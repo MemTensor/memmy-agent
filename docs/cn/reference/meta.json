@@ -1,0 +1,5 @@
+{
+  "title": "参考",
+  "icon": "Library",
+  "pages": ["cli", "openai-api", "memory-api", "local-api", "ports"]
+}

@@ -1,0 +1,19 @@
+---
+title: Messaging Channels
+icon: MessagesSquare
+---
+
+Memmy plugs into the IMs you already use, so you can command your Agent right from your chat apps. Currently supported:
+
+**Telegram · Discord · iMessage · WeChat · Feishu · DingTalk**
+
+## How to Connect
+
+| Channel | Method |
+| --- | --- |
+| WeChat | QR code sign-in; the dialog polls for the scan result |
+| Feishu | `appId` + `appSecret` form; on insufficient permissions, missing scopes are parsed out with an application link |
+| DingTalk | `clientId` + `clientSecret` form |
+| Telegram / Discord / iMessage | Follow the dialog instructions on the Tools page |
+
+Connection status refreshes every 5 seconds; connected channels can be disconnected anytime. Channel configuration is written into the runtime by the local backend via the memmy-agent admin client.

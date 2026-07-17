@@ -1,0 +1,19 @@
+---
+title: memmy-memory CLI
+icon: Terminal
+---
+
+供外部 Agent 或脚本访问 Memory 服务：
+
+```bash
+memmy-memory init
+memmy-memory health
+memmy-memory search "项目里的记忆策略"
+memmy-memory add "这是一条需要保存的知识"
+memmy-memory get <id>
+memmy-memory delete <id>
+```
+
+默认连接 `http://127.0.0.1:18960`。可用 `--url`、`--token`、`--config`、`--source`、`--user-id` 指定目标服务、认证、调用来源和用户命名空间。
+
+另支持 `reload-config`、`session open/close`、`turn start/complete` 和 `raw` 调用。

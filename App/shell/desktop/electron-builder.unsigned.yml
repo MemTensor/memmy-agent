@@ -1,0 +1,57 @@
+appId: cn.memtensor.memmy
+productName: Memmy
+artifactName: Memmy-${version}-${arch}-unsigned.${ext}
+
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - dist/**/*
+  - package.json
+
+asar: true
+asarUnpack:
+  - "**/*.node"
+  - "**/node_modules/sqlite-vec-*/vec0.*"
+  - "dist/renderer/**"
+
+extraResources:
+  - from: dist/runtime/bin
+    to: cli
+    filter:
+      - "**/*"
+  - from: build/MenuBarIconTemplate.png
+    to: MenuBarIconTemplate.png
+  - from: build/MenuBarIconTemplate@2x.png
+    to: MenuBarIconTemplate@2x.png
+  - from: ../../../.env
+    to: .env
+
+mac:
+  icon: build/icon.icns
+  category: public.app-category.productivity
+  extendInfo:
+    NSMicrophoneUsageDescription: "Memmy uses the microphone only when you start voice input."
+  target:
+    - target: dmg
+  identity: null
+  hardenedRuntime: false
+  gatekeeperAssess: false
+  forceCodeSigning: false
+  notarize: false
+
+dmg:
+  title: Memmy Installer
+  icon: build/icon.icns
+  background: build/dmg-background.png
+  window:
+    width: 540
+    height: 380
+  contents:
+    - x: 130
+      y: 200
+    - x: 410
+      y: 200
+      type: link
+      path: /Applications

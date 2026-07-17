@@ -1,0 +1,229 @@
+---
+title: Agent 来源与扫描
+description: 了解 Memmy 如何扫描六种内置 Agent 的本地历史，以及安装的 Hook、插件和实时记忆效果。
+icon: ScanSearch
+---
+
+Agent Source 是 Memmy 读取外部 Agent 本地历史的适配器。来源扫描负责导入已经存在的对话；新对话中的自动召回和采集由 Hook 或插件接入负责。
+
+<Callout type="warn" icon={false}>
+  <div className="mb-2 flex items-center gap-2 text-[1.0625rem] font-semibold leading-6 text-fd-card-foreground">
+    <span aria-hidden="true" className="inline-flex size-5 shrink-0 items-center justify-center rounded-full bg-(--callout-color) text-xs font-bold leading-none text-fd-card">!</span>
+    <span>历史扫描和实时接入是两件事</span>
+  </div>
+
+  “同步新增”读取 Agent 已写入本地的数据；Hook 或插件负责新对话中的自动召回、自动采集和任务接续。只扫描不会修改 Agent 配置，安装 Hook 或插件才会写入下文列出的配置和文件。
+</Callout>
+
+## 内置来源
+
+| Agent | 默认历史来源 | 实时接入 |
+| --- | --- | --- |
+| Cursor | `~/Library/Application Support/Cursor/User/workspaceStorage/**/state.vscdb` 和 `globalStorage/state.vscdb` | Hook |
+| Claude Code | `~/.claude/projects/**/*.jsonl` | Hook |
+| Codex | `~/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-*.jsonl` | Hook |
+| OpenCode | `~/.local/share/opencode/opencode.db` | 原生插件 |
+| OpenClaw | `~/.openclaw` 下的 conversation / memory SQLite | Memory 插件 |
+| Hermes | `~/.hermes/sessions/**/*.jsonl` 和 `~/.hermes/state.db` | Memory Provider 插件 |
+
+## 增量同步
+
+- **同步新增**扫描全部已发现来源；每个来源也可以单独同步。
+- 默认只读取上次同步后产生的新对话，并用水位与去重键避免重复导入。
+- 扫描可以暂停、继续或停止；进度通过 SSE 实时推送。
+- **深度扫描**使用 `full` 模式回扫旧历史，需要二次确认。
+- 可以手动添加列表之外的 Agent（名称 + 本地数据路径）；手动来源只负责扫描，不会自动获得 Hook 或插件。
+
+## 扫描偏好
+
+| 开关 | 效果 |
+| --- | --- |
+| 自动扫描已知 Agent | Memmy 启动后检查内置来源的新对话 |
+| 自动增量同步 | Agent 本地会话文件变化后继续同步新增内容 |
+| 新发现 Agent 自动安装 Hook/插件 | 为新发现的内置 Agent 安装对应实时接入；精简 Skill 会随接入一并安装 |
+
+关闭自动安装后，Agent 仍会出现在列表中，你可以手动点击 **安装 Hook** 或 **安装插件**。
+
+## 数据处理与本地管理
+
+- 导入前会执行去重、敏感信息过滤，并按对话回合合并后生成记忆。
+- 可以查看本地数据路径（默认 `~/.memmy/memory-service`）、打开目录、导出 `memory.sqlite`，或在二次确认后清空本地记忆数据。
+- 移除 Hook 或插件不会删除已经导入的历史；清空本地数据是单独的显式操作。
+
+## Hook 与插件接入
+
+Memmy 通过 Agent 原生支持的 **Hook** 或**插件**接入实时对话。安装接入能力时，Memmy 还会为该 Agent 自动安装一份精简的 `memmy-memory` Skill，用于在自动注入的上下文不足时主动搜索和读取记忆。
+
+### 接入方式总览
+
+| Agent | 接入类型 | 使用的事件或接口 | 主要效果 |
+| --- | --- | --- | --- |
+| Cursor | Hook | `beforeSubmitPrompt`、`afterAgentResponse`、`stop` | 建立回合、记录回复、在回合结束时自动采集，并支持 `/memmy-resume` |
+| Claude Code | Hook | `UserPromptSubmit`、`Stop` | 请求前召回并注入相关记忆，结束时自动采集，支持 `/memmy-resume` |
+| Codex | Hook | `UserPromptSubmit`、`Stop` | 请求前召回并注入相关记忆，结束时自动采集，支持 `/memmy-resume` |
+| OpenCode | 原生插件 | 消息、工具、文本完成和会话事件 | 自动召回、采集回复与工具轨迹，并提供原生记忆工具和 `/memmy-resume` |
+| OpenClaw | Memory 插件 | `before_prompt_build`、`agent_end` | 构建提示词前注入记忆，Agent 结束时采集完整回合，并提供原生记忆工具 |
+| Hermes | Memory Provider 插件 | `prefetch`、`sync_turn` 等 Provider 生命周期 | 自动召回和采集，镜像 Hermes 的显式记忆写入，并提供原生记忆工具 |
+
+### 一次对话中会发生什么
+
+```mermaid
+flowchart LR
+  Request["用户请求"] --> Entry["Hook / 插件"]
+  Entry --> Start["打开会话并开始回合"]
+  Start --> Recall["检索相关 Memmy 记忆"]
+  Recall --> Context["作为历史上下文注入"]
+  Context --> Agent["Agent 执行任务"]
+  Agent --> Complete["采集回答、状态和可用的工具轨迹"]
+  Complete --> Memory["完成回合并写入本地 Memory 服务"]
+```
+
+安装后的共同效果：
+
+- **自动召回**：Claude Code、Codex、OpenCode、OpenClaw 和 Hermes 会在正常请求执行前检索相关记忆并注入上下文。
+- **自动采集**：Hook 或插件会在回合结束时提交用户请求、Agent 回答和成功/失败状态，不需要 Agent 手动执行 `memmy-memory add`。
+- **任务接续**：输入 `/memmy-resume <query>` 会搜索最多 5 个候选 L1 episode；继续输入 `1`–`5` 可读取完整 episode 并注入接续上下文。
+- **按需查询**：随接入安装的 Skill 保留 `memmy-memory search` 和 `memmy-memory get`，只在自动上下文不足时使用。
+- **来源标记**：采集结果会记录 `cursor`、`claude_code`、`codex`、`opencode`、`openclaw` 或 `hermes`，便于过滤和追踪来源。
+
+<Callout type="warn" icon={false}>
+  <div className="mb-2 flex items-center gap-2 text-[1.0625rem] font-semibold leading-6 text-fd-card-foreground">
+    <span aria-hidden="true" className="inline-flex size-5 shrink-0 items-center justify-center rounded-full bg-(--callout-color) text-xs font-bold leading-none text-fd-card">!</span>
+    <span>Cursor 当前的 Hook 重点负责自动采集和 <code>/memmy-resume</code></span>
+  </div>
+
+  普通请求需要额外记忆时，由随 Hook 安装的 Skill 执行按需搜索；其他五个接入会在普通请求前自动注入召回结果。
+</Callout>
+
+### Cursor：三个 Hook
+
+Memmy 会在 `~/.cursor/hooks.json` 中追加自己的 Hook 条目，不会覆盖其他 Hook。
+
+| Hook | 触发时机 | Memmy 的处理 |
+| --- | --- | --- |
+| `beforeSubmitPrompt` | 用户请求提交前 | 打开或复用 Memmy 会话、开始回合并保存请求；同时拦截 `/memmy-resume` 搜索和候选选择 |
+| `afterAgentResponse` | Agent 生成回复后 | 将最终回复暂存在本回合状态中，供结束 Hook 采集 |
+| `stop` | Agent 回合停止时 | 汇总请求和回复，调用 turn-complete 接口自动保存回合；失败时放行，不阻塞 Cursor |
+
+默认写入或更新：
+
+- `~/.cursor/hooks.json`
+- `~/.cursor/hooks/memmy-resume-hook.mjs`
+- `~/.cursor/hooks/memmy-memory-config.json`
+- `~/.cursor/skills/memmy-memory/SKILL.md`
+
+### Claude Code：`UserPromptSubmit` 与 `Stop`
+
+| Hook | 触发时机 | Memmy 的处理 |
+| --- | --- | --- |
+| `UserPromptSubmit` | 用户请求进入模型前 | 开始 Memmy 回合，把召回结果放入 `additionalContext`；处理 `/memmy-resume` |
+| `Stop` | Claude Code 完成或终止回合时 | 从 Hook payload 或 transcript 读取请求与回答，按 `succeeded`、`failed` 或 `cancelled` 完成回合 |
+
+默认写入或更新：
+
+- `~/.claude/settings.json`
+- `~/.claude/hooks/memmy-resume-hook.mjs`
+- `~/.claude/hooks/memmy-memory-config.json`
+- `~/.claude/commands/memmy-resume.md`
+- `~/.claude/CLAUDE.md`
+- `~/.claude/skills/memmy-memory/SKILL.md`
+
+### Codex：`UserPromptSubmit` 与 `Stop`
+
+| Hook | 触发时机 | Memmy 的处理 |
+| --- | --- | --- |
+| `UserPromptSubmit` | 用户请求提交前 | 开始回合并通过 Hook 的 `additionalContext` 注入相关记忆；处理 `/memmy-resume` |
+| `Stop` | Codex 回合停止时 | 从 transcript 或最后一条 Assistant 消息提取回答并完成回合，保留失败和取消状态 |
+
+默认写入或更新：
+
+- `~/.codex/hooks.json`
+- `~/.codex/hooks/memmy-resume-hook.mjs`
+- `~/.codex/hooks/memmy-memory-config.json`
+- `~/.codex/AGENTS.md`
+- `~/.codex/skills/memmy-memory/SKILL.md`
+
+### OpenCode：原生插件
+
+| 回调 | 效果 |
+| --- | --- |
+| `chat.message` | 开始回合、自动注入召回结果，并处理 `/memmy-resume` |
+| `tool.execute.before` / `tool.execute.after` | 记录非 Memmy 工具的调用参数与结果，作为回合轨迹的一部分 |
+| `experimental.text.complete` / `message.part.updated` | 收集 Assistant 的完整文本输出 |
+| `session.error` | 把当前回合标记为失败并记录错误 |
+| `session.idle` | 异步完成并采集当前回合 |
+| `dispose` | 插件卸载或进程退出前刷新尚未提交的回合 |
+
+插件还注册 `memmy_memory_search`、`memmy_memory_get`、`memmy_memory_add` 三个原生工具。
+
+默认在 `~/.config/opencode` 中写入或更新：
+
+- `plugins/memmy-memory.js`
+- `plugins/memmy-memory-config.json`
+- `commands/memmy-resume.md`
+- `AGENTS.md`
+- `skills/memmy-memory/SKILL.md`
+
+如果设置了 `OPENCODE_CONFIG_DIR` 或 `XDG_CONFIG_HOME`，文件会写入对应配置目录。
+
+### OpenClaw：Memory 插件
+
+| 接口 | 效果 |
+| --- | --- |
+| `registerMemoryCapability` | 告诉 OpenClaw 当前启用了 Memmy，并声明注入内容属于历史上下文 |
+| `before_prompt_build` | 在构建提示词前开始回合，通过 `prependContext` 注入召回结果或选中的 episode |
+| `agent_end` | 提取本轮请求、回答和工具轨迹，同步完成回合，避免进程结束时丢失采集结果 |
+| `registerCommand` | 注册 `/memmy-resume` |
+| `registerTool` | 注册 `memmy_memory_search`、`memmy_memory_get`、`memmy_memory_add` |
+
+安装时会把 `plugins.slots.memory` 指向 `memmy-memory`，并启用 `allowPromptInjection` 与 `allowConversationAccess`。
+
+默认写入或更新：
+
+- `~/.openclaw/extensions/memmy-memory/`
+- `~/.openclaw/openclaw.json`
+- `~/.openclaw/skills/memmy-memory/SKILL.md`
+- OpenClaw workspace 下的 `AGENTS.md`（默认 `~/.openclaw/workspace/AGENTS.md`）
+
+OpenClaw 的 memory slot 只能有一个提供者。如果已安装其他记忆插件，Memmy 会在安装前提示：替换现有插件，或保留现有插件并只安装 Skill。
+
+### Hermes：Memory Provider 插件
+
+| Provider 接口 / Hook | 效果 |
+| --- | --- |
+| `system_prompt_block` | 声明 Memmy 已启用，并约束注入记忆只作为历史上下文 |
+| `prefetch` | 用户请求前开始回合并返回相关记忆上下文 |
+| `sync_turn` | 在后台线程完成回合，自动采集用户请求和 Assistant 回复 |
+| `on_memory_write` | 将 Hermes 发出的显式记忆写入同步到 Memmy |
+| `on_session_switch` | 让 Memmy 会话跟随 Hermes 会话切换 |
+| `get_tool_schemas` / `handle_tool_call` | 提供 `memmy_memory_search`、`memmy_memory_get`、`memmy_memory_add` |
+| `pre_llm_call` / `pre_gateway_dispatch` | 识别 `/memmy-resume` 的候选编号并注入或重写为完整 episode 上下文 |
+
+安装时会把 `memory.provider` 设为 `memmy-memory`，启用 `memory` toolset 和独立的 `memmy-resume` command plugin。
+
+默认写入或更新：
+
+- `~/.hermes/plugins/memmy-memory/`
+- `~/.hermes/plugins/memmy-resume/`
+- `~/.hermes/config.yaml`
+- `~/.hermes/SOUL.md`
+- `~/.hermes/skills/memmy-memory/SKILL.md`
+
+Hermes 同样只允许一个活动的 Memory Provider；检测到其他 Provider 时，Memmy 会先请求确认。
+
+### 安装、验证与移除
+
+1. 打开 **记忆管理 → 跨Agent接入**。
+2. Cursor、Claude Code、Codex 点击 **安装 Hook**；OpenCode、OpenClaw、Hermes 点击 **安装插件**。
+3. 如果 Agent 正在运行，重启 Agent 或新建会话，让它重新加载配置。
+4. 完成一轮普通对话，再到 Memmy 的记忆或日志页面确认对应来源出现新记录。
+5. 输入 `/memmy-resume <关键词>`，确认能看到候选并用 `1`–`5` 选择一个 episode。
+
+点击 **移除 Hook** 或 **移除插件** 时，Memmy 会停用并清理自己管理的实时接入和附带 Skill；其他 Hook 配置会保留，已经进入 Memmy 的历史记忆不会被删除。
+
+### 本地访问与失败行为
+
+- Hook 和插件从 `~/.memmy/config.yaml` 读取 Memory 服务地址与 token，并把运行所需配置保存在对应 Agent 的本地配置目录。请不要公开这些配置文件。
+- Memmy 注入的内容使用 `<memmy_memory_context>` 标记为历史记忆，并用 `<current_user_request>` 明确当前请求，降低旧记忆被误当成新指令的风险。
+- 召回或采集失败时采用 **fail-open**：记录错误并继续 Agent 的当前任务，不会因为 Memory 服务暂时不可用而中断正常对话。
+- Hook 命令的宿主超时为 60 秒，单次 Memory 请求超时为 45 秒。

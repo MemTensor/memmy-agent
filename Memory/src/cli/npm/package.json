@@ -1,0 +1,22 @@
+{
+  "name": "@memtensor/memmy-memory-cli",
+  "version": "0.0.1-beta.1",
+  "description": "Memmy Memory CLI for local agent memory.",
+  "type": "module",
+  "bin": {
+    "memmy-memory": "./bin/memmy-memory.js"
+  },
+  "scripts": {
+    "postinstall": "node scripts/postinstall.js",
+    "prepublishOnly": "node scripts/prepublish-check.js"
+  },
+  "files": [
+    "bin",
+    "scripts",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "UNLICENSED"
+}

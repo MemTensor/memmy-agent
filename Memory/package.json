@@ -1,0 +1,40 @@
+{
+  "name": "@memmy/memory",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/src/index.js",
+  "bin": {
+    "memmy-memory": "./dist/src/cli/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && npm run copy-cli-assets",
+    "copy-cli-assets": "rm -rf dist/src/cli/agent_inject.md dist/src/cli/skills && mkdir -p dist/src/cli && cp -R src/cli/agent_inject.md src/cli/skills dist/src/cli/",
+    "dev": "tsx src/server/index.ts",
+    "serve": "node dist/src/server/index.js",
+    "serve:local": "node dist/src/server/index.js",
+    "serve:dev": "tsx src/server/index.ts",
+    "worker:run": "node dist/src/cli/index.js raw POST /worker/run",
+    "test": "vitest run tests",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "package:npm": "node src/cli/npm/build-package.mjs",
+    "pack:npm": "npm run package:npm && npm pack ../dist/memmy-memory-npm",
+    "binary": "bash src/cli/scripts/build-binary.sh"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^3.8.0",
+    "better-sqlite3": "^12.6.3",
+    "sqlite-vec": "0.1.9",
+    "yaml": "^2.9.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^25.9.1",
+    "tsx": "^4.22.3",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.7"
+  }
+}

@@ -1,0 +1,131 @@
+/** Desktop design tokens. */
+:root {
+  color-scheme: light;
+
+  /* Color canvas oat color token. */
+  --color-canvas-oat: #f3f8f7;
+  /* Color accent neon mint color token. */
+  --color-accent-neon-mint: #62ffb0;
+  --color-sidebar-bg: color-mix(
+    in srgb,
+    var(--color-icon-ember) 2.5%,
+    color-mix(
+      in srgb,
+      var(--color-accent-neon-mint) 2.5%,
+      color-mix(in srgb, var(--color-canvas-oat) 68%, white)
+    )
+  );
+  /* Color sidebar divider color token. */
+  --color-sidebar-divider: color-mix(
+    in srgb,
+    var(--color-icon-ember) 2%,
+    color-mix(in srgb, var(--color-border-stone) 18%, transparent)
+  );
+  --color-background-paper: #ffffff;
+  /* Color content base color token. */
+  --color-content-base: color-mix(
+    in srgb,
+    var(--color-icon-ember) 0.4%,
+    color-mix(in srgb, var(--color-background-paper) 96%, white)
+  );
+  --color-content-bg: var(--color-content-base);
+  /* Color content glow neon color token. */
+  --color-content-glow-neon: rgb(98 255 176 / 0.008);
+  --color-content-glow-ember: rgb(245 158 107 / 0.006);
+  --color-text-ink: #111d1c;
+  --color-border-stone: #cce0db;
+  --color-outline-ebony: #111d1c;
+  --color-action-sky: #5cbfae;
+  --color-action-sky-hover: #3aa893;
+  --color-nav-active-bg: color-mix(in srgb, var(--color-action-sky) 16%, white);
+  --color-footer-slate: #b6e6db;
+  --color-icon-ember: #f59e6b;
+  --color-accent-pink: #ffc4cf;
+  --color-accent-lavender: #e0dffc;
+  --color-accent-mint: #c8f0e0;
+  --color-accent-peach: #ffe2c9;
+  --color-accent-lemon: #fdf2b8;
+  --color-status-success: #2dc999;
+  --color-status-success-soft: #d4f4ea;
+  --color-status-error: #f87b8e;
+  --color-status-error-soft: #fde4e7;
+  --color-role-assistant: #8ba1f3;
+  --color-role-assistant-soft: #e2e8fc;
+
+  /* Font sans stack. */
+  --font-sans: "Nunito", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable", "Segoe UI", "Helvetica Neue", "Apple Color Emoji", "Segoe UI Emoji", sans-serif;
+  /* Font chat stack. */
+  --font-chat: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable", "Segoe UI", "Helvetica Neue", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC", "Apple Color Emoji", "Segoe UI Emoji", sans-serif;
+  /* Font mono stack. */
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Monaco, "Cascadia Mono", Consolas, "Liberation Mono", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC", monospace;
+  --codex-toolbar-height: 46px;
+  --codex-toolbar-button-size: 28px;
+  /* Codex sidebar nav icon inset color token. */
+  --codex-sidebar-nav-icon-inset: 28px;
+  /* Codex window control inset color token. */
+  --codex-window-control-inset: 84px;
+  --codex-sidebar-hidden-topbar-padding: 124px;
+  --codex-sidebar-width: 250px;
+  --codex-sidebar-min-width: 240px;
+  --codex-sidebar-max-width: 520px;
+  --codex-text-xs: 11px;
+  --codex-leading-xs: 16px;
+  --codex-text-sm: 12px;
+  --codex-leading-sm: 16px;
+  --codex-text-base: 14px;
+  --codex-leading-base: 20px;
+  --codex-icon-xs: 16px;
+  --codex-separator-width: 0.5px;
+  --codex-sidebar-divider-width: 0.8px;
+  --codex-scrollbar-size: 6px;
+  --codex-scrollbar-thumb: color-mix(in srgb, var(--color-border-stone) 36%, transparent);
+  --codex-radius-lg: 10px;
+  --codex-content-padding-x: 32px;
+
+  /* Radius card token. */
+  --radius-card: 12px;
+  --radius-card-lg: 10px;
+  --radius-composer: 14px;
+  --radius-pill: 9999px;
+  --radius-btn: 8px;
+  --radius-input: 8px;
+  --radius-tag: 9999px;
+  --shadow-card: 0 16px 38px rgba(17, 29, 28, 0.08);
+  --shadow-soft: 0 8px 24px rgba(17, 29, 28, 0.08);
+  --shadow-popover: 0 18px 52px rgba(17, 29, 28, 0.16);
+  --duration-fast: 150ms;
+  --duration-normal: 220ms;
+  --z-modal: 50;
+  --z-drawer: 10001;
+
+  /* Color canvas color token. */
+  --color-canvas: var(--color-canvas-oat);
+  --color-surface: var(--color-background-paper);
+  --color-surface-muted: color-mix(in srgb, var(--color-canvas-oat) 72%, white);
+  --color-ink: var(--color-text-ink);
+  --color-ink-muted: color-mix(in srgb, var(--color-text-ink) 58%, transparent);
+  --color-line: color-mix(in srgb, var(--color-border-stone) 72%, transparent);
+  --color-line-strong: var(--color-border-stone);
+  /* Border content panel color token. */
+  --border-content-panel: color-mix(
+    in srgb,
+    color-mix(in srgb, var(--color-border-stone) 72%, var(--color-icon-ember)) 20%,
+    transparent
+  );
+  --color-primary: var(--color-action-sky);
+  --color-primary-strong: var(--color-action-sky-hover);
+  --color-accent: var(--color-icon-ember);
+  --color-danger: var(--color-status-error);
+  --color-warning: var(--color-icon-ember);
+  --color-success: var(--color-status-success);
+  --color-info: var(--color-role-assistant);
+  --shadow-panel: var(--shadow-card);
+  --radius-sm: var(--radius-btn);
+  --radius-md: var(--radius-card);
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+}

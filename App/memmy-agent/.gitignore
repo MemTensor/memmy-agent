@@ -1,0 +1,9 @@
+node_modules/
+dist/
+coverage/
+.env
+/config.yaml
+/dataset/
+.DS_Store
+.check
+*.bak

@@ -1,0 +1,12 @@
+---
+title: Managed Tool Integrations
+icon: Puzzle
+---
+
+The standard integrations on the Tools page come from a managed catalog (Composio), including GitHub, GitLab, Gmail, Google Calendar/Docs/Drive/Sheets/Slides, Notion, Slack, Linear, Jira, Confluence, Figma, Dropbox, Airtable, Trello, Salesforce, HubSpot, Stripe, Zoom, and more.
+
+## Authorization Flow
+
+1. Click a tool card, review the permission scopes, then click Connect to get an authorization URL.
+2. Complete OAuth in your external browser; the dialog polls every 4 seconds for up to 5 minutes.
+3. Once connected, the tool is exposed to the Agent Runtime through the Composio MCP bridge, and the desktop backend automatically writes `tools.mcpServers.composio`.

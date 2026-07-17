@@ -1,0 +1,32 @@
+{
+  "name": "@memmy/backend",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "default": "./dist/src/index.js"
+    }
+  },
+  "scripts": {
+    "build": "npm run build -w @memmy/local-api-contracts && node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json && node -e \"const fs=require('node:fs'); fs.cpSync('src/infrastructure/app-state-store/migrations', 'dist/src/infrastructure/app-state-store/migrations', { recursive: true }); fs.cpSync('src/infrastructure/agent-source-store/migrations', 'dist/src/infrastructure/agent-source-store/migrations', { recursive: true }); fs.cpSync('src/infrastructure/idempotency-store/migrations', 'dist/src/infrastructure/idempotency-store/migrations', { recursive: true }); if (fs.existsSync('src/adapters/outbound/agent-adapter/plugins')) fs.cpSync('src/adapters/outbound/agent-adapter/plugins', 'dist/src/adapters/outbound/agent-adapter/plugins', { recursive: true });\"",
+    "lint": "eslint \"src/**/*.ts\" \"vitest.config.ts\"",
+    "typecheck": "npm run build -w @memmy/local-api-contracts && tsc -p tsconfig.json --noEmit",
+    "test": "npm run build -w @memmy/local-api-contracts && vitest run",
+    "test:agent-adapter:coverage": "npm run build -w @memmy/local-api-contracts && vitest run src/adapters/outbound/agent-adapter/tests --coverage",
+    "db:migrate": "tsx src/infrastructure/app-state-store/cli/migrate.ts"
+  },
+  "dependencies": {
+    "@memmy/local-api-contracts": "0.0.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "dotenv": "^16.6.1",
+    "fastify": "^5.8.5",
+    "sqlite-vec": "0.1.9",
+    "undici": "^6.26.0",
+    "yaml": "^2.9.0",
+    "zod": "^4.4.3"
+  }
+}

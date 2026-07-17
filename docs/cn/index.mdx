@@ -1,0 +1,90 @@
+---
+title: Memmy
+description: 让所有 AI，都记得同一个你。
+icon: BookOpen
+---
+
+
+Memmy 是你的**个人记忆中枢**，也是懂你的专属 Agent，让**所有 AI 连接同一份记忆，在协同中持续进化**。
+
+它将你的知识、偏好和项目经验沉淀为个人记忆，并让 Cursor、Claude Code、Codex、OpenClaw 等不同 Agent 共享同一份上下文。
+
+提供桌面应用、CLI 和 API，让你以不同方式使用同一套长期记忆。一次积累，多处使用。
+
+- 下载 Memmy 桌面应用，几分钟完成引导
+- BYOK 模式，接入你已有的模型额度
+- 把 Cursor、Claude Code、Codex 的历史变成记忆
+
+## Memmy 是什么
+
+Memmy 不是只有一个聊天窗口的应用，而是一套完整的本地 Agent Runtime：
+
+- **桌面端**提供任务工作台、桌宠、记忆面板、工具连接和设置页。
+- **Agent Runtime** 负责对话、工具调用、MCP、定时任务、长任务、会话和技能。
+- **Memory 服务**负责记忆的写入、检索、归档和分析，默认使用本地 SQLite。
+- **本地后端**负责账号、配置、集成、Agent 来源扫描、Skill 安装和本机 API。
+- **CLI 和 HTTP API** 让外部 Agent、脚本或其他产品也能接入 Memmy。
+
+### 适合谁
+
+- 同时使用多个 AI 编码/对话工具（Cursor、Claude Code、Codex、Opencode、OpenClaw、Hermes），希望它们共享同一套记忆的人。
+- 希望数据本地优先、自带 API Key 的开发者。
+- 想要一个常驻桌面、随叫随到的 Agent 入口（桌宠）的日常用户。
+
+## 你需要准备
+
+- 一台 macOS 或 Windows 设备（桌面端），或 Node.js `>=22` 环境（CLI / 源码态）。
+- 账号模式：一个 Memmy 账号（含平台体验 Token）。
+- 或 API Key 模式：任一支持的模型 Provider 的 API Key。
+
+## 工作原理
+
+![Memmy 架构图](https://cdn.memtensor.com.cn/img/1783665524205_5h1ohc_compressed.png)
+
+## 核心能力
+
+- 扫描 Cursor、Claude Code、Codex 等来源的历史对话，去重入库，统一检索。
+- 配置在 `~/.memmy/config.yaml`，记忆在本地 SQLite，接口用 token 保护。
+- 多会话任务、流式输出、附件、语音输入和 Slash command。
+- 透明置顶小窗，随时接收文本或语音任务，与主工作台同步。
+- Telegram、微信、飞书、钉钉等渠道，GitHub、Notion、Slack 等托管集成。
+- OpenAI 兼容、Anthropic、Gemini、DeepSeek、Ollama 等众多 Provider。
+
+## 快速开始
+
+1. 下载并启动 Memmy 桌面应用；或编译 `App/memmy-agent` 后使用 CLI。
+2. 选择账号模式或 API Key 模式，配置主模型并完成一次连接测试。CLI 用户运行：
+
+```bash
+memmy onboard
+```
+
+3. 在主工作台发送第一条任务；或在终端里：
+
+```bash
+memmy agent --message "你好，介绍一下当前工作区"
+```
+
+<Callout type="idea">
+  建议第一个里程碑保持很小：先让桌面端或 CLI 成功发出一轮普通回复，再继续配置工具、渠道、MCP、记忆扫描和桌宠。
+</Callout>
+
+## 配置
+
+主配置默认在 `~/.memmy/config.yaml`，支持 `${ENV_NAME}` 环境变量引用：
+
+```yaml
+agents:
+  defaults:
+    model: openai/gpt-4.1
+    provider: openai
+    timezone: Asia/Shanghai
+
+providers:
+  openai:
+    apiKey: ${OPENAI_API_KEY}
+```
+
+## 接下来
+
+完整安装与首次配置概览、条目、策略、世界模型与日志把 Memmy 接进你的 IMmemmy 与 memmy-memory 命令进程、端口与数据流FAQ 与排障入口

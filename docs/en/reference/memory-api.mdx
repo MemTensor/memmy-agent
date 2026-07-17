@@ -1,0 +1,39 @@
+---
+title: Memory Runtime API
+icon: Database
+---
+
+Default address `http://127.0.0.1:18960`. Once `storage.token`, `MEMMY_MEMORY_TOKEN`, or `MEMORY_SERVICE_TOKEN` is set, all endpoints except the health check require a bearer token.
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/api/v1/health` | Health check |
+| `POST` | `/api/v1/sessions/open` | Open an Agent session |
+| `POST` | `/api/v1/sessions/:sessionId/close` | Close a session |
+| `POST` | `/api/v1/turns/start` | Record a turn start |
+| `POST` | `/api/v1/turns/:turnId/complete` | Record a turn completion |
+| `POST` | `/api/v1/memory/search` | Search memories |
+| `POST` | `/api/v1/memory/add` | Write a memory |
+| `GET` | `/api/v1/memory/:id` | Memory details |
+| `DELETE` | `/api/v1/memory/:id` | Delete a memory |
+| `GET` | `/api/v1/panel/overview` | Panel overview |
+| `GET` | `/api/v1/panel/analysis` | Memory analytics |
+| `GET` | `/api/v1/panel/items` | Entry list |
+
+## Local Storage Configuration
+
+```yaml
+memmyMemory:
+  version: 1
+  activeProfile: byok
+  storage:
+    mode: local
+    backend: sqlite
+    sqlitePath: ~/.memmy/memory-service/memory.sqlite
+    endpoint: http://127.0.0.1:18960
+    token: local-token
+  profiles:
+    byok:
+      embedding:
+        provider: local
+```

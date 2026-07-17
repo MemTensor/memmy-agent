@@ -1,0 +1,19 @@
+---
+title: 消息渠道
+icon: MessagesSquare
+---
+
+Memmy 可以接入常用 IM，让你在聊天软件里直接使唤 Agent。已支持：
+
+**Telegram · Discord · iMessage · WeChat · Feishu · DingTalk**
+
+## 连接方式
+
+| 渠道 | 方式 |
+| --- | --- |
+| WeChat | 扫码登录，弹窗内轮询扫码结果 |
+| Feishu | `appId` + `appSecret` 表单；权限不足时解析缺失 scope 并给出申请链接 |
+| DingTalk | `clientId` + `clientSecret` 表单 |
+| Telegram / Discord / iMessage | 在工具页按弹窗指引连接 |
+
+连接状态每 5 秒自动刷新；已连接渠道可随时断开。渠道配置由本地后端通过 memmy-agent admin client 写入运行时。

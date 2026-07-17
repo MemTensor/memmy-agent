@@ -1,0 +1,48 @@
+appId: cn.memtensor.memmy
+productName: Memmy
+artifactName: Memmy-${version}-${arch}-unsigned.${ext}
+
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - dist/**/*
+  - package.json
+
+asar: true
+asarUnpack:
+  - "**/*.node"
+  - "**/node_modules/sqlite-vec-*/vec0.*"
+  - "dist/renderer/**"
+
+extraResources:
+  - from: dist/runtime/bin
+    to: cli
+    filter:
+      - "**/*"
+  - from: ../../../.env
+    to: .env
+  - from: build/icon.ico
+    to: icon.ico
+
+win:
+  icon: build/icon.ico
+  target:
+    - target: nsis
+      arch:
+        - x64
+  requestedExecutionLevel: asInvoker
+  signAndEditExecutable: true
+  signExecutable: false
+  forceCodeSigning: false
+
+nsis:
+  include: build/installer-win-unsigned.nsh
+  oneClick: false
+  perMachine: false
+  allowElevation: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: false
+  createStartMenuShortcut: true
+  shortcutName: Memmy

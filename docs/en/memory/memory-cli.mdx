@@ -1,0 +1,19 @@
+---
+title: memmy-memory CLI
+icon: Terminal
+---
+
+Gives external Agents or scripts access to the Memory service:
+
+```bash
+memmy-memory init
+memmy-memory health
+memmy-memory search "memory policies in this project"
+memmy-memory add "a piece of knowledge worth saving"
+memmy-memory get <id>
+memmy-memory delete <id>
+```
+
+Connects to `http://127.0.0.1:18960` by default. Use `--url`, `--token`, `--config`, `--source`, and `--user-id` to specify the target service, authentication, calling source, and user namespace.
+
+Also supports reload-config, session open/close, turn start/complete, and raw calls.

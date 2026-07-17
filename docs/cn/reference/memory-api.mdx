@@ -1,0 +1,39 @@
+---
+title: Memory Runtime API
+icon: Database
+---
+
+默认地址 `http://127.0.0.1:18960`。设置 `storage.token`、`MEMMY_MEMORY_TOKEN` 或 `MEMORY_SERVICE_TOKEN` 后，除健康检查外的接口需要携带 bearer token。
+
+| Method | Path | 说明 |
+| --- | --- | --- |
+| `GET` | `/api/v1/health` | 健康检查 |
+| `POST` | `/api/v1/sessions/open` | 打开 Agent 会话 |
+| `POST` | `/api/v1/sessions/:sessionId/close` | 关闭会话 |
+| `POST` | `/api/v1/turns/start` | 记录回合开始 |
+| `POST` | `/api/v1/turns/:turnId/complete` | 记录回合完成 |
+| `POST` | `/api/v1/memory/search` | 检索记忆 |
+| `POST` | `/api/v1/memory/add` | 写入记忆 |
+| `GET` | `/api/v1/memory/:id` | 记忆详情 |
+| `DELETE` | `/api/v1/memory/:id` | 删除记忆 |
+| `GET` | `/api/v1/panel/overview` | 面板概览 |
+| `GET` | `/api/v1/panel/analysis` | 记忆分析 |
+| `GET` | `/api/v1/panel/items` | 条目列表 |
+
+## 本地存储配置
+
+```yaml
+memmyMemory:
+  version: 1
+  activeProfile: byok
+  storage:
+    mode: local
+    backend: sqlite
+    sqlitePath: ~/.memmy/memory-service/memory.sqlite
+    endpoint: http://127.0.0.1:18960
+    token: local-token
+  profiles:
+    byok:
+      embedding:
+        provider: local
+```

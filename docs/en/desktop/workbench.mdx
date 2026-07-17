@@ -1,0 +1,34 @@
+---
+title: Main Workbench
+icon: LayoutDashboard
+---
+
+`/main` is the full Agent workbench: task list on the left, message stream in the middle, input box at the bottom.
+
+## Input & Sending
+
+- `Enter` to send, `Shift + Enter` for a new line; IME composition (e.g. Chinese input) is handled correctly.
+- The `+` button adds attachments: up to 4, 10MB each, supporting images and common formats like `.pdf`, `.docx`, `.xlsx`, `.pptx`, `.md`, `.csv`, `.json`.
+- The microphone button enables voice input (requires an ASR model); transcriptions merge into the input box.
+- While a task is running, the send button becomes a stop button.
+
+## Slash Commands
+
+Type `/` to open the command panel:
+
+| Command | Purpose |
+| --- | --- |
+| `/new` | Start a new task |
+| `/stop` | Stop the current task |
+| `/restart` | Re-run the current task |
+| `/status` | Check the Agent's runtime status |
+| `/model` | View the current model configuration |
+| `/goal` | View or manage goal state |
+| `/dream` | Manually trigger memory consolidation |
+| `/dream-log` | View consolidation records |
+| `/dream-restore` | Restore the pre-consolidation state |
+| `/help` | Help |
+
+## Task List
+
+Grouped by Pinned, Today, Yesterday, Last 7 Days, Older, and Archived. Supports rename, pin, archive, restore, and delete; running tasks show a spinner, and completed-but-unread tasks show an unread dot. `Cmd/Ctrl + K` opens task search.

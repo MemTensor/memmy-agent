@@ -1,0 +1,766 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Memmy System Architecture · Light · Purple</title>
+<style>
+  :root {
+    --ink: #211d36;
+    --body: #4b4763;
+    --mut: #7d7898;
+    --v900: #2d1a6e;
+    --v800: #3f279e;
+    --v700: #5335cf;
+    --v600: #6d4aff;
+    --v400: #9d85f5;
+    --v300: #b8a9f5;
+    --v50: #f9f7ff;
+    --hair: rgba(33,29,54,0.08);
+    --mono: "SF Mono","Fira Code","JetBrains Mono",Menlo,monospace;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { width:100%; height:100%; overflow:hidden; background:#edebf4;
+    font-family:"Inter","PingFang SC","Microsoft YaHei",-apple-system,sans-serif; color:var(--ink); }
+
+  #stage {
+    width:1920px; height:1080px; position:absolute; top:50%; left:50%; transform-origin:center;
+    background:
+      radial-gradient(940px 640px at 50% 50%, rgba(109,74,255,0.055), transparent 66%),
+      radial-gradient(1000px 520px at 12% -8%, rgba(109,74,255,0.035), transparent 60%),
+      radial-gradient(1000px 520px at 90% 16%, rgba(109,74,255,0.03), transparent 62%),
+      linear-gradient(180deg, #ffffff, #f8f7fc);
+  }
+  #stage::before {
+    content:""; position:absolute; inset:0; pointer-events:none;
+    background:radial-gradient(circle, rgba(33,29,54,0.05) 1px, transparent 1.3px);
+    background-size:26px 26px;
+    mask-image:radial-gradient(1300px 900px at 50% 46%, #000 25%, transparent 100%);
+  }
+
+  .abs { position:absolute; }
+  .hairline { height:1px; left:104px; right:64px; background:var(--hair); }
+
+  /* ===== Title & legend ===== */
+  .title { top:22px; left:50%; transform:translateX(-50%); display:flex; align-items:center; gap:15px; }
+  .title img { width:52px; height:52px; border-radius:13px; display:block;
+    box-shadow:0 4px 14px rgba(33,29,54,0.14); }
+  .title h1 {
+    font-size:38px; font-weight:800; letter-spacing:1.5px; white-space:nowrap;
+    background:linear-gradient(100deg,#8f76ff,#5335cf 55%,#2d1a6e);
+    -webkit-background-clip:text; background-clip:text; color:transparent;
+  }
+  .legend { top:96px; right:78px; display:flex; gap:20px; align-items:center; }
+  .lg { display:flex; align-items:center; gap:7px; font-size:13px; color:#565270; letter-spacing:0.8px; }
+  .lg .sw { width:20px; height:0; border-top:2.5px solid; border-radius:2px; }
+
+  /* ===== Layer dividers + on-line labels ===== */
+  .divider {
+    position:absolute; left:96px; right:56px; height:0;
+    border-top:1.6px dashed rgba(109,74,255,0.36);
+    -webkit-mask-image:linear-gradient(90deg,#000 0,#000 55%,transparent 99%);
+    mask-image:linear-gradient(90deg,#000 0,#000 55%,transparent 99%);
+  }
+  .divider::before {
+    content:""; position:absolute; left:0; right:0; top:-1.6px; height:1.6px;
+    background:linear-gradient(90deg, rgba(109,74,255,0.25), transparent 70%);
+    filter:blur(2.5px);
+  }
+  .dlabel {
+    position:absolute; transform:translateY(-50%); left:96px;
+    display:flex; align-items:center; gap:7px;
+    font-family:var(--mono); font-size:11.5px; font-weight:800; letter-spacing:1.8px;
+    color:var(--v700); white-space:nowrap;
+    background:#ffffff; border:1.2px solid rgba(109,74,255,0.4);
+    padding:4px 13px; border-radius:999px;
+    box-shadow:0 2px 10px rgba(109,74,255,0.12);
+  }
+  .dlabel i { font-style:normal; color:#9d92c6; font-weight:600; font-size:10.5px; letter-spacing:2px; }
+
+  /* ===== 01 Entry cards ===== */
+  .ecard {
+    width:306px; height:126px; border-radius:14px; padding:13px 16px 12px; transform:translateX(-50%);
+    border:1px solid rgba(109,74,255,0.2);
+    background:#ffffff;
+    box-shadow:0 6px 20px rgba(33,29,54,0.06), 0 1px 3px rgba(33,29,54,0.05);
+    display:flex; flex-direction:column; gap:8px;
+  }
+  .ecard .rw { display:flex; align-items:center; gap:12px; }
+  .ecard .plate {
+    width:46px; height:46px; flex:0 0 46px; border-radius:12px; display:grid; place-items:center;
+    background:rgba(109,74,255,0.06);
+    border:1px solid rgba(109,74,255,0.24);
+  }
+  .ecard .plate svg { width:22px; height:22px; stroke:var(--v700); fill:none; stroke-width:1.9; stroke-linecap:round; stroke-linejoin:round; }
+  .ecard h3 { font-size:18.5px; font-weight:750; letter-spacing:0.6px; white-space:nowrap; display:flex; align-items:center; gap:8px; color:#241f3f; }
+  .ecard .cnt {
+    font-family:var(--mono); font-size:11.5px; font-weight:700; color:#fff;
+    background:linear-gradient(100deg,#8f76ff,#5c3ee8); padding:2px 8px; border-radius:999px;
+  }
+  .ecard .s { font-size:13px; color:var(--mut); letter-spacing:0.2px; margin-top:3px; white-space:nowrap; }
+  .ecard .avs { margin-top:2px; }
+  .ecard .tags { display:flex; gap:6px; margin-top:auto; }
+  .ecard .tag {
+    font-family:var(--mono); font-size:11.5px; color:var(--v700); letter-spacing:0.3px; white-space:nowrap;
+    border:1px solid rgba(109,74,255,0.22); background:rgba(109,74,255,0.045); padding:3px 9px; border-radius:6px;
+  }
+  .ecard.hl {
+    border:1.5px solid rgba(109,74,255,0.5);
+    background:linear-gradient(180deg, #ffffff, #f6f3ff);
+    box-shadow:0 10px 28px rgba(109,74,255,0.16), 0 1px 3px rgba(33,29,54,0.05);
+  }
+  .ecard.hl .plate { background:linear-gradient(135deg, rgba(143,118,255,0.14), rgba(83,53,207,0.07)); border-color:rgba(109,74,255,0.38); }
+  .ecard.hl h3 { color:var(--v700); }
+
+  /* ===== Terminal card ===== */
+  .term {
+    width:306px; height:126px; border-radius:14px; transform:translateX(-50%); overflow:hidden;
+    border:1px solid rgba(109,74,255,0.2);
+    background:#ffffff;
+    box-shadow:0 6px 20px rgba(33,29,54,0.06), 0 1px 3px rgba(33,29,54,0.05);
+    display:flex; flex-direction:column;
+  }
+  .term .bar {
+    height:30px; flex:0 0 30px; display:flex; align-items:center; padding:0 12px; gap:6.5px;
+    background:linear-gradient(180deg,#f8f7fd,#f1effa); border-bottom:1px solid rgba(33,29,54,0.07);
+  }
+  .term .dot { width:10px; height:10px; border-radius:50%; background:#ddd9ef; }
+  .term .bar .t { flex:1; text-align:center; font-family:var(--mono); font-size:12px; font-weight:700; color:#4a4468; letter-spacing:0.5px; margin-right:30px; }
+  .term .body { flex:1; background:var(--v50); padding:9px 14px; display:flex; flex-direction:column; gap:5px; }
+  .term .ln { font-family:var(--mono); font-size:12.5px; letter-spacing:0.2px; white-space:nowrap; color:#3d3757; }
+  .term .ln .p { color:var(--v600); font-weight:800; }
+  .term .ln .c { color:#7a5fd8; }
+  .term .ln.dim { color:#8d87a5; font-size:11.5px; }
+
+  /* ===== 02 Core panels ===== */
+  .panel {
+    border-radius:14px; overflow:hidden;
+    border:1px solid rgba(33,29,54,0.1);
+    background:#ffffff;
+    box-shadow:0 16px 40px rgba(33,29,54,0.08), 0 2px 6px rgba(33,29,54,0.05);
+    display:flex; flex-direction:column;
+  }
+  .panel .chrome {
+    height:38px; flex:0 0 38px; display:flex; align-items:center; padding:0 13px; gap:7px;
+    background:linear-gradient(180deg,#f8f7fd,#f2f0fa); border-bottom:1px solid rgba(33,29,54,0.08);
+  }
+  .panel .chrome .dot { width:11px; height:11px; border-radius:50%; background:#ddd9ef; }
+  .panel .chrome .t { flex:1; text-align:center; font-size:14px; font-weight:750; color:#332e50; letter-spacing:0.5px; white-space:nowrap; }
+  .panel .chrome .t i { font-style:normal; color:#8d89a6; font-weight:500; font-size:12.5px; }
+  .panel .chrome .port {
+    font-family:var(--mono); font-size:11.5px; font-weight:700; white-space:nowrap;
+    color:var(--v700); border:1px solid rgba(109,74,255,0.28);
+    background:rgba(109,74,255,0.045); padding:3px 10px; border-radius:999px;
+  }
+  .panel .pbody { flex:1; padding:10px 16px 12px; display:flex; flex-direction:column; }
+
+  .sec-label {
+    font-family:var(--mono); font-size:11px; font-weight:800; letter-spacing:2px;
+    color:#9285cc; margin:0 0 4px 2px;
+  }
+  .varr { text-align:center; line-height:10px; height:10px; margin:2px 0; }
+  .varr svg { width:11px; height:11px; stroke:#8b6ff0; stroke-width:2.2; fill:none; stroke-linecap:round; stroke-linejoin:round; }
+
+  /* Runtime pipeline */
+  .entry-lay {
+    display:flex; align-items:center; justify-content:space-between; gap:6px;
+    border:1px dashed rgba(109,74,255,0.32); border-radius:10px; padding:6px 10px; background:#fcfbff;
+  }
+  .entry-lay .ec {
+    display:flex; align-items:center; gap:6px; font-size:12.5px; font-weight:650; color:#453f66; white-space:nowrap;
+  }
+  .entry-lay .ec::before { content:""; width:5px; height:5px; border-radius:50%; background:var(--v400); }
+  .loopbox {
+    border:1.2px solid rgba(109,74,255,0.34); border-radius:11px; padding:8px 12px 9px;
+    background:linear-gradient(180deg,#ffffff,#f8f5ff);
+    display:flex; flex-direction:column; gap:7px;
+  }
+  .loopbox .lb-hd { display:flex; align-items:baseline; gap:9px; }
+  .loopbox .lb-hd b { font-size:15.5px; font-weight:750; color:var(--v800); letter-spacing:0.3px; }
+  .loopbox .lb-hd span { font-size:11.5px; color:var(--mut); margin-left:auto; white-space:nowrap; }
+  .steps { display:flex; align-items:center; gap:5px; }
+  .step {
+    flex:1; text-align:center; font-size:11.5px; font-weight:650; color:#4b4370; white-space:nowrap;
+    border:1px solid rgba(109,74,255,0.24); background:#ffffff; border-radius:7px; padding:5px 1px;
+  }
+  .step.mem { color:var(--v700); border-color:rgba(109,74,255,0.5); background:#f4f0ff; font-weight:750; }
+  .steps .sar { color:var(--v600); font-size:11px; flex:0 0 auto; }
+  .lb-sub { font-size:11.5px; color:var(--mut); letter-spacing:0.4px; white-space:nowrap; }
+  .subsys { display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; }
+  .sbox {
+    border:1px solid rgba(109,74,255,0.2); border-radius:10px; padding:7px 10px; background:#fdfcff;
+    display:flex; flex-direction:column; gap:2px;
+  }
+  .sbox b { font-size:14px; font-weight:700; color:#2f2950; white-space:nowrap; }
+  .sbox span { font-size:11.5px; color:var(--mut); white-space:nowrap; }
+  .membar {
+    display:flex; align-items:center; gap:10px; border-radius:9px; padding:8px 13px;
+    background:linear-gradient(90deg, rgba(109,74,255,0.12), rgba(109,74,255,0.03));
+    box-shadow:inset 3px 0 0 var(--v600);
+  }
+  .membar b { font-size:14.5px; font-weight:750; color:var(--v700); white-space:nowrap; }
+  .membar span { font-size:12px; color:#6e6890; margin-left:auto; white-space:nowrap; font-family:var(--mono); }
+
+  /* Backend hexagonal three columns */
+  .hexwrap { display:grid; grid-template-columns:149px 15px 1fr 15px 149px; flex:1; }
+  .hcol { display:flex; flex-direction:column; gap:7px; }
+  .hcol .hhd { font-family:var(--mono); font-size:11px; font-weight:800; letter-spacing:2px; color:#9285cc; text-align:center; margin-bottom:1px; }
+  .hbox {
+    border:1px solid rgba(109,74,255,0.2); border-radius:10px; background:#fdfcff; padding:8px 10px;
+    display:flex; flex-direction:column; justify-content:center; gap:4px; flex:1; overflow:hidden;
+  }
+  .hbox .top { display:flex; align-items:center; gap:7px; }
+  .hbox .hi {
+    width:24px; height:24px; flex:0 0 24px; border-radius:7px; display:grid; place-items:center;
+    background:rgba(109,74,255,0.07); border:1px solid rgba(109,74,255,0.24);
+  }
+  .hbox .hi svg { width:13px; height:13px; stroke:var(--v700); fill:none; stroke-width:1.9; stroke-linecap:round; stroke-linejoin:round; }
+  .hbox b { font-size:13px; font-weight:700; color:#2f2950; white-space:nowrap; }
+  .hbox span { font-size:11px; color:var(--mut); white-space:normal; line-height:1.5; display:block; }
+  .hbox.hl { border:1.2px solid rgba(109,74,255,0.48); background:linear-gradient(135deg,#f5f1ff,#fdfcff); }
+  .hbox.hl b { color:var(--v700); }
+  .hbox.hl .hi { background:rgba(109,74,255,0.12); border-color:rgba(109,74,255,0.4); }
+  .hgut { display:flex; flex-direction:column; justify-content:space-evenly; align-items:center; padding-top:14px; }
+  .hgut svg { width:11px; height:11px; stroke:#8b6ff0; stroke-width:2.2; fill:none; stroke-linecap:round; stroke-linejoin:round; }
+  .hexcap {
+    margin-top:8px; padding-top:8px; border-top:1px dashed rgba(33,29,54,0.09);
+    font-size:11.5px; color:#8b87a3; text-align:center; letter-spacing:0.6px; white-space:nowrap;
+  }
+  .hexcap b { color:#5f5788; font-weight:700; }
+
+  /* ===== Memory hub ===== */
+  .ring-outer { width:356px; height:356px; left:782px; top:362px; border-radius:50%; border:1.5px dotted rgba(109,74,255,0.38); }
+  .ring-mid { width:298px; height:298px; left:811px; top:391px; border-radius:50%; border:1px dashed rgba(109,74,255,0.22); transform:rotate(12deg); }
+  .orb {
+    width:164px; height:164px; left:878px; top:458px; border-radius:50%;
+    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:3px;
+    background:
+      radial-gradient(circle at 50% 30%, rgba(255,255,255,0.9), rgba(255,255,255,0) 42%),
+      linear-gradient(140deg, #a78bfa 0%, #6d4aff 54%, #3f279e 100%);
+    box-shadow:0 14px 40px rgba(109,74,255,0.32), 0 4px 12px rgba(33,29,54,0.1), inset 0 2px 16px rgba(255,255,255,0.22), inset 0 -8px 22px rgba(45,26,110,0.32);
+  }
+  .orb .t1 { font-size:18.5px; font-weight:800; letter-spacing:0.8px; color:#fff; text-shadow:0 1px 8px rgba(45,26,110,0.5); white-space:nowrap; }
+  .orb .osrow { display:flex; align-items:center; gap:7px; margin-top:8px; filter:drop-shadow(0 1px 6px rgba(45,26,110,0.4)); }
+  .orb .osrow img { height:23px; display:block; }
+  .orb .osrow span { font-size:20px; font-weight:800; color:#fff; letter-spacing:0.3px; }
+  .loop-cap { left:960px; top:372px; transform:translateX(-50%); font-size:12.5px; letter-spacing:1.6px; color:#9179dd; white-space:nowrap; font-weight:600; }
+  .lnode {
+    width:128px; height:48px; border-radius:11px; transform:translate(-50%,-50%);
+    display:flex; align-items:center; justify-content:center; gap:8px;
+    background:rgba(255,255,255,0.52);
+    border:1px solid rgba(109,74,255,0.34);
+    box-shadow:0 4px 12px rgba(109,74,255,0.09);
+    backdrop-filter:blur(3px);
+  }
+  .lnode .li {
+    width:23px; height:23px; flex:0 0 23px; border-radius:7px; display:grid; place-items:center;
+    background:rgba(255,255,255,0.55);
+    border:1px solid rgba(109,74,255,0.28);
+  }
+  .lnode .li svg { width:12.5px; height:12.5px; stroke:var(--v700); fill:none; stroke-width:1.9; stroke-linecap:round; stroke-linejoin:round; }
+  .lnode b { font-family:var(--mono); font-size:13.5px; color:var(--v700); letter-spacing:0.5px; display:block; }
+  .lnode span { font-size:10.5px; color:#6e659a; letter-spacing:0.3px; display:block; margin-top:1px; white-space:nowrap; }
+
+  /* ===== Labels ===== */
+  .plabel {
+    font-size:13px; letter-spacing:0.6px; color:#4b4763; white-space:nowrap; transform:translate(-50%,-50%);
+    background:#ffffff; border:1px solid rgba(33,29,54,0.12); padding:4px 12px; border-radius:999px;
+    box-shadow:0 2px 8px rgba(33,29,54,0.06);
+  }
+  .plabel.hl { color:var(--v700); border:1.2px solid rgba(109,74,255,0.4); background:#f8f6ff;
+    box-shadow:0 3px 12px rgba(109,74,255,0.13); font-weight:700; }
+  .plabel.mini { font-size:12px; padding:3px 10px; color:#565270; }
+  .flow-t { font-size:13.5px; color:var(--v700); letter-spacing:1.2px; white-space:nowrap; transform:translate(-50%,-50%); font-weight:700; }
+
+  /* ===== 03 Data cards ===== */
+  .dcard {
+    width:330px; height:142px; border-radius:14px; padding:12px 16px 12px; transform:translateX(-50%);
+    border:1px solid rgba(83,53,207,0.22);
+    background:#ffffff;
+    box-shadow:0 6px 20px rgba(33,29,54,0.06), 0 1px 3px rgba(33,29,54,0.05);
+    display:flex; flex-direction:column; gap:7px;
+  }
+  .dcard .rw { display:flex; align-items:center; gap:11px; }
+  .dcard .plate {
+    width:40px; height:40px; flex:0 0 40px; border-radius:10px; display:grid; place-items:center;
+    background:rgba(83,53,207,0.05);
+    border:1px solid rgba(83,53,207,0.25);
+  }
+  .dcard .plate svg { width:19px; height:19px; stroke:var(--v700); fill:none; stroke-width:1.9; stroke-linecap:round; stroke-linejoin:round; }
+  .dcard h4 { font-size:17px; font-weight:750; letter-spacing:0.4px; white-space:nowrap; color:#241f3f; }
+  .dcard .loc {
+    margin-left:auto; font-size:11px; letter-spacing:1.5px; font-weight:800; color:#6e659a;
+    border:1px solid rgba(83,53,207,0.22); background:rgba(83,53,207,0.04); padding:2.5px 8px; border-radius:5px; white-space:nowrap;
+  }
+  .dcard.hero {
+    border:1.5px solid rgba(109,74,255,0.52);
+    background:linear-gradient(180deg, #ffffff, #f6f3ff);
+    box-shadow:0 10px 28px rgba(109,74,255,0.16), 0 1px 3px rgba(33,29,54,0.05);
+  }
+  .dcard.hero .plate { background:linear-gradient(135deg, rgba(143,118,255,0.13), rgba(83,53,207,0.06)); border-color:rgba(109,74,255,0.4); }
+  .dcard.hero h4 { color:var(--v700); }
+  .dcard.hero .loc { color:var(--v700); border-color:rgba(109,74,255,0.35); background:rgba(109,74,255,0.06); }
+  .dcard.ext { border-style:dashed; }
+
+  /* Data card internals */
+  .tl { font-family:var(--mono); font-size:12px; color:#4e4870; white-space:nowrap; line-height:1.5; }
+  .tl i { font-style:normal; color:#9b95b5; font-size:11px; margin-left:6px; }
+  .tl .dir { color:var(--v700); font-weight:700; }
+
+  .avs { display:flex; align-items:center; padding-left:3px; }
+  .av {
+    width:28px; height:28px; border-radius:50%; margin-left:-7px; flex:0 0 28px;
+    display:grid; place-items:center; background:#ffffff;
+    border:1px solid rgba(33,29,54,0.1);
+    box-shadow:0 0 0 2px #fff, 0 2px 5px rgba(33,29,54,0.16);
+  }
+  .av img { width:17px; height:17px; object-fit:contain; display:block; }
+  .av:first-child { margin-left:0; }
+  .av.more { background:#efeaff; color:var(--v700); font-size:10px; font-weight:800; font-family:var(--mono); border-color:rgba(109,74,255,0.3); }
+  .av.mono { font-size:10.5px; font-weight:800; color:var(--v700); font-family:var(--mono); }
+  .avs .cap { margin-left:10px; font-size:12px; color:var(--mut); white-space:nowrap; }
+
+  .lpills { display:flex; gap:5px; }
+  .lp {
+    font-family:var(--mono); font-size:12px; font-weight:750; color:var(--v700); white-space:nowrap;
+    border:1px solid rgba(109,74,255,0.35); background:#f6f2ff; padding:3.5px 0; border-radius:7px;
+    flex:1; text-align:center;
+  }
+  .ln { display:flex; align-items:center; gap:8px; font-family:var(--mono); font-size:12.5px; color:#524d70; letter-spacing:0.1px; white-space:nowrap; }
+  .ln::before { content:"▸"; color:var(--v400); font-size:9px; }
+  .tchips { display:flex; flex-wrap:wrap; gap:5px; }
+  .tc {
+    font-family:var(--mono); font-size:11.5px; color:#5c5480; white-space:nowrap;
+    border:1px solid rgba(83,53,207,0.2); background:rgba(83,53,207,0.035); padding:3px 8px; border-radius:6px;
+  }
+
+  /* ===== Footer ===== */
+  .footer {
+    left:104px; right:64px; bottom:22px; border-top:1px solid var(--hair);
+    display:flex; align-items:center; justify-content:center; gap:36px; padding-top:14px;
+  }
+  .fo { display:flex; align-items:center; gap:9px; font-size:13.5px; color:#565270; letter-spacing:0.8px; white-space:nowrap; }
+  .fo .dt { width:7px; height:7px; border-radius:50%; }
+  .fo i { font-style:normal; font-family:var(--mono); color:#2c2748; font-size:12.5px; font-weight:600; }
+  .brand { position:absolute; right:0; top:14px; font-family:var(--mono); font-size:10.5px; color:#8d89a6; letter-spacing:1.5px; }
+  .brand b { color:#6e5fc0; font-weight:800; }
+</style>
+</head>
+<body>
+<div id="stage">
+
+  <svg class="abs" width="1920" height="1080" style="left:0;top:0" fill="none">
+    <defs>
+      <marker id="cMid" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+        <path d="M2.2,1.6 L7.4,5 L2.2,8.4" stroke="#9d85f5" stroke-width="1.9" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+      </marker>
+      <marker id="cStrong" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+        <path d="M2.2,1.6 L7.4,5 L2.2,8.4" stroke="#6d4aff" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+      </marker>
+      <linearGradient id="gCenterTop" gradientUnits="userSpaceOnUse" x1="0" y1="260" x2="0" y2="356">
+        <stop offset="0" stop-color="#b8a9f5"/><stop offset="1" stop-color="#6d4aff"/>
+      </linearGradient>
+      <linearGradient id="gMemL" gradientUnits="userSpaceOnUse" x1="690" y1="540" x2="772" y2="540">
+        <stop offset="0" stop-color="#b8a9f5"/><stop offset="1" stop-color="#6d4aff"/>
+      </linearGradient>
+      <linearGradient id="gMemR" gradientUnits="userSpaceOnUse" x1="1148" y1="540" x2="1230" y2="540">
+        <stop offset="0" stop-color="#6d4aff"/><stop offset="1" stop-color="#b8a9f5"/>
+      </linearGradient>
+      <linearGradient id="gCenterBot" gradientUnits="userSpaceOnUse" x1="0" y1="724" x2="0" y2="800">
+        <stop offset="0" stop-color="#6d4aff"/><stop offset="1" stop-color="#3f279e"/>
+      </linearGradient>
+    </defs>
+
+    <!-- 01 → 02: chevron arrows -->
+    <path d="M270,262 V324" stroke="#9d85f5" stroke-width="2" stroke-linecap="round" marker-end="url(#cMid)"/>
+    <path d="M615,262 V324" stroke="#9d85f5" stroke-width="2" stroke-linecap="round" marker-end="url(#cMid)"/>
+    <path d="M960,262 V350" stroke="url(#gCenterTop)" stroke-width="2.8" stroke-linecap="round" marker-end="url(#cStrong)"/>
+    <path d="M1305,262 V324" stroke="#9d85f5" stroke-width="2" stroke-linecap="round" marker-end="url(#cMid)"/>
+    <path d="M1650,262 V324" stroke="#9d85f5" stroke-width="2" stroke-linecap="round" stroke-dasharray="1 7" marker-end="url(#cMid)"/>
+    <circle cx="270" cy="261" r="3" fill="#9d85f5"/>
+    <circle cx="615" cy="261" r="3" fill="#9d85f5"/>
+    <circle cx="960" cy="261" r="3.5" fill="#6d4aff"/>
+    <circle cx="1305" cy="261" r="3" fill="#9d85f5"/>
+    <circle cx="1650" cy="261" r="3" fill="#9d85f5"/>
+
+    <!-- 02: panels ↔ memory hub -->
+    <path d="M690,540 L770,540" stroke="url(#gMemL)" stroke-width="2.8" stroke-linecap="round" marker-end="url(#cStrong)" marker-start="url(#cMid)"/>
+    <path d="M1148,540 L1228,540" stroke="url(#gMemR)" stroke-width="2.8" stroke-linecap="round" marker-end="url(#cMid)" marker-start="url(#cStrong)"/>
+
+    <!-- Self-evolution loop -->
+    <path d="M896.6,404.1 A150,150 0 0 1 1023.4,404.1" stroke="#7c5cf0" stroke-width="2" stroke-linecap="round" opacity="0.9" marker-end="url(#cStrong)"/>
+    <path d="M1096,476.6 A150,150 0 0 1 1096,603.4" stroke="#7c5cf0" stroke-width="2" stroke-linecap="round" opacity="0.9" marker-end="url(#cStrong)"/>
+    <path d="M1023.4,676 A150,150 0 0 1 896.6,676" stroke="#7c5cf0" stroke-width="2" stroke-linecap="round" opacity="0.9" marker-end="url(#cStrong)"/>
+    <path d="M824,603.4 A150,150 0 0 1 824,476.6" stroke="#7c5cf0" stroke-width="1.7" stroke-linecap="round" opacity="0.5" stroke-dasharray="1 7" marker-end="url(#cStrong)"/>
+
+    <!-- 02 → 03: ball-and-socket connectors (UML component style) -->
+    <!-- Each: upper line → half-circle socket; lower line up from data card → hollow ball -->
+    <g stroke="#7a5ce0" stroke-width="2" stroke-linecap="round">
+      <path d="M280,724 V776"/>
+      <path d="M280,786 m-9,0 a9,9 0 0 1 18,0" fill="none"/>
+      <path d="M280,822 V800"/>
+    </g>
+    <circle cx="280" cy="793.5" r="4.5" fill="#fff" stroke="#7a5ce0" stroke-width="2"/>
+
+    <g stroke="#9d85f5" stroke-width="2" stroke-linecap="round">
+      <path d="M620,724 V776" stroke-dasharray="1 7"/>
+      <path d="M620,786 m-9,0 a9,9 0 0 1 18,0" fill="none"/>
+      <path d="M620,822 V800" stroke-dasharray="1 6"/>
+    </g>
+    <circle cx="620" cy="793.5" r="4.5" fill="#fff" stroke="#9d85f5" stroke-width="2"/>
+
+    <path d="M960,724 V774" stroke="url(#gCenterBot)" stroke-width="2.8" stroke-linecap="round"/>
+    <path d="M960,786 m-11,0 a11,11 0 0 1 22,0" fill="none" stroke="#5335cf" stroke-width="2.4" stroke-linecap="round"/>
+    <path d="M960,822 V801" stroke="#3f279e" stroke-width="2.8" stroke-linecap="round"/>
+    <circle cx="960" cy="793.5" r="5.5" fill="#fff" stroke="#5335cf" stroke-width="2.4"/>
+
+    <g stroke="#7a5ce0" stroke-width="2" stroke-linecap="round">
+      <path d="M1300,724 V776"/>
+      <path d="M1300,786 m-9,0 a9,9 0 0 1 18,0" fill="none"/>
+      <path d="M1300,822 V800"/>
+    </g>
+    <circle cx="1300" cy="793.5" r="4.5" fill="#fff" stroke="#7a5ce0" stroke-width="2"/>
+
+    <g stroke="#9d85f5" stroke-width="2" stroke-linecap="round">
+      <path d="M1640,724 V776" stroke-dasharray="1 7"/>
+      <path d="M1640,786 m-9,0 a9,9 0 0 1 18,0" fill="none"/>
+      <path d="M1640,822 V800" stroke-dasharray="1 6"/>
+    </g>
+    <circle cx="1640" cy="793.5" r="4.5" fill="#fff" stroke="#9d85f5" stroke-width="2"/>
+
+    <circle cx="280" cy="723" r="3" fill="#7a5ce0"/>
+    <circle cx="620" cy="723" r="3" fill="#9d85f5"/>
+    <circle cx="960" cy="723" r="3.5" fill="#6d4aff"/>
+    <circle cx="1300" cy="723" r="3" fill="#7a5ce0"/>
+    <circle cx="1640" cy="723" r="3" fill="#9d85f5"/>
+  </svg>
+
+  <!-- Layer dividers (labels ride the line) -->
+  <!-- <div class="divider" style="top:118px"></div>
+  <div class="dlabel" style="top:118px">01 INTERFACE</div> -->
+  <div class="divider" style="top:308px"></div>
+  <!-- <div class="dlabel" style="top:308px">02 CORE</div> -->
+  <div class="divider" style="top:786px"></div>
+  <!-- <div class="dlabel" style="top:786px">03 DATA</div> -->
+
+  <!-- Title / legend -->
+  <div class="abs title">
+    <img src="assets/logo.png" alt="Memmy">
+    <h1>Memmy System Architecture</h1>
+  </div>
+  <div class="abs legend">
+    <span class="lg"><span class="sw" style="border-color:#9d85f5"></span>Data Flow</span>
+    <span class="lg"><span class="sw" style="border-color:#6d4aff"></span>Memory Flow</span>
+    <span class="lg"><span class="sw" style="border-color:#5335cf"></span>Storage Interface</span>
+    <span class="lg"><span class="sw" style="border-color:#aaa6c0;border-top-style:dashed"></span>External / Read-only</span>
+  </div>
+
+  <!-- ═══ 01 Interface layer ═══ -->
+  <div class="abs term" style="left:270px;top:132px">
+    <div class="bar">
+      <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+      <span class="t">CLI — zsh</span>
+    </div>
+    <div class="body">
+      <div class="ln"><span class="p">$</span> memmy <span class="c">— interactive TUI / serve</span></div>
+      <div class="ln"><span class="p">$</span> memmy-memory <span class="c">search "…"</span></div>
+      <div class="ln dim">Agent entry + memory entry · scriptable</div>
+    </div>
+  </div>
+
+  <div class="abs ecard" style="left:615px;top:132px">
+    <div class="rw">
+      <span class="plate"><svg viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-8 8H4l2-3a8 8 0 1 1 15-5z"/></svg></span>
+      <div>
+        <h3>Channels <span class="cnt">×15</span></h3>
+        <div class="avs">
+          <span class="av"><img src="assets/wechat-color.svg" alt="WeChat"></span>
+          <span class="av"><img src="assets/feishu-color.svg" alt="Feishu"></span>
+          <span class="av"><img src="assets/dingtalk-color.svg" alt="DingTalk"></span>
+          <span class="av mono">TG</span>
+          <span class="av more">+11</span>
+        </div>
+      </div>
+    </div>
+    <div class="tags"><span class="tag">Webhook / Long-lived</span><span class="tag">Voice Tasks</span></div>
+  </div>
+  <div class="abs ecard hl" style="left:960px;top:132px">
+    <div class="rw">
+      <span class="plate"><svg viewBox="0 0 24 24"><rect x="4" y="8" width="16" height="11" rx="2"/><path d="M12 8V4M8 4h8M9 13h.01M15 13h.01"/></svg></span>
+      <div>
+        <h3>External Agents <span class="cnt">×6</span></h3>
+        <div class="avs">
+          <span class="av"><img src="assets/cursor.svg" alt="Cursor"></span>
+          <span class="av"><img src="assets/claude-color.svg" alt="Claude Code"></span>
+          <span class="av"><img src="assets/openai.svg" alt="Codex"></span>
+          <span class="av mono">Op</span>
+          <span class="av mono">OC</span>
+          <span class="av mono">He</span>
+        </div>
+      </div>
+    </div>
+    <div class="tags"><span class="tag">Skill Injection</span><span class="tag">History Takeover</span></div>
+  </div>
+  <div class="abs ecard" style="left:1305px;top:132px">
+    <div class="rw">
+      <span class="plate"><svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg></span>
+      <div>
+        <h3>Desktop</h3>
+        <div class="s">Electron Workbench + Pet</div>
+      </div>
+    </div>
+    <div class="tags"><span class="tag">REST + SSE</span><span class="tag">WebSocket</span></div>
+  </div>
+  <div class="abs ecard" style="left:1650px;top:132px">
+    <div class="rw">
+      <span class="plate"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></svg></span>
+      <div>
+        <h3>Managed Tools</h3>
+        <div class="s">GitHub · Gmail · Notion · Jira …</div>
+      </div>
+    </div>
+    <div class="tags"><span class="tag">Composio MCP</span><span class="tag">OAuth</span></div>
+  </div>
+
+  <div class="abs plabel hl" style="left:960px;top:300px">Skill Memory Direct Link</div>
+
+  <!-- ═══ 02 Agent Runtime ═══ -->
+  <article class="abs panel" style="left:110px;top:330px;width:572px;height:394px">
+    <div class="chrome">
+      <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+      <span class="t">Agent Runtime <i>· Task Execution Core</i></span>
+      <span class="port">OpenAI API</span>
+    </div>
+    <div class="pbody">
+      <div class="sec-label">ENTRYPOINTS</div>
+      <div class="entry-lay">
+        <span class="ec">CLI Bridge</span>
+        <span class="ec">Channel Manager ×15</span>
+        <span class="ec">WebSocket Bridge</span>
+        <span class="ec">OpenAI API</span>
+      </div>
+      <div class="varr"><svg viewBox="0 0 12 12"><path d="M2.5,4 L6,7.5 L9.5,4"/></svg></div>
+
+      <div class="sec-label">CORE LOOP</div>
+      <div class="loopbox">
+        <div class="lb-hd"><b>Agent Loop</b><span>AutoCompact · Streaming Output</span></div>
+        <div class="steps">
+          <span class="step mem">Recall Inject</span><span class="sar">▸</span>
+          <span class="step">Build Context</span><span class="sar">▸</span>
+          <span class="step">Model Call</span><span class="sar">▸</span>
+          <span class="step">Tool Exec</span><span class="sar">▸</span>
+          <span class="step mem">Turn Write-back</span>
+        </div>
+        <div class="lb-sub">Multi-session · Subagents · Long Tasks · Cron Heartbeat · Safety Policies</div>
+      </div>
+      <div class="varr"><svg viewBox="0 0 12 12"><path d="M2.5,4 L6,7.5 L9.5,4"/></svg></div>
+
+      <div class="sec-label">SUBSYSTEMS</div>
+      <div class="subsys">
+        <div class="sbox"><b>Tool Engine</b><span>Shell · Files · Web · MCP</span></div>
+        <div class="sbox"><b>Provider Factory ×12</b><span>BYOK / Account · Fallback</span></div>
+        <div class="sbox"><b>Skill System</b><span>Built-in ×11 · Self-evolving</span></div>
+      </div>
+      <div class="varr"><svg viewBox="0 0 12 12"><path d="M2.5,4 L6,7.5 L9.5,4"/></svg></div>
+
+      <div class="membar">
+        <b>Memory Hooks</b>
+        <span>Recall / Write-back ⇄ Shared Memory</span>
+      </div>
+    </div>
+  </article>
+
+  <!-- ═══ 02 Local Backend ═══ -->
+  <article class="abs panel" style="left:1238px;top:330px;width:572px;height:394px">
+    <div class="chrome">
+      <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+      <span class="t">Local Backend</span>
+      <span class="port">Fastify · Local Token</span>
+    </div>
+    <div class="pbody">
+      <div class="hexwrap">
+        <div class="hcol">
+          <div class="hhd">INBOUND</div>
+          <div class="hbox">
+            <div class="top"><span class="hi"><svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="7" rx="2"/><rect x="2" y="14" width="20" height="7" rx="2"/><path d="M6 6.5h.01M6 17.5h.01"/></svg></span><b>Local REST API</b></div>
+            <span>Dynamic port · token auth</span>
+          </div>
+          <div class="hbox">
+            <div class="top"><span class="hi"><svg viewBox="0 0 24 24"><path d="M4 11a9 9 0 0 1 9 9M4 4a16 16 0 0 1 16 16"/><circle cx="5" cy="19" r="1.5"/></svg></span><b>SSE Progress</b></div>
+            <span>Live scan / ingest progress push</span>
+          </div>
+          <div class="hbox">
+            <div class="top"><span class="hi"><svg viewBox="0 0 24 24"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg></span><b>Composio MCP</b></div>
+            <span>Managed tool access · OAuth</span>
+          </div>
+        </div>
+        <div class="hgut">
+          <svg viewBox="0 0 12 12"><path d="M4,2.5 L7.5,6 L4,9.5"/></svg>
+          <svg viewBox="0 0 12 12"><path d="M4,2.5 L7.5,6 L4,9.5"/></svg>
+          <svg viewBox="0 0 12 12"><path d="M4,2.5 L7.5,6 L4,9.5"/></svg>
+        </div>
+        <div class="hcol">
+          <div class="hhd">SERVICES</div>
+          <div class="hbox hl">
+            <div class="top"><span class="hi"><svg viewBox="0 0 24 24"><path d="M22 3H2l8 9.5V19l4 2v-8.5z"/></svg></span><b>Ingest Pipeline</b></div>
+            <span>Scan → redact secrets → dedupe → chunked ingest</span>
+          </div>
+          <div class="hbox">
+            <div class="top"><span class="hi"><svg viewBox="0 0 24 24"><path d="M12 19l7-7 3 3-7 7-3-3zM18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5zM2 2l7.6 7.6"/><circle cx="11" cy="11" r="2"/></svg></span><b>Skill Deploy · Scanner</b></div>
+            <span>Memory skill install · scheduled scans · scan logs</span>
+          </div>
+          <div class="hbox">
+            <div class="top"><span class="hi"><svg viewBox="0 0 24 24"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></span><b>Quota & Onboarding</b></div>
+            <span>Token metering · bootstrap · model tests · ASR</span>
+          </div>
+        </div>
+        <div class="hgut">
+          <svg viewBox="0 0 12 12"><path d="M4,2.5 L7.5,6 L4,9.5"/></svg>
+          <svg viewBox="0 0 12 12"><path d="M4,2.5 L7.5,6 L4,9.5"/></svg>
+          <svg viewBox="0 0 12 12"><path d="M4,2.5 L7.5,6 L4,9.5"/></svg>
+        </div>
+        <div class="hcol">
+          <div class="hhd">OUTBOUND</div>
+          <div class="hbox hl">
+            <div class="top"><span class="hi"><svg viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/></svg></span><b>Memory Client</b></div>
+            <span>Ingest writes / memory governance</span>
+          </div>
+          <div class="hbox">
+            <div class="top"><span class="hi"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></span><b>Agent Source ×6</b></div>
+            <span>Read-only scans of external Agent history</span>
+          </div>
+          <div class="hbox">
+            <div class="top"><span class="hi"><svg viewBox="0 0 24 24"><path d="M12 19l7-7 3 3-7 7-3-3zM18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/></svg></span><b>Skill Writer</b></div>
+            <span>Writes rules / AGENTS.md · cloud sync</span>
+          </div>
+        </div>
+      </div>
+      <div class="hexcap"><b>Ports &amp; Adapters</b> — in/out adapters decoupled from core · swappable</div>
+    </div>
+  </article>
+
+  <!-- ═══ Memory hub ═══ -->
+  <div class="abs ring-outer"></div>
+  <div class="abs ring-mid"></div>
+  <div class="abs orb">
+    <span class="t1">Shared Memory</span>
+    <div class="osrow"><img src="assets/memos-white.png" alt=""><span>MemOS</span></div>
+  </div>
+  <div class="abs loop-cap">Memory Self-Evolution Loop</div>
+  <div class="abs lnode" style="left:854px;top:434px">
+    <span class="li"><svg viewBox="0 0 24 24"><circle cx="6" cy="19" r="2.5"/><circle cx="18" cy="5" r="2.5"/><path d="M8.5 19H15a3.5 3.5 0 0 0 0-7H9a3.5 3.5 0 0 1 0-7h6.5"/></svg></span>
+    <div><b>L1</b><span>Exec Traces</span></div>
+  </div>
+  <div class="abs lnode" style="left:1066px;top:434px">
+    <span class="li"><svg viewBox="0 0 24 24"><path d="M9 18h6M10 21h4M12 3a6 6 0 0 1 3.6 10.8c-.6.5-.6 1.2-.6 2.2h-6c0-1-.1-1.7-.6-2.2A6 6 0 0 1 12 3z"/></svg></span>
+    <div><b>L2</b><span>Strategies</span></div>
+  </div>
+  <div class="abs lnode" style="left:1066px;top:646px">
+    <span class="li"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a13.5 13.5 0 0 1 0 18M12 3a13.5 13.5 0 0 0 0 18"/></svg></span>
+    <div><b>L3</b><span>World Model</span></div>
+  </div>
+  <div class="abs lnode" style="left:854px;top:646px">
+    <span class="li"><svg viewBox="0 0 24 24"><path d="M13 2L4 14h6l-1 8 9-12h-6z"/></svg></span>
+    <div><b>Skill</b><span>Reusable Skills</span></div>
+  </div>
+
+  <div class="abs flow-t" style="left:730px;top:514px">Recall</div>
+  <div class="abs flow-t" style="left:730px;top:568px">Write-back</div>
+  <div class="abs flow-t" style="left:1188px;top:514px">Ingest</div>
+  <div class="abs flow-t" style="left:1188px;top:568px">Governance</div>
+
+  <div class="abs plabel hl" style="left:960px;top:752px">Full-text + Vector Hybrid Retrieval · Dream Consolidation</div>
+  <div class="abs plabel mini" style="left:620px;top:752px">HTTPS · BYOK</div>
+  <div class="abs plabel mini" style="left:1640px;top:752px">Read-only Scan · Redaction</div>
+
+  <!-- ═══ 03 Data layer ═══ -->
+  <div class="abs dcard" style="left:280px;top:832px">
+    <div class="rw">
+      <span class="plate"><svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></span>
+      <h4>Local Workspace</h4><span class="loc">LOCAL</span>
+    </div>
+    <div class="tl"><span class="dir">~/.memmy/</span></div>
+    <div class="tl">├─ config.yaml <i>BYOK · ${ENV} refs</i></div>
+    <!-- <div class="tl">├─ workspace/ <i>templates · built-in skills</i></div> -->
+    <div class="tl">└─ logs/ · cli-bin/ <i>rolling logs</i></div>
+  </div>
+
+  <div class="abs dcard ext" style="left:620px;top:832px">
+    <div class="rw">
+      <span class="plate"><svg viewBox="0 0 24 24"><path d="M17.5 19a4.5 4.5 0 0 0 .4-9A6 6 0 0 0 6.2 8.5 4.8 4.8 0 0 0 6.5 19z"/></svg></span>
+      <h4>Cloud Models</h4><span class="loc">OPTIONAL</span>
+    </div>
+    <div class="avs">
+      <span class="av"><img src="assets/openai.svg" alt="OpenAI"></span>
+      <span class="av mono">An</span>
+      <span class="av mono">Ge</span>
+      <span class="av mono">DS</span>
+      <span class="av mono">Qw</span>
+      <span class="av mono">Zh</span>
+      <span class="av mono">Mi</span>
+      <span class="av more">+5</span>
+      <span class="cap">Provider ×12</span>
+    </div>
+    <div class="ln">LLM · Embedding · ASR · Image Gen</div>
+    <div class="ln">BYOK — keys via ${ENV}, never on disk</div>
+  </div>
+
+  <div class="abs dcard hero" style="left:960px;top:832px">
+    <div class="rw">
+      <span class="plate"><svg viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg></span>
+      <h4>Memory Store SQLite</h4><span class="loc">CORE</span>
+    </div>
+    <div class="lpills">
+      <span class="lp">L1</span><span class="lp">L2</span><span class="lp">L3</span><span class="lp">Skill</span>
+    </div>
+    <div class="ln">FTS5 full-text + dual vector tables</div>
+    <div class="ln">episodes · feedback · skill_trials</div>
+  </div>
+
+  <div class="abs dcard" style="left:1300px;top:832px">
+    <div class="rw">
+      <span class="plate"><svg viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/></svg></span>
+      <h4>App State Store</h4><span class="loc">LOCAL</span>
+    </div>
+    <div class="tchips">
+      <span class="tc">accounts</span><span class="tc">integrations</span><span class="tc">channel_state</span>
+      <span class="tc">scan_journal</span><span class="tc">idempotency</span>
+    </div>
+    <div class="ln">Accounts · channels · idempotency</div>
+  </div>
+
+  <div class="abs dcard ext" style="left:1640px;top:832px">
+    <div class="rw">
+      <span class="plate"><svg viewBox="0 0 24 24"><path d="M12 3v18M5 7l7-4 7 4M5 17l7 4 7-4"/></svg></span>
+      <h4>External History</h4><span class="loc">READ-ONLY</span>
+    </div>
+    <div class="avs">
+      <span class="av"><img src="assets/cursor.svg" alt="Cursor"></span>
+      <span class="av"><img src="assets/claude-color.svg" alt="Claude Code"></span>
+      <span class="av"><img src="assets/openai.svg" alt="Codex"></span>
+      <span class="av mono">Op</span>
+      <span class="av mono">OC</span>
+      <span class="av mono">He</span>
+      <span class="cap">Sources ×6</span>
+    </div>
+    <div class="ln">state.vscdb · *.jsonl · *.db</div>
+    <div class="ln">Read-only scan · secrets redacted</div>
+  </div>
+
+  <!-- ═══ Footer ═══ -->
+  <div class="abs footer">
+    <span class="fo"><span class="dt" style="background:#9d85f5"></span>Full local loopback <i>127.0.0.1</i></span>
+    <span class="fo"><span class="dt" style="background:#5335cf"></span>Triple token verification</span>
+    <span class="fo"><span class="dt" style="background:#3f279e"></span>SQLite by default · memory never leaves your machine</span>
+    <span class="brand">MEMTENSOR · MEMMY · Powered by <b>MemOS</b></span>
+  </div>
+</div>
+
+<script>
+  function fit() {
+    const s = document.getElementById("stage");
+    s.style.transform = `translate(-50%,-50%) scale(${Math.min(innerWidth/1920, innerHeight/1080)})`;
+  }
+  addEventListener("resize", fit); fit();
+</script>
+</body>
+</html>

@@ -1,0 +1,37 @@
+{
+  "name": "@memmy/frontend-desktop",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "npm run build -w @memmy/desktop-interface && tsc -p tsconfig.json --noEmit && vite build",
+    "typecheck": "npm run build -w @memmy/desktop-interface && tsc -p tsconfig.json --noEmit",
+    "test": "npm run build -w @memmy/desktop-interface && vitest run"
+  },
+  "dependencies": {
+    "@memmy/desktop-interface": "0.0.0",
+    "@memmy/local-api-contracts": "0.0.0",
+    "@types/react-syntax-highlighter": "^15.5.13",
+    "@vitejs/plugin-react": "^6.0.2",
+    "@xyflow/react": "^12.11.2",
+    "electron-log": "^5.4.4",
+    "katex": "^0.16.47",
+    "lucide-react": "^1.16.0",
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6",
+    "react-markdown": "^10.1.0",
+    "react-syntax-highlighter": "^16.1.1",
+    "rehype-katex": "^7.0.1",
+    "remark-breaks": "^4.0.0",
+    "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0",
+    "vite": "^8.0.14",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.15",
+    "@types/react-dom": "^19.2.3",
+    "happy-dom": "^20.10.6"
+  }
+}

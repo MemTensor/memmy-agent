@@ -1,0 +1,27 @@
+{
+  "pages": [
+    "index",
+    "---[Play]Getting started---",
+    "...start",
+    "---[Monitor]Desktop---",
+    "...desktop",
+    "---[Brain]Memory---",
+    "...memory",
+    "---[MessageSquare]Channels---",
+    "...channels",
+    "---[Wrench]Tools---",
+    "...tools",
+    "---[Cpu]Models---",
+    "...models",
+    "---[Boxes]Concepts---",
+    "...concepts",
+    "---[Library]Reference---",
+    "...reference",
+    "---[Code]Development---",
+    "...development",
+    "---[Shield]Security---",
+    "...security",
+    "---[CircleQuestionMark]Help---",
+    "...help"
+  ]
+}

@@ -1,0 +1,18 @@
+---
+title: 给外部 Agent 安装记忆 Skill
+icon: Plug
+---
+
+除了被动扫描历史，Memmy 还能让外部 Agent **主动**读写记忆。
+
+桌面端会自动启动；或使用 `npm run memory:serve:dev` 源码态启动。
+
+桌面端「记忆来源」页提供一键安装到 `~/.local/bin`。
+
+### CLI 安装
+
+```bash
+memmy-memory init --agent <agent>
+```
+
+Memmy 会把记忆指令文件写入对应 Agent 的规则目录，之后该 Agent 就会主动调用 `memmy-memory` 检索和写入记忆。

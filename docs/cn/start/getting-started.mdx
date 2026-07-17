@@ -1,0 +1,88 @@
+---
+title: 入门指南
+description: 本页带你从零完成 Memmy 的安装、首次配置和第一轮对话。
+icon: Rocket
+---
+
+## 你需要准备
+
+- macOS 或 Windows 桌面环境（桌面端路径）。
+- 或 Node.js `>=22` + npm（CLI / 源码路径）。
+- API Key 模式需要至少一个模型 Provider 的 API Key。
+
+<Callout type="idea">
+  不确定选哪种模式？账号模式开箱即用并附带平台体验 Token；API Key 模式的数据与额度完全由你掌控。两种模式的数据都以本地优先方式保存。
+</Callout>
+
+## 快速设置
+
+下载并安装 Memmy 桌面应用。首次启动会自动完成：
+
+1. 设置 `MEMMY_HOME` 和 `MEMMY_CONFIG`。
+2. 安装内置 CLI，并为已授权的 Agent 准备 Hook、插件和配套 Skill。
+3. 准备 `~/.memmy/config.yaml`、workspace 和 Memory SQLite。
+4. 启动 Memory 服务和 Agent gateway。
+
+```bash
+cd App/memmy-agent
+npm install
+npm run build
+node dist/main.js --help
+```
+
+在欢迎页选择：
+
+- **账号模式**：手机号或邮箱验证码登录，使用平台体验 Token。
+- **API Key 模式**：分三步配置主模型 + Embedding、记忆相关模型、可选的 ASR 与图像生成模型，每一步都提供真实连接测试。
+
+```bash
+memmy onboard          # 初始化配置和 workspace
+memmy onboard --wizard # 终端菜单式配置模型、Provider、工具
+memmy status           # 检查配置与运行状态
+```
+
+进入主工作台，在输入框发送第一条消息。`Enter` 发送，`Shift + Enter` 换行，输入 `/` 可打开 Slash command 面板。
+
+```bash
+memmy agent --message "你好，介绍一下当前工作区"
+# 或直接进入交互式聊天
+memmy
+```
+
+打开「记忆管理 → 跨Agent接入」，扫描 Cursor、Claude Code、Codex、OpenCode、OpenClaw、Hermes 的历史对话并入库。首次引导会让你选择是否只扫描，或同时为检测到的 Agent 安装对应的 Hook/插件；Skill 会随实时接入一并安装。
+
+接入后，Hook 或插件会在新对话中自动采集完整回合，并在支持的 Agent 中自动注入相关记忆。详见 [Agent 来源与扫描](/docs/memory/sources) 中的 Hook 与插件说明。
+
+
+打开「工具」页：
+
+- 消息渠道：Telegram、Discord、iMessage、WeChat、Feishu、DingTalk。
+- 托管集成：GitHub、Gmail、Notion、Slack、Linear、Jira 等，走 OAuth 授权。
+
+## 高级：把 Memmy 当本地 API 用
+
+```bash
+memmy serve
+```
+
+默认监听 `http://127.0.0.1:18990`，提供 `GET /health`、`GET /v1/models`、`POST /v1/chat/completions`，可被任何支持 OpenAI Chat Completions 协议的工具复用。
+
+## 高级：环境变量
+
+| 变量 | 作用 |
+| --- | --- |
+| `MEMMY_HOME` | Memmy 数据主目录（默认 `~/.memmy`） |
+| `MEMMY_CONFIG` | 主配置文件路径（默认 `~/.memmy/config.yaml`） |
+| `MEMMY_MEMORY_TOKEN` / `MEMORY_SERVICE_TOKEN` | Memory HTTP 服务的 bearer token |
+
+配置文件中的 `${ENV_NAME}` 会被自动解析，避免把 API Key 写死在配置里。
+
+## 接下来做什么
+
+会话、附件、语音与 Slash command · Agent 扫描与 Hook/插件接入 · 三步配置详解 · 常驻桌面的轻量入口
+
+## 相关内容
+
+- [默认端口](/docs/reference/ports)
+- [安全与隐私](/docs/security/security)
+- [常见问题](/docs/help/faq)

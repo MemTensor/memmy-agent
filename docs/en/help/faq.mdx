@@ -1,0 +1,24 @@
+---
+title: FAQ
+icon: MessageCircleQuestionMark
+---
+
+**How is Memmy different from a regular chatbot?**
+
+A regular chatbot only handles the current conversation. Memmy maintains local memory, scans external Agent history, installs Agent Skills, and puts the desktop app, CLI, Memory service, and tool connections in one runtime environment.
+
+**Do I have to register an account?**
+
+Not necessarily. The desktop app supports both account mode and API Key mode; API Key mode uses your own model quota, and data is still stored local-first.
+
+**Can I use Memmy without configuring ASR or an image generation model?**
+
+Yes. They only affect voice input and Agent image generation — both optional capabilities that never block normal chat or memory features.
+
+**How do external Agents use Memmy's memory?**
+
+First run the Memory service, then install the CLI, and finally install the corresponding Skill for Codex, Cursor, Claude Code, Opencode, OpenClaw, or Hermes.
+
+**Where is my data stored? Does scanning upload it?**
+
+Everything defaults to `~/.memmy`, including config, workspace, the Memory SQLite database, and runtime files. Scanning and ingestion happen entirely locally, with memories written to local SQLite. Participation in the "memory improvement program" is explicitly controlled by a toggle in privacy settings.

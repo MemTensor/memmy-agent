@@ -1,0 +1,31 @@
+{
+  "name": "@memmy/desktop",
+  "version": "0.0.2",
+  "private": true,
+  "type": "module",
+  "description": "Memmy desktop client.",
+  "author": "MemTensor",
+  "main": "./dist/main/main.js",
+  "scripts": {
+    "build": "npm run build -w @memmy/frontend-desktop && npm run build:main && node -e \"require('node:fs').cpSync('../../frontend/desktop/dist', 'dist/renderer', { recursive: true })\"",
+    "build:main": "npm run build -w @memmy/desktop-interface && npm run build -w @memmy/backend && node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json",
+    "build:runtime": "npm --prefix ../../.. run memory:build && npm --prefix ../../memmy-agent run build",
+    "dev": "npm run build:runtime && npm run build:main && electron dist/main/main.js",
+    "dist:mac": "bash ../../../scripts/internal/package-mac-dmg.sh",
+    "dist:mac:unsigned": "MEMMY_SKIP_CODESIGN=1 bash ../../../scripts/internal/package-mac-dmg.sh",
+    "test": "vitest run tests",
+    "typecheck": "npm run build -w @memmy/desktop-interface && npm run build -w @memmy/backend && tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@memmy/backend": "0.0.0",
+    "@memmy/desktop-interface": "0.0.0",
+    "@memmy/local-api-contracts": "0.0.0",
+    "dotenv": "^16.6.1",
+    "electron-log": "^5.4.4",
+    "yaml": "^2.9.0"
+  },
+  "devDependencies": {
+    "electron": "38.4.0",
+    "electron-builder": "^26.0.12"
+  }
+}
