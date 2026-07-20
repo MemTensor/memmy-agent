@@ -4,7 +4,7 @@ import path from "node:path";
 import YAML from "yaml";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { onboard } from "../../src/entrypoints/cli/commands.js";
-import { loadConfig, saveConfig } from "../../src/config/loader.js";
+import { ConfigLoadError, loadConfig, saveConfig } from "../../src/config/loader.js";
 import { Config } from "../../src/config/schema.js";
 import { validateUrlTarget } from "../../src/security/network.js";
 
@@ -343,27 +343,27 @@ describe("config migrations", () => {
     expect(ok).toBe(false);
   });
 
-  it("falls back to defaults when the config file cannot be parsed", () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  it("throws instead of silently using defaults when the config file cannot be parsed", () => {
+    const configPath = tmpRawConfig("{");
 
-    const config = loadConfig(tmpRawConfig("{"));
-
-    expect(config.agents.defaults.model).toBe(new Config().agents.defaults.model);
-    expect(config.channels.sendMaxRetries).toBe(3);
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining("Using default configuration."));
+    expect(() => loadConfig(configPath)).toThrow(ConfigLoadError);
+    try {
+      loadConfig(configPath);
+      expect.unreachable("loadConfig should have thrown");
+    } catch (error) {
+      expect((error as Error).message).toContain(configPath);
+    }
   });
 
-  it("falls back to defaults when schema validation fails", () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  it("throws instead of silently using defaults when schema validation fails", () => {
+    const configPath = tmpConfig({ channels: { sendMaxRetries: 99 } });
 
-    const config = loadConfig(tmpConfig({ channels: { sendMaxRetries: 99 } }));
-
-    expect(config.channels.sendMaxRetries).toBe(3);
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining("sendMaxRetries"));
+    expect(() => loadConfig(configPath)).toThrow(ConfigLoadError);
+    expect(() => loadConfig(configPath)).toThrow(/sendMaxRetries/);
+    expect(() => loadConfig(configPath)).toThrow(new RegExp(configPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   });
 
-  it("resets SSRF whitelist when a bad config falls back to defaults", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  it("does not silently reset the SSRF whitelist when a bad config fails to load", async () => {
     const whitelisted = tmpConfig({ tools: { ssrfWhitelist: ["100.64.0.0/10"] } });
     const bad = tmpConfig({
       tools: { ssrfWhitelist: ["100.64.0.0/10"] },
@@ -373,11 +373,21 @@ describe("config migrations", () => {
     loadConfig(whitelisted);
     await expect(validateUrlTarget("http://100.100.1.1/api")).resolves.toEqual([true, ""]);
 
-    const config = loadConfig(bad);
+    expect(() => loadConfig(bad)).toThrow(ConfigLoadError);
+    // The failed load must not have touched any global state (like the SSRF whitelist):
+    // the last successfully loaded config stays in effect until a valid config loads.
     const [ok] = await validateUrlTarget("http://100.100.1.1/api");
+    expect(ok).toBe(true);
+  });
 
-    expect(config.tools.ssrfWhitelist).toEqual([]);
-    expect(ok).toBe(false);
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining("Using default configuration."));
+  it("still loads defaults when the config file does not exist", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-config-migration-"));
+    roots.push(root);
+    const missingPath = path.join(root, "does-not-exist", "config.yaml");
+
+    const config = loadConfig(missingPath);
+
+    expect(config.agents.defaults.model).toBe(new Config().agents.defaults.model);
+    expect(config.channels.sendMaxRetries).toBe(3);
   });
 });
