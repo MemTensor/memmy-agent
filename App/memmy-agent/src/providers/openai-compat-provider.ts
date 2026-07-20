@@ -16,6 +16,7 @@ import {
 } from "./openai-responses/index.js";
 import { memmyAccountNoneThinkingStyle } from "./memmy-account.js";
 import { OPENROUTER_ATTRIBUTION_HEADERS } from "./openrouter-attribution.js";
+import { memmyAccountApiBase } from "./registry.js";
 import { normalizeToolArgumentsString, parseToolArguments } from "./tool-json.js";
 import { stripThink } from "../utils/helpers.js";
 
@@ -133,7 +134,7 @@ export class OpenAICompatProvider extends LLMProvider {
     }
     if (this.apiKey && this.spec?.envKey) this.setupEnv(this.apiKey, this.apiBase);
 
-    const effectiveBase = this.apiBase || this.spec?.defaultApiBase || null;
+    const effectiveBase = this.apiBase || resolveDefaultApiBase(this.spec);
     this.effectiveBase = effectiveBase;
     this.defaultHeaders = { "x-session-affinity": sessionAffinity() };
     if (usesOpenRouterAttribution(this.spec, effectiveBase)) {
@@ -1106,6 +1107,14 @@ function sessionAffinity(): string {
 
 function specName(spec: any): string {
   return String(spec?.name ?? "").toLowerCase();
+}
+
+// memmy_account's real API base is resolved lazily (see providers/registry.ts): only a genuine attempt
+// to build a request for it (no explicit apiBase override) resolves MEMMY_CLOUD_SERVICE and throws the
+// clear "not configured" error. Every other provider keeps reading its precomputed defaultApiBase.
+function resolveDefaultApiBase(spec: any): string | null {
+  if (specName(spec) === "memmy_account") return memmyAccountApiBase();
+  return spec?.defaultApiBase || null;
 }
 
 function chatCompletionToolsForProvider(
