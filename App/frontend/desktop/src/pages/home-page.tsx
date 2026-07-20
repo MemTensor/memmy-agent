@@ -59,7 +59,7 @@ import { mergeVoiceTranscript, useAsrRecorder } from "./asr-recorder.js";
 import { consumePendingFirstEncounterTaskLaunch } from "./first-encounter-task-launch.js";
 import { HistoryDagPanel, type HistoryDagPanelState } from "./history-dag-panel.js";
 import { Mic, Pause, Plus, Send } from "./memory/memory-prototype-icons.js";
-import { RotateCw, X, ChevronDown } from "lucide-react";
+import { ArrowDown, RotateCw, X } from "lucide-react";
 
 export { agentChatScopeKey, updateComposerDraftForScope };
 export { hydrateAgentThreadInBackground };
@@ -1526,15 +1526,15 @@ export function HomePage() {
       setShowScrollToBottomFab(false);
       return;
     }
-    // Only a scroll event that follows a real wheel/touch gesture is allowed
-    // to turn auto-scroll off. This is what "the user took over the mouse and scrolled up"
-    // means literally — a scroll event with no recent user gesture behind it
-    // (e.g. one racing with streaming content growth) must not disable it.
+    // The control reflects the actual scroll position even when the user moved
+    // with the scrollbar or keyboard. Only a scroll event that follows a real
+    // wheel/touch gesture is allowed to turn auto-scroll off, so a scroll event
+    // racing with streaming content growth cannot disable it.
+    setShowScrollToBottomFab(true);
     if (Date.now() > userScrollIntentUntilRef.current) {
       return;
     }
     shouldAutoScrollAgentConversationRef.current = false;
-    setShowScrollToBottomFab(true);
   }
 
   /**
@@ -1777,7 +1777,7 @@ export function HomePage() {
               />
             </div>
           </div>
-          {showScrollToBottomFab && isCurrentAgentRunning ? (
+          {showScrollToBottomFab ? (
             <button
               type="button"
               className="agent-scroll-to-bottom-fab"
@@ -1785,7 +1785,7 @@ export function HomePage() {
               title={t("home.scrollToLatest")}
               onClick={resumeAgentConversationAutoScroll}
             >
-              <ChevronDown size={16} aria-hidden="true" />
+              <ArrowDown size={16} aria-hidden="true" />
             </button>
           ) : null}
           <div className="agent-conversation-composer">
