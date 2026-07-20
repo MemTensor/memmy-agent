@@ -57,6 +57,7 @@ describe("MemmyMemoryHook", () => {
     expect(content).toContain("A User question or an Assistant assertion does not establish a user fact by itself");
     expect(content).toContain("explicit User statement or correction, or reliable Tool evidence");
     expect(content).toContain("do not guess or claim unsupported prior records");
+    expect(content).toContain('<memmy_memory_status status="unavailable">');
   });
 
   it("opens session, starts turn, completes turn, and injects search context", async () => {
@@ -420,5 +421,84 @@ describe("MemmyMemoryHook", () => {
     await hook.sessionEnd(new AgentHookContext({ sessionKey: "cli:direct", reason: "quit" }));
 
     expect(client.closeSession).not.toHaveBeenCalled();
+  });
+
+  describe("memory service unavailable", () => {
+    function unreachableClient() {
+      const client = fakeClient();
+      client.openSession = vi.fn(async () => {
+        throw new Error("fetch failed: connect ECONNREFUSED 127.0.0.1:18960");
+      });
+      return client;
+    }
+
+    it("surfaces recall failure without fabricating an empty-memory context", async () => {
+      const client = unreachableClient();
+      const hook = new MemmyMemoryHook(client as any, { workspace: "/tmp/workspace", userId: "user_hook_1" });
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const spec = { sessionKey: "cli:direct", workspace: "/tmp/workspace", contextWindowTokens: 4096 };
+      const messages = [
+        { role: "system", content: "System prompt" },
+        { role: "user", content: "Please remember my favorite color is blue." },
+      ];
+
+      await expect(hook.beforeRun(new AgentHookContext({ spec, messages }))).resolves.toBeUndefined();
+
+      const userBlocks = messages[1].content as unknown as Array<{ text?: string }>;
+      const userContent = userBlocks.map((block) => block.text ?? "").join("\n");
+      expect(userContent).toContain('<memmy_memory_status status="unavailable">');
+      expect(userContent).toContain("Never claim you searched memory and found nothing");
+      expect(userContent).toContain("Please remember my favorite color is blue.");
+      expect(userContent).not.toContain("memmy_memory_context");
+      expect(userContent).not.toContain("ECONNREFUSED");
+      expect(hook.lastError).toContain("ECONNREFUSED");
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(String(warnSpy.mock.calls[0][0])).toContain("[memmy-memory]");
+      expect(String(warnSpy.mock.calls[0][0])).toContain("cli:direct");
+
+      warnSpy.mockRestore();
+    });
+
+    it("does not complete a turn that was never established", async () => {
+      const client = unreachableClient();
+      const hook = new MemmyMemoryHook(client as any, { workspace: "/tmp/workspace" });
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      const spec = { sessionKey: "cli:direct", workspace: "/tmp/workspace", contextWindowTokens: 4096 };
+
+      await hook.beforeRun(new AgentHookContext({ spec, messages: [{ role: "user", content: "hi" }] }));
+      await hook.afterRun(new AgentHookContext({ spec }), { finalContent: "Done", stopReason: "completed" });
+
+      expect(client.completeTurn).not.toHaveBeenCalled();
+      vi.restoreAllMocks();
+    });
+
+    it("deduplicates warnings until the service recovers", async () => {
+      const client = unreachableClient();
+      const hook = new MemmyMemoryHook(client as any, { workspace: "/tmp/workspace" });
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const spec = { sessionKey: "cli:direct", workspace: "/tmp/workspace", contextWindowTokens: 4096 };
+
+      await hook.beforeRun(new AgentHookContext({ spec, messages: [{ role: "user", content: "one" }] }));
+      await hook.beforeRun(new AgentHookContext({ spec, messages: [{ role: "user", content: "two" }] }));
+      await hook.beforeRun(new AgentHookContext({ spec, messages: [{ role: "user", content: "three" }] }));
+
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+
+      client.openSession = vi.fn(async (_body: any) => ({
+        sessionId: "session-recovered",
+        userId: "local-user",
+        resumed: false,
+      }));
+      await hook.beforeRun(new AgentHookContext({ spec, messages: [{ role: "user", content: "four" }] }));
+      expect(hook.lastError).toBeNull();
+
+      client.startTurn = vi.fn(async () => {
+        throw new Error("fetch failed: connect ECONNREFUSED 127.0.0.1:18960");
+      });
+      await hook.beforeRun(new AgentHookContext({ spec, messages: [{ role: "user", content: "five" }] }));
+
+      expect(warnSpy).toHaveBeenCalledTimes(2);
+      warnSpy.mockRestore();
+    });
   });
 });
