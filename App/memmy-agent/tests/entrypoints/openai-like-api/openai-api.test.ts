@@ -56,6 +56,26 @@ describe("OpenAI-compatible API response helpers", () => {
     expect(result.choices[0].message.content).toBe("hello world");
     expect(result.choices[0].finish_reason).toBe("stop");
     expect(result.id).toMatch(/^chatcmpl-/);
+    expect(result.usage).toEqual({ prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
+  });
+
+  it("reports real token usage when the agent run supplied it", () => {
+    const result = chatCompletionResponse("hello world", "test-model", {
+      prompt_tokens: 128,
+      completion_tokens: 32,
+      total_tokens: 160,
+    });
+
+    expect(result.usage).toEqual({ prompt_tokens: 128, completion_tokens: 32, total_tokens: 160 });
+  });
+
+  it("derives total_tokens from prompt+completion when upstream omits it", () => {
+    const result = chatCompletionResponse("hello world", "test-model", {
+      prompt_tokens: 10,
+      completion_tokens: 5,
+    });
+
+    expect(result.usage).toEqual({ prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
   });
 });
 
@@ -323,6 +343,57 @@ describe("OpenAI-compatible API routing", () => {
     expect(captured).not.toBeNull();
     expect(captured.media).toEqual(["/tmp/image.png", "/tmp/report.pdf"]);
     expect(captured.content).toBe("analyze this");
+  });
+
+  it("propagates the turn's real token usage from the agent loop into the API response", async () => {
+    const app = createApp(
+      {
+        processDirect: async () => ({
+          content: "mock response",
+          metadata: { usage: { prompt_tokens: 42, completion_tokens: 17, total_tokens: 59 } },
+        }),
+      },
+      "test-model",
+    );
+
+    const response = await app.fetch(request({ messages: [{ role: "user", content: "hello" }] }));
+    const body = (await response.json()) as any;
+
+    expect(response.status).toBe(200);
+    expect(body.choices[0].message.content).toBe("mock response");
+    expect(body.usage).toEqual({ prompt_tokens: 42, completion_tokens: 17, total_tokens: 59 });
+  });
+
+  it("sums usage across the empty-response retry into a single reported total", async () => {
+    let calls = 0;
+    const app = createApp(
+      {
+        processDirect: async () => {
+          calls += 1;
+          if (calls === 1) {
+            return { content: "", metadata: { usage: { prompt_tokens: 20, completion_tokens: 0, total_tokens: 20 } } };
+          }
+          return { content: "recovered", metadata: { usage: { prompt_tokens: 25, completion_tokens: 9, total_tokens: 34 } } };
+        },
+      },
+      "m",
+    );
+
+    const response = await app.fetch(request({ messages: [{ role: "user", content: "hello" }] }));
+    const body = (await response.json()) as any;
+
+    expect(calls).toBe(2);
+    expect(body.choices[0].message.content).toBe("recovered");
+    expect(body.usage).toEqual({ prompt_tokens: 45, completion_tokens: 9, total_tokens: 54 });
+  });
+
+  it("defaults to zeroed usage when the agent loop reports none", async () => {
+    const app = createApp({ processDirect: async () => "plain string reply" }, "m");
+
+    const response = await app.fetch(request({ messages: [{ role: "user", content: "hello" }] }));
+    const body = (await response.json()) as any;
+
+    expect(body.usage).toEqual({ prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
   });
 
   it("adapts real AgentLoop-style processDirect calls from API object arguments", async () => {

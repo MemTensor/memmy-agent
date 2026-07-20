@@ -30,7 +30,19 @@ export function errorJson(status: number, message: string, errType = "invalid_re
   return Response.json({ error: { message, type: errType, code: status } }, { status });
 }
 
-export function chatCompletionResponse(content: string, model: string): Record<string, any> {
+function normalizeChatUsage(usage: Record<string, any> | null | undefined): {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+} {
+  const promptTokens = Math.max(0, Math.trunc(Number(usage?.prompt_tokens ?? 0)) || 0);
+  const completionTokens = Math.max(0, Math.trunc(Number(usage?.completion_tokens ?? 0)) || 0);
+  const rawTotal = Number(usage?.total_tokens);
+  const totalTokens = Number.isFinite(rawTotal) && rawTotal > 0 ? Math.trunc(rawTotal) : promptTokens + completionTokens;
+  return { prompt_tokens: promptTokens, completion_tokens: completionTokens, total_tokens: totalTokens };
+}
+
+export function chatCompletionResponse(content: string, model: string, usage?: Record<string, any> | null): Record<string, any> {
   return {
     id: `chatcmpl-${crypto.randomUUID().slice(0, 12)}`,
     object: "chat.completion",
@@ -43,7 +55,7 @@ export function chatCompletionResponse(content: string, model: string): Record<s
         finish_reason: "stop",
       },
     ],
-    usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+    usage: normalizeChatUsage(usage),
   };
 }
 
@@ -51,6 +63,22 @@ function responseText(value: any): string {
   if (value == null) return "";
   if (typeof value?.content === "string") return value.content;
   return String(value);
+}
+
+function responseUsage(value: any): Record<string, any> {
+  const usage = value?.metadata?.usage;
+  return usage && typeof usage === "object" ? usage : {};
+}
+
+function mergeUsageRecords(...records: Array<Record<string, any> | null | undefined>): Record<string, number> {
+  const merged: Record<string, number> = {};
+  for (const record of records) {
+    for (const [key, value] of Object.entries(record ?? {})) {
+      const num = Number(value);
+      if (Number.isFinite(num)) merged[key] = (merged[key] ?? 0) + num;
+    }
+  }
+  return merged;
 }
 
 export function sseChunk(delta: string, model: string, chunkId: string, finishReason: string | null = null): string {
@@ -66,6 +94,18 @@ export function sseChunk(delta: string, model: string, chunkId: string, finishRe
         finish_reason: finishReason,
       },
     ],
+  };
+  return `data: ${JSON.stringify(payload)}\n\n`;
+}
+
+export function sseUsageChunk(usage: Record<string, any> | null | undefined, model: string, chunkId: string): string {
+  const payload = {
+    id: chunkId,
+    object: "chat.completion.chunk",
+    created: Math.floor(Date.now() / 1000),
+    model,
+    choices: [] as unknown[],
+    usage: normalizeChatUsage(usage),
   };
   return `data: ${JSON.stringify(payload)}\n\n`;
 }
@@ -215,6 +255,7 @@ export async function handleChatCompletions(request: Request, ctx?: ApiContext):
   let sessionId: string | null | undefined;
   let requestedModel: string | null | undefined;
   let stream = false;
+  let streamIncludeUsage = false;
 
   try {
     if (contentType.startsWith("multipart/")) {
@@ -227,6 +268,7 @@ export async function handleChatCompletions(request: Request, ctx?: ApiContext):
         return errorJson(400, "Invalid JSON body");
       }
       stream = Boolean(body.stream);
+      streamIncludeUsage = Boolean(body.stream_options?.include_usage);
       requestedModel = body.model;
       [text, mediaPaths] = parseJsonContent(body);
       sessionId = body.session_id;
@@ -277,6 +319,7 @@ export async function handleChatCompletions(request: Request, ctx?: ApiContext):
         };
         void (async () => {
           let failed = false;
+          let turnUsage: Record<string, any> = {};
           const onStream = async (token: string) => {
             if (token) emitted = true;
             write(sseChunk(token, context.modelName, chunkId));
@@ -294,6 +337,7 @@ export async function handleChatCompletions(request: Request, ctx?: ApiContext):
                 ),
                 context.requestTimeout,
               );
+              turnUsage = responseUsage(response);
               if (!emitted) {
                 const finalText = responseText(response);
                 if (finalText.trim()) write(sseChunk(finalText, context.modelName, chunkId));
@@ -304,6 +348,7 @@ export async function handleChatCompletions(request: Request, ctx?: ApiContext):
           } finally {
             if (!failed) {
               write(sseChunk("", context.modelName, chunkId, "stop"));
+              if (streamIncludeUsage) write(sseUsageChunk(turnUsage, context.modelName, chunkId));
               write(SSE_DONE);
             }
             close();
@@ -328,14 +373,16 @@ export async function handleChatCompletions(request: Request, ctx?: ApiContext):
     const reply = await withSessionLock(context, sessionKey, async () => {
       const first = await withTimeout(Promise.resolve(callAgent(context, baseArgs)), context.requestTimeout);
       let textResponse = responseText(first);
+      let usage = responseUsage(first);
       if (!textResponse.trim()) {
         const retry = await withTimeout(Promise.resolve(callAgent(context, baseArgs)), context.requestTimeout);
         textResponse = responseText(retry);
+        usage = mergeUsageRecords(usage, responseUsage(retry));
         if (!textResponse.trim()) textResponse = EMPTY_FINAL_RESPONSE_MESSAGE;
       }
-      return textResponse;
+      return { text: textResponse, usage };
     });
-    return Response.json(chatCompletionResponse(reply, context.modelName));
+    return Response.json(chatCompletionResponse(reply.text, context.modelName, reply.usage));
   } catch (err) {
     const message = (err as Error).message ?? "";
     if (message.startsWith("Request timed out")) return errorJson(504, message);
