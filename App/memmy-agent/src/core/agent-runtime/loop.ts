@@ -82,6 +82,7 @@ export class TurnContext {
   hadInjections = false;
   userPersistedEarly = false;
   saveSkip = 0;
+  usage: Record<string, any> = {};
   outbound: OutboundMessage | null = null;
   onProgress: any = null;
   onStream: any = null;
@@ -1310,7 +1311,7 @@ export class AgentLoop {
       boundary?: TurnCancellationBoundary | null;
       tools?: ToolRegistryInstance | null;
     } = {},
-  ): Promise<[string, string[], Record<string, any>[], string, boolean, boolean]> {
+  ): Promise<[string, string[], Record<string, any>[], string, boolean, boolean, Record<string, any>]> {
     this.refreshProviderSnapshot();
     this.syncSubagentRuntimeLimits();
     const activeTools = tools ?? this.tools;
@@ -1364,7 +1365,8 @@ export class AgentLoop {
         injectionCallback: ({ limit = 3 } = {}) => this.drainPendingQueue(pendingQueue, limit, session?.key ?? sessionKey),
       }),
     );
-    this.lastUsage = normalizeUsageRecord(result.usage ?? result.response?.usage);
+    const turnUsage = normalizeUsageRecord(result.usage ?? result.response?.usage);
+    this.lastUsage = turnUsage;
     const toolsUsed = (result.toolCalls ?? []).map((call: any) => call?.function?.name ?? call?.name).filter(Boolean);
     return [
       result.finalContent ?? result.content ?? EMPTY_FINAL_RESPONSE_MESSAGE,
@@ -1373,6 +1375,7 @@ export class AgentLoop {
       result.stopReason ?? "",
       Boolean(result.hadInjections),
       Boolean(result.finalContentStreamed),
+      turnUsage,
     ];
   }
 
@@ -1382,10 +1385,11 @@ export class AgentLoop {
     allMessages: Record<string, any>[],
     stopReason: string,
     hadInjections: boolean,
-    { turnLatencyMs = null, tools = null, finalContentStreamed = false }: {
+    { turnLatencyMs = null, tools = null, finalContentStreamed = false, usage = null }: {
       turnLatencyMs?: number | null;
       tools?: ToolRegistryInstance | null;
       finalContentStreamed?: boolean;
+      usage?: Record<string, any> | null;
     } = {},
   ): OutboundMessage | null {
     void allMessages;
@@ -1401,6 +1405,7 @@ export class AgentLoop {
         ...(msg.metadata ?? {}),
         ...(finalContentStreamed && !["error", "toolError"].includes(stopReason) ? { streamed: true } : {}),
         ...(turnLatencyMs != null ? { latencyMs: Math.trunc(turnLatencyMs) } : {}),
+        ...(usage ? { usage } : {}),
       },
     });
   }
@@ -1488,7 +1493,7 @@ export class AgentLoop {
   }
 
   async stateRun(ctx: TurnContext): Promise<string> {
-    const [finalContent, toolsUsed, allMessages, stopReason, hadInjections, finalContentStreamed] = await this.runAgentLoop(ctx.initialMessages, {
+    const [finalContent, toolsUsed, allMessages, stopReason, hadInjections, finalContentStreamed, usage] = await this.runAgentLoop(ctx.initialMessages, {
       onProgress: ctx.onProgress,
       onStream: ctx.onStream,
       onStreamEnd: ctx.onStreamEnd,
@@ -1514,6 +1519,7 @@ export class AgentLoop {
     ctx.stopReason = stopReason;
     ctx.hadInjections = hadInjections;
     ctx.finalContentStreamed = finalContentStreamed;
+    ctx.usage = usage;
     return "ok";
   }
 
@@ -1545,6 +1551,7 @@ export class AgentLoop {
       turnLatencyMs: ctx.turnLatencyMs,
       tools: ctx.tools,
       finalContentStreamed: ctx.finalContentStreamed,
+      usage: ctx.usage,
     });
     return "ok";
   }

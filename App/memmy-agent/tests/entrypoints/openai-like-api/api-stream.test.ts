@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SSE_DONE, sseChunk, createApp } from "../../../src/entrypoints/openai-like-api/server.js";
+import { SSE_DONE, sseChunk, sseUsageChunk, createApp } from "../../../src/entrypoints/openai-like-api/server.js";
 
 function request(body: unknown): Request {
   return new Request("http://localhost/v1/chat/completions", {
@@ -46,6 +46,17 @@ describe("SSE response helpers", () => {
 
   it("uses the OpenAI [DONE] SSE terminator", () => {
     expect(SSE_DONE).toBe("data: [DONE]\n\n");
+  });
+
+  it("formats a usage-only chunk with empty choices, per stream_options.include_usage", () => {
+    const payload = JSON.parse(
+      sseUsageChunk({ prompt_tokens: 12, completion_tokens: 8, total_tokens: 20 }, "test-model", "chatcmpl-abc123").split("data: ", 2)[1],
+    );
+
+    expect(payload.id).toBe("chatcmpl-abc123");
+    expect(payload.object).toBe("chat.completion.chunk");
+    expect(payload.choices).toEqual([]);
+    expect(payload.usage).toEqual({ prompt_tokens: 12, completion_tokens: 8, total_tokens: 20 });
   });
 });
 
@@ -240,6 +251,51 @@ describe("SSE chat completions", () => {
 
     expect(response.status).toBe(200);
     expect(capturedKey).toBe("api:my-session");
+  });
+
+  it("emits a trailing usage chunk when stream_options.include_usage is set", async () => {
+    const app = createApp(
+      {
+        processDirect: async (args: any) => {
+          await args.onStream("hi");
+          await args.onStreamEnd();
+          return { content: "hi", metadata: { usage: { prompt_tokens: 11, completion_tokens: 4, total_tokens: 15 } } };
+        },
+      },
+      "m",
+    );
+
+    const response = await app.fetch(
+      request({ messages: [{ role: "user", content: "hi" }], stream: true, stream_options: { include_usage: true } }),
+    );
+    const payloads = ssePayloads(await response.text());
+    const chunks = payloads.slice(0, -1).map((line) => JSON.parse(line));
+    const usageChunk = chunks.at(-1);
+
+    expect(payloads.at(-1)).toBe("[DONE]");
+    expect(usageChunk.choices).toEqual([]);
+    expect(usageChunk.usage).toEqual({ prompt_tokens: 11, completion_tokens: 4, total_tokens: 15 });
+    expect(chunks.at(-2).choices[0].finish_reason).toBe("stop");
+  });
+
+  it("omits the usage chunk when stream_options.include_usage is not set", async () => {
+    const app = createApp(
+      {
+        processDirect: async (args: any) => {
+          await args.onStream("hi");
+          await args.onStreamEnd();
+          return { content: "hi", metadata: { usage: { prompt_tokens: 11, completion_tokens: 4, total_tokens: 15 } } };
+        },
+      },
+      "m",
+    );
+
+    const response = await app.fetch(request({ messages: [{ role: "user", content: "hi" }], stream: true }));
+    const payloads = ssePayloads(await response.text());
+    const chunks = payloads.slice(0, -1).map((line) => JSON.parse(line));
+
+    expect(payloads.at(-1)).toBe("[DONE]");
+    expect(chunks.every((chunk) => chunk.usage === undefined)).toBe(true);
   });
 
   it("does not emit a successful terminator after backend failures", async () => {
