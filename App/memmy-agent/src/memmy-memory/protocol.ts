@@ -1,8 +1,10 @@
 export const MEMMY_MEMORY_CONTEXT_TAG = "memmy_memory_context";
+export const MEMMY_MEMORY_STATUS_TAG = "memmy_memory_status";
 export const CURRENT_USER_REQUEST_TAG = "current_user_request";
 
 const MEMORY_CONTEXT_TAGS = [
   MEMMY_MEMORY_CONTEXT_TAG,
+  MEMMY_MEMORY_STATUS_TAG,
   "memos_context",
   "memory_context",
 ] as const;
@@ -37,6 +39,26 @@ export function renderMemmyContextPacket(markdown: string, source: MemmyMemoryCo
   const context = renderMemmyMemoryContext(markdown, source);
   const request = renderCurrentUserRequest(currentUserRequest);
   return context ? `${context}\n\n${request}` : request;
+}
+
+// Distinct from renderMemmyMemoryContext: this reports that memory could not be checked at all,
+// so the model must not treat it as "recall ran and found nothing relevant".
+export function renderMemmyMemoryUnavailableNotice(reason?: string | null): string {
+  const detail = typeof reason === "string" && reason.trim() ? ` (${reason.trim()})` : "";
+  return [
+    `<${MEMMY_MEMORY_STATUS_TAG} status="unavailable">`,
+    "IMPORTANT:",
+    `- The Memmy long-term memory service is currently unreachable${detail}.`,
+    "- No memory recall or write was performed for this turn. This is NOT the same as \"memory was searched and nothing relevant was found\" — memory was simply not checked.",
+    "- Never claim you searched memory and found nothing. If the user asks about previously saved information or long-term memory, tell them the memory service is temporarily unavailable, then continue helping with the current request using only what is visible in this conversation.",
+    `</${MEMMY_MEMORY_STATUS_TAG}>`,
+  ].join("\n");
+}
+
+export function renderMemmyMemoryUnavailablePacket(currentUserRequest: string, reason?: string | null): string {
+  const notice = renderMemmyMemoryUnavailableNotice(reason);
+  const request = renderCurrentUserRequest(currentUserRequest);
+  return `${notice}\n\n${request}`;
 }
 
 export function extractCurrentUserRequestText(value: string): string {
