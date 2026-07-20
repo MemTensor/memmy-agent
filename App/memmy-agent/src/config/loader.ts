@@ -7,6 +7,12 @@ import { Config } from "./schema.js";
 
 let configPathOverride: string | null = null;
 
+/** Base class for config values that fail to load or resolve. Callers should treat these as fatal. */
+export class ConfigError extends Error {}
+
+/** The config file exists but could not be parsed as YAML or failed schema validation. */
+export class ConfigLoadError extends ConfigError {}
+
 function expandHome(value: string): string {
   return value === "~" || value.startsWith("~/") ? path.join(os.homedir(), value.slice(2)) : value;
 }
@@ -38,7 +44,7 @@ function resolveInPlace(obj: any): any {
   return obj;
 }
 
-class EnvValueError extends Error {}
+export class EnvValueError extends ConfigError {}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -72,17 +78,22 @@ export function migrateConfig(data: any): any {
 
 export function loadConfig(configPath?: string | null): Config {
   const target = expandHome(configPath ?? getConfigPath());
-  let config = new Config();
   if (!fs.existsSync(target)) {
+    const config = new Config();
     configureSsrfWhitelist(config.tools.ssrfWhitelist);
     return config;
   }
   const raw = fs.readFileSync(target, "utf8");
+  let config: Config;
   try {
     const parsed = raw.trim() ? YAML.parse(raw) : {};
     config = new Config(migrateConfig(parsed));
   } catch (error) {
-    console.warn(`Failed to load config from ${target}: ${errorMessage(error)}\nUsing default configuration.`);
+    // The config file exists but is unusable (bad YAML or a value that fails schema
+    // validation). Silently falling back to defaults here would run the agent on a
+    // configuration the user never asked for (e.g. dropping BYOK credentials), so this
+    // must fail loud instead of warning and continuing.
+    throw new ConfigLoadError(`Failed to load config from ${target}: ${errorMessage(error)}`);
   }
   configureSsrfWhitelist(config.tools.ssrfWhitelist);
   return config;
