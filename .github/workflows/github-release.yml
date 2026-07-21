@@ -84,20 +84,21 @@ jobs:
             exit 1
           fi
 
-      - name: Check out the exact release commit
+      - name: Check out trusted main history
         uses: actions/checkout@v4
         with:
-          ref: ${{ steps.release.outputs.target_sha }}
+          ref: main
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Verify target is on main
         env:
           TARGET_SHA: ${{ steps.release.outputs.target_sha }}
         run: |
           set -euo pipefail
-          git fetch --no-tags origin main
-          git merge-base --is-ancestor "$TARGET_SHA" origin/main
-          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+          git cat-file -e "$TARGET_SHA^{commit}"
+          git merge-base --is-ancestor "$TARGET_SHA" refs/remotes/origin/main
 
       - name: Download and verify OSS artifacts
         env:
@@ -148,8 +149,9 @@ jobs:
           set -euo pipefail
           notes="release-assets/RELEASE_NOTES.md"
           manual_notes=".github/release-notes/$TAG.md"
-          if [[ -f "$manual_notes" ]]; then
-            cat "$manual_notes" > "$notes"
+          manual_object="${TARGET_SHA}:${manual_notes}"
+          if git cat-file -e "$manual_object" 2>/dev/null; then
+            git show "$manual_object" > "$notes"
             printf '\n\n' >> "$notes"
           else
             : > "$notes"

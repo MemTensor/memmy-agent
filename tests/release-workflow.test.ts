@@ -44,13 +44,38 @@ describe("GitHub release workflow", () => {
   it("binds the tag to the merged commit and refuses existing releases", () => {
     const resolveScript = script("Resolve and validate release");
     expect(resolveScript).toContain('target_sha="$PR_MERGE_SHA"');
-    expect(steps.find((step) => step.name === "Check out the exact release commit")?.with).toEqual(
-      expect.objectContaining({ ref: "${{ steps.release.outputs.target_sha }}" }),
+    expect(script("Create draft release and upload every asset")).toContain(
+      '--target "$TARGET_SHA"',
     );
     const duplicateCheck = script("Check for an existing tag or release");
     expect(duplicateCheck).toContain("git ls-remote --exit-code --tags");
     expect(duplicateCheck).toContain('gh release view "$TAG"');
     expect(duplicateCheck).not.toContain("--force");
+  });
+
+  it("keeps merged fork code out of the trusted release checkout", () => {
+    const checkout = steps.find((step) => step.name === "Check out trusted main history");
+    expect(checkout?.uses).toBe("actions/checkout@v4");
+    expect(checkout?.with).toEqual(
+      expect.objectContaining({
+        ref: "main",
+        "fetch-depth": 0,
+        "persist-credentials": false,
+      }),
+    );
+    expect(JSON.stringify(checkout?.with)).not.toContain("target_sha");
+    expect(source).not.toContain("allow-unsafe-pr-checkout");
+
+    const verifyScript = script("Verify target is on main");
+    expect(verifyScript).toContain("refs/heads/main:refs/remotes/origin/main");
+    expect(verifyScript).toContain('git cat-file -e "$TARGET_SHA^{commit}"');
+    expect(verifyScript).toContain(
+      'git merge-base --is-ancestor "$TARGET_SHA" refs/remotes/origin/main',
+    );
+
+    const notesScript = script("Build release notes");
+    expect(notesScript).toContain('manual_object="${TARGET_SHA}:${manual_notes}"');
+    expect(notesScript).toContain('git show "$manual_object" > "$notes"');
   });
 
   it("downloads all four OSS artifacts and verifies Content-MD5", () => {
