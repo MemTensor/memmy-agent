@@ -4,6 +4,7 @@ import type {
   DesktopAppInfo,
   DesktopImageActionRequest,
   DesktopImageSaveResult,
+  DesktopMemoryServiceRestartResult,
   DesktopRuntimeConfig,
   DesktopUpdateCheckResult,
   DesktopUpdateDownloadProgress,
@@ -39,6 +40,7 @@ import {
 } from "./window-mode.js";
 import {
   preparePackagedRuntimeConfig,
+  restartExternalMemoryService,
   resolveAgentGatewayRuntimeConfig,
   startPackagedRuntimeServices,
   type PackagedRuntimeServices
@@ -69,6 +71,8 @@ let menuBarTray: Tray | null = null;
 const MENU_BAR_TRAY_GUID = "8B2A0C33-45C0-4C43-8F1C-77F7D4FDF2D4";
 let runtimeServices: PackagedRuntimeServices | null = null;
 let runtimeConfig: DesktopRuntimeConfig | null = null;
+let memoryServiceControl: { baseUrl: string; token: string } | null = null;
+let memoryServiceRestart: Promise<DesktopMemoryServiceRestartResult> | null = null;
 let packagedRendererServer: PackagedRendererStaticServer | null = null;
 let packagedRendererBaseUrl: string | null = null;
 let queuedPetWindowClose: ReturnType<typeof setTimeout> | null = null;
@@ -608,11 +612,16 @@ function showPackagedStartupError(error: unknown): void {
  */
 async function startLocalApi(services: PackagedRuntimeServices | null): Promise<DesktopRuntimeConfig> {
   const databasePath = join(app.getPath("userData"), "app.sqlite");
+  let memoryControl: { baseUrl: string; token: string };
   if (services) {
     process.env.MEMMY_CONFIG ??= services.memory.configPath;
     process.env.MEMMY_MEMORY_LAYER_URL = services.memory.baseUrl;
     process.env.MEMMY_MEMORY_LAYER_TOKEN = services.memory.token;
     process.env.MEMMY_MEMORY_DB_PATH = services.memory.databasePath;
+    memoryControl = {
+      baseUrl: services.memory.baseUrl,
+      token: services.memory.token
+    };
   } else {
     const memoryRuntime = await preparePackagedRuntimeConfig({
       ensureDirectories: false,
@@ -624,7 +633,12 @@ async function startLocalApi(services: PackagedRuntimeServices | null): Promise<
     process.env.MEMMY_MEMORY_LAYER_URL ??= memoryRuntime.memoryBaseUrl;
     process.env.MEMMY_MEMORY_LAYER_TOKEN ??= memoryRuntime.memoryToken;
     process.env.MEMMY_MEMORY_DB_PATH ??= memoryRuntime.memoryDatabasePath;
+    memoryControl = {
+      baseUrl: memoryRuntime.memoryBaseUrl,
+      token: memoryRuntime.memoryToken
+    };
   }
+  memoryServiceControl = memoryControl;
   const desktopInstallFingerprint = app.isPackaged ? await resolveDesktopInstallFingerprint() : undefined;
   localBackend = await createLocalBackend({
     // databasePath: the desktop-side local SQLite database path.
@@ -633,6 +647,7 @@ async function startLocalApi(services: PackagedRuntimeServices | null): Promise<
     bootstrapScenario: getBootstrapScenario(),
     desktopInstallFingerprint,
     memmyConfigPath: process.env.MEMMY_CONFIG,
+    memoryBaseUrl: memoryControl.baseUrl,
     runtimeConfigPath: process.env.MEMMY_HOME ? join(process.env.MEMMY_HOME, "runtime.json") : undefined
   });
   const agentGateway = services?.agentGateway ?? await resolveAgentGatewayRuntimeConfig();
@@ -645,8 +660,42 @@ async function startLocalApi(services: PackagedRuntimeServices | null): Promise<
 
   return {
     ...localBackend.runtimeConfig,
+    memory: {
+      baseUrl: memoryControl.baseUrl
+    },
     agentGateway: agentGatewayConfig
   };
+}
+
+async function restartMemoryService(): Promise<DesktopMemoryServiceRestartResult> {
+  if (memoryServiceRestart) {
+    return memoryServiceRestart;
+  }
+
+  const control = memoryServiceControl;
+  if (!control) {
+    throw new Error("Memory service runtime is not ready");
+  }
+
+  const operation = (async (): Promise<DesktopMemoryServiceRestartResult> => {
+    if (runtimeServices) {
+      await runtimeServices.restartMemory();
+    } else {
+      await restartExternalMemoryService(control);
+    }
+    return {
+      ok: true,
+      baseUrl: control.baseUrl
+    };
+  })();
+  memoryServiceRestart = operation;
+  try {
+    return await operation;
+  } finally {
+    if (memoryServiceRestart === operation) {
+      memoryServiceRestart = null;
+    }
+  }
 }
 
 /**
@@ -701,6 +750,8 @@ function registerIpcHandlers(): void {
   ipcMain.handle("memmy:export-memory-database", async (event) => exportMemoryDatabase(BrowserWindow.fromWebContents(event.sender)));
 
   ipcMain.handle("memmy:install-cli-tools", async () => installCliTools());
+
+  ipcMain.handle("memmy:restart-memory-service", async () => restartMemoryService());
 
   ipcMain.handle("memmy:open-logs-directory", async () => {
     await openLogsDirectory();
@@ -4401,7 +4452,7 @@ app.on("second-instance", () => {
 app.whenReady().then(async () => {
   if (!(await waitForSingleInstanceLock())) {
     // An instance is already running: this instance exits directly, to avoid a second instance
-    // contending for the fixed ports (memory 18799 / agent-gateway 18997) and causing a startup failure.
+    // contending for the fixed ports (memory 18960 / agent gateway) and causing a startup failure.
     app.quit();
     return;
   }
@@ -4553,6 +4604,7 @@ async function cleanupBeforeQuit(): Promise<void> {
   ipcMain.removeHandler("memmy:save-image");
   ipcMain.removeHandler("memmy:export-memory-database");
   ipcMain.removeHandler("memmy:install-cli-tools");
+  ipcMain.removeHandler("memmy:restart-memory-service");
   ipcMain.removeHandler("memmy:open-logs-directory");
   ipcMain.removeHandler("memmy:export-diagnostics-report");
   ipcMain.removeHandler("memmy:get-microphone-access-status");
@@ -4572,6 +4624,7 @@ async function cleanupBeforeQuit(): Promise<void> {
   destroyMenuBarTray();
   const services = runtimeServices;
   runtimeServices = null;
+  memoryServiceControl = null;
   const backend = localBackend;
   localBackend = null;
   await services?.close();

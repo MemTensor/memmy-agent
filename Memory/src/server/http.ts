@@ -20,6 +20,7 @@ import { MemoryServiceError, statusForCode } from "../utils/error.js";
 export const API_ROUTES = [
   "GET /api/v1/health",
   "POST /api/v1/admin/reload-config",
+  "POST /api/v1/admin/shutdown",
   "POST /api/v1/sessions/open",
   "POST /api/v1/sessions/:sessionId/close",
   "POST /api/v1/turns/start",
@@ -46,6 +47,7 @@ export interface MemoryHttpServerOptions {
   auth?: MemoryHttpAuthOptions;
   workerStartupFallbackMs?: number;
   workerPostHealthDelayMs?: number;
+  onShutdownRequested?: () => void;
 }
 
 export interface MemoryHttpAuthOptions {
@@ -103,7 +105,18 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
       }
       const principal = authenticate(request, url, options);
       const body = await readJson(request);
-      const result = await routeRequest(options.service, autoWorker, request.method, url, body, principal);
+      const result = await routeRequest(
+        options.service,
+        autoWorker,
+        request.method,
+        url,
+        body,
+        principal,
+        Boolean(options.onShutdownRequested)
+      );
+      if (request.method === "POST" && url.pathname === "/api/v1/admin/shutdown") {
+        response.once("finish", () => options.onShutdownRequested?.());
+      }
       writeJson(response, 200, result);
     } catch (error) {
       writeError(response, error, requestIdFromHeaders(request));
@@ -310,7 +323,8 @@ async function routeRequest(
   method: string,
   url: URL,
   body: unknown,
-  principal: AuthPrincipal
+  principal: AuthPrincipal,
+  canShutdown: boolean
 ): Promise<unknown> {
   const path = url.pathname;
 
@@ -330,6 +344,16 @@ async function routeRequest(
     });
     autoWorker.schedule();
     return result;
+  }
+  if (method === "POST" && path === "/api/v1/admin/shutdown") {
+    requireAdminWrite(principal);
+    if (!canShutdown) {
+      throw new MemoryServiceError("conflict", "memory service restart is not managed by this server");
+    }
+    return {
+      accepted: true,
+      serverTime: new Date().toISOString()
+    };
   }
   if (method === "POST" && path === "/api/v1/sessions/open") {
     requireMemoryWrite(principal);

@@ -459,6 +459,7 @@ echo "Preparing macOS $TARGET_CPU package."
 if [ ! -x "$ROOT_DIR/node_modules/.bin/tsc" ] || [ ! -x "$ROOT_DIR/node_modules/.bin/electron-builder" ]; then
   npm install
 fi
+npm install --workspace @memmy/frontend-desktop --no-package-lock
 
 echo "Installing memmy-agent dependencies."
 npm ci --prefix "$AGENT_DIR"

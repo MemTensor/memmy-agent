@@ -161,9 +161,15 @@ export const AgentGatewayRuntimeConfigSchema = z.object({
 });
 export type AgentGatewayRuntimeConfig = z.infer<typeof AgentGatewayRuntimeConfigSchema>;
 
+export const MemoryServiceRuntimeConfigSchema = z.object({
+    baseUrl: z.string().url()
+});
+export type MemoryServiceRuntimeConfig = z.infer<typeof MemoryServiceRuntimeConfigSchema>;
+
 export const RuntimeConfigSchema = z.object({
     baseUrl: z.string().url(),
     localToken: z.string().min(1),
+    memory: MemoryServiceRuntimeConfigSchema.optional(),
     agentGateway: AgentGatewayRuntimeConfigSchema.optional()
 });
 export type RuntimeConfig = z.infer<typeof RuntimeConfigSchema>;

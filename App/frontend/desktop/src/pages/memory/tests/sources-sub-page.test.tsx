@@ -10,6 +10,7 @@ import { AGENT_SOURCE_SCAN_COMPLETION_FEEDBACK_MS } from "../../../state/app-act
 import { agentSourceLogoUrl } from "../../agent-source-logos.js";
 import {
   formatAgentSourceActionError,
+  formatMemoryServiceAddress,
   formatScanProgressTail,
   formatSourceDataPath,
   formatSourceMemoryCount,
@@ -116,6 +117,14 @@ describe("SourcesSubPage", () => {
     expect(formatSourceMemoryCount(1161, (key, values) => `${key}:${values?.count}`)).toBe("memory.sourceMemoryCount:1,161");
   });
 
+  it("从运行时 Memory URL 展示真实端口，不再写死旧地址", () => {
+    expect(formatMemoryServiceAddress("http://127.0.0.1:18960")).toBe("127.0.0.1:18960");
+    expect(formatMemoryServiceAddress("http://localhost:18888/")).toBe("localhost:18888");
+    expect(formatMemoryServiceAddress(undefined)).toBeUndefined();
+    expect(zhCNMessages["memory.restartService"]).toBe("重启服务");
+    expect(zhCNMessages).not.toHaveProperty("memory.daemonAddress");
+  });
+
   it("接入源不可用时展示用户文案而不是 HTTP 调试信息", () => {
     const message = formatAgentSourceActionError(
       new ApiRequestError("Request /api/agent-sources/opencode/skill failed with status 500", 409, "agent_source_unavailable", "req-1"),
@@ -213,6 +222,7 @@ describe("SourcesSubPage", () => {
     expect(resolveAgentSourceStatusLabelKey(createSource("hermes", "plugin_installed"))).toBe("memory.pluginInstalled");
     expect(resolveAgentSourceStatusLabelKey(createSource("opencode", "plugin_installed"))).toBe("memory.pluginInstalled");
     expect(resolveAgentSourceStatusLabelKey(createSource("workbuddy", "not_connected"))).toBe("memory.skillNotInstalled");
+    expect(source).toContain('props.source.status === "skill_installed" || props.source.status === "plugin_installed"');
     expect(source).not.toContain("memory.notConnected");
   });
 });

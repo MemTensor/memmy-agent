@@ -8,6 +8,7 @@ type DesktopUpdateInstallResult = import("@memmy/desktop-interface").DesktopUpda
 type DesktopMenuBarIconResult = import("@memmy/desktop-interface").DesktopMenuBarIconResult;
 type DesktopImageActionRequest = import("@memmy/desktop-interface").DesktopImageActionRequest;
 type DesktopImageSaveResult = import("@memmy/desktop-interface").DesktopImageSaveResult;
+type DesktopMemoryServiceRestartResult = import("@memmy/desktop-interface").DesktopMemoryServiceRestartResult;
 type MicrophoneAccessStatus = import("@memmy/desktop-interface").MicrophoneAccessStatus;
 type MainWindowActionRequest = { id: string; action: "close" | "minimize" };
 
@@ -33,6 +34,7 @@ interface MemmyPreloadApi {
   saveImage(request: DesktopImageActionRequest): Promise<DesktopImageSaveResult>;
   exportMemoryDatabase(): Promise<unknown>;
   installCliTools(): Promise<unknown>;
+  restartMemoryService(): Promise<DesktopMemoryServiceRestartResult>;
   openLogsDirectory(): Promise<void>;
   exportDiagnosticsReport(): Promise<DiagnosticsReportExportResult>;
   getLogLevel(): Promise<"error" | "warn" | "info" | "debug">;
@@ -158,6 +160,10 @@ const memmyPreloadApi: MemmyPreloadApi = {
 
   async installCliTools(): Promise<unknown> {
     return ipcRenderer.invoke("memmy:install-cli-tools");
+  },
+
+  async restartMemoryService(): Promise<DesktopMemoryServiceRestartResult> {
+    return ipcRenderer.invoke("memmy:restart-memory-service");
   },
 
   async openLogsDirectory(): Promise<void> {

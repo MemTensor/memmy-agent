@@ -57,11 +57,13 @@ describe("local api", () => {
       databasePath: join(tempDir, "app.sqlite"),
       runtimeConfigPath: join(tempDir, "runtime.json"),
       localToken: "test-token",
+      memoryBaseUrl: "http://127.0.0.1:18960",
       memoryClient,
       cloudClient: createMockCloudClient()
     });
 
     expect(reloadReasons).toEqual([{ reason: "desktop_startup" }]);
+    expect(backend.runtimeConfig.memory).toEqual({ baseUrl: "http://127.0.0.1:18960" });
   });
 
   it("uses the built-in default Cloud client when MEMMY_CLOUD_URL is missing", async () => {

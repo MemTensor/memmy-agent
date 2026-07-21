@@ -39,6 +39,9 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
             service,
             host,
             port,
+            onShutdownRequested: () => {
+                setTimeout(() => process.kill(process.pid, "SIGTERM"), 0);
+            },
             auth: config.storage.token
                 ? { localServiceToken: config.storage.token }
                 : { allowAnonymous: true }

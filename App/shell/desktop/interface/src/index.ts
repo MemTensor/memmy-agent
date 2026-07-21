@@ -9,6 +9,11 @@ export interface DesktopMenuBarIconResult {
   enabled: boolean;
 }
 
+export interface DesktopMemoryServiceRestartResult {
+  ok: true;
+  baseUrl: string;
+}
+
 export interface DesktopAppInfo {
   name: string;
   version: string;

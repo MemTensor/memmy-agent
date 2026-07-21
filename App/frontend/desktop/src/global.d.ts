@@ -1,5 +1,5 @@
 /** Global.d module. */
-import type { DesktopAppInfo, DesktopImageActionRequest, DesktopImageSaveResult, DesktopUpdateCheckResult, DesktopUpdateDownloadProgress, DesktopUpdateInstallResult } from "@memmy/desktop-interface";
+import type { DesktopAppInfo, DesktopImageActionRequest, DesktopImageSaveResult, DesktopMemoryServiceRestartResult, DesktopUpdateCheckResult, DesktopUpdateDownloadProgress, DesktopUpdateInstallResult } from "@memmy/desktop-interface";
 
 declare global {
   type MemmyMicrophoneAccessStatus = "not-determined" | "granted" | "denied" | "restricted" | "unsupported";
@@ -39,6 +39,7 @@ declare global {
       saveImage(request: DesktopImageActionRequest): Promise<DesktopImageSaveResult>;
       exportMemoryDatabase(): Promise<{ canceled: true } | { canceled: false; exportPath: string; bytes: number }>;
       installCliTools(): Promise<MemmyCliInstallResult>;
+      restartMemoryService(): Promise<DesktopMemoryServiceRestartResult>;
       openLogsDirectory(): Promise<void>;
       exportDiagnosticsReport(): Promise<MemmyDiagnosticsReportExportResult>;
       getLogLevel(): Promise<"error" | "warn" | "info" | "debug">;

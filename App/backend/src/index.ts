@@ -50,6 +50,8 @@ export interface CreateLocalBackendOptions {
   runtimeConfigPath?: string;
   /** Memmy config path. */
   memmyConfigPath?: string;
+  /** Memory service address exposed to desktop and browser-debug clients. */
+  memoryBaseUrl?: string;
   /** Desktop install fingerprint. */
   desktopInstallFingerprint?: string;
   /** Agent source auto scan interval in ms. Defaults to one hour. */
@@ -140,7 +142,8 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
 
     const runtimeConfig = RuntimeConfigSchema.parse({
       baseUrl: `http://127.0.0.1:${(address as AddressInfo).port}`,
-      localToken
+      localToken,
+      memory: options.memoryBaseUrl ? { baseUrl: options.memoryBaseUrl } : undefined
     });
     await writeRuntimeConfigFile(runtimeConfig, options.runtimeConfigPath ?? resolveDefaultRuntimeConfigPath());
     autoScan = createAgentSourceAutoScanService({

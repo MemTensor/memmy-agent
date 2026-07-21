@@ -12933,6 +12933,53 @@ describe("MemoryService", () => {
     db.close();
   });
 
+  it("accepts a supervised shutdown request only with admin scope", async () => {
+    const { db, service } = createTestService();
+    let shutdownRequests = 0;
+    const server = createMemoryHttpServer({
+      service,
+      onShutdownRequested: () => {
+        shutdownRequests += 1;
+      },
+      auth: {
+        scopedApiKeys: {
+          "admin-token": {
+            namespace: { source: "codex", profileId: "admin-profile" },
+            scopes: ["admin:write"]
+          },
+          "reader-token": {
+            namespace: { source: "codex", profileId: "reader-profile" },
+            scopes: ["memory:read"]
+          }
+        }
+      }
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("expected TCP address");
+    const endpoint = `http://127.0.0.1:${address.port}/api/v1/admin/shutdown`;
+
+    const denied = await fetch(endpoint, {
+      method: "POST",
+      headers: { authorization: "Bearer reader-token", "content-type": "application/json" },
+      body: "{}"
+    });
+    expect(denied.status).toBe(403);
+    expect(shutdownRequests).toBe(0);
+
+    const accepted = await fetch(endpoint, {
+      method: "POST",
+      headers: { authorization: "Bearer admin-token", "content-type": "application/json" },
+      body: "{}"
+    });
+    expect(accepted.status).toBe(200);
+    await expect(accepted.json()).resolves.toMatchObject({ accepted: true });
+    await waitFor(() => shutdownRequests === 1);
+
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    db.close();
+  });
+
   it("applies REST auth principal scope and validates DTOs", async () => {
     const { db, service } = createTestService();
     const server = createMemoryHttpServer({
