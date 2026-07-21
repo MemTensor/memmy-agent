@@ -85,6 +85,8 @@ let isReplayingMainWindowAction = false;
 let isQuitting = false;
 let isQuitCleanupInProgress = false;
 let isQuitCleanupComplete = false;
+let shouldRelaunchAfterQuitCleanup = false;
+let lastMacosSecondInstanceAt = 0;
 let quitCleanupForceExitTimer: ReturnType<typeof setTimeout> | null = null;
 let areIpcHandlersRegistered = false;
 let isBootReady = false;
@@ -118,10 +120,9 @@ const WINDOWS_UPDATE_INSTALL_PROCESS_POLL_MS = 250;
 const WINDOWS_PREPARED_UPDATE_RELAUNCH_DELAY_MS = 500;
 const APP_QUIT_CLEANUP_FORCE_EXIT_DELAY_MS = 5000;
 const APP_QUIT_ANALYTICS_GRACE_MS = 150;
-const SINGLE_INSTANCE_LOCK_RETRY_INTERVAL_MS = 500;
-const SINGLE_INSTANCE_LOCK_WAIT_DEADLINE_MS = 10000;
-const SECOND_INSTANCE_ACTIVATE_DEBOUNCE_MS = 3000;
-const MACOS_STALE_REOPEN_QUIT_GRACE_MS = 20000;
+const MACOS_REOPEN_SECOND_INSTANCE_GRACE_MS = 2000;
+const MACOS_MICROPHONE_RELAUNCH_MARKER_FILE = "macos-microphone-relaunch.json";
+const MACOS_MICROPHONE_RELAUNCH_MARKER_TTL_MS = 5 * 60 * 1000;
 const MAIN_WINDOW_ROUTE_TARGET_CHANNEL = "memmy:route-target-request";
 const UPDATE_DOWNLOAD_PROGRESS_CHANNEL = "memmy:update-download-progress";
 const PREPARED_REQUIRED_UPDATE_FILE = "prepared-required-update.json";
@@ -2909,7 +2910,14 @@ async function requestMicrophoneAccess(): Promise<MicrophoneAccessStatus> {
 
   try {
     const granted = await systemPreferences.askForMediaAccess("microphone");
-    return granted ? "granted" : getMicrophoneAccessStatus();
+    if (granted) {
+      clearMacosMicrophoneRelaunchMarker();
+      return "granted";
+    }
+    // Remember that the app just entered the macOS microphone permission flow, so a later
+    // quit/reopen can be recognized even if the new process races ahead of the old one.
+    markMacosMicrophoneRelaunchRequested();
+    return getMicrophoneAccessStatus();
   } catch {
     return "unsupported";
   }
@@ -4331,100 +4339,39 @@ async function sendAppExitEventBeforeQuit(): Promise<void> {
   await Promise.race([exitEvent, delay(APP_QUIT_ANALYTICS_GRACE_MS)]);
 }
 
-let hasSingleInstanceLock = app.requestSingleInstanceLock();
-let lastSecondInstanceActivateAt = 0;
-let didWaitForSingleInstanceLock = false;
-let hasIgnoredStaleReopenQuit = false;
-let shouldRelaunchAfterQuitCleanup = false;
-const appProcessStartedAt = Date.now();
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
-/**
- * Waits for the single-instance lock while a previous instance finishes exiting.
- *
- * macOS "Quit & Reopen" (shown after privacy toggles such as the microphone permission) starts the
- * replacement instance while the old process is still running its quit cleanup and therefore still
- * holds the lock. Instead of giving up immediately — which turns "Quit & Reopen" into a plain quit —
- * retry until the old instance releases the lock or the deadline passes. The deadline comfortably
- * exceeds the quit-cleanup force-exit delay, so a genuinely running healthy instance is the only
- * case that still reaches the timeout.
- *
- * @returns Whether this instance owns the single-instance lock.
- */
-async function waitForSingleInstanceLock(): Promise<boolean> {
-  const deadline = Date.now() + SINGLE_INSTANCE_LOCK_WAIT_DEADLINE_MS;
-  while (!hasSingleInstanceLock && Date.now() < deadline) {
-    didWaitForSingleInstanceLock = true;
-    await delay(SINGLE_INSTANCE_LOCK_RETRY_INTERVAL_MS);
-    hasSingleInstanceLock = app.requestSingleInstanceLock();
-  }
-  return hasSingleInstanceLock;
-}
-
-/**
- * Detects the stale quit request macOS delivers to a freshly reopened instance.
- *
- * The "Quit & Reopen" flow quits the old instance and reopens the app, but when the old instance
- * shuts down slowly the reopen races ahead and the quit request is delivered to the replacement
- * instance instead — the reopened window flashes briefly and the app is gone. Having waited for the
- * single-instance lock is the fingerprint of that reopen race (a normal launch acquires the lock on
- * the first try), so shortly after such a launch the first quit request is treated as stale and
- * ignored once. Every later quit request behaves normally.
- *
- * @returns Whether the current quit request should be ignored as stale.
- */
-function shouldIgnoreStaleReopenQuit(): boolean {
-  return process.platform === "darwin"
-    && didWaitForSingleInstanceLock
-    && !hasIgnoredStaleReopenQuit
-    && Date.now() - appProcessStartedAt <= MACOS_STALE_REOPEN_QUIT_GRACE_MS;
-}
-
-app.on("second-instance", () => {
-  if (isQuitting || isQuitCleanupInProgress) {
-    // The other instance is a replacement waiting for this instance's lock; let it take over.
-    return;
-  }
-
-  // A waiting replacement instance retries the lock every few hundred milliseconds and each retry
-  // fires second-instance; debounce so a healthy primary does not keep re-stealing focus.
-  const now = Date.now();
-  if (now - lastSecondInstanceActivateAt < SECOND_INSTANCE_ACTIVATE_DEBOUNCE_MS) {
-    return;
-  }
-  lastSecondInstanceActivateAt = now;
-
-  if (isBootReady) {
-    activateMainWindow();
-  }
-});
-
-app.whenReady().then(async () => {
-  if (!(await waitForSingleInstanceLock())) {
-    // An instance is already running: this instance exits directly, to avoid a second instance
-    // contending for the fixed ports (memory 18799 / agent-gateway 18997) and causing a startup failure.
-    app.quit();
-    return;
-  }
-
-  await boot();
-}).catch(async (error: unknown) => {
-  console.error(error);
-  closeSplashWindow(); // Close the splash even on boot failure, so it does not stay stuck on screen
-  await writePackagedStartupLog(`boot:error\n${formatStartupError(error)}`);
-  showPackagedStartupError(error);
+if (!hasSingleInstanceLock) {
+  // An instance is already running: this instance exits directly, to avoid a second instance
+  // contending for the fixed ports (memory 18799 / agent-gateway 18997) and causing a startup failure.
   app.quit();
-});
+} else {
+  app.on("second-instance", () => {
+    if (process.platform === "darwin") {
+      lastMacosSecondInstanceAt = Date.now();
+    }
+
+    if (isQuitting || isQuitCleanupInProgress) {
+      // macOS System Settings can quit and reopen the app while the old process still owns
+      // the single-instance lock. Relaunch from the old process after cleanup releases it.
+      shouldRelaunchAfterQuitCleanup = true;
+      return;
+    }
+
+    if (isBootReady) {
+      activateMainWindow();
+    }
+  });
+  app.whenReady().then(boot).catch(async (error: unknown) => {
+    console.error(error);
+    closeSplashWindow(); // Close the splash even on boot failure, so it does not stay stuck on screen
+    await writePackagedStartupLog(`boot:error\n${formatStartupError(error)}`);
+    showPackagedStartupError(error);
+    app.quit();
+  });
+}
 
 app.on("activate", () => {
-  if (isQuitting || isQuitCleanupInProgress) {
-    // macOS "Quit & Reopen" delivers the reopen as an activate event to this still-dying instance
-    // when the quit cleanup is slow, so no replacement process is ever spawned. Honor the reopen
-    // by relaunching once cleanup finishes instead of letting the app end up fully closed.
-    shouldRelaunchAfterQuitCleanup = true;
-    void writePackagedStartupLog("quit:reopen-requested-during-quit");
-    return;
-  }
-
   if (isBootReady) {
     if (consumePetWindowCloseActivateSuppression()) {
       return;
@@ -4441,12 +4388,6 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", (event) => {
-  if (shouldIgnoreStaleReopenQuit()) {
-    hasIgnoredStaleReopenQuit = true;
-    event.preventDefault();
-    void writePackagedStartupLog("quit:ignored-stale-reopen-quit");
-    return;
-  }
   if (!hasSingleInstanceLock) {
     return;
   }
@@ -4456,13 +4397,17 @@ app.on("before-quit", (event) => {
 
   event.preventDefault();
   isQuitting = true;
+  if (shouldTreatMacosMicrophonePermissionReopen()) {
+    // macOS privacy toggles can start the replacement instance just before the old instance enters
+    // before-quit. Preserve that intent so cleanup does not turn "Quit & Reopen" into "Quit".
+    shouldRelaunchAfterQuitCleanup = true;
+  }
   hideAppShellForQuit();
   if (isQuitCleanupInProgress) {
     return;
   }
 
   isQuitCleanupInProgress = true;
-  void writePackagedStartupLog("quit:cleanup-start");
   armQuitCleanupForceExitTimer();
   void cleanupBeforeQuit()
     .catch(async (error: unknown) => {
@@ -4478,21 +4423,6 @@ app.on("before-quit", (event) => {
     });
 });
 
-/**
- * Relaunches the app after quit cleanup when a reopen request arrived mid-quit.
- *
- * @returns Nothing.
- */
-function relaunchAfterQuitCleanupIfRequested(): void {
-  if (!shouldRelaunchAfterQuitCleanup) {
-    return;
-  }
-
-  shouldRelaunchAfterQuitCleanup = false;
-  void writePackagedStartupLog("quit:relaunching-after-cleanup");
-  app.relaunch();
-}
-
 function armQuitCleanupForceExitTimer(): void {
   clearQuitCleanupForceExitTimer();
   quitCleanupForceExitTimer = setTimeout(() => {
@@ -4504,6 +4434,100 @@ function armQuitCleanupForceExitTimer(): void {
     app.exit(0);
   }, APP_QUIT_CLEANUP_FORCE_EXIT_DELAY_MS);
   quitCleanupForceExitTimer.unref?.();
+}
+
+function relaunchAfterQuitCleanupIfRequested(): void {
+  if (!shouldRelaunchAfterQuitCleanup) {
+    return;
+  }
+
+  shouldRelaunchAfterQuitCleanup = false;
+  app.relaunch();
+}
+
+function shouldTreatRecentMacosSecondInstanceAsReopen(): boolean {
+  if (process.platform !== "darwin" || lastMacosSecondInstanceAt <= 0) {
+    return false;
+  }
+
+  return Date.now() - lastMacosSecondInstanceAt <= MACOS_REOPEN_SECOND_INSTANCE_GRACE_MS;
+}
+
+function shouldTreatMacosMicrophonePermissionReopen(): boolean {
+  const requestedAt = readMacosMicrophoneRelaunchRequestedAt();
+  if (!requestedAt) {
+    return false;
+  }
+
+  if (Date.now() - requestedAt.getTime() > MACOS_MICROPHONE_RELAUNCH_MARKER_TTL_MS) {
+    clearMacosMicrophoneRelaunchMarker();
+    return false;
+  }
+
+  const hasRecentReopenAttempt = shouldTreatRecentMacosSecondInstanceAsReopen();
+  const microphoneAccessStatus = getMicrophoneAccessStatus();
+  if (microphoneAccessStatus === "granted") {
+    clearMacosMicrophoneRelaunchMarker();
+    return hasRecentReopenAttempt;
+  }
+
+  return false;
+}
+
+function markMacosMicrophoneRelaunchRequested(): void {
+  if (process.platform !== "darwin") {
+    return;
+  }
+
+  try {
+    writeFileSync(resolveMacosMicrophoneRelaunchMarkerPath(), JSON.stringify({
+      requestedAt: new Date().toISOString()
+    }), "utf8");
+  } catch (error) {
+    console.warn("macOS microphone relaunch marker write failed:", error);
+  }
+}
+
+function readMacosMicrophoneRelaunchRequestedAt(): Date | null {
+  if (process.platform !== "darwin") {
+    return null;
+  }
+
+  try {
+    const raw = readFileSync(resolveMacosMicrophoneRelaunchMarkerPath(), "utf8");
+    const parsed = JSON.parse(raw) as { requestedAt?: unknown };
+    if (typeof parsed.requestedAt !== "string" || !parsed.requestedAt.trim()) {
+      clearMacosMicrophoneRelaunchMarker();
+      return null;
+    }
+
+    const requestedAt = new Date(parsed.requestedAt);
+    if (Number.isNaN(requestedAt.getTime())) {
+      clearMacosMicrophoneRelaunchMarker();
+      return null;
+    }
+
+    return requestedAt;
+  } catch {
+    clearMacosMicrophoneRelaunchMarker();
+    return null;
+  }
+}
+
+function clearMacosMicrophoneRelaunchMarker(): void {
+  if (process.platform !== "darwin") {
+    return;
+  }
+
+  try {
+    unlinkSync(resolveMacosMicrophoneRelaunchMarkerPath());
+  } catch {
+    // Best-effort cleanup only.
+  }
+}
+
+function resolveMacosMicrophoneRelaunchMarkerPath(): string {
+  return join(app.getPath("userData"), MACOS_MICROPHONE_RELAUNCH_MARKER_FILE);
 }
 
 function hideAppShellForQuit(): void {
