@@ -738,6 +738,7 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).toContain("write_desktop_edition_manifest");
     expect(source).toContain('"signing": "$package_signing"');
     expect(source).toContain("npm run build -w @memmy/memory");
+    expect(source).toContain("npm install --workspace @memmy/frontend-desktop --no-package-lock");
     expect(source).toContain('npm ci --prefix "$AGENT_DIR"');
     expect(source).not.toContain('npm install --prefix "$AGENT_DIR"');
     expect(source).not.toContain('if [ ! -x "$AGENT_DIR/node_modules/.bin/tsc" ]');

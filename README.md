@@ -91,7 +91,8 @@ Memmy is not just a chat interface — it is an AI Agent Runtime t
 
 Memmy uses an npm workspaces monorepo architecture:
 
-Memmy System Architecture
+![Memmy System Architecture](docs/assets/memmy-architecture-en.png)
+
 
 ## Memmy vs. Personal AI Agents
 
@@ -122,7 +123,7 @@ Compared with "personal AI Agents" like Hermes and OpenClaw, what sets
 3. Enter the main workbench and send your first task.
 4. Open "Tools" to connect messaging channels or third-party tools; open "Memory" to scan Agent history sources.
 
-> **Account mode free credits**: signing in grants **30,000,000 (30 million) trial tokens**, so you can get running without your own API Key. You can check used / total / remaining amounts and the expiry date anytime in the app. Trial tokens use model `(TBD)`, valid for `(TBD)`. Once used up or expired, switch to API Key (BYOK) mode and continue with your own quota.
+> **Account mode free credits**: signing in grants **30,000,000 (30 million) trial tokens**, so you can get running without your own API Key. You can check used / total / remaining amounts and the expiry date anytime in the app. Once used up or expired, switch to API Key (BYOK) mode and continue with your own quota.
 
 ### Option 2: `memmy` CLI (Agent Runtime)
 

@@ -3,6 +3,7 @@ type IpcRendererEvent = import("electron").IpcRendererEvent;
 type DesktopAppInfo = import("@memmy/desktop-interface").DesktopAppInfo;
 type DesktopUpdateCheckResult = import("@memmy/desktop-interface").DesktopUpdateCheckResult;
 type DesktopUpdateDownloadOptions = import("@memmy/desktop-interface").DesktopUpdateDownloadOptions;
+type DesktopUpdateDownloadProgress = import("@memmy/desktop-interface").DesktopUpdateDownloadProgress;
 type DesktopUpdateInstallResult = import("@memmy/desktop-interface").DesktopUpdateInstallResult;
 type DesktopMenuBarIconResult = import("@memmy/desktop-interface").DesktopMenuBarIconResult;
 type DesktopImageActionRequest = import("@memmy/desktop-interface").DesktopImageActionRequest;
@@ -25,6 +26,7 @@ interface MemmyPreloadApi {
   getAppInfo(): Promise<DesktopAppInfo>;
   checkForUpdates(): Promise<DesktopUpdateCheckResult>;
   downloadUpdate(update: DesktopUpdateCheckResult, options?: DesktopUpdateDownloadOptions): Promise<DesktopUpdateInstallResult>;
+  onUpdateDownloadProgress(callback: (progress: DesktopUpdateDownloadProgress) => void): () => void;
   openUpdateInstaller(filePath: string): Promise<DesktopUpdateInstallResult>;
   openExternal(url: string): Promise<void>;
   openMailto(mailtoUrl: string): Promise<void>;
@@ -114,6 +116,14 @@ const memmyPreloadApi: MemmyPreloadApi = {
 
   async downloadUpdate(update: DesktopUpdateCheckResult, options?: DesktopUpdateDownloadOptions): Promise<DesktopUpdateInstallResult> {
     return ipcRenderer.invoke("memmy:download-update", update, options);
+  },
+
+  onUpdateDownloadProgress(callback: (progress: DesktopUpdateDownloadProgress) => void): () => void {
+    const listener = (_event: IpcRendererEvent, progress: DesktopUpdateDownloadProgress) => {
+      callback(progress);
+    };
+    ipcRenderer.on("memmy:update-download-progress", listener);
+    return () => ipcRenderer.removeListener("memmy:update-download-progress", listener);
   },
 
   async openUpdateInstaller(filePath: string): Promise<DesktopUpdateInstallResult> {
