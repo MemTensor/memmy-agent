@@ -34,10 +34,14 @@ describe("SourcesSubPage", () => {
   });
 
   it("同步按钮在扫描中旋转，完成后进入不可重复点击的勾选状态", () => {
-    expect(resolveAgentSourceScanButtonState("hermes", true, "hermes", new Set())).toBe("running");
-    expect(resolveAgentSourceScanButtonState("hermes", true, "cursor", new Set())).toBe("idle");
-    expect(resolveAgentSourceScanButtonState("hermes", false, null, new Set(["hermes"]))).toBe("completed");
-    expect(resolveAgentSourceScanButtonState("hermes", false, null, new Set())).toBe("idle");
+    const sourceIds = ["cursor", "claude_code", "codex", "opencode", "openclaw", "hermes", "workbuddy"];
+    for (const sourceId of sourceIds) {
+      const otherSourceId = sourceIds.find((candidate) => candidate !== sourceId)!;
+      expect(resolveAgentSourceScanButtonState(sourceId, true, sourceId, new Set())).toBe("running");
+      expect(resolveAgentSourceScanButtonState(sourceId, true, otherSourceId, new Set())).toBe("idle");
+      expect(resolveAgentSourceScanButtonState(sourceId, false, null, new Set([sourceId]))).toBe("completed");
+      expect(resolveAgentSourceScanButtonState(sourceId, false, null, new Set())).toBe("idle");
+    }
     expect(zhCNMessages["memory.syncCompleted"]).toBe("同步完成");
     expect(enUSMessages["memory.syncCompleted"]).toBe("Synced");
     expect(AGENT_SOURCE_SCAN_COMPLETION_FEEDBACK_MS).toBe(5000);

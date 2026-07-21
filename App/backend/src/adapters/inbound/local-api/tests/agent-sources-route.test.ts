@@ -303,7 +303,15 @@ describe("agent sources local api routes", () => {
     expect(calls).toEqual(["collectAll"]);
   });
 
-  it("starts source-scoped scan jobs from the request body", async () => {
+  it.each([
+    "cursor",
+    "claude_code",
+    "codex",
+    "opencode",
+    "openclaw",
+    "hermes",
+    "workbuddy"
+  ])("starts a source-scoped scan job for %s", async (sourceId) => {
     const calls: string[] = [];
     const { server } = createServer({
       agentSources: {
@@ -332,15 +340,19 @@ describe("agent sources local api routes", () => {
       method: "POST",
       url: "/api/agent-sources/scan",
       headers: { "x-memmy-local-token": "test-token" },
-      payload: { sourceId: "openclaw" }
+      payload: { sourceId }
     });
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({ jobId: expect.any(String) });
     expect(calls).toEqual([]);
 
-    await waitFor(() => calls.includes("summarize:openclaw"));
-    expect(calls).toEqual(["collectOne:openclaw", "ingest:openclaw", "summarize:openclaw"]);
+    await waitFor(() => calls.includes(`summarize:${sourceId}`));
+    expect(calls).toEqual([
+      `collectOne:${sourceId}`,
+      `ingest:${sourceId}`,
+      `summarize:${sourceId}`
+    ]);
   });
 
   it("stops the active scan job", async () => {
