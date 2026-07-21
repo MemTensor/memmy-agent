@@ -1,6 +1,7 @@
 /** Home page tests. */
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { Window } from "happy-dom";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { MemmyAgentRequestError } from "../../api/memmy-agent-client.js";
@@ -41,6 +42,7 @@ import {
 
 const homePageSourcePath = fileURLToPath(new URL("../home-page.tsx", import.meta.url));
 const agentRuntimeBridgeSourcePath = fileURLToPath(new URL("../../app/agent-runtime-bridge.tsx", import.meta.url));
+const stylesSourcePath = fileURLToPath(new URL("../../styles.css", import.meta.url));
 
 function readAgentRuntimeBridgeSource(): string {
   return readFileSync(agentRuntimeBridgeSourcePath, "utf8").replace(/\r\n/g, "\n");
@@ -322,6 +324,26 @@ describe("HomePage", () => {
     expect(source).toContain('${isComposerSingleLine ? "agent-composer-input--single " : ""}block w-full pl-4 pr-20 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40');
     expect(source).toContain('centerComposerControls ? "top-1/2 -translate-y-1/2" : "bottom-2"');
     expect(source).toContain("COMPOSER_SINGLE_LINE_HEIGHT_PX = 52");
+  });
+
+  it("keeps the single-line composer text and caret vertically centered", () => {
+    const window = new Window();
+    const style = window.document.createElement("style");
+    style.textContent = readFileSync(stylesSourcePath, "utf8").replace(/^@import[^;]+;$/gm, "");
+    window.document.head.append(style);
+
+    const shell = window.document.createElement("div");
+    shell.className = "agent-composer-shell";
+    const textarea = window.document.createElement("textarea");
+    textarea.className = "agent-composer-input--single py-3 text-sm";
+    shell.append(textarea);
+    window.document.body.append(shell);
+
+    const computed = window.getComputedStyle(textarea);
+    expect(computed.height).toBe("52px");
+    expect(computed.lineHeight).toBe("24px");
+    expect(computed.paddingTop).toBe("14px");
+    expect(computed.paddingBottom).toBe("14px");
   });
 
   it("applies the composer single-line treatment only while the textarea is one line", () => {

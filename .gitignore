@@ -13,6 +13,9 @@ memmy-memory-*.tgz
 App/memmy-agent/package-lock.json
 sessions/
 .*
+!.github/
+!.github/workflows/
+!.github/workflows/*.yml
 .env
 .env.*
 !.env.example

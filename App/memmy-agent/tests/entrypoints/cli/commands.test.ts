@@ -47,6 +47,7 @@ import {
 } from "../../../src/entrypoints/cli/commands.js";
 import { API_MAX_BODY_BYTES } from "../../../src/entrypoints/openai-like-api/server.js";
 import { setQuestionary } from "../../../src/entrypoints/cli/onboard.js";
+import { VERSION } from "../../../src/version.js";
 
 const ENV_KEYS = [
   "MEMMY_AGENT_DATA_DIR",
@@ -164,7 +165,7 @@ describe("CLI command helpers", () => {
     expect(isRootVersionRequest(["node", "memmy", "--version"])).toBe(true);
     await main(["node", "memmy", "--version"]);
 
-    expect(log).toHaveBeenCalledWith("0.0.1-beta.1");
+    expect(log).toHaveBeenCalledWith(VERSION);
   });
 
   it("routes bare memmy to the Ink TUI", async () => {

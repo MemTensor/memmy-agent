@@ -291,7 +291,8 @@ const rootDir = requiredEnv("ROOT_DIR");
 const memoryDir = requiredEnv("MEMORY_DIR");
 const runtimeDir = requiredEnv("MEMORY_RUNTIME_DIR");
 const runtimeName = "memmy-memory-runtime";
-const runtimeVersion = "0.0.0";
+const projectPackage = JSON.parse(await readFile(join(rootDir, "package.json"), "utf8"));
+const runtimeVersion = projectPackage.version;
 
 const memoryPackage = JSON.parse(await readFile(join(memoryDir, "package.json"), "utf8"));
 const rootLock = JSON.parse(await readFile(join(rootDir, "package-lock.json"), "utf8"));
@@ -444,6 +445,7 @@ prune_mac_runtime_artifacts() {
 }
 
 cd "$ROOT_DIR"
+node scripts/sync-project-version.mjs
 
 BUILDER_CONFIG="electron-builder.yml"
 TARGET_CPU="$(resolve_target_cpu "$@")"
