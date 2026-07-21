@@ -25,9 +25,6 @@ extraResources:
     to: MenuBarIconTemplate.png
   - from: build/MenuBarIconTemplate@2x.png
     to: MenuBarIconTemplate@2x.png
-  - from: ../../../.env
-    to: .env
-
 mac:
   icon: build/icon.icns
   category: public.app-category.productivity

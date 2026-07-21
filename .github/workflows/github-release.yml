@@ -1,0 +1,198 @@
+name: GitHub Release
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version without the v prefix (for example, 1.2.3)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && format('release/v{0}', inputs.version) || github.event.pull_request.head.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.merged == true &&
+       startsWith(github.event.pull_request.head.ref, 'release/v'))
+    runs-on: ubuntu-latest
+    environment: release
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Resolve and validate release
+        id: release
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          MANUAL_VERSION: ${{ inputs.version }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            if [[ ! "$PR_HEAD_REF" =~ ^release/v((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))$ ]]; then
+              echo "Release branch must match release/vX.Y.Z" >&2
+              exit 1
+            fi
+            version="${BASH_REMATCH[1]}"
+            target_sha="$PR_MERGE_SHA"
+            if [[ ! "$target_sha" =~ ^[0-9a-fA-F]{40}$ ]]; then
+              echo "The merged PR did not provide a valid merge_commit_sha" >&2
+              exit 1
+            fi
+          else
+            version="$MANUAL_VERSION"
+            target_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"
+          fi
+
+          if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Version must match X.Y.Z without a v prefix" >&2
+            exit 1
+          fi
+          if [[ ! "$target_sha" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "Could not resolve the main branch release commit" >&2
+            exit 1
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "target_sha=$target_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Check for an existing tag or release
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --tags "https://github.com/${GITHUB_REPOSITORY}.git" "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "Refusing to overwrite existing tag $TAG" >&2
+            exit 1
+          fi
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Refusing to overwrite existing release $TAG" >&2
+            exit 1
+          fi
+
+      - name: Check out the exact release commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.release.outputs.target_sha }}
+          fetch-depth: 0
+
+      - name: Verify target is on main
+        env:
+          TARGET_SHA: ${{ steps.release.outputs.target_sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$TARGET_SHA" origin/main
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+
+      - name: Download and verify OSS artifacts
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          base="https://memtensor-cdn.oss-cn-shanghai.aliyuncs.com/memmy/$VERSION"
+          artifacts=(
+            "Memmy-$VERSION-win32-x64-cn-signed.exe"
+            "Memmy-$VERSION-win32-x64-intl-signed.exe"
+            "Memmy-$VERSION-darwin-arm64-cn-signed.dmg"
+            "Memmy-$VERSION-darwin-arm64-intl-signed.dmg"
+          )
+
+          for artifact in "${artifacts[@]}"; do
+            url="$base/$artifact"
+            headers="$(mktemp)"
+            curl --fail --location --retry 5 --retry-all-errors --head \
+              --dump-header "$headers" --output /dev/null "$url"
+            content_md5="$(awk 'BEGIN { IGNORECASE=1 } /^Content-MD5:/ { gsub("\\r", "", $2); value=$2 } END { print value }' "$headers")"
+            if [[ -z "$content_md5" ]]; then
+              echo "OSS did not return Content-MD5 for $artifact" >&2
+              exit 1
+            fi
+
+            curl --fail --location --retry 5 --retry-all-errors \
+              --output "release-assets/$artifact" "$url"
+            test -s "release-assets/$artifact"
+
+            expected_md5="$(printf '%s' "$content_md5" | base64 --decode | xxd -p -c 256)"
+            actual_md5="$(md5sum "release-assets/$artifact" | awk '{print $1}')"
+            if [[ "$actual_md5" != "$expected_md5" ]]; then
+              echo "Content-MD5 mismatch for $artifact" >&2
+              exit 1
+            fi
+          done
+
+          (cd release-assets && md5sum Memmy-* > MD5SUMS.txt)
+          (cd release-assets && sha256sum Memmy-* > SHA256SUMS.txt)
+
+      - name: Build release notes
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          TAG: ${{ steps.release.outputs.tag }}
+          TARGET_SHA: ${{ steps.release.outputs.target_sha }}
+        run: |
+          set -euo pipefail
+          notes="release-assets/RELEASE_NOTES.md"
+          manual_notes=".github/release-notes/$TAG.md"
+          if [[ -f "$manual_notes" ]]; then
+            cat "$manual_notes" > "$notes"
+            printf '\n\n' >> "$notes"
+          else
+            : > "$notes"
+          fi
+
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+            -f tag_name="$TAG" -f target_commitish="$TARGET_SHA" \
+            --jq '.body' >> "$notes"
+
+          cat >> "$notes" <<EOF
+
+          ## Downloads
+
+          - Windows x64 (China): [Memmy-$VERSION-win32-x64-cn-signed.exe](https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/Memmy-$VERSION-win32-x64-cn-signed.exe)
+          - Windows x64 (International): [Memmy-$VERSION-win32-x64-intl-signed.exe](https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/Memmy-$VERSION-win32-x64-intl-signed.exe)
+          - macOS Apple Silicon (China): [Memmy-$VERSION-darwin-arm64-cn-signed.dmg](https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/Memmy-$VERSION-darwin-arm64-cn-signed.dmg)
+          - macOS Apple Silicon (International): [Memmy-$VERSION-darwin-arm64-intl-signed.dmg](https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/Memmy-$VERSION-darwin-arm64-intl-signed.dmg)
+
+          ## Installation
+
+          On Windows, download the appropriate signed `.exe` and run the installer. On Apple Silicon Macs, download the appropriate signed `.dmg`, open it, and drag Memmy to Applications.
+
+          ## Checksums
+
+          Verify downloads with `MD5SUMS.txt` or `SHA256SUMS.txt` attached to this release. The workflow also verifies every OSS object against its `Content-MD5` header before publishing.
+          EOF
+
+      - name: Create draft release and upload every asset
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+          TARGET_SHA: ${{ steps.release.outputs.target_sha }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$TARGET_SHA" \
+            --title "Memmy $TAG" \
+            --notes-file release-assets/RELEASE_NOTES.md \
+            --draft
+          gh release upload "$TAG" release-assets/Memmy-* release-assets/MD5SUMS.txt release-assets/SHA256SUMS.txt \
+            --repo "$GITHUB_REPOSITORY"
+
+      - name: Publish release as latest
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
