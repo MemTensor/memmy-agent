@@ -171,6 +171,8 @@ describe("Bundled Tool Contract", () => {
   it("tool contract balances general and coding workflows", () => {
     const content = fs.readFileSync(path.join(process.cwd(), "src/templates/agent/tool-contract.md"), "utf8");
     expect(content).toContain("## General Tool Contract");
+    expect(content).toContain("{% include 'agent/verification-contract.md' %}");
+    expect(content).not.toContain("After meaningful changes, verify with the smallest reliable check");
     expect(content).toContain("Use the narrowest structured tool");
     expect(content).toContain("Do not treat `exec` as a universal workaround");
     expect(content).toContain("## Execution Progress");
@@ -189,6 +191,8 @@ describe("Bundled Tool Contract", () => {
     expect(prompt).toContain("## General Tool Contract");
     expect(prompt).toContain("Do not treat `exec` as a universal workaround");
     expect(prompt).toContain("## Execution Progress");
+    expect(prompt.match(/# Verification Contract/g)).toHaveLength(1);
+    expect(prompt).toContain("`failed` means the validation output must be inspected");
   });
 });
 

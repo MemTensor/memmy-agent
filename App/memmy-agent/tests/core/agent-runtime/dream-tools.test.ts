@@ -9,7 +9,10 @@ describe("Dream tool registry", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-dream-tools-"));
     const dream = new Dream({ store: new MemoryStore(root), provider: {}, model: "m" });
 
-    expect(dream.buildTools().toolNames).toEqual(expect.arrayContaining(["read_file", "edit_file", "write_file"]));
+    const tools = dream.buildTools();
+    expect(tools.toolNames).toEqual(expect.arrayContaining(["read_file", "edit_file", "write_file"]));
+    expect(tools.get("edit_file")).toMatchObject({ postWriteValidation: false });
+    expect(tools.get("write_file")).toMatchObject({ postWriteValidation: false });
     expect(fs.existsSync(path.join(root, "skills"))).toBe(true);
     fs.rmSync(root, { recursive: true, force: true });
   });

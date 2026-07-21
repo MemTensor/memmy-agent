@@ -77,6 +77,9 @@ describe("SubagentManager", () => {
       expect(prompt).toContain("beta_skill");
       expect(prompt).toContain(betaPath);
       expect(prompt).not.toContain("alpha_skill");
+      expect(prompt.match(/# Verification Contract/g)).toHaveLength(1);
+      expect(prompt).toContain("If a tool result says its full output was persisted");
+      expect(prompt).not.toContain("{% include 'agent/verification-contract.md' %}");
     } finally {
       fs.rmSync(workspace, { recursive: true, force: true });
     }

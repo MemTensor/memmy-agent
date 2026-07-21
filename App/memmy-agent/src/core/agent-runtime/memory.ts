@@ -1236,10 +1236,18 @@ export class Dream {
   buildTools(): ToolRegistry {
     const tools = new ToolRegistry();
     tools.register(new ReadFileTool({ workspace: this.store.workspace, allowedDir: this.store.workspace }));
-    tools.register(new EditFileTool({ workspace: this.store.workspace, allowedDir: this.store.workspace }));
+    tools.register(new EditFileTool({
+      workspace: this.store.workspace,
+      allowedDir: this.store.workspace,
+      postWriteValidation: false,
+    }));
     const skillsDir = path.join(this.store.workspace, "skills");
     fs.mkdirSync(skillsDir, { recursive: true });
-    tools.register(new WriteFileTool({ workspace: this.store.workspace, allowedDir: skillsDir }));
+    tools.register(new WriteFileTool({
+      workspace: this.store.workspace,
+      allowedDir: skillsDir,
+      postWriteValidation: false,
+    }));
     return tools;
   }
 
