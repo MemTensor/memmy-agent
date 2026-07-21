@@ -1088,11 +1088,7 @@ function SourceStatusBadge(props: { source: Pick<AgentSourceView, "sourceId" | "
 
   const labelKey = resolveAgentSourceStatusLabelKey(props.source);
 
-  if (props.source.status === "skill_installed") {
-    return <span className="text-[10px] px-2 py-0.5 bg-status-success-soft text-status-success border border-status-success/30 rounded-tag font-normal shrink-0 whitespace-nowrap">{t(labelKey)}</span>;
-  }
-
-  if (props.source.status === "plugin_installed") {
+  if (props.source.status === "skill_installed" || props.source.status === "plugin_installed") {
     return <span className="text-[10px] px-2 py-0.5 bg-action-sky/10 text-action-sky border border-action-sky/20 rounded-tag font-normal shrink-0 whitespace-nowrap">{t(labelKey)}</span>;
   }
 

@@ -222,6 +222,7 @@ describe("SourcesSubPage", () => {
     expect(resolveAgentSourceStatusLabelKey(createSource("hermes", "plugin_installed"))).toBe("memory.pluginInstalled");
     expect(resolveAgentSourceStatusLabelKey(createSource("opencode", "plugin_installed"))).toBe("memory.pluginInstalled");
     expect(resolveAgentSourceStatusLabelKey(createSource("workbuddy", "not_connected"))).toBe("memory.skillNotInstalled");
+    expect(source).toContain('props.source.status === "skill_installed" || props.source.status === "plugin_installed"');
     expect(source).not.toContain("memory.notConnected");
   });
 });
