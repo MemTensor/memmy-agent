@@ -1,7 +1,9 @@
 name: GitHub Release
 
 on:
-  pull_request:
+  # Use the base repository's trusted workflow so merged PRs from public forks
+  # can publish without executing workflow code from the PR branch.
+  pull_request_target:
     types: [closed]
     branches: [main]
   workflow_dispatch:
@@ -39,7 +41,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+          if [[ "$EVENT_NAME" == "pull_request_target" ]]; then
             if [[ ! "$PR_HEAD_REF" =~ ^release/v((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))$ ]]; then
               echo "Release branch must match release/vX.Y.Z" >&2
               exit 1

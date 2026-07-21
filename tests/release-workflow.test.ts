@@ -19,11 +19,14 @@ const packagingConfigs = [
 ];
 
 describe("GitHub release workflow", () => {
-  it("only automatically handles merged release/vX.Y.Z PRs targeting main", () => {
-    expect(workflow.on.pull_request).toEqual({ types: ["closed"], branches: ["main"] });
+  it("uses the trusted base workflow for merged release/vX.Y.Z PRs targeting main", () => {
+    expect(workflow.on.pull_request_target).toEqual({ types: ["closed"], branches: ["main"] });
+    expect(workflow.on.pull_request).toBeUndefined();
     expect(releaseJob.if).toContain("github.event.pull_request.merged == true");
     expect(releaseJob.if).toContain("startsWith(github.event.pull_request.head.ref, 'release/v')");
-    expect(script("Resolve and validate release")).toContain(
+    const resolveScript = script("Resolve and validate release");
+    expect(resolveScript).toContain('if [[ "$EVENT_NAME" == "pull_request_target" ]]');
+    expect(resolveScript).toContain(
       "^release/v((0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*))$",
     );
   });
