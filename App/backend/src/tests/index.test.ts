@@ -41,6 +41,29 @@ afterEach(async () => {
 });
 
 describe("local api", () => {
+  it("reloads Memory config when the desktop backend starts", async () => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-backend-startup-reload-"));
+    const baseClient = createMockMemoryClient();
+    const reloadReasons: unknown[] = [];
+    const memoryClient: MemoryClient = {
+      ...baseClient,
+      async reloadConfig(input) {
+        reloadReasons.push(input);
+        return baseClient.reloadConfig(input);
+      }
+    };
+
+    backend = await createLocalBackend({
+      databasePath: join(tempDir, "app.sqlite"),
+      runtimeConfigPath: join(tempDir, "runtime.json"),
+      localToken: "test-token",
+      memoryClient,
+      cloudClient: createMockCloudClient()
+    });
+
+    expect(reloadReasons).toEqual([{ reason: "desktop_startup" }]);
+  });
+
   it("uses the built-in default Cloud client when MEMMY_CLOUD_URL is missing", async () => {
     const previousCloudUrl = process.env.MEMMY_CLOUD_URL;
     delete process.env.MEMMY_CLOUD_URL;

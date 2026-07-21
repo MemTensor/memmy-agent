@@ -1,5 +1,10 @@
 /** Memory detail runtime routes. */
-import { AddMemoryInputSchema, DeleteMemoryInputSchema, MemoryApiLogsInputSchema } from "@memmy/local-api-contracts";
+import {
+  AddMemoryInputSchema,
+  DeleteMemoryInputSchema,
+  MemoryApiLogsInputSchema,
+  MemoryProcessingStatusInputSchema
+} from "@memmy/local-api-contracts";
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
 import { withErrorEnvelope } from "../../../../../services/error-envelope.js";
@@ -35,6 +40,28 @@ export function registerMemoryRoutes(app: FastifyInstance, deps: AgentRuntimeRou
         excludedSourceAgents
       });
       return reply.send(await deps.services.panel.memoryApiLogs(input, runtimeContext()));
+    })
+  );
+
+  app.post(
+    "/api/v1/memory/processing/status",
+    { preHandler: deps.authenticateRuntimeToken },
+    withErrorEnvelope(async (request, reply) => {
+      const input = MemoryProcessingStatusInputSchema.parse(request.body);
+      return reply.send(await deps.services.memoryClient.getMemoryProcessingStatus(input.memoryIds));
+    })
+  );
+
+  app.post(
+    "/api/v1/memory/:id/processing/retry",
+    { preHandler: deps.authenticateRuntimeToken },
+    withErrorEnvelope(async (request, reply) => {
+      const params = MemoryParamsSchema.parse(request.params);
+      await deps.services.memoryClient.reloadConfig({
+        reason: "manual_processing_retry",
+        restartFailedProcessing: false
+      });
+      return reply.send(await deps.services.memoryClient.retryMemoryProcessing(params.id));
     })
   );
 

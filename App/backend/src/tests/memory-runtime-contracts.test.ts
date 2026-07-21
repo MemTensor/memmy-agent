@@ -77,7 +77,12 @@ describe("memory runtime contracts", () => {
     { name: "SearchInput", schema: SearchInputSchema, valid: { query: "typescript retry", sessionId: "session-1", layers: ["L1", "L2"], verbose: true, source: "codex" }, invalid: { query: 1 } },
     { name: "AddMemoryInput", schema: AddMemoryInputSchema, valid: { content: "remember this", layer: "L1", source: "codex" }, invalid: { content: "", layer: "L4" } },
     { name: "DeleteMemoryInput", schema: DeleteMemoryInputSchema, valid: { source: "codex" } },
-    { name: "MemoryReloadConfigInput", schema: MemoryReloadConfigInputSchema, valid: { reason: "profile_switched" }, invalid: { requestId: "" } },
+    {
+      name: "MemoryReloadConfigInput",
+      schema: MemoryReloadConfigInputSchema,
+      valid: { reason: "profile_switched", restartFailedProcessing: false },
+      invalid: { requestId: "" }
+    },
     { name: "PanelItemsInput", schema: PanelItemsInputSchema, valid: { layer: "L1", status: "activated", q: "route", page: 1 }, invalid: { layer: "L4", limit: 20 } }
   ];
 

@@ -551,17 +551,21 @@ export class MemoryService {
     };
   }
 
-  reloadConfig(_request: MemoryReloadConfigRequest = {}): MemoryReloadConfigResponse {
+  reloadConfig(request: MemoryReloadConfigRequest = {}): MemoryReloadConfigResponse {
     const previousConfig = this.config;
     const loader = this.options.configLoader ?? loadMemmyConfig;
     const nextConfig = cloneMemmyConfig(loader(this.options.configPath).config);
     const changed = stableStringify(previousConfig) !== stableStringify(nextConfig);
     const requiresRestart = stableStringify(previousConfig.storage) !== stableStringify(nextConfig.storage);
+    const reloadedAt = nowIso();
 
     this.config = nextConfig;
     this.llm = createLlmClient(nextConfig.summary, { modelRole: "memory_summary" });
     this.skillLlm = createLlmClient(resolveEvolutionConfig(nextConfig), { modelRole: "memory_evolution" });
     this.embedder = createEmbedder(nextConfig.embedding);
+    if (!requiresRestart && request.restartFailedProcessing !== false) {
+      this.restartFailedProcessing(reloadedAt);
+    }
 
     return {
       activeProfile: this.config.activeProfile,
@@ -572,7 +576,7 @@ export class MemoryService {
         evolution: this.skillLlm.status(),
         embedding: this.embedder.status()
       },
-      reloadedAt: nowIso()
+      reloadedAt
     };
   }
 
@@ -4704,6 +4708,84 @@ export class MemoryService {
     };
   }
 
+  private restartFailedProcessing(at: string, limit = 10000): number {
+    if (!this.memoryAddEnabled()) return 0;
+    let restarted = 0;
+    const failedItems = this.repos.processing.listByStates(["failed"], limit);
+
+    for (const failed of failedItems) {
+      if (!failed.stage || failed.retryAction === "none") continue;
+      const memory = this.repos.memories.get(failed.memoryId);
+      if (!memory) continue;
+
+      if (this.repos.memories.hasVector(memory.id, "vec_summary")) {
+        this.repos.processing.update(memory.id, {
+          state: "ready",
+          stage: null,
+          activeJobId: null,
+          errorCode: null,
+          errorMessage: null,
+          failedAt: null,
+          updatedAt: at
+        }, ["failed"]);
+        continue;
+      }
+
+      if (failed.stage === "embedding" && !this.config.algorithm.capture.embedAfterCapture) {
+        this.repos.processing.update(memory.id, {
+          state: "ready_text_only",
+          stage: null,
+          activeJobId: null,
+          attemptCount: 0,
+          retryAction: "retry",
+          errorCode: null,
+          errorMessage: null,
+          failedAt: null,
+          updatedAt: at
+        }, ["failed"]);
+        continue;
+      }
+
+      const result = this.repos.transaction(() => {
+        const current = this.repos.processing.get(memory.id);
+        if (!current || current.state !== "failed" || !current.stage || current.retryAction === "none") {
+          return undefined;
+        }
+        const jobType = current.stage === "summary"
+          ? memoryHasImportPipeline(memory) ? "import_summary" : "trace_summary"
+          : "embedding";
+        const job = this.enqueueJob({
+          jobType,
+          userId: memory.userId,
+          sessionId: memory.sessionId,
+          targetMemoryId: memory.id,
+          payload: {
+            source: "memory.processing.lifecycle_retry",
+            previousErrorCode: current.errorCode ?? undefined,
+            contentHash: memory.contentHash
+          },
+          maxAttempts: current.stage === "summary" ? 3 : 6,
+          createdAt: at
+        });
+        const processing = this.repos.processing.save({
+          ...current,
+          state: current.stage === "summary" ? "summary_pending" : "embedding_pending",
+          activeJobId: job.id,
+          attemptCount: 0,
+          retryAction: "retry",
+          errorCode: null,
+          errorMessage: null,
+          failedAt: null,
+          updatedAt: at
+        });
+        return { job, processing };
+      });
+      if (result) restarted += 1;
+    }
+
+    return restarted;
+  }
+
   enqueuePendingImportSummaries(limit = 10000, targetMemoryIds?: readonly string[]): {
     enqueued: number;
     memoryIds: string[];
@@ -4746,6 +4828,7 @@ export class MemoryService {
   reconcileWorkerStartup(limit = 10000): {
     requeuedJobs: number;
     requeuedEmbeddingRetries: number;
+    restartedFailedProcessing: number;
     enqueuedImportSummaries: number;
     enqueuedEmbeddingRepairs: number;
   } {
@@ -4753,6 +4836,7 @@ export class MemoryService {
       return {
         requeuedJobs: 0,
         requeuedEmbeddingRetries: 0,
+        restartedFailedProcessing: 0,
         enqueuedImportSummaries: 0,
         enqueuedEmbeddingRepairs: 0
       };
@@ -4769,6 +4853,7 @@ export class MemoryService {
     for (const { before, after } of embeddingRetries) {
       this.appendEmbeddingRetryChange(after, "queued", before);
     }
+    const restartedFailedProcessing = this.restartFailedProcessing(at, limit);
 
     let enqueuedImportSummaries = 0;
     let enqueuedEmbeddingRepairs = 0;
@@ -4862,6 +4947,7 @@ export class MemoryService {
     return {
       requeuedJobs: interruptedJobs.length + failedJobs.length,
       requeuedEmbeddingRetries: embeddingRetries.length,
+      restartedFailedProcessing,
       enqueuedImportSummaries,
       enqueuedEmbeddingRepairs
     };

@@ -433,6 +433,7 @@ export interface HealthResponse {
 
 export interface MemoryReloadConfigRequest extends RequestEnvelope {
   reason?: string;
+  restartFailedProcessing?: boolean;
 }
 
 export interface MemoryReloadConfigResponse {

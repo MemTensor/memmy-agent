@@ -320,11 +320,16 @@ async function routeRequest(
   if (method === "POST" && path === "/api/v1/admin/reload-config") {
     requireAdminWrite(principal);
     const request = asObject(body, "admin.reload-config") as MemoryReloadConfigRequest;
-    return service.reloadConfig({
+    const result = service.reloadConfig({
       requestId: typeof request.requestId === "string" ? request.requestId : undefined,
       adapterId: typeof request.adapterId === "string" ? request.adapterId : undefined,
-      reason: typeof request.reason === "string" ? request.reason : undefined
+      reason: typeof request.reason === "string" ? request.reason : undefined,
+      restartFailedProcessing: typeof request.restartFailedProcessing === "boolean"
+        ? request.restartFailedProcessing
+        : undefined
     });
+    autoWorker.schedule();
+    return result;
   }
   if (method === "POST" && path === "/api/v1/sessions/open") {
     requireMemoryWrite(principal);

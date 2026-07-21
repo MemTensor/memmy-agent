@@ -232,6 +232,53 @@ describe("MemoryService", () => {
     db.close();
   });
 
+  it("restarts retryable terminal processing failures after model config reload", async () => {
+    const root = mkdtempSync(join(tmpdir(), "mindock-memory-reload-failed-processing-"));
+    roots.push(root);
+    const db = new MemoryDb({ path: join(root, "memory.sqlite") });
+    const service = createTestMemoryService({
+      db,
+      mode: "dev",
+      config: DEFAULT_MEMMY_CONFIG,
+      configLoader: () => ({ config: DEFAULT_MEMMY_CONFIG }),
+      llm: createFailingLlm(),
+      embedder: createCapturingEmbedder([])
+    });
+    const namespace = { source: "hermes", profileId: "default", userId: "reload-failure-user" };
+    const added = addAgentSourceImport(service, namespace, "retry after config reload", "reload-failure");
+    await runWorkerRounds(service, 3, 1);
+    expect(service.memoryProcessingStatus([added.id], { namespace }).items[0]?.state).toBe("failed");
+
+    service.reloadConfig({
+      reason: "manual_processing_retry",
+      restartFailedProcessing: false
+    });
+    expect(service.memoryProcessingStatus([added.id], { namespace }).items[0]?.state).toBe("failed");
+
+    service.reloadConfig({ reason: "model_settings_saved" });
+
+    expect(service.memoryProcessingStatus([added.id], { namespace }).items[0]).toMatchObject({
+      state: "summary_pending",
+      stage: "summary",
+      attemptCount: 0,
+      errorCode: null,
+      errorMessage: null,
+      failedAt: null
+    });
+    const jobs = db.db.prepare(
+      `SELECT status, attempts
+       FROM evolution_jobs
+       WHERE target_memory_id = ? AND job_type = 'import_summary'
+       ORDER BY created_at ASC, id ASC`
+    ).all(added.id) as Array<{ status: string; attempts: number }>;
+    expect(jobs).toEqual([
+      { status: "dead_letter", attempts: 3 },
+      { status: "queued", attempts: 0 }
+    ]);
+
+    db.close();
+  });
+
   it("generates semantic ids for future memory writes", () => {
     const { service } = createTestService();
     const namespace = {
@@ -12723,7 +12770,7 @@ describe("MemoryService", () => {
     db.close();
   });
 
-  it("reconciles interrupted and missing processing jobs while preserving terminal failures on startup", async () => {
+  it("reconciles interrupted, missing, and terminally failed processing jobs on startup", async () => {
     const embeddingTexts: string[] = [];
     const { db, service } = createTestService({
       embedder: createCapturingEmbedder(embeddingTexts)
@@ -12791,12 +12838,12 @@ describe("MemoryService", () => {
       server.listen(0, "127.0.0.1", resolve);
     });
 
-    const repairedMemoryIds = [interruptedMemory.id, orphanMemory.id];
+    const repairedMemoryIds = [interruptedMemory.id, failedMemory.id, orphanMemory.id];
     await waitFor(() => {
       const row = db.db.prepare(
         `SELECT COUNT(*) AS count
          FROM memory_vector_entries
-         WHERE memory_id IN (?, ?)
+         WHERE memory_id IN (?, ?, ?)
            AND vector_field = 'vec_summary'`
       ).get(...repairedMemoryIds) as { count: number };
       return row.count === repairedMemoryIds.length;
@@ -12804,12 +12851,16 @@ describe("MemoryService", () => {
 
     expect(repos.runtime.getJob(interruptedJob!.id)?.status).toBe("succeeded");
     expect(repos.processing.get(interruptedMemory.id)?.state).toBe("ready");
+    expect(repos.processing.get(failedMemory.id)?.state).toBe("ready");
     expect(repos.processing.get(orphanMemory.id)?.state).toBe("ready");
-    expect(repos.processing.get(failedMemory.id)).toMatchObject({
-      state: "failed",
-      errorMessage: "previous embedding worker failed"
-    });
-    expect(repos.memories.hasVector(failedMemory.id, "vec_summary")).toBe(false);
+    expect(repos.memories.hasVector(failedMemory.id, "vec_summary")).toBe(true);
+    const failedMemoryJobs = db.db.prepare(
+      `SELECT status
+       FROM evolution_jobs
+       WHERE target_memory_id = ? AND job_type = 'embedding'
+       ORDER BY created_at ASC, id ASC`
+    ).all(failedMemory.id) as Array<{ status: string }>;
+    expect(failedMemoryJobs.map((job) => job.status)).toEqual(["dead_letter", "succeeded"]);
 
     await new Promise<void>((resolve) => server.close(() => resolve()));
     db.close();

@@ -237,7 +237,8 @@ export const MemoryHealthSnapshotSchema = z.object({
 export type MemoryHealthSnapshot = z.infer<typeof MemoryHealthSnapshotSchema>;
 
 export const MemoryReloadConfigInputSchema = RuntimeRequestFieldsSchema.extend({
-  reason: z.string().optional()
+  reason: z.string().optional(),
+  restartFailedProcessing: z.boolean().optional()
 });
 export type MemoryReloadConfigInput = z.infer<typeof MemoryReloadConfigInputSchema>;
 
