@@ -38,6 +38,14 @@ export interface DesktopUpdateDownloadOptions {
   openInstaller?: boolean;
 }
 
+export interface DesktopUpdateDownloadProgress {
+  downloadUrl: string;
+  filePath: string;
+  transferredBytes: number;
+  totalBytes: number | null;
+  percent: number | null;
+}
+
 export interface DesktopUpdateInstallResult {
   filePath: string;
   opened: boolean;

@@ -6,15 +6,16 @@ import type {
   DesktopImageSaveResult,
   DesktopRuntimeConfig,
   DesktopUpdateCheckResult,
+  DesktopUpdateDownloadProgress,
   DesktopUpdateDownloadOptions,
   DesktopUpdateInstallResult,
   DesktopUpdateMode,
   MicrophoneAccessStatus
 } from "@memmy/desktop-interface";
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, screen, shell, systemPreferences, Tray, type Event as ElectronEvent, type FileFilter, type IpcMainEvent, type MenuItemConstructorOptions, type Rectangle } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, screen, shell, systemPreferences, Tray, type Event as ElectronEvent, type FileFilter, type IpcMainEvent, type MenuItemConstructorOptions, type Rectangle, type WebContents } from "electron";
 import { spawn } from "node:child_process";
-import { constants as fsConstants, existsSync, readFileSync } from "node:fs";
-import { access, appendFile, chmod, copyFile, lstat, mkdir, readFile, readdir, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
+import { constants as fsConstants, existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { access, appendFile, chmod, copyFile, lstat, mkdir, open, readFile, readdir, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
 import YAML from "yaml";
@@ -122,6 +123,7 @@ const SINGLE_INSTANCE_LOCK_WAIT_DEADLINE_MS = 10000;
 const SECOND_INSTANCE_ACTIVATE_DEBOUNCE_MS = 3000;
 const MACOS_STALE_REOPEN_QUIT_GRACE_MS = 20000;
 const MAIN_WINDOW_ROUTE_TARGET_CHANNEL = "memmy:route-target-request";
+const UPDATE_DOWNLOAD_PROGRESS_CHANNEL = "memmy:update-download-progress";
 const PREPARED_REQUIRED_UPDATE_FILE = "prepared-required-update.json";
 const WINDOWS_UPDATE_PROMPT_LANGUAGE_FILE = "update-prompt-language.txt";
 const WINDOWS_APP_USER_MODEL_ID = "cn.memtensor.memmy";
@@ -670,7 +672,7 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle("memmy:check-for-updates", async () => checkForUpdates());
 
-  ipcMain.handle("memmy:download-update", async (_event, update: DesktopUpdateCheckResult, options?: DesktopUpdateDownloadOptions) => downloadUpdate(update, options));
+  ipcMain.handle("memmy:download-update", async (event, update: DesktopUpdateCheckResult, options?: DesktopUpdateDownloadOptions) => downloadUpdate(update, options, event.sender));
   ipcMain.handle("memmy:open-update-installer", async (_event, filePath: string) => openUpdateInstaller(filePath));
 
   ipcMain.handle("memmy:openExternal", async (_event, url: string) => {
@@ -1694,7 +1696,11 @@ async function resolvePreparedUpdatePackagePath(downloadUrl: string, latestVersi
  * @param update The update check result.
  * @returns The installer package's local path and open state.
  */
-async function downloadUpdate(update: DesktopUpdateCheckResult, options: DesktopUpdateDownloadOptions = {}): Promise<DesktopUpdateInstallResult> {
+async function downloadUpdate(
+  update: DesktopUpdateCheckResult,
+  options: DesktopUpdateDownloadOptions = {},
+  progressTarget?: WebContents
+): Promise<DesktopUpdateInstallResult> {
   if (update.status !== "available" || !update.downloadUrl) {
     throw new Error("no update package is available");
   }
@@ -1708,7 +1714,7 @@ async function downloadUpdate(update: DesktopUpdateCheckResult, options: Desktop
   const updatesDirectory = resolveUpdatesDirectory();
   await mkdir(updatesDirectory, { recursive: true });
   const filePath = join(updatesDirectory, resolveUpdatePackageFileName(downloadUrl, update.latestVersion));
-  await writeFile(filePath, Buffer.from(await response.arrayBuffer()));
+  await downloadUpdatePackageToFile(response, filePath, downloadUrl, progressTarget);
 
   if (options.openInstaller === false) {
     await stageMacDmgUpdatePackage(filePath).catch(async (error) => {
@@ -1723,6 +1729,119 @@ async function downloadUpdate(update: DesktopUpdateCheckResult, options: Desktop
   }
 
   return openUpdateInstaller(filePath);
+}
+
+async function downloadUpdatePackageToFile(
+  response: Response,
+  filePath: string,
+  downloadUrl: string,
+  progressTarget?: WebContents
+): Promise<void> {
+  const temporaryFilePath = `${filePath}.download`;
+  const totalBytes = readDownloadContentLength(response.headers);
+  let transferredBytes = 0;
+  let lastPublishedAt = 0;
+  let lastPublishedPercent: number | null = null;
+
+  const publishProgress = (force = false) => {
+    const progress = createUpdateDownloadProgress(downloadUrl, filePath, transferredBytes, totalBytes);
+    const now = Date.now();
+    if (!force && now - lastPublishedAt < 100 && progress.percent === lastPublishedPercent) {
+      return;
+    }
+
+    lastPublishedAt = now;
+    lastPublishedPercent = progress.percent;
+    emitUpdateDownloadProgress(progressTarget, progress);
+  };
+
+  await removeFileIfExists(temporaryFilePath);
+  publishProgress(true);
+
+  try {
+    if (!response.body) {
+      const buffer = Buffer.from(await response.arrayBuffer());
+      transferredBytes = buffer.byteLength;
+      await writeFile(temporaryFilePath, buffer);
+      publishProgress(true);
+    } else {
+      const reader = response.body.getReader();
+      const fileHandle = await open(temporaryFilePath, "w");
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) {
+            break;
+          }
+          if (!value) {
+            continue;
+          }
+
+          await fileHandle.write(value);
+          transferredBytes += value.byteLength;
+          publishProgress();
+        }
+      } finally {
+        reader.releaseLock();
+        await fileHandle.close().catch(() => undefined);
+      }
+      publishProgress(true);
+    }
+
+    await removeFileIfExists(filePath);
+    await rename(temporaryFilePath, filePath);
+  } catch (error) {
+    await removeFileIfExists(temporaryFilePath).catch(() => undefined);
+    throw error;
+  }
+}
+
+function readDownloadContentLength(headers: Headers): number | null {
+  const value = headers.get("content-length");
+  if (!value) {
+    return null;
+  }
+
+  const bytes = Number.parseInt(value, 10);
+  return Number.isSafeInteger(bytes) && bytes > 0 ? bytes : null;
+}
+
+function createUpdateDownloadProgress(
+  downloadUrl: string,
+  filePath: string,
+  transferredBytes: number,
+  totalBytes: number | null
+): DesktopUpdateDownloadProgress {
+  const safeTransferredBytes = Math.max(0, Math.round(transferredBytes));
+  const safeTotalBytes = totalBytes && totalBytes > 0 ? Math.round(totalBytes) : null;
+  return {
+    downloadUrl,
+    filePath,
+    transferredBytes: safeTransferredBytes,
+    totalBytes: safeTotalBytes,
+    percent: safeTotalBytes
+      ? Math.min(100, Math.max(0, Math.round((safeTransferredBytes / safeTotalBytes) * 100)))
+      : null
+  };
+}
+
+function emitUpdateDownloadProgress(
+  progressTarget: WebContents | undefined,
+  progress: DesktopUpdateDownloadProgress
+): void {
+  if (!progressTarget || progressTarget.isDestroyed()) {
+    return;
+  }
+
+  progressTarget.send(UPDATE_DOWNLOAD_PROGRESS_CHANNEL, progress);
+}
+
+async function removeFileIfExists(filePath: string): Promise<void> {
+  await unlink(filePath).catch((error: unknown) => {
+    if (!isMissingFileError(error)) {
+      throw error;
+    }
+  });
 }
 
 /**

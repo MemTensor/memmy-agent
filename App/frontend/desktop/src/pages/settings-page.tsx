@@ -1679,6 +1679,9 @@ export function SettingsPageView(props: SettingsPageViewProps) {
                 {t(update.feedback.key, update.feedback.values)}
               </div>
             )}
+            {update.phase === "downloading" && (
+              <UpdateDownloadProgress progress={update.downloadProgress} t={t} />
+            )}
           </div>
         </Section>
 
@@ -2159,6 +2162,78 @@ function UsageStatusLabel(props: { status: UsageLoadStatus; updatedAt: string | 
     return <span className={usageStyles.updated}>{t("settings.token.updatedAt", { value: formatUsageUpdatedAt(props.updatedAt) })}</span>;
   }
   return null;
+}
+
+interface UpdateDownloadProgressProps {
+  progress: UpdateCoordinatorValue["downloadProgress"];
+  t: SettingsTranslate;
+}
+
+function UpdateDownloadProgress(props: UpdateDownloadProgressProps) {
+  const percent = props.progress?.percent ?? null;
+  const displayPercent = percent ?? 28;
+  const progressText = resolveUpdateDownloadProgressText(props.progress, props.t);
+  const fillStyle = { width: `${displayPercent}%` } satisfies CSSProperties;
+
+  return (
+    <div className="w-full max-w-sm space-y-1.5">
+      <div
+        className="h-1.5 w-full overflow-hidden rounded-pill bg-action-sky/10"
+        role="progressbar"
+        aria-label={props.t("settings.about.downloadProgressLabel")}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={percent ?? undefined}
+        aria-valuetext={progressText}
+      >
+        <div
+          className={`h-full rounded-pill bg-action-sky transition-[width] duration-200 ease-out ${percent === null ? "animate-pulse" : ""}`}
+          style={fillStyle}
+        />
+      </div>
+      <div className="text-[11px] text-text-ink/45">{progressText}</div>
+    </div>
+  );
+}
+
+function resolveUpdateDownloadProgressText(
+  progress: UpdateCoordinatorValue["downloadProgress"],
+  t: SettingsTranslate
+): string {
+  if (!progress) {
+    return t("settings.about.downloadProgressStarting");
+  }
+  if (progress.percent !== null && progress.totalBytes !== null) {
+    return t("settings.about.downloadProgressSize", {
+      percent: progress.percent,
+      downloaded: formatUpdateDownloadBytes(progress.transferredBytes),
+      total: formatUpdateDownloadBytes(progress.totalBytes)
+    });
+  }
+  if (progress.percent !== null) {
+    return t("settings.about.downloadProgressPercent", { percent: progress.percent });
+  }
+  if (progress.transferredBytes > 0) {
+    return t("settings.about.downloadProgressBytes", { downloaded: formatUpdateDownloadBytes(progress.transferredBytes) });
+  }
+  return t("settings.about.downloadProgressStarting");
+}
+
+function formatUpdateDownloadBytes(bytes: number): string {
+  const safeBytes = Math.max(0, Math.round(bytes));
+  if (safeBytes < 1024) {
+    return `${safeBytes} B`;
+  }
+
+  const units = ["KB", "MB", "GB"] as const;
+  let value = safeBytes / 1024;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+
+  return `${value.toFixed(1)} ${units[unitIndex]}`;
 }
 
 /** Resolves the label for the app-level update state. */
