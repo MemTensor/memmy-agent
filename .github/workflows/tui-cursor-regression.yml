@@ -1,0 +1,32 @@
+name: TUI cursor regression
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  cursor-position:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: App/memmy-agent
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: App/memmy-agent/package-lock.json
+      - name: Verify shared project version
+        run: npm --prefix ../.. run version:check
+      - name: Install dependencies
+        run: npm ci
+      - name: Protect fullscreen cursor alignment
+        run: npm run test:tui-cursor

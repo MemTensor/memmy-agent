@@ -1811,7 +1811,8 @@ button {
   padding: 12px 16px 4px;
 }
 
-.agent-composer-input--single {
+/* Keep this more specific than `.agent-composer-shell textarea` above so its generic line-height cannot shift the caret. */
+.agent-composer-shell textarea.agent-composer-input--single {
   height: 52px;
   padding-top: 14px;
   padding-bottom: 14px;

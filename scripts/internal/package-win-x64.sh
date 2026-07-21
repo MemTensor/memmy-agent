@@ -71,6 +71,7 @@ resolve_electron_dist() {
   fi
 }
 
+node "$ROOT_DIR/scripts/sync-project-version.mjs"
 DESKTOP_VERSION="${MEMMY_DESKTOP_VERSION:-$(read_package_version "$DESKTOP_DIR/package.json")}"
 configure_npm_script_shell
 
@@ -216,13 +217,15 @@ install_better_sqlite3_prebuild_with_download_fallback() {
 }
 
 create_memory_runtime_manifest() {
-  node - "$MEMORY_DIR/package.json" "$RUNTIME_DIR/memory/package.json" <<'NODE'
+  node - "$ROOT_DIR/package.json" "$MEMORY_DIR/package.json" "$RUNTIME_DIR/memory/package.json" <<'NODE'
 const { readFileSync, writeFileSync } = require("node:fs");
 
-const [sourcePackagePath, runtimePackagePath] = process.argv.slice(2);
+const [projectPackagePath, sourcePackagePath, runtimePackagePath] = process.argv.slice(2);
+const projectPackage = JSON.parse(readFileSync(projectPackagePath, "utf8"));
 const sourcePackage = JSON.parse(readFileSync(sourcePackagePath, "utf8"));
 const runtimePackage = {
   name: "@memmy/packaged-memory-runtime",
+  version: projectPackage.version,
   private: true,
   type: "module",
   dependencies: sourcePackage.dependencies ?? {}

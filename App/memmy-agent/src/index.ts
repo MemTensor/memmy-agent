@@ -19,4 +19,4 @@ export * as session from "./core/session/index.js";
 export * as utils from "./utils/index.js";
 export * as frontendBridge from "./entrypoints/frontend-bridge/index.js";
 
-export const version = "0.0.1-beta.1";
+export { VERSION, VERSION as version } from "./version.js";

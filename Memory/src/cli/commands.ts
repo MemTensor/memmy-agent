@@ -15,10 +15,10 @@ import { sendRequest, type CliRequest, type CliRequestOptions } from "./http.js"
 import { renderCliOutput } from "./render/index.js";
 import { initMemoryCli, installMemoryCli } from "./setup.js";
 import { DEFAULT_MEMORY_URL, loadCliMemoryConfig } from "./config.js";
+import { PROJECT_VERSION } from "./project-version.js";
 
 type Method = "GET" | "POST" | "DELETE";
 const CLI_NAME = "memmy-memory";
-const CLI_VERSION = "0.0.1-beta.1";
 const COMPACT_GET_TOOL_FIELD_CHARS = 1200;
 
 export interface CommandContext {
@@ -35,7 +35,7 @@ export async function runCommand(context: CommandContext): Promise<unknown> {
     return helpText();
   }
   if (hasOption(options, "version") || hasOption(options, "v")) {
-    return `${CLI_NAME} ${CLI_VERSION}`;
+    return PROJECT_VERSION;
   }
   if (words.length === 0 || words[0] === "help") {
     return helpText();
@@ -522,7 +522,7 @@ function removeUndefined(value: unknown): void {
 
 function helpText(): string {
   return [
-    `${CLI_NAME} ${CLI_VERSION}`,
+    `${CLI_NAME} ${PROJECT_VERSION}`,
     "",
     "Usage:",
     `  ${CLI_NAME} <command> [options]`,

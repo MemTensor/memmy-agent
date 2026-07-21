@@ -34,6 +34,7 @@ import type {
   TurnCompleteRequest,
   TurnStartRequest
 } from "../types.js";
+import { PROJECT_VERSION } from "../cli/project-version.js";
 import { DEFAULT_NAMESPACE_SOURCE } from "../types.js";
 import { MemoryServiceError } from "../utils/error.js";
 import { newId, stableHash, stableStringify } from "../utils/id.js";
@@ -501,7 +502,7 @@ export class MemoryService {
     const backend = this.storageCapabilities();
     return {
       ok: true,
-      version: "0.1.0",
+      version: PROJECT_VERSION,
       uptimeMs: Date.now() - this.startedAt,
       mode: this.mode,
       activeProfile: this.config.activeProfile,
@@ -634,7 +635,7 @@ export class MemoryService {
     const namespace = normalizeNamespace(request.namespace);
     return {
       adapterId: request.adapterId ?? "anonymous",
-      serviceVersion: "0.1.0",
+      serviceVersion: PROJECT_VERSION,
       acceptedCapabilities: {
         lifecycle: request.capabilities?.lifecycle ?? true,
         tools: request.capabilities?.tools ?? true,
