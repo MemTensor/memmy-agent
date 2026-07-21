@@ -54,24 +54,28 @@ describe("GitHub release workflow", () => {
   });
 
   it("keeps merged fork code out of the trusted release checkout", () => {
-    const checkout = steps.find((step) => step.name === "Check out trusted main history");
+    const checkout = steps.find((step) => step.name === "Check out trusted base history");
     expect(checkout?.uses).toBe("actions/checkout@v4");
-    expect(checkout?.with).toEqual(
-      expect.objectContaining({
-        ref: "main",
-        "fetch-depth": 0,
-        "persist-credentials": false,
-      }),
-    );
-    expect(JSON.stringify(checkout?.with)).not.toContain("target_sha");
+    expect(checkout?.with).toEqual({
+      "fetch-depth": 0,
+      "persist-credentials": false,
+    });
+    expect(checkout?.with).not.toHaveProperty("ref");
+    expect(JSON.stringify(checkout)).not.toContain("github.event.pull_request");
+    expect(source).not.toContain("refs/pull/");
     expect(source).not.toContain("allow-unsafe-pr-checkout");
 
     const verifyScript = script("Verify target is on main");
-    expect(verifyScript).toContain("refs/heads/main:refs/remotes/origin/main");
+    expect(verifyScript).toContain("git fetch --no-tags origin main");
     expect(verifyScript).toContain('git cat-file -e "$TARGET_SHA^{commit}"');
-    expect(verifyScript).toContain(
-      'git merge-base --is-ancestor "$TARGET_SHA" refs/remotes/origin/main',
-    );
+    const ancestorCheck = 'git merge-base --is-ancestor "$TARGET_SHA" origin/main';
+    const detachTarget = 'git checkout --detach "$TARGET_SHA"';
+    const verifyHead = 'test "$(git rev-parse HEAD)" = "$TARGET_SHA"';
+    expect(verifyScript).toContain(ancestorCheck);
+    expect(verifyScript).toContain(detachTarget);
+    expect(verifyScript).toContain(verifyHead);
+    expect(verifyScript.indexOf(detachTarget)).toBeGreaterThan(verifyScript.indexOf(ancestorCheck));
+    expect(verifyScript.indexOf(verifyHead)).toBeGreaterThan(verifyScript.indexOf(detachTarget));
 
     const notesScript = script("Build release notes");
     expect(notesScript).toContain('manual_object="${TARGET_SHA}:${manual_notes}"');

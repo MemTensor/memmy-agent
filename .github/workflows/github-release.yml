@@ -84,10 +84,9 @@ jobs:
             exit 1
           fi
 
-      - name: Check out trusted main history
+      - name: Check out trusted base history
         uses: actions/checkout@v4
         with:
-          ref: main
           fetch-depth: 0
           persist-credentials: false
 
@@ -96,9 +95,11 @@ jobs:
           TARGET_SHA: ${{ steps.release.outputs.target_sha }}
         run: |
           set -euo pipefail
-          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+          git fetch --no-tags origin main
           git cat-file -e "$TARGET_SHA^{commit}"
-          git merge-base --is-ancestor "$TARGET_SHA" refs/remotes/origin/main
+          git merge-base --is-ancestor "$TARGET_SHA" origin/main
+          git checkout --detach "$TARGET_SHA"
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
 
       - name: Download and verify OSS artifacts
         env:
