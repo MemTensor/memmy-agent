@@ -276,7 +276,8 @@ function normalizeSchemaForOpenAI(schema: any): Record<string, any> {
     const nullable = extractNullableBranch(normalized[key]);
     if (nullable) {
       const [branch] = nullable;
-      const { [key]: drop, ...rest } = normalized;
+      const rest = { ...normalized };
+      delete rest[key];
       normalized = { ...rest, ...branch, nullable: true };
       break;
     }
@@ -581,13 +582,17 @@ export async function connectMcpServers(
         for (const resource of resources?.resources ?? []) {
           registry.register(new MCPResourceWrapper(liveSession, name, resource, cfgValue(cfg, "tool_timeout", "toolTimeout") ?? 30));
         }
-      } catch {}
+      } catch {
+        // Resource discovery is optional for MCP servers that do not implement it.
+      }
       try {
         const prompts = await liveSession.listPrompts?.();
         for (const prompt of prompts?.prompts ?? []) {
           registry.register(new MCPPromptWrapper(liveSession, name, prompt, cfgValue(cfg, "tool_timeout", "toolTimeout") ?? 30));
         }
-      } catch {}
+      } catch {
+        // Prompt discovery is optional for MCP servers that do not implement it.
+      }
       stacks[name] = {
         close: async () => {
           for (const close of closers.reverse()) await close().catch(() => undefined);

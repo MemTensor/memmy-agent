@@ -285,7 +285,6 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
   useEffect(() => {
     const timeout = window.setTimeout(() => void refresh().catch(() => undefined), 180);
     return () => window.clearTimeout(timeout);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.client, query, sourceAgent, page, t]);
 
   useEffect(() => {
@@ -295,7 +294,6 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
 
     const timeout = window.setTimeout(() => void refresh(page, sourceAgent, { useCache: false }).catch(() => undefined), PROCESSING_REFRESH_INTERVAL_MS);
     return () => window.clearTimeout(timeout);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state, props.client, query, sourceAgent, page, t]);
 
   useEffect(() => {
@@ -304,7 +302,6 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
     }
     const interval = window.setInterval(() => void refresh(page, sourceAgent, { useCache: false }).catch(() => undefined), MEMORIES_REFRESH_INTERVAL_MS);
     return () => window.clearInterval(interval);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.client, query, sourceAgent, page, t]);
 
   return (
