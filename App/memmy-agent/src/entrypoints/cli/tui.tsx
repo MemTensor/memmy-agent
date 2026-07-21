@@ -5,6 +5,8 @@ import { AgentLoop } from "../../core/agent-runtime/loop.js";
 import { Config } from "../../config/schema.js";
 import { getConfigPath, getWorkspacePath } from "../../config/paths.js";
 import { withProgressCapabilities } from "../../utils/progress-events.js";
+import { VERSION } from "../../version.js";
+import { resolveComposerCursorPosition, type ComposerLayout } from "./tui-cursor.js";
 
 type TuiMessageRole = "assistant" | "progress" | "system" | "user";
 
@@ -529,12 +531,17 @@ function absolutePosition(node: any): { x: number; y: number } | null {
   return { x, y };
 }
 
-function renderedTextPosition(node: any): { x: number; y: number } | null {
+function renderedTextLayout(node: any): ComposerLayout | null {
   const base = absolutePosition(node);
   if (!base) return null;
   const firstTextNode = node?.childNodes?.find((child: any) => child?.yogaNode);
+  let root = node;
+  while (root?.parentNode) root = root.parentNode;
+  const outputHeight = root?.yogaNode?.getComputedHeight?.();
+  if (!Number.isFinite(outputHeight)) return null;
 
   return {
+    outputHeight,
     x: base.x + (firstTextNode?.yogaNode?.getComputedLeft?.() ?? 0),
     y: base.y + (firstTextNode?.yogaNode?.getComputedTop?.() ?? 0),
   };
@@ -545,12 +552,14 @@ function ComposerInput({
   columns,
   cursor,
   placeholder,
+  rows,
   value,
 }: {
   active: boolean;
   columns: number;
   cursor: number;
   placeholder: string;
+  rows: number;
   value: string;
 }) {
   const rowRef = useRef<any>(null);
@@ -559,24 +568,24 @@ function ComposerInput({
   const safeCursor = snapCursor(value, cursor);
   const beforeCursor = value.slice(0, safeCursor);
   const afterCursor = value.slice(safeCursor);
-  const [basePosition, setBasePosition] = useState<{ x: number; y: number } | undefined>(undefined);
-  const rowWidth = Math.max(1, columns - (basePosition?.x ?? 0));
+  const [layout, setLayout] = useState<ComposerLayout | undefined>(undefined);
+  const rowWidth = Math.max(1, columns - (layout?.x ?? 0));
   const cursorCells = stringWidth(prompt + beforeCursor);
-  const cursorPosition = basePosition
-    ? {
-        x: basePosition.x + (cursorCells % rowWidth),
-        y: basePosition.y + Math.floor(cursorCells / rowWidth),
-      }
+  const cursorPosition = layout
+    ? resolveComposerCursorPosition({ cursorCells, layout, rowWidth, terminalRows: rows })
     : undefined;
 
   setCursorPosition(active ? cursorPosition : undefined);
 
   useEffect(() => {
-    const base = renderedTextPosition(rowRef.current);
-    if (!base) return;
-    const nextBasePosition = { x: base.x, y: base.y };
-    setBasePosition((previous) =>
-      previous?.x === nextBasePosition.x && previous.y === nextBasePosition.y ? previous : nextBasePosition,
+    const nextLayout = renderedTextLayout(rowRef.current);
+    if (!nextLayout) return;
+    setLayout((previous) =>
+      previous?.x === nextLayout.x &&
+      previous.y === nextLayout.y &&
+      previous.outputHeight === nextLayout.outputHeight
+        ? previous
+        : nextLayout,
     );
   });
 
@@ -851,7 +860,7 @@ function StatusRule({
 
 function MemmyTui({ config, registerCleanup, sessionId, toolsets, version }: TuiProps) {
   const { exit } = useApp();
-  const { columns } = useTerminalSize();
+  const { columns, rows } = useTerminalSize();
   const activeLoopRef = useRef<AgentLoop | null>(null);
   const activeAssistantIdRef = useRef<number | null>(null);
   const idRef = useRef(1);
@@ -1124,6 +1133,7 @@ function MemmyTui({ config, registerCleanup, sessionId, toolsets, version }: Tui
           columns={columns}
           cursor={inputCursor}
           placeholder={inputPlaceholder}
+          rows={rows}
           value={input}
         />
         <Text color={PALETTE.line}>{repeated("─", ruleWidth)}</Text>
@@ -1132,7 +1142,7 @@ function MemmyTui({ config, registerCleanup, sessionId, toolsets, version }: Tui
   );
 }
 
-export async function runInkInteractiveAgent(config: Config, sessionId = "cli:direct", version = "0.0.0"): Promise<null> {
+export async function runInkInteractiveAgent(config: Config, sessionId = "cli:direct"): Promise<null> {
   if (!process.stdin.isTTY) return null;
   const toolsets = readToolsets(config);
   let cleanup: TuiCleanup = async () => undefined;
@@ -1142,7 +1152,7 @@ export async function runInkInteractiveAgent(config: Config, sessionId = "cli:di
 
   process.stdout.write("\x1b[2J\x1b[H\x1b[3J");
   const instance = render(
-    <MemmyTui config={config} registerCleanup={registerCleanup} sessionId={sessionId} toolsets={toolsets} version={version} />,
+    <MemmyTui config={config} registerCleanup={registerCleanup} sessionId={sessionId} toolsets={toolsets} version={VERSION} />,
     { exitOnCtrlC: false, maxFps: 60 },
   );
 

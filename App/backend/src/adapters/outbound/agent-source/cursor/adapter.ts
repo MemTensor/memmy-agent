@@ -1,6 +1,7 @@
 /** Adapter module. */
 import { access } from "node:fs/promises";
 import { resolveCursorDataPaths } from "../../agent-paths.js";
+import { collectConversationWindow, remainingMessageCapacity } from "../conversation-window.js";
 import { redactSecrets } from "../secret-redactor.js";
 import type { ConversationMessage, ScanOptions, SourceAdapter, SourceDescriptor } from "../types.js";
 import { readCursorVscdb, type RawCursorMessage } from "./vscdb-reader.js";
@@ -83,15 +84,14 @@ export function createCursorSourceAdapter(deps: CreateCursorSourceAdapterDeps = 
           message: target.storageHash
         });
 
-        for await (const rawMessage of readCursorVscdb(target.stateDbPath)) {
+        const messages = await collectConversationWindow(
+          readCursorVscdb(target.stateDbPath),
+          options.since,
+          options.signal,
+          remainingMessageCapacity(options.maxMessages, emittedMessages)
+        );
+        for (const rawMessage of messages) {
           throwIfAborted(options.signal);
-          if (limitReached(emittedMessages, options.maxMessages)) {
-            break;
-          }
-          if (options.since && rawMessage.createdAt < options.since) {
-            continue;
-          }
-
           options.onProgress?.({
             sourceId: descriptor.sourceId,
             phase: "redact",

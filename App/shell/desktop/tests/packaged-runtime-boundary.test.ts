@@ -6,6 +6,7 @@ const mainSourcePath = fileURLToPath(new URL("../src/main/main.ts", import.meta.
 const preloadSourcePath = fileURLToPath(new URL("../src/preload/preload.cts", import.meta.url));
 const runtimeServicesPath = fileURLToPath(new URL("../src/main/runtime-services.ts", import.meta.url));
 const devStartPath = fileURLToPath(new URL("../../../../scripts/dev-start.sh", import.meta.url));
+const devMemorySupervisorPath = fileURLToPath(new URL("../../../../scripts/internal/dev-memory-supervisor.mjs", import.meta.url));
 const clearAllPath = fileURLToPath(new URL("../../../../scripts/clear-all.sh", import.meta.url));
 const packageMacDmgPath = fileURLToPath(new URL("../../../../scripts/internal/package-mac-dmg.sh", import.meta.url));
 const signedMacArm64PackagePath = fileURLToPath(
@@ -359,6 +360,20 @@ describe("desktop packaged runtime boundaries", () => {
     expect(packageSource).not.toContain("/usr/local/bin when writable");
   });
 
+  it("restarts the Memory process through the desktop bridge", () => {
+    const mainSource = readFileSync(mainSourcePath, "utf8");
+    const preloadSource = readFileSync(preloadSourcePath, "utf8");
+    const runtimeSource = readFileSync(runtimeServicesPath, "utf8");
+
+    expect(preloadSource).toContain("restartMemoryService(): Promise<DesktopMemoryServiceRestartResult>;");
+    expect(preloadSource).toContain('ipcRenderer.invoke("memmy:restart-memory-service")');
+    expect(mainSource).toContain('ipcMain.handle("memmy:restart-memory-service"');
+    expect(mainSource).toContain('ipcMain.removeHandler("memmy:restart-memory-service")');
+    expect(mainSource).toContain("await runtimeServices.restartMemory()");
+    expect(runtimeSource).toContain("restartManagedMemoryService");
+    expect(runtimeSource).toContain("/api/v1/admin/shutdown");
+  });
+
   it("keeps packaged agent CLI installation on memmy only", () => {
     const mainSource = readFileSync(mainSourcePath, "utf8");
     const packageSource = readFileSync(packageMacDmgPath, "utf8");
@@ -662,6 +677,7 @@ describe("desktop packaged runtime boundaries", () => {
 
   it("exports shared config and workspace paths from dev-start", () => {
     const source = readFileSync(devStartPath, "utf8");
+    const supervisorSource = readFileSync(devMemorySupervisorPath, "utf8");
     const nativeRebuildIndex = source.indexOf("npm rebuild better-sqlite3");
     const electronRuntimeCheckIndex = source.indexOf("ensure_electron_runtime", nativeRebuildIndex);
     const desktopLaunchIndex = source.indexOf("npm run dev -w @memmy/desktop", electronRuntimeCheckIndex);
@@ -680,6 +696,9 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).toContain('const Database = require("better-sqlite3")');
     expect(source).toContain("npm run dev -w @memmy/desktop");
     expect(source).toContain("env -u ELECTRON_RUN_AS_NODE npm run dev -w @memmy/desktop");
+    expect(source).toContain("node scripts/internal/dev-memory-supervisor.mjs");
+    expect(supervisorSource).toContain('["run", "memory:dev"]');
+    expect(supervisorSource).toContain("Memory dev process stopped");
     expect(source).toContain('pgrep -f "/Memmy.app/Contents/MacOS/Memmy"');
     expect(source.match(/lsof -tiTCP:18997/g)).toHaveLength(2);
     expect(source.match(/lsof -tiTCP:18999/g)).toHaveLength(2);
@@ -719,6 +738,7 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).toContain("write_desktop_edition_manifest");
     expect(source).toContain('"signing": "$package_signing"');
     expect(source).toContain("npm run build -w @memmy/memory");
+    expect(source).toContain("npm install --workspace @memmy/frontend-desktop --no-package-lock");
     expect(source).toContain('npm ci --prefix "$AGENT_DIR"');
     expect(source).not.toContain('npm install --prefix "$AGENT_DIR"');
     expect(source).not.toContain('if [ ! -x "$AGENT_DIR/node_modules/.bin/tsc" ]');

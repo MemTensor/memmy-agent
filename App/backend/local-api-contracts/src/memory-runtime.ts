@@ -85,6 +85,32 @@ export const MemoryMetricsSchema = z.object({
 });
 export type MemoryMetrics = z.infer<typeof MemoryMetricsSchema>;
 
+export const MemoryProcessingStateSchema = z.enum([
+  "summary_pending",
+  "summarizing",
+  "embedding_pending",
+  "embedding",
+  "ready",
+  "ready_text_only",
+  "failed"
+]);
+export type MemoryProcessingState = z.infer<typeof MemoryProcessingStateSchema>;
+
+export const MemoryProcessingRecordSchema = z.object({
+  memoryId: NonEmptyStringSchema,
+  state: MemoryProcessingStateSchema,
+  stage: z.enum(["summary", "embedding"]).nullable().optional(),
+  activeJobId: NonEmptyStringSchema.nullable().optional(),
+  attemptCount: z.number().int().nonnegative(),
+  manualRetryCount: z.number().int().nonnegative(),
+  retryAction: z.enum(["retry", "open_settings", "none"]),
+  errorCode: z.string().nullable().optional(),
+  errorMessage: z.string().nullable().optional(),
+  failedAt: IsoTimeSchema.nullable().optional(),
+  updatedAt: IsoTimeSchema
+});
+export type MemoryProcessingRecord = z.infer<typeof MemoryProcessingRecordSchema>;
+
 export const MemoryListItemSchema = z.object({
   id: NonEmptyStringSchema,
   kind: MemoryKindSchema,
@@ -93,6 +119,7 @@ export const MemoryListItemSchema = z.object({
   title: NonEmptyStringSchema,
   summary: z.string(),
   tags: z.array(z.string()),
+  processing: MemoryProcessingRecordSchema.optional(),
   metrics: MemoryMetricsSchema.optional(),
   metadata: UnknownRecordSchema.optional(),
   createdAt: IsoTimeSchema,
@@ -210,7 +237,8 @@ export const MemoryHealthSnapshotSchema = z.object({
 export type MemoryHealthSnapshot = z.infer<typeof MemoryHealthSnapshotSchema>;
 
 export const MemoryReloadConfigInputSchema = RuntimeRequestFieldsSchema.extend({
-  reason: z.string().optional()
+  reason: z.string().optional(),
+  restartFailedProcessing: z.boolean().optional()
 });
 export type MemoryReloadConfigInput = z.infer<typeof MemoryReloadConfigInputSchema>;
 
@@ -487,6 +515,25 @@ export const EnqueueImportSummariesOutputSchema = z.object({
   serverTime: IsoTimeSchema
 });
 export type EnqueueImportSummariesOutput = z.infer<typeof EnqueueImportSummariesOutputSchema>;
+
+export const MemoryProcessingStatusInputSchema = RuntimeRequestFieldsSchema.extend({
+  memoryIds: z.array(NonEmptyStringSchema).max(10_000)
+});
+export type MemoryProcessingStatusInput = z.infer<typeof MemoryProcessingStatusInputSchema>;
+
+export const MemoryProcessingStatusOutputSchema = z.object({
+  items: z.array(MemoryProcessingRecordSchema),
+  serverTime: IsoTimeSchema
+});
+export type MemoryProcessingStatusOutput = z.infer<typeof MemoryProcessingStatusOutputSchema>;
+
+export const RetryMemoryProcessingOutputSchema = z.object({
+  accepted: z.boolean(),
+  processing: MemoryProcessingRecordSchema,
+  job: JobRefSchema.optional(),
+  serverTime: IsoTimeSchema
+});
+export type RetryMemoryProcessingOutput = z.infer<typeof RetryMemoryProcessingOutputSchema>;
 
 /** Schema for panel items input. */
 export const PanelItemsInputSchema = z.object({

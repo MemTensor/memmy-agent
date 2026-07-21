@@ -26,6 +26,8 @@ describe("HttpMemoryClient", () => {
       "/api/v1/memory/:id",
       "/api/v1/worker/run",
       "/api/v1/worker/import-summaries/enqueue",
+      "/api/v1/memory/processing/status",
+      "/api/v1/memory/:id/processing/retry",
       "/api/v1/memory/logs",
       "/api/v1/panel/overview",
       "/api/v1/panel/analysis",
@@ -172,6 +174,31 @@ describe("HttpMemoryClient", () => {
     expect(requestUrls[0]?.searchParams.get("sourceAgent")).toBe("cursor");
     expect(requestUrls[0]?.searchParams.get("page")).toBe("2");
     expect(requestUrls[1]?.searchParams.getAll("excludedSourceAgents")).toEqual(["memmy-agent", "cursor"]);
+  });
+
+  it("limits worker requests to the scan's imported memories", async () => {
+    let requestBody: unknown;
+    const baseUrl = await startServer(async (request, response) => {
+      requestBody = await readJson(request);
+      sendJson(response, {
+        leased: 0,
+        succeeded: 0,
+        failed: 0,
+        jobs: [],
+        embeddingRetries: { leased: 0, succeeded: 0, failed: 0, items: [] },
+        changeSeq: 0,
+        syncCursor: "cursor-0",
+        serverTime: now()
+      });
+    });
+    const client = createHttpMemoryClient({ baseUrl, token: "", timeoutMs: 500, maxRetries: 0 });
+
+    await client.runWorker({ limit: 20, targetMemoryIds: ["memory-a", "memory-b"] });
+
+    expect(requestBody).toEqual({
+      limit: 20,
+      targetMemoryIds: ["memory-a", "memory-b"]
+    });
   });
 
   it("retries 5xx responses and succeeds before max retries is exhausted", async () => {

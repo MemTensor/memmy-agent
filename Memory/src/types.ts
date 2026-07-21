@@ -13,6 +13,30 @@ export type RetrievalMode =
   | "decision_repair"
   | "world_model";
 export type JobStatus = "queued" | "leased" | "succeeded" | "failed" | "dead_letter";
+export type MemoryProcessingState =
+  | "summary_pending"
+  | "summarizing"
+  | "embedding_pending"
+  | "embedding"
+  | "ready"
+  | "ready_text_only"
+  | "failed";
+export type MemoryProcessingStage = "summary" | "embedding";
+export type MemoryProcessingRetryAction = "retry" | "open_settings" | "none";
+
+export interface MemoryProcessingRecord {
+  memoryId: string;
+  state: MemoryProcessingState;
+  stage?: MemoryProcessingStage | null;
+  activeJobId?: string | null;
+  attemptCount: number;
+  manualRetryCount: number;
+  retryAction: MemoryProcessingRetryAction;
+  errorCode?: string | null;
+  errorMessage?: string | null;
+  failedAt?: IsoTime | null;
+  updatedAt: IsoTime;
+}
 export type JobType =
   | "episode_idle_close"
   | "trace_summary"
@@ -159,6 +183,7 @@ export interface MemoryListItem {
   createdAt: IsoTime;
   updatedAt: IsoTime;
   version: number;
+  processing?: MemoryProcessingRecord;
 }
 
 export interface MemoryDetailItem extends MemoryListItem {
@@ -408,6 +433,7 @@ export interface HealthResponse {
 
 export interface MemoryReloadConfigRequest extends RequestEnvelope {
   reason?: string;
+  restartFailedProcessing?: boolean;
 }
 
 export interface MemoryReloadConfigResponse {

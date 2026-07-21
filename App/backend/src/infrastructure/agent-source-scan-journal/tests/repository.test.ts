@@ -111,9 +111,19 @@ describe("agent source scan journal repository", () => {
           discoveredConversations: 1,
           emittedMessages: 2,
           skipped: 0,
+          memoryIds: [],
           errors: [{ conversationId: "scan", reason: "read failed" }]
         }
       ]
+    });
+    expect(journal.findLatestJob()).toEqual({
+      jobId: "job-2",
+      sourceId: "all",
+      mode: undefined,
+      phase: "summarize",
+      messageCount: 0,
+      sourceCount: 0,
+      resultCount: 1
     });
   });
 

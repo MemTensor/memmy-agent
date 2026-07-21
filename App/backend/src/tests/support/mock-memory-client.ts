@@ -215,6 +215,27 @@ export function createMockMemoryClient(options: CreateMockMemoryClientOptions = 
       };
     },
 
+    async getMemoryProcessingStatus() {
+      failIfNeeded();
+      return { items: [], serverTime: now() };
+    },
+
+    async retryMemoryProcessing(memoryId) {
+      failIfNeeded();
+      return {
+        accepted: false,
+        processing: {
+          memoryId,
+          state: "ready" as const,
+          attemptCount: 0,
+          manualRetryCount: 0,
+          retryAction: "retry" as const,
+          updatedAt: now()
+        },
+        serverTime: now()
+      };
+    },
+
     async runWorker() {
       failIfNeeded();
       return {

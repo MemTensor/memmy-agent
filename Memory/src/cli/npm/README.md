@@ -33,10 +33,10 @@ Default binary URL:
 https://memos-test.oss-cn-shanghai.aliyuncs.com/memmy-memory-{version}-{target}.tar.gz
 ```
 
-For the current beta package, the macOS arm64 archive name is:
+For example, a macOS arm64 archive name is:
 
 ```text
-memmy-memory-0.0.1-beta.1-darwin-arm64.tar.gz
+memmy-memory-{version}-darwin-arm64.tar.gz
 ```
 
 If download is skipped, running `memmy-memory` will fail until the binary exists

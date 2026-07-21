@@ -542,7 +542,7 @@ run_main() {
   cd "$ROOT_DIR"
   mkdir -p "$LOG_DIR"
   exec "$CONCURRENTLY_BIN" -k -n memory,agent-api,gateway,frontend,backend -c green,cyan,blue,magenta,yellow \
-    "bash -c 'set -o pipefail; npm run memory:dev 2>&1 | tee .tmp/dev-stack/memory.log'" \
+    "bash -c 'set -o pipefail; node scripts/internal/dev-memory-supervisor.mjs 2>&1 | tee .tmp/dev-stack/memory.log'" \
     "bash -c 'set -o pipefail; bash scripts/dev-start.sh --agent-api 2>&1 | tee .tmp/dev-stack/agent-api.log'" \
     "bash -c 'set -o pipefail; bash scripts/dev-start.sh --gateway 2>&1 | tee .tmp/dev-stack/gateway.log'" \
     "bash -c 'set -o pipefail; npm run dev -w @memmy/frontend-desktop -- --host 127.0.0.1 2>&1 | tee .tmp/dev-stack/frontend.log'" \

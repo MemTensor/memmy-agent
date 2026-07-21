@@ -305,6 +305,14 @@ export function createMemosSqliteMemoryClient(options: CreateMemosSqliteMemoryCl
       return readOnlyOperationUnavailable();
     },
 
+    async getMemoryProcessingStatus() {
+      return readOnlyOperationUnavailable();
+    },
+
+    async retryMemoryProcessing() {
+      return readOnlyOperationUnavailable();
+    },
+
     async runWorker() {
       return readOnlyOperationUnavailable();
     },

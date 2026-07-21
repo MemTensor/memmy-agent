@@ -8,6 +8,8 @@ import type {
   MemoryKind,
   MemoryLayer,
   MemoryListItem,
+  MemoryProcessingRecord,
+  MemoryProcessingState,
   MemoryRow,
   MemoryStatus,
   RecallHit
@@ -46,6 +48,7 @@ const BUNDLE_TABLES = [
   "memory_change_log",
   "evolution_jobs",
   "embedding_retry_queue",
+  "memory_processing_state",
   "runtime_kv",
   "artifacts",
   "audit_logs"
@@ -482,6 +485,10 @@ export class MemoryRepository {
     };
   }
 
+  deleteVector(memoryId: string, vectorField: MemoryVectorField): void {
+    this.vectors.delete(memoryId, vectorField);
+  }
+
   get(id: string): MemoryRow | undefined {
     const row = this.db
       .prepare(`SELECT * FROM memories WHERE id = ? AND deleted_at IS NULL`)
@@ -543,7 +550,11 @@ export class MemoryRepository {
     return this.hydrateMany(rows.map(memoryFromSql));
   }
 
-  listPendingAgentSourceImportSummaries(limit = 10000): MemoryRow[] {
+  listPendingAgentSourceImportSummaries(limit = 10000, targetMemoryIds?: readonly string[]): MemoryRow[] {
+    if (targetMemoryIds && targetMemoryIds.length === 0) return [];
+    const targetClause = targetMemoryIds
+      ? `AND memories.id IN (${targetMemoryIds.map(() => "?").join(", ")})`
+      : "";
     const rows = this.db
       .prepare(
         `SELECT *
@@ -551,13 +562,55 @@ export class MemoryRepository {
          WHERE deleted_at IS NULL
            AND status != 'deleted'
            AND memory_layer = 'L1'
-           AND json_extract(properties_json, '$.internal_info.import_pipeline.status') = 'summary_queued'
+           ${targetClause}
+           AND (
+             json_extract(properties_json, '$.internal_info.plugin_algorithm') LIKE 'memory.add.import_async.%'
+             OR EXISTS (
+               SELECT 1 FROM json_each(memories.tags_json)
+               WHERE lower(json_each.value) = 'agent-source'
+             )
+           )
+           AND EXISTS (
+             SELECT 1 FROM memory_processing_state
+             WHERE memory_processing_state.memory_id = memories.id
+               AND memory_processing_state.state = 'summary_pending'
+           )
            AND NOT EXISTS (
              SELECT 1
              FROM evolution_jobs
              WHERE evolution_jobs.target_memory_id = memories.id
                AND evolution_jobs.job_type = 'import_summary'
                AND evolution_jobs.status IN ('queued', 'leased')
+               AND json_extract(evolution_jobs.payload_json, '$.contentHash') = memories.content_hash
+           )
+         ORDER BY created_at DESC, updated_at DESC, id DESC
+         LIMIT ?`
+      )
+      .all(...(targetMemoryIds ?? []), limit) as MemorySqlRow[];
+    return this.hydrateMany(rows.map(memoryFromSql));
+  }
+
+  listUnprocessedAgentSourceImports(limit = 10000): MemoryRow[] {
+    const rows = this.db
+      .prepare(
+        `SELECT *
+         FROM memories
+         WHERE deleted_at IS NULL
+           AND status != 'deleted'
+           AND memory_layer = 'L1'
+           AND (
+             json_extract(properties_json, '$.internal_info.plugin_algorithm') LIKE 'memory.add.import_async.%'
+             OR EXISTS (
+               SELECT 1 FROM json_each(memories.tags_json)
+               WHERE lower(json_each.value) = 'agent-source'
+             )
+           )
+           AND EXISTS (
+             SELECT 1 FROM memory_processing_state
+             WHERE memory_processing_state.memory_id = memories.id
+               AND memory_processing_state.state IN (
+                 'summary_pending', 'summarizing', 'embedding_pending', 'embedding'
+               )
            )
          ORDER BY created_at DESC, updated_at DESC, id DESC
          LIMIT ?`
@@ -574,10 +627,18 @@ export class MemoryRepository {
          WHERE memories.deleted_at IS NULL
            AND memories.status != 'deleted'
            AND memories.memory_layer = 'L1'
-           AND json_extract(
-             memories.properties_json,
-             '$.internal_info.import_pipeline.status'
-           ) = 'indexing'
+           AND (
+             json_extract(memories.properties_json, '$.internal_info.plugin_algorithm') LIKE 'memory.add.import_async.%'
+             OR EXISTS (
+               SELECT 1 FROM json_each(memories.tags_json)
+               WHERE lower(json_each.value) = 'agent-source'
+             )
+           )
+           AND EXISTS (
+             SELECT 1 FROM memory_processing_state
+             WHERE memory_processing_state.memory_id = memories.id
+               AND memory_processing_state.state = 'embedding_pending'
+           )
            AND NOT EXISTS (
              SELECT 1
              FROM memory_vector_entries
@@ -749,6 +810,16 @@ export class MemoryRepository {
          LIMIT 1`
       )
       .get(...built.params) as { ok: number } | undefined;
+    return Boolean(row);
+  }
+
+  hasVector(memoryId: string, vectorField: MemoryVectorField = "vec_summary"): boolean {
+    const row = this.db.prepare(
+      `SELECT 1 AS ok
+       FROM memory_vector_entries
+       WHERE memory_id = ? AND vector_field = ?
+       LIMIT 1`
+    ).get(memoryId, vectorField) as { ok: number } | undefined;
     return Boolean(row);
   }
 
@@ -937,6 +1008,82 @@ export class MemoryRepository {
       )
       .all(...built.params, ...params, limit) as Array<{ id: string }>;
     return rows.map((row, index) => ({ id: row.id, score: 1 / (index + 1), channel }));
+  }
+}
+
+export class MemoryProcessingRepository {
+  constructor(private readonly db: Database.Database) {}
+
+  get(memoryId: string): MemoryProcessingRecord | undefined {
+    const row = this.db.prepare(
+      `SELECT * FROM memory_processing_state WHERE memory_id = ?`
+    ).get(memoryId) as SqlMemoryProcessingRow | undefined;
+    return row ? memoryProcessingFromSql(row) : undefined;
+  }
+
+  getMany(memoryIds: readonly string[]): MemoryProcessingRecord[] {
+    if (memoryIds.length === 0) return [];
+    const placeholders = memoryIds.map(() => "?").join(", ");
+    const rows = this.db.prepare(
+      `SELECT * FROM memory_processing_state
+       WHERE memory_id IN (${placeholders})`
+    ).all(...memoryIds) as SqlMemoryProcessingRow[];
+    const byId = new Map(rows.map((row) => [row.memory_id, memoryProcessingFromSql(row)]));
+    return memoryIds
+      .map((memoryId) => byId.get(memoryId))
+      .filter((record): record is MemoryProcessingRecord => Boolean(record));
+  }
+
+  listByStates(states: readonly MemoryProcessingState[], limit = 10000): MemoryProcessingRecord[] {
+    if (states.length === 0) return [];
+    const placeholders = states.map(() => "?").join(", ");
+    return (this.db.prepare(
+      `SELECT * FROM memory_processing_state
+       WHERE state IN (${placeholders})
+       ORDER BY updated_at ASC, memory_id ASC
+       LIMIT ?`
+    ).all(...states, limit) as SqlMemoryProcessingRow[]).map(memoryProcessingFromSql);
+  }
+
+  save(record: MemoryProcessingRecord): MemoryProcessingRecord {
+    this.db.prepare(
+      `INSERT INTO memory_processing_state (
+         memory_id, state, stage, active_job_id, attempt_count, manual_retry_count,
+         retry_action, error_code, error_message, failed_at, updated_at
+       ) VALUES (
+         @memoryId, @state, @stage, @activeJobId, @attemptCount, @manualRetryCount,
+         @retryAction, @errorCode, @errorMessage, @failedAt, @updatedAt
+       )
+       ON CONFLICT(memory_id) DO UPDATE SET
+         state = excluded.state,
+         stage = excluded.stage,
+         active_job_id = excluded.active_job_id,
+         attempt_count = excluded.attempt_count,
+         manual_retry_count = excluded.manual_retry_count,
+         retry_action = excluded.retry_action,
+         error_code = excluded.error_code,
+         error_message = excluded.error_message,
+         failed_at = excluded.failed_at,
+         updated_at = excluded.updated_at`
+    ).run({
+      ...record,
+      stage: record.stage ?? null,
+      activeJobId: record.activeJobId ?? null,
+      errorCode: record.errorCode ?? null,
+      errorMessage: record.errorMessage ?? null,
+      failedAt: record.failedAt ?? null
+    });
+    return this.get(record.memoryId) ?? record;
+  }
+
+  update(
+    memoryId: string,
+    patch: Partial<Omit<MemoryProcessingRecord, "memoryId">>,
+    expectedStates?: readonly MemoryProcessingState[]
+  ): MemoryProcessingRecord | undefined {
+    const current = this.get(memoryId);
+    if (!current || (expectedStates && !expectedStates.includes(current.state))) return undefined;
+    return this.save({ ...current, ...patch, memoryId });
   }
 }
 
@@ -1965,7 +2112,14 @@ export class RuntimeRepository {
     return row ? jobFromSql(row) : undefined;
   }
 
-  getPendingJob(targetMemoryId: string, jobType: JobType): EvolutionJobRecord | undefined {
+  getPendingJob(
+    targetMemoryId: string,
+    jobType: JobType,
+    contentHash?: string
+  ): EvolutionJobRecord | undefined {
+    const contentClause = contentHash
+      ? "AND json_extract(payload_json, '$.contentHash') = ?"
+      : "";
     const row = this.db
       .prepare(
         `SELECT *
@@ -1973,15 +2127,16 @@ export class RuntimeRepository {
          WHERE target_memory_id = ?
            AND job_type = ?
            AND status IN ('queued', 'leased')
+           ${contentClause}
          ORDER BY ${evolutionJobOrderSql()}
          LIMIT 1`
       )
-      .get(targetMemoryId, jobType) as SqlJobRow | undefined;
+      .get(targetMemoryId, jobType, ...(contentHash ? [contentHash] : [])) as SqlJobRow | undefined;
     return row ? jobFromSql(row) : undefined;
   }
 
-  hasPendingJob(targetMemoryId: string, jobType: JobType): boolean {
-    return Boolean(this.getPendingJob(targetMemoryId, jobType));
+  hasPendingJob(targetMemoryId: string, jobType: JobType, contentHash?: string): boolean {
+    return Boolean(this.getPendingJob(targetMemoryId, jobType, contentHash));
   }
 
   hasEpisodeJob(episodeId: string, jobType: JobType, statuses: JobStatus[]): boolean {
@@ -2000,9 +2155,19 @@ export class RuntimeRepository {
     return Boolean(row);
   }
 
-  leaseQueuedJobs(limit = 10, leaseSeconds = 60): EvolutionJobRecord[] {
+  leaseQueuedJobs(
+    limit = 10,
+    leaseSeconds = 60,
+    targetMemoryIds?: readonly string[]
+  ): EvolutionJobRecord[] {
+    if (targetMemoryIds?.length === 0) {
+      return [];
+    }
     const at = nowIso();
     const leaseUntil = new Date(Date.now() + leaseSeconds * 1000).toISOString();
+    const targetFilter = targetMemoryIds
+      ? `AND target_memory_id IN (${targetMemoryIds.map(() => "?").join(", ")})`
+      : "";
     const transaction = this.db.transaction(() => {
       const rows = this.db
         .prepare(
@@ -2015,10 +2180,11 @@ export class RuntimeRepository {
                json_extract(payload_json, '$.runAfter') IS NULL
                OR CAST(json_extract(payload_json, '$.runAfter') AS TEXT) <= ?
              )
+             ${targetFilter}
            ORDER BY ${evolutionJobOrderSql()}
            LIMIT ?`
         )
-        .all(at, at, limit) as SqlJobRow[];
+        .all(at, at, ...(targetMemoryIds ?? []), limit) as SqlJobRow[];
 
       for (const row of rows) {
         this.db
@@ -2058,7 +2224,17 @@ export class RuntimeRepository {
     return this.getJob(id);
   }
 
-  requeueFailedJobs(limit = 100, at = nowIso()): Array<{ before: EvolutionJobRecord; after: EvolutionJobRecord }> {
+  requeueFailedJobs(
+    limit = 100,
+    at = nowIso(),
+    targetMemoryIds?: readonly string[]
+  ): Array<{ before: EvolutionJobRecord; after: EvolutionJobRecord }> {
+    if (targetMemoryIds?.length === 0) {
+      return [];
+    }
+    const targetFilter = targetMemoryIds
+      ? `AND target_memory_id IN (${targetMemoryIds.map(() => "?").join(", ")})`
+      : "";
     const transaction = this.db.transaction(() => {
       const rows = this.db
         .prepare(
@@ -2066,10 +2242,11 @@ export class RuntimeRepository {
            FROM evolution_jobs
            WHERE status = 'failed'
              AND attempts < max_attempts
+             ${targetFilter}
            ORDER BY ${evolutionJobOrderSql()}
            LIMIT ?`
         )
-        .all(limit) as SqlJobRow[];
+        .all(...(targetMemoryIds ?? []), limit) as SqlJobRow[];
 
       for (const row of rows) {
         this.db
@@ -2325,8 +2502,15 @@ export class RuntimeRepository {
     workerId: string;
     leaseUntil: number;
     limit?: number;
+    targetMemoryIds?: readonly string[];
   }): EmbeddingRetryRecord[] {
+    if (input.targetMemoryIds?.length === 0) {
+      return [];
+    }
     const limit = Math.max(1, Math.min(200, Math.floor(input.limit ?? 25)));
+    const targetFilter = input.targetMemoryIds
+      ? `AND target_id IN (${input.targetMemoryIds.map(() => "?").join(", ")})`
+      : "";
     const transaction = this.db.transaction(() => {
       const rows = this.db
         .prepare(
@@ -2337,10 +2521,11 @@ export class RuntimeRepository {
              OR (status = 'in_progress' AND lease_until IS NOT NULL AND lease_until <= ?)
            )
              AND next_attempt_at <= ?
+             ${targetFilter}
            ORDER BY next_attempt_at ASC, created_at ASC
            LIMIT ?`
         )
-        .all(input.now, input.now, limit) as SqlEmbeddingRetryRow[];
+        .all(input.now, input.now, ...(input.targetMemoryIds ?? []), limit) as SqlEmbeddingRetryRow[];
       const claimed: EmbeddingRetryRecord[] = [];
       for (const row of rows) {
         const result = this.db
@@ -3168,12 +3353,14 @@ export class RuntimeRepository {
 
 export class Repositories {
   readonly memories: MemoryRepository;
+  readonly processing: MemoryProcessingRepository;
   readonly runtime: RuntimeRepository;
   readonly vectors: SqliteVecStore;
 
   constructor(readonly db: Database.Database) {
     this.vectors = new SqliteVecStore(db);
     this.memories = new MemoryRepository(db, this.vectors);
+    this.processing = new MemoryProcessingRepository(db);
     this.runtime = new RuntimeRepository(db);
   }
 
@@ -4054,6 +4241,20 @@ interface SqlJobRow {
   updated_at: string;
 }
 
+interface SqlMemoryProcessingRow {
+  memory_id: string;
+  state: MemoryProcessingRecord["state"];
+  stage: MemoryProcessingRecord["stage"] | null;
+  active_job_id: string | null;
+  attempt_count: number;
+  manual_retry_count: number;
+  retry_action: MemoryProcessingRecord["retryAction"];
+  error_code: string | null;
+  error_message: string | null;
+  failed_at: string | null;
+  updated_at: string;
+}
+
 interface SqlEmbeddingRetryRow {
   id: string;
   target_kind: EmbeddingRetryTargetKind;
@@ -4167,6 +4368,22 @@ function jobFromSql(row: SqlJobRow): EvolutionJobRecord {
     leasedUntil: row.leased_until,
     lastError: row.last_error,
     createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function memoryProcessingFromSql(row: SqlMemoryProcessingRow): MemoryProcessingRecord {
+  return {
+    memoryId: row.memory_id,
+    state: row.state,
+    stage: row.stage,
+    activeJobId: row.active_job_id,
+    attemptCount: row.attempt_count,
+    manualRetryCount: row.manual_retry_count,
+    retryAction: row.retry_action,
+    errorCode: row.error_code,
+    errorMessage: row.error_message,
+    failedAt: row.failed_at,
     updatedAt: row.updated_at
   };
 }
@@ -4391,6 +4608,8 @@ function inferNamespaceId(change: Omit<ChangeLogRecord, "seq">): string | null {
 
 function primaryKeyColumn(table: BundleTableName): string | undefined {
   if (table === "memory_change_log") return "seq";
+  if (table === "memory_processing_state") return "memory_id";
+  if (table === "runtime_kv") return "key";
   return "id";
 }
 
@@ -4517,6 +4736,7 @@ function evolutionJobOrderSql(): string {
   const importIndexingSql = importIndexingSqlPredicate();
   return `CASE WHEN status = 'leased' THEN 0 ELSE 1 END ASC,
            CASE
+             WHEN json_extract(payload_json, '$.source') = 'memory.processing.manual_retry' THEN 0
              WHEN job_type = 'episode_idle_close' THEN 1
              WHEN job_type = 'embedding' AND EXISTS (
                SELECT 1
@@ -4565,7 +4785,12 @@ function importSummaryPlaceholderSql(): string {
 }
 
 function importIndexingSqlPredicate(): string {
-  return "json_extract(memories.properties_json, '$.internal_info.import_pipeline.status') = 'indexing'";
+  return `EXISTS (
+    SELECT 1
+    FROM memory_processing_state
+    WHERE memory_processing_state.memory_id = memories.id
+      AND memory_processing_state.state IN ('embedding_pending', 'embedding')
+  )`;
 }
 
 export function jobToRef(job: EvolutionJobRecord): JobRef {

@@ -26,6 +26,8 @@ describe("agent runtime local api routes", () => {
       { method: "POST", url: "/api/v1/turns/turn-1/complete", payload: completeTurnInput() },
       { method: "POST", url: "/api/v1/memory/search", payload: searchInput() },
       { method: "POST", url: "/api/v1/memory/add", payload: addMemoryInput() },
+      { method: "POST", url: "/api/v1/memory/processing/status", payload: { memoryIds: ["memory-1"] } },
+      { method: "POST", url: "/api/v1/memory/memory-1/processing/retry", payload: {} },
       { method: "GET", url: "/api/v1/memory/memory-1" },
       { method: "DELETE", url: "/api/v1/memory/memory-1" },
       { method: "GET", url: "/api/v1/memory/logs?tools=memory_add,memory_search&limit=20&offset=0" },
@@ -58,6 +60,67 @@ describe("agent runtime local api routes", () => {
     });
 
     expect(response.statusCode).toBe(401);
+  });
+
+  it("reloads the latest model config before retrying one failed memory", async () => {
+    const calls: unknown[] = [];
+    app = createServer({
+      memoryClient: {
+        async reloadConfig(input: unknown) {
+          calls.push({ reload: input });
+          return {
+            activeProfile: "byok" as const,
+            changed: true,
+            requiresRestart: false,
+            models: memoryModels(),
+            reloadedAt: now()
+          };
+        },
+        async retryMemoryProcessing(memoryId: string) {
+          calls.push({ retry: memoryId });
+          return {
+            accepted: true,
+            processing: {
+              memoryId,
+              state: "summary_pending" as const,
+              stage: "summary" as const,
+              activeJobId: "job-retry",
+              attemptCount: 0,
+              manualRetryCount: 1,
+              retryAction: "retry" as const,
+              errorCode: null,
+              errorMessage: null,
+              failedAt: null,
+              updatedAt: now()
+            },
+            job: {
+              jobId: "job-retry",
+              jobType: "trace_summary" as const,
+              status: "queued" as const
+            },
+            serverTime: now()
+          };
+        }
+      }
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/v1/memory/memory-1/processing/retry",
+      headers: { "x-memmy-local-token": "test-token" },
+      payload: {}
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(calls).toEqual([
+      {
+        reload: {
+          reason: "manual_processing_retry",
+          restartFailedProcessing: false
+        }
+      },
+      { retry: "memory-1" }
+    ]);
   });
 
   it("parses source Agent filters for memory logs", async () => {
@@ -228,6 +291,48 @@ function createServer(overrides: Record<string, unknown> = {}): FastifyInstance 
           requiresRestart: false,
           models: memoryModels(),
           reloadedAt: now()
+        };
+      },
+      async getMemoryProcessingStatus(memoryIds: string[]) {
+        return {
+          items: memoryIds.map((memoryId) => ({
+            memoryId,
+            state: "failed" as const,
+            stage: "summary" as const,
+            activeJobId: null,
+            attemptCount: 3,
+            manualRetryCount: 0,
+            retryAction: "retry" as const,
+            errorCode: "processing_failed",
+            errorMessage: "provider unavailable",
+            failedAt: now(),
+            updatedAt: now()
+          })),
+          serverTime: now()
+        };
+      },
+      async retryMemoryProcessing(memoryId: string) {
+        return {
+          accepted: true,
+          processing: {
+            memoryId,
+            state: "summary_pending" as const,
+            stage: "summary" as const,
+            activeJobId: "job-retry",
+            attemptCount: 0,
+            manualRetryCount: 1,
+            retryAction: "retry" as const,
+            errorCode: null,
+            errorMessage: null,
+            failedAt: null,
+            updatedAt: now()
+          },
+          job: {
+            jobId: "job-retry",
+            jobType: "trace_summary" as const,
+            status: "queued" as const
+          },
+          serverTime: now()
         };
       }
     },

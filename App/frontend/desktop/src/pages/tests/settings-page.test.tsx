@@ -230,6 +230,30 @@ describe("SettingsPageView", () => {
     expect(html).not.toContain("检查更新");
   });
 
+  it("下载更新时在关于区展示下载进度条", () => {
+    const html = normalizeSsrHtml(renderSettingsPageView(
+      createReadyState(),
+      "zh-CN",
+      createUpdateViewModel({
+        phase: "downloading",
+        downloadProgress: {
+          downloadUrl: "https://updates.example.com/Memmy.dmg",
+          filePath: "/tmp/Memmy.dmg",
+          transferredBytes: 524_288,
+          totalBytes: 1_048_576,
+          percent: 50
+        }
+      })
+    ));
+
+    expect(html).toContain("下载中");
+    expect(html).toContain('role="progressbar"');
+    expect(html).toContain('aria-label="下载进度"');
+    expect(html).toContain('aria-valuenow="50"');
+    expect(html).toContain("已下载 50%");
+    expect(html).toContain("512.0 KB / 1.0 MB");
+  });
+
   it("菜单栏图标开关保存到应用设置并同步桌面 bridge", () => {
     const source = readFileSync(settingsPageSourcePath, "utf8");
 
@@ -818,6 +842,7 @@ function createUpdateViewModel(
     appVersion: "2.1.0",
     phase: "idle",
     preparedUpdatePath: null,
+    downloadProgress: null,
     feedback: null,
     requestPrimaryAction: vi.fn(async () => undefined),
     ...overrides

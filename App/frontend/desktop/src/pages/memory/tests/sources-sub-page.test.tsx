@@ -6,13 +6,16 @@ import { describe, expect, it } from "vitest";
 import { ApiRequestError } from "../../../api/http.js";
 import { AppProviders } from "../../../app/providers.js";
 import { enUSMessages, zhCNMessages } from "../../../i18n/messages.js";
+import { AGENT_SOURCE_SCAN_COMPLETION_FEEDBACK_MS } from "../../../state/app-actions.js";
 import { agentSourceLogoUrl } from "../../agent-source-logos.js";
 import {
   formatAgentSourceActionError,
+  formatMemoryServiceAddress,
   formatScanProgressTail,
   formatSourceDataPath,
   formatSourceMemoryCount,
   isAgentSourceConnectionActionDisabled,
+  resolveAgentSourceScanButtonState,
   resolveAgentSourceConnectionAction,
   resolveAgentSourceStatusLabelKey,
   resolveScanContinueSourceId
@@ -29,6 +32,20 @@ describe("SourcesSubPage", () => {
     expect(enUSMessages["memory.hookNotInstalled"]).toBe("Hook not installed");
     expect(enUSMessages["memory.installHook"]).toBe("Install Hook");
     expect(enUSMessages["memory.removeHook"]).toBe("Remove Hook");
+  });
+
+  it("同步按钮在扫描中旋转，完成后进入不可重复点击的勾选状态", () => {
+    const sourceIds = ["cursor", "claude_code", "codex", "opencode", "openclaw", "hermes", "workbuddy"];
+    for (const sourceId of sourceIds) {
+      const otherSourceId = sourceIds.find((candidate) => candidate !== sourceId)!;
+      expect(resolveAgentSourceScanButtonState(sourceId, true, sourceId, new Set())).toBe("running");
+      expect(resolveAgentSourceScanButtonState(sourceId, true, otherSourceId, new Set())).toBe("idle");
+      expect(resolveAgentSourceScanButtonState(sourceId, false, null, new Set([sourceId]))).toBe("completed");
+      expect(resolveAgentSourceScanButtonState(sourceId, false, null, new Set())).toBe("idle");
+    }
+    expect(zhCNMessages["memory.syncCompleted"]).toBe("同步完成");
+    expect(enUSMessages["memory.syncCompleted"]).toBe("Synced");
+    expect(AGENT_SOURCE_SCAN_COMPLETION_FEEDBACK_MS).toBe(5000);
   });
 
   it("使用 WorkBuddy 官方图标而不是文字缩写", () => {
@@ -98,6 +115,14 @@ describe("SourcesSubPage", () => {
     expect(formatSourceDataPath("/Users/zongy/.codex/sessions")).toBe("~/.codex/sessions");
     expect(formatSourceDataPath("~/.claude")).toBe("~/.claude");
     expect(formatSourceMemoryCount(1161, (key, values) => `${key}:${values?.count}`)).toBe("memory.sourceMemoryCount:1,161");
+  });
+
+  it("从运行时 Memory URL 展示真实端口，不再写死旧地址", () => {
+    expect(formatMemoryServiceAddress("http://127.0.0.1:18960")).toBe("127.0.0.1:18960");
+    expect(formatMemoryServiceAddress("http://localhost:18888/")).toBe("localhost:18888");
+    expect(formatMemoryServiceAddress(undefined)).toBeUndefined();
+    expect(zhCNMessages["memory.restartService"]).toBe("重启服务");
+    expect(zhCNMessages).not.toHaveProperty("memory.daemonAddress");
   });
 
   it("接入源不可用时展示用户文案而不是 HTTP 调试信息", () => {
@@ -197,6 +222,7 @@ describe("SourcesSubPage", () => {
     expect(resolveAgentSourceStatusLabelKey(createSource("hermes", "plugin_installed"))).toBe("memory.pluginInstalled");
     expect(resolveAgentSourceStatusLabelKey(createSource("opencode", "plugin_installed"))).toBe("memory.pluginInstalled");
     expect(resolveAgentSourceStatusLabelKey(createSource("workbuddy", "not_connected"))).toBe("memory.skillNotInstalled");
+    expect(source).toContain('props.source.status === "skill_installed" || props.source.status === "plugin_installed"');
     expect(source).not.toContain("memory.notConnected");
   });
 });

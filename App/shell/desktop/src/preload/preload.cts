@@ -3,10 +3,12 @@ type IpcRendererEvent = import("electron").IpcRendererEvent;
 type DesktopAppInfo = import("@memmy/desktop-interface").DesktopAppInfo;
 type DesktopUpdateCheckResult = import("@memmy/desktop-interface").DesktopUpdateCheckResult;
 type DesktopUpdateDownloadOptions = import("@memmy/desktop-interface").DesktopUpdateDownloadOptions;
+type DesktopUpdateDownloadProgress = import("@memmy/desktop-interface").DesktopUpdateDownloadProgress;
 type DesktopUpdateInstallResult = import("@memmy/desktop-interface").DesktopUpdateInstallResult;
 type DesktopMenuBarIconResult = import("@memmy/desktop-interface").DesktopMenuBarIconResult;
 type DesktopImageActionRequest = import("@memmy/desktop-interface").DesktopImageActionRequest;
 type DesktopImageSaveResult = import("@memmy/desktop-interface").DesktopImageSaveResult;
+type DesktopMemoryServiceRestartResult = import("@memmy/desktop-interface").DesktopMemoryServiceRestartResult;
 type MicrophoneAccessStatus = import("@memmy/desktop-interface").MicrophoneAccessStatus;
 type MainWindowActionRequest = { id: string; action: "close" | "minimize" };
 
@@ -24,6 +26,7 @@ interface MemmyPreloadApi {
   getAppInfo(): Promise<DesktopAppInfo>;
   checkForUpdates(): Promise<DesktopUpdateCheckResult>;
   downloadUpdate(update: DesktopUpdateCheckResult, options?: DesktopUpdateDownloadOptions): Promise<DesktopUpdateInstallResult>;
+  onUpdateDownloadProgress(callback: (progress: DesktopUpdateDownloadProgress) => void): () => void;
   openUpdateInstaller(filePath: string): Promise<DesktopUpdateInstallResult>;
   openExternal(url: string): Promise<void>;
   openMailto(mailtoUrl: string): Promise<void>;
@@ -31,6 +34,7 @@ interface MemmyPreloadApi {
   saveImage(request: DesktopImageActionRequest): Promise<DesktopImageSaveResult>;
   exportMemoryDatabase(): Promise<unknown>;
   installCliTools(): Promise<unknown>;
+  restartMemoryService(): Promise<DesktopMemoryServiceRestartResult>;
   openLogsDirectory(): Promise<void>;
   exportDiagnosticsReport(): Promise<DiagnosticsReportExportResult>;
   getLogLevel(): Promise<"error" | "warn" | "info" | "debug">;
@@ -114,6 +118,14 @@ const memmyPreloadApi: MemmyPreloadApi = {
     return ipcRenderer.invoke("memmy:download-update", update, options);
   },
 
+  onUpdateDownloadProgress(callback: (progress: DesktopUpdateDownloadProgress) => void): () => void {
+    const listener = (_event: IpcRendererEvent, progress: DesktopUpdateDownloadProgress) => {
+      callback(progress);
+    };
+    ipcRenderer.on("memmy:update-download-progress", listener);
+    return () => ipcRenderer.removeListener("memmy:update-download-progress", listener);
+  },
+
   async openUpdateInstaller(filePath: string): Promise<DesktopUpdateInstallResult> {
     return ipcRenderer.invoke("memmy:open-update-installer", filePath);
   },
@@ -148,6 +160,10 @@ const memmyPreloadApi: MemmyPreloadApi = {
 
   async installCliTools(): Promise<unknown> {
     return ipcRenderer.invoke("memmy:install-cli-tools");
+  },
+
+  async restartMemoryService(): Promise<DesktopMemoryServiceRestartResult> {
+    return ipcRenderer.invoke("memmy:restart-memory-service");
   },
 
   async openLogsDirectory(): Promise<void> {

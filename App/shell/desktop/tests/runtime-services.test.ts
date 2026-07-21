@@ -1,11 +1,18 @@
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import YAML from "yaml";
 import { afterEach, describe, expect, it } from "vitest";
-import { preparePackagedRuntimeConfig, spawnNodeService, syncBundledAgentSkills } from "../src/main/runtime-services.js";
+import {
+  preparePackagedRuntimeConfig,
+  restartExternalMemoryService,
+  spawnNodeService,
+  syncBundledAgentSkills
+} from "../src/main/runtime-services.js";
 
 const tempRoots: string[] = [];
+const testServers: Server[] = [];
 type ConfigRecord = Record<string, unknown>;
 
 async function makeTempRoot(): Promise<string> {
@@ -29,7 +36,63 @@ function recordValue(parent: ConfigRecord, key: string): ConfigRecord {
 
 describe("packaged desktop runtime config", () => {
   afterEach(async () => {
+    await Promise.all(testServers.splice(0).map((server) => new Promise<void>((resolveClose) => {
+      server.close(() => resolveClose());
+      server.closeAllConnections();
+    })));
     await Promise.all(tempRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  });
+
+  it("requests a supervised Memory shutdown and waits for the replacement service", async () => {
+    let shutdownRequests = 0;
+    let activeServer: Server;
+    let port = 0;
+
+    const startServer = async () => {
+      activeServer = createServer((request, response) => {
+        expect(request.headers.authorization).toBe("Bearer memory-token");
+        if (request.method === "GET" && request.url === "/api/v1/health") {
+          response.writeHead(200, { "content-type": "application/json" });
+          response.end(JSON.stringify({ ok: true }));
+          return;
+        }
+        if (request.method === "POST" && request.url === "/api/v1/admin/shutdown") {
+          shutdownRequests += 1;
+          response.writeHead(200, { "content-type": "application/json" });
+          response.end(JSON.stringify({ accepted: true }));
+          response.once("finish", () => {
+            activeServer.close();
+            activeServer.closeAllConnections();
+            setTimeout(() => void startServer(), 250);
+          });
+          return;
+        }
+        response.writeHead(404);
+        response.end();
+      });
+      testServers.push(activeServer);
+      await new Promise<void>((resolveListen, rejectListen) => {
+        activeServer.once("error", rejectListen);
+        activeServer.listen(port, "127.0.0.1", () => {
+          activeServer.off("error", rejectListen);
+          const address = activeServer.address();
+          if (!address || typeof address === "string") {
+            rejectListen(new Error("expected TCP address"));
+            return;
+          }
+          port = address.port;
+          resolveListen();
+        });
+      });
+    };
+
+    await startServer();
+    await restartExternalMemoryService({
+      baseUrl: `http://127.0.0.1:${port}`,
+      token: "memory-token"
+    });
+
+    expect(shutdownRequests).toBe(1);
   });
 
   it("creates missing packaged runtime config under the shared ~/.memmy home", async () => {

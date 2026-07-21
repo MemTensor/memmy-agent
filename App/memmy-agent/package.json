@@ -1,6 +1,6 @@
 {
   "name": "memmy-agent",
-  "version": "0.0.1-beta.1",
+  "version": "1.0.2",
   "description": "TypeScript refactor of memmy's agent runtime.",
   "type": "module",
   "main": "./dist/index.js",
@@ -9,9 +9,15 @@
     "memmy": "./dist/main.js"
   },
   "scripts": {
+    "version:sync": "npm --prefix ../.. run version:sync",
+    "prebuild": "npm run version:sync",
+    "pretypecheck": "npm run version:sync",
+    "pretest": "npm run version:sync",
+    "pretest:tui-cursor": "npm run version:sync",
     "build": "tsc -p tsconfig.build.json && find src/templates src/skills -type f ! -name '*.ts' -exec sh -c 'for file do target=\"dist/${file#src/}\"; mkdir -p \"$(dirname \"$target\")\"; cp -p \"$file\" \"$target\"; done' sh {} +",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
+    "test:tui-cursor": "vitest run tests/entrypoints/cli/tui-cursor.test.ts",
     "test:watch": "vitest"
   },
   "dependencies": {

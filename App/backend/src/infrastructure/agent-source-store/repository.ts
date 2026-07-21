@@ -31,6 +31,15 @@ export interface UpsertAgentSourceScanWatermarkInput {
   updatedAt: string;
 }
 
+export interface AgentSourceConversationCheckpoint {
+  sourceId: string;
+  conversationId: string;
+  lastMessageId: string;
+  lastCreatedAt: string;
+  contentHash: string;
+  updatedAt: string;
+}
+
 /** Contract for upsert agent source input. */
 export interface UpsertAgentSourceInput {
   sourceId: string;
@@ -48,6 +57,8 @@ export interface AgentSourceRepository {
   setLastScannedAt(sourceId: string, scannedAt: string): void;
   getScanWatermark(sourceId: string): AgentSourceScanWatermark | null;
   upsertScanWatermark(input: UpsertAgentSourceScanWatermarkInput): void;
+  getConversationCheckpoint(sourceId: string, conversationId: string): AgentSourceConversationCheckpoint | null;
+  upsertConversationCheckpoint(input: AgentSourceConversationCheckpoint): void;
   hasSeen(dedupKey: string): boolean;
   markSeen(dedupKey: string, sourceId: string): boolean;
 }
@@ -67,6 +78,15 @@ interface AgentSourceWatermarkRow {
   mode: AgentSourceScanMode;
   baseline_at: string | null;
   latest_seen_created_at: string | null;
+  updated_at: string;
+}
+
+interface AgentSourceConversationCheckpointRow {
+  source_id: string;
+  conversation_id: string;
+  last_message_id: string;
+  last_created_at: string;
+  content_hash: string;
   updated_at: string;
 }
 
@@ -171,6 +191,36 @@ export function createAgentSourceRepository(
       );
     },
 
+    getConversationCheckpoint(sourceId, conversationId) {
+      const row = db.prepare(`
+        SELECT source_id, conversation_id, last_message_id, last_created_at, content_hash, updated_at
+        FROM account_agent_source_conversation_checkpoints
+        WHERE uuid = ? AND source_id = ? AND conversation_id = ?
+      `).get(AGENT_SOURCE_SCOPE_UUID, sourceId, conversationId) as AgentSourceConversationCheckpointRow | undefined;
+      return row ? toConversationCheckpoint(row) : null;
+    },
+
+    upsertConversationCheckpoint(input) {
+      db.prepare(`
+        INSERT INTO account_agent_source_conversation_checkpoints (
+          uuid, source_id, conversation_id, last_message_id, last_created_at, content_hash, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(uuid, source_id, conversation_id) DO UPDATE SET
+          last_message_id = excluded.last_message_id,
+          last_created_at = excluded.last_created_at,
+          content_hash = excluded.content_hash,
+          updated_at = excluded.updated_at
+      `).run(
+        AGENT_SOURCE_SCOPE_UUID,
+        input.sourceId,
+        input.conversationId,
+        input.lastMessageId,
+        input.lastCreatedAt,
+        input.contentHash,
+        input.updatedAt
+      );
+    },
+
     hasSeen(dedupKey) {
       const row = db.prepare("SELECT dedup_key FROM account_ingestion_seen WHERE uuid = ? AND dedup_key = ?").get(AGENT_SOURCE_SCOPE_UUID, dedupKey);
       return Boolean(row);
@@ -216,6 +266,17 @@ function toAgentSourceScanWatermark(row: AgentSourceWatermarkRow): AgentSourceSc
     mode: row.mode,
     baselineAt: row.baseline_at,
     latestSeenCreatedAt: row.latest_seen_created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function toConversationCheckpoint(row: AgentSourceConversationCheckpointRow): AgentSourceConversationCheckpoint {
+  return {
+    sourceId: row.source_id,
+    conversationId: row.conversation_id,
+    lastMessageId: row.last_message_id,
+    lastCreatedAt: row.last_created_at,
+    contentHash: row.content_hash,
     updatedAt: row.updated_at
   };
 }

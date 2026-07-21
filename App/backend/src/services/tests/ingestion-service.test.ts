@@ -46,7 +46,6 @@ describe("ingestion service", () => {
         title: "message 1",
         source: "cursor",
         tags: ["agent-source", "cursor"],
-        turnId: "cursor:conv-a:0",
         createdAt: "2026-05-28T10:00:01.000Z"
       }),
       expect.objectContaining({
@@ -56,11 +55,14 @@ describe("ingestion service", () => {
         title: "message 5",
         source: "cursor",
         tags: ["agent-source", "cursor"],
-        turnId: "cursor:conv-b:1",
         createdAt: "2026-05-28T10:00:05.000Z"
       })
     ]);
     expect(added.every((input) => typeof input.requestId === "string" && input.requestId.length > 0)).toBe(true);
+    expect(added.map((input) => input.turnId)).toEqual([
+      expect.stringMatching(/^cursor:[a-f0-9]{24}$/),
+      expect.stringMatching(/^cursor:[a-f0-9]{24}$/)
+    ]);
     expect(stats).toEqual({
       attempted: 6,
       written: 4,
@@ -71,6 +73,9 @@ describe("ingestion service", () => {
       failedMemories: 0,
       memoryIds: ["memory-1", "memory-2"],
       conversations: 2,
+      completedConversationIds: [],
+      incompleteConversationIds: ["conv-a", "conv-b"],
+      failedConversationIds: [],
       errors: []
     });
   });
@@ -108,12 +113,42 @@ describe("ingestion service", () => {
     }));
   });
 
-  it("counts add failures and continues with later conversations", async () => {
-    const addedConversationIds: string[] = [];
+  it("keeps the trace identity stable while changing the idempotency key for revised content", async () => {
+    const added: Array<{ requestId?: string; turnId?: string }> = [];
     const service = createService({
       async addMemory(input) {
+        added.push({ requestId: input.requestId, turnId: input.turnId });
+        return {
+          id: "memory-stable-turn",
+          kind: "trace",
+          memoryLayer: "L1",
+          status: "activated",
+          title: "Stable turn",
+          summary: input.content,
+          tags: [],
+          createdAt: now(),
+          serverTime: now()
+        };
+      }
+    });
+    const first = [createMessage("conv-a", 1), createMessage("conv-a", 2)];
+    const revised = [first[0]!, { ...first[1]!, content: "revised assistant response" }];
+
+    await service.ingest(toAsyncIterable(first), { sourceId: "cursor" });
+    await service.ingest(toAsyncIterable(revised), { sourceId: "cursor" });
+
+    expect(added[0]?.turnId).toBe(added[1]?.turnId);
+    expect(added[0]?.requestId).not.toBe(added[1]?.requestId);
+  });
+
+  it("counts add failures and continues with later conversations", async () => {
+    const addedConversationIds: string[] = [];
+    let addCount = 0;
+    const service = createService({
+      async addMemory(input) {
+        addCount += 1;
         addedConversationIds.push(input.turnId ?? "");
-        if (input.turnId === "cursor:conv-a:0") {
+        if (addCount === 1) {
           throw new Error("memory unavailable");
         }
 
@@ -143,13 +178,19 @@ describe("ingestion service", () => {
       { sourceId: "cursor" }
     );
 
-    expect(addedConversationIds).toEqual(["cursor:conv-a:0", "cursor:conv-b:1"]);
+    expect(addedConversationIds).toEqual([
+      expect.stringMatching(/^cursor:[a-f0-9]{24}$/),
+      expect.stringMatching(/^cursor:[a-f0-9]{24}$/)
+    ]);
     expect(stats).toMatchObject({
       attempted: 6,
       written: 2,
       deduped: 2,
       failed: 2,
       conversations: 2,
+      completedConversationIds: [],
+      incompleteConversationIds: ["conv-b"],
+      failedConversationIds: ["conv-a"],
       errors: [{ conversationId: "conv-a", reason: "memory unavailable" }]
     });
   });
@@ -179,17 +220,33 @@ describe("ingestion service", () => {
       signal: controller.signal
     });
 
-    expect(calls).toEqual(["add:cursor:conv-a:0"]);
-    expect(stats).toMatchObject({ attempted: 4, written: 2, deduped: 1, conversations: 1 });
+    expect(calls).toEqual([expect.stringMatching(/^add:cursor:[a-f0-9]{24}$/)]);
+    expect(stats).toMatchObject({
+      attempted: 4,
+      written: 2,
+      deduped: 1,
+      conversations: 1,
+      incompleteConversationIds: ["conv-a"]
+    });
   });
 
-  it("skips a conversation when all dedup keys are already seen", async () => {
+  it("replays an already-seen conversation idempotently to recover its memory id", async () => {
     const calls: string[] = [];
     const service = createService(
       {
         async addMemory() {
           calls.push("add");
-          throw new Error("should not write deduped conversation");
+          return {
+            id: "memory-existing",
+            kind: "trace",
+            memoryLayer: "L1",
+            status: "activated",
+            title: "Existing memory",
+            summary: "Existing memory",
+            tags: [],
+            createdAt: now(),
+            serverTime: now()
+          };
         }
       },
       {
@@ -202,8 +259,17 @@ describe("ingestion service", () => {
       { sourceId: "cursor" }
     );
 
-    expect(calls).toEqual([]);
-    expect(stats).toMatchObject({ attempted: 3, written: 0, deduped: 3, failed: 0, conversations: 1 });
+    expect(calls).toEqual(["add"]);
+    expect(stats).toMatchObject({
+      attempted: 3,
+      written: 0,
+      deduped: 3,
+      failed: 0,
+      conversations: 1,
+      dedupedMemories: 1,
+      memoryIds: ["memory-existing"],
+      incompleteConversationIds: ["conv-a"]
+    });
   });
 
   it("does not import user-only or assistant-only turns as memories", async () => {

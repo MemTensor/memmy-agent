@@ -9,6 +9,11 @@ export interface DesktopMenuBarIconResult {
   enabled: boolean;
 }
 
+export interface DesktopMemoryServiceRestartResult {
+  ok: true;
+  baseUrl: string;
+}
+
 export interface DesktopAppInfo {
   name: string;
   version: string;
@@ -36,6 +41,14 @@ export interface DesktopUpdateCheckResult {
 
 export interface DesktopUpdateDownloadOptions {
   openInstaller?: boolean;
+}
+
+export interface DesktopUpdateDownloadProgress {
+  downloadUrl: string;
+  filePath: string;
+  transferredBytes: number;
+  totalBytes: number | null;
+  percent: number | null;
 }
 
 export interface DesktopUpdateInstallResult {

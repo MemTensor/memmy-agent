@@ -1811,7 +1811,8 @@ button {
   padding: 12px 16px 4px;
 }
 
-.agent-composer-input--single {
+/* Keep this more specific than `.agent-composer-shell textarea` above so its generic line-height cannot shift the caret. */
+.agent-composer-shell textarea.agent-composer-input--single {
   height: 52px;
   padding-top: 14px;
   padding-bottom: 14px;
@@ -3160,6 +3161,11 @@ code {
   color: color-mix(in srgb, var(--color-action-sky) 78%, var(--color-text-ink));
 }
 
+.memory-pill--failed {
+  background: color-mix(in srgb, var(--color-status-error) 11%, var(--color-background-paper));
+  color: color-mix(in srgb, var(--color-status-error) 82%, var(--color-text-ink));
+}
+
 .memory-pill--policy-candidate {
   background: color-mix(in srgb, var(--color-icon-ember) 18%, var(--color-background-paper));
   color: color-mix(in srgb, var(--color-icon-ember) 78%, var(--color-text-ink));
@@ -3509,6 +3515,81 @@ code {
   font-weight: 400;
   letter-spacing: 0.04em;
   text-transform: uppercase;
+}
+
+.memory-processing-failure {
+  border-color: color-mix(in srgb, var(--color-status-error) 38%, transparent);
+  background: color-mix(in srgb, var(--color-status-error) 6%, var(--color-background-paper));
+}
+
+.memory-processing-failure--success {
+  border-color: color-mix(in srgb, var(--color-status-success) 40%, transparent);
+  background: color-mix(in srgb, var(--color-status-success) 7%, var(--color-background-paper));
+}
+
+.memory-processing-failure__heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  color: var(--color-status-error);
+}
+
+.memory-processing-failure--success .memory-processing-failure__heading {
+  color: var(--color-status-success);
+}
+
+.memory-processing-failure__heading h5 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.memory-processing-failure__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.memory-processing-failure__retry-error {
+  margin: 12px 0 0;
+  color: var(--color-status-error);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.memory-processing-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 58%, transparent);
+  border-radius: 9px;
+  background: var(--color-background-paper);
+  color: color-mix(in srgb, var(--color-text-ink) 76%, transparent);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.memory-processing-action--primary {
+  border-color: color-mix(in srgb, var(--color-action-sky) 50%, transparent);
+  color: color-mix(in srgb, var(--color-action-sky) 82%, var(--color-text-ink));
+}
+
+.memory-processing-action:disabled {
+  cursor: default;
+  opacity: 0.72;
+}
+
+.memory-spin {
+  animation: memory-spin 0.8s linear infinite;
+}
+
+@keyframes memory-spin {
+  to { transform: rotate(360deg); }
 }
 
 .memory-detail-grid {

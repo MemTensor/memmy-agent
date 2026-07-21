@@ -1,6 +1,6 @@
 {
   "name": "@memmy/memory",
-  "version": "0.1.0",
+  "version": "1.0.2",
   "private": true,
   "type": "module",
   "main": "./dist/src/index.js",
@@ -8,6 +8,12 @@
     "memmy-memory": "./dist/src/cli/index.js"
   },
   "scripts": {
+    "version:sync": "npm --prefix .. run version:sync",
+    "prebuild": "npm run version:sync",
+    "pretypecheck": "npm run version:sync",
+    "pretest": "npm run version:sync",
+    "prepackage:npm": "npm run version:sync",
+    "prebinary": "npm run version:sync",
     "build": "tsc -p tsconfig.json && npm run copy-cli-assets",
     "copy-cli-assets": "rm -rf dist/src/cli/agent_inject.md dist/src/cli/skills && mkdir -p dist/src/cli && cp -R src/cli/agent_inject.md src/cli/skills dist/src/cli/",
     "dev": "tsx src/server/index.ts",

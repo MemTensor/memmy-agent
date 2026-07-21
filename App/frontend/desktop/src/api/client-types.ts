@@ -19,6 +19,7 @@ import { createMemmyAgentClient, type MemmyAgentClient } from "./memmy-agent-cli
 import { createHttpTokenQuotaClient, type TokenQuotaClient } from "./token-quota-client.js";
 
 export interface AppClients {
+  runtimeConfig: RuntimeConfig;
   bootstrap: BootstrapClient;
   account: AccountClient;
   config: ConfigClient;
@@ -43,6 +44,7 @@ export function createAppClients(input: CreateAppClientsInput): AppClients {
   }
 
   return {
+    runtimeConfig: input.runtimeConfig,
     bootstrap: createHttpBootstrapClient(input.runtimeConfig),
     account: createHttpAccountClient(input.runtimeConfig),
     config: createHttpConfigClient(input.runtimeConfig),

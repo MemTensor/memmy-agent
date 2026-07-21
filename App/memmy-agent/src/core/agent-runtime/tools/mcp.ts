@@ -13,6 +13,7 @@ import {
   RUNTIME_CONTROL_MCP_RELOAD,
 } from "../../runtime-messages/events.js";
 import { loadConfig, resolveConfigEnvVars } from "../../../config/loader.js";
+import { VERSION } from "../../../version.js";
 import { Tool } from "./base.js";
 import { ToolRegistry } from "./registry.js";
 
@@ -57,7 +58,7 @@ class SdkClientSession {
 
   constructor(transport: any) {
     this.transport = transport;
-    this.client = new Client({ name: "memmy-agent", version: "0.0.1-beta.1" });
+    this.client = new Client({ name: "memmy-agent", version: VERSION });
   }
 
   async enter(): Promise<this> {

@@ -115,7 +115,7 @@ export function MemoryPage(props: MemoryPageProps) {
   const childByPage = useMemo<Record<MemorySubPageId, ReactNode>>(
     () => ({
       overview: <OverviewSubPage client={client} />,
-      memories: <MemoriesSubPage client={client} />,
+      memories: <MemoriesSubPage client={client} onOpenSettings={() => dispatch(appActions.navigate("/settings"))} />,
       tasks: <TasksSubPage client={client} />,
       policies: <PoliciesSubPage client={client} />,
       "world-model": <WorldModelSubPage client={client} />,
@@ -124,7 +124,7 @@ export function MemoryPage(props: MemoryPageProps) {
       logs: <LogsSubPage client={client} />,
       sources: <SourcesSubPage />
     }),
-    [client]
+    [client, dispatch]
   );
 
   useEffect(() => {

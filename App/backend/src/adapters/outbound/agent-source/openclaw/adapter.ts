@@ -1,6 +1,7 @@
 /** Adapter module. */
 import { access } from "node:fs/promises";
 import { resolveOpenclawStateDirectory } from "../../agent-paths.js";
+import { collectConversationWindow, remainingMessageCapacity } from "../conversation-window.js";
 import { redactSecrets } from "../secret-redactor.js";
 import type { ConversationMessage, ScanOptions, SourceAdapter, SourceDescriptor } from "../types.js";
 import { discoverOpenclawDatabases } from "./db-discovery.js";
@@ -64,15 +65,14 @@ export function createOpenclawSourceAdapter(deps: CreateOpenclawSourceAdapterDep
           message: database.databasePath
         });
 
-        for await (const rawMessage of readOpenclawDatabase(database.databasePath)) {
+        const messages = await collectConversationWindow(
+          readOpenclawDatabase(database.databasePath),
+          options.since,
+          options.signal,
+          remainingMessageCapacity(options.maxMessages, emittedMessages)
+        );
+        for (const rawMessage of messages) {
           throwIfAborted(options.signal);
-          if (limitReached(emittedMessages, options.maxMessages)) {
-            break;
-          }
-          if (options.since && rawMessage.createdAt < options.since) {
-            continue;
-          }
-
           options.onProgress?.({
             sourceId: descriptor.sourceId,
             phase: "redact",

@@ -10,6 +10,7 @@ import {
   GetMemoryOutputSchema,
   MemoryApiLogsOutputSchema,
   MemoryHealthSnapshotSchema,
+  MemoryProcessingStatusOutputSchema,
   MemoryReloadConfigOutputSchema,
   PanelAnalysisOutputSchema,
   PanelItemsOutputSchema,
@@ -18,6 +19,7 @@ import {
   OpenSessionOutputSchema,
   SearchOutputSchema,
   StartTurnOutputSchema,
+  RetryMemoryProcessingOutputSchema,
   WorkerRunOutputSchema
 } from "@memmy/local-api-contracts";
 import type { ZodType } from "zod";
@@ -166,13 +168,31 @@ export function createHttpMemoryClient(
       });
     },
 
-    async enqueueImportSummaries() {
-      return request("POST", "enqueueImportSummaries", EnqueueImportSummariesOutputSchema);
+    async enqueueImportSummaries(memoryIds) {
+      return request("POST", "enqueueImportSummaries", EnqueueImportSummariesOutputSchema, {
+        body: memoryIds ? { memoryIds } : {}
+      });
+    },
+
+    async getMemoryProcessingStatus(memoryIds) {
+      return request("POST", "memoryProcessingStatus", MemoryProcessingStatusOutputSchema, {
+        body: { memoryIds }
+      });
+    },
+
+    async retryMemoryProcessing(memoryId) {
+      return request("POST", "retryMemoryProcessing", RetryMemoryProcessingOutputSchema, {
+        params: { id: memoryId },
+        body: {}
+      });
     },
 
     async runWorker(input) {
       return request("POST", "runWorker", WorkerRunOutputSchema, {
-        body: { limit: input.limit },
+        body: {
+          limit: input.limit,
+          targetMemoryIds: input.targetMemoryIds
+        },
         signal: input.signal,
         timeoutMs: input.timeoutMs
       });

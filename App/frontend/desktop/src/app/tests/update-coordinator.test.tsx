@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 /** App-level update coordinator tests. */
-import type { DesktopUpdateInstallResult } from "@memmy/desktop-interface";
+import type { DesktopUpdateDownloadProgress, DesktopUpdateInstallResult } from "@memmy/desktop-interface";
 import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -163,6 +163,77 @@ describe("UpdateCoordinatorProvider", () => {
     expect(checkForUpdates).toHaveBeenCalledTimes(1);
     expect(openUpdateInstaller).toHaveBeenCalledTimes(1);
   });
+
+  it("tracks desktop download progress until the installer is prepared", async () => {
+    let resolveDownload!: (result: DesktopUpdateInstallResult) => void;
+    let progressCallback!: (progress: DesktopUpdateDownloadProgress) => void;
+    const downloadPromise = new Promise<DesktopUpdateInstallResult>((resolve) => {
+      resolveDownload = resolve;
+    });
+    const unsubscribeProgress = vi.fn();
+    const onUpdateDownloadProgress = vi.fn((callback: (progress: DesktopUpdateDownloadProgress) => void) => {
+      progressCallback = callback;
+      return unsubscribeProgress;
+    });
+    setDesktopBridge({
+      platform: "darwin",
+      getAppInfo: vi.fn(async () => ({
+        name: "Memmy",
+        version: "2.1.0",
+        platform: "darwin",
+        arch: "arm64"
+      })),
+      checkForUpdates: vi.fn(async () => ({
+        status: "available" as const,
+        currentVersion: "2.1.0",
+        latestVersion: "2.2.0",
+        downloadUrl: "https://updates.example.com/Memmy.dmg"
+      })),
+      downloadUpdate: vi.fn(() => downloadPromise),
+      onUpdateDownloadProgress
+    });
+
+    await act(async () => {
+      root.render(
+        <AppStateProvider>
+          <I18nProvider language="zh-CN">
+            <UpdateCoordinatorProvider>
+              <UpdateHarness />
+            </UpdateCoordinatorProvider>
+          </I18nProvider>
+        </AppStateProvider>
+      );
+    });
+    expect(onUpdateDownloadProgress).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      getButtonByLabel("update-action").click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      getButtonByText("下载更新").click();
+      await Promise.resolve();
+    });
+    expect(readOutput("phase")).toBe("downloading");
+
+    act(() => {
+      progressCallback({
+        downloadUrl: "https://updates.example.com/Memmy.dmg",
+        filePath: "/tmp/Memmy-2.2.0.dmg",
+        transferredBytes: 512,
+        totalBytes: 1024,
+        percent: 50
+      });
+    });
+    expect(readOutput("download-progress")).toBe("50");
+
+    await act(async () => {
+      resolveDownload({ filePath: "/tmp/Memmy-2.2.0.dmg", opened: false });
+      await downloadPromise;
+    });
+    expect(readOutput("phase")).toBe("prepared");
+    expect(readOutput("download-progress")).toBe("");
+  });
 });
 
 function UpdateHarness() {
@@ -188,6 +259,7 @@ function UpdateHarness() {
       )}
       <output aria-label="phase">{update.phase}</output>
       <output aria-label="prepared-path">{update.preparedUpdatePath ?? ""}</output>
+      <output aria-label="download-progress">{update.downloadProgress?.percent ?? ""}</output>
       <output aria-label="feedback-key">{update.feedback?.key ?? ""}</output>
       <GlobalUpdateDialog />
     </>

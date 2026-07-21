@@ -83,6 +83,7 @@ describe("agent source contracts", () => {
       timestamp: "2026-05-28T10:00:01.000Z",
       payload: {
         jobId: "job-1",
+        sourceId: "cursor",
         results: [
           {
             sourceId: "cursor",

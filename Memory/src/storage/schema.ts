@@ -1,8 +1,17 @@
 import type Database from "better-sqlite3";
 
-export const SCHEMA_VERSION = 3;
-export const SCHEMA_MIGRATION_ID = "003_api_log_source_agent";
+export const SCHEMA_VERSION = 4;
+export const SCHEMA_MIGRATION_ID = "004_memory_processing_state";
 const API_LOG_SOURCE_AGENT_MIGRATION_FROM_VERSION = 2;
+const PROCESSING_TAGS = new Set([
+  "摘要排队中",
+  "摘要整理中",
+  "摘要总结中",
+  "建立索引中",
+  "索引建立中",
+  "索引已建立",
+  "处理失败"
+]);
 
 const statements = [
   `CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -385,6 +394,28 @@ const statements = [
   `CREATE INDEX IF NOT EXISTS idx_embedding_retry_target
     ON embedding_retry_queue (target_kind, target_id)`,
 
+  `CREATE TABLE IF NOT EXISTS memory_processing_state (
+    memory_id TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+    state TEXT NOT NULL CHECK (state IN (
+      'summary_pending', 'summarizing', 'embedding_pending', 'embedding',
+      'ready', 'ready_text_only', 'failed'
+    )),
+    stage TEXT CHECK (stage IN ('summary', 'embedding')),
+    active_job_id TEXT REFERENCES evolution_jobs(id) ON DELETE SET NULL,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    manual_retry_count INTEGER NOT NULL DEFAULT 0,
+    retry_action TEXT NOT NULL DEFAULT 'retry'
+      CHECK (retry_action IN ('retry', 'open_settings', 'none')),
+    error_code TEXT,
+    error_message TEXT,
+    failed_at TEXT,
+    updated_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_memory_processing_state_state_updated
+    ON memory_processing_state (state, updated_at ASC)`,
+  `CREATE INDEX IF NOT EXISTS idx_memory_processing_state_active_job
+    ON memory_processing_state (active_job_id)`,
+
   `CREATE TABLE IF NOT EXISTS artifacts (
     id TEXT PRIMARY KEY,
     session_id TEXT,
@@ -426,12 +457,27 @@ export function migrate(db: Database.Database): void {
   const now = new Date().toISOString();
   const checksum = String(statements.join("\n").length);
   const foreignKeys = Number(db.pragma("foreign_keys", { simple: true }) ?? 0);
-  let reset = false;
+  const hasMemories = tableExists(db, "memories");
+  const version = currentSchemaVersion(db);
+
+  if (hasMemories && version !== SCHEMA_VERSION && version !== 2 && version !== 3) {
+    throw new Error(
+      `Unsupported memory database schema version ${version}; the database was left unchanged`
+    );
+  }
+  if (version > SCHEMA_VERSION) {
+    throw new Error(
+      `Memory database schema version ${version} is newer than supported version ${SCHEMA_VERSION}`
+    );
+  }
 
   db.pragma("foreign_keys = OFF");
   try {
     db.transaction(() => {
-      reset = migrateOrResetSchema(db);
+      if (version === API_LOG_SOURCE_AGENT_MIGRATION_FROM_VERSION &&
+          !columnExists(db, "api_logs", "source_agent")) {
+        db.prepare(`ALTER TABLE api_logs ADD COLUMN source_agent TEXT`).run();
+      }
       for (const statement of statements) {
         db.prepare(statement).run();
       }
@@ -440,6 +486,11 @@ export function migrate(db: Database.Database): void {
          ON evolution_jobs (dedupe_key)
          WHERE dedupe_key IS NOT NULL AND status IN ('queued', 'leased', 'failed')`
       ).run();
+
+      if (hasMemories && version < SCHEMA_VERSION) {
+        backfillMemoryProcessingState(db, now);
+        removeLegacyProcessingMetadata(db);
+      }
 
       db.prepare(
         `INSERT INTO schema_migrations (id, version, applied_at, checksum)
@@ -450,70 +501,197 @@ export function migrate(db: Database.Database): void {
            checksum = excluded.checksum`
       ).run(SCHEMA_MIGRATION_ID, SCHEMA_VERSION, now, checksum);
     })();
-    if (reset) {
-      db.exec("VACUUM");
-    }
   } finally {
     db.pragma(`foreign_keys = ${foreignKeys ? "ON" : "OFF"}`);
   }
 }
 
-function migrateOrResetSchema(db: Database.Database): boolean {
-  const hasMemories = tableExists(db, "memories");
-  if (!hasMemories) {
-    return false;
-  }
-  const version = tableExists(db, "schema_migrations")
-    ? Number((db.prepare(`SELECT MAX(version) AS version FROM schema_migrations`).get() as { version?: number } | undefined)?.version ?? 0)
-    : 0;
-  if (version === SCHEMA_VERSION) return false;
-  if (version === API_LOG_SOURCE_AGENT_MIGRATION_FROM_VERSION) {
-    db.prepare(`ALTER TABLE api_logs ADD COLUMN source_agent TEXT`).run();
-    return false;
-  }
+function currentSchemaVersion(db: Database.Database): number {
+  if (!tableExists(db, "schema_migrations")) return 0;
+  return Number((db.prepare(
+    `SELECT MAX(version) AS version FROM schema_migrations`
+  ).get() as { version?: number } | undefined)?.version ?? 0);
+}
 
-  const vectorTables = db
-    .prepare(
-      `SELECT name
-       FROM sqlite_master
-       WHERE type = 'table'
-         AND name GLOB 'memory_vec_[0-9]*'
-         AND sql LIKE 'CREATE VIRTUAL TABLE%USING vec0%'
-       ORDER BY name`
-    )
-    .all() as Array<{ name: string }>;
-  for (const { name } of vectorTables) {
-    db.prepare(`DROP TABLE IF EXISTS ${name}`).run();
-  }
+function columnExists(db: Database.Database, table: string, column: string): boolean {
+  if (!tableExists(db, table)) return false;
+  return (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>)
+    .some((item) => item.name === column);
+}
 
-  for (const table of [
-    "schema_migrations",
-    "audit_logs",
-    "artifacts",
-    "embedding_retry_queue",
-    "evolution_jobs",
-    "idempotency_keys",
-    "memory_change_log",
-    "api_logs",
-    "recall_events",
-    "skill_trials",
-    "trace_policy_links",
-    "l2_candidate_pool",
-    "decision_repairs",
-    "feedback",
-    "raw_turns",
-    "episodes",
-    "sessions",
-    "memory_vector_entries",
-    "memory_vectors",
-    "memory_embeddings",
-    "memories_fts",
-    "memories",
-    "runtime_kv"
-  ]) {
-    db.prepare(`DROP TABLE IF EXISTS ${table}`).run();
+function backfillMemoryProcessingState(db: Database.Database, now: string): void {
+  db.prepare(
+    `INSERT INTO memory_processing_state (
+       memory_id, state, stage, active_job_id, attempt_count, manual_retry_count,
+       retry_action, error_code, error_message, failed_at, updated_at
+     )
+     SELECT
+       memories.id,
+       CASE
+         WHEN EXISTS (
+           SELECT 1 FROM memory_vector_entries
+           WHERE memory_id = memories.id AND vector_field = 'vec_summary'
+         ) THEN 'ready'
+         WHEN COALESCE(latest_job.status, '') = 'dead_letter'
+           OR COALESCE(latest_retry.status, '') = 'failed' THEN 'failed'
+         WHEN COALESCE(latest_job.job_type, '') IN ('trace_summary', 'import_summary')
+           THEN 'summary_pending'
+         WHEN TRIM(COALESCE(
+           json_extract(properties_json, '$.internal_info.trace.summary'),
+           json_extract(info_json, '$.summary'),
+           json_extract(properties_json, '$.internal_info.summary'),
+           ''
+         )) = '' THEN 'summary_pending'
+         WHEN LOWER(TRIM(COALESCE(
+           json_extract(properties_json, '$.internal_info.trace.summary'),
+           json_extract(info_json, '$.summary'),
+           json_extract(properties_json, '$.internal_info.summary'),
+           ''
+         ))) IN ('user', 'assistant', 'system', 'tool', 'developer', '摘要排队中', '摘要整理中', '摘要总结中')
+           THEN 'summary_pending'
+         ELSE 'embedding_pending'
+       END,
+       CASE
+         WHEN EXISTS (
+           SELECT 1 FROM memory_vector_entries
+           WHERE memory_id = memories.id AND vector_field = 'vec_summary'
+         ) THEN NULL
+         WHEN COALESCE(latest_job.job_type, '') IN ('trace_summary', 'import_summary') THEN 'summary'
+         WHEN COALESCE(latest_job.job_type, '') = 'embedding'
+           OR COALESCE(latest_retry.status, '') = 'failed' THEN 'embedding'
+         WHEN TRIM(COALESCE(
+           json_extract(properties_json, '$.internal_info.trace.summary'),
+           json_extract(info_json, '$.summary'),
+           json_extract(properties_json, '$.internal_info.summary'),
+           ''
+         )) = '' THEN 'summary'
+         WHEN LOWER(TRIM(COALESCE(
+           json_extract(properties_json, '$.internal_info.trace.summary'),
+           json_extract(info_json, '$.summary'),
+           json_extract(properties_json, '$.internal_info.summary'),
+           ''
+         ))) IN ('user', 'assistant', 'system', 'tool', 'developer', '摘要排队中', '摘要整理中', '摘要总结中')
+           THEN 'summary'
+         ELSE 'embedding'
+       END,
+       NULL,
+       MAX(COALESCE(latest_job.attempts, 0), COALESCE(latest_retry.attempts, 0)),
+       0,
+       'retry',
+       CASE
+         WHEN COALESCE(latest_job.status, '') = 'dead_letter' THEN 'processing_failed'
+         WHEN COALESCE(latest_retry.status, '') = 'failed' THEN 'embedding_failed'
+         ELSE NULL
+       END,
+       COALESCE(latest_job.last_error, latest_retry.last_error),
+       CASE
+         WHEN COALESCE(latest_job.status, '') = 'dead_letter' THEN latest_job.updated_at
+         WHEN COALESCE(latest_retry.status, '') = 'failed'
+           THEN datetime(latest_retry.updated_at / 1000, 'unixepoch')
+         ELSE NULL
+       END,
+       ?
+     FROM memories
+     LEFT JOIN evolution_jobs AS latest_job ON latest_job.id = (
+       SELECT id FROM evolution_jobs
+       WHERE target_memory_id = memories.id
+         AND job_type IN ('trace_summary', 'import_summary', 'embedding')
+       ORDER BY updated_at DESC, rowid DESC LIMIT 1
+     )
+     LEFT JOIN embedding_retry_queue AS latest_retry ON latest_retry.id = (
+       SELECT id FROM embedding_retry_queue
+       WHERE target_kind = 'trace' AND target_id = memories.id
+         AND vector_field = 'vec_summary'
+       ORDER BY updated_at DESC, rowid DESC LIMIT 1
+     )
+     WHERE memories.deleted_at IS NULL
+       AND memories.status != 'deleted'
+       AND memories.memory_layer = 'L1'
+       AND json_extract(properties_json, '$.internal_info.memory_kind') = 'trace'
+     ON CONFLICT(memory_id) DO NOTHING`
+  ).run(now);
+
+  db.prepare(
+    `DELETE FROM evolution_jobs
+     WHERE job_type IN ('trace_summary', 'import_summary', 'embedding')
+       AND target_memory_id IN (SELECT memory_id FROM memory_processing_state)`
+  ).run();
+  db.prepare(
+    `DELETE FROM embedding_retry_queue
+     WHERE target_kind = 'trace'
+       AND target_id IN (SELECT memory_id FROM memory_processing_state)`
+  ).run();
+}
+
+function removeLegacyProcessingMetadata(db: Database.Database): void {
+  const rows = db.prepare(
+    `SELECT id, tags_json, info_json, properties_json, memory_value, status, deleted_at
+     FROM memories
+     WHERE memory_layer = 'L1'
+       AND json_extract(properties_json, '$.internal_info.memory_kind') = 'trace'`
+  ).all() as Array<{
+    id: string;
+    tags_json: string;
+    info_json: string;
+    properties_json: string;
+    memory_value: string;
+    status: string;
+    deleted_at: string | null;
+  }>;
+
+  for (const row of rows) {
+    const tags = stripProcessingTags(parseJsonArray(row.tags_json));
+    const info = parseJsonObject(row.info_json);
+    const properties = parseJsonObject(row.properties_json);
+    delete info.import_pipeline;
+    if (Array.isArray(info.tags)) info.tags = stripProcessingTags(info.tags);
+    if (Array.isArray(properties.tags)) properties.tags = stripProcessingTags(properties.tags);
+    const publicInfo = isRecord(properties.info) ? properties.info : undefined;
+    if (publicInfo) {
+      delete publicInfo.import_pipeline;
+      if (Array.isArray(publicInfo.tags)) publicInfo.tags = stripProcessingTags(publicInfo.tags);
+    }
+    const internalInfo = isRecord(properties.internal_info) ? properties.internal_info : undefined;
+    if (internalInfo) delete internalInfo.import_pipeline;
+
+    db.prepare(
+      `UPDATE memories SET tags_json = ?, info_json = ?, properties_json = ? WHERE id = ?`
+    ).run(JSON.stringify(tags), JSON.stringify(info), JSON.stringify(properties), row.id);
+    db.prepare(`DELETE FROM memories_fts WHERE id = ?`).run(row.id);
+    if (!row.deleted_at && row.status !== "deleted") {
+      db.prepare(
+        `INSERT INTO memories_fts (id, identifier, memory_value, tags) VALUES (?, ?, ?, ?)`
+      ).run(row.id, row.id, row.memory_value, tags.join(" "));
+    }
   }
-  return true;
+}
+
+function parseJsonArray(value: string): unknown[] {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function parseJsonObject(value: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return isRecord(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function stripProcessingTags(values: unknown[]): string[] {
+  return [...new Set(values
+    .filter((value): value is string => typeof value === "string")
+    .filter((value) => !PROCESSING_TAGS.has(value)))];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
 function tableExists(db: Database.Database, table: string): boolean {

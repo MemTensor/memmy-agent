@@ -17,7 +17,10 @@ import type { PermissionManager } from "../../../../permission/index.js";
 import { withErrorEnvelope } from "../../../../services/error-envelope.js";
 import type { AgentSourceAutoInjectService } from "../../../../services/agent-source-auto-inject-service.js";
 import type { AgentSourceService } from "../../../../services/agent-source-service.js";
-import { deletePersistedScanResume } from "../../../../services/agent-source-scan-journal.js";
+import {
+  deletePersistedScanResume,
+  readLatestPersistedScanResume
+} from "../../../../services/agent-source-scan-journal.js";
 import type { ProgressBus } from "../../../../services/progress-bus.js";
 import {
   type AgentSourceScanJobState,
@@ -52,14 +55,22 @@ export function registerAgentSourceRoutes(app: FastifyInstance, options: Registe
   };
 
   let activeScanJob: ActiveScanJob | null = null;
-  let pausedScanJob: {
+  type PausedScanJob = {
     jobId: string;
     sourceId: string;
     mode?: AgentSourceScanJobState["mode"];
     lastProgress: PipelineProgress & { jobId: string };
     resume: RouteScanResumeState | null;
+  };
+  const restoredScanJob = toPausedScanJob(readLatestPersistedScanResume(options.scanWorker?.databasePath));
+  let pausedScanJob: PausedScanJob | null = restoredScanJob;
+  let lastScanProgress: (PipelineProgress & { jobId: string }) | null = restoredScanJob?.lastProgress ?? null;
+  let lastScanCompletion: {
+    jobId: string;
+    sourceId: string;
+    succeeded: boolean;
+    completedAt: string;
   } | null = null;
-  let lastScanProgress: (PipelineProgress & { jobId: string }) | null = null;
 
   app.addHook("onClose", async () => {
     if (!activeScanJob) {
@@ -69,8 +80,6 @@ export function registerAgentSourceRoutes(app: FastifyInstance, options: Registe
     const closingJob = activeScanJob;
     activeScanJob = null;
     abortScanJob(closingJob);
-    cleanupResumeState(closingJob.resume);
-    cleanupResumeState(pausedScanJob?.resume ?? null);
     pausedScanJob = null;
     await closingJob.worker?.terminate().catch(() => undefined);
   });
@@ -113,9 +122,11 @@ export function registerAgentSourceRoutes(app: FastifyInstance, options: Registe
     const progress = activeScanJob
       ? { jobId: activeScanJob.jobId, ...activeScanJob.lastProgress }
       : lastScanProgress?.phase === "stopped" ? lastScanProgress : null;
+    const completion = recentScanCompletion(lastScanCompletion);
     return reply.send(AgentSourceScanStatusResponseSchema.parse({
       active: Boolean(activeScanJob),
-      progress
+      progress,
+      ...(completion ? { completion } : {})
     }));
   });
 
@@ -146,6 +157,7 @@ export function registerAgentSourceRoutes(app: FastifyInstance, options: Registe
       pausedScanJob = null;
     }
     const jobId = pausedJob?.jobId ?? randomUUID();
+    lastScanCompletion = null;
     const controller = new AbortController();
     activeScanJob = {
       jobId,
@@ -313,8 +325,10 @@ export function registerAgentSourceRoutes(app: FastifyInstance, options: Registe
         if (activeScanJob?.jobId !== scanJob.jobId) {
           return;
         }
+        lastScanCompletion = scanCompletion(scanJob.jobId, scanJob.sourceId, results);
         options.progressBus.emit("agent_source.scan_completed", {
           jobId: scanJob.jobId,
+          sourceId: scanJob.sourceId,
           results
         });
       }
@@ -387,8 +401,10 @@ export function registerAgentSourceRoutes(app: FastifyInstance, options: Registe
     }
 
     if (message.type === "completed") {
+      lastScanCompletion = scanCompletion(jobId, activeScanJob.sourceId, message.results);
       options.progressBus.emit("agent_source.scan_completed", {
         jobId,
+        sourceId: activeScanJob.sourceId,
         results: message.results
       });
       finishActiveScanJob(jobId);
@@ -403,24 +419,36 @@ export function registerAgentSourceRoutes(app: FastifyInstance, options: Registe
       return;
     }
 
+    const results = [
+      {
+        sourceId: activeScanJob.sourceId,
+        discoveredConversations: 0,
+        emittedMessages: 0,
+        skipped: 0,
+        errors: [
+          {
+            conversationId: "scan",
+            reason: error.message
+          }
+        ]
+      }
+    ];
+    lastScanCompletion = scanCompletion(jobId, activeScanJob.sourceId, results);
     options.progressBus.emit("agent_source.scan_completed", {
       jobId,
-      results: [
-        {
-          sourceId: activeScanJob.sourceId,
-          discoveredConversations: 0,
-          emittedMessages: 0,
-          skipped: 0,
-          errors: [
-            {
-              conversationId: "scan",
-              reason: error.message
-            }
-          ]
-        }
-      ]
+      sourceId: activeScanJob.sourceId,
+      results
     });
-    finishActiveScanJob(jobId);
+    const failedJob = activeScanJob;
+    pausedScanJob = {
+      jobId: failedJob.jobId,
+      sourceId: failedJob.sourceId,
+      mode: failedJob.mode,
+      lastProgress: toStoppedProgress(failedJob.jobId, failedJob.lastProgress),
+      resume: failedJob.resume
+    };
+    activeScanJob = null;
+    lastScanProgress = pausedScanJob.lastProgress;
   }
 
   function updateActiveProgress(jobId: string, progress: PipelineProgress): void {
@@ -464,8 +492,53 @@ export function registerAgentSourceRoutes(app: FastifyInstance, options: Registe
   }
 }
 
+function toPausedScanJob(
+  persisted: ReturnType<typeof readLatestPersistedScanResume>
+): {
+  jobId: string;
+  sourceId: string;
+  mode?: AgentSourceScanJobState["mode"];
+  lastProgress: PipelineProgress & { jobId: string };
+  resume: RouteScanResumeState;
+} | null {
+  if (!persisted) return null;
+  const total = persisted.resume.phase === "add" ? persisted.resume.messageCount : 0;
+  return {
+    jobId: persisted.jobId,
+    sourceId: persisted.sourceId,
+    mode: persisted.mode,
+    resume: persisted.resume,
+    lastProgress: {
+      jobId: persisted.jobId,
+      sourceId: persisted.sourceId,
+      phase: "stopped",
+      current: 0,
+      total,
+      message: "Agent source scan interrupted and ready to resume"
+    }
+  };
+}
+
 function emitStoppedProgress(jobId: string, progressBus: ProgressBus, lastProgress?: PipelineProgress): void {
   progressBus.emit("agent_source.scan_progress", toStoppedProgress(jobId, lastProgress));
+}
+
+function scanCompletion(
+  jobId: string,
+  sourceId: string,
+  results: readonly { errors: readonly unknown[] }[]
+): { jobId: string; sourceId: string; succeeded: boolean; completedAt: string } {
+  return {
+    jobId,
+    sourceId,
+    succeeded: results.every((result) => result.errors.length === 0),
+    completedAt: new Date().toISOString()
+  };
+}
+
+function recentScanCompletion<T extends { completedAt: string }>(completion: T | null): T | null {
+  if (!completion) return null;
+  return Date.now() - Date.parse(completion.completedAt) <= 60_000 ? completion : null;
 }
 
 function resolveAgentSourceScanWorkerUrl(): URL {

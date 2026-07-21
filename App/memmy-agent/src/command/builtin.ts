@@ -5,9 +5,8 @@ import { handlePairingCommand } from "../integrations/channel-auth/store.js";
 import { buildStatusContent } from "../utils/helpers.js";
 import { fetchSearchUsage } from "../utils/searchusage.js";
 import { buildHistoryDagPayload, renderHistoryDagSummary, SessionDagStore } from "../session-dag/index.js";
+import { VERSION } from "../version.js";
 import { CommandContext, CommandRouter } from "./router.js";
-
-const VERSION = "0.0.1-beta.1";
 
 export class BuiltinCommandSpec {
   constructor(

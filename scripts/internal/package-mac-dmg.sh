@@ -291,7 +291,8 @@ const rootDir = requiredEnv("ROOT_DIR");
 const memoryDir = requiredEnv("MEMORY_DIR");
 const runtimeDir = requiredEnv("MEMORY_RUNTIME_DIR");
 const runtimeName = "memmy-memory-runtime";
-const runtimeVersion = "0.0.0";
+const projectPackage = JSON.parse(await readFile(join(rootDir, "package.json"), "utf8"));
+const runtimeVersion = projectPackage.version;
 
 const memoryPackage = JSON.parse(await readFile(join(memoryDir, "package.json"), "utf8"));
 const rootLock = JSON.parse(await readFile(join(rootDir, "package-lock.json"), "utf8"));
@@ -391,7 +392,60 @@ function resolvePackageKey(fromPackageKey, dependencyName) {
 NODE
 }
 
+prune_better_sqlite3_build_artifacts() {
+  local module_dir="$1"
+  local native_file="$module_dir/build/Release/better_sqlite3.node"
+
+  if [ ! -f "$native_file" ]; then
+    return
+  fi
+
+  local tmp_dir
+  tmp_dir="$(mktemp -d)"
+  mkdir -p "$tmp_dir/build/Release"
+  cp "$native_file" "$tmp_dir/build/Release/better_sqlite3.node"
+  rm -rf "$module_dir/build" "$module_dir/deps"
+  mkdir -p "$module_dir/build/Release"
+  cp "$tmp_dir/build/Release/better_sqlite3.node" "$native_file"
+  rm -rf "$tmp_dir"
+}
+
+prune_onnxruntime_native_artifacts() {
+  local target_cpu="$1"
+  local napi_dir="$2"
+
+  if [ ! -d "$napi_dir" ]; then
+    return
+  fi
+
+  find "$napi_dir" -mindepth 1 -maxdepth 1 -type d ! -name darwin -exec rm -rf {} +
+  case "$target_cpu" in
+    arm64)
+      rm -rf "$napi_dir/darwin/x64"
+      ;;
+    x64)
+      rm -rf "$napi_dir/darwin/arm64"
+      ;;
+  esac
+}
+
+prune_mac_runtime_artifacts() {
+  local target_cpu="$1"
+
+  echo "Pruning macOS runtime artifacts for darwin-$target_cpu."
+  find "$RUNTIME_DIR" -type f -name "*.map" -delete
+
+  while IFS= read -r module_dir; do
+    prune_better_sqlite3_build_artifacts "$module_dir"
+  done < <(find "$RUNTIME_DIR" -path "*/node_modules/better-sqlite3" -type d)
+
+  while IFS= read -r napi_dir; do
+    prune_onnxruntime_native_artifacts "$target_cpu" "$napi_dir"
+  done < <(find "$RUNTIME_DIR" -path "*/node_modules/onnxruntime-node/bin/napi-v3" -type d)
+}
+
 cd "$ROOT_DIR"
+node scripts/sync-project-version.mjs
 
 BUILDER_CONFIG="electron-builder.yml"
 TARGET_CPU="$(resolve_target_cpu "$@")"
@@ -405,6 +459,7 @@ echo "Preparing macOS $TARGET_CPU package."
 if [ ! -x "$ROOT_DIR/node_modules/.bin/tsc" ] || [ ! -x "$ROOT_DIR/node_modules/.bin/electron-builder" ]; then
   npm install
 fi
+npm install --workspace @memmy/frontend-desktop --no-package-lock
 
 echo "Installing memmy-agent dependencies."
 npm ci --prefix "$AGENT_DIR"
@@ -441,6 +496,7 @@ create_cli_launcher "$CLI_BIN_DIR/memmy-memory" "dist/runtime/memory/src/cli/ind
 create_cli_launcher "$CLI_BIN_DIR/memmy" "dist/runtime/memmy-agent/dist/main.js"
 create_cli_installer "$CLI_BIN_DIR/install-cli"
 create_dmg_cli_installer_command "$DMG_HELPER_DIR/Install CLI.command"
+prune_mac_runtime_artifacts "$TARGET_CPU"
 
 if [ "${MEMMY_PACKAGE_PREPARE_ONLY:-}" = "1" ]; then
   echo "Prepared desktop runtime resources at $RUNTIME_DIR"

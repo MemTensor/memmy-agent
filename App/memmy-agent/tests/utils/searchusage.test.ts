@@ -264,7 +264,7 @@ describe("fetchSearchUsage", () => {
 
 describe("buildStatusContent search usage integration", () => {
   const base = {
-    version: "0.0.1-beta.1",
+    version: "test-version",
     model: "claude-opus-4-5",
     startTime: 1_000_000,
     lastUsage: { prompt_tokens: 1000, completion_tokens: 200 },
@@ -302,7 +302,7 @@ describe("buildStatusContent search usage integration", () => {
       searchUsageText: "🔍 Web Search: duckduckgo\n   Usage tracking: not available",
     });
 
-    expect(content).toContain("memmy v0.0.1-beta.1");
+    expect(content).toContain("memmy vtest-version");
     expect(content).toContain("claude-opus-4-5");
     expect(content).toContain("1000 in / 200 out");
     expect(content).toContain("duckduckgo");

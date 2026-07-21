@@ -410,6 +410,41 @@ export function createMockMemoryRuntimeClient(): MemoryRuntimeClient {
       };
     },
 
+    async getMemoryProcessingStatus(memoryIds) {
+      return {
+        items: mockMemoryItems
+          .filter((item) => memoryIds.includes(item.id) && item.processing)
+          .map((item) => item.processing!),
+        serverTime: now
+      };
+    },
+
+    async retryMemoryProcessing(id) {
+      return {
+        accepted: true,
+        processing: {
+          memoryId: id,
+          state: "summary_pending",
+          stage: "summary",
+          activeJobId: "mock-processing-job",
+          attemptCount: 0,
+          manualRetryCount: 1,
+          retryAction: "none",
+          errorCode: null,
+          errorMessage: null,
+          failedAt: null,
+          updatedAt: now
+        },
+        job: {
+          jobId: "mock-processing-job",
+          jobType: "import_summary",
+          status: "queued",
+          targetMemoryId: id
+        },
+        serverTime: now
+      };
+    },
+
     async listMemoryLogs(input): Promise<MemoryApiLogsOutput> {
       const logs: MemoryApiLogsOutput["logs"] = [
         {

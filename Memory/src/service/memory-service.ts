@@ -12,6 +12,8 @@ import type {
   MemoryKind,
   MemoryLayer,
   MemoryListItem,
+  MemoryProcessingRecord,
+  MemoryProcessingState,
   MemoryImportRequest,
   MemoryReloadConfigRequest,
   MemoryReloadConfigResponse,
@@ -34,6 +36,7 @@ import type {
   TurnCompleteRequest,
   TurnStartRequest
 } from "../types.js";
+import { PROJECT_VERSION } from "../cli/project-version.js";
 import { DEFAULT_NAMESPACE_SOURCE } from "../types.js";
 import { MemoryServiceError } from "../utils/error.js";
 import { newId, stableHash, stableStringify } from "../utils/id.js";
@@ -263,13 +266,23 @@ type SkillEnhancementResult =
   | { ok: false; reason: string };
 type TraceMeta = NonNullable<ReturnType<typeof traceMetaFromMemory>>;
 const IMPORT_SUMMARY_QUEUED_TAG = "摘要排队中";
-const IMPORT_INDEXING_TAG = "建立索引中";
-const IMPORT_INDEXED_TAG = "索引已建立";
-const IMPORT_STATUS_TAGS = [IMPORT_SUMMARY_QUEUED_TAG, IMPORT_INDEXING_TAG, IMPORT_INDEXED_TAG];
+const IMPORT_SUMMARY_PROCESSING_TAG = "摘要总结中";
+const IMPORT_INDEXING_TAG = "索引建立中";
+const IMPORT_FAILED_TAG = "处理失败";
+const IMPORT_STATUS_TAGS = [
+  IMPORT_SUMMARY_QUEUED_TAG,
+  "摘要整理中",
+  IMPORT_SUMMARY_PROCESSING_TAG,
+  "建立索引中",
+  IMPORT_INDEXING_TAG,
+  "索引已建立",
+  IMPORT_FAILED_TAG
+];
 const IMPORT_DEFAULT_ALPHA = 0;
 const IMPORT_DEFAULT_VALUE = 0;
 const IMPORT_DEFAULT_PRIORITY = 0.5;
 const IMPORT_TOOL_PAYLOAD_MAX_CHARS = 20_000;
+const SUMMARY_WORKER_CONCURRENCY = 4;
 type PolicyMeta = NonNullable<ReturnType<typeof policyMetaFromMemory>>;
 type WorldModelMeta = NonNullable<ReturnType<typeof worldModelMetaFromMemory>>;
 type HumanScoreResult = ReturnType<typeof heuristicHumanScore>;
@@ -501,7 +514,7 @@ export class MemoryService {
     const backend = this.storageCapabilities();
     return {
       ok: true,
-      version: "0.1.0",
+      version: PROJECT_VERSION,
       uptimeMs: Date.now() - this.startedAt,
       mode: this.mode,
       activeProfile: this.config.activeProfile,
@@ -538,17 +551,21 @@ export class MemoryService {
     };
   }
 
-  reloadConfig(_request: MemoryReloadConfigRequest = {}): MemoryReloadConfigResponse {
+  reloadConfig(request: MemoryReloadConfigRequest = {}): MemoryReloadConfigResponse {
     const previousConfig = this.config;
     const loader = this.options.configLoader ?? loadMemmyConfig;
     const nextConfig = cloneMemmyConfig(loader(this.options.configPath).config);
     const changed = stableStringify(previousConfig) !== stableStringify(nextConfig);
     const requiresRestart = stableStringify(previousConfig.storage) !== stableStringify(nextConfig.storage);
+    const reloadedAt = nowIso();
 
     this.config = nextConfig;
     this.llm = createLlmClient(nextConfig.summary, { modelRole: "memory_summary" });
     this.skillLlm = createLlmClient(resolveEvolutionConfig(nextConfig), { modelRole: "memory_evolution" });
     this.embedder = createEmbedder(nextConfig.embedding);
+    if (!requiresRestart && request.restartFailedProcessing !== false) {
+      this.restartFailedProcessing(reloadedAt);
+    }
 
     return {
       activeProfile: this.config.activeProfile,
@@ -559,7 +576,7 @@ export class MemoryService {
         evolution: this.skillLlm.status(),
         embedding: this.embedder.status()
       },
-      reloadedAt: nowIso()
+      reloadedAt
     };
   }
 
@@ -634,7 +651,7 @@ export class MemoryService {
     const namespace = normalizeNamespace(request.namespace);
     return {
       adapterId: request.adapterId ?? "anonymous",
-      serviceVersion: "0.1.0",
+      serviceVersion: PROJECT_VERSION,
       acceptedCapabilities: {
         lifecycle: request.capabilities?.lifecycle ?? true,
         tools: request.capabilities?.tools ?? true,
@@ -1428,35 +1445,60 @@ export class MemoryService {
           createdAt: at
         });
         this.repos.runtime.appendEpisodeTurn(episode.id, stepRawTurnId, upsert.memory.id, at);
-        if (this.llm.isConfigured()) {
-          jobs.push(this.enqueueJob({
-            jobType: "trace_summary",
-            userId: session.userId,
-            sessionId: session.id,
-            episodeId: episode.id,
-            targetMemoryId: upsert.memory.id,
-            payload: {
-              turnId: step.turnId,
-              rawTurnId: stepRawTurnId,
-              source: "turn.complete.capture.v7"
-            },
-            createdAt: at
-          }));
-        }
-        if (this.config.algorithm.capture.embedAfterCapture) {
-          jobs.push(this.enqueueJob({
-            jobType: "embedding",
-            userId: session.userId,
-            sessionId: session.id,
-            episodeId: episode.id,
-            targetMemoryId: upsert.memory.id,
-            payload: {
-              turnId: step.turnId,
-              rawTurnId: stepRawTurnId,
-              waitsFor: "trace_summary"
-            },
-            createdAt: at
-          }));
+        if (!this.repos.processing.get(upsert.memory.id)) {
+          const summaryRequired = this.llm.isConfigured();
+          const embeddingRequired = this.config.algorithm.capture.embedAfterCapture;
+          const job = summaryRequired
+            ? this.enqueueJob({
+              jobType: "trace_summary",
+              userId: session.userId,
+              sessionId: session.id,
+              episodeId: episode.id,
+              targetMemoryId: upsert.memory.id,
+              payload: {
+                turnId: step.turnId,
+                rawTurnId: stepRawTurnId,
+                source: "turn.complete.capture.v7",
+                contentHash: upsert.memory.contentHash
+              },
+              maxAttempts: 3,
+              createdAt: at
+            })
+            : embeddingRequired
+              ? this.enqueueJob({
+                jobType: "embedding",
+                userId: session.userId,
+                sessionId: session.id,
+                episodeId: episode.id,
+                targetMemoryId: upsert.memory.id,
+                payload: {
+                  turnId: step.turnId,
+                  rawTurnId: stepRawTurnId,
+                  source: "turn.complete.capture.v7",
+                  contentHash: upsert.memory.contentHash
+                },
+                maxAttempts: 6,
+                createdAt: at
+              })
+              : undefined;
+          if (job) jobs.push(job);
+          this.repos.processing.save({
+            memoryId: upsert.memory.id,
+            state: summaryRequired
+              ? "summary_pending"
+              : embeddingRequired
+                ? "embedding_pending"
+                : "ready_text_only",
+            stage: summaryRequired ? "summary" : embeddingRequired ? "embedding" : null,
+            activeJobId: job?.id ?? null,
+            attemptCount: 0,
+            manualRetryCount: 0,
+            retryAction: "retry",
+            errorCode: null,
+            errorMessage: null,
+            failedAt: null,
+            updatedAt: at
+          });
         }
       }
       for (const artifact of requestArtifacts) {
@@ -2159,7 +2201,7 @@ export class MemoryService {
         status: ["activated", "resolving"]
       },
       500
-    ).filter(isMemoryReadyForRetrieval);
+    ).filter((memory) => this.isMemoryReadyForRetrieval(memory));
     const retrieval = retrievePluginMemories({
       query,
       queryVector: await this.queryVector(query),
@@ -2602,7 +2644,7 @@ export class MemoryService {
       channelScoresByMemory.set(hit.id, scores);
     }
     return {
-      memories: this.repos.memories.getMany(candidateIds).filter(isMemoryReadyForRetrieval),
+      memories: this.repos.memories.getMany(candidateIds).filter((memory) => this.isMemoryReadyForRetrieval(memory)),
       channelScoresByMemory
     };
   }
@@ -2630,6 +2672,20 @@ export class MemoryService {
     const tagged = search(tags);
     if (tagged.length > 0 || config.tagFilter === "on") return tagged;
     return this.repos.memories.searchVectorIds(queryVector, "vec_summary", filter, vectorPool);
+  }
+
+  private isMemoryReadyForRetrieval(memory: MemoryRow): boolean {
+    const processing = this.repos.processing.get(memory.id);
+    if (!processing || !memoryHasImportPipeline(memory)) return isMemoryReadyForRetrieval(memory);
+    if (processing.state === "ready" || processing.state === "ready_text_only") return true;
+    if (
+      processing.state === "embedding_pending" ||
+      processing.state === "embedding" ||
+      (processing.state === "failed" && processing.stage === "embedding")
+    ) {
+      return isMemoryReadyForRetrieval(memory);
+    }
+    return false;
   }
 
   private retrievalVectorPoolSize(
@@ -2957,16 +3013,7 @@ export class MemoryService {
         title,
         summary: importSummary ?? firstLine(request.content),
         source: request.source ?? "manual",
-        turn_id: request.turnId,
-        ...(importTrace
-          ? {
-            import_pipeline: {
-              status: "summary_queued",
-              label: IMPORT_SUMMARY_QUEUED_TAG,
-              updated_at: at
-            }
-          }
-          : {})
+        turn_id: request.turnId
       },
       internal: {
         source: request.source ?? "manual",
@@ -2975,12 +3022,7 @@ export class MemoryService {
         turn_id: request.turnId,
         ...(importTrace
           ? {
-            plugin_algorithm: "memory.add.import_async.v1",
-            import_pipeline: {
-              status: "summary_queued",
-              label: IMPORT_SUMMARY_QUEUED_TAG,
-              updated_at: at
-            },
+            plugin_algorithm: "memory.add.import_async.v2",
             trace: importTrace
           }
           : {})
@@ -2988,21 +3030,73 @@ export class MemoryService {
       createdAt: at
     });
 
-    const upsert = this.repos.memories.upsertByKey(memory);
-    const inserted = upsert.memory;
-    const changeSeq = this.repos.runtime.appendChange({
-      memoryId: inserted.id,
-      namespaceId: namespaceIdFromMemory(inserted),
-      kind: kindFromMemory(inserted),
-      op: upsert.created ? "created" : "updated",
-      entityId: inserted.id,
-      userId: inserted.userId,
-      changeType: upsert.created ? "create" : "update",
-      before: upsert.previous,
-      after: inserted,
-      source: "memory.add",
-      createdAt: at
+    const persisted = this.repos.transaction(() => {
+      const upsert = this.repos.memories.upsertByKey(memory);
+      const inserted = upsert.memory;
+      const changeSeq = this.repos.runtime.appendChange({
+        memoryId: inserted.id,
+        namespaceId: namespaceIdFromMemory(inserted),
+        kind: kindFromMemory(inserted),
+        op: upsert.created ? "created" : "updated",
+        entityId: inserted.id,
+        userId: inserted.userId,
+        changeType: upsert.created ? "create" : "update",
+        before: upsert.previous,
+        after: inserted,
+        source: "memory.add",
+        createdAt: at
+      });
+
+      if (importTrace) {
+        const existing = this.repos.processing.get(inserted.id);
+        const contentChanged = Boolean(
+          !upsert.created &&
+          upsert.previous?.contentHash &&
+          upsert.previous.contentHash !== inserted.contentHash
+        );
+        if (contentChanged) {
+          this.repos.memories.deleteVector(inserted.id, "vec_summary");
+        }
+        const processing = !existing || contentChanged
+          ? this.repos.processing.save({
+            memoryId: inserted.id,
+            state: "summary_pending",
+            stage: "summary",
+            activeJobId: null,
+            attemptCount: 0,
+            manualRetryCount: existing?.manualRetryCount ?? 0,
+            retryAction: "retry",
+            errorCode: null,
+            errorMessage: null,
+            failedAt: null,
+            updatedAt: at
+          })
+          : existing;
+        if (!request.deferProcessing && processing.state === "summary_pending" && !processing.activeJobId) {
+          const job = this.enqueueJob({
+            jobType: "import_summary",
+            userId: inserted.userId,
+            sessionId: inserted.sessionId,
+            targetMemoryId: inserted.id,
+            payload: {
+              source: "memory.add",
+              changeSeq,
+              contentHash: inserted.contentHash
+            },
+            maxAttempts: 3,
+            createdAt: at
+          });
+          this.repos.processing.update(inserted.id, {
+            activeJobId: job.id,
+            updatedAt: at
+          }, ["summary_pending"]);
+        }
+      }
+
+      return { upsert, changeSeq };
     });
+    const { upsert, changeSeq } = persisted;
+    const inserted = upsert.memory;
 
     if (upsert.created && !isAgentSourceImportMemoryAdd(request)) {
       this.enqueueJob({
@@ -3019,21 +3113,7 @@ export class MemoryService {
       });
     }
 
-    if (importTrace) {
-      if (!request.deferProcessing) {
-        this.enqueueJob({
-          jobType: "import_summary",
-          userId: inserted.userId,
-          sessionId: inserted.sessionId,
-          targetMemoryId: inserted.id,
-          payload: {
-            source: "memory.add",
-            changeSeq
-          },
-          createdAt: at
-        });
-      }
-    } else if (this.config.algorithm.capture.embedAfterCapture) {
+    if (!importTrace && this.config.algorithm.capture.embedAfterCapture) {
       this.enqueueJob({
         jobType: "embedding",
         userId: inserted.userId,
@@ -3190,7 +3270,8 @@ export class MemoryService {
       throw new MemoryServiceError("not_found", `memory not found: ${id}`);
     }
     this.assertMemoryInScope(memory, request.namespace);
-    const detail = detailFromMemory(memory);
+    const processing = this.repos.processing.get(memory.id);
+    const detail = detailFromMemory(memory, processing);
     const refs = this.refsForMemory(memory);
     const item = memoryDetailWithLayerPayload(detail, memory);
     return {
@@ -4402,7 +4483,11 @@ export class MemoryService {
       const memories = this.repos.memories
         .getMany(hits.map((hit) => hit.id));
       return {
-        items: memories.map((memory) => panelListItemFromMemory(this.repos.memories.toListItem(memory), memory)),
+        items: memories.map((memory) => panelListItemFromMemory(
+          this.repos.memories.toListItem(memory),
+          memory,
+          this.repos.processing.get(memory.id)
+        )),
         page,
         pageSize,
         total,
@@ -4417,7 +4502,11 @@ export class MemoryService {
     const memories = this.repos.memories
       .list(filter, pageSize, offset);
     return {
-      items: memories.map((memory) => panelListItemFromMemory(this.repos.memories.toListItem(memory), memory)),
+      items: memories.map((memory) => panelListItemFromMemory(
+        this.repos.memories.toListItem(memory),
+        memory,
+        this.repos.processing.get(memory.id)
+      )),
       page,
       pageSize,
       total,
@@ -4534,28 +4623,200 @@ export class MemoryService {
     };
   }
 
-  enqueuePendingImportSummaries(limit = 10000): {
-    enqueued: number;
-    memoryIds: string[];
+  memoryProcessingStatus(memoryIds: readonly string[], request: RequestEnvelope = {}): {
+    items: MemoryProcessingRecord[];
     serverTime: string;
   } {
-    const memories = this.repos.memories.listPendingAgentSourceImportSummaries(limit);
+    const ids = dedupeStrings(memoryIds).slice(0, 10_000);
+    const memories = this.repos.memories.getMany(ids);
     for (const memory of memories) {
-      this.enqueueJob({
-        jobType: "import_summary",
+      this.assertMemoryInScope(memory, request.namespace);
+    }
+    return {
+      items: this.repos.processing.getMany(ids),
+      serverTime: nowIso()
+    };
+  }
+
+  retryMemoryProcessing(memoryId: string, request: RequestEnvelope = {}): {
+    accepted: boolean;
+    processing: MemoryProcessingRecord;
+    job?: JobRef;
+    serverTime: string;
+  } {
+    this.assertMemoryAddEnabled();
+    const memory = this.repos.memories.get(memoryId);
+    if (!memory) {
+      throw new MemoryServiceError("not_found", `memory not found: ${memoryId}`);
+    }
+    this.assertMemoryInScope(memory, request.namespace);
+    const current = this.repos.processing.get(memoryId);
+    if (!current) {
+      throw new MemoryServiceError("invalid_argument", `memory has no asynchronous processing state: ${memoryId}`);
+    }
+    if (current.state !== "failed") {
+      return {
+        accepted: false,
+        processing: current,
+        serverTime: nowIso()
+      };
+    }
+    if (current.retryAction === "none" || !current.stage) {
+      throw new MemoryServiceError("conflict", current.errorMessage ?? "memory processing cannot be retried");
+    }
+
+    const at = nowIso();
+    const result = this.repos.transaction(() => {
+      const latest = this.repos.processing.get(memoryId);
+      if (!latest || latest.state !== "failed" || !latest.stage) {
+        return latest ? { accepted: false, processing: latest } : undefined;
+      }
+      const summaryJobType = memoryHasImportPipeline(memory) ? "import_summary" : "trace_summary";
+      const job = this.enqueueJob({
+        jobType: latest.stage === "summary" ? summaryJobType : "embedding",
         userId: memory.userId,
         sessionId: memory.sessionId,
         targetMemoryId: memory.id,
         payload: {
-          source: "agent_source.scan.summary_stage"
+          source: "memory.processing.manual_retry",
+          previousErrorCode: latest.errorCode ?? undefined,
+          contentHash: memory.contentHash
         },
-        createdAt: memory.createdAt
+        maxAttempts: latest.stage === "summary" ? 3 : 6,
+        createdAt: at
+      });
+      const processing = this.repos.processing.save({
+        ...latest,
+        state: latest.stage === "summary" ? "summary_pending" : "embedding_pending",
+        activeJobId: job.id,
+        attemptCount: 0,
+        manualRetryCount: latest.manualRetryCount + 1,
+        retryAction: "retry",
+        errorCode: null,
+        errorMessage: null,
+        failedAt: null,
+        updatedAt: at
+      });
+      return { accepted: true, processing, job: jobToRef(job) };
+    });
+    if (!result) {
+      throw new MemoryServiceError("not_found", `processing state not found: ${memoryId}`);
+    }
+    return {
+      ...result,
+      serverTime: at
+    };
+  }
+
+  private restartFailedProcessing(at: string, limit = 10000): number {
+    if (!this.memoryAddEnabled()) return 0;
+    let restarted = 0;
+    const failedItems = this.repos.processing.listByStates(["failed"], limit);
+
+    for (const failed of failedItems) {
+      if (!failed.stage || failed.retryAction === "none") continue;
+      const memory = this.repos.memories.get(failed.memoryId);
+      if (!memory) continue;
+
+      if (this.repos.memories.hasVector(memory.id, "vec_summary")) {
+        this.repos.processing.update(memory.id, {
+          state: "ready",
+          stage: null,
+          activeJobId: null,
+          errorCode: null,
+          errorMessage: null,
+          failedAt: null,
+          updatedAt: at
+        }, ["failed"]);
+        continue;
+      }
+
+      if (failed.stage === "embedding" && !this.config.algorithm.capture.embedAfterCapture) {
+        this.repos.processing.update(memory.id, {
+          state: "ready_text_only",
+          stage: null,
+          activeJobId: null,
+          attemptCount: 0,
+          retryAction: "retry",
+          errorCode: null,
+          errorMessage: null,
+          failedAt: null,
+          updatedAt: at
+        }, ["failed"]);
+        continue;
+      }
+
+      const result = this.repos.transaction(() => {
+        const current = this.repos.processing.get(memory.id);
+        if (!current || current.state !== "failed" || !current.stage || current.retryAction === "none") {
+          return undefined;
+        }
+        const jobType = current.stage === "summary"
+          ? memoryHasImportPipeline(memory) ? "import_summary" : "trace_summary"
+          : "embedding";
+        const job = this.enqueueJob({
+          jobType,
+          userId: memory.userId,
+          sessionId: memory.sessionId,
+          targetMemoryId: memory.id,
+          payload: {
+            source: "memory.processing.lifecycle_retry",
+            previousErrorCode: current.errorCode ?? undefined,
+            contentHash: memory.contentHash
+          },
+          maxAttempts: current.stage === "summary" ? 3 : 6,
+          createdAt: at
+        });
+        const processing = this.repos.processing.save({
+          ...current,
+          state: current.stage === "summary" ? "summary_pending" : "embedding_pending",
+          activeJobId: job.id,
+          attemptCount: 0,
+          retryAction: "retry",
+          errorCode: null,
+          errorMessage: null,
+          failedAt: null,
+          updatedAt: at
+        });
+        return { job, processing };
+      });
+      if (result) restarted += 1;
+    }
+
+    return restarted;
+  }
+
+  enqueuePendingImportSummaries(limit = 10000, targetMemoryIds?: readonly string[]): {
+    enqueued: number;
+    memoryIds: string[];
+    serverTime: string;
+  } {
+    const targets = targetMemoryIds ? dedupeStrings(targetMemoryIds) : undefined;
+    const memories = this.repos.memories.listPendingAgentSourceImportSummaries(limit, targets);
+    for (const memory of memories) {
+      this.repos.transaction(() => {
+        const job = this.enqueueJob({
+          jobType: "import_summary",
+          userId: memory.userId,
+          sessionId: memory.sessionId,
+          targetMemoryId: memory.id,
+          payload: {
+            source: "agent_source.scan.summary_stage",
+            contentHash: memory.contentHash
+          },
+          maxAttempts: 3,
+          createdAt: memory.createdAt
+        });
+        this.repos.processing.update(memory.id, {
+          activeJobId: job.id,
+          updatedAt: nowIso()
+        }, ["summary_pending"]);
       });
     }
 
     return {
       enqueued: memories.length,
-      memoryIds: memories.map((memory) => memory.id),
+      memoryIds: targets ?? this.repos.memories.listUnprocessedAgentSourceImports(limit).map((memory) => memory.id),
       serverTime: nowIso()
     };
   }
@@ -4567,6 +4828,7 @@ export class MemoryService {
   reconcileWorkerStartup(limit = 10000): {
     requeuedJobs: number;
     requeuedEmbeddingRetries: number;
+    restartedFailedProcessing: number;
     enqueuedImportSummaries: number;
     enqueuedEmbeddingRepairs: number;
   } {
@@ -4574,6 +4836,7 @@ export class MemoryService {
       return {
         requeuedJobs: 0,
         requeuedEmbeddingRetries: 0,
+        restartedFailedProcessing: 0,
         enqueuedImportSummaries: 0,
         enqueuedEmbeddingRepairs: 0
       };
@@ -4590,39 +4853,107 @@ export class MemoryService {
     for (const { before, after } of embeddingRetries) {
       this.appendEmbeddingRetryChange(after, "queued", before);
     }
+    const restartedFailedProcessing = this.restartFailedProcessing(at, limit);
 
-    const importSummaries = this.enqueuePendingImportSummaries(limit);
+    let enqueuedImportSummaries = 0;
     let enqueuedEmbeddingRepairs = 0;
-    for (const memory of this.repos.memories.listUnindexedL1Imports(limit)) {
-      if (this.repos.runtime.hasPendingJob(memory.id, "embedding")) {
+    const activeProcessing = this.repos.processing.listByStates([
+      "summary_pending",
+      "summarizing",
+      "embedding_pending",
+      "embedding"
+    ], limit);
+    for (const processing of activeProcessing) {
+      const memory = this.repos.memories.get(processing.memoryId);
+      if (!memory) continue;
+      if (this.repos.memories.hasVector(memory.id, "vec_summary")) {
+        this.repos.processing.update(memory.id, {
+          state: "ready",
+          stage: null,
+          activeJobId: null,
+          errorCode: null,
+          errorMessage: null,
+          failedAt: null,
+          updatedAt: at
+        });
         continue;
       }
-      const previousRetry = this.repos.runtime.getEmbeddingRetryByTarget(
-        "trace",
-        memory.id,
-        "vec_summary"
-      );
-      if (previousRetry?.status === "pending" || previousRetry?.status === "in_progress") {
+
+      if (processing.state === "summary_pending" || processing.state === "summarizing") {
+        const jobType = memoryHasImportPipeline(memory) ? "import_summary" : "trace_summary";
+        let job = this.repos.runtime.getPendingJob(memory.id, jobType, memory.contentHash ?? undefined);
+        if (!job) {
+          job = this.enqueueJob({
+            jobType,
+            userId: memory.userId,
+            sessionId: memory.sessionId,
+            targetMemoryId: memory.id,
+            payload: {
+              source: "startup.processing_repair",
+              contentHash: memory.contentHash
+            },
+            maxAttempts: 3,
+            createdAt: at
+          });
+          if (jobType === "import_summary") enqueuedImportSummaries += 1;
+        }
+        this.repos.processing.update(memory.id, {
+          state: "summary_pending",
+          stage: "summary",
+          activeJobId: job.id,
+          updatedAt: at
+        }, ["summary_pending", "summarizing"]);
         continue;
       }
-      const sourceText = traceSummaryEmbeddingText(memory);
-      if (!sourceText) {
+
+      if (!this.config.algorithm.capture.embedAfterCapture) {
+        this.repos.processing.update(memory.id, {
+          state: "ready_text_only",
+          stage: null,
+          activeJobId: null,
+          attemptCount: 0,
+          retryAction: "retry",
+          errorCode: null,
+          errorMessage: null,
+          failedAt: null,
+          updatedAt: at
+        }, ["embedding_pending", "embedding"]);
         continue;
       }
-      const retry = this.enqueueEmbeddingRetry(memory, sourceText, at, "vec_summary");
-      this.appendEmbeddingRetryChange(retry, "queued", previousRetry);
-      enqueuedEmbeddingRepairs += 1;
+      let job = this.repos.runtime.getPendingJob(memory.id, "embedding", memory.contentHash ?? undefined);
+      if (!job) {
+        job = this.enqueueJob({
+          jobType: "embedding",
+          userId: memory.userId,
+          sessionId: memory.sessionId,
+          targetMemoryId: memory.id,
+          payload: {
+            reason: "startup.processing_repair",
+            contentHash: memory.contentHash
+          },
+          maxAttempts: 6,
+          createdAt: at
+        });
+        enqueuedEmbeddingRepairs += 1;
+      }
+      this.repos.processing.update(memory.id, {
+        state: "embedding_pending",
+        stage: "embedding",
+        activeJobId: job.id,
+        updatedAt: at
+      }, ["embedding_pending", "embedding"]);
     }
 
     return {
       requeuedJobs: interruptedJobs.length + failedJobs.length,
       requeuedEmbeddingRetries: embeddingRetries.length,
-      enqueuedImportSummaries: importSummaries.enqueued,
+      restartedFailedProcessing,
+      enqueuedImportSummaries,
       enqueuedEmbeddingRepairs
     };
   }
 
-  async runWorkerOnce(limit = 100, request: RequestEnvelope = {}): Promise<{
+  async runWorkerOnce(limit = 100, request: RequestEnvelope & { targetMemoryIds?: string[] } = {}): Promise<{
     leased: number;
     succeeded: number;
     failed: number;
@@ -4636,16 +4967,24 @@ export class MemoryService {
       return this.runWorkerNoWrite(request);
     }
     const normalizedLimit = Math.max(1, Math.floor(limit));
-    const embeddingRetries = await this.runEmbeddingRetryOnce(normalizedLimit);
+    const targetMemoryIds = request.targetMemoryIds;
     const requeuedJobs = this.repos.runtime.requeueFailedJobs(
-      Math.max(0, normalizedLimit - embeddingRetries.leased)
+      normalizedLimit,
+      nowIso(),
+      targetMemoryIds
     );
     for (const { before, after } of requeuedJobs) {
       this.appendJobChange(after, "queued", before);
     }
     const jobs = this.repos.runtime.leaseQueuedJobs(
-      Math.max(0, normalizedLimit - embeddingRetries.leased)
+      normalizedLimit,
+      60,
+      targetMemoryIds
     );
+    const retryCapacity = Math.max(0, normalizedLimit - jobs.length);
+    const embeddingRetries = retryCapacity > 0
+      ? await this.runEmbeddingRetryOnce(retryCapacity, targetMemoryIds)
+      : { leased: 0, succeeded: 0, failed: 0, items: [] };
     const results: WorkerJobRunResult[] = [];
     for (let index = 0; index < jobs.length;) {
       const job = jobs[index]!;
@@ -4659,7 +4998,12 @@ export class MemoryService {
         if (batchType === "embedding") {
           results.push(...await this.runLeasedEmbeddingJobs(batch));
         } else {
-          results.push(...await Promise.all(batch.map((item) => this.runLeasedWorkerJob(item))));
+          for (let offset = 0; offset < batch.length; offset += SUMMARY_WORKER_CONCURRENCY) {
+            results.push(...await Promise.all(
+              batch.slice(offset, offset + SUMMARY_WORKER_CONCURRENCY)
+                .map((item) => this.runLeasedWorkerJob(item))
+            ));
+          }
         }
         continue;
       }
@@ -4686,6 +5030,7 @@ export class MemoryService {
 
   private async runLeasedWorkerJob(job: EvolutionJobRecord): Promise<WorkerJobRunResult> {
     this.appendJobChange(job, "leased");
+    this.markProcessingJobLeased(job);
     try {
       await this.processJob(job);
       return this.completeLeasedWorkerJob(job);
@@ -4700,6 +5045,7 @@ export class MemoryService {
 
     for (const job of jobs) {
       this.appendJobChange(job, "leased");
+      this.markProcessingJobLeased(job);
       try {
         const item = this.prepareEmbeddingJob(job);
         if (item) {
@@ -4731,12 +5077,16 @@ export class MemoryService {
       } catch (error) {
         const at = nowIso();
         for (const item of batch) {
-          const retry = this.enqueueEmbeddingRetry(item.memory, item.text, at, item.vectorField);
-          this.appendEmbeddingRetryChange(retry, "queued", undefined, {
-            code: "embedding_error",
-            message: error instanceof Error ? error.message : String(error)
-          });
-          results.push(this.completeLeasedWorkerJob(item.job));
+          if (this.repos.processing.get(item.memory.id)) {
+            results.push(this.failLeasedWorkerJob(item.job, error));
+          } else {
+            const retry = this.enqueueEmbeddingRetry(item.memory, item.text, at, item.vectorField);
+            this.appendEmbeddingRetryChange(retry, "queued", undefined, {
+              code: "embedding_error",
+              message: error instanceof Error ? error.message : String(error)
+            });
+            results.push(this.completeLeasedWorkerJob(item.job));
+          }
         }
       }
     }
@@ -4763,18 +5113,22 @@ export class MemoryService {
   }
 
   private failLeasedWorkerJob(job: EvolutionJobRecord, error: unknown): WorkerJobRunResult {
+    const errorMessage = processingStageForJob(job.jobType)
+      ? sanitizeProcessingError(error)
+      : error instanceof Error ? error.message : String(error);
     const failedJob = this.repos.runtime.failJob(
       job.id,
-      error instanceof Error ? error.message : String(error)
+      errorMessage
     ) ?? {
       ...job,
       status: "failed" as const,
       leasedUntil: null,
-      lastError: error instanceof Error ? error.message : String(error),
+      lastError: errorMessage,
       updatedAt: nowIso()
     };
     const failOp = failedJob.status === "dead_letter" ? "dead_letter" : "failed";
     this.appendJobChange(failedJob, failOp, job);
+    this.updateProcessingAfterJobFailure(failedJob, errorMessage);
     return {
       succeeded: 0,
       failed: 1,
@@ -4785,13 +5139,62 @@ export class MemoryService {
     };
   }
 
-  private async runEmbeddingRetryOnce(limit: number): Promise<EmbeddingRetryRunSummary> {
+  private markProcessingJobLeased(job: EvolutionJobRecord): void {
+    if (!job.targetMemoryId) return;
+    const stage = processingStageForJob(job.jobType);
+    if (!stage) return;
+    const memory = this.repos.memories.get(job.targetMemoryId);
+    if (!memory || !processingJobMatchesMemory(job, memory)) return;
+    const state = stage === "summary" ? "summarizing" : "embedding";
+    this.repos.processing.update(job.targetMemoryId, {
+      state,
+      stage,
+      activeJobId: job.id,
+      attemptCount: job.attempts,
+      errorCode: null,
+      errorMessage: null,
+      failedAt: null,
+      updatedAt: nowIso()
+    }, stage === "summary"
+      ? ["summary_pending", "summarizing"]
+      : ["embedding_pending", "embedding"]);
+  }
+
+  private updateProcessingAfterJobFailure(job: EvolutionJobRecord, error: unknown): void {
+    if (!job.targetMemoryId) return;
+    const stage = processingStageForJob(job.jobType);
+    if (!stage || !this.repos.processing.get(job.targetMemoryId)) return;
+    const memory = this.repos.memories.get(job.targetMemoryId);
+    if (!memory || !processingJobMatchesMemory(job, memory)) return;
+    const message = sanitizeProcessingError(error);
+    const terminal = job.status === "dead_letter";
+    const classification = classifyProcessingError(message);
+    this.repos.processing.update(job.targetMemoryId, {
+      state: terminal ? "failed" : stage === "summary" ? "summary_pending" : "embedding_pending",
+      stage,
+      activeJobId: terminal ? null : job.id,
+      attemptCount: job.attempts,
+      retryAction: terminal ? classification.retryAction : "retry",
+      errorCode: terminal ? classification.code : null,
+      errorMessage: terminal ? message : null,
+      failedAt: terminal ? nowIso() : null,
+      updatedAt: nowIso()
+    }, stage === "summary"
+      ? ["summary_pending", "summarizing", "failed"]
+      : ["embedding_pending", "embedding", "failed"]);
+  }
+
+  private async runEmbeddingRetryOnce(
+    limit: number,
+    targetMemoryIds?: readonly string[]
+  ): Promise<EmbeddingRetryRunSummary> {
     const now = Date.now();
     const retries = this.repos.runtime.claimDueEmbeddingRetries({
       now,
       workerId: this.embeddingRetryWorkerId,
       leaseUntil: now + EMBEDDING_RETRY_LEASE_MS,
-      limit
+      limit,
+      targetMemoryIds
     });
     const results: Array<{ succeeded: number; failed: number; item: EmbeddingRetryRunSummary["items"][number] | null }> = [];
     const claimed: Array<{
@@ -4853,32 +5256,48 @@ export class MemoryService {
       throw new Error(`embedding retry target not found: ${retry.targetKind}:${retry.targetId}`);
     }
     const at = nowIso();
-    const previous = memory;
-    const vectorized = updateMemoryVectorField(memory, retry.vectorField, vector, {
-      model: this.embedder.config.model ?? this.embedder.config.provider,
-      provider: this.embedder.config.provider,
-      updatedAt: at
-    });
-    const next = memory.memoryLayer === "L1"
-      ? updateImportPipelineStatus(vectorized, "indexed", at)
-      : vectorized;
-    const saved = this.repos.memories.updateMaintenance(next);
-    this.repos.runtime.appendChange({
-      memoryId: saved.id,
-      namespaceId: namespaceIdFromMemory(saved),
-      kind: kindFromMemory(saved),
-      op: "updated",
-      entityId: saved.id,
-      userId: saved.userId,
-      changeType: "update",
-      before: previous,
-      after: saved,
-      source: "worker.embedding_retry",
-      createdAt: at
-    });
-    const completed = this.repos.runtime.markEmbeddingRetrySucceededClaimed(retry.id, {
-      ...claim,
-      now: Date.now()
+    let completed: EmbeddingRetryRecord | undefined;
+    this.repos.transaction(() => {
+      const previous = memory;
+      const vectorized = updateMemoryVectorField(memory, retry.vectorField, vector, {
+        model: this.embedder.config.model ?? this.embedder.config.provider,
+        provider: this.embedder.config.provider,
+        updatedAt: at
+      });
+      const next = memory.memoryLayer === "L1"
+        ? updateImportPipelineStatus(vectorized, "indexed", at)
+        : vectorized;
+      const saved = this.repos.memories.updateMaintenance(next);
+      if (this.repos.processing.get(saved.id)) {
+        this.repos.processing.update(saved.id, {
+          state: "ready",
+          stage: null,
+          activeJobId: null,
+          attemptCount: retry.attempts + 1,
+          retryAction: "retry",
+          errorCode: null,
+          errorMessage: null,
+          failedAt: null,
+          updatedAt: at
+        }, ["embedding_pending", "embedding"]);
+      }
+      this.repos.runtime.appendChange({
+        memoryId: saved.id,
+        namespaceId: namespaceIdFromMemory(saved),
+        kind: kindFromMemory(saved),
+        op: "updated",
+        entityId: saved.id,
+        userId: saved.userId,
+        changeType: "update",
+        before: previous,
+        after: saved,
+        source: "worker.embedding_retry",
+        createdAt: at
+      });
+      completed = this.repos.runtime.markEmbeddingRetrySucceededClaimed(retry.id, {
+        ...claim,
+        now: Date.now()
+      });
     });
     if (completed) {
       this.appendEmbeddingRetryChange(completed, "succeeded", retry);
@@ -5962,6 +6381,9 @@ export class MemoryService {
       const [vector] = await this.embedder.embed([item.text], item.role);
       this.applyEmbeddingVector(item, vector ?? []);
     } catch (error) {
+      if (this.repos.processing.get(item.memory.id)) {
+        throw error;
+      }
       const at = nowIso();
       const retry = this.enqueueEmbeddingRetry(item.memory, item.text, at, item.vectorField);
       this.appendEmbeddingRetryChange(retry, "queued", undefined, {
@@ -5974,6 +6396,9 @@ export class MemoryService {
   private prepareEmbeddingJob(job: EvolutionJobRecord): PreparedEmbeddingJob | null {
     const memory = job.targetMemoryId ? this.repos.memories.get(job.targetMemoryId) : undefined;
     if (!memory) {
+      throw new Error(`embedding target not found: ${job.targetMemoryId ?? "unknown"}`);
+    }
+    if (!processingJobMatchesMemory(job, memory)) {
       return null;
     }
 
@@ -6012,104 +6437,33 @@ export class MemoryService {
     if (!current) {
       throw new Error(`embedding target not found: ${item.memory.id}`);
     }
-    const previous = current;
-    const next = updateMemoryVectorField(current, item.vectorField, vector, {
-        model: this.embedder.config.model ?? this.embedder.config.provider,
-        provider: this.embedder.config.provider,
-        updatedAt: at
-      });
-    const saved = this.repos.memories.updateMaintenance(current.memoryLayer === "L1"
-      ? updateImportPipelineStatus(next, "indexed", at)
-      : next);
-    this.repos.runtime.appendChange({
-      memoryId: saved.id,
-      namespaceId: namespaceIdFromMemory(saved),
-      kind: kindFromMemory(saved),
-      op: "updated",
-      entityId: saved.id,
-      userId: saved.userId,
-      changeType: "update",
-      before: previous,
-      after: saved,
-      source: "worker.embedding",
-      createdAt: at
-    });
-  }
-
-  private async summarizeImportedTrace(job: EvolutionJobRecord): Promise<void> {
-    const memory = job.targetMemoryId ? this.repos.memories.get(job.targetMemoryId) : undefined;
-    if (!memory || memory.memoryLayer !== "L1") {
+    if (!processingJobMatchesMemory(item.job, current)) {
       return;
     }
-    const trace = this.traceMeta(memory);
-    if (!trace) {
-      return;
-    }
-
-    const summary = this.llm.isConfigured()
-      ? await this.summarizeTraceForCapture({
-        trace,
-        userText: trace.userText,
-        agentText: trace.agentText,
-        toolCalls: trace.toolCalls,
-        reflectionText: ""
-      })
-      : fallbackImportSummary(trace, memory);
-    const at = nowIso();
-    const previous = memory;
-    const next = updateImportPipelineStatus(updateTraceImportSummary(memory, {
-      summary,
-      alpha: IMPORT_DEFAULT_ALPHA,
-      value: IMPORT_DEFAULT_VALUE,
-      priority: IMPORT_DEFAULT_PRIORITY,
-      tags: importStatusTags(memory.tags, "indexing"),
-      updatedAt: at
-    }), "indexing", at);
-    const saved = this.repos.memories.update(next);
-    this.repos.runtime.appendChange({
-      memoryId: saved.id,
-      namespaceId: namespaceIdFromMemory(saved),
-      kind: kindFromMemory(saved),
-      op: "updated",
-      entityId: saved.id,
-      userId: saved.userId,
-      changeType: "update",
-      before: previous,
-      after: saved,
-      source: "worker.import_summary",
-      createdAt: at
-    });
-    this.enqueuePostImportEmbedding(saved, job, at);
-  }
-
-  private async summarizeCapturedTrace(job: EvolutionJobRecord): Promise<void> {
-    const memory = job.targetMemoryId ? this.repos.memories.get(job.targetMemoryId) : undefined;
-    if (!memory || memory.memoryLayer !== "L1" || memoryHasImportPipeline(memory)) {
-      return;
-    }
-    const trace = this.traceMeta(memory);
-    if (!trace) {
-      return;
-    }
-
-    const summary = this.llm.isConfigured()
-      ? await this.summarizeTraceForCapture({
-        trace,
-        userText: trace.userText,
-        agentText: trace.agentText,
-        toolCalls: trace.toolCalls,
-        reflectionText: trace.reflection ?? ""
-      })
-      : trace.summary || fallbackTraceSummary(trace);
-    const at = nowIso();
-    const previous = memory;
-    const saved = summary.trim() && summary.trim() !== trace.summary.trim()
-      ? this.repos.memories.update(updateTraceSummary(memory, {
-        summary: summary.trim(),
-        updatedAt: at
-      }))
-      : previous;
-    if (saved !== previous) {
+    this.repos.transaction(() => {
+      const previous = current;
+      const next = updateMemoryVectorField(current, item.vectorField, vector, {
+          model: this.embedder.config.model ?? this.embedder.config.provider,
+          provider: this.embedder.config.provider,
+          updatedAt: at
+        });
+      const saved = this.repos.memories.updateMaintenance(current.memoryLayer === "L1"
+        ? updateImportPipelineStatus(next, "indexed", at)
+        : next);
+      if (this.repos.processing.get(saved.id)) {
+        this.repos.processing.update(saved.id, {
+          state: "ready",
+          stage: null,
+          activeJobId: null,
+          attemptCount: item.job.attempts,
+          retryAction: "retry",
+          errorCode: null,
+          errorMessage: null,
+          failedAt: null,
+          updatedAt: at
+        }, ["embedding_pending", "embedding"]);
+        this.repos.runtime.completeJob(item.job.id, at);
+      }
       this.repos.runtime.appendChange({
         memoryId: saved.id,
         namespaceId: namespaceIdFromMemory(saved),
@@ -6120,11 +6474,124 @@ export class MemoryService {
         changeType: "update",
         before: previous,
         after: saved,
-        source: "worker.trace_summary",
+        source: "worker.embedding",
         createdAt: at
       });
+    });
+  }
+
+  private async summarizeImportedTrace(job: EvolutionJobRecord): Promise<void> {
+    const memory = job.targetMemoryId ? this.repos.memories.get(job.targetMemoryId) : undefined;
+    if (!memory || memory.memoryLayer !== "L1") {
+      throw new Error(`import summary target not found: ${job.targetMemoryId ?? "unknown"}`);
     }
-    this.enqueuePostTraceSummaryEmbedding(saved, job, at);
+    if (!processingJobMatchesMemory(job, memory)) {
+      return;
+    }
+    const trace = this.traceMeta(memory);
+    if (!trace) {
+      throw new Error(`import trace payload is missing: ${memory.id}`);
+    }
+
+    const generatedSummary = this.llm.isConfigured()
+      ? await this.summarizeTraceForCapture({
+        trace,
+        userText: trace.userText,
+        agentText: trace.agentText,
+        toolCalls: trace.toolCalls,
+        reflectionText: ""
+      }, { strict: true })
+      : fallbackImportSummary(trace, memory);
+    const summary = firstRealSummary(generatedSummary) ?? fallbackImportSummary(trace, memory);
+    const at = nowIso();
+    const current = this.repos.memories.get(memory.id);
+    if (!current || !processingJobMatchesMemory(job, current)) {
+      return;
+    }
+    this.repos.transaction(() => {
+      const previous = current;
+      const next = updateImportPipelineStatus(updateTraceImportSummary(current, {
+        summary,
+        alpha: IMPORT_DEFAULT_ALPHA,
+        value: IMPORT_DEFAULT_VALUE,
+        priority: IMPORT_DEFAULT_PRIORITY,
+        tags: importStatusTags(memory.tags, "indexing"),
+        updatedAt: at
+      }), "indexing", at);
+      const saved = this.repos.memories.update(next);
+      this.repos.runtime.appendChange({
+        memoryId: saved.id,
+        namespaceId: namespaceIdFromMemory(saved),
+        kind: kindFromMemory(saved),
+        op: "updated",
+        entityId: saved.id,
+        userId: saved.userId,
+        changeType: "update",
+        before: previous,
+        after: saved,
+        source: "worker.import_summary",
+        createdAt: at
+      });
+      this.enqueuePostImportEmbedding(saved, job, at);
+    });
+  }
+
+  private async summarizeCapturedTrace(job: EvolutionJobRecord): Promise<void> {
+    const memory = job.targetMemoryId ? this.repos.memories.get(job.targetMemoryId) : undefined;
+    if (!memory || memory.memoryLayer !== "L1" || memoryHasImportPipeline(memory)) {
+      throw new Error(`trace summary target is invalid: ${job.targetMemoryId ?? "unknown"}`);
+    }
+    if (!processingJobMatchesMemory(job, memory)) {
+      return;
+    }
+    const trace = this.traceMeta(memory);
+    if (!trace) {
+      throw new Error(`trace payload is missing: ${memory.id}`);
+    }
+
+    const summary = this.llm.isConfigured()
+      ? await this.summarizeTraceForCapture({
+        trace,
+        userText: trace.userText,
+        agentText: trace.agentText,
+        toolCalls: trace.toolCalls,
+        reflectionText: trace.reflection ?? ""
+      }, { strict: true })
+      : trace.summary || fallbackTraceSummary(trace);
+    const at = nowIso();
+    const current = this.repos.memories.get(memory.id);
+    if (!current || !processingJobMatchesMemory(job, current)) {
+      return;
+    }
+    const currentTrace = this.traceMeta(current);
+    if (!currentTrace) {
+      throw new Error(`trace payload is missing: ${current.id}`);
+    }
+    this.repos.transaction(() => {
+      const previous = current;
+      const saved = summary.trim() && summary.trim() !== currentTrace.summary.trim()
+        ? this.repos.memories.update(updateTraceSummary(current, {
+          summary: summary.trim(),
+          updatedAt: at
+        }))
+        : previous;
+      if (saved !== previous) {
+        this.repos.runtime.appendChange({
+          memoryId: saved.id,
+          namespaceId: namespaceIdFromMemory(saved),
+          kind: kindFromMemory(saved),
+          op: "updated",
+          entityId: saved.id,
+          userId: saved.userId,
+          changeType: "update",
+          before: previous,
+          after: saved,
+          source: "worker.trace_summary",
+          createdAt: at
+        });
+      }
+      this.enqueuePostTraceSummaryEmbedding(saved, job, at);
+    });
   }
 
   private async reflectTrace(job: EvolutionJobRecord): Promise<void> {
@@ -6667,7 +7134,7 @@ export class MemoryService {
     agentText: string;
     toolCalls: ToolCallPayload[];
     reflectionText: string;
-  }): Promise<string> {
+  }, options: { strict?: boolean } = {}): Promise<string> {
     try {
       const result = await this.llm.completeJson<{
         summary?: unknown;
@@ -6687,16 +7154,31 @@ export class MemoryService {
       });
       const summary = sanitizeSummaryText(stringOr(result.summary, ""));
       return summary || input.trace.summary;
-    } catch {
+    } catch (error) {
+      if (options.strict) throw error;
       return input.trace.summary;
     }
   }
 
   private enqueuePostReflectionEmbedding(memory: MemoryRow, job: EvolutionJobRecord, at: string): void {
+    if (this.repos.processing.get(memory.id)) {
+      this.repos.memories.deleteVector(memory.id, "vec_summary");
+    }
     if (!this.config.algorithm.capture.embedAfterCapture) {
+      this.repos.processing.update(memory.id, {
+        state: "ready_text_only",
+        stage: null,
+        activeJobId: null,
+        attemptCount: 0,
+        retryAction: "retry",
+        errorCode: null,
+        errorMessage: null,
+        failedAt: null,
+        updatedAt: at
+      });
       return;
     }
-    this.enqueueJob({
+    const embeddingJob = this.enqueueJob({
       jobType: "embedding",
       userId: memory.userId,
       sessionId: memory.sessionId,
@@ -6704,20 +7186,41 @@ export class MemoryService {
       targetMemoryId: memory.id,
       payload: {
         reason: "reflection.updated",
-        sourceJobId: job.id
+        sourceJobId: job.id,
+        contentHash: memory.contentHash
       },
+      maxAttempts: 6,
       createdAt: at
+    });
+    this.repos.processing.update(memory.id, {
+      state: "embedding_pending",
+      stage: "embedding",
+      activeJobId: embeddingJob.id,
+      attemptCount: 0,
+      retryAction: "retry",
+      errorCode: null,
+      errorMessage: null,
+      failedAt: null,
+      updatedAt: at
     });
   }
 
   private enqueuePostTraceSummaryEmbedding(memory: MemoryRow, job: EvolutionJobRecord, at: string): void {
     if (!this.config.algorithm.capture.embedAfterCapture) {
+      this.repos.processing.update(memory.id, {
+        state: "ready_text_only",
+        stage: null,
+        activeJobId: null,
+        attemptCount: job.attempts,
+        retryAction: "retry",
+        errorCode: null,
+        errorMessage: null,
+        failedAt: null,
+        updatedAt: at
+      }, ["summary_pending", "summarizing"]);
       return;
     }
-    if (this.repos.runtime.hasPendingJob(memory.id, "embedding")) {
-      return;
-    }
-    this.enqueueJob({
+    const embeddingJob = this.enqueueJob({
       jobType: "embedding",
       userId: memory.userId,
       sessionId: memory.sessionId,
@@ -6725,17 +7228,41 @@ export class MemoryService {
       targetMemoryId: memory.id,
       payload: {
         reason: "trace.summary.updated",
-        sourceJobId: job.id
+        sourceJobId: job.id,
+        contentHash: memory.contentHash
       },
+      maxAttempts: 6,
       createdAt: at
     });
+    this.repos.processing.update(memory.id, {
+      state: "embedding_pending",
+      stage: "embedding",
+      activeJobId: embeddingJob.id,
+      attemptCount: 0,
+      retryAction: "retry",
+      errorCode: null,
+      errorMessage: null,
+      failedAt: null,
+      updatedAt: at
+    }, ["summary_pending", "summarizing"]);
   }
 
   private enqueuePostImportEmbedding(memory: MemoryRow, job: EvolutionJobRecord, at: string): void {
     if (!this.config.algorithm.capture.embedAfterCapture) {
+      this.repos.processing.update(memory.id, {
+        state: "ready_text_only",
+        stage: null,
+        activeJobId: null,
+        attemptCount: 0,
+        retryAction: "retry",
+        errorCode: null,
+        errorMessage: null,
+        failedAt: null,
+        updatedAt: at
+      }, ["summary_pending", "summarizing"]);
       return;
     }
-    this.enqueueJob({
+    const embeddingJob = this.enqueueJob({
       jobType: "embedding",
       userId: memory.userId,
       sessionId: memory.sessionId,
@@ -6743,10 +7270,23 @@ export class MemoryService {
       targetMemoryId: memory.id,
       payload: {
         reason: "import.summary.updated",
-        sourceJobId: job.id
+        sourceJobId: job.id,
+        contentHash: memory.contentHash
       },
+      maxAttempts: 6,
       createdAt: at
     });
+    this.repos.processing.update(memory.id, {
+      state: "embedding_pending",
+      stage: "embedding",
+      activeJobId: embeddingJob.id,
+      attemptCount: 0,
+      retryAction: "retry",
+      errorCode: null,
+      errorMessage: null,
+      failedAt: null,
+      updatedAt: at
+    }, ["summary_pending", "summarizing"]);
   }
 
   private associateL2(job: EvolutionJobRecord): void {
@@ -9331,6 +9871,7 @@ export class MemoryService {
     targetMemoryId?: string;
     dedupeKey?: string;
     payload?: Record<string, unknown>;
+    maxAttempts?: number;
     createdAt?: string;
   }): EvolutionJobRecord {
     const at = input.createdAt ?? nowIso();
@@ -9346,7 +9887,7 @@ export class MemoryService {
       targetMemoryId: input.targetMemoryId,
       payload: input.payload ?? {},
       attempts: 0,
-      maxAttempts: 3,
+      maxAttempts: input.maxAttempts ?? 3,
       createdAt: at,
       updatedAt: at
     });
@@ -9451,18 +9992,34 @@ export class MemoryService {
   }
 
   private enqueueImportSummaryIfMissing(memory: MemoryRow, at: string): void {
-    if (this.repos.runtime.hasPendingJob(memory.id, "import_summary")) {
+    const jobType = memoryHasImportPipeline(memory) ? "import_summary" : "trace_summary";
+    if (this.repos.runtime.hasPendingJob(memory.id, jobType, memory.contentHash ?? undefined)) {
       return;
     }
-    this.enqueueJob({
-      jobType: "import_summary",
-      userId: memory.userId,
-      sessionId: memory.sessionId,
-      targetMemoryId: memory.id,
-      payload: {
-        source: "worker.embedding.summary_guard"
-      },
-      createdAt: at
+    this.repos.transaction(() => {
+      const job = this.enqueueJob({
+        jobType,
+        userId: memory.userId,
+        sessionId: memory.sessionId,
+        targetMemoryId: memory.id,
+        payload: {
+          source: "worker.embedding.summary_guard",
+          contentHash: memory.contentHash
+        },
+        maxAttempts: 3,
+        createdAt: at
+      });
+      this.repos.processing.update(memory.id, {
+        state: "summary_pending",
+        stage: "summary",
+        activeJobId: job.id,
+        attemptCount: 0,
+        retryAction: "retry",
+        errorCode: null,
+        errorMessage: null,
+        failedAt: null,
+        updatedAt: at
+      }, ["embedding_pending", "embedding", "summary_pending", "summarizing"]);
     });
   }
 
@@ -11126,6 +11683,9 @@ function rawTurnIdForSessionTurn(sessionId: string, turnId: string): string {
 }
 
 function memoryAddKey(request: MemoryAddRequest, layer: MemoryLayer, title: string): string {
+  if (isAgentSourceImportMemoryAdd(request) && request.adapterId && request.turnId) {
+    return `memory.add:${request.adapterId}:turn:${request.turnId}`;
+  }
   if (request.adapterId && request.requestId) {
     return `memory.add:${request.adapterId}:${request.requestId}`;
   }
@@ -11137,8 +11697,7 @@ function memoryAddTags(request: MemoryAddRequest, importTrace: boolean, traceTag
     return uniq([
       ...(request.tags ?? []),
       ...(request.source ? [request.source] : []),
-      ...traceTags,
-      IMPORT_SUMMARY_QUEUED_TAG
+      ...traceTags
     ]);
   }
   return uniq([
@@ -11441,6 +12000,46 @@ function workerJobCanRunInParallel(job: EvolutionJobRecord): boolean {
   return job.jobType === "trace_summary" || job.jobType === "import_summary" || job.jobType === "embedding";
 }
 
+function processingStageForJob(jobType: JobType): "summary" | "embedding" | undefined {
+  if (jobType === "trace_summary" || jobType === "import_summary") return "summary";
+  if (jobType === "embedding") return "embedding";
+  return undefined;
+}
+
+function processingJobMatchesMemory(job: EvolutionJobRecord, memory: MemoryRow): boolean {
+  const contentHash = typeof job.payload.contentHash === "string" ? job.payload.contentHash : undefined;
+  return !contentHash || contentHash === memory.contentHash;
+}
+
+function sanitizeProcessingError(error: unknown): string {
+  const message = (error instanceof Error ? error.message : String(error))
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, "[redacted]")
+    .replace(/\b(api[_-]?key)\s*[:=]\s*\S+/gi, "$1=[redacted]")
+    .trim();
+  return clip(message || "Unknown processing error", 1000);
+}
+
+function classifyProcessingError(message: string): {
+  code: string;
+  retryAction: "retry" | "open_settings" | "none";
+} {
+  const normalized = message.toLowerCase();
+  if (/api.?key|unauthorized|forbidden|\b401\b|\b403\b|\b404\b|model.+not configured|missing.+model|expected json|html instead of json|configured model endpoint/.test(normalized)) {
+    return { code: "model_configuration", retryAction: "open_settings" };
+  }
+  if (/trace payload is missing|memory content is missing|corrupt|malformed memory/.test(normalized)) {
+    return { code: "memory_corrupt", retryAction: "none" };
+  }
+  if (/timeout|timed out|network|connect|temporar|rate.?limit|\b429\b|\b5\d\d\b/.test(normalized)) {
+    return { code: "transient_provider_error", retryAction: "retry" };
+  }
+  if (/vector|embedding|dimension|finite values/.test(normalized)) {
+    return { code: "embedding_failed", retryAction: "retry" };
+  }
+  return { code: "processing_failed", retryAction: "retry" };
+}
+
 function evolutionJobDedupeKey(input: {
   jobType: JobType;
   episodeId?: string;
@@ -11465,11 +12064,11 @@ function evolutionJobDedupeKey(input: {
         ? `episode_idle_close:${input.episodeId}:${payloadString("triggerRawTurnId") ?? "turn"}`
         : undefined;
     case "embedding":
-      return target ? `embedding:${target}` : undefined;
+      return target ? `embedding:${target}:${payloadString("contentHash") ?? "current"}` : undefined;
     case "trace_summary":
-      return target ? `trace_summary:${target}` : undefined;
+      return target ? `trace_summary:${target}:${payloadString("contentHash") ?? "current"}` : undefined;
     case "import_summary":
-      return target ? `import_summary:${target}` : undefined;
+      return target ? `import_summary:${target}:${payloadString("contentHash") ?? "current"}` : undefined;
     case "reflection":
       return input.episodeId ? `reflection:${input.episodeId}` : target ? `reflection:${target}` : undefined;
     case "reward":
@@ -12407,42 +13006,22 @@ function updateMemoryVectorField(memory: MemoryRow, vectorField: EmbeddingRetryV
   });
 }
 
-function updateImportPipelineStatus(memory: MemoryRow, status: "indexing" | "indexed", at: string): MemoryRow {
+function updateImportPipelineStatus(memory: MemoryRow, _status: "indexing" | "indexed", at: string): MemoryRow {
   if (memory.memoryLayer !== "L1" || !memoryHasImportPipeline(memory)) return memory;
-  const label = status === "indexed" ? IMPORT_INDEXED_TAG : IMPORT_INDEXING_TAG;
-  const internalInfo = memory.properties.internal_info;
-  const tags = importStatusTags(memory.tags, status);
+  const tags = importStatusTags(memory.tags, _status);
   return {
     ...memory,
     tags,
     info: {
       ...memory.info,
-      tags,
-      import_pipeline: {
-        status,
-        label,
-        updated_at: at
-      }
+      tags
     },
     properties: {
       ...memory.properties,
       tags,
       info: {
         ...(memory.properties.info ?? {}),
-        tags,
-        import_pipeline: {
-          status,
-          label,
-          updated_at: at
-        }
-      },
-      internal_info: {
-        ...internalInfo,
-        import_pipeline: {
-          status,
-          label,
-          updated_at: at
-        }
+        tags
       }
     },
     updatedAt: at
@@ -12450,16 +13029,14 @@ function updateImportPipelineStatus(memory: MemoryRow, status: "indexing" | "ind
 }
 
 function memoryHasImportPipeline(memory: MemoryRow): boolean {
-  return isRecord(memory.properties.internal_info.import_pipeline);
+  const algorithm = stringFromRecord(memory.properties.internal_info, "plugin_algorithm");
+  return algorithm?.startsWith("memory.add.import_async.") === true ||
+    memory.tags.some((tag) => tag.trim().toLowerCase() === "agent-source");
 }
 
 function memoryNeedsImportSummary(memory: MemoryRow): boolean {
   if (memory.memoryLayer !== "L1" || !memoryHasImportPipeline(memory)) {
     return false;
-  }
-  const pipeline = memory.properties.internal_info.import_pipeline;
-  if (isRecord(pipeline) && pipeline.status === "summary_queued") {
-    return true;
   }
   const summary = firstSummary(
     stringFromRecord(memory.info, "summary") ??
@@ -12488,8 +13065,8 @@ function firstRealSummary(...values: Array<string | undefined>): string | undefi
 }
 
 function importStatusTags(tags: string[], status: "indexing" | "indexed"): string[] {
-  const label = status === "indexed" ? IMPORT_INDEXED_TAG : IMPORT_INDEXING_TAG;
-  return uniq([...tags.filter((tag) => !IMPORT_STATUS_TAGS.includes(tag)), label]);
+  void status;
+  return uniq(tags.filter((tag) => !IMPORT_STATUS_TAGS.includes(tag)));
 }
 
 function updateTraceImportSummary(memory: MemoryRow, input: {
@@ -13848,18 +14425,23 @@ function truncateEpisodeLine(value: string, maxChars = 220): string {
   return cleaned.length <= maxChars ? cleaned : `${cleaned.slice(0, maxChars - 3)}...`;
 }
 
-function panelListItemFromMemory(item: MemoryListItem, memory: MemoryRow): MemoryListItem {
+function panelListItemFromMemory(
+  item: MemoryListItem,
+  memory: MemoryRow,
+  processing?: MemoryProcessingRecord
+): MemoryListItem {
   return {
     ...item,
+    processing,
     metadata: {
       ...(item.metadata ?? {}),
       source: panelSourceForMemory(memory)
     },
-    tags: panelTagsForMemory(memory)
+    tags: panelTagsForMemory(memory, processing)
   };
 }
 
-function detailFromMemory(memory: MemoryRow): MemoryDetailItem {
+function detailFromMemory(memory: MemoryRow, processing?: MemoryProcessingRecord): MemoryDetailItem {
   const sourceMemoryIds = memory.properties.internal_info.source_memory_ids;
   const source = panelSourceForMemory(memory);
   return {
@@ -13869,9 +14451,10 @@ function detailFromMemory(memory: MemoryRow): MemoryDetailItem {
     status: memory.status,
     title: detailTitleForMemory(memory),
     summary: detailSummaryForMemory(memory),
-    tags: panelTagsForMemory(memory),
+    tags: panelTagsForMemory(memory, processing),
     updatedAt: memory.updatedAt,
     version: memory.version,
+    processing,
     body: memory.memoryValue,
     createdAt: memory.createdAt,
     sourceMemoryIds: stringArray(sourceMemoryIds),
@@ -15471,11 +16054,11 @@ function firstLine(value: string): string {
 }
 
 function fallbackImportSummary(trace: TraceMeta, memory: MemoryRow): string {
-  const visibleText = [trace.userText, trace.agentText]
-    .filter((value) => value.trim().length > 0)
-    .join("\n");
   const title = stringFromRecord(memory.info, "title");
-  return clip(firstLine(visibleText) || title || "导入记忆", 200);
+  const summary = [trace.userText, trace.agentText, title]
+    .map((value) => firstLine(value ?? ""))
+    .find((value) => value && !isImportSummaryPlaceholder(value));
+  return clip(summary || "导入记忆", 200);
 }
 
 function fallbackTraceSummary(trace: TraceMeta): string {
@@ -16638,21 +17221,23 @@ function panelSourceDistribution(memories: MemoryRow[]): Array<{ source: string;
     .sort((a, b) => b.count - a.count || a.source.localeCompare(b.source));
 }
 
-function panelTagsForMemory(memory: MemoryRow): string[] {
-  return panelStatusTagsForMemory(memory);
+function panelTagsForMemory(memory: MemoryRow, processing?: MemoryProcessingRecord): string[] {
+  return panelStatusTagsForMemory(memory, processing);
 }
 
-function panelStatusTagsForMemory(memory: MemoryRow): string[] {
-  if (memory.status === "archived" || memory.status === "deleted") {
-    return memory.tags;
+function panelStatusTagsForMemory(memory: MemoryRow, processing?: MemoryProcessingRecord): string[] {
+  const tags = memory.tags.filter((tag) => !IMPORT_STATUS_TAGS.includes(tag));
+  if (memory.status === "archived" || memory.status === "deleted" || !processing) {
+    return tags;
   }
-  if (memoryNeedsImportSummary(memory)) {
-    return memory.tags;
-  }
-  if (!hasMemoryRetrievalIndex(memory)) {
-    return importStatusTags(memory.tags, "indexing");
-  }
-  return memory.tags;
+  const label = processing.state === "summary_pending" || processing.state === "summarizing"
+    ? IMPORT_SUMMARY_PROCESSING_TAG
+    : processing.state === "embedding_pending" || processing.state === "embedding"
+      ? IMPORT_INDEXING_TAG
+      : processing.state === "failed"
+        ? IMPORT_FAILED_TAG
+        : undefined;
+  return label ? uniq([...tags, label]) : tags;
 }
 
 function panelSourceForMemory(memory: MemoryRow): string {

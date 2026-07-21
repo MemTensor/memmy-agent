@@ -39,6 +39,9 @@ export interface IngestionStats {
   failedMemories: number;
   memoryIds: string[];
   conversations: number;
+  completedConversationIds: string[];
+  incompleteConversationIds: string[];
+  failedConversationIds: string[];
   errors: Array<{ conversationId: string; reason: string }>;
 }
 
@@ -70,6 +73,9 @@ export function createIngestionService(options: CreateIngestionServiceOptions): 
         failedMemories: 0,
         memoryIds: [],
         conversations: 0,
+        completedConversationIds: [],
+        incompleteConversationIds: [],
+        failedConversationIds: [],
         errors: []
       };
 
@@ -136,6 +142,8 @@ async function processConversation(
   stats: IngestionStats
 ): Promise<void> {
   let processedTurns = 0;
+  let incomplete = false;
+  let failed = false;
 
   for (const turn of splitConversationIntoTurns(messages)) {
     processedTurns += 1;
@@ -144,6 +152,7 @@ async function processConversation(
     }
 
     if (!isCompleteTurn(turn)) {
+      incomplete = true;
       stats.deduped += turn.messages.length;
       emitIngestionProgress(ctx, stats);
       continue;
@@ -151,12 +160,6 @@ async function processConversation(
 
     const dedupKeys = turn.messages.map((message) => createDedupKey(ctx.sourceId, message.messageId));
     const allSeen = dedupKeys.every((dedupKey) => options.agentSourceRepository.hasSeen(dedupKey));
-    if (allSeen) {
-      stats.deduped += turn.messages.length;
-      stats.dedupedMemories += 1;
-      emitIngestionProgress(ctx, stats);
-      continue;
-    }
 
     try {
       const added = await options.memoryClient.addMemory({
@@ -167,12 +170,17 @@ async function processConversation(
         title: titleForTurn(ctx.sourceId, turn),
         tags: ["agent-source", ctx.sourceId],
         source: ctx.sourceId,
-        turnId: `${ctx.sourceId}:${turn.conversationId}:${turn.turnIndex}`,
+        turnId: createStableTurnId(ctx.sourceId, turn),
         createdAt: turnCreatedAt(turn),
         ...(ctx.deferProcessing ? { deferProcessing: true } : {})
       });
-      stats.written += turn.messages.length;
-      stats.writtenMemories += 1;
+      if (allSeen) {
+        stats.deduped += turn.messages.length;
+        stats.dedupedMemories += 1;
+      } else {
+        stats.written += turn.messages.length;
+        stats.writtenMemories += 1;
+      }
       stats.memoryIds.push(added.id);
 
       for (const dedupKey of dedupKeys) {
@@ -180,6 +188,7 @@ async function processConversation(
       }
       emitIngestionProgress(ctx, stats);
     } catch (error) {
+      failed = true;
       stats.failed += turn.messages.length;
       stats.failedMemories += 1;
       stats.errors.push({
@@ -189,6 +198,12 @@ async function processConversation(
       emitIngestionProgress(ctx, stats);
     }
   }
+
+  const conversationId = messages[0]?.conversationId;
+  if (!conversationId) return;
+  if (failed) stats.failedConversationIds.push(conversationId);
+  else if (incomplete) stats.incompleteConversationIds.push(conversationId);
+  else stats.completedConversationIds.push(conversationId);
 }
 
 function emitIngestionProgress(ctx: IngestionContext, stats: IngestionStats): void {
@@ -282,8 +297,25 @@ function createDedupKey(sourceId: string, messageId: string): string {
 
 function createTurnRequestId(sourceId: string, turn: ImportedTurn): string {
   return createHash("sha256")
-    .update(`${sourceId}::${turn.conversationId}::${turn.messages.map((message) => message.messageId).join(",")}`)
+    .update([
+      stableTurnIdentity(sourceId, turn),
+      turnCreatedAt(turn),
+      renderMessagesToMarkdown(turn.messages)
+    ].join("\u0000"))
     .digest("hex");
+}
+
+function createStableTurnId(sourceId: string, turn: ImportedTurn): string {
+  const hash = createHash("sha256").update(stableTurnIdentity(sourceId, turn)).digest("hex");
+  return `${sourceId}:${hash.slice(0, 24)}`;
+}
+
+function stableTurnIdentity(sourceId: string, turn: ImportedTurn): string {
+  const firstUserMessageId = turn.messages.find((message) => message.role === "user")?.messageId;
+  if (!firstUserMessageId) {
+    throw new IngestionAssertionError("complete turn is missing its first user message id");
+  }
+  return `${sourceId}::${turn.conversationId}::${firstUserMessageId}`;
 }
 
 function titleForTurn(sourceId: string, turn: ImportedTurn): string {

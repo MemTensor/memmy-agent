@@ -1,6 +1,9 @@
 /** Agent source service module. */
-import { randomUUID } from "node:crypto";
-import { setImmediate as yieldToEventLoop } from "node:timers/promises";
+import { createHash, randomUUID } from "node:crypto";
+import {
+  setImmediate as yieldToEventLoop,
+  setTimeout as waitForWorkerProgress
+} from "node:timers/promises";
 import type {
   AddManualInput,
   AgentSourceMemoryPluginConflict,
@@ -16,7 +19,7 @@ import type {
 import type { MemoryClient } from "../adapters/outbound/memory-client/index.js";
 import type { SourceRegistry } from "../adapters/outbound/agent-source/source-registry.js";
 import type { AgentSourceRepository, AgentSourceRecord } from "../infrastructure/agent-source-store/index.js";
-import type { IngestionService } from "./ingestion-service.js";
+import type { IngestionService, IngestionStats } from "./ingestion-service.js";
 import { AgentSourceUnavailableError } from "./runtime-errors.js";
 import type { SkillDistributionService } from "./skill-distribution-service.js";
 
@@ -27,6 +30,7 @@ const IMPORT_SUMMARY_PRIORITY_LIMIT = 100;
 const IMPORT_SUMMARY_PRIORITY_BATCH_SIZE = 20;
 const IMPORT_SUMMARY_STANDARD_BATCH_SIZE = 100;
 const IMPORT_WORKER_TIMEOUT_MS = 600_000;
+const IMPORT_PROGRESS_POLL_INTERVAL_MS = 250;
 const INITIAL_GLOBAL_MEMORY_LIMIT = 1_000;
 const INITIAL_ABSENT_SOURCE_MEMORY_LIMIT = 200;
 const INITIAL_SOURCE_MEMORY_LIMIT = 1_000;
@@ -39,7 +43,7 @@ export interface AgentSourceService {
   collectOne(sourceId: string, options?: AgentSourceScanOptions): Promise<CollectedSourceScan>;
   collectAll(options?: AgentSourceScanOptions): Promise<CollectedSourceScan[]>;
   ingestCollected(collected: readonly CollectedSourceScan[], options?: AgentSourceScanOptions): Promise<ScanResult[]>;
-  processImportSummaries(options?: AgentSourceScanOptions): Promise<void>;
+  processImportSummaries(memoryIds: readonly string[], options?: AgentSourceScanOptions): Promise<ProcessingFailure[]>;
   addManual(input: AddManualInput): Promise<AgentSourceView>;
   remove(sourceId: string): Promise<void>;
   installSkill(sourceId: string): Promise<void>;
@@ -47,6 +51,11 @@ export interface AgentSourceService {
   installPlugin(sourceId: string): Promise<void>;
   uninstallPlugin(sourceId: string): Promise<void>;
   detectMemoryPluginConflicts(): Promise<AgentSourceMemoryPluginConflict[]>;
+}
+
+export interface ProcessingFailure {
+  memoryId: string;
+  reason: string;
 }
 
 /** Contract for agent source scan options. */
@@ -67,7 +76,7 @@ export interface CreateAgentSourceServiceOptions {
   sourceRegistry: SourceRegistry;
   agentSourceRepository: AgentSourceRepository;
   ingestionService: IngestionService;
-  memoryClient: Pick<MemoryClient, "enqueueImportSummaries" | "runWorker">;
+  memoryClient: Pick<MemoryClient, "enqueueImportSummaries" | "getMemoryProcessingStatus" | "runWorker">;
   skillDistributionService: SkillDistributionService;
   now?: () => string;
   createId?: () => string;
@@ -86,7 +95,13 @@ export function createAgentSourceService(options: CreateAgentSourceServiceOption
     async scanAll(scanOptions = {}) {
       const collected = await this.collectAll(scanOptions);
       const results = await this.ingestCollected(collected, scanOptions);
-      await this.processImportSummaries(scanOptions);
+      for (const result of results) {
+        const failures = await this.processImportSummaries(result.memoryIds ?? [], {
+          ...scanOptions,
+          progressSourceId: result.sourceId
+        });
+        appendProcessingFailures(result, failures);
+      }
       return results;
     },
 
@@ -113,14 +128,19 @@ export function createAgentSourceService(options: CreateAgentSourceServiceOption
       return results;
     },
 
-    async processImportSummaries(scanOptions = {}) {
-      await processPendingImportSummaries(options, scanOptions);
+    async processImportSummaries(memoryIds, scanOptions = {}) {
+      return processPendingImportSummaries(options, memoryIds, scanOptions);
     },
 
     async scanOne(sourceId, scanOptions = {}) {
       const collected = await this.collectOne(sourceId, scanOptions);
       const result = await ingestCollectedSource(options, collected, scanOptions, now);
-      await processPendingImportSummaries(options, { ...scanOptions, progressSourceId: sourceId });
+      const failures = await processPendingImportSummaries(
+        options,
+        result.memoryIds ?? [],
+        { ...scanOptions, progressSourceId: sourceId }
+      );
+      appendProcessingFailures(result, failures);
       return result;
     },
 
@@ -282,9 +302,6 @@ async function collectSourceMessages(
       }
     })) {
       scanOptions.signal?.throwIfAborted();
-      if (maxMessages !== undefined && collected.messages.length >= maxMessages) {
-        break;
-      }
       collected.messages.push(message);
       if (!collected.conversationIds.includes(message.conversationId)) {
         collected.conversationIds.push(message.conversationId);
@@ -314,14 +331,17 @@ async function collectSourceMessages(
     scanMode === "initial_subset"
       ? boundSourceToRecentMemoryUnits(collected, INITIAL_SOURCE_MEMORY_LIMIT)
       : collected;
+  const checkpointFiltered = scanMode === "incremental"
+    ? filterCheckpointedConversations(options, bounded)
+    : bounded;
   emitProgress(scanOptions, {
     sourceId,
     phase: "scan",
-    current: bounded.messages.length,
-    total: bounded.messages.length,
+    current: checkpointFiltered.messages.length,
+    total: checkpointFiltered.messages.length,
     message: "Source scan completed"
   });
-  return bounded;
+  return checkpointFiltered;
 }
 
 async function ingestCollectedSource(
@@ -331,6 +351,7 @@ async function ingestCollectedSource(
   now: () => string
 ): Promise<ScanResult> {
   let skipped = 0;
+  let stats: IngestionStats | undefined;
   const errors = [...collected.errors];
 
   emitProgress(scanOptions, {
@@ -343,7 +364,7 @@ async function ingestCollectedSource(
 
   try {
     const ingestMessages = sortMessagesForIngestion(collected.messages);
-    const stats = await options.ingestionService.ingest(toAsyncIterable(ingestMessages), {
+    stats = await options.ingestionService.ingest(toAsyncIterable(ingestMessages), {
       sourceId: collected.sourceId,
       signal: scanOptions.signal,
       deferProcessing: true,
@@ -358,6 +379,7 @@ async function ingestCollectedSource(
         });
       }
     });
+    scanOptions.signal?.throwIfAborted();
     skipped = stats.deduped;
     errors.push(...stats.errors);
   } catch (error) {
@@ -370,15 +392,116 @@ async function ingestCollectedSource(
     });
   }
 
-  options.agentSourceRepository.setLastScannedAt(collected.sourceId, now());
-  updateScanWatermark(options, collected, scanOptions, now());
+  const scannedAt = now();
+  options.agentSourceRepository.setLastScannedAt(collected.sourceId, scannedAt);
+  if (stats) {
+    updateConversationCheckpoints(options, collected, stats.completedConversationIds, scannedAt);
+  }
+  if (
+    stats &&
+    errors.length === 0 &&
+    stats.incompleteConversationIds.length === 0 &&
+    stats.failedConversationIds.length === 0
+  ) {
+    updateScanWatermark(options, collected, scanOptions, scannedAt);
+  }
   return {
     sourceId: collected.sourceId,
     discoveredConversations: collected.conversationIds.length,
     emittedMessages: collected.messages.length,
     skipped,
+    memoryIds: stats?.memoryIds ?? [],
     errors
   };
+}
+
+function filterCheckpointedConversations(
+  options: CreateAgentSourceServiceOptions,
+  collected: CollectedSourceScan
+): CollectedSourceScan {
+  const grouped = groupMessagesByConversation(collected.messages);
+  const included = new Set<string>();
+  for (const [conversationId, messages] of grouped) {
+    const latest = latestConversationMessage(messages);
+    const contentHash = conversationContentHash(messages);
+    const checkpoint = options.agentSourceRepository.getConversationCheckpoint(
+      collected.sourceId,
+      conversationId
+    );
+    if (!checkpoint || !latest || compareMessageCursor(latest, checkpoint) > 0 || checkpoint.contentHash !== contentHash) {
+      included.add(conversationId);
+    }
+  }
+  return {
+    ...collected,
+    conversationIds: collected.conversationIds.filter((id) => included.has(id)),
+    messages: collected.messages.filter((message) => included.has(message.conversationId))
+  };
+}
+
+function updateConversationCheckpoints(
+  options: CreateAgentSourceServiceOptions,
+  collected: CollectedSourceScan,
+  completedConversationIds: readonly string[],
+  updatedAt: string
+): void {
+  const grouped = groupMessagesByConversation(collected.messages);
+  for (const conversationId of completedConversationIds) {
+    const latest = latestConversationMessage(grouped.get(conversationId) ?? []);
+    if (!latest) continue;
+    options.agentSourceRepository.upsertConversationCheckpoint({
+      sourceId: collected.sourceId,
+      conversationId,
+      lastMessageId: latest.messageId,
+      lastCreatedAt: latest.createdAt,
+      contentHash: conversationContentHash(grouped.get(conversationId) ?? []),
+      updatedAt
+    });
+  }
+}
+
+function groupMessagesByConversation(
+  messages: readonly ConversationMessage[]
+): Map<string, ConversationMessage[]> {
+  const grouped = new Map<string, ConversationMessage[]>();
+  for (const message of messages) {
+    const current = grouped.get(message.conversationId) ?? [];
+    current.push(message);
+    grouped.set(message.conversationId, current);
+  }
+  return grouped;
+}
+
+function latestConversationMessage(messages: readonly ConversationMessage[]): ConversationMessage | undefined {
+  return [...messages].sort((left, right) =>
+    Date.parse(right.createdAt) - Date.parse(left.createdAt) ||
+    right.messageId.localeCompare(left.messageId)
+  )[0];
+}
+
+function compareMessageCursor(
+  message: ConversationMessage,
+  checkpoint: { lastCreatedAt: string; lastMessageId: string }
+): number {
+  return Date.parse(message.createdAt) - Date.parse(checkpoint.lastCreatedAt) ||
+    message.messageId.localeCompare(checkpoint.lastMessageId);
+}
+
+function conversationContentHash(messages: readonly ConversationMessage[]): string {
+  const content = sortMessagesForIngestion(messages).map((message) => ({
+    messageId: message.messageId,
+    role: message.role,
+    content: message.content,
+    createdAt: message.createdAt,
+    toolName: conversationMetaString(message, "toolName") ?? conversationMetaString(message, "hermesToolName"),
+    toolCallId: conversationMetaString(message, "toolCallId") ?? conversationMetaString(message, "hermesToolCallId")
+  }));
+  return createHash("sha256").update(JSON.stringify(content)).digest("hex");
+}
+
+function conversationMetaString(message: ConversationMessage, key: string): string | undefined {
+  const value = message.rawMeta[key];
+  return typeof value === "string" ? value : undefined;
 }
 
 function shouldApplyInitialGlobalBound(
@@ -558,14 +681,18 @@ function uniqueConversationIds(messages: readonly ConversationMessage[]): string
 
 async function processPendingImportSummaries(
   options: CreateAgentSourceServiceOptions,
+  memoryIds: readonly string[],
   scanOptions: AgentSourceScanOptions
-): Promise<void> {
+): Promise<ProcessingFailure[]> {
   scanOptions.signal?.throwIfAborted();
-  const queued = await options.memoryClient.enqueueImportSummaries();
-  const pendingMemoryIds = new Set(queued.memoryIds);
+  const ownedMemoryIds = [...new Set(memoryIds)];
+  await options.memoryClient.enqueueImportSummaries(ownedMemoryIds);
+  const pendingMemoryIds = new Set(ownedMemoryIds);
+  const failures: ProcessingFailure[] = [];
   const progressSourceId = scanOptions.progressSourceId ?? "all";
   let indexed = 0;
   let prioritySummaries = 0;
+  let lastProgressAt = Date.now();
   emitProgress(scanOptions, {
     sourceId: progressSourceId,
     phase: "summarize",
@@ -581,53 +708,70 @@ async function processPendingImportSummaries(
       : IMPORT_SUMMARY_STANDARD_BATCH_SIZE;
     const result = await options.memoryClient.runWorker({
       limit,
+      targetMemoryIds: [...pendingMemoryIds],
       signal: scanOptions.signal,
       timeoutMs: IMPORT_WORKER_TIMEOUT_MS
     });
 
     prioritySummaries += result.jobs.filter((job) =>
       job.jobType === "import_summary" &&
-      Boolean(job.targetMemoryId && queued.memoryIds.includes(job.targetMemoryId))
+      Boolean(job.targetMemoryId && pendingMemoryIds.has(job.targetMemoryId))
     ).length;
-    indexed += consumeIndexedMemoryIds(pendingMemoryIds, result);
+    const refreshed = await options.memoryClient.getMemoryProcessingStatus([...pendingMemoryIds]);
+    const processingByMemoryId = new Map(refreshed.items.map((item) => [item.memoryId, item]));
+    const activeMemoryIds = new Set(refreshed.items
+      .filter((item) => item.state === "summary_pending" || item.state === "summarizing" ||
+        item.state === "embedding_pending" || item.state === "embedding")
+      .map((item) => item.memoryId));
+    const previousPending = pendingMemoryIds.size;
+    for (const memoryId of pendingMemoryIds) {
+      if (activeMemoryIds.has(memoryId)) continue;
+      const processing = processingByMemoryId.get(memoryId);
+      if (!processing) {
+        failures.push({ memoryId, reason: "Memory processing state is missing" });
+      } else if (processing.state === "failed") {
+        failures.push({
+          memoryId,
+          reason: processing.errorMessage || "Memory processing failed"
+        });
+      }
+      if (!activeMemoryIds.has(memoryId)) {
+        pendingMemoryIds.delete(memoryId);
+      }
+    }
+    indexed = ownedMemoryIds.length - pendingMemoryIds.size;
+    if (pendingMemoryIds.size < previousPending) {
+      lastProgressAt = Date.now();
+    }
     emitProgress(scanOptions, {
       sourceId: progressSourceId,
       phase: "summarize",
       current: indexed,
-      total: queued.memoryIds.length,
+      total: ownedMemoryIds.length,
       message: "Summarizing and indexing latest memories"
     });
 
-    if (result.leased === 0 && result.embeddingRetries.leased === 0) {
+    if (pendingMemoryIds.size === 0) {
       break;
+    }
+    if (Date.now() - lastProgressAt >= IMPORT_WORKER_TIMEOUT_MS) {
+      throw new Error(`Timed out waiting for ${pendingMemoryIds.size} imported memories to finish indexing`);
+    }
+    if (result.leased === 0 && result.embeddingRetries.leased === 0) {
+      await waitForWorkerProgress(IMPORT_PROGRESS_POLL_INTERVAL_MS, undefined, { signal: scanOptions.signal });
     }
     await yieldToEventLoop();
   }
+  return failures;
 }
 
-function consumeIndexedMemoryIds(
-  pendingMemoryIds: Set<string>,
-  result: Awaited<ReturnType<Pick<MemoryClient, "runWorker">["runWorker"]>>
-): number {
-  let indexed = 0;
-  for (const job of result.jobs) {
-    if (job.jobType !== "embedding" || job.status !== "succeeded" || !job.targetMemoryId) {
-      continue;
-    }
-    if (pendingMemoryIds.delete(job.targetMemoryId)) {
-      indexed += 1;
-    }
-  }
-  for (const retry of result.embeddingRetries.items) {
-    if (retry.status !== "succeeded") {
-      continue;
-    }
-    if (pendingMemoryIds.delete(retry.targetMemoryId)) {
-      indexed += 1;
-    }
-  }
-  return indexed;
+function appendProcessingFailures(result: ScanResult, failures: readonly ProcessingFailure[]): void {
+  result.errors.push(...failures.map((failure) => ({
+    conversationId: failure.memoryId,
+    reason: failure.reason
+  })));
 }
+
 
 async function* toAsyncIterable(messages: readonly ConversationMessage[]): AsyncIterable<ConversationMessage> {
   for (const message of messages) {

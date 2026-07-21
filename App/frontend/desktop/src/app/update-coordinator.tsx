@@ -1,5 +1,5 @@
 /** App-level desktop update coordination. */
-import type { DesktopUpdateCheckResult, DesktopUpdateInstallResult } from "@memmy/desktop-interface";
+import type { DesktopUpdateCheckResult, DesktopUpdateDownloadProgress, DesktopUpdateInstallResult } from "@memmy/desktop-interface";
 import {
   createContext,
   useCallback,
@@ -37,6 +37,7 @@ export interface UpdateCoordinatorValue {
   appVersion: string;
   phase: UpdatePhase;
   preparedUpdatePath: string | null;
+  downloadProgress: DesktopUpdateDownloadProgress | null;
   feedback: UpdateFeedback | null;
   requestPrimaryAction(): Promise<void>;
 }
@@ -47,6 +48,7 @@ interface UpdateCoordinatorState {
   phase: UpdatePhase;
   result: DesktopUpdateCheckResult | null;
   preparedUpdatePath: string | null;
+  downloadProgress: DesktopUpdateDownloadProgress | null;
   feedback: UpdateFeedback | null;
   dialog: UpdateDialogKind;
 }
@@ -65,6 +67,7 @@ const INITIAL_UPDATE_STATE: UpdateCoordinatorState = {
   phase: "idle",
   result: null,
   preparedUpdatePath: null,
+  downloadProgress: null,
   feedback: null,
   dialog: null
 };
@@ -138,6 +141,25 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
     };
   }, []);
 
+  useEffect(() => {
+    const bridge = typeof window === "undefined" ? undefined : window.memmy;
+    if (!bridge?.onUpdateDownloadProgress) {
+      return;
+    }
+
+    return bridge.onUpdateDownloadProgress((progress) => {
+      commitUpdateState((current) => {
+        if (current.phase !== "downloading") {
+          return current;
+        }
+        return {
+          ...current,
+          downloadProgress: progress
+        };
+      });
+    });
+  }, [commitUpdateState]);
+
   const requestUpdateResult = useCallback((): Promise<DesktopUpdateCheckResult> => {
     const existingRequest = checkInFlightRef.current;
     if (existingRequest) {
@@ -169,6 +191,7 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
         ...current,
         phase: "available",
         dialog: null,
+        downloadProgress: null,
         feedback: { key: "settings.about.updateAvailableNoLink", values: { version } }
       }));
       return;
@@ -181,6 +204,7 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
         ...current,
         phase: "available",
         dialog: null,
+        downloadProgress: null,
         feedback: { key: "settings.about.openingUpdate", values: { version } }
       }));
       return;
@@ -190,6 +214,7 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
       ...current,
       phase: "downloading",
       preparedUpdatePath: null,
+      downloadProgress: null,
       dialog: null,
       feedback: { key: "settings.about.downloadingUpdate", values: { version } }
     }));
@@ -210,6 +235,7 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
         phase: "prepared",
         result: preparedResult,
         preparedUpdatePath: installResult.filePath,
+        downloadProgress: null,
         feedback: { key: "settings.about.silentReady", values: { version } },
         dialog: "install-confirm"
       }));
@@ -222,6 +248,7 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
         ...current,
         phase: "error",
         preparedUpdatePath: null,
+        downloadProgress: null,
         dialog: null,
         feedback: { key: "settings.about.updateInstallFailed" }
       }));
@@ -248,6 +275,7 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
         ...state,
         phase: "prepared",
         dialog: null,
+        downloadProgress: null,
         feedback: { key: "settings.about.updateInstallFailed" }
       }));
       return;
@@ -257,6 +285,7 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
       ...state,
       phase: "installing",
       dialog: null,
+      downloadProgress: null,
       feedback: { key: resolveUpdateInstallStartedMessageKey(appPlatform) }
     }));
 
@@ -273,6 +302,7 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
         ...state,
         phase: installResult.willQuit ? "installing" : "prepared",
         dialog: null,
+        downloadProgress: null,
         feedback: { key: resolveUpdateInstallResultMessageKey(installResult, appPlatform) }
       }));
     } catch (error) {
@@ -284,6 +314,7 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
         ...state,
         phase: "prepared",
         dialog: null,
+        downloadProgress: null,
         feedback: { key: "settings.about.updateInstallFailed" }
       }));
     } finally {
@@ -300,6 +331,7 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
       phase: "checking",
       result: null,
       preparedUpdatePath: null,
+      downloadProgress: null,
       feedback: null,
       dialog: null
     }));
@@ -314,6 +346,7 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
           phase: "not-configured",
           result,
           preparedUpdatePath: null,
+          downloadProgress: null,
           feedback: { key: "settings.about.updateNotConfigured" },
           dialog: null
         }));
@@ -325,6 +358,7 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
           phase: "latest",
           result,
           preparedUpdatePath: null,
+          downloadProgress: null,
           feedback: { key: "settings.about.upToDate", values: { version: result.currentVersion } },
           dialog: null
         }));
@@ -337,6 +371,7 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
           phase: "prepared",
           result,
           preparedUpdatePath: result.preparedUpdatePath ?? null,
+          downloadProgress: null,
           feedback: { key: "settings.about.silentReady", values: { version } },
           dialog: "install-confirm"
         }));
@@ -347,6 +382,7 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
         phase: "available",
         result,
         preparedUpdatePath: null,
+        downloadProgress: null,
         feedback: result.downloadUrl
           ? { key: "settings.about.updateReady", values: { version } }
           : { key: "settings.about.updateAvailableNoLink", values: { version } },
@@ -361,6 +397,7 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
         phase: "error",
         result: null,
         preparedUpdatePath: null,
+        downloadProgress: null,
         feedback: { key: "settings.about.updateCheckFailed" },
         dialog: null
       }));
@@ -458,6 +495,7 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
     appVersion,
     phase: updateState.phase,
     preparedUpdatePath: updateState.preparedUpdatePath,
+    downloadProgress: updateState.downloadProgress,
     feedback: updateState.feedback,
     result: updateState.result,
     dialog: updateState.dialog,

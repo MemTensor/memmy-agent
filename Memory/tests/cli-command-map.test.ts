@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { runCommand } from "../src/cli/commands.js";
+import { PROJECT_VERSION } from "../src/cli/project-version.js";
 
 interface CapturedRequest {
   method: string;
@@ -24,7 +25,7 @@ describe("memmy CLI command map", () => {
   it("prints a complete help page", async () => {
     const help = await runCommand({ argv: ["--help"] });
 
-    expect(help).toContain("memmy-memory 0.0.1-beta.1");
+    expect(help).toContain(`memmy-memory ${PROJECT_VERSION}`);
     expect(help).toContain("Usage:");
     expect(help).toContain("init --agent codex");
     expect(help).toContain("init --skip-agent-skills");
@@ -34,8 +35,8 @@ describe("memmy CLI command map", () => {
   });
 
   it("prints the CLI version", async () => {
-    await expect(runCommand({ argv: ["--version"] })).resolves.toBe("memmy-memory 0.0.1-beta.1");
-    await expect(runCommand({ argv: ["-v"] })).resolves.toBe("memmy-memory 0.0.1-beta.1");
+    await expect(runCommand({ argv: ["--version"] })).resolves.toBe(PROJECT_VERSION);
+    await expect(runCommand({ argv: ["-v"] })).resolves.toBe(PROJECT_VERSION);
   });
 
   const minimalCases: Array<{

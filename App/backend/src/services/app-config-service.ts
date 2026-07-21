@@ -377,12 +377,7 @@ async function reloadMemoryConfigIfNeeded(
   if (!projection?.changed || !projection.activeProfileAffected || !options.memoryClient) {
     return;
   }
-
-  try {
-    await options.memoryClient.reloadConfig({ reason });
-  } catch {
-    // noop
-  }
+  await options.memoryClient.reloadConfig({ reason });
 }
 
 /** Reads get authenticated cloud account. */

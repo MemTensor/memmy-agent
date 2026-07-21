@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
@@ -34,6 +34,7 @@ describe("repository sqlite schema contract", () => {
         "idempotency_keys",
         "evolution_jobs",
         "embedding_retry_queue",
+        "memory_processing_state",
         "artifacts",
         "audit_logs",
         "memory_vector_entries"
@@ -175,7 +176,7 @@ describe("repository sqlite schema contract", () => {
     }
   });
 
-  it("migrates schema v2 to v3 without deleting user data", () => {
+  it("migrates schema v2 to v4 without deleting user data", () => {
     const root = mkdtempSync(join(tmpdir(), "mindock-repo-v2-source-agent-migration-"));
     const dbPath = join(root, "memory.sqlite");
     try {
@@ -227,13 +228,100 @@ describe("repository sqlite schema contract", () => {
       });
       expect((migrated.db.prepare(`PRAGMA index_list(api_logs)`).all() as Array<{ name: string }>)
         .map((index) => index.name)).toContain("idx_api_logs_tool_source_time");
+      expect(existsSync(`${dbPath}.pre-v${SCHEMA_VERSION}.bak`)).toBe(true);
       migrated.close();
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
   });
 
-  it("recreates an incompatible schema instead of migrating old data", () => {
+  it("migrates v3 trace memories into explicit processing states without losing search data or vectors", () => {
+    const root = mkdtempSync(join(tmpdir(), "mindock-repo-v3-processing-migration-"));
+    const dbPath = join(root, "memory.sqlite");
+    try {
+      const seeded = new MemoryDb({ path: dbPath });
+      const repos = new Repositories(seeded.db);
+      repos.memories.insert(schemaTraceMemory("legacy-ready", "legacy ready summary", true));
+      repos.memories.insert(schemaTraceMemory("legacy-embedding", "legacy searchable summary", false));
+      repos.memories.insert(schemaTraceMemory("legacy-summary", "摘要排队中", false));
+      repos.memories.insert(schemaTraceMemory("legacy-failed", "legacy failed summary", false));
+      repos.runtime.enqueueJob({
+        id: "legacy-failed-job",
+        jobType: "import_summary",
+        status: "queued",
+        dedupeKey: "import_summary:legacy-failed",
+        userId: "old-user",
+        targetMemoryId: "legacy-failed",
+        payload: {},
+        attempts: 3,
+        maxAttempts: 3,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z"
+      });
+      seeded.db.prepare(`
+        UPDATE evolution_jobs
+        SET status = 'dead_letter', last_error = 'legacy provider failed'
+        WHERE id = 'legacy-failed-job'
+      `).run();
+      seeded.db.exec(`
+        DROP TABLE memory_processing_state;
+        DELETE FROM schema_migrations;
+        INSERT INTO schema_migrations (id, version, applied_at, checksum)
+        VALUES ('003_runtime_schema', 3, '2026-01-01T00:00:00.000Z', 'v3');
+      `);
+      seeded.close();
+
+      const migrated = new MemoryDb({ path: dbPath });
+      const processingRows = migrated.db.prepare(`
+        SELECT memory_id, state, stage, error_message
+        FROM memory_processing_state
+        ORDER BY memory_id
+      `).all() as Array<{ memory_id: string; state: string; stage: string | null; error_message: string | null }>;
+      expect(processingRows).toEqual([
+        {
+          memory_id: "legacy-embedding",
+          state: "embedding_pending",
+          stage: "embedding",
+          error_message: null
+        },
+        {
+          memory_id: "legacy-failed",
+          state: "failed",
+          stage: "summary",
+          error_message: "legacy provider failed"
+        },
+        {
+          memory_id: "legacy-ready",
+          state: "ready",
+          stage: null,
+          error_message: null
+        },
+        {
+          memory_id: "legacy-summary",
+          state: "summary_pending",
+          stage: "summary",
+          error_message: null
+        }
+      ]);
+      expect(migrated.db.prepare(`SELECT COUNT(*) AS count FROM memories`).get()).toEqual({ count: 4 });
+      expect(migrated.db.prepare(`
+        SELECT embedding_dim
+        FROM memory_vector_entries
+        WHERE memory_id = 'legacy-ready' AND vector_field = 'vec_summary'
+      `).get()).toEqual({ embedding_dim: 3 });
+      expect(migrated.db.prepare(`SELECT COUNT(*) AS count FROM memories_fts`).get()).toEqual({ count: 4 });
+      const tags = migrated.db.prepare(`SELECT tags_json FROM memories WHERE id = 'legacy-embedding'`).get() as {
+        tags_json: string;
+      };
+      expect(JSON.parse(tags.tags_json)).toEqual(["agent-source", "hermes", "legacy-user-tag"]);
+      expect(existsSync(`${dbPath}.pre-v${SCHEMA_VERSION}.bak`)).toBe(true);
+      migrated.close();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects an unknown schema without changing user data", () => {
     const root = mkdtempSync(join(tmpdir(), "mindock-repo-incompatible-schema-"));
     try {
       const dbPath = join(root, "memory.sqlite");
@@ -251,23 +339,18 @@ describe("repository sqlite schema contract", () => {
       `);
       incompatible.close();
 
-      const db = new MemoryDb({ path: dbPath });
-      expect(db.schemaVersion()).toEqual({
-        version: SCHEMA_VERSION,
-        lastMigrationId: SCHEMA_MIGRATION_ID
-      });
-      expect(db.db.prepare(`SELECT COUNT(*) AS count FROM memories`).get()).toEqual({ count: 0 });
-      expect(db.db.prepare(`PRAGMA table_info(memories)`).all()).toEqual(expect.arrayContaining([
-        expect.objectContaining({ name: "memory_value" }),
-        expect.objectContaining({ name: "memory_layer" })
-      ]));
-      db.close();
+      expect(() => new MemoryDb({ path: dbPath })).toThrow(/left unchanged/);
+      const verified = new Database(dbPath);
+      expect(verified.prepare(`SELECT id FROM memories`).get()).toEqual({ id: "old-memory" });
+      expect(verified.prepare(`SELECT version FROM schema_migrations`).get()).toEqual({ version: 1 });
+      verified.close();
+      expect(existsSync(`${dbPath}.pre-v${SCHEMA_VERSION}.bak`)).toBe(true);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
   });
 
-  it("drops incompatible vec0 virtual tables and their shadow data during a full reset", () => {
+  it("keeps vectors intact when an unknown schema is rejected", () => {
     const root = mkdtempSync(join(tmpdir(), "mindock-repo-incompatible-vec-schema-"));
     const dbPath = join(root, "memory.sqlite");
     try {
@@ -284,17 +367,17 @@ describe("repository sqlite schema contract", () => {
       ).run();
       seeded.close();
 
-      const reset = new MemoryDb({ path: dbPath });
-      expect(reset.schemaVersion()).toEqual({
-        version: SCHEMA_VERSION,
-        lastMigrationId: SCHEMA_MIGRATION_ID
-      });
-      expect(reset.db.prepare(`SELECT COUNT(*) AS count FROM memories`).get()).toEqual({ count: 0 });
-      expect(sqliteNames(reset, "memory_vec_2%")).toEqual([]);
-      expect(reset.db.prepare(`SELECT COUNT(*) AS count FROM memory_vector_entries`).get())
-        .toEqual({ count: 0 });
-      expect(reset.db.prepare(`PRAGMA foreign_key_check`).all()).toEqual([]);
-      reset.close();
+      expect(() => new MemoryDb({ path: dbPath })).toThrow(/left unchanged/);
+      const verified = new Database(dbPath);
+      expect(verified.prepare(`SELECT COUNT(*) AS count FROM memories`).get()).toEqual({ count: 1 });
+      expect(verified.prepare(`SELECT COUNT(*) AS count FROM memory_vector_entries`).get())
+        .toEqual({ count: 1 });
+      const names = (verified.prepare(
+        `SELECT name FROM sqlite_master WHERE name LIKE 'memory_vec_2%' ORDER BY name`
+      ).all() as Array<{ name: string }>).map((row) => row.name);
+      expect(names).toEqual(expect.arrayContaining(["memory_vec_2", "memory_vec_2_chunks", "memory_vec_2_rowids"]));
+      verified.close();
+      expect(existsSync(`${dbPath}.pre-v${SCHEMA_VERSION}.bak`)).toBe(true);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -328,6 +411,53 @@ function schemaVectorMemory(): MemoryRow {
     },
     memoryLayer: "L2",
     contentHash: "old-vector-memory-hash",
+    version: 1,
+    createdAt: at,
+    updatedAt: at,
+    deletedAt: null
+  };
+}
+
+function schemaTraceMemory(id: string, summary: string, withVector: boolean): MemoryRow {
+  const at = "2026-01-01T00:00:00.000Z";
+  return {
+    id,
+    timeline: at,
+    userId: "old-user",
+    agentId: "hermes",
+    memoryType: "LongTermMemory",
+    status: "activated",
+    visibility: "private",
+    memoryKey: `memory.add:agent-source:hermes:${id}`,
+    memoryValue: `Summary: ${summary}\n\nUser:\nlegacy searchable content`,
+    tags: ["agent-source", "hermes", "legacy-user-tag", "摘要总结中", "索引建立中"],
+    info: {
+      summary,
+      source: "hermes",
+      import_pipeline: { status: "indexing" }
+    },
+    properties: {
+      internal_info: {
+        memory_layer: "L1",
+        memory_kind: "trace",
+        plugin_algorithm: "memory.add.import_async.v2",
+        import_pipeline: { status: "indexing" },
+        trace: {
+          summary,
+          user_text: "legacy searchable content",
+          agent_text: "legacy answer",
+          tool_calls: [],
+          ...(withVector
+            ? {
+              vec_summary: [1, 0, 0],
+              embedding_model: "legacy-embedding-model"
+            }
+            : {})
+        }
+      }
+    },
+    memoryLayer: "L1",
+    contentHash: `${id}-hash`,
     version: 1,
     createdAt: at,
     updatedAt: at,

@@ -15,6 +15,7 @@ export interface AgentSourceScanProgressEvent {
 /** Contract for agent source scan completed event. */
 export interface AgentSourceScanCompletedEvent {
   jobId: string;
+  sourceId: string;
   results: ScanResult[];
 }
 

@@ -39,8 +39,8 @@ describe("app state store migrations", () => {
     expect(settings.userMode).toBe("unset");
     expect(settings.menuBarIconEnabled).toBe(true);
     expect(agentSources).toEqual([]);
-    expect(firstMigrationCount).toBe(23);
-    expect(secondMigrationCount).toBe(23);
+    expect(firstMigrationCount).toBe(25);
+    expect(secondMigrationCount).toBe(25);
   });
 
   it("recovers when the ASR migration columns already exist but its migration record is missing", () => {

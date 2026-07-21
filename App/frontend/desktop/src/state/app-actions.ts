@@ -34,6 +34,17 @@ export interface AgentSourceScanProgress {
   message?: string;
 }
 
+export interface AgentSourceScanCompletion {
+  jobId: string;
+  sourceId: string;
+}
+
+export interface AgentSourceScanFinished extends AgentSourceScanCompletion {
+  succeeded: boolean;
+}
+
+export const AGENT_SOURCE_SCAN_COMPLETION_FEEDBACK_MS = 5_000;
+
 /** Type definition for app action. */
 export type AppAction =
   | ToolsAction
@@ -51,9 +62,10 @@ export type AppAction =
   | { type: "agentSources/loaded"; sources: AgentSourceView[] }
   | { type: "agentSources/refreshed"; sources: AgentSourceView[] }
   | { type: "agentSources/error"; message: string }
-  | { type: "agentSources/scanStarted" }
+  | { type: "agentSources/scanStarted"; sourceId: string }
   | { type: "agentSources/scanProgress"; progress: AgentSourceScanProgress }
-  | { type: "agentSources/scanCompleted" }
+  | { type: "agentSources/scanCompleted"; scan?: AgentSourceScanFinished }
+  | { type: "agentSources/scanCompletionExpired"; jobId: string }
   | { type: "scanPreferences/updated"; preferences: Partial<ScanPreferences> }
   | { type: "preferredMode/updated"; preferredMode: PreferredMode }
   | { type: "account/updated"; email?: string; phoneNumber?: string | null; nickname?: string; registeredAt?: string | null }
@@ -128,8 +140,8 @@ export const appActions = {
   },
 
   /** Handles agent source scan started. */
-  agentSourceScanStarted(): AppAction {
-    return { type: "agentSources/scanStarted" };
+  agentSourceScanStarted(sourceId = "all"): AppAction {
+    return { type: "agentSources/scanStarted", sourceId };
   },
 
   /** Handles agent source scan progress received. */
@@ -138,8 +150,12 @@ export const appActions = {
   },
 
   /** Handles agent source scan completed. */
-  agentSourceScanCompleted(): AppAction {
-    return { type: "agentSources/scanCompleted" };
+  agentSourceScanCompleted(scan?: AgentSourceScanFinished): AppAction {
+    return { type: "agentSources/scanCompleted", scan };
+  },
+
+  agentSourceScanCompletionExpired(jobId: string): AppAction {
+    return { type: "agentSources/scanCompletionExpired", jobId };
   },
 
   /** Handles scan preferences updated. */

@@ -32,7 +32,12 @@ import {
   formatScanCompletedError
 } from "./pages/agent-source-scan-error.js";
 import { useTranslation } from "./i18n/use-translation.js";
-import { agentActions, appActions, type AppAction } from "./state/app-actions.js";
+import {
+  AGENT_SOURCE_SCAN_COMPLETION_FEEDBACK_MS,
+  agentActions,
+  appActions,
+  type AppAction
+} from "./state/app-actions.js";
 import { useAppState } from "./state/app-state.js";
 
 /** Handles app. */
@@ -68,6 +73,35 @@ function RuntimeApp() {
   useEffect(() => {
     let events: EventSource | undefined;
     let isActive = true;
+    const scanCompletionTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
+
+    function scheduleScanCompletionExpiry(jobId: string) {
+      const existingTimeout = scanCompletionTimeouts.get(jobId);
+      if (existingTimeout) clearTimeout(existingTimeout);
+      scanCompletionTimeouts.set(jobId, setTimeout(() => {
+        scanCompletionTimeouts.delete(jobId);
+        dispatch(appActions.agentSourceScanCompletionExpired(jobId));
+      }, AGENT_SOURCE_SCAN_COMPLETION_FEEDBACK_MS));
+    }
+
+    async function reconcileAgentSourceScanStatus(agentSourceClient: ReturnType<typeof createAppClients>["agentSources"]) {
+      try {
+        const status = await agentSourceClient.getScanStatus();
+        if (!isActive) return;
+        if (status.progress) {
+          dispatch(appActions.agentSourceScanProgressReceived(status.progress));
+          return;
+        }
+        if (status.completion) {
+          dispatch(appActions.agentSourceScanCompleted(status.completion));
+          scheduleScanCompletionExpiry(status.completion.jobId);
+          return;
+        }
+        dispatch(appActions.agentSourceScanCompleted());
+      } catch {
+        // The next heartbeat or reconnect will reconcile again.
+      }
+    }
 
     /** Handles boot. */
     async function boot() {
@@ -133,6 +167,9 @@ function RuntimeApp() {
         dispatch(appActions.agentSourcesLoaded(sources));
         if (scanStatus.progress) {
           dispatch(appActions.agentSourceScanProgressReceived(scanStatus.progress));
+        } else if (scanStatus.completion) {
+          dispatch(appActions.agentSourceScanCompleted(scanStatus.completion));
+          scheduleScanCompletionExpiry(scanStatus.completion.jobId);
         }
         if (accountSession.authenticated) {
           dispatch(appActions.accountUpdated({
@@ -152,7 +189,10 @@ function RuntimeApp() {
         dispatch(appActions.eventStatusChanged("connecting"));
 
         events = createEventsConnection(runtimeConfig);
-        events.addEventListener("app.connected", () => dispatch(appActions.eventStatusChanged("connected")));
+        events.addEventListener("app.connected", () => {
+          dispatch(appActions.eventStatusChanged("connected"));
+          void reconcileAgentSourceScanStatus(clients.agentSources);
+        });
         events.addEventListener("app.heartbeat", () => dispatch(appActions.eventStatusChanged("heartbeat")));
         events.addEventListener("agent_source.scan_progress", (event) => {
           const parsed = parseSseEvent(event);
@@ -162,9 +202,14 @@ function RuntimeApp() {
         });
         events.addEventListener("agent_source.scan_completed", (event) => {
           const parsed = parseSseEvent(event);
-          const scanResults = parsed?.type === "agent_source.scan_completed" ? parsed.payload.results : null;
+          if (parsed?.type !== "agent_source.scan_completed") {
+            return;
+          }
+          const { jobId, sourceId, results: scanResults } = parsed.payload;
+          const scanSucceeded = scanResults.every((result) => result.errors.length === 0);
           clearMemoryPanelCache();
-          dispatch(appActions.agentSourceScanCompleted());
+          dispatch(appActions.agentSourceScanCompleted({ jobId, sourceId, succeeded: scanSucceeded }));
+          scheduleScanCompletionExpiry(jobId);
           void clients.agentSources
             .listSources()
             .then((nextSources) => {
@@ -197,6 +242,9 @@ function RuntimeApp() {
     return () => {
       isActive = false;
       events?.close();
+      for (const timeout of scanCompletionTimeouts.values()) {
+        clearTimeout(timeout);
+      }
     };
   }, [bootKey, dispatch, setClients]);
 

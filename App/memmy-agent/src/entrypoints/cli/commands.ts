@@ -46,6 +46,7 @@ import { evaluateResponse } from "../../utils/evaluator.js";
 import { installConsoleLevelGate } from "../../runtime-log-level.js";
 import { syncWorkspaceTemplates } from "../../utils/helpers.js";
 import { withProgressCapabilities } from "../../utils/progress-events.js";
+import { VERSION } from "../../version.js";
 import {
   consumeRestartNoticeFromEnv,
   formatRestartCompletedMessage,
@@ -55,7 +56,6 @@ import { createChannelAdmin } from "../frontend-bridge/channels-api.js";
 import { getQuestionary, runOnboard } from "./onboard.js";
 import { StreamRenderer, ThinkingSpinner } from "./stream.js";
 
-export const CLI_VERSION = "0.0.1-beta.1";
 export const app = new Command("memmy");
 
 export type GatewayRuntime = {
@@ -199,7 +199,7 @@ export async function runRootInteractiveAgent(): Promise<unknown> {
   syncRuntimeWorkspaceTemplates(loaded);
   printCliRestartNoticeIfNeeded("cli:direct", true);
   const { runInkInteractiveAgent } = await import("./tui.js");
-  return runInkInteractiveAgent(loaded, "cli:direct", CLI_VERSION);
+  return runInkInteractiveAgent(loaded, "cli:direct");
 }
 
 export async function main(argv: string[] = process.argv): Promise<void> {
@@ -1516,7 +1516,7 @@ export async function readInteractiveInputAsync(prompt = "> "): Promise<string> 
 }
 
 export function versionCallback(value: boolean): void {
-  if (value) console.log(CLI_VERSION);
+  if (value) console.log(VERSION);
 }
 
 export function warnDeprecatedConfigKeys(configPath: string | null = null): string[] {

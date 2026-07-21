@@ -32,6 +32,7 @@ export interface PackagedRuntimeServices {
     bootstrapSecret: string;
     configPath: string;
   };
+  restartMemory(): Promise<void>;
   close(): Promise<void>;
   terminateSync(): void;
 }
@@ -96,6 +97,8 @@ export async function startPackagedRuntimeServices(
   const entries = resolveRuntimeEntryPaths(options);
   const runtimeConfig = await preparePackagedRuntimeConfig();
   const children: ManagedChild[] = [];
+  let memoryRestart: Promise<void> | null = null;
+  let closing = false;
 
   try {
     await syncBundledAgentSkills({
@@ -117,7 +120,21 @@ export async function startPackagedRuntimeServices(
         bootstrapSecret: runtimeConfig.agentGatewayBootstrapSecret,
         configPath: runtimeConfig.configPath
       },
+      async restartMemory() {
+        if (closing) {
+          throw new Error("Memmy is shutting down");
+        }
+        if (!memoryRestart) {
+          memoryRestart = restartManagedMemoryService(entries, runtimeConfig, children, options)
+            .finally(() => {
+              memoryRestart = null;
+            });
+        }
+        await memoryRestart;
+      },
       async close() {
+        closing = true;
+        await memoryRestart?.catch(() => undefined);
         await stopManagedChildren(children);
       },
       terminateSync() {
@@ -280,7 +297,8 @@ async function ensureMemoryService(
   options: StartPackagedRuntimeServicesOptions
 ): Promise<void> {
   const healthUrl = `${runtimeConfig.memoryBaseUrl}/api/v1/health`;
-  const probe = await probeHttpService(healthUrl);
+  const healthHeaders = memoryAuthHeaders(runtimeConfig.memoryToken);
+  const probe = await probeHttpService(healthUrl, healthHeaders);
   if (probe === "ready") {
     return;
   }
@@ -310,7 +328,73 @@ async function ensureMemoryService(
     logLevel: options.logLevel
   });
   children.push(memoryChild);
-  await waitForHttpService("memory", healthUrl, memoryChild);
+  await waitForHttpService("memory", healthUrl, memoryChild, healthHeaders);
+}
+
+async function restartManagedMemoryService(
+  entries: RuntimeEntryPaths,
+  runtimeConfig: PackagedRuntimeConfig,
+  children: ManagedChild[],
+  options: StartPackagedRuntimeServicesOptions
+): Promise<void> {
+  const healthUrl = `${runtimeConfig.memoryBaseUrl}/api/v1/health`;
+  const healthHeaders = memoryAuthHeaders(runtimeConfig.memoryToken);
+  const managedMemory = children.filter((child) => child.name === "memory" && isManagedChildRunning(child));
+
+  if (managedMemory.length > 0) {
+    await Promise.all(managedMemory.map((child) => stopManagedChild(child)));
+  } else {
+    const probe = await probeHttpService(healthUrl, healthHeaders);
+    if (probe === "ready") {
+      await requestMemoryServiceShutdown({
+        baseUrl: runtimeConfig.memoryBaseUrl,
+        token: runtimeConfig.memoryToken
+      });
+    } else if (probe === "unexpected") {
+      throw new Error(`Memory endpoint is occupied by an unexpected service: ${healthUrl}`);
+    }
+  }
+
+  removeManagedChildrenByName(children, "memory");
+  await waitForHttpServiceStop(healthUrl, healthHeaders);
+  await ensureMemoryService(entries, runtimeConfig, children, options);
+}
+
+export async function restartExternalMemoryService(input: {
+  baseUrl: string;
+  token: string;
+}): Promise<void> {
+  const baseUrl = normalizeBaseUrl(parseHttpUrl(input.baseUrl, "Memory service URL"));
+  const healthUrl = `${baseUrl}/api/v1/health`;
+  const healthHeaders = memoryAuthHeaders(input.token);
+  const probe = await probeHttpService(healthUrl, healthHeaders);
+  if (probe !== "ready") {
+    throw new Error(probe === "unexpected"
+      ? `Memory endpoint returned an unexpected response: ${healthUrl}`
+      : `Memory service is not running: ${healthUrl}`);
+  }
+
+  await requestMemoryServiceShutdown(input);
+  await waitForHttpServiceStop(healthUrl, healthHeaders);
+  await waitForHttpServiceReady("memory", healthUrl, healthHeaders);
+}
+
+async function requestMemoryServiceShutdown(input: { baseUrl: string; token: string }): Promise<void> {
+  const baseUrl = normalizeBaseUrl(parseHttpUrl(input.baseUrl, "Memory service URL"));
+  const response = await fetch(`${baseUrl}/api/v1/admin/shutdown`, {
+    method: "POST",
+    cache: "no-store",
+    headers: {
+      "content-type": "application/json",
+      ...memoryAuthHeaders(input.token)
+    },
+    body: "{}",
+    signal: AbortSignal.timeout(HTTP_TIMEOUT_MS)
+  });
+  if (!response.ok) {
+    const body = (await response.text()).trim();
+    throw new Error(`Memory restart request failed with HTTP ${response.status}${body ? `: ${body.slice(0, 300)}` : ""}`);
+  }
 }
 
 async function ensureAgentGateway(
@@ -434,6 +518,34 @@ async function probeHttpService(url: string, headers: Record<string, string> = {
   }
 }
 
+async function waitForHttpServiceStop(url: string, headers: Record<string, string> = {}): Promise<void> {
+  const deadline = Date.now() + STARTUP_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (await probeHttpService(url, headers) === "unreachable") {
+      return;
+    }
+    await sleep(50);
+  }
+  throw new Error(`Memory service did not stop at ${url}`);
+}
+
+async function waitForHttpServiceReady(
+  name: string,
+  url: string,
+  headers: Record<string, string> = {}
+): Promise<void> {
+  const deadline = Date.now() + STARTUP_TIMEOUT_MS;
+  let lastProbe: HttpProbeResult = "unreachable";
+  while (Date.now() < deadline) {
+    lastProbe = await probeHttpService(url, headers);
+    if (lastProbe === "ready") {
+      return;
+    }
+    await sleep(POLL_INTERVAL_MS);
+  }
+  throw new Error(`${name} did not restart at ${url} (last probe: ${lastProbe})`);
+}
+
 async function waitForHttpService(
   name: string,
   url: string,
@@ -472,6 +584,22 @@ async function stopManagedChildren(children: ManagedChild[]): Promise<void> {
   await Promise.allSettled([...children].reverse().map((child) => stopManagedChild(child)));
 }
 
+function isManagedChildRunning(child: ManagedChild): boolean {
+  return !child.exitDescription && child.process.exitCode === null && child.process.signalCode === null;
+}
+
+function removeManagedChildrenByName(children: ManagedChild[], name: string): void {
+  for (let index = children.length - 1; index >= 0; index -= 1) {
+    if (children[index]?.name === name) {
+      children.splice(index, 1);
+    }
+  }
+}
+
+function memoryAuthHeaders(token: string): Record<string, string> {
+  return token ? { authorization: `Bearer ${token}` } : {};
+}
+
 /**
  * Synchronously, best-effort terminates all child service processes.
  *
@@ -506,7 +634,7 @@ async function stopManagedChild(child: ManagedChild): Promise<void> {
   }
 
   // Windows: child.kill only terminates the direct child; if memory / agent-gateway spawned a
-  // worker (grandchild), it survives, keeps holding the fixed ports (18799 / 18997) and locking
+  // worker (grandchild), it survives, keeps holding the fixed service ports and locking
   // Memmy.exe, causing EADDRINUSE on the next launch and blocking silent updates from installing.
   // Use taskkill /T to kill the entire process tree.
   if (process.platform === "win32") {
