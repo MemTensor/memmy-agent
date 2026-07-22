@@ -118,7 +118,7 @@ import {
   sourceMemoryIdsFromMemory,
   truncateDetailTitle
 } from "./read-model/memory.js";
-import { normalizeQueryRewriteQueries } from "./retrieval/query-rewrite.js";
+import { mergeRetrievalResults, normalizeQueryRewriteQueries } from "./retrieval/query-rewrite.js";
 import { MemoryServiceError } from "../utils/error.js";
 import { newId, stableHash, stableStringify } from "../utils/id.js";
 import {
@@ -2597,7 +2597,7 @@ export class MemoryService {
       )
     ));
     return {
-      retrieval: mergeRetrievalResults(outputs.map((output) => output.retrieval), input.limit),
+      retrieval: mergeRetrievalResults(outputs.map((output) => output.retrieval), input.limit, QUERY_REWRITE_RRF_CONSTANT, QUERY_REWRITE_PER_QUERY_MIN_KEEP),
       memories: uniqMemories(outputs.flatMap((output) => output.memories))
     };
   }
@@ -15648,82 +15648,6 @@ function capText(value: string, max: number): string {
 function capSkillPromptText(value: string, max: number): string {
   if (value.length <= max) return value;
   return `${value.slice(0, max)}…`;
-}
-
-function mergeRetrievalResults(retrievals: RetrievalResult[], limit: number): RetrievalResult {
-  const entries = new Map<string, {
-    hit: RecallHit;
-    score: number;
-    firstRank: number;
-    firstQueryIndex: number;
-  }>();
-  for (const [queryIndex, retrieval] of retrievals.entries()) {
-    for (const [rank, hit] of retrieval.hits.entries()) {
-      const existing = entries.get(hit.id);
-      const entry = existing ?? {
-        hit,
-        score: 0,
-        firstRank: rank,
-        firstQueryIndex: queryIndex
-      };
-      entry.score += 1 / (rank + 1 + QUERY_REWRITE_RRF_CONSTANT);
-      if (!existing || hit.score > existing.hit.score) {
-        entry.hit = hit;
-      }
-      entry.firstRank = Math.min(entry.firstRank, rank);
-      entry.firstQueryIndex = Math.min(entry.firstQueryIndex, queryIndex);
-      entries.set(hit.id, entry);
-    }
-  }
-  const rankedEntries = Array.from(entries.values())
-    .sort((left, right) =>
-      right.score - left.score ||
-      left.firstRank - right.firstRank ||
-      left.firstQueryIndex - right.firstQueryIndex
-    );
-  const perQueryKeep = Math.min(
-    QUERY_REWRITE_PER_QUERY_MIN_KEEP,
-    Math.max(1, Math.floor(Math.max(0, limit) / Math.max(1, retrievals.length)))
-  );
-  const reservedIds = new Set(
-    retrievals.flatMap((retrieval) => retrieval.hits.slice(0, perQueryKeep).map((hit) => hit.id))
-  );
-  const selectedEntries = [
-    ...rankedEntries.filter((entry) => reservedIds.has(entry.hit.id)),
-    ...rankedEntries.filter((entry) => !reservedIds.has(entry.hit.id))
-  ].slice(0, Math.max(0, limit));
-  const hits = selectedEntries
-    .map((entry) => ({
-      ...entry.hit,
-      score: roundNumber(entry.score)
-    }));
-  const kept = {
-    tier1: hits.filter((hit) => recallHitTier(hit) === "tier1").length,
-    tier2: hits.filter((hit) => recallHitTier(hit) === "tier2").length,
-    tier3: hits.filter((hit) => recallHitTier(hit) === "tier3").length
-  };
-  return {
-    hits,
-    debug: {
-      tierSizes: retrievals.reduce(
-        (acc, retrieval) => ({
-          tier1: acc.tier1 + retrieval.debug.tierSizes.tier1,
-          tier2: acc.tier2 + retrieval.debug.tierSizes.tier2,
-          tier3: acc.tier3 + retrieval.debug.tierSizes.tier3
-        }),
-        { tier1: 0, tier2: 0, tier3: 0 }
-      ),
-      kept,
-      topRelevance: hits[0]?.score ?? 0,
-      droppedByThreshold: retrievals.reduce((sum, retrieval) => sum + retrieval.debug.droppedByThreshold, 0)
-    }
-  };
-}
-
-function recallHitTier(hit: RecallHit): "tier1" | "tier2" | "tier3" {
-  if (hit.memoryLayer === "Skill") return "tier1";
-  if (hit.memoryLayer === "L3") return "tier3";
-  return "tier2";
 }
 
 function uniq<T>(values: T[]): T[] {
