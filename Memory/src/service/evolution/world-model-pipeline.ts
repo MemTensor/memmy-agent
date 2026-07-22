@@ -18,6 +18,7 @@ import { isRecord } from "../../utils/json.js";
 import { nowIso } from "../../utils/time.js";
 import { profileIdFromMemory,projectIdFromMemory } from "../namespace/namespace-scope.js";
 import type { EnqueueJobInput } from "../worker/job-handlers.js";
+import { logEvolutionDecision } from "./evolution-logging.js";
 
 type TraceMeta = NonNullable<ReturnType<typeof traceMetaFromMemory>>;
 type PolicyMeta = NonNullable<ReturnType<typeof policyMetaFromMemory>>;
@@ -71,10 +72,23 @@ export class WorldModelPipeline {
       minPolicySupport: this.deps.config.algorithm.l3Abstraction.minPolicySupport,
       clusterMinSimilarity: this.deps.config.algorithm.l3Abstraction.clusterMinSimilarity
     });
+    if (fallbackDrafts.length === 0) {
+      logEvolutionDecision(job, "l3_abstraction", "no_eligible_cluster", {
+        policyCount: policies.length,
+        filteredPolicyCount: filteredPolicies.length,
+        minPolicies: this.deps.config.algorithm.l3Abstraction.minPolicies,
+        minPolicyGain: this.deps.config.algorithm.l3Abstraction.minPolicyGain,
+        minPolicySupport: this.deps.config.algorithm.l3Abstraction.minPolicySupport,
+        clusterMinSimilarity: this.deps.config.algorithm.l3Abstraction.clusterMinSimilarity
+      });
+    }
     const policyById = new Map(policies.map((policy) => [policy.id, policy]));
     const readyDrafts: WorldModelDraft[] = [];
     for (const draft of fallbackDrafts) {
       if (this.l3DomainInCooldown(userId, draft.domainKey, at)) {
+        logEvolutionDecision(job, "l3_abstraction", "cooldown", {
+          policyCount: draft.policyIds.length
+        });
         this.deps.repos.runtime.appendChange({
           memoryId: source?.id ?? draft.key,
           namespaceId: source ? this.deps.namespaceIdFromMemory(source) : undefined,
@@ -102,6 +116,10 @@ export class WorldModelPipeline {
           .map((policyId) => policyById.get(policyId))
           .find((policy): policy is PolicyMeta => Boolean(policy));
         const anchorMemory = source ?? anchorPolicy?.memory;
+        logEvolutionDecision(job, "l3_abstraction", enhancement.reason, {
+          sourceMemoryId: anchorMemory?.id,
+          policyCount: enhancement.fallback.policyIds.length
+        });
         this.deps.repos.runtime.appendChange({
           memoryId: anchorMemory?.id ?? enhancement.fallback.key,
           namespaceId: anchorMemory ? this.deps.namespaceIdFromMemory(anchorMemory) : undefined,
@@ -412,8 +430,7 @@ private async enhanceWorldModelDrafts(
         ], {
           operation: `${L3_ABSTRACTION_PROMPT.id}.v${L3_ABSTRACTION_PROMPT.version}`,
           thinkingMode: "enabled",
-          temperature: 0.15,
-          maxTokens: 1200
+          temperature: 0.15
         });
         const invalidReason = l3AbstractionInvalidReason(result);
         if (invalidReason) {

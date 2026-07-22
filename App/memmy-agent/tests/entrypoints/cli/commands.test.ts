@@ -456,9 +456,8 @@ describe("CLI command helpers", () => {
       save: vi.fn(),
       listSessions: vi.fn(() => []),
     };
-    let fakeLoop: any;
     let loopRunning = true;
-    fakeLoop = {
+    const fakeLoop: any = {
       workspace,
       model: "agent_chat",
       unifiedSession: false,

@@ -26,8 +26,10 @@ import {
   worldModelMetaFromMemory
 } from "../../algorithm/plugin-algorithms.js";
 import {
+  MEMORY_SUMMARY_MAX_TOKENS,
   type MemmyConfig
 } from "../../config/index.js";
+import { createMemoryLogger, memoryErrorFields } from "../../logging/logger.js";
 import type { Embedder, LlmClient } from "../../model/types.js";
 import {
   kindFromMemory,
@@ -88,6 +90,8 @@ const QUERY_REWRITE_COUNT = 3;
 const QUERY_REWRITE_RRF_CONSTANT = 8;
 
 const QUERY_REWRITE_PER_QUERY_MIN_KEEP = 3;
+
+const pipelineLogger = createMemoryLogger("pipeline");
 
 const QUERY_REWRITE_SYSTEM_PROMPT = `You rewrite a user's memory search request into exactly 3 complementary retrieval queries.
 
@@ -169,7 +173,7 @@ function searchCandidateFromHit(hit: RecallHit, memory?: MemoryRow): Record<stri
     refKind: hit.kind,
     refId: hit.id,
     score: hit.score,
-    content: formatted.body,
+    content: formatted?.body ?? "",
     snippet: hit.snippet,
     summary: hit.title,
     origin: hit.source,
@@ -273,7 +277,10 @@ export function buildInjectedContext(
     domain: tuning?.domain
   };
   const memoryById = new Map(contextMemories.map((memory) => [memory.id, memory]));
-  const rendered = hits.map((hit) => renderInjectedSection(hit, memoryById.get(hit.id), options));
+  const rendered = hits.flatMap((hit) => {
+    const section = renderInjectedSection(hit, memoryById.get(hit.id), options);
+    return section ? [section] : [];
+  });
   const memories = isStandaloneMathInjected(options)
     ? suppressLowSpecificityStandaloneMathSections(
         suppressIsolatedMathSkillSections(rendered),
@@ -316,8 +323,13 @@ export function buildInjectedContext(
   };
 }
 
-function renderInjectedSection(hit: RecallHit, memory: MemoryRow | undefined, options: InjectedRenderOptions): RenderedInjectedSection {
+function renderInjectedSection(
+  hit: RecallHit,
+  memory: MemoryRow | undefined,
+  options: InjectedRenderOptions
+): RenderedInjectedSection | null {
   const rendered = renderInjectedSnippet(hit, memory, options);
+  if (!rendered) return null;
   const content = rendered.body;
   return {
     refKind: rendered.refKind,
@@ -338,7 +350,7 @@ function renderInjectedSnippet(
   hit: RecallHit,
   memory: MemoryRow | undefined,
   options: InjectedRenderOptions
-): { refKind: InjectedSnippetRefKind; title: string; body: string } {
+): { refKind: InjectedSnippetRefKind; title: string; body: string } | null {
   if (hit.kind === "skill" || hit.memoryLayer === "Skill") {
     const skill = memory ? skillMetaFromMemory(memory) : null;
     const name = skill?.name || hit.title || "Skill";
@@ -381,6 +393,7 @@ function renderInjectedSnippet(
 
   if (hit.kind === "trace" || hit.memoryLayer === "L1") {
     const trace = memory ? traceMetaFromMemory(memory) : null;
+    if (!trace) return null;
     return {
       refKind: "trace",
       title: "Trace",
@@ -447,25 +460,14 @@ function renderInjectedExperienceUseHint(policy: NonNullable<ReturnType<typeof p
   return "Use as prior successful guidance when the current task matches.";
 }
 
-function renderInjectedTraceBody(hit: RecallHit, trace: TraceMeta | null): string {
-  if (!trace) {
-    return [
-      `id: ${hit.id}`,
-      `timestamp: ${formatInjectedTimestamp(undefined, hit.updatedAt)}`,
-      "",
-      ...labeledInjectedBlock("Content", hit.snippet)
-    ].join("\n");
-  }
-  const reflection = displayReflectionText(trace.reflection);
+function renderInjectedTraceBody(hit: RecallHit, trace: TraceMeta): string {
   return [
     `id: ${hit.id}`,
     `timestamp: ${formatInjectedTimestamp(trace.ts, hit.updatedAt)}`,
-    ...(trace.summary.trim() ? ["", ...labeledInjectedBlock("Summary", trace.summary)] : []),
     "",
-    ...labeledInjectedBlock("User", trace.userText || "(empty)"),
+    ...labeledInjectedBlock("Historical user statement", trace.userText || "(empty)"),
     "",
-    ...labeledInjectedBlock("Assistant", trace.agentText || "(empty)"),
-    ...(reflection ? ["", ...labeledInjectedBlock("Reflection", reflection)] : [])
+    ...labeledInjectedBlock("Historical assistant response", trace.agentText || "(empty)")
   ].join("\n");
 }
 
@@ -492,7 +494,9 @@ function renderInjectedMarkdown(
   const standaloneMathFinalAnswer = isStandaloneMathInjected(options);
   const taskProtocol = injectedTaskProtocol(options.query);
   if (sections.length === 0 && !guidance && !standaloneMathFinalAnswer && !taskProtocol) return "";
-  const parts: string[] = [injectedHeaderForMode(retrievalMode, standaloneMathFinalAnswer, Boolean(taskProtocol))];
+  const parts: string[] = [];
+  const header = injectedHeaderForMode(retrievalMode, standaloneMathFinalAnswer, Boolean(taskProtocol));
+  if (header) parts.push(header);
   if (taskProtocol) {
     parts.push(taskProtocol);
   } else if (standaloneMathFinalAnswer) {
@@ -607,11 +611,7 @@ function injectedHeaderForMode(mode: RetrievalMode, standaloneMathFinalAnswer = 
     return "# Memory search results\n\n" +
       "The memory tool returned candidate methods and prior examples. Verify fit before using them.";
   }
-  if (mode === "turn_start") {
-    return "# Memory context\n\n" +
-      "The memory system recalled historical items that may relate to the current user query.\n" +
-      "Use them only when they are relevant to the current request; ignore unrelated or conflicting memories.";
-  }
+  if (mode === "turn_start") return "";
   if (mode === "skill_invoke") {
     return "# Invoked skill\n\n" +
       "Follow the procedure below; the verification step tells you when you're done.";
@@ -625,9 +625,7 @@ function injectedHeaderForMode(mode: RetrievalMode, standaloneMathFinalAnswer = 
       "You have failed this tool multiple times in a row. Below are preferred / avoided actions\n" +
       "distilled from similar past situations. Please adapt your plan accordingly.";
   }
-  return "# Memory context\n\n" +
-    "The memory system recalled the following items for the current user query.\n" +
-    "Use them only when relevant to the current request.";
+  return "";
 }
 
 function isStandaloneMathInjected(options: InjectedRenderOptions): boolean {
@@ -1130,6 +1128,21 @@ export class RetrievalService {
     }
     const context = this.deps.resolveContext(request);
     const retrievalMode = request.retrievalMode ?? "search";
+    const episode = request.episodeId
+      ? this.deps.requireEpisode(request.episodeId)
+      : request.sessionId
+        ? this.deps.repos.runtime.latestEpisodeForSession(request.sessionId)
+        : undefined;
+    if (episode) {
+      this.deps.assertEpisodeInScope(episode, request.namespace);
+    }
+    const recentRawTurnIds = retrievalMode === "turn_start" && request.sessionId
+      ? new Set(
+          this.deps.repos.runtime
+            .listRecentRawTurnsBySession(request.sessionId, 8)
+            .map((turn) => turn.id)
+        )
+      : undefined;
     const tuning = this.retrievalTuningConfig();
     const allowedLayers = retrievalLayersForProfile(retrievalLayersForMode(retrievalMode), tuning);
     const layers = request.layers === undefined
@@ -1151,10 +1164,7 @@ export class RetrievalService {
       tags: request.tags,
       limit: retrievalLimit,
       mode: retrievalMode,
-      excludeTraceSessionId:
-        retrievalMode === "turn_start"
-          ? request.sessionId
-          : undefined,
+      excludeTraceRawTurnIds: recentRawTurnIds,
       targetSkillId: request.targetSkillId
     });
     const retrieval = retrievalOutput.retrieval;
@@ -1176,14 +1186,6 @@ export class RetrievalService {
     const recallEventId = newId("recall");
     const candidateMemoryIds = memories.map((memory) => memory.id);
     const sourceMemoryIds = contextPacket.sourceMemoryIds;
-    const episode = request.episodeId
-      ? this.deps.requireEpisode(request.episodeId)
-      : request.sessionId
-        ? this.deps.repos.runtime.latestEpisodeForSession(request.sessionId)
-        : undefined;
-    if (episode) {
-      this.deps.assertEpisodeInScope(episode, request.namespace);
-    }
     const hitIds = new Set(hits.map((hit) => hit.id));
     const dropped = [
       ...contextPacket.droppedDueToBudget,
@@ -1280,7 +1282,7 @@ export class RetrievalService {
     tags?: string[];
     limit: number;
     mode: RetrievalMode;
-    excludeTraceSessionId?: string;
+    excludeTraceRawTurnIds?: ReadonlySet<string>;
     targetSkillId?: string;
   }): Promise<{ retrieval: RetrievalResult; memories: MemoryRow[] }> {
     if (input.limit <= 0 || input.layers.length === 0) {
@@ -1322,7 +1324,7 @@ export class RetrievalService {
           layers: input.layers,
           limit: input.limit,
           mode: input.mode,
-          excludeTraceSessionId: input.excludeTraceSessionId,
+          excludeTraceRawTurnIds: input.excludeTraceRawTurnIds,
           targetSkillId: input.targetSkillId,
           channelScoresByMemory: candidatePool.channelScoresByMemory,
           config
@@ -1362,7 +1364,8 @@ export class RetrievalService {
     status: string[];
   }> {
     const config = this.deps.config.algorithm.retrieval;
-    const filterLlm = this.deps.skillLlm.isConfigured() ? this.deps.skillLlm : this.deps.llm;
+    const usesEvolutionLlm = this.deps.skillLlm.isConfigured();
+    const filterLlm = usesEvolutionLlm ? this.deps.skillLlm : this.deps.llm;
     if (!config.llmFilterEnabled) {
       return {
         hits,
@@ -1408,7 +1411,9 @@ export class RetrievalService {
           temperature: 0,
           timeoutMs: RETRIEVAL_FILTER_TIMEOUT_MS,
           maxRetries: 0,
-          maxTokens: Math.min(2048, Math.max(160, hits.length * 8 + 80)),
+          maxTokens: usesEvolutionLlm
+            ? Math.min(2048, Math.max(160, hits.length * 8 + 80))
+            : MEMORY_SUMMARY_MAX_TOKENS,
           jsonMode: true
         }
       );
@@ -1418,6 +1423,13 @@ export class RetrievalService {
           ? result.ranked
           : null;
       if (!selectedRaw) {
+        pipelineLogger.warn("fallback.used", {
+          operation: `${RETRIEVAL_FILTER_PROMPT.id}.v${RETRIEVAL_FILTER_PROMPT.version}`,
+          pipeline: "retrieval.filter",
+          fallback: "candidate_cap",
+          reason: "invalid_selection_shape",
+          candidateCount: hits.length
+        });
         return {
           hits: llmFilterFallbackCap(hits, config.llmFilterFallbackMaxKeep),
           status: ["llm_filter:llm_failed_fallback_cap"]
@@ -1436,6 +1448,14 @@ export class RetrievalService {
             status: ["llm_filter:llm_dropped_all"]
           };
         }
+        pipelineLogger.warn("fallback.used", {
+          operation: `${RETRIEVAL_FILTER_PROMPT.id}.v${RETRIEVAL_FILTER_PROMPT.version}`,
+          pipeline: "retrieval.filter",
+          fallback: "candidate_cap",
+          reason: "invalid_selection_indices",
+          candidateCount: hits.length,
+          selectedCount: selectedRaw.length
+        });
         return {
           hits: llmFilterFallbackCap(hits, config.llmFilterFallbackMaxKeep),
           status: ["llm_filter:llm_failed_fallback_cap"]
@@ -1446,7 +1466,14 @@ export class RetrievalService {
         hits: kept,
         status: kept.length === hits.length ? ["llm_filter:llm_kept_all"] : ["llm_filter:llm_filtered"]
       };
-    } catch {
+    } catch (error) {
+      pipelineLogger.warn("fallback.used", {
+        operation: `${RETRIEVAL_FILTER_PROMPT.id}.v${RETRIEVAL_FILTER_PROMPT.version}`,
+        pipeline: "retrieval.filter",
+        fallback: "candidate_cap",
+        candidateCount: hits.length,
+        ...memoryErrorFields(error)
+      });
       return {
         hits: llmFilterFallbackCap(hits, config.llmFilterFallbackMaxKeep),
         status: ["llm_filter:llm_failed_fallback_cap"]
@@ -1482,8 +1509,21 @@ export class RetrievalService {
         }
       );
       const queries = normalizeQueryRewriteQueries(result.queries, QUERY_REWRITE_COUNT);
-      return queries.length > 0 ? queries : [raw];
-    } catch {
+      if (queries.length > 0) return queries;
+      pipelineLogger.warn("fallback.used", {
+        operation: "retrieval.query_rewrite.v1",
+        pipeline: "retrieval.query_rewrite",
+        fallback: "original_query",
+        reason: "empty_rewrite"
+      });
+      return [raw];
+    } catch (error) {
+      pipelineLogger.warn("fallback.used", {
+        operation: "retrieval.query_rewrite.v1",
+        pipeline: "retrieval.query_rewrite",
+        fallback: "original_query",
+        ...memoryErrorFields(error)
+      });
       return [raw];
     }
   }
@@ -1518,9 +1558,23 @@ export class RetrievalService {
       );
       const queryVecText = typeof result.queryVecText === "string" ? result.queryVecText.trim() : "";
       const keywords = normalizeRetrievalExtractKeywords(result.keywords);
-      if (!queryVecText && keywords.length === 0) return null;
+      if (!queryVecText && keywords.length === 0) {
+        pipelineLogger.warn("fallback.used", {
+          operation: `${RETRIEVAL_QUERY_EXTRACT_PROMPT.id}.v${RETRIEVAL_QUERY_EXTRACT_PROMPT.version}`,
+          pipeline: "retrieval.query_extract",
+          fallback: "raw_query",
+          reason: "empty_extract"
+        });
+        return null;
+      }
       return { queryVecText, keywords };
-    } catch {
+    } catch (error) {
+      pipelineLogger.warn("fallback.used", {
+        operation: `${RETRIEVAL_QUERY_EXTRACT_PROMPT.id}.v${RETRIEVAL_QUERY_EXTRACT_PROMPT.version}`,
+        pipeline: "retrieval.query_extract",
+        fallback: "raw_query",
+        ...memoryErrorFields(error)
+      });
       return null;
     }
   }
@@ -1630,7 +1684,13 @@ export class RetrievalService {
   async queryVector(query: string): Promise<number[] | undefined> {
     try {
       return await this.deps.withTimeout(this.deps.embedder.embedOne(query, "query"), QUERY_VECTOR_TIMEOUT_MS);
-    } catch {
+    } catch (error) {
+      pipelineLogger.warn("fallback.used", {
+        operation: "retrieval.query_embedding",
+        pipeline: "retrieval.query_vector",
+        fallback: "text_only_retrieval",
+        ...memoryErrorFields(error)
+      });
       return undefined;
     }
   }

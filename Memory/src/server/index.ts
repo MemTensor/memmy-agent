@@ -5,8 +5,11 @@ import { fileURLToPath } from "node:url";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { createStorageBackend } from "../storage/backend.js";
 import { loadMemmyConfig } from "../config/index.js";
+import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
 import { MemoryService } from "../service/memory-service.js";
 import { listenMemoryHttpServer } from "./http.js";
+
+const logger = createMemoryLogger("server");
 
 export async function main(argv = process.argv.slice(2)): Promise<void> {
     const options = parseServeArgs(argv);
@@ -17,6 +20,14 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
         numberEnv("MEMORY_SERVICE_PORT") ??
         18960;
     const sqlitePath = options.dbPath ?? config.storage.sqlitePath;
+    logger.info("service.starting", {
+        host,
+        port,
+        mode: config.storage.mode,
+        storageBackend: config.storage.backend,
+        sqlitePath,
+        configPath
+    });
     const serverLock = config.storage.backend === "openmem-cloud-rest"
         ? undefined
         : acquireSqliteServerLock({ sqlitePath, host, port });
@@ -50,7 +61,11 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
             writeCurrentEndpoint(configPath, url);
         }
 
-        process.stdout.write(`Memmy memory service listening at ${url}\n`);
+        logger.info("service.listening", {
+            url,
+            mode: config.storage.mode,
+            storageBackend: config.storage.backend
+        });
         await new Promise<void>(() => {
             // Keep the process alive while the HTTP server owns the service lifecycle.
         });
@@ -233,7 +248,11 @@ function writeCurrentEndpoint(configPath: string, endpoint: string): void {
         const content = stringifyYaml(root);
         writeFileSync(configPath, content.endsWith("\n") ? content : `${content}\n`, "utf8");
     } catch (error) {
-        process.stderr.write(`failed to write current Memory endpoint: ${error instanceof Error ? error.message : String(error)}\n`);
+        logger.warn("config.endpoint_write_failed", {
+            configPath,
+            endpoint,
+            ...memoryErrorFields(error)
+        });
     }
 }
 
@@ -257,7 +276,7 @@ function realpathOrSelf(path: string): string {
 
 if (isDirectRun()) {
     main().catch((error) => {
-        process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+        logger.error("service.fatal", memoryErrorFields(error));
         process.exitCode = 1;
     });
 }

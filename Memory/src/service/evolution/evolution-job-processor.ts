@@ -124,6 +124,7 @@ export class EvolutionJobProcessor {
       repos: deps.repos,
       get config() { return owner.deps.config; },
       get llm() { return owner.deps.llm; },
+      get skillLlm() { return owner.deps.skillLlm; },
       traceMeta: deps.traceMeta,
       namespaceIdFromMemory: deps.namespaceIdFromMemory,
       enqueueJob: deps.enqueueJob,
@@ -133,7 +134,7 @@ export class EvolutionJobProcessor {
     this.reward = new RewardPipeline({
       get config() { return owner.deps.config; },
       repos: deps.repos,
-      get llm() { return owner.deps.llm; },
+      get skillLlm() { return owner.deps.skillLlm; },
       nowIso,
       newId,
       traceMeta: deps.traceMeta,

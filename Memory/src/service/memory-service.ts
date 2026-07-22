@@ -9,6 +9,7 @@ import {
   resolveEvolutionConfig,
   type MemmyConfig
 } from "../config/index.js";
+import { createMemoryLogger } from "../logging/logger.js";
 import { createEmbedder } from "../model/embedder.js";
 import { createLlmClient } from "../model/llm.js";
 import type { Embedder,LlmClient } from "../model/types.js";
@@ -137,6 +138,8 @@ import {
   type EnqueueJobInput
 } from "./worker/job-handlers.js";
 import { WorkerRunner } from "./worker/worker-runner.js";
+
+const serviceLogger = createMemoryLogger("memory-service");
 
 export type { FeedbackResponse } from "./feedback/feedback-experience.js";
 
@@ -527,6 +530,7 @@ export class MemoryService {
       stringifyForMemory,
       withDuplicateFlag
     });
+    serviceLogger.info("initialized", memoryConfigLogFields(this.config));
   }
 
   private memoryAddEnabled(): boolean {
@@ -603,6 +607,12 @@ export class MemoryService {
     if (!requiresRestart && request.restartFailedProcessing !== false) {
       this.restartFailedProcessing(reloadedAt);
     }
+    serviceLogger.info("config.reloaded", {
+      changed,
+      requiresRestart,
+      restartFailedProcessing: !requiresRestart && request.restartFailedProcessing !== false,
+      ...memoryConfigLogFields(this.config)
+    });
 
     return {
       activeProfile: this.config.activeProfile,
@@ -2306,4 +2316,50 @@ function errorMessageFromUnknown(value: unknown): string | undefined {
 
 function cloneMemmyConfig(config: MemmyConfig): MemmyConfig {
   return structuredClone(config);
+}
+
+function memoryConfigLogFields(config: MemmyConfig): Record<string, unknown> {
+  const evolution = resolveEvolutionConfig(config);
+  return {
+    activeProfile: config.activeProfile,
+    memoryAddEnabled: config.algorithm.enableMemoryAdd,
+    memorySearchEnabled: config.algorithm.enableMemorySearch,
+    summaryModel: {
+      provider: config.summary.provider,
+      vendor: config.summary.vendor,
+      model: config.summary.model,
+      maxTokens: config.summary.maxTokens,
+      timeoutMs: config.summary.timeoutMs,
+      maxRetries: config.summary.maxRetries,
+      malformedRetries: config.summary.malformedRetries
+    },
+    evolutionModel: {
+      provider: evolution.provider,
+      vendor: evolution.vendor,
+      model: evolution.model,
+      maxTokens: evolution.maxTokens,
+      timeoutMs: evolution.timeoutMs,
+      maxRetries: evolution.maxRetries,
+      malformedRetries: evolution.malformedRetries
+    },
+    embeddingModel: {
+      provider: config.embedding.provider,
+      model: config.embedding.model,
+      timeoutMs: config.embedding.timeoutMs,
+      maxRetries: config.embedding.maxRetries
+    },
+    evolutionGates: {
+      l2UseLlm: config.algorithm.l2Induction.useLlm,
+      l2MinEpisodes: config.algorithm.l2Induction.minEpisodesForInduction,
+      l2MinGain: config.algorithm.l2Induction.minGain,
+      l3UseLlm: config.algorithm.l3Abstraction.useLlm,
+      l3MinPolicies: config.algorithm.l3Abstraction.minPolicies,
+      l3MinPolicyGain: config.algorithm.l3Abstraction.minPolicyGain,
+      l3MinPolicySupport: config.algorithm.l3Abstraction.minPolicySupport,
+      l3ClusterMinSimilarity: config.algorithm.l3Abstraction.clusterMinSimilarity,
+      skillUseLlm: config.algorithm.skill.useLlm,
+      skillMinSupport: config.algorithm.skill.minSupport,
+      skillMinGain: config.algorithm.skill.minGain
+    }
+  };
 }

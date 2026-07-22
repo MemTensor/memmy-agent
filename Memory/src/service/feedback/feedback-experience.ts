@@ -15,6 +15,7 @@ import {
 import {
   type MemmyConfig
 } from "../../config/index.js";
+import { createMemoryLogger, memoryErrorFields } from "../../logging/logger.js";
 import type { Embedder,LlmClient } from "../../model/types.js";
 import {
   Repositories,
@@ -132,7 +133,14 @@ export interface DecisionRepairSynthesisRequest {
   highValue: DecisionRepairTraceSource[];
   lowValue: DecisionRepairTraceSource[];
   traceCharCap: number;
+  diagnostics?: {
+    pipeline?: string;
+    feedbackId?: string;
+    sourceMemoryId?: string;
+  };
 }
+
+const pipelineLogger = createMemoryLogger("pipeline");
 
 export type SynthesizeDecisionRepairDraft = (
   input: DecisionRepairSynthesisRequest
@@ -388,7 +396,11 @@ async maybeSynthesizeFeedbackDecisionRepair(
       classification,
       highValue,
       lowValue,
-      traceCharCap: this.deps.config.algorithm.feedback.traceCharCap
+      traceCharCap: this.deps.config.algorithm.feedback.traceCharCap,
+      diagnostics: {
+        pipeline: "decision_repair.feedback",
+        feedbackId: feedback.id
+      }
     }, {
       useLlm: this.deps.config.algorithm.feedback.useLlm,
       llm: this.deps.skillLlm
@@ -788,7 +800,16 @@ async enhanceFeedbackExperienceDraft(
         confidence: numberOr(result.confidence, fallback.confidence),
         method: "llm"
       });
-    } catch {
+    } catch (error) {
+      pipelineLogger.warn("fallback.used", {
+        operation: polarity === "negative"
+          ? `${FAILURE_EXPERIENCE_SINK_PROMPT.id}.v${FAILURE_EXPERIENCE_SINK_PROMPT.version}`
+          : "feedback.refine.v1",
+        pipeline: "feedback.refinement",
+        fallback: "rule_based_refinement",
+        feedbackId: input.feedback.id,
+        ...memoryErrorFields(error)
+      });
       return applyFeedbackRefinement(
         fallback,
         refineFeedbackExperienceByRules({
@@ -1879,9 +1900,23 @@ export async function synthesizeDecisionRepairDraft(
       maxTokens: 800
     });
     return normalizeDecisionRepairLlmDraft(result);
-  } catch {
+  } catch (error) {
+    pipelineLogger.warn("fallback.used", {
+      operation: DECISION_REPAIR_OPERATION,
+      pipeline: input.diagnostics?.pipeline ?? decisionRepairPipelineForTrigger(input.trigger),
+      fallback: "no_llm_draft",
+      feedbackId: input.diagnostics?.feedbackId,
+      sourceMemoryId: input.diagnostics?.sourceMemoryId,
+      ...memoryErrorFields(error)
+    });
     return undefined;
   }
+}
+
+function decisionRepairPipelineForTrigger(trigger: string): string {
+  if (trigger === "failure-burst") return "decision_repair.failure_burst";
+  if (trigger === "value-distribution") return "decision_repair.value_distribution";
+  return "decision_repair.feedback";
 }
 
 function decisionRepairTraceBlock(source: DecisionRepairTraceSource, charCap: number): string {

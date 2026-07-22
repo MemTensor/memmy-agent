@@ -5,6 +5,7 @@
  * injected explicitly so this module has no service-class dependency.
  */
 import type { Embedder } from "../../model/types.js";
+import { createMemoryLogger, memoryErrorFields } from "../../logging/logger.js";
 import {
   jobToRef,
   type EmbeddingRetryRecord,
@@ -34,6 +35,8 @@ import {
 
 export const SUMMARY_WORKER_CONCURRENCY = 4;
 export const EMBEDDING_RETRY_LEASE_MS = 5 * 60_000;
+
+const workerLogger = createMemoryLogger("worker");
 
 export interface WorkerJobRunResult {
   succeeded: number;
@@ -313,6 +316,16 @@ export class WorkerRunner {
 
     const succeeded = results.reduce((sum, result) => sum + result.succeeded, 0);
     const failed = results.reduce((sum, result) => sum + result.failed, 0);
+    if (jobs.length > 0 || embeddingRetries.leased > 0) {
+      workerLogger.info("drain.completed", {
+        leased: jobs.length,
+        succeeded,
+        failed,
+        embeddingRetriesLeased: embeddingRetries.leased,
+        embeddingRetriesSucceeded: embeddingRetries.succeeded,
+        embeddingRetriesFailed: embeddingRetries.failed
+      });
+    }
     const changeSeq = this.deps.repos.runtime.latestChangeSeq();
     return {
       leased: jobs.length,
@@ -329,6 +342,7 @@ export class WorkerRunner {
   async runLeasedWorkerJob(job: EvolutionJobRecord): Promise<WorkerJobRunResult> {
     this.deps.appendJobChange(job, "leased");
     this.markProcessingJobLeased(job);
+    workerLogger.info("job.started", workerJobLogFields(job));
     try {
       await this.deps.jobHandlers.processJob(job);
       return this.completeLeasedWorkerJob(job);
@@ -344,6 +358,7 @@ export class WorkerRunner {
     for (const job of jobs) {
       this.deps.appendJobChange(job, "leased");
       this.markProcessingJobLeased(job);
+      workerLogger.info("job.started", workerJobLogFields(job));
       try {
         const item = this.deps.embeddingJobs.prepareEmbeddingJob(job);
         if (item) {
@@ -392,6 +407,7 @@ export class WorkerRunner {
       updatedAt: this.deps.nowIso()
     };
     this.deps.appendJobChange(completed, "succeeded", job);
+    workerLogger.info("job.succeeded", workerJobLogFields(completed));
     return {
       succeeded: 1,
       failed: 0,
@@ -413,6 +429,11 @@ export class WorkerRunner {
     const failOp = failedJob.status === "dead_letter" ? "dead_letter" : "failed";
     this.deps.appendJobChange(failedJob, failOp, job);
     this.updateProcessingAfterJobFailure(failedJob, errorMessage);
+    workerLogger.error("job.failed", {
+      ...workerJobLogFields(failedJob),
+      terminal: failedJob.status === "dead_letter",
+      ...memoryErrorFields(error)
+    });
     return {
       succeeded: 0,
       failed: 1,
@@ -552,6 +573,7 @@ export class WorkerRunner {
     });
     if (completed) {
       this.deps.appendEmbeddingRetryChange(completed, "succeeded", retry);
+      workerLogger.info("embedding_retry.succeeded", embeddingRetryLogFields(completed));
       return { succeeded: 1, failed: 0, item: embeddingRetryToRunItem(completed) };
     }
     return { succeeded: 0, failed: 0, item: null };
@@ -581,6 +603,16 @@ export class WorkerRunner {
       });
     if (updated) {
       this.deps.appendEmbeddingRetryChange(updated, terminal ? "failed" : "retry", retry);
+      const fields = {
+        ...embeddingRetryLogFields(updated),
+        terminal,
+        ...memoryErrorFields(error)
+      };
+      if (terminal) {
+        workerLogger.error("embedding_retry.failed", fields);
+      } else {
+        workerLogger.warn("embedding_retry.retry_scheduled", fields);
+      }
       return { succeeded: 0, failed: 1, item: embeddingRetryToRunItem(updated) };
     }
     return { succeeded: 0, failed: 1, item: null };
@@ -589,4 +621,31 @@ export class WorkerRunner {
   private nowMs(): number {
     return this.deps.nowMs?.() ?? Date.now();
   }
+}
+
+function workerJobLogFields(job: EvolutionJobRecord): Record<string, unknown> {
+  return {
+    jobId: job.id,
+    jobType: job.jobType,
+    status: job.status,
+    attempt: job.attempts,
+    maxAttempts: job.maxAttempts,
+    sessionId: job.sessionId,
+    episodeId: job.episodeId,
+    targetMemoryId: job.targetMemoryId
+  };
+}
+
+function embeddingRetryLogFields(retry: EmbeddingRetryRecord): Record<string, unknown> {
+  return {
+    retryId: retry.id,
+    targetKind: retry.targetKind,
+    targetMemoryId: retry.targetId,
+    vectorField: retry.vectorField,
+    role: retry.embedRole,
+    status: retry.status,
+    attempt: retry.attempts,
+    maxAttempts: retry.maxAttempts,
+    nextAttemptAt: retry.nextAttemptAt
+  };
 }

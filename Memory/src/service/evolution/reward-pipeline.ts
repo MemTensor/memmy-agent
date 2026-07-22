@@ -7,6 +7,7 @@ import {
   traceMetaFromMemory
 } from "../../algorithm/plugin-algorithms.js";
 import type { MemmyConfig } from "../../config/index.js";
+import { createMemoryLogger,memoryErrorFields } from "../../logging/logger.js";
 import type { LlmClient } from "../../model/types.js";
 import type {
   EpisodeRecord,
@@ -29,6 +30,8 @@ import type { EnqueueJobInput } from "../worker/job-handlers.js";
 type TraceMeta = NonNullable<ReturnType<typeof traceMetaFromMemory>>;
 type HumanScoreResult = ReturnType<typeof heuristicHumanScore>;
 
+const pipelineLogger = createMemoryLogger("pipeline");
+
 export interface DecisionRepairSummary {
   repairId?: string;
   contextHash?: string;
@@ -40,7 +43,7 @@ export interface DecisionRepairSummary {
 export interface RewardPipelineDeps {
   config: MemmyConfig;
   repos: Repositories;
-  llm: LlmClient;
+  skillLlm: LlmClient;
   nowIso(): string;
   newId(prefix: string): string;
   traceMeta(memory: MemoryRow | null | undefined): TraceMeta | null;
@@ -274,7 +277,7 @@ export class RewardPipeline {
     fallback: HumanScoreResult;
     payload: Record<string, unknown>;
   }): Promise<HumanScoreResult> {
-    if (!this.deps.config.algorithm.reward.llmScoring || !this.deps.llm.isConfigured()) return input.fallback;
+    if (!this.deps.config.algorithm.reward.llmScoring || !this.deps.skillLlm.isConfigured()) return input.fallback;
     try {
       const rawTurnId = rawTurnIdFromMemory(input.source);
       const rawTurn = rawTurnId ? this.deps.repos.runtime.getRawTurn(rawTurnId) : undefined;
@@ -288,8 +291,7 @@ export class RewardPipeline {
         hostSessionId: input.source.sessionId ?? rawTurn?.sessionId,
         hostConversationId: input.source.conversationId ?? rawTurn?.conversationId
       };
-      const result = await this.deps.llm.completeJson<{
-        rHuman?: unknown;
+      const result = await this.deps.skillLlm.completeJson<{
         goal_achievement?: unknown;
         process_quality?: unknown;
         user_satisfaction?: unknown;
@@ -310,27 +312,45 @@ export class RewardPipeline {
             episodeTraces: input.episodeTraces,
             maxChars: this.deps.config.algorithm.reward.summaryMaxChars,
             evaluator: {
-              scorerProvider: this.deps.llm.config.provider,
-              scorerModel: this.deps.llm.config.model
+              scorerProvider: this.deps.skillLlm.config.provider,
+              scorerModel: this.deps.skillLlm.config.model
             }
           }),
           "", "FEEDBACK:", stableStringify(input.payload)
         ].join("\n\n") }
       ], {
         operation: `reward.${REWARD_R_HUMAN_PROMPT.id}.v${REWARD_R_HUMAN_PROMPT.version}`,
+        thinkingMode: "disabled",
         temperature: 0,
         maxTokens: 700
       });
-      const goalAchievement = clampNumber(numberOr(result.goal_achievement ?? result.goalAchievement, input.fallback.axes.goalAchievement), -1, 1);
-      const processQuality = clampNumber(numberOr(result.process_quality ?? result.processQuality, input.fallback.axes.processQuality), -1, 1);
-      const userSatisfaction = clampNumber(numberOr(result.user_satisfaction ?? result.userSatisfaction, input.fallback.axes.userSatisfaction), -1, 1);
+      const rawGoalAchievement = result.goal_achievement ?? result.goalAchievement;
+      const rawProcessQuality = result.process_quality ?? result.processQuality;
+      const rawUserSatisfaction = result.user_satisfaction ?? result.userSatisfaction;
+      if (
+        typeof rawGoalAchievement !== "number" || !Number.isFinite(rawGoalAchievement) ||
+        typeof rawProcessQuality !== "number" || !Number.isFinite(rawProcessQuality) ||
+        typeof rawUserSatisfaction !== "number" || !Number.isFinite(rawUserSatisfaction)
+      ) {
+        throw new Error("reward response missing valid scoring axes");
+      }
+      const goalAchievement = clampNumber(rawGoalAchievement, -1, 1);
+      const processQuality = clampNumber(rawProcessQuality, -1, 1);
+      const userSatisfaction = clampNumber(rawUserSatisfaction, -1, 1);
       return {
-        rHuman: clampNumber(numberOr(result.rHuman, combineRewardAxes({ goalAchievement, processQuality, userSatisfaction })), -1, 1),
+        rHuman: combineRewardAxes({ goalAchievement, processQuality, userSatisfaction }),
         axes: { goalAchievement, processQuality, userSatisfaction },
         reason: stringOr(result.reason, input.fallback.reason),
         source: "llm"
       };
-    } catch {
+    } catch (error) {
+      pipelineLogger.warn("fallback.used", {
+        operation: `reward.${REWARD_R_HUMAN_PROMPT.id}.v${REWARD_R_HUMAN_PROMPT.version}`,
+        pipeline: "reward.scoring",
+        fallback: "heuristic_score",
+        sourceMemoryId: input.source.id,
+        ...memoryErrorFields(error)
+      });
       return input.fallback;
     }
   }
@@ -464,7 +484,11 @@ export class RewardPipeline {
       classification: { shape: "negative", confidence: 0.6, avoid: trace.summary, text: trace.summary },
       highValue: this.deps.decisionRepairTraceSources(evidence.highValueMemories),
       lowValue: this.deps.decisionRepairTraceSources(evidence.lowValueMemories),
-      traceCharCap: this.deps.config.algorithm.feedback.traceCharCap
+      traceCharCap: this.deps.config.algorithm.feedback.traceCharCap,
+      diagnostics: {
+        pipeline: "decision_repair.value_distribution",
+        sourceMemoryId: trace.id
+      }
     };
     return this.deps.synthesizeDecisionRepairDraft(request);
   }
@@ -739,7 +763,6 @@ function rewardClampHeadTail(value: string, maxChars: number): string {
 
 function rewardClampAgentText(value: string): string { return rewardOneLine(value || "(no agent text)", 800); }
 function clampNumber(value: number, min: number, max: number): number { return Math.max(min, Math.min(max, value)); }
-function numberOr(value: unknown, fallback: number): number { return typeof value === "number" && Number.isFinite(value) ? value : fallback; }
 function stringOr(value: unknown, fallback: string): string { return typeof value === "string" && value.trim() ? value.trim() : fallback; }
 function stringArray(value: unknown): string[] { return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []; }
 function uniq<T>(values: T[]): T[] { return [...new Set(values)]; }

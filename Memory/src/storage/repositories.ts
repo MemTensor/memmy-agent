@@ -1725,6 +1725,20 @@ export class RuntimeRepository {
     return row ? rawTurnFromSql(row) : undefined;
   }
 
+  listRecentRawTurnsBySession(sessionId: string, limit = 8): RawTurnRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT *
+         FROM raw_turns
+         WHERE session_id = ?
+           AND deleted_at IS NULL
+         ORDER BY created_at DESC, rowid DESC
+         LIMIT ?`
+      )
+      .all(sessionId, limit) as SqlRawTurnRow[];
+    return rows.map(rawTurnFromSql);
+  }
+
   listRawTurnsByEpisode(episodeId: string, limit = 100): RawTurnRecord[] {
     const rows = this.db
       .prepare(

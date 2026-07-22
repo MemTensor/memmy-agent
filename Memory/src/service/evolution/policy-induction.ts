@@ -19,6 +19,7 @@ import type { MemoryRow } from "../../types.js";
 import { isRecord } from "../../utils/json.js";
 import { stableHash } from "../../utils/id.js";
 import type { EnqueueJobInput } from "../worker/job-handlers.js";
+import { logEvolutionDecision } from "./evolution-logging.js";
 
 export type PolicyDraft = ReturnType<typeof buildPolicyDraft>;
 export type PolicyEnhancementResult =
@@ -192,6 +193,12 @@ export class PolicyInductionEngine {
           .filter((id): id is string => Boolean(id))
       ).length;
       if (distinctEpisodeCount < this.deps.config.algorithm.l2Induction.minEpisodesForInduction) {
+        logEvolutionDecision(job, "l2_induction", "gate_not_met", {
+          sourceMemoryId: source.id,
+          evidenceCount: bucket.length,
+          distinctEpisodeCount,
+          requiredEpisodes: this.deps.config.algorithm.l2Induction.minEpisodesForInduction
+        });
         continue;
       }
 
@@ -250,6 +257,11 @@ export class PolicyInductionEngine {
 
       const enhancement = await this.enhancePolicyDraft(signature, promptEvidenceTraces, fallbackDraft);
       if (!enhancement.ok) {
+        logEvolutionDecision(job, "l2_induction", enhancement.reason, {
+          sourceMemoryId: source.id,
+          evidenceCount: bucket.length,
+          distinctEpisodeCount
+        });
         this.deps.enqueueChange({
           memoryId: source.id,
           namespaceId: sourceNamespaceId,

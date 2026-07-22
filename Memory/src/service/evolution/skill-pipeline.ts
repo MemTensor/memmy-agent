@@ -24,6 +24,7 @@ import { recordApiLog } from "../model-audit/model-call-audit.js";
 import { profileIdFromMemory,projectIdFromMemory } from "../namespace/namespace-scope.js";
 import { skillBetaPosterior,skillSuccessRate } from "../read-model/skill.js";
 import type { EnqueueJobInput } from "../worker/job-handlers.js";
+import { logEvolutionDecision } from "./evolution-logging.js";
 
 type TraceMeta=NonNullable<ReturnType<typeof traceMetaFromMemory>>;
 type PolicyMeta=NonNullable<ReturnType<typeof policyMetaFromMemory>>;
@@ -73,6 +74,9 @@ export class SkillPipeline {
       const evidenceTraces = this.gatherSkillEvidence(policy, userId);
       const counterExamples = this.gatherSkillCounterExamples(policy, userId);
       if (evidenceTraces.length === 0) {
+        logEvolutionDecision(job, "skill_crystallization", "no_evidence", {
+          policyId: policy.id
+        });
         this.deps.repos.runtime.appendChange({
           memoryId: policyMemory.id,
           namespaceId: this.deps.namespaceIdFromMemory(policyMemory),
@@ -89,6 +93,10 @@ export class SkillPipeline {
       }
       const existingSkill = this.findExistingSkillForPolicy(policy, userId);
       if (this.isSkillCrystallizationInCooldown(policy, at)) {
+        logEvolutionDecision(job, "skill_crystallization", "cooldown", {
+          policyId: policy.id,
+          existingSkillId: existingSkill?.id
+        });
         this.deps.repos.runtime.appendChange({
           memoryId: policyMemory.id,
           namespaceId: this.deps.namespaceIdFromMemory(policyMemory),
@@ -119,6 +127,11 @@ export class SkillPipeline {
         ? await this.enhanceSkillDraft(policy, fallbackDraft, evidenceTraces, counterExamples, existingSkill)
         : { ok: false, reason: "not-eligible" } as const;
       if (!enhancement.ok) {
+        logEvolutionDecision(job, "skill_crystallization", enhancement.reason, {
+          policyId: policy.id,
+          evidenceCount: evidenceTraces.length,
+          counterExampleCount: counterExamples.length
+        });
         this.deps.repos.runtime.appendChange({
           memoryId: policyMemory.id,
           namespaceId: this.deps.namespaceIdFromMemory(policyMemory),
@@ -136,6 +149,10 @@ export class SkillPipeline {
       const draft = enhancement.draft;
       const verdict = verifySkillDraft({ draft, evidenceTraces });
       if (!verdict.ok) {
+        logEvolutionDecision(job, "skill_crystallization", "verification_failed", {
+          policyId: policy.id,
+          verdict
+        });
         this.deps.repos.runtime.appendChange({
           memoryId: policyMemory.id,
           namespaceId: this.deps.namespaceIdFromMemory(policyMemory),
@@ -569,8 +586,7 @@ private async enhanceSkillDraft(
       ], {
         operation: rebuild ? `${prompt.id}.v${prompt.version}` : prompt.id,
         thinkingMode: "enabled",
-        temperature: 0.2,
-        maxTokens: 1400
+        temperature: 0.2
       });
       if (detectSkillModelRefusal(result)) {
         return { ok: false, reason: "llm-refusal" };

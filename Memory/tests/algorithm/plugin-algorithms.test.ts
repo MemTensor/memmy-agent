@@ -98,6 +98,52 @@ describe("plugin algorithm parity helpers", () => {
     expect(result.hits[0]).toMatchObject({ id: memory.id });
   });
 
+  it("excludes traces already present in the recent session window", () => {
+    const currentEpisode = traceMemory(
+      "trace-current-episode",
+      "episode-current",
+      "current episode context",
+      0.8,
+      [1, 0]
+    );
+    const recentSession = traceMemory(
+      "trace-recent-session",
+      "episode-previous",
+      "recent session context",
+      0.7,
+      [1, 0]
+    );
+    const olderSession = traceMemory(
+      "trace-older-session",
+      "episode-older",
+      "older compressed context",
+      0.6,
+      [1, 0]
+    );
+    const memories = [currentEpisode, recentSession, olderSession];
+    const channelScoresByMemory = new Map(
+      memories.map((memory) => [memory.id, { fts: 0.9 }])
+    );
+
+    const result = retrievePluginMemories({
+      query: "context",
+      memories,
+      layers: ["L1"],
+      limit: 5,
+      mode: "turn_start",
+      excludeTraceRawTurnIds: new Set([
+        "raw-trace-current-episode",
+        "raw-trace-recent-session",
+      ]),
+      channelScoresByMemory,
+      config: { tagFilter: "off" }
+    });
+
+    expect(result.hits.map((hit) => hit.id)).toContain("trace-older-session");
+    expect(result.hits.map((hit) => hit.id)).not.toContain("trace-current-episode");
+    expect(result.hits.map((hit) => hit.id)).not.toContain("trace-recent-session");
+  });
+
   it("generates L2 candidate pool ids with the plugin DJB2 signature hash", () => {
     expect(l2CandidateSignatureHash("docker|pip|pip.install|_")).toBe("45lfrb");
     expect(l2CandidateIdFor("docker|pip|pip.install|_", "tr:abc!*")).toBe("cand_45lfrb_trabc");
@@ -562,7 +608,7 @@ describe("plugin algorithm parity helpers", () => {
     expect(strict.hits.map((hit) => hit.id)).not.toContain("trace-vector-untagged");
   });
 
-  it("omits internal reflection labels from episode rollups while keeping real reflections", () => {
+  it("renders episode rollups from trace summaries and meaningful reflections", () => {
     const related = traceMemory(
       "trace-related-label",
       "episode-reflection-format",
@@ -593,8 +639,14 @@ describe("plugin algorithm parity helpers", () => {
     });
 
     const episode = result.hits.find((hit) => hit.source === "episode");
+    expect(episode?.snippet).toContain("summary: sqlite migration path was fixed");
+    expect(episode?.snippet).toContain("summary: rerun the migration test after fixing the path");
     expect(episode?.snippet).not.toContain("reflection: RELATED");
-    expect(episode?.snippet).toContain("reflection: Prefer rerunning the focused migration test");
+    expect(episode?.snippet).toContain(
+      "reflection: Prefer rerunning the focused migration test after changing the sqlite path."
+    );
+    expect(episode?.snippet).not.toContain("user:");
+    expect(episode?.snippet).not.toContain("agent:");
   });
 
   it("classifies plugin-style turn relations for revision, follow-up, and new task boundaries", () => {
@@ -687,13 +739,14 @@ describe("plugin algorithm parity helpers", () => {
   it("uses the plugin relation LLM prompt and arbitration framing", async () => {
     const calls: string[] = [];
     const messages = new Map<string, Array<{ role: "system" | "user" | "assistant"; content: string }>>();
+    const options = new Map<string, { maxTokens?: number }>();
     await classifyTurnRelationWithLlm({
       prevUserText: "Configure nginx TLS for the service",
       prevAssistantText: "Use port 443 and verify the certificate chain.",
       newUserText: "Can you also cover database certificate rotation?",
       prevTags: ["nginx"]
     }, {
-      llm: relationLlm(calls, messages)
+      llm: relationLlm(calls, messages, {}, options)
     });
 
     const primary = messages.get("relation.classify.v1");
@@ -707,6 +760,8 @@ describe("plugin algorithm parity helpers", () => {
     expect(arbitration?.[0]?.content).toContain("When in doubt, choose follow_up");
     expect(arbitration?.[1]?.content).toContain("CURRENT TASK CONTEXT");
     expect(arbitration?.[1]?.content).toContain("NEW MESSAGE");
+    expect(options.get("relation.classify.v1")?.maxTokens).toBe(512);
+    expect(options.get("relation.arbitration.v1")?.maxTokens).toBe(512);
   });
 
   it("seeds captured trace priority like the plugin so fresh rows are recallable before reward", () => {
@@ -1876,7 +1931,8 @@ function worldModelMemory(
 function relationLlm(
   calls: string[],
   messagesByOperation?: Map<string, Array<{ role: "system" | "user" | "assistant"; content: string }>>,
-  responsesByOperation: Record<string, Record<string, unknown>> = {}
+  responsesByOperation: Record<string, Record<string, unknown>> = {},
+  optionsByOperation?: Map<string, { maxTokens?: number }>
 ): LlmClient {
   return {
     config: {
@@ -1898,10 +1954,11 @@ function relationLlm(
     },
     async completeJson<T extends Record<string, unknown>>(
       messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
-      options: { operation: string }
+      options: { operation: string; maxTokens?: number }
     ): Promise<T> {
       calls.push(options.operation);
       messagesByOperation?.set(options.operation, messages);
+      optionsByOperation?.set(options.operation, options);
       if (responsesByOperation[options.operation]) {
         return responsesByOperation[options.operation] as T;
       }

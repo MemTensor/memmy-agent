@@ -7,6 +7,7 @@ import type {
   ToolCallPayload
 } from "../types.js";
 import type { LlmClient } from "../model/types.js";
+import { MEMORY_SUMMARY_MAX_TOKENS } from "../config/index.js";
 import { memoryVector } from "../storage/memory-vector-state.js";
 import { stableHash } from "../utils/id.js";
 
@@ -42,6 +43,7 @@ export interface TraceMemoryMeta {
   memory: MemoryRow;
   ts: number;
   turnId?: string;
+  rawTurnId?: string;
   episodeId?: string;
   sessionId?: string;
   userId: string;
@@ -842,7 +844,7 @@ async function callRelationLlm(
     {
       operation: "relation.classify.v1",
       temperature: llm.config.temperature,
-      maxTokens: 300
+      maxTokens: MEMORY_SUMMARY_MAX_TOKENS
     }
   );
   if (typeof value.relation !== "string" || !RELATION_ALLOWED.includes(value.relation as TurnRelation)) {
@@ -878,7 +880,7 @@ async function callRelationArbitration(
     {
       operation: "relation.arbitration.v1",
       temperature: llm.config.temperature,
-      maxTokens: 200
+      maxTokens: MEMORY_SUMMARY_MAX_TOKENS
     }
   );
   if (value.relation !== "follow_up" && value.relation !== "new_task") {
@@ -3225,10 +3227,11 @@ export function traceMetaFromMemory(memory: MemoryRow): TraceMemoryMeta | null {
     memory,
     ts: numberField(trace, "ts") ?? Date.parse(memory.timeline),
     turnId: stringField(trace, "turn_id"),
+    rawTurnId: stringField(trace, "raw_turn_id"),
     episodeId: stringField(trace, "episode_id"),
     sessionId: memory.sessionId,
     userId: memory.userId,
-    summary: stringField(trace, "summary") ?? firstLine(memory.memoryValue),
+    summary: stringField(trace, "summary") ?? "",
     userText: stringField(trace, "userText") ?? "",
     agentText: stringField(trace, "agentText") ?? "",
     toolCalls,
@@ -4089,7 +4092,7 @@ export function retrievePluginMemories(input: {
   layers?: MemoryLayer[];
   limit: number;
   mode?: RetrievalMode;
-  excludeTraceSessionId?: string;
+  excludeTraceRawTurnIds?: ReadonlySet<string>;
   targetSkillId?: string;
   channelScoresByMemory?: ReadonlyMap<string, SeededChannelScores>;
   now?: number;
@@ -4117,7 +4120,7 @@ export function retrievePluginMemories(input: {
       queryVec,
       {
         mode,
-        excludeTraceSessionId: input.excludeTraceSessionId,
+        excludeTraceRawTurnIds: input.excludeTraceRawTurnIds,
         channelScoresByMemory: input.channelScoresByMemory,
         config
       },
@@ -4132,7 +4135,7 @@ export function retrievePluginMemories(input: {
       now,
       {
         mode,
-        excludeTraceSessionId: input.excludeTraceSessionId,
+        excludeTraceRawTurnIds: input.excludeTraceRawTurnIds,
         targetSkillId: input.targetSkillId,
         traceVectorTags,
         traceVectorTagsRequired,
@@ -4896,7 +4899,7 @@ function hasTaggedTraceVectorMatch(
   queryVec: number[],
   options: {
     mode: RetrievalMode;
-    excludeTraceSessionId?: string;
+    excludeTraceRawTurnIds?: ReadonlySet<string>;
     channelScoresByMemory?: ReadonlyMap<string, SeededChannelScores>;
     config: Required<RetrievalTuningConfig>;
   },
@@ -4909,12 +4912,7 @@ function hasTaggedTraceVectorMatch(
     if (!memoryHasAnyTag(memory, traceVectorTags)) return false;
     const trace = traceMetaFromMemory(memory);
     if (!trace || !hasRetrievalEmbedding(memory, { trace, policy: null, skill: null, world: null })) return false;
-    if (
-      options.excludeTraceSessionId &&
-      (trace.sessionId === options.excludeTraceSessionId || memory.sessionId === options.excludeTraceSessionId)
-    ) {
-      return false;
-    }
+    if (shouldExcludeTraceFromTurnContext(trace, options)) return false;
     return vectorChannelsForMemory(memory, queryVec, options.config, {
       seededChannelScores: options.channelScoresByMemory?.get(memory.id),
       useSeededChannelScores: options.channelScoresByMemory !== undefined
@@ -4937,7 +4935,7 @@ function candidateFromMemory(
   now: number,
   options: {
     mode: RetrievalMode;
-    excludeTraceSessionId?: string;
+    excludeTraceRawTurnIds?: ReadonlySet<string>;
     targetSkillId?: string;
     traceVectorTags: string[];
     traceVectorTagsRequired: boolean;
@@ -4952,13 +4950,7 @@ function candidateFromMemory(
   const skill = memory.memoryLayer === "Skill" ? skillMetaFromMemory(memory) : null;
   const world = memory.memoryLayer === "L3" ? worldModelMetaFromMemory(memory) : null;
   if (!isMemoryReadyForRetrieval(memory)) return null;
-  if (
-    trace &&
-    options.excludeTraceSessionId &&
-    (trace.sessionId === options.excludeTraceSessionId || memory.sessionId === options.excludeTraceSessionId)
-  ) {
-    return null;
-  }
+  if (trace && shouldExcludeTraceFromTurnContext(trace, options)) return null;
   if (
     memory.memoryLayer === "Skill" &&
     options.mode === "skill_invoke" &&
@@ -5033,6 +5025,15 @@ function candidateFromMemory(
     score: 0,
     vectorScore
   };
+}
+
+function shouldExcludeTraceFromTurnContext(
+  trace: TraceMemoryMeta,
+  options: {
+    excludeTraceRawTurnIds?: ReadonlySet<string>;
+  }
+): boolean {
+  return Boolean(trace.rawTurnId && options.excludeTraceRawTurnIds?.has(trace.rawTurnId));
 }
 
 function suppressFeedbackExperiencesCoveredBySkills(
@@ -5179,20 +5180,13 @@ function dedupeCandidateChannels(
 function renderEpisodeRollupSnippet(traces: TraceMemoryMeta[], totalTraceCount: number): string {
   const header = "Past similar episode";
   const maxChars = 800;
-  const steps = traces.slice(0, 6).map((trace, index) => {
+  const steps = traces.slice(0, 6).flatMap((trace, index) => {
     const parts = [`step ${index + 1}`];
     const summary = trace.summary?.trim().replace(/\s+/g, " ") ?? "";
-    if (summary) {
-      parts.push(`summary: ${summary.slice(0, 160)}`);
-    } else {
-      const userText = trace.userText?.trim().replace(/\s+/g, " ") ?? "";
-      const agentText = trace.agentText?.trim().replace(/\s+/g, " ") ?? "";
-      if (userText) parts.push(`user: ${userText.slice(0, 120)}`);
-      if (agentText) parts.push(`agent: ${agentText.slice(0, 120)}`);
-    }
+    if (summary) parts.push(`summary: ${summary.slice(0, 160)}`);
     const reflection = displayReflectionText(trace.reflection);
     if (reflection) parts.push(`reflection: ${reflection.slice(0, 160)}`);
-    return parts.join("\n  ");
+    return parts.length > 1 ? [parts.join("\n  ")] : [];
   });
   const omitted = totalTraceCount > 6 ? `…(+${totalTraceCount - 6} more steps)` : "";
   const full = [header, ...steps, omitted].filter(Boolean).join("\n");
