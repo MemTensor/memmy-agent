@@ -1,5 +1,5 @@
 /** Settings page module. */
-import { useEffect, useRef, useState, type CSSProperties, type Dispatch, type ReactNode } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type Dispatch, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { Brain, Palette, Rocket, Settings2, Shield, User, Zap, ArrowRight, ArrowLeft, Bell, ExternalLink, FolderOpen, Info, LogOut, Wrench, Search, Eye, EyeOff, ChevronDown, ChevronUp, ChevronRight, Database, Loader2, CheckCircle2, XCircle, Check, AlertTriangle, ArrowDownToLine, ArrowUpFromLine, MessageSquare, FileText, Sparkles, Mic, Image as ImageIcon } from "lucide-react";
 import type { AppSettingsDto, ByokTokenUsageByKind, ByokTokenUsageKind, ByokTokenUsageSummary, Language, PrivacySettingsDto, TokenUsageDto } from "@memmy/local-api-contracts";
 import { useApiClients } from "../app/providers.js";
@@ -19,6 +19,7 @@ import {
 import { consumeTokenExhaustedApplyMoreRequest, TOKEN_EXHAUSTED_APPLY_MORE_EVENT } from "../app/token-exhausted-apply-more.js";
 import { getLegalLinkUrl } from "../legal/legal-links.js";
 import { maskAccountIdentifier } from "../utils/mask-account-identifier.js";
+import { isComposingKeyboardEvent } from "../utils/keyboard.js";
 import { openExternalUrl } from "../utils/open-url.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { appActions, type AppAction } from "../state/app-actions.js";
@@ -208,6 +209,11 @@ export interface SettingsPageViewProps {
   update: UpdateCoordinatorValue;
   track?: TrackAnalyticsEvent;
   onUsageDetailVisibleChange?: (visible: boolean) => void;
+}
+
+/** Returns whether a nickname input key event should save the current draft. */
+export function shouldSaveAccountNicknameOnKeyDown(event: ReactKeyboardEvent<HTMLInputElement>): boolean {
+  return event.key === "Enter" && !isComposingKeyboardEvent(event);
 }
 
 /**
@@ -1113,7 +1119,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
                       value={nicknameDraft}
                       onChange={(event) => setNicknameDraft(event.target.value)}
                       onKeyDown={(event) => {
-                        if (event.key === "Enter") {
+                        if (shouldSaveAccountNicknameOnKeyDown(event)) {
                           void saveNickname();
                         }
                         if (event.key === "Escape") {

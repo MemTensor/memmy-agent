@@ -14,6 +14,7 @@ import {
   formatUsageUpdatedAt,
   isPendingQuotaRequestError,
   readLogLevel,
+  shouldSaveAccountNicknameOnKeyDown,
   writeLogLevel
 } from "../settings-page.js";
 
@@ -720,6 +721,16 @@ describe("SettingsPageView", () => {
     expect(source).toContain("appActions.accountCleared()");
   });
 
+  it("中文输入法组合输入中的 Enter 只确认候选，不保存账户昵称", () => {
+    expect(shouldSaveAccountNicknameOnKeyDown(nicknameKeyEvent({ nativeEvent: { isComposing: true } }))).toBe(false);
+    expect(shouldSaveAccountNicknameOnKeyDown(nicknameKeyEvent({ nativeEvent: { keyCode: 229 } }))).toBe(false);
+    expect(shouldSaveAccountNicknameOnKeyDown(nicknameKeyEvent({ nativeEvent: { isComposing: false, keyCode: 13 } }))).toBe(true);
+    expect(shouldSaveAccountNicknameOnKeyDown(nicknameKeyEvent({ key: "Escape" }))).toBe(false);
+
+    const source = readFileSync(settingsPageSourcePath, "utf8");
+    expect(source).toContain("if (shouldSaveAccountNicknameOnKeyDown(event))");
+  });
+
   it("设置页账户区长昵称和账号按真实溢出再显示提示", () => {
     const longAccountState = appReducer(
       createAccountModeState(),
@@ -857,6 +868,15 @@ function createUpdateViewModel(
  */
 function normalizeSsrHtml(html: string): string {
   return html.replaceAll("<!-- -->", "");
+}
+
+function nicknameKeyEvent(
+  overrides: { key?: string; nativeEvent?: { isComposing?: boolean; keyCode?: number } } = {}
+) {
+  return {
+    key: overrides.key ?? "Enter",
+    nativeEvent: overrides.nativeEvent ?? { isComposing: false, keyCode: 13 }
+  } as any;
 }
 
 /**
