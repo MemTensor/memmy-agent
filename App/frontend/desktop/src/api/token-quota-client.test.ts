@@ -11,4 +11,22 @@ describe("token-quota-client", () => {
       expect.objectContaining({ path: "/api/token-quota/request", body: { reason: "x".repeat(20) } })
     );
   });
+
+  it("GET /api/token-quota/eligibility 查询当前申请资格", async () => {
+    const eligibility = {
+      state: "available",
+      requestCount: 0,
+      maxRequestCount: 5,
+      nextAllowedAtEpochMs: null,
+      latestRequestStatus: null,
+      latestReviewNote: null
+    };
+    const requestJson = vi.fn(async () => eligibility);
+    const client = createHttpTokenQuotaClient({} as never, requestJson as never);
+
+    await expect(client.getEligibility()).resolves.toEqual(eligibility);
+    expect(requestJson).toHaveBeenCalledWith(
+      expect.objectContaining({ path: "/api/token-quota/eligibility" })
+    );
+  });
 });
