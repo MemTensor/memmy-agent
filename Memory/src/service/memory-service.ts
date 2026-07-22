@@ -72,6 +72,7 @@ import {
   traceSummaryEmbeddingText,
   updateMemoryVectorField
 } from "./embedding/embedding-pipeline.js";
+import { recordApiLog } from "./model-audit/model-call-audit.js";
 import { MemoryServiceError } from "../utils/error.js";
 import { newId, stableHash, stableStringify } from "../utils/id.js";
 import {
@@ -1606,7 +1607,7 @@ export class MemoryService {
 
     for (const memoryId of response.l1MemoryIds) {
       const memory = this.repos.memories.get(memoryId);
-      this.recordApiLog("memory_add", {
+      recordApiLog(this.repos.runtime, "memory_add", {
         sessionId: response.sessionId,
         turnId,
         episodeId: response.episodeId,
@@ -2460,7 +2461,7 @@ export class MemoryService {
       const toSearchCandidateLog = (hit: RecallHit): Record<string, unknown> =>
         searchCandidateFromHit(hit, logMemoryById.get(hit.id));
       const sourceAgent = request.source?.trim() || context.namespace.source;
-      this.recordApiLog("memory_search", {
+      recordApiLog(this.repos.runtime, "memory_search", {
         query: request.query,
         sessionId: request.sessionId,
         episodeId: episode?.id,
@@ -3167,7 +3168,7 @@ export class MemoryService {
       serverTime: nowIso()
     };
     if (!isAgentSourceImportMemoryAdd(request)) {
-      this.recordApiLog("memory_add", {
+      recordApiLog(this.repos.runtime, "memory_add", {
         sessionId: request.sessionId,
         turnId: request.turnId,
         layer,
@@ -4266,26 +4267,6 @@ export class MemoryService {
       nextOffset: offset + result.logs.length < result.total ? offset + result.logs.length : undefined,
       serverTime: nowIso()
     };
-  }
-
-  private recordApiLog(
-    toolName: ApiLogRecord["toolName"],
-    input: unknown,
-    output: unknown,
-    durationMs: number,
-    success: boolean,
-    calledAt = nowIso(),
-    sourceAgent?: string
-  ): void {
-    this.repos.runtime.insertApiLog({
-      toolName,
-      sourceAgent: sourceAgent?.trim() || undefined,
-      inputJson: JSON.stringify(input ?? {}),
-      outputJson: JSON.stringify(output ?? {}),
-      durationMs: Math.max(0, Math.round(durationMs)),
-      success,
-      calledAt
-    });
   }
 
   serviceMetrics(input: RequestEnvelope & { userId?: string } = {}): {
@@ -6147,7 +6128,7 @@ export class MemoryService {
         source: "worker.skill_crystallization.v7",
         createdAt: at
       });
-      this.recordApiLog(
+      recordApiLog(this.repos.runtime,
         upsert.created ? "skill_generate" : "skill_evolve",
         { phase: "done", skillId: upsert.memory.id, policyId: policy.id },
         {
@@ -7545,7 +7526,7 @@ export class MemoryService {
         source: "worker.skill_lifecycle.v7",
         createdAt: at
       });
-      this.recordApiLog(
+      recordApiLog(this.repos.runtime,
         "skill_evolve",
         { phase: "done", skillId: saved.id, policyId: policy.id, reason: "reward_drift" },
         {
@@ -8796,7 +8777,7 @@ export class MemoryService {
       source: "worker.skill_trial_resolve",
       createdAt: at
     });
-    this.recordApiLog(
+    recordApiLog(this.repos.runtime,
       "skill_evolve",
       { phase: "done", skillId: saved.id, trialId: trial.id, reason: "skill_trial_update" },
       {
