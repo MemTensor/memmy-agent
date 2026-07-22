@@ -9527,7 +9527,6 @@ export class MemoryService {
         hostConversationId: input.source.conversationId ?? rawTurn?.conversationId
       };
       const result = await this.skillLlm.completeJson<{
-        rHuman?: unknown;
         goal_achievement?: unknown;
         process_quality?: unknown;
         user_satisfaction?: unknown;
@@ -9571,15 +9570,25 @@ export class MemoryService {
         temperature: 0,
         maxTokens: 700
       });
-      const goalAchievement = clampNumber(numberOr(result.goal_achievement ?? result.goalAchievement, input.fallback.axes.goalAchievement), -1, 1);
-      const processQuality = clampNumber(numberOr(result.process_quality ?? result.processQuality, input.fallback.axes.processQuality), -1, 1);
-      const userSatisfaction = clampNumber(numberOr(result.user_satisfaction ?? result.userSatisfaction, input.fallback.axes.userSatisfaction), -1, 1);
+      const rawGoalAchievement = result.goal_achievement ?? result.goalAchievement;
+      const rawProcessQuality = result.process_quality ?? result.processQuality;
+      const rawUserSatisfaction = result.user_satisfaction ?? result.userSatisfaction;
+      if (
+        typeof rawGoalAchievement !== "number" || !Number.isFinite(rawGoalAchievement) ||
+        typeof rawProcessQuality !== "number" || !Number.isFinite(rawProcessQuality) ||
+        typeof rawUserSatisfaction !== "number" || !Number.isFinite(rawUserSatisfaction)
+      ) {
+        throw new Error("reward response missing valid scoring axes");
+      }
+      const goalAchievement = clampNumber(rawGoalAchievement, -1, 1);
+      const processQuality = clampNumber(rawProcessQuality, -1, 1);
+      const userSatisfaction = clampNumber(rawUserSatisfaction, -1, 1);
       return {
-        rHuman: clampNumber(numberOr(result.rHuman, combineRewardAxes({
+        rHuman: combineRewardAxes({
           goalAchievement,
           processQuality,
           userSatisfaction
-        })), -1, 1),
+        }),
         axes: {
           goalAchievement,
           processQuality,

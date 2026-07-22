@@ -12150,6 +12150,90 @@ describe("MemoryService", () => {
     db.close();
   });
 
+  it("falls back to explicit feedback when the reward LLM returns an empty object", async () => {
+    const root = mkdtempSync(join(tmpdir(), "mindock-memory-empty-reward-"));
+    roots.push(root);
+    const db = new MemoryDb({ path: join(root, "memory.sqlite") });
+    const rewardCalls: Array<{
+      messages: Array<{ role: string; content: string }>;
+      options: { operation: string };
+    }> = [];
+    const service = createTestMemoryService({
+      db,
+      mode: "dev",
+      skillLlm: createEmptyRewardLlm(rewardCalls),
+      config: {
+        ...DEFAULT_MEMMY_CONFIG,
+        algorithm: {
+          ...DEFAULT_MEMMY_CONFIG.algorithm,
+          capture: {
+            ...DEFAULT_MEMMY_CONFIG.algorithm.capture,
+            synthReflection: false,
+            embedAfterCapture: false,
+            alphaScoring: false
+          },
+          l2Induction: {
+            ...DEFAULT_MEMMY_CONFIG.algorithm.l2Induction,
+            useLlm: false
+          },
+          l3Abstraction: {
+            ...DEFAULT_MEMMY_CONFIG.algorithm.l3Abstraction,
+            useLlm: false
+          },
+          skill: {
+            ...DEFAULT_MEMMY_CONFIG.algorithm.skill,
+            useLlm: false
+          }
+        }
+      }
+    });
+    const session = service.openSession({
+      namespace: {
+        source: "codex",
+        profileId: "jiang",
+        userId: "user-empty-reward"
+      }
+    });
+    const complete = service.completeTurn("turn-empty-reward", {
+      sessionId: session.sessionId,
+      episodeId: "episode-empty-reward",
+      query: "verify the focused workflow",
+      answer: "The focused workflow passed."
+    });
+    await service.feedback({
+      sessionId: session.sessionId,
+      episodeId: complete.episodeId,
+      l1MemoryId: complete.l1MemoryId,
+      channel: "explicit",
+      polarity: "positive",
+      magnitude: 1,
+      rationale: "accepted"
+    });
+
+    await service.runWorkerOnce(50);
+
+    expect(rewardCalls.some((call) => call.options.operation === "reward.reward.r_human.v6")).toBe(true);
+    const memory = db.db.prepare(
+      `SELECT properties_json FROM memories WHERE id = ?`
+    ).get(complete.l1MemoryId) as { properties_json: string };
+    const trace = (JSON.parse(memory.properties_json) as {
+      internal_info: { trace: { value: number; r_human?: number; reward_reason?: string } };
+    }).internal_info.trace;
+    expect(trace.r_human).toBe(1);
+    expect(trace.value).toBe(1);
+    expect(trace.reward_reason).toContain("heuristic explicit");
+    const episode = db.db.prepare(
+      `SELECT r_task, reward_detail_json FROM episodes WHERE id = ?`
+    ).get(complete.episodeId) as { r_task: number; reward_detail_json: string };
+    const rewardDetail = JSON.parse(episode.reward_detail_json) as {
+      source?: string;
+      rHuman?: number;
+    };
+    expect(episode.r_task).toBe(1);
+    expect(rewardDetail).toMatchObject({ source: "explicit", rHuman: 1 });
+    db.close();
+  });
+
   it("scores R_human with the evolution LLM, thinking disabled, and stores episode reward meta", async () => {
     const root = mkdtempSync(join(tmpdir(), "mindock-memory-"));
     roots.push(root);
@@ -14727,7 +14811,7 @@ function createNoToolSkillLlm(calls: Array<{
   messages: Array<{ role: string; content: string }>;
   options: { operation: string };
 }> = []): LlmClient {
-  return createCapturingL2Llm(calls, {
+  const base = createCapturingL2Llm(calls, {
     name: "memory_workflow_pytest_retry",
     retrieval_blurb: "Use for python REST memory workflows and pytest retry workflows that require focused verification.",
     trigger_context: "Use when a memory workflow or pytest workflow should inspect output before retrying.",
@@ -14742,6 +14826,25 @@ function createNoToolSkillLlm(calls: Array<{
     tools: [],
     tags: ["pytest", "retry"]
   });
+  return {
+    ...base,
+    async completeJson<T extends Record<string, unknown>>(
+      messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
+      options: { operation: string }
+    ): Promise<T> {
+      if (options.operation === "reward.reward.r_human.v6") {
+        calls.push({ messages, options });
+        return {
+          goal_achievement: 1,
+          process_quality: 1,
+          user_satisfaction: 1,
+          label: "success",
+          reason: "explicit positive feedback confirms successful completion"
+        } as unknown as T;
+      }
+      return base.completeJson<T>(messages, options);
+    }
+  };
 }
 
 function createFeedbackRefinerLlm(calls: Array<{
@@ -14920,6 +15023,41 @@ function createFollowUpRelationClassifierLlm(calls: string[]): LlmClient {
       return {
         provider: "host",
         model: "follow-up-relation-classifier",
+        configured: true,
+        remote: true
+      };
+    }
+  };
+}
+
+function createEmptyRewardLlm(calls: Array<{
+  messages: Array<{ role: string; content: string }>;
+  options: { operation: string };
+}>): LlmClient {
+  return {
+    config: {
+      ...DEFAULT_MEMMY_CONFIG.evolution,
+      provider: "host",
+      endpoint: "http://127.0.0.1/empty-reward",
+      model: "empty-reward"
+    },
+    isConfigured() {
+      return true;
+    },
+    async complete() {
+      return "{}";
+    },
+    async completeJson<T extends Record<string, unknown>>(
+      messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
+      options: { operation: string }
+    ): Promise<T> {
+      calls.push({ messages, options });
+      return {} as T;
+    },
+    status() {
+      return {
+        provider: "host",
+        model: "empty-reward",
         configured: true,
         remote: true
       };
