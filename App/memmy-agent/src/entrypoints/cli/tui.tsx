@@ -4,7 +4,7 @@ import stringWidth from "string-width";
 import { AgentLoop } from "../../core/agent-runtime/loop.js";
 import { Config } from "../../config/schema.js";
 import { getConfigPath, getWorkspacePath } from "../../config/paths.js";
-import { withProgressCapabilities } from "../../utils/progress-events.js";
+import { withProgressCapabilities, type ProgressOptions } from "../../utils/progress-events.js";
 import { VERSION } from "../../version.js";
 import { resolveComposerCursorPosition, type ComposerLayout } from "./tui-cursor.js";
 
@@ -34,6 +34,16 @@ type ToolsetSummary = {
 type TerminalSize = {
   columns: number;
   rows: number;
+};
+
+type YogaLayoutNode = {
+  childNodes?: YogaLayoutNode[];
+  parentNode?: YogaLayoutNode | null;
+  yogaNode?: {
+    getComputedHeight: () => number;
+    getComputedLeft: () => number;
+    getComputedTop: () => number;
+  };
 };
 
 const PROMPT = "❯";
@@ -516,8 +526,8 @@ function isMacActionFallback(key: ModifierKey, input: string, target: "a" | "e" 
   return isMac && key.ctrl && !key.meta && key.super !== true && input.toLowerCase() === target;
 }
 
-function absolutePosition(node: any): { x: number; y: number } | null {
-  let current = node;
+function absolutePosition(node: unknown): { x: number; y: number } | null {
+  let current = node as YogaLayoutNode | null;
   let x = 0;
   let y = 0;
 
@@ -531,14 +541,15 @@ function absolutePosition(node: any): { x: number; y: number } | null {
   return { x, y };
 }
 
-function renderedTextLayout(node: any): ComposerLayout | null {
+function renderedTextLayout(node: unknown): ComposerLayout | null {
+  const layoutNode = node as YogaLayoutNode | null;
   const base = absolutePosition(node);
   if (!base) return null;
-  const firstTextNode = node?.childNodes?.find((child: any) => child?.yogaNode);
-  let root = node;
+  const firstTextNode = layoutNode?.childNodes?.find((child) => child.yogaNode);
+  let root = layoutNode;
   while (root?.parentNode) root = root.parentNode;
   const outputHeight = root?.yogaNode?.getComputedHeight?.();
-  if (!Number.isFinite(outputHeight)) return null;
+  if (typeof outputHeight !== "number" || !Number.isFinite(outputHeight)) return null;
 
   return {
     outputHeight,
@@ -562,7 +573,7 @@ function ComposerInput({
   rows: number;
   value: string;
 }) {
-  const rowRef = useRef<any>(null);
+  const rowRef = useRef<unknown>(null);
   const { setCursorPosition } = useCursor();
   const prompt = ` ${PROMPT} `;
   const safeCursor = snapCursor(value, cursor);
@@ -590,7 +601,7 @@ function ComposerInput({
   });
 
   return (
-    <Box ref={rowRef}>
+    <Box ref={(node) => { rowRef.current = node; }}>
       <Text color={active ? PALETTE.ink : PALETTE.muted} bold>
         {prompt}
       </Text>
@@ -933,8 +944,8 @@ function MemmyTui({ config, registerCleanup, sessionId, toolsets, version }: Tui
   }, [registerCleanup]);
 
   const handleProgress = useCallback(
-    async (content: string, opts: Record<string, any> = {}) => {
-      const metadata: Record<string, any> = { agentProgress: true, ...opts };
+    async (content: string, opts: ProgressOptions = {}) => {
+      const metadata: ProgressOptions & { agentProgress: boolean } = { agentProgress: true, ...opts };
       const text = content ?? "";
       if (metadata.reasoning || metadata.reasoningDelta) {
         if (text.trim()) setNotice(text.trim().slice(0, 80));

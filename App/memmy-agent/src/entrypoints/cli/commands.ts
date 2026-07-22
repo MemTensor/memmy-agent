@@ -1305,7 +1305,9 @@ export function restoreTerminal(): void {
   if (process.stdin.isTTY && typeof process.stdin.setRawMode === "function") {
     try {
       process.stdin.setRawMode(false);
-    } catch {}
+    } catch {
+      // Terminal restoration is best-effort during shutdown.
+    }
   }
 }
 
