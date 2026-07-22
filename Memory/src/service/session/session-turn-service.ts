@@ -85,6 +85,7 @@ type SessionTurnDependencies = {
   repos: Repositories;
   readonly config: MemmyConfig;
   readonly llm: LlmClient;
+  readonly skillLlm: LlmClient;
   synthesizeDecisionRepairDraft: SynthesizeDecisionRepairDraft;
 } & Record<string, any>;
 interface CompleteTurnResponse { turnId: string; sessionId: string; episodeId: string; rawTurnId: string; l1MemoryId: string; l1MemoryIds: string[]; closedEpisodeIds: string[]; scheduledEvolution: boolean; jobs: JobRef[]; changeSeq: number; syncCursor: string; etag: string; serverTime: string; duplicate?: boolean; }
@@ -1857,7 +1858,9 @@ export class SessionTurnService {
         : undefined,
       prevTags: relationContext.tags
     }, {
-      llm: this.deps.llm
+      llm: this.deps.config.activeProfile === "account"
+        ? this.deps.skillLlm
+        : this.deps.llm
     });
     return this.applyEpisodeRelationDecision(session, latest, decision, userText, source, relationContext.lastTurnAtMs);
   }

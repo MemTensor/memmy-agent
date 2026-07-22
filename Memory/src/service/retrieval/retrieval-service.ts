@@ -1365,7 +1365,11 @@ export class RetrievalService {
   }> {
     const config = this.deps.config.algorithm.retrieval;
     const usesEvolutionLlm = this.deps.skillLlm.isConfigured();
-    const filterLlm = usesEvolutionLlm ? this.deps.skillLlm : this.deps.llm;
+    const filterLlm = usesEvolutionLlm
+      ? this.deps.skillLlm
+      : this.deps.config.activeProfile === "account"
+        ? undefined
+        : this.deps.llm;
     if (!config.llmFilterEnabled) {
       return {
         hits,
@@ -1378,7 +1382,7 @@ export class RetrievalService {
     if (!query.trim()) {
       return { hits, status: [] };
     }
-    if (!filterLlm.isConfigured()) {
+    if (!filterLlm?.isConfigured()) {
       return {
         hits: llmFilterFallbackCap(hits, config.llmFilterFallbackMaxKeep),
         status: ["llm_filter:no_llm"]
