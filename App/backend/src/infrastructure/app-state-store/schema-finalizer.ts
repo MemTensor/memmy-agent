@@ -1,5 +1,10 @@
 /** Schema finalizer module. */
 import type { DatabaseSync } from "node:sqlite";
+import {
+  discardLegacyAppStateSnapshot,
+  restoreLegacyAppState,
+  type LegacyAppStateSnapshot
+} from "./legacy-state-migration.js";
 
 const LEGACY_ACCOUNT_TABLES = [
   "account_session",
@@ -51,10 +56,26 @@ interface ModelConfigRefRow {
 }
 
 /** Handles finalize database design. */
-export function finalizeDatabaseDesign(db: DatabaseSync): void {
-  normalizeCloudAccountPrimaryKeys(db);
-  normalizeAccountSecretRefs(db);
-  dropLegacyAccountTables(db);
+export function finalizeDatabaseDesign(
+  db: DatabaseSync,
+  legacyState: LegacyAppStateSnapshot | null = null
+): void {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    if (legacyState) {
+      restoreLegacyAppState(db, legacyState);
+    }
+    normalizeCloudAccountPrimaryKeys(db);
+    normalizeAccountSecretRefs(db);
+    dropLegacyAccountTables(db);
+    if (legacyState) {
+      discardLegacyAppStateSnapshot(db);
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
 }
 
 /** Normalizes normalize cloud account primary keys. */
