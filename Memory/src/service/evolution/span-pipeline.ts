@@ -859,12 +859,11 @@ Rules:
 - If multiple independent facts appear, cover every independently retrievable
   fact and list them compactly with semicolons instead of dropping one or
   merging them into a broad umbrella topic.
-- For temporal facts, record the EVENT date/time, not just the conversation
-  date/time. When a session timestamp and a relative expression are present,
-  the summary MUST include the resolved absolute date/time. It may also retain
-  the relative wording, but never use it instead of the absolute value. Example:
-  a session on 22 October 2023 saying "bought it yesterday" means 21 October 2023.
-  If exact resolution is impossible, retain the relative wording and its anchor.
+- Preserve temporal expressions as stated in the source. Keep relative wording
+  such as "last Friday", "tomorrow", or "next month" as relative wording in the
+  summary. Do NOT resolve, normalize, infer, or replace a relative expression
+  with an absolute date/time, even when a session timestamp is available. If the
+  source itself provides an absolute date/time, preserve it without alteration.
 - Use future-query words from the source. Prefer concrete event/action/object
   terms over generic words such as "support", "journey", "strength", or
   "discussion" unless those are the only durable fact.

@@ -779,9 +779,11 @@ describe("MemoryService", () => {
     expect(summaryCall?.messages[0]?.content).toContain("concrete retrieval anchors");
     expect(summaryCall?.messages[0]?.content).toContain("atomic real-world facts");
     expect(summaryCall?.messages[0]?.content).toContain("use most of the 200-character budget");
-    expect(summaryCall?.messages[0]?.content).toContain("MUST include the resolved absolute date/time");
+    expect(summaryCall?.messages[0]?.content).toContain("Preserve temporal expressions as stated in the source");
+    expect(summaryCall?.messages[0]?.content).toContain("Do NOT resolve, normalize, infer, or replace a relative expression");
+    expect(summaryCall?.messages[0]?.content).not.toContain("MUST include the resolved absolute date/time");
     expect(summaryCall?.messages[0]?.content).toContain("image captions");
-    expect(summaryCall?.messages[0]?.content).toContain("record the EVENT date/time");
+    expect(summaryCall?.messages[0]?.content).toContain("source itself provides an absolute date/time, preserve it");
     expect(summaryCall?.messages[0]?.content).toContain("Use future-query words");
     expect(summaryCall?.messages[0]?.content).toContain("Preserve original speaker/person names");
     expect(summaryCall?.messages[0]?.content).not.toContain("L1");
