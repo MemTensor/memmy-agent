@@ -99,6 +99,17 @@ describe("AgentRunner tool result persistence", () => {
     expect(fs.existsSync(path.join(workspace, ".memmy", "tool-results", "test_runner", "call_result.txt"))).toBe(true);
   });
 
+  it("persists the full appended lint result for oversized file-tool output", async () => {
+    const lintTail = "\n\nLint results:\n- /workspace/page.html: failed\n  missing </html>";
+    const content = `Successfully wrote /workspace/page.html\n${"x".repeat(20_000)}${lintTail}`;
+    const { workspace, toolMessage } = await runSingleToolResult({ name: "write_file", content });
+    const persisted = path.join(workspace, ".memmy", "tool-results", "test_runner", "call_result.txt");
+
+    expect(toolMessage.content).toContain("[tool output persisted]");
+    expect(fs.readFileSync(persisted, "utf8")).toBe(content);
+    expect(fs.readFileSync(persisted, "utf8")).toContain(lintTail);
+  });
+
   it("persists exec output when the tool truncation marker pushes it over 50,000 chars", async () => {
     const [content] = truncateOutput("x".repeat(50_001), 50_000);
     expect(content.length).toBeGreaterThan(50_000);

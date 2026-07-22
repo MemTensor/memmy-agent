@@ -411,7 +411,7 @@ export class SessionDagConfig extends Base {
   debugLog = true;
   maxBuilderContextNodes = 40;
   maxUpdateAttempts = 5;
-  retryBackoffMs = [1000, 5000, 30000, 60000, 90000];
+  retryBackoffMs = [0, 3000, 5000, 10000];
   maxConcurrentSessionQueues = 4;
   compactionCatchupTimeoutMs = 120_000;
 
@@ -434,7 +434,7 @@ export class SessionDagConfig extends Base {
     this.retryBackoffMs = assertIntArrayRange(
       "sessionDag.retryBackoffMs",
       pick(init, ["retryBackoffMs"], this.retryBackoffMs),
-      1000,
+      0,
       600_000,
     );
     this.maxConcurrentSessionQueues = assertIntRange(

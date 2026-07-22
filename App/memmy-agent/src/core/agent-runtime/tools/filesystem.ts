@@ -4,6 +4,7 @@ import path from "node:path";
 import { lookup } from "mime-types";
 import { Tool, type ToolExecutionContext } from "./base.js";
 import { FileStates, FileStateStore, currentFileStates } from "./file-state.js";
+import { appendFileLintResults, lintFile } from "./file-lint.js";
 import { isPathInside, resolveWorkspacePath, workspaceRelative } from "./path-utils.js";
 import { extractText } from "../../../utils/document.js";
 import { getMediaDir } from "../../../config/paths.js";
@@ -395,6 +396,7 @@ type FsToolInit = {
   extraAllowedDirs?: string[];
   fileStates?: FileStates;
   fileStateStore?: FileStateStore;
+  postWriteValidation?: boolean;
 };
 
 function shouldRestrictToWorkspace(ctx: any): boolean {
@@ -440,6 +442,20 @@ function isToolAbortError(error: unknown): boolean {
 
 function throwIfAborted(signal?: AbortSignal | null): void {
   if (signal?.aborted) throw createToolAbortError();
+}
+
+async function readBackWrittenFile(
+  target: string,
+  expected: string,
+  signal?: AbortSignal | null,
+): Promise<string> {
+  throwIfAborted(signal);
+  const stat = await fs.stat(target);
+  if (!stat.isFile()) throw new Error(`Write verification failed: ${target} is not a regular file`);
+  throwIfAborted(signal);
+  const content = await fs.readFile(target, { encoding: "utf8", signal: signal ?? undefined });
+  if (content !== expected) throw new Error(`Write verification failed: content mismatch for ${target}`);
+  return content;
 }
 
 export class FsTool extends Tool {
@@ -655,6 +671,7 @@ export class WriteFileTool extends Tool {
   fileStateOwner: FileStateOwner;
   fallbackFileStates = new FileStates();
   requestContext: any = null;
+  postWriteValidation: boolean;
 
   constructor(init: FsToolInit = {}) {
     super();
@@ -663,6 +680,7 @@ export class WriteFileTool extends Tool {
     this.allowedDir = allowedDir ? path.resolve(allowedDir) : null;
     this.extraAllowedDirs = resolveExtraAllowedDirs(init.extraAllowedDirs);
     this.fileStateOwner = stateOwner(init);
+    this.postWriteValidation = init.postWriteValidation ?? true;
   }
 
   static create(ctx: any): Tool {
@@ -717,6 +735,10 @@ export class WriteFileTool extends Tool {
       writeStarted = true;
       await fs.writeFile(target, params.content, { encoding: "utf8", signal: signal ?? undefined });
       this.fileStates().recordWrite(target);
+      if (!this.postWriteValidation) return `Successfully wrote ${target}`;
+      const content = await readBackWrittenFile(target, params.content, signal);
+      const lint = await lintFile({ path: target, content }, { abortSignal: signal });
+      return appendFileLintResults(`Successfully wrote ${target}`, [lint]);
     } catch (error) {
       if (isToolAbortError(error)) {
         if (writeStarted && fsSync.existsSync(target)) this.fileStates().recordWrite(target);
@@ -724,7 +746,6 @@ export class WriteFileTool extends Tool {
       }
       throw error;
     }
-    return `Successfully wrote ${target}`;
   }
 }
 
@@ -738,6 +759,7 @@ export class EditFileTool extends Tool {
   fileStateOwner: FileStateOwner;
   fallbackFileStates = new FileStates();
   requestContext: any = null;
+  postWriteValidation: boolean;
 
   constructor(init: FsToolInit = {}) {
     super();
@@ -746,6 +768,7 @@ export class EditFileTool extends Tool {
     this.allowedDir = allowedDir ? path.resolve(allowedDir) : null;
     this.extraAllowedDirs = resolveExtraAllowedDirs(init.extraAllowedDirs);
     this.fileStateOwner = stateOwner(init);
+    this.postWriteValidation = init.postWriteValidation ?? true;
   }
 
   static create(ctx: any): Tool {
@@ -845,7 +868,11 @@ export class EditFileTool extends Tool {
         writeStarted = true;
         await fs.writeFile(target, newText, { encoding: "utf8", signal: signal ?? undefined });
         this.fileStates().recordWrite(target);
-        return exists ? "Successfully edited file" : `Successfully created ${target}`;
+        const success = exists ? "Successfully edited file" : `Successfully created ${target}`;
+        if (!this.postWriteValidation) return success;
+        const content = await readBackWrittenFile(target, newText, signal);
+        const lint = await lintFile({ path: target, content }, { abortSignal: signal });
+        return appendFileLintResults(success, [lint]);
       }
       const stat = fsSync.statSync(target);
       if (stat.size > EditFileTool.MAX_EDIT_FILE_SIZE) {
@@ -907,7 +934,16 @@ export class EditFileTool extends Tool {
       writeStarted = true;
       await fs.writeFile(target, updated, { encoding: "utf8", signal: signal ?? undefined });
       this.fileStates().recordWrite(target);
-      return warning ? `${warning}\nSuccessfully edited file` : "Successfully edited file";
+      const success = warning ? `${warning}\nSuccessfully edited file` : "Successfully edited file";
+      if (!this.postWriteValidation) return success;
+      const content = await readBackWrittenFile(target, updated, signal);
+      const lint = await lintFile({
+        path: target,
+        content,
+        previousContent: raw.toString("utf8"),
+        useDelta: true,
+      }, { abortSignal: signal });
+      return appendFileLintResults(success, [lint]);
     } catch (error) {
       if (isToolAbortError(error)) {
         if (writeStarted && fsSync.existsSync(target)) this.fileStates().recordWrite(target);

@@ -455,7 +455,8 @@ export class SubagentManager {
     const skillsSummary = new SkillsLoader(this.workspace, null, this.disabledSkills).buildSkillsSummary();
     const template = renderSkillsSummaryBlock(
       readTemplate("agent/subagent-system.md")
-        .replace(/\{%\s*include 'agent\/snippets\/untrusted-content\.md'\s*%\}/g, readTemplate("agent/snippets/untrusted-content.md")),
+        .replace(/\{%\s*include 'agent\/snippets\/untrusted-content\.md'\s*%\}/g, readTemplate("agent/snippets/untrusted-content.md"))
+        .replace(/\{%\s*include 'agent\/verification-contract\.md'\s*%\}/g, readTemplate("agent/verification-contract.md")),
       skillsSummary,
     );
     return renderInlineTemplate(template, {

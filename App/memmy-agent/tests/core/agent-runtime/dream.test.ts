@@ -197,7 +197,8 @@ describe("Dream run", () => {
       content: "---\nname: test-skill\ndescription: Test\n---\n",
     });
 
-    expect(String(result)).toContain("Successfully wrote");
+    expect(String(result)).toBe(`Successfully wrote ${path.join(store.workspace, "skills", "test-skill", "SKILL.md")}`);
+    expect(String(result)).not.toContain("Lint results:");
     expect(fs.existsSync(path.join(store.workspace, "skills", "test-skill", "SKILL.md"))).toBe(true);
   });
 
