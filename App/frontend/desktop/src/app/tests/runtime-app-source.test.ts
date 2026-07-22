@@ -26,7 +26,7 @@ describe("RuntimeApp bootstrap loading", () => {
 
     expect(source).toContain("window.memmy.onRouteTargetRequest");
     expect(source).toContain("resolveMainWindowRouteTarget(rawTarget)");
-    expect(source).toContain("focusMainWindowAgentChat(target.agentChatId, agentClient, dispatch);");
+    expect(source).toContain("focusMainWindowAgentChat(target.agentChatId, agentClient, dispatch, agentState);");
     expect(source).toContain("dispatch(appActions.navigate(target.route));");
     expect(source).toContain("window.history.replaceState(window.history.state");
     expect(source).toContain("FOCUSED_AGENT_CHAT_STORAGE_KEY");
@@ -130,11 +130,14 @@ describe("RuntimeApp bootstrap loading", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({
-      type: "agent/historyOpenMissing",
-      chatId: "chat-2",
-      sessionKey: "websocket:chat-2"
+      type: "agent/historyOpenFailed",
+      chatId: "chat-2"
     }));
-    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({ type: "agent/sessionsLoadFailed" }));
-    expect(dispatch).not.toHaveBeenCalledWith(expect.objectContaining({ type: "agent/error" }));
+    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({
+      type: "agent/taskStateSettled",
+      sidebarState: expect.objectContaining({ schema_version: 1 }),
+      error: expect.objectContaining({ source: "sessions", message: "Failed to fetch" })
+    }));
+    expect(dispatch).not.toHaveBeenCalledWith(expect.objectContaining({ type: "agent/connectionFailed" }));
   });
 });

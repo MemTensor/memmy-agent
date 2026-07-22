@@ -62,12 +62,10 @@ describe("AgentRuntimeBridge", () => {
     expect(source).toContain("clearConnectRetryTimer();");
     expect(connectionEffect).toContain("const delayMs = agentRuntimeConnectRetryDelayMs(connectAttemptRef.current);");
     expect(connectionEffect).toContain("connectAttemptRef.current += 1;");
-    expect(connectionEffect).toContain("dispatch(agentActions.failed(error instanceof Error ? error.message : String(error)));");
+    expect(connectionEffect).toContain("dispatch(agentActions.connectionFailed(error instanceof Error ? error.message : String(error)));");
     expect(connectionEffect).toContain("scheduleRetry();");
-    expect(connectionEffect).toContain("const recoveredFromFailure = connectAttemptRef.current > 0;");
     expect(connectionEffect).toContain("registerConnectionHandlers(nextConnection);");
     expect(connectionEffect).toContain("connectAttemptRef.current = 0;");
-    expect(connectionEffect).toContain('void refreshAgentTaskList(client, dispatch, { reason: "auto" });');
     expect(connectionEffect).toContain("[cleanupConnection, clearConnectRetryTimer, clients?.memmyAgent, dispatch, enabled, registerConnectionHandlers]");
   });
 
@@ -94,12 +92,12 @@ describe("AgentRuntimeBridge", () => {
 
   it("uses background hydrate and metadata-only task refresh for refreshRequested", () => {
     const source = readBridgeSource();
-    const refreshEffect = source.slice(source.indexOf("useEffect(() => {\n    if (!clients?.memmyAgent || !state.agent.refreshRequested || !enabled)"), source.indexOf("return (\n    <AgentRuntimeBridgeContext.Provider"));
+    const refreshEffect = source.slice(source.indexOf("state.agent.refreshRequested || !enabled || state.agent.recoveringGeneration !== null"), source.indexOf("return (\n    <AgentRuntimeBridgeContext.Provider"));
     const refreshTaskListBlock = source.slice(source.indexOf("export function refreshAgentTaskList"), source.indexOf("function isAgentConnectionEvent"));
 
     expect(refreshEffect).toContain("Object.entries(state.agent.pendingCanonicalHydrateByChatId)");
     expect(refreshEffect).toContain("hydrateAgentThreadInBackground(clients.memmyAgent, dispatch, chatId);");
-    expect(refreshEffect).toContain("void refreshAgentTaskList(clients.memmyAgent, dispatch);");
+    expect(refreshEffect).toContain("void refreshAgentTaskList(clients.memmyAgent, dispatch, { state: state.agent });");
     expect(refreshTaskListBlock).toContain("client.listSessions()");
     expect(refreshTaskListBlock).toContain("client.readSidebarState()");
     expect(refreshTaskListBlock).not.toContain("readWebuiThread");
@@ -147,9 +145,8 @@ describe("AgentRuntimeBridge", () => {
     expect(client.readSidebarState).toHaveBeenCalledTimes(1);
     expect(client.readWebuiThread).not.toHaveBeenCalled();
     expect(dispatch.mock.calls.map(([action]) => action.type)).toEqual([
-      "agent/sessionsLoading",
-      "agent/sidebarStateLoaded",
-      "agent/sessionsLoaded"
+      "agent/taskStateLoading",
+      "agent/taskStateSettled"
     ]);
   });
 });
