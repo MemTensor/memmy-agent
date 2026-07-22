@@ -2,6 +2,7 @@ import type { MemoryAddRequest, MemoryLayer, ToolCallPayload } from "../../types
 import { captureTurnSteps, signatureFromTraceParts } from "../../algorithm/plugin-algorithms.js";
 import { MemoryServiceError } from "../../utils/error.js";
 import { stableHash } from "../../utils/id.js";
+import { clip, firstLine } from "../../utils/text.js";
 
 export const IMPORT_SUMMARY_QUEUED_TAG = "摘要排队中";
 export const IMPORT_SUMMARY_PROCESSING_TAG = "摘要总结中";
@@ -252,14 +253,6 @@ function stringFromRecord(record: Record<string, unknown>, key: string): string 
   return typeof value === "string" ? value : undefined;
 }
 
-function firstLine(value: string): string {
-  return value.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? "";
-}
-
-function clip(value: string, max: number): string {
-  const cleaned = value.replace(/\s+/g, " ").trim();
-  return cleaned.length <= max ? cleaned : `${cleaned.slice(0, max - 3)}...`;
-}
 
 function isToolCallPayload(value: unknown): value is ToolCallPayload {
   return typeof value === "object" && value !== null && !Array.isArray(value) && typeof (value as { name?: unknown }).name === "string";

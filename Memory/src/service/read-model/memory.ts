@@ -2,6 +2,8 @@ import type { MemoryDetailItem, MemoryProcessingRecord, MemoryRow } from "../../
 import { kindFromMemory } from "../../storage/repositories.js";
 import { policyMetaFromMemory, skillMetaFromMemory, traceMetaFromMemory, worldModelMetaFromMemory } from "../../algorithm/plugin-algorithms.js";
 import { panelSourceForMemory, panelTagsForMemory } from "./panel.js";
+import { isRecord } from "../../utils/json.js";
+import { firstLine } from "../../utils/text.js";
 
 export function detailFromMemory(memory: MemoryRow, processing?: MemoryProcessingRecord): MemoryDetailItem {
   const sourceMemoryIds = memory.properties.internal_info.source_memory_ids;
@@ -55,6 +57,4 @@ function stringArrayFromInternal(memory: MemoryRow, key: string): string[] { ret
 function stringArray(value: unknown): string[] { return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean) : []; }
 function stringFromMaybeRecord(record: unknown, key: string): string | undefined { return isRecord(record) ? stringFromRecord(record, key) : undefined; }
 function stringFromRecord(record: Record<string, unknown>, key: string): string | undefined { const value = record[key]; return typeof value === "string" ? value : undefined; }
-function firstLine(value: string): string { return value.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? ""; }
 function rawTurnIdFromMemory(memory: MemoryRow): string | undefined { const source = memory.properties.internal_info.source_raw_turn_id; if (typeof source === "string" && source) return source; const raw = memory.properties.internal_info.raw_turn_id; if (typeof raw === "string" && raw) return raw; const trace = memory.properties.internal_info.trace; return isRecord(trace) ? stringFromRecord(trace, "raw_turn_id") : undefined; }
-function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }

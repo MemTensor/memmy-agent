@@ -1,4 +1,5 @@
 import type { MemoryListItem, MemoryProcessingRecord, MemoryRow } from "../../types.js";
+import { isRecord } from "../../utils/json.js";
 import {
   IMPORT_FAILED_TAG,
   IMPORT_INDEXING_TAG,
@@ -122,9 +123,6 @@ function firstString(...values: unknown[]): string | undefined {
   return undefined;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function uniq(values: string[]): string[] {
   return [...new Set(values)];

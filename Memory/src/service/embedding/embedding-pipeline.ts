@@ -11,6 +11,8 @@ import {
   traceMetaFromMemory,
   worldModelMetaFromMemory
 } from "../../algorithm/plugin-algorithms.js";
+import { isRecord } from "../../utils/json.js";
+import { clip } from "../../utils/text.js";
 
 const EMBEDDING_RETRY_BASE_BACKOFF_MS = 60_000;
 const EMBEDDING_RETRY_MAX_BACKOFF_MS = 60 * 60_000;
@@ -147,13 +149,4 @@ function isImportSummaryPlaceholder(value: string | undefined): boolean {
 function stringFromRecord(record: Record<string, unknown>, key: string): string | undefined {
   const value = record[key];
   return typeof value === "string" ? value : undefined;
-}
-
-function clip(value: string, max: number): string {
-  const cleaned = value.replace(/\s+/g, " ").trim();
-  return cleaned.length <= max ? cleaned : `${cleaned.slice(0, max - 3)}...`;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

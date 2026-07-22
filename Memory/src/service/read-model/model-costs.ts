@@ -1,4 +1,5 @@
 import type { ApiLogRecord } from "../../storage/repositories.js";
+import { isRecord } from "../../utils/json.js";
 
 export function panelToolLatency(logs: ApiLogRecord[], dates: string[]): {
   tools: Array<{ name: string; calls: number; avgMs: number; p95Ms: number }>;
@@ -92,8 +93,4 @@ function panelJsonObject(raw: string): Record<string, unknown> {
   } catch {
     return {};
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
