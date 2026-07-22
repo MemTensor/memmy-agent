@@ -25,7 +25,7 @@ describe("token-quota-service", () => {
     expect(requestTokenQuota).toHaveBeenCalledWith({ uuid: "uuid-1", reason: "x".repeat(20) });
   });
 
-  it("同一账号已有待审批申请时返回原 pending 结果,不重复打 cloud", async () => {
+  it("每次提交都交给云端做并发与资格校验", async () => {
     const requestTokenQuota = vi.fn(async () => ({ requestId: "r1", status: "pending" as const }));
     const svc = createTokenQuotaService({
       cloudClient: { requestTokenQuota } as never,
@@ -37,38 +37,34 @@ describe("token-quota-service", () => {
 
     expect(first).toEqual({ requestId: "r1", status: "pending" });
     expect(second).toEqual({ requestId: "r1", status: "pending" });
-    expect(requestTokenQuota).toHaveBeenCalledTimes(1);
-  });
-
-  it("pending 申请按账号隔离", async () => {
-    let currentUuid = "uuid-1";
-    const requestTokenQuota = vi.fn(async ({ uuid }: { uuid: string }) => ({ requestId: `${uuid}-request`, status: "pending" as const }));
-    const svc = createTokenQuotaService({
-      cloudClient: { requestTokenQuota } as never,
-      accountSessionRepository: { getCloudUuid: () => currentUuid } as never
-    });
-
-    const first = await svc.requestQuota({ reason: "第一次申请".repeat(5) });
-    currentUuid = "uuid-2";
-    const second = await svc.requestQuota({ reason: "第二次申请".repeat(5) });
-
-    expect(first.requestId).toBe("uuid-1-request");
-    expect(second.requestId).toBe("uuid-2-request");
     expect(requestTokenQuota).toHaveBeenCalledTimes(2);
   });
 
-  it("pending 缓存过期后允许重新提交到 cloud", async () => {
-    const requestTokenQuota = vi.fn()
-      .mockResolvedValueOnce({ requestId: "r1", status: "pending" as const })
-      .mockResolvedValueOnce({ requestId: "r2", status: "pending" as const });
+  it("查询资格时带当前账号 uuid 转发 cloudClient", async () => {
+    const eligibility = {
+      state: "available" as const,
+      requestCount: 0,
+      maxRequestCount: 5 as const,
+      nextAllowedAtEpochMs: null,
+      latestRequestStatus: null,
+      latestReviewNote: null
+    };
+    const getTokenQuotaEligibility = vi.fn(async () => eligibility);
     const svc = createTokenQuotaService({
-      cloudClient: { requestTokenQuota } as never,
-      accountSessionRepository: repo("uuid-1"),
-      pendingRequestTtlMs: 0
+      cloudClient: { getTokenQuotaEligibility } as never,
+      accountSessionRepository: repo("uuid-1")
     });
 
-    await expect(svc.requestQuota({ reason: "第一次申请".repeat(5) })).resolves.toMatchObject({ requestId: "r1" });
-    await expect(svc.requestQuota({ reason: "第二次申请".repeat(5) })).resolves.toMatchObject({ requestId: "r2" });
-    expect(requestTokenQuota).toHaveBeenCalledTimes(2);
+    await expect(svc.getEligibility()).resolves.toEqual(eligibility);
+    expect(getTokenQuotaEligibility).toHaveBeenCalledWith({ uuid: "uuid-1" });
+  });
+
+  it("未登录查询资格时抛 unauthorized", async () => {
+    const svc = createTokenQuotaService({
+      cloudClient: {} as never,
+      accountSessionRepository: repo(undefined)
+    });
+
+    await expect(svc.getEligibility()).rejects.toMatchObject({ code: "unauthorized" });
   });
 });
