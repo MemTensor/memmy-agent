@@ -1,8 +1,11 @@
 import type { EmbeddingConfig } from "../config/index.js";
+import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
 import { stableHash } from "../utils/id.js";
 import { bearer, postJsonWithRetry, trimTrailingSlash } from "./http.js";
 import { HttpByokTokenUsageRecorder, extractModelTokenUsage } from "./token-usage.js";
 import type { Embedder, ModelStatus } from "./types.js";
+
+const logger = createMemoryLogger("embedding");
 
 interface OpenAiEmbeddingResponse {
   data?: Array<{ embedding?: number[] }>;
@@ -73,7 +76,7 @@ class HttpEmbedder implements Embedder {
     if (missing.length > 0) {
       const vectors = this.isRemote()
         ? await this.embedRemote(missing.map((item) => item.text), role)
-        : await this.embedLocal(missing.map((item) => item.text));
+        : await this.embedLocal(missing.map((item) => item.text), role);
       for (let index = 0; index < missing.length; index += 1) {
         const item = missing[index]!;
         const rawVector = vectors[index];
@@ -105,18 +108,40 @@ class HttpEmbedder implements Embedder {
   }
 
   private async embedRemote(texts: string[], role: "query" | "document"): Promise<number[][]> {
+    const startedAt = Date.now();
+    const fields = {
+      provider: this.config.provider,
+      model: this.config.model,
+      role,
+      batchSize: texts.length
+    };
+    logger.debug("request.started", fields);
     try {
       const vectors = await this.embedRemoteOnce(texts, role);
       this.lastOkAt = new Date().toISOString();
       this.lastError = undefined;
+      logger.info("request.succeeded", { ...fields, durationMs: Date.now() - startedAt });
       return vectors;
     } catch (error) {
       this.lastError = error instanceof Error ? error.message : String(error);
+      logger.error("request.failed", {
+        ...fields,
+        durationMs: Date.now() - startedAt,
+        ...memoryErrorFields(error)
+      });
       throw error;
     }
   }
 
-  private async embedLocal(texts: string[]): Promise<number[][]> {
+  private async embedLocal(texts: string[], role: "query" | "document"): Promise<number[][]> {
+    const startedAt = Date.now();
+    const fields = {
+      provider: this.config.provider,
+      model: this.config.model,
+      role,
+      batchSize: texts.length
+    };
+    logger.debug("request.started", fields);
     try {
       const model = this.config.model || "Xenova/all-MiniLM-L6-v2";
       const extractor = await ensureLocalExtractor(model);
@@ -130,9 +155,15 @@ class HttpEmbedder implements Embedder {
       }
       this.lastOkAt = new Date().toISOString();
       this.lastError = undefined;
+      logger.info("request.succeeded", { ...fields, durationMs: Date.now() - startedAt });
       return vectors;
     } catch (error) {
       this.lastError = error instanceof Error ? error.message : String(error);
+      logger.error("request.failed", {
+        ...fields,
+        durationMs: Date.now() - startedAt,
+        ...memoryErrorFields(error)
+      });
       throw error;
     }
   }
@@ -166,6 +197,8 @@ class HttpEmbedder implements Embedder {
     }
     const response = await postJsonWithRetry<OpenAiEmbeddingResponse>({
       provider,
+      operation: `embedding.${role}`,
+      model: this.config.model,
       url,
       headers: bearer(this.config.apiKey),
       timeoutMs: this.config.timeoutMs,
@@ -189,6 +222,8 @@ class HttpEmbedder implements Embedder {
     const url = `${base}/models/${encodeURIComponent(model)}:batchEmbedContents?key=${encodeURIComponent(this.config.apiKey)}`;
     const response = await postJsonWithRetry<GeminiEmbeddingResponse>({
       provider: "gemini",
+      operation: `embedding.${role}`,
+      model,
       url,
       timeoutMs: this.config.timeoutMs,
       maxRetries: this.config.maxRetries,
@@ -211,6 +246,8 @@ class HttpEmbedder implements Embedder {
     const url = this.config.endpoint || "https://api.cohere.com/v2/embed";
     const response = await postJsonWithRetry<CohereEmbeddingResponse>({
       provider: "cohere",
+      operation: `embedding.${role}`,
+      model: this.config.model || "embed-v4.0",
       url,
       headers: bearer(this.config.apiKey),
       timeoutMs: this.config.timeoutMs,

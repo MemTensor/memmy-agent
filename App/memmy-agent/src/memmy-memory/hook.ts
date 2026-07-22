@@ -3,8 +3,9 @@ import { AgentHook, AgentHookContext, type AgentToolRegistrationContext, type Sy
 import { ContextBuilder } from "../core/agent-runtime/context.js";
 import { extractReasoning, stripThink } from "../utils/helpers.js";
 import {
+  CURRENT_USER_REQUEST_TAG,
   extractCurrentUserRequestText,
-  renderMemmyContextPacket,
+  renderMemmyMemoryContext,
 } from "./protocol.js";
 import type { MemmyMemoryClient } from "./client.js";
 import { registerMemmyMemoryTools } from "./tools.js";
@@ -98,7 +99,7 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
         query: userText || "(conversation continued)",
       }));
       turn.episodeId = stringOrUndefined(response?.episodeId);
-      this.injectMemoryContext(messages, response?.injectedContext, userText);
+      this.injectMemoryContext(messages, response?.injectedContext);
       turn.messageStartIndex = messages.length;
     });
   }
@@ -216,21 +217,20 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
     return stringOrUndefined(ctx?.spec?.sessionKey) ?? stringOrUndefined(ctx?.sessionKey) ?? stringOrUndefined(ctx?.session?.key) ?? null;
   }
 
-  private injectMemoryContext(messages: JsonRecord[], injectedContext: any, userText: string): void {
+  private injectMemoryContext(messages: JsonRecord[], injectedContext: any): void {
     const markdown = typeof injectedContext === "string"
       ? injectedContext
       : typeof injectedContext?.markdown === "string"
         ? injectedContext.markdown
         : "";
     if (!markdown.trim()) return;
-    const block = renderMemmyContextPacket(markdown, "turn_start", userText);
+    const memoryBlock = renderMemmyMemoryContext(markdown, "turn_start");
     for (let index = messages.length - 1; index >= 0; index -= 1) {
       const message = messages[index];
       if (message?.role !== "user") continue;
-      message.content = injectProtocolContent(message.content, block);
+      message.content = injectProtocolContent(message.content, memoryBlock);
       return;
     }
-    messages.unshift({ role: "user", content: block });
   }
 
   private async safe(fn: () => Promise<void>): Promise<void> {
@@ -272,13 +272,21 @@ function stripRuntimeContext(content: string): string {
 }
 
 function stripProtocolContextFromContent(content: any): any {
-  if (typeof content === "string") return extractCurrentUserRequestText(content);
+  if (typeof content === "string") {
+    return stripProtocolContextFromText(content);
+  }
   if (!Array.isArray(content)) return content;
   return content
     .map((item) => {
       if (!isJsonRecord(item)) return item;
-      if (typeof item.text === "string") return { ...item, text: extractCurrentUserRequestText(item.text) };
-      if (typeof item.content === "string") return { ...item, content: extractCurrentUserRequestText(item.content) };
+      if (typeof item.text === "string") {
+        const text = stripProtocolContextFromText(item.text);
+        return text === item.text ? item : { ...item, text };
+      }
+      if (typeof item.content === "string") {
+        const itemContent = stripProtocolContextFromText(item.content);
+        return itemContent === item.content ? item : { ...item, content: itemContent };
+      }
       return item;
     })
     .filter((item) => {
@@ -286,6 +294,15 @@ function stripProtocolContextFromContent(content: any): any {
       const text = typeof item.text === "string" ? item.text : typeof item.content === "string" ? item.content : null;
       return text === null || text.trim().length > 0;
     });
+}
+
+function stripProtocolContextFromText(value: string): string {
+  if (/^\s*<\/?current_user_request(?:\s[^>]*)?>\s*$/i.test(value)) return "";
+  return containsProtocolContext(value) ? extractCurrentUserRequestText(value) : value;
+}
+
+function containsProtocolContext(value: string): boolean {
+  return /<(?:memmy_memory_context|memos_context|memory_context|current_user_request)(?:\s[^>]*)?>/i.test(value);
 }
 
 function lastUserText(messages: JsonRecord[]): string {
@@ -323,24 +340,43 @@ function splitRuntimeContextContent(content: string): { body: string; runtime: s
   const pos = content.indexOf(ContextBuilder.RUNTIME_CONTEXT_TAG);
   if (pos < 0) return { body: content, runtime: "" };
   return {
-    body: content.slice(0, pos).trimEnd(),
-    runtime: content.slice(pos).trim(),
+    body: content.slice(0, pos),
+    runtime: content.slice(pos),
   };
 }
 
-function injectProtocolContent(content: any, protocolBlock: string): string | JsonRecord[] {
-  if (typeof content === "string") {
-    const runtime = splitRuntimeContextContent(content).runtime;
-    return runtime ? `${protocolBlock}\n\n${runtime}` : protocolBlock;
-  }
-  if (!Array.isArray(content)) return protocolBlock;
-  const blocks = stripProtocolContextFromContent(content);
-  const preserved = toContentBlocks(blocks).filter((item) => {
+function injectProtocolContent(content: any, memoryBlock: string): JsonRecord[] {
+  const original = stripProtocolContextFromContent(content);
+  const blocks = toContentBlocks(original);
+  const requestBlocks: JsonRecord[] = [];
+  const runtimeBlocks: JsonRecord[] = [];
+
+  for (const item of blocks) {
     const text = typeof item.text === "string" ? item.text : typeof item.content === "string" ? item.content : "";
-    if (!text) return true;
-    return text.startsWith(ContextBuilder.RUNTIME_CONTEXT_TAG);
-  });
-  return [{ type: "text", text: protocolBlock }, ...preserved];
+    if (text.startsWith(ContextBuilder.RUNTIME_CONTEXT_TAG)) {
+      runtimeBlocks.push(item);
+      continue;
+    }
+    if (typeof item.text === "string" && item.text.includes(ContextBuilder.RUNTIME_CONTEXT_TAG)) {
+      const { body, runtime } = splitRuntimeContextContent(item.text);
+      if (body) requestBlocks.push({ ...item, text: body });
+      if (runtime) runtimeBlocks.push({ ...item, text: runtime });
+      continue;
+    }
+    requestBlocks.push(item);
+  }
+
+  if (requestBlocks.length === 0) {
+    requestBlocks.push({ type: "text", text: "(conversation continued)" });
+  }
+
+  return [
+    { type: "text", text: memoryBlock },
+    { type: "text", text: `<${CURRENT_USER_REQUEST_TAG}>` },
+    ...requestBlocks,
+    { type: "text", text: `</${CURRENT_USER_REQUEST_TAG}>` },
+    ...runtimeBlocks,
+  ];
 }
 
 type ToolCallAnnotations = {

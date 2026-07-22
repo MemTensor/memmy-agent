@@ -58,12 +58,14 @@ import {
 import {
   DEFAULT_MEMMY_CONFIG,
   loadMemmyConfig,
+  MEMORY_SUMMARY_MAX_TOKENS,
   resolveEvolutionConfig,
   type MemmyConfig
 } from "../config/index.js";
 import { createEmbedder } from "../model/embedder.js";
 import { createLlmClient } from "../model/llm.js";
 import type { Embedder, LlmClient } from "../model/types.js";
+import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
 import {
   type EpisodeRecord,
   type ApiLogRecord,
@@ -154,6 +156,11 @@ import type {
   SeededChannelScores
 } from "../algorithm/plugin-algorithms.js";
 import type { TurnFeedbackClassification } from "../algorithm/plugin-algorithms.js";
+
+const workerLogger = createMemoryLogger("worker");
+const evolutionLogger = createMemoryLogger("evolution");
+const pipelineLogger = createMemoryLogger("pipeline");
+const serviceLogger = createMemoryLogger("memory-service");
 
 const RETRIEVAL_QUERY_EXTRACT_TIMEOUT_MS = 60_000;
 const RETRIEVAL_FILTER_TIMEOUT_MS = 30_000;
@@ -490,6 +497,7 @@ export class MemoryService {
         ? options.llm
         : createLlmClient(resolveEvolutionConfig(this.config), { modelRole: "memory_evolution" }));
     this.embedder = options.embedder ?? createEmbedder(this.config.embedding);
+    serviceLogger.info("initialized", memoryConfigLogFields(this.config));
   }
 
   private memoryAddEnabled(): boolean {
@@ -566,6 +574,12 @@ export class MemoryService {
     if (!requiresRestart && request.restartFailedProcessing !== false) {
       this.restartFailedProcessing(reloadedAt);
     }
+    serviceLogger.info("config.reloaded", {
+      changed,
+      requiresRestart,
+      restartFailedProcessing: !requiresRestart && request.restartFailedProcessing !== false,
+      ...memoryConfigLogFields(this.config)
+    });
 
     return {
       activeProfile: this.config.activeProfile,
@@ -2010,7 +2024,13 @@ export class MemoryService {
         maxTokens: 800
       });
       return normalizeDecisionRepairLlmDraft(result);
-    } catch {
+    } catch (error) {
+      pipelineLogger.warn("fallback.used", {
+        operation: DECISION_REPAIR_OPERATION,
+        pipeline: "decision_repair.failure_burst",
+        fallback: "no_llm_draft",
+        ...memoryErrorFields(error)
+      });
       return undefined;
     }
   }
@@ -2315,6 +2335,21 @@ export class MemoryService {
     }
     const context = this.resolveContext(request);
     const retrievalMode = request.retrievalMode ?? "search";
+    const episode = request.episodeId
+      ? this.requireEpisode(request.episodeId)
+      : request.sessionId
+        ? this.repos.runtime.latestEpisodeForSession(request.sessionId)
+        : undefined;
+    if (episode) {
+      this.assertEpisodeInScope(episode, request.namespace);
+    }
+    const recentRawTurnIds = retrievalMode === "turn_start" && request.sessionId
+      ? new Set(
+          this.repos.runtime
+            .listRecentRawTurnsBySession(request.sessionId, 8)
+            .map((turn) => turn.id)
+        )
+      : undefined;
     const tuning = this.retrievalTuningConfig();
     const allowedLayers = retrievalLayersForProfile(retrievalLayersForMode(retrievalMode), tuning);
     const layers = request.layers === undefined
@@ -2336,10 +2371,7 @@ export class MemoryService {
       tags: request.tags,
       limit: retrievalLimit,
       mode: retrievalMode,
-      excludeTraceSessionId:
-        retrievalMode === "turn_start"
-          ? request.sessionId
-          : undefined,
+      excludeTraceRawTurnIds: recentRawTurnIds,
       targetSkillId: request.targetSkillId
     });
     const retrieval = retrievalOutput.retrieval;
@@ -2361,14 +2393,6 @@ export class MemoryService {
     const recallEventId = newId("recall");
     const candidateMemoryIds = memories.map((memory) => memory.id);
     const sourceMemoryIds = contextPacket.sourceMemoryIds;
-    const episode = request.episodeId
-      ? this.requireEpisode(request.episodeId)
-      : request.sessionId
-        ? this.repos.runtime.latestEpisodeForSession(request.sessionId)
-        : undefined;
-    if (episode) {
-      this.assertEpisodeInScope(episode, request.namespace);
-    }
     const hitIds = new Set(hits.map((hit) => hit.id));
     const dropped = [
       ...contextPacket.droppedDueToBudget,
@@ -2465,7 +2489,7 @@ export class MemoryService {
     tags?: string[];
     limit: number;
     mode: RetrievalMode;
-    excludeTraceSessionId?: string;
+    excludeTraceRawTurnIds?: ReadonlySet<string>;
     targetSkillId?: string;
   }): Promise<{ retrieval: RetrievalResult; memories: MemoryRow[] }> {
     if (input.limit <= 0 || input.layers.length === 0) {
@@ -2507,7 +2531,7 @@ export class MemoryService {
           layers: input.layers,
           limit: input.limit,
           mode: input.mode,
-          excludeTraceSessionId: input.excludeTraceSessionId,
+          excludeTraceRawTurnIds: input.excludeTraceRawTurnIds,
           targetSkillId: input.targetSkillId,
           channelScoresByMemory: candidatePool.channelScoresByMemory,
           config
@@ -2728,7 +2752,8 @@ export class MemoryService {
     status: string[];
   }> {
     const config = this.config.algorithm.retrieval;
-    const filterLlm = this.skillLlm.isConfigured() ? this.skillLlm : this.llm;
+    const usesEvolutionLlm = this.skillLlm.isConfigured();
+    const filterLlm = usesEvolutionLlm ? this.skillLlm : this.llm;
     if (!config.llmFilterEnabled) {
       return {
         hits,
@@ -2774,7 +2799,9 @@ export class MemoryService {
           temperature: 0,
           timeoutMs: RETRIEVAL_FILTER_TIMEOUT_MS,
           maxRetries: 0,
-          maxTokens: Math.min(2048, Math.max(160, hits.length * 8 + 80)),
+          maxTokens: usesEvolutionLlm
+            ? Math.min(2048, Math.max(160, hits.length * 8 + 80))
+            : MEMORY_SUMMARY_MAX_TOKENS,
           jsonMode: true
         }
       );
@@ -2784,6 +2811,13 @@ export class MemoryService {
           ? result.ranked
           : null;
       if (!selectedRaw) {
+        pipelineLogger.warn("fallback.used", {
+          operation: `${RETRIEVAL_FILTER_PROMPT.id}.v${RETRIEVAL_FILTER_PROMPT.version}`,
+          pipeline: "retrieval.filter",
+          fallback: "candidate_cap",
+          reason: "invalid_selection_shape",
+          candidateCount: hits.length
+        });
         return {
           hits: llmFilterFallbackCap(hits, config.llmFilterFallbackMaxKeep),
           status: ["llm_filter:llm_failed_fallback_cap"]
@@ -2802,6 +2836,14 @@ export class MemoryService {
             status: ["llm_filter:llm_dropped_all"]
           };
         }
+        pipelineLogger.warn("fallback.used", {
+          operation: `${RETRIEVAL_FILTER_PROMPT.id}.v${RETRIEVAL_FILTER_PROMPT.version}`,
+          pipeline: "retrieval.filter",
+          fallback: "candidate_cap",
+          reason: "invalid_selection_indices",
+          candidateCount: hits.length,
+          selectedCount: selectedRaw.length
+        });
         return {
           hits: llmFilterFallbackCap(hits, config.llmFilterFallbackMaxKeep),
           status: ["llm_filter:llm_failed_fallback_cap"]
@@ -2812,7 +2854,14 @@ export class MemoryService {
         hits: kept,
         status: kept.length === hits.length ? ["llm_filter:llm_kept_all"] : ["llm_filter:llm_filtered"]
       };
-    } catch {
+    } catch (error) {
+      pipelineLogger.warn("fallback.used", {
+        operation: `${RETRIEVAL_FILTER_PROMPT.id}.v${RETRIEVAL_FILTER_PROMPT.version}`,
+        pipeline: "retrieval.filter",
+        fallback: "candidate_cap",
+        candidateCount: hits.length,
+        ...memoryErrorFields(error)
+      });
       return {
         hits: llmFilterFallbackCap(hits, config.llmFilterFallbackMaxKeep),
         status: ["llm_filter:llm_failed_fallback_cap"]
@@ -2848,8 +2897,21 @@ export class MemoryService {
         }
       );
       const queries = normalizeQueryRewriteQueries(result.queries);
-      return queries.length > 0 ? queries : [raw];
-    } catch {
+      if (queries.length > 0) return queries;
+      pipelineLogger.warn("fallback.used", {
+        operation: "retrieval.query_rewrite.v1",
+        pipeline: "retrieval.query_rewrite",
+        fallback: "original_query",
+        reason: "empty_rewrite"
+      });
+      return [raw];
+    } catch (error) {
+      pipelineLogger.warn("fallback.used", {
+        operation: "retrieval.query_rewrite.v1",
+        pipeline: "retrieval.query_rewrite",
+        fallback: "original_query",
+        ...memoryErrorFields(error)
+      });
       return [raw];
     }
   }
@@ -2884,9 +2946,23 @@ export class MemoryService {
       );
       const queryVecText = typeof result.queryVecText === "string" ? result.queryVecText.trim() : "";
       const keywords = normalizeRetrievalExtractKeywords(result.keywords);
-      if (!queryVecText && keywords.length === 0) return null;
+      if (!queryVecText && keywords.length === 0) {
+        pipelineLogger.warn("fallback.used", {
+          operation: `${RETRIEVAL_QUERY_EXTRACT_PROMPT.id}.v${RETRIEVAL_QUERY_EXTRACT_PROMPT.version}`,
+          pipeline: "retrieval.query_extract",
+          fallback: "raw_query",
+          reason: "empty_extract"
+        });
+        return null;
+      }
       return { queryVecText, keywords };
-    } catch {
+    } catch (error) {
+      pipelineLogger.warn("fallback.used", {
+        operation: `${RETRIEVAL_QUERY_EXTRACT_PROMPT.id}.v${RETRIEVAL_QUERY_EXTRACT_PROMPT.version}`,
+        pipeline: "retrieval.query_extract",
+        fallback: "raw_query",
+        ...memoryErrorFields(error)
+      });
       return null;
     }
   }
@@ -5011,6 +5087,17 @@ export class MemoryService {
     const failed = results.reduce((sum, result) => sum + result.failed, 0);
     const refs = results.map((result) => result.ref);
 
+    if (jobs.length > 0 || embeddingRetries.leased > 0) {
+      workerLogger.info("drain.completed", {
+        leased: jobs.length,
+        succeeded,
+        failed,
+        embeddingRetriesLeased: embeddingRetries.leased,
+        embeddingRetriesSucceeded: embeddingRetries.succeeded,
+        embeddingRetriesFailed: embeddingRetries.failed
+      });
+    }
+
     const changeSeq = this.repos.runtime.latestChangeSeq();
     return {
       leased: jobs.length,
@@ -5027,6 +5114,7 @@ export class MemoryService {
   private async runLeasedWorkerJob(job: EvolutionJobRecord): Promise<WorkerJobRunResult> {
     this.appendJobChange(job, "leased");
     this.markProcessingJobLeased(job);
+    workerLogger.info("job.started", workerJobLogFields(job));
     try {
       await this.processJob(job);
       return this.completeLeasedWorkerJob(job);
@@ -5042,6 +5130,7 @@ export class MemoryService {
     for (const job of jobs) {
       this.appendJobChange(job, "leased");
       this.markProcessingJobLeased(job);
+      workerLogger.info("job.started", workerJobLogFields(job));
       try {
         const item = this.prepareEmbeddingJob(job);
         if (item) {
@@ -5098,6 +5187,7 @@ export class MemoryService {
       updatedAt: nowIso()
     };
     this.appendJobChange(completed, "succeeded", job);
+    workerLogger.info("job.succeeded", workerJobLogFields(completed));
     return {
       succeeded: 1,
       failed: 0,
@@ -5125,6 +5215,11 @@ export class MemoryService {
     const failOp = failedJob.status === "dead_letter" ? "dead_letter" : "failed";
     this.appendJobChange(failedJob, failOp, job);
     this.updateProcessingAfterJobFailure(failedJob, errorMessage);
+    workerLogger.error("job.failed", {
+      ...workerJobLogFields(failedJob),
+      terminal: failedJob.status === "dead_letter",
+      ...memoryErrorFields(error)
+    });
     return {
       succeeded: 0,
       failed: 1,
@@ -5297,6 +5392,7 @@ export class MemoryService {
     });
     if (completed) {
       this.appendEmbeddingRetryChange(completed, "succeeded", retry);
+      workerLogger.info("embedding_retry.succeeded", embeddingRetryLogFields(completed));
       return { succeeded: 1, failed: 0, item: embeddingRetryToRunItem(completed) };
     }
     return { succeeded: 0, failed: 0, item: null };
@@ -5326,6 +5422,16 @@ export class MemoryService {
       });
     if (updated) {
       this.appendEmbeddingRetryChange(updated, terminal ? "failed" : "retry", retry);
+      const fields = {
+        ...embeddingRetryLogFields(updated),
+        terminal,
+        ...memoryErrorFields(error)
+      };
+      if (terminal) {
+        workerLogger.error("embedding_retry.failed", fields);
+      } else {
+        workerLogger.warn("embedding_retry.retry_scheduled", fields);
+      }
       return { succeeded: 0, failed: 1, item: embeddingRetryToRunItem(updated) };
     }
     return { succeeded: 0, failed: 1, item: null };
@@ -5480,6 +5586,12 @@ export class MemoryService {
         .filter((trace): trace is NonNullable<ReturnType<typeof traceMetaFromMemory>> => Boolean(trace));
       const distinctEpisodeCount = uniq(bucket.map((trace) => trace.episodeId).filter((id): id is string => Boolean(id))).length;
       if (distinctEpisodeCount < this.config.algorithm.l2Induction.minEpisodesForInduction) {
+        logEvolutionDecision(job, "l2_induction", "gate_not_met", {
+          sourceMemoryId: source.id,
+          evidenceCount: bucket.length,
+          distinctEpisodeCount,
+          requiredEpisodes: this.config.algorithm.l2Induction.minEpisodesForInduction
+        });
         continue;
       }
       const bucketTraceIds = bucket.map((trace) => trace.id);
@@ -5532,6 +5644,11 @@ export class MemoryService {
       });
       const enhancement = await this.enhancePolicyDraft(signature, promptEvidenceTraces, fallbackDraft);
       if (!enhancement.ok) {
+        logEvolutionDecision(job, "l2_induction", enhancement.reason, {
+          sourceMemoryId: source.id,
+          evidenceCount: bucket.length,
+          distinctEpisodeCount
+        });
         this.repos.runtime.appendChange({
           memoryId: source.id,
           namespaceId: sourceNamespaceId,
@@ -5717,10 +5834,23 @@ export class MemoryService {
       minPolicySupport: this.config.algorithm.l3Abstraction.minPolicySupport,
       clusterMinSimilarity: this.config.algorithm.l3Abstraction.clusterMinSimilarity
     });
+    if (fallbackDrafts.length === 0) {
+      logEvolutionDecision(job, "l3_abstraction", "no_eligible_cluster", {
+        policyCount: policies.length,
+        filteredPolicyCount: filteredPolicies.length,
+        minPolicies: this.config.algorithm.l3Abstraction.minPolicies,
+        minPolicyGain: this.config.algorithm.l3Abstraction.minPolicyGain,
+        minPolicySupport: this.config.algorithm.l3Abstraction.minPolicySupport,
+        clusterMinSimilarity: this.config.algorithm.l3Abstraction.clusterMinSimilarity
+      });
+    }
     const policyById = new Map(policies.map((policy) => [policy.id, policy]));
     const readyDrafts: WorldModelDraft[] = [];
     for (const draft of fallbackDrafts) {
       if (this.l3DomainInCooldown(userId, draft.domainKey, at)) {
+        logEvolutionDecision(job, "l3_abstraction", "cooldown", {
+          policyCount: draft.policyIds.length
+        });
         this.repos.runtime.appendChange({
           memoryId: source?.id ?? draft.key,
           namespaceId: source ? namespaceIdFromMemory(source) : undefined,
@@ -5748,6 +5878,10 @@ export class MemoryService {
           .map((policyId) => policyById.get(policyId))
           .find((policy): policy is PolicyMeta => Boolean(policy));
         const anchorMemory = source ?? anchorPolicy?.memory;
+        logEvolutionDecision(job, "l3_abstraction", enhancement.reason, {
+          sourceMemoryId: anchorMemory?.id,
+          policyCount: enhancement.fallback.policyIds.length
+        });
         this.repos.runtime.appendChange({
           memoryId: anchorMemory?.id ?? enhancement.fallback.key,
           namespaceId: anchorMemory ? namespaceIdFromMemory(anchorMemory) : undefined,
@@ -5959,6 +6093,9 @@ export class MemoryService {
       const evidenceTraces = this.gatherSkillEvidence(policy, userId);
       const counterExamples = this.gatherSkillCounterExamples(policy, userId);
       if (evidenceTraces.length === 0) {
+        logEvolutionDecision(job, "skill_crystallization", "no_evidence", {
+          policyId: policy.id
+        });
         this.repos.runtime.appendChange({
           memoryId: policyMemory.id,
           namespaceId: namespaceIdFromMemory(policyMemory),
@@ -5975,6 +6112,10 @@ export class MemoryService {
       }
       const existingSkill = this.findExistingSkillForPolicy(policy, userId);
       if (this.isSkillCrystallizationInCooldown(policy, at)) {
+        logEvolutionDecision(job, "skill_crystallization", "cooldown", {
+          policyId: policy.id,
+          existingSkillId: existingSkill?.id
+        });
         this.repos.runtime.appendChange({
           memoryId: policyMemory.id,
           namespaceId: namespaceIdFromMemory(policyMemory),
@@ -6005,6 +6146,11 @@ export class MemoryService {
         ? await this.enhanceSkillDraft(policy, fallbackDraft, evidenceTraces, counterExamples, existingSkill)
         : { ok: false, reason: "not-eligible" } as const;
       if (!enhancement.ok) {
+        logEvolutionDecision(job, "skill_crystallization", enhancement.reason, {
+          policyId: policy.id,
+          evidenceCount: evidenceTraces.length,
+          counterExampleCount: counterExamples.length
+        });
         this.repos.runtime.appendChange({
           memoryId: policyMemory.id,
           namespaceId: namespaceIdFromMemory(policyMemory),
@@ -6022,6 +6168,10 @@ export class MemoryService {
       const draft = enhancement.draft;
       const verdict = verifySkillDraft({ draft, evidenceTraces });
       if (!verdict.ok) {
+        logEvolutionDecision(job, "skill_crystallization", "verification_failed", {
+          policyId: policy.id,
+          verdict
+        });
         this.repos.runtime.appendChange({
           memoryId: policyMemory.id,
           namespaceId: namespaceIdFromMemory(policyMemory),
@@ -6322,7 +6472,13 @@ export class MemoryService {
   private async queryVector(query: string): Promise<number[] | undefined> {
     try {
       return await withTimeout(this.embedder.embedOne(query, "query"), QUERY_VECTOR_TIMEOUT_MS);
-    } catch {
+    } catch (error) {
+      pipelineLogger.warn("fallback.used", {
+        operation: "retrieval.query_embedding",
+        pipeline: "retrieval.query_vector",
+        fallback: "text_only_retrieval",
+        ...memoryErrorFields(error)
+      });
       return undefined;
     }
   }
@@ -6604,7 +6760,7 @@ export class MemoryService {
     if (episodeId && (!episode || episode.status !== "closed")) {
       return;
     }
-    if (!this.llm.isConfigured()) {
+    if (!this.skillLlm.isConfigured()) {
       if (this.applyUnconfiguredEpisodeDefault(job)) {
         if (episode) {
           this.enqueueEpisodeRewardAfterReflection(episode, nowIso(), "implicit_fallback");
@@ -6699,7 +6855,7 @@ export class MemoryService {
       return;
     }
 
-    const result = await this.llm.completeJson<{
+    const result = await this.skillLlm.completeJson<{
       summary?: unknown;
       reflection?: unknown;
       alpha?: unknown;
@@ -6729,6 +6885,7 @@ export class MemoryService {
       }
     ], {
       operation: `capture.alpha.${REFLECTION_SCORE_PROMPT.id}.v${REFLECTION_SCORE_PROMPT.version}`,
+      thinkingMode: "disabled",
       temperature: 0,
       maxTokens: 700
     });
@@ -6815,7 +6972,11 @@ export class MemoryService {
       return true;
     }
 
-    await this.applyBatchReflectionScores(job, memories, batchRelatedDefaultScores(memories.length));
+    const payload = this.batchReflectionPayload(episode, memories);
+    await this.applyBatchReflectionScores(job, memories, batchRelatedDefaultScores(
+      memories.length,
+      Array.isArray(payload.steps) ? payload.steps : undefined
+    ));
     return true;
   }
 
@@ -6838,7 +6999,17 @@ export class MemoryService {
           results.set(win.start, scores);
           ok = true;
           break;
-        } catch {
+        } catch (error) {
+          pipelineLogger.warn("batch_window.failed", {
+            operation: BATCH_REFLECTION_OPERATION,
+            pipeline: "reflection.batch_score",
+            episodeId: episode.id,
+            windowStart: win.start,
+            windowEnd: win.end,
+            attempt: attempt + 1,
+            maxAttempts: maxRetries + 1,
+            ...memoryErrorFields(error)
+          });
           if (attempt === maxRetries) {
             failedWindows += 1;
           }
@@ -6854,13 +7025,37 @@ export class MemoryService {
     memories: MemoryRow[]
   ): Promise<BatchReflectionScore[]> {
     const payload = this.batchReflectionPayload(episode, memories);
+    const steps = Array.isArray(payload.steps) ? payload.steps : [];
+    if (steps.length !== memories.length) {
+      throw new Error(`batch reflection payload length mismatch: expected ${memories.length}`);
+    }
+    const directScores = new Map<number, BatchReflectionScore>();
+    const modelStepIndices: number[] = [];
+    steps.forEach((value, idx) => {
+      const step = isRecord(value) ? value : undefined;
+      if (isSocialOnlyBatchReflectionStep(step)) {
+        directScores.set(idx, socialOnlyBatchReflectionScore(idx));
+      } else {
+        modelStepIndices.push(idx);
+      }
+    });
+    if (modelStepIndices.length === 0) {
+      return Array.from({ length: steps.length }, (_, idx) => directScores.get(idx)!);
+    }
+    const modelPayload = {
+      ...payload,
+      steps: modelStepIndices.map((sourceIdx, idx) => ({
+        ...(isRecord(steps[sourceIdx]) ? steps[sourceIdx] : {}),
+        idx
+      }))
+    };
     const lang = detectDominantLanguage(memories.flatMap((memory) => {
       const trace = traceMetaFromMemory(memory);
       return trace
         ? [trace.userText, trace.agentText, traceAgentThinking(memory), trace.reflection]
         : [];
     }));
-    const result = await this.llm.completeJson<{
+    const result = await this.skillLlm.completeJson<{
       scores?: unknown;
     }>([
       {
@@ -6873,18 +7068,27 @@ export class MemoryService {
       },
       {
         role: "user",
-        content: stableStringify(payload)
+        content: stableStringify(modelPayload)
       }
     ], {
       operation: BATCH_REFLECTION_OPERATION,
+      thinkingMode: "disabled",
       temperature: 0,
-      maxTokens: Math.max(1200, memories.length * 220)
+      maxTokens: Math.max(1200, modelStepIndices.length * 220)
     });
-    return parseBatchReflectionScores(
-      result.scores,
-      memories.length,
-      Array.isArray(payload.steps) ? payload.steps : undefined
-    );
+    const modelScores = parseBatchReflectionScores(result.scores, modelStepIndices.length);
+    for (const score of modelScores) {
+      const sourceIdx = modelStepIndices[score.idx];
+      if (sourceIdx === undefined) {
+        throw new Error(`batch reflection model score idx out of range: ${score.idx}`);
+      }
+      directScores.set(sourceIdx, { ...score, idx: sourceIdx });
+    }
+    return Array.from({ length: steps.length }, (_, idx) => {
+      const score = directScores.get(idx);
+      if (!score) throw new Error(`batch reflection score missing idx: ${idx}`);
+      return score;
+    });
   }
 
   private async applyBatchReflectionScores(
@@ -6999,8 +7203,8 @@ export class MemoryService {
     const rawTurns = this.repos.runtime.listRawTurnsByEpisode(episode.id, 100);
     return {
       host_context: {
-        reflectionProvider: this.llm.config.provider,
-        reflectionModel: this.llm.config.model,
+        reflectionProvider: this.skillLlm.config.provider,
+        reflectionModel: this.skillLlm.config.model,
         sessionId: episode.sessionId
       },
       task_context: reflectionContextIncludesTask(this.config.algorithm.capture.reflectionContextMode)
@@ -7043,7 +7247,7 @@ export class MemoryService {
       return null;
     }
     try {
-      const text = await this.llm.complete([
+      const text = await this.skillLlm.complete([
         {
           role: "system",
           content: TRACE_REFLECTION_SYNTH_SYSTEM_PROMPT
@@ -7061,12 +7265,19 @@ export class MemoryService {
         }
       ], {
         operation: "capture.reflection.synth",
+        thinkingMode: "disabled",
         temperature: 0.1,
         maxTokens: 500
       });
       const cleaned = sanitizeReflectionText(text);
       return cleaned && cleaned !== "NO_REFLECTION" ? clip(cleaned, 1500) : null;
-    } catch {
+    } catch (error) {
+      pipelineLogger.warn("fallback.used", {
+        operation: "capture.reflection.synth",
+        pipeline: "reflection.synthesis",
+        fallback: "no_synthetic_reflection",
+        ...memoryErrorFields(error)
+      });
       return null;
     }
   }
@@ -7131,27 +7342,68 @@ export class MemoryService {
     toolCalls: ToolCallPayload[];
     reflectionText: string;
   }, options: { strict?: boolean } = {}): Promise<string> {
-    try {
-      const result = await this.llm.completeJson<{
+    const messages = [
+      {
+        role: "system" as const,
+        content: CAPTURE_SUMMARY_SYSTEM_PROMPT
+      },
+      {
+        role: "user" as const,
+        content: traceSummaryPayload(input)
+      }
+    ];
+    const summarizeWith = async (
+      llm: LlmClient,
+      thinkingMode?: "disabled"
+    ): Promise<string> => {
+      const result = await llm.completeJson<{
         summary?: unknown;
-      }>([
-        {
-          role: "system",
-          content: CAPTURE_SUMMARY_SYSTEM_PROMPT
-        },
-        {
-          role: "user",
-          content: traceSummaryPayload(input)
-        }
-      ], {
+      }>(messages, {
         operation: "capture.summarize",
+        thinkingMode,
         temperature: 0,
-        maxTokens: 220
+        maxTokens: MEMORY_SUMMARY_MAX_TOKENS
       });
       const summary = sanitizeSummaryText(stringOr(result.summary, ""));
       return summary || input.trace.summary;
-    } catch (error) {
-      if (options.strict) throw error;
+    };
+
+    try {
+      return await summarizeWith(this.llm);
+    } catch (primaryError) {
+      const logContext = {
+        operation: "capture.summarize",
+        pipeline: "trace.summary",
+        sourceMemoryId: input.trace.id,
+        episodeId: input.trace.episodeId,
+        primaryModel: this.llm.config.model,
+        fallbackModel: this.skillLlm.config.model
+      };
+      if (this.llm.isConfigured() && this.skillLlm.isConfigured() && this.skillLlm !== this.llm) {
+        pipelineLogger.warn("summary.fallback_started", {
+          ...logContext,
+          ...memoryErrorFields(primaryError)
+        });
+        try {
+          const summary = await summarizeWith(this.skillLlm, "disabled");
+          pipelineLogger.info("summary.fallback_succeeded", logContext);
+          return summary;
+        } catch (fallbackError) {
+          pipelineLogger.error("summary.fallback_failed", {
+            ...logContext,
+            primaryErrorMessage: primaryError instanceof Error ? primaryError.message : String(primaryError),
+            fallbackErrorMessage: fallbackError instanceof Error ? fallbackError.message : String(fallbackError)
+          });
+          if (options.strict) throw fallbackError;
+        }
+      } else if (options.strict) {
+        throw primaryError;
+      }
+      pipelineLogger.warn("fallback.used", {
+        ...logContext,
+        fallback: "existing_summary",
+        ...memoryErrorFields(primaryError)
+      });
       return input.trace.summary;
     }
   }
@@ -7609,7 +7861,14 @@ export class MemoryService {
         maxTokens: 800
       });
       return normalizeDecisionRepairLlmDraft(result);
-    } catch {
+    } catch (error) {
+      pipelineLogger.warn("fallback.used", {
+        operation: DECISION_REPAIR_OPERATION,
+        pipeline: "decision_repair.feedback",
+        fallback: "no_llm_draft",
+        feedbackId: feedback.id,
+        ...memoryErrorFields(error)
+      });
       return undefined;
     }
   }
@@ -8016,7 +8275,16 @@ export class MemoryService {
         confidence: numberOr(result.confidence, fallback.confidence),
         method: "llm"
       });
-    } catch {
+    } catch (error) {
+      pipelineLogger.warn("fallback.used", {
+        operation: polarity === "negative"
+          ? `${FAILURE_EXPERIENCE_SINK_PROMPT.id}.v${FAILURE_EXPERIENCE_SINK_PROMPT.version}`
+          : "feedback.refine.v1",
+        pipeline: "feedback.refinement",
+        fallback: "rule_based_refinement",
+        feedbackId: input.feedback.id,
+        ...memoryErrorFields(error)
+      });
       return applyFeedbackRefinement(
         fallback,
         refineFeedbackExperienceByRules({
@@ -9023,8 +9291,7 @@ export class MemoryService {
         ], {
           operation: `${L3_ABSTRACTION_PROMPT.id}.v${L3_ABSTRACTION_PROMPT.version}`,
           thinkingMode: "enabled",
-          temperature: 0.15,
-          maxTokens: 1200
+          temperature: 0.15
         });
         const invalidReason = l3AbstractionInvalidReason(result);
         if (invalidReason) {
@@ -9195,8 +9462,7 @@ export class MemoryService {
       ], {
         operation: rebuild ? `${prompt.id}.v${prompt.version}` : prompt.id,
         thinkingMode: "enabled",
-        temperature: 0.2,
-        maxTokens: 1400
+        temperature: 0.2
       });
       if (detectSkillModelRefusal(result)) {
         return { ok: false, reason: "llm-refusal" };
@@ -9246,7 +9512,7 @@ export class MemoryService {
     fallback: HumanScoreResult;
     payload: Record<string, unknown>;
   }): Promise<HumanScoreResult> {
-    if (!this.config.algorithm.reward.llmScoring || !this.llm.isConfigured()) {
+    if (!this.config.algorithm.reward.llmScoring || !this.skillLlm.isConfigured()) {
       return input.fallback;
     }
     try {
@@ -9260,8 +9526,7 @@ export class MemoryService {
         hostSessionId: input.source.sessionId ?? rawTurn?.sessionId,
         hostConversationId: input.source.conversationId ?? rawTurn?.conversationId
       };
-      const result = await this.llm.completeJson<{
-        rHuman?: unknown;
+      const result = await this.skillLlm.completeJson<{
         goal_achievement?: unknown;
         process_quality?: unknown;
         user_satisfaction?: unknown;
@@ -9290,8 +9555,8 @@ export class MemoryService {
               episodeTraces: input.episodeTraces,
               maxChars: this.config.algorithm.reward.summaryMaxChars,
               evaluator: {
-                scorerProvider: this.llm.config.provider,
-                scorerModel: this.llm.config.model
+                scorerProvider: this.skillLlm.config.provider,
+                scorerModel: this.skillLlm.config.model
               }
             }),
             "",
@@ -9301,18 +9566,29 @@ export class MemoryService {
         }
       ], {
         operation: `reward.${REWARD_R_HUMAN_PROMPT.id}.v${REWARD_R_HUMAN_PROMPT.version}`,
+        thinkingMode: "disabled",
         temperature: 0,
         maxTokens: 700
       });
-      const goalAchievement = clampNumber(numberOr(result.goal_achievement ?? result.goalAchievement, input.fallback.axes.goalAchievement), -1, 1);
-      const processQuality = clampNumber(numberOr(result.process_quality ?? result.processQuality, input.fallback.axes.processQuality), -1, 1);
-      const userSatisfaction = clampNumber(numberOr(result.user_satisfaction ?? result.userSatisfaction, input.fallback.axes.userSatisfaction), -1, 1);
+      const rawGoalAchievement = result.goal_achievement ?? result.goalAchievement;
+      const rawProcessQuality = result.process_quality ?? result.processQuality;
+      const rawUserSatisfaction = result.user_satisfaction ?? result.userSatisfaction;
+      if (
+        typeof rawGoalAchievement !== "number" || !Number.isFinite(rawGoalAchievement) ||
+        typeof rawProcessQuality !== "number" || !Number.isFinite(rawProcessQuality) ||
+        typeof rawUserSatisfaction !== "number" || !Number.isFinite(rawUserSatisfaction)
+      ) {
+        throw new Error("reward response missing valid scoring axes");
+      }
+      const goalAchievement = clampNumber(rawGoalAchievement, -1, 1);
+      const processQuality = clampNumber(rawProcessQuality, -1, 1);
+      const userSatisfaction = clampNumber(rawUserSatisfaction, -1, 1);
       return {
-        rHuman: clampNumber(numberOr(result.rHuman, combineRewardAxes({
+        rHuman: combineRewardAxes({
           goalAchievement,
           processQuality,
           userSatisfaction
-        })), -1, 1),
+        }),
         axes: {
           goalAchievement,
           processQuality,
@@ -9321,7 +9597,14 @@ export class MemoryService {
         reason: stringOr(result.reason, input.fallback.reason),
         source: "llm"
       };
-    } catch {
+    } catch (error) {
+      pipelineLogger.warn("fallback.used", {
+        operation: `reward.${REWARD_R_HUMAN_PROMPT.id}.v${REWARD_R_HUMAN_PROMPT.version}`,
+        pipeline: "reward.scoring",
+        fallback: "heuristic_score",
+        sourceMemoryId: input.source.id,
+        ...memoryErrorFields(error)
+      });
       return input.fallback;
     }
   }
@@ -9742,7 +10025,14 @@ export class MemoryService {
         maxTokens: 800
       });
       return normalizeDecisionRepairLlmDraft(result);
-    } catch {
+    } catch (error) {
+      pipelineLogger.warn("fallback.used", {
+        operation: DECISION_REPAIR_OPERATION,
+        pipeline: "decision_repair.value_distribution",
+        fallback: "no_llm_draft",
+        sourceMemoryId: trace.id,
+        ...memoryErrorFields(error)
+      });
       return undefined;
     }
   }
@@ -12016,6 +12306,98 @@ function sanitizeProcessingError(error: unknown): string {
   return clip(message || "Unknown processing error", 1000);
 }
 
+function workerJobLogFields(job: EvolutionJobRecord): Record<string, unknown> {
+  return {
+    jobId: job.id,
+    jobType: job.jobType,
+    status: job.status,
+    attempt: job.attempts,
+    maxAttempts: job.maxAttempts,
+    sessionId: job.sessionId,
+    episodeId: job.episodeId,
+    targetMemoryId: job.targetMemoryId
+  };
+}
+
+function memoryConfigLogFields(config: MemmyConfig): Record<string, unknown> {
+  const evolution = resolveEvolutionConfig(config);
+  return {
+    activeProfile: config.activeProfile,
+    memoryAddEnabled: config.algorithm.enableMemoryAdd,
+    memorySearchEnabled: config.algorithm.enableMemorySearch,
+    summaryModel: {
+      provider: config.summary.provider,
+      vendor: config.summary.vendor,
+      model: config.summary.model,
+      maxTokens: config.summary.maxTokens,
+      timeoutMs: config.summary.timeoutMs,
+      maxRetries: config.summary.maxRetries,
+      malformedRetries: config.summary.malformedRetries
+    },
+    evolutionModel: {
+      provider: evolution.provider,
+      vendor: evolution.vendor,
+      model: evolution.model,
+      maxTokens: evolution.maxTokens,
+      timeoutMs: evolution.timeoutMs,
+      maxRetries: evolution.maxRetries,
+      malformedRetries: evolution.malformedRetries
+    },
+    embeddingModel: {
+      provider: config.embedding.provider,
+      model: config.embedding.model,
+      timeoutMs: config.embedding.timeoutMs,
+      maxRetries: config.embedding.maxRetries
+    },
+    evolutionGates: {
+      l2UseLlm: config.algorithm.l2Induction.useLlm,
+      l2MinEpisodes: config.algorithm.l2Induction.minEpisodesForInduction,
+      l2MinGain: config.algorithm.l2Induction.minGain,
+      l3UseLlm: config.algorithm.l3Abstraction.useLlm,
+      l3MinPolicies: config.algorithm.l3Abstraction.minPolicies,
+      l3MinPolicyGain: config.algorithm.l3Abstraction.minPolicyGain,
+      l3MinPolicySupport: config.algorithm.l3Abstraction.minPolicySupport,
+      l3ClusterMinSimilarity: config.algorithm.l3Abstraction.clusterMinSimilarity,
+      skillUseLlm: config.algorithm.skill.useLlm,
+      skillMinSupport: config.algorithm.skill.minSupport,
+      skillMinGain: config.algorithm.skill.minGain
+    }
+  };
+}
+
+function embeddingRetryLogFields(retry: EmbeddingRetryRecord): Record<string, unknown> {
+  return {
+    retryId: retry.id,
+    targetKind: retry.targetKind,
+    targetMemoryId: retry.targetId,
+    vectorField: retry.vectorField,
+    role: retry.embedRole,
+    status: retry.status,
+    attempt: retry.attempts,
+    maxAttempts: retry.maxAttempts,
+    nextAttemptAt: retry.nextAttemptAt
+  };
+}
+
+function logEvolutionDecision(
+  job: EvolutionJobRecord,
+  stage: "l2_induction" | "l3_abstraction" | "skill_crystallization",
+  reason: string,
+  fields: Record<string, unknown> = {}
+): void {
+  const context = {
+    ...workerJobLogFields(job),
+    stage,
+    reason,
+    ...fields
+  };
+  if (/llm-failed|llm-refusal|invalid|verification_failed|malformed|truncat/i.test(reason)) {
+    evolutionLogger.warn("generation.skipped", context);
+  } else {
+    evolutionLogger.info("gate.skipped", context);
+  }
+}
+
 function classifyProcessingError(message: string): {
   code: string;
   retryAction: "retry" | "open_settings" | "none";
@@ -13719,9 +14101,9 @@ function renderInjectedTraceBody(hit: RecallHit, trace: TraceMeta): string {
     `id: ${hit.id}`,
     `timestamp: ${formatInjectedTimestamp(trace.ts, hit.updatedAt)}`,
     "",
-    ...labeledInjectedBlock("User", trace.userText || "(empty)"),
+    ...labeledInjectedBlock("Historical user statement", trace.userText || "(empty)"),
     "",
-    ...labeledInjectedBlock("Assistant", trace.agentText || "(empty)")
+    ...labeledInjectedBlock("Historical assistant response", trace.agentText || "(empty)")
   ].join("\n");
 }
 
@@ -16152,8 +16534,7 @@ interface BatchReflectionPayloadStep {
 
 function parseBatchReflectionScores(
   value: unknown,
-  expected: number,
-  steps?: readonly BatchReflectionPayloadStep[]
+  expected: number
 ): BatchReflectionScore[] {
   if (!Array.isArray(value) || value.length !== expected) {
     throw new Error(`batch reflection scores length mismatch: expected ${expected}`);
@@ -16167,25 +16548,13 @@ function parseBatchReflectionScores(
     if (!Number.isInteger(idx) || idx < 0 || idx >= expected) {
       throw new Error(`batch reflection score idx out of range: ${String(item.idx)}`);
     }
-    const step = steps?.[idx];
-    const durableMemory = isDurableMemoryBatchReflectionStep(step);
-    const socialOnly = !durableMemory && isSocialOnlyBatchReflectionStep(step);
-    const modelRelevance = parseBatchReflectionRelevance(item.relevance);
-    const relevance = durableMemory && modelRelevance === "IRRELEVANT"
-      ? "RELATED"
-      : socialOnly
-        ? "IRRELEVANT"
-        : modelRelevance;
+    const relevance = parseBatchReflectionRelevance(item.relevance);
     byIdx.set(idx, {
       idx,
       reflectionText: relevance,
       alpha: alphaForBatchReflectionRelevance(relevance),
       usable: relevance !== "IRRELEVANT",
-      reason: durableMemory && modelRelevance === "IRRELEVANT"
-        ? "DURABLE_MEMORY"
-        : socialOnly
-          ? "SOCIAL_ONLY"
-          : typeof item.reason === "string" ? item.reason : undefined
+      reason: typeof item.reason === "string" ? item.reason : undefined
     });
   });
   if (byIdx.size !== expected) {
@@ -16233,17 +16602,36 @@ function isSocialOnlyBatchReflectionStep(step: BatchReflectionPayloadStep | unde
   if (!step) return false;
   const toolCalls = Array.isArray(step.tool_calls) ? step.tool_calls : [];
   if (toolCalls.length > 0) return false;
-  const combined = [
-    typeof step.state === "string" ? step.state : "",
-    typeof step.action === "string" ? step.action : "",
-    typeof step.thinking === "string" ? step.thinking : ""
-  ].join("\n").toLowerCase();
-  if (!combined.trim()) return false;
-  const socialPattern =
-    /(谢谢|感谢|辛苦|棒|很好|很对|厉害|夸奖|客气|不用谢|再见|拜拜|你好|您好|早上好|晚上好|thank(s| you)?|appreciate|great job|well done|awesome|nice|you're welcome|no problem|bye|goodbye|hello|hi)/i;
+  const state = typeof step.state === "string" ? step.state.trim().toLowerCase() : "";
+  if (!state) return false;
+  if (batchReflectionWordCount(state) > 6) return false;
+  if (isDurableMemoryBatchReflectionStep(step)) return false;
+  const explicitSocialPattern =
+    /(谢谢|感谢|辛苦|客气|不用谢|再见|拜拜|你好|您好|早上好|晚上好)|\b(?:thanks?|thank\s+you|appreciate|great\s+job|well\s+done|awesome|nice|you(?:'|’)re\s+welcome|no\s+problem|bye|goodbye|hello|hi)\b/i;
+  const shortPraisePattern =
+    /^(?:你|您|回答|做得)?[^\n]{0,8}(?:真棒|棒极了|做得好|很好|很对|厉害|太强了)[！!。.]*$/i;
+  const substantiveSignalPattern =
+    /[?？]|(?:请|帮我|推荐|介绍|解释|分析|比较|查询|查找|查一下|告诉我|为什么|怎么|如何|什么|哪(?:个|种|里)?|是否|是不是|能否|需要|想要|问题|关于|区别|原因)|\b(?:please|help|recommend|introduce|explain|analy[sz]e|compare|find|search|tell\s+me|why|how|what|which|where|whether|can\s+you|could\s+you|need|want|question|about)\b/i;
   const taskSignalPattern =
     /(修复|实现|改|更新|测试|报错|错误|命令|脚本|代码|函数|文件|数据库|sql|trace|episode|reward|reflection|alpha|value|fix|implement|update|test|error|command|script|code|function|file|db|database|query|bug|issue|task)/i;
-  return socialPattern.test(combined) && !taskSignalPattern.test(combined);
+  const socialIntent = explicitSocialPattern.test(state) || shortPraisePattern.test(state);
+  return socialIntent && !substantiveSignalPattern.test(state) && !taskSignalPattern.test(state);
+}
+
+function batchReflectionWordCount(text: string): number {
+  return Array.from(new Intl.Segmenter(undefined, { granularity: "word" }).segment(text))
+    .filter((part) => part.isWordLike)
+    .length;
+}
+
+function socialOnlyBatchReflectionScore(idx: number): BatchReflectionScore {
+  return {
+    idx,
+    reflectionText: "IRRELEVANT",
+    alpha: 0,
+    usable: false,
+    reason: "SOCIAL_ONLY"
+  };
 }
 
 function mergeBatchWindowScores(length: number, windowScores: Map<number, BatchReflectionScore[]>): BatchReflectionScore[] {
@@ -16270,14 +16658,22 @@ function mergeBatchWindowScores(length: number, windowScores: Map<number, BatchR
   });
 }
 
-function batchRelatedDefaultScores(length: number): BatchReflectionScore[] {
-  return Array.from({ length }, (_, idx) => ({
-    idx,
-    reflectionText: "RELATED_DEFAULT",
-    alpha: 0.5,
-    usable: true,
-    reason: "FALLBACK_RELATED_DEFAULT"
-  }));
+function batchRelatedDefaultScores(
+  length: number,
+  steps?: readonly unknown[]
+): BatchReflectionScore[] {
+  return Array.from({ length }, (_, idx) => {
+    const step = isRecord(steps?.[idx]) ? steps[idx] : undefined;
+    return isSocialOnlyBatchReflectionStep(step)
+      ? socialOnlyBatchReflectionScore(idx)
+      : {
+        idx,
+        reflectionText: "RELATED_DEFAULT",
+        alpha: 0.5,
+        usable: true,
+        reason: "FALLBACK_RELATED_DEFAULT"
+      };
+  });
 }
 
 function batchReflectionRank(score: BatchReflectionScore): number {

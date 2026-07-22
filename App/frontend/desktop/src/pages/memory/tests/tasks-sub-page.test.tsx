@@ -102,6 +102,26 @@ describe("TasksSubPage", () => {
     expect(html).not.toContain("127.0.0.1");
   });
 
+  it("任务历史聊天渲染 GFM 表格", () => {
+    const baseTask = createTaskFixture();
+    const task = {
+      ...baseTask,
+      chat: baseTask.chat.map((message) => message.role === "assistant"
+        ? {
+            ...message,
+            text: "| | 黄瓤（β-胡萝卜素） | 红瓤（番茄红素） |\n|---|---|---|\n| 抗氧化 | ✅ 强 | ✅✅ 更强 |"
+          }
+        : message)
+    };
+    const html = renderTasks({ status: "ready", data: tasksOutput([task]) }, task);
+
+    expect(html).toContain("memory-markdown__table-scroll");
+    expect(html).toContain('<table class="memory-markdown__table">');
+    expect(html).toContain('<th class="memory-markdown__th">黄瓤（β-胡萝卜素）</th>');
+    expect(html).toContain('<td class="memory-markdown__td">✅✅ 更强</td>');
+    expect(html).not.toContain("|---|---|---|");
+  });
+
   it("统一展示技能沉淀状态文案", () => {
     const tasks: MemoryTask[] = [
       { ...createTaskFixture(), id: "queued", skillStatus: "queued" },

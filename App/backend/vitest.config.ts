@@ -25,11 +25,15 @@ function findRepoEnvFile(startDir: string): string | null {
 }
 
 const envPath = findRepoEnvFile(moduleDir);
-const parsed = envPath ? (loadDotenv({ path: envPath }).parsed ?? {}) : {};
+const parsed = envPath ? (loadDotenv({ path: envPath, processEnv: {} }).parsed ?? {}) : {};
+const testEnv = {
+  ...parsed,
+  MEMMY_CLOUD_SERVICE: "https://cloud.test.invalid"
+};
 
 export default defineConfig({
   test: {
-    env: parsed,
+    env: testEnv,
     coverage: {
       provider: "v8",
       include: ["src/adapters/outbound/agent-adapter/**/*.ts"],

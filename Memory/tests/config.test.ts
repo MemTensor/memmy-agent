@@ -165,6 +165,22 @@ describe("memmy memory config", () => {
     expect(loadMemmyConfig(configPath).config.evolution.enableThinking).toBe(true);
   });
 
+  it("defaults evolution output to 4096 tokens", () => {
+    const root = tempRoot();
+    const configPath = join(root, "config.yaml");
+    writeFileSync(configPath, YAML.stringify({ memmyMemory: {} }));
+
+    expect(loadMemmyConfig(configPath).config.evolution.maxTokens).toBe(4096);
+  });
+
+  it("defaults summary output to 512 tokens", () => {
+    const root = tempRoot();
+    const configPath = join(root, "config.yaml");
+    writeFileSync(configPath, YAML.stringify({ memmyMemory: {} }));
+
+    expect(loadMemmyConfig(configPath).config.summary.maxTokens).toBe(512);
+  });
+
   it("selects active memory profiles and forces account models to openai-compatible runtime providers", () => {
     const root = tempRoot();
     const configPath = join(root, "config.yaml");

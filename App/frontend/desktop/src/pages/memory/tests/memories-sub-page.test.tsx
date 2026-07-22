@@ -546,6 +546,33 @@ describe("MemoriesSubPage", () => {
     expect(html).not.toContain("<a ");
     expect(html).not.toContain("127.0.0.1:19000");
   });
+
+  it("历史 trace 详情渲染 GFM 表格", () => {
+    const tableDetail = {
+      ...memoryDetailFixture,
+      item: {
+        ...memoryDetailFixture.item,
+        metadata: {
+          ...memoryDetailFixture.item.metadata,
+          traceDetail: {
+            ...(memoryDetailFixture.item.metadata.traceDetail as Record<string, unknown>),
+            finalResponse: "| | 黄瓤（β-胡萝卜素） | 红瓤（番茄红素） |\n|---|---|---|\n| 护眼 | ✅✅ 可转化为维A | ❌ 无此功能 |"
+          }
+        }
+      }
+    };
+    const html = renderMemories({
+      status: "ready",
+      data: panelItemsOutput([memoryListItemFixture]),
+      detail: { status: "ready", data: tableDetail }
+    });
+
+    expect(html).toContain("memory-markdown__table-scroll");
+    expect(html).toContain('<table class="memory-markdown__table">');
+    expect(html).toContain('<th class="memory-markdown__th">红瓤（番茄红素）</th>');
+    expect(html).toContain('<td class="memory-markdown__td">❌ 无此功能</td>');
+    expect(html).not.toContain("|---|---|---|");
+  });
 });
 
 /** Renders render memories. */
