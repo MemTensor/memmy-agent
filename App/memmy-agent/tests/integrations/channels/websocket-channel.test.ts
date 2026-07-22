@@ -66,6 +66,7 @@ function tempDataDir(): string {
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
   websocketTurnWallStartTimes.clear();
   if (oldDataDir === undefined) delete process.env.MEMMY_AGENT_DATA_DIR;
   else process.env.MEMMY_AGENT_DATA_DIR = oldDataDir;
@@ -1303,6 +1304,53 @@ describe("WebSocketChannel memmy parity cases", () => {
 
     await expect(channel.sendDelta("chat-1", "hello")).resolves.toBeUndefined();
     expect(channel.subscriptions.has("chat-1")).toBe(false);
+  });
+
+  it("isolates serialization and send failures to the affected connection", async () => {
+    const channel = new WebSocketChannel({}, new MessageBus());
+    const broken = {
+      send: vi.fn(async () => undefined),
+      close: vi.fn(),
+      remoteAddress: ["127.0.0.2"]
+    };
+    const healthy = {
+      send: vi.fn(async () => undefined),
+      close: vi.fn(),
+      remoteAddress: ["127.0.0.3"]
+    };
+    channel.attachConnection(broken, "chat-1");
+    channel.attachConnection(healthy, "chat-1");
+    const cyclic: Record<string, unknown> = { event: "message" };
+    cyclic.self = cyclic;
+
+    await expect(channel.safeSendTo(broken, cyclic)).resolves.toBeUndefined();
+
+    expect(broken.close).toHaveBeenCalledWith(1011, "connection send failed");
+    expect(channel.subscriptions.get("chat-1")).toEqual(new Set([healthy]));
+
+    await channel.send(new OutboundMessage({ channel: "websocket", chatId: "chat-1", content: "still alive" }));
+    expect(healthy.send).toHaveBeenCalledTimes(1);
+    expect(sent(healthy)).toMatchObject({ event: "message", content: "still alive" });
+  });
+
+  it("closes only the failed connection when a connection loop rejects", () => {
+    const channel = new WebSocketChannel({}, new MessageBus());
+    const failed = {
+      send: vi.fn(async () => undefined),
+      close: vi.fn(),
+      remoteAddress: ["127.0.0.4"]
+    };
+    const healthy = connection();
+    channel.attachConnection(failed, "chat-1");
+    channel.attachConnection(healthy, "chat-1");
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    channel.handleConnectionLoopFailure(failed, new TypeError("dispatch failed"));
+
+    expect(failed.close).toHaveBeenCalledWith(1011, "connection loop failed");
+    expect(channel.subscriptions.get("chat-1")).toEqual(new Set([healthy]));
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining("TypeError"));
+    expect(warning.mock.calls[0]?.[0]).not.toContain("dispatch failed");
   });
 
   it("sendDelta emits delta and stream end", async () => {

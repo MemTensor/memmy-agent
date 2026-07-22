@@ -6,6 +6,8 @@ import {
   type LlmClient
 } from "../../../src/index.js";
 import {
+  accountRuntimeConfig,
+  createCapturingEmbedder,
   createMemoryServiceFixture,
   runWorkerRounds
 } from "../../fixtures/memory-service-fixture.js";
@@ -19,7 +21,10 @@ const {
 
 afterEach(cleanup);
 
-function createRelationClassifierLlm(calls: string[]): LlmClient {
+function createRelationClassifierLlm(
+  calls: string[],
+  optionCalls?: Array<{ operation: string; thinkingMode?: string }>
+): LlmClient {
   return {
     config: {
       ...DEFAULT_MEMMY_CONFIG.summary,
@@ -35,12 +40,13 @@ function createRelationClassifierLlm(calls: string[]): LlmClient {
     },
     async completeJson<T extends Record<string, unknown>>(
       _messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
-      options: { operation: string }
+      options: { operation: string; thinkingMode?: string }
     ): Promise<T> {
       if (options.operation === "retrieval.retrieval.query.extract.v1") {
         return { queryVecText: "", keywords: [] } as unknown as T;
       }
       calls.push(options.operation);
+      optionCalls?.push({ operation: options.operation, thinkingMode: options.thinkingMode });
       if (options.operation === "relation.classify.v1") {
         return {
           relation: "new_task",
@@ -430,6 +436,51 @@ describe("MemoryService / session / episode relation", () => {
       relationDecision?: { signals?: string[] };
     };
     expect(meta.relationDecision?.signals).toContain("arbitration_override");
+    db.close();
+  });
+
+  it("keeps the account summary model out of relation classification", async () => {
+    const root = createTestRoot("mindock-memory-account-relation-");
+    const db = new MemoryDb({
+      path: join(root, "memory.sqlite")
+    });
+    const summaryCalls: string[] = [];
+    const evolutionCalls: string[] = [];
+    const evolutionOptions: Array<{ operation: string; thinkingMode?: string }> = [];
+    const service = createTestMemoryService({
+      db,
+      mode: "dev",
+      config: accountRuntimeConfig(),
+      llm: createRelationClassifierLlm(summaryCalls),
+      skillLlm: createRelationClassifierLlm(evolutionCalls, evolutionOptions),
+      embedder: createCapturingEmbedder([])
+    });
+    const session = service.openSession({
+      namespace: {
+        source: "codex",
+        profileId: "jiang",
+        userId: "user-account-relation-model"
+      }
+    });
+    service.completeTurn("turn-account-relation-first", {
+      sessionId: session.sessionId,
+      query: "Configure nginx TLS for the service",
+      answer: "Use port 443 and verify the certificate chain."
+    });
+
+    await service.startTurn({
+      turnId: "turn-account-relation-next",
+      sessionId: session.sessionId,
+      query: "Database certificate rotation details please"
+    });
+
+    expect(summaryCalls).not.toContain("relation.classify.v1");
+    expect(summaryCalls).not.toContain("relation.arbitration.v1");
+    expect(evolutionCalls).toEqual(["relation.classify.v1", "relation.arbitration.v1"]);
+    expect(evolutionOptions).toEqual([
+      { operation: "relation.classify.v1", thinkingMode: "disabled" },
+      { operation: "relation.arbitration.v1", thinkingMode: "disabled" }
+    ]);
     db.close();
   });
 
