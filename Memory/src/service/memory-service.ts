@@ -47,6 +47,21 @@ import {
   projectIdFromMemory,
   sessionScopeForOpenRequest
 } from "./namespace/namespace-scope.js";
+import {
+  buildRepairSuggestionQuery,
+  buildSearchQuery,
+  completeObservedRawTurn,
+  normalizeCompleteTurnArtifacts,
+  normalizeCompleteTurnSourceMemoryIds,
+  normalizeCompleteTurnToolCalls,
+  normalizeCompleteTurnToolResults,
+  normalizeRetrievalExtractKeywords,
+  rawTurnIdForSessionTurn,
+  sanitizeMemoryAddRequest,
+  sanitizeTurnCompleteRequest,
+  sanitizeTurnStartRequest,
+  turnStartContextHints
+} from "./turn/turn-normalization.js";
 import { MemoryServiceError } from "../utils/error.js";
 import { newId, stableHash, stableStringify } from "../utils/id.js";
 import {
@@ -11375,235 +11390,6 @@ function positiveInteger(value: number | undefined): number | undefined {
   if (value === undefined || !Number.isFinite(value)) return undefined;
   const normalized = Math.trunc(value);
   return normalized > 0 ? normalized : undefined;
-}
-
-function buildSearchQuery(request: TurnStartRequest, domain?: string): string {
-  return buildPluginRetrievalQuery({
-    reason: "turn_start",
-    userText: request.query,
-    contextHints: request.contextHints,
-    domain
-  }).text;
-}
-
-function turnStartContextHints(request: TurnStartRequest): Record<string, unknown> {
-  const hints: Record<string, unknown> = {
-    ...(isRecord(request.contextHints) ? request.contextHints : {})
-  };
-  if (!hints.taskKind && isStandaloneMathFinalAnswerTask(request.query)) {
-    hints.taskKind = STANDALONE_MATH_FINAL_ANSWER_TASK_KIND;
-  }
-  return hints;
-}
-
-function normalizeRetrievalExtractKeywords(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  const out: string[] = [];
-  const seen = new Set<string>();
-  for (const item of value) {
-    const keyword = String(item ?? "").trim();
-    if (!keyword) continue;
-    const normalized = keyword.toLowerCase();
-    if (seen.has(normalized)) continue;
-    seen.add(normalized);
-    out.push(keyword);
-    if (out.length >= 5) break;
-  }
-  return out;
-}
-
-function buildRepairSuggestionQuery(request: RepairSuggestionRequest): string {
-  const error = errorMessageFromUnknown(request.error);
-  const pluginRepairQuery =
-    request.toolName
-      ? buildPluginRetrievalQuery({
-          reason: "decision_repair",
-          failingTool: request.toolName,
-          failureCount: 1,
-          lastErrorCode: error
-        }).text
-      : "";
-  return [
-    pluginRepairQuery,
-    request.issue,
-    error,
-    request.context
-  ]
-    .filter(Boolean)
-    .join("\n");
-}
-
-function sanitizeTurnStartRequest<T extends TurnStartRequest & Record<string, unknown>>(request: T): T {
-  return {
-    ...request,
-    query: sanitizeMemmyProtocolText(String(request.query ?? ""))
-  };
-}
-
-function sanitizeTurnCompleteRequest<T extends TurnCompleteRequest & Record<string, unknown>>(request: T): T {
-  const toolCalls = Array.isArray(request.toolCalls) ? request.toolCalls : [];
-  return {
-    ...request,
-    query: sanitizeMemmyProtocolText(String(request.query ?? "")),
-    answer: sanitizeMemmyProtocolText(String(request.answer ?? "")),
-    toolCalls: Array.isArray(request.toolCalls)
-      ? request.toolCalls.map((call) => sanitizeMemmyProtocolValue(call))
-      : request.toolCalls,
-    toolResults: Array.isArray(request.toolResults)
-      ? request.toolResults.map((result, index) => sanitizeCompleteTurnToolResult(result, toolNameFromToolCall(toolCalls[index])))
-      : request.toolResults
-  };
-}
-
-function sanitizeMemoryAddRequest<T extends MemoryAddRequest>(request: T): T {
-  return {
-    ...request,
-    content: sanitizeMemmyProtocolText(request.content ?? ""),
-    title: typeof request.title === "string" ? sanitizeMemmyProtocolText(request.title) : request.title,
-  };
-}
-
-function sanitizeCompleteTurnToolResult(value: unknown, pairedToolName: string | undefined): unknown {
-  const toolName = toolNameFromToolResult(value) ?? pairedToolName;
-  if (isMemmyRecallToolName(toolName)) {
-    const output: Record<string, unknown> = {
-      name: toolName,
-      output: memmyRecallToolPlaceholder(toolName)
-    };
-    if (isRecord(value)) {
-      const toolCallId = stringFromRecord(value, "toolCallId")
-        ?? stringFromRecord(value, "tool_call_id")
-        ?? stringFromRecord(value, "id");
-      if (toolCallId) output.toolCallId = toolCallId;
-    }
-    return output;
-  }
-  return sanitizeMemmyProtocolValue(value);
-}
-
-function toolNameFromToolCall(value: unknown): string | undefined {
-  if (!isRecord(value)) return undefined;
-  const fn = isRecord(value.function) ? value.function : {};
-  return stringFromRecord(value, "name")
-    ?? stringFromRecord(value, "toolName")
-    ?? stringFromRecord(fn, "name");
-}
-
-function toolNameFromToolResult(value: unknown): string | undefined {
-  if (!isRecord(value)) return undefined;
-  return stringFromRecord(value, "name")
-    ?? stringFromRecord(value, "toolName")
-    ?? stringFromRecord(value, "tool_name");
-}
-
-function completeObservedRawTurn(
-  existing: RawTurnRecord,
-  request: TurnCompleteRequest & Record<string, unknown>,
-  completedAt: string
-): RawTurnRecord {
-  const toolCalls = normalizeCompleteTurnToolCalls(request);
-  const toolResults = normalizeCompleteTurnToolResults(request);
-
-  return {
-    ...existing,
-    userText: request.query ?? existing.userText,
-    assistantText: request.answer,
-    reasoningSummary: stringFromMaybeRecord(request, "reasoningSummary") ?? existing.reasoningSummary,
-    toolCalls: toolCalls.length > 0 ? toolCalls : existing.toolCalls,
-    toolResults: toolResults.length > 0 ? toolResults : existing.toolResults,
-    sourceMemoryIds: normalizeCompleteTurnSourceMemoryIds(request, existing.sourceMemoryIds),
-    usage: isRecord(request.usage) ? request.usage : existing.usage,
-    messagePayload: {
-      ...(existing.messagePayload ?? {}),
-      turn_complete: {
-        completed_at: completedAt,
-        source_memory_ids: normalizeCompleteTurnSourceMemoryIds(request, existing.sourceMemoryIds)
-      }
-    },
-    status: request.status ?? "succeeded"
-  };
-}
-
-function normalizeCompleteTurnSourceMemoryIds(
-  request: TurnCompleteRequest & Record<string, unknown>,
-  fallback: string[] = []
-): string[] {
-  return Array.isArray(request.sourceMemoryIds)
-    ? request.sourceMemoryIds.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
-    : fallback;
-}
-
-interface NormalizedCompleteTurnArtifact {
-  kind: string;
-  uri?: string;
-  payload: Record<string, unknown>;
-}
-
-function normalizeCompleteTurnArtifacts(request: TurnCompleteRequest): NormalizedCompleteTurnArtifact[] {
-  if (!Array.isArray(request.artifacts)) return [];
-  return request.artifacts
-    .map((artifact) => {
-      if (!isRecord(artifact)) return null;
-      const kind = stringFromRecord(artifact, "kind") ?? "artifact";
-      const uri = stringFromRecord(artifact, "uri");
-      const normalized: NormalizedCompleteTurnArtifact = {
-        kind,
-        payload: artifact
-      };
-      if (uri) normalized.uri = uri;
-      return normalized;
-    })
-    .filter((artifact): artifact is NormalizedCompleteTurnArtifact => Boolean(artifact));
-}
-
-function normalizeCompleteTurnToolCalls(request: TurnCompleteRequest): ToolCallPayload[] {
-  const results = normalizeCompleteTurnToolResults(request);
-  return (Array.isArray(request.toolCalls) ? request.toolCalls : [])
-    .map((call, index) => normalizeCompleteTurnToolCall(call, results[index]))
-    .filter((call): call is ToolCallPayload => Boolean(call));
-}
-
-function normalizeCompleteTurnToolResults(request: TurnCompleteRequest): unknown[] {
-  return Array.isArray(request.toolResults) ? request.toolResults : [];
-}
-
-function normalizeCompleteTurnToolCall(value: unknown, pairedResult: unknown): ToolCallPayload | null {
-  if (!isRecord(value)) return null;
-  const fn = isRecord(value.function) ? value.function : {};
-  const name = stringFromRecord(value, "name") ?? stringFromRecord(fn, "name");
-  if (!name) return null;
-
-  const resultRecord = isRecord(pairedResult) ? pairedResult : {};
-  const error = errorMessageFromUnknown(value.error)
-    ?? errorMessageFromUnknown(resultRecord.error)
-    ?? errorMessageFromUnknown(resultRecord.message);
-  const output = firstDefined(value.output, value.result, resultRecord.output, resultRecord.result, resultRecord.content, pairedResult);
-
-  return {
-    id: stringFromRecord(value, "id") ?? stringFromRecord(value, "call_id") ?? stringFromRecord(value, "tool_call_id"),
-    name,
-    input: firstDefined(value.input, value.args, value.arguments, fn.arguments),
-    output,
-    error,
-    success: typeof value.success === "boolean" ? value.success : error ? false : undefined,
-    startedAt: timeFromRecord(value, "startedAt") ?? timeFromRecord(value, "started_at"),
-    endedAt: timeFromRecord(value, "endedAt") ?? timeFromRecord(value, "ended_at"),
-    thinkingBefore: stringFromRecord(value, "thinkingBefore") ?? stringFromRecord(value, "thinking_before"),
-    assistantTextBefore: stringFromRecord(value, "assistantTextBefore") ?? stringFromRecord(value, "assistant_text_before")
-  };
-}
-
-function firstDefined(...values: unknown[]): unknown {
-  return values.find((value) => value !== undefined && value !== null);
-}
-
-function timeFromRecord(record: Record<string, unknown>, key: string): string | undefined {
-  const value = record[key];
-  return typeof value === "string" && value.trim() ? value : undefined;
-}
-
-function rawTurnIdForSessionTurn(sessionId: string, turnId: string): string {
-  return `raw_${stableHash(`${sessionId}:${turnId}`).slice(0, 20)}`;
 }
 
 function memoryAddKey(request: MemoryAddRequest, layer: MemoryLayer, title: string): string {
