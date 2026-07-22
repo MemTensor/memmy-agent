@@ -890,7 +890,7 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).not.toContain("mv -f");
   });
 
-  it("does not bundle the repo-root .env into packaged apps", () => {
+  it("bundles the repo-root .env so packaged apps can resolve MEMMY_CLOUD_SERVICE", () => {
     const configs = [
       readFileSync(electronBuilderPath, "utf8"),
       readFileSync(unsignedElectronBuilderPath, "utf8"),
@@ -899,8 +899,8 @@ describe("desktop packaged runtime boundaries", () => {
     ];
 
     for (const config of configs) {
-      expect(config).not.toContain("from: ../../../.env");
-      expect(config).not.toContain("to: .env");
+      expect(config).toContain("from: ../../../.env");
+      expect(config).toContain("to: .env");
     }
   });
 });
