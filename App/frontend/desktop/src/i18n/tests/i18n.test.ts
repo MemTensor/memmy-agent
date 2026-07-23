@@ -24,6 +24,13 @@ describe("desktop i18n helpers", () => {
     expect(messageCatalogs["en-US"]["appFrame.task.rename"]).toBe("Rename task");
   });
 
+  it("localizes starter tasks without changing their prefill intent", () => {
+    expect(messageCatalogs["zh-CN"]["home.suggestion.heading"]).toBe("试试这些任务");
+    expect(messageCatalogs["en-US"]["home.suggestion.heading"]).toBe("Try a starter task");
+    expect(messageCatalogs["zh-CN"]["home.suggestion.four"]).toContain("图片或文件");
+    expect(messageCatalogs["en-US"]["home.suggestion.four"]).toContain("image or file");
+  });
+
   it("keeps account verification errors localized per language", () => {
     expect(messageCatalogs["zh-CN"]["login.error.invalidCode"]).toBe("验证码错误");
     expect(messageCatalogs["zh-CN"]["login.error.invalidPhone"]).toBe("手机号格式错误");
