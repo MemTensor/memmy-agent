@@ -19,16 +19,16 @@ const {
 
 afterEach(cleanup);
 
-function createEmptyRewardLlm(calls: Array<{
+function createEmptyRewardSummaryLlm(calls: Array<{
   messages: Array<{ role: string; content: string }>;
   options: { operation: string };
 }>): LlmClient {
   return {
     config: {
-      ...DEFAULT_MEMMY_CONFIG.evolution,
+      ...DEFAULT_MEMMY_CONFIG.summary,
       provider: "host",
-      endpoint: "http://127.0.0.1/empty-reward",
-      model: "empty-reward"
+      endpoint: "http://127.0.0.1/empty-reward-summary",
+      model: "empty-reward-summary"
     },
     isConfigured() {
       return true;
@@ -46,7 +46,7 @@ function createEmptyRewardLlm(calls: Array<{
     status() {
       return {
         provider: "host",
-        model: "empty-reward",
+        model: "empty-reward-summary",
         configured: true,
         remote: true
       };
@@ -54,7 +54,7 @@ function createEmptyRewardLlm(calls: Array<{
   };
 }
 
-function createCapturingRewardLlm(calls: Array<{
+function createCapturingRewardSummaryLlm(calls: Array<{
   messages: Array<{ role: string; content: string }>;
   options: {
     operation: string;
@@ -64,10 +64,10 @@ function createCapturingRewardLlm(calls: Array<{
 }>): LlmClient {
   return {
     config: {
-      ...DEFAULT_MEMMY_CONFIG.evolution,
+      ...DEFAULT_MEMMY_CONFIG.summary,
       provider: "host",
-      endpoint: "http://127.0.0.1/reward-capturing",
-      model: "reward-capturing"
+      endpoint: "http://127.0.0.1/reward-summary-capturing",
+      model: "reward-summary-capturing"
     },
     isConfigured() {
       return true;
@@ -98,7 +98,7 @@ function createCapturingRewardLlm(calls: Array<{
     status() {
       return {
         provider: "host",
-        model: "reward-capturing",
+        model: "reward-summary-capturing",
         configured: true,
         remote: true
       };
@@ -413,7 +413,7 @@ describe("MemoryService / evolution / reward", () => {
     const service = createTestMemoryService({
       db,
       mode: "dev",
-      skillLlm: createEmptyRewardLlm(rewardCalls),
+      llm: createEmptyRewardSummaryLlm(rewardCalls),
       config: {
         ...DEFAULT_MEMMY_CONFIG,
         algorithm: {
@@ -486,7 +486,7 @@ describe("MemoryService / evolution / reward", () => {
     db.close();
   });
 
-  it("scores R_human with the evolution LLM, thinking disabled, and stores episode reward meta", async () => {
+  it("scores R_human with the summary LLM, thinking disabled, and stores episode reward meta", async () => {
     const root = createTestRoot("mindock-memory-");
     const db = new MemoryDb({
       path: join(root, "memory.sqlite")
@@ -502,7 +502,7 @@ describe("MemoryService / evolution / reward", () => {
     const service = createTestMemoryService({
       db,
       mode: "dev",
-      skillLlm: createCapturingRewardLlm(rewardCalls),
+      llm: createCapturingRewardSummaryLlm(rewardCalls),
       config: {
         ...DEFAULT_MEMMY_CONFIG,
         algorithm: {
@@ -573,7 +573,7 @@ describe("MemoryService / evolution / reward", () => {
     expect(rewardCall!.messages[0]!.content).toContain("HOST_AGENT_CONTEXT");
     expect(rewardCall!.messages[1]!.content).toContain("HOST_AGENT_CONTEXT");
     expect(rewardCall!.messages[1]!.content).toContain("TASK_SUMMARY");
-    expect(rewardCall!.messages[1]!.content).toContain("scorerModel: reward-capturing");
+    expect(rewardCall!.messages[1]!.content).toContain("scorerModel: reward-summary-capturing");
     expect(rewardCall!.messages[1]!.content).toContain("EPISODE_MISSION");
     expect(rewardCall!.messages[1]!.content).toContain("EXECUTION_OUTCOME");
     expect(rewardCall!.messages[1]!.content).toContain("USER_ASKS_AND_AGENT_REPLIES (2, in order)");

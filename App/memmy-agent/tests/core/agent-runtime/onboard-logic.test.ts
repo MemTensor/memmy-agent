@@ -119,11 +119,12 @@ class OuterDraftModel extends Base {
 }
 
 describe("onboard logic", () => {
-  it("exposes workspace identity and memory locations in the default prompt", () => {
+  it("exposes workspace identity without file memory locations by default", () => {
     const builder = new ContextBuilder({ workspace: "/tmp/memmy-onboard" });
 
     expect(builder.buildSystemPrompt()).toContain("Your workspace is at: /tmp/memmy-onboard");
-    expect(builder.buildSystemPrompt()).toContain("Long-term memory");
+    expect(builder.buildSystemPrompt()).not.toContain("memory/MEMORY.md");
+    expect(builder.buildSystemPrompt()).not.toContain("memory/history.jsonl");
   });
 
   it("uses the default prompt answer when stdin would block", async () => {
@@ -540,7 +541,22 @@ describe("onboard logic", () => {
     const workspace = makeTempDir();
     const added = syncWorkspaceTemplates(workspace);
     expect(Array.isArray(added)).toBe(true);
+    expect(fs.existsSync(path.join(workspace, "memory", "MEMORY.md"))).toBe(false);
+    expect(fs.existsSync(path.join(workspace, "memory", "history.jsonl"))).toBe(true);
+    expect(fs.existsSync(path.join(workspace, ".git"))).toBe(false);
+  });
+
+  it("creates file memory assets only when explicitly enabled", () => {
+    const workspace = makeTempDir();
+    const added = syncWorkspaceTemplates(workspace, undefined, {
+      fileMemoryEnabled: true,
+    });
+
+    expect(added).toContain(path.join("memory", "MEMORY.md"));
     expect(fs.existsSync(path.join(workspace, "memory", "MEMORY.md"))).toBe(true);
+    expect(fs.existsSync(path.join(workspace, "memory", "history.jsonl"))).toBe(true);
+    expect(fs.existsSync(path.join(workspace, ".git"))).toBe(true);
+    expect(fs.existsSync(path.join(workspace, "memory", ".dreamCursor"))).toBe(true);
   });
 
   it("does not overwrite existing workspace template files", () => {

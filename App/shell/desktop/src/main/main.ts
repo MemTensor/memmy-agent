@@ -49,6 +49,24 @@ import { resolveRendererContextMenuCommands, resolveRendererContextMenuMaxLabelW
 import { startPackagedRendererStaticServer, type PackagedRendererStaticServer } from "./renderer-static-server.js";
 import { shouldBlockRendererReloadShortcut } from "./renderer-shortcuts.js";
 import { normalizeMailtoUrl } from "./mailto-url.js";
+import { buildAgentToolCliPromptDeepLink, buildAgentToolPromptDeepLink, normalizeAgentToolLaunchRequest } from "./agent-tool-deeplink.js";
+import {
+  CLAUDE_CODE_TERMINAL_SCRIPT,
+  DIRECT_PROMPT_TERMINAL_SCRIPT,
+  HERMES_TERMINAL_SCRIPT,
+  OPENCLAW_RELAY_SESSION_LABEL,
+  OPENCLAW_TERMINAL_SCRIPT,
+  OPENCODE_TERMINAL_SCRIPT,
+  appendOpenClawSessionToDashboardUrl,
+  claudeCodeBinaryCandidates,
+  codexBinaryCandidates,
+  cursorAgentBinaryCandidates,
+  extractOpenClawDashboardUrl,
+  extractOpenClawSessionKey,
+  hermesBinaryCandidates,
+  openClawBinaryCandidates,
+  opencodeBinaryCandidates
+} from "./agent-tool-terminal.js";
 import {
   desktopRuntimeHomeDirectoryName,
   desktopUserDataDirectoryName,
@@ -727,6 +745,8 @@ function registerIpcHandlers(): void {
   ipcMain.handle("memmy:openExternal", async (_event, url: string) => {
     await openExternalUrl(url);
   });
+
+  ipcMain.handle("memmy:openAgentTool", async (_event, sourceId: string, prompt: string) => openAgentTool(sourceId, prompt));
 
   ipcMain.handle("memmy:openMailto", async (_event, mailtoUrl: string) => {
     await openMailtoUrl(mailtoUrl);
@@ -4599,6 +4619,7 @@ async function cleanupBeforeQuit(): Promise<void> {
   ipcMain.removeHandler("memmy:download-update");
   ipcMain.removeHandler("memmy:open-update-installer");
   ipcMain.removeHandler("memmy:openExternal");
+  ipcMain.removeHandler("memmy:openAgentTool");
   ipcMain.removeHandler("memmy:openMailto");
   ipcMain.removeHandler("memmy:copy-image-to-clipboard");
   ipcMain.removeHandler("memmy:save-image");
@@ -5174,6 +5195,206 @@ async function openExternalUrl(rawUrl: string): Promise<void> {
     return;
   }
   await shell.openExternal(normalizeHttpUrl(rawUrl));
+}
+
+async function openAgentTool(rawSourceId: unknown, rawPrompt: unknown): Promise<{ opened: boolean }> {
+  const request = normalizeAgentToolLaunchRequest(rawSourceId, rawPrompt);
+  if (!request) {
+    return { opened: false };
+  }
+  const homeDirectory = homedir();
+  if (request.sourceId === "openclaw") {
+    return { opened: await openOpenClawGuiOrTerminal(request.prompt) };
+  }
+  const deepLink = buildAgentToolPromptDeepLink(request.sourceId, request.prompt, { homeDirectory });
+  if (deepLink && await tryOpenRegisteredAgentToolDeepLink(deepLink)) {
+    return { opened: true };
+  }
+  if (request.sourceId === "claude_code") {
+    const cliDeepLink = buildAgentToolCliPromptDeepLink(request.sourceId, request.prompt);
+    if (cliDeepLink && await tryOpenRegisteredAgentToolDeepLink(cliDeepLink)) {
+      return { opened: true };
+    }
+    return { opened: await openClaudeCodeTerminal(request.prompt) };
+  }
+  if (request.sourceId === "cursor") {
+    return { opened: await openDirectPromptTerminal(request.prompt, cursorAgentBinaryCandidates(homeDirectory)) };
+  }
+  if (request.sourceId === "codex") {
+    return { opened: await openDirectPromptTerminal(request.prompt, codexBinaryCandidates(homeDirectory)) };
+  }
+  if (request.sourceId === "opencode") {
+    return { opened: await openScriptedAgentTerminal(OPENCODE_TERMINAL_SCRIPT, [request.prompt, homeDirectory], opencodeBinaryCandidates(homeDirectory)) };
+  }
+  if (request.sourceId === "hermes") {
+    return { opened: await openScriptedAgentTerminal(HERMES_TERMINAL_SCRIPT, [request.prompt], hermesBinaryCandidates(homeDirectory)) };
+  }
+  return { opened: false };
+}
+
+async function tryOpenRegisteredAgentToolDeepLink(deepLink: string): Promise<boolean> {
+  try {
+    if ((process.platform === "darwin" || process.platform === "win32") && !app.getApplicationNameForProtocol(deepLink).trim()) {
+      return false;
+    }
+    await shell.openExternal(deepLink);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function openOpenClawGuiOrTerminal(prompt: string): Promise<boolean> {
+  const binaryPath = openClawBinaryCandidates(homedir()).find((candidate) => existsSync(candidate));
+  if (!binaryPath) {
+    return false;
+  }
+  try {
+    const output = await runProcessAndCaptureOutput(binaryPath, ["dashboard", "--yes", "--no-open"]);
+    const dashboardUrl = extractOpenClawDashboardUrl(output);
+    if (!dashboardUrl) {
+      return openOpenClawTerminal(prompt, binaryPath);
+    }
+    // Open a fresh Control UI session so the relay prompt matches other agents'
+    // "new chat + same text" handoff instead of continuing the shared main session.
+    const sessionOutput = await runProcessAndCaptureOutput(binaryPath, [
+      "gateway",
+      "call",
+      "sessions.create",
+      "--json",
+      "--params",
+      JSON.stringify({ label: OPENCLAW_RELAY_SESSION_LABEL })
+    ]);
+    const sessionKey = extractOpenClawSessionKey(sessionOutput);
+    const targetUrl = sessionKey
+      ? appendOpenClawSessionToDashboardUrl(dashboardUrl, sessionKey)
+      : dashboardUrl;
+    await shell.openExternal(targetUrl, { activate: true });
+    try {
+      clipboard.writeText(prompt);
+    } catch {
+      // The renderer already attempted to copy the prompt. Keep the CLI handoff.
+    }
+    if (sessionKey) {
+      startDetachedProcess(binaryPath, ["agent", "--session-key", sessionKey, "--message", prompt]);
+    } else {
+      startDetachedProcess(binaryPath, ["agent", "--message", prompt]);
+    }
+    return true;
+  } catch {
+    return openOpenClawTerminal(prompt, binaryPath);
+  }
+}
+
+async function openOpenClawTerminal(prompt: string, binaryPath: string): Promise<boolean> {
+  if (process.platform !== "darwin") {
+    return false;
+  }
+  try {
+    try {
+      clipboard.writeText(prompt);
+    } catch {
+      // The renderer already attempted to copy the prompt; keep the fallback usable.
+    }
+    await runProcessAndWait("/usr/bin/osascript", ["-e", OPENCLAW_TERMINAL_SCRIPT, binaryPath, prompt]);
+    return true;
+  } catch {
+    await openMacTerminalFallback();
+    return false;
+  }
+}
+
+async function openClaudeCodeTerminal(prompt: string): Promise<boolean> {
+  return openScriptedAgentTerminal(CLAUDE_CODE_TERMINAL_SCRIPT, [prompt], claudeCodeBinaryCandidates(homedir()));
+}
+
+async function openDirectPromptTerminal(prompt: string, binaryCandidates: string[]): Promise<boolean> {
+  return openScriptedAgentTerminal(DIRECT_PROMPT_TERMINAL_SCRIPT, [prompt], binaryCandidates);
+}
+
+async function openScriptedAgentTerminal(script: string, scriptArgs: string[], binaryCandidates: string[]): Promise<boolean> {
+  if (process.platform !== "darwin") {
+    return false;
+  }
+  const binaryPath = binaryCandidates.find((candidate) => existsSync(candidate));
+  if (!binaryPath) {
+    await openMacTerminalFallback();
+    return false;
+  }
+  try {
+    await runProcessAndWait("/usr/bin/osascript", ["-e", script, binaryPath, ...scriptArgs]);
+    return true;
+  } catch {
+    await openMacTerminalFallback();
+    return false;
+  }
+}
+
+async function openMacTerminalFallback(): Promise<void> {
+  const terminalPath = ["/System/Applications/Utilities/Terminal.app", "/Applications/Utilities/Terminal.app"].find((candidate) => existsSync(candidate));
+  if (terminalPath) {
+    await shell.openPath(terminalPath);
+  }
+}
+
+async function runProcessAndWait(command: string, args: string[]): Promise<void> {
+  await new Promise<void>((resolvePromise, reject) => {
+    const child = spawn(command, args, { stdio: "ignore" });
+    child.once("error", reject);
+    child.once("close", (code) => {
+      if (code === 0) {
+        resolvePromise();
+        return;
+      }
+      reject(new Error(`${command} exited with code ${code ?? "unknown"}`));
+    });
+  });
+}
+
+function startDetachedProcess(command: string, args: string[]): void {
+  const child = spawn(command, args, { detached: true, stdio: "ignore" });
+  child.unref();
+}
+
+async function runProcessAndCaptureOutput(command: string, args: string[]): Promise<string> {
+  return new Promise<string>((resolvePromise, reject) => {
+    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let output = "";
+    let settled = false;
+    const timeout = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      child.kill();
+      reject(new Error(`${command} timed out`));
+    }, 15_000);
+    const finish = (callback: () => void) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeout);
+      callback();
+    };
+    const append = (chunk: Buffer) => {
+      if (output.length < 65_536) {
+        output += chunk.toString("utf8").slice(0, 65_536 - output.length);
+      }
+    };
+    child.stdout.on("data", append);
+    child.stderr.on("data", append);
+    child.once("error", (error) => finish(() => reject(error)));
+    child.once("close", (code) => {
+      finish(() => {
+        if (code === 0) {
+          resolvePromise(output);
+          return;
+        }
+        reject(new Error(`${command} exited with code ${code ?? "unknown"}`));
+      });
+    });
+  });
 }
 
 /**

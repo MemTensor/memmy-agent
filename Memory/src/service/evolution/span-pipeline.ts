@@ -22,11 +22,6 @@ import { clip,firstLine } from "../../utils/text.js";
 import { nowIso } from "../../utils/time.js";
 import type { ScheduleEmbeddingAfterTextUpdateInput } from "../embedding/embedding-job-processor.js";
 import {
-  detectMemReaderPromptLanguage,
-  MEMOS_MEMORY_READER_MAX_TOKENS,
-  renderMemReaderPrompt
-} from "./memos-account-summary-prompts.js";
-import {
   importStatusTags,
   memoryHasImportPipeline,
   updateImportPipelineStatus
@@ -162,7 +157,7 @@ private async reflectSingleTrace(
       return;
     }
 
-    const result = await this.deps.skillLlm.completeJson<{
+    const result = await this.deps.llm.completeJson<{
       summary?: unknown;
       reflection?: unknown;
       alpha?: unknown;
@@ -554,7 +549,7 @@ private async synthesizeTraceReflection(input: {
       return null;
     }
     try {
-      const text = await this.deps.skillLlm.complete([
+      const text = await this.deps.llm.complete([
         {
           role: "system",
           content: TRACE_REFLECTION_SYNTH_SYSTEM_PROMPT
@@ -649,7 +644,7 @@ private reflectionDownstreamPreview(job: EvolutionJobRecord, memory: MemoryRow):
     toolCalls: ToolCallPayload[];
     reflectionText: string;
   }, options: { strict?: boolean } = {}): Promise<string> {
-    const standardMessages = [
+    const messages = [
       {
         role: "system" as const,
         content: CAPTURE_SUMMARY_SYSTEM_PROMPT
@@ -659,10 +654,10 @@ private reflectionDownstreamPreview(job: EvolutionJobRecord, memory: MemoryRow):
         content: traceSummaryPayload(input)
       }
     ];
-    const summarizeStandardWith = async (llm: LlmClient): Promise<string> => {
+    const summarizeWith = async (llm: LlmClient): Promise<string> => {
       const result = await llm.completeJson<{
         summary?: unknown;
-      }>(standardMessages, {
+      }>(messages, {
         operation: "capture.summarize",
         thinkingMode: "disabled",
         temperature: 0,
@@ -671,28 +666,9 @@ private reflectionDownstreamPreview(job: EvolutionJobRecord, memory: MemoryRow):
       const summary = sanitizeSummaryText(stringOr(result.summary, ""));
       return summary || input.trace.summary;
     };
-    const summarizeAccountWith = async (llm: LlmClient): Promise<string> => {
-      const conversation = accountTraceConversationPayload(input);
-      const language = detectMemReaderPromptLanguage(input.userText || conversation);
-      const response = await llm.complete([
-        {
-          role: "user",
-          content: renderMemReaderPrompt(language, conversation)
-        }
-      ], {
-        operation: "capture.summarize",
-        thinkingMode: "disabled",
-        temperature: 0,
-        maxTokens: MEMOS_MEMORY_READER_MAX_TOKENS,
-        jsonMode: true
-      });
-      return parseMemReaderSummary(response);
-    };
 
     try {
-      return this.deps.config.activeProfile === "account"
-        ? await summarizeAccountWith(this.deps.llm)
-        : await summarizeStandardWith(this.deps.llm);
+      return await summarizeWith(this.deps.llm);
     } catch (primaryError) {
       const logContext = {
         operation: "capture.summarize",
@@ -708,7 +684,7 @@ private reflectionDownstreamPreview(job: EvolutionJobRecord, memory: MemoryRow):
           ...memoryErrorFields(primaryError)
         });
         try {
-          const summary = await summarizeStandardWith(this.deps.skillLlm);
+          const summary = await summarizeWith(this.deps.skillLlm);
           pipelineLogger.info("summary.fallback_succeeded", logContext);
           return summary;
         } catch (fallbackError) {
@@ -1253,46 +1229,6 @@ function traceSummaryPayload(input: {
     parts.push(`REFLECTION:\n${clip(input.reflectionText, 300)}`);
   }
   return clip(parts.join("\n\n"), 3500);
-}
-
-function accountTraceConversationPayload(input: {
-  trace: { ts: number };
-  userText: string;
-  agentText: string;
-  toolCalls: ToolCallPayload[];
-}): string {
-  const timestamp = new Date(input.trace.ts).toISOString();
-  const lines: string[] = [];
-  if (input.userText) {
-    lines.push(`user: [${timestamp}]: ${clip(input.userText, 1400)}`);
-  }
-  if (input.agentText) {
-    lines.push(`assistant: [${timestamp}]: ${clip(input.agentText, 1400)}`);
-  }
-  for (const call of input.toolCalls) {
-    lines.push(`tool: [${timestamp}]: ${call.name}(${clip(stringifyForMemory(call.input), 120)})`);
-  }
-  return clip(lines.join("\n"), 3500);
-}
-
-function parseMemReaderSummary(text: string): string {
-  const trimmed = text.trim();
-  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)?.[1]?.trim();
-  const candidate = fenced ?? trimmed;
-  const start = candidate.indexOf("{");
-  const end = candidate.lastIndexOf("}");
-  if (start < 0 || end < start) {
-    throw new Error("account memory reader output does not contain a JSON object");
-  }
-  const parsed = JSON.parse(candidate.slice(start, end + 1)) as unknown;
-  if (!isRecord(parsed) || !Array.isArray(parsed["memory list"])) {
-    throw new Error("account memory reader output must contain a memory list array");
-  }
-  const summary = sanitizeSummaryText(stringOr(parsed.summary, ""));
-  if (!summary) {
-    throw new Error("account memory reader output summary is empty");
-  }
-  return summary;
 }
 
 function formatReflectionToolCall(call: ToolCallPayload): string {

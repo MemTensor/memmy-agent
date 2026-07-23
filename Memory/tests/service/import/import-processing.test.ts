@@ -29,44 +29,6 @@ const {
 
 afterEach(cleanup);
 
-function createAccountMemoryReaderLlm(calls: Array<{
-  messages: LlmMessage[];
-  options: LlmCompletionOptions;
-}>): LlmClient {
-  return {
-    config: accountRuntimeConfig().summary,
-    isConfigured() {
-      return true;
-    },
-    async complete(messages: LlmMessage[], options: LlmCompletionOptions) {
-      calls.push({ messages, options });
-      const zh = messages[0]?.content.startsWith("您是记忆提取专家。") === true;
-      return JSON.stringify({
-        "memory list": [
-          {
-            key: zh ? "账户中文记忆" : "Account English memory",
-            memory_type: "UserMemory",
-            value: zh ? "用户询问了 Memmy 的发布时间。" : "The user asked about Memmy's release date.",
-            tags: zh ? ["Memmy", "发布时间"] : ["Memmy", "release date"]
-          }
-        ],
-        summary: zh ? "账户中文摘要" : "Account English summary"
-      });
-    },
-    async completeJson<T extends Record<string, unknown>>(): Promise<T> {
-      throw new Error("account memory reader must use the exact single-user-message prompt path");
-    },
-    status() {
-      return {
-        provider: "openai_compatible",
-        model: "memory_summary",
-        configured: true,
-        remote: true
-      };
-    }
-  };
-}
-
 describe("MemoryService / import / processing", () => {
   it("imports L1 memory with async summary, default score, and embedding only", async () => {
     const root = createTestRoot("mindock-memory-import-add-");
@@ -276,20 +238,20 @@ describe("MemoryService / import / processing", () => {
     db.close();
   });
 
-  it("uses the fixed language-specific MemOS prompt only for account summaries", async () => {
+  it("uses the standard summary prompt for account summaries", async () => {
     const root = createTestRoot("mindock-memory-account-summary-");
     const db = new MemoryDb({
       path: join(root, "memory.sqlite")
     });
     const calls: Array<{
-      messages: LlmMessage[];
-      options: LlmCompletionOptions;
+      messages: Array<{ role: string; content: string }>;
+      options: { operation: string; thinkingMode?: "inherit" | "enabled" | "disabled" };
     }> = [];
     const service = createTestMemoryService({
       db,
       mode: "dev",
       config: accountRuntimeConfig(),
-      llm: createAccountMemoryReaderLlm(calls),
+      llm: createBatchReflectionLlm(calls, "账户通用摘要", "memory_summary"),
       embedder: createCapturingEmbedder([])
     });
     const namespace = {
@@ -298,45 +260,41 @@ describe("MemoryService / import / processing", () => {
       userId: "user-account-summary-prompts"
     };
 
-    const zhMemory = addAgentSourceImport(
+    const memory = addAgentSourceImport(
       service,
       namespace,
       "memmy 在上周五发布了，你看看情况？",
       "account-summary-zh",
       "2026-07-21T12:48:59.000Z"
     );
-    const enMemory = addAgentSourceImport(
-      service,
-      namespace,
-      "Please check whether Memmy shipped last Friday.",
-      "account-summary-en",
-      "2026-07-21T12:49:59.000Z"
-    );
 
     await service.runWorkerOnce(100);
 
-    expect(calls).toHaveLength(2);
-    const zhCall = calls.find((call) => call.messages[0]?.content.includes("memmy 在上周五发布了"));
-    const enCall = calls.find((call) => call.messages[0]?.content.includes("Memmy shipped last Friday"));
-    expect(zhCall?.messages).toHaveLength(1);
-    expect(zhCall?.messages[0]).toMatchObject({ role: "user" });
-    expect(zhCall?.messages[0]?.content).toMatch(/^您是记忆提取专家。/);
-    expect(zhCall?.messages[0]?.content).toContain("user: [2026-07-21T12:48:59.000Z]");
-    expect(enCall?.messages).toHaveLength(1);
-    expect(enCall?.messages[0]).toMatchObject({ role: "user" });
-    expect(enCall?.messages[0]?.content).toMatch(/^You are a memory extraction expert\./);
-    expect(enCall?.messages[0]?.content).toContain("user: [2026-07-21T12:49:59.000Z]");
-    expect(calls.every((call) => call.options.jsonMode === true)).toBe(true);
-    expect(calls.every((call) => call.options.thinkingMode === "disabled")).toBe(true);
-    expect(calls.every((call) => call.options.maxTokens === 1024)).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.messages).toHaveLength(2);
+    expect(calls[0]?.messages[0]).toMatchObject({
+      role: "system",
+      content: expect.stringContaining("single user/agent exchange")
+    });
+    expect(calls[0]?.messages[0]?.content).toContain(
+      "Preserve temporal expressions as stated in the source."
+    );
+    expect(calls[0]?.messages[0]?.content).toContain(
+      "Do NOT resolve, normalize, infer, or replace a relative expression"
+    );
+    expect(calls[0]?.messages[1]).toMatchObject({
+      role: "user",
+      content: expect.stringContaining("USER: memmy 在上周五发布了")
+    });
+    expect(calls[0]?.options.thinkingMode).toBe("disabled");
 
-    const rows = [zhMemory.id, enMemory.id].map((id) => db.db.prepare(
+    const row = db.db.prepare(
       `SELECT properties_json FROM memories WHERE id = ?`
-    ).get(id) as { properties_json: string });
-    const summaries = rows.map((row) => (
+    ).get(memory.id) as { properties_json: string };
+    const summary = (
       JSON.parse(row.properties_json) as { internal_info: { trace: { summary: string } } }
-    ).internal_info.trace.summary);
-    expect(summaries).toEqual(expect.arrayContaining(["账户中文摘要", "Account English summary"]));
+    ).internal_info.trace.summary;
+    expect(summary).toBe("账户通用摘要");
     db.close();
   });
 
@@ -468,65 +426,6 @@ describe("MemoryService / import / processing", () => {
       internal_info: { trace: { summary: string } };
     };
     expect(properties.internal_info.trace.summary).toBe("进化模型生成的降级摘要");
-    db.close();
-  });
-
-  it("falls back to the standard evolution prompt when an account reader violates its response schema", async () => {
-    const root = createTestRoot("mindock-memory-account-summary-fallback-");
-    const db = new MemoryDb({ path: join(root, "memory.sqlite") });
-    const accountCalls: Array<{ messages: LlmMessage[]; options: LlmCompletionOptions }> = [];
-    const evolutionCalls: Array<{
-      messages: Array<{ role: string; content: string }>;
-      options: { operation: string; thinkingMode?: "inherit" | "enabled" | "disabled" };
-    }> = [];
-    const accountBase = createAccountMemoryReaderLlm(accountCalls);
-    const accountLlm: LlmClient = {
-      ...accountBase,
-      async complete(messages: LlmMessage[], options: LlmCompletionOptions) {
-        accountCalls.push({ messages, options });
-        return JSON.stringify({ summary: "missing required memory list" });
-      }
-    };
-    const evolutionLlm = createBatchReflectionLlm(
-      evolutionCalls,
-      "进化模型使用通用提示词生成的摘要",
-      "evolution-model"
-    );
-    const service = createTestMemoryService({
-      db,
-      mode: "dev",
-      config: accountRuntimeConfig(),
-      llm: accountLlm,
-      skillLlm: evolutionLlm,
-      embedder: createCapturingEmbedder([])
-    });
-    const namespace = { source: "codex", profileId: "default", userId: "account-summary-fallback-user" };
-    const added = addAgentSourceImport(
-      service,
-      namespace,
-      "请核对 Memmy 的发布时间。",
-      "account-summary-schema-fallback"
-    );
-
-    const run = await service.runWorkerOnce(1);
-
-    expect(run.jobs).toEqual([
-      expect.objectContaining({ jobType: "import_summary", status: "succeeded" })
-    ]);
-    expect(accountCalls).toHaveLength(1);
-    expect(accountCalls[0]?.messages).toHaveLength(1);
-    expect(accountCalls[0]?.messages[0]?.content).toMatch(/^您是记忆提取专家。/);
-    const fallbackCall = evolutionCalls.find((call) => call.options.operation === "capture.summarize");
-    expect(fallbackCall?.messages[0]?.role).toBe("system");
-    expect(fallbackCall?.messages[0]?.content).toContain("single user/agent exchange");
-    expect(fallbackCall?.options.thinkingMode).toBe("disabled");
-    const stored = db.db.prepare(
-      `SELECT properties_json FROM memories WHERE id = ?`
-    ).get(added.id) as { properties_json: string };
-    const properties = JSON.parse(stored.properties_json) as {
-      internal_info: { trace: { summary: string } };
-    };
-    expect(properties.internal_info.trace.summary).toBe("进化模型使用通用提示词生成的摘要");
     db.close();
   });
 

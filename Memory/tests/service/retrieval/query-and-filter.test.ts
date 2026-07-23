@@ -547,13 +547,15 @@ describe("MemoryService / retrieval / query and filtering", () => {
     db.close();
   });
 
-  it("uses the evolution LLM for retrieval filtering instead of the summary LLM", async () => {
-    const root = createTestRoot("mindock-memory-llm-filter-evolution-");
+  it("uses the summary LLM for retrieval filtering and falls back to evolution when unavailable", async () => {
+    const root = createTestRoot("mindock-memory-llm-filter-summary-");
     const db = new MemoryDb({
       path: join(root, "memory.sqlite")
     });
     const summaryCalls: Array<{ operation: string }> = [];
     const evolutionCalls: Array<{ operation: string; thinkingMode?: string }> = [];
+    let summaryConfigured = true;
+    let summaryFails = false;
     const summaryLlm: LlmClient = {
       config: {
         ...DEFAULT_MEMMY_CONFIG.summary,
@@ -562,7 +564,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
         model: "summary"
       },
       isConfigured() {
-        return true;
+        return summaryConfigured;
       },
       async complete() {
         return "{}";
@@ -572,6 +574,9 @@ describe("MemoryService / retrieval / query and filtering", () => {
         options: { operation: string }
       ): Promise<T> {
         summaryCalls.push({ operation: options.operation });
+        if (summaryFails && options.operation === "retrieval.retrieval.filter.v5") {
+          throw new Error("summary filter unavailable");
+        }
         if (options.operation === "retrieval.retrieval.query.extract.v1") {
           return {
             queryVecText: messages.find((message) => message.role === "user")?.content.replace(/^COMPLETE USER INPUT:\n/, "") ?? "",
@@ -675,14 +680,50 @@ describe("MemoryService / retrieval / query and filtering", () => {
       query: "python pytest failure"
     });
 
-    expect(summaryCalls.map((call) => call.operation)).not.toContain("retrieval.retrieval.query.extract.v1");
-    expect(summaryCalls.map((call) => call.operation)).not.toContain("retrieval.retrieval.filter.v5");
+    expect(summaryCalls.map((call) => call.operation)).toContain("retrieval.retrieval.filter.v5");
+    expect(evolutionCalls.map((call) => call.operation)).toEqual(["retrieval.retrieval.query.extract.v1"]);
+    expect(evolutionCalls.every((call) => call.thinkingMode === "disabled")).toBe(true);
+    expect(recall.hits).toHaveLength(1);
+
+    summaryConfigured = false;
+    summaryCalls.length = 0;
+    evolutionCalls.length = 0;
+    const fallbackRecall = await service.search({
+      namespace: {
+        source: "codex",
+        profileId: "jiang",
+        userId: "user-filter-evolution"
+      },
+      query: "python pytest failure"
+    });
+
+    expect(summaryCalls).toHaveLength(0);
     expect(evolutionCalls.map((call) => call.operation)).toEqual([
       "retrieval.retrieval.query.extract.v1",
       "retrieval.retrieval.filter.v5"
     ]);
     expect(evolutionCalls.every((call) => call.thinkingMode === "disabled")).toBe(true);
-    expect(recall.hits).toHaveLength(1);
+    expect(fallbackRecall.hits).toHaveLength(1);
+
+    summaryConfigured = true;
+    summaryFails = true;
+    summaryCalls.length = 0;
+    evolutionCalls.length = 0;
+    const failedSummaryRecall = await service.search({
+      namespace: {
+        source: "codex",
+        profileId: "jiang",
+        userId: "user-filter-evolution"
+      },
+      query: "python pytest failure"
+    });
+
+    expect(summaryCalls.map((call) => call.operation)).toEqual(["retrieval.retrieval.filter.v5"]);
+    expect(evolutionCalls.map((call) => call.operation)).toEqual([
+      "retrieval.retrieval.query.extract.v1",
+      "retrieval.retrieval.filter.v5"
+    ]);
+    expect(failedSummaryRecall.hits).toHaveLength(1);
     db.close();
   });
 

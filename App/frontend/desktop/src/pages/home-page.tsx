@@ -29,8 +29,8 @@ import { encodeAgentImage, type AgentImageMime } from "../lib/agent-image-encode
 import { formatConversationTitleForDisplay } from "../lib/format-conversation-title.js";
 import { useTaskBus, type TaskBusAgentMessage } from "../lib/task-bus.js";
 import type { AppAction } from "../state/app-actions.js";
-import { agentActions, createAgentOperationError } from "../state/app-actions.js";
-import type { AgentState } from "../state/agent-chat-slice.js";
+import { agentActions, appActions, createAgentOperationError } from "../state/app-actions.js";
+import type { AgentChatMessage, AgentState } from "../state/agent-chat-slice.js";
 import { useAppState } from "../state/app-state.js";
 import { isComposingKeyboardEvent } from "../utils/keyboard.js";
 import {
@@ -57,7 +57,16 @@ import { AgentAttachmentCard, splitAgentAttachmentName } from "./agent-file-atta
 import { AgentThreadMessages, ChatImageLightbox } from "./agent-thread-messages.js";
 import { AppFrame } from "./app-frame.js";
 import { mergeVoiceTranscript, useAsrRecorder } from "./asr-recorder.js";
-import { consumePendingFirstEncounterTaskLaunch, writePendingFirstEncounterTaskLaunch } from "./first-encounter-task-launch.js";
+import { FirstEncounterRelayChallenge, FirstEncounterRelayOptIn, firstEncounterFollowUpMode, hasDetectedRelayAgents, relayAgentOptions } from "./first-encounter-relay-challenge.js";
+import {
+  consumeFirstEncounterRelayArm,
+  consumePendingFirstEncounterTaskLaunch,
+  readFirstEncounterRelayChat,
+  readFirstEncounterRelayReadyChat,
+  writeFirstEncounterRelayChat,
+  writeFirstEncounterRelayReadyChat,
+  writePendingFirstEncounterTaskLaunch
+} from "./first-encounter-task-launch.js";
 import { HistoryDagPanel, type HistoryDagPanelState } from "./history-dag-panel.js";
 import { Mic, Pause, Plus, Send } from "./memory/memory-prototype-icons.js";
 import { ArrowDown, RotateCw, X } from "lucide-react";
@@ -631,6 +640,12 @@ export function HomePage() {
   const [lastCompactionPanel, setLastCompactionPanel] = useState<StatusPanelState>({ open: false });
   const [historyDagPanel, setHistoryDagPanel] = useState<HistoryDagPanelState>({ open: false });
   const [isCreatingChat, setIsCreatingChat] = useState(false);
+  const [firstEncounterRelayChatId, setFirstEncounterRelayChatId] = useState<string | null>(() => (
+    readFirstEncounterRelayChat(typeof window === "undefined" ? undefined : window.sessionStorage)
+  ));
+  const [firstEncounterRelayReadyChatId, setFirstEncounterRelayReadyChatId] = useState<string | null>(() => (
+    readFirstEncounterRelayReadyChat(typeof window === "undefined" ? undefined : window.sessionStorage)
+  ));
   const [isComposerSingleLine, setIsComposerSingleLine] = useState(true);
   const composerDrafts = state.agent.composerDraftsByScope;
   const pendingAttachmentsByScope = state.agent.composerPendingAttachmentsByScope;
@@ -674,6 +689,86 @@ export function HomePage() {
       state.agent.optimisticSendingByChatId[state.agent.currentChatId]
     )
   );
+  const firstEncounterFollowUp = firstEncounterFollowUpMode(state.bootstrap?.onboarding.scanPermission ?? "unset");
+  const isFirstEncounterFollowUpChat = Boolean(
+    firstEncounterRelayChatId
+    && state.agent.currentChatId === firstEncounterRelayChatId
+    && firstEncounterFollowUp
+  );
+  const firstEncounterRelayAnswerMessageId = isFirstEncounterFollowUpChat
+    ? firstCompletedAssistantAnswerMessageId(state.agent.messages)
+    : null;
+  const firstEncounterRelayAnchorMessageId = isFirstEncounterFollowUpChat && firstEncounterRelayReadyChatId === firstEncounterRelayChatId
+    ? firstTurnTerminalMessageId(state.agent.messages)
+    : null;
+  const agentSourceOptions = state.agentSources.items.map((source) => ({
+    sourceId: source.sourceId,
+    displayName: source.displayName,
+    available: source.available,
+    status: source.status
+  }));
+  const relayAgents = relayAgentOptions(agentSourceOptions);
+  const hasDetectedAgents = hasDetectedRelayAgents(agentSourceOptions);
+
+  const rememberFirstEncounterRelayChatIfArmed = useCallback((chatId: string) => {
+    const storage = typeof window === "undefined" ? undefined : window.sessionStorage;
+    if (!consumeFirstEncounterRelayArm(storage)) {
+      return;
+    }
+    writeFirstEncounterRelayChat(storage, chatId);
+    setFirstEncounterRelayChatId(chatId);
+  }, []);
+
+  useEffect(() => {
+    if (!isFirstEncounterFollowUpChat || !firstEncounterRelayChatId) {
+      return;
+    }
+    if (firstEncounterRelayReadyChatId === firstEncounterRelayChatId) {
+      return;
+    }
+    if (isCurrentAgentRunning || !firstEncounterRelayAnswerMessageId || !firstTurnTerminalMessageId(state.agent.messages)) {
+      return;
+    }
+
+    // Only a genuine turn_end can unlock the card. This deliberately rejects
+    // partial text, idle snapshots, and user-stopped tasks.
+    if (state.agent.lastTaskCompletion?.chatId === firstEncounterRelayChatId && !firstTurnWasStoppedByUser(state.agent.messages)) {
+      writeFirstEncounterRelayReadyChat(
+        typeof window === "undefined" ? undefined : window.sessionStorage,
+        firstEncounterRelayChatId
+      );
+      setFirstEncounterRelayReadyChatId(firstEncounterRelayChatId);
+    }
+  }, [
+    firstEncounterRelayAnswerMessageId,
+    firstEncounterRelayChatId,
+    firstEncounterRelayReadyChatId,
+    isCurrentAgentRunning,
+    isFirstEncounterFollowUpChat,
+    state.agent.lastTaskCompletion?.chatId,
+    state.agent.messages
+  ]);
+
+  const openFirstEncounterRelayAgent = useCallback(async (sourceId: string, prompt: string): Promise<boolean> => {
+    try {
+      const result = await window.memmy?.openAgentTool?.(sourceId, prompt);
+      return result?.opened === true;
+    } catch {
+      return false;
+    }
+  }, []);
+
+  const openFirstEncounterRelayConnections = useCallback(() => {
+    dispatch(appActions.navigate("/memory-sources"));
+  }, [dispatch]);
+
+  const firstEncounterRelayContent = firstEncounterRelayAnchorMessageId && hasDetectedAgents
+    ? firstEncounterFollowUp === "relay"
+      ? <FirstEncounterRelayChallenge agents={relayAgents} onOpenAgent={openFirstEncounterRelayAgent} />
+      : firstEncounterFollowUp === "connect"
+        ? <FirstEncounterRelayOptIn onOpenConnections={openFirstEncounterRelayConnections} />
+        : null
+    : null;
 
   useEffect(() => {
     const stored = readStoredAgentRestartState();
@@ -837,11 +932,14 @@ export function HomePage() {
       chatSelectionEpoch: state.agent.chatSelectionEpoch,
       getChatSelectionEpoch: () => chatSelectionEpochRef.current,
       scopeKey: agentChatScopeKey(null, state.agent.newChatRequestId),
-      onNewChatMessageSent: (chatId) => refreshAgentTaskList(memmyAgent, dispatch, {
-        expectedChatId: chatId,
-        reason: "new-chat",
-        state: state.agent
-      })
+      onNewChatMessageSent: (chatId) => {
+        rememberFirstEncounterRelayChatIfArmed(chatId);
+        refreshAgentTaskList(memmyAgent, dispatch, {
+          expectedChatId: chatId,
+          reason: "new-chat",
+          state: state.agent
+        });
+      }
     }).then((sent) => {
       if (!sent) {
         writePendingFirstEncounterTaskLaunch(
@@ -856,6 +954,7 @@ export function HomePage() {
     dispatch,
     ensureChatSubscription,
     language,
+    rememberFirstEncounterRelayChatIfArmed,
     state.agent,
     track
   ]);
@@ -1133,11 +1232,14 @@ export function HomePage() {
       getChatSelectionEpoch: () => chatSelectionEpochRef.current,
       scopeKey: sendScopeKey,
       onNewChatMessageSent: clients?.memmyAgent
-        ? (chatId) => refreshAgentTaskList(clients.memmyAgent, dispatch, {
+        ? (chatId) => {
+          rememberFirstEncounterRelayChatIfArmed(chatId);
+          refreshAgentTaskList(clients.memmyAgent, dispatch, {
             expectedChatId: chatId,
             reason: "new-chat",
             state: state.agent
-          })
+          });
+        }
         : undefined
     });
   }
@@ -1855,6 +1957,9 @@ export function HomePage() {
                 chatScopeKey={chatScopeKey}
                 historyVersion={currentHistoryVersion}
                 messages={state.agent.messages}
+                afterMessageId={firstEncounterRelayAnchorMessageId}
+                afterMessageContent={firstEncounterRelayContent}
+                forceMessageActionsForMessageId={firstEncounterRelayAnswerMessageId}
                 retryWaitStatus={state.agent.currentChatId ? state.agent.retryWaitStatusByChatId[state.agent.currentChatId] ?? null : null}
                 isSending={state.agent.isSending}
                 sanitizePlatformApiErrors={sanitizePlatformApiErrors}
@@ -2393,4 +2498,39 @@ function formatBytes(bytes: number): string {
 
 function isMessageKey(value: string): value is MessageKey {
   return Object.prototype.hasOwnProperty.call(zhCNMessages, value);
+}
+
+export function hasCompletedAssistantAnswer(messages: AgentChatMessage[]): boolean {
+  return firstCompletedAssistantAnswerMessageId(messages) !== null;
+}
+
+export function firstCompletedAssistantAnswerMessageId(messages: AgentChatMessage[]): string | null {
+  const message = firstTurnMessages(messages).find((candidate) => (
+    candidate.role === "assistant"
+    && !candidate.isStreaming
+    && candidate.kind !== "trace"
+    && candidate.kind !== "narration"
+    && candidate.kind !== "context_compaction"
+    && candidate.content.trim().length > 0
+  ));
+  return message?.id || null;
+}
+
+/** Last event of the first task, so supplemental UI follows all of its activity. */
+export function firstTurnTerminalMessageId(messages: AgentChatMessage[]): string | null {
+  const firstTurn = firstTurnMessages(messages);
+  return firstCompletedAssistantAnswerMessageId(messages) ? firstTurn.at(-1)?.id ?? null : null;
+}
+
+function firstTurnWasStoppedByUser(messages: AgentChatMessage[]): boolean {
+  return firstTurnMessages(messages).some((message) => message.stoppedByUser === true);
+}
+
+function firstTurnMessages(messages: AgentChatMessage[]): AgentChatMessage[] {
+  const firstUserIndex = messages.findIndex((message) => message.role === "user");
+  if (firstUserIndex < 0) {
+    return [];
+  }
+  const nextUserIndex = messages.findIndex((message, index) => index > firstUserIndex && message.role === "user");
+  return messages.slice(firstUserIndex, nextUserIndex < 0 ? undefined : nextUserIndex);
 }

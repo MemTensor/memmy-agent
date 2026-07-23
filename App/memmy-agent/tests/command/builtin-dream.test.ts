@@ -1,6 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { InboundMessage } from "../../src/core/runtime-messages/events.js";
-import { cmdDreamLog, cmdDreamRestore } from "../../src/command/builtin.js";
+import {
+  buildHelpText,
+  builtinCommandPalette,
+  cmdDream,
+  cmdDreamLog,
+  cmdDreamRestore,
+} from "../../src/command/builtin.js";
 import { CommandContext } from "../../src/command/router.js";
 import { CommitInfo } from "../../src/utils/gitstore.js";
 
@@ -43,7 +49,13 @@ class FakeGit {
   }
 }
 
-function makeCtx(raw: string, git: FakeGit, args = "", lastDreamCursor = 1): CommandContext {
+function makeCtx(
+  raw: string,
+  git: FakeGit,
+  args = "",
+  lastDreamCursor = 1,
+  fileMemoryEnabled = true,
+): CommandContext {
   const msg = new InboundMessage({ channel: "cli", senderId: "u1", chatId: "direct", content: raw });
   return new CommandContext({
     msg,
@@ -51,9 +63,66 @@ function makeCtx(raw: string, git: FakeGit, args = "", lastDreamCursor = 1): Com
     key: msg.sessionKey,
     raw,
     args,
-    loop: { consolidator: { store: new FakeStore(git, lastDreamCursor) } },
+    loop: {
+      fileMemoryEnabled,
+      consolidator: { store: new FakeStore(git, lastDreamCursor) },
+    },
   });
 }
+
+describe("Dream command availability", () => {
+  it("hides Dream commands by default and exposes them only when enabled", () => {
+    expect(builtinCommandPalette().map((entry) => entry.command)).not.toContain(
+      "/dream",
+    );
+    expect(buildHelpText()).not.toContain("/dream");
+    expect(
+      builtinCommandPalette({ fileMemoryEnabled: true }).map(
+        (entry) => entry.command,
+      ),
+    ).toEqual(
+      expect.arrayContaining(["/dream", "/dream-log", "/dream-restore"]),
+    );
+    expect(buildHelpText({ fileMemoryEnabled: true })).toContain("/dream");
+  });
+
+  it("guards manual Dream commands without touching Dream or Git", async () => {
+    const git = new FakeGit();
+    const log = vi.spyOn(git, "log");
+    const revert = vi.spyOn(git, "revert");
+    const dreamRun = vi.fn();
+    const scheduleBackground = vi.fn();
+    const msg = new InboundMessage({
+      channel: "cli",
+      senderId: "u1",
+      chatId: "direct",
+      content: "/dream",
+    });
+    const disabled = new CommandContext({
+      msg,
+      key: msg.sessionKey,
+      raw: "/dream",
+      loop: {
+        fileMemoryEnabled: false,
+        dream: { run: dreamRun },
+        scheduleBackground,
+        bus: { publishOutbound: vi.fn() },
+        consolidator: { store: new FakeStore(git) },
+      },
+    });
+
+    for (const command of [cmdDream, cmdDreamLog, cmdDreamRestore]) {
+      const out = await command(disabled);
+      expect(out.content).toBe(
+        "File memory is disabled by fileMemory.enabled=false.",
+      );
+    }
+    expect(dreamRun).not.toHaveBeenCalled();
+    expect(scheduleBackground).not.toHaveBeenCalled();
+    expect(log).not.toHaveBeenCalled();
+    expect(revert).not.toHaveBeenCalled();
+  });
+});
 
 describe("dream log command", () => {
   it("formats the latest dream change with friendly next steps", async () => {

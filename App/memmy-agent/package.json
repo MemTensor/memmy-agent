@@ -14,7 +14,7 @@
     "pretypecheck": "npm run version:sync",
     "pretest": "npm run version:sync",
     "pretest:tui-cursor": "npm run version:sync",
-    "build": "tsc -p tsconfig.build.json && find src/templates src/skills -type f ! -name '*.ts' -exec sh -c 'for file do target=\"dist/${file#src/}\"; mkdir -p \"$(dirname \"$target\")\"; cp -p \"$file\" \"$target\"; done' sh {} +",
+    "build": "tsc -p tsconfig.build.json && node -e 'const fs=require(\"node:fs\"); for (const target of [\"dist/skills/memory\",\"dist/skills/my\"]) fs.rmSync(target,{recursive:true,force:true}); for (const target of [\"dist/core/agent-runtime/tools/self.js\",\"dist/core/agent-runtime/tools/self.js.map\",\"dist/core/agent-runtime/tools/self.d.ts\",\"dist/core/agent-runtime/tools/runtime-state.js\",\"dist/core/agent-runtime/tools/runtime-state.js.map\",\"dist/core/agent-runtime/tools/runtime-state.d.ts\"]) fs.rmSync(target,{force:true})' && find src/templates src/skills -type f ! -name '*.ts' -exec sh -c 'for file do target=\"dist/${file#src/}\"; mkdir -p \"$(dirname \"$target\")\"; cp -p \"$file\" \"$target\"; done' sh {} +",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:tui-cursor": "vitest run tests/entrypoints/cli/tui-cursor.test.ts",

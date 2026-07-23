@@ -6,21 +6,9 @@ export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonObject | JsonValue[];
 export type JsonObject = { readonly [key: string]: JsonValue };
 
-/** Implementation of jsonl parse error. */
-export class JsonlParseError extends Error {
-  constructor(
-    public readonly filePath: string,
-    public readonly lineNumber: number,
-    cause: unknown
-  ) {
-    super(`invalid JSON at ${filePath}:${lineNumber}`);
-    this.name = "JsonlParseError";
-    this.cause = cause;
-  }
-}
-
 /**
- * Streams a JSONL file.
+ * Streams valid object rows from a JSONL file.
+ * Malformed and non-object rows are skipped without interrupting the stream.
  *
  * @param filePath JSONL file path.
  * @param signal Optional abort signal.
@@ -32,11 +20,9 @@ export async function* readJsonlObjects(filePath: string, signal?: AbortSignal):
     input: stream,
     crlfDelay: Number.POSITIVE_INFINITY
   });
-  let lineNumber = 0;
 
   try {
     for await (const line of lines) {
-      lineNumber += 1;
       throwIfAborted(signal, filePath);
       if (line.trim().length === 0) {
         continue;
@@ -45,12 +31,12 @@ export async function* readJsonlObjects(filePath: string, signal?: AbortSignal):
       let parsed: unknown;
       try {
         parsed = JSON.parse(line);
-      } catch (error) {
-        throw new JsonlParseError(filePath, lineNumber, error);
+      } catch {
+        continue;
       }
 
       if (!isJsonObject(parsed)) {
-        throw new JsonlParseError(filePath, lineNumber, new Error("line is not a JSON object"));
+        continue;
       }
 
       yield parsed;

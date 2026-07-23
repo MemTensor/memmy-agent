@@ -1,4 +1,8 @@
-import { describe, expect, it } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { loadConfig, saveConfig } from "../../src/config/loader.js";
 import { WebSocketConfig } from "../../src/integrations/channels/websocket.js";
 import { DEFAULT_MAX_TOKENS } from "../../src/token-budget.js";
 import {
@@ -13,7 +17,101 @@ import {
   SessionDagConfig,
 } from "../../src/config/schema.js";
 
+const roots: string[] = [];
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  for (const root of roots.splice(0)) {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function configFile(contents = ""): string {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-config-schema-"));
+  roots.push(root);
+  const file = path.join(root, "config.yaml");
+  fs.writeFileSync(file, contents, "utf8");
+  return file;
+}
+
 describe("config schema validation", () => {
+  it("defaults file memory off and preserves explicit booleans", () => {
+    const defaults = new Config();
+    const enabled = new Config({ fileMemory: { enabled: true } });
+    const disabled = new Config({ fileMemory: { enabled: false } });
+
+    expect(defaults.fileMemory.enabled).toBe(false);
+    expect(new Config({ fileMemory: {} }).fileMemory.enabled).toBe(false);
+    expect(enabled.fileMemory.enabled).toBe(true);
+    expect(disabled.fileMemory.enabled).toBe(false);
+    expect(defaults.toObject().fileMemory).toEqual({ enabled: false });
+    expect(enabled.toObject().fileMemory).toEqual({ enabled: true });
+  });
+
+  it.each([
+    [{ fileMemory: null }, /fileMemory must be an object/],
+    [{ fileMemory: [] }, /fileMemory must be an object/],
+    [{ fileMemory: "false" }, /fileMemory must be an object/],
+    [{ fileMemory: 0 }, /fileMemory must be an object/],
+    [{ fileMemory: { enabled: "false" } }, /fileMemory\.enabled/],
+    [{ fileMemory: { enabled: 0 } }, /fileMemory\.enabled/],
+    [{ fileMemory: { enabled: null } }, /fileMemory\.enabled/],
+  ])("rejects invalid file memory config %#", (input, error) => {
+    expect(() => new Config(input as any)).toThrow(error);
+  });
+
+  it("does not accept aliases or couple file memory to memmy memory", () => {
+    expect(new Config({ fileMemory: { enable: true } }).fileMemory.enabled).toBe(false);
+    expect(
+      new Config({
+        agents: { defaults: { fileMemory: { enabled: true } } },
+      } as any).fileMemory.enabled,
+    ).toBe(false);
+
+    for (const fileMemoryEnabled of [false, true]) {
+      for (const memmyMemoryEnabled of [false, true]) {
+        const config = new Config({
+          fileMemory: { enabled: fileMemoryEnabled },
+          memmyMemory: { enabled: memmyMemoryEnabled },
+        });
+        expect(config.fileMemory.enabled).toBe(fileMemoryEnabled);
+        expect(config.memmyMemory.enabled).toBe(memmyMemoryEnabled);
+      }
+    }
+  });
+
+  it("round-trips explicit file memory booleans through config files", () => {
+    for (const enabled of [false, true]) {
+      const file = configFile();
+      saveConfig(new Config({ fileMemory: { enabled } }), file);
+      expect(loadConfig(file).fileMemory.enabled).toBe(enabled);
+    }
+  });
+
+  it.each([
+    "fileMemory: null\n",
+    "fileMemory: []\n",
+    "fileMemory: false\n",
+    "fileMemory:\n  enabled: \"false\"\n",
+    "fileMemory:\n  enabled: 0\n",
+    "fileMemory:\n  enabled: null\n",
+  ])("rejects invalid file memory YAML without rewriting it", (contents) => {
+    const file = configFile(contents);
+
+    expect(() => loadConfig(file)).toThrow(/fileMemory/);
+    expect(fs.readFileSync(file, "utf8")).toBe(contents);
+  });
+
+  it("keeps the existing fallback behavior for unrelated invalid sections", () => {
+    const file = configFile("sessionDag:\n  debugLog: \"true\"\n");
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const loaded = loadConfig(file);
+
+    expect(loaded.sessionDag.debugLog).toBe(true);
+    expect(loaded.fileMemory.enabled).toBe(false);
+  });
+
   it("validates AgentDefaults numeric bounds and enums", () => {
     expect(DEFAULT_MAX_TOKENS).toBe(65_536);
     expect(new AgentDefaults().maxTokens).toBe(DEFAULT_MAX_TOKENS);

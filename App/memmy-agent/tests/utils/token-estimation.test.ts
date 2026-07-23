@@ -128,10 +128,20 @@ describe("estimatePromptTokensChain", () => {
     fs.writeFileSync(path.join(workspace, "AGENTS.md"), "custom", "utf8");
     const added = syncWorkspaceTemplates(workspace);
     expect(fs.readFileSync(path.join(workspace, "AGENTS.md"), "utf8")).toBe("custom");
-    expect(added).toContain(path.join("memory", "MEMORY.md"));
+    expect(added).not.toContain(path.join("memory", "MEMORY.md"));
     expect(added).not.toContain("TOOLS.md");
-    expect(fs.existsSync(path.join(workspace, ".git"))).toBe(true);
-    expect(fs.existsSync(path.join(workspace, "memory", ".dreamCursor"))).toBe(true);
+    expect(fs.existsSync(path.join(workspace, ".git"))).toBe(false);
+    expect(fs.existsSync(path.join(workspace, "memory", ".dreamCursor"))).toBe(false);
+
+    const enabledWorkspace = path.join(root, "enabled-workspace");
+    const enabledAdded = syncWorkspaceTemplates(enabledWorkspace, undefined, {
+      fileMemoryEnabled: true,
+    });
+    expect(enabledAdded).toContain(path.join("memory", "MEMORY.md"));
+    expect(fs.existsSync(path.join(enabledWorkspace, ".git"))).toBe(true);
+    expect(
+      fs.existsSync(path.join(enabledWorkspace, "memory", ".dreamCursor")),
+    ).toBe(true);
 
     fs.rmSync(root, { recursive: true, force: true });
   });

@@ -234,6 +234,15 @@ describe("CLI command helpers", () => {
     expect(raw.agents.defaults.maxTokens).toBe(65_536);
     expect(raw.channels.websocket).toEqual(expect.objectContaining({ enabled: true }));
     expect(raw.channels.slack).toEqual(expect.objectContaining({ enabled: false }));
+    expect(raw.fileMemory).toEqual({ enabled: false });
+    expect(config.fileMemory.enabled).toBe(false);
+    expect(fs.existsSync(path.join(workspace, "memory", "history.jsonl"))).toBe(
+      true,
+    );
+    expect(fs.existsSync(path.join(workspace, "memory", "MEMORY.md"))).toBe(
+      false,
+    );
+    expect(fs.existsSync(path.join(workspace, ".git"))).toBe(false);
 
     expect(fs.existsSync(path.join(legacyDir, "jobs.json"))).toBe(true);
     expect(fs.existsSync(path.join(workspace, "cron", "jobs.json"))).toBe(false);
@@ -441,6 +450,7 @@ describe("CLI command helpers", () => {
     const workspace = path.join(root, "workspace");
     const configPath = writeConfig(root, {
       agents: { defaults: { workspace, model: "openai/test-model" } },
+      fileMemory: { enabled: true },
       channels: {
         websocket: { enabled: true, port: 0 },
       },
@@ -463,6 +473,7 @@ describe("CLI command helpers", () => {
       workspace,
       model: "agent_chat",
       unifiedSession: false,
+      fileMemoryEnabled: true,
       tools: { get: vi.fn(() => undefined) },
       provider: null,
       refreshProviderSnapshot: vi.fn(() => {
@@ -548,6 +559,7 @@ describe("CLI command helpers", () => {
     expect(fakeLoop.processMessage).not.toHaveBeenCalled();
     expect(fs.existsSync(path.join(workspace, "AGENTS.md"))).toBe(true);
     expect(runtime.cron.listJobs({ includeDisabled: true }).map((job) => job.id)).toContain("dream");
+    expect((websocketChannel as WebSocketChannel).fileMemoryEnabled).toBe(true);
     await runtime.stop();
     expect(fakeLoop.stop).toHaveBeenCalledTimes(1);
   });
@@ -620,6 +632,7 @@ describe("CLI command helpers", () => {
       workspace,
       model: "agent_chat",
       unifiedSession: false,
+      fileMemoryEnabled: false,
       tools: { get: vi.fn(() => undefined) },
       provider: null,
       refreshProviderSnapshot: vi.fn(),
@@ -667,6 +680,33 @@ describe("CLI command helpers", () => {
       state: new CronJobState({ nextRunAtMs }),
     });
   }
+
+  it("removes and guards Dream cron when file memory is disabled", async () => {
+    const processDirect = vi.fn();
+    const { runtime, fakeLoop } = await startCronGatewayWithFakeLoop({
+      processDirect,
+    });
+    try {
+      expect(
+        runtime.cron
+          .listJobs({ includeDisabled: true })
+          .map((job) => job.id),
+      ).not.toContain("dream");
+      const result = await runtime.cron.onJob?.(
+        new CronJob({
+          id: "dream",
+          name: "dream",
+          schedule: new CronSchedule({ kind: "every", everyMs: 60_000 }),
+          payload: new CronPayload({ kind: "systemEvent" }),
+        }),
+      );
+      expect(result).toBe("File memory is disabled.");
+      expect(fakeLoop.dream.run).not.toHaveBeenCalled();
+      expect(processDirect).not.toHaveBeenCalled();
+    } finally {
+      await runtime.stop();
+    }
+  });
 
   it("delivers WebUI cron fallback messages as non-streaming proactive transcript messages", async () => {
     const processDirect = vi.fn(async () => ({ content: "cron final", metadata: {} }));
@@ -1247,8 +1287,26 @@ describe("CLI command parity with memmy test_commands", () => {
     expect(config.agents.defaults.workspace).toBe(workspace);
     expect(fs.existsSync(configPath)).toBe(true);
     expect(fs.existsSync(path.join(workspace, "AGENTS.md"))).toBe(true);
-    expect(fs.existsSync(path.join(workspace, "memory", "MEMORY.md"))).toBe(true);
+    expect(fs.existsSync(path.join(workspace, "memory", "MEMORY.md"))).toBe(false);
+    expect(config.fileMemory.enabled).toBe(false);
     expect(log).toHaveBeenCalledWith("memmy is ready");
+  });
+
+  it("onboard preserves explicit file memory enablement", async () => {
+    const root = tempRoot();
+    const configPath = writeConfig(root, {
+      fileMemory: { enabled: true },
+    });
+    const workspace = path.join(root, "workspace");
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+    const config = await onboard({ config: configPath, workspace });
+    const raw = YAML.parse(fs.readFileSync(configPath, "utf8"));
+
+    expect(config.fileMemory.enabled).toBe(true);
+    expect(raw.fileMemory.enabled).toBe(true);
+    expect(fs.existsSync(path.join(workspace, "memory", "MEMORY.md"))).toBe(true);
+    expect(fs.existsSync(path.join(workspace, ".git"))).toBe(true);
   });
 
   it("onboard existing config refresh", async () => {

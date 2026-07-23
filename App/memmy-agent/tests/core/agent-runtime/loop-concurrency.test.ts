@@ -14,10 +14,13 @@ function tmpRoot(): string {
   return root;
 }
 
-function makeLoop(): AgentLoop {
+function makeLoop(fileMemoryEnabled = false): AgentLoop {
   return new AgentLoop({
     bus: new MessageBus(),
-    config: new Config({ memmyMemory: { enabled: false } }),
+    config: new Config({
+      fileMemory: { enabled: fileMemoryEnabled },
+      memmyMemory: { enabled: false },
+    }),
     provider: {
       generation: { maxTokens: 4096 },
       getDefaultModel: () => "test-model",
@@ -114,7 +117,7 @@ describe("AgentLoop concurrent chat turns", () => {
 
   it("keeps archived image artifact paths out of other session prompts", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
-    const loop = makeLoop();
+    const loop = makeLoop(true);
     loop.context.memory.rawArchive(
       [{ role: "tool", content: '{"artifacts":[{"path":"/media/wonton-a.png"}]}' }],
       { sessionKey: "websocket:chat-1" },

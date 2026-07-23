@@ -186,6 +186,16 @@ export async function preparePackagedRuntimeConfig(
   const defaults = ensureRecord(agents, "defaults");
 
   let changed = false;
+  if (!Object.prototype.hasOwnProperty.call(config, "fileMemory")) {
+    config.fileMemory = { enabled: false };
+    changed = true;
+  } else if (
+    isRecord(config.fileMemory) &&
+    !Object.prototype.hasOwnProperty.call(config.fileMemory, "enabled")
+  ) {
+    config.fileMemory.enabled = false;
+    changed = true;
+  }
   changed = repairMemoryActiveProfile(memmyMemory) || changed;
   const defaultWorkspace = join(memmyHome, "workspace");
   const configuredWorkspace = stringValue(defaults.workspace);

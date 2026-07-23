@@ -45,15 +45,38 @@ export const BUILTIN_COMMAND_SPECS = [
   new BuiltinCommandSpec("/pairing", "Manage pairing", "List, approve, deny or revoke pairing requests.", "shield", "[list|approve <code>|deny <code>|revoke <user_id>]"),
 ];
 
-export function builtinCommandPalette(options: { sessionDagEnabled?: boolean } = {}): Record<string, string>[] {
+type BuiltinCommandOptions = {
+  sessionDagEnabled?: boolean;
+  fileMemoryEnabled?: boolean;
+};
+
+const DREAM_COMMANDS = new Set(["/dream", "/dream-log", "/dream-restore"]);
+const FILE_MEMORY_DISABLED_MESSAGE =
+  "File memory is disabled by fileMemory.enabled=false.";
+
+function filteredBuiltinCommandSpecs(
+  options: BuiltinCommandOptions = {},
+): BuiltinCommandSpec[] {
   return BUILTIN_COMMAND_SPECS
     .filter((spec) => options.sessionDagEnabled !== false || spec.command !== "/history-dag")
-    .map((spec) => spec.asDict());
+    .filter(
+      (spec) =>
+        options.fileMemoryEnabled === true ||
+        !DREAM_COMMANDS.has(spec.command),
+    );
 }
 
-export function buildHelpText(): string {
+export function builtinCommandPalette(
+  options: BuiltinCommandOptions = {},
+): Record<string, string>[] {
+  return filteredBuiltinCommandSpecs(options).map((spec) => spec.asDict());
+}
+
+export function buildHelpText(
+  options: Pick<BuiltinCommandOptions, "fileMemoryEnabled"> = {},
+): string {
   const lines = ["memmy commands:"];
-  for (const spec of BUILTIN_COMMAND_SPECS) {
+  for (const spec of filteredBuiltinCommandSpecs(options)) {
     const cmd = spec.argHint ? `${spec.command} ${spec.argHint}` : spec.command;
     lines.push(`${cmd} - ${spec.description}`);
   }
@@ -313,6 +336,9 @@ function formatDreamLogContent(commit: any, diff: string, requestedSha?: string)
 }
 
 export async function cmdDreamLog(ctx: CommandContext): Promise<OutboundMessage> {
+  if (ctx.loop?.fileMemoryEnabled !== true) {
+    return reply(ctx, FILE_MEMORY_DISABLED_MESSAGE, { renderAs: "text" });
+  }
   const store = ctx.loop?.consolidator?.store;
   const git = store?.git;
   if (!git?.isInitialized?.()) {
@@ -343,6 +369,9 @@ function formatDreamRestoreList(commits: any[]): string {
 }
 
 export async function cmdDreamRestore(ctx: CommandContext): Promise<OutboundMessage> {
+  if (ctx.loop?.fileMemoryEnabled !== true) {
+    return reply(ctx, FILE_MEMORY_DISABLED_MESSAGE, { renderAs: "text" });
+  }
   const git = ctx.loop?.consolidator?.store?.git;
   if (!git?.isInitialized?.()) return reply(ctx, "Dream history is not available because memory versioning is not initialized.", { renderAs: "text" });
   const args = ctx.args.trim();
@@ -365,7 +394,13 @@ export async function cmdPairing(ctx: CommandContext): Promise<OutboundMessage> 
 }
 
 export async function cmdHelp(ctx: CommandContext): Promise<OutboundMessage> {
-  return reply(ctx, buildHelpText(), { renderAs: "text" });
+  return reply(
+    ctx,
+    buildHelpText({
+      fileMemoryEnabled: ctx.loop?.fileMemoryEnabled === true,
+    }),
+    { renderAs: "text" },
+  );
 }
 
 export async function cmdStatus(ctx: CommandContext): Promise<OutboundMessage> {
@@ -430,6 +465,9 @@ export async function cmdStatus(ctx: CommandContext): Promise<OutboundMessage> {
 }
 
 export async function cmdDream(ctx: CommandContext): Promise<OutboundMessage> {
+  if (ctx.loop?.fileMemoryEnabled !== true) {
+    return reply(ctx, FILE_MEMORY_DISABLED_MESSAGE);
+  }
   const loop = ctx.loop;
   const msg = ctx.msg;
   const publish = async (content: string) => {

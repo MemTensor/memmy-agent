@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { JsonlParseError, readJsonlObjects } from "../jsonl-lines.js";
+import { readJsonlObjects } from "../jsonl-lines.js";
 
 let tempDir: string | undefined;
 
@@ -21,14 +21,16 @@ describe("readJsonlObjects", () => {
     await expect(collect(readJsonlObjects(filePath))).resolves.toEqual([{ a: 1 }, { b: 2 }]);
   });
 
-  it("throws JsonlParseError with file path and line number for invalid JSON", async () => {
-    const filePath = writeJsonl(['{"a":1}', "not-json"]);
+  it("skips malformed and non-object rows while continuing with later records", async () => {
+    const filePath = writeJsonl([
+      '{"a":1}',
+      "not-json",
+      "[]",
+      '{"truncated":',
+      '{"b":2}'
+    ]);
 
-    await expect(collect(readJsonlObjects(filePath))).rejects.toMatchObject({
-      filePath,
-      lineNumber: 2
-    });
-    await expect(collect(readJsonlObjects(filePath))).rejects.toBeInstanceOf(JsonlParseError);
+    await expect(collect(readJsonlObjects(filePath))).resolves.toEqual([{ a: 1 }, { b: 2 }]);
   });
 
   it("honors an already aborted signal", async () => {

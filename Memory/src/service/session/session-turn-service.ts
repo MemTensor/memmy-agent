@@ -1858,9 +1858,7 @@ export class SessionTurnService {
         : undefined,
       prevTags: relationContext.tags
     }, {
-      llm: this.deps.config.activeProfile === "account"
-        ? this.deps.skillLlm
-        : this.deps.llm
+      llm: this.deps.llm
     });
     return this.applyEpisodeRelationDecision(session, latest, decision, userText, source, relationContext.lastTurnAtMs);
   }

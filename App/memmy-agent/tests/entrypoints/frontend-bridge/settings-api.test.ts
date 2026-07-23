@@ -98,7 +98,10 @@ describe("webui settings api", () => {
 
   it("updates agent settings with validation and restart metadata", () => {
     const file = useConfigFile();
-    saveConfig(new Config(), file);
+    saveConfig(
+      new Config({ fileMemory: { enabled: false } }),
+      file,
+    );
 
     const payload = updateAgentSettings({
       model: ["anthropic/claude-sonnet-4-5"],
@@ -115,6 +118,7 @@ describe("webui settings api", () => {
     const saved = loadConfig(file);
     expect(saved.agents.defaults.timezone).toBe("Asia/Shanghai");
     expect(saved.agents.defaults.botName).toBe("memmy");
+    expect(saved.fileMemory.enabled).toBe(false);
     expect(() => updateAgentSettings({ timezone: ["Mars/Base"] })).toThrow(/invalid timezone/);
   });
 

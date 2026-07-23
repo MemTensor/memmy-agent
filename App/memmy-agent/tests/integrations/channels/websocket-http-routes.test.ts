@@ -85,12 +85,14 @@ describe("WebSocket HTTP route helpers", () => {
     staticDistPath = null,
     runtimeModelName = null,
     workspacePath = null,
+    fileMemoryEnabled = false,
     config = {},
   }: {
     sessionManager?: SessionManager | null;
     staticDistPath?: string | null;
     runtimeModelName?: (() => string | null | undefined) | null;
     workspacePath?: string | null;
+    fileMemoryEnabled?: boolean;
     config?: Record<string, any>;
   } = {}): WebSocketChannel {
     return new WebSocketChannel(
@@ -104,7 +106,13 @@ describe("WebSocket HTTP route helpers", () => {
         ...config,
       },
       new MessageBus(),
-      { sessionManager, staticDistPath, runtimeModelName, workspacePath },
+      {
+        sessionManager,
+        staticDistPath,
+        runtimeModelName,
+        workspacePath,
+        fileMemoryEnabled,
+      },
     );
   }
 
@@ -899,6 +907,43 @@ describe("WebSocket HTTP route helpers", () => {
     const port = await startChannel(channel);
     const response = await fetch(`http://127.0.0.1:${port}/api/unknown`);
     expect(response.status).toBe(404);
+  });
+
+  it("projects the runtime file memory snapshot into the command palette", () => {
+    const root = tmpRoot();
+    const configPath = path.join(root, "config.yaml");
+    process.env.MEMMY_CONFIG = configPath;
+    fs.writeFileSync(
+      configPath,
+      "fileMemory:\n  enabled: true\nsessionDag:\n  enabled: true\n",
+      "utf8",
+    );
+    const disabled = makeChannel({ fileMemoryEnabled: false });
+    const enabled = makeChannel({ fileMemoryEnabled: true });
+    vi.spyOn(disabled as any, "checkApiToken").mockReturnValue(true);
+    vi.spyOn(enabled as any, "checkApiToken").mockReturnValue(true);
+
+    const disabledCommands = responseJson(
+      (disabled as any).handleCommands({}),
+    ).commands.map((entry: any) => entry.command);
+    const enabledCommands = responseJson(
+      (enabled as any).handleCommands({}),
+    ).commands.map((entry: any) => entry.command);
+
+    expect(disabledCommands).not.toContain("/dream");
+    expect(enabledCommands).toEqual(
+      expect.arrayContaining(["/dream", "/dream-log", "/dream-restore"]),
+    );
+
+    fs.writeFileSync(
+      configPath,
+      "fileMemory:\n  enabled: false\nsessionDag:\n  enabled: true\n",
+      "utf8",
+    );
+    const afterDiskChange = responseJson(
+      (enabled as any).handleCommands({}),
+    ).commands.map((entry: any) => entry.command);
+    expect(afterDiskChange).toContain("/dream");
   });
 
   it("purges expired API tokens while keeping live tokens", () => {
