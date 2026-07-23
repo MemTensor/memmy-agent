@@ -1321,7 +1321,7 @@ export function PetPageView({ bus, mainRoute = "/main", onNavigate, onPetWindowC
 
   useEffect(() => {
     if (focusedTask && (focusedTask.status === "done" || focusedTask.status === "error") && !focusedTask.dismissed) {
-      bus.dismissTask(focusedTask.id);
+      bus.focusTask(null);
     }
   }, []);
 
