@@ -471,14 +471,40 @@ describe("WebSocket HTTP route helpers", () => {
     expect(loadConfig(process.env.MEMMY_CONFIG).tools.imageGeneration.apiKey).toBe("sk-route-secret");
   });
 
-  it("lists only websocket sessions on the WebUI sessions route", async () => {
-    const manager = seedMany(tmpRoot(), ["cli:direct", "slack:C123", "lark:oc_abc", "websocket:alpha", "websocket:beta"]);
+  it("lists desktop and WeChat sessions on the WebUI sessions route", async () => {
+    const manager = seedMany(tmpRoot(), ["cli:direct", "slack:C123", "lark:oc_abc", "weixin:wx-user", "websocket:alpha", "websocket:beta"]);
     const channel = makeChannel({ sessionManager: manager });
     const port = await startChannel(channel);
     const listing = await fetch(`http://127.0.0.1:${port}/api/sessions`, { headers: await authHeaders(port) });
     expect(listing.status).toBe(200);
     const keys = new Set(((await listing.json()) as any).sessions.map((session: any) => session.key));
-    expect(keys).toEqual(new Set(["websocket:alpha", "websocket:beta"]));
+    expect(keys).toEqual(new Set(["weixin:wx-user", "websocket:alpha", "websocket:beta"]));
+  });
+
+  it("opens persisted WeChat messages without a WebUI transcript", async () => {
+    const root = tmpRoot();
+    const manager = new SessionManager(root);
+    const session = new Session({ key: "weixin:wx-user" });
+    session.addMessage("user", "微信里的问题", { timestamp: "2026-07-23T02:00:00.000Z" });
+    session.addMessage("assistant", "微信里的回答", { timestamp: "2026-07-23T02:00:01.000Z" });
+    manager.save(session);
+
+    const channel = makeChannel({ sessionManager: manager });
+    const port = await startChannel(channel);
+    const response = await fetch(
+      `http://127.0.0.1:${port}/api/sessions/${encodeURIComponent("weixin:wx-user")}/webui-thread`,
+      { headers: await authHeaders(port) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      sessionKey: "weixin:wx-user",
+      last_turn_closed: true,
+      messages: [
+        { role: "user", content: "微信里的问题" },
+        { role: "assistant", content: "微信里的回答" },
+      ],
+    });
   });
 
   it("uses session message timestamps for WebUI thread messages when transcripts omit time", () => {
@@ -855,7 +881,7 @@ describe("WebSocket HTTP route helpers", () => {
     expect(fs.existsSync(manager.pathFor("websocket:encoded-key"))).toBe(false);
   });
 
-  it("rejects non-websocket session keys for direct session routes", async () => {
+  it("rejects session keys that are not visible in the desktop history", async () => {
     const manager = seedMany(tmpRoot(), ["websocket:kept", "cli:direct", "slack:C123"]);
     const channel = makeChannel({ sessionManager: manager });
     const port = await startChannel(channel);
