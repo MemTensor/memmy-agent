@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { AgentSourceStatus, ScanPermission } from "@memmy/local-api-contracts";
 import { ArrowRight, ArrowRightLeft, Check, Copy, ExternalLink, Loader2 } from "lucide-react";
 import { useTranslation } from "../i18n/use-translation.js";
+import type { MessageKey, MessageValues } from "../i18n/messages.js";
 import { agentSourceDisplayName, agentSourceLogoUrl, normalizeAgentSourceId } from "./agent-source-logos.js";
 
 export interface RelayAgentOption {
@@ -209,7 +210,7 @@ function relayAgentName(agent: RelayAgentOption): string {
 
 function relayFeedbackStatus(
   feedback: RelayFeedback | null,
-  t: (key: string, vars?: Record<string, string | number>) => string
+  t: (key: MessageKey, values?: MessageValues) => string
 ): { tone: "info" | "danger"; text: string } | null {
   if (!feedback || feedback.kind === "copied") {
     return null;
