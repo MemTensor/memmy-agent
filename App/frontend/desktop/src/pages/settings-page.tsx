@@ -1,5 +1,5 @@
 /** Settings page module. */
-import { useEffect, useRef, useState, type CSSProperties, type Dispatch, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type Dispatch, type ReactNode } from "react";
 import { Brain, Palette, Rocket, Settings2, Shield, User, Zap, ArrowRight, ArrowLeft, Bell, ExternalLink, FolderOpen, Info, LogOut, Wrench, Search, Eye, EyeOff, ChevronDown, ChevronUp, ChevronRight, Database, Loader2, CheckCircle2, XCircle, Check, AlertTriangle, ArrowDownToLine, ArrowUpFromLine, MessageSquare, FileText, Sparkles, Mic, Image as ImageIcon } from "lucide-react";
 import type { AppSettingsDto, ByokTokenUsageByKind, ByokTokenUsageKind, ByokTokenUsageSummary, Language, PrivacySettingsDto, TokenUsageDto } from "@memmy/local-api-contracts";
 import { useApiClients } from "../app/providers.js";
@@ -212,7 +212,7 @@ export interface SettingsPageViewProps {
 }
 
 /** Returns whether a nickname input key event should save the current draft. */
-export function shouldSaveAccountNicknameOnKeyDown(event: ReactKeyboardEvent<HTMLInputElement>): boolean {
+export function shouldSaveAccountNicknameOnKeyDown(event: import("react").KeyboardEvent<HTMLInputElement>): boolean {
   return event.key === "Enter" && !isComposingKeyboardEvent(event);
 }
 
