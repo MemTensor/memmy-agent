@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { formatAgentModelError, formatRetryWaitStatus, isAgentModelErrorContent, shouldSuppressRetryWaitStatus } from "../agent-model-error.js";
+import { classifyAgentApiError, formatAgentModelError, formatRetryWaitStatus, isAgentModelErrorContent, shouldSuppressRetryWaitStatus } from "../agent-model-error.js";
 
 const t = (key: string, values?: Record<string, string | number>) => {
   if (key === "agent.error.connectionFailed") return "无法连接到模型服务";
   if (key === "agent.error.retrying") return `${values?.seconds}s 后重试（第 ${values?.attempt} 次）`;
   if (key === "agent.error.givingUp") return "模型请求多次重试后仍失败";
   if (key === "agent.error.modelFailed") return "模型请求失败";
+  if (key === "agent.error.quotaExceeded") return "用户 Token 额度已用完";
+  if (key === "agent.error.upstreamBillingUnavailable") return "云端模型服务计费异常";
+  if (key === "agent.error.upstreamRateLimited") return "云端模型服务繁忙，请稍后重试";
   return key;
 };
 
@@ -18,6 +21,17 @@ describe("agent-model-error", () => {
 
   it("formats connection failures into user-facing copy", () => {
     expect(formatAgentModelError("Error: 503 upstream connect error or disconnect/reset before headers", t).title).toBe("无法连接到模型服务");
+  });
+
+  it("classifies upstream billing separately from user Token quota", () => {
+    expect(classifyAgentApiError("Error: 403 用户额度不足，剩余额度: $ -0.039544")).toBe("upstream_billing_unavailable");
+    expect(formatAgentModelError("Error: 403 用户额度不足，剩余额度: $ -0.039544", t).title).toBe("云端模型服务计费异常");
+    expect(formatAgentModelError("Error: REQUEST_TOKEN_QUOTA_EXCEEDED", t).title).toBe("用户 Token 额度已用完");
+  });
+
+  it("classifies explicit upstream rate limits", () => {
+    expect(classifyAgentApiError("Error: UPSTREAM_RATE_LIMITED")).toBe("upstream_rate_limited");
+    expect(formatAgentModelError("Error: UPSTREAM_RATE_LIMITED", t).title).toBe("云端模型服务繁忙，请稍后重试");
   });
 
   it("maps auth failures to login-expired copy in account mode", () => {

@@ -222,6 +222,14 @@ describe("PetPage helpers", () => {
     expect(resolvePetAgentErrorMessage(new Error("连接失败"), "未接入")).toBe("连接失败");
     expect(resolvePetAgentErrorMessage({ reason: "missing content" }, "未接入")).toBe("missing content");
     expect(resolvePetAgentErrorMessage({}, "未接入")).toBe("未接入");
+    const translate = (kind: string) => ({
+      user_token_quota_exhausted: "用户 Token 额度已用完",
+      upstream_billing_unavailable: "云端模型服务计费异常",
+      upstream_rate_limited: "云端模型服务繁忙，请稍后重试",
+    } as Record<string, string>)[kind] ?? null;
+    expect(resolvePetAgentErrorMessage(new Error("403 用户额度不足，剩余额度: $ -0.039544"), "未接入", translate)).toBe("云端模型服务计费异常");
+    expect(resolvePetAgentErrorMessage(new Error("REQUEST_TOKEN_QUOTA_EXCEEDED"), "未接入", translate)).toBe("用户 Token 额度已用完");
+    expect(resolvePetAgentErrorMessage(new Error("UPSTREAM_RATE_LIMITED"), "未接入", translate)).toBe("云端模型服务繁忙，请稍后重试");
   });
 
   it("根据可见内容 union 生成动态原生窗口尺寸和桌宠锚点偏移", () => {
