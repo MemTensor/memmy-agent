@@ -5,7 +5,7 @@
  * component keeps activity grouped and renders the complete trace list returned
  * by live WebSocket events and /webui-thread history.
  */
-import { memo, useEffect, useMemo, useRef, useState, type CSSProperties, type ComponentType, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent, type SVGProps } from "react";
+import { Fragment, memo, useEffect, useMemo, useRef, useState, type CSSProperties, type ComponentType, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent, type ReactNode, type SVGProps } from "react";
 import { createPortal } from "react-dom";
 import {
   AlertCircle,
@@ -62,6 +62,10 @@ import {
 
 interface AgentThreadMessagesProps {
   messages: AgentChatMessage[];
+  afterMessageId?: string | null;
+  afterMessageContent?: ReactNode;
+  /** Shows standard reply actions on the final text reply when a supplement follows activity. */
+  forceMessageActionsForMessageId?: string | null;
   retryWaitStatus?: AgentRetryWaitStatus | null;
   artifactClient?: AgentArtifactClient | null;
   chatScopeKey: string;
@@ -182,32 +186,38 @@ export const AgentThreadMessages = memo(function AgentThreadMessages(props: Agen
           const manualOpen = manualOpenByActivityKey[unit.activityKey];
           const open = isAutoOpenRunning ? manualOpen ?? true : manualOpen ?? unit.stoppedByUser;
           return (
-            <AgentActivityCluster
-              key={unit.activityKey}
-              activityKey={unit.activityKey}
-              bodyId={unit.bodyId}
-              messages={unit.messages}
-              isRunning={isAutoOpenRunning}
-              stoppedByUser={unit.stoppedByUser}
-              open={open}
-              onToggle={() => setManualOpenByActivityKey((current) => ({ ...current, [unit.activityKey]: !open }))}
-              artifactClient={props.artifactClient}
-            />
+            <Fragment key={unit.activityKey}>
+              <AgentActivityCluster
+                activityKey={unit.activityKey}
+                bodyId={unit.bodyId}
+                messages={unit.messages}
+                isRunning={isAutoOpenRunning}
+                stoppedByUser={unit.stoppedByUser}
+                open={open}
+                onToggle={() => setManualOpenByActivityKey((current) => ({ ...current, [unit.activityKey]: !open }))}
+                artifactClient={props.artifactClient}
+              />
+              {unit.messages.some((message) => message.id === props.afterMessageId) ? props.afterMessageContent : null}
+            </Fragment>
           );
         }
+        const messageKey = unit.message.id || `${unit.message.role}-${index}`;
         return (
-          <SingleMessage
-            key={unit.message.id || `${unit.message.role}-${index}`}
-            message={unit.message}
-            artifactClient={props.artifactClient}
-            chatScopeKey={props.chatScopeKey}
-            unitIndex={index}
-            isFinalAssistantAnswer={index === finalAssistantAnswerIndex}
-            deferContentRender={shouldDeferAgentMessageContent(unit, index, units.length)}
-            deferredRevealDelayMs={deferredAgentMessageRevealDelay(index, units.length)}
-            sanitizePlatformApiErrors={props.sanitizePlatformApiErrors === true}
-            accountMode={props.accountMode === true}
-          />
+          <Fragment key={messageKey}>
+            <SingleMessage
+              message={unit.message}
+              artifactClient={props.artifactClient}
+              chatScopeKey={props.chatScopeKey}
+              unitIndex={index}
+              isFinalAssistantAnswer={index === finalAssistantAnswerIndex}
+              forceMessageActions={unit.message.id === (props.forceMessageActionsForMessageId ?? props.afterMessageId)}
+              deferContentRender={shouldDeferAgentMessageContent(unit, index, units.length)}
+              deferredRevealDelayMs={deferredAgentMessageRevealDelay(index, units.length)}
+              sanitizePlatformApiErrors={props.sanitizePlatformApiErrors === true}
+              accountMode={props.accountMode === true}
+            />
+            {unit.message.id === props.afterMessageId ? props.afterMessageContent : null}
+          </Fragment>
         );
       })}
       {shouldShowThinkingPlaceholder(props.messages, props.isSending) && (
@@ -219,6 +229,9 @@ export const AgentThreadMessages = memo(function AgentThreadMessages(props: Agen
 
 function areAgentThreadMessagesPropsEqual(previous: AgentThreadMessagesProps, next: AgentThreadMessagesProps): boolean {
   return previous.messages === next.messages
+    && previous.afterMessageId === next.afterMessageId
+    && previous.afterMessageContent === next.afterMessageContent
+    && previous.forceMessageActionsForMessageId === next.forceMessageActionsForMessageId
     && previous.artifactClient === next.artifactClient
     && previous.chatScopeKey === next.chatScopeKey
     && previous.historyVersion === next.historyVersion
@@ -378,6 +391,7 @@ interface SingleMessageProps {
   chatScopeKey: string;
   unitIndex: number;
   isFinalAssistantAnswer?: boolean;
+  forceMessageActions?: boolean;
   deferContentRender?: boolean;
   deferredRevealDelayMs?: number;
   sanitizePlatformApiErrors?: boolean;
@@ -442,7 +456,7 @@ const SingleMessage = memo(function SingleMessage(props: SingleMessageProps) {
     );
   }
 
-  const isFinalAnswer = props.isFinalAssistantAnswer !== false;
+  const isFinalAnswer = props.isFinalAssistantAnswer !== false || props.forceMessageActions === true;
   const assistantCopyReady = isFinalAnswer && isAssistantMessageCopyReady(message);
   const displayedContent = resolveAgentMessageDisplayContent(message, {
     sanitizePlatformApiErrors: props.sanitizePlatformApiErrors === true,
@@ -628,6 +642,7 @@ function areSingleMessagePropsEqual(previous: SingleMessageProps, next: SingleMe
     && previous.chatScopeKey === next.chatScopeKey
     && previous.unitIndex === next.unitIndex
     && previous.isFinalAssistantAnswer === next.isFinalAssistantAnswer
+    && previous.forceMessageActions === next.forceMessageActions
     && previous.deferContentRender === next.deferContentRender
     && previous.deferredRevealDelayMs === next.deferredRevealDelayMs
     && previous.sanitizePlatformApiErrors === next.sanitizePlatformApiErrors

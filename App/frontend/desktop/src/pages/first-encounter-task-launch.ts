@@ -1,4 +1,7 @@
 export const PENDING_FIRST_ENCOUNTER_TASK_LAUNCH_KEY = "memmy.pendingFirstEncounterTaskLaunch";
+export const FIRST_ENCOUNTER_RELAY_CHAT_KEY = "memmy.firstEncounterRelayChat";
+export const FIRST_ENCOUNTER_RELAY_ARMED_KEY = "memmy.firstEncounterRelayArmed";
+export const FIRST_ENCOUNTER_RELAY_READY_CHAT_KEY = "memmy.firstEncounterRelayReadyChat";
 
 interface StorageLike {
   getItem(key: string): string | null;
@@ -45,4 +48,42 @@ export function consumePendingFirstEncounterTaskLaunch(storage: StorageLike | nu
   } catch {
     return rawValue.trim() || null;
   }
+}
+
+export function writeFirstEncounterRelayChat(storage: StorageLike | null | undefined, chatId: string): void {
+  const normalizedChatId = chatId.trim();
+  if (!storage || !normalizedChatId) {
+    return;
+  }
+  storage.setItem(FIRST_ENCOUNTER_RELAY_CHAT_KEY, normalizedChatId);
+}
+
+export function readFirstEncounterRelayChat(storage: StorageLike | null | undefined): string | null {
+  return storage?.getItem(FIRST_ENCOUNTER_RELAY_CHAT_KEY)?.trim() || null;
+}
+
+export function writeFirstEncounterRelayReadyChat(storage: StorageLike | null | undefined, chatId: string): void {
+  const normalizedChatId = chatId.trim();
+  if (!storage || !normalizedChatId) {
+    return;
+  }
+  storage.setItem(FIRST_ENCOUNTER_RELAY_READY_CHAT_KEY, normalizedChatId);
+}
+
+export function readFirstEncounterRelayReadyChat(storage: StorageLike | null | undefined): string | null {
+  return storage?.getItem(FIRST_ENCOUNTER_RELAY_READY_CHAT_KEY)?.trim() || null;
+}
+
+/** Arms the next first-created chat for the post-answer relay card. */
+export function armFirstEncounterRelayChat(storage: StorageLike | null | undefined): void {
+  storage?.setItem(FIRST_ENCOUNTER_RELAY_ARMED_KEY, "1");
+}
+
+/** Consumes the one-shot relay arm after the first chat has been created. */
+export function consumeFirstEncounterRelayArm(storage: StorageLike | null | undefined): boolean {
+  if (storage?.getItem(FIRST_ENCOUNTER_RELAY_ARMED_KEY) !== "1") {
+    return false;
+  }
+  storage.removeItem(FIRST_ENCOUNTER_RELAY_ARMED_KEY);
+  return true;
 }

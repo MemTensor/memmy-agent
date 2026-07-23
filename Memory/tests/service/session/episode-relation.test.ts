@@ -439,20 +439,20 @@ describe("MemoryService / session / episode relation", () => {
     db.close();
   });
 
-  it("keeps the account summary model out of relation classification", async () => {
+  it("uses the account summary model for relation classification", async () => {
     const root = createTestRoot("mindock-memory-account-relation-");
     const db = new MemoryDb({
       path: join(root, "memory.sqlite")
     });
     const summaryCalls: string[] = [];
     const evolutionCalls: string[] = [];
-    const evolutionOptions: Array<{ operation: string; thinkingMode?: string }> = [];
+    const summaryOptions: Array<{ operation: string; thinkingMode?: string }> = [];
     const service = createTestMemoryService({
       db,
       mode: "dev",
       config: accountRuntimeConfig(),
-      llm: createRelationClassifierLlm(summaryCalls),
-      skillLlm: createRelationClassifierLlm(evolutionCalls, evolutionOptions),
+      llm: createRelationClassifierLlm(summaryCalls, summaryOptions),
+      skillLlm: createRelationClassifierLlm(evolutionCalls),
       embedder: createCapturingEmbedder([])
     });
     const session = service.openSession({
@@ -474,10 +474,9 @@ describe("MemoryService / session / episode relation", () => {
       query: "Database certificate rotation details please"
     });
 
-    expect(summaryCalls).not.toContain("relation.classify.v1");
-    expect(summaryCalls).not.toContain("relation.arbitration.v1");
-    expect(evolutionCalls).toEqual(["relation.classify.v1", "relation.arbitration.v1"]);
-    expect(evolutionOptions).toEqual([
+    expect(summaryCalls).toEqual(["relation.classify.v1", "relation.arbitration.v1"]);
+    expect(evolutionCalls).toEqual([]);
+    expect(summaryOptions).toEqual([
       { operation: "relation.classify.v1", thinkingMode: "disabled" },
       { operation: "relation.arbitration.v1", thinkingMode: "disabled" }
     ]);
