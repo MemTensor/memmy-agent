@@ -24,7 +24,6 @@ import { ToolLoader } from "./tools/loader.js";
 import { RequestContext, ToolContext } from "./tools/context.js";
 import { ExecSessionManager } from "./tools/exec-session.js";
 import { MessageTool, type MessageSendCallback } from "./tools/message.js";
-import { MyTool } from "./tools/self.js";
 import { FileStateStore } from "./tools/file-state.js";
 import { connectMissingServers, runtimeLines as mcpRuntimeLines, sessionExtra as mcpSessionExtra } from "./tools/mcp.js";
 import { ContextBuilder } from "./context.js";
@@ -573,7 +572,6 @@ export class AgentLoop {
     this.refreshToolsSnapshot();
     const toolCtx = this.createToolContext(messageSendCallback);
     const registry = new ToolLoader({ workspace: this.workspace, ctx: toolCtx }).loadRegistry(toolCtx);
-    if (this.config.tools.my.enable && !registry.get("my")) registry.register(new MyTool({ runtime: this as any }));
     if (includeConnectedMcp) this.copyConnectedMcpTools(registry);
     this.registerHookTools(toolCtx, phase, registry);
     return registry;

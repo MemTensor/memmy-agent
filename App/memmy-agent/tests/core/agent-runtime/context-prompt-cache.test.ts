@@ -299,15 +299,34 @@ describe("Context prompt cache inputs", () => {
   });
 
   it("includes always skills as active skills but excludes them from the skills index", () => {
-    const prompt = new ContextBuilder({ workspace: makeWorkspace() }).buildSystemPrompt();
+    const workspace = makeWorkspace();
+    const skillDir = path.join(workspace, "skills", "always-test");
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(skillDir, "SKILL.md"),
+      [
+        "---",
+        "name: always-test",
+        "description: Always-on test fixture",
+        "always: true",
+        "---",
+        "",
+        "# Always Test",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const prompt = new ContextBuilder({ workspace }).buildSystemPrompt();
     expect(prompt).toContain("# Active Skills");
-    expect(prompt).toContain("### Skill: my");
+    expect(prompt).toContain("### Skill: always-test");
+    expect(prompt).not.toContain("### Skill: my");
     expect(prompt).not.toContain("### Skill: memory");
     expect(prompt).not.toContain("Memory skill");
     expect(prompt).not.toContain("Tomorrow? Memory.");
     const skillsSection = prompt.split("# Skills\n", 2);
     expect(skillsSection.length).toBeGreaterThan(1);
     const indexText = skillsSection[1].split("\n\n---", 1)[0];
+    expect(indexText).not.toContain("**always-test**");
     expect(indexText).not.toContain("**memory**");
   });
 
