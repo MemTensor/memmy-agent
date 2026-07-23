@@ -29,6 +29,7 @@ interface MemmyPreloadApi {
   onUpdateDownloadProgress(callback: (progress: DesktopUpdateDownloadProgress) => void): () => void;
   openUpdateInstaller(filePath: string): Promise<DesktopUpdateInstallResult>;
   openExternal(url: string): Promise<void>;
+  openAgentTool(sourceId: string, prompt: string): Promise<{ opened: boolean }>;
   openMailto(mailtoUrl: string): Promise<void>;
   copyImageToClipboard(request: DesktopImageActionRequest): Promise<void>;
   saveImage(request: DesktopImageActionRequest): Promise<DesktopImageSaveResult>;
@@ -132,6 +133,10 @@ const memmyPreloadApi: MemmyPreloadApi = {
 
   async openExternal(url: string): Promise<void> {
     return ipcRenderer.invoke("memmy:openExternal", url);
+  },
+
+  async openAgentTool(sourceId: string, prompt: string): Promise<{ opened: boolean }> {
+    return ipcRenderer.invoke("memmy:openAgentTool", sourceId, prompt);
   },
 
   async openMailto(mailtoUrl: string): Promise<void> {

@@ -13,7 +13,7 @@ import { useAppState } from "../state/app-state.js";
 import { startAgentSourceScan } from "./memory-source-scan.js";
 import { formatAgentSourceScanRequestError } from "./agent-source-scan-error.js";
 import { FirstEncounterReport } from "./first-encounter-report.js";
-import { clearPendingFirstEncounterTaskLaunch, writePendingFirstEncounterTaskLaunch } from "./first-encounter-task-launch.js";
+import { armFirstEncounterRelayChat, clearPendingFirstEncounterTaskLaunch, writePendingFirstEncounterTaskLaunch } from "./first-encounter-task-launch.js";
 import {
   streamFirstEncounterReport,
   type DiscoveredAgent,
@@ -451,6 +451,7 @@ export function OnboardingPage() {
     dispatch(agentActions.newChatRequested());
     dispatch(appActions.preferredModeUpdated("full"));
     dispatch(appActions.onboardingUpdated(completionPatch));
+    armFirstEncounterRelayChat(typeof window === "undefined" ? undefined : window.sessionStorage);
     writeDeferredGuidanceStep(typeof window === "undefined" ? undefined : window.sessionStorage, "armed");
     dispatch(appActions.navigate(targetRoute));
     track({ name: "onboarding_step_completed", params: { step: "mode_selection", step_index: 3, choice: "full" }, consentTier: "basic" });
