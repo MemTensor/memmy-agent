@@ -15,6 +15,32 @@ afterEach(() => {
 });
 
 describe("memory LLM JSON length retry", () => {
+  it("merges existing system messages into one leading system message", async () => {
+    const fetchMock = sequenceFetch([openAiResponse('{"ok":true}', "stop")]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = createLlmClient(llmConfig());
+    await client.completeJson<{ ok: boolean }>([
+      { role: "user", content: "generate" },
+      { role: "system", content: "Summarize the conversation." },
+      { role: "system", content: "Answer in Chinese." }
+    ], {
+      operation: "capture.summarize"
+    });
+
+    expect(requestBodies(fetchMock)[0]?.messages).toEqual([
+      {
+        role: "system",
+        content: [
+          "Return exactly one valid JSON object. Do not include markdown fences or explanatory text.",
+          "Summarize the conversation.",
+          "Answer in Chinese."
+        ].join("\n\n")
+      },
+      { role: "user", content: "generate" }
+    ]);
+  });
+
   it("doubles max tokens once when the provider reports a length stop", async () => {
     const fetchMock = sequenceFetch([
       openAiResponse('{"ok":true}', "length"),

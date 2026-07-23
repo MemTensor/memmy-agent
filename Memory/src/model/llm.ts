@@ -871,9 +871,13 @@ function jsonMessages(
       : undefined,
     previousError ? `Previous JSON parse error: ${previousError instanceof Error ? previousError.message : String(previousError)}` : undefined
   ].filter(Boolean).join("\n");
+  const system = messages
+    .filter((message) => message.role === "system")
+    .map((message) => message.content)
+    .join("\n\n");
   return [
-    { role: "system", content: hint },
-    ...messages
+    { role: "system", content: system ? `${hint}\n\n${system}` : hint },
+    ...messages.filter((message) => message.role !== "system")
   ];
 }
 
