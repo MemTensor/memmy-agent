@@ -58,12 +58,7 @@ export function migrateConfig(data: any): any {
     copy.agents.defaults.model = copy.model;
   }
   if (copy.tools) {
-    if (!copy.tools.my && ("myEnabled" in copy.tools || "mySet" in copy.tools)) {
-      copy.tools.my = {
-        enable: copy.tools.myEnabled ?? true,
-        allowSet: copy.tools.mySet ?? false,
-      };
-    }
+    delete copy.tools.my;
     delete copy.tools.myEnabled;
     delete copy.tools.mySet;
   }

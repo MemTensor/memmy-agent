@@ -847,24 +847,6 @@ function normalizeImageGenerationProvider(value: any): string {
   return provider;
 }
 
-export class MyToolConfig extends Base {
-  enable = true;
-  allowSet = false;
-
-  constructor(init: Dict = {}) {
-    super();
-    this.enable = pick(init, ["enable"], true);
-    this.allowSet = pick(init, ["allowSet"], false);
-  }
-
-  override toObject(): Dict {
-    return {
-      enable: this.enable,
-      allowSet: this.allowSet,
-    };
-  }
-}
-
 export class MCPServerConfig extends Base {
   type?: "stdio" | "sse" | "streamableHttp";
   transport?: "stdio" | "sse" | "streamableHttp";
@@ -897,7 +879,6 @@ export class ToolsConfig extends Base {
   webSearch: WebSearchConfig;
   webFetch: WebFetchConfig;
   imageGeneration: ImageGenerationToolConfig;
-  my: MyToolConfig;
   restrictToWorkspace = false;
   ssrfWhitelist: string[] = [];
   mcpServers: Dict<MCPServerConfig>;
@@ -922,7 +903,6 @@ export class ToolsConfig extends Base {
       init.imageGeneration instanceof ImageGenerationToolConfig
         ? init.imageGeneration
         : new ImageGenerationToolConfig(pick(init, ["imageGeneration"], {}));
-    this.my = init.my instanceof MyToolConfig ? init.my : new MyToolConfig(init.my ?? {});
     this.restrictToWorkspace = pick(init, ["restrictToWorkspace"], false);
     this.ssrfWhitelist = assertStringArray("ssrfWhitelist", pick(init, ["ssrfWhitelist"], []));
     const mcp = pick(init, ["mcpServers"], {});
@@ -947,7 +927,6 @@ export class ToolsConfig extends Base {
       webSearch: this.webSearch.toObject(),
       webFetch: this.webFetch.toObject(),
       imageGeneration: this.imageGeneration.toObject(),
-      my: this.my.toObject(),
       restrictToWorkspace: this.restrictToWorkspace,
       ssrfWhitelist: this.ssrfWhitelist,
       mcpServers: dumpServers,

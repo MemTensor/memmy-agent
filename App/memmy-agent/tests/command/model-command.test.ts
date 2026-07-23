@@ -84,13 +84,6 @@ describe("model command", () => {
     expect(loop.model).toBe("base-model");
   });
 
-  it("does not depend on my.allow_set", async () => {
-    const loop = makeLoop();
-    expect(loop.toolsConfig.my.allowSet).toBe(false);
-    await cmdModel(ctx(loop, "/model fast", "fast"));
-    expect(loop.modelPreset).toBe("fast");
-  });
-
   it("is registered as exact and prefix and appears in help and palette", async () => {
     const router = new CommandRouter();
     registerBuiltinCommands(router);

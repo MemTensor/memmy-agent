@@ -155,7 +155,6 @@ const TOOLSET_BY_TOOL_NAME: Record<string, string> = {
   list_exec_sessions: "exec",
   long_task: "goal",
   message: "runtime",
-  my: "runtime",
   read_file: "file",
   spawn: "runtime",
   web_fetch: "web",

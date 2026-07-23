@@ -68,8 +68,6 @@ describe("SkillsLoader listSkills", () => {
     expect(loader.listSkills(false).map((entry) => entry.name)).not.toContain(
       "memory",
     );
-    expect(loader.loadSkill("my")).not.toContain("Memory skill");
-    expect(loader.loadSkill("my")).not.toContain("Tomorrow? Memory.");
 
     const userSkill = writeSkill(path.join(workspace, "skills"), "memory", {
       body: "# User Memory Helper",
@@ -82,6 +80,29 @@ describe("SkillsLoader listSkills", () => {
       ]),
     );
     expect(userLoader.loadSkill("memory")).toContain("# User Memory Helper");
+  });
+
+  it("removes the builtin my skill while preserving a workspace skill with the same name", () => {
+    const workspace = tmpDir();
+    const builtinOnly = new SkillsLoader(workspace);
+
+    expect(builtinOnly.listSkills(false).map((entry) => entry.name)).not.toContain(
+      "my",
+    );
+    expect(builtinOnly.getAlwaysSkills()).not.toContain("my");
+    expect(builtinOnly.loadSkill("my")).toBeNull();
+
+    const userSkill = writeSkill(path.join(workspace, "skills"), "my", {
+      body: "# User My Helper",
+    });
+    const workspaceLoader = new SkillsLoader(workspace);
+
+    expect(workspaceLoader.listSkills(false)).toEqual(
+      expect.arrayContaining([
+        { name: "my", path: userSkill, source: "workspace" },
+      ]),
+    );
+    expect(workspaceLoader.loadSkill("my")).toContain("# User My Helper");
   });
 
   it("returns empty when the workspace skills directory is missing", () => {
