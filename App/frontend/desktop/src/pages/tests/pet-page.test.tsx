@@ -767,14 +767,17 @@ describe("PetPageView SSR", () => {
     expect(source).not.toContain("const transcript = textInput.trim();");
   });
 
-  it("挂载时自动 dismiss 已处于终态的 focusedTask，避免完整模式残留气泡", () => {
+  it("挂载时只清除已完成 focusedTask 的焦点，避免残留气泡同时保留任务列表记录", () => {
     const source = readFileSync(petPageSourcePath, "utf8");
 
-    expect(source).toContain('bus.dismissTask(focusedTask.id)');
-    const dismissBlock = source.indexOf('bus.dismissTask(focusedTask.id)');
-    const mountGuard = source.indexOf('focusedTask.status === "done" || focusedTask.status === "error"');
+    const mountGuard = source.indexOf('if (focusedTask && (focusedTask.status === "done" || focusedTask.status === "error")');
+    const mountEffectEnd = source.indexOf("}, []);", mountGuard);
+    const mountEffect = source.slice(mountGuard, mountEffectEnd);
+
     expect(mountGuard).toBeGreaterThan(-1);
-    expect(dismissBlock).toBeGreaterThan(mountGuard);
+    expect(mountEffectEnd).toBeGreaterThan(mountGuard);
+    expect(mountEffect).toContain("bus.focusTask(null);");
+    expect(mountEffect).not.toContain("bus.dismissTask(");
     expect(source).not.toContain("react-hooks/exhaustive-deps");
   });
 
