@@ -4,6 +4,7 @@ import {
   createQueuedAnalytics,
   normalizeAnalyticsUserId,
   readAnalyticsClientId,
+  type AnalyticsAppEdition,
   type AnalyticsAppEnv,
   type AnalyticsParams,
 } from "./analytics-transport.js";
@@ -138,6 +139,7 @@ export function createAgentSourceLifecycleAnalytics(options: {
   getUserId?: () => string | null | undefined;
   getUserMode?: () => string | null | undefined;
   appEnv?: AnalyticsAppEnv | null;
+  appEdition?: AnalyticsAppEdition | null;
   debugMode?: boolean | null;
   fetchImpl?: typeof fetch;
   baseUrl?: string | null;
@@ -148,6 +150,7 @@ export function createAgentSourceLifecycleAnalytics(options: {
     getUserId: options.getUserId,
     getUserMode: options.getUserMode,
     appEnv: options.appEnv,
+    appEdition: options.appEdition,
     debugMode: options.debugMode,
     fetchImpl: options.fetchImpl,
     baseUrl: options.baseUrl,

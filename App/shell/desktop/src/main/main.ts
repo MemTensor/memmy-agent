@@ -118,6 +118,7 @@ let areIpcHandlersRegistered = false;
 let isBootReady = false;
 let analyticsClientId: string | null = null;
 let analyticsAppEnv: "dev" | "prod" | null = null;
+let analyticsAppEdition: "cn" | "intl" | null = null;
 let requiredUpdateBackgroundFirstCheckTimer: ReturnType<typeof setTimeout> | null = null;
 let requiredUpdateBackgroundCheckTimer: ReturnType<typeof setTimeout> | null = null;
 let isRequiredUpdateBackgroundCheckRunning = false;
@@ -4393,7 +4394,11 @@ function handleAnalyticsClientId(_event: IpcMainEvent, payload: unknown): void {
     return;
   }
 
-  const { clientId, appEnv } = payload as { clientId?: unknown; appEnv?: unknown };
+  const { clientId, appEnv, appEdition } = payload as {
+    clientId?: unknown;
+    appEnv?: unknown;
+    appEdition?: unknown;
+  };
   if (typeof clientId === "string" && clientId) {
     analyticsClientId = clientId;
     // gtag is the source of truth: always overwrite so CLI picks up reinstall/new IDs.
@@ -4407,6 +4412,9 @@ function handleAnalyticsClientId(_event: IpcMainEvent, payload: unknown): void {
   if (appEnv === "dev" || appEnv === "prod") {
     analyticsAppEnv = appEnv;
   }
+  if (appEdition === "cn" || appEdition === "intl") {
+    analyticsAppEdition = appEdition;
+  }
 }
 
 async function sendAppExitEvent(): Promise<void> {
@@ -4416,6 +4424,7 @@ async function sendAppExitEvent(): Promise<void> {
       eventName: "app_exit",
       clientId: analyticsClientId,
       appEnv: analyticsAppEnv ?? undefined,
+      appEdition: analyticsAppEdition ?? resolveCurrentDesktopEdition(),
     });
     console.log("[analytics] app_exit sent");
   } catch (error) {

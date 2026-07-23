@@ -1,5 +1,9 @@
 import { mergeAnalyticsEventParams } from "./analytics-context.js";
-import { resolveAnalyticsAppEnv, resolveGtagConfigOptions } from "./gtag-config.js";
+import {
+  resolveAnalyticsAppEdition,
+  resolveAnalyticsAppEnv,
+  resolveGtagConfigOptions
+} from "./gtag-config.js";
 
 declare global {
   interface Window {
@@ -47,7 +51,8 @@ export function initGtag(): void {
       if (typeof clientId === "string" && clientId) {
         window.memmy?.sendAnalyticsClientId({
           clientId,
-          appEnv: resolveAnalyticsAppEnv()
+          appEnv: resolveAnalyticsAppEnv(),
+          appEdition: resolveAnalyticsAppEdition()
         });
         console.log("[analytics] gtag client_id ready:", clientId);
       }

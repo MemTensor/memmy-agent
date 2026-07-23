@@ -4,6 +4,7 @@ import { join as nodeJoin } from "node:path";
 import { loadConfig } from "../config/loader.js";
 
 export type AnalyticsAppEnv = "dev" | "prod";
+export type AnalyticsAppEdition = "cn" | "intl";
 export type AnalyticsUserMode = "account" | "byok";
 
 export type AnalyticsParams = Record<string, string | number | boolean>;
@@ -24,6 +25,7 @@ export type PostAnalyticsEventsInput = {
   /** account | byok; unset/unknown omitted from params. */
   userMode?: string | null;
   appEnv?: AnalyticsAppEnv | null;
+  appEdition?: AnalyticsAppEdition | null;
   debugMode?: boolean | null;
   baseUrl?: string | null;
   fetchImpl?: typeof fetch;
@@ -55,6 +57,13 @@ export function resolveAnalyticsAppEnv(env: NodeJS.ProcessEnv = process.env): An
   return env.NODE_ENV === "production" ? "prod" : "dev";
 }
 
+/** MEMMY_APP_EDITION=intl → intl, otherwise cn (matches desktop gtag / legal-links). */
+export function resolveAnalyticsAppEdition(
+  env: NodeJS.ProcessEnv = process.env,
+): AnalyticsAppEdition {
+  return env.MEMMY_APP_EDITION?.trim().toLowerCase() === "intl" ? "intl" : "cn";
+}
+
 export function resolveAnalyticsDebugMode(
   env: NodeJS.ProcessEnv = process.env,
   appEnv: AnalyticsAppEnv = resolveAnalyticsAppEnv(env),
@@ -69,6 +78,7 @@ export function resolveAnalyticsDebugMode(
 export function resolveAnalyticsEnvParams(options: {
   env?: NodeJS.ProcessEnv;
   appEnv?: AnalyticsAppEnv | null;
+  appEdition?: AnalyticsAppEdition | null;
   debugMode?: boolean | null;
 } = {}): AnalyticsParams {
   const env = options.env ?? process.env;
@@ -76,12 +86,17 @@ export function resolveAnalyticsEnvParams(options: {
     options.appEnv === "dev" || options.appEnv === "prod"
       ? options.appEnv
       : resolveAnalyticsAppEnv(env);
+  const appEdition =
+    options.appEdition === "cn" || options.appEdition === "intl"
+      ? options.appEdition
+      : resolveAnalyticsAppEdition(env);
   const debugMode =
     typeof options.debugMode === "boolean"
       ? options.debugMode
       : resolveAnalyticsDebugMode(env, appEnv);
   return {
     app_env: appEnv,
+    app_edition: appEdition,
     ...(debugMode ? { debug_mode: 1 } : {}),
   };
 }
@@ -220,6 +235,7 @@ export function postAnalyticsEvents(input: PostAnalyticsEventsInput): Promise<vo
   const envParams = resolveAnalyticsEnvParams({
     env,
     appEnv: input.appEnv,
+    appEdition: input.appEdition,
     debugMode: input.debugMode,
   });
 
@@ -274,6 +290,7 @@ export function createQueuedAnalytics(options: {
   getUserMode?: () => string | null | undefined;
   source?: string;
   appEnv?: AnalyticsAppEnv | null;
+  appEdition?: AnalyticsAppEdition | null;
   debugMode?: boolean | null;
   fetchImpl?: typeof fetch;
   baseUrl?: string | null;
@@ -310,6 +327,7 @@ export function createQueuedAnalytics(options: {
         userId: getUserId(),
         userMode: getUserMode(),
         appEnv: options.appEnv,
+        appEdition: options.appEdition,
         debugMode: options.debugMode,
         fetchImpl: options.fetchImpl,
         baseUrl: options.baseUrl,

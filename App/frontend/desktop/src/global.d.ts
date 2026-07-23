@@ -67,7 +67,11 @@ declare global {
       startPetWindowDrag(pointer: { clientX: number; clientY: number }): void;
       stopPetWindowDrag(): void;
       syncPetWindowLayout(layout: { width: number; height: number; mascotOffsetX: number; mascotOffsetY: number }): void;
-      sendAnalyticsClientId(payload: { clientId: string; appEnv: "dev" | "prod" }): void;
+      sendAnalyticsClientId(payload: {
+        clientId: string;
+        appEnv: "dev" | "prod";
+        appEdition: "cn" | "intl";
+      }): void;
     };
   }
 }
