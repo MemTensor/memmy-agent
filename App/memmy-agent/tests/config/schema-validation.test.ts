@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { WebSocketConfig } from "../../src/integrations/channels/websocket.js";
+import { DEFAULT_MAX_TOKENS } from "../../src/token-budget.js";
 import {
   AgentDefaults,
   ApiConfig,
@@ -14,6 +15,8 @@ import {
 
 describe("config schema validation", () => {
   it("validates AgentDefaults numeric bounds and enums", () => {
+    expect(DEFAULT_MAX_TOKENS).toBe(65_536);
+    expect(new AgentDefaults().maxTokens).toBe(DEFAULT_MAX_TOKENS);
     expect(new AgentDefaults().temperature).toBe(0.7);
     expect(() => new AgentDefaults({ maxConcurrentSubagents: 0 })).toThrow(/maxConcurrentSubagents/);
     expect(() => new AgentDefaults({ providerRetryMode: "forever" })).toThrow(/providerRetryMode/);
@@ -50,6 +53,7 @@ describe("config schema validation", () => {
     expect(() => new InlineFallbackConfig({ provider: "", model: "gpt-4.1" })).toThrow(/fallback provider/);
 
     expect(new ModelPresetConfig({ model: "gpt-4.1" }).model).toBe("gpt-4.1");
+    expect(new ModelPresetConfig({ model: "gpt-4.1" }).maxTokens).toBe(DEFAULT_MAX_TOKENS);
     expect(new ModelPresetConfig({ model: "gpt-4.1" }).temperature).toBe(0.7);
     expect(new InlineFallbackConfig({ provider: "openai", model: "gpt-4.1" }).provider).toBe("openai");
   });
@@ -108,7 +112,7 @@ describe("config schema validation", () => {
       debugLog: true,
       maxBuilderContextNodes: 40,
       maxUpdateAttempts: 5,
-      retryBackoffMs: [1000, 5000, 30000, 60000, 90000],
+      retryBackoffMs: [0, 3000, 5000, 10000],
       maxConcurrentSessionQueues: 4,
       compactionCatchupTimeoutMs: 120000,
     });
@@ -124,6 +128,9 @@ describe("config schema validation", () => {
     expect(new SessionDagConfig({ debugLog: false }).debugLog).toBe(false);
     expect(new SessionDagConfig({ debugLog: true }).debugLog).toBe(true);
     expect(new SessionDagConfig({ debugLog: true }).toObject()).toMatchObject({ debugLog: true });
+    expect(new SessionDagConfig({ retryBackoffMs: [0, 3000, 5000, 10000] }).toObject()).toMatchObject({
+      retryBackoffMs: [0, 3000, 5000, 10000],
+    });
 
     expect(() => new ContextCompactionConfig({ summaryMode: "xml" })).toThrow(/contextCompaction\.summaryMode/);
     expect(() => new SessionDagConfig({ enabled: "true" })).toThrow(/sessionDag\.enabled/);
@@ -134,7 +141,9 @@ describe("config schema validation", () => {
     expect(() => new SessionDagConfig({ maxBuilderContextNodes: 0 })).toThrow(/maxBuilderContextNodes/);
     expect(() => new SessionDagConfig({ maxUpdateAttempts: 21 })).toThrow(/maxUpdateAttempts/);
     expect(() => new SessionDagConfig({ retryBackoffMs: [] })).toThrow(/retryBackoffMs/);
-    expect(() => new SessionDagConfig({ retryBackoffMs: [999] })).toThrow(/retryBackoffMs/);
+    expect(() => new SessionDagConfig({ retryBackoffMs: [-1] })).toThrow(/retryBackoffMs/);
+    expect(() => new SessionDagConfig({ retryBackoffMs: [1.5] })).toThrow(/retryBackoffMs/);
+    expect(() => new SessionDagConfig({ retryBackoffMs: [600_001] })).toThrow(/retryBackoffMs/);
     expect(() => new SessionDagConfig({ maxConcurrentSessionQueues: 17 })).toThrow(/maxConcurrentSessionQueues/);
     expect(() => new SessionDagConfig({ compactionCatchupTimeoutMs: 999 })).toThrow(/compactionCatchupTimeoutMs/);
     expect(() => new Config({

@@ -199,7 +199,15 @@ describe("AppFrame", () => {
     expect(source).not.toContain("dispatch(agentActions.transientSendFailed(chatId));");
     expect(source).not.toContain(removedOpenErrorSetter);
     expect(source).not.toContain(removedOpenErrorState);
-    expect(source).not.toContain('role="alert"');
+    expect(source).not.toContain('state.agent.operationErrorsBySurface.sidebar');
+  });
+
+  it("bases rapid sidebar mutations on the latest optimistic state", () => {
+    const source = readFileSync(resolve(__dirname, "..", "app-frame.tsx"), "utf8");
+
+    expect(source).toContain("const sidebarStateRef = useRef(state.agent.sidebarState);");
+    expect(source).toContain("updateSidebarStateForTask(sidebarStateRef.current, task.sessionKey, patch)");
+    expect(source).toContain("sidebarStateRef.current = nextState;");
   });
 
   it("uses a task-list icon for the preview toggle menu item", () => {

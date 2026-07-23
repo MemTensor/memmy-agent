@@ -774,13 +774,6 @@ function TraceMemoryDetail(props: {
         <div className="memory-detail-text">{summaryText || "-"}</div>
       </section>
 
-      {detail.reflection?.trim() && (
-        <section className="memory-detail-card">
-          <h5 className="memory-detail-card__label">{t("memory.memories.reflection")}</h5>
-          <div className="memory-detail-text">{cleanMemoryBody(detail.reflection)}</div>
-        </section>
-      )}
-
       <section className="memory-detail-card">
         <h5 className="memory-detail-card__label">{t("memory.memories.turnSteps")}</h5>
         {hasTurnSteps ? (

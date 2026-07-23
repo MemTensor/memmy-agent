@@ -10,6 +10,7 @@ describe("build runtime assets", () => {
     execFileSync(npmBin, ["run", "build"], { cwd: process.cwd(), stdio: "pipe" });
 
     expect(fs.existsSync(path.join(process.cwd(), "dist/templates/agent/subagent-announce.md"))).toBe(true);
+    expect(fs.existsSync(path.join(process.cwd(), "dist/templates/agent/verification-contract.md"))).toBe(true);
     expect(fs.existsSync(path.join(process.cwd(), "dist/templates/memory/MEMORY.md"))).toBe(true);
     expect(fs.existsSync(path.join(process.cwd(), "dist/skills/goal/SKILL.md"))).toBe(true);
     expect(fs.existsSync(path.join(process.cwd(), "dist/skills/skill-creator/SKILL.md"))).toBe(true);

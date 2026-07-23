@@ -4,6 +4,7 @@ import { CommandContext, CommandRouter } from "../../command/router.js";
 import { registerBuiltinCommands } from "../../command/builtin.js";
 import { Config, ModelPresetConfig } from "../../config/schema.js";
 import { getWorkspacePath } from "../../config/paths.js";
+import { CONTEXT_SAFETY_BUFFER_TOKENS } from "../../token-budget.js";
 import { CronService } from "../../cron/service.js";
 import { makeProvider } from "../../providers/factory.js";
 import { makeReloadingProviderSnapshotLoader, makeReloadingToolsSnapshotLoader } from "../../providers/snapshot-loader.js";
@@ -444,6 +445,7 @@ export class AgentLoop {
       workspace: this.workspace,
       bus: this.bus,
       model: this.model,
+      contextWindowTokens: this.contextWindowTokens,
       toolsConfig: this.config.tools,
       maxIterations: this.maxIterations,
       maxConcurrent: defaults.maxConcurrentSubagents,
@@ -698,7 +700,9 @@ export class AgentLoop {
   replayTokenBudget(): number {
     if (this.contextWindowTokens <= 0) return 0;
     const reserved = Number(this.provider?.generation?.maxTokens ?? 4096);
-    const budget = this.contextWindowTokens - Math.max(1, reserved) - 1024;
+    const budget = this.contextWindowTokens
+      - Math.max(1, reserved)
+      - CONTEXT_SAFETY_BUFFER_TOKENS;
     return budget > 0 ? budget : Math.max(128, Math.floor(this.contextWindowTokens / 2));
   }
 
@@ -795,7 +799,9 @@ export class AgentLoop {
       this.provider.generation.reasoningEffort = reasoningEffort;
     }
     (this.runner as any).provider = provider;
-    if (typeof (this.subagents as any)?.setProvider === "function") (this.subagents as any).setProvider(provider, model);
+    if (typeof (this.subagents as any)?.setProvider === "function") {
+      (this.subagents as any).setProvider(provider, model, contextWindowTokens);
+    }
     else if (this.subagents) (this.subagents as any).model = model;
     if (typeof (this.consolidator as any)?.setProvider === "function") (this.consolidator as any).setProvider(provider, model, contextWindowTokens);
     else (this.consolidator as any).model = model;

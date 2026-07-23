@@ -33,3 +33,27 @@ describe("POST /api/token-quota/request", () => {
     expect(res.statusCode).toBeGreaterThanOrEqual(400);
   });
 });
+
+describe("GET /api/token-quota/eligibility", () => {
+  it("返回当前账号的申请资格", async () => {
+    const app = Fastify();
+    const getEligibility = vi.fn(async () => ({
+      state: "cooldown" as const,
+      requestCount: 1,
+      maxRequestCount: 5 as const,
+      nextAllowedAtEpochMs: 1_785_312_000_000,
+      latestRequestStatus: "rejected" as const,
+      latestReviewNote: "额度用途不明确"
+    }));
+    registerTokenQuotaRoutes(app, {
+      tokenQuota: { getEligibility } as never,
+      authenticateRuntimeToken: async () => undefined
+    });
+
+    const res = await app.inject({ method: "GET", url: "/api/token-quota/eligibility" });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ state: "cooldown", latestReviewNote: "额度用途不明确" });
+    expect(getEligibility).toHaveBeenCalledTimes(1);
+  });
+});

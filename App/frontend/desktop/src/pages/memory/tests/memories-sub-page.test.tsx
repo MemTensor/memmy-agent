@@ -423,6 +423,10 @@ describe("MemoriesSubPage", () => {
           ...memoryDetailFixture.item.metadata,
           source: "hermes",
           status: "succeeded",
+          traceDetail: {
+            ...(memoryDetailFixture.item.metadata.traceDetail as Record<string, unknown>),
+            reflection: "PIVOTAL"
+          },
           nested: {
             status: "nested-status-value",
             keep: "visible metadata"
@@ -489,6 +493,7 @@ describe("MemoriesSubPage", () => {
     expect(html).toContain("时间");
     expect(html).toContain("价值");
     expect(html).toContain("反思权重 α");
+    expect(html).not.toContain("PIVOTAL");
     expect(html).toContain("优先级");
     expect(html).toContain("0.735");
     expect(html).toContain("0.500");

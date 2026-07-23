@@ -15,7 +15,7 @@ import { isComposingKeyboardEvent } from "../utils/keyboard.js";
 import memoIdleUrl from "../assets/mascot/memo-idle-alpha.webm";
 import { AlertCircle, AlertTriangle, CheckCircle2, Loader2, Maximize, Maximize2, Mic, Pause, Send, StopSquare, X } from "./memory/memory-prototype-icons.js";
 import { useAsrRecorder } from "./asr-recorder.js";
-import { createPetAgentBridge } from "./pet-agent-bridge.js";
+import { createPetAgentBridge, PetReconnectRecoveryTracker } from "./pet-agent-bridge.js";
 import type { AgentArtifactClient } from "./agent-message-content.js";
 
 /** Type definition for display state. */
@@ -635,11 +635,38 @@ export function PetPage() {
   const busRef = useRef(bus);
   const connectionRef = useRef<MemmyAgentWebSocketConnection | null>(null);
   const connectionPromiseRef = useRef<Promise<MemmyAgentWebSocketConnection> | null>(null);
-  const connectionGenerationRef = useRef(0);
+  const connectionInstanceEpochRef = useRef(0);
   const chatUnsubscribersRef = useRef<Map<string, MemmyAgentUnsubscribe>>(new Map());
   const taskIdByChatIdRef = useRef<Map<string, string>>(new Map());
   const answerTextByTaskIdRef = useRef<Map<string, string>>(new Map());
   const cancelledTaskIdsRef = useRef<Set<string>>(new Set());
+  const recoveryTracker = useMemo(() => clients?.memmyAgent ? new PetReconnectRecoveryTracker({
+    client: clients.memmyAgent,
+    getConnection: () => connectionRef.current,
+    completeTask: (taskId, text) => {
+      cleanupPetTaskById(taskId);
+      busRef.current.completeTask(taskId, text);
+    },
+    errorTask: (taskId, message) => {
+      cleanupPetTaskById(taskId);
+      busRef.current.errorTask(taskId, message);
+    },
+    emptyResponseMessage: t("pet.agentEmptyResponse"),
+    recoveryTimeoutMessage: t("home.agent.recoveryTimeout"),
+    interruptedMessage: t("home.agent.executionInterrupted")
+  }) : null, [clients?.memmyAgent, t]);
+
+  function cleanupPetTaskById(taskId: string): void {
+    for (const [chatId, currentTaskId] of taskIdByChatIdRef.current) {
+      if (currentTaskId !== taskId) {
+        continue;
+      }
+      taskIdByChatIdRef.current.delete(chatId);
+      chatUnsubscribersRef.current.get(chatId)?.();
+      chatUnsubscribersRef.current.delete(chatId);
+    }
+    answerTextByTaskIdRef.current.delete(taskId);
+  }
 
   useEffect(() => {
     busRef.current = bus;
@@ -657,20 +684,6 @@ export function PetPage() {
       console.warn("setPetWindow failed", error);
     });
   }, []);
-
-  const failPendingAgentTasks = useCallback(
-    (error: unknown) => {
-      const message = resolvePetAgentErrorMessage(error, t("pet.agentUnavailable"));
-      const taskIds = new Set(taskIdByChatIdRef.current.values());
-      taskIdByChatIdRef.current.clear();
-
-      for (const taskId of taskIds) {
-        answerTextByTaskIdRef.current.delete(taskId);
-        busRef.current.errorTask(taskId, message);
-      }
-    },
-    [t]
-  );
 
   const handlePetAgentChatEvent = useCallback(
     (chatId: string, event: MemmyAgentWsEvent) => {
@@ -693,13 +706,14 @@ export function PetPage() {
 
       taskIdByChatIdRef.current.delete(chatId);
       answerTextByTaskIdRef.current.delete(taskId);
+      recoveryTracker?.remove(taskId);
       if (action.type === "complete") {
         busRef.current.completeTask(taskId, action.text);
       } else {
         busRef.current.errorTask(taskId, action.message);
       }
     },
-    [t]
+    [recoveryTracker, t]
   );
 
   const cleanupPetAgentTaskRun = useCallback(
@@ -715,8 +729,9 @@ export function PetPage() {
         }
       }
       answerTextByTaskIdRef.current.delete(task.id);
+      recoveryTracker?.remove(task.id);
     },
-    [clients?.memmyAgent]
+    [clients?.memmyAgent, recoveryTracker]
   );
 
   const ensurePetAgentConnection = useCallback(async () => {
@@ -729,20 +744,26 @@ export function PetPage() {
     }
 
     if (!connectionPromiseRef.current) {
-      const generation = connectionGenerationRef.current;
+      const instanceEpoch = connectionInstanceEpochRef.current;
       connectionPromiseRef.current = clients.memmyAgent
         .connectWebSocket((event) => {
-          if (event.event === "error" && !event.chat_id) {
-            failPendingAgentTasks(event);
+          if (event.event === "connection_closed") {
+            recoveryTracker?.connectionClosed(event.connection_generation ?? 0);
+          } else if (event.event === "ready" && typeof event.connection_generation === "number") {
+            recoveryTracker?.ready(event.connection_generation);
           }
         })
         .then((connection) => {
-          if (connectionGenerationRef.current !== generation) {
+          if (connectionInstanceEpochRef.current !== instanceEpoch) {
             connection.close();
             throw new Error(t("pet.agentUnavailable"));
           }
 
           connectionRef.current = connection;
+          const generation = connection.getReadyGeneration();
+          if (generation !== null) {
+            recoveryTracker?.ready(generation);
+          }
           return connection;
         })
         .catch((error) => {
@@ -752,7 +773,7 @@ export function PetPage() {
     }
 
     return connectionPromiseRef.current;
-  }, [clients, failPendingAgentTasks, t]);
+  }, [clients, recoveryTracker, t]);
 
   const submitPetAgentTask = useCallback(
     (task: Task, content: string) => {
@@ -773,7 +794,17 @@ export function PetPage() {
             chatUnsubscribersRef.current.set(chatId, unsubscribe);
           }
 
-          connection.sendMessage({ chatId, content });
+          const expectedGeneration = connection.getReadyGeneration();
+          if (expectedGeneration === null) {
+            throw new Error(t("pet.agentUnavailable"));
+          }
+          recoveryTracker?.register({ taskId: task.id, chatId, submittedContent: content });
+          try {
+            connection.sendMessage({ chatId, content }, expectedGeneration);
+          } catch (error) {
+            cleanupPetAgentTaskRun(task);
+            throw error;
+          }
         })
         .catch((error) => {
           if (cancelledTaskIdsRef.current.has(task.id)) {
@@ -786,7 +817,7 @@ export function PetPage() {
           busRef.current.errorTask(task.id, resolvePetAgentErrorMessage(error, t("pet.agentUnavailable")));
         });
     },
-    [cleanupPetAgentTaskRun, clients?.memmyAgent, ensurePetAgentConnection, handlePetAgentChatEvent, t]
+    [cleanupPetAgentTaskRun, clients?.memmyAgent, ensurePetAgentConnection, handlePetAgentChatEvent, recoveryTracker, t]
   );
 
   const stopPetAgentTask = useCallback(
@@ -815,8 +846,12 @@ export function PetPage() {
   );
 
   useEffect(() => {
+    recoveryTracker?.prune(bus.runningTasks.map((task) => task.id));
+  }, [bus.runningTasks, recoveryTracker]);
+
+  useEffect(() => {
     return () => {
-      connectionGenerationRef.current += 1;
+      connectionInstanceEpochRef.current += 1;
       for (const unsubscribe of chatUnsubscribersRef.current.values()) {
         unsubscribe();
       }
@@ -827,8 +862,9 @@ export function PetPage() {
       taskIdByChatIdRef.current.clear();
       answerTextByTaskIdRef.current.clear();
       cancelledTaskIdsRef.current.clear();
+      recoveryTracker?.close();
     };
-  }, [clients?.memmyAgent]);
+  }, [clients?.memmyAgent, recoveryTracker]);
 
   return <PetPageView bus={bus} mainRoute={resolvePetFullRoute(state)} onNavigate={navigate} onPetWindowChange={setPetWindow} onSubmitTask={submitPetAgentTask} onStopTask={stopPetAgentTask} asrClient={clients?.asr} memmyAgentClient={clients?.memmyAgent} />;
 }

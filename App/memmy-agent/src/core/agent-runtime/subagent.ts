@@ -103,6 +103,7 @@ type SubagentManagerInit = {
   workspace?: string;
   bus?: MessageBus;
   model?: string | null;
+  contextWindowTokens?: number;
   toolsConfig?: any;
   restrictToWorkspace?: boolean;
   disabledSkills?: string[];
@@ -127,6 +128,7 @@ export class SubagentManager {
   workspace: string;
   bus: MessageBus;
   model: string | null;
+  contextWindowTokens: number;
   toolsConfig: any;
   restrictToWorkspace: boolean;
   disabledSkills: Set<string>;
@@ -148,6 +150,7 @@ export class SubagentManager {
     this.workspace = path.resolve(String(init.workspace ?? defaults.workspace ?? process.cwd()));
     this.bus = init.bus ?? new MessageBus();
     this.model = init.model ?? this.provider?.getDefaultModel?.() ?? this.provider?.model ?? null;
+    this.contextWindowTokens = init.contextWindowTokens ?? defaults.contextWindowTokens;
     this.toolsConfig = init.toolsConfig ?? new Config().tools;
     this.restrictToWorkspace = init.restrictToWorkspace ?? false;
     this.disabledSkills = new Set(init.disabledSkills ?? []);
@@ -220,9 +223,10 @@ export class SubagentManager {
     return new ToolLoader({ workspace: root, ctx }).loadRegistry(ctx, { scope: "subagent" });
   }
 
-  setProvider(provider: any, model: string): void {
+  setProvider(provider: any, model: string, contextWindowTokens = this.contextWindowTokens): void {
     this.provider = provider;
     this.model = model;
+    this.contextWindowTokens = contextWindowTokens;
     this.runner.provider = provider;
   }
 
@@ -332,6 +336,8 @@ export class SubagentManager {
         provider: this.provider,
         tools,
         model: this.model,
+        maxTokens: this.provider?.generation?.maxTokens,
+        contextWindowTokens: this.contextWindowTokens,
         temperature: temperature ?? undefined,
         maxIterations: this.maxIterations,
         maxToolResultChars: this.maxToolResultChars,
@@ -455,7 +461,8 @@ export class SubagentManager {
     const skillsSummary = new SkillsLoader(this.workspace, null, this.disabledSkills).buildSkillsSummary();
     const template = renderSkillsSummaryBlock(
       readTemplate("agent/subagent-system.md")
-        .replace(/\{%\s*include 'agent\/snippets\/untrusted-content\.md'\s*%\}/g, readTemplate("agent/snippets/untrusted-content.md")),
+        .replace(/\{%\s*include 'agent\/snippets\/untrusted-content\.md'\s*%\}/g, readTemplate("agent/snippets/untrusted-content.md"))
+        .replace(/\{%\s*include 'agent\/verification-contract\.md'\s*%\}/g, readTemplate("agent/verification-contract.md")),
       skillsSummary,
     );
     return renderInlineTemplate(template, {

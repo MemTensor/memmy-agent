@@ -9,6 +9,7 @@ import { buildHelpText, cmdRestart, setRestartCommandRuntimeForTests } from "../
 import { CommandContext } from "../../../src/command/router.js";
 import { Session } from "../../../src/core/session/manager.js";
 import {
+  DESKTOP_MANAGED_GATEWAY_ENV,
   RESTART_NOTIFY_CHANNEL_ENV,
   RESTART_NOTIFY_CHAT_ID_ENV,
   RESTART_STARTED_AT_ENV,
@@ -74,10 +75,12 @@ async function withTimeout<T>(promise: Promise<T>, ms = 1000): Promise<T> {
 
 describe("/restart command", () => {
   afterEach(() => {
+    vi.useRealTimers();
     setRestartCommandRuntimeForTests(null);
     delete process.env[RESTART_NOTIFY_CHANNEL_ENV];
     delete process.env[RESTART_NOTIFY_CHAT_ID_ENV];
     delete process.env[RESTART_STARTED_AT_ENV];
+    delete process.env[DESKTOP_MANAGED_GATEWAY_ENV];
   });
 
   it("sets restart notification env vars and schedules process restart", async () => {
@@ -128,6 +131,81 @@ describe("/restart command", () => {
 
     expect(out.content).toContain("Restarting");
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("scheduler failed"));
+  });
+
+  it("hands managed Desktop restart ownership to IPC and exits with code 75 only after acknowledgement", async () => {
+    const callbacks: Array<() => void> = [];
+    const scheduler = vi.fn((callback: () => void, delayMs: number) => {
+      callbacks.push(callback);
+      return delayMs;
+    });
+    const exit = vi.fn();
+    const sendIpc = vi.fn((message, callback: (error: Error | null) => void) => {
+      callback(null);
+      return true;
+    });
+    setRestartCommandRuntimeForTests({
+      env: { [DESKTOP_MANAGED_GATEWAY_ENV]: "1" },
+      scheduler,
+      exit,
+      sendIpc
+    });
+    const msg = new InboundMessage({
+      channel: "websocket",
+      senderId: "user",
+      chatId: "chat-1",
+      content: "/restart",
+      metadata: { webui: true }
+    });
+    const ctx = new CommandContext({ msg, session: null, key: msg.sessionKey, raw: "/restart", loop: {} });
+
+    const out = await cmdRestart(ctx);
+
+    expect(out.content).toContain("Restarting");
+    expect(sendIpc).toHaveBeenCalledWith(expect.objectContaining({
+      type: "memmy-agent:restart",
+      channel: "websocket",
+      chatId: "chat-1",
+      metadata: { webui: true }
+    }), expect.any(Function));
+    expect(scheduler).toHaveBeenCalledWith(expect.any(Function), 1_000);
+    expect(exit).not.toHaveBeenCalled();
+    callbacks[0]?.();
+    expect(exit).toHaveBeenCalledWith(75);
+    expect(process.env[RESTART_NOTIFY_CHANNEL_ENV]).toBeUndefined();
+  });
+
+  it("does not exit a managed gateway when Desktop IPC fails or times out", async () => {
+    vi.useFakeTimers();
+    const scheduler = vi.fn();
+    const exit = vi.fn();
+    setRestartCommandRuntimeForTests({
+      env: { [DESKTOP_MANAGED_GATEWAY_ENV]: "1" },
+      scheduler,
+      exit,
+      sendIpc: vi.fn((_message, callback) => {
+        callback(new Error("IPC closed"));
+        return false;
+      })
+    });
+    const msg = new InboundMessage({ channel: "websocket", senderId: "user", chatId: "chat-1", content: "/restart" });
+    const ctx = new CommandContext({ msg, session: null, key: msg.sessionKey, raw: "/restart", loop: {} });
+
+    await expect(cmdRestart(ctx)).resolves.toMatchObject({ content: expect.stringContaining("Failed to restart") });
+    expect(scheduler).not.toHaveBeenCalled();
+    expect(exit).not.toHaveBeenCalled();
+
+    setRestartCommandRuntimeForTests({
+      env: { [DESKTOP_MANAGED_GATEWAY_ENV]: "1" },
+      scheduler,
+      exit,
+      sendIpc: vi.fn(() => true)
+    });
+    const timedOut = cmdRestart(ctx);
+    await vi.advanceTimersByTimeAsync(500);
+    await expect(timedOut).resolves.toMatchObject({ content: expect.stringContaining("Failed to restart") });
+    expect(scheduler).not.toHaveBeenCalled();
+    expect(exit).not.toHaveBeenCalled();
   });
 
   it("help includes restart and status", () => {

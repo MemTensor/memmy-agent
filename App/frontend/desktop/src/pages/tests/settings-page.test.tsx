@@ -13,9 +13,11 @@ import {
   SettingsPageView,
   formatUsageUpdatedAt,
   isPendingQuotaRequestError,
+  resolveQuotaEligibilityMessage,
   readLogLevel,
   writeLogLevel
 } from "../settings-page.js";
+import { formatMessage, zhCNMessages } from "../../i18n/messages.js";
 
 const settingsPageSourcePath = fileURLToPath(new URL("../settings-page.tsx", import.meta.url));
 const updateCoordinatorSourcePath = fileURLToPath(new URL("../../app/update-coordinator.tsx", import.meta.url));
@@ -765,16 +767,49 @@ describe("赠送活动开关 - Token 页申请更多按钮", () => {
     expect(html).not.toContain(APPLY_MORE);
   });
 
-  it("申请中状态会禁用申请入口并轮询刷新额度", () => {
+  it("申请中状态只在窗口重新聚焦时刷新，不启动定时轮询", () => {
     const source = readFileSync(settingsPageSourcePath, "utf8");
 
-    expect(source).toContain("const [quotaRequestPending, setQuotaRequestPending] = useState(false);");
+    expect(source).toContain("tokenQuotaClient.getEligibility()");
     expect(source).toContain('t("settings.token.applyMore.pending")');
     expect(source).toContain('t("settings.token.applyMore.pendingDesc")');
-    expect(source).toContain("disabled={quotaRequestPending}");
-    expect(source).toContain("if (quotaRequestPending || !canSubmitFeedback(feedbackText) || feedbackSubmitting)");
-    expect(source).toContain("const timer = window.setInterval");
+    expect(source).toContain("const quotaApplicationBlocked = quotaEligibility !== null && quotaEligibility.state !== \"available\"");
+    expect(source).toContain("if (quotaApplicationBlocked || !canSubmitFeedback(feedbackText) || feedbackSubmitting)");
+    expect(source).toContain('window.addEventListener("focus"');
+    expect(source).not.toContain("window.setInterval");
     expect(source).toContain("dispatch(appActions.tokenUsageUpdated(nextTokenUsage));");
+  });
+
+  it("冷却期拒绝且没有理由时展示固定兜底文案和下次可申请时间", () => {
+    const message = resolveQuotaEligibilityMessage({
+      state: "cooldown",
+      requestCount: 1,
+      maxRequestCount: 5,
+      nextAllowedAtEpochMs: new Date(2026, 6, 29, 15, 0).getTime(),
+      latestRequestStatus: "rejected",
+      latestReviewNote: null
+    }, "zh-CN");
+
+    expect(message).not.toBeNull();
+    expect(formatMessage(zhCNMessages[message!.key], message!.values)).toBe(
+      "申请未通过。7 月 29 日 15:00 后可再次申请。"
+    );
+  });
+
+  it("达到 5 次上限时展示最近拒绝理由且不再给出申请入口", () => {
+    const message = resolveQuotaEligibilityMessage({
+      state: "limit_reached",
+      requestCount: 5,
+      maxRequestCount: 5,
+      nextAllowedAtEpochMs: null,
+      latestRequestStatus: "rejected",
+      latestReviewNote: "申请场景说明不够具体"
+    }, "zh-CN");
+
+    expect(message).toEqual({
+      key: "settings.token.applyMore.limitRejectedWithReason",
+      values: { reason: "申请场景说明不够具体", count: 5 }
+    });
   });
 
   it("重复 pending 申请错误会转成申请中状态", () => {

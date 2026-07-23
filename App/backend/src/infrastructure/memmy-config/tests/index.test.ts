@@ -284,8 +284,7 @@ describe("writeAppLoginFieldsToMemmyConfig", () => {
       vendor: "qwen",
       endpoint: ACCOUNT_API_BASE,
       model: "memory_summary",
-      apiKey: "cloud-login-uuid",
-      enableThinking: false
+      apiKey: "cloud-login-uuid"
     });
     expect(parsed.memmyMemory?.profiles?.account?.evolution).toEqual({
       vendor: "qwen",
@@ -541,8 +540,7 @@ describe("writeByokModelProjectionToMemmyConfig", () => {
       vendor: "anthropic",
       endpoint: "https://api.anthropic.example",
       model: "claude-3-5-haiku",
-      apiKey: "sk-memory",
-      enableThinking: false
+      apiKey: "sk-memory"
     });
     expect(parsed.memmyMemory.profiles.byok.evolution).toEqual({
       provider: "openai_compatible",
@@ -603,7 +601,7 @@ describe("writeByokModelProjectionToMemmyConfig", () => {
       memmyMemory: {
         profiles: {
           byok: {
-            summary: { provider: string; vendor: string; enableThinking: boolean };
+            summary: { provider: string; vendor: string };
             evolution: { provider: string; vendor: string; enableThinking: boolean };
           };
         };
@@ -616,9 +614,9 @@ describe("writeByokModelProjectionToMemmyConfig", () => {
         : "openai_compatible";
     expect(parsed.memmyMemory.profiles.byok.summary).toMatchObject({
       provider: expectedProtocol,
-      vendor: provider,
-      enableThinking: false
+      vendor: provider
     });
+    expect(parsed.memmyMemory.profiles.byok.summary).not.toHaveProperty("enableThinking");
     expect(parsed.memmyMemory.profiles.byok.evolution).toMatchObject({
       provider: expectedProtocol,
       vendor: provider,
@@ -817,8 +815,7 @@ describe("writeByokModelProjectionToMemmyConfig", () => {
       vendor: "openai_compatible",
       endpoint: "https://memory.example/v1",
       model: "memory-model",
-      apiKey: "sk-memory",
-      enableThinking: false
+      apiKey: "sk-memory"
     });
     expect(parsed.providers.openai).toMatchObject({
       apiBase: "https://api.openai.example/v1",

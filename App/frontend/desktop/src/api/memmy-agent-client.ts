@@ -250,6 +250,7 @@ export type MemmyAgentSendMessageInput = {
 
 export type MemmyAgentWsEvent = {
   event: string;
+  connection_generation?: number;
   chat_id?: string;
   client_id?: string;
   text?: string;
@@ -306,9 +307,10 @@ export interface MemmyAgentClient {
 export type MemmyAgentUnsubscribe = () => void;
 
 export interface MemmyAgentWebSocketConnection {
-  newChat(timeoutMs?: number): Promise<string>;
+  getReadyGeneration(): number | null;
+  newChat(expectedGeneration: number, timeoutMs?: number): Promise<string>;
   attach(chatId: string): void;
-  sendMessage(input: MemmyAgentSendMessageInput): void;
+  sendMessage(input: MemmyAgentSendMessageInput, expectedGeneration: number): void;
   stop(chatId: string): void;
   restart(chatId: string): void;
   status(chatId: string): void;
@@ -316,14 +318,22 @@ export interface MemmyAgentWebSocketConnection {
   onChat(chatId: string, handler: (event: MemmyAgentWsEvent) => void): MemmyAgentUnsubscribe;
   onStatusResult(handler: (chatId: string, content: string) => void): MemmyAgentUnsubscribe;
   onHistoryDagResult(handler: (chatId: string, content: string, payload: HistoryDagPayload) => void): MemmyAgentUnsubscribe;
-  onSessionUpdate(handler: (chatId: string, scope?: string) => void): MemmyAgentUnsubscribe;
-  onRuntimeModelUpdate(handler: (modelName: string | null, modelPreset?: string | null) => void): MemmyAgentUnsubscribe;
+  onSessionUpdate(handler: (chatId: string, scope: string | undefined, generation: number) => void): MemmyAgentUnsubscribe;
+  onRuntimeModelUpdate(handler: (modelName: string | null, modelPreset: string | null | undefined, generation: number) => void): MemmyAgentUnsubscribe;
   onRunStatus(handler: (chatId: string, startedAt: number | null) => void): MemmyAgentUnsubscribe;
   onRunLifecycle(handler: (chatId: string, event: MemmyAgentRunLifecycleEvent) => void): MemmyAgentUnsubscribe;
+  requestRunStatusSnapshot(chatId: string, expectedGeneration: number, timeoutMs?: number): Promise<MemmyAgentRunStatusSnapshot>;
   getRunStartedAt(chatId: string): number | null;
   getGoalState(chatId: string): unknown;
   close(): void;
 }
+
+export type MemmyAgentRunStatusSnapshot = {
+  status: "running" | "idle";
+  startedAt: number | null;
+  turnId: string | null;
+  connectionGeneration: number;
+};
 
 export interface CreateMemmyAgentClientInput {
   baseUrl?: string | null;
@@ -340,7 +350,7 @@ export interface WebSocketLike {
   onclose: ((event: CloseEvent) => void) | null;
   readyState: number;
   send(data: string): void;
-  close(): void;
+  close(code?: number, reason?: string): void;
 }
 
 export class MemmyAgentRequestError extends Error {
@@ -350,6 +360,13 @@ export class MemmyAgentRequestError extends Error {
     super(message);
     this.name = "MemmyAgentRequestError";
     this.status = status;
+  }
+}
+
+export class AgentGatewayUnavailableError extends Error {
+  constructor(message = "Agent gateway is not ready") {
+    super(message);
+    this.name = "AgentGatewayUnavailableError";
   }
 }
 
@@ -656,8 +673,8 @@ class HttpMemmyAgentClient implements MemmyAgentClient {
 }
 
 const WS_OPEN = 1;
-const WS_CLOSING = 2;
 const PENDING_INBOUND_MAX = 2000;
+const READY_HANDSHAKE_TIMEOUT_MS = 5_000;
 
 interface MemmyAgentWebSocketSessionInput {
   bootstrap(options?: { force?: boolean }): Promise<MemmyAgentBootstrap>;
@@ -668,9 +685,22 @@ interface MemmyAgentWebSocketSessionInput {
 }
 
 interface PendingNewChat {
+  generation: number;
   resolve: (chatId: string) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+}
+
+interface PendingRunStatusSnapshot {
+  generation: number;
+  resolve: (snapshot: MemmyAgentRunStatusSnapshot) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+interface PendingInitialReady {
+  resolve: () => void;
+  reject: (error: Error) => void;
 }
 
 class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
@@ -679,14 +709,22 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectAttempts = 0;
   private pendingNewChat: PendingNewChat | null = null;
+  private pendingInitialReady: PendingInitialReady | null = null;
+  private readonly pendingRunStatusSnapshots = new Map<string, PendingRunStatusSnapshot>();
+  private connectionGeneration = 0;
+  private transportOpenGeneration: number | null = null;
+  private readyGeneration: number | null = null;
+  private readyHandshakeTimer: ReturnType<typeof setTimeout> | null = null;
+  private hasReachedReady = false;
+  private lastOrdinarySendChatId: string | null = null;
   private readonly knownChats = new Set<string>();
-  private readonly sendQueue: Record<string, unknown>[] = [];
+  private readonly controlQueue: Record<string, unknown>[] = [];
   private readonly chatHandlers = new Map<string, Set<(event: MemmyAgentWsEvent) => void>>();
   private readonly pendingInboundByChat = new Map<string, MemmyAgentWsEvent[]>();
   private readonly statusResultHandlers = new Set<(chatId: string, content: string) => void>();
   private readonly historyDagResultHandlers = new Set<(chatId: string, content: string, payload: HistoryDagPayload) => void>();
-  private readonly sessionUpdateHandlers = new Set<(chatId: string, scope?: string) => void>();
-  private readonly runtimeModelHandlers = new Set<(modelName: string | null, modelPreset?: string | null) => void>();
+  private readonly sessionUpdateHandlers = new Set<(chatId: string, scope: string | undefined, generation: number) => void>();
+  private readonly runtimeModelHandlers = new Set<(modelName: string | null, modelPreset: string | null | undefined, generation: number) => void>();
   private readonly runStatusHandlers = new Set<(chatId: string, startedAt: number | null) => void>();
   private readonly runLifecycleHandlers = new Set<(chatId: string, event: MemmyAgentRunLifecycleEvent) => void>();
   private readonly runStartedAtByChatId = new Map<string, number>();
@@ -695,16 +733,38 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
   constructor(private readonly input: MemmyAgentWebSocketSessionInput) {}
 
   async connect(): Promise<void> {
-    await this.openSocket(true);
+    const ready = new Promise<void>((resolve, reject) => {
+      this.pendingInitialReady = { resolve, reject };
+    });
+    try {
+      await this.openSocket(true);
+      await ready;
+    } catch (error) {
+      const connectError = asError(error, "Agent gateway connection failed");
+      this.rejectInitialReady(connectError);
+      this.close();
+      throw connectError;
+    }
   }
 
-  newChat(timeoutMs = 5000): Promise<string> {
+  getReadyGeneration(): number | null {
+    return this.readyGeneration;
+  }
+
+  newChat(expectedGeneration: number, timeoutMs = 5000): Promise<string> {
     if (this.pendingNewChat) {
       return Promise.reject(new Error("newChat already in flight"));
     }
 
+    try {
+      this.assertReadyGeneration(expectedGeneration);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+
     return new Promise<string>((resolve, reject) => {
       const pending: PendingNewChat = {
+        generation: expectedGeneration,
         resolve,
         reject,
         timer: setTimeout(() => {
@@ -715,7 +775,13 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
         }, timeoutMs)
       };
       this.pendingNewChat = pending;
-      this.queueSend({ type: "new_chat" });
+      try {
+        this.sendOrdinaryFrame({ type: "new_chat" }, expectedGeneration);
+      } catch (error) {
+        this.pendingNewChat = null;
+        clearTimeout(pending.timer);
+        reject(asError(error, "Unable to create chat"));
+      }
     });
   }
 
@@ -724,19 +790,23 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
       return;
     }
     this.knownChats.add(chatId);
-    this.queueSend({ type: "attach", chat_id: chatId });
+    const generation = this.readyGeneration;
+    if (generation !== null) {
+      this.sendAttach(chatId, generation);
+    }
   }
 
-  sendMessage(input: MemmyAgentSendMessageInput): void {
-    this.knownChats.add(input.chatId);
-    this.queueSend({
+  sendMessage(input: MemmyAgentSendMessageInput, expectedGeneration: number): void {
+    this.sendOrdinaryFrame({
       type: "message",
       chat_id: input.chatId,
       content: input.content,
       webui: true,
       ...(input.language ? { language: input.language } : {}),
       ...(input.media?.length ? { media_paths: input.media.map((item) => item.path) } : {})
-    });
+    }, expectedGeneration);
+    this.knownChats.add(input.chatId);
+    this.lastOrdinarySendChatId = input.chatId;
   }
 
   stop(chatId: string): void {
@@ -744,7 +814,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
       return;
     }
     this.knownChats.add(chatId);
-    this.queueSend({
+    this.queueControl({
       type: "stop",
       chat_id: chatId
     });
@@ -755,7 +825,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
       return;
     }
     this.knownChats.add(chatId);
-    this.queueSend({
+    this.queueControl({
       type: "message",
       chat_id: chatId,
       content: "/restart",
@@ -768,7 +838,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
       return;
     }
     this.knownChats.add(chatId);
-    this.queueSend({ type: "status", chat_id: chatId });
+    this.queueControl({ type: "status", chat_id: chatId });
   }
 
   historyDag(chatId: string): void {
@@ -776,7 +846,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
       return;
     }
     this.knownChats.add(chatId);
-    this.queueSend({ type: "history_dag", chat_id: chatId });
+    this.queueControl({ type: "history_dag", chat_id: chatId });
   }
 
   onChat(chatId: string, handler: (event: MemmyAgentWsEvent) => void): MemmyAgentUnsubscribe {
@@ -819,12 +889,12 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     return () => this.historyDagResultHandlers.delete(handler);
   }
 
-  onSessionUpdate(handler: (chatId: string, scope?: string) => void): MemmyAgentUnsubscribe {
+  onSessionUpdate(handler: (chatId: string, scope: string | undefined, generation: number) => void): MemmyAgentUnsubscribe {
     this.sessionUpdateHandlers.add(handler);
     return () => this.sessionUpdateHandlers.delete(handler);
   }
 
-  onRuntimeModelUpdate(handler: (modelName: string | null, modelPreset?: string | null) => void): MemmyAgentUnsubscribe {
+  onRuntimeModelUpdate(handler: (modelName: string | null, modelPreset: string | null | undefined, generation: number) => void): MemmyAgentUnsubscribe {
     this.runtimeModelHandlers.add(handler);
     return () => this.runtimeModelHandlers.delete(handler);
   }
@@ -844,7 +914,8 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
         event: "goal_status",
         chat_id: chatId,
         status: "running",
-        started_at: startedAt
+        started_at: startedAt,
+        ...(this.readyGeneration !== null ? { connection_generation: this.readyGeneration } : {})
       });
     }
     return () => this.runLifecycleHandlers.delete(handler);
@@ -858,66 +929,132 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     return this.goalStateByChatId.get(chatId);
   }
 
+  requestRunStatusSnapshot(
+    chatId: string,
+    expectedGeneration: number,
+    timeoutMs = 5_000
+  ): Promise<MemmyAgentRunStatusSnapshot> {
+    try {
+      this.assertReadyGeneration(expectedGeneration);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    if (this.pendingRunStatusSnapshots.has(chatId)) {
+      return Promise.reject(new Error(`Run status snapshot already pending for ${chatId}`));
+    }
+
+    return new Promise<MemmyAgentRunStatusSnapshot>((resolve, reject) => {
+      const pending: PendingRunStatusSnapshot = {
+        generation: expectedGeneration,
+        resolve,
+        reject,
+        timer: setTimeout(() => {
+          if (this.pendingRunStatusSnapshots.get(chatId) === pending) {
+            this.pendingRunStatusSnapshots.delete(chatId);
+          }
+          reject(new Error(`Run status snapshot timed out for ${chatId}`));
+        }, timeoutMs)
+      };
+      this.pendingRunStatusSnapshots.set(chatId, pending);
+      try {
+        this.sendOrdinaryFrame({ type: "attach", chat_id: chatId }, expectedGeneration);
+      } catch (error) {
+        this.pendingRunStatusSnapshots.delete(chatId);
+        clearTimeout(pending.timer);
+        reject(asError(error, "Unable to request run status snapshot"));
+      }
+    });
+  }
+
   close(): void {
     this.intentionallyClosed = true;
+    this.connectionGeneration += 1;
     this.rejectPendingNewChat(new Error("newChat cancelled"));
+    this.rejectPendingRunStatusSnapshots(new Error("run status snapshot cancelled"));
+    this.rejectInitialReady(new Error("Agent gateway connection cancelled"));
+    this.clearReadyHandshakeTimer();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
     const socket = this.socket;
     this.socket = null;
+    this.readyGeneration = null;
+    this.transportOpenGeneration = null;
     socket?.close();
   }
 
   private async openSocket(forceBootstrap: boolean): Promise<void> {
+    const generation = this.connectionGeneration + 1;
+    this.connectionGeneration = generation;
     const boot = await this.input.bootstrap({ force: forceBootstrap });
-    if (this.intentionallyClosed) {
+    if (this.intentionallyClosed || generation !== this.connectionGeneration) {
       return;
     }
     const ws = this.input.webSocketFactory(toWebSocketUrl(this.input.baseUrl, boot.ws_path, boot.token, this.input.clientId));
     this.socket = ws;
-    ws.onopen = () => this.handleOpen();
-    ws.onmessage = (event) => this.handleMessage(event);
-    ws.onerror = () => this.emitEvent({ event: "error", detail: "websocket_error" });
-    ws.onclose = (event) => this.handleClose(event);
+    ws.onopen = () => this.handleOpen(ws, generation);
+    ws.onmessage = (event) => this.handleMessage(ws, generation, event);
+    ws.onerror = () => this.handleError(ws, generation);
+    ws.onclose = (event) => this.handleClose(ws, generation, event);
     if (ws.readyState === WS_OPEN) {
-      this.handleOpen();
+      this.handleOpen(ws, generation);
     }
   }
 
-  private handleOpen(): void {
-    this.reconnectAttempts = 0;
-    for (const chatId of this.knownChats) {
-      this.rawSend({ type: "attach", chat_id: chatId });
+  private handleOpen(socket: WebSocketLike, generation: number): void {
+    if (!this.isCurrentSocket(socket, generation) || this.transportOpenGeneration === generation) {
+      return;
     }
-    const queued = this.sendQueue.splice(0);
-    for (const frame of queued) {
-      this.rawSend(frame);
-    }
+    this.transportOpenGeneration = generation;
+    this.clearReadyHandshakeTimer();
+    this.readyHandshakeTimer = setTimeout(() => {
+      if (this.isCurrentSocket(socket, generation) && this.readyGeneration !== generation) {
+        socket.close(1011, "ready timeout");
+      }
+    }, READY_HANDSHAKE_TIMEOUT_MS);
   }
 
-  private handleMessage(event: MessageEvent): void {
+  private handleMessage(socket: WebSocketLike, generation: number, event: MessageEvent): void {
+    if (!this.isCurrentSocket(socket, generation)) {
+      return;
+    }
     const parsed = parseWsEvent(event.data);
     if (!parsed) {
       return;
     }
 
-    const normalized = normalizeGatewayMediaUrls(parsed, this.input.baseUrl);
-
-    this.emitEvent(normalized);
+    const normalized: MemmyAgentWsEvent = {
+      ...normalizeGatewayMediaUrls(parsed, this.input.baseUrl),
+      connection_generation: generation
+    };
 
     if (normalized.event === "ready") {
+      if (this.readyGeneration !== generation) {
+        this.clearReadyHandshakeTimer();
+        this.readyGeneration = generation;
+        this.hasReachedReady = true;
+        this.reconnectAttempts = 0;
+        this.pendingInitialReady?.resolve();
+        this.pendingInitialReady = null;
+        for (const chatId of this.knownChats) {
+          this.sendAttach(chatId, generation);
+        }
+        this.flushControlQueue(socket, generation);
+      }
       if (normalized.chat_id) {
         this.knownChats.add(normalized.chat_id);
       }
+      this.emitEvent(normalized);
       return;
     }
+
+    this.emitEvent(normalized);
 
     if (normalized.event === "attached") {
       if (normalized.chat_id) {
         this.knownChats.add(normalized.chat_id);
-        this.resolvePendingNewChat(normalized.chat_id);
+        this.resolvePendingNewChat(normalized.chat_id, generation);
         this.dispatchChat(normalized.chat_id, normalized);
       }
       return;
@@ -925,7 +1062,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
 
     if (normalized.event === "runtime_model_updated") {
       for (const handler of this.runtimeModelHandlers) {
-        handler(normalized.model_name ?? null, typeof normalized.model_preset === "string" ? normalized.model_preset : null);
+        handler(normalized.model_name ?? null, typeof normalized.model_preset === "string" ? normalized.model_preset : null, generation);
       }
       return;
     }
@@ -933,7 +1070,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     if (normalized.event === "session_updated") {
       if (normalized.chat_id) {
         for (const handler of this.sessionUpdateHandlers) {
-          handler(normalized.chat_id, typeof normalized.scope === "string" ? normalized.scope : undefined);
+          handler(normalized.chat_id, typeof normalized.scope === "string" ? normalized.scope : undefined, generation);
         }
       }
       return;
@@ -976,19 +1113,45 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
 
     this.recordRunStatus(chatId, normalized);
     this.recordGoalState(chatId, normalized);
+    this.resolveRunStatusSnapshot(chatId, normalized, generation);
     this.dispatchChat(chatId, normalized);
   }
 
-  private handleClose(event?: CloseEvent): void {
+  private handleError(socket: WebSocketLike, generation: number): void {
+    if (!this.isCurrentSocket(socket, generation)) {
+      return;
+    }
+    this.emitEvent({ event: "transport_error", detail: "websocket_error", connection_generation: generation });
+  }
+
+  private handleClose(socket: WebSocketLike, generation: number, event?: CloseEvent): void {
+    if (!this.isCurrentSocket(socket, generation)) {
+      return;
+    }
     this.socket = null;
+    this.transportOpenGeneration = null;
+    this.readyGeneration = null;
+    this.clearReadyHandshakeTimer();
     this.rejectPendingNewChat(new Error("newChat failed because websocket closed"));
+    this.rejectPendingRunStatusSnapshots(new Error("run status snapshot failed because websocket closed"), generation);
     if (this.intentionallyClosed) {
       return;
     }
-    if (event?.code === 1009) {
-      this.emitEvent({ event: "transport_error", detail: "message_too_big" });
+    if (!this.hasReachedReady) {
+      this.lastOrdinarySendChatId = null;
+      this.rejectInitialReady(new Error("Agent gateway closed before ready"));
+      return;
     }
-    this.emitEvent({ event: "connection_closed" });
+    if (event?.code === 1009) {
+      this.emitEvent({
+        event: "transport_error",
+        detail: "message_too_big",
+        connection_generation: generation,
+        ...(this.lastOrdinarySendChatId ? { chat_id: this.lastOrdinarySendChatId } : {})
+      });
+    }
+    this.lastOrdinarySendChatId = null;
+    this.emitEvent({ event: "connection_closed", connection_generation: generation });
     this.scheduleReconnect();
   }
 
@@ -1000,24 +1163,86 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     this.reconnectAttempts += 1;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
-      void this.openSocket(true).catch(() => this.scheduleReconnect());
+      void this.openSocket(true).catch((error) => {
+        this.emitEvent({
+          event: "connection_attempt_failed",
+          detail: asError(error, "Agent gateway reconnect failed").message,
+          connection_generation: this.connectionGeneration
+        });
+        this.scheduleReconnect();
+      });
     }, delayMs);
   }
 
-  private queueSend(frame: Record<string, unknown>): void {
-    if (this.socket?.readyState === WS_OPEN) {
-      this.rawSend(frame);
+  private queueControl(frame: Record<string, unknown>): void {
+    const socket = this.socket;
+    const generation = this.readyGeneration;
+    if (!socket || generation === null || socket.readyState !== WS_OPEN) {
+      this.controlQueue.push(frame);
       return;
     }
-    this.sendQueue.push(frame);
+    try {
+      this.rawSend(socket, generation, frame);
+    } catch {
+      this.controlQueue.push(frame);
+      socket.close(1011, "send failed");
+    }
   }
 
-  private rawSend(frame: Record<string, unknown>): void {
-    if (!this.socket || this.socket.readyState >= WS_CLOSING) {
-      this.sendQueue.push(frame);
+  private flushControlQueue(socket: WebSocketLike, generation: number): void {
+    while (this.controlQueue.length > 0 && this.isReadySocket(socket, generation)) {
+      const frame = this.controlQueue[0]!;
+      try {
+        this.rawSend(socket, generation, frame);
+        this.controlQueue.shift();
+      } catch {
+        socket.close(1011, "send failed");
+        return;
+      }
+    }
+  }
+
+  private sendAttach(chatId: string, generation: number): void {
+    const socket = this.socket;
+    if (!socket || !this.isReadySocket(socket, generation)) {
       return;
     }
-    sendJson(this.socket, frame);
+    try {
+      this.rawSend(socket, generation, { type: "attach", chat_id: chatId });
+    } catch {
+      socket.close(1011, "attach failed");
+    }
+  }
+
+  private sendOrdinaryFrame(frame: Record<string, unknown>, expectedGeneration: number): void {
+    this.assertReadyGeneration(expectedGeneration);
+    this.rawSend(this.socket!, expectedGeneration, frame);
+  }
+
+  private rawSend(socket: WebSocketLike, generation: number, frame: Record<string, unknown>): void {
+    if (!this.isReadySocket(socket, generation)) {
+      throw new AgentGatewayUnavailableError();
+    }
+    sendJson(socket, frame);
+  }
+
+  private assertReadyGeneration(expectedGeneration: number): void {
+    const socket = this.socket;
+    if (!socket || !this.isReadySocket(socket, expectedGeneration)) {
+      throw new AgentGatewayUnavailableError();
+    }
+  }
+
+  private isReadySocket(socket: WebSocketLike, generation: number): boolean {
+    return this.isCurrentSocket(socket, generation)
+      && this.readyGeneration === generation
+      && socket.readyState === WS_OPEN;
+  }
+
+  private isCurrentSocket(socket: WebSocketLike, generation: number): boolean {
+    return !this.intentionallyClosed
+      && this.socket === socket
+      && this.connectionGeneration === generation;
   }
 
   private dispatchChat(chatId: string, event: MemmyAgentWsEvent): void {
@@ -1038,9 +1263,9 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     this.pendingInboundByChat.set(chatId, queue);
   }
 
-  private resolvePendingNewChat(chatId: string): void {
+  private resolvePendingNewChat(chatId: string, generation: number): void {
     const pending = this.pendingNewChat;
-    if (!pending) {
+    if (!pending || pending.generation !== generation) {
       return;
     }
     this.pendingNewChat = null;
@@ -1056,6 +1281,56 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     this.pendingNewChat = null;
     clearTimeout(pending.timer);
     pending.reject(error);
+  }
+
+  private resolveRunStatusSnapshot(chatId: string, event: MemmyAgentWsEvent, generation: number): void {
+    if (event.event !== "run_status_snapshot") {
+      return;
+    }
+    const pending = this.pendingRunStatusSnapshots.get(chatId);
+    if (!pending || pending.generation !== generation) {
+      return;
+    }
+    const status = event.status === "running" ? "running" : event.status === "idle" ? "idle" : null;
+    if (!status) {
+      return;
+    }
+    this.pendingRunStatusSnapshots.delete(chatId);
+    clearTimeout(pending.timer);
+    pending.resolve({
+      status,
+      startedAt: typeof event.started_at === "number" ? event.started_at : null,
+      turnId: typeof event.turn_id === "string" ? event.turn_id : typeof event.turnId === "string" ? event.turnId : null,
+      connectionGeneration: generation
+    });
+  }
+
+  private rejectPendingRunStatusSnapshots(error: Error, generation?: number): void {
+    for (const [chatId, pending] of this.pendingRunStatusSnapshots) {
+      if (generation !== undefined && pending.generation !== generation) {
+        continue;
+      }
+      this.pendingRunStatusSnapshots.delete(chatId);
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+  }
+
+  private rejectInitialReady(error: Error): void {
+    const pending = this.pendingInitialReady;
+    if (!pending) {
+      return;
+    }
+    this.pendingInitialReady = null;
+    pending.reject(error);
+  }
+
+  private clearReadyHandshakeTimer(): void {
+    if (!this.readyHandshakeTimer) {
+      return;
+    }
+    clearTimeout(this.readyHandshakeTimer);
+    this.readyHandshakeTimer = null;
   }
 
   private recordRunStatus(chatId: string, event: MemmyAgentWsEvent): void {
@@ -1101,6 +1376,10 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
   private emitEvent(event: MemmyAgentWsEvent): void {
     this.input.onEvent?.(event);
   }
+}
+
+function asError(error: unknown, fallback: string): Error {
+  return error instanceof Error ? error : new Error(fallback);
 }
 
 function normalizeBaseUrl(value: string): string {

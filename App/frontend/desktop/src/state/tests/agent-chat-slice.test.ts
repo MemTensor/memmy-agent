@@ -38,15 +38,30 @@ describe("agent chat slice", () => {
   });
 
   it("dismisses only the matching transient error without changing connection status", () => {
-    const errored = agentReducer(initialAgentState, { type: "agent/error", message: "语音识别失败" });
+    const error = { id: "chat-error-1", source: "send" as const, message: "语音识别失败", createdAt: 1 };
+    const errored = agentReducer(initialAgentState, { type: "agent/operationFailed", surface: "chat", error });
 
-    const staleDismiss = agentReducer(errored, { type: "agent/errorDismissed", message: "旧错误" });
-    expect(staleDismiss.error).toBe("语音识别失败");
-    expect(staleDismiss.connectionStatus).toBe("error");
+    const staleDismiss = agentReducer(errored, { type: "agent/operationErrorDismissed", surface: "chat", id: "旧错误" });
+    expect(staleDismiss.operationErrorsBySurface.chat).toEqual(error);
+    expect(staleDismiss.connectionStatus).toBe("idle");
 
-    const dismissed = agentReducer(errored, { type: "agent/errorDismissed", message: "语音识别失败" });
-    expect(dismissed.error).toBeNull();
-    expect(dismissed.connectionStatus).toBe("error");
+    const dismissed = agentReducer(errored, { type: "agent/operationErrorDismissed", surface: "chat", id: error.id });
+    expect(dismissed.operationErrorsBySurface.chat).toBeNull();
+    expect(dismissed.connectionStatus).toBe("idle");
+  });
+
+  it("assigns a unique operation error id to repeated gateway errors", () => {
+    const first = agentReducer(initialAgentState, {
+      type: "agent/wsEvent",
+      event: { event: "error", detail: "same failure", connection_generation: 0 }
+    });
+    const second = agentReducer(first, {
+      type: "agent/wsEvent",
+      event: { event: "error", detail: "same failure", connection_generation: 0 }
+    });
+
+    expect(first.operationErrorsBySurface.chat?.message).toBe("same failure");
+    expect(second.operationErrorsBySurface.chat?.id).not.toBe(first.operationErrorsBySurface.chat?.id);
   });
 
   it("clears sessions loading failures without showing a connection error", () => {
@@ -62,7 +77,7 @@ describe("agent chat slice", () => {
     expect(state.currentSessionsRequestId).toBeNull();
     expect(state.currentSessionsRequestRunStatusVersionByChatId).toBeNull();
     expect(state.connectionStatus).toBe("idle");
-    expect(state.error).toBeNull();
+    expect(state.connectionError).toBeNull();
   });
 
   it("marks the current chat unseen when completion arrives outside the visible chat view", () => {
@@ -1410,9 +1425,8 @@ describe("agent chat slice", () => {
     expect(state.connectionStatus).toBe("connected");
     expect(state.isSending).toBe(false);
     expect(state.optimisticSendingByChatId["chat-1"]).toBeUndefined();
-    expect(state.error).toBe("home.media.error.sendUnsupported");
-    expect(state.messages).toHaveLength(1);
-    expect(state.messages[0]).toMatchObject({ role: "user", content: "描述图片" });
+    expect(state.operationErrorsBySurface.chat?.message).toBe("home.media.error.sendUnsupported");
+    expect(state.messages).toHaveLength(0);
   });
 
   it("uses the current chat as a fallback for media rejection events without chat ids", () => {
@@ -1431,7 +1445,62 @@ describe("agent chat slice", () => {
     expect(state.connectionStatus).toBe("connected");
     expect(state.isSending).toBe(false);
     expect(state.optimisticSendingByChatId["chat-1"]).toBeUndefined();
-    expect(state.error).toBe("home.media.error.sendTooManyAttachments");
+    expect(state.operationErrorsBySurface.chat?.message).toBe("home.media.error.sendTooManyAttachments");
+  });
+
+  it("does not remove a canonical user message for a rejection without a matching optimistic send", () => {
+    let state = loadHistory(initialAgentState, "websocket:chat-1", [
+      { role: "user", content: "已经保存的消息" }
+    ]);
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "error", chat_id: "chat-1", detail: "attachment_rejected", reason: "mime" }
+    });
+
+    expect(state.messages).toEqual([{ id: "user-0", role: "user", content: "已经保存的消息" }]);
+    expect(state.operationErrorsBySurface.chat?.message).toBe("home.media.error.sendUnsupported");
+  });
+
+  it("clears only the target optimistic send when the gateway reports missing content", () => {
+    let state = agentReducer(initialAgentState, {
+      type: "agent/userMessageQueued",
+      chatId: "chat-1",
+      content: "缺少内容"
+    });
+    state = agentReducer(state, {
+      type: "agent/userMessageQueued",
+      chatId: "chat-2",
+      content: "另一条消息",
+      focus: false
+    });
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "error", chat_id: "chat-1", detail: "missing content" }
+    });
+
+    expect(state.optimisticSendingByChatId["chat-1"]).toBeUndefined();
+    expect(state.optimisticSendingByChatId["chat-2"]).toBe(true);
+    expect(state.messages).toHaveLength(0);
+    expect(state.messagesByChatId["chat-2"]?.at(-1)).toMatchObject({ role: "user", content: "另一条消息" });
+    expect(state.operationErrorsBySurface.chat).toMatchObject({ source: "send", chatId: "chat-1" });
+  });
+
+  it("clears only the target stop lock when the gateway reports stop_failed", () => {
+    const state = agentReducer({
+      ...initialAgentState,
+      connectionStatus: "connected",
+      stopInFlightByChatId: { "chat-1": true, "chat-2": true }
+    }, {
+      type: "agent/wsEvent",
+      event: { event: "error", chat_id: "chat-1", detail: "stop_failed" }
+    });
+
+    expect(state.connectionStatus).toBe("connected");
+    expect(state.stopInFlightByChatId["chat-1"]).toBeUndefined();
+    expect(state.stopInFlightByChatId["chat-2"]).toBe(true);
+    expect(state.operationErrorsBySurface.chat).toMatchObject({ source: "gateway-command", chatId: "chat-1" });
   });
 
   it("restores blank draft state after a transient pre-send failure", () => {
@@ -1516,7 +1585,7 @@ describe("agent chat slice", () => {
     expect(state.connectionStatus).toBe("connected");
     expect(state.isSending).toBe(false);
     expect(state.optimisticSendingByChatId["chat-big"]).toBeUndefined();
-    expect(state.error).toBe("home.media.error.messageTooBig");
+    expect(state.operationErrorsBySurface.chat?.message).toBe("home.media.error.messageTooBig");
   });
 
   it("preserves structured media path and kind from webui-thread history", () => {
@@ -3292,7 +3361,535 @@ describe("agent chat slice", () => {
     expect(state.currentSessionKey).toBeNull();
     expect(state.blankDraftActive).toBe(true);
   });
+
+  it("changes connection lifecycle only for the current socket generation", () => {
+    let state = agentReducer(initialAgentState, {
+      type: "agent/wsEvent",
+      event: { event: "ready", chat_id: "chat-1", connection_generation: 1 }
+    });
+
+    expect(state.connectionStatus).toBe("connected");
+    expect(state.connectionGeneration).toBe(1);
+    expect(state.recoveringGeneration).toBe(1);
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "connection_closed", connection_generation: 1 }
+    });
+    expect(state.connectionStatus).toBe("reconnecting");
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "ready", chat_id: "chat-1", connection_generation: 2 }
+    });
+    const connected = state;
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "connection_closed", connection_generation: 1 }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "attached", chat_id: "stale-chat", connection_generation: 1 }
+    });
+
+    expect(state).toBe(connected);
+    expect(state.connectionStatus).toBe("connected");
+    expect(state.currentChatId).toBe("chat-1");
+  });
+
+  it("does not treat attached as an application-ready connection", () => {
+    const state = agentReducer({ ...initialAgentState, connectionStatus: "connecting" }, {
+      type: "agent/wsEvent",
+      event: { event: "attached", chat_id: "chat-1" }
+    });
+
+    expect(state.connectionStatus).toBe("connecting");
+    expect(state.currentChatId).toBe("chat-1");
+  });
+
+  it("marks only submitted chats uncertain on close while preserving drafts, attachments, and other chat state", () => {
+    const attachment = readyPendingFile("draft.txt");
+    let state = agentReducer(initialAgentState, {
+      type: "agent/wsEvent",
+      event: { event: "ready", chat_id: "chat-1", connection_generation: 1 }
+    });
+    state = agentReducer(state, { type: "agent/recoveryFinished", generation: 1 });
+    state = agentReducer(state, { type: "agent/userMessageQueued", chatId: "chat-1", content: "待确认消息" });
+    state = agentReducer(state, { type: "agent/composerDraftUpdated", scopeKey: "chat:chat-2", value: "保留草稿" });
+    state = agentReducer(state, { type: "agent/composerPendingAttachmentsUpdated", scopeKey: "chat:chat-2", attachments: [attachment] });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "delta", chat_id: "chat-2", text: "另一个会话流" }
+    });
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "connection_closed", connection_generation: 1 }
+    });
+
+    expect(state.connectionStatus).toBe("reconnecting");
+    expect(state.deliveryUncertainByChatId).toEqual({ "chat-1": true });
+    expect(state.messagesByChatId["chat-2"]?.map((message) => message.content)).toEqual(["另一个会话流"]);
+    expect(state.composerDraftsByScope["chat:chat-2"]).toBe("保留草稿");
+    expect(state.composerPendingAttachmentsByScope["chat:chat-2"]).toEqual([attachment]);
+  });
+
+  it("uses closed canonical history as idle when a running snapshot raced with turn completion", () => {
+    let state = recoveryStateWithPendingMessage("已提交消息");
+    const requestId = "recovery-chat-1";
+    state = agentReducer(state, {
+      type: "agent/recoveryChatLoading",
+      request: {
+        requestId,
+        generation: 2,
+        chatId: "chat-1",
+        chatSelectionEpoch: state.chatSelectionEpoch,
+        runStatusVersionAtStart: state.runStatusVersionByChatId["chat-1"] ?? 0
+      }
+    });
+    state = agentReducer(state, {
+      type: "agent/recoveryChatSnapshotLoaded",
+      requestId,
+      generation: 2,
+      chatId: "chat-1",
+      chatSelectionEpoch: state.chatSelectionEpoch,
+      thread: {
+        schemaVersion: 1,
+        sessionKey: "websocket:chat-1",
+        last_turn_closed: true,
+        messages: [
+          { role: "user", content: "已提交消息" },
+          { role: "assistant", content: "已完成" }
+        ]
+      },
+      runSnapshot: {
+        status: "running",
+        startedAt: 2_000,
+        turnId: "turn-stale",
+        connectionGeneration: 2
+      },
+      noticeId: "notice-closed",
+      completedAt: 3_000
+    });
+
+    expect(state.messages.map((message) => message.content)).toEqual(["已提交消息", "已完成"]);
+    expect(state.runStartedAtByChatId["chat-1"]).toBeNull();
+    expect(state.activeTurnIdByChatId["chat-1"]).toBeNull();
+    expect(state.optimisticSendingByChatId["chat-1"]).toBeUndefined();
+    expect(state.deliveryUncertainByChatId["chat-1"]).toBeUndefined();
+  });
+
+  it("reports a pre-generated message-not-recorded notice without altering unrelated state", () => {
+    const attachment = readyPendingFile("keep.txt");
+    let state = recoveryStateWithPendingMessage("本次待确认消息");
+    state = agentReducer(state, { type: "agent/composerDraftUpdated", scopeKey: "chat:chat-1", value: "恢复中草稿" });
+    state = agentReducer(state, { type: "agent/composerPendingAttachmentsUpdated", scopeKey: "chat:chat-1", attachments: [attachment] });
+    const requestId = "recovery-missing";
+    state = agentReducer(state, {
+      type: "agent/recoveryChatLoading",
+      request: {
+        requestId,
+        generation: 2,
+        chatId: "chat-1",
+        chatSelectionEpoch: state.chatSelectionEpoch,
+        runStatusVersionAtStart: state.runStatusVersionByChatId["chat-1"] ?? 0
+      }
+    });
+    state = agentReducer(state, {
+      type: "agent/recoveryChatSnapshotLoaded",
+      requestId,
+      generation: 2,
+      chatId: "chat-1",
+      chatSelectionEpoch: state.chatSelectionEpoch,
+      thread: {
+        schemaVersion: 1,
+        sessionKey: "websocket:chat-1",
+        last_turn_closed: false,
+        messages: [{ role: "user", content: "服务端上一条消息" }]
+      },
+      runSnapshot: { status: "idle", startedAt: null, turnId: null, connectionGeneration: 2 },
+      noticeId: "notice-missing",
+      completedAt: 4_000
+    });
+
+    expect(state.messages.map((message) => message.content)).toEqual(["服务端上一条消息"]);
+    expect(state.operationErrorsBySurface.chat).toEqual({
+      id: "notice-missing",
+      source: "recovery",
+      message: "home.agent.messageNotRecorded",
+      chatId: "chat-1",
+      createdAt: 4_000
+    });
+    expect(state.composerDraftsByScope["chat:chat-1"]).toBe("恢复中草稿");
+    expect(state.composerPendingAttachmentsByScope["chat:chat-1"]).toEqual([attachment]);
+  });
+
+  it("keeps delivery uncertainty when canonical history succeeds but the run snapshot fails", () => {
+    let state = recoveryStateWithPendingMessage("服务端已记录");
+    const requestId = "recovery-snapshot-failed";
+    state = agentReducer(state, {
+      type: "agent/recoveryChatLoading",
+      request: {
+        requestId,
+        generation: 2,
+        chatId: "chat-1",
+        chatSelectionEpoch: state.chatSelectionEpoch,
+        runStatusVersionAtStart: state.runStatusVersionByChatId["chat-1"] ?? 0
+      }
+    });
+    state = agentReducer(state, {
+      type: "agent/recoveryChatSnapshotLoaded",
+      requestId,
+      generation: 2,
+      chatId: "chat-1",
+      chatSelectionEpoch: state.chatSelectionEpoch,
+      thread: {
+        schemaVersion: 1,
+        sessionKey: "websocket:chat-1",
+        last_turn_closed: false,
+        messages: [{ role: "user", content: "服务端已记录" }]
+      },
+      runSnapshot: null,
+      noticeId: "notice-snapshot-failed",
+      completedAt: 4_100,
+      failureMessage: "run snapshot: timed out"
+    });
+
+    expect(state.deliveryUncertainByChatId["chat-1"]).toBe(true);
+    expect(state.operationErrorsBySurface.chat).toEqual({
+      id: "notice-snapshot-failed",
+      source: "recovery",
+      message: "run snapshot: timed out",
+      chatId: "chat-1",
+      createdAt: 4_100
+    });
+  });
+
+  it("reports an interrupted execution when canonical saved the pending user but the recovered run is idle", () => {
+    let state = recoveryStateWithPendingMessage("已保存但未完成");
+    const requestId = "recovery-interrupted";
+    state = agentReducer(state, {
+      type: "agent/recoveryChatLoading",
+      request: {
+        requestId,
+        generation: 2,
+        chatId: "chat-1",
+        chatSelectionEpoch: state.chatSelectionEpoch,
+        runStatusVersionAtStart: state.runStatusVersionByChatId["chat-1"] ?? 0
+      }
+    });
+    state = agentReducer(state, {
+      type: "agent/recoveryChatSnapshotLoaded",
+      requestId,
+      generation: 2,
+      chatId: "chat-1",
+      chatSelectionEpoch: state.chatSelectionEpoch,
+      thread: {
+        schemaVersion: 1,
+        sessionKey: "websocket:chat-1",
+        last_turn_closed: false,
+        messages: [{ role: "user", content: "已保存但未完成" }]
+      },
+      runSnapshot: { status: "idle", startedAt: null, turnId: null, connectionGeneration: 2 },
+      noticeId: "notice-interrupted",
+      completedAt: 4_200
+    });
+
+    expect(state.messages.map((message) => message.content)).toEqual(["已保存但未完成"]);
+    expect(state.optimisticSendingByChatId["chat-1"]).toBeUndefined();
+    expect(state.deliveryUncertainByChatId["chat-1"]).toBeUndefined();
+    expect(state.operationErrorsBySurface.chat).toEqual({
+      id: "notice-interrupted",
+      source: "recovery",
+      message: "home.agent.executionInterrupted",
+      chatId: "chat-1",
+      createdAt: 4_200
+    });
+  });
+
+  it("does not mistake an older identical canonical user message for the pending submission", () => {
+    let state = recoveryStateWithPendingMessage("重复问题");
+    state = agentReducer(state, {
+      type: "agent/recoveryChatLoading",
+      request: {
+        requestId: "recovery-repeated-user",
+        generation: 2,
+        chatId: "chat-1",
+        chatSelectionEpoch: state.chatSelectionEpoch,
+        runStatusVersionAtStart: state.runStatusVersionByChatId["chat-1"] ?? 0
+      }
+    });
+    state = agentReducer(state, {
+      type: "agent/recoveryChatSnapshotLoaded",
+      requestId: "recovery-repeated-user",
+      generation: 2,
+      chatId: "chat-1",
+      chatSelectionEpoch: state.chatSelectionEpoch,
+      thread: {
+        schemaVersion: 1,
+        sessionKey: "websocket:chat-1",
+        last_turn_closed: false,
+        messages: [
+          { role: "user", content: "重复问题" },
+          { role: "assistant", content: "上一轮回答" },
+          { role: "user", content: "另一条最新问题" }
+        ]
+      },
+      runSnapshot: { status: "idle", startedAt: null, turnId: null, connectionGeneration: 2 },
+      noticeId: "notice-repeated-user",
+      completedAt: 4_500
+    });
+
+    expect(state.operationErrorsBySurface.chat?.message).toBe("home.agent.messageNotRecorded");
+    expect(state.deliveryUncertainByChatId["chat-1"]).toBeUndefined();
+  });
+
+  it("ignores stale sidebar confirms, failures, and refresh snapshots after a newer mutation", () => {
+    const first = sidebar({ pinned_keys: ["websocket:chat-1"] });
+    const second = sidebar({
+      pinned_keys: ["websocket:chat-1"],
+      archived_keys: ["websocket:chat-2"]
+    });
+    let state = agentReducer(initialAgentState, {
+      type: "agent/taskStateLoading",
+      request: {
+        requestId: "refresh-before-mutations",
+        sidebarStateVersionAtStart: 0,
+        runStatusVersionAtStartByChatId: {},
+        recoveryGeneration: null
+      }
+    });
+    state = agentReducer(state, { type: "agent/sidebarMutationStarted", mutationId: "mutation-1", sidebarState: first });
+    state = agentReducer(state, { type: "agent/sidebarMutationStarted", mutationId: "mutation-2", sidebarState: second });
+    const latest = state;
+
+    state = agentReducer(state, { type: "agent/sidebarMutationConfirmed", mutationId: "mutation-1", sidebarState: defaultAgentSidebarState });
+    state = agentReducer(state, {
+      type: "agent/sidebarMutationFailed",
+      mutationId: "mutation-1",
+      error: { id: "old-error", source: "sidebar", message: "old failure", createdAt: 1 }
+    });
+    expect(state).toBe(latest);
+
+    state = agentReducer(state, {
+      type: "agent/taskStateSettled",
+      requestId: "refresh-before-mutations",
+      recoveryGeneration: null,
+      sidebarState: defaultAgentSidebarState
+    });
+    expect(state.sidebarState).toEqual(second);
+
+    state = agentReducer(state, { type: "agent/sidebarMutationConfirmed", mutationId: "mutation-2", sidebarState: second });
+    expect(state.currentSidebarMutationId).toBeNull();
+    expect(state.sidebarState).toEqual(second);
+    expect(state.sidebarStateVersion).toBe(3);
+  });
+
+  it("does not let recoveryFinished clear a newer foreground history request", () => {
+    let state = recoveryStateWithPendingMessage("恢复中的消息");
+    state = agentReducer(state, {
+      type: "agent/recoveryChatLoading",
+      request: {
+        requestId: "old-recovery",
+        generation: 2,
+        chatId: "chat-1",
+        chatSelectionEpoch: state.chatSelectionEpoch,
+        runStatusVersionAtStart: 0
+      }
+    });
+    state = agentReducer(state, {
+      type: "agent/historyLoading",
+      sessionKey: "websocket:chat-2",
+      chatId: "chat-2",
+      requestId: "new-history"
+    });
+
+    state = agentReducer(state, { type: "agent/recoveryFinished", generation: 2 });
+
+    expect(state.recoveringGeneration).toBeNull();
+    expect(state.currentRecoveryChatRequest).toBeNull();
+    expect(state.currentChatId).toBe("chat-2");
+    expect(state.currentHistoryRequestIdByChatId["chat-2"]).toBe("new-history");
+    expect(state.isLoadingHistory).toBe(true);
+  });
+
+  it("invalidates old HTTP request tokens on an intentional connection dispose while preserving page data", () => {
+    const attachment = readyPendingFile("keep-on-dispose.txt");
+    let state = recoveryStateWithPendingMessage("保留消息");
+    state = agentReducer(state, { type: "agent/composerDraftUpdated", scopeKey: "chat:chat-1", value: "保留草稿" });
+    state = agentReducer(state, { type: "agent/composerPendingAttachmentsUpdated", scopeKey: "chat:chat-1", attachments: [attachment] });
+    state = agentReducer(state, {
+      type: "agent/historyHydrateLoading",
+      sessionKey: "websocket:chat-1",
+      chatId: "chat-1",
+      requestId: "old-hydrate"
+    });
+
+    const disposed = agentReducer(state, { type: "agent/connectionDisposed" });
+    const late = agentReducer(disposed, {
+      type: "agent/historyHydrateLoaded",
+      requestId: "old-hydrate",
+      thread: {
+        schemaVersion: 1,
+        sessionKey: "websocket:chat-1",
+        messages: [{ role: "assistant", content: "迟到覆盖" }]
+      }
+    });
+
+    expect(disposed.connectionStatus).toBe("idle");
+    expect(disposed.connectionGeneration).toBe(0);
+    expect(disposed.messages.map((message) => message.content)).toEqual(["保留消息"]);
+    expect(disposed.composerDraftsByScope["chat:chat-1"]).toBe("保留草稿");
+    expect(disposed.composerPendingAttachmentsByScope["chat:chat-1"]).toEqual([attachment]);
+    expect(late).toBe(disposed);
+  });
+
+  it("drops an in-flight recovery task snapshot when that socket generation closes", () => {
+    let state = recoveryStateWithPendingMessage("恢复中的消息");
+    state = agentReducer(state, {
+      type: "agent/taskStateLoading",
+      request: {
+        requestId: "recovery-task-2",
+        sidebarStateVersionAtStart: state.sidebarStateVersion,
+        runStatusVersionAtStartByChatId: {},
+        recoveryGeneration: 2
+      }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "connection_closed", connection_generation: 2 }
+    });
+    const closed = state;
+
+    state = agentReducer(state, {
+      type: "agent/taskStateSettled",
+      requestId: "recovery-task-2",
+      recoveryGeneration: 2,
+      sessions
+    });
+
+    expect(closed.currentTaskStateRequest).toBeNull();
+    expect(closed.isLoadingSessions).toBe(false);
+    expect(state).toBe(closed);
+  });
+
+  it("does not let the parallel task snapshot erase a running recovery snapshot", () => {
+    let state = recoveryStateWithPendingMessage("继续运行");
+    const runVersionAtStart = state.runStatusVersionByChatId["chat-1"] ?? 0;
+    state = agentReducer(state, {
+      type: "agent/taskStateLoading",
+      request: {
+        requestId: "parallel-task",
+        sidebarStateVersionAtStart: state.sidebarStateVersion,
+        runStatusVersionAtStartByChatId: { "chat-1": runVersionAtStart },
+        recoveryGeneration: 2
+      }
+    });
+    state = agentReducer(state, {
+      type: "agent/recoveryChatLoading",
+      request: {
+        requestId: "parallel-chat",
+        generation: 2,
+        chatId: "chat-1",
+        chatSelectionEpoch: state.chatSelectionEpoch,
+        runStatusVersionAtStart: runVersionAtStart
+      }
+    });
+    state = agentReducer(state, {
+      type: "agent/recoveryChatSnapshotLoaded",
+      requestId: "parallel-chat",
+      generation: 2,
+      chatId: "chat-1",
+      chatSelectionEpoch: state.chatSelectionEpoch,
+      thread: {
+        schemaVersion: 1,
+        sessionKey: "websocket:chat-1",
+        last_turn_closed: false,
+        messages: [{ role: "user", content: "继续运行" }]
+      },
+      runSnapshot: { status: "running", startedAt: 2_000, turnId: "turn-2", connectionGeneration: 2 },
+      noticeId: "running-notice",
+      completedAt: 3_000
+    });
+    const afterChatRecovery = state;
+    state = agentReducer(state, {
+      type: "agent/taskStateSettled",
+      requestId: "parallel-task",
+      recoveryGeneration: 2,
+      sessions: [{ key: "websocket:chat-1", title: "任务", preview: "旧 HTTP 快照" }]
+    });
+
+    expect(afterChatRecovery.runStatusVersionByChatId["chat-1"]).toBe(runVersionAtStart + 1);
+    expect(state.runStartedAtByChatId["chat-1"]).toBe(2_000);
+    expect(state.activeTurnIdByChatId["chat-1"]).toBe("turn-2");
+    expect(state.isSending).toBe(true);
+  });
+
+  it("keeps a newer live run status authoritative over an older recovery snapshot and closed history", () => {
+    let state = recoveryStateWithPendingMessage("继续运行");
+    state = agentReducer(state, {
+      type: "agent/recoveryChatLoading",
+      request: {
+        requestId: "stale-recovery",
+        generation: 2,
+        chatId: "chat-1",
+        chatSelectionEpoch: state.chatSelectionEpoch,
+        runStatusVersionAtStart: state.runStatusVersionByChatId["chat-1"] ?? 0
+      }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "goal_status",
+        chat_id: "chat-1",
+        status: "running",
+        started_at: 4_000,
+        turn_id: "turn-new",
+        connection_generation: 2
+      }
+    });
+    state = agentReducer(state, {
+      type: "agent/recoveryChatSnapshotLoaded",
+      requestId: "stale-recovery",
+      generation: 2,
+      chatId: "chat-1",
+      chatSelectionEpoch: state.chatSelectionEpoch,
+      thread: {
+        schemaVersion: 1,
+        sessionKey: "websocket:chat-1",
+        last_turn_closed: true,
+        messages: [
+          { role: "user", content: "继续运行" },
+          { role: "assistant", content: "旧完成记录" }
+        ]
+      },
+      runSnapshot: { status: "idle", startedAt: null, turnId: null, connectionGeneration: 2 },
+      noticeId: "stale-notice",
+      completedAt: 5_000
+    });
+
+    expect(state.runStartedAtByChatId["chat-1"]).toBe(4_000);
+    expect(state.activeTurnIdByChatId["chat-1"]).toBe("turn-new");
+    expect(state.isSending).toBe(true);
+  });
 });
+
+function recoveryStateWithPendingMessage(content: string): AgentState {
+  let state = agentReducer(initialAgentState, {
+    type: "agent/wsEvent",
+    event: { event: "ready", chat_id: "chat-1", connection_generation: 1 }
+  });
+  state = agentReducer(state, { type: "agent/recoveryFinished", generation: 1 });
+  state = agentReducer(state, { type: "agent/userMessageQueued", chatId: "chat-1", content });
+  state = agentReducer(state, {
+    type: "agent/wsEvent",
+    event: { event: "connection_closed", connection_generation: 1 }
+  });
+  return agentReducer(state, {
+    type: "agent/wsEvent",
+    event: { event: "ready", chat_id: "chat-1", connection_generation: 2 }
+  });
+}
 
 function loadHistory(state: AgentState, sessionKey: string, messages: Array<Record<string, unknown>>, requestId = `${sessionKey}-request`): AgentState {
   const chatId = sessionKey.replace(/^websocket:/, "");

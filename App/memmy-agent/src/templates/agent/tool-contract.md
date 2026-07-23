@@ -9,8 +9,9 @@ records general tool contracts and less obvious usage patterns.
 - When state is uncertain, perform only enough read-only discovery to identify the cause, the smallest relevant change, and a verification step.
 - Do not treat `exec` as a universal workaround for files, search, web, messages, or scheduling.
 - If a tool fails, read the error, refresh the relevant state, and retry with a different method instead of repeating the same call.
-- After meaningful changes, verify with the smallest reliable check: reread changed state, run targeted tests, or inspect command output.
 - Treat safety and workspace-boundary errors as real limits, not obstacles to bypass.
+
+{% include 'agent/verification-contract.md' %}
 
 ## Execution Progress
 

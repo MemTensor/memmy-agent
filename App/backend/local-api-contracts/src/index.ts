@@ -1083,3 +1083,29 @@ export const TokenQuotaApplyResultSchema = z.object({
     status: z.enum(["pending", "approved", "rejected"])
 });
 export type TokenQuotaApplyResult = z.infer<typeof TokenQuotaApplyResultSchema>;
+
+/** Token quota eligibility states exposed by the local API. */
+export const TokenQuotaEligibilityStateSchema = z.enum([
+    "available",
+    "pending",
+    "cooldown",
+    "limit_reached"
+]);
+export type TokenQuotaEligibilityState = z.infer<typeof TokenQuotaEligibilityStateSchema>;
+
+/** Token quota eligibility for the current account. */
+export const TokenQuotaEligibilitySchema = z.object({
+    /** Current eligibility state. */
+    state: TokenQuotaEligibilityStateSchema,
+    /** Number of successfully created requests, capped at five. */
+    requestCount: z.number().int().min(0).max(5),
+    /** Maximum number of requests allowed for an account. */
+    maxRequestCount: z.literal(5),
+    /** Cooldown end time in Unix milliseconds; null outside cooldown. */
+    nextAllowedAtEpochMs: z.number().int().nonnegative().nullable(),
+    /** Status of the latest request; null when no request exists. */
+    latestRequestStatus: z.enum(["pending", "approved", "rejected"]).nullable(),
+    /** Rejection note for the latest request; null when unavailable or not rejected. */
+    latestReviewNote: z.string().nullable()
+});
+export type TokenQuotaEligibility = z.infer<typeof TokenQuotaEligibilitySchema>;

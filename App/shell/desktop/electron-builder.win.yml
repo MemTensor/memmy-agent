@@ -21,6 +21,8 @@ extraResources:
     to: cli
     filter:
       - "**/*"
+  - from: ../../../.env
+    to: .env
   - from: build/icon.ico
     to: icon.ico
 

@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import path from "node:path";
 import { Tool, type ToolExecutionContext } from "./base.js";
+import { appendFileLintResults, lintFiles, type FileLintRequest } from "./file-lint.js";
 
 type EditAction = "add" | "replace" | "delete";
 type PatchEdit = {
@@ -12,7 +13,7 @@ type PatchEdit = {
 };
 
 type PendingChange =
-  | { kind: "write"; rel: string; target: string; content: string; existed: boolean }
+  | { kind: "write"; rel: string; target: string; content: string; existed: boolean; previous: string | null }
   | { kind: "delete"; rel: string; target: string; previous: string };
 
 type PatchPlan = {
@@ -269,6 +270,7 @@ export class ApplyPatchTool extends Tool {
             target,
             content: state.content,
             existed: state.existed,
+            previous: state.previous,
           },
     );
     return { changes, summaries };
@@ -296,6 +298,32 @@ export class ApplyPatchTool extends Tool {
           await fs.writeFile(change.target, change.content, { encoding: "utf8", signal: signal ?? undefined });
         }
       }
+      const lintRequests: FileLintRequest[] = [];
+      for (const change of plan.changes) {
+        throwIfAborted(signal);
+        if (change.kind === "delete") {
+          if (fsSync.existsSync(change.target)) {
+            throw new PatchError(`Delete verification failed: ${change.target} still exists`);
+          }
+          continue;
+        }
+        const stat = await fs.stat(change.target);
+        if (!stat.isFile()) throw new PatchError(`Write verification failed: ${change.target} is not a regular file`);
+        throwIfAborted(signal);
+        const content = await fs.readFile(change.target, { encoding: "utf8", signal: signal ?? undefined });
+        if (content !== change.content) {
+          throw new PatchError(`Write verification failed: content mismatch for ${change.target}`);
+        }
+        lintRequests.push({
+          path: change.target,
+          content,
+          previousContent: change.previous,
+          useDelta: change.existed,
+        });
+      }
+      const lintResults = await lintFiles(lintRequests, { abortSignal: signal });
+      const success = `Patch applied:\n${plan.summaries.map(formatSummary).join("\n")}`;
+      return appendFileLintResults(success, lintResults);
     } catch (err) {
       if (applied) {
         for (const [target, data] of backups) {
@@ -308,7 +336,6 @@ export class ApplyPatchTool extends Tool {
       }
       throw err;
     }
-    return `Patch applied:\n${plan.summaries.map(formatSummary).join("\n")}`;
   }
 
   async execute(params: { edits?: PatchEdit[]; dryRun?: boolean } = {}, context?: ToolExecutionContext): Promise<string> {

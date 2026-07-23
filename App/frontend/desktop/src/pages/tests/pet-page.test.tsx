@@ -737,7 +737,7 @@ describe("PetPageView SSR", () => {
     expect(source).toContain('dispatch(agentActions.wsEventReceived({ event: "stop_result", chat_id: chatId, stopped: 1 }));');
     expect(source).toContain("if (cancelledTaskIdsRef.current.has(task.id))");
     expect(source).toContain("cleanupPetAgentTaskRun(task);");
-    expect(source.indexOf("if (cancelledTaskIdsRef.current.has(task.id))")).toBeLessThan(source.indexOf("connection.sendMessage({ chatId, content });"));
+    expect(source.indexOf("if (cancelledTaskIdsRef.current.has(task.id))")).toBeLessThan(source.indexOf("connection.sendMessage({ chatId, content }, expectedGeneration);"));
     const stopFocusedTaskIndex = source.indexOf("const stopFocusedPetTask = useCallback");
     const rememberStoppedSessionIndex = source.indexOf("lastMainRouteSessionIdRef.current = focusedTask.sessionId;", stopFocusedTaskIndex);
     const stopHandlerIndex = source.indexOf("const stoppedBySubmitHandler = onStopTask?.(focusedTask) ?? false;", stopFocusedTaskIndex);

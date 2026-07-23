@@ -274,6 +274,73 @@ describe("EditFileTool", () => {
   });
 });
 
+describe("filesystem post-write validation", () => {
+  it("appends passed, failed, and skipped lint results without changing the success prefix", async () => {
+    const root = workspace();
+    const validPath = path.join(root, "valid.json");
+    const invalidPath = path.join(root, "invalid.json");
+    const markdownPath = path.join(root, "README.md");
+    const tool = new WriteFileTool({ workspace: root });
+
+    const valid = await tool.execute({ path: validPath, content: "{}" });
+    const invalid = await tool.execute({ path: invalidPath, content: "{" });
+    const skipped = await tool.execute({ path: markdownPath, content: "# Notes" });
+
+    expect(valid).toBe(`Successfully wrote ${validPath}\n\nLint results:\n- ${validPath}: passed`);
+    expect(invalid).toMatch(new RegExp(`^Successfully wrote ${invalidPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\n\\nLint results:`));
+    expect(invalid).toContain(`${invalidPath}: failed`);
+    expect(await fs.readFile(invalidPath, "utf8")).toBe("{");
+    expect(skipped).toContain(`${markdownPath}: skipped`);
+    expect(skipped).toContain("No validator for .md");
+  });
+
+  it("keeps the original write result when post-write validation is disabled", async () => {
+    const root = workspace();
+    const target = path.join(root, "memory.md");
+
+    const result = await new WriteFileTool({ workspace: root, postWriteValidation: false }).execute({
+      path: target,
+      content: "memory",
+    });
+
+    expect(result).toBe(`Successfully wrote ${target}`);
+  });
+
+  it("rejects write_file when the exact readback does not match", async () => {
+    const root = workspace();
+    const target = path.join(root, "mismatch.json");
+    const originalReadFile = fs.readFile.bind(fs);
+    vi.spyOn(fs, "readFile").mockImplementation(async (...args) => {
+      const result = await originalReadFile(...args);
+      return String(args[0]) === target && typeof result === "string" ? `${result}changed` : result;
+    });
+
+    await expect(new WriteFileTool({ workspace: root }).execute({ path: target, content: "{}" }))
+      .rejects.toThrow("content mismatch");
+  });
+
+  it("uses lint delta for exact edits and reports edit readback mismatches as errors", async () => {
+    const root = workspace();
+    const target = path.join(root, "delta.ts");
+    await fs.writeFile(target, "const value: = 1;\nconst label = 'old';\n", "utf8");
+    const tool = new EditFileTool({ workspace: root });
+
+    const unchangedFailure = await tool.execute({ path: target, old_text: "'old'", new_text: "'new'" });
+
+    expect(unchangedFailure).toContain(`${target}: passed`);
+    expect(unchangedFailure).toContain("pre-existing lint output unchanged");
+
+    const originalReadFile = fs.readFile.bind(fs);
+    vi.spyOn(fs, "readFile").mockImplementation(async (...args) => {
+      const result = await originalReadFile(...args);
+      return String(args[0]) === target && typeof result === "string" ? `${result}changed` : result;
+    });
+    const mismatch = await tool.execute({ path: target, old_text: "'new'", new_text: "'again'" });
+
+    expect(mismatch).toContain("Error editing file: Write verification failed");
+  });
+});
+
 describe("filesystem tool cancellation", () => {
   function abortedContext(): { abortSignal: AbortSignal } {
     const controller = new AbortController();

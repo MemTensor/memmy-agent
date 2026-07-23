@@ -8,10 +8,12 @@ import type {
   CloudIntegrationSessionInput,
   CloudAccountProfile,
   GetAccountInfoInput,
+  GetTokenQuotaEligibilityInput,
   GetTokenUsageInput,
   GrantTokensInput,
   RequestTokenQuotaInput,
   TokenQuotaApplyResult,
+  TokenQuotaEligibility,
   CloudLoginInput,
   CloudLogoutInput,
   SendEmailCodeInput,
@@ -148,6 +150,19 @@ export function createMockCloudClient(options: CreateMockCloudClientOptions = {}
 
     async requestTokenQuota(_input: RequestTokenQuotaInput): Promise<TokenQuotaApplyResult> {
       return { requestId: "mock-req", status: "pending" };
+    },
+
+    async getTokenQuotaEligibility(
+      _input: GetTokenQuotaEligibilityInput
+    ): Promise<TokenQuotaEligibility> {
+      return {
+        state: "available",
+        requestCount: 0,
+        maxRequestCount: 5,
+        nextAllowedAtEpochMs: null,
+        latestRequestStatus: null,
+        latestReviewNote: null
+      };
     },
 
     async listIntegrationCapabilities(_input: CloudIntegrationSessionInput) {

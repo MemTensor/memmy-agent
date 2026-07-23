@@ -1,14 +1,21 @@
+import { type ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import YAML from "yaml";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  AgentGatewaySupervisor,
   preparePackagedRuntimeConfig,
   restartExternalMemoryService,
   spawnNodeService,
-  syncBundledAgentSkills
+  syncBundledAgentSkills,
+  type ManagedChild,
+  type PackagedRuntimeConfig,
+  type RuntimeEntryPaths,
+  type StartPackagedRuntimeServicesOptions
 } from "../src/main/runtime-services.js";
 
 const tempRoots: string[] = [];
@@ -36,6 +43,8 @@ function recordValue(parent: ConfigRecord, key: string): ConfigRecord {
 
 describe("packaged desktop runtime config", () => {
   afterEach(async () => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
     await Promise.all(testServers.splice(0).map((server) => new Promise<void>((resolveClose) => {
       server.close(() => resolveClose());
       server.closeAllConnections();
@@ -310,6 +319,250 @@ describe("packaged desktop runtime config", () => {
   });
 });
 
+describe("AgentGatewaySupervisor", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("uses one in-flight startup and leaves an already-running external gateway alone", async () => {
+    let resolveProbe: ((result: "ready") => void) | null = null;
+    const probe = vi.fn(() => new Promise<"ready">((resolve) => {
+      resolveProbe = resolve;
+    }));
+    const harness = createSupervisorHarness({ probe });
+
+    const first = harness.supervisor.ensureStarted();
+    const second = harness.supervisor.ensureStarted();
+
+    expect(second).toBe(first);
+    expect(probe).toHaveBeenCalledTimes(1);
+    resolveProbe?.("ready");
+    await Promise.all([first, second]);
+
+    expect(harness.supervisor.ownership).toBe("external");
+    expect(harness.spawn).not.toHaveBeenCalled();
+    expect(harness.children).toEqual([]);
+  });
+
+  it("fails initial startup cleanly without starting an infinite replacement loop", async () => {
+    vi.useFakeTimers();
+    const harness = createSupervisorHarness({
+      waitForHttpService: vi.fn(async () => {
+        throw new Error("startup timeout");
+      }),
+      stopManagedChild: vi.fn(async (child: ManagedChild) => {
+        emitChildClose(child, 1);
+      })
+    });
+
+    await expect(harness.supervisor.ensureStarted()).rejects.toThrow("startup timeout");
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(harness.spawn).toHaveBeenCalledTimes(1);
+    expect(harness.supervisor.hasReachedReady).toBe(false);
+    expect(harness.supervisor.restartTimer).toBeNull();
+  });
+
+  it("restarts an owned gateway with bounded escalating delays and ignores old child callbacks", async () => {
+    vi.useFakeTimers();
+    const harness = createSupervisorHarness();
+    await harness.supervisor.ensureStarted();
+    const first = harness.spawned[0]!;
+
+    emitChildClose(first, 1);
+    await vi.advanceTimersByTimeAsync(249);
+    expect(harness.spawn).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(harness.spawn).toHaveBeenCalledTimes(2);
+
+    const second = harness.spawned[1]!;
+    emitChildClose(first, 1);
+    emitChildClose(second, 1);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(harness.spawn).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(harness.spawn).toHaveBeenCalledTimes(3);
+
+    emitChildClose(harness.spawned[2]!, 1);
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(harness.spawn).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(harness.spawn).toHaveBeenCalledTimes(4);
+
+    emitChildClose(harness.spawned[3]!, 1);
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(harness.spawn).toHaveBeenCalledTimes(4);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(harness.spawn).toHaveBeenCalledTimes(5);
+
+    emitChildClose(harness.spawned[4]!, 1);
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(harness.spawn).toHaveBeenCalledTimes(5);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(harness.spawn).toHaveBeenCalledTimes(6);
+
+    emitChildClose(harness.spawned[5]!, 1);
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(harness.spawn).toHaveBeenCalledTimes(6);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(harness.spawn).toHaveBeenCalledTimes(7);
+  });
+
+  it("moves to the next backoff step when a replacement never becomes ready", async () => {
+    vi.useFakeTimers();
+    const waitForHttpService = vi.fn()
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("replacement timeout"))
+      .mockResolvedValueOnce(undefined);
+    const stopManagedChild = vi.fn(async (child: ManagedChild) => {
+      emitChildClose(child, 1);
+    });
+    const harness = createSupervisorHarness({ waitForHttpService, stopManagedChild });
+    await harness.supervisor.ensureStarted();
+
+    emitChildClose(harness.spawned[0]!, 1);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(harness.spawn).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(harness.spawn).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(harness.spawn).toHaveBeenCalledTimes(3);
+  });
+
+  it("resets the crash backoff after an owned replacement stays ready for 30 seconds", async () => {
+    vi.useFakeTimers();
+    const harness = createSupervisorHarness();
+    await harness.supervisor.ensureStarted();
+    emitChildClose(harness.spawned[0]!, 1);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(harness.spawn).toHaveBeenCalledTimes(2);
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(harness.supervisor.restartAttempt).toBe(0);
+    emitChildClose(harness.spawned[1]!, 1);
+    await vi.advanceTimersByTimeAsync(249);
+    expect(harness.spawn).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(harness.spawn).toHaveBeenCalledTimes(3);
+  });
+
+  it("stops a still-running child after an error and schedules only one replacement on close", async () => {
+    vi.useFakeTimers();
+    const stop = vi.fn(async (child: ManagedChild) => {
+      emitChildClose(child, 1);
+    });
+    const harness = createSupervisorHarness({ stopManagedChild: stop });
+    await harness.supervisor.ensureStarted();
+    const first = harness.spawned[0]!;
+
+    first.process.emit("error", new Error("spawn pipe failed"));
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(harness.spawn).toHaveBeenCalledTimes(2);
+  });
+
+  it("switches to external ownership if another gateway appears during replacement delay", async () => {
+    vi.useFakeTimers();
+    const probe = vi.fn()
+      .mockResolvedValueOnce("unreachable")
+      .mockResolvedValueOnce("ready");
+    const harness = createSupervisorHarness({ probe });
+    await harness.supervisor.ensureStarted();
+
+    emitChildClose(harness.spawned[0]!, 1);
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(harness.supervisor.ownership).toBe("external");
+    expect(harness.spawn).toHaveBeenCalledTimes(1);
+    expect(harness.supervisor.ownedChild).toBeNull();
+  });
+
+  it("passes one valid managed restart notice to an exit-75 replacement", async () => {
+    vi.useFakeTimers();
+    const harness = createSupervisorHarness();
+    await harness.supervisor.ensureStarted();
+    const first = harness.spawned[0]!;
+    first.process.emit("message", {
+      type: "memmy-agent:restart",
+      channel: "websocket",
+      chatId: "chat-1",
+      startedAt: "123.5",
+      metadata: { reason: "command" }
+    });
+
+    emitChildClose(first, 75);
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(harness.spawn).toHaveBeenCalledTimes(2);
+    expect(harness.spawn.mock.calls[1]?.[3]).toMatchObject({
+      MEMMY_DESKTOP_MANAGED_GATEWAY: "1",
+      MEMMY_AGENT_RESTART_NOTIFY_CHANNEL: "websocket",
+      MEMMY_AGENT_RESTART_NOTIFY_CHAT_ID: "chat-1",
+      MEMMY_AGENT_RESTART_STARTED_AT: "123.5",
+      MEMMY_AGENT_RESTART_NOTIFY_METADATA: JSON.stringify({ reason: "command" })
+    });
+  });
+
+  it("keeps a managed restart notice until a replacement reaches readiness", async () => {
+    vi.useFakeTimers();
+    const waitForHttpService = vi.fn()
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("replacement timeout"))
+      .mockResolvedValueOnce(undefined);
+    const stopManagedChild = vi.fn(async (child: ManagedChild) => {
+      emitChildClose(child, 1);
+    });
+    const harness = createSupervisorHarness({ waitForHttpService, stopManagedChild });
+    await harness.supervisor.ensureStarted();
+    const first = harness.spawned[0]!;
+    first.process.emit("message", {
+      type: "memmy-agent:restart",
+      channel: "websocket",
+      chatId: "chat-1",
+      startedAt: "123.5",
+      metadata: { reason: "command" }
+    });
+
+    emitChildClose(first, 75);
+    await vi.advanceTimersByTimeAsync(250);
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(harness.spawn).toHaveBeenCalledTimes(3);
+    expect(harness.spawn.mock.calls[2]?.[3]).toMatchObject({
+      MEMMY_AGENT_RESTART_NOTIFY_CHANNEL: "websocket",
+      MEMMY_AGENT_RESTART_NOTIFY_CHAT_ID: "chat-1",
+      MEMMY_AGENT_RESTART_STARTED_AT: "123.5",
+      MEMMY_AGENT_RESTART_NOTIFY_METADATA: JSON.stringify({ reason: "command" })
+    });
+  });
+
+  it("rejects invalid managed restart IPC and never respawns after shutdown", async () => {
+    vi.useFakeTimers();
+    const harness = createSupervisorHarness();
+    await harness.supervisor.ensureStarted();
+    const first = harness.spawned[0]!;
+    first.process.emit("message", {
+      type: "memmy-agent:restart",
+      channel: "websocket",
+      chatId: "chat-1",
+      startedAt: "",
+      metadata: {},
+      unexpected: true
+    });
+    emitChildClose(first, 75);
+
+    await harness.supervisor.close();
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(harness.spawn).toHaveBeenCalledTimes(1);
+    expect(harness.supervisor.stopping).toBe(true);
+    expect(harness.supervisor.restartTimer).toBeNull();
+  });
+});
+
 describe("spawnNodeService 落盘与 env 注入", () => {
   it("把子进程 stdout 落盘到指定日志文件", async () => {
     const root = await makeTempRoot();
@@ -343,3 +596,70 @@ describe("spawnNodeService 落盘与 env 注入", () => {
     expect(await readFile(logFile, "utf8")).toContain("debug");
   });
 });
+
+function createSupervisorHarness(overrides: {
+  probe?: ReturnType<typeof vi.fn>;
+  waitForHttpService?: ReturnType<typeof vi.fn>;
+  stopManagedChild?: ReturnType<typeof vi.fn>;
+} = {}) {
+  const entries: RuntimeEntryPaths = {
+    memoryEntry: "/runtime/memory.js",
+    agentEntry: "/runtime/agent.js"
+  };
+  const runtimeConfig: PackagedRuntimeConfig = {
+    configPath: "/memmy/config.yaml",
+    agentWorkspace: "/memmy/workspace",
+    memoryDatabasePath: "/memmy/memory.sqlite",
+    memoryBaseUrl: "http://127.0.0.1:18960",
+    memoryToken: "memory-token",
+    memoryListenHost: "127.0.0.1",
+    memoryListenPort: 18960,
+    agentGatewayBaseUrl: "http://127.0.0.1:18980",
+    agentGatewayHealthHost: "127.0.0.1",
+    agentGatewayHealthPort: 18970,
+    agentGatewayBootstrapSecret: "gateway-secret"
+  };
+  const options: StartPackagedRuntimeServicesOptions = {
+    appPath: "/app",
+    resourcesPath: "/resources",
+    logDirectory: "/logs",
+    logLevel: "info"
+  };
+  const children: ManagedChild[] = [];
+  const spawned: ManagedChild[] = [];
+  const spawn = vi.fn(() => {
+    const child = createManagedChild();
+    spawned.push(child);
+    return child;
+  });
+  const supervisor = new AgentGatewaySupervisor(entries, runtimeConfig, children, options, {
+    probeHttpService: overrides.probe ?? vi.fn(async () => "unreachable" as const),
+    spawnNodeService: spawn,
+    waitForHttpService: overrides.waitForHttpService ?? vi.fn(async () => undefined),
+    stopManagedChild: overrides.stopManagedChild ?? vi.fn(async () => undefined)
+  });
+  return { supervisor, children, spawned, spawn };
+}
+
+function createManagedChild(): ManagedChild {
+  const process = new EventEmitter() as EventEmitter & {
+    exitCode: number | null;
+    signalCode: NodeJS.Signals | null;
+    kill: ReturnType<typeof vi.fn>;
+  };
+  process.exitCode = null;
+  process.signalCode = null;
+  process.kill = vi.fn(() => true);
+  return {
+    name: "agent-gateway",
+    process: process as unknown as ChildProcess,
+    stdoutTail: [],
+    stderrTail: [],
+    exitDescription: null,
+    logWriter: null
+  };
+}
+
+function emitChildClose(child: ManagedChild, code: number): void {
+  child.process.emit("close", code, null);
+}

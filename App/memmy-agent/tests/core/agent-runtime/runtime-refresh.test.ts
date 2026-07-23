@@ -34,6 +34,7 @@ describe("runtime refresh", () => {
     expect(loop.runner.provider).toBe(newProvider);
     expect(loop.subagents.provider).toBe(newProvider);
     expect(loop.subagents.model).toBe("new-model");
+    expect(loop.subagents.contextWindowTokens).toBe(2000);
     expect(loop.subagents.runner.provider).toBe(newProvider);
     expect(loop.consolidator.provider).toBe(newProvider);
     expect(loop.consolidator.model).toBe("new-model");
@@ -115,5 +116,6 @@ describe("runtime refresh", () => {
     expect(loop.model).toBe("openai/gpt-4.1");
     expect(provider.generation.maxTokens).toBe(222);
     expect(loop.contextWindowTokens).toBe(333);
+    expect(loop.subagents.contextWindowTokens).toBe(333);
   });
 });

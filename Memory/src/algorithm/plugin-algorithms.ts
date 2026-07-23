@@ -843,6 +843,7 @@ async function callRelationLlm(
     ],
     {
       operation: "relation.classify.v1",
+      thinkingMode: "disabled",
       temperature: llm.config.temperature,
       maxTokens: MEMORY_SUMMARY_MAX_TOKENS
     }
@@ -879,6 +880,7 @@ async function callRelationArbitration(
     ],
     {
       operation: "relation.arbitration.v1",
+      thinkingMode: "disabled",
       temperature: llm.config.temperature,
       maxTokens: MEMORY_SUMMARY_MAX_TOKENS
     }

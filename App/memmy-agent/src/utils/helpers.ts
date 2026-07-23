@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { get_encoding } from "tiktoken";
+import { CONTEXT_SAFETY_BUFFER_TOKENS, DEFAULT_MAX_TOKENS } from "../token-budget.js";
 import { GitStore } from "./gitstore.js";
 
 const THINK_BLOCK_RE = /<(think|thought)>([\s\S]*?)<\/\1>/gi;
@@ -404,8 +405,11 @@ export function buildStatusContent(
   const lastOut = usage.completion_tokens ?? 0;
   const cached = usage.cached_tokens ?? 0;
   const contextTotal = Math.max(input.contextWindowTokens ?? 0, 0);
-  const maxCompletion = input.maxCompletionTokens ?? 8192;
-  const contextBudget = Math.max(contextTotal - Math.floor(maxCompletion) - 1024, 1);
+  const maxCompletion = input.maxCompletionTokens ?? DEFAULT_MAX_TOKENS;
+  const contextBudget = Math.max(
+    contextTotal - Math.floor(maxCompletion) - CONTEXT_SAFETY_BUFFER_TOKENS,
+    1,
+  );
   const contextEstimate = input.contextTokensEstimate ?? 0;
   const contextPct =
     contextBudget > 0 ? Math.min(Math.floor((contextEstimate / contextBudget) * 100), 999) : 0;

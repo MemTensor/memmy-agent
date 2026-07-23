@@ -10,6 +10,7 @@ import {
   OkResponseSchema,
   PromotionFlagsSchema,
   QWEN_ASR_MODEL_ID,
+  TokenQuotaEligibilitySchema,
   TokenUsageDtoSchema,
   type AuthorizeIntegrationResponse,
   type IntegrationCapabilitiesResponse,
@@ -35,11 +36,13 @@ import type {
   CloudLoginResult,
   CloudLogoutInput,
   GetAccountInfoInput,
+  GetTokenQuotaEligibilityInput,
   GetTokenUsageInput,
   GrantTokensInput,
   ReleaseCheckResult,
   RequestTokenQuotaInput,
   TokenQuotaApplyResult,
+  TokenQuotaEligibility,
   SendEmailCodeInput,
   SendPhoneCodeInput,
   SendTelemetryInput,
@@ -207,6 +210,24 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
         requestId: String(data.requestId ?? ""),
         status: (["pending", "approved", "rejected"].includes(status) ? status : "pending") as TokenQuotaApplyResult["status"]
       };
+    },
+
+    async getTokenQuotaEligibility(
+      input: GetTokenQuotaEligibilityInput
+    ): Promise<TokenQuotaEligibility> {
+      const data = await requestCloudData<unknown>(
+        fetchImpl,
+        baseUrl,
+        timeoutMs,
+        "/api/agentUser/quota/apply/eligibility",
+        {
+          method: "GET",
+          lang: "zh",
+          bearerCredential: input.uuid
+        }
+      );
+
+      return TokenQuotaEligibilitySchema.parse(data);
     },
 
     async listIntegrationCapabilities(input: CloudIntegrationSessionInput): Promise<IntegrationCapabilitiesResponse> {

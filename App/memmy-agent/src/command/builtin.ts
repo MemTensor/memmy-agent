@@ -1,7 +1,14 @@
 import { spawn, type SpawnOptions } from "node:child_process";
 import { OutboundMessage } from "../core/runtime-messages/events.js";
-import { setRestartNoticeToEnv } from "../utils/restart.js";
+import {
+  createManagedRestartNotice,
+  DESKTOP_MANAGED_GATEWAY_ENV,
+  parseManagedRestartNotice,
+  setRestartNoticeToEnv,
+  type ManagedRestartNotice
+} from "../utils/restart.js";
 import { handlePairingCommand } from "../integrations/channel-auth/store.js";
+import { DEFAULT_MAX_TOKENS } from "../token-budget.js";
 import { buildStatusContent } from "../utils/helpers.js";
 import { fetchSearchUsage } from "../utils/searchusage.js";
 import { buildHistoryDagPayload, renderHistoryDagSummary, SessionDagStore } from "../session-dag/index.js";
@@ -73,6 +80,7 @@ export type RestartCommandRuntime = {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   warn?: (message: string) => void;
+  sendIpc?: (message: ManagedRestartNotice, callback: (error: Error | null) => void) => boolean;
 };
 
 let restartCommandRuntimeForTests: RestartCommandRuntime | null = null;
@@ -124,6 +132,22 @@ export async function cmdStop(ctx: CommandContext): Promise<OutboundMessage> {
 }
 
 export async function cmdRestart(ctx: CommandContext): Promise<OutboundMessage> {
+  const runtime: RestartCommandRuntime = restartCommandRuntimeForTests ?? {};
+  const env = runtime.env ?? process.env;
+  const managed = env[DESKTOP_MANAGED_GATEWAY_ENV] === "1";
+  if (managed) {
+    const notice = parseManagedRestartNotice(createManagedRestartNotice({
+      channel: ctx.msg.channel,
+      chatId: ctx.msg.chatId,
+      metadata: { ...(ctx.msg.metadata ?? {}) }
+    }));
+    if (!notice || !await sendManagedRestartNotice(runtime, notice)) {
+      return reply(ctx, "Failed to restart memmy: Desktop supervisor unavailable.");
+    }
+    scheduleManagedRestartExit(runtime);
+    return reply(ctx, "Restarting...");
+  }
+
   setRestartNoticeToEnv({
     channel: ctx.msg.channel,
     chatId: ctx.msg.chatId,
@@ -131,6 +155,39 @@ export async function cmdRestart(ctx: CommandContext): Promise<OutboundMessage> 
   });
   scheduleRestartForCommand();
   return reply(ctx, "Restarting...");
+}
+
+async function sendManagedRestartNotice(runtime: RestartCommandRuntime, notice: ManagedRestartNotice): Promise<boolean> {
+  const sender = runtime.sendIpc ?? (typeof process.send === "function"
+    ? ((message, callback) => process.send!(message, callback))
+    : null);
+  if (!sender) return false;
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        resolve(false);
+      }
+    }, 500);
+    try {
+      sender(notice, (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(!error);
+      });
+    } catch {
+      settled = true;
+      clearTimeout(timer);
+      resolve(false);
+    }
+  });
+}
+
+function scheduleManagedRestartExit(runtime: RestartCommandRuntime, delayMs = 1000): void {
+  const scheduler = runtime.scheduler ?? ((callback: () => void, ms: number) => setTimeout(callback, ms));
+  scheduler(() => (runtime.exit ?? process.exit)(75), delayMs);
 }
 
 export async function cmdNew(ctx: CommandContext): Promise<OutboundMessage> {
@@ -349,7 +406,10 @@ export async function cmdStatus(ctx: CommandContext): Promise<OutboundMessage> {
     typeof session?.getHistory === "function"
       ? session.getHistory({ maxMessages: 0 }).length
       : session?.messages?.filter((message: any) => !message.commandMessage).length ?? 0;
-  const maxCompletionTokens = loop?.provider?.generation?.max_tokens ?? loop?.provider?.generation?.maxTokens ?? loop?.config?.agents?.defaults?.maxTokens ?? 8192;
+  const maxCompletionTokens = loop?.provider?.generation?.max_tokens
+    ?? loop?.provider?.generation?.maxTokens
+    ?? loop?.config?.agents?.defaults?.maxTokens
+    ?? DEFAULT_MAX_TOKENS;
 
   return reply(
     ctx,

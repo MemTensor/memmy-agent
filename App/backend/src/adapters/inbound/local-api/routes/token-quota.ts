@@ -1,5 +1,9 @@
-/** Token quota module. */
-import { RequestTokenQuotaInputSchema, TokenQuotaApplyResultSchema } from "@memmy/local-api-contracts";
+/** Local HTTP routes for token quota requests. */
+import {
+  RequestTokenQuotaInputSchema,
+  TokenQuotaApplyResultSchema,
+  TokenQuotaEligibilitySchema
+} from "@memmy/local-api-contracts";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { TokenQuotaService } from "../../../../services/token-quota-service.js";
 import { withErrorEnvelope } from "../../../../services/error-envelope.js";
@@ -13,6 +17,15 @@ export interface RegisterTokenQuotaRoutesOptions {
 
 /** Registers register token quota routes. */
 export function registerTokenQuotaRoutes(app: FastifyInstance, options: RegisterTokenQuotaRoutesOptions): void {
+  app.get(
+    "/api/token-quota/eligibility",
+    { preHandler: options.authenticateRuntimeToken },
+    withErrorEnvelope(async (_request, reply) => {
+      const result = TokenQuotaEligibilitySchema.parse(await options.tokenQuota.getEligibility());
+      return reply.send(result);
+    })
+  );
+
   app.post(
     "/api/token-quota/request",
     { preHandler: options.authenticateRuntimeToken },

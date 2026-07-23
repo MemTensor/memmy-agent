@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { estimateMessageTokens, Session } from "../session/manager.js";
+import { CONTEXT_SAFETY_BUFFER_TOKENS } from "../../token-budget.js";
 import { GitStore } from "../../utils/gitstore.js";
 import { ensureDir, estimatePromptTokensChain, stripThink, truncateText } from "../../utils/helpers.js";
 import { renderTemplate } from "../../utils/prompt-templates.js";
@@ -551,7 +552,7 @@ type ConsolidatorInit = {
 
 export class Consolidator {
   static MAX_CONSOLIDATION_ROUNDS = 5;
-  static SAFETY_BUFFER = 1024;
+  static SAFETY_BUFFER = CONTEXT_SAFETY_BUFFER_TOKENS;
 
   store: MemoryStore;
   provider: any;
@@ -1236,10 +1237,18 @@ export class Dream {
   buildTools(): ToolRegistry {
     const tools = new ToolRegistry();
     tools.register(new ReadFileTool({ workspace: this.store.workspace, allowedDir: this.store.workspace }));
-    tools.register(new EditFileTool({ workspace: this.store.workspace, allowedDir: this.store.workspace }));
+    tools.register(new EditFileTool({
+      workspace: this.store.workspace,
+      allowedDir: this.store.workspace,
+      postWriteValidation: false,
+    }));
     const skillsDir = path.join(this.store.workspace, "skills");
     fs.mkdirSync(skillsDir, { recursive: true });
-    tools.register(new WriteFileTool({ workspace: this.store.workspace, allowedDir: skillsDir }));
+    tools.register(new WriteFileTool({
+      workspace: this.store.workspace,
+      allowedDir: skillsDir,
+      postWriteValidation: false,
+    }));
     return tools;
   }
 

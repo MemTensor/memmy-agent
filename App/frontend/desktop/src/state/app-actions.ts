@@ -16,9 +16,17 @@ import { isIntegrationSetupDiagnosticError, logHiddenIntegrationSetupDiagnosticE
 import type { IntegrationsClient } from "../api/integrations-client.js";
 import type { IntegrationConnection } from "../integrations/connection-state.js";
 import type { IntegrationMeta } from "../integrations/integration-meta.js";
-import type { MemmyAgentSessionSummary, MemmyAgentSidebarState, MemmyAgentWebuiThread, MemmyAgentWsEvent } from "../api/memmy-agent-client.js";
+import type { MemmyAgentRunStatusSnapshot, MemmyAgentSessionSummary, MemmyAgentSidebarState, MemmyAgentWebuiThread, MemmyAgentWsEvent } from "../api/memmy-agent-client.js";
 import type { PendingAttachment } from "./agent-composer-state.js";
-import type { AgentAction, AgentChatMediaAttachment } from "./agent-chat-slice.js";
+import type {
+  AgentAction,
+  AgentChatMediaAttachment,
+  AgentOperationError,
+  AgentOperationErrorSource,
+  AgentOperationSurface,
+  AgentRecoveryChatRequest,
+  AgentTaskStateRequest
+} from "./agent-chat-slice.js";
 import type { ToolsAction } from "./tools-slice.js";
 
 /** Type definition for event connection status. */
@@ -44,6 +52,26 @@ export interface AgentSourceScanFinished extends AgentSourceScanCompletion {
 }
 
 export const AGENT_SOURCE_SCAN_COMPLETION_FEEDBACK_MS = 5_000;
+
+let agentOperationErrorCounter = 0;
+
+export function createAgentOperationError(input: {
+  source: AgentOperationErrorSource;
+  message: string;
+  chatId?: string;
+  scopeKey?: string;
+}): AgentOperationError {
+  agentOperationErrorCounter += 1;
+  const createdAt = Date.now();
+  return {
+    id: `${input.source}-${createdAt}-${agentOperationErrorCounter}`,
+    source: input.source,
+    message: input.message,
+    ...(input.chatId ? { chatId: input.chatId } : {}),
+    ...(input.scopeKey ? { scopeKey: input.scopeKey } : {}),
+    createdAt
+  };
+}
 
 /** Type definition for app action. */
 export type AppAction =
@@ -213,16 +241,20 @@ export const agentActions = {
     return { type: "agent/connectionConnecting" };
   },
 
-  connectionClosed(): AppAction {
-    return { type: "agent/connectionClosed" };
+  connectionFailed(message: string): AppAction {
+    return { type: "agent/connectionFailed", message };
   },
 
-  failed(message: string): AppAction {
-    return { type: "agent/error", message };
+  connectionDisposed(): AppAction {
+    return { type: "agent/connectionDisposed" };
   },
 
-  errorDismissed(message: string): AppAction {
-    return { type: "agent/errorDismissed", message };
+  operationFailed(surface: AgentOperationSurface, error: AgentOperationError): AppAction {
+    return { type: "agent/operationFailed", surface, error };
+  },
+
+  operationErrorDismissed(surface: AgentOperationSurface, id: string): AppAction {
+    return { type: "agent/operationErrorDismissed", surface, id };
   },
 
   sessionsLoading(requestId?: string): AppAction {
@@ -245,6 +277,32 @@ export const agentActions = {
     return { type: "agent/sidebarStateSaved", sidebarState };
   },
 
+  sidebarMutationStarted(mutationId: string, sidebarState: MemmyAgentSidebarState): AppAction {
+    return { type: "agent/sidebarMutationStarted", mutationId, sidebarState };
+  },
+
+  sidebarMutationConfirmed(mutationId: string, sidebarState: MemmyAgentSidebarState): AppAction {
+    return { type: "agent/sidebarMutationConfirmed", mutationId, sidebarState };
+  },
+
+  sidebarMutationFailed(mutationId: string, error: AgentOperationError): AppAction {
+    return { type: "agent/sidebarMutationFailed", mutationId, error };
+  },
+
+  taskStateLoading(request: AgentTaskStateRequest): AppAction {
+    return { type: "agent/taskStateLoading", request };
+  },
+
+  taskStateSettled(input: {
+    requestId: string;
+    recoveryGeneration: number | null;
+    sessions?: MemmyAgentSessionSummary[];
+    sidebarState?: MemmyAgentSidebarState;
+    error?: AgentOperationError;
+  }): AppAction {
+    return { type: "agent/taskStateSettled", ...input };
+  },
+
   historyLoading(sessionKey: string, chatId: string, requestId: string): AppAction {
     return { type: "agent/historyLoading", sessionKey, chatId, requestId };
   },
@@ -257,6 +315,10 @@ export const agentActions = {
     return { type: "agent/historyOpenMissing", sessionKey, chatId, requestId };
   },
 
+  historyOpenFailed(chatId: string, requestId: string, error: AgentOperationError): AppAction {
+    return { type: "agent/historyOpenFailed", chatId, requestId, error };
+  },
+
   historyHydrateLoading(sessionKey: string, chatId: string, requestId: string): AppAction {
     return { type: "agent/historyHydrateLoading", sessionKey, chatId, requestId };
   },
@@ -265,8 +327,8 @@ export const agentActions = {
     return { type: "agent/historyHydrateLoaded", thread, requestId };
   },
 
-  historyHydrateFailed(chatId: string, requestId: string): AppAction {
-    return { type: "agent/historyHydrateFailed", chatId, requestId };
+  historyHydrateFailed(chatId: string, requestId: string, error?: AgentOperationError): AppAction {
+    return { type: "agent/historyHydrateFailed", chatId, requestId, ...(error ? { error } : {}) };
   },
 
   newChatRequested(): AppAction {
@@ -285,7 +347,7 @@ export const agentActions = {
     return { type: "agent/transientSendFailed", chatId };
   },
 
-  userMessageQueued(input: { chatId: string; content: string; media?: AgentChatMediaAttachment[] }): AppAction {
+  userMessageQueued(input: { chatId: string; content: string; media?: AgentChatMediaAttachment[]; focus?: boolean; deliveryUncertain?: boolean }): AppAction {
     return { type: "agent/userMessageQueued", ...input };
   },
 
@@ -323,6 +385,28 @@ export const agentActions = {
 
   restartFailed(message: string): AppAction {
     return { type: "agent/restartFailed", message };
+  },
+
+  recoveryChatLoading(request: AgentRecoveryChatRequest): AppAction {
+    return { type: "agent/recoveryChatLoading", request };
+  },
+
+  recoveryChatSnapshotLoaded(input: {
+    requestId: string;
+    generation: number;
+    chatId: string;
+    chatSelectionEpoch: number;
+    thread: MemmyAgentWebuiThread | null;
+    runSnapshot: MemmyAgentRunStatusSnapshot | null;
+    noticeId: string;
+    completedAt: number;
+    failureMessage?: string;
+  }): AppAction {
+    return { type: "agent/recoveryChatSnapshotLoaded", ...input };
+  },
+
+  recoveryFinished(generation: number): AppAction {
+    return { type: "agent/recoveryFinished", generation };
   },
 
   chatViewVisibilityChanged(visible: boolean): AppAction {

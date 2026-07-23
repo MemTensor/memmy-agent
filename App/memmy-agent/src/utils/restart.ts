@@ -2,6 +2,16 @@ export const RESTART_NOTIFY_CHANNEL_ENV = "MEMMY_AGENT_RESTART_NOTIFY_CHANNEL";
 export const RESTART_NOTIFY_CHAT_ID_ENV = "MEMMY_AGENT_RESTART_NOTIFY_CHAT_ID";
 export const RESTART_NOTIFY_METADATA_ENV = "MEMMY_AGENT_RESTART_NOTIFY_METADATA";
 export const RESTART_STARTED_AT_ENV = "MEMMY_AGENT_RESTART_STARTED_AT";
+export const DESKTOP_MANAGED_GATEWAY_ENV = "MEMMY_DESKTOP_MANAGED_GATEWAY";
+export const MANAGED_RESTART_IPC_TYPE = "memmy-agent:restart";
+
+export interface ManagedRestartNotice {
+  type: typeof MANAGED_RESTART_IPC_TYPE;
+  channel: string;
+  chatId: string;
+  startedAt: string;
+  metadata: Record<string, unknown>;
+}
 
 export class RestartNotice {
   channel: string;
@@ -54,6 +64,60 @@ export function setRestartNoticeToEnv({
   }
 }
 
+export function restartNoticeEnv(notice: ManagedRestartNotice): Record<string, string> {
+  return {
+    [RESTART_NOTIFY_CHANNEL_ENV]: notice.channel,
+    [RESTART_NOTIFY_CHAT_ID_ENV]: notice.chatId,
+    [RESTART_STARTED_AT_ENV]: notice.startedAt,
+    ...(Object.keys(notice.metadata).length > 0
+      ? { [RESTART_NOTIFY_METADATA_ENV]: JSON.stringify(notice.metadata) }
+      : {})
+  };
+}
+
+export function createManagedRestartNotice(input: {
+  channel: string;
+  chatId?: string;
+  metadata?: Record<string, unknown> | null;
+  startedAt?: number;
+}): ManagedRestartNotice {
+  return {
+    type: MANAGED_RESTART_IPC_TYPE,
+    channel: input.channel,
+    chatId: input.chatId ?? "",
+    startedAt: String(input.startedAt ?? Date.now() / 1000),
+    metadata: input.metadata ?? {}
+  };
+}
+
+export function parseManagedRestartNotice(value: unknown): ManagedRestartNotice | null {
+  if (!isPlainObject(value)) return null;
+  const keys = Object.keys(value);
+  if (keys.some((key) => !["type", "channel", "chatId", "startedAt", "metadata"].includes(key))) return null;
+  if (value.type !== MANAGED_RESTART_IPC_TYPE) return null;
+  if (typeof value.channel !== "string" || value.channel.trim().length === 0 || value.channel.length > 64) return null;
+  if (typeof value.chatId !== "string" || value.chatId.length > 256) return null;
+  if (typeof value.startedAt !== "string" || value.startedAt.trim().length === 0 || value.startedAt.length > 32 || !Number.isFinite(Number(value.startedAt))) return null;
+  if (!isPlainObject(value.metadata)) return null;
+  let metadataJson: string;
+  try {
+    metadataJson = JSON.stringify(value.metadata);
+  } catch {
+    return null;
+  }
+  if (typeof metadataJson !== "string") return null;
+  if (Buffer.byteLength(metadataJson, "utf8") > 16 * 1024) return null;
+  const metadata = JSON.parse(metadataJson) as unknown;
+  if (!isPlainObject(metadata)) return null;
+  return {
+    type: MANAGED_RESTART_IPC_TYPE,
+    channel: value.channel,
+    chatId: value.chatId,
+    startedAt: value.startedAt,
+    metadata
+  };
+}
+
 export function consumeRestartNoticeFromEnv(): RestartNotice | null {
   const channel = (process.env[RESTART_NOTIFY_CHANNEL_ENV] ?? "").trim();
   const chatId = (process.env[RESTART_NOTIFY_CHAT_ID_ENV] ?? "").trim();
@@ -84,4 +148,10 @@ export function shouldShowCliRestartNotice(notice: RestartNotice, sessionId: str
 
 export function requestRestart(reason = ""): RestartNotice {
   return new RestartNotice({ metadata: reason ? { reason } : {} });
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }

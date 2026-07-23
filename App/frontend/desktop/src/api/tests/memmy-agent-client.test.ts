@@ -5,7 +5,9 @@ import {
   DEFAULT_MEMMY_AGENT_WEBUI_BASE_URL,
   defaultMemmyAgentBaseUrl,
   sessionKeyToChatId,
+  type MemmyAgentClient,
   type MemmyAgentSidebarState,
+  type MemmyAgentWsEvent,
   type WebSocketLike
 } from "../memmy-agent-client.js";
 
@@ -538,11 +540,10 @@ describe("memmy-agent client", () => {
     });
     const events: unknown[] = [];
 
-    const connection = await client.connectWebSocket((event) => events.push(event));
+    const connection = await connectReady(client, sockets, (event) => events.push(event), { event: "ready", chat_id: "chat-1", client_id: "frontend-test" });
     expect(sockets[0]?.url).toBe("wss://agent.local:18980/ws?token=agent-token&client_id=frontend-test");
 
-    sockets[0]?.emit({ event: "ready", chat_id: "chat-1", client_id: "frontend-test" });
-    const newChat = connection.newChat();
+    const newChat = connection.newChat(1);
     connection.attach("chat-2");
     connection.sendMessage({
       chatId: "chat-2",
@@ -556,7 +557,7 @@ describe("memmy-agent client", () => {
         mime: "image/png",
         bytes: 3
       }]
-    });
+    }, 1);
     connection.stop("chat-2");
     connection.restart("chat-2");
     connection.restart("");
@@ -568,8 +569,8 @@ describe("memmy-agent client", () => {
 
     await expect(newChat).resolves.toBe("chat-new");
     expect(events).toEqual([
-      { event: "ready", chat_id: "chat-1", client_id: "frontend-test" },
-      { event: "attached", chat_id: "chat-new" }
+      { event: "ready", chat_id: "chat-1", client_id: "frontend-test", connection_generation: 1 },
+      { event: "attached", chat_id: "chat-new", connection_generation: 1 }
     ]);
     expect(sockets[0]?.sent.map((item) => JSON.parse(item))).toEqual([
       { type: "new_chat" },
@@ -589,6 +590,66 @@ describe("memmy-agent client", () => {
     ]);
   });
 
+  it("does not resolve websocket connection until the current socket receives ready", async () => {
+    const sockets: FakeSocket[] = [];
+    const client = createMemmyAgentClient({
+      baseUrl: "https://agent.local:18980",
+      clientId: "frontend-test",
+      fetchFn: vi.fn(async () => json(bootstrap)) as typeof fetch,
+      webSocketFactory: (url) => {
+        const socket = new FakeSocket(url);
+        sockets.push(socket);
+        return socket;
+      }
+    });
+    let settled = false;
+
+    const pending = client.connectWebSocket().then((connection) => {
+      settled = true;
+      return connection;
+    });
+    while (!sockets[0]) {
+      await Promise.resolve();
+    }
+    await Promise.resolve();
+
+    expect(settled).toBe(false);
+    expect(sockets[0]?.sent).toEqual([]);
+
+    sockets[0]?.emit({ event: "ready", chat_id: "chat-1" });
+    await expect(pending).resolves.toBeDefined();
+    expect(settled).toBe(true);
+  });
+
+  it("closes and rejects a connection whose application ready handshake times out", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    const events: MemmyAgentWsEvent[] = [];
+    const client = createMemmyAgentClient({
+      baseUrl: "https://agent.local:18980",
+      clientId: "frontend-test",
+      fetchFn: vi.fn(async () => json(bootstrap)) as typeof fetch,
+      webSocketFactory: (url) => {
+        const socket = new FakeSocket(url);
+        sockets.push(socket);
+        return socket;
+      }
+    });
+
+    const pending = client.connectWebSocket((event) => events.push(event));
+    const rejection = expect(pending).rejects.toThrow("closed before ready");
+    while (!sockets[0]) {
+      await Promise.resolve();
+    }
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(sockets[0]?.closeCalls[0]).toEqual({ code: 1011, reason: "ready timeout" });
+    sockets[0]?.emitClose(1011);
+    await rejection;
+    expect(sockets).toHaveLength(1);
+    expect(events).toEqual([]);
+  });
+
   it("newChat resolves server assigned chat id", async () => {
     const sockets: FakeSocket[] = [];
     const client = createMemmyAgentClient({
@@ -602,8 +663,8 @@ describe("memmy-agent client", () => {
       }
     });
 
-    const connection = await client.connectWebSocket();
-    const pending = connection.newChat();
+    const connection = await connectReady(client, sockets);
+    const pending = connection.newChat(1);
     expect(sockets[0]?.sent.map((item) => JSON.parse(item))).toContainEqual({ type: "new_chat" });
 
     sockets[0]?.emit({ event: "attached", chat_id: "server-chat" });
@@ -624,10 +685,10 @@ describe("memmy-agent client", () => {
       }
     });
 
-    const connection = await client.connectWebSocket();
-    const pending = connection.newChat();
+    const connection = await connectReady(client, sockets);
+    const pending = connection.newChat(1);
 
-    await expect(connection.newChat()).rejects.toThrow("newChat already in flight");
+    await expect(connection.newChat(1)).rejects.toThrow("newChat already in flight");
     sockets[0]?.emit({ event: "attached", chat_id: "server-chat" });
     await expect(pending).resolves.toBe("server-chat");
   });
@@ -646,13 +707,13 @@ describe("memmy-agent client", () => {
       }
     });
 
-    const connection = await client.connectWebSocket();
-    const pending = connection.newChat(100);
+    const connection = await connectReady(client, sockets);
+    const pending = connection.newChat(1, 100);
     const rejection = expect(pending).rejects.toThrow("newChat timed out");
     await vi.advanceTimersByTimeAsync(100);
 
     await rejection;
-    const second = connection.newChat();
+    const second = connection.newChat(1);
     sockets[0]?.emit({ event: "attached", chat_id: "server-chat" });
     await expect(second).resolves.toBe("server-chat");
   });
@@ -671,16 +732,80 @@ describe("memmy-agent client", () => {
       }
     });
 
-    const connection = await client.connectWebSocket();
-    const pending = connection.newChat();
+    const connection = await connectReady(client, sockets);
+    const pending = connection.newChat(1);
     const rejection = expect(pending).rejects.toThrow("websocket closed");
     sockets[0]?.emitClose();
 
     await rejection;
-    const second = connection.newChat();
     await vi.advanceTimersByTimeAsync(500);
+    sockets[1]?.emit({ event: "ready", chat_id: "ready-2" });
+    const second = connection.newChat(2);
     sockets[1]?.emit({ event: "attached", chat_id: "server-chat" });
     await expect(second).resolves.toBe("server-chat");
+    connection.close();
+  });
+
+  it("resolves a run status snapshot only for the requested chat and ready generation", async () => {
+    const sockets: FakeSocket[] = [];
+    const client = createMemmyAgentClient({
+      baseUrl: "https://agent.local:18980",
+      clientId: "frontend-test",
+      fetchFn: vi.fn(async () => json(bootstrap)) as typeof fetch,
+      webSocketFactory: (url) => {
+        const socket = new FakeSocket(url);
+        sockets.push(socket);
+        return socket;
+      }
+    });
+
+    const connection = await connectReady(client, sockets);
+    let settled = false;
+    const pending = connection.requestRunStatusSnapshot("chat-1", 1).finally(() => {
+      settled = true;
+    });
+    expect(sockets[0]?.sent.map((item) => JSON.parse(item))).toContainEqual({ type: "attach", chat_id: "chat-1" });
+
+    sockets[0]?.emit({ event: "run_status_snapshot", chat_id: "chat-2", status: "idle" });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    sockets[0]?.emit({
+      event: "run_status_snapshot",
+      chat_id: "chat-1",
+      status: "running",
+      started_at: 1_234,
+      turn_id: "turn-1"
+    });
+    await expect(pending).resolves.toEqual({
+      status: "running",
+      startedAt: 1_234,
+      turnId: "turn-1",
+      connectionGeneration: 1
+    });
+  });
+
+  it("rejects a pending run status snapshot when its socket closes", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    const client = createMemmyAgentClient({
+      baseUrl: "https://agent.local:18980",
+      clientId: "frontend-test",
+      fetchFn: vi.fn(async () => json(bootstrap)) as typeof fetch,
+      webSocketFactory: (url) => {
+        const socket = new FakeSocket(url);
+        sockets.push(socket);
+        return socket;
+      }
+    });
+
+    const connection = await connectReady(client, sockets);
+    const pending = connection.requestRunStatusSnapshot("chat-1", 1);
+    const rejection = expect(pending).rejects.toThrow("websocket closed");
+    sockets[0]?.emitClose();
+
+    await rejection;
+    await expect(connection.requestRunStatusSnapshot("chat-1", 1)).rejects.toThrow("Agent gateway is not ready");
     connection.close();
   });
 
@@ -698,7 +823,7 @@ describe("memmy-agent client", () => {
       }
     });
 
-    await client.connectWebSocket(() => undefined);
+    await connectReady(client, sockets, () => undefined);
 
     expect(sockets[0]?.url).toBe("ws://127.0.0.1:5174/ws?token=agent-token&client_id=frontend-test");
   });
@@ -718,10 +843,12 @@ describe("memmy-agent client", () => {
     const globalEvents: unknown[] = [];
     const chatEvents: unknown[] = [];
 
-    const connection = await client.connectWebSocket((event) => globalEvents.push(event));
+    const connection = await connectReady(client, sockets, (event) => globalEvents.push(event));
+    globalEvents.length = 0;
     sockets[0]?.emit({
       event: "message",
       chat_id: "chat-2",
+      connection_generation: 1,
       kind: "progress",
       text: "queued trace ![Diagram](/api/media/sig-live/payload-live)",
       media_urls: [{ kind: "image", url: "/api/media/sig-live/payload-live", name: "live.png" }]
@@ -731,6 +858,7 @@ describe("memmy-agent client", () => {
     const expectedEvent = {
       event: "message",
       chat_id: "chat-2",
+      connection_generation: 1,
       kind: "progress",
       text: "queued trace ![Diagram](https://agent.local:18980/api/media/sig-live/payload-live)",
       media_urls: [{ kind: "image", url: "https://agent.local:18980/api/media/sig-live/payload-live", name: "live.png" }]
@@ -757,7 +885,7 @@ describe("memmy-agent client", () => {
     const statusResults: unknown[] = [];
     const chatEvents: unknown[] = [];
 
-    const connection = await client.connectWebSocket();
+    const connection = await connectReady(client, sockets);
     connection.onStatusResult((chatId, content) => statusResults.push({ chatId, content }));
     connection.onChat("chat-2", (event) => chatEvents.push(event));
 
@@ -782,7 +910,7 @@ describe("memmy-agent client", () => {
     const historyDagResults: unknown[] = [];
     const chatEvents: unknown[] = [];
 
-    const connection = await client.connectWebSocket();
+    const connection = await connectReady(client, sockets);
     connection.onHistoryDagResult((chatId, content, payload) => historyDagResults.push({ chatId, content, payload }));
     connection.onChat("chat-2", (event) => chatEvents.push(event));
     connection.historyDag("chat-2");
@@ -865,7 +993,7 @@ describe("memmy-agent client", () => {
     const historyDagResults: unknown[] = [];
     const chatEvents: unknown[] = [];
 
-    const connection = await client.connectWebSocket();
+    const connection = await connectReady(client, sockets);
     connection.onHistoryDagResult((chatId, content, payload) => historyDagResults.push({ chatId, content, payload }));
     connection.onChat("chat-2", (event) => chatEvents.push(event));
 
@@ -919,7 +1047,7 @@ describe("memmy-agent client", () => {
       }
     });
     const historyDagResults: any[] = [];
-    const connection = await client.connectWebSocket();
+    const connection = await connectReady(client, sockets);
     connection.onHistoryDagResult((chatId, content, payload) => historyDagResults.push({ chatId, content, payload }));
 
     sockets[0]?.emit({
@@ -958,7 +1086,7 @@ describe("memmy-agent client", () => {
     const runUpdates: unknown[] = [];
     const runLifecycleUpdates: unknown[] = [];
 
-    const connection = await client.connectWebSocket();
+    const connection = await connectReady(client, sockets);
     connection.onSessionUpdate((chatId, scope) => sessionUpdates.push({ chatId, scope }));
     connection.onRuntimeModelUpdate((modelName, modelPreset) => modelUpdates.push({ modelName, modelPreset }));
     connection.onRunStatus((chatId, startedAt) => runUpdates.push({ chatId, startedAt }));
@@ -1010,7 +1138,7 @@ describe("memmy-agent client", () => {
       }
     });
 
-    const connection = await client.connectWebSocket((event) => {
+    const connection = await connectReady(client, sockets, (event) => {
       if (event.event === "run_status_snapshot") callbackOrder.push("event");
     });
     connection.onRunStatus(() => callbackOrder.push("run-status"));
@@ -1074,7 +1202,8 @@ describe("memmy-agent client", () => {
       }
     });
 
-    const connection = await client.connectWebSocket((event) => globalEvents.push(event));
+    const connection = await connectReady(client, sockets, (event) => globalEvents.push(event));
+    globalEvents.length = 0;
     connection.onRunStatus((chatId, startedAt) => runUpdates.push({ chatId, startedAt }));
     connection.onRunLifecycle((chatId, event) => lifecycleEvents.push({ chatId, event }));
     connection.onChat("chat-1", (event) => chatEvents.push(event));
@@ -1084,15 +1213,15 @@ describe("memmy-agent client", () => {
     sockets[0]?.emit({ event: "run_status_snapshot", chat_id: "chat-1", status: "running" });
 
     expect(globalEvents).toEqual([
-      { event: "run_status_snapshot", status: "idle" },
-      { event: "run_status_snapshot", chat_id: "chat-1", status: "unknown" },
-      { event: "run_status_snapshot", chat_id: "chat-1", status: "running" }
+      { event: "run_status_snapshot", status: "idle", connection_generation: 1 },
+      { event: "run_status_snapshot", chat_id: "chat-1", status: "unknown", connection_generation: 1 },
+      { event: "run_status_snapshot", chat_id: "chat-1", status: "running", connection_generation: 1 }
     ]);
     expect(runUpdates).toEqual([]);
     expect(lifecycleEvents).toEqual([]);
     expect(chatEvents).toEqual([
-      { event: "run_status_snapshot", chat_id: "chat-1", status: "unknown" },
-      { event: "run_status_snapshot", chat_id: "chat-1", status: "running" }
+      { event: "run_status_snapshot", chat_id: "chat-1", status: "unknown", connection_generation: 1 },
+      { event: "run_status_snapshot", chat_id: "chat-1", status: "running", connection_generation: 1 }
     ]);
     expect(connection.getRunStartedAt("chat-1")).toBeNull();
   });
@@ -1111,7 +1240,7 @@ describe("memmy-agent client", () => {
     });
     const runUpdates: unknown[] = [];
 
-    await client.connectWebSocket().then((connection) => {
+    await connectReady(client, sockets).then((connection) => {
       connection.onRunStatus((chatId, startedAt) => runUpdates.push({ chatId, startedAt }));
     });
     sockets[0]?.emit({ event: "turn_end" });
@@ -1133,7 +1262,7 @@ describe("memmy-agent client", () => {
       }
     });
 
-    const connection = await client.connectWebSocket();
+    const connection = await connectReady(client, sockets);
     connection.onChat("chat-1", () => undefined);
     sockets[0]?.emit({ event: "run_status_snapshot", chat_id: "chat-1", status: "running", started_at: 1780732800 });
     expect(connection.getRunStartedAt("chat-1")).toBe(1780732800);
@@ -1141,9 +1270,103 @@ describe("memmy-agent client", () => {
     await vi.advanceTimersByTimeAsync(500);
 
     expect(sockets).toHaveLength(2);
+    expect(sockets[1]?.sent).toEqual([]);
+    sockets[1]?.emit({ event: "ready", chat_id: "ready-2" });
     expect(sockets[1]?.sent.map((item) => JSON.parse(item))).toContainEqual({ type: "attach", chat_id: "chat-1" });
     sockets[1]?.emit({ event: "run_status_snapshot", chat_id: "chat-1", status: "idle" });
     expect(connection.getRunStartedAt("chat-1")).toBeNull();
+  });
+
+  it("queues only control frames while reconnecting and flushes them after ready", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    const client = createMemmyAgentClient({
+      baseUrl: "https://agent.local:18980",
+      clientId: "frontend-test",
+      fetchFn: vi.fn(async () => json(bootstrap)) as typeof fetch,
+      webSocketFactory: (url) => {
+        const socket = new FakeSocket(url);
+        sockets.push(socket);
+        return socket;
+      }
+    });
+
+    const connection = await connectReady(client, sockets);
+    sockets[0]?.emitClose();
+    connection.stop("chat-control");
+    connection.status("chat-control");
+    expect(() => connection.sendMessage({ chatId: "chat-message", content: "do not queue" }, 1))
+      .toThrow("Agent gateway is not ready");
+
+    await vi.advanceTimersByTimeAsync(500);
+    expect(sockets[1]?.sent).toEqual([]);
+    sockets[1]?.emit({ event: "ready", chat_id: "ready-2" });
+
+    expect(sockets[1]?.sent.map((item) => JSON.parse(item))).toEqual([
+      { type: "attach", chat_id: "ready-chat" },
+      { type: "attach", chat_id: "chat-control" },
+      { type: "stop", chat_id: "chat-control" },
+      { type: "status", chat_id: "chat-control" }
+    ]);
+  });
+
+  it("ignores all callbacks from an old socket after a newer generation starts", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    const events: MemmyAgentWsEvent[] = [];
+    const client = createMemmyAgentClient({
+      baseUrl: "https://agent.local:18980",
+      clientId: "frontend-test",
+      fetchFn: vi.fn(async () => json(bootstrap)) as typeof fetch,
+      webSocketFactory: (url) => {
+        const socket = new FakeSocket(url);
+        sockets.push(socket);
+        return socket;
+      }
+    });
+
+    await connectReady(client, sockets, (event) => events.push(event));
+    sockets[0]?.emitClose();
+    await vi.advanceTimersByTimeAsync(500);
+    const eventCountAfterClose = events.length;
+
+    sockets[0]?.emit({ event: "ready", chat_id: "stale-ready" });
+    sockets[0]?.emit({ event: "message", chat_id: "chat-1", content: "stale" });
+    sockets[0]?.emitError();
+    sockets[0]?.emitClose();
+    expect(events).toHaveLength(eventCountAfterClose);
+
+    sockets[1]?.emit({ event: "ready", chat_id: "fresh-ready" });
+    expect(events.at(-1)).toEqual({
+      event: "ready",
+      chat_id: "fresh-ready",
+      connection_generation: 2
+    });
+  });
+
+  it("attributes a 1009 transport error only to the most recently sent ordinary chat", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    const events: MemmyAgentWsEvent[] = [];
+    const client = createMemmyAgentClient({
+      baseUrl: "https://agent.local:18980",
+      clientId: "frontend-test",
+      fetchFn: vi.fn(async () => json(bootstrap)) as typeof fetch,
+      webSocketFactory: (url) => {
+        const socket = new FakeSocket(url);
+        sockets.push(socket);
+        return socket;
+      }
+    });
+
+    const connection = await connectReady(client, sockets, (event) => events.push(event));
+    connection.sendMessage({ chatId: "chat-2", content: "large payload" }, 1);
+    sockets[0]?.emitClose(1009);
+
+    expect(events.slice(-2)).toEqual([
+      { event: "transport_error", detail: "message_too_big", connection_generation: 1, chat_id: "chat-2" },
+      { event: "connection_closed", connection_generation: 1 }
+    ]);
   });
 
   it("converts between WebUI chat id and session key", () => {
@@ -1164,6 +1387,20 @@ function authHeader(init?: RequestInit): string | undefined {
   return (init?.headers as Record<string, string> | undefined)?.Authorization;
 }
 
+async function connectReady(
+  client: MemmyAgentClient,
+  sockets: FakeSocket[],
+  onEvent?: (event: MemmyAgentWsEvent) => void,
+  readyEvent: Record<string, unknown> = { event: "ready", chat_id: "ready-chat" }
+) {
+  const pending = client.connectWebSocket(onEvent);
+  while (!sockets[0]) {
+    await Promise.resolve();
+  }
+  sockets[0].emit(readyEvent);
+  return pending;
+}
+
 class FakeSocket implements WebSocketLike {
   onopen: ((event: Event) => void) | null = null;
   onmessage: ((event: MessageEvent) => void) | null = null;
@@ -1171,6 +1408,7 @@ class FakeSocket implements WebSocketLike {
   onclose: ((event: CloseEvent) => void) | null = null;
   readyState = 1;
   sent: string[] = [];
+  closeCalls: Array<{ code: number | undefined; reason: string | undefined }> = [];
 
   constructor(readonly url: string) {}
 
@@ -1178,7 +1416,8 @@ class FakeSocket implements WebSocketLike {
     this.sent.push(data);
   }
 
-  close(): void {
+  close(code?: number, reason?: string): void {
+    this.closeCalls.push({ code, reason });
     this.readyState = 3;
   }
 
@@ -1186,8 +1425,12 @@ class FakeSocket implements WebSocketLike {
     this.onmessage?.({ data: JSON.stringify(event) } as MessageEvent);
   }
 
-  emitClose(): void {
+  emitError(): void {
+    this.onerror?.({} as Event);
+  }
+
+  emitClose(code = 1006): void {
     this.readyState = 3;
-    this.onclose?.({ code: 1006 } as CloseEvent);
+    this.onclose?.({ code } as CloseEvent);
   }
 }

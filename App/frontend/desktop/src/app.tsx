@@ -36,8 +36,10 @@ import {
   AGENT_SOURCE_SCAN_COMPLETION_FEEDBACK_MS,
   agentActions,
   appActions,
+  createAgentOperationError,
   type AppAction
 } from "./state/app-actions.js";
+import type { AgentState } from "./state/agent-chat-slice.js";
 import { useAppState } from "./state/app-state.js";
 
 /** Handles app. */
@@ -51,12 +53,14 @@ export function App() {
 
 /** Runs runtime app. */
 function RuntimeApp() {
-  const { dispatch } = useAppState();
+  const { state, dispatch } = useAppState();
   const { clients, setClients } = useApiClients();
   const { t } = useTranslation();
   const translationRef = useRef(t);
+  const agentStateRef = useRef(state.agent);
   const [bootKey, setBootKey] = useState(0);
   translationRef.current = t;
+  agentStateRef.current = state.agent;
 
   const retry = useCallback(() => setBootKey((value) => value + 1), []);
 
@@ -66,7 +70,7 @@ function RuntimeApp() {
     }
 
     return window.memmy.onRouteTargetRequest((target) => {
-      applyMainWindowRouteTarget(target, dispatch, clients?.memmyAgent ?? null);
+      applyMainWindowRouteTarget(target, dispatch, clients?.memmyAgent ?? null, agentStateRef.current);
     });
   }, [clients?.memmyAgent, dispatch]);
 
@@ -260,13 +264,14 @@ function RuntimeApp() {
 export function applyMainWindowRouteTarget(
   rawTarget: MainWindowRouteTarget,
   dispatch: (action: AppAction) => void,
-  agentClient: Pick<MemmyAgentClient, "chatIdToSessionKey" | "readWebuiThread" | "listSessions" | "readSidebarState"> | null = null
+  agentClient: Pick<MemmyAgentClient, "chatIdToSessionKey" | "readWebuiThread" | "listSessions" | "readSidebarState"> | null = null,
+  agentState?: Pick<AgentState, "sidebarStateVersion" | "runStatusVersionByChatId">
 ): void {
   const target = resolveMainWindowRouteTarget(rawTarget);
   if (target.route === "/main") {
     if (target.agentChatId && agentClient) {
       rememberFocusedAgentChat(null);
-      focusMainWindowAgentChat(target.agentChatId, agentClient, dispatch);
+      focusMainWindowAgentChat(target.agentChatId, agentClient, dispatch, agentState);
     } else {
       rememberFocusedAgentChat(target.agentChatId);
     }
@@ -283,14 +288,20 @@ let mainWindowRouteAgentRequestCounter = 0;
 function focusMainWindowAgentChat(
   chatId: string,
   client: Pick<MemmyAgentClient, "chatIdToSessionKey" | "readWebuiThread" | "listSessions" | "readSidebarState">,
-  dispatch: (action: AppAction) => void
+  dispatch: (action: AppAction) => void,
+  agentState?: Pick<AgentState, "sidebarStateVersion" | "runStatusVersionByChatId">
 ): void {
   mainWindowRouteAgentRequestCounter += 1;
   const sessionKey = client.chatIdToSessionKey(chatId);
   const historyRequestId = `main-route-${chatId}-${mainWindowRouteAgentRequestCounter}`;
   const sessionsRequestId = `main-route-sessions-${mainWindowRouteAgentRequestCounter}`;
   dispatch(agentActions.historyLoading(sessionKey, chatId, historyRequestId));
-  dispatch(agentActions.sessionsLoading(sessionsRequestId));
+  dispatch(agentActions.taskStateLoading({
+    requestId: sessionsRequestId,
+    sidebarStateVersionAtStart: agentState?.sidebarStateVersion ?? 0,
+    runStatusVersionAtStartByChatId: { ...(agentState?.runStatusVersionByChatId ?? {}) },
+    recoveryGeneration: null
+  }));
 
   void client
     .readWebuiThread(sessionKey)
@@ -304,20 +315,30 @@ function focusMainWindowAgentChat(
       }
 
       console.warn("focus main window agent chat history failed", error);
-      dispatch(agentActions.historyOpenMissing(sessionKey, chatId, historyRequestId));
+      dispatch(agentActions.historyOpenFailed(chatId, historyRequestId, createAgentOperationError({
+        source: "history",
+        message: error instanceof Error ? error.message : String(error),
+        chatId
+      })));
     });
 
-  void Promise.all([
+  void Promise.allSettled([
     client.listSessions(),
     client.readSidebarState()
   ])
-    .then(([sessions, sidebarState]) => {
-      dispatch(agentActions.sidebarStateLoaded(sidebarState));
-      dispatch(agentActions.sessionsLoaded(sessions, sessionsRequestId));
-    })
-    .catch((error) => {
-      console.warn("focus main window agent chat sessions failed", error);
-      dispatch(agentActions.sessionsLoadFailed(sessionsRequestId));
+    .then(([sessionsResult, sidebarResult]) => {
+      const failures = [sessionsResult, sidebarResult]
+        .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+        .map((result) => result.reason instanceof Error ? result.reason.message : String(result.reason));
+      dispatch(agentActions.taskStateSettled({
+        requestId: sessionsRequestId,
+        recoveryGeneration: null,
+        ...(sessionsResult.status === "fulfilled" ? { sessions: sessionsResult.value } : {}),
+        ...(sidebarResult.status === "fulfilled" ? { sidebarState: sidebarResult.value } : {}),
+        ...(failures.length > 0 ? {
+          error: createAgentOperationError({ source: "sessions", message: failures.join("; ") })
+        } : {})
+      }));
     });
 }
 
