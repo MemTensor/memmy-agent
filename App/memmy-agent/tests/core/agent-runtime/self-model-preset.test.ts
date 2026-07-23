@@ -26,6 +26,7 @@ function workspace(): string {
 
 function makeLoop(presets: Record<string, ModelPresetConfig> = {}, activePreset: string | null = null): AgentLoop {
   return new AgentLoop({
+    config: new Config({ fileMemory: { enabled: true } }),
     bus: new MessageBus(),
     provider: provider("base-model"),
     workspace: workspace(),
@@ -69,12 +70,13 @@ describe("self model preset", () => {
     expect(loop.consolidator.model).toBe("openai/gpt-4.1");
     expect(loop.consolidator.contextWindowTokens).toBe(32_768);
     expect(loop.consolidator.maxCompletionTokens).toBe(4096);
-    expect(loop.dream.model).toBe("openai/gpt-4.1");
+    expect(loop.dream?.model).toBe("openai/gpt-4.1");
   });
 
   it("publishes runtime model updates when setModelPreset is called", () => {
     const published: Array<[string | null, string | null | undefined]> = [];
     const loop = new AgentLoop({
+      config: new Config({ fileMemory: { enabled: true } }),
       bus: new MessageBus(),
       provider: provider("base-model"),
       workspace: workspace(),
@@ -99,6 +101,7 @@ describe("self model preset", () => {
       contextWindowTokens: 200_000,
     });
     const loop = new AgentLoop({
+      config: new Config({ fileMemory: { enabled: true } }),
       bus: new MessageBus(),
       provider: oldProvider,
       workspace: workspace(),
@@ -121,8 +124,8 @@ describe("self model preset", () => {
     expect(loop.subagents.provider).toBe(newProvider);
     expect(loop.subagents.runner.provider).toBe(newProvider);
     expect(loop.consolidator.provider).toBe(newProvider);
-    expect(loop.dream.provider).toBe(newProvider);
-    expect(loop.dream.runner.provider).toBe(newProvider);
+    expect(loop.dream?.provider).toBe(newProvider);
+    expect(loop.dream?.runner.provider).toBe(newProvider);
     expect(loop.model).toBe("anthropic/claude-opus-4-5");
     expect(loop.contextWindowTokens).toBe(200_000);
     expect(loop.consolidator.maxCompletionTokens).toBe(2048);
@@ -130,6 +133,7 @@ describe("self model preset", () => {
 
   it("leaves old runtime state intact when preset snapshot loading fails", () => {
     const loop = new AgentLoop({
+      config: new Config({ fileMemory: { enabled: true } }),
       bus: new MessageBus(),
       provider: provider("base-model", 123),
       workspace: workspace(),
@@ -146,7 +150,7 @@ describe("self model preset", () => {
     expect(loop.model).toBe("base-model");
     expect(loop.subagents.model).not.toBe("openai/gpt-4.1");
     expect(loop.consolidator.model).toBe("base-model");
-    expect(loop.dream.model).toBe("base-model");
+    expect(loop.dream?.model).toBe("base-model");
     expect(loop.contextWindowTokens).toBe(1000);
     expect(loop.consolidator.maxCompletionTokens).toBe(123);
   });

@@ -77,6 +77,7 @@ type WebSocketChannelOptions = {
   workspacePath?: string | null;
   runtimeModelName?: RuntimeModelNameResolver;
   cancelActiveTasks?: (sessionKey: string) => Promise<number>;
+  fileMemoryEnabled?: boolean;
 };
 export type WebuiLanguage = "zh-CN" | "en-US";
 
@@ -503,6 +504,7 @@ export class WebSocketChannel extends BaseChannel {
   staticDistPath: string | null = null;
   runtimeModelName: RuntimeModelNameResolver = null;
   workspacePath: string;
+  readonly fileMemoryEnabled: boolean;
   cancelActiveTasks: ((sessionKey: string) => Promise<number>) | null = null;
   server: any = null;
   channelAdmin: ChannelAdminApi | null = null;
@@ -516,6 +518,7 @@ export class WebSocketChannel extends BaseChannel {
     const staticDistPath = options.staticDistPath ?? config?.staticDistPath ?? null;
     this.staticDistPath = staticDistPath ? path.resolve(String(staticDistPath)) : null;
     this.runtimeModelName = options.runtimeModelName ?? config?.runtimeModelName ?? null;
+    this.fileMemoryEnabled = options.fileMemoryEnabled === true;
     this.cancelActiveTasks = options.cancelActiveTasks ?? config?.cancelActiveTasks ?? null;
     const workspacePath = options.workspacePath ?? config?.workspacePath ?? getWorkspacePath();
     this.workspacePath = path.resolve(String(workspacePath));
@@ -764,7 +767,12 @@ export class WebSocketChannel extends BaseChannel {
     } catch {
       sessionDagEnabled = true;
     }
-    return httpJsonResponse({ commands: builtinCommandPalette({ sessionDagEnabled }) });
+    return httpJsonResponse({
+      commands: builtinCommandPalette({
+        sessionDagEnabled,
+        fileMemoryEnabled: this.fileMemoryEnabled,
+      }),
+    });
   }
 
   handleWebuiSidebarState(request: any): HttpLikeResponse {

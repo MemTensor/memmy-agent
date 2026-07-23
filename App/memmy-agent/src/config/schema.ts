@@ -1069,6 +1069,23 @@ export class MemmyMemoryConfig extends Base {
   }
 }
 
+export class FileMemoryConfig extends Base {
+  enabled = false;
+
+  constructor(init: unknown = {}) {
+    super();
+    const data = assertPlainObject("fileMemory", init);
+    this.enabled = assertBoolean(
+      "fileMemory.enabled",
+      pick(data, ["enabled"], false),
+    );
+  }
+
+  override toObject(): Dict {
+    return { enabled: this.enabled };
+  }
+}
+
 export class Config extends Base {
   app: Dict;
   agents: AgentsConfig;
@@ -1078,6 +1095,7 @@ export class Config extends Base {
   heartbeat: HeartbeatConfig;
   api: ApiConfig;
   gateway: GatewayConfig;
+  fileMemory: FileMemoryConfig;
   memmyMemory: MemmyMemoryConfig;
   modelPresets: Dict<ModelPresetConfig>;
   sessionDag: SessionDagConfig;
@@ -1112,6 +1130,13 @@ export class Config extends Base {
     this.api = init.api instanceof ApiConfig ? init.api : new ApiConfig(init.api ?? {});
     this.gateway =
       init.gateway instanceof GatewayConfig ? init.gateway : new GatewayConfig(init.gateway ?? {});
+    const fileMemory = Object.prototype.hasOwnProperty.call(init, "fileMemory")
+      ? init.fileMemory
+      : {};
+    this.fileMemory =
+      fileMemory instanceof FileMemoryConfig
+        ? fileMemory
+        : new FileMemoryConfig(fileMemory);
     if (!("heartbeat" in (init.gateway ?? {})) && init.heartbeat) {
       this.gateway.heartbeat =
         init.heartbeat instanceof HeartbeatConfig
@@ -1289,6 +1314,7 @@ export class Config extends Base {
       tools: this.tools,
       api: this.api,
       gateway: this.gateway,
+      fileMemory: this.fileMemory,
       memmyMemory: this.memmyMemory,
       sessionDag: this.sessionDag,
       contextCompaction: this.contextCompaction,

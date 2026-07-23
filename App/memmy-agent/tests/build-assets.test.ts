@@ -7,8 +7,27 @@ const npmBin = process.platform === "win32" ? "npm.cmd" : "npm";
 
 describe("build runtime assets", () => {
   it("copies templates and builtin skill resources into dist", () => {
+    const staleMemorySkill = path.join(
+      process.cwd(),
+      "dist/skills/memory/SKILL.md",
+    );
+    fs.mkdirSync(path.dirname(staleMemorySkill), { recursive: true });
+    fs.writeFileSync(staleMemorySkill, "stale sentinel", "utf8");
+
     execFileSync(npmBin, ["run", "build"], { cwd: process.cwd(), stdio: "pipe" });
 
+    expect(
+      fs.existsSync(path.join(process.cwd(), "dist/templates/agent/file-memory.md")),
+    ).toBe(true);
+    expect(fs.existsSync(path.join(process.cwd(), "dist/skills/memory"))).toBe(
+      false,
+    );
+    const mySkill = fs.readFileSync(
+      path.join(process.cwd(), "dist/skills/my/SKILL.md"),
+      "utf8",
+    );
+    expect(mySkill).not.toContain("Memory skill");
+    expect(mySkill).not.toContain("Tomorrow? Memory.");
     expect(fs.existsSync(path.join(process.cwd(), "dist/templates/agent/subagent-announce.md"))).toBe(true);
     expect(fs.existsSync(path.join(process.cwd(), "dist/templates/agent/verification-contract.md"))).toBe(true);
     expect(fs.existsSync(path.join(process.cwd(), "dist/templates/memory/MEMORY.md"))).toBe(true);

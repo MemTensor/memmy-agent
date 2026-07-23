@@ -27,6 +27,10 @@ function scopedPrompt(builder: ContextBuilder, sessionKey: string, unifiedSessio
   })[0].content);
 }
 
+function fileMemoryBuilder(workspace = makeWorkspace()): ContextBuilder {
+  return new ContextBuilder({ workspace, fileMemoryEnabled: true });
+}
+
 describe("Context prompt cache inputs", () => {
   it("uses bundled templates for all bootstrap files", () => {
     for (const filename of ContextBuilder.BOOTSTRAP_FILES) {
@@ -40,12 +44,30 @@ describe("Context prompt cache inputs", () => {
   });
 
   it("reflects the current Dream memory contract", () => {
-    const prompt = new ContextBuilder({ workspace: makeWorkspace() }).buildSystemPrompt();
+    const prompt = fileMemoryBuilder().buildSystemPrompt();
+    expect(prompt.match(/# File Memory/g)).toHaveLength(1);
     expect(prompt).toContain("memory/history.jsonl");
-    expect(prompt).toContain("automatically managed by Dream");
-    expect(prompt).toContain("do not edit directly");
+    expect(prompt).toContain("maintained automatically by Dream");
+    expect(prompt).toContain("Do not edit those files directly");
     expect(prompt).not.toContain("memory/HISTORY.md");
     expect(prompt).not.toContain("write important facts here");
+  });
+
+  it("keeps file memory out of the default system prompt", () => {
+    const workspace = makeWorkspace();
+    fs.mkdirSync(path.join(workspace, "memory"), { recursive: true });
+    fs.writeFileSync(path.join(workspace, "memory", "MEMORY.md"), "secret memory", "utf8");
+    const builder = new ContextBuilder({ workspace });
+    builder.memory.appendHistory("secret history");
+
+    const prompt = builder.buildSystemPrompt();
+
+    expect(builder.fileMemoryEnabled).toBe(false);
+    expect(prompt).not.toContain("# File Memory");
+    expect(prompt).not.toContain("secret memory");
+    expect(prompt).not.toContain("secret history");
+    expect(prompt).not.toContain("# Recent History");
+    expect(prompt).not.toContain("File memory is disabled");
   });
 
   it("appends runtime context to the current user message", () => {
@@ -101,7 +123,7 @@ describe("Context prompt cache inputs", () => {
   });
 
   it("injects unprocessed memory history with timestamps", () => {
-    const builder = new ContextBuilder({ workspace: makeWorkspace() });
+    const builder = fileMemoryBuilder();
     builder.memory.appendHistory("User asked about weather in Tokyo");
     builder.memory.appendHistory("Agent fetched forecast via web_search");
     const prompt = builder.buildSystemPrompt();
@@ -112,7 +134,7 @@ describe("Context prompt cache inputs", () => {
   });
 
   it("injects only recent history owned by the current session", () => {
-    const builder = new ContextBuilder({ workspace: makeWorkspace() });
+    const builder = fileMemoryBuilder();
     builder.memory.appendHistory("old-wonton.png");
     builder.memory.appendHistory("wonton-a.png", { sessionKey: "websocket:chat-a" });
     builder.memory.appendHistory("city-b.png", { sessionKey: "websocket:chat-b" });
@@ -130,7 +152,7 @@ describe("Context prompt cache inputs", () => {
   });
 
   it("shares legacy and non-internal history only in unified mode", () => {
-    const builder = new ContextBuilder({ workspace: makeWorkspace() });
+    const builder = fileMemoryBuilder();
     builder.memory.appendHistory("legacy.png");
     builder.memory.appendHistory("channel-a.png", { sessionKey: "websocket:chat-a" });
     builder.memory.appendHistory("unified.png", { sessionKey: "unified:default" });
@@ -147,7 +169,7 @@ describe("Context prompt cache inputs", () => {
   });
 
   it("filters by session before applying the recent history entry cap", () => {
-    const builder = new ContextBuilder({ workspace: makeWorkspace() });
+    const builder = fileMemoryBuilder();
     builder.memory.appendHistory("keep-current-session.png", { sessionKey: "websocket:chat-a" });
     for (let index = 0; index < builder.maxRecentHistory + 20; index += 1) {
       builder.memory.appendHistory(`other-${index}.png`, { sessionKey: "websocket:chat-b" });
@@ -160,7 +182,7 @@ describe("Context prompt cache inputs", () => {
   });
 
   it("caps recent history at the configured maximum entry count", () => {
-    const builder = new ContextBuilder({ workspace: makeWorkspace() });
+    const builder = fileMemoryBuilder();
     for (let index = 0; index < builder.maxRecentHistory + 20; index += 1) {
       builder.memory.appendHistory(`entry-${index}`);
     }
@@ -171,21 +193,21 @@ describe("Context prompt cache inputs", () => {
   });
 
   it("truncates recent history at the configured character maximum", () => {
-    const builder = new ContextBuilder({ workspace: makeWorkspace() });
+    const builder = fileMemoryBuilder();
     builder.memory.appendHistory("x".repeat(builder.maxHistoryChars + 5_000));
     const [, historySection] = builder.buildSystemPrompt().split("# Recent History\n\n", 2);
     expect(historySection.length).toBeLessThan(builder.maxHistoryChars + 200);
   });
 
   it("omits recent history after Dream has processed all entries", () => {
-    const builder = new ContextBuilder({ workspace: makeWorkspace() });
+    const builder = fileMemoryBuilder();
     const cursor = builder.memory.appendHistory("already processed entry");
     builder.memory.setLastDreamCursor(cursor);
     expect(builder.buildSystemPrompt()).not.toContain("# Recent History");
   });
 
   it("shows only history entries after the Dream cursor", () => {
-    const builder = new ContextBuilder({ workspace: makeWorkspace() });
+    const builder = fileMemoryBuilder();
     builder.memory.appendHistory("old conversation about TypeScript");
     const cursor = builder.memory.appendHistory("old conversation about Rust");
     builder.memory.appendHistory("recent question about Docker");
@@ -279,7 +301,10 @@ describe("Context prompt cache inputs", () => {
   it("includes always skills as active skills but excludes them from the skills index", () => {
     const prompt = new ContextBuilder({ workspace: makeWorkspace() }).buildSystemPrompt();
     expect(prompt).toContain("# Active Skills");
-    expect(prompt).toContain("### Skill: memory");
+    expect(prompt).toContain("### Skill: my");
+    expect(prompt).not.toContain("### Skill: memory");
+    expect(prompt).not.toContain("Memory skill");
+    expect(prompt).not.toContain("Tomorrow? Memory.");
     const skillsSection = prompt.split("# Skills\n", 2);
     expect(skillsSection.length).toBeGreaterThan(1);
     const indexText = skillsSection[1].split("\n\n---", 1)[0];
@@ -288,18 +313,36 @@ describe("Context prompt cache inputs", () => {
 
   it("skips template MEMORY.md in the system prompt", () => {
     const workspace = makeWorkspace();
-    syncWorkspaceTemplates(workspace);
-    const prompt = new ContextBuilder({ workspace }).buildSystemPrompt();
+    syncWorkspaceTemplates(workspace, undefined, { fileMemoryEnabled: true });
+    const prompt = fileMemoryBuilder(workspace).buildSystemPrompt();
     expect(prompt).not.toContain("# Memory\n\n## Long-term Memory");
     expect(prompt).not.toContain("This file is automatically updated by memmy");
   });
 
   it("injects customized MEMORY.md content", () => {
     const workspace = makeWorkspace();
-    syncWorkspaceTemplates(workspace);
+    syncWorkspaceTemplates(workspace, undefined, { fileMemoryEnabled: true });
     fs.writeFileSync(path.join(workspace, "memory", "MEMORY.md"), "# Long-term Memory\n\nUser prefers dark mode.\n", "utf8");
-    const prompt = new ContextBuilder({ workspace }).buildSystemPrompt();
+    const prompt = fileMemoryBuilder(workspace).buildSystemPrompt();
     expect(prompt).toContain("# Memory\n\n## Long-term Memory");
     expect(prompt).toContain("User prefers dark mode");
+  });
+
+  it("keeps bootstrap content and order independent from file memory", () => {
+    const workspace = makeWorkspace();
+    fs.writeFileSync(path.join(workspace, "AGENTS.md"), "AGENT_UNIQUE", "utf8");
+    fs.writeFileSync(path.join(workspace, "SOUL.md"), "SOUL_UNIQUE", "utf8");
+    fs.writeFileSync(path.join(workspace, "USER.md"), "USER_UNIQUE", "utf8");
+
+    for (const fileMemoryEnabled of [false, true]) {
+      const prompt = new ContextBuilder({
+        workspace,
+        fileMemoryEnabled,
+      }).buildSystemPrompt(null, null, "session summary");
+      expect(prompt.indexOf("AGENT_UNIQUE")).toBeLessThan(prompt.indexOf("SOUL_UNIQUE"));
+      expect(prompt.indexOf("SOUL_UNIQUE")).toBeLessThan(prompt.indexOf("USER_UNIQUE"));
+      expect(prompt).toContain("[Archived Context Summary]");
+      expect(prompt).toContain("session summary");
+    }
   });
 });

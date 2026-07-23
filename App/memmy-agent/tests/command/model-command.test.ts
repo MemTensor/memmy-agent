@@ -13,7 +13,7 @@ import {
   registerBuiltinCommands,
 } from "../../src/command/builtin.js";
 import { CommandContext, CommandRouter } from "../../src/command/router.js";
-import { ModelPresetConfig } from "../../src/config/schema.js";
+import { Config, ModelPresetConfig } from "../../src/config/schema.js";
 
 function provider(defaultModel: string, maxTokens = 123): any {
   return {
@@ -25,6 +25,7 @@ function provider(defaultModel: string, maxTokens = 123): any {
 function makeLoop(): AgentLoop {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-model-command-"));
   return new AgentLoop({
+    config: new Config({ fileMemory: { enabled: true } }),
     bus: new MessageBus(),
     provider: provider("base-model", 123),
     workspace: root,

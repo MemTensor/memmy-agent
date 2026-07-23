@@ -112,7 +112,9 @@ export class ChannelManager {
   }
 
   channelRuntimeOptions(name: string): Record<string, any> {
-    const options: Record<string, any> = {};
+    const options: Record<string, any> = {
+      fileMemoryEnabled: this.config?.fileMemory?.enabled === true,
+    };
     if (name !== "websocket") return options;
 
     if (this.sessionManager) {
