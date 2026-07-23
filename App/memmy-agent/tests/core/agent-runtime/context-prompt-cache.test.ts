@@ -328,21 +328,36 @@ describe("Context prompt cache inputs", () => {
     expect(prompt).toContain("User prefers dark mode");
   });
 
-  it("keeps bootstrap content and order independent from file memory", () => {
+  it("controls USER.md bootstrap with file memory while preserving other bootstrap content", () => {
     const workspace = makeWorkspace();
     fs.writeFileSync(path.join(workspace, "AGENTS.md"), "AGENT_UNIQUE", "utf8");
     fs.writeFileSync(path.join(workspace, "SOUL.md"), "SOUL_UNIQUE", "utf8");
     fs.writeFileSync(path.join(workspace, "USER.md"), "USER_UNIQUE", "utf8");
 
-    for (const fileMemoryEnabled of [false, true]) {
-      const prompt = new ContextBuilder({
-        workspace,
-        fileMemoryEnabled,
-      }).buildSystemPrompt(null, null, "session summary");
-      expect(prompt.indexOf("AGENT_UNIQUE")).toBeLessThan(prompt.indexOf("SOUL_UNIQUE"));
-      expect(prompt.indexOf("SOUL_UNIQUE")).toBeLessThan(prompt.indexOf("USER_UNIQUE"));
-      expect(prompt).toContain("[Archived Context Summary]");
-      expect(prompt).toContain("session summary");
-    }
+    const disabledPrompt = new ContextBuilder({
+      workspace,
+      fileMemoryEnabled: false,
+    }).buildSystemPrompt(null, null, "disabled summary");
+    expect(disabledPrompt).toContain("AGENT_UNIQUE");
+    expect(disabledPrompt).toContain("SOUL_UNIQUE");
+    expect(disabledPrompt).not.toContain("USER_UNIQUE");
+    expect(disabledPrompt.indexOf("AGENT_UNIQUE")).toBeLessThan(
+      disabledPrompt.indexOf("SOUL_UNIQUE"),
+    );
+    expect(disabledPrompt).toContain("[Archived Context Summary]");
+    expect(disabledPrompt).toContain("disabled summary");
+
+    const enabledPrompt = new ContextBuilder({
+      workspace,
+      fileMemoryEnabled: true,
+    }).buildSystemPrompt(null, null, "enabled summary");
+    expect(enabledPrompt.indexOf("AGENT_UNIQUE")).toBeLessThan(
+      enabledPrompt.indexOf("SOUL_UNIQUE"),
+    );
+    expect(enabledPrompt.indexOf("SOUL_UNIQUE")).toBeLessThan(
+      enabledPrompt.indexOf("USER_UNIQUE"),
+    );
+    expect(enabledPrompt).toContain("[Archived Context Summary]");
+    expect(enabledPrompt).toContain("enabled summary");
   });
 });

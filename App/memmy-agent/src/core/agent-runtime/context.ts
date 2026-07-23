@@ -133,6 +133,7 @@ export class ContextBuilder {
   loadBootstrapFiles(): string {
     const parts: string[] = [];
     for (const filename of ContextBuilder.BOOTSTRAP_FILES) {
+      if (filename === "USER.md" && !this.fileMemoryEnabled) continue;
       const file = path.join(this.workspace, filename);
       if (fs.existsSync(file)) parts.push(`## ${filename}\n\n${fs.readFileSync(file, "utf8")}`);
     }
