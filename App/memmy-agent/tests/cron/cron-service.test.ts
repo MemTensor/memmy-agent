@@ -269,6 +269,34 @@ describe("CronService", () => {
     expect(service.getJob("dream")).not.toBeNull();
   });
 
+  it("unregisters only matching protected system jobs", () => {
+    const service = new CronService(storePath());
+    const ordinary = new CronJob({
+      id: "dream",
+      name: "user dream",
+      schedule: new CronSchedule({ kind: "every", everyMs: 60_000 }),
+      payload: new CronPayload({ kind: "agentTurn", message: "user task" }),
+      system: false,
+    });
+    const system = new CronJob({
+      id: "dream",
+      name: "dream",
+      schedule: new CronSchedule({ kind: "cron", expr: "0 */2 * * *" }),
+      payload: new CronPayload({ kind: "systemEvent" }),
+      system: true,
+    });
+    service.loadStore();
+    service.store!.jobs = [ordinary, system];
+    service.saveStore();
+
+    expect(service.unregisterSystemJob("dream")).toBe(true);
+    expect(service.listJobs({ includeDisabled: true })).toHaveLength(1);
+    expect(service.listJobs({ includeDisabled: true })[0].name).toBe(
+      "user dream",
+    );
+    expect(service.unregisterSystemJob("dream")).toBe(false);
+  });
+
   it("running services see jobs added by another instance", async () => {
     const file = storePath();
     const called: string[] = [];

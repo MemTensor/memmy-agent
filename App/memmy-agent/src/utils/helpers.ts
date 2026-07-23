@@ -474,9 +474,14 @@ export function maybePersistToolResult(
   });
 }
 
-export function syncWorkspaceTemplates(workspace: string, templatesDir?: string): string[] {
+export function syncWorkspaceTemplates(
+  workspace: string,
+  templatesDir?: string,
+  options: { fileMemoryEnabled?: boolean } = {},
+): string[] {
   const src =
     templatesDir ?? path.join(path.dirname(new URL(import.meta.url).pathname), "..", "templates");
+  const fileMemoryEnabled = options.fileMemoryEnabled === true;
   fs.mkdirSync(workspace, { recursive: true });
   const added: string[] = [];
   const copyIfMissing = (source: string | null, target: string, content = "") => {
@@ -491,9 +496,19 @@ export function syncWorkspaceTemplates(workspace: string, templatesDir?: string)
     const target = path.join(workspace, name);
     if (fs.existsSync(source)) copyIfMissing(source, target);
   }
-  copyIfMissing(path.join(src, "memory", "MEMORY.md"), path.join(workspace, "memory", "MEMORY.md"));
+  if (fileMemoryEnabled) {
+    copyIfMissing(
+      path.join(src, "memory", "MEMORY.md"),
+      path.join(workspace, "memory", "MEMORY.md"),
+    );
+  }
   copyIfMissing(null, path.join(workspace, "memory", "history.jsonl"));
   fs.mkdirSync(path.join(workspace, "skills"), { recursive: true });
-  new GitStore(workspace, ["SOUL.md", "USER.md", "memory/MEMORY.md", "memory/.dreamCursor"]).init();
+  if (fileMemoryEnabled) {
+    new GitStore(
+      workspace,
+      ["SOUL.md", "USER.md", "memory/MEMORY.md", "memory/.dreamCursor"],
+    ).init();
+  }
   return added;
 }

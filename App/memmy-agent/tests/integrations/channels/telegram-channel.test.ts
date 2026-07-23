@@ -109,6 +109,38 @@ describe("Telegram channel", () => {
     expect(new TelegramChannel().name).toBe("telegram");
   });
 
+  it("hides Dream bot commands unless file memory is enabled", async () => {
+    const disabledCommands = vi.fn(async (_commands: any[]) => undefined);
+    const disabledBot = makeBot({ set_my_commands: disabledCommands });
+    const disabled = new TelegramChannel(
+      { app: { bot: disabledBot } },
+      new MessageBus(),
+    );
+    await disabled.start();
+
+    const enabledCommands = vi.fn(async (_commands: any[]) => undefined);
+    const enabledBot = makeBot({ set_my_commands: enabledCommands });
+    const enabled = new TelegramChannel(
+      { app: { bot: enabledBot } },
+      new MessageBus(),
+      { fileMemoryEnabled: true },
+    );
+    await enabled.start();
+
+    const disabledNames = disabledCommands.mock.calls[0][0].map(
+      (entry: any) => entry.command,
+    );
+    const enabledNames = enabledCommands.mock.calls[0][0].map(
+      (entry: any) => entry.command,
+    );
+    expect(disabledNames).not.toContain("dream");
+    expect(disabledNames).not.toContain("dream_log");
+    expect(disabledNames).not.toContain("dream_restore");
+    expect(enabledNames).toEqual(
+      expect.arrayContaining(["dream", "dream_log", "dream_restore"]),
+    );
+  });
+
   it("sends text with HTML rendering and button fallback", async () => {
     const bot = { send_message: vi.fn(async (args: any) => ({ message_id: 1 })) };
     const channel = new TelegramChannel({ app: { bot } });

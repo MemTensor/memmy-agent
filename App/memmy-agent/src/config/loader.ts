@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import YAML from "yaml";
 import { configureSsrfWhitelist } from "../security/network.js";
-import { Config } from "./schema.js";
+import { Config, FileMemoryConfig } from "./schema.js";
 
 let configPathOverride: string | null = null;
 
@@ -78,8 +78,23 @@ export function loadConfig(configPath?: string | null): Config {
     return config;
   }
   const raw = fs.readFileSync(target, "utf8");
+  let parsed: any;
   try {
-    const parsed = raw.trim() ? YAML.parse(raw) : {};
+    parsed = raw.trim() ? YAML.parse(raw) : {};
+  } catch (error) {
+    console.warn(`Failed to load config from ${target}: ${errorMessage(error)}\nUsing default configuration.`);
+    configureSsrfWhitelist(config.tools.ssrfWhitelist);
+    return config;
+  }
+  if (
+    parsed &&
+    typeof parsed === "object" &&
+    !Array.isArray(parsed) &&
+    Object.prototype.hasOwnProperty.call(parsed, "fileMemory")
+  ) {
+    new FileMemoryConfig(parsed.fileMemory);
+  }
+  try {
     config = new Config(migrateConfig(parsed));
   } catch (error) {
     console.warn(`Failed to load config from ${target}: ${errorMessage(error)}\nUsing default configuration.`);

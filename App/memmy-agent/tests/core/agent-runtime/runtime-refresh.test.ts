@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { AgentLoop } from "../../../src/core/agent-runtime/loop.js";
+import { Config } from "../../../src/config/schema.js";
 import { LLMResponse } from "../../../src/providers/base.js";
 
 function provider(defaultModel: string, maxTokens = 123): any {
@@ -14,6 +15,7 @@ describe("runtime refresh", () => {
     const oldProvider = provider("old-model");
     const newProvider = provider("new-model", 456);
     const loop = new AgentLoop({
+      config: new Config({ fileMemory: { enabled: true } }),
       provider: oldProvider,
       workspace: "/tmp/memmy-runtime-refresh-provider",
       model: "old-model",
@@ -40,9 +42,33 @@ describe("runtime refresh", () => {
     expect(loop.consolidator.model).toBe("new-model");
     expect(loop.consolidator.contextWindowTokens).toBe(2000);
     expect(loop.consolidator.maxCompletionTokens).toBe(456);
-    expect(loop.dream.provider).toBe(newProvider);
-    expect(loop.dream.model).toBe("new-model");
-    expect(loop.dream.runner.provider).toBe(newProvider);
+    expect(loop.dream?.provider).toBe(newProvider);
+    expect(loop.dream?.model).toBe("new-model");
+    expect(loop.dream?.runner.provider).toBe(newProvider);
+  });
+
+  it("refreshes non-Dream helpers without creating Dream when file memory is off", () => {
+    const oldProvider = provider("old-model");
+    const newProvider = provider("new-model", 456);
+    const loop = new AgentLoop({
+      provider: oldProvider,
+      workspace: "/tmp/memmy-runtime-refresh-file-memory-off",
+      model: "old-model",
+      providerSnapshotLoader: () => ({
+        provider: newProvider,
+        model: "new-model",
+        contextWindowTokens: 2000,
+        signature: ["new-model"],
+      }),
+    });
+
+    loop.refreshProviderSnapshot();
+
+    expect(loop.fileMemoryEnabled).toBe(false);
+    expect(loop.dream).toBeNull();
+    expect(loop.runner.provider).toBe(newProvider);
+    expect(loop.subagents.provider).toBe(newProvider);
+    expect(loop.consolidator.provider).toBe(newProvider);
   });
 
   it("refreshes provider snapshots before returning llm runtime", () => {

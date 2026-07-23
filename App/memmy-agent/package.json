@@ -14,7 +14,7 @@
     "pretypecheck": "npm run version:sync",
     "pretest": "npm run version:sync",
     "pretest:tui-cursor": "npm run version:sync",
-    "build": "tsc -p tsconfig.build.json && find src/templates src/skills -type f ! -name '*.ts' -exec sh -c 'for file do target=\"dist/${file#src/}\"; mkdir -p \"$(dirname \"$target\")\"; cp -p \"$file\" \"$target\"; done' sh {} +",
+    "build": "tsc -p tsconfig.build.json && node -e 'require(\"node:fs\").rmSync(\"dist/skills/memory\", { recursive: true, force: true })' && find src/templates src/skills -type f ! -name '*.ts' -exec sh -c 'for file do target=\"dist/${file#src/}\"; mkdir -p \"$(dirname \"$target\")\"; cp -p \"$file\" \"$target\"; done' sh {} +",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:tui-cursor": "vitest run tests/entrypoints/cli/tui-cursor.test.ts",

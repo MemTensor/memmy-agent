@@ -61,6 +61,29 @@ afterEach(() => {
 });
 
 describe("SkillsLoader listSkills", () => {
+  it("keeps the product memory skill removed while preserving user skills named memory", () => {
+    const workspace = tmpDir();
+    const loader = new SkillsLoader(workspace);
+
+    expect(loader.listSkills(false).map((entry) => entry.name)).not.toContain(
+      "memory",
+    );
+    expect(loader.loadSkill("my")).not.toContain("Memory skill");
+    expect(loader.loadSkill("my")).not.toContain("Tomorrow? Memory.");
+
+    const userSkill = writeSkill(path.join(workspace, "skills"), "memory", {
+      body: "# User Memory Helper",
+    });
+    const userLoader = new SkillsLoader(workspace);
+
+    expect(userLoader.listSkills(false)).toEqual(
+      expect.arrayContaining([
+        { name: "memory", path: userSkill, source: "workspace" },
+      ]),
+    );
+    expect(userLoader.loadSkill("memory")).toContain("# User Memory Helper");
+  });
+
   it("returns empty when the workspace skills directory is missing", () => {
     const { workspace, builtin } = makeWorkspace();
 

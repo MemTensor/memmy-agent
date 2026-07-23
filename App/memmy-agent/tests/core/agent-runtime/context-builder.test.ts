@@ -130,11 +130,23 @@ describe("Load Bootstrap Files", () => {
     expect(result).toContain("Soul.");
   });
 
-  it("all bootstrap files", () => {
+  it("all bootstrap files when file memory is enabled", () => {
     const root = tempRoot();
     for (const name of ContextBuilder.BOOTSTRAP_FILES) fs.writeFileSync(path.join(root, name), `Content of ${name}`, "utf8");
-    const result = builder(root).loadBootstrapFiles();
+    const result = builder(root, { fileMemoryEnabled: true }).loadBootstrapFiles();
     for (const name of ContextBuilder.BOOTSTRAP_FILES) expect(result).toContain(`## ${name}`);
+  });
+
+  it("omits USER.md when file memory is disabled", () => {
+    const root = tempRoot();
+    fs.writeFileSync(path.join(root, "AGENTS.md"), "Rules.", "utf8");
+    fs.writeFileSync(path.join(root, "SOUL.md"), "Soul.", "utf8");
+    fs.writeFileSync(path.join(root, "USER.md"), "User.", "utf8");
+    const result = builder(root).loadBootstrapFiles();
+    expect(result).toContain("## AGENTS.md");
+    expect(result).toContain("## SOUL.md");
+    expect(result).not.toContain("## USER.md");
+    expect(result).not.toContain("User.");
   });
 
   it("legacy tools md is not bootstrapped", () => {

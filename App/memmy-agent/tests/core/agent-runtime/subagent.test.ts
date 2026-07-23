@@ -73,6 +73,13 @@ describe("SubagentManager", () => {
         "---\nname: beta_skill\ndescription: Available test skill\n---\n\n# Beta",
         "utf8",
       );
+      const memoryPath = path.join(skillsRoot, "memory", "SKILL.md");
+      fs.mkdirSync(path.dirname(memoryPath), { recursive: true });
+      fs.writeFileSync(
+        memoryPath,
+        "---\nname: memory\ndescription: User-created helper\n---\n\n# User Memory Helper",
+        "utf8",
+      );
 
       const prompt = manager({ workspace, disabledSkills: ["alpha_skill"] }).buildSubagentPrompt();
 
@@ -80,7 +87,11 @@ describe("SubagentManager", () => {
       expect(prompt).toContain("Use read_file to read SKILL.md");
       expect(prompt).toContain("beta_skill");
       expect(prompt).toContain(betaPath);
+      expect(prompt).toContain(memoryPath);
+      expect(prompt).toContain("User-created helper");
       expect(prompt).not.toContain("alpha_skill");
+      expect(prompt).not.toContain("# File Memory");
+      expect(prompt).not.toContain("# Recent History");
       expect(prompt.match(/# Verification Contract/g)).toHaveLength(1);
       expect(prompt).toContain("If a tool result says its full output was persisted");
       expect(prompt).not.toContain("{% include 'agent/verification-contract.md' %}");

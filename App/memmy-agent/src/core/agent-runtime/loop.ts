@@ -337,6 +337,7 @@ export class AgentLoop {
   execConfig: any;
   provider: any;
   workspace: string;
+  readonly fileMemoryEnabled: boolean;
   model: string | null;
   modelPresets: Record<string, ModelPresetConfig>;
   private defaultModelPreset: ModelPresetConfig;
@@ -352,7 +353,7 @@ export class AgentLoop {
   consolidator: Consolidator;
   sessionDagQueue: SessionDagQueueManager | null;
   autoCompact: AutoCompact;
-  dream: Dream;
+  dream: Dream | null;
   maxIterations: number;
   contextWindowTokens: number;
   contextBlockLimit: number | null;
@@ -409,6 +410,7 @@ export class AgentLoop {
     this.toolsConfig = this.config.tools;
     this.webConfig = { search: this.config.tools.webSearch, fetch: this.config.tools.webFetch };
     this.execConfig = (this.config.tools as any).exec ?? {};
+    this.fileMemoryEnabled = this.config.fileMemory.enabled;
     const defaults = this.config.agents.defaults;
     this.workspace = path.resolve(getWorkspacePath(init.workspace ?? defaults.workspace ?? process.cwd()));
     installMemmyMemory(this.config, { workspace: this.workspace, hooks: this.extraHooks });
@@ -456,6 +458,7 @@ export class AgentLoop {
     this.context = new ContextBuilder({
       workspace: this.workspace,
       timezone: init.timezone ?? defaults.timezone,
+      fileMemoryEnabled: this.fileMemoryEnabled,
     });
     this.runner = new AgentRunner();
     this.tools = this.createToolRegistry("init");
@@ -478,11 +481,13 @@ export class AgentLoop {
       dagCatchupTimeoutMs: this.config.sessionDag.compactionCatchupTimeoutMs,
     });
     this.autoCompact = new AutoCompact(this.sessions, this.consolidator, init.sessionTtlMinutes ?? defaults.sessionTtlMinutes);
-    this.dream = new Dream({
-      store: this.context.memory,
-      provider: this.provider,
-      model: this.model ?? "",
-    });
+    this.dream = this.fileMemoryEnabled
+      ? new Dream({
+          store: this.context.memory,
+          provider: this.provider,
+          model: this.model ?? "",
+        })
+      : null;
     const requestedPreset = init.modelPreset ?? defaults.modelPreset;
     if (requestedPreset) this.setModelPreset(requestedPreset, { publishUpdate: false });
   }
@@ -805,8 +810,13 @@ export class AgentLoop {
     else if (this.subagents) (this.subagents as any).model = model;
     if (typeof (this.consolidator as any)?.setProvider === "function") (this.consolidator as any).setProvider(provider, model, contextWindowTokens);
     else (this.consolidator as any).model = model;
-    if (typeof (this.dream as any)?.setProvider === "function") (this.dream as any).setProvider(provider, model);
-    else (this.dream as any).model = model;
+    if (this.dream) {
+      if (typeof (this.dream as any).setProvider === "function") {
+        (this.dream as any).setProvider(provider, model);
+      } else {
+        (this.dream as any).model = model;
+      }
+    }
     this.providerSignature = snapshot.signature ?? JSON.stringify({ model, contextWindowTokens });
     if (publishUpdate && this.runtimeModelPublisher) this.runtimeModelPublisher(this.model, modelPreset ?? this.modelPreset);
   }

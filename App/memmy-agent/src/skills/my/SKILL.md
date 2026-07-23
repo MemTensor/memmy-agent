@@ -66,7 +66,4 @@ always: true
 | Need | Use | Persists? |
 |------|-----|-----------|
 | Per-session temp state | `my(action="set", key="...", value=...)` | No |
-| Long-term facts | Memory skill (`MEMORY.md`, `USER.md`) | Yes |
 | Permanent config change | Edit config file | Yes |
-
-**Rule of thumb:** Tomorrow? Memory. This turn only? My.
