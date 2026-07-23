@@ -134,7 +134,7 @@ export class EvolutionJobProcessor {
     this.reward = new RewardPipeline({
       get config() { return owner.deps.config; },
       repos: deps.repos,
-      get skillLlm() { return owner.deps.skillLlm; },
+      get llm() { return owner.deps.llm; },
       nowIso,
       newId,
       traceMeta: deps.traceMeta,

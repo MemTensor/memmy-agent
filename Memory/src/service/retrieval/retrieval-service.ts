@@ -1364,12 +1364,12 @@ export class RetrievalService {
     status: string[];
   }> {
     const config = this.deps.config.algorithm.retrieval;
-    const usesEvolutionLlm = this.deps.skillLlm.isConfigured();
-    const filterLlm = usesEvolutionLlm
-      ? this.deps.skillLlm
-      : this.deps.config.activeProfile === "account"
-        ? undefined
-        : this.deps.llm;
+    const usesSummaryLlm = this.deps.llm.isConfigured();
+    const filterLlm = usesSummaryLlm
+      ? this.deps.llm
+      : this.deps.skillLlm.isConfigured()
+        ? this.deps.skillLlm
+        : undefined;
     if (!config.llmFilterEnabled) {
       return {
         hits,
@@ -1394,7 +1394,7 @@ export class RetrievalService {
       const candidates = hits.map((hit, index) =>
         `${index + 1}. ${describeRetrievalFilterCandidate(hit, bodyChars)}`
       ).join("\n");
-      const result = await filterLlm.completeJson<{
+      const completeFilter = (llm: LlmClient, isSummaryLlm: boolean) => llm.completeJson<{
         selected?: unknown;
         ranked?: unknown;
         sufficient?: unknown;
@@ -1415,12 +1415,32 @@ export class RetrievalService {
           temperature: 0,
           timeoutMs: RETRIEVAL_FILTER_TIMEOUT_MS,
           maxRetries: 0,
-          maxTokens: usesEvolutionLlm
-            ? Math.min(2048, Math.max(160, hits.length * 8 + 80))
-            : MEMORY_SUMMARY_MAX_TOKENS,
+          maxTokens: isSummaryLlm
+            ? MEMORY_SUMMARY_MAX_TOKENS
+            : Math.min(2048, Math.max(160, hits.length * 8 + 80)),
           jsonMode: true
         }
       );
+      let result;
+      try {
+        result = await completeFilter(filterLlm, usesSummaryLlm);
+      } catch (primaryError) {
+        const evolutionFallback = usesSummaryLlm &&
+          this.deps.skillLlm.isConfigured() &&
+          this.deps.skillLlm !== filterLlm
+          ? this.deps.skillLlm
+          : undefined;
+        if (!evolutionFallback) throw primaryError;
+        pipelineLogger.warn("fallback.used", {
+          operation: `${RETRIEVAL_FILTER_PROMPT.id}.v${RETRIEVAL_FILTER_PROMPT.version}`,
+          pipeline: "retrieval.filter",
+          fallback: "evolution_llm",
+          primaryModel: filterLlm.config.model,
+          fallbackModel: evolutionFallback.config.model,
+          ...memoryErrorFields(primaryError)
+        });
+        result = await completeFilter(evolutionFallback, false);
+      }
       const selectedRaw = Array.isArray(result.selected)
         ? result.selected
         : Array.isArray(result.ranked)

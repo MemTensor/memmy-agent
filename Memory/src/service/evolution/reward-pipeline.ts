@@ -43,7 +43,7 @@ export interface DecisionRepairSummary {
 export interface RewardPipelineDeps {
   config: MemmyConfig;
   repos: Repositories;
-  skillLlm: LlmClient;
+  llm: LlmClient;
   nowIso(): string;
   newId(prefix: string): string;
   traceMeta(memory: MemoryRow | null | undefined): TraceMeta | null;
@@ -277,7 +277,7 @@ export class RewardPipeline {
     fallback: HumanScoreResult;
     payload: Record<string, unknown>;
   }): Promise<HumanScoreResult> {
-    if (!this.deps.config.algorithm.reward.llmScoring || !this.deps.skillLlm.isConfigured()) return input.fallback;
+    if (!this.deps.config.algorithm.reward.llmScoring || !this.deps.llm.isConfigured()) return input.fallback;
     try {
       const rawTurnId = rawTurnIdFromMemory(input.source);
       const rawTurn = rawTurnId ? this.deps.repos.runtime.getRawTurn(rawTurnId) : undefined;
@@ -291,7 +291,7 @@ export class RewardPipeline {
         hostSessionId: input.source.sessionId ?? rawTurn?.sessionId,
         hostConversationId: input.source.conversationId ?? rawTurn?.conversationId
       };
-      const result = await this.deps.skillLlm.completeJson<{
+      const result = await this.deps.llm.completeJson<{
         goal_achievement?: unknown;
         process_quality?: unknown;
         user_satisfaction?: unknown;
@@ -312,8 +312,8 @@ export class RewardPipeline {
             episodeTraces: input.episodeTraces,
             maxChars: this.deps.config.algorithm.reward.summaryMaxChars,
             evaluator: {
-              scorerProvider: this.deps.skillLlm.config.provider,
-              scorerModel: this.deps.skillLlm.config.model
+              scorerProvider: this.deps.llm.config.provider,
+              scorerModel: this.deps.llm.config.model
             }
           }),
           "", "FEEDBACK:", stableStringify(input.payload)
