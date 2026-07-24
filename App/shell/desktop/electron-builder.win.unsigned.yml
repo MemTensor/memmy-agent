@@ -13,6 +13,9 @@ files:
 asar: true
 asarUnpack:
   - "**/*.node"
+  - "**/onnxruntime-node/bin/napi-v3/win32/x64/**/*.dll"
+  - "**/@img/sharp-win32-x64/lib/libvips*.dll"
+  - "**/@lydell/node-pty-win32-x64/prebuilds/win32-x64/conpty/**"
   - "**/node_modules/sqlite-vec-*/vec0.*"
   - "dist/renderer/**"
 

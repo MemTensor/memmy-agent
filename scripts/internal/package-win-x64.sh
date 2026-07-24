@@ -123,6 +123,24 @@ run_with_retries() {
   done
 }
 
+require_packaged_runtime_file() {
+  local required_file="$1"
+
+  if [ ! -f "$required_file" ]; then
+    echo "Missing required packaged runtime file: $required_file" >&2
+    exit 1
+  fi
+}
+
+require_packaged_runtime_glob() {
+  local required_pattern="$1"
+
+  if ! compgen -G "$required_pattern" >/dev/null; then
+    echo "Missing required packaged runtime file matching: $required_pattern" >&2
+    exit 1
+  fi
+}
+
 patch_electron_builder_nsis_refresh() {
   local template_path="$ROOT_DIR/node_modules/app-builder-lib/templates/nsis/uninstaller.nsh"
   local windows_template_path
@@ -381,6 +399,8 @@ verify_windows_native_module() {
 
 verify_windows_onnxruntime_module() {
   local onnxruntime_node="$RUNTIME_DIR/memory/node_modules/onnxruntime-node/bin/napi-v3/win32/x64/onnxruntime_binding.node"
+  local onnxruntime_dir
+  onnxruntime_dir="$(dirname "$onnxruntime_node")"
 
   if [ ! -f "$onnxruntime_node" ]; then
     echo "Missing onnxruntime-node Windows x64 native module: $onnxruntime_node" >&2
@@ -399,6 +419,36 @@ verify_windows_onnxruntime_module() {
       exit 1
       ;;
   esac
+
+  require_packaged_runtime_file "$onnxruntime_dir/onnxruntime.dll"
+  require_packaged_runtime_glob "$onnxruntime_dir/*.dll"
+}
+
+verify_windows_sharp_module() {
+  local sharp_dir="$RUNTIME_DIR/memory/node_modules/@img/sharp-win32-x64/lib"
+
+  require_packaged_runtime_file "$sharp_dir/sharp-win32-x64.node"
+  require_packaged_runtime_glob "$sharp_dir/libvips*.dll"
+}
+
+verify_windows_agent_native_artifacts() {
+  local node_pty_dir="$RUNTIME_DIR/memmy-agent/node_modules/openclaw/node_modules/@lydell/node-pty-win32-x64/prebuilds/win32-x64"
+
+  require_packaged_runtime_file "$node_pty_dir/conpty.node"
+  require_packaged_runtime_file "$node_pty_dir/conpty/conpty.dll"
+  require_packaged_runtime_file "$node_pty_dir/conpty/OpenConsole.exe"
+  require_packaged_runtime_glob "$RUNTIME_DIR/memmy-agent/node_modules/openclaw/node_modules/sqlite-vec-windows-x64/vec0.*"
+}
+
+verify_packaged_windows_unpacked_artifacts() {
+  local unpacked_runtime="$DESKTOP_DIR/release/win-unpacked/resources/app.asar.unpacked/dist/runtime"
+
+  require_packaged_runtime_file "$DESKTOP_DIR/release/win-unpacked/resources/app.asar"
+  require_packaged_runtime_file "$unpacked_runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/win32/x64/onnxruntime.dll"
+  require_packaged_runtime_glob "$unpacked_runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/win32/x64/*.dll"
+  require_packaged_runtime_glob "$unpacked_runtime/memory/node_modules/@img/sharp-win32-x64/lib/libvips*.dll"
+  require_packaged_runtime_file "$unpacked_runtime/memmy-agent/node_modules/openclaw/node_modules/@lydell/node-pty-win32-x64/prebuilds/win32-x64/conpty/conpty.dll"
+  require_packaged_runtime_file "$unpacked_runtime/memmy-agent/node_modules/openclaw/node_modules/@lydell/node-pty-win32-x64/prebuilds/win32-x64/conpty/OpenConsole.exe"
 }
 
 npm_ci_win_x64() {
@@ -454,6 +504,7 @@ npm_ci_win_x64 "$RUNTIME_DIR/memory"
 install_better_sqlite3_win_x64
 verify_windows_native_module
 verify_windows_onnxruntime_module
+verify_windows_sharp_module
 
 cp -R "$AGENT_DIR/dist" "$RUNTIME_DIR/memmy-agent/dist"
 cp "$AGENT_DIR/package.json" "$RUNTIME_DIR/memmy-agent/package.json"
@@ -461,6 +512,7 @@ cp "$AGENT_DIR/package-lock.json" "$RUNTIME_DIR/memmy-agent/package-lock.json"
 
 log "Installing Windows x64 memmy-agent runtime dependencies"
 npm_ci_win_x64 "$RUNTIME_DIR/memmy-agent"
+verify_windows_agent_native_artifacts
 
 log "Creating Windows CLI launchers"
 create_windows_cli_launcher "$CLI_BIN_DIR/memmy-memory.cmd" "dist\\runtime\\memory\\src\\cli\\index.js"
@@ -483,6 +535,7 @@ if [ "${#WINDOWS_SIGNING_BUILDER_ARGS[@]}" -gt 0 ]; then
 fi
 
 npx electron-builder "${BUILDER_ARGS[@]}" --win nsis --x64 "$@" --config.artifactName="$ARTIFACT_NAME"
+verify_packaged_windows_unpacked_artifacts
 
 if [ ! -f "$FINAL_EXE" ]; then
   echo "Packaging completed without the expected installer: $FINAL_EXE" >&2

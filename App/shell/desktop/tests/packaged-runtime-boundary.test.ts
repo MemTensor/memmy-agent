@@ -105,6 +105,42 @@ describe("desktop packaged runtime boundaries", () => {
     }
   });
 
+  it("unpacks ONNX Runtime native libraries next to their native bindings", () => {
+    for (const configPath of [electronBuilderPath, unsignedElectronBuilderPath]) {
+      const config = readFileSync(configPath, "utf8");
+      expect(config).toContain('- "**/onnxruntime-node/bin/napi-v3/darwin/**/*.dylib"');
+    }
+    for (const configPath of [winElectronBuilderPath, winUnsignedBuilderPath]) {
+      const config = readFileSync(configPath, "utf8");
+      expect(config).toContain('- "**/onnxruntime-node/bin/napi-v3/win32/x64/**/*.dll"');
+    }
+  });
+
+  it("unpacks Sharp libvips native libraries next to the Sharp native binding", () => {
+    for (const configPath of [electronBuilderPath, unsignedElectronBuilderPath]) {
+      const config = readFileSync(configPath, "utf8");
+      expect(config).toContain('- "**/@img/sharp-libvips-darwin-*/lib/libvips*.dylib"');
+    }
+    for (const configPath of [winElectronBuilderPath, winUnsignedBuilderPath]) {
+      const config = readFileSync(configPath, "utf8");
+      expect(config).toContain('- "**/@img/sharp-win32-x64/lib/libvips*.dll"');
+    }
+  });
+
+  it("unpacks Windows node-pty ConPTY runtime files for dynamic loading", () => {
+    for (const configPath of [winElectronBuilderPath, winUnsignedBuilderPath]) {
+      const config = readFileSync(configPath, "utf8");
+      expect(config).toContain('- "**/@lydell/node-pty-win32-x64/prebuilds/win32-x64/conpty/**"');
+    }
+  });
+
+  it("unpacks macOS node-pty spawn helpers used by the native pty binding", () => {
+    for (const configPath of [electronBuilderPath, unsignedElectronBuilderPath]) {
+      const config = readFileSync(configPath, "utf8");
+      expect(config).toContain('- "**/@lydell/node-pty-darwin-*/prebuilds/darwin-*/spawn-helper"');
+    }
+  });
+
   it("keeps the desktop main process on the shared Memmy identity and config path", () => {
     const source = readFileSync(mainSourcePath, "utf8");
 
@@ -774,6 +810,29 @@ describe("desktop packaged runtime boundaries", () => {
         expect(source).toContain("unset MEMMY_SKIP_CODESIGN");
       }
     }
+  });
+
+  it("fails package preparation when required native runtime companion files are missing", () => {
+    const macSource = readFileSync(packageMacDmgPath, "utf8");
+    const winSource = readFileSync(packageWinX64Path, "utf8");
+
+    expect(macSource).toContain("verify_mac_memory_native_artifacts");
+    expect(macSource).toContain("verify_mac_agent_native_artifacts");
+    expect(macSource).toContain("verify_packaged_mac_unpacked_artifacts");
+    expect(macSource).toContain("libonnxruntime*.dylib");
+    expect(macSource).toContain("sharp-libvips-darwin-$target_cpu/lib/libvips*.dylib");
+    expect(macSource).toContain("node-pty-darwin-$target_cpu/prebuilds/darwin-$target_cpu");
+    expect(macSource).toContain("app.asar.unpacked/dist/runtime");
+    expect(macSource).toContain("spawn-helper");
+    expect(winSource).toContain("verify_windows_onnxruntime_module");
+    expect(winSource).toContain("verify_windows_sharp_module");
+    expect(winSource).toContain("verify_windows_agent_native_artifacts");
+    expect(winSource).toContain("verify_packaged_windows_unpacked_artifacts");
+    expect(winSource).toContain("onnxruntime.dll");
+    expect(winSource).toContain("sharp-win32-x64/lib");
+    expect(winSource).toContain("win-unpacked/resources/app.asar.unpacked/dist/runtime");
+    expect(winSource).toContain("conpty/OpenConsole.exe");
+    expect(winSource).toContain("sqlite-vec-windows-x64/vec0.*");
   });
 
   it("sets an explicit edition in macOS package wrappers", () => {

@@ -429,6 +429,67 @@ prune_onnxruntime_native_artifacts() {
   esac
 }
 
+require_packaged_runtime_file() {
+  local required_file="$1"
+
+  if [ ! -f "$required_file" ]; then
+    echo "Missing required packaged runtime file: $required_file" >&2
+    exit 1
+  fi
+}
+
+require_packaged_runtime_glob() {
+  local required_pattern="$1"
+
+  if ! compgen -G "$required_pattern" >/dev/null; then
+    echo "Missing required packaged runtime file matching: $required_pattern" >&2
+    exit 1
+  fi
+}
+
+verify_mac_memory_native_artifacts() {
+  local target_cpu="$1"
+
+  require_packaged_runtime_file "$RUNTIME_DIR/memory/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
+  require_packaged_runtime_glob "$RUNTIME_DIR/memory/node_modules/sqlite-vec-darwin-$target_cpu/vec0.*"
+  require_packaged_runtime_file "$RUNTIME_DIR/memory/node_modules/onnxruntime-node/bin/napi-v3/darwin/$target_cpu/onnxruntime_binding.node"
+  require_packaged_runtime_glob "$RUNTIME_DIR/memory/node_modules/onnxruntime-node/bin/napi-v3/darwin/$target_cpu/libonnxruntime*.dylib"
+  require_packaged_runtime_file "$RUNTIME_DIR/memory/node_modules/@img/sharp-darwin-$target_cpu/lib/sharp-darwin-$target_cpu.node"
+  require_packaged_runtime_glob "$RUNTIME_DIR/memory/node_modules/@img/sharp-libvips-darwin-$target_cpu/lib/libvips*.dylib"
+}
+
+verify_mac_agent_native_artifacts() {
+  local target_cpu="$1"
+  local node_pty_dir="$RUNTIME_DIR/memmy-agent/node_modules/openclaw/node_modules/@lydell/node-pty-darwin-$target_cpu/prebuilds/darwin-$target_cpu"
+
+  require_packaged_runtime_file "$node_pty_dir/pty.node"
+  require_packaged_runtime_file "$node_pty_dir/spawn-helper"
+  require_packaged_runtime_glob "$RUNTIME_DIR/memmy-agent/node_modules/openclaw/node_modules/sqlite-vec-darwin-$target_cpu/vec0.*"
+}
+
+resolve_packaged_mac_app_path() {
+  local target_cpu="$1"
+  local app_path="$DESKTOP_DIR/release/mac-$target_cpu/Memmy.app"
+
+  if [ "$target_cpu" = "x64" ] && [ ! -d "$app_path" ]; then
+    app_path="$DESKTOP_DIR/release/mac/Memmy.app"
+  fi
+
+  printf '%s\n' "$app_path"
+}
+
+verify_packaged_mac_unpacked_artifacts() {
+  local target_cpu="$1"
+  local app_path
+  app_path="$(resolve_packaged_mac_app_path "$target_cpu")"
+  local unpacked_runtime="$app_path/Contents/Resources/app.asar.unpacked/dist/runtime"
+
+  require_packaged_runtime_file "$app_path/Contents/Resources/app.asar"
+  require_packaged_runtime_glob "$unpacked_runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/darwin/$target_cpu/libonnxruntime*.dylib"
+  require_packaged_runtime_glob "$unpacked_runtime/memory/node_modules/@img/sharp-libvips-darwin-$target_cpu/lib/libvips*.dylib"
+  require_packaged_runtime_file "$unpacked_runtime/memmy-agent/node_modules/openclaw/node_modules/@lydell/node-pty-darwin-$target_cpu/prebuilds/darwin-$target_cpu/spawn-helper"
+}
+
 prune_mac_runtime_artifacts() {
   local target_cpu="$1"
 
@@ -497,6 +558,8 @@ create_cli_launcher "$CLI_BIN_DIR/memmy" "dist/runtime/memmy-agent/dist/main.js"
 create_cli_installer "$CLI_BIN_DIR/install-cli"
 create_dmg_cli_installer_command "$DMG_HELPER_DIR/Install CLI.command"
 prune_mac_runtime_artifacts "$TARGET_CPU"
+verify_mac_memory_native_artifacts "$TARGET_CPU"
+verify_mac_agent_native_artifacts "$TARGET_CPU"
 
 if [ "${MEMMY_PACKAGE_PREPARE_ONLY:-}" = "1" ]; then
   echo "Prepared desktop runtime resources at $RUNTIME_DIR"
@@ -512,6 +575,7 @@ if [ -n "${MEMMY_ELECTRON_DIST:-}" ]; then
 fi
 
 npx electron-builder "${BUILDER_ARGS[@]}" --mac dmg "$@"
+verify_packaged_mac_unpacked_artifacts "$TARGET_CPU"
 
 LATEST_DMG="$(ls -t release/*.dmg 2>/dev/null | head -1 || true)"
 if [ -n "$LATEST_DMG" ]; then
