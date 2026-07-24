@@ -98,6 +98,52 @@ describe("agent source service", () => {
     });
   });
 
+  it("completes the scan and advances checkpoints when every memory is skipped", async () => {
+    const repository = createRepository();
+    const messages = createCompleteMemoryMessages("cursor", 1, "2026-05-28T10:00:00.000Z");
+    const service = createService({
+      repository,
+      adapters: [createFakeAdapter("cursor", messages)],
+      ingestionService: {
+        async ingest(input) {
+          const collected: ConversationMessage[] = [];
+          for await (const message of input) {
+            collected.push(message);
+          }
+          return {
+            attempted: collected.length,
+            written: 0,
+            deduped: collected.length,
+            failed: 0,
+            writtenMemories: 0,
+            dedupedMemories: 0,
+            failedMemories: 0,
+            memoryIds: [],
+            conversations: 1,
+            completedConversationIds: ["cursor-conv-1"],
+            incompleteConversationIds: [],
+            failedConversationIds: [],
+            errors: []
+          };
+        }
+      }
+    });
+
+    const result = await service.scanOne("cursor");
+
+    expect(result).toEqual({
+      sourceId: "cursor",
+      discoveredConversations: 1,
+      emittedMessages: 2,
+      skipped: 2,
+      memoryIds: [],
+      errors: []
+    });
+    expect(repository.getConversationCheckpoint("cursor", "cursor-conv-1")).not.toBeNull();
+    expect(repository.getScanWatermark("cursor")).not.toBeNull();
+    expect(repository.listSources()[0]?.messageCount).toBe(0);
+  });
+
   it("forwards adapter scan progress through scan options", async () => {
     const phases: string[] = [];
     const service = createService({
