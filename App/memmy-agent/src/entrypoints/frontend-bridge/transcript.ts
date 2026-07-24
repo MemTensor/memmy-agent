@@ -1158,16 +1158,64 @@ export function lastTranscriptUserTurnClosed(lines: Dict[]): boolean {
   return sawUser && closed;
 }
 
+function sessionMessageText(message: Dict): string {
+  if (typeof message.content === "string") return message.content;
+  if (!Array.isArray(message.content)) return "";
+  return message.content
+    .flatMap((block) => isDict(block) && block.type === "text" && typeof block.text === "string" ? [block.text] : [])
+    .join("\n");
+}
+
+function sessionMessagesToTranscriptLines(messages: Dict[]): Dict[] {
+  const lines: Dict[] = [];
+  for (const message of messages) {
+    if (!isDict(message) || (message.role !== "user" && message.role !== "assistant")) continue;
+    if (
+      message.role === "assistant"
+      && (message.injectedEvent || (Array.isArray(message.tool_calls) && message.tool_calls.length))
+    ) continue;
+    const text = sessionMessageText(message);
+    const media = Array.isArray(message.media)
+      ? message.media.filter((item): item is string => typeof item === "string" && Boolean(item.trim()))
+      : [];
+    if (!text.trim() && !media.length) continue;
+
+    if (message.role === "user") {
+      lines.push({
+        event: "user",
+        text,
+        ...(media.length ? { media_paths: media } : {}),
+        ...createdAtPatch(message),
+      });
+      continue;
+    }
+
+    lines.push({
+      event: "message",
+      text,
+      ...(media.length ? { media } : {}),
+      ...(typeof message.latency_ms === "number" ? { latency_ms: message.latency_ms } : {}),
+      ...createdAtPatch(message),
+    });
+    lines.push({ event: "turn_end" });
+  }
+  return lines;
+}
+
 export function buildWebuiThreadResponse(sessionKey: string, messages: any[]): Dict;
 export function buildWebuiThreadResponse(sessionKey: string, options?: BuildWebuiThreadResponseOptions | null): Dict | null;
 export function buildWebuiThreadResponse(sessionKey: string, messagesOrOptions: any[] | BuildWebuiThreadResponseOptions | null = null): Dict | null {
   if (Array.isArray(messagesOrOptions)) return { id: sessionKey, messages: messagesOrOptions };
-  const lines = readTranscriptLines(sessionKey);
+  const options = messagesOrOptions ?? {};
+  const transcriptLines = readTranscriptLines(sessionKey);
+  const lines = transcriptLines.length
+    ? transcriptLines
+    : sessionMessagesToTranscriptLines(options.sessionMessages ?? []);
   if (!lines.length) return null;
   return {
     schemaVersion: WEBUI_TRANSCRIPT_SCHEMA_VERSION,
     sessionKey,
     last_turn_closed: lastTranscriptUserTurnClosed(lines),
-    messages: replayTranscriptToUiMessages(lines, messagesOrOptions ?? {}),
+    messages: replayTranscriptToUiMessages(lines, options),
   };
 }

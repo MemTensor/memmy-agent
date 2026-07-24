@@ -331,6 +331,42 @@ describe("memmy-agent client", () => {
     await expect(client.deleteSession("websocket:chat-1")).resolves.toBe(true);
   });
 
+  it("opens channel history whose session key contains address characters", async () => {
+    const sessionKey = "imessage:+15551234567@example.com";
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/webui/bootstrap") {
+        return json(bootstrap);
+      }
+      if (url.pathname === "/api/sessions/imessage%3A%2B15551234567%40example.com/webui-thread") {
+        return json({
+          schemaVersion: 3,
+          sessionKey,
+          last_turn_closed: true,
+          messages: [
+            { role: "user", content: "渠道里的问题" },
+            { role: "assistant", content: "渠道里的回答" }
+          ]
+        });
+      }
+      return json({ error: "not found" }, 404);
+    });
+    const client = createMemmyAgentClient({
+      baseUrl: "http://127.0.0.1:18980",
+      clientId: "frontend-test",
+      fetchFn: fetchMock as typeof fetch
+    });
+
+    await expect(client.readWebuiThread(sessionKey)).resolves.toMatchObject({
+      sessionKey,
+      last_turn_closed: true,
+      messages: [
+        { role: "user", content: "渠道里的问题" },
+        { role: "assistant", content: "渠道里的回答" }
+      ]
+    });
+  });
+
   it("normalizes gateway media URLs in webui-thread snapshots without rewriting unrelated fields", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = new URL(String(input));

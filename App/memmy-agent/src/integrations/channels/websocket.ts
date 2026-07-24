@@ -82,7 +82,16 @@ type WebSocketChannelOptions = {
 export type WebuiLanguage = "zh-CN" | "en-US";
 
 const CHAT_ID_RE = /^[A-Za-z0-9_:-]{1,64}$/;
-const API_KEY_RE = /^[A-Za-z0-9_:.-]{1,128}$/;
+const API_KEY_RE = /^[A-Za-z0-9_:@+.-]{1,128}$/;
+const DESKTOP_VISIBLE_SESSION_PREFIXES = [
+  "websocket:",
+  "weixin:",
+  "discord:",
+  "telegram:",
+  "imessage:",
+  "feishu:",
+  "dingtalk:",
+] as const;
 const WEBUI_LANGUAGE_VALUES = new Set<WebuiLanguage>(["zh-CN", "en-US"]);
 const LOCALHOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
 const MCP_VALUES_HEADER = "x-memmy-agent-mcp-values";
@@ -730,12 +739,14 @@ export class WebSocketChannel extends BaseChannel {
     const cleaned = Array.isArray(sessions)
       ? sessions.flatMap((session: any) => {
           const key = session?.key;
-          if (typeof key !== "string" || !this.isWebsocketChannelSessionKey(key)) return [];
+          if (typeof key !== "string" || !this.isDesktopVisibleSessionKey(key)) return [];
           const row = { ...session };
           delete row.path;
-          const chatId = key.split(":", 2)[1] ?? "";
-          const startedAt = websocketTurnWallStartedAt(chatId);
-          if (startedAt != null) row.run_started_at = startedAt;
+          if (this.isWebsocketChannelSessionKey(key)) {
+            const chatId = key.split(":", 2)[1] ?? "";
+            const startedAt = websocketTurnWallStartedAt(chatId);
+            if (startedAt != null) row.run_started_at = startedAt;
+          }
           return [row];
         })
       : [];
@@ -894,6 +905,10 @@ export class WebSocketChannel extends BaseChannel {
     return key.startsWith("websocket:");
   }
 
+  isDesktopVisibleSessionKey(key: string): boolean {
+    return DESKTOP_VISIBLE_SESSION_PREFIXES.some((prefix) => key.startsWith(prefix));
+  }
+
   readSessionFile(key: string): Record<string, any> | null {
     const read = this.sessionManager?.readSessionFile;
     if (typeof read === "function") return read.call(this.sessionManager, key);
@@ -912,7 +927,7 @@ export class WebSocketChannel extends BaseChannel {
     if (!this.sessionManager) return httpError(503, "session manager unavailable");
     const decodedKey = decodeApiKey(key);
     if (decodedKey == null) return httpError(400, "invalid session key");
-    if (!this.isWebsocketChannelSessionKey(decodedKey)) return httpError(404, "session not found");
+    if (!this.isDesktopVisibleSessionKey(decodedKey)) return httpError(404, "session not found");
     const data = this.readSessionFile(decodedKey);
     if (!data) return httpError(404, "session not found");
     if (Array.isArray(data.messages)) scrubSubagentMessagesForChannel(data.messages);
@@ -924,7 +939,7 @@ export class WebSocketChannel extends BaseChannel {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
     const decodedKey = decodeApiKey(key);
     if (decodedKey == null) return httpError(400, "invalid session key");
-    if (!this.isWebsocketChannelSessionKey(decodedKey)) return httpError(404, "session not found");
+    if (!this.isDesktopVisibleSessionKey(decodedKey)) return httpError(404, "session not found");
     const sessionMessages = this.readSessionFile(decodedKey)?.messages;
     const data = buildWebuiThreadResponse(decodedKey, {
       sessionMessages: Array.isArray(sessionMessages) ? sessionMessages : null,
@@ -976,7 +991,7 @@ export class WebSocketChannel extends BaseChannel {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
     const decodedKey = decodeApiKey(key);
     if (decodedKey == null) return httpError(400, "invalid session key");
-    if (!this.isWebsocketChannelSessionKey(decodedKey)) return httpError(404, "session not found");
+    if (!this.isDesktopVisibleSessionKey(decodedKey)) return httpError(404, "session not found");
     const data = this.readSessionFile(decodedKey);
     if (!data) return httpError(404, "session not found");
     return httpJsonResponse(this.lastCompactionPayload(decodedKey, data.metadata?.lastSummary));
@@ -1106,7 +1121,7 @@ export class WebSocketChannel extends BaseChannel {
     if (!this.sessionManager) return httpError(503, "session manager unavailable");
     const decodedKey = decodeApiKey(key);
     if (decodedKey == null) return httpError(400, "invalid session key");
-    if (!this.isWebsocketChannelSessionKey(decodedKey)) return httpError(404, "session not found");
+    if (!this.isDesktopVisibleSessionKey(decodedKey)) return httpError(404, "session not found");
     const del = this.sessionManager.deleteSession ?? this.sessionManager.delete;
     const deleted = typeof del === "function" ? del.call(this.sessionManager, decodedKey) : false;
     deleteWebuiThread(decodedKey);
@@ -1119,7 +1134,7 @@ export class WebSocketChannel extends BaseChannel {
     if (!this.sessionManager) return httpError(503, "session manager unavailable");
     const decodedKey = decodeApiKey(key);
     if (decodedKey == null) return httpError(400, "invalid session key");
-    if (!this.isWebsocketChannelSessionKey(decodedKey)) return httpError(404, "session not found");
+    if (!this.isDesktopVisibleSessionKey(decodedKey)) return httpError(404, "session not found");
     let decoded: any;
     try {
       decoded = JSON.parse(requestBodyText(request));
