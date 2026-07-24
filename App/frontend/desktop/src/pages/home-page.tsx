@@ -69,7 +69,7 @@ import {
 } from "./first-encounter-task-launch.js";
 import { HistoryDagPanel, type HistoryDagPanelState } from "./history-dag-panel.js";
 import { Mic, Pause, Plus, Send } from "./memory/memory-prototype-icons.js";
-import { ArrowDown, RotateCw, X } from "lucide-react";
+import { ArrowDown, Brain, CalendarCheck, FileText, ListChecks, RotateCw, X } from "lucide-react";
 
 export { agentChatScopeKey, updateComposerDraftForScope };
 export { hydrateAgentThreadInBackground };
@@ -1138,6 +1138,33 @@ export function HomePage() {
       || state.agent.connectionStatus !== "connected"
       || state.agent.recoveringGeneration !== null;
   const centerComposerControls = isComposerSingleLine && pendingAttachments.length === 0;
+  const showStarterSuggestions = !input.trim() && pendingAttachments.length === 0;
+  const starterSuggestions = [
+    {
+      id: "recent-tasks",
+      title: t("home.suggestion.one.title"),
+      prompt: t("home.suggestion.one"),
+      Icon: ListChecks
+    },
+    {
+      id: "work-preferences",
+      title: t("home.suggestion.two.title"),
+      prompt: t("home.suggestion.two"),
+      Icon: Brain
+    },
+    {
+      id: "daily-priorities",
+      title: t("home.suggestion.three.title"),
+      prompt: t("home.suggestion.three"),
+      Icon: CalendarCheck
+    },
+    {
+      id: "file-summary",
+      title: t("home.suggestion.four.title"),
+      prompt: t("home.suggestion.four"),
+      Icon: FileText
+    }
+  ];
 
   // Local composer errors are cleared per session so a voice-permission error does not pollute other sessions.
   useEffect(() => {
@@ -1358,6 +1385,23 @@ export function HomePage() {
     ) {
       loadSlashCommands({ resetAttempts: true });
     }
+  }
+
+  /**
+   * Prefills a starter task without sending it so the user can review or edit
+   * the prompt before spending tokens.
+   */
+  function selectStarterSuggestion(prompt: string) {
+    updateComposerInput(prompt);
+    inputRef.current?.focus();
+    window.requestAnimationFrame(() => {
+      const element = inputRef.current;
+      if (!element) {
+        return;
+      }
+      resizeComposerInput(element);
+      element.setSelectionRange(element.value.length, element.value.length);
+    });
   }
 
 
@@ -1932,6 +1976,32 @@ export function HomePage() {
               {statusText && <p className="text-center text-xs text-text-ink/45 mt-4">{statusText}</p>}
               <p className="text-center text-[11px] text-text-ink/40 mt-4">{t("home.notice")}</p>
             </div>
+            {showStarterSuggestions ? (
+              <section className="home-starter-prompts" aria-labelledby="home-starter-prompts-title">
+                <div className="home-starter-prompts__header">
+                  <h2 id="home-starter-prompts-title">{t("home.suggestion.heading")}</h2>
+                  <p>{t("home.suggestion.hint")}</p>
+                </div>
+                <div className="home-starter-prompts__grid">
+                  {starterSuggestions.map(({ id, title, prompt, Icon }) => (
+                    <button
+                      key={id}
+                      type="button"
+                      className="home-starter-prompt"
+                      onClick={() => selectStarterSuggestion(prompt)}
+                    >
+                      <span className="home-starter-prompt__icon">
+                        <Icon size={18} strokeWidth={1.8} aria-hidden="true" />
+                      </span>
+                      <span className="home-starter-prompt__copy">
+                        <span className="home-starter-prompt__title">{title}</span>
+                        <span className="home-starter-prompt__description">{prompt}</span>
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </section>
+            ) : null}
             <input ref={fileInputRef} type="file" accept={AGENT_MEDIA_ACCEPT} multiple hidden className="hidden" onChange={(event) => void selectMedia(event)} />
           </div>
         </section>

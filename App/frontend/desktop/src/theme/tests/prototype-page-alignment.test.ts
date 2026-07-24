@@ -48,7 +48,14 @@ describe("prototype page structure alignment", () => {
     expect(source("pages/home-page.tsx")).toContain("relative home-empty-composer agent-composer-shell rounded-card-lg");
     expect(source("pages/home-page.tsx")).toContain("w-full px-5 pt-4 pb-12 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40");
     expect(source("pages/home-page.tsx")).toContain("absolute bottom-3 right-4 flex items-center gap-2");
-    expect(source("pages/home-page.tsx")).not.toContain("home.suggestion.");
+    expect(source("pages/home-page.tsx")).toContain('t("home.suggestion.heading")');
+    expect(source("pages/home-page.tsx")).toContain('className="home-starter-prompts__grid"');
+    expect(source("pages/home-page.tsx")).toContain('className="home-starter-prompt"');
+    expect(source("styles.css")).toContain(".home-starter-prompts__grid");
+    expect(source("styles.css")).toContain("grid-template-columns: repeat(2, minmax(0, 1fr));");
+    expect(source("styles.css")).toContain(".home-starter-prompt:focus-visible");
+    expect(source("styles.css")).toContain("@media (max-width: 720px)");
+    expect(source("styles.css")).toContain("@media (max-height: 760px)");
     expect(source("pages/home-page.tsx")).toContain("agent-conversation-panel flex flex-col h-full");
     expect(source("pages/home-page.tsx")).toContain("app-frame-page-content agent-conversation-scroll flex-1 overflow-y-auto");
     expect(source("pages/home-page.tsx")).toContain("max-w-3xl mx-auto space-y-3");

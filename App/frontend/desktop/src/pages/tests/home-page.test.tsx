@@ -85,6 +85,13 @@ describe("HomePage", () => {
     expect(html).not.toContain('data-icon="pause"');
     expect(html).toContain("内容由 AI 生成，请仔细甄别");
     expect(html).toContain("text-center text-[11px] text-text-ink/40 mt-4");
+    expect(html).toContain("试试这些任务");
+    expect(html).toContain("点击后可先修改，再发送");
+    expect(html).toContain("回顾最近任务");
+    expect(html).toContain("总结工作偏好");
+    expect(html).toContain("规划今日重点");
+    expect(html).toContain("读懂图片或文件");
+    expect(html.match(/class="home-starter-prompt"/g)).toHaveLength(4);
     expect(html).not.toContain("未选择任何文件");
   });
 
