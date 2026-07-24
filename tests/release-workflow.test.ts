@@ -17,8 +17,39 @@ const packagingConfigs = [
   "electron-builder.win.yml",
   "electron-builder.win.unsigned.yml",
 ];
+const versionedManifests = [
+  "Memory/package.json",
+  "Memory/src/cli/npm/package.json",
+  "App/memmy-agent/package.json",
+  "App/shell/desktop/package.json",
+];
+
+function readJson(relativePath: string): {
+  version?: string;
+  packages?: Record<string, { version?: string }>;
+} {
+  return JSON.parse(readFileSync(resolve(repoRoot, relativePath), "utf8"));
+}
 
 describe("GitHub release workflow", () => {
+  it("keeps every release manifest and lockfile aligned to the root version", () => {
+    const version = readJson("package.json").version;
+
+    for (const manifest of versionedManifests) {
+      expect(readJson(manifest).version, manifest).toBe(version);
+    }
+
+    const rootLock = readJson("package-lock.json");
+    expect(rootLock.version).toBe(version);
+    expect(rootLock.packages?.[""].version).toBe(version);
+    expect(rootLock.packages?.Memory.version).toBe(version);
+    expect(rootLock.packages?.["App/shell/desktop"].version).toBe(version);
+
+    const agentLock = readJson("App/memmy-agent/package-lock.json");
+    expect(agentLock.version).toBe(version);
+    expect(agentLock.packages?.[""].version).toBe(version);
+  });
+
   it("uses the trusted base workflow for merged release/vX.Y.Z PRs targeting main", () => {
     expect(workflow.on.pull_request_target).toEqual({ types: ["closed"], branches: ["main"] });
     expect(workflow.on.pull_request).toBeUndefined();
