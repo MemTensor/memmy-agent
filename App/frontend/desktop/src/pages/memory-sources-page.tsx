@@ -13,7 +13,11 @@ import { useTranslation } from "../i18n/use-translation.js";
 import { Button } from "../components/button.js";
 import { Banner } from "../components/banner.js";
 import { Modal } from "../components/modal.js";
-import { agentActions, appActions } from "../state/app-actions.js";
+import {
+  AGENT_SOURCE_SCAN_COMPLETION_FEEDBACK_MS,
+  agentActions,
+  appActions
+} from "../state/app-actions.js";
 import type { AgentSourceScanProgress } from "../state/app-actions.js";
 import { useAppState } from "../state/app-state.js";
 import { writePendingFirstEncounterTaskLaunch } from "./first-encounter-task-launch.js";
@@ -74,6 +78,7 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
   const [cliInstallMessage, setCliInstallMessage] = useState("");
   const [cliInstallError, setCliInstallError] = useState("");
   const [managedSyncingSourceId, setManagedSyncingSourceId] = useState<string | null>(null);
+  const [managedSyncCompletedSourceId, setManagedSyncCompletedSourceId] = useState<string | null>(null);
   const scanProgress = state.agentSources.scanProgress;
   const isScanning = state.agentSources.isScanning;
   const scanTargetSourceId = scanProgress?.sourceId ?? state.agentSources.activeScanSourceId;
@@ -136,6 +141,18 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
     const timeoutId = window.setTimeout(() => setMemoryServiceMessage(""), 5000);
     return () => window.clearTimeout(timeoutId);
   }, [memoryServiceMessage]);
+
+  useEffect(() => {
+    if (!managedSyncCompletedSourceId) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(
+      () => setManagedSyncCompletedSourceId(null),
+      AGENT_SOURCE_SCAN_COMPLETION_FEEDBACK_MS
+    );
+    return () => window.clearTimeout(timeoutId);
+  }, [managedSyncCompletedSourceId]);
 
   async function refreshMemoryServiceHealth() {
     if (!clients) {
@@ -414,10 +431,12 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
     }
 
     setManagedSyncingSourceId(source.sourceId);
+    setManagedSyncCompletedSourceId(null);
     void ensureScanPermission()
       .then(() => clients.agentSources.syncManagedSource(source.sourceId))
       .then(() => {
         clearMemoryPanelCache();
+        setManagedSyncCompletedSourceId(source.sourceId);
         reloadSources();
       })
       .catch((error) => dispatch(appActions.agentSourcesFailed(
@@ -719,7 +738,11 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
           const connectionActionDisabled = isAgentSourceConnectionActionDisabled(source, connectionAction);
           const sourceScanDisabled = isScanning || sourceScanButtonState === "completed" || !source.available;
           const managedSyncReady = !source.builtin && source.syncReady === true;
-          const managedSyncBusy = managedSyncingSourceId === source.sourceId;
+          const managedSyncButtonState = resolveManagedAgentSourceSyncButtonState(
+            source.sourceId,
+            managedSyncingSourceId,
+            managedSyncCompletedSourceId
+          );
 
           return (
             <article key={source.sourceId} className="flex items-center gap-4 p-4 bg-background-paper border-content-panel rounded-card transition-all">
@@ -763,12 +786,15 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
                     />
                     <ActionBtn
                       icon={<RefreshCw size={13} />}
-                      label={t(managedSyncReady ? "memory.syncNew" : "memory.firstScan")}
+                      label={t(managedSyncButtonState === "completed"
+                        ? "memory.syncCompleted"
+                        : managedSyncReady ? "memory.syncNew" : "memory.firstScan")}
                       onClick={() => managedSyncReady
                         ? syncManagedSource(source)
                         : launchManagedAgentTask(source, "connect")}
-                      disabled={isScanning || Boolean(managedSyncingSourceId)}
-                      busy={managedSyncBusy}
+                      disabled={isScanning || Boolean(managedSyncingSourceId) || managedSyncButtonState === "completed"}
+                      busy={managedSyncButtonState === "running"}
+                      completed={managedSyncButtonState === "completed"}
                     />
                     <ActionBtn
                       icon={<Trash2 size={13} />}
@@ -1374,6 +1400,17 @@ export function resolveAgentSourceScanButtonState(
     return "running";
   }
   return recentlyCompletedSourceIds.has(sourceId) ? "completed" : "idle";
+}
+
+export function resolveManagedAgentSourceSyncButtonState(
+  sourceId: string,
+  syncingSourceId: string | null,
+  completedSourceId: string | null
+): AgentSourceScanButtonState {
+  if (syncingSourceId === sourceId) {
+    return "running";
+  }
+  return completedSourceId === sourceId ? "completed" : "idle";
 }
 
 interface MemoryDatabaseExportSuccess {

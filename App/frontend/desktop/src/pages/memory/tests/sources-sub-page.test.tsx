@@ -19,6 +19,7 @@ import {
   isAgentSourceConnectionActionDisabled,
   resolveAgentSourceScanButtonState,
   resolveAgentSourceConnectionAction,
+  resolveManagedAgentSourceSyncButtonState,
   resolveAgentSourceStatusLabelKey,
   resolveScanContinueSourceId
 } from "../../memory-sources-page.js";
@@ -48,6 +49,13 @@ describe("SourcesSubPage", () => {
     expect(zhCNMessages["memory.syncCompleted"]).toBe("同步完成");
     expect(enUSMessages["memory.syncCompleted"]).toBe("Synced");
     expect(AGENT_SOURCE_SCAN_COMPLETION_FEEDBACK_MS).toBe(5000);
+  });
+
+  it("手动添加的 Agent 同步完成后显示与内置 Agent 一致的勾选反馈", () => {
+    expect(resolveManagedAgentSourceSyncButtonState("manual-qoder", "manual-qoder", null)).toBe("running");
+    expect(resolveManagedAgentSourceSyncButtonState("manual-qoder", null, "manual-qoder")).toBe("completed");
+    expect(resolveManagedAgentSourceSyncButtonState("manual-qoder", null, null)).toBe("idle");
+    expect(resolveManagedAgentSourceSyncButtonState("manual-qoder", "manual-other", "manual-other")).toBe("idle");
   });
 
   it("使用 WorkBuddy 官方图标而不是文字缩写", () => {
