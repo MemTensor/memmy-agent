@@ -6,6 +6,15 @@ import { buildWebuiThreadResponse } from "../../../src/entrypoints/frontend-brid
 
 const roots: string[] = [];
 const oldDataDir = process.env.MEMMY_AGENT_DATA_DIR;
+const desktopChannelSessionKeys = [
+  ["WeChat", "weixin:wx-user"],
+  ["Discord", "discord:channel-1"],
+  ["Telegram", "telegram:chat-1"],
+  ["iMessage", "imessage:user@example.com"],
+  ["iMessage phone number", "imessage:+15551234567"],
+  ["Feishu", "feishu:chat-1"],
+  ["DingTalk", "dingtalk:user-1"],
+] as const;
 
 function useEmptyDataDir(): void {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-channel-thread-"));
@@ -20,23 +29,23 @@ afterEach(() => {
 });
 
 describe("channel session thread fallback", () => {
-  it("builds a closed WeChat thread from persisted session messages when no WebUI transcript exists", () => {
+  it.each(desktopChannelSessionKeys)("builds a closed %s thread from persisted session messages when no WebUI transcript exists", (_channelName, sessionKey) => {
     useEmptyDataDir();
 
-    const response = buildWebuiThreadResponse("weixin:wx-user", {
+    const response = buildWebuiThreadResponse(sessionKey, {
       sessionMessages: [
-        { role: "user", content: "微信里的问题", timestamp: "2026-07-23T02:00:00.000Z" },
-        { role: "assistant", content: "微信里的回答", timestamp: "2026-07-23T02:00:01.000Z" },
+        { role: "user", content: "渠道里的问题", timestamp: "2026-07-23T02:00:00.000Z" },
+        { role: "assistant", content: "渠道里的回答", timestamp: "2026-07-23T02:00:01.000Z" },
       ],
     });
 
     expect(response).toMatchObject({
       schemaVersion: 3,
-      sessionKey: "weixin:wx-user",
+      sessionKey,
       last_turn_closed: true,
       messages: [
-        { role: "user", content: "微信里的问题" },
-        { role: "assistant", content: "微信里的回答" },
+        { role: "user", content: "渠道里的问题" },
+        { role: "assistant", content: "渠道里的回答" },
       ],
     });
   });

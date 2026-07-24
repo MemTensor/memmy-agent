@@ -34,6 +34,15 @@ const running: WebSocketChannel[] = [];
 const tmpDirs: string[] = [];
 const originalMemmyAgentConfig = process.env.MEMMY_CONFIG;
 const originalMemmyAgentDataDir = process.env.MEMMY_AGENT_DATA_DIR;
+const desktopChannelSessionKeys = [
+  ["WeChat", "weixin:wx-user"],
+  ["Discord", "discord:channel-1"],
+  ["Telegram", "telegram:chat-1"],
+  ["iMessage", "imessage:user@example.com"],
+  ["iMessage phone number", "imessage:+15551234567"],
+  ["Feishu", "feishu:chat-1"],
+  ["DingTalk", "dingtalk:user-1"],
+] as const;
 
 afterEach(async () => {
   await Promise.all(running.splice(0).map((channel) => channel.stop()));
@@ -257,8 +266,10 @@ describe("WebSocket HTTP route helpers", () => {
     const listing = await fetch(`http://127.0.0.1:${port}/api/sessions`, { headers });
     expect(listing.status).toBe(200);
     const sessions = (await listing.json() as any).sessions;
-    expect(sessions.map((row: any) => row.key)).toEqual(["websocket:abc"]);
-    expect(sessions[0]).not.toHaveProperty("path");
+    expect(new Set(sessions.map((row: any) => row.key))).toEqual(
+      new Set(["telegram:abc", "websocket:abc"]),
+    );
+    expect(sessions.every((row: any) => !Object.hasOwn(row, "path"))).toBe(true);
 
     const messages = await fetch(`http://127.0.0.1:${port}/api/sessions/${encodeURIComponent("websocket:abc")}/messages`, { headers });
     expect(messages.status).toBe(200);
@@ -471,38 +482,43 @@ describe("WebSocket HTTP route helpers", () => {
     expect(loadConfig(process.env.MEMMY_CONFIG).tools.imageGeneration.apiKey).toBe("sk-route-secret");
   });
 
-  it("lists desktop and WeChat sessions on the WebUI sessions route", async () => {
-    const manager = seedMany(tmpRoot(), ["cli:direct", "slack:C123", "lark:oc_abc", "weixin:wx-user", "websocket:alpha", "websocket:beta"]);
+  it("lists desktop and supported channel sessions on the WebUI sessions route", () => {
+    const supportedChannelKeys = desktopChannelSessionKeys.map(([, key]) => key);
+    const manager = seedMany(tmpRoot(), [
+      "cli:direct",
+      "slack:C123",
+      ...supportedChannelKeys,
+      "websocket:alpha",
+      "websocket:beta",
+    ]);
     const channel = makeChannel({ sessionManager: manager });
-    const port = await startChannel(channel);
-    const listing = await fetch(`http://127.0.0.1:${port}/api/sessions`, { headers: await authHeaders(port) });
+    const listing = channel.handleSessionsList({ headers: withApiToken(channel) });
     expect(listing.status).toBe(200);
-    const keys = new Set(((await listing.json()) as any).sessions.map((session: any) => session.key));
-    expect(keys).toEqual(new Set(["weixin:wx-user", "websocket:alpha", "websocket:beta"]));
+    const keys = new Set(responseJson(listing).sessions.map((session: any) => session.key));
+    expect(keys).toEqual(new Set([...supportedChannelKeys, "websocket:alpha", "websocket:beta"]));
   });
 
-  it("opens persisted WeChat messages without a WebUI transcript", async () => {
+  it.each(desktopChannelSessionKeys)("opens persisted %s messages without a WebUI transcript", (_channelName, sessionKey) => {
     const root = tmpRoot();
     const manager = new SessionManager(root);
-    const session = new Session({ key: "weixin:wx-user" });
-    session.addMessage("user", "微信里的问题", { timestamp: "2026-07-23T02:00:00.000Z" });
-    session.addMessage("assistant", "微信里的回答", { timestamp: "2026-07-23T02:00:01.000Z" });
+    const session = new Session({ key: sessionKey });
+    session.addMessage("user", "渠道里的问题", { timestamp: "2026-07-23T02:00:00.000Z" });
+    session.addMessage("assistant", "渠道里的回答", { timestamp: "2026-07-23T02:00:01.000Z" });
     manager.save(session);
 
     const channel = makeChannel({ sessionManager: manager });
-    const port = await startChannel(channel);
-    const response = await fetch(
-      `http://127.0.0.1:${port}/api/sessions/${encodeURIComponent("weixin:wx-user")}/webui-thread`,
-      { headers: await authHeaders(port) },
+    const response = channel.handleWebuiThreadGet(
+      { headers: withApiToken(channel) },
+      encodeURIComponent(sessionKey),
     );
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({
-      sessionKey: "weixin:wx-user",
+    expect(responseJson(response)).toMatchObject({
+      sessionKey,
       last_turn_closed: true,
       messages: [
-        { role: "user", content: "微信里的问题" },
-        { role: "assistant", content: "微信里的回答" },
+        { role: "user", content: "渠道里的问题" },
+        { role: "assistant", content: "渠道里的回答" },
       ],
     });
   });

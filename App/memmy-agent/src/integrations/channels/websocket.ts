@@ -81,7 +81,16 @@ type WebSocketChannelOptions = {
 export type WebuiLanguage = "zh-CN" | "en-US";
 
 const CHAT_ID_RE = /^[A-Za-z0-9_:-]{1,64}$/;
-const API_KEY_RE = /^[A-Za-z0-9_:.-]{1,128}$/;
+const API_KEY_RE = /^[A-Za-z0-9_:@+.-]{1,128}$/;
+const DESKTOP_VISIBLE_SESSION_PREFIXES = [
+  "websocket:",
+  "weixin:",
+  "discord:",
+  "telegram:",
+  "imessage:",
+  "feishu:",
+  "dingtalk:",
+] as const;
 const WEBUI_LANGUAGE_VALUES = new Set<WebuiLanguage>(["zh-CN", "en-US"]);
 const LOCALHOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
 const MCP_VALUES_HEADER = "x-memmy-agent-mcp-values";
@@ -874,7 +883,7 @@ export class WebSocketChannel extends BaseChannel {
   }
 
   isDesktopVisibleSessionKey(key: string): boolean {
-    return this.isWebsocketChannelSessionKey(key) || key.startsWith("weixin:");
+    return DESKTOP_VISIBLE_SESSION_PREFIXES.some((prefix) => key.startsWith(prefix));
   }
 
   readSessionFile(key: string): Record<string, any> | null {
