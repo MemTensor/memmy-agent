@@ -1,6 +1,6 @@
 {
   "name": "memmy-agent",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "TypeScript refactor of memmy's agent runtime.",
   "type": "module",
   "main": "./dist/index.js",
