@@ -491,6 +491,452 @@ describe("app state store migrations", () => {
     resumedStore.close();
   });
 
+  it("preserves the authenticated account when upgrading the legacy 0007 database", () => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-app-state-"));
+    const databasePath = join(tempDir, "app.sqlite");
+    const secretSeedPath = join(tempDir, "secret-seed.sqlite");
+    const legacyCloudUuidRef = "account-session:default:cloud-uuid";
+
+    const [encryptedCloudUuid] = createEncryptedSecretFixtures(secretSeedPath, [
+      { ref: legacyCloudUuidRef, value: "legacy-cloud-login-uuid" }
+    ]);
+
+    const legacyDb = createLegacy0007Database(databasePath);
+    legacyDb.prepare("UPDATE app_settings SET user_mode = 'account' WHERE id = 'default'").run();
+    legacyDb.prepare(
+      `UPDATE account_session SET
+        user_id = ?,
+        email = ?,
+        nickname = ?,
+        plan_type = ?,
+        has_finished_guide = ?,
+        region = ?,
+        registered_at = ?,
+        raw_profile_json = ?,
+        cloud_uuid_ref = ?,
+        updated_at = ?
+      WHERE id = 'default'`
+    ).run(
+      "legacy-user-1",
+      "legacy@example.com",
+      "Legacy User",
+      "free",
+      1,
+      "CN",
+      "2026-06-01T10:00:00.000Z",
+      JSON.stringify({ userId: "legacy-user-1", userName: "Legacy User" }),
+      legacyCloudUuidRef,
+      "2026-07-21T10:00:00.000Z"
+    );
+    insertLegacySecretFixtures(legacyDb, [encryptedCloudUuid]);
+    legacyDb.prepare(
+      `UPDATE onboarding_state SET
+        completed = 1,
+        current_step = 'completed',
+        has_accepted_terms = 1,
+        scan_permission = 'scan_only',
+        improvement_program = 'accepted',
+        completed_at = '2026-06-01T10:30:00.000Z'
+      WHERE id = 'default'`
+    ).run();
+    legacyDb.prepare(
+      `UPDATE privacy_settings SET
+        allow_memory_improvement_upload = 1,
+        local_only_mode = 1
+      WHERE id = 'default'`
+    ).run();
+    legacyDb.prepare(
+      `UPDATE token_usage_cache SET
+        plan_name = 'free',
+        total_tokens = 40000000,
+        used_tokens = 36191554,
+        remaining_tokens = 3808446,
+        last_synced_at = '2026-07-22T02:22:51.000Z'
+      WHERE id = 'default'`
+    ).run();
+    legacyDb.prepare(
+      `UPDATE model_config SET
+        provider = 'deepseek',
+        base_url = 'https://legacy-model.example/v1',
+        model_id = 'deepseek-chat',
+        embedding_mode = 'separate',
+        embedding_base_url = 'https://legacy-embedding.example/v1',
+        embedding_model_id = 'legacy-embedding'
+      WHERE id = 'default'`
+    ).run();
+    legacyDb.prepare(
+      `INSERT INTO agent_sources (
+        source_id,
+        display_name,
+        data_path,
+        builtin,
+        status,
+        last_scanned_at
+      ) VALUES (?, ?, ?, ?, ?, ?)`
+    ).run("legacy-source", "Legacy Source", "/legacy/source", 1, "skill_installed", "2026-07-21T11:00:00.000Z");
+    legacyDb.prepare(
+      "INSERT INTO ingestion_seen (dedup_key, source_id, created_at) VALUES (?, ?, ?)"
+    ).run("legacy-message", "legacy-source", "2026-07-21T11:01:00.000Z");
+    legacyDb.prepare(
+      `INSERT INTO idempotency_keys (
+        adapter_id,
+        request_id,
+        body_hash,
+        response_json,
+        status_code,
+        created_at
+      ) VALUES (?, ?, ?, ?, ?, ?)`
+    ).run("legacy-adapter", "legacy-request", "legacy-hash", "{\"ok\":true}", 200, "2026-07-21T11:02:00.000Z");
+    legacyDb.close();
+
+    const upgradedStore = createAppStateStore({ databasePath });
+    const upgradedSession = upgradedStore.repositories.accountSession.get();
+    const upgradedCloudUuid = upgradedStore.repositories.accountSession.getCloudUuid();
+    const upgradedTokenUsage = upgradedStore.repositories.bootstrap.getTokenUsage();
+    const upgradedOnboarding = upgradedStore.repositories.bootstrap.getOnboardingState();
+    const upgradedPrivacy = upgradedStore.repositories.bootstrap.getPrivacySettings();
+    const upgradedModelConfig = upgradedStore.db
+      .prepare("SELECT provider, base_url, model_id, embedding_mode, embedding_model_id FROM account_model_config WHERE uuid = ?")
+      .get("legacy-user-1");
+    const upgradedAgentSource = upgradedStore.db
+      .prepare("SELECT display_name, status, last_scanned_at FROM account_agent_sources WHERE uuid = ? AND source_id = ?")
+      .get("local-agent-sources", "legacy-source");
+    const upgradedIngestionSeen = upgradedStore.db
+      .prepare("SELECT source_id FROM account_ingestion_seen WHERE uuid = ? AND dedup_key = ?")
+      .get("local-agent-sources", "legacy-message");
+    const upgradedIdempotency = upgradedStore.repositories.idempotency.lookup("legacy-adapter", "legacy-request");
+    const upgradedActiveUuid = upgradedStore.db
+      .prepare("SELECT active_uuid FROM app_settings WHERE id = 'default'")
+      .get() as { active_uuid: string | null };
+    upgradedStore.close();
+
+    expect(upgradedSession).toMatchObject({
+      authenticated: true,
+      profile: {
+        userId: "legacy-user-1",
+        email: "legacy@example.com",
+        nickname: "Legacy User"
+      }
+    });
+    expect(upgradedCloudUuid).toBe("legacy-cloud-login-uuid");
+    expect(upgradedActiveUuid.active_uuid).toBe("legacy-user-1");
+    expect(upgradedTokenUsage).toMatchObject({
+      planName: "free",
+      totalTokens: 40000000,
+      usedTokens: 36191554,
+      remainingTokens: 3808446
+    });
+    expect(upgradedOnboarding).toMatchObject({
+      completed: true,
+      currentStep: "completed",
+      scanPermission: "scan_only",
+      improvementProgram: "accepted"
+    });
+    expect(upgradedPrivacy).toMatchObject({
+      allowMemoryImprovementUpload: true,
+      localOnlyMode: true
+    });
+    expect(upgradedModelConfig).toEqual({
+      provider: "deepseek",
+      base_url: "https://legacy-model.example/v1",
+      model_id: "deepseek-chat",
+      embedding_mode: "custom",
+      embedding_model_id: "legacy-embedding"
+    });
+    expect(upgradedAgentSource).toEqual({
+      display_name: "Legacy Source",
+      status: "skill_installed",
+      last_scanned_at: "2026-07-21T11:00:00.000Z"
+    });
+    expect(upgradedIngestionSeen).toEqual({ source_id: "legacy-source" });
+    expect(upgradedIdempotency).toEqual({
+      bodyHash: "legacy-hash",
+      responseJson: "{\"ok\":true}",
+      statusCode: 200,
+      createdAt: "2026-07-21T11:02:00.000Z"
+    });
+
+    const reopenedStore = createAppStateStore({ databasePath });
+    expect(reopenedStore.repositories.accountSession.get()).toMatchObject({
+      authenticated: true,
+      profile: { userId: "legacy-user-1" }
+    });
+    expect(reopenedStore.repositories.accountSession.getCloudUuid()).toBe("legacy-cloud-login-uuid");
+    expect(reopenedStore.repositories.bootstrap.getTokenUsage()).toMatchObject({
+      planName: "free",
+      totalTokens: 40000000,
+      usedTokens: 36191554,
+      remainingTokens: 3808446,
+      lastSyncedAt: "2026-07-22T02:22:51.000Z"
+    });
+    expect(reopenedStore.repositories.agentSources.listSources()).toEqual([
+      {
+        sourceId: "legacy-source",
+        displayName: "Legacy Source",
+        dataPath: "/legacy/source",
+        builtin: true,
+        status: "skill_installed",
+        messageCount: 1,
+        lastScannedAt: "2026-07-21T11:00:00.000Z"
+      }
+    ]);
+    expect(reopenedStore.repositories.agentSources.hasSeen("legacy-message")).toBe(true);
+    expect(reopenedStore.repositories.idempotency.lookup("legacy-adapter", "legacy-request")).toEqual({
+      bodyHash: "legacy-hash",
+      responseJson: "{\"ok\":true}",
+      statusCode: 200,
+      createdAt: "2026-07-21T11:02:00.000Z"
+    });
+    reopenedStore.close();
+  });
+
+  it("preserves legacy BYOK config and secrets in the local scope", () => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-app-state-"));
+    const databasePath = join(tempDir, "app.sqlite");
+    const secretSeedPath = join(tempDir, "secret-seed.sqlite");
+    const legacyModelRef = "model:default:api-key";
+    const legacyEmbeddingRef = "model:default:embedding-api-key";
+    const secretFixtures = createEncryptedSecretFixtures(secretSeedPath, [
+      { ref: legacyModelRef, value: "primary-fixture-value" },
+      { ref: legacyEmbeddingRef, value: "embedding-fixture-value" }
+    ]);
+
+    const legacyDb = createLegacy0007Database(databasePath);
+    legacyDb.prepare("UPDATE app_settings SET user_mode = 'byok' WHERE id = 'default'").run();
+    legacyDb.prepare(
+      `UPDATE account_session SET
+        user_id = 'stale-cloud-user',
+        nickname = 'Stale Cloud User'
+      WHERE id = 'default'`
+    ).run();
+    legacyDb.prepare(
+      `UPDATE onboarding_state SET
+        completed = 1,
+        current_step = 'completed',
+        completed_at = '2026-07-20T10:00:00.000Z'
+      WHERE id = 'default'`
+    ).run();
+    legacyDb.prepare(
+      `UPDATE privacy_settings SET
+        allow_memory_improvement_upload = 1,
+        local_only_mode = 1
+      WHERE id = 'default'`
+    ).run();
+    legacyDb.prepare(
+      `UPDATE model_config SET
+        provider = 'deepseek',
+        base_url = 'https://legacy-byok.example/v1',
+        model_id = 'deepseek-chat',
+        api_key_ref = ?,
+        embedding_mode = 'separate',
+        embedding_base_url = 'https://legacy-embedding.example/v1',
+        embedding_model_id = 'legacy-embedding',
+        embedding_api_key_ref = ?
+      WHERE id = 'default'`
+    ).run(legacyModelRef, legacyEmbeddingRef);
+    insertLegacySecretFixtures(legacyDb, secretFixtures);
+    legacyDb.close();
+
+    const upgradedStore = createAppStateStore({ databasePath });
+    const upgradedSettings = upgradedStore.repositories.bootstrap.getAppSettings();
+    const upgradedOnboarding = upgradedStore.repositories.bootstrap.getOnboardingState();
+    const upgradedPrivacy = upgradedStore.repositories.bootstrap.getPrivacySettings();
+    const upgradedModel = upgradedStore.repositories.modelConfig.get();
+    const upgradedActiveUuid = upgradedStore.db
+      .prepare("SELECT active_uuid FROM app_settings WHERE id = 'default'")
+      .get() as { active_uuid: string | null };
+    const upgradedModelRow = upgradedStore.db
+      .prepare(
+        `SELECT uuid, api_key_ref, embedding_api_key_ref
+         FROM account_model_config
+         WHERE uuid = ?`
+      )
+      .get(LOCAL_BYOK_ACCOUNT_UUID);
+    const upgradedSecretRows = upgradedStore.db
+      .prepare(
+        `SELECT ref, uuid, purpose
+         FROM secret_store
+         WHERE ref IN (?, ?)
+         ORDER BY purpose ASC`
+      )
+      .all(
+        `account:${LOCAL_BYOK_ACCOUNT_UUID}:model-api-key`,
+        `account:${LOCAL_BYOK_ACCOUNT_UUID}:embedding-api-key`
+      );
+
+    expect(upgradedSettings.userMode).toBe("byok");
+    expect(upgradedActiveUuid.active_uuid).toBeNull();
+    expect(upgradedOnboarding).toMatchObject({ completed: true, currentStep: "completed" });
+    expect(upgradedPrivacy).toMatchObject({
+      allowMemoryImprovementUpload: true,
+      localOnlyMode: true
+    });
+    expect(upgradedModel).toMatchObject({
+      provider: "deepseek",
+      baseUrl: "https://legacy-byok.example/v1",
+      modelId: "deepseek-chat",
+      hasApiKey: true,
+      embedding: {
+        mode: "custom",
+        baseUrl: "https://legacy-embedding.example/v1",
+        modelId: "legacy-embedding",
+        hasApiKey: true
+      }
+    });
+    expect(upgradedStore.repositories.modelConfig.getTestApiKey?.("primary")).toBe(
+      "primary-fixture-value"
+    );
+    expect(upgradedStore.repositories.modelConfig.getTestApiKey?.("embedding")).toBe(
+      "embedding-fixture-value"
+    );
+    expect(upgradedModelRow).toEqual({
+      uuid: LOCAL_BYOK_ACCOUNT_UUID,
+      api_key_ref: `account:${LOCAL_BYOK_ACCOUNT_UUID}:model-api-key`,
+      embedding_api_key_ref: `account:${LOCAL_BYOK_ACCOUNT_UUID}:embedding-api-key`
+    });
+    expect(upgradedSecretRows).toEqual([
+      {
+        ref: `account:${LOCAL_BYOK_ACCOUNT_UUID}:embedding-api-key`,
+        uuid: LOCAL_BYOK_ACCOUNT_UUID,
+        purpose: "embedding_api_key"
+      },
+      {
+        ref: `account:${LOCAL_BYOK_ACCOUNT_UUID}:model-api-key`,
+        uuid: LOCAL_BYOK_ACCOUNT_UUID,
+        purpose: "model_api_key"
+      }
+    ]);
+    upgradedStore.close();
+
+    const reopenedStore = createAppStateStore({ databasePath });
+    expect(reopenedStore.repositories.bootstrap.getAppSettings().userMode).toBe("byok");
+    expect(reopenedStore.repositories.bootstrap.getOnboardingState()).toMatchObject({
+      completed: true,
+      currentStep: "completed"
+    });
+    expect(reopenedStore.repositories.bootstrap.getPrivacySettings()).toMatchObject({
+      allowMemoryImprovementUpload: true,
+      localOnlyMode: true
+    });
+    expect(reopenedStore.repositories.modelConfig.get()).toMatchObject({
+      provider: "deepseek",
+      modelId: "deepseek-chat",
+      hasApiKey: true,
+      embedding: { mode: "custom", modelId: "legacy-embedding", hasApiKey: true }
+    });
+    expect(reopenedStore.repositories.modelConfig.getTestApiKey?.("primary")).toBe(
+      "primary-fixture-value"
+    );
+    expect(reopenedStore.repositories.modelConfig.getTestApiKey?.("embedding")).toBe(
+      "embedding-fixture-value"
+    );
+    reopenedStore.close();
+  });
+
+  it("preserves logged-out legacy singleton state in the local fallback scope", () => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-app-state-"));
+    const databasePath = join(tempDir, "app.sqlite");
+    const legacyDb = createLegacy0007Database(databasePath);
+    legacyDb.prepare("UPDATE app_settings SET user_mode = 'account' WHERE id = 'default'").run();
+    legacyDb.prepare(
+      `UPDATE onboarding_state SET
+        completed = 1,
+        current_step = 'completed',
+        completed_at = '2026-07-20T11:00:00.000Z'
+      WHERE id = 'default'`
+    ).run();
+    legacyDb.prepare(
+      `UPDATE privacy_settings SET
+        allow_memory_improvement_upload = 1,
+        local_only_mode = 1
+      WHERE id = 'default'`
+    ).run();
+    legacyDb.prepare(
+      `UPDATE model_config SET
+        provider = 'deepseek',
+        base_url = 'https://legacy-logged-out.example/v1',
+        model_id = 'deepseek-chat'
+      WHERE id = 'default'`
+    ).run();
+    legacyDb.close();
+
+    const upgradedStore = createAppStateStore({ databasePath });
+    const activeUuid = upgradedStore.db
+      .prepare("SELECT active_uuid FROM app_settings WHERE id = 'default'")
+      .get() as { active_uuid: string | null };
+    const modelRow = upgradedStore.db
+      .prepare("SELECT uuid FROM account_model_config WHERE uuid = ?")
+      .get(LOCAL_BYOK_ACCOUNT_UUID);
+
+    expect(upgradedStore.repositories.accountSession.get()).toEqual({ authenticated: false });
+    expect(activeUuid.active_uuid).toBeNull();
+    expect(upgradedStore.repositories.bootstrap.getOnboardingState()).toMatchObject({
+      completed: true,
+      currentStep: "completed"
+    });
+    expect(upgradedStore.repositories.bootstrap.getPrivacySettings()).toMatchObject({
+      allowMemoryImprovementUpload: true,
+      localOnlyMode: true
+    });
+    expect(upgradedStore.repositories.modelConfig.get()).toMatchObject({
+      provider: "deepseek",
+      baseUrl: "https://legacy-logged-out.example/v1",
+      modelId: "deepseek-chat"
+    });
+    expect(modelRow).toEqual({ uuid: LOCAL_BYOK_ACCOUNT_UUID });
+    upgradedStore.close();
+  });
+
+  it("resumes legacy restoration from the durable snapshot after SQL migrations", () => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-app-state-"));
+    const databasePath = join(tempDir, "app.sqlite");
+    const legacyDb = createLegacy0007Database(databasePath);
+    legacyDb.prepare("UPDATE app_settings SET user_mode = 'account' WHERE id = 'default'").run();
+    legacyDb.prepare(
+      `UPDATE account_session SET
+        user_id = 'interrupted-user',
+        nickname = 'Interrupted User'
+      WHERE id = 'default'`
+    ).run();
+    legacyDb.prepare(
+      `INSERT INTO idempotency_keys (
+        adapter_id,
+        request_id,
+        body_hash,
+        response_json,
+        status_code,
+        created_at
+      ) VALUES ('interrupted-adapter', 'interrupted-request', 'hash', '{}', 201, ?)`
+    ).run("2026-07-21T12:00:00.000Z");
+
+    expect(captureLegacyAppState(legacyDb)).not.toBeNull();
+    runMigrations(legacyDb);
+    expect(
+      legacyDb.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+        .get("_legacy_app_state_snapshot")
+    ).toBeDefined();
+    legacyDb.close();
+
+    const resumedStore = createAppStateStore({ databasePath });
+    expect(resumedStore.repositories.accountSession.get()).toMatchObject({
+      authenticated: true,
+      profile: { userId: "interrupted-user", nickname: "Interrupted User" }
+    });
+    expect(
+      resumedStore.repositories.idempotency.lookup("interrupted-adapter", "interrupted-request")
+    ).toEqual({
+      bodyHash: "hash",
+      responseJson: "{}",
+      statusCode: 201,
+      createdAt: "2026-07-21T12:00:00.000Z"
+    });
+    expect(
+      resumedStore.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+        .get("_legacy_app_state_snapshot")
+    ).toBeUndefined();
+    resumedStore.close();
+  });
+
   it("recovers when the ASR migration columns already exist but its migration record is missing", () => {
     tempDir = mkdtempSync(join(tmpdir(), "memmy-app-state-"));
     const databasePath = join(tempDir, "app.sqlite");

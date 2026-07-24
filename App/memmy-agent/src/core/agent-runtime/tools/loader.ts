@@ -28,7 +28,6 @@ export const SKIP_MODULES = new Set([
   "sandbox",
   "mcp",
   "index",
-  "runtime-state",
 ]);
 
 type ToolClass = (new (...args: any[]) => Tool) & {

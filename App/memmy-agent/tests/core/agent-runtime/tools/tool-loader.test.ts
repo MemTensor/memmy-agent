@@ -14,7 +14,6 @@ import { MessageTool } from "../../../../src/core/agent-runtime/tools/message.js
 import { ToolRegistry } from "../../../../src/core/agent-runtime/tools/registry.js";
 import { FindFilesTool, GrepTool } from "../../../../src/core/agent-runtime/tools/search.js";
 import { ExecTool, ExecToolConfig } from "../../../../src/core/agent-runtime/tools/shell.js";
-import { MyTool, MyToolConfig } from "../../../../src/core/agent-runtime/tools/self.js";
 import { SpawnTool } from "../../../../src/core/agent-runtime/tools/spawn.js";
 import { WebFetchTool, WebSearchTool, WebToolsConfig } from "../../../../src/core/agent-runtime/tools/web.js";
 import { BUILTIN_SKILLS_DIR } from "../../../../src/core/agent-runtime/skills.js";
@@ -54,7 +53,6 @@ function mockConfig(overrides: Record<string, any> = {}) {
     }),
     web: new WebToolsConfig({ enable: true, search: {}, fetch: {}, proxy: null, userAgent: null }),
     imageGeneration: new ImageGenerationToolConfig({ enabled: false }),
-    my: new MyToolConfig({ enable: true }),
     restrictToWorkspace: false,
     ...overrides,
   };
@@ -263,7 +261,7 @@ describe("Message, spawn, and cron tools", () => {
   });
 });
 
-describe("Exec, web, image, and self tools", () => {
+describe("Exec, web, and image tools", () => {
   it("exposes ExecTool config metadata", () => {
     expect(ExecTool.configCls()).toBe(ExecToolConfig);
     expect(ExecTool.configKey).toBe("exec");
@@ -347,19 +345,6 @@ describe("Exec, web, image, and self tools", () => {
     expect(tool.config).toBe(imageGeneration);
   });
 
-  it("exposes MyTool config metadata", () => {
-    expect(MyTool.configKey).toBe("my");
-    expect(MyTool.configCls()).toBe(MyToolConfig);
-  });
-
-  it("enables and disables MyTool from config", () => {
-    const config = mockConfig({ my: new MyToolConfig({ enable: true }) });
-    const ctx = new ToolContext({ config, workspace: "/tmp" });
-    expect(MyTool.enabled(ctx)).toBe(true);
-    config.my.enable = false;
-    expect(MyTool.enabled(ctx)).toBe(false);
-  });
-
   it("keeps MCP wrappers out of loader discovery", () => {
     expect(MCPToolWrapper.pluginDiscoverable).toBe(false);
     expect(MCPResourceWrapper.pluginDiscoverable).toBe(false);
@@ -373,13 +358,11 @@ describe("Config round-trip", () => {
       tools: {
         web: { enable: true, search: { provider: "brave", apiKey: "test" } },
         exec: { enable: false, timeout: 120 },
-        my: { allowSet: true },
         imageGeneration: { enabled: true, provider: "openrouter" },
       },
     });
     const dumped = config.toObject();
 
-    expect(dumped.tools.my.allowSet).toBe(true);
     expect(dumped.tools.imageGeneration.enabled).toBe(true);
     expect(config.tools.exec.enable).toBe(false);
     expect(config.tools.exec.timeout).toBe(120);
@@ -393,11 +376,25 @@ describe("Config round-trip", () => {
     expect(config.tools.exec.timeout).toBe(60);
     expect(config.tools.web.enable).toBe(true);
     expect(config.tools.web.search.provider).toBe("duckduckgo");
-    expect(config.tools.my.enable).toBe(true);
-    expect(config.tools.my.allowSet).toBe(false);
     expect(config.tools.imageGeneration.enabled).toBe(false);
     expect(config.tools.restrictToWorkspace).toBe(false);
     expect(["cli", "Apps"].join("") in config.tools).toBe(false);
+  });
+
+  it("ignores retired my tool config fields", () => {
+    const config = Config.fromObject({
+      tools: {
+        my: { enable: true, allowSet: true },
+        myEnabled: true,
+        mySet: true,
+        webSearch: { provider: "brave" },
+      },
+    });
+
+    expect(Object.prototype.hasOwnProperty.call(config.tools, "my")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(config.tools, "myEnabled")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(config.tools, "mySet")).toBe(false);
+    expect(config.tools.webSearch.provider).toBe("brave");
   });
 });
 

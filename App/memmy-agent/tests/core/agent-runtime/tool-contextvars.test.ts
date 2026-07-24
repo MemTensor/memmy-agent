@@ -6,7 +6,6 @@ import { CronService } from "../../../src/cron/service.js";
 import { RequestContext } from "../../../src/core/agent-runtime/tools/context.js";
 import { CronTool } from "../../../src/core/agent-runtime/tools/cron.js";
 import { MessageTool } from "../../../src/core/agent-runtime/tools/message.js";
-import { RuntimeState } from "../../../src/core/agent-runtime/tools/runtime-state.js";
 import { SpawnTool } from "../../../src/core/agent-runtime/tools/spawn.js";
 
 const roots: string[] = [];
@@ -30,48 +29,6 @@ afterEach(() => {
 });
 
 describe("tool task-local request context", () => {
-  it("defaults runtime state to the configured default context window", () => {
-    expect(new RuntimeState().contextWindowTokens).toBe(200_000);
-  });
-
-  it("exposes the runtime state contract used by MyTool", () => {
-    const state = new RuntimeState({
-      model: "test-model",
-      maxIterations: 3,
-      currentIteration: 2,
-      toolNames: ["read_file"],
-      contextWindowTokens: 128_000,
-      maxToolResultChars: 32_000,
-      providerRetryMode: "aggressive",
-      modelPreset: "coding",
-      activePreset: "coding",
-      workspace: "/tmp/ws",
-      subagents: {},
-      values: { custom: 1 },
-    });
-
-    expect(state.get("model")).toBe("test-model");
-    expect(state.get("custom")).toBe(1);
-    expect(state.currentIteration).toBe(2);
-    expect(state.toolNames).toEqual(["read_file"]);
-    expect(state.contextWindowTokens).toBe(128_000);
-    expect(state.maxToolResultChars).toBe(32_000);
-    expect(state.providerRetryMode).toBe("aggressive");
-    expect(state.modelPreset).toBe("coding");
-    expect(state.activePreset).toBe("coding");
-    state.set("maxIterations", 5);
-    expect(state.maxIterations).toBe(5);
-    state.set("contextWindowTokens", 256_000);
-    expect(state.contextWindowTokens).toBe(256_000);
-    state.set("currentIteration", 4);
-    expect(state.currentIteration).toBe(4);
-    state.syncSubagentRuntimeLimits();
-    expect(state.maxIterations).toBe(5);
-    expect(state.subagents.maxIterations).toBe(5);
-    state.set("ephemeral", "ok");
-    expect(state.runtimeVars.ephemeral).toBe("ok");
-  });
-
   it("keeps MessageTool context local to each async task", async () => {
     const seen: Array<[string, string, string]> = [];
     const [entered, markEntered] = deferred();

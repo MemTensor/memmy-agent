@@ -172,7 +172,9 @@ export function modelDisplay(config: Config): [string, string] {
 export function syncRuntimeWorkspaceTemplates(config: Config): string {
   const workspacePath = getWorkspacePath(config.agents.defaults.workspace);
   fs.mkdirSync(workspacePath, { recursive: true });
-  syncWorkspaceTemplates(workspacePath);
+  syncWorkspaceTemplates(workspacePath, undefined, {
+    fileMemoryEnabled: config.fileMemory.enabled,
+  });
   return workspacePath;
 }
 
@@ -384,7 +386,9 @@ export async function onboard({
   onboardPlugins(configPath);
   const workspacePath = getWorkspacePath(loaded.agents.defaults.workspace);
   fs.mkdirSync(workspacePath, { recursive: true });
-  syncWorkspaceTemplates(workspacePath);
+  syncWorkspaceTemplates(workspacePath, undefined, {
+    fileMemoryEnabled: loaded.fileMemory.enabled,
+  });
   console.log(`memmy is ready`);
   console.log(`Config: ${configPath}`);
   console.log(`Workspace: ${workspacePath}`);
@@ -794,8 +798,11 @@ export async function gateway({
   cron.onJob = async (job: CronJob) => {
     if (job.payload.kind === "systemEvent") {
       if (job.name === "dream") {
-        await loop.dream?.run?.();
-        return "Dream completed.";
+        if (loop.fileMemoryEnabled === true && loop.dream) {
+          await loop.dream.run();
+          return "Dream completed.";
+        }
+        return "File memory is disabled.";
       }
       return null;
     }
@@ -889,21 +896,24 @@ export async function gateway({
   };
 
   const dreamConfig = loaded.agents.defaults.dream;
-  if (loop.dream) {
+  if (loop.fileMemoryEnabled && loop.dream) {
     if (dreamConfig.modelOverride) loop.dream.setProvider(loop.provider, dreamConfig.modelOverride);
     loop.dream.maxBatchSize = dreamConfig.maxBatchSize;
     loop.dream.maxIterations = dreamConfig.maxIterations;
     loop.dream.annotateLineAges = dreamConfig.annotateLineAges;
+    cron.registerSystemJob(
+      new CronJob({
+        id: "dream",
+        name: "dream",
+        schedule: dreamConfig.buildSchedule(loaded.agents.defaults.timezone),
+        payload: new CronPayload({ kind: "systemEvent", message: "Dream memory consolidation" }),
+      }),
+    );
+    console.log(`Dream: ${dreamConfig.describeSchedule()}`);
+  } else {
+    cron.unregisterSystemJob("dream");
+    console.log("File memory: disabled");
   }
-  cron.registerSystemJob(
-    new CronJob({
-      id: "dream",
-      name: "dream",
-      schedule: dreamConfig.buildSchedule(loaded.agents.defaults.timezone),
-      payload: new CronPayload({ kind: "systemEvent", message: "Dream memory consolidation" }),
-    }),
-  );
-  console.log(`Dream: ${dreamConfig.describeSchedule()}`);
 
   const hbCfg = loaded.gateway.heartbeat;
   const heartbeatPreamble =
