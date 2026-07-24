@@ -7,6 +7,7 @@ import type {
   ToolCallPayload
 } from "../types.js";
 import type { LlmClient } from "../model/types.js";
+import { MEMORY_SUMMARY_MAX_TOKENS } from "../config/index.js";
 import { memoryVector } from "../storage/memory-vector-state.js";
 import { stableHash } from "../utils/id.js";
 
@@ -42,6 +43,7 @@ export interface TraceMemoryMeta {
   memory: MemoryRow;
   ts: number;
   turnId?: string;
+  rawTurnId?: string;
   episodeId?: string;
   sessionId?: string;
   userId: string;
@@ -206,9 +208,6 @@ const RELATION_STRONG_HEURISTIC_THRESHOLD = 0.85;
 const RELATION_ARBITRATION_THRESHOLD = 0.8;
 const RELATION_ALLOWED: TurnRelation[] = ["revision", "follow_up", "new_task", "unknown"];
 const RELATION_GENERIC_TAGS = new Set(["trace", "turn", "memory", "openclaw", "codex", "hermes"]);
-const INTENT_ALLOWED: IntentKind[] = ["task", "memory_probe", "chitchat", "meta", "unknown"];
-const INTENT_STRONG_HEURISTIC_THRESHOLD = 0.85;
-
 export function classifyIntent(text: string): IntentDecision {
   const trimmed = text.trim();
   if (!trimmed) {
@@ -217,50 +216,6 @@ export function classifyIntent(text: string): IntentDecision {
   const heuristic = matchIntentHeuristic(trimmed);
   if (heuristic) {
     return intentDecision(heuristic.kind, heuristic.confidence, heuristic.reason, [heuristic.signal]);
-  }
-  return intentDecision("unknown", 0.4, "no classifier signal; defaulting to full retrieval", ["default_unknown"]);
-}
-
-export async function classifyIntentWithLlm(
-  text: string,
-  options: {
-    llm?: LlmClient;
-    timeoutMs?: number;
-    disableLlm?: boolean;
-  } = {}
-): Promise<IntentDecision> {
-  const trimmed = text.trim();
-  if (!trimmed) {
-    return intentDecision("chitchat", 0.9, "empty message", ["empty"]);
-  }
-  const heuristic = matchIntentHeuristic(trimmed);
-  if (heuristic && heuristic.confidence >= INTENT_STRONG_HEURISTIC_THRESHOLD) {
-    return intentDecision(heuristic.kind, heuristic.confidence, heuristic.reason, [heuristic.signal]);
-  }
-
-  const llm = options.llm;
-  if (!options.disableLlm && llm?.isConfigured()) {
-    try {
-      const result = await relationWithTimeout(
-        callIntentLlm(llm, trimmed),
-        options.timeoutMs ?? 6000
-      );
-      return {
-        ...result,
-        signals: ["llm", ...(heuristic ? [`heuristic:${heuristic.signal}(weak)`] : [])]
-      };
-    } catch {
-      // Fall through to plugin-style weak heuristic/default fallback.
-    }
-  }
-
-  if (heuristic) {
-    return intentDecision(
-      heuristic.kind,
-      heuristic.confidence,
-      `${heuristic.reason} (fallback)`,
-      [heuristic.signal, "llm_skipped"]
-    );
   }
   return intentDecision("unknown", 0.4, "no classifier signal; defaulting to full retrieval", ["default_unknown"]);
 }
@@ -671,57 +626,6 @@ function intentDecision(kind: IntentKind, confidence: number, reason: string, si
   };
 }
 
-const INTENT_SYSTEM_PROMPT = `You are a fast intent classifier for a memory/tool-using agent.
-
-Classify the user's message into ONE of:
-  - "task"         — user wants the agent to do work (build / fix / analyze / explain / run …).
-  - "memory_probe" — user is asking about past conversation context.
-  - "chitchat"     — small talk, thanks, greetings with no actionable content.
-  - "meta"         — command to the plugin itself (starts with "/memos" / "/memory").
-  - "unknown"      — truly ambiguous.
-
-Return JSON with exactly these keys:
-{
-  "kind": one of the five labels above,
-  "confidence": number in [0, 1],
-  "reason": short English justification (≤ 80 chars, no quotes)
-}
-
-Rules:
-- Never invent a new label.
-- If unsure, pick "unknown" with confidence ≤ 0.5.
-- "task" is the safe default for imperative requests in any language.`;
-
-async function callIntentLlm(llm: LlmClient, text: string): Promise<IntentDecision> {
-  const value = await llm.completeJson<Record<string, unknown>>(
-    [
-      { role: "system", content: INTENT_SYSTEM_PROMPT },
-      { role: "user", content: text.slice(0, 2000) }
-    ],
-    {
-      operation: "session.intent.classify.v1",
-      temperature: 0,
-      maxTokens: 260
-    }
-  );
-  if (typeof value.kind !== "string" || !INTENT_ALLOWED.includes(value.kind as IntentKind)) {
-    throw new Error(`intent.kind out of vocabulary: ${String(value.kind)}`);
-  }
-  if (typeof value.confidence !== "number") {
-    throw new Error("intent.confidence must be a number");
-  }
-  if (typeof value.reason !== "string") {
-    throw new Error("intent.reason must be a string");
-  }
-  const kind = value.kind as IntentKind;
-  const confidence = clamp01(value.confidence);
-  const reason = value.reason;
-  return {
-    ...intentDecision(kind, confidence, reason, ["llm"]),
-    llmModel: llm.config.model
-  };
-}
-
 function intentWordCount(text: string): number {
   if (/[\u4E00-\u9FFF\u3400-\u4DBF]/.test(text)) {
     return Array.from(text).filter((char) => /[\u4E00-\u9FFF\u3400-\u4DBF]|\w/.test(char)).length;
@@ -939,8 +843,9 @@ async function callRelationLlm(
     ],
     {
       operation: "relation.classify.v1",
+      thinkingMode: "disabled",
       temperature: llm.config.temperature,
-      maxTokens: 300
+      maxTokens: MEMORY_SUMMARY_MAX_TOKENS
     }
   );
   if (typeof value.relation !== "string" || !RELATION_ALLOWED.includes(value.relation as TurnRelation)) {
@@ -975,8 +880,9 @@ async function callRelationArbitration(
     ],
     {
       operation: "relation.arbitration.v1",
+      thinkingMode: "disabled",
       temperature: llm.config.temperature,
-      maxTokens: 200
+      maxTokens: MEMORY_SUMMARY_MAX_TOKENS
     }
   );
   if (value.relation !== "follow_up" && value.relation !== "new_task") {
@@ -3323,10 +3229,11 @@ export function traceMetaFromMemory(memory: MemoryRow): TraceMemoryMeta | null {
     memory,
     ts: numberField(trace, "ts") ?? Date.parse(memory.timeline),
     turnId: stringField(trace, "turn_id"),
+    rawTurnId: stringField(trace, "raw_turn_id"),
     episodeId: stringField(trace, "episode_id"),
     sessionId: memory.sessionId,
     userId: memory.userId,
-    summary: stringField(trace, "summary") ?? firstLine(memory.memoryValue),
+    summary: stringField(trace, "summary") ?? "",
     userText: stringField(trace, "userText") ?? "",
     agentText: stringField(trace, "agentText") ?? "",
     toolCalls,
@@ -4187,7 +4094,7 @@ export function retrievePluginMemories(input: {
   layers?: MemoryLayer[];
   limit: number;
   mode?: RetrievalMode;
-  excludeTraceSessionId?: string;
+  excludeTraceRawTurnIds?: ReadonlySet<string>;
   targetSkillId?: string;
   channelScoresByMemory?: ReadonlyMap<string, SeededChannelScores>;
   now?: number;
@@ -4215,7 +4122,7 @@ export function retrievePluginMemories(input: {
       queryVec,
       {
         mode,
-        excludeTraceSessionId: input.excludeTraceSessionId,
+        excludeTraceRawTurnIds: input.excludeTraceRawTurnIds,
         channelScoresByMemory: input.channelScoresByMemory,
         config
       },
@@ -4230,7 +4137,7 @@ export function retrievePluginMemories(input: {
       now,
       {
         mode,
-        excludeTraceSessionId: input.excludeTraceSessionId,
+        excludeTraceRawTurnIds: input.excludeTraceRawTurnIds,
         targetSkillId: input.targetSkillId,
         traceVectorTags,
         traceVectorTagsRequired,
@@ -4994,7 +4901,7 @@ function hasTaggedTraceVectorMatch(
   queryVec: number[],
   options: {
     mode: RetrievalMode;
-    excludeTraceSessionId?: string;
+    excludeTraceRawTurnIds?: ReadonlySet<string>;
     channelScoresByMemory?: ReadonlyMap<string, SeededChannelScores>;
     config: Required<RetrievalTuningConfig>;
   },
@@ -5007,12 +4914,7 @@ function hasTaggedTraceVectorMatch(
     if (!memoryHasAnyTag(memory, traceVectorTags)) return false;
     const trace = traceMetaFromMemory(memory);
     if (!trace || !hasRetrievalEmbedding(memory, { trace, policy: null, skill: null, world: null })) return false;
-    if (
-      options.excludeTraceSessionId &&
-      (trace.sessionId === options.excludeTraceSessionId || memory.sessionId === options.excludeTraceSessionId)
-    ) {
-      return false;
-    }
+    if (shouldExcludeTraceFromTurnContext(trace, options)) return false;
     return vectorChannelsForMemory(memory, queryVec, options.config, {
       seededChannelScores: options.channelScoresByMemory?.get(memory.id),
       useSeededChannelScores: options.channelScoresByMemory !== undefined
@@ -5035,7 +4937,7 @@ function candidateFromMemory(
   now: number,
   options: {
     mode: RetrievalMode;
-    excludeTraceSessionId?: string;
+    excludeTraceRawTurnIds?: ReadonlySet<string>;
     targetSkillId?: string;
     traceVectorTags: string[];
     traceVectorTagsRequired: boolean;
@@ -5050,13 +4952,7 @@ function candidateFromMemory(
   const skill = memory.memoryLayer === "Skill" ? skillMetaFromMemory(memory) : null;
   const world = memory.memoryLayer === "L3" ? worldModelMetaFromMemory(memory) : null;
   if (!isMemoryReadyForRetrieval(memory)) return null;
-  if (
-    trace &&
-    options.excludeTraceSessionId &&
-    (trace.sessionId === options.excludeTraceSessionId || memory.sessionId === options.excludeTraceSessionId)
-  ) {
-    return null;
-  }
+  if (trace && shouldExcludeTraceFromTurnContext(trace, options)) return null;
   if (
     memory.memoryLayer === "Skill" &&
     options.mode === "skill_invoke" &&
@@ -5131,6 +5027,15 @@ function candidateFromMemory(
     score: 0,
     vectorScore
   };
+}
+
+function shouldExcludeTraceFromTurnContext(
+  trace: TraceMemoryMeta,
+  options: {
+    excludeTraceRawTurnIds?: ReadonlySet<string>;
+  }
+): boolean {
+  return Boolean(trace.rawTurnId && options.excludeTraceRawTurnIds?.has(trace.rawTurnId));
 }
 
 function suppressFeedbackExperiencesCoveredBySkills(
@@ -5277,20 +5182,13 @@ function dedupeCandidateChannels(
 function renderEpisodeRollupSnippet(traces: TraceMemoryMeta[], totalTraceCount: number): string {
   const header = "Past similar episode";
   const maxChars = 800;
-  const steps = traces.slice(0, 6).map((trace, index) => {
+  const steps = traces.slice(0, 6).flatMap((trace, index) => {
     const parts = [`step ${index + 1}`];
     const summary = trace.summary?.trim().replace(/\s+/g, " ") ?? "";
-    if (summary) {
-      parts.push(`summary: ${summary.slice(0, 160)}`);
-    } else {
-      const userText = trace.userText?.trim().replace(/\s+/g, " ") ?? "";
-      const agentText = trace.agentText?.trim().replace(/\s+/g, " ") ?? "";
-      if (userText) parts.push(`user: ${userText.slice(0, 120)}`);
-      if (agentText) parts.push(`agent: ${agentText.slice(0, 120)}`);
-    }
+    if (summary) parts.push(`summary: ${summary.slice(0, 160)}`);
     const reflection = displayReflectionText(trace.reflection);
     if (reflection) parts.push(`reflection: ${reflection.slice(0, 160)}`);
-    return parts.join("\n  ");
+    return parts.length > 1 ? [parts.join("\n  ")] : [];
   });
   const omitted = totalTraceCount > 6 ? `…(+${totalTraceCount - 6} more steps)` : "";
   const full = [header, ...steps, omitted].filter(Boolean).join("\n");

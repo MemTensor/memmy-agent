@@ -4,6 +4,7 @@ import { CommandContext, CommandRouter } from "../../command/router.js";
 import { registerBuiltinCommands } from "../../command/builtin.js";
 import { Config, ModelPresetConfig } from "../../config/schema.js";
 import { getWorkspacePath } from "../../config/paths.js";
+import { CONTEXT_SAFETY_BUFFER_TOKENS } from "../../token-budget.js";
 import { CronService } from "../../cron/service.js";
 import { makeProvider } from "../../providers/factory.js";
 import { makeReloadingProviderSnapshotLoader, makeReloadingToolsSnapshotLoader } from "../../providers/snapshot-loader.js";
@@ -23,7 +24,6 @@ import { ToolLoader } from "./tools/loader.js";
 import { RequestContext, ToolContext } from "./tools/context.js";
 import { ExecSessionManager } from "./tools/exec-session.js";
 import { MessageTool, type MessageSendCallback } from "./tools/message.js";
-import { MyTool } from "./tools/self.js";
 import { FileStateStore } from "./tools/file-state.js";
 import { connectMissingServers, runtimeLines as mcpRuntimeLines, sessionExtra as mcpSessionExtra } from "./tools/mcp.js";
 import { ContextBuilder } from "./context.js";
@@ -336,6 +336,7 @@ export class AgentLoop {
   execConfig: any;
   provider: any;
   workspace: string;
+  readonly fileMemoryEnabled: boolean;
   model: string | null;
   modelPresets: Record<string, ModelPresetConfig>;
   private defaultModelPreset: ModelPresetConfig;
@@ -351,7 +352,7 @@ export class AgentLoop {
   consolidator: Consolidator;
   sessionDagQueue: SessionDagQueueManager | null;
   autoCompact: AutoCompact;
-  dream: Dream;
+  dream: Dream | null;
   maxIterations: number;
   contextWindowTokens: number;
   contextBlockLimit: number | null;
@@ -408,6 +409,7 @@ export class AgentLoop {
     this.toolsConfig = this.config.tools;
     this.webConfig = { search: this.config.tools.webSearch, fetch: this.config.tools.webFetch };
     this.execConfig = (this.config.tools as any).exec ?? {};
+    this.fileMemoryEnabled = this.config.fileMemory.enabled;
     const defaults = this.config.agents.defaults;
     this.workspace = path.resolve(getWorkspacePath(init.workspace ?? defaults.workspace ?? process.cwd()));
     installMemmyMemory(this.config, { workspace: this.workspace, hooks: this.extraHooks });
@@ -444,6 +446,7 @@ export class AgentLoop {
       workspace: this.workspace,
       bus: this.bus,
       model: this.model,
+      contextWindowTokens: this.contextWindowTokens,
       toolsConfig: this.config.tools,
       maxIterations: this.maxIterations,
       maxConcurrent: defaults.maxConcurrentSubagents,
@@ -454,6 +457,7 @@ export class AgentLoop {
     this.context = new ContextBuilder({
       workspace: this.workspace,
       timezone: init.timezone ?? defaults.timezone,
+      fileMemoryEnabled: this.fileMemoryEnabled,
     });
     this.runner = new AgentRunner();
     this.tools = this.createToolRegistry("init");
@@ -476,11 +480,13 @@ export class AgentLoop {
       dagCatchupTimeoutMs: this.config.sessionDag.compactionCatchupTimeoutMs,
     });
     this.autoCompact = new AutoCompact(this.sessions, this.consolidator, init.sessionTtlMinutes ?? defaults.sessionTtlMinutes);
-    this.dream = new Dream({
-      store: this.context.memory,
-      provider: this.provider,
-      model: this.model ?? "",
-    });
+    this.dream = this.fileMemoryEnabled
+      ? new Dream({
+          store: this.context.memory,
+          provider: this.provider,
+          model: this.model ?? "",
+        })
+      : null;
     const requestedPreset = init.modelPreset ?? defaults.modelPreset;
     if (requestedPreset) this.setModelPreset(requestedPreset, { publishUpdate: false });
   }
@@ -566,7 +572,6 @@ export class AgentLoop {
     this.refreshToolsSnapshot();
     const toolCtx = this.createToolContext(messageSendCallback);
     const registry = new ToolLoader({ workspace: this.workspace, ctx: toolCtx }).loadRegistry(toolCtx);
-    if (this.config.tools.my.enable && !registry.get("my")) registry.register(new MyTool({ runtime: this as any }));
     if (includeConnectedMcp) this.copyConnectedMcpTools(registry);
     this.registerHookTools(toolCtx, phase, registry);
     return registry;
@@ -698,7 +703,9 @@ export class AgentLoop {
   replayTokenBudget(): number {
     if (this.contextWindowTokens <= 0) return 0;
     const reserved = Number(this.provider?.generation?.maxTokens ?? 4096);
-    const budget = this.contextWindowTokens - Math.max(1, reserved) - 1024;
+    const budget = this.contextWindowTokens
+      - Math.max(1, reserved)
+      - CONTEXT_SAFETY_BUFFER_TOKENS;
     return budget > 0 ? budget : Math.max(128, Math.floor(this.contextWindowTokens / 2));
   }
 
@@ -795,12 +802,19 @@ export class AgentLoop {
       this.provider.generation.reasoningEffort = reasoningEffort;
     }
     (this.runner as any).provider = provider;
-    if (typeof (this.subagents as any)?.setProvider === "function") (this.subagents as any).setProvider(provider, model);
+    if (typeof (this.subagents as any)?.setProvider === "function") {
+      (this.subagents as any).setProvider(provider, model, contextWindowTokens);
+    }
     else if (this.subagents) (this.subagents as any).model = model;
     if (typeof (this.consolidator as any)?.setProvider === "function") (this.consolidator as any).setProvider(provider, model, contextWindowTokens);
     else (this.consolidator as any).model = model;
-    if (typeof (this.dream as any)?.setProvider === "function") (this.dream as any).setProvider(provider, model);
-    else (this.dream as any).model = model;
+    if (this.dream) {
+      if (typeof (this.dream as any).setProvider === "function") {
+        (this.dream as any).setProvider(provider, model);
+      } else {
+        (this.dream as any).model = model;
+      }
+    }
     this.providerSignature = snapshot.signature ?? JSON.stringify({ model, contextWindowTokens });
     if (publishUpdate && this.runtimeModelPublisher) this.runtimeModelPublisher(this.model, modelPreset ?? this.modelPreset);
   }

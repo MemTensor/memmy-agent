@@ -1,4 +1,5 @@
 import { LLMProvider, LLMResponse, ToolCallRequest } from "../../providers/base.js";
+import { CONTEXT_SAFETY_BUFFER_TOKENS } from "../../token-budget.js";
 import { ToolRegistry } from "./tools/registry.js";
 import type { ToolExecutionContext } from "./tools/base.js";
 import { AgentHook, AgentHookContext } from "./hook.js";
@@ -42,7 +43,6 @@ const PERSISTED_MODEL_ERROR_PLACEHOLDER = "[Assistant reply unavailable due to m
 export const MAX_EMPTY_RETRIES = 2;
 const MAX_LENGTH_RECOVERIES = 3;
 export const MAX_INJECTIONS_PER_TURN = 3;
-const SNIP_SAFETY_BUFFER = 1024;
 const MICROCOMPACT_MIN_CHARS = 500;
 const COMPACTABLE_TOOLS = new Set([
   "read_file",
@@ -818,7 +818,8 @@ export class AgentRunner {
       : Number.isInteger(providerMaxTokens)
         ? Number(providerMaxTokens)
         : 4096;
-    const budget = spec.contextBlockLimit ?? spec.contextWindowTokens - maxOutput - SNIP_SAFETY_BUFFER;
+    const budget = spec.contextBlockLimit
+      ?? spec.contextWindowTokens - maxOutput - CONTEXT_SAFETY_BUFFER_TOKENS;
     if (budget <= 0) return messages;
     const estimateResult = estimatePromptTokensChain(this.provider, spec.model ?? null, messages, spec.tools?.getDefinitions?.() ?? []);
     const estimate = Array.isArray(estimateResult) ? estimateResult[0] : estimateResult;

@@ -48,12 +48,14 @@ describe("webui settings api", () => {
     expect(payload.agent.model).toBe("openai/gpt-4.1-mini");
     const rows = Object.fromEntries(payload.model_presets.map((row: any) => [row.name, row]));
     expect(rows["fast-writing"].label).toBe("Fast writing");
+    expect(rows["fast-writing"].max_tokens).toBe(65_536);
 
     const saved = loadConfig(file);
     expect(saved.agents.defaults.modelPreset).toBe("fast-writing");
     expect(saved.modelPresets["fast-writing"].label).toBe("Fast writing");
     expect(saved.modelPresets["fast-writing"].model).toBe("openai/gpt-4.1-mini");
     expect(saved.modelPresets["fast-writing"].provider).toBe("openai");
+    expect(saved.modelPresets["fast-writing"].maxTokens).toBe(65_536);
 
     expect(() => createModelConfiguration({
       label: ["Fast writing"],
@@ -65,6 +67,22 @@ describe("webui settings api", () => {
     } catch (error) {
       expect((error as WebUISettingsError).status).toBe(409);
     }
+  });
+
+  it("exposes default and explicit preset maxTokens values", () => {
+    const file = useConfigFile();
+    saveConfig(new Config({
+      modelPresets: {
+        small: { model: "openai/gpt-4.1-mini", provider: "openai", maxTokens: 1234 },
+      },
+    }), file);
+
+    const payload = settingsPayload();
+    const rows = Object.fromEntries(payload.model_presets.map((row: any) => [row.name, row]));
+
+    expect(payload.agent.max_tokens).toBe(65_536);
+    expect(rows.default.max_tokens).toBe(65_536);
+    expect(rows.small.max_tokens).toBe(1234);
   });
 
   it("rejects unconfigured providers", () => {
@@ -80,7 +98,10 @@ describe("webui settings api", () => {
 
   it("updates agent settings with validation and restart metadata", () => {
     const file = useConfigFile();
-    saveConfig(new Config(), file);
+    saveConfig(
+      new Config({ fileMemory: { enabled: false } }),
+      file,
+    );
 
     const payload = updateAgentSettings({
       model: ["anthropic/claude-sonnet-4-5"],
@@ -97,6 +118,7 @@ describe("webui settings api", () => {
     const saved = loadConfig(file);
     expect(saved.agents.defaults.timezone).toBe("Asia/Shanghai");
     expect(saved.agents.defaults.botName).toBe("memmy");
+    expect(saved.fileMemory.enabled).toBe(false);
     expect(() => updateAgentSettings({ timezone: ["Mars/Base"] })).toThrow(/invalid timezone/);
   });
 

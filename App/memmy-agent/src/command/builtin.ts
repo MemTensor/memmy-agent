@@ -1,7 +1,14 @@
 import { spawn, type SpawnOptions } from "node:child_process";
 import { OutboundMessage } from "../core/runtime-messages/events.js";
-import { setRestartNoticeToEnv } from "../utils/restart.js";
+import {
+  createManagedRestartNotice,
+  DESKTOP_MANAGED_GATEWAY_ENV,
+  parseManagedRestartNotice,
+  setRestartNoticeToEnv,
+  type ManagedRestartNotice
+} from "../utils/restart.js";
 import { handlePairingCommand } from "../integrations/channel-auth/store.js";
+import { DEFAULT_MAX_TOKENS } from "../token-budget.js";
 import { buildStatusContent } from "../utils/helpers.js";
 import { fetchSearchUsage } from "../utils/searchusage.js";
 import { buildHistoryDagPayload, renderHistoryDagSummary, SessionDagStore } from "../session-dag/index.js";
@@ -38,15 +45,38 @@ export const BUILTIN_COMMAND_SPECS = [
   new BuiltinCommandSpec("/pairing", "Manage pairing", "List, approve, deny or revoke pairing requests.", "shield", "[list|approve <code>|deny <code>|revoke <user_id>]"),
 ];
 
-export function builtinCommandPalette(options: { sessionDagEnabled?: boolean } = {}): Record<string, string>[] {
+type BuiltinCommandOptions = {
+  sessionDagEnabled?: boolean;
+  fileMemoryEnabled?: boolean;
+};
+
+const DREAM_COMMANDS = new Set(["/dream", "/dream-log", "/dream-restore"]);
+const FILE_MEMORY_DISABLED_MESSAGE =
+  "File memory is disabled by fileMemory.enabled=false.";
+
+function filteredBuiltinCommandSpecs(
+  options: BuiltinCommandOptions = {},
+): BuiltinCommandSpec[] {
   return BUILTIN_COMMAND_SPECS
     .filter((spec) => options.sessionDagEnabled !== false || spec.command !== "/history-dag")
-    .map((spec) => spec.asDict());
+    .filter(
+      (spec) =>
+        options.fileMemoryEnabled === true ||
+        !DREAM_COMMANDS.has(spec.command),
+    );
 }
 
-export function buildHelpText(): string {
+export function builtinCommandPalette(
+  options: BuiltinCommandOptions = {},
+): Record<string, string>[] {
+  return filteredBuiltinCommandSpecs(options).map((spec) => spec.asDict());
+}
+
+export function buildHelpText(
+  options: Pick<BuiltinCommandOptions, "fileMemoryEnabled"> = {},
+): string {
   const lines = ["memmy commands:"];
-  for (const spec of BUILTIN_COMMAND_SPECS) {
+  for (const spec of filteredBuiltinCommandSpecs(options)) {
     const cmd = spec.argHint ? `${spec.command} ${spec.argHint}` : spec.command;
     lines.push(`${cmd} - ${spec.description}`);
   }
@@ -73,6 +103,7 @@ export type RestartCommandRuntime = {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   warn?: (message: string) => void;
+  sendIpc?: (message: ManagedRestartNotice, callback: (error: Error | null) => void) => boolean;
 };
 
 let restartCommandRuntimeForTests: RestartCommandRuntime | null = null;
@@ -124,6 +155,22 @@ export async function cmdStop(ctx: CommandContext): Promise<OutboundMessage> {
 }
 
 export async function cmdRestart(ctx: CommandContext): Promise<OutboundMessage> {
+  const runtime: RestartCommandRuntime = restartCommandRuntimeForTests ?? {};
+  const env = runtime.env ?? process.env;
+  const managed = env[DESKTOP_MANAGED_GATEWAY_ENV] === "1";
+  if (managed) {
+    const notice = parseManagedRestartNotice(createManagedRestartNotice({
+      channel: ctx.msg.channel,
+      chatId: ctx.msg.chatId,
+      metadata: { ...(ctx.msg.metadata ?? {}) }
+    }));
+    if (!notice || !await sendManagedRestartNotice(runtime, notice)) {
+      return reply(ctx, "Failed to restart memmy: Desktop supervisor unavailable.");
+    }
+    scheduleManagedRestartExit(runtime);
+    return reply(ctx, "Restarting...");
+  }
+
   setRestartNoticeToEnv({
     channel: ctx.msg.channel,
     chatId: ctx.msg.chatId,
@@ -131,6 +178,39 @@ export async function cmdRestart(ctx: CommandContext): Promise<OutboundMessage> 
   });
   scheduleRestartForCommand();
   return reply(ctx, "Restarting...");
+}
+
+async function sendManagedRestartNotice(runtime: RestartCommandRuntime, notice: ManagedRestartNotice): Promise<boolean> {
+  const sender = runtime.sendIpc ?? (typeof process.send === "function"
+    ? ((message, callback) => process.send!(message, callback))
+    : null);
+  if (!sender) return false;
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        resolve(false);
+      }
+    }, 500);
+    try {
+      sender(notice, (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(!error);
+      });
+    } catch {
+      settled = true;
+      clearTimeout(timer);
+      resolve(false);
+    }
+  });
+}
+
+function scheduleManagedRestartExit(runtime: RestartCommandRuntime, delayMs = 1000): void {
+  const scheduler = runtime.scheduler ?? ((callback: () => void, ms: number) => setTimeout(callback, ms));
+  scheduler(() => (runtime.exit ?? process.exit)(75), delayMs);
 }
 
 export async function cmdNew(ctx: CommandContext): Promise<OutboundMessage> {
@@ -256,6 +336,9 @@ function formatDreamLogContent(commit: any, diff: string, requestedSha?: string)
 }
 
 export async function cmdDreamLog(ctx: CommandContext): Promise<OutboundMessage> {
+  if (ctx.loop?.fileMemoryEnabled !== true) {
+    return reply(ctx, FILE_MEMORY_DISABLED_MESSAGE, { renderAs: "text" });
+  }
   const store = ctx.loop?.consolidator?.store;
   const git = store?.git;
   if (!git?.isInitialized?.()) {
@@ -286,6 +369,9 @@ function formatDreamRestoreList(commits: any[]): string {
 }
 
 export async function cmdDreamRestore(ctx: CommandContext): Promise<OutboundMessage> {
+  if (ctx.loop?.fileMemoryEnabled !== true) {
+    return reply(ctx, FILE_MEMORY_DISABLED_MESSAGE, { renderAs: "text" });
+  }
   const git = ctx.loop?.consolidator?.store?.git;
   if (!git?.isInitialized?.()) return reply(ctx, "Dream history is not available because memory versioning is not initialized.", { renderAs: "text" });
   const args = ctx.args.trim();
@@ -308,7 +394,13 @@ export async function cmdPairing(ctx: CommandContext): Promise<OutboundMessage> 
 }
 
 export async function cmdHelp(ctx: CommandContext): Promise<OutboundMessage> {
-  return reply(ctx, buildHelpText(), { renderAs: "text" });
+  return reply(
+    ctx,
+    buildHelpText({
+      fileMemoryEnabled: ctx.loop?.fileMemoryEnabled === true,
+    }),
+    { renderAs: "text" },
+  );
 }
 
 export async function cmdStatus(ctx: CommandContext): Promise<OutboundMessage> {
@@ -349,7 +441,10 @@ export async function cmdStatus(ctx: CommandContext): Promise<OutboundMessage> {
     typeof session?.getHistory === "function"
       ? session.getHistory({ maxMessages: 0 }).length
       : session?.messages?.filter((message: any) => !message.commandMessage).length ?? 0;
-  const maxCompletionTokens = loop?.provider?.generation?.max_tokens ?? loop?.provider?.generation?.maxTokens ?? loop?.config?.agents?.defaults?.maxTokens ?? 8192;
+  const maxCompletionTokens = loop?.provider?.generation?.max_tokens
+    ?? loop?.provider?.generation?.maxTokens
+    ?? loop?.config?.agents?.defaults?.maxTokens
+    ?? DEFAULT_MAX_TOKENS;
 
   return reply(
     ctx,
@@ -370,6 +465,9 @@ export async function cmdStatus(ctx: CommandContext): Promise<OutboundMessage> {
 }
 
 export async function cmdDream(ctx: CommandContext): Promise<OutboundMessage> {
+  if (ctx.loop?.fileMemoryEnabled !== true) {
+    return reply(ctx, FILE_MEMORY_DISABLED_MESSAGE);
+  }
   const loop = ctx.loop;
   const msg = ctx.msg;
   const publish = async (content: string) => {

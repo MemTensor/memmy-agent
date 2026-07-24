@@ -1,7 +1,7 @@
-/** Settings page module. */
-import { useEffect, useRef, useState, type CSSProperties, type Dispatch, type ReactNode } from "react";
+/** Settings page for account, model, token usage, and desktop preferences. */
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type Dispatch, type ReactNode } from "react";
 import { Brain, Palette, Rocket, Settings2, Shield, User, Zap, ArrowRight, ArrowLeft, Bell, ExternalLink, FolderOpen, Info, LogOut, Wrench, Search, Eye, EyeOff, ChevronDown, ChevronUp, ChevronRight, Database, Loader2, CheckCircle2, XCircle, Check, AlertTriangle, ArrowDownToLine, ArrowUpFromLine, MessageSquare, FileText, Sparkles, Mic, Image as ImageIcon } from "lucide-react";
-import type { AppSettingsDto, ByokTokenUsageByKind, ByokTokenUsageKind, ByokTokenUsageSummary, Language, PrivacySettingsDto, TokenUsageDto } from "@memmy/local-api-contracts";
+import type { AppSettingsDto, ByokTokenUsageByKind, ByokTokenUsageKind, ByokTokenUsageSummary, Language, PrivacySettingsDto, TokenQuotaEligibility, TokenUsageDto } from "@memmy/local-api-contracts";
 import { useApiClients } from "../app/providers.js";
 import { resolveGiftTokenUsage } from "../app/routes.js";
 import { useUpdateCoordinator, type UpdateCoordinatorValue, type UpdatePhase } from "../app/update-coordinator.js";
@@ -19,6 +19,7 @@ import {
 import { consumeTokenExhaustedApplyMoreRequest, TOKEN_EXHAUSTED_APPLY_MORE_EVENT } from "../app/token-exhausted-apply-more.js";
 import { getLegalLinkUrl } from "../legal/legal-links.js";
 import { maskAccountIdentifier } from "../utils/mask-account-identifier.js";
+import { isComposingKeyboardEvent } from "../utils/keyboard.js";
 import { openExternalUrl } from "../utils/open-url.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { appActions, type AppAction } from "../state/app-actions.js";
@@ -80,6 +81,14 @@ type UsageLoadStatus = "idle" | "loading" | "ready" | "error";
 type DeveloperAction = "openLogs" | "exportDiagnostics";
 type DeveloperFeedbackTone = "success" | "error";
 type DiagnosticsReportHost = "electron" | "browser";
+
+/** Localized message descriptor for a token quota eligibility state. */
+export interface QuotaEligibilityMessage {
+  /** Message key to render. */
+  key: MessageKey;
+  /** Interpolation values such as date, rejection reason, and request limit. */
+  values?: MessageValues;
+}
 
 /** Contract for developer feedback. */
 interface DeveloperFeedback {
@@ -210,6 +219,11 @@ export interface SettingsPageViewProps {
   onUsageDetailVisibleChange?: (visible: boolean) => void;
 }
 
+/** Returns whether a nickname input key event should save the current draft. */
+export function shouldSaveAccountNicknameOnKeyDown(event: import("react").KeyboardEvent<HTMLInputElement>): boolean {
+  return event.key === "Enter" && !isComposingKeyboardEvent(event);
+}
+
 /**
  * Renders the pure settings-page view.
  *
@@ -248,7 +262,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const [feedbackSubmitting, setFeedbackSubmitting] = useState(false);
   const [feedbackSubmitted, setFeedbackSubmitted] = useState(false);
   const [feedbackError, setFeedbackError] = useState<string | null>(null);
-  const [quotaRequestPending, setQuotaRequestPending] = useState(false);
+  const [quotaEligibility, setQuotaEligibility] = useState<TokenQuotaEligibility | null>(null);
   const [byokUsage, setByokUsage] = useState<ByokTokenUsageSummary>(EMPTY_BYOK_TOKEN_USAGE);
   const [byokUsageStatus, setByokUsageStatus] = useState<UsageLoadStatus>("idle");
   const preserveSuccessfulTestHydrateRef = useRef(false);
@@ -338,7 +352,13 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const { usagePercent, isTokenLow } = resolveGiftTokenUsage(giftUsedTokens, giftTotalTokens, giftRemainingTokens);
   const showGiftQuota = !isByokMode;
   const canApplyMoreByPromotion = bootstrap?.promotions?.applyMore ?? true;
+  const quotaRequestPending = quotaEligibility?.state === "pending";
+  const quotaApplicationBlocked = quotaEligibility !== null && quotaEligibility.state !== "available";
   const applyMoreButtonLabel = quotaRequestPending ? t("settings.token.applyMore.pending") : t("settings.token.applyMore");
+  const quotaEligibilityMessage = resolveQuotaEligibilityMessage(quotaEligibility, language);
+  const quotaEligibilityText = quotaEligibilityMessage
+    ? t(quotaEligibilityMessage.key, quotaEligibilityMessage.values)
+    : null;
   const customUsedTokens = byokUsage.totalTokens;
   const tokenExpiryText = formatTokenExpiry(tokenUsage.expiresAt, t);
   const primaryModelId = state.modelConfig.configured ? modelId || state.modelConfig.model : "";
@@ -370,6 +390,23 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     && canSaveEmbeddingModelConfig(embeddingMode, embFormValues, embValidation);
   const patchMemoryModel = (patch: Partial<ModelConfig>) => setMemoryModel((current) => ({ ...current, ...patch }));
   const patchSkillModel = (patch: Partial<ModelConfig>) => setSkillModel((current) => ({ ...current, ...patch }));
+
+  /** Keeps the last known state on failure; submission still receives server-side validation. */
+  const refreshQuotaEligibility = useCallback(async (): Promise<TokenQuotaEligibility | null> => {
+    if (!tokenQuotaClient || !isAccountMode) {
+      setQuotaEligibility(null);
+      return null;
+    }
+
+    try {
+      const nextEligibility = await tokenQuotaClient.getEligibility();
+      setQuotaEligibility(nextEligibility);
+      return nextEligibility;
+    } catch (error) {
+      console.warn("load token quota eligibility failed", error);
+      return null;
+    }
+  }, [isAccountMode, tokenQuotaClient]);
 
   useEffect(() => {
     if (preserveSuccessfulTestHydrateRef.current) {
@@ -430,37 +467,42 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   }, [configClient, dispatch, isAccountMode]);
 
   useEffect(() => {
-    if (!quotaRequestPending || !configClient || !isAccountMode) {
+    void refreshQuotaEligibility();
+  }, [refreshQuotaEligibility]);
+
+  useEffect(() => {
+    if (quotaApplicationBlocked) {
+      setShowApplyMore(false);
+    }
+  }, [quotaApplicationBlocked]);
+
+  useEffect(() => {
+    if (!quotaRequestPending || !isAccountMode) {
       return undefined;
     }
 
-    let cancelled = false;
-    const refreshPendingQuota = async () => {
-      try {
-        const nextTokenUsage = await configClient.getTokenUsage();
-        if (cancelled) {
+    /** Pending requests refresh on window focus instead of fixed-interval polling. */
+    const handleWindowFocus = () => {
+      void refreshQuotaEligibility().then(async (nextEligibility) => {
+        if (!nextEligibility || nextEligibility.state === "pending" || !configClient) {
           return;
         }
 
-        dispatch(appActions.tokenUsageUpdated(nextTokenUsage));
-        if (nextTokenUsage.totalTokens > giftTotalTokens || nextTokenUsage.remainingTokens > giftRemainingTokens) {
-          setQuotaRequestPending(false);
+        try {
+          const nextTokenUsage = await configClient.getTokenUsage();
+          dispatch(appActions.tokenUsageUpdated(nextTokenUsage));
+        } catch (error) {
+          console.warn("refresh reviewed token quota failed", error);
         }
-      } catch (error) {
-        console.warn("refresh pending token quota failed", error);
-      }
+      });
     };
 
-    void refreshPendingQuota();
-    const timer = window.setInterval(() => {
-      void refreshPendingQuota();
-    }, 15_000);
+    window.addEventListener("focus", handleWindowFocus);
 
     return () => {
-      cancelled = true;
-      window.clearInterval(timer);
+      window.removeEventListener("focus", handleWindowFocus);
     };
-  }, [configClient, dispatch, giftRemainingTokens, giftTotalTokens, isAccountMode, quotaRequestPending]);
+  }, [configClient, dispatch, isAccountMode, quotaRequestPending, refreshQuotaEligibility]);
 
   useEffect(() => {
     let cancelled = false;
@@ -504,7 +546,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   }, []);
 
   useEffect(() => {
-    if (typeof window === "undefined" || !canApplyMoreByPromotion) {
+    if (typeof window === "undefined" || !canApplyMoreByPromotion || quotaApplicationBlocked) {
       return;
     }
 
@@ -520,7 +562,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     return () => {
       window.removeEventListener(TOKEN_EXHAUSTED_APPLY_MORE_EVENT, openRequestedApplyMore);
     };
-  }, [canApplyMoreByPromotion]);
+  }, [canApplyMoreByPromotion, quotaApplicationBlocked]);
 
   useEffect(() => {
     if (typeof persistedMenuBarIconEnabled === "boolean") {
@@ -820,6 +862,9 @@ export function SettingsPageView(props: SettingsPageViewProps) {
    * Opens the "Request more quota" feedback modal, resetting the previous input and state.
    */
   function openApplyMore() {
+    if (quotaApplicationBlocked) {
+      return;
+    }
     setFeedbackText("");
     setFeedbackSubmitting(false);
     setFeedbackSubmitted(false);
@@ -840,7 +885,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
    * Returns early when the text is too short; disables the button during submission; on success shows the success state and clears the input.
    */
   async function handleSubmitFeedback() {
-    if (quotaRequestPending || !canSubmitFeedback(feedbackText) || feedbackSubmitting) {
+    if (quotaApplicationBlocked || !canSubmitFeedback(feedbackText) || feedbackSubmitting) {
       return;
     }
     setFeedbackSubmitting(true);
@@ -848,9 +893,16 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     try {
       const result = await tokenQuotaClient?.requestQuota(feedbackText);
       if (result?.status === "pending") {
-        setQuotaRequestPending(true);
+        setQuotaEligibility((current) => ({
+          state: "pending",
+          requestCount: Math.min(5, (current?.requestCount ?? 0) + 1),
+          maxRequestCount: 5,
+          nextAllowedAtEpochMs: null,
+          latestRequestStatus: "pending",
+          latestReviewNote: null
+        }));
       } else if (result?.status === "approved") {
-        setQuotaRequestPending(false);
+        await refreshQuotaEligibility();
         try {
           const nextTokenUsage = await configClient?.getTokenUsage();
           if (nextTokenUsage) {
@@ -863,8 +915,21 @@ export function SettingsPageView(props: SettingsPageViewProps) {
       setFeedbackSubmitted(true);
       setFeedbackText("");
     } catch (error) {
+      const nextEligibility = await refreshQuotaEligibility();
+      if (nextEligibility && nextEligibility.state !== "available") {
+        setFeedbackSubmitted(false);
+        setFeedbackText("");
+        return;
+      }
       if (isPendingQuotaRequestError(error)) {
-        setQuotaRequestPending(true);
+        setQuotaEligibility({
+          state: "pending",
+          requestCount: 1,
+          maxRequestCount: 5,
+          nextAllowedAtEpochMs: null,
+          latestRequestStatus: "pending",
+          latestReviewNote: null
+        });
         setFeedbackSubmitted(false);
         setFeedbackText("");
         return;
@@ -1113,7 +1178,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
                       value={nicknameDraft}
                       onChange={(event) => setNicknameDraft(event.target.value)}
                       onKeyDown={(event) => {
-                        if (event.key === "Enter") {
+                        if (shouldSaveAccountNicknameOnKeyDown(event)) {
                           void saveNickname();
                         }
                         if (event.key === "Escape") {
@@ -1491,23 +1556,29 @@ export function SettingsPageView(props: SettingsPageViewProps) {
               />
             </div>
 
-            {isTokenLow && showGiftQuota && (
+            {(isTokenLow || quotaEligibilityText) && showGiftQuota && (
               <div className="flex items-center gap-2.5 p-4 bg-status-error-soft rounded-card border border-status-error/20">
                 <Info size={14} className="text-status-error mt-0.5 shrink-0" />
                 <p className="flex-1 text-xs text-status-error/85 leading-relaxed">
-                  {t("settings.token.lowHint")}
+                  {quotaEligibilityText ?? t("settings.token.lowHint")}
                 </p>
-                {/* Only the "Request more" button is gated by the Nacos promotions.applyMore flag; the low-balance hint text keeps its original always-shown logic. When the flag can't be read, show it by default (preserving current behavior). */}
-                {canApplyMoreByPromotion && (
+                {quotaRequestPending ? (
                   <button
                     type="button"
-                    onClick={openApplyMore}
-                    disabled={quotaRequestPending}
+                    disabled
                     className="shrink-0 px-3 py-1.5 text-xs font-normal text-white bg-status-error rounded-btn hover:opacity-90 transition-opacity cursor-pointer disabled:opacity-55 disabled:cursor-not-allowed"
                   >
                     {applyMoreButtonLabel}
                   </button>
-                )}
+                ) : canApplyMoreByPromotion && isTokenLow && (!quotaEligibility || quotaEligibility.state === "available") ? (
+                  <button
+                    type="button"
+                    onClick={openApplyMore}
+                    className="shrink-0 px-3 py-1.5 text-xs font-normal text-white bg-status-error rounded-btn hover:opacity-90 transition-opacity cursor-pointer"
+                  >
+                    {applyMoreButtonLabel}
+                  </button>
+                ) : null}
               </div>
             )}
 
@@ -1779,7 +1850,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
                   <button
                     type="button"
                     onClick={() => void handleSubmitFeedback()}
-                    disabled={quotaRequestPending || !canSubmitFeedback(feedbackText) || feedbackSubmitting}
+                    disabled={quotaApplicationBlocked || !canSubmitFeedback(feedbackText) || feedbackSubmitting}
                     className="flex-1 py-3 text-sm text-white bg-action-sky rounded-btn hover:bg-action-sky-hover transition-colors font-semibold cursor-pointer shadow-md disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     {t("settings.token.applyMore.submit")}
@@ -3058,6 +3129,84 @@ export function isPendingQuotaRequestError(error: unknown): boolean {
   }
 
   return /\u5f85\u5ba1\u6279|\u91cd\u590d\u63d0\u4ea4|\u5df2\u6709.*\u7533\u8bf7|pending|duplicate/i.test(error.message);
+}
+
+/**
+ * Converts cloud eligibility into a settings-page message.
+ *
+ * @param eligibility Current account eligibility; null when it has not loaded successfully.
+ * @param language UI language used to format local date and time.
+ * @returns The message descriptor, or null when the account can apply.
+ */
+export function resolveQuotaEligibilityMessage(
+  eligibility: TokenQuotaEligibility | null,
+  language: "zh-CN" | "en-US"
+): QuotaEligibilityMessage | null {
+  if (!eligibility || eligibility.state === "available") {
+    return null;
+  }
+  if (eligibility.state === "pending") {
+    return { key: "settings.token.applyMore.pendingDesc" };
+  }
+
+  const reviewNote = normalizeQuotaReviewNote(eligibility.latestReviewNote);
+  if (eligibility.state === "limit_reached") {
+    const values = { count: eligibility.maxRequestCount };
+    if (eligibility.latestRequestStatus === "approved") {
+      return { key: "settings.token.applyMore.limitApproved", values };
+    }
+    if (eligibility.latestRequestStatus === "rejected" && reviewNote) {
+      return {
+        key: "settings.token.applyMore.limitRejectedWithReason",
+        values: { ...values, reason: reviewNote }
+      };
+    }
+    if (eligibility.latestRequestStatus === "rejected") {
+      return { key: "settings.token.applyMore.limitRejected", values };
+    }
+    return { key: "settings.token.applyMore.limit", values };
+  }
+
+  if (eligibility.nextAllowedAtEpochMs === null) {
+    return { key: "settings.token.applyMore.cooldown" };
+  }
+
+  const values = {
+    nextAllowedAt: formatQuotaNextAllowedAt(eligibility.nextAllowedAtEpochMs, language)
+  };
+  if (eligibility.latestRequestStatus === "approved") {
+    return { key: "settings.token.applyMore.cooldownApproved", values };
+  }
+  if (eligibility.latestRequestStatus === "rejected" && reviewNote) {
+    return {
+      key: "settings.token.applyMore.cooldownRejectedWithReason",
+      values: { ...values, reason: reviewNote }
+    };
+  }
+  if (eligibility.latestRequestStatus === "rejected") {
+    return { key: "settings.token.applyMore.cooldownRejected", values };
+  }
+  return { key: "settings.token.applyMore.cooldownAt", values };
+}
+
+function normalizeQuotaReviewNote(value: string | null): string | null {
+  const normalized = value?.trim().replace(/[。！？.!?]+$/u, "") ?? "";
+  return normalized || null;
+}
+
+function formatQuotaNextAllowedAt(epochMs: number, language: "zh-CN" | "en-US"): string {
+  const date = new Date(epochMs);
+  if (language === "zh-CN") {
+    const pad = (value: number) => String(value).padStart(2, "0");
+    return `${date.getMonth() + 1} \u6708 ${date.getDate()} \u65e5 ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  }
+
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit"
+  }).format(date);
 }
 
 /**

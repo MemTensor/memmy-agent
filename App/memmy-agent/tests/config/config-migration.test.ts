@@ -280,29 +280,41 @@ describe("config migrations", () => {
     expect(saved.memmyMemory.profiles).toBeUndefined();
   });
 
-  it("migrates legacy my tool keys", () => {
-    const config = loadConfig(tmpConfig({ tools: { myEnabled: false, mySet: true } }));
+  it("ignores retired my tool config fields", () => {
+    const config = loadConfig(
+      tmpConfig({
+        tools: {
+          my: { enable: true, allowSet: true },
+          myEnabled: false,
+          mySet: true,
+          webSearch: { provider: "brave" },
+        },
+      }),
+    );
 
-    expect(config.tools.my.enable).toBe(false);
-    expect(config.tools.my.allowSet).toBe(true);
+    expect(Object.prototype.hasOwnProperty.call(config.tools, "my")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(config.tools, "myEnabled")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(config.tools, "mySet")).toBe(false);
+    expect(config.tools.webSearch.provider).toBe("brave");
   });
 
-  it("rewrites legacy my tool keys on save", () => {
-    const configPath = tmpConfig({ tools: { myEnabled: false, mySet: true } });
+  it("removes retired my tool config fields on save", () => {
+    const configPath = tmpConfig({
+      tools: {
+        my: { enable: true, allowSet: true },
+        myEnabled: false,
+        mySet: true,
+        webSearch: { provider: "brave" },
+      },
+    });
 
     saveConfig(loadConfig(configPath), configPath);
     const tools = YAML.parse(fs.readFileSync(configPath, "utf8")).tools;
 
+    expect(tools).not.toHaveProperty("my");
     expect(tools).not.toHaveProperty("myEnabled");
     expect(tools).not.toHaveProperty("mySet");
-    expect(tools.my).toEqual({ enable: false, allowSet: true });
-  });
-
-  it("lets new my tool keys take precedence over legacy keys", () => {
-    const config = loadConfig(tmpConfig({ tools: { myEnabled: false, mySet: false, my: { enable: true, allowSet: true } } }));
-
-    expect(config.tools.my.enable).toBe(true);
-    expect(config.tools.my.allowSet).toBe(true);
+    expect(tools.webSearch.provider).toBe("brave");
   });
 
   it("does not crash onboard with legacy memoryWindow", async () => {

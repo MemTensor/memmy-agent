@@ -8,6 +8,7 @@ import {
 import { GenerationSettings, LLMProvider, LLMResponse } from "../../../src/providers/base.js";
 import { FallbackProvider } from "../../../src/providers/fallback-provider.js";
 import { ProviderSnapshot, buildProviderSnapshot, providerSignature } from "../../../src/providers/factory.js";
+import { DEFAULT_MAX_TOKENS } from "../../../src/token-budget.js";
 
 function makeResponse(
   content = "ok",
@@ -173,6 +174,60 @@ describe("FallbackProvider configuration", () => {
     });
 
     expect(buildProviderSnapshot(config).contextWindowTokens).toBe(64_000);
+  });
+
+  it("inline fallbacks inherit the primary default maxTokens", () => {
+    const config = Config.fromObject({
+      agents: {
+        defaults: {
+          model: "openai/gpt-4.1",
+          provider: "openai",
+          fallbackModels: [{ model: "deepseek/deepseek-chat", provider: "deepseek" }],
+        },
+      },
+      providers: {
+        openai: { apiKey: "primary-key" },
+        deepseek: { apiKey: "fallback-key" },
+      },
+    });
+
+    const provider = buildProviderSnapshot(config).provider as FallbackProvider;
+
+    expect(provider.generation.maxTokens).toBe(DEFAULT_MAX_TOKENS);
+    expect(provider.fallbackPresets[0].maxTokens).toBe(DEFAULT_MAX_TOKENS);
+  });
+
+  it("named fallback presets preserve an explicit maxTokens value during failover", async () => {
+    const config = Config.fromObject({
+      agents: {
+        defaults: {
+          model: "openai/gpt-4.1",
+          provider: "openai",
+          fallbackModels: ["small"],
+        },
+      },
+      modelPresets: {
+        small: { model: "deepseek/deepseek-chat", provider: "deepseek", maxTokens: 4096 },
+      },
+      providers: {
+        openai: { apiKey: "primary-key" },
+        deepseek: { apiKey: "fallback-key" },
+      },
+    });
+    const configured = buildProviderSnapshot(config).provider as FallbackProvider;
+    const fallbackProvider = new FakeProvider("fallback", makeResponse("fallback ok"));
+    const provider = new FallbackProvider({
+      primary: new FakeProvider("primary", errorResponse()),
+      fallbackPresets: configured.fallbackPresets,
+      providerFactory: () => fallbackProvider,
+    });
+
+    await provider.chat({
+      messages: [{ role: "user", content: "hi" }],
+      maxTokens: DEFAULT_MAX_TOKENS,
+    });
+
+    expect(fallbackProvider.chatCalls[0].maxTokens).toBe(4096);
   });
 
   it("provider snapshots default to the configured default context window", () => {

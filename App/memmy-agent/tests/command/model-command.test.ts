@@ -13,7 +13,7 @@ import {
   registerBuiltinCommands,
 } from "../../src/command/builtin.js";
 import { CommandContext, CommandRouter } from "../../src/command/router.js";
-import { ModelPresetConfig } from "../../src/config/schema.js";
+import { Config, ModelPresetConfig } from "../../src/config/schema.js";
 
 function provider(defaultModel: string, maxTokens = 123): any {
   return {
@@ -25,6 +25,7 @@ function provider(defaultModel: string, maxTokens = 123): any {
 function makeLoop(): AgentLoop {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-model-command-"));
   return new AgentLoop({
+    config: new Config({ fileMemory: { enabled: true } }),
     bus: new MessageBus(),
     provider: provider("base-model", 123),
     workspace: root,
@@ -81,13 +82,6 @@ describe("model command", () => {
     expect(out.content).toContain("Available presets: `default`, `fast`");
     expect(loop.modelPreset).toBeNull();
     expect(loop.model).toBe("base-model");
-  });
-
-  it("does not depend on my.allow_set", async () => {
-    const loop = makeLoop();
-    expect(loop.toolsConfig.my.allowSet).toBe(false);
-    await cmdModel(ctx(loop, "/model fast", "fast"));
-    expect(loop.modelPreset).toBe("fast");
   });
 
   it("is registered as exact and prefix and appears in help and palette", async () => {

@@ -29,7 +29,8 @@ import { encodeAgentImage, type AgentImageMime } from "../lib/agent-image-encode
 import { formatConversationTitleForDisplay } from "../lib/format-conversation-title.js";
 import { useTaskBus, type TaskBusAgentMessage } from "../lib/task-bus.js";
 import type { AppAction } from "../state/app-actions.js";
-import { agentActions } from "../state/app-actions.js";
+import { agentActions, appActions, createAgentOperationError } from "../state/app-actions.js";
+import type { AgentChatMessage, AgentState } from "../state/agent-chat-slice.js";
 import { useAppState } from "../state/app-state.js";
 import { isComposingKeyboardEvent } from "../utils/keyboard.js";
 import {
@@ -56,7 +57,16 @@ import { AgentAttachmentCard, splitAgentAttachmentName } from "./agent-file-atta
 import { AgentThreadMessages, ChatImageLightbox } from "./agent-thread-messages.js";
 import { AppFrame } from "./app-frame.js";
 import { mergeVoiceTranscript, useAsrRecorder } from "./asr-recorder.js";
-import { consumePendingFirstEncounterTaskLaunch } from "./first-encounter-task-launch.js";
+import { FirstEncounterRelayChallenge, FirstEncounterRelayOptIn, firstEncounterFollowUpMode, hasDetectedRelayAgents, relayAgentOptions } from "./first-encounter-relay-challenge.js";
+import {
+  consumeFirstEncounterRelayArm,
+  consumePendingFirstEncounterTaskLaunch,
+  readFirstEncounterRelayChat,
+  readFirstEncounterRelayReadyChat,
+  writeFirstEncounterRelayChat,
+  writeFirstEncounterRelayReadyChat,
+  writePendingFirstEncounterTaskLaunch
+} from "./first-encounter-task-launch.js";
 import { HistoryDagPanel, type HistoryDagPanelState } from "./history-dag-panel.js";
 import { Mic, Pause, Plus, Send } from "./memory/memory-prototype-icons.js";
 import { ArrowDown, RotateCw, X } from "lucide-react";
@@ -81,8 +91,6 @@ const SLASH_COMMAND_RETRY_DELAYS_MS = [300, 1000, 2500];
  * immediately, regardless of what triggered that scroll event.
  */
 const AGENT_CONVERSATION_USER_SCROLL_INTENT_MS = 600;
-/** Definition for agent error auto dismiss ms. */
-export const AGENT_ERROR_AUTO_DISMISS_MS = 5000;
 /** Definition for stop confirmation grace ms. */
 export const STOP_CONFIRMATION_GRACE_MS = 8000;
 /** Definition for composer error auto dismiss ms. */
@@ -95,7 +103,10 @@ const TRANSLATABLE_AGENT_ERROR_KEYS = new Set<MessageKey>([
   "home.media.error.sendTooManyAttachments",
   "home.media.error.sendReadFailed",
   "home.media.error.sendFailed",
-  "home.media.error.messageTooBig"
+  "home.media.error.messageTooBig",
+  "home.agent.messageNotRecorded",
+  "home.agent.executionInterrupted",
+  "home.agent.recoveryTimeout"
 ]);
 export const AGENT_ATTACHMENT_ACCEPT = agentAttachmentAccept();
 export const AGENT_MEDIA_ACCEPT = AGENT_ATTACHMENT_ACCEPT;
@@ -154,7 +165,8 @@ export interface RequestAgentStatusInput {
 
 export interface RequestNewSessionResetInput {
   chatId: string | null;
-  connection: Pick<MemmyAgentWebSocketConnection, "sendMessage"> | null;
+  connection: Pick<MemmyAgentWebSocketConnection, "getReadyGeneration" | "sendMessage"> | null;
+  canSubmitOrdinaryMessage: boolean;
   ensureChatSubscription?: (chatId: string) => void;
   clearInput: () => void;
   clearPendingMedia: () => void;
@@ -164,7 +176,7 @@ export interface RequestNewSessionResetInput {
 
 export interface SubmitAgentComposerMessageInput {
   chatId: string | null;
-  connection: Pick<MemmyAgentWebSocketConnection, "newChat" | "sendMessage"> | null;
+  connection: Pick<MemmyAgentWebSocketConnection, "getReadyGeneration" | "newChat" | "sendMessage"> | null;
   ensureChatSubscription?: (chatId: string) => void;
   content: string;
   language?: MemmyAgentUiLanguage;
@@ -176,6 +188,9 @@ export interface SubmitAgentComposerMessageInput {
   setComposerMediaError?: (message: string | null) => void;
   clearComposer: () => void;
   onNewChatMessageSent?: (chatId: string) => void;
+  chatSelectionEpoch?: number;
+  getChatSelectionEpoch?: () => number;
+  scopeKey?: string;
 }
 
 export interface RequestAgentStopInput {
@@ -465,17 +480,22 @@ export function requestAgentStatusPanel(input: RequestAgentStatusInput): boolean
 }
 
 export function requestNewSessionReset(input: RequestNewSessionResetInput): boolean {
-  input.clearInput();
-  input.clearPendingMedia();
-  input.dismissSlashMenu();
-
-  if (!input.chatId || !input.connection) {
+  const generation = input.connection?.getReadyGeneration() ?? null;
+  if (!input.canSubmitOrdinaryMessage || !input.chatId || !input.connection || generation === null) {
     input.focusInput?.();
     return false;
   }
 
+  try {
+    input.connection.sendMessage({ chatId: input.chatId, content: "/new" }, generation);
+  } catch {
+    input.focusInput?.();
+    return false;
+  }
   input.ensureChatSubscription?.(input.chatId);
-  input.connection.sendMessage({ chatId: input.chatId, content: "/new" });
+  input.clearInput();
+  input.clearPendingMedia();
+  input.dismissSlashMenu();
   input.focusInput?.();
   return true;
 }
@@ -485,19 +505,28 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
   if ((!text && !input.pendingAttachments.length) || !input.connection) {
     return false;
   }
+  const expectedGeneration = input.connection.getReadyGeneration();
+  if (expectedGeneration === null) {
+    return false;
+  }
   if (input.pendingAttachments.some((item) => !isPendingAttachmentReadyForUpload(item))) {
     input.setComposerMediaError?.("home.media.error.sendReadFailed");
     return false;
   }
 
   let chatId = input.chatId;
+  const capturedChatSelectionEpoch = input.chatSelectionEpoch ?? 0;
   const createdNewChat = !chatId;
   if (!chatId) {
     input.setCreatingChat?.(true);
     try {
-      chatId = await input.connection.newChat();
+      chatId = await input.connection.newChat(expectedGeneration);
     } catch (error) {
-      input.dispatch(agentActions.failed(readableError(error)));
+      input.dispatch(agentActions.operationFailed("chat", createAgentOperationError({
+        source: "new-chat",
+        message: readableError(error),
+        ...(input.scopeKey ? { scopeKey: input.scopeKey } : {})
+      })));
       return false;
     } finally {
       input.setCreatingChat?.(false);
@@ -542,22 +571,41 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
     return false;
   }
 
+  const focus = (input.getChatSelectionEpoch?.() ?? capturedChatSelectionEpoch) === capturedChatSelectionEpoch;
+  if (focus) {
+    input.ensureChatSubscription?.(chatId);
+  }
+  try {
+    input.connection.sendMessage({
+      chatId,
+      content: text,
+      ...(input.language ? { language: input.language } : {}),
+      media: uploadedAttachments
+    }, expectedGeneration);
+  } catch (error) {
+    if (createdNewChat) {
+      input.dispatch(agentActions.transientSendFailed(chatId));
+    }
+    input.dispatch(agentActions.operationFailed("chat", createAgentOperationError({
+      source: "send",
+      message: readableError(error),
+      chatId,
+      ...(input.scopeKey ? { scopeKey: input.scopeKey } : {})
+    })));
+    return false;
+  }
+  const deliveryUncertain = input.connection.getReadyGeneration() !== expectedGeneration;
   input.track({ name: "agent_send_message", params: { page_path: "/main" }, consentTier: "basic" });
-  if (createdNewChat) {
+  if (createdNewChat && focus) {
     input.dispatch(agentActions.newChatCreated(chatId));
   }
   input.dispatch(agentActions.userMessageQueued({
     chatId,
     content: text,
-    media: uploadedAttachments.map((item) => ({ url: item.url, name: item.name, kind: item.kind, path: item.path }))
+    media: uploadedAttachments.map((item) => ({ url: item.url, name: item.name, kind: item.kind, path: item.path })),
+    focus,
+    deliveryUncertain
   }));
-  input.ensureChatSubscription?.(chatId);
-  input.connection.sendMessage({
-    chatId,
-    content: text,
-    ...(input.language ? { language: input.language } : {}),
-    media: uploadedAttachments
-  });
   input.clearComposer();
   if (createdNewChat) {
     input.onNewChatMessageSent?.(chatId);
@@ -577,6 +625,8 @@ export function HomePage() {
   const { track } = useAnalytics();
   const { syncAgentConversation } = useTaskBus();
   const { connection, ensureChatSubscription } = useAgentRuntimeBridge();
+  const chatSelectionEpochRef = useRef(state.agent.chatSelectionEpoch);
+  chatSelectionEpochRef.current = state.agent.chatSelectionEpoch;
   const [slashCommands, setSlashCommands] = useState<MemmyAgentSlashCommand[]>([]);
   const slashCommandsRef = useRef<MemmyAgentSlashCommand[]>([]);
   const slashCommandsInFlightRef = useRef(false);
@@ -590,6 +640,12 @@ export function HomePage() {
   const [lastCompactionPanel, setLastCompactionPanel] = useState<StatusPanelState>({ open: false });
   const [historyDagPanel, setHistoryDagPanel] = useState<HistoryDagPanelState>({ open: false });
   const [isCreatingChat, setIsCreatingChat] = useState(false);
+  const [firstEncounterRelayChatId, setFirstEncounterRelayChatId] = useState<string | null>(() => (
+    readFirstEncounterRelayChat(typeof window === "undefined" ? undefined : window.sessionStorage)
+  ));
+  const [firstEncounterRelayReadyChatId, setFirstEncounterRelayReadyChatId] = useState<string | null>(() => (
+    readFirstEncounterRelayReadyChat(typeof window === "undefined" ? undefined : window.sessionStorage)
+  ));
   const [isComposerSingleLine, setIsComposerSingleLine] = useState(true);
   const composerDrafts = state.agent.composerDraftsByScope;
   const pendingAttachmentsByScope = state.agent.composerPendingAttachmentsByScope;
@@ -633,6 +689,86 @@ export function HomePage() {
       state.agent.optimisticSendingByChatId[state.agent.currentChatId]
     )
   );
+  const firstEncounterFollowUp = firstEncounterFollowUpMode(state.bootstrap?.onboarding.scanPermission ?? "unset");
+  const isFirstEncounterFollowUpChat = Boolean(
+    firstEncounterRelayChatId
+    && state.agent.currentChatId === firstEncounterRelayChatId
+    && firstEncounterFollowUp
+  );
+  const firstEncounterRelayAnswerMessageId = isFirstEncounterFollowUpChat
+    ? firstCompletedAssistantAnswerMessageId(state.agent.messages)
+    : null;
+  const firstEncounterRelayAnchorMessageId = isFirstEncounterFollowUpChat && firstEncounterRelayReadyChatId === firstEncounterRelayChatId
+    ? firstTurnTerminalMessageId(state.agent.messages)
+    : null;
+  const agentSourceOptions = state.agentSources.items.map((source) => ({
+    sourceId: source.sourceId,
+    displayName: source.displayName,
+    available: source.available,
+    status: source.status
+  }));
+  const relayAgents = relayAgentOptions(agentSourceOptions);
+  const hasDetectedAgents = hasDetectedRelayAgents(agentSourceOptions);
+
+  const rememberFirstEncounterRelayChatIfArmed = useCallback((chatId: string) => {
+    const storage = typeof window === "undefined" ? undefined : window.sessionStorage;
+    if (!consumeFirstEncounterRelayArm(storage)) {
+      return;
+    }
+    writeFirstEncounterRelayChat(storage, chatId);
+    setFirstEncounterRelayChatId(chatId);
+  }, []);
+
+  useEffect(() => {
+    if (!isFirstEncounterFollowUpChat || !firstEncounterRelayChatId) {
+      return;
+    }
+    if (firstEncounterRelayReadyChatId === firstEncounterRelayChatId) {
+      return;
+    }
+    if (isCurrentAgentRunning || !firstEncounterRelayAnswerMessageId || !firstTurnTerminalMessageId(state.agent.messages)) {
+      return;
+    }
+
+    // Only a genuine turn_end can unlock the card. This deliberately rejects
+    // partial text, idle snapshots, and user-stopped tasks.
+    if (state.agent.lastTaskCompletion?.chatId === firstEncounterRelayChatId && !firstTurnWasStoppedByUser(state.agent.messages)) {
+      writeFirstEncounterRelayReadyChat(
+        typeof window === "undefined" ? undefined : window.sessionStorage,
+        firstEncounterRelayChatId
+      );
+      setFirstEncounterRelayReadyChatId(firstEncounterRelayChatId);
+    }
+  }, [
+    firstEncounterRelayAnswerMessageId,
+    firstEncounterRelayChatId,
+    firstEncounterRelayReadyChatId,
+    isCurrentAgentRunning,
+    isFirstEncounterFollowUpChat,
+    state.agent.lastTaskCompletion?.chatId,
+    state.agent.messages
+  ]);
+
+  const openFirstEncounterRelayAgent = useCallback(async (sourceId: string, prompt: string): Promise<boolean> => {
+    try {
+      const result = await window.memmy?.openAgentTool?.(sourceId, prompt);
+      return result?.opened === true;
+    } catch {
+      return false;
+    }
+  }, []);
+
+  const openFirstEncounterRelayConnections = useCallback(() => {
+    dispatch(appActions.navigate("/memory-sources"));
+  }, [dispatch]);
+
+  const firstEncounterRelayContent = firstEncounterRelayAnchorMessageId && hasDetectedAgents
+    ? firstEncounterFollowUp === "relay"
+      ? <FirstEncounterRelayChallenge agents={relayAgents} onOpenAgent={openFirstEncounterRelayAgent} />
+      : firstEncounterFollowUp === "connect"
+        ? <FirstEncounterRelayOptIn onOpenConnections={openFirstEncounterRelayConnections} />
+        : null
+    : null;
 
   useEffect(() => {
     const stored = readStoredAgentRestartState();
@@ -760,12 +896,18 @@ export function HomePage() {
 
     const focusedChatId = readFocusedAgentChatId();
     if (focusedChatId) {
-      loadAgentThread(clients.memmyAgent, dispatch, focusedChatId, undefined, { tolerateMissingThread: true });
+      loadAgentThread(clients.memmyAgent, dispatch, focusedChatId, undefined, {
+        tolerateMissingThread: true,
+        taskState: state.agent
+      });
     }
   }, [clients, dispatch, state.agent.blankDraftActive]);
 
   useEffect(() => {
-    if (!clients?.memmyAgent || !connection || state.agent.connectionStatus === "error") {
+    if (!clients?.memmyAgent
+      || !connection
+      || state.agent.connectionStatus !== "connected"
+      || state.agent.recoveringGeneration !== null) {
       return;
     }
 
@@ -787,9 +929,35 @@ export function HomePage() {
       track,
       setCreatingChat: setIsCreatingChat,
       clearComposer: () => undefined,
-      onNewChatMessageSent: (chatId) => refreshAgentTaskList(memmyAgent, dispatch, { expectedChatId: chatId, reason: "new-chat" })
+      chatSelectionEpoch: state.agent.chatSelectionEpoch,
+      getChatSelectionEpoch: () => chatSelectionEpochRef.current,
+      scopeKey: agentChatScopeKey(null, state.agent.newChatRequestId),
+      onNewChatMessageSent: (chatId) => {
+        rememberFirstEncounterRelayChatIfArmed(chatId);
+        refreshAgentTaskList(memmyAgent, dispatch, {
+          expectedChatId: chatId,
+          reason: "new-chat",
+          state: state.agent
+        });
+      }
+    }).then((sent) => {
+      if (!sent) {
+        writePendingFirstEncounterTaskLaunch(
+          typeof window === "undefined" ? undefined : window.sessionStorage,
+          pendingPrompt
+        );
+      }
     });
-  }, [clients, connection, dispatch, ensureChatSubscription, language, state.agent.connectionStatus, track]);
+  }, [
+    clients,
+    connection,
+    dispatch,
+    ensureChatSubscription,
+    language,
+    rememberFirstEncounterRelayChatIfArmed,
+    state.agent,
+    track
+  ]);
 
   useEffect(() => {
     if (lastChatScopeKeyRef.current === null) {
@@ -938,8 +1106,23 @@ export function HomePage() {
   const visibleSlashCommands = buildVisibleSlashCommands(slashCommandsWithLocal, state.agent.isSending, stopSlashCommand);
   const filteredSlashCommands = slashQuery == null ? [] : filterSlashCommands(visibleSlashCommands, slashQuery, recentSlashCommands);
   const slashMenuOpen = filteredSlashCommands.length > 0;
-  const statusText = agentStatusText(state.agent.connectionStatus, state.agent.modelName, t);
-  const agentError = agentErrorText(state.agent.error, t);
+  const displayConnectionStatus = state.agent.recoveryKind === "initial"
+    ? "connecting"
+    : state.agent.recoveryKind === "reconnect"
+      ? "reconnecting"
+      : state.agent.connectionStatus;
+  const statusText = agentStatusText(displayConnectionStatus, state.agent.modelName, t);
+  const chatOperationError = state.agent.operationErrorsBySurface.chat;
+  const visibleChatOperationError = chatOperationError
+    && (chatOperationError.scopeKey
+      ? chatOperationError.scopeKey === chatScopeKey
+      : !chatOperationError.chatId || chatOperationError.chatId === state.agent.currentChatId)
+    ? chatOperationError
+    : null;
+  const agentError = agentErrorText(visibleChatOperationError?.message ?? state.agent.connectionError, t);
+  const deliveryUncertain = state.agent.currentChatId
+    ? Boolean(state.agent.deliveryUncertainByChatId[state.agent.currentChatId])
+    : false;
   const isAccountMode = state.bootstrap?.app.userMode === "account";
   const sanitizePlatformApiErrors = isAccountMode;
   const hasBlockedPendingMedia = pendingAttachments.some((item) => item.status !== "ready");
@@ -947,22 +1130,14 @@ export function HomePage() {
   const stopInFlight = state.agent.currentChatId ? Boolean(state.agent.stopInFlightByChatId[state.agent.currentChatId]) : false;
   const composerSubmitDisabled = isCurrentAgentRunning
     ? stopInFlight
-    : stopInFlight || !hasComposerPayload || hasBlockedPendingMedia || !connection || isCreatingChat || state.agent.connectionStatus === "error";
+    : stopInFlight
+      || !hasComposerPayload
+      || hasBlockedPendingMedia
+      || !connection
+      || isCreatingChat
+      || state.agent.connectionStatus !== "connected"
+      || state.agent.recoveringGeneration !== null;
   const centerComposerControls = isComposerSingleLine && pendingAttachments.length === 0;
-
-  // Agent channel errors only clear the notice text without changing the connection state, to avoid misjudging the current channel status.
-  useEffect(() => {
-    const currentError = state.agent.error;
-    if (!currentError) {
-      return;
-    }
-
-    const timeoutId = window.setTimeout(() => {
-      dispatch(agentActions.errorDismissed(currentError));
-    }, AGENT_ERROR_AUTO_DISMISS_MS);
-
-    return () => window.clearTimeout(timeoutId);
-  }, [dispatch, state.agent.error]);
 
   // Local composer errors are cleared per session so a voice-permission error does not pollute other sessions.
   useEffect(() => {
@@ -1053,8 +1228,18 @@ export function HomePage() {
       setCreatingChat: setIsCreatingChat,
       setComposerMediaError: (message) => setComposerMediaErrorForScope(sendScopeKey, message),
       clearComposer: () => clearComposerAfterSend(sendScopeKey),
+      chatSelectionEpoch: state.agent.chatSelectionEpoch,
+      getChatSelectionEpoch: () => chatSelectionEpochRef.current,
+      scopeKey: sendScopeKey,
       onNewChatMessageSent: clients?.memmyAgent
-        ? (chatId) => refreshAgentTaskList(clients.memmyAgent, dispatch, { expectedChatId: chatId, reason: "new-chat" })
+        ? (chatId) => {
+          rememberFirstEncounterRelayChatIfArmed(chatId);
+          refreshAgentTaskList(clients.memmyAgent, dispatch, {
+            expectedChatId: chatId,
+            reason: "new-chat",
+            state: state.agent
+          });
+        }
         : undefined
     });
   }
@@ -1393,6 +1578,8 @@ export function HomePage() {
       requestNewSessionReset({
         chatId: state.agent.currentChatId,
         connection,
+        canSubmitOrdinaryMessage: state.agent.connectionStatus === "connected"
+          && state.agent.recoveringGeneration === null,
         ensureChatSubscription,
         clearInput: () => setCurrentComposerDraft(""),
         clearPendingMedia: clearPendingAttachments,
@@ -1741,6 +1928,7 @@ export function HomePage() {
             <div className="home-empty-status-area">
               {composerMediaError && <p role="alert" className="text-center text-xs text-status-error mt-3">{agentErrorText(composerMediaError, t)}</p>}
               {agentError && <p className="text-center text-xs text-status-error mt-4">{agentError}</p>}
+              {deliveryUncertain && <p className="text-center text-xs text-status-error mt-4">{t("home.agent.deliveryUncertain")}</p>}
               {statusText && <p className="text-center text-xs text-text-ink/45 mt-4">{statusText}</p>}
               <p className="text-center text-[11px] text-text-ink/40 mt-4">{t("home.notice")}</p>
             </div>
@@ -1757,10 +1945,10 @@ export function HomePage() {
             onTouchMove={markAgentConversationUserScrollIntent}
           >
             <div className="max-w-3xl mx-auto space-y-3">
-              {state.agent.connectionStatus !== "connected" && (
+              {displayConnectionStatus !== "connected" && (
                 <div className="text-center">
                   <span className="inline-flex text-[11px] px-3 py-1 rounded-tag bg-background-paper text-text-ink/55 border border-border-stone/30">
-                    {agentStatusText(state.agent.connectionStatus, state.agent.modelName, t)}
+                    {agentStatusText(displayConnectionStatus, state.agent.modelName, t)}
                   </span>
                 </div>
               )}
@@ -1769,6 +1957,9 @@ export function HomePage() {
                 chatScopeKey={chatScopeKey}
                 historyVersion={currentHistoryVersion}
                 messages={state.agent.messages}
+                afterMessageId={firstEncounterRelayAnchorMessageId}
+                afterMessageContent={firstEncounterRelayContent}
+                forceMessageActionsForMessageId={firstEncounterRelayAnswerMessageId}
                 retryWaitStatus={state.agent.currentChatId ? state.agent.retryWaitStatusByChatId[state.agent.currentChatId] ?? null : null}
                 isSending={state.agent.isSending}
                 sanitizePlatformApiErrors={sanitizePlatformApiErrors}
@@ -1884,6 +2075,7 @@ export function HomePage() {
               </div>
               {composerMediaError && <p role="alert" className="text-center text-xs text-status-error mt-2">{agentErrorText(composerMediaError, t)}</p>}
               {agentError && <p className="text-center text-xs text-status-error mt-2">{agentError}</p>}
+              {deliveryUncertain && <p className="text-center text-xs text-status-error mt-2">{t("home.agent.deliveryUncertain")}</p>}
               <p className="text-center text-[11px] text-text-ink/40 mt-2">{t("home.notice")}</p>
               <input ref={fileInputRef} type="file" accept={AGENT_MEDIA_ACCEPT} multiple hidden className="hidden" onChange={(event) => void selectMedia(event)} />
             </div>
@@ -1926,41 +2118,34 @@ function loadAgentThread(
   dispatch: (action: AppAction) => void,
   chatId: string,
   sessionKey = client.chatIdToSessionKey(chatId),
-  options: { tolerateMissingThread?: boolean } = {}
+  options: {
+    tolerateMissingThread?: boolean;
+    taskState?: Pick<AgentState, "sidebarStateVersion" | "runStatusVersionByChatId">;
+  } = {}
 ): void {
   const requestId = nextAgentHistoryRequestId(chatId);
-  const sessionsRequestId = nextAgentSessionsRequestId("thread");
   dispatch(agentActions.historyLoading(sessionKey, chatId, requestId));
-  dispatch(agentActions.sessionsLoading(sessionsRequestId));
-  void Promise.all([
-    client.readWebuiThread(sessionKey).catch((error: unknown) => {
+  void client.readWebuiThread(sessionKey)
+    .catch((error: unknown) => {
       if (options.tolerateMissingThread && error instanceof MemmyAgentRequestError && error.status === 404) {
         return { schemaVersion: 1, sessionKey, messages: [] };
       }
       throw error;
-    }),
-    client.listSessions(),
-    client.readSidebarState()
-  ])
-    .then(([thread, sessions, sidebarState]) => {
-      dispatch(agentActions.historyLoaded(thread, requestId));
-      dispatch(agentActions.sidebarStateLoaded(sidebarState));
-      dispatch(agentActions.sessionsLoaded(sessions, sessionsRequestId));
     })
-    .catch((error) => dispatch(agentActions.failed(error instanceof Error ? error.message : String(error))));
+    .then((thread) => dispatch(agentActions.historyLoaded(thread, requestId)))
+    .catch((error) => dispatch(agentActions.historyOpenFailed(chatId, requestId, createAgentOperationError({
+      source: "history",
+      message: error instanceof Error ? error.message : String(error),
+      chatId
+    }))));
+  refreshAgentTaskList(client, dispatch, { reason: "thread", state: options.taskState });
 }
 
 let agentHistoryRequestCounter = 0;
-let agentSessionsRequestCounter = 0;
 
 function nextAgentHistoryRequestId(chatId: string): string {
   agentHistoryRequestCounter += 1;
   return `${chatId}-${agentHistoryRequestCounter}`;
-}
-
-function nextAgentSessionsRequestId(reason: "thread"): string {
-  agentSessionsRequestCounter += 1;
-  return `sessions-${reason}-${Date.now()}-${agentSessionsRequestCounter}`;
 }
 
 export function readFocusedAgentChatId(
@@ -2313,4 +2498,39 @@ function formatBytes(bytes: number): string {
 
 function isMessageKey(value: string): value is MessageKey {
   return Object.prototype.hasOwnProperty.call(zhCNMessages, value);
+}
+
+export function hasCompletedAssistantAnswer(messages: AgentChatMessage[]): boolean {
+  return firstCompletedAssistantAnswerMessageId(messages) !== null;
+}
+
+export function firstCompletedAssistantAnswerMessageId(messages: AgentChatMessage[]): string | null {
+  const message = firstTurnMessages(messages).find((candidate) => (
+    candidate.role === "assistant"
+    && !candidate.isStreaming
+    && candidate.kind !== "trace"
+    && candidate.kind !== "narration"
+    && candidate.kind !== "context_compaction"
+    && candidate.content.trim().length > 0
+  ));
+  return message?.id || null;
+}
+
+/** Last event of the first task, so supplemental UI follows all of its activity. */
+export function firstTurnTerminalMessageId(messages: AgentChatMessage[]): string | null {
+  const firstTurn = firstTurnMessages(messages);
+  return firstCompletedAssistantAnswerMessageId(messages) ? firstTurn.at(-1)?.id ?? null : null;
+}
+
+function firstTurnWasStoppedByUser(messages: AgentChatMessage[]): boolean {
+  return firstTurnMessages(messages).some((message) => message.stoppedByUser === true);
+}
+
+function firstTurnMessages(messages: AgentChatMessage[]): AgentChatMessage[] {
+  const firstUserIndex = messages.findIndex((message) => message.role === "user");
+  if (firstUserIndex < 0) {
+    return [];
+  }
+  const nextUserIndex = messages.findIndex((message, index) => index > firstUserIndex && message.role === "user");
+  return messages.slice(firstUserIndex, nextUserIndex < 0 ? undefined : nextUserIndex);
 }

@@ -78,6 +78,7 @@ describe("edit_file read tracking and creation", () => {
     const result = await new EditFileTool({ workspace: root }).execute({ path: file, old_text: "", new_text: "print('hi')" });
 
     expect(result.toLowerCase()).toMatch(/created|successfully/);
+    expect(result).toContain(`${file}: passed`);
     expect(fs.existsSync(file)).toBe(true);
     expect(fs.readFileSync(file, "utf8")).toBe("print('hi')");
   });
@@ -101,6 +102,7 @@ describe("edit_file read tracking and creation", () => {
     const result = await new EditFileTool({ workspace: root }).execute({ path: file, old_text: "", new_text: "print('hi')" });
 
     expect(result).toContain("Successfully");
+    expect(result).toContain(`${file}: passed`);
     expect(fs.readFileSync(file, "utf8")).toBe("print('hi')");
   });
 

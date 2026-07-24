@@ -234,6 +234,7 @@ export interface MemmyConfig {
 
 const ACCOUNT_EVOLUTION_THINKING_BUDGET = 1_000;
 const ASYNC_EVOLUTION_TIMEOUT_MS = 3 * 60_000;
+export const MEMORY_SUMMARY_MAX_TOKENS = 512;
 
 export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
   version: 1,
@@ -254,7 +255,7 @@ export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
     apiKey: undefined,
     enableThinking: false,
     temperature: 0,
-    maxTokens: 1200,
+    maxTokens: MEMORY_SUMMARY_MAX_TOKENS,
     timeoutMs: 45_000,
     maxRetries: 3,
     malformedRetries: 1
@@ -267,7 +268,7 @@ export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
     apiKey: undefined,
     enableThinking: true,
     temperature: 0,
-    maxTokens: 1600,
+    maxTokens: 4096,
     timeoutMs: ASYNC_EVOLUTION_TIMEOUT_MS,
     maxRetries: 2,
     malformedRetries: 1
@@ -491,7 +492,6 @@ function configFromEnv(): Record<string, unknown> {
       endpoint: process.env.MEMMY_SUMMARY_ENDPOINT,
       model: process.env.MEMMY_SUMMARY_MODEL,
       apiKey: process.env.MEMMY_SUMMARY_API_KEY,
-      enableThinking: booleanEnv("MEMMY_SUMMARY_ENABLE_THINKING"),
       temperature: numberEnv("MEMMY_SUMMARY_TEMPERATURE"),
       maxTokens: numberEnv("MEMMY_SUMMARY_MAX_TOKENS"),
       timeoutMs: numberEnv("MEMMY_SUMMARY_TIMEOUT_MS"),
@@ -533,7 +533,10 @@ function configFromEnv(): Record<string, unknown> {
 
 function normalizeConfig(input: Record<string, unknown>): MemmyConfig {
   const storage = normalizeStorage(asRecord(input.storage));
-  const summary = normalizeLlm(asRecord(input.summary), DEFAULT_MEMMY_CONFIG.summary);
+  const summary = {
+    ...normalizeLlm(asRecord(input.summary), DEFAULT_MEMMY_CONFIG.summary),
+    enableThinking: false
+  };
   const activeProfile = memoryProfileName(input.activeProfile, DEFAULT_MEMMY_CONFIG.activeProfile);
   const normalizedEvolution = normalizeLlm(asRecord(input.evolution), DEFAULT_MEMMY_CONFIG.evolution);
   const evolution = activeProfile === "account"

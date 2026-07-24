@@ -457,6 +457,21 @@ export class CronService {
     return job;
   }
 
+  unregisterSystemJob(jobId: string): boolean {
+    const store = this.loadStore();
+    if (!store) return false;
+    const jobs = store.jobs.filter(
+      (job) =>
+        job.id !== jobId ||
+        (job.payload.kind !== "systemEvent" && job.system !== true),
+    );
+    if (jobs.length === store.jobs.length) return false;
+    store.jobs = jobs;
+    this.saveStore();
+    this.armTimer();
+    return true;
+  }
+
   removeJob(jobId: string): "removed" | "protected" | "not_found" {
     const store = this.loadStore();
     const job = store?.jobs.find((row) => row.id === jobId);

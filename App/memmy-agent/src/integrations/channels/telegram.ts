@@ -241,8 +241,14 @@ export class TelegramChannel extends BaseChannel {
   ];
   static TELEGRAM_BUS_SLASH_COMMAND_RE =
     /^\/(?:new|stop|restart|status|dream|history|goal|pairing|model)(?:@\w+)?(?:\s+.*)?$/;
+  private static readonly DREAM_COMMANDS = new Set([
+    "dream",
+    "dream_log",
+    "dream_restore",
+  ]);
   override config: TelegramConfig;
   displayName = "Telegram";
+  readonly fileMemoryEnabled: boolean;
   app: any = null;
   chatIds: Record<string, number> = {};
   typingTasks = new Map<string, any>();
@@ -253,10 +259,15 @@ export class TelegramChannel extends BaseChannel {
   botUsername: string | null = null;
   streamBuffers: Record<string, StreamBuf> = {};
 
-  constructor(config: any = {}, bus?: any) {
+  constructor(
+    config: any = {},
+    bus?: any,
+    options: { fileMemoryEnabled?: boolean } = {},
+  ) {
     const normalized = config instanceof TelegramConfig ? config : new TelegramConfig(config);
     super("telegram", normalized, bus);
     this.config = normalized;
+    this.fileMemoryEnabled = options.fileMemoryEnabled === true;
     this.app = normalized.app ?? null;
   }
 
@@ -301,7 +312,13 @@ export class TelegramChannel extends BaseChannel {
     if (typeof this.app?.bot?.set_my_commands === "function") {
       await this.app.bot
         .set_my_commands(
-          TelegramChannel.BOT_COMMANDS.map(([command, description]) => ({ command, description })),
+          TelegramChannel.BOT_COMMANDS
+            .filter(
+              ([command]) =>
+                this.fileMemoryEnabled ||
+                !TelegramChannel.DREAM_COMMANDS.has(command),
+            )
+            .map(([command, description]) => ({ command, description })),
         )
         .catch(() => undefined);
     }

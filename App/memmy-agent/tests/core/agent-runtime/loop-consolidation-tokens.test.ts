@@ -54,6 +54,21 @@ afterEach(() => {
 });
 
 describe("AgentLoop replay token budget", () => {
+  it("uses the default completion reserve and shared safety margin", () => {
+    const config = new Config({ contextCompaction: { summaryMode: "text" } });
+    const loop = new AgentLoop({
+      config,
+      provider: {
+        generation: { maxTokens: config.agents.defaults.maxTokens },
+        getDefaultModel: () => "m",
+      },
+      contextWindowTokens: config.agents.defaults.contextWindowTokens,
+      workspace: "/tmp/memmy-loop-default-budget",
+    });
+
+    expect(loop.replayTokenBudget()).toBe(130_368);
+  });
+
   it("reserves completion tokens and a safety margin", () => {
     const loop = new AgentLoop({
       config: new Config({ contextCompaction: { summaryMode: "text" } }),
@@ -62,7 +77,7 @@ describe("AgentLoop replay token budget", () => {
       workspace: "/tmp/memmy-loop-budget",
     });
 
-    expect(loop.replayTokenBudget()).toBe(10_000 - 1000 - 1024);
+    expect(loop.replayTokenBudget()).toBe(10_000 - 1000 - 4_096);
   });
 
   it("does not consolidate when the prompt is below the token threshold", async () => {

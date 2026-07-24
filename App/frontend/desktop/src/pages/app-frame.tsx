@@ -15,7 +15,7 @@ import type { MessageKey } from "../i18n/messages.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { getLegalLinkUrl } from "../legal/legal-links.js";
 import { useTaskBus } from "../lib/task-bus.js";
-import { agentActions, appActions } from "../state/app-actions.js";
+import { agentActions, appActions, createAgentOperationError } from "../state/app-actions.js";
 import type { AppState } from "../state/app-reducer.js";
 import { useAppState } from "../state/app-state.js";
 import { agentChatScopeKey } from "../state/agent-composer-state.js";
@@ -193,6 +193,8 @@ export function AppFrame(props: AppFrameProps) {
   const sidebarResize = useCodexResizableSidebar("memmy.appFrame.sidebarWidth.codex.v2");
   const hasRequestedAgentData = useRef(false);
   const lastNotifiedCompletionAt = useRef<number | null>(null);
+  const sidebarStateRef = useRef(state.agent.sidebarState);
+  sidebarStateRef.current = state.agent.sidebarState;
   const accountSummary = resolveSidebarAccountSummary(state, {
     brandName: t("brand.name"),
     byokLabel: t("welcome.byok.title"),
@@ -353,19 +355,28 @@ export function AppFrame(props: AppFrameProps) {
     }
 
     const sessionsRequestId = nextAgentSessionsRequestId("manual");
-    dispatch(agentActions.sessionsLoading(sessionsRequestId));
-    try {
-      const boot = await clients.memmyAgent.bootstrap();
-      dispatch(agentActions.bootstrapSucceeded(boot.model_name));
-      const [sessions, sidebarState] = await Promise.all([
-        clients.memmyAgent.listSessions(),
-        clients.memmyAgent.readSidebarState()
-      ]);
-      dispatch(agentActions.sidebarStateLoaded(sidebarState));
-      dispatch(agentActions.sessionsLoaded(sessions, sessionsRequestId));
-    } catch (error) {
-      dispatch(agentActions.failed(error instanceof Error ? error.message : String(error)));
-    }
+    dispatch(agentActions.taskStateLoading({
+      requestId: sessionsRequestId,
+      sidebarStateVersionAtStart: state.agent.sidebarStateVersion,
+      runStatusVersionAtStartByChatId: { ...state.agent.runStatusVersionByChatId },
+      recoveryGeneration: null
+    }));
+    const [sessionsResult, sidebarResult] = await Promise.allSettled([
+      clients.memmyAgent.listSessions(),
+      clients.memmyAgent.readSidebarState()
+    ]);
+    const failures = [sessionsResult, sidebarResult]
+      .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+      .map((result) => result.reason instanceof Error ? result.reason.message : String(result.reason));
+    dispatch(agentActions.taskStateSettled({
+      requestId: sessionsRequestId,
+      recoveryGeneration: null,
+      ...(sessionsResult.status === "fulfilled" ? { sessions: sessionsResult.value } : {}),
+      ...(sidebarResult.status === "fulfilled" ? { sidebarState: sidebarResult.value } : {}),
+      ...(failures.length > 0 ? {
+        error: createAgentOperationError({ source: "sessions", message: failures.join("; ") })
+      } : {})
+    }));
   }
 
   function openNewAgent() {
@@ -489,12 +500,16 @@ export function AppFrame(props: AppFrameProps) {
         dispatch(agentActions.historyOpenMissing(task.sessionKey, chatId, requestId));
         return;
       }
-      dispatch(agentActions.failed(error instanceof Error ? error.message : String(error)));
+      dispatch(agentActions.historyOpenFailed(chatId, requestId, createAgentOperationError({
+        source: "history",
+        message: error instanceof Error ? error.message : String(error),
+        chatId
+      })));
     }
   }
 
   async function saveSidebarStateForTask(task: AgentTaskView, patch: Parameters<typeof updateSidebarStateForTask>[2]) {
-    const nextState = updateSidebarStateForTask(state.agent.sidebarState, task.sessionKey, patch);
+    const nextState = updateSidebarStateForTask(sidebarStateRef.current, task.sessionKey, patch);
     await saveSidebarState(nextState);
   }
 
@@ -504,9 +519,9 @@ export function AppFrame(props: AppFrameProps) {
     showPreviews?: boolean;
   }) {
     await saveSidebarState({
-      ...state.agent.sidebarState,
+      ...sidebarStateRef.current,
       view: {
-        ...state.agent.sidebarState.view,
+        ...sidebarStateRef.current.view,
         ...(patch.sort ? { sort: patch.sort } : {}),
         ...(patch.showArchived == null ? {} : { show_archived: patch.showArchived }),
         ...(patch.showPreviews == null ? {} : { show_previews: patch.showPreviews })
@@ -519,11 +534,16 @@ export function AppFrame(props: AppFrameProps) {
       return;
     }
 
-    dispatch(agentActions.sidebarStateSaved(nextState));
+    const mutationId = nextAgentSidebarMutationId();
+    sidebarStateRef.current = nextState;
+    dispatch(agentActions.sidebarMutationStarted(mutationId, nextState));
     try {
-      dispatch(agentActions.sidebarStateSaved(await clients.memmyAgent.writeSidebarState(nextState)));
+      dispatch(agentActions.sidebarMutationConfirmed(mutationId, await clients.memmyAgent.writeSidebarState(nextState)));
     } catch (error) {
-      dispatch(agentActions.failed(error instanceof Error ? error.message : String(error)));
+      dispatch(agentActions.sidebarMutationFailed(mutationId, createAgentOperationError({
+        source: "sidebar",
+        message: error instanceof Error ? error.message : String(error)
+      })));
     }
   }
 
@@ -559,7 +579,10 @@ export function AppFrame(props: AppFrameProps) {
       await saveSidebarStateForTask(task, { title: null });
       await refreshAgentTasks();
     } catch (error) {
-      dispatch(agentActions.failed(error instanceof Error ? error.message : String(error)));
+      dispatch(agentActions.operationFailed("sidebar", createAgentOperationError({
+        source: "sidebar",
+        message: error instanceof Error ? error.message : String(error)
+      })));
     }
   }
 
@@ -630,7 +653,10 @@ export function AppFrame(props: AppFrameProps) {
       }
       await refreshAgentTasks();
     } catch (error) {
-      dispatch(agentActions.failed(error instanceof Error ? error.message : String(error)));
+      dispatch(agentActions.operationFailed("sidebar", createAgentOperationError({
+        source: "sidebar",
+        message: error instanceof Error ? error.message : String(error)
+      })));
     }
   }
 
@@ -822,7 +848,7 @@ export function AppFrame(props: AppFrameProps) {
                 tasks={[]}
                 currentSessionKey={highlightedSessionKey}
                 showPreviews={state.agent.sidebarState.view.show_previews}
-                emptyText={state.agent.isLoadingSessions ? t("appFrame.taskList.loading") : state.agent.error ?? t(showingArchived ? "appFrame.taskList.emptyArchived" as MessageKey : "appFrame.taskList.empty")}
+                emptyText={state.agent.isLoadingSessions ? t("appFrame.taskList.loading") : t(showingArchived ? "appFrame.taskList.emptyArchived" as MessageKey : "appFrame.taskList.empty")}
                 onOpenTask={openAgentTask}
                 onRenameTask={openRenameDialog}
                 onContextMenu={openTaskContextMenu}
@@ -1074,6 +1100,7 @@ export function AppFrame(props: AppFrameProps) {
 
 let agentHistoryRequestCounter = 0;
 let agentSessionsRequestCounter = 0;
+let agentSidebarMutationCounter = 0;
 
 function nextAgentHistoryRequestId(chatId: string): string {
   agentHistoryRequestCounter += 1;
@@ -1083,6 +1110,11 @@ function nextAgentHistoryRequestId(chatId: string): string {
 function nextAgentSessionsRequestId(reason: "manual"): string {
   agentSessionsRequestCounter += 1;
   return `sessions-${reason}-${Date.now()}-${agentSessionsRequestCounter}`;
+}
+
+function nextAgentSidebarMutationId(): string {
+  agentSidebarMutationCounter += 1;
+  return `sidebar-${Date.now()}-${agentSidebarMutationCounter}`;
 }
 
 function CommunityLink(props: { href: string; title: string; detail: string; external?: boolean }) {

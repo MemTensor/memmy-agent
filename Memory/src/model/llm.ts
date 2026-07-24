@@ -1,4 +1,5 @@
 import type { LlmConfig } from "../config/index.js";
+import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
 import { bearer, postJsonWithRetry, trimTrailingSlash } from "./http.js";
 import {
   HttpByokTokenUsageRecorder,
@@ -7,23 +8,30 @@ import {
 } from "./token-usage.js";
 import type { LlmClient, LlmCompletionOptions, LlmMessage, ModelStatus } from "./types.js";
 
+const logger = createMemoryLogger("llm");
+
 interface OpenAiChatResponse {
-  choices?: Array<{ message?: { content?: string } }>;
+  choices?: Array<{ message?: { content?: string }; finish_reason?: string }>;
   usage?: Record<string, unknown>;
 }
 
 interface GeminiGenerateResponse {
-  candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+  candidates?: Array<{
+    content?: { parts?: Array<{ text?: string }> };
+    finishReason?: string;
+  }>;
   usageMetadata?: Record<string, unknown>;
 }
 
 interface AnthropicResponse {
   content?: Array<{ type?: string; text?: string }>;
+  stop_reason?: string;
   usage?: Record<string, unknown>;
 }
 
 interface BedrockResponse {
   output?: { message?: { content?: Array<{ text?: string }> } };
+  stopReason?: string;
   usage?: Record<string, unknown>;
 }
 
@@ -31,7 +39,15 @@ interface HostResponse {
   text?: string;
   content?: string;
   output?: string;
+  finishReason?: string;
+  finish_reason?: string;
+  stopReason?: string;
   usage?: Record<string, unknown>;
+}
+
+interface LlmCallResult {
+  text: string;
+  finishReason?: "stop" | "length" | "other";
 }
 
 const OPENAI_COMPAT_THINKING_EFFORT = "medium";
@@ -74,21 +90,54 @@ class HttpLlmClient implements LlmClient {
   }
 
   async complete(messages: LlmMessage[], options: LlmCompletionOptions): Promise<string> {
+    return (await this.completeResult(messages, options)).text;
+  }
+
+  private async completeResult(
+    messages: LlmMessage[],
+    options: LlmCompletionOptions
+  ): Promise<LlmCallResult> {
+    const startedAt = Date.now();
+    const fields = {
+      role: this.options.modelRole ?? "unspecified",
+      operation: options.operation,
+      provider: this.config.provider,
+      model: this.config.model,
+      maxTokens: options.maxTokens ?? this.config.maxTokens,
+      timeoutMs: options.timeoutMs ?? this.config.timeoutMs,
+      maxRetries: options.maxRetries ?? this.config.maxRetries,
+      jsonMode: options.jsonMode ?? false
+    };
     if (!this.isConfigured()) {
-      throw new Error(`LLM provider is not configured: ${this.config.provider || "(empty)"}`);
+      const error = new Error(`LLM provider is not configured: ${this.config.provider || "(empty)"}`);
+      this.lastError = error.message;
+      logger.error("request.rejected", { ...fields, ...memoryErrorFields(error) });
+      throw error;
     }
     const callOptions = {
       ...options,
       temperature: options.temperature ?? this.config.temperature,
       maxTokens: options.maxTokens ?? this.config.maxTokens
     };
+    logger.debug("request.started", fields);
     try {
       const result = await this.completeOnce(messages, callOptions);
       this.lastOkAt = new Date().toISOString();
       this.lastError = undefined;
+      logger.info("request.succeeded", {
+        ...fields,
+        durationMs: Date.now() - startedAt,
+        finishReason: result.finishReason ?? "unknown",
+        outputChars: result.text.length
+      });
       return result;
     } catch (error) {
       this.lastError = error instanceof Error ? error.message : String(error);
+      logger.error("request.failed", {
+        ...fields,
+        durationMs: Date.now() - startedAt,
+        ...memoryErrorFields(error)
+      });
       throw error;
     }
   }
@@ -98,19 +147,100 @@ class HttpLlmClient implements LlmClient {
     options: LlmCompletionOptions
   ): Promise<T> {
     let lastError: unknown;
-    for (let attempt = 0; attempt <= this.config.malformedRetries; attempt += 1) {
-      const withJsonHint = jsonMessages(messages, attempt > 0 ? lastError : undefined);
-      const text = await this.complete(withJsonHint, {
+    let malformedRetriesRemaining = Math.max(0, this.config.malformedRetries);
+    let lengthRetryUsed = false;
+    let previousWasTruncated = false;
+    let maxTokens = options.maxTokens ?? this.config.maxTokens;
+    let jsonAttempt = 0;
+
+    while (true) {
+      jsonAttempt += 1;
+      const withJsonHint = jsonMessages(messages, lastError, previousWasTruncated);
+      const result = await this.completeResult(withJsonHint, {
         ...options,
+        maxTokens,
         jsonMode: true
       });
+      let parsed: T | undefined;
+      let parseError: unknown;
       try {
-        return parseJsonObject(text) as T;
+        parsed = parseJsonObject(result.text) as T;
       } catch (error) {
-        lastError = error;
+        parseError = error;
       }
+
+      const truncated = result.finishReason === "length" || (
+        parseError !== undefined && looksLikeTruncatedJson(result.text, parseError)
+      );
+      const expandedMaxTokens = truncated && !lengthRetryUsed
+        ? doubleMaxTokens(maxTokens)
+        : undefined;
+      if (expandedMaxTokens !== undefined) {
+        logger.warn("json.truncated_retry", {
+          role: this.options.modelRole ?? "unspecified",
+          operation: options.operation,
+          provider: this.config.provider,
+          model: this.config.model,
+          attempt: jsonAttempt,
+          finishReason: result.finishReason ?? "unknown",
+          outputChars: result.text.length,
+          previousMaxTokens: maxTokens,
+          nextMaxTokens: expandedMaxTokens,
+          ...(parseError ? memoryErrorFields(parseError) : {})
+        });
+        lengthRetryUsed = true;
+        previousWasTruncated = true;
+        maxTokens = expandedMaxTokens;
+        lastError = parseError ?? new Error("LLM output reached the max token limit");
+        continue;
+      }
+
+      if (parseError === undefined && parsed !== undefined) {
+        if (jsonAttempt > 1) {
+          logger.info("json.recovered", {
+            role: this.options.modelRole ?? "unspecified",
+            operation: options.operation,
+            provider: this.config.provider,
+            model: this.config.model,
+            attempt: jsonAttempt,
+            maxTokens
+          });
+        }
+        return parsed;
+      }
+      lastError = parseError;
+      if (malformedRetriesRemaining > 0) {
+        logger.warn("json.malformed_retry", {
+          role: this.options.modelRole ?? "unspecified",
+          operation: options.operation,
+          provider: this.config.provider,
+          model: this.config.model,
+          attempt: jsonAttempt,
+          retriesRemaining: malformedRetriesRemaining,
+          maxTokens,
+          finishReason: result.finishReason ?? "unknown",
+          outputChars: result.text.length,
+          ...memoryErrorFields(parseError)
+        });
+        malformedRetriesRemaining -= 1;
+        previousWasTruncated = false;
+        continue;
+      }
+      const finalError = lastError instanceof Error ? lastError : new Error(String(lastError));
+      this.lastError = finalError.message;
+      logger.error("json.failed", {
+        role: this.options.modelRole ?? "unspecified",
+        operation: options.operation,
+        provider: this.config.provider,
+        model: this.config.model,
+        attempt: jsonAttempt,
+        maxTokens,
+        finishReason: result.finishReason ?? "unknown",
+        outputChars: result.text.length,
+        ...memoryErrorFields(finalError)
+      });
+      throw finalError;
     }
-    throw lastError instanceof Error ? lastError : new Error(String(lastError));
   }
 
   status(): ModelStatus {
@@ -124,7 +254,7 @@ class HttpLlmClient implements LlmClient {
     };
   }
 
-  private completeOnce(messages: LlmMessage[], options: Required<Pick<LlmCompletionOptions, "operation">> & LlmCompletionOptions): Promise<string> {
+  private completeOnce(messages: LlmMessage[], options: Required<Pick<LlmCompletionOptions, "operation">> & LlmCompletionOptions): Promise<LlmCallResult> {
     switch (this.config.provider) {
       case "openai_compatible":
         return this.completeOpenAiCompatible(messages, options);
@@ -141,7 +271,7 @@ class HttpLlmClient implements LlmClient {
     }
   }
 
-  private async completeOpenAiCompatible(messages: LlmMessage[], options: LlmCompletionOptions): Promise<string> {
+  private async completeOpenAiCompatible(messages: LlmMessage[], options: LlmCompletionOptions): Promise<LlmCallResult> {
     const base = trimTrailingSlash(this.config.endpoint || "https://api.openai.com/v1");
     const url = base.endsWith("/chat/completions") ? base : `${base}/chat/completions`;
     const thinking = openAiCompatibleThinkingControl({
@@ -162,6 +292,8 @@ class HttpLlmClient implements LlmClient {
       : undefined;
     const response = await postJsonWithRetry<OpenAiChatResponse>({
       provider: "openai_compatible",
+      operation: options.operation,
+      model: this.config.model,
       url,
       headers: bearer(this.config.apiKey),
       timeoutMs: options.timeoutMs ?? this.config.timeoutMs,
@@ -177,15 +309,16 @@ class HttpLlmClient implements LlmClient {
         ...(options.jsonMode && !omitJsonMode ? { response_format: { type: "json_object" } } : {})
       }
     });
-    const text = response.choices?.[0]?.message?.content;
+    const choice = response.choices?.[0];
+    const text = choice?.message?.content;
     if (typeof text !== "string") {
       throw new Error("openai_compatible response missing choices[0].message.content");
     }
     this.recordTokenUsage(response, options);
-    return text;
+    return { text, finishReason: normalizeFinishReason(choice?.finish_reason) };
   }
 
-  private async completeGemini(messages: LlmMessage[], options: LlmCompletionOptions): Promise<string> {
+  private async completeGemini(messages: LlmMessage[], options: LlmCompletionOptions): Promise<LlmCallResult> {
     if (!this.config.apiKey) {
       throw new Error("gemini provider requires apiKey");
     }
@@ -218,20 +351,23 @@ class HttpLlmClient implements LlmClient {
     }
     const response = await postJsonWithRetry<GeminiGenerateResponse>({
       provider: "gemini",
+      operation: options.operation,
+      model: this.config.model,
       url,
       timeoutMs: options.timeoutMs ?? this.config.timeoutMs,
       maxRetries: options.maxRetries ?? this.config.maxRetries,
       body
     });
-    const text = response.candidates?.[0]?.content?.parts?.map((part) => part.text ?? "").join("");
+    const candidate = response.candidates?.[0];
+    const text = candidate?.content?.parts?.map((part) => part.text ?? "").join("");
     if (typeof text !== "string") {
       throw new Error("gemini response missing candidates[0].content.parts");
     }
     this.recordTokenUsage(response, options);
-    return text;
+    return { text, finishReason: normalizeFinishReason(candidate?.finishReason) };
   }
 
-  private async completeAnthropic(messages: LlmMessage[], options: LlmCompletionOptions): Promise<string> {
+  private async completeAnthropic(messages: LlmMessage[], options: LlmCompletionOptions): Promise<LlmCallResult> {
     if (!this.config.apiKey) {
       throw new Error("anthropic provider requires apiKey");
     }
@@ -247,6 +383,8 @@ class HttpLlmClient implements LlmClient {
       .join("\n\n");
     const response = await postJsonWithRetry<AnthropicResponse>({
       provider: "anthropic",
+      operation: options.operation,
+      model: this.config.model,
       url,
       headers: {
         "x-api-key": this.config.apiKey,
@@ -275,10 +413,10 @@ class HttpLlmClient implements LlmClient {
       .map((block) => block.text ?? "")
       .join("");
     this.recordTokenUsage(response, options);
-    return text;
+    return { text, finishReason: normalizeFinishReason(response.stop_reason) };
   }
 
-  private async completeBedrock(messages: LlmMessage[], options: LlmCompletionOptions): Promise<string> {
+  private async completeBedrock(messages: LlmMessage[], options: LlmCompletionOptions): Promise<LlmCallResult> {
     if (!this.config.endpoint) {
       throw new Error("bedrock provider requires endpoint");
     }
@@ -295,6 +433,8 @@ class HttpLlmClient implements LlmClient {
       : requestedMaxTokens;
     const response = await postJsonWithRetry<BedrockResponse>({
       provider: "bedrock",
+      operation: options.operation,
+      model: this.config.model,
       url: `${base}/model/${model}/converse`,
       headers: this.config.apiKey ? { authorization: this.config.apiKey } : {},
       timeoutMs: options.timeoutMs ?? this.config.timeoutMs,
@@ -323,15 +463,17 @@ class HttpLlmClient implements LlmClient {
       throw new Error("bedrock response missing output.message.content");
     }
     this.recordTokenUsage(response, options);
-    return text;
+    return { text, finishReason: normalizeFinishReason(response.stopReason) };
   }
 
-  private async completeHost(messages: LlmMessage[], options: LlmCompletionOptions): Promise<string> {
+  private async completeHost(messages: LlmMessage[], options: LlmCompletionOptions): Promise<LlmCallResult> {
     if (!this.config.endpoint) {
       throw new Error("host provider requires endpoint");
     }
     const response = await postJsonWithRetry<HostResponse>({
       provider: "host",
+      operation: options.operation,
+      model: this.config.model,
       url: this.config.endpoint,
       headers: bearer(this.config.apiKey),
       timeoutMs: options.timeoutMs ?? this.config.timeoutMs,
@@ -350,7 +492,12 @@ class HttpLlmClient implements LlmClient {
       throw new Error("host response missing text/content/output");
     }
     this.recordTokenUsage(response, options);
-    return text;
+    return {
+      text,
+      finishReason: normalizeFinishReason(
+        response.finishReason ?? response.finish_reason ?? response.stopReason
+      )
+    };
   }
 
   private recordTokenUsage(response: unknown, options: LlmCompletionOptions): void {
@@ -712,14 +859,25 @@ function modelSlug(model: string): string {
   return model.trim().toLowerCase().split("/").at(-1) ?? model.trim().toLowerCase();
 }
 
-function jsonMessages(messages: LlmMessage[], previousError?: unknown): LlmMessage[] {
+function jsonMessages(
+  messages: LlmMessage[],
+  previousError?: unknown,
+  previousWasTruncated = false
+): LlmMessage[] {
   const hint = [
     "Return exactly one valid JSON object. Do not include markdown fences or explanatory text.",
+    previousWasTruncated
+      ? "The previous output was truncated. Return the complete object within the expanded output budget."
+      : undefined,
     previousError ? `Previous JSON parse error: ${previousError instanceof Error ? previousError.message : String(previousError)}` : undefined
   ].filter(Boolean).join("\n");
+  const system = messages
+    .filter((message) => message.role === "system")
+    .map((message) => message.content)
+    .join("\n\n");
   return [
-    { role: "system", content: hint },
-    ...messages
+    { role: "system", content: system ? `${hint}\n\n${system}` : hint },
+    ...messages.filter((message) => message.role !== "system")
   ];
 }
 
@@ -737,6 +895,60 @@ function parseJsonObject(text: string): Record<string, unknown> {
     throw new Error("LLM JSON output is not an object");
   }
   return parsed as Record<string, unknown>;
+}
+
+function doubleMaxTokens(value: number | undefined): number | undefined {
+  if (value === undefined || !Number.isFinite(value) || value <= 0) return undefined;
+  return Math.min(Number.MAX_SAFE_INTEGER, Math.max(1, Math.floor(value)) * 2);
+}
+
+function normalizeFinishReason(value: string | undefined): LlmCallResult["finishReason"] {
+  if (!value) return undefined;
+  switch (value.trim().toLowerCase()) {
+    case "stop":
+    case "end_turn":
+      return "stop";
+    case "length":
+    case "max_tokens":
+    case "max_output_tokens":
+      return "length";
+    default:
+      return "other";
+  }
+}
+
+function looksLikeTruncatedJson(text: string, error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/unexpected end|unterminated|end of json/iu.test(message)) return true;
+
+  const start = text.indexOf("{");
+  if (start < 0) return false;
+  const stack: string[] = [];
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index]!;
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+    } else if (char === "{" || char === "[") {
+      stack.push(char);
+    } else if (char === "}" && stack.at(-1) === "{") {
+      stack.pop();
+    } else if (char === "]" && stack.at(-1) === "[") {
+      stack.pop();
+    }
+  }
+  return inString || stack.length > 0;
 }
 
 function normalizeAnthropicEndpoint(value: string): string {

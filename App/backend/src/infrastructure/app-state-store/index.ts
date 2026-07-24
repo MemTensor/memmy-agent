@@ -5,6 +5,7 @@ import { createIdempotencyStore, type IdempotencyStore } from "../idempotency-st
 import { getActiveAccountUuid } from "./account-context.js";
 import { openDatabase, resolveDefaultDatabasePath } from "./db.js";
 import { createFilesystemLocalDataStore, type LocalDataStore } from "./local-data-store.js";
+import { captureLegacyAppState } from "./legacy-state-migration.js";
 import { runMigrations } from "./migration-runner.js";
 import { createAccountSessionRepository, type AccountSessionRepository } from "./repositories/account-session-repo.js";
 import { createBootstrapRepository, type BootstrapRepository } from "./repositories/bootstrap-repo.js";
@@ -59,13 +60,14 @@ export interface AppStateStore {
 export function createAppStateStore(options: CreateAppStateStoreOptions = {}): AppStateStore {
   const databasePath = options.databasePath ?? resolveDefaultDatabasePath();
   const db = openDatabase({ databasePath });
+  const legacyState = options.migrateOnOpen !== false ? captureLegacyAppState(db) : null;
 
   if (options.migrateOnOpen !== false) {
     runMigrations(db);
     ensureDefaultAppStateRows(db);
   }
   const secretStore = createSqliteSecretStore(db);
-  finalizeDatabaseDesign(db);
+  finalizeDatabaseDesign(db, legacyState);
   const localDataStore = createFilesystemLocalDataStore({ databasePath, db, secretStore });
   const getActiveUuid = () => getActiveAccountUuid(db);
 

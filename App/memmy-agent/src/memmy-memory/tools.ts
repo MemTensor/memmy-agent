@@ -15,8 +15,6 @@ type ToolSpec = {
   execute: (client: MemmyMemoryClient, body: JsonRecord, runtime: MemmyMemoryToolRuntime, sessionKey: string | null) => Promise<any>;
 };
 
-const COMPACT_GET_TOOL_FIELD_CHARS = 1200;
-
 function objectSchema(properties: JsonRecord, required: string[] = []): JsonSchema {
   return { type: "object", properties, required };
 }
@@ -156,12 +154,14 @@ function markdownFromSearchResult(result: any): string {
   if (typeof injected?.markdown === "string" && injected.markdown.trim()) return injected.markdown.trim();
   const hits = Array.isArray(result?.hits) ? result.hits : Array.isArray(result?.debug?.hits) ? result.debug.hits : [];
   if (hits.length) {
-    return hits.map((hit: any, index: number) => {
+    const renderedHits = hits.flatMap((hit: any, index: number) => {
       const title = stringValue(hit?.title) || stringValue(hit?.id) || "memory";
       const layer = stringValue(hit?.memoryLayer) || "memory";
+      if (layer === "L1") return [];
       const snippet = stringValue(hit?.snippet);
-      return [`${index + 1}. [${layer}] ${title}`, snippet].filter(Boolean).join("\n");
-    }).join("\n\n");
+      return [[`${index + 1}. [${layer}] ${title}`, snippet].filter(Boolean).join("\n")];
+    });
+    if (renderedHits.length) return renderedHits.join("\n\n");
   }
   return "No relevant Memmy memories found.";
 }
@@ -173,13 +173,14 @@ function markdownFromMemoryDetail(result: any): string {
   const title = stringValue(result?.title) || id;
   const summary = stringValue(result?.summary);
   const content = compactMemoryGetContent(result);
+  const isL1 = layer === "L1";
   return [
     `id: ${id}`,
     `kind: ${kind}`,
     `layer: ${layer}`,
-    `title: ${title}`,
+    ...(isL1 ? [] : [`title: ${title}`]),
     "",
-    content || (summary && summary !== title ? summary : JSON.stringify(result, null, 2)),
+    content || (isL1 ? "" : (summary && summary !== title ? summary : JSON.stringify(result, null, 2))),
   ].filter(Boolean).join("\n");
 }
 
@@ -190,6 +191,7 @@ function stringValue(value: unknown): string {
 function compactMemoryGetContent(result: any): string {
   const rawTurn = rawTurnRecord(result);
   if (rawTurn) return compactRawTurnContent(rawTurn);
+  if (stringValue(result?.memoryLayer) === "L1" || stringValue(result?.layer) === "L1") return "";
   return compactMemoryBody(stringValue(result?.body) || stringValue(result?.content));
 }
 
@@ -197,9 +199,7 @@ function compactRawTurnContent(rawTurn: JsonRecord): string {
   const parts: string[] = [];
   const userText = stringValue(rawTurn.userText);
   const assistantText = stringValue(rawTurn.assistantText);
-  const toolDetails = compactRawTurnToolDetails(rawTurn);
   if (userText) parts.push(`User:\n${userText}`);
-  if (toolDetails) parts.push(toolDetails);
   if (assistantText) parts.push(`Assistant:\n${assistantText}`);
   return parts.join("\n\n");
 }
@@ -229,87 +229,10 @@ function rawTurnRecord(result: any): JsonRecord | undefined {
   return itemRefs ? recordValue(itemRefs.rawTurn) : undefined;
 }
 
-function compactRawTurnToolDetails(rawTurn: JsonRecord): string | undefined {
-  const toolCalls = arrayRecords(rawTurn.toolCalls);
-  const toolResults = arrayRecords(rawTurn.toolResults);
-  if (toolCalls.length === 0 && toolResults.length === 0) return undefined;
-
-  const lines = ["Tool calls:"];
-  const count = Math.max(toolCalls.length, toolResults.length);
-  for (let index = 0; index < count; index += 1) {
-    const call = toolCalls[index];
-    const resultRecord = toolResultFor(call, toolResults, index);
-    const name = toolName(call, resultRecord, index);
-    lines.push(`- ${name}`);
-    const input = toolInput(call);
-    if (input) lines.push(...toolFieldLines("input", input));
-    const output = toolOutput(call, resultRecord);
-    if (output) lines.push(...toolFieldLines("output", output));
-    const error = toolError(call, resultRecord);
-    if (error) lines.push(...toolFieldLines("error", error));
-  }
-  return lines.join("\n");
-}
-
-function arrayRecords(value: unknown): JsonRecord[] {
-  return Array.isArray(value) ? value.filter(isJsonRecord) : [];
-}
-
 function recordValue(value: unknown): JsonRecord | undefined {
   return isJsonRecord(value) ? value : undefined;
 }
 
 function isJsonRecord(value: unknown): value is JsonRecord {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
-}
-
-function toolResultFor(call: JsonRecord | undefined, results: JsonRecord[], index: number): JsonRecord | undefined {
-  const callId = stringValue(call?.id);
-  if (callId) {
-    const matched = results.find((result) => stringValue(result.toolCallId) === callId || stringValue(result.id) === callId);
-    if (matched) return matched;
-  }
-  return results[index];
-}
-
-function toolName(call: JsonRecord | undefined, result: JsonRecord | undefined, index: number): string {
-  const fn = recordValue(call?.function);
-  return stringValue(call?.name) ||
-    stringValue(fn?.name) ||
-    stringValue(result?.name) ||
-    `tool_${index + 1}`;
-}
-
-function toolInput(call: JsonRecord | undefined): string | undefined {
-  if (!call) return undefined;
-  const fn = recordValue(call.function);
-  return compactToolValue(call.input) ??
-    compactToolValue(call.arguments) ??
-    compactToolValue(fn?.arguments);
-}
-
-function toolOutput(call: JsonRecord | undefined, result: JsonRecord | undefined): string | undefined {
-  return compactToolValue(result?.output) ??
-    compactToolValue(result?.result) ??
-    compactToolValue(call?.output);
-}
-
-function toolError(call: JsonRecord | undefined, result: JsonRecord | undefined): string | undefined {
-  return compactToolValue(result?.error) ??
-    compactToolValue(call?.error);
-}
-
-function compactToolValue(value: unknown): string | undefined {
-  if (value === undefined || value === null || value === "") return undefined;
-  const text = typeof value === "string" ? value.trim() : JSON.stringify(value);
-  if (!text) return undefined;
-  return text.length <= COMPACT_GET_TOOL_FIELD_CHARS
-    ? text
-    : `${text.slice(0, COMPACT_GET_TOOL_FIELD_CHARS - 16)}\n...[truncated]`;
-}
-
-function toolFieldLines(label: string, value: string): string[] {
-  return value.includes("\n")
-    ? [`  ${label}:`, ...value.split("\n").map((line) => `    ${line}`)]
-    : [`  ${label}: ${value}`];
 }

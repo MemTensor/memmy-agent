@@ -6,6 +6,7 @@ import { GitHubCopilotProvider } from "../../src/providers/github-copilot-provid
 import { makeProvider } from "../../src/providers/factory.js";
 import { OpenAICompatProvider } from "../../src/providers/openai-compat-provider.js";
 import { findByName } from "../../src/providers/registry.js";
+import { DEFAULT_MAX_TOKENS } from "../../src/token-budget.js";
 
 describe("provider initialization", () => {
   it("normalizes hyphen and camel-case provider names", () => {
@@ -37,5 +38,19 @@ describe("provider initialization", () => {
     expect(() =>
       makeProvider(new Config({ agents: { defaults: { provider: "azure", model: "deployment" } } })),
     ).toThrow("Azure OpenAI requires apiKey and apiBase");
+  });
+
+  it("uses the configured preset maxTokens for provider generation", () => {
+    const defaultProvider = makeProvider(new Config({
+      agents: { defaults: { provider: "openai", model: "openai/gpt-4.1" } },
+      providers: { openai: { apiKey: "sk-test" } },
+    }));
+    const explicitProvider = makeProvider(new Config({
+      agents: { defaults: { provider: "openai", model: "openai/gpt-4.1", maxTokens: 1234 } },
+      providers: { openai: { apiKey: "sk-test" } },
+    }));
+
+    expect(defaultProvider.generation.maxTokens).toBe(DEFAULT_MAX_TOKENS);
+    expect(explicitProvider.generation.maxTokens).toBe(1234);
   });
 });

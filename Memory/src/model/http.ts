@@ -1,6 +1,12 @@
+import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
+
+const logger = createMemoryLogger("model-http");
+
 export async function postJsonWithRetry<T>(
   input: {
     provider: string;
+    operation?: string;
+    model?: string;
     url: string;
     headers?: Record<string, string>;
     body: unknown;
@@ -34,7 +40,28 @@ export async function postJsonWithRetry<T>(
     } catch (error) {
       lastError = error;
       if (attempt < input.maxRetries) {
-        await sleep(Math.min(1_000 * Math.pow(2, attempt), 8_000));
+        const delayMs = Math.min(1_000 * Math.pow(2, attempt), 8_000);
+        logger.warn("request.retry_scheduled", {
+          provider: input.provider,
+          operation: input.operation,
+          model: input.model,
+          endpoint: safeEndpoint(input.url),
+          attempt: attempt + 1,
+          maxAttempts: input.maxRetries + 1,
+          delayMs,
+          ...memoryErrorFields(error)
+        });
+        await sleep(delayMs);
+      } else {
+        logger.error("request.failed", {
+          provider: input.provider,
+          operation: input.operation,
+          model: input.model,
+          endpoint: safeEndpoint(input.url),
+          attempt: attempt + 1,
+          maxAttempts: input.maxRetries + 1,
+          ...memoryErrorFields(error)
+        });
       }
     }
   }
@@ -114,4 +141,13 @@ function looksLikeHtml(response: Response, text: string): boolean {
 
 function compact(value: string): string {
   return value.replace(/\s+/g, " ").trim();
+}
+
+function safeEndpoint(value: string): string {
+  try {
+    const url = new URL(value);
+    return `${url.origin}${url.pathname}`;
+  } catch {
+    return value.split("?", 1)[0] ?? "<invalid-url>";
+  }
 }

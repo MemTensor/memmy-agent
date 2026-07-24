@@ -57,6 +57,22 @@ describe("AgentRunner tool execution", () => {
     expect(result.event).toMatchObject({ name: "echo", status: "ok" });
   });
 
+  it("keeps file lint failures as successful tool content", async () => {
+    const runner = new AgentRunner();
+    const content = "Successfully wrote /workspace/broken.json\n\nLint results:\n- /workspace/broken.json: failed\n  syntax error";
+    const call = new ToolCallRequest({ id: "c1", name: "write_file", arguments: {} });
+    const spec = new AgentRunSpec({
+      failOnToolError: true,
+      tools: { execute: async () => content, get: () => ({ readOnly: false }) } as any,
+    });
+
+    const [result] = await runner.executeTools(spec, [call]);
+
+    expect(result.result).toBe(content);
+    expect(result.error).toBeNull();
+    expect(result.event).toMatchObject({ name: "write_file", status: "ok" });
+  });
+
   it("returns SSRF and workspace boundary errors as recoverable tool results", async () => {
     const runner = new AgentRunner();
     const ssrf = new ToolCallRequest({ id: "c1", name: "web_fetch", arguments: { url: "http://127.0.0.1/admin" } });

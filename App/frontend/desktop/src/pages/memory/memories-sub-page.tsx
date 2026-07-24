@@ -12,6 +12,7 @@ import {
 } from "./memory-agent-filter.js";
 import { MemoryDrawerDeleteAction } from "./memory-delete-action.js";
 import { MemoryAgentSourceTag } from "./memory-agent-source-tag.js";
+import { MemoryMarkdown } from "./memory-markdown.js";
 import { toMemoryDetailErrorMessage } from "./memory-detail-error.js";
 import { cleanMemoryBody, cleanMemoryText, displayMemoryTitle, drawerEyebrow, memoryDisplaySource } from "./memory-display.js";
 import {
@@ -773,13 +774,6 @@ function TraceMemoryDetail(props: {
         <div className="memory-detail-text">{summaryText || "-"}</div>
       </section>
 
-      {detail.reflection?.trim() && (
-        <section className="memory-detail-card">
-          <h5 className="memory-detail-card__label">{t("memory.memories.reflection")}</h5>
-          <div className="memory-detail-text">{cleanMemoryBody(detail.reflection)}</div>
-        </section>
-      )}
-
       <section className="memory-detail-card">
         <h5 className="memory-detail-card__label">{t("memory.memories.turnSteps")}</h5>
         {hasTurnSteps ? (
@@ -816,7 +810,7 @@ function TraceTurnEventBlock(props: { event: TraceTurnEvent }) {
 
   return (
     <MemoryTurnBlock label={label} tone={event.kind}>
-      <MarkdownText text={event.text} />
+      <MemoryMarkdown text={event.text} />
     </MemoryTurnBlock>
   );
 }
@@ -1148,107 +1142,6 @@ function firstDefined(...values: unknown[]): unknown {
 
 function recordValue(value: unknown): Record<string, unknown> {
   return isRecord(value) ? value : {};
-}
-
-function MarkdownText(props: { text: string }) {
-  return <div className="memory-markdown" dangerouslySetInnerHTML={{ __html: renderMarkdown(props.text) }} />;
-}
-
-const HTML_ESCAPE: Record<string, string> = {
-  "&": "&amp;",
-  "<": "&lt;",
-  ">": "&gt;",
-  "\"": "&quot;",
-  "'": "&#39;"
-};
-
-function renderMarkdown(source: string): string {
-  const lines = source.replace(/\r\n/g, "\n").split("\n");
-  const output: string[] = [];
-  let index = 0;
-
-  while (index < lines.length) {
-    const line = lines[index]!;
-
-    if (line.startsWith("```")) {
-      const language = line.slice(3).trim();
-      const codeLines: string[] = [];
-      index += 1;
-      while (index < lines.length && !lines[index]!.startsWith("```")) {
-        codeLines.push(lines[index]!);
-        index += 1;
-      }
-      index += 1;
-      const languageClass = language ? ` class="language-${escapeHtml(language)}"` : "";
-      output.push(`<pre class="memory-markdown__pre"><code${languageClass}>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
-      continue;
-    }
-
-    const heading = line.match(/^(#{1,4})\s+(.+)$/);
-    if (heading) {
-      const level = heading[1]!.length + 3;
-      output.push(`<h${level} class="memory-markdown__heading">${inlineMarkdown(heading[2]!)}</h${level}>`);
-      index += 1;
-      continue;
-    }
-
-    if (/^[*-]\s+/.test(line)) {
-      const items: string[] = [];
-      while (index < lines.length && /^[*-]\s+/.test(lines[index]!)) {
-        items.push(lines[index]!.replace(/^[*-]\s+/, ""));
-        index += 1;
-      }
-      output.push(`<ul class="memory-markdown__list">${items.map((item) => `<li>${inlineMarkdown(item)}</li>`).join("")}</ul>`);
-      continue;
-    }
-
-    if (/^\d+\.\s+/.test(line)) {
-      const items: string[] = [];
-      while (index < lines.length && /^\d+\.\s+/.test(lines[index]!)) {
-        items.push(lines[index]!.replace(/^\d+\.\s+/, ""));
-        index += 1;
-      }
-      output.push(`<ol class="memory-markdown__list">${items.map((item) => `<li>${inlineMarkdown(item)}</li>`).join("")}</ol>`);
-      continue;
-    }
-
-    if (/^>\s?/.test(line)) {
-      const quoteLines: string[] = [];
-      while (index < lines.length && /^>\s?/.test(lines[index]!)) {
-        quoteLines.push(lines[index]!.replace(/^>\s?/, ""));
-        index += 1;
-      }
-      output.push(`<blockquote class="memory-markdown__quote">${quoteLines.map(inlineMarkdown).join("<br/>")}</blockquote>`);
-      continue;
-    }
-
-    if (line.trim() === "") {
-      output.push("<br/>");
-      index += 1;
-      continue;
-    }
-
-    output.push(`<p class="memory-markdown__p">${inlineMarkdown(line)}</p>`);
-    index += 1;
-  }
-
-  return output.join("");
-}
-
-function inlineMarkdown(value: string): string {
-  let output = escapeHtml(value);
-  output = output.replace(/`([^`]+)`/g, '<code class="memory-markdown__code">$1</code>');
-  output = output.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
-  output = output.replace(/__(.+?)__/g, "<strong>$1</strong>");
-  output = output.replace(/\*(.+?)\*/g, "<em>$1</em>");
-  output = output.replace(/_(.+?)_/g, "<em>$1</em>");
-  output = output.replace(/~~(.+?)~~/g, "<del>$1</del>");
-  output = output.replace(/\[([^\]\n]+)\]\(([^)\n]+)\)/g, (_match, label: string) => label);
-  return output;
-}
-
-function escapeHtml(value: string): string {
-  return value.replace(/[&<>"']/g, (char) => HTML_ESCAPE[char] ?? char);
 }
 
 function arrayValue(value: unknown): unknown[] {

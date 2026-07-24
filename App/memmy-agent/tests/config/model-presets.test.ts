@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { Config, ModelPresetConfig } from "../../src/config/schema.js";
+import { DEFAULT_MAX_TOKENS } from "../../src/token-budget.js";
 
 describe("model presets", () => {
   it("resolves defaults when no preset is active", () => {
@@ -7,6 +8,7 @@ describe("model presets", () => {
     const resolved = config.resolvePreset();
 
     expect(config.agents.defaults.contextWindowTokens).toBe(200_000);
+    expect(config.agents.defaults.maxTokens).toBe(DEFAULT_MAX_TOKENS);
     expect(resolved.model).toBe(config.agents.defaults.model);
     expect(resolved.provider).toBe(config.agents.defaults.provider);
     expect(resolved.maxTokens).toBe(config.agents.defaults.maxTokens);
@@ -16,7 +18,10 @@ describe("model presets", () => {
   });
 
   it("uses the default context window for implicit named presets", () => {
-    expect(new ModelPresetConfig({ model: "openai/gpt-4.1" }).contextWindowTokens).toBe(200_000);
+    const preset = new ModelPresetConfig({ model: "openai/gpt-4.1" });
+
+    expect(preset.contextWindowTokens).toBe(200_000);
+    expect(preset.maxTokens).toBe(DEFAULT_MAX_TOKENS);
   });
 
   it("accepts exact OpenAI apiType values only", () => {

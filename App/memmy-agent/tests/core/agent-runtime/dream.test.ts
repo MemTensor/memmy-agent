@@ -14,7 +14,7 @@ function workspace(): string {
 }
 
 function makeStore(): MemoryStore {
-  const store = new MemoryStore(workspace());
+  const store = new MemoryStore(workspace(), { fileMemoryEnabled: true });
   store.writeSoul("# Soul\n- Helpful");
   store.writeUser("# User\n- Developer");
   store.writeMemory("# Memory\n- Project X active");
@@ -102,7 +102,10 @@ describe("Dream run", () => {
   });
 
   it("advances dream cursor only after completed runner result and compacts history", async () => {
-    const store = new MemoryStore(workspace(), 2);
+    const store = new MemoryStore(workspace(), {
+      maxHistoryEntries: 2,
+      fileMemoryEnabled: true,
+    });
     store.appendHistory("event 1");
     store.appendHistory("event 2");
     store.appendHistory("event 3");
@@ -197,7 +200,8 @@ describe("Dream run", () => {
       content: "---\nname: test-skill\ndescription: Test\n---\n",
     });
 
-    expect(String(result)).toContain("Successfully wrote");
+    expect(String(result)).toBe(`Successfully wrote ${path.join(store.workspace, "skills", "test-skill", "SKILL.md")}`);
+    expect(String(result)).not.toContain("Lint results:");
     expect(fs.existsSync(path.join(store.workspace, "skills", "test-skill", "SKILL.md"))).toBe(true);
   });
 

@@ -18,9 +18,12 @@ describe("local/cloud storage backend parity", () => {
       expect(sqliteBackend.capabilities()).toMatchObject({
         backendId: "sqlite-local",
         backend: "sqlite",
+        fullText: "fts5",
+        vector: "native",
         changeLog: true,
         idempotency: true,
-        jobs: true
+        jobs: true,
+        importExport: true
       });
       sqliteBackend.close();
 

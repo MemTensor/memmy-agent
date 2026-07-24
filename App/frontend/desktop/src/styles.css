@@ -4001,20 +4001,38 @@ code {
   line-height: 1.55;
 }
 
-.memory-log-markdown table {
-  display: block;
-  width: max-content;
+.memory-markdown__table-scroll {
   max-width: 100%;
   margin: 0 0 8px;
   overflow-x: auto;
+}
+
+.memory-markdown__table,
+.memory-log-markdown table {
+  width: max-content;
+  max-width: 100%;
   border-collapse: collapse;
 }
 
+.memory-log-markdown table {
+  display: block;
+  margin: 0 0 8px;
+  overflow-x: auto;
+}
+
+.memory-markdown__th,
+.memory-markdown__td,
 .memory-log-markdown :is(th, td) {
   border: 1px solid color-mix(in srgb, var(--color-border-stone) 42%, transparent);
   padding: 5px 8px;
   white-space: nowrap;
   text-align: left;
+}
+
+.memory-markdown__th {
+  background: color-mix(in srgb, var(--color-text-ink) 6%, var(--color-background-paper));
+  color: var(--color-text-ink);
+  font-weight: 600;
 }
 
 .memory-markdown a {

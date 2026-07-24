@@ -77,6 +77,7 @@ type WebSocketChannelOptions = {
   workspacePath?: string | null;
   runtimeModelName?: RuntimeModelNameResolver;
   cancelActiveTasks?: (sessionKey: string) => Promise<number>;
+  fileMemoryEnabled?: boolean;
 };
 export type WebuiLanguage = "zh-CN" | "en-US";
 
@@ -503,6 +504,7 @@ export class WebSocketChannel extends BaseChannel {
   staticDistPath: string | null = null;
   runtimeModelName: RuntimeModelNameResolver = null;
   workspacePath: string;
+  readonly fileMemoryEnabled: boolean;
   cancelActiveTasks: ((sessionKey: string) => Promise<number>) | null = null;
   server: any = null;
   channelAdmin: ChannelAdminApi | null = null;
@@ -516,6 +518,7 @@ export class WebSocketChannel extends BaseChannel {
     const staticDistPath = options.staticDistPath ?? config?.staticDistPath ?? null;
     this.staticDistPath = staticDistPath ? path.resolve(String(staticDistPath)) : null;
     this.runtimeModelName = options.runtimeModelName ?? config?.runtimeModelName ?? null;
+    this.fileMemoryEnabled = options.fileMemoryEnabled === true;
     this.cancelActiveTasks = options.cancelActiveTasks ?? config?.cancelActiveTasks ?? null;
     const workspacePath = options.workspacePath ?? config?.workspacePath ?? getWorkspacePath();
     this.workspacePath = path.resolve(String(workspacePath));
@@ -563,6 +566,15 @@ export class WebSocketChannel extends BaseChannel {
     this.connectionDefaultChats.delete(connection);
   }
 
+  safeCleanupConnection(connection: any): void {
+    try {
+      this.cleanupConnection(connection);
+    } catch {
+      // Cleanup is connection-local and idempotent. A broken connection must
+      // never affect the gateway or another subscriber.
+    }
+  }
+
   async maybePushActiveGoalState(chatId: string): Promise<void> {
     if (!this.sessionManager) return;
     const row = this.readSessionFile(`websocket:${chatId}`);
@@ -595,7 +607,7 @@ export class WebSocketChannel extends BaseChannel {
           started_at: startedAt,
           ...(turnId ? { turn_id: turnId } : {}),
         };
-    await this.safeSendTo(connection, JSON.stringify(payload));
+    await this.safeSendTo(connection, payload);
   }
 
   async hydrateAfterSubscribe(chatId: string): Promise<void> {
@@ -603,20 +615,26 @@ export class WebSocketChannel extends BaseChannel {
     await this.maybePushTurnRunWallClock(chatId);
   }
 
-  async safeSendTo(connection: any, raw: string): Promise<void> {
+  async safeSendTo(connection: any, payload: string | Record<string, any>): Promise<void> {
     try {
+      const raw = typeof payload === "string" ? payload : JSON.stringify(payload);
       if (typeof connection?.send === "function") await connection.send(raw);
     } catch {
       // A renderer can close its socket while subscription hydration or a
       // broadcast is still in flight. Treat that as a per-connection event;
       // rejecting here would escape the fire-and-forget connection loop and
       // terminate the packaged Agent gateway process.
-      this.cleanupConnection(connection);
+      try {
+        connection?.close?.(1011, "connection send failed");
+      } catch {
+        // The socket can already be gone.
+      }
+      this.safeCleanupConnection(connection);
     }
   }
 
   async sendEvent(connection: any, event: string, fields: Record<string, any> = {}): Promise<void> {
-    await this.safeSendTo(connection, JSON.stringify({ event, ...fields }));
+    await this.safeSendTo(connection, { event, ...fields });
   }
 
   expectedPath(): string {
@@ -749,7 +767,12 @@ export class WebSocketChannel extends BaseChannel {
     } catch {
       sessionDagEnabled = true;
     }
-    return httpJsonResponse({ commands: builtinCommandPalette({ sessionDagEnabled }) });
+    return httpJsonResponse({
+      commands: builtinCommandPalette({
+        sessionDagEnabled,
+        fileMemoryEnabled: this.fileMemoryEnabled,
+      }),
+    });
   }
 
   handleWebuiSidebarState(request: any): HttpLikeResponse {
@@ -1255,8 +1278,7 @@ export class WebSocketChannel extends BaseChannel {
   ): Promise<void> {
     if (!this.shouldSendTurnPayload(chatId, payload)) return;
     if (appendTranscript) this.tryAppendWebuiTranscript(chatId, payload);
-    const raw = JSON.stringify(payload);
-    for (const connection of targets ?? [...(this.subscriptions.get(chatId) ?? [])]) await this.safeSendTo(connection, raw);
+    for (const connection of targets ?? [...(this.subscriptions.get(chatId) ?? [])]) await this.safeSendTo(connection, payload);
   }
 
   rewriteLocalMarkdownImages(text: string): string {
@@ -1394,7 +1416,7 @@ export class WebSocketChannel extends BaseChannel {
           return;
         }
         connection.accept(head);
-        void this.connectionLoop(connection);
+        void this.connectionLoop(connection).catch((error) => this.handleConnectionLoopFailure(connection, error));
       } catch (error) {
         rejectUpgrade(socket, httpError(500, error instanceof Error ? error.message : "Internal Server Error"));
       }
@@ -1463,8 +1485,22 @@ export class WebSocketChannel extends BaseChannel {
         });
       }
     } finally {
-      this.cleanupConnection(connection);
+      this.safeCleanupConnection(connection);
     }
+  }
+
+  handleConnectionLoopFailure(connection: any, error: unknown): void {
+    const errorType = error instanceof Error ? error.name : typeof error;
+    const remote = Array.isArray(connection?.remoteAddress)
+      ? String(connection.remoteAddress[0] ?? "unknown")
+      : String(connection?.remoteAddress ?? "unknown");
+    console.warn(`[websocket] connection loop failed (${errorType}, remote=${remote})`);
+    try {
+      connection?.close?.(1011, "connection loop failed");
+    } catch {
+      // The socket can already be gone.
+    }
+    this.safeCleanupConnection(connection);
   }
 
   override async handleMessage(
@@ -1874,8 +1910,7 @@ export class WebSocketChannel extends BaseChannel {
     if (message.metadata?.[OUTBOUND_META_AGENT_UI] != null) payload.agent_ui = message.metadata[OUTBOUND_META_AGENT_UI];
     if (!this.shouldSendTurnPayload(message.chatId, payload)) return;
     this.tryAppendWebuiTranscript(message.chatId, { ...payload, text: message.content, content: message.content });
-    const raw = JSON.stringify(payload);
-    for (const connection of targets) await this.safeSendTo(connection, raw);
+    for (const connection of targets) await this.safeSendTo(connection, payload);
   }
 
   async sendDelta(chatId: string, delta: string, metadata: Record<string, any> = {}): Promise<void> {
@@ -1956,13 +1991,11 @@ export class WebSocketChannel extends BaseChannel {
     if (!model) return;
     const body: Record<string, any> = { event: "runtime_model_updated", model_name: model };
     if (typeof modelPreset === "string" && modelPreset.trim()) body.model_preset = modelPreset.trim();
-    const raw = JSON.stringify(body);
-    for (const connection of this.connectionChats.keys()) await this.safeSendTo(connection, raw);
+    for (const connection of this.connectionChats.keys()) await this.safeSendTo(connection, body);
   }
 
   private async broadcast(chatId: string, payload: Record<string, any>): Promise<void> {
-    const raw = JSON.stringify(payload);
-    for (const connection of this.subscriptions.get(chatId) ?? []) await this.safeSendTo(connection, raw);
+    for (const connection of this.subscriptions.get(chatId) ?? []) await this.safeSendTo(connection, payload);
   }
 }
 
@@ -2347,6 +2380,10 @@ class MinimalWebSocketConnection implements AsyncIterable<string | Buffer> {
     this.socket.write(encodeServerFrame(Buffer.from(raw, "utf8"), 0x1));
   }
 
+  close(code = 1000, reason = "connection closed"): void {
+    this.closeWithCode(code, reason);
+  }
+
   [Symbol.asyncIterator](): AsyncIterator<string | Buffer> {
     return {
       next: () => this.next(),
@@ -2428,9 +2465,12 @@ class MinimalWebSocketConnection implements AsyncIterable<string | Buffer> {
     const payload = Buffer.alloc(2 + reasonBuffer.length);
     payload.writeUInt16BE(code, 0);
     reasonBuffer.copy(payload, 2);
-    this.socket.write(encodeServerFrame(payload, 0x8));
-    this.socket.end();
-    this.closeQueue();
+    try {
+      this.socket.write(encodeServerFrame(payload, 0x8));
+      this.socket.end();
+    } finally {
+      this.closeQueue();
+    }
   }
 
 }

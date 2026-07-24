@@ -170,8 +170,12 @@ ensure_memmy_agent_dependencies() {
   local package
   local -a missing_packages=()
   local -a required_packages=(
+    "html-validate"
     "ink"
+    "parse5"
+    "postcss"
     "react"
+    "smol-toml"
     "typescript"
   )
 

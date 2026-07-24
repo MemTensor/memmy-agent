@@ -21,3 +21,32 @@ describe("requestTokenQuota", () => {
     expect((init as RequestInit).headers).toMatchObject({ authorization: "Bearer uuid-1" });
   });
 });
+
+describe("getTokenQuotaEligibility", () => {
+  it("GET /api/agentUser/quota/apply/eligibility 带 Bearer uuid", async () => {
+    const eligibility = {
+      state: "cooldown",
+      requestCount: 1,
+      maxRequestCount: 5,
+      nextAllowedAtEpochMs: 1_785_312_000_000,
+      latestRequestStatus: "rejected",
+      latestReviewNote: "额度用途不明确"
+    } as const;
+    const fetchImpl = vi.fn(async () =>
+      new Response(JSON.stringify({ data: eligibility }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      })
+    );
+    const client = createHttpCloudClient({
+      baseUrl: "https://cloud.test",
+      fetchImpl: fetchImpl as unknown as typeof fetch
+    });
+
+    await expect(client.getTokenQuotaEligibility({ uuid: "uuid-1" })).resolves.toEqual(eligibility);
+    const [url, init] = fetchImpl.mock.calls[0]!;
+    expect(String(url)).toBe("https://cloud.test/api/agentUser/quota/apply/eligibility");
+    expect((init as RequestInit).method).toBe("GET");
+    expect((init as RequestInit).headers).toMatchObject({ authorization: "Bearer uuid-1" });
+  });
+});

@@ -35,7 +35,7 @@ describe("memmy memory config", () => {
     expect(loadMemmyConfig(configPath).config.algorithm.retrieval.readOnlyInjectionProfile).toBe("all");
   });
 
-  it("defaults summary thinking off and evolution thinking on", () => {
+  it("keeps summary thinking off and defaults evolution thinking on", () => {
     const root = tempRoot();
     const configPath = join(root, "config.yaml");
     writeFileSync(configPath, YAML.stringify({
@@ -142,7 +142,7 @@ describe("memmy memory config", () => {
     expect(fromEnv.algorithm.retrieval.readOnlyInjectionProfile).toBe("experience");
   });
 
-  it("reads summary and evolution thinking switches from config and environment", () => {
+  it("ignores summary thinking switches and reads the evolution switch", () => {
     const root = tempRoot();
     const configPath = join(root, "config.yaml");
     writeFileSync(configPath, YAML.stringify({
@@ -156,13 +156,29 @@ describe("memmy memory config", () => {
       }
     }));
 
-    expect(loadMemmyConfig(configPath).config.summary.enableThinking).toBe(true);
+    expect(loadMemmyConfig(configPath).config.summary.enableThinking).toBe(false);
     expect(loadMemmyConfig(configPath).config.evolution.enableThinking).toBe(false);
 
-    setEnv("MEMMY_SUMMARY_ENABLE_THINKING", "false");
+    setEnv("MEMMY_SUMMARY_ENABLE_THINKING", "true");
     setEnv("MEMMY_EVOLUTION_ENABLE_THINKING", "1");
     expect(loadMemmyConfig(configPath).config.summary.enableThinking).toBe(false);
     expect(loadMemmyConfig(configPath).config.evolution.enableThinking).toBe(true);
+  });
+
+  it("defaults evolution output to 4096 tokens", () => {
+    const root = tempRoot();
+    const configPath = join(root, "config.yaml");
+    writeFileSync(configPath, YAML.stringify({ memmyMemory: {} }));
+
+    expect(loadMemmyConfig(configPath).config.evolution.maxTokens).toBe(4096);
+  });
+
+  it("defaults summary output to 512 tokens", () => {
+    const root = tempRoot();
+    const configPath = join(root, "config.yaml");
+    writeFileSync(configPath, YAML.stringify({ memmyMemory: {} }));
+
+    expect(loadMemmyConfig(configPath).config.summary.maxTokens).toBe(512);
   });
 
   it("selects active memory profiles and forces account models to openai-compatible runtime providers", () => {

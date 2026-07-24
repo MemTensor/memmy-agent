@@ -85,7 +85,8 @@ describe("memory layer smoke plan", () => {
         includeInjectedContext: true
       });
       expect(recall.hits.map((hit) => hit.id)).toContain(completed.l1MemoryId);
-      expect(recall.injectedContext.markdown).toContain("# Memory context");
+      expect(recall.injectedContext.markdown).toContain("## L1 Trace Memories");
+      expect(recall.injectedContext.markdown).not.toContain("# Memory context");
     } finally {
       db.close();
     }

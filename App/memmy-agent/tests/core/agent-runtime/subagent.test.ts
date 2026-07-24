@@ -6,13 +6,17 @@ import { AgentHookContext } from "../../../src/core/agent-runtime/hook.js";
 import { AgentRunResult } from "../../../src/core/agent-runtime/runner.js";
 import { SubagentManager, SubagentStatus, SubagentHook } from "../../../src/core/agent-runtime/subagent.js";
 import { MessageBus } from "../../../src/core/runtime-messages/queue.js";
+import { DEFAULT_MAX_TOKENS } from "../../../src/token-budget.js";
 
 function tmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "memmy-subagent-"));
 }
 
 function manager(extra: Record<string, any> = {}): SubagentManager {
-  const provider = { getDefaultModel: () => "test-model" };
+  const provider = {
+    generation: { maxTokens: DEFAULT_MAX_TOKENS },
+    getDefaultModel: () => "test-model",
+  };
   return new SubagentManager({
     provider,
     workspace: tmpDir(),
@@ -69,6 +73,13 @@ describe("SubagentManager", () => {
         "---\nname: beta_skill\ndescription: Available test skill\n---\n\n# Beta",
         "utf8",
       );
+      const memoryPath = path.join(skillsRoot, "memory", "SKILL.md");
+      fs.mkdirSync(path.dirname(memoryPath), { recursive: true });
+      fs.writeFileSync(
+        memoryPath,
+        "---\nname: memory\ndescription: User-created helper\n---\n\n# User Memory Helper",
+        "utf8",
+      );
 
       const prompt = manager({ workspace, disabledSkills: ["alpha_skill"] }).buildSubagentPrompt();
 
@@ -76,14 +87,25 @@ describe("SubagentManager", () => {
       expect(prompt).toContain("Use read_file to read SKILL.md");
       expect(prompt).toContain("beta_skill");
       expect(prompt).toContain(betaPath);
+      expect(prompt).toContain(memoryPath);
+      expect(prompt).toContain("User-created helper");
       expect(prompt).not.toContain("alpha_skill");
+      expect(prompt).not.toContain("# File Memory");
+      expect(prompt).not.toContain("# Recent History");
+      expect(prompt.match(/# Verification Contract/g)).toHaveLength(1);
+      expect(prompt).toContain("If a tool result says its full output was persisted");
+      expect(prompt).not.toContain("{% include 'agent/verification-contract.md' %}");
     } finally {
       fs.rmSync(workspace, { recursive: true, force: true });
     }
   });
 
   it("spawns, tracks by session, forwards run spec fields, and cleans up", async () => {
-    const sm = manager({ maxIterations: 37, llmWallTimeoutForSession: (key: string | null) => (key === "cli:direct" ? 0 : null) });
+    const sm = manager({
+      contextWindowTokens: 128_000,
+      maxIterations: 37,
+      llmWallTimeoutForSession: (key: string | null) => (key === "cli:direct" ? 0 : null),
+    });
     let release!: () => void;
     const blocker = new Promise<void>((resolve) => {
       release = resolve;
@@ -109,6 +131,8 @@ describe("SubagentManager", () => {
     release();
     await Promise.all([...sm.runningTasks.values()]);
     expect(seenSpec.maxIterations).toBe(37);
+    expect(seenSpec.maxTokens).toBe(DEFAULT_MAX_TOKENS);
+    expect(seenSpec.contextWindowTokens).toBe(128_000);
     expect(seenSpec.temperature).toBe(0.9);
     expect(seenSpec.maxIterationsMessage).toBe("Task completed but no final response was generated.");
     expect(seenSpec.errorMessage).toBeNull();
@@ -119,6 +143,35 @@ describe("SubagentManager", () => {
     expect(seenSpec.checkpointCallback).toBeTypeOf("function");
     expect(sm.getRunningCount()).toBe(0);
     expect(sm.getRunningCountBySession("cli:direct")).toBe(0);
+  });
+
+  it("forwards an explicit provider maxTokens value without replacing it", async () => {
+    const sm = manager({
+      provider: {
+        generation: { maxTokens: 1234 },
+        getDefaultModel: () => "small-model",
+      },
+      model: "small-model",
+      contextWindowTokens: 32_000,
+    });
+    const status = new SubagentStatus({ taskId: "small", label: "small", taskDescription: "do it" });
+    let seenSpec: any = null;
+    sm.runner.run = vi.fn(async (spec) => {
+      seenSpec = spec;
+      return new AgentRunResult({ finalContent: "done", messages: [], stopReason: "completed" });
+    });
+    sm.announceResult = vi.fn(async () => undefined) as any;
+
+    await sm.runSubagent(
+      "small",
+      "do it",
+      "small",
+      { channel: "cli", chatId: "direct" },
+      status,
+    );
+
+    expect(seenSpec.maxTokens).toBe(1234);
+    expect(seenSpec.contextWindowTokens).toBe(32_000);
   });
 
   it("announces results as inbound system messages with session override", async () => {
@@ -158,12 +211,13 @@ describe("SubagentManager", () => {
     expect(text).toContain("timeout");
   });
 
-  it("updates provider and runner together", () => {
+  it("updates provider, runner, and context window together", () => {
     const sm = manager();
-    const provider = { model: "new-model" };
-    sm.setProvider(provider, "new-model");
+    const provider = { generation: { maxTokens: 1234 }, model: "new-model" };
+    sm.setProvider(provider, "new-model", 64_000);
     expect(sm.provider).toBe(provider);
     expect(sm.model).toBe("new-model");
+    expect(sm.contextWindowTokens).toBe(64_000);
     expect(sm.runner.provider).toBe(provider);
   });
 });

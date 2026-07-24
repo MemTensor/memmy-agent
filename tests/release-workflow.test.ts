@@ -127,14 +127,14 @@ describe("GitHub release workflow", () => {
     expect(workflow.concurrency.group).toContain("pull_request.head.ref");
   });
 
-  it("does not embed a repository .env file in desktop installers", () => {
+  it("embeds the repository .env required by packaged desktop runtimes", () => {
     for (const config of packagingConfigs) {
       const packagingSource = readFileSync(
         resolve(import.meta.dirname, `../App/shell/desktop/${config}`),
         "utf8",
       );
-      expect(packagingSource).not.toMatch(/from:\s+.*\.env(?:\s|$)/);
-      expect(packagingSource).not.toMatch(/to:\s+\.env(?:\s|$)/);
+      expect(packagingSource).toMatch(/from:\s+\.\.\/\.\.\/\.\.\/\.env(?:\s|$)/);
+      expect(packagingSource).toMatch(/to:\s+\.env(?:\s|$)/);
     }
   });
 });

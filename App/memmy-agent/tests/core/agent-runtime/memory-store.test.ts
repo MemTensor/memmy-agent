@@ -376,6 +376,107 @@ describe("MemoryStore history and cursor recovery", () => {
 });
 
 describe("MemoryStore dream cursor, raw archive, and git integration", () => {
+  it("defaults direct and numeric constructors to disabled file memory", () => {
+    const direct = new MemoryStore(workspace());
+    const numeric = new MemoryStore(workspace(), 2);
+
+    expect(direct.fileMemoryEnabled).toBe(false);
+    expect(numeric.fileMemoryEnabled).toBe(false);
+    expect(numeric.maxHistoryEntries).toBe(2);
+  });
+
+  it("skips pending history before compacting on disabled startup", () => {
+    const root = workspace();
+    const memoryDir = path.join(root, "memory");
+    fs.mkdirSync(memoryDir);
+    fs.writeFileSync(
+      path.join(memoryDir, "history.jsonl"),
+      [1, 2, 3, 4]
+        .map((cursor) =>
+          JSON.stringify({
+            cursor,
+            timestamp: "2026-04-01 10:00",
+            content: `event ${cursor}`,
+          }),
+        )
+        .join("\n") + "\n",
+      "utf8",
+    );
+    fs.writeFileSync(path.join(memoryDir, ".cursor"), "4", "utf8");
+    fs.writeFileSync(path.join(memoryDir, ".dreamCursor"), "1", "utf8");
+
+    const disabled = new MemoryStore(root, {
+      maxHistoryEntries: 2,
+      fileMemoryEnabled: false,
+    });
+
+    expect(disabled.getLastDreamCursor()).toBe(4);
+    expect(disabled.readHistory().map((entry) => entry.cursor)).toEqual([3, 4]);
+  });
+
+  it("never moves a disabled startup dream cursor backward", () => {
+    const root = workspace();
+    const memoryDir = path.join(root, "memory");
+    fs.mkdirSync(memoryDir);
+    fs.writeFileSync(
+      path.join(memoryDir, "history.jsonl"),
+      '{"cursor":4,"timestamp":"2026-04-01 10:00","content":"event"}\n',
+      "utf8",
+    );
+    fs.writeFileSync(path.join(memoryDir, ".dreamCursor"), "9", "utf8");
+
+    const disabled = new MemoryStore(root, { fileMemoryEnabled: false });
+
+    expect(disabled.getLastDreamCursor()).toBe(9);
+  });
+
+  it("advances the disabled dream cursor and retention after every archive", () => {
+    const disabled = new MemoryStore(workspace(), {
+      maxHistoryEntries: 2,
+      fileMemoryEnabled: false,
+    });
+
+    disabled.appendHistory("summary event");
+    disabled.rawArchive([{ role: "user", content: "raw event" }]);
+    disabled.appendHistory("file-cap event");
+
+    expect(disabled.getLastDreamCursor()).toBe(3);
+    expect(disabled.readHistory().map((entry) => entry.cursor)).toEqual([2, 3]);
+    expect(disabled.readHistory()[0].content).toContain("[RAW]");
+  });
+
+  it("does not compact disabled history when retention is non-positive", () => {
+    const disabled = new MemoryStore(workspace(), {
+      maxHistoryEntries: 0,
+      fileMemoryEnabled: false,
+    });
+    for (let index = 0; index < 4; index += 1) {
+      disabled.appendHistory(`event ${index}`);
+    }
+
+    expect(disabled.readHistory()).toHaveLength(4);
+    expect(disabled.getLastDreamCursor()).toBe(4);
+  });
+
+  it("skips closed-period history and resumes Dream eligibility after re-enable", () => {
+    const root = workspace();
+    const disabled = new MemoryStore(root, { fileMemoryEnabled: false });
+    disabled.appendHistory("closed one");
+    disabled.appendHistory("closed two");
+    expect(disabled.getLastDreamCursor()).toBe(2);
+
+    const enabled = new MemoryStore(root, { fileMemoryEnabled: true });
+    expect(enabled.readUnprocessedHistory(enabled.getLastDreamCursor())).toEqual([]);
+    enabled.appendHistory("newly eligible");
+
+    expect(enabled.getLastDreamCursor()).toBe(2);
+    expect(
+      enabled
+        .readUnprocessedHistory(enabled.getLastDreamCursor())
+        .map((entry) => entry.content),
+    ).toEqual(["newly eligible"]);
+  });
+
   it("starts with dream cursor zero", () => {
     expect(store().getLastDreamCursor()).toBe(0);
   });

@@ -7,6 +7,41 @@ const repoRoot = fileURLToPath(new URL("../../../..", import.meta.url));
 const devStartPath = fileURLToPath(new URL("../../../../scripts/dev-start.sh", import.meta.url));
 
 describe("development CLI launchers", () => {
+  it("reinstalls memmy-agent dependencies when file validators are missing", () => {
+    const script = String.raw`set -euo pipefail
+source scripts/dev-start.sh
+
+install_calls=0
+dependencies_installed=0
+
+node_can_resolve_from_dir() {
+  local package="$2"
+  case "$package" in
+    html-validate|smol-toml)
+      test "$dependencies_installed" -eq 1
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
+
+npm() {
+  test "$1" = "ci"
+  test "$2" = "--prefix"
+  test "$3" = "$MEMMY_AGENT_DIR"
+  test "$4" = "--include=dev"
+  install_calls=$((install_calls + 1))
+  dependencies_installed=1
+}
+
+ensure_memmy_agent_dependencies
+test "$install_calls" -eq 1`;
+    const result = spawnSync("bash", ["-s"], { cwd: repoRoot, encoding: "utf8", input: script });
+
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+  });
+
   it("migrates managed Windows launchers and preserves unrelated files", () => {
     const source = readFileSync(devStartPath, "utf8");
     expect(source).toContain('if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then');

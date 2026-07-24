@@ -1,5 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { randomUUID } from "node:crypto";
 import type { AddressInfo } from "node:net";
+import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
 import { memoryPanelHtml } from "../viewer/static.js";
 import type {
   MemoryAddRequest,
@@ -16,6 +18,9 @@ import type {
 import { DEFAULT_NAMESPACE_SOURCE } from "../types.js";
 import { MemoryService } from "../service/memory-service.js";
 import { MemoryServiceError, statusForCode } from "../utils/error.js";
+
+const logger = createMemoryLogger("http");
+const workerLogger = createMemoryLogger("worker");
 
 export const API_ROUTES = [
   "GET /api/v1/health",
@@ -84,6 +89,9 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
     postHealthDelayMs: options.workerPostHealthDelayMs ?? DEFAULT_WORKER_POST_HEALTH_DELAY_MS
   });
   const server = createServer(async (request, response) => {
+    const startedAt = Date.now();
+    const requestId = requestIdFromHeaders(request) ?? randomUUID();
+    const requestPath = request.url?.split("?", 1)[0] ?? "<missing>";
     setCors(response);
     if (request.method === "OPTIONS") {
       response.writeHead(204);
@@ -118,8 +126,30 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
         response.once("finish", () => options.onShutdownRequested?.());
       }
       writeJson(response, 200, result);
+      logger.debug("request.succeeded", {
+        requestId,
+        method: request.method,
+        path: requestPath,
+        status: 200,
+        durationMs: Date.now() - startedAt
+      });
     } catch (error) {
-      writeError(response, error, requestIdFromHeaders(request));
+      const status = error instanceof MemoryServiceError ? statusForCode(error.code) : 500;
+      const fields = {
+        requestId,
+        method: request.method,
+        path: requestPath,
+        status,
+        durationMs: Date.now() - startedAt,
+        ...(error instanceof MemoryServiceError ? { errorCode: error.code } : {}),
+        ...memoryErrorFields(error)
+      };
+      if (status >= 500) {
+        logger.error("request.failed", fields);
+      } else {
+        logger.warn("request.rejected", fields);
+      }
+      writeError(response, error, requestId);
     }
   });
   server.once("listening", () => autoWorker.start());
@@ -187,7 +217,7 @@ function createAutoWorkerDrain(
         try {
           service.reconcileWorkerStartup();
         } catch (error) {
-          console.error("[memmy] worker startup reconciliation failed", error);
+          workerLogger.error("startup.reconciliation_failed", memoryErrorFields(error));
         }
       }
       do {
@@ -209,7 +239,7 @@ function createAutoWorkerDrain(
         }
       } while (requested && !continueSoon);
     } catch (error) {
-      console.error("[memmy] auto worker drain failed", error);
+      workerLogger.error("drain.failed", memoryErrorFields(error));
     } finally {
       running = false;
       if (disposed) {
