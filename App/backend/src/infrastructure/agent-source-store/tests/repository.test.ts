@@ -34,7 +34,20 @@ describe("agent source repository", () => {
       sourceId: "cursor",
       displayName: "Cursor",
       dataPath: "/Users/test/Library/Application Support/Cursor",
-      builtin: true
+      builtin: true,
+      syncRecipe: {
+        version: 1,
+        format: "jsonl",
+        path: "/Users/test/.cursor/history.jsonl",
+        fields: {
+          messageId: "id",
+          conversationId: "conversation_id",
+          role: "role",
+          content: "content",
+          createdAt: "created_at"
+        },
+        timestampFormat: "auto"
+      }
     });
     repository.setStatus("cursor", "skill_installed");
     repository.setLastScannedAt("cursor", scannedAt);
@@ -47,7 +60,12 @@ describe("agent source repository", () => {
         builtin: true,
         status: "skill_installed",
         messageCount: 0,
-        lastScannedAt: scannedAt
+        lastScannedAt: scannedAt,
+        syncRecipe: expect.objectContaining({
+          version: 1,
+          format: "jsonl",
+          path: "/Users/test/.cursor/history.jsonl"
+        })
       }
     ]);
 
@@ -63,7 +81,8 @@ describe("agent source repository", () => {
       displayName: "Cursor Stable",
       dataPath: "/Users/test/Cursor",
       status: "skill_installed",
-      lastScannedAt: scannedAt
+      lastScannedAt: scannedAt,
+      syncRecipe: expect.objectContaining({ format: "jsonl" })
     });
 
     repository.removeSource("cursor");
@@ -166,6 +185,7 @@ function createRepository(): AgentSourceRepository {
       builtin         INTEGER NOT NULL CHECK(builtin IN (0,1)),
       status          TEXT NOT NULL DEFAULT 'not_connected',
       last_scanned_at TEXT,
+      sync_recipe_json TEXT,
       created_at      TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
       PRIMARY KEY (uuid, source_id)

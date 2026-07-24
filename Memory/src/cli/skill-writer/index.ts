@@ -12,6 +12,10 @@ export interface AgentSkillInstallOptions {
   dryRun?: boolean;
 }
 
+export interface AgentSkillBatchInstallOptions extends AgentSkillInstallOptions {
+  skipUnavailable?: boolean;
+}
+
 export interface AgentSkillInstallResult {
   agent: MemmyAgentId;
   root: string;
@@ -27,18 +31,8 @@ interface AgentTarget {
   skillsRelativePath: string;
 }
 
-const START_MARKER = "<!-- memmy-memory cli : start -->";
-const END_MARKER = "<!-- memmy-memory cli : end -->";
-const COMPATIBLE_MARKER_PAIRS = [
-  {
-    start: "<!-- Memmy Memory CLI : Start !-->",
-    end: "<!-- Memmy Memory CLI : end ! -->"
-  },
-  {
-    start: "<!-- memmy-memory:start v=1 -->",
-    end: "<!-- memmy-memory:end v=1 -->"
-  }
-];
+const START_MARKER = "<!-- memmy:start v=1 -->";
+const END_MARKER = "<!-- memmy:end v=1 -->";
 const SKILL_DIRECTORY_NAME = "memmy-memory";
 
 const AGENT_TARGETS: Record<MemmyAgentId, Omit<AgentTarget, "id" | "root">> = {
@@ -68,11 +62,19 @@ const AGENT_TARGETS: Record<MemmyAgentId, Omit<AgentTarget, "id" | "root">> = {
   }
 };
 
-export function installMemmyMemorySkillForAgents(
+export async function installMemmyMemorySkillForAgents(
   agents: string[],
-  options: AgentSkillInstallOptions = {}
+  options: AgentSkillBatchInstallOptions = {}
 ): Promise<AgentSkillInstallResult[]> {
-  return Promise.all(normalizeAgentIds(agents).map((agent) => installMemmyMemorySkillForAgent(agent, options)));
+  const results = await Promise.all(
+    normalizeAgentIds(agents).map(async (agent) => {
+      if (options.skipUnavailable && !(await isExistingDirectory(targetForAgent(agent, options.agentRoot).root))) {
+        return null;
+      }
+      return installMemmyMemorySkillForAgent(agent, options);
+    })
+  );
+  return results.filter((result): result is AgentSkillInstallResult => result !== null);
 }
 
 export async function installMemmyMemorySkillForAgent(
@@ -204,11 +206,9 @@ async function resolveCliAssetRoot(rootOverride: string | undefined): Promise<st
 
 function upsertMarkerBlock(existing: string, content: string): string {
   const block = `${START_MARKER}\n${content.trimEnd()}\n${END_MARKER}\n`;
-  for (const marker of [{ start: START_MARKER, end: END_MARKER }, ...COMPATIBLE_MARKER_PAIRS]) {
-    const pattern = createMarkerBlockPattern(marker.start, marker.end);
-    if (pattern.test(existing)) {
-      return existing.replace(pattern, block);
-    }
+  const pattern = createMarkerBlockPattern(START_MARKER, END_MARKER);
+  if (pattern.test(existing)) {
+    return existing.replace(pattern, block);
   }
 
   const separator = existing.length > 0 && !existing.endsWith("\n") ? "\n" : "";

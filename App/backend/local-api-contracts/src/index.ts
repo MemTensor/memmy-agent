@@ -5,6 +5,8 @@ export * from "./memory-runtime.js";
 export * from "./endpoints.js";
 export * from "./cloud-service.js";
 
+export const MANAGED_AGENT_DISCOVERY_PENDING_DATA_PATH = "memmy-agent://history-discovery-pending";
+
 export const UserModeSchema = z.enum(["unset", "byok", "account"]);
 export type UserMode = z.infer<typeof UserModeSchema>;
 
@@ -194,7 +196,9 @@ export const AgentSourceViewSchema = z.object({
     available: z.boolean(),
     status: AgentSourceStatusSchema,
     messageCount: z.number().int().nonnegative(),
-    lastScannedAt: z.string().datetime().nullable()
+    lastScannedAt: z.string().datetime().nullable(),
+    syncBoundaryAt: z.string().datetime().nullable().optional(),
+    syncReady: z.boolean().optional()
 });
 export type AgentSourceView = z.infer<typeof AgentSourceViewSchema>;
 
@@ -214,10 +218,93 @@ export type AgentSourceMemoryPluginConflictsResponse = z.infer<typeof AgentSourc
 
 /** Schema for add manual input. */
 export const AddManualInputSchema = z.object({
-    displayName: z.string().min(1),
-    dataPath: z.string().min(1)
+    displayName: z.string().trim().min(1).max(120)
 });
 export type AddManualInput = z.infer<typeof AddManualInputSchema>;
+
+export const ManagedAgentSourceMessageSchema = z.object({
+    messageId: z.string().min(1),
+    conversationId: z.string().min(1),
+    role: z.enum(["user", "assistant", "tool", "system"]),
+    content: z.string().min(1),
+    createdAt: z.string().datetime(),
+    workspacePath: z.string().nullable().optional(),
+    gitRoot: z.string().nullable().optional(),
+    rawMeta: z.record(z.string(), z.unknown()).optional()
+});
+export type ManagedAgentSourceMessage = z.infer<typeof ManagedAgentSourceMessageSchema>;
+
+export const ManagedAgentSourceImportInputSchema = z.object({
+    mode: z.enum(["initial_subset", "incremental"]),
+    messages: z.array(ManagedAgentSourceMessageSchema).max(2_000),
+    dataPath: z.string().trim().min(1).optional(),
+    syncBoundaryAt: z.string().datetime().nullable().optional(),
+    latestSeenAt: z.string().datetime().nullable().optional(),
+    final: z.boolean().default(false)
+});
+export type ManagedAgentSourceImportInput = z.infer<typeof ManagedAgentSourceImportInputSchema>;
+
+export const ManagedAgentSourceImportResultSchema = z.object({
+    sourceId: z.string().min(1),
+    attempted: z.number().int().nonnegative(),
+    written: z.number().int().nonnegative(),
+    deduped: z.number().int().nonnegative(),
+    failed: z.number().int().nonnegative(),
+    memoryIds: z.array(z.string()),
+    syncBoundaryAt: z.string().datetime().nullable(),
+    errors: z.array(z.object({
+        conversationId: z.string().min(1),
+        reason: z.string().min(1)
+    }))
+});
+export type ManagedAgentSourceImportResult = z.infer<typeof ManagedAgentSourceImportResultSchema>;
+
+const ManagedAgentSyncFieldMapSchema = z.object({
+    messageId: z.string().trim().min(1).optional(),
+    conversationId: z.string().trim().min(1).optional(),
+    role: z.string().trim().min(1),
+    content: z.string().trim().min(1),
+    createdAt: z.string().trim().min(1),
+    workspacePath: z.string().trim().min(1).optional(),
+    gitRoot: z.string().trim().min(1).optional()
+});
+
+const ManagedAgentSyncRecipeBaseSchema = z.object({
+    version: z.literal(1),
+    path: z.string().trim().min(1),
+    fields: ManagedAgentSyncFieldMapSchema,
+    roleMap: z.record(z.string(), z.enum(["user", "assistant", "tool", "system"])).optional(),
+    timestampFormat: z.enum(["auto", "iso", "unix_seconds", "unix_milliseconds"]).default("auto")
+});
+
+export const ManagedAgentSyncRecipeSchema = z.discriminatedUnion("format", [
+    ManagedAgentSyncRecipeBaseSchema.extend({
+        format: z.literal("jsonl"),
+        fileSuffix: z.string().min(1).optional()
+    }),
+    ManagedAgentSyncRecipeBaseSchema.extend({
+        format: z.literal("json"),
+        fileSuffix: z.string().min(1).optional(),
+        recordsPath: z.string().trim().min(1).optional()
+    }),
+    ManagedAgentSyncRecipeBaseSchema.extend({
+        format: z.literal("sqlite"),
+        query: z.string().trim().min(1)
+    })
+]);
+export type ManagedAgentSyncRecipe = z.infer<typeof ManagedAgentSyncRecipeSchema>;
+
+export const ManagedAgentSourceUpdateInputSchema = z.object({
+    dataPath: z.string().trim().min(1).optional(),
+    skillInstalled: z.boolean().optional(),
+    syncRecipe: ManagedAgentSyncRecipeSchema.optional()
+}).refine((input) =>
+    input.dataPath !== undefined ||
+    input.skillInstalled !== undefined ||
+    input.syncRecipe !== undefined, {
+    message: "At least one managed Agent source field is required"
+});
+export type ManagedAgentSourceUpdateInput = z.infer<typeof ManagedAgentSourceUpdateInputSchema>;
 
 /** Schema for agent source id params. */
 export const AgentSourceIdParamsSchema = z.object({

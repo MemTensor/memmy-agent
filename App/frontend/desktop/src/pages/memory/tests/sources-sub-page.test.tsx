@@ -1,5 +1,6 @@
 /** Sources sub page tests. */
 import { renderToString } from "react-dom/server";
+import { MANAGED_AGENT_DISCOVERY_PENDING_DATA_PATH } from "@memmy/local-api-contracts";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -9,6 +10,7 @@ import { enUSMessages, zhCNMessages } from "../../../i18n/messages.js";
 import { AGENT_SOURCE_SCAN_COMPLETION_FEEDBACK_MS } from "../../../state/app-actions.js";
 import { agentSourceLogoUrl } from "../../agent-source-logos.js";
 import {
+  buildManagedAgentTaskPrompt,
   formatAgentSourceActionError,
   formatMemoryServiceAddress,
   formatScanProgressTail,
@@ -17,6 +19,7 @@ import {
   isAgentSourceConnectionActionDisabled,
   resolveAgentSourceScanButtonState,
   resolveAgentSourceConnectionAction,
+  resolveManagedAgentSourceSyncButtonState,
   resolveAgentSourceStatusLabelKey,
   resolveScanContinueSourceId
 } from "../../memory-sources-page.js";
@@ -46,6 +49,13 @@ describe("SourcesSubPage", () => {
     expect(zhCNMessages["memory.syncCompleted"]).toBe("同步完成");
     expect(enUSMessages["memory.syncCompleted"]).toBe("Synced");
     expect(AGENT_SOURCE_SCAN_COMPLETION_FEEDBACK_MS).toBe(5000);
+  });
+
+  it("手动添加的 Agent 同步完成后显示与内置 Agent 一致的勾选反馈", () => {
+    expect(resolveManagedAgentSourceSyncButtonState("manual-qoder", "manual-qoder", null)).toBe("running");
+    expect(resolveManagedAgentSourceSyncButtonState("manual-qoder", null, "manual-qoder")).toBe("completed");
+    expect(resolveManagedAgentSourceSyncButtonState("manual-qoder", null, null)).toBe("idle");
+    expect(resolveManagedAgentSourceSyncButtonState("manual-qoder", "manual-other", "manual-other")).toBe("idle");
   });
 
   it("使用 WorkBuddy 官方图标而不是文字缩写", () => {
@@ -96,6 +106,75 @@ describe("SourcesSubPage", () => {
     expect(source).toContain('variant="soft"');
     expect(source).toContain("manual-source-modal__footer");
     expect(source).not.toContain("fixed inset-0 z-50 flex items-center justify-center bg-text-ink/25 backdrop-blur-sm");
+  });
+
+  it("新增 Agent 立即写入页面状态，并在重新进入页面时从后端刷新", () => {
+    const source = readFileSync(resolve(__dirname, "..", "..", "memory-sources-page.tsx"), "utf8");
+
+    expect(source).toContain("dispatch(appActions.agentSourcesRefreshed([");
+    expect(source).toContain(".listSources()");
+    expect(source).toContain("if (active) dispatch(appActions.agentSourcesRefreshed(sources));");
+  });
+
+  it("未知 Agent 首次接入任务始终使用英文 Prompt", () => {
+    const prompt = buildManagedAgentTaskPrompt({
+      sourceId: "manual-1",
+      displayName: "Aider",
+      dataPath: "~/.aider"
+    }, "connect");
+
+    expect(prompt).toContain("$agent-memory-onboarding");
+    expect(prompt).toContain("Use $agent-memory-onboarding for this cross-Agent memory task.");
+    expect(prompt).toContain("This is an on-demand task launched by the cross-Agent button.");
+    expect(prompt).not.toMatch(/[\u3400-\u9fff]/u);
+    expect(prompt).toContain('"operation": "connect"');
+    expect(prompt).toContain('"source_id": "manual-1"');
+    expect(prompt).not.toContain("sync_boundary_at");
+  });
+
+  it("未知 Agent 后续同步直接调用后端配方，不再启动 Agent 会话", () => {
+    const source = readFileSync(resolve(__dirname, "..", "..", "memory-sources-page.tsx"), "utf8");
+
+    expect(source).toContain(".syncManagedSource(source.sourceId)");
+    expect(source).toContain("source.syncReady === true");
+    expect(source).not.toContain('launchManagedAgentTask(source, "sync")');
+  });
+
+  it("未知 Agent GUI 文案同时提供中英文版本", () => {
+    const keys = [
+      "memory.addOtherAgent",
+      "memory.addOtherAgentDescription",
+      "memory.addTitle",
+      "memory.confirmAndStart",
+      "memory.manualAgentAiHint",
+      "memory.deleteAgent"
+    ] as const;
+
+    for (const key of keys) {
+      expect(zhCNMessages[key]).toBeTruthy();
+      expect(enUSMessages[key]).toBeTruthy();
+      expect(zhCNMessages[key]).not.toBe(enUSMessages[key]);
+    }
+  });
+
+  it("未知 Agent 的待发现占位符不会被当作历史目录", () => {
+    const prompt = buildManagedAgentTaskPrompt({
+      sourceId: "manual-1",
+      displayName: "Aider",
+      dataPath: MANAGED_AGENT_DISCOVERY_PENDING_DATA_PATH
+    }, "connect");
+
+    expect(prompt).not.toContain("data_path");
+  });
+
+  it("首次扫描不会沿用错误的旧同步边界", () => {
+    const prompt = buildManagedAgentTaskPrompt({
+      sourceId: "manual-1",
+      displayName: "Kimi Work",
+      dataPath: "~/Library/Application Support/kimi-desktop"
+    }, "connect");
+
+    expect(prompt).not.toContain("sync_boundary_at");
   });
 
   it("全量扫描确认页要求先选择扫描范围，不再展示二次勾选", () => {

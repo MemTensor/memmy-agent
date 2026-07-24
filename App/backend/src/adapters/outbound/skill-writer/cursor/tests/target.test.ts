@@ -166,7 +166,7 @@ describe("cursor skill target", () => {
       expect(output.user_message).not.toContain("Assistant raw summary 1");
       expect(output.user_message).toContain("5. episode_5");
       expect(output.user_message).not.toContain("6. episode_6");
-      expect(output.user_message).toContain("输入 1-5 选择要接续的 episode");
+      expect(output.user_message).toContain("Enter 1-5 to select an episode to resume.");
       expect(requestBody).toMatchObject({
         query: "测试query",
         layers: ["L1"],

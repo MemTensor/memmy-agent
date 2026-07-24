@@ -229,14 +229,28 @@ export class ContextBuilder {
     sessionKey: string | null = null,
     unifiedSession = false,
   ): string {
+    const sections = this.buildSystemPromptSections(
+      channel,
+      sessionSummary,
+      responseLanguage,
+      sessionKey,
+      unifiedSession,
+    );
+    const alwaysSkills = new Set(this.skills.getAlwaysSkills());
+    const availableSkills = new Set(this.skills.listSkills(true).map((entry) => entry.name));
+    const requestedSkills = (skillNames ?? []).filter((name) =>
+      availableSkills.has(name) && !alwaysSkills.has(name)
+    );
+    const requestedSkillContent = this.skills.loadSkillsForContext(requestedSkills);
+    if (requestedSkillContent) {
+      const summaryIndex = sections.findIndex((section) => section.id === "skills-summary");
+      sections.splice(summaryIndex < 0 ? sections.length : summaryIndex, 0, {
+        id: "requested-skills",
+        content: `# Requested Skills\n\n${requestedSkillContent}`,
+      });
+    }
     const ctx = new SystemPromptBuildContext({
-      sections: this.buildSystemPromptSections(
-        channel,
-        sessionSummary,
-        responseLanguage,
-        sessionKey,
-        unifiedSession,
-      ),
+      sections,
       skillNames,
       channel,
       sessionSummary,
@@ -338,6 +352,7 @@ export class ContextBuilder {
       ? sessionMetadata.webui_language ?? sessionMetadata.webuiLanguage ?? null
       : null;
     const effectiveResponseLanguage = responseLanguage ?? sessionResponseLanguage;
+    const effectiveSkillNames = skillNames ?? this.skills.findExplicitSkillNames(currentMessage ?? "");
     const runtime = ContextBuilder.buildRuntimeContext(channel, chatId ?? null, this.timezone, {
       senderId,
       supplementalLines: runtimeLines,
@@ -348,7 +363,7 @@ export class ContextBuilder {
       {
         role: "system",
         content: this.buildSystemPrompt(
-          skillNames ?? null,
+          effectiveSkillNames.length > 0 ? effectiveSkillNames : null,
           channel,
           sessionSummary ?? null,
           hook ?? null,

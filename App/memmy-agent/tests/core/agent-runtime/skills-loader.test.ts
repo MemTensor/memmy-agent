@@ -295,6 +295,33 @@ describe("SkillsLoader disabled skills", () => {
   });
 });
 
+describe("SkillsLoader manual-only skills", () => {
+  it("keeps manual-only skills out of the startup summary and always-loaded set", () => {
+    const { workspace, builtin } = makeWorkspace();
+    writeSkill(builtin, "button-guide", {
+      metadataJson: { manualOnly: true, always: true },
+      body: "# Button Guide"
+    });
+    const loader = new SkillsLoader(workspace, builtin);
+
+    expect(loader.buildSkillsSummary()).not.toContain("button-guide");
+    expect(loader.getAlwaysSkills()).not.toContain("button-guide");
+    expect(loader.listSkills(true).map((entry) => entry.name)).toContain("button-guide");
+  });
+
+  it("finds a manual-only skill only from an explicit dollar reference", () => {
+    const { workspace, builtin } = makeWorkspace();
+    writeSkill(builtin, "button-guide", {
+      metadataJson: { manualOnly: true },
+      body: "# Button Guide"
+    });
+    const loader = new SkillsLoader(workspace, builtin);
+
+    expect(loader.findExplicitSkillNames("ordinary startup")).toEqual([]);
+    expect(loader.findExplicitSkillNames("run $button-guide now")).toEqual(["button-guide"]);
+  });
+});
+
 describe("SkillsLoader YAML metadata", () => {
   it("parses folded descriptions in buildSkillsSummary", () => {
     const { workspace, builtin } = makeWorkspace();

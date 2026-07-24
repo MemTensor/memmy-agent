@@ -6,6 +6,16 @@ import type { MemoryClient } from "../adapters/outbound/memory-client/index.js";
 import type { AgentSourceRepository } from "../infrastructure/agent-source-store/index.js";
 
 const INGESTION_TURN_YIELD_INTERVAL = 50;
+export const MEMORY_ADD_REQUEST_MAX_BYTES = 2 * 1024 * 1024;
+
+export interface IngestionWarning {
+  code: "memory_add_request_too_large";
+  sourceId: string;
+  conversationId: string;
+  turnId: string;
+  bodyBytes: number;
+  limitBytes: number;
+}
 
 /** Contract for ingestion service. */
 export interface IngestionService {
@@ -15,6 +25,7 @@ export interface IngestionService {
 /** Contract for ingestion context. */
 export interface IngestionContext {
   sourceId: string;
+  memorySource?: string;
   signal?: AbortSignal;
   deferProcessing?: boolean;
   totalMessages?: number;
@@ -49,6 +60,7 @@ export interface IngestionStats {
 export interface CreateIngestionServiceOptions {
   memoryClient: Pick<MemoryClient, "addMemory">;
   agentSourceRepository: Pick<AgentSourceRepository, "hasSeen" | "markSeen">;
+  warn?: (warning: IngestionWarning) => void;
 }
 
 /** Implementation of ingestion assertion error. */
@@ -144,6 +156,7 @@ async function processConversation(
   let processedTurns = 0;
   let incomplete = false;
   let failed = false;
+  const memorySource = ctx.memorySource ?? ctx.sourceId;
 
   for (const turn of splitConversationIntoTurns(messages)) {
     processedTurns += 1;
@@ -158,22 +171,38 @@ async function processConversation(
       continue;
     }
 
+    const request = {
+      requestId: createTurnRequestId(ctx.sourceId, turn),
+      adapterId: `agent-source:${ctx.sourceId}`,
+      content: renderMessagesToMarkdown(turn.messages),
+      layer: "L1",
+      title: titleForTurn(memorySource, turn),
+      tags: ["agent-source", memorySource],
+      source: memorySource,
+      turnId: createStableTurnId(ctx.sourceId, turn),
+      createdAt: turnCreatedAt(turn),
+      ...(ctx.deferProcessing ? { deferProcessing: true } : {})
+    } satisfies Parameters<MemoryClient["addMemory"]>[0];
+    const bodyBytes = Buffer.byteLength(JSON.stringify(request));
+    if (bodyBytes > MEMORY_ADD_REQUEST_MAX_BYTES) {
+      stats.deduped += turn.messages.length;
+      (options.warn ?? warnToConsole)({
+        code: "memory_add_request_too_large",
+        sourceId: ctx.sourceId,
+        conversationId: turn.conversationId,
+        turnId: request.turnId,
+        bodyBytes,
+        limitBytes: MEMORY_ADD_REQUEST_MAX_BYTES
+      });
+      emitIngestionProgress(ctx, stats);
+      continue;
+    }
+
     const dedupKeys = turn.messages.map((message) => createDedupKey(ctx.sourceId, message.messageId));
     const allSeen = dedupKeys.every((dedupKey) => options.agentSourceRepository.hasSeen(dedupKey));
 
     try {
-      const added = await options.memoryClient.addMemory({
-        requestId: createTurnRequestId(ctx.sourceId, turn),
-        adapterId: `agent-source:${ctx.sourceId}`,
-        content: renderMessagesToMarkdown(turn.messages),
-        layer: "L1",
-        title: titleForTurn(ctx.sourceId, turn),
-        tags: ["agent-source", ctx.sourceId],
-        source: ctx.sourceId,
-        turnId: createStableTurnId(ctx.sourceId, turn),
-        createdAt: turnCreatedAt(turn),
-        ...(ctx.deferProcessing ? { deferProcessing: true } : {})
-      });
+      const added = await options.memoryClient.addMemory(request);
       if (allSeen) {
         stats.deduped += turn.messages.length;
         stats.dedupedMemories += 1;
@@ -337,4 +366,10 @@ function firstReadableLine(value: string): string | undefined {
 function clipTitle(value: string): string {
   const trimmed = value.trim();
   return trimmed.length <= 120 ? trimmed : `${trimmed.slice(0, 117)}...`;
+}
+
+function warnToConsole(warning: IngestionWarning): void {
+  console.warn(
+    `[agent-source] skipped oversized memory.add request: ${JSON.stringify(warning)}`
+  );
 }

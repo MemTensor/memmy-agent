@@ -330,6 +330,19 @@ describe("Context prompt cache inputs", () => {
     expect(indexText).not.toContain("**memory**");
   });
 
+  it("loads the onboarding guide only for the button-generated explicit task", () => {
+    const builder = new ContextBuilder({ workspace: makeWorkspace() });
+
+    expect(builder.buildSystemPrompt()).not.toContain("agent-memory-onboarding");
+
+    const messages = builder.buildMessages({
+      history: [],
+      currentMessage: "请使用 $agent-memory-onboarding 完成接入"
+    });
+    expect(String(messages[0]?.content)).toContain("### Skill: agent-memory-onboarding");
+    expect(String(messages[0]?.content)).toContain("This is a button-triggered guide");
+  });
+
   it("skips template MEMORY.md in the system prompt", () => {
     const workspace = makeWorkspace();
     syncWorkspaceTemplates(workspace, undefined, { fileMemoryEnabled: true });

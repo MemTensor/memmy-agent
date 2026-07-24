@@ -5,6 +5,7 @@ import {
   AgentSourceScanInputSchema,
   AgentSourceScanStatusResponseSchema,
   AgentSourceViewSchema,
+  ManagedAgentSourceImportResultSchema,
   OkResponseSchema,
   type AddManualInput,
   type AgentSourceMemoryPluginConflict,
@@ -12,6 +13,7 @@ import {
   type AgentSourceScanInput,
   type AgentSourceScanStatusResponse,
   type AgentSourceView,
+  type ManagedAgentSourceImportResult,
   type RuntimeConfig
 } from "@memmy/local-api-contracts";
 import { requestJson } from "./http.js";
@@ -23,6 +25,7 @@ export interface AgentSourceClient {
   stopScan(): Promise<void>;
   cancelScan(): Promise<void>;
   addManualSource(input: AddManualInput): Promise<AgentSourceView>;
+  syncManagedSource(sourceId: string): Promise<ManagedAgentSourceImportResult>;
   removeSource(sourceId: string): Promise<void>;
   installSkill(sourceId: string): Promise<void>;
   uninstallSkill(sourceId: string): Promise<void>;
@@ -91,6 +94,15 @@ export function createHttpAgentSourceClient(config: RuntimeConfig): AgentSourceC
         path: "/api/agent-sources/manual",
         schema: AgentSourceViewSchema,
         body: AddManualInputSchema.parse(input)
+      });
+    },
+
+    async syncManagedSource(sourceId) {
+      return requestJson({
+        config,
+        path: `/api/agent-sources/${encodeURIComponent(sourceId)}/managed/sync`,
+        schema: ManagedAgentSourceImportResultSchema,
+        init: { method: "POST" }
       });
     },
 

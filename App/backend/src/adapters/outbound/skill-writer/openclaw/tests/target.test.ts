@@ -394,7 +394,7 @@ describe("openclaw skill target", () => {
       expect(result?.text).toContain("tail_summary: Last L1 summary 1");
       expect(result?.text).not.toContain("Assistant raw summary 1");
       expect(result?.text).not.toContain("6. episode_6");
-      expect(result?.text).toContain("输入 1-5 选择要接续的 episode");
+      expect(result?.text).toContain("Enter 1-5 to select an episode to resume.");
       expect(requestBodies[0]?.query).toBe("测试query");
       expect(requestBodies[0]?.layers).toEqual(["L1"]);
       expect(requestBodies[0]?.limit).toBe(20);

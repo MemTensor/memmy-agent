@@ -29,3 +29,4 @@ Runtime metadata uses memmy-agent's own `metadata.memmy` namespace.
 | `tmux` | Remote-control tmux sessions |
 | `skill-creator` | Create new skills |
 | `goal` | Sustained objectives: `long_task`, `complete_goal`, idempotent goals, modular project work, early research |
+| `agent-memory-onboarding` | Discover an unknown Agent, install Memmy Skill, import its initial history, and save an automatic-sync recipe |

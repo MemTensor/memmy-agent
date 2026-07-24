@@ -7,6 +7,7 @@ export * from "./search.js";
 export * from "./shell.js";
 export * from "./message.js";
 export * from "./apply-patch.js";
+export * from "./agent-source.js";
 export * from "./web.js";
 export * from "./cron.js";
 export * from "./exec-session.js";
