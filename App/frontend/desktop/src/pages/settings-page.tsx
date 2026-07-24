@@ -19,7 +19,6 @@ import {
 import { consumeTokenExhaustedApplyMoreRequest, TOKEN_EXHAUSTED_APPLY_MORE_EVENT } from "../app/token-exhausted-apply-more.js";
 import { getLegalLinkUrl } from "../legal/legal-links.js";
 import { maskAccountIdentifier } from "../utils/mask-account-identifier.js";
-import { isComposingKeyboardEvent } from "../utils/keyboard.js";
 import { openExternalUrl } from "../utils/open-url.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { appActions, type AppAction } from "../state/app-actions.js";
@@ -217,11 +216,6 @@ export interface SettingsPageViewProps {
   update: UpdateCoordinatorValue;
   track?: TrackAnalyticsEvent;
   onUsageDetailVisibleChange?: (visible: boolean) => void;
-}
-
-/** Returns whether a nickname input key event should save the current draft. */
-export function shouldSaveAccountNicknameOnKeyDown(event: import("react").KeyboardEvent<HTMLInputElement>): boolean {
-  return event.key === "Enter" && !isComposingKeyboardEvent(event);
 }
 
 /**
@@ -1178,7 +1172,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
                       value={nicknameDraft}
                       onChange={(event) => setNicknameDraft(event.target.value)}
                       onKeyDown={(event) => {
-                        if (shouldSaveAccountNicknameOnKeyDown(event)) {
+                        if (event.key === "Enter") {
                           void saveNickname();
                         }
                         if (event.key === "Escape") {
