@@ -45,6 +45,7 @@ describe("local app route inventory", () => {
       { method: "PATCH", url: "/api/account/profile", payload: { nickname: "Memmy User" } },
       { method: "POST", url: "/api/account/logout", payload: {} },
       { method: "GET", url: "/api/account/session" },
+      { method: "GET", url: "/api/local-data" },
       { method: "POST", url: "/api/local-data/reveal", payload: {} },
       { method: "POST", url: "/api/local-data/export", payload: {} },
       { method: "DELETE", url: "/api/local-data", payload: { confirm: true } },
@@ -180,6 +181,9 @@ function createServer(): FastifyInstance {
       }
     },
     localData: {
+      async getPath() {
+        return { ok: true, dataPath: "/tmp/memmy-data" };
+      },
       async reveal() {
         return { ok: true, dataPath: "/tmp/memmy-data" };
       },

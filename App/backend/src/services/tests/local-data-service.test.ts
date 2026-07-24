@@ -3,6 +3,33 @@ import { describe, expect, it } from "vitest";
 import { createLocalDataService } from "../local-data-service.js";
 
 describe("LocalDataService", () => {
+  it("returns the local data path without revealing it", async () => {
+    const calls: string[] = [];
+    const service = createLocalDataService({
+      localDataStore: {
+        getDataPath() {
+          calls.push("path");
+          return "C:\\Users\\memmy-user\\.memmy\\memory-service";
+        },
+        revealDataPath(dataPath) {
+          calls.push(`reveal:${dataPath}`);
+        },
+        exportData() {
+          return { exportPath: "/tmp/export/memmy-export-1", bytes: 128 };
+        },
+        clearMemoryDatabase() {
+          calls.push("clear");
+        }
+      }
+    });
+
+    await expect(service.getPath()).resolves.toEqual({
+      ok: true,
+      dataPath: "C:\\Users\\memmy-user\\.memmy\\memory-service"
+    });
+    expect(calls).toEqual(["path"]);
+  });
+
   it("reveals, exports, and clears through the local data store", async () => {
     const calls: string[] = [];
     const service = createLocalDataService({

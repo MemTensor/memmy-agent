@@ -59,7 +59,7 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
   const [localDataBusy, setLocalDataBusy] = useState<"reveal" | "export" | "clear" | null>(null);
   const [localDataError, setLocalDataError] = useState("");
   const [localDataExportMessage, setLocalDataExportMessage] = useState("");
-  const [dataDir, setDataDir] = useState("~/.memmy/memory-service");
+  const [dataDir, setDataDir] = useState("");
   const [memoryServiceStatus, setMemoryServiceStatus] = useState<MemoryServiceStatus>(() => memoryServiceStatusFromBootstrap(state.bootstrap?.health.memory));
   const [memoryServiceBusy, setMemoryServiceBusy] = useState(false);
   const [memoryServiceMessage, setMemoryServiceMessage] = useState("");
@@ -90,6 +90,32 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
     }
 
     void refreshMemoryServiceHealth();
+  }, [clients]);
+
+  useEffect(() => {
+    if (!clients) {
+      return;
+    }
+
+    let cancelled = false;
+    setDataDir("");
+    setLocalDataError("");
+    void clients.localData
+      .getPath()
+      .then((result) => {
+        if (!cancelled) {
+          setDataDir(formatSourceDataPath(result.dataPath));
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setLocalDataError(error instanceof Error ? error.message : String(error));
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [clients]);
 
   useEffect(() => {
@@ -766,7 +792,9 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
         <div className="flex items-center justify-between py-2.5">
           <div className="flex-1 pr-4">
             <div className="text-sm text-text-ink/70">{t("memory.localDataPath")}</div>
-            <code className="text-[11px] text-text-ink/50 font-mono mt-0.5 block">{dataDir}</code>
+            <code className="text-[11px] text-text-ink/50 font-mono mt-0.5 block">
+              {dataDir || (localDataError ? t("common.unknown") : t("common.loading"))}
+            </code>
           </div>
           <button
             type="button"
