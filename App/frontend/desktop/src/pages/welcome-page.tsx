@@ -7,6 +7,7 @@ import { persistLoginModeSelection } from "../app/login-mode.js";
 import { useApiClients } from "../app/providers.js";
 import { buildAccountOnboardingStartPatch, resolveByokEntry, resolvePostLoginRoute } from "../app/routes.js";
 import { AuthCodeForm } from "../components/auth-code-form.js";
+import { InviteResultToast, type InviteResultTone } from "../components/invite-result-toast.js";
 import { LanguageToggleButton } from "../components/language-toggle-button.js";
 import { Memmy } from "../components/mascot/memmy.js";
 import { usePhoneAuth } from "../components/use-phone-auth.js";
@@ -17,6 +18,9 @@ import { useTranslation } from "../i18n/use-translation.js";
 import { appActions } from "../state/app-actions.js";
 import { useAppState } from "../state/app-state.js";
 
+/** Temporary review controls for registration-side invite toasts. */
+const PREVIEW_INVITE_REGISTER_TOASTS = false;
+
 /** Handles welcome page. */
 export function WelcomePage() {
   const { state, dispatch } = useAppState();
@@ -26,8 +30,10 @@ export function WelcomePage() {
   const phoneAuth = usePhoneAuth();
   const [identifier, setIdentifier] = useState("");
   const [code, setCode] = useState("");
+  const [inviteCode, setInviteCode] = useState("");
   const [modePersistencePending, setModePersistencePending] = useState(false);
   const [modePersistenceFeedback, setModePersistenceFeedback] = useState<{ text: string; tone: "error" | "success" } | null>(null);
+  const [inviteResultToast, setInviteResultToast] = useState<{ text: string; tone: InviteResultTone } | null>(null);
   const channel = resolveDesktopAccountChannel();
   const canContinue = Boolean(identifier.trim() && code.trim());
   const showLoginBanner = state.bootstrap?.promotions?.loginBanner ?? true;
@@ -36,6 +42,7 @@ export function WelcomePage() {
   useEffect(() => {
     setIdentifier("");
     setCode("");
+    setInviteCode("");
     setModePersistenceFeedback(null);
     phoneAuth.resetInteractionState();
   }, [channel, phoneAuth.resetInteractionState]);
@@ -182,19 +189,54 @@ export function WelcomePage() {
                 identifier={identifier}
                 identifierType={channel}
                 code={code}
+                inviteCode={inviteCode}
                 disabled={!canContinue || phoneAuth.loginPending || modePersistencePending}
                 sendCodeDisabled={phoneAuth.sendCodeDisabled}
                 sendCodeLabel={phoneAuth.sendCodeLabel}
                 feedback={modePersistenceFeedback ?? phoneAuth.feedback}
                 onIdentifierChange={setIdentifier}
                 onCodeChange={setCode}
+                onInviteCodeChange={setInviteCode}
                 onSendCode={() => void phoneAuth.sendCode(channel, identifier)}
                 onSubmit={() => void submitLogin()}
                 onOpenTerms={() => void openExternalUrl(getLegalLinkUrl("terms", language, state.bootstrap?.legal))}
                 onOpenDataAgreement={() => void openExternalUrl(getLegalLinkUrl("data", language, state.bootstrap?.legal))}
               />
+              {PREVIEW_INVITE_REGISTER_TOASTS ? (
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    className="px-2.5 py-1 text-[11px] text-text-ink/55 border border-border-stone/40 rounded-btn hover:bg-canvas-oat/60 cursor-pointer"
+                    onClick={() => setInviteResultToast({ text: t("login.invite.successToast"), tone: "success" })}
+                  >
+                    {t("login.invite.previewSuccess")}
+                  </button>
+                  <button
+                    type="button"
+                    className="px-2.5 py-1 text-[11px] text-text-ink/55 border border-border-stone/40 rounded-btn hover:bg-canvas-oat/60 cursor-pointer"
+                    onClick={() => setInviteResultToast({ text: t("login.invite.invalidToast"), tone: "missed" })}
+                  >
+                    {t("login.invite.previewInvalid")}
+                  </button>
+                  <button
+                    type="button"
+                    className="px-2.5 py-1 text-[11px] text-text-ink/55 border border-border-stone/40 rounded-btn hover:bg-canvas-oat/60 cursor-pointer"
+                    onClick={() => setInviteResultToast({ text: t("login.invite.existingUserToast"), tone: "missed" })}
+                  >
+                    {t("login.invite.previewExistingUser")}
+                  </button>
+                </div>
+              ) : null}
             </div>
           </div>
+
+          {inviteResultToast ? (
+            <InviteResultToast
+              text={inviteResultToast.text}
+              tone={inviteResultToast.tone}
+              onDismiss={() => setInviteResultToast(null)}
+            />
+          ) : null}
 
           <div className="flex items-center gap-3 mt-4 mb-4">
             <div className="flex-1 h-px bg-border-stone/60" />
