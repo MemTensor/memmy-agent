@@ -11,6 +11,7 @@ import { createAccountSessionRepository, type AccountSessionRepository } from ".
 import { createBootstrapRepository, type BootstrapRepository } from "./repositories/bootstrap-repo.js";
 import { createByokTokenUsageRepository, type ByokTokenUsageRepository } from "./repositories/byok-token-usage-repo.js";
 import { createComposioMachineTokenRepository, type ComposioMachineTokenRepository } from "./repositories/composio-machine-token-repo.js";
+import { createDeviceIdentityRepository, type DeviceIdentityRepository } from "./repositories/device-identity-repo.js";
 import { createModelConfigRepository, type ModelConfigRepository } from "./repositories/model-config-repo.js";
 import { finalizeDatabaseDesign } from "./schema-finalizer.js";
 import { createSqliteSecretStore, type SecretStore } from "./secret-store.js";
@@ -47,6 +48,8 @@ export interface AppStateStore {
     composioMachineToken: ComposioMachineTokenRepository;
     /** Byok token usage. */
     byokTokenUsage: ByokTokenUsageRepository;
+    /** Installation-scoped device identity. */
+    deviceIdentity: DeviceIdentityRepository;
   };
   /** Secret store. */
   secretStore: SecretStore;
@@ -81,7 +84,8 @@ export function createAppStateStore(options: CreateAppStateStoreOptions = {}): A
       agentSources: createAgentSourceRepository(db),
       idempotency: createIdempotencyStore(db, { getActiveUuid }),
       composioMachineToken: createComposioMachineTokenRepository(secretStore),
-      byokTokenUsage: createByokTokenUsageRepository(db)
+      byokTokenUsage: createByokTokenUsageRepository(db),
+      deviceIdentity: createDeviceIdentityRepository(db)
     },
     secretStore,
     localDataStore,

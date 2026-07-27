@@ -98,7 +98,10 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
     await memoryClient.reloadConfig({ reason: "desktop_startup" });
     const scanWorker = options.memoryClient ? undefined : { databasePath: appStateStore.databasePath };
     const cloudConfig = resolveCloudClientConfig(process.env);
-    const cloudClient = options.cloudClient ?? createDefaultCloudClient(cloudConfig);
+    const cloudClient = options.cloudClient ?? createDefaultCloudClient(
+      cloudConfig,
+      tryGetInstallationId(appStateStore)
+    );
     const agentAdapterRegistry =
       options.agentAdapterRegistry ??
       createDefaultAgentAdapterRegistry({
@@ -185,11 +188,20 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
  * @param config the Cloud HTTP configuration.
  * @returns an HTTP CloudClient pointing at the real cloud account service.
  */
-function createDefaultCloudClient(config: CloudClientConfig): CloudClient {
+function createDefaultCloudClient(config: CloudClientConfig, deviceId?: string): CloudClient {
   return createHttpCloudClient({
     baseUrl: config.baseUrl,
-    timeoutMs: config.timeoutMs
+    timeoutMs: config.timeoutMs,
+    deviceId
   });
+}
+
+function tryGetInstallationId(appStateStore: ReturnType<typeof createAppStateStore>): string | undefined {
+  try {
+    return appStateStore.repositories.deviceIdentity.getOrCreateInstallationId();
+  } catch {
+    return undefined;
+  }
 }
 
 export function readMemoryLayerConfig(env: NodeJS.ProcessEnv): MemoryLayerConfig | null {

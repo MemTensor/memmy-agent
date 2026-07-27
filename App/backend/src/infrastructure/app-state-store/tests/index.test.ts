@@ -41,8 +41,8 @@ describe("app state store migrations", () => {
     expect(settings.userMode).toBe("unset");
     expect(settings.menuBarIconEnabled).toBe(true);
     expect(agentSources).toEqual([]);
-    expect(firstMigrationCount).toBe(26);
-    expect(secondMigrationCount).toBe(26);
+    expect(firstMigrationCount).toBe(27);
+    expect(secondMigrationCount).toBe(27);
   });
 
   it("preserves the authenticated account when upgrading the legacy 0007 database", () => {
@@ -1594,7 +1594,8 @@ describe("app state store migrations", () => {
       "menu_bar_icon_enabled",
       "auto_scan_known_agents",
       "watch_file_changes",
-      "auto_inject_skill"
+      "auto_inject_skill",
+      "installation_id"
     ]);
     expect(settings).toMatchObject({
       defaultLaunchMode: "last",

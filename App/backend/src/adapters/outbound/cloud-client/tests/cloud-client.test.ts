@@ -23,13 +23,20 @@ afterEach(async () => {
 
 describe("cloud client", () => {
   it("http client maps docs/cloud-api.md paths and response fields", async () => {
-    const requests: Array<{ path: string; body: unknown; lang: string | undefined }> = [];
+    const deviceId = "48b12e26-e2e1-4f2b-916d-7ce18fd6b1a5";
+    const requests: Array<{
+      path: string;
+      body: unknown;
+      lang: string | undefined;
+      deviceId: string | undefined;
+    }> = [];
     server = createServer(async (request, response) => {
       const body = await readJson(request);
       requests.push({
         path: request.url ?? "",
         body,
-        lang: request.headers.lang as string | undefined
+        lang: request.headers.lang as string | undefined,
+        deviceId: request.headers["x-memmy-device-id"] as string | undefined
       });
 
       if (request.url === "/api/agentUser/login") {
@@ -60,7 +67,11 @@ describe("cloud client", () => {
     if (!address || typeof address === "string") {
       throw new Error("Mock cloud server did not bind to a port");
     }
-    const client = createHttpCloudClient({ baseUrl: `http://127.0.0.1:${address.port}`, timeoutMs: 1000 });
+    const client = createHttpCloudClient({
+      baseUrl: `http://127.0.0.1:${address.port}`,
+      timeoutMs: 1000,
+      deviceId
+    });
 
     await client.sendEmailCode({ email: "hello@example.com", zhEnv: true });
     await client.sendPhoneCode({ phoneNumber: "13800138000", zhEnv: false });
@@ -74,17 +85,20 @@ describe("cloud client", () => {
       {
         path: "/api/user/sendVerification",
         body: { email: "hello@example.com", zhEnv: true },
-        lang: "zh"
+        lang: "zh",
+        deviceId
       },
       {
         path: "/api/agentUser/sendPhoneVerification",
         body: { phoneNumber: "13800138000", zhEnv: false },
-        lang: "en"
+        lang: "en",
+        deviceId
       },
       {
         path: "/api/agentUser/login",
         body: { email: "hello@example.com", verificationCode: "654321", loginSource: "memmy" },
-        lang: "zh"
+        lang: "zh",
+        deviceId
       }
     ]);
     expect(login).toMatchObject({
@@ -102,6 +116,27 @@ describe("cloud client", () => {
     });
     expect(login.profile.rawProfile).not.toHaveProperty("token");
     expect(login.profile.rawProfile).not.toHaveProperty("uuid");
+  });
+
+  it("keeps authentication requests compatible when no device ID is available", async () => {
+    let receivedDeviceId: string | undefined;
+    server = createServer((request, response) => {
+      receivedDeviceId = request.headers["x-memmy-device-id"] as string | undefined;
+      sendJson(response, { code: 0, message: "ok", data: true });
+    });
+    await listen(server);
+    const address = server.address();
+    if (!address || typeof address === "string") {
+      throw new Error("Mock cloud server did not bind to a port");
+    }
+    const client = createHttpCloudClient({
+      baseUrl: `http://127.0.0.1:${address.port}`,
+      timeoutMs: 1000
+    });
+
+    await client.sendEmailCode({ email: "hello@example.com", zhEnv: true });
+
+    expect(receivedDeviceId).toBeUndefined();
   });
 
   it("maps cloud agent_user phone field to local phoneNumber", async () => {
@@ -760,10 +795,14 @@ describe("cloud client", () => {
   });
 
   it("http client fetches promotion flags from Playground desktop endpoint", async () => {
-    const requests: Array<{ path: string; method: string | undefined }> = [];
+    const requests: Array<{ path: string; method: string | undefined; deviceId: string | undefined }> = [];
     const promotions = { loginBanner: true, improvementGift: false, applyMore: true };
     server = createServer((request, response) => {
-      requests.push({ path: request.url ?? "", method: request.method });
+      requests.push({
+        path: request.url ?? "",
+        method: request.method,
+        deviceId: request.headers["x-memmy-device-id"] as string | undefined
+      });
       sendJson(response, { code: 0, message: "ok", data: promotions });
     });
     await listen(server);
@@ -771,10 +810,18 @@ describe("cloud client", () => {
     if (!address || typeof address === "string") {
       throw new Error("Mock cloud server did not bind to a port");
     }
-    const client = createHttpCloudClient({ baseUrl: `http://127.0.0.1:${address.port}`, timeoutMs: 1000 });
+    const client = createHttpCloudClient({
+      baseUrl: `http://127.0.0.1:${address.port}`,
+      timeoutMs: 1000,
+      deviceId: "48b12e26-e2e1-4f2b-916d-7ce18fd6b1a5"
+    });
 
     await expect(client.getPromotions()).resolves.toEqual(promotions);
-    expect(requests).toEqual([{ path: "/api/memmy/desktop/promotions", method: "GET" }]);
+    expect(requests).toEqual([{
+      path: "/api/memmy/desktop/promotions",
+      method: "GET",
+      deviceId: undefined
+    }]);
   });
 
   it("http client returns undefined when promotions endpoint fails or shape mismatches", async () => {

@@ -64,6 +64,8 @@ export interface CreateHttpCloudClientOptions {
   timeoutMs?: number;
   /** Fetch impl. */
   fetchImpl?: typeof fetch;
+  /** Installation-scoped identifier attached only to authentication requests. */
+  deviceId?: string;
 }
 
 /** Creates create http cloud client. */
@@ -71,6 +73,7 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
   const baseUrl = normalizeBaseUrl(options.baseUrl ?? resolveCloudServiceBaseUrl(process.env.MEMMY_CLOUD_SERVICE));
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
+  const deviceId = options.deviceId;
 
   return {
     async health(): Promise<CloudHealth> {
@@ -87,7 +90,8 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
           email: input.email,
           zhEnv: input.zhEnv
         },
-        lang: langFromZhEnv(input.zhEnv)
+        lang: langFromZhEnv(input.zhEnv),
+        deviceId
       });
     },
 
@@ -97,7 +101,8 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
           phoneNumber: input.phoneNumber,
           zhEnv: input.zhEnv
         },
-        lang: langFromZhEnv(input.zhEnv)
+        lang: langFromZhEnv(input.zhEnv),
+        deviceId
       });
     },
 
@@ -109,7 +114,8 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
           verificationCode: input.verificationCode,
           loginSource: input.loginSource.toLowerCase()
         },
-        lang: "zh"
+        lang: "zh",
+        deviceId
       });
 
       const uuid = readString(data.uuid) ?? readString(data.token);
@@ -362,6 +368,7 @@ interface CloudRequestOptions {
   lang: "zh" | "en";
   bearerCredential?: string;
   composioMachineToken?: string;
+  deviceId?: string;
   toError?: (status: number, envelope: CloudEnvelope) => Error;
 }
 
@@ -417,7 +424,8 @@ async function requestCloudData<T>(
       ...(options.body === undefined ? {} : { "content-type": "application/json" }),
       lang: options.lang,
       ...(options.bearerCredential ? { authorization: `Bearer ${options.bearerCredential}` } : {}),
-      ...(options.composioMachineToken ? { "x-memmy-composio-token": options.composioMachineToken } : {})
+      ...(options.composioMachineToken ? { "x-memmy-composio-token": options.composioMachineToken } : {}),
+      ...(options.deviceId ? { "x-memmy-device-id": options.deviceId } : {})
     },
     body: options.body === undefined ? undefined : JSON.stringify(options.body),
     signal: AbortSignal.timeout(timeoutMs)
