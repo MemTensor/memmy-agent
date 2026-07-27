@@ -933,7 +933,11 @@ function MemmyTui({ config, registerCleanup, sessionId, toolsets, version }: Tui
       const loop = activeLoopRef.current;
       if (!loop) return;
       loop.stop();
-      await settleWithTimeout([loop.closeMcp()], 1500);
+      await settleWithTimeout([
+        typeof (loop as any).closeRuntimeTools === "function"
+          ? loop.closeRuntimeTools()
+          : loop.closeMcp(),
+      ], 1500);
       activeLoopRef.current = null;
     });
     registerCleanup(cleanup);
@@ -980,7 +984,7 @@ function MemmyTui({ config, registerCleanup, sessionId, toolsets, version }: Tui
       setNotice("queued");
       setTurnStartedAt(Date.now());
       activeAssistantIdRef.current = null;
-      const loop = AgentLoop.fromConfig(config);
+      const loop = activeLoopRef.current ?? AgentLoop.fromConfig(config);
       activeLoopRef.current = loop;
       void (async () => {
         try {
@@ -1003,8 +1007,6 @@ function MemmyTui({ config, registerCleanup, sessionId, toolsets, version }: Tui
           const message = error instanceof Error ? error.message : String(error);
           appendMessage("system", `Error: ${message}`);
         } finally {
-          await settleWithTimeout([loop.closeMcp()], 1500);
-          if (activeLoopRef.current === loop) activeLoopRef.current = null;
           finishTurn();
         }
       })();

@@ -16,6 +16,7 @@ import { FindFilesTool, GrepTool } from "./search.js";
 import { ExecTool } from "./shell.js";
 import { SpawnTool } from "./spawn.js";
 import { WebFetchTool, WebSearchTool } from "./web.js";
+import { BROWSER_TOOL_CLASSES } from "./browser.js";
 
 export const SKIP_MODULES = new Set([
   "base",
@@ -57,6 +58,7 @@ const BUILTIN_TOOL_CLASSES: ToolClass[] = [
   WebSearchTool,
   WriteFileTool,
   WriteStdinTool,
+  ...BROWSER_TOOL_CLASSES,
 ];
 
 function scopesFor(cls: ToolClass): Set<string> {

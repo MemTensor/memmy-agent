@@ -64,13 +64,17 @@ describe("memmy-agent client", () => {
       if (url.pathname === "/api/sessions") {
         expect(init?.headers).toEqual({ Authorization: "Bearer agent-token" });
         return json({
+          projectRegistryState: "ready",
+          projects: [],
           sessions: [
             {
               key: "websocket:chat-1",
               title: "创建 AI 电商助手",
               preview: "继续拆解需求",
               updatedAt: "2026-06-06T08:00:00.000Z",
-              run_started_at: 1780732800
+              run_started_at: 1780732800,
+              projectId: null,
+              cwd: "/Users/yuan/.memmy/workspace"
             }
           ]
         });
@@ -107,7 +111,7 @@ describe("memmy-agent client", () => {
       }
       if (url.pathname === "/api/sessions") {
         sessionAuthHeaders.push(authHeader(init));
-        return json({ sessions: [] });
+        return json({ projectRegistryState: "ready", projects: [], sessions: [] });
       }
       return json({ error: "not found" }, 404);
     });
@@ -161,7 +165,7 @@ describe("memmy-agent client", () => {
       fetchFn: fetchMock as typeof fetch
     });
 
-    await expect(client.openArtifact("/Users/yuan/result.png")).resolves.toBeUndefined();
+    await expect(client.openArtifact("/Users/yuan/result.png", "websocket:chat-1")).resolves.toBeUndefined();
     expect(calls).toEqual([
       { path: "/webui/bootstrap", auth: undefined },
       { path: "/api/webui/artifacts/open", auth: "Bearer token-old" },
@@ -189,7 +193,7 @@ describe("memmy-agent client", () => {
       fetchFn: fetchMock as typeof fetch
     });
 
-    await expect(client.resolveArtifact("/Users/yuan/missing.png")).rejects.toMatchObject({ status: 404 });
+    await expect(client.resolveArtifact("/Users/yuan/missing.png", "websocket:chat-1")).rejects.toMatchObject({ status: 404 });
     expect(paths).toEqual([
       "/webui/bootstrap",
       "/api/webui/artifacts/resolve"
@@ -203,7 +207,7 @@ describe("memmy-agent client", () => {
       paths.push(url.pathname);
       return url.pathname === "/webui/bootstrap"
         ? json({ error: "unauthorized" }, 401)
-        : json({ sessions: [] });
+        : json({ projectRegistryState: "ready", projects: [], sessions: [] });
     });
     const client = createMemmyAgentClient({
       baseUrl: "http://127.0.0.1:18980",
@@ -257,9 +261,13 @@ describe("memmy-agent client", () => {
         return json(bootstrap);
       }
       if (url.pathname === "/api/webui/sidebar-state/update") {
-        expect(JSON.parse(url.searchParams.get("state") ?? "{}")).toMatchObject({
-          schema_version: 1,
-          view: { show_previews: true }
+        expect(init?.method).toBe("POST");
+        expect(JSON.parse(String(init?.body))).toMatchObject({
+          base_updated_at: sidebarState.updated_at,
+          state: {
+            schema_version: 1,
+            view: { show_previews: true }
+          }
         });
         return json(sidebarState);
       }
@@ -295,7 +303,9 @@ describe("memmy-agent client", () => {
             key: "websocket:chat-1",
             title: "重命名任务",
             preview: "继续拆解需求",
-            updatedAt: "2026-06-06T08:30:00.000Z"
+            updatedAt: "2026-06-06T08:30:00.000Z",
+            projectId: null,
+            cwd: "/Users/yuan/.memmy/workspace"
           }
         });
       }
@@ -306,7 +316,7 @@ describe("memmy-agent client", () => {
     });
     const client = createMemmyAgentClient({ baseUrl: "http://127.0.0.1:18980", clientId: "frontend-test", fetchFn: fetchMock as typeof fetch });
 
-    await expect(client.writeSidebarState(sidebarState)).resolves.toEqual(sidebarState);
+    await expect(client.writeSidebarState(sidebarState.updated_at, sidebarState)).resolves.toEqual(sidebarState);
     await expect(client.readWebuiThread("websocket:chat-1")).resolves.toMatchObject({
       sessionKey: "websocket:chat-1",
       messages: [
@@ -410,40 +420,40 @@ describe("memmy-agent client", () => {
         if (body.path === "/Users/yuan/.memmy/workspace") {
           return json({ ok: true, path: "/Users/yuan/.memmy/workspace", name: "workspace", kind: "directory" });
         }
-        expect(body).toEqual({ path: "/Users/yuan/result.png" });
+        expect(body).toEqual({ path: "/Users/yuan/result.png", sessionKey: "websocket:chat-1" });
         return json({ ok: true, path: "/Users/yuan/result.png", name: "result.png", kind: "image", media_url: "/api/media/signed" });
       }
       if (url.pathname === "/api/webui/artifacts/reveal") {
         expect(init?.method).toBe("POST");
         expect(init?.headers).toEqual({ "Content-Type": "application/json", Authorization: "Bearer agent-token" });
-        expect(JSON.parse(String(init?.body))).toEqual({ path: "/Users/yuan/result.png" });
+        expect(JSON.parse(String(init?.body))).toEqual({ path: "/Users/yuan/result.png", sessionKey: "websocket:chat-1" });
         return json({ ok: true, path: "/Users/yuan/result.png" });
       }
       if (url.pathname === "/api/webui/artifacts/open") {
         expect(init?.method).toBe("POST");
         expect(init?.headers).toEqual({ "Content-Type": "application/json", Authorization: "Bearer agent-token" });
-        expect(JSON.parse(String(init?.body))).toEqual({ path: "/Users/yuan/result.png" });
+        expect(JSON.parse(String(init?.body))).toEqual({ path: "/Users/yuan/result.png", sessionKey: "websocket:chat-1" });
         return json({ ok: true, path: "/Users/yuan/result.png" });
       }
       return json({ error: "not found" }, 404);
     });
     const client = createMemmyAgentClient({ baseUrl: "http://127.0.0.1:18980", clientId: "frontend-test", fetchFn: fetchMock as typeof fetch });
 
-    await expect(client.resolveArtifact("/Users/yuan/result.png")).resolves.toEqual({
+    await expect(client.resolveArtifact("/Users/yuan/result.png", "websocket:chat-1")).resolves.toEqual({
       ok: true,
       path: "/Users/yuan/result.png",
       name: "result.png",
       kind: "image",
       media_url: "http://127.0.0.1:18980/api/media/signed"
     });
-    await expect(client.resolveArtifact("/Users/yuan/.memmy/workspace")).resolves.toEqual({
+    await expect(client.resolveArtifact("/Users/yuan/.memmy/workspace", "websocket:chat-1")).resolves.toEqual({
       ok: true,
       path: "/Users/yuan/.memmy/workspace",
       name: "workspace",
       kind: "directory"
     });
-    await expect(client.revealArtifact("/Users/yuan/result.png")).resolves.toBeUndefined();
-    await expect(client.openArtifact("/Users/yuan/result.png")).resolves.toBeUndefined();
+    await expect(client.revealArtifact("/Users/yuan/result.png", "websocket:chat-1")).resolves.toBeUndefined();
+    await expect(client.openArtifact("/Users/yuan/result.png", "websocket:chat-1")).resolves.toBeUndefined();
     expect(calls.map((call) => call.path)).toEqual([
       "/webui/bootstrap",
       "/api/webui/artifacts/resolve",

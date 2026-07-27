@@ -523,7 +523,7 @@ fi
 npm install --workspace @memmy/frontend-desktop --no-package-lock
 
 echo "Installing memmy-agent dependencies."
-npm ci --prefix "$AGENT_DIR"
+PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --prefix "$AGENT_DIR"
 
 npm run build -w @memmy/memory
 npm --prefix "$AGENT_DIR" run build
@@ -546,7 +546,30 @@ node_modules/.bin/electron-rebuild \
   -m "$RUNTIME_DIR/memory"
 cp "$AGENT_DIR/package.json" "$RUNTIME_DIR/memmy-agent/package.json"
 cp "$AGENT_DIR/package-lock.json" "$RUNTIME_DIR/memmy-agent/package-lock.json"
-npm ci --prefix "$RUNTIME_DIR/memmy-agent" --omit=dev --os=darwin --cpu="$TARGET_CPU"
+PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --prefix "$RUNTIME_DIR/memmy-agent" --omit=dev --os=darwin --cpu="$TARGET_CPU"
+(
+  cd "$RUNTIME_DIR/memmy-agent"
+  node --input-type=module --eval '
+    import fs from "node:fs";
+    import path from "node:path";
+    import { createRequire } from "node:module";
+    import { createConnection } from "@playwright/mcp";
+    import { chromium } from "playwright";
+    const require = createRequire(import.meta.url);
+    const runtimePackage = require("./package.json");
+    const mcpPath = require.resolve("@playwright/mcp/package.json");
+    const playwrightPath = require.resolve("playwright/package.json");
+    const corePath = require.resolve("playwright-core/package.json");
+    const mcpPackage = require(mcpPath);
+    const playwrightPackage = require(playwrightPath);
+    const corePackage = require(corePath);
+    if (typeof createConnection !== "function" || typeof chromium?.executablePath !== "function") throw new Error("Playwright MCP runtime exports are unavailable");
+    if (mcpPackage.version !== runtimePackage.dependencies["@playwright/mcp"]) throw new Error("Playwright MCP runtime version mismatch");
+    if (playwrightPackage.version !== runtimePackage.dependencies.playwright || corePackage.version !== runtimePackage.dependencies.playwright) throw new Error("Playwright runtime version mismatch");
+    if (!fs.existsSync(path.join(path.dirname(playwrightPath), "cli.js"))) throw new Error("Playwright runtime CLI is missing");
+    if (!fs.readFileSync("./dist/main.js", "utf8").includes("browser-prepare")) throw new Error("browser-prepare command is missing");
+  '
+)
 node_modules/.bin/electron-rebuild \
   -f \
   -v "$ELECTRON_VERSION" \

@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getMediaDir } from "../../../src/config/paths.js";
 import { MessageBus } from "../../../src/core/runtime-messages/index.js";
+import { SessionManager } from "../../../src/core/session/manager.js";
 import { WebSocketChannel, WebSocketConfig, extractDataUrlMime, sniffImageMime } from "../../../src/integrations/channels/websocket.js";
 
 const roots: string[] = [];
@@ -32,6 +33,23 @@ function dataUrl(mime: string, payload: Buffer): string {
 
 function makeChannel(): WebSocketChannel {
   const channel = new WebSocketChannel({ enabled: true, allowFrom: ["*"], websocketRequiresToken: false }, new MessageBus());
+  channel.handleMessage = vi.fn(async () => undefined) as any;
+  channel.hydrateAfterSubscribe = vi.fn(async () => undefined) as any;
+  return channel;
+}
+
+function makeWebuiChannel(): WebSocketChannel {
+  const root = tmpRoot();
+  const workspace = path.join(root, "workspace");
+  fs.mkdirSync(workspace, { recursive: true });
+  const channel = new WebSocketChannel(
+    { enabled: true, allowFrom: ["*"], websocketRequiresToken: false },
+    new MessageBus(),
+    {
+      sessionManager: new SessionManager(path.join(root, "sessions")),
+      workspacePath: workspace,
+    },
+  );
   channel.handleMessage = vi.fn(async () => undefined) as any;
   channel.hydrateAfterSubscribe = vi.fn(async () => undefined) as any;
   return channel;
@@ -104,7 +122,7 @@ describe("WebSocket message envelopes with media paths", () => {
   });
 
   it("forwards normalized MCP preset attachments", async () => {
-    const channel = makeChannel();
+    const channel = makeWebuiChannel();
     const connection = makeConnection();
 
     await channel.dispatchEnvelope(connection, "client-1", {
@@ -112,6 +130,8 @@ describe("WebSocket message envelopes with media paths", () => {
       chat_id: "abc123",
       content: "please use @browserbase",
       webui: true,
+      client_request_id: "11111111-1111-4111-8111-111111111111",
+      target: { kind: "standalone" },
       mcp_presets: [
         {
           name: "Browserbase",

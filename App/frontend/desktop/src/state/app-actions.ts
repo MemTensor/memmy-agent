@@ -16,7 +16,7 @@ import { isIntegrationSetupDiagnosticError, logHiddenIntegrationSetupDiagnosticE
 import type { IntegrationsClient } from "../api/integrations-client.js";
 import type { IntegrationConnection } from "../integrations/connection-state.js";
 import type { IntegrationMeta } from "../integrations/integration-meta.js";
-import type { MemmyAgentRunStatusSnapshot, MemmyAgentSessionSummary, MemmyAgentSidebarState, MemmyAgentWebuiThread, MemmyAgentWsEvent } from "../api/memmy-agent-client.js";
+import type { MemmyAgentRunStatusSnapshot, MemmyAgentSessionSnapshot, MemmyAgentSessionSummary, MemmyAgentSidebarState, MemmyAgentWebuiThread, MemmyAgentWsEvent, WebuiSessionTarget } from "../api/memmy-agent-client.js";
 import type { PendingAttachment } from "./agent-composer-state.js";
 import type {
   AgentAction,
@@ -265,6 +265,10 @@ export const agentActions = {
     return { type: "agent/sessionsLoaded", sessions, ...(requestId ? { requestId } : {}) };
   },
 
+  sessionSnapshotApplied(snapshot: MemmyAgentSessionSnapshot): AppAction {
+    return { type: "agent/sessionSnapshotApplied", snapshot };
+  },
+
   sessionsLoadFailed(requestId?: string): AppAction {
     return { type: "agent/sessionsLoadFailed", ...(requestId ? { requestId } : {}) };
   },
@@ -285,8 +289,12 @@ export const agentActions = {
     return { type: "agent/sidebarMutationConfirmed", mutationId, sidebarState };
   },
 
-  sidebarMutationFailed(mutationId: string, error: AgentOperationError): AppAction {
-    return { type: "agent/sidebarMutationFailed", mutationId, error };
+  sidebarMutationFailed(
+    mutationId: string,
+    sidebarState: MemmyAgentSidebarState,
+    error: AgentOperationError
+  ): AppAction {
+    return { type: "agent/sidebarMutationFailed", mutationId, sidebarState, error };
   },
 
   taskStateLoading(request: AgentTaskStateRequest): AppAction {
@@ -296,6 +304,7 @@ export const agentActions = {
   taskStateSettled(input: {
     requestId: string;
     recoveryGeneration: number | null;
+    snapshot?: MemmyAgentSessionSnapshot;
     sessions?: MemmyAgentSessionSummary[];
     sidebarState?: MemmyAgentSidebarState;
     error?: AgentOperationError;
@@ -359,8 +368,16 @@ export const agentActions = {
     return { type: "agent/composerPendingAttachmentsUpdated", scopeKey, attachments };
   },
 
-  composerMediaErrorUpdated(scopeKey: string, message: string | null): AppAction {
-    return { type: "agent/composerMediaErrorUpdated", scopeKey, message };
+  draftTargetUpdated(scopeKey: string, target: WebuiSessionTarget): AppAction {
+    return { type: "agent/draftTargetUpdated", scopeKey, target };
+  },
+
+  messageSendLockUpdated(scopeKey: string, clientRequestId: string | null): AppAction {
+    return { type: "agent/messageSendLockUpdated", scopeKey, clientRequestId };
+  },
+
+  tasksMarkedRead(chatIds: string[]): AppAction {
+    return { type: "agent/tasksMarkedRead", chatIds };
   },
 
   composerScopeCleared(scopeKey: string): AppAction {

@@ -407,6 +407,18 @@ function resolveExtraAllowedDirs(dirs?: string[] | null): string[] {
   return (dirs ?? []).map((dir) => path.resolve(dir));
 }
 
+function readonlyExtraAllowedDirs(ctx: any, restrict: boolean): string[] | undefined {
+  if (!restrict) return undefined;
+  if (Array.isArray(ctx?.readonlySkillRoots)) return [...ctx.readonlySkillRoots];
+  return [BUILTIN_SKILLS_DIR];
+}
+
+function writableExtraAllowedDirs(ctx: any, restrict: boolean): string[] | undefined {
+  if (!restrict) return undefined;
+  if (Array.isArray(ctx?.readonlySkillRoots)) return [];
+  return [BUILTIN_SKILLS_DIR];
+}
+
 function isToolPathAllowed(target: string, allowedDir: string | null, extraAllowedDirs: string[] = []): boolean {
   return (
     !allowedDir
@@ -482,7 +494,7 @@ export class FsTool extends Tool {
     return new this({
       workspace: ctx?.workspace ?? process.cwd(),
       allowedDir: restrict ? ctx?.workspace : undefined,
-      extraAllowedDirs: restrict ? [BUILTIN_SKILLS_DIR] : undefined,
+      extraAllowedDirs: readonlyExtraAllowedDirs(ctx, restrict),
       fileStateStore: ctx?.fileStateStore,
     });
   }
@@ -548,7 +560,7 @@ export class ReadFileTool extends Tool {
     return new ReadFileTool({
       workspace: ctx?.workspace ?? process.cwd(),
       allowedDir: restrict ? ctx?.workspace : undefined,
-      extraAllowedDirs: restrict ? [BUILTIN_SKILLS_DIR] : undefined,
+      extraAllowedDirs: readonlyExtraAllowedDirs(ctx, restrict),
       fileStateStore: ctx?.fileStateStore,
     });
   }
@@ -688,7 +700,7 @@ export class WriteFileTool extends Tool {
     return new WriteFileTool({
       workspace: ctx?.workspace ?? process.cwd(),
       allowedDir: restrict ? ctx?.workspace : undefined,
-      extraAllowedDirs: restrict ? [BUILTIN_SKILLS_DIR] : undefined,
+      extraAllowedDirs: writableExtraAllowedDirs(ctx, restrict),
       fileStateStore: ctx?.fileStateStore,
     });
   }
@@ -776,7 +788,7 @@ export class EditFileTool extends Tool {
     return new EditFileTool({
       workspace: ctx?.workspace ?? process.cwd(),
       allowedDir: restrict ? ctx?.workspace : undefined,
-      extraAllowedDirs: restrict ? [BUILTIN_SKILLS_DIR] : undefined,
+      extraAllowedDirs: writableExtraAllowedDirs(ctx, restrict),
       fileStateStore: ctx?.fileStateStore,
     });
   }
@@ -971,7 +983,7 @@ export class ListDirTool extends Tool {
     return new ListDirTool({
       workspace: ctx?.workspace ?? process.cwd(),
       allowedDir: restrict ? ctx?.workspace : undefined,
-      extraAllowedDirs: restrict ? [BUILTIN_SKILLS_DIR] : undefined,
+      extraAllowedDirs: readonlyExtraAllowedDirs(ctx, restrict),
     });
   }
 

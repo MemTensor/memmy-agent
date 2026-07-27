@@ -98,6 +98,7 @@ describe("AgentLoop turn persistence", () => {
       metadata: { [WEBUI_LANGUAGE_METADATA_KEY]: "zh-CN" },
     });
     const ctx = new TurnContext({ msg, sessionKey: "websocket:compaction", session, turnId: "turn-ctx" });
+    ctx.sessionWorkspace = loop.workspace;
     const capturedOptions: { value: Record<string, any> | null } = { value: null };
     (loop.consolidator as any).maybeConsolidateByTokens = vi.fn(async (_session: Session, opts: Record<string, any>) => {
       capturedOptions.value = opts;
@@ -130,6 +131,7 @@ describe("AgentLoop turn persistence", () => {
       content: "continue",
     });
     const ctx = new TurnContext({ msg, sessionKey: "cli:compaction", session, turnId: "turn-cli" });
+    ctx.sessionWorkspace = loop.workspace;
     let capturedOptions: Record<string, any> | null = null;
     (loop.consolidator as any).maybeConsolidateByTokens = vi.fn(async (_session: Session, opts: Record<string, any>) => {
       capturedOptions = opts;

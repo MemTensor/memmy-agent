@@ -61,6 +61,28 @@ afterEach(() => {
 });
 
 describe("SkillsLoader listSkills", () => {
+  it("discovers the single-file builtin ui-craft skill with browser visual QA", () => {
+    const loader = new SkillsLoader(tmpDir());
+    const entry = loader.listSkills(false).find((skill) => skill.name === "ui-craft");
+    const content = loader.loadSkill("ui-craft");
+
+    expect(entry).toMatchObject({ name: "ui-craft", source: "builtin" });
+    expect(content).toContain("browser_navigate");
+    expect(content).toContain("browser_snapshot");
+    expect(content).toContain("browser_console_messages");
+    expect(content).toContain("browser_network_requests");
+    expect(content).toContain("browser_take_screenshot");
+    expect(content).toContain("browser_resize");
+    expect(content).toContain("independent static HTML");
+    expect(content).toContain("permitted local `.html`/`.htm` path");
+    expect(content).toContain("foreground with `yield_time_ms`");
+    expect(content).toContain("terminate its Exec session after validation");
+    expect(content).toContain("one-sentence visual thesis");
+    expect(content).toContain("Run the anti-template review");
+    expect(content).toContain("Completion gate");
+    expect(fs.readdirSync(path.dirname(entry!.path))).toEqual(["SKILL.md"]);
+  });
+
   it("keeps the product memory skill removed while preserving user skills named memory", () => {
     const workspace = tmpDir();
     const loader = new SkillsLoader(workspace);

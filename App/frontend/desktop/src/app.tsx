@@ -1,8 +1,12 @@
 /** App module. */
 import { SseEventSchema, type AccountSessionView, type SseEvent } from "@memmy/local-api-contracts";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { gtagEvent } from "./analytics/gtag-init.js";
-import { AgentRuntimeBridge } from "./app/agent-runtime-bridge.js";
+import {
+  AgentRuntimeBridge,
+  createAgentTaskStateCoordinator,
+  type AgentTaskStateCoordinator
+} from "./app/agent-runtime-bridge.js";
 import { AppProviders, useApiClients } from "./app/providers.js";
 import { AppRouter } from "./app/router.js";
 import { UpdateCoordinatorProvider } from "./app/update-coordinator.js";
@@ -61,8 +65,19 @@ function RuntimeApp() {
   const [bootKey, setBootKey] = useState(0);
   translationRef.current = t;
   agentStateRef.current = state.agent;
+  const taskStateCoordinator = useMemo(() => (
+    clients?.memmyAgent
+      ? createAgentTaskStateCoordinator(
+          clients.memmyAgent,
+          dispatch,
+          () => agentStateRef.current
+        )
+      : null
+  ), [clients?.memmyAgent, dispatch]);
 
   const retry = useCallback(() => setBootKey((value) => value + 1), []);
+
+  useEffect(() => () => taskStateCoordinator?.dispose(), [taskStateCoordinator]);
 
   useEffect(() => {
     if (typeof window === "undefined" || !window.memmy?.onRouteTargetRequest) {
@@ -70,9 +85,15 @@ function RuntimeApp() {
     }
 
     return window.memmy.onRouteTargetRequest((target) => {
-      applyMainWindowRouteTarget(target, dispatch, clients?.memmyAgent ?? null, agentStateRef.current);
+      applyMainWindowRouteTarget(
+        target,
+        dispatch,
+        clients?.memmyAgent ?? null,
+        agentStateRef.current,
+        taskStateCoordinator ?? undefined
+      );
     });
-  }, [clients?.memmyAgent, dispatch]);
+  }, [clients?.memmyAgent, dispatch, taskStateCoordinator]);
 
   useEffect(() => {
     let events: EventSource | undefined;
@@ -254,7 +275,7 @@ function RuntimeApp() {
 
   return (
     <UpdateCoordinatorProvider>
-      <AgentRuntimeBridge>
+      <AgentRuntimeBridge taskStateCoordinator={taskStateCoordinator ?? undefined}>
         <AppRouter onRetry={retry} />
       </AgentRuntimeBridge>
     </UpdateCoordinatorProvider>
@@ -264,14 +285,19 @@ function RuntimeApp() {
 export function applyMainWindowRouteTarget(
   rawTarget: MainWindowRouteTarget,
   dispatch: (action: AppAction) => void,
-  agentClient: Pick<MemmyAgentClient, "chatIdToSessionKey" | "readWebuiThread" | "listSessions" | "readSidebarState"> | null = null,
-  agentState?: Pick<AgentState, "sidebarStateVersion" | "runStatusVersionByChatId">
+  agentClient: Pick<MemmyAgentClient, "chatIdToSessionKey" | "readWebuiThread" | "getSessionSnapshot" | "readSidebarState"> | null = null,
+  agentState?: Pick<AgentState, "sidebarStateVersion" | "runStatusVersionByChatId">,
+  taskStateCoordinator?: Pick<AgentTaskStateCoordinator, "focusTask">
 ): void {
   const target = resolveMainWindowRouteTarget(rawTarget);
   if (target.route === "/main") {
     if (target.agentChatId && agentClient) {
       rememberFocusedAgentChat(null);
-      focusMainWindowAgentChat(target.agentChatId, agentClient, dispatch, agentState);
+      if (taskStateCoordinator) {
+        taskStateCoordinator.focusTask(target.agentChatId);
+      } else {
+        focusMainWindowAgentChat(target.agentChatId, agentClient, dispatch, agentState);
+      }
     } else {
       rememberFocusedAgentChat(target.agentChatId);
     }
@@ -287,7 +313,7 @@ let mainWindowRouteAgentRequestCounter = 0;
 
 function focusMainWindowAgentChat(
   chatId: string,
-  client: Pick<MemmyAgentClient, "chatIdToSessionKey" | "readWebuiThread" | "listSessions" | "readSidebarState">,
+  client: Pick<MemmyAgentClient, "chatIdToSessionKey" | "readWebuiThread" | "getSessionSnapshot" | "readSidebarState">,
   dispatch: (action: AppAction) => void,
   agentState?: Pick<AgentState, "sidebarStateVersion" | "runStatusVersionByChatId">
 ): void {
@@ -323,7 +349,7 @@ function focusMainWindowAgentChat(
     });
 
   void Promise.allSettled([
-    client.listSessions(),
+    client.getSessionSnapshot({ timeoutMs: 10_000 }),
     client.readSidebarState()
   ])
     .then(([sessionsResult, sidebarResult]) => {
@@ -333,7 +359,7 @@ function focusMainWindowAgentChat(
       dispatch(agentActions.taskStateSettled({
         requestId: sessionsRequestId,
         recoveryGeneration: null,
-        ...(sessionsResult.status === "fulfilled" ? { sessions: sessionsResult.value } : {}),
+        ...(sessionsResult.status === "fulfilled" ? { snapshot: sessionsResult.value } : {}),
         ...(sidebarResult.status === "fulfilled" ? { sidebarState: sidebarResult.value } : {}),
         ...(failures.length > 0 ? {
           error: createAgentOperationError({ source: "sessions", message: failures.join("; ") })

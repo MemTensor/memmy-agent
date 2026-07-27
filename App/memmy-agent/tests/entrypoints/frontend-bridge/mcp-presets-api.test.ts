@@ -58,7 +58,6 @@ describe("mcp presets api", () => {
 
     for (const name of [
       "browserbase",
-      "playwright",
       "github",
       "figma",
       "context7",
@@ -237,11 +236,11 @@ describe("mcp presets api", () => {
     const dataDir = path.join(root, "data");
     process.env.MEMMY_AGENT_DATA_DIR = dataDir;
 
-    mcpPresetsAction("enable", { name: ["playwright"] });
+    mcpPresetsAction("enable", { name: ["context7"] });
 
-    const cwd = (loadConfig().tools.mcpServers.playwright as any).cwd;
-    expect(cwd).toBe(path.join(dataDir, "mcp", "playwright"));
-    expect(fs.statSync(path.join(dataDir, "mcp", "playwright")).isDirectory()).toBe(true);
+    const cwd = (loadConfig().tools.mcpServers.context7 as any).cwd;
+    expect(cwd).toBe(path.join(dataDir, "mcp", "context7"));
+    expect(fs.statSync(path.join(dataDir, "mcp", "context7")).isDirectory()).toBe(true);
   });
 
   it("writes URLs for no-auth remote presets", () => {
@@ -300,18 +299,18 @@ describe("mcp presets api", () => {
 
   it("removes a managed MCP preset and its managed cwd", () => {
     const root = useConfig();
-    mcpPresetsAction("enable", { name: ["playwright"] });
-    const managedCwd = path.join(root, "mcp", "playwright");
+    mcpPresetsAction("enable", { name: ["context7"] });
+    const managedCwd = path.join(root, "mcp", "context7");
     fs.writeFileSync(path.join(managedCwd, "cache.txt"), "managed runtime data", "utf8");
 
-    const payload = mcpPresetsAction("remove", { name: ["playwright"] });
+    const payload = mcpPresetsAction("remove", { name: ["context7"] });
 
     expect(payload.requires_restart).toBe(true);
     expect(payload.last_action.ok).toBe(true);
     expect(payload.last_action.removed).toBe(true);
-    expect(payload.last_action.managed_paths_removed).toEqual(["runtime:mcp/playwright"]);
+    expect(payload.last_action.managed_paths_removed).toEqual(["runtime:mcp/context7"]);
     expect(fs.existsSync(managedCwd)).toBe(false);
-    expect(loadConfig().tools.mcpServers).not.toHaveProperty("playwright");
+    expect(loadConfig().tools.mcpServers).not.toHaveProperty("context7");
   });
 
   it("preserves user cwd when removing a custom MCP server", () => {
@@ -335,10 +334,10 @@ describe("mcp presets api", () => {
 
   it("reports missing test dependencies", async () => {
     useConfig();
-    mcpPresetsAction("enable", { name: ["playwright"] });
+    mcpPresetsAction("enable", { name: ["context7"] });
     process.env.PATH = "";
 
-    const payload = await mcpPresetsTestAction({ name: ["playwright"] });
+    const payload = await mcpPresetsTestAction({ name: ["context7"] });
 
     expect(payload.last_action.ok).toBe(false);
     expect(payload.last_action.message).toContain("npx");
@@ -346,24 +345,24 @@ describe("mcp presets api", () => {
 
   it("connects to a preset and reports tools", async () => {
     useConfig();
-    mcpPresetsAction("enable", { name: ["playwright"] });
+    mcpPresetsAction("enable", { name: ["context7"] });
     const config = loadConfig();
-    config.tools.mcpServers.playwright.command = process.execPath;
+    config.tools.mcpServers.context7.command = process.execPath;
     saveConfig(config);
     vi.spyOn(mcpTools, "connectMcpServers").mockImplementation(async (servers, registry) => {
-      expect(Object.keys(servers)).toEqual(["playwright"]);
+      expect(Object.keys(servers)).toEqual(["context7"]);
       registry.register({
-        name: "mcp_playwright_browser_navigate",
-        toSchema: () => ({ name: "mcp_playwright_browser_navigate", description: "", parameters: {} }),
+        name: "mcp_context7_resolve_library",
+        toSchema: () => ({ name: "mcp_context7_resolve_library", description: "", parameters: {} }),
       } as any);
-      return { playwright: { aclose: async () => undefined } };
+      return { context7: { aclose: async () => undefined } };
     });
 
-    const payload = await mcpPresetsTestAction({ name: ["playwright"] });
+    const payload = await mcpPresetsTestAction({ name: ["context7"] });
 
     expect(payload.last_action.ok).toBe(true);
     expect(payload.last_action.tool_count).toBe(1);
-    expect(payload.last_action.tool_names).toEqual(["mcp_playwright_browser_navigate"]);
+    expect(payload.last_action.tool_names).toEqual(["mcp_context7_resolve_library"]);
   });
 
   it("resolves environment placeholders before testing MCP presets", async () => {
@@ -390,21 +389,21 @@ describe("mcp presets api", () => {
 
   it("times out slow MCP preset test connections", async () => {
     useConfig();
-    mcpPresetsAction("enable", { name: ["playwright"] });
+    mcpPresetsAction("enable", { name: ["context7"] });
     const config = loadConfig();
-    config.tools.mcpServers.playwright.command = process.execPath;
-    (config.tools.mcpServers.playwright as any).tool_timeout = 60;
+    config.tools.mcpServers.context7.command = process.execPath;
+    (config.tools.mcpServers.context7 as any).tool_timeout = 60;
     saveConfig(config);
     vi.spyOn(mcpTools, "connectMcpServers").mockReturnValue(new Promise(() => undefined) as any);
     vi.useFakeTimers();
 
-    const pending = mcpPresetsTestAction({ name: ["playwright"] });
+    const pending = mcpPresetsTestAction({ name: ["context7"] });
     await vi.advanceTimersByTimeAsync(20_000);
     const payload = await pending;
 
     expect(payload.last_action.ok).toBe(false);
     expect(payload.last_action.error).toBe("timeout");
-    expect(payload.last_action.message).toBe("Playwright test timed out.");
+    expect(payload.last_action.message).toBe("Context7 test timed out.");
   });
 
   it("keeps hyphenated MCP server names in test tool prefixes", async () => {

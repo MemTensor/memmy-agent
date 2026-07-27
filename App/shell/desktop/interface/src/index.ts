@@ -68,3 +68,7 @@ export interface DesktopImageActionRequest {
 export type DesktopImageSaveResult =
   | { canceled: true }
   | { canceled: false; filePath: string; bytes: number };
+
+export type DesktopProjectDirectorySelection =
+  | { canceled: true }
+  | { canceled: false; path: string };

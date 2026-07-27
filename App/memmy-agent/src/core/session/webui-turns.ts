@@ -2,7 +2,12 @@ import { InboundMessage, OutboundMessage } from "../runtime-messages/events.js";
 import { MessageBus } from "../runtime-messages/queue.js";
 import { LLMProvider } from "../../providers/base.js";
 import { goalStateWsBlob } from "./goal-state.js";
-import { Session, SessionManager } from "./manager.js";
+import {
+  Session,
+  SessionManager,
+  WEBUI_PROJECT_ID_METADATA_KEY,
+  WEBUI_WORKSPACE_CWD_METADATA_KEY,
+} from "./manager.js";
 import { truncateText } from "../../utils/helpers.js";
 import { withProgressCapabilities } from "../../utils/progress-events.js";
 
@@ -10,6 +15,7 @@ export const WEBUI_SESSION_METADATA_KEY = "webui";
 export const WEBUI_LANGUAGE_METADATA_KEY = "webui_language";
 export const WEBUI_TITLE_METADATA_KEY = "title";
 export const WEBUI_TITLE_USER_EDITED_METADATA_KEY = "titleUserEdited";
+export { WEBUI_PROJECT_ID_METADATA_KEY, WEBUI_WORKSPACE_CWD_METADATA_KEY };
 export const TITLE_MAX_CHARS = 60;
 export const TITLE_GENERATION_MAX_TOKENS = 96;
 export const TITLE_GENERATION_REASONING_EFFORT = "none";
@@ -54,7 +60,8 @@ function titleInputs(session: Session | any): [string, string] {
 export async function maybeGenerateWebuiTitle({ sessions, sessionKey, provider, model }: { sessions: SessionManager; sessionKey?: string; provider: LLMProvider | any; model: string }): Promise<boolean> {
   const key = sessionKey;
   if (!key) return false;
-  const session = sessions.getOrCreate(key);
+  const session = sessions.get(key);
+  if (!session) return false;
   if (session.metadata?.[WEBUI_SESSION_METADATA_KEY] !== true) return false;
   if (session.metadata?.[WEBUI_TITLE_USER_EDITED_METADATA_KEY] === true) return false;
   const currentTitle = session.metadata?.[WEBUI_TITLE_METADATA_KEY];
@@ -169,7 +176,11 @@ export async function finishWebuiTurn(input: {
 }): Promise<void> {
   const { bus, msg, sessionKey, sessions, latencyMs } = input;
   if (msg.channel !== "websocket") return;
-  const session = sessions.getOrCreate(sessionKey);
+  const getSession = sessions.get;
+  const session = typeof getSession === "function"
+    ? getSession.call(sessions, sessionKey)
+    : sessions.getOrCreate(sessionKey);
+  if (!session) return;
   const metadata: Record<string, any> = {
     ...(msg.metadata ?? {}),
     turnEnd: true,

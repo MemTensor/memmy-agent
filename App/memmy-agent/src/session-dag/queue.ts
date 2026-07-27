@@ -56,6 +56,13 @@ export class SessionDagQueueManager {
     this.queues.clear();
   }
 
+  async closeSession(sessionKey: string): Promise<void> {
+    const queue = this.queues.get(sessionKey);
+    if (!queue) return;
+    this.queues.delete(sessionKey);
+    await queue.close();
+  }
+
   async runWithSlot<T>(fn: () => Promise<T>): Promise<T> {
     if (this.activeWorkers >= this.config.maxConcurrentSessionQueues) {
       await new Promise<void>((resolve) => this.waiters.push(resolve));
@@ -107,12 +114,17 @@ class SessionDagQueue {
   private closed = false;
   private storeClosed = false;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly closedPromise: Promise<void>;
+  private resolveClosed!: () => void;
 
   constructor(
     private readonly sessionKey: string,
     private readonly manager: SessionDagQueueManager,
   ) {
     this.store = new SessionDagStore({ sessionKey });
+    this.closedPromise = new Promise<void>((resolve) => {
+      this.resolveClosed = resolve;
+    });
   }
 
   enqueue(turn: DagTurnInput): void {
@@ -150,11 +162,12 @@ class SessionDagQueue {
     return this.store.listTurns(["blocked"]).some((turn) => turn.message_start <= target.message_start);
   }
 
-  close(): void {
+  close(): Promise<void> {
     this.closed = true;
     if (this.retryTimer) clearTimeout(this.retryTimer);
     this.retryTimer = null;
     if (!this.running) this.closeStore();
+    return this.closedPromise;
   }
 
   private async process(): Promise<void> {
@@ -202,6 +215,7 @@ class SessionDagQueue {
     if (this.storeClosed) return;
     this.storeClosed = true;
     this.store.close();
+    this.resolveClosed();
   }
 }
 

@@ -239,7 +239,9 @@ describe("app reducer", () => {
         {
           key: "websocket:chat-1",
           title: "创建 AI 电商助手",
-          preview: "整理 PRD"
+          preview: "整理 PRD",
+          projectId: null,
+          cwd: "/workspace"
         }
       ])
     );

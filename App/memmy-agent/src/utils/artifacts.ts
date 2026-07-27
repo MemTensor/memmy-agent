@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { getMediaDir } from "../config/paths.js";
 import { detectImageMime, ensureDir } from "./helpers.js";
+import { DEFAULT_MAX_BYTES } from "./media-decode.js";
 
 const DATA_IMAGE_RE = /^data:(image\/[A-Za-z0-9.+-]+);base64,([\s\S]*)$/;
 const MIME_EXTENSIONS: Record<string, string> = {
@@ -103,4 +104,57 @@ export function generatedImageToolResult(artifacts: Array<Record<string, any>>):
     next_step:
       "Use these artifact paths as reference_images for follow-up edits. Call the message tool with the artifact paths in the media parameter to deliver the images to the user. Keep raw paths internal unless the user asks for debug details.",
   });
+}
+
+function decodeCanonicalBase64(data: string): Buffer {
+  const normalized = data.replace(/\s+/g, "");
+  if (!normalized || normalized.length % 4 === 1 || !/^[A-Za-z0-9+/]*={0,2}$/.test(normalized)) {
+    throw new ArtifactError("invalid base64 image payload");
+  }
+  const raw = Buffer.from(normalized, "base64");
+  if (
+    !raw.length ||
+    raw.toString("base64").replace(/=+$/g, "") !== normalized.replace(/=+$/g, "")
+  ) {
+    throw new ArtifactError("invalid base64 image payload");
+  }
+  return raw;
+}
+
+export function storeToolImageArtifact(
+  data: string,
+  declaredMime: string,
+  { maxBytes = DEFAULT_MAX_BYTES }: { maxBytes?: number } = {},
+): {
+  dataUrl: string;
+  mime: string;
+  path: string;
+} {
+  const raw = decodeCanonicalBase64(data);
+  if (raw.length > maxBytes) {
+    throw new ArtifactError(
+      `image exceeds ${Math.round(maxBytes / (1024 * 1024))}MB limit`,
+    );
+  }
+  const detectedMime = detectImageMime(raw);
+  const normalizedDeclared = declaredMime.trim().toLowerCase();
+  if (!detectedMime || !MIME_EXTENSIONS[detectedMime]) {
+    throw new ArtifactError("unsupported or unrecognized image data");
+  }
+  if (normalizedDeclared !== detectedMime) {
+    throw new ArtifactError(
+      `image MIME mismatch: declared ${normalizedDeclared || "unknown"}, detected ${detectedMime}`,
+    );
+  }
+  const root = ensureDir(getMediaDir("tool-results"));
+  const target = path.join(
+    root,
+    `tool_${crypto.randomUUID().replace(/-/g, "")}${MIME_EXTENSIONS[detectedMime]}`,
+  );
+  fs.writeFileSync(target, raw);
+  return {
+    dataUrl: `data:${detectedMime};base64,${raw.toString("base64")}`,
+    mime: detectedMime,
+    path: target,
+  };
 }

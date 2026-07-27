@@ -105,6 +105,11 @@ export class CronService {
   private timerTask: NodeJS.Timeout | null = null;
   running = false;
   private timerActive = false;
+  private readonly activeJobRuns = new Set<{
+    sessionKey: string | null;
+    system: boolean;
+    done: Promise<void>;
+  }>();
   maxSleepMs: number;
 
   constructor(storePath: string, options: CronServiceOptions | CronJobCallback = {}, maxSleepMs = 300_000) {
@@ -324,6 +329,15 @@ export class CronService {
 
   async executeJob(job: CronJob): Promise<void> {
     const started = nowMs();
+    let finishRun!: () => void;
+    const activeRun = {
+      sessionKey: job.payload.sessionKey ?? null,
+      system: job.payload.kind === "systemEvent" || job.system === true,
+      done: new Promise<void>((resolve) => {
+        finishRun = resolve;
+      }),
+    };
+    this.activeJobRuns.add(activeRun);
     try {
       await this.onJob?.(job);
       job.state.lastStatus = "ok";
@@ -331,6 +345,9 @@ export class CronService {
     } catch (err) {
       job.state.lastStatus = "error";
       job.state.lastError = err instanceof Error ? err.message : String(err);
+    } finally {
+      this.activeJobRuns.delete(activeRun);
+      finishRun();
     }
 
     const ended = nowMs();
@@ -489,6 +506,60 @@ export class CronService {
 
   remove(jobId: string): boolean {
     return this.removeJob(jobId) === "removed";
+  }
+
+  async removeWebuiJobsForSessionKeys(
+    sessionKeys: Iterable<string>,
+    timeoutMs = 30_000,
+  ): Promise<void> {
+    const keys = new Set(sessionKeys);
+    if (!keys.size) return;
+    const deadline = Date.now() + Math.max(1, timeoutMs);
+    while (true) {
+      const store = this.loadStore();
+      if (store) {
+        const next = store.jobs.filter((job) => (
+          job.payload.kind === "systemEvent"
+          || job.system === true
+          || !job.payload.sessionKey
+          || !keys.has(job.payload.sessionKey)
+        ));
+        if (next.length !== store.jobs.length) {
+          store.jobs = next;
+          this.saveStore();
+          this.armTimer();
+        }
+      }
+      const running = [...this.activeJobRuns].filter(
+        (run) => !run.system && run.sessionKey != null && keys.has(run.sessionKey),
+      );
+      if (!running.length) {
+        const remaining = this.loadStore()?.jobs.some((job) => (
+          job.payload.kind !== "systemEvent"
+          && job.system !== true
+          && job.payload.sessionKey != null
+          && keys.has(job.payload.sessionKey)
+        ));
+        if (!remaining) return;
+        continue;
+      }
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) throw new Error("cron_session_cleanup_timeout");
+      let timer: NodeJS.Timeout | null = null;
+      try {
+        await Promise.race([
+          Promise.all(running.map((run) => run.done)),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(
+              () => reject(new Error("cron_session_cleanup_timeout")),
+              remainingMs,
+            );
+          }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    }
   }
 
   enableJob(jobId: string, options: { enabled?: boolean } | boolean = true): CronJob | null {

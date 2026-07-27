@@ -191,6 +191,10 @@ describe("Bundled Tool Contract", () => {
     expect(content).toContain("A request to change external state is incomplete");
     expect(content).toContain("## File and Coding Workflows");
     expect(content).toContain("apply_patch");
+    expect(content).toContain("Keep long-running services in the foreground");
+    expect(content).toContain("Do not use `&`, `nohup`, `disown`, or daemon mode");
+    expect(content).toContain("pass its permitted local path directly to `browser_navigate`");
+    expect(content).toContain("project's existing dev/preview command through managed Exec");
     expect(content).toContain("## Web and External Information");
     expect(content).toContain("## Messaging and Media");
     expect(content).toContain("## Scheduling and Background Work");
@@ -203,6 +207,8 @@ describe("Bundled Tool Contract", () => {
     expect(prompt).toContain("## General Tool Contract");
     expect(prompt).toContain("Do not treat `exec` as a universal workaround");
     expect(prompt).toContain("## Execution Progress");
+    expect(prompt).toContain("Keep long-running services in the foreground");
+    expect(prompt).toContain("independent static `.html`/`.htm` page");
     expect(prompt.match(/# Verification Contract/g)).toHaveLength(1);
     expect(prompt).toContain("`failed` means the validation output must be inspected");
   });

@@ -399,8 +399,6 @@ verify_windows_native_module() {
 
 verify_windows_onnxruntime_module() {
   local onnxruntime_node="$RUNTIME_DIR/memory/node_modules/onnxruntime-node/bin/napi-v3/win32/x64/onnxruntime_binding.node"
-  local onnxruntime_dir
-  onnxruntime_dir="$(dirname "$onnxruntime_node")"
 
   if [ ! -f "$onnxruntime_node" ]; then
     echo "Missing onnxruntime-node Windows x64 native module: $onnxruntime_node" >&2
@@ -454,7 +452,7 @@ verify_packaged_windows_unpacked_artifacts() {
 npm_ci_win_x64() {
   local package_dir="$1"
 
-  npm ci --prefix "$package_dir" --omit=dev --ignore-scripts --os=win32 --cpu=x64
+  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --prefix "$package_dir" --omit=dev --ignore-scripts --os=win32 --cpu=x64
 }
 
 install_better_sqlite3_win_x64() {
@@ -480,7 +478,7 @@ if [ ! -d "$ROOT_DIR/node_modules" ]; then
 fi
 
 log "Installing memmy-agent dependencies"
-npm_with_configured_script_shell ci --prefix "$AGENT_DIR"
+PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm_with_configured_script_shell ci --prefix "$AGENT_DIR"
 
 log "Building Memory workspace"
 npm_with_configured_script_shell run build -w @memmy/memory
@@ -513,6 +511,29 @@ cp "$AGENT_DIR/package-lock.json" "$RUNTIME_DIR/memmy-agent/package-lock.json"
 log "Installing Windows x64 memmy-agent runtime dependencies"
 npm_ci_win_x64 "$RUNTIME_DIR/memmy-agent"
 verify_windows_agent_native_artifacts
+(
+  cd "$RUNTIME_DIR/memmy-agent"
+  node --input-type=module --eval '
+    import fs from "node:fs";
+    import path from "node:path";
+    import { createRequire } from "node:module";
+    import { createConnection } from "@playwright/mcp";
+    import { chromium } from "playwright";
+    const require = createRequire(import.meta.url);
+    const runtimePackage = require("./package.json");
+    const mcpPath = require.resolve("@playwright/mcp/package.json");
+    const playwrightPath = require.resolve("playwright/package.json");
+    const corePath = require.resolve("playwright-core/package.json");
+    const mcpPackage = require(mcpPath);
+    const playwrightPackage = require(playwrightPath);
+    const corePackage = require(corePath);
+    if (typeof createConnection !== "function" || typeof chromium?.executablePath !== "function") throw new Error("Playwright MCP runtime exports are unavailable");
+    if (mcpPackage.version !== runtimePackage.dependencies["@playwright/mcp"]) throw new Error("Playwright MCP runtime version mismatch");
+    if (playwrightPackage.version !== runtimePackage.dependencies.playwright || corePackage.version !== runtimePackage.dependencies.playwright) throw new Error("Playwright runtime version mismatch");
+    if (!fs.existsSync(path.join(path.dirname(playwrightPath), "cli.js"))) throw new Error("Playwright runtime CLI is missing");
+    if (!fs.readFileSync("./dist/main.js", "utf8").includes("browser-prepare")) throw new Error("browser-prepare command is missing");
+  '
+)
 
 log "Creating Windows CLI launchers"
 create_windows_cli_launcher "$CLI_BIN_DIR/memmy-memory.cmd" "dist\\runtime\\memory\\src\\cli\\index.js"

@@ -24,6 +24,8 @@ function createSession(sessions: SessionManager, chatId = "chat-1", content = "è
   const sessionKey = `websocket:${chatId}`;
   const session = sessions.getOrCreate(sessionKey);
   session.metadata.webui = true;
+  session.metadata.webuiProjectId = null;
+  session.metadata.webuiWorkspaceCwd = fs.realpathSync(sessions.root);
   session.addMessage("user", content);
   sessions.save(session);
   return sessionKey;

@@ -5,3 +5,4 @@ export * from "./thread-disk.js";
 export * from "./transcript.js";
 export * from "./mcp-presets-runtime.js";
 export * from "./mcp-presets-api.js";
+export * from "./projects.js";

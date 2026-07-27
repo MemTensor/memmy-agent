@@ -3,13 +3,15 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState, ty
 import {
   MemmyAgentRequestError,
   type MemmyAgentClient,
+  type MemmyAgentProject,
   type MemmyAgentRunStatusSnapshot,
+  type MemmyAgentSidebarState,
   type MemmyAgentUnsubscribe,
   type MemmyAgentWebSocketConnection,
   type MemmyAgentWsEvent
 } from "../api/memmy-agent-client.js";
 import { agentActions, createAgentOperationError, type AppAction } from "../state/app-actions.js";
-import type { AgentState } from "../state/agent-chat-slice.js";
+import { updateSidebarStateForTask, type AgentState } from "../state/agent-chat-slice.js";
 import { useAppState } from "../state/app-state.js";
 import { useApiClients } from "./providers.js";
 import type { AppRoutePath } from "./routes.js";
@@ -17,6 +19,525 @@ import type { AppRoutePath } from "./routes.js";
 export interface AgentRuntimeBridgeValue {
   connection: MemmyAgentWebSocketConnection | null;
   ensureChatSubscription(chatId: string): void;
+  taskStateCoordinator: AgentTaskStateCoordinator;
+}
+
+export type SidebarIntent =
+  | {
+      id: string;
+      kind: "task-patch";
+      sessionKey: string;
+      patch: {
+        pinned?: boolean;
+        archived?: boolean;
+        title?: string | null;
+        tags?: string[];
+      };
+    }
+  | { id: string; kind: "batch-archive"; sessionKeys: string[] }
+  | { id: string; kind: "set-collapsed"; groupKey: string; collapsed: boolean }
+  | {
+      id: string;
+      kind: "view-patch";
+      patch: Partial<MemmyAgentSidebarState["view"]>;
+    };
+
+export interface AgentTaskStateCoordinator {
+  refreshTaskState(options?: RefreshAgentTaskListOptions): void;
+  focusTask(chatId: string): void;
+  mutateProject(operation: ProjectMutationOperation): Promise<ProjectMutationOutcome>;
+  enqueueSidebarIntent(intent: SidebarIntent): Promise<void>;
+  runWithSidebarSettled<T>(operation: () => Promise<T>): Promise<T>;
+  retrySidebarIntents(): void;
+  dispose(): void;
+}
+
+export type ProjectMutationOperation =
+  | {
+      kind: "create";
+      input: { mode: "blank" | "existing"; path: string; name?: string };
+    }
+  | {
+      kind: "update";
+      projectId: string;
+      update: { name: string } | { pinned: boolean };
+    }
+  | { kind: "delete"; projectId: string };
+
+export type ProjectMutationOutcome =
+  | {
+      status: "committed";
+      project: MemmyAgentProject | null;
+      deletedSessionKeys: string[];
+    }
+  | { status: "rejected"; code: string }
+  | { status: "unknown" };
+
+type QueuedSidebarIntent = {
+  intent: SidebarIntent;
+  attempts: number;
+  resolve(): void;
+  reject(error: unknown): void;
+};
+
+const SIDEBAR_INTENT_MAX_ATTEMPTS = 3;
+const SIDEBAR_SETTLE_TIMEOUT_MS = 10_000;
+const unavailableTaskStateCoordinator: AgentTaskStateCoordinator = {
+  refreshTaskState: () => undefined,
+  focusTask: () => undefined,
+  mutateProject: async () => ({ status: "rejected", code: "agent_gateway_unavailable" }),
+  enqueueSidebarIntent: async () => {
+    throw new Error("agent_gateway_unavailable");
+  },
+  runWithSidebarSettled: async (operation) => operation(),
+  retrySidebarIntents: () => undefined,
+  dispose: () => undefined
+};
+
+/** Applies one replayable sidebar mutation to any authoritative server state. */
+export function applySidebarIntent(
+  state: MemmyAgentSidebarState,
+  intent: SidebarIntent
+): MemmyAgentSidebarState {
+  switch (intent.kind) {
+    case "task-patch":
+      return updateSidebarStateForTask(state, intent.sessionKey, intent.patch);
+    case "batch-archive":
+      return {
+        ...state,
+        archived_keys: [...new Set([...state.archived_keys, ...intent.sessionKeys])]
+      };
+    case "set-collapsed":
+      return updateSidebarStateForTask(state, intent.groupKey, {
+        collapsed: intent.collapsed
+      });
+    case "view-patch":
+      return {
+        ...state,
+        view: {
+          ...state.view,
+          ...intent.patch
+        }
+      };
+  }
+}
+
+function replaySidebarIntents(
+  base: MemmyAgentSidebarState,
+  queue: readonly QueuedSidebarIntent[]
+): MemmyAgentSidebarState {
+  return queue.reduce(
+    (current, entry) => applySidebarIntent(current, entry.intent),
+    base
+  );
+}
+
+function sidebarIntentAlreadyApplied(
+  state: MemmyAgentSidebarState,
+  intent: SidebarIntent
+): boolean {
+  const applied = applySidebarIntent(state, intent);
+  return JSON.stringify({ ...applied, updated_at: null })
+    === JSON.stringify({ ...state, updated_at: null });
+}
+
+function sidebarMutationId(intent: SidebarIntent): string {
+  return `sidebar-${intent.id}`;
+}
+
+/** Creates the single task/sidebar coordinator for one renderer client lifecycle. */
+export function createAgentTaskStateCoordinator(
+  client: MemmyAgentClient,
+  dispatch: (action: AppAction) => void,
+  getAgentState: () => AgentState
+): AgentTaskStateCoordinator {
+  let disposed = false;
+  let acceptingSidebarIntents = true;
+  let processingSidebarIntents = false;
+  let sidebarQueuePaused = false;
+  let confirmedSidebarState = getAgentState().sidebarState;
+  const sidebarQueue: QueuedSidebarIntent[] = [];
+  const settleWaiters = new Set<(settled: boolean) => void>();
+  let focusRequestSequence = 0;
+  let projectMutationSequence = 0;
+  let projectMutationInFlight = false;
+  let refreshInFlight = false;
+  let refreshDirtyOptions: RefreshAgentTaskListOptions | null = null;
+  let refreshRetryTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function dispatchOptimisticState(): void {
+    const head = sidebarQueue[0];
+    if (!head || disposed) return;
+    dispatch(agentActions.sidebarMutationStarted(
+      sidebarMutationId(head.intent),
+      replaySidebarIntents(confirmedSidebarState, sidebarQueue)
+    ));
+  }
+
+  function notifySettled(settled: boolean): void {
+    for (const waiter of settleWaiters) waiter(settled);
+    settleWaiters.clear();
+  }
+
+  function rejectHead(error: unknown): void {
+    const head = sidebarQueue.shift();
+    if (!head) return;
+    head.reject(error);
+    dispatch(agentActions.sidebarMutationFailed(
+      sidebarMutationId(head.intent),
+      replaySidebarIntents(confirmedSidebarState, sidebarQueue),
+      createAgentOperationError({
+        source: "sidebar",
+        message: error instanceof Error ? error.message : String(error)
+      })
+    ));
+    dispatchOptimisticState();
+  }
+
+  async function readSidebarForReconciliation(): Promise<MemmyAgentSidebarState | null> {
+    try {
+      return await client.readSidebarState();
+    } catch {
+      return null;
+    }
+  }
+
+  async function processSidebarQueue(): Promise<void> {
+    if (
+      disposed
+      || processingSidebarIntents
+      || sidebarQueuePaused
+      || sidebarQueue.length === 0
+    ) {
+      return;
+    }
+    processingSidebarIntents = true;
+    try {
+      while (!disposed && !sidebarQueuePaused && sidebarQueue.length > 0) {
+        const head = sidebarQueue[0];
+        if (!head) break;
+        const candidate = applySidebarIntent(confirmedSidebarState, head.intent);
+        try {
+          const committed = await client.writeSidebarState(
+            confirmedSidebarState.updated_at,
+            candidate,
+            { timeoutMs: SIDEBAR_SETTLE_TIMEOUT_MS }
+          );
+          confirmedSidebarState = committed;
+          sidebarQueue.shift();
+          head.resolve();
+          dispatch(agentActions.sidebarMutationConfirmed(
+            sidebarMutationId(head.intent),
+            replaySidebarIntents(confirmedSidebarState, sidebarQueue)
+          ));
+          dispatchOptimisticState();
+        } catch (error) {
+          head.attempts += 1;
+          if (
+            error instanceof MemmyAgentRequestError
+            && error.status === 409
+            && error.code === "sidebar_state_conflict"
+            && error.data?.sidebarState
+          ) {
+            confirmedSidebarState = error.data.sidebarState;
+          } else {
+            const reconciled = await readSidebarForReconciliation();
+            if (!reconciled) {
+              sidebarQueuePaused = true;
+              dispatch(agentActions.sidebarMutationFailed(
+                sidebarMutationId(head.intent),
+                replaySidebarIntents(confirmedSidebarState, sidebarQueue),
+                createAgentOperationError({
+                  source: "sidebar",
+                  message: "sidebar_sync_pending"
+                })
+              ));
+              notifySettled(false);
+              break;
+            }
+            confirmedSidebarState = reconciled;
+            if (sidebarIntentAlreadyApplied(reconciled, head.intent)) {
+              sidebarQueue.shift();
+              head.resolve();
+              dispatch(agentActions.sidebarMutationConfirmed(
+                sidebarMutationId(head.intent),
+                replaySidebarIntents(confirmedSidebarState, sidebarQueue)
+              ));
+              dispatchOptimisticState();
+              continue;
+            }
+          }
+
+          if (head.attempts >= SIDEBAR_INTENT_MAX_ATTEMPTS) {
+            rejectHead(error);
+          } else {
+            dispatchOptimisticState();
+          }
+        }
+      }
+    } finally {
+      processingSidebarIntents = false;
+      if (!disposed && sidebarQueue.length === 0) notifySettled(true);
+    }
+  }
+
+  function awaitSidebarSettled(): Promise<boolean> {
+    if (sidebarQueue.length === 0) return Promise.resolve(true);
+    if (sidebarQueuePaused) return Promise.resolve(false);
+    return new Promise<boolean>((resolve) => {
+      let completed = false;
+      const waiter = (settled: boolean): void => {
+        if (completed) return;
+        completed = true;
+        globalThis.clearTimeout(timer);
+        resolve(settled);
+      };
+      const timer = globalThis.setTimeout(() => {
+        settleWaiters.delete(waiter);
+        waiter(false);
+      }, SIDEBAR_SETTLE_TIMEOUT_MS);
+      settleWaiters.add(waiter);
+    });
+  }
+
+  function scheduleCoordinatorRefresh(options: RefreshAgentTaskListOptions): void {
+    if (disposed) return;
+    if (projectMutationInFlight || refreshInFlight) {
+      refreshDirtyOptions = {
+        ...(refreshDirtyOptions ?? {}),
+        ...options,
+        state: options.state ?? refreshDirtyOptions?.state
+      };
+      return;
+    }
+    refreshInFlight = true;
+    const reason = options.reason ?? "auto";
+    const attempt = options.attempt ?? 0;
+    const state = options.state ?? getAgentState();
+    const requestId = nextAgentSessionsRequestId(reason);
+    dispatch(agentActions.taskStateLoading({
+      requestId,
+      sidebarStateVersionAtStart: state.sidebarStateVersion,
+      runStatusVersionAtStartByChatId: { ...state.runStatusVersionByChatId },
+      recoveryGeneration: null
+    }));
+    void Promise.allSettled([
+      client.getSessionSnapshot({ timeoutMs: 10_000 }),
+      client.readSidebarState()
+    ]).then(([sessionsResult, sidebarResult]) => {
+      if (disposed) return;
+      const failures = [sessionsResult, sidebarResult]
+        .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+        .map((result) => result.reason instanceof Error
+          ? result.reason.message
+          : String(result.reason));
+      if (sidebarResult.status === "fulfilled" && sidebarQueue.length === 0) {
+        confirmedSidebarState = sidebarResult.value;
+      }
+      dispatch(agentActions.taskStateSettled({
+        requestId,
+        recoveryGeneration: null,
+        ...(sessionsResult.status === "fulfilled"
+          ? { snapshot: sessionsResult.value }
+          : {}),
+        ...(sidebarResult.status === "fulfilled"
+          ? { sidebarState: sidebarResult.value }
+          : {}),
+        ...(failures.length > 0
+          ? {
+              error: createAgentOperationError({
+                source: "sessions",
+                message: failures.join("; ")
+              })
+            }
+          : {})
+      }));
+      if (
+        options.expectedChatId
+        && sessionsResult.status === "fulfilled"
+        && !sessionsResult.value.sessions.some(
+          (session) => session.key === client.chatIdToSessionKey(options.expectedChatId!)
+        )
+        && attempt < NEW_CHAT_REFRESH_RETRY_DELAYS_MS.length
+      ) {
+        if (refreshRetryTimer) globalThis.clearTimeout(refreshRetryTimer);
+        refreshRetryTimer = globalThis.setTimeout(() => {
+          refreshRetryTimer = null;
+          scheduleCoordinatorRefresh({ ...options, attempt: attempt + 1 });
+        }, NEW_CHAT_REFRESH_RETRY_DELAYS_MS[attempt]);
+      }
+    }).finally(() => {
+      refreshInFlight = false;
+      if (disposed || projectMutationInFlight) return;
+      const dirty = refreshDirtyOptions;
+      refreshDirtyOptions = null;
+      if (dirty) scheduleCoordinatorRefresh(dirty);
+    });
+  }
+
+  const coordinator: AgentTaskStateCoordinator = {
+    refreshTaskState(options = {}) {
+      if (disposed) return;
+      if (sidebarQueuePaused) {
+        sidebarQueuePaused = false;
+        void processSidebarQueue();
+      }
+      scheduleCoordinatorRefresh({
+        ...options,
+        state: options.state ?? getAgentState()
+      });
+    },
+    focusTask(chatId) {
+      if (disposed) return;
+      focusRequestSequence += 1;
+      const sessionKey = client.chatIdToSessionKey(chatId);
+      const requestId = `coordinator-focus-${chatId}-${focusRequestSequence}`;
+      dispatch(agentActions.historyLoading(sessionKey, chatId, requestId));
+      void client.readWebuiThread(sessionKey)
+        .then((thread) => dispatch(agentActions.historyLoaded(thread, requestId)))
+        .catch((error: unknown) => {
+          if (error instanceof MemmyAgentRequestError && error.status === 404) {
+            dispatch(agentActions.historyLoaded({
+              schemaVersion: 1,
+              sessionKey,
+              messages: []
+            }, requestId));
+            return;
+          }
+          dispatch(agentActions.historyOpenFailed(chatId, requestId, createAgentOperationError({
+            source: "history",
+            message: error instanceof Error ? error.message : String(error),
+            chatId
+          })));
+        });
+      coordinator.refreshTaskState({ reason: "thread" });
+    },
+    async mutateProject(operation) {
+      if (disposed) return { status: "rejected", code: "coordinator_disposed" };
+      if (projectMutationInFlight) {
+        return { status: "rejected", code: "project_mutation_conflict" };
+      }
+      projectMutationInFlight = true;
+      projectMutationSequence += 1;
+      const requestId = `project-mutation-${projectMutationSequence}`;
+      const state = getAgentState();
+      dispatch(agentActions.taskStateLoading({
+        requestId,
+        sidebarStateVersionAtStart: state.sidebarStateVersion,
+        runStatusVersionAtStartByChatId: { ...state.runStatusVersionByChatId },
+        recoveryGeneration: null
+      }));
+      try {
+        if (operation.kind === "create") {
+          const result = await client.createProject(operation.input, { timeoutMs: 15_000 });
+          if (disposed) return { status: "unknown" };
+          dispatch(agentActions.taskStateSettled({
+            requestId,
+            recoveryGeneration: null,
+            snapshot: result.snapshot
+          }));
+          return {
+            status: "committed",
+            project: result.project,
+            deletedSessionKeys: []
+          };
+        }
+        if (operation.kind === "update") {
+          const result = await client.updateProject(
+            operation.projectId,
+            operation.update,
+            { timeoutMs: 15_000 }
+          );
+          if (disposed) return { status: "unknown" };
+          dispatch(agentActions.taskStateSettled({
+            requestId,
+            recoveryGeneration: null,
+            snapshot: result.snapshot
+          }));
+          return {
+            status: "committed",
+            project: result.project,
+            deletedSessionKeys: []
+          };
+        }
+        const result = await coordinator.runWithSidebarSettled(
+          () => client.deleteProject(operation.projectId, { timeoutMs: 30_000 })
+        );
+        if (disposed) return { status: "unknown" };
+        dispatch(agentActions.taskStateSettled({
+          requestId,
+          recoveryGeneration: null,
+          snapshot: result.snapshot
+        }));
+        return {
+          status: "committed",
+          project: null,
+          deletedSessionKeys: result.deletedSessionKeys
+        };
+      } catch (error) {
+        if (disposed) return { status: "unknown" };
+        coordinator.refreshTaskState({ reason: "manual" });
+        if (error instanceof MemmyAgentRequestError) {
+          return {
+            status: "rejected",
+            code: error.code ?? "project_operation_failed"
+          };
+        }
+        if (error instanceof Error && error.message === "sidebar_sync_pending") {
+          return { status: "rejected", code: "sidebar_sync_pending" };
+        }
+        return { status: "unknown" };
+      } finally {
+        projectMutationInFlight = false;
+        const dirty = refreshDirtyOptions;
+        refreshDirtyOptions = null;
+        if (dirty) scheduleCoordinatorRefresh(dirty);
+      }
+    },
+    enqueueSidebarIntent(intent) {
+      if (disposed) return Promise.reject(new Error("coordinator_disposed"));
+      if (!acceptingSidebarIntents) {
+        return Promise.reject(new Error("sidebar_sync_pending"));
+      }
+      if (sidebarQueue.length === 0 && !processingSidebarIntents) {
+        confirmedSidebarState = getAgentState().sidebarState;
+      }
+      return new Promise<void>((resolve, reject) => {
+        sidebarQueue.push({ intent, attempts: 0, resolve, reject });
+        dispatchOptimisticState();
+        void processSidebarQueue();
+      });
+    },
+    async runWithSidebarSettled(operation) {
+      if (disposed) throw new Error("coordinator_disposed");
+      acceptingSidebarIntents = false;
+      try {
+        const settled = await awaitSidebarSettled();
+        if (!settled) throw new Error("sidebar_sync_pending");
+        return await operation();
+      } finally {
+        acceptingSidebarIntents = true;
+      }
+    },
+    retrySidebarIntents() {
+      if (disposed || sidebarQueue.length === 0) return;
+      sidebarQueuePaused = false;
+      dispatchOptimisticState();
+      void processSidebarQueue();
+    },
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      if (refreshRetryTimer) {
+        globalThis.clearTimeout(refreshRetryTimer);
+        refreshRetryTimer = null;
+      }
+      const error = new DOMException("Coordinator disposed", "AbortError");
+      for (const entry of sidebarQueue.splice(0)) entry.reject(error);
+      notifySettled(false);
+    }
+  };
+  return coordinator;
 }
 
 const AgentRuntimeBridgeContext = createContext<AgentRuntimeBridgeValue | null>(null);
@@ -41,7 +562,10 @@ export function isAgentRuntimeBridgeRoute(path: AppRoutePath): boolean {
 }
 
 /** Handles agent runtime bridge. */
-export function AgentRuntimeBridge(props: { children: ReactNode }) {
+export function AgentRuntimeBridge(props: {
+  children: ReactNode;
+  taskStateCoordinator?: AgentTaskStateCoordinator;
+}) {
   const { clients } = useApiClients();
   const { state, dispatch } = useAppState();
   const enabled = isAgentRuntimeBridgeRoute(state.navigation.currentPath);
@@ -53,12 +577,31 @@ export function AgentRuntimeBridge(props: { children: ReactNode }) {
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const connectAttemptRef = useRef(0);
   const connectInFlightRef = useRef(false);
-  const operationErrorTimersRef = useRef<Record<"chat" | "sidebar", ReturnType<typeof setTimeout> | null>>({
-    chat: null,
-    sidebar: null
-  });
+  const operationErrorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const agentStateRef = useRef(state.agent);
   agentStateRef.current = state.agent;
+  const ownedTaskStateCoordinatorRef = useRef<{
+    client: MemmyAgentClient;
+    coordinator: AgentTaskStateCoordinator;
+  } | null>(null);
+  if (
+    !props.taskStateCoordinator
+    && clients?.memmyAgent
+    && ownedTaskStateCoordinatorRef.current?.client !== clients.memmyAgent
+  ) {
+    ownedTaskStateCoordinatorRef.current?.coordinator.dispose();
+    ownedTaskStateCoordinatorRef.current = {
+      client: clients.memmyAgent,
+      coordinator: createAgentTaskStateCoordinator(
+        clients.memmyAgent,
+        dispatch,
+        () => agentStateRef.current
+      )
+    };
+  }
+  const taskStateCoordinator = props.taskStateCoordinator
+    ?? ownedTaskStateCoordinatorRef.current?.coordinator
+    ?? unavailableTaskStateCoordinator;
 
   const clearConnectRetryTimer = useCallback((): void => {
     if (retryTimerRef.current) {
@@ -124,6 +667,15 @@ export function AgentRuntimeBridge(props: { children: ReactNode }) {
       })
     ];
   }, [dispatch]);
+
+  useEffect(() => {
+    return () => {
+      if (!props.taskStateCoordinator) {
+        ownedTaskStateCoordinatorRef.current?.coordinator.dispose();
+        ownedTaskStateCoordinatorRef.current = null;
+      }
+    };
+  }, [props.taskStateCoordinator]);
 
   useEffect(() => {
     if (!enabled || !clients?.memmyAgent) {
@@ -235,7 +787,7 @@ export function AgentRuntimeBridge(props: { children: ReactNode }) {
     }));
 
     const taskRecovery = Promise.all([
-      settleByDeadline(client.listSessions(), deadline),
+      settleByDeadline(client.getSessionSnapshot({ timeoutMs: AGENT_RECOVERY_DEADLINE_MS }), deadline),
       settleByDeadline(client.readSidebarState(), deadline)
     ]).then(([sessionsResult, sidebarResult]) => {
       if (cancelled) {
@@ -247,7 +799,7 @@ export function AgentRuntimeBridge(props: { children: ReactNode }) {
       dispatch(agentActions.taskStateSettled({
         requestId: taskRequestId,
         recoveryGeneration: generation,
-        ...(sessionsResult.ok ? { sessions: sessionsResult.value } : {}),
+        ...(sessionsResult.ok ? { snapshot: sessionsResult.value } : {}),
         ...(sidebarResult.ok ? { sidebarState: sidebarResult.value } : {}),
         ...(failures.length > 0 ? {
           error: createAgentOperationError({
@@ -318,36 +870,20 @@ export function AgentRuntimeBridge(props: { children: ReactNode }) {
   ]);
 
   useEffect(() => {
-    const error = state.agent.operationErrorsBySurface.chat;
+    const error = state.agent.operationErrorNotice;
     if (error) {
-      operationErrorTimersRef.current.chat = globalThis.setTimeout(() => {
+      operationErrorTimerRef.current = globalThis.setTimeout(() => {
         dispatch(agentActions.operationErrorDismissed("chat", error.id));
       }, AGENT_OPERATION_ERROR_DISMISS_MS);
     }
     return () => {
-      const timer = operationErrorTimersRef.current.chat;
+      const timer = operationErrorTimerRef.current;
       if (timer) {
         globalThis.clearTimeout(timer);
-        operationErrorTimersRef.current.chat = null;
+        operationErrorTimerRef.current = null;
       }
     };
-  }, [dispatch, state.agent.operationErrorsBySurface.chat]);
-
-  useEffect(() => {
-    const error = state.agent.operationErrorsBySurface.sidebar;
-    if (error) {
-      operationErrorTimersRef.current.sidebar = globalThis.setTimeout(() => {
-        dispatch(agentActions.operationErrorDismissed("sidebar", error.id));
-      }, AGENT_OPERATION_ERROR_DISMISS_MS);
-    }
-    return () => {
-      const timer = operationErrorTimersRef.current.sidebar;
-      if (timer) {
-        globalThis.clearTimeout(timer);
-        operationErrorTimersRef.current.sidebar = null;
-      }
-    };
-  }, [dispatch, state.agent.operationErrorsBySurface.sidebar]);
+  }, [dispatch, state.agent.operationErrorNotice]);
 
   useEffect(() => {
     if (!clients?.memmyAgent || !state.agent.refreshRequested || !enabled || state.agent.recoveringGeneration !== null) {
@@ -361,7 +897,7 @@ export function AgentRuntimeBridge(props: { children: ReactNode }) {
     }
 
     if (!state.agent.isLoadingSessions) {
-      void refreshAgentTaskList(clients.memmyAgent, dispatch, { state: state.agent });
+      taskStateCoordinator?.refreshTaskState();
     }
   }, [
     clients?.memmyAgent,
@@ -371,11 +907,16 @@ export function AgentRuntimeBridge(props: { children: ReactNode }) {
     state.agent.isLoadingSessions,
     state.agent.pendingCanonicalHydrateByChatId,
     state.agent.recoveringGeneration,
-    state.agent.refreshRequested
+    state.agent.refreshRequested,
+    taskStateCoordinator
   ]);
 
   return (
-    <AgentRuntimeBridgeContext.Provider value={{ connection, ensureChatSubscription }}>
+    <AgentRuntimeBridgeContext.Provider value={{
+      connection,
+      ensureChatSubscription,
+      taskStateCoordinator
+    }}>
       {props.children}
     </AgentRuntimeBridgeContext.Provider>
   );
@@ -388,6 +929,11 @@ export function useAgentRuntimeBridge(): AgentRuntimeBridgeValue {
     throw new Error("useAgentRuntimeBridge must be used within AgentRuntimeBridge");
   }
   return value;
+}
+
+/** Returns the runtime bridge when a standalone render is nested beneath it. */
+export function useOptionalAgentRuntimeBridge(): AgentRuntimeBridgeValue | null {
+  return useContext(AgentRuntimeBridgeContext);
 }
 
 /** Handles hydrate agent thread in background. */
@@ -408,7 +954,7 @@ export function hydrateAgentThreadInBackground(
     }))));
 }
 
-interface RefreshAgentTaskListOptions {
+export interface RefreshAgentTaskListOptions {
   expectedChatId?: string;
   reason?: "auto" | "new-chat" | "manual" | "thread";
   attempt?: number;
@@ -433,7 +979,7 @@ export function refreshAgentTaskList(
     recoveryGeneration: null
   }));
   void Promise.allSettled([
-    client.listSessions(),
+    client.getSessionSnapshot({ timeoutMs: 10_000 }),
     client.readSidebarState()
   ])
     .then(([sessionsResult, sidebarResult]) => {
@@ -443,7 +989,7 @@ export function refreshAgentTaskList(
       dispatch(agentActions.taskStateSettled({
         requestId,
         recoveryGeneration: null,
-        ...(sessionsResult.status === "fulfilled" ? { sessions: sessionsResult.value } : {}),
+        ...(sessionsResult.status === "fulfilled" ? { snapshot: sessionsResult.value } : {}),
         ...(sidebarResult.status === "fulfilled" ? { sidebarState: sidebarResult.value } : {}),
         ...(failures.length > 0 ? {
           error: createAgentOperationError({ source: "sessions", message: failures.join("; ") })
@@ -452,7 +998,7 @@ export function refreshAgentTaskList(
       if (
         options.expectedChatId
         && sessionsResult.status === "fulfilled"
-        && !sessionsResult.value.some((session) => session.key === client.chatIdToSessionKey(options.expectedChatId!))
+        && !sessionsResult.value.sessions.some((session) => session.key === client.chatIdToSessionKey(options.expectedChatId!))
         && attempt < NEW_CHAT_REFRESH_RETRY_DELAYS_MS.length
       ) {
         globalThis.setTimeout(() => refreshAgentTaskList(client, dispatch, {

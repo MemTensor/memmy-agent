@@ -4,13 +4,14 @@ import { resolve } from "node:path";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { AppProviders } from "../../app/providers.js";
+import type { MemmyAgentProject } from "../../api/memmy-agent-client.js";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
 import { enUSMessages, zhCNMessages, type MessageKey } from "../../i18n/messages.js";
 import { appActions } from "../../state/app-actions.js";
 import { appReducer, createInitialAppState } from "../../state/app-reducer.js";
 import type { AgentTaskView } from "../../state/agent-chat-slice.js";
 import { mockBootstrap } from "./fixtures/bootstrap.js";
-import { AppFrame, TaskArchiveInlineAction, TaskRow, groupAgentTasks, groupTasksByTime, resolveSidebarAccountSummary, resolveSidebarMenuOverlayStyle, shouldCreateNewAgentDraft, truncateAccountDisplayText } from "../app-frame.js";
+import { AppFrame, TaskArchiveInlineAction, TaskRow, groupAgentTasks, groupTasksByTime, resolveSidebarAccountSummary, resolveSidebarContextMenuPlacement, resolveSidebarMenuOverlayStyle, resolveTaskAncestorGroupKeys, shouldCreateNewAgentDraft, truncateAccountDisplayText } from "../app-frame.js";
 
 describe("AppFrame", () => {
   it("使用原型 MainLayout 的侧栏图标与导航文案", () => {
@@ -24,7 +25,8 @@ describe("AppFrame", () => {
 
     expect(html).toContain("新任务");
     expect(html).toContain("连接与工具");
-    expect(html).toContain("今天");
+    expect(html).toContain("项目");
+    expect(html).toContain("任务");
     expect(html).toContain("暂无任务");
     expect(html).not.toContain("置顶");
     expect(html).not.toContain("归档");
@@ -32,7 +34,7 @@ describe("AppFrame", () => {
     expect(html).toContain('role="separator"');
     expect(html).toContain('aria-label="调整主侧边栏宽度"');
     expect(html).toContain("sidebar-resize-handle");
-    expect(html).toContain("app-frame-task-section-action__dots");
+    expect(html).toContain("app-frame-task-section-action");
     expect(html).not.toContain("刷新列表");
     expect(html).not.toContain("预览任务");
     expect(html).not.toContain("排序方式");
@@ -143,6 +145,40 @@ describe("AppFrame", () => {
     expect(source).toContain('"app-frame-nav-button--active"');
   });
 
+  it("labels project tasks whose project record or registry is unavailable", () => {
+    const unavailableTask = task("unavailable", {
+      projectId: "project-a",
+      groupProjectId: null,
+      cwd: "/projects/alpha",
+      missingProject: true
+    });
+    const renderTask = (projectRegistryState: "ready" | "corrupt") => renderToString(
+      <I18nProvider language="zh-CN">
+        <TaskRow
+          task={unavailableTask}
+          isCurrent={false}
+          showPreview
+          projectRegistryState={projectRegistryState}
+          onOpen={() => undefined}
+          onContextMenu={() => undefined}
+          onPin={() => undefined}
+          archiveConfirming={false}
+          onRequestArchive={() => undefined}
+          onConfirmArchive={() => undefined}
+          onUnarchive={() => undefined}
+          onDeleteArchived={() => undefined}
+        />
+      </I18nProvider>
+    );
+
+    const missingHtml = renderTask("ready");
+    const corruptHtml = renderTask("corrupt");
+    expect(missingHtml).toContain("项目记录不可用");
+    expect(missingHtml).toContain('title="项目记录不可用 · /projects/alpha"');
+    expect(corruptHtml).toContain("项目注册表不可用");
+    expect(corruptHtml).toContain('title="项目注册表不可用 · /projects/alpha"');
+  });
+
   it("positions the task action menu as a top-level viewport overlay", () => {
     const overlayStyle = resolveSidebarMenuOverlayStyle(
       { right: 188, bottom: 424 },
@@ -202,12 +238,13 @@ describe("AppFrame", () => {
     expect(source).not.toContain('state.agent.operationErrorsBySurface.sidebar');
   });
 
-  it("bases rapid sidebar mutations on the latest optimistic state", () => {
+  it("queues rapid sidebar mutations as replayable coordinator intents", () => {
     const source = readFileSync(resolve(__dirname, "..", "app-frame.tsx"), "utf8");
 
-    expect(source).toContain("const sidebarStateRef = useRef(state.agent.sidebarState);");
-    expect(source).toContain("updateSidebarStateForTask(sidebarStateRef.current, task.sessionKey, patch)");
-    expect(source).toContain("sidebarStateRef.current = nextState;");
+    expect(source).toContain("taskStateCoordinator.enqueueSidebarIntent(intent)");
+    expect(source).toContain('kind: "task-patch"');
+    expect(source).toContain('kind: "batch-archive"');
+    expect(source).not.toContain("sidebarStateRef");
   });
 
   it("uses a task-list icon for the preview toggle menu item", () => {
@@ -230,7 +267,7 @@ describe("AppFrame", () => {
     expect(toggleTaskListMenuBlock).toContain("setSortMenuOpen(false);");
     expect(openTaskContextMenuBlock).toContain("setTaskListMenuAnchor(null);");
     expect(openTaskContextMenuBlock).toContain("setSortMenuOpen(false);");
-    expect(source.match(/toggleTaskListMenu\(sidebarMenuAnchorFromRect/g)).toHaveLength(2);
+    expect(source.match(/toggleTaskListMenu\(sidebarMenuAnchorFromRect/g)).toHaveLength(1);
   });
 
   it("New Agent opens a local blank draft without calling the backend", () => {
@@ -240,7 +277,7 @@ describe("AppFrame", () => {
     expect(shouldCreateNewAgentDraft(newAgentDraftState({ blankDraftActive: true }))).toBe(false);
     expect(shouldCreateNewAgentDraft(newAgentDraftState({ composerDraftsByScope: { "draft-3": "未发送" } }))).toBe(false);
     expect(shouldCreateNewAgentDraft(newAgentDraftState({ composerPendingAttachmentsByScope: { "draft-3": [{} as never] } }))).toBe(false);
-    expect(source).toContain("function openNewAgent()");
+    expect(source).toContain("function openNewAgent(target?: WebuiSessionTarget)");
     expect(source).toContain("clearFocusedAgentTarget(");
     expect(source).toContain("if (shouldCreateNewAgentDraft(state.agent))");
     expect(source).toContain("dispatch(agentActions.newChatRequested());");
@@ -413,6 +450,105 @@ describe("AppFrame", () => {
     expect(source).toContain('backdropClassName="rename-dialog-backdrop"');
     expect(source).toContain("onClick={submitRenameDialog}");
     expect(source).toContain("isComposingKeyboardEvent(event)");
+  });
+
+  it("portals task and project context menus above the main content", () => {
+    const source = readFileSync(resolve(__dirname, "..", "app-frame.tsx"), "utf8");
+    const taskMenuBlock = source.slice(
+      source.indexOf("function TaskContextMenu"),
+      source.indexOf("function ProjectContextMenu")
+    );
+    const projectMenuBlock = source.slice(
+      source.indexOf("function ProjectContextMenu"),
+      source.indexOf("function MenuButton")
+    );
+
+    expect(taskMenuBlock).toContain("return createPortal(menu, document.body);");
+    expect(projectMenuBlock).toContain("return createPortal(menu, document.body);");
+  });
+
+  it("keeps pointer-anchored context menus inside every viewport edge", () => {
+    const size = { width: 176, height: 200, margin: 8, gap: 0 };
+
+    expect(resolveSidebarContextMenuPlacement(
+      { x: 220, y: 610 },
+      { width: 1280, height: 768 },
+      size
+    )).toEqual({ left: 220, top: 560 });
+    expect(resolveSidebarContextMenuPlacement(
+      { x: -20, y: -40 },
+      { width: 1280, height: 768 },
+      size
+    )).toEqual({ left: 8, top: 8 });
+    expect(resolveSidebarContextMenuPlacement(
+      { x: 1260, y: 740 },
+      { width: 1280, height: 768 },
+      size
+    )).toEqual({ left: 1096, top: 560 });
+  });
+
+  it("keeps the project rename modal and input open until the mutation commits", () => {
+    const source = readFileSync(resolve(__dirname, "..", "app-frame.tsx"), "utf8");
+    const updateBlock = source.slice(
+      source.indexOf("async function updateProject"),
+      source.indexOf("async function revealProject")
+    );
+    const renameProjectBlock = source.slice(
+      source.indexOf("open={renameProject != null}"),
+      source.indexOf("open={deleteConfirmTask != null}")
+    );
+
+    expect(updateBlock).toContain("): Promise<boolean> {");
+    expect(updateBlock).toContain("return false;");
+    expect(updateBlock).toContain("return true;");
+    expect(renameProjectBlock).toContain("updateProject(renameProject.id, { name: value }).then((committed) => {");
+    expect(renameProjectBlock).toContain("if (committed) {");
+    expect(renameProjectBlock).toContain("setRenameProjectId(null);");
+    expect(renameProjectBlock).not.toContain("setRenameProjectId(null);\n                void updateProject");
+  });
+
+  it("keeps project removal confirmation locked while delete outcome is pending", () => {
+    const source = readFileSync(resolve(__dirname, "..", "app-frame.tsx"), "utf8");
+    const removeDialogBlock = source.slice(
+      source.indexOf("open={removeProject != null}"),
+      source.indexOf("open={archiveProject != null}")
+    );
+
+    expect(removeDialogBlock).toContain("confirmDisabled={projectMutationId != null}");
+    expect(removeDialogBlock).toContain("if (projectMutationId == null) {");
+    expect(removeDialogBlock).toContain("setRemoveProjectId(null);");
+  });
+
+  it("resolves the visible sidebar ancestors for explicitly opened tasks", () => {
+    const unpinnedProject = project("project-a");
+    const pinnedProject = project("project-b", true);
+
+    expect(resolveTaskAncestorGroupKeys(task("standalone"), [unpinnedProject], false))
+      .toEqual(["standalone"]);
+    expect(resolveTaskAncestorGroupKeys(
+      task("project-task", { projectId: unpinnedProject.id, groupProjectId: unpinnedProject.id }),
+      [unpinnedProject],
+      false
+    )).toEqual(["projects", `project:${unpinnedProject.id}`]);
+    expect(resolveTaskAncestorGroupKeys(
+      task("pinned-project-task", { projectId: pinnedProject.id, groupProjectId: pinnedProject.id }),
+      [pinnedProject],
+      false
+    )).toEqual(["pinned", `project:${pinnedProject.id}`]);
+    expect(resolveTaskAncestorGroupKeys(
+      task("individually-pinned", {
+        pinned: true,
+        projectId: unpinnedProject.id,
+        groupProjectId: unpinnedProject.id
+      }),
+      [unpinnedProject],
+      false
+    )).toEqual(["pinned"]);
+    expect(resolveTaskAncestorGroupKeys(
+      task("archived", { archived: true, projectId: pinnedProject.id, groupProjectId: pinnedProject.id }),
+      [pinnedProject],
+      true
+    )).toEqual(["projects", `project:${pinnedProject.id}`]);
   });
 
   it("opens the rename modal when a non-archived sidebar session is double-clicked", () => {
@@ -777,6 +913,16 @@ function task(chatId: string, overrides: Partial<ReturnType<typeof baseTask>> = 
   return { ...baseTask(chatId), ...overrides };
 }
 
+function project(id: string, pinned = false): MemmyAgentProject {
+  return {
+    id,
+    name: id,
+    rootPath: `/workspace/${id}`,
+    pinned,
+    createdAt: "2026-07-26T00:00:00.000Z"
+  };
+}
+
 function baseTask(chatId: string): AgentTaskView {
   return {
     sessionKey: `websocket:${chatId}`,
@@ -788,7 +934,11 @@ function baseTask(chatId: string): AgentTaskView {
     completedUnseen: false,
     pinned: false,
     archived: false,
-    tags: []
+    tags: [],
+    projectId: null,
+    groupProjectId: null,
+    cwd: "/workspace",
+    missingProject: false
   };
 }
 
@@ -800,7 +950,6 @@ function newAgentDraftState(overrides: Partial<NewAgentDraftTestState> = {}): Ne
     newChatRequestId: 3,
     composerDraftsByScope: {},
     composerPendingAttachmentsByScope: {},
-    composerMediaErrorByScope: {},
     ...overrides
   };
 }

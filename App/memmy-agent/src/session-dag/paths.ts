@@ -32,3 +32,18 @@ export function ensureSessionDagDir(env: NodeJS.ProcessEnv = process.env): strin
   fs.mkdirSync(root, { recursive: true });
   return root;
 }
+
+export function removeSessionDagFiles(
+  sessionKey: string,
+  env: NodeJS.ProcessEnv = process.env,
+): void {
+  const dbPath = sessionDagDbPath(sessionKey, env);
+  for (const candidate of [
+    dbPath,
+    `${dbPath}-wal`,
+    `${dbPath}-shm`,
+    sessionDagDebugLogPath(sessionKey, env),
+  ]) {
+    fs.rmSync(candidate, { force: true });
+  }
+}

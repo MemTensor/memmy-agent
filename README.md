@@ -50,7 +50,7 @@ Memmy provides a complete local Agent runtime environment.
 
 - **A unified experience across entry points** Supports the desktop app, CLI/TUI, and an OpenAI-compatible API, all sharing the same Agents, memory, and configuration.
 - **Continuous task collaboration** Start a task from any entry point and seamlessly continue it across different scenarios, unconstrained by a single session.
-- **Extensible Agent capabilities** Connect more tools through Skills and MCP, taking the Agent from conversation to real task execution.
+- **Extensible Agent capabilities** Connect more tools through Skills and MCP, taking the Agent from conversation to real task execution. Memmy also provides managed Chromium browser tools for local page inspection and visual verification.
 
 ### 🔬 Tool & Ecosystem Connections
 
@@ -146,7 +146,14 @@ agents:
 providers:
   openai:
     apiKey: ${OPENAI_API_KEY}   # Supports ${ENV_NAME}-style environment variable references
+tools:
+  browser:
+    enabled: true
+    maxSessions: 4
+    idleTimeoutS: 900
 ```
+
+The desktop app and `scripts/dev-start.sh` prepare the matching managed Chromium build before the Agent Gateway starts. Agent requests never download a browser; when the managed executable is unavailable, browser tools are omitted while other Agent features continue to work.
 
 ### Option 3: `memmy-memory` CLI (memory access for external Agents / scripts)
 
