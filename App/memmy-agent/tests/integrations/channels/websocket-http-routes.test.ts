@@ -61,9 +61,18 @@ describe("WebSocket HTTP route helpers", () => {
     return ["xdg-open", [path.dirname(filePath)]];
   }
 
-  function seedSession(root: string, key = "websocket:test"): SessionManager {
+  function seedSession(
+    root: string,
+    key = "websocket:test",
+    workspace = root,
+  ): SessionManager {
     const manager = new SessionManager(root);
     const session = new Session({ key });
+    if (key.startsWith("websocket:")) {
+      session.metadata.webui = true;
+      session.metadata.webuiProjectId = null;
+      session.metadata.webuiWorkspaceCwd = fs.realpathSync(workspace);
+    }
     session.addMessage("user", `hi from ${key}`);
     session.addMessage("assistant", "hello back");
     manager.save(session);
@@ -74,6 +83,11 @@ describe("WebSocket HTTP route helpers", () => {
     const manager = new SessionManager(root);
     for (const key of keys) {
       const session = new Session({ key });
+      if (key.startsWith("websocket:")) {
+        session.metadata.webui = true;
+        session.metadata.webuiProjectId = null;
+        session.metadata.webuiWorkspaceCwd = fs.realpathSync(root);
+      }
       session.addMessage("user", `hi from ${key}`);
       manager.save(session);
     }
@@ -86,6 +100,8 @@ describe("WebSocket HTTP route helpers", () => {
     runtimeModelName = null,
     workspacePath = null,
     fileMemoryEnabled = false,
+    cancelActiveTasks = undefined,
+    closeBrowserChat = undefined,
     config = {},
   }: {
     sessionManager?: SessionManager | null;
@@ -93,6 +109,8 @@ describe("WebSocket HTTP route helpers", () => {
     runtimeModelName?: (() => string | null | undefined) | null;
     workspacePath?: string | null;
     fileMemoryEnabled?: boolean;
+    cancelActiveTasks?: (sessionKey: string) => Promise<number>;
+    closeBrowserChat?: (channel: string, chatId: string) => Promise<void>;
     config?: Record<string, any>;
   } = {}): WebSocketChannel {
     return new WebSocketChannel(
@@ -112,6 +130,8 @@ describe("WebSocket HTTP route helpers", () => {
         runtimeModelName,
         workspacePath,
         fileMemoryEnabled,
+        cancelActiveTasks,
+        closeBrowserChat,
       },
     );
   }
@@ -162,7 +182,6 @@ describe("WebSocket HTTP route helpers", () => {
     const sessionManager = new SessionManager(root);
     const manager = new ChannelManager(
       {
-        workspacePath: root,
         channels: {
           websocket: {
             enabled: true,
@@ -174,7 +193,11 @@ describe("WebSocket HTTP route helpers", () => {
         },
       },
       new MessageBus(),
-      { sessionManager, webuiRuntimeModelName: () => "openai/gpt-4.1" },
+      {
+        sessionManager,
+        workspacePath: root,
+        webuiRuntimeModelName: () => "openai/gpt-4.1",
+      },
     );
 
     const channel = manager.getChannel("websocket");
@@ -235,6 +258,9 @@ describe("WebSocket HTTP route helpers", () => {
     tmpDirs.push(root);
     const manager = new SessionManager(root);
     const session = new Session({ key: "websocket:abc" });
+    session.metadata.webui = true;
+    session.metadata.webuiProjectId = null;
+    session.metadata.webuiWorkspaceCwd = fs.realpathSync(root);
     session.addMessage("user", "hi");
     session.addMessage("assistant", "hello back");
     manager.save(session);
@@ -284,13 +310,16 @@ describe("WebSocket HTTP route helpers", () => {
       method: "OPTIONS",
       headers: {
         Origin: origin,
-        "Access-Control-Request-Method": "GET",
+        "Access-Control-Request-Method": "PATCH",
         "Access-Control-Request-Headers": "x-memmy-agent-auth"
       }
     });
     expect(preflight.status).toBe(204);
     expect(preflight.headers.get("access-control-allow-origin")).toBe(origin);
     expect(preflight.headers.get("access-control-allow-headers")).toContain("x-memmy-agent-auth");
+    expect(preflight.headers.get("access-control-allow-methods")).toBe(
+      "GET, POST, PATCH, DELETE, OPTIONS",
+    );
 
     const boot = await fetch(`http://127.0.0.1:${port}/webui/bootstrap`, {
       headers: {
@@ -634,8 +663,11 @@ describe("WebSocket HTTP route helpers", () => {
       title_overrides: { "websocket:sidebar": "Pinned work" },
       view: { density: "compact", show_archived: true },
     };
-    const query = new URLSearchParams({ state: JSON.stringify(payload) });
-    const updated = await fetch(`http://127.0.0.1:${port}/api/webui/sidebar-state/update?${query}`, { headers });
+    const updated = await fetch(`http://127.0.0.1:${port}/api/webui/sidebar-state/update`, {
+      method: "POST",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({ base_updated_at: null, state: payload }),
+    });
     expect(updated.status).toBe(200);
     const body = (await updated.json()) as Record<string, any>;
     expect(body.pinned_keys).toEqual(["websocket:sidebar"]);
@@ -649,7 +681,13 @@ describe("WebSocket HTTP route helpers", () => {
     process.env.MEMMY_AGENT_DATA_DIR = root;
     const manager = seedSession(root, "websocket:doomed");
     appendTranscriptObject("websocket:doomed", { event: "user", chat_id: "doomed", text: "x" });
-    const channel = makeChannel({ sessionManager: manager });
+    const cancelActiveTasks = vi.fn(async () => 1);
+    const closeBrowserChat = vi.fn(async () => undefined);
+    const channel = makeChannel({
+      sessionManager: manager,
+      cancelActiveTasks,
+      closeBrowserChat,
+    });
     const port = await startChannel(channel);
     const headers = await authHeaders(port);
 
@@ -660,6 +698,11 @@ describe("WebSocket HTTP route helpers", () => {
     expect(((await deleted.json()) as any).deleted).toBe(true);
     expect(fs.existsSync(manager.pathFor("websocket:doomed"))).toBe(false);
     expect(fs.existsSync(webuiTranscriptPath("websocket:doomed"))).toBe(false);
+    expect(cancelActiveTasks).toHaveBeenCalledWith("websocket:doomed");
+    expect(closeBrowserChat).toHaveBeenCalledWith("websocket", "doomed");
+    expect(cancelActiveTasks.mock.invocationCallOrder[0]).toBeLessThan(
+      closeBrowserChat.mock.invocationCallOrder[0],
+    );
   });
 
   it("renames websocket session titles through the WebUI title route", async () => {
@@ -709,13 +752,17 @@ describe("WebSocket HTTP route helpers", () => {
     const resolvedOutsideDir = fs.realpathSync(outsideDir);
     const spawn = childProcessMocks.spawn;
     const spawnSync = childProcessMocks.spawnSync;
-    const channel = makeChannel({ sessionManager: seedSession(root), workspacePath: workspace });
+    const sessionKey = "websocket:test";
+    const channel = makeChannel({
+      sessionManager: seedSession(root, sessionKey, workspace),
+      workspacePath: workspace,
+    });
     const port = await startChannel(channel);
     const headers = { ...(await authHeaders(port)), "content-type": "application/json" };
 
     const denied = await fetch(`http://127.0.0.1:${port}/api/webui/artifacts/resolve`, {
       method: "POST",
-      body: JSON.stringify({ path: note }),
+      body: JSON.stringify({ path: note, sessionKey }),
     });
     expect(denied.status).toBe(401);
 
@@ -725,7 +772,7 @@ describe("WebSocket HTTP route helpers", () => {
     const resolvedFile = await fetch(`http://127.0.0.1:${port}/api/webui/artifacts/resolve`, {
       method: "POST",
       headers,
-      body: JSON.stringify({ path: note }),
+      body: JSON.stringify({ path: note, sessionKey }),
     });
     expect(resolvedFile.status).toBe(200);
     expect(await resolvedFile.json()).toMatchObject({ ok: true, path: resolvedNotePath, name: "result.md", kind: "file" });
@@ -733,7 +780,7 @@ describe("WebSocket HTTP route helpers", () => {
     const resolvedImage = await fetch(`http://127.0.0.1:${port}/api/webui/artifacts/resolve`, {
       method: "POST",
       headers,
-      body: JSON.stringify({ path: "diagram.png" }),
+      body: JSON.stringify({ path: "diagram.png", sessionKey }),
     });
     expect(resolvedImage.status).toBe(200);
     expect(await resolvedImage.json()).toMatchObject({ ok: true, name: "diagram.png", kind: "image", media_url: expect.stringMatching(/^\/api\/media\//) });
@@ -741,7 +788,7 @@ describe("WebSocket HTTP route helpers", () => {
     const stagedOutside = await fetch(`http://127.0.0.1:${port}/api/webui/artifacts/resolve`, {
       method: "POST",
       headers,
-      body: JSON.stringify({ path: outside }),
+      body: JSON.stringify({ path: outside, sessionKey }),
     });
     expect(stagedOutside.status).toBe(200);
     expect(await stagedOutside.json()).toMatchObject({ ok: true, name: "outside.md", kind: "file", media_url: expect.stringMatching(/^\/api\/media\//) });
@@ -749,7 +796,7 @@ describe("WebSocket HTTP route helpers", () => {
     const resolvedDirectory = await fetch(`http://127.0.0.1:${port}/api/webui/artifacts/resolve`, {
       method: "POST",
       headers,
-      body: JSON.stringify({ path: outsideDir }),
+      body: JSON.stringify({ path: outsideDir, sessionKey }),
     });
     expect(resolvedDirectory.status).toBe(200);
     expect(await resolvedDirectory.json()).toEqual({ ok: true, path: resolvedOutsideDir, name: "outside-dir", kind: "directory" });
@@ -757,7 +804,7 @@ describe("WebSocket HTTP route helpers", () => {
     const rejected = await fetch(`http://127.0.0.1:${port}/api/webui/artifacts/resolve`, {
       method: "POST",
       headers,
-      body: JSON.stringify({ path: missing }),
+      body: JSON.stringify({ path: missing, sessionKey }),
     });
     expect(rejected.status).toBe(404);
 
@@ -765,14 +812,14 @@ describe("WebSocket HTTP route helpers", () => {
       const rejectedSpecialFile = await fetch(`http://127.0.0.1:${port}/api/webui/artifacts/resolve`, {
         method: "POST",
         headers,
-        body: JSON.stringify({ path: "/dev/null" }),
+        body: JSON.stringify({ path: "/dev/null", sessionKey }),
       });
       expect(rejectedSpecialFile.status).toBe(404);
     }
 
     const deniedOpen = await fetch(`http://127.0.0.1:${port}/api/webui/artifacts/open`, {
       method: "POST",
-      body: JSON.stringify({ path: note }),
+      body: JSON.stringify({ path: note, sessionKey }),
     });
     expect(deniedOpen.status).toBe(401);
 
@@ -782,14 +829,14 @@ describe("WebSocket HTTP route helpers", () => {
     const rejectedOpen = await fetch(`http://127.0.0.1:${port}/api/webui/artifacts/open`, {
       method: "POST",
       headers,
-      body: JSON.stringify({ path: missing }),
+      body: JSON.stringify({ path: missing, sessionKey }),
     });
     expect(rejectedOpen.status).toBe(404);
 
     const opened = await fetch(`http://127.0.0.1:${port}/api/webui/artifacts/open`, {
       method: "POST",
       headers,
-      body: JSON.stringify({ path: note }),
+      body: JSON.stringify({ path: note, sessionKey }),
     });
     expect(opened.status).toBe(200);
     expect(await opened.json()).toEqual({ ok: true, path: resolvedNotePath });
@@ -800,7 +847,7 @@ describe("WebSocket HTTP route helpers", () => {
     const openedUnicodePdf = await fetch(`http://127.0.0.1:${port}/api/webui/artifacts/open`, {
       method: "POST",
       headers,
-      body: JSON.stringify({ path: outsidePdf }),
+      body: JSON.stringify({ path: outsidePdf, sessionKey }),
     });
     expect(openedUnicodePdf.status).toBe(200);
     const openedUnicodePdfBody = await openedUnicodePdf.json() as Record<string, any>;
@@ -811,7 +858,7 @@ describe("WebSocket HTTP route helpers", () => {
     const openedDirectory = await fetch(`http://127.0.0.1:${port}/api/webui/artifacts/open`, {
       method: "POST",
       headers,
-      body: JSON.stringify({ path: outsideDir }),
+      body: JSON.stringify({ path: outsideDir, sessionKey }),
     });
     expect(openedDirectory.status).toBe(200);
     expect(await openedDirectory.json()).toEqual({ ok: true, path: resolvedOutsideDir });
@@ -821,7 +868,7 @@ describe("WebSocket HTTP route helpers", () => {
     const revealed = await fetch(`http://127.0.0.1:${port}/api/webui/artifacts/reveal`, {
       method: "POST",
       headers,
-      body: JSON.stringify({ path: note }),
+      body: JSON.stringify({ path: note, sessionKey }),
     });
     expect(revealed.status).toBe(200);
     expect(await revealed.json()).toEqual({ ok: true, path: resolvedNotePath });
@@ -834,7 +881,7 @@ describe("WebSocket HTTP route helpers", () => {
     const revealedDirectory = await fetch(`http://127.0.0.1:${port}/api/webui/artifacts/reveal`, {
       method: "POST",
       headers,
-      body: JSON.stringify({ path: outsideDir }),
+      body: JSON.stringify({ path: outsideDir, sessionKey }),
     });
     expect(revealedDirectory.status).toBe(200);
     expect(await revealedDirectory.json()).toEqual({ ok: true, path: resolvedOutsideDir });

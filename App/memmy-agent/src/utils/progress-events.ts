@@ -127,6 +127,34 @@ export function toolEventResultExtras(result: any): [any[], any[]] {
   ];
 }
 
+export function sanitizeToolEventResult(result: any): {
+  result: any;
+  files: string[];
+} {
+  const files = new Set<string>();
+  const sanitize = (value: any): any => {
+    if (Array.isArray(value)) return value.map(sanitize);
+    if (!value || typeof value !== "object") return value;
+    if (value.type === "image_url") {
+      const storedPath =
+        typeof value.meta?.path === "string" && value.meta.path.trim()
+          ? value.meta.path
+          : null;
+      if (storedPath) files.add(storedPath);
+      return {
+        type: "text",
+        text: storedPath ? `[image: ${storedPath}]` : "[image]",
+      };
+    }
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([key]) => key !== "meta")
+        .map(([key, item]) => [key, sanitize(item)]),
+    );
+  };
+  return { result: sanitize(result), files: [...files] };
+}
+
 export function buildToolEventFinishPayloads(context: any): Array<Record<string, any>> {
   const toolCalls = context.toolCalls ?? [];
   const toolResults = context.toolResults ?? [];
@@ -139,15 +167,17 @@ export function buildToolEventFinishPayloads(context: any): Array<Record<string,
     const event = toolEvents[idx] && typeof toolEvents[idx] === "object" ? toolEvents[idx] : {};
     const phase = event.status === "ok" ? "end" : "error";
     const [files, embeds] = toolEventResultExtras(result);
+    const sanitized = sanitizeToolEventResult(result);
+    const eventFiles = [...new Set([...files, ...sanitized.files])];
     const payload: Record<string, any> = {
       version: 1,
       phase,
       call_id: String(call?.id ?? ""),
       name: call?.name ?? call?.function?.name ?? "",
       arguments: call?.arguments ?? {},
-      result: phase === "end" ? result : null,
+      result: phase === "end" ? sanitized.result : null,
       error: null,
-      files,
+      files: eventFiles,
       embeds,
     };
     if (phase === "error")

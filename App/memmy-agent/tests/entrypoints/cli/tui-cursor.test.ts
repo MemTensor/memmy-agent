@@ -3,6 +3,20 @@ import { describe, expect, it } from "vitest";
 import { resolveComposerCursorPosition } from "../../../src/entrypoints/cli/tui-cursor.js";
 
 describe("TUI composer cursor", () => {
+  it("reuses one AgentLoop across turns and closes runtime tools on TUI cleanup", () => {
+    const tuiSource = readFileSync(
+      new URL("../../../src/entrypoints/cli/tui.tsx", import.meta.url),
+      "utf8",
+    );
+
+    expect(tuiSource).toContain(
+      "const loop = activeLoopRef.current ?? AgentLoop.fromConfig(config);",
+    );
+    expect(tuiSource).toMatch(
+      /const cleanup = onceCleanup[\s\S]*?loop\.stop\(\);[\s\S]*?loop\.closeRuntimeTools\(\)/,
+    );
+  });
+
   it("keeps the fullscreen correction wired into the live composer", () => {
     const tuiSource = readFileSync(
       new URL("../../../src/entrypoints/cli/tui.tsx", import.meta.url),

@@ -29,6 +29,26 @@ function tmpDataDir(name: string): string {
   return dir;
 }
 
+function artifactChannel(data: string, workspace: string): {
+  channel: WebSocketChannel;
+  sessionKey: string;
+} {
+  const sessionKey = "websocket:artifact";
+  const manager = new SessionManager(path.join(data, "sessions"));
+  const session = new Session({ key: sessionKey });
+  session.metadata.webui = true;
+  session.metadata.webuiProjectId = null;
+  session.metadata.webuiWorkspaceCwd = fs.realpathSync(workspace);
+  manager.save(session);
+  return {
+    channel: new WebSocketChannel({}, new MessageBus(), {
+      sessionManager: manager,
+      workspacePath: workspace,
+    }),
+    sessionKey,
+  };
+}
+
 describe("WebSocket media route", () => {
   it("keeps media route root stable when users configure trailing slashes", () => {
     expect(normalizeConfigPath("/media/")).toBe("/media");
@@ -121,7 +141,7 @@ describe("WebSocket media route", () => {
     fs.writeFileSync(deck, "pptx", "utf8");
     fs.writeFileSync(outside, PNG_BYTES);
     fs.mkdirSync(outsideDir);
-    const channel = new WebSocketChannel({}, new MessageBus(), { workspacePath: workspace });
+    const { channel, sessionKey } = artifactChannel(data, workspace);
     (channel as any).apiTokens.set("api-token", Date.now() / 1000 + 60);
     const headers = { authorization: "Bearer api-token" };
 
@@ -129,7 +149,7 @@ describe("WebSocket media route", () => {
       path: "/api/webui/artifacts/resolve",
       method: "POST",
       headers,
-      body: JSON.stringify({ path: image }),
+      body: JSON.stringify({ path: image, sessionKey }),
     });
     expect(resolved.status).toBe(200);
     const body = JSON.parse(String(resolved.body));
@@ -143,7 +163,7 @@ describe("WebSocket media route", () => {
       path: "/api/webui/artifacts/resolve",
       method: "POST",
       headers,
-      body: JSON.stringify({ path: deck }),
+      body: JSON.stringify({ path: deck, sessionKey }),
     });
     expect(resolvedDeck.status).toBe(200);
     const deckBody = JSON.parse(String(resolvedDeck.body));
@@ -154,7 +174,7 @@ describe("WebSocket media route", () => {
       path: "/api/webui/artifacts/resolve",
       method: "POST",
       headers,
-      body: JSON.stringify({ path: outside }),
+      body: JSON.stringify({ path: outside, sessionKey }),
     });
     expect(stagedOutside.status).toBe(200);
     const outsideBody = JSON.parse(String(stagedOutside.body));
@@ -167,7 +187,7 @@ describe("WebSocket media route", () => {
       path: "/api/webui/artifacts/resolve",
       method: "POST",
       headers,
-      body: JSON.stringify({ path: outsideDir }),
+      body: JSON.stringify({ path: outsideDir, sessionKey }),
     });
     expect(resolvedDirectory.status).toBe(200);
     expect(JSON.parse(String(resolvedDirectory.body))).toEqual({
@@ -182,7 +202,7 @@ describe("WebSocket media route", () => {
       path: "/api/webui/artifacts/resolve",
       method: "POST",
       headers,
-      body: JSON.stringify({ path: "../outside.png" }),
+      body: JSON.stringify({ path: "../outside.png", sessionKey }),
     });
     expect(escapedRelative.status).toBe(404);
     expect(String(escapedRelative.body)).not.toContain(outside);
@@ -194,14 +214,14 @@ describe("WebSocket media route", () => {
     fs.mkdirSync(workspace, { recursive: true });
     const outsidePdf = path.join(data, "我爱乌克兰.pdf");
     fs.writeFileSync(outsidePdf, PDF_BYTES);
-    const channel = new WebSocketChannel({}, new MessageBus(), { workspacePath: workspace });
+    const { channel, sessionKey } = artifactChannel(data, workspace);
     (channel as any).apiTokens.set("api-token", Date.now() / 1000 + 60);
 
     const resolved = channel.handleArtifactResolve({
       path: "/api/webui/artifacts/resolve",
       method: "POST",
       headers: { authorization: "Bearer api-token" },
-      body: JSON.stringify({ path: outsidePdf }),
+      body: JSON.stringify({ path: outsidePdf, sessionKey }),
     });
 
     expect(resolved.status).toBe(200);

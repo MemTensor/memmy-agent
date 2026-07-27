@@ -93,6 +93,22 @@ describe("desktop packaged runtime boundaries", () => {
     expect(desktopPackage.dependencies ?? {}).not.toHaveProperty("zod");
   });
 
+  it("pins the in-process Playwright MCP runtime in the agent package", () => {
+    const agentPackage = readJson<PackageJson>(agentPackagePath);
+    const agentLock = readJson<any>(agentPackageLockPath);
+
+    expect(agentPackage.dependencies).toMatchObject({
+      "@playwright/mcp": "0.0.78",
+      playwright: "1.62.0-alpha-1783623505000",
+    });
+    expect(agentLock.packages["node_modules/@playwright/mcp"].version).toBe(
+      "0.0.78",
+    );
+    expect(agentLock.packages["node_modules/playwright"].version).toBe(
+      "1.62.0-alpha-1783623505000",
+    );
+  });
+
   it("unpacks the sqlite-vec native extension in every desktop package variant", () => {
     for (const configPath of [
       electronBuilderPath,
@@ -102,6 +118,42 @@ describe("desktop packaged runtime boundaries", () => {
     ]) {
       const config = readFileSync(configPath, "utf8");
       expect(config).toContain('- "**/node_modules/sqlite-vec-*/vec0.*"');
+    }
+  });
+
+  it("unpacks ONNX Runtime native libraries next to their native bindings", () => {
+    for (const configPath of [electronBuilderPath, unsignedElectronBuilderPath]) {
+      const config = readFileSync(configPath, "utf8");
+      expect(config).toContain('- "**/onnxruntime-node/bin/napi-v3/darwin/**/*.dylib"');
+    }
+    for (const configPath of [winElectronBuilderPath, winUnsignedBuilderPath]) {
+      const config = readFileSync(configPath, "utf8");
+      expect(config).toContain('- "**/onnxruntime-node/bin/napi-v3/win32/x64/**/*.dll"');
+    }
+  });
+
+  it("unpacks Sharp libvips native libraries next to the Sharp native binding", () => {
+    for (const configPath of [electronBuilderPath, unsignedElectronBuilderPath]) {
+      const config = readFileSync(configPath, "utf8");
+      expect(config).toContain('- "**/@img/sharp-libvips-darwin-*/lib/libvips*.dylib"');
+    }
+    for (const configPath of [winElectronBuilderPath, winUnsignedBuilderPath]) {
+      const config = readFileSync(configPath, "utf8");
+      expect(config).toContain('- "**/@img/sharp-win32-x64/lib/libvips*.dll"');
+    }
+  });
+
+  it("unpacks Windows node-pty ConPTY runtime files for dynamic loading", () => {
+    for (const configPath of [winElectronBuilderPath, winUnsignedBuilderPath]) {
+      const config = readFileSync(configPath, "utf8");
+      expect(config).toContain('- "**/@lydell/node-pty-win32-x64/prebuilds/win32-x64/conpty/**"');
+    }
+  });
+
+  it("unpacks macOS node-pty spawn helpers used by the native pty binding", () => {
+    for (const configPath of [electronBuilderPath, unsignedElectronBuilderPath]) {
+      const config = readFileSync(configPath, "utf8");
+      expect(config).toContain('- "**/@lydell/node-pty-darwin-*/prebuilds/darwin-*/spawn-helper"');
     }
   });
 
@@ -662,6 +714,13 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).toContain('join(dirname(options.agentEntry), "skills")');
     expect(source).toContain('join(options.agentWorkspace, "skills")');
     expect(source).toContain("copyDirectoryContents");
+    expect(source).toContain("await preparePackagedBrowser(entries, runtimeConfig, options)");
+    expect(source).toContain('[entries.agentEntry, "internal", "browser-prepare"]');
+    expect(source.indexOf("await preparePackagedBrowser")).toBeLessThan(
+      source.indexOf("await ensureMemoryService"),
+    );
+    expect(source).toContain('join(options.logDirectory, "browser-prepare.log")');
+    expect(source).toContain('ELECTRON_RUN_AS_NODE: "1"');
     expect(source).toContain("await readdir(sourceDirectory, { withFileTypes: true })");
     expect(source).toContain("await writeFile(targetPath, await readFile(sourcePath))");
     expect(source).not.toContain("startDesktopRuntimeServices");
@@ -695,6 +754,10 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source.match(/"bash -c /g)).toHaveLength(5);
     expect(source).toContain('const Database = require("better-sqlite3")');
     expect(source).toContain("npm run dev -w @memmy/desktop");
+    expect(source).toContain("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci");
+    expect(source).toContain(
+      '"$MEMMY_RUNTIME_NODE_PATH" dist/main.js internal browser-prepare',
+    );
     expect(source).toContain("env -u ELECTRON_RUN_AS_NODE npm run dev -w @memmy/desktop");
     expect(source).toContain("node scripts/internal/dev-memory-supervisor.mjs");
     expect(supervisorSource).toContain('["run", "memory:dev"]');
@@ -740,6 +803,9 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).toContain("npm run build -w @memmy/memory");
     expect(source).toContain("npm install --workspace @memmy/frontend-desktop --no-package-lock");
     expect(source).toContain('npm ci --prefix "$AGENT_DIR"');
+    expect(source).toContain('import { createConnection } from "@playwright/mcp"');
+    expect(source).toContain('require.resolve("playwright-core/package.json")');
+    expect(source).toContain('"browser-prepare"');
     expect(source).not.toContain('npm install --prefix "$AGENT_DIR"');
     expect(source).not.toContain('if [ ! -x "$AGENT_DIR/node_modules/.bin/tsc" ]');
     expect(source).toContain('cp -R "$MEMORY_DIR/dist/src" "$RUNTIME_DIR/memory/src"');
@@ -774,6 +840,38 @@ describe("desktop packaged runtime boundaries", () => {
         expect(source).toContain("unset MEMMY_SKIP_CODESIGN");
       }
     }
+  });
+
+  it("validates the bundled browser runtime during Windows packaging", () => {
+    const source = readFileSync(packageWinX64Path, "utf8");
+
+    expect(source).toContain("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1");
+    expect(source).toContain('import { createConnection } from "@playwright/mcp"');
+    expect(source).toContain('require.resolve("playwright-core/package.json")');
+    expect(source).toContain('"browser-prepare"');
+  });
+
+  it("fails package preparation when required native runtime companion files are missing", () => {
+    const macSource = readFileSync(packageMacDmgPath, "utf8");
+    const winSource = readFileSync(packageWinX64Path, "utf8");
+
+    expect(macSource).toContain("verify_mac_memory_native_artifacts");
+    expect(macSource).toContain("verify_mac_agent_native_artifacts");
+    expect(macSource).toContain("verify_packaged_mac_unpacked_artifacts");
+    expect(macSource).toContain("libonnxruntime*.dylib");
+    expect(macSource).toContain("sharp-libvips-darwin-$target_cpu/lib/libvips*.dylib");
+    expect(macSource).toContain("node-pty-darwin-$target_cpu/prebuilds/darwin-$target_cpu");
+    expect(macSource).toContain("app.asar.unpacked/dist/runtime");
+    expect(macSource).toContain("spawn-helper");
+    expect(winSource).toContain("verify_windows_onnxruntime_module");
+    expect(winSource).toContain("verify_windows_sharp_module");
+    expect(winSource).toContain("verify_windows_agent_native_artifacts");
+    expect(winSource).toContain("verify_packaged_windows_unpacked_artifacts");
+    expect(winSource).toContain("onnxruntime.dll");
+    expect(winSource).toContain("sharp-win32-x64/lib");
+    expect(winSource).toContain("win-unpacked/resources/app.asar.unpacked/dist/runtime");
+    expect(winSource).toContain("conpty/OpenConsole.exe");
+    expect(winSource).toContain("sqlite-vec-windows-x64/vec0.*");
   });
 
   it("sets an explicit edition in macOS package wrappers", () => {

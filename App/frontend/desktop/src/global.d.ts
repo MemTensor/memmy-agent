@@ -1,5 +1,5 @@
 /** Global.d module. */
-import type { DesktopAppInfo, DesktopImageActionRequest, DesktopImageSaveResult, DesktopMemoryServiceRestartResult, DesktopUpdateCheckResult, DesktopUpdateDownloadProgress, DesktopUpdateInstallResult } from "@memmy/desktop-interface";
+import type { DesktopAppInfo, DesktopImageActionRequest, DesktopImageSaveResult, DesktopMemoryServiceRestartResult, DesktopProjectDirectorySelection, DesktopUpdateCheckResult, DesktopUpdateDownloadProgress, DesktopUpdateInstallResult } from "@memmy/desktop-interface";
 
 declare global {
   type MemmyMicrophoneAccessStatus = "not-determined" | "granted" | "denied" | "restricted" | "unsupported";
@@ -47,6 +47,8 @@ declare global {
       setLogLevel(level: "error" | "warn" | "info" | "debug"): Promise<void>;
       getMicrophoneAccessStatus(): Promise<MemmyMicrophoneAccessStatus>;
       requestMicrophoneAccess(): Promise<MemmyMicrophoneAccessStatus>;
+      selectProjectDirectory(): Promise<DesktopProjectDirectorySelection>;
+      selectEmptyProjectDirectory(): Promise<DesktopProjectDirectorySelection>;
       notifyTaskDone(payload: { title: string; body: string; silent: boolean }): Promise<void>;
       notifyUpdateAvailable(payload: { title: string; body: string; silent: boolean }): Promise<void>;
       setPetWindow(enabled: boolean, target?: { route?: string; hash?: string; agentChatId?: string; petIntent?: "user" }): Promise<void>;

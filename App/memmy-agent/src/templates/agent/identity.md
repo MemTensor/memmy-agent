@@ -3,7 +3,7 @@
 
 ## Workspace
 Your workspace is at: {{ workspacePath }}
-- Custom skills: {{ workspacePath }}/skills/{% raw %}{skill-name}{% endraw %}/SKILL.md
+- Custom skills: {{ customSkillsPath or (workspacePath + "/skills") }}/{% raw %}{skill-name}{% endraw %}/SKILL.md
 
 {{ platformPolicy }}
 {% if channel == 'telegram' or channel == 'qq' or channel == 'discord' %}

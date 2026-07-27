@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MessageBus, OutboundMessage } from "../../../src/core/runtime-messages/index.js";
 import { getMediaDir } from "../../../src/config/paths.js";
+import { SessionManager } from "../../../src/core/session/manager.js";
 import {
   WebSocketChannel,
   WebSocketConfig,
@@ -63,6 +64,15 @@ function tempDataDir(): string {
   roots.push(root);
   process.env.MEMMY_AGENT_DATA_DIR = root;
   return root;
+}
+
+function webuiChannel(bus: MessageBus, root = tempDataDir()): WebSocketChannel {
+  const workspace = path.join(root, "workspace");
+  fs.mkdirSync(workspace, { recursive: true });
+  return new WebSocketChannel({}, bus, {
+    sessionManager: new SessionManager(path.join(root, "sessions")),
+    workspacePath: workspace,
+  });
 }
 
 afterEach(() => {
@@ -203,9 +213,9 @@ describe("WebSocket channel", () => {
   });
 
   it("dispatches typed envelopes with media into inbound bus messages", async () => {
-    tempDataDir();
+    const root = tempDataDir();
     const bus = new MessageBus();
-    const channel = new WebSocketChannel({}, bus);
+    const channel = webuiChannel(bus, root);
     const titleService = {
       trackUserMessage: vi.fn(),
       onUserMessagePersisted: vi.fn(),
@@ -220,6 +230,8 @@ describe("WebSocket channel", () => {
       chat_id: "chat-1",
       content: "see this",
       webui: true,
+      client_request_id: "11111111-1111-4111-8111-111111111111",
+      target: { kind: "standalone" },
       language: "zh-CN",
       media_paths: [imagePath, textPath],
       mcp_presets: ["local"],
@@ -462,10 +474,17 @@ describe("WebSocket channel", () => {
 
   it("marks webui inbound metadata only for webui envelopes", async () => {
     const bus = new MessageBus();
-    const channel = new WebSocketChannel({}, bus);
+    const channel = webuiChannel(bus);
     const ws = connection();
 
-    await channel.dispatchEnvelope(ws, "client-1", { type: "message", chat_id: "chat-1", content: "hello", webui: true });
+    await channel.dispatchEnvelope(ws, "client-1", {
+      type: "message",
+      chat_id: "chat-1",
+      content: "hello",
+      webui: true,
+      client_request_id: "22222222-2222-4222-8222-222222222222",
+      target: { kind: "standalone" },
+    });
 
     const inbound = await bus.nextInbound();
     expect(inbound.metadata.webui).toBe(true);
@@ -484,10 +503,18 @@ describe("WebSocket channel", () => {
 
   it("ignores unsupported webui language metadata", async () => {
     const bus = new MessageBus();
-    const channel = new WebSocketChannel({}, bus);
+    const channel = webuiChannel(bus);
     const ws = connection();
 
-    await channel.dispatchEnvelope(ws, "client-1", { type: "message", chat_id: "chat-1", content: "hello", webui: true, language: "fr-FR" });
+    await channel.dispatchEnvelope(ws, "client-1", {
+      type: "message",
+      chat_id: "chat-1",
+      content: "hello",
+      webui: true,
+      client_request_id: "33333333-3333-4333-8333-333333333333",
+      target: { kind: "standalone" },
+      language: "fr-FR",
+    });
 
     const inbound = await bus.nextInbound();
     expect(inbound.metadata.webui).toBe(true);
@@ -1206,8 +1233,15 @@ describe("WebSocketChannel memmy parity cases", () => {
 
   it("marks inbound metadata for WebUI message envelopes", async () => {
     const bus = new MessageBus();
-    const channel = new WebSocketChannel({}, bus);
-    await channel.dispatchEnvelope(connection(), "webui-client", { type: "message", chat_id: "chat-1", content: "hello", webui: true });
+    const channel = webuiChannel(bus);
+    await channel.dispatchEnvelope(connection(), "webui-client", {
+      type: "message",
+      chat_id: "chat-1",
+      content: "hello",
+      webui: true,
+      client_request_id: "44444444-4444-4444-8444-444444444444",
+      target: { kind: "standalone" },
+    });
     const msg = await bus.nextInbound();
     expect(msg.channel).toBe("websocket");
     expect(msg.chatId).toBe("chat-1");

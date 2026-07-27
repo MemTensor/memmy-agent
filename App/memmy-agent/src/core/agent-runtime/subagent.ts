@@ -214,11 +214,16 @@ export class SubagentManager {
     };
   }
 
-  buildTools(workspace: string | null = null, toolsConfig: any = null): ToolRegistry {
+  buildTools(
+    workspace: string | null = null,
+    toolsConfig: any = null,
+    readonlySkillRoots: readonly string[] = [],
+  ): ToolRegistry {
     const root = path.resolve(workspace ?? this.workspace);
     const ctx = new ToolContext({
       config: toolsConfig ?? this.subagentToolsConfig(),
       workspace: root,
+      readonlySkillRoots,
     });
     return new ToolLoader({ workspace: root, ctx }).loadRegistry(ctx, { scope: "subagent" });
   }
@@ -238,6 +243,8 @@ export class SubagentManager {
     sessionKey?: string | null;
     originMessageId?: string | null;
     temperature?: number | null;
+    workspace?: string | null;
+    readonlySkillRoots?: readonly string[];
   }, label: string | null = null, originChannel = "cli", originChatId = "direct", sessionKey: string | null = null, originMessageId: string | null = null, temperature: number | null = null): Promise<string> {
     const args = typeof input === "string" ? { task: input, label, originChannel, originChatId, sessionKey, originMessageId, temperature } : input;
     const task = String(args.task ?? "");
@@ -247,6 +254,8 @@ export class SubagentManager {
       channel: args.originChannel ?? originChannel,
       chatId: args.originChatId ?? originChatId,
       sessionKey: args.sessionKey ?? sessionKey,
+      workspace: path.resolve(args.workspace ?? this.workspace),
+      readonlySkillRoots: Object.freeze([...(args.readonlySkillRoots ?? [])]),
     };
     const status = new SubagentStatus({
       taskId,
@@ -325,9 +334,13 @@ export class SubagentManager {
     const isCancelled = (): boolean => Boolean(signal?.aborted);
     try {
       status.phase = "running";
-      const tools = this.buildTools();
+      const workspace = path.resolve(origin.workspace ?? this.workspace);
+      const readonlySkillRoots = Array.isArray(origin.readonlySkillRoots)
+        ? origin.readonlySkillRoots
+        : [];
+      const tools = this.buildTools(workspace, null, readonlySkillRoots);
       const messages = [
-        { role: "system", content: this.buildSubagentPrompt() },
+        { role: "system", content: this.buildSubagentPrompt(workspace) },
         { role: "user", content: task },
       ];
       const sessKey = origin.sessionKey ?? null;
@@ -349,6 +362,7 @@ export class SubagentManager {
           status.iteration = Number(payload.iteration ?? status.iteration);
         },
         sessionKey: sessKey,
+        workspace,
         llmTimeoutS: this.llmWallTimeoutForSession?.(sessKey) ?? null,
         abortSignal: signal,
         hook: new SubagentHook(taskId, status),
@@ -457,7 +471,7 @@ export class SubagentManager {
     return lines.join("\n") || error || "Error: subagent execution failed.";
   }
 
-  buildSubagentPrompt(): string {
+  buildSubagentPrompt(workspace: string = this.workspace): string {
     const skillsSummary = new SkillsLoader(this.workspace, null, this.disabledSkills).buildSkillsSummary();
     const template = renderSkillsSummaryBlock(
       readTemplate("agent/subagent-system.md")
@@ -467,7 +481,7 @@ export class SubagentManager {
     );
     return renderInlineTemplate(template, {
       timeContext: ContextBuilder.buildRuntimeContext?.(null, null) ?? "",
-      workspace: this.workspace,
+      workspace,
       skillsSummary,
     });
   }

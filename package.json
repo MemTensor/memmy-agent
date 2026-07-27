@@ -1,6 +1,6 @@
 {
   "name": "memmy-agent",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "private": true,
   "type": "module",
   "description": "Local-first agent memory substrate with desktop and CLI surfaces.",

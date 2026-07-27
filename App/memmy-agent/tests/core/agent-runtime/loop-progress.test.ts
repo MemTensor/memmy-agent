@@ -38,6 +38,13 @@ function makeLoop(root = tempRoot()): AgentLoop {
   });
 }
 
+function reserveStandaloneSession(loop: AgentLoop, chatId: string): void {
+  loop.sessions.reserveWebuiSessionBinding(`websocket:${chatId}`, {
+    projectId: null,
+    cwd: fs.realpathSync(loop.workspace),
+  });
+}
+
 async function drain(bus: MessageBus): Promise<any[]> {
   const messages: any[] = [];
   while (bus.outboundSize > 0) messages.push(await bus.consumeOutbound());
@@ -432,6 +439,7 @@ describe("AgentLoop progress integration", () => {
   it("streams provider deltas to websocket channels and marks final response", async () => {
     const bus = new MessageBus();
     const loop = makeLoop();
+    reserveStandaloneSession(loop, "chat1");
     loop.bus = bus;
     (loop.provider as any).supportsProgressDeltas = true;
     (loop.provider as any).chatWithRetry = vi.fn();
@@ -464,6 +472,7 @@ describe("AgentLoop progress integration", () => {
   it("does not mark non-streamed empty-response recovery as already streamed", async () => {
     const bus = new MessageBus();
     const loop = makeLoop();
+    reserveStandaloneSession(loop, "chat1");
     loop.bus = bus;
     (loop.provider as any).chatStreamWithRetry = vi.fn(async () => new LLMResponse({ content: "", toolCalls: [] }));
     (loop.provider as any).chatWithRetry = vi.fn(async () => new LLMResponse({ content: "Recovered final answer", toolCalls: [] }));
@@ -532,6 +541,7 @@ describe("AgentLoop progress integration", () => {
   it("publishes a final turn-end marker after websocket dispatch", async () => {
     const bus = new MessageBus();
     const loop = makeLoop();
+    reserveStandaloneSession(loop, "chat1");
     loop.bus = bus;
     (loop.provider as any).chatWithRetry = vi.fn(async () => new LLMResponse({ content: "Done", toolCalls: [] }));
     loop.tools.getDefinitions = vi.fn(() => []);

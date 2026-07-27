@@ -749,8 +749,8 @@ def _format_resume_search_result(query: str, candidates: List[Dict[str, Any]]) -
     for candidate in candidates:
         lines.append(_format_resume_episode(candidate))
         lines.append("")
-    lines.append("输入 1-5 选择要接续的 episode；Memmy 会自动读取完整 episode（等价于 memmy-memory get <episode_id>）并注入接续上下文。")
-    lines.append("输入 /memmy-resume cancel 取消。")
+    lines.append("Enter 1-5 to select an episode to resume. Memmy will automatically retrieve the full episode (equivalent to memmy-memory get <episode_id>) and inject continuation context.")
+    lines.append("Enter /memmy-resume cancel to cancel.")
     return "\n".join(lines).rstrip()
 
 

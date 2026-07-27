@@ -7,6 +7,7 @@ import {
   ArtifactError,
   decodeImageDataUrl,
   storeGeneratedImageArtifact,
+  storeToolImageArtifact,
 } from "../../src/utils/artifacts.js";
 
 const PNG_DATA_URL =
@@ -84,5 +85,40 @@ describe("artifact helpers", () => {
     expect(() => storeGeneratedImageArtifact(PNG_DATA_URL, { prompt: "x", model: "m", saveDir: "../outside" })).toThrow(
       ArtifactError,
     );
+  });
+
+  it("stores MCP image blocks in the shared media directory", () => {
+    const root = tmpRoot("memmy-tool-artifacts-");
+    process.env.MEMMY_AGENT_DATA_DIR = root;
+    setConfigPath(path.join(root, "config.yaml"));
+    const base64 = PNG_DATA_URL.slice(PNG_DATA_URL.indexOf(",") + 1);
+
+    const artifact = storeToolImageArtifact(base64, "image/png");
+
+    expect(artifact.mime).toBe("image/png");
+    expect(artifact.dataUrl).toBe(PNG_DATA_URL);
+    expect(path.dirname(artifact.path)).toBe(
+      path.join(root, "media", "tool-results"),
+    );
+    expect(fs.readFileSync(artifact.path).subarray(0, 4)).toEqual(
+      Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+    );
+  });
+
+  it("rejects malformed, mismatched, and oversized MCP image blocks", () => {
+    const root = tmpRoot("memmy-tool-artifacts-");
+    process.env.MEMMY_AGENT_DATA_DIR = root;
+    setConfigPath(path.join(root, "config.yaml"));
+    const base64 = PNG_DATA_URL.slice(PNG_DATA_URL.indexOf(",") + 1);
+
+    expect(() => storeToolImageArtifact("not-base64", "image/png")).toThrow(
+      ArtifactError,
+    );
+    expect(() => storeToolImageArtifact(base64, "image/jpeg")).toThrow(
+      /MIME mismatch/,
+    );
+    expect(() =>
+      storeToolImageArtifact(base64, "image/png", { maxBytes: 1 }),
+    ).toThrow(/exceeds/);
   });
 });

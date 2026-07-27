@@ -18,7 +18,12 @@ describe("createPetAgentBridge", () => {
     });
 
     await bridge.sendTask({ task: createTask(), content: "总结一下 MemOS" });
-    expect(socket.connection.sendMessage).toHaveBeenCalledWith({ chatId: "chat-1", content: "总结一下 MemOS" }, 1);
+    expect(socket.connection.sendMessage).toHaveBeenCalledWith({
+      chatId: "chat-1",
+      content: "总结一下 MemOS",
+      clientRequestId: expect.any(String),
+      target: { kind: "standalone" }
+    }, 1);
 
     expect(bridge.stopTask("task-1")).toBe(true);
 

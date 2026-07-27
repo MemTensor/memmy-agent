@@ -57,7 +57,8 @@ export async function initMemoryCli(options: MemoryCliSetupOptions = {}): Promis
     agentInstallations = await installMemmyMemorySkillForAgents(requestedAgents, {
       agentRoot: options.agents?.length ? options.agentRoot : undefined,
       assetRoot: options.assetRoot,
-      dryRun: options.dryRun
+      dryRun: options.dryRun,
+      skipUnavailable: !options.agents?.length
     });
   }
 

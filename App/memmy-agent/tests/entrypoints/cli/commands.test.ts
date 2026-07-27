@@ -36,6 +36,7 @@ import {
   providerLogin,
   providerLogout,
   resolveOauthProvider,
+  runInternalCommand,
   serve,
   setCliRuntimeLogs,
   setConfigValue,
@@ -141,11 +142,38 @@ afterEach(() => {
   setCliRuntimeLogs(false);
   (process.stdin as any).isTTY = originalStdinIsTty;
   setConfigPath(null);
+  process.exitCode = 0;
   for (const key of ENV_KEYS) delete process.env[key];
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
 describe("CLI command helpers", () => {
+  it("keeps the browser preparation command hidden and accepts only its exact argv", async () => {
+    const root = tempRoot();
+    setConfigPath(
+      writeConfig(root, { tools: { browser: { enabled: false } } }),
+    );
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    process.exitCode = 0;
+
+    await expect(
+      runInternalCommand(["node", "memmy", "internal", "browser-prepare"]),
+    ).resolves.toBe(true);
+    expect(log).toHaveBeenCalledWith("disabled");
+    expect(process.exitCode).toBe(0);
+    expect(buildHelpText()).not.toContain("browser-prepare");
+
+    await expect(
+      runInternalCommand(["node", "memmy", "internal", "browser-prepare", "--extra"]),
+    ).resolves.toBe(true);
+    expect(error).toHaveBeenCalledWith("unavailable");
+    expect(process.exitCode).toBe(2);
+    await expect(runInternalCommand(["node", "memmy", "status"])).resolves.toBe(
+      false,
+    );
+  });
+
   it("includes core slash commands in the command palette and help", () => {
     const names = builtinCommandPalette().map((item) => item.command);
 
@@ -597,6 +625,7 @@ describe("CLI command helpers", () => {
   }> {
     const root = tempRoot("memmy-cron-gateway-");
     const workspace = path.join(root, "workspace");
+    fs.mkdirSync(workspace, { recursive: true });
     const configPath = writeConfig(root, {
       agents: { defaults: { workspace, model: "openai/test-model" } },
       gateway: {
@@ -607,6 +636,7 @@ describe("CLI command helpers", () => {
     });
     const sessionsByKey = new Map<string, any>();
     const sessions = {
+      get: vi.fn((key: string) => sessionsByKey.get(key) ?? null),
       getOrCreate: vi.fn((key: string) => {
         let session = sessionsByKey.get(key);
         if (!session) {
@@ -627,6 +657,10 @@ describe("CLI command helpers", () => {
       listSessions: vi.fn(() => []),
       flush: vi.fn(async () => undefined),
     };
+    const cronTargetSession = sessions.getOrCreate("websocket:chat-1");
+    cronTargetSession.metadata.webui = true;
+    cronTargetSession.metadata.webuiProjectId = null;
+    cronTargetSession.metadata.webuiWorkspaceCwd = fs.realpathSync(workspace);
     let loopRunning = true;
     const fakeLoop: any = {
       workspace,
@@ -644,6 +678,12 @@ describe("CLI command helpers", () => {
       dispatchMessage: vi.fn(async () => undefined),
       processMessage: vi.fn(async () => null),
       processDirect,
+      resolveSessionWorkspace: vi.fn((
+        _message: unknown,
+        _session: unknown,
+        _reservation: unknown,
+        binding: unknown,
+      ) => binding),
       llmRuntime: vi.fn(() => ({ provider: {}, model: "openai/test-model" })),
       scheduleBackground: vi.fn((promise: Promise<any>) => {
         void promise.catch(() => undefined);
@@ -734,7 +774,9 @@ describe("CLI command helpers", () => {
         sessionKey: "cron:cron-test",
         channel: "websocket",
         chatId: "chat-1",
-        metadata: expect.objectContaining({ turn_id: "stale-turn" }),
+        metadata: {
+          webui_language: "zh-CN",
+        },
         messageSendCallback: expect.any(Function),
       }));
       expect(fakeLoop.waitForCronTargetAvailable).toHaveBeenCalledWith("websocket", "websocket:chat-1");

@@ -19,7 +19,12 @@ function shJoin(args: string[]): string {
   return args.map(quoteArg).join(" ");
 }
 
-function bwrap(command: string, workspace: string, cwd: string): string {
+function bwrap(
+  command: string,
+  workspace: string,
+  cwd: string,
+  readonlyRoots: readonly string[] = [],
+): string {
   const ws = path.resolve(workspace);
   const requestedCwd = path.resolve(cwd);
   const sandboxCwd = requestedCwd === ws || requestedCwd.startsWith(`${ws}${path.sep}`) ? requestedCwd : ws;
@@ -29,6 +34,12 @@ function bwrap(command: string, workspace: string, cwd: string): string {
   const args = ["bwrap", "--new-session", "--die-with-parent"];
   for (const entry of required) args.push("--ro-bind", entry, entry);
   for (const entry of optional) args.push("--ro-bind-try", entry, entry);
+  for (const entry of readonlyRoots) {
+    const root = path.resolve(entry);
+    if (root !== ws && !root.startsWith(`${ws}${path.sep}`)) {
+      args.push("--ro-bind-try", root, root);
+    }
+  }
   args.push(
     "--proc",
     "/proc",
@@ -56,12 +67,21 @@ function bwrap(command: string, workspace: string, cwd: string): string {
   return shJoin(args);
 }
 
-const BACKENDS: Record<string, (command: string, workspace: string, cwd: string) => string> = {
+const BACKENDS: Record<
+  string,
+  (command: string, workspace: string, cwd: string, readonlyRoots?: readonly string[]) => string
+> = {
   bwrap,
 };
 
-export function wrapCommand(sandbox: string, command: string, workspace: string, cwd: string): string {
+export function wrapCommand(
+  sandbox: string,
+  command: string,
+  workspace: string,
+  cwd: string,
+  readonlyRoots: readonly string[] = [],
+): string {
   const backend = BACKENDS[sandbox];
   if (!backend) throw new Error(`Unknown sandbox backend ${JSON.stringify(sandbox)}. Available: ${Object.keys(BACKENDS).join(", ")}`);
-  return backend(command, workspace, cwd);
+  return backend(command, workspace, cwd, readonlyRoots);
 }

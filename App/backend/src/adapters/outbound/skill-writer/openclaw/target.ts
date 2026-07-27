@@ -1643,8 +1643,8 @@ function formatResumeSearchResult(query, candidates) {
     "",
     candidates.map(formatResumeEpisode).join("\n\n"),
     "",
-    "输入 1-5 选择要接续的 episode；Memmy 会自动读取完整 episode（等价于 memmy-memory get <episode_id>）并注入接续上下文。",
-    "输入 /memmy-resume cancel 取消。"
+    "Enter 1-5 to select an episode to resume. Memmy will automatically retrieve the full episode (equivalent to memmy-memory get <episode_id>) and inject continuation context.",
+    "Enter /memmy-resume cancel to cancel."
   ].join("\n");
 }
 

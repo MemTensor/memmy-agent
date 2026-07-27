@@ -1,6 +1,6 @@
 {
   "name": "@memmy/memory",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "private": true,
   "type": "module",
   "main": "./dist/src/index.js",

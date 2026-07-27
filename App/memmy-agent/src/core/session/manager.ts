@@ -8,6 +8,46 @@ export const FILE_MAX_MESSAGES = 2_000;
 const WEBUI_SESSION_METADATA_KEY = "webui";
 const WEBUI_TITLE_METADATA_KEY = "title";
 const WEBUI_TITLE_USER_EDITED_METADATA_KEY = "titleUserEdited";
+export const WEBUI_PROJECT_ID_METADATA_KEY = "webuiProjectId";
+export const WEBUI_WORKSPACE_CWD_METADATA_KEY = "webuiWorkspaceCwd";
+
+export type WebuiSessionBinding = {
+  projectId: string | null;
+  cwd: string;
+};
+
+type WebuiSessionBindingReservation = {
+  binding: WebuiSessionBinding;
+  rejection: "project_removed" | null;
+};
+
+export class WebuiSessionBindingError extends Error {
+  readonly code: string;
+
+  constructor(code: string) {
+    super(code);
+    this.name = "WebuiSessionBindingError";
+    this.code = code;
+  }
+}
+
+export function readWebuiSessionBinding(
+  session: Pick<Session, "metadata"> | null | undefined,
+): WebuiSessionBinding {
+  const metadata = session?.metadata;
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    throw new WebuiSessionBindingError("workspace_missing");
+  }
+  const projectId = metadata[WEBUI_PROJECT_ID_METADATA_KEY];
+  const cwd = metadata[WEBUI_WORKSPACE_CWD_METADATA_KEY];
+  if (projectId !== null && (typeof projectId !== "string" || !projectId.trim())) {
+    throw new WebuiSessionBindingError("workspace_missing");
+  }
+  if (typeof cwd !== "string" || !path.isAbsolute(cwd) || path.resolve(cwd) !== cwd) {
+    throw new WebuiSessionBindingError("workspace_missing");
+  }
+  return { projectId, cwd };
+}
 
 export function estimateMessageTokens(message: Record<string, any>): number {
   return Math.ceil(JSON.stringify(message).length / 4);
@@ -47,13 +87,19 @@ function sessionSummary(session: Session, filePath: string, options: { repairPre
   const previewMessage = options.repairPreview
     ? session.messages.find((m) => messagePreviewText(m)) ?? {}
     : scan.find((m) => m.role === "user") ?? scan[0] ?? {};
-  return {
+  const summary: Record<string, any> = {
     key: session.key,
     title: session.metadata.title,
     preview: messagePreviewText(previewMessage),
     updatedAt: session.updatedAt,
     path: filePath,
   };
+  if (session.metadata?.[WEBUI_SESSION_METADATA_KEY] === true) {
+    const binding = readWebuiSessionBinding(session);
+    summary.projectId = binding.projectId;
+    summary.cwd = binding.cwd;
+  }
+  return summary;
 }
 
 function alignWindowToUserTurn(messages: Record<string, any>[]): Record<string, any>[] {
@@ -257,6 +303,8 @@ export class SessionManager {
   root: string;
   sessionsDir: string;
   sessions = new Map<string, Session>();
+  private readonly webuiBindingReservations = new Map<string, WebuiSessionBindingReservation>();
+  private readonly permanentlyDeletedSessionKeys = new Set<string>();
 
   constructor(root: string) {
     this.root = path.resolve(String(root));
@@ -273,6 +321,9 @@ export class SessionManager {
   }
 
   getOrCreate(key: string): Session {
+    if (this.permanentlyDeletedSessionKeys.has(key)) {
+      throw new WebuiSessionBindingError("session_deleted");
+    }
     const cached = this.sessions.get(key);
     if (cached) return cached;
     const session = this.loadSession(key) ?? new Session({ key });
@@ -281,12 +332,90 @@ export class SessionManager {
   }
 
   getOrCreateWithInfo(key: string): { session: Session; created: boolean } {
+    if (this.permanentlyDeletedSessionKeys.has(key)) {
+      throw new WebuiSessionBindingError("session_deleted");
+    }
     const cached = this.sessions.get(key);
     if (cached) return { session: cached, created: false };
     const loaded = this.loadSession(key);
     const session = loaded ?? new Session({ key });
     this.sessions.set(key, session);
     return { session, created: loaded == null };
+  }
+
+  get(key: string): Session | null {
+    if (this.permanentlyDeletedSessionKeys.has(key)) return null;
+    const cached = this.sessions.get(key);
+    if (cached) return cached;
+    const loaded = this.loadSession(key);
+    if (!loaded) return null;
+    this.sessions.set(key, loaded);
+    return loaded;
+  }
+
+  has(key: string): boolean {
+    return this.sessions.has(key) || fs.existsSync(this.pathFor(key));
+  }
+
+  reserveWebuiSessionBinding(sessionKey: string, binding: WebuiSessionBinding): WebuiSessionBinding {
+    if (this.permanentlyDeletedSessionKeys.has(sessionKey)) {
+      throw new WebuiSessionBindingError("session_deleted");
+    }
+    if (this.has(sessionKey)) return readWebuiSessionBinding(this.get(sessionKey));
+    const normalized = normalizeWebuiSessionBinding(binding);
+    const current = this.webuiBindingReservations.get(sessionKey);
+    if (!current) {
+      this.webuiBindingReservations.set(sessionKey, { binding: normalized, rejection: null });
+      return normalized;
+    }
+    if (current.rejection) throw new WebuiSessionBindingError(current.rejection);
+    if (
+      current.binding.projectId !== normalized.projectId
+      || current.binding.cwd !== normalized.cwd
+    ) {
+      throw new WebuiSessionBindingError("workspace_conflict");
+    }
+    return current.binding;
+  }
+
+  peekWebuiSessionBindingReservation(sessionKey: string): WebuiSessionBinding | null {
+    const reservation = this.webuiBindingReservations.get(sessionKey);
+    if (!reservation) return null;
+    if (reservation.rejection) throw new WebuiSessionBindingError(reservation.rejection);
+    return reservation.binding;
+  }
+
+  consumeWebuiSessionBindingReservation(sessionKey: string): WebuiSessionBinding {
+    const reservation = this.webuiBindingReservations.get(sessionKey);
+    this.webuiBindingReservations.delete(sessionKey);
+    if (!reservation) throw new WebuiSessionBindingError("workspace_missing");
+    if (reservation.rejection) throw new WebuiSessionBindingError(reservation.rejection);
+    return reservation.binding;
+  }
+
+  releaseWebuiSessionBindingReservation(sessionKey: string): void {
+    this.webuiBindingReservations.delete(sessionKey);
+  }
+
+  rejectWebuiSessionBindingReservationsForProject(projectId: string): string[] {
+    const rejected: string[] = [];
+    for (const [sessionKey, reservation] of this.webuiBindingReservations) {
+      if (reservation.binding.projectId !== projectId) continue;
+      this.webuiBindingReservations.delete(sessionKey);
+      rejected.push(sessionKey);
+    }
+    return rejected;
+  }
+
+  hasWebuiSessionBindingReservationForProject(projectId: string): boolean {
+    for (const reservation of this.webuiBindingReservations.values()) {
+      if (reservation.binding.projectId === projectId) return true;
+    }
+    return false;
+  }
+
+  clearWebuiSessionBindingReservations(): void {
+    this.webuiBindingReservations.clear();
   }
 
   invalidate(key: string): void {
@@ -369,6 +498,7 @@ export class SessionManager {
   }
 
   loadSession(key: string): Session | null {
+    if (this.permanentlyDeletedSessionKeys.has(key)) return null;
     try {
       return this.parseJsonlSession(key, false);
     } catch {
@@ -401,6 +531,7 @@ export class SessionManager {
   }
 
   save(session: Session, options: { fsync?: boolean } | boolean = {}): void {
+    if (this.permanentlyDeletedSessionKeys.has(session.key)) return;
     const shouldFsync = typeof options === "boolean" ? options : Boolean(options.fsync);
     fs.mkdirSync(this.root, { recursive: true });
     const file = this.pathFor(session.key);
@@ -453,6 +584,7 @@ export class SessionManager {
   }
 
   async saveAsync(session: Session): Promise<void> {
+    if (this.permanentlyDeletedSessionKeys.has(session.key)) return;
     await fsp.mkdir(this.root, { recursive: true });
     const file = this.pathFor(session.key);
     const tmp = `${file}.tmp`;
@@ -467,6 +599,7 @@ export class SessionManager {
   }
 
   delete(key: string): boolean {
+    this.webuiBindingReservations.delete(key);
     this.sessions.delete(key);
     const file = this.pathFor(key);
     if (fs.existsSync(file)) {
@@ -477,6 +610,11 @@ export class SessionManager {
   }
 
   deleteSession(key: string): boolean {
+    return this.delete(key);
+  }
+
+  hardDeleteSession(key: string): boolean {
+    this.permanentlyDeletedSessionKeys.add(key);
     return this.delete(key);
   }
 
@@ -533,4 +671,40 @@ export class SessionManager {
     rows.sort((a, b) => String(b.updatedAt ?? "").localeCompare(String(a.updatedAt ?? "")));
     return rows;
   }
+
+  webuiSessionSummary(session: Session): Record<string, any> {
+    return sessionSummary(session, this.pathFor(session.key));
+  }
+
+  listWebuiSessionRecords(): Session[] {
+    const records = new Map<string, Session>();
+    for (const file of fs.readdirSync(this.root).filter((name) => name.endsWith(".jsonl"))) {
+      const fallbackKey = path.basename(file, ".jsonl").replace("_", ":");
+      const session = this.loadSession(fallbackKey);
+      if (!session || !isWebuiSession(session)) continue;
+      records.set(session.key, session);
+    }
+    for (const [key, session] of this.sessions) {
+      if (isWebuiSession(session)) records.set(key, session);
+    }
+    return [...records.values()]
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  }
+}
+
+function normalizeWebuiSessionBinding(binding: WebuiSessionBinding): WebuiSessionBinding {
+  const projectId = binding?.projectId;
+  const cwd = binding?.cwd;
+  if (projectId !== null && (typeof projectId !== "string" || !projectId.trim())) {
+    throw new WebuiSessionBindingError("workspace_missing");
+  }
+  if (typeof cwd !== "string" || !path.isAbsolute(cwd)) {
+    throw new WebuiSessionBindingError("workspace_missing");
+  }
+  return { projectId, cwd: path.resolve(cwd) };
+}
+
+function isWebuiSession(session: Session): boolean {
+  return session.key.startsWith("websocket:")
+    && session.metadata?.[WEBUI_SESSION_METADATA_KEY] === true;
 }

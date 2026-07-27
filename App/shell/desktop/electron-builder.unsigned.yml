@@ -13,6 +13,9 @@ files:
 asar: true
 asarUnpack:
   - "**/*.node"
+  - "**/onnxruntime-node/bin/napi-v3/darwin/**/*.dylib"
+  - "**/@img/sharp-libvips-darwin-*/lib/libvips*.dylib"
+  - "**/@lydell/node-pty-darwin-*/prebuilds/darwin-*/spawn-helper"
   - "**/node_modules/sqlite-vec-*/vec0.*"
   - "dist/renderer/**"
 

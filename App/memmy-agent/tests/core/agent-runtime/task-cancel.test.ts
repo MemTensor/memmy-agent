@@ -22,6 +22,13 @@ function makeLoop(): AgentLoop {
   });
 }
 
+function reserveStandaloneSession(loop: AgentLoop, chatId: string): void {
+  loop.sessions.reserveWebuiSessionBinding(`websocket:${chatId}`, {
+    projectId: null,
+    cwd: fs.realpathSync(loop.workspace),
+  });
+}
+
 function cancelableTask(): Promise<void> & { cancel: () => boolean; done: () => boolean } {
   let settled = false;
   let rejectTask!: (error: Error) => void;
@@ -275,6 +282,7 @@ describe("task cancellation", () => {
 
   it("dispatch publishes WebUI running and idle around a normal turn", async () => {
     const loop = makeLoop();
+    reserveStandaloneSession(loop, "c1");
     loop.runner.run = vi.fn(async (spec: any) => new AgentRunResult({
       finalContent: "hi",
       messages: [...spec.messages, { role: "assistant", content: "hi" }],
@@ -386,6 +394,7 @@ describe("task cancellation", () => {
       messages: [...spec.messages, { role: "assistant", content: "after-new" }],
       stopReason: "completed",
     }));
+    reserveStandaloneSession(loop, "c1");
 
     const running = loop.run();
     try {
@@ -453,6 +462,7 @@ describe("task cancellation", () => {
         }),
       } as any,
     });
+    reserveStandaloneSession(loop, "c1");
 
     const running = loop.run();
     try {

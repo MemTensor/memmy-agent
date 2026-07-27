@@ -41,6 +41,8 @@ describe("build runtime assets", () => {
     expect(fs.existsSync(path.join(process.cwd(), "dist/skills/goal/SKILL.md"))).toBe(true);
     expect(fs.existsSync(path.join(process.cwd(), "dist/skills/skill-creator/SKILL.md"))).toBe(true);
     expect(fs.existsSync(path.join(process.cwd(), "dist/skills/skill-creator/scripts/quick-validate.py"))).toBe(true);
+    expect(fs.existsSync(path.join(process.cwd(), "dist/skills/ui-craft/SKILL.md"))).toBe(true);
+    expect(fs.existsSync(path.join(process.cwd(), "dist/skills/ui-craft/references"))).toBe(false);
 
     const tmuxScript = path.join(process.cwd(), "dist/skills/tmux/scripts/find-sessions.sh");
     expect(fs.existsSync(tmuxScript)).toBe(true);

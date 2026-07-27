@@ -11,6 +11,18 @@ const MAX_TITLE_LEN = 160;
 const MAX_TAG_LEN = 40;
 const ALLOWED_DENSITIES = new Set(["comfortable", "compact"]);
 const ALLOWED_SORTS = new Set(["updated_desc", "created_desc", "title_asc"]);
+let sidebarMutationActive = false;
+
+export class WebuiSidebarStateConflictError extends Error {
+  readonly code = "sidebar_state_conflict";
+  readonly sidebarState: Record<string, any>;
+
+  constructor(sidebarState: Record<string, any>) {
+    super("sidebar state changed");
+    this.name = "WebuiSidebarStateConflictError";
+    this.sidebarState = sidebarState;
+  }
+}
 
 export function webuiSidebarStatePath(): string {
   return path.join(getWebuiDir(), "sidebar-state.json");
@@ -151,7 +163,19 @@ function fsyncDirBestEffort(dir: string): void {
 
 export function writeWebuiSidebarState(raw: Record<string, any>): Record<string, any> {
   const state = normalizeWebuiSidebarState(raw);
-  state.updated_at = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+  const current = readWebuiSidebarState();
+  state.updated_at = nextSidebarUpdatedAt(current.updated_at);
+  persistWebuiSidebarState(state);
+  return state;
+}
+
+function nextSidebarUpdatedAt(previous: unknown): string {
+  const now = Date.now();
+  const previousMs = typeof previous === "string" ? Date.parse(previous) : Number.NaN;
+  return new Date(Number.isNaN(previousMs) ? now : Math.max(now, previousMs + 1)).toISOString();
+}
+
+function persistWebuiSidebarState(state: Record<string, any>): void {
   const encoded = `${JSON.stringify(stableJsonValue(state), null, 2)}\n`;
   if (Buffer.byteLength(encoded) > MAX_STATE_FILE_BYTES) throw new Error("sidebar state is too large");
   const file = webuiSidebarStatePath();
@@ -174,9 +198,58 @@ export function writeWebuiSidebarState(raw: Record<string, any>): Record<string,
     }
     if (fs.existsSync(tmp)) fs.rmSync(tmp, { force: true });
   }
-  return state;
 }
 
 export function sidebarState(): Record<string, any> {
   return readWebuiSidebarState();
+}
+
+export function mutateWebuiSidebarState(
+  baseUpdatedAt: string | null | undefined,
+  mutate: (state: Record<string, any>) => Record<string, any> | void,
+): Record<string, any> {
+  if (sidebarMutationActive) throw new Error("sidebar state mutation is already active");
+  sidebarMutationActive = true;
+  try {
+    const current = readWebuiSidebarState();
+    const expected = baseUpdatedAt ?? null;
+    if ((current.updated_at ?? null) !== expected) {
+      throw new WebuiSidebarStateConflictError(current);
+    }
+    const mutable = structuredClone(current);
+    const result = mutate(mutable) ?? mutable;
+    const normalized = normalizeWebuiSidebarState(result);
+    normalized.updated_at = current.updated_at;
+    const currentComparable = { ...current, updated_at: null };
+    const nextComparable = { ...normalized, updated_at: null };
+    if (JSON.stringify(stableJsonValue(currentComparable)) === JSON.stringify(stableJsonValue(nextComparable))) {
+      return current;
+    }
+    normalized.updated_at = nextSidebarUpdatedAt(current.updated_at);
+    persistWebuiSidebarState(normalized);
+    return normalized;
+  } finally {
+    sidebarMutationActive = false;
+  }
+}
+
+export function replaceWebuiSidebarState(
+  baseUpdatedAt: string | null | undefined,
+  raw: Record<string, any>,
+): Record<string, any> {
+  return mutateWebuiSidebarState(baseUpdatedAt, () => raw);
+}
+
+export function removeWebuiSidebarSessionKeys(sessionKeys: Iterable<string>): Record<string, any> {
+  const keys = new Set(sessionKeys);
+  if (!keys.size) return readWebuiSidebarState();
+  const current = readWebuiSidebarState();
+  return mutateWebuiSidebarState(current.updated_at, (state) => {
+    state.pinned_keys = state.pinned_keys.filter((key: string) => !keys.has(key));
+    state.archived_keys = state.archived_keys.filter((key: string) => !keys.has(key));
+    for (const key of keys) {
+      delete state.title_overrides[key];
+      delete state.tags_by_key[key];
+    }
+  });
 }

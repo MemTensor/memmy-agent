@@ -5,7 +5,14 @@ import path from "node:path";
 import { PassThrough } from "node:stream";
 import iconv from "iconv-lite";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ExecSession, ExecSessionManager, ListExecSessionsTool, WriteStdinTool } from "../../../../src/core/agent-runtime/tools/exec-session.js";
+import {
+  EXEC_LIFECYCLE_ERROR,
+  ExecSession,
+  ExecSessionManager,
+  ListExecSessionsTool,
+  WriteStdinTool,
+  terminateManagedProcessTree,
+} from "../../../../src/core/agent-runtime/tools/exec-session.js";
 import { ExecTool, ExecToolConfig } from "../../../../src/core/agent-runtime/tools/shell.js";
 
 const WINDOWS_COMMAND_NOT_FOUND = "'node' 不是内部或外部命令，也不是可运行的程序\r\n或批处理文件。\r\n";
@@ -20,6 +27,26 @@ function tmpDir(prefix: string): string {
 
 function nodeCommand(code: string): string {
   return `${JSON.stringify(process.execPath)} -e ${JSON.stringify(code)}`;
+}
+
+function pipeHoldingDescendantCommand(): string {
+  const descendant = "setInterval(() => {}, 1000)";
+  return nodeCommand(
+    `const { spawn } = require("node:child_process");`
+    + `const child = spawn(process.execPath, ["-e", ${JSON.stringify(descendant)}], `
+    + `{ stdio: ["ignore", process.stdout, process.stderr] });`
+    + `console.log("descendant_pid=" + child.pid);`
+    + "child.unref();",
+  );
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
 }
 
 function sessionId(output: string): string {
@@ -56,6 +83,7 @@ function closeFakeSessionChild(child: ReturnType<typeof fakeSessionChild>, exitC
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   for (const root of roots.splice(0)) {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -217,6 +245,86 @@ describe("exec session tools", () => {
     expect(final.done).toBe(true);
     expect(final.exitCode).toBe(0);
     expect(final.output).toBe("最后输出");
+  });
+
+  it("bounds one-shot draining and terminates descendants that keep stdio open", async () => {
+    if (process.platform === "win32") return;
+    const root = tmpDir("memmy-exec-one-shot-drain-");
+    const tool = new ExecTool({
+      workspace: root,
+      config: new ExecToolConfig({ timeoutS: 10 }),
+    });
+
+    const result = await tool.execute({ command: pipeHoldingDescendantCommand() });
+    const pid = Number(result.match(/descendant_pid=(\d+)/)?.[1]);
+
+    expect(result).toContain(EXEC_LIFECYCLE_ERROR);
+    expect(pid).toBeGreaterThan(0);
+    await waitFor(() => !processIsAlive(pid));
+  });
+
+  it("bounds yielded-session draining and removes the completed session", async () => {
+    if (process.platform === "win32") return;
+    const root = tmpDir("memmy-exec-session-drain-");
+    const manager = new ExecSessionManager();
+    const tool = new ExecTool({
+      workspace: root,
+      sessionManager: manager,
+      config: new ExecToolConfig({ timeoutS: 10 }),
+    });
+    const stdin = new WriteStdinTool({ manager });
+
+    let result = await tool.execute({
+      command: pipeHoldingDescendantCommand(),
+      yield_time_ms: 100,
+    });
+    if (result.includes("session_id:")) {
+      result += `\n${await stdin.execute({
+        session_id: sessionId(result),
+        yield_time_ms: 100,
+      })}`;
+    }
+    const pid = Number(result.match(/descendant_pid=(\d+)/)?.[1]);
+
+    expect(result).toContain(EXEC_LIFECYCLE_ERROR);
+    expect(pid).toBeGreaterThan(0);
+    await waitFor(() => !processIsAlive(pid));
+    await expect(manager.list()).resolves.toEqual([]);
+  });
+
+  it("uses taskkill tree arguments and force escalation on Windows", async () => {
+    vi.useFakeTimers();
+    const child = fakeSessionChild();
+    child.pid = 4321;
+    const helpers: any[] = [];
+    const spawnProcess = vi.fn(() => {
+      const helper = new EventEmitter() as any;
+      helper.kill = vi.fn();
+      helpers.push(helper);
+      return helper;
+    });
+
+    const pending = terminateManagedProcessTree(child, {
+      platform: "win32",
+      spawnProcess: spawnProcess as any,
+    });
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(spawnProcess).toHaveBeenNthCalledWith(
+      1,
+      "taskkill.exe",
+      ["/PID", "4321", "/T"],
+      { shell: false, windowsHide: true, stdio: "ignore" },
+    );
+    expect(spawnProcess).toHaveBeenNthCalledWith(
+      2,
+      "taskkill.exe",
+      ["/PID", "4321", "/T", "/F"],
+      { shell: false, windowsHide: true, stdio: "ignore" },
+    );
+    closeFakeSessionChild(child);
+    await pending;
+    expect(helpers).toHaveLength(2);
   });
 
   it("accepts max_output_tokens for session output", async () => {
