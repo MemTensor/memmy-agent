@@ -5271,6 +5271,99 @@ input[type="checkbox"].check-sky:checked::after {
   color: #fff;
 }
 
+.github-star-prompt {
+  position: fixed;
+  right: var(--space-5);
+  bottom: 48px;
+  /* Below product-tour mask (z-40) and modals (--z-modal: 50). */
+  z-index: 30;
+  width: 256px;
+  max-width: calc(100vw - 32px);
+  pointer-events: none;
+}
+
+.github-star-prompt__card {
+  position: relative;
+  pointer-events: auto;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  width: 256px;
+  max-width: 100%;
+  padding: var(--space-4);
+  border-radius: var(--radius-card);
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 50%, transparent);
+  background: var(--color-background-paper);
+  box-shadow: var(--shadow-soft);
+}
+
+.github-star-prompt__title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 20px;
+  color: var(--color-text-ink);
+}
+
+.github-star-prompt__body {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 18px;
+  color: color-mix(in srgb, var(--color-text-ink) 58%, transparent);
+}
+
+.github-star-prompt__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+}
+
+.github-star-prompt__secondary {
+  flex: 0 0 auto;
+  min-width: 0;
+  height: 32px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--radius-btn);
+  background: transparent;
+  color: color-mix(in srgb, var(--color-text-ink) 45%, transparent);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+  cursor: pointer;
+  transition: color 150ms ease, background 150ms ease;
+}
+
+.github-star-prompt__secondary:hover {
+  background: color-mix(in srgb, var(--color-canvas-oat) 70%, transparent);
+  color: color-mix(in srgb, var(--color-text-ink) 62%, transparent);
+}
+
+.github-star-prompt__primary {
+  flex: 1;
+  height: 32px;
+  min-height: 32px;
+  border: 0;
+  border-radius: var(--radius-btn);
+  background: var(--color-action-sky);
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 16px;
+  cursor: pointer;
+  transition: background 150ms ease;
+}
+
+.github-star-prompt__primary:hover {
+  background: var(--color-action-sky-hover);
+}
+
 .banner {
   display: flex;
   align-items: flex-start;

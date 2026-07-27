@@ -10,6 +10,7 @@ import {
 import { AppProviders, useApiClients } from "./app/providers.js";
 import { AppRouter } from "./app/router.js";
 import { UpdateCoordinatorProvider } from "./app/update-coordinator.js";
+import { GithubStarPromptHost } from "./components/github-star-prompt-host.js";
 import {
   FOCUSED_AGENT_CHAT_STORAGE_KEY,
   readGuidanceCompleted,
@@ -277,6 +278,7 @@ function RuntimeApp() {
     <UpdateCoordinatorProvider>
       <AgentRuntimeBridge taskStateCoordinator={taskStateCoordinator ?? undefined}>
         <AppRouter onRetry={retry} />
+        <GithubStarPromptHost />
       </AgentRuntimeBridge>
     </UpdateCoordinatorProvider>
   );
