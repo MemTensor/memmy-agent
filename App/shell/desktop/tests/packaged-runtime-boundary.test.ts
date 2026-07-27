@@ -805,7 +805,9 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).toContain('npm ci --prefix "$AGENT_DIR"');
     expect(source).toContain('import { createConnection } from "@playwright/mcp"');
     expect(source).toContain('require.resolve("playwright-core/package.json")');
+    expect(source).toContain("./dist/entrypoints/cli/commands.js");
     expect(source).toContain('"browser-prepare"');
+    expect(source).not.toContain('fs.readFileSync("./dist/main.js", "utf8").includes("browser-prepare")');
     expect(source).not.toContain('npm install --prefix "$AGENT_DIR"');
     expect(source).not.toContain('if [ ! -x "$AGENT_DIR/node_modules/.bin/tsc" ]');
     expect(source).toContain('cp -R "$MEMORY_DIR/dist/src" "$RUNTIME_DIR/memory/src"');
@@ -848,7 +850,9 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).toContain("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1");
     expect(source).toContain('import { createConnection } from "@playwright/mcp"');
     expect(source).toContain('require.resolve("playwright-core/package.json")');
+    expect(source).toContain("./dist/entrypoints/cli/commands.js");
     expect(source).toContain('"browser-prepare"');
+    expect(source).not.toContain('fs.readFileSync("./dist/main.js", "utf8").includes("browser-prepare")');
   });
 
   it("fails package preparation when required native runtime companion files are missing", () => {
@@ -867,6 +871,7 @@ describe("desktop packaged runtime boundaries", () => {
     expect(winSource).toContain("verify_windows_sharp_module");
     expect(winSource).toContain("verify_windows_agent_native_artifacts");
     expect(winSource).toContain("verify_packaged_windows_unpacked_artifacts");
+    expect(winSource).toContain('onnxruntime_dir="$(dirname "$onnxruntime_node")"');
     expect(winSource).toContain("onnxruntime.dll");
     expect(winSource).toContain("sharp-win32-x64/lib");
     expect(winSource).toContain("win-unpacked/resources/app.asar.unpacked/dist/runtime");

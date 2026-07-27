@@ -520,7 +520,11 @@ echo "Preparing macOS $TARGET_CPU package."
 if [ ! -x "$ROOT_DIR/node_modules/.bin/tsc" ] || [ ! -x "$ROOT_DIR/node_modules/.bin/electron-builder" ]; then
   npm install
 fi
-npm install --workspace @memmy/frontend-desktop --no-package-lock
+if npm ls --workspace @memmy/frontend-desktop --depth=0 >/dev/null 2>&1; then
+  echo "Frontend desktop workspace dependencies already installed."
+else
+  npm install --workspace @memmy/frontend-desktop --no-package-lock
+fi
 
 echo "Installing memmy-agent dependencies."
 PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --prefix "$AGENT_DIR"
@@ -567,7 +571,8 @@ PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --prefix "$RUNTIME_DIR/memmy-agent" --
     if (mcpPackage.version !== runtimePackage.dependencies["@playwright/mcp"]) throw new Error("Playwright MCP runtime version mismatch");
     if (playwrightPackage.version !== runtimePackage.dependencies.playwright || corePackage.version !== runtimePackage.dependencies.playwright) throw new Error("Playwright runtime version mismatch");
     if (!fs.existsSync(path.join(path.dirname(playwrightPath), "cli.js"))) throw new Error("Playwright runtime CLI is missing");
-    if (!fs.readFileSync("./dist/main.js", "utf8").includes("browser-prepare")) throw new Error("browser-prepare command is missing");
+    const commandEntrypoint = "./dist/entrypoints/cli/commands.js";
+    if (!fs.readFileSync(commandEntrypoint, "utf8").includes("browser-prepare")) throw new Error("browser-prepare command is missing");
   '
 )
 node_modules/.bin/electron-rebuild \

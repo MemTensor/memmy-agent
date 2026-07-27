@@ -399,6 +399,8 @@ verify_windows_native_module() {
 
 verify_windows_onnxruntime_module() {
   local onnxruntime_node="$RUNTIME_DIR/memory/node_modules/onnxruntime-node/bin/napi-v3/win32/x64/onnxruntime_binding.node"
+  local onnxruntime_dir
+  onnxruntime_dir="$(dirname "$onnxruntime_node")"
 
   if [ ! -f "$onnxruntime_node" ]; then
     echo "Missing onnxruntime-node Windows x64 native module: $onnxruntime_node" >&2
@@ -531,7 +533,8 @@ verify_windows_agent_native_artifacts
     if (mcpPackage.version !== runtimePackage.dependencies["@playwright/mcp"]) throw new Error("Playwright MCP runtime version mismatch");
     if (playwrightPackage.version !== runtimePackage.dependencies.playwright || corePackage.version !== runtimePackage.dependencies.playwright) throw new Error("Playwright runtime version mismatch");
     if (!fs.existsSync(path.join(path.dirname(playwrightPath), "cli.js"))) throw new Error("Playwright runtime CLI is missing");
-    if (!fs.readFileSync("./dist/main.js", "utf8").includes("browser-prepare")) throw new Error("browser-prepare command is missing");
+    const commandEntrypoint = "./dist/entrypoints/cli/commands.js";
+    if (!fs.readFileSync(commandEntrypoint, "utf8").includes("browser-prepare")) throw new Error("browser-prepare command is missing");
   '
 )
 
