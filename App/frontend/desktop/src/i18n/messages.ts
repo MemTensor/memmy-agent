@@ -1503,7 +1503,7 @@ export const enUSMessages: Record<keyof typeof zhCNMessages, string> = {
   "githubStar.title": "✨ Has Memmy been helpful?",
   "githubStar.bodyLine1": "Memmy is an open-source project.",
   "githubStar.bodyLine2": "Your Star helps more people discover it",
-  "githubStar.cta": "Support on GitHub ⭐",
+  "githubStar.cta": "Star on GitHub ⭐️",
   "githubStar.later": "Maybe later",
   "login.title": "Create your Memmy account",
   "login.identifier": "Email or phone",
