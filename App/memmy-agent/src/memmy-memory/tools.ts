@@ -102,7 +102,6 @@ function withRuntimeDefaults(params: JsonRecord, runtime: MemmyMemoryToolRuntime
     ...params,
   };
   body.sessionId = runtimeValue(body.sessionId, runtime.currentSessionId(sessionKey) ?? undefined);
-  body.episodeId = runtimeValue(body.episodeId, runtime.currentEpisodeId(sessionKey) ?? undefined);
   body.turnId = runtimeValue(body.turnId, runtime.currentTurnId(sessionKey) ?? undefined);
   return compact(body);
 }

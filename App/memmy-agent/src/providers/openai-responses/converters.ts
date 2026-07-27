@@ -47,11 +47,51 @@ export function convertMessages(messages: Record<string, any>[]): [string, Recor
       }
     } else if (msg.role === "tool") {
       const [callId] = splitToolCallId(msg.tool_call_id);
-      const content = typeof msg.content === "string" ? msg.content : jsonDumpsDefault(msg.content ?? "");
-      items.push({ type: "function_call_output", call_id: callId, output: content });
+      items.push({
+        type: "function_call_output",
+        call_id: callId,
+        output: convertToolOutput(msg.content),
+      });
     }
   }
   return [instructions, items];
+}
+
+export function convertToolOutput(content: any): string | Record<string, any>[] {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return jsonDumpsDefault(content ?? "");
+  const hasImage = content.some(
+    (block) =>
+      block?.type === "image_url" &&
+      typeof (block.image_url?.url ?? block.image_url) === "string",
+  );
+  if (!hasImage) {
+    return content
+      .map((block) =>
+        block?.type === "text" && typeof block.text === "string"
+          ? block.text
+          : jsonDumpsDefault(block),
+      )
+      .join("\n");
+  }
+  const output: Record<string, any>[] = [];
+  for (const block of content) {
+    if (block?.type === "text" && typeof block.text === "string") {
+      output.push({ type: "input_text", text: block.text });
+      continue;
+    }
+    if (block?.type === "image_url") {
+      const imageUrl = block.image_url?.url ?? block.image_url;
+      if (typeof imageUrl === "string") {
+        output.push({
+          type: "input_image",
+          image_url: imageUrl,
+          detail: block.image_url?.detail ?? "auto",
+        });
+      }
+    }
+  }
+  return output.length ? output : "";
 }
 
 export function convertUserMessage(content: any): Record<string, any> {

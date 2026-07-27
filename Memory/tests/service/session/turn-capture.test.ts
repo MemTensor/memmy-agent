@@ -17,6 +17,132 @@ const {
 afterEach(cleanup);
 
 describe("MemoryService / session / turn capture", () => {
+  it("keeps turn.start read-only and writes the complete turn atomically", async () => {
+    const { db, service } = createTestService();
+    const session = service.openSession({
+      namespace: {
+        source: "cursor",
+        profileId: "default",
+        userId: "turn-start-readonly-user"
+      }
+    });
+    const counts = () => ({
+      episodes: (db.db.prepare("SELECT COUNT(*) AS count FROM episodes").get() as { count: number }).count,
+      rawTurns: (db.db.prepare("SELECT COUNT(*) AS count FROM raw_turns").get() as { count: number }).count,
+      memories: (db.db.prepare("SELECT COUNT(*) AS count FROM memories").get() as { count: number }).count,
+      recalls: (db.db.prepare("SELECT COUNT(*) AS count FROM recall_events").get() as { count: number }).count,
+      apiLogs: (db.db.prepare("SELECT COUNT(*) AS count FROM api_logs").get() as { count: number }).count,
+      idempotency: (db.db.prepare("SELECT COUNT(*) AS count FROM idempotency_keys").get() as { count: number }).count
+    });
+    const before = counts();
+
+    const started = await service.startTurn({
+      adapterId: "memmy-cursor-hook",
+      requestId: "cursor-start:readonly",
+      sessionId: session.sessionId,
+      turnId: "turn-start-readonly",
+      query: "Do not persist this query until the assistant finishes."
+    });
+
+    expect(started.turnId).toBe("turn-start-readonly");
+    expect(started).not.toHaveProperty("episodeId");
+    expect(counts()).toEqual(before);
+
+    const completed = service.completeTurn("turn-start-readonly", {
+      adapterId: "memmy-cursor-hook",
+      requestId: "cursor-complete:readonly",
+      sessionId: session.sessionId,
+      query: "Do not persist this query until the assistant finishes.",
+      answer: "The complete user and assistant turn is now safe to persist.",
+      status: "succeeded",
+      sourceMemoryIds: started.sourceMemoryIds
+    });
+
+    expect(completed.l1MemoryIds).toHaveLength(1);
+    expect(counts()).toMatchObject({
+      episodes: before.episodes + 1,
+      rawTurns: before.rawTurns + 1,
+      memories: before.memories + 1,
+      recalls: before.recalls,
+      apiLogs: before.apiLogs + 1,
+      idempotency: before.idempotency + 1
+    });
+    expect(completed.jobs.map((job) => job.jobType)).toContain("episode_idle_close");
+    db.close();
+  });
+
+  it("rejects cancelled and structurally incomplete completions without writing anything", () => {
+    const { db, service } = createTestService();
+    const session = service.openSession({
+      namespace: {
+        source: "cursor",
+        profileId: "default",
+        userId: "turn-cancelled-user"
+      }
+    });
+    const count = (table: string) =>
+      (db.db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }).count;
+    const before = {
+      episodes: count("episodes"),
+      rawTurns: count("raw_turns"),
+      memories: count("memories"),
+      jobs: count("evolution_jobs")
+    };
+
+    expect(() => service.completeTurn("turn-cancelled", {
+      sessionId: session.sessionId,
+      query: "Cancel this request.",
+      answer: "A partial answer",
+      status: "cancelled"
+    })).toThrow("cancelled turns are not persisted");
+    expect(() => service.completeTurn("turn-user-only", {
+      sessionId: session.sessionId,
+      query: "This request has no final assistant response.",
+      answer: ""
+    })).toThrow("requires a non-empty user query and assistant result");
+    expect(() => service.completeTurn("turn-assistant-only", {
+      sessionId: session.sessionId,
+      query: "",
+      answer: "This answer has no user query."
+    })).toThrow("requires a non-empty user query and assistant result");
+
+    expect({
+      episodes: count("episodes"),
+      rawTurns: count("raw_turns"),
+      memories: count("memories"),
+      jobs: count("evolution_jobs")
+    }).toEqual(before);
+    db.close();
+  });
+
+  it("persists explicit failed turns with their failure result", () => {
+    const { db, service } = createTestService();
+    const session = service.openSession({
+      namespace: {
+        source: "cursor",
+        profileId: "default",
+        userId: "turn-failed-user"
+      }
+    });
+
+    const completed = service.completeTurn("turn-failed", {
+      sessionId: session.sessionId,
+      query: "Run the deployment.",
+      answer: "Deployment failed: connection timed out.",
+      status: "failed"
+    });
+
+    expect(completed.l1MemoryIds).toHaveLength(1);
+    expect(db.db.prepare(
+      "SELECT status, user_text, assistant_text FROM raw_turns WHERE id = ?"
+    ).get(completed.rawTurnId)).toEqual({
+      status: "failed",
+      user_text: "Run the deployment.",
+      assistant_text: "Deployment failed: connection timed out."
+    });
+    db.close();
+  });
+
   it("uses plugin capture normalizer limits from service config", () => {
     const root = createTestRoot("mindock-memory-capture-normalizer-");
     const db = new MemoryDb({
@@ -429,7 +555,7 @@ describe("MemoryService / session / turn capture", () => {
     db.close();
   });
 
-  it("stores empty turns as raw observations without creating empty L1 memories", () => {
+  it("does not store empty turns", () => {
     const { db, service } = createTestService();
     const session = service.openSession({
       namespace: {
@@ -439,27 +565,20 @@ describe("MemoryService / session / turn capture", () => {
       }
     });
 
-    const complete = service.completeTurn("turn-empty-capture", {
+    expect(() => service.completeTurn("turn-empty-capture", {
       sessionId: session.sessionId,
       query: "",
       answer: ""
-    });
-
-    expect(complete.l1MemoryId).toBe("");
-    expect(complete.l1MemoryIds).toEqual([]);
-    expect(complete.jobs.map((job) => job.jobType)).not.toContain("reward");
-    const rawTurn = db.db.prepare(
-      `SELECT id
-       FROM raw_turns
-       WHERE id = ?`
-    ).get(complete.rawTurnId) as { id: string } | undefined;
-    expect(rawTurn?.id).toBe(complete.rawTurnId);
+    })).toThrow("requires a non-empty user query and assistant result");
     const emptyMemories = db.db.prepare(
       `SELECT COUNT(*) AS count
        FROM memories
        WHERE user_id = ?`
     ).get("empty-capture-user") as { count: number };
     expect(emptyMemories.count).toBe(0);
+    expect(db.db.prepare(
+      "SELECT COUNT(*) AS count FROM raw_turns WHERE user_id = ?"
+    ).get("empty-capture-user")).toEqual({ count: 0 });
     db.close();
   });
 

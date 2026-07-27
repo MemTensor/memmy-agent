@@ -288,11 +288,17 @@ export function createPetAgentBridge(options: CreatePetAgentBridgeOptions): PetA
       if (expectedGeneration === null) {
         throw new Error(unavailableMessage);
       }
-      const chatId = await resolveChatId(nextConnection, input.task.sessionId, expectedGeneration);
+      const resolvedChat = await resolveChatId(nextConnection, input.task.sessionId, expectedGeneration);
+      const { chatId } = resolvedChat;
       subscribeTaskRun(nextConnection, chatId, input.task.id);
       recoveryTracker.register({ taskId: input.task.id, chatId, submittedContent: content });
       try {
-        nextConnection.sendMessage({ chatId, content }, expectedGeneration);
+        await nextConnection.sendMessage({
+          chatId,
+          content,
+          clientRequestId: crypto.randomUUID(),
+          ...(resolvedChat.created ? { target: { kind: "standalone" as const } } : {})
+        }, expectedGeneration);
       } catch (error) {
         const run = activeRuns.get(chatId);
         if (run) {
@@ -360,15 +366,15 @@ export function createPetAgentBridge(options: CreatePetAgentBridgeOptions): PetA
     nextConnection: MemmyAgentWebSocketConnection,
     sessionId: string,
     expectedGeneration: number
-  ): Promise<string> {
+  ): Promise<{ chatId: string; created: boolean }> {
     const existing = sessionChatIds.get(sessionId);
     if (existing) {
-      return existing;
+      return { chatId: existing, created: false };
     }
 
     const chatId = await requestNewChat(nextConnection, expectedGeneration);
     sessionChatIds.set(sessionId, chatId);
-    return chatId;
+    return { chatId, created: true };
   }
 
   /** Handles request new chat. */

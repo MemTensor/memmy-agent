@@ -195,6 +195,7 @@ describe("unified session /new command", () => {
       sessions,
       consolidator: { archive: vi.fn(async () => true) },
       cancelActiveTasks: vi.fn(async () => 0),
+      closeBrowserSession: vi.fn(async () => undefined),
       scheduleBackground: vi.fn(),
     };
     const msg = new InboundMessage({
@@ -208,6 +209,14 @@ describe("unified session /new command", () => {
     await cmdNew(new CommandContext({ msg, session: null, key: UNIFIED_SESSION_KEY, raw: "/new", loop, abortSignal: signal }));
 
     expect(loop.cancelActiveTasks).toHaveBeenCalledWith(UNIFIED_SESSION_KEY, { excludeSignal: signal });
+    expect(loop.closeBrowserSession).toHaveBeenCalledWith(
+      UNIFIED_SESSION_KEY,
+      "telegram",
+      "111",
+    );
+    expect(loop.cancelActiveTasks.mock.invocationCallOrder[0]).toBeLessThan(
+      loop.closeBrowserSession.mock.invocationCallOrder[0],
+    );
   });
 
   it("clears the shared unified session", async () => {

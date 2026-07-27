@@ -318,7 +318,7 @@ export class EmbeddingJobProcessor {
   private markEmbeddingPending(memory: MemoryRow, activeJobId: string, at: string, allowedStates?: MemoryProcessingState[]): void {
     this.deps.repos.processing.update(memory.id, {
       state: "embedding_pending", stage: "embedding", activeJobId, attemptCount: 0, retryAction: "retry",
-      errorCode: null, errorMessage: null, failedAt: null, updatedAt: at
+      updatedAt: at
     }, allowedStates);
   }
 

@@ -5,6 +5,7 @@ import type {
   DesktopImageActionRequest,
   DesktopImageSaveResult,
   DesktopMemoryServiceRestartResult,
+  DesktopProjectDirectorySelection,
   DesktopRuntimeConfig,
   DesktopUpdateCheckResult,
   DesktopUpdateDownloadProgress,
@@ -49,6 +50,10 @@ import { resolveRendererContextMenuCommands, resolveRendererContextMenuMaxLabelW
 import { startPackagedRendererStaticServer, type PackagedRendererStaticServer } from "./renderer-static-server.js";
 import { shouldBlockRendererReloadShortcut } from "./renderer-shortcuts.js";
 import { normalizeMailtoUrl } from "./mailto-url.js";
+import {
+  selectEmptyProjectDirectory,
+  selectProjectDirectory,
+} from "./project-directory-picker.js";
 import { buildAgentToolCliPromptDeepLink, buildAgentToolPromptDeepLink, normalizeAgentToolLaunchRequest } from "./agent-tool-deeplink.js";
 import {
   CLAUDE_CODE_TERMINAL_SCRIPT,
@@ -788,6 +793,20 @@ function registerIpcHandlers(): void {
   ipcMain.handle("memmy:get-microphone-access-status", () => getMicrophoneAccessStatus());
 
   ipcMain.handle("memmy:request-microphone-access", async () => requestMicrophoneAccess());
+
+  ipcMain.handle(
+    "memmy:select-project-directory",
+    async (event): Promise<DesktopProjectDirectorySelection> => (
+      selectProjectDirectory(BrowserWindow.fromWebContents(event.sender))
+    ),
+  );
+
+  ipcMain.handle(
+    "memmy:select-empty-project-directory",
+    async (event): Promise<DesktopProjectDirectorySelection> => (
+      selectEmptyProjectDirectory(BrowserWindow.fromWebContents(event.sender))
+    ),
+  );
 
   ipcMain.handle("memmy:set-pet-window", (_event, enabled: boolean, target?: RendererRouteTarget | null) => {
     setPetWindowMode(Boolean(enabled), parseRendererRouteTarget(target));
@@ -4630,6 +4649,8 @@ async function cleanupBeforeQuit(): Promise<void> {
   ipcMain.removeHandler("memmy:export-diagnostics-report");
   ipcMain.removeHandler("memmy:get-microphone-access-status");
   ipcMain.removeHandler("memmy:request-microphone-access");
+  ipcMain.removeHandler("memmy:select-project-directory");
+  ipcMain.removeHandler("memmy:select-empty-project-directory");
   ipcMain.removeHandler("memmy:notify-task-done");
   ipcMain.removeHandler("memmy:notify-update-available");
   ipcMain.removeHandler("memmy:set-pet-window");

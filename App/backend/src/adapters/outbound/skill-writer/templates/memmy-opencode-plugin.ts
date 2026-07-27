@@ -91,7 +91,6 @@ export const MemmyMemoryPlugin = async ({ client, directory, worktree }) => {
       pendingTurns.set(input.sessionID, {
         sessionId,
         turnId,
-        episodeId: normalizeText(turn && turn.episodeId) || undefined,
         sourceMemoryIds: Array.isArray(turn && turn.sourceMemoryIds) ? turn.sourceMemoryIds : undefined,
         query: cleanQuery,
         userMessageId: normalizeText(output && output.message && output.message.id) || requestedTurnId,
@@ -136,14 +135,15 @@ export const MemmyMemoryPlugin = async ({ client, directory, worktree }) => {
 
   async function completeTurn(pending) {
     const answer = sanitizeCaptureText([...pending.answerParts.values()].filter(Boolean).join("\n\n")) ||
-      sanitizeCaptureText(pending.error) ||
-      "Turn ended without assistant text.";
+      sanitizeCaptureText(pending.error);
+    if (!sanitizeCaptureText(pending.query) || !answer) {
+      return;
+    }
     const memmy = await createMemmyClient();
     await memmy.post("/api/v1/turns/" + encodeURIComponent(pending.turnId) + "/complete", {
       adapterId: "memmy-opencode-plugin",
       requestId: "opencode-plugin:" + pending.turnId,
       sessionId: pending.sessionId,
-      episodeId: pending.episodeId,
       source: SOURCE,
       query: pending.query,
       answer,
@@ -351,8 +351,13 @@ export const MemmyMemoryPlugin = async ({ client, directory, worktree }) => {
         return;
       }
       if (event && event.type === "session.error") {
-        const pending = pendingTurns.get(normalizeText(properties.sessionID));
+        const sessionID = normalizeText(properties.sessionID);
+        const pending = pendingTurns.get(sessionID);
         if (pending) {
+          if (isCancellationError(properties.error)) {
+            pendingTurns.delete(sessionID);
+            return;
+          }
           pending.status = "failed";
           pending.error = errorText(properties.error);
         }
@@ -374,6 +379,11 @@ export const MemmyMemoryPlugin = async ({ client, directory, worktree }) => {
 
 function partsFromOutput(output) {
   return output && Array.isArray(output.parts) ? output.parts : [];
+}
+
+function isCancellationError(error) {
+  const text = errorText(error).toLowerCase();
+  return text.includes("cancelled") || text.includes("canceled") || text.includes("aborted");
 }
 
 function extractUserText(parts) {
@@ -778,8 +788,8 @@ function formatResumeSearchResult(query, candidates) {
     "",
     candidates.map(formatResumeEpisode).join("\n\n"),
     "",
-    "输入 1-5 选择要接续的 episode；Memmy 会自动读取完整 episode 并注入接续上下文。",
-    "输入 /memmy-resume cancel 取消。"
+    "Enter 1-5 to select an episode to resume. Memmy will automatically retrieve the full episode and inject continuation context.",
+    "Enter /memmy-resume cancel to cancel."
   ].join("\n");
 }
 

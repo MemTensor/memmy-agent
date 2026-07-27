@@ -1,16 +1,19 @@
 /** Home page module. */
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ChangeEvent, type ClipboardEvent, type CSSProperties, type DragEvent, type KeyboardEvent, type SetStateAction, type UIEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type CSSProperties, type DragEvent, type KeyboardEvent, type SetStateAction, type UIEvent } from "react";
 import { hydrateAgentThreadInBackground, refreshAgentTaskList, useAgentRuntimeBridge } from "../app/agent-runtime-bridge.js";
 import { useApiClients } from "../app/providers.js";
 import { FOCUSED_AGENT_CHAT_STORAGE_KEY, clearFocusedAgentTarget, normalizeAgentChatId, readLaunchAgentChatId, removeLaunchAgentChatIdFromUrl } from "../app/routes.js";
 import {
   MemmyAgentRequestError,
+  MemmyAgentMessageRejectedError,
   type MemmyAgentClient,
+  type MemmyAgentProject,
   type MemmyAgentSlashCommand,
   type MemmyAgentUiLanguage,
   type MemmyAgentWebSocketConnection,
   type UploadAgentMediaInput,
-  type UploadedAgentMedia
+  type UploadedAgentMedia,
+  type WebuiSessionTarget
 } from "../api/memmy-agent-client.js";
 import type { AnalyticsEvent } from "../analytics/analytics-events.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
@@ -69,7 +72,7 @@ import {
 } from "./first-encounter-task-launch.js";
 import { HistoryDagPanel, type HistoryDagPanelState } from "./history-dag-panel.js";
 import { Mic, Pause, Plus, Send } from "./memory/memory-prototype-icons.js";
-import { ArrowDown, RotateCw, X } from "lucide-react";
+import { ArrowDown, ChevronDown, Folder, FolderPlus, RotateCw, X } from "lucide-react";
 
 export { agentChatScopeKey, updateComposerDraftForScope };
 export { hydrateAgentThreadInBackground };
@@ -93,8 +96,6 @@ const SLASH_COMMAND_RETRY_DELAYS_MS = [300, 1000, 2500];
 const AGENT_CONVERSATION_USER_SCROLL_INTENT_MS = 600;
 /** Definition for stop confirmation grace ms. */
 export const STOP_CONFIRMATION_GRACE_MS = 8000;
-/** Definition for composer error auto dismiss ms. */
-export const COMPOSER_ERROR_AUTO_DISMISS_MS = 5000;
 const TRANSLATABLE_AGENT_ERROR_KEYS = new Set<MessageKey>([
   "home.media.error.sendUnsupported",
   "home.media.error.sendSize",
@@ -165,7 +166,12 @@ export interface RequestAgentStatusInput {
 
 export interface RequestNewSessionResetInput {
   chatId: string | null;
-  connection: Pick<MemmyAgentWebSocketConnection, "getReadyGeneration" | "sendMessage"> | null;
+  connection: {
+    getReadyGeneration(): number | null;
+    sendMessage(
+      ...args: Parameters<MemmyAgentWebSocketConnection["sendMessage"]>
+    ): ReturnType<MemmyAgentWebSocketConnection["sendMessage"]> | void;
+  } | null;
   canSubmitOrdinaryMessage: boolean;
   ensureChatSubscription?: (chatId: string) => void;
   clearInput: () => void;
@@ -176,7 +182,15 @@ export interface RequestNewSessionResetInput {
 
 export interface SubmitAgentComposerMessageInput {
   chatId: string | null;
-  connection: Pick<MemmyAgentWebSocketConnection, "getReadyGeneration" | "newChat" | "sendMessage"> | null;
+  target?: WebuiSessionTarget | null;
+  clientRequestId?: string;
+  connection: {
+    getReadyGeneration(): number | null;
+    newChat(expectedGeneration: number, timeoutMs?: number): Promise<string>;
+    sendMessage(
+      ...args: Parameters<MemmyAgentWebSocketConnection["sendMessage"]>
+    ): ReturnType<MemmyAgentWebSocketConnection["sendMessage"]> | void;
+  } | null;
   ensureChatSubscription?: (chatId: string) => void;
   content: string;
   language?: MemmyAgentUiLanguage;
@@ -513,8 +527,13 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
     input.setComposerMediaError?.("home.media.error.sendReadFailed");
     return false;
   }
+  if (input.chatId && input.target) {
+    return false;
+  }
 
   let chatId = input.chatId;
+  const clientRequestId = input.clientRequestId ?? crypto.randomUUID();
+  const capturedTarget = input.chatId ? null : input.target ?? { kind: "standalone" as const };
   const capturedChatSelectionEpoch = input.chatSelectionEpoch ?? 0;
   const createdNewChat = !chatId;
   if (!chatId) {
@@ -560,6 +579,8 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
     chat_id: chatId,
     content: text,
     webui: true,
+    client_request_id: clientRequestId,
+    ...(capturedTarget ? { target: capturedTarget } : {}),
     ...(input.language ? { language: input.language } : {}),
     ...(uploadedAttachments.length ? { media_paths: uploadedAttachments.map((item) => item.path) } : {})
   };
@@ -576,9 +597,11 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
     input.ensureChatSubscription?.(chatId);
   }
   try {
-    input.connection.sendMessage({
+    await input.connection.sendMessage({
       chatId,
       content: text,
+      clientRequestId,
+      ...(capturedTarget ? { target: capturedTarget } : {}),
       ...(input.language ? { language: input.language } : {}),
       media: uploadedAttachments
     }, expectedGeneration);
@@ -586,15 +609,23 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
     if (createdNewChat) {
       input.dispatch(agentActions.transientSendFailed(chatId));
     }
+    if (
+      error instanceof MemmyAgentMessageRejectedError
+      && error.reason === "project_removed"
+      && input.scopeKey
+    ) {
+      input.dispatch(agentActions.draftTargetUpdated(input.scopeKey, { kind: "standalone" }));
+    }
     input.dispatch(agentActions.operationFailed("chat", createAgentOperationError({
       source: "send",
-      message: readableError(error),
+      message: error instanceof MemmyAgentMessageRejectedError
+        ? `${error.detail}:${error.reason}`
+        : readableError(error),
       chatId,
       ...(input.scopeKey ? { scopeKey: input.scopeKey } : {})
     })));
     return false;
   }
-  const deliveryUncertain = input.connection.getReadyGeneration() !== expectedGeneration;
   input.track({ name: "agent_send_message", params: { page_path: "/main" }, consentTier: "basic" });
   if (createdNewChat && focus) {
     input.dispatch(agentActions.newChatCreated(chatId));
@@ -604,7 +635,7 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
     content: text,
     media: uploadedAttachments.map((item) => ({ url: item.url, name: item.name, kind: item.kind, path: item.path })),
     focus,
-    deliveryUncertain
+    ...(capturedTarget ? { target: capturedTarget } : {})
   }));
   input.clearComposer();
   if (createdNewChat) {
@@ -624,7 +655,7 @@ export function HomePage() {
   const { language, t } = useTranslation();
   const { track } = useAnalytics();
   const { syncAgentConversation } = useTaskBus();
-  const { connection, ensureChatSubscription } = useAgentRuntimeBridge();
+  const { connection, ensureChatSubscription, taskStateCoordinator } = useAgentRuntimeBridge();
   const chatSelectionEpochRef = useRef(state.agent.chatSelectionEpoch);
   chatSelectionEpochRef.current = state.agent.chatSelectionEpoch;
   const [slashCommands, setSlashCommands] = useState<MemmyAgentSlashCommand[]>([]);
@@ -640,6 +671,8 @@ export function HomePage() {
   const [lastCompactionPanel, setLastCompactionPanel] = useState<StatusPanelState>({ open: false });
   const [historyDagPanel, setHistoryDagPanel] = useState<HistoryDagPanelState>({ open: false });
   const [isCreatingChat, setIsCreatingChat] = useState(false);
+  const [projectPickerOpen, setProjectPickerOpen] = useState(false);
+  const [projectPickerOperationId, setProjectPickerOperationId] = useState<string | null>(null);
   const [firstEncounterRelayChatId, setFirstEncounterRelayChatId] = useState<string | null>(() => (
     readFirstEncounterRelayChat(typeof window === "undefined" ? undefined : window.sessionStorage)
   ));
@@ -649,7 +682,6 @@ export function HomePage() {
   const [isComposerSingleLine, setIsComposerSingleLine] = useState(true);
   const composerDrafts = state.agent.composerDraftsByScope;
   const pendingAttachmentsByScope = state.agent.composerPendingAttachmentsByScope;
-  const composerMediaErrorByScope = state.agent.composerMediaErrorByScope;
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -667,11 +699,26 @@ export function HomePage() {
   const composerDraftsRef = useRef<Record<string, string>>(composerDrafts);
   const pendingAttachmentsRef = useRef<Record<string, PendingAttachment[]>>(pendingAttachmentsByScope);
   const stopRequestLocksRef = useRef<Set<string>>(new Set());
+  const messageSendLocksRef = useRef<Set<string>>(new Set());
+  const draftTargetRevisionRef = useRef(state.agent.draftTargetRevisionByScope);
+  draftTargetRevisionRef.current = state.agent.draftTargetRevisionByScope;
   const asrRecorder = useAsrRecorder(clients?.asr, { emptyAudioMessage: t("home.asrEmptyAudio") });
   const chatScopeKey = agentChatScopeKey(state.agent.currentChatId, state.agent.newChatRequestId);
   const input = composerDrafts[chatScopeKey] ?? "";
   const pendingAttachments = pendingAttachmentsByScope[chatScopeKey] ?? [];
-  const composerMediaError = composerMediaErrorByScope[chatScopeKey] ?? null;
+  const draftTarget = state.agent.draftTargetsByScope[chatScopeKey] ?? { kind: "standalone" as const };
+  const selectedDraftProject = draftTarget.kind === "project"
+    ? state.agent.projects.find((project) => project.id === draftTarget.projectId) ?? null
+    : null;
+  const currentSessionProjectBlocked = state.agent.projectRegistryState === "corrupt"
+    && Boolean(
+      state.agent.currentSessionKey
+      && state.agent.sessions.find((session) => session.key === state.agent.currentSessionKey)?.projectId
+    );
+  const draftProjectBlocked = !state.agent.currentChatId
+    && state.agent.projectRegistryState === "corrupt"
+    && draftTarget.kind === "project";
+  const messageSendInFlight = Boolean(state.agent.messageSendInFlightByScope[chatScopeKey]);
   const currentHistoryVersion = state.agent.currentChatId
     ? state.agent.historyVersionByChatId[state.agent.currentChatId] ?? 0
     : state.agent.newChatRequestId;
@@ -680,6 +727,16 @@ export function HomePage() {
     ? state.agent.tasks.find((task) => task.sessionKey === state.agent.currentSessionKey)?.title.trim() || t("home.title")
     : t("home.title");
   const activeConversationTitleDisplay = formatConversationTitleForDisplay(activeConversationTitle);
+  const sessionArtifactClient = useMemo(() => {
+    const client = clients?.memmyAgent;
+    const sessionKey = state.agent.currentSessionKey;
+    if (!client || !sessionKey) return null;
+    return {
+      resolveArtifact: (path: string) => client.resolveArtifact(path, sessionKey),
+      revealArtifact: (path: string) => client.revealArtifact(path, sessionKey),
+      openArtifact: (path: string) => client.openArtifact(path, sessionKey)
+    };
+  }, [clients?.memmyAgent, state.agent.currentSessionKey]);
   const isCurrentAgentRunning = Boolean(
     state.agent.currentChatId &&
     (
@@ -897,11 +954,12 @@ export function HomePage() {
     const focusedChatId = readFocusedAgentChatId();
     if (focusedChatId) {
       loadAgentThread(clients.memmyAgent, dispatch, focusedChatId, undefined, {
+        taskStateCoordinator,
         tolerateMissingThread: true,
         taskState: state.agent
       });
     }
-  }, [clients, dispatch, state.agent.blankDraftActive]);
+  }, [clients, dispatch, state.agent.blankDraftActive, taskStateCoordinator]);
 
   useEffect(() => {
     if (!clients?.memmyAgent
@@ -919,6 +977,7 @@ export function HomePage() {
 
     void submitAgentComposerMessage({
       chatId: null,
+      target: { kind: "standalone" },
       connection,
       ensureChatSubscription,
       content: pendingPrompt,
@@ -934,7 +993,7 @@ export function HomePage() {
       scopeKey: agentChatScopeKey(null, state.agent.newChatRequestId),
       onNewChatMessageSent: (chatId) => {
         rememberFirstEncounterRelayChatIfArmed(chatId);
-        refreshAgentTaskList(memmyAgent, dispatch, {
+        taskStateCoordinator.refreshTaskState({
           expectedChatId: chatId,
           reason: "new-chat",
           state: state.agent
@@ -956,6 +1015,7 @@ export function HomePage() {
     language,
     rememberFirstEncounterRelayChatIfArmed,
     state.agent,
+    taskStateCoordinator,
     track
   ]);
 
@@ -1112,17 +1172,14 @@ export function HomePage() {
       ? "reconnecting"
       : state.agent.connectionStatus;
   const statusText = agentStatusText(displayConnectionStatus, state.agent.modelName, t);
-  const chatOperationError = state.agent.operationErrorsBySurface.chat;
-  const visibleChatOperationError = chatOperationError
-    && (chatOperationError.scopeKey
-      ? chatOperationError.scopeKey === chatScopeKey
-      : !chatOperationError.chatId || chatOperationError.chatId === state.agent.currentChatId)
-    ? chatOperationError
+  const operationErrorNotice = state.agent.operationErrorNotice;
+  const visibleOperationError = operationErrorNotice
+    && (operationErrorNotice.scopeKey
+      ? operationErrorNotice.scopeKey === chatScopeKey
+      : !operationErrorNotice.chatId || operationErrorNotice.chatId === state.agent.currentChatId)
+    ? operationErrorNotice
     : null;
-  const agentError = agentErrorText(visibleChatOperationError?.message ?? state.agent.connectionError, t);
-  const deliveryUncertain = state.agent.currentChatId
-    ? Boolean(state.agent.deliveryUncertainByChatId[state.agent.currentChatId])
-    : false;
+  const agentError = agentErrorText(visibleOperationError?.message ?? null, t);
   const isAccountMode = state.bootstrap?.app.userMode === "account";
   const sanitizePlatformApiErrors = isAccountMode;
   const hasBlockedPendingMedia = pendingAttachments.some((item) => item.status !== "ready");
@@ -1135,25 +1192,12 @@ export function HomePage() {
       || hasBlockedPendingMedia
       || !connection
       || isCreatingChat
+      || messageSendInFlight
+      || currentSessionProjectBlocked
+      || draftProjectBlocked
       || state.agent.connectionStatus !== "connected"
       || state.agent.recoveringGeneration !== null;
   const centerComposerControls = isComposerSingleLine && pendingAttachments.length === 0;
-
-  // Local composer errors are cleared per session so a voice-permission error does not pollute other sessions.
-  useEffect(() => {
-    const currentError = composerMediaError;
-    if (!currentError) {
-      return;
-    }
-
-    const timeoutId = window.setTimeout(() => {
-      if (composerMediaErrorByScope[chatScopeKey] === currentError) {
-        dispatch(agentActions.composerMediaErrorUpdated(chatScopeKey, null));
-      }
-    }, COMPOSER_ERROR_AUTO_DISMISS_MS);
-
-    return () => window.clearTimeout(timeoutId);
-  }, [chatScopeKey, composerMediaError, composerMediaErrorByScope, dispatch]);
 
   useEffect(() => {
     if (selectedCommandIndex >= filteredSlashCommands.length) {
@@ -1164,6 +1208,24 @@ export function HomePage() {
   useEffect(() => {
     composerDraftsRef.current = composerDrafts;
   }, [composerDrafts]);
+
+  useEffect(() => {
+    if (
+      !state.agent.currentChatId
+      && draftTarget.kind === "project"
+      && state.agent.projectRegistryState === "ready"
+      && !selectedDraftProject
+    ) {
+      dispatch(agentActions.draftTargetUpdated(chatScopeKey, { kind: "standalone" }));
+    }
+  }, [
+    chatScopeKey,
+    dispatch,
+    draftTarget,
+    selectedDraftProject,
+    state.agent.currentChatId,
+    state.agent.projectRegistryState
+  ]);
 
   useEffect(() => {
     pendingAttachmentsRef.current = pendingAttachmentsByScope;
@@ -1215,33 +1277,101 @@ export function HomePage() {
       return;
     }
     const sendScopeKey = chatScopeKey;
-    await submitAgentComposerMessage({
-      chatId: state.agent.currentChatId,
-      connection,
-      ensureChatSubscription,
-      content: input,
-      language,
-      pendingAttachments,
-      uploadAgentMedia: (attachments) => clients!.memmyAgent.uploadAgentMedia(attachments),
-      dispatch,
-      track,
-      setCreatingChat: setIsCreatingChat,
-      setComposerMediaError: (message) => setComposerMediaErrorForScope(sendScopeKey, message),
-      clearComposer: () => clearComposerAfterSend(sendScopeKey),
-      chatSelectionEpoch: state.agent.chatSelectionEpoch,
-      getChatSelectionEpoch: () => chatSelectionEpochRef.current,
-      scopeKey: sendScopeKey,
-      onNewChatMessageSent: clients?.memmyAgent
-        ? (chatId) => {
-          rememberFirstEncounterRelayChatIfArmed(chatId);
-          refreshAgentTaskList(clients.memmyAgent, dispatch, {
-            expectedChatId: chatId,
-            reason: "new-chat",
-            state: state.agent
-          });
-        }
-        : undefined
-    });
+    if (messageSendLocksRef.current.has(sendScopeKey)) return;
+    const clientRequestId = crypto.randomUUID();
+    messageSendLocksRef.current.add(sendScopeKey);
+    dispatch(agentActions.messageSendLockUpdated(sendScopeKey, clientRequestId));
+    const target: WebuiSessionTarget | null = state.agent.currentChatId ? null : draftTarget;
+    try {
+      await submitAgentComposerMessage({
+        chatId: state.agent.currentChatId,
+        target,
+        clientRequestId,
+        connection,
+        ensureChatSubscription,
+        content: input,
+        language,
+        pendingAttachments,
+        uploadAgentMedia: (attachments) => clients!.memmyAgent.uploadAgentMedia(attachments),
+        dispatch,
+        track,
+        setCreatingChat: setIsCreatingChat,
+        setComposerMediaError: (message) => setComposerMediaErrorForScope(sendScopeKey, message),
+        clearComposer: () => clearComposerAfterSend(sendScopeKey),
+        chatSelectionEpoch: state.agent.chatSelectionEpoch,
+        getChatSelectionEpoch: () => chatSelectionEpochRef.current,
+        scopeKey: sendScopeKey,
+        onNewChatMessageSent: clients?.memmyAgent
+          ? (chatId) => {
+            rememberFirstEncounterRelayChatIfArmed(chatId);
+            taskStateCoordinator.refreshTaskState({
+              expectedChatId: chatId,
+              reason: "new-chat",
+              state: state.agent
+            });
+          }
+          : undefined
+      });
+    } finally {
+      messageSendLocksRef.current.delete(sendScopeKey);
+      dispatch(agentActions.messageSendLockUpdated(sendScopeKey, null));
+    }
+  }
+
+  function selectDraftTarget(target: WebuiSessionTarget) {
+    if (state.agent.currentChatId || messageSendInFlight) return;
+    dispatch(agentActions.draftTargetUpdated(chatScopeKey, target));
+    setProjectPickerOpen(false);
+  }
+
+  async function selectOtherProjectFolder() {
+    if (
+      state.agent.currentChatId
+      || messageSendInFlight
+      || projectPickerOperationId
+      || !window.memmy?.selectProjectDirectory
+      || !clients?.memmyAgent
+    ) {
+      return;
+    }
+    const operationId = `draft-project-picker-${crypto.randomUUID()}`;
+    const scopeKey = chatScopeKey;
+    const revision = state.agent.draftTargetRevisionByScope[scopeKey] ?? 0;
+    setProjectPickerOperationId(operationId);
+    try {
+      const selected = await window.memmy.selectProjectDirectory();
+      if (selected.canceled) return;
+      const result = await taskStateCoordinator.mutateProject({
+        kind: "create",
+        input: { mode: "existing", path: selected.path }
+      });
+      if (result.status !== "committed" || !result.project) {
+        throw new MemmyAgentRequestError(
+          "project registration failed",
+          result.status === "rejected" ? 409 : 503,
+          result.status === "rejected" ? result.code : "network_unavailable"
+        );
+      }
+      const currentRevision = draftTargetRevisionRef.current[scopeKey] ?? 0;
+      if (scopeKey === chatScopeKey && currentRevision === revision) {
+        dispatch(agentActions.draftTargetUpdated(scopeKey, {
+          kind: "project",
+          projectId: result.project.id
+        }));
+      }
+      setProjectPickerOpen(false);
+    } catch (error) {
+      dispatch(agentActions.operationFailed("chat", createAgentOperationError({
+        source: "new-chat",
+        message: error instanceof MemmyAgentRequestError
+          ? error.code ?? "project_operation_failed"
+          : "network_unavailable",
+        scopeKey
+      })));
+      taskStateCoordinator.refreshTaskState({ reason: "manual", state: state.agent });
+    } finally {
+      setProjectPickerOperationId((current) => current === operationId ? null : current);
+    }
   }
 
   function runExactLocalSlashCommand(command: string): boolean {
@@ -1334,7 +1464,14 @@ export function HomePage() {
   }
 
   function setComposerMediaErrorForScope(scopeKey: string, message: string | null) {
-    dispatch(agentActions.composerMediaErrorUpdated(scopeKey, message));
+    if (!message) {
+      return;
+    }
+    dispatch(agentActions.operationFailed("chat", createAgentOperationError({
+      source: "send",
+      message,
+      scopeKey
+    })));
   }
 
   function setCurrentComposerMediaError(message: string | null) {
@@ -1426,7 +1563,6 @@ export function HomePage() {
   }
 
   function resetNewChatLocalUi() {
-    resetComposerDraftUi();
     resetTransientConversationUi();
     setSlashMenuDismissed(false);
     setIsCreatingChat(false);
@@ -1814,10 +1950,12 @@ export function HomePage() {
           }
         : item));
     } catch (error) {
-      const message = error instanceof Error && error.message ? error.message : "home.media.error.sendReadFailed";
-      setPendingAttachmentsForScope(scopeKey, (current) => current.map((item) => item.id === id
-        ? { ...item, status: "error", errorKey: isMessageKey(message) ? message : "home.media.error.sendReadFailed" }
-        : item));
+      setPendingAttachmentsForScope(scopeKey, (current) => {
+        const failed = current.find((item) => item.id === id);
+        if (failed) revokePendingAttachment(failed);
+        return current.filter((item) => item.id !== id);
+      });
+      setComposerMediaErrorForScope(scopeKey, "attachment_read_failed");
     }
   }
 
@@ -1861,6 +1999,19 @@ export function HomePage() {
             <h1 className="text-2xl font-bold text-text-ink">{t("home.subtitle")}</h1>
           </div>
           <div className="w-full max-w-2xl">
+            <AgentOperationErrorSlot message={agentError} />
+            <ProjectTargetPicker
+              open={projectPickerOpen}
+              target={draftTarget}
+              selectedProject={selectedDraftProject}
+              projects={state.agent.projects}
+              registryState={state.agent.projectRegistryState}
+              disabled={messageSendInFlight || projectPickerOperationId != null}
+              canChooseOtherFolder={typeof window !== "undefined" && Boolean(window.memmy?.selectProjectDirectory)}
+              onToggle={() => setProjectPickerOpen((open) => !open)}
+              onSelect={selectDraftTarget}
+              onChooseOther={() => void selectOtherProjectFolder()}
+            />
             <div
               className="relative home-empty-composer agent-composer-shell rounded-card-lg"
               onDragOver={handleComposerDragOver}
@@ -1926,9 +2077,6 @@ export function HomePage() {
               </div>
             </div>
             <div className="home-empty-status-area">
-              {composerMediaError && <p role="alert" className="text-center text-xs text-status-error mt-3">{agentErrorText(composerMediaError, t)}</p>}
-              {agentError && <p className="text-center text-xs text-status-error mt-4">{agentError}</p>}
-              {deliveryUncertain && <p className="text-center text-xs text-status-error mt-4">{t("home.agent.deliveryUncertain")}</p>}
               {statusText && <p className="text-center text-xs text-text-ink/45 mt-4">{statusText}</p>}
               <p className="text-center text-[11px] text-text-ink/40 mt-4">{t("home.notice")}</p>
             </div>
@@ -1964,7 +2112,7 @@ export function HomePage() {
                 isSending={state.agent.isSending}
                 sanitizePlatformApiErrors={sanitizePlatformApiErrors}
                 accountMode={isAccountMode}
-                artifactClient={clients?.memmyAgent ?? null}
+                artifactClient={sessionArtifactClient}
               />
             </div>
           </div>
@@ -1981,6 +2129,12 @@ export function HomePage() {
           ) : null}
           <div className="agent-conversation-composer">
             <div className="max-w-3xl mx-auto">
+              {currentSessionProjectBlocked ? (
+                <p className="mx-auto mb-2 w-fit rounded-tag border border-status-error/20 bg-status-error/5 px-3 py-1 text-xs text-status-error" role="status">
+                  {t("home.project.registryUnavailable")}
+                </p>
+              ) : null}
+              <AgentOperationErrorSlot message={agentError} />
               <div
                 className="relative agent-composer-shell rounded-card-lg"
                 onDragOver={handleComposerDragOver}
@@ -2073,9 +2227,6 @@ export function HomePage() {
                   />
                 </div>
               </div>
-              {composerMediaError && <p role="alert" className="text-center text-xs text-status-error mt-2">{agentErrorText(composerMediaError, t)}</p>}
-              {agentError && <p className="text-center text-xs text-status-error mt-2">{agentError}</p>}
-              {deliveryUncertain && <p className="text-center text-xs text-status-error mt-2">{t("home.agent.deliveryUncertain")}</p>}
               <p className="text-center text-[11px] text-text-ink/40 mt-2">{t("home.notice")}</p>
               <input ref={fileInputRef} type="file" accept={AGENT_MEDIA_ACCEPT} multiple hidden className="hidden" onChange={(event) => void selectMedia(event)} />
             </div>
@@ -2083,6 +2234,90 @@ export function HomePage() {
         </section>
       )}
     </AppFrame>
+  );
+}
+
+export function AgentOperationErrorSlot(props: { message: string | null }) {
+  return (
+    <div className="agent-operation-error-slot" aria-live="polite" aria-atomic="true">
+      {props.message ? (
+        <p key={props.message} className="agent-operation-error-toast" role="alert">
+          {props.message}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function ProjectTargetPicker(props: {
+  open: boolean;
+  target: WebuiSessionTarget;
+  selectedProject: MemmyAgentProject | null;
+  projects: MemmyAgentProject[];
+  registryState: "ready" | "corrupt";
+  disabled: boolean;
+  canChooseOtherFolder: boolean;
+  onToggle: () => void;
+  onSelect: (target: WebuiSessionTarget) => void;
+  onChooseOther: () => void;
+}) {
+  const { t } = useTranslation();
+  const selectedLabel = props.registryState === "corrupt"
+    ? t("home.project.registryUnavailable")
+    : props.selectedProject?.name ?? t("home.project.optional");
+  const selectedPath = props.registryState === "ready" ? props.selectedProject?.rootPath : null;
+  return (
+    <div className="home-project-picker">
+      <button
+        type="button"
+        className="home-project-picker__trigger"
+        disabled={props.disabled}
+        aria-expanded={props.open}
+        onClick={props.onToggle}
+      >
+        <Folder size={16} className="shrink-0" />
+        <span className="min-w-0 flex-1 text-left">
+          <span className="block truncate">{selectedLabel}</span>
+          {selectedPath ? <span className="block truncate text-[10px] opacity-60">{selectedPath}</span> : null}
+        </span>
+        <ChevronDown size={14} className="shrink-0" />
+      </button>
+      {props.open ? (
+        <div className="home-project-picker__menu">
+          {props.registryState === "ready" ? props.projects.map((project) => (
+            <button
+              key={project.id}
+              type="button"
+              className={`home-project-picker__option${props.target.kind === "project" && props.target.projectId === project.id ? " home-project-picker__option--active" : ""}`}
+              title={project.rootPath}
+              onClick={() => props.onSelect({ kind: "project", projectId: project.id })}
+            >
+              <Folder size={14} className="shrink-0" />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate">{project.name}</span>
+                <span className="block truncate text-[10px] opacity-60">{project.rootPath}</span>
+              </span>
+            </button>
+          )) : null}
+          {props.registryState === "ready" && props.canChooseOtherFolder ? (
+            <button type="button" className="home-project-picker__option" onClick={props.onChooseOther}>
+              <FolderPlus size={14} className="shrink-0" />
+              <span>{t("home.project.chooseOther")}</span>
+            </button>
+          ) : null}
+          {props.target.kind === "project" ? (
+            <button
+              type="button"
+              className="home-project-picker__option home-project-picker__option--clear"
+              onClick={() => props.onSelect({ kind: "standalone" })}
+            >
+              <X size={14} className="shrink-0" />
+              <span>{t("home.project.clear")}</span>
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -2097,8 +2332,32 @@ export function agentErrorText(error: string | null, t: HomeTranslate = defaultH
   if (TRANSLATABLE_AGENT_ERROR_KEYS.has(error as MessageKey)) {
     return t(error as MessageKey);
   }
-  return error;
+  const stableCode = error.includes(":") ? error.slice(error.lastIndexOf(":") + 1) : error;
+  const mapped = AGENT_OPERATION_ERROR_MESSAGE_KEYS[stableCode];
+  if (mapped) return t(mapped);
+  if (
+    /failed to fetch|network|connection refused|gateway connection|websocket|econnrefused/i.test(error)
+  ) {
+    return t("home.error.network");
+  }
+  return t("home.error.generic");
 }
+
+const AGENT_OPERATION_ERROR_MESSAGE_KEYS: Record<string, MessageKey> = {
+  network_unavailable: "home.error.network",
+  request_timeout: "home.error.timeout",
+  project_directory_unavailable: "home.error.projectUnavailable",
+  project_unavailable: "home.error.projectUnavailable",
+  workspace_unavailable: "home.error.projectUnavailable",
+  project_removed: "home.error.projectUnavailable",
+  project_deleting: "home.error.projectDeleting",
+  project_directory_not_empty: "home.error.projectNotEmpty",
+  project_limit_reached: "home.error.projectLimit",
+  project_registry_corrupt: "home.error.projectRegistry",
+  message_request_conflict: "home.error.messageConflict",
+  result_unknown: "home.error.resultUnknown",
+  attachment_read_failed: "home.media.error.sendReadFailed"
+};
 
 export function agentStatusText(status: string, modelName: string | null, t: HomeTranslate): string | null {
   if (status === "connected") {
@@ -2121,6 +2380,7 @@ function loadAgentThread(
   options: {
     tolerateMissingThread?: boolean;
     taskState?: Pick<AgentState, "sidebarStateVersion" | "runStatusVersionByChatId">;
+    taskStateCoordinator?: ReturnType<typeof useAgentRuntimeBridge>["taskStateCoordinator"];
   } = {}
 ): void {
   const requestId = nextAgentHistoryRequestId(chatId);
@@ -2138,7 +2398,11 @@ function loadAgentThread(
       message: error instanceof Error ? error.message : String(error),
       chatId
     }))));
-  refreshAgentTaskList(client, dispatch, { reason: "thread", state: options.taskState });
+  if (options.taskStateCoordinator) {
+    options.taskStateCoordinator.refreshTaskState({ reason: "thread", state: options.taskState });
+  } else {
+    refreshAgentTaskList(client, dispatch, { reason: "thread", state: options.taskState });
+  }
 }
 
 let agentHistoryRequestCounter = 0;

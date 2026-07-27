@@ -456,9 +456,6 @@ export class WorkerRunner {
       stage,
       activeJobId: job.id,
       attemptCount: job.attempts,
-      errorCode: null,
-      errorMessage: null,
-      failedAt: null,
       updatedAt: this.deps.nowIso()
     }, stage === "summary"
       ? ["summary_pending", "summarizing"]
@@ -480,9 +477,11 @@ export class WorkerRunner {
       activeJobId: terminal ? null : job.id,
       attemptCount: job.attempts,
       retryAction: terminal ? classification.retryAction : "retry",
-      errorCode: terminal ? classification.code : null,
-      errorMessage: terminal ? message : null,
-      failedAt: terminal ? this.deps.nowIso() : null,
+      ...(terminal ? {
+        errorCode: classification.code,
+        errorMessage: message,
+        failedAt: this.deps.nowIso()
+      } : {}),
       updatedAt: this.deps.nowIso()
     }, stage === "summary"
       ? ["summary_pending", "summarizing", "failed"]

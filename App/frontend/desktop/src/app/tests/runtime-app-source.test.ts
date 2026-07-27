@@ -48,7 +48,7 @@ describe("RuntimeApp bootstrap loading", () => {
     const routerSource = readFileSync(resolve(__dirname, "..", "router.tsx"), "utf8");
 
     expect(appSource).toContain("<UpdateCoordinatorProvider>");
-    expect(appSource).toContain("<AgentRuntimeBridge>");
+    expect(appSource).toContain("<AgentRuntimeBridge taskStateCoordinator={taskStateCoordinator ?? undefined}>");
     expect(appSource.indexOf("<UpdateCoordinatorProvider>")).toBeLessThan(appSource.indexOf("<AppRouter onRetry={retry} />"));
     expect(routerSource).toContain("<GlobalUpdateDialog");
     expect(routerSource).toContain("suspended={isPetWindowContext || Boolean(petGuideRequest) || tokenModalOpen}");
@@ -63,7 +63,16 @@ describe("RuntimeApp bootstrap loading", () => {
         sessionKey,
         messages: [{ role: "user", content: "hi" }]
       })),
-      listSessions: vi.fn(async () => [{ key: "websocket:chat-2", title: "Chat 2" }]),
+      getSessionSnapshot: vi.fn(async () => ({
+        projectRegistryState: "ready" as const,
+        projects: [],
+        sessions: [{
+          key: "websocket:chat-2",
+          title: "Chat 2",
+          projectId: null,
+          cwd: "/workspace"
+        }]
+      })),
       readSidebarState: vi.fn(async () => ({
         schema_version: 1 as const,
         pinned_keys: [],
@@ -76,6 +85,7 @@ describe("RuntimeApp bootstrap loading", () => {
           show_previews: true,
           show_timestamps: true,
           show_archived: false,
+          show_project_archived: false,
           sort: "updated_desc" as const
         },
         updated_at: null
@@ -105,7 +115,7 @@ describe("RuntimeApp bootstrap loading", () => {
       readWebuiThread: vi.fn(async () => {
         throw new Error("Failed to fetch");
       }),
-      listSessions: vi.fn(async () => {
+      getSessionSnapshot: vi.fn(async () => {
         throw new Error("Failed to fetch");
       }),
       readSidebarState: vi.fn(async () => ({
@@ -120,6 +130,7 @@ describe("RuntimeApp bootstrap loading", () => {
           show_previews: true,
           show_timestamps: true,
           show_archived: false,
+          show_project_archived: false,
           sort: "updated_desc" as const
         },
         updated_at: null

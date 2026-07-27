@@ -213,7 +213,7 @@ function closeSessionOutput() {
 }
 
 function startTurnOutput() {
-  return { turnId: "turn-1", contextPacketId: "context-1", sessionId: "session-1", episodeId: "episode-1", injectedContext: injectedContext(), searchEventId: "search-1", sourceMemoryIds: ["memory-1"], hits: [recallHit()], status: [], serverTime: ISO };
+  return { turnId: "turn-1", contextPacketId: "context-1", sessionId: "session-1", injectedContext: injectedContext(), searchEventId: "search-1", sourceMemoryIds: ["memory-1"], hits: [recallHit()], status: [], serverTime: ISO };
 }
 
 function completeTurnOutput() {

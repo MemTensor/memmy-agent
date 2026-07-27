@@ -35,6 +35,7 @@ describe("SourcesSubPage local data path", () => {
     });
     const getPath = vi.fn(() => pathPromise);
     const reveal = vi.fn(async () => ({ ok: true as const, dataPath: windowsDataPath }));
+    const listSources = vi.fn(async () => []);
     const clients = {
       runtimeConfig: {
         baseUrl: "http://127.0.0.1:18100",
@@ -44,6 +45,9 @@ describe("SourcesSubPage local data path", () => {
       localData: {
         getPath,
         reveal
+      },
+      agentSources: {
+        listSources
       },
       memoryRuntime: {
         async health() {
@@ -63,6 +67,7 @@ describe("SourcesSubPage local data path", () => {
     });
 
     expect(getPath).toHaveBeenCalledTimes(1);
+    expect(listSources).toHaveBeenCalledTimes(1);
     expect(reveal).not.toHaveBeenCalled();
     expect(container.textContent).not.toContain("~/.memmy/memory-service");
     expect(container.textContent).not.toContain(windowsDataPath);

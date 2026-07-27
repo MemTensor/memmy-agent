@@ -119,6 +119,7 @@ export async function startPackagedRuntimeServices(
       agentEntry: entries.agentEntry,
       agentWorkspace: runtimeConfig.agentWorkspace
     });
+    await preparePackagedBrowser(entries, runtimeConfig, options);
     await ensureMemoryService(entries, runtimeConfig, children, options);
     await gatewaySupervisor.ensureStarted();
 
@@ -295,6 +296,72 @@ export async function syncBundledAgentSkills(options: {
   const workspaceSkillsDirectory = join(options.agentWorkspace, "skills");
 
   await copyDirectoryContents(bundledSkillsDirectory, workspaceSkillsDirectory);
+}
+
+export async function preparePackagedBrowser(
+  entries: RuntimeEntryPaths,
+  runtimeConfig: PackagedRuntimeConfig,
+  options: StartPackagedRuntimeServicesOptions,
+  spawnProcess: typeof spawn = spawn
+): Promise<boolean> {
+  const logWriter = createRotatingWriter({
+    filePath: join(options.logDirectory, "browser-prepare.log"),
+    maxSize: DAEMON_LOG_MAX_SIZE,
+    maxFiles: DAEMON_LOG_MAX_FILES
+  });
+  if (!existsSync(entries.agentEntry)) {
+    logWriter.write(`Missing browser prepare runtime entry: ${entries.agentEntry}\n`);
+    logWriter.close();
+    return false;
+  }
+  return new Promise<boolean>((resolvePrepare) => {
+    let settled = false;
+    const finish = (ready: boolean): void => {
+      if (settled) return;
+      settled = true;
+      logWriter.close();
+      resolvePrepare(ready);
+    };
+    let child: ChildProcess;
+    try {
+      child = spawnProcess(
+        process.execPath,
+        [entries.agentEntry, "internal", "browser-prepare"],
+        {
+          env: {
+            ...process.env,
+            MEMMY_CONFIG: runtimeConfig.configPath,
+            MEMMY_AGENT_WORKSPACE: runtimeConfig.agentWorkspace,
+            ELECTRON_RUN_AS_NODE: "1",
+            NODE_ENV: process.env.NODE_ENV ?? "production"
+          },
+          stdio: ["ignore", "pipe", "pipe"],
+          windowsHide: true,
+          shell: false
+        }
+      );
+    } catch (error) {
+      logWriter.write(`Browser prepare failed to start: ${String(error)}\n`);
+      finish(false);
+      return;
+    }
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk) => logWriter.write(String(chunk)));
+    child.stderr?.on("data", (chunk) => logWriter.write(String(chunk)));
+    child.once("error", (error) => {
+      logWriter.write(`Browser prepare failed: ${error.message}\n`);
+      finish(false);
+    });
+    child.once("exit", (code, signal) => {
+      if (code !== 0) {
+        logWriter.write(
+          `Browser prepare unavailable: ${signal ? `signal ${signal}` : `code ${String(code)}`}\n`
+        );
+      }
+      finish(code === 0);
+    });
+  });
 }
 
 async function copyDirectoryContents(sourceDirectory: string, targetDirectory: string): Promise<void> {

@@ -215,6 +215,11 @@ function scheduleManagedRestartExit(runtime: RestartCommandRuntime, delayMs = 10
 
 export async function cmdNew(ctx: CommandContext): Promise<OutboundMessage> {
   await ctx.loop?.cancelActiveTasks?.(ctx.key, { excludeSignal: ctx.abortSignal });
+  await ctx.loop?.closeBrowserSession?.(
+    ctx.key,
+    ctx.msg.channel,
+    ctx.msg.chatId,
+  );
   const session = ctx.session ?? ctx.loop?.sessions?.getOrCreate?.(ctx.key);
   if (session) {
     const snapshot = (session.messages ?? []).slice(session.lastConsolidated ?? 0);

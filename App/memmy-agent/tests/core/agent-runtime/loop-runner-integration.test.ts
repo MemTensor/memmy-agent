@@ -96,6 +96,10 @@ describe("AgentLoop direct processing", () => {
   it("publishes a thread session update after early-persisting WebUI user messages", async () => {
     const p = provider(["web answer"]);
     const agent = loop(p);
+    agent.sessions.reserveWebuiSessionBinding("websocket:web-chat", {
+      projectId: null,
+      cwd: fs.realpathSync(agent.workspace),
+    });
 
     const outbound = await agent.processMessage(new InboundMessage({
       channel: "websocket",

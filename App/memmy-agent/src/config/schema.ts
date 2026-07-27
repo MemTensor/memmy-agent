@@ -595,6 +595,41 @@ export class WebToolsConfig extends Base {
   }
 }
 
+export class BrowserToolsConfig extends Base {
+  enabled = true;
+  maxSessions = 4;
+  idleTimeoutS = 900;
+
+  constructor(init: Dict = {}) {
+    super();
+    init = assertPlainObject("tools.browser", init);
+    this.enabled = assertBoolean(
+      "tools.browser.enabled",
+      pick(init, ["enabled"], this.enabled),
+    );
+    this.maxSessions = assertIntRange(
+      "tools.browser.maxSessions",
+      pick(init, ["maxSessions"], this.maxSessions),
+      1,
+      8,
+    );
+    this.idleTimeoutS = assertIntRange(
+      "tools.browser.idleTimeoutS",
+      pick(init, ["idleTimeoutS"], this.idleTimeoutS),
+      60,
+      3600,
+    );
+  }
+
+  override toObject(): Dict {
+    return {
+      enabled: this.enabled,
+      maxSessions: this.maxSessions,
+      idleTimeoutS: this.idleTimeoutS,
+    };
+  }
+}
+
 export class ExecToolConfig extends Base {
   enable = true;
   enabled = true;
@@ -875,6 +910,7 @@ export class MCPServerConfig extends Base {
 
 export class ToolsConfig extends Base {
   web: WebToolsConfig;
+  browser: BrowserToolsConfig;
   exec: ExecToolConfig;
   webSearch: WebSearchConfig;
   webFetch: WebFetchConfig;
@@ -895,6 +931,10 @@ export class ToolsConfig extends Base {
             search: searchInit,
             fetch: fetchInit,
           });
+    this.browser =
+      init.browser instanceof BrowserToolsConfig
+        ? init.browser
+        : new BrowserToolsConfig(pick(init, ["browser"], {}));
     this.exec =
       init.exec instanceof ExecToolConfig ? init.exec : new ExecToolConfig(init.exec ?? {});
     this.webSearch = init.webSearch instanceof WebSearchConfig ? init.webSearch : this.web.search;
@@ -923,6 +963,7 @@ export class ToolsConfig extends Base {
     );
     return {
       web: this.web.toObject(),
+      browser: this.browser.toObject(),
       exec: this.exec.toObject(),
       webSearch: this.webSearch.toObject(),
       webFetch: this.webFetch.toObject(),

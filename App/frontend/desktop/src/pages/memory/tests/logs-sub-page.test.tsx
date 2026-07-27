@@ -487,7 +487,16 @@ describe("LogsSubPage", () => {
                   id: 2,
                   toolName: "memory_search",
                   inputJson: JSON.stringify({ query: "hermes" }),
-                  outputJson: JSON.stringify({ candidates: [], filtered: [] }),
+                  outputJson: JSON.stringify({
+                    candidates: [],
+                    filtered: [],
+                    stats: {
+                      raw: 14,
+                      ranked: 0,
+                      finalReturned: 0,
+                      llmFilter: { kept: 0, dropped: 0, outcome: "kept" }
+                    }
+                  }),
                   durationMs: 20,
                   success: true,
                   calledAt: "2026-06-03T10:01:00.000Z"
@@ -648,7 +657,7 @@ describe("LogsSubPage", () => {
     expect(html).not.toContain("candidates 7, kept 6");
   });
 
-  it("keeps stats-only memory_search counts visible after long summaries", () => {
+  it("uses the pre-LLM ranked count instead of the raw recall count", () => {
     const html = renderToString(
       <I18nProvider language="zh-CN">
         <LogsSubPageView
@@ -693,7 +702,8 @@ describe("LogsSubPage", () => {
 
     expect(html).toContain("用户希望参考腾讯团队实践图");
     expect(html).toContain("memory-log-card__summary-tail");
-    expect(html).toContain("· 保留 2/10");
+    expect(html).toContain("· 保留 2/4");
+    expect(html).not.toContain("· 保留 2/10");
     expect(html).not.toContain("· 保留 0/0");
   });
 

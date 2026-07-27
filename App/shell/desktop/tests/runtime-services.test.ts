@@ -8,6 +8,7 @@ import YAML from "yaml";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AgentGatewaySupervisor,
+  preparePackagedBrowser,
   preparePackagedRuntimeConfig,
   restartExternalMemoryService,
   spawnNodeService,
@@ -371,6 +372,59 @@ describe("packaged desktop runtime config", () => {
       .resolves.toBe("# Example\n");
     await expect(readFile(join(agentWorkspace, "skills", "example", "references", "guide.md"), "utf8"))
       .resolves.toBe("guide\n");
+  });
+
+  it("prepares the packaged browser with the bundled agent runtime before services start", async () => {
+    const root = await makeTempRoot();
+    const agentEntry = join(root, "runtime", "memmy-agent", "dist", "main.js");
+    const logDirectory = join(root, "logs");
+    await mkdir(join(root, "runtime", "memmy-agent", "dist"), { recursive: true });
+    await mkdir(logDirectory, { recursive: true });
+    await writeFile(agentEntry, "// bundled agent\n", "utf8");
+    const child = new EventEmitter() as ChildProcess;
+    (child as any).stdout = Object.assign(new EventEmitter(), {
+      setEncoding: vi.fn(),
+    });
+    (child as any).stderr = Object.assign(new EventEmitter(), {
+      setEncoding: vi.fn(),
+    });
+    const spawnProcess = vi.fn(() => {
+      queueMicrotask(() => child.emit("exit", 0, null));
+      return child;
+    });
+    const runtimeConfig = {
+      configPath: join(root, "config.yaml"),
+      agentWorkspace: join(root, "workspace"),
+    } as PackagedRuntimeConfig;
+
+    await expect(
+      preparePackagedBrowser(
+        { agentEntry, memoryEntry: join(root, "memory.js") },
+        runtimeConfig,
+        {
+          appPath: root,
+          resourcesPath: root,
+          logDirectory,
+          logLevel: "info",
+        },
+        spawnProcess as any,
+      ),
+    ).resolves.toBe(true);
+
+    expect(spawnProcess).toHaveBeenCalledWith(
+      process.execPath,
+      [agentEntry, "internal", "browser-prepare"],
+      expect.objectContaining({
+        shell: false,
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"],
+        env: expect.objectContaining({
+          MEMMY_CONFIG: runtimeConfig.configPath,
+          MEMMY_AGENT_WORKSPACE: runtimeConfig.agentWorkspace,
+          ELECTRON_RUN_AS_NODE: "1",
+        }),
+      }),
+    );
   });
 });
 

@@ -2,6 +2,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -16,6 +17,7 @@ import { loadConfig, resolveConfigEnvVars } from "../../../config/loader.js";
 import { VERSION } from "../../../version.js";
 import { Tool } from "./base.js";
 import { ToolRegistry } from "./registry.js";
+import { storeToolImageArtifact } from "../../../utils/artifacts.js";
 
 const TRANSIENT_EXC_NAMES = new Set([
   "ClosedResourceError",
@@ -262,7 +264,7 @@ function extractNullableBranch(options: any): [Record<string, any>, boolean] | n
   return sawNull && nonNull.length === 1 ? [nonNull[0], true] : null;
 }
 
-function normalizeSchemaForOpenAI(schema: any): Record<string, any> {
+export function normalizeSchemaForOpenAI(schema: any): Record<string, any> {
   if (!schema || typeof schema !== "object" || Array.isArray(schema)) return { type: "object", properties: {}, required: [] };
   let normalized: Record<string, any> = { ...schema };
   if (Array.isArray(normalized.type)) {
@@ -298,6 +300,92 @@ function normalizeSchemaForOpenAI(schema: any): Record<string, any> {
 function textFromContentBlock(block: any): string {
   if (block && typeof block === "object" && typeof block.text === "string") return block.text;
   return String(block);
+}
+
+export type McpContentMode = "text" | "structured";
+
+export function convertMcpToolContent(
+  result: any,
+  mode: McpContentMode = "text",
+): string | Array<Record<string, any>> {
+  const content = Array.isArray(result?.content) ? result.content : [];
+  if (mode === "text") {
+    return content.map(textFromContentBlock).join("\n") || "(no output)";
+  }
+  const converted: Array<Record<string, any>> = [];
+  for (const block of content) {
+    if (block?.type === "text" && typeof block.text === "string") {
+      converted.push({ type: "text", text: block.text });
+      continue;
+    }
+    if (
+      block?.type === "image" &&
+      typeof block.data === "string" &&
+      typeof block.mimeType === "string"
+    ) {
+      try {
+        const stored = storeToolImageArtifact(block.data, block.mimeType);
+        converted.push({
+          type: "image_url",
+          image_url: { url: stored.dataUrl, detail: "auto" },
+          meta: { path: stored.path },
+        });
+      } catch (error) {
+        converted.push({
+          type: "text",
+          text: `[image unavailable: ${error instanceof Error ? error.message : "invalid image"}]`,
+        });
+      }
+      continue;
+    }
+    converted.push({
+      type: "text",
+      text: `[unsupported MCP content: ${String(block?.type ?? typeof block)}]`,
+    });
+  }
+  return converted.length ? converted : [{ type: "text", text: "(no output)" }];
+}
+
+export type InMemoryMcpConnection = {
+  client: Client;
+  server: any;
+  clientTransport: InMemoryTransport;
+  serverTransport: InMemoryTransport;
+  close: () => Promise<void>;
+};
+
+export async function connectInMemoryMcpServer(server: any): Promise<InMemoryMcpConnection> {
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "memmy-agent-browser", version: VERSION });
+  try {
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+  } catch (error) {
+    await Promise.allSettled([
+      client.close(),
+      server.close?.(),
+      clientTransport.close(),
+      serverTransport.close(),
+    ]);
+    throw error;
+  }
+  let closed = false;
+  return {
+    client,
+    server,
+    clientTransport,
+    serverTransport,
+    close: async () => {
+      if (closed) return;
+      closed = true;
+      await Promise.allSettled([
+        client.close(),
+        server.close?.(),
+        clientTransport.close(),
+        serverTransport.close(),
+      ]);
+    },
+  };
 }
 
 export class MCPToolWrapper extends Tool {
@@ -339,7 +427,7 @@ export class MCPToolWrapper extends Tool {
           this.toolTimeout,
           "timeout",
         );
-        return (result.content ?? []).map(textFromContentBlock).join("\n") || "(no output)";
+        return convertMcpToolContent(result, "text") as string;
       } catch (error) {
         if ((error as Error).message === "timeout") return `(MCP tool call timed out after ${this.toolTimeout}s)`;
         if ((error as Error).name === "CancelledError") return "(MCP tool call was cancelled)";

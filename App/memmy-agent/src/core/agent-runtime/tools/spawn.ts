@@ -8,11 +8,18 @@ export class SpawnTool extends Tool {
   originChatId = "direct";
   sessionKey = "cli:direct";
   originMessageId: string | null = null;
+  workspace: string | null = null;
+  readonlySkillRoots: readonly string[];
   private readonly requestContext = new RequestContextStore();
 
-  constructor(options: { manager?: any } | any = {}) {
+  constructor(options: { manager?: any; readonlySkillRoots?: readonly string[] } | any = {}) {
     super();
     this.manager = options && typeof options === "object" && "manager" in options ? options.manager : options;
+    this.readonlySkillRoots = Object.freeze(
+      options && typeof options === "object" && Array.isArray(options.readonlySkillRoots)
+        ? [...options.readonlySkillRoots]
+        : [],
+    );
   }
 
   static enabled(ctx: any): boolean {
@@ -20,7 +27,10 @@ export class SpawnTool extends Tool {
   }
 
   static create(ctx: any): Tool {
-    return new SpawnTool({ manager: ctx?.subagentManager });
+    return new SpawnTool({
+      manager: ctx?.subagentManager,
+      readonlySkillRoots: ctx?.readonlySkillRoots ?? [],
+    });
   }
 
   get name(): string {
@@ -49,6 +59,7 @@ export class SpawnTool extends Tool {
     this.originChatId = ctx.chatId ?? "direct";
     this.sessionKey = ctx.sessionKey ?? `${this.originChannel}:${this.originChatId}`;
     this.originMessageId = ctx.messageId ?? null;
+    this.workspace = ctx.workspace ?? null;
   }
 
   async execute(params: { task?: string; label?: string; temperature?: number } = {}): Promise<string> {
@@ -63,6 +74,7 @@ export class SpawnTool extends Tool {
       ? (requestContext.sessionKey ?? `${originChannel}:${originChatId}`)
       : this.sessionKey;
     const originMessageId = requestContext?.messageId ?? this.originMessageId;
+    const workspace = requestContext?.workspace ?? this.workspace;
     const running = this.manager.getRunningCount?.() ?? 0;
     const limit = this.manager.maxConcurrentSubagents ?? this.manager.maxConcurrent;
     if (limit != null && running >= limit) {
@@ -80,6 +92,8 @@ export class SpawnTool extends Tool {
         sessionKey,
         originMessageId,
         temperature: params.temperature,
+        workspace,
+        readonlySkillRoots: this.readonlySkillRoots,
       }),
     );
   }

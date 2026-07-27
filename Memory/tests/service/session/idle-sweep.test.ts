@@ -206,18 +206,11 @@ describe("MemoryService / session / idle sweep", () => {
       sessionId: longSession.sessionId,
       query: "Run a long deployment verification"
     });
-    const rawTurn = db.db.prepare(
-      `SELECT id
-       FROM raw_turns
-       WHERE session_id = ?
-         AND turn_id = ?`
-    ).get(longSession.sessionId, "turn-long-running") as { id: string };
-    db.db.prepare(
-      `UPDATE raw_turns
-       SET created_at = ?
-       WHERE id = ?`
-    ).run(new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(), rawTurn.id);
-    service.completeTurn("turn-long-running", {
+    expect(started).not.toHaveProperty("episodeId");
+    expect(db.db.prepare(
+      "SELECT id FROM raw_turns WHERE session_id = ? AND turn_id = ?"
+    ).get(longSession.sessionId, "turn-long-running")).toBeUndefined();
+    const completed = service.completeTurn("turn-long-running", {
       sessionId: longSession.sessionId,
       query: "Run a long deployment verification",
       answer: "The long deployment verification completed."
@@ -226,7 +219,7 @@ describe("MemoryService / session / idle sweep", () => {
       `UPDATE episodes
        SET updated_at = ?
        WHERE id = ?`
-    ).run(new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(), started.episodeId);
+    ).run(new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(), completed.episodeId);
 
     const triggerSession = service.openSession({
       namespace: {
@@ -247,7 +240,7 @@ describe("MemoryService / session / idle sweep", () => {
       `SELECT status
        FROM episodes
        WHERE id = ?`
-    ).get(started.episodeId) as { status: string };
+    ).get(completed.episodeId) as { status: string };
     expect(episode.status).toBe("open");
     db.close();
   });
@@ -267,17 +260,24 @@ describe("MemoryService / session / idle sweep", () => {
       sessionId: activeSession.sessionId,
       query: "Run a long tool-driven deployment"
     });
+    expect(started).not.toHaveProperty("episodeId");
+    await service.observeTool({
+      sessionId: activeSession.sessionId,
+      turnId: "turn-active-tool",
+      toolCallId: "call-active-tool",
+      toolName: "deployment_status",
+      args: { deployment: "release" }
+    });
     const rawTurn = db.db.prepare(
-      `SELECT id
+      `SELECT id, episode_id
        FROM raw_turns
        WHERE session_id = ?
          AND turn_id = ?`
-    ).get(activeSession.sessionId, "turn-active-tool") as { id: string };
+    ).get(activeSession.sessionId, "turn-active-tool") as { id: string; episode_id: string };
     const oldAt = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
     setRawTurnActivityAt(db, rawTurn.id, oldAt);
     await service.observeTool({
       sessionId: activeSession.sessionId,
-      episodeId: started.episodeId,
       turnId: "turn-active-tool",
       toolCallId: "call-active-tool",
       toolName: "deployment_status",
@@ -287,7 +287,7 @@ describe("MemoryService / session / idle sweep", () => {
       `UPDATE episodes
        SET updated_at = ?
        WHERE id = ?`
-    ).run(oldAt, started.episodeId);
+    ).run(oldAt, rawTurn.episode_id);
 
     const triggerSession = service.openSession({
       namespace: {
@@ -308,7 +308,7 @@ describe("MemoryService / session / idle sweep", () => {
       `SELECT status
        FROM episodes
        WHERE id = ?`
-    ).get(started.episodeId) as { status: string };
+    ).get(rawTurn.episode_id) as { status: string };
     expect(episode.status).toBe("open");
     db.close();
   });

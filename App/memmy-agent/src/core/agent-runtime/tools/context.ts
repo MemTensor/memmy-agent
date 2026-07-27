@@ -42,6 +42,8 @@ export class ToolContext extends RequestContext {
   messageSendCallback?: any;
   providerSnapshotLoader?: (() => any) | null;
   execSessionManager?: any;
+  browserSessionManager?: any;
+  readonlySkillRoots?: readonly string[];
   timezone: string;
 
   constructor(init: Partial<ToolContext> = {}) {
@@ -52,6 +54,8 @@ export class ToolContext extends RequestContext {
     this.fileStateStore = init.fileStateStore;
     this.providerSnapshotLoader = init.providerSnapshotLoader ?? null;
     this.execSessionManager = init.execSessionManager;
+    this.browserSessionManager = init.browserSessionManager;
+    this.readonlySkillRoots = init.readonlySkillRoots;
     this.timezone = init.timezone ?? "UTC";
   }
 }

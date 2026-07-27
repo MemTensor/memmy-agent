@@ -99,6 +99,13 @@ export class WebuiTitleService {
     );
   }
 
+  discard(sessionKey: string): void {
+    if (!sessionKey.startsWith("websocket:")) return;
+    const chatId = sessionKey.slice("websocket:".length);
+    const pending = this.pendingByChatId.get(chatId);
+    if (pending?.sessionKey === sessionKey) this.pendingByChatId.delete(chatId);
+  }
+
   private async generateTitle(pending: PendingTitleRequest): Promise<boolean> {
     if (this.inFlightSessionKeys.has(pending.sessionKey)) return false;
     this.inFlightSessionKeys.add(pending.sessionKey);

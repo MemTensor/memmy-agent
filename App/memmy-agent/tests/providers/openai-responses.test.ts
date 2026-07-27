@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   consumeSdkStream,
   convertMessages,
+  convertToolOutput,
   convertTools,
   convertUserMessage,
   FINISH_REASON_MAP,
@@ -199,6 +200,44 @@ describe("OpenAI Responses convertMessages", () => {
     const [, items] = convertMessages([{ role: "tool", tool_call_id: "call_1", content: { key: "value" } }]);
 
     expect(items[0].output).toBe('{"key": "value"}');
+  });
+
+  it("passes mixed browser screenshot results as native multimodal tool output", () => {
+    const imageUrl = "data:image/png;base64,abc";
+    const content = [
+      { type: "text", text: "Screenshot captured" },
+      {
+        type: "image_url",
+        image_url: { url: imageUrl, detail: "high" },
+        meta: { path: "/tmp/screenshot.png" },
+      },
+    ];
+
+    expect(convertToolOutput(content)).toEqual([
+      { type: "input_text", text: "Screenshot captured" },
+      { type: "input_image", image_url: imageUrl, detail: "high" },
+    ]);
+    const [, items] = convertMessages([
+      { role: "tool", tool_call_id: "call_browser", content },
+    ]);
+    expect(items[0]).toEqual({
+      type: "function_call_output",
+      call_id: "call_browser",
+      output: [
+        { type: "input_text", text: "Screenshot captured" },
+        { type: "input_image", image_url: imageUrl, detail: "high" },
+      ],
+    });
+    expect(JSON.stringify(items[0])).not.toContain("/tmp/screenshot.png");
+  });
+
+  it("keeps text-only structured tool output compatible with string output", () => {
+    expect(
+      convertToolOutput([
+        { type: "text", text: "first" },
+        { type: "text", text: "second" },
+      ]),
+    ).toBe("first\nsecond");
   });
 
   it("does not leak non-standard message keys", () => {

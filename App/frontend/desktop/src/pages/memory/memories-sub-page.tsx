@@ -218,6 +218,18 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
     void refresh(page, sourceAgent, { useCache: false }).catch(() => undefined);
   }
 
+  function updateOpenDetailProcessing(memoryId: string, processing: MemoryProcessingRecord) {
+    setDetail((current) => current?.status === "ready" && current.data.item.id === memoryId
+      ? {
+          status: "ready",
+          data: {
+            ...current.data,
+            item: { ...current.data.item, processing }
+          }
+        }
+      : current);
+  }
+
   async function retryMemoryProcessing(memoryId: string) {
     if (!props.client) {
       setRetryFeedback({ memoryId, status: "error", message: t("memory.clientNotReady") });
@@ -230,13 +242,15 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
     }
     setRetryFeedback({ memoryId, status: "running" });
     try {
-      await props.client.retryMemoryProcessing(memoryId);
+      const retry = await props.client.retryMemoryProcessing(memoryId);
+      updateOpenDetailProcessing(memoryId, retry.processing);
       const deadline = Date.now() + 10 * 60_000;
       while (Date.now() < deadline) {
         const status = await props.client.getMemoryProcessingStatus([memoryId]);
         if (requestId !== retryRequestIdRef.current) return;
         const processing = status.items.find((item) => item.memoryId === memoryId);
         if (!processing) throw new Error(t("memory.memories.processing.missing"));
+        updateOpenDetailProcessing(memoryId, processing);
         if (processing.state === "failed") {
           throw new Error(processing.errorMessage || t("memory.memories.processing.retryFailed"));
         }
@@ -603,28 +617,57 @@ function MemoryProcessingFailureCard(props: {
   const { t } = useTranslation();
   const processing = props.item.processing;
   const feedback = props.retryFeedback?.memoryId === props.item.id ? props.retryFeedback : null;
-  if (processing?.state !== "failed" && feedback?.status !== "running" && feedback?.status !== "succeeded") {
+  const processingRetryInProgress = Boolean(
+    processing?.errorMessage &&
+    processing.state !== "failed" &&
+    processing.state !== "ready" &&
+    processing.state !== "ready_text_only"
+  );
+  const retryInProgress = feedback?.status === "running" || processingRetryInProgress;
+  if (processing?.state !== "failed" && !retryInProgress && feedback?.status !== "succeeded") {
     return null;
   }
 
-  const retryDisabled = feedback?.status === "running" || feedback?.status === "succeeded";
+  const retryDisabled = retryInProgress || feedback?.status === "succeeded";
+  const showPreviousFailure = Boolean(
+    processing?.errorMessage &&
+    (retryInProgress || processing.state !== "failed")
+  );
+  const showRetryAction = Boolean(
+    props.onRetryProcessing &&
+    ((processing?.state === "failed" && processing.retryAction !== "none") ||
+      retryInProgress ||
+      feedback?.status === "succeeded")
+  );
   return (
     <section className={`memory-detail-card memory-processing-failure${feedback?.status === "succeeded" ? " memory-processing-failure--success" : ""}`}>
       <div className="memory-processing-failure__heading">
-        {feedback?.status === "succeeded" ? <CheckCircle2 size={17} /> : <AlertTriangle size={17} />}
+        {feedback?.status === "succeeded"
+          ? <CheckCircle2 size={17} />
+          : retryInProgress
+            ? <Loader2 size={17} className="memory-spin" />
+            : <AlertTriangle size={17} />}
         <h5>{feedback?.status === "succeeded"
           ? t("memory.memories.processing.retrySucceeded")
-          : t("memory.memories.processing.failureTitle")}</h5>
+          : retryInProgress
+            ? t("memory.memories.processing.retrying")
+            : t("memory.memories.processing.failureTitle")}</h5>
       </div>
-      {processing?.state === "failed" && (
+      {processing?.errorMessage && (
         <dl className="memory-detail-grid">
-          <dt>{t("memory.memories.processing.stage")}</dt>
-          <dd>{processingStageLabel(processing, t)}</dd>
-          <dt>{t("memory.memories.processing.reason")}</dt>
+          {!showPreviousFailure && (
+            <>
+              <dt>{t("memory.memories.processing.stage")}</dt>
+              <dd>{processingStageLabel(processing, t)}</dd>
+            </>
+          )}
+          <dt>{t(showPreviousFailure
+            ? "memory.memories.processing.previousReason"
+            : "memory.memories.processing.reason")}</dt>
           <dd>{processing.errorMessage || "-"}</dd>
-          <dt>{t("memory.memories.processing.attempts")}</dt>
-          <dd>{processing.attemptCount}</dd>
-          <dt>{t("memory.memories.processing.failedAt")}</dt>
+          <dt>{t(showPreviousFailure
+            ? "memory.memories.processing.previousFailedAt"
+            : "memory.memories.processing.failedAt")}</dt>
           <dd>{processing.failedAt ? formatDateTime(processing.failedAt) : "-"}</dd>
         </dl>
       )}
@@ -634,23 +677,23 @@ function MemoryProcessingFailureCard(props: {
         </p>
       )}
       <div className="memory-processing-failure__actions">
-        {processing?.retryAction === "open_settings" && props.onOpenSettings && !retryDisabled && (
+        {processing?.state === "failed" && processing.retryAction === "open_settings" && props.onOpenSettings && !retryDisabled && (
           <button type="button" className="memory-processing-action" onClick={props.onOpenSettings}>
             <Settings2 size={14} />
             {t("memory.memories.processing.openSettings")}
           </button>
         )}
-        {processing?.retryAction !== "none" && props.onRetryProcessing && (
+        {showRetryAction && (
           <button
             type="button"
             className="memory-processing-action memory-processing-action--primary"
             disabled={retryDisabled}
             onClick={() => void props.onRetryProcessing?.(props.item.id)}
           >
-            {feedback?.status === "running" ? <Loader2 size={14} className="memory-spin" />
+            {retryInProgress ? <Loader2 size={14} className="memory-spin" />
               : feedback?.status === "succeeded" ? <CheckCircle2 size={14} />
                 : <RefreshCw size={14} />}
-            {feedback?.status === "running"
+            {retryInProgress
               ? t("memory.memories.processing.retrying")
               : feedback?.status === "succeeded"
                 ? t("memory.memories.processing.retrySucceeded")

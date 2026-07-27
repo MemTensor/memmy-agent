@@ -4,6 +4,11 @@ import { PRODUCT_TOUR_MEMORY_NAV_ANCHOR, PRODUCT_TOUR_TOOLS_NAV_ANCHOR } from ".
 import type { AppRoutePath } from "../app/routes.js";
 import { clearDeferredGuidanceStep, clearFocusedAgentTarget, clearProductTourStep, readDeferredGuidanceStep, readGuidanceCompleted, routeTable, writeDeferredGuidanceStep, writeGuidanceCompleted } from "../app/routes.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
+import {
+  useOptionalAgentRuntimeBridge,
+  type AgentTaskStateCoordinator,
+  type SidebarIntent
+} from "../app/agent-runtime-bridge.js";
 import { useOptionalApiClients } from "../app/providers.js";
 import { MemmyAgentRequestError } from "../api/memmy-agent-client.js";
 import { communityLinks } from "../community/community-links.js";
@@ -13,13 +18,14 @@ import { Modal } from "../components/modal.js";
 import { Tooltip } from "../components/tooltip.js";
 import type { MessageKey } from "../i18n/messages.js";
 import { useTranslation } from "../i18n/use-translation.js";
+import type { MemmyAgentProject, WebuiSessionTarget } from "../api/memmy-agent-client.js";
 import { getLegalLinkUrl } from "../legal/legal-links.js";
 import { useTaskBus } from "../lib/task-bus.js";
 import { agentActions, appActions, createAgentOperationError } from "../state/app-actions.js";
 import type { AppState } from "../state/app-reducer.js";
 import { useAppState } from "../state/app-state.js";
 import { agentChatScopeKey } from "../state/agent-composer-state.js";
-import { updateSidebarStateForTask, type AgentTaskView } from "../state/agent-chat-slice.js";
+import type { AgentTaskView } from "../state/agent-chat-slice.js";
 import { decideTaskDoneNotification } from "../state/task-done-notification.js";
 import { maskAccountIdentifier } from "../utils/mask-account-identifier.js";
 import { openExternalUrl } from "../utils/open-url.js";
@@ -49,6 +55,7 @@ import {
   Trash2,
   User
 } from "./memory/memory-prototype-icons.js";
+import { CheckCheck, ChevronDown, ChevronRight, Folder, FolderPlus, MoreHorizontal, Pencil, Plus } from "lucide-react";
 
 export interface AppFrameProps {
   title: string;
@@ -71,11 +78,33 @@ interface TaskGroups {
   archived: AgentTaskView[];
 }
 
+export interface ProjectSidebarNode {
+  project: MemmyAgentProject;
+  tasks: AgentTaskView[];
+}
+
+export interface ProjectSidebarTree {
+  pinnedTasks: AgentTaskView[];
+  pinnedProjects: ProjectSidebarNode[];
+  projects: ProjectSidebarNode[];
+  standaloneTasks: AgentTaskView[];
+  archivedProjects: ProjectSidebarNode[];
+  archivedStandaloneTasks: AgentTaskView[];
+}
+
+interface ProjectContextMenuState {
+  projectId: string;
+  x: number;
+  y: number;
+}
+
 interface TaskContextMenuState {
   task: AgentTaskView;
   x: number;
   y: number;
 }
+
+type SidebarTaskPatch = Extract<SidebarIntent, { kind: "task-patch" }>["patch"];
 
 interface SidebarMenuAnchor {
   right: number;
@@ -103,8 +132,13 @@ interface SidebarMenuOverlayStyle extends SidebarMenuPlacement {
   zIndex: number;
 }
 
+interface SidebarContextMenuPlacement {
+  left: number;
+  top: number;
+}
+
 type AgentTaskSort = AppState["agent"]["sidebarState"]["view"]["sort"];
-type NewAgentDraftState = Pick<AppState["agent"], "blankDraftActive" | "newChatRequestId" | "composerDraftsByScope" | "composerPendingAttachmentsByScope" | "composerMediaErrorByScope">;
+type NewAgentDraftState = Pick<AppState["agent"], "blankDraftActive" | "newChatRequestId" | "composerDraftsByScope" | "composerPendingAttachmentsByScope">;
 
 export interface SidebarAccountLabels {
   brandName: string;
@@ -144,10 +178,37 @@ const sidebarMoreMenuSize: SidebarMenuSize = {
   margin: 8,
   gap: 4
 };
+const projectListMoreMenuSize: SidebarMenuSize = {
+  width: 128,
+  height: 40,
+  margin: 8,
+  gap: 4
+};
+const taskContextMenuSize: SidebarMenuSize = {
+  width: 144,
+  height: 112,
+  margin: 8,
+  gap: 0
+};
+const projectContextMenuSize: SidebarMenuSize = {
+  width: 176,
+  height: 200,
+  margin: 8,
+  gap: 0
+};
 const sidebarMenuOverlayZIndex = 9999;
 const SIDEBAR_PROFILE_NAME_MAX_VISUAL_WIDTH = 10;
 const SIDEBAR_PROFILE_META_MAX_VISUAL_WIDTH = 12;
 const ACCOUNT_DISPLAY_ELLIPSIS = "…";
+const standaloneRenderTaskStateCoordinator: AgentTaskStateCoordinator = {
+  refreshTaskState: () => undefined,
+  focusTask: () => undefined,
+  mutateProject: async () => ({ status: "rejected", code: "agent_gateway_unavailable" }),
+  enqueueSidebarIntent: async () => undefined,
+  runWithSidebarSettled: async (operation) => operation(),
+  retrySidebarIntents: () => undefined,
+  dispose: () => undefined
+};
 
 function resolveProductTourNavAnchor(path: AppRoutePath): string | undefined {
   if (path === "/memory") return PRODUCT_TOUR_MEMORY_NAV_ANCHOR;
@@ -161,8 +222,7 @@ export function shouldCreateNewAgentDraft(agent: NewAgentDraftState): boolean {
   }
   const draftScopeKey = agentChatScopeKey(null, agent.newChatRequestId);
   return !agent.composerDraftsByScope[draftScopeKey]
-    && !(agent.composerPendingAttachmentsByScope[draftScopeKey]?.length)
-    && !agent.composerMediaErrorByScope[draftScopeKey];
+    && !(agent.composerPendingAttachmentsByScope[draftScopeKey]?.length);
 }
 
 export function AppFrame(props: AppFrameProps) {
@@ -170,13 +230,23 @@ export function AppFrame(props: AppFrameProps) {
   const { clients } = useOptionalApiClients();
   const { t, language } = useTranslation();
   const { track } = useAnalytics();
+  const taskStateCoordinator = useOptionalAgentRuntimeBridge()?.taskStateCoordinator
+    ?? standaloneRenderTaskStateCoordinator;
   const taskBus = useTaskBus();
   const { syncAgentTaskStatuses } = taskBus;
   const [searchPaletteOpen, setSearchPaletteOpen] = useState(false);
   const [showCommunity, setShowCommunity] = useState(false);
   const [taskListMenuAnchor, setTaskListMenuAnchor] = useState<SidebarMenuAnchor | null>(null);
+  const [projectListMenuAnchor, setProjectListMenuAnchor] = useState<SidebarMenuAnchor | null>(null);
   const [sortMenuOpen, setSortMenuOpen] = useState(false);
   const [taskContextMenu, setTaskContextMenu] = useState<TaskContextMenuState | null>(null);
+  const [projectContextMenu, setProjectContextMenu] = useState<ProjectContextMenuState | null>(null);
+  const [projectCreateMenuOpen, setProjectCreateMenuOpen] = useState(false);
+  const [renameProjectId, setRenameProjectId] = useState<string | null>(null);
+  const [renameProjectValue, setRenameProjectValue] = useState("");
+  const [removeProjectId, setRemoveProjectId] = useState<string | null>(null);
+  const [archiveProjectId, setArchiveProjectId] = useState<string | null>(null);
+  const [projectMutationId, setProjectMutationId] = useState<string | null>(null);
   const [archiveConfirmSessionKey, setArchiveConfirmSessionKey] = useState<string | null>(null);
   const [deleteConfirmTask, setDeleteConfirmTask] = useState<AgentTaskView | null>(null);
   const [renameTarget, setRenameTarget] = useState<AgentTaskView | null>(null);
@@ -193,8 +263,7 @@ export function AppFrame(props: AppFrameProps) {
   const sidebarResize = useCodexResizableSidebar("memmy.appFrame.sidebarWidth.codex.v2");
   const hasRequestedAgentData = useRef(false);
   const lastNotifiedCompletionAt = useRef<number | null>(null);
-  const sidebarStateRef = useRef(state.agent.sidebarState);
-  sidebarStateRef.current = state.agent.sidebarState;
+  const previousCanonicalSessionKeysRef = useRef<Set<string> | null>(null);
   const accountSummary = resolveSidebarAccountSummary(state, {
     brandName: t("brand.name"),
     byokLabel: t("welcome.byok.title"),
@@ -206,13 +275,29 @@ export function AppFrame(props: AppFrameProps) {
   const accountNameLine = truncateAccountDisplayText(accountSummary.name, SIDEBAR_PROFILE_NAME_MAX_VISUAL_WIDTH);
   const accountMetaLine = truncateAccountDisplayText(accountSummary.meta, SIDEBAR_PROFILE_META_MAX_VISUAL_WIDTH);
   const visibleTasks = state.agent.tasks;
-  const taskGroups = useMemo(() => groupAgentTasks(visibleTasks), [visibleTasks]);
-  const showingArchived = state.agent.sidebarState.view.show_archived;
-  const timeGroups = useMemo(
-    () => groupTasksByTime(showingArchived ? taskGroups.archived : taskGroups.active),
-    [showingArchived, taskGroups.active, taskGroups.archived]
+  const projectTree = useMemo(
+    () => deriveSidebarPlacement(visibleTasks, state.agent.projects),
+    [state.agent.projects, visibleTasks]
+  );
+  const showingStandaloneArchived = state.agent.sidebarState.view.show_archived;
+  const showingProjectArchived = state.agent.sidebarState.view.show_project_archived;
+  const visibleProjectTree = useMemo(
+    () => deriveVisibleSidebarPlacement(projectTree, {
+      projectTasks: showingProjectArchived,
+      standaloneTasks: showingStandaloneArchived
+    }),
+    [projectTree, showingProjectArchived, showingStandaloneArchived]
   );
   const highlightedSessionKey = state.navigation.currentPath === "/main" ? state.agent.currentSessionKey : null;
+  const renameProject = state.agent.projects.find((project) => project.id === renameProjectId) ?? null;
+  const removeProject = state.agent.projects.find((project) => project.id === removeProjectId) ?? null;
+  const archiveProject = state.agent.projects.find((project) => project.id === archiveProjectId) ?? null;
+  const removeProjectTaskCount = removeProject
+    ? state.agent.sessions.filter((session) => session.projectId === removeProject.id).length
+    : 0;
+  const archiveProjectTaskCount = archiveProject
+    ? countProjectTasksToArchive(state.agent.tasks, archiveProject.id)
+    : 0;
 
   useEffect(() => {
     const el = taskScrollRef.current;
@@ -258,6 +343,21 @@ export function AppFrame(props: AppFrameProps) {
   }, [state.agent.tasks, syncAgentTaskStatuses]);
 
   useEffect(() => {
+    const current = new Set(state.agent.sessions.map((session) => session.key));
+    const previous = previousCanonicalSessionKeysRef.current;
+    if (previous) {
+      const removed = [...previous].filter((sessionKey) => !current.has(sessionKey));
+      if (removed.length && clients?.memmyAgent) {
+        taskBus.removeTasksBySessionIds(removed.flatMap((sessionKey) => [
+          sessionKey,
+          clients.memmyAgent!.sessionKeyToChatId(sessionKey)
+        ]));
+      }
+    }
+    previousCanonicalSessionKeysRef.current = current;
+  }, [clients?.memmyAgent, state.agent.sessions, taskBus]);
+
+  useEffect(() => {
     if (!clients?.memmyAgent || hasRequestedAgentData.current) {
       return;
     }
@@ -298,14 +398,20 @@ export function AppFrame(props: AppFrameProps) {
   }, [state.agent.lastTaskCompletion, state.agent.tasks, state.bootstrap, t]);
 
   useEffect(() => {
-    if (typeof document === "undefined" || (!taskListMenuAnchor && !taskContextMenu && !archiveConfirmSessionKey)) {
+    if (
+      typeof document === "undefined"
+      || (!taskListMenuAnchor && !projectListMenuAnchor && !taskContextMenu && !projectContextMenu && !projectCreateMenuOpen && !archiveConfirmSessionKey)
+    ) {
       return;
     }
 
     const closeMenus = () => {
       setTaskListMenuAnchor(null);
+      setProjectListMenuAnchor(null);
       setSortMenuOpen(false);
       setTaskContextMenu(null);
+      setProjectContextMenu(null);
+      setProjectCreateMenuOpen(false);
       setArchiveConfirmSessionKey(null);
     };
     const closeOnEscape = (event: KeyboardEvent) => {
@@ -320,7 +426,7 @@ export function AppFrame(props: AppFrameProps) {
       document.removeEventListener("click", closeMenus);
       document.removeEventListener("keydown", closeOnEscape);
     };
-  }, [archiveConfirmSessionKey, taskContextMenu, taskListMenuAnchor]);
+  }, [archiveConfirmSessionKey, projectContextMenu, projectCreateMenuOpen, projectListMenuAnchor, taskContextMenu, taskListMenuAnchor]);
 
   useEffect(() => {
     if (!showCommunity || typeof document === "undefined") {
@@ -349,37 +455,15 @@ export function AppFrame(props: AppFrameProps) {
     };
   }, [showCommunity]);
 
-  async function refreshAgentTasks() {
-    if (!clients?.memmyAgent) {
-      return;
-    }
-
-    const sessionsRequestId = nextAgentSessionsRequestId("manual");
-    dispatch(agentActions.taskStateLoading({
-      requestId: sessionsRequestId,
-      sidebarStateVersionAtStart: state.agent.sidebarStateVersion,
-      runStatusVersionAtStartByChatId: { ...state.agent.runStatusVersionByChatId },
-      recoveryGeneration: null
-    }));
-    const [sessionsResult, sidebarResult] = await Promise.allSettled([
-      clients.memmyAgent.listSessions(),
-      clients.memmyAgent.readSidebarState()
-    ]);
-    const failures = [sessionsResult, sidebarResult]
-      .filter((result): result is PromiseRejectedResult => result.status === "rejected")
-      .map((result) => result.reason instanceof Error ? result.reason.message : String(result.reason));
-    dispatch(agentActions.taskStateSettled({
-      requestId: sessionsRequestId,
-      recoveryGeneration: null,
-      ...(sessionsResult.status === "fulfilled" ? { sessions: sessionsResult.value } : {}),
-      ...(sidebarResult.status === "fulfilled" ? { sidebarState: sidebarResult.value } : {}),
-      ...(failures.length > 0 ? {
-        error: createAgentOperationError({ source: "sessions", message: failures.join("; ") })
-      } : {})
-    }));
+  function refreshAgentTasks(): void {
+    taskStateCoordinator.refreshTaskState({ reason: "manual" });
   }
 
-  function openNewAgent() {
+  function openNewAgent(target?: WebuiSessionTarget) {
+    const nextDraftRequestId = shouldCreateNewAgentDraft(state.agent)
+      ? state.agent.newChatRequestId + 1
+      : state.agent.newChatRequestId;
+    const draftScopeKey = agentChatScopeKey(null, nextDraftRequestId);
     clearFocusedAgentTarget(
       typeof window === "undefined" ? undefined : window.sessionStorage,
       typeof window === "undefined" ? undefined : window.location,
@@ -390,12 +474,15 @@ export function AppFrame(props: AppFrameProps) {
     } else if (!state.agent.blankDraftActive) {
       dispatch(agentActions.blankDraftReopened());
     }
+    if (target || !(draftScopeKey in state.agent.draftTargetsByScope)) {
+      dispatch(agentActions.draftTargetUpdated(draftScopeKey, target ?? { kind: "standalone" }));
+    }
     dispatch(appActions.navigate("/main"));
   }
 
   function openSidebarRoute(path: AppRoutePath) {
     if (path === "/main") {
-      openNewAgent();
+      openNewAgent({ kind: "standalone" });
     } else {
       dispatch(appActions.navigate(path));
     }
@@ -508,43 +595,207 @@ export function AppFrame(props: AppFrameProps) {
     }
   }
 
-  async function saveSidebarStateForTask(task: AgentTaskView, patch: Parameters<typeof updateSidebarStateForTask>[2]) {
-    const nextState = updateSidebarStateForTask(sidebarStateRef.current, task.sessionKey, patch);
-    await saveSidebarState(nextState);
+  async function saveSidebarStateForTask(task: AgentTaskView, patch: SidebarTaskPatch) {
+    await enqueueSidebarIntent({
+      id: nextAgentSidebarMutationId(),
+      kind: "task-patch",
+      sessionKey: task.sessionKey,
+      patch: {
+        ...(patch.title === undefined ? {} : { title: patch.title }),
+        ...(patch.pinned === undefined ? {} : { pinned: patch.pinned }),
+        ...(patch.archived === undefined ? {} : { archived: patch.archived }),
+        ...(patch.tags === undefined ? {} : { tags: patch.tags })
+      }
+    });
   }
 
   async function saveSidebarView(patch: {
     sort?: typeof state.agent.sidebarState.view.sort;
     showArchived?: boolean;
+    showProjectArchived?: boolean;
     showPreviews?: boolean;
   }) {
-    await saveSidebarState({
-      ...sidebarStateRef.current,
-      view: {
-        ...sidebarStateRef.current.view,
+    await enqueueSidebarIntent({
+      id: nextAgentSidebarMutationId(),
+      kind: "view-patch",
+      patch: {
         ...(patch.sort ? { sort: patch.sort } : {}),
         ...(patch.showArchived == null ? {} : { show_archived: patch.showArchived }),
+        ...(patch.showProjectArchived == null ? {} : { show_project_archived: patch.showProjectArchived }),
         ...(patch.showPreviews == null ? {} : { show_previews: patch.showPreviews })
       }
     });
   }
 
-  async function saveSidebarState(nextState: typeof state.agent.sidebarState) {
-    if (!clients?.memmyAgent) {
-      return;
-    }
-
-    const mutationId = nextAgentSidebarMutationId();
-    sidebarStateRef.current = nextState;
-    dispatch(agentActions.sidebarMutationStarted(mutationId, nextState));
+  async function enqueueSidebarIntent(intent: SidebarIntent): Promise<void> {
     try {
-      dispatch(agentActions.sidebarMutationConfirmed(mutationId, await clients.memmyAgent.writeSidebarState(nextState)));
+      await taskStateCoordinator.enqueueSidebarIntent(intent);
     } catch (error) {
-      dispatch(agentActions.sidebarMutationFailed(mutationId, createAgentOperationError({
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      if (!(error instanceof Error) || error.message !== "sidebar_sync_pending") return;
+      dispatch(agentActions.operationFailed("sidebar", createAgentOperationError({
         source: "sidebar",
-        message: error instanceof Error ? error.message : String(error)
+        message: "sidebar_sync_pending"
       })));
     }
+  }
+
+  function toggleSidebarGroup(key: string) {
+    void enqueueSidebarIntent({
+      id: nextAgentSidebarMutationId(),
+      kind: "set-collapsed",
+      groupKey: key,
+      collapsed: !state.agent.sidebarState.collapsed_groups[key]
+    });
+  }
+
+  function expandTaskAncestors(task: AgentTaskView) {
+    const showingTaskArchive = task.groupProjectId
+      ? showingProjectArchived
+      : showingStandaloneArchived;
+    for (const key of resolveTaskAncestorGroupKeys(task, state.agent.projects, showingTaskArchive)) {
+      if (!state.agent.sidebarState.collapsed_groups[key]) continue;
+      void enqueueSidebarIntent({
+        id: nextAgentSidebarMutationId(),
+        kind: "set-collapsed",
+        groupKey: key,
+        collapsed: false
+      });
+    }
+  }
+
+  async function registerProject(mode: "blank" | "existing") {
+    setProjectCreateMenuOpen(false);
+    if (!clients?.memmyAgent || !window.memmy || projectMutationId) return;
+    const operationId = `project-create-${crypto.randomUUID()}`;
+    setProjectMutationId(operationId);
+    try {
+      const selected = mode === "blank"
+        ? await window.memmy.selectEmptyProjectDirectory()
+        : await window.memmy.selectProjectDirectory();
+      if (selected.canceled) return;
+      const result = await taskStateCoordinator.mutateProject({
+        kind: "create",
+        input: { mode, path: selected.path }
+      });
+      if (result.status !== "committed") {
+        showProjectOperationError(result.status === "rejected" ? result.code : "network_unavailable");
+      }
+    } catch (error) {
+      showProjectOperationError(error);
+      void refreshAgentTasks();
+    } finally {
+      setProjectMutationId((current) => current === operationId ? null : current);
+    }
+  }
+
+  async function updateProject(
+    projectId: string,
+    update: { name: string } | { pinned: boolean }
+  ): Promise<boolean> {
+    if (!clients?.memmyAgent || projectMutationId) return false;
+    const operationId = `project-update-${crypto.randomUUID()}`;
+    setProjectMutationId(operationId);
+    try {
+      const result = await taskStateCoordinator.mutateProject({
+        kind: "update",
+        projectId,
+        update
+      });
+      if (result.status !== "committed") {
+        showProjectOperationError(result.status === "rejected" ? result.code : "network_unavailable");
+        return false;
+      }
+      return true;
+    } catch (error) {
+      showProjectOperationError(error);
+      void refreshAgentTasks();
+      return false;
+    } finally {
+      setProjectMutationId((current) => current === operationId ? null : current);
+    }
+  }
+
+  async function revealProject(projectId: string) {
+    if (!clients?.memmyAgent || projectMutationId) return;
+    const operationId = `project-reveal-${crypto.randomUUID()}`;
+    setProjectMutationId(operationId);
+    try {
+      await clients.memmyAgent.revealProject(projectId, { timeoutMs: 15_000 });
+    } catch (error) {
+      showProjectOperationError(error);
+    } finally {
+      setProjectMutationId((current) => current === operationId ? null : current);
+    }
+  }
+
+  async function archiveProjectTasks(projectId: string) {
+    const keys = state.agent.tasks
+      .filter((task) => task.projectId === projectId && !task.archived)
+      .map((task) => task.sessionKey);
+    if (!keys.length) return;
+    await enqueueSidebarIntent({
+      id: nextAgentSidebarMutationId(),
+      kind: "batch-archive",
+      sessionKeys: keys
+    });
+    setArchiveProjectId(null);
+  }
+
+  function markProjectTasksRead(projectId: string) {
+    const keys = state.agent.tasks
+      .filter((task) => task.projectId === projectId)
+      .map((task) => task.chatId);
+    dispatch(agentActions.tasksMarkedRead(keys));
+  }
+
+  async function confirmRemoveProject() {
+    const projectId = removeProjectId;
+    if (!projectId || !clients?.memmyAgent || projectMutationId) return;
+    const operationId = `project-delete-${crypto.randomUUID()}`;
+    setProjectMutationId(operationId);
+    try {
+      const result = await taskStateCoordinator.mutateProject({
+        kind: "delete",
+        projectId
+      });
+      if (result.status !== "committed") {
+        showProjectOperationError(result.status === "rejected" ? result.code : "network_unavailable");
+        return;
+      }
+      taskBus.removeTasksBySessionIds(result.deletedSessionKeys.flatMap((key) => [
+        key,
+        clients.memmyAgent.sessionKeyToChatId(key)
+      ]));
+      setRemoveProjectId(null);
+    } catch (error) {
+      showProjectOperationError(error);
+      void refreshAgentTasks();
+    } finally {
+      setProjectMutationId((current) => current === operationId ? null : current);
+    }
+  }
+
+  function showProjectOperationError(error: unknown) {
+    const code = typeof error === "string"
+      ? error
+      : error instanceof MemmyAgentRequestError
+        ? error.code
+        : null;
+    dispatch(agentActions.operationFailed("sidebar", createAgentOperationError({
+      source: "sidebar",
+      message: code ?? "project_operation_failed"
+    })));
+  }
+
+  function openProjectMenu(event: MouseEvent, projectId: string) {
+    event.stopPropagation();
+    setTaskListMenuAnchor(null);
+    setProjectListMenuAnchor(null);
+    setSortMenuOpen(false);
+    setProjectCreateMenuOpen(false);
+    setTaskContextMenu(null);
+    setProjectContextMenu({ projectId, x: event.clientX, y: event.clientY });
   }
 
   function openRenameDialog(task: AgentTaskView) {
@@ -600,7 +851,7 @@ export function AppFrame(props: AppFrameProps) {
   function archiveTask(task: AgentTaskView) {
     setArchiveConfirmSessionKey(null);
     track({ name: "task_archived", params: { page_path: state.navigation.currentPath }, consentTier: "basic" });
-    void saveSidebarStateForTask(task, { archived: true, pinned: false });
+    void saveSidebarStateForTask(task, { archived: true });
   }
 
   function unarchiveTask(task: AgentTaskView) {
@@ -609,15 +860,28 @@ export function AppFrame(props: AppFrameProps) {
   }
 
   function toggleTaskListMenu(anchor: SidebarMenuAnchor) {
+    setProjectListMenuAnchor(null);
+    setProjectCreateMenuOpen(false);
     setTaskContextMenu(null);
     setArchiveConfirmSessionKey(null);
     setTaskListMenuAnchor((value) => (value ? null : anchor));
     setSortMenuOpen(false);
   }
 
+  function toggleProjectListMenu(anchor: SidebarMenuAnchor) {
+    setTaskListMenuAnchor(null);
+    setSortMenuOpen(false);
+    setProjectCreateMenuOpen(false);
+    setTaskContextMenu(null);
+    setProjectContextMenu(null);
+    setArchiveConfirmSessionKey(null);
+    setProjectListMenuAnchor((value) => (value ? null : anchor));
+  }
+
   function openTaskContextMenu(event: MouseEvent, task: AgentTaskView) {
     event.preventDefault();
     setTaskListMenuAnchor(null);
+    setProjectListMenuAnchor(null);
     setSortMenuOpen(false);
     setArchiveConfirmSessionKey(null);
     setTaskContextMenu({ task, x: event.clientX, y: event.clientY });
@@ -759,155 +1023,190 @@ export function AppFrame(props: AppFrameProps) {
 
         <div ref={taskScrollRef} className={`app-frame-task-scroll mt-5 mx-4 flex-1 overflow-y-auto${taskScrollFade ? " app-frame-task-scroll--faded" : ""}`}>
           <div className="space-y-3">
-            {!showingArchived && (
-              <TaskSection
+            {visibleProjectTree.pinnedTasks.length > 0 || visibleProjectTree.pinnedProjects.length > 0 ? (
+              <ProjectTreeSection
                 title={t("common.pin")}
-                tasks={taskGroups.pinned}
+                groupKey="pinned"
+                collapsedGroups={state.agent.sidebarState.collapsed_groups}
+                projects={visibleProjectTree.pinnedProjects}
+                tasks={visibleProjectTree.pinnedTasks}
                 currentSessionKey={highlightedSessionKey}
                 showPreviews={state.agent.sidebarState.view.show_previews}
+                projectRegistryState={state.agent.projectRegistryState}
+                onToggleGroup={toggleSidebarGroup}
+                onToggleProject={toggleSidebarGroup}
                 onOpenTask={openAgentTask}
                 onRenameTask={openRenameDialog}
-                onContextMenu={openTaskContextMenu}
+                onTaskContextMenu={openTaskContextMenu}
                 onPinTask={pinTask}
                 archiveConfirmSessionKey={archiveConfirmSessionKey}
                 onRequestArchiveTask={requestArchiveTask}
                 onConfirmArchiveTask={archiveTask}
                 onUnarchiveTask={unarchiveTask}
                 onDeleteArchivedTask={requestDeleteArchivedTask}
-                hideWhenEmpty
+                onProjectContextMenu={openProjectMenu}
+                onNewProjectTask={(projectId) => openNewAgent({ kind: "project", projectId })}
               />
-            )}
-            {timeGroups.length > 0 ? timeGroups.map((group, index) => (
-              <TaskSection
-                key={group.labelKey}
-                title={t(group.labelKey as Parameters<typeof t>[0])}
-                tasks={group.tasks}
-                currentSessionKey={highlightedSessionKey}
-                showPreviews={state.agent.sidebarState.view.show_previews}
-                onOpenTask={openAgentTask}
-                onRenameTask={openRenameDialog}
-                onContextMenu={openTaskContextMenu}
-                onPinTask={pinTask}
-                archiveConfirmSessionKey={archiveConfirmSessionKey}
-                onRequestArchiveTask={requestArchiveTask}
-                onConfirmArchiveTask={archiveTask}
-                onUnarchiveTask={unarchiveTask}
-                onDeleteArchivedTask={requestDeleteArchivedTask}
-                headerAction={index === 0 ? (
-                  <div className="relative flex items-center">
+            ) : null}
+
+            <ProjectTreeSection
+              title={t("appFrame.projects")}
+              groupKey="projects"
+              collapsedGroups={state.agent.sidebarState.collapsed_groups}
+              projects={visibleProjectTree.projects}
+              tasks={[]}
+              currentSessionKey={highlightedSessionKey}
+              showPreviews={state.agent.sidebarState.view.show_previews}
+              projectRegistryState={state.agent.projectRegistryState}
+              emptyText={state.agent.projectRegistryState === "corrupt"
+                ? t("appFrame.project.registryUnavailable")
+                : t("appFrame.project.empty")}
+              onToggleGroup={toggleSidebarGroup}
+              onToggleProject={toggleSidebarGroup}
+              onOpenTask={openAgentTask}
+              onRenameTask={openRenameDialog}
+              onTaskContextMenu={openTaskContextMenu}
+              onPinTask={pinTask}
+              archiveConfirmSessionKey={archiveConfirmSessionKey}
+              onRequestArchiveTask={requestArchiveTask}
+              onConfirmArchiveTask={archiveTask}
+              onUnarchiveTask={unarchiveTask}
+              onDeleteArchivedTask={requestDeleteArchivedTask}
+              onProjectContextMenu={openProjectMenu}
+              onNewProjectTask={(projectId) => openNewAgent({ kind: "project", projectId })}
+              headerAction={(
+                <div className="flex items-center gap-0.5">
+                  <div className="relative">
                     <button
                       type="button"
-                      aria-label={t("appFrame.taskList.actions")}
-                      title={t("appFrame.taskList.actions")}
+                      className="app-frame-task-section-action"
+                      aria-label={t("appFrame.project.add")}
+                      title={t("appFrame.project.add")}
+                      disabled={state.agent.projectRegistryState === "corrupt" || projectMutationId != null}
                       onClick={(event) => {
                         event.stopPropagation();
-                        toggleTaskListMenu(sidebarMenuAnchorFromRect(event.currentTarget.getBoundingClientRect()));
+                        setTaskListMenuAnchor(null);
+                        setProjectListMenuAnchor(null);
+                        setSortMenuOpen(false);
+                        setProjectCreateMenuOpen((open) => !open);
                       }}
-                      className="app-frame-task-section-action"
                     >
-                      <span className="app-frame-task-section-action__dots" aria-hidden="true">
-                        <span />
-                        <span />
-                        <span />
-                      </span>
+                      <Plus size={14} />
                     </button>
-                    {taskListMenuAnchor && (
-                      <SidebarMoreMenu
-                        anchor={taskListMenuAnchor}
-                        showPreviews={state.agent.sidebarState.view.show_previews}
-                        showArchived={state.agent.sidebarState.view.show_archived}
-                        sort={state.agent.sidebarState.view.sort}
-                        sortMenuOpen={sortMenuOpen}
-                        onRefresh={() => {
-                          setTaskListMenuAnchor(null);
-                          void refreshAgentTasks();
-                        }}
-                        onTogglePreviews={() => {
-                          setTaskListMenuAnchor(null);
-                          void saveSidebarView({ showPreviews: !state.agent.sidebarState.view.show_previews });
-                        }}
-                        onToggleArchived={() => {
-                          setTaskListMenuAnchor(null);
-                          void saveSidebarView({ showArchived: !state.agent.sidebarState.view.show_archived });
-                        }}
-                        onToggleSortMenu={() => setSortMenuOpen((value) => !value)}
-                        onSelectSort={(sort) => {
-                          setTaskListMenuAnchor(null);
-                          setSortMenuOpen(false);
-                          void saveSidebarView({ sort });
-                        }}
-                      />
-                    )}
+                    {projectCreateMenuOpen ? (
+                      <div className="app-frame-project-create-menu">
+                        <MenuButton label={t("appFrame.project.createBlank")} onClick={() => void registerProject("blank")} />
+                        <MenuButton label={t("appFrame.project.useExisting")} onClick={() => void registerProject("existing")} />
+                      </div>
+                    ) : null}
                   </div>
-                ) : undefined}
-                alwaysShowHeader
-              />
-            )) : (
-              <TaskSection
-                title={t("appFrame.timeGroup.today")}
-                tasks={[]}
-                currentSessionKey={highlightedSessionKey}
-                showPreviews={state.agent.sidebarState.view.show_previews}
-                emptyText={state.agent.isLoadingSessions ? t("appFrame.taskList.loading") : t(showingArchived ? "appFrame.taskList.emptyArchived" as MessageKey : "appFrame.taskList.empty")}
-                onOpenTask={openAgentTask}
-                onRenameTask={openRenameDialog}
-                onContextMenu={openTaskContextMenu}
-                onPinTask={pinTask}
-                archiveConfirmSessionKey={archiveConfirmSessionKey}
-                onRequestArchiveTask={requestArchiveTask}
-                onConfirmArchiveTask={archiveTask}
-                onUnarchiveTask={unarchiveTask}
-                onDeleteArchivedTask={requestDeleteArchivedTask}
-                headerAction={(
-                  <div className="relative flex items-center">
-                    <button
-                      type="button"
-                      aria-label={t("appFrame.taskList.actions")}
-                      title={t("appFrame.taskList.actions")}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        toggleTaskListMenu(sidebarMenuAnchorFromRect(event.currentTarget.getBoundingClientRect()));
+                  <button
+                    type="button"
+                    aria-label={t("appFrame.project.listActions")}
+                    title={t("appFrame.project.listActions")}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      toggleProjectListMenu(sidebarMenuAnchorFromRect(event.currentTarget.getBoundingClientRect()));
+                    }}
+                    className="app-frame-task-section-action"
+                  >
+                    <MoreHorizontal size={14} />
+                  </button>
+                  {projectListMenuAnchor ? (
+                    <ProjectListMoreMenu
+                      anchor={projectListMenuAnchor}
+                      showArchived={showingProjectArchived}
+                      onToggleArchived={() => {
+                        setProjectListMenuAnchor(null);
+                        void saveSidebarView({ showProjectArchived: !showingProjectArchived });
                       }}
-                      className="app-frame-task-section-action"
-                    >
-                      <span className="app-frame-task-section-action__dots" aria-hidden="true">
-                        <span />
-                        <span />
-                        <span />
-                      </span>
-                    </button>
-                    {taskListMenuAnchor && (
-                      <SidebarMoreMenu
-                        anchor={taskListMenuAnchor}
-                        showPreviews={state.agent.sidebarState.view.show_previews}
-                        showArchived={state.agent.sidebarState.view.show_archived}
-                        sort={state.agent.sidebarState.view.sort}
-                        sortMenuOpen={sortMenuOpen}
-                        onRefresh={() => {
-                          setTaskListMenuAnchor(null);
-                          void refreshAgentTasks();
-                        }}
-                        onTogglePreviews={() => {
-                          setTaskListMenuAnchor(null);
-                          void saveSidebarView({ showPreviews: !state.agent.sidebarState.view.show_previews });
-                        }}
-                        onToggleArchived={() => {
-                          setTaskListMenuAnchor(null);
-                          void saveSidebarView({ showArchived: !state.agent.sidebarState.view.show_archived });
-                        }}
-                        onToggleSortMenu={() => setSortMenuOpen((value) => !value)}
-                        onSelectSort={(sort) => {
-                          setTaskListMenuAnchor(null);
-                          setSortMenuOpen(false);
-                          void saveSidebarView({ sort });
-                        }}
-                      />
-                    )}
-                  </div>
-                )}
-                alwaysShowHeader
-              />
-            )}
+                    />
+                  ) : null}
+                </div>
+              )}
+            />
+
+            <ProjectTreeSection
+              title={t("appFrame.tasks")}
+              groupKey="standalone"
+              collapsedGroups={state.agent.sidebarState.collapsed_groups}
+              projects={[]}
+              tasks={visibleProjectTree.standaloneTasks}
+              currentSessionKey={highlightedSessionKey}
+              showPreviews={state.agent.sidebarState.view.show_previews}
+              projectRegistryState={state.agent.projectRegistryState}
+              emptyText={state.agent.isLoadingSessions
+                ? t("appFrame.taskList.loading")
+                : t(showingStandaloneArchived ? "appFrame.taskList.emptyArchived" as MessageKey : "appFrame.taskList.empty")}
+              onToggleGroup={toggleSidebarGroup}
+              onToggleProject={toggleSidebarGroup}
+              onOpenTask={openAgentTask}
+              onRenameTask={openRenameDialog}
+              onTaskContextMenu={openTaskContextMenu}
+              onPinTask={pinTask}
+              archiveConfirmSessionKey={archiveConfirmSessionKey}
+              onRequestArchiveTask={requestArchiveTask}
+              onConfirmArchiveTask={archiveTask}
+              onUnarchiveTask={unarchiveTask}
+              onDeleteArchivedTask={requestDeleteArchivedTask}
+              onProjectContextMenu={openProjectMenu}
+              onNewProjectTask={(projectId) => openNewAgent({ kind: "project", projectId })}
+              headerAction={(
+                <div className="flex items-center gap-0.5">
+                  <button
+                    type="button"
+                    className="app-frame-task-section-action"
+                    aria-label={t("appFrame.task.newStandalone")}
+                    title={t("appFrame.task.newStandalone")}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      openNewAgent({ kind: "standalone" });
+                    }}
+                  >
+                    <Plus size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    aria-label={t("appFrame.taskList.actions")}
+                    title={t("appFrame.taskList.actions")}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      toggleTaskListMenu(sidebarMenuAnchorFromRect(event.currentTarget.getBoundingClientRect()));
+                    }}
+                    className="app-frame-task-section-action"
+                  >
+                    <MoreHorizontal size={14} />
+                  </button>
+                  {taskListMenuAnchor ? (
+                    <SidebarMoreMenu
+                      anchor={taskListMenuAnchor}
+                      showPreviews={state.agent.sidebarState.view.show_previews}
+                      showArchived={showingStandaloneArchived}
+                      sort={state.agent.sidebarState.view.sort}
+                      sortMenuOpen={sortMenuOpen}
+                      onRefresh={() => {
+                        setTaskListMenuAnchor(null);
+                        void refreshAgentTasks();
+                      }}
+                      onTogglePreviews={() => {
+                        setTaskListMenuAnchor(null);
+                        void saveSidebarView({ showPreviews: !state.agent.sidebarState.view.show_previews });
+                      }}
+                      onToggleArchived={() => {
+                        setTaskListMenuAnchor(null);
+                        void saveSidebarView({ showArchived: !showingStandaloneArchived });
+                      }}
+                      onToggleSortMenu={() => setSortMenuOpen((value) => !value)}
+                      onSelectSort={(sort) => {
+                        setTaskListMenuAnchor(null);
+                        setSortMenuOpen(false);
+                        void saveSidebarView({ sort });
+                      }}
+                    />
+                  ) : null}
+                </div>
+              )}
+            />
           </div>
           {taskContextMenu && (
             <TaskContextMenu
@@ -920,6 +1219,39 @@ export function AppFrame(props: AppFrameProps) {
               onClose={() => setTaskContextMenu(null)}
             />
           )}
+          {projectContextMenu ? (
+            <ProjectContextMenu
+              menu={projectContextMenu}
+              project={state.agent.projects.find((project) => project.id === projectContextMenu.projectId) ?? null}
+              archiveTaskCount={countProjectTasksToArchive(state.agent.tasks, projectContextMenu.projectId)}
+              onClose={() => setProjectContextMenu(null)}
+              onPin={(project) => {
+                setProjectContextMenu(null);
+                void updateProject(project.id, { pinned: !project.pinned });
+              }}
+              onReveal={(project) => {
+                setProjectContextMenu(null);
+                void revealProject(project.id);
+              }}
+              onRename={(project) => {
+                setProjectContextMenu(null);
+                setRenameProjectId(project.id);
+                setRenameProjectValue(project.name);
+              }}
+              onMarkRead={(project) => {
+                setProjectContextMenu(null);
+                markProjectTasksRead(project.id);
+              }}
+              onArchive={(project) => {
+                setProjectContextMenu(null);
+                setArchiveProjectId(project.id);
+              }}
+              onRemove={(project) => {
+                setProjectContextMenu(null);
+                setRemoveProjectId(project.id);
+              }}
+            />
+          ) : null}
         </div>
 
         <button
@@ -997,6 +1329,82 @@ export function AppFrame(props: AppFrameProps) {
           {props.children}
         </div>
       </main>
+      <ConfirmDialog
+        open={removeProject != null}
+        title={t("appFrame.project.remove")}
+        message={removeProject ? t("appFrame.project.removeConfirm", {
+          name: removeProject.name,
+          count: removeProjectTaskCount
+        }) : ""}
+        cancelLabel={t("dialog.cancel")}
+        closeLabel={t("common.close")}
+        confirmLabel={t("common.remove")}
+        confirmDisabled={projectMutationId != null}
+        confirmVariant="danger"
+        onCancel={() => {
+          if (projectMutationId == null) {
+            setRemoveProjectId(null);
+          }
+        }}
+        onConfirm={() => void confirmRemoveProject()}
+      />
+      <ConfirmDialog
+        open={archiveProject != null}
+        title={t("appFrame.project.archiveTasks")}
+        message={archiveProject ? t("appFrame.project.archiveConfirm", {
+          name: archiveProject.name,
+          count: archiveProjectTaskCount
+        }) : ""}
+        cancelLabel={t("dialog.cancel")}
+        closeLabel={t("common.close")}
+        confirmLabel={t("common.confirm")}
+        onCancel={() => setArchiveProjectId(null)}
+        onConfirm={() => {
+          if (archiveProject) void archiveProjectTasks(archiveProject.id);
+        }}
+      />
+      <Modal
+        open={renameProject != null}
+        title={t("appFrame.project.rename")}
+        showCloseButton={false}
+        className="rename-dialog"
+        backdropClassName="rename-dialog-backdrop"
+        style={{ width: 360, maxWidth: "calc(100vw - 32px)" }}
+        onClose={() => setRenameProjectId(null)}
+        footer={(
+          <>
+            <Button type="button" variant="soft" size="sm" onClick={() => setRenameProjectId(null)}>
+              {t("dialog.cancel")}
+            </Button>
+            <Button
+              type="button"
+              variant="primary"
+              size="sm"
+              disabled={!renameProjectValue.trim() || projectMutationId != null}
+              onClick={() => {
+                if (!renameProject) return;
+                const value = renameProjectValue.trim();
+                void updateProject(renameProject.id, { name: value }).then((committed) => {
+                  if (committed) {
+                    setRenameProjectId(null);
+                  }
+                });
+              }}
+            >
+              {t("dialog.ok")}
+            </Button>
+          </>
+        )}
+      >
+        <input
+          type="text"
+          maxLength={160}
+          value={renameProjectValue}
+          onChange={(event) => setRenameProjectValue(event.target.value)}
+          className="rename-dialog-input"
+        />
+        {renameProject ? <div className="app-frame-project-path">{renameProject.rootPath}</div> : null}
+      </Modal>
       <ConfirmDialog
         open={deleteConfirmTask != null}
         title={t("appFrame.deleteArchivedTitle")}
@@ -1084,6 +1492,11 @@ export function AppFrame(props: AppFrameProps) {
       <SearchPalette
         open={searchPaletteOpen}
         tasks={state.agent.tasks}
+        projects={state.agent.projects}
+        projectRegistryState={state.agent.projectRegistryState}
+        standaloneLabel={t("appFrame.tasks")}
+        missingProjectLabel={t("appFrame.project.recordUnavailable")}
+        registryUnavailableLabel={t("appFrame.project.taskRegistryUnavailable")}
         placeholder={t("appFrame.search")}
         emptyLabel={t("appFrame.search.empty")}
         untitledLabel={t("appFrame.search.untitled")}
@@ -1091,6 +1504,7 @@ export function AppFrame(props: AppFrameProps) {
         onClose={() => setSearchPaletteOpen(false)}
         onSelectTask={(task) => {
           setSearchPaletteOpen(false);
+          expandTaskAncestors(task);
           void openAgentTask(task);
         }}
       />
@@ -1099,17 +1513,11 @@ export function AppFrame(props: AppFrameProps) {
 }
 
 let agentHistoryRequestCounter = 0;
-let agentSessionsRequestCounter = 0;
 let agentSidebarMutationCounter = 0;
 
 function nextAgentHistoryRequestId(chatId: string): string {
   agentHistoryRequestCounter += 1;
   return `${chatId}-${agentHistoryRequestCounter}`;
-}
-
-function nextAgentSessionsRequestId(reason: "manual"): string {
-  agentSessionsRequestCounter += 1;
-  return `sessions-${reason}-${Date.now()}-${agentSessionsRequestCounter}`;
 }
 
 function nextAgentSidebarMutationId(): string {
@@ -1187,6 +1595,28 @@ export function resolveSidebarMenuOverlayStyle(
 }
 
 /**
+ * Keeps a pointer-anchored context menu entirely inside the viewport.
+ *
+ * @param point The pointer position that opened the menu.
+ * @param viewport The current viewport size.
+ * @param size The menu size and margin configuration.
+ * @returns The menu's fixed left/top coordinates.
+ */
+export function resolveSidebarContextMenuPlacement(
+  point: { x: number; y: number },
+  viewport: SidebarMenuViewport,
+  size: SidebarMenuSize
+): SidebarContextMenuPlacement {
+  const maxLeft = Math.max(size.margin, viewport.width - size.width - size.margin);
+  const maxTop = Math.max(size.margin, viewport.height - size.height - size.margin);
+
+  return {
+    left: clamp(point.x, size.margin, maxLeft),
+    top: clamp(point.y + size.gap, size.margin, maxTop)
+  };
+}
+
+/**
  * Clamps a number to a closed interval.
  *
  * @param value The number to clamp.
@@ -1204,6 +1634,79 @@ export function groupAgentTasks(tasks: AgentTaskView[]): TaskGroups {
     active: tasks.filter((task) => !task.pinned && !task.archived),
     archived: tasks.filter((task) => task.archived)
   };
+}
+
+export function deriveSidebarPlacement(
+  tasks: AgentTaskView[],
+  projects: MemmyAgentProject[]
+): ProjectSidebarTree {
+  const activeTasks = tasks.filter((task) => !task.archived);
+  const archivedTasks = tasks.filter((task) => task.archived);
+  const unpinnedActiveTasks = activeTasks.filter((task) => !task.pinned);
+  const buildNodes = (
+    source: AgentTaskView[],
+    projectFilter: (project: MemmyAgentProject) => boolean
+  ): ProjectSidebarNode[] => projects
+    .filter(projectFilter)
+    .map((project) => ({
+      project,
+      tasks: source.filter((task) => task.groupProjectId === project.id)
+    }));
+
+  return {
+    pinnedTasks: activeTasks.filter((task) => task.pinned),
+    pinnedProjects: buildNodes(unpinnedActiveTasks, (project) => project.pinned),
+    projects: buildNodes(unpinnedActiveTasks, (project) => !project.pinned),
+    standaloneTasks: unpinnedActiveTasks.filter((task) => task.groupProjectId === null),
+    archivedProjects: buildNodes(archivedTasks, () => true),
+    archivedStandaloneTasks: archivedTasks.filter((task) => task.groupProjectId === null)
+  };
+}
+
+export const buildProjectSidebarTree = deriveSidebarPlacement;
+
+export function deriveVisibleSidebarPlacement(
+  tree: ProjectSidebarTree,
+  showingArchived: { projectTasks: boolean; standaloneTasks: boolean }
+) {
+  return {
+    pinnedTasks: tree.pinnedTasks.filter((task) => (
+      task.groupProjectId
+        ? !showingArchived.projectTasks
+        : !showingArchived.standaloneTasks
+    )),
+    pinnedProjects: showingArchived.projectTasks ? [] : tree.pinnedProjects,
+    projects: showingArchived.projectTasks ? tree.archivedProjects : tree.projects,
+    standaloneTasks: showingArchived.standaloneTasks
+      ? tree.archivedStandaloneTasks
+      : tree.standaloneTasks
+  };
+}
+
+export function countProjectTasksToArchive(
+  tasks: AgentTaskView[],
+  projectId: string
+): number {
+  return tasks.filter((task) => task.projectId === projectId && !task.archived).length;
+}
+
+export function resolveTaskAncestorGroupKeys(
+  task: AgentTaskView,
+  projects: MemmyAgentProject[],
+  showingArchived: boolean
+): string[] {
+  if (!showingArchived && task.pinned) {
+    return ["pinned"];
+  }
+  if (task.groupProjectId) {
+    const projectKey = `project:${task.groupProjectId}`;
+    if (showingArchived) {
+      return ["projects", projectKey];
+    }
+    const project = projects.find((candidate) => candidate.id === task.groupProjectId);
+    return [project?.pinned ? "pinned" : "projects", projectKey];
+  }
+  return ["standalone"];
 }
 
 export interface TimeGroup {
@@ -1241,6 +1744,140 @@ export function groupTasksByTime(tasks: AgentTaskView[], now?: Date): TimeGroup[
   if (week.length) groups.push({ labelKey: "appFrame.timeGroup.last7days", tasks: week });
   if (older.length) groups.push({ labelKey: "appFrame.timeGroup.older", tasks: older });
   return groups;
+}
+
+function ProjectTreeSection(props: {
+  title: string;
+  groupKey: string;
+  collapsedGroups: Record<string, boolean>;
+  projects: ProjectSidebarNode[];
+  tasks: AgentTaskView[];
+  currentSessionKey: string | null;
+  showPreviews: boolean;
+  projectRegistryState: "ready" | "corrupt";
+  headerAction?: ReactNode;
+  emptyText?: string;
+  onToggleGroup: (key: string) => void;
+  onToggleProject: (key: string) => void;
+  onOpenTask: (task: AgentTaskView) => Promise<void>;
+  onRenameTask: (task: AgentTaskView) => void;
+  onTaskContextMenu: (event: MouseEvent, task: AgentTaskView) => void;
+  onPinTask: (task: AgentTaskView, pinned: boolean) => void;
+  archiveConfirmSessionKey: string | null;
+  onRequestArchiveTask: (task: AgentTaskView) => void;
+  onConfirmArchiveTask: (task: AgentTaskView) => void;
+  onUnarchiveTask: (task: AgentTaskView) => void;
+  onDeleteArchivedTask: (task: AgentTaskView) => void;
+  onProjectContextMenu: (event: MouseEvent, projectId: string) => void;
+  onNewProjectTask: (projectId: string) => void;
+}) {
+  const collapsed = Boolean(props.collapsedGroups[props.groupKey]);
+  const renderTask = (task: AgentTaskView, nested = false) => (
+    <div key={task.sessionKey} className={nested ? "app-frame-project-task" : undefined}>
+      <TaskRow
+        task={task}
+        isCurrent={props.currentSessionKey === task.sessionKey}
+        showPreview={props.showPreviews}
+        projectRegistryState={props.projectRegistryState}
+        onOpen={() => void props.onOpenTask(task)}
+        onRename={() => props.onRenameTask(task)}
+        onContextMenu={(event) => props.onTaskContextMenu(event, task)}
+        onPin={() => props.onPinTask(task, !task.pinned)}
+        archiveConfirming={props.archiveConfirmSessionKey === task.sessionKey}
+        onRequestArchive={() => props.onRequestArchiveTask(task)}
+        onConfirmArchive={() => props.onConfirmArchiveTask(task)}
+        onUnarchive={() => props.onUnarchiveTask(task)}
+        onDeleteArchived={() => props.onDeleteArchivedTask(task)}
+      />
+    </div>
+  );
+
+  return (
+    <section className="space-y-1">
+      <div
+        className="app-frame-task-section-header flex cursor-pointer items-center justify-between py-1.5 pl-1 pr-0"
+        onClick={() => props.onToggleGroup(props.groupKey)}
+      >
+        <button
+          type="button"
+          className="flex min-w-0 flex-1 items-center gap-1.5 text-left text-text-ink/50"
+          aria-expanded={!collapsed}
+        >
+          <span className="app-frame-task-section-header__title min-w-0 truncate">{props.title}</span>
+          {collapsed
+            ? <ChevronRight size={13} aria-hidden="true" className="app-frame-task-section-header__toggle-icon shrink-0" />
+            : <ChevronDown size={13} aria-hidden="true" className="app-frame-task-section-header__toggle-icon shrink-0" />}
+        </button>
+        <div
+          className="app-frame-task-section-header__actions"
+          onClick={(event) => event.stopPropagation()}
+        >
+          {props.headerAction}
+        </div>
+      </div>
+      {!collapsed ? (
+        <>
+          {props.tasks.map((task) => renderTask(task))}
+          {props.projects.map((node) => {
+            const projectKey = `project:${node.project.id}`;
+            const projectCollapsed = Boolean(props.collapsedGroups[projectKey]);
+            return (
+              <div key={node.project.id} className="app-frame-project-node">
+                <ProjectRow
+                  project={node.project}
+                  collapsed={projectCollapsed}
+                  onToggle={() => props.onToggleProject(projectKey)}
+                  onContextMenu={(event) => props.onProjectContextMenu(event, node.project.id)}
+                  onNewTask={() => props.onNewProjectTask(node.project.id)}
+                />
+                {!projectCollapsed ? node.tasks.map((task) => renderTask(task, true)) : null}
+              </div>
+            );
+          })}
+          {!props.tasks.length && !props.projects.length && props.emptyText ? (
+            <div className="app-frame-task-empty pl-5 py-2 text-text-ink/40">{props.emptyText}</div>
+          ) : null}
+        </>
+      ) : null}
+    </section>
+  );
+}
+
+function ProjectRow(props: {
+  project: MemmyAgentProject;
+  collapsed: boolean;
+  onToggle: () => void;
+  onContextMenu: (event: MouseEvent) => void;
+  onNewTask: () => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div
+      className="app-frame-project-row flex items-center gap-1 rounded-input hover:bg-canvas-oat/55"
+      title={props.project.rootPath}
+    >
+      <button
+        type="button"
+        className="flex min-w-0 flex-1 items-center gap-1.5 py-1.5 pl-1 text-left"
+        aria-expanded={!props.collapsed}
+        onClick={props.onToggle}
+      >
+        <Folder size={14} className="shrink-0 text-action-sky/70" />
+        <span className="app-frame-project-title min-w-0 flex-1 truncate text-text-ink/75">{props.project.name}</span>
+      </button>
+      <div className="app-frame-project-row__actions flex shrink-0 items-center pr-1">
+        <TaskIconButton label={t("appFrame.project.newTask")} onClick={props.onNewTask}>
+          <MessageSquarePlus size={12} />
+        </TaskIconButton>
+        <TaskIconButton
+          label={t("appFrame.project.actions")}
+          onClick={(event) => props.onContextMenu(event)}
+        >
+          <MoreHorizontal size={12} />
+        </TaskIconButton>
+      </div>
+    </div>
+  );
 }
 
 function TaskSection(props: {
@@ -1298,6 +1935,7 @@ export function TaskRow(props: {
   task: AgentTaskView;
   isCurrent: boolean;
   showPreview: boolean;
+  projectRegistryState?: "ready" | "corrupt";
   onOpen: () => void;
   onRename?: () => void;
   onContextMenu: (event: MouseEvent) => void;
@@ -1319,6 +1957,12 @@ export function TaskRow(props: {
   const titleClass = props.isCurrent ? "text-action-sky-hover" : "text-text-ink/70";
   const previewClass = props.isCurrent ? "text-action-sky-hover/65" : "text-text-ink/45";
   const hasTaskStatus = props.task.runStartedAt != null || props.task.completedUnseen;
+  const projectIssueLabel = props.task.projectId == null || props.task.groupProjectId != null
+    ? null
+    : props.projectRegistryState === "corrupt"
+      ? t("appFrame.project.taskRegistryUnavailable")
+      : t("appFrame.project.recordUnavailable");
+  const projectIssueTitle = projectIssueLabel ? `${projectIssueLabel} · ${props.task.cwd}` : undefined;
   const shouldShowTaskActions = archived ? isTaskRowHovered : props.archiveConfirming || isTaskRowHovered || hasTaskStatus;
 
   return (
@@ -1332,6 +1976,7 @@ export function TaskRow(props: {
       <button
         type="button"
         aria-current={props.isCurrent ? "page" : undefined}
+        title={projectIssueTitle}
         onClick={props.onOpen}
         onDoubleClick={(event) => {
           if (archived || !props.onRename) {
@@ -1341,7 +1986,7 @@ export function TaskRow(props: {
           event.stopPropagation();
           props.onRename();
         }}
-        className="min-w-0 flex-1 text-left pl-3 py-2 cursor-pointer"
+        className="min-w-0 flex-1 text-left pl-1 py-2 cursor-pointer"
       >
         <span className="flex min-w-0 items-center gap-1.5">
           <span className={`app-frame-task-title min-w-0 flex-1 truncate ${titleClass}`}>{props.task.title}</span>
@@ -1349,6 +1994,11 @@ export function TaskRow(props: {
         {props.showPreview && props.task.preview && (
           <span className={`app-frame-task-preview mt-1 block truncate ${previewClass}`}>{props.task.preview}</span>
         )}
+        {projectIssueLabel ? (
+          <span className="app-frame-task-preview mt-1 block truncate text-status-error/70">
+            {projectIssueLabel}
+          </span>
+        ) : null}
       </button>
       {shouldShowTaskActions && (
         <div className="flex self-center shrink-0 items-center justify-center gap-0.5 pr-1.5">
@@ -1441,7 +2091,13 @@ export function TaskArchiveInlineAction(props: {
   );
 }
 
-function TaskIconButton(props: { label: string; active?: boolean; danger?: boolean; children: ReactNode; onClick: () => void }) {
+function TaskIconButton(props: {
+  label: string;
+  active?: boolean;
+  danger?: boolean;
+  children: ReactNode;
+  onClick: (event: MouseEvent<HTMLButtonElement>) => void;
+}) {
   const colorClass = props.danger
     ? "text-text-ink/40 hover:text-status-error"
     : props.active
@@ -1455,7 +2111,7 @@ function TaskIconButton(props: { label: string; active?: boolean; danger?: boole
         aria-label={props.label}
         onClick={(event) => {
           event.stopPropagation();
-          props.onClick();
+          props.onClick(event);
         }}
         className={`task-icon-button w-6 h-6 inline-flex items-center justify-center rounded-input text-center leading-none hover:bg-background-paper/80 transition-colors cursor-pointer ${colorClass}`}
       >
@@ -1479,6 +2135,42 @@ function InlineConfirmButton(props: { ariaLabel: string; label: string; onClick:
       {props.label}
     </button>
   );
+}
+
+function ProjectListMoreMenu(props: {
+  anchor: SidebarMenuAnchor;
+  showArchived: boolean;
+  onToggleArchived: () => void;
+}) {
+  const { t } = useTranslation();
+
+  if (typeof document === "undefined" || typeof window === "undefined") {
+    return null;
+  }
+
+  const overlayStyle = resolveSidebarMenuOverlayStyle(
+    props.anchor,
+    { width: window.innerWidth, height: window.innerHeight },
+    projectListMoreMenuSize
+  );
+  const menu = (
+    <div
+      className="fixed w-32 rounded-menu border border-border-stone/40 bg-background-paper shadow-lg p-1"
+      style={overlayStyle}
+      onClick={(event) => event.stopPropagation()}
+    >
+      <MenuButton
+        icon={<Archive size={12} />}
+        label={props.showArchived
+          ? t("appFrame.project.showAll")
+          : t("appFrame.project.showArchived")}
+        active={props.showArchived}
+        onClick={props.onToggleArchived}
+      />
+    </div>
+  );
+
+  return createPortal(menu, document.body);
 }
 
 function SidebarMoreMenu(props: {
@@ -1554,10 +2246,18 @@ function TaskContextMenu(props: {
     action();
     props.onClose();
   };
-  return (
+  if (typeof document === "undefined" || typeof window === "undefined") {
+    return null;
+  }
+  const placement = resolveSidebarContextMenuPlacement(
+    props.menu,
+    { width: window.innerWidth, height: window.innerHeight },
+    taskContextMenuSize
+  );
+  const menu = (
     <div
       className="fixed z-50 w-36 rounded-menu border border-border-stone/40 bg-background-paper shadow-lg p-1"
-      style={{ left: props.menu.x, top: props.menu.y }}
+      style={placement}
       onClick={(event) => event.stopPropagation()}
     >
       {task.archived ? (
@@ -1574,19 +2274,100 @@ function TaskContextMenu(props: {
       )}
     </div>
   );
+  return createPortal(menu, document.body);
 }
 
-function MenuButton(props: { label: string; icon?: ReactNode; active?: boolean; danger?: boolean; onClick: () => void }) {
-  const colorClass = props.danger
-    ? "text-status-error hover:bg-status-error/10"
-    : props.active
-      ? "text-action-sky bg-action-sky/10"
-      : "text-text-ink/65 hover:bg-canvas-oat/60";
+function ProjectContextMenu(props: {
+  menu: ProjectContextMenuState;
+  project: MemmyAgentProject | null;
+  archiveTaskCount: number;
+  onPin: (project: MemmyAgentProject) => void;
+  onReveal: (project: MemmyAgentProject) => void;
+  onRename: (project: MemmyAgentProject) => void;
+  onMarkRead: (project: MemmyAgentProject) => void;
+  onArchive: (project: MemmyAgentProject) => void;
+  onRemove: (project: MemmyAgentProject) => void;
+  onClose: () => void;
+}) {
+  const { t } = useTranslation();
+  const project = props.project;
+  if (!project) return null;
+  const run = (action: () => void) => {
+    action();
+    props.onClose();
+  };
+  if (typeof document === "undefined" || typeof window === "undefined") {
+    return null;
+  }
+  const placement = resolveSidebarContextMenuPlacement(
+    props.menu,
+    { width: window.innerWidth, height: window.innerHeight },
+    projectContextMenuSize
+  );
+  const menu = (
+    <div
+      className="fixed z-50 w-44 rounded-menu border border-border-stone/40 bg-background-paper shadow-lg p-1"
+      style={placement}
+      onClick={(event) => event.stopPropagation()}
+    >
+      <MenuButton
+        icon={<Pin size={12} />}
+        label={project.pinned ? t("appFrame.project.unpin") : t("appFrame.project.pin")}
+        onClick={() => run(() => props.onPin(project))}
+      />
+      <MenuButton
+        icon={<Folder size={12} />}
+        label={t("appFrame.project.reveal")}
+        onClick={() => run(() => props.onReveal(project))}
+      />
+      <MenuButton
+        icon={<Pencil size={12} />}
+        label={t("appFrame.project.rename")}
+        onClick={() => run(() => props.onRename(project))}
+      />
+      <MenuButton
+        icon={<CheckCheck size={12} />}
+        label={t("appFrame.project.markRead")}
+        onClick={() => run(() => props.onMarkRead(project))}
+      />
+      <MenuButton
+        icon={<Archive size={12} />}
+        label={t("appFrame.project.archiveTasks")}
+        disabled={props.archiveTaskCount === 0}
+        onClick={() => run(() => props.onArchive(project))}
+      />
+      <MenuButton
+        icon={<Trash2 size={12} />}
+        label={t("appFrame.project.remove")}
+        danger
+        onClick={() => run(() => props.onRemove(project))}
+      />
+    </div>
+  );
+  return createPortal(menu, document.body);
+}
+
+function MenuButton(props: {
+  label: string;
+  icon?: ReactNode;
+  active?: boolean;
+  danger?: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  const colorClass = props.disabled
+    ? "cursor-not-allowed text-text-ink/30"
+    : props.danger
+      ? "cursor-pointer text-status-error hover:bg-status-error/10"
+      : props.active
+        ? "cursor-pointer text-action-sky bg-action-sky/10"
+        : "cursor-pointer text-text-ink/65 hover:bg-canvas-oat/60";
   return (
     <button
       type="button"
+      disabled={props.disabled}
       onClick={props.onClick}
-      className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-input text-left text-xs cursor-pointer ${colorClass}`}
+      className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-input text-left text-xs ${colorClass}`}
     >
       {props.icon}
       <span className="truncate">{props.label}</span>

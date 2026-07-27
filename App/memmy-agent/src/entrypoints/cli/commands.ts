@@ -10,7 +10,9 @@ import { InboundMessage, OutboundMessage } from "../../core/runtime-messages/eve
 import { AgentLoop, UNIFIED_SESSION_KEY } from "../../core/agent-runtime/loop.js";
 import { CronTool } from "../../core/agent-runtime/tools/cron.js";
 import { MessageTool } from "../../core/agent-runtime/tools/message.js";
+import { prepareManagedChromium } from "../../core/agent-runtime/tools/browser-setup.js";
 import { WebuiTitleService } from "../../core/session/webui-title.js";
+import { readWebuiSessionBinding } from "../../core/session/manager.js";
 import { WEBUI_LANGUAGE_METADATA_KEY } from "../../core/session/webui-turns.js";
 import {
   API_MAX_BODY_BYTES,
@@ -53,6 +55,7 @@ import {
   shouldShowCliRestartNotice,
 } from "../../utils/restart.js";
 import { createChannelAdmin } from "../frontend-bridge/channels-api.js";
+import { ProjectStore } from "../frontend-bridge/projects.js";
 import { getQuestionary, runOnboard } from "./onboard.js";
 import { StreamRenderer, ThinkingSpinner } from "./stream.js";
 
@@ -76,6 +79,22 @@ export function setCliRuntimeLogs(enabled: boolean): void {
 
 export function cliRuntimeLogsEnabled(): boolean {
   return cliRuntimeLogs;
+}
+
+async function initializeLoopRuntimeTools(loop: any): Promise<void> {
+  if (typeof loop?.initializeRuntimeTools === "function") {
+    await loop.initializeRuntimeTools();
+    return;
+  }
+  await loop?.connectMcp?.();
+}
+
+async function closeLoopRuntimeTools(loop: any): Promise<void> {
+  if (typeof loop?.closeRuntimeTools === "function") {
+    await loop.closeRuntimeTools();
+    return;
+  }
+  await loop?.closeMcp?.();
 }
 
 export function sanitizeSurrogates(text: string): string {
@@ -204,7 +223,31 @@ export async function runRootInteractiveAgent(): Promise<unknown> {
   return runInkInteractiveAgent(loaded, "cli:direct");
 }
 
+export async function runInternalCommand(argv: string[]): Promise<boolean> {
+  if (argv[2] !== "internal") return false;
+  if (argv.length !== 4 || argv[3] !== "browser-prepare") {
+    console.error("unavailable");
+    process.exitCode = 2;
+    return true;
+  }
+  try {
+    const loaded = loadRuntimeConfig(null, null);
+    const result = await prepareManagedChromium(loaded.tools.browser.enabled);
+    console.log(result.status);
+    if (result.status === "unavailable") {
+      if (result.error) console.error(result.error);
+      process.exitCode = 1;
+    }
+  } catch (error) {
+    console.log("unavailable");
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  }
+  return true;
+}
+
 export async function main(argv: string[] = process.argv): Promise<void> {
+  if (await runInternalCommand(argv)) return;
   if (isRootVersionRequest(argv)) {
     versionCallback(true);
     return;
@@ -478,7 +521,7 @@ export async function serve({
   syncRuntimeWorkspaceTemplates(loaded);
   setCliRuntimeLogs(Boolean(verbose));
   const loop = AgentLoop.fromConfig(loaded);
-  await loop.connectMcp();
+  await initializeLoopRuntimeTools(loop);
   const resolved = loaded.resolvePreset();
   const appServer = createApp(
     loop,
@@ -489,7 +532,7 @@ export async function serve({
   const bindPort = port == null ? loaded.api.port : Number(port);
   let cleanupPromise: Promise<void> | null = null;
   const closeMcpOnce = (): Promise<void> => {
-    cleanupPromise ??= Promise.resolve(loop.closeMcp()).catch(() => undefined);
+    cleanupPromise ??= Promise.resolve(closeLoopRuntimeTools(loop)).catch(() => undefined);
     return cleanupPromise;
   };
   const server = http.createServer(async (req, res) => {
@@ -625,6 +668,15 @@ function sanitizeCronDeliveryMetadata(
   return next;
 }
 
+function cronExecutionMetadata(
+  channel: string,
+  metadata: Record<string, any> = {},
+): Record<string, any> {
+  const next = sanitizeCronDeliveryMetadata(channel, metadata);
+  if (channel === "websocket") delete next.webui;
+  return next;
+}
+
 function usesChineseCronLanguage(metadata: Record<string, any>): boolean {
   return String(metadata?.[WEBUI_LANGUAGE_METADATA_KEY] ?? "")
     .toLowerCase()
@@ -685,22 +737,32 @@ export async function gateway({
   installConsoleLevelGate();
   const bus = new MessageBus();
   const cron = new CronService(path.join(workspacePath, "cron", "jobs.json"));
+  const projectStore = new ProjectStore();
   const loop = AgentLoop.fromConfig(loaded, bus, {
     cronService: cron,
+    projectStore,
     runtimeModelPublisher: (model, preset) => {
       if (model) publishRuntimeModelUpdate(bus, model, preset);
     },
   });
+  await initializeLoopRuntimeTools(loop);
   const manager = new ChannelManager(loaded, bus, {
     sessionManager: loop.sessions,
+    workspacePath,
     webuiRuntimeModelName: () => {
       loop.refreshProviderSnapshot();
       return loop.model ?? null;
     },
     cancelActiveTasks: (sessionKey) => loop.cancelActiveTasks(sessionKey),
+    closeBrowserChat: (channel, chatId) => loop.closeBrowserChat(channel, chatId),
   });
   const webuiChannel = manager.getChannel("websocket");
   if (webuiChannel instanceof WebSocketChannel) {
+    webuiChannel.setProjectStore(projectStore);
+    webuiChannel.setSessionDeletionServices({
+      cronService: cron,
+      sessionDagQueue: loop.sessionDagQueue,
+    });
     webuiChannel.setChannelAdmin(createChannelAdmin(manager));
     webuiChannel.setWebuiTitleService(
       new WebuiTitleService({
@@ -812,6 +874,24 @@ export async function gateway({
     const channel = job.payload.channel ?? "cli";
     const chatId = job.payload.to ?? job.payload.chatId ?? "direct";
     const targetSessionKey = job.payload.sessionKey ?? channelSessionKey(loop, channel, chatId);
+    let targetSessionBinding = null;
+    if (channel === "websocket") {
+      const targetSession = loop.sessions.get(targetSessionKey);
+      if (!targetSession) throw new Error("cron target session not found");
+      targetSessionBinding = loop.resolveSessionWorkspace(
+        new InboundMessage({
+          channel,
+          chatId,
+          senderId: "cron",
+          content: message,
+          metadata: job.payload.channelMeta ?? {},
+          sessionKey: targetSessionKey,
+        }),
+        targetSession,
+        null,
+        readWebuiSessionBinding(targetSession),
+      );
+    }
     const scheduledForMs = job.state.nextRunAtMs ?? Date.now();
     const cronContext: CronDeliveryContext = {
       jobId: job.id,
@@ -858,9 +938,12 @@ export async function gateway({
           sessionKey: `cron:${job.id}`,
           channel,
           chatId,
-          metadata: channel === "websocket" ? job.payload.channelMeta : {},
+          metadata: channel === "websocket"
+            ? cronExecutionMetadata(channel, job.payload.channelMeta ?? {})
+            : {},
           onProgress: async () => undefined,
           messageSendCallback,
+          sessionBindingOverride: targetSessionBinding,
         });
         content = response?.content ?? "";
       } finally {
@@ -971,7 +1054,7 @@ export async function gateway({
       await Promise.allSettled([
         inboundTask,
         manager.stopAll(),
-        loop.closeMcp(),
+        closeLoopRuntimeTools(loop),
         (loop.sessions as any)?.flush?.(),
         closeServer(healthServer),
       ]);
@@ -1044,7 +1127,10 @@ export async function agent({
         if (!rendererClosed) await renderer.close();
       } finally {
         loop.stop();
-        await Promise.allSettled([loop.closeMcp(), Promise.resolve(loop.sessions.flushAll())]);
+        await Promise.allSettled([
+          closeLoopRuntimeTools(loop),
+          Promise.resolve(loop.sessions.flushAll()),
+        ]);
       }
     }
   }
@@ -1194,7 +1280,11 @@ export async function runInteractiveAgent(
     active = false;
     loop.stop();
     restoreTerminal();
-    await Promise.allSettled([runTask, outboundTask, loop.closeMcp()]);
+    await Promise.allSettled([
+      runTask,
+      outboundTask,
+      closeLoopRuntimeTools(loop),
+    ]);
   }
   return null;
 }

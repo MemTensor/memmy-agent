@@ -414,6 +414,7 @@ describe("ToolLoader load integration", () => {
     expect(registered).toEqual(
       expect.arrayContaining([
         "apply_patch",
+        "memmy_agent_source",
         "read_file",
         "write_file",
         "edit_file",

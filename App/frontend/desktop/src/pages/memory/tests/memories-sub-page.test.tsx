@@ -258,6 +258,45 @@ describe("MemoriesSubPage", () => {
     expect(html).toContain("重试");
     expect(html).toContain("检查模型设置");
     expect(html).toContain("memory-pill--failed");
+    expect(html).not.toContain("已尝试次数");
+  });
+
+  it("重试处理中持续展示上次失败原因", () => {
+    const processing = {
+      memoryId: memoryListItemFixture.id,
+      state: "embedding_pending" as const,
+      stage: "embedding" as const,
+      activeJobId: "embedding-retry",
+      attemptCount: 0,
+      manualRetryCount: 1,
+      retryAction: "retry" as const,
+      errorCode: "model_configuration",
+      errorMessage: "摘要模型未配置",
+      failedAt: "2026-06-03T09:30:00.000Z",
+      updatedAt: "2026-06-03T09:31:00.000Z"
+    };
+    const html = renderMemories({
+      status: "ready",
+      data: panelItemsOutput([{ ...memoryListItemFixture, processing }]),
+      detail: {
+        status: "ready",
+        data: {
+          ...memoryDetailFixture,
+          item: { ...memoryDetailFixture.item, processing }
+        }
+      }
+    }, "zh-CN", {
+      onRetryProcessing: vi.fn(),
+      onOpenSettings: vi.fn()
+    });
+
+    expect(html).toContain("正在重试");
+    expect(html).toContain("上次失败原因");
+    expect(html).toContain("摘要模型未配置");
+    expect(html).toContain("上次失败时间");
+    expect(html).not.toContain("已尝试次数");
+    expect(html).not.toContain("检查模型设置");
+    expect(html).not.toContain("立即重试");
   });
 
   it("重试接口失败时保留原始处理原因，并单独展示本次重试错误", () => {

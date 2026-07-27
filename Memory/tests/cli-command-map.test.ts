@@ -187,6 +187,16 @@ describe("memmy CLI command map", () => {
     });
   });
 
+  it("rejects cancelled turn completion before sending a request", async () => {
+    await expect(runMappedCommand([
+      "turn", "complete", "turn_1",
+      "--session-id", "se_123",
+      "--query", "cancel this",
+      "--answer", "partial response",
+      "--status", "cancelled"
+    ])).rejects.toThrow("cancelled turns must not be persisted");
+  });
+
   it("parses simple search filters from user options", async () => {
     const { requests } = await runMappedCommand([
       "search", "test failures",

@@ -1,5 +1,6 @@
 /** Agent sources route tests. */
 import { randomUUID } from "node:crypto";
+import { MANAGED_AGENT_DISCOVERY_PENDING_DATA_PATH } from "@memmy/local-api-contracts";
 import { afterEach, describe, expect, it } from "vitest";
 import { createProgressBus, type ProgressBus } from "../../../../services/progress-bus.js";
 import { createLocalApiServer } from "../server.js";
@@ -115,7 +116,7 @@ describe("agent sources local api routes", () => {
           return {
             sourceId: "manual-1",
             displayName: input.displayName,
-            dataPath: input.dataPath,
+            dataPath: MANAGED_AGENT_DISCOVERY_PENDING_DATA_PATH,
             builtin: false,
             available: true,
             status: "not_connected",
@@ -147,8 +148,7 @@ describe("agent sources local api routes", () => {
       url: "/api/agent-sources/manual",
       headers: { "x-memmy-local-token": "test-token" },
       payload: {
-        displayName: "Manual Agent",
-        dataPath: "/tmp/manual"
+        displayName: "Manual Agent"
       }
     });
     const removeResponse = await server.inject({
@@ -184,6 +184,114 @@ describe("agent sources local api routes", () => {
     expect(uninstallPluginResponse.json()).toEqual({ ok: true });
     expect(uninstallResponse.json()).toEqual({ ok: true });
     expect(calls).toEqual(["add:Manual Agent", "remove:manual-1", "install:cursor", "plugin:openclaw", "unplugin:openclaw", "uninstall:cursor"]);
+  });
+
+  it("accepts AI-normalized history batches and managed Skill status updates", async () => {
+    const calls: string[] = [];
+    const { server } = createServer({
+      agentSources: {
+        ...createFakeAgentSourceService(),
+        async importManaged(sourceId, input) {
+          calls.push(`import:${sourceId}:${input.mode}:${input.messages.length}:${input.final}`);
+          return {
+            sourceId,
+            attempted: input.messages.length,
+            written: input.messages.length,
+            deduped: 0,
+            failed: 0,
+            memoryIds: ["memory-1"],
+            syncBoundaryAt: input.syncBoundaryAt ?? null,
+            errors: []
+          };
+        },
+        async syncManaged(sourceId) {
+          calls.push(`sync:${sourceId}`);
+          return {
+            sourceId,
+            attempted: 2,
+            written: 1,
+            deduped: 1,
+            failed: 0,
+            memoryIds: ["memory-2"],
+            syncBoundaryAt: "2026-07-01T10:00:00.000Z",
+            errors: []
+          };
+        },
+        async updateManaged(sourceId, input) {
+          calls.push(`update:${sourceId}:${input.skillInstalled}`);
+          return {
+            sourceId,
+            displayName: "Aider",
+            dataPath: input.dataPath ?? "/tmp/aider",
+            builtin: false,
+            available: true,
+            status: input.skillInstalled ? "skill_installed" : "not_connected",
+            messageCount: 2,
+            lastScannedAt: null,
+            syncBoundaryAt: null
+          };
+        }
+      }
+    });
+    app = server;
+
+    const importResponse = await server.inject({
+      method: "POST",
+      url: "/api/agent-sources/manual-1/managed/import",
+      headers: { "x-memmy-local-token": "test-token" },
+      payload: {
+        mode: "initial_subset",
+        messages: [
+          {
+            messageId: "message-1",
+            conversationId: "conversation-1",
+            role: "user",
+            content: "question",
+            createdAt: "2026-07-01T10:00:00.000Z"
+          }
+        ],
+        syncBoundaryAt: "2026-07-01T10:00:00.000Z",
+        final: true
+      }
+    });
+    const updateResponse = await server.inject({
+      method: "PATCH",
+      url: "/api/agent-sources/manual-1/managed",
+      headers: { "x-memmy-local-token": "test-token" },
+      payload: {
+        dataPath: "/tmp/aider",
+        skillInstalled: true
+      }
+    });
+    const syncResponse = await server.inject({
+      method: "POST",
+      url: "/api/agent-sources/manual-1/managed/sync",
+      headers: { "x-memmy-local-token": "test-token" }
+    });
+
+    expect(importResponse.statusCode).toBe(200);
+    expect(importResponse.json()).toMatchObject({
+      sourceId: "manual-1",
+      attempted: 1,
+      syncBoundaryAt: "2026-07-01T10:00:00.000Z"
+    });
+    expect(updateResponse.statusCode).toBe(200);
+    expect(updateResponse.json()).toMatchObject({
+      sourceId: "manual-1",
+      status: "skill_installed",
+      dataPath: "/tmp/aider"
+    });
+    expect(syncResponse.json()).toMatchObject({
+      sourceId: "manual-1",
+      attempted: 2,
+      written: 1,
+      deduped: 1
+    });
+    expect(calls).toEqual([
+      "import:manual-1:initial_subset:1:true",
+      "update:manual-1:true",
+      "sync:manual-1"
+    ]);
   });
 
   it("returns a structured user-actionable error when skill target is unavailable", async () => {
@@ -868,12 +976,49 @@ function createFakeAgentSourceService(): AgentSourceService {
       return {
         sourceId: randomUUID(),
         displayName: input.displayName,
-        dataPath: input.dataPath,
+        dataPath: MANAGED_AGENT_DISCOVERY_PENDING_DATA_PATH,
         builtin: false,
         available: true,
         status: "not_connected",
         messageCount: 0,
         lastScannedAt: null
+      };
+    },
+    async importManaged(sourceId, input) {
+      return {
+        sourceId,
+        attempted: input.messages.length,
+        written: input.messages.length,
+        deduped: 0,
+        failed: 0,
+        memoryIds: [],
+        syncBoundaryAt: input.syncBoundaryAt ?? null,
+        errors: []
+      };
+    },
+    async syncManaged(sourceId) {
+      return {
+        sourceId,
+        attempted: 0,
+        written: 0,
+        deduped: 0,
+        failed: 0,
+        memoryIds: [],
+        syncBoundaryAt: null,
+        errors: []
+      };
+    },
+    async updateManaged(sourceId, input) {
+      return {
+        sourceId,
+        displayName: "Manual Agent",
+        dataPath: input.dataPath ?? MANAGED_AGENT_DISCOVERY_PENDING_DATA_PATH,
+        builtin: false,
+        available: true,
+        status: input.skillInstalled ? "skill_installed" : "not_connected",
+        messageCount: 0,
+        lastScannedAt: null,
+        syncBoundaryAt: null
       };
     },
     async remove() {

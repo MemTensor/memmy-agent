@@ -98,7 +98,6 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
         sessionId,
         query: userText || "(conversation continued)",
       }));
-      turn.episodeId = stringOrUndefined(response?.episodeId);
       this.injectMemoryContext(messages, response?.injectedContext);
       turn.messageStartIndex = messages.length;
     });
@@ -110,6 +109,11 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
       if (!sessionKey) return;
       const turn = this.turnBySessionKey.get(sessionKey);
       if (!turn) return;
+      const status = statusFromResult(result, ctx);
+      if (status === "cancelled") {
+        this.turnBySessionKey.delete(sessionKey);
+        return;
+      }
       const messages = Array.isArray(result?.messages) ? result.messages : [];
       const toolCallAnnotations = toolCallAnnotationsFromMessages(messages, turn.messageStartIndex);
       const toolCalls = normalizeAgentToolCalls(result?.toolCalls ?? ctx.toolCalls ?? [], toolCallAnnotations);
@@ -119,21 +123,29 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
         result?.reasoning,
         reasoningSummaryFromMessages(messages, turn.messageStartIndex),
       );
-      const response = await this.client.completeTurn(turn.turnId, compact({
+      const answer = firstNonemptyString(
+        result?.finalContent,
+        result?.content,
+        ctx.finalContent,
+        status === "failed" ? failedTurnText(result, ctx) : undefined,
+      );
+      if (!turn.userText.trim() || !answer) {
+        this.turnBySessionKey.delete(sessionKey);
+        return;
+      }
+      await this.client.completeTurn(turn.turnId, compact({
         ...this.requestEnvelope(sessionKey, ctx),
+        requestId: completeRequestId(turn.turnId, status, turn.userText, answer),
         sessionId: turn.sessionId,
         query: turn.userText,
-        answer: String(result?.finalContent ?? result?.content ?? ctx.finalContent ?? ""),
+        answer,
         reasoningSummary,
         toolCalls,
         toolResults,
         usage: result?.usage ?? ctx.usage,
-        status: statusFromResult(result, ctx),
+        status,
       }));
-      turn.rawTurnId = stringOrUndefined(response?.rawTurnId) ?? turn.rawTurnId;
-      turn.l1MemoryId = stringOrUndefined(response?.l1MemoryId) ?? turn.l1MemoryId;
-      const l1MemoryIds = arrayOfStrings(response?.l1MemoryIds);
-      if (!turn.l1MemoryId && l1MemoryIds.length) turn.l1MemoryId = l1MemoryIds[0];
+      this.turnBySessionKey.delete(sessionKey);
     });
   }
 
@@ -160,11 +172,6 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
   currentSessionId(sessionKey?: string | null): string | null {
     if (!sessionKey) return null;
     return this.sessionIdBySessionKey.get(sessionKey) ?? this.deriveSessionId(sessionKey);
-  }
-
-  currentEpisodeId(sessionKey?: string | null): string | null {
-    if (!sessionKey) return null;
-    return this.turnBySessionKey.get(sessionKey)?.episodeId ?? null;
   }
 
   currentTurnId(sessionKey?: string | null): string | null {
@@ -255,10 +262,6 @@ function stringOrUndefined(value: any): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
 }
 
-function arrayOfStrings(value: any): string[] {
-  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
-}
-
 function messageContentText(content: any): string {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) return content.map((item) => item?.text ?? item?.content ?? "").filter(Boolean).join("\n");
@@ -324,10 +327,34 @@ function firstNonemptyString(...values: any[]): string | undefined {
 }
 
 function statusFromResult(result: any, ctx: AgentHookContext): "succeeded" | "failed" | "cancelled" {
-  const stopReason = String(result?.stopReason ?? ctx.stopReason ?? "");
-  if (stopReason === "cancelled" || stopReason === "cancelledByUser") return "cancelled";
-  if (result?.error || ctx.error || stopReason === "toolError" || stopReason === "error") return "failed";
+  const stopReason = String(result?.stopReason ?? ctx.stopReason ?? "")
+    .toLowerCase()
+    .replace(/[\s_-]+/gu, "");
+  if (["cancelled", "canceled", "cancelledbyuser", "canceledbyuser", "aborted"].includes(stopReason)) return "cancelled";
+  if (result?.error || ctx.error || stopReason === "toolerror" || stopReason === "error" || stopReason === "failed") return "failed";
   return "succeeded";
+}
+
+function failedTurnText(result: any, ctx: AgentHookContext): string {
+  return firstNonemptyString(
+    result?.error?.message,
+    result?.error,
+    ctx.error,
+    "Agent generation failed before producing a final response.",
+  )!;
+}
+
+function completeRequestId(
+  turnId: string,
+  status: "succeeded" | "failed",
+  query: string,
+  answer: string,
+): string {
+  const hash = createHash("sha256")
+    .update([status, query, answer].join("\u0000"))
+    .digest("hex")
+    .slice(0, 20);
+  return `memmy-agent-complete:${turnId}:${hash}`;
 }
 
 function toContentBlocks(content: any): JsonRecord[] {

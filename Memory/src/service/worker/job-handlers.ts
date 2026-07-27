@@ -392,9 +392,6 @@ export function enqueueImportSummaryIfMissing(
       activeJobId: job.id,
       attemptCount: 0,
       retryAction: "retry",
-      errorCode: null,
-      errorMessage: null,
-      failedAt: null,
       updatedAt: at
     }, ["embedding_pending", "embedding", "summary_pending", "summarizing"]);
   });

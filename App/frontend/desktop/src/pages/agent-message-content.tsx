@@ -11,7 +11,11 @@ import "katex/dist/katex.min.css";
 import type { MemmyAgentClient, ResolvedAgentArtifact } from "../api/memmy-agent-client.js";
 import { useTranslation } from "../i18n/use-translation.js";
 
-export type AgentArtifactClient = Pick<MemmyAgentClient, "resolveArtifact" | "revealArtifact" | "openArtifact">;
+export type AgentArtifactClient = {
+  resolveArtifact(path: string): ReturnType<MemmyAgentClient["resolveArtifact"]>;
+  revealArtifact(path: string): Promise<void>;
+  openArtifact(path: string): Promise<void>;
+};
 export type AttachmentActionStatus = "opened" | "revealed" | "downloaded" | "failed";
 export type AttachmentCopyTarget = "path" | "url";
 export type AttachmentDownloadStarter = (url: string, name: string) => boolean;

@@ -2,7 +2,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { renderToString } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
 import type { Task, TaskBusValue } from "../../lib/task-bus.js";
 import { mockBootstrap } from "./fixtures/bootstrap.js";
@@ -15,6 +15,7 @@ import {
   hasPetThreadLatestAnswer,
   isPetDoubleClick,
   mapPetThreadMessagesToTaskBus,
+  petAgentSessionExists,
   PET_CANVAS,
   PET_TASK_RECONCILE_INTERVAL_MS,
   PET_TIMING,
@@ -36,6 +37,30 @@ const stylesPath = fileURLToPath(new URL("../../styles.css", import.meta.url));
 const petPageSourcePath = fileURLToPath(new URL("../pet-page.tsx", import.meta.url));
 
 describe("PetPage helpers", () => {
+  it("桌宠缓存未命中时向 Gateway 确认已有 Session，不能误建 standalone", async () => {
+    const cachedList = vi.fn(async () => [{ key: "websocket:project-chat" } as never]);
+
+    await expect(petAgentSessionExists({
+      sessionKey: "websocket:project-chat",
+      cachedSessions: [{ key: "websocket:project-chat" } as never],
+      listSessions: cachedList
+    })).resolves.toBe(true);
+    expect(cachedList).not.toHaveBeenCalled();
+
+    await expect(petAgentSessionExists({
+      sessionKey: "websocket:project-chat",
+      cachedSessions: [],
+      listSessions: cachedList
+    })).resolves.toBe(true);
+    expect(cachedList).toHaveBeenCalledTimes(1);
+
+    await expect(petAgentSessionExists({
+      sessionKey: "websocket:new-chat",
+      cachedSessions: [],
+      listSessions: async () => []
+    })).resolves.toBe(false);
+  });
+
   it("按规范派生 displayState", () => {
     expect(deriveDisplayState({ focusedTask: null, hasUndismissedAnswer: false, isActive: false, isInHotzone: false })).toBe("idle");
     expect(deriveDisplayState({ focusedTask: null, hasUndismissedAnswer: false, isActive: true, isInHotzone: false })).toBe("active");
@@ -367,8 +392,8 @@ describe("PetPage helpers", () => {
     const targets = resolvePetTaskReconcileTargets({
       client,
       sessions: [
-        { key: "websocket:chat-running", run_started_at: 1780732800 },
-        { key: "websocket:chat-done" }
+        { key: "websocket:chat-running", run_started_at: 1780732800, projectId: null, cwd: "/workspace" },
+        { key: "websocket:chat-done", projectId: null, cwd: "/workspace" }
       ],
       items: [
         { id: "chat-running", sessionId: "chat-running", taskId: "task-running", title: "运行中", status: "processing", activityAt: 2_000 },
@@ -737,7 +762,7 @@ describe("PetPageView SSR", () => {
     expect(source).toContain('dispatch(agentActions.wsEventReceived({ event: "stop_result", chat_id: chatId, stopped: 1 }));');
     expect(source).toContain("if (cancelledTaskIdsRef.current.has(task.id))");
     expect(source).toContain("cleanupPetAgentTaskRun(task);");
-    expect(source.indexOf("if (cancelledTaskIdsRef.current.has(task.id))")).toBeLessThan(source.indexOf("connection.sendMessage({ chatId, content }, expectedGeneration);"));
+    expect(source.indexOf("if (cancelledTaskIdsRef.current.has(task.id))")).toBeLessThan(source.indexOf("await connection.sendMessage({"));
     const stopFocusedTaskIndex = source.indexOf("const stopFocusedPetTask = useCallback");
     const rememberStoppedSessionIndex = source.indexOf("lastMainRouteSessionIdRef.current = focusedTask.sessionId;", stopFocusedTaskIndex);
     const stopHandlerIndex = source.indexOf("const stoppedBySubmitHandler = onStopTask?.(focusedTask) ?? false;", stopFocusedTaskIndex);

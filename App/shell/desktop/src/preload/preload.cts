@@ -9,6 +9,7 @@ type DesktopMenuBarIconResult = import("@memmy/desktop-interface").DesktopMenuBa
 type DesktopImageActionRequest = import("@memmy/desktop-interface").DesktopImageActionRequest;
 type DesktopImageSaveResult = import("@memmy/desktop-interface").DesktopImageSaveResult;
 type DesktopMemoryServiceRestartResult = import("@memmy/desktop-interface").DesktopMemoryServiceRestartResult;
+type DesktopProjectDirectorySelection = import("@memmy/desktop-interface").DesktopProjectDirectorySelection;
 type MicrophoneAccessStatus = import("@memmy/desktop-interface").MicrophoneAccessStatus;
 type MainWindowActionRequest = { id: string; action: "close" | "minimize" };
 
@@ -42,6 +43,8 @@ interface MemmyPreloadApi {
   setLogLevel(level: "error" | "warn" | "info" | "debug"): Promise<void>;
   getMicrophoneAccessStatus(): Promise<MicrophoneAccessStatus>;
   requestMicrophoneAccess(): Promise<MicrophoneAccessStatus>;
+  selectProjectDirectory(): Promise<DesktopProjectDirectorySelection>;
+  selectEmptyProjectDirectory(): Promise<DesktopProjectDirectorySelection>;
   notifyTaskDone(payload: { title: string; body: string; silent: boolean }): Promise<void>;
   notifyUpdateAvailable(payload: { title: string; body: string; silent: boolean }): Promise<void>;
   setPetWindow(enabled: boolean, target?: { route?: string; hash?: string; agentChatId?: string; petIntent?: "user" }): Promise<void>;
@@ -193,6 +196,14 @@ const memmyPreloadApi: MemmyPreloadApi = {
 
   async requestMicrophoneAccess(): Promise<MicrophoneAccessStatus> {
     return ipcRenderer.invoke("memmy:request-microphone-access");
+  },
+
+  async selectProjectDirectory(): Promise<DesktopProjectDirectorySelection> {
+    return ipcRenderer.invoke("memmy:select-project-directory");
+  },
+
+  async selectEmptyProjectDirectory(): Promise<DesktopProjectDirectorySelection> {
+    return ipcRenderer.invoke("memmy:select-empty-project-directory");
   },
 
   async setPetWindow(enabled: boolean, target?: { route?: string; hash?: string; agentChatId?: string; petIntent?: "user" }): Promise<void> {

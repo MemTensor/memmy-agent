@@ -53,13 +53,41 @@ describe("skill creator quick validator", () => {
     const skillDir = writeSkill(root, "memmy-metadata", [
       "name: memmy-metadata",
       "description: Validate canonical memmy metadata.",
-      `metadata: ${JSON.stringify({ memmy: { always: true, requires: { bins: ["gh"], env: ["GITHUB_TOKEN"] } } })}`,
+      `metadata: ${JSON.stringify({ memmy: { always: true, manualOnly: false, requires: { bins: ["gh"], env: ["GITHUB_TOKEN"] } } })}`,
     ]);
 
     const result = runValidator(skillDir);
 
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("Skill is valid!");
+  });
+
+  it("accepts a manual-only Skill", () => {
+    const root = tempRoot();
+    const skillDir = writeSkill(root, "button-guide", [
+      "name: button-guide",
+      "description: Load only for an explicit button task.",
+      `metadata: ${JSON.stringify({ memmy: { manualOnly: true } })}`,
+    ]);
+
+    const result = runValidator(skillDir);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("Skill is valid!");
+  });
+
+  it("rejects a manual-only Skill that also requests startup loading", () => {
+    const root = tempRoot();
+    const skillDir = writeSkill(root, "conflicting-guide", [
+      "name: conflicting-guide",
+      "description: Reject conflicting load modes.",
+      `metadata: ${JSON.stringify({ memmy: { manualOnly: true, always: true } })}`,
+    ]);
+
+    const result = runValidator(skillDir);
+
+    expect(result.status).not.toBe(0);
+    expect(result.stdout).toContain("cannot both be true");
   });
 
   it("rejects placeholder skill descriptions", () => {

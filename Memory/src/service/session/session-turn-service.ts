@@ -3,7 +3,6 @@ import {
   classifyIntent,
   classifyTurnFeedback,
   classifyTurnRelation,
-  classifyTurnRelationWithLlm,
   policyMetaFromMemory,
   retrievalLayersForMode,
   retrievePluginMemories,
@@ -626,8 +625,6 @@ export class SessionTurnService {
     contextPacketId: string;
     turnId: string;
     sessionId: string;
-    episodeId: string;
-    closedEpisodeIds: string[];
     searchEventId: string;
     hits: RecallHit[];
     injectedContext: InjectedContext;
@@ -649,36 +646,13 @@ export class SessionTurnService {
     const session = this.deps.requireOpenSession(request.sessionId);
     this.deps.assertSessionInScope(session, request.namespace);
     const turnId = request.turnId ?? newId("turn");
-    const existingRawTurn = this.deps.repos.runtime.getRawTurnBySessionTurn(session.id, turnId);
-    if (existingRawTurn) {
-      this.deps.assertRawTurnInScope(existingRawTurn, request.namespace);
-    }
-    const latestEpisodeBefore = existingRawTurn
-      ? undefined
-      : this.deps.repos.runtime.latestEpisodeForSession(session.id);
-    const episode = existingRawTurn
-      ? this.deps.requireEpisode(existingRawTurn.episodeId)
-      : await this.ensureEpisodeForTurnWithLlm(session, undefined, request.query, "turn.start");
-    const closedEpisodeIds = closedEpisodeIdsFromBoundary(
-      latestEpisodeBefore,
-      episode,
-      latestEpisodeBefore ? this.deps.repos.runtime.getEpisode(latestEpisodeBefore.id) : undefined
-    );
-    const intentDecision = episode.rawTurnIds.length === 0
-      ? classifyIntent(request.query)
-      : undefined;
-    if (intentDecision) {
-      this.deps.repos.runtime.updateEpisodeMeta(episode.id, {
-        intentDecision
-      });
-    }
+    const intentDecision = classifyIntent(request.query);
     const contextHints = turnStartContextHints(request);
     const search = await this.deps.search({
       requestId: request.requestId,
       adapterId: request.adapterId,
       namespace: namespaceForSession(session),
       sessionId: session.id,
-      episodeId: episode.id,
       turnId,
       query: buildSearchQuery({ ...request, contextHints }, this.deps.config.domain),
       layers: intentDecision ? this.deps.memoryLayersForIntent(intentDecision.kind) : ["Skill", "L2", "L1", "L3"],
@@ -687,54 +661,15 @@ export class SessionTurnService {
       includeInjectedContext: true,
       retrievalMode: "turn_start",
       contextHints,
-      injectedContextQuery: request.query
+      injectedContextQuery: request.query,
+      recordEvent: false
     });
-    const contextPacketId = `ctx_${stableHash(`${session.id}:${episode.id}:${turnId}:${search.searchEventId}`).slice(0, 20)}`;
-    if (!existingRawTurn) {
-      const at = nowIso();
-      this.deps.repos.runtime.touchSession(session.id, at);
-      const rawTurn = this.deps.repos.runtime.insertRawTurn({
-        id: rawTurnIdForSessionTurn(session.id, turnId),
-        sessionId: session.id,
-        episodeId: episode.id,
-        turnId,
-        userId: session.userId,
-        conversationId: session.conversationId,
-        userText: request.query,
-        toolCalls: [],
-        toolResults: [],
-        sourceMemoryIds: search.sourceMemoryIds,
-        usage: {},
-        messagePayload: {
-          turn_start: {
-            contextPacketId,
-            searchEventId: search.searchEventId
-          }
-        },
-        status: "started",
-        createdAt: at
-      });
-      this.deps.repos.runtime.appendEpisodeRawTurn(episode.id, rawTurn.id, at);
-      this.deps.repos.runtime.appendChange({
-        memoryId: rawTurn.id,
-        namespaceId: this.deps.namespaceIdFromSession(session),
-        kind: "raw_turn",
-        op: "created",
-        entityId: rawTurn.id,
-        userId: session.userId,
-        changeType: "raw_turn_created",
-        after: rawTurn,
-        source: "turn.start",
-        createdAt: at
-      });
-    }
+    const contextPacketId = `ctx_${stableHash(`${session.id}:${turnId}:${search.searchEventId}`).slice(0, 20)}`;
 
     return {
       contextPacketId,
       turnId,
       sessionId: session.id,
-      episodeId: episode.id,
-      closedEpisodeIds,
       searchEventId: search.searchEventId,
       hits: search.hits,
       injectedContext: search.injectedContext,
@@ -752,6 +687,15 @@ export class SessionTurnService {
 
   completeTurn(turnId: string, request: TurnCompleteRequest & Record<string, unknown>): CompleteTurnResponse {
     request = sanitizeTurnCompleteRequest(request);
+    if (request.status === "cancelled") {
+      throw new MemoryServiceError("invalid_argument", "cancelled turns are not persisted");
+    }
+    if (!request.query.trim() || !request.answer.trim()) {
+      throw new MemoryServiceError(
+        "invalid_argument",
+        "turn.complete requires a non-empty user query and assistant result"
+      );
+    }
     if (!this.deps.memoryAddEnabled()) {
       return this.deps.completeTurnNoWrite(turnId, request);
     }
@@ -1830,37 +1774,6 @@ export class SessionTurnService {
         maxToolOutputChars: this.deps.config.algorithm.capture.maxToolOutputChars
       }).map((step) => ({ ...step, rawTurnId: rawTurn.id }))
     );
-  }
-
-  private async ensureEpisodeForTurnWithLlm(
-    session: SessionRecord,
-    episodeId: string | undefined,
-    userText: string | undefined,
-    source: string
-  ): Promise<EpisodeRecord> {
-    if (episodeId || !userText?.trim()) {
-      return this.ensureEpisode(session, episodeId);
-    }
-    const latest = this.deps.repos.runtime.latestEpisodeForSession(session.id);
-    if (!latest) {
-      return this.ensureEpisode(session);
-    }
-    const relationContext = this.episodeRelationContext(latest);
-    if (!relationContext.prevUserText) {
-      return this.ensureEpisode(session);
-    }
-    const decision = await classifyTurnRelationWithLlm({
-      prevUserText: relationContext.prevUserText,
-      prevAssistantText: relationContext.prevAssistantText,
-      newUserText: userText,
-      gapMs: relationContext.lastTurnAtMs
-        ? Math.max(0, Date.now() - relationContext.lastTurnAtMs)
-        : undefined,
-      prevTags: relationContext.tags
-    }, {
-      llm: this.deps.llm
-    });
-    return this.applyEpisodeRelationDecision(session, latest, decision, userText, source, relationContext.lastTurnAtMs);
   }
 
   private ensureEpisodeForTurn(

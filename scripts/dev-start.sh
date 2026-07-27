@@ -177,6 +177,8 @@ ensure_memmy_agent_dependencies() {
     "react"
     "smol-toml"
     "typescript"
+    "@playwright/mcp"
+    "playwright"
   )
 
   for package in "${required_packages[@]}"; do
@@ -190,7 +192,7 @@ ensure_memmy_agent_dependencies() {
   fi
 
   log "installing memmy-agent npm dependencies (missing: ${missing_packages[*]})"
-  npm ci --prefix "$MEMMY_AGENT_DIR" --include=dev
+  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --prefix "$MEMMY_AGENT_DIR" --include=dev
 
   missing_packages=()
   for package in "${required_packages[@]}"; do
@@ -541,6 +543,9 @@ run_main() {
   log "copying built skills into memmy workspace"
   mkdir -p "$MEMMY_WORKSPACE_DIR/skills"
   cp -R "$MEMMY_AGENT_DIR/dist/skills/." "$MEMMY_WORKSPACE_DIR/skills/"
+
+  log "preparing managed Chromium"
+  "$MEMMY_RUNTIME_NODE_PATH" dist/main.js internal browser-prepare
 
   log "starting Memory, agent API, gateway, frontend, and desktop backend"
   cd "$ROOT_DIR"

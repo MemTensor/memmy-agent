@@ -1,5 +1,6 @@
 import type { LlmConfig } from "../config/index.js";
 import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
+import type { MemoryAgentRegion } from "./agent-region.js";
 import { bearer, postJsonWithRetry, trimTrailingSlash } from "./http.js";
 import {
   HttpByokTokenUsageRecorder,
@@ -63,6 +64,7 @@ interface ThinkingControl {
 
 export interface CreateLlmClientOptions {
   modelRole?: MemoryLlmModelRole;
+  agentRegion?: MemoryAgentRegion;
 }
 
 export function createLlmClient(config: LlmConfig, options: CreateLlmClientOptions = {}): LlmClient {
@@ -295,7 +297,10 @@ class HttpLlmClient implements LlmClient {
       operation: options.operation,
       model: this.config.model,
       url,
-      headers: bearer(this.config.apiKey),
+      headers: {
+        ...bearer(this.config.apiKey),
+        ...(this.options.agentRegion ? { "X-Agent-Region": this.options.agentRegion } : {})
+      },
       timeoutMs: options.timeoutMs ?? this.config.timeoutMs,
       maxRetries: options.maxRetries ?? this.config.maxRetries,
       body: {

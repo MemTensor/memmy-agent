@@ -9,12 +9,10 @@ interface DesktopEditionManifest {
 
 export function resolveDesktopEdition(rawManifest: string | null | undefined, envAccountChannel?: string): DesktopEdition {
   const manifest = parseDesktopEditionManifest(rawManifest);
-  if (manifest?.edition === "intl" || manifest?.accountChannel === "email") {
-    return "intl";
-  }
-  if (manifest?.edition === "cn" || manifest?.accountChannel === "phone") {
-    return "cn";
-  }
+  if (manifest?.edition === "intl") return "intl";
+  if (manifest?.edition === "cn") return "cn";
+  if (manifest?.accountChannel === "email") return "intl";
+  if (manifest?.accountChannel === "phone") return "cn";
 
   return envAccountChannel?.trim().toLowerCase() === "email" ? "intl" : "cn";
 }

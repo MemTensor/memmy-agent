@@ -427,9 +427,7 @@ async function routeRequest(
       contextHints: request.contextHints,
       contextBudget: request.contextBudget
     };
-    const result = await service.idempotent("turn.start", publicRequest, { request: publicRequest }, () =>
-      service.startTurn(publicRequest as TurnStartRequest & Record<string, unknown>)
-    );
+    const result = await service.startTurn(publicRequest as TurnStartRequest & Record<string, unknown>);
     scheduleAutoWorkerForEvolution(result, autoWorker);
     return publicStartTurnResponse(result);
   }
@@ -706,7 +704,6 @@ function publicStartTurnResponse(result: unknown): Record<string, unknown> {
     turnId: record.turnId,
     contextPacketId: record.contextPacketId,
     sessionId: record.sessionId,
-    episodeId: record.episodeId,
     searchEventId: record.searchEventId,
     injectedContext: record.injectedContext,
     sourceMemoryIds: record.sourceMemoryIds,

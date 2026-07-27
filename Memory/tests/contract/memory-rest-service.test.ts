@@ -173,6 +173,13 @@ describe("MemoryService / REST contract", () => {
     });
     const opened = await openedResponse.json() as { sessionId: string };
     expect(openedResponse.status).toBe(200);
+    const beforeStart = {
+      episodes: (db.db.prepare("SELECT COUNT(*) AS count FROM episodes").get() as { count: number }).count,
+      rawTurns: (db.db.prepare("SELECT COUNT(*) AS count FROM raw_turns").get() as { count: number }).count,
+      recalls: (db.db.prepare("SELECT COUNT(*) AS count FROM recall_events").get() as { count: number }).count,
+      apiLogs: (db.db.prepare("SELECT COUNT(*) AS count FROM api_logs").get() as { count: number }).count,
+      idempotency: (db.db.prepare("SELECT COUNT(*) AS count FROM idempotency_keys").get() as { count: number }).count
+    };
 
     const startResponse = await fetch(baseUrl + "/turns/start", {
       method: "POST",
@@ -192,12 +199,19 @@ describe("MemoryService / REST contract", () => {
       })
     });
     const started = await startResponse.json() as {
-      episodeId: string;
       searchEventId: string;
       turnId: string;
     };
     expect(startResponse.status).toBe(200);
     expect(started.turnId).toBe("cursor-http-turn");
+    expect(started).not.toHaveProperty("episodeId");
+    expect({
+      episodes: (db.db.prepare("SELECT COUNT(*) AS count FROM episodes").get() as { count: number }).count,
+      rawTurns: (db.db.prepare("SELECT COUNT(*) AS count FROM raw_turns").get() as { count: number }).count,
+      recalls: (db.db.prepare("SELECT COUNT(*) AS count FROM recall_events").get() as { count: number }).count,
+      apiLogs: (db.db.prepare("SELECT COUNT(*) AS count FROM api_logs").get() as { count: number }).count,
+      idempotency: (db.db.prepare("SELECT COUNT(*) AS count FROM idempotency_keys").get() as { count: number }).count
+    }).toEqual(beforeStart);
 
     const completeResponse = await fetch(baseUrl + "/turns/cursor-http-turn/complete", {
       method: "POST",
@@ -207,7 +221,6 @@ describe("MemoryService / REST contract", () => {
         requestId: "cursor-complete:http-fields",
         source: "cursor",
         sessionId: opened.sessionId,
-        episodeId: started.episodeId,
         query: "Continue the hook lifecycle repair",
         answer: "The lifecycle now reuses its started turn and episode.",
         tags: ["hook-lifecycle"],
@@ -222,7 +235,7 @@ describe("MemoryService / REST contract", () => {
     });
     const completed = await completeResponse.json() as { episodeId: string; rawTurnId: string };
     expect(completeResponse.status).toBe(200);
-    expect(completed.episodeId).toBe(started.episodeId);
+    expect(completed.episodeId).toMatch(/^episode_/u);
 
     const sessionRow = db.db.prepare(
       "SELECT source, profile_id, workspace_path FROM sessions WHERE id = ?"
@@ -237,21 +250,10 @@ describe("MemoryService / REST contract", () => {
       workspace_path: "/tmp/hook-workspace"
     });
 
-    const recallRow = db.db.prepare(
-      "SELECT request_json FROM recall_events WHERE id = ?"
-    ).get(started.searchEventId) as { request_json: string };
-    expect(JSON.parse(recallRow.request_json)).toMatchObject({
-      contextBudget: 37,
-      contextHints: {
-        agentIdentity: "cursor-agent",
-        hostProvider: "cursor"
-      }
-    });
-
     const rawTurn = db.db.prepare(
       "SELECT episode_id, source_memory_ids_json FROM raw_turns WHERE id = ?"
     ).get(completed.rawTurnId) as { episode_id: string; source_memory_ids_json: string };
-    expect(rawTurn.episode_id).toBe(started.episodeId);
+    expect(rawTurn.episode_id).toBe(completed.episodeId);
     expect(JSON.parse(rawTurn.source_memory_ids_json)).toEqual(["memory-from-turn-start"]);
     const artifactCount = db.db.prepare(
       "SELECT COUNT(*) AS count FROM artifacts WHERE raw_turn_id = ?"

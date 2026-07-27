@@ -230,7 +230,7 @@ export class ImportJobProcessor {
         sessionId: memory.sessionId, targetMemoryId: memory.id, payload: { source: "memory.processing.manual_retry", previousErrorCode: latest.errorCode ?? undefined, contentHash: memory.contentHash },
         maxAttempts: latest.stage === "summary" ? 3 : 6, createdAt: at });
       const processing = d.processing.save({ ...latest, state: latest.stage === "summary" ? "summary_pending" : "embedding_pending", activeJobId: job.id,
-        attemptCount: 0, manualRetryCount: latest.manualRetryCount + 1, retryAction: "retry", errorCode: null, errorMessage: null, failedAt: null, updatedAt: at });
+        attemptCount: 0, manualRetryCount: latest.manualRetryCount + 1, retryAction: "retry", updatedAt: at });
       return { accepted: true, processing, job: d.jobToRef(job) };
     });
     if (!result) throw d.createError("not_found", `processing state not found: ${memoryId}`);
@@ -279,7 +279,7 @@ export class ImportJobProcessor {
           payload: { source: "memory.processing.lifecycle_retry", previousErrorCode: current.errorCode ?? undefined, contentHash: memory.contentHash },
           maxAttempts: current.stage === "summary" ? 3 : 6, createdAt: at });
         const processing = d.processing.save({ ...current, state: current.stage === "summary" ? "summary_pending" : "embedding_pending", activeJobId: job.id,
-          attemptCount: 0, retryAction: "retry", errorCode: null, errorMessage: null, failedAt: null, updatedAt: at });
+          attemptCount: 0, retryAction: "retry", updatedAt: at });
         return { job, processing };
       });
       if (result) restarted += 1;

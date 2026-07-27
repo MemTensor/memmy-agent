@@ -244,7 +244,8 @@ describe("MemoryService / facade / config and storage", () => {
     const namespace = { source: "hermes", profileId: "default", userId: "reload-failure-user" };
     const added = addAgentSourceImport(service, namespace, "retry after config reload", "reload-failure");
     await runWorkerRounds(service, 3, 1);
-    expect(service.memoryProcessingStatus([added.id], { namespace }).items[0]?.state).toBe("failed");
+    const failed = service.memoryProcessingStatus([added.id], { namespace }).items[0];
+    expect(failed?.state).toBe("failed");
 
     service.reloadConfig({
       reason: "manual_processing_retry",
@@ -258,9 +259,9 @@ describe("MemoryService / facade / config and storage", () => {
       state: "summary_pending",
       stage: "summary",
       attemptCount: 0,
-      errorCode: null,
-      errorMessage: null,
-      failedAt: null
+      errorCode: failed?.errorCode,
+      errorMessage: failed?.errorMessage,
+      failedAt: failed?.failedAt
     });
     const jobs = db.db.prepare(
       `SELECT status, attempts

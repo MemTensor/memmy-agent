@@ -8,6 +8,7 @@ import { DEFAULT_MAX_TOKENS } from "../../src/token-budget.js";
 import {
   AgentDefaults,
   ApiConfig,
+  BrowserToolsConfig,
   Config,
   ContextCompactionConfig,
   GatewayConfig,
@@ -35,6 +36,44 @@ function configFile(contents = ""): string {
 }
 
 describe("config schema validation", () => {
+  it("defines and round-trips browser tool defaults", () => {
+    const defaults = new BrowserToolsConfig();
+    expect(defaults.toObject()).toEqual({
+      enabled: true,
+      maxSessions: 4,
+      idleTimeoutS: 900,
+    });
+    const configured = new Config({
+      tools: {
+        browser: {
+          enabled: false,
+          maxSessions: 8,
+          idleTimeoutS: 3600,
+        },
+      },
+    });
+    expect(configured.tools.browser.toObject()).toEqual({
+      enabled: false,
+      maxSessions: 8,
+      idleTimeoutS: 3600,
+    });
+    expect(configured.toObject().tools.browser).toEqual(
+      configured.tools.browser.toObject(),
+    );
+  });
+
+  it.each([
+    [null, /tools\.browser must be an object/],
+    [[], /tools\.browser must be an object/],
+    [{ enabled: "true" }, /tools\.browser\.enabled/],
+    [{ maxSessions: 0 }, /tools\.browser\.maxSessions/],
+    [{ maxSessions: 9 }, /tools\.browser\.maxSessions/],
+    [{ idleTimeoutS: 59 }, /tools\.browser\.idleTimeoutS/],
+    [{ idleTimeoutS: 3601 }, /tools\.browser\.idleTimeoutS/],
+  ])("rejects invalid browser tool config %#", (browser, error) => {
+    expect(() => new Config({ tools: { browser } } as any)).toThrow(error);
+  });
+
   it("defaults file memory off and preserves explicit booleans", () => {
     const defaults = new Config();
     const enabled = new Config({ fileMemory: { enabled: true } });

@@ -7,11 +7,14 @@
  */
 import type {
   MemmyAgentMediaAttachment,
+  MemmyAgentProject,
   MemmyAgentRunStatusSnapshot,
+  MemmyAgentSessionSnapshot,
   MemmyAgentSessionSummary,
   MemmyAgentSidebarState,
   MemmyAgentWebuiThread,
-  MemmyAgentWsEvent
+  MemmyAgentWsEvent,
+  WebuiSessionTarget
 } from "../api/memmy-agent-client.js";
 import { chatIdToSessionKey } from "../api/memmy-agent-client.js";
 import type { PendingAttachment } from "./agent-composer-state.js";
@@ -80,11 +83,16 @@ export interface AgentTaskView {
   pinned: boolean;
   archived: boolean;
   tags: string[];
+  projectId: string | null;
+  groupProjectId: string | null;
+  cwd: string;
+  missingProject: boolean;
 }
 
 interface OptimisticAgentTask {
   content: string;
   createdAt: string;
+  target: WebuiSessionTarget;
 }
 
 export interface AgentChatMessage {
@@ -123,6 +131,7 @@ export interface AgentRetryWaitStatus {
 export interface AgentState {
   connectionStatus: AgentConnectionStatus;
   connectionError: string | null;
+  operationErrorNotice: AgentOperationError | null;
   operationErrorsBySurface: Record<AgentOperationSurface, AgentOperationError | null>;
   connectionGeneration: number;
   recoveringGeneration: number | null;
@@ -135,6 +144,8 @@ export interface AgentState {
   chatViewVisible: boolean;
   currentChatId: string | null;
   currentSessionKey: string | null;
+  projectRegistryState: "ready" | "corrupt";
+  projects: MemmyAgentProject[];
   sessions: MemmyAgentSessionSummary[];
   sidebarState: MemmyAgentSidebarState;
   sidebarStateVersion: number;
@@ -168,7 +179,9 @@ export interface AgentState {
   goalState: AgentGoalState | null;
   composerDraftsByScope: Record<string, string>;
   composerPendingAttachmentsByScope: Record<string, PendingAttachment[]>;
-  composerMediaErrorByScope: Record<string, string | null>;
+  draftTargetsByScope: Record<string, WebuiSessionTarget>;
+  draftTargetRevisionByScope: Record<string, number>;
+  messageSendInFlightByScope: Record<string, string>;
   isLoadingSessions: boolean;
   isLoadingHistory: boolean;
   isSending: boolean;
@@ -193,14 +206,15 @@ export type AgentAction =
   | { type: "agent/operationErrorDismissed"; surface: AgentOperationSurface; id: string }
   | { type: "agent/sessionsLoading"; requestId?: string }
   | { type: "agent/sessionsLoaded"; sessions: MemmyAgentSessionSummary[]; requestId?: string }
+  | { type: "agent/sessionSnapshotApplied"; snapshot: MemmyAgentSessionSnapshot }
   | { type: "agent/sessionsLoadFailed"; requestId?: string }
   | { type: "agent/sidebarStateLoaded"; sidebarState: MemmyAgentSidebarState }
   | { type: "agent/sidebarStateSaved"; sidebarState: MemmyAgentSidebarState }
   | { type: "agent/sidebarMutationStarted"; mutationId: string; sidebarState: MemmyAgentSidebarState }
   | { type: "agent/sidebarMutationConfirmed"; mutationId: string; sidebarState: MemmyAgentSidebarState }
-  | { type: "agent/sidebarMutationFailed"; mutationId: string; error: AgentOperationError }
+  | { type: "agent/sidebarMutationFailed"; mutationId: string; sidebarState: MemmyAgentSidebarState; error: AgentOperationError }
   | { type: "agent/taskStateLoading"; request: AgentTaskStateRequest }
-  | { type: "agent/taskStateSettled"; requestId: string; recoveryGeneration: number | null; sessions?: MemmyAgentSessionSummary[]; sidebarState?: MemmyAgentSidebarState; error?: AgentOperationError }
+  | { type: "agent/taskStateSettled"; requestId: string; recoveryGeneration: number | null; snapshot?: MemmyAgentSessionSnapshot; sessions?: MemmyAgentSessionSummary[]; sidebarState?: MemmyAgentSidebarState; error?: AgentOperationError }
   | { type: "agent/historyLoading"; sessionKey: string; chatId: string; requestId: string }
   | { type: "agent/historyLoaded"; thread: MemmyAgentWebuiThread; requestId: string }
   | { type: "agent/historyOpenMissing"; sessionKey: string; chatId: string; requestId: string }
@@ -212,10 +226,12 @@ export type AgentAction =
   | { type: "agent/blankDraftReopened" }
   | { type: "agent/newChatCreated"; chatId: string }
   | { type: "agent/transientSendFailed"; chatId: string }
-  | { type: "agent/userMessageQueued"; chatId: string; content: string; media?: AgentChatMediaAttachment[]; focus?: boolean; deliveryUncertain?: boolean }
+  | { type: "agent/userMessageQueued"; chatId: string; content: string; media?: AgentChatMediaAttachment[]; focus?: boolean; deliveryUncertain?: boolean; target?: WebuiSessionTarget }
   | { type: "agent/composerDraftUpdated"; scopeKey: string; value: string }
   | { type: "agent/composerPendingAttachmentsUpdated"; scopeKey: string; attachments: PendingAttachment[] }
-  | { type: "agent/composerMediaErrorUpdated"; scopeKey: string; message: string | null }
+  | { type: "agent/draftTargetUpdated"; scopeKey: string; target: WebuiSessionTarget }
+  | { type: "agent/messageSendLockUpdated"; scopeKey: string; clientRequestId: string | null }
+  | { type: "agent/tasksMarkedRead"; chatIds: string[] }
   | { type: "agent/composerScopeCleared"; scopeKey: string }
   | { type: "agent/stopRequested"; chatId: string }
   | { type: "agent/stopUnconfirmed"; chatId: string }
@@ -239,6 +255,7 @@ export const defaultAgentSidebarState: MemmyAgentSidebarState = {
     show_previews: false,
     show_timestamps: false,
     show_archived: false,
+    show_project_archived: false,
     sort: "updated_desc"
   },
   updated_at: null
@@ -247,6 +264,7 @@ export const defaultAgentSidebarState: MemmyAgentSidebarState = {
 export const initialAgentState: AgentState = {
   connectionStatus: "idle",
   connectionError: null,
+  operationErrorNotice: null,
   operationErrorsBySurface: { chat: null, sidebar: null },
   connectionGeneration: 0,
   recoveringGeneration: null,
@@ -259,6 +277,8 @@ export const initialAgentState: AgentState = {
   chatViewVisible: false,
   currentChatId: null,
   currentSessionKey: null,
+  projectRegistryState: "ready",
+  projects: [],
   sessions: [],
   sidebarState: defaultAgentSidebarState,
   sidebarStateVersion: 0,
@@ -290,7 +310,9 @@ export const initialAgentState: AgentState = {
   goalState: null,
   composerDraftsByScope: {},
   composerPendingAttachmentsByScope: {},
-  composerMediaErrorByScope: {},
+  draftTargetsByScope: {},
+  draftTargetRevisionByScope: {},
+  messageSendInFlightByScope: {},
   isLoadingSessions: false,
   isLoadingHistory: false,
   isSending: false,
@@ -345,9 +367,19 @@ export function agentReducer(state: AgentState, action: AgentAction): AgentState
     case "agent/operationFailed":
       return setOperationError(state, action.surface, action.error);
     case "agent/operationErrorDismissed":
-      return state.operationErrorsBySurface[action.surface]?.id === action.id
-        ? setOperationError(state, action.surface, null)
-        : state;
+      if (state.operationErrorNotice?.id !== action.id) return state;
+      return {
+        ...state,
+        operationErrorNotice: null,
+        operationErrorsBySurface: {
+          chat: state.operationErrorsBySurface.chat?.id === action.id
+            ? null
+            : state.operationErrorsBySurface.chat,
+          sidebar: state.operationErrorsBySurface.sidebar?.id === action.id
+            ? null
+            : state.operationErrorsBySurface.sidebar
+        }
+      };
     case "agent/sessionsLoading":
       return {
         ...state,
@@ -357,6 +389,8 @@ export function agentReducer(state: AgentState, action: AgentAction): AgentState
       };
     case "agent/sessionsLoaded":
       return completeSessionsLoad(state, action.sessions, action.requestId);
+    case "agent/sessionSnapshotApplied":
+      return completeSessionSnapshotLoad(state, action.snapshot);
     case "agent/sessionsLoadFailed":
       return failSessionsLoad(state, action.requestId);
     case "agent/sidebarStateLoaded":
@@ -380,11 +414,12 @@ export function agentReducer(state: AgentState, action: AgentAction): AgentState
         : state;
     case "agent/sidebarMutationFailed":
       return state.currentSidebarMutationId === action.mutationId
-        ? setOperationError({
+        ? setOperationError(deriveTasks({
             ...state,
+            sidebarState: action.sidebarState,
             sidebarStateVersion: state.sidebarStateVersion + 1,
             currentSidebarMutationId: null
-          }, "sidebar", action.error)
+          }), "sidebar", action.error)
         : state;
     case "agent/taskStateLoading":
       return {
@@ -422,8 +457,27 @@ export function agentReducer(state: AgentState, action: AgentAction): AgentState
       return updateComposerDraft(state, action.scopeKey, action.value);
     case "agent/composerPendingAttachmentsUpdated":
       return updateComposerPendingAttachments(state, action.scopeKey, action.attachments);
-    case "agent/composerMediaErrorUpdated":
-      return updateComposerMediaError(state, action.scopeKey, action.message);
+    case "agent/draftTargetUpdated":
+      return {
+        ...state,
+        draftTargetsByScope: { ...state.draftTargetsByScope, [action.scopeKey]: action.target },
+        draftTargetRevisionByScope: {
+          ...state.draftTargetRevisionByScope,
+          [action.scopeKey]: (state.draftTargetRevisionByScope[action.scopeKey] ?? 0) + 1
+        }
+      };
+    case "agent/messageSendLockUpdated":
+      return {
+        ...state,
+        messageSendInFlightByScope: action.clientRequestId
+          ? { ...state.messageSendInFlightByScope, [action.scopeKey]: action.clientRequestId }
+          : clearChatMapValue(state.messageSendInFlightByScope, action.scopeKey)
+      };
+    case "agent/tasksMarkedRead": {
+      const completedUnseenByChatId = { ...state.completedUnseenByChatId };
+      for (const chatId of action.chatIds) delete completedUnseenByChatId[chatId];
+      return deriveTasks({ ...state, completedUnseenByChatId });
+    }
     case "agent/composerScopeCleared":
       return clearComposerScope(state, action.scopeKey);
     case "agent/stopRequested":
@@ -473,13 +527,26 @@ function setOperationError(
   surface: AgentOperationSurface,
   error: AgentOperationError | null
 ): AgentState {
+  if (
+    error
+    && state.operationErrorNotice
+    && isBackgroundOperationError(error)
+    && !isBackgroundOperationError(state.operationErrorNotice)
+  ) {
+    return state;
+  }
   return {
     ...state,
+    operationErrorNotice: error,
     operationErrorsBySurface: {
       ...state.operationErrorsBySurface,
       [surface]: error
     }
   };
+}
+
+function isBackgroundOperationError(error: AgentOperationError): boolean {
+  return error.source === "sessions" || error.source === "recovery";
 }
 
 function operationErrorFromEvent(event: MemmyAgentWsEvent, source: AgentOperationErrorSource): AgentOperationError {
@@ -525,7 +592,14 @@ function queueOptimisticUserMessage(
     ...nextState,
     messagesByChatId,
     optimisticSendingByChatId: { ...nextState.optimisticSendingByChatId, [action.chatId]: true },
-    optimisticTasksByChatId: maybeAddOptimisticTask(nextState, action.chatId, action.content, action.media, now),
+    optimisticTasksByChatId: maybeAddOptimisticTask(
+      nextState,
+      action.chatId,
+      action.content,
+      action.media,
+      action.target,
+      now
+    ),
     completedUnseenByChatId,
     retryWaitStatusByChatId,
     deliveryUncertainByChatId,
@@ -557,6 +631,13 @@ function settleTaskState(
       currentSessionsRequestId: action.requestId,
       currentSessionsRequestRunStatusVersionByChatId: request.runStatusVersionAtStartByChatId
     }, action.sessions, action.requestId);
+  }
+  if (action.snapshot) {
+    nextState = completeSessionSnapshotLoad({
+      ...nextState,
+      currentSessionsRequestId: action.requestId,
+      currentSessionsRequestRunStatusVersionByChatId: request.runStatusVersionAtStartByChatId
+    }, action.snapshot, action.requestId);
   }
   if (action.sidebarState && request.sidebarStateVersionAtStart === nextState.sidebarStateVersion) {
     nextState = deriveTasks({ ...nextState, sidebarState: action.sidebarState });
@@ -796,43 +877,33 @@ function updateComposerPendingAttachments(state: AgentState, scopeKey: string, a
   };
 }
 
-function updateComposerMediaError(state: AgentState, scopeKey: string, message: string | null): AgentState {
-  if (!message) {
-    if (!(scopeKey in state.composerMediaErrorByScope)) {
-      return state;
-    }
-    const composerMediaErrorByScope = { ...state.composerMediaErrorByScope };
-    delete composerMediaErrorByScope[scopeKey];
-    return { ...state, composerMediaErrorByScope };
-  }
-  if (state.composerMediaErrorByScope[scopeKey] === message) {
-    return state;
-  }
-  return {
-    ...state,
-    composerMediaErrorByScope: { ...state.composerMediaErrorByScope, [scopeKey]: message }
-  };
-}
-
 function clearComposerScope(state: AgentState, scopeKey: string): AgentState {
   const hasDraft = scopeKey in state.composerDraftsByScope;
   const hasPendingAttachments = scopeKey in state.composerPendingAttachmentsByScope;
-  const hasMediaError = scopeKey in state.composerMediaErrorByScope;
-  if (!hasDraft && !hasPendingAttachments && !hasMediaError) {
+  const hasTarget = scopeKey in state.draftTargetsByScope;
+  const hasTargetRevision = scopeKey in state.draftTargetRevisionByScope;
+  const hasSendLock = scopeKey in state.messageSendInFlightByScope;
+  if (!hasDraft && !hasPendingAttachments && !hasTarget && !hasTargetRevision && !hasSendLock) {
     return state;
   }
 
   const composerDraftsByScope = { ...state.composerDraftsByScope };
   const composerPendingAttachmentsByScope = { ...state.composerPendingAttachmentsByScope };
-  const composerMediaErrorByScope = { ...state.composerMediaErrorByScope };
+  const draftTargetsByScope = { ...state.draftTargetsByScope };
+  const draftTargetRevisionByScope = { ...state.draftTargetRevisionByScope };
+  const messageSendInFlightByScope = { ...state.messageSendInFlightByScope };
   delete composerDraftsByScope[scopeKey];
   delete composerPendingAttachmentsByScope[scopeKey];
-  delete composerMediaErrorByScope[scopeKey];
+  delete draftTargetsByScope[scopeKey];
+  delete draftTargetRevisionByScope[scopeKey];
+  delete messageSendInFlightByScope[scopeKey];
   return {
     ...state,
     composerDraftsByScope,
     composerPendingAttachmentsByScope,
-    composerMediaErrorByScope
+    draftTargetsByScope,
+    draftTargetRevisionByScope,
+    messageSendInFlightByScope
   };
 }
 
@@ -851,9 +922,18 @@ function enterBlankDraft(state: AgentState, newChatRequestId: number): AgentStat
   };
 }
 
-export function buildAgentTasks(sessions: MemmyAgentSessionSummary[], sidebarState: MemmyAgentSidebarState): AgentTaskView[] {
+export function buildAgentTasks(
+  sessions: MemmyAgentSessionSummary[],
+  sidebarState: MemmyAgentSidebarState,
+  projects: MemmyAgentProject[] = [],
+  projectRegistryState: AgentState["projectRegistryState"] = "ready"
+): AgentTaskView[] {
+  const projectIds = new Set(projects.map((project) => project.id));
   const rows = sessions.map((session) => {
     const chatId = sessionKeyToChatId(session.key);
+    const missingProject = projectRegistryState === "ready"
+      && session.projectId !== null
+      && !projectIds.has(session.projectId);
     return buildTaskView(
       sidebarState,
       session.key,
@@ -862,7 +942,11 @@ export function buildAgentTasks(sessions: MemmyAgentSessionSummary[], sidebarSta
       session.preview ?? "",
       session.updatedAt ?? null,
       session.run_started_at ?? null,
-      false
+      false,
+      session.projectId,
+      session.cwd,
+      missingProject,
+      projectRegistryState === "ready" && !missingProject ? session.projectId : null
     );
   });
   rows.sort((left, right) => compareTasks(left, right, sidebarState.view.sort));
@@ -870,9 +954,13 @@ export function buildAgentTasks(sessions: MemmyAgentSessionSummary[], sidebarSta
 }
 
 function buildAgentTasksForState(state: AgentState): AgentTaskView[] {
+  const projectIds = new Set(state.projects.map((project) => project.id));
   const canonicalChatIds = new Set(state.sessions.map((session) => sessionKeyToChatId(session.key)));
   const rows = state.sessions.map((session) => {
     const chatId = sessionKeyToChatId(session.key);
+    const missingProject = state.projectRegistryState === "ready"
+      && session.projectId !== null
+      && !projectIds.has(session.projectId);
     return buildTaskView(
       state.sidebarState,
       session.key,
@@ -881,7 +969,11 @@ function buildAgentTasksForState(state: AgentState): AgentTaskView[] {
       session.preview ?? "",
       session.updatedAt ?? null,
       effectiveRunStartedAtForChat(state, chatId),
-      isTaskCompletedUnseen(state, chatId)
+      isTaskCompletedUnseen(state, chatId),
+      session.projectId,
+      session.cwd,
+      missingProject,
+      state.projectRegistryState === "ready" && !missingProject ? session.projectId : null
     );
   });
 
@@ -890,6 +982,13 @@ function buildAgentTasksForState(state: AgentState): AgentTaskView[] {
       continue;
     }
     const sessionKey = chatIdToSessionKey(chatId);
+    const projectId = task.target.kind === "project" ? task.target.projectId : null;
+    const project = projectId
+      ? state.projects.find((candidate) => candidate.id === projectId) ?? null
+      : null;
+    const missingProject = state.projectRegistryState === "ready"
+      && projectId !== null
+      && project === null;
     rows.push(buildTaskView(
       state.sidebarState,
       sessionKey,
@@ -898,7 +997,11 @@ function buildAgentTasksForState(state: AgentState): AgentTaskView[] {
       task.content,
       task.createdAt,
       effectiveRunStartedAtForChat(state, chatId),
-      isTaskCompletedUnseen(state, chatId)
+      isTaskCompletedUnseen(state, chatId),
+      projectId,
+      project?.rootPath ?? "",
+      missingProject,
+      state.projectRegistryState === "ready" && !missingProject ? projectId : null
     ));
   }
 
@@ -914,7 +1017,11 @@ function buildTaskView(
   preview: string,
   updatedAt: string | null,
   runStartedAt: number | null,
-  completedUnseen: boolean
+  completedUnseen: boolean,
+  projectId: string | null,
+  cwd: string,
+  missingProject: boolean,
+  groupProjectId: string | null
 ): AgentTaskView {
   const titleOverride = sidebarState.title_overrides[sessionKey];
   return {
@@ -927,7 +1034,11 @@ function buildTaskView(
     completedUnseen,
     pinned: sidebarState.pinned_keys.includes(sessionKey),
     archived: sidebarState.archived_keys.includes(sessionKey),
-    tags: sidebarState.tags_by_key[sessionKey] ?? []
+    tags: sidebarState.tags_by_key[sessionKey] ?? [],
+    projectId,
+    groupProjectId,
+    cwd,
+    missingProject
   };
 }
 
@@ -942,6 +1053,7 @@ export function updateSidebarStateForTask(
     collapsed?: boolean;
     sort?: MemmyAgentSidebarState["view"]["sort"];
     showArchived?: boolean;
+    showProjectArchived?: boolean;
   }
 ): MemmyAgentSidebarState {
   return {
@@ -954,13 +1066,46 @@ export function updateSidebarStateForTask(
     view: {
       ...state.view,
       ...(patch.sort ? { sort: patch.sort } : {}),
-      ...(patch.showArchived == null ? {} : { show_archived: patch.showArchived })
+      ...(patch.showArchived == null ? {} : { show_archived: patch.showArchived }),
+      ...(patch.showProjectArchived == null ? {} : { show_project_archived: patch.showProjectArchived })
     }
   };
 }
 
 function deriveTasks(state: AgentState): AgentState {
   return { ...state, tasks: buildAgentTasksForState(state) };
+}
+
+function completeSessionSnapshotLoad(
+  state: AgentState,
+  snapshot: MemmyAgentSessionSnapshot,
+  requestId?: string
+): AgentState {
+  const activeProjectIds = new Set(snapshot.projects.map((project) => project.id));
+  const draftTargetsByScope = { ...state.draftTargetsByScope };
+  const draftTargetRevisionByScope = { ...state.draftTargetRevisionByScope };
+  if (snapshot.projectRegistryState === "ready") {
+    for (const [scopeKey, target] of Object.entries(draftTargetsByScope)) {
+      if (target.kind !== "project" || activeProjectIds.has(target.projectId)) continue;
+      draftTargetsByScope[scopeKey] = { kind: "standalone" };
+      draftTargetRevisionByScope[scopeKey] = (draftTargetRevisionByScope[scopeKey] ?? 0) + 1;
+    }
+  }
+  const loaded = completeSessionsLoad({
+    ...state,
+    projectRegistryState: snapshot.projectRegistryState,
+    projects: snapshot.projects,
+    draftTargetsByScope,
+    draftTargetRevisionByScope
+  }, snapshot.sessions, requestId);
+  if (
+    loaded.currentSessionKey
+    && !snapshot.sessions.some((session) => session.key === loaded.currentSessionKey)
+    && !(loaded.currentChatId && loaded.optimisticTasksByChatId[loaded.currentChatId])
+  ) {
+    return enterBlankDraft(loaded, loaded.newChatRequestId + 1);
+  }
+  return loaded;
 }
 
 function completeSessionsLoad(state: AgentState, sessions: MemmyAgentSessionSummary[], requestId: string | undefined): AgentState {
@@ -1300,6 +1445,7 @@ function maybeAddOptimisticTask(
   chatId: string,
   content: string,
   media: AgentChatMediaAttachment[] | undefined,
+  target: WebuiSessionTarget | undefined,
   now: number
 ): Record<string, OptimisticAgentTask> {
   if (hasCanonicalSession(state, chatId)) {
@@ -1309,7 +1455,8 @@ function maybeAddOptimisticTask(
     ...state.optimisticTasksByChatId,
     [chatId]: {
       content: optimisticTaskText(content, media),
-      createdAt: new Date(now).toISOString()
+      createdAt: new Date(now).toISOString(),
+      target: target ?? { kind: "standalone" }
     }
   };
 }

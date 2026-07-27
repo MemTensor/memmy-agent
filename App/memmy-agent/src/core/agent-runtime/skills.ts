@@ -81,6 +81,7 @@ export class SkillsLoader {
     for (const entry of this.listSkills(false)) {
       if (excluded.has(entry.name)) continue;
       const meta = this.getSkillMeta(entry.name);
+      if (meta.manualOnly) continue;
       const available = this.checkRequirements(meta);
       const desc = this.getSkillDescription(entry.name);
       if (available) lines.push(`- **${entry.name}** - ${desc}  \`${entry.path}\``);
@@ -140,9 +141,20 @@ export class SkillsLoader {
     return this.listSkills(true)
       .filter((entry) => {
         const meta = this.getSkillMetadata(entry.name) ?? {};
-        return Boolean(this.parseMemmyMetadata(meta.metadata).always || meta.always);
+        const memmy = this.parseMemmyMetadata(meta.metadata);
+        return !memmy.manualOnly && Boolean(memmy.always || meta.always);
       })
       .map((entry) => entry.name);
+  }
+
+  findExplicitSkillNames(text: string): string[] {
+    const available = new Set(this.listSkills(true).map((entry) => entry.name));
+    const matches = new Set<string>();
+    for (const match of text.matchAll(/\$([a-z0-9][a-z0-9-]{0,63})(?![a-z0-9-])/gu)) {
+      const name = match[1];
+      if (name && available.has(name)) matches.add(name);
+    }
+    return [...matches];
   }
 
   getSkillMetadata(name: string): Record<string, any> | null {

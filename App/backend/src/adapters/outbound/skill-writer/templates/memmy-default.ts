@@ -58,7 +58,7 @@ export function renderMemmyDefaultContent(source: string): string {
     `memmy-memory turn complete "$TURN_ID" --source ${source} --session-id "$SESSION_ID" --query "$USER_QUERY" --answer "$FINAL_ANSWER" --status succeeded`,
     "```",
     "",
-    "Use `--status failed` or `--status cancelled` when the turn did not complete normally. Close the session when the agent session is done:",
+    "Use `--status failed` for an actual failure. Do not call `turn complete` when the user cancels the turn. Close the session when the agent session is done:",
     "",
     "```bash",
     `memmy-memory session close "$SESSION_ID" --source ${source}`,

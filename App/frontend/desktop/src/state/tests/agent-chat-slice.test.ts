@@ -18,13 +18,17 @@ const sessions: MemmyAgentSessionSummary[] = [
     key: "websocket:chat-1",
     title: "客户需求分析与软件功能需求拆解",
     preview: "继续确认范围",
-    updatedAt: "2026-06-06T09:00:00.000Z"
+    updatedAt: "2026-06-06T09:00:00.000Z",
+    projectId: null,
+    cwd: "/workspace"
   },
   {
     key: "websocket:chat-2",
     title: "Memmy PRD 整理",
     preview: "补充首期接口",
-    updatedAt: "2026-06-06T10:00:00.000Z"
+    updatedAt: "2026-06-06T10:00:00.000Z",
+    projectId: null,
+    cwd: "/workspace"
   }
 ];
 
@@ -62,6 +66,43 @@ describe("agent chat slice", () => {
 
     expect(first.operationErrorsBySurface.chat?.message).toBe("same failure");
     expect(second.operationErrorsBySurface.chat?.id).not.toBe(first.operationErrorsBySurface.chat?.id);
+  });
+
+  it("does not let a background refresh error replace or queue behind a visible user error", () => {
+    const userError = { id: "user-error", source: "send" as const, message: "attachment_read_failed", createdAt: 1 };
+    const backgroundError = { id: "background-error", source: "sessions" as const, message: "network_unavailable", createdAt: 2 };
+    const withUserError = agentReducer(initialAgentState, {
+      type: "agent/operationFailed",
+      surface: "chat",
+      error: userError
+    });
+    const afterBackgroundError = agentReducer(withUserError, {
+      type: "agent/operationFailed",
+      surface: "chat",
+      error: backgroundError
+    });
+
+    expect(afterBackgroundError).toBe(withUserError);
+    expect(afterBackgroundError.operationErrorNotice).toEqual(userError);
+    expect(afterBackgroundError.operationErrorsBySurface.chat).toEqual(userError);
+  });
+
+  it("lets a user error replace a visible background refresh error", () => {
+    const backgroundError = { id: "background-error", source: "recovery" as const, message: "network_unavailable", createdAt: 1 };
+    const userError = { id: "user-error", source: "sidebar" as const, message: "project_update_failed", createdAt: 2 };
+    const withBackgroundError = agentReducer(initialAgentState, {
+      type: "agent/operationFailed",
+      surface: "chat",
+      error: backgroundError
+    });
+    const afterUserError = agentReducer(withBackgroundError, {
+      type: "agent/operationFailed",
+      surface: "sidebar",
+      error: userError
+    });
+
+    expect(afterUserError.operationErrorNotice).toEqual(userError);
+    expect(afterUserError.operationErrorsBySurface.sidebar).toEqual(userError);
   });
 
   it("clears sessions loading failures without showing a connection error", () => {
@@ -189,7 +230,11 @@ describe("agent chat slice", () => {
         completedUnseen: false,
         pinned: true,
         archived: false,
-        tags: ["需求", "首期"]
+        tags: ["需求", "首期"],
+        projectId: null,
+        groupProjectId: null,
+        cwd: "/workspace",
+        missingProject: false
       },
       {
         sessionKey: "websocket:chat-2",
@@ -201,7 +246,11 @@ describe("agent chat slice", () => {
         completedUnseen: false,
         pinned: false,
         archived: true,
-        tags: []
+        tags: [],
+        projectId: null,
+        groupProjectId: null,
+        cwd: "/workspace",
+        missingProject: false
       }
     ]);
 
@@ -219,7 +268,9 @@ describe("agent chat slice", () => {
         key: "websocket:chat-preview",
         title: "",
         preview: "请帮我总结这个用户问题",
-        updatedAt: "2026-06-06T12:00:00.000Z"
+        updatedAt: "2026-06-06T12:00:00.000Z",
+        projectId: null,
+        cwd: "/workspace"
       }
     ], defaultAgentSidebarState);
 
@@ -234,7 +285,8 @@ describe("agent chat slice", () => {
       tags: ["电商", " AI "],
       collapsed: true,
       sort: "title_asc",
-      showArchived: true
+      showArchived: true,
+      showProjectArchived: true
     });
 
     expect(nextState.title_overrides).toEqual({ "websocket:chat-1": "创建 AI 电商助手" });
@@ -242,7 +294,11 @@ describe("agent chat slice", () => {
     expect(nextState.archived_keys).toEqual(["websocket:chat-1"]);
     expect(nextState.tags_by_key).toEqual({ "websocket:chat-1": ["电商", "AI"] });
     expect(nextState.collapsed_groups).toEqual({ "websocket:chat-1": true });
-    expect(nextState.view).toMatchObject({ sort: "title_asc", show_archived: true });
+    expect(nextState.view).toMatchObject({
+      sort: "title_asc",
+      show_archived: true,
+      show_project_archived: true
+    });
   });
 
   it("reduces websocket events into streaming messages without requesting history refresh on turn end", () => {
@@ -1522,7 +1578,11 @@ describe("agent chat slice", () => {
       ...state,
       optimisticTasksByChatId: {
         ...state.optimisticTasksByChatId,
-        "chat-transient": { content: "未保存消息", createdAt: "2026-06-18T00:00:00.000Z" }
+        "chat-transient": {
+          content: "未保存消息",
+          createdAt: "2026-06-18T00:00:00.000Z",
+          target: { kind: "standalone" }
+        }
       }
     };
 
@@ -2105,7 +2165,9 @@ describe("agent chat slice", () => {
       title: "整理今天的 PPT",
       preview: "整理今天的 PPT",
       runStartedAt: null,
-      completedUnseen: false
+      completedUnseen: false,
+      projectId: null,
+      groupProjectId: null
     });
     expect(state.isSending).toBe(true);
 
@@ -2115,13 +2177,67 @@ describe("agent chat slice", () => {
 
     state = agentReducer(state, {
       type: "agent/sessionsLoaded",
-      sessions: [...sessions, { key: "websocket:chat-new", title: "后端标题", preview: "已保存", updatedAt: "2026-06-06T11:00:00.000Z" }]
+      sessions: [...sessions, { key: "websocket:chat-new", title: "后端标题", preview: "已保存", updatedAt: "2026-06-06T11:00:00.000Z", projectId: null, cwd: "/workspace" }]
     });
     expect(state.tasks.find((task) => task.chatId === "chat-new")).toMatchObject({
       title: "后端标题",
       preview: "已保存"
     });
     expect(state.optimisticTasksByChatId["chat-new"]).toBeUndefined();
+  });
+
+  it("keeps a project task in its project while replacing the optimistic row with the canonical session", () => {
+    vi.spyOn(Date, "now").mockReturnValue(1781240000000);
+    const project = {
+      id: "project-a",
+      name: "Project A",
+      rootPath: "/workspace/project-a",
+      pinned: false,
+      createdAt: "2026-06-06T08:00:00.000Z"
+    };
+    let state: AgentState = {
+      ...initialAgentState,
+      projects: [project]
+    };
+    state = agentReducer(state, { type: "agent/newChatCreated", chatId: "chat-project" });
+    state = agentReducer(state, {
+      type: "agent/userMessageQueued",
+      chatId: "chat-project",
+      content: "检查项目",
+      target: { kind: "project", projectId: project.id }
+    });
+
+    expect(state.tasks.find((task) => task.chatId === "chat-project")).toMatchObject({
+      projectId: project.id,
+      groupProjectId: project.id,
+      cwd: project.rootPath,
+      missingProject: false
+    });
+
+    state = agentReducer(state, {
+      type: "agent/sessionSnapshotApplied",
+      snapshot: {
+        projectRegistryState: "ready",
+        projects: [project],
+        sessions: [{
+          key: "websocket:chat-project",
+          title: "后端标题",
+          preview: "已保存",
+          updatedAt: "2026-06-06T11:00:00.000Z",
+          projectId: project.id,
+          cwd: project.rootPath
+        }]
+      }
+    });
+
+    expect(state.tasks.find((task) => task.chatId === "chat-project")).toMatchObject({
+      title: "后端标题",
+      projectId: project.id,
+      groupProjectId: project.id,
+      cwd: project.rootPath,
+      missingProject: false
+    });
+    expect(state.optimisticTasksByChatId["chat-project"]).toBeUndefined();
   });
 
   it("marks background completed tasks as unseen and clears the dot when opened", () => {
@@ -2741,17 +2857,14 @@ describe("agent chat slice", () => {
     let state = agentReducer(initialAgentState, { type: "agent/composerDraftUpdated", scopeKey: "chat-a", value: "A 草稿" });
     state = agentReducer(state, { type: "agent/composerDraftUpdated", scopeKey: "chat-b", value: "B 草稿" });
     state = agentReducer(state, { type: "agent/composerPendingAttachmentsUpdated", scopeKey: "chat-a", attachments: [attachment] });
-    state = agentReducer(state, { type: "agent/composerMediaErrorUpdated", scopeKey: "chat-a", message: "home.media.error.sendFailed" });
 
     expect(state.composerDraftsByScope).toEqual({ "chat-a": "A 草稿", "chat-b": "B 草稿" });
     expect(state.composerPendingAttachmentsByScope["chat-a"]).toEqual([attachment]);
-    expect(state.composerMediaErrorByScope["chat-a"]).toBe("home.media.error.sendFailed");
 
     state = agentReducer(state, { type: "agent/composerScopeCleared", scopeKey: "chat-a" });
 
     expect(state.composerDraftsByScope).toEqual({ "chat-b": "B 草稿" });
     expect(state.composerPendingAttachmentsByScope["chat-a"]).toBeUndefined();
-    expect(state.composerMediaErrorByScope["chat-a"]).toBeUndefined();
   });
 
   it("newChatRequested does not clear composer scopes", () => {
@@ -3644,6 +3757,27 @@ describe("agent chat slice", () => {
     expect(state.deliveryUncertainByChatId["chat-1"]).toBeUndefined();
   });
 
+  it("replaces a failed optimistic sidebar state with the supplied confirmed replay", () => {
+    const optimistic = sidebar({ pinned_keys: ["websocket:chat-1"] });
+    const confirmed = sidebar({ archived_keys: ["websocket:chat-2"] });
+    let state = agentReducer(initialAgentState, {
+      type: "agent/sidebarMutationStarted",
+      mutationId: "mutation-1",
+      sidebarState: optimistic
+    });
+
+    state = agentReducer(state, {
+      type: "agent/sidebarMutationFailed",
+      mutationId: "mutation-1",
+      sidebarState: confirmed,
+      error: { id: "write-error", source: "sidebar", message: "write failed", createdAt: 1 }
+    });
+
+    expect(state.sidebarState).toEqual(confirmed);
+    expect(state.currentSidebarMutationId).toBeNull();
+    expect(state.operationErrorsBySurface.sidebar?.id).toBe("write-error");
+  });
+
   it("ignores stale sidebar confirms, failures, and refresh snapshots after a newer mutation", () => {
     const first = sidebar({ pinned_keys: ["websocket:chat-1"] });
     const second = sidebar({
@@ -3667,6 +3801,7 @@ describe("agent chat slice", () => {
     state = agentReducer(state, {
       type: "agent/sidebarMutationFailed",
       mutationId: "mutation-1",
+      sidebarState: defaultAgentSidebarState,
       error: { id: "old-error", source: "sidebar", message: "old failure", createdAt: 1 }
     });
     expect(state).toBe(latest);
@@ -3816,7 +3951,7 @@ describe("agent chat slice", () => {
       type: "agent/taskStateSettled",
       requestId: "parallel-task",
       recoveryGeneration: 2,
-      sessions: [{ key: "websocket:chat-1", title: "任务", preview: "旧 HTTP 快照" }]
+      sessions: [{ key: "websocket:chat-1", title: "任务", preview: "旧 HTTP 快照", projectId: null, cwd: "/workspace" }]
     });
 
     expect(afterChatRecovery.runStatusVersionByChatId["chat-1"]).toBe(runVersionAtStart + 1);

@@ -499,14 +499,23 @@ function stringArrayOption(parsed: ParsedArgs, name: string): string[] | undefin
   return parseStringArray(value);
 }
 
-function normalizeTurnStatus(status: string | undefined): "succeeded" | "failed" | "cancelled" | undefined {
+function normalizeTurnStatus(status: string | undefined): "succeeded" | "failed" | undefined {
   if (!status) return undefined;
-  if (status === "ok" || status === "success" || status === "succeeded") return "succeeded";
-  if (status === "error" || status === "failed" || status === "failure" || status === "timeout" || status === "killed") {
+  const normalized = status.toLowerCase();
+  if (normalized === "ok" || normalized === "success" || normalized === "succeeded") return "succeeded";
+  if (
+    normalized === "error" ||
+    normalized === "failed" ||
+    normalized === "failure" ||
+    normalized === "timeout" ||
+    normalized === "killed"
+  ) {
     return "failed";
   }
-  if (status === "cancelled" || status === "reset" || status === "deleted") return "cancelled";
-  return status as "succeeded" | "failed" | "cancelled";
+  if (normalized === "cancelled" || normalized === "canceled" || normalized === "reset" || normalized === "deleted") {
+    throw new Error("cancelled turns must not be persisted");
+  }
+  throw new Error(`unsupported turn status: ${status}`);
 }
 
 function removeUndefined(value: unknown): void {

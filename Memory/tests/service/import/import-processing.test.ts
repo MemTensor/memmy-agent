@@ -474,6 +474,12 @@ describe("MemoryService / import / processing", () => {
     expect(failed?.errorMessage).not.toContain("supersecret-token");
     expect(failed?.errorMessage).not.toContain("sk-supersecret123456");
     expect(failed?.errorMessage).not.toContain("private-value");
+    expect(failed?.failedAt).toBeTruthy();
+    const firstFailure = {
+      errorCode: failed?.errorCode,
+      errorMessage: failed?.errorMessage,
+      failedAt: failed?.failedAt
+    };
     const persistedFailure = db.db.prepare(
       `SELECT last_error FROM evolution_jobs WHERE target_memory_id = ? ORDER BY updated_at DESC LIMIT 1`
     ).get(added.id) as { last_error: string | null };
@@ -482,23 +488,65 @@ describe("MemoryService / import / processing", () => {
     expect(persistedFailure.last_error).not.toContain("sk-supersecret123456");
     expect(persistedFailure.last_error).not.toContain("private-value");
 
-    failureMessage = null;
-    const retry = service.retryMemoryProcessing(added.id, { namespace });
-    expect(retry).toMatchObject({
+    failureMessage = "429 second provider failure";
+    const failedRetry = service.retryMemoryProcessing(added.id, { namespace });
+    expect(failedRetry).toMatchObject({
       accepted: true,
       processing: {
         state: "summary_pending",
         stage: "summary",
-        manualRetryCount: 1
+        manualRetryCount: 1,
+        ...firstFailure
       },
       job: { jobType: "import_summary", status: "queued" }
     });
     await service.runWorkerOnce(1);
+    expect(service.memoryProcessingStatus([added.id], { namespace }).items[0]).toMatchObject({
+      state: "summary_pending",
+      stage: "summary",
+      ...firstFailure
+    });
+    await service.runWorkerOnce(1);
+    await service.runWorkerOnce(1);
+    const secondFailure = service.memoryProcessingStatus([added.id], { namespace }).items[0];
+    expect(secondFailure).toMatchObject({
+      state: "failed",
+      stage: "summary",
+      manualRetryCount: 1,
+      errorCode: "transient_provider_error",
+      errorMessage: "429 second provider failure"
+    });
+    expect(secondFailure?.failedAt).toBeTruthy();
+
+    failureMessage = null;
+    const successfulRetry = service.retryMemoryProcessing(added.id, { namespace });
+    expect(successfulRetry).toMatchObject({
+      accepted: true,
+      processing: {
+        state: "summary_pending",
+        stage: "summary",
+        manualRetryCount: 2,
+        errorCode: secondFailure?.errorCode,
+        errorMessage: secondFailure?.errorMessage,
+        failedAt: secondFailure?.failedAt
+      }
+    });
+    await service.runWorkerOnce(1);
+    expect(service.memoryProcessingStatus([added.id], { namespace }).items[0]).toMatchObject({
+      state: "embedding_pending",
+      stage: "embedding",
+      errorCode: secondFailure?.errorCode,
+      errorMessage: secondFailure?.errorMessage,
+      failedAt: secondFailure?.failedAt
+    });
     await service.runWorkerOnce(1);
     expect(service.memoryProcessingStatus([added.id], { namespace }).items[0]).toMatchObject({
       state: "ready",
       stage: null,
-      manualRetryCount: 1
+      manualRetryCount: 2,
+      errorCode: null,
+      errorMessage: null,
+      failedAt: null
     });
     expect(llmCalls.filter((call) => call.options.operation === "capture.summarize")).toHaveLength(1);
 

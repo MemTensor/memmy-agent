@@ -1,8 +1,14 @@
 /** Ingestion service tests. */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { MemoryClient } from "../../adapters/outbound/memory-client/index.js";
 import { createMockMemoryClient } from "../../tests/support/mock-memory-client.js";
-import { createIngestionService, IngestionAssertionError, type IngestionService } from "../ingestion-service.js";
+import {
+  createIngestionService,
+  IngestionAssertionError,
+  MEMORY_ADD_REQUEST_MAX_BYTES,
+  type IngestionService,
+  type IngestionWarning
+} from "../ingestion-service.js";
 import type { AgentSourceRepository } from "../../infrastructure/agent-source-store/index.js";
 import type { ConversationMessage } from "../../adapters/outbound/agent-source/types.js";
 
@@ -73,8 +79,8 @@ describe("ingestion service", () => {
       failedMemories: 0,
       memoryIds: ["memory-1", "memory-2"],
       conversations: 2,
-      completedConversationIds: [],
-      incompleteConversationIds: ["conv-a", "conv-b"],
+      completedConversationIds: ["conv-b"],
+      incompleteConversationIds: ["conv-a"],
       failedConversationIds: [],
       errors: []
     });
@@ -110,6 +116,37 @@ describe("ingestion service", () => {
     expect(added[0]).toEqual(expect.objectContaining({
       adapterId: "agent-source:cursor",
       deferProcessing: true
+    }));
+  });
+
+  it("uses the user-entered Agent name as the L1 memory source when supplied", async () => {
+    const added: Array<Record<string, unknown>> = [];
+    const service = createService({
+      async addMemory(input) {
+        added.push(input as Record<string, unknown>);
+        return {
+          id: "memory-aider",
+          kind: "trace",
+          memoryLayer: "L1",
+          status: "activated",
+          title: input.title ?? "Imported conversation",
+          summary: input.content,
+          tags: input.tags ?? [],
+          createdAt: now(),
+          serverTime: now()
+        };
+      }
+    });
+
+    await service.ingest(
+      toAsyncIterable([createMessage("conv-a", 1), createMessage("conv-a", 2)]),
+      { sourceId: "manual-id-1", memorySource: "Aider" }
+    );
+
+    expect(added[0]).toEqual(expect.objectContaining({
+      adapterId: "agent-source:manual-id-1",
+      source: "Aider",
+      tags: ["agent-source", "Aider"]
     }));
   });
 
@@ -188,10 +225,117 @@ describe("ingestion service", () => {
       deduped: 2,
       failed: 2,
       conversations: 2,
-      completedConversationIds: [],
-      incompleteConversationIds: ["conv-b"],
+      completedConversationIds: ["conv-b"],
+      incompleteConversationIds: [],
       failedConversationIds: ["conv-a"],
       errors: [{ conversationId: "conv-a", reason: "memory unavailable" }]
+    });
+  });
+
+  it("warns and skips an oversized turn while importing later turns", async () => {
+    const added: Array<Record<string, unknown>> = [];
+    const warnings: IngestionWarning[] = [];
+    const hasSeen = vi.fn(() => false);
+    const markSeen = vi.fn(() => true);
+    const service = createService(
+      {
+        async addMemory(input) {
+          added.push(input as Record<string, unknown>);
+          return {
+            id: "memory-1",
+            kind: "trace",
+            memoryLayer: input.layer ?? "L1",
+            status: "activated",
+            title: input.title ?? "Imported conversation",
+            summary: input.content,
+            tags: input.tags ?? [],
+            createdAt: now(),
+            serverTime: now()
+          };
+        }
+      },
+      { hasSeen, markSeen },
+      (warning) => warnings.push(warning)
+    );
+
+    const stats = await service.ingest(
+      toAsyncIterable([
+        { ...createMessage("conv-a", 1), content: "x".repeat(MEMORY_ADD_REQUEST_MAX_BYTES) },
+        createMessage("conv-a", 2),
+        createMessage("conv-b", 3),
+        createMessage("conv-b", 4)
+      ]),
+      { sourceId: "cursor" }
+    );
+
+    expect(added).toHaveLength(1);
+    expect(hasSeen).toHaveBeenCalledTimes(1);
+    expect(markSeen).toHaveBeenCalledTimes(2);
+    expect(warnings).toEqual([
+      expect.objectContaining({
+        code: "memory_add_request_too_large",
+        sourceId: "cursor",
+        conversationId: "conv-a",
+        turnId: expect.stringMatching(/^cursor:[a-f0-9]{24}$/),
+        bodyBytes: expect.any(Number),
+        limitBytes: MEMORY_ADD_REQUEST_MAX_BYTES
+      })
+    ]);
+    expect(warnings[0]!.bodyBytes).toBeGreaterThan(MEMORY_ADD_REQUEST_MAX_BYTES);
+    expect(stats).toEqual({
+      attempted: 4,
+      written: 2,
+      deduped: 2,
+      failed: 0,
+      writtenMemories: 1,
+      dedupedMemories: 0,
+      failedMemories: 0,
+      memoryIds: ["memory-1"],
+      conversations: 2,
+      completedConversationIds: ["conv-a", "conv-b"],
+      incompleteConversationIds: [],
+      failedConversationIds: [],
+      errors: []
+    });
+  });
+
+  it("completes successfully with zero added memories when every turn is oversized", async () => {
+    const addMemory = vi.fn();
+    const hasSeen = vi.fn(() => false);
+    const markSeen = vi.fn(() => true);
+    const warnings: IngestionWarning[] = [];
+    const service = createService(
+      { addMemory },
+      { hasSeen, markSeen },
+      (warning) => warnings.push(warning)
+    );
+
+    const stats = await service.ingest(
+      toAsyncIterable([
+        { ...createMessage("conv-a", 1), content: "界".repeat(MEMORY_ADD_REQUEST_MAX_BYTES) },
+        createMessage("conv-a", 2)
+      ]),
+      { sourceId: "cursor" }
+    );
+
+    expect(addMemory).not.toHaveBeenCalled();
+    expect(hasSeen).not.toHaveBeenCalled();
+    expect(markSeen).not.toHaveBeenCalled();
+    expect(warnings).toHaveLength(1);
+    expect(stats).toEqual({
+      attempted: 2,
+      written: 0,
+      deduped: 2,
+      failed: 0,
+      writtenMemories: 0,
+      dedupedMemories: 0,
+      failedMemories: 0,
+      memoryIds: [],
+      conversations: 1,
+      completedConversationIds: ["conv-a"],
+      incompleteConversationIds: [],
+      failedConversationIds: [],
+      errors: []
     });
   });
 
@@ -308,6 +452,80 @@ describe("ingestion service", () => {
     });
   });
 
+  it("imports only turns that start with user and end with a non-empty assistant response", async () => {
+    const added: string[] = [];
+    const service = createService({
+      async addMemory(input) {
+        added.push(input.content);
+        return {
+          id: `memory-${added.length}`,
+          kind: "trace",
+          memoryLayer: input.layer ?? "L1",
+          status: "activated",
+          title: input.title ?? "Imported conversation",
+          summary: input.content,
+          tags: input.tags ?? [],
+          createdAt: now(),
+          serverTime: now()
+        };
+      }
+    });
+    const message = (
+      conversationId: string,
+      messageId: string,
+      role: ConversationMessage["role"],
+      content = messageId
+    ): ConversationMessage => ({
+      ...createMessage(conversationId, 1),
+      conversationId,
+      messageId,
+      role,
+      content
+    });
+
+    const stats = await service.ingest(
+      toAsyncIterable([
+        message("user-tools", "ut-user", "user"),
+        message("user-tools", "ut-tool", "tool"),
+        message("assistant-only", "ao-assistant", "assistant"),
+        message("tools-assistant", "ta-tool", "tool"),
+        message("tools-assistant", "ta-assistant", "assistant"),
+        message("abandoned-then-complete", "ac-user-abandoned", "user"),
+        message("abandoned-then-complete", "ac-tool-abandoned", "tool"),
+        message("abandoned-then-complete", "ac-user-complete", "user"),
+        message("abandoned-then-complete", "ac-tool-complete", "tool"),
+        message("abandoned-then-complete", "ac-assistant-complete", "assistant"),
+        message("empty-assistant", "ea-user", "user"),
+        message("empty-assistant", "ea-assistant", "assistant", "   "),
+        message("complete", "complete-user", "user"),
+        message("complete", "complete-tool", "tool"),
+        message("complete", "complete-assistant", "assistant")
+      ]),
+      { sourceId: "cursor" }
+    );
+
+    expect(added).toEqual([
+      [
+        "## user\n\nac-user-complete",
+        "## tool\n\nac-tool-complete",
+        "## assistant\n\nac-assistant-complete"
+      ].join("\n\n"),
+      [
+        "## user\n\ncomplete-user",
+        "## tool\n\ncomplete-tool",
+        "## assistant\n\ncomplete-assistant"
+      ].join("\n\n")
+    ]);
+    expect(stats.incompleteConversationIds).toEqual(["user-tools", "empty-assistant"]);
+    expect(stats.completedConversationIds).toEqual([
+      "assistant-only",
+      "tools-assistant",
+      "abandoned-then-complete",
+      "complete"
+    ]);
+    expect(stats.writtenMemories).toBe(2);
+  });
+
   it("throws IngestionAssertionError when a conversationId is not contiguous", async () => {
     const service = createService({});
 
@@ -326,7 +544,8 @@ describe("ingestion service", () => {
 
 function createService(
   memoryClientPatch: Partial<MemoryClient>,
-  repositoryPatch: Partial<AgentSourceRepository> = {}
+  repositoryPatch: Partial<AgentSourceRepository> = {},
+  warn?: (warning: IngestionWarning) => void
 ): IngestionService {
   return createIngestionService({
     memoryClient: {
@@ -336,7 +555,8 @@ function createService(
     agentSourceRepository: {
       ...createRepository(),
       ...repositoryPatch
-    }
+    },
+    warn
   });
 }
 

@@ -166,7 +166,7 @@ describe("cursor skill target", () => {
       expect(output.user_message).not.toContain("Assistant raw summary 1");
       expect(output.user_message).toContain("5. episode_5");
       expect(output.user_message).not.toContain("6. episode_6");
-      expect(output.user_message).toContain("输入 1-5 选择要接续的 episode");
+      expect(output.user_message).toContain("Enter 1-5 to select an episode to resume.");
       expect(requestBody).toMatchObject({
         query: "测试query",
         layers: ["L1"],
@@ -195,7 +195,7 @@ describe("cursor skill target", () => {
     }
   });
 
-  it("uses one started turn and episode across Cursor prompt, response, and stop hooks", async () => {
+  it("captures only completed Cursor turns and drops user-cancelled turns", async () => {
     const { rootDirectory, memmyConfigPath } = createFixture();
     const requests: Array<{ body: Record<string, unknown>; path: string }> = [];
     const server = createServer(async (request: IncomingMessage, response: ServerResponse) => {
@@ -209,7 +209,6 @@ describe("cursor skill target", () => {
       if (url.pathname === "/api/v1/turns/start") {
         writeJsonResponse(response, 200, {
           turnId: "cursor-turn-1",
-          episodeId: "cursor-episode-1",
           sourceMemoryIds: ["cursor-memory-1"],
           injectedContext: { markdown: "Cursor historical context" }
         });
@@ -291,12 +290,87 @@ describe("cursor skill target", () => {
       expect(requests[3]?.body).toMatchObject({
         adapterId: "memmy-cursor-hook",
         sessionId: "cursor-memory-session",
-        episodeId: "cursor-episode-1",
         query: "继续检查 episode 生命周期",
         answer: "Cursor 生命周期修复完成",
         sourceMemoryIds: ["cursor-memory-1"],
         status: "succeeded"
       });
+      expect(requests[3]?.body).not.toHaveProperty("episodeId");
+
+      const cancelledEvent = {
+        ...eventBase,
+        generation_id: "cursor-generation-2"
+      };
+      await runNodeHook(
+        hookScriptPath,
+        JSON.stringify({
+          ...cancelledEvent,
+          hook_event_name: "beforeSubmitPrompt",
+          prompt: "这个任务会被用户取消"
+        })
+      );
+      await runNodeHook(
+        hookScriptPath,
+        JSON.stringify({
+          ...cancelledEvent,
+          hook_event_name: "afterAgentResponse",
+          text: "尚未完成的部分回复"
+        })
+      );
+      await runNodeHook(
+        hookScriptPath,
+        JSON.stringify({
+          ...cancelledEvent,
+          hook_event_name: "stop",
+          status: "cancelled"
+        })
+      );
+      expect(requests.slice(4).map((item) => item.path)).toEqual([
+        "/api/v1/sessions/open",
+        "/api/v1/turns/start"
+      ]);
+
+      await runNodeHook(
+        hookScriptPath,
+        JSON.stringify({
+          ...cancelledEvent,
+          hook_event_name: "stop",
+          status: "completed"
+        })
+      );
+      expect(requests).toHaveLength(6);
+
+      const incompleteEvent = {
+        ...eventBase,
+        generation_id: "cursor-generation-3"
+      };
+      const transcriptPath = join(rootDirectory, "incomplete-transcript.jsonl");
+      writeFileSync(transcriptPath, [
+        JSON.stringify({ role: "user", content: "上一轮问题" }),
+        JSON.stringify({ role: "assistant", content: "上一轮完整回复" }),
+        JSON.stringify({ role: "user", content: "当前尚未完成的问题" })
+      ].join("\n"), "utf8");
+      await runNodeHook(
+        hookScriptPath,
+        JSON.stringify({
+          ...incompleteEvent,
+          hook_event_name: "beforeSubmitPrompt",
+          prompt: "当前尚未完成的问题"
+        })
+      );
+      await runNodeHook(
+        hookScriptPath,
+        JSON.stringify({
+          ...incompleteEvent,
+          hook_event_name: "stop",
+          status: "completed",
+          transcript_path: transcriptPath
+        })
+      );
+      expect(requests.slice(6).map((item) => item.path)).toEqual([
+        "/api/v1/sessions/open",
+        "/api/v1/turns/start"
+      ]);
     } finally {
       await close(server);
     }

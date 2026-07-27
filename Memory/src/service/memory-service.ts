@@ -10,8 +10,10 @@ import {
   type MemmyConfig
 } from "../config/index.js";
 import { createMemoryLogger } from "../logging/logger.js";
+import { resolveMemoryAgentRegion } from "../model/agent-region.js";
 import { createEmbedder } from "../model/embedder.js";
 import { createLlmClient } from "../model/llm.js";
+import type { MemoryLlmModelRole } from "../model/token-usage.js";
 import type { Embedder,LlmClient } from "../model/types.js";
 import {
   sqliteBackendCapabilities,
@@ -149,6 +151,16 @@ function evolutionUsesSharedLlm(config: MemmyConfig): boolean {
   return !evolution.provider && !evolution.model && !evolution.endpoint && !evolution.apiKey;
 }
 
+function createConfiguredMemoryLlm(config: MemmyConfig, modelRole: MemoryLlmModelRole): LlmClient {
+  return createLlmClient(
+    modelRole === "memory_summary" ? config.summary : resolveEvolutionConfig(config),
+    {
+      modelRole,
+      agentRegion: resolveMemoryAgentRegion(config.activeProfile)
+    }
+  );
+}
+
 export interface MemoryServiceOptions {
   db?: MemoryDb;
   backend?: StorageBackend;
@@ -201,6 +213,7 @@ type InternalMemorySearchRequest = MemorySearchRequest & {
   targetSkillId?: string;
   contextHints?: Record<string, unknown>;
   injectedContextQuery?: string;
+  recordEvent?: boolean;
 };
 
 function requireMemoryDb(options: MemoryServiceOptions): MemoryDb {
@@ -236,11 +249,11 @@ export class MemoryService {
     this.repos = options.backend?.repositories() ?? new Repositories(requireMemoryDb(options).db);
     this.mode = options.mode ?? "local";
     this.config = cloneMemmyConfig(options.config ?? DEFAULT_MEMMY_CONFIG);
-    this.llm = options.llm ?? createLlmClient(this.config.summary, { modelRole: "memory_summary" });
+    this.llm = options.llm ?? createConfiguredMemoryLlm(this.config, "memory_summary");
     this.skillLlm = options.skillLlm ??
       (options.llm && evolutionUsesSharedLlm(this.config)
         ? options.llm
-        : createLlmClient(resolveEvolutionConfig(this.config), { modelRole: "memory_evolution" }));
+        : createConfiguredMemoryLlm(this.config, "memory_evolution"));
     this.embedder = options.embedder ?? createEmbedder(this.config.embedding);
     const workerHandlerOwner = this;
     this.workerHandlers = createWorkerJobHandlers({
@@ -601,8 +614,8 @@ export class MemoryService {
     const reloadedAt = nowIso();
 
     this.config = nextConfig;
-    this.llm = createLlmClient(nextConfig.summary, { modelRole: "memory_summary" });
-    this.skillLlm = createLlmClient(resolveEvolutionConfig(nextConfig), { modelRole: "memory_evolution" });
+    this.llm = createConfiguredMemoryLlm(nextConfig, "memory_summary");
+    this.skillLlm = createConfiguredMemoryLlm(nextConfig, "memory_evolution");
     this.embedder = createEmbedder(nextConfig.embedding);
     if (!requiresRestart && request.restartFailedProcessing !== false) {
       this.restartFailedProcessing(reloadedAt);
@@ -769,8 +782,6 @@ export class MemoryService {
     contextPacketId: string;
     turnId: string;
     sessionId: string;
-    episodeId: string;
-    closedEpisodeIds: string[];
     searchEventId: string;
     hits: RecallHit[];
     injectedContext: InjectedContext;
@@ -1840,15 +1851,13 @@ export class MemoryService {
       includeInjectedContext: true,
       retrievalMode: "turn_start",
       contextHints,
-      injectedContextQuery: request.query
+      injectedContextQuery: request.query,
+      recordEvent: false
     });
-    const episodeId = `episode_${stableHash(`readonly:${request.sessionId}:${turnId}`).slice(0, 20)}`;
     return {
-      contextPacketId: `ctx_${stableHash(`${request.sessionId}:${episodeId}:${turnId}:${search.searchEventId}`).slice(0, 20)}`,
+      contextPacketId: `ctx_${stableHash(`${request.sessionId}:${turnId}:${search.searchEventId}`).slice(0, 20)}`,
       turnId,
       sessionId: request.sessionId,
-      episodeId,
-      closedEpisodeIds: [],
       searchEventId: search.searchEventId,
       hits: search.hits,
       injectedContext: search.injectedContext,

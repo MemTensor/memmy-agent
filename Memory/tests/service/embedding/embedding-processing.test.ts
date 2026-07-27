@@ -165,6 +165,14 @@ describe("MemoryService / embedding / processing", () => {
       }
     });
 
+    await service.startTurn({
+      sessionId: session.sessionId,
+      turnId: "turn-live-trace-summary",
+      query: "Remember the SQLite migration workflow."
+    });
+    expect(db.db.prepare("SELECT COUNT(*) AS count FROM evolution_jobs").get()).toEqual({ count: 0 });
+    expect(db.db.prepare("SELECT COUNT(*) AS count FROM memory_processing_state").get()).toEqual({ count: 0 });
+
     const complete = service.completeTurn("turn-live-trace-summary", {
       sessionId: session.sessionId,
       query: "Remember the SQLite migration workflow.",

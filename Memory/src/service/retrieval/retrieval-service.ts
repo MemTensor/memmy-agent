@@ -70,6 +70,7 @@ type InternalMemorySearchRequest = MemorySearchRequest & {
   targetSkillId?: string;
   contextHints?: Record<string, unknown>;
   injectedContextQuery?: string;
+  recordEvent?: boolean;
 };
 
 type PolicyMeta = NonNullable<ReturnType<typeof policyMetaFromMemory>>;
@@ -1199,7 +1200,8 @@ export class RetrievalService {
           reason: "rank_threshold" as const
         }))
     ];
-    if (this.deps.memoryAddEnabled()) {
+    const shouldRecordEvent = this.deps.memoryAddEnabled() && request.recordEvent !== false;
+    if (shouldRecordEvent) {
       this.deps.repos.runtime.insertRecallEvent({
         id: recallEventId,
         namespaceId: this.deps.namespaceIdFromContext(context.namespace),
@@ -1240,7 +1242,7 @@ export class RetrievalService {
       verbose: request.verbose === true,
       serverTime: nowIso()
     };
-    if (this.deps.memoryAddEnabled()) {
+    if (shouldRecordEvent) {
       const keptIds = new Set(hits.map((hit) => hit.id));
       const logMemoryById = new Map(memories.map((memory) => [memory.id, memory]));
       const toSearchCandidateLog = (hit: RecallHit): Record<string, unknown> =>

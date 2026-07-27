@@ -21,6 +21,11 @@ describe("desktop edition identity", () => {
     expect(desktopRuntimeHomeDirectoryName("intl")).toBe(".memmy");
   });
 
+  it("prefers edition when both manifest identity fields are present", () => {
+    expect(resolveDesktopEdition(JSON.stringify({ edition: "cn", accountChannel: "email" }))).toBe("cn");
+    expect(resolveDesktopEdition(JSON.stringify({ edition: "intl", accountChannel: "phone" }))).toBe("intl");
+  });
+
   it("falls back to the build account channel when the manifest is absent", () => {
     expect(resolveDesktopEdition(null, "email")).toBe("intl");
     expect(resolveDesktopEdition(null, "phone")).toBe("cn");

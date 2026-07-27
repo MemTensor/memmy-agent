@@ -95,7 +95,6 @@ describe("memmy memory tools", () => {
         },
       }),
       currentSessionId: () => "memmy-agent::cli:direct",
-      currentEpisodeId: () => "ep-1",
       currentTurnId: () => "turn-1",
       currentUserText: () => "Summarize the current README",
     };
@@ -183,7 +182,6 @@ describe("memmy memory tools", () => {
     const runtime: MemmyMemoryToolRuntime = {
       requestEnvelope: () => ({}),
       currentSessionId: () => "session-1",
-      currentEpisodeId: () => "episode-1",
       currentTurnId: () => "turn-1",
       currentUserText: () => "current task",
     };
@@ -220,7 +218,6 @@ describe("memmy memory tools", () => {
     const runtime: MemmyMemoryToolRuntime = {
       requestEnvelope: () => ({}),
       currentSessionId: () => "memmy-agent::cli:direct",
-      currentEpisodeId: () => "ep-1",
       currentTurnId: () => "turn-1",
       currentUserText: () => "current task",
     };
@@ -257,7 +254,6 @@ describe("memmy memory tools", () => {
         },
       }),
       currentSessionId: (sessionKey) => sessionKey ? `memmy-agent::${sessionKey}` : null,
-      currentEpisodeId: () => null,
       currentTurnId: () => null,
       currentUserText: () => "current task",
     };

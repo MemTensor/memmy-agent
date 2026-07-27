@@ -241,6 +241,134 @@ body.memmy-window-fullscreen {
   border-radius: 0 0 var(--radius-composer) var(--radius-composer);
 }
 
+.agent-operation-error-slot {
+  position: relative;
+  z-index: 90;
+  display: flex;
+  min-height: 0;
+  align-items: center;
+  justify-content: center;
+  margin: 0 auto 6px;
+  font-size: 12px;
+  line-height: 18px;
+  text-align: center;
+}
+
+.agent-operation-error-slot:empty {
+  display: none;
+}
+
+.agent-operation-error-toast {
+  max-width: min(100%, 560px);
+  margin: 0;
+  padding: 9px 14px;
+  overflow-wrap: anywhere;
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 72%, transparent);
+  border-radius: var(--radius-card);
+  background: color-mix(in srgb, var(--color-background-paper) 96%, var(--color-canvas-oat));
+  box-shadow: 0 8px 24px rgb(17 29 28 / 0.1);
+  color: var(--color-text-ink);
+  font-weight: 500;
+  animation: agent-operation-error-toast-lifecycle 5s ease both;
+}
+
+@keyframes agent-operation-error-toast-lifecycle {
+  0% {
+    opacity: 0;
+    transform: translateY(4px) scale(0.985);
+  }
+
+  4%,
+  92% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+
+  100% {
+    opacity: 0;
+    transform: translateY(-2px) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-operation-error-toast {
+    animation: none;
+  }
+}
+
+.home-project-picker {
+  position: relative;
+  z-index: 45;
+  margin-bottom: 8px;
+}
+
+.home-project-picker__trigger {
+  display: flex;
+  width: 100%;
+  min-height: 40px;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 12px;
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 55%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--color-background-paper) 92%, transparent);
+  color: color-mix(in srgb, var(--color-text-ink) 62%, transparent);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.home-project-picker__trigger:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--color-action-sky) 40%, var(--color-border-stone));
+  color: var(--color-text-ink);
+}
+
+.home-project-picker__trigger:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.home-project-picker__menu {
+  position: absolute;
+  top: calc(100% + 5px);
+  right: 0;
+  left: 0;
+  z-index: 100;
+  max-height: 280px;
+  overflow-y: auto;
+  padding: 5px;
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 45%, transparent);
+  border-radius: 10px;
+  background: var(--color-background-paper);
+  box-shadow: 0 14px 36px rgb(20 42 35 / 0.16);
+}
+
+.home-project-picker__option {
+  display: flex;
+  width: 100%;
+  min-height: 38px;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 9px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: color-mix(in srgb, var(--color-text-ink) 68%, transparent);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.home-project-picker__option:hover,
+.home-project-picker__option--active {
+  background: color-mix(in srgb, var(--color-action-sky) 10%, transparent);
+  color: var(--color-action-sky-hover);
+}
+
+.home-project-picker__option--clear {
+  margin-top: 3px;
+  border-top: 1px solid color-mix(in srgb, var(--color-border-stone) 34%, transparent);
+}
+
 .border-content-panel {
   border: 1px solid var(--border-content-panel);
   box-shadow: none;
@@ -5143,6 +5271,99 @@ input[type="checkbox"].check-sky:checked::after {
   color: #fff;
 }
 
+.github-star-prompt {
+  position: fixed;
+  right: var(--space-5);
+  bottom: 48px;
+  /* Below product-tour mask (z-40) and modals (--z-modal: 50). */
+  z-index: 30;
+  width: 256px;
+  max-width: calc(100vw - 32px);
+  pointer-events: none;
+}
+
+.github-star-prompt__card {
+  position: relative;
+  pointer-events: auto;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  width: 256px;
+  max-width: 100%;
+  padding: var(--space-4);
+  border-radius: var(--radius-card);
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 50%, transparent);
+  background: var(--color-background-paper);
+  box-shadow: var(--shadow-soft);
+}
+
+.github-star-prompt__title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 20px;
+  color: var(--color-text-ink);
+}
+
+.github-star-prompt__body {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 18px;
+  color: color-mix(in srgb, var(--color-text-ink) 58%, transparent);
+}
+
+.github-star-prompt__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+}
+
+.github-star-prompt__secondary {
+  flex: 0 0 auto;
+  min-width: 0;
+  height: 32px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--radius-btn);
+  background: transparent;
+  color: color-mix(in srgb, var(--color-text-ink) 45%, transparent);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+  cursor: pointer;
+  transition: color 150ms ease, background 150ms ease;
+}
+
+.github-star-prompt__secondary:hover {
+  background: color-mix(in srgb, var(--color-canvas-oat) 70%, transparent);
+  color: color-mix(in srgb, var(--color-text-ink) 62%, transparent);
+}
+
+.github-star-prompt__primary {
+  flex: 1;
+  height: 32px;
+  min-height: 32px;
+  border: 0;
+  border-radius: var(--radius-btn);
+  background: var(--color-action-sky);
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 16px;
+  cursor: pointer;
+  transition: background 150ms ease;
+}
+
+.github-star-prompt__primary:hover {
+  background: var(--color-action-sky-hover);
+}
+
 .banner {
   display: flex;
   align-items: flex-start;
@@ -6852,18 +7073,44 @@ input[type="checkbox"].check-sky:checked::after {
   letter-spacing: 0;
 }
 
-.app-frame-task-section-header {
-  font-size: 12px;
+.app-frame-task-section-header,
+.app-frame-project-title,
+.app-frame-task-title {
+  font-size: 13px;
   font-weight: 400;
-  line-height: 16px;
-  letter-spacing: 0.01em;
+  line-height: 18px;
+  letter-spacing: 0;
 }
 
 .app-frame-task-section-header__title {
   display: flex;
   align-items: center;
-  height: 16px;
-  line-height: 16px;
+  height: 18px;
+  line-height: 18px;
+}
+
+.app-frame-task-section-header__toggle-icon {
+  visibility: hidden;
+  opacity: 0;
+  transition: opacity var(--duration-fast);
+}
+
+.app-frame-task-section-header:hover .app-frame-task-section-header__toggle-icon {
+  visibility: visible;
+  opacity: 1;
+}
+
+.app-frame-task-section-header__actions {
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.app-frame-task-section-header:hover .app-frame-task-section-header__actions,
+.app-frame-task-section-header:focus-within .app-frame-task-section-header__actions {
+  visibility: visible;
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .app-frame-task-section-action {
@@ -6889,6 +7136,62 @@ input[type="checkbox"].check-sky:checked::after {
   outline-offset: 1px;
 }
 
+.app-frame-task-section-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.35;
+}
+
+.app-frame-project-node {
+  min-width: 0;
+}
+
+.app-frame-project-row {
+  min-height: 30px;
+  font-family: var(--font-sans);
+}
+
+.app-frame-project-row__actions {
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.app-frame-project-row:hover .app-frame-project-row__actions,
+.app-frame-project-row:focus-within .app-frame-project-row__actions {
+  visibility: visible;
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.app-frame-project-task {
+  margin-left: 18px;
+  border-left: 1px solid color-mix(in srgb, var(--color-border-stone) 42%, transparent);
+  padding-left: 3px;
+}
+
+.app-frame-project-create-menu {
+  position: absolute;
+  top: 22px;
+  right: 0;
+  z-index: 80;
+  width: 150px;
+  padding: 4px;
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 40%, transparent);
+  border-radius: var(--radius-menu);
+  background: var(--color-background-paper);
+  box-shadow: 0 10px 28px rgb(29 45 39 / 0.14);
+}
+
+.app-frame-project-path {
+  margin-top: 8px;
+  overflow: hidden;
+  color: color-mix(in srgb, var(--color-text-ink) 45%, transparent);
+  font-size: 11px;
+  line-height: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .app-frame-task-section-action__dots {
   display: inline-flex;
   align-items: center;
@@ -6907,13 +7210,6 @@ input[type="checkbox"].check-sky:checked::after {
 .app-frame-task-row {
   border-radius: 8px;
   font-family: var(--font-sans);
-}
-
-.app-frame-task-title {
-  font-size: 13px;
-  font-weight: 400;
-  line-height: 18px;
-  letter-spacing: 0;
 }
 
 .app-frame-task-preview,

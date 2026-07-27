@@ -165,7 +165,7 @@ describe("memmy-memory CLI setup commands", () => {
       join(root, ".openclaw", "workspace", "AGENTS.md"),
       join(root, ".hermes", "SOUL.md")
     ]) {
-      expect(readFileSync(injectPath, "utf8")).toContain("<!-- memmy-memory cli : start -->");
+      expect(readFileSync(injectPath, "utf8")).toContain("<!-- memmy:start v=1 -->");
     }
 
     for (const skillPath of [
@@ -178,6 +178,33 @@ describe("memmy-memory CLI setup commands", () => {
     ]) {
       expect(readFileSync(skillPath, "utf8")).toContain("name: memmy-memory");
     }
+  });
+
+  it("skips an unavailable agent when installing all supported agent skills", async () => {
+    const root = tempRoot();
+    const assetRoot = join(root, "assets");
+    createCliAssets(assetRoot);
+    createAllAgentRoots(root);
+    rmSync(join(root, ".hermes"), { recursive: true, force: true });
+    setEnv("HOME", root);
+
+    const result = await runCommand({
+      argv: [
+        "init",
+        "--home", join(root, "memmy-home"),
+        "--asset-root", assetRoot
+      ]
+    }) as Record<string, unknown>;
+
+    expect((result.agents as Array<{ agent: string }>).map(({ agent }) => agent)).toEqual([
+      "codex",
+      "cursor",
+      "claude",
+      "opencode",
+      "openclaw"
+    ]);
+    expect(existsSync(join(root, ".hermes"))).toBe(false);
+    expect(existsSync(join(root, ".codex", "skills", "memmy-memory", "SKILL.md"))).toBe(true);
   });
 
   it("installs OpenCode into OPENCODE_CONFIG_DIR", async () => {
@@ -307,10 +334,10 @@ describe("memmy-memory CLI setup commands", () => {
     expect(readFileSync(join(agentRoot, "AGENTS.md"), "utf8")).toBe(
       [
         "manual prefix",
-        "<!-- memmy-memory cli : start -->",
+        "<!-- memmy:start v=1 -->",
         "# Agent Inject",
         "Use the memmy-memory skill.",
-        "<!-- memmy-memory cli : end -->",
+        "<!-- memmy:end v=1 -->",
         ""
       ].join("\n")
     );
@@ -360,7 +387,7 @@ describe("memmy-memory CLI setup commands", () => {
       mkdirSync(dirname(injectPath), { recursive: true });
       writeFileSync(
         injectPath,
-        ["before", "<!-- memmy-memory:start v=1 -->", "old", "<!-- memmy-memory:end v=1 -->", "after", ""].join("\n")
+        ["before", "<!-- memmy:start v=1 -->", "old", "<!-- memmy:end v=1 -->", "after", ""].join("\n")
       );
 
       await runCommand({
@@ -374,36 +401,10 @@ describe("memmy-memory CLI setup commands", () => {
       });
 
       expect(readFileSync(injectPath, "utf8")).toBe(
-        ["before", "<!-- memmy-memory cli : start -->", "# Agent Inject", "Use the memmy-memory skill.", "<!-- memmy-memory cli : end -->", "after", ""].join("\n")
+        ["before", "<!-- memmy:start v=1 -->", "# Agent Inject", "Use the memmy-memory skill.", "<!-- memmy:end v=1 -->", "after", ""].join("\n")
       );
       expect(existsSync(join(agentRoot, "skills", "memmy-memory", "SKILL.md"))).toBe(true);
     }
-  });
-
-  it("migrates previous marker blocks instead of appending another inject block", async () => {
-    const root = tempRoot();
-    const agentRoot = join(root, ".codex");
-    const assetRoot = join(root, "assets");
-    mkdirSync(agentRoot, { recursive: true });
-    writeFileSync(
-      join(agentRoot, "AGENTS.md"),
-      ["before", "<!-- memmy-memory:start v=1 -->", "old", "<!-- memmy-memory:end v=1 -->", "after", ""].join("\n")
-    );
-    createCliAssets(assetRoot);
-
-    await runCommand({
-      argv: [
-        "init",
-        "--home", join(root, "memmy-home"),
-        "--agent", "codex",
-        "--agent-root", agentRoot,
-        "--asset-root", assetRoot
-      ]
-    });
-
-    expect(readFileSync(join(agentRoot, "AGENTS.md"), "utf8")).toBe(
-      ["before", "<!-- memmy-memory cli : start -->", "# Agent Inject", "Use the memmy-memory skill.", "<!-- memmy-memory cli : end -->", "after", ""].join("\n")
-    );
   });
 
   it("does not create a missing agent root during init agent installation", async () => {
