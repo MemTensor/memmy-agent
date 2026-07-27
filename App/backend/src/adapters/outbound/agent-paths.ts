@@ -187,3 +187,26 @@ function resolveAgentPathWithRuntime(value: string, runtime: AgentPathRuntime): 
     ? runtime.pathApi.normalize(expanded)
     : runtime.pathApi.resolve(expanded);
 }
+
+
+export function resolveWindsurfDataDirectory(options: ResolveAgentPathOptions = {}): string {
+  const runtime = createAgentPathRuntime(options);
+  return runtime.pathApi.join(runtime.homeDirectory, ".codeium", "windsurf");
+}
+
+export function resolveClineDataDirectory(options: ResolveAgentPathOptions = {}): string {
+  const runtime = createAgentPathRuntime(options);
+  const configBase =
+    runtime.environment.APPDATA ??
+    (runtime.platform() === "darwin"
+      ? runtime.pathApi.join(runtime.homeDirectory, "Library", "Application Support")
+      : runtime.pathApi.join(runtime.homeDirectory, ".config"));
+  return runtime.pathApi.join(
+    configBase,
+    "Code",
+    "User",
+    "globalStorage",
+    "saoudrizwan.claude-dev"
+  );
+}
+
