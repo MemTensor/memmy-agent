@@ -20,8 +20,18 @@
   </p>
 
 <div align="center">
+  
+## Memmy is your personal memory hub — and a dedicated Agent that knows you best.
+
+</div>
 
 <div align="center">
+
+**English** • [简体中文](README.zh-CN.md)
+
+![image](docs/assets/banner-en.png)
+
+</div>
 
 ## 🆓 Sign-up for Free Trial
 
