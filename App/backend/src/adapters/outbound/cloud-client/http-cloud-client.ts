@@ -85,7 +85,7 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
     },
 
     async sendEmailCode(input: SendEmailCodeInput): Promise<void> {
-      await requestBoolean(fetchImpl, baseUrl, timeoutMs, "/api/user/sendVerification", {
+      await requestBoolean(fetchImpl, baseUrl, timeoutMs, "/api/agentUser/sendEmailVerification", {
         body: {
           email: input.email,
           zhEnv: input.zhEnv

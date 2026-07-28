@@ -83,7 +83,7 @@ describe("cloud client", () => {
 
     expect(requests).toEqual([
       {
-        path: "/api/user/sendVerification",
+        path: "/api/agentUser/sendEmailVerification",
         body: { email: "hello@example.com", zhEnv: true },
         lang: "zh",
         deviceId

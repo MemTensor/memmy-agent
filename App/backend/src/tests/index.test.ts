@@ -95,7 +95,10 @@ describe("local api", () => {
     preparedStore.close();
 
     integrationServer = createServer(async (request, response) => {
-      if (request.method === "POST" && request.url === "/api/user/sendVerification") {
+      if (
+        request.method === "POST" &&
+        request.url === "/api/agentUser/sendEmailVerification"
+      ) {
         deviceId = request.headers["x-memmy-device-id"] as string | undefined;
         sendJson(response, { code: 0, message: "ok", data: true });
         return;
