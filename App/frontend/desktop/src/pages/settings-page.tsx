@@ -1,7 +1,7 @@
 /** Settings page for account, model, token usage, and desktop preferences. */
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type Dispatch, type ReactNode } from "react";
 import { Brain, Palette, Rocket, Settings2, Shield, User, Zap, ArrowRight, ArrowLeft, Bell, ExternalLink, FolderOpen, Info, LogOut, Wrench, Search, Eye, EyeOff, ChevronDown, ChevronUp, ChevronRight, Database, Loader2, CheckCircle2, XCircle, Check, AlertTriangle, ArrowDownToLine, ArrowUpFromLine, MessageSquare, FileText, Sparkles, Mic, Image as ImageIcon } from "lucide-react";
-import type { AppSettingsDto, ByokTokenUsageByKind, ByokTokenUsageKind, ByokTokenUsageSummary, Language, PrivacySettingsDto, TokenQuotaEligibility, TokenUsageDto } from "@memmy/local-api-contracts";
+import type { AppSettingsDto, ByokTokenUsageByKind, ByokTokenUsageKind, ByokTokenUsageSummary, Language, PrivacySettingsDto, TokenQuotaEligibility, TokenSceneUsageDto, TokenUsageDto, TokenUsageScene } from "@memmy/local-api-contracts";
 import { useApiClients } from "../app/providers.js";
 import { resolveGiftTokenUsage } from "../app/routes.js";
 import { useUpdateCoordinator, type UpdateCoordinatorValue, type UpdatePhase } from "../app/update-coordinator.js";
@@ -136,11 +136,12 @@ export function writeLogLevel(storage: Storage | undefined, level: LogLevel): vo
 
 const FALLBACK_TOKEN_USAGE: TokenUsageDto = {
   planName: "Trial Token",
-  totalTokens: 30_000_000,
+  totalTokens: 0,
   usedTokens: 0,
-  remainingTokens: 30_000_000,
+  remainingTokens: 0,
   expiresAt: null,
-  lastSyncedAt: null
+  lastSyncedAt: null,
+  sceneUsages: []
 };
 
 const EMPTY_BYOK_TOKEN_USAGE: ByokTokenUsageSummary = {
@@ -360,7 +361,6 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     ? t(quotaEligibilityMessage.key, quotaEligibilityMessage.values)
     : null;
   const customUsedTokens = byokUsage.totalTokens;
-  const tokenExpiryText = formatTokenExpiry(tokenUsage.expiresAt, t);
   const primaryModelId = state.modelConfig.configured ? modelId || state.modelConfig.model : "";
   const mainModelTestKey = createModelConfigValidationKey(mainModelFormValues);
   const isMainModelTestStale = Boolean(llmValidation.testedKey && llmValidation.testedKey !== mainModelTestKey);
@@ -1149,7 +1149,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     return (
       <UsageDetailView
         showPlatform={showGiftQuota}
-        platformChatTokens={giftUsedTokens}
+        platformUsage={tokenUsage}
         byokUsage={byokUsage}
         byokUsageStatus={byokUsageStatus}
         onBack={() => updateShowUsageDetail(false)}
@@ -1534,7 +1534,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
                   />
                 </div>
                 <div className="mt-2">
-                  <span className="text-xs text-text-ink/50">{t("settings.token.remaining", { count: formatNumber(giftRemainingTokens), expiry: tokenExpiryText })}</span>
+                  <span className="text-xs text-text-ink/50">{t("settings.token.remaining", { count: formatNumber(giftRemainingTokens) })}</span>
                 </div>
               </div>
             )}
@@ -1909,14 +1909,14 @@ function ChannelStat(props: ChannelStatProps) {
  *
  * Field meanings:
  * - showPlatform: Whether to show the platform-gifted channel.
- * - platformChatTokens: The platform-gifted LLM Token usage.
+ * - platformUsage: Platform quota aggregate and scene details.
  * - byokUsage: The local BYOK API Key Token usage summary.
  * - byokUsageStatus: The local usage loading status.
  * - onBack: The callback to return to the settings page.
  */
 interface UsageDetailViewProps {
   showPlatform: boolean;
-  platformChatTokens: number;
+  platformUsage: TokenUsageDto;
   byokUsage: ByokTokenUsageSummary;
   byokUsageStatus: UsageLoadStatus;
   onBack: () => void;
@@ -1959,7 +1959,7 @@ function UsageDetailView(props: UsageDetailViewProps) {
           {props.showPlatform && (
             <UsageTotalCard
               label={t("settings.token.platformModel")}
-              value={props.platformChatTokens}
+              value={props.platformUsage.usedTokens}
               hint={t("settings.token.used")}
               tone="sky"
             />
@@ -2011,7 +2011,69 @@ function UsageDetailView(props: UsageDetailViewProps) {
             </div>
           )}
         </section>
+
+        {props.showPlatform && (
+          <section>
+            <div className={usageStyles.sectionHead}>
+              <h2>{t("settings.token.platformSceneStats")}</h2>
+              <p>{t("settings.token.platformSceneStatsHint")}</p>
+            </div>
+            <div className={`${usageStyles.grid} ${usageStyles.sceneGrid}`}>
+              {(["agent_chat", "memory_summary", "memory_evolution"] as const).map((scene) => (
+                <PlatformSceneQuotaCard
+                  key={scene}
+                  usage={resolvePlatformSceneUsage(props.platformUsage.sceneUsages, scene)}
+                />
+              ))}
+            </div>
+          </section>
+        )}
         </div>
+      </div>
+    </div>
+  );
+}
+
+function resolvePlatformSceneUsage(
+  usages: TokenSceneUsageDto[],
+  scene: TokenUsageScene
+): TokenSceneUsageDto {
+  return usages.find((usage) => usage.scene === scene) ?? {
+    scene,
+    totalTokens: 0,
+    usedTokens: 0,
+    remainingTokens: 0
+  };
+}
+
+function PlatformSceneQuotaCard(props: { usage: TokenSceneUsageDto }) {
+  const { t } = useTranslation();
+  const labelKey = {
+    agent_chat: "settings.token.agentTask",
+    memory_summary: "settings.token.memorySummary",
+    memory_evolution: "settings.token.memoryEvolution"
+  } as const;
+  const percent = props.usage.totalTokens <= 0
+    ? 0
+    : Math.min(100, Math.max(0, (props.usage.usedTokens / props.usage.totalTokens) * 100));
+
+  return (
+    <div className={`${usageStyles.panel} p-5`}>
+      <div className={usageStyles.eyebrow}>
+        <span className={usageStyles.skyDot} />
+        {t(labelKey[props.usage.scene])}
+      </div>
+      <div className="mt-4 text-sm text-text-ink/70">
+        {t("settings.token.sceneUsedTotal", {
+          used: formatNumber(props.usage.usedTokens),
+          total: formatNumber(props.usage.totalTokens)
+        })}
+      </div>
+      <div className="mt-3 h-2 bg-canvas-oat rounded-pill overflow-hidden">
+        <div className="h-full bg-action-sky rounded-pill" style={{ width: `${percent}%` }} />
+      </div>
+      <div className="mt-3 text-xs text-text-ink/45">
+        {t("settings.token.sceneRemaining", { count: formatNumber(props.usage.remainingTokens) })}
       </div>
     </div>
   );
@@ -3207,21 +3269,6 @@ function formatQuotaNextAllowedAt(epochMs: number, language: "zh-CN" | "en-US"):
     hour: "2-digit",
     minute: "2-digit"
   }).format(date);
-}
-
-/**
- * Formats the Token expiry time.
- *
- * @param value The ISO 8601 expiry time; null means no expiry limit.
- * @returns A readable validity description for the settings-page Token area.
- */
-function formatTokenExpiry(value: string | null, t: SettingsTranslate): string {
-  if (!value) {
-    return t("settings.token.neverExpires");
-  }
-
-  const [date] = value.split("T");
-  return t("settings.token.expiresAt", { date: date || value });
 }
 
 /**

@@ -181,6 +181,10 @@
   gap: 12px;
 }
 
+.sceneGrid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .usageCard {
   padding: 16px;
 }
@@ -383,6 +387,10 @@
   .grid {
     grid-template-columns: 1fr;
   }
+
+  .sceneGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 640px) {
@@ -411,6 +419,10 @@
   }
 
   .overviewGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .sceneGrid {
     grid-template-columns: 1fr;
   }
 

@@ -26,15 +26,6 @@ export interface CreateBootstrapServiceOptions {
   bootstrapScenario?: BootstrapScenario;
 }
 
-const TOKEN_USAGE_PLACEHOLDER = TokenUsageDtoSchema.parse({
-  planName: "体验 Token",
-  totalTokens: 30000000,
-  usedTokens: 0,
-  remainingTokens: 30000000,
-  expiresAt: null,
-  lastSyncedAt: null
-});
-
 export function createBootstrapService(options: CreateBootstrapServiceOptions): BootstrapService {
   return {
     async getBootstrap() {
@@ -62,7 +53,7 @@ export function createBootstrapService(options: CreateBootstrapServiceOptions): 
             : onboarding,
         privacy: bootstrap.getPrivacySettings(),
         scanPreferences: bootstrap.getScanPreferences(),
-        tokenUsage,
+        tokenUsage: tokenUsage ?? createTokenUsagePlaceholder(promotions.agentChatTokenTotal),
         health: {
           localApi: "ok",
           memory: memoryHealth,
@@ -116,12 +107,12 @@ async function reconcileImprovementProgram(
 }
 
 /** Handles refresh token usage. */
-async function refreshTokenUsage(options: CreateBootstrapServiceOptions): Promise<TokenUsageDto> {
+async function refreshTokenUsage(options: CreateBootstrapServiceOptions): Promise<TokenUsageDto | undefined> {
   const accountSession = options.appStateStore.repositories.accountSession;
   const session = accountSession.get();
   const uuid = accountSession.getCloudUuid();
   if (!session.authenticated || !uuid) {
-    return TOKEN_USAGE_PLACEHOLDER;
+    return undefined;
   }
 
   try {
@@ -131,8 +122,20 @@ async function refreshTokenUsage(options: CreateBootstrapServiceOptions): Promis
     });
     return TokenUsageDtoSchema.parse(usage);
   } catch {
-    return TOKEN_USAGE_PLACEHOLDER;
+    return undefined;
   }
+}
+
+function createTokenUsagePlaceholder(agentChatTokenTotal: number): TokenUsageDto {
+  return TokenUsageDtoSchema.parse({
+    planName: "体验 Token",
+    totalTokens: agentChatTokenTotal,
+    usedTokens: 0,
+    remainingTokens: agentChatTokenTotal,
+    expiresAt: null,
+    lastSyncedAt: null,
+    sceneUsages: []
+  });
 }
 
 /** Reads get legal urls. */
@@ -147,7 +150,8 @@ async function getLegalUrls(cloudClient: CloudClient): Promise<LegalAgreementUrl
 const PROMOTIONS_FALLBACK: PromotionFlags = {
   loginBanner: true,
   improvementGift: true,
-  applyMore: true
+  applyMore: true,
+  agentChatTokenTotal: 0
 };
 
 /** Reads get promotions. */

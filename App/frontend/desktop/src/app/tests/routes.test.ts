@@ -77,7 +77,8 @@ const baseBootstrap = AppBootstrapResponseSchema.parse({
   promotions: {
     loginBanner: true,
     improvementGift: true,
-    applyMore: true
+    applyMore: true,
+    agentChatTokenTotal: 2_000_000
   }
 });
 
@@ -307,6 +308,7 @@ describe("desktop route table", () => {
     expect(shouldShowTokenExhaustedModal(zeroTokenAccount)).toBe(true);
     expect(shouldShowTokenExhaustedModal({ ...zeroTokenAccount, app: { ...zeroTokenAccount.app, userMode: "byok" } })).toBe(false);
     expect(shouldShowTokenExhaustedModal({ ...zeroTokenAccount, tokenUsage: { ...zeroTokenAccount.tokenUsage, remainingTokens: 1 } })).toBe(false);
+    expect(shouldShowTokenExhaustedModal({ ...zeroTokenAccount, tokenUsage: { ...zeroTokenAccount.tokenUsage, remainingTokens: -1 } })).toBe(true);
   });
 
   it("restores completed account users from the persisted session on refresh", () => {

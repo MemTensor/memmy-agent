@@ -282,6 +282,7 @@ async function stopPackagedRendererServer(): Promise<void> {
  */
 async function boot(): Promise<void> {
   try {
+    process.env.MEMMY_APP_EDITION = resolveCurrentDesktopEdition();
     initLogger();
     forceLightWindowChrome();
     await writePackagedStartupLog("boot:start");

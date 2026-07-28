@@ -41,8 +41,8 @@ describe("app state store migrations", () => {
     expect(settings.userMode).toBe("unset");
     expect(settings.menuBarIconEnabled).toBe(true);
     expect(agentSources).toEqual([]);
-    expect(firstMigrationCount).toBe(27);
-    expect(secondMigrationCount).toBe(27);
+    expect(firstMigrationCount).toBe(28);
+    expect(secondMigrationCount).toBe(28);
   });
 
   it("preserves the authenticated account when upgrading the legacy 0007 database", () => {
@@ -1892,7 +1892,27 @@ describe("bootstrap repository writes", () => {
       usedTokens: 1000000,
       remainingTokens: 34000000,
       expiresAt: null,
-      lastSyncedAt: "2026-06-05T10:00:00.000Z"
+      lastSyncedAt: "2026-06-05T10:00:00.000Z",
+      sceneUsages: [
+        {
+          scene: "agent_chat",
+          totalTokens: 10000000,
+          usedTokens: 1000000,
+          remainingTokens: 9000000
+        },
+        {
+          scene: "memory_summary",
+          totalTokens: 20000000,
+          usedTokens: 0,
+          remainingTokens: 20000000
+        },
+        {
+          scene: "memory_evolution",
+          totalTokens: 5000000,
+          usedTokens: 0,
+          remainingTokens: 5000000
+        }
+      ]
     });
     const reloaded = store.repositories.bootstrap.getTokenUsage();
     store.close();
@@ -1901,7 +1921,15 @@ describe("bootstrap repository writes", () => {
     expect(reloaded).toMatchObject({
       totalTokens: 35000000,
       remainingTokens: 34000000,
-      lastSyncedAt: "2026-06-05T10:00:00.000Z"
+      lastSyncedAt: "2026-06-05T10:00:00.000Z",
+      sceneUsages: expect.arrayContaining([
+        expect.objectContaining({
+          scene: "agent_chat",
+          totalTokens: 10000000,
+          usedTokens: 1000000,
+          remainingTokens: 9000000
+        })
+      ])
     });
   });
 

@@ -313,6 +313,7 @@ function moveAccountScopedRows(db: DatabaseSync, fromUuid: string, toUuid: strin
     "remaining_tokens",
     "expires_at",
     "last_synced_at",
+    "scene_usages_json",
     "created_at",
     "updated_at"
   ]);

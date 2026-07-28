@@ -1348,6 +1348,7 @@ function tokenUsage(overrides: Partial<TokenUsageDto> = {}): TokenUsageDto {
     remainingTokens: 30000000,
     expiresAt: null,
     lastSyncedAt: null,
+    sceneUsages: [],
     ...overrides
   };
 }

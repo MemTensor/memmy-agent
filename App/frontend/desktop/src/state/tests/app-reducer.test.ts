@@ -44,7 +44,8 @@ const bootstrap = AppBootstrapResponseSchema.parse({
   promotions: {
     loginBanner: true,
     improvementGift: true,
-    applyMore: true
+    applyMore: true,
+    agentChatTokenTotal: 2_000_000
   }
 });
 
@@ -127,7 +128,8 @@ describe("app reducer", () => {
         usedTokens: 1000000,
         remainingTokens: 34000000,
         expiresAt: null,
-        lastSyncedAt: "2026-06-05T10:00:00.000Z"
+        lastSyncedAt: "2026-06-05T10:00:00.000Z",
+        sceneUsages: []
       })
     );
 

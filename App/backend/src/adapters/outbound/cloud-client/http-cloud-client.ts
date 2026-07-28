@@ -19,7 +19,8 @@ import {
   type LegalAgreementUrls,
   type IntegrationToolResult,
   type OkResponse,
-  type PromotionFlags
+  type PromotionFlags,
+  type TokenSceneUsageDto
 } from "@memmy/local-api-contracts";
 import type {
   CloudAuthorizeIntegrationInput,
@@ -425,7 +426,8 @@ async function requestCloudData<T>(
       lang: options.lang,
       ...(options.bearerCredential ? { authorization: `Bearer ${options.bearerCredential}` } : {}),
       ...(options.composioMachineToken ? { "x-memmy-composio-token": options.composioMachineToken } : {}),
-      ...(options.deviceId ? { "x-memmy-device-id": options.deviceId } : {})
+      ...(options.deviceId ? { "x-memmy-device-id": options.deviceId } : {}),
+      "x-agent-region": normalizeAgentRegion(process.env.MEMMY_APP_EDITION)
     },
     body: options.body === undefined ? undefined : JSON.stringify(options.body),
     signal: AbortSignal.timeout(timeoutMs)
@@ -437,6 +439,10 @@ async function requestCloudData<T>(
   }
 
   return envelope.data as T;
+}
+
+function normalizeAgentRegion(value: string | undefined): "cn" | "intl" {
+  return value?.trim().toLowerCase() === "intl" ? "intl" : "cn";
 }
 
 /**
@@ -565,9 +571,28 @@ function toAgentUserInfoTokenUsageSnapshot(data: Record<string, unknown>): Token
     planName: readString(data.planName) ?? readString(data.plan_name) ?? readString(data.planType) ?? readString(data.plan_type) ?? "体验 Token",
     totalTokens: readNonNegativeInteger(data.tokenTotal),
     usedTokens: readNonNegativeInteger(data.tokenConsumer),
-    remainingTokens: readNonNegativeInteger(data.tokenAvailable),
+    remainingTokens: readInteger(data.tokenAvailable),
     expiresAt: readIsoTime(data.expiresAt, data.expires_at, data.expiredAt, data.expired_at),
-    lastSyncedAt: readIsoTime(data.lastSyncedAt, data.last_synced_at, data.updatedAt, data.updated_at) ?? new Date().toISOString()
+    lastSyncedAt: readIsoTime(data.lastSyncedAt, data.last_synced_at, data.updatedAt, data.updated_at) ?? new Date().toISOString(),
+    sceneUsages: toTokenSceneUsages(data.tokenScenes ?? data.token_scenes)
+  });
+}
+
+function toTokenSceneUsages(value: unknown): TokenSceneUsageDto[] {
+  if (!Array.isArray(value)) return [];
+
+  return value.flatMap((item) => {
+    const record = asRecord(item);
+    const scene = readString(record.scene);
+    if (scene !== "agent_chat" && scene !== "memory_summary" && scene !== "memory_evolution") {
+      return [];
+    }
+    return [{
+      scene,
+      totalTokens: readNonNegativeInteger(record.tokenTotal, record.totalTokens),
+      usedTokens: readNonNegativeInteger(record.tokenConsumer, record.usedTokens),
+      remainingTokens: readInteger(record.tokenAvailable, record.remainingTokens)
+    }];
   });
 }
 
@@ -914,6 +939,27 @@ function readNonNegativeInteger(...values: unknown[]): number {
     const parsed = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value.trim()) : Number.NaN;
     if (Number.isFinite(parsed) && parsed >= 0) {
       return Math.floor(parsed);
+    }
+  }
+
+  return 0;
+}
+
+/**
+ * Reads a signed integer from candidate cloud fields.
+ *
+ * @param values fields that may contain a number or a numeric string.
+ * @returns the first finite integer; returns 0 when missing.
+ */
+function readInteger(...values: unknown[]): number {
+  for (const value of values) {
+    const parsed = typeof value === "number"
+      ? value
+      : typeof value === "string" && value.trim()
+        ? Number(value.trim())
+        : Number.NaN;
+    if (Number.isFinite(parsed)) {
+      return Math.trunc(parsed);
     }
   }
 

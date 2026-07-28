@@ -22,7 +22,7 @@ Sign up to get free tokens. Model routing is automatic — start exp
 
 > **Trial credits:**
 
-- **Registration grants 30,000,000 tokens; you can check your remaining balance and usage inside the app.**
+- **Registration grants Agent task trial tokens; the current amount and usage are shown in the app.**
 
 Once the trial credits run out, you can switch to BYOK and use your own model API.
 
@@ -123,7 +123,7 @@ Compared with "personal AI Agents" like Hermes and OpenClaw, what sets
 3. Enter the main workbench and send your first task.
 4. Open "Tools" to connect messaging channels or third-party tools; open "Memory" to scan Agent history sources.
 
-> **Account mode free credits**: signing in grants **30,000,000 (30 million) trial tokens**, so you can get running without your own API Key. You can check used / total / remaining amounts and the expiry date anytime in the app. Once used up or expired, switch to API Key (BYOK) mode and continue with your own quota.
+> **Account mode free credits**: signing in grants Agent task trial tokens, so you can get running without your own API Key. The current amount and usage are shown in the app. Once used up or expired, switch to API Key (BYOK) mode and continue with your own quota.
 
 ### Option 2: `memmy` CLI (Agent Runtime)
 

@@ -63,15 +63,17 @@ interface TokenUsageRow {
   remaining_tokens: number;
   expires_at: string | null;
   last_synced_at: string | null;
+  scene_usages_json: string;
 }
 
 const DEFAULT_TOKEN_USAGE = TokenUsageDtoSchema.parse({
   planName: "体验 Token",
-  totalTokens: 30000000,
+  totalTokens: 0,
   usedTokens: 0,
-  remainingTokens: 30000000,
+  remainingTokens: 0,
   expiresAt: null,
-  lastSyncedAt: null
+  lastSyncedAt: null,
+  sceneUsages: []
 });
 export interface BootstrapRepository {
   getAppSettings(): AppSettingsDto;
@@ -308,7 +310,8 @@ export function createBootstrapRepository(db: DatabaseSync): BootstrapRepository
           used_tokens,
           remaining_tokens,
           expires_at,
-          last_synced_at
+          last_synced_at,
+          scene_usages_json
         FROM account_token_usage_cache
         WHERE uuid = ?`,
         [uuid]
@@ -320,7 +323,8 @@ export function createBootstrapRepository(db: DatabaseSync): BootstrapRepository
         usedTokens: row.used_tokens,
         remainingTokens: row.remaining_tokens,
         expiresAt: row.expires_at,
-        lastSyncedAt: row.last_synced_at
+        lastSyncedAt: row.last_synced_at,
+        sceneUsages: JSON.parse(row.scene_usages_json) as unknown
       });
     },
 
@@ -335,6 +339,7 @@ export function createBootstrapRepository(db: DatabaseSync): BootstrapRepository
           remaining_tokens = ?,
           expires_at = ?,
           last_synced_at = ?,
+          scene_usages_json = ?,
           updated_at = ?
         WHERE uuid = ?`
       ).run(
@@ -344,6 +349,7 @@ export function createBootstrapRepository(db: DatabaseSync): BootstrapRepository
         parsed.remainingTokens,
         parsed.expiresAt,
         parsed.lastSyncedAt,
+        JSON.stringify(parsed.sceneUsages),
         new Date().toISOString(),
         uuid
       );

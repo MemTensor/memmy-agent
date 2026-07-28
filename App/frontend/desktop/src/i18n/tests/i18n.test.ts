@@ -13,6 +13,32 @@ describe("desktop i18n helpers", () => {
     expect(formatMessage("剩余 {count} Token", { count: 30000000 })).toBe("剩余 30000000 Token");
   });
 
+  it("formats the welcome Agent trial quota from runtime values", () => {
+    expect(formatMessage(messageCatalogs["zh-CN"]["welcome.gift"], { count: "2,000,000" }))
+      .toBe("注册即送 2,000,000 Agent 任务体验 Token，开箱即用");
+    expect(formatMessage(messageCatalogs["en-US"]["welcome.gift"], { count: "2,000,000" }))
+      .toBe("Sign up to get 2,000,000 Agent task trial tokens, ready to use");
+  });
+
+  it("localizes the Token gift details in Chinese and English", () => {
+    expect(messageCatalogs["zh-CN"]["welcome.gift.detail.subtitle"])
+      .toBe("额外赠送 2,200 万记忆处理 Token");
+    expect(messageCatalogs["zh-CN"]["welcome.gift.detail.bullet.conversations"])
+      .toBe("可发起约 30 次完整 Agent 对话");
+    expect(messageCatalogs["zh-CN"]["welcome.gift.detail.bullet.memories"])
+      .toBe("可自动整理 5000+ 条历史对话为记忆");
+    expect(messageCatalogs["zh-CN"]["welcome.gift.detail.bullet.features"])
+      .toBe("覆盖全功能");
+    expect(messageCatalogs["en-US"]["welcome.gift.detail.subtitle"])
+      .toBe("Includes an extra 22M tokens for memory processing");
+    expect(messageCatalogs["en-US"]["welcome.gift.detail.bullet.conversations"])
+      .toBe("Start about 30 complete Agent conversations");
+    expect(messageCatalogs["en-US"]["welcome.gift.detail.bullet.memories"])
+      .toBe("Automatically organize 5,000+ historical conversations into memories");
+    expect(messageCatalogs["en-US"]["welcome.gift.detail.bullet.features"])
+      .toBe("Full feature access");
+  });
+
   it("uses native language names for language choices", () => {
     expect(messageCatalogs["en-US"]["settings.general.language.zh"]).toBe("中文");
   });

@@ -102,13 +102,25 @@ export const PrivacySettingsDtoSchema = z.object({
 });
 export type PrivacySettingsDto = z.infer<typeof PrivacySettingsDtoSchema>;
 
+export const TokenUsageSceneSchema = z.enum(["agent_chat", "memory_summary", "memory_evolution"]);
+export type TokenUsageScene = z.infer<typeof TokenUsageSceneSchema>;
+
+export const TokenSceneUsageDtoSchema = z.object({
+    scene: TokenUsageSceneSchema,
+    totalTokens: z.number().int().nonnegative(),
+    usedTokens: z.number().int().nonnegative(),
+    remainingTokens: z.number().int()
+});
+export type TokenSceneUsageDto = z.infer<typeof TokenSceneUsageDtoSchema>;
+
 export const TokenUsageDtoSchema = z.object({
     planName: z.string(),
     totalTokens: z.number().int().nonnegative(),
     usedTokens: z.number().int().nonnegative(),
-    remainingTokens: z.number().int().nonnegative(),
+    remainingTokens: z.number().int(),
     expiresAt: z.string().datetime().nullable(),
-    lastSyncedAt: z.string().datetime().nullable()
+    lastSyncedAt: z.string().datetime().nullable(),
+    sceneUsages: z.array(TokenSceneUsageDtoSchema).default([])
 });
 export type TokenUsageDto = z.infer<typeof TokenUsageDtoSchema>;
 
@@ -487,7 +499,8 @@ export type LegalAgreementUrls = z.infer<typeof LegalAgreementUrlsSchema>;
 export const PromotionFlagsSchema = z.object({
     loginBanner: z.boolean(),
     improvementGift: z.boolean(),
-    applyMore: z.boolean()
+    applyMore: z.boolean(),
+    agentChatTokenTotal: z.number().int().nonnegative()
 });
 export type PromotionFlags = z.infer<typeof PromotionFlagsSchema>;
 

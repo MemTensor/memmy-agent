@@ -348,7 +348,6 @@ describe("SettingsPageView", () => {
     expect(html).toContain("修改昵称");
     expect(html).toContain("Token 用量");
     expect(html).toContain("平台赠送 Token");
-    expect(html).toContain("赠送 Token 永不过期");
     expect(html).toContain("平台赠送大模型");
     expect(html).toContain("自有 API Key");
     expect(html).toContain("查看用量详情");
@@ -847,7 +846,8 @@ function createLowTokenState(applyMore: boolean): AppState {
     promotions: {
       loginBanner: true,
       improvementGift: true,
-      applyMore
+      applyMore,
+      agentChatTokenTotal: mockBootstrap.promotions?.agentChatTokenTotal ?? 0
     }
   };
   const bootstrapped = appReducer(createInitialAppState(), appActions.bootstrapLoaded(lowBootstrap, "/settings"));
@@ -934,7 +934,27 @@ function createAccountModeState(): AppState {
     tokenUsage: {
       ...mockBootstrap.tokenUsage,
       usedTokens: 18_420_000,
-      remainingTokens: 11_580_000
+      remainingTokens: 11_580_000,
+      sceneUsages: [
+        {
+          scene: "agent_chat" as const,
+          totalTokens: 5_000_000,
+          usedTokens: 1_420_000,
+          remainingTokens: 3_580_000
+        },
+        {
+          scene: "memory_summary" as const,
+          totalTokens: 20_000_000,
+          usedTokens: 15_000_000,
+          remainingTokens: 5_000_000
+        },
+        {
+          scene: "memory_evolution" as const,
+          totalTokens: 5_000_000,
+          usedTokens: 2_000_000,
+          remainingTokens: 3_000_000
+        }
+      ]
     }
   };
   const bootstrapped = appReducer(createInitialAppState(), appActions.bootstrapLoaded(accountBootstrap, "/settings"));
@@ -1007,7 +1027,8 @@ function createImprovementBonusState(): AppState {
       usedTokens: 0,
       remainingTokens: 35_000_000,
       expiresAt: null,
-      lastSyncedAt: "2026-06-09T06:36:49.417Z"
+      lastSyncedAt: "2026-06-09T06:36:49.417Z",
+      sceneUsages: []
     })
   );
 }
