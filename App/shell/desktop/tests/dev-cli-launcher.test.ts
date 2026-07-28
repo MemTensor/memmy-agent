@@ -7,6 +7,68 @@ const repoRoot = fileURLToPath(new URL("../../../..", import.meta.url));
 const devStartPath = fileURLToPath(new URL("../../../../scripts/dev-start.sh", import.meta.url));
 
 describe("development CLI launchers", () => {
+  it("defaults development startup to the international edition", () => {
+    const script = String.raw`set -euo pipefail
+source scripts/dev-start.sh
+unset MEMMY_APP_EDITION MEMMY_ACCOUNT_CHANNEL
+
+configure_dev_edition /path/that/does/not/exist
+test "$MEMMY_APP_EDITION" = "intl"
+test "$MEMMY_ACCOUNT_CHANNEL" = "email"`;
+    const result = spawnSync("bash", ["-s"], { cwd: repoRoot, encoding: "utf8", input: script });
+
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+  });
+
+  it("loads the domestic edition from a dotenv file and derives its account channel", () => {
+    const script = String.raw`set -euo pipefail
+source scripts/dev-start.sh
+test_dir="$(mktemp -d)"
+trap 'rm -rf "$test_dir"' EXIT
+printf '%s\n' 'MEMMY_APP_EDITION=cn' > "$test_dir/.env"
+unset MEMMY_APP_EDITION MEMMY_ACCOUNT_CHANNEL
+
+configure_dev_edition "$test_dir/.env"
+test "$MEMMY_APP_EDITION" = "cn"
+test "$MEMMY_ACCOUNT_CHANNEL" = "phone"`;
+    const result = spawnSync("bash", ["-s"], { cwd: repoRoot, encoding: "utf8", input: script });
+
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+  });
+
+  it("rejects an unsupported development edition", () => {
+    const script = String.raw`set -euo pipefail
+source scripts/dev-start.sh
+test_dir="$(mktemp -d)"
+trap 'rm -rf "$test_dir"' EXIT
+printf '%s\n' 'MEMMY_APP_EDITION=staging' > "$test_dir/.env"
+unset MEMMY_APP_EDITION MEMMY_ACCOUNT_CHANNEL
+
+configure_dev_edition "$test_dir/.env"`;
+    const result = spawnSync("bash", ["-s"], { cwd: repoRoot, encoding: "utf8", input: script });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("MEMMY_APP_EDITION must be either cn or intl");
+  });
+
+  it("configures the explicit development edition before starting dependencies", () => {
+    const script = String.raw`set -euo pipefail
+source scripts/dev-start.sh
+export MEMMY_APP_EDITION=cn
+unset MEMMY_ACCOUNT_CHANNEL
+require_command() {
+  channel="$(printenv MEMMY_ACCOUNT_CHANNEL || printf '%s' unset)"
+  printf '%s/%s\n' "$MEMMY_APP_EDITION" "$channel"
+  exit 0
+}
+
+run_main`;
+    const result = spawnSync("bash", ["-s"], { cwd: repoRoot, encoding: "utf8", input: script });
+
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+    expect(result.stdout).toBe("cn/phone\n");
+  });
+
   it("reinstalls memmy-agent dependencies when file validators are missing", () => {
     const script = String.raw`set -euo pipefail
 source scripts/dev-start.sh

@@ -35,6 +35,58 @@ log() {
   printf '[dev-start] %s\n' "$*"
 }
 
+read_dev_edition_from_env_file() {
+  local env_file="$1"
+  local line name value
+
+  [[ -f "$env_file" ]] || return 1
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    if [[ ! "$line" =~ ^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=(.*)$ ]]; then
+      continue
+    fi
+
+    name="${BASH_REMATCH[2]}"
+    [[ "$name" == "MEMMY_APP_EDITION" ]] || continue
+
+    value="${BASH_REMATCH[3]}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    if [[ "$value" == \"*\" && "$value" == *\" ]] || [[ "$value" == \'*\' && "$value" == *\' ]]; then
+      value="${value:1:${#value}-2}"
+    fi
+    printf '%s\n' "$value"
+    return 0
+  done <"$env_file"
+
+  return 1
+}
+
+configure_dev_edition() {
+  local env_file="${1:-$ROOT_DIR/.env}"
+  local edition="${MEMMY_APP_EDITION:-}"
+
+  if [[ -z "$edition" ]]; then
+    edition="$(read_dev_edition_from_env_file "$env_file" || true)"
+  fi
+  edition="${edition:-intl}"
+
+  case "$edition" in
+    cn)
+      export MEMMY_ACCOUNT_CHANNEL="phone"
+      ;;
+    intl)
+      export MEMMY_ACCOUNT_CHANNEL="email"
+      ;;
+    *)
+      printf '[dev-start] MEMMY_APP_EDITION must be either cn or intl; received: %s\n' "$edition" >&2
+      return 1
+      ;;
+  esac
+  export MEMMY_APP_EDITION="$edition"
+}
+
 command_exists() {
   command -v "$1" >/dev/null 2>&1
 }
@@ -497,6 +549,7 @@ run_agent_api() {
 }
 
 run_main() {
+  configure_dev_edition
   require_command node
   require_command npm
   require_command lsof
@@ -506,6 +559,7 @@ run_main() {
   export PATH="$runtime_node_dir:$PATH"
   hash -r
   log "using Node $("$MEMMY_RUNTIME_NODE_PATH" --version) from $MEMMY_RUNTIME_NODE_PATH"
+  log "using desktop edition $MEMMY_APP_EDITION with $MEMMY_ACCOUNT_CHANNEL account channel"
 
   ensure_npm_dependencies
 
