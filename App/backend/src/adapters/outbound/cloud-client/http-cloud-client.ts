@@ -57,6 +57,9 @@ const CLOUD_COMPOSIO_ROUTER_TIMEOUT_MS = 60_000;
 const CLOUD_COMPOSIO_UNAVAILABLE_MESSAGE = "工具连接服务暂时不可用";
 const CLOUD_COMPOSIO_SERVICE_UNAVAILABLE_CODE = 60020;
 const CLOUD_COMPOSIO_TOOLKIT_UNSUPPORTED_CODE = 60021;
+const CLOUD_EMAIL_VERIFICATION_CODE_START = 40110;
+const CLOUD_EMAIL_VERIFICATION_CODE_END = 40120;
+const CLOUD_EMAIL_RATE_LIMIT_CODES = new Set([40112, 40113, 40114, 40115]);
 
 export interface CreateHttpCloudClientOptions {
   /** Base url. */
@@ -92,7 +95,8 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
           zhEnv: input.zhEnv
         },
         lang: langFromZhEnv(input.zhEnv),
-        deviceId
+        deviceId,
+        toError: toCloudEmailVerificationError
       });
     },
 
@@ -116,7 +120,8 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
           loginSource: input.loginSource.toLowerCase()
         },
         lang: "zh",
-        deviceId
+        deviceId,
+        ...(input.email ? { toError: toCloudEmailVerificationError } : {})
       });
 
       const uuid = readString(data.uuid) ?? readString(data.token);
@@ -759,6 +764,27 @@ function toCloudIntegrationError(status: number, envelope: CloudEnvelope): Error
 
   const code = classifyCloudError(status, envelope.code);
   const message = code === "internal" ? CLOUD_COMPOSIO_UNAVAILABLE_MESSAGE : sanitizeMessage(rawMessage);
+  return Object.assign(new Error(message), { code });
+}
+
+/**
+ * Preserves user-facing Cloud errors for email verification flows.
+ *
+ * @param status HTTP status code.
+ * @param envelope Cloud Service response envelope.
+ * @returns an Error recognizable by error-envelope.
+ */
+function toCloudEmailVerificationError(status: number, envelope: CloudEnvelope): Error {
+  const isEmailVerificationError =
+    envelope.code >= CLOUD_EMAIL_VERIFICATION_CODE_START &&
+    envelope.code < CLOUD_EMAIL_VERIFICATION_CODE_END;
+  const code = isEmailVerificationError
+    ? CLOUD_EMAIL_RATE_LIMIT_CODES.has(envelope.code)
+      ? "rate_limited"
+      : "invalid_argument"
+    : classifyCloudError(status, envelope.code);
+  const message = envelope.message || `Cloud email verification request failed with HTTP ${status}`;
+
   return Object.assign(new Error(message), { code });
 }
 

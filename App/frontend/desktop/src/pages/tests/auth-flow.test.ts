@@ -40,11 +40,12 @@ describe("auth flow pages", () => {
     expect(source).toContain('t("login.error.modePersistenceFailed")');
   });
 
-  it("验证码接口错误统一映射为当前语言文案，不直接展示后端 message", () => {
+  it("邮箱验证码业务错误透传云端 message，其他错误继续使用本地文案", () => {
     const hookSource = readFileSync(resolve(__dirname, "../../components/use-phone-auth.ts"), "utf8");
 
-    expect(hookSource).toContain("resolveAuthErrorMessage(error, t,");
-    expect(hookSource).not.toContain("error instanceof Error ? error.message");
+    expect(hookSource).toContain("resolveAuthErrorMessage(error, channel, t,");
+    expect(hookSource).toContain('channel === "email"');
+    expect(hookSource).toContain("error instanceof ApiRequestError");
     expect(hookSource).toContain('"\\u9A8C\\u8BC1\\u7801\\u9519\\u8BEF"');
     expect(hookSource).toContain("invalidCodeBackendMarkers.some((marker) => normalized.includes(marker))");
     expect(hookSource).toContain('t("login.error.invalidCode")');

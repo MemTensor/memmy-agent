@@ -2,6 +2,7 @@
 import type { AccountChannel, AccountSessionView } from "@memmy/local-api-contracts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAnalytics } from "../analytics/use-analytics.js";
+import { ApiRequestError } from "../api/http.js";
 import { useApiClients } from "../app/providers.js";
 import type { MessageKey, MessageValues } from "../i18n/messages.js";
 import { useTranslation } from "../i18n/use-translation.js";
@@ -74,7 +75,12 @@ function resolveIdentifierValidationMessage(channel: AccountChannel, reason: Aut
   return t(reason === "invalidEmail" ? "login.error.invalidEmail" : "login.error.invalidPhone");
 }
 
-function resolveAuthErrorMessage(error: unknown, t: AuthTranslate, fallbackKey: MessageKey): string {
+export function resolveAuthErrorMessage(
+  error: unknown,
+  channel: AccountChannel,
+  t: AuthTranslate,
+  fallbackKey: MessageKey
+): string {
   let rawMessage = "";
 
   if (error instanceof Error) {
@@ -84,6 +90,16 @@ function resolveAuthErrorMessage(error: unknown, t: AuthTranslate, fallbackKey: 
   }
 
   const normalized = rawMessage.trim().toLowerCase();
+
+  if (
+    channel === "email" &&
+    error instanceof ApiRequestError &&
+    error.code !== null &&
+    error.code !== "internal" &&
+    normalized
+  ) {
+    return rawMessage.trim();
+  }
 
   if (invalidCodeBackendMarkers.some((marker) => normalized.includes(marker))) {
     return t("login.error.invalidCode");
@@ -183,7 +199,7 @@ export function usePhoneAuth(): UsePhoneAuthResult {
       if (!isCurrentInteraction(interactionVersion)) {
         return;
       }
-      setFeedback({ text: resolveAuthErrorMessage(error, t, "login.sendCodeFailed"), tone: "error" });
+      setFeedback({ text: resolveAuthErrorMessage(error, channel, t, "login.sendCodeFailed"), tone: "error" });
     } finally {
       if (isCurrentInteraction(interactionVersion)) {
         setSending(false);
@@ -229,7 +245,7 @@ export function usePhoneAuth(): UsePhoneAuthResult {
       if (!isCurrentInteraction(interactionVersion)) {
         return null;
       }
-      setFeedback({ text: resolveAuthErrorMessage(error, t, "login.loginFailed"), tone: "error" });
+      setFeedback({ text: resolveAuthErrorMessage(error, channel, t, "login.loginFailed"), tone: "error" });
       return null;
     } finally {
       if (isCurrentInteraction(interactionVersion)) {

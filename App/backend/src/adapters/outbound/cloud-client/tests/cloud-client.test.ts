@@ -167,6 +167,58 @@ describe("cloud client", () => {
     expect(receivedRegion).toBe("intl");
   });
 
+  it("preserves email verification rate-limit messages as structured errors", async () => {
+    server = createServer((_request, response) => {
+      sendJson(response, {
+        code: 40113,
+        message: "请求过于频繁，请60秒后再试",
+        data: null
+      });
+    });
+    await listen(server);
+    const address = server.address();
+    if (!address || typeof address === "string") {
+      throw new Error("Mock cloud server did not bind to a port");
+    }
+    const client = createHttpCloudClient({
+      baseUrl: `http://127.0.0.1:${address.port}`,
+      timeoutMs: 1000
+    });
+
+    await expect(client.sendEmailCode({ email: "hello@example.com", zhEnv: true })).rejects.toMatchObject({
+      code: "rate_limited",
+      message: "请求过于频繁，请60秒后再试"
+    });
+  });
+
+  it("preserves email login verification messages as structured errors", async () => {
+    server = createServer((_request, response) => {
+      sendJson(response, {
+        code: 40111,
+        message: "验证码错误",
+        data: null
+      });
+    });
+    await listen(server);
+    const address = server.address();
+    if (!address || typeof address === "string") {
+      throw new Error("Mock cloud server did not bind to a port");
+    }
+    const client = createHttpCloudClient({
+      baseUrl: `http://127.0.0.1:${address.port}`,
+      timeoutMs: 1000
+    });
+
+    await expect(client.login({
+      email: "hello@example.com",
+      verificationCode: "654321",
+      loginSource: "Memmy"
+    })).rejects.toMatchObject({
+      code: "invalid_argument",
+      message: "验证码错误"
+    });
+  });
+
   it("maps cloud agent_user phone field to local phoneNumber", async () => {
     server = createServer((request, response) => {
       if (request.url === "/api/agentUser/login") {
