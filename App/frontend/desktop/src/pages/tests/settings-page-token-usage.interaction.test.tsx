@@ -30,7 +30,7 @@ describe("SettingsPage platform scene quota details", () => {
     document.body.replaceChildren();
   });
 
-  it("shows the aggregate on settings and all three scene totals in usage details", () => {
+  it("shows Agent-task quota on settings and scene rows in usage details", () => {
     const bootstrap = {
       ...mockBootstrap,
       app: {
@@ -52,9 +52,9 @@ describe("SettingsPage platform scene quota details", () => {
           },
           {
             scene: "memory_summary" as const,
-            totalTokens: 20_000_000,
-            usedTokens: 15_000_000,
-            remainingTokens: 5_000_000
+            totalTokens: 19_000_000,
+            usedTokens: 14_500_000,
+            remainingTokens: 4_500_000
           },
           {
             scene: "memory_evolution" as const,
@@ -65,6 +65,49 @@ describe("SettingsPage platform scene quota details", () => {
         ]
       }
     };
+    const byokSummary = {
+      inputTokens: 1_950_000,
+      outputTokens: 550_000,
+      totalTokens: 2_500_000,
+      cachedInputTokens: 330_000,
+      cacheCreationInputTokens: 0,
+      updatedAt: "2026-07-28T08:00:00.000Z",
+      byKind: [
+        {
+          kind: "agent_chat" as const,
+          inputTokens: 850_000,
+          outputTokens: 250_000,
+          totalTokens: 1_100_000,
+          cachedInputTokens: 180_000,
+          cacheCreationInputTokens: 0
+        },
+        {
+          kind: "memory_summary" as const,
+          inputTokens: 420_000,
+          outputTokens: 80_000,
+          totalTokens: 500_000,
+          cachedInputTokens: 60_000,
+          cacheCreationInputTokens: 0
+        },
+        {
+          kind: "memory_evolution" as const,
+          inputTokens: 500_000,
+          outputTokens: 220_000,
+          totalTokens: 720_000,
+          cachedInputTokens: 90_000,
+          cacheCreationInputTokens: 0
+        },
+        {
+          kind: "embedding" as const,
+          inputTokens: 180_000,
+          outputTokens: 0,
+          totalTokens: 180_000,
+          cachedInputTokens: 0,
+          cacheCreationInputTokens: 0
+        }
+      ]
+    };
+
     const state = appReducer(
       createInitialAppState(),
       appActions.bootstrapLoaded(bootstrap, "/settings")
@@ -76,6 +119,9 @@ describe("SettingsPage platform scene quota details", () => {
           <SettingsPageView
             state={state}
             dispatch={vi.fn()}
+            byokTokenUsageClient={{
+              getSummary: vi.fn(async () => byokSummary)
+            } as never}
             update={{
               appVersion: "1.0.4",
               phase: "idle",
@@ -89,28 +135,45 @@ describe("SettingsPage platform scene quota details", () => {
       );
     });
 
-    expect(container.textContent).toContain("赠送大模型额度已用 23.0M Token");
-    expect(container.textContent).toContain("共 30.0M Token");
+    expect(container.textContent).toContain("Agent 任务额度已用 6.0M Token");
+    expect(container.textContent).toContain("共 5.0M Token");
 
     const detailsButton = [...container.querySelectorAll("button")]
       .find((button) => button.textContent?.includes("查看用量详情"));
     expect(detailsButton).toBeDefined();
     act(() => detailsButton?.click());
 
-    expect(container.textContent).toContain("平台场景额度");
-    expect(container.textContent).toContain("Agent 任务");
-    expect(container.textContent).toContain("已用 6.0M / 共 5.0M Token");
-    expect(container.textContent).toContain("剩余 -1.0M Token");
-    expect(container.textContent).toContain("记忆摘要");
-    expect(container.textContent).toContain("已用 15.0M / 共 20.0M Token");
-    expect(container.textContent).toContain("记忆进化");
-    expect(container.textContent).toContain("已用 2.0M / 共 5.0M Token");
+    // Wait for BYOK summary load if SettingsPageView fetches on detail open.
+    return Promise.resolve().then(async () => {
+      await act(async () => {
+        await Promise.resolve();
+      });
 
-    const sceneHeading = [...container.querySelectorAll("h2")]
-      .find((heading) => heading.textContent === "平台场景额度");
-    const sceneGrid = sceneHeading?.parentElement?.nextElementSibling;
-    expect(sceneGrid).toBeInstanceOf(HTMLElement);
-    expect(sceneGrid?.className).toContain("sceneGrid");
+      expect(container.textContent).toContain("平台赠送额度");
+      expect(container.textContent).toContain("Agent 任务");
+      expect(container.textContent).toContain("6M/5MToken");
+      expect(container.textContent).toContain("记忆摘要");
+      expect(container.textContent).toContain("14.5M/19MToken");
+      expect(container.textContent).toContain("记忆进化");
+      expect(container.textContent).toContain("2M/5MToken");
+      expect(container.textContent).not.toContain("已用");
+
+      const platformHeading = [...container.querySelectorAll("h2")]
+        .find((heading) => heading.textContent === "平台赠送额度");
+      // Sum of the three scene rows (6 + 14.5 + 2) / (5 + 19 + 5).
+      const platformStats = platformHeading?.parentElement?.querySelector("p");
+      expect(platformStats?.className).toContain("sectionNote");
+      expect(platformStats?.textContent).toBe("22.5M / 29MToken");
+      const platformQuotaList = platformHeading?.parentElement?.nextElementSibling;
+      expect(platformQuotaList).toBeInstanceOf(HTMLElement);
+      expect(platformQuotaList?.className).toContain("platformQuotaList");
+      expect(platformQuotaList?.querySelectorAll("article")).toHaveLength(3);
+      expect(platformQuotaList?.textContent).not.toContain("Embedding");
+
+      const byokHeading = [...container.querySelectorAll("h2")]
+        .find((heading) => heading.textContent === "自有 API Key 消耗");
+      expect(byokHeading).toBeDefined();
+    });
   });
 });
 

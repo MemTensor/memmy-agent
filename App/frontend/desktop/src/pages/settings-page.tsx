@@ -144,27 +144,6 @@ const FALLBACK_TOKEN_USAGE: TokenUsageDto = {
   sceneUsages: []
 };
 
-/**
- * Local-dev stand-in when Cloud has not yet returned sceneUsages.
- *
- * Numbers match the 1.0.4 account-mode fixture (createReadyState): aggregate
- * 18.42M / 30M, and the three scenes Cloud actually budgets. Embedding is not
- * among them — the platform does not grant a complimentary allowance for it.
- */
-const DEV_PLATFORM_TOKEN_USAGE_MOCK: TokenUsageDto = {
-  planName: "Trial Token",
-  totalTokens: 30_000_000,
-  usedTokens: 18_420_000,
-  remainingTokens: 11_580_000,
-  expiresAt: null,
-  lastSyncedAt: null,
-  sceneUsages: [
-    { scene: "agent_chat", totalTokens: 5_000_000, usedTokens: 1_420_000, remainingTokens: 3_580_000 },
-    { scene: "memory_summary", totalTokens: 20_000_000, usedTokens: 15_000_000, remainingTokens: 5_000_000 },
-    { scene: "memory_evolution", totalTokens: 5_000_000, usedTokens: 2_000_000, remainingTokens: 3_000_000 }
-  ]
-};
-
 const EMPTY_BYOK_TOKEN_USAGE: ByokTokenUsageSummary = {
   inputTokens: 0,
   outputTokens: 0,
@@ -369,7 +348,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const modelModeClass = modelMode === "platform" ? "bg-action-sky/10 text-action-sky" : "bg-status-success-soft text-status-success";
   const modelDotClass = modelMode === "platform" ? "bg-action-sky" : "bg-status-success";
   const modelHeaderSpacing = modelMode === "platform" && !showApiConfig ? "" : " mb-4";
-  const tokenUsage = resolveDevPlatformTokenUsage(bootstrap?.tokenUsage ?? FALLBACK_TOKEN_USAGE);
+  const tokenUsage = bootstrap?.tokenUsage ?? FALLBACK_TOKEN_USAGE;
   const giftUsedTokens = tokenUsage.usedTokens;
   // The summary bar tracks Agent 任务 (the task model), not the plan total:
   // that scene is what blocks the user first. Red / "request more" still use
@@ -2100,13 +2079,6 @@ function UsageSectionHead(props: { icon: ReactNode; title: string; stats?: Usage
 }
 
 type UsageStat = { label: string; value: string; unit?: string } | null;
-
-function resolveDevPlatformTokenUsage(usage: TokenUsageDto): TokenUsageDto {
-  if (!import.meta.env.DEV || import.meta.env.MODE === "test" || usage.sceneUsages.length > 0) {
-    return usage;
-  }
-  return DEV_PLATFORM_TOKEN_USAGE_MOCK;
-}
 
 /**
  * Sorts backend-reported usage rows into the canonical scene order.
