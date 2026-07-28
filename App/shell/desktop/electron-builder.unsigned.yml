@@ -17,6 +17,7 @@ asarUnpack:
   - "**/@img/sharp-libvips-darwin-*/lib/libvips*.dylib"
   - "**/@lydell/node-pty-darwin-*/prebuilds/darwin-*/spawn-helper"
   - "**/node_modules/sqlite-vec-*/vec0.*"
+  - "dist/runtime/memmy-agent/node_modules/@memmy/migrations/**"
   - "dist/renderer/**"
 
 extraResources:
