@@ -20,6 +20,12 @@ import {
   RequestContext,
   ToolContext,
 } from "../../../../src/core/agent-runtime/tools/context.js";
+import type {
+  BrowserPreparationState,
+} from "../../../../src/core/agent-runtime/tools/browser-setup.js";
+import {
+  waitForBrowserPreparation,
+} from "../../../../src/core/agent-runtime/tools/browser-preparation-wait.js";
 import { ToolLoader } from "../../../../src/core/agent-runtime/tools/loader.js";
 import { ToolRegistry } from "../../../../src/core/agent-runtime/tools/registry.js";
 
@@ -76,12 +82,15 @@ function browserToolDefinitions(): Array<Record<string, any>> {
   }));
 }
 
-function fakeRuntime(root: string): {
+function fakeRuntime(
+  root: string,
+  { executableReady = true }: { executableReady?: boolean } = {},
+): {
   runtimeLoader: BrowserRuntimeLoader;
   state: FakeRuntimeState;
 } {
   const executablePath = path.join(root, "chromium");
-  fs.writeFileSync(executablePath, "fake", "utf8");
+  if (executableReady) fs.writeFileSync(executablePath, "fake", "utf8");
   const state: FakeRuntimeState = {
     launches: 0,
     contexts: [],
@@ -126,7 +135,11 @@ function fakeRuntime(root: string): {
     createConnection: async (config, contextGetter) => {
       state.connections += 1;
       state.connectionConfigs.push(structuredClone(config ?? {}));
-      const context = await contextGetter!() as any;
+      let contextPromise: Promise<any> | null = null;
+      const getContext = (): Promise<any> => {
+        contextPromise ??= contextGetter!();
+        return contextPromise;
+      };
       const server = new Server(
         { name: "fake-playwright-mcp", version: "1.0.0" },
         { capabilities: { tools: {} } },
@@ -135,6 +148,7 @@ function fakeRuntime(root: string): {
         tools: browserToolDefinitions(),
       }));
       server.setRequestHandler(CallToolRequestSchema, async (request) => {
+        const context = await getContext();
         const name = request.params.name;
         const args = (request.params.arguments ?? {}) as Record<string, any>;
         state.calls.push({ contextId: context.id, name, arguments: args });
@@ -532,6 +546,181 @@ describe("BrowserSessionManager", () => {
       registry,
     );
     expect(registry.toolNames).toEqual([]);
+  });
+
+  it("waits in the original tool call and continues after Chromium becomes ready", async () => {
+    const root = tmpRoot();
+    const executablePath = path.join(root, "chromium");
+    const { runtimeLoader, state } = fakeRuntime(root, { executableReady: false });
+    const preparationStartedAt = new Date().toISOString();
+    let preparationState: BrowserPreparationState = {
+      status: "preparing",
+      updatedAt: preparationStartedAt,
+      startedAt: preparationStartedAt,
+      lastProgressAt: preparationStartedAt,
+      progressPercent: 0,
+    };
+    const manager = new BrowserSessionManager(
+      { enabled: true },
+      {
+        runtimeLoader,
+        preparationStateLoader: () => preparationState,
+      },
+    );
+    managers.push(manager);
+
+    await expect(manager.initialize()).resolves.toBe("preparing");
+    expect(state.launches).toBe(0);
+    const registry = new ToolRegistry();
+    new ToolLoader({ testClasses: [...BROWSER_TOOL_CLASSES] as any }).load(
+      new ToolContext({ browserSessionManager: manager }),
+      registry,
+    );
+    expect(registry.toolNames).toEqual([...BROWSER_TOOL_NAMES].sort());
+    const tool = registry.get("browser_navigate") as BrowserNavigateTool;
+    tool.setContext(new RequestContext({
+      sessionKey: "session",
+      channel: "websocket",
+      chatId: "chat",
+      workspace: root,
+    }));
+
+    let settled = false;
+    const controller = new AbortController();
+    const cancelledExecution = tool.execute(
+      { url: "https://cancelled.example.com" },
+      { abortSignal: controller.signal },
+    );
+    const execution = tool.execute({ url: "https://example.com" }).finally(() => {
+      settled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(settled).toBe(false);
+    controller.abort();
+    await expect(cancelledExecution).rejects.toMatchObject({ name: "AbortError" });
+
+    fs.writeFileSync(executablePath, "fake", "utf8");
+    preparationState = {
+      status: "ready",
+      updatedAt: new Date().toISOString(),
+      executablePath,
+    };
+    await expect(execution).resolves.toEqual([
+      expect.objectContaining({
+        type: "text",
+        text: expect.stringContaining("browser_navigate"),
+      }),
+    ]);
+    expect(manager.capability).toBe("ready");
+    expect(state.launches).toBe(2);
+  });
+
+  it("fails preparation waiting with the recorded unavailable reason", async () => {
+    await expect(waitForBrowserPreparation({
+      loadState: () => ({
+        status: "unavailable",
+        updatedAt: "2026-07-28T00:00:00.000Z",
+        error: "download failed",
+      }),
+      isExecutableReady: () => false,
+    })).rejects.toThrow("浏览器组件准备失败：download failed");
+  });
+
+  it("bounds preparation waiting by inactivity and total duration", async () => {
+    let now = Date.parse("2026-07-28T00:02:01.000Z");
+    const sleep = vi.fn(async () => undefined);
+    await expect(waitForBrowserPreparation({
+      loadState: () => ({
+        status: "preparing",
+        updatedAt: "2026-07-28T00:00:00.000Z",
+        startedAt: "2026-07-28T00:00:00.000Z",
+        lastProgressAt: "2026-07-28T00:00:00.000Z",
+        progressPercent: 0,
+      }),
+      isExecutableReady: () => false,
+      now: () => now,
+      sleep,
+    })).rejects.toThrow("浏览器组件下载无进度，准备失败");
+
+    now = Date.parse("2026-07-28T00:15:01.000Z");
+    await expect(waitForBrowserPreparation({
+      loadState: () => ({
+        status: "preparing",
+        updatedAt: "2026-07-28T00:14:30.000Z",
+        startedAt: "2026-07-28T00:00:00.000Z",
+        lastProgressAt: "2026-07-28T00:14:30.000Z",
+        progressPercent: 90,
+      }),
+      isExecutableReady: () => false,
+      now: () => now,
+      sleep,
+    })).rejects.toThrow("浏览器组件下载超时，准备失败");
+  });
+
+  it("cancels only the waiting browser tool caller", async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(waitForBrowserPreparation({
+      loadState: () => ({
+        status: "preparing",
+        updatedAt: new Date().toISOString(),
+      }),
+      isExecutableReady: () => false,
+      abortSignal: controller.signal,
+    })).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("ignores a stale unavailable state from a previous desktop attempt", async () => {
+    const root = tmpRoot();
+    const executablePath = path.join(root, "chromium");
+    const { runtimeLoader } = fakeRuntime(root, { executableReady: false });
+    let preparationState: BrowserPreparationState = {
+      status: "unavailable",
+      attemptId: "previous-attempt",
+      updatedAt: "2026-07-27T00:00:00.000Z",
+      error: "previous download failed",
+    };
+    const manager = new BrowserSessionManager(
+      { enabled: true },
+      {
+        runtimeLoader,
+        desktopManaged: true,
+        preparationAttemptId: "current-attempt",
+        preparationStateLoader: () => preparationState,
+      },
+    );
+    managers.push(manager);
+
+    await expect(manager.initialize()).resolves.toBe("preparing");
+    const registry = new ToolRegistry();
+    new ToolLoader({ testClasses: [...BROWSER_TOOL_CLASSES] as any }).load(
+      new ToolContext({ browserSessionManager: manager }),
+      registry,
+    );
+    expect(registry.toolNames).toEqual([...BROWSER_TOOL_NAMES].sort());
+    const tool = registry.get("browser_navigate") as BrowserNavigateTool;
+    tool.setContext(new RequestContext({
+      sessionKey: "session",
+      channel: "websocket",
+      chatId: "chat",
+      workspace: root,
+    }));
+    const execution = tool.execute({ url: "https://example.com" });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    fs.writeFileSync(executablePath, "fake", "utf8");
+    preparationState = {
+      status: "ready",
+      attemptId: "current-attempt",
+      updatedAt: new Date().toISOString(),
+      executablePath,
+    };
+    await expect(execution).resolves.toEqual([
+      expect.objectContaining({
+        type: "text",
+        text: expect.stringContaining("browser_navigate"),
+      }),
+    ]);
   });
 });
 

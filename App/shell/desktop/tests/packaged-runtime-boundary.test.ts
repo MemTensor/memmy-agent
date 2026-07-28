@@ -839,11 +839,18 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).toContain('join(dirname(options.agentEntry), "skills")');
     expect(source).toContain('join(options.agentWorkspace, "skills")');
     expect(source).toContain("copyDirectoryContents");
-    expect(source).toContain("await preparePackagedBrowser(entries, runtimeConfig, options)");
+    expect(source).toContain(
+      "browserPreparation = startPackagedBrowserPreparation(",
+    );
+    expect(source).not.toContain("await preparePackagedBrowser(entries, runtimeConfig, options)");
     expect(source).toContain('[entries.agentEntry, "internal", "browser-prepare"]');
-    expect(source.indexOf("await preparePackagedBrowser")).toBeLessThan(
+    expect(source.indexOf("browserPreparation = startPackagedBrowserPreparation")).toBeLessThan(
       source.indexOf("await ensureMemoryService"),
     );
+    expect(source).toContain("browserPreparation?.stop()");
+    expect(source).toContain("terminateProcessTreeSync(child)");
+    expect(source).toContain('detached: process.platform !== "win32"');
+    expect(source).toContain('process.kill(-pid, "SIGKILL")');
     expect(source).toContain('join(options.logDirectory, "browser-prepare.log")');
     expect(source).toContain('ELECTRON_RUN_AS_NODE: "1"');
     expect(source).toContain("await readdir(sourceDirectory, { withFileTypes: true })");
