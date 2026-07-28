@@ -166,7 +166,7 @@ export function TasksSubPage(props: TasksSubPageProps) {
       })
       .catch((error) => {
         if (requestId !== requestIdRef.current) {
-          return;
+          return undefined;
         }
         setState({ status: "error", message: toErrorMessage(error) });
         throw error;

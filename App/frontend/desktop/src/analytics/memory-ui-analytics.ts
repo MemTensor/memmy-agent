@@ -1,8 +1,9 @@
-import type { AgentSourceScanMode } from "@memmy/local-api-contracts";
+import type { AgentSourceScanMode, MemoryApiLogToolName } from "@memmy/local-api-contracts";
 import type {
   MemoryUiAnalyticsEvent,
   MemoryUiDetailOpenedEvent,
   MemoryUiDeletedEvent,
+  MemoryUiEventParams,
   MemoryUiPanelRefreshedEvent,
   MemoryUiSearchSubmittedEvent,
   MemoryUiSourceScanCompletedEvent,
@@ -51,7 +52,7 @@ export function buildMemoryUiFilterLayer(base: string, suffix?: string): string 
 }
 
 export function buildLogsFilterLayer(
-  tool: "" | "memory_add" | "memory_search",
+  tool: "" | MemoryApiLogToolName,
   sourceAgent = ""
 ): string {
   let layer = "logs";
@@ -83,12 +84,12 @@ function buildMemoryUiBaseParams(input: MemoryUiBaseParamsInput): {
   };
 }
 
-function compactAnalyticsParams(
-  params: Record<string, string | number | boolean | undefined>
-): Record<string, string | number | boolean> {
+function compactAnalyticsParams<T extends Record<string, string | number | boolean | undefined>>(
+  params: T
+): { [K in keyof T]-?: Exclude<T[K], undefined> } {
   return Object.fromEntries(
     Object.entries(params).filter((entry): entry is [string, string | number | boolean] => entry[1] !== undefined)
-  );
+  ) as { [K in keyof T]-?: Exclude<T[K], undefined> };
 }
 
 export function buildMemoryUiSearchSubmittedEvent(input: MemoryUiBaseParamsInput & {
@@ -167,7 +168,7 @@ function buildScanEventParams(input: {
   sourceId: string;
   scanMode: AgentSourceScanMode;
   durationMs?: number;
-}): Record<string, string | number | boolean> {
+}): MemoryUiEventParams & { source_id: string; scan_mode: string; duration_ms?: number } {
   return compactAnalyticsParams({
     page_path: input.pagePath,
     sub_page: input.subPage,
@@ -238,7 +239,7 @@ export function buildMemorySourceScanFailedEvent(input: {
 }
 
 export function trackMemoryUiEvent(event: MemoryUiAnalyticsEvent): void {
-  gtagEvent(event.name, event.params);
+  gtagEvent(event.name, event.params as unknown as Record<string, string | number | boolean>);
 }
 
 export function trackAgentSourceScanOutcome(input: {

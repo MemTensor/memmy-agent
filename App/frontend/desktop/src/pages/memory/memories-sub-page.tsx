@@ -150,7 +150,7 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
       })
       .catch((error) => {
         if (requestId !== requestIdRef.current) {
-          return;
+          return undefined;
         }
         setState({ status: "error", message: toErrorMessage(error) });
         throw error;
