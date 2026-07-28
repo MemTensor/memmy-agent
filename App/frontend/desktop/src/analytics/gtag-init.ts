@@ -1,3 +1,4 @@
+import { mergeAnalyticsEventParams } from "./analytics-context.js";
 import { resolveAnalyticsAppEnv, resolveGtagConfigOptions } from "./gtag-config.js";
 
 declare global {
@@ -7,14 +8,14 @@ declare global {
   }
 }
 
-const MEASUREMENT_ID = (import.meta.env.VITE_GA4_MEASUREMENT_ID as string | undefined)?.trim();
+const MEASUREMENT_ID = (import.meta.env.MEMMY_GA4_MEASUREMENT_ID as string | undefined)?.trim();
 
 let initialized = false;
 
 export function initGtag(): void {
   if (initialized) return;
   if (!MEASUREMENT_ID) {
-    console.log("[analytics] initGtag skipped: VITE_GA4_MEASUREMENT_ID not set");
+    console.log("[analytics] initGtag skipped: MEMMY_GA4_MEASUREMENT_ID not set");
     return;
   }
   initialized = true;
@@ -63,10 +64,11 @@ export function gtagEvent(
   name: string,
   params?: Record<string, string | number | boolean>
 ): void {
-  if (!MEASUREMENT_ID || typeof window.gtag !== "function") {
+  if (!MEASUREMENT_ID || typeof window === "undefined" || typeof window.gtag !== "function") {
     console.log("[analytics] gtagEvent skipped (gtag not ready):", name, params);
     return;
   }
-  console.log("[analytics] gtagEvent:", name, params ?? {});
-  window.gtag("event", name, params ?? {});
+  const mergedParams = mergeAnalyticsEventParams(params);
+  console.log("[analytics] gtagEvent:", name, mergedParams);
+  window.gtag("event", name, mergedParams);
 }

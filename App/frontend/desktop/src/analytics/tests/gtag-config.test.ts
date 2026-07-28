@@ -23,7 +23,7 @@ describe("gtag config", () => {
     ).toEqual({
       send_page_view: false,
       app_env: "dev",
-      debug_mode: true
+      debug_mode: 1
     });
 
     expect(
@@ -38,7 +38,7 @@ describe("gtag config", () => {
     ).toEqual({
       send_page_view: false,
       app_env: "prod",
-      debug_mode: true
+      debug_mode: 1
     });
   });
 });

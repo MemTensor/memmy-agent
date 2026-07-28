@@ -1,7 +1,9 @@
 /** App module. */
 import { SseEventSchema, type AccountSessionView, type SseEvent } from "@memmy/local-api-contracts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { setAnalyticsUserMode } from "./analytics/analytics-context.js";
 import { gtagEvent } from "./analytics/gtag-init.js";
+import { trackAgentSourceScanOutcome } from "./analytics/memory-ui-analytics.js";
 import {
   AgentRuntimeBridge,
   createAgentTaskStateCoordinator,
@@ -78,6 +80,10 @@ function RuntimeApp() {
 
   const retry = useCallback(() => setBootKey((value) => value + 1), []);
 
+  useEffect(() => {
+    setAnalyticsUserMode(state.bootstrap?.app.userMode ?? "unset");
+  }, [state.bootstrap?.app.userMode]);
+
   useEffect(() => () => taskStateCoordinator?.dispose(), [taskStateCoordinator]);
 
   useEffect(() => {
@@ -119,6 +125,7 @@ function RuntimeApp() {
           return;
         }
         if (status.completion) {
+          trackAgentSourceScanOutcome(status.completion);
           dispatch(appActions.agentSourceScanCompleted(status.completion));
           scheduleScanCompletionExpiry(status.completion.jobId);
           return;
@@ -179,6 +186,7 @@ function RuntimeApp() {
         }
 
         setClients(clients);
+        setAnalyticsUserMode(effectiveBootstrap.app.userMode);
         dispatch(appActions.bootstrapLoaded(effectiveBootstrap, initialPath));
         if (bootstrap.tokenUsage.totalTokens > 0) {
           const u = bootstrap.tokenUsage;
@@ -194,6 +202,7 @@ function RuntimeApp() {
         if (scanStatus.progress) {
           dispatch(appActions.agentSourceScanProgressReceived(scanStatus.progress));
         } else if (scanStatus.completion) {
+          trackAgentSourceScanOutcome(scanStatus.completion);
           dispatch(appActions.agentSourceScanCompleted(scanStatus.completion));
           scheduleScanCompletionExpiry(scanStatus.completion.jobId);
         }
@@ -233,6 +242,7 @@ function RuntimeApp() {
           }
           const { jobId, sourceId, results: scanResults } = parsed.payload;
           const scanSucceeded = scanResults.every((result) => result.errors.length === 0);
+          trackAgentSourceScanOutcome({ jobId, sourceId, succeeded: scanSucceeded });
           clearMemoryPanelCache();
           dispatch(appActions.agentSourceScanCompleted({ jobId, sourceId, succeeded: scanSucceeded }));
           scheduleScanCompletionExpiry(jobId);

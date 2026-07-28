@@ -306,6 +306,10 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
       formatError: (error) => formatAgentSourceScanRequestError(error, scanSource, t),
       scheduleFallback(callback, delayMs) {
         window.setTimeout(callback, delayMs);
+      },
+      analyticsContext: {
+        pagePath: "/memory/sources",
+        subPage: "sources"
       }
     });
   }
@@ -487,16 +491,16 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
 
     switch (action) {
       case "install_plugin":
-        runSourceAction(clients.agentSources.installPlugin(source.sourceId), source);
+        runSourceAction(clients.agentSources.installPlugin(source.sourceId, { installType: "manual" }), source);
         return;
       case "remove_plugin":
-        runSourceAction(clients.agentSources.uninstallPlugin(source.sourceId), source);
+        runSourceAction(clients.agentSources.uninstallPlugin(source.sourceId, { installType: "manual" }), source);
         return;
       case "install_hook":
-        runSourceAction(clients.agentSources.installPlugin(source.sourceId), source);
+        runSourceAction(clients.agentSources.installPlugin(source.sourceId, { installType: "manual" }), source);
         return;
       case "remove_hook":
-        runSourceAction(clients.agentSources.uninstallPlugin(source.sourceId), source);
+        runSourceAction(clients.agentSources.uninstallPlugin(source.sourceId, { installType: "manual" }), source);
         return;
       case "install_skill":
         runSourceAction(clients.agentSources.installSkill(source.sourceId), source);

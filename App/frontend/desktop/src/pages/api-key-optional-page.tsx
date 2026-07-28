@@ -156,7 +156,7 @@ export function ApiKeyOptionalPage() {
         onboarding: byokCompletion.onboardingPatch
       });
       dispatch(appActions.navigate(byokCompletion.nextRoute));
-      track({ name: "byok_completed", params: {}, consentTier: "basic" });
+      track({ name: "byok_completed", params: { user_mode: "byok" }, consentTier: "basic" });
     } catch (error) {
       console.error("save byok optional model config failed", error);
     } finally {

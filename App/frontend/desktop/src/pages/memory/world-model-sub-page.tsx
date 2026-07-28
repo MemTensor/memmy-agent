@@ -2,6 +2,13 @@
 import { useEffect, useState } from "react";
 import type { GetMemoryOutput, MemoryListItem, PanelItemsOutput } from "@memmy/local-api-contracts";
 import type { MemoryRuntimeClient } from "../../api/memory-runtime-client.js";
+import {
+  buildMemoryUiDeletedEvent,
+  buildMemoryUiDetailOpenedEvent,
+  buildMemoryUiPanelRefreshedEvent,
+  buildMemoryUiSearchSubmittedEvent
+} from "../../analytics/memory-ui-analytics.js";
+import { useAnalytics } from "../../analytics/use-analytics.js";
 import type { MessageKey } from "../../i18n/messages.js";
 import { useTranslation } from "../../i18n/use-translation.js";
 import { ChevronRight, Globe2, Search, X } from "./memory-prototype-icons.js";
@@ -79,13 +86,15 @@ function worldModelCacheKeys(query: string, page: number): string[] {
 /** Handles world model sub page. */
 export function WorldModelSubPage(props: WorldModelSubPageProps) {
   const { t } = useTranslation();
+  const { track } = useAnalytics();
+  const worldModelFilterLayer = "L3";
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
   const [state, setState] = useState<RemoteData<PanelItemsOutput>>({ status: "loading" });
   const [detail, setDetail] = useState<WorldModelDetailState>(null);
   const [selectedWorldModelId, setSelectedWorldModelId] = useState<string | null>(null);
 
-  function search(nextPage = page, options: { useCache?: boolean } = {}): Promise<void> {
+  function search(nextPage = page, options: { useCache?: boolean } = {}): Promise<PanelItemsOutput | undefined> {
     if (!props.client) {
       const message = t("memory.clientNotReady");
       setState({ status: "error", message });
@@ -105,6 +114,7 @@ export function WorldModelSubPage(props: WorldModelSubPageProps) {
       .then((data) => {
         writeMemoryPanelCaches(cacheKeys, data);
         setState({ status: "ready", data });
+        return data;
       })
       .catch((error) => {
         setState({ status: "error", message: toErrorMessage(error) });
@@ -114,6 +124,10 @@ export function WorldModelSubPage(props: WorldModelSubPageProps) {
 
   function openWorldModel(item: MemoryListItem) {
     setSelectedWorldModelId(item.id);
+    track(buildMemoryUiDetailOpenedEvent({
+      subPage: "world-model",
+      filterLayer: worldModelFilterLayer
+    }));
     if (!props.client) {
       setDetail({ status: "error", message: t("memory.clientNotReady") });
       return;
@@ -136,6 +150,10 @@ export function WorldModelSubPage(props: WorldModelSubPageProps) {
     }
 
     await props.client.deleteMemory(id);
+    track(buildMemoryUiDeletedEvent({
+      subPage: "world-model",
+      filterLayer: worldModelFilterLayer
+    }));
     clearMemoryPanelCache();
     closeWorldModel();
     void search(page, { useCache: false }).catch(() => undefined);
@@ -150,7 +168,18 @@ export function WorldModelSubPage(props: WorldModelSubPageProps) {
   function runSearch() {
     closeWorldModel();
     setPage(1);
-    void search(1).catch(() => undefined);
+    void search(1)
+      .then((data) => {
+        if (!data) {
+          return;
+        }
+        track(buildMemoryUiSearchSubmittedEvent({
+          subPage: "world-model",
+          filterLayer: worldModelFilterLayer,
+          resultCount: data.total
+        }));
+      })
+      .catch(() => undefined);
   }
 
   function changePage(nextPage: number) {
@@ -178,7 +207,16 @@ export function WorldModelSubPage(props: WorldModelSubPageProps) {
       onQueryChange={changeQuery}
       onSearch={runSearch}
       onPageChange={changePage}
-      onRefresh={() => search(page, { useCache: false })}
+      onRefresh={async () => {
+        const data = await search(page, { useCache: false });
+        if (data) {
+          track(buildMemoryUiPanelRefreshedEvent({
+            subPage: "world-model",
+            filterLayer: worldModelFilterLayer,
+            resultCount: data.total
+          }));
+        }
+      }}
       onOpenWorldModel={openWorldModel}
       onDeleteWorldModel={deleteWorldModel}
       onCloseWorldModel={closeWorldModel}

@@ -1,4 +1,10 @@
 import type { Config } from "../config/schema.js";
+import {
+  resolveAnalyticsUserModeFromConfig,
+  resolveLiveAnalyticsUserMode,
+  resolveLiveLoggedInAnalyticsUserId,
+  resolveLoggedInAnalyticsUserId,
+} from "../analytics/cloud-analytics.js";
 import { MemmyMemoryClient } from "./client.js";
 import { resolveMemmyMemoryConfig } from "./config.js";
 import { discoverMemmyMemoryConnection } from "./discovery.js";
@@ -9,6 +15,13 @@ export type MemmyMemoryIntegration = {
   enabled: boolean;
   client?: MemmyMemoryClient;
   hook?: MemmyMemoryHook;
+};
+
+export {
+  resolveAnalyticsUserModeFromConfig,
+  resolveLiveAnalyticsUserMode,
+  resolveLiveLoggedInAnalyticsUserId,
+  resolveLoggedInAnalyticsUserId,
 };
 
 export function createMemmyMemoryIntegration(
@@ -22,6 +35,10 @@ export function createMemmyMemoryIntegration(
   const hook = new MemmyMemoryHook(client, {
     workspace: options.workspace ?? null,
     userId: resolved.userId,
+    // Prefer disk config: AgentLoop keeps a cloned in-memory Config that stays
+    // stale after desktop switches account ↔ byok and rewrites config.yaml.
+    getAnalyticsUserId: () => resolveLiveLoggedInAnalyticsUserId(),
+    getAnalyticsUserMode: () => resolveLiveAnalyticsUserMode(),
   });
   void hook.initialize().catch((error) => {
     hook.lastError = error instanceof Error ? error.message : String(error);

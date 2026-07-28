@@ -104,6 +104,7 @@ describe("LogsSubPage", () => {
           onSourceAgentChange={vi.fn()}
           onPageChange={vi.fn()}
           onRefresh={vi.fn()}
+          onOpenDetail={vi.fn()}
         />
       </I18nProvider>
     );
@@ -162,6 +163,7 @@ describe("LogsSubPage", () => {
           onSourceAgentChange={vi.fn()}
           onPageChange={vi.fn()}
           onRefresh={vi.fn()}
+          onOpenDetail={vi.fn()}
         />
       </I18nProvider>
     );
@@ -206,6 +208,7 @@ describe("LogsSubPage", () => {
           onSourceAgentChange={vi.fn()}
           onPageChange={vi.fn()}
           onRefresh={vi.fn()}
+          onOpenDetail={vi.fn()}
         />
       </I18nProvider>
     );
@@ -245,6 +248,7 @@ describe("LogsSubPage", () => {
           onSourceAgentChange={vi.fn()}
           onPageChange={vi.fn()}
           onRefresh={vi.fn()}
+          onOpenDetail={vi.fn()}
         />
       </I18nProvider>
     );
@@ -277,6 +281,7 @@ describe("LogsSubPage", () => {
           onSourceAgentChange={vi.fn()}
           onPageChange={vi.fn()}
           onRefresh={vi.fn()}
+          onOpenDetail={vi.fn()}
         />
       </I18nProvider>
     );
@@ -514,6 +519,7 @@ describe("LogsSubPage", () => {
           onSourceAgentChange={vi.fn()}
           onPageChange={vi.fn()}
           onRefresh={vi.fn()}
+          onOpenDetail={vi.fn()}
         />
       </I18nProvider>
     );
@@ -581,6 +587,7 @@ describe("LogsSubPage", () => {
           onSourceAgentChange={vi.fn()}
           onPageChange={vi.fn()}
           onRefresh={vi.fn()}
+          onOpenDetail={vi.fn()}
         />
       </I18nProvider>
     );
@@ -647,6 +654,7 @@ describe("LogsSubPage", () => {
           onSourceAgentChange={vi.fn()}
           onPageChange={vi.fn()}
           onRefresh={vi.fn()}
+          onOpenDetail={vi.fn()}
         />
       </I18nProvider>
     );
@@ -696,6 +704,7 @@ describe("LogsSubPage", () => {
           onSourceAgentChange={vi.fn()}
           onPageChange={vi.fn()}
           onRefresh={vi.fn()}
+          onOpenDetail={vi.fn()}
         />
       </I18nProvider>
     );
@@ -751,6 +760,7 @@ describe("LogsSubPage", () => {
           onSourceAgentChange={vi.fn()}
           onPageChange={vi.fn()}
           onRefresh={vi.fn()}
+          onOpenDetail={vi.fn()}
         />
       </I18nProvider>
     );
@@ -790,6 +800,7 @@ describe("LogsSubPage", () => {
           onSourceAgentChange={vi.fn()}
           onPageChange={vi.fn()}
           onRefresh={vi.fn()}
+          onOpenDetail={vi.fn()}
         />
       </I18nProvider>
     );

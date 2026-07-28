@@ -1,4 +1,4 @@
-import { createLocalBackend, loadCloudServiceEnv, sendGa4Events, resolveGa4Config, type BootstrapScenario, type LocalBackend } from "@memmy/backend";
+import { createLocalBackend, loadCloudServiceEnv, trackAnalyticsEvent, type BootstrapScenario, type LocalBackend } from "@memmy/backend";
 import { resolveCloudServiceBaseUrl } from "@memmy/local-api-contracts";
 import type {
   DesktopAppInfo,
@@ -86,6 +86,7 @@ import {
   setLogLevel as applyAndPersistLogLevel,
   type LogLevel
 } from "./logger.js";
+import { persistSharedAnalyticsClientId } from "./analytics-client-id-store.js";
 
 let mainWindow: BrowserWindow | null = null;
 let petWindow: BrowserWindow | null = null;
@@ -4395,6 +4396,13 @@ function handleAnalyticsClientId(_event: IpcMainEvent, payload: unknown): void {
   const { clientId, appEnv } = payload as { clientId?: unknown; appEnv?: unknown };
   if (typeof clientId === "string" && clientId) {
     analyticsClientId = clientId;
+    // gtag is the source of truth: always overwrite so CLI picks up reinstall/new IDs.
+    try {
+      const path = persistSharedAnalyticsClientId(clientId);
+      console.log("[analytics] shared client_id persisted:", path);
+    } catch (error) {
+      console.warn("[analytics] failed to persist shared client_id:", error);
+    }
   }
   if (appEnv === "dev" || appEnv === "prod") {
     analyticsAppEnv = appEnv;
@@ -4402,14 +4410,12 @@ function handleAnalyticsClientId(_event: IpcMainEvent, payload: unknown): void {
 }
 
 async function sendAppExitEvent(): Promise<void> {
-  const config = resolveGa4Config();
-  if (!config || !analyticsClientId) return;
+  if (!analyticsClientId) return;
   try {
-    await sendGa4Events({
-      config,
+    await trackAnalyticsEvent({
+      eventName: "app_exit",
       clientId: analyticsClientId,
       appEnv: analyticsAppEnv ?? undefined,
-      events: [{ name: "app_exit" }]
     });
     console.log("[analytics] app_exit sent");
   } catch (error) {

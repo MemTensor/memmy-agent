@@ -1,6 +1,13 @@
 import { useEffect, useState } from "react";
 import type { GetMemoryOutput, MemoryApiLog, MemoryApiLogToolName, PanelItemsOutput } from "@memmy/local-api-contracts";
 import type { MemoryRuntimeClient } from "../../api/memory-runtime-client.js";
+import {
+  buildMemoryUiDeletedEvent,
+  buildMemoryUiDetailOpenedEvent,
+  buildMemoryUiPanelRefreshedEvent,
+  buildMemoryUiSearchSubmittedEvent
+} from "../../analytics/memory-ui-analytics.js";
+import { useAnalytics } from "../../analytics/use-analytics.js";
 import type { MessageKey } from "../../i18n/messages.js";
 import { useTranslation } from "../../i18n/use-translation.js";
 import { ChevronRight, Search, Wand2, X } from "./memory-prototype-icons.js";
@@ -106,6 +113,8 @@ function skillsCacheKeys(query: string, page: number): string[] {
 
 export function SkillsSubPage(props: SkillsSubPageProps) {
   const { t } = useTranslation();
+  const { track } = useAnalytics();
+  const skillsFilterLayer = "Skill";
   const demoEnabled = isSkillsDemoEnabled();
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
@@ -115,6 +124,10 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
 
   function openSkill(skillId: string) {
     setSelectedSkillId(skillId);
+    track(buildMemoryUiDetailOpenedEvent({
+      subPage: "skills",
+      filterLayer: skillsFilterLayer
+    }));
     if (demoEnabled) {
       const skillDetail = demoSkillDetail(skillId);
       if (!skillDetail) {
@@ -140,7 +153,7 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
       .catch((error) => setDetail({ status: "error", message: toMemoryDetailErrorMessage(error, t("memory.detailUnavailable")) }));
   }
 
-  function refresh(nextPage = page, options: { useCache?: boolean } = {}): Promise<void> {
+  function refresh(nextPage = page, options: { useCache?: boolean } = {}): Promise<PanelItemsOutput | undefined> {
     const normalizedPage = normalizePage(nextPage);
 
     if (demoEnabled) {
@@ -154,7 +167,7 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
           setDetail({ status: "ready", data: { detail: firstDetail, timeline: demoSkillTimeline(firstSkill.id) } });
         }
       }
-      return Promise.resolve();
+      return Promise.resolve(data);
     }
 
     if (!props.client) {
@@ -175,6 +188,7 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
       .then((data) => {
         writeMemoryPanelCaches(cacheKeys, data);
         setState({ status: "ready", data });
+        return data;
       })
       .catch((error) => {
         setState({ status: "error", message: toErrorMessage(error) });
@@ -191,7 +205,18 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
   function runSearch() {
     closeSkill();
     setPage(1);
-    void refresh(1).catch(() => undefined);
+    void refresh(1)
+      .then((data) => {
+        if (!data) {
+          return;
+        }
+        track(buildMemoryUiSearchSubmittedEvent({
+          subPage: "skills",
+          filterLayer: skillsFilterLayer,
+          resultCount: data.total
+        }));
+      })
+      .catch(() => undefined);
   }
 
   function changePage(nextPage: number) {
@@ -221,6 +246,10 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
     }
 
     await props.client.deleteMemory(id);
+    track(buildMemoryUiDeletedEvent({
+      subPage: "skills",
+      filterLayer: skillsFilterLayer
+    }));
     clearMemoryPanelCache();
     closeSkill();
     void refresh(page, { useCache: false }).catch(() => undefined);
@@ -239,7 +268,16 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
       onQueryChange={changeQuery}
       onSearch={runSearch}
       onPageChange={changePage}
-      onRefresh={() => refresh(page, { useCache: false })}
+      onRefresh={async () => {
+        const data = await refresh(page, { useCache: false });
+        if (data) {
+          track(buildMemoryUiPanelRefreshedEvent({
+            subPage: "skills",
+            filterLayer: skillsFilterLayer,
+            resultCount: data.total
+          }));
+        }
+      }}
       onOpenSkill={openSkill}
       onDeleteSkill={deleteSkill}
       onCloseSkill={closeSkill}

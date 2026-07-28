@@ -17,6 +17,13 @@ import { createAgentSourceRepository, type AgentSourceRepository } from "../../i
 import { createMockMemoryClient } from "../../tests/support/mock-memory-client.js";
 import type { IngestionService } from "../ingestion-service.js";
 import { createAgentSourceService, type AgentSourceService } from "../agent-source-service.js";
+import {
+  AGENT_SOURCE_ANALYTICS_EVENTS,
+  buildAgentSourceConflictParams,
+  buildAgentSourcePluginLifecycleParams,
+  buildAgentSourceSkillLifecycleParams,
+  type AgentSourceLifecycleAnalytics,
+} from "../../analytics/agent-source-analytics.js";
 import type { SkillDistributionService } from "../skill-distribution-service.js";
 
 let db: DatabaseSync | undefined;
@@ -1032,6 +1039,171 @@ describe("agent source service", () => {
       }
     ]);
   });
+
+  it("emits agent source lifecycle and conflict analytics", async () => {
+    const repository = createRepository();
+    repository.upsertSource({
+      sourceId: "cursor",
+      displayName: "Cursor",
+      dataPath: "/tmp/cursor",
+      builtin: true
+    });
+    const analytics = createAgentSourceAnalyticsRecorder();
+    const service = createService({
+      repository,
+      adapters: [createFakeAdapter("cursor")],
+      agentSourceAnalytics: analytics.recorder,
+      getScanPermission: async () => "scan_and_write_skill",
+      skillDistributionService: {
+        async install() {
+          return undefined;
+        },
+        async uninstall() {
+          return undefined;
+        },
+        async installPlugin() {
+          return undefined;
+        },
+        async uninstallPlugin() {
+          return undefined;
+        },
+        async detectMemoryPluginConflicts() {
+          return [
+            {
+              sourceId: "openclaw",
+              displayName: "OpenClaw",
+              configPath: "/tmp/openclaw/openclaw.json",
+              installedPluginId: "memory-core"
+            }
+          ];
+        }
+      }
+    });
+
+    await service.installPlugin("cursor", { installType: "manual" });
+    await service.uninstallPlugin("cursor", { installType: "manual" });
+    await service.detectMemoryPluginConflicts();
+
+    expect(analytics.events.map((event) => event.eventName)).toEqual([
+      AGENT_SOURCE_ANALYTICS_EVENTS.pluginInstalled,
+      AGENT_SOURCE_ANALYTICS_EVENTS.pluginUninstalled,
+      AGENT_SOURCE_ANALYTICS_EVENTS.pluginConflictDetected,
+    ]);
+    expect(analytics.events[0]?.params).toMatchObject({
+      source_id: "cursor",
+      source_kind: "hook",
+      permission: "scan_and_write_skill",
+      status_before: "not_connected",
+      status_after: "plugin_installed",
+      install_type: "manual",
+      success: true,
+    });
+    expect(analytics.events[1]?.params).toMatchObject({
+      source_id: "cursor",
+      status_after: "not_connected",
+      success: true,
+    });
+    expect(analytics.events[2]?.params).toMatchObject({
+      source_id: "openclaw",
+      source_kind: "native_plugin",
+      permission: "scan_and_write_skill",
+      installed_plugin_id: "memory-core",
+    });
+  });
+
+  it("emits skill install analytics", async () => {
+    const repository = createRepository();
+    repository.upsertSource({
+      sourceId: "workbuddy",
+      displayName: "WorkBuddy",
+      dataPath: "/tmp/workbuddy",
+      builtin: true,
+      status: "not_connected",
+    });
+    const analytics = createAgentSourceAnalyticsRecorder();
+    const service = createService({
+      repository,
+      adapters: [createFakeAdapter("workbuddy")],
+      agentSourceAnalytics: analytics.recorder,
+      getScanPermission: async () => "scan_only",
+      skillDistributionService: {
+        async install() {
+          return undefined;
+        },
+        async uninstall() {
+          return undefined;
+        },
+        async installPlugin() {
+          return undefined;
+        },
+        async uninstallPlugin() {
+          return undefined;
+        },
+      },
+    });
+
+    await service.installSkill("workbuddy");
+
+    expect(analytics.events).toHaveLength(1);
+    expect(analytics.events[0]).toMatchObject({
+      eventName: AGENT_SOURCE_ANALYTICS_EVENTS.skillInstalled,
+      params: {
+        source_id: "workbuddy",
+        source_kind: "skill",
+        permission: "scan_only",
+        status_before: "not_connected",
+        status_after: "skill_installed",
+        success: true,
+      },
+    });
+  });
+
+  it("emits failed plugin install analytics before rethrowing", async () => {
+    const repository = createRepository();
+    repository.upsertSource({
+      sourceId: "cursor",
+      displayName: "Cursor",
+      dataPath: "/tmp/cursor",
+      builtin: true
+    });
+    const analytics = createAgentSourceAnalyticsRecorder();
+    const service = createService({
+      repository,
+      adapters: [createFakeAdapter("cursor")],
+      agentSourceAnalytics: analytics.recorder,
+      getScanPermission: async () => "scan_and_write_skill",
+      skillDistributionService: {
+        async install() {
+          return undefined;
+        },
+        async uninstall() {
+          return undefined;
+        },
+        async installPlugin() {
+          throw new Error("install failed");
+        },
+        async uninstallPlugin() {
+          return undefined;
+        }
+      }
+    });
+
+    await expect(service.installPlugin("cursor", { installType: "auto_inject" })).rejects.toThrow("install failed");
+    expect(analytics.events).toHaveLength(1);
+    expect(analytics.events[0]).toMatchObject({
+      eventName: AGENT_SOURCE_ANALYTICS_EVENTS.pluginInstalled,
+      params: {
+        source_id: "cursor",
+        source_kind: "hook",
+        permission: "scan_and_write_skill",
+        status_before: "not_connected",
+        status_after: "not_connected",
+        install_type: "auto_inject",
+        success: false,
+        error_code: "install failed",
+      },
+    });
+  });
 });
 
 function createService(
@@ -1041,6 +1213,8 @@ function createService(
     ingestionService?: IngestionService;
     skillDistributionService?: SkillDistributionService;
     memoryClient?: MemoryClient;
+    agentSourceAnalytics?: AgentSourceLifecycleAnalytics;
+    getScanPermission?: () => Promise<import("@memmy/local-api-contracts").ScanPermission>;
   } = {}
 ): AgentSourceService {
   return createAgentSourceService({
@@ -1048,6 +1222,8 @@ function createService(
     agentSourceRepository: options.repository ?? createRepository(),
     ingestionService: options.ingestionService ?? createFakeIngestionService(),
     memoryClient: options.memoryClient ?? createMockMemoryClient(),
+    agentSourceAnalytics: options.agentSourceAnalytics,
+    getScanPermission: options.getScanPermission,
     skillDistributionService:
       options.skillDistributionService ??
       ({
@@ -1257,4 +1433,49 @@ function createIncompleteUserMessages(sourceId: string, count: number, newestAt:
 
 function expectMemoryCount(messages: readonly ConversationMessage[] | undefined, expected: number): void {
   expect(messages?.filter((message) => message.role === "user")).toHaveLength(expected);
+}
+
+function createAgentSourceAnalyticsRecorder(): {
+  recorder: AgentSourceLifecycleAnalytics;
+  events: Array<{ eventName: string; params: Record<string, unknown> }>;
+} {
+  const events: Array<{ eventName: string; params: Record<string, unknown> }> = [];
+  return {
+    events,
+    recorder: {
+      trackPluginInstalled(input) {
+        events.push({
+          eventName: AGENT_SOURCE_ANALYTICS_EVENTS.pluginInstalled,
+          params: buildAgentSourcePluginLifecycleParams(input),
+        });
+      },
+      trackPluginUninstalled(input) {
+        events.push({
+          eventName: AGENT_SOURCE_ANALYTICS_EVENTS.pluginUninstalled,
+          params: buildAgentSourcePluginLifecycleParams(input),
+        });
+      },
+      trackSkillInstalled(input) {
+        events.push({
+          eventName: AGENT_SOURCE_ANALYTICS_EVENTS.skillInstalled,
+          params: buildAgentSourceSkillLifecycleParams(input),
+        });
+      },
+      trackSkillUninstalled(input) {
+        events.push({
+          eventName: AGENT_SOURCE_ANALYTICS_EVENTS.skillUninstalled,
+          params: buildAgentSourceSkillLifecycleParams(input),
+        });
+      },
+      trackPluginConflictDetected(input) {
+        events.push({
+          eventName: AGENT_SOURCE_ANALYTICS_EVENTS.pluginConflictDetected,
+          params: buildAgentSourceConflictParams(input),
+        });
+      },
+      async flush() {
+        return undefined;
+      },
+    },
+  };
 }

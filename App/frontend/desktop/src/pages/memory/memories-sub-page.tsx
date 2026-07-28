@@ -1,6 +1,14 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { GetMemoryOutput, MemoryProcessingRecord, PanelItemsInput, PanelItemsOutput } from "@memmy/local-api-contracts";
 import type { MemoryRuntimeClient } from "../../api/memory-runtime-client.js";
+import {
+  buildMemoryUiDeletedEvent,
+  buildMemoryUiDetailOpenedEvent,
+  buildMemoryUiFilterLayer,
+  buildMemoryUiPanelRefreshedEvent,
+  buildMemoryUiSearchSubmittedEvent
+} from "../../analytics/memory-ui-analytics.js";
+import { useAnalytics } from "../../analytics/use-analytics.js";
 import { ApiRequestError } from "../../api/http.js";
 import type { MessageKey } from "../../i18n/messages.js";
 import { useTranslation } from "../../i18n/use-translation.js";
@@ -96,6 +104,8 @@ function memoriesCacheKeys(query: string, sourceAgent: string, page: number): st
 
 export function MemoriesSubPage(props: MemoriesSubPageProps) {
   const { t } = useTranslation();
+  const { track } = useAnalytics();
+  const memoriesFilterLayer = (sourceAgent = "") => buildMemoryUiFilterLayer("L1", sourceAgent || undefined);
   const [query, setQuery] = useState("");
   const [sourceAgent, setSourceAgent] = useState("");
   const [page, setPage] = useState(1);
@@ -108,7 +118,7 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
   const retryRequestIdRef = useRef(0);
   const retryResetTimerRef = useRef<number | null>(null);
 
-  function refresh(nextPage = page, nextSourceAgent = sourceAgent, options: { useCache?: boolean } = {}): Promise<void> {
+  function refresh(nextPage = page, nextSourceAgent = sourceAgent, options: { useCache?: boolean } = {}): Promise<PanelItemsOutput | undefined> {
     if (!props.client) {
       const message = t("memory.clientNotReady");
       setState({ status: "error", message });
@@ -130,12 +140,13 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
       .then((data) => {
         writeMemoryPanelCaches(cacheKeys, data);
         if (requestId !== requestIdRef.current) {
-          return;
+          return undefined;
         }
         setState({ status: "ready", data });
         if (data.page !== normalizedPage) {
           setPage(data.page);
         }
+        return data;
       })
       .catch((error) => {
         if (requestId !== requestIdRef.current) {
@@ -159,7 +170,18 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
     setDetail(null);
     setSelectedMemoryId(null);
     setPage(1);
-    void refresh(1).catch(() => undefined);
+    void refresh(1)
+      .then((data) => {
+        if (!data) {
+          return;
+        }
+        track(buildMemoryUiSearchSubmittedEvent({
+          subPage: "memories",
+          filterLayer: memoriesFilterLayer(sourceAgent),
+          resultCount: data.total
+        }));
+      })
+      .catch(() => undefined);
   }
 
   function changeSourceAgent(value: string) {
@@ -185,6 +207,10 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
   function openDetail(item: PanelItemsOutput["items"][number]) {
     const requestId = ++detailRequestIdRef.current;
     setSelectedMemoryId(item.id);
+    track(buildMemoryUiDetailOpenedEvent({
+      subPage: "memories",
+      filterLayer: memoriesFilterLayer(sourceAgent)
+    }));
 
     if (!props.client) {
       setDetail({ status: "error", message: t("memory.clientNotReady") });
@@ -211,6 +237,10 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
     }
 
     await props.client.deleteMemory(id);
+    track(buildMemoryUiDeletedEvent({
+      subPage: "memories",
+      filterLayer: memoriesFilterLayer(sourceAgent)
+    }));
     detailRequestIdRef.current += 1;
     clearMemoryPanelCache();
     setDetail(null);
@@ -328,7 +358,16 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
       onSourceAgentChange={changeSourceAgent}
       onSearch={runSearch}
       onPageChange={changePage}
-      onRefresh={() => refresh(page, sourceAgent, { useCache: false })}
+      onRefresh={async () => {
+        const data = await refresh(page, sourceAgent, { useCache: false });
+        if (data) {
+          track(buildMemoryUiPanelRefreshedEvent({
+            subPage: "memories",
+            filterLayer: memoriesFilterLayer(sourceAgent),
+            resultCount: data.total
+          }));
+        }
+      }}
       onOpenDetail={openDetail}
       onDeleteDetail={deleteMemoryDetail}
       onRetryProcessing={retryMemoryProcessing}

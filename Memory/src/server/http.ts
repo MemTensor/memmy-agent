@@ -18,6 +18,16 @@ import type {
 import { DEFAULT_NAMESPACE_SOURCE } from "../types.js";
 import { MemoryService } from "../service/memory-service.js";
 import { MemoryServiceError, statusForCode } from "../utils/error.js";
+import {
+  createPluginRuntimeAnalytics,
+  hitCountFromGetResponse,
+  hitCountFromSearchResponse,
+  storedCountFromAddResponse,
+  trackExternalHookCapture,
+  trackExternalHookRecall,
+  trackExternalToolCall,
+  type PluginRuntimeAnalytics,
+} from "./plugin-runtime-analytics.js";
 
 const logger = createMemoryLogger("http");
 const workerLogger = createMemoryLogger("worker");
@@ -53,6 +63,7 @@ export interface MemoryHttpServerOptions {
   workerStartupFallbackMs?: number;
   workerPostHealthDelayMs?: number;
   onShutdownRequested?: () => void;
+  pluginRuntimeAnalytics?: PluginRuntimeAnalytics;
 }
 
 export interface MemoryHttpAuthOptions {
@@ -88,6 +99,7 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
     startupFallbackMs: options.workerStartupFallbackMs ?? DEFAULT_WORKER_STARTUP_FALLBACK_MS,
     postHealthDelayMs: options.workerPostHealthDelayMs ?? DEFAULT_WORKER_POST_HEALTH_DELAY_MS
   });
+  const pluginRuntimeAnalytics = options.pluginRuntimeAnalytics ?? createPluginRuntimeAnalytics();
   const server = createServer(async (request, response) => {
     const startedAt = Date.now();
     const requestId = requestIdFromHeaders(request) ?? randomUUID();
@@ -120,7 +132,8 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
         url,
         body,
         principal,
-        Boolean(options.onShutdownRequested)
+        Boolean(options.onShutdownRequested),
+        pluginRuntimeAnalytics
       );
       if (request.method === "POST" && url.pathname === "/api/v1/admin/shutdown") {
         response.once("finish", () => options.onShutdownRequested?.());
@@ -354,7 +367,8 @@ async function routeRequest(
   url: URL,
   body: unknown,
   principal: AuthPrincipal,
-  canShutdown: boolean
+  canShutdown: boolean,
+  pluginRuntimeAnalytics: PluginRuntimeAnalytics
 ): Promise<unknown> {
   const path = url.pathname;
 
@@ -427,7 +441,9 @@ async function routeRequest(
       contextHints: request.contextHints,
       contextBudget: request.contextBudget
     };
-    const result = await service.startTurn(publicRequest as TurnStartRequest & Record<string, unknown>);
+    const result = await trackExternalHookRecall(pluginRuntimeAnalytics, request, () =>
+      service.startTurn(publicRequest as TurnStartRequest & Record<string, unknown>)
+    );
     scheduleAutoWorkerForEvolution(result, autoWorker);
     return publicStartTurnResponse(result);
   }
@@ -439,6 +455,7 @@ async function routeRequest(
     requireStringField(request, "sessionId", "turn.complete");
     requireStringField(request, "query", "turn.complete");
     requireStringField(request, "answer", "turn.complete");
+    const turnId = decodeMatchSegment(turnComplete, 1);
     const publicRequest: TurnCompleteRequest = {
       requestId: request.requestId,
       adapterId: request.adapterId,
@@ -456,9 +473,15 @@ async function routeRequest(
       usage: request.usage,
       status: request.status
     };
-    const result = service.completeTurn(
-      decodeMatchSegment(turnComplete, 1),
-      publicRequest as TurnCompleteRequest & Record<string, unknown>
+    const result = await trackExternalHookCapture(
+      pluginRuntimeAnalytics,
+      { ...request, turnId },
+      request,
+      () =>
+        service.completeTurn(
+          turnId,
+          publicRequest as TurnCompleteRequest & Record<string, unknown>
+        )
     );
     scheduleAutoWorkerForEvolution(result, autoWorker);
     return publicCompleteTurnResponse(result);
@@ -485,8 +508,14 @@ async function routeRequest(
       includeInjectedContext: typeof request.includeInjectedContext === "boolean" ? request.includeInjectedContext : undefined,
       verbose: request.verbose === true
     };
-    return publicSearchResponse(await service.idempotent("memory.search", publicRequest, { path, request: publicRequest }, () =>
-      service.search(publicRequest)
+    return publicSearchResponse(await trackExternalToolCall(
+      pluginRuntimeAnalytics,
+      { ...request, toolName: "memmy_memory_search" },
+      () =>
+        service.idempotent("memory.search", publicRequest, { path, request: publicRequest }, () =>
+          service.search(publicRequest)
+        ),
+      (result) => ({ hit_count: hitCountFromSearchResponse(result) }),
     ));
   }
 
@@ -508,8 +537,17 @@ async function routeRequest(
       createdAt: typeof request.createdAt === "string" ? request.createdAt : undefined,
       deferProcessing: request.deferProcessing === true
     };
-    const result = await service.idempotent("memory.add", publicRequest, { path, request: publicRequest }, () =>
-      service.addMemory(publicRequest)
+    const result = await trackExternalToolCall(
+      pluginRuntimeAnalytics,
+      { ...request, toolName: "memmy_memory_add" },
+      () =>
+        service.idempotent("memory.add", publicRequest, { path, request: publicRequest }, () =>
+          service.addMemory(publicRequest)
+        ),
+      (addResult) => ({
+        stored_count: storedCountFromAddResponse(addResult),
+        ...(publicRequest.layer ? { layer: publicRequest.layer } : {}),
+      }),
     );
     if (!publicRequest.deferProcessing) {
       autoWorker.schedule();
@@ -623,9 +661,20 @@ async function routeRequest(
   const memoryGet = match(path, /^\/api\/v1\/memory\/([^/]+)$/);
   if (method === "GET" && memoryGet) {
     requireMemoryRead(principal);
-    return service.getMemory(
-      decodeMatchSegment(memoryGet, 1),
-      { namespace: principal.namespace }
+    return trackExternalToolCall(
+      pluginRuntimeAnalytics,
+      {
+        source: url.searchParams.get("source") ?? undefined,
+        adapterId: url.searchParams.get("adapterId") ?? undefined,
+        namespace: principal.namespace,
+        toolName: "memmy_memory_get",
+      },
+      () =>
+        service.getMemory(
+          decodeMatchSegment(memoryGet, 1),
+          { namespace: principal.namespace }
+        ),
+      (result) => ({ hit_count: hitCountFromGetResponse(result) }),
     );
   }
 

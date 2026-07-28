@@ -292,6 +292,12 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).not.toContain("startDesktopRuntimeServices");
   });
 
+  it("persists gtag client_id into the shared ~/.memmy analytics-client-id file", () => {
+    const mainSource = readFileSync(mainSourcePath, "utf8");
+    expect(mainSource).toContain('import { persistSharedAnalyticsClientId } from "./analytics-client-id-store.js"');
+    expect(mainSource).toContain("persistSharedAnalyticsClientId(clientId)");
+  });
+
   it("omits empty agent gateway bootstrap secrets in development runtime config", () => {
     const mainSource = readFileSync(mainSourcePath, "utf8");
     const contractsSource = readFileSync(localApiContractsPath, "utf8");

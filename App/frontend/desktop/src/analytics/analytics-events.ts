@@ -77,6 +77,67 @@ export interface ImprovementLogEvent {
   consentTier: "improvement";
 }
 
+export interface MemoryUiEventParams {
+  page_path: string;
+  sub_page: string;
+  filter_layer: string;
+  result_count?: number;
+  source_id?: string;
+  scan_mode?: string;
+  duration_ms?: number;
+}
+
+export interface MemoryUiSearchSubmittedEvent {
+  name: "memory_ui_search_submitted";
+  params: MemoryUiEventParams & { result_count: number };
+  consentTier: "basic";
+}
+
+export interface MemoryUiDetailOpenedEvent {
+  name: "memory_detail_opened";
+  params: MemoryUiEventParams;
+  consentTier: "basic";
+}
+
+export interface MemoryUiDeletedEvent {
+  name: "memory_deleted";
+  params: MemoryUiEventParams;
+  consentTier: "basic";
+}
+
+export interface MemoryUiPanelRefreshedEvent {
+  name: "memory_panel_refreshed";
+  params: MemoryUiEventParams & { result_count: number };
+  consentTier: "basic";
+}
+
+export interface MemoryUiSourceScanStartedEvent {
+  name: "memory_source_scan_started";
+  params: MemoryUiEventParams & { source_id: string; scan_mode: string };
+  consentTier: "basic";
+}
+
+export interface MemoryUiSourceScanCompletedEvent {
+  name: "memory_source_scan_completed";
+  params: MemoryUiEventParams & { source_id: string; scan_mode: string; duration_ms?: number };
+  consentTier: "basic";
+}
+
+export interface MemoryUiSourceScanFailedEvent {
+  name: "memory_source_scan_failed";
+  params: MemoryUiEventParams & { source_id: string; scan_mode: string; duration_ms?: number };
+  consentTier: "basic";
+}
+
+export type MemoryUiAnalyticsEvent =
+  | MemoryUiSearchSubmittedEvent
+  | MemoryUiDetailOpenedEvent
+  | MemoryUiDeletedEvent
+  | MemoryUiPanelRefreshedEvent
+  | MemoryUiSourceScanStartedEvent
+  | MemoryUiSourceScanCompletedEvent
+  | MemoryUiSourceScanFailedEvent;
+
 export type AnalyticsEvent =
   | PageViewEvent
   | FeatureEvent
@@ -87,4 +148,5 @@ export type AnalyticsEvent =
   | OnboardingStepCompletedEvent
   | OnboardingCompletedEvent
   | TokenUsageSnapshotEvent
-  | ImprovementLogEvent;
+  | ImprovementLogEvent
+  | MemoryUiAnalyticsEvent;

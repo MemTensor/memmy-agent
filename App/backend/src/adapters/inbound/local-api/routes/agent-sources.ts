@@ -4,6 +4,7 @@ import {
   AgentSourceAutoInjectResultSchema,
   AgentSourceIdParamsSchema,
   AgentSourceMemoryPluginConflictsResponseSchema,
+  AgentSourcePluginActionInputSchema,
   AgentSourceScanInputSchema,
   AgentSourceScanJobResponseSchema,
   AgentSourceScanStatusResponseSchema,
@@ -294,7 +295,8 @@ export function registerAgentSourceRoutes(app: FastifyInstance, options: Registe
     { preHandler: options.authenticateRuntimeToken },
     withErrorEnvelope(async (request, reply) => {
       const params = AgentSourceIdParamsSchema.parse(request.params);
-      await options.agentSources.installPlugin(params.sourceId);
+      const action = AgentSourcePluginActionInputSchema.parse(request.body ?? {});
+      await options.agentSources.installPlugin(params.sourceId, action);
       return reply.send(OkResponseSchema.parse({ ok: true }));
     })
   );
@@ -304,7 +306,8 @@ export function registerAgentSourceRoutes(app: FastifyInstance, options: Registe
     { preHandler: options.authenticateRuntimeToken },
     withErrorEnvelope(async (request, reply) => {
       const params = AgentSourceIdParamsSchema.parse(request.params);
-      await options.agentSources.uninstallPlugin(params.sourceId);
+      const action = AgentSourcePluginActionInputSchema.parse(request.body ?? {});
+      await options.agentSources.uninstallPlugin(params.sourceId, action);
       return reply.send(OkResponseSchema.parse({ ok: true }));
     })
   );

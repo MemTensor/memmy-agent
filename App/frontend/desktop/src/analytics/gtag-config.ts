@@ -19,7 +19,7 @@ export function resolveGtagConfigOptions(input?: {
 }): {
   send_page_view: false;
   app_env: AnalyticsAppEnv;
-  debug_mode?: true;
+  debug_mode?: 1;
 } {
   const isProd = input?.isProd ?? import.meta.env.PROD;
   const isDev = input?.isDev ?? import.meta.env.DEV;
@@ -30,6 +30,6 @@ export function resolveGtagConfigOptions(input?: {
   return {
     send_page_view: false,
     app_env: resolveAnalyticsAppEnv(isProd),
-    ...(debugMode ? { debug_mode: true } : {})
+    ...(debugMode ? { debug_mode: 1 } : {})
   };
 }

@@ -1,6 +1,13 @@
 import { useEffect, useState } from "react";
 import type { GetMemoryOutput, MemoryListItem, PanelItemsOutput } from "@memmy/local-api-contracts";
 import type { MemoryRuntimeClient } from "../../api/memory-runtime-client.js";
+import {
+  buildMemoryUiDeletedEvent,
+  buildMemoryUiDetailOpenedEvent,
+  buildMemoryUiPanelRefreshedEvent,
+  buildMemoryUiSearchSubmittedEvent
+} from "../../analytics/memory-ui-analytics.js";
+import { useAnalytics } from "../../analytics/use-analytics.js";
 import type { MessageKey } from "../../i18n/messages.js";
 import { useTranslation } from "../../i18n/use-translation.js";
 import { ChevronRight, Search, Sparkles, X } from "./memory-prototype-icons.js";
@@ -56,12 +63,14 @@ function policiesCacheKeys(query: string, page: number): string[] {
 
 export function PoliciesSubPage(props: PoliciesSubPageProps) {
   const { t } = useTranslation();
+  const { track } = useAnalytics();
+  const policiesFilterLayer = "L2";
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
   const [state, setState] = useState<RemoteData<PanelItemsOutput>>({ status: "loading" });
   const [detail, setDetail] = useState<DetailState>(null);
 
-  function refresh(nextPage = page, options: { useCache?: boolean } = {}): Promise<void> {
+  function refresh(nextPage = page, options: { useCache?: boolean } = {}): Promise<PanelItemsOutput | undefined> {
     if (!props.client) {
       const message = t("memory.clientNotReady");
       setState({ status: "error", message });
@@ -82,6 +91,7 @@ export function PoliciesSubPage(props: PoliciesSubPageProps) {
       .then((data) => {
         writeMemoryPanelCaches(cacheKeys, data);
         setState({ status: "ready", data });
+        return data;
       })
       .catch((error) => {
         setState({ status: "error", message: toErrorMessage(error) });
@@ -98,7 +108,18 @@ export function PoliciesSubPage(props: PoliciesSubPageProps) {
   function runSearch() {
     setDetail(null);
     setPage(1);
-    void refresh(1).catch(() => undefined);
+    void refresh(1)
+      .then((data) => {
+        if (!data) {
+          return;
+        }
+        track(buildMemoryUiSearchSubmittedEvent({
+          subPage: "policies",
+          filterLayer: policiesFilterLayer,
+          resultCount: data.total
+        }));
+      })
+      .catch(() => undefined);
   }
 
   function changePage(nextPage: number) {
@@ -113,6 +134,10 @@ export function PoliciesSubPage(props: PoliciesSubPageProps) {
   }
 
   function openDetail(item: MemoryListItem) {
+    track(buildMemoryUiDetailOpenedEvent({
+      subPage: "policies",
+      filterLayer: policiesFilterLayer
+    }));
     if (!props.client) {
       setDetail({ status: "error", message: t("memory.clientNotReady") });
       return;
@@ -131,6 +156,10 @@ export function PoliciesSubPage(props: PoliciesSubPageProps) {
     }
 
     await props.client.deleteMemory(id);
+    track(buildMemoryUiDeletedEvent({
+      subPage: "policies",
+      filterLayer: policiesFilterLayer
+    }));
     clearMemoryPanelCache();
     setDetail(null);
     void refresh(page, { useCache: false }).catch(() => undefined);
@@ -151,7 +180,16 @@ export function PoliciesSubPage(props: PoliciesSubPageProps) {
           </h3>
           <p className="memory-panel__subtitle">{t("memory.policies.description")}</p>
         </div>
-        <MemoryRefreshButton onClick={() => refresh(page, { useCache: false })} />
+        <MemoryRefreshButton onClick={async () => {
+          const data = await refresh(page, { useCache: false });
+          if (data) {
+            track(buildMemoryUiPanelRefreshedEvent({
+              subPage: "policies",
+              filterLayer: policiesFilterLayer,
+              resultCount: data.total
+            }));
+          }
+        }} />
       </div>
       <div className="memory-toolbar">
         <label className="memory-search">

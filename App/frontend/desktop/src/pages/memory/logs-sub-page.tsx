@@ -4,6 +4,12 @@ import ReactMarkdown, { type Components } from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import { ApiRequestError } from "../../api/http.js";
+import {
+  buildLogsFilterLayer,
+  buildMemoryUiDetailOpenedEvent,
+  buildMemoryUiPanelRefreshedEvent
+} from "../../analytics/memory-ui-analytics.js";
+import { useAnalytics } from "../../analytics/use-analytics.js";
 import { MEMORY_ADD_STATUS_SUMMARIES, type MessageKey, type MessageValues } from "../../i18n/messages.js";
 import type { MemoryRuntimeClient } from "../../api/memory-runtime-client.js";
 import { useTranslation } from "../../i18n/use-translation.js";
@@ -74,12 +80,14 @@ function logsCacheKeys(page: number, tool: "" | MemoryApiLogToolName, sourceAgen
 
 export function LogsSubPage(props: LogsSubPageProps) {
   const { t } = useTranslation();
+  const { track } = useAnalytics();
   const [tool, setTool] = useState<"" | MemoryApiLogToolName>("");
   const [sourceAgent, setSourceAgent] = useState("");
   const [page, setPage] = useState(1);
   const [state, setState] = useState<RemoteData<MemoryApiLogsOutput>>({ status: "loading" });
+  const logsFilterLayer = () => buildLogsFilterLayer(tool, sourceAgent);
 
-  function refresh(nextPage = page, nextTool = tool, nextSourceAgent = sourceAgent, options: { useCache?: boolean } = {}): Promise<void> {
+  function refresh(nextPage = page, nextTool = tool, nextSourceAgent = sourceAgent, options: { useCache?: boolean } = {}): Promise<MemoryApiLogsOutput | undefined> {
     if (!props.client) {
       const message = t("memory.clientNotReady");
       setState({ status: "error", message });
@@ -93,6 +101,7 @@ export function LogsSubPage(props: LogsSubPageProps) {
       .then((data) => {
         writeMemoryPanelCaches(cacheKeys, data);
         setState({ status: "ready", data });
+        return data;
       })
       .catch((error) => {
         setState({ status: "error", message: toErrorMessage(error) });
@@ -118,7 +127,22 @@ export function LogsSubPage(props: LogsSubPageProps) {
         setPage(1);
       }}
       onPageChange={(nextPage) => setPage(normalizePage(nextPage))}
-      onRefresh={() => refresh(page, tool, sourceAgent, { useCache: false })}
+      onRefresh={async () => {
+        const data = await refresh(page, tool, sourceAgent, { useCache: false });
+        if (data) {
+          track(buildMemoryUiPanelRefreshedEvent({
+            subPage: "logs",
+            filterLayer: logsFilterLayer(),
+            resultCount: data.total
+          }));
+        }
+      }}
+      onOpenDetail={() => {
+        track(buildMemoryUiDetailOpenedEvent({
+          subPage: "logs",
+          filterLayer: logsFilterLayer()
+        }));
+      }}
     />
   );
 }
@@ -131,6 +155,7 @@ export interface LogsSubPageViewProps {
   onSourceAgentChange: (sourceAgent: string) => void;
   onPageChange: (page: number) => void;
   onRefresh: () => void | Promise<void>;
+  onOpenDetail: () => void;
 }
 
 export function LogsSubPageView(props: LogsSubPageViewProps) {
@@ -158,6 +183,7 @@ export function LogsSubPageView(props: LogsSubPageViewProps) {
         next.delete(id);
       } else {
         next.add(id);
+        props.onOpenDetail();
       }
       return next;
     });

@@ -1,6 +1,20 @@
 import { Tool, type JsonSchema } from "../core/agent-runtime/tools/base.js";
 import { RequestContext, RequestContextStore } from "../core/agent-runtime/tools/context.js";
 import {
+  MEMORY_ANALYTICS_ENTRYPOINTS,
+  MEMORY_OP_MODES,
+  MEMORY_OP_STORAGE_BACKEND,
+  compactAnalyticsParams,
+  elapsedMs,
+  errorCodeFromUnknown,
+  formatMemoryLayers,
+  hitCountFromGetResponse,
+  hitCountFromSearchResponse,
+  memoryAnalyticsEventsFor,
+  type AnalyticsParams,
+  type MemoryAnalyticsEntrypoint,
+} from "../analytics/memory-lifecycle-analytics.js";
+import {
   extractCurrentUserRequestText,
   renderMemmyContextPacket,
 } from "./protocol.js";
@@ -80,13 +94,99 @@ export class MemmyMemoryTool extends Tool {
 
   async execute(params: JsonRecord = {}): Promise<string> {
     const sessionKey = this.requestContext.get()?.sessionKey ?? null;
+    const context = this.runtime.memoryAnalyticsContext?.(sessionKey) ?? {};
+    const entrypoint =
+      context.entrypoint === MEMORY_ANALYTICS_ENTRYPOINTS.desktop
+        ? MEMORY_ANALYTICS_ENTRYPOINTS.desktop
+        : MEMORY_ANALYTICS_ENTRYPOINTS.cli;
+    const op = toolAnalyticsOp(this.spec.name, entrypoint);
+    if (!op) {
+      try {
+        const result = await this.spec.execute(this.client, params, this.runtime, sessionKey);
+        return formatMemmyToolResult(this.spec.name, result, params, this.runtime, sessionKey);
+      } catch (error) {
+        return `Error: ${error instanceof Error ? error.message : String(error)}`;
+      }
+    }
+
+    const base = toolOpBaseParams(this.runtime, sessionKey, params);
+    this.runtime.trackMemoryAnalytics?.(op.started, base);
+    const startedAt = Date.now();
     try {
       const result = await this.spec.execute(this.client, params, this.runtime, sessionKey);
+      this.runtime.trackMemoryAnalytics?.(op.succeeded, {
+        ...base,
+        duration_ms: elapsedMs(startedAt),
+        success: true,
+        hit_count: op.hitCount(result),
+      });
       return formatMemmyToolResult(this.spec.name, result, params, this.runtime, sessionKey);
     } catch (error) {
+      this.runtime.trackMemoryAnalytics?.(op.failed, {
+        ...base,
+        duration_ms: elapsedMs(startedAt),
+        success: false,
+        error_code: errorCodeFromUnknown(error),
+      });
       return `Error: ${error instanceof Error ? error.message : String(error)}`;
     }
   }
+}
+
+function toolAnalyticsOp(
+  toolName: string,
+  entrypoint: MemoryAnalyticsEntrypoint,
+): {
+  started: string;
+  succeeded: string;
+  failed: string;
+  hitCount: (result: unknown) => number;
+} | null {
+  const events = memoryAnalyticsEventsFor(entrypoint);
+  if (toolName === "memmy_memory_search") {
+    return {
+      started: events.searchStarted,
+      succeeded: events.searchSucceeded,
+      failed: events.searchFailed,
+      hitCount: hitCountFromSearchResponse,
+    };
+  }
+  if (toolName === "memmy_memory_get") {
+    return {
+      started: events.getStarted,
+      succeeded: events.getSucceeded,
+      failed: events.getFailed,
+      hitCount: hitCountFromGetResponse,
+    };
+  }
+  return null;
+}
+
+function toolOpBaseParams(
+  runtime: MemmyMemoryToolRuntime,
+  sessionKey: string | null,
+  params: JsonRecord,
+): AnalyticsParams {
+  const context = runtime.memoryAnalyticsContext?.(sessionKey) ?? {};
+  const adapterId =
+    typeof context.adapter_id === "string" && context.adapter_id.trim()
+      ? context.adapter_id
+      : "memmy-agent";
+  const entrypoint =
+    context.entrypoint === MEMORY_ANALYTICS_ENTRYPOINTS.desktop
+      ? MEMORY_ANALYTICS_ENTRYPOINTS.desktop
+      : MEMORY_ANALYTICS_ENTRYPOINTS.cli;
+  const layer = formatMemoryLayers(params.layers);
+  return compactAnalyticsParams({
+    entrypoint,
+    adapter_id: adapterId,
+    storage_backend: MEMORY_OP_STORAGE_BACKEND,
+    mode: MEMORY_OP_MODES.tool,
+    ...(layer ? { layer } : {}),
+    ...(typeof context.session_id_hash === "string" ? { session_id_hash: context.session_id_hash } : {}),
+    ...(typeof context.turn_id_hash === "string" ? { turn_id_hash: context.turn_id_hash } : {}),
+    ...(typeof context.episode_id_hash === "string" ? { episode_id_hash: context.episode_id_hash } : {}),
+  });
 }
 
 export function registerMemmyMemoryTools(registry: any, client: MemmyMemoryClient, runtime: MemmyMemoryToolRuntime): void {
