@@ -1,30 +1,36 @@
-# memmy-agent
 
-![image](docs/assets/banner-en.png)
+<br>
+<div align="center">
+  <a href="https://memmy.bot/">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-dark.svg">
+      <source media="(prefers-color-scheme: light)" srcset="docs/assets/logo-light.svg">
+      <img alt="Memmy Logo" src="docs/assets/logo-light.svg" width="50%">
+    </picture>
+  </a>
+</div>
+<br>
+<br>
+<p align="center">
+    <a href="https://memmy.bot/docs/"><img src="https://img.shields.io/badge/Docs-Get--Start-006400?labelColor=gray&style=for-the-badge&logo=googledocs&logoColor=white" alt="Docs"></a>
+    <a href="https://github.com/MemTensor/memmy-agent/releases"><img src="https://img.shields.io/badge/News-ED8D45?labelColor=gray&style=for-the-badge&logo=applenews&logoColor=white" alt="applenews"></a>
+    <a href="https://www.producthunt.com/products/memmy?launch=memmy-agent"><img src="https://img.shields.io/badge/Memmy--Agent-DA552F?labelColor=gray&style=for-the-badge&logo=producthunt&logoColor=white" alt="producthunt"></a>
+    <a href="https://discord.gg/zfhKKn52wP"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fdiscord.com%2Fapi%2Fv10%2Finvites%2FzfhKKn52wP%3Fwith_counts%3Dtrue&query=%24.approximate_presence_count&suffix=%20online&label=Discord&color=404EED&labelColor=gray&style=for-the-badge&logo=discord&logoColor=white" alt="Discord"></a>
+    <a href="https://x.com/Memmy_ai"><img src="https://img.shields.io/badge/Follow-Memmy-000000?labelColor=gray&style=for-the-badge&logo=x&logoColor=white" alt="X"></a>
+  </p>
 
-**Memmy is your personal memory hub — and a dedicated Agent that knows you best.**
+<div align="center">
 
-One unified memory layer for every AI you use. Evolving together through collaboration.
+<div align="center">
 
-It distills your knowledge, preferences, and project experience into personal memory, and share the same context across every Agents — Cursor, Claude Code, Codex, OpenClaw 🦞, and more.
-
-Available as a desktop app, CLI, and API. You can use the same long-term memory whatever the ways you like to use. **Build it once, use it everywhere.**
-
-[Docs](https://memmy.bot/docs/) • [Quick Start](#quick-start) • [Core Concepts](#core-concepts) • [Build from Source](#build-from-source)
-
-[简体中文](README.zh-CN.md) • **English**
-
-## 🚀 Get Started with Memmy
-
-Get Memmy from [Official Website](https://memmy.bot/) or [GitHub Release](https://github.com/MemTensor/memmy-agent/releases).
+## 🆓 Sign-up for Free Trial
 
 Sign up to get free tokens. Model routing is automatic — start exploring the full Memory + Agent Runtime with zero config.
 
-> **Trial credits:**
-
-- **Registration grants Agent task trial tokens; the current amount and usage are shown in the app.**
-
-Once the trial credits run out, you can switch to BYOK and use your own model API.
+> [!TIP]
+> **Trial credits:** 
+> **Registration grants ***2,000,000 tokens***; you can check your remaining balance and usage inside the app.**
+> Once the trial credits run out, you can switch to BYOK and use your own model API.
 
 ## What Is Memmy?
 
@@ -34,9 +40,13 @@ Switch agents, close a tab, start a new session, and you're re-introd
 
 Memmy fixes that.
 
-With a unified memory layer shared across Cursor, Claude Code, Codex, and more, your agents build on each other's context instead of starting over. One-shot conversations become a long-term working relationship.
+With a unified memory layer shared across Cursor, Claude Code, Codex, OpenClaw 🦞, Hermes Agent and more, your agents build on each other's context instead of starting over. One-shot conversations become a long-term working relationship.
 
-### 🧠 Cross-Agent Memory Layer
+It distills your knowledge, preferences, and project experience into personal memory, and share the same context across every Agents.
+
+Available as a desktop app, CLI, and API. You can use the same long-term memory whatever the ways you like to use. **Build it once, use it everywhere.**
+
+###  Cross-Agent Memory Layer
 
 Memmy provides a unified personal memory layer for all AI Agents.
 
@@ -50,7 +60,7 @@ Memmy provides a complete local Agent runtime environment.
 
 - **A unified experience across entry points** Supports the desktop app, CLI/TUI, and an OpenAI-compatible API, all sharing the same Agents, memory, and configuration.
 - **Continuous task collaboration** Start a task from any entry point and seamlessly continue it across different scenarios, unconstrained by a single session.
-- **Extensible Agent capabilities** Connect more tools through Skills and MCP, taking the Agent from conversation to real task execution. Memmy also provides managed Chromium browser tools for local page inspection and visual verification.
+- **Extensible Agent capabilities** Connect more tools through Skills and MCP, taking the Agent from conversation to real task execution.
 
 ### 🔬 Tool & Ecosystem Connections
 
@@ -74,7 +84,7 @@ After installing Memmy, it can automatically scan the history of your�
 
 Now supported: Cursor, Claude Code, Codex, OpenCode, OpenClaw, Hermes Agent.
 
-[See the full support list](https://memmy.bot/docs/memory/sources)
+See the full support list → link to docs/import-agent-memory.md
 
 ## One Agent Runtime, Multiple Entry Points
 
@@ -87,7 +97,9 @@ Memmy is not just a chat interface — it is an AI Agent Runtime t
 | 🔌 Integration Layer | Connect external ecosystems        | Messaging channels, third-party tools, OpenAI-compatible API                      |
 | 🖥️ User Interface  | Provide entry points               | Desktop App, CLI/TUI, Web API                                                     |
 
-### Repository Architecture
+### Repository Structure
+
+Memmy uses an npm workspaces monorepo architecture:
 
 ![Memmy System Architecture](docs/assets/memmy-architecture-en.png)
 
@@ -120,7 +132,7 @@ Compared with "personal AI Agents" like Hermes and OpenClaw, what sets
 3. Enter the main workbench and send your first task.
 4. Open "Tools" to connect messaging channels or third-party tools; open "Memory" to scan Agent history sources.
 
-> **Account mode free credits**: signing in grants Agent task trial tokens, so you can get running without your own API Key. The current amount and usage are shown in the app. Once used up or expired, switch to API Key (BYOK) mode and continue with your own quota.
+> **Account mode free credits**: signing in grants **30,000,000 (30 million) trial tokens**, so you can get running without your own API Key. You can check used / total / remaining amounts and the expiry date anytime in the app. Once used up or expired, switch to API Key (BYOK) mode and continue with your own quota.
 
 ### Option 2: `memmy` CLI (Agent Runtime)
 
@@ -143,14 +155,7 @@ agents:
 providers:
   openai:
     apiKey: ${OPENAI_API_KEY}   # Supports ${ENV_NAME}-style environment variable references
-tools:
-  browser:
-    enabled: true
-    maxSessions: 4
-    idleTimeoutS: 900
 ```
-
-The desktop app and `scripts/dev-start.sh` prepare the matching managed Chromium build before the Agent Gateway starts. Agent requests never download a browser; when the managed executable is unavailable, browser tools are omitted while other Agent features continue to work.
 
 ### Option 3: `memmy-memory` CLI (memory access for external Agents / scripts)
 
@@ -162,14 +167,14 @@ memmy-memory add "a piece of knowledge worth saving"
 memmy-memory get <id>
 ```
 
-Connects to `http://127.0.0.1:18960` by default; use `--url`, `--token`, `--config`, `--source`, and `--user-id` to specify the target service, authentication, source, and user namespace.
+Connects to `http://127.0.0.1:18960\` by default; use `--url`, `--token`, `--config`, `--source`, and `--user-id` to specify the target service, authentication, source, and user namespace.
 
 ## Core Concepts
 
 - **Workspace** — the Agent's working directory, default `~/.memmy/workspace`; syncs templates, built-in skills, and memory files.
 - **Config** — the main configuration, default `~/.memmy/config.yaml` (overridable via `MEMMY_CONFIG` / `--config`), covering models, providers, tools, MCP, gateway, Memory, and workspace settings.
 - **Agent Runtime** — the core of task execution: model calls, message loop, tool registration, MCP, sessions, long tasks, skill loading, auto-compaction, and memory hooks.
-- **Memory Service** — the local-first memory foundation, default `http://127.0.0.1:18960`, providing session, turn, search, write, panel, and analytics APIs; every entry point reads and writes the same memory, so tasks and context carry over across Agents.
+- **Memory Service** — the local-first memory foundation, default `http://127.0.0.1:18960\`, providing session, turn, search, write, panel, and analytics APIs; every entry point reads and writes the same memory, so tasks and context carry over across Agents.
 - **Local Backend** — the backend for the desktop local API (Fastify + SQLite app state), handling accounts, configuration, integrations, source scanning, and Skill writing.
 - **Agent Source** — an adapter that collects historical context from external Agents; each source has history-reading logic and an optional Skill install target.
 
