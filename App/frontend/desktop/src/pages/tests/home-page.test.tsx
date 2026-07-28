@@ -256,6 +256,24 @@ describe("HomePage", () => {
     expect(resolveProjectTargetPickerActiveIndex(["new"], null)).toBe(0);
   });
 
+  it("shows and searches only the 10 most recently added projects", () => {
+    const projects = Array.from({ length: 12 }, (_, index) => ({
+      id: `project-${index + 1}`,
+      name: `Project ${index + 1}`,
+      rootPath: `C:\\work\\project-${index + 1}`,
+      pinned: false,
+      createdAt: `2026-01-${String(index + 1).padStart(2, "0")}`
+    }));
+
+    expect(filterProjectTargetPickerProjects(projects, "")).toEqual(projects.slice(2).reverse());
+    expect(filterProjectTargetPickerProjects(projects, "project-1")).toEqual([
+      projects[11],
+      projects[10],
+      projects[9]
+    ]);
+    expect(filterProjectTargetPickerProjects(projects, "project-2")).toEqual([]);
+  });
+
   it("sizes the project menu to its content within composer and viewport caps", () => {
     const styles = readFileSync(stylesSourcePath, "utf8");
     const source = readFileSync(homePageSourcePath, "utf8");

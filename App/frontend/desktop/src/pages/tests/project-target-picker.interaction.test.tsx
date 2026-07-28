@@ -194,7 +194,7 @@ describe("ProjectTargetPicker interactions", () => {
     act(() => getTrigger().click());
 
     expect(document.querySelector("[data-project-id]")).toBeNull();
-    expect(buttonWithText("新建项目")).toBeNull();
+    expect(buttonWithText("选择新项目")).toBeNull();
     expect(buttonWithText("不在项目中工作")).not.toBeNull();
     pressKey(getSearch(), "Enter");
     expect(document.querySelector('[data-testid="picker-target"]')?.textContent).toBe("standalone");
@@ -292,7 +292,7 @@ function pressKey(input: HTMLInputElement, key: string) {
 }
 
 async function clickNewProject() {
-  const button = buttonWithText("新建项目");
+  const button = buttonWithText("选择新项目");
   if (!button) throw new Error("Missing New project button");
   await act(async () => {
     const pointerDown = new PointerEvent("pointerdown", { bubbles: true, cancelable: true });

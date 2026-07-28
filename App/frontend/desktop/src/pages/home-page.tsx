@@ -2246,9 +2246,12 @@ export const filterProjectTargetPickerProjects = (
   projects: MemmyAgentProject[],
   query: string
 ): MemmyAgentProject[] => {
+  const recentProjects = [...projects]
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id))
+    .slice(0, 10);
   const normalizedQuery = query.trim().toLocaleLowerCase();
-  if (!normalizedQuery) return projects;
-  return projects.filter((project) => (
+  if (!normalizedQuery) return recentProjects;
+  return recentProjects.filter((project) => (
     project.name.toLocaleLowerCase().includes(normalizedQuery)
     || project.rootPath.toLocaleLowerCase().includes(normalizedQuery)
   ));
