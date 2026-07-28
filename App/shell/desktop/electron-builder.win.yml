@@ -17,6 +17,7 @@ asarUnpack:
   - "**/@img/sharp-win32-x64/lib/libvips*.dll"
   - "**/@lydell/node-pty-win32-x64/prebuilds/win32-x64/conpty/**"
   - "**/node_modules/sqlite-vec-*/vec0.*"
+  - "dist/runtime/memmy-agent/node_modules/@memmy/migrations/**"
   - "dist/renderer/**"
 
 extraResources:

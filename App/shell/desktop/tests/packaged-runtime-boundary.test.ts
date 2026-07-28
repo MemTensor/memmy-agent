@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { parse as parseYaml } from "yaml";
 
 const mainSourcePath = fileURLToPath(new URL("../src/main/main.ts", import.meta.url));
 const preloadSourcePath = fileURLToPath(new URL("../src/preload/preload.cts", import.meta.url));
@@ -215,6 +216,22 @@ describe("desktop packaged runtime boundaries", () => {
     expect(winSource.indexOf('run build --prefix "$MIGRATIONS_DIR"')).toBeLessThan(
       winSource.indexOf('ci --prefix "$AGENT_DIR"'),
     );
+  });
+
+  it("unpacks the migrations runtime in every desktop package variant", () => {
+    for (const configPath of [
+      electronBuilderPath,
+      unsignedElectronBuilderPath,
+      winElectronBuilderPath,
+      winUnsignedBuilderPath
+    ]) {
+      const config = parseYaml(readFileSync(configPath, "utf8")) as {
+        asarUnpack?: string[];
+      };
+      expect(config.asarUnpack).toContain(
+        "dist/runtime/memmy-agent/node_modules/@memmy/migrations/**"
+      );
+    }
   });
 
   it("unpacks the sqlite-vec native extension in every desktop package variant", () => {
