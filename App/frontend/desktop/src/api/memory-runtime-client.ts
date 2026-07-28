@@ -11,6 +11,8 @@ import {
   MemoryApiLogsInputSchema,
   MemoryApiLogsOutputSchema,
   MemoryHealthSnapshotSchema,
+  MemoryProcessingStatusInputSchema,
+  MemoryProcessingStatusOutputSchema,
   MemoryReloadConfigInputSchema,
   MemoryReloadConfigOutputSchema,
   OpenSessionInputSchema,
@@ -25,6 +27,7 @@ import {
   SearchOutputSchema,
   StartTurnInputSchema,
   StartTurnOutputSchema,
+  RetryMemoryProcessingOutputSchema,
   type CloseSessionInput,
   type CloseSessionOutput,
   type CompleteTurnInput,
@@ -37,6 +40,7 @@ import {
   type MemoryApiLogsInput,
   type MemoryApiLogsOutput,
   type MemoryHealthSnapshot,
+  type MemoryProcessingStatusOutput,
   type MemoryReloadConfigInput,
   type MemoryReloadConfigOutput,
   type OpenSessionInput,
@@ -51,6 +55,7 @@ import {
   type SearchOutput,
   type StartTurnInput,
   type StartTurnOutput,
+  type RetryMemoryProcessingOutput,
   type RuntimeConfig
 } from "@memmy/local-api-contracts";
 import { ApiRequestError, requestJson } from "./http.js";
@@ -64,6 +69,8 @@ export const MEMORY_RUNTIME_ENDPOINTS = [
   "POST /api/v1/turns/:turnId/complete",
   "POST /api/v1/memory/search",
   "POST /api/v1/memory/add",
+  "POST /api/v1/memory/processing/status",
+  "POST /api/v1/memory/:id/processing/retry",
   "GET /api/v1/memory/:id",
   "DELETE /api/v1/memory/:id",
   "GET /api/v1/memory/logs",
@@ -85,6 +92,8 @@ export interface MemoryRuntimeClient {
   addMemory(input: AddMemoryInput): Promise<AddMemoryOutput>;
   getMemory(id: string): Promise<GetMemoryOutput>;
   deleteMemory(id: string): Promise<DeleteMemoryOutput>;
+  getMemoryProcessingStatus(memoryIds: string[]): Promise<MemoryProcessingStatusOutput>;
+  retryMemoryProcessing(id: string): Promise<RetryMemoryProcessingOutput>;
   listMemoryLogs(input: MemoryApiLogsInput): Promise<MemoryApiLogsOutput>;
   getPanelOverview(): Promise<PanelOverviewOutput>;
   getPanelAnalysis(): Promise<PanelAnalysisOutput>;
@@ -157,6 +166,24 @@ export function createHttpMemoryRuntimeClient(config: RuntimeConfig): MemoryRunt
         path: `/api/v1/memory/${encodeURIComponent(id)}`,
         schema: DeleteMemoryOutputSchema,
         init: { method: "DELETE" }
+      });
+    },
+
+    async getMemoryProcessingStatus(memoryIds) {
+      return requestJson({
+        config,
+        path: "/api/v1/memory/processing/status",
+        schema: MemoryProcessingStatusOutputSchema,
+        body: MemoryProcessingStatusInputSchema.parse({ memoryIds })
+      });
+    },
+
+    async retryMemoryProcessing(id) {
+      return requestJson({
+        config,
+        path: `/api/v1/memory/${encodeURIComponent(id)}/processing/retry`,
+        schema: RetryMemoryProcessingOutputSchema,
+        body: {}
       });
     },
 
@@ -250,6 +277,12 @@ export function createUnavailableMemoryRuntimeClient(): MemoryRuntimeClient {
       throw unavailable();
     },
     async deleteMemory() {
+      throw unavailable();
+    },
+    async getMemoryProcessingStatus() {
+      throw unavailable();
+    },
+    async retryMemoryProcessing() {
       throw unavailable();
     },
     async listMemoryLogs() {

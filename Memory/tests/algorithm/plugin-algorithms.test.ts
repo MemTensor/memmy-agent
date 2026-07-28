@@ -9,7 +9,6 @@ import {
   buildWorldModelDraft,
   classifyFeedbackText,
   classifyIntent,
-  classifyIntentWithLlm,
   classifyTurnFeedback,
   classifyTurnRelation,
   classifyTurnRelationWithLlm,
@@ -97,6 +96,52 @@ describe("plugin algorithm parity helpers", () => {
     });
 
     expect(result.hits[0]).toMatchObject({ id: memory.id });
+  });
+
+  it("excludes traces already present in the recent session window", () => {
+    const currentEpisode = traceMemory(
+      "trace-current-episode",
+      "episode-current",
+      "current episode context",
+      0.8,
+      [1, 0]
+    );
+    const recentSession = traceMemory(
+      "trace-recent-session",
+      "episode-previous",
+      "recent session context",
+      0.7,
+      [1, 0]
+    );
+    const olderSession = traceMemory(
+      "trace-older-session",
+      "episode-older",
+      "older compressed context",
+      0.6,
+      [1, 0]
+    );
+    const memories = [currentEpisode, recentSession, olderSession];
+    const channelScoresByMemory = new Map(
+      memories.map((memory) => [memory.id, { fts: 0.9 }])
+    );
+
+    const result = retrievePluginMemories({
+      query: "context",
+      memories,
+      layers: ["L1"],
+      limit: 5,
+      mode: "turn_start",
+      excludeTraceRawTurnIds: new Set([
+        "raw-trace-current-episode",
+        "raw-trace-recent-session",
+      ]),
+      channelScoresByMemory,
+      config: { tagFilter: "off" }
+    });
+
+    expect(result.hits.map((hit) => hit.id)).toContain("trace-older-session");
+    expect(result.hits.map((hit) => hit.id)).not.toContain("trace-current-episode");
+    expect(result.hits.map((hit) => hit.id)).not.toContain("trace-recent-session");
   });
 
   it("generates L2 candidate pool ids with the plugin DJB2 signature hash", () => {
@@ -256,7 +301,7 @@ describe("plugin algorithm parity helpers", () => {
     expect(extractRetrievalTags("Docker container DOCKER")).toEqual(["docker"]);
   });
 
-  it("classifies plugin-style turn intents and retrieval tier plans", async () => {
+  it("classifies rule-matched intents and defaults unmatched input to full retrieval", () => {
     expect(classifyIntent("谢谢")).toMatchObject({
       kind: "chitchat",
       retrieval: { tier1: false, tier2: false, tier3: false }
@@ -269,32 +314,14 @@ describe("plugin algorithm parity helpers", () => {
       kind: "memory_probe",
       retrieval: { tier1: true, tier2: true, tier3: false }
     });
-
-    const calls: string[] = [];
-    const llmDecision = await classifyIntentWithLlm("Could be a task or a past-context question", {
-      llm: intentLlm(calls)
+    expect(classifyIntent("please help me refactor this config")).toMatchObject({
+      kind: "task",
+      retrieval: { tier1: true, tier2: true, tier3: true }
     });
-    expect(calls).toEqual(["session.intent.classify.v1"]);
-    expect(llmDecision).toMatchObject({
-      kind: "memory_probe",
-      retrieval: { tier1: true, tier2: true, tier3: false }
+    expect(classifyIntent("我喜欢吃什么")).toMatchObject({
+      kind: "unknown",
+      retrieval: { tier1: true, tier2: true, tier3: true }
     });
-  });
-
-  it("falls back to weak intent heuristics when the plugin-style LLM classifier is malformed", async () => {
-    const calls: string[] = [];
-    const decision = await classifyIntentWithLlm("please help me refactor this config", {
-      llm: intentLlm(calls, {
-        kind: "not_a_real_label",
-        confidence: 1,
-        reason: "bad label"
-      })
-    });
-
-    expect(calls).toEqual(["session.intent.classify.v1"]);
-    expect(decision.kind).toBe("task");
-    expect(decision.signals).toContain("task.imperative_verb");
-    expect(decision.signals).toContain("llm_skipped");
   });
 
   it("classifies feedback text with the plugin classifier rules", () => {
@@ -431,11 +458,13 @@ describe("plugin algorithm parity helpers", () => {
     const trace = memory.properties.internal_info.trace as Record<string, unknown>;
     trace.userText = "我喜欢吃什么水果";
     trace.agentText = "你喜欢吃的水果是草莓";
+    trace.span_ids = ["span_fruit_goal", "span_fruit_answer"];
 
     const meta = traceMetaFromMemory(memory);
     expect(meta).toMatchObject({
       userText: "我喜欢吃什么水果",
-      agentText: "你喜欢吃的水果是草莓"
+      agentText: "你喜欢吃的水果是草莓",
+      spanIds: ["span_fruit_goal", "span_fruit_answer"]
     });
 
     const result = retrievePluginMemories({
@@ -581,7 +610,7 @@ describe("plugin algorithm parity helpers", () => {
     expect(strict.hits.map((hit) => hit.id)).not.toContain("trace-vector-untagged");
   });
 
-  it("omits internal reflection labels from episode rollups while keeping real reflections", () => {
+  it("renders episode rollups from trace summaries and meaningful reflections", () => {
     const related = traceMemory(
       "trace-related-label",
       "episode-reflection-format",
@@ -612,8 +641,14 @@ describe("plugin algorithm parity helpers", () => {
     });
 
     const episode = result.hits.find((hit) => hit.source === "episode");
+    expect(episode?.snippet).toContain("summary: sqlite migration path was fixed");
+    expect(episode?.snippet).toContain("summary: rerun the migration test after fixing the path");
     expect(episode?.snippet).not.toContain("reflection: RELATED");
-    expect(episode?.snippet).toContain("reflection: Prefer rerunning the focused migration test");
+    expect(episode?.snippet).toContain(
+      "reflection: Prefer rerunning the focused migration test after changing the sqlite path."
+    );
+    expect(episode?.snippet).not.toContain("user:");
+    expect(episode?.snippet).not.toContain("agent:");
   });
 
   it("classifies plugin-style turn relations for revision, follow-up, and new task boundaries", () => {
@@ -703,20 +738,59 @@ describe("plugin algorithm parity helpers", () => {
     expect(decision.signals).toContain("llm_skipped");
   });
 
+  it("accepts an explicit end-topic decision from the relation LLM", async () => {
+    const decision = await classifyTurnRelationWithLlm({
+      prevUserText: "Configure nginx TLS for the service",
+      prevAssistantText: "Use port 443 and verify the certificate chain.",
+      newUserText: "结束话题"
+    }, {
+      llm: relationLlm([], undefined, {
+        "relation.classify.v1": {
+          relation: "end_topic",
+          confidence: 0.98,
+          reason: "user explicitly ends the current topic"
+        }
+      })
+    });
+
+    expect(decision).toMatchObject({
+      relation: "end_topic",
+      confidence: 0.98
+    });
+  });
+
+  it("does not synthesize end-topic decisions without the relation LLM", async () => {
+    const decision = await classifyTurnRelationWithLlm({
+      prevUserText: "Configure nginx TLS for the service",
+      prevAssistantText: "Use port 443 and verify the certificate chain.",
+      newUserText: "结束话题"
+    }, {
+      disableLlm: true
+    });
+
+    expect(decision.relation).toBe("follow_up");
+  });
+
   it("uses the plugin relation LLM prompt and arbitration framing", async () => {
     const calls: string[] = [];
     const messages = new Map<string, Array<{ role: "system" | "user" | "assistant"; content: string }>>();
+    const options = new Map<string, { maxTokens?: number }>();
     await classifyTurnRelationWithLlm({
       prevUserText: "Configure nginx TLS for the service",
       prevAssistantText: "Use port 443 and verify the certificate chain.",
       newUserText: "Can you also cover database certificate rotation?",
       prevTags: ["nginx"]
     }, {
-      llm: relationLlm(calls, messages)
+      llm: relationLlm(calls, messages, {}, options)
     });
 
     const primary = messages.get("relation.classify.v1");
     expect(primary?.[0]?.content).toContain("DEFAULT to follow_up");
+    expect(primary?.[0]?.content).toContain('"end_topic"');
+    expect(primary?.[0]?.content).toContain("sole intent");
+    expect(primary?.[0]?.content).toContain("结束这个话题，我们聊旅游");
+    expect(primary?.[0]?.content).toContain("如何结束进程");
+    expect(primary?.[0]?.content).toContain("except an explicit end_topic");
     expect(primary?.[0]?.content).toContain("Nginx SSL");
     expect(primary?.[0]?.content).toContain("tools, systems, or methods");
     expect(primary?.[1]?.content).toContain("PREVIOUS_USER_MESSAGE");
@@ -726,6 +800,8 @@ describe("plugin algorithm parity helpers", () => {
     expect(arbitration?.[0]?.content).toContain("When in doubt, choose follow_up");
     expect(arbitration?.[1]?.content).toContain("CURRENT TASK CONTEXT");
     expect(arbitration?.[1]?.content).toContain("NEW MESSAGE");
+    expect(options.get("relation.classify.v1")?.maxTokens).toBe(512);
+    expect(options.get("relation.arbitration.v1")?.maxTokens).toBe(512);
   });
 
   it("seeds captured trace priority like the plugin so fresh rows are recallable before reward", () => {
@@ -1223,6 +1299,14 @@ describe("plugin algorithm parity helpers", () => {
     expect(buildWorldModelDraft({
       policies: [policy("p-enough-gain", "Parse SEC 13F infotable holdings with sec-api", [1, 0], 0.03)]
     })).toHaveLength(1);
+    expect(buildWorldModelDraft({
+      policies: [{
+        ...policy("p-negative-caveat", "Avoid repeating a failed SEC 13F parser path", [1, 0], 0.8),
+        experienceType: "failure_avoidance",
+        evidencePolarity: "negative",
+        skillEligible: false
+      }]
+    })).toHaveLength(0);
 
     expect(buildSkillDraft({
       policy: policy("p-skill-low-gain", "Parse SEC 13F infotable holdings with sec-api", [1, 0], 0.01),
@@ -1693,6 +1777,7 @@ function trace(id: string, episodeId: string, value: number, vec: number[]): Tra
     priority: value,
     tags: ["python", "pytest"],
     errorSignatures: [],
+    spanIds: [],
     vecSummary: vec,
     vecAction: vec,
     signature: "python|pytest|_"
@@ -1892,54 +1977,11 @@ function worldModelMemory(
   }, [{ vectorField: "vec", vector: vec }]);
 }
 
-function intentLlm(
-  calls: string[],
-  response: Record<string, unknown> = {
-    kind: "memory_probe",
-    confidence: 0.77,
-    reason: "asks about prior context"
-  }
-): LlmClient {
-  return {
-    config: {
-      provider: "host",
-      endpoint: "http://127.0.0.1/intent",
-      model: "intent-test",
-      enableThinking: false,
-      temperature: 0,
-      maxTokens: 300,
-      timeoutMs: 6000,
-      maxRetries: 0,
-      malformedRetries: 0
-    },
-    isConfigured() {
-      return true;
-    },
-    async complete() {
-      return "{}";
-    },
-    async completeJson<T extends Record<string, unknown>>(
-      _messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
-      options: { operation: string }
-    ): Promise<T> {
-      calls.push(options.operation);
-      return response as T;
-    },
-    status() {
-      return {
-        provider: "host",
-        model: "intent-test",
-        configured: true,
-        remote: true
-      };
-    }
-  };
-}
-
 function relationLlm(
   calls: string[],
   messagesByOperation?: Map<string, Array<{ role: "system" | "user" | "assistant"; content: string }>>,
-  responsesByOperation: Record<string, Record<string, unknown>> = {}
+  responsesByOperation: Record<string, Record<string, unknown>> = {},
+  optionsByOperation?: Map<string, { maxTokens?: number }>
 ): LlmClient {
   return {
     config: {
@@ -1961,10 +2003,11 @@ function relationLlm(
     },
     async completeJson<T extends Record<string, unknown>>(
       messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
-      options: { operation: string }
+      options: { operation: string; maxTokens?: number }
     ): Promise<T> {
       calls.push(options.operation);
       messagesByOperation?.set(options.operation, messages);
+      optionsByOperation?.set(options.operation, options);
       if (responsesByOperation[options.operation]) {
         return responsesByOperation[options.operation] as T;
       }

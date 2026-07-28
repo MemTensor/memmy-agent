@@ -2,7 +2,7 @@ export type IsoTime = string;
 export const DEFAULT_NAMESPACE_SOURCE = "unknown";
 export type Cursor = string;
 export type MemoryLayer = "L1" | "L2" | "L3" | "Skill";
-export type MemoryKind = "trace" | "policy" | "world_model" | "skill";
+export type MemoryKind = "trace" | "span" | "policy" | "world_model" | "skill";
 export type MemoryStatus = "activated" | "resolving" | "archived" | "deleted";
 export type RetrievalMode =
   | "search"
@@ -13,6 +13,30 @@ export type RetrievalMode =
   | "decision_repair"
   | "world_model";
 export type JobStatus = "queued" | "leased" | "succeeded" | "failed" | "dead_letter";
+export type MemoryProcessingState =
+  | "summary_pending"
+  | "summarizing"
+  | "embedding_pending"
+  | "embedding"
+  | "ready"
+  | "ready_text_only"
+  | "failed";
+export type MemoryProcessingStage = "summary" | "embedding";
+export type MemoryProcessingRetryAction = "retry" | "open_settings" | "none";
+
+export interface MemoryProcessingRecord {
+  memoryId: string;
+  state: MemoryProcessingState;
+  stage?: MemoryProcessingStage | null;
+  activeJobId?: string | null;
+  attemptCount: number;
+  manualRetryCount: number;
+  retryAction: MemoryProcessingRetryAction;
+  errorCode?: string | null;
+  errorMessage?: string | null;
+  failedAt?: IsoTime | null;
+  updatedAt: IsoTime;
+}
 export type JobType =
   | "episode_idle_close"
   | "trace_summary"
@@ -20,6 +44,8 @@ export type JobType =
   | "reflection"
   | "embedding"
   | "reward"
+  | "span_big_turn"
+  | "negative_experience"
   | "l2_association"
   | "l2_induction"
   | "l3_abstraction"
@@ -104,6 +130,7 @@ export interface MemoryRow {
 
 export interface MemoryFilter {
   userId?: string;
+  negativeExperienceUserId?: string;
   sessionId?: string;
   conversationId?: string;
   agentId?: string;
@@ -159,6 +186,7 @@ export interface MemoryListItem {
   createdAt: IsoTime;
   updatedAt: IsoTime;
   version: number;
+  processing?: MemoryProcessingRecord;
 }
 
 export interface MemoryDetailItem extends MemoryListItem {
@@ -408,6 +436,7 @@ export interface HealthResponse {
 
 export interface MemoryReloadConfigRequest extends RequestEnvelope {
   reason?: string;
+  restartFailedProcessing?: boolean;
 }
 
 export interface MemoryReloadConfigResponse {

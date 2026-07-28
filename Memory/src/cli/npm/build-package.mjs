@@ -4,10 +4,7 @@ import { fileURLToPath } from "node:url";
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const cliRoot = join(scriptDirectory, "..");
-const monorepoRoot = join(cliRoot, "..", "..", "..");
-const projectRoot = await pathExists(join(monorepoRoot, "Memory", "src", "cli", "npm", "package.json"))
-  ? monorepoRoot
-  : cliRoot;
+const projectRoot = join(cliRoot, "..", "..", "..");
 const packageOutput = join(projectRoot, "dist", "memmy-memory-npm");
 const templateManifestPath = join(scriptDirectory, "package.json");
 const templateReadmePath = join(scriptDirectory, "README.md");
@@ -18,6 +15,8 @@ await rm(packageOutput, { recursive: true, force: true });
 await mkdir(packageOutput, { recursive: true });
 
 const packageManifest = JSON.parse(await readFile(templateManifestPath, "utf8"));
+const projectManifest = JSON.parse(await readFile(join(projectRoot, "package.json"), "utf8"));
+packageManifest.version = projectManifest.version;
 
 await writeFile(join(packageOutput, "package.json"), `${JSON.stringify(packageManifest, null, 2)}\n`, "utf8");
 await cp(templateReadmePath, join(packageOutput, "README.md"));
@@ -42,14 +41,5 @@ async function removeJunkFiles(root) {
     if (entry.isDirectory()) {
       await removeJunkFiles(path);
     }
-  }
-}
-
-async function pathExists(path) {
-  try {
-    await import("node:fs/promises").then((fs) => fs.access(path));
-    return true;
-  } catch {
-    return false;
   }
 }

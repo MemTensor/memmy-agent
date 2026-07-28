@@ -573,9 +573,10 @@ export async function writeByokModelProjectionToMemmyConfig(
   const existingByok = isRecord(profiles.byok) ? profiles.byok : {};
   profiles.byok = {
     ...existingByok,
-    summary: buildMemoryModelProjection(input.memmyMemory.summary, isRecord(existingByok.summary) ? existingByok.summary : null, {
-      defaultEnableThinking: false
-    }),
+    summary: buildMemoryModelProjection(
+      input.memmyMemory.summary,
+      isRecord(existingByok.summary) ? existingByok.summary : null
+    ),
     evolution: buildMemoryModelProjection(
       input.memmyMemory.evolution,
       isRecord(existingByok.evolution) ? existingByok.evolution : null,
@@ -908,15 +909,15 @@ function clearAccountMemoryProjection(config: Record<string, unknown>): void {
 }
 
 /**
- * Build the Memory service Summary config fragment.
+ * Build a Memory service model config fragment.
  *
  * @param input the role model config.
- * @returns the Memory service Summary config fragment.
+ * @returns the Memory service model config fragment.
  */
 function buildMemoryModelProjection(
   input: MemmyMemoryModelConfigInput["summary"],
   existing: Record<string, unknown> | null = null,
-  options: { defaultEnableThinking: boolean }
+  options: { defaultEnableThinking?: boolean } = {}
 ): Record<string, unknown> {
   const projection = mapModelProtocol(input.provider);
   return omitUndefined({
@@ -925,7 +926,9 @@ function buildMemoryModelProjection(
     endpoint: input.baseUrl,
     model: input.modelId,
     apiKey: input.apiKey ?? existingString(existing?.apiKey),
-    enableThinking: existingBoolean(existing?.enableThinking) ?? options.defaultEnableThinking
+    enableThinking: options.defaultEnableThinking === undefined
+      ? undefined
+      : existingBoolean(existing?.enableThinking) ?? options.defaultEnableThinking
   });
 }
 
@@ -958,8 +961,7 @@ function buildAccountMemoryProfile(input: {
       vendor: "qwen",
       endpoint: resolveMemmyAccountApiBase(),
       model: MEMORY_ACCOUNT_SUMMARY_MODEL,
-      apiKey,
-      enableThinking: existingBoolean(asRecord(input.existing?.summary)?.enableThinking) ?? false
+      apiKey
     }),
     evolution: omitUndefined({
       vendor: "qwen",

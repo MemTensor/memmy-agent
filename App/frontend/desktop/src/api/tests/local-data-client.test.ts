@@ -11,29 +11,44 @@ describe("local data client", () => {
     vi.unstubAllGlobals();
   });
 
-  it("reveals and clears local memory data with runtime token", async () => {
+  it("gets, reveals, and clears local memory data with runtime token", async () => {
+    const dataPath = "C:\\Users\\test\\.memmy\\memory-service";
     const fetchMock = vi.fn(async (url: URL, init: RequestInit) => {
+      if (url.pathname === "/api/local-data" && init.method === "GET") {
+        return jsonResponse({ ok: true, dataPath });
+      }
       if (url.pathname === "/api/local-data/reveal") {
-        return jsonResponse({ ok: true, dataPath: "/Users/test/.memmy/memory-service" });
+        return jsonResponse({ ok: true, dataPath });
       }
       return jsonResponse({ ok: true, clearedAt: "2026-06-02T10:00:00.000Z" });
     });
     vi.stubGlobal("fetch", fetchMock);
 
     const client = createHttpLocalDataClient(runtimeConfig);
-    await expect(client.reveal()).resolves.toEqual({ ok: true, dataPath: "/Users/test/.memmy/memory-service" });
+    await expect(client.getPath()).resolves.toEqual({ ok: true, dataPath });
+    await expect(client.reveal()).resolves.toEqual({ ok: true, dataPath });
     await expect(client.clear({ confirm: true })).resolves.toEqual({ ok: true, clearedAt: "2026-06-02T10:00:00.000Z" });
 
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
-      new URL("/api/local-data/reveal", runtimeConfig.baseUrl),
+      new URL("/api/local-data", runtimeConfig.baseUrl),
       expect.objectContaining({
-        method: "POST",
+        method: "GET",
+        body: undefined,
         headers: expect.objectContaining({ "x-memmy-local-token": "local-token" })
       })
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
+      new URL("/api/local-data/reveal", runtimeConfig.baseUrl),
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({}),
+        headers: expect.objectContaining({ "x-memmy-local-token": "local-token" })
+      })
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
       new URL("/api/local-data", runtimeConfig.baseUrl),
       expect.objectContaining({
         method: "DELETE",

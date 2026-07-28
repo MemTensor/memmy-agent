@@ -41,12 +41,13 @@ function readSource(path: string): string {
 }
 
 describe("WelcomePage 赠送活动开关", () => {
-  it("登录页赠送黄条由 promotions.loginBanner 开关控制，取不到默认展示", () => {
+  it("登录页赠送黄条由 promotions.loginBanner 和 Agent 任务额度共同控制", () => {
     const pageSource = readSource(pageSourcePath);
 
     expect(pageSource).toContain("state.bootstrap?.promotions?.loginBanner ?? true");
+    expect(pageSource).toContain("(agentChatTokenTotal ?? 0) > 0");
     const gateIndex = pageSource.indexOf("promotions?.loginBanner ?? true");
-    const giftLabelIndex = pageSource.indexOf('t("welcome.gift")');
+    const giftLabelIndex = pageSource.indexOf('t("welcome.gift",');
     expect(gateIndex).toBeGreaterThanOrEqual(0);
     expect(giftLabelIndex).toBeGreaterThan(gateIndex);
   });

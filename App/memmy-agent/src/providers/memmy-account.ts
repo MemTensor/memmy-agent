@@ -1,4 +1,15 @@
 export type MemmyAccountThinkingStyle = "enable_thinking" | "thinking_type" | "";
+export type MemmyAccountRegion = "cn" | "intl";
+
+export function resolveMemmyAccountRegion(
+  edition = process.env.MEMMY_APP_EDITION,
+): MemmyAccountRegion {
+  return edition?.trim().toLowerCase() === "intl" ? "intl" : "cn";
+}
+
+export function resolveMemmyAccountHeaders(): Record<string, string> {
+  return { "X-Agent-Region": resolveMemmyAccountRegion() };
+}
 
 export function memmyAccountNoneThinkingStyle(
   providerName: string | null | undefined,

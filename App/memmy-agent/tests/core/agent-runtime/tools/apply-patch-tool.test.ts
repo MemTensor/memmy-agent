@@ -58,6 +58,7 @@ describe("ApplyPatchTool structured edits", () => {
     });
 
     expect(result).toContain("update calc.ts");
+    expect(result).toContain(`${target}: passed`);
     expect(fs.readFileSync(target, "utf8")).toBe("function add(a: number, b: number) {\n  return a - b;\n}\n");
   });
 
@@ -70,6 +71,7 @@ describe("ApplyPatchTool structured edits", () => {
     });
 
     expect(result).toContain("add config.ts");
+    expect(result).toContain(`${path.join(root, "config.ts")}: passed`);
     expect(fs.readFileSync(path.join(root, "config.ts"), "utf8")).toBe("export const DEBUG = true;\n");
   });
 
@@ -200,6 +202,7 @@ describe("ApplyPatchTool structured edits", () => {
     });
 
     expect(result).toContain("Patch dry-run succeeded");
+    expect(result).not.toContain("Lint results:");
     expect(fs.readFileSync(target, "utf8")).toBe("before\n");
     expect(fs.existsSync(path.join(root, "added.txt"))).toBe(false);
   });
@@ -299,5 +302,43 @@ describe("ApplyPatchTool structured edits", () => {
 
     expect(fs.readFileSync(first, "utf8")).toBe("before-one\n");
     expect(fs.readFileSync(second, "utf8")).toBe("before-two\n");
+  });
+
+  it("keeps all write results when one file fails lint and another is unsupported", async () => {
+    const root = workspace();
+    const tool = new ApplyPatchTool({ workspace: root });
+
+    const result = await tool.execute({
+      edits: [
+        { path: "broken.json", action: "add", newText: "{" },
+        { path: "README.md", action: "add", newText: "notes" },
+      ],
+    });
+
+    expect(result.startsWith("Patch applied:\n")).toBe(true);
+    expect(result).toContain(`${path.join(root, "broken.json")}: failed`);
+    expect(result).toContain(`${path.join(root, "README.md")}: skipped`);
+    expect(result.indexOf("broken.json")).toBeLessThan(result.lastIndexOf("README.md"));
+  });
+
+  it("rolls back the whole patch when exact readback fails", async () => {
+    const root = workspace();
+    const target = path.join(root, "readback.ts");
+    fs.writeFileSync(target, "const value = 1;\n");
+    const originalReadFile = fsp.readFile.bind(fsp);
+    let encodedReads = 0;
+    vi.spyOn(fsp, "readFile").mockImplementation(async (...args) => {
+      const result = await originalReadFile(...args);
+      if (String(args[0]) === target && typeof result === "string") {
+        encodedReads += 1;
+        if (encodedReads === 2) return `${result}changed`;
+      }
+      return result;
+    });
+
+    await expect(new ApplyPatchTool({ workspace: root }).execute({
+      edits: [{ path: "readback.ts", action: "replace", oldText: "1", newText: "2" }],
+    })).rejects.toThrow("content mismatch");
+    expect(fs.readFileSync(target, "utf8")).toBe("const value = 1;\n");
   });
 });

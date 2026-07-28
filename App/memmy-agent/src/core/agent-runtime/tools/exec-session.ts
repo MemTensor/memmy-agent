@@ -1,4 +1,4 @@
-import { ChildProcessWithoutNullStreams, spawn } from "node:child_process";
+import { ChildProcess, ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { Tool, type ToolExecutionContext } from "./base.js";
 import { CommandOutputDecoder, type CommandOutputDecoderOptions } from "./command-output-decoder.js";
@@ -9,6 +9,15 @@ export const DEFAULT_WAIT_FOR_MS = 10_000;
 export const MAX_WAIT_FOR_MS = 120_000;
 export const DEFAULT_MAX_OUTPUT_CHARS = 10_000;
 export const MAX_OUTPUT_CHARS = 50_000;
+const STDIO_DRAIN_GRACE_MS = 1000;
+const PROCESS_TERMINATE_GRACE_MS = 1000;
+export const EXEC_LIFECYCLE_ERROR =
+  "Error: Command process exited but descendants kept stdout/stderr open; the managed process tree was terminated.";
+
+type ManagedProcessOptions = {
+  platform?: NodeJS.Platform;
+  spawnProcess?: typeof spawn;
+};
 
 export type SessionPoll = {
   output: string;
@@ -19,6 +28,7 @@ export type SessionPoll = {
   terminated: boolean;
   stdinClosed: boolean;
   truncatedChars: number;
+  lifecycleError: string | null;
 };
 
 export type ExecSessionInfo = {
@@ -33,6 +43,148 @@ export type ExecSessionInfo = {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function processExited(child: ChildProcess): boolean {
+  return child.exitCode != null || child.signalCode != null;
+}
+
+function readableClosed(stream: NodeJS.ReadableStream | null | undefined): boolean {
+  if (!stream) return true;
+  const readable = stream as NodeJS.ReadableStream & {
+    destroyed?: boolean;
+    readableEnded?: boolean;
+  };
+  return readable.destroyed === true || readable.readableEnded === true;
+}
+
+function processStreamsClosed(child: ChildProcess): boolean {
+  return processExited(child)
+    && readableClosed(child.stdout)
+    && readableClosed(child.stderr);
+}
+
+async function waitForProcessClose(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (processStreamsClosed(child)) return true;
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (closed: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.removeListener("close", onClose);
+      resolve(closed);
+    };
+    const onClose = () => finish(true);
+    const timer = setTimeout(() => finish(processStreamsClosed(child)), timeoutMs);
+    timer.unref?.();
+    child.once("close", onClose);
+  });
+}
+
+function signalPosixProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
+  const pid = child.pid;
+  if (typeof pid === "number" && pid > 0) {
+    try {
+      process.kill(-pid, signal);
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") return;
+    }
+  }
+  try {
+    child.kill(signal);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+  }
+}
+
+function signalWindowsProcessTree(
+  child: ChildProcess,
+  force: boolean,
+  spawnProcess: typeof spawn,
+): void {
+  const pid = child.pid;
+  if (typeof pid !== "number" || pid <= 0) {
+    try {
+      child.kill(force ? "SIGKILL" : "SIGTERM");
+    } catch {
+      // A missing process is already terminated.
+    }
+    return;
+  }
+  const args = ["/PID", String(pid), "/T"];
+  if (force) args.push("/F");
+  try {
+    const taskkill = spawnProcess("taskkill.exe", args, {
+      shell: false,
+      windowsHide: true,
+      stdio: "ignore",
+    });
+    const timer = setTimeout(() => {
+      try {
+        taskkill.kill();
+      } catch {
+        // The helper has already exited.
+      }
+    }, PROCESS_TERMINATE_GRACE_MS);
+    timer.unref?.();
+    const clear = () => clearTimeout(timer);
+    taskkill.once("error", clear);
+    taskkill.once("close", clear);
+  } catch {
+    try {
+      child.kill(force ? "SIGKILL" : "SIGTERM");
+    } catch {
+      // A missing process is already terminated.
+    }
+  }
+}
+
+export async function terminateManagedProcessTree(
+  child: ChildProcess,
+  {
+    platform = process.platform,
+    spawnProcess = spawn,
+  }: ManagedProcessOptions = {},
+): Promise<void> {
+  if (processStreamsClosed(child)) return;
+  if (platform === "win32") {
+    signalWindowsProcessTree(child, false, spawnProcess);
+  } else {
+    signalPosixProcessTree(child, "SIGTERM");
+  }
+  if (await waitForProcessClose(child, PROCESS_TERMINATE_GRACE_MS)) return;
+  if (platform === "win32") {
+    signalWindowsProcessTree(child, true, spawnProcess);
+  } else {
+    signalPosixProcessTree(child, "SIGKILL");
+  }
+  await waitForProcessClose(child, STDIO_DRAIN_GRACE_MS);
+}
+
+export async function drainExitedProcessStreams({
+  child,
+  closePromise,
+  streamsClosed,
+  forceCloseStreams,
+  options,
+}: {
+  child: ChildProcess;
+  closePromise: Promise<void>;
+  streamsClosed: () => boolean;
+  forceCloseStreams: () => void;
+  options?: ManagedProcessOptions;
+}): Promise<string | null> {
+  if (streamsClosed()) return null;
+  const closedDuringDrain = await Promise.race([
+    closePromise.then(() => true),
+    sleep(STDIO_DRAIN_GRACE_MS).then(() => streamsClosed()),
+  ]);
+  if (closedDuringDrain || streamsClosed()) return null;
+  await terminateManagedProcessTree(child, options);
+  if (!streamsClosed()) forceCloseStreams();
+  return EXEC_LIFECYCLE_ERROR;
 }
 
 function createToolAbortError(): Error {
@@ -96,6 +248,7 @@ export class ExecSession {
   private stdoutFinished = false;
   private stderrFinished = false;
   private streamsClosed = false;
+  private lifecycleError: string | null = null;
   private readonly closePromise: Promise<void>;
   private resolveClose!: () => void;
 
@@ -127,7 +280,12 @@ export class ExecSession {
       this.resolveClose = resolve;
     });
     if (!shellProgram) {
-      this.process = spawnProcess(command, { cwd, env, shell: true });
+      this.process = spawnProcess(command, {
+        cwd,
+        env,
+        shell: true,
+        detached: process.platform !== "win32",
+      });
     } else if (process.platform === "win32") {
       this.process = spawnProcess(command, { cwd, env, shell: true, windowsHide: true });
     } else {
@@ -136,7 +294,7 @@ export class ExecSession {
       const shellName = resolvedShell.split(/[\\/]/).pop()?.toLowerCase() ?? "";
       if (login && ["bash", "bash.exe", "zsh", "zsh.exe"].includes(shellName)) args.push("-l");
       args.push("-c", command);
-      this.process = spawnProcess(resolvedShell, args, { cwd, env });
+      this.process = spawnProcess(resolvedShell, args, { cwd, env, detached: true });
     }
     this.process.on("error", (error) => this.chunks.push(`Error executing command: ${error.message}`));
     this.process.stdout.on("data", (chunk: Buffer) => {
@@ -158,7 +316,7 @@ export class ExecSession {
   }
 
   private isDone(): boolean {
-    return this.process.exitCode != null || this.process.signalCode != null;
+    return processExited(this.process);
   }
 
   async write(data: string): Promise<string | null> {
@@ -177,14 +335,9 @@ export class ExecSession {
   }
 
   async kill(): Promise<void> {
-    if (this.isDone()) return;
-    this.process.kill("SIGTERM");
-    await Promise.race([
-      new Promise<void>((resolve) => this.process.once("close", () => resolve())),
-      sleep(5000).then(() => {
-        if (!this.isDone()) this.process.kill("SIGKILL");
-      }),
-    ]);
+    if (this.streamsClosed) return;
+    await terminateManagedProcessTree(this.process);
+    if (!this.streamsClosed) this.forceCloseStreams();
   }
 
   async poll(
@@ -201,7 +354,14 @@ export class ExecSession {
       this.timedOut = true;
       await this.kill();
     }
-    if (this.isDone() && !this.streamsClosed) await this.closePromise;
+    if (this.isDone() && !this.streamsClosed) {
+      this.lifecycleError ??= await drainExitedProcessStreams({
+        child: this.process,
+        closePromise: this.closePromise,
+        streamsClosed: () => this.streamsClosed,
+        forceCloseStreams: () => this.forceCloseStreams(),
+      });
+    }
     throwIfAborted(abortSignal);
     const raw = this.chunks.join("");
     this.chunks = [];
@@ -217,6 +377,7 @@ export class ExecSession {
       terminated,
       stdinClosed,
       truncatedChars: truncated,
+      lifecycleError: this.lifecycleError,
     };
   }
 
@@ -240,6 +401,17 @@ export class ExecSession {
     if (this.stderrFinished) return;
     this.stderrFinished = true;
     this.appendStderr(this.stderrDecoder.end());
+  }
+
+  private forceCloseStreams(): void {
+    this.process.stdout.destroy();
+    this.process.stderr.destroy();
+    this.process.stdin.destroy();
+    this.finishStdoutOnce();
+    this.finishStderrOnce();
+    if (this.streamsClosed) return;
+    this.streamsClosed = true;
+    this.resolveClose();
   }
 }
 
@@ -388,6 +560,7 @@ export function formatSessionPoll(sessionId: string, poll: SessionPoll): string 
   const parts = poll.output ? [poll.output] : [];
   if (poll.truncatedChars) parts.push(`(output truncated by ${poll.truncatedChars.toLocaleString()} chars)`);
   if (poll.timedOut) parts.push("Error: Command timed out; session was terminated.");
+  if (poll.lifecycleError) parts.push(poll.lifecycleError);
   if (poll.terminated && !poll.timedOut) parts.push("Session terminated.");
   if (poll.stdinClosed) parts.push("Stdin closed.");
   if (poll.done) parts.push(`Exit code: ${poll.exitCode}`);
@@ -571,6 +744,7 @@ export class WriteStdinTool extends Tool {
       terminated: false,
       stdinClosed: false,
       truncatedChars: 0,
+      lifecycleError: null,
     });
     return `${formatted}\nWait target not observed: '${waitFor}'`;
   }

@@ -1,11 +1,16 @@
 /** App module. */
 import { SseEventSchema, type AccountSessionView, type SseEvent } from "@memmy/local-api-contracts";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { gtagEvent } from "./analytics/gtag-init.js";
-import { AgentRuntimeBridge } from "./app/agent-runtime-bridge.js";
+import {
+  AgentRuntimeBridge,
+  createAgentTaskStateCoordinator,
+  type AgentTaskStateCoordinator
+} from "./app/agent-runtime-bridge.js";
 import { AppProviders, useApiClients } from "./app/providers.js";
 import { AppRouter } from "./app/router.js";
 import { UpdateCoordinatorProvider } from "./app/update-coordinator.js";
+import { GithubStarPromptHost } from "./components/github-star-prompt-host.js";
 import {
   FOCUSED_AGENT_CHAT_STORAGE_KEY,
   readGuidanceCompleted,
@@ -32,7 +37,14 @@ import {
   formatScanCompletedError
 } from "./pages/agent-source-scan-error.js";
 import { useTranslation } from "./i18n/use-translation.js";
-import { agentActions, appActions, type AppAction } from "./state/app-actions.js";
+import {
+  AGENT_SOURCE_SCAN_COMPLETION_FEEDBACK_MS,
+  agentActions,
+  appActions,
+  createAgentOperationError,
+  type AppAction
+} from "./state/app-actions.js";
+import type { AgentState } from "./state/agent-chat-slice.js";
 import { useAppState } from "./state/app-state.js";
 
 /** Handles app. */
@@ -46,14 +58,27 @@ export function App() {
 
 /** Runs runtime app. */
 function RuntimeApp() {
-  const { dispatch } = useAppState();
+  const { state, dispatch } = useAppState();
   const { clients, setClients } = useApiClients();
   const { t } = useTranslation();
   const translationRef = useRef(t);
+  const agentStateRef = useRef(state.agent);
   const [bootKey, setBootKey] = useState(0);
   translationRef.current = t;
+  agentStateRef.current = state.agent;
+  const taskStateCoordinator = useMemo(() => (
+    clients?.memmyAgent
+      ? createAgentTaskStateCoordinator(
+          clients.memmyAgent,
+          dispatch,
+          () => agentStateRef.current
+        )
+      : null
+  ), [clients?.memmyAgent, dispatch]);
 
   const retry = useCallback(() => setBootKey((value) => value + 1), []);
+
+  useEffect(() => () => taskStateCoordinator?.dispose(), [taskStateCoordinator]);
 
   useEffect(() => {
     if (typeof window === "undefined" || !window.memmy?.onRouteTargetRequest) {
@@ -61,13 +86,48 @@ function RuntimeApp() {
     }
 
     return window.memmy.onRouteTargetRequest((target) => {
-      applyMainWindowRouteTarget(target, dispatch, clients?.memmyAgent ?? null);
+      applyMainWindowRouteTarget(
+        target,
+        dispatch,
+        clients?.memmyAgent ?? null,
+        agentStateRef.current,
+        taskStateCoordinator ?? undefined
+      );
     });
-  }, [clients?.memmyAgent, dispatch]);
+  }, [clients?.memmyAgent, dispatch, taskStateCoordinator]);
 
   useEffect(() => {
     let events: EventSource | undefined;
     let isActive = true;
+    const scanCompletionTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
+
+    function scheduleScanCompletionExpiry(jobId: string) {
+      const existingTimeout = scanCompletionTimeouts.get(jobId);
+      if (existingTimeout) clearTimeout(existingTimeout);
+      scanCompletionTimeouts.set(jobId, setTimeout(() => {
+        scanCompletionTimeouts.delete(jobId);
+        dispatch(appActions.agentSourceScanCompletionExpired(jobId));
+      }, AGENT_SOURCE_SCAN_COMPLETION_FEEDBACK_MS));
+    }
+
+    async function reconcileAgentSourceScanStatus(agentSourceClient: ReturnType<typeof createAppClients>["agentSources"]) {
+      try {
+        const status = await agentSourceClient.getScanStatus();
+        if (!isActive) return;
+        if (status.progress) {
+          dispatch(appActions.agentSourceScanProgressReceived(status.progress));
+          return;
+        }
+        if (status.completion) {
+          dispatch(appActions.agentSourceScanCompleted(status.completion));
+          scheduleScanCompletionExpiry(status.completion.jobId);
+          return;
+        }
+        dispatch(appActions.agentSourceScanCompleted());
+      } catch {
+        // The next heartbeat or reconnect will reconcile again.
+      }
+    }
 
     /** Handles boot. */
     async function boot() {
@@ -133,6 +193,9 @@ function RuntimeApp() {
         dispatch(appActions.agentSourcesLoaded(sources));
         if (scanStatus.progress) {
           dispatch(appActions.agentSourceScanProgressReceived(scanStatus.progress));
+        } else if (scanStatus.completion) {
+          dispatch(appActions.agentSourceScanCompleted(scanStatus.completion));
+          scheduleScanCompletionExpiry(scanStatus.completion.jobId);
         }
         if (accountSession.authenticated) {
           dispatch(appActions.accountUpdated({
@@ -152,7 +215,10 @@ function RuntimeApp() {
         dispatch(appActions.eventStatusChanged("connecting"));
 
         events = createEventsConnection(runtimeConfig);
-        events.addEventListener("app.connected", () => dispatch(appActions.eventStatusChanged("connected")));
+        events.addEventListener("app.connected", () => {
+          dispatch(appActions.eventStatusChanged("connected"));
+          void reconcileAgentSourceScanStatus(clients.agentSources);
+        });
         events.addEventListener("app.heartbeat", () => dispatch(appActions.eventStatusChanged("heartbeat")));
         events.addEventListener("agent_source.scan_progress", (event) => {
           const parsed = parseSseEvent(event);
@@ -162,9 +228,14 @@ function RuntimeApp() {
         });
         events.addEventListener("agent_source.scan_completed", (event) => {
           const parsed = parseSseEvent(event);
-          const scanResults = parsed?.type === "agent_source.scan_completed" ? parsed.payload.results : null;
+          if (parsed?.type !== "agent_source.scan_completed") {
+            return;
+          }
+          const { jobId, sourceId, results: scanResults } = parsed.payload;
+          const scanSucceeded = scanResults.every((result) => result.errors.length === 0);
           clearMemoryPanelCache();
-          dispatch(appActions.agentSourceScanCompleted());
+          dispatch(appActions.agentSourceScanCompleted({ jobId, sourceId, succeeded: scanSucceeded }));
+          scheduleScanCompletionExpiry(jobId);
           void clients.agentSources
             .listSources()
             .then((nextSources) => {
@@ -197,13 +268,17 @@ function RuntimeApp() {
     return () => {
       isActive = false;
       events?.close();
+      for (const timeout of scanCompletionTimeouts.values()) {
+        clearTimeout(timeout);
+      }
     };
   }, [bootKey, dispatch, setClients]);
 
   return (
     <UpdateCoordinatorProvider>
-      <AgentRuntimeBridge>
+      <AgentRuntimeBridge taskStateCoordinator={taskStateCoordinator ?? undefined}>
         <AppRouter onRetry={retry} />
+        <GithubStarPromptHost />
       </AgentRuntimeBridge>
     </UpdateCoordinatorProvider>
   );
@@ -212,13 +287,19 @@ function RuntimeApp() {
 export function applyMainWindowRouteTarget(
   rawTarget: MainWindowRouteTarget,
   dispatch: (action: AppAction) => void,
-  agentClient: Pick<MemmyAgentClient, "chatIdToSessionKey" | "readWebuiThread" | "listSessions" | "readSidebarState"> | null = null
+  agentClient: Pick<MemmyAgentClient, "chatIdToSessionKey" | "readWebuiThread" | "getSessionSnapshot" | "readSidebarState"> | null = null,
+  agentState?: Pick<AgentState, "sidebarStateVersion" | "runStatusVersionByChatId">,
+  taskStateCoordinator?: Pick<AgentTaskStateCoordinator, "focusTask">
 ): void {
   const target = resolveMainWindowRouteTarget(rawTarget);
   if (target.route === "/main") {
     if (target.agentChatId && agentClient) {
       rememberFocusedAgentChat(null);
-      focusMainWindowAgentChat(target.agentChatId, agentClient, dispatch);
+      if (taskStateCoordinator) {
+        taskStateCoordinator.focusTask(target.agentChatId);
+      } else {
+        focusMainWindowAgentChat(target.agentChatId, agentClient, dispatch, agentState);
+      }
     } else {
       rememberFocusedAgentChat(target.agentChatId);
     }
@@ -234,15 +315,21 @@ let mainWindowRouteAgentRequestCounter = 0;
 
 function focusMainWindowAgentChat(
   chatId: string,
-  client: Pick<MemmyAgentClient, "chatIdToSessionKey" | "readWebuiThread" | "listSessions" | "readSidebarState">,
-  dispatch: (action: AppAction) => void
+  client: Pick<MemmyAgentClient, "chatIdToSessionKey" | "readWebuiThread" | "getSessionSnapshot" | "readSidebarState">,
+  dispatch: (action: AppAction) => void,
+  agentState?: Pick<AgentState, "sidebarStateVersion" | "runStatusVersionByChatId">
 ): void {
   mainWindowRouteAgentRequestCounter += 1;
   const sessionKey = client.chatIdToSessionKey(chatId);
   const historyRequestId = `main-route-${chatId}-${mainWindowRouteAgentRequestCounter}`;
   const sessionsRequestId = `main-route-sessions-${mainWindowRouteAgentRequestCounter}`;
   dispatch(agentActions.historyLoading(sessionKey, chatId, historyRequestId));
-  dispatch(agentActions.sessionsLoading(sessionsRequestId));
+  dispatch(agentActions.taskStateLoading({
+    requestId: sessionsRequestId,
+    sidebarStateVersionAtStart: agentState?.sidebarStateVersion ?? 0,
+    runStatusVersionAtStartByChatId: { ...(agentState?.runStatusVersionByChatId ?? {}) },
+    recoveryGeneration: null
+  }));
 
   void client
     .readWebuiThread(sessionKey)
@@ -256,20 +343,30 @@ function focusMainWindowAgentChat(
       }
 
       console.warn("focus main window agent chat history failed", error);
-      dispatch(agentActions.historyOpenMissing(sessionKey, chatId, historyRequestId));
+      dispatch(agentActions.historyOpenFailed(chatId, historyRequestId, createAgentOperationError({
+        source: "history",
+        message: error instanceof Error ? error.message : String(error),
+        chatId
+      })));
     });
 
-  void Promise.all([
-    client.listSessions(),
+  void Promise.allSettled([
+    client.getSessionSnapshot({ timeoutMs: 10_000 }),
     client.readSidebarState()
   ])
-    .then(([sessions, sidebarState]) => {
-      dispatch(agentActions.sidebarStateLoaded(sidebarState));
-      dispatch(agentActions.sessionsLoaded(sessions, sessionsRequestId));
-    })
-    .catch((error) => {
-      console.warn("focus main window agent chat sessions failed", error);
-      dispatch(agentActions.sessionsLoadFailed(sessionsRequestId));
+    .then(([sessionsResult, sidebarResult]) => {
+      const failures = [sessionsResult, sidebarResult]
+        .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+        .map((result) => result.reason instanceof Error ? result.reason.message : String(result.reason));
+      dispatch(agentActions.taskStateSettled({
+        requestId: sessionsRequestId,
+        recoveryGeneration: null,
+        ...(sessionsResult.status === "fulfilled" ? { snapshot: sessionsResult.value } : {}),
+        ...(sidebarResult.status === "fulfilled" ? { sidebarState: sidebarResult.value } : {}),
+        ...(failures.length > 0 ? {
+          error: createAgentOperationError({ source: "sessions", message: failures.join("; ") })
+        } : {})
+      }));
     });
 }
 

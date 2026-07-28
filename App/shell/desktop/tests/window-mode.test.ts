@@ -171,48 +171,56 @@ describe("desktop pet window mode", () => {
     expect(source).toContain("if (consumePetWindowCloseActivateSuppression()) {\n      return;\n    }\n\n    activateMainWindow();");
   });
 
-  it("relaunches after quit cleanup when macOS reopens during or just before old instance exit", () => {
+  it("retries the single-instance lock so macOS quit-and-reopen survives slow old-instance exit", () => {
     const source = readFileSync(mainSourcePath, "utf8");
-    const singleInstanceIndex = source.indexOf("const hasSingleInstanceLock = app.requestSingleInstanceLock();");
-    const singleInstanceBlock = source.slice(singleInstanceIndex, source.indexOf('app.on("activate"', singleInstanceIndex));
-    const beforeQuitIndex = source.indexOf('app.on("before-quit"');
-    const beforeQuitBlock = source.slice(beforeQuitIndex, source.indexOf("function armQuitCleanupForceExitTimer(): void", beforeQuitIndex));
     const secondInstanceIndex = source.indexOf('app.on("second-instance"');
     const secondInstanceBlock = source.slice(secondInstanceIndex, source.indexOf("app.whenReady()", secondInstanceIndex));
-    const forceExitBlock = source.slice(
-      source.indexOf("function armQuitCleanupForceExitTimer(): void"),
-      source.indexOf("function hideAppShellForQuit(): void")
-    );
+    const whenReadyIndex = source.indexOf("app.whenReady()", secondInstanceIndex);
+    const whenReadyBlock = source.slice(whenReadyIndex, source.indexOf('app.on("activate"', whenReadyIndex));
+    const beforeQuitIndex = source.indexOf('app.on("before-quit"');
+    const beforeQuitBlock = source.slice(beforeQuitIndex, source.indexOf("function armQuitCleanupForceExitTimer(): void", beforeQuitIndex));
 
-    expect(source).toContain("const hasSingleInstanceLock = app.requestSingleInstanceLock();");
-    expect(singleInstanceBlock).toContain("if (!hasSingleInstanceLock)");
-    expect(singleInstanceBlock).toContain("app.quit();");
-    expect(source).toContain("let shouldRelaunchAfterQuitCleanup = false;");
-    expect(source).toContain("let lastMacosSecondInstanceAt = 0;");
-    expect(source).toContain("const MACOS_REOPEN_SECOND_INSTANCE_GRACE_MS = 2000;");
-    expect(source).toContain('const MACOS_MICROPHONE_RELAUNCH_MARKER_FILE = "macos-microphone-relaunch.json";');
-    expect(source).toContain("const MACOS_MICROPHONE_RELAUNCH_MARKER_TTL_MS = 5 * 60 * 1000;");
-    expect(secondInstanceBlock).toContain('if (process.platform === "darwin")');
-    expect(secondInstanceBlock).toContain("lastMacosSecondInstanceAt = Date.now();");
+    // The replacement instance started by macOS "Quit & Reopen" retries the lock until the old
+    // instance finishes cleanup, instead of quitting immediately or relaunching heuristically.
+    expect(source).toContain("let hasSingleInstanceLock = app.requestSingleInstanceLock();");
+    expect(source).toContain("const SINGLE_INSTANCE_LOCK_RETRY_INTERVAL_MS = 500;");
+    expect(source).toContain("const SINGLE_INSTANCE_LOCK_WAIT_DEADLINE_MS = 10000;");
+    expect(source).toContain("const SECOND_INSTANCE_ACTIVATE_DEBOUNCE_MS = 3000;");
+    expect(source).toContain("async function waitForSingleInstanceLock(): Promise<boolean>");
+    expect(source).toContain("hasSingleInstanceLock = app.requestSingleInstanceLock();");
+    expect(source).toContain("await delay(SINGLE_INSTANCE_LOCK_RETRY_INTERVAL_MS);");
+    expect(whenReadyBlock).toContain("if (!(await waitForSingleInstanceLock()))");
+    expect(whenReadyBlock).toContain("app.quit();");
+    expect(whenReadyBlock).toContain("await boot();");
+
+    // While quitting, the old instance stays out of the way and lets the replacement take over;
+    // a healthy primary debounces the activations caused by the replacement's lock retries.
     expect(secondInstanceBlock).toContain("if (isQuitting || isQuitCleanupInProgress)");
-    expect(secondInstanceBlock).toContain("shouldRelaunchAfterQuitCleanup = true;");
-    expect(secondInstanceBlock).toContain("return;");
+    expect(secondInstanceBlock).toContain("SECOND_INSTANCE_ACTIVATE_DEBOUNCE_MS");
+    expect(secondInstanceBlock).toContain("activateMainWindow();");
     expect(beforeQuitBlock).toContain("if (!hasSingleInstanceLock)");
-    expect(beforeQuitBlock).toContain("if (shouldTreatMacosMicrophonePermissionReopen())");
-    expect(source).toContain("function shouldTreatRecentMacosSecondInstanceAsReopen(): boolean");
-    expect(source).toContain("function shouldTreatMacosMicrophonePermissionReopen(): boolean");
-    expect(source).toContain("function markMacosMicrophoneRelaunchRequested(): void");
-    expect(source).toContain("function readMacosMicrophoneRelaunchRequestedAt(): Date | null");
-    expect(source).toContain("function clearMacosMicrophoneRelaunchMarker(): void");
-    expect(source).toContain("function resolveMacosMicrophoneRelaunchMarkerPath(): string");
-    expect(source).toContain("markMacosMicrophoneRelaunchRequested();");
-    expect(source).toContain('if (granted) {\n      clearMacosMicrophoneRelaunchMarker();\n      return "granted";\n    }');
-    expect(source).toContain("const hasRecentReopenAttempt = shouldTreatRecentMacosSecondInstanceAsReopen();");
-    expect(source).toContain('if (microphoneAccessStatus === "granted") {\n    clearMacosMicrophoneRelaunchMarker();\n    return hasRecentReopenAttempt;\n  }');
+
+    // macOS can deliver the "Quit & Reopen" quit request to the freshly reopened instance when the
+    // old instance exits slowly; that stale quit is ignored once so the reopened window survives.
+    expect(source).toContain("const MACOS_STALE_REOPEN_QUIT_GRACE_MS = 20000;");
+    expect(source).toContain("function shouldIgnoreStaleReopenQuit(): boolean");
+    expect(source).toContain("didWaitForSingleInstanceLock = true;");
+    expect(beforeQuitBlock).toContain("if (shouldIgnoreStaleReopenQuit())");
+    expect(beforeQuitBlock).toContain("hasIgnoredStaleReopenQuit = true;");
+    expect(beforeQuitBlock).toContain("event.preventDefault();");
+
+    // When the reopen instead reaches the dying instance as an activate event (no replacement
+    // process is spawned), the dying instance honors it by relaunching after cleanup.
+    const activateIndex = source.indexOf('app.on("activate"');
+    const activateBlock = source.slice(activateIndex, source.indexOf('app.on("window-all-closed"', activateIndex));
+    expect(activateBlock).toContain("if (isQuitting || isQuitCleanupInProgress)");
+    expect(activateBlock).toContain("shouldRelaunchAfterQuitCleanup = true;");
     expect(source).toContain("function relaunchAfterQuitCleanupIfRequested(): void");
     expect(source).toContain("relaunchAfterQuitCleanupIfRequested();\n      app.quit();");
-    expect(forceExitBlock).toContain("runtimeServices?.terminateSync();\n    relaunchAfterQuitCleanupIfRequested();\n    app.exit(0);");
-    expect(source).toContain("app.relaunch();");
+    expect(source).toContain("relaunchAfterQuitCleanupIfRequested();\n    app.exit(0);");
+
+    // The reopen intent comes only from concrete signals (activate during quit): no marker files.
+    expect(source).not.toContain("macos-microphone-relaunch");
   });
 
   it("restores an existing full window without reloading the renderer", () => {

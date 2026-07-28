@@ -30,7 +30,14 @@ export const validateLegalEnv = (env: Record<string, string | undefined>): void 
 /** Vite configuration. */
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, REPO_ROOT_DIR, "");
-  validateLegalEnv(env);
+  const validationEnv = mode === "test"
+    ? {
+        ...env,
+        MEMMY_LEGAL_CN_BASE_URL: "https://test.memmy.cn",
+        MEMMY_LEGAL_INTL_BASE_URL: "https://test.memmy.bot"
+      }
+    : env;
+  validateLegalEnv(validationEnv);
   const memmyAgentTarget = env.VITE_MEMMY_AGENT_WEBUI_URL?.trim() || DEFAULT_MEMMY_AGENT_WEBUI_BASE_URL;
   const memmyAgentWsTarget = memmyAgentTarget.replace(/^http/, "ws");
 

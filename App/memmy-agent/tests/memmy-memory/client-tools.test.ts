@@ -95,7 +95,6 @@ describe("memmy memory tools", () => {
         },
       }),
       currentSessionId: () => "memmy-agent::cli:direct",
-      currentEpisodeId: () => "ep-1",
       currentTurnId: () => "turn-1",
       currentUserText: () => "Summarize the current README",
     };
@@ -183,7 +182,6 @@ describe("memmy memory tools", () => {
     const runtime: MemmyMemoryToolRuntime = {
       requestEnvelope: () => ({}),
       currentSessionId: () => "session-1",
-      currentEpisodeId: () => "episode-1",
       currentTurnId: () => "turn-1",
       currentUserText: () => "current task",
     };
@@ -194,10 +192,12 @@ describe("memmy memory tools", () => {
 
     expect(getResult).toContain('<memmy_memory_context source="tool_get">');
     expect(getResult).toContain("User:\ncheck memory");
-    expect(getResult).toContain("Tool calls:");
-    expect(getResult).toContain('input: {"command":"sysctl hw.memsize"}');
-    expect(getResult).toContain("output:\n    hw.memsize: 17179869184");
     expect(getResult).toContain("Assistant:\n16 GB");
+    expect(getResult).not.toContain("Summary:");
+    expect(getResult).not.toContain("title: Checked memory");
+    expect(getResult).not.toContain("Tool calls:");
+    expect(getResult).not.toContain('input: {"command":"sysctl hw.memsize"}');
+    expect(getResult).not.toContain("hw.memsize: 17179869184");
     expect(getResult).not.toContain("RawTurn:");
     expect(getResult).not.toContain("TraceStep:");
     expect(getResult).not.toContain("Alpha:");
@@ -218,7 +218,6 @@ describe("memmy memory tools", () => {
     const runtime: MemmyMemoryToolRuntime = {
       requestEnvelope: () => ({}),
       currentSessionId: () => "memmy-agent::cli:direct",
-      currentEpisodeId: () => "ep-1",
       currentTurnId: () => "turn-1",
       currentUserText: () => "current task",
     };
@@ -255,7 +254,6 @@ describe("memmy memory tools", () => {
         },
       }),
       currentSessionId: (sessionKey) => sessionKey ? `memmy-agent::${sessionKey}` : null,
-      currentEpisodeId: () => null,
       currentTurnId: () => null,
       currentUserText: () => "current task",
     };

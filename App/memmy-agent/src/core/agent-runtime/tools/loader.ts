@@ -5,6 +5,7 @@ import { Tool } from "./base.js";
 import { ToolContext } from "./context.js";
 import { ToolRegistry } from "./registry.js";
 import { ApplyPatchTool } from "./apply-patch.js";
+import { AgentSourceTool } from "./agent-source.js";
 import { CronTool } from "./cron.js";
 import { ListExecSessionsTool, WriteStdinTool } from "./exec-session.js";
 import { ReadFileTool, WriteFileTool, EditFileTool, ListDirTool } from "./filesystem.js";
@@ -15,6 +16,7 @@ import { FindFilesTool, GrepTool } from "./search.js";
 import { ExecTool } from "./shell.js";
 import { SpawnTool } from "./spawn.js";
 import { WebFetchTool, WebSearchTool } from "./web.js";
+import { BROWSER_TOOL_CLASSES } from "./browser.js";
 
 export const SKIP_MODULES = new Set([
   "base",
@@ -27,7 +29,6 @@ export const SKIP_MODULES = new Set([
   "sandbox",
   "mcp",
   "index",
-  "runtime-state",
 ]);
 
 type ToolClass = (new (...args: any[]) => Tool) & {
@@ -38,6 +39,7 @@ type ToolClass = (new (...args: any[]) => Tool) & {
 };
 
 const BUILTIN_TOOL_CLASSES: ToolClass[] = [
+  AgentSourceTool,
   ApplyPatchTool,
   CompleteGoalTool,
   CronTool,
@@ -56,6 +58,7 @@ const BUILTIN_TOOL_CLASSES: ToolClass[] = [
   WebSearchTool,
   WriteFileTool,
   WriteStdinTool,
+  ...BROWSER_TOOL_CLASSES,
 ];
 
 function scopesFor(cls: ToolClass): Set<string> {

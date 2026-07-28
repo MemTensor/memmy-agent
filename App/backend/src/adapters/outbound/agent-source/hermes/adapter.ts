@@ -2,6 +2,7 @@
 import { access } from "node:fs/promises";
 import { join } from "node:path";
 import { resolveHermesHomeDirectory } from "../../agent-paths.js";
+import { collectConversationWindow, remainingMessageCapacity } from "../conversation-window.js";
 import { redactSecrets } from "../secret-redactor.js";
 import type { ConversationMessage, ScanOptions, SourceAdapter, SourceDescriptor } from "../types.js";
 import { readHermesRollout, type RawHermesRolloutMessage } from "./rollout-reader.js";
@@ -78,15 +79,14 @@ export function createHermesSourceAdapter(deps: CreateHermesSourceAdapterDeps = 
             ? streamJsonlMessages(target.session, options.signal)
             : streamStateDbMessages(target.stateDbPath);
 
-        for await (const message of iterable) {
+        const messages = await collectConversationWindow(
+          iterable,
+          options.since,
+          options.signal,
+          remainingMessageCapacity(options.maxMessages, emittedMessages)
+        );
+        for (const message of messages) {
           throwIfAborted(options.signal);
-          if (limitReached(emittedMessages, options.maxMessages)) {
-            break;
-          }
-          if (options.since && message.createdAt < options.since) {
-            continue;
-          }
-
           options.onProgress?.({
             sourceId: descriptor.sourceId,
             phase: "redact",

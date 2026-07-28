@@ -16,7 +16,7 @@ describe("AgentThreadMessages", () => {
     const threadSource = readFileSync(agentThreadMessagesSourceUrl, "utf8");
     const contentSource = readFileSync(agentMessageContentSourceUrl, "utf8");
 
-    expect(threadSource).toContain("import { memo, useEffect, useMemo, useRef, useState, type CSSProperties, type ComponentType, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent, type SVGProps } from \"react\";");
+    expect(threadSource).toMatch(/import \{[^}]*\bmemo\b[^}]*\} from "react";/u);
     expect(threadSource).toContain("export const AgentThreadMessages = memo(function AgentThreadMessages(props: AgentThreadMessagesProps) {");
     expect(threadSource).toContain("}, areAgentThreadMessagesPropsEqual);");
     expect(threadSource).toContain("function areAgentThreadMessagesPropsEqual(previous: AgentThreadMessagesProps, next: AgentThreadMessagesProps): boolean");

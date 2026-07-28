@@ -1,12 +1,16 @@
 /** Welcome page legal link tests. */
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { getLegalLinkUrl } from "../../legal/legal-links.js";
 
 const welcomePageSourcePath = fileURLToPath(new URL("../welcome-page.tsx", import.meta.url));
 
 describe("WelcomePage 协议入口外链", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it("服务协议入口用当前语言的外链打开系统浏览器", () => {
     const source = readSource();
 
@@ -29,6 +33,9 @@ describe("WelcomePage 协议入口外链", () => {
   });
 
   it("getLegalLinkUrl 随语言联动:中英文取到不同的协议页地址", () => {
+    vi.stubEnv("MEMMY_LEGAL_CN_BASE_URL", "https://test.memmy.cn");
+    vi.stubEnv("MEMMY_LEGAL_INTL_BASE_URL", "https://test.memmy.bot");
+
     expect(getLegalLinkUrl("terms", "zh-CN")).not.toBe(getLegalLinkUrl("terms", "en-US"));
     expect(getLegalLinkUrl("data", "zh-CN")).not.toBe(getLegalLinkUrl("data", "en-US"));
   });

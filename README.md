@@ -22,7 +22,7 @@ Sign up to get free tokens. Model routing is automatic — start exp
 
 > **Trial credits:**
 
-- **Registration grants 30,000,000 tokens; you can check your remaining balance and usage inside the app.**
+- **Registration grants Agent task trial tokens; the current amount and usage are shown in the app.**
 
 Once the trial credits run out, you can switch to BYOK and use your own model API.
 
@@ -50,7 +50,7 @@ Memmy provides a complete local Agent runtime environment.
 
 - **A unified experience across entry points** Supports the desktop app, CLI/TUI, and an OpenAI-compatible API, all sharing the same Agents, memory, and configuration.
 - **Continuous task collaboration** Start a task from any entry point and seamlessly continue it across different scenarios, unconstrained by a single session.
-- **Extensible Agent capabilities** Connect more tools through Skills and MCP, taking the Agent from conversation to real task execution.
+- **Extensible Agent capabilities** Connect more tools through Skills and MCP, taking the Agent from conversation to real task execution. Memmy also provides managed Chromium browser tools for local page inspection and visual verification.
 
 ### 🔬 Tool & Ecosystem Connections
 
@@ -91,7 +91,8 @@ Memmy is not just a chat interface — it is an AI Agent Runtime t
 
 Memmy uses an npm workspaces monorepo architecture:
 
-Memmy System Architecture
+![Memmy System Architecture](docs/assets/memmy-architecture-en.png)
+
 
 ## Memmy vs. Personal AI Agents
 
@@ -122,7 +123,7 @@ Compared with "personal AI Agents" like Hermes and OpenClaw, what sets
 3. Enter the main workbench and send your first task.
 4. Open "Tools" to connect messaging channels or third-party tools; open "Memory" to scan Agent history sources.
 
-> **Account mode free credits**: signing in grants **30,000,000 (30 million) trial tokens**, so you can get running without your own API Key. You can check used / total / remaining amounts and the expiry date anytime in the app. Trial tokens use model `(TBD)`, valid for `(TBD)`. Once used up or expired, switch to API Key (BYOK) mode and continue with your own quota.
+> **Account mode free credits**: signing in grants Agent task trial tokens, so you can get running without your own API Key. The current amount and usage are shown in the app. Once used up or expired, switch to API Key (BYOK) mode and continue with your own quota.
 
 ### Option 2: `memmy` CLI (Agent Runtime)
 
@@ -145,7 +146,14 @@ agents:
 providers:
   openai:
     apiKey: ${OPENAI_API_KEY}   # Supports ${ENV_NAME}-style environment variable references
+tools:
+  browser:
+    enabled: true
+    maxSessions: 4
+    idleTimeoutS: 900
 ```
+
+The desktop app and `scripts/dev-start.sh` prepare the matching managed Chromium build before the Agent Gateway starts. Agent requests never download a browser; when the managed executable is unavailable, browser tools are omitted while other Agent features continue to work.
 
 ### Option 3: `memmy-memory` CLI (memory access for external Agents / scripts)
 

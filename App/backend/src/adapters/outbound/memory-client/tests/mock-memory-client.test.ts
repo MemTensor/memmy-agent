@@ -79,6 +79,7 @@ describe("createMockMemoryClient", () => {
       "deleteMemory",
       "enqueueImportSummaries",
       "getMemory",
+      "getMemoryProcessingStatus",
       "health",
       "memoryApiLogs",
       "openSession",
@@ -86,6 +87,7 @@ describe("createMockMemoryClient", () => {
       "panelItems",
       "panelOverview",
       "reloadConfig",
+      "retryMemoryProcessing",
       "runWorker",
       "search",
       "startTurn"

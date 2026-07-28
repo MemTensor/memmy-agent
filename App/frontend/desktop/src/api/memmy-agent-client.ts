@@ -22,11 +22,38 @@ const SessionSummarySchema = z.object({
   title: z.string().optional(),
   preview: z.string().optional(),
   updatedAt: z.string().optional(),
-  run_started_at: z.number().optional()
+  run_started_at: z.number().optional(),
+  projectId: z.string().nullable(),
+  cwd: z.string()
 }).passthrough();
 
-const SessionsResponseSchema = z.object({
+const ProjectSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  rootPath: z.string(),
+  pinned: z.boolean(),
+  createdAt: z.string()
+});
+
+const SessionSnapshotSchema = z.object({
+  projectRegistryState: z.union([z.literal("ready"), z.literal("corrupt")]),
+  projects: z.array(ProjectSchema),
   sessions: z.array(SessionSummarySchema)
+});
+
+const ProjectMutationResponseSchema = z.object({
+  project: ProjectSchema,
+  snapshot: SessionSnapshotSchema
+});
+
+const ProjectDeleteResponseSchema = z.object({
+  deletedId: z.string(),
+  deletedSessionKeys: z.array(z.string()),
+  snapshot: SessionSnapshotSchema
+});
+
+const ProjectRevealResponseSchema = z.object({
+  ok: z.literal(true)
 });
 
 const SlashCommandSchema = z.object({
@@ -66,6 +93,7 @@ const SidebarStateSchema = z.object({
     show_previews: z.boolean(),
     show_timestamps: z.boolean(),
     show_archived: z.boolean(),
+    show_project_archived: z.boolean(),
     sort: z.union([z.literal("updated_desc"), z.literal("created_desc"), z.literal("title_asc")])
   }),
   updated_at: z.string().nullable()
@@ -162,6 +190,8 @@ const UploadedAgentMediaResponseSchema = z.object({
 
 export type MemmyAgentBootstrap = z.infer<typeof BootstrapSchema>;
 export type MemmyAgentSessionSummary = z.infer<typeof SessionSummarySchema>;
+export type MemmyAgentProject = z.infer<typeof ProjectSchema>;
+export type MemmyAgentSessionSnapshot = z.infer<typeof SessionSnapshotSchema>;
 export type MemmyAgentSidebarState = z.infer<typeof SidebarStateSchema>;
 export type MemmyAgentWebuiThread = z.infer<typeof WebuiThreadSchema>;
 export type MemmyAgentLastCompaction = z.infer<typeof LastCompactionSchema>;
@@ -241,15 +271,22 @@ export type MemmyAgentMediaAttachment = {
   path?: string;
 };
 
+export type WebuiSessionTarget =
+  | { kind: "standalone" }
+  | { kind: "project"; projectId: string };
+
 export type MemmyAgentSendMessageInput = {
   chatId: string;
   content: string;
+  clientRequestId?: string;
+  target?: WebuiSessionTarget;
   language?: MemmyAgentUiLanguage;
   media?: MemmyAgentMediaInput[];
 };
 
 export type MemmyAgentWsEvent = {
   event: string;
+  connection_generation?: number;
   chat_id?: string;
   client_id?: string;
   text?: string;
@@ -261,6 +298,7 @@ export type MemmyAgentWsEvent = {
   kind?: string;
   detail?: string;
   reason?: string;
+  client_request_id?: string;
   latency_ms?: number;
   media_urls?: MemmyAgentMediaAttachment[];
   metadata?: Record<string, unknown>;
@@ -285,17 +323,36 @@ export type MemmyAgentRunLifecycleEvent = MemmyAgentWsEvent & {
 
 export interface MemmyAgentClient {
   bootstrap(options?: { force?: boolean }): Promise<MemmyAgentBootstrap>;
+  getSessionSnapshot(options?: MemmyAgentRequestOptions): Promise<MemmyAgentSessionSnapshot>;
   listSessions(): Promise<MemmyAgentSessionSummary[]>;
   listSlashCommands(): Promise<MemmyAgentSlashCommand[]>;
   readSidebarState(): Promise<MemmyAgentSidebarState>;
-  writeSidebarState(state: MemmyAgentSidebarState): Promise<MemmyAgentSidebarState>;
+  writeSidebarState(
+    baseUpdatedAt: string | null,
+    state: MemmyAgentSidebarState,
+    options?: MemmyAgentRequestOptions
+  ): Promise<MemmyAgentSidebarState>;
+  createProject(
+    input: { mode: "blank" | "existing"; path: string; name?: string },
+    options?: MemmyAgentRequestOptions
+  ): Promise<MemmyAgentProjectMutationResult>;
+  updateProject(
+    projectId: string,
+    update: { name: string } | { pinned: boolean },
+    options?: MemmyAgentRequestOptions
+  ): Promise<MemmyAgentProjectMutationResult>;
+  revealProject(projectId: string, options?: MemmyAgentRequestOptions): Promise<void>;
+  deleteProject(
+    projectId: string,
+    options?: MemmyAgentRequestOptions
+  ): Promise<MemmyAgentProjectDeleteResult>;
   readWebuiThread(sessionKey: string): Promise<MemmyAgentWebuiThread>;
   readLastCompaction(sessionKey: string): Promise<MemmyAgentLastCompaction>;
   renameSession(sessionKey: string, title: string): Promise<MemmyAgentSessionSummary>;
   deleteSession(sessionKey: string): Promise<boolean>;
-  resolveArtifact(path: string): Promise<ResolvedAgentArtifact>;
-  revealArtifact(path: string): Promise<void>;
-  openArtifact(path: string): Promise<void>;
+  resolveArtifact(path: string, sessionKey: string): Promise<ResolvedAgentArtifact>;
+  revealArtifact(path: string, sessionKey: string): Promise<void>;
+  openArtifact(path: string, sessionKey: string): Promise<void>;
   uploadAgentMedia(attachments: UploadAgentMediaInput[]): Promise<UploadedAgentMedia[]>;
   uploadAgentImages(images: UploadAgentImageInput[]): Promise<UploadedAgentImage[]>;
   connectWebSocket(onEvent?: (event: MemmyAgentWsEvent) => void): Promise<MemmyAgentWebSocketConnection>;
@@ -306,9 +363,10 @@ export interface MemmyAgentClient {
 export type MemmyAgentUnsubscribe = () => void;
 
 export interface MemmyAgentWebSocketConnection {
-  newChat(timeoutMs?: number): Promise<string>;
+  getReadyGeneration(): number | null;
+  newChat(expectedGeneration: number, timeoutMs?: number): Promise<string>;
   attach(chatId: string): void;
-  sendMessage(input: MemmyAgentSendMessageInput): void;
+  sendMessage(input: MemmyAgentSendMessageInput, expectedGeneration: number): Promise<void>;
   stop(chatId: string): void;
   restart(chatId: string): void;
   status(chatId: string): void;
@@ -316,14 +374,38 @@ export interface MemmyAgentWebSocketConnection {
   onChat(chatId: string, handler: (event: MemmyAgentWsEvent) => void): MemmyAgentUnsubscribe;
   onStatusResult(handler: (chatId: string, content: string) => void): MemmyAgentUnsubscribe;
   onHistoryDagResult(handler: (chatId: string, content: string, payload: HistoryDagPayload) => void): MemmyAgentUnsubscribe;
-  onSessionUpdate(handler: (chatId: string, scope?: string) => void): MemmyAgentUnsubscribe;
-  onRuntimeModelUpdate(handler: (modelName: string | null, modelPreset?: string | null) => void): MemmyAgentUnsubscribe;
+  onSessionUpdate(handler: (chatId: string, scope: string | undefined, generation: number) => void): MemmyAgentUnsubscribe;
+  onRuntimeModelUpdate(handler: (modelName: string | null, modelPreset: string | null | undefined, generation: number) => void): MemmyAgentUnsubscribe;
   onRunStatus(handler: (chatId: string, startedAt: number | null) => void): MemmyAgentUnsubscribe;
   onRunLifecycle(handler: (chatId: string, event: MemmyAgentRunLifecycleEvent) => void): MemmyAgentUnsubscribe;
+  requestRunStatusSnapshot(chatId: string, expectedGeneration: number, timeoutMs?: number): Promise<MemmyAgentRunStatusSnapshot>;
   getRunStartedAt(chatId: string): number | null;
   getGoalState(chatId: string): unknown;
   close(): void;
 }
+
+export type MemmyAgentRunStatusSnapshot = {
+  status: "running" | "idle";
+  startedAt: number | null;
+  turnId: string | null;
+  connectionGeneration: number;
+};
+
+export type MemmyAgentProjectMutationResult = {
+  project: MemmyAgentProject;
+  snapshot: MemmyAgentSessionSnapshot;
+};
+
+export type MemmyAgentProjectDeleteResult = {
+  deletedId: string;
+  deletedSessionKeys: string[];
+  snapshot: MemmyAgentSessionSnapshot;
+};
+
+export type MemmyAgentRequestOptions = {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+};
 
 export interface CreateMemmyAgentClientInput {
   baseUrl?: string | null;
@@ -340,16 +422,44 @@ export interface WebSocketLike {
   onclose: ((event: CloseEvent) => void) | null;
   readyState: number;
   send(data: string): void;
-  close(): void;
+  close(code?: number, reason?: string): void;
 }
 
 export class MemmyAgentRequestError extends Error {
   readonly status: number;
+  readonly code: string | null;
+  readonly data?: { sidebarState: MemmyAgentSidebarState };
 
-  constructor(message: string, status: number) {
+  constructor(
+    message: string,
+    status: number,
+    code: string | null = null,
+    data?: { sidebarState: MemmyAgentSidebarState }
+  ) {
     super(message);
     this.name = "MemmyAgentRequestError";
     this.status = status;
+    this.code = code;
+    this.data = data;
+  }
+}
+
+export class AgentGatewayUnavailableError extends Error {
+  constructor(message = "Agent gateway is not ready") {
+    super(message);
+    this.name = "AgentGatewayUnavailableError";
+  }
+}
+
+export class MemmyAgentMessageRejectedError extends Error {
+  readonly detail: string;
+  readonly reason: string;
+
+  constructor(detail: string, reason: string) {
+    super("Message was rejected");
+    this.name = "MemmyAgentMessageRejectedError";
+    this.detail = detail;
+    this.reason = reason;
   }
 }
 
@@ -485,9 +595,12 @@ class HttpMemmyAgentClient implements MemmyAgentClient {
     return this.bootRefreshPromise;
   }
 
+  async getSessionSnapshot(options: MemmyAgentRequestOptions = {}): Promise<MemmyAgentSessionSnapshot> {
+    return this.request("/api/sessions", SessionSnapshotSchema, options);
+  }
+
   async listSessions(): Promise<MemmyAgentSessionSummary[]> {
-    const response = await this.request("/api/sessions", SessionsResponseSchema);
-    return response.sessions;
+    return (await this.getSessionSnapshot()).sessions;
   }
 
   async listSlashCommands(): Promise<MemmyAgentSlashCommand[]> {
@@ -507,9 +620,59 @@ class HttpMemmyAgentClient implements MemmyAgentClient {
     return this.request("/api/webui/sidebar-state", SidebarStateSchema);
   }
 
-  async writeSidebarState(state: MemmyAgentSidebarState): Promise<MemmyAgentSidebarState> {
-    const query = new URLSearchParams({ state: JSON.stringify(state) });
-    return this.request(`/api/webui/sidebar-state/update?${query.toString()}`, SidebarStateSchema);
+  async writeSidebarState(
+    baseUpdatedAt: string | null,
+    state: MemmyAgentSidebarState,
+    options: MemmyAgentRequestOptions = {}
+  ): Promise<MemmyAgentSidebarState> {
+    return this.request("/api/webui/sidebar-state/update", SidebarStateSchema, {
+      ...options,
+      method: "POST",
+      body: {
+        base_updated_at: baseUpdatedAt,
+        state
+      }
+    });
+  }
+
+  async createProject(
+    input: { mode: "blank" | "existing"; path: string; name?: string },
+    options: MemmyAgentRequestOptions = {}
+  ): Promise<MemmyAgentProjectMutationResult> {
+    return this.request("/api/projects", ProjectMutationResponseSchema, {
+      ...options,
+      method: "POST",
+      body: input
+    });
+  }
+
+  async updateProject(
+    projectId: string,
+    update: { name: string } | { pinned: boolean },
+    options: MemmyAgentRequestOptions = {}
+  ): Promise<MemmyAgentProjectMutationResult> {
+    return this.request(`/api/projects/${encodeURIComponent(projectId)}`, ProjectMutationResponseSchema, {
+      ...options,
+      method: "PATCH",
+      body: update
+    });
+  }
+
+  async revealProject(projectId: string, options: MemmyAgentRequestOptions = {}): Promise<void> {
+    await this.request(`/api/projects/${encodeURIComponent(projectId)}/reveal`, ProjectRevealResponseSchema, {
+      ...options,
+      method: "POST"
+    });
+  }
+
+  async deleteProject(
+    projectId: string,
+    options: MemmyAgentRequestOptions = {}
+  ): Promise<MemmyAgentProjectDeleteResult> {
+    return this.request(`/api/projects/${encodeURIComponent(projectId)}`, ProjectDeleteResponseSchema, {
+      ...options,
+      method: "DELETE"
+    });
   }
 
   async readWebuiThread(sessionKey: string): Promise<MemmyAgentWebuiThread> {
@@ -533,24 +696,24 @@ class HttpMemmyAgentClient implements MemmyAgentClient {
     return response.deleted;
   }
 
-  async resolveArtifact(path: string): Promise<ResolvedAgentArtifact> {
+  async resolveArtifact(path: string, sessionKey: string): Promise<ResolvedAgentArtifact> {
     return this.request("/api/webui/artifacts/resolve", ResolvedArtifactSchema, {
       method: "POST",
-      body: { path }
+      body: { path, sessionKey }
     });
   }
 
-  async revealArtifact(path: string): Promise<void> {
+  async revealArtifact(path: string, sessionKey: string): Promise<void> {
     await this.request("/api/webui/artifacts/reveal", RevealArtifactResponseSchema, {
       method: "POST",
-      body: { path }
+      body: { path, sessionKey }
     });
   }
 
-  async openArtifact(path: string): Promise<void> {
+  async openArtifact(path: string, sessionKey: string): Promise<void> {
     await this.request("/api/webui/artifacts/open", RevealArtifactResponseSchema, {
       method: "POST",
-      body: { path }
+      body: { path, sessionKey }
     });
   }
 
@@ -620,10 +783,23 @@ class HttpMemmyAgentClient implements MemmyAgentClient {
   private async request<T>(
     path: string,
     schema: z.ZodType<T>,
-    options: { includeToken?: boolean; headers?: Record<string, string>; method?: string; body?: unknown; retryOnUnauthorized?: boolean } = {}
+    options: {
+      includeToken?: boolean;
+      headers?: Record<string, string>;
+      method?: string;
+      body?: unknown;
+      retryOnUnauthorized?: boolean;
+      signal?: AbortSignal;
+      timeoutMs?: number;
+    } = {}
   ): Promise<T> {
     const includeToken = options.includeToken ?? true;
     const retryOnUnauthorized = options.retryOnUnauthorized ?? true;
+    const timeoutController = options.timeoutMs == null ? null : new AbortController();
+    const timeout = timeoutController
+      ? setTimeout(() => timeoutController.abort(new DOMException("Request timed out", "TimeoutError")), options.timeoutMs)
+      : null;
+    const signal = combineAbortSignals(options.signal, timeoutController?.signal);
     const send = async (boot: MemmyAgentBootstrap | null): Promise<Response> => {
       const headers = {
         ...(options.headers ?? {}),
@@ -633,31 +809,40 @@ class HttpMemmyAgentClient implements MemmyAgentClient {
       return this.fetchFn(new URL(path, this.baseUrl), {
         method: options.method ?? "GET",
         headers: Object.keys(headers).length ? headers : undefined,
-        ...(options.body == null ? {} : { body: JSON.stringify(options.body) })
+        ...(options.body == null ? {} : { body: JSON.stringify(options.body) }),
+        ...(signal ? { signal } : {})
       });
     };
 
-    let boot = includeToken ? await this.bootstrap() : null;
-    let response = await send(boot);
-    if (response.status === 401 && includeToken && retryOnUnauthorized) {
-      this.boot = null;
-      this.bootExpiresAtMs = 0;
-      boot = await this.bootstrap({ force: true });
-      response = await send(boot);
-    }
+    try {
+      let boot = includeToken ? await this.bootstrap() : null;
+      let response = await send(boot);
+      if (response.status === 401 && includeToken && retryOnUnauthorized) {
+        this.boot = null;
+        this.bootExpiresAtMs = 0;
+        boot = await this.bootstrap({ force: true });
+        response = await send(boot);
+      }
 
-    if (!response.ok) {
-      throw new MemmyAgentRequestError(await errorMessage(response), response.status);
-    }
+      if (!response.ok) {
+        const parsed = await parseRequestError(response);
+        throw new MemmyAgentRequestError(parsed.message, response.status, parsed.code, parsed.data);
+      }
 
-    const parsed = schema.parse(await response.json());
-    return normalizeGatewayMediaUrls(parsed, this.baseUrl);
+      const parsed = schema.parse(await response.json());
+      return normalizeGatewayMediaUrls(parsed, this.baseUrl);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
   }
 }
 
 const WS_OPEN = 1;
-const WS_CLOSING = 2;
 const PENDING_INBOUND_MAX = 2000;
+const READY_HANDSHAKE_TIMEOUT_MS = 5_000;
+const MESSAGE_ACK_TIMEOUT_MS = 10_000;
+const MESSAGE_RESULT_TIMEOUT_MS = 30_000;
+const MAX_AUTOMATIC_MESSAGE_CONFIRMATIONS = 3;
 
 interface MemmyAgentWebSocketSessionInput {
   bootstrap(options?: { force?: boolean }): Promise<MemmyAgentBootstrap>;
@@ -668,9 +853,33 @@ interface MemmyAgentWebSocketSessionInput {
 }
 
 interface PendingNewChat {
+  generation: number;
   resolve: (chatId: string) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+}
+
+interface PendingRunStatusSnapshot {
+  generation: number;
+  resolve: (snapshot: MemmyAgentRunStatusSnapshot) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+interface PendingMessageAttempt {
+  input: MemmyAgentSendMessageInput & { clientRequestId: string };
+  promise: Promise<void>;
+  resolve: () => void;
+  reject: (error: Error) => void;
+  acknowledgementTimer: ReturnType<typeof setTimeout> | null;
+  resultTimer: ReturnType<typeof setTimeout> | null;
+  reconnectConfirmations: number;
+  lastSentGeneration: number | null;
+}
+
+interface PendingInitialReady {
+  resolve: () => void;
+  reject: (error: Error) => void;
 }
 
 class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
@@ -679,14 +888,23 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectAttempts = 0;
   private pendingNewChat: PendingNewChat | null = null;
+  private pendingInitialReady: PendingInitialReady | null = null;
+  private readonly pendingRunStatusSnapshots = new Map<string, PendingRunStatusSnapshot>();
+  private readonly pendingMessageAttempts = new Map<string, PendingMessageAttempt>();
+  private connectionGeneration = 0;
+  private transportOpenGeneration: number | null = null;
+  private readyGeneration: number | null = null;
+  private readyHandshakeTimer: ReturnType<typeof setTimeout> | null = null;
+  private hasReachedReady = false;
+  private lastOrdinarySendChatId: string | null = null;
   private readonly knownChats = new Set<string>();
-  private readonly sendQueue: Record<string, unknown>[] = [];
+  private readonly controlQueue: Record<string, unknown>[] = [];
   private readonly chatHandlers = new Map<string, Set<(event: MemmyAgentWsEvent) => void>>();
   private readonly pendingInboundByChat = new Map<string, MemmyAgentWsEvent[]>();
   private readonly statusResultHandlers = new Set<(chatId: string, content: string) => void>();
   private readonly historyDagResultHandlers = new Set<(chatId: string, content: string, payload: HistoryDagPayload) => void>();
-  private readonly sessionUpdateHandlers = new Set<(chatId: string, scope?: string) => void>();
-  private readonly runtimeModelHandlers = new Set<(modelName: string | null, modelPreset?: string | null) => void>();
+  private readonly sessionUpdateHandlers = new Set<(chatId: string, scope: string | undefined, generation: number) => void>();
+  private readonly runtimeModelHandlers = new Set<(modelName: string | null, modelPreset: string | null | undefined, generation: number) => void>();
   private readonly runStatusHandlers = new Set<(chatId: string, startedAt: number | null) => void>();
   private readonly runLifecycleHandlers = new Set<(chatId: string, event: MemmyAgentRunLifecycleEvent) => void>();
   private readonly runStartedAtByChatId = new Map<string, number>();
@@ -695,16 +913,38 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
   constructor(private readonly input: MemmyAgentWebSocketSessionInput) {}
 
   async connect(): Promise<void> {
-    await this.openSocket(true);
+    const ready = new Promise<void>((resolve, reject) => {
+      this.pendingInitialReady = { resolve, reject };
+    });
+    try {
+      await this.openSocket(true);
+      await ready;
+    } catch (error) {
+      const connectError = asError(error, "Agent gateway connection failed");
+      this.rejectInitialReady(connectError);
+      this.close();
+      throw connectError;
+    }
   }
 
-  newChat(timeoutMs = 5000): Promise<string> {
+  getReadyGeneration(): number | null {
+    return this.readyGeneration;
+  }
+
+  newChat(expectedGeneration: number, timeoutMs = 5000): Promise<string> {
     if (this.pendingNewChat) {
       return Promise.reject(new Error("newChat already in flight"));
     }
 
+    try {
+      this.assertReadyGeneration(expectedGeneration);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+
     return new Promise<string>((resolve, reject) => {
       const pending: PendingNewChat = {
+        generation: expectedGeneration,
         resolve,
         reject,
         timer: setTimeout(() => {
@@ -715,7 +955,13 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
         }, timeoutMs)
       };
       this.pendingNewChat = pending;
-      this.queueSend({ type: "new_chat" });
+      try {
+        this.sendOrdinaryFrame({ type: "new_chat" }, expectedGeneration);
+      } catch (error) {
+        this.pendingNewChat = null;
+        clearTimeout(pending.timer);
+        reject(asError(error, "Unable to create chat"));
+      }
     });
   }
 
@@ -724,19 +970,68 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
       return;
     }
     this.knownChats.add(chatId);
-    this.queueSend({ type: "attach", chat_id: chatId });
+    const generation = this.readyGeneration;
+    if (generation !== null) {
+      this.sendAttach(chatId, generation);
+    }
   }
 
-  sendMessage(input: MemmyAgentSendMessageInput): void {
-    this.knownChats.add(input.chatId);
-    this.queueSend({
-      type: "message",
-      chat_id: input.chatId,
-      content: input.content,
-      webui: true,
-      ...(input.language ? { language: input.language } : {}),
-      ...(input.media?.length ? { media_paths: input.media.map((item) => item.path) } : {})
+  sendMessage(input: MemmyAgentSendMessageInput, expectedGeneration: number): Promise<void> {
+    if (!input.clientRequestId) {
+      this.sendMessageFrame(input, expectedGeneration);
+      return Promise.resolve();
+    }
+
+    const key = messageAttemptKey(input.chatId, input.clientRequestId);
+    const current = this.pendingMessageAttempts.get(key);
+    if (current) {
+      if (!sameMessageAttempt(current.input, input)) {
+        return Promise.reject(new Error("clientRequestId already belongs to another message"));
+      }
+      current.reconnectConfirmations = 0;
+      this.sendPendingMessageAttempt(current, expectedGeneration);
+      return current.promise;
+    }
+
+    let resolveAttempt!: () => void;
+    let rejectAttempt!: (error: Error) => void;
+    const promise = new Promise<void>((resolve, reject) => {
+      resolveAttempt = resolve;
+      rejectAttempt = reject;
     });
+    const attempt: PendingMessageAttempt = {
+      input: { ...input, clientRequestId: input.clientRequestId },
+      promise,
+      resolve: resolveAttempt,
+      reject: rejectAttempt,
+      acknowledgementTimer: null,
+      resultTimer: null,
+      reconnectConfirmations: 0,
+      lastSentGeneration: null
+    };
+    this.pendingMessageAttempts.set(key, attempt);
+    attempt.resultTimer = setTimeout(() => {
+      if (this.pendingMessageAttempts.get(key) !== attempt) return;
+      this.pendingMessageAttempts.delete(key);
+      if (attempt.acknowledgementTimer) clearTimeout(attempt.acknowledgementTimer);
+      this.emitEvent({
+        event: "message_confirmation_exhausted",
+        chat_id: attempt.input.chatId,
+        client_request_id: attempt.input.clientRequestId
+      });
+      attempt.reject(new MemmyAgentMessageRejectedError(
+        "message_result_unknown",
+        "result_unknown"
+      ));
+    }, MESSAGE_RESULT_TIMEOUT_MS);
+    try {
+      this.sendPendingMessageAttempt(attempt, expectedGeneration);
+    } catch (error) {
+      this.pendingMessageAttempts.delete(key);
+      if (attempt.resultTimer) clearTimeout(attempt.resultTimer);
+      throw error;
+    }
+    return promise;
   }
 
   stop(chatId: string): void {
@@ -744,7 +1039,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
       return;
     }
     this.knownChats.add(chatId);
-    this.queueSend({
+    this.queueControl({
       type: "stop",
       chat_id: chatId
     });
@@ -755,7 +1050,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
       return;
     }
     this.knownChats.add(chatId);
-    this.queueSend({
+    this.queueControl({
       type: "message",
       chat_id: chatId,
       content: "/restart",
@@ -768,7 +1063,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
       return;
     }
     this.knownChats.add(chatId);
-    this.queueSend({ type: "status", chat_id: chatId });
+    this.queueControl({ type: "status", chat_id: chatId });
   }
 
   historyDag(chatId: string): void {
@@ -776,7 +1071,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
       return;
     }
     this.knownChats.add(chatId);
-    this.queueSend({ type: "history_dag", chat_id: chatId });
+    this.queueControl({ type: "history_dag", chat_id: chatId });
   }
 
   onChat(chatId: string, handler: (event: MemmyAgentWsEvent) => void): MemmyAgentUnsubscribe {
@@ -819,12 +1114,12 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     return () => this.historyDagResultHandlers.delete(handler);
   }
 
-  onSessionUpdate(handler: (chatId: string, scope?: string) => void): MemmyAgentUnsubscribe {
+  onSessionUpdate(handler: (chatId: string, scope: string | undefined, generation: number) => void): MemmyAgentUnsubscribe {
     this.sessionUpdateHandlers.add(handler);
     return () => this.sessionUpdateHandlers.delete(handler);
   }
 
-  onRuntimeModelUpdate(handler: (modelName: string | null, modelPreset?: string | null) => void): MemmyAgentUnsubscribe {
+  onRuntimeModelUpdate(handler: (modelName: string | null, modelPreset: string | null | undefined, generation: number) => void): MemmyAgentUnsubscribe {
     this.runtimeModelHandlers.add(handler);
     return () => this.runtimeModelHandlers.delete(handler);
   }
@@ -844,7 +1139,8 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
         event: "goal_status",
         chat_id: chatId,
         status: "running",
-        started_at: startedAt
+        started_at: startedAt,
+        ...(this.readyGeneration !== null ? { connection_generation: this.readyGeneration } : {})
       });
     }
     return () => this.runLifecycleHandlers.delete(handler);
@@ -858,66 +1154,140 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     return this.goalStateByChatId.get(chatId);
   }
 
+  requestRunStatusSnapshot(
+    chatId: string,
+    expectedGeneration: number,
+    timeoutMs = 5_000
+  ): Promise<MemmyAgentRunStatusSnapshot> {
+    try {
+      this.assertReadyGeneration(expectedGeneration);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    if (this.pendingRunStatusSnapshots.has(chatId)) {
+      return Promise.reject(new Error(`Run status snapshot already pending for ${chatId}`));
+    }
+
+    return new Promise<MemmyAgentRunStatusSnapshot>((resolve, reject) => {
+      const pending: PendingRunStatusSnapshot = {
+        generation: expectedGeneration,
+        resolve,
+        reject,
+        timer: setTimeout(() => {
+          if (this.pendingRunStatusSnapshots.get(chatId) === pending) {
+            this.pendingRunStatusSnapshots.delete(chatId);
+          }
+          reject(new Error(`Run status snapshot timed out for ${chatId}`));
+        }, timeoutMs)
+      };
+      this.pendingRunStatusSnapshots.set(chatId, pending);
+      try {
+        this.sendOrdinaryFrame({ type: "attach", chat_id: chatId }, expectedGeneration);
+      } catch (error) {
+        this.pendingRunStatusSnapshots.delete(chatId);
+        clearTimeout(pending.timer);
+        reject(asError(error, "Unable to request run status snapshot"));
+      }
+    });
+  }
+
   close(): void {
     this.intentionallyClosed = true;
+    this.connectionGeneration += 1;
     this.rejectPendingNewChat(new Error("newChat cancelled"));
+    this.rejectPendingRunStatusSnapshots(new Error("run status snapshot cancelled"));
+    this.rejectPendingMessageAttempts(new Error("message confirmation cancelled"));
+    this.rejectInitialReady(new Error("Agent gateway connection cancelled"));
+    this.clearReadyHandshakeTimer();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
     const socket = this.socket;
     this.socket = null;
+    this.readyGeneration = null;
+    this.transportOpenGeneration = null;
     socket?.close();
   }
 
   private async openSocket(forceBootstrap: boolean): Promise<void> {
+    const generation = this.connectionGeneration + 1;
+    this.connectionGeneration = generation;
     const boot = await this.input.bootstrap({ force: forceBootstrap });
-    if (this.intentionallyClosed) {
+    if (this.intentionallyClosed || generation !== this.connectionGeneration) {
       return;
     }
     const ws = this.input.webSocketFactory(toWebSocketUrl(this.input.baseUrl, boot.ws_path, boot.token, this.input.clientId));
     this.socket = ws;
-    ws.onopen = () => this.handleOpen();
-    ws.onmessage = (event) => this.handleMessage(event);
-    ws.onerror = () => this.emitEvent({ event: "error", detail: "websocket_error" });
-    ws.onclose = (event) => this.handleClose(event);
+    ws.onopen = () => this.handleOpen(ws, generation);
+    ws.onmessage = (event) => this.handleMessage(ws, generation, event);
+    ws.onerror = () => this.handleError(ws, generation);
+    ws.onclose = (event) => this.handleClose(ws, generation, event);
     if (ws.readyState === WS_OPEN) {
-      this.handleOpen();
+      this.handleOpen(ws, generation);
     }
   }
 
-  private handleOpen(): void {
-    this.reconnectAttempts = 0;
-    for (const chatId of this.knownChats) {
-      this.rawSend({ type: "attach", chat_id: chatId });
+  private handleOpen(socket: WebSocketLike, generation: number): void {
+    if (!this.isCurrentSocket(socket, generation) || this.transportOpenGeneration === generation) {
+      return;
     }
-    const queued = this.sendQueue.splice(0);
-    for (const frame of queued) {
-      this.rawSend(frame);
-    }
+    this.transportOpenGeneration = generation;
+    this.clearReadyHandshakeTimer();
+    this.readyHandshakeTimer = setTimeout(() => {
+      if (this.isCurrentSocket(socket, generation) && this.readyGeneration !== generation) {
+        socket.close(1011, "ready timeout");
+      }
+    }, READY_HANDSHAKE_TIMEOUT_MS);
   }
 
-  private handleMessage(event: MessageEvent): void {
+  private handleMessage(socket: WebSocketLike, generation: number, event: MessageEvent): void {
+    if (!this.isCurrentSocket(socket, generation)) {
+      return;
+    }
     const parsed = parseWsEvent(event.data);
     if (!parsed) {
       return;
     }
 
-    const normalized = normalizeGatewayMediaUrls(parsed, this.input.baseUrl);
-
-    this.emitEvent(normalized);
+    const normalized: MemmyAgentWsEvent = {
+      ...normalizeGatewayMediaUrls(parsed, this.input.baseUrl),
+      connection_generation: generation
+    };
 
     if (normalized.event === "ready") {
+      if (this.readyGeneration !== generation) {
+        this.clearReadyHandshakeTimer();
+        this.readyGeneration = generation;
+        this.hasReachedReady = true;
+        this.reconnectAttempts = 0;
+        this.pendingInitialReady?.resolve();
+        this.pendingInitialReady = null;
+        for (const chatId of this.knownChats) {
+          this.sendAttach(chatId, generation);
+        }
+        this.flushControlQueue(socket, generation);
+        this.confirmPendingMessagesAfterReconnect(generation);
+      }
       if (normalized.chat_id) {
         this.knownChats.add(normalized.chat_id);
       }
+      this.emitEvent(normalized);
       return;
+    }
+
+    this.emitEvent(normalized);
+
+    if (normalized.event === "message_accepted") {
+      this.resolvePendingMessageAttempt(normalized);
+    } else if (normalized.event === "error") {
+      this.rejectPendingMessageAttempt(normalized);
     }
 
     if (normalized.event === "attached") {
       if (normalized.chat_id) {
         this.knownChats.add(normalized.chat_id);
-        this.resolvePendingNewChat(normalized.chat_id);
+        this.resolvePendingNewChat(normalized.chat_id, generation);
         this.dispatchChat(normalized.chat_id, normalized);
       }
       return;
@@ -925,7 +1295,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
 
     if (normalized.event === "runtime_model_updated") {
       for (const handler of this.runtimeModelHandlers) {
-        handler(normalized.model_name ?? null, typeof normalized.model_preset === "string" ? normalized.model_preset : null);
+        handler(normalized.model_name ?? null, typeof normalized.model_preset === "string" ? normalized.model_preset : null, generation);
       }
       return;
     }
@@ -933,7 +1303,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     if (normalized.event === "session_updated") {
       if (normalized.chat_id) {
         for (const handler of this.sessionUpdateHandlers) {
-          handler(normalized.chat_id, typeof normalized.scope === "string" ? normalized.scope : undefined);
+          handler(normalized.chat_id, typeof normalized.scope === "string" ? normalized.scope : undefined, generation);
         }
       }
       return;
@@ -976,19 +1346,46 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
 
     this.recordRunStatus(chatId, normalized);
     this.recordGoalState(chatId, normalized);
+    this.resolveRunStatusSnapshot(chatId, normalized, generation);
     this.dispatchChat(chatId, normalized);
   }
 
-  private handleClose(event?: CloseEvent): void {
+  private handleError(socket: WebSocketLike, generation: number): void {
+    if (!this.isCurrentSocket(socket, generation)) {
+      return;
+    }
+    this.emitEvent({ event: "transport_error", detail: "websocket_error", connection_generation: generation });
+  }
+
+  private handleClose(socket: WebSocketLike, generation: number, event?: CloseEvent): void {
+    if (!this.isCurrentSocket(socket, generation)) {
+      return;
+    }
     this.socket = null;
+    this.transportOpenGeneration = null;
+    this.readyGeneration = null;
+    this.clearReadyHandshakeTimer();
+    this.suspendPendingMessageAttemptsForReconnect();
     this.rejectPendingNewChat(new Error("newChat failed because websocket closed"));
+    this.rejectPendingRunStatusSnapshots(new Error("run status snapshot failed because websocket closed"), generation);
     if (this.intentionallyClosed) {
       return;
     }
-    if (event?.code === 1009) {
-      this.emitEvent({ event: "transport_error", detail: "message_too_big" });
+    if (!this.hasReachedReady) {
+      this.lastOrdinarySendChatId = null;
+      this.rejectInitialReady(new Error("Agent gateway closed before ready"));
+      return;
     }
-    this.emitEvent({ event: "connection_closed" });
+    if (event?.code === 1009) {
+      this.emitEvent({
+        event: "transport_error",
+        detail: "message_too_big",
+        connection_generation: generation,
+        ...(this.lastOrdinarySendChatId ? { chat_id: this.lastOrdinarySendChatId } : {})
+      });
+    }
+    this.lastOrdinarySendChatId = null;
+    this.emitEvent({ event: "connection_closed", connection_generation: generation });
     this.scheduleReconnect();
   }
 
@@ -1000,24 +1397,195 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     this.reconnectAttempts += 1;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
-      void this.openSocket(true).catch(() => this.scheduleReconnect());
+      void this.openSocket(true).catch((error) => {
+        this.emitEvent({
+          event: "connection_attempt_failed",
+          detail: asError(error, "Agent gateway reconnect failed").message,
+          connection_generation: this.connectionGeneration
+        });
+        this.scheduleReconnect();
+      });
     }, delayMs);
   }
 
-  private queueSend(frame: Record<string, unknown>): void {
-    if (this.socket?.readyState === WS_OPEN) {
-      this.rawSend(frame);
+  private queueControl(frame: Record<string, unknown>): void {
+    const socket = this.socket;
+    const generation = this.readyGeneration;
+    if (!socket || generation === null || socket.readyState !== WS_OPEN) {
+      this.controlQueue.push(frame);
       return;
     }
-    this.sendQueue.push(frame);
+    try {
+      this.rawSend(socket, generation, frame);
+    } catch {
+      this.controlQueue.push(frame);
+      socket.close(1011, "send failed");
+    }
   }
 
-  private rawSend(frame: Record<string, unknown>): void {
-    if (!this.socket || this.socket.readyState >= WS_CLOSING) {
-      this.sendQueue.push(frame);
+  private flushControlQueue(socket: WebSocketLike, generation: number): void {
+    while (this.controlQueue.length > 0 && this.isReadySocket(socket, generation)) {
+      const frame = this.controlQueue[0]!;
+      try {
+        this.rawSend(socket, generation, frame);
+        this.controlQueue.shift();
+      } catch {
+        socket.close(1011, "send failed");
+        return;
+      }
+    }
+  }
+
+  private sendAttach(chatId: string, generation: number): void {
+    const socket = this.socket;
+    if (!socket || !this.isReadySocket(socket, generation)) {
       return;
     }
-    sendJson(this.socket, frame);
+    try {
+      this.rawSend(socket, generation, { type: "attach", chat_id: chatId });
+    } catch {
+      socket.close(1011, "attach failed");
+    }
+  }
+
+  private sendOrdinaryFrame(frame: Record<string, unknown>, expectedGeneration: number): void {
+    this.assertReadyGeneration(expectedGeneration);
+    this.rawSend(this.socket!, expectedGeneration, frame);
+  }
+
+  private sendMessageFrame(input: MemmyAgentSendMessageInput, expectedGeneration: number): void {
+    this.sendOrdinaryFrame({
+      type: "message",
+      chat_id: input.chatId,
+      content: input.content,
+      webui: true,
+      ...(input.clientRequestId ? { client_request_id: input.clientRequestId } : {}),
+      ...(input.target ? { target: input.target } : {}),
+      ...(input.language ? { language: input.language } : {}),
+      ...(input.media?.length ? { media_paths: input.media.map((item) => item.path) } : {})
+    }, expectedGeneration);
+    this.knownChats.add(input.chatId);
+    this.lastOrdinarySendChatId = input.chatId;
+  }
+
+  private sendPendingMessageAttempt(attempt: PendingMessageAttempt, generation: number): void {
+    this.sendMessageFrame(attempt.input, generation);
+    attempt.lastSentGeneration = generation;
+    if (attempt.acknowledgementTimer) clearTimeout(attempt.acknowledgementTimer);
+    attempt.acknowledgementTimer = setTimeout(() => {
+      attempt.acknowledgementTimer = null;
+      this.emitEvent({
+        event: "message_confirmation_pending",
+        chat_id: attempt.input.chatId,
+        client_request_id: attempt.input.clientRequestId,
+        connection_generation: generation
+      });
+    }, MESSAGE_ACK_TIMEOUT_MS);
+  }
+
+  private confirmPendingMessagesAfterReconnect(generation: number): void {
+    for (const attempt of this.pendingMessageAttempts.values()) {
+      if (attempt.lastSentGeneration === generation) continue;
+      if (attempt.reconnectConfirmations >= MAX_AUTOMATIC_MESSAGE_CONFIRMATIONS) {
+        this.emitEvent({
+          event: "message_confirmation_exhausted",
+          chat_id: attempt.input.chatId,
+          client_request_id: attempt.input.clientRequestId,
+          connection_generation: generation
+        });
+        const key = messageAttemptKey(attempt.input.chatId, attempt.input.clientRequestId);
+        if (this.pendingMessageAttempts.get(key) === attempt) {
+          this.pendingMessageAttempts.delete(key);
+          if (attempt.acknowledgementTimer) clearTimeout(attempt.acknowledgementTimer);
+          if (attempt.resultTimer) clearTimeout(attempt.resultTimer);
+          attempt.reject(new MemmyAgentMessageRejectedError(
+            "message_result_unknown",
+            "result_unknown"
+          ));
+        }
+        continue;
+      }
+      attempt.reconnectConfirmations += 1;
+      try {
+        this.sendPendingMessageAttempt(attempt, generation);
+      } catch {
+        this.emitEvent({
+          event: "message_confirmation_pending",
+          chat_id: attempt.input.chatId,
+          client_request_id: attempt.input.clientRequestId,
+          connection_generation: generation
+        });
+      }
+    }
+  }
+
+  private resolvePendingMessageAttempt(event: MemmyAgentWsEvent): void {
+    if (!event.chat_id || !event.client_request_id) return;
+    const key = messageAttemptKey(event.chat_id, event.client_request_id);
+    const attempt = this.pendingMessageAttempts.get(key);
+    if (!attempt) return;
+    this.pendingMessageAttempts.delete(key);
+    if (attempt.acknowledgementTimer) clearTimeout(attempt.acknowledgementTimer);
+    if (attempt.resultTimer) clearTimeout(attempt.resultTimer);
+    attempt.resolve();
+  }
+
+  private rejectPendingMessageAttempt(event: MemmyAgentWsEvent): void {
+    if (!event.chat_id || !event.client_request_id) return;
+    const key = messageAttemptKey(event.chat_id, event.client_request_id);
+    const attempt = this.pendingMessageAttempts.get(key);
+    if (!attempt) return;
+    this.pendingMessageAttempts.delete(key);
+    if (attempt.acknowledgementTimer) clearTimeout(attempt.acknowledgementTimer);
+    if (attempt.resultTimer) clearTimeout(attempt.resultTimer);
+    attempt.reject(new MemmyAgentMessageRejectedError(
+      typeof event.detail === "string" ? event.detail : "message_request_rejected",
+      typeof event.reason === "string" ? event.reason : "message_rejected"
+    ));
+  }
+
+  private rejectPendingMessageAttempts(error: Error): void {
+    for (const [key, attempt] of this.pendingMessageAttempts) {
+      this.pendingMessageAttempts.delete(key);
+      if (attempt.acknowledgementTimer) clearTimeout(attempt.acknowledgementTimer);
+      if (attempt.resultTimer) clearTimeout(attempt.resultTimer);
+      attempt.reject(error);
+    }
+  }
+
+  private suspendPendingMessageAttemptsForReconnect(): void {
+    for (const attempt of this.pendingMessageAttempts.values()) {
+      if (attempt.acknowledgementTimer) {
+        clearTimeout(attempt.acknowledgementTimer);
+        attempt.acknowledgementTimer = null;
+      }
+    }
+  }
+
+  private rawSend(socket: WebSocketLike, generation: number, frame: Record<string, unknown>): void {
+    if (!this.isReadySocket(socket, generation)) {
+      throw new AgentGatewayUnavailableError();
+    }
+    sendJson(socket, frame);
+  }
+
+  private assertReadyGeneration(expectedGeneration: number): void {
+    const socket = this.socket;
+    if (!socket || !this.isReadySocket(socket, expectedGeneration)) {
+      throw new AgentGatewayUnavailableError();
+    }
+  }
+
+  private isReadySocket(socket: WebSocketLike, generation: number): boolean {
+    return this.isCurrentSocket(socket, generation)
+      && this.readyGeneration === generation
+      && socket.readyState === WS_OPEN;
+  }
+
+  private isCurrentSocket(socket: WebSocketLike, generation: number): boolean {
+    return !this.intentionallyClosed
+      && this.socket === socket
+      && this.connectionGeneration === generation;
   }
 
   private dispatchChat(chatId: string, event: MemmyAgentWsEvent): void {
@@ -1038,9 +1606,9 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     this.pendingInboundByChat.set(chatId, queue);
   }
 
-  private resolvePendingNewChat(chatId: string): void {
+  private resolvePendingNewChat(chatId: string, generation: number): void {
     const pending = this.pendingNewChat;
-    if (!pending) {
+    if (!pending || pending.generation !== generation) {
       return;
     }
     this.pendingNewChat = null;
@@ -1056,6 +1624,56 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     this.pendingNewChat = null;
     clearTimeout(pending.timer);
     pending.reject(error);
+  }
+
+  private resolveRunStatusSnapshot(chatId: string, event: MemmyAgentWsEvent, generation: number): void {
+    if (event.event !== "run_status_snapshot") {
+      return;
+    }
+    const pending = this.pendingRunStatusSnapshots.get(chatId);
+    if (!pending || pending.generation !== generation) {
+      return;
+    }
+    const status = event.status === "running" ? "running" : event.status === "idle" ? "idle" : null;
+    if (!status) {
+      return;
+    }
+    this.pendingRunStatusSnapshots.delete(chatId);
+    clearTimeout(pending.timer);
+    pending.resolve({
+      status,
+      startedAt: typeof event.started_at === "number" ? event.started_at : null,
+      turnId: typeof event.turn_id === "string" ? event.turn_id : typeof event.turnId === "string" ? event.turnId : null,
+      connectionGeneration: generation
+    });
+  }
+
+  private rejectPendingRunStatusSnapshots(error: Error, generation?: number): void {
+    for (const [chatId, pending] of this.pendingRunStatusSnapshots) {
+      if (generation !== undefined && pending.generation !== generation) {
+        continue;
+      }
+      this.pendingRunStatusSnapshots.delete(chatId);
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+  }
+
+  private rejectInitialReady(error: Error): void {
+    const pending = this.pendingInitialReady;
+    if (!pending) {
+      return;
+    }
+    this.pendingInitialReady = null;
+    pending.reject(error);
+  }
+
+  private clearReadyHandshakeTimer(): void {
+    if (!this.readyHandshakeTimer) {
+      return;
+    }
+    clearTimeout(this.readyHandshakeTimer);
+    this.readyHandshakeTimer = null;
   }
 
   private recordRunStatus(chatId: string, event: MemmyAgentWsEvent): void {
@@ -1101,6 +1719,52 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
   private emitEvent(event: MemmyAgentWsEvent): void {
     this.input.onEvent?.(event);
   }
+}
+
+function asError(error: unknown, fallback: string): Error {
+  return error instanceof Error ? error : new Error(fallback);
+}
+
+function messageAttemptKey(chatId: string, clientRequestId: string): string {
+  return `${chatId}\u0000${clientRequestId}`;
+}
+
+function sameMessageAttempt(
+  left: MemmyAgentSendMessageInput,
+  right: MemmyAgentSendMessageInput
+): boolean {
+  return JSON.stringify({
+    chatId: left.chatId,
+    content: left.content,
+    clientRequestId: left.clientRequestId,
+    target: left.target ?? null,
+    language: left.language ?? null,
+    mediaPaths: left.media?.map((item) => item.path) ?? []
+  }) === JSON.stringify({
+    chatId: right.chatId,
+    content: right.content,
+    clientRequestId: right.clientRequestId,
+    target: right.target ?? null,
+    language: right.language ?? null,
+    mediaPaths: right.media?.map((item) => item.path) ?? []
+  });
+}
+
+function combineAbortSignals(
+  external: AbortSignal | undefined,
+  timeout: AbortSignal | undefined
+): AbortSignal | undefined {
+  if (!external) return timeout;
+  if (!timeout) return external;
+  const controller = new AbortController();
+  const abort = (signal: AbortSignal): void => {
+    if (!controller.signal.aborted) controller.abort(signal.reason);
+  };
+  if (external.aborted) abort(external);
+  if (timeout.aborted) abort(timeout);
+  external.addEventListener("abort", () => abort(external), { once: true });
+  timeout.addEventListener("abort", () => abort(timeout), { once: true });
+  return controller.signal;
 }
 
 function normalizeBaseUrl(value: string): string {
@@ -1232,4 +1896,36 @@ async function errorMessage(response: Response): Promise<string> {
     // Fall through to generic status message.
   }
   return `memmy-agent request failed with status ${response.status}`;
+}
+
+async function parseRequestError(response: Response): Promise<{
+  message: string;
+  code: string | null;
+  data?: { sidebarState: MemmyAgentSidebarState };
+}> {
+  try {
+    const body = await response.json();
+    if (body && typeof body === "object" && !Array.isArray(body)) {
+      const record = body as Record<string, unknown>;
+      const code = typeof record.code === "string" ? record.code : null;
+      const message = typeof record.message === "string"
+        ? record.message
+        : typeof record.error === "string"
+          ? record.error
+          : `memmy-agent request failed with status ${response.status}`;
+      if (code === "sidebar_state_conflict") {
+        const sidebarState = SidebarStateSchema.safeParse(record.sidebarState);
+        if (sidebarState.success) {
+          return { message, code, data: { sidebarState: sidebarState.data } };
+        }
+      }
+      return { message, code };
+    }
+  } catch {
+    // Fall through to the status-only error.
+  }
+  return {
+    message: `memmy-agent request failed with status ${response.status}`,
+    code: null
+  };
 }

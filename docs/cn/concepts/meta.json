@@ -1,5 +1,5 @@
 {
   "title": "概念",
   "icon": "Boxes",
-  "pages": ["architecture", "features"]
+  "pages": ["architecture", "end-to-end-flow", "features"]
 }

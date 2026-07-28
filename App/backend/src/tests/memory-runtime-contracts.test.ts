@@ -36,6 +36,18 @@ import type { ZodType } from "zod";
 const ISO = "2026-05-29T10:00:00.000Z";
 
 describe("memory runtime contracts", () => {
+  it("parses Span memories and Span processing jobs", () => {
+    expect(() => MemoryListItemSchema.parse(memoryListItem({ kind: "span" }))).not.toThrow();
+    expect(() => PanelItemsOutputSchema.parse({
+      ...panelItemsOutput(),
+      items: [memoryListItem({ kind: "span" })]
+    })).not.toThrow();
+    expect(() => JobRefSchema.parse({
+      ...jobRef(),
+      jobType: "span_big_turn"
+    })).not.toThrow();
+  });
+
   const outputCases: Array<{ name: string; schema: ZodType<unknown>; valid: unknown; invalid: unknown }> = [
     { name: "InjectedContext", schema: InjectedContextSchema, valid: injectedContext(), invalid: { markdown: "", sections: [{ id: "sec-1", kind: "bad" }] } },
     { name: "RecallHit", schema: RecallHitSchema, valid: recallHit(), invalid: { ...recallHit(), memoryLayer: "L4" } },
@@ -77,7 +89,12 @@ describe("memory runtime contracts", () => {
     { name: "SearchInput", schema: SearchInputSchema, valid: { query: "typescript retry", sessionId: "session-1", layers: ["L1", "L2"], verbose: true, source: "codex" }, invalid: { query: 1 } },
     { name: "AddMemoryInput", schema: AddMemoryInputSchema, valid: { content: "remember this", layer: "L1", source: "codex" }, invalid: { content: "", layer: "L4" } },
     { name: "DeleteMemoryInput", schema: DeleteMemoryInputSchema, valid: { source: "codex" } },
-    { name: "MemoryReloadConfigInput", schema: MemoryReloadConfigInputSchema, valid: { reason: "profile_switched" }, invalid: { requestId: "" } },
+    {
+      name: "MemoryReloadConfigInput",
+      schema: MemoryReloadConfigInputSchema,
+      valid: { reason: "profile_switched", restartFailedProcessing: false },
+      invalid: { requestId: "" }
+    },
     { name: "PanelItemsInput", schema: PanelItemsInputSchema, valid: { layer: "L1", status: "activated", q: "route", page: 1 }, invalid: { layer: "L4", limit: 20 } }
   ];
 
@@ -208,7 +225,7 @@ function closeSessionOutput() {
 }
 
 function startTurnOutput() {
-  return { turnId: "turn-1", contextPacketId: "context-1", sessionId: "session-1", episodeId: "episode-1", injectedContext: injectedContext(), searchEventId: "search-1", sourceMemoryIds: ["memory-1"], hits: [recallHit()], status: [], serverTime: ISO };
+  return { turnId: "turn-1", contextPacketId: "context-1", sessionId: "session-1", injectedContext: injectedContext(), searchEventId: "search-1", sourceMemoryIds: ["memory-1"], hits: [recallHit()], status: [], serverTime: ISO };
 }
 
 function completeTurnOutput() {

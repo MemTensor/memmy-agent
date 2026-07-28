@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { isDirectRun, main } from "../src/cli/index.js";
+import { PROJECT_VERSION } from "../src/cli/project-version.js";
 import {
   createMemoryHttpServer,
   type Embedder,
@@ -63,7 +64,7 @@ describe("memmy CLI", () => {
       };
       expect(health).toMatchObject({
         ok: true,
-        version: "0.1.0",
+        version: PROJECT_VERSION,
         storage: {
           backendId: "sqlite-local"
         }
@@ -208,7 +209,7 @@ describe("memmy CLI", () => {
       };
       expect(health).toMatchObject({
         ok: true,
-        version: "0.1.0",
+        version: PROJECT_VERSION,
         storage: {
           backendId: "sqlite-local"
         }

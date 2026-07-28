@@ -1,10 +1,11 @@
 # Memmy Skills
 
-This directory contains built-in skills that extend memmy's capabilities.
+This directory contains the built-in skills bundled with `memmy-agent`.
 
 ## Skill Format
 
 Each skill is a directory containing a `SKILL.md` file with:
+
 - YAML frontmatter (name, description, metadata)
 - Markdown instructions for the agent
 
@@ -21,11 +22,16 @@ Runtime metadata uses memmy-agent's own `metadata.memmy` namespace.
 
 ## Available Skills
 
-| Skill | Description |
-|-------|-------------|
-| `github` | Interact with GitHub using the `gh` CLI |
-| `weather` | Get weather info using wttr.in and Open-Meteo |
-| `summarize` | Summarize URLs, files, and YouTube videos |
-| `tmux` | Remote-control tmux sessions |
-| `skill-creator` | Create new skills |
-| `goal` | Sustained objectives: `long_task`, `complete_goal`, idempotent goals, modular project work, early research |
+| Skill                     | Description                                                                                                                         |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `agent-memory-onboarding` | Connect an explicitly named local agent, install its Memory integration, import initial history, and save an automatic-sync recipe. |
+| `cron`                    | Schedule reminders and recurring tasks.                                                                                             |
+| `github`                  | Work with issues, pull requests, CI runs, and the GitHub API through the `gh` CLI.                                                  |
+| `goal`                    | Manage sustained objectives with explicit goal state and completion.                                                                |
+| `image-generation`        | Generate images and iteratively edit saved image artifacts.                                                                         |
+| `skill-creator`           | Create, review, and maintain `memmy-agent` skills.                                                                                  |
+| `summarize`               | Summarize URLs, local files, podcasts, and YouTube videos.                                                                          |
+| `tmux`                    | Remote-control interactive terminal sessions.                                                                                       |
+| `ui-craft`                | Design and implement browser-visible interfaces with visual QA.                                                                     |
+| `update-setup`            | Configure a workspace-specific Memmy upgrade skill.                                                                                 |
+| `weather`                 | Retrieve current weather and forecasts without an API key.                                                                          |

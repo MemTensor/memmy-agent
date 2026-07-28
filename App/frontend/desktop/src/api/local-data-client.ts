@@ -14,6 +14,7 @@ import {
 import { requestJson } from "./http.js";
 
 export interface LocalDataClient {
+  getPath(): Promise<LocalDataRevealResponse>;
   reveal(): Promise<LocalDataRevealResponse>;
   export(input: ExportLocalDataInput): Promise<LocalDataExportResponse>;
   clear(input: ClearLocalDataInput): Promise<LocalDataClearResponse>;
@@ -21,6 +22,14 @@ export interface LocalDataClient {
 
 export function createHttpLocalDataClient(config: RuntimeConfig): LocalDataClient {
   return {
+    async getPath() {
+      return requestJson({
+        config,
+        path: "/api/local-data",
+        schema: LocalDataRevealResponseSchema
+      });
+    },
+
     async reveal() {
       return requestJson({
         config,

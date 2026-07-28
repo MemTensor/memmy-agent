@@ -26,7 +26,7 @@ describe("RuntimeApp bootstrap loading", () => {
 
     expect(source).toContain("window.memmy.onRouteTargetRequest");
     expect(source).toContain("resolveMainWindowRouteTarget(rawTarget)");
-    expect(source).toContain("focusMainWindowAgentChat(target.agentChatId, agentClient, dispatch);");
+    expect(source).toContain("focusMainWindowAgentChat(target.agentChatId, agentClient, dispatch, agentState);");
     expect(source).toContain("dispatch(appActions.navigate(target.route));");
     expect(source).toContain("window.history.replaceState(window.history.state");
     expect(source).toContain("FOCUSED_AGENT_CHAT_STORAGE_KEY");
@@ -48,7 +48,7 @@ describe("RuntimeApp bootstrap loading", () => {
     const routerSource = readFileSync(resolve(__dirname, "..", "router.tsx"), "utf8");
 
     expect(appSource).toContain("<UpdateCoordinatorProvider>");
-    expect(appSource).toContain("<AgentRuntimeBridge>");
+    expect(appSource).toContain("<AgentRuntimeBridge taskStateCoordinator={taskStateCoordinator ?? undefined}>");
     expect(appSource.indexOf("<UpdateCoordinatorProvider>")).toBeLessThan(appSource.indexOf("<AppRouter onRetry={retry} />"));
     expect(routerSource).toContain("<GlobalUpdateDialog");
     expect(routerSource).toContain("suspended={isPetWindowContext || Boolean(petGuideRequest) || tokenModalOpen}");
@@ -63,7 +63,16 @@ describe("RuntimeApp bootstrap loading", () => {
         sessionKey,
         messages: [{ role: "user", content: "hi" }]
       })),
-      listSessions: vi.fn(async () => [{ key: "websocket:chat-2", title: "Chat 2" }]),
+      getSessionSnapshot: vi.fn(async () => ({
+        projectRegistryState: "ready" as const,
+        projects: [],
+        sessions: [{
+          key: "websocket:chat-2",
+          title: "Chat 2",
+          projectId: null,
+          cwd: "/workspace"
+        }]
+      })),
       readSidebarState: vi.fn(async () => ({
         schema_version: 1 as const,
         pinned_keys: [],
@@ -76,6 +85,7 @@ describe("RuntimeApp bootstrap loading", () => {
           show_previews: true,
           show_timestamps: true,
           show_archived: false,
+          show_project_archived: false,
           sort: "updated_desc" as const
         },
         updated_at: null
@@ -105,7 +115,7 @@ describe("RuntimeApp bootstrap loading", () => {
       readWebuiThread: vi.fn(async () => {
         throw new Error("Failed to fetch");
       }),
-      listSessions: vi.fn(async () => {
+      getSessionSnapshot: vi.fn(async () => {
         throw new Error("Failed to fetch");
       }),
       readSidebarState: vi.fn(async () => ({
@@ -120,6 +130,7 @@ describe("RuntimeApp bootstrap loading", () => {
           show_previews: true,
           show_timestamps: true,
           show_archived: false,
+          show_project_archived: false,
           sort: "updated_desc" as const
         },
         updated_at: null
@@ -130,11 +141,14 @@ describe("RuntimeApp bootstrap loading", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({
-      type: "agent/historyOpenMissing",
-      chatId: "chat-2",
-      sessionKey: "websocket:chat-2"
+      type: "agent/historyOpenFailed",
+      chatId: "chat-2"
     }));
-    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({ type: "agent/sessionsLoadFailed" }));
-    expect(dispatch).not.toHaveBeenCalledWith(expect.objectContaining({ type: "agent/error" }));
+    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({
+      type: "agent/taskStateSettled",
+      sidebarState: expect.objectContaining({ schema_version: 1 }),
+      error: expect.objectContaining({ source: "sessions", message: "Failed to fetch" })
+    }));
+    expect(dispatch).not.toHaveBeenCalledWith(expect.objectContaining({ type: "agent/connectionFailed" }));
   });
 });

@@ -29,10 +29,38 @@ An Agent Source is Memmy's adapter for reading local history from an external Ag
 ## Incremental sync
 
 - **Sync new** scans every detected source; each source can also be synced individually.
-- By default, Memmy reads only conversations created after the previous sync and uses watermarks and deduplication keys to avoid duplicate imports.
 - Scans can be paused, resumed, or stopped; progress streams in real time over SSE.
 - **Deep scan** uses `full` mode to backfill older history and requires a second confirmation.
 - You can manually add an Agent outside the built-in list with a name and local data path. Manual sources support scanning only and do not receive a Hook or plugin automatically.
+
+### Why scanned-message and added-memory counts differ
+
+The scan and “Adding” progress indicators count **messages**, while the memory pages count **memory records**. These values are not one-to-one. Memmy groups messages by source and conversation, then writes one L1 memory for each complete conversation turn:
+
+- A user message starts a turn. Following tool, system, and Assistant messages are merged into that turn, which must start with non-empty user content and end with a non-empty Assistant message.
+- One complete turn creates one L1 memory. For example, one user message, two tool messages, and one Assistant message are four processed messages but only one added memory.
+- Messages reread at the watermark boundary and messages imported previously are deduplicated with conversation checkpoints, source message IDs, and stable turn IDs. A repeat sync updates or returns the same memory instead of creating a copy.
+- A user-only turn, a turn without a final Assistant response, or a turn with empty boundary content is skipped until a later sync can complete it.
+- An oversized turn is skipped, while a Memory service write error is counted as failed. Neither case adds a memory.
+
+As a result, the current scan/processed-message count, the unique imported-message count, and the new-memory count can all differ. Before counting, built-in adapters also ignore non-message records, extract usable text, and redact common secrets and large Base64 payloads.
+
+### How the date-time watermark works
+
+Memmy maintains a separate date-time watermark for each source. This is not simply the “last scanned” time shown in the UI:
+
+1. When the initial scan starts, Memmy stores its start time as a baseline and also records the newest message timestamp actually observed. The later of those values becomes the effective cursor for the next incremental scan.
+2. On later **Sync new** runs, a built-in source selects a conversation when at least one of its messages has a timestamp **greater than or equal to** the cursor. Memmy rereads the entire selected conversation so a watermark cannot cut off the user request at the start of a turn.
+3. The inclusive `>=` boundary intentionally allows the boundary message to be read again. Before import, a conversation checkpoint compares the last message timestamp, message ID, and content hash. Stable source message IDs and turn IDs then make the import itself idempotent.
+4. The watermark advances to the newest observed timestamp only when scanning and import finish without errors and there are no incomplete or failed conversations. After a scan error or an unfinished turn, the watermark stays in place so the next run can retry. The displayed “last scanned” time may still change and is not the incremental cursor.
+
+For a manually added Agent whose format Memmy discovers, the first import stores a sync boundary. Later syncs select complete turns whose starting user message is strictly later than that boundary, then use stable message and turn IDs to remove repeats.
+
+### Images, files, and oversized turns
+
+An image or file attachment does not cause a turn to be skipped by itself. Built-in sources extract usable text from history and replace common inline Base64 image or file payloads with a redaction marker before import.
+
+Attachment contents, file text, tool output, or other long text may still become part of a turn. Memmy measures the UTF-8 size of the complete memory-write request (`memory.add` JSON), including the user request, tool trace, Assistant response, and request metadata. If it exceeds **2 MiB**, Memmy skips the entire turn rather than truncating it or splitting it across memories, then continues with other turns in the same sync. This is recorded as skipped rather than as a sync failure, so the sync may still complete successfully. The size limit applies to the complete turn request, not only to the user request's character count.
 
 ## Scan preferences
 
@@ -46,7 +74,7 @@ When auto-install is disabled, the Agent still appears in the list and you can c
 
 ## Data processing and local management
 
-- Before import, Memmy deduplicates messages, filters sensitive data, and merges messages into conversation turns before generating memory.
+- Each successfully written complete turn first becomes one raw L1 memory, then receives its summary and search index in the background.
 - You can view the local data path (default `~/.memmy/memory-service`), open the directory, export `memory.sqlite`, or wipe local memory data after a second confirmation.
 - Removing a Hook or plugin does not delete imported history. Clearing local data is a separate explicit action.
 

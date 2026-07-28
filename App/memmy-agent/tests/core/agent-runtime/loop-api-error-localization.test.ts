@@ -41,6 +41,13 @@ function quotaErrorResponse(): LLMResponse {
   return new LLMResponse({ content: "Error calling LLM: REQUEST_TOKEN_QUOTA_EXCEEDED_ERROR", finishReason: "error" });
 }
 
+function reserveStandaloneSession(agent: AgentLoop, chatId: string): void {
+  agent.sessions.reserveWebuiSessionBinding(`websocket:${chatId}`, {
+    projectId: null,
+    cwd: fs.realpathSync(agent.workspace),
+  });
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
   for (const dir of roots.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
@@ -49,6 +56,7 @@ afterEach(() => {
 describe("AgentLoop WebUI API error localization", () => {
   it("uses a Chinese fallback for WebUI API errors in Chinese mode", async () => {
     const agent = loopWithResponse(apiErrorResponse());
+    reserveStandaloneSession(agent, "chat-zh");
 
     const outbound = await agent.processMessage(
       new InboundMessage({
@@ -66,6 +74,7 @@ describe("AgentLoop WebUI API error localization", () => {
 
   it("uses an English fallback for WebUI API errors in English mode", async () => {
     const agent = loopWithResponse(apiErrorResponse());
+    reserveStandaloneSession(agent, "chat-en");
 
     const outbound = await agent.processMessage(
       new InboundMessage({
@@ -83,6 +92,7 @@ describe("AgentLoop WebUI API error localization", () => {
 
   it("shows a quota-specific Chinese message when the model token quota is exhausted", async () => {
     const agent = loopWithResponse(quotaErrorResponse());
+    reserveStandaloneSession(agent, "chat-quota-zh");
 
     const outbound = await agent.processMessage(
       new InboundMessage({
@@ -100,6 +110,7 @@ describe("AgentLoop WebUI API error localization", () => {
 
   it("shows a quota-specific English message when the model token quota is exhausted", async () => {
     const agent = loopWithResponse(quotaErrorResponse());
+    reserveStandaloneSession(agent, "chat-quota-en");
 
     const outbound = await agent.processMessage(
       new InboundMessage({

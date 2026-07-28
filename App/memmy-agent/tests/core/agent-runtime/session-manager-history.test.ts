@@ -57,6 +57,8 @@ describe("SessionManager history and previews", () => {
     const manager = new SessionManager(tempRoot());
     const session = manager.getOrCreate("websocket:chat-rename");
     session.metadata.webui = true;
+    session.metadata.webuiProjectId = null;
+    session.metadata.webuiWorkspaceCwd = fs.realpathSync(manager.root);
     session.metadata.title = "自动生成标题";
     session.addMessage("user", "帮我整理 PRD");
     manager.save(session);

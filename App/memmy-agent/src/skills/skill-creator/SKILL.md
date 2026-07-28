@@ -51,10 +51,13 @@ Use only `metadata.memmy` for runtime metadata:
 metadata:
   memmy:
     always: true
+    manualOnly: false
     requires:
       bins: ["gh"]
       env: ["GITHUB_TOKEN"]
 ```
+
+Set `metadata.memmy.manualOnly: true` for a Skill that must stay out of the normal Skill index and load only when the current task explicitly references `$skill-name`. Do not combine it with startup initialization.
 
 ## Creation Workflow
 

@@ -1,42 +1,49 @@
 # memmy-agent
 
-TypeScript refactor of the `memmy` runtime.
+The TypeScript agent runtime behind Memmy. It provides the `memmy` CLI, direct
+and interactive chat, the channel gateway, and an OpenAI-compatible HTTP API.
 
-## 本地默认端口
+## Requirements
 
-| 服务 | 默认端口 |
-| --- | ---: |
-| Memory HTTP / 记忆底座 | `18960` |
-| gateway health | `18970` |
-| WebUI / WebSocket / admin HTTP | `18980` |
-| OpenAI 兼容 API / `memmy serve` | `18990` |
-| 桌面前端 Vite dev server | `19000` |
-| Vite HMR | `19010` |
-| 桌面本地 API | 随机端口 |
-| Composio MCP bridge | 复用桌面本地 API 随机端口 |
+- Node.js 22 or later
+- npm
 
-## 安装后使用
+## Default Local Ports
 
-安装完成后，直接使用 `memmy` 命令。先确认命令可用：
+| Service                               |                                 Default port |
+| ------------------------------------- | -------------------------------------------: |
+| Memory HTTP service                   |                                      `18960` |
+| Gateway health server                 |                                      `18970` |
+| WebUI, WebSocket, and admin HTTP      |                                      `18980` |
+| OpenAI-compatible API (`memmy serve`) |                                      `18990` |
+| Desktop Vite development server       |                                      `19000` |
+| Vite HMR                              |                                      `19010` |
+| Desktop local API                     |                                    Ephemeral |
+| Composio MCP bridge                   | Same ephemeral port as the desktop local API |
+
+## Installed CLI
+
+After installation, use the `memmy` command:
 
 ```bash
 memmy --help
+memmy --version
 ```
 
-### 初始化配置
+### Initialize Configuration
 
-第一次使用先初始化配置和工作区：
+Run onboarding once to create the configuration file and workspace:
 
 ```bash
 memmy onboard
 ```
 
-默认会创建：
+The default locations are:
 
-- 配置文件：`~/.memmy/config.yaml`
-- 工作区：`~/.memmy/workspace`
+- Configuration: `~/.memmy/config.yaml`
+- Workspace: `~/.memmy/workspace`
 
-如果要指定配置文件或工作区：
+Override either location with command-line options:
 
 ```bash
 memmy onboard \
@@ -44,104 +51,104 @@ memmy onboard \
   --workspace /path/to/workspace
 ```
 
-也可以用环境变量指定默认位置：
+The same defaults can be overridden with environment variables:
 
 ```bash
 MEMMY_CONFIG=/path/to/config.yaml memmy status
 MEMMY_AGENT_WORKSPACE=/path/to/workspace memmy status
 ```
 
-### 交互式初始化
-
-如果希望通过终端菜单配置模型、Provider、工具或 API 服务：
+Use the interactive wizard to configure models, providers, tools, and API
+settings:
 
 ```bash
 memmy onboard --wizard
 ```
 
-交互式初始化只负责写入配置和初始化 workspace，不会启动 agent、API 服务或 Memory 服务，也不会实际调用模型验证 key。
+Onboarding only writes configuration and initializes the workspace. It does not
+start the agent, API server, gateway, or Memory service, and it does not make a
+model request to validate credentials.
 
-### 查看状态
+### Inspect Runtime Status
 
 ```bash
 memmy status
 ```
 
-这个命令会显示当前配置文件、工作区、模型和 provider 配置状态。
+The status output includes the active configuration file, workspace, model, and
+provider readiness.
 
-### 交互式聊天（TUI）
+### Chat from the Terminal
 
-不带子命令时，`memmy` 会进入交互式聊天模式：
+Running `memmy` without a subcommand starts the interactive TUI:
 
 ```bash
 memmy
 ```
 
-也可以显式使用 `agent` 子命令：
+The explicit `agent` subcommand provides the same interactive mode:
 
 ```bash
 memmy agent
 ```
 
-指定 session 可以复用同一个会话上下文：
+Reuse a session or select a different configuration and workspace:
 
 ```bash
 memmy agent --session cli:work
-```
-
-指定配置或工作区：
-
-```bash
 memmy agent \
   --config /path/to/config.yaml \
   --workspace /path/to/workspace
 ```
 
-### 直接发送一轮消息
+Send a single message with `--message`, or pipe it through standard input:
 
 ```bash
-memmy agent --message "你好，介绍一下当前工作区"
+memmy agent --message "Summarize the current workspace"
+echo "Explain this project" | memmy agent
 ```
 
-也可以从标准输入传入消息：
-
-```bash
-echo "帮我总结这个项目" | memmy agent
-```
-
-### 启动 OpenAI 兼容 API 服务
+### Start the OpenAI-Compatible API
 
 ```bash
 memmy serve
 ```
 
-默认监听：
-
-```text
-http://127.0.0.1:18990
-```
-
-常用覆盖参数：
+The server listens on `http://127.0.0.1:18990` by default. Override its bind
+address, port, or per-request timeout when needed:
 
 ```bash
 memmy serve --host 0.0.0.0 --port 18990 --timeout 120
 ```
 
-当前服务提供 OpenAI 兼容接口：
+Available endpoints:
 
 - `GET /health`
 - `GET /v1/models`
 - `POST /v1/chat/completions`
 
-Provider OAuth 登录：
+### Start the Channel Gateway
+
+The gateway starts the configured chat channels and a separate health server:
 
 ```bash
-memmy provider login openai_codex
+memmy gateway
+memmy gateway --host 127.0.0.1 --port 18970
 ```
 
-### 配置模型和 Provider
+Inspect channel state, authenticate a channel, or list the built-in channel
+plugins:
 
-初始化后编辑 `~/.memmy/config.yaml`。例如使用 OpenAI 兼容模型：
+```bash
+memmy channels status
+memmy channels login <channel>
+memmy plugins list
+```
+
+### Configure Models and Providers
+
+After onboarding, edit `~/.memmy/config.yaml`. For example, an
+OpenAI-compatible model can be configured as follows:
 
 ```yaml
 agents:
@@ -153,90 +160,77 @@ providers:
     apiKey: ${OPENAI_API_KEY}
 ```
 
-然后在当前 shell 中设置环境变量：
+Set the referenced environment variable in the current shell:
 
 ```bash
 export OPENAI_API_KEY="your-api-key"
 ```
 
-`memmy-agent` 会在加载配置时解析 `${ENV_NAME}` 形式的环境变量。
+`memmy-agent` resolves `${ENV_NAME}` and `${ENV_NAME:fallback}` placeholders
+when it loads the configuration.
 
-### 命令速查
+OAuth providers support explicit login and logout:
 
-| 功能 | 安装后命令 |
-|---|---|
-| 查看帮助 | `memmy --help` |
-| 初始化 | `memmy onboard` |
-| 交互式初始化 | `memmy onboard --wizard` |
-| 查看状态 | `memmy status` |
-| 交互式聊天（TUI） | `memmy` |
-| 单轮消息 | `memmy agent --message "..."` |
-| OpenAI 兼容 API | `memmy serve` |
-| Provider 登录 | `memmy provider login <provider>` |
+```bash
+memmy provider login openai_codex
+memmy provider logout openai_codex
+```
 
-## 源码开发运行
+The configuration CLI currently supports setting the application user ID:
 
-源码开发态使用编译后的入口 `node dist/main.js`。先进入当前包目录：
+```bash
+memmy config set app.userId <user-id>
+```
+
+### Command Reference
+
+| Task                             | Command                                                   |
+| -------------------------------- | --------------------------------------------------------- |
+| Show help                        | `memmy --help`                                            |
+| Initialize                       | `memmy onboard`                                           |
+| Run the interactive wizard       | `memmy onboard --wizard`                                  |
+| Inspect status                   | `memmy status`                                            |
+| Start interactive chat           | `memmy`                                                   |
+| Send one message                 | `memmy agent --message "..."`                             |
+| Start the OpenAI-compatible API  | `memmy serve`                                             |
+| Start the channel gateway        | `memmy gateway`                                           |
+| Inspect or authenticate channels | `memmy channels status`, `memmy channels login <channel>` |
+| List channel plugins             | `memmy plugins list`                                      |
+| Authenticate a provider          | `memmy provider login <provider>`                         |
+| Log out from a provider          | `memmy provider logout <provider>`                        |
+| Set the application user ID      | `memmy config set app.userId <user-id>`                   |
+
+## Source Development
+
+Run package-local commands from this directory:
 
 ```bash
 cd App/memmy-agent
-```
-
-### 环境要求
-
-- Node.js >= 22
-- npm
-
-### 安装依赖
-
-```bash
 npm install
 ```
 
-这个命令会安装 `package.json` 中声明的运行时依赖和开发依赖，依赖会放到当前包的 `node_modules/` 目录。
-
-### 编译
+Build TypeScript into `dist/` and copy the runtime templates and built-in
+skills:
 
 ```bash
 npm run build
 ```
 
-这个命令会把 `src/` 里的 TypeScript 编译到 `dist/`，并复制运行时需要的 templates 和 built-in skills。
-
-### 使用源码态 CLI
-
-查看帮助：
+Use the compiled CLI:
 
 ```bash
 node dist/main.js --help
-```
-
-初始化：
-
-```bash
 node dist/main.js onboard
-```
-
-交互式初始化：
-
-```bash
 node dist/main.js onboard --wizard
-```
-
-交互式聊天（TUI）：
-
-```bash
 node dist/main.js
-```
-
-单轮消息：
-
-```bash
-node dist/main.js agent --message "你好，介绍一下当前工作区"
-```
-
-启动 OpenAI 兼容 API 服务：
-
-```bash
+node dist/main.js agent --message "Summarize the current workspace"
 node dist/main.js serve
+node dist/main.js gateway
+```
+
+Run the package checks:
+
+```bash
+npm run typecheck
+npm test
 ```

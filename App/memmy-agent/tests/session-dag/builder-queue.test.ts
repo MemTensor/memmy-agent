@@ -54,6 +54,85 @@ afterEach(() => {
 });
 
 describe("Session DAG builder and queue", () => {
+  it("maps the default retry backoff slots in attempt order", () => {
+    const root = tmpRoot();
+    const sessions = new SessionManager(path.join(root, "sessions"));
+    const queue = new SessionDagQueueManager({
+      config: new SessionDagConfig(),
+      sessions,
+      provider: () => ({}),
+      model: () => "test-model",
+    });
+
+    try {
+      expect([0, 1, 2, 3].map((attemptCount) => queue.retryDelayMs(attemptCount))).toEqual([0, 3000, 5000, 10000]);
+      expect(queue.retryDelayMs(4)).toBe(10000);
+      expect(queue.retryDelayMs(100)).toBe(10000);
+    } finally {
+      queue.closeAll();
+    }
+  });
+
+  it("retries asynchronously when the configured backoff is zero", async () => {
+    const root = tmpRoot();
+    oldDagDir = process.env.MEMMY_AGENT_SESSION_DAG_DIR;
+    process.env.MEMMY_AGENT_SESSION_DAG_DIR = path.join(root, "dag");
+    const sessionKey = "cli:zero-retry-backoff";
+    const { sessions, session } = makeSession(root, sessionKey);
+    const provider: any = {
+      chatWithRetry: vi.fn(async () => {
+        if (provider.chatWithRetry.mock.calls.length === 1) {
+          return {
+            content: JSON.stringify({ ops: [{ op: "unsupported" }] }),
+            usage: { prompt_tokens: 1, completion_tokens: 1 },
+          };
+        }
+        return {
+          content: JSON.stringify({
+            ops: [
+              {
+                op: "add_node",
+                temp_id: "n0",
+                kind: "task",
+                status: "active",
+                title: "验证零延迟重试",
+                summary: "验证 DAG 队列可在下一轮事件循环立即重试。",
+                importance: 80,
+              },
+            ],
+          }),
+          usage: { prompt_tokens: 1, completion_tokens: 1 },
+        };
+      }),
+    };
+    const queue = new SessionDagQueueManager({
+      config: new SessionDagConfig({ maxUpdateAttempts: 2, retryBackoffMs: [0], maxConcurrentSessionQueues: 1 }),
+      sessions,
+      provider: () => provider,
+      model: () => "test-model",
+    });
+
+    queue.enqueueSavedTurn(sessionKey, {
+      turn_id: "turn-zero-retry-backoff",
+      message_start: 0,
+      message_end: session.messages.length,
+      user_text: "验证零延迟重试",
+      assistant_text: "已验证。",
+    });
+
+    const processed = await queue.waitUntilProcessed(sessionKey, "turn-zero-retry-backoff", 5000);
+    const store = new SessionDagStore({ sessionKey });
+    try {
+      expect(processed).toBe(true);
+      expect(provider.chatWithRetry).toHaveBeenCalledTimes(2);
+      expect(store.getTurn("turn-zero-retry-backoff")).toMatchObject({ dag_status: "done", build_mode: "llm_patch" });
+    } finally {
+      store.close();
+      await waitForQueueDrain();
+      queue.closeAll();
+    }
+  });
+
   it("builds a patch from turn messages and DAG context", async () => {
     const root = tmpRoot();
     oldDagDir = process.env.MEMMY_AGENT_SESSION_DAG_DIR;

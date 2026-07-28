@@ -192,12 +192,12 @@ describe("openclaw skill target", () => {
     expect(pluginIndex).toContain("Sender (untrusted metadata):");
     expect(pluginIndex).toContain("resolveRunId(ctx, event)");
     expect(pluginIndex).toContain("const text = cleanOpenclawUserText(message.content);");
-    expect(pluginIndex).toContain("query: normalizeOptionalText(pending && pending.query) || query");
+    expect(pluginIndex).toContain("query: resolvedQuery");
     expect(pluginIndex).toContain("toolCalls: toolTrace.toolCalls.length ? toolTrace.toolCalls : undefined");
     expect(pluginIndex).toContain("toolResults: toolTrace.toolResults.length ? toolTrace.toolResults : undefined");
     expect(pluginIndex).toContain("contextHints: resolveContextHints(ctx)");
-    expect(pluginIndex).toContain("episodeId: turn.episodeId");
-    expect(pluginIndex).toContain("episodeId: normalizeOptionalText(pending && pending.episodeId) || undefined");
+    expect(pluginIndex).not.toContain("episodeId: turn.episodeId");
+    expect(pluginIndex).not.toContain("pending.episodeId");
     expect(pluginIndex).toContain("sourceMemoryIds: Array.isArray(pending && pending.sourceMemoryIds)");
     expect(pluginIndex).toContain('profileId: normalizeOptionalText(ctx && ctx.agentId) || "main"');
     expect(pluginIndex).toContain("function latestTurnText");
@@ -229,7 +229,7 @@ describe("openclaw skill target", () => {
     expect(pluginIndex).toContain("new AbortController()");
     expect(pluginIndex).toContain("toolCalls: Array.isArray(payload.toolCalls) ? payload.toolCalls : undefined");
     expect(pluginIndex).toContain("toolResults: Array.isArray(payload.toolResults) ? payload.toolResults : undefined");
-    expect(pluginIndex).toContain("episodeId: payload.episodeId || undefined");
+    expect(pluginIndex).not.toContain("episodeId: payload.episodeId || undefined");
     expect(pluginIndex).toContain("mode: 'turn_complete'");
     expect(pluginIndex).not.toContain("mode: 'memory_add'");
     expect(pluginIndex).not.toContain("contentParts.push('User: '");
@@ -394,7 +394,7 @@ describe("openclaw skill target", () => {
       expect(result?.text).toContain("tail_summary: Last L1 summary 1");
       expect(result?.text).not.toContain("Assistant raw summary 1");
       expect(result?.text).not.toContain("6. episode_6");
-      expect(result?.text).toContain("输入 1-5 选择要接续的 episode");
+      expect(result?.text).toContain("Enter 1-5 to select an episode to resume.");
       expect(requestBodies[0]?.query).toBe("测试query");
       expect(requestBodies[0]?.layers).toEqual(["L1"]);
       expect(requestBodies[0]?.limit).toBe(20);
@@ -439,7 +439,7 @@ describe("openclaw skill target", () => {
         return jsonResponse({ sessionId: "session-opened" });
       }
       if (targetUrl.pathname === "/api/v1/turns/start") {
-        return jsonResponse({ turnId: "turn-started", episodeId: "episode-started", injectedContext: { markdown: "memory context" } });
+        return jsonResponse({ turnId: "turn-started", injectedContext: { markdown: "memory context" } });
       }
       return jsonResponse({}, 404);
     }) as typeof fetch;

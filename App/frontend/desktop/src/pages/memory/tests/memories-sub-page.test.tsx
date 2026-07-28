@@ -7,8 +7,10 @@ import {
   buildPanelItemsInput,
   loadMemoryDetail,
   loadMemoriesData,
-  MemoriesSubPageView
+  MemoriesSubPageView,
+  processingRetryErrorMessage
 } from "../memories-sub-page.js";
+import { ApiRequestError } from "../../../api/http.js";
 import {
   createMemoryRuntimeClientStub,
   memoryDetailFixture,
@@ -111,14 +113,76 @@ describe("MemoriesSubPage", () => {
     expect(html).not.toContain("memory-pill--source");
   });
 
-  it("摘要未完成时用导入 trace 的用户 query 作为记忆标题", () => {
-    expect(displayMemoryTitle({
+  it("摘要完成前或失败时展示 user-text，完成后展示真实摘要", () => {
+    const trace = {
       id: "memory-trace-import",
-      title: "codex turn 2026-06-10 #10",
-      summary: "## user",
+      title: "修复自动扫描卡顿和标题占位",
       memoryLayer: "L1",
       body: "## user\n\n修复自动扫描卡顿和标题占位\n\n## assistant\n\n已开始排查。"
+    } as const;
+
+    expect(displayMemoryTitle({
+      ...trace,
+      summary: ""
     })).toBe("修复自动扫描卡顿和标题占位");
+    expect(displayMemoryTitle({
+      ...trace,
+      summary: "摘要整理中"
+    })).toBe("修复自动扫描卡顿和标题占位");
+    expect(displayMemoryTitle({
+      ...trace,
+      summary: "已修复自动扫描卡顿，并替换临时标题"
+    })).toBe("已修复自动扫描卡顿，并替换临时标题");
+  });
+
+  it("span 列表展示标题，详情只展示子目标和摘要", () => {
+    const spanItem = {
+      ...memoryListItemFixture,
+      id: "span_38dff97911bbdf533513",
+      kind: "span" as const,
+      title: "读取并分析源码，分类金融策略",
+      summary: "阅读策略、指标和组合模型相关文件。"
+    };
+    const spanDetail = {
+      item: {
+        ...spanItem,
+        body: "Goal: 读取并分析源码，分类金融策略\nSummary: 阅读策略、指标和组合模型相关文件。",
+        sourceMemoryIds: [],
+        metadata: {
+          spanDetail: {
+            toolCallStart: 1,
+            toolCalls: [
+              { id: "tool-1", name: "rg", input: { pattern: "span" }, output: "match" },
+              { id: "tool-2", name: "npm_test", output: "passed" }
+            ]
+          },
+          properties: {
+            internal_info: {
+              span: { span_goal: "读取并分析源码，分类金融策略" }
+            }
+          }
+        }
+      },
+      version: 1,
+      etag: "span-detail"
+    };
+
+    const html = renderMemories({
+      status: "ready",
+      data: panelItemsOutput([spanItem]),
+      detail: { status: "ready", data: spanDetail }
+    });
+
+    expect(html).toContain("读取并分析源码，分类金融策略");
+    expect(html).toContain("子目标");
+    expect(html).toContain("摘要");
+    expect(html).toContain("阅读策略、指标和组合模型相关文件。");
+    expect(html).toContain("相关步骤");
+    expect(html).toContain("工具调用 · rg");
+    expect(html).toContain("工具调用 · npm_test");
+    expect(html).not.toContain("正文");
+    expect(html).not.toContain("Goal:");
+    expect(html).not.toContain("Summary:");
   });
 
   it("搜索列表和点击详情都调用 memoryRuntime client", async () => {
@@ -162,7 +226,7 @@ describe("MemoriesSubPage", () => {
     expect(html).not.toContain("共 43 条");
   });
 
-  it("把导入流水线 tags 渲染成用户可理解的处理状态", () => {
+  it("把结构化处理状态渲染成用户可理解的提示", () => {
     const base = {
       ...memoryListItemFixture,
       metrics: undefined,
@@ -171,48 +235,38 @@ describe("MemoriesSubPage", () => {
 
     const summaryHtml = renderMemories({
       status: "ready",
-      data: panelItemsOutput([{ ...base, id: "memory-summary", summary: "摘要排队中", tags: [...base.tags, "摘要排队中"] }]),
-      detail: null
-    });
-    expect(summaryHtml).toContain("摘要整理中");
-    expect(summaryHtml).not.toContain("摘要排队中");
-
-    const indexHtml = renderMemories({
-      status: "ready",
-      data: panelItemsOutput([{ ...base, id: "memory-index", tags: [...base.tags, "建立索引中"] }]),
-      detail: null
-    });
-    expect(indexHtml).toContain("索引建立中");
-    expect(indexHtml).not.toContain("建立索引中");
-
-    const staleSummaryTagHtml = renderMemories({
-      status: "ready",
       data: panelItemsOutput([{
         ...base,
-        id: "memory-summary-stale",
-        summary: "已完成的真实摘要",
-        tags: [...base.tags, "摘要排队中", "建立索引中"]
+        id: "memory-summary",
+        processing: processingRecord("memory-summary", "summary_pending", "summary")
       }]),
       detail: null
     });
-    expect(staleSummaryTagHtml).toContain("索引建立中");
-    expect(staleSummaryTagHtml).not.toContain("摘要整理中");
+    expect(summaryHtml).toContain("摘要总结中");
 
-    const indexedHtml = renderMemories({
+    const indexHtml = renderMemories({
       status: "ready",
-      data: panelItemsOutput([
-        {
-          ...base,
-          id: "memory-indexed",
-          tags: [...base.tags, "索引已建立"],
-          metrics: { value: 0, alpha: 0, reflectionDone: false }
-        }
-      ]),
+      data: panelItemsOutput([{
+        ...base,
+        id: "memory-index",
+        processing: processingRecord("memory-index", "embedding_pending", "embedding")
+      }]),
       detail: null
     });
-    expect(indexedHtml).not.toContain("反思生成中");
-    expect(indexedHtml).not.toContain("索引建立中");
-    expect(indexedHtml).not.toContain("索引已建立");
+    expect(indexHtml).toContain("索引建立中");
+
+    const readyHtml = renderMemories({
+      status: "ready",
+      data: panelItemsOutput([{
+        ...base,
+        id: "memory-ready",
+        summary: "已完成的真实摘要",
+        processing: processingRecord("memory-ready", "ready", null)
+      }]),
+      detail: null
+    });
+    expect(readyHtml).not.toContain("摘要总结中");
+    expect(readyHtml).not.toContain("索引建立中");
 
     const doneHtml = renderMemories({
       status: "ready",
@@ -220,7 +274,7 @@ describe("MemoriesSubPage", () => {
         {
           ...base,
           id: "memory-reflection-done",
-          tags: [...base.tags, "索引已建立"],
+          processing: processingRecord("memory-reflection-done", "ready", null),
           metrics: { value: 0.8, alpha: 0.6, reflectionDone: true }
         }
       ]),
@@ -229,7 +283,133 @@ describe("MemoriesSubPage", () => {
     expect(doneHtml).toContain('data-icon="sparkles"');
     expect(doneHtml).toContain("反思");
     expect(doneHtml).not.toContain("反思生成中");
-    expect(doneHtml).not.toContain("索引已建立");
+  });
+
+  it("展示结构化失败原因，并提供设置与立即重试操作", () => {
+    const processing = {
+      memoryId: memoryListItemFixture.id,
+      state: "failed" as const,
+      stage: "summary" as const,
+      activeJobId: null,
+      attemptCount: 3,
+      manualRetryCount: 0,
+      retryAction: "open_settings" as const,
+      errorCode: "model_configuration",
+      errorMessage: "摘要模型未配置",
+      failedAt: "2026-06-03T09:30:00.000Z",
+      updatedAt: "2026-06-03T09:30:00.000Z"
+    };
+    const html = renderMemories({
+      status: "ready",
+      data: panelItemsOutput([{ ...memoryListItemFixture, processing }]),
+      detail: {
+        status: "ready",
+        data: {
+          ...memoryDetailFixture,
+          item: { ...memoryDetailFixture.item, processing }
+        }
+      }
+    }, "zh-CN", {
+      onRetryProcessing: vi.fn(),
+      onOpenSettings: vi.fn()
+    });
+
+    expect(html).toContain("处理失败");
+    expect(html).toContain("摘要总结");
+    expect(html).toContain("摘要模型未配置");
+    expect(html).toContain("重试");
+    expect(html).toContain("检查模型设置");
+    expect(html).toContain("memory-pill--failed");
+    expect(html).not.toContain("已尝试次数");
+  });
+
+  it("重试处理中持续展示上次失败原因", () => {
+    const processing = {
+      memoryId: memoryListItemFixture.id,
+      state: "embedding_pending" as const,
+      stage: "embedding" as const,
+      activeJobId: "embedding-retry",
+      attemptCount: 0,
+      manualRetryCount: 1,
+      retryAction: "retry" as const,
+      errorCode: "model_configuration",
+      errorMessage: "摘要模型未配置",
+      failedAt: "2026-06-03T09:30:00.000Z",
+      updatedAt: "2026-06-03T09:31:00.000Z"
+    };
+    const html = renderMemories({
+      status: "ready",
+      data: panelItemsOutput([{ ...memoryListItemFixture, processing }]),
+      detail: {
+        status: "ready",
+        data: {
+          ...memoryDetailFixture,
+          item: { ...memoryDetailFixture.item, processing }
+        }
+      }
+    }, "zh-CN", {
+      onRetryProcessing: vi.fn(),
+      onOpenSettings: vi.fn()
+    });
+
+    expect(html).toContain("正在重试");
+    expect(html).toContain("上次失败原因");
+    expect(html).toContain("摘要模型未配置");
+    expect(html).toContain("上次失败时间");
+    expect(html).not.toContain("已尝试次数");
+    expect(html).not.toContain("检查模型设置");
+    expect(html).not.toContain("立即重试");
+  });
+
+  it("重试接口失败时保留原始处理原因，并单独展示本次重试错误", () => {
+    const processing = {
+      memoryId: memoryListItemFixture.id,
+      state: "failed" as const,
+      stage: "summary" as const,
+      activeJobId: null,
+      attemptCount: 3,
+      manualRetryCount: 0,
+      retryAction: "open_settings" as const,
+      errorCode: "model_configuration",
+      errorMessage: "openai_compatible HTTP 200: expected JSON but received HTML instead of a model API response",
+      failedAt: "2026-06-03T09:30:00.000Z",
+      updatedAt: "2026-06-03T09:30:00.000Z"
+    };
+    const html = renderMemories({
+      status: "ready",
+      data: panelItemsOutput([{ ...memoryListItemFixture, processing }]),
+      detail: {
+        status: "ready",
+        data: {
+          ...memoryDetailFixture,
+          item: { ...memoryDetailFixture.item, processing }
+        }
+      }
+    }, "zh-CN", {
+      onRetryProcessing: vi.fn(),
+      retryFeedback: {
+        memoryId: memoryListItemFixture.id,
+        status: "error",
+        message: "本地记忆服务尚未加载重试功能，请完全退出并重新打开 Memmy 后再试"
+      }
+    });
+
+    expect(html).toContain(processing.errorMessage);
+    expect(html).toContain("本次重试未成功：本地记忆服务尚未加载重试功能");
+    expect(html).toContain("memory-processing-failure__retry-error");
+  });
+
+  it("只把没有结构化错误体的 404 识别为旧的本地重试接口", () => {
+    const restartMessage = "请重启 Memmy";
+
+    expect(processingRetryErrorMessage(
+      new ApiRequestError("Request failed", 404),
+      restartMessage
+    )).toBe(restartMessage);
+    expect(processingRetryErrorMessage(
+      new ApiRequestError("memory not found", 404, "not_found"),
+      restartMessage
+    )).toBe("memory not found");
   });
 
   it("英文模式下详情里的导入摘要占位文案使用英文", () => {
@@ -344,6 +524,10 @@ describe("MemoriesSubPage", () => {
           ...memoryDetailFixture.item.metadata,
           source: "hermes",
           status: "succeeded",
+          traceDetail: {
+            ...(memoryDetailFixture.item.metadata.traceDetail as Record<string, unknown>),
+            reflection: "PIVOTAL"
+          },
           nested: {
             status: "nested-status-value",
             keep: "visible metadata"
@@ -410,6 +594,7 @@ describe("MemoriesSubPage", () => {
     expect(html).toContain("时间");
     expect(html).toContain("价值");
     expect(html).toContain("反思权重 α");
+    expect(html).not.toContain("PIVOTAL");
     expect(html).toContain("优先级");
     expect(html).toContain("0.735");
     expect(html).toContain("0.500");
@@ -467,10 +652,45 @@ describe("MemoriesSubPage", () => {
     expect(html).not.toContain("<a ");
     expect(html).not.toContain("127.0.0.1:19000");
   });
+
+  it("历史 trace 详情渲染 GFM 表格", () => {
+    const tableDetail = {
+      ...memoryDetailFixture,
+      item: {
+        ...memoryDetailFixture.item,
+        metadata: {
+          ...memoryDetailFixture.item.metadata,
+          traceDetail: {
+            ...(memoryDetailFixture.item.metadata.traceDetail as Record<string, unknown>),
+            finalResponse: "| | 黄瓤（β-胡萝卜素） | 红瓤（番茄红素） |\n|---|---|---|\n| 护眼 | ✅✅ 可转化为维A | ❌ 无此功能 |"
+          }
+        }
+      }
+    };
+    const html = renderMemories({
+      status: "ready",
+      data: panelItemsOutput([memoryListItemFixture]),
+      detail: { status: "ready", data: tableDetail }
+    });
+
+    expect(html).toContain("memory-markdown__table-scroll");
+    expect(html).toContain('<table class="memory-markdown__table">');
+    expect(html).toContain('<th class="memory-markdown__th">红瓤（番茄红素）</th>');
+    expect(html).toContain('<td class="memory-markdown__td">❌ 无此功能</td>');
+    expect(html).not.toContain("|---|---|---|");
+  });
 });
 
 /** Renders render memories. */
-function renderMemories(state: Parameters<typeof MemoriesSubPageView>[0]["state"], language = "zh-CN"): string {
+function renderMemories(
+  state: Parameters<typeof MemoriesSubPageView>[0]["state"],
+  language = "zh-CN",
+  actions: {
+    onRetryProcessing?: (id: string) => void;
+    onOpenSettings?: () => void;
+    retryFeedback?: NonNullable<Parameters<typeof MemoriesSubPageView>[0]["retryFeedback"]>;
+  } = {}
+): string {
   return renderToString(
     <I18nProvider language={language}>
       <MemoriesSubPageView
@@ -484,8 +704,31 @@ function renderMemories(state: Parameters<typeof MemoriesSubPageView>[0]["state"
         onRefresh={vi.fn()}
         onOpenDetail={vi.fn()}
         onDeleteDetail={vi.fn(async () => undefined)}
+        onRetryProcessing={actions.onRetryProcessing}
+        onOpenSettings={actions.onOpenSettings}
+        retryFeedback={actions.retryFeedback}
         onCloseDetail={vi.fn()}
       />
     </I18nProvider>
   );
+}
+
+function processingRecord(
+  memoryId: string,
+  state: "summary_pending" | "embedding_pending" | "ready",
+  stage: "summary" | "embedding" | null
+) {
+  return {
+    memoryId,
+    state,
+    stage,
+    activeJobId: null,
+    attemptCount: 0,
+    manualRetryCount: 0,
+    retryAction: "none" as const,
+    errorCode: null,
+    errorMessage: null,
+    failedAt: null,
+    updatedAt: "2026-06-03T09:30:00.000Z"
+  };
 }

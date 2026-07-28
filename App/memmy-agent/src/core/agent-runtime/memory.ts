@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { estimateMessageTokens, Session } from "../session/manager.js";
+import { CONTEXT_SAFETY_BUFFER_TOKENS } from "../../token-budget.js";
 import { GitStore } from "../../utils/gitstore.js";
 import { ensureDir, estimatePromptTokensChain, stripThink, truncateText } from "../../utils/helpers.js";
 import { renderTemplate } from "../../utils/prompt-templates.js";
@@ -64,6 +65,11 @@ type ArchiveOptions = {
   sessionKey?: string | null;
 };
 
+export type MemoryStoreOptions = {
+  maxHistoryEntries?: number;
+  fileMemoryEnabled?: boolean;
+};
+
 const LEGACY_ENTRY_START_RE = /^\[(\d{4}-\d{2}-\d{2}[^\]]*)\]\s*/;
 const LEGACY_TIMESTAMP_RE = /^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2})\]\s*/;
 const LEGACY_RAW_MESSAGE_RE = /^\[\d{4}-\d{2}-\d{2}[^\]]*\]\s+[A-Z][A-Z0-9_]*(?:\s+\[tools:\s*[^\]]+\])?:/;
@@ -85,6 +91,7 @@ export class MemoryStore {
   root: string;
   workspace: string;
   maxHistoryEntries: number;
+  readonly fileMemoryEnabled: boolean;
   memoryDir: string;
   memoryFile: string;
   historyFile: string;
@@ -97,13 +104,18 @@ export class MemoryStore {
   oversizeLogged = false;
   gitStore: GitStore;
 
-  constructor(workspace: string, maxHistoryEntries: number | { maxHistoryEntries?: number } = MemoryStore.DEFAULT_MAX_HISTORY) {
+  constructor(
+    workspace: string,
+    options: number | MemoryStoreOptions = MemoryStore.DEFAULT_MAX_HISTORY,
+  ) {
     this.workspace = this.root = path.resolve(workspace);
     const maxEntries =
-      typeof maxHistoryEntries === "number"
-        ? maxHistoryEntries
-        : (maxHistoryEntries.maxHistoryEntries ?? MemoryStore.DEFAULT_MAX_HISTORY);
+      typeof options === "number"
+        ? options
+        : (options.maxHistoryEntries ?? MemoryStore.DEFAULT_MAX_HISTORY);
     this.maxHistoryEntries = maxEntries;
+    this.fileMemoryEnabled =
+      typeof options === "object" && options.fileMemoryEnabled === true;
     this.memoryDir = ensureDir(path.join(this.workspace, "memory"));
     this.memoryFile = path.join(this.memoryDir, "MEMORY.md");
     this.historyFile = path.join(this.memoryDir, "history.jsonl");
@@ -114,6 +126,10 @@ export class MemoryStore {
     this.dreamCursorFile = path.join(this.memoryDir, ".dreamCursor");
     this.gitStore = new GitStore(this.workspace, ["SOUL.md", "USER.md", "memory/MEMORY.md", "memory/.dreamCursor"]);
     this.maybeMigrateLegacyHistory();
+    if (!this.fileMemoryEnabled) {
+      this.skipPendingDreamHistory();
+      this.compactHistory();
+    }
   }
 
   get git(): GitStore {
@@ -192,6 +208,10 @@ export class MemoryStore {
     fs.mkdirSync(path.dirname(this.historyFile), { recursive: true });
     fs.appendFileSync(this.historyFile, `${JSON.stringify(record)}\n`, "utf8");
     fs.writeFileSync(this.cursorFile, String(cursor), "utf8");
+    if (!this.fileMemoryEnabled) {
+      if (cursor > this.getLastDreamCursor()) this.setLastDreamCursor(cursor);
+      this.compactHistory();
+    }
     return cursor;
   }
 
@@ -353,6 +373,12 @@ export class MemoryStore {
 
   setLastDreamCursor(cursor: number): void {
     fs.writeFileSync(this.dreamCursorFile, String(cursor), "utf8");
+  }
+
+  private skipPendingDreamHistory(): void {
+    const current = this.getLastDreamCursor();
+    const latest = this.getLastCursor();
+    if (latest > current) this.setLastDreamCursor(latest);
   }
 
   static formatMessages(messages: Array<Record<string, any>>): string {
@@ -551,7 +577,7 @@ type ConsolidatorInit = {
 
 export class Consolidator {
   static MAX_CONSOLIDATION_ROUNDS = 5;
-  static SAFETY_BUFFER = 1024;
+  static SAFETY_BUFFER = CONTEXT_SAFETY_BUFFER_TOKENS;
 
   store: MemoryStore;
   provider: any;
@@ -1236,10 +1262,18 @@ export class Dream {
   buildTools(): ToolRegistry {
     const tools = new ToolRegistry();
     tools.register(new ReadFileTool({ workspace: this.store.workspace, allowedDir: this.store.workspace }));
-    tools.register(new EditFileTool({ workspace: this.store.workspace, allowedDir: this.store.workspace }));
+    tools.register(new EditFileTool({
+      workspace: this.store.workspace,
+      allowedDir: this.store.workspace,
+      postWriteValidation: false,
+    }));
     const skillsDir = path.join(this.store.workspace, "skills");
     fs.mkdirSync(skillsDir, { recursive: true });
-    tools.register(new WriteFileTool({ workspace: this.store.workspace, allowedDir: skillsDir }));
+    tools.register(new WriteFileTool({
+      workspace: this.store.workspace,
+      allowedDir: skillsDir,
+      postWriteValidation: false,
+    }));
     return tools;
   }
 

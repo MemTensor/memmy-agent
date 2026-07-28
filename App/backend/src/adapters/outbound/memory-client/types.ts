@@ -14,6 +14,7 @@ import type {
   MemoryApiLogsInput,
   MemoryApiLogsOutput,
   MemoryHealthSnapshot,
+  MemoryProcessingStatusOutput,
   MemoryReloadConfigInput,
   MemoryReloadConfigOutput,
   PanelAnalysisOutput,
@@ -28,6 +29,7 @@ import type {
   SearchOutput,
   StartTurnInput,
   StartTurnOutput,
+  RetryMemoryProcessingOutput,
   WorkerRunOutput
 } from "@memmy/local-api-contracts";
 
@@ -47,8 +49,15 @@ export interface MemoryClient {
   getMemory(input: { memoryId: string }): Promise<GetMemoryOutput>;
   deleteMemory(input: DeleteMemoryInput & { memoryId: string }): Promise<DeleteMemoryOutput>;
 
-  enqueueImportSummaries(): Promise<EnqueueImportSummariesOutput>;
-  runWorker(input: { limit: number; signal?: AbortSignal; timeoutMs?: number }): Promise<WorkerRunOutput>;
+  enqueueImportSummaries(memoryIds?: string[]): Promise<EnqueueImportSummariesOutput>;
+  getMemoryProcessingStatus(memoryIds: string[]): Promise<MemoryProcessingStatusOutput>;
+  retryMemoryProcessing(memoryId: string): Promise<RetryMemoryProcessingOutput>;
+  runWorker(input: {
+    limit: number;
+    targetMemoryIds?: string[];
+    signal?: AbortSignal;
+    timeoutMs?: number;
+  }): Promise<WorkerRunOutput>;
 
   panelOverview(): Promise<PanelOverviewOutput>;
   panelAnalysis(): Promise<PanelAnalysisOutput>;

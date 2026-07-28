@@ -5,6 +5,8 @@ export * from "./memory-runtime.js";
 export * from "./endpoints.js";
 export * from "./cloud-service.js";
 
+export const MANAGED_AGENT_DISCOVERY_PENDING_DATA_PATH = "memmy-agent://history-discovery-pending";
+
 export const UserModeSchema = z.enum(["unset", "byok", "account"]);
 export type UserMode = z.infer<typeof UserModeSchema>;
 
@@ -100,13 +102,25 @@ export const PrivacySettingsDtoSchema = z.object({
 });
 export type PrivacySettingsDto = z.infer<typeof PrivacySettingsDtoSchema>;
 
+export const TokenUsageSceneSchema = z.enum(["agent_chat", "memory_summary", "memory_evolution"]);
+export type TokenUsageScene = z.infer<typeof TokenUsageSceneSchema>;
+
+export const TokenSceneUsageDtoSchema = z.object({
+    scene: TokenUsageSceneSchema,
+    totalTokens: z.number().int().nonnegative(),
+    usedTokens: z.number().int().nonnegative(),
+    remainingTokens: z.number().int()
+});
+export type TokenSceneUsageDto = z.infer<typeof TokenSceneUsageDtoSchema>;
+
 export const TokenUsageDtoSchema = z.object({
     planName: z.string(),
     totalTokens: z.number().int().nonnegative(),
     usedTokens: z.number().int().nonnegative(),
-    remainingTokens: z.number().int().nonnegative(),
+    remainingTokens: z.number().int(),
     expiresAt: z.string().datetime().nullable(),
-    lastSyncedAt: z.string().datetime().nullable()
+    lastSyncedAt: z.string().datetime().nullable(),
+    sceneUsages: z.array(TokenSceneUsageDtoSchema).default([])
 });
 export type TokenUsageDto = z.infer<typeof TokenUsageDtoSchema>;
 
@@ -161,9 +175,15 @@ export const AgentGatewayRuntimeConfigSchema = z.object({
 });
 export type AgentGatewayRuntimeConfig = z.infer<typeof AgentGatewayRuntimeConfigSchema>;
 
+export const MemoryServiceRuntimeConfigSchema = z.object({
+    baseUrl: z.string().url()
+});
+export type MemoryServiceRuntimeConfig = z.infer<typeof MemoryServiceRuntimeConfigSchema>;
+
 export const RuntimeConfigSchema = z.object({
     baseUrl: z.string().url(),
     localToken: z.string().min(1),
+    memory: MemoryServiceRuntimeConfigSchema.optional(),
     agentGateway: AgentGatewayRuntimeConfigSchema.optional()
 });
 export type RuntimeConfig = z.infer<typeof RuntimeConfigSchema>;
@@ -188,7 +208,9 @@ export const AgentSourceViewSchema = z.object({
     available: z.boolean(),
     status: AgentSourceStatusSchema,
     messageCount: z.number().int().nonnegative(),
-    lastScannedAt: z.string().datetime().nullable()
+    lastScannedAt: z.string().datetime().nullable(),
+    syncBoundaryAt: z.string().datetime().nullable().optional(),
+    syncReady: z.boolean().optional()
 });
 export type AgentSourceView = z.infer<typeof AgentSourceViewSchema>;
 
@@ -208,10 +230,93 @@ export type AgentSourceMemoryPluginConflictsResponse = z.infer<typeof AgentSourc
 
 /** Schema for add manual input. */
 export const AddManualInputSchema = z.object({
-    displayName: z.string().min(1),
-    dataPath: z.string().min(1)
+    displayName: z.string().trim().min(1).max(120)
 });
 export type AddManualInput = z.infer<typeof AddManualInputSchema>;
+
+export const ManagedAgentSourceMessageSchema = z.object({
+    messageId: z.string().min(1),
+    conversationId: z.string().min(1),
+    role: z.enum(["user", "assistant", "tool", "system"]),
+    content: z.string().min(1),
+    createdAt: z.string().datetime(),
+    workspacePath: z.string().nullable().optional(),
+    gitRoot: z.string().nullable().optional(),
+    rawMeta: z.record(z.string(), z.unknown()).optional()
+});
+export type ManagedAgentSourceMessage = z.infer<typeof ManagedAgentSourceMessageSchema>;
+
+export const ManagedAgentSourceImportInputSchema = z.object({
+    mode: z.enum(["initial_subset", "incremental"]),
+    messages: z.array(ManagedAgentSourceMessageSchema).max(2_000),
+    dataPath: z.string().trim().min(1).optional(),
+    syncBoundaryAt: z.string().datetime().nullable().optional(),
+    latestSeenAt: z.string().datetime().nullable().optional(),
+    final: z.boolean().default(false)
+});
+export type ManagedAgentSourceImportInput = z.infer<typeof ManagedAgentSourceImportInputSchema>;
+
+export const ManagedAgentSourceImportResultSchema = z.object({
+    sourceId: z.string().min(1),
+    attempted: z.number().int().nonnegative(),
+    written: z.number().int().nonnegative(),
+    deduped: z.number().int().nonnegative(),
+    failed: z.number().int().nonnegative(),
+    memoryIds: z.array(z.string()),
+    syncBoundaryAt: z.string().datetime().nullable(),
+    errors: z.array(z.object({
+        conversationId: z.string().min(1),
+        reason: z.string().min(1)
+    }))
+});
+export type ManagedAgentSourceImportResult = z.infer<typeof ManagedAgentSourceImportResultSchema>;
+
+const ManagedAgentSyncFieldMapSchema = z.object({
+    messageId: z.string().trim().min(1).optional(),
+    conversationId: z.string().trim().min(1).optional(),
+    role: z.string().trim().min(1),
+    content: z.string().trim().min(1),
+    createdAt: z.string().trim().min(1),
+    workspacePath: z.string().trim().min(1).optional(),
+    gitRoot: z.string().trim().min(1).optional()
+});
+
+const ManagedAgentSyncRecipeBaseSchema = z.object({
+    version: z.literal(1),
+    path: z.string().trim().min(1),
+    fields: ManagedAgentSyncFieldMapSchema,
+    roleMap: z.record(z.string(), z.enum(["user", "assistant", "tool", "system"])).optional(),
+    timestampFormat: z.enum(["auto", "iso", "unix_seconds", "unix_milliseconds"]).default("auto")
+});
+
+export const ManagedAgentSyncRecipeSchema = z.discriminatedUnion("format", [
+    ManagedAgentSyncRecipeBaseSchema.extend({
+        format: z.literal("jsonl"),
+        fileSuffix: z.string().min(1).optional()
+    }),
+    ManagedAgentSyncRecipeBaseSchema.extend({
+        format: z.literal("json"),
+        fileSuffix: z.string().min(1).optional(),
+        recordsPath: z.string().trim().min(1).optional()
+    }),
+    ManagedAgentSyncRecipeBaseSchema.extend({
+        format: z.literal("sqlite"),
+        query: z.string().trim().min(1)
+    })
+]);
+export type ManagedAgentSyncRecipe = z.infer<typeof ManagedAgentSyncRecipeSchema>;
+
+export const ManagedAgentSourceUpdateInputSchema = z.object({
+    dataPath: z.string().trim().min(1).optional(),
+    skillInstalled: z.boolean().optional(),
+    syncRecipe: ManagedAgentSyncRecipeSchema.optional()
+}).refine((input) =>
+    input.dataPath !== undefined ||
+    input.skillInstalled !== undefined ||
+    input.syncRecipe !== undefined, {
+    message: "At least one managed Agent source field is required"
+});
+export type ManagedAgentSourceUpdateInput = z.infer<typeof ManagedAgentSourceUpdateInputSchema>;
 
 /** Schema for agent source id params. */
 export const AgentSourceIdParamsSchema = z.object({
@@ -319,7 +424,13 @@ export type AgentSourceScanProgressPayload = z.infer<typeof AgentSourceScanProgr
 
 export const AgentSourceScanStatusResponseSchema = z.object({
     active: z.boolean(),
-    progress: AgentSourceScanProgressPayloadSchema.nullable()
+    progress: AgentSourceScanProgressPayloadSchema.nullable(),
+    completion: z.object({
+        jobId: z.string().min(1),
+        sourceId: z.string().min(1),
+        succeeded: z.boolean(),
+        completedAt: z.string().datetime()
+    }).nullable().optional()
 });
 export type AgentSourceScanStatusResponse = z.infer<typeof AgentSourceScanStatusResponseSchema>;
 
@@ -360,6 +471,7 @@ export const ScanResultSchema = z.object({
     discoveredConversations: z.number().int().nonnegative(),
     emittedMessages: z.number().int().nonnegative(),
     skipped: z.number().int().nonnegative(),
+    memoryIds: z.array(z.string().min(1)).optional(),
     errors: z.array(
         z.object({
             conversationId: z.string().min(1),
@@ -387,7 +499,8 @@ export type LegalAgreementUrls = z.infer<typeof LegalAgreementUrlsSchema>;
 export const PromotionFlagsSchema = z.object({
     loginBanner: z.boolean(),
     improvementGift: z.boolean(),
-    applyMore: z.boolean()
+    applyMore: z.boolean(),
+    agentChatTokenTotal: z.number().int().nonnegative()
 });
 export type PromotionFlags = z.infer<typeof PromotionFlagsSchema>;
 
@@ -1046,6 +1159,7 @@ export const ScanCompletedSseEventSchema = z.object({
     timestamp: z.string().datetime(),
     payload: z.object({
         jobId: z.string().min(1),
+        sourceId: z.string().min(1),
         results: z.array(ScanResultSchema)
     })
 });
@@ -1069,3 +1183,29 @@ export const TokenQuotaApplyResultSchema = z.object({
     status: z.enum(["pending", "approved", "rejected"])
 });
 export type TokenQuotaApplyResult = z.infer<typeof TokenQuotaApplyResultSchema>;
+
+/** Token quota eligibility states exposed by the local API. */
+export const TokenQuotaEligibilityStateSchema = z.enum([
+    "available",
+    "pending",
+    "cooldown",
+    "limit_reached"
+]);
+export type TokenQuotaEligibilityState = z.infer<typeof TokenQuotaEligibilityStateSchema>;
+
+/** Token quota eligibility for the current account. */
+export const TokenQuotaEligibilitySchema = z.object({
+    /** Current eligibility state. */
+    state: TokenQuotaEligibilityStateSchema,
+    /** Number of successfully created requests, capped at five. */
+    requestCount: z.number().int().min(0).max(5),
+    /** Maximum number of requests allowed for an account. */
+    maxRequestCount: z.literal(5),
+    /** Cooldown end time in Unix milliseconds; null outside cooldown. */
+    nextAllowedAtEpochMs: z.number().int().nonnegative().nullable(),
+    /** Status of the latest request; null when no request exists. */
+    latestRequestStatus: z.enum(["pending", "approved", "rejected"]).nullable(),
+    /** Rejection note for the latest request; null when unavailable or not rejected. */
+    latestReviewNote: z.string().nullable()
+});
+export type TokenQuotaEligibility = z.infer<typeof TokenQuotaEligibilitySchema>;

@@ -14,10 +14,14 @@ afterEach(async () => {
 });
 
 describe("local data routes", () => {
-  it("registers reveal, export, and clear behind the runtime token", async () => {
+  it("registers path inspection, reveal, export, and clear behind the runtime token", async () => {
     const calls: string[] = [];
     app = createServer({
       localData: {
+        async getPath() {
+          calls.push("getPath");
+          return { ok: true, dataPath: "C:\\Users\\memmy-user\\.memmy\\memory-service" };
+        },
         async reveal() {
           calls.push("reveal");
           return { ok: true, dataPath: "/tmp/memmy-data" };
@@ -33,23 +37,24 @@ describe("local data routes", () => {
       }
     });
 
+    const path = await injectJson("GET", "/api/local-data");
     const reveal = await injectJson("POST", "/api/local-data/reveal", {});
     const exported = await injectJson("POST", "/api/local-data/export", { targetPath: "/tmp/export" });
     const cleared = await injectJson("DELETE", "/api/local-data", { confirm: true });
 
+    expect(path.json()).toEqual({ ok: true, dataPath: "C:\\Users\\memmy-user\\.memmy\\memory-service" });
     expect(reveal.json()).toEqual({ ok: true, dataPath: "/tmp/memmy-data" });
     expect(exported.json()).toEqual({ exportPath: "/tmp/export/memmy-export-1", bytes: 128 });
     expect(cleared.json()).toEqual({ ok: true, clearedAt: "2026-06-02T10:00:00.000Z" });
-    expect(calls).toEqual(["reveal", "export:/tmp/export", "clear:true"]);
+    expect(calls).toEqual(["getPath", "reveal", "export:/tmp/export", "clear:true"]);
   });
 
-  it("rejects local data routes without a valid runtime token", async () => {
+  it("rejects path inspection without a valid runtime token", async () => {
     app = createServer();
 
     const response = await app.inject({
-      method: "POST",
-      url: "/api/local-data/reveal",
-      payload: {}
+      method: "GET",
+      url: "/api/local-data"
     });
 
     expect(response.statusCode).toBe(401);
@@ -69,7 +74,7 @@ describe("local data routes", () => {
   });
 });
 
-async function injectJson(method: string, url: string, payload: unknown) {
+async function injectJson(method: string, url: string, payload?: unknown) {
   if (!app) {
     throw new Error("Test server is not initialized");
   }
@@ -93,6 +98,9 @@ function createServer(overrides: Record<string, unknown> = {}): FastifyInstance 
     },
     progressBus: createProgressBus(),
     localData: {
+      async getPath() {
+        return { ok: true, dataPath: "/tmp/memmy-data" };
+      },
       async reveal() {
         return { ok: true, dataPath: "/tmp/memmy-data" };
       },

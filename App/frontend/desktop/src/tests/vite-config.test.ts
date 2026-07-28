@@ -1,7 +1,7 @@
 /** Vite config tests. */
 import { fileURLToPath } from "node:url";
 import type { AliasOptions, UserConfig } from "vite";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import viteConfig from "../../vite.config.js";
 
 type AliasEntry = {
@@ -12,8 +12,12 @@ type AliasEntry = {
 };
 
 describe("vite workspace resolution", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it("loads local API contracts from source instead of generated dist", () => {
-    const config = resolveConfig();
+    const config = resolveConfig("test");
     const aliases = normalizeAliasEntries(config.resolve?.alias);
 
     expect(aliases).toContainEqual({
@@ -21,17 +25,33 @@ describe("vite workspace resolution", () => {
       replacement: fileURLToPath(new URL("../../../../backend/local-api-contracts/src/index.ts", import.meta.url))
     });
   });
+
+  it("isolates test validation without mutating process env", () => {
+    vi.stubEnv("MEMMY_LEGAL_CN_BASE_URL", "http://invalid.test");
+    vi.stubEnv("MEMMY_LEGAL_INTL_BASE_URL", "https://invalid.test/path");
+
+    expect(() => resolveConfig("test")).not.toThrow();
+    expect(process.env.MEMMY_LEGAL_CN_BASE_URL).toBe("http://invalid.test");
+    expect(process.env.MEMMY_LEGAL_INTL_BASE_URL).toBe("https://invalid.test/path");
+  });
+
+  it("keeps development validation strict", () => {
+    vi.stubEnv("MEMMY_LEGAL_CN_BASE_URL", "http://invalid.test");
+    vi.stubEnv("MEMMY_LEGAL_INTL_BASE_URL", "https://valid.test");
+
+    expect(() => resolveConfig("development")).toThrow(/MEMMY_LEGAL_CN_BASE_URL/);
+  });
 });
 
 /** Handles resolve config. */
-function resolveConfig(): UserConfig {
+function resolveConfig(mode: string): UserConfig {
   if (typeof viteConfig !== "function") {
     return viteConfig;
   }
 
   const config = viteConfig({
     command: "serve",
-    mode: "development",
+    mode,
     isSsrBuild: false,
     isPreview: false
   });

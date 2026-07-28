@@ -137,6 +137,7 @@ export class OpenAICompatProvider extends LLMProvider {
     const effectiveBase = this.apiBase || resolveDefaultApiBase(this.spec);
     this.effectiveBase = effectiveBase;
     this.defaultHeaders = { "x-session-affinity": sessionAffinity() };
+    Object.assign(this.defaultHeaders, this.spec?.resolveHeaders?.());
     if (usesOpenRouterAttribution(this.spec, effectiveBase)) {
       Object.assign(this.defaultHeaders, OPENROUTER_ATTRIBUTION_HEADERS);
     }

@@ -209,7 +209,7 @@ describe("AgentRunner progress deltas", () => {
       expect(name).toBe("write_file");
       expect(progressEvents.some((event) => event.approximate && event.added === 24)).toBe(true);
       fs.writeFileSync(path.join(workspace, params.path), params.content, "utf8");
-      return "ok";
+      return "Successfully wrote file\n\nLint results:\n- file: failed\n  syntax error";
     });
 
     const result = await new AgentRunner(provider as any).run(
@@ -227,7 +227,12 @@ describe("AgentRunner progress deltas", () => {
 
     expect(result.finalContent).toBe("done");
     expect(progressEvents.some((event) => event.approximate && event.added === 24)).toBe(true);
-    expect(progressEvents.some((event) => !event.approximate && event.phase === "end" && event.added === 24)).toBe(true);
+    expect(progressEvents.some((event) => (
+      !event.approximate
+      && event.phase === "end"
+      && event.status === "done"
+      && event.added === 24
+    ))).toBe(true);
     expect(provider.chatWithRetry).not.toHaveBeenCalled();
   });
 

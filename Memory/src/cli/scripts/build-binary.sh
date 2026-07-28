@@ -4,19 +4,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLI_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 MEMORY_ROOT="$(cd "$CLI_DIR/../.." && pwd)"
-MONOREPO_ROOT="$(cd "$CLI_DIR/../../.." && pwd)"
-if [[ -f "$MONOREPO_ROOT/package.json" && -f "$MONOREPO_ROOT/Memory/src/cli/tsconfig.json" ]]; then
-  PROJECT_ROOT="$MONOREPO_ROOT"
-else
-  PROJECT_ROOT="$CLI_DIR"
-fi
+PROJECT_ROOT="$(cd "$CLI_DIR/../../.." && pwd)"
 cd "$PROJECT_ROOT"
 
-if [[ -f "$CLI_DIR/npm/package.json" ]]; then
-  VERSION_PACKAGE_JSON="$CLI_DIR/npm/package.json"
-else
-  VERSION_PACKAGE_JSON="$PROJECT_ROOT/package.json"
-fi
+VERSION_PACKAGE_JSON="$PROJECT_ROOT/package.json"
 export VERSION_PACKAGE_JSON
 VERSION="${MEMMY_MEMORY_VERSION:-$(node -p "require(process.env.VERSION_PACKAGE_JSON).version")}"
 TARGET="${MEMMY_MEMORY_TARGET:-}"

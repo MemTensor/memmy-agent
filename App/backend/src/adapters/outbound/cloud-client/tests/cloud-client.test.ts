@@ -1,11 +1,12 @@
 /** Cloud client tests. */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHttpCloudClient } from "../index.js";
 
 let server: ReturnType<typeof createServer> | undefined;
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   if (server) {
     await new Promise<void>((resolve, reject) => {
       server?.close((error) => {
@@ -23,13 +24,22 @@ afterEach(async () => {
 
 describe("cloud client", () => {
   it("http client maps docs/cloud-api.md paths and response fields", async () => {
-    const requests: Array<{ path: string; body: unknown; lang: string | undefined }> = [];
+    const deviceId = "48b12e26-e2e1-4f2b-916d-7ce18fd6b1a5";
+    const requests: Array<{
+      path: string;
+      body: unknown;
+      lang: string | undefined;
+      deviceId: string | undefined;
+      region: string | undefined;
+    }> = [];
     server = createServer(async (request, response) => {
       const body = await readJson(request);
       requests.push({
         path: request.url ?? "",
         body,
-        lang: request.headers.lang as string | undefined
+        lang: request.headers.lang as string | undefined,
+        deviceId: request.headers["x-memmy-device-id"] as string | undefined,
+        region: request.headers["x-agent-region"] as string | undefined
       });
 
       if (request.url === "/api/agentUser/login") {
@@ -60,7 +70,11 @@ describe("cloud client", () => {
     if (!address || typeof address === "string") {
       throw new Error("Mock cloud server did not bind to a port");
     }
-    const client = createHttpCloudClient({ baseUrl: `http://127.0.0.1:${address.port}`, timeoutMs: 1000 });
+    const client = createHttpCloudClient({
+      baseUrl: `http://127.0.0.1:${address.port}`,
+      timeoutMs: 1000,
+      deviceId
+    });
 
     await client.sendEmailCode({ email: "hello@example.com", zhEnv: true });
     await client.sendPhoneCode({ phoneNumber: "13800138000", zhEnv: false });
@@ -72,19 +86,25 @@ describe("cloud client", () => {
 
     expect(requests).toEqual([
       {
-        path: "/api/user/sendVerification",
+        path: "/api/agentUser/sendEmailVerification",
         body: { email: "hello@example.com", zhEnv: true },
-        lang: "zh"
+        lang: "zh",
+        deviceId,
+        region: "cn"
       },
       {
         path: "/api/agentUser/sendPhoneVerification",
         body: { phoneNumber: "13800138000", zhEnv: false },
-        lang: "en"
+        lang: "en",
+        deviceId,
+        region: "cn"
       },
       {
         path: "/api/agentUser/login",
         body: { email: "hello@example.com", verificationCode: "654321", loginSource: "memmy" },
-        lang: "zh"
+        lang: "zh",
+        deviceId,
+        region: "cn"
       }
     ]);
     expect(login).toMatchObject({
@@ -102,6 +122,49 @@ describe("cloud client", () => {
     });
     expect(login.profile.rawProfile).not.toHaveProperty("token");
     expect(login.profile.rawProfile).not.toHaveProperty("uuid");
+  });
+
+  it("keeps authentication requests compatible when no device ID is available", async () => {
+    let receivedDeviceId: string | undefined;
+    server = createServer((request, response) => {
+      receivedDeviceId = request.headers["x-memmy-device-id"] as string | undefined;
+      sendJson(response, { code: 0, message: "ok", data: true });
+    });
+    await listen(server);
+    const address = server.address();
+    if (!address || typeof address === "string") {
+      throw new Error("Mock cloud server did not bind to a port");
+    }
+    const client = createHttpCloudClient({
+      baseUrl: `http://127.0.0.1:${address.port}`,
+      timeoutMs: 1000
+    });
+
+    await client.sendEmailCode({ email: "hello@example.com", zhEnv: true });
+
+    expect(receivedDeviceId).toBeUndefined();
+  });
+
+  it("sends the international edition through X-Agent-Region", async () => {
+    let receivedRegion: string | undefined;
+    vi.stubEnv("MEMMY_APP_EDITION", "intl");
+    server = createServer((request, response) => {
+      receivedRegion = request.headers["x-agent-region"] as string | undefined;
+      sendJson(response, { code: 0, message: "ok", data: true });
+    });
+    await listen(server);
+    const address = server.address();
+    if (!address || typeof address === "string") {
+      throw new Error("Mock cloud server did not bind to a port");
+    }
+    const client = createHttpCloudClient({
+      baseUrl: `http://127.0.0.1:${address.port}`,
+      timeoutMs: 1000
+    });
+
+    await client.sendEmailCode({ email: "hello@example.com", zhEnv: false });
+
+    expect(receivedRegion).toBe("intl");
   });
 
   it("maps cloud agent_user phone field to local phoneNumber", async () => {
@@ -217,14 +280,21 @@ describe("cloud client", () => {
   });
 
   it("http client reads token usage from agentUser info and grants through quota update endpoint", async () => {
-    const requests: Array<{ path: string; method: string | undefined; body: unknown; authorization: string | undefined }> = [];
+    const requests: Array<{
+      path: string;
+      method: string | undefined;
+      body: unknown;
+      authorization: string | undefined;
+      region: string | undefined;
+    }> = [];
     let quotaUpdated = false;
     server = createServer(async (request, response) => {
       requests.push({
         path: request.url ?? "",
         method: request.method,
         body: await readJson(request),
-        authorization: request.headers.authorization
+        authorization: request.headers.authorization,
+        region: request.headers["x-agent-region"] as string | undefined
       });
       if (request.url === "/api/agentUser/info") {
         sendJson(response, {
@@ -235,6 +305,26 @@ describe("cloud client", () => {
             tokenTotal: quotaUpdated ? 35000000 : 30000000,
             tokenAvailable: quotaUpdated ? 34998655 : 29998655,
             tokenConsumer: 1345,
+            tokenScenes: [
+              {
+                scene: "agent_chat",
+                tokenTotal: quotaUpdated ? 10000000 : 5000000,
+                tokenConsumer: 345,
+                tokenAvailable: quotaUpdated ? 9999655 : 4999655
+              },
+              {
+                scene: "memory_summary",
+                tokenTotal: 20000000,
+                tokenConsumer: 1000,
+                tokenAvailable: 19999000
+              },
+              {
+                scene: "memory_evolution",
+                tokenTotal: 5000000,
+                tokenConsumer: 0,
+                tokenAvailable: 5000000
+              }
+            ],
             expiresAt: null,
             lastSyncedAt: "2026-06-05T10:00:00.000Z"
           }
@@ -263,7 +353,27 @@ describe("cloud client", () => {
       planName: "free",
       totalTokens: 30000000,
       usedTokens: 1345,
-      remainingTokens: 29998655
+      remainingTokens: 29998655,
+      sceneUsages: [
+        {
+          scene: "agent_chat",
+          totalTokens: 5000000,
+          usedTokens: 345,
+          remainingTokens: 4999655
+        },
+        {
+          scene: "memory_summary",
+          totalTokens: 20000000,
+          usedTokens: 1000,
+          remainingTokens: 19999000
+        },
+        {
+          scene: "memory_evolution",
+          totalTokens: 5000000,
+          usedTokens: 0,
+          remainingTokens: 5000000
+        }
+      ]
     });
     await expect(
       client.grantImprovementProgramTokens({
@@ -280,19 +390,22 @@ describe("cloud client", () => {
         path: "/api/agentUser/info",
         method: "GET",
         body: {},
-        authorization: "Bearer cloud.login.uuid"
+        authorization: "Bearer cloud.login.uuid",
+        region: "cn"
       },
       {
         path: "/api/agentUser/quota/updateTokenTotal",
         method: "POST",
         body: { tokenExtra: 5_000_000 },
-        authorization: "Bearer cloud.login.uuid"
+        authorization: "Bearer cloud.login.uuid",
+        region: "cn"
       },
       {
         path: "/api/agentUser/info",
         method: "GET",
         body: {},
-        authorization: "Bearer cloud.login.uuid"
+        authorization: "Bearer cloud.login.uuid",
+        region: "cn"
       }
     ]);
   });
@@ -760,10 +873,19 @@ describe("cloud client", () => {
   });
 
   it("http client fetches promotion flags from Playground desktop endpoint", async () => {
-    const requests: Array<{ path: string; method: string | undefined }> = [];
-    const promotions = { loginBanner: true, improvementGift: false, applyMore: true };
+    const requests: Array<{ path: string; method: string | undefined; deviceId: string | undefined }> = [];
+    const promotions = {
+      loginBanner: true,
+      improvementGift: false,
+      applyMore: true,
+      agentChatTokenTotal: 2_000_000
+    };
     server = createServer((request, response) => {
-      requests.push({ path: request.url ?? "", method: request.method });
+      requests.push({
+        path: request.url ?? "",
+        method: request.method,
+        deviceId: request.headers["x-memmy-device-id"] as string | undefined
+      });
       sendJson(response, { code: 0, message: "ok", data: promotions });
     });
     await listen(server);
@@ -771,10 +893,18 @@ describe("cloud client", () => {
     if (!address || typeof address === "string") {
       throw new Error("Mock cloud server did not bind to a port");
     }
-    const client = createHttpCloudClient({ baseUrl: `http://127.0.0.1:${address.port}`, timeoutMs: 1000 });
+    const client = createHttpCloudClient({
+      baseUrl: `http://127.0.0.1:${address.port}`,
+      timeoutMs: 1000,
+      deviceId: "48b12e26-e2e1-4f2b-916d-7ce18fd6b1a5"
+    });
 
     await expect(client.getPromotions()).resolves.toEqual(promotions);
-    expect(requests).toEqual([{ path: "/api/memmy/desktop/promotions", method: "GET" }]);
+    expect(requests).toEqual([{
+      path: "/api/memmy/desktop/promotions",
+      method: "GET",
+      deviceId: undefined
+    }]);
   });
 
   it("http client returns undefined when promotions endpoint fails or shape mismatches", async () => {

@@ -633,7 +633,6 @@ export default {
         pendingTurns.set(turnKey(ctx, sessionId, event), {
           sessionId,
           turnId: turn.turnId,
-          episodeId: turn.episodeId,
           sourceMemoryIds: Array.isArray(turn.sourceMemoryIds) ? turn.sourceMemoryIds : undefined,
           query
         });
@@ -654,16 +653,26 @@ export default {
       const turnText = latestTurnText(messages);
       const toolTrace = extractTurnToolTrace(messages, turnText.userIndex);
       const query = turnText.query;
-      const answer = turnText.answer || normalizeOptionalText(event && event.error) || "Turn ended without assistant text.";
-      if (!query && !answer) {
-        return;
-      }
-
       const externalSessionId = resolveExternalSessionId(ctx);
       const sessionId = sessionCache.get(externalSessionId) || externalSessionId;
       const key = turnKey(ctx, sessionId, event);
       const externalKey = turnKey(ctx, externalSessionId, event);
       const pending = pendingTurns.get(key) || pendingTurns.get(externalKey);
+      if (isCancelledAgentEnd(event)) {
+        pendingTurns.delete(key);
+        pendingTurns.delete(externalKey);
+        return;
+      }
+      const status = event && event.success === false ? "failed" : "succeeded";
+      const answer = turnText.answer ||
+        normalizeOptionalText(event && event.error) ||
+        (status === "failed" ? "Agent generation failed before producing a final response." : "");
+      const resolvedQuery = normalizeOptionalText(pending && pending.query) || query;
+      if (!resolvedQuery || !answer) {
+        pendingTurns.delete(key);
+        pendingTurns.delete(externalKey);
+        return;
+      }
       const resolvedTurnId = normalizeOptionalText(pending && pending.turnId) || fallbackTurnId(ctx, sessionId, query, answer, event);
       const captureKey = key + "\\u0000" + resolvedTurnId;
       if (completedTurns.has(captureKey)) {
@@ -674,10 +683,9 @@ export default {
         externalSessionId,
         sessionId: normalizeOptionalText(pending && pending.sessionId) || sessionId,
         turnId: resolvedTurnId,
-        episodeId: normalizeOptionalText(pending && pending.episodeId) || undefined,
-        query: normalizeOptionalText(pending && pending.query) || query || "OpenClaw turn",
+        query: resolvedQuery,
         answer,
-        status: event && event.success === false ? "failed" : "succeeded",
+        status,
         workspacePath: normalizeOptionalText(ctx && ctx.workspaceDir),
         profileId: normalizeOptionalText(ctx && ctx.agentId) || "main",
         toolCalls: toolTrace.toolCalls.length ? toolTrace.toolCalls : undefined,
@@ -860,7 +868,7 @@ const SYNC_COMPLETE_SCRIPT = [
   "  sessionId = opened.sessionId || sessionId;",
   "  turnId = turnId || 'openclaw-fallback-' + hashText([sessionId || '', payload.query || '', payload.answer || ''].join('\\\\u0000'));",
   "}",
-  "const result = await post('/api/v1/turns/' + encodeURIComponent(turnId) + '/complete', { sessionId, episodeId: payload.episodeId || undefined, source: 'openclaw', query: payload.query || 'OpenClaw turn', answer: payload.answer || 'Turn ended without assistant text.', status: payload.status || 'succeeded', toolCalls: Array.isArray(payload.toolCalls) ? payload.toolCalls : undefined, toolResults: Array.isArray(payload.toolResults) ? payload.toolResults : undefined, sourceMemoryIds: Array.isArray(payload.sourceMemoryIds) ? payload.sourceMemoryIds : undefined });",
+  "const result = await post('/api/v1/turns/' + encodeURIComponent(turnId) + '/complete', { sessionId, source: 'openclaw', query: payload.query, answer: payload.answer, status: payload.status || 'succeeded', toolCalls: Array.isArray(payload.toolCalls) ? payload.toolCalls : undefined, toolResults: Array.isArray(payload.toolResults) ? payload.toolResults : undefined, sourceMemoryIds: Array.isArray(payload.sourceMemoryIds) ? payload.sourceMemoryIds : undefined });",
   "console.log(JSON.stringify({ ok: true, mode: 'turn_complete', result }));"
 ].join("\n");
 
@@ -1196,6 +1204,20 @@ function latestTurnText(messages) {
     answer: assistantParts.join("\n\n").trim(),
     userIndex
   };
+}
+
+function isCancelledAgentEnd(event) {
+  const status = normalizeOptionalText(firstPresent(
+    event && event.status,
+    event && event.stopReason,
+    event && event.stop_reason,
+    event && event.finishReason,
+    event && event.finish_reason
+  )).toLowerCase().replace(/[\s_-]+/gu, "");
+  return status === "cancelled" ||
+    status === "canceled" ||
+    status === "aborted" ||
+    status === "cancelledbyuser";
 }
 
 function resolvePromptQuery(event, messages) {
@@ -1643,8 +1665,8 @@ function formatResumeSearchResult(query, candidates) {
     "",
     candidates.map(formatResumeEpisode).join("\n\n"),
     "",
-    "输入 1-5 选择要接续的 episode；Memmy 会自动读取完整 episode（等价于 memmy-memory get <episode_id>）并注入接续上下文。",
-    "输入 /memmy-resume cancel 取消。"
+    "Enter 1-5 to select an episode to resume. Memmy will automatically retrieve the full episode (equivalent to memmy-memory get <episode_id>) and inject continuation context.",
+    "Enter /memmy-resume cancel to cancel."
   ].join("\n");
 }
 

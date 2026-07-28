@@ -188,7 +188,7 @@ describe("codex skill target", () => {
       expect(output.reason).not.toContain("Assistant raw summary 1");
       expect(output.reason).toContain("5. episode_5");
       expect(output.reason).not.toContain("6. episode_6");
-      expect(output.reason).toContain("输入 1-5 选择要接续的 episode");
+      expect(output.reason).toContain("Enter 1-5 to select an episode to resume.");
       expect(requestBody).toMatchObject({
         query: "测试query",
         layers: ["L1"],
@@ -234,7 +234,7 @@ describe("codex skill target", () => {
     }
   });
 
-  it("uses one started turn and episode when capturing a completed Codex turn", async () => {
+  it("uses turn.complete as the only write phase for a completed Codex turn", async () => {
     const { rootDirectory, memmyConfigPath } = createFixture();
     const requests: Array<{ body: Record<string, unknown>; path: string }> = [];
     const server = createServer(async (request: IncomingMessage, response: ServerResponse) => {
@@ -248,7 +248,6 @@ describe("codex skill target", () => {
       if (request.method === "POST" && url.pathname === "/api/v1/turns/start") {
         writeJsonResponse(response, 200, {
           turnId: "turn-stop-1",
-          episodeId: "episode-1",
           sourceMemoryIds: ["memory-1"],
           injectedContext: { markdown: "Relevant prior context" }
         });
@@ -325,13 +324,13 @@ describe("codex skill target", () => {
         adapterId: "memmy-codex-hook",
         requestId: expect.stringMatching(/^codex-complete:turn-stop-1:/u),
         sessionId: "memmy-session-1",
-        episodeId: "episode-1",
         query: "请继续完成数据分析报告",
         answer: "已经完成数据分析报告",
         status: "succeeded",
         source: "codex",
         sourceMemoryIds: ["memory-1"]
       });
+      expect(requests[3]?.body).not.toHaveProperty("episodeId");
     } finally {
       await close(server);
     }

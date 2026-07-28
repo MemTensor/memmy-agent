@@ -13,6 +13,8 @@ export const MEMORY_LAYER_PATHS = Object.freeze({
   deleteMemory: "/api/v1/memory/:id",
   runWorker: "/api/v1/worker/run",
   enqueueImportSummaries: "/api/v1/worker/import-summaries/enqueue",
+  memoryProcessingStatus: "/api/v1/memory/processing/status",
+  retryMemoryProcessing: "/api/v1/memory/:id/processing/retry",
   memoryApiLogs: "/api/v1/memory/logs",
   panelOverview: "/api/v1/panel/overview",
   panelAnalysis: "/api/v1/panel/analysis",

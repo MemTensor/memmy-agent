@@ -134,7 +134,16 @@ export async function runAgentSourceScanJob(
     }
 
     callbacks.onResumeChanged({ phase: "summarize", results });
-    await agentSources.processImportSummaries(scanOptions);
+    for (const result of results) {
+      const failures = await agentSources.processImportSummaries(result.memoryIds ?? [], {
+        ...scanOptions,
+        progressSourceId: result.sourceId
+      });
+      result.errors.push(...failures.map((failure) => ({
+        conversationId: failure.memoryId,
+        reason: failure.reason
+      })));
+    }
     if (job.controller.signal.aborted) {
       return;
     }

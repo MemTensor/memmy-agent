@@ -5,11 +5,13 @@ import { createIdempotencyStore, type IdempotencyStore } from "../idempotency-st
 import { getActiveAccountUuid } from "./account-context.js";
 import { openDatabase, resolveDefaultDatabasePath } from "./db.js";
 import { createFilesystemLocalDataStore, type LocalDataStore } from "./local-data-store.js";
+import { captureLegacyAppState } from "./legacy-state-migration.js";
 import { runMigrations } from "./migration-runner.js";
 import { createAccountSessionRepository, type AccountSessionRepository } from "./repositories/account-session-repo.js";
 import { createBootstrapRepository, type BootstrapRepository } from "./repositories/bootstrap-repo.js";
 import { createByokTokenUsageRepository, type ByokTokenUsageRepository } from "./repositories/byok-token-usage-repo.js";
 import { createComposioMachineTokenRepository, type ComposioMachineTokenRepository } from "./repositories/composio-machine-token-repo.js";
+import { createDeviceIdentityRepository, type DeviceIdentityRepository } from "./repositories/device-identity-repo.js";
 import { createModelConfigRepository, type ModelConfigRepository } from "./repositories/model-config-repo.js";
 import { finalizeDatabaseDesign } from "./schema-finalizer.js";
 import { createSqliteSecretStore, type SecretStore } from "./secret-store.js";
@@ -46,6 +48,8 @@ export interface AppStateStore {
     composioMachineToken: ComposioMachineTokenRepository;
     /** Byok token usage. */
     byokTokenUsage: ByokTokenUsageRepository;
+    /** Installation-scoped device identity. */
+    deviceIdentity: DeviceIdentityRepository;
   };
   /** Secret store. */
   secretStore: SecretStore;
@@ -59,13 +63,14 @@ export interface AppStateStore {
 export function createAppStateStore(options: CreateAppStateStoreOptions = {}): AppStateStore {
   const databasePath = options.databasePath ?? resolveDefaultDatabasePath();
   const db = openDatabase({ databasePath });
+  const legacyState = options.migrateOnOpen !== false ? captureLegacyAppState(db) : null;
 
   if (options.migrateOnOpen !== false) {
     runMigrations(db);
     ensureDefaultAppStateRows(db);
   }
   const secretStore = createSqliteSecretStore(db);
-  finalizeDatabaseDesign(db);
+  finalizeDatabaseDesign(db, legacyState);
   const localDataStore = createFilesystemLocalDataStore({ databasePath, db, secretStore });
   const getActiveUuid = () => getActiveAccountUuid(db);
 
@@ -79,7 +84,8 @@ export function createAppStateStore(options: CreateAppStateStoreOptions = {}): A
       agentSources: createAgentSourceRepository(db),
       idempotency: createIdempotencyStore(db, { getActiveUuid }),
       composioMachineToken: createComposioMachineTokenRepository(secretStore),
-      byokTokenUsage: createByokTokenUsageRepository(db)
+      byokTokenUsage: createByokTokenUsageRepository(db),
+      deviceIdentity: createDeviceIdentityRepository(db)
     },
     secretStore,
     localDataStore,

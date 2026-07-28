@@ -63,6 +63,7 @@ describe("webui sidebar state", () => {
       show_previews: false,
       show_timestamps: false,
       show_archived: true,
+      show_project_archived: false,
       sort: "updated_desc",
     });
   });
@@ -74,7 +75,7 @@ describe("webui sidebar state", () => {
       pinned_keys: ["websocket:a"],
       archived_keys: ["websocket:b"],
       title_overrides: { "websocket:a": "Release" },
-      view: { density: "compact", show_previews: true },
+      view: { density: "compact", show_previews: true, show_project_archived: true },
     });
 
     expect(state.pinned_keys).toEqual(["websocket:a"]);
@@ -82,6 +83,7 @@ describe("webui sidebar state", () => {
     expect(state.title_overrides).toEqual({ "websocket:a": "Release" });
     expect(state.view.density).toBe("compact");
     expect(state.view.show_previews).toBe(true);
+    expect(state.view.show_project_archived).toBe(true);
     expect(fs.existsSync(webuiSidebarStatePath())).toBe(true);
     expect(readWebuiSidebarState().pinned_keys).toEqual(["websocket:a"]);
   });

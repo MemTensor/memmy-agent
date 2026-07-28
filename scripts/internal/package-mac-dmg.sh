@@ -5,7 +5,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DESKTOP_DIR="$ROOT_DIR/App/shell/desktop"
 AGENT_DIR="$ROOT_DIR/App/memmy-agent"
 MEMORY_DIR="$ROOT_DIR/Memory"
+MIGRATIONS_DIR="$ROOT_DIR/Migrations"
 RUNTIME_DIR="$DESKTOP_DIR/dist/runtime"
+MIGRATIONS_STAGING_DIR="$DESKTOP_DIR/dist/Migrations"
 CLI_BIN_DIR="$RUNTIME_DIR/bin"
 DMG_HELPER_DIR="$DESKTOP_DIR/dist/dmg"
 
@@ -291,7 +293,8 @@ const rootDir = requiredEnv("ROOT_DIR");
 const memoryDir = requiredEnv("MEMORY_DIR");
 const runtimeDir = requiredEnv("MEMORY_RUNTIME_DIR");
 const runtimeName = "memmy-memory-runtime";
-const runtimeVersion = "0.0.0";
+const projectPackage = JSON.parse(await readFile(join(rootDir, "package.json"), "utf8"));
+const runtimeVersion = projectPackage.version;
 
 const memoryPackage = JSON.parse(await readFile(join(memoryDir, "package.json"), "utf8"));
 const rootLock = JSON.parse(await readFile(join(rootDir, "package-lock.json"), "utf8"));
@@ -391,7 +394,126 @@ function resolvePackageKey(fromPackageKey, dependencyName) {
 NODE
 }
 
+prune_better_sqlite3_build_artifacts() {
+  local module_dir="$1"
+  local native_file="$module_dir/build/Release/better_sqlite3.node"
+
+  if [ ! -f "$native_file" ]; then
+    return
+  fi
+
+  local tmp_dir
+  tmp_dir="$(mktemp -d)"
+  mkdir -p "$tmp_dir/build/Release"
+  cp "$native_file" "$tmp_dir/build/Release/better_sqlite3.node"
+  rm -rf "$module_dir/build" "$module_dir/deps"
+  mkdir -p "$module_dir/build/Release"
+  cp "$tmp_dir/build/Release/better_sqlite3.node" "$native_file"
+  rm -rf "$tmp_dir"
+}
+
+prune_onnxruntime_native_artifacts() {
+  local target_cpu="$1"
+  local napi_dir="$2"
+
+  if [ ! -d "$napi_dir" ]; then
+    return
+  fi
+
+  find "$napi_dir" -mindepth 1 -maxdepth 1 -type d ! -name darwin -exec rm -rf {} +
+  case "$target_cpu" in
+    arm64)
+      rm -rf "$napi_dir/darwin/x64"
+      ;;
+    x64)
+      rm -rf "$napi_dir/darwin/arm64"
+      ;;
+  esac
+}
+
+require_packaged_runtime_file() {
+  local required_file="$1"
+
+  if [ ! -f "$required_file" ]; then
+    echo "Missing required packaged runtime file: $required_file" >&2
+    exit 1
+  fi
+}
+
+require_packaged_runtime_glob() {
+  local required_pattern="$1"
+
+  if ! compgen -G "$required_pattern" >/dev/null; then
+    echo "Missing required packaged runtime file matching: $required_pattern" >&2
+    exit 1
+  fi
+}
+
+verify_mac_memory_native_artifacts() {
+  local target_cpu="$1"
+
+  require_packaged_runtime_file "$RUNTIME_DIR/memory/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
+  require_packaged_runtime_glob "$RUNTIME_DIR/memory/node_modules/sqlite-vec-darwin-$target_cpu/vec0.*"
+  require_packaged_runtime_file "$RUNTIME_DIR/memory/node_modules/onnxruntime-node/bin/napi-v3/darwin/$target_cpu/onnxruntime_binding.node"
+  require_packaged_runtime_glob "$RUNTIME_DIR/memory/node_modules/onnxruntime-node/bin/napi-v3/darwin/$target_cpu/libonnxruntime*.dylib"
+  require_packaged_runtime_file "$RUNTIME_DIR/memory/node_modules/@img/sharp-darwin-$target_cpu/lib/sharp-darwin-$target_cpu.node"
+  require_packaged_runtime_glob "$RUNTIME_DIR/memory/node_modules/@img/sharp-libvips-darwin-$target_cpu/lib/libvips*.dylib"
+}
+
+verify_mac_agent_native_artifacts() {
+  local target_cpu="$1"
+  local node_pty_dir="$RUNTIME_DIR/memmy-agent/node_modules/openclaw/node_modules/@lydell/node-pty-darwin-$target_cpu/prebuilds/darwin-$target_cpu"
+
+  require_packaged_runtime_file "$node_pty_dir/pty.node"
+  require_packaged_runtime_file "$node_pty_dir/spawn-helper"
+  require_packaged_runtime_glob "$RUNTIME_DIR/memmy-agent/node_modules/openclaw/node_modules/sqlite-vec-darwin-$target_cpu/vec0.*"
+}
+
+resolve_packaged_mac_app_path() {
+  local target_cpu="$1"
+  local app_path="$DESKTOP_DIR/release/mac-$target_cpu/Memmy.app"
+
+  if [ "$target_cpu" = "x64" ] && [ ! -d "$app_path" ]; then
+    app_path="$DESKTOP_DIR/release/mac/Memmy.app"
+  fi
+
+  printf '%s\n' "$app_path"
+}
+
+verify_packaged_mac_unpacked_artifacts() {
+  local target_cpu="$1"
+  local app_path
+  app_path="$(resolve_packaged_mac_app_path "$target_cpu")"
+  local unpacked_runtime="$app_path/Contents/Resources/app.asar.unpacked/dist/runtime"
+
+  require_packaged_runtime_file "$app_path/Contents/Resources/app.asar"
+  require_packaged_runtime_glob "$unpacked_runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/darwin/$target_cpu/libonnxruntime*.dylib"
+  require_packaged_runtime_glob "$unpacked_runtime/memory/node_modules/@img/sharp-libvips-darwin-$target_cpu/lib/libvips*.dylib"
+  require_packaged_runtime_file "$unpacked_runtime/memmy-agent/node_modules/@memmy/migrations/dist/index.js"
+  if [ -L "$unpacked_runtime/memmy-agent/node_modules/@memmy/migrations" ]; then
+    echo "Packaged migrations package must not be a symbolic link." >&2
+    exit 1
+  fi
+  require_packaged_runtime_file "$unpacked_runtime/memmy-agent/node_modules/openclaw/node_modules/@lydell/node-pty-darwin-$target_cpu/prebuilds/darwin-$target_cpu/spawn-helper"
+}
+
+prune_mac_runtime_artifacts() {
+  local target_cpu="$1"
+
+  echo "Pruning macOS runtime artifacts for darwin-$target_cpu."
+  find "$RUNTIME_DIR" -type f -name "*.map" -delete
+
+  while IFS= read -r module_dir; do
+    prune_better_sqlite3_build_artifacts "$module_dir"
+  done < <(find "$RUNTIME_DIR" -path "*/node_modules/better-sqlite3" -type d)
+
+  while IFS= read -r napi_dir; do
+    prune_onnxruntime_native_artifacts "$target_cpu" "$napi_dir"
+  done < <(find "$RUNTIME_DIR" -path "*/node_modules/onnxruntime-node/bin/napi-v3" -type d)
+}
+
 cd "$ROOT_DIR"
+node scripts/sync-project-version.mjs
 
 BUILDER_CONFIG="electron-builder.yml"
 TARGET_CPU="$(resolve_target_cpu "$@")"
@@ -405,9 +527,18 @@ echo "Preparing macOS $TARGET_CPU package."
 if [ ! -x "$ROOT_DIR/node_modules/.bin/tsc" ] || [ ! -x "$ROOT_DIR/node_modules/.bin/electron-builder" ]; then
   npm install
 fi
+npm install --workspace @memmy/migrations --include=dev
+if npm ls --workspace @memmy/frontend-desktop --depth=0 >/dev/null 2>&1; then
+  echo "Frontend desktop workspace dependencies already installed."
+else
+  npm install --workspace @memmy/frontend-desktop --no-package-lock
+fi
+
+echo "Building migrations package."
+npm --prefix "$MIGRATIONS_DIR" run build
 
 echo "Installing memmy-agent dependencies."
-npm ci --prefix "$AGENT_DIR"
+PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --prefix "$AGENT_DIR"
 
 npm run build -w @memmy/memory
 npm --prefix "$AGENT_DIR" run build
@@ -416,7 +547,11 @@ write_desktop_edition_manifest
 
 rm -rf "$RUNTIME_DIR"
 rm -rf "$DMG_HELPER_DIR"
+rm -rf "$MIGRATIONS_STAGING_DIR"
 mkdir -p "$RUNTIME_DIR/memory" "$RUNTIME_DIR/memmy-agent" "$CLI_BIN_DIR" "$DMG_HELPER_DIR"
+mkdir -p "$MIGRATIONS_STAGING_DIR"
+cp "$MIGRATIONS_DIR/package.json" "$MIGRATIONS_STAGING_DIR/package.json"
+cp -R "$MIGRATIONS_DIR/dist" "$MIGRATIONS_STAGING_DIR/dist"
 cp -R "$MEMORY_DIR/dist/src" "$RUNTIME_DIR/memory/src"
 cp -R "$AGENT_DIR/dist" "$RUNTIME_DIR/memmy-agent/dist"
 create_memory_runtime_manifest "$RUNTIME_DIR/memory"
@@ -430,7 +565,51 @@ node_modules/.bin/electron-rebuild \
   -m "$RUNTIME_DIR/memory"
 cp "$AGENT_DIR/package.json" "$RUNTIME_DIR/memmy-agent/package.json"
 cp "$AGENT_DIR/package-lock.json" "$RUNTIME_DIR/memmy-agent/package-lock.json"
-npm ci --prefix "$RUNTIME_DIR/memmy-agent" --omit=dev --os=darwin --cpu="$TARGET_CPU"
+PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --prefix "$RUNTIME_DIR/memmy-agent" --omit=dev --os=darwin --cpu="$TARGET_CPU"
+RUNTIME_MIGRATIONS_DIR="$RUNTIME_DIR/memmy-agent/node_modules/@memmy/migrations"
+rm -rf "$RUNTIME_MIGRATIONS_DIR"
+mkdir -p "$RUNTIME_MIGRATIONS_DIR"
+cp "$MIGRATIONS_STAGING_DIR/package.json" "$RUNTIME_MIGRATIONS_DIR/package.json"
+cp -R "$MIGRATIONS_STAGING_DIR/dist" "$RUNTIME_MIGRATIONS_DIR/dist"
+if [ -L "$RUNTIME_MIGRATIONS_DIR" ]; then
+  echo "Packaged migrations package must not be a symbolic link." >&2
+  exit 1
+fi
+if [ ! -f "$RUNTIME_MIGRATIONS_DIR/dist/index.js" ]; then
+  echo "Packaged migrations entrypoint is missing." >&2
+  exit 1
+fi
+rm -rf "$MIGRATIONS_STAGING_DIR"
+if [ -e "$MIGRATIONS_STAGING_DIR" ]; then
+  echo "Migrations staging directory was not removed." >&2
+  exit 1
+fi
+(
+  cd "$RUNTIME_DIR/memmy-agent"
+  node --input-type=module --eval '
+    import fs from "node:fs";
+    import path from "node:path";
+    import { createRequire } from "node:module";
+    import { runMigrations } from "@memmy/migrations";
+    import { createConnection } from "@playwright/mcp";
+    import { chromium } from "playwright";
+    const require = createRequire(import.meta.url);
+    const runtimePackage = require("./package.json");
+    const mcpPath = require.resolve("@playwright/mcp/package.json");
+    const playwrightPath = require.resolve("playwright/package.json");
+    const corePath = require.resolve("playwright-core/package.json");
+    const mcpPackage = require(mcpPath);
+    const playwrightPackage = require(playwrightPath);
+    const corePackage = require(corePath);
+    if (typeof runMigrations !== "function") throw new Error("Migrations runtime export is unavailable");
+    if (typeof createConnection !== "function" || typeof chromium?.executablePath !== "function") throw new Error("Playwright MCP runtime exports are unavailable");
+    if (mcpPackage.version !== runtimePackage.dependencies["@playwright/mcp"]) throw new Error("Playwright MCP runtime version mismatch");
+    if (playwrightPackage.version !== runtimePackage.dependencies.playwright || corePackage.version !== runtimePackage.dependencies.playwright) throw new Error("Playwright runtime version mismatch");
+    if (!fs.existsSync(path.join(path.dirname(playwrightPath), "cli.js"))) throw new Error("Playwright runtime CLI is missing");
+    const commandEntrypoint = "./dist/entrypoints/cli/commands.js";
+    if (!fs.readFileSync(commandEntrypoint, "utf8").includes("browser-prepare")) throw new Error("browser-prepare command is missing");
+  '
+)
 node_modules/.bin/electron-rebuild \
   -f \
   -v "$ELECTRON_VERSION" \
@@ -441,6 +620,9 @@ create_cli_launcher "$CLI_BIN_DIR/memmy-memory" "dist/runtime/memory/src/cli/ind
 create_cli_launcher "$CLI_BIN_DIR/memmy" "dist/runtime/memmy-agent/dist/main.js"
 create_cli_installer "$CLI_BIN_DIR/install-cli"
 create_dmg_cli_installer_command "$DMG_HELPER_DIR/Install CLI.command"
+prune_mac_runtime_artifacts "$TARGET_CPU"
+verify_mac_memory_native_artifacts "$TARGET_CPU"
+verify_mac_agent_native_artifacts "$TARGET_CPU"
 
 if [ "${MEMMY_PACKAGE_PREPARE_ONLY:-}" = "1" ]; then
   echo "Prepared desktop runtime resources at $RUNTIME_DIR"
@@ -456,6 +638,7 @@ if [ -n "${MEMMY_ELECTRON_DIST:-}" ]; then
 fi
 
 npx electron-builder "${BUILDER_ARGS[@]}" --mac dmg "$@"
+verify_packaged_mac_unpacked_artifacts "$TARGET_CPU"
 
 LATEST_DMG="$(ls -t release/*.dmg 2>/dev/null | head -1 || true)"
 if [ -n "$LATEST_DMG" ]; then

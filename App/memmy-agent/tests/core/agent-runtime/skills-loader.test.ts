@@ -61,6 +61,72 @@ afterEach(() => {
 });
 
 describe("SkillsLoader listSkills", () => {
+  it("discovers the single-file builtin ui-craft skill with browser visual QA", () => {
+    const loader = new SkillsLoader(tmpDir());
+    const entry = loader.listSkills(false).find((skill) => skill.name === "ui-craft");
+    const content = loader.loadSkill("ui-craft");
+
+    expect(entry).toMatchObject({ name: "ui-craft", source: "builtin" });
+    expect(content).toContain("browser_navigate");
+    expect(content).toContain("browser_snapshot");
+    expect(content).toContain("browser_console_messages");
+    expect(content).toContain("browser_network_requests");
+    expect(content).toContain("browser_take_screenshot");
+    expect(content).toContain("browser_resize");
+    expect(content).toContain("independent static HTML");
+    expect(content).toContain("permitted local `.html`/`.htm` path");
+    expect(content).toContain("foreground with `yield_time_ms`");
+    expect(content).toContain("terminate its Exec session after validation");
+    expect(content).toContain("one-sentence visual thesis");
+    expect(content).toContain("Run the anti-template review");
+    expect(content).toContain("Completion gate");
+    expect(fs.readdirSync(path.dirname(entry!.path))).toEqual(["SKILL.md"]);
+  });
+
+  it("keeps the product memory skill removed while preserving user skills named memory", () => {
+    const workspace = tmpDir();
+    const loader = new SkillsLoader(workspace);
+
+    expect(loader.listSkills(false).map((entry) => entry.name)).not.toContain(
+      "memory",
+    );
+
+    const userSkill = writeSkill(path.join(workspace, "skills"), "memory", {
+      body: "# User Memory Helper",
+    });
+    const userLoader = new SkillsLoader(workspace);
+
+    expect(userLoader.listSkills(false)).toEqual(
+      expect.arrayContaining([
+        { name: "memory", path: userSkill, source: "workspace" },
+      ]),
+    );
+    expect(userLoader.loadSkill("memory")).toContain("# User Memory Helper");
+  });
+
+  it("removes the builtin my skill while preserving a workspace skill with the same name", () => {
+    const workspace = tmpDir();
+    const builtinOnly = new SkillsLoader(workspace);
+
+    expect(builtinOnly.listSkills(false).map((entry) => entry.name)).not.toContain(
+      "my",
+    );
+    expect(builtinOnly.getAlwaysSkills()).not.toContain("my");
+    expect(builtinOnly.loadSkill("my")).toBeNull();
+
+    const userSkill = writeSkill(path.join(workspace, "skills"), "my", {
+      body: "# User My Helper",
+    });
+    const workspaceLoader = new SkillsLoader(workspace);
+
+    expect(workspaceLoader.listSkills(false)).toEqual(
+      expect.arrayContaining([
+        { name: "my", path: userSkill, source: "workspace" },
+      ]),
+    );
+    expect(workspaceLoader.loadSkill("my")).toContain("# User My Helper");
+  });
+
   it("returns empty when the workspace skills directory is missing", () => {
     const { workspace, builtin } = makeWorkspace();
 
@@ -248,6 +314,33 @@ describe("SkillsLoader disabled skills", () => {
     );
 
     expect(new SkillsLoader(workspace, builtin).getAlwaysSkills()).toEqual([]);
+  });
+});
+
+describe("SkillsLoader manual-only skills", () => {
+  it("keeps manual-only skills out of the startup summary and always-loaded set", () => {
+    const { workspace, builtin } = makeWorkspace();
+    writeSkill(builtin, "button-guide", {
+      metadataJson: { manualOnly: true, always: true },
+      body: "# Button Guide"
+    });
+    const loader = new SkillsLoader(workspace, builtin);
+
+    expect(loader.buildSkillsSummary()).not.toContain("button-guide");
+    expect(loader.getAlwaysSkills()).not.toContain("button-guide");
+    expect(loader.listSkills(true).map((entry) => entry.name)).toContain("button-guide");
+  });
+
+  it("finds a manual-only skill only from an explicit dollar reference", () => {
+    const { workspace, builtin } = makeWorkspace();
+    writeSkill(builtin, "button-guide", {
+      metadataJson: { manualOnly: true },
+      body: "# Button Guide"
+    });
+    const loader = new SkillsLoader(workspace, builtin);
+
+    expect(loader.findExplicitSkillNames("ordinary startup")).toEqual([]);
+    expect(loader.findExplicitSkillNames("run $button-guide now")).toEqual(["button-guide"]);
   });
 });
 

@@ -2,8 +2,22 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import { defaultAgentSidebarState } from "../../state/agent-chat-slice.js";
-import { agentRuntimeConnectRetryDelayMs, hydrateAgentThreadInBackground, isAgentRuntimeBridgeRoute, refreshAgentTaskList } from "../agent-runtime-bridge.js";
+import { MemmyAgentRequestError } from "../../api/memmy-agent-client.js";
+import {
+  agentReducer,
+  defaultAgentSidebarState,
+  initialAgentState,
+  type AgentAction,
+  type AgentState
+} from "../../state/agent-chat-slice.js";
+import type { AppAction } from "../../state/app-actions.js";
+import {
+  agentRuntimeConnectRetryDelayMs,
+  createAgentTaskStateCoordinator,
+  hydrateAgentThreadInBackground,
+  isAgentRuntimeBridgeRoute,
+  refreshAgentTaskList
+} from "../agent-runtime-bridge.js";
 
 const bridgeSourcePath = fileURLToPath(new URL("../agent-runtime-bridge.tsx", import.meta.url));
 
@@ -62,12 +76,10 @@ describe("AgentRuntimeBridge", () => {
     expect(source).toContain("clearConnectRetryTimer();");
     expect(connectionEffect).toContain("const delayMs = agentRuntimeConnectRetryDelayMs(connectAttemptRef.current);");
     expect(connectionEffect).toContain("connectAttemptRef.current += 1;");
-    expect(connectionEffect).toContain("dispatch(agentActions.failed(error instanceof Error ? error.message : String(error)));");
+    expect(connectionEffect).toContain("dispatch(agentActions.connectionFailed(error instanceof Error ? error.message : String(error)));");
     expect(connectionEffect).toContain("scheduleRetry();");
-    expect(connectionEffect).toContain("const recoveredFromFailure = connectAttemptRef.current > 0;");
     expect(connectionEffect).toContain("registerConnectionHandlers(nextConnection);");
     expect(connectionEffect).toContain("connectAttemptRef.current = 0;");
-    expect(connectionEffect).toContain('void refreshAgentTaskList(client, dispatch, { reason: "auto" });');
     expect(connectionEffect).toContain("[cleanupConnection, clearConnectRetryTimer, clients?.memmyAgent, dispatch, enabled, registerConnectionHandlers]");
   });
 
@@ -94,13 +106,13 @@ describe("AgentRuntimeBridge", () => {
 
   it("uses background hydrate and metadata-only task refresh for refreshRequested", () => {
     const source = readBridgeSource();
-    const refreshEffect = source.slice(source.indexOf("useEffect(() => {\n    if (!clients?.memmyAgent || !state.agent.refreshRequested || !enabled)"), source.indexOf("return (\n    <AgentRuntimeBridgeContext.Provider"));
+    const refreshEffect = source.slice(source.indexOf("state.agent.refreshRequested || !enabled || state.agent.recoveringGeneration !== null"), source.indexOf("return (\n    <AgentRuntimeBridgeContext.Provider"));
     const refreshTaskListBlock = source.slice(source.indexOf("export function refreshAgentTaskList"), source.indexOf("function isAgentConnectionEvent"));
 
     expect(refreshEffect).toContain("Object.entries(state.agent.pendingCanonicalHydrateByChatId)");
     expect(refreshEffect).toContain("hydrateAgentThreadInBackground(clients.memmyAgent, dispatch, chatId);");
-    expect(refreshEffect).toContain("void refreshAgentTaskList(clients.memmyAgent, dispatch);");
-    expect(refreshTaskListBlock).toContain("client.listSessions()");
+    expect(refreshEffect).toContain("taskStateCoordinator?.refreshTaskState();");
+    expect(refreshTaskListBlock).toContain("client.getSessionSnapshot({ timeoutMs: 10_000 })");
     expect(refreshTaskListBlock).toContain("client.readSidebarState()");
     expect(refreshTaskListBlock).not.toContain("readWebuiThread");
   });
@@ -132,9 +144,13 @@ describe("AgentRuntimeBridge", () => {
     const dispatch = vi.fn();
     const client = {
       chatIdToSessionKey: (chatId: string) => `websocket:${chatId}`,
-      listSessions: vi.fn(async () => [
-        { key: "websocket:chat-1", title: "完成任务", preview: "done", updatedAt: "2026-06-30T00:00:00.000Z" }
-      ]),
+      getSessionSnapshot: vi.fn(async () => ({
+        projectRegistryState: "ready" as const,
+        projects: [],
+        sessions: [
+          { key: "websocket:chat-1", title: "完成任务", preview: "done", updatedAt: "2026-06-30T00:00:00.000Z", projectId: null, cwd: "/workspace" }
+        ]
+      })),
       readSidebarState: vi.fn(async () => defaultAgentSidebarState),
       readWebuiThread: vi.fn()
     };
@@ -143,13 +159,211 @@ describe("AgentRuntimeBridge", () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(client.listSessions).toHaveBeenCalledTimes(1);
+    expect(client.getSessionSnapshot).toHaveBeenCalledTimes(1);
     expect(client.readSidebarState).toHaveBeenCalledTimes(1);
     expect(client.readWebuiThread).not.toHaveBeenCalled();
     expect(dispatch.mock.calls.map(([action]) => action.type)).toEqual([
-      "agent/sessionsLoading",
-      "agent/sidebarStateLoaded",
-      "agent/sessionsLoaded"
+      "agent/taskStateLoading",
+      "agent/taskStateSettled"
     ]);
+  });
+
+  it("serializes replayable sidebar intents in FIFO order", async () => {
+    let agentState: AgentState = initialAgentState;
+    const dispatch = vi.fn((action: AppAction) => {
+      if (action.type.startsWith("agent/")) {
+        agentState = agentReducer(agentState, action as AgentAction);
+      }
+    });
+    let resolveFirst!: (value: typeof defaultAgentSidebarState) => void;
+    const firstWrite = new Promise<typeof defaultAgentSidebarState>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const writeSidebarState = vi.fn()
+      .mockImplementationOnce(() => firstWrite)
+      .mockImplementationOnce(async (_base, state) => ({
+        ...state,
+        updated_at: "2026-07-26T00:00:00.002Z"
+      }));
+    const client = {
+      writeSidebarState,
+      readSidebarState: vi.fn(async () => defaultAgentSidebarState)
+    };
+    const coordinator = createAgentTaskStateCoordinator(
+      client as any,
+      dispatch,
+      () => agentState
+    );
+
+    const pin = coordinator.enqueueSidebarIntent({
+      id: "pin",
+      kind: "task-patch",
+      sessionKey: "websocket:chat",
+      patch: { pinned: true }
+    });
+    const archive = coordinator.enqueueSidebarIntent({
+      id: "archive",
+      kind: "task-patch",
+      sessionKey: "websocket:chat",
+      patch: { archived: true }
+    });
+
+    expect(writeSidebarState).toHaveBeenCalledTimes(1);
+    expect(writeSidebarState.mock.calls[0]?.[1]).toMatchObject({
+      pinned_keys: ["websocket:chat"],
+      archived_keys: []
+    });
+    resolveFirst({
+      ...defaultAgentSidebarState,
+      pinned_keys: ["websocket:chat"],
+      updated_at: "2026-07-26T00:00:00.001Z"
+    });
+    await pin;
+    await archive;
+
+    expect(writeSidebarState).toHaveBeenCalledTimes(2);
+    expect(writeSidebarState.mock.calls[1]?.[0]).toBe("2026-07-26T00:00:00.001Z");
+    expect(writeSidebarState.mock.calls[1]?.[1]).toMatchObject({
+      pinned_keys: ["websocket:chat"],
+      archived_keys: ["websocket:chat"]
+    });
+    coordinator.dispose();
+  });
+
+  it("rebases a sidebar intent on the authoritative state returned by CAS conflict", async () => {
+    let agentState: AgentState = initialAgentState;
+    const dispatch = (action: AppAction): void => {
+      if (action.type.startsWith("agent/")) {
+        agentState = agentReducer(agentState, action as AgentAction);
+      }
+    };
+    const serverState = {
+      ...defaultAgentSidebarState,
+      archived_keys: ["websocket:other"],
+      updated_at: "2026-07-26T00:00:00.010Z"
+    };
+    const writeSidebarState = vi.fn()
+      .mockRejectedValueOnce(new MemmyAgentRequestError(
+        "conflict",
+        409,
+        "sidebar_state_conflict",
+        { sidebarState: serverState }
+      ))
+      .mockImplementationOnce(async (_base, state) => ({
+        ...state,
+        updated_at: "2026-07-26T00:00:00.011Z"
+      }));
+    const coordinator = createAgentTaskStateCoordinator(
+      {
+        writeSidebarState,
+        readSidebarState: vi.fn(async () => serverState)
+      } as any,
+      dispatch,
+      () => agentState
+    );
+
+    await coordinator.enqueueSidebarIntent({
+      id: "pin",
+      kind: "task-patch",
+      sessionKey: "websocket:chat",
+      patch: { pinned: true }
+    });
+
+    expect(writeSidebarState).toHaveBeenCalledTimes(2);
+    expect(writeSidebarState.mock.calls[1]?.[0]).toBe(serverState.updated_at);
+    expect(writeSidebarState.mock.calls[1]?.[1]).toMatchObject({
+      pinned_keys: ["websocket:chat"],
+      archived_keys: ["websocket:other"]
+    });
+    coordinator.dispose();
+  });
+
+  it("drops a failed sidebar intent after three attempts and continues from the confirmed state", async () => {
+    let agentState: AgentState = initialAgentState;
+    const dispatch = (action: AppAction): void => {
+      if (action.type.startsWith("agent/")) {
+        agentState = agentReducer(agentState, action as AgentAction);
+      }
+    };
+    const writeSidebarState = vi.fn()
+      .mockRejectedValueOnce(new Error("write failed"))
+      .mockRejectedValueOnce(new Error("write failed"))
+      .mockRejectedValueOnce(new Error("write failed"))
+      .mockImplementationOnce(async (_base, state) => ({
+        ...state,
+        updated_at: "2026-07-26T00:00:00.001Z"
+      }));
+    const coordinator = createAgentTaskStateCoordinator(
+      {
+        writeSidebarState,
+        readSidebarState: vi.fn(async () => defaultAgentSidebarState)
+      } as any,
+      dispatch,
+      () => agentState
+    );
+
+    const failed = coordinator.enqueueSidebarIntent({
+      id: "pin",
+      kind: "task-patch",
+      sessionKey: "websocket:chat",
+      patch: { pinned: true }
+    }).catch((error: unknown) => error);
+    const archive = coordinator.enqueueSidebarIntent({
+      id: "archive",
+      kind: "task-patch",
+      sessionKey: "websocket:chat",
+      patch: { archived: true }
+    });
+
+    expect(await failed).toBeInstanceOf(Error);
+    await archive;
+
+    expect(writeSidebarState).toHaveBeenCalledTimes(4);
+    expect(agentState.sidebarState.pinned_keys).toEqual([]);
+    expect(agentState.sidebarState.archived_keys).toEqual(["websocket:chat"]);
+    expect(agentState.currentSidebarMutationId).toBeNull();
+    coordinator.dispose();
+  });
+
+  it("waits for sidebar persistence before entering a project removal barrier", async () => {
+    let agentState: AgentState = initialAgentState;
+    const dispatch = (action: AppAction): void => {
+      if (action.type.startsWith("agent/")) {
+        agentState = agentReducer(agentState, action as AgentAction);
+      }
+    };
+    let resolveWrite!: (value: typeof defaultAgentSidebarState) => void;
+    const write = new Promise<typeof defaultAgentSidebarState>((resolve) => {
+      resolveWrite = resolve;
+    });
+    const operation = vi.fn(async () => "deleted");
+    const coordinator = createAgentTaskStateCoordinator(
+      {
+        writeSidebarState: vi.fn(() => write),
+        readSidebarState: vi.fn(async () => defaultAgentSidebarState)
+      } as any,
+      dispatch,
+      () => agentState
+    );
+
+    const queued = coordinator.enqueueSidebarIntent({
+      id: "pin",
+      kind: "task-patch",
+      sessionKey: "websocket:chat",
+      patch: { pinned: true }
+    });
+    const deletion = coordinator.runWithSidebarSettled(operation);
+    await Promise.resolve();
+    expect(operation).not.toHaveBeenCalled();
+
+    resolveWrite({
+      ...defaultAgentSidebarState,
+      pinned_keys: ["websocket:chat"],
+      updated_at: "2026-07-26T00:00:00.001Z"
+    });
+    await queued;
+    await expect(deletion).resolves.toBe("deleted");
+    expect(operation).toHaveBeenCalledTimes(1);
+    coordinator.dispose();
   });
 });

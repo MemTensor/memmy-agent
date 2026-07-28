@@ -101,7 +101,6 @@ export function createMockMemoryClient(options: CreateMockMemoryClientOptions = 
         turnId: input.turnId ?? randomUUID(),
         contextPacketId: randomUUID(),
         sessionId: input.sessionId,
-        episodeId: randomUUID(),
         injectedContext: {
           markdown: "",
           sections: []
@@ -211,6 +210,27 @@ export function createMockMemoryClient(options: CreateMockMemoryClientOptions = 
       return {
         enqueued: 0,
         memoryIds: [],
+        serverTime: now()
+      };
+    },
+
+    async getMemoryProcessingStatus() {
+      failIfNeeded();
+      return { items: [], serverTime: now() };
+    },
+
+    async retryMemoryProcessing(memoryId) {
+      failIfNeeded();
+      return {
+        accepted: false,
+        processing: {
+          memoryId,
+          state: "ready" as const,
+          attemptCount: 0,
+          manualRetryCount: 0,
+          retryAction: "retry" as const,
+          updatedAt: now()
+        },
         serverTime: now()
       };
     },

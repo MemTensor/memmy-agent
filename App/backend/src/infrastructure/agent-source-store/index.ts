@@ -2,6 +2,7 @@
 export {
   createAgentSourceRepository,
   type AgentSourceRecord,
+  type AgentSourceConversationCheckpoint,
   type AgentSourceRepository,
   type UpsertAgentSourceInput
 } from "./repository.js";

@@ -6,6 +6,7 @@ import { AgentLoop } from "../../../src/core/agent-runtime/loop.js";
 import { AgentRunner, AgentRunSpec, BACKFILL_CONTENT, MICROCOMPACT_KEEP_RECENT } from "../../../src/core/agent-runtime/runner.js";
 import { InboundMessage } from "../../../src/core/runtime-messages/index.js";
 import { LLMProvider, LLMResponse } from "../../../src/providers/base.js";
+import { CONTEXT_SAFETY_BUFFER_TOKENS } from "../../../src/token-budget.js";
 
 const MAX_TOOL_RESULT_CHARS = 16_000;
 
@@ -63,6 +64,27 @@ function tmpWorkspace(): string {
 }
 
 describe("AgentRunner governance", () => {
+  it("uses the shared context safety margin when no context block limit is configured", () => {
+    const provider = new CaptureProvider();
+    provider.estimate = 3000;
+    const runner = new AgentRunner(provider);
+    const messages = [
+      { role: "system", content: "system" },
+      { role: "user", content: `old ${"context ".repeat(3000)}` },
+      { role: "assistant", content: "old answer" },
+      { role: "user", content: "latest request" },
+    ];
+
+    const trimmed = runner.snipHistory(
+      runSpec(messages, { contextWindowTokens: 10_000, maxTokens: 4000 }),
+      messages,
+    );
+
+    expect(CONTEXT_SAFETY_BUFFER_TOKENS).toBe(4_096);
+    expect(trimmed.length).toBeLessThan(messages.length);
+    expect(trimmed.at(-1)?.content).toBe("latest request");
+  });
+
   it("defaults to recoverable tool errors unless explicitly enabled", () => {
     expect(new AgentRunSpec({}).failOnToolError).toBe(false);
     expect(new AgentRunSpec({ failOnToolError: true }).failOnToolError).toBe(true);

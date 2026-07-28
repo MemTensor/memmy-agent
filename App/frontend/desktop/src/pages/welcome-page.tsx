@@ -16,6 +16,7 @@ import { openExternalUrl } from "../utils/open-url.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { appActions } from "../state/app-actions.js";
 import { useAppState } from "../state/app-state.js";
+import { formatTokenGiftAmount } from "./token-gift.js";
 
 /** Handles welcome page. */
 export function WelcomePage() {
@@ -30,7 +31,9 @@ export function WelcomePage() {
   const [modePersistenceFeedback, setModePersistenceFeedback] = useState<{ text: string; tone: "error" | "success" } | null>(null);
   const channel = resolveDesktopAccountChannel();
   const canContinue = Boolean(identifier.trim() && code.trim());
-  const showLoginBanner = state.bootstrap?.promotions?.loginBanner ?? true;
+  const agentChatTokenTotal = state.bootstrap?.promotions?.agentChatTokenTotal;
+  const showLoginBanner =
+    (state.bootstrap?.promotions?.loginBanner ?? true) && (agentChatTokenTotal ?? 0) > 0;
 
   // Handles use effect.
   useEffect(() => {
@@ -173,7 +176,9 @@ export function WelcomePage() {
                 <span className="w-6 h-6 rounded-full bg-action-sky/15 flex items-center justify-center text-action-sky shrink-0">
                   <Gift size={14} strokeWidth={2.2} />
                 </span>
-                <span className="text-sm text-text-ink/70">{t("welcome.gift")}</span>
+                <span className="text-sm text-text-ink/70">
+                  {t("welcome.gift", { count: formatTokenGiftAmount(agentChatTokenTotal) })}
+                </span>
               </button>
             )}
 

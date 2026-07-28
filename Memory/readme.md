@@ -1,10 +1,17 @@
 # Memory
 
-`Memory` 是本地优先的 memmy 记忆服务，默认使用 SQLite 存储，并通过 HTTP 服务和 `memmy-memory` CLI 给 agent 暴露记忆能力。
+`Memory` is Memmy's local-first memory service. It stores data in SQLite by
+default and exposes memory operations through an HTTP service and the
+`memmy-memory` CLI.
 
-## 常用命令
+## Requirements
 
-在仓库根目录运行：
+- Node.js 20 or later
+- npm
+
+## Development
+
+Run the main workflows from the repository root:
 
 ```bash
 npm run memory:serve:dev
@@ -13,9 +20,16 @@ npm run memory:lint
 npm run memory:build
 ```
 
-开发服务入口是 `Memory/src/server/index.ts`，编译后入口是 `Memory/dist/src/server/index.js`。默认服务地址是 `http://127.0.0.1:18960`。
+The development server entry point is `Memory/src/server/index.ts`. After a
+build, the server entry point is `Memory/dist/src/server/index.js`, and it can be
+started with:
 
-自定义服务参数：
+```bash
+npm run memory:serve
+```
+
+The service listens on `http://127.0.0.1:18960` by default. Override its
+settings after `--`:
 
 ```bash
 npm run memory:serve:dev -- \
@@ -25,16 +39,18 @@ npm run memory:serve:dev -- \
   --config ~/.memmy/config.yaml
 ```
 
-## 配置
+The built-in Memory panel is available at `/` and `/viewer`.
 
-默认配置文件查找顺序：
+## Configuration
+
+Unless `--config` is provided, the service checks these locations in order:
 
 ```text
 MEMMY_CONFIG
 ~/.memmy/config.yaml
 ```
 
-最小配置示例：
+A minimal local configuration is:
 
 ```yaml
 memmyMemory:
@@ -52,26 +68,34 @@ memmyMemory:
         provider: local
 ```
 
-设置 `storage.token`、`MEMMY_MEMORY_TOKEN` 或 `MEMORY_SERVICE_TOKEN` 后，除 `GET /api/v1/health` 外的接口需要携带 bearer token。
+The `MEMMY_MEMORY_HOST`, `MEMMY_MEMORY_PORT`, and `MEMMY_MEMORY_DB`
+environment variables override the corresponding server settings. The
+`MEMORY_SERVICE_*` aliases are also accepted.
+
+When `storage.token`, `MEMMY_MEMORY_TOKEN`, or `MEMORY_SERVICE_TOKEN` is set,
+all HTTP routes except `GET /api/v1/health` require that token as a bearer token
+or `x-api-key`.
 
 ## CLI
 
-在 `Memory/` 目录内源码运行：
+Run the CLI directly from source inside the `Memory/` directory:
 
 ```bash
 npx tsx src/cli/index.ts health --url http://127.0.0.1:18960
 ```
 
-在 `Memory/` 目录内编译后运行：
+After building, use the compiled entry point:
 
 ```bash
 node dist/src/cli/index.js health --url http://127.0.0.1:18960
 ```
 
-当前专用命令：
+Available commands:
 
 ```text
 memmy-memory init
+memmy-memory install
+memmy-memory serve
 memmy-memory health
 memmy-memory reload-config
 memmy-memory session open
@@ -86,6 +110,15 @@ memmy-memory delete <id>
 memmy-memory raw <method> <path>
 ```
 
-`get` 默认输出可直接给 agent 使用的精简内容；需要完整 JSON 详情时使用 `--verbose`。
+Use `--url`, `--token`, `--user-id`, `--source`, or `--config` to select the
+target service and namespace for an individual command.
 
-`memmy-memory serve` 只说明如何连接外部 Memory 服务，不会启动本地 HTTP 服务。
+`memmy-memory get` prints compact, agent-readable content by default. Add
+`--verbose` to inspect the complete JSON detail response.
+
+`memmy-memory serve` does not start the local HTTP service. It only reports how
+to connect this standalone CLI to an external Memory service.
+
+For npm package installation and agent-skill setup, see
+[`src/cli/npm/README.md`](src/cli/npm/README.md). For the integration-test
+layout, see [`tests/service/README.md`](tests/service/README.md).

@@ -13,9 +13,12 @@ import {
   SettingsPageView,
   formatUsageUpdatedAt,
   isPendingQuotaRequestError,
+  resolveQuotaEligibilityMessage,
   readLogLevel,
+  shouldSaveAccountNicknameOnKeyDown,
   writeLogLevel
 } from "../settings-page.js";
+import { formatMessage, zhCNMessages } from "../../i18n/messages.js";
 
 const settingsPageSourcePath = fileURLToPath(new URL("../settings-page.tsx", import.meta.url));
 const updateCoordinatorSourcePath = fileURLToPath(new URL("../../app/update-coordinator.tsx", import.meta.url));
@@ -230,6 +233,30 @@ describe("SettingsPageView", () => {
     expect(html).not.toContain("检查更新");
   });
 
+  it("下载更新时在关于区展示下载进度条", () => {
+    const html = normalizeSsrHtml(renderSettingsPageView(
+      createReadyState(),
+      "zh-CN",
+      createUpdateViewModel({
+        phase: "downloading",
+        downloadProgress: {
+          downloadUrl: "https://updates.example.com/Memmy.dmg",
+          filePath: "/tmp/Memmy.dmg",
+          transferredBytes: 524_288,
+          totalBytes: 1_048_576,
+          percent: 50
+        }
+      })
+    ));
+
+    expect(html).toContain("下载中");
+    expect(html).toContain('role="progressbar"');
+    expect(html).toContain('aria-label="下载进度"');
+    expect(html).toContain('aria-valuenow="50"');
+    expect(html).toContain("已下载 50%");
+    expect(html).toContain("512.0 KB / 1.0 MB");
+  });
+
   it("菜单栏图标开关保存到应用设置并同步桌面 bridge", () => {
     const source = readFileSync(settingsPageSourcePath, "utf8");
 
@@ -321,7 +348,6 @@ describe("SettingsPageView", () => {
     expect(html).toContain("修改昵称");
     expect(html).toContain("Token 用量");
     expect(html).toContain("平台赠送 Token");
-    expect(html).toContain("赠送 Token 永不过期");
     expect(html).toContain("平台赠送大模型");
     expect(html).toContain("自有 API Key");
     expect(html).toContain("查看用量详情");
@@ -696,6 +722,16 @@ describe("SettingsPageView", () => {
     expect(source).toContain("appActions.accountCleared()");
   });
 
+  it("中文输入法组合输入中的 Enter 只确认候选，不保存账户昵称", () => {
+    expect(shouldSaveAccountNicknameOnKeyDown(nicknameKeyEvent({ nativeEvent: { isComposing: true } }))).toBe(false);
+    expect(shouldSaveAccountNicknameOnKeyDown(nicknameKeyEvent({ nativeEvent: { keyCode: 229 } }))).toBe(false);
+    expect(shouldSaveAccountNicknameOnKeyDown(nicknameKeyEvent({ nativeEvent: { isComposing: false, keyCode: 13 } }))).toBe(true);
+    expect(shouldSaveAccountNicknameOnKeyDown(nicknameKeyEvent({ key: "Escape" }))).toBe(false);
+
+    const source = readFileSync(settingsPageSourcePath, "utf8");
+    expect(source).toContain("if (shouldSaveAccountNicknameOnKeyDown(event))");
+  });
+
   it("设置页账户区长昵称和账号按真实溢出再显示提示", () => {
     const longAccountState = appReducer(
       createAccountModeState(),
@@ -741,16 +777,49 @@ describe("赠送活动开关 - Token 页申请更多按钮", () => {
     expect(html).not.toContain(APPLY_MORE);
   });
 
-  it("申请中状态会禁用申请入口并轮询刷新额度", () => {
+  it("申请中状态只在窗口重新聚焦时刷新，不启动定时轮询", () => {
     const source = readFileSync(settingsPageSourcePath, "utf8");
 
-    expect(source).toContain("const [quotaRequestPending, setQuotaRequestPending] = useState(false);");
+    expect(source).toContain("tokenQuotaClient.getEligibility()");
     expect(source).toContain('t("settings.token.applyMore.pending")');
     expect(source).toContain('t("settings.token.applyMore.pendingDesc")');
-    expect(source).toContain("disabled={quotaRequestPending}");
-    expect(source).toContain("if (quotaRequestPending || !canSubmitFeedback(feedbackText) || feedbackSubmitting)");
-    expect(source).toContain("const timer = window.setInterval");
+    expect(source).toContain("const quotaApplicationBlocked = quotaEligibility !== null && quotaEligibility.state !== \"available\"");
+    expect(source).toContain("if (quotaApplicationBlocked || !canSubmitFeedback(feedbackText) || feedbackSubmitting)");
+    expect(source).toContain('window.addEventListener("focus"');
+    expect(source).not.toContain("window.setInterval");
     expect(source).toContain("dispatch(appActions.tokenUsageUpdated(nextTokenUsage));");
+  });
+
+  it("冷却期拒绝且没有理由时展示固定兜底文案和下次可申请时间", () => {
+    const message = resolveQuotaEligibilityMessage({
+      state: "cooldown",
+      requestCount: 1,
+      maxRequestCount: 5,
+      nextAllowedAtEpochMs: new Date(2026, 6, 29, 15, 0).getTime(),
+      latestRequestStatus: "rejected",
+      latestReviewNote: null
+    }, "zh-CN");
+
+    expect(message).not.toBeNull();
+    expect(formatMessage(zhCNMessages[message!.key], message!.values)).toBe(
+      "申请未通过。7 月 29 日 15:00 后可再次申请。"
+    );
+  });
+
+  it("达到 5 次上限时展示最近拒绝理由且不再给出申请入口", () => {
+    const message = resolveQuotaEligibilityMessage({
+      state: "limit_reached",
+      requestCount: 5,
+      maxRequestCount: 5,
+      nextAllowedAtEpochMs: null,
+      latestRequestStatus: "rejected",
+      latestReviewNote: "申请场景说明不够具体"
+    }, "zh-CN");
+
+    expect(message).toEqual({
+      key: "settings.token.applyMore.limitRejectedWithReason",
+      values: { reason: "申请场景说明不够具体", count: 5 }
+    });
   });
 
   it("重复 pending 申请错误会转成申请中状态", () => {
@@ -777,7 +846,8 @@ function createLowTokenState(applyMore: boolean): AppState {
     promotions: {
       loginBanner: true,
       improvementGift: true,
-      applyMore
+      applyMore,
+      agentChatTokenTotal: mockBootstrap.promotions?.agentChatTokenTotal ?? 0
     }
   };
   const bootstrapped = appReducer(createInitialAppState(), appActions.bootstrapLoaded(lowBootstrap, "/settings"));
@@ -818,6 +888,7 @@ function createUpdateViewModel(
     appVersion: "2.1.0",
     phase: "idle",
     preparedUpdatePath: null,
+    downloadProgress: null,
     feedback: null,
     requestPrimaryAction: vi.fn(async () => undefined),
     ...overrides
@@ -832,6 +903,15 @@ function createUpdateViewModel(
  */
 function normalizeSsrHtml(html: string): string {
   return html.replaceAll("<!-- -->", "");
+}
+
+function nicknameKeyEvent(
+  overrides: { key?: string; nativeEvent?: { isComposing?: boolean; keyCode?: number } } = {}
+) {
+  return {
+    key: overrides.key ?? "Enter",
+    nativeEvent: overrides.nativeEvent ?? { isComposing: false, keyCode: 13 }
+  } as any;
 }
 
 /**
@@ -854,7 +934,27 @@ function createAccountModeState(): AppState {
     tokenUsage: {
       ...mockBootstrap.tokenUsage,
       usedTokens: 18_420_000,
-      remainingTokens: 11_580_000
+      remainingTokens: 11_580_000,
+      sceneUsages: [
+        {
+          scene: "agent_chat" as const,
+          totalTokens: 5_000_000,
+          usedTokens: 1_420_000,
+          remainingTokens: 3_580_000
+        },
+        {
+          scene: "memory_summary" as const,
+          totalTokens: 20_000_000,
+          usedTokens: 15_000_000,
+          remainingTokens: 5_000_000
+        },
+        {
+          scene: "memory_evolution" as const,
+          totalTokens: 5_000_000,
+          usedTokens: 2_000_000,
+          remainingTokens: 3_000_000
+        }
+      ]
     }
   };
   const bootstrapped = appReducer(createInitialAppState(), appActions.bootstrapLoaded(accountBootstrap, "/settings"));
@@ -927,7 +1027,8 @@ function createImprovementBonusState(): AppState {
       usedTokens: 0,
       remainingTokens: 35_000_000,
       expiresAt: null,
-      lastSyncedAt: "2026-06-09T06:36:49.417Z"
+      lastSyncedAt: "2026-06-09T06:36:49.417Z",
+      sceneUsages: []
     })
   );
 }

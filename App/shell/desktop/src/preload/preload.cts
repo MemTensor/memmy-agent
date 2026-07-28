@@ -3,10 +3,13 @@ type IpcRendererEvent = import("electron").IpcRendererEvent;
 type DesktopAppInfo = import("@memmy/desktop-interface").DesktopAppInfo;
 type DesktopUpdateCheckResult = import("@memmy/desktop-interface").DesktopUpdateCheckResult;
 type DesktopUpdateDownloadOptions = import("@memmy/desktop-interface").DesktopUpdateDownloadOptions;
+type DesktopUpdateDownloadProgress = import("@memmy/desktop-interface").DesktopUpdateDownloadProgress;
 type DesktopUpdateInstallResult = import("@memmy/desktop-interface").DesktopUpdateInstallResult;
 type DesktopMenuBarIconResult = import("@memmy/desktop-interface").DesktopMenuBarIconResult;
 type DesktopImageActionRequest = import("@memmy/desktop-interface").DesktopImageActionRequest;
 type DesktopImageSaveResult = import("@memmy/desktop-interface").DesktopImageSaveResult;
+type DesktopMemoryServiceRestartResult = import("@memmy/desktop-interface").DesktopMemoryServiceRestartResult;
+type DesktopProjectDirectorySelection = import("@memmy/desktop-interface").DesktopProjectDirectorySelection;
 type MicrophoneAccessStatus = import("@memmy/desktop-interface").MicrophoneAccessStatus;
 type MainWindowActionRequest = { id: string; action: "close" | "minimize" };
 
@@ -24,19 +27,24 @@ interface MemmyPreloadApi {
   getAppInfo(): Promise<DesktopAppInfo>;
   checkForUpdates(): Promise<DesktopUpdateCheckResult>;
   downloadUpdate(update: DesktopUpdateCheckResult, options?: DesktopUpdateDownloadOptions): Promise<DesktopUpdateInstallResult>;
+  onUpdateDownloadProgress(callback: (progress: DesktopUpdateDownloadProgress) => void): () => void;
   openUpdateInstaller(filePath: string): Promise<DesktopUpdateInstallResult>;
   openExternal(url: string): Promise<void>;
+  openAgentTool(sourceId: string, prompt: string): Promise<{ opened: boolean }>;
   openMailto(mailtoUrl: string): Promise<void>;
   copyImageToClipboard(request: DesktopImageActionRequest): Promise<void>;
   saveImage(request: DesktopImageActionRequest): Promise<DesktopImageSaveResult>;
   exportMemoryDatabase(): Promise<unknown>;
   installCliTools(): Promise<unknown>;
+  restartMemoryService(): Promise<DesktopMemoryServiceRestartResult>;
   openLogsDirectory(): Promise<void>;
   exportDiagnosticsReport(): Promise<DiagnosticsReportExportResult>;
   getLogLevel(): Promise<"error" | "warn" | "info" | "debug">;
   setLogLevel(level: "error" | "warn" | "info" | "debug"): Promise<void>;
   getMicrophoneAccessStatus(): Promise<MicrophoneAccessStatus>;
   requestMicrophoneAccess(): Promise<MicrophoneAccessStatus>;
+  selectProjectDirectory(): Promise<DesktopProjectDirectorySelection>;
+  selectEmptyProjectDirectory(): Promise<DesktopProjectDirectorySelection>;
   notifyTaskDone(payload: { title: string; body: string; silent: boolean }): Promise<void>;
   notifyUpdateAvailable(payload: { title: string; body: string; silent: boolean }): Promise<void>;
   setPetWindow(enabled: boolean, target?: { route?: string; hash?: string; agentChatId?: string; petIntent?: "user" }): Promise<void>;
@@ -114,12 +122,24 @@ const memmyPreloadApi: MemmyPreloadApi = {
     return ipcRenderer.invoke("memmy:download-update", update, options);
   },
 
+  onUpdateDownloadProgress(callback: (progress: DesktopUpdateDownloadProgress) => void): () => void {
+    const listener = (_event: IpcRendererEvent, progress: DesktopUpdateDownloadProgress) => {
+      callback(progress);
+    };
+    ipcRenderer.on("memmy:update-download-progress", listener);
+    return () => ipcRenderer.removeListener("memmy:update-download-progress", listener);
+  },
+
   async openUpdateInstaller(filePath: string): Promise<DesktopUpdateInstallResult> {
     return ipcRenderer.invoke("memmy:open-update-installer", filePath);
   },
 
   async openExternal(url: string): Promise<void> {
     return ipcRenderer.invoke("memmy:openExternal", url);
+  },
+
+  async openAgentTool(sourceId: string, prompt: string): Promise<{ opened: boolean }> {
+    return ipcRenderer.invoke("memmy:openAgentTool", sourceId, prompt);
   },
 
   async openMailto(mailtoUrl: string): Promise<void> {
@@ -150,6 +170,10 @@ const memmyPreloadApi: MemmyPreloadApi = {
     return ipcRenderer.invoke("memmy:install-cli-tools");
   },
 
+  async restartMemoryService(): Promise<DesktopMemoryServiceRestartResult> {
+    return ipcRenderer.invoke("memmy:restart-memory-service");
+  },
+
   async openLogsDirectory(): Promise<void> {
     return ipcRenderer.invoke("memmy:open-logs-directory");
   },
@@ -172,6 +196,14 @@ const memmyPreloadApi: MemmyPreloadApi = {
 
   async requestMicrophoneAccess(): Promise<MicrophoneAccessStatus> {
     return ipcRenderer.invoke("memmy:request-microphone-access");
+  },
+
+  async selectProjectDirectory(): Promise<DesktopProjectDirectorySelection> {
+    return ipcRenderer.invoke("memmy:select-project-directory");
+  },
+
+  async selectEmptyProjectDirectory(): Promise<DesktopProjectDirectorySelection> {
+    return ipcRenderer.invoke("memmy:select-empty-project-directory");
   },
 
   async setPetWindow(enabled: boolean, target?: { route?: string; hash?: string; agentChatId?: string; petIntent?: "user" }): Promise<void> {

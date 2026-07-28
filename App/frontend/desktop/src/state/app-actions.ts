@@ -16,9 +16,17 @@ import { isIntegrationSetupDiagnosticError, logHiddenIntegrationSetupDiagnosticE
 import type { IntegrationsClient } from "../api/integrations-client.js";
 import type { IntegrationConnection } from "../integrations/connection-state.js";
 import type { IntegrationMeta } from "../integrations/integration-meta.js";
-import type { MemmyAgentSessionSummary, MemmyAgentSidebarState, MemmyAgentWebuiThread, MemmyAgentWsEvent } from "../api/memmy-agent-client.js";
+import type { MemmyAgentRunStatusSnapshot, MemmyAgentSessionSnapshot, MemmyAgentSessionSummary, MemmyAgentSidebarState, MemmyAgentWebuiThread, MemmyAgentWsEvent, WebuiSessionTarget } from "../api/memmy-agent-client.js";
 import type { PendingAttachment } from "./agent-composer-state.js";
-import type { AgentAction, AgentChatMediaAttachment } from "./agent-chat-slice.js";
+import type {
+  AgentAction,
+  AgentChatMediaAttachment,
+  AgentOperationError,
+  AgentOperationErrorSource,
+  AgentOperationSurface,
+  AgentRecoveryChatRequest,
+  AgentTaskStateRequest
+} from "./agent-chat-slice.js";
 import type { ToolsAction } from "./tools-slice.js";
 
 /** Type definition for event connection status. */
@@ -32,6 +40,37 @@ export interface AgentSourceScanProgress {
   current: number;
   total: number;
   message?: string;
+}
+
+export interface AgentSourceScanCompletion {
+  jobId: string;
+  sourceId: string;
+}
+
+export interface AgentSourceScanFinished extends AgentSourceScanCompletion {
+  succeeded: boolean;
+}
+
+export const AGENT_SOURCE_SCAN_COMPLETION_FEEDBACK_MS = 5_000;
+
+let agentOperationErrorCounter = 0;
+
+export function createAgentOperationError(input: {
+  source: AgentOperationErrorSource;
+  message: string;
+  chatId?: string;
+  scopeKey?: string;
+}): AgentOperationError {
+  agentOperationErrorCounter += 1;
+  const createdAt = Date.now();
+  return {
+    id: `${input.source}-${createdAt}-${agentOperationErrorCounter}`,
+    source: input.source,
+    message: input.message,
+    ...(input.chatId ? { chatId: input.chatId } : {}),
+    ...(input.scopeKey ? { scopeKey: input.scopeKey } : {}),
+    createdAt
+  };
 }
 
 /** Type definition for app action. */
@@ -51,9 +90,10 @@ export type AppAction =
   | { type: "agentSources/loaded"; sources: AgentSourceView[] }
   | { type: "agentSources/refreshed"; sources: AgentSourceView[] }
   | { type: "agentSources/error"; message: string }
-  | { type: "agentSources/scanStarted" }
+  | { type: "agentSources/scanStarted"; sourceId: string }
   | { type: "agentSources/scanProgress"; progress: AgentSourceScanProgress }
-  | { type: "agentSources/scanCompleted" }
+  | { type: "agentSources/scanCompleted"; scan?: AgentSourceScanFinished }
+  | { type: "agentSources/scanCompletionExpired"; jobId: string }
   | { type: "scanPreferences/updated"; preferences: Partial<ScanPreferences> }
   | { type: "preferredMode/updated"; preferredMode: PreferredMode }
   | { type: "account/updated"; email?: string; phoneNumber?: string | null; nickname?: string; registeredAt?: string | null }
@@ -128,8 +168,8 @@ export const appActions = {
   },
 
   /** Handles agent source scan started. */
-  agentSourceScanStarted(): AppAction {
-    return { type: "agentSources/scanStarted" };
+  agentSourceScanStarted(sourceId = "all"): AppAction {
+    return { type: "agentSources/scanStarted", sourceId };
   },
 
   /** Handles agent source scan progress received. */
@@ -138,8 +178,12 @@ export const appActions = {
   },
 
   /** Handles agent source scan completed. */
-  agentSourceScanCompleted(): AppAction {
-    return { type: "agentSources/scanCompleted" };
+  agentSourceScanCompleted(scan?: AgentSourceScanFinished): AppAction {
+    return { type: "agentSources/scanCompleted", scan };
+  },
+
+  agentSourceScanCompletionExpired(jobId: string): AppAction {
+    return { type: "agentSources/scanCompletionExpired", jobId };
   },
 
   /** Handles scan preferences updated. */
@@ -197,16 +241,20 @@ export const agentActions = {
     return { type: "agent/connectionConnecting" };
   },
 
-  connectionClosed(): AppAction {
-    return { type: "agent/connectionClosed" };
+  connectionFailed(message: string): AppAction {
+    return { type: "agent/connectionFailed", message };
   },
 
-  failed(message: string): AppAction {
-    return { type: "agent/error", message };
+  connectionDisposed(): AppAction {
+    return { type: "agent/connectionDisposed" };
   },
 
-  errorDismissed(message: string): AppAction {
-    return { type: "agent/errorDismissed", message };
+  operationFailed(surface: AgentOperationSurface, error: AgentOperationError): AppAction {
+    return { type: "agent/operationFailed", surface, error };
+  },
+
+  operationErrorDismissed(surface: AgentOperationSurface, id: string): AppAction {
+    return { type: "agent/operationErrorDismissed", surface, id };
   },
 
   sessionsLoading(requestId?: string): AppAction {
@@ -215,6 +263,10 @@ export const agentActions = {
 
   sessionsLoaded(sessions: MemmyAgentSessionSummary[], requestId?: string): AppAction {
     return { type: "agent/sessionsLoaded", sessions, ...(requestId ? { requestId } : {}) };
+  },
+
+  sessionSnapshotApplied(snapshot: MemmyAgentSessionSnapshot): AppAction {
+    return { type: "agent/sessionSnapshotApplied", snapshot };
   },
 
   sessionsLoadFailed(requestId?: string): AppAction {
@@ -229,6 +281,37 @@ export const agentActions = {
     return { type: "agent/sidebarStateSaved", sidebarState };
   },
 
+  sidebarMutationStarted(mutationId: string, sidebarState: MemmyAgentSidebarState): AppAction {
+    return { type: "agent/sidebarMutationStarted", mutationId, sidebarState };
+  },
+
+  sidebarMutationConfirmed(mutationId: string, sidebarState: MemmyAgentSidebarState): AppAction {
+    return { type: "agent/sidebarMutationConfirmed", mutationId, sidebarState };
+  },
+
+  sidebarMutationFailed(
+    mutationId: string,
+    sidebarState: MemmyAgentSidebarState,
+    error: AgentOperationError
+  ): AppAction {
+    return { type: "agent/sidebarMutationFailed", mutationId, sidebarState, error };
+  },
+
+  taskStateLoading(request: AgentTaskStateRequest): AppAction {
+    return { type: "agent/taskStateLoading", request };
+  },
+
+  taskStateSettled(input: {
+    requestId: string;
+    recoveryGeneration: number | null;
+    snapshot?: MemmyAgentSessionSnapshot;
+    sessions?: MemmyAgentSessionSummary[];
+    sidebarState?: MemmyAgentSidebarState;
+    error?: AgentOperationError;
+  }): AppAction {
+    return { type: "agent/taskStateSettled", ...input };
+  },
+
   historyLoading(sessionKey: string, chatId: string, requestId: string): AppAction {
     return { type: "agent/historyLoading", sessionKey, chatId, requestId };
   },
@@ -241,6 +324,10 @@ export const agentActions = {
     return { type: "agent/historyOpenMissing", sessionKey, chatId, requestId };
   },
 
+  historyOpenFailed(chatId: string, requestId: string, error: AgentOperationError): AppAction {
+    return { type: "agent/historyOpenFailed", chatId, requestId, error };
+  },
+
   historyHydrateLoading(sessionKey: string, chatId: string, requestId: string): AppAction {
     return { type: "agent/historyHydrateLoading", sessionKey, chatId, requestId };
   },
@@ -249,8 +336,8 @@ export const agentActions = {
     return { type: "agent/historyHydrateLoaded", thread, requestId };
   },
 
-  historyHydrateFailed(chatId: string, requestId: string): AppAction {
-    return { type: "agent/historyHydrateFailed", chatId, requestId };
+  historyHydrateFailed(chatId: string, requestId: string, error?: AgentOperationError): AppAction {
+    return { type: "agent/historyHydrateFailed", chatId, requestId, ...(error ? { error } : {}) };
   },
 
   newChatRequested(): AppAction {
@@ -269,7 +356,7 @@ export const agentActions = {
     return { type: "agent/transientSendFailed", chatId };
   },
 
-  userMessageQueued(input: { chatId: string; content: string; media?: AgentChatMediaAttachment[] }): AppAction {
+  userMessageQueued(input: { chatId: string; content: string; media?: AgentChatMediaAttachment[]; focus?: boolean; deliveryUncertain?: boolean; target?: WebuiSessionTarget }): AppAction {
     return { type: "agent/userMessageQueued", ...input };
   },
 
@@ -281,8 +368,16 @@ export const agentActions = {
     return { type: "agent/composerPendingAttachmentsUpdated", scopeKey, attachments };
   },
 
-  composerMediaErrorUpdated(scopeKey: string, message: string | null): AppAction {
-    return { type: "agent/composerMediaErrorUpdated", scopeKey, message };
+  draftTargetUpdated(scopeKey: string, target: WebuiSessionTarget): AppAction {
+    return { type: "agent/draftTargetUpdated", scopeKey, target };
+  },
+
+  messageSendLockUpdated(scopeKey: string, clientRequestId: string | null): AppAction {
+    return { type: "agent/messageSendLockUpdated", scopeKey, clientRequestId };
+  },
+
+  tasksMarkedRead(chatIds: string[]): AppAction {
+    return { type: "agent/tasksMarkedRead", chatIds };
   },
 
   composerScopeCleared(scopeKey: string): AppAction {
@@ -307,6 +402,28 @@ export const agentActions = {
 
   restartFailed(message: string): AppAction {
     return { type: "agent/restartFailed", message };
+  },
+
+  recoveryChatLoading(request: AgentRecoveryChatRequest): AppAction {
+    return { type: "agent/recoveryChatLoading", request };
+  },
+
+  recoveryChatSnapshotLoaded(input: {
+    requestId: string;
+    generation: number;
+    chatId: string;
+    chatSelectionEpoch: number;
+    thread: MemmyAgentWebuiThread | null;
+    runSnapshot: MemmyAgentRunStatusSnapshot | null;
+    noticeId: string;
+    completedAt: number;
+    failureMessage?: string;
+  }): AppAction {
+    return { type: "agent/recoveryChatSnapshotLoaded", ...input };
+  },
+
+  recoveryFinished(generation: number): AppAction {
+    return { type: "agent/recoveryFinished", generation };
   },
 
   chatViewVisibilityChanged(visible: boolean): AppAction {

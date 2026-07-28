@@ -107,8 +107,32 @@ export interface RequestTokenQuotaInput {
 
 /** Contract for token quota apply result. */
 export interface TokenQuotaApplyResult {
+  /** Cloud quota request identifier. */
   requestId: string;
+  /** Review status of the newly created request. */
   status: "pending" | "approved" | "rejected";
+}
+
+/** Credentials required to query token quota eligibility. */
+export interface GetTokenQuotaEligibilityInput {
+  /** Cloud UUID of the signed-in account. */
+  uuid: string;
+}
+
+/** Token quota eligibility returned by the cloud service. */
+export interface TokenQuotaEligibility {
+  /** Whether the account can apply and, if not, why. */
+  state: "available" | "pending" | "cooldown" | "limit_reached";
+  /** Number of successfully created requests. */
+  requestCount: number;
+  /** Maximum number of requests allowed for an account. */
+  maxRequestCount: 5;
+  /** Cooldown end time in Unix milliseconds; null outside cooldown. */
+  nextAllowedAtEpochMs: number | null;
+  /** Status of the latest request; null when no request exists. */
+  latestRequestStatus: "pending" | "approved" | "rejected" | null;
+  /** Rejection note for the latest request; null when unavailable or not rejected. */
+  latestReviewNote: string | null;
 }
 
 export interface SendTelemetryInput {
@@ -181,6 +205,7 @@ export interface CloudClient {
   updateAccountProfile(input: UpdateCloudAccountProfileInput): Promise<void>;
   getTokenUsage(input: GetTokenUsageInput): Promise<TokenUsageSnapshot>;
   grantImprovementProgramTokens(input: GrantTokensInput): Promise<TokenUsageSnapshot>;
+  getTokenQuotaEligibility(input: GetTokenQuotaEligibilityInput): Promise<TokenQuotaEligibility>;
   requestTokenQuota(input: RequestTokenQuotaInput): Promise<TokenQuotaApplyResult>;
   listIntegrationCapabilities(input: CloudIntegrationSessionInput): Promise<IntegrationCapabilitiesResponse>;
   authorizeIntegration(input: CloudAuthorizeIntegrationInput): Promise<AuthorizeIntegrationResponse>;

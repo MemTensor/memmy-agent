@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { Consolidator, MemoryStore } from "../../../src/core/agent-runtime/memory.js";
 import { AgentDefaults } from "../../../src/config/schema.js";
+import { CONTEXT_SAFETY_BUFFER_TOKENS } from "../../../src/token-budget.js";
 
 function makeSession(turns: number): any {
   const messages: Record<string, any>[] = [];
@@ -43,7 +44,8 @@ describe("Consolidator ratio", () => {
       consolidationRatio: 0.25,
     });
 
-    expect(consolidator.inputTokenBudget).toBe(10_000 - 1000 - consolidator.safetyBuffer);
+    expect(consolidator.safetyBuffer).toBe(CONTEXT_SAFETY_BUFFER_TOKENS);
+    expect(consolidator.inputTokenBudget).toBe(10_000 - 1000 - 4_096);
     expect(consolidator.consolidationRatio).toBe(0.25);
   });
 

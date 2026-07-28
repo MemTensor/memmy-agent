@@ -581,8 +581,8 @@ function buildSummary(log: MemoryApiLog, input: unknown, output: unknown, t: Tra
     const query = searchInput.query?.trim();
     const counts = memorySearchSummaryCounts(searchOutput);
     const result = t("memory.logs.search.summary", {
-      candidates: counts.candidates,
-      filtered: counts.filtered
+      beforeLlm: counts.beforeLlm,
+      afterLlm: counts.afterLlm
     });
     return query ? { text: query, tail: `· ${result}` } : { text: result };
   }
@@ -608,19 +608,12 @@ function usableAddSummary(value: string | null | undefined): string | undefined 
   return text;
 }
 
-function memorySearchSummaryCounts(output: SearchOutput): { candidates: number; filtered: number } {
-  const statsCandidateCount = firstNonNegativeInt(output.stats?.raw, output.stats?.ranked);
-  const statsFilteredCount = firstNonNegativeInt(output.stats?.finalReturned, output.stats?.llmFilter?.kept);
-  const candidateArrayCount = output.candidates?.length;
-  const filteredArrayCount = output.filtered?.length;
-
+function memorySearchSummaryCounts(output: SearchOutput): { beforeLlm: number; afterLlm: number } {
   return {
-    candidates: candidateArrayCount !== undefined && candidateArrayCount > 0
-      ? candidateArrayCount
-      : statsCandidateCount ?? candidateArrayCount ?? 0,
-    filtered: filteredArrayCount !== undefined && filteredArrayCount > 0
-      ? filteredArrayCount
-      : statsFilteredCount ?? filteredArrayCount ?? 0
+    beforeLlm: firstNonNegativeInt(output.stats?.ranked) ?? output.candidates?.length ?? 0,
+    afterLlm: firstNonNegativeInt(output.stats?.llmFilter?.kept, output.stats?.finalReturned)
+      ?? output.filtered?.length
+      ?? 0
   };
 }
 

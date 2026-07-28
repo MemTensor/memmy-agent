@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   consumeRestartNoticeFromEnv,
+  createManagedRestartNotice,
   formatRestartCompletedMessage,
+  MANAGED_RESTART_IPC_TYPE,
+  parseManagedRestartNotice,
   RESTART_NOTIFY_CHANNEL_ENV,
   RESTART_NOTIFY_CHAT_ID_ENV,
   RESTART_NOTIFY_METADATA_ENV,
@@ -56,5 +59,43 @@ describe("restart notice helpers", () => {
     expect(shouldShowCliRestartNotice(notice, "cli:other")).toBe(false);
     expect(shouldShowCliRestartNotice(notice, "direct")).toBe(true);
     expect(shouldShowCliRestartNotice(new RestartNotice({ channel: "feishu", chatId: "oc_1", startedAtRaw: "100" }), "cli:direct")).toBe(false);
+  });
+
+  it("creates and validates the strict Desktop managed restart IPC envelope", () => {
+    const notice = createManagedRestartNotice({
+      channel: "websocket",
+      chatId: "chat-1",
+      startedAt: 123.5,
+      metadata: { webui: true }
+    });
+
+    expect(parseManagedRestartNotice(notice)).toEqual({
+      type: MANAGED_RESTART_IPC_TYPE,
+      channel: "websocket",
+      chatId: "chat-1",
+      startedAt: "123.5",
+      metadata: { webui: true }
+    });
+  });
+
+  it("rejects malformed, oversized, and non-plain managed restart IPC", () => {
+    const valid = {
+      type: MANAGED_RESTART_IPC_TYPE,
+      channel: "websocket",
+      chatId: "chat-1",
+      startedAt: "123.5",
+      metadata: {}
+    };
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+
+    expect(parseManagedRestartNotice({ ...valid, extra: true })).toBeNull();
+    expect(parseManagedRestartNotice({ ...valid, channel: "x".repeat(65) })).toBeNull();
+    expect(parseManagedRestartNotice({ ...valid, chatId: "x".repeat(257) })).toBeNull();
+    expect(parseManagedRestartNotice({ ...valid, startedAt: "" })).toBeNull();
+    expect(parseManagedRestartNotice({ ...valid, startedAt: "not-a-number" })).toBeNull();
+    expect(parseManagedRestartNotice({ ...valid, metadata: [] })).toBeNull();
+    expect(parseManagedRestartNotice({ ...valid, metadata: { payload: "x".repeat(17 * 1024) } })).toBeNull();
+    expect(parseManagedRestartNotice({ ...valid, metadata: cyclic })).toBeNull();
   });
 });

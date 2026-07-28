@@ -7,10 +7,14 @@
  */
 import type {
   MemmyAgentMediaAttachment,
+  MemmyAgentProject,
+  MemmyAgentRunStatusSnapshot,
+  MemmyAgentSessionSnapshot,
   MemmyAgentSessionSummary,
   MemmyAgentSidebarState,
   MemmyAgentWebuiThread,
-  MemmyAgentWsEvent
+  MemmyAgentWsEvent,
+  WebuiSessionTarget
 } from "../api/memmy-agent-client.js";
 import { chatIdToSessionKey } from "../api/memmy-agent-client.js";
 import type { PendingAttachment } from "./agent-composer-state.js";
@@ -26,6 +30,31 @@ import {
 } from "./agent-tool-traces.js";
 
 export type AgentConnectionStatus = "idle" | "bootstrapping" | "connecting" | "connected" | "reconnecting" | "error";
+export type AgentOperationSurface = "chat" | "sidebar";
+export type AgentOperationErrorSource = "sessions" | "sidebar" | "history" | "new-chat" | "send" | "gateway-command" | "recovery";
+export interface AgentOperationError {
+  id: string;
+  source: AgentOperationErrorSource;
+  message: string;
+  chatId?: string;
+  scopeKey?: string;
+  createdAt: number;
+}
+
+export interface AgentTaskStateRequest {
+  requestId: string;
+  sidebarStateVersionAtStart: number;
+  runStatusVersionAtStartByChatId: Record<string, number>;
+  recoveryGeneration: number | null;
+}
+
+export interface AgentRecoveryChatRequest {
+  requestId: string;
+  generation: number;
+  chatId: string;
+  chatSelectionEpoch: number;
+  runStatusVersionAtStart: number;
+}
 /**
  * "narration" is a mid-turn assistant draft: visible text the model streamed
  * before continuing the loop (stream_end with resuming=true). It is part of
@@ -54,11 +83,16 @@ export interface AgentTaskView {
   pinned: boolean;
   archived: boolean;
   tags: string[];
+  projectId: string | null;
+  groupProjectId: string | null;
+  cwd: string;
+  missingProject: boolean;
 }
 
 interface OptimisticAgentTask {
   content: string;
   createdAt: string;
+  target: WebuiSessionTarget;
 }
 
 export interface AgentChatMessage {
@@ -96,12 +130,28 @@ export interface AgentRetryWaitStatus {
 
 export interface AgentState {
   connectionStatus: AgentConnectionStatus;
+  connectionError: string | null;
+  operationErrorNotice: AgentOperationError | null;
+  operationErrorsBySurface: Record<AgentOperationSurface, AgentOperationError | null>;
+  connectionGeneration: number;
+  recoveringGeneration: number | null;
+  recoveringChatId: string | null;
+  recoveringChatSelectionEpoch: number | null;
+  recoveryKind: "initial" | "reconnect" | null;
+  lastRecoveredGeneration: number;
+  chatSelectionEpoch: number;
   modelName: string | null;
   chatViewVisible: boolean;
   currentChatId: string | null;
   currentSessionKey: string | null;
+  projectRegistryState: "ready" | "corrupt";
+  projects: MemmyAgentProject[];
   sessions: MemmyAgentSessionSummary[];
   sidebarState: MemmyAgentSidebarState;
+  sidebarStateVersion: number;
+  currentSidebarMutationId: string | null;
+  currentTaskStateRequest: AgentTaskStateRequest | null;
+  currentRecoveryChatRequest: AgentRecoveryChatRequest | null;
   tasks: AgentTaskView[];
   messages: AgentChatMessage[];
   messagesByChatId: Record<string, AgentChatMessage[]>;
@@ -117,6 +167,7 @@ export interface AgentState {
   activeTurnIdByChatId: Record<string, string | null>;
   closedTurnIdsByChatId: Record<string, Record<string, "stopped" | "ended">>;
   optimisticSendingByChatId: Record<string, boolean>;
+  deliveryUncertainByChatId: Record<string, boolean>;
   stopInFlightByChatId: Record<string, boolean>;
   suppressAssistantStreamUntilTurnEndByChatId: Record<string, boolean>;
   optimisticTasksByChatId: Record<string, OptimisticAgentTask>;
@@ -128,7 +179,9 @@ export interface AgentState {
   goalState: AgentGoalState | null;
   composerDraftsByScope: Record<string, string>;
   composerPendingAttachmentsByScope: Record<string, PendingAttachment[]>;
-  composerMediaErrorByScope: Record<string, string | null>;
+  draftTargetsByScope: Record<string, WebuiSessionTarget>;
+  draftTargetRevisionByScope: Record<string, number>;
+  messageSendInFlightByScope: Record<string, string>;
   isLoadingSessions: boolean;
   isLoadingHistory: boolean;
   isSending: boolean;
@@ -137,7 +190,6 @@ export interface AgentState {
   restartSawDisconnect: boolean;
   restartCompletedAt: number | null;
   restartError: string | null;
-  error: string | null;
   refreshRequested: boolean;
   newChatRequestId: number;
   blankDraftActive: boolean;
@@ -147,35 +199,48 @@ export type AgentAction =
   | { type: "agent/bootstrapStarted" }
   | { type: "agent/bootstrapSucceeded"; modelName: string | null }
   | { type: "agent/connectionConnecting" }
-  | { type: "agent/connectionClosed" }
+  | { type: "agent/connectionFailed"; message: string }
+  | { type: "agent/connectionDisposed" }
   | { type: "agent/chatViewVisibilityChanged"; visible: boolean }
-  | { type: "agent/error"; message: string }
-  | { type: "agent/errorDismissed"; message: string }
+  | { type: "agent/operationFailed"; surface: AgentOperationSurface; error: AgentOperationError }
+  | { type: "agent/operationErrorDismissed"; surface: AgentOperationSurface; id: string }
   | { type: "agent/sessionsLoading"; requestId?: string }
   | { type: "agent/sessionsLoaded"; sessions: MemmyAgentSessionSummary[]; requestId?: string }
+  | { type: "agent/sessionSnapshotApplied"; snapshot: MemmyAgentSessionSnapshot }
   | { type: "agent/sessionsLoadFailed"; requestId?: string }
   | { type: "agent/sidebarStateLoaded"; sidebarState: MemmyAgentSidebarState }
   | { type: "agent/sidebarStateSaved"; sidebarState: MemmyAgentSidebarState }
+  | { type: "agent/sidebarMutationStarted"; mutationId: string; sidebarState: MemmyAgentSidebarState }
+  | { type: "agent/sidebarMutationConfirmed"; mutationId: string; sidebarState: MemmyAgentSidebarState }
+  | { type: "agent/sidebarMutationFailed"; mutationId: string; sidebarState: MemmyAgentSidebarState; error: AgentOperationError }
+  | { type: "agent/taskStateLoading"; request: AgentTaskStateRequest }
+  | { type: "agent/taskStateSettled"; requestId: string; recoveryGeneration: number | null; snapshot?: MemmyAgentSessionSnapshot; sessions?: MemmyAgentSessionSummary[]; sidebarState?: MemmyAgentSidebarState; error?: AgentOperationError }
   | { type: "agent/historyLoading"; sessionKey: string; chatId: string; requestId: string }
   | { type: "agent/historyLoaded"; thread: MemmyAgentWebuiThread; requestId: string }
   | { type: "agent/historyOpenMissing"; sessionKey: string; chatId: string; requestId: string }
+  | { type: "agent/historyOpenFailed"; chatId: string; requestId: string; error: AgentOperationError }
   | { type: "agent/historyHydrateLoading"; sessionKey: string; chatId: string; requestId: string }
   | { type: "agent/historyHydrateLoaded"; thread: MemmyAgentWebuiThread; requestId: string }
-  | { type: "agent/historyHydrateFailed"; chatId: string; requestId: string }
+  | { type: "agent/historyHydrateFailed"; chatId: string; requestId: string; error?: AgentOperationError }
   | { type: "agent/newChatRequested" }
   | { type: "agent/blankDraftReopened" }
   | { type: "agent/newChatCreated"; chatId: string }
   | { type: "agent/transientSendFailed"; chatId: string }
-  | { type: "agent/userMessageQueued"; chatId: string; content: string; media?: AgentChatMediaAttachment[] }
+  | { type: "agent/userMessageQueued"; chatId: string; content: string; media?: AgentChatMediaAttachment[]; focus?: boolean; deliveryUncertain?: boolean; target?: WebuiSessionTarget }
   | { type: "agent/composerDraftUpdated"; scopeKey: string; value: string }
   | { type: "agent/composerPendingAttachmentsUpdated"; scopeKey: string; attachments: PendingAttachment[] }
-  | { type: "agent/composerMediaErrorUpdated"; scopeKey: string; message: string | null }
+  | { type: "agent/draftTargetUpdated"; scopeKey: string; target: WebuiSessionTarget }
+  | { type: "agent/messageSendLockUpdated"; scopeKey: string; clientRequestId: string | null }
+  | { type: "agent/tasksMarkedRead"; chatIds: string[] }
   | { type: "agent/composerScopeCleared"; scopeKey: string }
   | { type: "agent/stopRequested"; chatId: string }
   | { type: "agent/stopUnconfirmed"; chatId: string }
   | { type: "agent/restartRequested"; startedAt: number }
   | { type: "agent/restartRestored"; chatId: string; startedAt: number; sawDisconnect: boolean }
   | { type: "agent/restartFailed"; message: string }
+  | { type: "agent/recoveryChatLoading"; request: AgentRecoveryChatRequest }
+  | { type: "agent/recoveryChatSnapshotLoaded"; requestId: string; generation: number; chatId: string; chatSelectionEpoch: number; thread: MemmyAgentWebuiThread | null; runSnapshot: MemmyAgentRunStatusSnapshot | null; noticeId: string; completedAt: number; failureMessage?: string }
+  | { type: "agent/recoveryFinished"; generation: number }
   | { type: "agent/wsEvent"; event: MemmyAgentWsEvent };
 
 export const defaultAgentSidebarState: MemmyAgentSidebarState = {
@@ -190,6 +255,7 @@ export const defaultAgentSidebarState: MemmyAgentSidebarState = {
     show_previews: false,
     show_timestamps: false,
     show_archived: false,
+    show_project_archived: false,
     sort: "updated_desc"
   },
   updated_at: null
@@ -197,12 +263,28 @@ export const defaultAgentSidebarState: MemmyAgentSidebarState = {
 
 export const initialAgentState: AgentState = {
   connectionStatus: "idle",
+  connectionError: null,
+  operationErrorNotice: null,
+  operationErrorsBySurface: { chat: null, sidebar: null },
+  connectionGeneration: 0,
+  recoveringGeneration: null,
+  recoveringChatId: null,
+  recoveringChatSelectionEpoch: null,
+  recoveryKind: null,
+  lastRecoveredGeneration: 0,
+  chatSelectionEpoch: 0,
   modelName: null,
   chatViewVisible: false,
   currentChatId: null,
   currentSessionKey: null,
+  projectRegistryState: "ready",
+  projects: [],
   sessions: [],
   sidebarState: defaultAgentSidebarState,
+  sidebarStateVersion: 0,
+  currentSidebarMutationId: null,
+  currentTaskStateRequest: null,
+  currentRecoveryChatRequest: null,
   tasks: [],
   messages: [],
   messagesByChatId: {},
@@ -218,6 +300,7 @@ export const initialAgentState: AgentState = {
   activeTurnIdByChatId: {},
   closedTurnIdsByChatId: {},
   optimisticSendingByChatId: {},
+  deliveryUncertainByChatId: {},
   stopInFlightByChatId: {},
   suppressAssistantStreamUntilTurnEndByChatId: {},
   optimisticTasksByChatId: {},
@@ -227,7 +310,9 @@ export const initialAgentState: AgentState = {
   goalState: null,
   composerDraftsByScope: {},
   composerPendingAttachmentsByScope: {},
-  composerMediaErrorByScope: {},
+  draftTargetsByScope: {},
+  draftTargetRevisionByScope: {},
+  messageSendInFlightByScope: {},
   isLoadingSessions: false,
   isLoadingHistory: false,
   isSending: false,
@@ -236,55 +321,128 @@ export const initialAgentState: AgentState = {
   restartSawDisconnect: false,
   restartCompletedAt: null,
   restartError: null,
-  error: null,
   refreshRequested: false,
   newChatRequestId: 0,
   blankDraftActive: false
 };
 
+let agentWsOperationErrorCounter = 0;
+
 export function agentReducer(state: AgentState, action: AgentAction): AgentState {
   switch (action.type) {
     case "agent/bootstrapStarted":
-      return { ...state, connectionStatus: "bootstrapping", error: null };
+      return { ...state, connectionStatus: "bootstrapping", connectionError: null };
     case "agent/bootstrapSucceeded":
-      return { ...state, modelName: action.modelName, error: null };
+      return { ...state, modelName: action.modelName, connectionError: null };
     case "agent/connectionConnecting":
-      return { ...state, connectionStatus: "connecting", error: null };
-    case "agent/connectionClosed":
-      return { ...state, connectionStatus: "reconnecting" };
+      return { ...state, connectionStatus: "connecting", connectionError: null };
+    case "agent/connectionFailed":
+      return {
+        ...state,
+        connectionStatus: state.lastRecoveredGeneration > 0 ? "reconnecting" : "error",
+        connectionError: action.message
+      };
+    case "agent/connectionDisposed":
+      return {
+        ...state,
+        connectionStatus: "idle",
+        connectionError: null,
+        connectionGeneration: 0,
+        recoveringGeneration: null,
+        recoveringChatId: null,
+        recoveringChatSelectionEpoch: null,
+        recoveryKind: null,
+        lastRecoveredGeneration: 0,
+        currentTaskStateRequest: null,
+        currentRecoveryChatRequest: null,
+        currentSessionsRequestId: null,
+        currentSessionsRequestRunStatusVersionByChatId: null,
+        currentHistoryRequestIdByChatId: {},
+        currentHistoryHydrateRequestIdByChatId: {},
+        isLoadingSessions: false,
+        isLoadingHistory: false
+      };
     case "agent/chatViewVisibilityChanged":
       return updateChatViewVisibility(state, action.visible);
-    case "agent/error":
-      return { ...state, connectionStatus: "error", isLoadingSessions: false, isLoadingHistory: false, isSending: false, optimisticSendingByChatId: {}, stopInFlightByChatId: {}, error: action.message };
-    case "agent/errorDismissed":
-      return state.error === action.message ? { ...state, error: null } : state;
+    case "agent/operationFailed":
+      return setOperationError(state, action.surface, action.error);
+    case "agent/operationErrorDismissed":
+      if (state.operationErrorNotice?.id !== action.id) return state;
+      return {
+        ...state,
+        operationErrorNotice: null,
+        operationErrorsBySurface: {
+          chat: state.operationErrorsBySurface.chat?.id === action.id
+            ? null
+            : state.operationErrorsBySurface.chat,
+          sidebar: state.operationErrorsBySurface.sidebar?.id === action.id
+            ? null
+            : state.operationErrorsBySurface.sidebar
+        }
+      };
     case "agent/sessionsLoading":
       return {
         ...state,
         isLoadingSessions: true,
-        error: null,
         currentSessionsRequestRunStatusVersionByChatId: { ...state.runStatusVersionByChatId },
         ...(action.requestId ? { currentSessionsRequestId: action.requestId } : {})
       };
     case "agent/sessionsLoaded":
       return completeSessionsLoad(state, action.sessions, action.requestId);
+    case "agent/sessionSnapshotApplied":
+      return completeSessionSnapshotLoad(state, action.snapshot);
     case "agent/sessionsLoadFailed":
       return failSessionsLoad(state, action.requestId);
     case "agent/sidebarStateLoaded":
     case "agent/sidebarStateSaved":
-      return deriveTasks({ ...state, sidebarState: action.sidebarState, error: null });
+      return deriveTasks({ ...state, sidebarState: action.sidebarState });
+    case "agent/sidebarMutationStarted":
+      return deriveTasks({
+        ...state,
+        sidebarState: action.sidebarState,
+        sidebarStateVersion: state.sidebarStateVersion + 1,
+        currentSidebarMutationId: action.mutationId
+      });
+    case "agent/sidebarMutationConfirmed":
+      return state.currentSidebarMutationId === action.mutationId
+        ? deriveTasks({
+            ...state,
+            sidebarState: action.sidebarState,
+            sidebarStateVersion: state.sidebarStateVersion + 1,
+            currentSidebarMutationId: null
+          })
+        : state;
+    case "agent/sidebarMutationFailed":
+      return state.currentSidebarMutationId === action.mutationId
+        ? setOperationError(deriveTasks({
+            ...state,
+            sidebarState: action.sidebarState,
+            sidebarStateVersion: state.sidebarStateVersion + 1,
+            currentSidebarMutationId: null
+          }), "sidebar", action.error)
+        : state;
+    case "agent/taskStateLoading":
+      return {
+        ...state,
+        isLoadingSessions: true,
+        currentTaskStateRequest: action.request
+      };
+    case "agent/taskStateSettled":
+      return settleTaskState(state, action);
     case "agent/historyLoading":
       return beginHistoryLoad(state, action.sessionKey, action.chatId, action.requestId);
     case "agent/historyLoaded":
       return completeHistoryLoad(state, action.thread, action.requestId);
     case "agent/historyOpenMissing":
       return completeHistoryOpenMissing(state, action.sessionKey, action.chatId, action.requestId);
+    case "agent/historyOpenFailed":
+      return failHistoryOpen(state, action.chatId, action.requestId, action.error);
     case "agent/historyHydrateLoading":
       return beginHistoryHydrateLoad(state, action.chatId, action.requestId);
     case "agent/historyHydrateLoaded":
       return completeHistoryHydrateLoad(state, action.thread, action.requestId);
     case "agent/historyHydrateFailed":
-      return failHistoryHydrateLoad(state, action.chatId, action.requestId);
+      return failHistoryHydrateLoad(state, action.chatId, action.requestId, action.error);
     case "agent/newChatRequested":
       return enterBlankDraft(state, state.newChatRequestId + 1);
     case "agent/blankDraftReopened":
@@ -294,39 +452,32 @@ export function agentReducer(state: AgentState, action: AgentAction): AgentState
     case "agent/transientSendFailed":
       return clearTransientSend(state, action.chatId);
     case "agent/userMessageQueued":
-      {
-        const nextState = clearSuppressAssistantStreamUntilTurnEnd(
-          switchCurrentChat(state, action.chatId, chatIdToSessionKey(action.chatId)),
-          action.chatId
-        );
-        const now = Date.now();
-        const completedUnseenByChatId = clearChatMapValue(nextState.completedUnseenByChatId, action.chatId);
-        const retryWaitStatusByChatId = clearChatMapValue(nextState.retryWaitStatusByChatId, action.chatId);
-        return syncCurrentMessages(deriveTasks({
-          ...nextState,
-          optimisticSendingByChatId: { ...nextState.optimisticSendingByChatId, [action.chatId]: true },
-          optimisticTasksByChatId: maybeAddOptimisticTask(nextState, action.chatId, action.content, action.media, now),
-          completedUnseenByChatId,
-          retryWaitStatusByChatId,
-          isSending: true,
-          messages: [
-            ...nextState.messages,
-            {
-              id: nextMessageId(nextState.messages, "user"),
-              role: "user",
-              content: action.content,
-              createdAt: now,
-              ...(action.media?.length ? { media: action.media } : {})
-            }
-          ]
-        }));
-      }
+      return queueOptimisticUserMessage(state, action);
     case "agent/composerDraftUpdated":
       return updateComposerDraft(state, action.scopeKey, action.value);
     case "agent/composerPendingAttachmentsUpdated":
       return updateComposerPendingAttachments(state, action.scopeKey, action.attachments);
-    case "agent/composerMediaErrorUpdated":
-      return updateComposerMediaError(state, action.scopeKey, action.message);
+    case "agent/draftTargetUpdated":
+      return {
+        ...state,
+        draftTargetsByScope: { ...state.draftTargetsByScope, [action.scopeKey]: action.target },
+        draftTargetRevisionByScope: {
+          ...state.draftTargetRevisionByScope,
+          [action.scopeKey]: (state.draftTargetRevisionByScope[action.scopeKey] ?? 0) + 1
+        }
+      };
+    case "agent/messageSendLockUpdated":
+      return {
+        ...state,
+        messageSendInFlightByScope: action.clientRequestId
+          ? { ...state.messageSendInFlightByScope, [action.scopeKey]: action.clientRequestId }
+          : clearChatMapValue(state.messageSendInFlightByScope, action.scopeKey)
+      };
+    case "agent/tasksMarkedRead": {
+      const completedUnseenByChatId = { ...state.completedUnseenByChatId };
+      for (const chatId of action.chatIds) delete completedUnseenByChatId[chatId];
+      return deriveTasks({ ...state, completedUnseenByChatId });
+    }
     case "agent/composerScopeCleared":
       return clearComposerScope(state, action.scopeKey);
     case "agent/stopRequested":
@@ -358,11 +509,332 @@ export function agentReducer(state: AgentState, action: AgentAction): AgentState
         restartSawDisconnect: false,
         restartError: action.message
       };
+    case "agent/recoveryChatLoading":
+      return beginRecoveryChatLoad(state, action.request);
+    case "agent/recoveryChatSnapshotLoaded":
+      return completeRecoveryChatLoad(state, action);
+    case "agent/recoveryFinished":
+      return finishRecovery(state, action.generation);
     case "agent/wsEvent":
       return reduceWsEvent(state, action.event);
     default:
       return state;
   }
+}
+
+function setOperationError(
+  state: AgentState,
+  surface: AgentOperationSurface,
+  error: AgentOperationError | null
+): AgentState {
+  if (
+    error
+    && state.operationErrorNotice
+    && isBackgroundOperationError(error)
+    && !isBackgroundOperationError(state.operationErrorNotice)
+  ) {
+    return state;
+  }
+  return {
+    ...state,
+    operationErrorNotice: error,
+    operationErrorsBySurface: {
+      ...state.operationErrorsBySurface,
+      [surface]: error
+    }
+  };
+}
+
+function isBackgroundOperationError(error: AgentOperationError): boolean {
+  return error.source === "sessions" || error.source === "recovery";
+}
+
+function operationErrorFromEvent(event: MemmyAgentWsEvent, source: AgentOperationErrorSource): AgentOperationError {
+  const generation = event.connection_generation ?? 0;
+  const message = event.detail ?? "memmy-agent error";
+  const createdAt = Date.now();
+  agentWsOperationErrorCounter += 1;
+  return {
+    id: `${source}-${generation}-${createdAt}-${agentWsOperationErrorCounter}`,
+    source,
+    message,
+    ...(event.chat_id ? { chatId: event.chat_id } : {}),
+    createdAt
+  };
+}
+
+function queueOptimisticUserMessage(
+  state: AgentState,
+  action: Extract<AgentAction, { type: "agent/userMessageQueued" }>
+): AgentState {
+  const shouldFocus = action.focus !== false;
+  const selectedState = shouldFocus
+    ? switchCurrentChat(state, action.chatId, chatIdToSessionKey(action.chatId))
+    : state;
+  const nextState = clearSuppressAssistantStreamUntilTurnEnd(selectedState, action.chatId);
+  const now = Date.now();
+  const existingMessages = chatMessagesForId(nextState, action.chatId);
+  const message: AgentChatMessage = {
+    id: nextMessageId(existingMessages, "user"),
+    role: "user",
+    content: action.content,
+    createdAt: now,
+    ...(action.media?.length ? { media: action.media } : {})
+  };
+  const messages = [...existingMessages, message];
+  const messagesByChatId = { ...nextState.messagesByChatId, [action.chatId]: messages };
+  const completedUnseenByChatId = clearChatMapValue(nextState.completedUnseenByChatId, action.chatId);
+  const retryWaitStatusByChatId = clearChatMapValue(nextState.retryWaitStatusByChatId, action.chatId);
+  const deliveryUncertainByChatId = action.deliveryUncertain
+    ? { ...nextState.deliveryUncertainByChatId, [action.chatId]: true }
+    : clearChatMapValue(nextState.deliveryUncertainByChatId, action.chatId);
+  return deriveTasks({
+    ...nextState,
+    messagesByChatId,
+    optimisticSendingByChatId: { ...nextState.optimisticSendingByChatId, [action.chatId]: true },
+    optimisticTasksByChatId: maybeAddOptimisticTask(
+      nextState,
+      action.chatId,
+      action.content,
+      action.media,
+      action.target,
+      now
+    ),
+    completedUnseenByChatId,
+    retryWaitStatusByChatId,
+    deliveryUncertainByChatId,
+    ...(action.chatId === nextState.currentChatId && !nextState.blankDraftActive
+      ? { messages, isSending: true }
+      : {})
+  });
+}
+
+function settleTaskState(
+  state: AgentState,
+  action: Extract<AgentAction, { type: "agent/taskStateSettled" }>
+): AgentState {
+  const request = state.currentTaskStateRequest;
+  if (!request
+    || request.requestId !== action.requestId
+    || request.recoveryGeneration !== action.recoveryGeneration) {
+    return state;
+  }
+
+  let nextState: AgentState = {
+    ...state,
+    currentTaskStateRequest: null,
+    isLoadingSessions: false
+  };
+  if (action.sessions) {
+    nextState = completeSessionsLoad({
+      ...nextState,
+      currentSessionsRequestId: action.requestId,
+      currentSessionsRequestRunStatusVersionByChatId: request.runStatusVersionAtStartByChatId
+    }, action.sessions, action.requestId);
+  }
+  if (action.snapshot) {
+    nextState = completeSessionSnapshotLoad({
+      ...nextState,
+      currentSessionsRequestId: action.requestId,
+      currentSessionsRequestRunStatusVersionByChatId: request.runStatusVersionAtStartByChatId
+    }, action.snapshot, action.requestId);
+  }
+  if (action.sidebarState && request.sidebarStateVersionAtStart === nextState.sidebarStateVersion) {
+    nextState = deriveTasks({ ...nextState, sidebarState: action.sidebarState });
+  }
+  return action.error ? setOperationError(nextState, "sidebar", action.error) : nextState;
+}
+
+function failHistoryOpen(
+  state: AgentState,
+  chatId: string,
+  requestId: string,
+  error: AgentOperationError
+): AgentState {
+  if (state.currentChatId !== chatId || state.currentHistoryRequestIdByChatId[chatId] !== requestId) {
+    return state;
+  }
+  const currentHistoryRequestIdByChatId = { ...state.currentHistoryRequestIdByChatId };
+  delete currentHistoryRequestIdByChatId[chatId];
+  return setOperationError({
+    ...state,
+    currentHistoryRequestIdByChatId,
+    isLoadingHistory: false
+  }, "chat", error);
+}
+
+function beginRecoveryChatLoad(state: AgentState, request: AgentRecoveryChatRequest): AgentState {
+  if (request.generation !== state.recoveringGeneration
+    || request.chatId !== state.currentChatId
+    || request.chatSelectionEpoch !== state.chatSelectionEpoch) {
+    return state;
+  }
+  return { ...state, currentRecoveryChatRequest: request, isLoadingHistory: true };
+}
+
+function completeRecoveryChatLoad(
+  state: AgentState,
+  action: Extract<AgentAction, { type: "agent/recoveryChatSnapshotLoaded" }>
+): AgentState {
+  const request = state.currentRecoveryChatRequest;
+  if (!request
+    || action.generation !== state.recoveringGeneration
+    || request.requestId !== action.requestId
+    || request.generation !== action.generation
+    || request.chatId !== action.chatId
+    || request.chatSelectionEpoch !== action.chatSelectionEpoch
+    || state.currentChatId !== action.chatId
+    || state.chatSelectionEpoch !== action.chatSelectionEpoch) {
+    return state;
+  }
+
+  const runVersionChanged = (state.runStatusVersionByChatId[action.chatId] ?? 0) !== request.runStatusVersionAtStart;
+  const localMessages = chatMessagesForId(state, action.chatId);
+  const snapshotMessages = action.thread ? normalizeThreadMessages(action.thread.messages) : null;
+  const localUser = latestUserMessage(localMessages);
+  const canonicalUser = snapshotMessages ? latestUserMessage(snapshotMessages) : null;
+  const canonicalContainsPendingUser = localUser !== null
+    && canonicalUser !== null
+    && userPayloadEquivalent(canonicalUser, localUser);
+  const runningSnapshotCompletedBeforeHistory = action.runSnapshot?.status === "running"
+    && action.thread?.last_turn_closed === true
+    && canonicalContainsPendingUser
+    && !runVersionChanged;
+  let nextState: AgentState = { ...state, currentRecoveryChatRequest: null, isLoadingHistory: false };
+
+  if (snapshotMessages
+    && !runVersionChanged
+    && (action.runSnapshot?.status === "idle" || runningSnapshotCompletedBeforeHistory)) {
+    nextState = replaceChatMessages(nextState, action.chatId, snapshotMessages);
+    nextState = markChatIdle(nextState, action.chatId, { source: "session_hydrate" });
+    nextState = {
+      ...nextState,
+      deliveryUncertainByChatId: clearChatMapValue(nextState.deliveryUncertainByChatId, action.chatId)
+    };
+    if (state.deliveryUncertainByChatId[action.chatId] && !canonicalContainsPendingUser) {
+      nextState = setOperationError(nextState, "chat", recoveryNotice(
+        action.chatId,
+        "home.agent.messageNotRecorded",
+        action.noticeId,
+        action.completedAt
+      ));
+    } else if (
+      canonicalContainsPendingUser
+      && isChatBusy(state, action.chatId)
+      && action.thread?.last_turn_closed !== true
+    ) {
+      nextState = setOperationError(nextState, "chat", recoveryNotice(
+        action.chatId,
+        "home.agent.executionInterrupted",
+        action.noticeId,
+        action.completedAt
+      ));
+    }
+  } else if (snapshotMessages) {
+    const guardedThread = runVersionChanged || (
+      action.runSnapshot?.status === "running"
+      && action.thread?.last_turn_closed === true
+      && !canonicalContainsPendingUser
+    )
+      ? { ...action.thread!, last_turn_closed: false }
+      : action.thread!;
+    nextState = completeHistoryHydrateLoad({
+      ...nextState,
+      currentHistoryHydrateRequestIdByChatId: {
+        ...nextState.currentHistoryHydrateRequestIdByChatId,
+        [action.chatId]: action.requestId
+      }
+    }, guardedThread, action.requestId);
+    if (canonicalContainsPendingUser && action.runSnapshot) {
+      nextState = {
+        ...nextState,
+        deliveryUncertainByChatId: clearChatMapValue(nextState.deliveryUncertainByChatId, action.chatId)
+      };
+    }
+  }
+
+  if (action.runSnapshot?.status === "running" && !runVersionChanged && !runningSnapshotCompletedBeforeHistory) {
+    nextState = applyRecoveryRunningSnapshot(nextState, action.chatId, action.runSnapshot);
+  } else if (action.runSnapshot?.status === "idle" && !action.thread && !runVersionChanged) {
+    nextState = markChatIdle(nextState, action.chatId, { source: "session_hydrate" });
+  }
+
+  if (action.failureMessage) {
+    nextState = setOperationError(nextState, "chat", recoveryNotice(
+      action.chatId,
+      action.failureMessage,
+      action.noticeId,
+      action.completedAt
+    ));
+  }
+  return nextState;
+}
+
+function finishRecovery(state: AgentState, generation: number): AgentState {
+  if (state.recoveringGeneration !== generation) {
+    return state;
+  }
+  const clearTaskRequest = state.currentTaskStateRequest?.recoveryGeneration === generation;
+  const clearChatRequest = state.currentRecoveryChatRequest?.generation === generation;
+  const currentChatId = state.currentChatId;
+  const hasCurrentNormalHistoryRequest = Boolean(currentChatId && (
+    state.currentHistoryRequestIdByChatId[currentChatId]
+    || state.currentHistoryHydrateRequestIdByChatId[currentChatId]
+  ));
+  return {
+    ...state,
+    recoveringGeneration: null,
+    recoveringChatId: null,
+    recoveringChatSelectionEpoch: null,
+    recoveryKind: null,
+    lastRecoveredGeneration: generation,
+    ...(clearChatRequest ? { currentRecoveryChatRequest: null } : {}),
+    ...(clearTaskRequest ? { currentTaskStateRequest: null, isLoadingSessions: false } : {}),
+    ...(clearChatRequest && !hasCurrentNormalHistoryRequest ? { isLoadingHistory: false } : {})
+  };
+}
+
+function replaceChatMessages(state: AgentState, chatId: string, messages: AgentChatMessage[]): AgentState {
+  return {
+    ...state,
+    messagesByChatId: { ...state.messagesByChatId, [chatId]: messages },
+    ...(state.currentChatId === chatId && !state.blankDraftActive ? { messages } : {})
+  };
+}
+
+function applyRecoveryRunningSnapshot(
+  state: AgentState,
+  chatId: string,
+  snapshot: MemmyAgentRunStatusSnapshot
+): AgentState {
+  const runStartedAt = snapshot.startedAt ?? Date.now();
+  const runningState = markChatRunning(state, chatId, runStartedAt, snapshot.turnId);
+  return deriveTasks({
+    ...runningState,
+    activeTurnIdByChatId: { ...runningState.activeTurnIdByChatId, [chatId]: snapshot.turnId },
+    ...(runningState.currentChatId === chatId ? { isSending: true } : {})
+  });
+}
+
+function recoveryNotice(chatId: string, message: string, id: string, createdAt: number): AgentOperationError {
+  return {
+    id,
+    source: "recovery",
+    message,
+    chatId,
+    createdAt
+  };
+}
+
+function userPayloadEquivalent(left: AgentChatMessage, right: AgentChatMessage): boolean {
+  if (left.role !== "user" || right.role !== "user" || left.content.trim() !== right.content.trim()) {
+    return false;
+  }
+  const normalizeMedia = (media: AgentChatMediaAttachment[] | undefined) => (media ?? []).map((item) => ({
+    path: item.path ?? "",
+    url: item.url ?? ""
+  }));
+  return JSON.stringify(normalizeMedia(left.media)) === JSON.stringify(normalizeMedia(right.media));
 }
 
 function updateComposerDraft(state: AgentState, scopeKey: string, value: string): AgentState {
@@ -405,43 +877,33 @@ function updateComposerPendingAttachments(state: AgentState, scopeKey: string, a
   };
 }
 
-function updateComposerMediaError(state: AgentState, scopeKey: string, message: string | null): AgentState {
-  if (!message) {
-    if (!(scopeKey in state.composerMediaErrorByScope)) {
-      return state;
-    }
-    const composerMediaErrorByScope = { ...state.composerMediaErrorByScope };
-    delete composerMediaErrorByScope[scopeKey];
-    return { ...state, composerMediaErrorByScope };
-  }
-  if (state.composerMediaErrorByScope[scopeKey] === message) {
-    return state;
-  }
-  return {
-    ...state,
-    composerMediaErrorByScope: { ...state.composerMediaErrorByScope, [scopeKey]: message }
-  };
-}
-
 function clearComposerScope(state: AgentState, scopeKey: string): AgentState {
   const hasDraft = scopeKey in state.composerDraftsByScope;
   const hasPendingAttachments = scopeKey in state.composerPendingAttachmentsByScope;
-  const hasMediaError = scopeKey in state.composerMediaErrorByScope;
-  if (!hasDraft && !hasPendingAttachments && !hasMediaError) {
+  const hasTarget = scopeKey in state.draftTargetsByScope;
+  const hasTargetRevision = scopeKey in state.draftTargetRevisionByScope;
+  const hasSendLock = scopeKey in state.messageSendInFlightByScope;
+  if (!hasDraft && !hasPendingAttachments && !hasTarget && !hasTargetRevision && !hasSendLock) {
     return state;
   }
 
   const composerDraftsByScope = { ...state.composerDraftsByScope };
   const composerPendingAttachmentsByScope = { ...state.composerPendingAttachmentsByScope };
-  const composerMediaErrorByScope = { ...state.composerMediaErrorByScope };
+  const draftTargetsByScope = { ...state.draftTargetsByScope };
+  const draftTargetRevisionByScope = { ...state.draftTargetRevisionByScope };
+  const messageSendInFlightByScope = { ...state.messageSendInFlightByScope };
   delete composerDraftsByScope[scopeKey];
   delete composerPendingAttachmentsByScope[scopeKey];
-  delete composerMediaErrorByScope[scopeKey];
+  delete draftTargetsByScope[scopeKey];
+  delete draftTargetRevisionByScope[scopeKey];
+  delete messageSendInFlightByScope[scopeKey];
   return {
     ...state,
     composerDraftsByScope,
     composerPendingAttachmentsByScope,
-    composerMediaErrorByScope
+    draftTargetsByScope,
+    draftTargetRevisionByScope,
+    messageSendInFlightByScope
   };
 }
 
@@ -453,16 +915,25 @@ function enterBlankDraft(state: AgentState, newChatRequestId: number): AgentStat
     currentSessionKey: null,
     isSending: false,
     isLoadingHistory: false,
-    error: null,
     goalState: null,
     blankDraftActive: true,
+    chatSelectionEpoch: state.chatSelectionEpoch + 1,
     newChatRequestId
   };
 }
 
-export function buildAgentTasks(sessions: MemmyAgentSessionSummary[], sidebarState: MemmyAgentSidebarState): AgentTaskView[] {
+export function buildAgentTasks(
+  sessions: MemmyAgentSessionSummary[],
+  sidebarState: MemmyAgentSidebarState,
+  projects: MemmyAgentProject[] = [],
+  projectRegistryState: AgentState["projectRegistryState"] = "ready"
+): AgentTaskView[] {
+  const projectIds = new Set(projects.map((project) => project.id));
   const rows = sessions.map((session) => {
     const chatId = sessionKeyToChatId(session.key);
+    const missingProject = projectRegistryState === "ready"
+      && session.projectId !== null
+      && !projectIds.has(session.projectId);
     return buildTaskView(
       sidebarState,
       session.key,
@@ -471,7 +942,11 @@ export function buildAgentTasks(sessions: MemmyAgentSessionSummary[], sidebarSta
       session.preview ?? "",
       session.updatedAt ?? null,
       session.run_started_at ?? null,
-      false
+      false,
+      session.projectId,
+      session.cwd,
+      missingProject,
+      projectRegistryState === "ready" && !missingProject ? session.projectId : null
     );
   });
   rows.sort((left, right) => compareTasks(left, right, sidebarState.view.sort));
@@ -479,9 +954,13 @@ export function buildAgentTasks(sessions: MemmyAgentSessionSummary[], sidebarSta
 }
 
 function buildAgentTasksForState(state: AgentState): AgentTaskView[] {
+  const projectIds = new Set(state.projects.map((project) => project.id));
   const canonicalChatIds = new Set(state.sessions.map((session) => sessionKeyToChatId(session.key)));
   const rows = state.sessions.map((session) => {
     const chatId = sessionKeyToChatId(session.key);
+    const missingProject = state.projectRegistryState === "ready"
+      && session.projectId !== null
+      && !projectIds.has(session.projectId);
     return buildTaskView(
       state.sidebarState,
       session.key,
@@ -490,7 +969,11 @@ function buildAgentTasksForState(state: AgentState): AgentTaskView[] {
       session.preview ?? "",
       session.updatedAt ?? null,
       effectiveRunStartedAtForChat(state, chatId),
-      isTaskCompletedUnseen(state, chatId)
+      isTaskCompletedUnseen(state, chatId),
+      session.projectId,
+      session.cwd,
+      missingProject,
+      state.projectRegistryState === "ready" && !missingProject ? session.projectId : null
     );
   });
 
@@ -499,6 +982,13 @@ function buildAgentTasksForState(state: AgentState): AgentTaskView[] {
       continue;
     }
     const sessionKey = chatIdToSessionKey(chatId);
+    const projectId = task.target.kind === "project" ? task.target.projectId : null;
+    const project = projectId
+      ? state.projects.find((candidate) => candidate.id === projectId) ?? null
+      : null;
+    const missingProject = state.projectRegistryState === "ready"
+      && projectId !== null
+      && project === null;
     rows.push(buildTaskView(
       state.sidebarState,
       sessionKey,
@@ -507,7 +997,11 @@ function buildAgentTasksForState(state: AgentState): AgentTaskView[] {
       task.content,
       task.createdAt,
       effectiveRunStartedAtForChat(state, chatId),
-      isTaskCompletedUnseen(state, chatId)
+      isTaskCompletedUnseen(state, chatId),
+      projectId,
+      project?.rootPath ?? "",
+      missingProject,
+      state.projectRegistryState === "ready" && !missingProject ? projectId : null
     ));
   }
 
@@ -523,7 +1017,11 @@ function buildTaskView(
   preview: string,
   updatedAt: string | null,
   runStartedAt: number | null,
-  completedUnseen: boolean
+  completedUnseen: boolean,
+  projectId: string | null,
+  cwd: string,
+  missingProject: boolean,
+  groupProjectId: string | null
 ): AgentTaskView {
   const titleOverride = sidebarState.title_overrides[sessionKey];
   return {
@@ -536,7 +1034,11 @@ function buildTaskView(
     completedUnseen,
     pinned: sidebarState.pinned_keys.includes(sessionKey),
     archived: sidebarState.archived_keys.includes(sessionKey),
-    tags: sidebarState.tags_by_key[sessionKey] ?? []
+    tags: sidebarState.tags_by_key[sessionKey] ?? [],
+    projectId,
+    groupProjectId,
+    cwd,
+    missingProject
   };
 }
 
@@ -551,6 +1053,7 @@ export function updateSidebarStateForTask(
     collapsed?: boolean;
     sort?: MemmyAgentSidebarState["view"]["sort"];
     showArchived?: boolean;
+    showProjectArchived?: boolean;
   }
 ): MemmyAgentSidebarState {
   return {
@@ -563,13 +1066,46 @@ export function updateSidebarStateForTask(
     view: {
       ...state.view,
       ...(patch.sort ? { sort: patch.sort } : {}),
-      ...(patch.showArchived == null ? {} : { show_archived: patch.showArchived })
+      ...(patch.showArchived == null ? {} : { show_archived: patch.showArchived }),
+      ...(patch.showProjectArchived == null ? {} : { show_project_archived: patch.showProjectArchived })
     }
   };
 }
 
 function deriveTasks(state: AgentState): AgentState {
   return { ...state, tasks: buildAgentTasksForState(state) };
+}
+
+function completeSessionSnapshotLoad(
+  state: AgentState,
+  snapshot: MemmyAgentSessionSnapshot,
+  requestId?: string
+): AgentState {
+  const activeProjectIds = new Set(snapshot.projects.map((project) => project.id));
+  const draftTargetsByScope = { ...state.draftTargetsByScope };
+  const draftTargetRevisionByScope = { ...state.draftTargetRevisionByScope };
+  if (snapshot.projectRegistryState === "ready") {
+    for (const [scopeKey, target] of Object.entries(draftTargetsByScope)) {
+      if (target.kind !== "project" || activeProjectIds.has(target.projectId)) continue;
+      draftTargetsByScope[scopeKey] = { kind: "standalone" };
+      draftTargetRevisionByScope[scopeKey] = (draftTargetRevisionByScope[scopeKey] ?? 0) + 1;
+    }
+  }
+  const loaded = completeSessionsLoad({
+    ...state,
+    projectRegistryState: snapshot.projectRegistryState,
+    projects: snapshot.projects,
+    draftTargetsByScope,
+    draftTargetRevisionByScope
+  }, snapshot.sessions, requestId);
+  if (
+    loaded.currentSessionKey
+    && !snapshot.sessions.some((session) => session.key === loaded.currentSessionKey)
+    && !(loaded.currentChatId && loaded.optimisticTasksByChatId[loaded.currentChatId])
+  ) {
+    return enterBlankDraft(loaded, loaded.newChatRequestId + 1);
+  }
+  return loaded;
 }
 
 function completeSessionsLoad(state: AgentState, sessions: MemmyAgentSessionSummary[], requestId: string | undefined): AgentState {
@@ -608,8 +1144,7 @@ function completeSessionsLoad(state: AgentState, sessions: MemmyAgentSessionSumm
     suppressAssistantStreamUntilTurnEndByChatId: pruneBooleanMap(state.suppressAssistantStreamUntilTurnEndByChatId, knownChatIds),
     currentSessionsRequestId: null,
     isLoadingSessions: false,
-    refreshRequested: false,
-    error: null
+    refreshRequested: false
   };
 
   return deriveTasks({
@@ -641,7 +1176,6 @@ function beginHistoryLoad(state: AgentState, sessionKey: string, chatId: string,
     ...nextState,
     blankDraftActive: false,
     isLoadingHistory: true,
-    error: null,
     pendingCanonicalHydrateByChatId: { ...nextState.pendingCanonicalHydrateByChatId, [chatId]: true },
     currentHistoryRequestIdByChatId: { ...nextState.currentHistoryRequestIdByChatId, [chatId]: requestId },
     currentHistoryHydrateRequestIdByChatId
@@ -686,8 +1220,7 @@ function completeHistoryLoad(state: AgentState, thread: MemmyAgentWebuiThread, r
     blankDraftActive: false,
     isSending: isChatBusy(state, chatId) || hasLiveStreamingMessage(messages),
     isLoadingHistory: false,
-    refreshRequested: false,
-    error: null
+    refreshRequested: false
   }), chatId, messages, historyTurnClosed);
   return thread.last_turn_closed ? markChatIdle(nextState, chatId, { source: "session_hydrate" }) : nextState;
 }
@@ -752,7 +1285,6 @@ function completeHistoryHydrateLoad(state: AgentState, thread: MemmyAgentWebuiTh
     historyVersionByChatId,
     pendingCanonicalHydrateByChatId,
     currentHistoryHydrateRequestIdByChatId,
-    error: null,
     ...(chatId === state.currentChatId && !state.blankDraftActive
       ? { messages, isSending: isChatBusy(state, chatId) || hasLiveStreamingMessage(messages) }
       : {})
@@ -762,7 +1294,12 @@ function completeHistoryHydrateLoad(state: AgentState, thread: MemmyAgentWebuiTh
   return hydrateTurnClosed ? markChatIdle(hydrated, chatId, { source: "session_hydrate" }) : hydrated;
 }
 
-function failHistoryHydrateLoad(state: AgentState, chatId: string, requestId: string): AgentState {
+function failHistoryHydrateLoad(
+  state: AgentState,
+  chatId: string,
+  requestId: string,
+  error?: AgentOperationError
+): AgentState {
   if (state.currentHistoryHydrateRequestIdByChatId[chatId] !== requestId) {
     return state;
   }
@@ -770,11 +1307,12 @@ function failHistoryHydrateLoad(state: AgentState, chatId: string, requestId: st
   const currentHistoryHydrateRequestIdByChatId = { ...state.currentHistoryHydrateRequestIdByChatId };
   delete pendingCanonicalHydrateByChatId[chatId];
   delete currentHistoryHydrateRequestIdByChatId[chatId];
-  return deriveTasks({
+  const nextState = deriveTasks({
     ...state,
     pendingCanonicalHydrateByChatId,
     currentHistoryHydrateRequestIdByChatId
   });
+  return error ? setOperationError(nextState, "chat", error) : nextState;
 }
 
 function cacheCurrentMessages(state: AgentState): AgentState {
@@ -802,6 +1340,7 @@ function switchCurrentChat(state: AgentState, chatId: string, sessionKey = chatI
     return deriveTasks({
       ...cachedState,
       completedUnseenByChatId,
+      chatSelectionEpoch: cachedState.blankDraftActive ? cachedState.chatSelectionEpoch + 1 : cachedState.chatSelectionEpoch,
       blankDraftActive: false,
       goalState: cachedState.goalStatesByChatId[chatId] ?? cachedState.goalState,
       isSending: isChatBusy(cachedState, chatId)
@@ -810,6 +1349,7 @@ function switchCurrentChat(state: AgentState, chatId: string, sessionKey = chatI
   return deriveTasks({
     ...cachedState,
     completedUnseenByChatId,
+    chatSelectionEpoch: cachedState.chatSelectionEpoch + 1,
     currentChatId: chatId,
     currentSessionKey: sessionKey,
     messages: cachedState.messagesByChatId[chatId] ?? [],
@@ -905,6 +1445,7 @@ function maybeAddOptimisticTask(
   chatId: string,
   content: string,
   media: AgentChatMediaAttachment[] | undefined,
+  target: WebuiSessionTarget | undefined,
   now: number
 ): Record<string, OptimisticAgentTask> {
   if (hasCanonicalSession(state, chatId)) {
@@ -914,7 +1455,8 @@ function maybeAddOptimisticTask(
     ...state.optimisticTasksByChatId,
     [chatId]: {
       content: optimisticTaskText(content, media),
-      createdAt: new Date(now).toISOString()
+      createdAt: new Date(now).toISOString(),
+      target: target ?? { kind: "standalone" }
     }
   };
 }
@@ -1210,11 +1752,10 @@ function messagesEquivalent(left: AgentChatMessage, right: AgentChatMessage | un
 }
 
 function handleAttached(state: AgentState, chatId: string | null): AgentState {
-  const connected = { ...state, connectionStatus: "connected" as const, error: null };
   if (!chatId || state.currentChatId || state.blankDraftActive) {
-    return connected;
+    return state;
   }
-  return switchCurrentChat(connected, chatId);
+  return switchCurrentChat(state, chatId);
 }
 
 function markSessionUpdated(state: AgentState, chatId: string | null | undefined, scope: unknown): AgentState {
@@ -1333,34 +1874,115 @@ function markClosedTurn(
 }
 
 function reduceWsEvent(state: AgentState, event: MemmyAgentWsEvent): AgentState {
+  const generation = event.connection_generation;
+  const lifecycleEvent = event.event === "ready"
+    || event.event === "connection_closed"
+    || event.event === "connection_attempt_failed";
+  if (generation !== undefined) {
+    if (lifecycleEvent ? generation < state.connectionGeneration : generation !== state.connectionGeneration) {
+      return state;
+    }
+  }
+
   if (isChatContentEvent(event.event)) {
     return reduceChatContentEvent(state, event);
   }
 
   switch (event.event) {
-    case "ready":
-      return completeRestartAfterReconnect(
-        state.currentChatId || state.blankDraftActive
-          ? { ...state, connectionStatus: "connected", error: null }
-          : withCurrentChat({ ...state, connectionStatus: "connected", error: null }, event.chat_id ?? null)
-      );
+    case "ready": {
+      const readyGeneration = generation ?? Math.max(1, state.connectionGeneration);
+      const base = state.currentChatId || state.blankDraftActive
+        ? state
+        : withCurrentChat(state, event.chat_id ?? null);
+      if (readyGeneration <= state.lastRecoveredGeneration || state.recoveringGeneration === readyGeneration) {
+        return completeRestartAfterReconnect({
+          ...base,
+          connectionStatus: "connected",
+          connectionError: null,
+          connectionGeneration: readyGeneration
+        });
+      }
+      const pendingCanonicalHydrateByChatId = { ...base.pendingCanonicalHydrateByChatId };
+      for (const chatId of Object.keys(base.currentHistoryRequestIdByChatId)) {
+        pendingCanonicalHydrateByChatId[chatId] = true;
+      }
+      for (const chatId of Object.keys(base.currentHistoryHydrateRequestIdByChatId)) {
+        pendingCanonicalHydrateByChatId[chatId] = true;
+      }
+      return completeRestartAfterReconnect({
+        ...base,
+        connectionStatus: "connected",
+        connectionError: null,
+        connectionGeneration: readyGeneration,
+        recoveringGeneration: readyGeneration,
+        recoveringChatId: base.currentChatId,
+        recoveringChatSelectionEpoch: base.currentChatId ? base.chatSelectionEpoch : null,
+        recoveryKind: state.connectionStatus === "reconnecting" ? "reconnect" : "initial",
+        pendingCanonicalHydrateByChatId,
+        currentHistoryRequestIdByChatId: {},
+        currentHistoryHydrateRequestIdByChatId: {},
+        isLoadingHistory: false,
+        currentRecoveryChatRequest: null
+      });
+    }
     case "attached":
-      return completeRestartAfterReconnect(handleAttached(state, event.chat_id ?? null));
+      return handleAttached(state, event.chat_id ?? null);
     case "error":
       if (event.detail === "image_rejected" || event.detail === "attachment_rejected") {
         return handleMediaRejected(state, event);
       }
-      return { ...state, connectionStatus: "error", isSending: false, optimisticSendingByChatId: {}, error: event.detail ?? "memmy-agent error" };
+      if (event.detail === "missing content") {
+        return handleMissingContent(state, event);
+      }
+      if (event.detail === "stop_failed") {
+        return handleStopFailed(state, event);
+      }
+      return setOperationError(state, "chat", operationErrorFromEvent(event, "gateway-command"));
     case "transport_error":
       if (event.detail === "message_too_big") {
         return handleTransportMessageTooBig(state, event);
       }
-      return state;
-    case "connection_closed":
-      // A dead socket can never deliver stop_result/turn_end — clear pending
-      // stop locks so the composer is not left permanently unsendable.
-      return markRestartSawDisconnect({ ...state, connectionStatus: "reconnecting", isSending: false, stopInFlightByChatId: {} });
+      return { ...state, connectionError: event.detail ?? "websocket_error" };
+    case "connection_attempt_failed":
+      return {
+        ...state,
+        connectionGeneration: generation ?? state.connectionGeneration,
+        connectionStatus: "reconnecting",
+        connectionError: event.detail ?? "Agent gateway reconnect failed"
+      };
+    case "connection_closed": {
+      const deliveryUncertainByChatId = { ...state.deliveryUncertainByChatId };
+      for (const chatId of Object.keys(state.optimisticSendingByChatId)) {
+        if (state.optimisticSendingByChatId[chatId]) {
+          deliveryUncertainByChatId[chatId] = true;
+        }
+      }
+      const clearRecoveryTaskRequest = state.currentTaskStateRequest?.recoveryGeneration === generation;
+      const currentChatId = state.currentChatId;
+      const hasCurrentNormalHistoryRequest = Boolean(currentChatId && (
+        state.currentHistoryRequestIdByChatId[currentChatId]
+        || state.currentHistoryHydrateRequestIdByChatId[currentChatId]
+      ));
+      return markRestartSawDisconnect({
+        ...state,
+        connectionGeneration: generation ?? state.connectionGeneration,
+        connectionStatus: "reconnecting",
+        connectionError: null,
+        recoveringGeneration: null,
+        recoveringChatId: null,
+        recoveringChatSelectionEpoch: null,
+        recoveryKind: null,
+        currentRecoveryChatRequest: null,
+        ...(clearRecoveryTaskRequest ? { currentTaskStateRequest: null, isLoadingSessions: false } : {}),
+        ...(!hasCurrentNormalHistoryRequest ? { isLoadingHistory: false } : {}),
+        deliveryUncertainByChatId,
+        stopInFlightByChatId: {}
+      });
+    }
     case "run_status_snapshot":
+      if (generation !== undefined && state.recoveringGeneration === generation && state.recoveringChatId === event.chat_id) {
+        return state;
+      }
       return reconcileRunStatusSnapshot(state, event);
     case "goal_status":
       return updateGoalStatus(state, event);
@@ -1539,53 +2161,84 @@ function clearTransientSend(state: AgentState, chatId: string): AgentState {
 function handleTransportMessageTooBig(state: AgentState, event: MemmyAgentWsEvent): AgentState {
   const chatId = event.chat_id ?? state.currentChatId;
   if (!chatId) {
-    return {
-      ...state,
-      isSending: false,
-      optimisticSendingByChatId: {},
-      error: "home.media.error.messageTooBig"
-    };
+    return setOperationError(state, "chat", operationErrorForChat("home.media.error.messageTooBig", undefined, "send"));
   }
-  const optimisticSendingByChatId = clearChatMapValue(state.optimisticSendingByChatId, chatId);
-  const optimisticTasksByChatId = hasCanonicalSession(state, chatId)
-    ? state.optimisticTasksByChatId
-    : clearChatMapValue(state.optimisticTasksByChatId, chatId);
-  return deriveTasks({
-    ...state,
-    optimisticSendingByChatId,
-    optimisticTasksByChatId,
-    error: "home.media.error.messageTooBig",
-    ...(chatId === state.currentChatId
-      ? { isSending: isChatBusy({ ...state, optimisticSendingByChatId }, chatId) }
-      : {})
-  });
+  const nextState = clearRejectedOptimisticSend(state, chatId);
+  return setOperationError(nextState, "chat", operationErrorForChat("home.media.error.messageTooBig", chatId, "send"));
 }
 
 function handleMediaRejected(state: AgentState, event: MemmyAgentWsEvent): AgentState {
   const chatId = event.chat_id ?? state.currentChatId;
   if (!chatId) {
-    return {
-      ...state,
-      isSending: false,
-      optimisticSendingByChatId: {},
-      error: mediaRejectedMessageKey(event.reason)
-    };
+    return setOperationError(state, "chat", operationErrorForChat(mediaRejectedMessageKey(event.reason), undefined, "send"));
   }
 
+  return setOperationError(
+    clearRejectedOptimisticSend(state, chatId),
+    "chat",
+    operationErrorForChat(mediaRejectedMessageKey(event.reason), chatId, "send")
+  );
+}
+
+function handleMissingContent(state: AgentState, event: MemmyAgentWsEvent): AgentState {
+  const chatId = event.chat_id;
+  const nextState = chatId ? clearRejectedOptimisticSend(state, chatId) : state;
+  return setOperationError(nextState, "chat", operationErrorFromEvent(event, "send"));
+}
+
+function handleStopFailed(state: AgentState, event: MemmyAgentWsEvent): AgentState {
+  const chatId = event.chat_id;
+  const nextState = chatId
+    ? { ...state, stopInFlightByChatId: clearChatMapValue(state.stopInFlightByChatId, chatId) }
+    : state;
+  return setOperationError(nextState, "chat", operationErrorFromEvent(event, "gateway-command"));
+}
+
+function clearRejectedOptimisticSend(state: AgentState, chatId: string): AgentState {
+  if (!state.optimisticSendingByChatId[chatId]) {
+    return state;
+  }
   const optimisticSendingByChatId = clearChatMapValue(state.optimisticSendingByChatId, chatId);
   const optimisticTasksByChatId = hasCanonicalSession(state, chatId)
     ? state.optimisticTasksByChatId
     : clearChatMapValue(state.optimisticTasksByChatId, chatId);
-  const nextState = {
+  const messages = removeLatestOptimisticUser(chatMessagesForId(state, chatId));
+  return deriveTasks({
     ...state,
     optimisticSendingByChatId,
     optimisticTasksByChatId,
-    error: mediaRejectedMessageKey(event.reason),
+    messagesByChatId: { ...state.messagesByChatId, [chatId]: messages },
     ...(chatId === state.currentChatId
-      ? { isSending: isChatBusy({ ...state, optimisticSendingByChatId }, chatId) }
+      ? { messages, isSending: isChatBusy({ ...state, optimisticSendingByChatId }, chatId) }
       : {})
+  });
+}
+
+function operationErrorForChat(
+  message: string,
+  chatId: string | undefined,
+  source: AgentOperationErrorSource
+): AgentOperationError {
+  const createdAt = Date.now();
+  agentWsOperationErrorCounter += 1;
+  return {
+    id: `${source}-${chatId ?? "global"}-${createdAt}-${agentWsOperationErrorCounter}`,
+    source,
+    message,
+    ...(chatId ? { chatId } : {}),
+    createdAt
   };
-  return deriveTasks(nextState);
+}
+
+function removeLatestOptimisticUser(messages: AgentChatMessage[]): AgentChatMessage[] {
+  const next = [...messages];
+  for (let index = next.length - 1; index >= 0; index -= 1) {
+    if (next[index]?.role === "user") {
+      next.splice(index, 1);
+      break;
+    }
+  }
+  return next;
 }
 
 function markRestartSawDisconnect(state: AgentState): AgentState {
@@ -2543,10 +3196,14 @@ function markChatIdle(state: AgentState, chatId: string, options: { source: Mark
       : null;
   const closedState = closedReason ? markClosedTurn(retryFinishedState, chatId, options.turnId ?? null, closedReason) : retryFinishedState;
   const suppressionClearedState = clearSuppressAssistantStreamUntilTurnEnd(closedState, chatId);
+  const activeTurnIdByChatId = options.source === "session_hydrate"
+    ? { ...suppressionClearedState.activeTurnIdByChatId, [chatId]: null }
+    : suppressionClearedState.activeTurnIdByChatId;
   const nextState = deriveTasks({
     ...suppressionClearedState,
     runStartedAtByChatId: { ...suppressionClearedState.runStartedAtByChatId, [chatId]: null },
     runStatusVersionByChatId: bumpRunStatusVersion(suppressionClearedState, chatId),
+    activeTurnIdByChatId,
     optimisticSendingByChatId,
     stopInFlightByChatId,
     completedUnseenByChatId,

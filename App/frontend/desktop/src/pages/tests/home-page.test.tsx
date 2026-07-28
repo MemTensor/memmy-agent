@@ -1,6 +1,7 @@
 /** Home page tests. */
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { Window } from "happy-dom";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { MemmyAgentRequestError } from "../../api/memmy-agent-client.js";
@@ -15,6 +16,7 @@ import {
   ComposerMediaPreviewStrip,
   ComposerSubmitButton,
   HomePage,
+  AgentOperationErrorSlot,
   agentErrorText,
   agentStatusText,
   agentChatScopeKey,
@@ -41,6 +43,7 @@ import {
 
 const homePageSourcePath = fileURLToPath(new URL("../home-page.tsx", import.meta.url));
 const agentRuntimeBridgeSourcePath = fileURLToPath(new URL("../../app/agent-runtime-bridge.tsx", import.meta.url));
+const stylesSourcePath = fileURLToPath(new URL("../../styles.css", import.meta.url));
 
 function readAgentRuntimeBridgeSource(): string {
   return readFileSync(agentRuntimeBridgeSourcePath, "utf8").replace(/\r\n/g, "\n");
@@ -70,7 +73,8 @@ describe("HomePage", () => {
     expect(html).toContain("发送");
     expect(html).toContain("Agent 正在连接");
     expect(html).not.toContain('aria-haspopup="menu"');
-    expect(html).not.toContain('aria-expanded=');
+    expect(html).toContain('class="home-project-picker__trigger"');
+    expect(html).toContain('aria-expanded="false"');
     expect(html).toContain(`accept="${AGENT_MEDIA_ACCEPT}"`);
     expect(html).toContain("hidden");
     expect(html).toContain('class="hidden"');
@@ -166,15 +170,35 @@ describe("HomePage", () => {
     expect(source).not.toContain('className="absolute left-1/2 bottom-full mb-3 z-30 -translate-x-1/2"');
   });
 
-  it("auto-dismisses the visible agent error after five seconds", () => {
+  it("keeps all temporary operation error auto-dismiss centralized in the runtime bridge", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
+    const bridgeSource = readAgentRuntimeBridgeSource();
 
-    expect(source).toContain("AGENT_ERROR_AUTO_DISMISS_MS = 5000");
-    expect(source).toContain("COMPOSER_ERROR_AUTO_DISMISS_MS = 5000");
-    expect(source).toContain("window.setTimeout");
-    expect(source).toContain("agentActions.errorDismissed(currentError)");
-    expect(source).toContain("agentActions.composerMediaErrorUpdated(chatScopeKey, null)");
-    expect(source).toContain("window.clearTimeout");
+    expect(source).not.toContain("COMPOSER_ERROR_AUTO_DISMISS_MS");
+    expect(source).not.toContain("composerMediaErrorUpdated");
+    expect(source).toContain('agentActions.operationFailed("chat", createAgentOperationError({');
+    expect(source).toContain('source: "send"');
+    expect(bridgeSource).toContain("AGENT_OPERATION_ERROR_DISMISS_MS = 5_000");
+    expect(bridgeSource).toContain('agentActions.operationErrorDismissed("chat", error.id)');
+    expect(bridgeSource).toContain("state.agent.operationErrorNotice");
+  });
+
+  it("renders operation errors in a neutral rounded toast", () => {
+    const html = renderToString(<AgentOperationErrorSlot message="项目操作未完成，请重试" />);
+    const styles = readFileSync(stylesSourcePath, "utf8");
+    const toastStyles = styles.slice(
+      styles.indexOf(".agent-operation-error-toast {"),
+      styles.indexOf("@keyframes agent-operation-error-toast-lifecycle")
+    );
+
+    expect(html).toContain('class="agent-operation-error-toast"');
+    expect(html).toContain('role="alert"');
+    expect(html).toContain("项目操作未完成，请重试");
+    expect(toastStyles).toContain("border-radius: var(--radius-card);");
+    expect(toastStyles).toContain("background: color-mix(in srgb, var(--color-background-paper) 96%, var(--color-canvas-oat));");
+    expect(toastStyles).toContain("box-shadow: 0 8px 24px rgb(17 29 28 / 0.1);");
+    expect(toastStyles).toContain("color: var(--color-text-ink);");
+    expect(toastStyles).not.toContain("var(--color-status-error)");
   });
 
   it("keeps composer state in the agent reducer instead of HomePage local state", () => {
@@ -182,13 +206,12 @@ describe("HomePage", () => {
 
     expect(source).toContain("state.agent.composerDraftsByScope");
     expect(source).toContain("state.agent.composerPendingAttachmentsByScope");
-    expect(source).toContain("state.agent.composerMediaErrorByScope");
     expect(source).toContain("agentActions.composerDraftUpdated(scopeKey, nextValue)");
     expect(source).toContain("const sendScopeKey = chatScopeKey;");
     expect(source).toContain("clearComposer: () => clearComposerAfterSend(sendScopeKey)");
     expect(source).not.toContain("useState<Record<string, string>>({})");
     expect(source).not.toContain("useState<Record<string, PendingAttachment[]>>({})");
-    expect(source).not.toContain("useState<Record<string, string | null>>({})");
+    expect(source).not.toContain("composerMediaErrorByScope");
   });
 
   it("does not revoke all pending attachments when HomePage unmounts", () => {
@@ -203,6 +226,17 @@ describe("HomePage", () => {
 
     expect(source).toContain("const lastNewChatRequestRef = useRef(state.agent.newChatRequestId);");
     expect(source).not.toContain("const lastNewChatRequestRef = useRef(0);");
+  });
+
+  it("preserves the project target selected for a newly opened draft", () => {
+    const source = readFileSync(homePageSourcePath, "utf8");
+    const resetNewChatLocalUi = source.slice(
+      source.indexOf("function resetNewChatLocalUi()"),
+      source.indexOf("/**\n   * Records the most recently used slash command.")
+    );
+
+    expect(resetNewChatLocalUi).toContain("resetTransientConversationUi();");
+    expect(resetNewChatLocalUi).not.toContain("resetComposerDraftUi();");
   });
 
   it("consumes launch chat query params when reading focused agent chat ids", () => {
@@ -324,6 +358,26 @@ describe("HomePage", () => {
     expect(source).toContain("COMPOSER_SINGLE_LINE_HEIGHT_PX = 52");
   });
 
+  it("keeps the single-line composer text and caret vertically centered", () => {
+    const window = new Window();
+    const style = window.document.createElement("style");
+    style.textContent = readFileSync(stylesSourcePath, "utf8").replace(/^@import[^;]+;$/gm, "");
+    window.document.head.append(style);
+
+    const shell = window.document.createElement("div");
+    shell.className = "agent-composer-shell";
+    const textarea = window.document.createElement("textarea");
+    textarea.className = "agent-composer-input--single py-3 text-sm";
+    shell.append(textarea);
+    window.document.body.append(shell);
+
+    const computed = window.getComputedStyle(textarea);
+    expect(computed.height).toBe("52px");
+    expect(computed.lineHeight).toBe("24px");
+    expect(computed.paddingTop).toBe("14px");
+    expect(computed.paddingBottom).toBe("14px");
+  });
+
   it("applies the composer single-line treatment only while the textarea is one line", () => {
     vi.stubGlobal("window", {
       getComputedStyle: () => ({
@@ -401,7 +455,7 @@ describe("HomePage", () => {
   it("consumes the shared AgentRuntimeBridge connection instead of owning websocket lifecycle", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
 
-    expect(source).toContain("const { connection, ensureChatSubscription } = useAgentRuntimeBridge();");
+    expect(source).toContain("const { connection, ensureChatSubscription, taskStateCoordinator } = useAgentRuntimeBridge();");
     expect(source).toContain("connection.onStatusResult((chatId, content) => {");
     expect(source).toContain("subscribedChatId: state.agent.currentChatId");
     expect(source).not.toContain("connectWebSocket(");
@@ -478,13 +532,13 @@ describe("HomePage", () => {
 
   it("metadata-only task refresh reads sessions and sidebar state without hydrating messages", () => {
     const source = readAgentRuntimeBridgeSource();
-    const refreshEffect = source.slice(source.indexOf("useEffect(() => {\n    if (!clients?.memmyAgent || !state.agent.refreshRequested || !enabled)"), source.indexOf("  }, [\n    clients?.memmyAgent,\n    dispatch,\n    enabled"));
+    const refreshEffect = source.slice(source.indexOf("state.agent.refreshRequested || !enabled || state.agent.recoveringGeneration !== null"), source.indexOf("  }, [\n    clients?.memmyAgent,\n    dispatch,\n    enabled"));
     const refreshTaskList = source.slice(source.indexOf("export function refreshAgentTaskList"), source.indexOf("function isAgentConnectionEvent"));
 
     expect(refreshEffect).toContain("Object.entries(state.agent.pendingCanonicalHydrateByChatId)");
     expect(refreshEffect).toContain("hydrateAgentThreadInBackground(clients.memmyAgent, dispatch, chatId);");
-    expect(refreshEffect).toContain("void refreshAgentTaskList(clients.memmyAgent, dispatch);");
-    expect(refreshTaskList).toContain("client.listSessions()");
+    expect(refreshEffect).toContain("taskStateCoordinator?.refreshTaskState();");
+    expect(refreshTaskList).toContain("client.getSessionSnapshot({ timeoutMs: 10_000 })");
     expect(refreshTaskList).toContain("client.readSidebarState()");
     expect(refreshTaskList).not.toContain("readWebuiThread");
   });
@@ -598,7 +652,7 @@ describe("HomePage", () => {
     expect(track).not.toHaveBeenCalled();
   });
 
-  it("subscribes before resetting the current session with slash new", () => {
+  it("validates and sends slash new before clearing the composer", () => {
     const sendMessage = vi.fn();
     const ensureChatSubscription = vi.fn();
     const clearInput = vi.fn();
@@ -608,7 +662,8 @@ describe("HomePage", () => {
 
     expect(requestNewSessionReset({
       chatId: "chat-1",
-      connection: { sendMessage },
+      connection: { getReadyGeneration: () => 1, sendMessage },
+      canSubmitOrdinaryMessage: true,
       ensureChatSubscription,
       clearInput,
       clearPendingMedia,
@@ -620,8 +675,8 @@ describe("HomePage", () => {
     expect(clearPendingMedia).toHaveBeenCalledTimes(1);
     expect(dismissSlashMenu).toHaveBeenCalledTimes(1);
     expect(ensureChatSubscription).toHaveBeenCalledWith("chat-1");
-    expect(sendMessage).toHaveBeenCalledWith({ chatId: "chat-1", content: "/new" });
-    expect(mockCallOrder(ensureChatSubscription)).toBeLessThan(mockCallOrder(sendMessage));
+    expect(sendMessage).toHaveBeenCalledWith({ chatId: "chat-1", content: "/new" }, 1);
+    expect(mockCallOrder(sendMessage)).toBeLessThan(mockCallOrder(ensureChatSubscription));
     expect(focusInput).toHaveBeenCalledTimes(1);
   });
 
@@ -748,13 +803,14 @@ describe("HomePage", () => {
     expect(agentErrorText("home.media.error.sendUnsupported")).toBe("当前不支持此文件格式。请上传图片、PDF、Office 文档或文本文件。");
     expect(agentErrorText("home.media.error.sendTooManyAttachments")).toBe("最多 4 个附件。");
     expect(agentErrorText("home.media.error.sendFileSize")).toBe("单个文件不能超过 10 MB。");
-    expect(agentErrorText("plain error")).toBe("plain error");
+    expect(agentErrorText("plain error")).toBe("操作未完成，请重试");
     expect(agentErrorText(null)).toBeNull();
   });
 
   it("blank composer first send creates chat then sends message", async () => {
     const newChat = vi.fn(async () => "chat-new");
     const sendMessage = vi.fn();
+    const getReadyGeneration = vi.fn(() => 1);
     const ensureChatSubscription = vi.fn();
     const dispatch = vi.fn();
     const track = vi.fn();
@@ -769,7 +825,7 @@ describe("HomePage", () => {
 
     await expect(submitAgentComposerMessage({
       chatId: null,
-      connection: { newChat, sendMessage },
+      connection: { getReadyGeneration, newChat, sendMessage },
       ensureChatSubscription,
       content: " 帮我整理计划 ",
       language: "zh-CN",
@@ -785,7 +841,7 @@ describe("HomePage", () => {
       onNewChatMessageSent
     })).resolves.toBe(true);
 
-    expect(newChat).toHaveBeenCalledTimes(1);
+    expect(newChat).toHaveBeenCalledWith(1);
     expect(dispatch).toHaveBeenNthCalledWith(1, { type: "agent/newChatCreated", chatId: "chat-new" });
     expect(dispatch).toHaveBeenNthCalledWith(2, {
       type: "agent/userMessageQueued",
@@ -794,7 +850,9 @@ describe("HomePage", () => {
       media: [
         { url: "http://agent.local/api/media/sig/shot", name: "shot.png", kind: "image", path: "/media/websocket/webui/shot.png" },
         { url: "http://agent.local/api/media/sig/report", name: "小短文.pdf", kind: "file", path: "/media/websocket/webui/小短文.pdf" }
-      ]
+      ],
+      focus: true,
+      target: { kind: "standalone" }
     });
     expect(uploadAgentMedia).toHaveBeenCalledWith([
       { blob: encodedBlob, name: "shot.png", kind: "image", mime: "image/png" },
@@ -803,15 +861,17 @@ describe("HomePage", () => {
     expect(sendMessage).toHaveBeenCalledWith({
       chatId: "chat-new",
       content: "帮我整理计划",
+      clientRequestId: expect.any(String),
+      target: { kind: "standalone" },
       language: "zh-CN",
       media: [
         { path: "/media/websocket/webui/shot.png", url: "http://agent.local/api/media/sig/shot", name: "shot.png", kind: "image", mime: "image/png", bytes: 3 },
         { path: "/media/websocket/webui/小短文.pdf", url: "http://agent.local/api/media/sig/report", name: "小短文.pdf", kind: "file", mime: "application/pdf", bytes: 12 }
       ]
-    });
+    }, 1);
     expect(ensureChatSubscription).toHaveBeenCalledWith("chat-new");
-    expect(mockCallOrder(dispatch, 1)).toBeLessThan(mockCallOrder(ensureChatSubscription));
     expect(mockCallOrder(ensureChatSubscription)).toBeLessThan(mockCallOrder(sendMessage));
+    expect(mockCallOrder(sendMessage)).toBeLessThan(mockCallOrder(dispatch, 1));
     expect(setCreatingChat).toHaveBeenNthCalledWith(1, true);
     expect(setCreatingChat).toHaveBeenLastCalledWith(false);
     expect(clearComposer).toHaveBeenCalledTimes(1);
@@ -819,16 +879,52 @@ describe("HomePage", () => {
     expect(track).toHaveBeenCalledWith({ name: "agent_send_message", params: { page_path: "/main" }, consentTier: "basic" });
   });
 
+  it("keeps a new project target on the optimistic task action", async () => {
+    const dispatch = vi.fn();
+    const sendMessage = vi.fn();
+    const projectTarget = { kind: "project" as const, projectId: "project-a" };
+
+    await expect(submitAgentComposerMessage({
+      chatId: null,
+      target: projectTarget,
+      connection: {
+        getReadyGeneration: () => 1,
+        newChat: vi.fn(async () => "chat-project"),
+        sendMessage
+      },
+      content: "检查项目",
+      pendingAttachments: [],
+      uploadAgentMedia: vi.fn(async () => []),
+      dispatch,
+      track: vi.fn(),
+      clearComposer: vi.fn()
+    })).resolves.toBe(true);
+
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      chatId: "chat-project",
+      target: projectTarget
+    }), 1);
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "agent/userMessageQueued",
+      chatId: "chat-project",
+      content: "检查项目",
+      media: [],
+      focus: true,
+      target: projectTarget
+    });
+  });
+
   it("existing chat send does not create a new chat", async () => {
     const newChat = vi.fn(async () => "unused-chat");
     const sendMessage = vi.fn();
+    const getReadyGeneration = vi.fn(() => 1);
     const ensureChatSubscription = vi.fn();
     const dispatch = vi.fn();
     const onNewChatMessageSent = vi.fn();
 
     await expect(submitAgentComposerMessage({
       chatId: "chat-1",
-      connection: { newChat, sendMessage },
+      connection: { getReadyGeneration, newChat, sendMessage },
       ensureChatSubscription,
       content: "继续",
       pendingAttachments: [],
@@ -840,11 +936,16 @@ describe("HomePage", () => {
     })).resolves.toBe(true);
 
     expect(newChat).not.toHaveBeenCalled();
-    expect(dispatch).toHaveBeenCalledWith({ type: "agent/userMessageQueued", chatId: "chat-1", content: "继续", media: [] });
+    expect(dispatch).toHaveBeenCalledWith({ type: "agent/userMessageQueued", chatId: "chat-1", content: "继续", media: [], focus: true });
     expect(ensureChatSubscription).toHaveBeenCalledWith("chat-1");
-    expect(sendMessage).toHaveBeenCalledWith({ chatId: "chat-1", content: "继续", media: [] });
-    expect(mockCallOrder(dispatch)).toBeLessThan(mockCallOrder(ensureChatSubscription));
+    expect(sendMessage).toHaveBeenCalledWith({
+      chatId: "chat-1",
+      content: "继续",
+      clientRequestId: expect.any(String),
+      media: []
+    }, 1);
     expect(mockCallOrder(ensureChatSubscription)).toBeLessThan(mockCallOrder(sendMessage));
+    expect(mockCallOrder(sendMessage)).toBeLessThan(mockCallOrder(dispatch));
     expect(onNewChatMessageSent).not.toHaveBeenCalled();
   });
 
@@ -855,7 +956,7 @@ describe("HomePage", () => {
 
     await expect(submitAgentComposerMessage({
       chatId: null,
-      connection: { newChat: vi.fn(async () => { throw new Error("new chat failed"); }), sendMessage },
+      connection: { getReadyGeneration: () => 1, newChat: vi.fn(async () => { throw new Error("new chat failed"); }), sendMessage },
       content: "不要丢",
       pendingAttachments: [],
       uploadAgentMedia: vi.fn(async () => []),
@@ -864,9 +965,105 @@ describe("HomePage", () => {
       clearComposer
     })).resolves.toBe(false);
 
-    expect(dispatch).toHaveBeenCalledWith({ type: "agent/error", message: "new chat failed" });
+    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({
+      type: "agent/operationFailed",
+      surface: "chat",
+      error: expect.objectContaining({ source: "new-chat", message: "new chat failed" })
+    }));
     expect(sendMessage).not.toHaveBeenCalled();
     expect(clearComposer).not.toHaveBeenCalled();
+  });
+
+  it("synchronous websocket send failure creates no optimistic message and keeps the composer", async () => {
+    const dispatch = vi.fn();
+    const clearComposer = vi.fn();
+    const sendMessage = vi.fn(() => {
+      throw new Error("gateway disconnected");
+    });
+
+    await expect(submitAgentComposerMessage({
+      chatId: "chat-1",
+      connection: { getReadyGeneration: () => 1, newChat: vi.fn(async () => "unused-chat"), sendMessage },
+      content: "不要静默丢失",
+      pendingAttachments: [],
+      uploadAgentMedia: vi.fn(async () => []),
+      dispatch,
+      track: vi.fn(),
+      clearComposer
+    })).resolves.toBe(false);
+
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({
+      type: "agent/operationFailed",
+      surface: "chat",
+      error: expect.objectContaining({ source: "send", message: "gateway disconnected", chatId: "chat-1" })
+    }));
+    expect(dispatch).not.toHaveBeenCalledWith(expect.objectContaining({ type: "agent/userMessageQueued" }));
+    expect(clearComposer).not.toHaveBeenCalled();
+  });
+
+  it("does not restore the old delivery-uncertain flag after an acknowledged send", async () => {
+    const dispatch = vi.fn();
+    let generation: number | null = 1;
+    const sendMessage = vi.fn(() => {
+      generation = null;
+    });
+
+    await expect(submitAgentComposerMessage({
+      chatId: "chat-1",
+      connection: { getReadyGeneration: () => generation, newChat: vi.fn(async () => "unused-chat"), sendMessage },
+      content: "发送后立刻断线",
+      pendingAttachments: [],
+      uploadAgentMedia: vi.fn(async () => []),
+      dispatch,
+      track: vi.fn(),
+      clearComposer: vi.fn()
+    })).resolves.toBe(true);
+
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "agent/userMessageQueued",
+      chatId: "chat-1",
+      content: "发送后立刻断线",
+      media: [],
+      focus: true
+    });
+  });
+
+  it("finishes a same-generation background send without stealing a chat selected during upload", async () => {
+    const dispatch = vi.fn();
+    const ensureChatSubscription = vi.fn();
+    let selectionEpoch = 4;
+    const uploadAgentMedia = vi.fn(async () => {
+      selectionEpoch = 5;
+      return [];
+    });
+
+    await expect(submitAgentComposerMessage({
+      chatId: null,
+      connection: {
+        getReadyGeneration: () => 1,
+        newChat: vi.fn(async () => "background-chat"),
+        sendMessage: vi.fn()
+      },
+      ensureChatSubscription,
+      content: "后台完成",
+      pendingAttachments: [readyFile({ fileName: "note.txt" })],
+      uploadAgentMedia,
+      dispatch,
+      track: vi.fn(),
+      clearComposer: vi.fn(),
+      chatSelectionEpoch: 4,
+      getChatSelectionEpoch: () => selectionEpoch,
+      scopeKey: "draft-4"
+    })).resolves.toBe(true);
+
+    expect(ensureChatSubscription).not.toHaveBeenCalled();
+    expect(dispatch).not.toHaveBeenCalledWith(expect.objectContaining({ type: "agent/newChatCreated" }));
+    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({
+      type: "agent/userMessageQueued",
+      chatId: "background-chat",
+      focus: false
+    }));
   });
 
   it("maps backend file 413 to the current composer file-size error", async () => {
@@ -877,7 +1074,7 @@ describe("HomePage", () => {
 
     await expect(submitAgentComposerMessage({
       chatId: "chat-1",
-      connection: { newChat: vi.fn(async () => "unused-chat"), sendMessage },
+      connection: { getReadyGeneration: () => 1, newChat: vi.fn(async () => "unused-chat"), sendMessage },
       content: "看这个文件",
       pendingAttachments: [readyFile({ fileName: "large.pdf", originalBytes: 10 * 1024 * 1024 + 1 })],
       uploadAgentMedia: vi.fn(async () => { throw new MemmyAgentRequestError("file too large", 413); }),

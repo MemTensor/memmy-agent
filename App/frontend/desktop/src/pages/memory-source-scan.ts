@@ -32,12 +32,12 @@ export interface StartAgentSourceScanInput {
 
 export async function startAgentSourceScan(input: StartAgentSourceScanInput): Promise<void> {
   const delayMs = input.fallbackDelayMs ?? DEFAULT_SCAN_FALLBACK_DELAY_MS;
+  const sourceId = input.sourceId ?? "all";
 
-  input.dispatch(appActions.agentSourceScanStarted());
+  input.dispatch(appActions.agentSourceScanStarted(sourceId));
 
   try {
     await input.ensureScanPermission?.();
-    const sourceId = input.sourceId ?? "all";
     const job = await input.clients.agentSources.startScan({
       sourceId,
       ...(input.mode ? { mode: input.mode } : {})

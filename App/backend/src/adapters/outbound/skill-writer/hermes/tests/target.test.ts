@@ -363,7 +363,7 @@ print(json.dumps({"calls": calls, "text": text, "selection": selection}, ensure_
     expect(output.text).not.toContain("Assistant raw summary 1");
     expect(output.text).toContain("5. episode_5");
     expect(output.text).not.toContain("6. episode_6");
-    expect(output.text).toContain("输入 1-5 选择要接续的 episode");
+    expect(output.text).toContain("Enter 1-5 to select an episode to resume.");
     expect(output.calls[0]?.path).toBe("/api/v1/memory/search");
     expect(output.calls[0]?.body.query).toBe("测试query");
     expect(output.calls[0]?.body.layers).toEqual(["L1"]);

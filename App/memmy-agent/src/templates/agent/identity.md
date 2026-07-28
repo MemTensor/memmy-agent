@@ -3,9 +3,7 @@
 
 ## Workspace
 Your workspace is at: {{ workspacePath }}
-- Long-term memory: {{ workspacePath }}/memory/MEMORY.md (automatically managed by Dream — do not edit directly)
-- History log: {{ workspacePath }}/memory/history.jsonl (append-only JSONL; prefer the built-in `grep` when searching).
-- Custom skills: {{ workspacePath }}/skills/{% raw %}{skill-name}{% endraw %}/SKILL.md
+- Custom skills: {{ customSkillsPath or (workspacePath + "/skills") }}/{% raw %}{skill-name}{% endraw %}/SKILL.md
 
 {{ platformPolicy }}
 {% if channel == 'telegram' or channel == 'qq' or channel == 'discord' %}

@@ -187,7 +187,7 @@ describe("claude code skill target", () => {
       expect(output.reason).not.toContain("Assistant raw summary 1");
       expect(output.reason).toContain("5. episode_5");
       expect(output.reason).not.toContain("6. episode_6");
-      expect(output.reason).toContain("输入 1-5 选择要接续的 episode");
+      expect(output.reason).toContain("Enter 1-5 to select an episode to resume.");
       expect(requestBody).toMatchObject({
         query: "测试query",
         layers: ["L1"],
@@ -245,7 +245,7 @@ describe("claude code skill target", () => {
     }
   });
 
-  it("uses one started turn and episode when capturing a completed Claude Code turn", async () => {
+  it("uses turn.complete as the only write phase for a completed Claude Code turn", async () => {
     const { rootDirectory, memmyConfigPath } = createFixture();
     const requests: Array<{ body: Record<string, unknown>; path: string }> = [];
     const server = createServer(async (request: IncomingMessage, response: ServerResponse) => {
@@ -259,7 +259,6 @@ describe("claude code skill target", () => {
       if (url.pathname === "/api/v1/turns/start") {
         writeJsonResponse(response, 200, {
           turnId: "claude-turn-1",
-          episodeId: "claude-episode-1",
           sourceMemoryIds: ["claude-memory-1"],
           injectedContext: { markdown: "Claude historical context" }
         });
@@ -329,11 +328,11 @@ describe("claude code skill target", () => {
       expect(requests[3]?.body).toMatchObject({
         adapterId: "memmy-claude_code-hook",
         sessionId: "claude-memory-session",
-        episodeId: "claude-episode-1",
         query: "继续修复 episode 切换问题",
         answer: "修复已经完成",
         sourceMemoryIds: ["claude-memory-1"]
       });
+      expect(requests[3]?.body).not.toHaveProperty("episodeId");
     } finally {
       await close(server);
     }

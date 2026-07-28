@@ -14,6 +14,7 @@ import { openExternalUrl } from "../utils/open-url.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { appActions } from "../state/app-actions.js";
 import { useAppState } from "../state/app-state.js";
+import { formatTokenGiftAmount } from "./token-gift.js";
 
 export function TokenDetailPage() {
   const { state, dispatch } = useAppState();
@@ -26,6 +27,7 @@ export function TokenDetailPage() {
   const [modePersistenceFeedback, setModePersistenceFeedback] = useState<{ text: string; tone: "error" | "success" } | null>(null);
   const channel = resolveDesktopAccountChannel();
   const canContinue = Boolean(identifier.trim() && code.trim());
+  const agentChatTokenTotal = state.bootstrap?.promotions?.agentChatTokenTotal;
 
   useEffect(() => {
     setIdentifier("");
@@ -124,7 +126,9 @@ export function TokenDetailPage() {
           <div className="bg-gradient-to-br from-action-sky to-action-sky-hover rounded-card-lg p-7 text-white text-center mb-6 relative overflow-hidden">
             <div className="absolute top-3 right-4 w-16 h-16 bg-white/10 rounded-full" />
             <div className="absolute bottom-2 left-4 w-12 h-12 bg-white/5 rounded-full" />
-            <div className="text-3xl font-extrabold tracking-tight">30,000,000</div>
+            <div className="text-3xl font-extrabold tracking-tight">
+              {formatTokenGiftAmount(agentChatTokenTotal)}
+            </div>
             <div className="text-sm text-white/70 mt-1">{t("welcome.gift.detail.subtitle")}</div>
             <div
               className={`mt-5 space-y-2 text-left mx-auto ${language === "en-US" ? "w-full" : "max-w-xs"}`}

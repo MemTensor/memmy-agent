@@ -19,6 +19,72 @@ afterEach(() => {
 });
 
 describe("createMemosSqliteMemoryClient", () => {
+  it("preserves Span memory kinds in panel responses", async () => {
+    const dbPath = createMemoryDatabase({
+      id: "span_sqlite_1",
+      sessionId: "codex-session-span",
+      agentId: "codex",
+      tagsJson: JSON.stringify(["span"]),
+      infoJson: JSON.stringify({ source: "worker.span_big_turn.v1" }),
+      propertiesJson: JSON.stringify({
+        internal_info: {
+          memory_layer: "L1",
+          memory_kind: "span",
+          source: "worker.span_big_turn.v1"
+        }
+      })
+    });
+    const client = createMemosSqliteMemoryClient({
+      sources: [{ id: "memmy-memory", label: "memmy", dbPath }],
+      now: () => NOW
+    });
+
+    await expect(client.panelItems({ layer: "L1", page: 1 })).resolves.toMatchObject({
+      items: [{ id: "memmy-memory::span_sqlite_1", kind: "span" }]
+    });
+  });
+
+  it("exposes only the span's raw-turn tool-call range in detail metadata", async () => {
+    const dbPath = createMemoryDatabase({
+      id: "span_sqlite_steps",
+      sessionId: "codex-session-span",
+      agentId: "codex",
+      tagsJson: JSON.stringify(["span"]),
+      infoJson: JSON.stringify({ raw_turn_id: "raw-span-1" }),
+      propertiesJson: JSON.stringify({
+        internal_info: {
+          memory_layer: "L1",
+          memory_kind: "span",
+          span: { raw_turn_id: "raw-span-1", tool_call_start: 1, tool_call_end: 2 }
+        }
+      }),
+      rawTurn: {
+        id: "raw-span-1",
+        toolCalls: [
+          { id: "tool-0", name: "read_file" },
+          { id: "tool-1", name: "rg" },
+          { id: "tool-2", name: "npm_test" },
+          { id: "tool-3", name: "git_diff" }
+        ]
+      }
+    });
+    const client = createMemosSqliteMemoryClient({
+      sources: [{ id: "memmy-memory", label: "memmy", dbPath }],
+      now: () => NOW
+    });
+
+    const detail = await client.getMemory({ memoryId: "memmy-memory::span_sqlite_steps" });
+
+    expect(detail.item.metadata.spanDetail).toEqual({
+      toolCallStart: 1,
+      toolCallEnd: 2,
+      toolCalls: [
+        { id: "tool-1", name: "rg" },
+        { id: "tool-2", name: "npm_test" }
+      ]
+    });
+  });
+
   it("derives Hermes source from the session id when the row agent is the default", async () => {
     const dbPath = createMemoryDatabase({
       id: "trace_hermes_1",
@@ -418,6 +484,10 @@ function createMemoryDatabase(row: {
     sessionId: string;
     skillMemoryIds: string[];
   };
+  rawTurn?: {
+    id: string;
+    toolCalls: Array<Record<string, unknown>>;
+  };
 }): string {
   tempDir = mkdtempSync(join(tmpdir(), "memmy-sqlite-client-"));
   const dbPath = join(tempDir, "memory.sqlite");
@@ -498,6 +568,38 @@ function createMemoryDatabase(row: {
   `).run(row.id, NOW);
   db.prepare(`INSERT INTO memory_vec_3 (rowid, embedding) VALUES (?, ?)`)
     .run(1n, Buffer.from(new Float32Array([1, 0, 0]).buffer));
+  if (row.rawTurn) {
+    db.exec(`
+      CREATE TABLE raw_turns (
+        id TEXT PRIMARY KEY,
+        session_id TEXT,
+        episode_id TEXT,
+        turn_id TEXT,
+        user_id TEXT,
+        conversation_id TEXT,
+        user_text TEXT,
+        assistant_text TEXT,
+        reasoning_summary TEXT,
+        tool_calls_json TEXT,
+        tool_results_json TEXT,
+        source_memory_ids_json TEXT,
+        usage_json TEXT,
+        message_payload_json TEXT,
+        status TEXT,
+        redacted_at TEXT,
+        deleted_at TEXT,
+        created_at TEXT
+      )
+    `);
+    db.prepare(`
+      INSERT INTO raw_turns (
+        id, session_id, episode_id, turn_id, user_id, conversation_id, user_text,
+        assistant_text, reasoning_summary, tool_calls_json, tool_results_json,
+        source_memory_ids_json, usage_json, message_payload_json, status,
+        redacted_at, deleted_at, created_at
+      ) VALUES (?, ?, NULL, ?, ?, NULL, NULL, NULL, NULL, ?, '[]', '[]', '{}', '{}', 'succeeded', NULL, NULL, ?)
+    `).run(row.rawTurn.id, row.sessionId, row.rawTurn.id, "local-user", JSON.stringify(row.rawTurn.toolCalls), NOW);
+  }
   if (row.episode) {
     db.exec(`
       CREATE TABLE episodes (

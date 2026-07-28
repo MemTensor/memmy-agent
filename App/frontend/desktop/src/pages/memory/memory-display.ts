@@ -2,6 +2,7 @@ import type { MemoryListItem } from "@memmy/local-api-contracts";
 import { displayMemoryId } from "./memory-id.js";
 
 type MemoryDisplayItem = Pick<MemoryListItem, "id" | "title" | "summary" | "memoryLayer"> & {
+  kind?: MemoryListItem["kind"];
   body?: string;
 };
 type MemorySourceItem = Pick<MemoryListItem, "tags"> & {
@@ -39,6 +40,10 @@ export function drawerEyebrow(item?: Pick<MemoryListItem, "id"> | null): string 
 }
 
 export function displayMemoryTitle(item: MemoryDisplayItem, ...candidates: Array<string | undefined | null>): string {
+  if (item.kind === "span") {
+    return item.title;
+  }
+
   for (const value of [readySummary(item.summary), ...candidates, firstUserQueryLine(item.body), firstReadableBodyLine(item.body), item.title]) {
     const cleaned = cleanMemoryText(value);
     if (cleaned && !isInternalTitle(cleaned)) return cleaned;

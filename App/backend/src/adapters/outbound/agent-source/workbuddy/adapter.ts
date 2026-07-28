@@ -4,6 +4,7 @@ import {
   resolveWorkbuddyHomeDirectory,
   resolveWorkbuddyProjectsDirectory
 } from "../../agent-paths.js";
+import { collectConversationWindow, remainingMessageCapacity } from "../conversation-window.js";
 import { redactSecrets } from "../secret-redactor.js";
 import type { ConversationMessage, ScanOptions, SourceAdapter, SourceDescriptor } from "../types.js";
 import { readWorkbuddyHistory, type RawWorkbuddyMessage } from "./history-reader.js";
@@ -72,15 +73,14 @@ export function createWorkbuddySourceAdapter(deps: CreateWorkbuddySourceAdapterD
           message: session.sessionFilePath
         });
 
-        for await (const rawMessage of readWorkbuddyHistory(session.sessionFilePath, options.signal)) {
+        const messages = await collectConversationWindow(
+          readWorkbuddyHistory(session.sessionFilePath, options.signal),
+          options.since,
+          options.signal,
+          remainingMessageCapacity(options.maxMessages, emittedMessages)
+        );
+        for (const rawMessage of messages) {
           throwIfAborted(options.signal);
-          if (limitReached(emittedMessages, options.maxMessages)) {
-            break;
-          }
-          if (options.since && rawMessage.createdAt < options.since) {
-            continue;
-          }
-
           options.onProgress?.({
             sourceId: descriptor.sourceId,
             phase: "redact",

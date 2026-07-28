@@ -32,6 +32,7 @@ export interface PackagedRuntimeServices {
     bootstrapSecret: string;
     configPath: string;
   };
+  restartMemory(): Promise<void>;
   close(): Promise<void>;
   terminateSync(): void;
 }
@@ -51,12 +52,12 @@ export interface PreparePackagedRuntimeConfigOptions {
   ensureDirectories?: boolean;
 }
 
-interface RuntimeEntryPaths {
+export interface RuntimeEntryPaths {
   memoryEntry: string;
   agentEntry: string;
 }
 
-interface PackagedRuntimeConfig {
+export interface PackagedRuntimeConfig {
   configPath: string;
   agentWorkspace: string;
   memoryDatabasePath: string;
@@ -70,7 +71,7 @@ interface PackagedRuntimeConfig {
   agentGatewayBootstrapSecret: string;
 }
 
-interface ManagedChild {
+export interface ManagedChild {
   name: string;
   process: ChildProcess;
   stdoutTail: string[];
@@ -82,11 +83,24 @@ interface ManagedChild {
 interface ServiceLogOptions {
   logFilePath: string;
   logLevel: LogLevel;
+  ipc?: boolean;
 }
 
 const DAEMON_LOG_MAX_SIZE = 5 * 1024 * 1024;
 
 const DAEMON_LOG_MAX_FILES = 5;
+const AGENT_GATEWAY_RESTART_DELAYS_MS = [250, 1_000, 2_000, 5_000, 10_000] as const;
+const AGENT_GATEWAY_STABLE_MS = 30_000;
+const DESKTOP_MANAGED_GATEWAY_ENV = "MEMMY_DESKTOP_MANAGED_GATEWAY";
+const MANAGED_RESTART_IPC_TYPE = "memmy-agent:restart";
+
+interface DesktopManagedRestartNotice {
+  type: typeof MANAGED_RESTART_IPC_TYPE;
+  channel: string;
+  chatId: string;
+  startedAt: string;
+  metadata: Record<string, unknown>;
+}
 
 type HttpProbeResult = "ready" | "unreachable" | "unexpected";
 
@@ -96,14 +110,18 @@ export async function startPackagedRuntimeServices(
   const entries = resolveRuntimeEntryPaths(options);
   const runtimeConfig = await preparePackagedRuntimeConfig();
   const children: ManagedChild[] = [];
+  const gatewaySupervisor = new AgentGatewaySupervisor(entries, runtimeConfig, children, options);
+  let memoryRestart: Promise<void> | null = null;
+  let closing = false;
 
   try {
     await syncBundledAgentSkills({
       agentEntry: entries.agentEntry,
       agentWorkspace: runtimeConfig.agentWorkspace
     });
+    await preparePackagedBrowser(entries, runtimeConfig, options);
     await ensureMemoryService(entries, runtimeConfig, children, options);
-    await ensureAgentGateway(entries, runtimeConfig, children, options);
+    await gatewaySupervisor.ensureStarted();
 
     return {
       memory: {
@@ -117,14 +135,31 @@ export async function startPackagedRuntimeServices(
         bootstrapSecret: runtimeConfig.agentGatewayBootstrapSecret,
         configPath: runtimeConfig.configPath
       },
+      async restartMemory() {
+        if (closing) {
+          throw new Error("Memmy is shutting down");
+        }
+        if (!memoryRestart) {
+          memoryRestart = restartManagedMemoryService(entries, runtimeConfig, children, options)
+            .finally(() => {
+              memoryRestart = null;
+            });
+        }
+        await memoryRestart;
+      },
       async close() {
+        closing = true;
+        await memoryRestart?.catch(() => undefined);
+        await gatewaySupervisor.close();
         await stopManagedChildren(children);
       },
       terminateSync() {
+        gatewaySupervisor.terminateSync();
         terminateManagedChildrenSync(children);
       }
     };
   } catch (error) {
+    await gatewaySupervisor.close();
     await stopManagedChildren(children);
     throw error;
   }
@@ -152,6 +187,16 @@ export async function preparePackagedRuntimeConfig(
   const defaults = ensureRecord(agents, "defaults");
 
   let changed = false;
+  if (!Object.prototype.hasOwnProperty.call(config, "fileMemory")) {
+    config.fileMemory = { enabled: false };
+    changed = true;
+  } else if (
+    isRecord(config.fileMemory) &&
+    !Object.prototype.hasOwnProperty.call(config.fileMemory, "enabled")
+  ) {
+    config.fileMemory.enabled = false;
+    changed = true;
+  }
   changed = repairMemoryActiveProfile(memmyMemory) || changed;
   const defaultWorkspace = join(memmyHome, "workspace");
   const configuredWorkspace = stringValue(defaults.workspace);
@@ -253,6 +298,72 @@ export async function syncBundledAgentSkills(options: {
   await copyDirectoryContents(bundledSkillsDirectory, workspaceSkillsDirectory);
 }
 
+export async function preparePackagedBrowser(
+  entries: RuntimeEntryPaths,
+  runtimeConfig: PackagedRuntimeConfig,
+  options: StartPackagedRuntimeServicesOptions,
+  spawnProcess: typeof spawn = spawn
+): Promise<boolean> {
+  const logWriter = createRotatingWriter({
+    filePath: join(options.logDirectory, "browser-prepare.log"),
+    maxSize: DAEMON_LOG_MAX_SIZE,
+    maxFiles: DAEMON_LOG_MAX_FILES
+  });
+  if (!existsSync(entries.agentEntry)) {
+    logWriter.write(`Missing browser prepare runtime entry: ${entries.agentEntry}\n`);
+    logWriter.close();
+    return false;
+  }
+  return new Promise<boolean>((resolvePrepare) => {
+    let settled = false;
+    const finish = (ready: boolean): void => {
+      if (settled) return;
+      settled = true;
+      logWriter.close();
+      resolvePrepare(ready);
+    };
+    let child: ChildProcess;
+    try {
+      child = spawnProcess(
+        process.execPath,
+        [entries.agentEntry, "internal", "browser-prepare"],
+        {
+          env: {
+            ...process.env,
+            MEMMY_CONFIG: runtimeConfig.configPath,
+            MEMMY_AGENT_WORKSPACE: runtimeConfig.agentWorkspace,
+            ELECTRON_RUN_AS_NODE: "1",
+            NODE_ENV: process.env.NODE_ENV ?? "production"
+          },
+          stdio: ["ignore", "pipe", "pipe"],
+          windowsHide: true,
+          shell: false
+        }
+      );
+    } catch (error) {
+      logWriter.write(`Browser prepare failed to start: ${String(error)}\n`);
+      finish(false);
+      return;
+    }
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk) => logWriter.write(String(chunk)));
+    child.stderr?.on("data", (chunk) => logWriter.write(String(chunk)));
+    child.once("error", (error) => {
+      logWriter.write(`Browser prepare failed: ${error.message}\n`);
+      finish(false);
+    });
+    child.once("exit", (code, signal) => {
+      if (code !== 0) {
+        logWriter.write(
+          `Browser prepare unavailable: ${signal ? `signal ${signal}` : `code ${String(code)}`}\n`
+        );
+      }
+      finish(code === 0);
+    });
+  });
+}
+
 async function copyDirectoryContents(sourceDirectory: string, targetDirectory: string): Promise<void> {
   await mkdir(targetDirectory, { recursive: true });
 
@@ -280,7 +391,8 @@ async function ensureMemoryService(
   options: StartPackagedRuntimeServicesOptions
 ): Promise<void> {
   const healthUrl = `${runtimeConfig.memoryBaseUrl}/api/v1/health`;
-  const probe = await probeHttpService(healthUrl);
+  const healthHeaders = memoryAuthHeaders(runtimeConfig.memoryToken);
+  const probe = await probeHttpService(healthUrl, healthHeaders);
   if (probe === "ready") {
     return;
   }
@@ -310,50 +422,340 @@ async function ensureMemoryService(
     logLevel: options.logLevel
   });
   children.push(memoryChild);
-  await waitForHttpService("memory", healthUrl, memoryChild);
+  await waitForHttpService("memory", healthUrl, memoryChild, healthHeaders);
 }
 
-async function ensureAgentGateway(
+async function restartManagedMemoryService(
   entries: RuntimeEntryPaths,
   runtimeConfig: PackagedRuntimeConfig,
   children: ManagedChild[],
   options: StartPackagedRuntimeServicesOptions
 ): Promise<void> {
-  const bootstrapUrl = `${runtimeConfig.agentGatewayBaseUrl}/webui/bootstrap`;
-  const bootstrapHeaders: Record<string, string> = runtimeConfig.agentGatewayBootstrapSecret
-    ? { "x-memmy-agent-auth": runtimeConfig.agentGatewayBootstrapSecret }
-    : {};
-  const probe = await probeHttpService(bootstrapUrl, bootstrapHeaders);
-  if (probe === "ready") {
-    return;
-  }
-  if (probe === "unexpected") {
-    throw new Error(`Agent gateway endpoint is occupied by an unexpected service: ${bootstrapUrl}`);
+  const healthUrl = `${runtimeConfig.memoryBaseUrl}/api/v1/health`;
+  const healthHeaders = memoryAuthHeaders(runtimeConfig.memoryToken);
+  const managedMemory = children.filter((child) => child.name === "memory" && isManagedChildRunning(child));
+
+  if (managedMemory.length > 0) {
+    await Promise.all(managedMemory.map((child) => stopManagedChild(child)));
+  } else {
+    const probe = await probeHttpService(healthUrl, healthHeaders);
+    if (probe === "ready") {
+      await requestMemoryServiceShutdown({
+        baseUrl: runtimeConfig.memoryBaseUrl,
+        token: runtimeConfig.memoryToken
+      });
+    } else if (probe === "unexpected") {
+      throw new Error(`Memory endpoint is occupied by an unexpected service: ${healthUrl}`);
+    }
   }
 
-  const agentChild = spawnNodeService("agent-gateway", entries.agentEntry, [
-    "gateway",
-    "--config",
-    runtimeConfig.configPath,
-    "--workspace",
-    runtimeConfig.agentWorkspace,
-    "--host",
-    runtimeConfig.agentGatewayHealthHost,
-    "--port",
-    String(runtimeConfig.agentGatewayHealthPort)
-  ], {
-    MEMMY_CONFIG: runtimeConfig.configPath,
-    MEMMY_AGENT_WORKSPACE: runtimeConfig.agentWorkspace,
-    MEMMY_MEMORY_URL: runtimeConfig.memoryBaseUrl,
-    MEMMY_MEMORY_TOKEN: runtimeConfig.memoryToken,
-    MEMORY_SERVICE_URL: runtimeConfig.memoryBaseUrl,
-    MEMORY_SERVICE_TOKEN: runtimeConfig.memoryToken
-  }, {
-    logFilePath: join(options.logDirectory, "agent-gateway.log"),
-    logLevel: options.logLevel
+  removeManagedChildrenByName(children, "memory");
+  await waitForHttpServiceStop(healthUrl, healthHeaders);
+  await ensureMemoryService(entries, runtimeConfig, children, options);
+}
+
+export async function restartExternalMemoryService(input: {
+  baseUrl: string;
+  token: string;
+}): Promise<void> {
+  const baseUrl = normalizeBaseUrl(parseHttpUrl(input.baseUrl, "Memory service URL"));
+  const healthUrl = `${baseUrl}/api/v1/health`;
+  const healthHeaders = memoryAuthHeaders(input.token);
+  const probe = await probeHttpService(healthUrl, healthHeaders);
+  if (probe !== "ready") {
+    throw new Error(probe === "unexpected"
+      ? `Memory endpoint returned an unexpected response: ${healthUrl}`
+      : `Memory service is not running: ${healthUrl}`);
+  }
+
+  await requestMemoryServiceShutdown(input);
+  await waitForHttpServiceStop(healthUrl, healthHeaders);
+  await waitForHttpServiceReady("memory", healthUrl, healthHeaders);
+}
+
+async function requestMemoryServiceShutdown(input: { baseUrl: string; token: string }): Promise<void> {
+  const baseUrl = normalizeBaseUrl(parseHttpUrl(input.baseUrl, "Memory service URL"));
+  const response = await fetch(`${baseUrl}/api/v1/admin/shutdown`, {
+    method: "POST",
+    cache: "no-store",
+    headers: {
+      "content-type": "application/json",
+      ...memoryAuthHeaders(input.token)
+    },
+    body: "{}",
+    signal: AbortSignal.timeout(HTTP_TIMEOUT_MS)
   });
-  children.push(agentChild);
-  await waitForHttpService("agent-gateway", bootstrapUrl, agentChild, bootstrapHeaders);
+  if (!response.ok) {
+    const body = (await response.text()).trim();
+    throw new Error(`Memory restart request failed with HTTP ${response.status}${body ? `: ${body.slice(0, 300)}` : ""}`);
+  }
+}
+
+export interface AgentGatewaySupervisorDependencies {
+  probeHttpService?: typeof probeHttpService;
+  spawnNodeService?: typeof spawnNodeService;
+  waitForHttpService?: typeof waitForHttpService;
+  stopManagedChild?: typeof stopManagedChild;
+  setTimer?: typeof setTimeout;
+  clearTimer?: typeof clearTimeout;
+}
+
+export class AgentGatewaySupervisor {
+  ownership: "external" | "owned" | null = null;
+  ownedChild: ManagedChild | null = null;
+  childGeneration = 0;
+  startPromise: Promise<void> | null = null;
+  stopping = false;
+  restartTimer: ReturnType<typeof setTimeout> | null = null;
+  restartAttempt = 0;
+  stableTimer: ReturnType<typeof setTimeout> | null = null;
+  pendingRestartNotice: { childGeneration: number; notice: DesktopManagedRestartNotice } | null = null;
+  hasReachedReady = false;
+
+  private replacementNotice: DesktopManagedRestartNotice | null = null;
+  private readonly bootstrapUrl: string;
+  private readonly bootstrapHeaders: Record<string, string>;
+  private readonly dependencies: Required<AgentGatewaySupervisorDependencies>;
+
+  constructor(
+    private readonly entries: RuntimeEntryPaths,
+    private readonly runtimeConfig: PackagedRuntimeConfig,
+    private readonly children: ManagedChild[],
+    private readonly options: StartPackagedRuntimeServicesOptions,
+    dependencies: AgentGatewaySupervisorDependencies = {}
+  ) {
+    this.bootstrapUrl = `${runtimeConfig.agentGatewayBaseUrl}/webui/bootstrap`;
+    this.bootstrapHeaders = runtimeConfig.agentGatewayBootstrapSecret
+      ? { "x-memmy-agent-auth": runtimeConfig.agentGatewayBootstrapSecret }
+      : {};
+    this.dependencies = {
+      probeHttpService: dependencies.probeHttpService ?? probeHttpService,
+      spawnNodeService: dependencies.spawnNodeService ?? spawnNodeService,
+      waitForHttpService: dependencies.waitForHttpService ?? waitForHttpService,
+      stopManagedChild: dependencies.stopManagedChild ?? stopManagedChild,
+      setTimer: dependencies.setTimer ?? setTimeout,
+      clearTimer: dependencies.clearTimer ?? clearTimeout
+    };
+  }
+
+  ensureStarted(): Promise<void> {
+    if (this.startPromise) return this.startPromise;
+    this.startPromise = this.ensureStartedOnce().finally(() => {
+      this.startPromise = null;
+    });
+    return this.startPromise;
+  }
+
+  async close(): Promise<void> {
+    this.stopping = true;
+    this.clearTimers();
+    const child = this.ownedChild;
+    this.ownedChild = null;
+    if (child) {
+      await this.dependencies.stopManagedChild(child).catch(() => undefined);
+      this.removeChild(child);
+      child.logWriter?.close();
+    }
+  }
+
+  terminateSync(): void {
+    this.stopping = true;
+    this.clearTimers();
+    const child = this.ownedChild;
+    this.ownedChild = null;
+    if (child) {
+      terminateManagedChildrenSync([child]);
+      this.removeChild(child);
+      child.logWriter?.close();
+    }
+  }
+
+  private async ensureStartedOnce(): Promise<void> {
+    if (this.stopping || this.ownership === "external" || (this.ownership === "owned" && this.ownedChild)) {
+      return;
+    }
+    const probe = await this.dependencies.probeHttpService(this.bootstrapUrl, this.bootstrapHeaders);
+    if (probe === "ready") {
+      this.ownership = "external";
+      return;
+    }
+    if (probe === "unexpected") {
+      throw new Error(`Agent gateway endpoint is occupied by an unexpected service: ${this.bootstrapUrl}`);
+    }
+    await this.spawnOwnedGateway(true);
+  }
+
+  private async spawnOwnedGateway(initialStartup: boolean): Promise<void> {
+    if (this.stopping) return;
+    const generation = this.childGeneration + 1;
+    this.childGeneration = generation;
+    const notice = this.replacementNotice;
+    const child = this.dependencies.spawnNodeService("agent-gateway", this.entries.agentEntry, [
+      "gateway",
+      "--config",
+      this.runtimeConfig.configPath,
+      "--workspace",
+      this.runtimeConfig.agentWorkspace,
+      "--host",
+      this.runtimeConfig.agentGatewayHealthHost,
+      "--port",
+      String(this.runtimeConfig.agentGatewayHealthPort)
+    ], {
+      MEMMY_CONFIG: this.runtimeConfig.configPath,
+      MEMMY_AGENT_WORKSPACE: this.runtimeConfig.agentWorkspace,
+      MEMMY_MEMORY_URL: this.runtimeConfig.memoryBaseUrl,
+      MEMMY_MEMORY_TOKEN: this.runtimeConfig.memoryToken,
+      MEMORY_SERVICE_URL: this.runtimeConfig.memoryBaseUrl,
+      MEMORY_SERVICE_TOKEN: this.runtimeConfig.memoryToken,
+      [DESKTOP_MANAGED_GATEWAY_ENV]: "1",
+      ...(notice ? restartNoticeEnv(notice) : {})
+    }, {
+      logFilePath: join(this.options.logDirectory, "agent-gateway.log"),
+      logLevel: this.options.logLevel,
+      ipc: true
+    });
+    this.ownership = "owned";
+    this.ownedChild = child;
+    this.children.push(child);
+    this.bindOwnedChild(child, generation);
+
+    try {
+      await this.dependencies.waitForHttpService("agent-gateway", this.bootstrapUrl, child, this.bootstrapHeaders);
+      if (this.stopping || this.ownedChild !== child || this.childGeneration !== generation) return;
+      this.hasReachedReady = true;
+      this.replacementNotice = null;
+      this.startStableTimer(child, generation);
+    } catch (error) {
+      if (this.ownedChild === child) {
+        await this.dependencies.stopManagedChild(child).catch(() => undefined);
+      }
+      if (initialStartup) throw error;
+    }
+  }
+
+  private bindOwnedChild(child: ManagedChild, generation: number): void {
+    let closed = false;
+    child.process.on("message", (message) => {
+      if (this.stopping
+        || this.ownedChild !== child
+        || this.childGeneration !== generation
+        || this.pendingRestartNotice?.childGeneration === generation) {
+        return;
+      }
+      const notice = parseDesktopManagedRestartNotice(message);
+      if (notice) {
+        this.pendingRestartNotice = { childGeneration: generation, notice };
+      }
+    });
+    child.process.once("error", (error) => {
+      if (this.ownedChild !== child || this.childGeneration !== generation) return;
+      const exitDescription = `error ${error.message}`;
+      if (isManagedChildRunning(child)) {
+        void this.dependencies.stopManagedChild(child)
+          .catch(() => undefined)
+          .finally(() => {
+            child.exitDescription ??= exitDescription;
+          });
+      } else {
+        child.exitDescription ??= exitDescription;
+      }
+    });
+    child.process.once("close", (code, signal) => {
+      if (closed) return;
+      closed = true;
+      child.exitDescription = signal ? `signal ${signal}` : `code ${code ?? "unknown"}`;
+      this.handleOwnedChildClose(child, generation, code);
+    });
+  }
+
+  private handleOwnedChildClose(child: ManagedChild, generation: number, code: number | null): void {
+    this.removeChild(child);
+    child.logWriter?.close();
+    if (this.ownedChild !== child || this.childGeneration !== generation) return;
+    this.ownedChild = null;
+    this.clearStableTimer();
+    if (this.stopping || !this.hasReachedReady) return;
+
+    const pending = this.pendingRestartNotice?.childGeneration === generation
+      ? this.pendingRestartNotice.notice
+      : null;
+    this.pendingRestartNotice = null;
+    if (code === 75 && pending) {
+      this.replacementNotice = pending;
+      this.restartAttempt = 1;
+      this.scheduleReplacement(250);
+      return;
+    }
+    if (pending) {
+      this.replacementNotice = null;
+    }
+    this.scheduleReplacement();
+  }
+
+  private scheduleReplacement(delayOverride?: number): void {
+    if (this.stopping || this.restartTimer) return;
+    const delay = delayOverride ?? (
+      AGENT_GATEWAY_RESTART_DELAYS_MS[this.restartAttempt]
+      ?? AGENT_GATEWAY_RESTART_DELAYS_MS[AGENT_GATEWAY_RESTART_DELAYS_MS.length - 1]
+      ?? 10_000
+    );
+    if (delayOverride === undefined) this.restartAttempt += 1;
+    this.restartTimer = this.dependencies.setTimer(() => {
+      this.restartTimer = null;
+      void this.startReplacement();
+    }, delay);
+    this.restartTimer.unref?.();
+  }
+
+  private async startReplacement(): Promise<void> {
+    if (this.stopping) return;
+    const probe = await this.dependencies.probeHttpService(this.bootstrapUrl, this.bootstrapHeaders);
+    if (probe === "ready") {
+      this.ownership = "external";
+      this.pendingRestartNotice = null;
+      this.replacementNotice = null;
+      return;
+    }
+    if (probe === "unexpected") {
+      this.scheduleReplacement();
+      return;
+    }
+    try {
+      await this.spawnOwnedGateway(false);
+    } catch {
+      this.scheduleReplacement();
+    }
+  }
+
+  private startStableTimer(child: ManagedChild, generation: number): void {
+    this.clearStableTimer();
+    this.stableTimer = this.dependencies.setTimer(() => {
+      this.stableTimer = null;
+      if (!this.stopping && this.ownedChild === child && this.childGeneration === generation) {
+        this.restartAttempt = 0;
+      }
+    }, AGENT_GATEWAY_STABLE_MS);
+    this.stableTimer.unref?.();
+  }
+
+  private clearStableTimer(): void {
+    if (!this.stableTimer) return;
+    this.dependencies.clearTimer(this.stableTimer);
+    this.stableTimer = null;
+  }
+
+  private clearTimers(): void {
+    if (this.restartTimer) {
+      this.dependencies.clearTimer(this.restartTimer);
+      this.restartTimer = null;
+    }
+    this.clearStableTimer();
+  }
+
+  private removeChild(child: ManagedChild): void {
+    const index = this.children.indexOf(child);
+    if (index >= 0) this.children.splice(index, 1);
+  }
 }
 
 function resolveRuntimeEntryPaths(options: StartPackagedRuntimeServicesOptions): RuntimeEntryPaths {
@@ -384,7 +786,7 @@ export function spawnNodeService(
   };
   const child = spawn(process.execPath, [entry, ...args], {
     env: childEnv,
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: logOptions.ipc ? ["ignore", "pipe", "pipe", "ipc"] : ["ignore", "pipe", "pipe"],
     windowsHide: true
   });
   const logWriter = createRotatingWriter({
@@ -434,6 +836,34 @@ async function probeHttpService(url: string, headers: Record<string, string> = {
   }
 }
 
+async function waitForHttpServiceStop(url: string, headers: Record<string, string> = {}): Promise<void> {
+  const deadline = Date.now() + STARTUP_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (await probeHttpService(url, headers) === "unreachable") {
+      return;
+    }
+    await sleep(50);
+  }
+  throw new Error(`Memory service did not stop at ${url}`);
+}
+
+async function waitForHttpServiceReady(
+  name: string,
+  url: string,
+  headers: Record<string, string> = {}
+): Promise<void> {
+  const deadline = Date.now() + STARTUP_TIMEOUT_MS;
+  let lastProbe: HttpProbeResult = "unreachable";
+  while (Date.now() < deadline) {
+    lastProbe = await probeHttpService(url, headers);
+    if (lastProbe === "ready") {
+      return;
+    }
+    await sleep(POLL_INTERVAL_MS);
+  }
+  throw new Error(`${name} did not restart at ${url} (last probe: ${lastProbe})`);
+}
+
 async function waitForHttpService(
   name: string,
   url: string,
@@ -472,6 +902,22 @@ async function stopManagedChildren(children: ManagedChild[]): Promise<void> {
   await Promise.allSettled([...children].reverse().map((child) => stopManagedChild(child)));
 }
 
+function isManagedChildRunning(child: ManagedChild): boolean {
+  return !child.exitDescription && child.process.exitCode === null && child.process.signalCode === null;
+}
+
+function removeManagedChildrenByName(children: ManagedChild[], name: string): void {
+  for (let index = children.length - 1; index >= 0; index -= 1) {
+    if (children[index]?.name === name) {
+      children.splice(index, 1);
+    }
+  }
+}
+
+function memoryAuthHeaders(token: string): Record<string, string> {
+  return token ? { authorization: `Bearer ${token}` } : {};
+}
+
 /**
  * Synchronously, best-effort terminates all child service processes.
  *
@@ -506,7 +952,7 @@ async function stopManagedChild(child: ManagedChild): Promise<void> {
   }
 
   // Windows: child.kill only terminates the direct child; if memory / agent-gateway spawned a
-  // worker (grandchild), it survives, keeps holding the fixed ports (18799 / 18997) and locking
+  // worker (grandchild), it survives, keeps holding the fixed service ports and locking
   // Memmy.exe, causing EADDRINUSE on the next launch and blocking silent updates from installing.
   // Use taskkill /T to kill the entire process tree.
   if (process.platform === "win32") {
@@ -593,6 +1039,51 @@ function memoryProfileName(value: unknown): "account" | "byok" | undefined {
 
 function isRecord(value: unknown): value is ConfigRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseDesktopManagedRestartNotice(value: unknown): DesktopManagedRestartNotice | null {
+  if (!isPlainObject(value)) return null;
+  const keys = Object.keys(value);
+  if (keys.some((key) => !["type", "channel", "chatId", "startedAt", "metadata"].includes(key))) return null;
+  if (value.type !== MANAGED_RESTART_IPC_TYPE) return null;
+  if (typeof value.channel !== "string" || value.channel.trim().length === 0 || value.channel.length > 64) return null;
+  if (typeof value.chatId !== "string" || value.chatId.length > 256) return null;
+  if (typeof value.startedAt !== "string" || value.startedAt.trim().length === 0 || value.startedAt.length > 32 || !Number.isFinite(Number(value.startedAt))) return null;
+  if (!isPlainObject(value.metadata)) return null;
+  let metadataJson: string;
+  try {
+    metadataJson = JSON.stringify(value.metadata);
+  } catch {
+    return null;
+  }
+  if (typeof metadataJson !== "string") return null;
+  if (Buffer.byteLength(metadataJson, "utf8") > 16 * 1024) return null;
+  const metadata = JSON.parse(metadataJson) as unknown;
+  if (!isPlainObject(metadata)) return null;
+  return {
+    type: MANAGED_RESTART_IPC_TYPE,
+    channel: value.channel,
+    chatId: value.chatId,
+    startedAt: value.startedAt,
+    metadata
+  };
+}
+
+function restartNoticeEnv(notice: DesktopManagedRestartNotice): Record<string, string> {
+  return {
+    MEMMY_AGENT_RESTART_NOTIFY_CHANNEL: notice.channel,
+    MEMMY_AGENT_RESTART_NOTIFY_CHAT_ID: notice.chatId,
+    MEMMY_AGENT_RESTART_STARTED_AT: notice.startedAt,
+    ...(Object.keys(notice.metadata).length > 0
+      ? { MEMMY_AGENT_RESTART_NOTIFY_METADATA: JSON.stringify(notice.metadata) }
+      : {})
+  };
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
 
 function stringValue(value: unknown): string | undefined {

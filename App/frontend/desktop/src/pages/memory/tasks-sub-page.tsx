@@ -5,6 +5,7 @@ import { formatMessage, type MessageKey, type MessageValues, type ResolvedLangua
 import { useTranslation } from "../../i18n/use-translation.js";
 import { ChevronRight, ListChecks, Search, X } from "./memory-prototype-icons.js";
 import { MemoryDrawerDeleteAction } from "./memory-delete-action.js";
+import { MemoryMarkdown } from "./memory-markdown.js";
 import {
   clearMemoryPanelCache,
   memoryPanelCacheKey,
@@ -417,7 +418,7 @@ function TaskChatBubble(props: { message: TaskChatMessage }) {
           {message.role === "tool" && message.tool ? (
             <TaskToolBubble tool={message.tool} />
           ) : (
-            <MarkdownText text={message.text ?? ""} />
+            <MemoryMarkdown text={message.text ?? ""} />
           )}
         </div>
       </div>
@@ -873,104 +874,4 @@ function timeValue(value: unknown): string | number | undefined {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-/**
- * Renders a safe subset of Markdown.
- */
-function MarkdownText(props: { text: string }) {
-  return <div className="memory-markdown" dangerouslySetInnerHTML={{ __html: renderMarkdown(props.text) }} />;
-}
-
-/**
- * Converts the Markdown subset into escaped HTML.
- */
-function renderMarkdown(source: string): string {
-  const lines = source.replace(/\r\n/g, "\n").split("\n");
-  const output: string[] = [];
-
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index] ?? "";
-    if (!line.trim()) {
-      continue;
-    }
-
-    if (line.startsWith("```")) {
-      const language = line.slice(3).trim().replace(/[^a-zA-Z0-9_-]/g, "");
-      const codeLines: string[] = [];
-      index += 1;
-      while (index < lines.length && !(lines[index] ?? "").startsWith("```")) {
-        codeLines.push(lines[index] ?? "");
-        index += 1;
-      }
-      const languageClass = language ? ` class="language-${language}"` : "";
-      output.push(`<pre class="memory-markdown__pre"><code${languageClass}>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
-      continue;
-    }
-
-    const heading = /^(#{1,3})\s+(.+)$/.exec(line);
-    if (heading) {
-      const level = heading[1]!.length;
-      output.push(`<h${level} class="memory-markdown__heading">${inlineMarkdown(heading[2]!)}</h${level}>`);
-      continue;
-    }
-
-    if (/^\s*[-*]\s+/.test(line)) {
-      const items: string[] = [];
-      while (index < lines.length && /^\s*[-*]\s+/.test(lines[index] ?? "")) {
-        items.push((lines[index] ?? "").replace(/^\s*[-*]\s+/, ""));
-        index += 1;
-      }
-      index -= 1;
-      output.push(`<ul class="memory-markdown__list">${items.map((item) => `<li>${inlineMarkdown(item)}</li>`).join("")}</ul>`);
-      continue;
-    }
-
-    if (/^\s*\d+\.\s+/.test(line)) {
-      const items: string[] = [];
-      while (index < lines.length && /^\s*\d+\.\s+/.test(lines[index] ?? "")) {
-        items.push((lines[index] ?? "").replace(/^\s*\d+\.\s+/, ""));
-        index += 1;
-      }
-      index -= 1;
-      output.push(`<ol class="memory-markdown__list">${items.map((item) => `<li>${inlineMarkdown(item)}</li>`).join("")}</ol>`);
-      continue;
-    }
-
-    if (/^>\s?/.test(line)) {
-      const quoteLines: string[] = [];
-      while (index < lines.length && /^>\s?/.test(lines[index] ?? "")) {
-        quoteLines.push((lines[index] ?? "").replace(/^>\s?/, ""));
-        index += 1;
-      }
-      index -= 1;
-      output.push(`<blockquote class="memory-markdown__quote">${quoteLines.map(inlineMarkdown).join("<br/>")}</blockquote>`);
-      continue;
-    }
-
-    output.push(`<p class="memory-markdown__p">${inlineMarkdown(line)}</p>`);
-  }
-
-  return output.join("");
-}
-
-/**
- * Renders inline Markdown.
- */
-function inlineMarkdown(value: string): string {
-  let output = escapeHtml(value);
-  output = output.replace(/`([^`]+)`/g, '<code class="memory-markdown__code">$1</code>');
-  output = output.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-  output = output.replace(/\*([^*]+)\*/g, "<em>$1</em>");
-  output = output.replace(/\[([^\]]+)]\(([^)]+)\)/g, (_match, label: string) => label);
-  return output;
-}
-
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
 }

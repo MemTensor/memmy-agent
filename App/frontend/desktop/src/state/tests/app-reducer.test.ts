@@ -44,7 +44,8 @@ const bootstrap = AppBootstrapResponseSchema.parse({
   promotions: {
     loginBanner: true,
     improvementGift: true,
-    applyMore: true
+    applyMore: true,
+    agentChatTokenTotal: 2_000_000
   }
 });
 
@@ -127,7 +128,8 @@ describe("app reducer", () => {
         usedTokens: 1000000,
         remainingTokens: 34000000,
         expiresAt: null,
-        lastSyncedAt: "2026-06-05T10:00:00.000Z"
+        lastSyncedAt: "2026-06-05T10:00:00.000Z",
+        sceneUsages: []
       })
     );
 
@@ -139,7 +141,8 @@ describe("app reducer", () => {
   });
 
   it("stores real scan progress from SSE events until the completed event arrives", () => {
-    const loadingState = appReducer(createInitialAppState(), appActions.agentSourceScanStarted());
+    const loadingState = appReducer(createInitialAppState(), appActions.agentSourceScanStarted("cursor"));
+    expect(loadingState.agentSources.activeScanSourceId).toBe("cursor");
     const progressState = appReducer(
       loadingState,
       appActions.agentSourceScanProgressReceived({
@@ -163,12 +166,40 @@ describe("app reducer", () => {
       message: "Adding memories"
     });
 
-    const completedState = appReducer(progressState, appActions.agentSourceScanCompleted());
+    const completedState = appReducer(progressState, appActions.agentSourceScanCompleted({
+      jobId: "job-1",
+      sourceId: "cursor",
+      succeeded: true
+    }));
     expect(completedState.agentSources.isScanning).toBe(false);
+    expect(completedState.agentSources.activeScanSourceId).toBeNull();
     expect(completedState.agentSources.scanProgress).toBeNull();
+    expect(completedState.agentSources.recentScanCompletions).toEqual([{ jobId: "job-1", sourceId: "cursor" }]);
 
     const loadedState = appReducer(completedState, appActions.agentSourcesLoaded([]));
     expect(loadedState.agentSources.items).toEqual([]);
+    expect(loadedState.agentSources.recentScanCompletions).toEqual([{ jobId: "job-1", sourceId: "cursor" }]);
+
+    const expiredState = appReducer(loadedState, appActions.agentSourceScanCompletionExpired("job-1"));
+    expect(expiredState.agentSources.recentScanCompletions).toEqual([]);
+
+    const failedButFinishedState = appReducer(expiredState, appActions.agentSourceScanCompleted({
+      jobId: "job-2",
+      sourceId: "hermes",
+      succeeded: false
+    }));
+    expect(failedButFinishedState.agentSources.recentScanCompletions).toEqual([
+      { jobId: "job-2", sourceId: "hermes" }
+    ]);
+
+    const staleProgressState = appReducer(failedButFinishedState, appActions.agentSourceScanProgressReceived({
+      jobId: "job-1",
+      sourceId: "cursor",
+      phase: "scan",
+      current: 0,
+      total: 0
+    }));
+    expect(staleProgressState).toBe(failedButFinishedState);
   });
 
   it("ignores stale scan progress for a stopped job", () => {
@@ -210,7 +241,9 @@ describe("app reducer", () => {
         {
           key: "websocket:chat-1",
           title: "创建 AI 电商助手",
-          preview: "整理 PRD"
+          preview: "整理 PRD",
+          projectId: null,
+          cwd: "/workspace"
         }
       ])
     );

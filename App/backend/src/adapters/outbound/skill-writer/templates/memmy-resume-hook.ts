@@ -147,6 +147,11 @@ function isAgentResponseEvent(payload) {
 
 async function captureCompletedTurn(payload) {
   const pending = await readTurnState(payload);
+  const status = completedTurnStatus(payload);
+  if (status === "cancelled") {
+    await clearTurnState(payload);
+    return;
+  }
   const transcriptPath = normalizeText(payload.transcript_path || payload.transcriptPath);
   const transcriptMessages = transcriptPath ? await readTranscriptMessages(transcriptPath) : [];
   const query = sanitizeCaptureText(
@@ -157,9 +162,11 @@ async function captureCompletedTurn(payload) {
   const answer = sanitizeCaptureText(
     normalizeText(pending && pending.answer) ||
     normalizeText(payload.last_assistant_message || payload.lastAssistantMessage) ||
-    latestMessageText(transcriptMessages, "assistant")
+    latestAssistantAfterLastUser(transcriptMessages) ||
+    (status === "failed" ? failedTurnText(payload) : "")
   );
   if (!query || !answer || isResumeCommand(query)) {
+    await clearTurnState(payload);
     return;
   }
 
@@ -176,25 +183,15 @@ async function captureCompletedTurn(payload) {
 
   await client.post("/api/v1/turns/" + encodeURIComponent(turnId) + "/complete", {
     adapterId: "memmy-" + SOURCE + "-hook",
-    requestId: SOURCE + "-complete:" + turnId + ":" + hashText(answer),
+    requestId: SOURCE + "-complete:" + turnId + ":" + hashText([status, query, answer].join("\\u0000")),
     sessionId,
-    episodeId: normalizeText(pending && pending.episodeId) || undefined,
     query,
     answer,
-    status: completedTurnStatus(payload),
+    status,
     source: SOURCE,
     sourceMemoryIds: Array.isArray(pending && pending.sourceMemoryIds) ? pending.sourceMemoryIds : undefined
   });
-  await writeTurnState(payload, {
-    ...(pending || {}),
-    createdAt: normalizeText(pending && pending.createdAt) || new Date().toISOString(),
-    sessionId,
-    turnId,
-    episodeId: normalizeText(pending && pending.episodeId) || undefined,
-    query,
-    answer,
-    completedAt: new Date().toISOString()
-  });
+  await clearTurnState(payload);
 }
 
 async function startCapturedTurn(payload, prompt) {
@@ -223,7 +220,6 @@ async function startCapturedTurn(payload, prompt) {
     createdAt: new Date().toISOString(),
     sessionId,
     turnId: normalizeText(turn && turn.turnId) || requestedTurnId,
-    episodeId: normalizeText(turn && turn.episodeId) || undefined,
     query,
     sourceMemoryIds: Array.isArray(turn && turn.sourceMemoryIds) ? turn.sourceMemoryIds : undefined,
     answer: ""
@@ -275,9 +271,21 @@ function transcriptMessageFromRecord(record) {
       return text ? { role, text } : null;
     }
   }
+  if (
+    record.type === "response_item" &&
+    (payload.type === "function_call" || payload.type === "function_call_output" || payload.type === "tool_call")
+  ) {
+    return { role: "tool", text: contentText(payload.output || payload.content || payload.name) || payload.type };
+  }
   if (record.type === "event_msg" && payload.type === "user_message") {
     const text = normalizeText(payload.message);
     return text ? { role: "user", text } : null;
+  }
+  if (
+    record.type === "event_msg" &&
+    (payload.type === "function_call" || payload.type === "function_call_output" || payload.type === "tool_call")
+  ) {
+    return { role: "tool", text: contentText(payload.output || payload.content || payload.name) || payload.type };
   }
   const message = record.message && typeof record.message === "object" ? record.message : {};
   const role = normalizeText(message.role) || normalizeText(record.role) ||
@@ -285,6 +293,9 @@ function transcriptMessageFromRecord(record) {
   if (role === "user" || role === "assistant") {
     const text = contentText(message.content || record.content || record.text);
     return text ? { role, text } : null;
+  }
+  if (role === "tool") {
+    return { role: "tool", text: contentText(message.content || record.content || record.text) || "tool" };
   }
   return null;
 }
@@ -297,6 +308,22 @@ function latestMessageText(messages, role) {
     }
   }
   return "";
+}
+
+function latestAssistantAfterLastUser(messages) {
+  let lastUserIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index] && messages[index].role === "user") {
+      lastUserIndex = index;
+      break;
+    }
+  }
+  if (lastUserIndex < 0) {
+    return "";
+  }
+  const tail = messages.slice(lastUserIndex);
+  const last = tail[tail.length - 1];
+  return last && last.role === "assistant" ? normalizeText(last.text) : "";
 }
 
 function extractPrompt(payload) {
@@ -409,14 +436,44 @@ function workspacePath(payload) {
 }
 
 function completedTurnStatus(payload) {
-  const status = normalizeText(payload.status).toLowerCase();
-  if (status === "aborted" || status === "cancelled" || status === "canceled") {
+  const status = normalizeText(
+    payload.status ||
+    payload.stop_reason ||
+    payload.stopReason ||
+    payload.finish_reason ||
+    payload.finishReason
+  ).toLowerCase();
+  const compactStatus = status.replace(/[\s_-]+/gu, "");
+  const detail = [
+    normalizeText(payload.error),
+    normalizeText(payload.error_message || payload.errorMessage),
+    normalizeText(payload.reason)
+  ].join(" ").toLowerCase();
+  if (
+    compactStatus === "aborted" ||
+    compactStatus === "cancelled" ||
+    compactStatus === "canceled" ||
+    compactStatus === "cancelledbyuser" ||
+    compactStatus === "canceledbyuser" ||
+    detail.includes("cancelled") ||
+    detail.includes("canceled") ||
+    detail.includes("aborted by user")
+  ) {
     return "cancelled";
   }
-  if (status === "error" || status === "failed" || payload.success === false) {
+  if (compactStatus === "error" || compactStatus === "failed" || payload.success === false) {
     return "failed";
   }
   return "succeeded";
+}
+
+function failedTurnText(payload) {
+  return sanitizeCaptureText(
+    normalizeText(payload.error) ||
+    normalizeText(payload.error_message || payload.errorMessage) ||
+    normalizeText(payload.reason) ||
+    "Agent generation failed before producing a final response."
+  );
 }
 
 function writeAllowOutput() {
@@ -660,6 +717,10 @@ async function writeTurnState(payload, state) {
   await writeFile(turnStateUrl(payload), JSON.stringify(state, null, 2) + "\n", "utf8");
 }
 
+async function clearTurnState(payload) {
+  await unlink(turnStateUrl(payload)).catch(() => undefined);
+}
+
 async function readPendingState() {
   try {
     const state = parseJson(await readFile(STATE_URL, "utf8"));
@@ -881,8 +942,8 @@ function formatResumeSearchResult(query, candidates) {
     "",
     candidates.map(formatResumeEpisode).join("\n\n"),
     "",
-    "输入 1-5 选择要接续的 episode；Memmy 会自动读取完整 episode（等价于 memmy-memory get <episode_id>）并注入接续上下文。",
-    "输入 /memmy-resume cancel 取消。"
+    "Enter 1-5 to select an episode to resume. Memmy will automatically retrieve the full episode (equivalent to memmy-memory get <episode_id>) and inject continuation context.",
+    "Enter /memmy-resume cancel to cancel."
   ].join("\n");
 }
 

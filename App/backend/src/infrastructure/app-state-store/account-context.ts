@@ -83,8 +83,15 @@ export function ensureAccountDefaults(
      VALUES (?, ?, ?)`
   ).run(uuid, now, now);
   db.prepare(
-    `INSERT OR IGNORE INTO account_token_usage_cache (uuid, created_at, updated_at)
-     VALUES (?, ?, ?)`
+    `INSERT OR IGNORE INTO account_token_usage_cache (
+       uuid,
+       total_tokens,
+       used_tokens,
+       remaining_tokens,
+       scene_usages_json,
+       created_at,
+       updated_at
+     ) VALUES (?, 0, 0, 0, '[]', ?, ?)`
   ).run(uuid, now, now);
 
   if (options.copyLegacyModelConfig) {

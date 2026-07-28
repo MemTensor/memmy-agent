@@ -12,6 +12,7 @@ import {
 import type { LocalDataStore } from "../infrastructure/app-state-store/local-data-store.js";
 
 export interface LocalDataService {
+  getPath(): Promise<LocalDataRevealResponse>;
   reveal(): Promise<LocalDataRevealResponse>;
   export(input: ExportLocalDataInput): Promise<LocalDataExportResponse>;
   clear(input: ClearLocalDataInput): Promise<LocalDataClearResponse>;
@@ -25,15 +26,20 @@ export interface CreateLocalDataServiceOptions {
 /** Creates create local data service. */
 export function createLocalDataService(options: CreateLocalDataServiceOptions): LocalDataService {
   const now = options.now ?? (() => new Date());
+  const getPathResponse = (): LocalDataRevealResponse => LocalDataRevealResponseSchema.parse({
+    ok: true,
+    dataPath: options.localDataStore.getDataPath()
+  });
 
   return {
+    async getPath() {
+      return getPathResponse();
+    },
+
     async reveal() {
-      const dataPath = options.localDataStore.getDataPath();
-      await options.localDataStore.revealDataPath(dataPath);
-      return LocalDataRevealResponseSchema.parse({
-        ok: true,
-        dataPath
-      });
+      const response = getPathResponse();
+      await options.localDataStore.revealDataPath(response.dataPath);
+      return response;
     },
 
     async export(input) {

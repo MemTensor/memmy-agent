@@ -12,9 +12,15 @@ import { OpenAICompatProvider } from "../../../src/providers/openai-compat-provi
 import { stripModelPrefix as stripCodexModelPrefix } from "../../../src/providers/openai-codex-provider.js";
 import { GitHubCopilotProvider, getStorage } from "../../../src/providers/github-copilot-provider.js";
 import { AgentLoop } from "../../../src/core/agent-runtime/loop.js";
+import { SessionManager } from "../../../src/core/session/manager.js";
 import { InboundMessage, OutboundMessage } from "../../../src/core/runtime-messages/events.js";
 import { CronJob, CronJobState, CronPayload, CronSchedule } from "../../../src/cron/types.js";
 import { WebSocketChannel } from "../../../src/integrations/channels/websocket.js";
+import {
+  defaultWebuiSidebarState,
+  readWebuiSidebarState,
+  webuiSidebarStatePath,
+} from "../../../src/entrypoints/frontend-bridge/sidebar-state.js";
 import {
   RESTART_NOTIFY_CHANNEL_ENV,
   RESTART_NOTIFY_CHAT_ID_ENV,
@@ -36,6 +42,7 @@ import {
   providerLogin,
   providerLogout,
   resolveOauthProvider,
+  runInternalCommand,
   serve,
   setCliRuntimeLogs,
   setConfigValue,
@@ -47,6 +54,7 @@ import {
 } from "../../../src/entrypoints/cli/commands.js";
 import { API_MAX_BODY_BYTES } from "../../../src/entrypoints/openai-like-api/server.js";
 import { setQuestionary } from "../../../src/entrypoints/cli/onboard.js";
+import { VERSION } from "../../../src/version.js";
 
 const ENV_KEYS = [
   "MEMMY_AGENT_DATA_DIR",
@@ -140,11 +148,38 @@ afterEach(() => {
   setCliRuntimeLogs(false);
   (process.stdin as any).isTTY = originalStdinIsTty;
   setConfigPath(null);
+  process.exitCode = 0;
   for (const key of ENV_KEYS) delete process.env[key];
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
 describe("CLI command helpers", () => {
+  it("keeps the browser preparation command hidden and accepts only its exact argv", async () => {
+    const root = tempRoot();
+    setConfigPath(
+      writeConfig(root, { tools: { browser: { enabled: false } } }),
+    );
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    process.exitCode = 0;
+
+    await expect(
+      runInternalCommand(["node", "memmy", "internal", "browser-prepare"]),
+    ).resolves.toBe(true);
+    expect(log).toHaveBeenCalledWith("disabled");
+    expect(process.exitCode).toBe(0);
+    expect(buildHelpText()).not.toContain("browser-prepare");
+
+    await expect(
+      runInternalCommand(["node", "memmy", "internal", "browser-prepare", "--extra"]),
+    ).resolves.toBe(true);
+    expect(error).toHaveBeenCalledWith("unavailable");
+    expect(process.exitCode).toBe(2);
+    await expect(runInternalCommand(["node", "memmy", "status"])).resolves.toBe(
+      false,
+    );
+  });
+
   it("includes core slash commands in the command palette and help", () => {
     const names = builtinCommandPalette().map((item) => item.command);
 
@@ -164,7 +199,7 @@ describe("CLI command helpers", () => {
     expect(isRootVersionRequest(["node", "memmy", "--version"])).toBe(true);
     await main(["node", "memmy", "--version"]);
 
-    expect(log).toHaveBeenCalledWith("0.0.1-beta.1");
+    expect(log).toHaveBeenCalledWith(VERSION);
   });
 
   it("routes bare memmy to the Ink TUI", async () => {
@@ -229,8 +264,19 @@ describe("CLI command helpers", () => {
     expect(fs.existsSync(configPath)).toBe(true);
     expect(fs.existsSync(path.join(workspace, "AGENTS.md"))).toBe(true);
     const raw = YAML.parse(fs.readFileSync(configPath, "utf8"));
+    expect(config.agents.defaults.maxTokens).toBe(65_536);
+    expect(raw.agents.defaults.maxTokens).toBe(65_536);
     expect(raw.channels.websocket).toEqual(expect.objectContaining({ enabled: true }));
     expect(raw.channels.slack).toEqual(expect.objectContaining({ enabled: false }));
+    expect(raw.fileMemory).toEqual({ enabled: false });
+    expect(config.fileMemory.enabled).toBe(false);
+    expect(fs.existsSync(path.join(workspace, "memory", "history.jsonl"))).toBe(
+      true,
+    );
+    expect(fs.existsSync(path.join(workspace, "memory", "MEMORY.md"))).toBe(
+      false,
+    );
+    expect(fs.existsSync(path.join(workspace, ".git"))).toBe(false);
 
     expect(fs.existsSync(path.join(legacyDir, "jobs.json"))).toBe(true);
     expect(fs.existsSync(path.join(workspace, "cron", "jobs.json"))).toBe(false);
@@ -388,6 +434,13 @@ describe("CLI command helpers", () => {
   it("serve connects MCP on startup and closes it when the API server closes", async () => {
     const root = tempRoot("memmy-serve-mcp-");
     const workspace = path.join(root, "workspace");
+    const migrationStatePath = path.join(
+      workspace,
+      ".memmy-migrations",
+      "agent-workspace.json",
+    );
+    fs.mkdirSync(path.dirname(migrationStatePath), { recursive: true });
+    fs.writeFileSync(migrationStatePath, "invalid migration state", "utf8");
     const configPath = writeConfig(root, {
       agents: { defaults: { workspace, model: "openai/test-model" } },
       api: { host: "127.0.0.1", port: 0, timeout: 1 },
@@ -398,6 +451,7 @@ describe("CLI command helpers", () => {
 
     const server = await serve({ config: configPath });
     expect(loop.connectMcp).toHaveBeenCalledTimes(1);
+    expect(fs.readFileSync(migrationStatePath, "utf8")).toBe("invalid migration state");
     await closeServer(server);
 
     expect(loop.closeMcp).toHaveBeenCalledTimes(1);
@@ -436,8 +490,50 @@ describe("CLI command helpers", () => {
   it("gateway starts a configured health endpoint and can stop cleanly", async () => {
     const root = tempRoot("memmy-gateway-");
     const workspace = path.join(root, "workspace");
+    const sessionsDir = path.join(workspace, "sessions");
+    const legacySessionPath = path.join(sessionsDir, "websocket_legacy.jsonl");
+    const archivedSessionPath = path.join(sessionsDir, "websocket_archived.jsonl");
+    fs.mkdirSync(sessionsDir, { recursive: true });
+    fs.writeFileSync(
+      legacySessionPath,
+      `${JSON.stringify({
+        recordType: "metadata",
+        key: "websocket:legacy",
+        createdAt: "2026-07-01T00:00:00.000Z",
+        updatedAt: "2026-07-01T00:00:00.000Z",
+        metadata: { webui: true, title: "legacy" },
+        lastConsolidated: 0,
+      })}\n${JSON.stringify({
+        role: "user",
+        content: "historical question",
+        timestamp: "2026-07-01T00:01:00.000Z",
+      })}\n`,
+      "utf8",
+    );
+    fs.writeFileSync(
+      archivedSessionPath,
+      `${JSON.stringify({
+        recordType: "metadata",
+        key: "websocket:archived",
+        createdAt: "2026-06-01T00:00:00.000Z",
+        updatedAt: "2026-06-01T00:00:00.000Z",
+        metadata: { webui: true, title: "archived" },
+        lastConsolidated: 0,
+      })}\n`,
+      "utf8",
+    );
+    process.env.MEMMY_AGENT_DATA_DIR = path.join(root, "data");
+    const sidebarState = {
+      ...defaultWebuiSidebarState(),
+      pinned_keys: ["websocket:legacy"],
+      archived_keys: ["websocket:archived"],
+    };
+    const sidebarStatePath = webuiSidebarStatePath();
+    fs.writeFileSync(sidebarStatePath, JSON.stringify(sidebarState), "utf8");
+    const originalSidebarState = fs.readFileSync(sidebarStatePath);
     const configPath = writeConfig(root, {
       agents: { defaults: { workspace, model: "openai/test-model" } },
+      fileMemory: { enabled: true },
       channels: {
         websocket: { enabled: true, port: 0 },
       },
@@ -447,20 +543,13 @@ describe("CLI command helpers", () => {
         heartbeat: { enabled: false, intervalS: 900, keepRecentMessages: 4 },
       },
     });
-    const fakeSessions = {
-      getOrCreate: vi.fn(() => ({
-        addMessage: vi.fn(),
-        retainRecentLegalSuffix: vi.fn(),
-      })),
-      save: vi.fn(),
-      listSessions: vi.fn(() => []),
-    };
-    let fakeLoop: any;
+    let migratedSessionManager: SessionManager | null = null;
     let loopRunning = true;
-    fakeLoop = {
+    const fakeLoop: any = {
       workspace,
       model: "agent_chat",
       unifiedSession: false,
+      fileMemoryEnabled: true,
       tools: { get: vi.fn(() => undefined) },
       provider: null,
       refreshProviderSnapshot: vi.fn(() => {
@@ -489,14 +578,16 @@ describe("CLI command helpers", () => {
         loopRunning = false;
       }),
       closeMcp: vi.fn(async () => undefined),
-      sessions: {
-        ...fakeSessions,
-        flush: vi.fn(async () => undefined),
-      },
+      sessions: null,
     };
     let cronStorePath = "";
+    let bindingAtLoopCreation: Record<string, unknown> | null = null;
     let publishedModelUpdate: OutboundMessage | undefined;
     vi.spyOn(AgentLoop, "fromConfig").mockImplementation((_loaded: any, bus: any, extra: any = {}) => {
+      const metadataLine = fs.readFileSync(legacySessionPath, "utf8").trim().split("\n")[0]!;
+      bindingAtLoopCreation = JSON.parse(metadataLine).metadata;
+      migratedSessionManager = new SessionManager(sessionsDir);
+      fakeLoop.sessions = migratedSessionManager;
       cronStorePath = extra.cronService?.storePath ?? "";
       if (typeof extra.runtimeModelPublisher === "function") {
         extra.runtimeModelPublisher("gpt-x", "fast");
@@ -505,6 +596,7 @@ describe("CLI command helpers", () => {
       return fakeLoop as any;
     });
     vi.spyOn(console, "log").mockImplementation(() => undefined);
+    vi.spyOn(console, "info").mockImplementation(() => undefined);
 
     const runtime = await gateway({ config: configPath });
     const address = runtime.healthServer.address();
@@ -514,6 +606,23 @@ describe("CLI command helpers", () => {
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ status: "ok" });
+    expect(bindingAtLoopCreation).toMatchObject({
+      webui: true,
+      title: "legacy",
+      webuiProjectId: null,
+      webuiWorkspaceCwd: fs.realpathSync(workspace),
+    });
+    const migrationStatePath = path.join(
+      workspace,
+      ".memmy-migrations",
+      "agent-workspace.json",
+    );
+    expect(JSON.parse(fs.readFileSync(migrationStatePath, "utf8")).applied).toEqual([
+      expect.objectContaining({
+        id: "v1.0.4/0001-add-webui-session-binding",
+        introducedIn: "1.0.4",
+      }),
+    ]);
     expect(missing.status).toBe(404);
     expect(runtime.heartbeat.enabled).toBe(false);
     expect(runtime.heartbeat.intervalS).toBe(900);
@@ -521,6 +630,36 @@ describe("CLI command helpers", () => {
     expect(runtime.manager.webuiRuntimeModelName?.()).toBe("openai/refreshed-model");
     const websocketChannel = runtime.manager.getChannel("websocket");
     expect(websocketChannel).toBeInstanceOf(WebSocketChannel);
+    const snapshot = (websocketChannel as WebSocketChannel).webuiSessionSnapshot();
+    expect(snapshot.sessions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          key: "websocket:legacy",
+          projectId: null,
+          cwd: fs.realpathSync(workspace),
+        }),
+        expect.objectContaining({
+          key: "websocket:archived",
+          projectId: null,
+          cwd: fs.realpathSync(workspace),
+        }),
+      ]),
+    );
+    const historicalSession = migratedSessionManager!.get("websocket:legacy");
+    expect(historicalSession?.messages).toEqual([
+      expect.objectContaining({ role: "user", content: "historical question" }),
+    ]);
+    historicalSession?.addMessage("assistant", "continued reply");
+    migratedSessionManager!.save(historicalSession!);
+    expect(new SessionManager(sessionsDir).get("websocket:legacy")?.messages).toEqual([
+      expect.objectContaining({ role: "user", content: "historical question" }),
+      expect.objectContaining({ role: "assistant", content: "continued reply" }),
+    ]);
+    expect(readWebuiSidebarState()).toMatchObject({
+      pinned_keys: ["websocket:legacy"],
+      archived_keys: ["websocket:archived"],
+    });
+    expect(fs.readFileSync(sidebarStatePath)).toEqual(originalSidebarState);
     expect((websocketChannel as any).webuiTitleService).toMatchObject({
       sessions: fakeLoop.sessions,
       llmRuntime: expect.any(Function),
@@ -546,8 +685,44 @@ describe("CLI command helpers", () => {
     expect(fakeLoop.processMessage).not.toHaveBeenCalled();
     expect(fs.existsSync(path.join(workspace, "AGENTS.md"))).toBe(true);
     expect(runtime.cron.listJobs({ includeDisabled: true }).map((job) => job.id)).toContain("dream");
+    expect((websocketChannel as WebSocketChannel).fileMemoryEnabled).toBe(true);
     await runtime.stop();
     expect(fakeLoop.stop).toHaveBeenCalledTimes(1);
+
+    const migratedBytes = fs.readFileSync(legacySessionPath);
+    const secondRuntime = await gateway({ config: configPath });
+    expect(fs.readFileSync(legacySessionPath)).toEqual(migratedBytes);
+    expect(JSON.parse(fs.readFileSync(migrationStatePath, "utf8")).applied).toHaveLength(1);
+    await secondRuntime.stop();
+    expect(fakeLoop.stop).toHaveBeenCalledTimes(2);
+  });
+
+  it("gateway stops before creating AgentLoop when migration state is invalid", async () => {
+    const root = tempRoot("memmy-gateway-migration-failure-");
+    const workspace = path.join(root, "workspace");
+    const migrationStatePath = path.join(
+      workspace,
+      ".memmy-migrations",
+      "agent-workspace.json",
+    );
+    fs.mkdirSync(path.dirname(migrationStatePath), { recursive: true });
+    fs.writeFileSync(migrationStatePath, "{invalid-json", "utf8");
+    const configPath = writeConfig(root, {
+      agents: { defaults: { workspace, model: "openai/test-model" } },
+      gateway: {
+        host: "127.0.0.1",
+        port: 0,
+        heartbeat: { enabled: false, intervalS: 900, keepRecentMessages: 4 },
+      },
+    });
+    const fromConfig = vi.spyOn(AgentLoop, "fromConfig");
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await expect(gateway({ config: configPath })).rejects.toMatchObject({
+      code: "migration_state_invalid",
+    });
+    expect(fromConfig).not.toHaveBeenCalled();
+    expect(fs.readFileSync(migrationStatePath, "utf8")).toBe("{invalid-json");
   });
 
   it("gateway health helper serves only the health endpoint", async () => {
@@ -583,6 +758,7 @@ describe("CLI command helpers", () => {
   }> {
     const root = tempRoot("memmy-cron-gateway-");
     const workspace = path.join(root, "workspace");
+    fs.mkdirSync(workspace, { recursive: true });
     const configPath = writeConfig(root, {
       agents: { defaults: { workspace, model: "openai/test-model" } },
       gateway: {
@@ -593,6 +769,7 @@ describe("CLI command helpers", () => {
     });
     const sessionsByKey = new Map<string, any>();
     const sessions = {
+      get: vi.fn((key: string) => sessionsByKey.get(key) ?? null),
       getOrCreate: vi.fn((key: string) => {
         let session = sessionsByKey.get(key);
         if (!session) {
@@ -613,11 +790,16 @@ describe("CLI command helpers", () => {
       listSessions: vi.fn(() => []),
       flush: vi.fn(async () => undefined),
     };
+    const cronTargetSession = sessions.getOrCreate("websocket:chat-1");
+    cronTargetSession.metadata.webui = true;
+    cronTargetSession.metadata.webuiProjectId = null;
+    cronTargetSession.metadata.webuiWorkspaceCwd = fs.realpathSync(workspace);
     let loopRunning = true;
     const fakeLoop: any = {
       workspace,
       model: "agent_chat",
       unifiedSession: false,
+      fileMemoryEnabled: false,
       tools: { get: vi.fn(() => undefined) },
       provider: null,
       refreshProviderSnapshot: vi.fn(),
@@ -629,6 +811,12 @@ describe("CLI command helpers", () => {
       dispatchMessage: vi.fn(async () => undefined),
       processMessage: vi.fn(async () => null),
       processDirect,
+      resolveSessionWorkspace: vi.fn((
+        _message: unknown,
+        _session: unknown,
+        _reservation: unknown,
+        binding: unknown,
+      ) => binding),
       llmRuntime: vi.fn(() => ({ provider: {}, model: "openai/test-model" })),
       scheduleBackground: vi.fn((promise: Promise<any>) => {
         void promise.catch(() => undefined);
@@ -666,6 +854,33 @@ describe("CLI command helpers", () => {
     });
   }
 
+  it("removes and guards Dream cron when file memory is disabled", async () => {
+    const processDirect = vi.fn();
+    const { runtime, fakeLoop } = await startCronGatewayWithFakeLoop({
+      processDirect,
+    });
+    try {
+      expect(
+        runtime.cron
+          .listJobs({ includeDisabled: true })
+          .map((job) => job.id),
+      ).not.toContain("dream");
+      const result = await runtime.cron.onJob?.(
+        new CronJob({
+          id: "dream",
+          name: "dream",
+          schedule: new CronSchedule({ kind: "every", everyMs: 60_000 }),
+          payload: new CronPayload({ kind: "systemEvent" }),
+        }),
+      );
+      expect(result).toBe("File memory is disabled.");
+      expect(fakeLoop.dream.run).not.toHaveBeenCalled();
+      expect(processDirect).not.toHaveBeenCalled();
+    } finally {
+      await runtime.stop();
+    }
+  });
+
   it("delivers WebUI cron fallback messages as non-streaming proactive transcript messages", async () => {
     const processDirect = vi.fn(async () => ({ content: "cron final", metadata: {} }));
     const { runtime, fakeLoop, sessionsByKey } = await startCronGatewayWithFakeLoop({ processDirect });
@@ -692,7 +907,9 @@ describe("CLI command helpers", () => {
         sessionKey: "cron:cron-test",
         channel: "websocket",
         chatId: "chat-1",
-        metadata: expect.objectContaining({ turn_id: "stale-turn" }),
+        metadata: {
+          webui_language: "zh-CN",
+        },
         messageSendCallback: expect.any(Function),
       }));
       expect(fakeLoop.waitForCronTargetAvailable).toHaveBeenCalledWith("websocket", "websocket:chat-1");
@@ -1245,8 +1462,26 @@ describe("CLI command parity with memmy test_commands", () => {
     expect(config.agents.defaults.workspace).toBe(workspace);
     expect(fs.existsSync(configPath)).toBe(true);
     expect(fs.existsSync(path.join(workspace, "AGENTS.md"))).toBe(true);
-    expect(fs.existsSync(path.join(workspace, "memory", "MEMORY.md"))).toBe(true);
+    expect(fs.existsSync(path.join(workspace, "memory", "MEMORY.md"))).toBe(false);
+    expect(config.fileMemory.enabled).toBe(false);
     expect(log).toHaveBeenCalledWith("memmy is ready");
+  });
+
+  it("onboard preserves explicit file memory enablement", async () => {
+    const root = tempRoot();
+    const configPath = writeConfig(root, {
+      fileMemory: { enabled: true },
+    });
+    const workspace = path.join(root, "workspace");
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+    const config = await onboard({ config: configPath, workspace });
+    const raw = YAML.parse(fs.readFileSync(configPath, "utf8"));
+
+    expect(config.fileMemory.enabled).toBe(true);
+    expect(raw.fileMemory.enabled).toBe(true);
+    expect(fs.existsSync(path.join(workspace, "memory", "MEMORY.md"))).toBe(true);
+    expect(fs.existsSync(path.join(workspace, ".git"))).toBe(true);
   });
 
   it("onboard existing config refresh", async () => {

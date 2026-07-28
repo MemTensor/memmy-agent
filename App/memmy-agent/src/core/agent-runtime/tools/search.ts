@@ -93,6 +93,12 @@ function shouldRestrictToWorkspace(ctx: any): boolean {
   return Boolean(ctx?.config?.restrictToWorkspace || ctx?.config?.exec?.sandbox);
 }
 
+function readonlyExtraAllowedDirs(ctx: any, restrict: boolean): string[] | undefined {
+  if (!restrict) return undefined;
+  if (Array.isArray(ctx?.readonlySkillRoots)) return [...ctx.readonlySkillRoots];
+  return [BUILTIN_SKILLS_DIR];
+}
+
 function resolveExtraAllowedDirs(dirs?: string[] | null): string[] {
   return (dirs ?? []).map((dir) => path.resolve(dir));
 }
@@ -175,7 +181,7 @@ export class FindFilesTool extends SearchTool {
     return new FindFilesTool({
       workspace: ctx?.workspace ?? process.cwd(),
       allowedDir: restrict ? ctx?.workspace : undefined,
-      extraAllowedDirs: restrict ? [BUILTIN_SKILLS_DIR] : undefined,
+      extraAllowedDirs: readonlyExtraAllowedDirs(ctx, restrict),
     });
   }
 
@@ -292,7 +298,7 @@ export class GrepTool extends SearchTool {
     return new GrepTool({
       workspace: ctx?.workspace ?? process.cwd(),
       allowedDir: restrict ? ctx?.workspace : undefined,
-      extraAllowedDirs: restrict ? [BUILTIN_SKILLS_DIR] : undefined,
+      extraAllowedDirs: readonlyExtraAllowedDirs(ctx, restrict),
     });
   }
 

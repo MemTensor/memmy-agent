@@ -1,7 +1,7 @@
 /** Adapter module. */
 import { access } from "node:fs/promises";
 import { resolveCodexSessionsDirectory } from "../../agent-paths.js";
-import { JsonlParseError } from "../jsonl-lines.js";
+import { collectConversationWindow, remainingMessageCapacity } from "../conversation-window.js";
 import { redactSecrets } from "../secret-redactor.js";
 import type { ConversationMessage, ScanOptions, SourceAdapter, SourceDescriptor } from "../types.js";
 import { readCodexRollout, type RawCodexMessage } from "./rollout-reader.js";
@@ -67,26 +67,18 @@ export function createCodexSourceAdapter(deps: CreateCodexSourceAdapterDeps = {}
           message: session.sessionFilePath
         });
 
-        try {
-          for await (const rawMessage of readCodexRollout(session.sessionFilePath, options.signal)) {
-            throwIfAborted(options.signal);
-            if (limitReached(emittedMessages, options.maxMessages)) {
-              break;
-            }
-            if (options.since && rawMessage.createdAt < options.since) {
-              continue;
-            }
-
-            options.onProgress?.({ sourceId: descriptor.sourceId, phase: "redact", current: emittedMessages, total: emittedMessages + 1 });
-            emittedMessages += 1;
-            options.onProgress?.({ sourceId: descriptor.sourceId, phase: "emit", current: emittedMessages, total: emittedMessages });
-            yield toConversationMessage(descriptor.sourceId, rawMessage, session.workspacePath, session.gitRoot);
-          }
-        } catch (error) {
+        const messages = await collectConversationWindow(
+          readCodexRollout(session.sessionFilePath, options.signal),
+          options.since,
+          options.signal,
+          remainingMessageCapacity(options.maxMessages, emittedMessages)
+        );
+        for (const rawMessage of messages) {
           throwIfAborted(options.signal);
-          if (!(error instanceof JsonlParseError)) {
-            throw error;
-          }
+          options.onProgress?.({ sourceId: descriptor.sourceId, phase: "redact", current: emittedMessages, total: emittedMessages + 1 });
+          emittedMessages += 1;
+          options.onProgress?.({ sourceId: descriptor.sourceId, phase: "emit", current: emittedMessages, total: emittedMessages });
+          yield toConversationMessage(descriptor.sourceId, rawMessage, session.workspacePath, session.gitRoot);
         }
       }
 

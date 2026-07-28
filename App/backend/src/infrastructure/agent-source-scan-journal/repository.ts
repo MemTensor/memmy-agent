@@ -46,7 +46,18 @@ export interface WriteScanResumeInput {
 export interface AgentSourceScanJournal {
   writeResume(input: WriteScanResumeInput): void;
   readResume(jobId: string): JournalScanResumeState | null;
+  findLatestJob(): JournalScanJob | null;
   deleteJob(jobId: string): void;
+}
+
+export interface JournalScanJob {
+  jobId: string;
+  sourceId: string;
+  mode?: AgentSourceScanMode;
+  phase: JournalScanResumeState["phase"];
+  messageCount: number;
+  sourceCount: number;
+  resultCount: number;
 }
 
 interface SourceStateRow {
@@ -74,10 +85,14 @@ interface ResultRow {
   discovered_conversations: number;
   emitted_messages: number;
   skipped: number;
+  memory_ids_json: string;
   errors_json: string;
 }
 
 interface JobRow {
+  job_id: string;
+  source_id: string;
+  mode: AgentSourceScanMode | null;
   phase: JournalScanResumeState["phase"];
 }
 
@@ -118,10 +133,40 @@ export function createAgentSourceScanJournal(db: DatabaseSync): AgentSourceScanJ
         : { phase: "summarize", results: readResults(db, jobId) };
     },
 
+    findLatestJob() {
+      const row = db.prepare(`
+        SELECT job_id, source_id, mode, phase
+        FROM account_agent_source_scan_jobs
+        WHERE uuid = ?
+        ORDER BY updated_at DESC, created_at DESC, job_id DESC
+        LIMIT 1
+      `).get(AGENT_SOURCE_SCOPE_UUID) as JobRow | undefined;
+      if (!row) return null;
+      const messageCount = countJobRows(db, "account_agent_source_scan_messages", row.job_id);
+      const sourceCount = countJobRows(db, "account_agent_source_scan_source_state", row.job_id);
+      const resultCount = countJobRows(db, "account_agent_source_scan_results", row.job_id);
+      return {
+        jobId: row.job_id,
+        sourceId: row.source_id,
+        mode: row.mode ?? undefined,
+        phase: row.phase,
+        messageCount,
+        sourceCount,
+        resultCount
+      };
+    },
+
     deleteJob(jobId) {
       deleteJobRows(db, jobId);
     }
   };
+}
+
+function countJobRows(db: DatabaseSync, table: string, jobId: string): number {
+  const row = db.prepare(
+    `SELECT COUNT(*) AS count FROM ${table} WHERE uuid = ? AND job_id = ?`
+  ).get(AGENT_SOURCE_SCOPE_UUID, jobId) as { count: number };
+  return Number(row.count);
 }
 
 function ensureAgentSourceScope(db: DatabaseSync): void {
@@ -234,9 +279,10 @@ function writeResults(db: DatabaseSync, jobId: string, results: readonly ScanRes
       discovered_conversations,
       emitted_messages,
       skipped,
+      memory_ids_json,
       errors_json,
       updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const now = new Date().toISOString();
 
@@ -249,6 +295,7 @@ function writeResults(db: DatabaseSync, jobId: string, results: readonly ScanRes
       result.discoveredConversations,
       result.emittedMessages,
       result.skipped,
+      JSON.stringify(result.memoryIds ?? []),
       JSON.stringify(result.errors),
       now
     );
@@ -316,6 +363,7 @@ function readResults(db: DatabaseSync, jobId: string): ScanResult[] {
       discovered_conversations,
       emitted_messages,
       skipped,
+      memory_ids_json,
       errors_json
     FROM account_agent_source_scan_results
     WHERE uuid = ? AND job_id = ?
@@ -327,6 +375,7 @@ function readResults(db: DatabaseSync, jobId: string): ScanResult[] {
     discoveredConversations: row.discovered_conversations,
     emittedMessages: row.emitted_messages,
     skipped: row.skipped,
+    memoryIds: parseJsonArray<string>(row.memory_ids_json),
     errors: parseJsonArray<{ conversationId: string; reason: string }>(row.errors_json)
   }));
 }

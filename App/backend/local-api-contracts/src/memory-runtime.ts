@@ -10,7 +10,7 @@ export const CursorSchema = z.string();
 export type Cursor = z.infer<typeof CursorSchema>;
 
 /** Schema for memory kind. */
-export const MemoryKindSchema = z.enum(["trace", "policy", "world_model", "skill"]);
+export const MemoryKindSchema = z.enum(["trace", "span", "policy", "world_model", "skill"]);
 export type MemoryKind = z.infer<typeof MemoryKindSchema>;
 
 /** Schema for memory layer. */
@@ -33,6 +33,7 @@ export const JobTypeSchema = z.enum([
   "reflection",
   "embedding",
   "reward",
+  "span_big_turn",
   "l2_association",
   "l2_induction",
   "l3_abstraction",
@@ -85,6 +86,32 @@ export const MemoryMetricsSchema = z.object({
 });
 export type MemoryMetrics = z.infer<typeof MemoryMetricsSchema>;
 
+export const MemoryProcessingStateSchema = z.enum([
+  "summary_pending",
+  "summarizing",
+  "embedding_pending",
+  "embedding",
+  "ready",
+  "ready_text_only",
+  "failed"
+]);
+export type MemoryProcessingState = z.infer<typeof MemoryProcessingStateSchema>;
+
+export const MemoryProcessingRecordSchema = z.object({
+  memoryId: NonEmptyStringSchema,
+  state: MemoryProcessingStateSchema,
+  stage: z.enum(["summary", "embedding"]).nullable().optional(),
+  activeJobId: NonEmptyStringSchema.nullable().optional(),
+  attemptCount: z.number().int().nonnegative(),
+  manualRetryCount: z.number().int().nonnegative(),
+  retryAction: z.enum(["retry", "open_settings", "none"]),
+  errorCode: z.string().nullable().optional(),
+  errorMessage: z.string().nullable().optional(),
+  failedAt: IsoTimeSchema.nullable().optional(),
+  updatedAt: IsoTimeSchema
+});
+export type MemoryProcessingRecord = z.infer<typeof MemoryProcessingRecordSchema>;
+
 export const MemoryListItemSchema = z.object({
   id: NonEmptyStringSchema,
   kind: MemoryKindSchema,
@@ -93,6 +120,7 @@ export const MemoryListItemSchema = z.object({
   title: NonEmptyStringSchema,
   summary: z.string(),
   tags: z.array(z.string()),
+  processing: MemoryProcessingRecordSchema.optional(),
   metrics: MemoryMetricsSchema.optional(),
   metadata: UnknownRecordSchema.optional(),
   createdAt: IsoTimeSchema,
@@ -210,7 +238,8 @@ export const MemoryHealthSnapshotSchema = z.object({
 export type MemoryHealthSnapshot = z.infer<typeof MemoryHealthSnapshotSchema>;
 
 export const MemoryReloadConfigInputSchema = RuntimeRequestFieldsSchema.extend({
-  reason: z.string().optional()
+  reason: z.string().optional(),
+  restartFailedProcessing: z.boolean().optional()
 });
 export type MemoryReloadConfigInput = z.infer<typeof MemoryReloadConfigInputSchema>;
 
@@ -271,7 +300,6 @@ export const StartTurnOutputSchema = z.object({
   turnId: NonEmptyStringSchema,
   contextPacketId: NonEmptyStringSchema,
   sessionId: NonEmptyStringSchema,
-  episodeId: NonEmptyStringSchema,
   injectedContext: InjectedContextSchema,
   searchEventId: NonEmptyStringSchema,
   sourceMemoryIds: z.array(NonEmptyStringSchema),
@@ -294,7 +322,7 @@ export const CompleteTurnInputSchema = RuntimeRequestFieldsSchema.extend({
   artifacts: z.array(z.unknown()).optional(),
   sourceMemoryIds: z.array(NonEmptyStringSchema).optional(),
   usage: z.record(z.string(), z.unknown()).optional(),
-  status: z.enum(["succeeded", "failed", "cancelled"]).optional()
+  status: z.enum(["succeeded", "failed"]).optional()
 });
 export type CompleteTurnInput = z.infer<typeof CompleteTurnInputSchema>;
 
@@ -487,6 +515,25 @@ export const EnqueueImportSummariesOutputSchema = z.object({
   serverTime: IsoTimeSchema
 });
 export type EnqueueImportSummariesOutput = z.infer<typeof EnqueueImportSummariesOutputSchema>;
+
+export const MemoryProcessingStatusInputSchema = RuntimeRequestFieldsSchema.extend({
+  memoryIds: z.array(NonEmptyStringSchema).max(10_000)
+});
+export type MemoryProcessingStatusInput = z.infer<typeof MemoryProcessingStatusInputSchema>;
+
+export const MemoryProcessingStatusOutputSchema = z.object({
+  items: z.array(MemoryProcessingRecordSchema),
+  serverTime: IsoTimeSchema
+});
+export type MemoryProcessingStatusOutput = z.infer<typeof MemoryProcessingStatusOutputSchema>;
+
+export const RetryMemoryProcessingOutputSchema = z.object({
+  accepted: z.boolean(),
+  processing: MemoryProcessingRecordSchema,
+  job: JobRefSchema.optional(),
+  serverTime: IsoTimeSchema
+});
+export type RetryMemoryProcessingOutput = z.infer<typeof RetryMemoryProcessingOutputSchema>;
 
 /** Schema for panel items input. */
 export const PanelItemsInputSchema = z.object({

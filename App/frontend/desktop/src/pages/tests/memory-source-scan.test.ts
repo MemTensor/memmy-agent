@@ -101,6 +101,7 @@ describe("startAgentSourceScan", () => {
     });
 
     expect(clients.agentSources.startScan).toHaveBeenCalledWith({ sourceId: "openclaw" });
+    expect(actions[0]).toEqual(appActions.agentSourceScanStarted("openclaw"));
     expect(actions).toContainEqual(appActions.agentSourceScanProgressReceived({
       jobId: "job-source",
       sourceId: "openclaw",

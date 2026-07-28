@@ -2,7 +2,7 @@
 
 Intent map:
 - finish a turn and persist the interaction -> `memmy-memory turn complete <turnId>`;
-- record a failed or cancelled turn outcome -> `memmy-memory turn complete <turnId> --status failed|cancelled`;
+- record a failed turn outcome -> `memmy-memory turn complete <turnId> --status failed`;
 - connect the final answer to the session and query -> `memmy-memory turn complete <turnId> --session-id <id> --query <text> --answer <text>`.
 
 Use this command when:
@@ -15,7 +15,7 @@ API shape:
 - `turnId` is sent in the URL path;
 - the CLI sends a JSON body;
 - `sessionId`, `query`, and `answer` are required;
-- `status` is optional and normalized to `succeeded`, `failed`, or `cancelled`.
+- `status` is optional and normalized to `succeeded` or `failed`.
 - `source` should be passed as `--source <agent-source>` by installed agent skills.
 
 Never store:
@@ -36,7 +36,7 @@ Common flags:
 - `--session-id <id>`
 - `--query <text>`
 - `--answer <text>`
-- `--status <succeeded|failed|cancelled>`
+- `--status <succeeded|failed>`
 - `--source <agent-source>`
 
 Example:
@@ -50,4 +50,5 @@ Working rules:
 - keep `query` faithful to the user request or task;
 - keep `answer` accurate to the actual result;
 - use `--status failed` when the task failed but the result is still useful to remember;
+- do not call this command for a user-cancelled turn;
 - save returned memory ids when later inspection or deletion may be needed.

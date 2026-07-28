@@ -12,7 +12,12 @@ import { OUTBOUND_META_AGENT_UI, MessageBus, OutboundMessage } from "../../core/
 import { builtinCommandPalette } from "../../command/builtin.js";
 import { loadConfig } from "../../config/loader.js";
 import { getMediaDir, getWorkspacePath } from "../../config/paths.js";
+import type { CronService } from "../../cron/service.js";
 import { goalStateWsBlob } from "../../core/session/goal-state.js";
+import {
+  readWebuiSessionBinding,
+  type Session,
+} from "../../core/session/manager.js";
 import { websocketTurnWallStartedAt, websocketTurnWallStartTimes } from "../../core/session/webui-turns.js";
 import type { WebuiTitleService } from "../../core/session/webui-title.js";
 import { scrubSubagentMessagesForChannel } from "../../utils/subagent-channel-display.js";
@@ -20,7 +25,19 @@ import {
   mcpPresetsSettingsAction,
   normalizeMcpPresetMentions,
 } from "../../entrypoints/frontend-bridge/mcp-presets-api.js";
-import { readWebuiSidebarState, writeWebuiSidebarState } from "../../entrypoints/frontend-bridge/sidebar-state.js";
+import {
+  readWebuiSidebarState,
+  removeWebuiSidebarSessionKeys,
+  replaceWebuiSidebarState,
+  WebuiSidebarStateConflictError,
+} from "../../entrypoints/frontend-bridge/sidebar-state.js";
+import {
+  assertWebuiWorkspaceAvailable,
+  ProjectStore,
+  WebuiProjectError,
+  type WebuiProject,
+  type WebuiSessionTarget,
+} from "../../entrypoints/frontend-bridge/projects.js";
 import {
   createModelConfiguration,
   settingsPayload,
@@ -34,9 +51,14 @@ import { deleteWebuiThread } from "../../entrypoints/frontend-bridge/thread-disk
 import {
   appendTranscriptObject,
   buildWebuiThreadResponse,
+  readTranscriptLines,
   rewriteLocalMarkdownImages,
 } from "../../entrypoints/frontend-bridge/transcript.js";
 import type { ChannelAdminApi } from "../../entrypoints/frontend-bridge/channels-api.js";
+import {
+  removeSessionDagFiles,
+  type SessionDagQueueManager,
+} from "../../session-dag/index.js";
 import { MAX_FILE_SIZE } from "../../utils/media-decode.js";
 
 type Query = Record<string, string[]>;
@@ -71,12 +93,23 @@ type WebuiUploadClassification = {
   extension: string;
   maxBytes: number;
 };
+type InflightWebuiMessageRequest = {
+  digest: string;
+  connections: Set<any>;
+};
 type WebSocketChannelOptions = {
   sessionManager?: any;
+  projectStore?: ProjectStore | null;
   staticDistPath?: string | null;
   workspacePath?: string | null;
   runtimeModelName?: RuntimeModelNameResolver;
   cancelActiveTasks?: (sessionKey: string) => Promise<number>;
+  closeBrowserChat?: (channel: string, chatId: string) => Promise<void>;
+  fileMemoryEnabled?: boolean;
+};
+type SessionDeletionServices = {
+  cronService: CronService;
+  sessionDagQueue: SessionDagQueueManager | null;
 };
 export type WebuiLanguage = "zh-CN" | "en-US";
 
@@ -135,6 +168,7 @@ const DATA_URL_MIME_RE = /^data:([^;]+);base64,/i;
 const MAX_ISSUED_TOKENS = 10_000;
 const MAX_HTTP_JSON_BODY_BYTES = 64 * 1024;
 const MAX_ARTIFACT_STAGING_BYTES = 100 * 1024 * 1024;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export function stripTrailingSlash(value: string): string {
   if (!value) return "/";
@@ -503,20 +537,31 @@ export class WebSocketChannel extends BaseChannel {
   staticDistPath: string | null = null;
   runtimeModelName: RuntimeModelNameResolver = null;
   workspacePath: string;
+  readonly fileMemoryEnabled: boolean;
   cancelActiveTasks: ((sessionKey: string) => Promise<number>) | null = null;
+  closeBrowserChat: ((channel: string, chatId: string) => Promise<void>) | null = null;
   server: any = null;
   channelAdmin: ChannelAdminApi | null = null;
   webuiTitleService: WebuiTitleService | null = null;
+  projectStore: ProjectStore | null = null;
+  inflightWebuiMessageRequests = new Map<string, InflightWebuiMessageRequest>();
+  sessionDeletionServices: SessionDeletionServices | null = null;
+  projectDeletionCoordinators = new Map<string, Promise<string[]>>();
+  projectDeletionRetryTimers = new Map<string, NodeJS.Timeout>();
+  pendingProjectDeleteContinuation: Promise<void> | null = null;
 
   constructor(config: any = {}, bus?: any, options: WebSocketChannelOptions = {}) {
     const normalized = config instanceof WebSocketConfig ? config : new WebSocketConfig(config);
     super("websocket", normalized, bus);
     this.config = normalized;
     this.sessionManager = options.sessionManager ?? config?.sessionManager ?? null;
+    this.projectStore = options.projectStore ?? config?.projectStore ?? null;
     const staticDistPath = options.staticDistPath ?? config?.staticDistPath ?? null;
     this.staticDistPath = staticDistPath ? path.resolve(String(staticDistPath)) : null;
     this.runtimeModelName = options.runtimeModelName ?? config?.runtimeModelName ?? null;
+    this.fileMemoryEnabled = options.fileMemoryEnabled === true;
     this.cancelActiveTasks = options.cancelActiveTasks ?? config?.cancelActiveTasks ?? null;
+    this.closeBrowserChat = options.closeBrowserChat ?? config?.closeBrowserChat ?? null;
     const workspacePath = options.workspacePath ?? config?.workspacePath ?? getWorkspacePath();
     this.workspacePath = path.resolve(String(workspacePath));
   }
@@ -527,6 +572,15 @@ export class WebSocketChannel extends BaseChannel {
 
   setWebuiTitleService(service: WebuiTitleService | null): void {
     this.webuiTitleService = service;
+  }
+
+  setProjectStore(projectStore: ProjectStore): void {
+    this.projectStore = projectStore;
+  }
+
+  setSessionDeletionServices(services: SessionDeletionServices): void {
+    this.sessionDeletionServices = services;
+    this.schedulePendingProjectDeletionContinuation();
   }
 
   static override defaultConfig(): Record<string, any> {
@@ -563,6 +617,195 @@ export class WebSocketChannel extends BaseChannel {
     this.connectionDefaultChats.delete(connection);
   }
 
+  safeCleanupConnection(connection: any): void {
+    try {
+      this.cleanupConnection(connection);
+    } catch {
+      // Cleanup is connection-local and idempotent. A broken connection must
+      // never affect the gateway or another subscriber.
+    }
+  }
+
+  private webuiRequestKey(sessionKey: string, clientRequestId: string): string {
+    return `${sessionKey}\0${clientRequestId}`;
+  }
+
+  private parseWebuiSessionTarget(value: unknown): WebuiSessionTarget | null {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const target = value as Record<string, unknown>;
+    const keys = Object.keys(target);
+    if (target.kind === "standalone" && keys.length === 1) {
+      return { kind: "standalone" };
+    }
+    if (
+      target.kind === "project"
+      && keys.length === 2
+      && keys.includes("projectId")
+      && typeof target.projectId === "string"
+      && UUID_RE.test(target.projectId)
+    ) {
+      return { kind: "project", projectId: target.projectId };
+    }
+    return null;
+  }
+
+  private webuiMessageDigest({
+    chatId,
+    content,
+    mediaPaths,
+    language,
+    target,
+  }: {
+    chatId: string;
+    content: string;
+    mediaPaths: string[];
+    language: WebuiLanguage | null;
+    target: WebuiSessionTarget | null;
+  }): string {
+    return crypto.createHash("sha256").update(JSON.stringify({
+      chat_id: chatId,
+      content,
+      media_paths: mediaPaths,
+      language,
+      target,
+    })).digest("hex");
+  }
+
+  private acceptedSessionMessage(
+    session: Session,
+    clientRequestId: string,
+  ): Record<string, any> | null {
+    for (let index = session.messages.length - 1; index >= 0; index -= 1) {
+      const message = session.messages[index];
+      if (
+        message?.role === "user"
+        && message?.client_request_id === clientRequestId
+      ) {
+        return message;
+      }
+    }
+    return null;
+  }
+
+  private ensureAcceptedTranscript(
+    chatId: string,
+    clientRequestId: string,
+  ): void {
+    const sessionKey = `websocket:${chatId}`;
+    if (readTranscriptLines(sessionKey).some(
+      (line) => line?.event === "user" && line?.client_request_id === clientRequestId,
+    )) {
+      return;
+    }
+    const session = this.sessionManager?.get?.(sessionKey) as Session | null;
+    const message = session ? this.acceptedSessionMessage(session, clientRequestId) : null;
+    if (!message) return;
+    const wire: Record<string, any> = {
+      event: "user",
+      chat_id: chatId,
+      text: typeof message.content === "string" ? message.content : "",
+      client_request_id: clientRequestId,
+    };
+    if (Array.isArray(message.media) && message.media.length) {
+      wire.media_paths = [...message.media];
+    }
+    if (Array.isArray(message.mcp_presets) && message.mcp_presets.length) {
+      wire.mcp_presets = structuredClone(message.mcp_presets);
+    }
+    this.tryAppendWebuiTranscript(chatId, wire);
+  }
+
+  private async sendWebuiRequestError(
+    connection: any,
+    {
+      chatId,
+      clientRequestId = null,
+      detail,
+      reason,
+    }: {
+      chatId: string;
+      clientRequestId?: string | null;
+      detail: string;
+      reason: string;
+    },
+  ): Promise<void> {
+    await this.sendEvent(connection, "error", {
+      chat_id: chatId,
+      ...(clientRequestId ? { client_request_id: clientRequestId } : {}),
+      detail,
+      reason,
+    });
+  }
+
+  private resolveWebuiMessageBinding(
+    sessionKey: string,
+    targetValue: unknown,
+  ): { binding: { projectId: string | null; cwd: string }; created: boolean } {
+    const existing = this.sessionManager?.get?.(sessionKey) as Session | null;
+    if (existing) {
+      const binding = readWebuiSessionBinding(existing);
+      if (binding.projectId !== null) {
+        const registry = this.requireProjectStore().snapshot();
+        if (registry.state === "corrupt") {
+          throw new WebuiProjectError("project_registry_corrupt", 503);
+        }
+        if (this.requireProjectStore().isDeleting(binding.projectId)) {
+          throw new WebuiProjectError("project_removed", 409);
+        }
+      }
+      let canonical: string;
+      try {
+        canonical = assertWebuiWorkspaceAvailable(binding.cwd);
+      } catch {
+        throw new WebuiProjectError("workspace_unavailable", 422);
+      }
+      if (canonical !== binding.cwd) {
+        throw new WebuiProjectError("workspace_unavailable", 422);
+      }
+      return { binding, created: false };
+    }
+
+    const target = this.parseWebuiSessionTarget(targetValue);
+    if (!target) {
+      throw new WebuiProjectError(
+        targetValue == null ? "session_target_required" : "session_target_invalid",
+        400,
+      );
+    }
+    let binding: { projectId: string | null; cwd: string };
+    if (target.kind === "standalone") {
+      binding = {
+        projectId: null,
+        cwd: assertWebuiWorkspaceAvailable(this.workspacePath),
+      };
+    } else {
+      const store = this.requireProjectStore();
+      const registry = store.snapshot();
+      if (registry.state === "corrupt") {
+        throw new WebuiProjectError("project_registry_corrupt", 503);
+      }
+      if (store.isDeleting(target.projectId)) {
+        throw new WebuiProjectError("project_removed", 409);
+      }
+      const project = store.getActive(target.projectId);
+      if (!project) throw new WebuiProjectError("project_not_found", 404);
+      let cwd: string;
+      try {
+        cwd = assertWebuiWorkspaceAvailable(project.rootPath);
+      } catch {
+        throw new WebuiProjectError("project_unavailable", 422);
+      }
+      if (cwd !== project.rootPath) {
+        throw new WebuiProjectError("project_unavailable", 422);
+      }
+      binding = { projectId: project.id, cwd };
+    }
+    return {
+      binding: this.sessionManager.reserveWebuiSessionBinding(sessionKey, binding),
+      created: true,
+    };
+  }
+
   async maybePushActiveGoalState(chatId: string): Promise<void> {
     if (!this.sessionManager) return;
     const row = this.readSessionFile(`websocket:${chatId}`);
@@ -595,7 +838,7 @@ export class WebSocketChannel extends BaseChannel {
           started_at: startedAt,
           ...(turnId ? { turn_id: turnId } : {}),
         };
-    await this.safeSendTo(connection, JSON.stringify(payload));
+    await this.safeSendTo(connection, payload);
   }
 
   async hydrateAfterSubscribe(chatId: string): Promise<void> {
@@ -603,20 +846,26 @@ export class WebSocketChannel extends BaseChannel {
     await this.maybePushTurnRunWallClock(chatId);
   }
 
-  async safeSendTo(connection: any, raw: string): Promise<void> {
+  async safeSendTo(connection: any, payload: string | Record<string, any>): Promise<void> {
     try {
+      const raw = typeof payload === "string" ? payload : JSON.stringify(payload);
       if (typeof connection?.send === "function") await connection.send(raw);
     } catch {
       // A renderer can close its socket while subscription hydration or a
       // broadcast is still in flight. Treat that as a per-connection event;
       // rejecting here would escape the fire-and-forget connection loop and
       // terminate the packaged Agent gateway process.
-      this.cleanupConnection(connection);
+      try {
+        connection?.close?.(1011, "connection send failed");
+      } catch {
+        // The socket can already be gone.
+      }
+      this.safeCleanupConnection(connection);
     }
   }
 
   async sendEvent(connection: any, event: string, fields: Record<string, any> = {}): Promise<void> {
-    await this.safeSendTo(connection, JSON.stringify({ event, ...fields }));
+    await this.safeSendTo(connection, { event, ...fields });
   }
 
   expectedPath(): string {
@@ -708,20 +957,54 @@ export class WebSocketChannel extends BaseChannel {
   handleSessionsList(request: any): HttpLikeResponse {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
     if (!this.sessionManager) return httpError(503, "session manager unavailable");
-    const sessions = this.sessionManager.listSessions();
-    const cleaned = Array.isArray(sessions)
-      ? sessions.flatMap((session: any) => {
+    return httpJsonResponse(this.webuiSessionSnapshot());
+  }
+
+  webuiSessionSnapshot(): Record<string, any> {
+    this.schedulePendingProjectDeletionContinuation();
+    const registry = this.projectStore?.snapshot() ?? { state: "ready" as const, projects: [] };
+    const records = typeof this.sessionManager?.listWebuiSessionRecords === "function"
+      ? this.sessionManager.listWebuiSessionRecords() as Session[]
+      : null;
+    const rawSessions = records
+      ? records.map((session) => {
+          if (typeof this.sessionManager?.webuiSessionSummary === "function") {
+            return this.sessionManager.webuiSessionSummary(session);
+          }
+          return {
+            key: session.key,
+            title: session.metadata?.title,
+            preview: "",
+            updatedAt: session.updatedAt,
+            ...readWebuiSessionBinding(session),
+          };
+        })
+      : (this.sessionManager?.listSessions?.() ?? []);
+    const sessions = Array.isArray(rawSessions)
+      ? rawSessions.flatMap((session: any) => {
           const key = session?.key;
           if (typeof key !== "string" || !this.isWebsocketChannelSessionKey(key)) return [];
+          if (
+            registry.state === "ready"
+            && typeof session.projectId === "string"
+            && this.projectStore?.isDeleting(session.projectId)
+          ) {
+            return [];
+          }
           const row = { ...session };
           delete row.path;
-          const chatId = key.split(":", 2)[1] ?? "";
+          const chatId = key.slice("websocket:".length);
           const startedAt = websocketTurnWallStartedAt(chatId);
           if (startedAt != null) row.run_started_at = startedAt;
           return [row];
         })
       : [];
-    return httpJsonResponse({ sessions: cleaned });
+    sessions.sort((left: any, right: any) => String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? "")));
+    return {
+      projectRegistryState: registry.state,
+      projects: registry.projects,
+      sessions,
+    };
   }
 
   handleSettings(request: any): HttpLikeResponse {
@@ -749,7 +1032,12 @@ export class WebSocketChannel extends BaseChannel {
     } catch {
       sessionDagEnabled = true;
     }
-    return httpJsonResponse({ commands: builtinCommandPalette({ sessionDagEnabled }) });
+    return httpJsonResponse({
+      commands: builtinCommandPalette({
+        sessionDagEnabled,
+        fileMemoryEnabled: this.fileMemoryEnabled,
+      }),
+    });
   }
 
   handleWebuiSidebarState(request: any): HttpLikeResponse {
@@ -759,20 +1047,159 @@ export class WebSocketChannel extends BaseChannel {
 
   handleWebuiSidebarStateUpdate(request: any): HttpLikeResponse {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
-    const raw = queryFirst(parseQuery(String(request?.path ?? "/")), "state");
-    if (raw == null) return httpError(400, "missing state");
     let decoded: any;
     try {
-      decoded = JSON.parse(raw);
+      decoded = JSON.parse(requestBodyText(request));
     } catch {
-      return httpError(400, "state must be JSON");
+      return httpJsonResponse(
+        { code: "project_request_invalid", message: "body must be JSON" },
+        { status: 400 },
+      );
     }
     if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) return httpError(400, "state must be an object");
+    const baseUpdatedAt = decoded.base_updated_at;
+    const state = decoded.state;
+    if ((baseUpdatedAt !== null && typeof baseUpdatedAt !== "string") || !state || typeof state !== "object" || Array.isArray(state)) {
+      return httpError(400, "invalid sidebar state update");
+    }
     try {
-      return httpJsonResponse(writeWebuiSidebarState(decoded));
+      return httpJsonResponse(replaceWebuiSidebarState(baseUpdatedAt, state));
     } catch (error) {
+      if (error instanceof WebuiSidebarStateConflictError) {
+        return httpJsonResponse(
+          {
+            code: error.code,
+            message: error.message,
+            sidebarState: error.sidebarState,
+          },
+          { status: 409 },
+        );
+      }
       if (error instanceof Error && error.message) return httpError(400, error.message);
       return httpError(500, "failed to write sidebar state");
+    }
+  }
+
+  projectErrorResponse(error: unknown): HttpLikeResponse {
+    if (error instanceof WebuiProjectError) {
+      return httpJsonResponse(
+        { code: error.code, message: error.message },
+        { status: error.status },
+      );
+    }
+    return httpJsonResponse(
+      { code: "project_operation_failed", message: "project operation failed" },
+      { status: 500 },
+    );
+  }
+
+  private requireProjectStore(): ProjectStore {
+    if (!this.projectStore) {
+      throw new WebuiProjectError("project_operation_failed", 503, "project store unavailable");
+    }
+    return this.projectStore;
+  }
+
+  private parseProjectBody(request: HttpRequestLike): Record<string, any> {
+    let body: unknown;
+    try {
+      body = JSON.parse(requestBodyText(request));
+    } catch {
+      throw new WebuiProjectError("project_request_invalid", 400);
+    }
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      throw new WebuiProjectError("project_request_invalid", 400);
+    }
+    return body as Record<string, any>;
+  }
+
+  private activeProject(id: string): WebuiProject {
+    const store = this.requireProjectStore();
+    if (store.isDeleting(id)) throw new WebuiProjectError("project_deleting", 409);
+    const project = store.getActive(id);
+    if (!project) throw new WebuiProjectError("project_not_found", 404);
+    return project;
+  }
+
+  async handleProjectCreate(request: HttpRequestLike): Promise<HttpLikeResponse> {
+    if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+    if ((request.method ?? "GET").toUpperCase() !== "POST") return httpError(405, "method not allowed");
+    try {
+      await this.continuePendingProjectDeletes();
+      const body = this.parseProjectBody(request);
+      const keys = Object.keys(body);
+      if (
+        keys.some((key) => !["mode", "path", "name"].includes(key))
+        || typeof body.path !== "string"
+        || (body.mode !== "blank" && body.mode !== "existing")
+        || (body.name != null && typeof body.name !== "string")
+      ) {
+        throw new WebuiProjectError("project_request_invalid", 400);
+      }
+      const before = this.requireProjectStore().snapshot();
+      if (before.state === "corrupt") throw new WebuiProjectError("project_registry_corrupt", 503);
+      const existing = before.projects.find((project) => {
+        try {
+          return project.rootPath === assertWebuiWorkspaceAvailable(body.path);
+        } catch {
+          return false;
+        }
+      });
+      const project = this.requireProjectStore().add(body.path, body.mode, body.name);
+      return httpJsonResponse(
+        { project, snapshot: this.webuiSessionSnapshot() },
+        { status: existing ? 200 : 201 },
+      );
+    } catch (error) {
+      return this.projectErrorResponse(error);
+    }
+  }
+
+  async handleProjectUpdate(request: HttpRequestLike, rawId: string): Promise<HttpLikeResponse> {
+    if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+    if ((request.method ?? "GET").toUpperCase() !== "PATCH") return httpError(405, "method not allowed");
+    try {
+      await this.continuePendingProjectDeletes();
+      const id = decodeApiKey(rawId);
+      if (!id) throw new WebuiProjectError("project_not_found", 404);
+      const body = this.parseProjectBody(request);
+      const keys = Object.keys(body);
+      if (
+        keys.length !== 1
+        || (keys[0] !== "name" && keys[0] !== "pinned")
+      ) {
+        throw new WebuiProjectError("project_request_invalid", 400);
+      }
+      this.activeProject(id);
+      const project = keys[0] === "name"
+        ? this.requireProjectStore().rename(id, body.name)
+        : this.requireProjectStore().setPinned(id, body.pinned);
+      return httpJsonResponse({ project, snapshot: this.webuiSessionSnapshot() });
+    } catch (error) {
+      return this.projectErrorResponse(error);
+    }
+  }
+
+  async handleProjectReveal(request: HttpRequestLike, rawId: string): Promise<HttpLikeResponse> {
+    if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+    if ((request.method ?? "GET").toUpperCase() !== "POST") return httpError(405, "method not allowed");
+    try {
+      await this.continuePendingProjectDeletes();
+      const id = decodeApiKey(rawId);
+      if (!id) throw new WebuiProjectError("project_not_found", 404);
+      const project = this.activeProject(id);
+      const canonical = assertWebuiWorkspaceAvailable(project.rootPath);
+      if (canonical !== project.rootPath) {
+        throw new WebuiProjectError("project_directory_unavailable", 422);
+      }
+      try {
+        revealFileInSystemManager(project.rootPath);
+      } catch {
+        throw new WebuiProjectError("project_reveal_unavailable", 500);
+      }
+      return httpJsonResponse({ ok: true });
+    } catch (error) {
+      return this.projectErrorResponse(error);
     }
   }
 
@@ -893,7 +1320,7 @@ export class WebSocketChannel extends BaseChannel {
     const data = this.readSessionFile(decodedKey);
     if (!data) return httpError(404, "session not found");
     if (Array.isArray(data.messages)) scrubSubagentMessagesForChannel(data.messages);
-    this.augmentMediaUrls(data);
+    this.augmentMediaUrls(data, decodedKey);
     return httpJsonResponse(data);
   }
 
@@ -905,9 +1332,9 @@ export class WebSocketChannel extends BaseChannel {
     const sessionMessages = this.readSessionFile(decodedKey)?.messages;
     const data = buildWebuiThreadResponse(decodedKey, {
       sessionMessages: Array.isArray(sessionMessages) ? sessionMessages : null,
-      augmentUserMedia: (paths: string[]) => this.augmentTranscriptUserMedia(paths),
-      augmentAssistantMedia: (paths: string[]) => paths.flatMap((p) => this.webuiMediaAttachmentForPath(p) ?? []),
-      augmentAssistantText: (text: string) => this.rewriteLocalMarkdownImages(text),
+      augmentUserMedia: (paths: string[]) => this.augmentTranscriptUserMedia(paths, decodedKey),
+      augmentAssistantMedia: (paths: string[]) => paths.flatMap((p) => this.webuiMediaAttachmentForPath(p, decodedKey) ?? []),
+      augmentAssistantText: (text: string) => this.rewriteLocalMarkdownImages(text, decodedKey),
     });
     if (!data) return httpError(404, "webui thread not found");
     return httpJsonResponse(data);
@@ -962,14 +1389,16 @@ export class WebSocketChannel extends BaseChannel {
   handleArtifactResolve(request: HttpRequestLike): HttpLikeResponse {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
     if ((request.method ?? "GET").toUpperCase() !== "POST") return httpError(405, "method not allowed");
-    const requestedPath = artifactPathFromRequest(request);
-    if (!requestedPath) return httpError(400, "missing path");
-    const resolved = this.resolveOrStageArtifactPath(requestedPath);
+    const artifactRequest = artifactRequestFromRequest(request);
+    if (!artifactRequest) return httpError(400, "missing path or sessionKey");
+    const workspace = this.artifactSessionWorkspace(artifactRequest.sessionKey);
+    if (!workspace) return httpError(404, "session not found");
+    const resolved = this.resolveOrStageArtifactPath(artifactRequest.path, workspace);
     if (!resolved) return httpError(404, "artifact not found");
     return httpJsonResponse({
       ok: true,
       path: resolved.path,
-      name: path.basename(expandHomePath(requestedPath)) || path.basename(resolved.path),
+      name: path.basename(expandHomePath(artifactRequest.path)) || path.basename(resolved.path),
       kind: resolved.kind,
       ...(resolved.mediaUrl ? { media_url: resolved.mediaUrl } : {}),
     });
@@ -978,9 +1407,11 @@ export class WebSocketChannel extends BaseChannel {
   handleArtifactReveal(request: HttpRequestLike): HttpLikeResponse {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
     if ((request.method ?? "GET").toUpperCase() !== "POST") return httpError(405, "method not allowed");
-    const requestedPath = artifactPathFromRequest(request);
-    if (!requestedPath) return httpError(400, "missing path");
-    const resolved = this.resolveOrStageArtifactPath(requestedPath);
+    const artifactRequest = artifactRequestFromRequest(request);
+    if (!artifactRequest) return httpError(400, "missing path or sessionKey");
+    const workspace = this.artifactSessionWorkspace(artifactRequest.sessionKey);
+    if (!workspace) return httpError(404, "session not found");
+    const resolved = this.resolveOrStageArtifactPath(artifactRequest.path, workspace);
     if (!resolved) return httpError(404, "artifact not found");
     try {
       revealFileInSystemManager(resolved.path);
@@ -993,9 +1424,11 @@ export class WebSocketChannel extends BaseChannel {
   handleArtifactOpen(request: HttpRequestLike): HttpLikeResponse {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
     if ((request.method ?? "GET").toUpperCase() !== "POST") return httpError(405, "method not allowed");
-    const requestedPath = artifactPathFromRequest(request);
-    if (!requestedPath) return httpError(400, "missing path");
-    const resolved = this.resolveOrStageArtifactPath(requestedPath);
+    const artifactRequest = artifactRequestFromRequest(request);
+    if (!artifactRequest) return httpError(400, "missing path or sessionKey");
+    const workspace = this.artifactSessionWorkspace(artifactRequest.sessionKey);
+    if (!workspace) return httpError(404, "session not found");
+    const resolved = this.resolveOrStageArtifactPath(artifactRequest.path, workspace);
     if (!resolved) return httpError(404, "artifact not found");
     const result = openPathWithSystemDefault(resolved.path);
     if (!result.ok) return httpError(500, result.message);
@@ -1078,16 +1511,219 @@ export class WebSocketChannel extends BaseChannel {
     });
   }
 
-  handleSessionDelete(request: any, key: string): HttpLikeResponse {
+  private discardInflightForProject(projectId: string): void {
+    const sessionKeys = new Set<string>(
+      (this.sessionManager?.listWebuiSessionRecords?.() ?? [])
+        .flatMap((session: Session) => {
+          try {
+            return readWebuiSessionBinding(session).projectId === projectId
+              ? [session.key]
+              : [];
+          } catch {
+            return [];
+          }
+        }),
+    );
+    for (const sessionKey of this.sessionManager?.rejectWebuiSessionBindingReservationsForProject?.(projectId) ?? []) {
+      sessionKeys.add(sessionKey);
+    }
+    for (const [key, inflight] of this.inflightWebuiMessageRequests) {
+      const separator = key.lastIndexOf("\0");
+      const sessionKey = separator >= 0 ? key.slice(0, separator) : key;
+      if (!sessionKeys.has(sessionKey)) continue;
+      const clientRequestId = separator >= 0 ? key.slice(separator + 1) : "";
+      const chatId = sessionKey.startsWith("websocket:")
+        ? sessionKey.slice("websocket:".length)
+        : "";
+      this.inflightWebuiMessageRequests.delete(key);
+      for (const connection of inflight.connections) {
+        void this.sendWebuiRequestError(connection, {
+          chatId,
+          clientRequestId,
+          detail: "session_binding_rejected",
+          reason: "project_removed",
+        });
+      }
+    }
+  }
+
+  private async deleteSessionDag(sessionKey: string): Promise<void> {
+    await this.sessionDeletionServices?.sessionDagQueue?.closeSession(sessionKey);
+    removeSessionDagFiles(sessionKey);
+  }
+
+  async hardDeleteWebuiSessions(
+    sessionKeys: Iterable<string>,
+    { cancelRunning }: { cancelRunning: boolean },
+  ): Promise<string[]> {
+    const keys = [...new Set(sessionKeys)]
+      .filter((key) => this.isWebsocketChannelSessionKey(key))
+      .sort();
+    if (!keys.length) return [];
+    if (cancelRunning) {
+      for (const key of keys) await this.cancelActiveTasks?.(key);
+    }
+    for (const key of keys) {
+      const chatId = key.slice("websocket:".length);
+      await this.closeBrowserChat?.("websocket", chatId).catch(() => undefined);
+    }
+    for (const key of keys) await this.deleteSessionDag(key);
+    for (const key of keys) {
+      this.webuiTitleService?.discard(key);
+      deleteWebuiThread(key);
+    }
+    removeWebuiSidebarSessionKeys(keys);
+    for (const key of keys) {
+      const del = this.sessionManager?.hardDeleteSession
+        ?? this.sessionManager?.deleteSession
+        ?? this.sessionManager?.delete;
+      if (typeof del === "function") del.call(this.sessionManager, key);
+    }
+    return keys;
+  }
+
+  private projectSessionKeys(projectId: string): string[] {
+    return (this.sessionManager?.listWebuiSessionRecords?.() ?? [])
+      .flatMap((session: Session) => {
+        try {
+          return readWebuiSessionBinding(session).projectId === projectId
+            ? [session.key]
+            : [];
+        } catch {
+          return [];
+        }
+      })
+      .sort();
+  }
+
+  private async removeProjectSessions(projectId: string): Promise<string[]> {
+    if (!this.sessionDeletionServices) {
+      throw new WebuiProjectError(
+        "project_operation_failed",
+        503,
+        "session deletion services unavailable",
+      );
+    }
+    const deleted = new Set<string>();
+    while (true) {
+      const keys = this.projectSessionKeys(projectId);
+      if (!keys.length) {
+        if (!this.sessionManager?.hasWebuiSessionBindingReservationForProject?.(projectId)) {
+          return [...deleted].sort();
+        }
+        this.discardInflightForProject(projectId);
+        continue;
+      }
+      for (const key of keys) await this.cancelActiveTasks?.(key);
+      await this.sessionDeletionServices.cronService.removeWebuiJobsForSessionKeys(keys);
+      for (const key of await this.hardDeleteWebuiSessions(keys, { cancelRunning: false })) {
+        deleted.add(key);
+      }
+    }
+  }
+
+  private coordinateProjectSessionDeletion(projectId: string): Promise<string[]> {
+    const existing = this.projectDeletionCoordinators.get(projectId);
+    if (existing) return existing;
+    const coordinator = this.removeProjectSessions(projectId).finally(() => {
+      if (this.projectDeletionCoordinators.get(projectId) === coordinator) {
+        this.projectDeletionCoordinators.delete(projectId);
+      }
+    });
+    this.projectDeletionCoordinators.set(projectId, coordinator);
+    return coordinator;
+  }
+
+  private scheduleProjectDeletionRetry(projectId: string, attempt = 0): void {
+    if (this.projectDeletionRetryTimers.has(projectId)) return;
+    const schedule = [1_000, 5_000, 30_000, 300_000];
+    const delay = schedule[Math.min(attempt, schedule.length - 1)];
+    const timer = setTimeout(() => {
+      this.projectDeletionRetryTimers.delete(projectId);
+      void this.coordinateProjectSessionDeletion(projectId)
+        .then(() => this.projectStore?.finishDeleting(projectId))
+        .catch(() => this.scheduleProjectDeletionRetry(projectId, attempt + 1));
+    }, delay);
+    timer.unref?.();
+    this.projectDeletionRetryTimers.set(projectId, timer);
+  }
+
+  private schedulePendingProjectDeletionContinuation(): void {
+    if (this.pendingProjectDeleteContinuation || !this.projectStore || !this.sessionDeletionServices) {
+      return;
+    }
+    if (this.projectStore.snapshot().state === "corrupt") return;
+    const continuation = this.projectStore.continuePendingDeletes(async (projectId) => {
+      try {
+        await this.coordinateProjectSessionDeletion(projectId);
+      } catch (error) {
+        this.scheduleProjectDeletionRetry(projectId);
+        throw error;
+      }
+    }).finally(() => {
+      if (this.pendingProjectDeleteContinuation === continuation) {
+        this.pendingProjectDeleteContinuation = null;
+      }
+    });
+    this.pendingProjectDeleteContinuation = continuation;
+    void continuation.catch(() => undefined);
+  }
+
+  private async continuePendingProjectDeletes(): Promise<void> {
+    this.schedulePendingProjectDeletionContinuation();
+    await this.pendingProjectDeleteContinuation;
+  }
+
+  async handleProjectDelete(
+    request: HttpRequestLike,
+    rawId: string,
+  ): Promise<HttpLikeResponse> {
+    if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+    if ((request.method ?? "GET").toUpperCase() !== "DELETE") return httpError(405, "method not allowed");
+    try {
+      const id = decodeApiKey(rawId);
+      if (!id) throw new WebuiProjectError("project_not_found", 404);
+      const store = this.requireProjectStore();
+      const snapshot = store.snapshot();
+      if (snapshot.state === "corrupt") {
+        throw new WebuiProjectError("project_registry_corrupt", 503);
+      }
+      const active = snapshot.projects.some((project) => project.id === id);
+      if (!active && !store.isDeleting(id)) {
+        throw new WebuiProjectError("project_not_found", 404);
+      }
+      if (active) {
+        store.beginDeleting(id, (projectId) => {
+          this.discardInflightForProject(projectId);
+        });
+      }
+      let deletedSessionKeys: string[];
+      try {
+        deletedSessionKeys = await this.coordinateProjectSessionDeletion(id);
+        store.finishDeleting(id);
+      } catch (error) {
+        this.scheduleProjectDeletionRetry(id);
+        throw error;
+      }
+      return httpJsonResponse({
+        deletedId: id,
+        deletedSessionKeys,
+        snapshot: this.webuiSessionSnapshot(),
+      });
+    } catch (error) {
+      return this.projectErrorResponse(error);
+    }
+  }
+
+  async handleSessionDelete(request: any, key: string): Promise<HttpLikeResponse> {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
     if (!this.sessionManager) return httpError(503, "session manager unavailable");
     const decodedKey = decodeApiKey(key);
     if (decodedKey == null) return httpError(400, "invalid session key");
     if (!this.isWebsocketChannelSessionKey(decodedKey)) return httpError(404, "session not found");
-    const del = this.sessionManager.deleteSession ?? this.sessionManager.delete;
-    const deleted = typeof del === "function" ? del.call(this.sessionManager, decodedKey) : false;
-    deleteWebuiThread(decodedKey);
-    return httpJsonResponse({ deleted: Boolean(deleted) });
+    const existed = Boolean(this.sessionManager?.has?.(decodedKey));
+    await this.hardDeleteWebuiSessions([decodedKey], { cancelRunning: true });
+    return httpJsonResponse({ deleted: existed });
   }
 
   handleSessionTitleUpdate(request: any, key: string): HttpLikeResponse {
@@ -1112,7 +1748,7 @@ export class WebSocketChannel extends BaseChannel {
     return httpJsonResponse({ session });
   }
 
-  augmentMediaUrls(payload: Record<string, any>): void {
+  augmentMediaUrls(payload: Record<string, any>, sessionKey?: string | null): void {
     const messages = payload.messages;
     if (!Array.isArray(messages)) return;
     for (const msg of messages) {
@@ -1121,19 +1757,33 @@ export class WebSocketChannel extends BaseChannel {
       if (!Array.isArray(media) || !media.length) continue;
       const attachments = media
         .filter((entry: any): entry is string => typeof entry === "string" && Boolean(entry))
-        .map((entry) => this.webuiMediaAttachmentForPath(entry))
+        .map((entry) => this.webuiMediaAttachmentForPath(entry, sessionKey))
         .filter((entry): entry is WebuiMediaAttachment => Boolean(entry));
       if (attachments.length) msg.media_urls = attachments;
       delete msg.media;
     }
   }
 
-  resolveAllowedArtifactPath(rawPath: string): AllowedArtifactPath | null {
+  artifactSessionWorkspace(sessionKey: string): string | null {
+    if (!this.isWebsocketChannelSessionKey(sessionKey)) return null;
+    const session = this.sessionManager?.get?.(sessionKey) as Session | null;
+    if (!session) return null;
+    try {
+      return readWebuiSessionBinding(session).cwd;
+    } catch {
+      return null;
+    }
+  }
+
+  resolveAllowedArtifactPath(
+    rawPath: string,
+    sessionWorkspace: string,
+  ): AllowedArtifactPath | null {
     const expanded = expandHomePath(rawPath);
     const isAbsoluteRequest = path.isAbsolute(expanded) || rawPath.startsWith("~/");
     const candidate = path.isAbsolute(expanded)
       ? path.resolve(expanded)
-      : path.resolve(this.workspacePath, rawPath);
+      : path.resolve(sessionWorkspace, rawPath);
     let resolved: string;
     let stat: fs.Stats;
     try {
@@ -1142,7 +1792,7 @@ export class WebSocketChannel extends BaseChannel {
     } catch {
       return null;
     }
-    const workspaceRoot = realpathIfExists(this.workspacePath);
+    const workspaceRoot = realpathIfExists(sessionWorkspace);
     if (stat.isDirectory()) {
       if (isAbsoluteRequest || isPathInside(resolved, workspaceRoot)) {
         return { path: resolved, kind: "directory" };
@@ -1157,8 +1807,11 @@ export class WebSocketChannel extends BaseChannel {
       : null;
   }
 
-  resolveOrStageArtifactPath(rawPath: string): ResolvedArtifactPath | null {
-    const allowed = this.resolveAllowedArtifactPath(rawPath);
+  resolveOrStageArtifactPath(
+    rawPath: string,
+    sessionWorkspace: string,
+  ): ResolvedArtifactPath | null {
+    const allowed = this.resolveAllowedArtifactPath(rawPath, sessionWorkspace);
     if (allowed) {
       if (allowed.kind === "directory") {
         return { path: allowed.path, kind: "directory" };
@@ -1205,10 +1858,13 @@ export class WebSocketChannel extends BaseChannel {
     }
   }
 
-  augmentTranscriptUserMedia(paths: string[]): Array<Record<string, any>> {
+  augmentTranscriptUserMedia(
+    paths: string[],
+    sessionKey?: string | null,
+  ): Array<Record<string, any>> {
     const out: Array<Record<string, any>> = [];
     for (const p of paths) {
-      const att = this.webuiMediaAttachmentForPath(p);
+      const att = this.webuiMediaAttachmentForPath(p, sessionKey);
       if (!att) continue;
       out.push(att);
     }
@@ -1255,14 +1911,16 @@ export class WebSocketChannel extends BaseChannel {
   ): Promise<void> {
     if (!this.shouldSendTurnPayload(chatId, payload)) return;
     if (appendTranscript) this.tryAppendWebuiTranscript(chatId, payload);
-    const raw = JSON.stringify(payload);
-    for (const connection of targets ?? [...(this.subscriptions.get(chatId) ?? [])]) await this.safeSendTo(connection, raw);
+    for (const connection of targets ?? [...(this.subscriptions.get(chatId) ?? [])]) await this.safeSendTo(connection, payload);
   }
 
-  rewriteLocalMarkdownImages(text: string): string {
+  rewriteLocalMarkdownImages(text: string, sessionKey?: string | null): string {
+    const workspacePath = sessionKey
+      ? this.artifactSessionWorkspace(sessionKey) ?? this.workspacePath
+      : this.workspacePath;
     return rewriteLocalMarkdownImages(text, {
-      workspacePath: this.workspacePath,
-      signPath: (filePath: string) => this.signOrStageMediaPath(filePath),
+      workspacePath,
+      signPath: (filePath: string) => this.signOrStageMediaPath(filePath, workspacePath),
     });
   }
 
@@ -1319,6 +1977,7 @@ export class WebSocketChannel extends BaseChannel {
     channelAdminMatch = got.match(/^\/api\/channels\/weixin\/login\/([^/]+)$/);
     if (channelAdminMatch) return this.handleChannelAdmin(request, "weixin-login-poll", decodeURIComponent(channelAdminMatch[1]));
     if (got === "/api/sessions") return this.handleSessionsList(request);
+    if (got === "/api/projects") return this.handleProjectCreate(request);
     if (got === "/api/settings") return this.handleSettings(request);
     if (got === "/api/commands") return this.handleCommands(request);
     if (got === "/api/webui/sidebar-state") return this.handleWebuiSidebarState(request);
@@ -1344,6 +2003,17 @@ export class WebSocketChannel extends BaseChannel {
     if (match) return this.handleSessionDelete(request, match[1]);
     match = got.match(/^\/api\/sessions\/([^/]+)\/title$/);
     if (match) return this.handleSessionTitleUpdate(request, match[1]);
+    match = got.match(/^\/api\/projects\/([^/]+)\/reveal$/);
+    if (match) return this.handleProjectReveal(request, match[1]);
+    match = got.match(/^\/api\/projects\/([^/]+)$/);
+    if (match) {
+      if ((request.method ?? "GET").toUpperCase() === "PATCH") {
+        return this.handleProjectUpdate(request, match[1]);
+      }
+      if ((request.method ?? "GET").toUpperCase() === "DELETE") {
+        return this.handleProjectDelete(request, match[1]);
+      }
+    }
     match = got.match(/^\/api\/media\/([A-Za-z0-9_-]+)\/([A-Za-z0-9_-]+)$/);
     if (match) return this.handleMediaFetch(match[1], match[2]);
     if (got === this.expectedPath() && isWebsocketUpgrade(request)) {
@@ -1394,7 +2064,7 @@ export class WebSocketChannel extends BaseChannel {
           return;
         }
         connection.accept(head);
-        void this.connectionLoop(connection);
+        void this.connectionLoop(connection).catch((error) => this.handleConnectionLoopFailure(connection, error));
       } catch (error) {
         rejectUpgrade(socket, httpError(500, error instanceof Error ? error.message : "Internal Server Error"));
       }
@@ -1419,6 +2089,10 @@ export class WebSocketChannel extends BaseChannel {
     this.apiTokens.clear();
     this.streamTextBuffers.clear();
     this.activeTurnIdByChatId.clear();
+    this.inflightWebuiMessageRequests.clear();
+    this.sessionManager?.clearWebuiSessionBindingReservations?.();
+    for (const timer of this.projectDeletionRetryTimers.values()) clearTimeout(timer);
+    this.projectDeletionRetryTimers.clear();
   }
 
   async connectionLoop(connection: any): Promise<void> {
@@ -1463,8 +2137,22 @@ export class WebSocketChannel extends BaseChannel {
         });
       }
     } finally {
-      this.cleanupConnection(connection);
+      this.safeCleanupConnection(connection);
     }
+  }
+
+  handleConnectionLoopFailure(connection: any, error: unknown): void {
+    const errorType = error instanceof Error ? error.name : typeof error;
+    const remote = Array.isArray(connection?.remoteAddress)
+      ? String(connection.remoteAddress[0] ?? "unknown")
+      : String(connection?.remoteAddress ?? "unknown");
+    console.warn(`[websocket] connection loop failed (${errorType}, remote=${remote})`);
+    try {
+      connection?.close?.(1011, "connection loop failed");
+    } catch {
+      // The socket can already be gone.
+    }
+    this.safeCleanupConnection(connection);
   }
 
   override async handleMessage(
@@ -1489,7 +2177,7 @@ export class WebSocketChannel extends BaseChannel {
             isDm,
           };
     const messageMetadata = opts.metadata ?? {};
-    if (messageMetadata.webui) {
+    if (messageMetadata.webui && !messageMetadata.client_request_id) {
       const chatId = String(opts.chatId ?? "");
       const userObj: Record<string, any> = {
         event: "user",
@@ -1540,6 +2228,200 @@ export class WebSocketChannel extends BaseChannel {
       return "mime";
     }
     return "deprecated_payload";
+  }
+
+  private webuiBindingErrorReason(error: unknown): string {
+    if (error instanceof WebuiProjectError) return error.code;
+    const code = typeof (error as any)?.code === "string"
+      ? String((error as any).code)
+      : "";
+    if ([
+      "project_removed",
+      "workspace_missing",
+      "workspace_unavailable",
+      "workspace_conflict",
+    ].includes(code)) {
+      return code;
+    }
+    return "workspace_unavailable";
+  }
+
+  private async dispatchWebuiMessage(
+    connection: any,
+    clientId: string,
+    envelope: Record<string, any>,
+    chatId: string,
+    content: string,
+    mediaPaths: string[],
+  ): Promise<void> {
+    const sessionKey = `websocket:${chatId}`;
+    if (envelope.webui !== true) {
+      const legacyMetadata: Record<string, any> = {
+        remote: connection?.remoteAddress ?? null,
+      };
+      const language = normalizeWebuiLanguage(envelope.language);
+      if (language) legacyMetadata.webui_language = language;
+      const mcpPresets = normalizeMcpPresetMentions(envelope.mcp_presets);
+      if (mcpPresets.length) legacyMetadata.mcp_presets = mcpPresets;
+      await this.handleMessage({
+        senderId: clientId,
+        chatId,
+        content,
+        media: mediaPaths.length ? mediaPaths : undefined,
+        metadata: legacyMetadata,
+        isDm: false,
+      });
+      return;
+    }
+    const rawClientRequestId = envelope.client_request_id;
+    const clientRequestId = typeof rawClientRequestId === "string" && UUID_RE.test(rawClientRequestId)
+      ? rawClientRequestId
+      : null;
+    const existing = this.sessionManager?.get?.(sessionKey) as Session | null;
+    if (!clientRequestId && (!existing || rawClientRequestId != null || envelope.target != null)) {
+      await this.sendWebuiRequestError(connection, {
+        chatId,
+        detail: "message_request_rejected",
+        reason: "message_request_id_required",
+      });
+      return;
+    }
+
+    const language = normalizeWebuiLanguage(envelope.language);
+    const normalizedTarget = envelope.target == null
+      ? null
+      : this.parseWebuiSessionTarget(envelope.target);
+    if (envelope.target != null && !normalizedTarget) {
+      await this.sendWebuiRequestError(connection, {
+        chatId,
+        clientRequestId,
+        detail: "session_binding_rejected",
+        reason: "session_target_invalid",
+      });
+      return;
+    }
+    const digest = clientRequestId
+      ? this.webuiMessageDigest({
+          chatId,
+          content,
+          mediaPaths,
+          language,
+          target: normalizedTarget,
+        })
+      : null;
+    if (existing && clientRequestId) {
+      const accepted = this.acceptedSessionMessage(existing, clientRequestId);
+      if (accepted) {
+        if (accepted.webui_request_digest !== digest) {
+          await this.sendWebuiRequestError(connection, {
+            chatId,
+            clientRequestId,
+            detail: "message_request_rejected",
+            reason: "message_request_conflict",
+          });
+          return;
+        }
+        this.ensureAcceptedTranscript(chatId, clientRequestId);
+        await this.sendEvent(connection, "message_accepted", {
+          chat_id: chatId,
+          client_request_id: clientRequestId,
+        });
+        return;
+      }
+    }
+    if (existing && envelope.target != null) {
+      await this.sendWebuiRequestError(connection, {
+        chatId,
+        clientRequestId,
+        detail: "session_binding_rejected",
+        reason: "session_target_invalid",
+      });
+      return;
+    }
+
+    const requestKey = clientRequestId
+      ? this.webuiRequestKey(sessionKey, clientRequestId)
+      : null;
+    if (requestKey && digest) {
+      const inflight = this.inflightWebuiMessageRequests.get(requestKey);
+      if (inflight) {
+        if (inflight.digest !== digest) {
+          await this.sendWebuiRequestError(connection, {
+            chatId,
+            clientRequestId,
+            detail: "message_request_rejected",
+            reason: "message_request_conflict",
+          });
+        } else {
+          inflight.connections.add(connection);
+        }
+        return;
+      }
+    }
+
+    let createdReservation = false;
+    try {
+      const resolved = this.resolveWebuiMessageBinding(sessionKey, envelope.target);
+      createdReservation = resolved.created;
+    } catch (error) {
+      await this.sendWebuiRequestError(connection, {
+        chatId,
+        clientRequestId,
+        detail: "session_binding_rejected",
+        reason: this.webuiBindingErrorReason(error),
+      });
+      return;
+    }
+
+    if (requestKey && digest) {
+      this.inflightWebuiMessageRequests.set(requestKey, {
+        digest,
+        connections: new Set([connection]),
+      });
+    }
+    const metadata: Record<string, any> = {
+      remote: connection?.remoteAddress ?? null,
+      webui: envelope.webui === true,
+    };
+    if (clientRequestId && digest) {
+      metadata.client_request_id = clientRequestId;
+      metadata.webui_request_digest = digest;
+    }
+    if (language) metadata.webui_language = language;
+    const mcpPresets: any[] = normalizeMcpPresetMentions(envelope.mcp_presets);
+    if (!mcpPresets.length) mcpPresets.push(...normalizeMentionList(envelope.mcp_presets));
+    if (mcpPresets.length) metadata.mcp_presets = mcpPresets;
+    if (envelope.image_generation && typeof envelope.image_generation === "object" && envelope.image_generation.enabled === true) {
+      metadata.image_generation = {
+        enabled: true,
+        aspect_ratio: typeof envelope.image_generation.aspect_ratio === "string"
+          ? envelope.image_generation.aspect_ratio
+          : null,
+      };
+    }
+    try {
+      this.webuiTitleService?.trackUserMessage({ chatId, content, metadata, mediaPaths });
+      await this.handleMessage({
+        senderId: clientId,
+        chatId,
+        content,
+        media: mediaPaths.length ? mediaPaths : undefined,
+        metadata,
+        isDm: false,
+      });
+    } catch (error) {
+      if (createdReservation) {
+        this.sessionManager?.releaseWebuiSessionBindingReservation?.(sessionKey);
+        this.webuiTitleService?.discard(sessionKey);
+      }
+      if (requestKey) this.inflightWebuiMessageRequests.delete(requestKey);
+      await this.sendWebuiRequestError(connection, {
+        chatId,
+        clientRequestId,
+        detail: "session_binding_rejected",
+        reason: this.webuiBindingErrorReason(error),
+      });
+    }
   }
 
   async dispatchEnvelope(connection: any, clientId: string, envelope: Record<string, any>): Promise<void> {
@@ -1636,28 +2518,14 @@ export class WebSocketChannel extends BaseChannel {
       if (!content.trim() && !mediaPaths.length) return this.sendEvent(connection, "error", { chat_id: chatId, detail: "missing content" });
       this.attachConnection(connection, chatId);
       await this.hydrateAfterSubscribe(chatId);
-      const metadata: Record<string, any> = { remote: connection?.remoteAddress ?? null };
-      if (envelope.webui === true) metadata.webui = true;
-      const language = normalizeWebuiLanguage(envelope.language);
-      if (language) metadata.webui_language = language;
-      const mcpPresets: any[] = normalizeMcpPresetMentions(envelope.mcp_presets);
-      if (!mcpPresets.length) mcpPresets.push(...normalizeMentionList(envelope.mcp_presets));
-      if (mcpPresets.length) metadata.mcp_presets = mcpPresets;
-      if (envelope.image_generation && typeof envelope.image_generation === "object" && envelope.image_generation.enabled === true) {
-        metadata.image_generation = {
-          enabled: true,
-          aspect_ratio: typeof envelope.image_generation.aspect_ratio === "string" ? envelope.image_generation.aspect_ratio : null,
-        };
-      }
-      this.webuiTitleService?.trackUserMessage({ chatId, content, metadata, mediaPaths });
-      await this.handleMessage({
-        senderId: clientId,
+      await this.dispatchWebuiMessage(
+        connection,
+        clientId,
+        envelope,
         chatId,
         content,
-        media: mediaPaths.length ? mediaPaths : undefined,
-        metadata,
-        isDm: false,
-      });
+        mediaPaths,
+      );
       return;
     }
     await this.sendEvent(connection, "error", { detail: `unknown type: ${JSON.stringify(type)}` });
@@ -1683,9 +2551,14 @@ export class WebSocketChannel extends BaseChannel {
     return `/api/media/${b64urlEncode(mac)}/${payload}`;
   }
 
-  signOrStageMediaPath(filePath: string): SignedMediaPath | null {
+  signOrStageMediaPath(
+    filePath: string,
+    workspacePath: string = this.workspacePath,
+  ): SignedMediaPath | null {
     const expanded = expandHomePath(filePath);
-    const candidate = path.isAbsolute(expanded) ? path.resolve(expanded) : path.resolve(this.workspacePath, expanded);
+    const candidate = path.isAbsolute(expanded)
+      ? path.resolve(expanded)
+      : path.resolve(workspacePath, expanded);
     const direct = this.signMediaPath(candidate);
     if (direct) {
       return { url: direct, name: path.basename(candidate), path: realpathIfExists(candidate) };
@@ -1702,12 +2575,18 @@ export class WebSocketChannel extends BaseChannel {
     return this.stageArtifactPath(resolved);
   }
 
-  webuiMediaAttachmentForPath(filePath: string): WebuiMediaAttachment | null {
+  webuiMediaAttachmentForPath(
+    filePath: string,
+    sessionKey?: string | null,
+  ): WebuiMediaAttachment | null {
     const name = path.basename(filePath) || "attachment";
     const kind = mediaKindForPath(filePath);
-    const resolved = this.resolveAllowedArtifactPath(filePath);
+    const workspace = sessionKey
+      ? this.artifactSessionWorkspace(sessionKey) ?? this.workspacePath
+      : this.workspacePath;
+    const resolved = this.resolveAllowedArtifactPath(filePath, workspace);
     if (resolved?.kind === "directory") return null;
-    const signed = this.signOrStageMediaPath(filePath);
+    const signed = this.signOrStageMediaPath(filePath, workspace);
     const resolvedFilePath = resolved?.path ?? null;
     if (!signed && !resolvedFilePath) return null;
     return {
@@ -1752,6 +2631,33 @@ export class WebSocketChannel extends BaseChannel {
   }
 
   override async send(message: OutboundMessage): Promise<void> {
+    if (message.metadata?.webuiSessionWorkspaceLost) {
+      await this.broadcast(message.chatId, {
+        event: "error",
+        chat_id: message.chatId,
+        client_request_id: String(message.metadata.clientRequestId ?? ""),
+        detail: "session_workspace_lost",
+        reason: String(message.metadata.reason ?? "workspace_unavailable"),
+      });
+      return;
+    }
+    if (message.metadata?.webuiMessageAccepted) {
+      const clientRequestId = String(message.metadata.clientRequestId ?? "");
+      if (!clientRequestId) return;
+      this.ensureAcceptedTranscript(message.chatId, clientRequestId);
+      const key = this.webuiRequestKey(`websocket:${message.chatId}`, clientRequestId);
+      const inflight = this.inflightWebuiMessageRequests.get(key);
+      this.inflightWebuiMessageRequests.delete(key);
+      const payload = {
+        event: "message_accepted",
+        chat_id: message.chatId,
+        client_request_id: clientRequestId,
+      };
+      for (const connection of inflight?.connections ?? this.subscriptions.get(message.chatId) ?? []) {
+        await this.safeSendTo(connection, payload);
+      }
+      return;
+    }
     if (message.metadata?.runtimeModelUpdated) {
       await this.sendRuntimeModelUpdated({
         modelName: message.metadata.model,
@@ -1799,7 +2705,7 @@ export class WebSocketChannel extends BaseChannel {
       return;
     }
     if (message.metadata?.contextCompaction) {
-      const wireText = this.rewriteLocalMarkdownImages(message.content);
+      const wireText = this.rewriteLocalMarkdownImages(message.content, `websocket:${message.chatId}`);
       const turnId = this.turnIdFromMetadata(message.metadata);
       const payload = {
         event: "context_compaction",
@@ -1814,7 +2720,7 @@ export class WebSocketChannel extends BaseChannel {
       return;
     }
     if (message.metadata?.retryWait) {
-      const wireText = this.rewriteLocalMarkdownImages(message.content);
+      const wireText = this.rewriteLocalMarkdownImages(message.content, `websocket:${message.chatId}`);
       const turnId = this.turnIdFromMetadata(message.metadata);
       const payload = {
         event: "retry_wait",
@@ -1826,7 +2732,7 @@ export class WebSocketChannel extends BaseChannel {
       return;
     }
     if (message.metadata?.webui_ephemeral_command === "status") {
-      const wireText = this.rewriteLocalMarkdownImages(message.content);
+      const wireText = this.rewriteLocalMarkdownImages(message.content, `websocket:${message.chatId}`);
       await this.broadcast(message.chatId, {
         event: "status_result",
         chat_id: message.chatId,
@@ -1837,7 +2743,7 @@ export class WebSocketChannel extends BaseChannel {
       return;
     }
     if (message.metadata?.webui_ephemeral_command === "historyDag") {
-      const wireText = this.rewriteLocalMarkdownImages(message.content);
+      const wireText = this.rewriteLocalMarkdownImages(message.content, `websocket:${message.chatId}`);
       await this.broadcast(message.chatId, {
         event: "history_dag_result",
         chat_id: message.chatId,
@@ -1852,7 +2758,7 @@ export class WebSocketChannel extends BaseChannel {
     }
 
     const targets = message.chatId === "*" ? [...this.connectionChats.keys()] : [...(this.subscriptions.get(message.chatId) ?? [])];
-    const wireText = this.rewriteLocalMarkdownImages(message.content);
+    const wireText = this.rewriteLocalMarkdownImages(message.content, `websocket:${message.chatId}`);
     const turnId = this.turnIdFromMetadata(message.metadata);
     const payload: Record<string, any> = {
       event: "message",
@@ -1863,7 +2769,9 @@ export class WebSocketChannel extends BaseChannel {
       media: message.media ?? [],
       ...(turnId ? { turn_id: turnId } : {}),
     };
-    const mediaUrls = (message.media ?? []).map((entry) => this.webuiMediaAttachmentForPath(entry)).filter((entry): entry is WebuiMediaAttachment => Boolean(entry));
+    const mediaUrls = (message.media ?? [])
+      .map((entry) => this.webuiMediaAttachmentForPath(entry, `websocket:${message.chatId}`))
+      .filter((entry): entry is WebuiMediaAttachment => Boolean(entry));
     if (mediaUrls.length) payload.media_urls = mediaUrls;
     if (message.metadata?.toolHint) payload.kind = "tool_hint";
     else if (message.metadata?.agentProgress) payload.kind = "progress";
@@ -1874,8 +2782,7 @@ export class WebSocketChannel extends BaseChannel {
     if (message.metadata?.[OUTBOUND_META_AGENT_UI] != null) payload.agent_ui = message.metadata[OUTBOUND_META_AGENT_UI];
     if (!this.shouldSendTurnPayload(message.chatId, payload)) return;
     this.tryAppendWebuiTranscript(message.chatId, { ...payload, text: message.content, content: message.content });
-    const raw = JSON.stringify(payload);
-    for (const connection of targets) await this.safeSendTo(connection, raw);
+    for (const connection of targets) await this.safeSendTo(connection, payload);
   }
 
   async sendDelta(chatId: string, delta: string, metadata: Record<string, any> = {}): Promise<void> {
@@ -1890,7 +2797,12 @@ export class WebSocketChannel extends BaseChannel {
       if (delta) buffered.push(delta);
       payload = { event: "stream_end", chat_id: chatId };
       if (metadata.resuming === true) payload.resuming = true;
-      if (buffered.length) payload.text = this.rewriteLocalMarkdownImages(buffered.join(""));
+      if (buffered.length) {
+        payload.text = this.rewriteLocalMarkdownImages(
+          buffered.join(""),
+          `websocket:${chatId}`,
+        );
+      }
     } else {
       if (turnId && this.activeTurnIdByChatId.get(chatId) !== turnId) return;
       (this.streamTextBuffers.get(key) ?? this.streamTextBuffers.set(key, []).get(key)!).push(delta);
@@ -1956,13 +2868,11 @@ export class WebSocketChannel extends BaseChannel {
     if (!model) return;
     const body: Record<string, any> = { event: "runtime_model_updated", model_name: model };
     if (typeof modelPreset === "string" && modelPreset.trim()) body.model_preset = modelPreset.trim();
-    const raw = JSON.stringify(body);
-    for (const connection of this.connectionChats.keys()) await this.safeSendTo(connection, raw);
+    for (const connection of this.connectionChats.keys()) await this.safeSendTo(connection, body);
   }
 
   private async broadcast(chatId: string, payload: Record<string, any>): Promise<void> {
-    const raw = JSON.stringify(payload);
-    for (const connection of this.subscriptions.get(chatId) ?? []) await this.safeSendTo(connection, raw);
+    for (const connection of this.subscriptions.get(chatId) ?? []) await this.safeSendTo(connection, payload);
   }
 }
 
@@ -1993,7 +2903,9 @@ function requestBodyText(request: HttpRequestLike): string {
   return typeof request.body === "string" ? request.body : "";
 }
 
-function artifactPathFromRequest(request: HttpRequestLike): string | null {
+function artifactRequestFromRequest(
+  request: HttpRequestLike,
+): { path: string; sessionKey: string } | null {
   const body = requestBodyText(request).trim();
   if (!body) return null;
   let parsed: unknown;
@@ -2003,8 +2915,18 @@ function artifactPathFromRequest(request: HttpRequestLike): string | null {
     return null;
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-  const rawPath = (parsed as Record<string, unknown>).path;
-  return typeof rawPath === "string" && rawPath.trim() ? rawPath.trim() : null;
+  const raw = parsed as Record<string, unknown>;
+  const rawPath = raw.path;
+  const sessionKey = raw.sessionKey;
+  if (
+    typeof rawPath !== "string"
+    || !rawPath.trim()
+    || typeof sessionKey !== "string"
+    || !API_KEY_RE.test(sessionKey)
+  ) {
+    return null;
+  }
+  return { path: rawPath.trim(), sessionKey };
 }
 
 function expandHomePath(value: string): string {
@@ -2135,7 +3057,7 @@ function corsHeadersForRequest(config: WebSocketConfig, request: { headers?: htt
   if (!isAllowedCorsOrigin(origin, config)) return {};
   return {
     "access-control-allow-origin": origin,
-    "access-control-allow-methods": "GET, POST, OPTIONS",
+    "access-control-allow-methods": "GET, POST, PATCH, DELETE, OPTIONS",
     "access-control-allow-headers": [
       "authorization",
       "content-type",
@@ -2347,6 +3269,10 @@ class MinimalWebSocketConnection implements AsyncIterable<string | Buffer> {
     this.socket.write(encodeServerFrame(Buffer.from(raw, "utf8"), 0x1));
   }
 
+  close(code = 1000, reason = "connection closed"): void {
+    this.closeWithCode(code, reason);
+  }
+
   [Symbol.asyncIterator](): AsyncIterator<string | Buffer> {
     return {
       next: () => this.next(),
@@ -2428,9 +3354,12 @@ class MinimalWebSocketConnection implements AsyncIterable<string | Buffer> {
     const payload = Buffer.alloc(2 + reasonBuffer.length);
     payload.writeUInt16BE(code, 0);
     reasonBuffer.copy(payload, 2);
-    this.socket.write(encodeServerFrame(payload, 0x8));
-    this.socket.end();
-    this.closeQueue();
+    try {
+      this.socket.write(encodeServerFrame(payload, 0x8));
+      this.socket.end();
+    } finally {
+      this.closeQueue();
+    }
   }
 
 }

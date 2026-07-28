@@ -284,8 +284,7 @@ describe("writeAppLoginFieldsToMemmyConfig", () => {
       vendor: "qwen",
       endpoint: ACCOUNT_API_BASE,
       model: "memory_summary",
-      apiKey: "cloud-login-uuid",
-      enableThinking: false
+      apiKey: "cloud-login-uuid"
     });
     expect(parsed.memmyMemory?.profiles?.account?.evolution).toEqual({
       vendor: "qwen",
@@ -326,6 +325,8 @@ describe("writeAppLoginFieldsToMemmyConfig", () => {
         "app:",
         "  locale: zh-CN",
         "  cloudUuid: old-app-cloud-login-uuid",
+        "fileMemory:",
+        "  enabled: false",
         "memmyMemory:",
         "  enabled: true",
         "  userId: old-memory-user",
@@ -338,6 +339,7 @@ describe("writeAppLoginFieldsToMemmyConfig", () => {
 
     const parsed = YAML.parse(readFileSync(configPath, "utf8")) as {
       app?: { cloudUuid?: unknown; userId?: unknown; locale?: unknown };
+      fileMemory?: { enabled?: unknown };
       memmyMemory?: {
         enabled?: unknown;
         activeProfile?: unknown;
@@ -348,6 +350,7 @@ describe("writeAppLoginFieldsToMemmyConfig", () => {
       identity?: unknown;
     };
     expect(parsed.app).toEqual({ locale: "zh-CN", cloudUuid: "cloud-login-uuid", userId: "user-1" });
+    expect(parsed.fileMemory?.enabled).toBe(false);
     expect(parsed.memmyMemory?.enabled).toBe(true);
     expect(parsed.memmyMemory?.activeProfile).toBe("account");
     expect(parsed.memmyMemory?.userId).toBeUndefined();
@@ -481,6 +484,8 @@ describe("writeByokModelProjectionToMemmyConfig", () => {
       [
         "channels:",
         "  showReasoning: false",
+        "fileMemory:",
+        "  enabled: false",
         "memmyMemory:",
         "  userId: user-1",
         "  storage:",
@@ -541,8 +546,7 @@ describe("writeByokModelProjectionToMemmyConfig", () => {
       vendor: "anthropic",
       endpoint: "https://api.anthropic.example",
       model: "claude-3-5-haiku",
-      apiKey: "sk-memory",
-      enableThinking: false
+      apiKey: "sk-memory"
     });
     expect(parsed.memmyMemory.profiles.byok.evolution).toEqual({
       provider: "openai_compatible",
@@ -561,6 +565,7 @@ describe("writeByokModelProjectionToMemmyConfig", () => {
     expect(parsed.memmyMemory.storage.endpoint).toBe("http://127.0.0.1:18888");
     expect(parsed.memmyMemory.algorithm.topK).toBe(8);
     expect(parsed.channels.showReasoning).toBe(false);
+    expect(parsed.fileMemory.enabled).toBe(false);
   });
 
   it.each([
@@ -603,7 +608,7 @@ describe("writeByokModelProjectionToMemmyConfig", () => {
       memmyMemory: {
         profiles: {
           byok: {
-            summary: { provider: string; vendor: string; enableThinking: boolean };
+            summary: { provider: string; vendor: string };
             evolution: { provider: string; vendor: string; enableThinking: boolean };
           };
         };
@@ -616,9 +621,9 @@ describe("writeByokModelProjectionToMemmyConfig", () => {
         : "openai_compatible";
     expect(parsed.memmyMemory.profiles.byok.summary).toMatchObject({
       provider: expectedProtocol,
-      vendor: provider,
-      enableThinking: false
+      vendor: provider
     });
+    expect(parsed.memmyMemory.profiles.byok.summary).not.toHaveProperty("enableThinking");
     expect(parsed.memmyMemory.profiles.byok.evolution).toMatchObject({
       provider: expectedProtocol,
       vendor: provider,
@@ -817,8 +822,7 @@ describe("writeByokModelProjectionToMemmyConfig", () => {
       vendor: "openai_compatible",
       endpoint: "https://memory.example/v1",
       model: "memory-model",
-      apiKey: "sk-memory",
-      enableThinking: false
+      apiKey: "sk-memory"
     });
     expect(parsed.providers.openai).toMatchObject({
       apiBase: "https://api.openai.example/v1",
@@ -838,6 +842,8 @@ describe("writeByokModelProjectionToMemmyConfig", () => {
         "  defaults:",
         "    provider: memmy_account",
         "    model: agent_chat",
+        "fileMemory:",
+        "  enabled: false",
         "memmyMemory:",
         "  activeProfile: account",
         "  profiles:",
@@ -879,6 +885,7 @@ describe("writeByokModelProjectionToMemmyConfig", () => {
     expect(parsed.memmyMemory.activeProfile).toBe("byok");
     expect(parsed.memmyMemory.profiles.account.userId).toBe("user-1");
     expect(parsed.memmyMemory.profiles.byok.evolution.model).toBe("skill-model");
+    expect(parsed.fileMemory.enabled).toBe(false);
   });
 });
 

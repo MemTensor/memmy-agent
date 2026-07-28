@@ -26,28 +26,42 @@ if [ ! -f "$LARGE_BG" ] || [ ! -f "$LARGE_BG_2X" ]; then
 fi
 
 VOLUME_PATH="/Volumes/$VOLUME_TITLE"
-RW_DMG="$(mktemp /tmp/memmy-rw.XXXXXX.dmg)"
+TMP_DIR="$(mktemp -d /tmp/memmy-dmg.XXXXXX)"
+RW_DMG="$TMP_DIR/rw.dmg"
+TMP_TIFF="$TMP_DIR/background.tiff"
+MOUNTED_VOLUME_PATH=""
 
 cleanup() {
-  if mount | grep -qF "$VOLUME_PATH" 2>/dev/null; then
+  if [ -n "$MOUNTED_VOLUME_PATH" ] && mount | grep -qF "$MOUNTED_VOLUME_PATH" 2>/dev/null; then
+    hdiutil detach "$MOUNTED_VOLUME_PATH" -quiet 2>/dev/null || hdiutil detach -force "$MOUNTED_VOLUME_PATH" -quiet 2>/dev/null || true
+  elif mount | grep -qF "$VOLUME_PATH" 2>/dev/null; then
     hdiutil detach "$VOLUME_PATH" -quiet 2>/dev/null || hdiutil detach -force "$VOLUME_PATH" -quiet 2>/dev/null || true
   fi
-  rm -f "$RW_DMG"
+  rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT
 
 hdiutil convert "$DMG_PATH" -format UDRW -o "$RW_DMG" -quiet -ov
 hdiutil attach "$RW_DMG" -noverify -noautoopen -quiet
 
-if [ ! -d "$VOLUME_PATH" ]; then
-  echo "Failed to mount read-write DMG at $VOLUME_PATH" >&2
+MOUNTED_VOLUME_PATH="$(hdiutil info | awk -v image_path="$RW_DMG" '
+  $1 == "image-path" {
+    in_image = ($3 == image_path)
+    next
+  }
+  in_image && $0 ~ /\/Volumes\// {
+    print substr($0, index($0, "/Volumes/"))
+    exit
+  }
+')"
+
+if [ -z "$MOUNTED_VOLUME_PATH" ] || [ ! -d "$MOUNTED_VOLUME_PATH" ]; then
+  echo "Failed to mount read-write DMG for $DMG_PATH" >&2
   exit 1
 fi
 
-TMP_TIFF="$(mktemp /tmp/memmy-dmg-bg.XXXXXX.tiff)"
 tiffutil -cathidpicheck "$LARGE_BG" "$LARGE_BG_2X" -out "$TMP_TIFF"
-cp "$TMP_TIFF" "$VOLUME_PATH/.background.tiff"
-rm -f "$TMP_TIFF"
+cp "$TMP_TIFF" "$MOUNTED_VOLUME_PATH/.background.tiff"
 
 osascript <<APPLESCRIPT || true
 tell application "Finder"
@@ -65,7 +79,8 @@ end tell
 APPLESCRIPT
 
 sync
-hdiutil detach "$VOLUME_PATH" -quiet
+hdiutil detach "$MOUNTED_VOLUME_PATH" -quiet
+MOUNTED_VOLUME_PATH=""
 
 mv "$DMG_PATH" "$DMG_PATH.bak"
 hdiutil convert "$RW_DMG" -format UDZO -o "$DMG_PATH" -quiet

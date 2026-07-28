@@ -4,9 +4,8 @@ import { fileURLToPath } from "node:url";
 import { config as loadDotenv } from "dotenv";
 import { defineConfig } from "vitest/config";
 
-// The test-time gateway address comes only from MEMMY_CLOUD_SERVICE in the repository root .env.
-// Load the root .env during configuration, before test modules are evaluated, and inject it through test.env.
-// This ensures tests that directly import providers/registry.ts or other module-evaluation readers can also see the value.
+// Load optional repository test settings before test modules are evaluated, then pin the required
+// gateway address to a non-routable HTTPS test origin so local .env files cannot affect test behavior.
 const moduleDir = dirname(fileURLToPath(import.meta.url));
 
 /**
@@ -31,7 +30,11 @@ function findRepoEnvFile(startDir: string): string | null {
 }
 
 const envPath = findRepoEnvFile(moduleDir);
-const parsed = envPath ? (loadDotenv({ path: envPath }).parsed ?? {}) : {};
+const parsed = envPath ? (loadDotenv({ path: envPath, processEnv: {} }).parsed ?? {}) : {};
+const testEnv = {
+  ...parsed,
+  MEMMY_CLOUD_SERVICE: "https://cloud.test.invalid"
+};
 
 export default defineConfig({
   test: {
@@ -40,7 +43,7 @@ export default defineConfig({
     testTimeout: 30_000,
     hookTimeout: 30_000,
     restoreMocks: true,
-    env: parsed,
+    env: testEnv,
   },
   resolve: {
     alias: {

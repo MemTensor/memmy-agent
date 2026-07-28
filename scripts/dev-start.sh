@@ -65,6 +65,7 @@ ensure_npm_dependencies() {
   local -a required_packages=(
     "concurrently"
     "wait-on"
+    "@types/proper-lockfile/index.d.ts"
     "electron-log/main"
     "electron-log/renderer"
     "@xyflow/react"
@@ -170,9 +171,15 @@ ensure_memmy_agent_dependencies() {
   local package
   local -a missing_packages=()
   local -a required_packages=(
+    "html-validate"
     "ink"
+    "parse5"
+    "postcss"
     "react"
+    "smol-toml"
     "typescript"
+    "@playwright/mcp"
+    "playwright"
   )
 
   for package in "${required_packages[@]}"; do
@@ -186,7 +193,7 @@ ensure_memmy_agent_dependencies() {
   fi
 
   log "installing memmy-agent npm dependencies (missing: ${missing_packages[*]})"
-  npm ci --prefix "$MEMMY_AGENT_DIR" --include=dev
+  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --prefix "$MEMMY_AGENT_DIR" --include=dev
 
   missing_packages=()
   for package in "${required_packages[@]}"; do
@@ -538,11 +545,14 @@ run_main() {
   mkdir -p "$MEMMY_WORKSPACE_DIR/skills"
   cp -R "$MEMMY_AGENT_DIR/dist/skills/." "$MEMMY_WORKSPACE_DIR/skills/"
 
+  log "preparing managed Chromium"
+  "$MEMMY_RUNTIME_NODE_PATH" dist/main.js internal browser-prepare
+
   log "starting Memory, agent API, gateway, frontend, and desktop backend"
   cd "$ROOT_DIR"
   mkdir -p "$LOG_DIR"
   exec "$CONCURRENTLY_BIN" -k -n memory,agent-api,gateway,frontend,backend -c green,cyan,blue,magenta,yellow \
-    "bash -c 'set -o pipefail; npm run memory:dev 2>&1 | tee .tmp/dev-stack/memory.log'" \
+    "bash -c 'set -o pipefail; node scripts/internal/dev-memory-supervisor.mjs 2>&1 | tee .tmp/dev-stack/memory.log'" \
     "bash -c 'set -o pipefail; bash scripts/dev-start.sh --agent-api 2>&1 | tee .tmp/dev-stack/agent-api.log'" \
     "bash -c 'set -o pipefail; bash scripts/dev-start.sh --gateway 2>&1 | tee .tmp/dev-stack/gateway.log'" \
     "bash -c 'set -o pipefail; npm run dev -w @memmy/frontend-desktop -- --host 127.0.0.1 2>&1 | tee .tmp/dev-stack/frontend.log'" \

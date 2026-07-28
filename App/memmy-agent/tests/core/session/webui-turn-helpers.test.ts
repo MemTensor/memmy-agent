@@ -102,6 +102,7 @@ describe("webui turn helpers", () => {
   it("finishes a WebUI turn with a turn_end anchor followed by idle cleanup", async () => {
     const bus = new MessageBus();
     const sessions = new SessionManager(sessionRoot());
+    sessions.getOrCreate("websocket:chat-finish");
     const msg = inbound("websocket", "chat-finish", { webui: true });
     websocketTurnWallStartTimes.set("chat-finish", 1780732800);
 

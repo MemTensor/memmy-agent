@@ -7,6 +7,7 @@ import {
   MCPResourceWrapper,
   MCPToolWrapper,
   closeServer,
+  convertMcpToolContent,
   normalizeWindowsStdioCommand,
   sanitizeName,
   serverSignature,
@@ -90,6 +91,7 @@ function runtimeFor(sessions: Record<string, any>, capture?: (params: any) => vo
 }
 
 const roots: string[] = [];
+const originalDataDir = process.env.MEMMY_AGENT_DATA_DIR;
 
 function useConfig(config: Config): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-mcp-tool-"));
@@ -103,6 +105,8 @@ afterEach(() => {
   setMcpRuntimeForTest(null);
   vi.restoreAllMocks();
   setConfigPath(path.join(os.tmpdir(), "memmy-agent-empty-config.yaml"));
+  if (originalDataDir == null) delete process.env.MEMMY_AGENT_DATA_DIR;
+  else process.env.MEMMY_AGENT_DATA_DIR = originalDataDir;
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
@@ -220,6 +224,73 @@ describe("MCPToolWrapper execution", () => {
 
     await expect(new MCPToolWrapper(session, "test", toolDef("demo"), 0.1).execute()).resolves.toBe("ok");
     expect(calls).toBe(2);
+  });
+});
+
+describe("MCP structured content conversion", () => {
+  it("preserves text and saves image blocks for multimodal tool results", () => {
+    const root = useConfig(new Config());
+    process.env.MEMMY_AGENT_DATA_DIR = root;
+    const result = convertMcpToolContent(
+      {
+        content: [
+          { type: "text", text: "captured" },
+          {
+            type: "image",
+            mimeType: "image/png",
+            data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
+          },
+        ],
+      },
+      "structured",
+    ) as Array<Record<string, any>>;
+
+    expect(result[0]).toEqual({ type: "text", text: "captured" });
+    expect(result[1]).toMatchObject({
+      type: "image_url",
+      image_url: {
+        url: expect.stringMatching(/^data:image\/png;base64,/),
+        detail: "auto",
+      },
+      meta: { path: expect.any(String) },
+    });
+    expect(fs.existsSync(result[1].meta.path)).toBe(true);
+  });
+
+  it("keeps ordinary MCP wrappers on their existing text-only behavior", () => {
+    expect(
+      convertMcpToolContent(
+        { content: [{ type: "text", text: "hello" }, 42] },
+        "text",
+      ),
+    ).toBe("hello\n42");
+  });
+
+  it("replaces only an invalid image block without leaking its payload", () => {
+    const result = convertMcpToolContent(
+      {
+        content: [
+          { type: "text", text: "before" },
+          {
+            type: "image",
+            mimeType: "image/png",
+            data: "private-invalid-payload",
+          },
+          { type: "text", text: "after" },
+        ],
+      },
+      "structured",
+    ) as Array<Record<string, any>>;
+
+    expect(result).toEqual([
+      { type: "text", text: "before" },
+      {
+        type: "text",
+        text: expect.stringContaining("[image unavailable:"),
+      },
+      { type: "text", text: "after" },
+    ]);
+    expect(JSON.stringify(result)).not.toContain("private-invalid-payload");
   });
 });
 

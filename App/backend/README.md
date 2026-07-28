@@ -1,78 +1,141 @@
 # @memmy/backend
 
-Memmy desktop local backend. The backend follows the hexagonal layout described in `docs/workspace-quirky-pumpkin.md`.
+The local backend used by the Memmy desktop application. It owns the
+ephemeral local API, application state, agent-history ingestion, Memory service
+integration, and installation of agent-side Memory skills and hooks.
 
-## Modules
+## Development
 
-- `adapters/inbound/local-api`: Fastify local HTTP API, runtime token auth, CORS, and SSE.
-- `adapters/outbound/agent-source`: external Agent history collection. Built-in sources: Cursor, Claude Code, Codex, OpenCode, OpenClaw, Hermes, and WorkBuddy.
-- `adapters/outbound/skill-writer`: external Agent Skill, Hook, and plugin installation for Cursor, Claude Code, Codex, OpenCode, OpenClaw, Hermes, and WorkBuddy.
-- `adapters/outbound/memory-client`: MemoryClient port with HTTP Memory Layer and local Memmy SQLite implementations for Agent Runtime routes.
-- `infrastructure/app-state-store`: local SQLite app state and migrations.
-- `infrastructure/agent-source-store`: source metadata and ingestion dedupe repository.
-- `infrastructure/cli-binary`: Memmy CLI runtime config and symlink path helpers.
-- `services`: use-case orchestration for bootstrap, ingestion, Agent Runtime, source scanning, skill distribution, and progress events.
+Run backend commands from the repository root:
 
-## CLI Runtime
+```bash
+npm run build -w @memmy/backend
+npm run typecheck -w @memmy/backend
+npm run lint -w @memmy/backend
+npm run test -w @memmy/backend
+```
 
-- Backend startup writes `~/.memmy/runtime.json` with owner-only permissions so `memmy-memory search` can reach the local daemon.
-- `memmy-memory search "<query>"` calls `/api/v1/memory/search` and prints real Memory Layer hit snippets as markdown bullets.
-- `infrastructure/cli-binary/installer.ts` can symlink a built `memmy` binary into `~/.local/bin/memmy`.
-- The symlink installer is not wired into packaging or startup yet; release packaging must call it or provide an equivalent install step before external Agents can rely on `memmy` being on `PATH`.
+Apply application-state migrations with:
 
-## HTTP Endpoints
+```bash
+npm run db:migrate
+```
 
-- `GET /api/health`: local API health.
-- `GET /api/app/bootstrap`: schema-valid app bootstrap payload.
-- `GET /api/events`: SSE stream. Uses `?token=` because EventSource cannot reliably send custom headers.
-- `GET /api/agent-sources`: list built-in and manual Agent sources.
-- `POST /api/agent-sources/scan`: start a background source scan and return `{ jobId }`.
-- `POST /api/agent-sources/manual`: add a manual source.
-- `DELETE /api/agent-sources/:sourceId`: remove a source.
-- `POST /api/agent-sources/:sourceId/skill`: install the Memmy Skill for a source.
-- `DELETE /api/agent-sources/:sourceId/skill`: uninstall the Memmy Skill for a source.
+## Architecture
 
-## Agent Runtime Routes
+- `adapters/inbound/local-api`: Fastify routes, runtime-token authentication,
+  CORS, SSE, and the Composio MCP bridge.
+- `adapters/outbound/agent-source`: built-in history readers for Cursor, Claude
+  Code, Codex, OpenCode, OpenClaw, Hermes, and WorkBuddy.
+- `adapters/outbound/skill-writer`: Memory skill, hook, command, and plugin
+  installation for the supported agents.
+- `adapters/outbound/agent-adapter`: manifest, loader, and registry contracts
+  for runtime-supplied agent adapters.
+- `adapters/outbound/memory-client`: HTTP Memory Layer and local Memmy SQLite
+  clients.
+- `adapters/outbound/cloud-client`: account, integration, and hosted-service
+  requests.
+- `adapters/outbound/memmy-agent-admin-client`: administrative calls to the
+  local `memmy-agent` gateway.
+- `infrastructure/app-state-store`: local application state, secrets,
+  repositories, and migrations.
+- `infrastructure/agent-source-store`: source metadata and ingestion
+  deduplication.
+- `infrastructure/idempotency-store`: persisted idempotency records for runtime
+  operations.
+- `infrastructure/memmy-config`: reads and updates the shared Memmy
+  configuration.
+- `services`: orchestration for bootstrap, account state, ingestion, scans,
+  runtime memory operations, skill distribution, channels, integrations, and
+  progress events.
 
-| Method | Path | Service | Permission | Idempotent |
-| --- | --- | --- | --- | --- |
-| `GET` | `/api/v1/health` | MemoryClient | none | no |
-| `POST` | `/api/v1/sessions/open` | SessionService.open | runtime token | yes |
-| `POST` | `/api/v1/sessions/:sessionId/close` | SessionService.close | runtime token | yes |
-| `POST` | `/api/v1/turns/start` | TurnService.start | runtime token | no |
-| `POST` | `/api/v1/turns/:turnId/complete` | TurnService.complete | runtime token | yes |
-| `POST` | `/api/v1/memory/search` | SearchService.search | runtime token | no |
-| `POST` | `/api/v1/memory/add` | MemoryDetailService.add | runtime token | no |
-| `GET` | `/api/v1/memory/:id` | MemoryDetailService.getById | runtime token | no |
-| `DELETE` | `/api/v1/memory/:id` | MemoryDetailService.delete | runtime token | no |
-| `GET` | `/api/v1/panel/overview` | PanelService.overview | runtime token | no |
-| `GET` | `/api/v1/panel/analysis` | PanelService.analysis | runtime token | no |
-| `GET` | `/api/v1/panel/items` | PanelService.items | runtime token | no |
+## Desktop Runtime
 
-## Built-in Agents
+The backend binds its local API to `127.0.0.1` on an ephemeral port. At startup
+it writes `~/.memmy/runtime.json` with owner-only permissions. That file
+contains the local API URL, runtime token, and optional Memory service URL used
+by desktop clients.
 
-| Agent | Source history | Skill target |
-| --- | --- | --- |
-| Cursor | Windows: `%APPDATA%\Cursor\User`; macOS: `~/Library/Application Support/Cursor/User`; Linux: `${XDG_CONFIG_HOME:-~/.config}/Cursor/User` (`workspaceStorage/*/state.vscdb`, `globalStorage/state.vscdb`) | `~/.cursor/skills/memmy-memory/SKILL.md`, `~/.cursor/hooks.json` |
-| Claude Code | `~/.claude/projects/<cwd-slug>/*.jsonl` | `~/.claude/CLAUDE.md` |
-| Codex | `~/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-*.jsonl` | `~/.codex/AGENTS.md` |
-| OpenCode | `~/.local/share/opencode/opencode.db` | `~/.config/opencode/AGENTS.md`, `~/.config/opencode/skills/memmy-memory/SKILL.md` |
-| OpenClaw | `~/.openclaw/memos-local/memos.db`, `~/.openclaw/memos-plugin/data/memos.db`, `~/.openclaw/**/*.db`, `*.sqlite`, `*.sqlite3` | `<workspace>/AGENTS.md`, `~/.openclaw/skills/memmy-memory/SKILL.md` |
-| Hermes | `~/.hermes/sessions/**/*.jsonl`, `~/.hermes/state.db` | `~/.hermes/SOUL.md` |
-| WorkBuddy | `~/.workbuddy/projects/<cwd-slug>/*.jsonl` (`WORKBUDDY_CONFIG_DIR` or `CODEBUDDY_CONFIG_DIR` can override the root) | `~/.workbuddy/skills/memmy-memory/SKILL.md` |
+The backend also writes the Composio MCP bridge URL and its dedicated token to
+`tools.mcpServers.composio` in the shared Memmy configuration.
+
+`infrastructure/cli-binary/installer.ts` can symlink a built `memmy` executable
+to `~/.local/bin/memmy`. Packaging or another caller must invoke the installer;
+backend startup does not install the symlink automatically.
+
+## Local API
+
+`GET /api/health` is the only unauthenticated local API route. Other `/api/*`
+routes require the `x-memmy-local-token` header, with two transport-specific
+exceptions:
+
+- `GET /api/events` accepts the same runtime token as `?token=` because browser
+  `EventSource` cannot reliably send custom headers.
+- `/mcp/composio` uses its dedicated `x-memmy-mcp-token`.
+
+The local API is grouped into these route families:
+
+- Application bootstrap, settings, onboarding, account, quota, and local data
+- Agent-source discovery, scanning, manual sources, auto-sync recipes, skills,
+  hooks, and plugins
+- Channels and external integrations
+- BYOK token usage and speech transcription
+- Agent Runtime memory, session, turn, and panel routes
+
+### Agent Runtime Routes
+
+Every route in this table requires the local runtime token.
+
+| Method   | Path                                  | Primary service                          |
+| -------- | ------------------------------------- | ---------------------------------------- |
+| `POST`   | `/api/v1/admin/reload-config`         | `MemoryClient.reloadConfig`              |
+| `GET`    | `/api/v1/health`                      | `MemoryClient.health`                    |
+| `POST`   | `/api/v1/sessions/open`               | `SessionService.open`                    |
+| `POST`   | `/api/v1/sessions/:sessionId/close`   | `SessionService.close`                   |
+| `POST`   | `/api/v1/turns/start`                 | `TurnService.start`                      |
+| `POST`   | `/api/v1/turns/:turnId/complete`      | `TurnService.complete`                   |
+| `POST`   | `/api/v1/memory/search`               | `SearchService.search`                   |
+| `POST`   | `/api/v1/memory/add`                  | `MemoryDetailService.add`                |
+| `GET`    | `/api/v1/memory/logs`                 | `PanelService.memoryApiLogs`             |
+| `POST`   | `/api/v1/memory/processing/status`    | `MemoryClient.getMemoryProcessingStatus` |
+| `POST`   | `/api/v1/memory/:id/processing/retry` | `MemoryClient.retryMemoryProcessing`     |
+| `GET`    | `/api/v1/memory/:id`                  | `MemoryDetailService.getById`            |
+| `DELETE` | `/api/v1/memory/:id`                  | `MemoryDetailService.delete`             |
+| `GET`    | `/api/v1/panel/overview`              | `PanelService.overview`                  |
+| `GET`    | `/api/v1/panel/analysis`              | `PanelService.analysis`                  |
+| `GET`    | `/api/v1/panel/items`                 | `PanelService.items`                     |
+| `GET`    | `/api/v1/panel/tasks`                 | `PanelService.tasks`                     |
+| `DELETE` | `/api/v1/panel/tasks/:id`             | `PanelService.deleteTask`                |
+
+## Built-in Agent Integrations
+
+| Agent       | Default history source                                                                                                                                                                                      | Installed Memory integration                                                                           |
+| ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| Cursor      | Windows: `%APPDATA%\Cursor\User`; macOS: `~/Library/Application Support/Cursor/User`; Linux: `${XDG_CONFIG_HOME:-~/.config}/Cursor/User` (`workspaceStorage/*/state.vscdb` and `globalStorage/state.vscdb`) | `~/.cursor/skills/memmy-memory/` and `~/.cursor/hooks.json`                                            |
+| Claude Code | `~/.claude/projects/**/*.jsonl`                                                                                                                                                                             | `~/.claude/CLAUDE.md`, `skills/memmy-memory/`, hooks, and the resume command                           |
+| Codex       | `~/.codex/sessions/**/rollout-*.jsonl`                                                                                                                                                                      | `~/.codex/AGENTS.md`, `skills/memmy-memory/`, and hooks                                                |
+| OpenCode    | `${XDG_DATA_HOME:-~/.local/share}/opencode/opencode.db`                                                                                                                                                     | `${XDG_CONFIG_HOME:-~/.config}/opencode/AGENTS.md`, `skills/memmy-memory/`, plugin, and resume command |
+| OpenClaw    | SQLite databases under `~/.openclaw/`                                                                                                                                                                       | Workspace `AGENTS.md`, `~/.openclaw/skills/memmy-memory/`, and the Memory extension                    |
+| Hermes      | `~/.hermes/sessions/**/*.jsonl` and `~/.hermes/state.db`                                                                                                                                                    | `~/.hermes/SOUL.md`, `skills/memmy-memory/`, and Memory/resume plugins                                 |
+| WorkBuddy   | `~/.workbuddy/projects/**/*.jsonl`                                                                                                                                                                          | `~/.workbuddy/skills/memmy-memory/`                                                                    |
+
+Agent roots can be overridden with `CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
+`OPENCODE_CONFIG_DIR`, `OPENCLAW_STATE_DIR`, `HERMES_HOME`,
+`WORKBUDDY_CONFIG_DIR`, or `CODEBUDDY_CONFIG_DIR`, as applicable.
 
 ## Memory Layer Configuration
 
-| Variable | Default | Description |
-| --- | --- | --- |
-| `MEMMY_MEMORY_LAYER_URL` | empty | Memory Layer base URL, for example `http://127.0.0.1:8765`. Empty falls back to local Memmy SQLite discovery; startup fails if no real source is available. |
-| `MEMMY_MEMORY_LAYER_TOKEN` | empty | Bearer token forwarded to the Memory Layer. |
-| `MEMMY_MEMORY_LAYER_TIMEOUT_MS` | `5000` | Per-request timeout in milliseconds. |
-| `MEMMY_MEMORY_LAYER_MAX_RETRIES` | `3` | Max retries for 5xx or network failures. |
+| Variable                         | Default | Description                                                                                                                                                             |
+| -------------------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MEMMY_MEMORY_LAYER_URL`         | Empty   | Memory Layer base URL, such as `http://127.0.0.1:18960`. When empty, the backend discovers a local Memmy SQLite database. Startup fails if neither source is available. |
+| `MEMMY_MEMORY_LAYER_TOKEN`       | Empty   | Bearer token forwarded to the Memory Layer.                                                                                                                             |
+| `MEMMY_MEMORY_LAYER_TIMEOUT_MS`  | `20000` | Per-request timeout in milliseconds.                                                                                                                                    |
+| `MEMMY_MEMORY_LAYER_MAX_RETRIES` | `3`     | Maximum retries for network errors and 5xx responses.                                                                                                                   |
+| `MEMMY_DISABLE_MEMOS_SQLITE`     | Empty   | Set to `1` to disable local SQLite discovery.                                                                                                                           |
 
 ## SSE Events
 
-- `app.connected`: sent when the SSE stream opens.
-- `app.heartbeat`: periodic heartbeat.
-- `agent_source.scan_progress`: source scan progress.
-- `agent_source.scan_completed`: source scan completion summary.
+- `app.connected`: emitted when the SSE stream opens.
+- `app.heartbeat`: periodic connection heartbeat.
+- `agent_source.scan_progress`: source-scan progress.
+- `agent_source.scan_completed`: source-scan completion summary.

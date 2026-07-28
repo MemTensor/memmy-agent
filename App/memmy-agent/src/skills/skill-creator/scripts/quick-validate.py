@@ -119,12 +119,16 @@ def _validate_memmy_metadata(metadata: Optional[Dict[str, Any]]) -> Optional[str
     memmy = metadata["memmy"]
     if not memmy:
         return None
-    allowed = {"always", "requires"}
+    allowed = {"always", "manualOnly", "requires"}
     unexpected = sorted(set(str(key) for key in memmy) - allowed)
     if unexpected:
         return f"Unexpected metadata.memmy key(s): {', '.join(unexpected)}"
     if "always" in memmy and not isinstance(memmy["always"], bool):
         return "metadata.memmy.always must be a boolean"
+    if "manualOnly" in memmy and not isinstance(memmy["manualOnly"], bool):
+        return "metadata.memmy.manualOnly must be a boolean"
+    if memmy.get("manualOnly") is True and memmy.get("always") is True:
+        return "metadata.memmy.manualOnly and metadata.memmy.always cannot both be true"
     requires = memmy.get("requires")
     if requires is None:
         return None

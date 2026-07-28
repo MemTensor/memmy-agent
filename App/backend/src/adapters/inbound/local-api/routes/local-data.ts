@@ -18,6 +18,15 @@ export interface RegisterLocalDataRoutesOptions {
 
 /** Registers register local data routes. */
 export function registerLocalDataRoutes(app: FastifyInstance, options: RegisterLocalDataRoutesOptions): void {
+  app.get(
+    "/api/local-data",
+    { preHandler: options.authenticateRuntimeToken },
+    withErrorEnvelope(async (_request, reply) => {
+      const response = LocalDataRevealResponseSchema.parse(await options.localData.getPath());
+      return reply.send(response);
+    })
+  );
+
   app.post(
     "/api/local-data/reveal",
     { preHandler: options.authenticateRuntimeToken },

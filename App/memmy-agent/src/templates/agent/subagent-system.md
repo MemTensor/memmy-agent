@@ -7,6 +7,8 @@ Focus on the task assigned to you. Your final response will be reported back to 
 
 {% include 'agent/snippets/untrusted-content.md' %}
 
+{% include 'agent/verification-contract.md' %}
+
 ## Workspace
 {{ workspace }}
 {% if skillsSummary %}

@@ -50,6 +50,8 @@ export interface CreateLocalBackendOptions {
   runtimeConfigPath?: string;
   /** Memmy config path. */
   memmyConfigPath?: string;
+  /** Memory service address exposed to desktop and browser-debug clients. */
+  memoryBaseUrl?: string;
   /** Desktop install fingerprint. */
   desktopInstallFingerprint?: string;
   /** Agent source auto scan interval in ms. Defaults to one hour. */
@@ -93,9 +95,13 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       runtimeToken: options.localToken
     });
     const memoryClient = options.memoryClient ?? createDefaultMemoryClient(process.env);
+    await memoryClient.reloadConfig({ reason: "desktop_startup" });
     const scanWorker = options.memoryClient ? undefined : { databasePath: appStateStore.databasePath };
     const cloudConfig = resolveCloudClientConfig(process.env);
-    const cloudClient = options.cloudClient ?? createDefaultCloudClient(cloudConfig);
+    const cloudClient = options.cloudClient ?? createDefaultCloudClient(
+      cloudConfig,
+      tryGetInstallationId(appStateStore)
+    );
     const agentAdapterRegistry =
       options.agentAdapterRegistry ??
       createDefaultAgentAdapterRegistry({
@@ -139,7 +145,8 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
 
     const runtimeConfig = RuntimeConfigSchema.parse({
       baseUrl: `http://127.0.0.1:${(address as AddressInfo).port}`,
-      localToken
+      localToken,
+      memory: options.memoryBaseUrl ? { baseUrl: options.memoryBaseUrl } : undefined
     });
     await writeRuntimeConfigFile(runtimeConfig, options.runtimeConfigPath ?? resolveDefaultRuntimeConfigPath());
     autoScan = createAgentSourceAutoScanService({
@@ -181,11 +188,20 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
  * @param config the Cloud HTTP configuration.
  * @returns an HTTP CloudClient pointing at the real cloud account service.
  */
-function createDefaultCloudClient(config: CloudClientConfig): CloudClient {
+function createDefaultCloudClient(config: CloudClientConfig, deviceId?: string): CloudClient {
   return createHttpCloudClient({
     baseUrl: config.baseUrl,
-    timeoutMs: config.timeoutMs
+    timeoutMs: config.timeoutMs,
+    deviceId
   });
+}
+
+function tryGetInstallationId(appStateStore: ReturnType<typeof createAppStateStore>): string | undefined {
+  try {
+    return appStateStore.repositories.deviceIdentity.getOrCreateInstallationId();
+  } catch {
+    return undefined;
+  }
 }
 
 export function readMemoryLayerConfig(env: NodeJS.ProcessEnv): MemoryLayerConfig | null {

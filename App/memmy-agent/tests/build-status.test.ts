@@ -1,7 +1,24 @@
 import { describe, expect, it } from "vitest";
+import { CONTEXT_SAFETY_BUFFER_TOKENS, DEFAULT_MAX_TOKENS } from "../src/token-budget.js";
 import { buildStatusContent } from "../src/utils/helpers.js";
 
 describe("build status content", () => {
+  it("uses the shared default completion reserve and safety margin", () => {
+    const content = buildStatusContent({
+      version: "0.1.0",
+      model: "test",
+      startTime: 1_000_000,
+      lastUsage: {},
+      contextWindowTokens: 200_000,
+      sessionMsgCount: 0,
+      contextTokensEstimate: 130_368,
+    });
+
+    expect(DEFAULT_MAX_TOKENS).toBe(65_536);
+    expect(CONTEXT_SAFETY_BUFFER_TOKENS).toBe(4_096);
+    expect(content).toContain("(100% of input budget)");
+  });
+
   it("shows cache hit rate when cached tokens are present", () => {
     const content = buildStatusContent({
       version: "0.1.0",
@@ -74,7 +91,7 @@ describe("build status content", () => {
       maxCompletionTokens: 8192,
     });
 
-    expect(content).toContain("(101% of input budget)");
+    expect(content).toContain("(103% of input budget)");
   });
 
   it("caps extreme context percentages at 999", () => {

@@ -3,7 +3,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { getLoadablePath as getSqliteVecLoadablePath } from "sqlite-vec";
-import { getSchemaVersion, migrate } from "./schema.js";
+import { getSchemaVersion, migrate, SCHEMA_VERSION } from "./schema.js";
 import { SQLITE_VEC_VERSION } from "./sqlite-vec-store.js";
 
 export interface MemoryDbOptions {
@@ -31,6 +31,7 @@ export class MemoryDb {
     }
     this.configure();
     if (!options.readonly) {
+      this.createPreMigrationBackup();
       migrate(this.db);
     }
   }
@@ -51,6 +52,21 @@ export class MemoryDb {
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("synchronous = NORMAL");
     this.db.pragma("busy_timeout = 5000");
+  }
+
+  private createPreMigrationBackup(): void {
+    if (this.path === ":memory:" || !existsSync(this.path)) return;
+    let version = 0;
+    try {
+      version = getSchemaVersion(this.db).version;
+    } catch {
+      return;
+    }
+    if (version <= 0 || version >= SCHEMA_VERSION) return;
+    const backupPath = `${this.path}.pre-v${SCHEMA_VERSION}.bak`;
+    if (existsSync(backupPath)) return;
+    this.db.pragma("wal_checkpoint(FULL)");
+    this.db.prepare("VACUUM INTO ?").run(backupPath);
   }
 }
 

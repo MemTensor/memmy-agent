@@ -1,13 +1,22 @@
+import fs from "node:fs";
 import path from "node:path";
 import { AsyncQueue, MessageBus, OutboundMessage, InboundMessage } from "../runtime-messages/index.js";
 import { CommandContext, CommandRouter } from "../../command/router.js";
 import { registerBuiltinCommands } from "../../command/builtin.js";
 import { Config, ModelPresetConfig } from "../../config/schema.js";
 import { getWorkspacePath } from "../../config/paths.js";
+import { CONTEXT_SAFETY_BUFFER_TOKENS } from "../../token-budget.js";
 import { CronService } from "../../cron/service.js";
 import { makeProvider } from "../../providers/factory.js";
 import { makeReloadingProviderSnapshotLoader, makeReloadingToolsSnapshotLoader } from "../../providers/snapshot-loader.js";
-import { Session, SessionManager } from "../session/manager.js";
+import {
+  readWebuiSessionBinding,
+  Session,
+  SessionManager,
+  type WebuiSessionBinding,
+  WEBUI_PROJECT_ID_METADATA_KEY,
+  WEBUI_WORKSPACE_CWD_METADATA_KEY,
+} from "../session/manager.js";
 import { goalStateRuntimeLines, runnerWallLlmTimeoutS, sustainedGoalActive } from "../session/goal-state.js";
 import { finishWebuiTurn, markWebuiSession, publishTurnRunStatus, publishWebuiThreadSessionUpdated, shouldPublishWebuiRunStatus, WEBUI_LANGUAGE_METADATA_KEY } from "../session/webui-turns.js";
 import { extractDocuments } from "../../utils/document.js";
@@ -23,10 +32,11 @@ import { ToolLoader } from "./tools/loader.js";
 import { RequestContext, ToolContext } from "./tools/context.js";
 import { ExecSessionManager } from "./tools/exec-session.js";
 import { MessageTool, type MessageSendCallback } from "./tools/message.js";
-import { MyTool } from "./tools/self.js";
 import { FileStateStore } from "./tools/file-state.js";
 import { connectMissingServers, runtimeLines as mcpRuntimeLines, sessionExtra as mcpSessionExtra } from "./tools/mcp.js";
+import { BrowserSessionManager, type BrowserScope } from "./tools/browser.js";
 import { ContextBuilder } from "./context.js";
+import { BUILTIN_SKILLS_DIR } from "./skills.js";
 import { Consolidator, Dream, type TokenCompactionStatus } from "./memory.js";
 import { AgentHook, AgentHookContext, CompositeAgentHook } from "./hook.js";
 import { SubagentManager } from "./subagent.js";
@@ -35,6 +45,11 @@ import { configuredModelPresets, defaultSelectionSignature, makePresetSnapshotLo
 import { installMemmyMemory } from "../../memmy-memory/index.js";
 import { createByokTokenUsageRecorder, installByokTokenUsage } from "../../integrations/byok-token-usage/index.js";
 import { SessionDagQueueManager, SessionDagUsageReporter, type DagTurnInput } from "../../session-dag/index.js";
+import {
+  assertWebuiWorkspaceAvailable,
+  ProjectStore,
+  WebuiProjectError,
+} from "../../entrypoints/frontend-bridge/projects.js";
 
 export const UNIFIED_SESSION_KEY = "unified:default";
 type ToolRegistryInstance = ReturnType<ToolLoader["loadRegistry"]>;
@@ -96,6 +111,9 @@ export class TurnContext {
   trace: StateTraceEntry[] = [];
   tools: ToolRegistryInstance | null = null;
   messageSendCallback: MessageSendCallback | null = null;
+  sessionWorkspace: string | null = null;
+  sessionProjectId: string | null = null;
+  trustedSessionBinding: WebuiSessionBinding | null = null;
 
   constructor(init: { msg: InboundMessage; sessionKey?: string; state?: TurnState; turnId?: string; session?: Session | null }) {
     this.msg = init.msg;
@@ -137,6 +155,7 @@ type AgentLoopInit = {
   cronService?: CronService;
   hooks?: AgentHook[];
   sessionDagQueue?: SessionDagQueueManager | null;
+  projectStore?: ProjectStore | null;
 };
 
 function truncateText(text: string, maxChars: number): string {
@@ -328,6 +347,16 @@ function isTaskCancelledError(error: unknown): boolean {
   return error instanceof Error && error.name === "TaskCancelledError";
 }
 
+export class SessionWorkspaceError extends Error {
+  readonly code: string;
+
+  constructor(code: string) {
+    super(code);
+    this.name = "SessionWorkspaceError";
+    this.code = code;
+  }
+}
+
 export class AgentLoop {
   bus: MessageBus;
   config: Config;
@@ -336,6 +365,7 @@ export class AgentLoop {
   execConfig: any;
   provider: any;
   workspace: string;
+  readonly fileMemoryEnabled: boolean;
   model: string | null;
   modelPresets: Record<string, ModelPresetConfig>;
   private defaultModelPreset: ModelPresetConfig;
@@ -343,6 +373,7 @@ export class AgentLoop {
   cronService: CronService;
   execSessionManager: ExecSessionManager;
   fileStateStore: FileStateStore;
+  browserSessionManager: BrowserSessionManager;
   subagents: SubagentManager;
   runner: AgentRunner;
   context: ContextBuilder;
@@ -350,8 +381,9 @@ export class AgentLoop {
   commands: CommandRouter;
   consolidator: Consolidator;
   sessionDagQueue: SessionDagQueueManager | null;
+  projectStore: ProjectStore | null;
   autoCompact: AutoCompact;
-  dream: Dream;
+  dream: Dream | null;
   maxIterations: number;
   contextWindowTokens: number;
   contextBlockLimit: number | null;
@@ -380,6 +412,7 @@ export class AgentLoop {
   mcpStacks: Record<string, any>;
   mcpConnected: boolean;
   mcpConnecting: boolean;
+  private browserRegistryInitialized = false;
   subagentPendingWaitMs = 300_000;
   static readonly RUNTIME_CHECKPOINT_KEY = "runtimeCheckpoint";
   static readonly PENDING_USER_TURN_KEY = "pendingUserTurn";
@@ -408,6 +441,7 @@ export class AgentLoop {
     this.toolsConfig = this.config.tools;
     this.webConfig = { search: this.config.tools.webSearch, fetch: this.config.tools.webFetch };
     this.execConfig = (this.config.tools as any).exec ?? {};
+    this.fileMemoryEnabled = this.config.fileMemory.enabled;
     const defaults = this.config.agents.defaults;
     this.workspace = path.resolve(getWorkspacePath(init.workspace ?? defaults.workspace ?? process.cwd()));
     installMemmyMemory(this.config, { workspace: this.workspace, hooks: this.extraHooks });
@@ -435,15 +469,26 @@ export class AgentLoop {
     this.modelPresets = Object.fromEntries(Object.entries(rawPresets).map(([name, preset]) => [name, preset instanceof ModelPresetConfig ? preset : new ModelPresetConfig(preset)]));
     this.unifiedSession = init.unifiedSession ?? defaults.unifiedSession;
     this.sessions = init.sessionManager ?? new SessionManager(init.sessionDir ?? path.join(this.workspace, "sessions"));
+    this.projectStore = init.projectStore ?? null;
     this.cronService = init.cronService ?? new CronService(path.join(this.workspace, "cron", "jobs.json"));
     this.sessionDagQueue = init.sessionDagQueue ?? this.createSessionDagQueue();
     this.execSessionManager = new ExecSessionManager();
     this.fileStateStore = new FileStateStore();
+    this.browserSessionManager = new BrowserSessionManager(
+      this.config.tools.browser,
+      {
+        restrictLocalFiles: Boolean(
+          this.config.tools.restrictToWorkspace
+          || this.config.tools.exec.sandbox,
+        ),
+      },
+    );
     this.subagents = new SubagentManager({
       provider: this.provider,
       workspace: this.workspace,
       bus: this.bus,
       model: this.model,
+      contextWindowTokens: this.contextWindowTokens,
       toolsConfig: this.config.tools,
       maxIterations: this.maxIterations,
       maxConcurrent: defaults.maxConcurrentSubagents,
@@ -454,9 +499,10 @@ export class AgentLoop {
     this.context = new ContextBuilder({
       workspace: this.workspace,
       timezone: init.timezone ?? defaults.timezone,
+      fileMemoryEnabled: this.fileMemoryEnabled,
     });
     this.runner = new AgentRunner();
-    this.tools = this.createToolRegistry("init");
+    this.tools = this.createToolRegistry("init", this.workspace);
     this.commands = new CommandRouter();
     registerBuiltinCommands(this.commands);
     this.consolidator = new Consolidator({
@@ -476,11 +522,13 @@ export class AgentLoop {
       dagCatchupTimeoutMs: this.config.sessionDag.compactionCatchupTimeoutMs,
     });
     this.autoCompact = new AutoCompact(this.sessions, this.consolidator, init.sessionTtlMinutes ?? defaults.sessionTtlMinutes);
-    this.dream = new Dream({
-      store: this.context.memory,
-      provider: this.provider,
-      model: this.model ?? "",
-    });
+    this.dream = this.fileMemoryEnabled
+      ? new Dream({
+          store: this.context.memory,
+          provider: this.provider,
+          model: this.model ?? "",
+        })
+      : null;
     const requestedPreset = init.modelPreset ?? defaults.modelPreset;
     if (requestedPreset) this.setModelPreset(requestedPreset, { publishUpdate: false });
   }
@@ -540,16 +588,22 @@ export class AgentLoop {
     return this.effectiveSessionKey(message);
   }
 
-  private createToolContext(messageSendCallback: MessageSendCallback | null = null): ToolContext {
+  private createToolContext(
+    capturedSessionWorkspace: string,
+    readonlySkillRoots: readonly string[] | undefined,
+    messageSendCallback: MessageSendCallback | null = null,
+  ): ToolContext {
     return new ToolContext({
       config: this.config.tools,
-      workspace: this.workspace,
+      workspace: capturedSessionWorkspace,
       bus: this.bus,
       subagentManager: this.subagents,
       cronService: this.cronService,
       sessions: this.sessions,
       execSessionManager: this.execSessionManager,
       fileStateStore: this.fileStateStore,
+      browserSessionManager: this.browserSessionManager,
+      readonlySkillRoots,
       timezone: this.context.timezone || this.config.agents.defaults.timezone || "UTC",
       runtimeState: this,
       messageSendCallback,
@@ -558,18 +612,39 @@ export class AgentLoop {
 
   private createToolRegistry(
     phase: string,
+    capturedSessionWorkspace: string,
     {
       includeConnectedMcp = false,
       messageSendCallback = null,
-    }: { includeConnectedMcp?: boolean; messageSendCallback?: MessageSendCallback | null } = {},
+      readonlySkillRoots,
+    }: {
+      includeConnectedMcp?: boolean;
+      messageSendCallback?: MessageSendCallback | null;
+      readonlySkillRoots?: readonly string[];
+    } = {},
   ): ToolRegistryInstance {
     this.refreshToolsSnapshot();
-    const toolCtx = this.createToolContext(messageSendCallback);
+    const toolCtx = this.createToolContext(
+      capturedSessionWorkspace,
+      readonlySkillRoots,
+      messageSendCallback,
+    );
     const registry = new ToolLoader({ workspace: this.workspace, ctx: toolCtx }).loadRegistry(toolCtx);
-    if (this.config.tools.my.enable && !registry.get("my")) registry.register(new MyTool({ runtime: this as any }));
     if (includeConnectedMcp) this.copyConnectedMcpTools(registry);
     this.registerHookTools(toolCtx, phase, registry);
     return registry;
+  }
+
+  private projectReadonlySkillRoots(): readonly string[] {
+    const roots = [path.join(this.workspace, "skills"), BUILTIN_SKILLS_DIR]
+      .flatMap((root) => {
+        try {
+          return fs.statSync(root).isDirectory() ? [fs.realpathSync(root)] : [];
+        } catch {
+          return [];
+        }
+      });
+    return Object.freeze([...new Set(roots)]);
   }
 
   private copyConnectedMcpTools(registry: ToolRegistryInstance): void {
@@ -585,6 +660,7 @@ export class AgentLoop {
     messageId: string | null = null,
     metadata: Record<string, any> = {},
     sessionKey: string | null = null,
+    capturedSessionWorkspace: string = this.workspace,
     tools: ToolRegistryInstance = this.tools,
   ): void {
     const effectiveKey = sessionKey ?? (this.unifiedSession ? UNIFIED_SESSION_KEY : `${channel}:${chatId}`);
@@ -593,6 +669,7 @@ export class AgentLoop {
       chatId,
       messageId,
       sessionKey: effectiveKey,
+      workspace: capturedSessionWorkspace,
       metadata,
     });
     for (const name of tools.toolNames) {
@@ -602,11 +679,40 @@ export class AgentLoop {
   }
 
   registerDefaultTools(): void {
-    this.tools = this.createToolRegistry("refresh");
+    this.tools = this.createToolRegistry("refresh", this.workspace);
   }
 
   async connectMcp(): Promise<void> {
     await connectMissingServers(this as any, this.tools);
+  }
+
+  async initializeRuntimeTools(): Promise<void> {
+    await this.connectMcp();
+    await this.browserSessionManager.initialize();
+    if (!this.browserRegistryInitialized) {
+      this.tools = this.createToolRegistry("runtime-init", this.workspace, {
+        includeConnectedMcp: true,
+      });
+      this.browserRegistryInitialized = true;
+    }
+  }
+
+  async closeRuntimeTools(): Promise<void> {
+    await this.browserSessionManager.close();
+    await this.closeMcp();
+  }
+
+  async closeBrowserSession(
+    sessionKey: string,
+    channel: string,
+    chatId: string,
+  ): Promise<void> {
+    const scope: BrowserScope = { sessionKey, channel, chatId };
+    await this.browserSessionManager.closeSession(scope);
+  }
+
+  async closeBrowserChat(channel: string, chatId: string): Promise<void> {
+    await this.browserSessionManager.closeChat(channel, chatId);
   }
 
   async closeMcp(): Promise<void> {
@@ -628,6 +734,68 @@ export class AgentLoop {
     const override = message.sessionKeyOverride;
     if (this.unifiedSession && !override) return UNIFIED_SESSION_KEY;
     return override ?? message.sessionKey;
+  }
+
+  resolveSessionWorkspace(
+    message: InboundMessage,
+    session: Session | null,
+    reservation: WebuiSessionBinding | null = null,
+    trustedOverride: WebuiSessionBinding | null = null,
+  ): WebuiSessionBinding {
+    let binding: WebuiSessionBinding;
+    let requiresAvailabilityCheck = false;
+    if (trustedOverride) {
+      binding = trustedOverride;
+      requiresAvailabilityCheck = true;
+    } else if (
+      message.channel === "websocket"
+      && (
+        session?.metadata?.webui === true
+        || reservation !== null
+        || message.metadata?.webui === true
+      )
+    ) {
+      if (session) {
+        binding = readWebuiSessionBinding(session);
+      } else if (reservation) {
+        binding = reservation;
+      } else {
+        throw new SessionWorkspaceError("workspace_missing");
+      }
+      requiresAvailabilityCheck = true;
+    } else {
+      binding = { projectId: null, cwd: this.workspace };
+    }
+
+    if (binding.projectId !== null && this.projectStore) {
+      const snapshot = this.projectStore.snapshot();
+      if (snapshot.state === "corrupt") {
+        throw new SessionWorkspaceError("project_registry_corrupt");
+      }
+      if (this.projectStore.isDeleting(binding.projectId)) {
+        throw new SessionWorkspaceError("project_removed");
+      }
+    }
+
+    if (!requiresAvailabilityCheck) return binding;
+
+    let canonical: string;
+    try {
+      canonical = assertWebuiWorkspaceAvailable(binding.cwd);
+    } catch (error) {
+      if (error instanceof WebuiProjectError) {
+        throw new SessionWorkspaceError(
+          error.code === "project_directory_unavailable"
+            ? "workspace_unavailable"
+            : "workspace_missing",
+        );
+      }
+      throw error;
+    }
+    if (canonical !== binding.cwd) {
+      throw new SessionWorkspaceError("workspace_unavailable");
+    }
+    return { projectId: binding.projectId, cwd: canonical };
   }
 
   lifecycleHook(): AgentHook {
@@ -677,12 +845,57 @@ export class AgentLoop {
     );
   }
 
-  async getOrCreateSession(sessionKey: string, reason = "created"): Promise<Session> {
+  async getOrCreateSession(
+    sessionKey: string,
+    reason = "created",
+    requireWebuiBinding = false,
+  ): Promise<Session> {
     const usesDefaultGetOrCreate = this.sessions instanceof SessionManager && this.sessions.getOrCreate === SessionManager.prototype.getOrCreate;
     if (!usesDefaultGetOrCreate) return this.sessions.getOrCreate(sessionKey);
     const getWithInfo = this.sessions.getOrCreateWithInfo;
     if (typeof getWithInfo !== "function") return this.sessions.getOrCreate(sessionKey);
+    let expectedBinding: WebuiSessionBinding | null = null;
+    if (requireWebuiBinding && sessionKey.startsWith("websocket:") && !this.sessions.has(sessionKey)) {
+      expectedBinding = this.sessions.peekWebuiSessionBindingReservation(sessionKey);
+      if (!expectedBinding) throw new SessionWorkspaceError("workspace_missing");
+      if (expectedBinding.projectId !== null && this.projectStore) {
+        const snapshot = this.projectStore.snapshot();
+        if (snapshot.state === "corrupt") {
+          throw new SessionWorkspaceError("project_registry_corrupt");
+        }
+        if (this.projectStore.isDeleting(expectedBinding.projectId)) {
+          throw new SessionWorkspaceError("project_removed");
+        }
+      }
+      let canonical: string;
+      try {
+        canonical = assertWebuiWorkspaceAvailable(expectedBinding.cwd);
+      } catch {
+        throw new SessionWorkspaceError("workspace_unavailable");
+      }
+      if (canonical !== expectedBinding.cwd) {
+        throw new SessionWorkspaceError("workspace_unavailable");
+      }
+    }
     const { session, created } = getWithInfo.call(this.sessions, sessionKey);
+    if (created && requireWebuiBinding && sessionKey.startsWith("websocket:")) {
+      const binding = this.sessions.consumeWebuiSessionBindingReservation(sessionKey);
+      if (
+        expectedBinding
+        && (
+          expectedBinding.projectId !== binding.projectId
+          || expectedBinding.cwd !== binding.cwd
+        )
+      ) {
+        this.sessions.delete(sessionKey);
+        throw new SessionWorkspaceError("workspace_conflict");
+      }
+      session.metadata ??= {};
+      session.metadata.webui = true;
+      session.metadata[WEBUI_PROJECT_ID_METADATA_KEY] = binding.projectId;
+      session.metadata[WEBUI_WORKSPACE_CWD_METADATA_KEY] = binding.cwd;
+      this.sessions.save(session, { fsync: true });
+    }
     if (created) await this.emitSessionStart(session, sessionKey, reason);
     return session;
   }
@@ -698,7 +911,9 @@ export class AgentLoop {
   replayTokenBudget(): number {
     if (this.contextWindowTokens <= 0) return 0;
     const reserved = Number(this.provider?.generation?.maxTokens ?? 4096);
-    const budget = this.contextWindowTokens - Math.max(1, reserved) - 1024;
+    const budget = this.contextWindowTokens
+      - Math.max(1, reserved)
+      - CONTEXT_SAFETY_BUFFER_TOKENS;
     return budget > 0 ? budget : Math.max(128, Math.floor(this.contextWindowTokens / 2));
   }
 
@@ -729,8 +944,8 @@ export class AgentLoop {
   }
 
   isSessionGoalActive(sessionKey: string): boolean {
-    const session = this.sessions.getOrCreate(sessionKey);
-    return sustainedGoalActive(session.metadata);
+    const session = this.sessions.get(sessionKey);
+    return Boolean(session && sustainedGoalActive(session.metadata));
   }
 
   isCronTargetBlocked(channel: string, sessionKey: string): boolean {
@@ -795,12 +1010,19 @@ export class AgentLoop {
       this.provider.generation.reasoningEffort = reasoningEffort;
     }
     (this.runner as any).provider = provider;
-    if (typeof (this.subagents as any)?.setProvider === "function") (this.subagents as any).setProvider(provider, model);
+    if (typeof (this.subagents as any)?.setProvider === "function") {
+      (this.subagents as any).setProvider(provider, model, contextWindowTokens);
+    }
     else if (this.subagents) (this.subagents as any).model = model;
     if (typeof (this.consolidator as any)?.setProvider === "function") (this.consolidator as any).setProvider(provider, model, contextWindowTokens);
     else (this.consolidator as any).model = model;
-    if (typeof (this.dream as any)?.setProvider === "function") (this.dream as any).setProvider(provider, model);
-    else (this.dream as any).model = model;
+    if (this.dream) {
+      if (typeof (this.dream as any).setProvider === "function") {
+        (this.dream as any).setProvider(provider, model);
+      } else {
+        (this.dream as any).model = model;
+      }
+    }
     this.providerSignature = snapshot.signature ?? JSON.stringify({ model, contextWindowTokens });
     if (publishUpdate && this.runtimeModelPublisher) this.runtimeModelPublisher(this.model, modelPreset ?? this.modelPreset);
   }
@@ -1023,12 +1245,36 @@ export class AgentLoop {
     const metadataExtra = {
       ...(mediaPaths.length ? { media: [...mediaPaths] } : {}),
       ...mcpSessionExtra(msg.metadata),
+      ...(typeof msg.metadata?.client_request_id === "string"
+        ? {
+            client_request_id: msg.metadata.client_request_id,
+            webui_request_digest: msg.metadata.webui_request_digest,
+          }
+        : {}),
       ...extra,
     };
     session.addMessage("user", typeof msg.content === "string" ? msg.content : "", metadataExtra);
     this.markPendingUserTurn(session);
-    this.sessions.save(session);
+    this.sessions.save(session, {
+      fsync: typeof msg.metadata?.client_request_id === "string",
+    });
     return true;
+  }
+
+  async publishWebuiMessageAccepted(msg: InboundMessage): Promise<void> {
+    const clientRequestId = msg.metadata?.client_request_id;
+    if (msg.channel !== "websocket" || typeof clientRequestId !== "string") return;
+    await this.bus.publishOutbound(
+      new OutboundMessage({
+        channel: "websocket",
+        chatId: msg.chatId,
+        content: "",
+        metadata: {
+          webuiMessageAccepted: true,
+          clientRequestId,
+        },
+      }),
+    );
   }
 
   localizeUserFacingApiError(
@@ -1043,7 +1289,13 @@ export class AgentLoop {
     return userFacingApiErrorFallback(language, content);
   }
 
-  buildInitialMessages(msg: InboundMessage, session: Session, history: Record<string, any>[], pendingSummary: string | null): Record<string, any>[] {
+  buildInitialMessages(
+    msg: InboundMessage,
+    session: Session,
+    history: Record<string, any>[],
+    pendingSummary: string | null,
+    sessionWorkspace: string,
+  ): Record<string, any>[] {
     return this.context.buildMessages({
       history,
       currentMessage: imageGenerationPrompt(msg.content, msg.metadata),
@@ -1062,6 +1314,7 @@ export class AgentLoop {
         }),
       ],
       hook: this.lifecycleHook(),
+      sessionWorkspace,
     });
   }
 
@@ -1268,9 +1521,23 @@ export class AgentLoop {
       return raw.startsWith("/") && msg.content !== raw ? "continue" : null;
     }
     if (raw.toLowerCase() !== "/new") {
-      session.addMessage("user", msg.content, { commandMessage: true });
+      session.addMessage("user", msg.content, {
+        commandMessage: true,
+        ...(typeof msg.metadata?.client_request_id === "string"
+          ? {
+              client_request_id: msg.metadata.client_request_id,
+              webui_request_digest: msg.metadata.webui_request_digest,
+            }
+          : {}),
+      });
       session.addMessage("assistant", result.content, { commandMessage: true });
-      this.sessions.save(session);
+      this.sessions.save(session, {
+        fsync: typeof msg.metadata?.client_request_id === "string",
+      });
+      await this.publishWebuiMessageAccepted(msg);
+    } else if (typeof msg.metadata?.client_request_id === "string") {
+      this.sessions.save(session, { fsync: true });
+      await this.publishWebuiMessageAccepted(msg);
     }
     return result;
   }
@@ -1293,6 +1560,7 @@ export class AgentLoop {
       turnId = null,
       boundary = null,
       tools = null,
+      sessionWorkspace = this.workspace,
     }: {
       onProgress?: any;
       onStream?: any;
@@ -1309,6 +1577,7 @@ export class AgentLoop {
       turnId?: string | null;
       boundary?: TurnCancellationBoundary | null;
       tools?: ToolRegistryInstance | null;
+      sessionWorkspace?: string;
     } = {},
   ): Promise<[string, string[], Record<string, any>[], string, boolean, boolean]> {
     this.refreshProviderSnapshot();
@@ -1324,7 +1593,15 @@ export class AgentLoop {
       metadata: metadata ?? {},
       sessionKey: activeSessionKey,
       toolHintMaxLength: this.toolHintMaxLength,
-      setToolContext: (...args: any[]) => this.setToolContext(args[0], args[1], args[2], args[3], args[4], activeTools),
+      setToolContext: (...args: any[]) => this.setToolContext(
+        args[0],
+        args[1],
+        args[2],
+        args[3],
+        args[4],
+        sessionWorkspace,
+        activeTools,
+      ),
       onIteration: (iteration: number) => {
         this.currentIterationValue = iteration;
       },
@@ -1342,7 +1619,7 @@ export class AgentLoop {
         reasoningEffort: this.provider?.generation?.reasoningEffort ?? this.config.agents.defaults.reasoningEffort,
         maxToolResultChars: this.maxToolResultChars,
         toolResultMaxCharsByName: SESSION_TOOL_RESULT_MAX_CHARS_BY_NAME,
-        workspace: this.workspace,
+        workspace: sessionWorkspace,
         sessionKey: activeSessionKey,
         contextWindowTokens: this.contextWindowTokens,
         contextBlockLimit: this.contextBlockLimit,
@@ -1407,6 +1684,20 @@ export class AgentLoop {
 
   async stateRestore(ctx: TurnContext): Promise<string> {
     let msg = ctx.msg;
+    const existingSession = this.sessions.get(ctx.sessionKey);
+    const reservation = existingSession
+      || msg.channel !== "websocket"
+      || msg.metadata?.webui !== true
+      ? null
+      : this.sessions.peekWebuiSessionBindingReservation(ctx.sessionKey);
+    const binding = this.resolveSessionWorkspace(
+      msg,
+      existingSession,
+      reservation,
+      ctx.trustedSessionBinding,
+    );
+    ctx.sessionWorkspace = binding.cwd;
+    ctx.sessionProjectId = binding.projectId;
     if (msg.media.length) {
       const [content, imageOnly] = await extractDocuments(msg.content, msg.media);
       msg = ctx.msg = new InboundMessage({
@@ -1421,7 +1712,13 @@ export class AgentLoop {
         timestamp: msg.timestamp,
       });
     }
-    if (!ctx.session) ctx.session = await this.getOrCreateSession(ctx.sessionKey);
+    if (!ctx.session) {
+      ctx.session = existingSession ?? await this.getOrCreateSession(
+        ctx.sessionKey,
+        "created",
+        reservation !== null,
+      );
+    }
     markWebuiSession(ctx.session, msg.metadata);
     let changed = this.restoreRuntimeCheckpoint(ctx.session);
     changed = this.restorePendingUserTurn(ctx.session) || changed;
@@ -1446,6 +1743,22 @@ export class AgentLoop {
   }
 
   async stateBuild(ctx: TurnContext): Promise<string> {
+    const sessionWorkspace = ctx.sessionWorkspace;
+    if (!sessionWorkspace) throw new SessionWorkspaceError("workspace_missing");
+    ctx.userPersistedEarly = this.persistUserMessageEarly(ctx.msg, ctx.session!);
+    if (ctx.userPersistedEarly) {
+      await this.publishWebuiMessageAccepted(ctx.msg);
+      await publishWebuiThreadSessionUpdated(this.bus, ctx.msg);
+    }
+    const revalidated = this.resolveSessionWorkspace(
+      ctx.msg,
+      ctx.session,
+      null,
+      ctx.trustedSessionBinding,
+    );
+    if (revalidated.cwd !== sessionWorkspace || revalidated.projectId !== ctx.sessionProjectId) {
+      throw new SessionWorkspaceError("workspace_conflict");
+    }
     const compactionOptions: {
       replayMaxMessages: number | null;
       notifyOnLockWait?: boolean;
@@ -1460,9 +1773,12 @@ export class AgentLoop {
       };
     }
     await this.consolidator.maybeConsolidateByTokens(ctx.session!, compactionOptions);
-    ctx.tools = this.createToolRegistry("turn", {
+    ctx.tools = this.createToolRegistry("turn", sessionWorkspace, {
       includeConnectedMcp: true,
       messageSendCallback: ctx.messageSendCallback,
+      ...(ctx.sessionProjectId !== null
+        ? { readonlySkillRoots: this.projectReadonlySkillRoots() }
+        : {}),
     });
     this.setToolContext(
       ctx.msg.channel,
@@ -1470,6 +1786,7 @@ export class AgentLoop {
       ctx.msg.metadata?.message_id ?? ctx.msg.metadata?.messageId ?? null,
       ctx.msg.metadata ?? {},
       ctx.sessionKey,
+      sessionWorkspace,
       ctx.tools,
     );
     const messageTool = ctx.tools.get("message");
@@ -1479,9 +1796,19 @@ export class AgentLoop {
       maxTokens: this.replayTokenBudget(),
       includeTimestamps: true,
     });
-    ctx.initialMessages = this.buildInitialMessages(ctx.msg, ctx.session!, ctx.history, ctx.pendingSummary);
-    ctx.userPersistedEarly = this.persistUserMessageEarly(ctx.msg, ctx.session!);
-    if (ctx.userPersistedEarly) await publishWebuiThreadSessionUpdated(this.bus, ctx.msg);
+    if (
+      ctx.userPersistedEarly
+      && ctx.history.at(-1)?.role === "user"
+    ) {
+      ctx.history = ctx.history.slice(0, -1);
+    }
+    ctx.initialMessages = this.buildInitialMessages(
+      ctx.msg,
+      ctx.session!,
+      ctx.history,
+      ctx.pendingSummary,
+      sessionWorkspace,
+    );
     ctx.onProgress ??= await this.buildBusProgressCallback(ctx);
     ctx.onRetryWait ??= await this.buildRetryWaitCallback(ctx.msg);
     return "ok";
@@ -1504,6 +1831,7 @@ export class AgentLoop {
       turnId: ctx.turnId,
       boundary: ctx.boundary,
       tools: ctx.tools,
+      sessionWorkspace: ctx.sessionWorkspace ?? this.workspace,
     });
     if (ctx.abortSignal?.aborted || stopReason === "cancelled") {
       throw createTaskCancelledError();
@@ -1559,6 +1887,7 @@ export class AgentLoop {
       pendingQueue,
       abortSignal,
       turnId,
+      sessionBindingOverride,
     }: {
       onProgress?: (...args: any[]) => Promise<void> | void;
       onStream?: (delta: string) => Promise<void> | void;
@@ -1567,6 +1896,7 @@ export class AgentLoop {
       abortSignal?: AbortSignal | null;
       turnId?: string | null;
       boundary?: TurnCancellationBoundary | null;
+      sessionBindingOverride?: WebuiSessionBinding | null;
     } = {},
   ): Promise<OutboundMessage | null> {
     this.refreshProviderSnapshot();
@@ -1576,6 +1906,13 @@ export class AgentLoop {
     const chatId = separator >= 0 ? rawChatId.slice(separator + 1) : rawChatId;
     const key = sessionKey ?? msg.sessionKeyOverride ?? `${channel}:${chatId}`;
     let session = await this.getOrCreateSession(key);
+    const sessionBinding = this.resolveSessionWorkspace(
+      msg,
+      session,
+      null,
+      sessionBindingOverride ?? null,
+    );
+    const sessionWorkspace = sessionBinding.cwd;
     if (this.restoreRuntimeCheckpoint(session)) this.sessions.save(session);
     if (this.restorePendingUserTurn(session)) this.sessions.save(session);
 
@@ -1585,11 +1922,28 @@ export class AgentLoop {
     await this.consolidator.maybeConsolidateByTokens(session, {
       replayMaxMessages: this.maxMessages,
     });
-    const tools = this.createToolRegistry("system-turn", { includeConnectedMcp: true });
+    const tools = this.createToolRegistry(
+      "system-turn",
+      sessionWorkspace,
+      {
+        includeConnectedMcp: true,
+        ...(sessionBinding.projectId !== null
+          ? { readonlySkillRoots: this.projectReadonlySkillRoots() }
+          : {}),
+      },
+    );
 
     const isSubagent = msg.senderId === "subagent";
     if (isSubagent && this.persistSubagentFollowup(session, msg)) this.sessions.save(session);
-    this.setToolContext(channel, chatId, msg.metadata?.message_id ?? msg.metadata?.messageId ?? null, msg.metadata ?? {}, key, tools);
+    this.setToolContext(
+      channel,
+      chatId,
+      msg.metadata?.message_id ?? msg.metadata?.messageId ?? null,
+      msg.metadata ?? {},
+      key,
+      sessionWorkspace,
+      tools,
+    );
 
     const history = session.getHistory({
       maxMessages: this.maxMessages,
@@ -1617,6 +1971,7 @@ export class AgentLoop {
             }),
           ],
       hook: this.lifecycleHook(),
+      sessionWorkspace,
     });
 
     const started = Date.now();
@@ -1633,6 +1988,7 @@ export class AgentLoop {
       pendingQueue,
       abortSignal,
       tools,
+      sessionWorkspace,
     });
     if (abortSignal?.aborted || stopReason === "cancelled") {
       throw createTaskCancelledError();
@@ -1675,6 +2031,7 @@ export class AgentLoop {
       turnId,
       boundary,
       messageSendCallback,
+      sessionBindingOverride,
     }: {
       onProgress?: (...args: any[]) => Promise<void> | void;
       onStream?: (delta: string) => Promise<void> | void;
@@ -1684,6 +2041,7 @@ export class AgentLoop {
       turnId?: string | null;
       boundary?: TurnCancellationBoundary | null;
       messageSendCallback?: MessageSendCallback | null;
+      sessionBindingOverride?: WebuiSessionBinding | null;
     } = {},
   ): Promise<OutboundMessage | null> {
     this.refreshProviderSnapshot();
@@ -1694,6 +2052,7 @@ export class AgentLoop {
         onStreamEnd,
         pendingQueue,
         abortSignal,
+        sessionBindingOverride,
       });
     }
     const key = sessionKey ?? this.sessionKey(message);
@@ -1706,6 +2065,7 @@ export class AgentLoop {
     ctx.abortSignal = abortSignal ?? null;
     ctx.boundary = boundary ?? createTurnCancellationBoundary({ turnId: ctx.turnId, signal: ctx.abortSignal });
     ctx.messageSendCallback = messageSendCallback ?? null;
+    ctx.trustedSessionBinding = sessionBindingOverride ?? null;
 
     await this.stateRestore(ctx);
     this.autoCompact.checkExpired((promise) => this.scheduleBackground(promise), this.activeTasks.keys());
@@ -1749,6 +2109,18 @@ export class AgentLoop {
     try {
       await lock.runExclusive(async () => {
         if (isCancelled()) return;
+        if (effectiveMsg.channel === "websocket" && effectiveMsg.metadata?.webui === true) {
+          const getSession = this.sessions.get;
+          const existing = typeof getSession === "function"
+            ? getSession.call(this.sessions, sessionKey)
+            : null;
+          if (!existing) {
+            const peekReservation = this.sessions.peekWebuiSessionBindingReservation;
+            if (typeof peekReservation === "function") {
+              peekReservation.call(this.sessions, sessionKey);
+            }
+          }
+        }
         if (publishRunStatus) {
           await publishTurnRunStatus(this.bus, effectiveMsg, "running");
           didPublishRunning = true;
@@ -1815,8 +2187,42 @@ export class AgentLoop {
         }
       });
     } catch (error) {
+      if (
+        error instanceof SessionWorkspaceError
+        && effectiveMsg.channel === "websocket"
+        && typeof effectiveMsg.metadata?.client_request_id === "string"
+      ) {
+        const getSession = this.sessions.get;
+        const session = typeof getSession === "function"
+          ? getSession.call(this.sessions, sessionKey)
+          : null;
+        if (session) {
+          this.clearPendingUserTurn(session);
+          this.clearRuntimeCheckpoint(session);
+          this.sessions.save(session, { fsync: true });
+        }
+        await this.bus.publishOutbound(
+          new OutboundMessage({
+            channel: "websocket",
+            chatId: effectiveMsg.chatId,
+            content: "",
+            metadata: {
+              webuiSessionWorkspaceLost: true,
+              clientRequestId: effectiveMsg.metadata.client_request_id,
+              reason: error.code === "workspace_missing"
+                ? "workspace_missing"
+                : "workspace_unavailable",
+            },
+          }),
+        );
+        return;
+      }
       try {
-        const session = this.sessions.getOrCreate(sessionKey);
+        const getSession = this.sessions.get;
+        const session = typeof getSession === "function"
+          ? getSession.call(this.sessions, sessionKey)
+          : this.sessions.getOrCreate(sessionKey);
+        if (!session) throw error;
         const restored = this.restoreRuntimeCheckpoint(session) || this.restorePendingUserTurn(session);
         if (restored) this.sessions.save(session);
       } catch {
@@ -1849,7 +2255,7 @@ export class AgentLoop {
 
   async run(): Promise<void> {
     this.running = true;
-    await this.connectMcp();
+    await this.initializeRuntimeTools();
     if (!this.running) return;
     while (this.running) {
       const msg = this.bus.inbound.getNowait();
@@ -1932,6 +2338,7 @@ export class AgentLoop {
       onStream,
       onStreamEnd,
       messageSendCallback,
+      sessionBindingOverride,
     }: {
       sessionKey?: string;
       channel?: string;
@@ -1942,9 +2349,10 @@ export class AgentLoop {
       onStream?: (delta: string) => Promise<void> | void;
       onStreamEnd?: (...args: any[]) => Promise<void> | void;
       messageSendCallback?: MessageSendCallback | null;
+      sessionBindingOverride?: WebuiSessionBinding | null;
     } = {},
   ): Promise<OutboundMessage | null> {
-    await this.connectMcp();
+    await this.initializeRuntimeTools();
     const key = this.unifiedSession ? UNIFIED_SESSION_KEY : sessionKey;
     const msg = new InboundMessage({
       channel,
@@ -1955,6 +2363,12 @@ export class AgentLoop {
       metadata,
       sessionKey: key,
     });
-    return this.processMessageInternal(msg, key, { onProgress, onStream, onStreamEnd, messageSendCallback });
+    return this.processMessageInternal(msg, key, {
+      onProgress,
+      onStream,
+      onStreamEnd,
+      messageSendCallback,
+      sessionBindingOverride,
+    });
   }
 }

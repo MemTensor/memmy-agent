@@ -74,17 +74,31 @@ export class ContextBuilder {
   systemPrompt = "";
   workspace: string;
   timezone: string | null;
+  readonly fileMemoryEnabled: boolean;
   memory: MemoryStore;
   skills: SkillsLoader;
   maxRecentHistory = ContextBuilder.MAX_RECENT_HISTORY;
   maxHistoryChars = ContextBuilder.MAX_HISTORY_CHARS;
 
-  constructor(init: { systemPrompt?: string; workspace?: string; timezone?: string | null; disabledSkills?: string[] | null } | string = {}) {
+  constructor(
+    init:
+      | {
+          systemPrompt?: string;
+          workspace?: string;
+          timezone?: string | null;
+          disabledSkills?: string[] | null;
+          fileMemoryEnabled?: boolean;
+        }
+      | string = {},
+  ) {
     const opts = typeof init === "string" ? { workspace: init } : init;
     this.systemPrompt = opts.systemPrompt ?? "";
     this.workspace = path.resolve(opts.workspace ?? process.cwd());
     this.timezone = opts.timezone ?? null;
-    this.memory = new MemoryStore(this.workspace);
+    this.fileMemoryEnabled = opts.fileMemoryEnabled === true;
+    this.memory = new MemoryStore(this.workspace, {
+      fileMemoryEnabled: this.fileMemoryEnabled,
+    });
     this.skills = new SkillsLoader(this.workspace, null, opts.disabledSkills ?? null);
   }
 
@@ -119,6 +133,7 @@ export class ContextBuilder {
   loadBootstrapFiles(): string {
     const parts: string[] = [];
     for (const filename of ContextBuilder.BOOTSTRAP_FILES) {
+      if (filename === "USER.md" && !this.fileMemoryEnabled) continue;
       const file = path.join(this.workspace, filename);
       if (fs.existsSync(file)) parts.push(`## ${filename}\n\n${fs.readFileSync(file, "utf8")}`);
     }
@@ -135,11 +150,12 @@ export class ContextBuilder {
     }
   }
 
-  getIdentity(channel?: string | null): string {
+  getIdentity(channel?: string | null, sessionWorkspace = this.workspace): string {
     const platformName = os.platform() === "darwin" ? "Darwin" : os.platform() === "win32" ? "Windows" : os.type();
     const runtime = `${platformName === "Darwin" ? "macOS" : platformName} ${os.arch()}, Node.js ${process.version}`;
     return renderTemplate("agent/identity.md", {
-      workspacePath: this.workspace,
+      workspacePath: sessionWorkspace,
+      customSkillsPath: path.join(this.workspace, "skills"),
       runtime,
       platformPolicy: renderTemplate("agent/platform-policy.md", { system: platformName }),
       channel: channel ?? "",
@@ -152,9 +168,10 @@ export class ContextBuilder {
     responseLanguage: string | null = null,
     sessionKey: string | null = null,
     unifiedSession = false,
+    sessionWorkspace = this.workspace,
   ): SystemPromptSection[] {
     const sections: SystemPromptSection[] = [];
-    const identity = this.systemPrompt || this.getIdentity(channel);
+    const identity = this.systemPrompt || this.getIdentity(channel, sessionWorkspace);
     if (identity) sections.push({ id: "identity", content: identity });
     const languageSection = responseLanguageSection(normalizeAgentResponseLanguage(responseLanguage));
     if (languageSection) sections.push(languageSection);
@@ -162,9 +179,18 @@ export class ContextBuilder {
     if (bootstrap) sections.push({ id: "bootstrap", content: bootstrap });
     const toolContract = renderTemplate("agent/tool-contract.md");
     if (toolContract) sections.push({ id: "tool-contract", content: toolContract });
-    const memory = this.memory.getMemoryContext();
-    if (memory && !ContextBuilder.isTemplateContent(this.memory.readMemory(), "memory/MEMORY.md")) {
-      sections.push({ id: "memory", content: `# Memory\n\n${memory}` });
+    if (this.fileMemoryEnabled) {
+      const fileMemory = renderTemplate("agent/file-memory.md", {
+        workspacePath: this.workspace,
+      });
+      if (fileMemory) sections.push({ id: "file-memory", content: fileMemory });
+      const memory = this.memory.getMemoryContext();
+      if (
+        memory &&
+        !ContextBuilder.isTemplateContent(this.memory.readMemory(), "memory/MEMORY.md")
+      ) {
+        sections.push({ id: "memory", content: `# Memory\n\n${memory}` });
+      }
     }
     const alwaysSkills = this.skills.getAlwaysSkills();
     if (alwaysSkills.length) {
@@ -173,16 +199,24 @@ export class ContextBuilder {
     }
     const skillsSummary = this.skills.buildSkillsSummary(new Set(alwaysSkills));
     if (skillsSummary) sections.push({ id: "skills-summary", content: renderTemplate("agent/skills-section.md", { skillsSummary }) });
-    const entries = this.memory.readRecentHistoryForPrompt(this.memory.getLastDreamCursor(), {
-      sessionKey,
-      unifiedSession,
-    });
-    if (entries.length) {
-      const capped = entries.slice(-this.maxRecentHistory);
-      const historyText = capped
-        .map((entry) => `- [${entry.timestamp ?? "?"}] ${entry.content ?? ""}`)
-        .join("\n");
-      sections.push({ id: "recent-history", content: `# Recent History\n\n${truncateText(historyText, this.maxHistoryChars)}` });
+    if (this.fileMemoryEnabled) {
+      const entries = this.memory.readRecentHistoryForPrompt(
+        this.memory.getLastDreamCursor(),
+        {
+          sessionKey,
+          unifiedSession,
+        },
+      );
+      if (entries.length) {
+        const capped = entries.slice(-this.maxRecentHistory);
+        const historyText = capped
+          .map((entry) => `- [${entry.timestamp ?? "?"}] ${entry.content ?? ""}`)
+          .join("\n");
+        sections.push({
+          id: "recent-history",
+          content: `# Recent History\n\n${truncateText(historyText, this.maxHistoryChars)}`,
+        });
+      }
     }
     if (sessionSummary) sections.push({ id: "session-summary", content: `[Archived Context Summary]\n\n${sessionSummary}` });
     return sections;
@@ -196,19 +230,35 @@ export class ContextBuilder {
     responseLanguage: string | null = null,
     sessionKey: string | null = null,
     unifiedSession = false,
+    sessionWorkspace = this.workspace,
   ): string {
+    const sections = this.buildSystemPromptSections(
+      channel,
+      sessionSummary,
+      responseLanguage,
+      sessionKey,
+      unifiedSession,
+      sessionWorkspace,
+    );
+    const alwaysSkills = new Set(this.skills.getAlwaysSkills());
+    const availableSkills = new Set(this.skills.listSkills(true).map((entry) => entry.name));
+    const requestedSkills = (skillNames ?? []).filter((name) =>
+      availableSkills.has(name) && !alwaysSkills.has(name)
+    );
+    const requestedSkillContent = this.skills.loadSkillsForContext(requestedSkills);
+    if (requestedSkillContent) {
+      const summaryIndex = sections.findIndex((section) => section.id === "skills-summary");
+      sections.splice(summaryIndex < 0 ? sections.length : summaryIndex, 0, {
+        id: "requested-skills",
+        content: `# Requested Skills\n\n${requestedSkillContent}`,
+      });
+    }
     const ctx = new SystemPromptBuildContext({
-      sections: this.buildSystemPromptSections(
-        channel,
-        sessionSummary,
-        responseLanguage,
-        sessionKey,
-        unifiedSession,
-      ),
+      sections,
       skillNames,
       channel,
       sessionSummary,
-      workspace: this.workspace,
+      workspace: sessionWorkspace,
     });
     hook?.onBuildSystemPrompt(ctx);
     return ctx.render();
@@ -233,7 +283,16 @@ export class ContextBuilder {
 
   build(session: Session, userContent?: string): Record<string, any>[] {
     const messages: Record<string, any>[] = [];
-    const system = this.buildSystemPrompt(null, null, null, null, null, session.key);
+    const system = this.buildSystemPrompt(
+      null,
+      null,
+      null,
+      null,
+      null,
+      session.key,
+      false,
+      this.workspace,
+    );
     if (system) messages.push({ role: "system", content: system });
     messages.push(...session.getHistory());
     if (userContent) messages.push({ role: "user", content: userContent });
@@ -258,6 +317,7 @@ export class ContextBuilder {
           hook?: AgentHook | null;
           sessionKey?: string | null;
           unifiedSession?: boolean;
+          sessionWorkspace?: string;
         }
       | Record<string, any>[] = {},
     positionalCurrentMessage?: string,
@@ -275,6 +335,7 @@ export class ContextBuilder {
       hook?: AgentHook | null;
       sessionKey?: string | null;
       unifiedSession?: boolean;
+      sessionWorkspace?: string;
     } = {},
   ): Record<string, any>[] {
     const args = Array.isArray(argsOrHistory)
@@ -296,6 +357,7 @@ export class ContextBuilder {
       hook,
       sessionKey = null,
       unifiedSession = false,
+      sessionWorkspace = this.workspace,
     } = args;
     const role = currentRole ?? "user";
     const runtimeLines = [
@@ -306,6 +368,7 @@ export class ContextBuilder {
       ? sessionMetadata.webui_language ?? sessionMetadata.webuiLanguage ?? null
       : null;
     const effectiveResponseLanguage = responseLanguage ?? sessionResponseLanguage;
+    const effectiveSkillNames = skillNames ?? this.skills.findExplicitSkillNames(currentMessage ?? "");
     const runtime = ContextBuilder.buildRuntimeContext(channel, chatId ?? null, this.timezone, {
       senderId,
       supplementalLines: runtimeLines,
@@ -316,13 +379,14 @@ export class ContextBuilder {
       {
         role: "system",
         content: this.buildSystemPrompt(
-          skillNames ?? null,
+          effectiveSkillNames.length > 0 ? effectiveSkillNames : null,
           channel,
           sessionSummary ?? null,
           hook ?? null,
           effectiveResponseLanguage ?? null,
           sessionKey,
           unifiedSession,
+          sessionWorkspace,
         ),
       },
       ...history,
