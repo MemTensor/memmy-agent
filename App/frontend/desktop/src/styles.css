@@ -610,7 +610,7 @@ body:has(.memory-drawer) .window-drag-region {
 
 .sidebar-toolbar-button {
   position: absolute;
-  top: calc((var(--codex-toolbar-height) - var(--codex-toolbar-button-size)) / 2 - 2px);
+  top: calc((var(--codex-toolbar-height) - var(--codex-toolbar-button-size)) / 2 - 1px);
   left: var(--codex-window-control-inset);
 }
 
@@ -627,7 +627,7 @@ body:has(.memory-drawer) .window-drag-region {
 
 .sidebar-restore-button {
   position: fixed;
-  top: calc((var(--codex-toolbar-height) - var(--codex-toolbar-button-size)) / 2 - 2px);
+  top: calc((var(--codex-toolbar-height) - var(--codex-toolbar-button-size)) / 2 - 1px);
   left: var(--codex-window-control-inset);
   z-index: 10000;
 }
