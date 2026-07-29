@@ -147,7 +147,9 @@ describe("2026-06-09 prototype modals", () => {
     expect(onboardingSource).toContain("function detectExistingMemoryPluginConflicts()");
     expect(onboardingSource).toContain("clients.agentSources.getMemoryPluginConflicts()");
     expect(onboardingSource).toContain('permission === "scan_and_write_skill"');
-    expect(onboardingSource).toContain("clients.agentSources.installPlugin(conflict.sourceId)");
+    expect(onboardingSource).toContain(
+      'clients.agentSources.installPlugin(conflict.sourceId, { installType: "conflict_replace" })'
+    );
     expect(onboardingSource).toContain("clients.agentSources.installSkill(conflict.sourceId)");
     expect(onboardingSource).toContain("function returnToScanPermission()");
     expect(onboardingSource).toContain('scanPermission: "unset"');

@@ -439,6 +439,7 @@ function startTurnOutput() {
     turnId: "turn-1",
     contextPacketId: "context-1",
     sessionId: "session-1",
+    episodeId: "episode-1",
     injectedContext: { markdown: "", sections: [] },
     searchEventId: "search-1",
     sourceMemoryIds: [],

@@ -122,7 +122,7 @@ describe("MemoryService / evolution / reward", () => {
       query: "finish the migration scaffold with durable sqlite state and a worker queue",
       answer: "implemented the service scaffold, sqlite schema, raw turn capture, and asynchronous worker queue"
     });
-    expect(complete.jobs.map((job) => job.jobType)).toEqual(["episode_idle_close"]);
+    expect(complete.jobs.map((job) => job.jobType)).toEqual(["trace_summary", "episode_idle_close"]);
 
     const rewardBeforeClose = db.db.prepare(
       `SELECT COUNT(*) AS count
@@ -171,7 +171,7 @@ describe("MemoryService / evolution / reward", () => {
       userId: "user-implicit-reward",
       status: "queued"
     }).items.map((job) => job.jobType);
-    expect(queuedOrder.slice(0, 2)).toEqual(["episode_idle_close", "reflection"]);
+    expect(queuedOrder.slice(0, 2)).toEqual(["episode_idle_close", "trace_summary"]);
 
     const run = await service.runWorkerOnce(20);
     expect(run.changeSeq).toBeGreaterThan(0);
@@ -280,12 +280,9 @@ describe("MemoryService / evolution / reward", () => {
       turnSummaries: string[];
       finalExchange: { user: string; assistant: string };
     };
-    expect(immediateRewardInput.turnSummaries[0]).toContain("我喜欢吃的水果是西瓜");
-    expect(immediateRewardInput.turnSummaries[0]).toContain("→ 记住了，你喜欢吃的水果是西瓜。");
+    expect(immediateRewardInput.turnSummaries[0]).toBe("LLM batch summary");
     expect(immediateRewardInput.turnSummaries[0]!.length).toBeLessThanOrEqual(200);
-    expect(immediateRewardInput.turnSummaries[1]).toBe(
-      "水果中和西瓜比较相似有哪些，推荐一个 → 我推荐哈密瓜。"
-    );
+    expect(immediateRewardInput.turnSummaries[1]).toBe("LLM batch summary");
     expect(immediateRewardInput.finalExchange).toEqual({
       user: "水果中和西瓜比较相似有哪些，推荐一个",
       assistant: "我推荐哈密瓜。"
@@ -293,9 +290,7 @@ describe("MemoryService / evolution / reward", () => {
     expect(calls.filter((call) =>
       call.options.operation === "reward.reward.r_human.v7"
     )).toHaveLength(1);
-    expect(calls.some((call) =>
-      call.options.operation === "capture.reflected_trace_summary.v1"
-    )).toBe(false);
+    expect(calls.filter((call) => call.options.operation === "capture.summarize")).toHaveLength(2);
 
     const third = service.completeTurn("turn-reward-before-reflection-3", {
       sessionId: session.sessionId,
@@ -621,7 +616,10 @@ describe("MemoryService / evolution / reward", () => {
     };
     expect(rewardInput).toEqual({
       mission: "verify reward scoring prompt",
-      turnSummaries: ["reflected reward summary", "reflected reward summary"],
+      turnSummaries: [
+        "verify reward scoring prompt",
+        "now summarize the final reward result"
+      ],
       finalExchange: {
         user: "now summarize the final reward result",
         assistant: "summarized the final reward result"
@@ -644,7 +642,6 @@ describe("MemoryService / evolution / reward", () => {
         agent: "codex"
       }
     });
-    expect(rewardCall!.messages[1]!.content).not.toContain("prepared the requested scoring workflow");
     expect(rewardCall!.messages[1]!.content).not.toContain("\"q\":\"reward prompt\"");
     expect(rewardCall!.messages[1]!.content).not.toContain("\"output\":\"ok\"");
     expect(rewardCall!.messages[1]!.content).not.toContain("reward-summary-capturing");

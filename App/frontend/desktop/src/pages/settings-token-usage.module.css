@@ -1,26 +1,31 @@
 .detailPage {
-  --usage-paper: #fff;
   --usage-ink: #111d1c;
-  --usage-muted: #748480;
-  --usage-line: rgba(204, 224, 219, .72);
-  --usage-mint: #39c7a1;
-  --usage-mint-soft: #e5f8f2;
-  --usage-coral: #f59e6b;
-  --usage-coral-soft: #fff0e6;
-  --usage-lav: #8ba1f3;
+  --usage-secondary: #3d514c;
+  --usage-muted: #7f938d;
+  --usage-track: color-mix(in srgb, var(--color-border-stone) 52%, transparent);
+  --usage-row-bg: color-mix(in srgb, var(--color-canvas-oat) 40%, transparent);
+  --usage-row-hover: color-mix(in srgb, var(--color-canvas-oat) 75%, transparent);
   height: 100%;
   overflow-y: auto;
   background: transparent;
   color: var(--usage-ink);
   font-family: var(--font-sans);
+  font-size: var(--codex-text-base);
+  line-height: var(--codex-leading-base);
   letter-spacing: 0;
 }
 
+/*
+ * Mirrors the settings page wrapper (`app-frame-page-content max-w-2xl mx-auto`)
+ * so both pages land on the same content edges. The horizontal padding comes
+ * from `app-frame-page-content`, so only the vertical padding is set here.
+ */
 .page {
   box-sizing: border-box;
-  width: min(100%, 1080px);
+  max-width: 672px;
   margin: 0 auto;
-  padding: calc(var(--codex-toolbar-height) + 8px) 0 40px;
+  padding-top: calc(var(--codex-toolbar-height) + 8px);
+  padding-bottom: 40px;
 }
 
 .backButton {
@@ -30,17 +35,18 @@
   align-items: center;
   gap: 6px;
   min-height: 44px;
-  margin: 0 0 10px -12px;
+  margin: 0 0 6px -12px;
   padding: 8px 12px;
   border: 0;
   border-radius: 999px;
   background: transparent;
-  color: rgba(17, 29, 28, .65);
-  font-size: 14px;
-  line-height: 20px;
+  color: var(--usage-muted);
+  font-size: var(--codex-text-sm);
+  line-height: var(--codex-leading-sm);
   cursor: pointer;
   pointer-events: auto;
   touch-action: manipulation;
+  transition: color var(--duration-fast) ease;
   -webkit-app-region: no-drag;
 }
 
@@ -48,28 +54,41 @@
   color: var(--usage-ink);
 }
 
+/* --- Page header --- */
+
 .titlebar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  margin-bottom: 22px;
+  margin-bottom: 24px;
 }
 
 .title {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   margin: 0;
-  font-size: 20px;
-  line-height: 28px;
+  font-size: 18px;
+  line-height: 24px;
   font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.titleMark {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  border-radius: var(--radius-btn);
+  background: color-mix(in srgb, var(--color-action-sky) 15%, transparent);
+  color: var(--color-action-sky-hover);
 }
 
 .bolt {
-  width: 20px;
-  height: 20px;
-  color: #5d6d69;
+  width: 15px;
+  height: 15px;
 }
 
 .updated,
@@ -77,370 +96,292 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  flex: 0 0 auto;
   color: var(--usage-muted);
-  font-size: 12px;
+  font-size: var(--codex-text-xs);
+  line-height: var(--codex-leading-xs);
+  font-variant-numeric: tabular-nums;
 }
 
 .statusError {
   color: var(--color-status-error);
 }
 
-.panel,
-.usageCard {
-  border: 1px solid var(--border-content-panel);
-  border-radius: var(--radius-card);
-  background: rgba(255, 255, 255, .9);
-  box-shadow: none;
+/* --- Sections: the heading sits outside the panel, details go inside --- */
+
+.usageSection {
+  margin-bottom: 24px;
 }
 
-.singleOverview {
-  margin-bottom: 20px;
-}
-
-.overviewGrid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-  margin-bottom: 20px;
-}
-
-.overview {
-  padding: 20px 22px;
-}
-
-.eyebrow {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  margin-bottom: 10px;
-  color: var(--usage-muted);
-  font-size: 13px;
-  font-weight: 650;
-}
-
-.dot,
-.skyDot {
-  width: 8px;
-  height: 8px;
-  border-radius: 999px;
-  background: var(--usage-mint);
-}
-
-.skyDot {
-  background: var(--color-action-sky);
-}
-
-.total {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  font-size: clamp(24px, 3.4vw, 32px);
-  line-height: 1;
-  font-weight: 760;
-  overflow-wrap: anywhere;
-}
-
-.total span {
-  color: var(--usage-muted);
-  font-size: 13px;
-  font-weight: 400;
-}
-
-.hint {
-  margin-top: 9px;
-  color: var(--usage-muted);
-  font-size: 12px;
-  line-height: 18px;
+.usageSection:last-child {
+  margin-bottom: 0;
 }
 
 .sectionHead {
   display: flex;
-  align-items: end;
+  align-items: baseline;
   justify-content: space-between;
-  gap: 12px;
-  margin: 0 2px 12px;
+  gap: 8px 16px;
+  margin-bottom: 12px;
 }
 
 .sectionHead h2 {
-  margin: 0;
-  font-size: 16px;
-  line-height: 24px;
-  font-weight: 700;
-}
-
-.sectionHead p {
-  margin: 0;
-  color: var(--usage-muted);
-  font-size: 12px;
-  text-align: right;
-}
-
-.grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.sceneGrid {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
-.usageCard {
-  padding: 16px;
-}
-
-.cardTop {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 12px;
-  align-items: start;
-}
-
-.kind {
   display: flex;
   align-items: center;
-  gap: 12px;
-  min-width: 0;
-}
-
-.icon {
-  display: grid;
-  place-items: center;
-  width: 40px;
-  height: 40px;
-  flex: 0 0 auto;
-  border-radius: 8px;
-}
-
-.icon svg {
-  display: block;
-  width: 18px;
-  height: 18px;
-  stroke: currentColor;
-}
-
-.agentIcon {
-  color: var(--usage-mint);
-  background: var(--usage-mint-soft);
-}
-
-.coralIcon {
-  color: var(--usage-coral);
-  background: var(--usage-coral-soft);
-}
-
-.lavIcon {
-  color: var(--usage-lav);
-  background: #edf1ff;
-}
-
-.dimIcon {
-  color: #74807e;
-  background: #f2f7f5;
-}
-
-.kind h3 {
+  gap: 8px;
   margin: 0;
-  font-size: 15px;
-  line-height: 21px;
-  font-weight: 700;
-}
-
-.desc {
-  margin-top: 2px;
-  color: var(--usage-muted);
-  font-size: 12px;
-  line-height: 17px;
-}
-
-.shareDial {
-  display: grid;
-  place-items: center;
-  width: 54px;
-  height: 54px;
-  border-radius: 50%;
-  background: conic-gradient(var(--tone) calc(var(--share) * 1%), #eaf3f1 0);
-}
-
-.shareDial::before {
-  content: attr(data-share);
-  display: grid;
-  place-items: center;
-  width: 42px;
-  height: 42px;
-  border-radius: 50%;
-  background: var(--usage-paper);
-  font-size: 13px;
-  font-weight: 760;
+  font-size: var(--codex-text-base);
+  line-height: var(--codex-leading-base);
+  font-weight: 600;
   color: var(--usage-ink);
 }
 
-.amountRow {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 12px;
-  margin-top: 14px;
-  padding-top: 12px;
-  border-top: 1px solid rgba(204, 224, 219, .58);
-}
-
-.amountLabel {
-  color: var(--usage-muted);
-  font-size: 11px;
-}
-
-.amountValue {
-  margin-top: 3px;
-  font-size: 22px;
-  line-height: 28px;
-  font-weight: 760;
-  overflow-wrap: anywhere;
-}
-
-.metrics {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 6px;
-  margin-top: 12px;
-}
-
-.metric {
-  min-width: 0;
-  padding: 9px 10px;
-  border-radius: 8px;
-  background: #f8fbfa;
-  box-shadow: inset 0 0 0 1px rgba(204, 224, 219, .62);
-}
-
-.metricLabel {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  color: var(--usage-muted);
-  font-size: 11px;
-}
-
-.metricLabel svg {
-  display: block;
-  width: 13px;
-  height: 13px;
-  stroke: currentColor;
+.sectionHead h2 svg {
   flex: 0 0 auto;
 }
 
-.metricValue {
-  margin-top: 5px;
-  font-size: 12px;
-  line-height: 17px;
-  font-weight: 730;
-  overflow-wrap: anywhere;
+.sectionNote {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+  margin: 0;
+  color: var(--usage-muted);
+  font-size: var(--codex-text-sm);
+  line-height: var(--codex-leading-sm);
 }
 
-.metricInput,
-.metricCache {
-  color: var(--usage-mint);
+.sectionNote > span {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  white-space: nowrap;
 }
 
-.metricOutput {
-  color: var(--usage-coral);
+.sectionNote > span + span::before {
+  content: "·";
+  margin-right: 5px;
+  color: var(--color-border-stone);
 }
 
-.inactive {
-  color: rgba(17, 29, 28, .55);
-  background: rgba(255, 255, 255, .62);
-  box-shadow: none;
+.sectionNote strong {
+  color: var(--usage-secondary);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 
-.inactive .shareDial {
-  --tone: #dcebe7;
+.sectionNote em {
+  color: var(--usage-muted);
+  font-size: var(--codex-text-xs);
+  font-style: normal;
+  font-weight: 400;
 }
 
-.inactive .metric {
-  opacity: .66;
-}
+/* --- Panels --- */
 
-.statePanel {
+.platformQuotaList,
+.byokUsageList,
+.usageState {
   border: 1px solid var(--border-content-panel);
-  border-radius: var(--radius-card);
-  background: rgba(255, 255, 255, .9);
-  box-shadow: none;
+  border-radius: var(--radius-card-lg);
+  background: var(--color-background-paper);
 }
 
-.stateContent {
+/*
+ * Mirrors the settings sections: the panel keeps the 24px inset of `p-6`, and
+ * the cards inside keep the 14px inset of `ChannelStat`'s `p-3.5`.
+ */
+.platformQuotaList,
+.byokUsageList {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 24px;
+}
+
+.usageState {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
-  min-height: 112px;
+  min-height: 96px;
   padding: 24px;
   color: var(--usage-muted);
-  font-size: 13px;
+  font-size: var(--codex-text-sm);
   text-align: center;
 }
 
-@media (max-width: 860px) {
-  .page {
-    padding: calc(var(--codex-toolbar-height) + 8px) 0 32px;
-  }
+/* --- Row cards (shared between platform & byok) --- */
 
-  .grid {
-    grid-template-columns: 1fr;
-  }
-
-  .sceneGrid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
+.platformQuotaRow,
+.byokUsageRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 10px 16px;
+  padding: 14px;
+  border: 1px solid var(--border-content-panel);
+  border-radius: var(--radius-card);
+  background: var(--usage-row-bg);
+  transition: background var(--duration-fast) ease;
 }
 
-@media (max-width: 640px) {
-  .page {
-    padding: calc(var(--codex-toolbar-height) + 8px) 0 28px;
-  }
+.platformQuotaRow:hover,
+.byokUsageRow:hover {
+  background: var(--usage-row-hover);
+}
 
+.compactScene {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.compactScene h3 {
+  margin: 0;
+  font-size: var(--codex-text-base);
+  line-height: var(--codex-leading-base);
+  font-weight: 500;
+  color: var(--usage-ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.compactScene p {
+  margin: 0;
+  color: var(--usage-muted);
+  font-size: var(--codex-text-xs);
+  line-height: var(--codex-leading-xs);
+}
+
+/*
+ * Echoes `.sectionNote` one level down: same label-then-figure rhythm, same
+ * middot separators, but at the row's own caption size so the breakdown reads
+ * as an annotation of the scene rather than a competing set of numbers.
+ */
+.compactScene .byokBreakdown {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 8px;
+  margin-top: 2px;
+}
+
+.byokBreakdown > span {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.byokBreakdown > span + span::before {
+  content: "·";
+  margin-right: 4px;
+  color: var(--color-border-stone);
+}
+
+.byokBreakdown strong {
+  color: var(--usage-secondary);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * The used figure carries the weight; the total and the unit stay quiet so the
+ * pair reads as one number against a reference rather than a sentence.
+ */
+.quotaNumbers,
+.byokUsageValue {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  font-size: var(--codex-text-base);
+  line-height: var(--codex-leading-base);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.quotaNumbers strong,
+.byokUsageValue strong {
+  color: var(--usage-ink);
+  font-weight: 600;
+}
+
+.quotaNumbers span {
+  color: var(--usage-muted);
+  font-weight: 400;
+}
+
+.quotaNumbers em,
+.byokUsageValue em {
+  color: var(--usage-muted);
+  font-size: var(--codex-text-xs);
+  font-style: normal;
+  font-weight: 400;
+}
+
+/* --- Meter --- */
+
+.meter {
+  grid-column: 1 / -1;
+  height: 4px;
+  overflow: hidden;
+  border-radius: var(--radius-pill);
+  background: var(--usage-track);
+}
+
+.meterFill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--color-action-sky);
+  transition: width var(--duration-normal) ease;
+}
+
+.meterFillOver {
+  background: var(--color-status-error);
+}
+
+.overQuota .quotaNumbers strong {
+  color: var(--color-status-error);
+}
+
+/* --- Idle rows --- */
+
+.inactive {
+  background: transparent;
+}
+
+.inactive .compactScene h3,
+.inactive .byokUsageValue strong {
+  color: var(--usage-muted);
+  font-weight: 400;
+}
+
+/* --- Responsive --- */
+
+@media (max-width: 640px) {
   .titlebar {
     display: block;
-    margin-bottom: 18px;
   }
 
-  .updated,
-  .statusError {
+  .titlebar .updated,
+  .titlebar .statusError {
     margin-top: 8px;
   }
 
-  .sectionHead p {
-    margin-top: 8px;
-    text-align: left;
-  }
-
-  .overviewGrid,
   .sectionHead {
     display: block;
   }
 
-  .overviewGrid {
-    grid-template-columns: 1fr;
+  .sectionNote {
+    margin-top: 4px;
   }
 
-  .sceneGrid {
-    grid-template-columns: 1fr;
-  }
-
-  .overview {
+  .platformQuotaList,
+  .byokUsageList {
     padding: 16px;
-  }
-
-  .usageCard {
-    padding: 14px;
-  }
-
-  .cardTop {
-    gap: 10px;
-  }
-}
-
-@media (max-width: 420px) {
-  .metrics {
-    grid-template-columns: 1fr;
   }
 }

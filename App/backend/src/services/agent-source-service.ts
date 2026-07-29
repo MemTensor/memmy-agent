@@ -8,11 +8,14 @@ import {
 import type {
   AddManualInput,
   AgentSourceMemoryPluginConflict,
+  AgentSourcePluginActionInput,
   AgentSourceScanMode,
+  AgentSourceStatus,
   AgentSourceView,
   ManagedAgentSourceImportInput,
   ManagedAgentSourceImportResult,
   ManagedAgentSourceUpdateInput,
+  ScanPermission,
   ScanResult
 } from "@memmy/local-api-contracts";
 import type {
@@ -30,6 +33,12 @@ import {
 } from "./ingestion-service.js";
 import { AgentSourceUnavailableError } from "./runtime-errors.js";
 import type { SkillDistributionService } from "./skill-distribution-service.js";
+import {
+  createAgentSourceLifecycleAnalytics,
+  type AgentSourceInstallType,
+  type AgentSourceLifecycleAnalytics,
+} from "../analytics/agent-source-analytics.js";
+import { errorCodeFromUnknown } from "../analytics/analytics-transport.js";
 import {
   extractManagedAgentHistory,
   selectIncrementalManagedMessages
@@ -63,8 +72,8 @@ export interface AgentSourceService {
   remove(sourceId: string): Promise<void>;
   installSkill(sourceId: string): Promise<void>;
   uninstallSkill(sourceId: string): Promise<void>;
-  installPlugin(sourceId: string): Promise<void>;
-  uninstallPlugin(sourceId: string): Promise<void>;
+  installPlugin(sourceId: string, action?: AgentSourcePluginActionInput): Promise<void>;
+  uninstallPlugin(sourceId: string, action?: AgentSourcePluginActionInput): Promise<void>;
   detectMemoryPluginConflicts(): Promise<AgentSourceMemoryPluginConflict[]>;
 }
 
@@ -93,6 +102,8 @@ export interface CreateAgentSourceServiceOptions {
   ingestionService: IngestionService;
   memoryClient: Pick<MemoryClient, "enqueueImportSummaries" | "getMemoryProcessingStatus" | "runWorker">;
   skillDistributionService: SkillDistributionService;
+  agentSourceAnalytics?: AgentSourceLifecycleAnalytics;
+  getScanPermission?: () => Promise<ScanPermission>;
   now?: () => string;
   createId?: () => string;
 }
@@ -101,6 +112,7 @@ export interface CreateAgentSourceServiceOptions {
 export function createAgentSourceService(options: CreateAgentSourceServiceOptions): AgentSourceService {
   const now = options.now ?? (() => new Date().toISOString());
   const createId = options.createId ?? randomUUID;
+  const agentSourceAnalytics = options.agentSourceAnalytics ?? createAgentSourceLifecycleAnalytics();
 
   return {
     async list() {
@@ -297,33 +309,151 @@ export function createAgentSourceService(options: CreateAgentSourceServiceOption
     },
 
     async installSkill(sourceId) {
-      await ensureSourceAvailable(options, sourceId);
-      await options.skillDistributionService.install(sourceId);
-      ensureSourceExists(options, sourceId);
-      options.agentSourceRepository.setStatus(sourceId, "skill_installed");
+      const startedAt = Date.now();
+      const statusBefore = readSourceStatus(options, sourceId);
+      const permission = await readScanPermission(options);
+      const builtin = readSourceBuiltin(options, sourceId);
+      try {
+        await ensureSourceAvailable(options, sourceId);
+        await options.skillDistributionService.install(sourceId);
+        ensureSourceExists(options, sourceId);
+        options.agentSourceRepository.setStatus(sourceId, "skill_installed");
+        agentSourceAnalytics.trackSkillInstalled({
+          sourceId,
+          builtin,
+          permission,
+          statusBefore,
+          statusAfter: "skill_installed",
+          success: true,
+          latencyMs: Date.now() - startedAt,
+        });
+      } catch (error) {
+        agentSourceAnalytics.trackSkillInstalled({
+          sourceId,
+          builtin,
+          permission,
+          statusBefore,
+          statusAfter: statusBefore,
+          success: false,
+          latencyMs: Date.now() - startedAt,
+          errorCode: errorCodeFromUnknown(error),
+        });
+        throw error;
+      }
     },
 
     async uninstallSkill(sourceId) {
-      await options.skillDistributionService.uninstall(sourceId);
-      ensureSourceExists(options, sourceId);
-      options.agentSourceRepository.setStatus(sourceId, "not_connected");
+      const startedAt = Date.now();
+      const statusBefore = readSourceStatus(options, sourceId);
+      const permission = await readScanPermission(options);
+      const builtin = readSourceBuiltin(options, sourceId);
+      try {
+        await options.skillDistributionService.uninstall(sourceId);
+        ensureSourceExists(options, sourceId);
+        options.agentSourceRepository.setStatus(sourceId, "not_connected");
+        agentSourceAnalytics.trackSkillUninstalled({
+          sourceId,
+          builtin,
+          permission,
+          statusBefore,
+          statusAfter: "not_connected",
+          success: true,
+          latencyMs: Date.now() - startedAt,
+        });
+      } catch (error) {
+        agentSourceAnalytics.trackSkillUninstalled({
+          sourceId,
+          builtin,
+          permission,
+          statusBefore,
+          statusAfter: statusBefore,
+          success: false,
+          latencyMs: Date.now() - startedAt,
+          errorCode: errorCodeFromUnknown(error),
+        });
+        throw error;
+      }
     },
 
-    async installPlugin(sourceId) {
-      await ensureSourceAvailable(options, sourceId);
-      await options.skillDistributionService.installPlugin(sourceId);
-      ensureSourceExists(options, sourceId);
-      options.agentSourceRepository.setStatus(sourceId, "plugin_installed");
+    async installPlugin(sourceId, action = {}) {
+      const startedAt = Date.now();
+      const installType = normalizePluginInstallType(action.installType);
+      const statusBefore = readSourceStatus(options, sourceId);
+      const permission = await readScanPermission(options);
+      try {
+        await ensureSourceAvailable(options, sourceId);
+        await options.skillDistributionService.installPlugin(sourceId);
+        ensureSourceExists(options, sourceId);
+        options.agentSourceRepository.setStatus(sourceId, "plugin_installed");
+        agentSourceAnalytics.trackPluginInstalled({
+          sourceId,
+          permission,
+          statusBefore,
+          statusAfter: "plugin_installed",
+          installType,
+          success: true,
+          latencyMs: Date.now() - startedAt,
+        });
+      } catch (error) {
+        agentSourceAnalytics.trackPluginInstalled({
+          sourceId,
+          permission,
+          statusBefore,
+          statusAfter: statusBefore,
+          installType,
+          success: false,
+          latencyMs: Date.now() - startedAt,
+          errorCode: errorCodeFromUnknown(error),
+        });
+        throw error;
+      }
     },
 
-    async uninstallPlugin(sourceId) {
-      await options.skillDistributionService.uninstallPlugin(sourceId);
-      ensureSourceExists(options, sourceId);
-      options.agentSourceRepository.setStatus(sourceId, "not_connected");
+    async uninstallPlugin(sourceId, action = {}) {
+      const startedAt = Date.now();
+      const installType = normalizePluginInstallType(action.installType);
+      const statusBefore = readSourceStatus(options, sourceId);
+      const permission = await readScanPermission(options);
+      try {
+        await options.skillDistributionService.uninstallPlugin(sourceId);
+        ensureSourceExists(options, sourceId);
+        options.agentSourceRepository.setStatus(sourceId, "not_connected");
+        agentSourceAnalytics.trackPluginUninstalled({
+          sourceId,
+          permission,
+          statusBefore,
+          statusAfter: "not_connected",
+          installType,
+          success: true,
+          latencyMs: Date.now() - startedAt,
+        });
+      } catch (error) {
+        agentSourceAnalytics.trackPluginUninstalled({
+          sourceId,
+          permission,
+          statusBefore,
+          statusAfter: statusBefore,
+          installType,
+          success: false,
+          latencyMs: Date.now() - startedAt,
+          errorCode: errorCodeFromUnknown(error),
+        });
+        throw error;
+      }
     },
 
     async detectMemoryPluginConflicts() {
-      return options.skillDistributionService.detectMemoryPluginConflicts?.() ?? [];
+      const permission = await readScanPermission(options);
+      const conflicts = await options.skillDistributionService.detectMemoryPluginConflicts?.() ?? [];
+      for (const conflict of conflicts) {
+        agentSourceAnalytics.trackPluginConflictDetected({
+          sourceId: conflict.sourceId,
+          configPath: conflict.configPath,
+          installedPluginId: conflict.installedPluginId,
+          permission,
+        });
+      }
+      return conflicts;
     }
   };
 }
@@ -1025,4 +1155,40 @@ function ensureManagedSource(
     throw new Error(`Agent source is not managed by Memmy Agent: ${sourceId}`);
   }
   return source;
+}
+
+function normalizePluginInstallType(value: string | undefined): AgentSourceInstallType {
+  if (
+    value === "manual" ||
+    value === "onboarding" ||
+    value === "auto_inject" ||
+    value === "conflict_replace"
+  ) {
+    return value;
+  }
+  return "manual";
+}
+
+function readSourceStatus(
+  options: Pick<CreateAgentSourceServiceOptions, "agentSourceRepository">,
+  sourceId: string,
+): AgentSourceStatus {
+  const source = options.agentSourceRepository.listSources().find((candidate) => candidate.sourceId === sourceId);
+  return source?.status ?? "not_connected";
+}
+
+function readSourceBuiltin(
+  options: Pick<CreateAgentSourceServiceOptions, "agentSourceRepository" | "sourceRegistry">,
+  sourceId: string,
+): boolean {
+  const source = options.agentSourceRepository.listSources().find((candidate) => candidate.sourceId === sourceId);
+  if (source) return source.builtin;
+  return options.sourceRegistry.list().some((adapter) => adapter.descriptor.sourceId === sourceId);
+}
+
+async function readScanPermission(
+  options: Pick<CreateAgentSourceServiceOptions, "getScanPermission">,
+): Promise<ScanPermission | undefined> {
+  if (!options.getScanPermission) return undefined;
+  return await options.getScanPermission();
 }

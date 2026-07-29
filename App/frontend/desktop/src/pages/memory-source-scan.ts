@@ -4,6 +4,13 @@ import type {
   AgentSourceScanInput,
   AgentSourceView
 } from "@memmy/local-api-contracts";
+import {
+  buildMemorySourceScanFailedEvent,
+  buildMemorySourceScanStartedEvent,
+  recordScanStarted,
+  trackMemoryUiEvent,
+  type MemoryUiSubPage
+} from "../analytics/memory-ui-analytics.js";
 import { appActions, type AppAction } from "../state/app-actions.js";
 
 const DEFAULT_SCAN_FALLBACK_DELAY_MS = 12_000;
@@ -28,11 +35,19 @@ export interface StartAgentSourceScanInput {
   formatError?: (error: unknown) => string;
   scheduleFallback: (callback: () => void, delayMs: number) => unknown;
   fallbackDelayMs?: number;
+  analyticsContext?: {
+    pagePath: string;
+    subPage: MemoryUiSubPage;
+  };
 }
 
 export async function startAgentSourceScan(input: StartAgentSourceScanInput): Promise<void> {
   const delayMs = input.fallbackDelayMs ?? DEFAULT_SCAN_FALLBACK_DELAY_MS;
   const sourceId = input.sourceId ?? "all";
+  const analyticsContext = input.analyticsContext ?? {
+    pagePath: "/memory/sources",
+    subPage: "sources" as const
+  };
 
   input.dispatch(appActions.agentSourceScanStarted(sourceId));
 
@@ -42,12 +57,31 @@ export async function startAgentSourceScan(input: StartAgentSourceScanInput): Pr
       sourceId,
       ...(input.mode ? { mode: input.mode } : {})
     });
+    recordScanStarted(job.jobId, {
+      sourceId,
+      scanMode: input.mode,
+      pagePath: analyticsContext.pagePath,
+      subPage: analyticsContext.subPage
+    });
+    trackMemoryUiEvent(buildMemorySourceScanStartedEvent({
+      pagePath: analyticsContext.pagePath,
+      subPage: analyticsContext.subPage,
+      sourceId,
+      scanMode: input.mode
+    }));
     input.dispatch(appActions.agentSourceScanProgressReceived(await resolveStartedScanProgress(input.clients, job, sourceId, input.queuedMessage)));
 
     input.scheduleFallback(() => {
       void reloadSources(input.clients, input.dispatch, input.formatError);
     }, delayMs);
   } catch (error) {
+    trackMemoryUiEvent(buildMemorySourceScanFailedEvent({
+      pagePath: analyticsContext.pagePath,
+      subPage: analyticsContext.subPage,
+      sourceId,
+      scanMode: input.mode,
+      durationMs: 0
+    }));
     input.dispatch(appActions.agentSourcesFailed(formatScanError(error, input.formatError)));
   }
 }

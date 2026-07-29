@@ -62,7 +62,7 @@ export function createAgentSourceAutoInjectService(
 
           try {
             if (HOOK_OR_PLUGIN_AGENT_SOURCE_IDS.has(source.sourceId)) {
-              await options.agentSources.installPlugin(source.sourceId);
+              await options.agentSources.installPlugin(source.sourceId, { installType: "auto_inject" });
             } else {
               await options.agentSources.installSkill(source.sourceId);
             }

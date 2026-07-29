@@ -633,6 +633,7 @@ export default {
         pendingTurns.set(turnKey(ctx, sessionId, event), {
           sessionId,
           turnId: turn.turnId,
+          episodeId: turn.episodeId,
           sourceMemoryIds: Array.isArray(turn.sourceMemoryIds) ? turn.sourceMemoryIds : undefined,
           query
         });
@@ -683,6 +684,7 @@ export default {
         externalSessionId,
         sessionId: normalizeOptionalText(pending && pending.sessionId) || sessionId,
         turnId: resolvedTurnId,
+        episodeId: normalizeOptionalText(pending && pending.episodeId) || undefined,
         query: resolvedQuery,
         answer,
         status,
@@ -868,7 +870,7 @@ const SYNC_COMPLETE_SCRIPT = [
   "  sessionId = opened.sessionId || sessionId;",
   "  turnId = turnId || 'openclaw-fallback-' + hashText([sessionId || '', payload.query || '', payload.answer || ''].join('\\\\u0000'));",
   "}",
-  "const result = await post('/api/v1/turns/' + encodeURIComponent(turnId) + '/complete', { sessionId, source: 'openclaw', query: payload.query, answer: payload.answer, status: payload.status || 'succeeded', toolCalls: Array.isArray(payload.toolCalls) ? payload.toolCalls : undefined, toolResults: Array.isArray(payload.toolResults) ? payload.toolResults : undefined, sourceMemoryIds: Array.isArray(payload.sourceMemoryIds) ? payload.sourceMemoryIds : undefined });",
+  "const result = await post('/api/v1/turns/' + encodeURIComponent(turnId) + '/complete', { sessionId, episodeId: payload.episodeId || undefined, source: 'openclaw', query: payload.query, answer: payload.answer, status: payload.status || 'succeeded', toolCalls: Array.isArray(payload.toolCalls) ? payload.toolCalls : undefined, toolResults: Array.isArray(payload.toolResults) ? payload.toolResults : undefined, sourceMemoryIds: Array.isArray(payload.sourceMemoryIds) ? payload.sourceMemoryIds : undefined });",
   "console.log(JSON.stringify({ ok: true, mode: 'turn_complete', result }));"
 ].join("\n");
 

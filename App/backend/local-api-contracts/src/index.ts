@@ -324,6 +324,21 @@ export const AgentSourceIdParamsSchema = z.object({
 });
 export type AgentSourceIdParams = z.infer<typeof AgentSourceIdParamsSchema>;
 
+/** Schema for agent source plugin install trigger. */
+export const AgentSourcePluginInstallTypeSchema = z.enum([
+    "manual",
+    "onboarding",
+    "auto_inject",
+    "conflict_replace"
+]);
+export type AgentSourcePluginInstallType = z.infer<typeof AgentSourcePluginInstallTypeSchema>;
+
+/** Schema for agent source plugin action input. */
+export const AgentSourcePluginActionInputSchema = z.object({
+    installType: AgentSourcePluginInstallTypeSchema.optional()
+});
+export type AgentSourcePluginActionInput = z.infer<typeof AgentSourcePluginActionInputSchema>;
+
 /** Schema for agent source scan mode. */
 export const AgentSourceScanModeSchema = z.enum(["initial_subset", "incremental", "full"]);
 export type AgentSourceScanMode = z.infer<typeof AgentSourceScanModeSchema>;

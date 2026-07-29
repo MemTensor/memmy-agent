@@ -138,6 +138,7 @@ describe("opencode skill target", () => {
       if (targetUrl.pathname === "/api/v1/turns/start") {
         return jsonResponse({
           turnId: "memmy-turn-1",
+          episodeId: "episode-1",
           sourceMemoryIds: ["trace-1"],
           injectedContext: { markdown: "User prefers concise answers." }
         });
@@ -187,6 +188,7 @@ describe("opencode skill target", () => {
       expect(requests.find((request) => request.path.endsWith("/complete"))?.body).toMatchObject({
         adapterId: "memmy-opencode-plugin",
         sessionId: "memmy-session-1",
+        episodeId: "episode-1",
         query: "请检查 README",
         answer: "检查完成",
         status: "succeeded",
@@ -194,7 +196,6 @@ describe("opencode skill target", () => {
         toolResults: [{ tool_call_id: "call-1", content: "README contents", output: "README contents" }],
         sourceMemoryIds: ["trace-1"]
       });
-      expect(requests.find((request) => request.path.endsWith("/complete"))?.body).not.toHaveProperty("episodeId");
     } finally {
       globalThis.fetch = originalFetch;
     }

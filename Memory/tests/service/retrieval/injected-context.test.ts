@@ -313,7 +313,7 @@ describe("MemoryService / retrieval / injected context", () => {
     db.close();
   });
 
-  it("returns turn.start recall context without persisting a recall event", async () => {
+  it("records turn.start recall context and search log", async () => {
     const { db, service } = createTestService();
     const seedSession = service.openSession({
       namespace: {
@@ -352,8 +352,44 @@ describe("MemoryService / retrieval / injected context", () => {
     expect(prepared.droppedDueToBudget).toEqual([]);
 
     expect(db.db.prepare(
-      "SELECT id FROM recall_events WHERE id = ?"
-    ).get(prepared.searchEventId)).toBeUndefined();
+      `SELECT turn_id, json_extract(request_json, '$.retrievalMode') AS retrieval_mode
+       FROM recall_events
+       WHERE id = ?`
+    ).get(prepared.searchEventId)).toEqual({
+      turn_id: "turn-budget-prepare",
+      retrieval_mode: "turn_start"
+    });
+    expect(db.db.prepare(
+      `SELECT tool_name, json_extract(input_json, '$.retrievalMode') AS retrieval_mode
+       FROM api_logs
+       WHERE tool_name = 'memory_search'
+       ORDER BY id DESC
+       LIMIT 1`
+    ).get()).toEqual({
+      tool_name: "memory_search",
+      retrieval_mode: "turn_start"
+    });
+
+    const completed = service.completeTurn("turn-budget-prepare", {
+      sessionId: activeSession.sessionId,
+      query: "fix sqlite budget migration",
+      answer: "The sqlite budget migration is fixed."
+    });
+    expect(completed.episodeId).toBe(prepared.episodeId);
+    const rawTurn = db.db.prepare(
+      "SELECT source_memory_ids_json, message_payload_json FROM raw_turns WHERE id = ?"
+    ).get(completed.rawTurnId) as {
+      source_memory_ids_json: string;
+      message_payload_json: string;
+    };
+    expect(JSON.parse(rawTurn.source_memory_ids_json)).toEqual(prepared.sourceMemoryIds);
+    expect(JSON.parse(rawTurn.message_payload_json)).toMatchObject({
+      turn_start: {
+        contextPacketId: prepared.contextPacketId,
+        searchEventId: prepared.searchEventId,
+        sourceMemoryIds: prepared.sourceMemoryIds
+      }
+    });
 
     db.close();
   });
@@ -702,7 +738,7 @@ describe("MemoryService / retrieval / injected context", () => {
     db.close();
   });
 
-  it("applies turn-start intent gates without creating intent episodes or logs", async () => {
+  it("applies turn-start intent gates while creating routed episodes", async () => {
     const { db, service } = createTestService();
     const session = service.openSession({
       namespace: {
@@ -751,9 +787,11 @@ describe("MemoryService / retrieval / injected context", () => {
     });
 
     expect(unknown.status).not.toContain("intent:chitchat:retrieval_skipped");
-    expect(db.db.prepare("SELECT COUNT(*) AS count FROM episodes").get()).toEqual({ count: 0 });
-    expect(db.db.prepare("SELECT COUNT(*) AS count FROM recall_events").get()).toEqual({ count: 0 });
-    expect(db.db.prepare("SELECT COUNT(*) AS count FROM api_logs").get()).toEqual({ count: 0 });
+    expect(db.db.prepare("SELECT COUNT(*) AS count FROM episodes").get()).toEqual({ count: 3 });
+    expect(db.db.prepare("SELECT COUNT(*) AS count FROM recall_events").get()).toEqual({ count: 3 });
+    expect(db.db.prepare(
+      "SELECT tool_name, COUNT(*) AS count FROM api_logs GROUP BY tool_name"
+    ).all()).toEqual([{ tool_name: "memory_search", count: 3 }]);
     db.close();
   });
 });

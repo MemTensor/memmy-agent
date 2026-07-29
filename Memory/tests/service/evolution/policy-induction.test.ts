@@ -32,7 +32,7 @@ const {
 afterEach(cleanup);
 
 describe("MemoryService / evolution / policy induction", () => {
-  it("keeps L2 candidate promotion scoped to the owning user", () => {
+  it("promotes only the selected L2 candidate evidence", () => {
     const { db } = createTestService();
     const repos = new Repositories(db.db);
     const at = new Date().toISOString();
@@ -284,7 +284,7 @@ describe("MemoryService / evolution / policy induction", () => {
     db.close();
   });
 
-  it("induces L2 policies across profiles in the same user account", async () => {
+  it("induces one shared L2 policy across profiles and user ids", async () => {
     const root = createTestRoot("mindock-memory-");
     const db = new MemoryDb({
       path: join(root, "memory.sqlite")
@@ -325,7 +325,7 @@ describe("MemoryService / evolution / policy induction", () => {
       namespace: {
         source: "codex",
         profileId: "profile-b",
-        userId: "shared-user"
+        userId: "other-shared-user"
       },
       workspaceId: "workspace-shared"
     });
@@ -357,8 +357,7 @@ describe("MemoryService / evolution / policy induction", () => {
     const crossProfilePolicyCount = db.db.prepare(
       `SELECT COUNT(*) AS count
        FROM memories
-       WHERE user_id = 'shared-user'
-         AND memory_layer = 'L2'`
+       WHERE memory_layer = 'L2'`
     ).get() as { count: number };
     expect(crossProfilePolicyCount.count).toBe(1);
 
@@ -387,8 +386,7 @@ describe("MemoryService / evolution / policy induction", () => {
     const policies = db.db.prepare(
       `SELECT agent_id, app_id, info_json
        FROM memories
-       WHERE user_id = 'shared-user'
-         AND memory_layer = 'L2'
+       WHERE memory_layer = 'L2'
        ORDER BY created_at`
     ).all() as Array<{ agent_id: string | null; app_id: string | null; info_json: string }>;
     expect(policies).toHaveLength(1);

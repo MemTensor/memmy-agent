@@ -300,6 +300,7 @@ export const StartTurnOutputSchema = z.object({
   turnId: NonEmptyStringSchema,
   contextPacketId: NonEmptyStringSchema,
   sessionId: NonEmptyStringSchema,
+  episodeId: NonEmptyStringSchema,
   injectedContext: InjectedContextSchema,
   searchEventId: NonEmptyStringSchema,
   sourceMemoryIds: z.array(NonEmptyStringSchema),
@@ -344,6 +345,8 @@ export type CompleteTurnOutput = z.infer<typeof CompleteTurnOutputSchema>;
 export const SearchInputSchema = RuntimeRequestFieldsSchema.extend({
   query: NonEmptyStringSchema,
   sessionId: z.string().optional(),
+  episodeId: z.string().optional(),
+  turnId: z.string().optional(),
   layers: z.array(MemoryLayerSchema).optional(),
   verbose: z.boolean().optional()
 });

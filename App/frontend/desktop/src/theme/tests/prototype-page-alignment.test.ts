@@ -102,7 +102,9 @@ describe("prototype page structure alignment", () => {
     expect(source("pages/memory-sources-page.tsx")).toContain('"memory.installHook"');
     expect(source("pages/memory-sources-page.tsx")).toContain('"memory.installSkill"');
     expect(source("pages/memory-sources-page.tsx")).toContain('"memory.removePlugin"');
-    expect(source("pages/memory-sources-page.tsx")).toContain("clients.agentSources.uninstallPlugin(source.sourceId)");
+    expect(source("pages/memory-sources-page.tsx")).toContain(
+      'clients.agentSources.uninstallPlugin(source.sourceId, { installType: "manual" })'
+    );
     expect(source("pages/memory-sources-page.tsx")).not.toContain('"memory.removeAgent"');
     expect(source("pages/memory-sources-page.tsx")).toContain("formatSourceDataPath(source.dataPath)");
     expect(source("pages/memory-sources-page.tsx")).toContain("formatSourceMemoryCount(source.messageCount, t)");

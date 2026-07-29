@@ -196,8 +196,8 @@ describe("openclaw skill target", () => {
     expect(pluginIndex).toContain("toolCalls: toolTrace.toolCalls.length ? toolTrace.toolCalls : undefined");
     expect(pluginIndex).toContain("toolResults: toolTrace.toolResults.length ? toolTrace.toolResults : undefined");
     expect(pluginIndex).toContain("contextHints: resolveContextHints(ctx)");
-    expect(pluginIndex).not.toContain("episodeId: turn.episodeId");
-    expect(pluginIndex).not.toContain("pending.episodeId");
+    expect(pluginIndex).toContain("episodeId: turn.episodeId");
+    expect(pluginIndex).toContain("pending.episodeId");
     expect(pluginIndex).toContain("sourceMemoryIds: Array.isArray(pending && pending.sourceMemoryIds)");
     expect(pluginIndex).toContain('profileId: normalizeOptionalText(ctx && ctx.agentId) || "main"');
     expect(pluginIndex).toContain("function latestTurnText");
@@ -229,7 +229,7 @@ describe("openclaw skill target", () => {
     expect(pluginIndex).toContain("new AbortController()");
     expect(pluginIndex).toContain("toolCalls: Array.isArray(payload.toolCalls) ? payload.toolCalls : undefined");
     expect(pluginIndex).toContain("toolResults: Array.isArray(payload.toolResults) ? payload.toolResults : undefined");
-    expect(pluginIndex).not.toContain("episodeId: payload.episodeId || undefined");
+    expect(pluginIndex).toContain("episodeId: payload.episodeId || undefined");
     expect(pluginIndex).toContain("mode: 'turn_complete'");
     expect(pluginIndex).not.toContain("mode: 'memory_add'");
     expect(pluginIndex).not.toContain("contentParts.push('User: '");

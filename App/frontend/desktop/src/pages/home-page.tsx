@@ -1,6 +1,6 @@
 /** Home page module. */
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type CSSProperties, type DragEvent, type KeyboardEvent, type SetStateAction, type UIEvent } from "react";
-import { hydrateAgentThreadInBackground, refreshAgentTaskList, useAgentRuntimeBridge } from "../app/agent-runtime-bridge.js";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type CSSProperties, type DragEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type SetStateAction, type UIEvent } from "react";
+import { hydrateAgentThreadInBackground, refreshAgentTaskList, useAgentRuntimeBridge, type AgentTaskStateCoordinator } from "../app/agent-runtime-bridge.js";
 import { useApiClients } from "../app/providers.js";
 import { FOCUSED_AGENT_CHAT_STORAGE_KEY, clearFocusedAgentTarget, normalizeAgentChatId, readLaunchAgentChatId, removeLaunchAgentChatIdFromUrl } from "../app/routes.js";
 import {
@@ -72,7 +72,7 @@ import {
 } from "./first-encounter-task-launch.js";
 import { HistoryDagPanel, type HistoryDagPanelState } from "./history-dag-panel.js";
 import { Mic, Pause, Plus, Send } from "./memory/memory-prototype-icons.js";
-import { ArrowDown, ChevronDown, Folder, FolderPlus, RotateCw, X } from "lucide-react";
+import { ArrowDown, Check, Folder, Plus as LucidePlus, RotateCw, Search, X } from "lucide-react";
 
 export { agentChatScopeKey, updateComposerDraftForScope };
 export { hydrateAgentThreadInBackground };
@@ -1339,36 +1339,28 @@ export function HomePage() {
     const revision = state.agent.draftTargetRevisionByScope[scopeKey] ?? 0;
     setProjectPickerOperationId(operationId);
     try {
-      const selected = await window.memmy.selectProjectDirectory();
-      if (selected.canceled) return;
-      const result = await taskStateCoordinator.mutateProject({
-        kind: "create",
-        input: { mode: "existing", path: selected.path }
+      await runProjectTargetFolderSelection({
+        selectDirectory: () => window.memmy!.selectProjectDirectory(),
+        mutateProject: (operation) => taskStateCoordinator.mutateProject(operation),
+        onCommitted: (project) => {
+          const currentRevision = draftTargetRevisionRef.current[scopeKey] ?? 0;
+          if (scopeKey === chatScopeKey && currentRevision === revision) {
+            dispatch(agentActions.draftTargetUpdated(scopeKey, {
+              kind: "project",
+              projectId: project.id
+            }));
+          }
+          setProjectPickerOpen(false);
+        },
+        onError: (error) => dispatch(agentActions.operationFailed("chat", createAgentOperationError({
+          source: "new-chat",
+          message: error instanceof MemmyAgentRequestError
+            ? error.code ?? "project_operation_failed"
+            : "network_unavailable",
+          scopeKey
+        }))),
+        onRefresh: () => taskStateCoordinator.refreshTaskState({ reason: "manual", state: state.agent })
       });
-      if (result.status !== "committed" || !result.project) {
-        throw new MemmyAgentRequestError(
-          "project registration failed",
-          result.status === "rejected" ? 409 : 503,
-          result.status === "rejected" ? result.code : "network_unavailable"
-        );
-      }
-      const currentRevision = draftTargetRevisionRef.current[scopeKey] ?? 0;
-      if (scopeKey === chatScopeKey && currentRevision === revision) {
-        dispatch(agentActions.draftTargetUpdated(scopeKey, {
-          kind: "project",
-          projectId: result.project.id
-        }));
-      }
-      setProjectPickerOpen(false);
-    } catch (error) {
-      dispatch(agentActions.operationFailed("chat", createAgentOperationError({
-        source: "new-chat",
-        message: error instanceof MemmyAgentRequestError
-          ? error.code ?? "project_operation_failed"
-          : "network_unavailable",
-        scopeKey
-      })));
-      taskStateCoordinator.refreshTaskState({ reason: "manual", state: state.agent });
     } finally {
       setProjectPickerOperationId((current) => current === operationId ? null : current);
     }
@@ -2009,6 +2001,7 @@ export function HomePage() {
               disabled={messageSendInFlight || projectPickerOperationId != null}
               canChooseOtherFolder={typeof window !== "undefined" && Boolean(window.memmy?.selectProjectDirectory)}
               onToggle={() => setProjectPickerOpen((open) => !open)}
+              onClose={() => setProjectPickerOpen(false)}
               onSelect={selectDraftTarget}
               onChooseOther={() => void selectOtherProjectFolder()}
             />
@@ -2249,7 +2242,65 @@ export function AgentOperationErrorSlot(props: { message: string | null }) {
   );
 }
 
-function ProjectTargetPicker(props: {
+export const filterProjectTargetPickerProjects = (
+  projects: MemmyAgentProject[],
+  query: string
+): MemmyAgentProject[] => {
+  const recentProjects = [...projects]
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id))
+    .slice(0, 10);
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  if (!normalizedQuery) return recentProjects;
+  return recentProjects.filter((project) => (
+    project.name.toLocaleLowerCase().includes(normalizedQuery)
+    || project.rootPath.toLocaleLowerCase().includes(normalizedQuery)
+  ));
+};
+
+export const resolveProjectTargetPickerActiveIndex = (
+  itemKeys: string[],
+  selectedKey: string | null
+): number => Math.max(0, selectedKey ? itemKeys.indexOf(selectedKey) : 0);
+
+export interface RunProjectTargetFolderSelectionInput {
+  selectDirectory: NonNullable<Window["memmy"]>["selectProjectDirectory"];
+  mutateProject: AgentTaskStateCoordinator["mutateProject"];
+  onCommitted: (project: MemmyAgentProject) => void;
+  onError: (error: unknown) => void;
+  onRefresh: () => void;
+}
+
+export const runProjectTargetFolderSelection = async (
+  input: RunProjectTargetFolderSelectionInput
+): Promise<"canceled" | "committed" | "failed"> => {
+  try {
+    const selected = await input.selectDirectory();
+    if (selected.canceled) return "canceled";
+    const result = await input.mutateProject({
+      kind: "create",
+      input: { mode: "existing", path: selected.path }
+    });
+    if (result.status !== "committed" || !result.project) {
+      throw new MemmyAgentRequestError(
+        "project registration failed",
+        result.status === "rejected" ? 409 : 503,
+        result.status === "rejected" ? result.code : "network_unavailable"
+      );
+    }
+    input.onCommitted(result.project);
+    return "committed";
+  } catch (error) {
+    input.onError(error);
+    input.onRefresh();
+    return "failed";
+  }
+};
+
+const preserveProjectTargetPickerSearchFocus = (event: ReactPointerEvent<HTMLButtonElement>) => {
+  event.preventDefault();
+};
+
+export function ProjectTargetPicker(props: {
   open: boolean;
   target: WebuiSessionTarget;
   selectedProject: MemmyAgentProject | null;
@@ -2258,63 +2309,199 @@ function ProjectTargetPicker(props: {
   disabled: boolean;
   canChooseOtherFolder: boolean;
   onToggle: () => void;
+  onClose: () => void;
   onSelect: (target: WebuiSessionTarget) => void;
   onChooseOther: () => void;
 }) {
   const { t } = useTranslation();
+  const [query, setQuery] = useState("");
+  const [activeIndex, setActiveIndex] = useState(0);
+  const [hasKeyboardNavigated, setHasKeyboardNavigated] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
   const selectedLabel = props.registryState === "corrupt"
     ? t("home.project.registryUnavailable")
     : props.selectedProject?.name ?? t("home.project.optional");
-  const selectedPath = props.registryState === "ready" ? props.selectedProject?.rootPath : null;
+  const visibleProjects = props.registryState === "ready"
+    ? filterProjectTargetPickerProjects(props.projects, query)
+    : [];
+  const itemKeys = [
+    ...visibleProjects.map((project) => `project:${project.id}`),
+    ...(props.registryState === "ready" && props.canChooseOtherFolder ? ["new"] : []),
+    ...(props.target.kind === "project" ? ["standalone"] : [])
+  ];
+  const selectedKey = props.target.kind === "project" ? `project:${props.target.projectId}` : null;
+  const itemKeySignature = itemKeys.join("\u0000");
+  const activeItemId = itemKeys.length > 0 ? `home-project-picker-option-${activeIndex}` : undefined;
+
+  useEffect(() => {
+    if (!props.open) return;
+    setQuery("");
+    setActiveIndex(0);
+    setHasKeyboardNavigated(false);
+    searchInputRef.current?.focus();
+  }, [props.open]);
+
+  useEffect(() => {
+    if (!props.open) return;
+    setActiveIndex(resolveProjectTargetPickerActiveIndex(itemKeys, selectedKey));
+    setHasKeyboardNavigated(false);
+  }, [itemKeySignature, props.open, query, selectedKey]);
+
+  useEffect(() => {
+    if (!props.open || !activeItemId || !hasKeyboardNavigated) return;
+    rootRef.current?.querySelector(`#${activeItemId}`)?.scrollIntoView({ block: "nearest" });
+  }, [activeItemId, hasKeyboardNavigated, props.open]);
+
+  useEffect(() => {
+    if (!props.open) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) props.onClose();
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointer);
+    return () => document.removeEventListener("pointerdown", closeOnOutsidePointer);
+  }, [props.onClose, props.open]);
+
+  const activateItem = (key: string | undefined) => {
+    if (key?.startsWith("project:")) {
+      props.onSelect({ kind: "project", projectId: key.slice("project:".length) });
+    } else if (key === "new") {
+      props.onChooseOther();
+    } else if (key === "standalone") {
+      props.onSelect({ kind: "standalone" });
+    }
+  };
+
+  const handlePickerKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Enter" && isComposingKeyboardEvent(event)) return;
+    if (event.key === "Tab") {
+      props.onClose();
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      props.onClose();
+      triggerRef.current?.focus();
+      return;
+    }
+    if (itemKeys.length === 0) return;
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      setHasKeyboardNavigated(true);
+      const offset = event.key === "ArrowDown" ? 1 : -1;
+      setActiveIndex((current) => Math.max(0, Math.min(itemKeys.length - 1, current + offset)));
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      activateItem(itemKeys[activeIndex]);
+    }
+  };
+
   return (
-    <div className="home-project-picker">
+    <div ref={rootRef} className="home-project-picker">
       <button
+        ref={triggerRef}
         type="button"
         className="home-project-picker__trigger"
         disabled={props.disabled}
         aria-expanded={props.open}
+        aria-haspopup="listbox"
         onClick={props.onToggle}
       >
         <Folder size={16} className="shrink-0" />
         <span className="min-w-0 flex-1 text-left">
           <span className="block truncate">{selectedLabel}</span>
-          {selectedPath ? <span className="block truncate text-[10px] opacity-60">{selectedPath}</span> : null}
         </span>
-        <ChevronDown size={14} className="shrink-0" />
       </button>
       {props.open ? (
         <div className="home-project-picker__menu">
-          {props.registryState === "ready" ? props.projects.map((project) => (
-            <button
-              key={project.id}
-              type="button"
-              className={`home-project-picker__option${props.target.kind === "project" && props.target.projectId === project.id ? " home-project-picker__option--active" : ""}`}
-              title={project.rootPath}
-              onClick={() => props.onSelect({ kind: "project", projectId: project.id })}
-            >
-              <Folder size={14} className="shrink-0" />
-              <span className="min-w-0 flex-1">
-                <span className="block truncate">{project.name}</span>
-                <span className="block truncate text-[10px] opacity-60">{project.rootPath}</span>
-              </span>
-            </button>
-          )) : null}
-          {props.registryState === "ready" && props.canChooseOtherFolder ? (
-            <button type="button" className="home-project-picker__option" onClick={props.onChooseOther}>
-              <FolderPlus size={14} className="shrink-0" />
-              <span>{t("home.project.chooseOther")}</span>
-            </button>
-          ) : null}
-          {props.target.kind === "project" ? (
-            <button
-              type="button"
-              className="home-project-picker__option home-project-picker__option--clear"
-              onClick={() => props.onSelect({ kind: "standalone" })}
-            >
-              <X size={14} className="shrink-0" />
-              <span>{t("home.project.clear")}</span>
-            </button>
-          ) : null}
+          <label className="home-project-picker__search">
+            <Search size={14} aria-hidden="true" />
+            <input
+              ref={searchInputRef}
+              value={query}
+              placeholder={t("home.project.search")}
+              aria-label={t("home.project.search")}
+              role="combobox"
+              aria-autocomplete="list"
+              aria-expanded="true"
+              aria-controls="home-project-picker-list"
+              aria-activedescendant={activeItemId}
+              onChange={(event) => {
+                setQuery(event.target.value);
+                setHasKeyboardNavigated(false);
+              }}
+              onKeyDown={handlePickerKeyDown}
+            />
+          </label>
+          <div id="home-project-picker-list" className="home-project-picker__list" role="listbox">
+            <div className="home-project-picker__projects" role="presentation">
+              {props.registryState === "corrupt" ? (
+                <p className="home-project-picker__empty">{t("home.project.registryUnavailable")}</p>
+              ) : visibleProjects.length === 0 ? (
+                <p className="home-project-picker__empty" role="status">{t("home.project.empty")}</p>
+              ) : visibleProjects.map((project, index) => {
+                const selected = props.target.kind === "project" && props.target.projectId === project.id;
+                return (
+                  <button
+                    id={`home-project-picker-option-${index}`}
+                    key={project.id}
+                    type="button"
+                    role="option"
+                    tabIndex={-1}
+                    aria-selected={selected}
+                    data-project-id={project.id}
+                    className={`home-project-picker__option${selected ? " home-project-picker__option--selected" : ""}${hasKeyboardNavigated && activeIndex === index ? " home-project-picker__option--keyboard-active" : ""}`}
+                    title={project.rootPath}
+                    onPointerDown={preserveProjectTargetPickerSearchFocus}
+                    onClick={() => props.onSelect({ kind: "project", projectId: project.id })}
+                  >
+                    <Folder size={14} className="shrink-0" aria-hidden="true" />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate">{project.name}</span>
+                      <span className="home-project-picker__path block truncate">{project.rootPath}</span>
+                    </span>
+                    {selected ? <Check size={14} className="shrink-0" aria-hidden="true" /> : null}
+                  </button>
+                );
+              })}
+            </div>
+            {itemKeys.some((key) => key === "new" || key === "standalone") ? (
+              <div className="home-project-picker__divider" role="separator" />
+            ) : null}
+            <div className="home-project-picker__actions" role="presentation">
+              {props.registryState === "ready" && props.canChooseOtherFolder ? (
+                <button
+                  id={`home-project-picker-option-${visibleProjects.length}`}
+                  type="button"
+                  role="option"
+                  tabIndex={-1}
+                  aria-selected="false"
+                  className={`home-project-picker__option home-project-picker__option--action${hasKeyboardNavigated && activeIndex === visibleProjects.length ? " home-project-picker__option--keyboard-active" : ""}`}
+                  onPointerDown={preserveProjectTargetPickerSearchFocus}
+                  onClick={props.onChooseOther}
+                >
+                  <LucidePlus size={14} className="shrink-0" aria-hidden="true" />
+                  <span>{t("home.project.new")}</span>
+                </button>
+              ) : null}
+              {props.target.kind === "project" ? (
+                <button
+                  id={`home-project-picker-option-${itemKeys.length - 1}`}
+                  type="button"
+                  role="option"
+                  tabIndex={-1}
+                  aria-selected="false"
+                  className={`home-project-picker__option home-project-picker__option--action${hasKeyboardNavigated && activeIndex === itemKeys.length - 1 ? " home-project-picker__option--keyboard-active" : ""}`}
+                  onPointerDown={preserveProjectTargetPickerSearchFocus}
+                  onClick={() => props.onSelect({ kind: "standalone" })}
+                >
+                  <X size={14} className="shrink-0" aria-hidden="true" />
+                  <span>{t("home.project.standalone")}</span>
+                </button>
+              ) : null}
+            </div>
+          </div>
         </div>
       ) : null}
     </div>

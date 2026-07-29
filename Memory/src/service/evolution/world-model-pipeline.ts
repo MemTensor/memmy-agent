@@ -109,7 +109,7 @@ export class WorldModelPipeline {
       }
       readyDrafts.push(draft);
     }
-    const enhancements = await this.enhanceWorldModelDrafts(readyDrafts, policies, userId);
+    const enhancements = await this.enhanceWorldModelDrafts(readyDrafts, policies);
     for (const enhancement of enhancements) {
       if (!enhancement.ok) {
         const anchorPolicy = enhancement.fallback.policyIds
@@ -139,7 +139,7 @@ export class WorldModelPipeline {
         continue;
       }
       const rawDraft = enhancement.draft;
-      const existing = this.findWorldModelMergeTarget(rawDraft, userId);
+      const existing = this.findWorldModelMergeTarget(rawDraft);
       const draft = existing
         ? mergeWorldModelDraftForUpdate(rawDraft, existing, this.deps.config.algorithm.l3Abstraction.confidenceDelta)
         : rawDraft;
@@ -269,10 +269,9 @@ private l3AbstractionSourceForJob(job: EvolutionJobRecord): MemoryRow | undefine
   }
 
 private findWorldModelMergeTarget(
-    draft: WorldModelDraft,
-    userId: string
+    draft: WorldModelDraft
   ): MemoryRow | undefined {
-    const exact = this.deps.repos.memories.getByKey(userId, "L3", draft.key);
+    const exact = this.deps.repos.memories.getByKey("L3", draft.key);
     if (
       exact &&
       !this.deps.isArchivedEvolutionMemory(exact)
@@ -316,7 +315,7 @@ private findWorldModelMergeTarget(
     return bestOverlap?.memory ?? bestVector?.memory;
   }
 
-private gatherWorldModelEvidence(policy: PolicyMeta, userId: string): TraceMeta[] {
+private gatherWorldModelEvidence(policy: PolicyMeta): TraceMeta[] {
     const byId = new Map<string, TraceMeta>();
     for (const memory of this.deps.repos.memories.getMany(policy.sourceTraceIds)) {
       const trace = this.deps.traceMeta(memory);
@@ -347,8 +346,7 @@ private gatherWorldModelEvidence(policy: PolicyMeta, userId: string): TraceMeta[
 
 private async enhanceWorldModelDrafts(
     fallbacks: WorldModelDraft[],
-    policies: PolicyMeta[],
-    userId: string
+    policies: PolicyMeta[]
   ): Promise<WorldModelEnhancementResult[]> {
     const out: WorldModelEnhancementResult[] = [];
     for (const fallback of fallbacks) {
@@ -367,7 +365,7 @@ private async enhanceWorldModelDrafts(
         const languageSamples: Array<string | null | undefined> = [];
         const policySummaries = selectedPolicies
           .map((policy) => {
-            const traces = this.gatherWorldModelEvidence(policy, userId);
+            const traces = this.gatherWorldModelEvidence(policy);
             languageSamples.push(
               policy.title,
               policy.trigger,

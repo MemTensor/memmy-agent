@@ -172,7 +172,7 @@ describe("MemoryService / embedding / processing", () => {
     db.close();
   });
 
-  it("defers captured L1 summary and embedding until episode reflection", async () => {
+  it("summarizes and embeds captured L1 traces before episode reflection", async () => {
     const llmCalls: Array<{
       messages: Array<{ role: string; content: string }>;
       options: { operation: string };
@@ -203,7 +203,7 @@ describe("MemoryService / embedding / processing", () => {
       answer: "Use focused checks first, then broaden only after the migration path is verified."
     });
 
-    expect(complete.jobs.map((job) => job.jobType)).toEqual(["episode_idle_close"]);
+    expect(complete.jobs.map((job) => job.jobType)).toEqual(["trace_summary", "episode_idle_close"]);
     expect(new Repositories(db.db).processing.get(complete.l1MemoryId)).toMatchObject({
       state: "summary_pending",
       stage: "summary",
@@ -216,14 +216,15 @@ describe("MemoryService / embedding / processing", () => {
     });
     expect(recall.hits.some((hit) => hit.id === complete.l1MemoryId)).toBe(true);
     const openEpisodeRun = await service.runWorkerOnce(10);
-    expect(openEpisodeRun.jobs.map((job) => job.jobType)).toEqual(["episode_idle_close"]);
-    expect(llmCalls.some((call) => call.options.operation.includes("summar"))).toBe(false);
-    expect(embeddingTexts).toHaveLength(0);
-    service.reconcileWorkerStartup();
+    expect(openEpisodeRun.jobs.map((job) => job.jobType)).toEqual(["episode_idle_close", "trace_summary"]);
+    expect(llmCalls.filter((call) => call.options.operation === "capture.summarize")).toHaveLength(1);
+    const embeddingRun = await service.runWorkerOnce(10);
+    expect(embeddingRun.jobs.map((job) => job.jobType)).toEqual(["embedding"]);
+    expect(embeddingTexts).toHaveLength(1);
     expect(db.db.prepare(
       `SELECT COUNT(*) AS count FROM evolution_jobs
        WHERE target_memory_id = ? AND job_type IN ('trace_summary', 'embedding')`
-    ).get(complete.l1MemoryId)).toEqual({ count: 0 });
+    ).get(complete.l1MemoryId)).toEqual({ count: 2 });
     const row = db.db.prepare(
       `SELECT info_json, properties_json
        FROM memories
@@ -235,20 +236,18 @@ describe("MemoryService / embedding / processing", () => {
         summary?: string;
         trace: {
           summary?: string;
-          summary_deferred_until_reflection?: boolean;
           vec_summary?: number[];
         };
       };
     };
-    expect(info.summary).toBe("");
-    expect(properties.internal_info.summary).toBe("");
-    expect(properties.internal_info.trace.summary).toBe("");
-    expect(properties.internal_info.trace.summary_deferred_until_reflection).toBe(true);
+    expect(info.summary).toBe("SQLite migrations should run focused checks before broad checks.");
+    expect(properties.internal_info.summary).toBe("SQLite migrations should run focused checks before broad checks.");
+    expect(properties.internal_info.trace.summary).toBe("SQLite migrations should run focused checks before broad checks.");
     expect(properties.internal_info.trace.vec_summary).toBeUndefined();
     expect(db.db.prepare(
       `SELECT embedding_dim FROM memory_vector_entries
        WHERE memory_id = ? AND vector_field = 'vec_summary'`
-    ).get(complete.l1MemoryId)).toBeUndefined();
+    ).get(complete.l1MemoryId)).toEqual({ embedding_dim: 3 });
     db.close();
   });
 });

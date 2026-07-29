@@ -492,7 +492,7 @@ export class RewardPipeline {
   } {
     const highValueMemories: MemoryRow[] = [];
     const lowValueMemories: MemoryRow[] = [];
-    const memories = this.deps.repos.memories.list({ userId: trace.userId, memoryLayer: "L1", status: "activated" }, 1000);
+    const memories = this.deps.repos.memories.list({ memoryLayer: "L1", status: "activated" }, 1000);
     for (const memory of memories) {
       const candidate = this.deps.traceMeta(memory);
       if (!candidate || candidate.signature !== trace.signature) continue;

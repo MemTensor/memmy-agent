@@ -71,8 +71,8 @@ export class SkillPipeline {
     for (const policyMemory of policyMemories) {
       const policy = policyMetaFromMemory(policyMemory);
       if (!policy) continue;
-      const evidenceTraces = this.gatherSkillEvidence(policy, userId);
-      const counterExamples = this.gatherSkillCounterExamples(policy, userId);
+      const evidenceTraces = this.gatherSkillEvidence(policy);
+      const counterExamples = this.gatherSkillCounterExamples(policy);
       if (evidenceTraces.length === 0) {
         logEvolutionDecision(job, "skill_crystallization", "no_evidence", {
           policyId: policy.id
@@ -91,7 +91,7 @@ export class SkillPipeline {
         });
         continue;
       }
-      const existingSkill = this.findExistingSkillForPolicy(policy, userId);
+      const existingSkill = this.findExistingSkillForPolicy(policy);
       if (this.isSkillCrystallizationInCooldown(policy, at)) {
         logEvolutionDecision(job, "skill_crystallization", "cooldown", {
           policyId: policy.id,
@@ -277,8 +277,7 @@ export class SkillPipeline {
   }
 
   findExistingSkillForPolicy(
-    policy: PolicyMeta,
-    userId: string
+    policy: PolicyMeta
   ): NonNullable<ReturnType<typeof skillMetaFromMemory>> | null {
     const candidates = this.deps.repos.memories
       .list({ memoryLayer: "Skill" }, 1000)
@@ -313,7 +312,7 @@ private skillCrystallizationCooldownKey(policy: PolicyMeta): string {
     return policy.id;
   }
 
-private gatherSkillEvidence(policy: PolicyMeta, userId: string): TraceMeta[] {
+private gatherSkillEvidence(policy: PolicyMeta): TraceMeta[] {
     const byId = new Map<string, TraceMeta>();
     const episodeIds = new Set(policy.sourceEpisodeIds);
     const failureEpisodeIds = new Set(
@@ -359,7 +358,7 @@ private isFailureEpisodeForSkillEvidence(episodeId: string): boolean {
     return episode.rewardDetail.skipped === true;
   }
 
-private gatherSkillCounterExamples(policy: PolicyMeta, userId: string): TraceMeta[] {
+private gatherSkillCounterExamples(policy: PolicyMeta): TraceMeta[] {
     if (policy.sourceEpisodeIds.length === 0) return [];
     const episodeIds = new Set(policy.sourceEpisodeIds);
     return this.deps.repos.memories

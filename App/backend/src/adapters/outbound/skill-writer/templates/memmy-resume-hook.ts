@@ -185,6 +185,7 @@ async function captureCompletedTurn(payload) {
     adapterId: "memmy-" + SOURCE + "-hook",
     requestId: SOURCE + "-complete:" + turnId + ":" + hashText([status, query, answer].join("\\u0000")),
     sessionId,
+    episodeId: normalizeText(pending && pending.episodeId) || undefined,
     query,
     answer,
     status,
@@ -220,6 +221,7 @@ async function startCapturedTurn(payload, prompt) {
     createdAt: new Date().toISOString(),
     sessionId,
     turnId: normalizeText(turn && turn.turnId) || requestedTurnId,
+    episodeId: normalizeText(turn && turn.episodeId) || undefined,
     query,
     sourceMemoryIds: Array.isArray(turn && turn.sourceMemoryIds) ? turn.sourceMemoryIds : undefined,
     answer: ""

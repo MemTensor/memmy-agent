@@ -8,6 +8,52 @@ import { Repositories } from "../../src/storage/repositories.js";
 import type { MemoryRow } from "../../src/types.js";
 
 describe("repository sqlite schema contract", () => {
+  it("adds global memory indexes when reopening a database with only user-prefixed indexes", () => {
+    const root = mkdtempSync(join(tmpdir(), "mindock-repo-global-index-upgrade-"));
+    const dbPath = join(root, "memory.sqlite");
+    try {
+      const initial = new MemoryDb({ path: dbPath });
+      initial.db.exec(`
+        DROP INDEX idx_memories_layer_status_updated;
+        DROP INDEX idx_memories_conversation_updated;
+        DROP INDEX idx_memories_content_hash_layer;
+        DROP INDEX idx_memories_key_layer;
+        CREATE INDEX idx_memories_user_layer_status_updated
+          ON memories (user_id, memory_layer, status, updated_at DESC);
+        CREATE INDEX idx_memories_user_conversation
+          ON memories (user_id, conversation_id, updated_at DESC);
+        CREATE INDEX idx_memories_hash
+          ON memories (user_id, content_hash, memory_layer);
+        CREATE INDEX idx_memories_key
+          ON memories (user_id, memory_key, memory_layer);
+      `);
+      initial.close();
+
+      const reopened = new MemoryDb({ path: dbPath });
+      const indexes = reopened.db
+        .prepare(`PRAGMA index_list(memories)`)
+        .all() as Array<{ name: string }>;
+      expect(indexes.map((index) => index.name)).toEqual(expect.arrayContaining([
+        "idx_memories_layer_status_updated",
+        "idx_memories_conversation_updated",
+        "idx_memories_content_hash_layer",
+        "idx_memories_key_layer"
+      ]));
+      const queryPlan = reopened.db.prepare(
+        `EXPLAIN QUERY PLAN
+         SELECT *
+         FROM memories
+         WHERE memory_layer = ?
+           AND memory_key = ?
+           AND deleted_at IS NULL`
+      ).all("L1", "shared-key") as Array<{ detail: string }>;
+      expect(queryPlan.some((step) => step.detail.includes("idx_memories_key_layer"))).toBe(true);
+      reopened.close();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("creates the runtime tables on a fresh sqlite database", () => {
     const root = mkdtempSync(join(tmpdir(), "mindock-repo-schema-"));
     try {

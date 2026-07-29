@@ -20,6 +20,10 @@ import { createSkillTargetRegistry, type SkillTargetRegistry } from "../adapters
 import type { CloudClient } from "../adapters/outbound/cloud-client/index.js";
 import type { MemoryClient } from "../adapters/outbound/memory-client/index.js";
 import type { PermissionManager } from "../permission/index.js";
+import {
+  createAgentSourceLifecycleAnalytics,
+  resolveLoggedInAnalyticsUserId,
+} from "../analytics/agent-source-analytics.js";
 import { createAgentSourceService, type AgentSourceService } from "./agent-source-service.js";
 import { createAgentSourceAutoInjectService, type AgentSourceAutoInjectService } from "./agent-source-auto-inject-service.js";
 import { createBuiltinAgentSourceRegistry } from "./builtin-agent-source-registry.js";
@@ -136,12 +140,28 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
     options.memmyAgentAdminClient ??
     createHttpMemmyAgentAdminClient({ bootstrapSecret: options.memmyAgentAdminBootstrapSecret });
   const memmyConfigWriter = options.memmyConfigWriter ?? createUnavailableMemmyConfigWriter();
+  const accountSessionRepository = options.appStateStore.repositories.accountSession;
   const agentSources = createAgentSourceService({
     sourceRegistry,
     agentSourceRepository: options.appStateStore.repositories.agentSources,
     ingestionService,
     memoryClient: options.memoryClient,
-    skillDistributionService
+    skillDistributionService,
+    getScanPermission: () => options.permissionManager.getScanPermission(),
+    agentSourceAnalytics: createAgentSourceLifecycleAnalytics({
+      getUserId: () => {
+        const session = accountSessionRepository.get();
+        if (!session.authenticated) return null;
+        return resolveLoggedInAnalyticsUserId({
+          cloudUuid: accountSessionRepository.getCloudUuid(),
+          userId: session.profile.userId,
+        });
+      },
+      getUserMode: () => {
+        const mode = options.appStateStore.repositories.bootstrap.getAppSettings().userMode;
+        return mode === "account" || mode === "byok" ? mode : null;
+      },
+    }),
   });
 
   return {

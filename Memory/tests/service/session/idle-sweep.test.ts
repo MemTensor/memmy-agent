@@ -206,15 +206,19 @@ describe("MemoryService / session / idle sweep", () => {
       sessionId: longSession.sessionId,
       query: "Run a long deployment verification"
     });
-    expect(started).not.toHaveProperty("episodeId");
+    expect(started.episodeId).toMatch(/^episode_/u);
     expect(db.db.prepare(
-      "SELECT id FROM raw_turns WHERE session_id = ? AND turn_id = ?"
-    ).get(longSession.sessionId, "turn-long-running")).toBeUndefined();
+      "SELECT episode_id, status FROM raw_turns WHERE session_id = ? AND turn_id = ?"
+    ).get(longSession.sessionId, "turn-long-running")).toEqual({
+      episode_id: started.episodeId,
+      status: "started"
+    });
     const completed = service.completeTurn("turn-long-running", {
       sessionId: longSession.sessionId,
       query: "Run a long deployment verification",
       answer: "The long deployment verification completed."
     });
+    expect(completed.episodeId).toBe(started.episodeId);
     db.db.prepare(
       `UPDATE episodes
        SET updated_at = ?
@@ -260,7 +264,7 @@ describe("MemoryService / session / idle sweep", () => {
       sessionId: activeSession.sessionId,
       query: "Run a long tool-driven deployment"
     });
-    expect(started).not.toHaveProperty("episodeId");
+    expect(started.episodeId).toMatch(/^episode_/u);
     await service.observeTool({
       sessionId: activeSession.sessionId,
       turnId: "turn-active-tool",
@@ -274,6 +278,7 @@ describe("MemoryService / session / idle sweep", () => {
        WHERE session_id = ?
          AND turn_id = ?`
     ).get(activeSession.sessionId, "turn-active-tool") as { id: string; episode_id: string };
+    expect(rawTurn.episode_id).toBe(started.episodeId);
     const oldAt = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
     setRawTurnActivityAt(db, rawTurn.id, oldAt);
     await service.observeTool({

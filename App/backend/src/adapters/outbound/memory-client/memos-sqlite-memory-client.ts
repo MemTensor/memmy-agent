@@ -118,6 +118,7 @@ interface LocalEpisodeRow {
 }
 
 interface LocalApiLogRow {
+  source: MemosSqliteSource;
   id: number;
   tool_name: "memory_add" | "memory_search" | "skill_generate" | "skill_evolve";
   source_agent: string | null;
@@ -441,7 +442,7 @@ export function createMemosSqliteMemoryClient(options: CreateMemosSqliteMemoryCl
           toolName: row.tool_name,
           ...(row.source_agent ? { sourceAgent: row.source_agent } : {}),
           inputJson: row.input_json,
-          outputJson: row.output_json,
+          outputJson: apiLogOutputWithCurrentTraceSummary(row),
           durationMs: nonNegativeInt(row.duration_ms, 0),
           success: row.success !== 0,
           calledAt: normalizeIsoTime(row.called_at)
@@ -507,10 +508,42 @@ function listApiLogRows(
            ORDER BY called_at DESC, id DESC
            LIMIT ?`
         )
-        .all(...tools, ...agentFilter.parameters, maxRows) as unknown as LocalApiLogRow[];
+        .all(...tools, ...agentFilter.parameters, maxRows)
+        .map((row) => ({ ...row as unknown as Omit<LocalApiLogRow, "source">, source }));
     }))
     .sort((a, b) => b.called_at.localeCompare(a.called_at) || b.id - a.id)
     .slice(0, maxRows);
+}
+
+function apiLogOutputWithCurrentTraceSummary(row: LocalApiLogRow): string {
+  if (row.tool_name !== "memory_add") return row.output_json;
+
+  try {
+    const output = readJsonObject(row.output_json);
+    const details = output.details;
+    if (!Array.isArray(details)) return row.output_json;
+
+    let changed = false;
+    const nextDetails = details.map((detail) => {
+      const record = objectAt(detail, []);
+      if (stringValue(record.role) !== "trace") return detail;
+      const traceId = stringValue(record.traceId);
+      if (!traceId) return detail;
+
+      const memory = withDb(row.source, (db) => {
+        if (!tableExists(db, "memories")) return undefined;
+        return db.prepare("SELECT * FROM memories WHERE id = ?").get(traceId) as LocalMemoryRow | undefined;
+      });
+      const summary = memory ? summaryFromParsed(memory, parsedRow(memory)) : undefined;
+      if (!summary || record.summary === summary) return detail;
+      changed = true;
+      return { ...record, summary };
+    });
+
+    return changed ? JSON.stringify({ ...output, details: nextDetails }) : row.output_json;
+  } catch {
+    return row.output_json;
+  }
 }
 
 /**
@@ -910,6 +943,7 @@ function appendDeleteChangeLog(db: DatabaseSync, target: MemoryRow, createdAt: s
 function toListItem(row: MemoryRow): MemoryListItem {
   const parsed = parsedRow(row.row);
   const source = sourceLabelForRow(row, parsed);
+  const spanGoal = spanGoalFromParsed(parsed);
   return {
     id: encodeId(row.source, row.row.id),
     kind: kindForRow(row.row),
@@ -919,11 +953,18 @@ function toListItem(row: MemoryRow): MemoryListItem {
     summary: firstNonEmpty(summaryFromParsed(row.row, parsed), row.row.memory_value),
     tags: withSourceTag(source, tagsForRow(row.row, parsed)),
     metrics: metricsForRow(parsed),
-    metadata: { source },
+    metadata: { source, ...(spanGoal ? { spanGoal } : {}) },
     createdAt: normalizeIsoTime(row.row.created_at),
     updatedAt: normalizeIsoTime(row.row.updated_at),
     version: nonNegativeInt(row.row.version, 1)
   };
+}
+
+function spanGoalFromParsed(parsed: ParsedRow): string | undefined {
+  const internalInfo = objectAt(parsed.properties, ["internal_info"]);
+  if (stringValue(internalInfo.memory_kind) !== "span") return undefined;
+  const goal = stringValue(objectAt(internalInfo, ["span"]).span_goal)?.trim();
+  return goal || undefined;
 }
 
 function toDetailItem(row: MemoryRow, sources?: readonly MemosSqliteSource[]): GetMemoryOutput {

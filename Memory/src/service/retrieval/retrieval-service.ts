@@ -1248,7 +1248,6 @@ export class RetrievalService {
     const candidateCount = layers.length === 0
       ? 0
       : this.candidatePool.retrievalCandidateCount({
-          negativeExperienceUserId: context.userId,
           layers,
           tags: request.tags
         });
@@ -1257,7 +1256,6 @@ export class RetrievalService {
     const queryVectorText = queryExtract?.queryVecText?.trim() || retrievalQuery;
     const retrievalLimit = request.limit ?? this.deps.turnStartRetrievalLimit();
     const retrievalOutput = await this.retrieveSearchMemories({
-      negativeExperienceUserId: context.userId,
       query: retrievalQuery,
       queryVectorText,
       queryExtract,
@@ -1377,7 +1375,6 @@ export class RetrievalService {
   }
 
   private async retrieveSearchMemories(input: {
-    negativeExperienceUserId: string;
     query: string;
     queryVectorText: string;
     queryExtract: RetrievalQueryExtract | null;
@@ -1401,13 +1398,11 @@ export class RetrievalService {
         domain: config.domain
       });
       const hasVectorCandidates = this.candidatePool.hasRetrievalVectorCandidates({
-        negativeExperienceUserId: input.negativeExperienceUserId,
         layers: input.layers,
         tags: input.tags
       });
       const queryVector = hasVectorCandidates ? await this.queryVector(queryVectorText) : undefined;
       const candidatePool = await this.candidatePool.indexedRetrievalCandidatePool({
-        negativeExperienceUserId: input.negativeExperienceUserId,
         compiledQuery,
         queryVector,
         layers: input.layers,

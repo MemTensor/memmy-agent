@@ -1,7 +1,7 @@
 /** Settings page for account, model, token usage, and desktop preferences. */
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type Dispatch, type ReactNode } from "react";
-import { Brain, Palette, Rocket, Settings2, Shield, User, Zap, ArrowRight, ArrowLeft, Bell, ExternalLink, FolderOpen, Info, LogOut, Wrench, Search, Eye, EyeOff, ChevronDown, ChevronUp, ChevronRight, Database, Loader2, CheckCircle2, XCircle, Check, AlertTriangle, ArrowDownToLine, ArrowUpFromLine, MessageSquare, FileText, Sparkles, Mic, Image as ImageIcon } from "lucide-react";
-import type { AppSettingsDto, ByokTokenUsageByKind, ByokTokenUsageKind, ByokTokenUsageSummary, Language, PrivacySettingsDto, TokenQuotaEligibility, TokenSceneUsageDto, TokenUsageDto, TokenUsageScene } from "@memmy/local-api-contracts";
+import { Brain, Palette, Rocket, Settings2, Shield, User, Zap, ArrowRight, ArrowLeft, Bell, ExternalLink, FolderOpen, Gift, Info, KeyRound, LogOut, Wrench, Search, Eye, EyeOff, ChevronDown, ChevronUp, ChevronRight, Database, Loader2, CheckCircle2, XCircle, Check, AlertTriangle, Mic, Image as ImageIcon } from "lucide-react";
+import type { AppSettingsDto, ByokTokenUsageByKind, ByokTokenUsageKind, ByokTokenUsageSummary, Language, PrivacySettingsDto, TokenQuotaEligibility, TokenSceneUsageDto, TokenUsageDto } from "@memmy/local-api-contracts";
 import { useApiClients } from "../app/providers.js";
 import { resolveGiftTokenUsage } from "../app/routes.js";
 import { useUpdateCoordinator, type UpdateCoordinatorValue, type UpdatePhase } from "../app/update-coordinator.js";
@@ -154,7 +154,9 @@ const EMPTY_BYOK_TOKEN_USAGE: ByokTokenUsageSummary = {
   byKind: []
 };
 
-const TOKEN_USAGE_KIND_ORDER: ByokTokenUsageKind[] = ["agent_chat", "memory_summary", "memory_evolution", "embedding"];
+// Display order for both panels. Platform Cloud scenes omit embedding; BYOK
+// kinds already include it in the contract — no backend TokenUsageScene change.
+const TOKEN_USAGE_SCENES = ["agent_chat", "memory_summary", "memory_evolution", "embedding"] as const satisfies readonly ByokTokenUsageKind[];
 
 /**
  * The default analytics-tracking function for the pure view.
@@ -348,9 +350,14 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const modelHeaderSpacing = modelMode === "platform" && !showApiConfig ? "" : " mb-4";
   const tokenUsage = bootstrap?.tokenUsage ?? FALLBACK_TOKEN_USAGE;
   const giftUsedTokens = tokenUsage.usedTokens;
-  const giftTotalTokens = tokenUsage.totalTokens;
-  const giftRemainingTokens = tokenUsage.remainingTokens;
-  const { usagePercent, isTokenLow } = resolveGiftTokenUsage(giftUsedTokens, giftTotalTokens, giftRemainingTokens);
+  // The summary bar tracks Agent 任务 (the task model), not the plan total:
+  // that scene is what blocks the user first. Red / "request more" still use
+  // the original rule — remaining <= 0 or usage >= 80% — on those figures.
+  const agentQuota = tokenUsage.sceneUsages.find((scene) => scene.scene === "agent_chat");
+  const giftTotalTokens = agentQuota?.totalTokens ?? tokenUsage.totalTokens;
+  const giftRemainingTokens = agentQuota?.remainingTokens ?? tokenUsage.remainingTokens;
+  const giftBarUsedTokens = agentQuota?.usedTokens ?? giftUsedTokens;
+  const { usagePercent, isTokenLow } = resolveGiftTokenUsage(giftBarUsedTokens, giftTotalTokens, giftRemainingTokens);
   const showGiftQuota = !isByokMode;
   const canApplyMoreByPromotion = bootstrap?.promotions?.applyMore ?? true;
   const quotaRequestPending = quotaEligibility?.state === "pending";
@@ -1524,7 +1531,11 @@ export function SettingsPageView(props: SettingsPageViewProps) {
             {showGiftQuota && (
               <div>
                 <div className="flex justify-between text-xs text-text-ink/65 mb-2">
-                  <span>{t("settings.token.giftUsed", { count: formatNumber(giftUsedTokens) })}</span>
+                  <span>
+                    {agentQuota
+                      ? t("settings.token.agentQuotaUsed", { count: formatNumber(giftBarUsedTokens) })
+                      : t("settings.token.giftUsed", { count: formatNumber(giftBarUsedTokens) })}
+                  </span>
                   <span>{t("settings.token.total", { count: formatNumber(giftTotalTokens) })}</span>
                 </div>
                 <div className="h-3 bg-canvas-oat rounded-pill overflow-hidden">
@@ -1914,7 +1925,7 @@ function ChannelStat(props: ChannelStatProps) {
  * - byokUsageStatus: The local usage loading status.
  * - onBack: The callback to return to the settings page.
  */
-interface UsageDetailViewProps {
+export interface UsageDetailViewProps {
   showPlatform: boolean;
   platformUsage: TokenUsageDto;
   byokUsage: ByokTokenUsageSummary;
@@ -1928,17 +1939,28 @@ interface UsageDetailViewProps {
  * @param props The Token usage detail page props.
  * @returns A detail page split by the platform-gifted and BYOK API Key channels.
  */
-function UsageDetailView(props: UsageDetailViewProps) {
+export function UsageDetailView(props: UsageDetailViewProps) {
   const { t } = useTranslation();
-  const hasByokRows = props.byokUsage.totalTokens > 0 || props.byokUsage.byKind.length > 0;
-  const byKind = TOKEN_USAGE_KIND_ORDER.map((kind) => {
-    return props.byokUsage.byKind.find((item) => item.kind === kind) ?? emptyUsageKind(kind);
-  });
+  // Neither panel invents rows. The platform grants quota per scene and does
+  // not currently budget embedding at all, while own-key spend only exists for
+  // scenes that have actually run, so both lists come straight from the
+  // backend payload; TOKEN_USAGE_SCENES only fixes the display order.
+  const platformScenes = orderByScene(props.platformUsage.sceneUsages, (usage) => usage.scene);
+  const byKind = orderByScene(props.byokUsage.byKind, (usage) => usage.kind);
+  const byokSummaryReady = props.byokUsageStatus !== "loading" && props.byokUsageStatus !== "error";
+  const showPlatform = props.showPlatform && platformScenes.length > 0;
+  // Sum the Cloud/Nacos scene budgets — same additive total the exhausted modal
+  // uses — so the section heading mirrors the rows below it.
+  const platformUsedTokens = platformScenes.reduce((sum, scene) => sum + scene.usedTokens, 0);
+  const platformTotalTokens = platformScenes.reduce((sum, scene) => sum + scene.totalTokens, 0);
+  // The two panels overlap on scenes, so the descriptions are only worth
+  // spelling out once: in the platform panel, or in the own-key panel when
+  // there is no platform panel above it.
+  const describeScenesInByok = !showPlatform;
 
   return (
     <div className={`${usageStyles.detailPage} settings-page`}>
-      <div className="app-frame-page-content">
-        <div className={usageStyles.page}>
+      <div className={`app-frame-page-content ${usageStyles.page}`}>
         <button
           type="button"
           onClick={props.onBack}
@@ -1950,325 +1972,254 @@ function UsageDetailView(props: UsageDetailViewProps) {
 
         <div className={usageStyles.titlebar}>
           <h1 className={usageStyles.title}>
-            <Zap className={usageStyles.bolt} /> {t("settings.token.detail")}
+            <span className={usageStyles.titleMark}>
+              <Zap className={usageStyles.bolt} />
+            </span>
+            {t("settings.token.detail")}
           </h1>
           <UsageStatusLabel status={props.byokUsageStatus} updatedAt={props.byokUsage.updatedAt} />
         </div>
 
-        <div className={props.showPlatform ? usageStyles.overviewGrid : usageStyles.singleOverview}>
-          {props.showPlatform && (
-            <UsageTotalCard
-              label={t("settings.token.platformModel")}
-              value={props.platformUsage.usedTokens}
-              hint={t("settings.token.used")}
-              tone="sky"
+        {showPlatform && (
+          <section className={usageStyles.usageSection}>
+            <UsageSectionHead
+              icon={<Gift size={16} className="text-text-ink/60" />}
+              title={t("settings.token.platformQuota")}
+              stats={[
+                {
+                  label: "",
+                  value: `${formatCompactTokenCount(platformUsedTokens)} / ${formatCompactTokenCount(platformTotalTokens)}`,
+                  unit: "Token"
+                }
+              ]}
             />
-          )}
-          <UsageTotalCard
-            label={t("settings.token.customModel")}
-            value={props.byokUsage.totalTokens}
-            hint={t("settings.token.byokLocalHint")}
-            tone="success"
-          />
-        </div>
-
-        <section>
-          <div className={usageStyles.sectionHead}>
-            <h2>{t("settings.token.categoryStats")}</h2>
-            <p>{t("settings.token.breakdownHint")}</p>
-          </div>
-
-          {props.byokUsageStatus === "loading" ? (
-            <div className={usageStyles.statePanel}>
-              <div className={usageStyles.stateContent}>
-                <Loader2 size={16} className="animate-spin" />
-                {t("settings.token.loading")}
-              </div>
-            </div>
-          ) : props.byokUsageStatus === "error" ? (
-            <div className={usageStyles.statePanel}>
-              <div className={usageStyles.stateContent}>
-                <div className="text-sm text-status-error">{t("settings.token.loadFailedTitle")}</div>
-                <div className="text-xs text-text-ink/45 mt-1">{t("settings.token.loadFailedHint")}</div>
-              </div>
-            </div>
-          ) : hasByokRows ? (
-            <div className={usageStyles.grid}>
-              {byKind.map((usage) => (
-                <UsageKindRow
-                  key={usage.kind}
-                  usage={usage}
-                  grandTotal={props.byokUsage.totalTokens}
-                />
-              ))}
-            </div>
-          ) : (
-            <div className={usageStyles.statePanel}>
-              <div className={usageStyles.stateContent}>
-                <div className="text-sm text-text-ink/65">{t("settings.token.noByokUsage")}</div>
-                <div className="text-xs text-text-ink/45 mt-1">{t("settings.token.noByokUsageHint")}</div>
-              </div>
-            </div>
-          )}
-        </section>
-
-        {props.showPlatform && (
-          <section>
-            <div className={usageStyles.sectionHead}>
-              <h2>{t("settings.token.platformSceneStats")}</h2>
-              <p>{t("settings.token.platformSceneStatsHint")}</p>
-            </div>
-            <div className={`${usageStyles.grid} ${usageStyles.sceneGrid}`}>
-              {(["agent_chat", "memory_summary", "memory_evolution"] as const).map((scene) => (
-                <PlatformSceneQuotaCard
-                  key={scene}
-                  usage={resolvePlatformSceneUsage(props.platformUsage.sceneUsages, scene)}
-                />
+            <div className={usageStyles.platformQuotaList}>
+              {platformScenes.map((usage) => (
+                <PlatformQuotaRow key={usage.scene} usage={usage} showDesc />
               ))}
             </div>
           </section>
         )}
-        </div>
-      </div>
-    </div>
-  );
-}
 
-function resolvePlatformSceneUsage(
-  usages: TokenSceneUsageDto[],
-  scene: TokenUsageScene
-): TokenSceneUsageDto {
-  return usages.find((usage) => usage.scene === scene) ?? {
-    scene,
-    totalTokens: 0,
-    usedTokens: 0,
-    remainingTokens: 0
-  };
-}
-
-function PlatformSceneQuotaCard(props: { usage: TokenSceneUsageDto }) {
-  const { t } = useTranslation();
-  const labelKey = {
-    agent_chat: "settings.token.agentTask",
-    memory_summary: "settings.token.memorySummary",
-    memory_evolution: "settings.token.memoryEvolution"
-  } as const;
-  const percent = props.usage.totalTokens <= 0
-    ? 0
-    : Math.min(100, Math.max(0, (props.usage.usedTokens / props.usage.totalTokens) * 100));
-
-  return (
-    <div className={`${usageStyles.panel} p-5`}>
-      <div className={usageStyles.eyebrow}>
-        <span className={usageStyles.skyDot} />
-        {t(labelKey[props.usage.scene])}
-      </div>
-      <div className="mt-4 text-sm text-text-ink/70">
-        {t("settings.token.sceneUsedTotal", {
-          used: formatNumber(props.usage.usedTokens),
-          total: formatNumber(props.usage.totalTokens)
-        })}
-      </div>
-      <div className="mt-3 h-2 bg-canvas-oat rounded-pill overflow-hidden">
-        <div className="h-full bg-action-sky rounded-pill" style={{ width: `${percent}%` }} />
-      </div>
-      <div className="mt-3 text-xs text-text-ink/45">
-        {t("settings.token.sceneRemaining", { count: formatNumber(props.usage.remainingTokens) })}
+        <section className={usageStyles.usageSection}>
+          <UsageSectionHead
+            icon={<KeyRound size={16} className="text-text-ink/60" />}
+            title={t("settings.token.apiKeyConsumption")}
+            stats={byokSummaryReady && byKind.length > 0 ? [
+              {
+                label: t("settings.token.summaryLocalTotal"),
+                value: formatTokenSummary(props.byokUsage.totalTokens),
+                unit: "Token"
+              }
+            ] : undefined}
+          />
+          {props.byokUsageStatus === "loading" ? (
+            <div className={usageStyles.usageState}>
+              <Loader2 size={16} className="animate-spin" />
+              {t("settings.token.loading")}
+            </div>
+          ) : props.byokUsageStatus === "error" ? (
+            <div className={usageStyles.usageState}>
+              <div>
+                <div className="text-sm text-status-error">{t("settings.token.loadFailedTitle")}</div>
+                <div className="text-xs text-text-ink/45 mt-1">{t("settings.token.loadFailedHint")}</div>
+              </div>
+            </div>
+          ) : byKind.length === 0 ? (
+            <div className={usageStyles.usageState}>
+              <div>
+                <div className="text-sm">{t("settings.token.noByokUsage")}</div>
+                <div className="text-xs text-text-ink/45 mt-1">{t("settings.token.noByokUsageHint")}</div>
+              </div>
+            </div>
+          ) : (
+            <div className={usageStyles.byokUsageList}>
+              {byKind.map((usage) => (
+                <ByokUsageRow key={usage.kind} usage={usage} showDesc={describeScenesInByok} />
+              ))}
+            </div>
+          )}
+        </section>
       </div>
     </div>
   );
 }
 
 /**
- * Token detail summary card props.
+ * Renders the card header shared by the platform quota and own-key sections.
  *
- * Field meanings:
- * - label: The summary item name.
- * - value: The summarized Token count.
- * - hint: Auxiliary description.
- * - tone: The summary color.
+ * The heading sits above the panel rather than inside it, matching the settings
+ * sections. Platform figures beside the title are the sum of the scene rows.
+ *
+ * @param props.icon The leading icon, which also aligns the title with the
+ * panel's inner text edge the same way the settings sections do.
+ * @param props.title The section heading.
+ * @param props.stats The optional aggregate figures shown beside the heading.
+ * @returns The section heading row, whose next sibling is the detail panel.
  */
-interface UsageTotalCardProps {
-  label: string;
-  value: number;
-  hint: string;
-  tone: "sky" | "success";
-}
+function UsageSectionHead(props: { icon: ReactNode; title: string; stats?: UsageStat[] }) {
+  const stats = props.stats?.filter((stat) => stat !== null) ?? [];
 
-/**
- * Renders the summary card at the top of the detail page.
- *
- * @param props The summary card props.
- * @returns A single channel's detail summary card.
- */
-function UsageTotalCard(props: UsageTotalCardProps) {
   return (
-    <div className={`${usageStyles.panel} ${usageStyles.overview}`}>
-      <div className={usageStyles.eyebrow}>
-        <span className={props.tone === "sky" ? usageStyles.skyDot : usageStyles.dot} />
-        {props.label}
-      </div>
-      <div className={usageStyles.total}>
-        {props.tone === "success" ? formatTokenSummary(props.value) : formatNumber(props.value)}
-        <span>Token</span>
-      </div>
-      <div className={usageStyles.hint}>{props.hint}</div>
+    <div className={usageStyles.sectionHead}>
+      <h2>{props.icon}{props.title}</h2>
+      {stats.length > 0 && (
+        <p className={usageStyles.sectionNote}>
+          {stats.map((stat, index) => (
+            <span key={stat.label || `stat-${index}`}>
+              {stat.label}
+              <strong>{stat.value}</strong>
+              {stat.unit ? <em>{stat.unit}</em> : null}
+            </span>
+          ))}
+        </p>
+      )}
     </div>
   );
 }
 
-function emptyUsageKind(kind: ByokTokenUsageKind): ByokTokenUsageByKind {
-  return {
-    kind,
-    inputTokens: 0,
-    outputTokens: 0,
-    totalTokens: 0,
-    cachedInputTokens: 0,
-    cacheCreationInputTokens: 0,
-    eventCount: 0,
-    updatedAt: null
-  };
+type UsageStat = { label: string; value: string; unit?: string } | null;
+
+/**
+ * Sorts backend-reported usage rows into the canonical scene order.
+ *
+ * Scenes absent from the payload stay absent: the platform budgets quota per
+ * scene and own-key totals only exist once a scene has run, so a placeholder
+ * row would be a number the backend never sent.
+ *
+ * @param items The rows the backend reported, in arbitrary order.
+ * @param sceneOf Reads the scene key off a row.
+ * @returns The same rows ordered by TOKEN_USAGE_SCENES.
+ */
+function orderByScene<T>(items: readonly T[], sceneOf: (item: T) => ByokTokenUsageKind): T[] {
+  return TOKEN_USAGE_SCENES.flatMap((scene) => items.filter((item) => sceneOf(item) === scene));
 }
 
-function usageKindMeta(kind: ByokTokenUsageKind, t: SettingsTranslate): {
-  label: string;
-  description: string;
-  icon: ReactNode;
-  iconClassName: string;
-  dialColor: string;
-} {
-  switch (kind) {
-    case "agent_chat":
-      return {
-        label: t("settings.token.kind.agentChat"),
-        description: t("settings.token.kind.agentChatDesc"),
-        icon: <MessageSquare />,
-        iconClassName: usageStyles.agentIcon ?? "",
-        dialColor: "var(--usage-mint)"
-      };
-    case "memory_summary":
-      return {
-        label: t("settings.token.kind.memorySummary"),
-        description: t("settings.token.kind.memorySummaryDesc"),
-        icon: <FileText />,
-        iconClassName: usageStyles.coralIcon ?? "",
-        dialColor: "var(--usage-coral)"
-      };
-    case "memory_evolution":
-      return {
-        label: t("settings.token.kind.memoryEvolution"),
-        description: t("settings.token.kind.memoryEvolutionDesc"),
-        icon: <Sparkles />,
-        iconClassName: usageStyles.lavIcon ?? "",
-        dialColor: "var(--usage-lav)"
-      };
-    case "embedding":
-      return {
-        label: t("settings.token.kind.embedding"),
-        description: t("settings.token.kind.embeddingDesc"),
-        icon: <Database />,
-        iconClassName: usageStyles.dimIcon ?? "",
-        dialColor: "#74807e"
-      };
-  }
+interface PlatformQuotaRowProps {
+  usage: TokenSceneUsageDto;
+  showDesc: boolean;
 }
 
-interface UsageKindRowProps {
-  usage: ByokTokenUsageByKind;
-  grandTotal: number;
-}
-
-function UsageKindRow(props: UsageKindRowProps) {
+function PlatformQuotaRow(props: PlatformQuotaRowProps) {
   const { t } = useTranslation();
-  const meta = usageKindMeta(props.usage.kind, t);
-  const share = props.grandTotal > 0 ? Math.round((props.usage.totalTokens / props.grandTotal) * 100) : 0;
-  const inactive = props.usage.totalTokens <= 0;
-  const dialStyle = {
-    "--share": Math.min(100, Math.max(0, share)),
-    "--tone": meta.dialColor
-  } as CSSProperties;
-  const cardClassName = inactive ? `${usageStyles.usageCard} ${usageStyles.inactive}` : usageStyles.usageCard;
+  const meta = usageSceneMeta(props.usage.scene, t);
+  const usedRatio = resolveUsedRatio(props.usage);
+  const isOverQuota = usedRatio !== null && usedRatio > 1;
+  const rowClassName = isOverQuota
+    ? `${usageStyles.platformQuotaRow} ${usageStyles.overQuota}`
+    : usageStyles.platformQuotaRow;
 
   return (
-    <article className={cardClassName}>
-      <div className={usageStyles.cardTop}>
-        <div className={usageStyles.kind}>
-          <div className={`${usageStyles.icon} ${meta.iconClassName}`}>
-            {meta.icon}
-          </div>
-          <div>
-            <h3>{meta.label}</h3>
-            <div className={usageStyles.desc}>{meta.description}</div>
-          </div>
-        </div>
-        <div className={usageStyles.shareDial} style={dialStyle} data-share={`${share}%`} aria-label={`${share}%`} />
+    <article className={rowClassName}>
+      <div className={usageStyles.compactScene}>
+        <h3>{meta.label}</h3>
+        {props.showDesc && <p>{meta.desc}</p>}
       </div>
-
-      <div className={usageStyles.amountRow}>
-        <div>
-          <div className={usageStyles.amountLabel}>{t("settings.token.amount")}</div>
-          <div className={usageStyles.amountValue}>{formatTokens(props.usage.totalTokens)}</div>
-        </div>
+      <div className={usageStyles.quotaNumbers}>
+        <strong>{formatCompactTokenCount(props.usage.usedTokens)}</strong>
+        <span>/</span>
+        <span>{formatCompactTokenCount(props.usage.totalTokens)}</span>
+        <em>Token</em>
       </div>
+      <UsageMeter
+        percent={usedRatio === null ? 0 : Math.round(Math.min(1, usedRatio) * 100)}
+        isOverQuota={isOverQuota}
+      />
+    </article>
+  );
+}
 
-      <div className={usageStyles.metrics}>
-        <TokenMetric
-          icon={<ArrowDownToLine />}
-          label={t("settings.token.input")}
-          value={props.usage.inputTokens}
-          accent={usageStyles.metricInput ?? ""}
-        />
-        <TokenMetric
-          icon={<ArrowUpFromLine />}
-          label={t("settings.token.output")}
-          value={props.usage.outputTokens}
-          accent={usageStyles.metricOutput ?? ""}
-        />
-        <TokenMetric
-          icon={<Database />}
-          label={t("settings.token.cacheHit")}
-          value={props.usage.cachedInputTokens}
-          accent={usageStyles.metricCache ?? ""}
-        />
+/**
+ * Renders one own-key scene row.
+ *
+ * Own-key spend has no ceiling to fill up, so this row deliberately carries no
+ * meter: the figures alone say how much each scene cost. Cache hits trail the
+ * input/output pair so the primary spend reads first.
+ *
+ * @param props.usage The scene's cumulative local usage.
+ * @param props.showDesc Whether this panel spells out the scene descriptions.
+ * @returns A single own-key usage row.
+ */
+function ByokUsageRow(props: { usage: ByokTokenUsageByKind; showDesc: boolean }) {
+  const { t } = useTranslation();
+  const meta = usageSceneMeta(props.usage.kind, t);
+  const isActive = props.usage.totalTokens > 0;
+  const rowClassName = isActive
+    ? usageStyles.byokUsageRow
+    : `${usageStyles.byokUsageRow} ${usageStyles.inactive}`;
+
+  return (
+    <article className={rowClassName}>
+      <div className={usageStyles.compactScene}>
+        <h3>{meta.label}</h3>
+        {props.showDesc && <p>{meta.desc}</p>}
+        {isActive && (
+          <p className={usageStyles.byokBreakdown}>
+            <span>
+              {t("settings.token.input")}
+              <strong>{formatCompactTokenCount(props.usage.inputTokens)}</strong>
+            </span>
+            <span>
+              {t("settings.token.output")}
+              <strong>{formatCompactTokenCount(props.usage.outputTokens)}</strong>
+            </span>
+            {props.usage.cachedInputTokens > 0 && (
+              <span>
+                {t("settings.token.cacheHit")}
+                <strong>{formatCompactTokenCount(props.usage.cachedInputTokens)}</strong>
+              </span>
+            )}
+          </p>
+        )}
+      </div>
+      <div className={usageStyles.byokUsageValue}>
+        <strong>{formatCompactTokenCount(props.usage.totalTokens)}</strong>
+        <em>Token</em>
       </div>
     </article>
   );
 }
 
 /**
- * Token category metric props.
+ * Renders the slim consumption meter for a platform quota row.
  *
- * Field meanings:
- * - icon: The category icon.
- * - label: The category name.
- * - value: The category's Token count.
- * - accent: The icon accent color.
+ * Only quota-backed figures get a meter, since a filling bar implies a ceiling.
+ *
+ * @param props.percent The consumed ratio in percent, clamped to 0-100.
+ * @param props.isOverQuota Whether the scene has consumed more than its quota.
+ * @returns A decorative meter track; the numbers next to it carry the value.
  */
-interface TokenMetricProps {
-  icon: ReactNode;
-  label: string;
-  value: number;
-  accent: string;
-}
+function UsageMeter(props: { percent: number; isOverQuota: boolean }) {
+  const percent = Math.min(100, Math.max(0, props.percent));
+  const fillClassName = props.isOverQuota
+    ? `${usageStyles.meterFill} ${usageStyles.meterFillOver}`
+    : usageStyles.meterFill;
 
-/**
- * Renders the input / output / cache-hit mini-metrics within a model row.
- *
- * @param props The metric props.
- * @returns A single category metric.
- */
-function TokenMetric(props: TokenMetricProps) {
   return (
-    <div className={usageStyles.metric}>
-      <div className={`${usageStyles.metricLabel} ${props.accent}`}>
-        {props.icon}
-        <span>{props.label}</span>
-      </div>
-      <div className={usageStyles.metricValue} title={formatTokens(props.value)}>
-        {formatTokens(props.value)}
-      </div>
+    <div className={usageStyles.meter} aria-hidden="true">
+      <span className={fillClassName} style={{ width: `${percent}%` }} />
     </div>
   );
+}
+
+function resolveUsedRatio(usage: TokenSceneUsageDto): number | null {
+  if (usage.totalTokens <= 0) {
+    return null;
+  }
+  return usage.usedTokens / usage.totalTokens;
+}
+
+function usageSceneMeta(kind: ByokTokenUsageKind, t: SettingsTranslate): { label: string; desc: string } {
+  switch (kind) {
+    case "agent_chat":
+      return { label: t("settings.token.agentTask"), desc: t("settings.token.agentTaskDesc") };
+    case "memory_summary":
+      return { label: t("settings.token.memorySummary"), desc: t("settings.token.memorySummaryDesc") };
+    case "memory_evolution":
+      return { label: t("settings.token.memoryEvolution"), desc: t("settings.token.memoryEvolutionDesc") };
+    case "embedding":
+      return { label: t("settings.token.embedding"), desc: t("settings.token.embeddingDesc") };
+  }
 }
 
 /**
@@ -3299,6 +3250,17 @@ function formatNumber(value: number): string {
     maximumFractionDigits: 1,
     minimumFractionDigits: 1
   }).format(millions)}M`;
+}
+
+function formatCompactTokenCount(value: number): string {
+  if (value >= 1_000_000) {
+    const millions = Math.floor((value / 1_000_000) * 10) / 10;
+    return `${new Intl.NumberFormat("en-US", { maximumFractionDigits: 1 }).format(millions)}M`;
+  }
+  if (value >= 1_000) {
+    return `${new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(value / 1_000)}K`;
+  }
+  return formatTokens(value);
 }
 
 /**

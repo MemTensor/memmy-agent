@@ -30,7 +30,8 @@ describe("createMemosSqliteMemoryClient", () => {
         internal_info: {
           memory_layer: "L1",
           memory_kind: "span",
-          source: "worker.span_big_turn.v1"
+          source: "worker.span_big_turn.v1",
+          span: { span_goal: "Inspect the local span data" }
         }
       })
     });
@@ -40,7 +41,11 @@ describe("createMemosSqliteMemoryClient", () => {
     });
 
     await expect(client.panelItems({ layer: "L1", page: 1 })).resolves.toMatchObject({
-      items: [{ id: "memmy-memory::span_sqlite_1", kind: "span" }]
+      items: [{
+        id: "memmy-memory::span_sqlite_1",
+        kind: "span",
+        metadata: { spanGoal: "Inspect the local span data" }
+      }]
     });
   });
 
@@ -403,6 +408,46 @@ describe("createMemosSqliteMemoryClient", () => {
       limit: 20,
       offset: 0
     })).resolves.toMatchObject({ total: 1, logs: [{ toolName: "memory_search" }] });
+  });
+
+  it("uses the current trace summary when reading memory_add logs", async () => {
+    const dbPath = createMemoryDatabase({
+      id: "trace_log_summary",
+      sessionId: "codex-session-log-summary",
+      agentId: "codex",
+      memoryValue: "Summary: Current summary from the trace",
+      tagsJson: JSON.stringify(["trace"]),
+      infoJson: JSON.stringify({ summary: "Current summary from the trace" }),
+      propertiesJson: JSON.stringify({
+        internal_info: { memory_kind: "trace", summary: "Current summary from the trace" }
+      })
+    });
+    seedApiLogs(dbPath);
+    const db = new DatabaseSync(dbPath);
+    db.prepare(`
+      INSERT INTO api_logs (tool_name, source_agent, input_json, output_json, duration_ms, success, called_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      "memory_add",
+      "codex",
+      "{}",
+      JSON.stringify({ details: [{ role: "trace", traceId: "trace_log_summary", summary: "RawTurn: raw_stale" }] }),
+      1,
+      1,
+      "2026-06-08T09:04:00.000Z"
+    );
+    db.close();
+
+    const client = createMemosSqliteMemoryClient({
+      sources: [{ id: "memmy-memory", label: "memmy", dbPath }],
+      now: () => NOW
+    });
+
+    await expect(client.memoryApiLogs({
+      tools: ["memory_add"], sourceAgent: "codex", limit: 20, offset: 0
+    })).resolves.toMatchObject({
+      logs: [{ outputJson: expect.stringContaining("Current summary from the trace") }]
+    });
   });
 
   it("deletes local SQLite memories so list, search, and detail cannot read them", async () => {

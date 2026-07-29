@@ -59,7 +59,11 @@ interface MemmyPreloadApi {
   startPetWindowDrag(pointer: { clientX: number; clientY: number }): void;
   stopPetWindowDrag(): void;
   syncPetWindowLayout(layout: { width: number; height: number; mascotOffsetX: number; mascotOffsetY: number }): void;
-  sendAnalyticsClientId(payload: { clientId: string; appEnv: "dev" | "prod" }): void;
+  sendAnalyticsClientId(payload: {
+    clientId: string;
+    appEnv: "dev" | "prod";
+    appEdition: "cn" | "intl";
+  }): void;
 }
 
 /**
@@ -262,7 +266,11 @@ const memmyPreloadApi: MemmyPreloadApi = {
     ipcRenderer.send("memmy:update-pet-window-layout", layout);
   },
 
-  sendAnalyticsClientId(payload: { clientId: string; appEnv: "dev" | "prod" }): void {
+  sendAnalyticsClientId(payload: {
+    clientId: string;
+    appEnv: "dev" | "prod";
+    appEdition: "cn" | "intl";
+  }): void {
     ipcRenderer.send("memmy:analytics-client-id", payload);
   }
 };

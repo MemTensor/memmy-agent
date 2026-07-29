@@ -1,6 +1,6 @@
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
-import { randomBytes } from "node:crypto";
-import { existsSync } from "node:fs";
+import { randomBytes, randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -80,6 +80,11 @@ export interface ManagedChild {
   logWriter: RotatingWriter | null;
 }
 
+export interface PackagedBrowserPreparation {
+  completion: Promise<boolean>;
+  stop(): void;
+}
+
 interface ServiceLogOptions {
   logFilePath: string;
   logLevel: LogLevel;
@@ -92,6 +97,7 @@ const DAEMON_LOG_MAX_FILES = 5;
 const AGENT_GATEWAY_RESTART_DELAYS_MS = [250, 1_000, 2_000, 5_000, 10_000] as const;
 const AGENT_GATEWAY_STABLE_MS = 30_000;
 const DESKTOP_MANAGED_GATEWAY_ENV = "MEMMY_DESKTOP_MANAGED_GATEWAY";
+const BROWSER_PREPARATION_ATTEMPT_ID_ENV = "MEMMY_BROWSER_PREPARATION_ATTEMPT_ID";
 const MANAGED_RESTART_IPC_TYPE = "memmy-agent:restart";
 
 interface DesktopManagedRestartNotice {
@@ -109,9 +115,18 @@ export async function startPackagedRuntimeServices(
 ): Promise<PackagedRuntimeServices> {
   const entries = resolveRuntimeEntryPaths(options);
   const runtimeConfig = await preparePackagedRuntimeConfig();
+  const browserPreparationAttemptId = randomUUID();
   const children: ManagedChild[] = [];
-  const gatewaySupervisor = new AgentGatewaySupervisor(entries, runtimeConfig, children, options);
+  const gatewaySupervisor = new AgentGatewaySupervisor(
+    entries,
+    runtimeConfig,
+    children,
+    options,
+    {},
+    browserPreparationAttemptId
+  );
   let memoryRestart: Promise<void> | null = null;
+  let browserPreparation: PackagedBrowserPreparation | null = null;
   let closing = false;
 
   try {
@@ -119,7 +134,13 @@ export async function startPackagedRuntimeServices(
       agentEntry: entries.agentEntry,
       agentWorkspace: runtimeConfig.agentWorkspace
     });
-    await preparePackagedBrowser(entries, runtimeConfig, options);
+    browserPreparation = startPackagedBrowserPreparation(
+      entries,
+      runtimeConfig,
+      options,
+      spawn,
+      browserPreparationAttemptId
+    );
     await ensureMemoryService(entries, runtimeConfig, children, options);
     await gatewaySupervisor.ensureStarted();
 
@@ -149,16 +170,19 @@ export async function startPackagedRuntimeServices(
       },
       async close() {
         closing = true;
+        browserPreparation?.stop();
         await memoryRestart?.catch(() => undefined);
         await gatewaySupervisor.close();
         await stopManagedChildren(children);
       },
       terminateSync() {
+        browserPreparation?.stop();
         gatewaySupervisor.terminateSync();
         terminateManagedChildrenSync(children);
       }
     };
   } catch (error) {
+    browserPreparation?.stop();
     await gatewaySupervisor.close();
     await stopManagedChildren(children);
     throw error;
@@ -298,70 +322,180 @@ export async function syncBundledAgentSkills(options: {
   await copyDirectoryContents(bundledSkillsDirectory, workspaceSkillsDirectory);
 }
 
+type DesktopBrowserPreparationState = {
+  status: "preparing" | "ready" | "unavailable";
+  attemptId: string;
+  updatedAt?: string;
+  startedAt?: string;
+  lastProgressAt?: string;
+  progressPercent?: number;
+  error?: string;
+};
+
+function browserPreparationStatePath(configPath: string): string {
+  return join(
+    dirname(configPath),
+    "mcp",
+    "playwright",
+    "browser-preparation-state.json"
+  );
+}
+
+function writeDesktopBrowserPreparationState(
+  configPath: string,
+  state: Omit<DesktopBrowserPreparationState, "updatedAt">
+): void {
+  const statePath = browserPreparationStatePath(configPath);
+  const temporaryPath = `${statePath}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    mkdirSync(dirname(statePath), { recursive: true });
+    writeFileSync(
+      temporaryPath,
+      `${JSON.stringify({ ...state, updatedAt: new Date().toISOString() }, null, 2)}\n`,
+      "utf8"
+    );
+    renameSync(temporaryPath, statePath);
+  } catch {
+    // The browser preparation child also publishes state when it starts.
+  } finally {
+    rmSync(temporaryPath, { force: true });
+  }
+}
+
+function readDesktopBrowserPreparationState(
+  configPath: string
+): DesktopBrowserPreparationState | null {
+  try {
+    const parsed = JSON.parse(
+      readFileSync(browserPreparationStatePath(configPath), "utf8")
+    ) as DesktopBrowserPreparationState;
+    if (!parsed || typeof parsed !== "object") return null;
+    if (!["preparing", "ready", "unavailable"].includes(parsed.status)) return null;
+    if (typeof parsed.attemptId !== "string") return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
 export async function preparePackagedBrowser(
   entries: RuntimeEntryPaths,
   runtimeConfig: PackagedRuntimeConfig,
   options: StartPackagedRuntimeServicesOptions,
   spawnProcess: typeof spawn = spawn
 ): Promise<boolean> {
+  return startPackagedBrowserPreparation(
+    entries,
+    runtimeConfig,
+    options,
+    spawnProcess
+  ).completion;
+}
+
+export function startPackagedBrowserPreparation(
+  entries: RuntimeEntryPaths,
+  runtimeConfig: PackagedRuntimeConfig,
+  options: StartPackagedRuntimeServicesOptions,
+  spawnProcess: typeof spawn = spawn,
+  attemptId: string = randomUUID()
+): PackagedBrowserPreparation {
   const logWriter = createRotatingWriter({
     filePath: join(options.logDirectory, "browser-prepare.log"),
     maxSize: DAEMON_LOG_MAX_SIZE,
     maxFiles: DAEMON_LOG_MAX_FILES
   });
+  let resolveCompletion: (ready: boolean) => void = () => undefined;
+  const completion = new Promise<boolean>((resolvePrepare) => {
+    resolveCompletion = resolvePrepare;
+  });
+  let child: ChildProcess | null = null;
+  let settled = false;
+  const finish = (ready: boolean): void => {
+    if (settled) return;
+    settled = true;
+    logWriter.close();
+    resolveCompletion(ready);
+  };
+  const stop = (): void => {
+    if (settled) return;
+    if (child) terminateProcessTreeSync(child);
+    finish(false);
+  };
+  const preparation = { completion, stop };
+  const startedAt = new Date().toISOString();
+  writeDesktopBrowserPreparationState(runtimeConfig.configPath, {
+    status: "preparing",
+    attemptId,
+    startedAt,
+    lastProgressAt: startedAt,
+    progressPercent: 0
+  });
+
   if (!existsSync(entries.agentEntry)) {
     logWriter.write(`Missing browser prepare runtime entry: ${entries.agentEntry}\n`);
-    logWriter.close();
-    return false;
+    finish(false);
+    return preparation;
   }
-  return new Promise<boolean>((resolvePrepare) => {
-    let settled = false;
-    const finish = (ready: boolean): void => {
-      if (settled) return;
-      settled = true;
-      logWriter.close();
-      resolvePrepare(ready);
-    };
-    let child: ChildProcess;
-    try {
-      child = spawnProcess(
-        process.execPath,
-        [entries.agentEntry, "internal", "browser-prepare"],
-        {
-          env: {
-            ...process.env,
-            MEMMY_CONFIG: runtimeConfig.configPath,
-            MEMMY_AGENT_WORKSPACE: runtimeConfig.agentWorkspace,
-            ELECTRON_RUN_AS_NODE: "1",
-            NODE_ENV: process.env.NODE_ENV ?? "production"
-          },
-          stdio: ["ignore", "pipe", "pipe"],
-          windowsHide: true,
-          shell: false
-        }
-      );
-    } catch (error) {
-      logWriter.write(`Browser prepare failed to start: ${String(error)}\n`);
-      finish(false);
-      return;
-    }
-    child.stdout?.setEncoding("utf8");
-    child.stderr?.setEncoding("utf8");
-    child.stdout?.on("data", (chunk) => logWriter.write(String(chunk)));
-    child.stderr?.on("data", (chunk) => logWriter.write(String(chunk)));
-    child.once("error", (error) => {
-      logWriter.write(`Browser prepare failed: ${error.message}\n`);
-      finish(false);
-    });
-    child.once("exit", (code, signal) => {
-      if (code !== 0) {
-        logWriter.write(
-          `Browser prepare unavailable: ${signal ? `signal ${signal}` : `code ${String(code)}`}\n`
-        );
+
+  try {
+    child = spawnProcess(
+      process.execPath,
+      [entries.agentEntry, "internal", "browser-prepare"],
+      {
+        env: {
+          ...process.env,
+          MEMMY_CONFIG: runtimeConfig.configPath,
+          MEMMY_AGENT_WORKSPACE: runtimeConfig.agentWorkspace,
+          [BROWSER_PREPARATION_ATTEMPT_ID_ENV]: attemptId,
+          ELECTRON_RUN_AS_NODE: "1",
+          NODE_ENV: process.env.NODE_ENV ?? "production"
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+        detached: process.platform !== "win32",
+        windowsHide: true,
+        shell: false
       }
-      finish(code === 0);
+    );
+  } catch (error) {
+    logWriter.write(`Browser prepare failed to start: ${String(error)}\n`);
+    writeDesktopBrowserPreparationState(runtimeConfig.configPath, {
+      status: "unavailable",
+      attemptId,
+      error: `Browser prepare failed to start: ${String(error)}`
     });
+    finish(false);
+    return preparation;
+  }
+  child.stdout?.setEncoding("utf8");
+  child.stderr?.setEncoding("utf8");
+  child.stdout?.on("data", (chunk) => logWriter.write(String(chunk)));
+  child.stderr?.on("data", (chunk) => logWriter.write(String(chunk)));
+  child.once("error", (error) => {
+    logWriter.write(`Browser prepare failed: ${error.message}\n`);
+    writeDesktopBrowserPreparationState(runtimeConfig.configPath, {
+      status: "unavailable",
+      attemptId,
+      error: `Browser prepare failed: ${error.message}`
+    });
+    finish(false);
   });
+  child.once("exit", (code, signal) => {
+    if (code !== 0) {
+      logWriter.write(
+        `Browser prepare unavailable: ${signal ? `signal ${signal}` : `code ${String(code)}`}\n`
+      );
+      const state = readDesktopBrowserPreparationState(runtimeConfig.configPath);
+      if (state?.attemptId === attemptId && state.status === "preparing") {
+        writeDesktopBrowserPreparationState(runtimeConfig.configPath, {
+          status: "unavailable",
+          attemptId,
+          error: `Browser prepare unavailable: ${signal ? `signal ${signal}` : `code ${String(code)}`}`
+        });
+      }
+    }
+    finish(code === 0);
+  });
+  return preparation;
 }
 
 async function copyDirectoryContents(sourceDirectory: string, targetDirectory: string): Promise<void> {
@@ -522,7 +656,9 @@ export class AgentGatewaySupervisor {
     private readonly runtimeConfig: PackagedRuntimeConfig,
     private readonly children: ManagedChild[],
     private readonly options: StartPackagedRuntimeServicesOptions,
-    dependencies: AgentGatewaySupervisorDependencies = {}
+    dependencies: AgentGatewaySupervisorDependencies = {},
+    private readonly browserPreparationAttemptId: string =
+      process.env[BROWSER_PREPARATION_ATTEMPT_ID_ENV]?.trim() || ""
   ) {
     this.bootstrapUrl = `${runtimeConfig.agentGatewayBaseUrl}/webui/bootstrap`;
     this.bootstrapHeaders = runtimeConfig.agentGatewayBootstrapSecret
@@ -608,6 +744,9 @@ export class AgentGatewaySupervisor {
       MEMORY_SERVICE_URL: this.runtimeConfig.memoryBaseUrl,
       MEMORY_SERVICE_TOKEN: this.runtimeConfig.memoryToken,
       [DESKTOP_MANAGED_GATEWAY_ENV]: "1",
+      ...(this.browserPreparationAttemptId
+        ? { [BROWSER_PREPARATION_ATTEMPT_ID_ENV]: this.browserPreparationAttemptId }
+        : {}),
       ...(notice ? restartNoticeEnv(notice) : {})
     }, {
       logFilePath: join(this.options.logDirectory, "agent-gateway.log"),
@@ -929,20 +1068,33 @@ function memoryAuthHeaders(token: string): Record<string, string> {
  */
 function terminateManagedChildrenSync(children: ManagedChild[]): void {
   for (const child of children) {
-    const pid = child.process.pid;
-    if (pid === undefined || child.process.exitCode !== null || child.process.signalCode !== null) {
-      continue;
-    }
+    terminateProcessTreeSync(child.process);
+  }
+}
 
+function terminateProcessTreeSync(child: ChildProcess): void {
+  if (child.exitCode != null || child.signalCode != null) return;
+  const pid = child.pid;
+  if (process.platform === "win32" && pid !== undefined) {
     try {
-      if (process.platform === "win32") {
-        execFileSync("taskkill", ["/F", "/T", "/PID", String(pid)], { stdio: "ignore" });
-      } else {
-        child.process.kill("SIGKILL");
-      }
+      execFileSync("taskkill", ["/F", "/T", "/PID", String(pid)], { stdio: "ignore" });
+      return;
     } catch {
-      // Fallback cleanup: the process may already have exited or we may lack permission; just ignore.
+      // Fall through to the direct-child fallback if taskkill cannot inspect the process tree.
     }
+  }
+  if (process.platform !== "win32" && pid !== undefined) {
+    try {
+      process.kill(-pid, "SIGKILL");
+      return;
+    } catch {
+      // Fall through if the detached process group has already exited.
+    }
+  }
+  try {
+    child.kill("SIGKILL");
+  } catch {
+    // The process may already have exited or we may lack permission; ignore.
   }
 }
 

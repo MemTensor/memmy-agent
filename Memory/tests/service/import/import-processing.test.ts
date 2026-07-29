@@ -668,7 +668,7 @@ describe("MemoryService / import / processing", () => {
     db.close();
   });
 
-  it("updates one stable imported trace and rebuilds only its current content version", async () => {
+  it("updates one stable imported trace across user ids and rebuilds only its current content version", async () => {
     const root = createTestRoot("mindock-memory-import-content-version-");
     const db = new MemoryDb({ path: join(root, "memory.sqlite") });
     const embeddingTexts: string[] = [];
@@ -699,13 +699,13 @@ describe("MemoryService / import / processing", () => {
 
     const second = service.addMemory({
       ...baseInput,
+      namespace: { ...namespace, userId: "versioned-import-other-user" },
       requestId: "version-2",
       content: "## user\n\nnew exchange\n\n## assistant\n\nnew answer"
     });
 
     expect(second.id).toBe(first.id);
-    expect(db.db.prepare(`SELECT COUNT(*) AS count FROM memories WHERE user_id = ?`).get(namespace.userId))
-      .toEqual({ count: 1 });
+    expect(db.db.prepare(`SELECT COUNT(*) AS count FROM memories`).get()).toEqual({ count: 1 });
     expect(new Repositories(db.db).memories.hasVector(first.id, "vec_summary")).toBe(false);
     expect(service.memoryProcessingStatus([first.id], { namespace }).items[0]).toMatchObject({
       state: "summary_pending",

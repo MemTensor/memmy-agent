@@ -95,6 +95,7 @@ describe("memmy memory tools", () => {
         },
       }),
       currentSessionId: () => "memmy-agent::cli:direct",
+      currentEpisodeId: () => "ep-1",
       currentTurnId: () => "turn-1",
       currentUserText: () => "Summarize the current README",
     };
@@ -121,10 +122,10 @@ describe("memmy memory tools", () => {
       query: "previous task",
       source: "memmy-agent",
       sessionId: "memmy-agent::cli:direct",
+      episodeId: "ep-1",
+      turnId: "turn-1",
       layers: ["L1"]
     });
-    expect(body).not.toHaveProperty("episodeId");
-    expect(body).not.toHaveProperty("turnId");
     expect(body).not.toHaveProperty("requestId");
     expect(body).not.toHaveProperty("adapterId");
     expect(calls[1].url).toBe("http://memory.test/api/v1/memory/trace_123");
@@ -182,6 +183,7 @@ describe("memmy memory tools", () => {
     const runtime: MemmyMemoryToolRuntime = {
       requestEnvelope: () => ({}),
       currentSessionId: () => "session-1",
+      currentEpisodeId: () => "episode-1",
       currentTurnId: () => "turn-1",
       currentUserText: () => "current task",
     };
@@ -218,6 +220,7 @@ describe("memmy memory tools", () => {
     const runtime: MemmyMemoryToolRuntime = {
       requestEnvelope: () => ({}),
       currentSessionId: () => "memmy-agent::cli:direct",
+      currentEpisodeId: () => "ep-1",
       currentTurnId: () => "turn-1",
       currentUserText: () => "current task",
     };
@@ -254,6 +257,7 @@ describe("memmy memory tools", () => {
         },
       }),
       currentSessionId: (sessionKey) => sessionKey ? `memmy-agent::${sessionKey}` : null,
+      currentEpisodeId: () => null,
       currentTurnId: () => null,
       currentUserText: () => "current task",
     };
@@ -281,5 +285,153 @@ describe("memmy memory tools", () => {
 
     const sessionIds = calls.map((call) => JSON.parse(String(call.init.body)).sessionId);
     expect(new Set(sessionIds)).toEqual(new Set(["memmy-agent::cli:a", "memmy-agent::cli:b"]));
+  });
+
+  it("returns an error string when search throws", async () => {
+    const client = new MemmyMemoryClient(
+      { baseUrl: "http://memory.test", timeoutMs: 1000 },
+      vi.fn(async () => response({ error: { message: "search failed" } }, 500)) as any,
+    );
+    const runtime: MemmyMemoryToolRuntime = {
+      requestEnvelope: () => ({}),
+      currentSessionId: () => "session-1",
+      currentEpisodeId: () => null,
+      currentTurnId: () => "turn-1",
+      currentUserText: () => "current task",
+    };
+    const registry = new ToolRegistry();
+    registerMemmyMemoryTools(registry, client, runtime);
+    setRegistryContext(registry, new RequestContext({ sessionKey: "cli:direct" }));
+
+    const result = await registry.get("memmy_memory_search")!.execute({ query: "q" });
+    expect(result).toContain("Error:");
+  });
+
+  it("reports memory_search and memory_get analytics with mode=tool", async () => {
+    const trackMemoryAnalytics = vi.fn();
+    const client = new MemmyMemoryClient(
+      { baseUrl: "http://memory.test", timeoutMs: 1000 },
+      vi.fn(async (url) => {
+        const path = new URL(String(url)).pathname;
+        if (path.endsWith("/search")) {
+          return response({ sourceMemoryIds: ["m1", "m2"], hits: [{ id: "m1" }, { id: "m2" }] });
+        }
+        if (path.includes("/memory/")) {
+          return response({ id: "trace_123", memoryLayer: "L2", title: "t" });
+        }
+        return response({ ok: true });
+      }) as any,
+    );
+    const runtime: MemmyMemoryToolRuntime = {
+      requestEnvelope: () => ({ adapterId: "memmy-agent", source: "memmy-agent" }),
+      currentSessionId: () => "session-1",
+      currentEpisodeId: () => "ep-1",
+      currentTurnId: () => "turn-1",
+      currentUserText: () => "current task",
+      trackMemoryAnalytics,
+      memoryAnalyticsContext: () => ({
+        entrypoint: "memmy-cli",
+        adapter_id: "memmy-agent",
+        session_id_hash: "sidhash",
+        turn_id_hash: "turnhash",
+        episode_id_hash: "ephash",
+      }),
+    };
+    const registry = new ToolRegistry();
+    registerMemmyMemoryTools(registry, client, runtime);
+    setRegistryContext(registry, new RequestContext({ sessionKey: "cli:direct" }));
+
+    await registry.get("memmy_memory_search")!.execute({ query: "q", layers: ["L1", "L2"] });
+    await registry.get("memmy_memory_get")!.execute({ id: "trace_123" });
+
+    const names = trackMemoryAnalytics.mock.calls.map((call) => call[0]);
+    expect(names).toEqual([
+      "memory_search_started",
+      "memory_search_succeeded",
+      "memory_get_started",
+      "memory_get_succeeded",
+    ]);
+    expect(trackMemoryAnalytics.mock.calls[0]![1]).toMatchObject({
+      entrypoint: "memmy-cli",
+      adapter_id: "memmy-agent",
+      storage_backend: "memmy-memory",
+      mode: "tool",
+      layer: "L1,L2",
+      session_id_hash: "sidhash",
+    });
+    expect(trackMemoryAnalytics.mock.calls[1]![1]).toMatchObject({
+      success: true,
+      hit_count: 2,
+    });
+    expect(trackMemoryAnalytics.mock.calls[3]![1]).toMatchObject({
+      mode: "tool",
+      success: true,
+      hit_count: 1,
+    });
+  });
+
+  it("reports memory_desktop_* tool analytics for webui entrypoint", async () => {
+    const trackMemoryAnalytics = vi.fn();
+    const client = new MemmyMemoryClient(
+      { baseUrl: "http://memory.test", timeoutMs: 1000 },
+      vi.fn(async () => response({ sourceMemoryIds: ["m1"], hits: [{ id: "m1" }] })) as any,
+    );
+    const runtime: MemmyMemoryToolRuntime = {
+      requestEnvelope: () => ({}),
+      currentSessionId: () => "session-1",
+      currentEpisodeId: () => null,
+      currentTurnId: () => "turn-1",
+      currentUserText: () => "current task",
+      trackMemoryAnalytics,
+      memoryAnalyticsContext: () => ({
+        entrypoint: "memmy-desktop",
+        adapter_id: "memmy-agent",
+      }),
+    };
+    const registry = new ToolRegistry();
+    registerMemmyMemoryTools(registry, client, runtime);
+    setRegistryContext(registry, new RequestContext({ sessionKey: "websocket:chat-1" }));
+
+    await registry.get("memmy_memory_search")!.execute({ query: "q" });
+    expect(trackMemoryAnalytics.mock.calls.map((call) => call[0])).toEqual([
+      "memory_desktop_search_started",
+      "memory_desktop_search_succeeded",
+    ]);
+    expect(trackMemoryAnalytics.mock.calls[0]![1]).toMatchObject({
+      entrypoint: "memmy-desktop",
+      mode: "tool",
+    });
+  });
+
+  it("reports memory_search_failed when search throws", async () => {
+    const trackMemoryAnalytics = vi.fn();
+    const client = new MemmyMemoryClient(
+      { baseUrl: "http://memory.test", timeoutMs: 1000 },
+      vi.fn(async () => response({ error: { message: "search failed" } }, 500)) as any,
+    );
+    const runtime: MemmyMemoryToolRuntime = {
+      requestEnvelope: () => ({}),
+      currentSessionId: () => "session-1",
+      currentEpisodeId: () => null,
+      currentTurnId: () => "turn-1",
+      currentUserText: () => "current task",
+      trackMemoryAnalytics,
+      memoryAnalyticsContext: () => ({ adapter_id: "memmy-agent", turn_id_hash: "turnhash" }),
+    };
+    const registry = new ToolRegistry();
+    registerMemmyMemoryTools(registry, client, runtime);
+    setRegistryContext(registry, new RequestContext({ sessionKey: "cli:direct" }));
+
+    const result = await registry.get("memmy_memory_search")!.execute({ query: "q" });
+    expect(result).toContain("Error:");
+    expect(trackMemoryAnalytics.mock.calls.map((call) => call[0])).toEqual([
+      "memory_search_started",
+      "memory_search_failed",
+    ]);
+    expect(trackMemoryAnalytics.mock.calls[1]![1]).toMatchObject({
+      mode: "tool",
+      success: false,
+      error_code: "http_500",
+    });
   });
 });

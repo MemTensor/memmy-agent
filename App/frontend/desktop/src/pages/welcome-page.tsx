@@ -64,7 +64,7 @@ export function WelcomePage() {
       return;
     }
 
-    track({ name: "signup_completed", params: { method: channel === "phone" ? "phone" : "email", is_new_user: session.isNewUser }, consentTier: "basic" });
+    track({ name: "signup_completed", params: { method: channel === "phone" ? "phone" : "email", is_new_user: session.isNewUser, user_mode: "account" }, consentTier: "basic" });
 
     dispatch(appActions.accountUpdated({
       email: session.profile.email ?? "",
@@ -125,7 +125,7 @@ export function WelcomePage() {
     // Definition for byok entry.
     const byokEntry = resolveByokEntry({ onboarding: state.bootstrap?.onboarding });
 
-    track({ name: "byok_started", consentTier: "basic" });
+    track({ name: "byok_started", params: { user_mode: "byok" }, consentTier: "basic" });
     setModePersistenceFeedback(null);
 
     try {

@@ -37,6 +37,8 @@ import {
   submitAgentComposerMessage,
   updateComposerDraftForScope,
   fileToPendingAttachment,
+  filterProjectTargetPickerProjects,
+  resolveProjectTargetPickerActiveIndex,
   validateAgentMediaFiles,
   type PendingFileAttachment
 } from "../home-page.js";
@@ -239,6 +241,98 @@ describe("HomePage", () => {
     expect(resetNewChatLocalUi).not.toContain("resetComposerDraftUi();");
   });
 
+  it("filters projects by name or path and resolves the keyboard-active row", () => {
+    const projects = [
+      { id: "one", name: "memmy-agent", rootPath: "C:\\work\\memmy-agent", pinned: false, createdAt: "2026-01-01" },
+      { id: "two", name: "Playground", rootPath: "D:\\code\\sandbox", pinned: false, createdAt: "2026-01-02" }
+    ];
+
+    expect(filterProjectTargetPickerProjects(projects, "MEMMY")).toEqual([projects[0]]);
+    expect(filterProjectTargetPickerProjects(projects, "sandbox")).toEqual([projects[1]]);
+    expect(filterProjectTargetPickerProjects(projects, "missing")).toEqual([]);
+    expect(resolveProjectTargetPickerActiveIndex(["project:one", "new"], "project:one")).toBe(0);
+    expect(resolveProjectTargetPickerActiveIndex(["project:one", "project:two", "new"], "project:two")).toBe(1);
+    expect(resolveProjectTargetPickerActiveIndex(["project:two", "new"], "project:one")).toBe(0);
+    expect(resolveProjectTargetPickerActiveIndex(["new"], null)).toBe(0);
+  });
+
+  it("shows and searches only the 10 most recently added projects", () => {
+    const projects = Array.from({ length: 12 }, (_, index) => ({
+      id: `project-${index + 1}`,
+      name: `Project ${index + 1}`,
+      rootPath: `C:\\work\\project-${index + 1}`,
+      pinned: false,
+      createdAt: `2026-01-${String(index + 1).padStart(2, "0")}`
+    }));
+
+    expect(filterProjectTargetPickerProjects(projects, "")).toEqual(projects.slice(2).reverse());
+    expect(filterProjectTargetPickerProjects(projects, "project-1")).toEqual([
+      projects[11],
+      projects[10],
+      projects[9]
+    ]);
+    expect(filterProjectTargetPickerProjects(projects, "project-2")).toEqual([]);
+  });
+
+  it("sizes the project menu to its content within composer and viewport caps", () => {
+    const styles = readFileSync(stylesSourcePath, "utf8");
+    const source = readFileSync(homePageSourcePath, "utf8");
+    const triggerStyles = styles.slice(
+      styles.indexOf(".home-project-picker__trigger {"),
+      styles.indexOf(".home-project-picker__trigger:hover")
+    );
+    const searchInputStyles = styles.slice(
+      styles.indexOf(".home-project-picker__search input {"),
+      styles.indexOf(".home-project-picker__search input::placeholder")
+    );
+    const searchFocusStyles = styles.slice(
+      styles.indexOf(".home-project-picker__search:focus-within {"),
+      styles.indexOf(".home-project-picker__list {")
+    );
+    const optionStyles = styles.slice(
+      styles.indexOf(".home-project-picker__option {"),
+      styles.indexOf(".home-project-picker__option:hover")
+    );
+    const listStyles = styles.slice(
+      styles.indexOf(".home-project-picker__list {"),
+      styles.indexOf(".home-project-picker__projects {")
+    );
+    const projectListStyles = styles.slice(
+      styles.indexOf(".home-project-picker__projects {"),
+      styles.indexOf(".home-project-picker__option {")
+    );
+    const selectedOptionStyles = styles.slice(
+      styles.indexOf(".home-project-picker__option--selected {"),
+      styles.indexOf(".home-project-picker__option:focus-visible")
+    );
+
+    expect(styles).toContain("width: max-content;");
+    expect(styles).toContain(".home-project-picker {\n  position: relative;\n  z-index: 45;\n  width: 100%;\n  max-width: 100%;");
+    expect(styles).toContain("width: max-content;\n  max-width: 100%;");
+    expect(styles).toContain("max-height: min(24rem, 45dvh);");
+    expect(styles).toContain("grid-template-rows: auto minmax(0, 1fr);");
+    expect(triggerStyles).toContain("border: 0;");
+    expect(triggerStyles).toContain("border-radius: 999px;");
+    expect(searchInputStyles).toContain("border: 0;");
+    expect(searchInputStyles).toContain("outline: 0;");
+    expect(searchFocusStyles).not.toContain("border:");
+    expect(searchFocusStyles).not.toContain("outline:");
+    expect(listStyles).toContain("overflow: hidden;");
+    expect(listStyles).toContain("grid-template-rows: minmax(0, 1fr) auto auto;");
+    expect(projectListStyles).toContain("overflow-y: auto;");
+    expect(projectListStyles).toContain("overscroll-behavior: contain;");
+    expect(selectedOptionStyles).toContain("background: var(--color-nav-active-bg);");
+    expect(selectedOptionStyles).toContain("color: var(--color-action-sky-hover);");
+    expect(selectedOptionStyles).toContain(".home-project-picker__option--selected > svg:last-child");
+    expect(source).toContain('className="home-project-picker__projects"');
+    expect(source).toContain('className="home-project-picker__actions"');
+    expect(optionStyles).toContain("min-height: 40px;");
+    expect(styles).toContain(".home-project-picker__option--action {\n  min-height: 36px;");
+    expect(source).not.toContain("<ChevronDown");
+    expect(source).not.toContain("<FolderPlus");
+    expect(source).toContain("<LucidePlus");
+  });
+
   it("consumes launch chat query params when reading focused agent chat ids", () => {
     const storage = new MemoryStorage();
     const replaceState = vi.fn();
@@ -321,7 +415,7 @@ describe("HomePage", () => {
     expect(keyDownHandler).not.toContain("!state.agent.isSending && !isCreatingChat");
   });
 
-  it("derives chat scope and active conversation from current chat identity", () => {
+  it("derives chat scope and active conversation from current chat identity and messages", () => {
     expect(agentChatScopeKey("chat-1", 3)).toBe("chat-1");
     expect(agentChatScopeKey(null, 3)).toBe("draft-3");
     expect(hasActiveAgentConversation("chat-1", 1)).toBe(true);

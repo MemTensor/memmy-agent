@@ -49,7 +49,7 @@ type PolicyTraceLink = {
 type ReposPort = {
   memories: {
     get(id: string): MemoryRow | undefined;
-    getByKey(userId: string, memoryLayer: "L2", memoryKey: string): MemoryRow | undefined;
+    getByKey(memoryLayer: "L2", memoryKey: string): MemoryRow | undefined;
     list(filter: Record<string, unknown>, limit?: number): MemoryRow[];
     getMany(ids: string[]): MemoryRow[];
     update(memory: MemoryRow): MemoryRow;
@@ -213,7 +213,7 @@ export class PolicyInductionEngine {
         }
       }
       const promptEvidenceTraces = [...byEpisode.values()];
-      const matchingPolicy = this.findExistingPolicyForL2Bucket(signature, bucket, source.userId);
+      const matchingPolicy = this.findExistingPolicyForL2Bucket(signature, bucket);
       if (matchingPolicy) {
         for (const trace of bucket) {
           const similarity = tracePolicySimilarity(trace, matchingPolicy);
@@ -227,7 +227,7 @@ export class PolicyInductionEngine {
           });
         }
         this.markCandidatePoolPromoted(source.userId, signature, bucketTraceIds, matchingPolicy.id, at);
-        this.recomputePolicyStats(matchingPolicy.id, source.userId, at, sourceTrace.episodeId);
+        this.recomputePolicyStats(matchingPolicy.id, at, sourceTrace.episodeId);
         for (const episodeId of uniq(
           bucket.map((trace) => trace.episodeId).filter((id): id is string => Boolean(id))
         )) {
@@ -237,7 +237,7 @@ export class PolicyInductionEngine {
       }
 
       const policyKey = `policy:${stableHash(signature).slice(0, 16)}`;
-      const existingPolicyMemory = this.deps.repos.memories.getByKey(source.userId, "L2", policyKey);
+      const existingPolicyMemory = this.deps.repos.memories.getByKey("L2", policyKey);
       const existingPolicy = existingPolicyMemory && !this.isArchivedEvolutionMemory(existingPolicyMemory)
         ? policyMetaFromMemory(existingPolicyMemory)
         : null;
@@ -464,7 +464,7 @@ export class PolicyInductionEngine {
     if (trace.episodeId) {
       this.deps.repos.runtime.appendEpisodeDerivedMemory(trace.episodeId, "L2", matchedPolicy.id, at);
     }
-    this.recomputePolicyStats(matchedPolicy.id, source.userId, at, trace.episodeId);
+    this.recomputePolicyStats(matchedPolicy.id, at, trace.episodeId);
   }
 
   async enhancePolicyDraft(
@@ -561,8 +561,7 @@ export class PolicyInductionEngine {
 
   private findExistingPolicyForL2Bucket(
     signature: string,
-    evidenceTraces: TraceMeta[],
-    userId: string
+    evidenceTraces: TraceMeta[]
   ): PolicyMeta | null {
     if (evidenceTraces.length === 0) return null;
     const policies = this.deps.repos.memories
@@ -590,7 +589,7 @@ export class PolicyInductionEngine {
     return best?.policy ?? null;
   }
 
-  recomputePolicyStats(policyId: string, userId: string, at: string, triggerEpisodeId?: string): void {
+  recomputePolicyStats(policyId: string, at: string, triggerEpisodeId?: string): void {
     const memory = this.deps.repos.memories.get(policyId);
     if (!memory || memory.memoryLayer !== "L2") return;
     const policy = policyMetaFromMemory(memory);
@@ -598,7 +597,7 @@ export class PolicyInductionEngine {
 
     const linkedTraceIds = new Set(
       this.deps.repos.runtime
-        .listTracePolicyLinks({ userId, l2MemoryId: policy.id, limit: 1000 })
+        .listTracePolicyLinks({ l2MemoryId: policy.id, limit: 1000 })
         .map((link) => link.l1MemoryId)
     );
 

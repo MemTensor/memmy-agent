@@ -303,7 +303,9 @@ export function OnboardingPage() {
     try {
       await Promise.all(
         conflicts.map((conflict) =>
-          replace ? clients.agentSources.installPlugin(conflict.sourceId) : clients.agentSources.installSkill(conflict.sourceId)
+          replace
+            ? clients.agentSources.installPlugin(conflict.sourceId, { installType: "conflict_replace" })
+            : clients.agentSources.installSkill(conflict.sourceId)
         )
       );
       dispatch(appActions.agentSourcesRefreshed(await clients.agentSources.listSources()));
@@ -341,7 +343,11 @@ export function OnboardingPage() {
         dispatch,
         queuedMessage: t("memory.scanQueued"),
         formatError: (error) => formatAgentSourceScanRequestError(error, undefined, t),
-        scheduleFallback: (callback, delayMs) => globalThis.setTimeout(callback, delayMs)
+        scheduleFallback: (callback, delayMs) => globalThis.setTimeout(callback, delayMs),
+        analyticsContext: {
+          pagePath: "/onboarding",
+          subPage: "onboarding"
+        }
       });
     } catch (error) {
       hasStartedAgentSourceScan.current = false;

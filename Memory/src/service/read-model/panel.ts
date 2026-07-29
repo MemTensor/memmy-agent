@@ -13,15 +13,24 @@ export function panelListItemFromMemory(
   memory: MemoryRow,
   processing?: MemoryProcessingRecord
 ): MemoryListItem {
+  const spanGoal = panelSpanGoalForMemory(memory);
   return {
     ...item,
     processing,
     metadata: {
       ...(item.metadata ?? {}),
-      source: panelSourceForMemory(memory)
+      source: panelSourceForMemory(memory),
+      ...(spanGoal ? { spanGoal } : {})
     },
     tags: panelTagsForMemory(memory, processing)
   };
+}
+
+function panelSpanGoalForMemory(memory: MemoryRow): string | undefined {
+  if (memory.properties.internal_info.memory_kind !== "span") return undefined;
+  const span = isRecord(memory.properties.internal_info.span) ? memory.properties.internal_info.span : {};
+  const goal = span.span_goal;
+  return typeof goal === "string" && goal.trim() ? goal.trim() : undefined;
 }
 
 export function panelSourceDistribution(memories: MemoryRow[]): Array<{ source: string; count: number; percentage: number }> {

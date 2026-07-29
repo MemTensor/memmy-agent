@@ -108,7 +108,7 @@ export interface FeedbackExperienceServiceDeps {
   enqueueJob(input: EnqueueJobInput): EvolutionJobRecord;
   encodeChangeCursor(seq: number, namespace?: RuntimeNamespace): string;
   readOnlyCursor(namespace?: RuntimeNamespace): { changeSeq: number; syncCursor: string };
-  findExistingSkillForPolicy(policy: PolicyMeta, userId: string): NonNullable<ReturnType<typeof skillMetaFromMemory>> | null;
+  findExistingSkillForPolicy(policy: PolicyMeta): NonNullable<ReturnType<typeof skillMetaFromMemory>> | null;
   upsertEvolutionMemory(memory: MemoryRow): { memory: MemoryRow; created: boolean; previous?: MemoryRow };
   pendingTrialsForFeedback(feedback: FeedbackRecord): SkillTrialRecord[];
 }
@@ -542,7 +542,7 @@ async maybeCreateFeedbackExperience(
       trace
     });
     const vector = await this.deps.embedder.embedOne(draft.vectorText, "query");
-    const existing = this.findSimilarFeedbackExperience(draft, vector, feedback.userId);
+    const existing = this.findSimilarFeedbackExperience(draft, vector);
     const at = feedback.createdAt;
     const saved = existing
       ? this.mergeFeedbackExperiencePolicy(existing, draft, vector, at)
@@ -605,7 +605,7 @@ maybeMintRepairCandidateSkill(
   ): MemoryRow | undefined {
     const policy = policyMetaFromMemory(policyMemory);
     if (!policy || !isRepairCandidatePolicyForSkill(policy)) return undefined;
-    if (this.deps.findExistingSkillForPolicy(policy, policyMemory.userId)) return undefined;
+    if (this.deps.findExistingSkillForPolicy(policy)) return undefined;
 
     const fix = policy.decisionGuidance.preference.find((item) => item.trim().length > 0);
     if (!fix) return undefined;
@@ -860,8 +860,7 @@ feedbackExperienceEpisodeContext(
 
 findSimilarFeedbackExperience(
     draft: FeedbackExperienceDraft,
-    vector: number[],
-    userId: string
+    vector: number[]
   ): MemoryRow | null {
     let best: { memory: MemoryRow; score: number; policy: PolicyMeta } | null = null;
     for (const memory of this.deps.repos.memories.list({ memoryLayer: "L2", status: ["activated", "resolving"] }, 1000)) {
@@ -1185,7 +1184,6 @@ feedbackRepairEvidence(
     const searchText = request.rationale ?? feedback.rationale;
     if (request.sessionId && (high.size < limit || low.size < limit)) {
       const evidence = this.sessionRepairEvidence(
-        feedback.userId,
         request.sessionId,
         searchText,
         limit
@@ -1243,7 +1241,6 @@ feedbackRepairEvidence(
   }
 
 sessionRepairEvidence(
-    userId: string,
     sessionId: string,
     keyword: string | undefined,
     limit: number
@@ -1357,7 +1354,6 @@ applyRecallOutcome(
     if (!outcome || outcome === "pending") return;
     const memoryIds = uniq(event.injectedMemoryIds ?? event.hitMemoryIds);
     for (const memory of this.deps.repos.memories.getMany(memoryIds)) {
-      if (memory.userId !== event.userId) continue;
       const previous = memory;
       let next = updateRecallStats(memory, {
         outcome,

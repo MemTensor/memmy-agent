@@ -539,7 +539,7 @@ export class SessionManager {
     try {
       fs.writeFileSync(tmp, this.encodeJsonl(session), "utf8");
       if (shouldFsync) {
-        const fd = fs.openSync(tmp, "r");
+        const fd = fs.openSync(tmp, "r+");
         try {
           fs.fsyncSync(fd);
         } finally {

@@ -1,6 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import type { PanelTaskItem } from "@memmy/local-api-contracts";
 import type { MemoryRuntimeClient } from "../../api/memory-runtime-client.js";
+import {
+  buildMemoryUiDeletedEvent,
+  buildMemoryUiDetailOpenedEvent,
+  buildMemoryUiPanelRefreshedEvent,
+  buildMemoryUiSearchSubmittedEvent
+} from "../../analytics/memory-ui-analytics.js";
+import { useAnalytics } from "../../analytics/use-analytics.js";
 import { formatMessage, type MessageKey, type MessageValues, type ResolvedLanguage, zhCNMessages } from "../../i18n/messages.js";
 import { useTranslation } from "../../i18n/use-translation.js";
 import { ChevronRight, ListChecks, Search, X } from "./memory-prototype-icons.js";
@@ -120,13 +127,15 @@ function tasksCacheKeys(query: string, page: number, language: ResolvedLanguage 
 
 export function TasksSubPage(props: TasksSubPageProps) {
   const { t, language } = useTranslation();
+  const { track } = useAnalytics();
+  const tasksFilterLayer = "tasks";
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
   const [state, setState] = useState<TasksState>({ status: "loading" });
   const [selectedTask, setSelectedTask] = useState<MemoryTask | null>(null);
   const requestIdRef = useRef(0);
 
-  function refresh(nextPage = page, options: { useCache?: boolean } = {}): Promise<void> {
+  function refresh(nextPage = page, options: { useCache?: boolean } = {}): Promise<MemoryTasksOutput | undefined> {
     if (!props.client) {
       const message = t("memory.clientNotReady");
       setState({ status: "error", message });
@@ -147,16 +156,17 @@ export function TasksSubPage(props: TasksSubPageProps) {
       .then((data) => {
         writeMemoryPanelCaches(cacheKeys, data);
         if (requestId !== requestIdRef.current) {
-          return;
+          return undefined;
         }
         setState({ status: "ready", data });
         if (data.page !== normalizedPage) {
           setPage(data.page);
         }
+        return data;
       })
       .catch((error) => {
         if (requestId !== requestIdRef.current) {
-          return;
+          return undefined;
         }
         setState({ status: "error", message: toErrorMessage(error) });
         throw error;
@@ -172,7 +182,26 @@ export function TasksSubPage(props: TasksSubPageProps) {
   function runSearch() {
     setSelectedTask(null);
     setPage(1);
-    void refresh(1).catch(() => undefined);
+    void refresh(1)
+      .then((data) => {
+        if (!data) {
+          return;
+        }
+        track(buildMemoryUiSearchSubmittedEvent({
+          subPage: "tasks",
+          filterLayer: tasksFilterLayer,
+          resultCount: data.total
+        }));
+      })
+      .catch(() => undefined);
+  }
+
+  function openTask(task: MemoryTask) {
+    track(buildMemoryUiDetailOpenedEvent({
+      subPage: "tasks",
+      filterLayer: tasksFilterLayer
+    }));
+    setSelectedTask(task);
   }
 
   function changePage(nextPage: number) {
@@ -191,6 +220,10 @@ export function TasksSubPage(props: TasksSubPageProps) {
     }
 
     await props.client.deletePanelTask(task.id);
+    track(buildMemoryUiDeletedEvent({
+      subPage: "tasks",
+      filterLayer: tasksFilterLayer
+    }));
     clearMemoryPanelCache();
     setSelectedTask(null);
     void refresh(page, { useCache: false }).catch(() => undefined);
@@ -219,8 +252,17 @@ export function TasksSubPage(props: TasksSubPageProps) {
       onQueryChange={changeQuery}
       onSearch={runSearch}
       onPageChange={changePage}
-      onRefresh={() => refresh(page, { useCache: false })}
-      onOpenTask={setSelectedTask}
+      onRefresh={async () => {
+        const data = await refresh(page, { useCache: false });
+        if (data) {
+          track(buildMemoryUiPanelRefreshedEvent({
+            subPage: "tasks",
+            filterLayer: tasksFilterLayer,
+            resultCount: data.total
+          }));
+        }
+      }}
+      onOpenTask={openTask}
       onDeleteTask={deleteTask}
       onCloseTask={() => setSelectedTask(null)}
     />

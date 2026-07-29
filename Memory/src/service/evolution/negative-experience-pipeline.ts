@@ -72,7 +72,7 @@ export class NegativeExperiencePipeline {
       (draft.sourceMemory ? projectIdFromMemory(draft.sourceMemory) : undefined) ?? draft.episode.projectId ?? "",
       (draft.sourceMemory ? profileIdFromMemory(draft.sourceMemory) : undefined) ?? ""
     ].join(":");
-    const key = `policy:avoid:${stableHash(`${draft.episode.userId}:${scopeIdentity}:${signature}`).slice(0, 24)}`;
+    const key = `policy:avoid:${stableHash(`${scopeIdentity}:${signature}`).slice(0, 24)}`;
     const existing = this.findExisting(draft, key);
     const existingInternal: Record<string, unknown> = existing && isRecord(existing.properties.internal_info)
       ? existing.properties.internal_info
@@ -308,7 +308,7 @@ export class NegativeExperiencePipeline {
 
   private findExisting(draft: NegativeExperienceDraft, key: string): MemoryRow | undefined {
     const sameEpisode = this.deps.repos.memories
-      .list({ userId: draft.episode.userId, memoryLayer: "L2" }, 1000)
+      .list({ memoryLayer: "L2" }, 1000)
       .find((memory) => {
         const policy = policyMetaFromMemory(memory);
         return policy?.experienceType === "failure_avoidance"
@@ -316,7 +316,7 @@ export class NegativeExperiencePipeline {
           && policy.sourceEpisodeIds.includes(draft.episode.id);
       });
     return sameEpisode
-      ?? this.deps.repos.memories.getByKey(draft.episode.userId, "L2", key);
+      ?? this.deps.repos.memories.getByKey("L2", key);
   }
 }
 

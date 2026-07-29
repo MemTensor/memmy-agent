@@ -18,9 +18,13 @@ import {
   type InMemoryMcpConnection,
 } from "./mcp.js";
 import {
+  BROWSER_PREPARATION_ATTEMPT_ID_ENV,
   configurePlaywrightBrowsersPath,
+  readBrowserPreparationState,
   resolveManagedChromium,
+  type BrowserPreparationState,
 } from "./browser-setup.js";
+import { waitForBrowserPreparation } from "./browser-preparation-wait.js";
 
 export const BROWSER_TOOL_NAMES = [
   "browser_navigate",
@@ -38,7 +42,7 @@ export const BROWSER_TOOL_NAMES = [
 ] as const;
 
 export type BrowserToolName = (typeof BROWSER_TOOL_NAMES)[number];
-export type BrowserCapability = "unknown" | "ready" | "disabled" | "unavailable";
+export type BrowserCapability = "unknown" | "preparing" | "ready" | "disabled" | "unavailable";
 export type BrowserScope = {
   sessionKey: string;
   channel: string;
@@ -68,6 +72,9 @@ type PlaywrightRuntime = {
 };
 
 export type BrowserRuntimeLoader = () => Promise<PlaywrightRuntime>;
+export type BrowserPreparationStateLoader = () => BrowserPreparationState | null;
+
+export const BROWSER_COMPONENT_PREPARING_MESSAGE = "浏览器组件正在准备";
 
 type BrowserSession = {
   key: string;
@@ -192,6 +199,9 @@ export class BrowserSessionManager {
   capability: BrowserCapability = "unknown";
   private readonly config: ReturnType<typeof normalizeBrowserConfig>;
   private readonly runtimeLoader: BrowserRuntimeLoader;
+  private readonly preparationStateLoader: BrowserPreparationStateLoader;
+  private readonly desktopManaged: boolean;
+  private readonly preparationAttemptId: string | null;
   private readonly restrictLocalFiles: boolean;
   private runtime: PlaywrightRuntime | null = null;
   private executablePath: string | null = null;
@@ -208,14 +218,24 @@ export class BrowserSessionManager {
     config: BrowserToolsConfig | Record<string, any>,
     {
       runtimeLoader = defaultRuntimeLoader,
+      preparationStateLoader = readBrowserPreparationState,
+      desktopManaged = process.env.MEMMY_DESKTOP_MANAGED_GATEWAY === "1",
+      preparationAttemptId =
+        process.env[BROWSER_PREPARATION_ATTEMPT_ID_ENV]?.trim() || null,
       restrictLocalFiles = false,
     }: {
       runtimeLoader?: BrowserRuntimeLoader;
+      preparationStateLoader?: BrowserPreparationStateLoader;
+      desktopManaged?: boolean;
+      preparationAttemptId?: string | null;
       restrictLocalFiles?: boolean;
     } = {},
   ) {
     this.config = normalizeBrowserConfig(config);
     this.runtimeLoader = runtimeLoader;
+    this.preparationStateLoader = preparationStateLoader;
+    this.desktopManaged = desktopManaged;
+    this.preparationAttemptId = preparationAttemptId;
     this.restrictLocalFiles = restrictLocalFiles;
     if (!this.config.enabled) this.capability = "disabled";
   }
@@ -227,8 +247,18 @@ export class BrowserSessionManager {
 
   initialize(): Promise<BrowserCapability> {
     if (this.initializePromise) return this.initializePromise;
-    this.initializePromise = this.probe();
-    return this.initializePromise;
+    const attempt = this.probe();
+    this.initializePromise = attempt;
+    void attempt.finally(() => {
+      if (
+        this.initializePromise === attempt
+        && this.capability !== "ready"
+        && this.capability !== "disabled"
+      ) {
+        this.initializePromise = null;
+      }
+    });
+    return attempt;
   }
 
   private async probe(): Promise<BrowserCapability> {
@@ -243,7 +273,14 @@ export class BrowserSessionManager {
     try {
       const runtime = await this.runtimeLoader();
       if (!runtime.executablePath || !fs.existsSync(runtime.executablePath)) {
-        this.capability = "unavailable";
+        await this.loadDefinitionsWithoutBrowser(runtime);
+        this.runtime = runtime;
+        this.executablePath = runtime.executablePath || null;
+        const preparationState = this.preparationStateLoader();
+        this.capability = preparationState?.status === "preparing"
+          || this.desktopManaged
+          ? "preparing"
+          : "unavailable";
         return this.capability;
       }
       browser = await runtime.chromium.launch({
@@ -258,19 +295,7 @@ export class BrowserSessionManager {
       );
       connection = await connectInMemoryMcpServer(server);
       const listed = await connection.client.listTools();
-      const byName = new Map(
-        (listed.tools ?? []).map((tool: any) => [String(tool.name), tool]),
-      );
-      if (BROWSER_TOOL_NAMES.some((name) => !byName.has(name))) {
-        this.capability = "unavailable";
-        return this.capability;
-      }
-      this.definitions = new Map(
-        BROWSER_TOOL_NAMES.map((name) => [
-          name,
-          narrowBrowserToolDefinition(byName.get(name)),
-        ]),
-      );
+      this.captureDefinitions(listed.tools ?? []);
       this.runtime = runtime;
       this.executablePath = runtime.executablePath;
       this.capability = "ready";
@@ -284,6 +309,74 @@ export class BrowserSessionManager {
       await browser?.close().catch(() => undefined);
       if (outputDir) fs.rmSync(outputDir, { recursive: true, force: true });
     }
+  }
+
+  private captureDefinitions(tools: any[]): void {
+    const byName = new Map(tools.map((tool: any) => [String(tool.name), tool]));
+    if (BROWSER_TOOL_NAMES.some((name) => !byName.has(name))) {
+      throw new Error("Playwright MCP browser tool set changed");
+    }
+    this.definitions = new Map(
+      BROWSER_TOOL_NAMES.map((name) => [
+        name,
+        narrowBrowserToolDefinition(byName.get(name)),
+      ]),
+    );
+  }
+
+  private async loadDefinitionsWithoutBrowser(runtime: PlaywrightRuntime): Promise<void> {
+    const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-browser-definitions-"));
+    let connection: InMemoryMcpConnection | null = null;
+    try {
+      const server = await runtime.createConnection(
+        this.connectionConfig(outputDir),
+        async () => {
+          throw new Error(BROWSER_COMPONENT_PREPARING_MESSAGE);
+        },
+      );
+      connection = await connectInMemoryMcpServer(server);
+      const listed = await connection.client.listTools();
+      this.captureDefinitions(listed.tools ?? []);
+    } finally {
+      await connection?.close().catch(() => undefined);
+      fs.rmSync(outputDir, { recursive: true, force: true });
+    }
+  }
+
+  private async ensureReadyForTool(
+    abortSignal: AbortSignal | null = null,
+  ): Promise<void> {
+    if (this.capability === "ready") return;
+    const isExecutableReady = (): boolean => Boolean(
+      this.executablePath && fs.existsSync(this.executablePath),
+    );
+    if (this.capability === "preparing" && !isExecutableReady()) {
+      await waitForBrowserPreparation({
+        loadState: this.preparationStateLoader,
+        isExecutableReady,
+        abortSignal,
+        expectedAttemptId: this.preparationAttemptId,
+      });
+    }
+    const preparationState = this.preparationStateLoader();
+    if (preparationState?.status === "unavailable" && !isExecutableReady()) {
+      this.capability = "unavailable";
+      throw new Error(
+        `浏览器组件准备失败${preparationState.error ? `：${preparationState.error}` : ""}`,
+      );
+    }
+    const capability = await this.initialize();
+    if (capability === "ready") return;
+    if (capability === "preparing") {
+      await waitForBrowserPreparation({
+        loadState: this.preparationStateLoader,
+        isExecutableReady,
+        abortSignal,
+        expectedAttemptId: this.preparationAttemptId,
+      });
+      if (await this.initialize() === "ready") return;
+    }
+    throw new Error("浏览器组件当前不可用");
   }
 
   private connectionConfig(outputDir: string): PlaywrightMcpConfig {
@@ -449,6 +542,7 @@ export class BrowserSessionManager {
     abortSignal: AbortSignal | null = null,
     localPreviewContext: BrowserLocalPreviewContext | null = null,
   ): Promise<string | Array<Record<string, any>>> {
+    await this.ensureReadyForTool(abortSignal);
     if (!this.definitions.has(name)) throw new Error(`browser tool '${name}' is unavailable`);
     const navigateTarget: BrowserNavigateTarget | null = name === "browser_navigate"
       ? classifyBrowserNavigateTarget(String(params.url ?? ""))
@@ -600,7 +694,8 @@ abstract class BrowserTool extends Tool {
   }
 
   static enabled(ctx: any): boolean {
-    return ctx.browserSessionManager?.capability === "ready";
+    return ctx.browserSessionManager?.capability === "ready"
+      || ctx.browserSessionManager?.capability === "preparing";
   }
 
   static create<T extends typeof BrowserTool>(this: T, ctx: any): InstanceType<T> {

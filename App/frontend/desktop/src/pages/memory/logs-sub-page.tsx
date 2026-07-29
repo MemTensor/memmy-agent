@@ -4,6 +4,12 @@ import ReactMarkdown, { type Components } from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import { ApiRequestError } from "../../api/http.js";
+import {
+  buildLogsFilterLayer,
+  buildMemoryUiDetailOpenedEvent,
+  buildMemoryUiPanelRefreshedEvent
+} from "../../analytics/memory-ui-analytics.js";
+import { useAnalytics } from "../../analytics/use-analytics.js";
 import { MEMORY_ADD_STATUS_SUMMARIES, type MessageKey, type MessageValues } from "../../i18n/messages.js";
 import type { MemoryRuntimeClient } from "../../api/memory-runtime-client.js";
 import { useTranslation } from "../../i18n/use-translation.js";
@@ -74,12 +80,14 @@ function logsCacheKeys(page: number, tool: "" | MemoryApiLogToolName, sourceAgen
 
 export function LogsSubPage(props: LogsSubPageProps) {
   const { t } = useTranslation();
+  const { track } = useAnalytics();
   const [tool, setTool] = useState<"" | MemoryApiLogToolName>("");
   const [sourceAgent, setSourceAgent] = useState("");
   const [page, setPage] = useState(1);
   const [state, setState] = useState<RemoteData<MemoryApiLogsOutput>>({ status: "loading" });
+  const logsFilterLayer = () => buildLogsFilterLayer(tool, sourceAgent);
 
-  function refresh(nextPage = page, nextTool = tool, nextSourceAgent = sourceAgent, options: { useCache?: boolean } = {}): Promise<void> {
+  function refresh(nextPage = page, nextTool = tool, nextSourceAgent = sourceAgent, options: { useCache?: boolean } = {}): Promise<MemoryApiLogsOutput | undefined> {
     if (!props.client) {
       const message = t("memory.clientNotReady");
       setState({ status: "error", message });
@@ -93,6 +101,7 @@ export function LogsSubPage(props: LogsSubPageProps) {
       .then((data) => {
         writeMemoryPanelCaches(cacheKeys, data);
         setState({ status: "ready", data });
+        return data;
       })
       .catch((error) => {
         setState({ status: "error", message: toErrorMessage(error) });
@@ -118,7 +127,22 @@ export function LogsSubPage(props: LogsSubPageProps) {
         setPage(1);
       }}
       onPageChange={(nextPage) => setPage(normalizePage(nextPage))}
-      onRefresh={() => refresh(page, tool, sourceAgent, { useCache: false })}
+      onRefresh={async () => {
+        const data = await refresh(page, tool, sourceAgent, { useCache: false });
+        if (data) {
+          track(buildMemoryUiPanelRefreshedEvent({
+            subPage: "logs",
+            filterLayer: logsFilterLayer(),
+            resultCount: data.total
+          }));
+        }
+      }}
+      onOpenDetail={() => {
+        track(buildMemoryUiDetailOpenedEvent({
+          subPage: "logs",
+          filterLayer: logsFilterLayer()
+        }));
+      }}
     />
   );
 }
@@ -131,6 +155,7 @@ export interface LogsSubPageViewProps {
   onSourceAgentChange: (sourceAgent: string) => void;
   onPageChange: (page: number) => void;
   onRefresh: () => void | Promise<void>;
+  onOpenDetail: () => void;
 }
 
 export function LogsSubPageView(props: LogsSubPageViewProps) {
@@ -158,6 +183,7 @@ export function LogsSubPageView(props: LogsSubPageViewProps) {
         next.delete(id);
       } else {
         next.add(id);
+        props.onOpenDetail();
       }
       return next;
     });
@@ -589,15 +615,33 @@ function buildSummary(log: MemoryApiLog, input: unknown, output: unknown, t: Tra
   const addInput = asRecord(input) as AddInput;
   const addOutput = asRecord(output) as AddOutput;
   const firstDetail = addOutput.details?.[0];
+  const summary = usableAddSummary(firstDetail?.summary);
   return {
     text: firstLogText(
-      usableAddSummary(firstDetail?.summary),
+      firstDetail?.role === "trace" && summary ? truncateTraceLogSummary(summary) : summary,
       firstDetail?.query,
       addInput.query,
       firstDetail?.content,
       firstDetail?.traceId
     ) ?? "memory item"
   };
+}
+
+function truncateTraceLogSummary(value: string): string {
+  const characters = Array.from(value);
+  const chineseCharacterCount = characters.filter((character) => /[\u3400-\u9fff]/u.test(character)).length;
+  if (chineseCharacterCount > 0) {
+    if (chineseCharacterCount <= 20) return value;
+    let count = 0;
+    const end = characters.findIndex((character) => {
+      if (/[\u3400-\u9fff]/u.test(character)) count += 1;
+      return count === 20;
+    });
+    return `${characters.slice(0, end + 1).join("")}...`;
+  }
+
+  const words = value.match(/\S+/g) ?? [];
+  return words.length > 20 ? `${words.slice(0, 20).join(" ")}...` : value;
 }
 
 function usableAddSummary(value: string | null | undefined): string | undefined {

@@ -205,8 +205,8 @@ export class EvolutionJobProcessor {
     return this.span.summarizeTraceForCapture(input, options);
   }
 
-  findExistingSkillForPolicy(policy: PolicyMeta, userId: string) {
-    return this.skill.findExistingSkillForPolicy(policy, userId);
+  findExistingSkillForPolicy(policy: PolicyMeta) {
+    return this.skill.findExistingSkillForPolicy(policy);
   }
 
   upsertEvolutionMemory(memory: MemoryRow): {
@@ -215,7 +215,7 @@ export class EvolutionJobProcessor {
     previous?: MemoryRow;
   } {
     const previous = memory.memoryKey
-      ? this.deps.repos.memories.getByKey(memory.userId, memory.memoryLayer, memory.memoryKey)
+      ? this.deps.repos.memories.getByKey(memory.memoryLayer, memory.memoryKey)
       : undefined;
     if (previous && this.isArchivedEvolutionMemory(previous)) {
       return {

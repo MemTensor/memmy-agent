@@ -64,6 +64,30 @@ describe("MemoryService / read model / panel", () => {
     db.close();
   });
 
+  it("uses the current trace summary when rendering memory_add logs", () => {
+    const { db, service } = createTestService();
+    const session = service.openSession({
+      namespace: { source: "codex", profileId: "default", userId: "user-panel-log-summary" }
+    });
+    const completed = service.completeTurn("turn-panel-log-summary", {
+      sessionId: session.sessionId,
+      query: "Summarize this trace for the log panel.",
+      answer: "The worker will generate a concise trace summary."
+    });
+    const repos = new Repositories(db.db);
+    const trace = repos.memories.get(completed.l1MemoryId);
+    expect(trace).toBeDefined();
+    repos.memories.update(updateTraceSummary(trace!, {
+      summary: "Current trace summary for the log panel",
+      updatedAt: new Date().toISOString()
+    }));
+
+    const log = service.apiLogs({ tools: ["memory_add"], limit: 1 }).logs[0];
+    const output = JSON.parse(log!.outputJson) as { details: Array<{ summary?: string }> };
+    expect(output.details[0]?.summary).toBe("Current trace summary for the log panel");
+    db.close();
+  });
+
   it("does not record memory_add logs for agent source scan imports", () => {
     const { db, service } = createTestService();
     service.addMemory({
@@ -141,6 +165,29 @@ describe("MemoryService / read model / panel", () => {
       value: 0.25,
       alpha: 0.5,
       reflectionDone: true
+    });
+
+    const spanMemory: MemoryRow = {
+      ...memory,
+      id: "span_panel_goal",
+      memoryKey: "span:session-panel-reflection-metric:0",
+      contentHash: "panel-span-goal-content",
+      properties: {
+        ...memory.properties,
+        internal_info: {
+          ...memory.properties.internal_info,
+          memory_kind: "span",
+          span: { span_goal: "Run the panel span regression" }
+        }
+      }
+    };
+    repos.memories.insert(spanMemory);
+
+    expect(service.panelItems({
+      userId: "user-panel-reflection-metric",
+      layer: "L1"
+    }).items.find((candidate) => candidate.id === spanMemory.id)?.metadata).toMatchObject({
+      spanGoal: "Run the panel span regression"
     });
     db.close();
   });

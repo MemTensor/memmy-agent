@@ -35,12 +35,10 @@ export class IndexedCandidatePool {
   constructor(private readonly deps: IndexedCandidatePoolDependencies) {}
 
   retrievalCandidateCount(input: {
-    negativeExperienceUserId: string;
     layers: MemoryLayer[];
     tags?: string[];
   }): number {
     const baseFilter: MemoryFilter = {
-      negativeExperienceUserId: input.negativeExperienceUserId,
       memoryLayer: input.layers,
       status: ["activated", "resolving"]
     };
@@ -48,13 +46,11 @@ export class IndexedCandidatePool {
   }
 
   hasRetrievalVectorCandidates(input: {
-    negativeExperienceUserId: string;
     layers: MemoryLayer[];
     tags?: string[];
   }): boolean {
     if (input.layers.length === 0) return false;
     const baseFilter: MemoryFilter = {
-      negativeExperienceUserId: input.negativeExperienceUserId,
       memoryLayer: input.layers,
       status: ["activated", "resolving"]
     };
@@ -62,7 +58,6 @@ export class IndexedCandidatePool {
   }
 
   async indexedRetrievalCandidatePool(input: {
-    negativeExperienceUserId: string;
     compiledQuery: CompiledRetrievalQuery;
     queryVector?: number[];
     layers: MemoryLayer[];
@@ -89,7 +84,6 @@ export class IndexedCandidatePool {
 
     for (const layer of layers) {
       const filter: MemoryFilter = {
-        negativeExperienceUserId: input.negativeExperienceUserId,
         memoryLayer: layer,
         status: ["activated", "resolving"],
         ...(input.tags?.length ? { tags: input.tags } : {})

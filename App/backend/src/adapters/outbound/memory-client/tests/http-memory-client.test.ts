@@ -440,6 +440,7 @@ function startTurnOutput(body: unknown) {
     turnId: input.turnId ?? "turn-1",
     contextPacketId: "context-1",
     sessionId: input.sessionId,
+    episodeId: "episode-1",
     injectedContext: { markdown: "", sections: [] },
     searchEventId: "search-1",
     sourceMemoryIds: [],

@@ -76,12 +76,9 @@ function createSpanBigTurnLlm(
           }))
         } as unknown as T;
       }
-      if (options.operation === "capture.reflected_trace_summary.v1") {
+      if (options.operation === "capture.summarize") {
         return {
-          summaries: [{
-            index: 0,
-            summary: "定位构建失败、修改依赖配置并验证修复结果"
-          }]
+          summary: "定位构建失败、修改依赖配置并验证修复结果"
         } as unknown as T;
       }
       if (options.operation === "reward.reward.r_human.v7") {

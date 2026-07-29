@@ -258,7 +258,7 @@ export class EmbeddingJobProcessor {
     if (!trace) throw new Error(`trace payload is missing: ${memory.id}`);
 
     const summary = this.deps.llm.isConfigured()
-      ? await this.deps.summarizeTraceForCapture({ trace, userText: trace.userText, agentText: trace.agentText, toolCalls: trace.toolCalls, reflectionText: trace.reflection ?? "" }, { strict: true })
+      ? await this.deps.summarizeTraceForCapture({ trace, userText: trace.userText, agentText: trace.agentText, toolCalls: trace.toolCalls, reflectionText: "" }, { strict: true })
       : trace.summary || fallbackTraceSummary(trace);
     const at = this.deps.nowIso();
     const current = this.deps.repos.memories.get(memory.id);

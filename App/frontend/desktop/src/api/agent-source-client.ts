@@ -7,8 +7,10 @@ import {
   AgentSourceViewSchema,
   ManagedAgentSourceImportResultSchema,
   OkResponseSchema,
+  AgentSourcePluginActionInputSchema,
   type AddManualInput,
   type AgentSourceMemoryPluginConflict,
+  type AgentSourcePluginActionInput,
   type AgentSourceScanJobResponse,
   type AgentSourceScanInput,
   type AgentSourceScanStatusResponse,
@@ -29,8 +31,8 @@ export interface AgentSourceClient {
   removeSource(sourceId: string): Promise<void>;
   installSkill(sourceId: string): Promise<void>;
   uninstallSkill(sourceId: string): Promise<void>;
-  installPlugin(sourceId: string): Promise<void>;
-  uninstallPlugin(sourceId: string): Promise<void>;
+  installPlugin(sourceId: string, action?: AgentSourcePluginActionInput): Promise<void>;
+  uninstallPlugin(sourceId: string, action?: AgentSourcePluginActionInput): Promise<void>;
   getMemoryPluginConflicts(): Promise<AgentSourceMemoryPluginConflict[]>;
 }
 
@@ -133,21 +135,23 @@ export function createHttpAgentSourceClient(config: RuntimeConfig): AgentSourceC
       });
     },
 
-    async installPlugin(sourceId) {
+    async installPlugin(sourceId, action) {
       await requestJson({
         config,
         path: `/api/agent-sources/${encodeURIComponent(sourceId)}/plugin`,
         schema: OkResponseSchema,
-        init: { method: "POST" }
+        init: { method: "POST" },
+        body: AgentSourcePluginActionInputSchema.parse(action ?? {})
       });
     },
 
-    async uninstallPlugin(sourceId) {
+    async uninstallPlugin(sourceId, action) {
       await requestJson({
         config,
         path: `/api/agent-sources/${encodeURIComponent(sourceId)}/plugin`,
         schema: OkResponseSchema,
-        init: { method: "DELETE" }
+        init: { method: "DELETE" },
+        body: AgentSourcePluginActionInputSchema.parse(action ?? {})
       });
     }
   };

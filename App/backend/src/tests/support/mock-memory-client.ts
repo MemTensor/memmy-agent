@@ -101,6 +101,7 @@ export function createMockMemoryClient(options: CreateMockMemoryClientOptions = 
         turnId: input.turnId ?? randomUUID(),
         contextPacketId: randomUUID(),
         sessionId: input.sessionId,
+        episodeId: randomUUID(),
         injectedContext: {
           markdown: "",
           sections: []

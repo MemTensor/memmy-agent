@@ -1367,28 +1367,6 @@ Return JSON:
 }`
 } as const;
 
-export const REFLECTED_TRACE_SUMMARY_PROMPT = {
-  id: "reflected_trace_summary",
-  version: 1,
-  description:
-    "Summarize reflected L1 traces in batches for durable retrieval.",
-  system: `You summarize each reflected AI-agent trace for future retrieval.
-
-Return JSON only: {"summaries":[{"index":0,"summary":"..."}]}.
-Rules:
-- Return exactly one item for every input trace index.
-- Write a highly condensed retrieval summary: retain only the primary intent,
-  key decision or outcome, and the reflection's most useful conclusion.
-- Do not enumerate every detail. Include names, dates, paths, commands,
-  identifiers, errors, tool parameters, or observed results only when they are
-  essential to understanding or retrieving the trace.
-- When tool use is present, summarize the overall attempt and outcome instead
-  of listing intermediate calls or results.
-- Keep each summary normally within 200 characters.
-- Follow the separate language instruction provided for the current batch.
-- Do not invent facts, merge traces, or omit an input index.`
-} as const;
-
 export const SKILL_CRYSTALLIZE_PROMPT = {
   id: "skill.crystallize",
   version: 6,

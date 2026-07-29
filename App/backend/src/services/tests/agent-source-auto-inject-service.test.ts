@@ -42,7 +42,12 @@ describe("agent source auto inject service", () => {
       installed: ["cursor", "opencode", "openclaw", "workbuddy"],
       failed: []
     });
-    expect(calls).toEqual(["plugin:cursor", "plugin:opencode", "plugin:openclaw", "skill:workbuddy"]);
+    expect(calls).toEqual([
+      "plugin:cursor:auto_inject",
+      "plugin:opencode:auto_inject",
+      "plugin:openclaw:auto_inject",
+      "skill:workbuddy",
+    ]);
   });
 
   it("skips unavailable builtin agents", async () => {
@@ -117,8 +122,8 @@ function createAgentSources(calls: string[]) {
     async installSkill(sourceId: string) {
       calls.push(`skill:${sourceId}`);
     },
-    async installPlugin(sourceId: string) {
-      calls.push(`plugin:${sourceId}`);
+    async installPlugin(sourceId: string, action?: { installType?: string }) {
+      calls.push(`plugin:${sourceId}:${action?.installType ?? "manual"}`);
     }
   };
 }

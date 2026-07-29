@@ -248,6 +248,7 @@ describe("codex skill target", () => {
       if (request.method === "POST" && url.pathname === "/api/v1/turns/start") {
         writeJsonResponse(response, 200, {
           turnId: "turn-stop-1",
+          episodeId: "episode-1",
           sourceMemoryIds: ["memory-1"],
           injectedContext: { markdown: "Relevant prior context" }
         });
@@ -330,7 +331,7 @@ describe("codex skill target", () => {
         source: "codex",
         sourceMemoryIds: ["memory-1"]
       });
-      expect(requests[3]?.body).not.toHaveProperty("episodeId");
+      expect(requests[3]?.body.episodeId).toBe("episode-1");
     } finally {
       await close(server);
     }

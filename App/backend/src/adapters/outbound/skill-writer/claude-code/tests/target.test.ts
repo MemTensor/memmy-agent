@@ -259,6 +259,7 @@ describe("claude code skill target", () => {
       if (url.pathname === "/api/v1/turns/start") {
         writeJsonResponse(response, 200, {
           turnId: "claude-turn-1",
+          episodeId: "claude-episode-1",
           sourceMemoryIds: ["claude-memory-1"],
           injectedContext: { markdown: "Claude historical context" }
         });
@@ -332,7 +333,7 @@ describe("claude code skill target", () => {
         answer: "修复已经完成",
         sourceMemoryIds: ["claude-memory-1"]
       });
-      expect(requests[3]?.body).not.toHaveProperty("episodeId");
+      expect(requests[3]?.body.episodeId).toBe("claude-episode-1");
     } finally {
       await close(server);
     }

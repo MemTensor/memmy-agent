@@ -329,6 +329,7 @@ export function createMockMemoryRuntimeClient(): MemoryRuntimeClient {
         turnId: input.turnId ?? "mock-turn",
         contextPacketId: "context-1",
         sessionId: input.sessionId,
+        episodeId: "mock-episode",
         injectedContext: { markdown: "- 用户偏好中文注释", sections: [] },
 	        searchEventId: "search-1",
 	        sourceMemoryIds: hits.map((hit) => hit.id),

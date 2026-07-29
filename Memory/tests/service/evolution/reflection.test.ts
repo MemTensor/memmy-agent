@@ -62,17 +62,6 @@ function createUnusableReflectionLlm(): LlmClient {
           }))
         } as unknown as T;
       }
-      if (options.operation === "capture.reflected_trace_summary.v1") {
-        const payload = JSON.parse(messages.find((message) => message.role === "user")?.content ?? "{}") as {
-          traces?: Array<{ index: number }>;
-        };
-        return {
-          summaries: (payload.traces ?? []).map((trace) => ({
-            index: trace.index,
-            summary: "unusable reflection summary"
-          }))
-        } as unknown as T;
-      }
       return {
         summary: "unusable reflection summary",
         reflection: "tautological reflection",
@@ -434,14 +423,15 @@ describe("MemoryService / evolution / reflection", () => {
       call.options.operation === "capture.reflection.batch.v13"
     );
     expect(reflectionCalls).toHaveLength(1);
-    const summaryCalls = calls.filter((call) =>
-      call.options.operation === "capture.reflected_trace_summary.v1"
-    );
-    expect(summaryCalls).toHaveLength(1);
-    const summaryPayload = JSON.parse(
-      summaryCalls[0]!.messages.find((message) => message.role === "user")?.content ?? "{}"
-    ) as { traces: Array<{ index: number }> };
-    expect(summaryPayload.traces.map((trace) => trace.index)).toEqual([0, 1]);
+    const summaryCalls = calls.filter((call) => call.options.operation === "capture.summarize");
+    expect(summaryCalls).toHaveLength(2);
+    expect(summaryCalls.map((call) => call.messages.find((message) => message.role === "user")?.content))
+      .toEqual(expect.arrayContaining([
+        expect.stringContaining("USER: Hi, thanks"),
+        expect.stringContaining("USER: 为什么黑美人西瓜不常见？")
+      ]));
+    expect(summaryCalls.every((call) => !call.messages.find((message) => message.role === "user")?.content.includes("REFLECTION:"))).toBe(true);
+    expect(calls.some((call) => call.options.operation === "capture.reflected_trace_summary.v1")).toBe(false);
     const payload = JSON.parse(
       reflectionCalls[0]!.messages.find((message) => message.role === "user")?.content ?? "{}"
     ) as { steps: Array<{ idx: number; state: string }> };
@@ -549,12 +539,11 @@ describe("MemoryService / evolution / reflection", () => {
     );
     expect(reflectionCall?.options.thinkingMode).toBe("disabled");
     expect(summaryCalls.some((call) => call.options.operation === "capture.reflection.batch.v13")).toBe(false);
-    const summaryCall = summaryCalls.find((call) =>
-      call.options.operation === "capture.reflected_trace_summary.v1"
-    );
+    const summaryCall = summaryCalls.find((call) => call.options.operation === "capture.summarize");
     expect(summaryCall).toBeTruthy();
-    expect(summaryCall!.messages[0]?.content).not.toContain("Write in English");
-    expect(summaryCall!.messages[1]?.content).toContain("Simplified Chinese");
+    expect(summaryCall!.messages[0]?.content).toContain("single user/agent exchange");
+    expect(summaryCall!.messages[1]?.content).not.toContain("REFLECTION:");
+    expect(summaryCalls.some((call) => call.options.operation === "capture.reflected_trace_summary.v1")).toBe(false);
     const payload = JSON.parse(
       reflectionCall?.messages.find((message) => message.role === "user")?.content ?? "{}"
     ) as { host_context?: { reflectionModel?: string } };
@@ -843,20 +832,13 @@ describe("MemoryService / evolution / reflection", () => {
     expect(payload.steps[0]?.tool_calls).toHaveLength(2);
     expect(payload.steps.every((step) => step.synth_allowed)).toBe(true);
     expect(payload.task_context).toContain("sqlite migration");
-    const summaryCall = calls.find((call) =>
-      call.options.operation === "capture.reflected_trace_summary.v1"
-    );
+    const summaryCall = calls.find((call) => call.options.operation === "capture.summarize");
     expect(summaryCall).toBeTruthy();
-    expect(summaryCall!.messages[0]?.content).toContain("each reflected AI-agent trace");
-    const summaryPayload = JSON.parse(
-      summaryCall!.messages.find((message) => message.role === "user")?.content ?? "{}"
-    ) as { traces: Array<{ index: number; reflection: string; toolCalls: unknown[] }> };
-    expect(summaryPayload.traces).toHaveLength(1);
-    expect(summaryPayload.traces[0]).toMatchObject({
-      index: 0,
-      reflection: "PIVOTAL"
-    });
-    expect(summaryPayload.traces[0]?.toolCalls).toHaveLength(2);
+    expect(summaryCall!.messages[0]?.content).toContain("single user/agent exchange");
+    const summaryPayload = summaryCall!.messages.find((message) => message.role === "user")?.content ?? "";
+    expect(summaryPayload).not.toContain("REFLECTION:");
+    expect(summaryPayload).toContain("TOOLS:");
+    expect(calls.some((call) => call.options.operation === "capture.reflected_trace_summary.v1")).toBe(false);
 
     const rows = complete.l1MemoryIds.map((id) => db.db.prepare(
       `SELECT properties_json
@@ -894,7 +876,7 @@ describe("MemoryService / evolution / reflection", () => {
        WHERE job_type = 'embedding'
          AND payload_json LIKE '%reflection.updated%'`
     ).get() as { count: number };
-    expect(queuedEmbedding.count).toBeGreaterThan(0);
+    expect(queuedEmbedding.count).toBe(complete.l1MemoryIds.length);
     db.close();
   });
 });

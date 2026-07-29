@@ -91,6 +91,7 @@ export const MemmyMemoryPlugin = async ({ client, directory, worktree }) => {
       pendingTurns.set(input.sessionID, {
         sessionId,
         turnId,
+        episodeId: normalizeText(turn && turn.episodeId) || undefined,
         sourceMemoryIds: Array.isArray(turn && turn.sourceMemoryIds) ? turn.sourceMemoryIds : undefined,
         query: cleanQuery,
         userMessageId: normalizeText(output && output.message && output.message.id) || requestedTurnId,
@@ -144,6 +145,7 @@ export const MemmyMemoryPlugin = async ({ client, directory, worktree }) => {
       adapterId: "memmy-opencode-plugin",
       requestId: "opencode-plugin:" + pending.turnId,
       sessionId: pending.sessionId,
+      episodeId: pending.episodeId,
       source: SOURCE,
       query: pending.query,
       answer,

@@ -13,7 +13,7 @@ describe("TUI composer cursor", () => {
       "const loop = activeLoopRef.current ?? AgentLoop.fromConfig(config);",
     );
     expect(tuiSource).toMatch(
-      /const cleanup = onceCleanup[\s\S]*?loop\.stop\(\);[\s\S]*?loop\.closeRuntimeTools\(\)/,
+      /const cleanup = onceCleanup[\s\S]*?if \(activeLoop\) activeLoop\.stop\(\);[\s\S]*?loop\.closeRuntimeTools\(\)/,
     );
   });
 

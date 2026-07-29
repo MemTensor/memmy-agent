@@ -36,6 +36,8 @@
 
 ## 🚀 开始体验 Memmy
 
+点击进入[官网下载](https://memmy.cn/)或者 [GitHub Release](https://github.com/MemTensor/memmy-agent/releases)下载。
+
 > [!TIP]
 > 注册 Memmy 后，即可获得免费 AI 使用额度，系统会自动进行模型调度，帮助你体验完整的 Memory + Agent Runtime。
 > **体验额度：** 

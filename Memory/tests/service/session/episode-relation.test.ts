@@ -148,11 +148,11 @@ describe("MemoryService / session / episode relation", () => {
     });
 
     expect(prepared).toMatchObject({
+      episodeId: first.episodeId,
+      closedEpisodeIds: [],
       hits: [],
       sourceMemoryIds: []
     });
-    expect(prepared).not.toHaveProperty("episodeId");
-    expect(prepared).not.toHaveProperty("closedEpisodeIds");
     expect(prepared.status).toContain("relation:end_topic");
     expect(relationCalls).toEqual([]);
     expect(service.getMemory(first.episodeId)).toMatchObject({
@@ -265,8 +265,9 @@ describe("MemoryService / session / episode relation", () => {
     const firstStart = await service.startTurn(request);
     const secondStart = await service.startTurn(request);
 
-    expect(firstStart).not.toHaveProperty("episodeId");
-    expect(secondStart).not.toHaveProperty("episodeId");
+    expect(firstStart.episodeId).toBe(secondStart.episodeId);
+    expect(firstStart.closedEpisodeIds).toEqual([]);
+    expect(secondStart.closedEpisodeIds).toEqual([]);
     expect(firstStart.status).toContain("relation:end_topic");
     expect(secondStart.status).toContain("relation:end_topic");
     expect(relationCalls).toEqual([]);
@@ -321,7 +322,7 @@ describe("MemoryService / session / episode relation", () => {
       answer: "可以使用 certbot 自动续期。"
     });
 
-    expect(nextStart).not.toHaveProperty("episodeId");
+    expect(nextStart.episodeId).toBe(next.episodeId);
     expect(next.episodeId).not.toBe(first.episodeId);
     expect(service.getMemory(first.episodeId)).toMatchObject({
       kind: "episode",
@@ -362,8 +363,8 @@ describe("MemoryService / session / episode relation", () => {
       query: "继续说明证书续期"
     });
 
-    expect(nextStart).not.toHaveProperty("episodeId");
-    expect(relationCalls).toEqual([]);
+    expect(nextStart.episodeId).not.toBe(first.episodeId);
+    expect(relationCalls).toEqual(["relation.classify.v1"]);
 
     service.completeTurn("turn-pending-end-topic-close", {
       sessionId: session.sessionId,
@@ -405,17 +406,17 @@ describe("MemoryService / session / episode relation", () => {
       sessionId: session.sessionId,
       query: "new task: summarize the Q4 hiring plan"
     });
-    expect(prepared).not.toHaveProperty("episodeId");
+    expect(prepared.episodeId).not.toBe(first.episodeId);
+    expect(prepared.closedEpisodeIds).toEqual([first.episodeId]);
     expect(db.db.prepare(
       "SELECT COUNT(*) AS count FROM episodes WHERE session_id = ?"
-    ).get(session.sessionId)).toEqual({ count: 1 });
+    ).get(session.sessionId)).toEqual({ count: 2 });
     const completed = service.completeTurn("turn-relation-new-task", {
       sessionId: session.sessionId,
       query: "new task: summarize the Q4 hiring plan",
       answer: "The Q4 hiring plan has been summarized."
     });
-    expect(completed.episodeId).not.toBe(first.episodeId);
-    expect(completed.closedEpisodeIds).toEqual([first.episodeId]);
+    expect(completed.episodeId).toBe(prepared.episodeId);
 
     const rows = db.db.prepare(
       `SELECT id, status, meta_json
@@ -459,7 +460,8 @@ describe("MemoryService / session / episode relation", () => {
       sessionId: session.sessionId,
       query: "那证书自动续期呢"
     });
-    expect(prepared).not.toHaveProperty("episodeId");
+    expect(prepared.episodeId).toBe(first.episodeId);
+    expect(prepared.closedEpisodeIds).toEqual([]);
 
     const rows = db.db.prepare(
       `SELECT id, status, meta_json
@@ -469,7 +471,9 @@ describe("MemoryService / session / episode relation", () => {
     ).all(session.sessionId) as Array<{ id: string; status: string; meta_json: string }>;
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ id: first.episodeId, status: "open" });
-    expect(JSON.parse(rows[0]!.meta_json)).not.toHaveProperty("relation");
+    expect(JSON.parse(rows[0]!.meta_json)).toMatchObject({
+      relation: "follow_up"
+    });
 
     const completed = service.completeTurn("turn-relation-follow-up-next", {
       sessionId: session.sessionId,
@@ -539,7 +543,7 @@ describe("MemoryService / session / episode relation", () => {
     db.close();
   });
 
-  it("does not reserve a raw turn at start and binds the episode during completion", async () => {
+  it("reserves a started raw turn in the selected episode and completes that same turn", async () => {
     const root = createTestRoot("mindock-memory-turn-bind-");
     const db = new MemoryDb({
       path: join(root, "memory.sqlite")
@@ -568,14 +572,18 @@ describe("MemoryService / session / episode relation", () => {
       sessionId: session.sessionId,
       query: "青竹项目的部署端口是多少？林浩偏好什么回答风格？"
     });
-    expect(prepared).not.toHaveProperty("episodeId");
-    expect(relationCalls).toEqual([]);
+    expect(prepared.episodeId).toBe(first.episodeId);
+    expect(relationCalls).toEqual(["relation.classify.v1"]);
     const reserved = db.db.prepare(
       `SELECT id, episode_id, status
        FROM raw_turns
        WHERE session_id = ? AND turn_id = ?`
     ).get(session.sessionId, "turn-bind-second") as { id: string; episode_id: string; status: string } | undefined;
-    expect(reserved).toBeUndefined();
+    expect(reserved).toEqual({
+      id: expect.stringMatching(/^raw_/u),
+      episode_id: prepared.episodeId,
+      status: "started"
+    });
 
     const completed = service.completeTurn("turn-bind-second", {
       sessionId: session.sessionId,
@@ -584,6 +592,7 @@ describe("MemoryService / session / episode relation", () => {
     });
 
     expect(completed.episodeId).toBe(first.episodeId);
+    expect(completed.rawTurnId).toBe(reserved?.id);
     const episodes = db.db.prepare(
       `SELECT id, turn_count, raw_turn_ids_json
        FROM episodes
@@ -662,7 +671,7 @@ describe("MemoryService / session / episode relation", () => {
     db.close();
   });
 
-  it("does not invoke the configured relation classifier during read-only turn.start", async () => {
+  it("uses the configured relation classifier during turn.start arbitration", async () => {
     const root = createTestRoot("mindock-memory-");
     const db = new MemoryDb({
       path: join(root, "memory.sqlite")
@@ -680,7 +689,7 @@ describe("MemoryService / session / episode relation", () => {
         userId: "user-relation-llm"
       }
     });
-    service.completeTurn("turn-relation-llm-first", {
+    const first = service.completeTurn("turn-relation-llm-first", {
       sessionId: session.sessionId,
       query: "Configure nginx TLS for the service",
       answer: "Use port 443 and verify the certificate chain."
@@ -691,8 +700,8 @@ describe("MemoryService / session / episode relation", () => {
       query: "Database certificate rotation details please"
     });
 
-    expect(prepared).not.toHaveProperty("episodeId");
-    expect(calls).toEqual([]);
+    expect(prepared.episodeId).toBe(first.episodeId);
+    expect(calls).toEqual(["relation.classify.v1", "relation.arbitration.v1"]);
     const rows = db.db.prepare(
       `SELECT meta_json
        FROM episodes
@@ -700,7 +709,12 @@ describe("MemoryService / session / episode relation", () => {
        ORDER BY opened_at ASC`
     ).all(session.sessionId) as Array<{ meta_json: string }>;
     expect(rows).toHaveLength(1);
-    expect(JSON.parse(rows[0]!.meta_json)).not.toHaveProperty("relationDecision");
+    expect(JSON.parse(rows[0]!.meta_json)).toMatchObject({
+      relationDecision: {
+        relation: "follow_up",
+        signals: expect.arrayContaining(["arbitration_override"])
+      }
+    });
     db.close();
   });
 
@@ -739,9 +753,12 @@ describe("MemoryService / session / episode relation", () => {
       query: "Database certificate rotation details please"
     });
 
-    expect(summaryCalls).toEqual([]);
+    expect(summaryCalls).toEqual(["relation.classify.v1", "relation.arbitration.v1"]);
     expect(evolutionCalls).toEqual([]);
-    expect(summaryOptions).toEqual([]);
+    expect(summaryOptions).toEqual([
+      { operation: "relation.classify.v1", thinkingMode: "disabled" },
+      { operation: "relation.arbitration.v1", thinkingMode: "disabled" }
+    ]);
     db.close();
   });
 
@@ -764,10 +781,10 @@ describe("MemoryService / session / episode relation", () => {
       sessionId: session.sessionId,
       query: "wrong, use port 443 instead and verify TLS"
     });
-    expect(prepared).not.toHaveProperty("episodeId");
+    expect(prepared.episodeId).toBe(first.episodeId);
     expect(db.db.prepare(
       "SELECT COUNT(*) AS count FROM feedback WHERE user_id = 'user-relation-revision'"
-    ).get()).toEqual({ count: 0 });
+    ).get()).toEqual({ count: 1 });
     const correction = service.completeTurn("turn-relation-revision-fix", {
       sessionId: session.sessionId,
       query: "wrong, use port 443 instead and verify TLS",
@@ -866,7 +883,8 @@ describe("MemoryService / session / episode relation", () => {
       sessionId: session.sessionId,
       query: "不对，应该用递归实现，这样性能不好。换个任务：实现二叉树层序遍历"
     });
-    expect(prepared).not.toHaveProperty("episodeId");
+    expect(prepared.episodeId).not.toBe(first.episodeId);
+    expect(prepared.closedEpisodeIds).toEqual([first.episodeId]);
     const correction = service.completeTurn("turn-implicit-feedback-correction", {
       sessionId: session.sessionId,
       query: "不对，应该用递归实现，这样性能不好。换个任务：实现二叉树层序遍历",

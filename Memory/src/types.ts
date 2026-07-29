@@ -129,8 +129,6 @@ export interface MemoryRow {
 }
 
 export interface MemoryFilter {
-  userId?: string;
-  negativeExperienceUserId?: string;
   sessionId?: string;
   conversationId?: string;
   agentId?: string;
@@ -306,6 +304,8 @@ export interface SubagentCompleteRequest extends RequestEnvelope {
 export interface MemorySearchRequest extends RequestEnvelope {
   query: string;
   sessionId?: string;
+  episodeId?: string;
+  turnId?: string;
   layers?: MemoryLayer[];
   tags?: string[];
   limit?: number;

@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MessageBus, OutboundMessage } from "../../../src/core/runtime-messages/index.js";
+import { AgentLoop } from "../../../src/core/agent-runtime/loop.js";
 import { getMediaDir } from "../../../src/config/paths.js";
 import { SessionManager } from "../../../src/core/session/manager.js";
 import {
@@ -257,6 +258,41 @@ describe("WebSocket channel", () => {
       mediaPaths: [imagePath, textPath],
     });
     expect(titleService.onUserMessagePersisted).not.toHaveBeenCalled();
+  });
+
+  it("acknowledges the first WebUI message after binding its workspace", async () => {
+    const root = tempDataDir();
+    const workspace = path.join(root, "workspace");
+    const sessions = new SessionManager(path.join(root, "sessions"));
+    fs.mkdirSync(workspace, { recursive: true });
+    const bus = new MessageBus();
+    const channel = new WebSocketChannel({}, bus, { sessionManager: sessions, workspacePath: workspace });
+    const loop = new AgentLoop({
+      workspace,
+      sessionManager: sessions,
+      bus,
+      provider: {
+        generation: { maxTokens: 256 },
+        getDefaultModel: () => "test-model",
+      },
+    });
+    const ws = connection();
+    channel.attachConnection(ws, "chat-1");
+
+    await channel.dispatchEnvelope(ws, "client-1", {
+      type: "message",
+      chat_id: "chat-1",
+      content: "/help",
+      webui: true,
+      client_request_id: "11111111-1111-4111-8111-111111111111",
+      target: { kind: "standalone" },
+    });
+    await loop.dispatchMessage(await bus.nextInbound());
+    while (bus.outboundSize) {
+      await channel.send(await bus.nextOutbound());
+    }
+
+    expect(ws.send.mock.calls.map(([payload]) => JSON.parse(payload).event)).toContain("message_accepted");
   });
 
   it("notifies the WebUI title service only after thread-scoped session updates are sent", async () => {

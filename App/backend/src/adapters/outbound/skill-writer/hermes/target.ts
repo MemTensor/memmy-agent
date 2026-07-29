@@ -1029,6 +1029,8 @@ class MemmyMemoryProvider(MemoryProvider):
                     self._turns[active_session] = {
                         "sessionId": memory_session_id,
                         "turnId": turn_id,
+                        "episodeId": str(turn.get("episodeId") or ""),
+                        "sourceMemoryIds": turn.get("sourceMemoryIds") if isinstance(turn.get("sourceMemoryIds"), list) else None,
                         "query": text,
                     }
             injected = turn.get("injectedContext") or {}
@@ -1160,6 +1162,8 @@ class MemmyMemoryProvider(MemoryProvider):
                 turn = {
                     "sessionId": memory_session_id,
                     "turnId": str(started.get("turnId") or ""),
+                    "episodeId": str(started.get("episodeId") or ""),
+                    "sourceMemoryIds": started.get("sourceMemoryIds") if isinstance(started.get("sourceMemoryIds"), list) else None,
                     "query": query,
                 }
             turn_id = turn.get("turnId") or ""
@@ -1167,9 +1171,11 @@ class MemmyMemoryProvider(MemoryProvider):
                 raise RuntimeError("Memmy did not return a turnId")
             _memmy_post("/api/v1/turns/" + turn_id + "/complete", {
                 "sessionId": memory_session_id,
+                "episodeId": turn.get("episodeId") or None,
                 "query": turn.get("query") or query,
                 "answer": answer,
                 "status": "succeeded",
+                "sourceMemoryIds": turn.get("sourceMemoryIds"),
             })
         except Exception as exc:
             logger.warning("memmy-memory sync failed: %s", exc)

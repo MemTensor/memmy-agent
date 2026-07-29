@@ -40,12 +40,16 @@ export function polardbMigrationSql(): string[] {
         to_tsvector('simple', coalesce(memory_value, '') || ' ' || coalesce(memory_key, ''))
       ) STORED
     )`,
-    `CREATE INDEX IF NOT EXISTS idx_memories_user_layer_status_updated
-      ON memories (user_id, memory_layer, status, updated_at DESC)`,
-    `CREATE INDEX IF NOT EXISTS idx_memories_user_conversation
-      ON memories (user_id, conversation_id, updated_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_memories_layer_status_updated
+      ON memories (memory_layer, status, updated_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_memories_conversation_updated
+      ON memories (conversation_id, updated_at DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_memories_agent_app
       ON memories (agent_id, app_id, updated_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_memories_content_hash_layer
+      ON memories (content_hash, memory_layer)`,
+    `CREATE INDEX IF NOT EXISTS idx_memories_key_layer
+      ON memories (memory_key, memory_layer)`,
     `CREATE INDEX IF NOT EXISTS idx_memories_tags_gin
       ON memories USING GIN (tags)`,
     `CREATE INDEX IF NOT EXISTS idx_memories_info_gin

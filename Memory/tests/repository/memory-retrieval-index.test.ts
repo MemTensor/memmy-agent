@@ -11,6 +11,57 @@ import { Repositories } from "../../src/storage/repositories.js";
 import type { MemoryLayer, MemoryRow } from "../../src/types.js";
 
 describe("memory retrieval indexes", () => {
+  it("upserts the same layer and key globally across user ids for every memory layer", () => {
+    const root = mkdtempSync(join(tmpdir(), "mindock-memory-global-key-"));
+    try {
+      const db = new MemoryDb({ path: join(root, "memory.sqlite") });
+      const repos = new Repositories(db.db);
+      const layers: MemoryLayer[] = ["L1", "L2", "L3", "Skill"];
+
+      for (const layer of layers) {
+        const first = {
+          ...authorityMemory(`shared_${layer.toLowerCase()}_first`, layer),
+          userId: "global-key-user-a",
+          memoryKey: "shared-memory-key",
+          memoryValue: `${layer} first value`
+        };
+        const second = {
+          ...authorityMemory(`shared_${layer.toLowerCase()}_second`, layer),
+          userId: "global-key-user-b",
+          memoryKey: "shared-memory-key",
+          memoryValue: `${layer} second value`,
+          timeline: "2026-06-19T00:00:00.000Z",
+          updatedAt: "2026-06-19T00:00:00.000Z"
+        };
+
+        const created = repos.memories.upsertByKey(first);
+        const updated = repos.memories.upsertByKey(second);
+
+        expect(created.created).toBe(true);
+        expect(updated).toMatchObject({
+          created: false,
+          memory: {
+            id: first.id,
+            userId: "global-key-user-a",
+            memoryLayer: layer,
+            memoryKey: "shared-memory-key",
+            memoryValue: `${layer} second value`
+          }
+        });
+        expect(repos.memories.getByKey(layer, "shared-memory-key")?.id).toBe(first.id);
+      }
+
+      expect(db.db.prepare(
+        `SELECT COUNT(*) AS count
+         FROM memories
+         WHERE memory_key = 'shared-memory-key'`
+      ).get()).toEqual({ count: layers.length });
+      db.close();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("stores trace vectors only in vec0 and searches vector, fts, and pattern routes", () => {
     const root = mkdtempSync(join(tmpdir(), "mindock-memory-retrieval-index-"));
     try {

@@ -297,17 +297,6 @@ export function createBatchReflectionLlm(calls: Array<{
           }))
         } as unknown as T;
       }
-      if (options.operation === "capture.reflected_trace_summary.v1") {
-        const payload = JSON.parse(messages.find((message) => message.role === "user")?.content ?? "{}") as {
-          traces?: Array<{ index: number }>;
-        };
-        return {
-          summaries: (payload.traces ?? []).map((trace) => ({
-            index: trace.index,
-            summary: captureSummary
-          }))
-        } as unknown as T;
-      }
       if (options.operation === "capture.summarize") {
         return {
           summary: captureSummary

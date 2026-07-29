@@ -17,7 +17,7 @@ const {
 afterEach(cleanup);
 
 describe("MemoryService / session / turn capture", () => {
-  it("keeps turn.start read-only and writes the complete turn atomically", async () => {
+  it("records a started RawTurn at turn.start and creates L1 only after turn.complete", async () => {
     const { db, service } = createTestService();
     const session = service.openSession({
       namespace: {
@@ -41,18 +41,61 @@ describe("MemoryService / session / turn capture", () => {
       requestId: "cursor-start:readonly",
       sessionId: session.sessionId,
       turnId: "turn-start-readonly",
-      query: "Do not persist this query until the assistant finishes."
+      query: "Do not create L1 until the assistant finishes."
     });
 
     expect(started.turnId).toBe("turn-start-readonly");
-    expect(started).not.toHaveProperty("episodeId");
-    expect(counts()).toEqual(before);
+    expect(started.episodeId).toMatch(/^episode_/u);
+    expect(started.closedEpisodeIds).toEqual([]);
+    expect(counts()).toEqual({
+      ...before,
+      episodes: before.episodes + 1,
+      rawTurns: before.rawTurns + 1,
+      recalls: before.recalls + 1,
+      apiLogs: before.apiLogs + 1
+    });
+    const startedRawTurn = db.db.prepare(
+      `SELECT episode_id, user_text, assistant_text, source_memory_ids_json,
+              message_payload_json, status
+       FROM raw_turns
+       WHERE session_id = ? AND turn_id = ?`
+    ).get(session.sessionId, started.turnId) as {
+      episode_id: string;
+      user_text: string;
+      assistant_text: string | null;
+      source_memory_ids_json: string;
+      message_payload_json: string;
+      status: string;
+    };
+    expect(startedRawTurn).toMatchObject({
+      episode_id: started.episodeId,
+      user_text: "Do not create L1 until the assistant finishes.",
+      assistant_text: null,
+      status: "started"
+    });
+    expect(JSON.parse(startedRawTurn.source_memory_ids_json)).toEqual(started.sourceMemoryIds);
+    expect(JSON.parse(startedRawTurn.message_payload_json)).toMatchObject({
+      turn_start: {
+        contextPacketId: started.contextPacketId,
+        searchEventId: started.searchEventId,
+        sourceMemoryIds: started.sourceMemoryIds
+      }
+    });
+    expect(db.db.prepare(
+      `SELECT tool_name, json_extract(input_json, '$.retrievalMode') AS retrieval_mode
+       FROM api_logs
+       ORDER BY id DESC
+       LIMIT 1`
+    ).get()).toEqual({
+      tool_name: "memory_search",
+      retrieval_mode: "turn_start"
+    });
 
     const completed = service.completeTurn("turn-start-readonly", {
       adapterId: "memmy-cursor-hook",
       requestId: "cursor-complete:readonly",
       sessionId: session.sessionId,
-      query: "Do not persist this query until the assistant finishes.",
+      query: "Do not create L1 until the assistant finishes.",
       answer: "The complete user and assistant turn is now safe to persist.",
       status: "succeeded",
       sourceMemoryIds: started.sourceMemoryIds
@@ -63,11 +106,88 @@ describe("MemoryService / session / turn capture", () => {
       episodes: before.episodes + 1,
       rawTurns: before.rawTurns + 1,
       memories: before.memories + 1,
-      recalls: before.recalls,
-      apiLogs: before.apiLogs + 1,
+      recalls: before.recalls + 1,
+      apiLogs: before.apiLogs + 2,
       idempotency: before.idempotency + 1
     });
     expect(completed.jobs.map((job) => job.jobType)).toContain("episode_idle_close");
+    db.close();
+  });
+
+  it("does not capture an interrupted started turn when a newer turn completes", async () => {
+    const { db, service } = createTestService();
+    const session = service.openSession({
+      namespace: {
+        source: "codex",
+        profileId: "default",
+        userId: "turn-interruption-user"
+      }
+    });
+    const memoryCount = () =>
+      (db.db.prepare("SELECT COUNT(*) AS count FROM memories").get() as { count: number }).count;
+    const beforeMemories = memoryCount();
+
+    const interrupted = await service.startTurn({
+      sessionId: session.sessionId,
+      turnId: "turn-interrupted",
+      query: "Fix the sqlite migration, but this response will be interrupted."
+    });
+    const replacement = await service.startTurn({
+      sessionId: session.sessionId,
+      turnId: "turn-replacement",
+      query: "For that sqlite migration, inspect the schema first."
+    });
+
+    expect(replacement.episodeId).toBe(interrupted.episodeId);
+    expect(memoryCount()).toBe(beforeMemories);
+    expect(db.db.prepare(
+      `SELECT turn_id, status, assistant_text
+       FROM raw_turns
+       WHERE session_id = ?
+       ORDER BY created_at ASC, turn_id ASC`
+    ).all(session.sessionId)).toEqual([
+      {
+        turn_id: "turn-interrupted",
+        status: "started",
+        assistant_text: null
+      },
+      {
+        turn_id: "turn-replacement",
+        status: "started",
+        assistant_text: null
+      }
+    ]);
+
+    const completed = service.completeTurn("turn-replacement", {
+      sessionId: session.sessionId,
+      query: "For that sqlite migration, inspect the schema first.",
+      answer: "I inspected the schema before changing the sqlite migration."
+    });
+
+    expect(completed.l1MemoryIds).toHaveLength(1);
+    expect(memoryCount()).toBe(beforeMemories + 1);
+    expect(db.db.prepare(
+      `SELECT turn_id, status
+       FROM raw_turns
+       WHERE session_id = ?
+       ORDER BY created_at ASC, turn_id ASC`
+    ).all(session.sessionId)).toEqual([
+      {
+        turn_id: "turn-interrupted",
+        status: "started"
+      },
+      {
+        turn_id: "turn-replacement",
+        status: "succeeded"
+      }
+    ]);
+    expect(db.db.prepare(
+      `SELECT json_extract(properties_json, '$.internal_info.raw_turn_id') AS raw_turn_id
+       FROM memories
+       WHERE id = ?`
+    ).get(completed.l1MemoryIds[0])).toEqual({
+      raw_turn_id: completed.rawTurnId
+    });
     db.close();
   });
 

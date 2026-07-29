@@ -150,6 +150,9 @@ describe("hermes skill target", () => {
     expect(pluginInit).toContain("thread.join(timeout=SHUTDOWN_THREAD_TIMEOUT_SECONDS)");
     expect(pluginInit).toContain("urlopen(request, timeout=HTTP_TIMEOUT_SECONDS)");
     expect(pluginInit).toContain("memory_session_id = self._ensure_session(active_session)");
+    expect(pluginInit).toContain('"episodeId": str(turn.get("episodeId") or "")');
+    expect(pluginInit).toContain('"episodeId": turn.get("episodeId") or None');
+    expect(pluginInit).toContain('"sourceMemoryIds": turn.get("sourceMemoryIds")');
     expect(pluginInit).toContain("if isinstance(injected_context, str) and injected_context.strip():");
     expect(pluginInit).toContain("markdown = _optional_text(injected_context.get(\"markdown\"))");
     expect(pluginInit).toContain("def _sanitize_memmy_protocol_text");

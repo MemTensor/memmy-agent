@@ -783,6 +783,8 @@ export class MemoryService {
     contextPacketId: string;
     turnId: string;
     sessionId: string;
+    episodeId: string;
+    closedEpisodeIds: string[];
     searchEventId: string;
     hits: RecallHit[];
     injectedContext: InjectedContext;
@@ -1838,6 +1840,7 @@ export class MemoryService {
     request: TurnStartRequest & Record<string, unknown>
   ): ReturnType<MemoryService["startTurn"]> {
     const turnId = request.turnId ?? newId("turn");
+    const episodeId = `episode_${stableHash(`readonly:${request.sessionId}:${turnId}`).slice(0, 20)}`;
     const contextHints = turnStartContextHints(request);
     const search = await this.search({
       requestId: request.requestId,
@@ -1852,13 +1855,14 @@ export class MemoryService {
       includeInjectedContext: true,
       retrievalMode: "turn_start",
       contextHints,
-      injectedContextQuery: request.query,
-      recordEvent: false
+      injectedContextQuery: request.query
     });
     return {
-      contextPacketId: `ctx_${stableHash(`${request.sessionId}:${turnId}:${search.searchEventId}`).slice(0, 20)}`,
+      contextPacketId: `ctx_${stableHash(`${request.sessionId}:${episodeId}:${turnId}:${search.searchEventId}`).slice(0, 20)}`,
       turnId,
       sessionId: request.sessionId,
+      episodeId,
+      closedEpisodeIds: [],
       searchEventId: search.searchEventId,
       hits: search.hits,
       injectedContext: search.injectedContext,

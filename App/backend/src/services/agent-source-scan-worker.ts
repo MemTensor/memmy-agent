@@ -8,6 +8,10 @@ import {
 } from "../adapters/outbound/memory-client/index.js";
 import { createAppStateStore, type AppStateStore } from "../infrastructure/app-state-store/index.js";
 import { createAgentSourceScanJournal, type AgentSourceScanJournal } from "../infrastructure/agent-source-scan-journal/index.js";
+import {
+  createAgentSourceLifecycleAnalytics,
+  resolveLoggedInAnalyticsUserId,
+} from "../analytics/agent-source-analytics.js";
 import { createAgentSourceService } from "./agent-source-service.js";
 import { createBuiltinAgentSourceRegistry } from "./builtin-agent-source-registry.js";
 import { createIngestionService } from "./ingestion-service.js";
@@ -85,12 +89,27 @@ function createAgentSources(appStateStore: AppStateStore, memoryClient: MemoryCl
     agentSourceRepository: appStateStore.repositories.agentSources
   });
 
+  const accountSessionRepository = appStateStore.repositories.accountSession;
   return createAgentSourceService({
     sourceRegistry,
     agentSourceRepository: appStateStore.repositories.agentSources,
     ingestionService,
     memoryClient,
-    skillDistributionService: createUnavailableSkillDistributionService()
+    skillDistributionService: createUnavailableSkillDistributionService(),
+    agentSourceAnalytics: createAgentSourceLifecycleAnalytics({
+      getUserId: () => {
+        const session = accountSessionRepository.get();
+        if (!session.authenticated) return null;
+        return resolveLoggedInAnalyticsUserId({
+          cloudUuid: accountSessionRepository.getCloudUuid(),
+          userId: session.profile.userId,
+        });
+      },
+      getUserMode: () => {
+        const mode = appStateStore.repositories.bootstrap.getAppSettings().userMode;
+        return mode === "account" || mode === "byok" ? mode : null;
+      },
+    }),
   });
 }
 

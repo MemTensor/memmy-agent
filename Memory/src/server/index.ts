@@ -8,10 +8,12 @@ import { loadMemmyConfig } from "../config/index.js";
 import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
 import { MemoryService } from "../service/memory-service.js";
 import { listenMemoryHttpServer } from "./http.js";
+import { loadCloudServiceEnv } from "../cli/load-env.js";
 
 const logger = createMemoryLogger("server");
 
 export async function main(argv = process.argv.slice(2)): Promise<void> {
+    loadCloudServiceEnv();
     const options = parseServeArgs(argv);
     const { config, path: configPath } = loadMemmyConfig(options.configPath);
     const host = options.host ?? process.env.MEMMY_MEMORY_HOST ?? process.env.MEMORY_SERVICE_HOST ?? "127.0.0.1";

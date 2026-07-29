@@ -4,6 +4,7 @@ import { displayMemoryId } from "./memory-id.js";
 type MemoryDisplayItem = Pick<MemoryListItem, "id" | "title" | "summary" | "memoryLayer"> & {
   kind?: MemoryListItem["kind"];
   body?: string;
+  metadata?: Record<string, unknown>;
 };
 type MemorySourceItem = Pick<MemoryListItem, "tags"> & {
   metadata?: Record<string, unknown>;
@@ -41,15 +42,30 @@ export function drawerEyebrow(item?: Pick<MemoryListItem, "id"> | null): string 
 
 export function displayMemoryTitle(item: MemoryDisplayItem, ...candidates: Array<string | undefined | null>): string {
   if (item.kind === "span") {
-    return item.title;
+    return spanGoal(item.metadata) ?? item.title;
   }
 
-  for (const value of [readySummary(item.summary), ...candidates, firstUserQueryLine(item.body), firstReadableBodyLine(item.body), item.title]) {
+  const summary = readySummary(item.summary);
+  if (item.kind === "trace" && summary) {
+    return summary;
+  }
+
+  for (const value of [summary, ...candidates, firstUserQueryLine(item.body), firstReadableBodyLine(item.body), item.title]) {
     const cleaned = cleanMemoryText(value);
     if (cleaned && !isInternalTitle(cleaned)) return cleaned;
   }
 
   return displayMemoryId(item.id);
+}
+
+function spanGoal(metadata?: Record<string, unknown>): string | undefined {
+  const explicitGoal = stringValue(metadata?.spanGoal)?.trim();
+  if (explicitGoal) return explicitGoal;
+
+  const properties = recordValue(metadata?.properties);
+  const internalInfo = recordValue(properties.internal_info);
+  const span = recordValue(internalInfo.span);
+  return stringValue(span.span_goal)?.trim() || undefined;
 }
 
 export function cleanMemoryBody(value?: string | null): string {
@@ -150,4 +166,8 @@ function firstAgentSourceTag(tags: readonly string[]): string | undefined {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+function recordValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }

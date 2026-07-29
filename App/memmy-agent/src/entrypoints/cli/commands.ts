@@ -1186,6 +1186,7 @@ export async function runInteractiveAgent(
     ? (sessionId.split(/:(.*)/s).filter(Boolean).slice(0, 2) as [string, string])
     : ["cli", sessionId];
   let active = true;
+  let exitTrigger: "quit" | "interrupt" = "quit";
   const state: {
     renderer: StreamRenderer | null;
     turnDone: (() => void) | null;
@@ -1245,6 +1246,7 @@ export async function runInteractiveAgent(
       } catch (error) {
         if ((error as Error).name !== "KeyboardInterrupt") throw error;
         console.log("\nGoodbye!");
+        exitTrigger = "interrupt";
         break;
       }
 
@@ -1252,6 +1254,7 @@ export async function runInteractiveAgent(
       if (!command) continue;
       if (isExitCommand(command)) {
         console.log("\nGoodbye!");
+        exitTrigger = "quit";
         break;
       }
 
@@ -1265,17 +1268,20 @@ export async function runInteractiveAgent(
       const donePromise = new Promise<void>((resolve) => {
         state.turnDone = resolve;
       });
-      await bus.publishInbound(
-        new InboundMessage({
-          channel: cliChannel,
-          chatId: cliChatId,
-          senderId: "user",
-          content: userInput,
-          metadata: { wantsStream: true },
-        }),
-      );
-      await donePromise;
-      state.turnDone = null;
+      try {
+        await bus.publishInbound(
+          new InboundMessage({
+            channel: cliChannel,
+            chatId: cliChatId,
+            senderId: "user",
+            content: userInput,
+            metadata: { wantsStream: true },
+          }),
+        );
+        await donePromise;
+      } finally {
+        state.turnDone = null;
+      }
 
       const turnResponse = turnResponses.shift();
       if (turnResponse) {
@@ -1288,6 +1294,11 @@ export async function runInteractiveAgent(
     }
   } finally {
     active = false;
+    try {
+      await loop.emitSessionEnd(null, sessionId, exitTrigger);
+    } catch {
+      // Best-effort Memory session close on interactive exit.
+    }
     loop.stop();
     restoreTerminal();
     await Promise.allSettled([

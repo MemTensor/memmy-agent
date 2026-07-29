@@ -21,7 +21,7 @@ describe("MemoryService / read model / skill list", () => {
     const namespaceB = {
       source: "codex",
       profileId: "jiang",
-      userId: "skill-page-user",
+      userId: "skill-page-other-user",
       workspaceId: "workspace-skill-page-b"
     };
     const sessionA = service.openSession({ namespace: namespaceA });

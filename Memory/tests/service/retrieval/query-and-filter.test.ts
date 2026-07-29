@@ -840,7 +840,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
     db.close();
   });
 
-  it("recalls memories across profiles in the same user account", async () => {
+  it("recalls memories across profiles and user ids in the shared database", async () => {
     const { db, service } = createTestService();
     const profileA = service.openSession({
       namespace: {
@@ -854,7 +854,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
       namespace: {
         source: "codex",
         profileId: "profile-b",
-        userId: "shared-recall-user"
+        userId: "other-recall-user"
       },
       workspaceId: "workspace-recall"
     });
@@ -871,8 +871,8 @@ describe("MemoryService / retrieval / query and filtering", () => {
     });
     const profileBMemory = service.completeTurn("turn-profile-b-recall", {
       sessionId: profileB.sessionId,
-      query: "remember profile B private vectorstore token cross_profile_secret_b",
-      answer: "Profile B private token marker should not leak."
+      query: "remember profile B shared vectorstore token cross_profile_secret_b",
+      answer: "Profile B shared token marker should remain globally recallable."
     });
     await service.runWorkerOnce(50);
 
@@ -883,6 +883,24 @@ describe("MemoryService / retrieval / query and filtering", () => {
       limit: 5
     });
     expect(recallA.hits.map((hit) => hit.id)).toContain(profileBMemory.l1MemoryId);
+    await service.feedback({
+      sessionId: profileA.sessionId,
+      recallEventId: recallA.searchEventId,
+      channel: "explicit",
+      polarity: "positive",
+      magnitude: 1,
+      rationale: "The memory from the other user id was useful."
+    });
+    const crossUserMemory = db.db.prepare(
+      `SELECT properties_json FROM memories WHERE id = ?`
+    ).get(profileBMemory.l1MemoryId) as { properties_json: string };
+    expect(JSON.parse(crossUserMemory.properties_json)).toMatchObject({
+      internal_info: {
+        recall: {
+          positive: 1
+        }
+      }
+    });
 
     const timelineA = service.timeline({
       namespace: {

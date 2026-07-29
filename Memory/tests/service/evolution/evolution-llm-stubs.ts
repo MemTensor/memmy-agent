@@ -39,15 +39,9 @@ export function createCapturingL2Llm(calls: Array<{
           }))
         } as unknown as T;
       }
-      if (options.operation === "capture.reflected_trace_summary.v1") {
-        const payload = JSON.parse(messages.find((message) => message.role === "user")?.content ?? "{}") as {
-          traces?: Array<{ index: number; userText?: string }>;
-        };
+      if (options.operation === "capture.summarize") {
         return {
-          summaries: (payload.traces ?? []).map((trace) => ({
-            index: trace.index,
-            summary: trace.userText || "reflected trace summary"
-          }))
+          summary: "reflected trace summary"
         } as unknown as T;
       }
       if (options.operation === "l2.induction.v3") {

@@ -161,7 +161,10 @@ describe("MemoryService / evolution / negative experience", () => {
     });
     expect(detail.body).toContain("Wrong port");
     expect(detail.body).toContain("443");
-    expect(operations).toEqual(["reward.reward.r_human.v7"]);
+    expect(operations).toEqual([
+      "capture.summarize",
+      "reward.reward.r_human.v7"
+    ]);
     const negativePolicy = (detail.metadata.properties as {
       internal_info: {
         policy: {
@@ -271,11 +274,14 @@ describe("MemoryService / evolution / negative experience", () => {
     expect(service.getMemory(policies[0]!.id, { namespace }).body).toContain(
       "TLS verification was skipped"
     );
-    expect(operations).toEqual(["reward.reward.r_human.v7"]);
+    expect(operations).toEqual([
+      "capture.summarize",
+      "reward.reward.r_human.v7"
+    ]);
     db.close();
   });
 
-  it("merges the same avoidance across episodes by distinct support", async () => {
+  it("merges the same avoidance across episodes and user ids", async () => {
     const { db, service } = createTestService({
       config: {
         ...DEFAULT_MEMMY_CONFIG,
@@ -385,13 +391,17 @@ describe("MemoryService / evolution / negative experience", () => {
       layers: ["L2"]
     });
     const otherPolicy = otherRecall.hits.find((hit) => hit.memoryLayer === "L2");
-    expect(otherPolicy?.id).not.toBe(policyIds[0]);
+    expect(otherPolicy?.id).toBe(policyIds[0]);
     expect(service.getMemory(otherPolicy!.id, { namespace: otherNamespace }).metadata).toMatchObject({
       properties: {
         internal_info: {
           policy: {
-            support: 1,
-            source_episode_ids: ["negative-support-other-episode"]
+            support: 3,
+            source_episode_ids: [
+              "negative-support-episode-one",
+              "negative-support-episode-two",
+              "negative-support-other-episode"
+            ]
           }
         }
       }
@@ -446,7 +456,7 @@ describe("MemoryService / evolution / negative experience", () => {
     db.close();
   });
 
-  it("filters other users' negative policies before applying candidate Top-K", async () => {
+  it("recalls negative policies written under another user id", async () => {
     const { db, service } = createTestService({
       config: {
         ...DEFAULT_MEMMY_CONFIG,
@@ -497,19 +507,23 @@ describe("MemoryService / evolution / negative experience", () => {
     }
     await service.runWorkerOnce(1000);
     await service.runWorkerOnce(1000);
-    const targetPolicyId = service.panelItems({
-      userId: "negative-target-user",
-      layer: "L2"
-    }).items[0]?.id;
-    expect(targetPolicyId).toBeTruthy();
+    const crossUserPolicy = db.db.prepare(
+      `SELECT id
+       FROM memories
+       WHERE user_id = ?
+         AND memory_layer = 'L2'
+         AND deleted_at IS NULL
+       LIMIT 1`
+    ).get("negative-other-user-0") as { id: string } | undefined;
+    expect(crossUserPolicy?.id).toBeTruthy();
 
     const result = await service.search({
       sessionId: targetSessionId,
-      query: "TLS certificate rotation verification",
+      query: "TLS_ROTATION_GUARD_0",
       layers: ["L2"],
       limit: 5
     });
-    expect(result.hits.some((hit) => hit.id === targetPolicyId)).toBe(true);
+    expect(result.hits.some((hit) => hit.id === crossUserPolicy?.id)).toBe(true);
     db.close();
   });
 });

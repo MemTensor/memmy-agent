@@ -1,14 +1,36 @@
+import { resolveMemmyAccountHeaders } from "./memmy-account.js";
+
 type Dict<T = any> = Record<string, T>;
+type ProviderHeaders = Record<string, string>;
 
 // Memmy Account gateway API base: the gateway domain comes only from MEMMY_CLOUD_SERVICE in the repository root .env.
-// Entrypoints load ../load-env.js before all module evaluation, so the code keeps no URL default.
-const cloudService = process.env.MEMMY_CLOUD_SERVICE?.trim();
-if (!cloudService) {
-  throw new Error(
-    "MEMMY_CLOUD_SERVICE 未配置:网关地址唯一来源是仓库根 .env,请确认入口已加载该文件。",
-  );
+// Resolution is deferred to actual memmy_account usage (see memmyAccountApiBase below) instead of module
+// evaluation, so importing this module never throws for BYOK users who don't configure it.
+/**
+ * Resolve the Memmy Account gateway API base from MEMMY_CLOUD_SERVICE.
+ *
+ * Call this only where the memmy_account provider is genuinely about to be used (e.g. building a real
+ * request). Throws the same clear error as before when the env var is missing.
+ */
+export function memmyAccountApiBase(): string {
+  const cloudService = process.env.MEMMY_CLOUD_SERVICE?.trim();
+  if (!cloudService) {
+    throw new Error(
+      "MEMMY_CLOUD_SERVICE 未配置:网关地址唯一来源是仓库根 .env,请确认入口已加载该文件。",
+    );
+  }
+  return `${cloudService}/api/agentExternal/v1`;
 }
-const MEMMY_ACCOUNT_API_BASE = `${cloudService}/api/agentExternal/v1`;
+
+// Safe, non-throwing variant for generic provider metadata/listing (onboarding, settings API, status),
+// which enumerate every provider spec regardless of which one is actually in use.
+function safeMemmyAccountApiBase(): string {
+  try {
+    return memmyAccountApiBase();
+  } catch {
+    return "";
+  }
+}
 
 export type ProviderBackend =
   | "openai_compat"
@@ -41,6 +63,7 @@ export class ProviderSpec {
   reasoningAsContent: boolean;
   aliases: string[];
   baseUrl?: string;
+  resolveHeaders?: () => ProviderHeaders;
 
   constructor(init: {
     name: string;
@@ -65,6 +88,7 @@ export class ProviderSpec {
     reasoningAsContent?: boolean;
     aliases?: string[];
     baseUrl?: string;
+    resolveHeaders?: () => ProviderHeaders;
   }) {
     this.name = init.name;
     this.keywords = init.keywords ?? init.aliases ?? [];
@@ -88,6 +112,7 @@ export class ProviderSpec {
     this.reasoningAsContent = init.reasoningAsContent ?? false;
     this.aliases = init.aliases ?? this.keywords;
     this.baseUrl = this.defaultApiBase || undefined;
+    this.resolveHeaders = init.resolveHeaders;
   }
 
   get label(): string {
@@ -263,7 +288,8 @@ export const PROVIDERS: ProviderSpec[] = [
     name: "memmy_account",
     keywords: ["memmy-account", "memmy_account"],
     displayName: "Memmy Account",
-    defaultApiBase: MEMMY_ACCOUNT_API_BASE,
+    defaultApiBase: safeMemmyAccountApiBase(),
+    resolveHeaders: resolveMemmyAccountHeaders,
   }),
   new ProviderSpec({
     name: "openai_codex",

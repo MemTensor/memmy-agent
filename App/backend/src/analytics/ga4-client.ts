@@ -41,10 +41,11 @@ export interface SendGa4EventsOptions {
   clientId: string;
   events: Ga4Event[];
   appEnv?: "dev" | "prod";
+  appEdition?: "cn" | "intl";
 }
 
 export async function sendGa4Events(opts: SendGa4EventsOptions): Promise<void> {
-  const { config, clientId, events, appEnv } = opts;
+  const { config, clientId, events, appEnv, appEdition } = opts;
   const url = `${GA4_ENDPOINT}?measurement_id=${config.measurementId}&api_secret=${config.apiSecret}`;
   const timeoutMs = Number.parseInt(process.env.MEMMY_GA4_TIMEOUT_MS ?? "5000", 10);
   const dispatcher = getProxyDispatcher();
@@ -56,6 +57,7 @@ export async function sendGa4Events(opts: SendGa4EventsOptions): Promise<void> {
       ...event.params,
       engagement_time_msec: index === 0 ? 100 : 1,
       ...(appEnv ? { app_env: appEnv } : {}),
+      ...(appEdition ? { app_edition: appEdition } : {}),
       ...(debugMode ? { debug_mode: 1 } : {})
     }
   }));

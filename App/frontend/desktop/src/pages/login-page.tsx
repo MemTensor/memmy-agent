@@ -56,7 +56,7 @@ export function LoginPage() {
       return;
     }
 
-    track({ name: "signup_completed", params: { method: channel === "phone" ? "phone" : "email", is_new_user: session.isNewUser }, consentTier: "basic" });
+    track({ name: "signup_completed", params: { method: channel === "phone" ? "phone" : "email", is_new_user: session.isNewUser, user_mode: "account" }, consentTier: "basic" });
 
     dispatch(appActions.accountUpdated({
       email: session.profile.email ?? "",

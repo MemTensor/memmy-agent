@@ -116,6 +116,7 @@ describe("MemoriesSubPage", () => {
   it("摘要完成前或失败时展示 user-text，完成后展示真实摘要", () => {
     const trace = {
       id: "memory-trace-import",
+      kind: "trace" as const,
       title: "修复自动扫描卡顿和标题占位",
       memoryLayer: "L1",
       body: "## user\n\n修复自动扫描卡顿和标题占位\n\n## assistant\n\n已开始排查。"
@@ -135,13 +136,32 @@ describe("MemoriesSubPage", () => {
     })).toBe("已修复自动扫描卡顿，并替换临时标题");
   });
 
-  it("span 列表展示标题，详情只展示子目标和摘要", () => {
+  it("trace 列表展示完整摘要", () => {
+    const trace = {
+      id: "memory-trace-summary-length",
+      kind: "trace" as const,
+      title: "fallback title",
+      memoryLayer: "L1" as const
+    };
+
+    expect(displayMemoryTitle({
+      ...trace,
+      summary: "甲".repeat(21)
+    })).toBe("甲".repeat(21));
+    expect(displayMemoryTitle({
+      ...trace,
+      summary: Array.from({ length: 21 }, (_value, index) => `word${index + 1}`).join(" ")
+    })).toBe(Array.from({ length: 21 }, (_value, index) => `word${index + 1}`).join(" "));
+  });
+
+  it("span 列表展示子目标，详情只展示子目标和摘要", () => {
     const spanItem = {
       ...memoryListItemFixture,
       id: "span_38dff97911bbdf533513",
       kind: "span" as const,
-      title: "读取并分析源码，分类金融策略",
-      summary: "阅读策略、指标和组合模型相关文件。"
+      title: "span_38dff97911bbdf533513",
+      summary: "阅读策略、指标和组合模型相关文件。",
+      metadata: { spanGoal: "读取并分析源码，分类金融策略" }
     };
     const spanDetail = {
       item: {
@@ -173,6 +193,7 @@ describe("MemoriesSubPage", () => {
       detail: { status: "ready", data: spanDetail }
     });
 
+    expect(displayMemoryTitle(spanItem)).toBe("读取并分析源码，分类金融策略");
     expect(html).toContain("读取并分析源码，分类金融策略");
     expect(html).toContain("子目标");
     expect(html).toContain("摘要");
