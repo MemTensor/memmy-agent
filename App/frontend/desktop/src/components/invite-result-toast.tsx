@@ -9,6 +9,7 @@ export interface InviteResultToastProps {
   text: string;
   tone: InviteResultTone;
   onDismiss: () => void;
+  onShown: () => void;
   durationMs?: number;
 }
 
@@ -16,7 +17,18 @@ export interface InviteResultToastProps {
 export function InviteResultToast(props: InviteResultToastProps) {
   const durationMs = props.durationMs ?? 3400;
   const onDismissRef = useRef(props.onDismiss);
+  const onShownRef = useRef(props.onShown);
+  const hasReportedShownRef = useRef(false);
   onDismissRef.current = props.onDismiss;
+  onShownRef.current = props.onShown;
+
+  useEffect(() => {
+    if (hasReportedShownRef.current) {
+      return;
+    }
+    hasReportedShownRef.current = true;
+    onShownRef.current();
+  }, []);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {

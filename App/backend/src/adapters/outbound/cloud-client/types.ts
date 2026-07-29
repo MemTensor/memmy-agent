@@ -2,11 +2,13 @@ import type {
   AsrModelId,
   AsrProvider,
   AuthorizeIntegrationResponse,
+  AccountInvitationView,
   HealthStatus,
   IntegrationCapabilitiesResponse,
   IntegrationConnectionsResponse,
   LegalAgreementUrls,
   IntegrationToolResult,
+  InvitationResult,
   OkResponse,
   PromotionFlags,
   TokenUsageDto
@@ -33,6 +35,7 @@ export interface CloudLoginInput {
   phoneNumber?: string;
   verificationCode: string;
   loginSource: "Memmy";
+  invitationCode?: string;
 }
 
 export interface CloudAccountProfile {
@@ -58,6 +61,12 @@ export interface CloudLoginResult {
   uuid: string;
   /** Is new user. */
   isNewUser: boolean | null;
+  /** One-time invitation result; never persisted as account profile state. */
+  invitationResult: InvitationResult;
+}
+
+export interface EnsureInvitationCodeInput {
+  uuid: string;
 }
 
 export interface GetTokenUsageInput {
@@ -199,6 +208,7 @@ export interface CloudClient {
   sendEmailCode(input: SendEmailCodeInput): Promise<void>;
   sendPhoneCode(input: SendPhoneCodeInput): Promise<void>;
   login(input: CloudLoginInput): Promise<CloudLoginResult>;
+  ensureInvitationCode(input: EnsureInvitationCodeInput): Promise<AccountInvitationView>;
   logout(input: CloudLogoutInput): Promise<void>;
   getAccountInfo(input: GetAccountInfoInput): Promise<CloudAccountProfile>;
   updateAccountGuide(input: UpdateAccountGuideInput): Promise<void>;

@@ -1,6 +1,7 @@
 /** App reducer module. */
 import { ASR_DEFAULT_BASE_URL, QWEN_ASR_MODEL_ID, type AgentSourceView, type AppBootstrapResponse, type ScanPreferences } from "@memmy/local-api-contracts";
 import type { AppRoutePath, PreferredMode } from "../app/routes.js";
+import type { InvitationToastKind } from "../app/invitation-result.js";
 import type { ModelProviderConfig } from "../api/config-client.js";
 import type { AgentSourceScanCompletion, AgentSourceScanProgress, AppAction, EventConnectionStatus } from "./app-actions.js";
 import { agentReducer, initialAgentState, type AgentAction, type AgentState } from "./agent-chat-slice.js";
@@ -51,6 +52,11 @@ export interface ModalState {
   manualSource: boolean;
 }
 
+export interface InvitationToastState {
+  id: number;
+  kind: InvitationToastKind;
+}
+
 /** Contract for app state. */
 export interface AppState {
   startup: StartupState;
@@ -61,6 +67,7 @@ export interface AppState {
   modelConfig: ModelProviderConfig;
   agent: AgentState;
   modals: ModalState;
+  invitationToast: InvitationToastState | null;
   tools: ToolsState;
 }
 
@@ -136,6 +143,7 @@ export function createInitialAppState(): AppState {
       modelConfig: false,
       manualSource: false
     },
+    invitationToast: null,
     tools: initialToolsState
   };
 }
@@ -184,6 +192,15 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         },
         agent: agentReducer(state.agent, { type: "agent/chatViewVisibilityChanged", visible: isAgentChatViewPath(action.path) })
       };
+    case "invitationToast/shown":
+      return {
+        ...state,
+        invitationToast: { id: action.id, kind: action.kind }
+      };
+    case "invitationToast/cleared":
+      return state.invitationToast?.id === action.id
+        ? { ...state, invitationToast: null }
+        : state;
     case "settings/updated":
       return state.bootstrap
         ? {

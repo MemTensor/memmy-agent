@@ -93,7 +93,11 @@ describe("AccountService", () => {
             uuid: "cloud.login.uuid",
             accountUuid: "cloud-account-user-1",
             isNewUser: true,
-            profile: cloudProfile()
+            profile: cloudProfile(),
+            invitationResult: {
+              status: "success" as const,
+              inviteeRewardTokens: 500_000
+            }
           };
         }
       },
@@ -124,15 +128,22 @@ describe("AccountService", () => {
       channel: "email",
       email: "hello@example.com",
       verificationCode: "123456",
-      loginSource: "Memmy"
+      loginSource: "Memmy",
+      invitationCode: "MEMMY-A1B2C3"
     });
 
     expect(result).toMatchObject({
-      authenticated: true,
-      isNewUser: true,
-      profile: {
-        email: "hello@example.com",
-        nickname: "hello"
+      session: {
+        authenticated: true,
+        isNewUser: true,
+        profile: {
+          email: "hello@example.com",
+          nickname: "hello"
+        }
+      },
+      invitationResult: {
+        status: "success",
+        inviteeRewardTokens: 500_000
       }
     });
     expect(JSON.stringify(result)).not.toContain("cloud.login.uuid");
@@ -141,7 +152,8 @@ describe("AccountService", () => {
         login: {
           email: "hello@example.com",
           verificationCode: "123456",
-          loginSource: "Memmy"
+          loginSource: "Memmy",
+          invitationCode: "MEMMY-A1B2C3"
         }
       },
       {
@@ -205,10 +217,13 @@ describe("AccountService", () => {
         loginSource: "Memmy"
       })
     ).resolves.toMatchObject({
-      authenticated: true,
-      profile: {
-        email: "hello@example.com"
-      }
+      session: {
+        authenticated: true,
+        profile: {
+          email: "hello@example.com"
+        }
+      },
+      invitationResult: { status: "not_provided" }
     });
     expect(calls).toEqual([
       "login",
@@ -251,11 +266,14 @@ describe("AccountService", () => {
         loginSource: "Memmy"
       })
     ).resolves.toMatchObject({
-      authenticated: true,
-      isNewUser: false,
-      profile: {
-        email: "hello@example.com"
-      }
+      session: {
+        authenticated: true,
+        isNewUser: false,
+        profile: {
+          email: "hello@example.com"
+        }
+      },
+      invitationResult: { status: "not_provided" }
     });
   });
 
@@ -302,10 +320,13 @@ describe("AccountService", () => {
         loginSource: "Memmy"
       })
     ).resolves.toMatchObject({
-      authenticated: true,
-      profile: {
-        hasFinishedGuide: false
-      }
+      session: {
+        authenticated: true,
+        profile: {
+          hasFinishedGuide: false
+        }
+      },
+      invitationResult: { status: "not_provided" }
     });
     expect(calls).toEqual([
       "cloud-login",

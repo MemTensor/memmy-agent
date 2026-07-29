@@ -3,9 +3,12 @@ import type { OnboardingStateDto } from "@memmy/local-api-contracts";
 import { Check, ChevronLeft } from "lucide-react";
 import { useEffect, useState } from "react";
 import { resolveDesktopAccountChannel } from "../app/account-channel.js";
+import { buildInvitationSignupEvent } from "../app/invitation-analytics.js";
+import { resolveInvitationToastKind } from "../app/invitation-result.js";
 import { persistLoginModeSelection } from "../app/login-mode.js";
 import { useApiClients } from "../app/providers.js";
 import { buildAccountOnboardingStartPatch, resolvePostLoginRoute } from "../app/routes.js";
+import { useAnalytics } from "../analytics/use-analytics.js";
 import { AuthCodeForm } from "../components/auth-code-form.js";
 import { LanguageToggleButton, PAGE_CORNER_ACTION_CONTAINER_STYLE, PageCornerActionButton } from "../components/language-toggle-button.js";
 import { useVerificationCodeAuth } from "../components/use-verification-code-auth.js";
@@ -19,6 +22,7 @@ import { formatTokenGiftAmount } from "./token-gift.js";
 export function TokenDetailPage() {
   const { state, dispatch } = useAppState();
   const { clients } = useApiClients();
+  const { track } = useAnalytics();
   const { t, language } = useTranslation();
   const verificationCodeAuth = useVerificationCodeAuth();
   const [identifier, setIdentifier] = useState("");
@@ -27,6 +31,7 @@ export function TokenDetailPage() {
   const [modePersistencePending, setModePersistencePending] = useState(false);
   const [modePersistenceFeedback, setModePersistenceFeedback] = useState<{ text: string; tone: "error" | "success" } | null>(null);
   const channel = resolveDesktopAccountChannel();
+  const invitationEnabled = state.bootstrap?.promotions?.invitation?.enabled === true;
   const canContinue = Boolean(identifier.trim() && code.trim());
   const agentChatTokenTotal = state.bootstrap?.promotions?.agentChatTokenTotal;
 
@@ -52,10 +57,26 @@ export function TokenDetailPage() {
     }
     setModePersistenceFeedback(null);
 
-    const session = await verificationCodeAuth.login(channel, identifier, code);
-    if (!session || !session.authenticated) {
+    const loginResult = await verificationCodeAuth.login(
+      channel,
+      identifier,
+      code,
+      invitationEnabled ? inviteCode : undefined
+    );
+    if (!loginResult || !loginResult.session.authenticated) {
       return;
     }
+    const session = loginResult.session;
+    const invitationToastKind = resolveInvitationToastKind(loginResult.invitationResult);
+    if (invitationToastKind) {
+      dispatch(appActions.showInvitationToast(invitationToastKind));
+    }
+
+    track(buildInvitationSignupEvent({
+      channel,
+      isNewUser: session.isNewUser,
+      invitationCode: invitationEnabled ? inviteCode : undefined
+    }));
 
     dispatch(appActions.accountUpdated({
       email: session.profile.email ?? "",
@@ -154,7 +175,7 @@ export function TokenDetailPage() {
                 feedback={modePersistenceFeedback ?? verificationCodeAuth.feedback}
                 onIdentifierChange={setIdentifier}
                 onCodeChange={setCode}
-                onInviteCodeChange={setInviteCode}
+                onInviteCodeChange={invitationEnabled ? setInviteCode : undefined}
                 onSendCode={() => void verificationCodeAuth.sendCode(channel, identifier)}
                 onSubmit={() => void submitLogin()}
                 onOpenTerms={() => void openExternalUrl(getLegalLinkUrl("terms", language, state.bootstrap?.legal))}

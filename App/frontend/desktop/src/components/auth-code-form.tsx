@@ -6,7 +6,7 @@ export interface AuthCodeFormProps {
   identifier: string;
   identifierType?: "email" | "phone";
   code: string;
-  /** Optional invite code; display-only until cloud redemption is wired. */
+  /** Optional invite code shown only while the invitation promotion is enabled. */
   inviteCode?: string;
   error?: string;
   disabled?: boolean;
@@ -70,6 +70,7 @@ export function AuthCodeForm(props: AuthCodeFormProps) {
           type="text"
           autoComplete="off"
           spellCheck={false}
+          maxLength={12}
           placeholder={t("login.invitePlaceholder")}
           value={props.inviteCode ?? ""}
           onChange={(event) => props.onInviteCodeChange?.(event.target.value)}

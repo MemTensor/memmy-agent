@@ -11,7 +11,22 @@ export interface PageViewEvent {
 }
 
 export interface FeatureEvent {
-  name: string;
+  name:
+    | "account_logout"
+    | "agent_media_attached"
+    | "agent_restart_requested"
+    | "agent_send_message"
+    | "agent_stop_generation"
+    | "byok_exit_to_register"
+    | "model_config_saved"
+    | "model_connection_tested"
+    | "model_mode_switched"
+    | "send_verification_code"
+    | "task_archived"
+    | "task_deleted"
+    | "task_opened"
+    | "task_pinned"
+    | "task_renamed";
   params: {
     page_path: string;
     [key: string]: string | number | boolean;
@@ -21,7 +36,28 @@ export interface FeatureEvent {
 
 export interface SignupCompletedEvent {
   name: "signup_completed";
-  params: { method: "phone" | "email"; is_new_user: boolean };
+  params: {
+    method: "phone" | "email";
+    is_new_user: boolean;
+    user_mode: "account";
+    invite_code_provided: boolean;
+  };
+  consentTier: "basic";
+}
+
+export interface InviteResultToastEvent {
+  name: "invite_result_toast";
+  params: {
+    result: "success" | "invalid" | "not_new_user";
+  };
+  consentTier: "basic";
+}
+
+export interface InviteCodeCopiedEvent {
+  name: "invite_code_copied";
+  params: {
+    page_path: "/settings";
+  };
   consentTier: "basic";
 }
 
@@ -143,6 +179,8 @@ export type AnalyticsEvent =
   | FeatureEvent
   | FirstEntryEvent
   | SignupCompletedEvent
+  | InviteResultToastEvent
+  | InviteCodeCopiedEvent
   | ByokStartedEvent
   | ByokCompletedEvent
   | OnboardingStepCompletedEvent

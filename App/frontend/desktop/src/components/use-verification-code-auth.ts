@@ -1,5 +1,5 @@
 /** Verification-code authentication module. */
-import type { AccountChannel, AccountSessionView } from "@memmy/local-api-contracts";
+import type { AccountChannel, AccountLoginResultView } from "@memmy/local-api-contracts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAnalytics } from "../analytics/use-analytics.js";
 import { ApiRequestError } from "../api/http.js";
@@ -44,7 +44,12 @@ export interface UseVerificationCodeAuthResult {
   sendCodeDisabled: boolean;
   sendCodeLabel: string;
   sendCode: (channel: AccountChannel, identifier: string) => Promise<void>;
-  login: (channel: AccountChannel, identifier: string, verificationCode: string) => Promise<AccountSessionView | null>;
+  login: (
+    channel: AccountChannel,
+    identifier: string,
+    verificationCode: string,
+    invitationCode?: string
+  ) => Promise<AccountLoginResultView | null>;
   clearFeedback: () => void;
   resetInteractionState: () => void;
 }
@@ -207,9 +212,15 @@ export function useVerificationCodeAuth(): UseVerificationCodeAuthResult {
     }
   }
 
-  async function login(channel: AccountChannel, rawIdentifier: string, rawCode: string): Promise<AccountSessionView | null> {
+  async function login(
+    channel: AccountChannel,
+    rawIdentifier: string,
+    rawCode: string,
+    rawInvitationCode?: string
+  ): Promise<AccountLoginResultView | null> {
     const validation = validateAuthIdentifier(channel, rawIdentifier);
     const verificationCode = rawCode.trim();
+    const invitationCode = rawInvitationCode?.trim();
 
     if (!validation.ok) {
       setFeedback({ text: resolveIdentifierValidationMessage(channel, validation.reason, t), tone: "error" });
@@ -225,22 +236,34 @@ export function useVerificationCodeAuth(): UseVerificationCodeAuthResult {
     const interactionVersion = interactionVersionRef.current;
 
     try {
-      const session = await clients.account.verifyCode(
+      const result = await clients.account.verifyCode(
         channel === "email"
-          ? { channel: "email", email: validation.identifier, verificationCode, loginSource: "Memmy" }
-          : { channel: "phone", phoneNumber: validation.identifier, verificationCode, loginSource: "Memmy" }
+          ? {
+              channel: "email",
+              email: validation.identifier,
+              verificationCode,
+              loginSource: "Memmy",
+              ...(invitationCode ? { invitationCode } : {})
+            }
+          : {
+              channel: "phone",
+              phoneNumber: validation.identifier,
+              verificationCode,
+              loginSource: "Memmy",
+              ...(invitationCode ? { invitationCode } : {})
+            }
       );
 
       if (!isCurrentInteraction(interactionVersion)) {
         return null;
       }
 
-      if (!session.authenticated) {
+      if (!result.session.authenticated) {
         setFeedback({ text: t("login.loginFailed"), tone: "error" });
         return null;
       }
 
-      return session;
+      return result;
     } catch (error) {
       if (!isCurrentInteraction(interactionVersion)) {
         return null;
