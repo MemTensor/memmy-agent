@@ -7,7 +7,10 @@ import {
   SessionWorkspaceError,
 } from "../../../src/core/agent-runtime/loop.js";
 import { InboundMessage } from "../../../src/core/runtime-messages/events.js";
-import { Session } from "../../../src/core/session/manager.js";
+import {
+  readWebuiSessionBinding,
+  Session,
+} from "../../../src/core/session/manager.js";
 import { ProjectStore } from "../../../src/entrypoints/frontend-bridge/projects.js";
 
 const roots: string[] = [];
@@ -69,6 +72,29 @@ describe("AgentLoop Session workspace", () => {
 
     const binding = { projectId: null, cwd: fs.realpathSync(profile) };
     expect(loop.resolveSessionWorkspace(message, null, binding)).toEqual(binding);
+  });
+
+  it("configures its SessionManager to recover late legacy WebUI Sessions", () => {
+    const profile = tempRoot("memmy-profile-");
+    const loop = makeLoop(profile);
+    const legacy = loop.sessions.getOrCreate("websocket:legacy");
+    legacy.metadata.webui = true;
+    loop.sessions.save(legacy);
+    loop.sessions.invalidate(legacy.key);
+
+    const reloaded = loop.sessions.get(legacy.key);
+
+    expect(readWebuiSessionBinding(reloaded)).toEqual({
+      projectId: null,
+      cwd: fs.realpathSync(profile),
+    });
+    expect(loop.sessions.listSessions()).toEqual([
+      expect.objectContaining({
+        key: legacy.key,
+        projectId: null,
+        cwd: fs.realpathSync(profile),
+      }),
+    ]);
   });
 
   it("uses the immutable Session binding after project rename and pin changes", () => {

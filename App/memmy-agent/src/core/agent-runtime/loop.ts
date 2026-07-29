@@ -468,7 +468,10 @@ export class AgentLoop {
     const rawPresets = init.modelPresets ?? this.config.modelPresets;
     this.modelPresets = Object.fromEntries(Object.entries(rawPresets).map(([name, preset]) => [name, preset instanceof ModelPresetConfig ? preset : new ModelPresetConfig(preset)]));
     this.unifiedSession = init.unifiedSession ?? defaults.unifiedSession;
-    this.sessions = init.sessionManager ?? new SessionManager(init.sessionDir ?? path.join(this.workspace, "sessions"));
+    this.sessions = init.sessionManager ?? new SessionManager(
+      init.sessionDir ?? path.join(this.workspace, "sessions"),
+      { legacyWebuiWorkspaceCwd: this.workspace },
+    );
     this.projectStore = init.projectStore ?? null;
     this.cronService = init.cronService ?? new CronService(path.join(this.workspace, "cron", "jobs.json"));
     this.sessionDagQueue = init.sessionDagQueue ?? this.createSessionDagQueue();
