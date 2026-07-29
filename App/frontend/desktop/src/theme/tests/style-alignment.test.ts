@@ -138,9 +138,9 @@ describe("prototype style alignment", () => {
     expect(sidebarToolbarButtonRule).toContain("height: var(--codex-toolbar-button-size);");
     expect(sidebarToolbarIconRule).toContain("width: var(--codex-icon-xs);");
     expect(sidebarToolbarIconRule).toContain("height: var(--codex-icon-xs);");
-    expect(sidebarToolbarPositionRule).toContain("top: calc((var(--codex-toolbar-height) - var(--codex-toolbar-button-size)) / 2 - 2px);");
+    expect(sidebarToolbarPositionRule).toContain("top: calc((var(--codex-toolbar-height) - var(--codex-toolbar-button-size)) / 2 - 1px);");
     expect(sidebarToolbarPositionRule).toContain("left: var(--codex-window-control-inset);");
-    expect(sidebarRestoreButtonRule).toContain("top: calc((var(--codex-toolbar-height) - var(--codex-toolbar-button-size)) / 2 - 2px);");
+    expect(sidebarRestoreButtonRule).toContain("top: calc((var(--codex-toolbar-height) - var(--codex-toolbar-button-size)) / 2 - 1px);");
     expect(sidebarRestoreButtonRule).toContain("left: var(--codex-window-control-inset);");
     expect(globalCss).toContain(".app-frame-main--sidebar-hidden .app-frame-content-topbar");
     expect(globalCss).toContain("padding-left: var(--codex-sidebar-hidden-topbar-padding);");
