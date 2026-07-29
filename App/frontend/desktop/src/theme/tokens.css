@@ -61,7 +61,7 @@
   --codex-toolbar-height: 46px;
   --codex-toolbar-button-size: 28px;
   /* Codex sidebar nav icon inset color token. */
-  --codex-sidebar-nav-icon-inset: 28px;
+  --codex-sidebar-nav-icon-inset: 20px;
   /* Codex window control inset color token. */
   --codex-window-control-inset: 84px;
   --codex-sidebar-hidden-topbar-padding: 124px;
@@ -89,6 +89,7 @@
   --radius-pill: 9999px;
   --radius-btn: 8px;
   --radius-input: 8px;
+  --radius-menu: 8px;
   --radius-tag: 9999px;
   --shadow-card: 0 16px 38px rgba(17, 29, 28, 0.08);
   --shadow-soft: 0 8px 24px rgba(17, 29, 28, 0.08);
