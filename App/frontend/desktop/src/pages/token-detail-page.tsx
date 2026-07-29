@@ -23,6 +23,7 @@ export function TokenDetailPage() {
   const phoneAuth = usePhoneAuth();
   const [identifier, setIdentifier] = useState("");
   const [code, setCode] = useState("");
+  const [inviteCode, setInviteCode] = useState("");
   const [modePersistencePending, setModePersistencePending] = useState(false);
   const [modePersistenceFeedback, setModePersistenceFeedback] = useState<{ text: string; tone: "error" | "success" } | null>(null);
   const channel = resolveDesktopAccountChannel();
@@ -32,6 +33,7 @@ export function TokenDetailPage() {
   useEffect(() => {
     setIdentifier("");
     setCode("");
+    setInviteCode("");
     setModePersistenceFeedback(null);
     phoneAuth.resetInteractionState();
   }, [channel, phoneAuth.resetInteractionState]);
@@ -145,12 +147,14 @@ export function TokenDetailPage() {
                 identifier={identifier}
                 identifierType={channel}
                 code={code}
+                inviteCode={inviteCode}
                 disabled={!canContinue || phoneAuth.loginPending || modePersistencePending}
                 sendCodeDisabled={phoneAuth.sendCodeDisabled}
                 sendCodeLabel={phoneAuth.sendCodeLabel}
                 feedback={modePersistenceFeedback ?? phoneAuth.feedback}
                 onIdentifierChange={setIdentifier}
                 onCodeChange={setCode}
+                onInviteCodeChange={setInviteCode}
                 onSendCode={() => void phoneAuth.sendCode(channel, identifier)}
                 onSubmit={() => void submitLogin()}
                 onOpenTerms={() => void openExternalUrl(getLegalLinkUrl("terms", language, state.bootstrap?.legal))}

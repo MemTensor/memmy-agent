@@ -1,7 +1,8 @@
 /** Settings page for account, model, token usage, and desktop preferences. */
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type Dispatch, type ReactNode } from "react";
-import { Brain, Palette, Rocket, Settings2, Shield, User, Zap, ArrowRight, ArrowLeft, Bell, ExternalLink, FolderOpen, Gift, Info, KeyRound, LogOut, Wrench, Search, Eye, EyeOff, ChevronDown, ChevronUp, ChevronRight, Database, Loader2, CheckCircle2, XCircle, Check, AlertTriangle, Mic, Image as ImageIcon } from "lucide-react";
+import { Brain, Palette, Rocket, Settings2, Shield, User, Zap, ArrowRight, ArrowLeft, Bell, ExternalLink, FolderOpen, Gift, Info, KeyRound, LogOut, Wrench, Search, Eye, EyeOff, ChevronDown, ChevronUp, ChevronRight, Database, Loader2, CheckCircle2, XCircle, Check, AlertTriangle, Mic, Image as ImageIcon, Copy} from "lucide-react";
 import type { AppSettingsDto, ByokTokenUsageByKind, ByokTokenUsageKind, ByokTokenUsageSummary, Language, PrivacySettingsDto, TokenQuotaEligibility, TokenSceneUsageDto, TokenUsageDto } from "@memmy/local-api-contracts";
+import { resolveDisplayInviteCode } from "../app/invite-code-display.js";
 import { useApiClients } from "../app/providers.js";
 import { resolveGiftTokenUsage } from "../app/routes.js";
 import { useUpdateCoordinator, type UpdateCoordinatorValue, type UpdatePhase } from "../app/update-coordinator.js";
@@ -144,6 +145,9 @@ const FALLBACK_TOKEN_USAGE: TokenUsageDto = {
   sceneUsages: []
 };
 
+/** Display preview for daily invite limit UI; set false after review / when backend is wired. */
+const PREVIEW_INVITE_DAILY_LIMIT_REACHED = false;
+
 const EMPTY_BYOK_TOKEN_USAGE: ByokTokenUsageSummary = {
   inputTokens: 0,
   outputTokens: 0,
@@ -268,6 +272,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const [quotaEligibility, setQuotaEligibility] = useState<TokenQuotaEligibility | null>(null);
   const [byokUsage, setByokUsage] = useState<ByokTokenUsageSummary>(EMPTY_BYOK_TOKEN_USAGE);
   const [byokUsageStatus, setByokUsageStatus] = useState<UsageLoadStatus>("idle");
+  const [inviteCopied, setInviteCopied] = useState(false);
   const preserveSuccessfulTestHydrateRef = useRef(false);
   const appSettings = bootstrap?.app;
   const privacySettings = bootstrap?.privacy;
@@ -359,6 +364,11 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const giftBarUsedTokens = agentQuota?.usedTokens ?? giftUsedTokens;
   const { usagePercent, isTokenLow } = resolveGiftTokenUsage(giftBarUsedTokens, giftTotalTokens, giftRemainingTokens);
   const showGiftQuota = !isByokMode;
+  const displayInviteCode = resolveDisplayInviteCode({
+    email: state.account.email,
+    phoneNumber: state.account.phoneNumber
+  });
+  const inviteDailyLimitReached = PREVIEW_INVITE_DAILY_LIMIT_REACHED;
   const canApplyMoreByPromotion = bootstrap?.promotions?.applyMore ?? true;
   const quotaRequestPending = quotaEligibility?.state === "pending";
   const quotaApplicationBlocked = quotaEligibility !== null && quotaEligibility.state !== "available";
@@ -1607,6 +1617,69 @@ export function SettingsPageView(props: SettingsPageViewProps) {
             </button>
           </div>
         </Section>
+
+        {isAccountMode && showGiftQuota ? (
+          <div
+            className={`mb-6 flex items-center gap-3 px-4 py-3 rounded-card-lg border ${
+              inviteDailyLimitReached
+                ? "bg-text-ink/[0.05] border-border-stone/50"
+                : "bg-action-sky/6 border-action-sky/15"
+            }`}
+          >
+            <span
+              className={`w-8 h-8 shrink-0 rounded-full flex items-center justify-center ${
+                inviteDailyLimitReached ? "bg-text-ink/10 text-text-ink/40" : "bg-action-sky/12 text-action-sky"
+              }`}
+            >
+              <Gift size={15} strokeWidth={2.1} aria-hidden="true" />
+            </span>
+            <div className="min-w-0 flex-1">
+              <p className="text-sm text-text-ink/80 leading-5">{t("settings.token.invite.title")}</p>
+              <p
+                className={`mt-0.5 text-xs leading-4 ${
+                  inviteDailyLimitReached ? "text-text-ink/50" : "text-text-ink/45"
+                }`}
+              >
+                {inviteDailyLimitReached ? t("settings.token.invite.dailyLimit") : t("settings.token.invite.body")}
+              </p>
+            </div>
+            <div className="shrink-0 flex items-center gap-2">
+              <code
+                className={`px-2.5 py-1.5 text-xs font-semibold tracking-wide bg-background-paper rounded-input border ${
+                  inviteDailyLimitReached
+                    ? "text-text-ink/35 border-border-stone/50"
+                    : "text-text-ink border-action-sky/20"
+                }`}
+              >
+                {displayInviteCode}
+              </code>
+              <button
+                type="button"
+                className={`inline-flex items-center gap-1 px-2.5 py-1.5 text-xs rounded-btn border transition-colors cursor-pointer ${
+                  inviteDailyLimitReached
+                    ? "text-text-ink/35 border-border-stone/50 hover:bg-text-ink/[0.03]"
+                    : "text-action-sky border-action-sky/30 hover:bg-action-sky/8"
+                }`}
+                onClick={() => {
+                  void (async () => {
+                    try {
+                      if (typeof navigator !== "undefined" && typeof navigator.clipboard?.writeText === "function") {
+                        await navigator.clipboard.writeText(displayInviteCode);
+                      }
+                      setInviteCopied(true);
+                      window.setTimeout(() => setInviteCopied(false), 2000);
+                    } catch (error) {
+                      console.warn("copy invite code failed", error);
+                    }
+                  })();
+                }}
+              >
+                <Copy size={12} strokeWidth={2.2} />
+                {inviteCopied ? t("settings.token.invite.copied") : t("settings.token.invite.copy")}
+              </button>
+            </div>
+          </div>
+        ) : null}
 
         <Section icon={<Palette size={16} className="text-text-ink/60" />} title={t("settings.general")}>
           <SelectRow

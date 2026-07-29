@@ -112,4 +112,24 @@ describe("AuthCodeForm", () => {
     expect(html).toContain("truncate");
     expect(html).toContain("text-status-error");
   });
+
+  it("提供邀请码回调时展示选填邀请码输入", () => {
+    const html = renderToString(
+      <I18nProvider language="zh-CN">
+        <AuthCodeForm
+          identifier="13800138000"
+          code="123456"
+          inviteCode="ABC"
+          onIdentifierChange={vi.fn()}
+          onCodeChange={vi.fn()}
+          onInviteCodeChange={vi.fn()}
+          onSendCode={vi.fn()}
+          onSubmit={vi.fn()}
+        />
+      </I18nProvider>
+    );
+
+    expect(html).toContain("邀请码（选填）");
+    expect(html).toContain('value="ABC"');
+  });
 });
