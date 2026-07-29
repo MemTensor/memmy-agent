@@ -511,11 +511,20 @@ export const LegalAgreementUrlsSchema = z.object({
 export type LegalAgreementUrls = z.infer<typeof LegalAgreementUrlsSchema>;
 
 /** Schema for promotion flags. */
+export const PromotionInvitationSchema = z.object({
+    enabled: z.boolean(),
+    inviterRewardTokens: z.number().int().nonnegative(),
+    inviteeRewardTokens: z.number().int().nonnegative(),
+    dailySuccessLimit: z.number().int().positive()
+});
+export type PromotionInvitation = z.infer<typeof PromotionInvitationSchema>;
+
 export const PromotionFlagsSchema = z.object({
     loginBanner: z.boolean(),
     improvementGift: z.boolean(),
     applyMore: z.boolean(),
-    agentChatTokenTotal: z.number().int().nonnegative()
+    agentChatTokenTotal: z.number().int().nonnegative(),
+    invitation: PromotionInvitationSchema.optional()
 });
 export type PromotionFlags = z.infer<typeof PromotionFlagsSchema>;
 
@@ -826,7 +835,11 @@ export const SendCodeInputSchema = z
         phoneNumber: z.string().min(3).optional(),
         locale: AccountLocaleSchema
     })
-    .refine((input) => (input.channel === "email" ? Boolean(input.email) : Boolean(input.phoneNumber)), {
+    .refine((input) => (
+        input.channel === "email"
+            ? Boolean(input.email) && !input.phoneNumber
+            : Boolean(input.phoneNumber) && !input.email
+    ), {
         message: "channel requires matching email or phoneNumber"
     });
 export type SendCodeInput = z.infer<typeof SendCodeInputSchema>;
@@ -845,9 +858,14 @@ export const VerifyCodeInputSchema = z
         email: z.string().email().optional(),
         phoneNumber: z.string().min(3).optional(),
         verificationCode: z.string().min(1),
-        loginSource: z.literal("Memmy")
+        loginSource: z.literal("Memmy"),
+        invitationCode: z.string().trim().max(12).optional()
     })
-    .refine((input) => (input.channel === "email" ? Boolean(input.email) : Boolean(input.phoneNumber)), {
+    .refine((input) => (
+        input.channel === "email"
+            ? Boolean(input.email) && !input.phoneNumber
+            : Boolean(input.phoneNumber) && !input.email
+    ), {
         message: "channel requires matching email or phoneNumber"
     });
 export type VerifyCodeInput = z.infer<typeof VerifyCodeInputSchema>;
@@ -884,6 +902,36 @@ export const AccountSessionViewSchema = z.discriminatedUnion("authenticated", [
     })
 ]);
 export type AccountSessionView = z.infer<typeof AccountSessionViewSchema>;
+
+/** One-time invitation outcome returned only by account login. */
+export const InvitationResultSchema = z.discriminatedUnion("status", [
+    z.object({
+        status: z.literal("success"),
+        inviteeRewardTokens: z.number().int().nonnegative()
+    }),
+    z.object({
+        status: z.enum(["not_provided", "invalid", "not_new_user", "pending"])
+    })
+]);
+export type InvitationResult = z.infer<typeof InvitationResultSchema>;
+
+/** Login result kept separate from the persisted account session. */
+export const AccountLoginResultViewSchema = z.object({
+    session: AccountSessionViewSchema,
+    invitationResult: InvitationResultSchema
+});
+export type AccountLoginResultView = z.infer<typeof AccountLoginResultViewSchema>;
+
+/** Current account invitation code and today's reserved-slot summary. */
+export const AccountInvitationViewSchema = z.object({
+    enabled: z.boolean(),
+    invitationCode: z.string().regex(/^MEMMY-[A-Za-z0-9]{6}$/).nullable(),
+    usedInviteSlotsToday: z.number().int().nonnegative(),
+    dailySuccessLimit: z.number().int().nonnegative(),
+    remainingInvitesToday: z.number().int().nonnegative(),
+    dailyLimitReached: z.boolean()
+});
+export type AccountInvitationView = z.infer<typeof AccountInvitationViewSchema>;
 
 /** Schema for avatar option. */
 export const AvatarOptionSchema = z.object({

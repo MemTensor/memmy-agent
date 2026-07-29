@@ -1,8 +1,12 @@
 /** Account service module. */
 import {
+  AccountInvitationViewSchema,
+  AccountLoginResultViewSchema,
   AccountProfileViewSchema,
   AccountSessionViewSchema,
   SendCodeResponseSchema,
+  type AccountInvitationView,
+  type AccountLoginResultView,
   type AccountProfileView,
   type AccountSessionView,
   type SendCodeInput,
@@ -23,7 +27,8 @@ const RESEND_WINDOW_MS = 60_000;
 
 export interface AccountService {
   sendCode(input: SendCodeInput): Promise<SendCodeResponse>;
-  verifyCode(input: VerifyCodeInput): Promise<AccountSessionView>;
+  verifyCode(input: VerifyCodeInput): Promise<AccountLoginResultView>;
+  getInvitation(): Promise<AccountInvitationView>;
   updateProfile(input: UpdateAccountProfileInput): Promise<AccountProfileView>;
   markGuideFinished(): Promise<OkResponse>;
   logout(): Promise<OkResponse>;
@@ -78,7 +83,8 @@ export function createAccountService(options: CreateAccountServiceOptions): Acco
         ...(input.email ? { email: input.email } : {}),
         ...(input.phoneNumber ? { phoneNumber: input.phoneNumber } : {}),
         verificationCode: input.verificationCode,
-        loginSource: input.loginSource
+        loginSource: input.loginSource,
+        ...(input.invitationCode ? { invitationCode: input.invitationCode } : {})
       });
 
       if (options.memmyConfigWriter) {
@@ -98,12 +104,28 @@ export function createAccountService(options: CreateAccountServiceOptions): Acco
         })
       );
 
-      return refreshCloudGuideState({
+      const refreshedSession = await refreshCloudGuideState({
         cloudClient: options.cloudClient,
         accountSessionRepository: options.accountSessionRepository,
         session,
         cloudUuid: loginResult.uuid
       });
+      return AccountLoginResultViewSchema.parse({
+        session: refreshedSession,
+        invitationResult: loginResult.invitationResult ?? { status: "not_provided" }
+      });
+    },
+
+    async getInvitation() {
+      const cloudUuid = options.accountSessionRepository.getCloudUuid();
+      if (!cloudUuid) {
+        throw Object.assign(new Error("Account session is not authenticated"), {
+          code: "unauthorized" as const
+        });
+      }
+      return AccountInvitationViewSchema.parse(
+        await options.cloudClient.ensureInvitationCode({ uuid: cloudUuid })
+      );
     },
 
     async updateProfile(input) {

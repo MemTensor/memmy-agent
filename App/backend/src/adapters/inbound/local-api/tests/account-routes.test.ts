@@ -24,7 +24,21 @@ describe("account local api routes", () => {
         },
         async verifyCode(input) {
           calls.push(`verify:${input.verificationCode}`);
-          return accountSession();
+          return {
+            session: accountSession(),
+            invitationResult: { status: "success", inviteeRewardTokens: 500_000 }
+          };
+        },
+        async getInvitation() {
+          calls.push("invitation");
+          return {
+            enabled: true,
+            invitationCode: "MEMMY-A1B2C3",
+            usedInviteSlotsToday: 3,
+            dailySuccessLimit: 5,
+            remainingInvitesToday: 2,
+            dailyLimitReached: false
+          };
         },
         async updateProfile(input) {
           calls.push(`profile:${input.nickname}`);
@@ -54,8 +68,10 @@ describe("account local api routes", () => {
       channel: "email",
       email: "hello@example.com",
       verificationCode: "123456",
-      loginSource: "Memmy"
+      loginSource: "Memmy",
+      invitationCode: "MEMMY-A1B2C3"
     });
+    const invitation = await injectJson("PUT", "/api/account/invitation", {});
     const profile = await injectJson("PATCH", "/api/account/profile", { nickname: "Memmy User" });
     const guideFinished = await injectJson("POST", "/api/account/guide-finished", {});
     const logout = await injectJson("POST", "/api/account/logout", {});
@@ -66,8 +82,15 @@ describe("account local api routes", () => {
     });
 
     expect(sendCode.json()).toEqual({ ok: true, resendAfterSec: 60 });
-    expect(verifyCode.json()).toMatchObject({ authenticated: true, profile: { email: "hello@example.com" } });
+    expect(verifyCode.json()).toMatchObject({
+      session: { authenticated: true, profile: { email: "hello@example.com" } },
+      invitationResult: { status: "success", inviteeRewardTokens: 500_000 }
+    });
     expect(JSON.stringify(verifyCode.json())).not.toContain("cloud.login.uuid");
+    expect(invitation.json()).toMatchObject({
+      invitationCode: "MEMMY-A1B2C3",
+      remainingInvitesToday: 2
+    });
     expect(profile.json()).toMatchObject({ nickname: "Memmy User" });
     expect(guideFinished.json()).toEqual({ ok: true });
     expect(logout.json()).toEqual({ ok: true });
@@ -75,6 +98,7 @@ describe("account local api routes", () => {
     expect(calls).toEqual([
       "send:email:hello@example.com",
       "verify:123456",
+      "invitation",
       "profile:Memmy User",
       "guide-finished",
       "logout",
@@ -182,7 +206,20 @@ function createServer(overrides: Record<string, unknown> = {}): FastifyInstance 
         return { ok: true, resendAfterSec: 60 };
       },
       async verifyCode() {
-        return accountSession();
+        return {
+          session: accountSession(),
+          invitationResult: { status: "not_provided" }
+        };
+      },
+      async getInvitation() {
+        return {
+          enabled: false,
+          invitationCode: null,
+          usedInviteSlotsToday: 0,
+          dailySuccessLimit: 0,
+          remainingInvitesToday: 0,
+          dailyLimitReached: false
+        };
       },
       async updateProfile() {
         return accountSession().profile;

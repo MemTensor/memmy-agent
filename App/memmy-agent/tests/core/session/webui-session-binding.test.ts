@@ -57,6 +57,52 @@ describe("WebUI Session binding", () => {
     });
   });
 
+  it("normalizes a legacy WebUI Session only when both binding fields are absent", () => {
+    const root = tempRoot();
+    const workspace = fs.realpathSync(root);
+    const sessionsRoot = path.join(workspace, "sessions");
+    const sessions = new SessionManager(sessionsRoot, {
+      legacyWebuiWorkspaceCwd: workspace,
+    });
+    const legacy = sessions.getOrCreate("websocket:legacy");
+    legacy.metadata.webui = true;
+    sessions.save(legacy);
+    sessions.invalidate(legacy.key);
+
+    const reloaded = sessions.get(legacy.key);
+
+    expect(readWebuiSessionBinding(reloaded)).toEqual({
+      projectId: null,
+      cwd: workspace,
+    });
+
+    const partial = sessions.getOrCreate("websocket:partial");
+    partial.metadata.webui = true;
+    partial.metadata.webuiProjectId = null;
+    sessions.save(partial);
+    sessions.invalidate(partial.key);
+
+    expect(() => readWebuiSessionBinding(sessions.get(partial.key))).toThrowError(
+      expect.objectContaining({ code: "workspace_missing" }),
+    );
+  });
+
+  it("does not normalize a non-WebSocket Session marked as WebUI", () => {
+    const root = tempRoot();
+    const workspace = fs.realpathSync(root);
+    const sessions = new SessionManager(path.join(workspace, "sessions"), {
+      legacyWebuiWorkspaceCwd: workspace,
+    });
+    const session = sessions.getOrCreate("telegram:mislabelled");
+    session.metadata.webui = true;
+    sessions.save(session);
+    sessions.invalidate(session.key);
+
+    expect(() => readWebuiSessionBinding(sessions.get(session.key))).toThrowError(
+      expect.objectContaining({ code: "workspace_missing" }),
+    );
+  });
+
   it("prevents late saves from recreating a permanently deleted Session", async () => {
     const root = tempRoot();
     const sessions = new SessionManager(path.join(root, "sessions"));

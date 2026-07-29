@@ -426,6 +426,10 @@ describe("SettingsPageView", () => {
 
     expect(source).toContain("configClient.getTokenUsage()");
     expect(source).toContain("dispatch(appActions.tokenUsageUpdated(tokenUsage))");
+    expect(source).toContain("requestAccountInvitation(accountClient, accountKey)");
+    expect(source).not.toContain("resolveDisplayInviteCode");
+    expect(source).toContain('t("settings.token.invite.title")');
+    expect(source).toContain("mb-6 flex items-center gap-3");
     expect(source).toContain("byokTokenUsageClient.getSummary");
     expect(source).toContain("EMPTY_BYOK_TOKEN_USAGE");
     expect(source).toContain("function ChannelStat");

@@ -4,6 +4,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { setAnalyticsUserMode } from "./analytics/analytics-context.js";
 import { gtagEvent } from "./analytics/gtag-init.js";
 import { trackAgentSourceScanOutcome } from "./analytics/memory-ui-analytics.js";
+import { useAnalytics } from "./analytics/use-analytics.js";
+import { buildInvitationToastEvent } from "./app/invitation-analytics.js";
 import {
   AgentRuntimeBridge,
   createAgentTaskStateCoordinator,
@@ -13,6 +15,7 @@ import { AppProviders, useApiClients } from "./app/providers.js";
 import { AppRouter } from "./app/router.js";
 import { UpdateCoordinatorProvider } from "./app/update-coordinator.js";
 import { GithubStarPromptHost } from "./components/github-star-prompt-host.js";
+import { InviteResultToast } from "./components/invite-result-toast.js";
 import {
   FOCUSED_AGENT_CHAT_STORAGE_KEY,
   readGuidanceCompleted,
@@ -62,6 +65,7 @@ export function App() {
 function RuntimeApp() {
   const { state, dispatch } = useAppState();
   const { clients, setClients } = useApiClients();
+  const { track } = useAnalytics();
   const { t } = useTranslation();
   const translationRef = useRef(t);
   const agentStateRef = useRef(state.agent);
@@ -289,6 +293,30 @@ function RuntimeApp() {
       <AgentRuntimeBridge taskStateCoordinator={taskStateCoordinator ?? undefined}>
         <AppRouter onRetry={retry} />
         <GithubStarPromptHost />
+        {state.invitationToast ? (
+          <InviteResultToast
+            key={state.invitationToast.id}
+            text={t(
+              state.invitationToast.kind === "success"
+                ? "login.invite.successToast"
+                : state.invitationToast.kind === "invalid"
+                  ? "login.invite.invalidToast"
+                  : "login.invite.existingUserToast"
+            )}
+            tone={state.invitationToast.kind === "success" ? "success" : "missed"}
+            onShown={() => {
+              const event = buildInvitationToastEvent(state.invitationToast?.kind ?? "not_provided");
+              if (event) {
+                track(event);
+              }
+            }}
+            onDismiss={() => {
+              if (state.invitationToast) {
+                dispatch(appActions.clearInvitationToast(state.invitationToast.id));
+              }
+            }}
+          />
+        ) : null}
       </AgentRuntimeBridge>
     </UpdateCoordinatorProvider>
   );

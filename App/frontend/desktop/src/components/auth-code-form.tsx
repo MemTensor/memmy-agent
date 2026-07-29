@@ -6,6 +6,8 @@ export interface AuthCodeFormProps {
   identifier: string;
   identifierType?: "email" | "phone";
   code: string;
+  /** Optional invite code shown only while the invitation promotion is enabled. */
+  inviteCode?: string;
   error?: string;
   disabled?: boolean;
   sendCodeDisabled?: boolean;
@@ -13,6 +15,7 @@ export interface AuthCodeFormProps {
   feedback?: { text: string; tone: "error" | "success" } | null;
   onIdentifierChange: (value: string) => void;
   onCodeChange: (value: string) => void;
+  onInviteCodeChange?: (value: string) => void;
   onSendCode: () => void;
   onSubmit: () => void;
   onOpenTerms?: () => void;
@@ -61,6 +64,24 @@ export function AuthCodeForm(props: AuthCodeFormProps) {
           {props.sendCodeLabel ?? t("login.getCode")}
         </button>
       </div>
+
+      {props.onInviteCodeChange ? (
+        <input
+          type="text"
+          autoComplete="off"
+          spellCheck={false}
+          maxLength={12}
+          placeholder={t("login.invitePlaceholder")}
+          value={props.inviteCode ?? ""}
+          onChange={(event) => props.onInviteCodeChange?.(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !props.disabled) {
+              props.onSubmit();
+            }
+          }}
+          className="auth-code-form-input auth-code-form-input--optional w-full px-5 py-3 border rounded-input text-sm focus:outline-none"
+        />
+      ) : null}
 
       {errorFeedback ? (
         <p

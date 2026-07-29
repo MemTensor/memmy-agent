@@ -1,4 +1,6 @@
 import {
+  AccountInvitationViewSchema,
+  AccountLoginResultViewSchema,
   AccountProfileViewSchema,
   AccountSessionViewSchema,
   OkResponseSchema,
@@ -6,6 +8,8 @@ import {
   SendCodeResponseSchema,
   UpdateAccountProfileInputSchema,
   VerifyCodeInputSchema,
+  type AccountInvitationView,
+  type AccountLoginResultView,
   type AccountProfileView,
   type AccountSessionView,
   type OkResponse,
@@ -47,7 +51,8 @@ export type AccountCodeValidationResult =
 
 export interface AccountClient {
   sendCode(input: SendCodeInput): Promise<SendCodeResponse>;
-  verifyCode(input: VerifyCodeInput): Promise<AccountSessionView>;
+  verifyCode(input: VerifyCodeInput): Promise<AccountLoginResultView>;
+  getInvitation(): Promise<AccountInvitationView>;
   updateProfile(input: UpdateAccountProfileInput): Promise<AccountProfileView>;
   markGuideFinished(): Promise<OkResponse>;
   logout(): Promise<OkResponse>;
@@ -69,8 +74,17 @@ export function createHttpAccountClient(config: RuntimeConfig): AccountClient {
       return requestJson({
         config,
         path: "/api/account/verify-code",
-        schema: AccountSessionViewSchema,
+        schema: AccountLoginResultViewSchema,
         body: VerifyCodeInputSchema.parse(input)
+      });
+    },
+
+    async getInvitation() {
+      return requestJson({
+        config,
+        path: "/api/account/invitation",
+        schema: AccountInvitationViewSchema,
+        init: { method: "PUT" }
       });
     },
 

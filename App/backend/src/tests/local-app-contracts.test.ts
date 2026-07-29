@@ -1,6 +1,8 @@
 /** Local app contracts tests. */
 import { describe, expect, it } from "vitest";
 import {
+  AccountInvitationViewSchema,
+  AccountLoginResultViewSchema,
   AccountSessionViewSchema,
   ApiErrorBodySchema,
   AuthorizeIntegrationResponseSchema,
@@ -27,6 +29,7 @@ import {
   PatchAppSettingsInputSchema,
   PatchOnboardingInputSchema,
   PatchPrivacyInputSchema,
+  PromotionFlagsSchema,
   SendCodeInputSchema,
   SetAvatarInputSchema,
   SetImprovementProgramInputSchema,
@@ -324,9 +327,32 @@ describe("local app contracts", () => {
         channel: "phone",
         phoneNumber: "13800138000",
         verificationCode: "123456",
+        loginSource: "Memmy",
+        invitationCode: "MEMMY-A1B2C3"
+      })
+    ).toMatchObject({
+      channel: "phone",
+      loginSource: "Memmy",
+      invitationCode: "MEMMY-A1B2C3"
+    });
+    expect(() =>
+      VerifyCodeInputSchema.parse({
+        channel: "email",
+        email: "hello@example.com",
+        verificationCode: "123456",
+        loginSource: "Memmy",
+        invitationCode: "MEMMY-TOO-LONG"
+      })
+    ).toThrow();
+    expect(() =>
+      VerifyCodeInputSchema.parse({
+        channel: "email",
+        email: "hello@example.com",
+        phoneNumber: "13800138000",
+        verificationCode: "123456",
         loginSource: "Memmy"
       })
-    ).toMatchObject({ channel: "phone", loginSource: "Memmy" });
+    ).toThrow();
     const parsedSession = AccountSessionViewSchema.parse({
       authenticated: true,
       isNewUser: true,
@@ -350,6 +376,42 @@ describe("local app contracts", () => {
       }
     });
     expect(AccountSessionViewSchema.parse({ authenticated: false })).toEqual({ authenticated: false });
+    expect(
+      AccountLoginResultViewSchema.parse({
+        session: parsedSession,
+        invitationResult: {
+          status: "success",
+          inviteeRewardTokens: 500_000
+        }
+      })
+    ).toMatchObject({
+      session: { authenticated: true },
+      invitationResult: { status: "success", inviteeRewardTokens: 500_000 }
+    });
+    expect(
+      AccountInvitationViewSchema.parse({
+        enabled: true,
+        invitationCode: "MEMMY-A1B2C3",
+        usedInviteSlotsToday: 3,
+        dailySuccessLimit: 5,
+        remainingInvitesToday: 2,
+        dailyLimitReached: false
+      })
+    ).toMatchObject({ invitationCode: "MEMMY-A1B2C3", remainingInvitesToday: 2 });
+    expect(
+      PromotionFlagsSchema.parse({
+        loginBanner: true,
+        improvementGift: true,
+        applyMore: true,
+        agentChatTokenTotal: 2_000_000,
+        invitation: {
+          enabled: true,
+          inviterRewardTokens: 500_000,
+          inviteeRewardTokens: 500_000,
+          dailySuccessLimit: 5
+        }
+      }).invitation.enabled
+    ).toBe(true);
     expect(AvatarOptionSchema.parse({ id: "memmy", displayName: "Memmy", assetKey: "avatar.memmy", kind: "image" })).toEqual({
       id: "memmy",
       displayName: "Memmy",

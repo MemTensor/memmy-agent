@@ -109,12 +109,16 @@ describe("account-client", () => {
           channel: "email",
           email: "grace@example.com",
           verificationCode: "123456",
-          loginSource: "Memmy"
+          loginSource: "Memmy",
+          invitationCode: "MEMMY-A1B2C3"
         });
         return jsonResponse({
-          authenticated: true,
-          isNewUser: true,
-          profile: profilePayload({ nickname: "Grace" })
+          session: {
+            authenticated: true,
+            isNewUser: true,
+            profile: profilePayload({ nickname: "Grace" })
+          },
+          invitationResult: { status: "not_provided" }
         });
       }
 
@@ -122,6 +126,18 @@ describe("account-client", () => {
         expect(init?.method).toBe("PATCH");
         expect(body).toEqual({ nickname: "Memmy User" });
         return jsonResponse(profilePayload({ nickname: "Memmy User" }));
+      }
+
+      if (url.endsWith("/api/account/invitation")) {
+        expect(init?.method).toBe("PUT");
+        return jsonResponse({
+          enabled: true,
+          invitationCode: "MEMMY-A1B2C3",
+          usedInviteSlotsToday: 3,
+          dailySuccessLimit: 5,
+          remainingInvitesToday: 2,
+          dailyLimitReached: false
+        });
       }
 
       if (url.endsWith("/api/account/guide-finished")) {
@@ -151,12 +167,20 @@ describe("account-client", () => {
         channel: "email",
         email: "grace@example.com",
         verificationCode: "123456",
-        loginSource: "Memmy"
+        loginSource: "Memmy",
+        invitationCode: "MEMMY-A1B2C3"
       })
     ).resolves.toMatchObject({
-      authenticated: true,
-      isNewUser: true,
-      profile: { email: "grace@example.com", nickname: "Grace" }
+      session: {
+        authenticated: true,
+        isNewUser: true,
+        profile: { email: "grace@example.com", nickname: "Grace" }
+      },
+      invitationResult: { status: "not_provided" }
+    });
+    await expect(client.getInvitation()).resolves.toMatchObject({
+      invitationCode: "MEMMY-A1B2C3",
+      remainingInvitesToday: 2
     });
     await expect(client.updateProfile({ nickname: "Memmy User" })).resolves.toMatchObject({
       email: "grace@example.com",
@@ -165,7 +189,7 @@ describe("account-client", () => {
     });
     await expect(client.markGuideFinished()).resolves.toEqual({ ok: true });
     await expect(client.logout()).resolves.toEqual({ ok: true });
-    expect(fetchMock).toHaveBeenCalledTimes(5);
+    expect(fetchMock).toHaveBeenCalledTimes(6);
   });
 });
 

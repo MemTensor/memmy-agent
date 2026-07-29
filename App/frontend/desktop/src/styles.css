@@ -5647,6 +5647,29 @@ input[type="checkbox"].check-sky:checked::after {
   line-height: 1.55;
 }
 
+.invite-result-toast {
+  position: fixed;
+  top: 4rem;
+  left: 50%;
+  z-index: 9998;
+  width: max-content;
+  max-width: min(92vw, 360px);
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.invite-result-toast__panel {
+  width: max-content;
+  max-width: 100%;
+}
+
+.invite-result-toast .banner {
+  margin-bottom: 0;
+  width: max-content;
+  max-width: 100%;
+  box-shadow: var(--shadow-soft);
+}
+
 .banner__icon {
   display: inline-flex;
   width: 26px;
@@ -8566,6 +8589,17 @@ input[type="checkbox"].check-sky:checked::after {
 
 .auth-code-form-input::placeholder {
   color: color-mix(in srgb, var(--color-text-ink) 24%, transparent);
+}
+
+/* Optional invite field: muted so it reads as secondary / non-required. */
+.auth-code-form-input--optional {
+  border-color: color-mix(in srgb, var(--color-border-stone) 42%, white);
+  background: color-mix(in srgb, var(--color-canvas-oat) 22%, white);
+  color: color-mix(in srgb, var(--color-text-ink) 68%, transparent);
+}
+
+.auth-code-form-input--optional::placeholder {
+  color: color-mix(in srgb, var(--color-text-ink) 28%, transparent);
 }
 
 /* Home empty brand mascot styles. */

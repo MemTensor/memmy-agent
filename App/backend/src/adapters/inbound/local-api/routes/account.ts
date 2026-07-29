@@ -1,5 +1,7 @@
 /** Account module. */
 import {
+  AccountInvitationViewSchema,
+  AccountLoginResultViewSchema,
   AccountProfileViewSchema,
   AccountSessionViewSchema,
   AvatarOptionSchema,
@@ -39,7 +41,18 @@ export function registerAccountRoutes(app: FastifyInstance, options: RegisterAcc
     { preHandler: options.authenticateRuntimeToken },
     withErrorEnvelope(async (request, reply) => {
       const input = VerifyCodeInputSchema.parse(request.body);
-      const response = AccountSessionViewSchema.parse(await options.account.verifyCode(input));
+      const response = AccountLoginResultViewSchema.parse(await options.account.verifyCode(input));
+      return reply.send(response);
+    })
+  );
+
+  app.put(
+    "/api/account/invitation",
+    { preHandler: options.authenticateRuntimeToken },
+    withErrorEnvelope(async (_request, reply) => {
+      const response = AccountInvitationViewSchema.parse(
+        await options.account.getInvitation()
+      );
       return reply.send(response);
     })
   );

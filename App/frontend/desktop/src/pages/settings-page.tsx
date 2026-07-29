@@ -1,8 +1,9 @@
 /** Settings page for account, model, token usage, and desktop preferences. */
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type Dispatch, type ReactNode } from "react";
-import { Brain, Palette, Rocket, Settings2, Shield, User, Zap, ArrowRight, ArrowLeft, Bell, ExternalLink, FolderOpen, Gift, Info, KeyRound, LogOut, Wrench, Search, Eye, EyeOff, ChevronDown, ChevronUp, ChevronRight, Database, Loader2, CheckCircle2, XCircle, Check, AlertTriangle, Mic, Image as ImageIcon } from "lucide-react";
-import type { AppSettingsDto, ByokTokenUsageByKind, ByokTokenUsageKind, ByokTokenUsageSummary, Language, PrivacySettingsDto, TokenQuotaEligibility, TokenSceneUsageDto, TokenUsageDto } from "@memmy/local-api-contracts";
+import { Brain, Palette, Rocket, Settings2, Shield, User, Zap, ArrowRight, ArrowLeft, Bell, ExternalLink, FolderOpen, Gift, Info, KeyRound, LogOut, Wrench, Search, Eye, EyeOff, ChevronDown, ChevronUp, ChevronRight, Database, Loader2, CheckCircle2, XCircle, Check, AlertTriangle, Mic, Image as ImageIcon, Copy} from "lucide-react";
+import type { AccountInvitationView, AppSettingsDto, ByokTokenUsageByKind, ByokTokenUsageKind, ByokTokenUsageSummary, Language, PrivacySettingsDto, TokenQuotaEligibility, TokenSceneUsageDto, TokenUsageDto } from "@memmy/local-api-contracts";
 import { useApiClients } from "../app/providers.js";
+import { copyInvitationCode } from "../app/invitation-analytics.js";
 import { resolveGiftTokenUsage } from "../app/routes.js";
 import { useUpdateCoordinator, type UpdateCoordinatorValue, type UpdatePhase } from "../app/update-coordinator.js";
 import type { AnalyticsEvent } from "../analytics/analytics-events.js";
@@ -158,6 +159,35 @@ const EMPTY_BYOK_TOKEN_USAGE: ByokTokenUsageSummary = {
 // kinds already include it in the contract — no backend TokenUsageScene change.
 const TOKEN_USAGE_SCENES = ["agent_chat", "memory_summary", "memory_evolution", "embedding"] as const satisfies readonly ByokTokenUsageKind[];
 
+let activeInvitationRequest: {
+  client: Pick<AccountClient, "getInvitation">;
+  accountKey: string;
+  promise: Promise<AccountInvitationView>;
+} | null = null;
+
+/** Coalesces React remount/re-render requests while the idempotent PUT is in flight. */
+export function requestAccountInvitation(
+  client: Pick<AccountClient, "getInvitation">,
+  accountKey: string
+): Promise<AccountInvitationView> {
+  if (
+    activeInvitationRequest?.client === client
+    && activeInvitationRequest.accountKey === accountKey
+  ) {
+    return activeInvitationRequest.promise;
+  }
+
+  const promise = client.getInvitation();
+  activeInvitationRequest = { client, accountKey, promise };
+  const clear = () => {
+    if (activeInvitationRequest?.promise === promise) {
+      activeInvitationRequest = null;
+    }
+  };
+  void promise.then(clear, clear);
+  return promise;
+}
+
 /**
  * The default analytics-tracking function for the pure view.
  *
@@ -268,6 +298,11 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const [quotaEligibility, setQuotaEligibility] = useState<TokenQuotaEligibility | null>(null);
   const [byokUsage, setByokUsage] = useState<ByokTokenUsageSummary>(EMPTY_BYOK_TOKEN_USAGE);
   const [byokUsageStatus, setByokUsageStatus] = useState<UsageLoadStatus>("idle");
+  const [inviteCopied, setInviteCopied] = useState(false);
+  const [invitationInfo, setInvitationInfo] = useState<AccountInvitationView | null>(null);
+  const [invitationLoadStatus, setInvitationLoadStatus] =
+    useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [invitationReloadVersion, setInvitationReloadVersion] = useState(0);
   const preserveSuccessfulTestHydrateRef = useRef(false);
   const appSettings = bootstrap?.app;
   const privacySettings = bootstrap?.privacy;
@@ -359,6 +394,11 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const giftBarUsedTokens = agentQuota?.usedTokens ?? giftUsedTokens;
   const { usagePercent, isTokenLow } = resolveGiftTokenUsage(giftBarUsedTokens, giftTotalTokens, giftRemainingTokens);
   const showGiftQuota = !isByokMode;
+  const invitationEnabled = bootstrap?.promotions?.invitation?.enabled === true;
+  const displayInviteCode = invitationInfo?.invitationCode ?? null;
+  const inviteDailyLimitReached = invitationInfo?.dailyLimitReached ?? false;
+  const showInvitationBanner = invitationEnabled
+    && (invitationLoadStatus !== "ready" || invitationInfo?.enabled === true);
   const canApplyMoreByPromotion = bootstrap?.promotions?.applyMore ?? true;
   const quotaRequestPending = quotaEligibility?.state === "pending";
   const quotaApplicationBlocked = quotaEligibility !== null && quotaEligibility.state !== "available";
@@ -472,6 +512,45 @@ export function SettingsPageView(props: SettingsPageViewProps) {
       cancelled = true;
     };
   }, [configClient, dispatch, isAccountMode]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!accountClient || !isAccountMode || !hasAccountSession || !invitationEnabled) {
+      setInvitationInfo(null);
+      setInvitationLoadStatus("idle");
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    setInvitationLoadStatus("loading");
+    const accountKey =
+      state.account.email || state.account.phoneNumber || state.account.registeredAt || "account";
+    void requestAccountInvitation(accountClient, accountKey).then((result) => {
+      if (cancelled) {
+        return;
+      }
+      setInvitationInfo(result.enabled ? result : null);
+      setInvitationLoadStatus("ready");
+    }).catch((error) => {
+      if (cancelled) {
+        return;
+      }
+      console.warn("load account invitation failed", error);
+      setInvitationInfo(null);
+      setInvitationLoadStatus("error");
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    accountClient,
+    hasAccountSession,
+    invitationEnabled,
+    invitationReloadVersion,
+    isAccountMode
+  ]);
 
   useEffect(() => {
     void refreshQuotaEligibility();
@@ -1607,6 +1686,90 @@ export function SettingsPageView(props: SettingsPageViewProps) {
             </button>
           </div>
         </Section>
+
+        {isAccountMode && showGiftQuota && showInvitationBanner ? (
+          <div
+            className={`mb-6 flex items-center gap-3 px-4 py-3 rounded-card-lg border ${
+              inviteDailyLimitReached
+                ? "bg-text-ink/[0.05] border-border-stone/50"
+                : "bg-action-sky/6 border-action-sky/15"
+            }`}
+          >
+            <span
+              className={`w-8 h-8 shrink-0 rounded-full flex items-center justify-center ${
+                inviteDailyLimitReached ? "bg-text-ink/10 text-text-ink/40" : "bg-action-sky/12 text-action-sky"
+              }`}
+            >
+              <Gift size={15} strokeWidth={2.1} aria-hidden="true" />
+            </span>
+            <div className="min-w-0 flex-1">
+              <p className="text-sm text-text-ink/80 leading-5">{t("settings.token.invite.title")}</p>
+              <p
+                className={`mt-0.5 text-xs leading-4 ${
+                  inviteDailyLimitReached ? "text-text-ink/50" : "text-text-ink/45"
+                }`}
+              >
+                {invitationLoadStatus === "error"
+                  ? t("settings.token.invite.loadFailed")
+                  : invitationLoadStatus === "loading" || invitationLoadStatus === "idle"
+                    ? t("settings.token.invite.loading")
+                    : inviteDailyLimitReached
+                      ? t("settings.token.invite.dailyLimit")
+                      : t("settings.token.invite.body")}
+              </p>
+            </div>
+            {displayInviteCode ? (
+              <div className="shrink-0 flex items-center gap-2">
+              <code
+                className={`px-2.5 py-1.5 text-xs font-semibold tracking-wide bg-background-paper rounded-input border ${
+                  inviteDailyLimitReached
+                    ? "text-text-ink/35 border-border-stone/50"
+                    : "text-text-ink border-action-sky/20"
+                }`}
+              >
+                {displayInviteCode}
+              </code>
+              <button
+                type="button"
+                className={`inline-flex items-center gap-1 px-2.5 py-1.5 text-xs rounded-btn border transition-colors cursor-pointer ${
+                  inviteDailyLimitReached
+                    ? "text-text-ink/35 border-border-stone/50 hover:bg-text-ink/[0.03]"
+                    : "text-action-sky border-action-sky/30 hover:bg-action-sky/8"
+                }`}
+                onClick={() => {
+                  void (async () => {
+                    try {
+                      if (typeof navigator === "undefined" || typeof navigator.clipboard?.writeText !== "function") {
+                        throw new Error("Clipboard API is unavailable");
+                      }
+                      await copyInvitationCode({
+                        invitationCode: displayInviteCode,
+                        clipboard: navigator.clipboard,
+                        track
+                      });
+                      setInviteCopied(true);
+                      window.setTimeout(() => setInviteCopied(false), 2000);
+                    } catch (error) {
+                      console.warn("copy invite code failed", error);
+                    }
+                  })();
+                }}
+              >
+                <Copy size={12} strokeWidth={2.2} />
+                {inviteCopied ? t("settings.token.invite.copied") : t("settings.token.invite.copy")}
+              </button>
+              </div>
+            ) : invitationLoadStatus === "error" ? (
+              <button
+                type="button"
+                className="shrink-0 px-2.5 py-1.5 text-xs rounded-btn border text-action-sky border-action-sky/30 hover:bg-action-sky/8 cursor-pointer"
+                onClick={() => setInvitationReloadVersion((current) => current + 1)}
+              >
+                {t("settings.token.invite.retry")}
+              </button>
+            ) : null}
+          </div>
+        ) : null}
 
         <Section icon={<Palette size={16} className="text-text-ink/60" />} title={t("settings.general")}>
           <SelectRow

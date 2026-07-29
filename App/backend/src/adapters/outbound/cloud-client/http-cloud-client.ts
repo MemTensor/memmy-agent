@@ -1,5 +1,6 @@
 /** Http cloud client module. */
 import {
+  AccountInvitationViewSchema,
   ASR_PROVIDER,
   AuthorizeIntegrationResponseSchema,
   resolveCloudServiceBaseUrl,
@@ -7,12 +8,14 @@ import {
   IntegrationConnectionsResponseSchema,
   LegalAgreementUrlsSchema,
   IntegrationToolResultSchema,
+  InvitationResultSchema,
   OkResponseSchema,
   PromotionFlagsSchema,
   QWEN_ASR_MODEL_ID,
   TokenQuotaEligibilitySchema,
   TokenUsageDtoSchema,
   type AuthorizeIntegrationResponse,
+  type AccountInvitationView,
   type IntegrationCapabilitiesResponse,
   type IntegrationConnection,
   type IntegrationConnectionsResponse,
@@ -37,6 +40,7 @@ import type {
   CloudLoginResult,
   CloudLogoutInput,
   GetAccountInfoInput,
+  EnsureInvitationCodeInput,
   GetTokenQuotaEligibilityInput,
   GetTokenUsageInput,
   GrantTokensInput,
@@ -117,7 +121,8 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
           ...(input.email ? { email: input.email } : {}),
           ...(input.phoneNumber ? { phoneNumber: input.phoneNumber } : {}),
           verificationCode: input.verificationCode,
-          loginSource: input.loginSource.toLowerCase()
+          loginSource: input.loginSource.toLowerCase(),
+          ...(input.invitationCode ? { invitationCode: input.invitationCode } : {})
         },
         lang: "zh",
         deviceId,
@@ -129,13 +134,35 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
         throw new Error("Cloud login response missing uuid");
       }
       const profile = toCloudAccountProfile(data);
+      const invitationResult = InvitationResultSchema.safeParse(data.invitationResult);
+      const userType = readString(data.userType);
 
       return {
         uuid,
         accountUuid: resolveAccountUuid(data, profile),
         profile,
-        isNewUser: readBoolean(data.isNewUser, data.newUser, data.is_new_user, data.new_user, data.firstLogin, data.isFirstLogin)
+        isNewUser: userType === "NEW_USER"
+          ? true
+          : readBoolean(data.isNewUser, data.newUser, data.is_new_user, data.new_user, data.firstLogin, data.isFirstLogin),
+        invitationResult: invitationResult.success
+          ? invitationResult.data
+          : { status: "not_provided" }
       };
+    },
+
+    async ensureInvitationCode(input: EnsureInvitationCodeInput): Promise<AccountInvitationView> {
+      const data = await requestCloudData<unknown>(
+        fetchImpl,
+        baseUrl,
+        timeoutMs,
+        "/api/agentUser/invitation/me/code",
+        {
+          method: "PUT",
+          lang: "zh",
+          bearerCredential: input.uuid
+        }
+      );
+      return AccountInvitationViewSchema.parse(data);
     },
 
     async logout(input: CloudLogoutInput): Promise<void> {
@@ -369,7 +396,7 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
 }
 
 interface CloudRequestOptions {
-  method?: "GET" | "POST" | "DELETE";
+  method?: "GET" | "POST" | "PUT" | "DELETE";
   body?: Record<string, unknown>;
   lang: "zh" | "en";
   bearerCredential?: string;
@@ -486,6 +513,7 @@ function toCloudAccountProfile(data: Record<string, unknown>): CloudAccountProfi
   const rawProfile = { ...data };
   delete rawProfile.token;
   delete rawProfile.uuid;
+  delete rawProfile.invitationResult;
 
   return {
     userId: readString(data.id) ?? "unknown",

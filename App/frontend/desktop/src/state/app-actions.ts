@@ -10,6 +10,7 @@ import type {
   TokenUsageDto
 } from "@memmy/local-api-contracts";
 import type { AppRoutePath, PreferredMode } from "../app/routes.js";
+import type { InvitationToastKind } from "../app/invitation-result.js";
 import type { ChannelsClient } from "../api/channels-client.js";
 import type { ModelProviderConfig } from "../api/config-client.js";
 import { isIntegrationSetupDiagnosticError, logHiddenIntegrationSetupDiagnosticError } from "../api/integration-errors.js";
@@ -54,6 +55,7 @@ export interface AgentSourceScanFinished extends AgentSourceScanCompletion {
 export const AGENT_SOURCE_SCAN_COMPLETION_FEEDBACK_MS = 5_000;
 
 let agentOperationErrorCounter = 0;
+let invitationToastCounter = 0;
 
 export function createAgentOperationError(input: {
   source: AgentOperationErrorSource;
@@ -82,6 +84,8 @@ export type AppAction =
   | { type: "bootstrap/loaded"; bootstrap: AppBootstrapResponse; initialPath: AppRoutePath }
   | { type: "events/statusChanged"; status: EventConnectionStatus }
   | { type: "navigation/changed"; path: AppRoutePath }
+  | { type: "invitationToast/shown"; id: number; kind: InvitationToastKind }
+  | { type: "invitationToast/cleared"; id: number }
   | { type: "settings/updated"; settings: Partial<AppSettingsDto> }
   | { type: "privacy/updated"; privacy: Partial<PrivacySettingsDto> }
   | { type: "tokenUsage/updated"; tokenUsage: TokenUsageDto }
@@ -126,6 +130,15 @@ export const appActions = {
   /** Handles navigate. */
   navigate(path: AppRoutePath): AppAction {
     return { type: "navigation/changed", path };
+  },
+
+  showInvitationToast(kind: InvitationToastKind): AppAction {
+    invitationToastCounter += 1;
+    return { type: "invitationToast/shown", id: invitationToastCounter, kind };
+  },
+
+  clearInvitationToast(id: number): AppAction {
+    return { type: "invitationToast/cleared", id };
   },
 
   /** Writes settings updated. */
