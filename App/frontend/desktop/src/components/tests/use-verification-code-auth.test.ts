@@ -1,10 +1,10 @@
-/** Use phone auth tests. */
+/** Verification-code authentication tests. */
 import { describe, expect, it } from "vitest";
 import { ApiRequestError } from "../../api/http.js";
 import type { MessageKey, MessageValues } from "../../i18n/messages.js";
-import { resolveAuthErrorMessage, validateAuthIdentifier } from "../use-phone-auth.js";
+import { resolveAuthErrorMessage, validateAuthIdentifier } from "../use-verification-code-auth.js";
 
-describe("usePhoneAuth helpers", () => {
+describe("useVerificationCodeAuth helpers", () => {
   it("validates phone identifiers before auth requests", () => {
     expect(validateAuthIdentifier("phone", "1538694757")).toEqual({
       ok: false,

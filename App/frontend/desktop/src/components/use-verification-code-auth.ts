@@ -1,4 +1,4 @@
-/** Use phone auth module. */
+/** Verification-code authentication module. */
 import type { AccountChannel, AccountSessionView } from "@memmy/local-api-contracts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAnalytics } from "../analytics/use-analytics.js";
@@ -36,7 +36,7 @@ export interface AuthCodeFeedback {
   tone: "error" | "success";
 }
 
-export interface UsePhoneAuthResult {
+export interface UseVerificationCodeAuthResult {
   sending: boolean;
   countdown: number;
   loginPending: boolean;
@@ -108,7 +108,7 @@ export function resolveAuthErrorMessage(
   return t(fallbackKey);
 }
 
-export function usePhoneAuth(): UsePhoneAuthResult {
+export function useVerificationCodeAuth(): UseVerificationCodeAuthResult {
   const { t, language } = useTranslation();
   const { clients } = useApiClients();
   const { track } = useAnalytics();

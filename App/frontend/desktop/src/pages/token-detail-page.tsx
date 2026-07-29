@@ -8,7 +8,7 @@ import { useApiClients } from "../app/providers.js";
 import { buildAccountOnboardingStartPatch, resolvePostLoginRoute } from "../app/routes.js";
 import { AuthCodeForm } from "../components/auth-code-form.js";
 import { LanguageToggleButton, PAGE_CORNER_ACTION_CONTAINER_STYLE, PageCornerActionButton } from "../components/language-toggle-button.js";
-import { usePhoneAuth } from "../components/use-phone-auth.js";
+import { useVerificationCodeAuth } from "../components/use-verification-code-auth.js";
 import { getLegalLinkUrl } from "../legal/legal-links.js";
 import { openExternalUrl } from "../utils/open-url.js";
 import { useTranslation } from "../i18n/use-translation.js";
@@ -20,7 +20,7 @@ export function TokenDetailPage() {
   const { state, dispatch } = useAppState();
   const { clients } = useApiClients();
   const { t, language } = useTranslation();
-  const phoneAuth = usePhoneAuth();
+  const verificationCodeAuth = useVerificationCodeAuth();
   const [identifier, setIdentifier] = useState("");
   const [code, setCode] = useState("");
   const [inviteCode, setInviteCode] = useState("");
@@ -35,24 +35,24 @@ export function TokenDetailPage() {
     setCode("");
     setInviteCode("");
     setModePersistenceFeedback(null);
-    phoneAuth.resetInteractionState();
-  }, [channel, phoneAuth.resetInteractionState]);
+    verificationCodeAuth.resetInteractionState();
+  }, [channel, verificationCodeAuth.resetInteractionState]);
 
   function toggleLanguage() {
     const nextLanguage = language === "en-US" ? "zh-CN" : "en-US";
-    phoneAuth.clearFeedback();
+    verificationCodeAuth.clearFeedback();
     setModePersistenceFeedback(null);
     dispatch(appActions.settingsUpdated({ language: nextLanguage }));
     void clients?.config.updateSettings({ language: nextLanguage }).catch(() => undefined);
   }
 
   async function submitLogin() {
-    if (!canContinue || phoneAuth.loginPending || modePersistencePending) {
+    if (!canContinue || verificationCodeAuth.loginPending || modePersistencePending) {
       return;
     }
     setModePersistenceFeedback(null);
 
-    const session = await phoneAuth.login(channel, identifier, code);
+    const session = await verificationCodeAuth.login(channel, identifier, code);
     if (!session || !session.authenticated) {
       return;
     }
@@ -148,14 +148,14 @@ export function TokenDetailPage() {
                 identifierType={channel}
                 code={code}
                 inviteCode={inviteCode}
-                disabled={!canContinue || phoneAuth.loginPending || modePersistencePending}
-                sendCodeDisabled={phoneAuth.sendCodeDisabled}
-                sendCodeLabel={phoneAuth.sendCodeLabel}
-                feedback={modePersistenceFeedback ?? phoneAuth.feedback}
+                disabled={!canContinue || verificationCodeAuth.loginPending || modePersistencePending}
+                sendCodeDisabled={verificationCodeAuth.sendCodeDisabled}
+                sendCodeLabel={verificationCodeAuth.sendCodeLabel}
+                feedback={modePersistenceFeedback ?? verificationCodeAuth.feedback}
                 onIdentifierChange={setIdentifier}
                 onCodeChange={setCode}
                 onInviteCodeChange={setInviteCode}
-                onSendCode={() => void phoneAuth.sendCode(channel, identifier)}
+                onSendCode={() => void verificationCodeAuth.sendCode(channel, identifier)}
                 onSubmit={() => void submitLogin()}
                 onOpenTerms={() => void openExternalUrl(getLegalLinkUrl("terms", language, state.bootstrap?.legal))}
                 onOpenDataAgreement={() => void openExternalUrl(getLegalLinkUrl("data", language, state.bootstrap?.legal))}

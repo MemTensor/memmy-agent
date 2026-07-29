@@ -10,12 +10,12 @@ describe("auth flow pages", () => {
     ["login-page.tsx"]
   ])("%s 通过本地账号 API 完成登录会话后再推进状态机", (fileName) => {
     const source = readSource(fileName);
-    const verifyIndex = source.indexOf("phoneAuth.login");
+    const verifyIndex = source.indexOf("verificationCodeAuth.login");
     const persistIndex = source.lastIndexOf("persistLoginModeSelection({");
 
-    expect(source).toContain("usePhoneAuth");
-    expect(source).toContain("phoneAuth.sendCode");
-    expect(source).toContain("phoneAuth.login");
+    expect(source).toContain("useVerificationCodeAuth");
+    expect(source).toContain("verificationCodeAuth.sendCode");
+    expect(source).toContain("verificationCodeAuth.login");
     expect(verifyIndex).toBeGreaterThanOrEqual(0);
     expect(persistIndex).toBeGreaterThan(verifyIndex);
   });
@@ -26,12 +26,12 @@ describe("auth flow pages", () => {
     ["login-page.tsx"]
   ])("%s 对无效账号或验证码给出可见错误", (fileName) => {
     const source = readSource(fileName);
-    const hookSource = readFileSync(resolve(__dirname, "../../components/use-phone-auth.ts"), "utf8");
+    const hookSource = readFileSync(resolve(__dirname, "../../components/use-verification-code-auth.ts"), "utf8");
 
-    expect(source).toContain("feedback={modePersistenceFeedback ?? phoneAuth.feedback}");
-    expect(source).toContain("sendCodeDisabled={phoneAuth.sendCodeDisabled}");
-    expect(source).toContain("sendCodeLabel={phoneAuth.sendCodeLabel}");
-    expect(source).toContain("disabled={!canContinue || phoneAuth.loginPending || modePersistencePending}");
+    expect(source).toContain("feedback={modePersistenceFeedback ?? verificationCodeAuth.feedback}");
+    expect(source).toContain("sendCodeDisabled={verificationCodeAuth.sendCodeDisabled}");
+    expect(source).toContain("sendCodeLabel={verificationCodeAuth.sendCodeLabel}");
+    expect(source).toContain("disabled={!canContinue || verificationCodeAuth.loginPending || modePersistencePending}");
     expect(hookSource).toContain("validateAuthIdentifier(channel, rawIdentifier)");
     expect(hookSource).toContain("resolveIdentifierValidationMessage(channel, validation.reason, t)");
     expect(hookSource).toContain('"login.error.invalidPhone"');
@@ -41,7 +41,7 @@ describe("auth flow pages", () => {
   });
 
   it("邮箱验证码业务错误透传云端 message，其他错误继续使用本地文案", () => {
-    const hookSource = readFileSync(resolve(__dirname, "../../components/use-phone-auth.ts"), "utf8");
+    const hookSource = readFileSync(resolve(__dirname, "../../components/use-verification-code-auth.ts"), "utf8");
 
     expect(hookSource).toContain("resolveAuthErrorMessage(error, channel, t,");
     expect(hookSource).toContain('channel === "email"');
@@ -57,11 +57,11 @@ describe("auth flow pages", () => {
     ["login-page.tsx"]
   ])("%s 账号通道由包配置决定，不随界面语言切换", (fileName) => {
     const source = readSource(fileName);
-    const hookSource = readFileSync(resolve(__dirname, "../../components/use-phone-auth.ts"), "utf8");
+    const hookSource = readFileSync(resolve(__dirname, "../../components/use-verification-code-auth.ts"), "utf8");
 
     expect(source).toContain("resolveDesktopAccountChannel()");
     expect(source).not.toContain('language === "en-US" ? "email" : "phone"');
-    expect(source).toContain("phoneAuth.resetInteractionState();");
+    expect(source).toContain("verificationCodeAuth.resetInteractionState();");
     expect(source).toContain("setModePersistenceFeedback(null);");
     expect(hookSource).toContain("resetInteractionState:");
     expect(hookSource).toContain("clearInterval(timerRef.current);");
@@ -73,17 +73,17 @@ describe("auth flow pages", () => {
     ["login-page.tsx"]
   ])("%s 切换界面语言时只清除已有登录错误，不重置输入或重发倒计时", (fileName) => {
     const source = readSource(fileName);
-    const hookSource = readFileSync(resolve(__dirname, "../../components/use-phone-auth.ts"), "utf8");
+    const hookSource = readFileSync(resolve(__dirname, "../../components/use-verification-code-auth.ts"), "utf8");
     const toggleStart = source.indexOf("function toggleLanguage()");
     const toggleEnd = source.indexOf("\n  }", toggleStart);
     const toggleSource = source.slice(toggleStart, toggleEnd);
 
     expect(toggleStart).toBeGreaterThanOrEqual(0);
-    expect(toggleSource).toContain("phoneAuth.clearFeedback();");
+    expect(toggleSource).toContain("verificationCodeAuth.clearFeedback();");
     expect(toggleSource).toContain("setModePersistenceFeedback(null);");
     expect(toggleSource).not.toContain("setIdentifier(");
     expect(toggleSource).not.toContain("setCode(");
-    expect(toggleSource).not.toContain("phoneAuth.resetInteractionState();");
+    expect(toggleSource).not.toContain("verificationCodeAuth.resetInteractionState();");
     expect(hookSource).toContain("clearFeedback:");
     expect(hookSource).toContain("setFeedback(null);");
   });

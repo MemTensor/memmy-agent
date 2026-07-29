@@ -10,7 +10,7 @@ import { AuthCodeForm } from "../components/auth-code-form.js";
 import { InviteResultToast, type InviteResultTone } from "../components/invite-result-toast.js";
 import { LanguageToggleButton } from "../components/language-toggle-button.js";
 import { Memmy } from "../components/mascot/memmy.js";
-import { usePhoneAuth } from "../components/use-phone-auth.js";
+import { useVerificationCodeAuth } from "../components/use-verification-code-auth.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
 import { getLegalLinkUrl } from "../legal/legal-links.js";
 import { openExternalUrl } from "../utils/open-url.js";
@@ -28,7 +28,7 @@ export function WelcomePage() {
   const { clients } = useApiClients();
   const { track } = useAnalytics();
   const { t, language } = useTranslation();
-  const phoneAuth = usePhoneAuth();
+  const verificationCodeAuth = useVerificationCodeAuth();
   const [identifier, setIdentifier] = useState("");
   const [code, setCode] = useState("");
   const [inviteCode, setInviteCode] = useState("");
@@ -47,13 +47,13 @@ export function WelcomePage() {
     setCode("");
     setInviteCode("");
     setModePersistenceFeedback(null);
-    phoneAuth.resetInteractionState();
-  }, [channel, phoneAuth.resetInteractionState]);
+    verificationCodeAuth.resetInteractionState();
+  }, [channel, verificationCodeAuth.resetInteractionState]);
 
   /** Handles toggle language. */
   function toggleLanguage() {
     const nextLanguage = language === "en-US" ? "zh-CN" : "en-US";
-    phoneAuth.clearFeedback();
+    verificationCodeAuth.clearFeedback();
     setModePersistenceFeedback(null);
     dispatch(appActions.settingsUpdated({ language: nextLanguage }));
     void clients?.config.updateSettings({ language: nextLanguage }).catch(() => undefined);
@@ -61,12 +61,12 @@ export function WelcomePage() {
 
   /** Handles submit login. */
   async function submitLogin() {
-    if (!canContinue || phoneAuth.loginPending || modePersistencePending) {
+    if (!canContinue || verificationCodeAuth.loginPending || modePersistencePending) {
       return;
     }
     setModePersistenceFeedback(null);
 
-    const session = await phoneAuth.login(channel, identifier, code);
+    const session = await verificationCodeAuth.login(channel, identifier, code);
     if (!session || !session.authenticated) {
       return;
     }
@@ -195,14 +195,14 @@ export function WelcomePage() {
                 identifierType={channel}
                 code={code}
                 inviteCode={inviteCode}
-                disabled={!canContinue || phoneAuth.loginPending || modePersistencePending}
-                sendCodeDisabled={phoneAuth.sendCodeDisabled}
-                sendCodeLabel={phoneAuth.sendCodeLabel}
-                feedback={modePersistenceFeedback ?? phoneAuth.feedback}
+                disabled={!canContinue || verificationCodeAuth.loginPending || modePersistencePending}
+                sendCodeDisabled={verificationCodeAuth.sendCodeDisabled}
+                sendCodeLabel={verificationCodeAuth.sendCodeLabel}
+                feedback={modePersistenceFeedback ?? verificationCodeAuth.feedback}
                 onIdentifierChange={setIdentifier}
                 onCodeChange={setCode}
                 onInviteCodeChange={setInviteCode}
-                onSendCode={() => void phoneAuth.sendCode(channel, identifier)}
+                onSendCode={() => void verificationCodeAuth.sendCode(channel, identifier)}
                 onSubmit={() => void submitLogin()}
                 onOpenTerms={() => void openExternalUrl(getLegalLinkUrl("terms", language, state.bootstrap?.legal))}
                 onOpenDataAgreement={() => void openExternalUrl(getLegalLinkUrl("data", language, state.bootstrap?.legal))}
