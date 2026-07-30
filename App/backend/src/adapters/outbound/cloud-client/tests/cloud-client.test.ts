@@ -429,8 +429,7 @@ describe("cloud client", () => {
     });
     await expect(
       client.grantImprovementProgramTokens({
-        uuid: "cloud.login.uuid",
-        tokenExtra: 5_000_000
+        uuid: "cloud.login.uuid"
       })
     ).resolves.toMatchObject({
       totalTokens: 35000000,
@@ -448,7 +447,7 @@ describe("cloud client", () => {
       {
         path: "/api/agentUser/quota/updateTokenTotal",
         method: "POST",
-        body: { tokenExtra: 5_000_000 },
+        body: { grantKey: "improvement_program" },
         authorization: "Bearer cloud.login.uuid",
         region: "cn"
       },
@@ -592,14 +591,12 @@ describe("cloud client", () => {
     const client = createHttpCloudClient({ baseUrl: `http://127.0.0.1:${address.port}`, timeoutMs: 1000 });
 
     await client.grantImprovementProgramTokens({
-      uuid: "cloud.login.uuid",
-      tokenExtra: 5_000_000,
-      grantKey: "improvement_program"
+      uuid: "cloud.login.uuid"
     });
 
     expect(requests).toContainEqual({
       path: "/api/agentUser/quota/updateTokenTotal",
-      body: { tokenExtra: 5_000_000, grantKey: "improvement_program" }
+      body: { grantKey: "improvement_program" }
     });
   });
 
@@ -929,6 +926,7 @@ describe("cloud client", () => {
     const promotions = {
       loginBanner: true,
       improvementGift: false,
+      improvementGiftRewardTokens: 300_000,
       applyMore: true,
       agentChatTokenTotal: 2_000_000
     };

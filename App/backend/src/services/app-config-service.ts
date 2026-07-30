@@ -86,10 +86,6 @@ const BUILT_IN_AVATARS = AvatarOptionSchema.array().parse([
     kind: "video"
   }
 ]);
-const IMPROVEMENT_PROGRAM_TOKEN_EXTRA = 5_000_000;
-// Idempotency key sent to the cloud so the improvement-program grant is applied at most once per user,
-// even if local data is deleted and the user re-accepts after reinstalling.
-const IMPROVEMENT_PROGRAM_GRANT_KEY = "improvement_program";
 /** Type definition for normalized model config input. */
 type NormalizedModelConfigInput = ModelConfigInput & { memmyMemory: MemmyMemoryModelConfigInput };
 
@@ -143,9 +139,7 @@ export function createAppConfigService(options: CreateAppConfigServiceOptions): 
       const cloudClient = getConfiguredCloudClient(options);
       const account = getAuthenticatedCloudAccount(options);
       const grantedTokenUsage = await cloudClient.grantImprovementProgramTokens({
-        uuid: account.uuid,
-        tokenExtra: IMPROVEMENT_PROGRAM_TOKEN_EXTRA,
-        grantKey: IMPROVEMENT_PROGRAM_GRANT_KEY
+        uuid: account.uuid
       });
       const tokenUsage = TokenUsageDtoSchema.parse(grantedTokenUsage);
 

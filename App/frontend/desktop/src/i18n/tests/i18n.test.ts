@@ -17,7 +17,7 @@ describe("desktop i18n helpers", () => {
     expect(formatMessage(messageCatalogs["zh-CN"]["welcome.gift"], { count: "2,000,000" }))
       .toBe("注册即送 2,000,000 Agent 任务体验 Token，开箱即用");
     expect(formatMessage(messageCatalogs["en-US"]["welcome.gift"], { count: "2,000,000" }))
-      .toBe("Sign up to get 2,000,000 Agent task trial tokens, ready to use");
+      .toBe("Sign up to get 2,000,000 task tokens, ready to use");
   });
 
   it("localizes the Token gift details in Chinese and English", () => {
