@@ -6,7 +6,8 @@ import { appActions, type AppAction } from "../state/app-actions.js";
 
 /** Contract for persist login mode selection input. */
 export interface PersistLoginModeSelectionInput {
-  configClient?: Pick<ConfigClient, "updateSettings" | "updateOnboarding">;
+  configClient?: Pick<ConfigClient, "updateSettings" | "updateOnboarding">
+    & Partial<Pick<ConfigClient, "getTokenUsage">>;
   dispatch: Dispatch<AppAction>;
   userMode: Extract<AppSettingsDto["userMode"], "account" | "byok">;
   onboarding?: Partial<OnboardingStateDto>;
@@ -16,6 +17,18 @@ export interface PersistLoginModeSelectionInput {
 export async function persistLoginModeSelection(input: PersistLoginModeSelectionInput): Promise<void> {
   const settingsPatch = { userMode: input.userMode };
   const savedSettings = await saveSettingsPatch(input.configClient, settingsPatch);
+
+  if (input.userMode === "account" && input.configClient?.getTokenUsage) {
+    try {
+      const tokenUsage = await input.configClient.getTokenUsage();
+      input.dispatch(appActions.tokenUsageUpdated(tokenUsage));
+    } catch (error) {
+      // Quota synchronization failure must not block login. The unsynchronized
+      // placeholder has lastSyncedAt=null, so it cannot trigger the exhausted modal.
+      console.warn("refresh token usage after login failed", error);
+    }
+  }
+
   input.dispatch(appActions.settingsUpdated(savedSettings));
 
   if (!input.onboarding) {

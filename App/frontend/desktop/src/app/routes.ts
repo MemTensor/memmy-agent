@@ -175,7 +175,12 @@ export function shouldExitPetLaunchForRoute(input: PetLaunchGuardInput): boolean
 
 /** Checks should show token exhausted modal. */
 export function shouldShowTokenExhaustedModal(bootstrap: AppBootstrapResponse | null | undefined): boolean {
-  return Boolean(bootstrap && bootstrap.app.userMode === "account" && bootstrap.tokenUsage.remainingTokens <= 0);
+  return Boolean(
+    bootstrap
+    && bootstrap.app.userMode === "account"
+    && bootstrap.tokenUsage.lastSyncedAt !== null
+    && bootstrap.tokenUsage.remainingTokens <= 0
+  );
 }
 
 /** Handles resolve post login route. */
