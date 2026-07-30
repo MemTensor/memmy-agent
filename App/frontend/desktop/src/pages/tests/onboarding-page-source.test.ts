@@ -271,19 +271,22 @@ describe("OnboardingPage source", () => {
 describe("OnboardingPage 赠送活动开关", () => {
   const improvementModalSourcePath = fileURLToPath(new URL("../improvement-program-modal.tsx", import.meta.url));
 
-  it("改进计划弹窗经 showGift prop 把 promotions.improvementGift 开关下传，取不到默认展示", () => {
+  it("改进计划弹窗严格按 promotions.improvementGift 开关展示，取不到时隐藏", () => {
     const appFrameSourcePath = fileURLToPath(new URL("../app-frame.tsx", import.meta.url));
     const source = readFileSync(appFrameSourcePath, "utf8");
 
-    expect(source).toContain("showGift={state.bootstrap?.promotions?.improvementGift ?? true}");
+    expect(source).toContain("showGift={state.bootstrap?.promotions?.improvementGift === true}");
+    expect(source).toContain(
+      "giftTokens={state.bootstrap?.promotions?.improvementGiftRewardTokens ?? 0}"
+    );
   });
 
-  it("改进计划赠送卡片在弹窗组件内部由 showGift 开关包裹，缺省仍展示", () => {
+  it("改进计划赠送卡片在弹窗组件内部由 showGift 开关包裹", () => {
     const modalSource = readFileSync(improvementModalSourcePath, "utf8");
 
-    expect(modalSource).toContain("props.showGift ?? true");
-    const gateIndex = modalSource.indexOf("props.showGift ?? true");
-    const benefitIndex = modalSource.indexOf('t("onboarding.improvement.benefitToken")');
+    expect(modalSource).not.toContain("props.showGift ?? true");
+    const gateIndex = modalSource.indexOf("props.showGift");
+    const benefitIndex = modalSource.indexOf('"onboarding.improvement.benefitToken"');
     expect(gateIndex).toBeGreaterThanOrEqual(0);
     expect(benefitIndex).toBeGreaterThan(gateIndex);
   });

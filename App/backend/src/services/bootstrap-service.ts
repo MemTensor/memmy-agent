@@ -149,7 +149,8 @@ async function getLegalUrls(cloudClient: CloudClient): Promise<LegalAgreementUrl
 
 const PROMOTIONS_FALLBACK: PromotionFlags = {
   loginBanner: true,
-  improvementGift: true,
+  improvementGift: false,
+  improvementGiftRewardTokens: 0,
   applyMore: true,
   agentChatTokenTotal: 0
 };

@@ -100,10 +100,6 @@ export interface UpdateCloudAccountProfileInput {
 export interface GrantTokensInput {
   /** Uuid. */
   uuid?: string;
-  /** Token extra. */
-  tokenExtra: number;
-  /** Per-user idempotency key so the cloud grants each named benefit at most once. */
-  grantKey?: string;
 }
 
 /** Contract for request token quota input. */

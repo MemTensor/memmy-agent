@@ -1460,7 +1460,8 @@ export function AppFrame(props: AppFrameProps) {
         <ImprovementProgramModal
           onChoice={chooseDeferredImprovementProgram}
           onLearnMore={() => void openExternalUrl(getLegalLinkUrl("data", language, state.bootstrap?.legal))}
-          showGift={state.bootstrap?.promotions?.improvementGift ?? true}
+          showGift={state.bootstrap?.promotions?.improvementGift === true}
+          giftTokens={state.bootstrap?.promotions?.improvementGiftRewardTokens ?? 0}
         />
       )}
       {deferredGuidanceStep === "product_tour" && (

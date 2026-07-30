@@ -144,6 +144,7 @@ describe("BootstrapService", () => {
           return {
             loginBanner: true,
             improvementGift: true,
+            improvementGiftRewardTokens: 1_000_000,
             applyMore: true,
             agentChatTokenTotal: 2_000_000
           };
@@ -286,6 +287,7 @@ describe("BootstrapService", () => {
     const promotions = {
       loginBanner: true,
       improvementGift: false,
+      improvementGiftRewardTokens: 300_000,
       applyMore: true,
       agentChatTokenTotal: 2_000_000
     };
@@ -308,7 +310,8 @@ describe("BootstrapService", () => {
 
     expect(bootstrap.promotions).toEqual({
       loginBanner: true,
-      improvementGift: true,
+      improvementGift: false,
+      improvementGiftRewardTokens: 0,
       applyMore: true,
       agentChatTokenTotal: 0
     });
@@ -327,7 +330,8 @@ describe("BootstrapService", () => {
 
     expect(bootstrap.promotions).toEqual({
       loginBanner: true,
-      improvementGift: true,
+      improvementGift: false,
+      improvementGiftRewardTokens: 0,
       applyMore: true,
       agentChatTokenTotal: 0
     });

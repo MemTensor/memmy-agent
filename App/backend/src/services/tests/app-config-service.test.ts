@@ -864,9 +864,7 @@ describe("AppConfigService", () => {
       { privacy: { allowMemoryImprovementUpload: true } },
       {
         grant: {
-          uuid: "cloud.login.uuid",
-          tokenExtra: 5_000_000,
-          grantKey: "improvement_program"
+          uuid: "cloud.login.uuid"
         }
       }
     ]);

@@ -308,12 +308,12 @@ describe("SettingsPageView", () => {
     expect(html).not.toContain("注册于");
   });
 
-  it("Token 用量展示参与奖励后的 5,000,000 Token 增量", () => {
+  it("Token 用量展示国际邮箱账号参与改进计划后的 300,000 Token 增量", () => {
     const html = normalizeSsrHtml(renderSettingsPageView(createImprovementBonusState()));
 
     expect(html).toContain("赠送大模型额度已用 0.0M Token");
-    expect(html).toContain("共 35.0M Token");
-    expect(html).toContain("剩余 35.0M Token");
+    expect(html).toContain("共 30.3M Token");
+    expect(html).toContain("剩余 30.3M Token");
     expect(html).not.toContain("共 30.0M Token");
   });
 
@@ -850,6 +850,7 @@ function createLowTokenState(applyMore: boolean): AppState {
     promotions: {
       loginBanner: true,
       improvementGift: true,
+      improvementGiftRewardTokens: 1_000_000,
       applyMore,
       agentChatTokenTotal: mockBootstrap.promotions?.agentChatTokenTotal ?? 0
     }
@@ -1016,9 +1017,10 @@ function createAccountModeWithoutIdentifierState(): AppState {
 }
 
 /**
- * Creates an account-mode settings page state that includes a 5,000,000 Token participation-reward increment.
+ * Creates an account-mode settings page state that includes an international
+ * email account's 300,000 Token improvement-program reward.
  *
- * @returns A settings page state with a total of 35,000,000 Tokens.
+ * @returns A settings page state with a total of 30,300,000 Tokens.
  */
 function createImprovementBonusState(): AppState {
   const state = createAccountModeState();
@@ -1027,9 +1029,9 @@ function createImprovementBonusState(): AppState {
     state,
     appActions.tokenUsageUpdated({
       planName: "free",
-      totalTokens: 35_000_000,
+      totalTokens: 30_300_000,
       usedTokens: 0,
-      remainingTokens: 35_000_000,
+      remainingTokens: 30_300_000,
       expiresAt: null,
       lastSyncedAt: "2026-06-09T06:36:49.417Z",
       sceneUsages: []

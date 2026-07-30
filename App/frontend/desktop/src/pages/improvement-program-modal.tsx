@@ -1,11 +1,13 @@
 import { ExternalLink, Gift } from "lucide-react";
 import { Memmy } from "../components/mascot/memmy.js";
 import { useTranslation } from "../i18n/use-translation.js";
+import { formatTokenGiftAmount } from "./token-gift.js";
 
 export interface ImprovementProgramModalProps {
   onChoice: (accepted: boolean) => void;
   onLearnMore: () => void;
-  showGift?: boolean;
+  showGift: boolean;
+  giftTokens: number;
 }
 
 export function ImprovementProgramModal(props: ImprovementProgramModalProps) {
@@ -23,13 +25,17 @@ export function ImprovementProgramModal(props: ImprovementProgramModalProps) {
         </div>
 
         <div className="px-7">
-          {(props.showGift ?? true) && (
+          {props.showGift && (
             <div className="bg-action-sky/10 border border-action-sky/25 rounded-card p-4 mb-4">
               <div className="flex items-center gap-2.5">
                 <Gift size={16} className="text-action-sky" />
                 <span className="text-sm text-text-ink/70">
                   {t("onboarding.improvement.benefitPrefix")}{" "}
-                  <strong className="text-action-sky">{t("onboarding.improvement.benefitToken")}</strong>
+                  <strong className="text-action-sky">
+                    {t("onboarding.improvement.benefitToken", {
+                      count: formatTokenGiftAmount(props.giftTokens)
+                    })}
+                  </strong>
                 </span>
               </div>
             </div>

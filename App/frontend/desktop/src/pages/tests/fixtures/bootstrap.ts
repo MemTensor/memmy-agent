@@ -51,6 +51,7 @@ export const mockBootstrap = AppBootstrapResponseSchema.parse({
   promotions: {
     loginBanner: true,
     improvementGift: true,
+    improvementGiftRewardTokens: 1_000_000,
     applyMore: true,
     agentChatTokenTotal: 2_000_000
   }

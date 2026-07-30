@@ -213,10 +213,9 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
     async grantImprovementProgramTokens(input: GrantTokensInput): Promise<TokenUsageSnapshot> {
       await requestCloudData<unknown>(fetchImpl, baseUrl, timeoutMs, "/api/agentUser/quota/updateTokenTotal", {
         body: {
-          tokenExtra: input.tokenExtra,
-          // Per-user idempotency key: the cloud must grant a named benefit at most once, so
-          // reinstalling and re-accepting cannot stack the improvement-program tokens again.
-          ...(input.grantKey ? { grantKey: input.grantKey } : {})
+          // This client method is dedicated to the improvement-program benefit. Keep the
+          // idempotency key internal so callers cannot accidentally request a generic grant.
+          grantKey: "improvement_program"
         },
         lang: "zh",
         bearerCredential: input.uuid
