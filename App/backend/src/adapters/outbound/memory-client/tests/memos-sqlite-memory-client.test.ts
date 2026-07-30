@@ -410,16 +410,19 @@ describe("createMemosSqliteMemoryClient", () => {
     })).resolves.toMatchObject({ total: 1, logs: [{ toolName: "memory_search" }] });
   });
 
-  it("uses the current trace summary when reading memory_add logs", async () => {
+  it("uses the current span goal when reading memory_add logs", async () => {
     const dbPath = createMemoryDatabase({
-      id: "trace_log_summary",
+      id: "span_log_goal",
       sessionId: "codex-session-log-summary",
       agentId: "codex",
-      memoryValue: "Summary: Current summary from the trace",
-      tagsJson: JSON.stringify(["trace"]),
-      infoJson: JSON.stringify({ summary: "Current summary from the trace" }),
+      memoryValue: "Goal: Current goal from the span",
+      tagsJson: JSON.stringify(["span"]),
+      infoJson: JSON.stringify({ span_goal: "Current goal from the span" }),
       propertiesJson: JSON.stringify({
-        internal_info: { memory_kind: "trace", summary: "Current summary from the trace" }
+        internal_info: {
+          memory_kind: "span",
+          span: { span_goal: "Current goal from the span" }
+        }
       })
     });
     seedApiLogs(dbPath);
@@ -431,7 +434,7 @@ describe("createMemosSqliteMemoryClient", () => {
       "memory_add",
       "codex",
       "{}",
-      JSON.stringify({ details: [{ role: "trace", traceId: "trace_log_summary", summary: "RawTurn: raw_stale" }] }),
+      JSON.stringify({ details: [{ role: "span", traceId: "span_log_goal" }] }),
       1,
       1,
       "2026-06-08T09:04:00.000Z"
@@ -446,7 +449,7 @@ describe("createMemosSqliteMemoryClient", () => {
     await expect(client.memoryApiLogs({
       tools: ["memory_add"], sourceAgent: "codex", limit: 20, offset: 0
     })).resolves.toMatchObject({
-      logs: [{ outputJson: expect.stringContaining("Current summary from the trace") }]
+      logs: [{ outputJson: expect.stringContaining("Current goal from the span") }]
     });
   });
 

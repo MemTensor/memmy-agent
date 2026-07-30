@@ -63,7 +63,7 @@ export interface MemoriesSubPageProps {
 type ProcessingRetryFeedback =
   | { memoryId: string; status: "running" }
   | { memoryId: string; status: "succeeded" }
-  | { memoryId: string; status: "error"; message: string }
+  | { memoryId: string; status: "error"; message: string; failedAt: string }
   | null;
 
 export interface MemorySearchFilters {
@@ -262,7 +262,12 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
 
   async function retryMemoryProcessing(memoryId: string) {
     if (!props.client) {
-      setRetryFeedback({ memoryId, status: "error", message: t("memory.clientNotReady") });
+      setRetryFeedback({
+        memoryId,
+        status: "error",
+        message: t("memory.clientNotReady"),
+        failedAt: new Date().toISOString()
+      });
       return;
     }
     const requestId = ++retryRequestIdRef.current;
@@ -309,7 +314,8 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
       setRetryFeedback({
         memoryId,
         status: "error",
-        message: processingRetryErrorMessage(error, t("memory.memories.processing.retryEndpointUnavailable"))
+        message: processingRetryErrorMessage(error, t("memory.memories.processing.retryEndpointUnavailable")),
+        failedAt: new Date().toISOString()
       });
       clearMemoryPanelCache();
       void refresh(page, sourceAgent, { useCache: false }).catch(() => undefined);
@@ -684,6 +690,13 @@ function MemoryProcessingFailureCard(props: {
   const { t } = useTranslation();
   const processing = props.item.processing;
   const feedback = props.retryFeedback?.memoryId === props.item.id ? props.retryFeedback : null;
+  const retryError = feedback?.status === "error" ? feedback : null;
+  const displayedErrorMessage = retryError?.message ?? processing?.errorMessage ?? null;
+  const displayedFailedAt = retryError?.failedAt ?? processing?.failedAt ?? null;
+  const retryErrorMatchesProcessing = Boolean(
+    retryError &&
+    processing?.errorMessage === retryError.message
+  );
   const processingRetryInProgress = Boolean(
     processing?.errorMessage &&
     processing.state !== "failed" &&
@@ -691,7 +704,12 @@ function MemoryProcessingFailureCard(props: {
     processing.state !== "ready_text_only"
   );
   const retryInProgress = feedback?.status === "running" || processingRetryInProgress;
-  if (processing?.state !== "failed" && !retryInProgress && feedback?.status !== "succeeded") {
+  if (
+    processing?.state !== "failed" &&
+    !retryInProgress &&
+    feedback?.status !== "succeeded" &&
+    feedback?.status !== "error"
+  ) {
     return null;
   }
 
@@ -704,8 +722,10 @@ function MemoryProcessingFailureCard(props: {
     props.onRetryProcessing &&
     ((processing?.state === "failed" && processing.retryAction !== "none") ||
       retryInProgress ||
+      feedback?.status === "error" ||
       feedback?.status === "succeeded")
   );
+  const showFailureStage = !showPreviousFailure && (!retryError || retryErrorMatchesProcessing);
   return (
     <section className={`memory-detail-card memory-processing-failure${feedback?.status === "succeeded" ? " memory-processing-failure--success" : ""}`}>
       <div className="memory-processing-failure__heading">
@@ -720,9 +740,9 @@ function MemoryProcessingFailureCard(props: {
             ? t("memory.memories.processing.retrying")
             : t("memory.memories.processing.failureTitle")}</h5>
       </div>
-      {processing?.errorMessage && (
-        <dl className="memory-detail-grid">
-          {!showPreviousFailure && (
+      {displayedErrorMessage && (
+        <dl className="memory-detail-grid" role={retryError ? "alert" : undefined}>
+          {showFailureStage && processing && (
             <>
               <dt>{t("memory.memories.processing.stage")}</dt>
               <dd>{processingStageLabel(processing, t)}</dd>
@@ -731,17 +751,12 @@ function MemoryProcessingFailureCard(props: {
           <dt>{t(showPreviousFailure
             ? "memory.memories.processing.previousReason"
             : "memory.memories.processing.reason")}</dt>
-          <dd>{processing.errorMessage || "-"}</dd>
+          <dd>{displayedErrorMessage}</dd>
           <dt>{t(showPreviousFailure
             ? "memory.memories.processing.previousFailedAt"
             : "memory.memories.processing.failedAt")}</dt>
-          <dd>{processing.failedAt ? formatDateTime(processing.failedAt) : "-"}</dd>
+          <dd>{displayedFailedAt ? formatDateTime(displayedFailedAt) : "-"}</dd>
         </dl>
-      )}
-      {feedback?.status === "error" && (
-        <p className="memory-processing-failure__retry-error" role="alert">
-          {t("memory.memories.processing.retryError", { message: feedback.message })}
-        </p>
       )}
       <div className="memory-processing-failure__actions">
         {processing?.state === "failed" && processing.retryAction === "open_settings" && props.onOpenSettings && !retryDisabled && (

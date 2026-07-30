@@ -2,8 +2,10 @@
 import type { ScanPreferences } from "@memmy/local-api-contracts";
 
 export const DEFAULT_AGENT_SOURCE_AUTO_SCAN_INTERVAL_MS = 60 * 60 * 1000;
+export const DEFAULT_AGENT_SOURCE_AUTO_SCAN_INITIAL_DELAY_MS = 5 * 60 * 1000;
 
 type Timer = ReturnType<typeof setTimeout>;
+type ScanTrigger = "startup" | "recurring";
 
 export interface AgentSourceAutoScanService {
   start(): void;
@@ -24,33 +26,37 @@ export function createAgentSourceAutoScanService(
   options: CreateAgentSourceAutoScanServiceOptions
 ): AgentSourceAutoScanService {
   const intervalMs = options.intervalMs ?? DEFAULT_AGENT_SOURCE_AUTO_SCAN_INTERVAL_MS;
-  const initialDelayMs = options.initialDelayMs ?? intervalMs;
+  const initialDelayMs = options.initialDelayMs ?? DEFAULT_AGENT_SOURCE_AUTO_SCAN_INITIAL_DELAY_MS;
   const fetchFn = options.fetchFn ?? fetch;
   let timer: Timer | null = null;
   let abortController: AbortController | null = null;
   let closed = false;
   let running = false;
 
-  const schedule = (delayMs: number) => {
+  const schedule = (delayMs: number, trigger: ScanTrigger) => {
     if (closed) {
       return;
     }
 
     timer = setTimeout(() => {
       timer = null;
-      void runScan().finally(() => schedule(intervalMs));
+      void runScan(trigger).finally(() => schedule(intervalMs, "recurring"));
     }, delayMs);
     timer.unref?.();
   };
 
-  const runScan = async () => {
+  const runScan = async (trigger: ScanTrigger) => {
     if (running || closed) {
       return;
     }
 
     running = true;
     try {
-      if (!options.getScanPreferences().watchFileChanges) {
+      const preferences = options.getScanPreferences();
+      const enabled = trigger === "startup"
+        ? preferences.autoScanKnownAgents
+        : preferences.watchFileChanges;
+      if (!enabled) {
         return;
       }
 
@@ -76,7 +82,11 @@ export function createAgentSourceAutoScanService(
         return;
       }
 
-      schedule(initialDelayMs);
+      const startupScanEnabled = options.getScanPreferences().autoScanKnownAgents;
+      schedule(
+        startupScanEnabled ? initialDelayMs : intervalMs,
+        startupScanEnabled ? "startup" : "recurring"
+      );
     },
 
     close() {

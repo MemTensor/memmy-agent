@@ -223,18 +223,33 @@ export class PanelReadModel {
 
       let changed = false;
       const details = output.details.map((detail) => {
-        if (!isRecord(detail) || detail.role !== "trace" || typeof detail.traceId !== "string") return detail;
-        const memory = this.deps.repos.memories.get(detail.traceId);
-        const summary = memory ? detailSummaryForMemory(memory) : undefined;
-        if (!summary || detail.summary === summary) return detail;
+        if (!isRecord(detail) || (detail.role !== "trace" && detail.role !== "span")) return detail;
+        const memoryId = typeof (detail.role === "span" ? detail.spanId : detail.traceId) === "string"
+          ? detail.role === "span" ? detail.spanId : detail.traceId
+          : detail.traceId;
+        if (typeof memoryId !== "string") return detail;
+        const memory = this.deps.repos.memories.get(memoryId);
+        const spanGoal = memory && detail.role === "span"
+          ? this.spanGoalForMemory(memory)
+          : undefined;
+        const summary = memory && detail.role === "trace" ? detailSummaryForMemory(memory) : undefined;
+        const key = detail.role === "span" ? "spanGoal" : "summary";
+        const value = spanGoal ?? summary;
+        if (!value || detail[key] === value) return detail;
         changed = true;
-        return { ...detail, summary };
+        return { ...detail, [key]: value };
       });
 
       return changed ? { ...log, outputJson: JSON.stringify({ ...output, details }) } : log;
     } catch {
       return log;
     }
+  }
+
+  private spanGoalForMemory(memory: Parameters<typeof detailSummaryForMemory>[0]): string | undefined {
+    const span = isRecord(memory.properties.internal_info.span) ? memory.properties.internal_info.span : undefined;
+    const goal = span?.span_goal;
+    return typeof goal === "string" && goal.trim() ? goal.trim() : undefined;
   }
 
   serviceMetrics(input: RequestEnvelope & { userId?: string } = {}): {

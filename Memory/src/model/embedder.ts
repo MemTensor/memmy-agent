@@ -1,3 +1,5 @@
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { EmbeddingConfig } from "../config/index.js";
 import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
 import { stableHash } from "../utils/id.js";
@@ -29,6 +31,12 @@ interface CohereEmbeddingResponse {
 
 type FeatureExtractor = (text: string, options?: Record<string, unknown>) => Promise<{ data?: ArrayLike<number> | Iterable<number> }>;
 type PipelineFn = (task: string, model: string, options?: Record<string, unknown>) => Promise<unknown>;
+interface TransformersModule {
+  env: {
+    cacheDir: string | null;
+  };
+  pipeline: PipelineFn;
+}
 
 let localExtractorPromise: Promise<FeatureExtractor> | null = null;
 let localExtractorModel: string | null = null;
@@ -297,7 +305,9 @@ async function ensureLocalExtractor(model: string): Promise<FeatureExtractor> {
   localExtractorModel = model;
   localExtractorPromise = (async () => {
     const mod = await import("@huggingface/transformers");
-    const pipeline = (mod as unknown as { pipeline: PipelineFn }).pipeline;
+    const transformers = mod as unknown as TransformersModule;
+    transformers.env.cacheDir = join(homedir(), ".memmy", "memory-service", "model-cache");
+    const pipeline = transformers.pipeline;
     return await pipeline("feature-extraction", model, {
       dtype: "q8",
       device: "cpu"

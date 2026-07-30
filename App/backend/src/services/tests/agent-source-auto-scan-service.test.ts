@@ -1,6 +1,9 @@
 /** Agent source auto scan service tests. */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createAgentSourceAutoScanService } from "../agent-source-auto-scan-service.js";
+import {
+  createAgentSourceAutoScanService,
+  DEFAULT_AGENT_SOURCE_AUTO_SCAN_INITIAL_DELAY_MS
+} from "../agent-source-auto-scan-service.js";
 import type { ScanPreferences } from "@memmy/local-api-contracts";
 
 const enabledPreferences: ScanPreferences = {
@@ -14,20 +17,19 @@ afterEach(() => {
 });
 
 describe("agent source auto scan service", () => {
-  it("posts to the local scan endpoint on the configured interval", async () => {
+  it("runs the startup scan after the default five-minute delay", async () => {
     vi.useFakeTimers();
     const fetchFn = vi.fn(async () => ({} as Response));
     const service = createAgentSourceAutoScanService({
       baseUrl: "http://127.0.0.1:19001",
       localToken: "test-token",
       intervalMs: 1_000,
-      initialDelayMs: 1_000,
       fetchFn,
       getScanPreferences: () => enabledPreferences
     });
 
     service.start();
-    await vi.advanceTimersByTimeAsync(999);
+    await vi.advanceTimersByTimeAsync(DEFAULT_AGENT_SOURCE_AUTO_SCAN_INITIAL_DELAY_MS - 1);
     expect(fetchFn).not.toHaveBeenCalled();
 
     await vi.advanceTimersByTimeAsync(1);
@@ -39,6 +41,70 @@ describe("agent source auto scan service", () => {
       },
       signal: expect.any(AbortSignal)
     });
+    service.close();
+  });
+
+  it("runs one startup scan when hourly incremental sync is disabled", async () => {
+    vi.useFakeTimers();
+    const fetchFn = vi.fn(async () => ({} as Response));
+    const service = createAgentSourceAutoScanService({
+      baseUrl: "http://127.0.0.1:19001",
+      localToken: "test-token",
+      intervalMs: 1_000,
+      initialDelayMs: 100,
+      fetchFn,
+      getScanPreferences: () => ({ ...enabledPreferences, watchFileChanges: false })
+    });
+
+    service.start();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    service.close();
+  });
+
+  it("waits for the hourly interval when startup scanning is disabled", async () => {
+    vi.useFakeTimers();
+    const fetchFn = vi.fn(async () => ({} as Response));
+    const service = createAgentSourceAutoScanService({
+      baseUrl: "http://127.0.0.1:19001",
+      localToken: "test-token",
+      intervalMs: 1_000,
+      initialDelayMs: 100,
+      fetchFn,
+      getScanPreferences: () => ({ ...enabledPreferences, autoScanKnownAgents: false })
+    });
+
+    service.start();
+    await vi.advanceTimersByTimeAsync(999);
+    expect(fetchFn).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    service.close();
+  });
+
+  it("does not scan when both automatic scan preferences are disabled", async () => {
+    vi.useFakeTimers();
+    const fetchFn = vi.fn(async () => ({} as Response));
+    const service = createAgentSourceAutoScanService({
+      baseUrl: "http://127.0.0.1:19001",
+      localToken: "test-token",
+      intervalMs: 100,
+      initialDelayMs: 10,
+      fetchFn,
+      getScanPreferences: () => ({
+        ...enabledPreferences,
+        autoScanKnownAgents: false,
+        watchFileChanges: false
+      })
+    });
+
+    service.start();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(fetchFn).not.toHaveBeenCalled();
     service.close();
   });
 
@@ -88,24 +154,5 @@ describe("agent source auto scan service", () => {
     await vi.advanceTimersByTimeAsync(100);
 
     expect(fetchFn).not.toHaveBeenCalled();
-  });
-
-  it("skips scans when hourly incremental sync is disabled", async () => {
-    vi.useFakeTimers();
-    const fetchFn = vi.fn(async () => ({} as Response));
-    const service = createAgentSourceAutoScanService({
-      baseUrl: "http://127.0.0.1:19001",
-      localToken: "test-token",
-      intervalMs: 100,
-      initialDelayMs: 100,
-      fetchFn,
-      getScanPreferences: () => ({ ...enabledPreferences, watchFileChanges: false })
-    });
-
-    service.start();
-    await vi.advanceTimersByTimeAsync(100);
-
-    expect(fetchFn).not.toHaveBeenCalled();
-    service.close();
   });
 });

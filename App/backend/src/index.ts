@@ -56,7 +56,7 @@ export interface CreateLocalBackendOptions {
   desktopInstallFingerprint?: string;
   /** Agent source auto scan interval in ms. Defaults to one hour. */
   agentSourceAutoScanIntervalMs?: number;
-  /** Agent source auto scan initial delay in ms. Defaults to the interval. */
+  /** Agent source startup scan delay in ms. Defaults to five minutes. */
   agentSourceAutoScanInitialDelayMs?: number;
 }
 

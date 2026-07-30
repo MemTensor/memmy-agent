@@ -382,7 +382,7 @@ describe("MemoriesSubPage", () => {
     expect(html).not.toContain("立即重试");
   });
 
-  it("重试接口失败时保留原始处理原因，并单独展示本次重试错误", () => {
+  it("重试接口失败时只在上方展示最新错误", () => {
     const processing = {
       memoryId: memoryListItemFixture.id,
       state: "failed" as const,
@@ -411,13 +411,17 @@ describe("MemoriesSubPage", () => {
       retryFeedback: {
         memoryId: memoryListItemFixture.id,
         status: "error",
-        message: "本地记忆服务尚未加载重试功能，请完全退出并重新打开 Memmy 后再试"
+        message: "本地记忆服务尚未加载重试功能，请完全退出并重新打开 Memmy 后再试",
+        failedAt: "2026-06-03T09:31:00.000Z"
       }
     });
 
-    expect(html).toContain(processing.errorMessage);
-    expect(html).toContain("本次重试未成功：本地记忆服务尚未加载重试功能");
-    expect(html).toContain("memory-processing-failure__retry-error");
+    const latestError = "本地记忆服务尚未加载重试功能，请完全退出并重新打开 Memmy 后再试";
+    expect(html.split(latestError)).toHaveLength(2);
+    expect(html).not.toContain(processing.errorMessage);
+    expect(html).not.toContain("本次重试未成功");
+    expect(html).not.toContain("memory-processing-failure__retry-error");
+    expect(html).toContain('role="alert"');
   });
 
   it("只把没有结构化错误体的 404 识别为旧的本地重试接口", () => {

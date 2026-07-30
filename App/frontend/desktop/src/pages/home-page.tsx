@@ -8,6 +8,7 @@ import {
   MemmyAgentMessageRejectedError,
   type MemmyAgentClient,
   type MemmyAgentProject,
+  type MemmyAgentSessionSummary,
   type MemmyAgentSlashCommand,
   type MemmyAgentUiLanguage,
   type MemmyAgentWebSocketConnection,
@@ -72,7 +73,7 @@ import {
 } from "./first-encounter-task-launch.js";
 import { HistoryDagPanel, type HistoryDagPanelState } from "./history-dag-panel.js";
 import { Mic, Pause, Plus, Send } from "./memory/memory-prototype-icons.js";
-import { ArrowDown, Check, Folder, Plus as LucidePlus, RotateCw, Search, X } from "lucide-react";
+import { ArrowDown, Check, ChevronDown, Folder, Plus as LucidePlus, RotateCw, X } from "lucide-react";
 
 export { agentChatScopeKey, updateComposerDraftForScope };
 export { hydrateAgentThreadInBackground };
@@ -107,7 +108,8 @@ const TRANSLATABLE_AGENT_ERROR_KEYS = new Set<MessageKey>([
   "home.media.error.messageTooBig",
   "home.agent.messageNotRecorded",
   "home.agent.executionInterrupted",
-  "home.agent.recoveryTimeout"
+  "home.agent.recoveryTimeout",
+  "home.project.desktopRequired"
 ]);
 export const AGENT_ATTACHMENT_ACCEPT = agentAttachmentAccept();
 export const AGENT_MEDIA_ACCEPT = AGENT_ATTACHMENT_ACCEPT;
@@ -1325,13 +1327,15 @@ export function HomePage() {
   }
 
   async function selectOtherProjectFolder() {
-    if (
-      state.agent.currentChatId
-      || messageSendInFlight
-      || projectPickerOperationId
-      || !window.memmy?.selectProjectDirectory
-      || !clients?.memmyAgent
-    ) {
+    if (state.agent.currentChatId || messageSendInFlight || projectPickerOperationId || !clients?.memmyAgent) {
+      return;
+    }
+    if (!window.memmy?.selectProjectDirectory) {
+      dispatch(agentActions.operationFailed("chat", createAgentOperationError({
+        source: "new-chat",
+        message: "home.project.desktopRequired",
+        scopeKey: chatScopeKey
+      })));
       return;
     }
     const operationId = `draft-project-picker-${crypto.randomUUID()}`;
@@ -1992,80 +1996,84 @@ export function HomePage() {
           </div>
           <div className="w-full max-w-2xl">
             <AgentOperationErrorSlot message={agentError} />
-            <ProjectTargetPicker
-              open={projectPickerOpen}
-              target={draftTarget}
-              selectedProject={selectedDraftProject}
-              projects={state.agent.projects}
-              registryState={state.agent.projectRegistryState}
-              disabled={messageSendInFlight || projectPickerOperationId != null}
-              canChooseOtherFolder={typeof window !== "undefined" && Boolean(window.memmy?.selectProjectDirectory)}
-              onToggle={() => setProjectPickerOpen((open) => !open)}
-              onClose={() => setProjectPickerOpen(false)}
-              onSelect={selectDraftTarget}
-              onChooseOther={() => void selectOtherProjectFolder()}
-            />
-            <div
-              className="relative home-empty-composer agent-composer-shell rounded-card-lg"
-              onDragOver={handleComposerDragOver}
-              onDrop={handleComposerDrop}
-            >
-              {slashMenuOpen && (
-                <div className="absolute left-0 bottom-full mb-3 z-40" style={{ width: "min(448px, 100%)" }}>
-                  <AgentCommandPalette commands={filteredSlashCommands} heading={t("home.commandPalette.commands")} selectedIndex={selectedCommandIndex} onSelect={selectSlashCommand} />
+            <div className="home-empty-composer-stack">
+              <div
+                className="relative home-empty-composer agent-composer-shell rounded-card-lg"
+                onDragOver={handleComposerDragOver}
+                onDrop={handleComposerDrop}
+              >
+                {slashMenuOpen && (
+                  <div className="absolute left-0 bottom-full mb-3 z-40" style={{ width: "min(448px, 100%)" }}>
+                    <AgentCommandPalette commands={filteredSlashCommands} heading={t("home.commandPalette.commands")} selectedIndex={selectedCommandIndex} onSelect={selectSlashCommand} />
+                  </div>
+                )}
+                {lastCompactionPanel.open && !slashMenuOpen && (
+                  <div className="absolute left-0 bottom-full mb-3 z-30 w-full" style={{ right: 0 }}>
+                    <AgentStatusPanel state={lastCompactionPanel} closeLabel={t("common.close")} loadingLabel={t("home.agent.connecting")} onClose={closeLastCompactionPanel} />
+                  </div>
+                )}
+                <ComposerMediaPreviewStrip
+                  items={pendingAttachments}
+                  onRemove={removePendingMedia}
+                  removeLabel={t("common.remove")}
+                  selectedLabel={t("home.media.addPhotoFile")}
+                  t={t}
+                />
+                <textarea
+                  ref={inputRef}
+                  value={input}
+                  placeholder={t("home.input")}
+                  rows={3}
+                  onChange={(event) => {
+                    updateComposerInput(event.target.value);
+                    resizeComposerInput(event.target);
+                  }}
+                  onKeyDown={handleComposerKeyDown}
+                  onPaste={handleComposerPaste}
+                  className="w-full px-5 pt-4 pb-12 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40"
+                />
+                <div className="absolute bottom-3 right-4 flex items-center gap-2 z-10">
+                  <button
+                    type="button"
+                    aria-label={t("home.media.menu")}
+                    title={t("home.media.menu")}
+                    onClick={openMediaFilePicker}
+                    className="p-1.5 inline-flex items-center justify-center rounded-lg text-text-ink/45 hover:bg-canvas-oat/60 hover:text-text-ink/65 transition-all cursor-pointer"
+                  >
+                    <Plus size={15} />
+                  </button>
+                  <button
+                    type="button"
+                    aria-label={t("home.voiceInput")}
+                    title={t("home.voiceInput")}
+                    disabled={asrRecorder.isTranscribing || asrRecorder.isStarting}
+                    onClick={toggleVoiceInput}
+                    className={`p-1.5 hover:bg-canvas-oat/60 rounded-lg transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${asrRecorder.isRecording ? "text-action-sky" : "text-text-ink/45 hover:text-text-ink/65"}`}
+                  >
+                    {asrRecorder.isRecording ? <Pause size={15} /> : <Mic size={15} />}
+                  </button>
+                  <ComposerSubmitButton
+                    isSending={isCurrentAgentRunning}
+                    disabled={composerSubmitDisabled}
+                    sendLabel={t("home.send")}
+                    stopLabel={t("home.stop")}
+                    onClick={isCurrentAgentRunning ? stopCurrentTurn : () => void sendMessage()}
+                  />
                 </div>
-              )}
-              {lastCompactionPanel.open && !slashMenuOpen && (
-                <div className="absolute left-0 bottom-full mb-3 z-30 w-full" style={{ right: 0 }}>
-                  <AgentStatusPanel state={lastCompactionPanel} closeLabel={t("common.close")} loadingLabel={t("home.agent.connecting")} onClose={closeLastCompactionPanel} />
-                </div>
-              )}
-              <ComposerMediaPreviewStrip
-                items={pendingAttachments}
-                onRemove={removePendingMedia}
-                removeLabel={t("common.remove")}
-                selectedLabel={t("home.media.addPhotoFile")}
-                t={t}
-              />
-              <textarea
-                ref={inputRef}
-                value={input}
-                placeholder={t("home.input")}
-                rows={3}
-                onChange={(event) => {
-                  updateComposerInput(event.target.value);
-                  resizeComposerInput(event.target);
-                }}
-                onKeyDown={handleComposerKeyDown}
-                onPaste={handleComposerPaste}
-                className="w-full px-5 pt-4 pb-12 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40"
-              />
-              <div className="absolute bottom-3 right-4 flex items-center gap-2 z-10">
-                <button
-                  type="button"
-                  aria-label={t("home.media.menu")}
-                  title={t("home.media.menu")}
-                  onClick={openMediaFilePicker}
-                  className="p-1.5 inline-flex items-center justify-center rounded-lg text-text-ink/45 hover:bg-canvas-oat/60 hover:text-text-ink/65 transition-all cursor-pointer"
-                >
-                  <Plus size={15} />
-                </button>
-                <button
-                  type="button"
-                  aria-label={t("home.voiceInput")}
-                  title={t("home.voiceInput")}
-                  disabled={asrRecorder.isTranscribing || asrRecorder.isStarting}
-                  onClick={toggleVoiceInput}
-                  className={`p-1.5 hover:bg-canvas-oat/60 rounded-lg transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${asrRecorder.isRecording ? "text-action-sky" : "text-text-ink/45 hover:text-text-ink/65"}`}
-                >
-                  {asrRecorder.isRecording ? <Pause size={15} /> : <Mic size={15} />}
-                </button>
-                <ComposerSubmitButton
-                  isSending={isCurrentAgentRunning}
-                  disabled={composerSubmitDisabled}
-                  sendLabel={t("home.send")}
-                  stopLabel={t("home.stop")}
-                  onClick={isCurrentAgentRunning ? stopCurrentTurn : () => void sendMessage()}
+              </div>
+              <div className="home-composer-toolbar">
+                <ProjectTargetPicker
+                  open={projectPickerOpen}
+                  target={draftTarget}
+                  selectedProject={selectedDraftProject}
+                  projects={state.agent.projects}
+                  sessions={state.agent.sessions}
+                  registryState={state.agent.projectRegistryState}
+                  disabled={messageSendInFlight || projectPickerOperationId != null}
+                  onToggle={() => setProjectPickerOpen((open) => !open)}
+                  onClose={() => setProjectPickerOpen(false)}
+                  onSelect={selectDraftTarget}
+                  onChooseOther={() => void selectOtherProjectFolder()}
                 />
               </div>
             </div>
@@ -2242,19 +2250,115 @@ export function AgentOperationErrorSlot(props: { message: string | null }) {
   );
 }
 
+/** Cursor-style path label: collapse the home directory to `~` and normalize separators. */
+export function formatWorkspaceDisplayPath(rootPath: string): string {
+  const normalized = rootPath.replace(/\\/g, "/");
+  if (normalized === "~" || normalized.startsWith("~/")) return normalized;
+  const unixHome = normalized.replace(/^\/(?:Users|home)\/[^/]+(?=\/|$)/, "~");
+  if (unixHome !== normalized) return unixHome;
+  return normalized.replace(/^[A-Za-z]:\/Users\/[^/]+(?=\/|$)/i, "~");
+}
+
+/** Final folder segment — preferred label when chrome width is limited. */
+export function workspaceFolderName(rootPath: string): string {
+  const displayPath = formatWorkspaceDisplayPath(rootPath).replace(/\/+$/, "");
+  if (!displayPath || displayPath === "~") return displayPath || "~";
+  return displayPath.slice(displayPath.lastIndexOf("/") + 1) || displayPath;
+}
+
+/** Approximate UI width: CJK glyphs count double so paths collapse before the leaf is clipped. */
+function workspacePathDisplayWidth(value: string): number {
+  let width = 0;
+  for (const char of value) {
+    width += (char.codePointAt(0) ?? 0) > 0xff ? 2 : 1;
+  }
+  return width;
+}
+
+function truncateWorkspacePathToWidth(value: string, maxWidth: number): string {
+  if (workspacePathDisplayWidth(value) <= maxWidth) return value;
+  let width = 0;
+  let cut = 0;
+  for (const char of value) {
+    const next = width + ((char.codePointAt(0) ?? 0) > 0xff ? 2 : 1);
+    if (next > Math.max(1, maxWidth - 1)) break;
+    width = next;
+    cut += char.length;
+  }
+  return `${value.slice(0, Math.max(1, cut))}…`;
+}
+
+/**
+ * Single-line path label that always keeps the leaf folder name intact.
+ * Collapse the middle/prefix first (`~/…/leaf`), never CSS-truncate the leaf.
+ */
+export function formatCompactWorkspacePath(rootPath: string, maxWidth = 28): string {
+  const displayPath = formatWorkspaceDisplayPath(rootPath).replace(/\/+$/, "");
+  const folder = workspaceFolderName(rootPath);
+  if (workspacePathDisplayWidth(folder) >= maxWidth) {
+    return truncateWorkspacePathToWidth(folder, maxWidth);
+  }
+  if (workspacePathDisplayWidth(displayPath) <= maxWidth) {
+    return displayPath;
+  }
+
+  const homePrefixed = displayPath.startsWith("~/");
+  const drivePrefixed = /^[A-Za-z]:\//.test(displayPath);
+  const compact = homePrefixed
+    ? `~/…/${folder}`
+    : drivePrefixed
+      ? `${displayPath.slice(0, 2)}/…/${folder}`
+      : `…/${folder}`;
+  if (workspacePathDisplayWidth(compact) <= maxWidth) return compact;
+  return folder;
+}
+
+export const PROJECT_TARGET_PICKER_MAX_RECENT = 10;
+
+type ProjectPickerSessionActivity = Pick<MemmyAgentSessionSummary, "projectId" | "updatedAt" | "run_started_at">;
+
+function projectPickerSessionActivityMs(session: ProjectPickerSessionActivity): number {
+  if (session.updatedAt) {
+    const parsed = Date.parse(session.updatedAt);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  if (typeof session.run_started_at === "number" && Number.isFinite(session.run_started_at)) {
+    return session.run_started_at < 1e12 ? session.run_started_at * 1000 : session.run_started_at;
+  }
+  return 0;
+}
+
+/** Recent workspaces by latest related conversation, capped at 10. */
 export const filterProjectTargetPickerProjects = (
   projects: MemmyAgentProject[],
-  query: string
+  query: string,
+  sessions: readonly ProjectPickerSessionActivity[] = []
 ): MemmyAgentProject[] => {
-  const recentProjects = [...projects]
-    .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id))
-    .slice(0, 10);
+  const latestActivityByProjectId = new Map<string, number>();
+  for (const session of sessions) {
+    if (!session.projectId) continue;
+    const activity = projectPickerSessionActivityMs(session);
+    const previous = latestActivityByProjectId.get(session.projectId) ?? 0;
+    if (activity > previous) latestActivityByProjectId.set(session.projectId, activity);
+  }
+
+  const sortedProjects = [...projects].sort((left, right) => {
+    const leftActivity = latestActivityByProjectId.get(left.id) ?? 0;
+    const rightActivity = latestActivityByProjectId.get(right.id) ?? 0;
+    if (rightActivity !== leftActivity) return rightActivity - leftActivity;
+    return right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id);
+  });
+
   const normalizedQuery = query.trim().toLocaleLowerCase();
-  if (!normalizedQuery) return recentProjects;
-  return recentProjects.filter((project) => (
-    project.name.toLocaleLowerCase().includes(normalizedQuery)
-    || project.rootPath.toLocaleLowerCase().includes(normalizedQuery)
-  ));
+  const matched = !normalizedQuery
+    ? sortedProjects
+    : sortedProjects.filter((project) => {
+      const displayPath = formatWorkspaceDisplayPath(project.rootPath).toLocaleLowerCase();
+      return project.name.toLocaleLowerCase().includes(normalizedQuery)
+        || project.rootPath.toLocaleLowerCase().includes(normalizedQuery)
+        || displayPath.includes(normalizedQuery);
+    });
+  return matched.slice(0, PROJECT_TARGET_PICKER_MAX_RECENT);
 };
 
 export const resolveProjectTargetPickerActiveIndex = (
@@ -2305,9 +2409,9 @@ export function ProjectTargetPicker(props: {
   target: WebuiSessionTarget;
   selectedProject: MemmyAgentProject | null;
   projects: MemmyAgentProject[];
+  sessions?: readonly ProjectPickerSessionActivity[];
   registryState: "ready" | "corrupt";
   disabled: boolean;
-  canChooseOtherFolder: boolean;
   onToggle: () => void;
   onClose: () => void;
   onSelect: (target: WebuiSessionTarget) => void;
@@ -2320,15 +2424,20 @@ export function ProjectTargetPicker(props: {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const selectedPath = props.selectedProject
+    ? formatWorkspaceDisplayPath(props.selectedProject.rootPath)
+    : null;
   const selectedLabel = props.registryState === "corrupt"
     ? t("home.project.registryUnavailable")
-    : props.selectedProject?.name ?? t("home.project.optional");
+    : props.selectedProject
+      ? workspaceFolderName(props.selectedProject.rootPath)
+      : t("home.project.optional");
   const visibleProjects = props.registryState === "ready"
-    ? filterProjectTargetPickerProjects(props.projects, query)
+    ? filterProjectTargetPickerProjects(props.projects, query, props.sessions)
     : [];
   const itemKeys = [
     ...visibleProjects.map((project) => `project:${project.id}`),
-    ...(props.registryState === "ready" && props.canChooseOtherFolder ? ["new"] : []),
+    ...(props.registryState === "ready" ? ["new"] : []),
     ...(props.target.kind === "project" ? ["standalone"] : [])
   ];
   const selectedKey = props.target.kind === "project" ? `project:${props.target.projectId}` : null;
@@ -2397,26 +2506,54 @@ export function ProjectTargetPicker(props: {
     }
   };
 
+  const triggerActive = Boolean(props.selectedProject) || props.open;
+
   return (
     <div ref={rootRef} className="home-project-picker">
-      <button
-        ref={triggerRef}
-        type="button"
-        className="home-project-picker__trigger"
-        disabled={props.disabled}
-        aria-expanded={props.open}
-        aria-haspopup="listbox"
-        onClick={props.onToggle}
-      >
-        <Folder size={16} className="shrink-0" />
-        <span className="min-w-0 flex-1 text-left">
-          <span className="block truncate">{selectedLabel}</span>
-        </span>
-      </button>
+      <div className={`home-project-picker__control${props.selectedProject ? " home-project-picker__control--selected" : ""}${props.open ? " home-project-picker__control--open" : ""}`}>
+        <button
+          ref={triggerRef}
+          type="button"
+          className={`home-project-picker__trigger${triggerActive ? " home-project-picker__trigger--selected" : ""}`}
+          disabled={props.disabled}
+          aria-expanded={props.open}
+          aria-haspopup="listbox"
+          title={selectedPath ?? undefined}
+          onClick={props.onToggle}
+        >
+          <span className="home-project-picker__leading" aria-hidden="true">
+            <Folder size={13} className="home-project-picker__folder-icon" />
+            {props.selectedProject ? <X size={13} className="home-project-picker__clear-icon" /> : null}
+          </span>
+          <span className="home-project-picker__label truncate">{selectedLabel}</span>
+          {props.selectedProject ? null : (
+            <ChevronDown
+              size={13}
+              className={`home-project-picker__chevron${props.open ? " home-project-picker__chevron--open" : ""}`}
+              aria-hidden="true"
+            />
+          )}
+        </button>
+        {props.selectedProject ? (
+          <button
+            type="button"
+            className="home-project-picker__clear"
+            disabled={props.disabled}
+            aria-label={t("home.project.clear")}
+            title={t("home.project.clear")}
+            onPointerDown={preserveProjectTargetPickerSearchFocus}
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              props.onSelect({ kind: "standalone" });
+              props.onClose();
+            }}
+          />
+        ) : null}
+      </div>
       {props.open ? (
         <div className="home-project-picker__menu">
           <label className="home-project-picker__search">
-            <Search size={14} aria-hidden="true" />
             <input
               ref={searchInputRef}
               value={query}
@@ -2442,6 +2579,7 @@ export function ProjectTargetPicker(props: {
                 <p className="home-project-picker__empty" role="status">{t("home.project.empty")}</p>
               ) : visibleProjects.map((project, index) => {
                 const selected = props.target.kind === "project" && props.target.projectId === project.id;
+                const displayPath = formatCompactWorkspacePath(project.rootPath);
                 return (
                   <button
                     id={`home-project-picker-option-${index}`}
@@ -2452,16 +2590,13 @@ export function ProjectTargetPicker(props: {
                     aria-selected={selected}
                     data-project-id={project.id}
                     className={`home-project-picker__option${selected ? " home-project-picker__option--selected" : ""}${hasKeyboardNavigated && activeIndex === index ? " home-project-picker__option--keyboard-active" : ""}`}
-                    title={project.rootPath}
+                    title={formatWorkspaceDisplayPath(project.rootPath)}
                     onPointerDown={preserveProjectTargetPickerSearchFocus}
                     onClick={() => props.onSelect({ kind: "project", projectId: project.id })}
                   >
-                    <Folder size={14} className="shrink-0" aria-hidden="true" />
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate">{project.name}</span>
-                      <span className="home-project-picker__path block truncate">{project.rootPath}</span>
-                    </span>
-                    {selected ? <Check size={14} className="shrink-0" aria-hidden="true" /> : null}
+                    <Folder size={13} className="shrink-0" aria-hidden="true" />
+                    <span className="home-project-picker__path truncate">{displayPath}</span>
+                    {selected ? <Check size={13} className="shrink-0" aria-hidden="true" /> : null}
                   </button>
                 );
               })}
@@ -2470,7 +2605,7 @@ export function ProjectTargetPicker(props: {
               <div className="home-project-picker__divider" role="separator" />
             ) : null}
             <div className="home-project-picker__actions" role="presentation">
-              {props.registryState === "ready" && props.canChooseOtherFolder ? (
+              {props.registryState === "ready" ? (
                 <button
                   id={`home-project-picker-option-${visibleProjects.length}`}
                   type="button"
@@ -2481,7 +2616,7 @@ export function ProjectTargetPicker(props: {
                   onPointerDown={preserveProjectTargetPickerSearchFocus}
                   onClick={props.onChooseOther}
                 >
-                  <LucidePlus size={14} className="shrink-0" aria-hidden="true" />
+                  <LucidePlus size={13} strokeWidth={1.75} className="shrink-0 home-project-picker__action-icon" aria-hidden="true" />
                   <span>{t("home.project.new")}</span>
                 </button>
               ) : null}
@@ -2496,7 +2631,7 @@ export function ProjectTargetPicker(props: {
                   onPointerDown={preserveProjectTargetPickerSearchFocus}
                   onClick={() => props.onSelect({ kind: "standalone" })}
                 >
-                  <X size={14} className="shrink-0" aria-hidden="true" />
+                  <X size={13} className="shrink-0" aria-hidden="true" />
                   <span>{t("home.project.standalone")}</span>
                 </button>
               ) : null}

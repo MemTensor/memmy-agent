@@ -526,18 +526,24 @@ function apiLogOutputWithCurrentTraceSummary(row: LocalApiLogRow): string {
     let changed = false;
     const nextDetails = details.map((detail) => {
       const record = objectAt(detail, []);
-      if (stringValue(record.role) !== "trace") return detail;
-      const traceId = stringValue(record.traceId);
-      if (!traceId) return detail;
+      const role = stringValue(record.role);
+      if (role !== "trace" && role !== "span") return detail;
+      const memoryId = stringValue(role === "span" ? record.spanId : record.traceId) ?? stringValue(record.traceId);
+      if (!memoryId) return detail;
 
       const memory = withDb(row.source, (db) => {
         if (!tableExists(db, "memories")) return undefined;
-        return db.prepare("SELECT * FROM memories WHERE id = ?").get(traceId) as LocalMemoryRow | undefined;
+        return db.prepare("SELECT * FROM memories WHERE id = ?").get(memoryId) as LocalMemoryRow | undefined;
       });
-      const summary = memory ? summaryFromParsed(memory, parsedRow(memory)) : undefined;
-      if (!summary || record.summary === summary) return detail;
+      const value = memory
+        ? role === "span"
+          ? spanGoalFromParsed(parsedRow(memory))
+          : summaryFromParsed(memory, parsedRow(memory))
+        : undefined;
+      const key = role === "span" ? "spanGoal" : "summary";
+      if (!value || record[key] === value) return detail;
       changed = true;
-      return { ...record, summary };
+      return { ...record, [key]: value };
     });
 
     return changed ? JSON.stringify({ ...output, details: nextDetails }) : row.output_json;

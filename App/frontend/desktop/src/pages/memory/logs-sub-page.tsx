@@ -343,6 +343,8 @@ interface AddDetail {
   role?: string;
   action?: string;
   summary?: string | null;
+  spanGoal?: string | null;
+  span_goal?: string | null;
   content?: string;
   traceId?: string;
   episodeId?: string;
@@ -616,15 +618,31 @@ function buildSummary(log: MemoryApiLog, input: unknown, output: unknown, t: Tra
   const addOutput = asRecord(output) as AddOutput;
   const firstDetail = addOutput.details?.[0];
   const summary = usableAddSummary(firstDetail?.summary);
+  if (firstDetail?.role === "trace" || firstDetail?.role === "span") {
+    const displayText = firstDetail.role === "span"
+      ? usableAddSummary(firstDetail.spanGoal ?? firstDetail.span_goal)
+      : usableTraceSummary(summary);
+    return {
+      text: firstLogText(
+        firstDetail.role === "trace" && displayText ? truncateTraceLogSummary(displayText) : displayText,
+        firstDetail.query,
+        addInput.query
+      ) ?? "memory item"
+    };
+  }
   return {
     text: firstLogText(
-      firstDetail?.role === "trace" && summary ? truncateTraceLogSummary(summary) : summary,
+      summary,
       firstDetail?.query,
       addInput.query,
       firstDetail?.content,
       firstDetail?.traceId
     ) ?? "memory item"
   };
+}
+
+function usableTraceSummary(value: string | undefined): string | undefined {
+  return value && !/^RawTurn:\s*/i.test(value) ? value : undefined;
 }
 
 function truncateTraceLogSummary(value: string): string {

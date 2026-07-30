@@ -1,17 +1,24 @@
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_MEMMY_CONFIG } from "../src/config/index.js";
 import { createEmbedder } from "../src/model/embedder.js";
 
 const transformerMocks = vi.hoisted(() => ({
+  env: {
+    cacheDir: "module-default-cache" as string | null
+  },
   extractor: vi.fn(),
   pipeline: vi.fn()
 }));
 
 vi.mock("@huggingface/transformers", () => ({
+  env: transformerMocks.env,
   pipeline: transformerMocks.pipeline
 }));
 
 afterEach(() => {
+  transformerMocks.env.cacheDir = "module-default-cache";
   transformerMocks.extractor.mockReset();
   transformerMocks.pipeline.mockReset();
   vi.unstubAllGlobals();
@@ -57,6 +64,9 @@ describe("embedder", () => {
     });
 
     await expect(embedder.embedOne("local memory")).resolves.toEqual([3, 4]);
+    expect(transformerMocks.env.cacheDir).toBe(
+      join(homedir(), ".memmy", "memory-service", "model-cache")
+    );
     expect(transformerMocks.extractor).toHaveBeenCalledWith("local memory", {
       pooling: "mean",
       normalize: false

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { PRODUCT_TOUR_MEMORY_NAV_ANCHOR, PRODUCT_TOUR_TOOLS_NAV_ANCHOR } from "../app/product-tour-layout.js";
 import type { AppRoutePath } from "../app/routes.js";
@@ -12,9 +12,7 @@ import {
 import { useOptionalApiClients } from "../app/providers.js";
 import { MemmyAgentRequestError } from "../api/memmy-agent-client.js";
 import { communityLinks } from "../community/community-links.js";
-import { Button } from "../components/button.js";
 import { ConfirmDialog } from "../components/confirm-dialog.js";
-import { Modal } from "../components/modal.js";
 import { Tooltip } from "../components/tooltip.js";
 import type { MessageKey } from "../i18n/messages.js";
 import { useTranslation } from "../i18n/use-translation.js";
@@ -55,7 +53,7 @@ import {
   Trash2,
   User
 } from "./memory/memory-prototype-icons.js";
-import { CheckCheck, ChevronDown, ChevronRight, Folder, FolderPlus, MoreHorizontal, Pencil, Plus } from "lucide-react";
+import { Check, CheckCheck, ChevronDown, ChevronRight, ChevronsDownUp, ChevronsUpDown, Folder, FolderOpen, FolderPlus, ListFilter, MoreHorizontal, Plus, RotateCcw } from "lucide-react";
 
 export interface AppFrameProps {
   title: string;
@@ -92,10 +90,13 @@ export interface ProjectSidebarTree {
   archivedStandaloneTasks: AgentTaskView[];
 }
 
+type SidebarContextMenuPlacementSource =
+  | { kind: "anchor"; anchor: SidebarMenuAnchor }
+  | { kind: "point"; x: number; y: number };
+
 interface ProjectContextMenuState {
   projectId: string;
-  x: number;
-  y: number;
+  placement: SidebarContextMenuPlacementSource;
 }
 
 interface TaskContextMenuState {
@@ -104,9 +105,12 @@ interface TaskContextMenuState {
   y: number;
 }
 
+type SidebarInlineRename = { sessionKey: string; original: string };
+
 type SidebarTaskPatch = Extract<SidebarIntent, { kind: "task-patch" }>["patch"];
 
 interface SidebarMenuAnchor {
+  left: number;
   right: number;
   bottom: number;
 }
@@ -172,15 +176,9 @@ const taskSortOptions = [
   { value: "title_asc", labelKey: "appFrame.sort.titleAsc" }
 ] as const;
 
-const sidebarMoreMenuSize: SidebarMenuSize = {
-  width: 128,
-  height: 128,
-  margin: 8,
-  gap: 4
-};
-const projectListMoreMenuSize: SidebarMenuSize = {
-  width: 128,
-  height: 40,
+const taskListActionsMenuSize: SidebarMenuSize = {
+  width: 140,
+  height: 252,
   margin: 8,
   gap: 4
 };
@@ -191,10 +189,16 @@ const taskContextMenuSize: SidebarMenuSize = {
   gap: 0
 };
 const projectContextMenuSize: SidebarMenuSize = {
-  width: 176,
-  height: 200,
+  width: 240,
+  height: 196,
   margin: 8,
-  gap: 0
+  gap: 4
+};
+const projectCreateMenuSize: SidebarMenuSize = {
+  width: 260,
+  height: 280,
+  margin: 8,
+  gap: 2
 };
 const sidebarMenuOverlayZIndex = 9999;
 const SIDEBAR_PROFILE_NAME_MAX_VISUAL_WIDTH = 10;
@@ -225,6 +229,18 @@ export function shouldCreateNewAgentDraft(agent: NewAgentDraftState): boolean {
     && !(agent.composerPendingAttachmentsByScope[draftScopeKey]?.length);
 }
 
+/** Sidebar workspace highlight: only when a blank new-task draft targets a project. */
+export function resolveSelectedSidebarProjectId(
+  agent: Pick<AppState["agent"], "currentSessionKey" | "newChatRequestId" | "draftTargetsByScope">,
+  currentPath: string
+): string | null {
+  if (currentPath !== "/main") return null;
+  // Existing chats must not light up their workspace — only new-task project picks do.
+  if (agent.currentSessionKey) return null;
+  const draft = agent.draftTargetsByScope[agentChatScopeKey(null, agent.newChatRequestId)];
+  return draft?.kind === "project" ? draft.projectId : null;
+}
+
 export function AppFrame(props: AppFrameProps) {
   const { state, dispatch } = useAppState();
   const { clients } = useOptionalApiClients();
@@ -237,27 +253,23 @@ export function AppFrame(props: AppFrameProps) {
   const [searchPaletteOpen, setSearchPaletteOpen] = useState(false);
   const [showCommunity, setShowCommunity] = useState(false);
   const [taskListMenuAnchor, setTaskListMenuAnchor] = useState<SidebarMenuAnchor | null>(null);
-  const [projectListMenuAnchor, setProjectListMenuAnchor] = useState<SidebarMenuAnchor | null>(null);
   const [sortMenuOpen, setSortMenuOpen] = useState(false);
   const [taskContextMenu, setTaskContextMenu] = useState<TaskContextMenuState | null>(null);
   const [projectContextMenu, setProjectContextMenu] = useState<ProjectContextMenuState | null>(null);
-  const [projectCreateMenuOpen, setProjectCreateMenuOpen] = useState(false);
-  const [renameProjectId, setRenameProjectId] = useState<string | null>(null);
-  const [renameProjectValue, setRenameProjectValue] = useState("");
+  const [projectCreateMenuAnchor, setProjectCreateMenuAnchor] = useState<SidebarMenuAnchor | null>(null);
+  const [inlineRename, setInlineRename] = useState<SidebarInlineRename | null>(null);
+  const [inlineRenameDraft, setInlineRenameDraft] = useState("");
   const [removeProjectId, setRemoveProjectId] = useState<string | null>(null);
   const [archiveProjectId, setArchiveProjectId] = useState<string | null>(null);
   const [projectMutationId, setProjectMutationId] = useState<string | null>(null);
   const [archiveConfirmSessionKey, setArchiveConfirmSessionKey] = useState<string | null>(null);
   const [deleteConfirmTask, setDeleteConfirmTask] = useState<AgentTaskView | null>(null);
-  const [renameTarget, setRenameTarget] = useState<AgentTaskView | null>(null);
-  const [renameValue, setRenameValue] = useState("");
   const [deferredGuidanceStep, setDeferredGuidanceStep] = useState(() =>
     readDeferredGuidanceStep(typeof window === "undefined" ? undefined : window.sessionStorage)
   );
   const [deferredNickname, setDeferredNickname] = useState("");
   const [sidebarHidden, setSidebarHidden] = useState(false);
   const communityMenuRef = useRef<HTMLDivElement | null>(null);
-  const renameInputRef = useRef<HTMLInputElement | null>(null);
   const taskScrollRef = useRef<HTMLDivElement | null>(null);
   const [taskScrollFade, setTaskScrollFade] = useState(false);
   const sidebarResize = useCodexResizableSidebar("memmy.appFrame.sidebarWidth.codex.v2");
@@ -281,15 +293,17 @@ export function AppFrame(props: AppFrameProps) {
   );
   const showingStandaloneArchived = state.agent.sidebarState.view.show_archived;
   const showingProjectArchived = state.agent.sidebarState.view.show_project_archived;
+  const showingArchived = showingProjectArchived || showingStandaloneArchived;
   const visibleProjectTree = useMemo(
     () => deriveVisibleSidebarPlacement(projectTree, {
-      projectTasks: showingProjectArchived,
-      standaloneTasks: showingStandaloneArchived
+      projectTasks: showingArchived,
+      standaloneTasks: showingArchived
     }),
-    [projectTree, showingProjectArchived, showingStandaloneArchived]
+    [projectTree, showingArchived]
   );
   const highlightedSessionKey = state.navigation.currentPath === "/main" ? state.agent.currentSessionKey : null;
-  const renameProject = state.agent.projects.find((project) => project.id === renameProjectId) ?? null;
+  const selectedSidebarProjectId = resolveSelectedSidebarProjectId(state.agent, state.navigation.currentPath);
+
   const removeProject = state.agent.projects.find((project) => project.id === removeProjectId) ?? null;
   const archiveProject = state.agent.projects.find((project) => project.id === archiveProjectId) ?? null;
   const removeProjectTaskCount = removeProject
@@ -400,19 +414,37 @@ export function AppFrame(props: AppFrameProps) {
   useEffect(() => {
     if (
       typeof document === "undefined"
-      || (!taskListMenuAnchor && !projectListMenuAnchor && !taskContextMenu && !projectContextMenu && !projectCreateMenuOpen && !archiveConfirmSessionKey)
+      || (!taskListMenuAnchor && !taskContextMenu && !projectContextMenu && !projectCreateMenuAnchor && !archiveConfirmSessionKey)
     ) {
       return;
     }
 
     const closeMenus = () => {
       setTaskListMenuAnchor(null);
-      setProjectListMenuAnchor(null);
       setSortMenuOpen(false);
       setTaskContextMenu(null);
       setProjectContextMenu(null);
-      setProjectCreateMenuOpen(false);
+      setProjectCreateMenuAnchor(null);
       setArchiveConfirmSessionKey(null);
+    };
+    const closeOnOutsidePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Element)) {
+        closeMenus();
+        return;
+      }
+      // Portal menus live under document.body; ignore presses inside them so item
+      // onClick can run (a blanket document click would unmount first).
+      // Inline archive confirm lives in the task row (not a portal); pointerdown
+      // must not clear archiveConfirmSessionKey before its click handler runs.
+      if (
+        target.closest(".app-frame-sidebar-menu")
+        || target.closest(".app-frame-workspace-picker-menu")
+        || target.closest(".app-frame-task-row--confirming")
+      ) {
+        return;
+      }
+      closeMenus();
     };
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
@@ -420,13 +452,13 @@ export function AppFrame(props: AppFrameProps) {
       }
     };
 
-    document.addEventListener("click", closeMenus);
+    document.addEventListener("pointerdown", closeOnOutsidePointerDown);
     document.addEventListener("keydown", closeOnEscape);
     return () => {
-      document.removeEventListener("click", closeMenus);
+      document.removeEventListener("pointerdown", closeOnOutsidePointerDown);
       document.removeEventListener("keydown", closeOnEscape);
     };
-  }, [archiveConfirmSessionKey, projectContextMenu, projectCreateMenuOpen, projectListMenuAnchor, taskContextMenu, taskListMenuAnchor]);
+  }, [archiveConfirmSessionKey, projectContextMenu, projectCreateMenuAnchor, taskContextMenu, taskListMenuAnchor]);
 
   useEffect(() => {
     if (!showCommunity || typeof document === "undefined") {
@@ -650,10 +682,7 @@ export function AppFrame(props: AppFrameProps) {
   }
 
   function expandTaskAncestors(task: AgentTaskView) {
-    const showingTaskArchive = task.groupProjectId
-      ? showingProjectArchived
-      : showingStandaloneArchived;
-    for (const key of resolveTaskAncestorGroupKeys(task, state.agent.projects, showingTaskArchive)) {
+    for (const key of resolveTaskAncestorGroupKeys(task, state.agent.projects, showingArchived)) {
       if (!state.agent.sidebarState.collapsed_groups[key]) continue;
       void enqueueSidebarIntent({
         id: nextAgentSidebarMutationId(),
@@ -664,8 +693,13 @@ export function AppFrame(props: AppFrameProps) {
     }
   }
 
+  function selectSidebarWorkspace(projectId: string) {
+    setProjectCreateMenuAnchor(null);
+    openNewAgent({ kind: "project", projectId });
+  }
+
   async function registerProject(mode: "blank" | "existing") {
-    setProjectCreateMenuOpen(false);
+    setProjectCreateMenuAnchor(null);
     if (!clients?.memmyAgent || !window.memmy || projectMutationId) return;
     const operationId = `project-create-${crypto.randomUUID()}`;
     setProjectMutationId(operationId);
@@ -680,6 +714,12 @@ export function AppFrame(props: AppFrameProps) {
       });
       if (result.status !== "committed") {
         showProjectOperationError(result.status === "rejected" ? result.code : "network_unavailable");
+        return;
+      }
+      if (result.project) {
+        openNewAgent({ kind: "project", projectId: result.project.id });
+      } else {
+        openNewAgent({ kind: "standalone" });
       }
     } catch (error) {
       showProjectOperationError(error);
@@ -749,6 +789,36 @@ export function AppFrame(props: AppFrameProps) {
     dispatch(agentActions.tasksMarkedRead(keys));
   }
 
+  function workspaceProjectIds(): string[] {
+    return Array.from(new Set([
+      ...visibleProjectTree.projects.map((node) => node.project.id),
+      ...visibleProjectTree.pinnedProjects.map((node) => node.project.id)
+    ]));
+  }
+
+  function setAllWorkspaceProjectsCollapsed(collapsed: boolean) {
+    for (const projectId of workspaceProjectIds()) {
+      const groupKey = `project:${projectId}`;
+      if (Boolean(state.agent.sidebarState.collapsed_groups[groupKey]) === collapsed) {
+        continue;
+      }
+      void enqueueSidebarIntent({
+        id: nextAgentSidebarMutationId(),
+        kind: "set-collapsed",
+        groupKey,
+        collapsed
+      });
+    }
+  }
+
+  function markAllTasksRead() {
+    const keys = state.agent.tasks.map((task) => task.chatId);
+    if (!keys.length) {
+      return;
+    }
+    dispatch(agentActions.tasksMarkedRead(keys));
+  }
+
   async function confirmRemoveProject() {
     const projectId = removeProjectId;
     if (!projectId || !clients?.memmyAgent || projectMutationId) return;
@@ -789,33 +859,70 @@ export function AppFrame(props: AppFrameProps) {
   }
 
   function openProjectMenu(event: MouseEvent, projectId: string) {
+    event.preventDefault();
     event.stopPropagation();
     setTaskListMenuAnchor(null);
-    setProjectListMenuAnchor(null);
     setSortMenuOpen(false);
-    setProjectCreateMenuOpen(false);
+    setProjectCreateMenuAnchor(null);
     setTaskContextMenu(null);
-    setProjectContextMenu({ projectId, x: event.clientX, y: event.clientY });
+    cancelInlineRename();
+    const target = event.currentTarget;
+    const fromActionButton = event.type === "click"
+      && target instanceof HTMLElement
+      && target.classList.contains("task-icon-button");
+    if (fromActionButton) {
+      const buttonRect = target.getBoundingClientRect();
+      setProjectContextMenu({
+        projectId,
+        placement: {
+          kind: "anchor",
+          // Left edge lines up with the … button.
+          anchor: {
+            left: buttonRect.left,
+            right: buttonRect.right,
+            bottom: buttonRect.bottom
+          }
+        }
+      });
+      return;
+    }
+    setProjectContextMenu({
+      projectId,
+      placement: { kind: "point", x: event.clientX, y: event.clientY }
+    });
   }
 
-  function openRenameDialog(task: AgentTaskView) {
+  function beginTaskRename(task: AgentTaskView) {
+    if (task.archived) {
+      return;
+    }
+    setTaskListMenuAnchor(null);
     setTaskContextMenu(null);
+    setProjectContextMenu(null);
     setArchiveConfirmSessionKey(null);
-    setRenameTarget(task);
-    setRenameValue(task.title);
+    setInlineRename({ sessionKey: task.sessionKey, original: task.title });
+    setInlineRenameDraft(task.title);
   }
 
-  function closeRenameDialog() {
-    setRenameTarget(null);
-    setRenameValue("");
+  function cancelInlineRename() {
+    setInlineRename(null);
+    setInlineRenameDraft("");
   }
 
-  function submitRenameDialog() {
-    const task = renameTarget;
-    const nextTitle = renameValue;
-    closeRenameDialog();
+  function commitInlineRename() {
+    const target = inlineRename;
+    const nextValue = inlineRenameDraft.trim();
+    if (!target) {
+      return;
+    }
+    if (!nextValue || nextValue === target.original) {
+      cancelInlineRename();
+      return;
+    }
+    cancelInlineRename();
+    const task = state.agent.tasks.find((item) => item.sessionKey === target.sessionKey);
     if (task) {
-      void renameTask(task, nextTitle);
+      void renameTask(task, nextValue);
     }
   }
 
@@ -848,6 +955,10 @@ export function AppFrame(props: AppFrameProps) {
     setArchiveConfirmSessionKey(task.sessionKey);
   }
 
+  function cancelArchiveConfirm() {
+    setArchiveConfirmSessionKey(null);
+  }
+
   function archiveTask(task: AgentTaskView) {
     setArchiveConfirmSessionKey(null);
     track({ name: "task_archived", params: { page_path: state.navigation.currentPath }, consentTier: "basic" });
@@ -860,30 +971,20 @@ export function AppFrame(props: AppFrameProps) {
   }
 
   function toggleTaskListMenu(anchor: SidebarMenuAnchor) {
-    setProjectListMenuAnchor(null);
-    setProjectCreateMenuOpen(false);
+    setProjectCreateMenuAnchor(null);
     setTaskContextMenu(null);
+    setProjectContextMenu(null);
     setArchiveConfirmSessionKey(null);
     setTaskListMenuAnchor((value) => (value ? null : anchor));
     setSortMenuOpen(false);
   }
 
-  function toggleProjectListMenu(anchor: SidebarMenuAnchor) {
-    setTaskListMenuAnchor(null);
-    setSortMenuOpen(false);
-    setProjectCreateMenuOpen(false);
-    setTaskContextMenu(null);
-    setProjectContextMenu(null);
-    setArchiveConfirmSessionKey(null);
-    setProjectListMenuAnchor((value) => (value ? null : anchor));
-  }
-
   function openTaskContextMenu(event: MouseEvent, task: AgentTaskView) {
     event.preventDefault();
     setTaskListMenuAnchor(null);
-    setProjectListMenuAnchor(null);
     setSortMenuOpen(false);
     setArchiveConfirmSessionKey(null);
+    cancelInlineRename();
     setTaskContextMenu({ task, x: event.clientX, y: event.clientY });
   }
 
@@ -975,7 +1076,7 @@ export function AppFrame(props: AppFrameProps) {
                 type="button"
                 data-tour-anchor={item.path ? resolveProductTourNavAnchor(item.path) : undefined}
                 onClick={handleClick}
-                className={`app-frame-nav-button relative flex items-center gap-2.5 px-3 py-2 transition-all cursor-pointer ${
+                className={`app-frame-nav-button relative flex items-center gap-2 transition-all cursor-pointer ${
                   active
                     ? "app-frame-nav-button--active"
                     : "text-text-ink/75 hover:bg-canvas-oat/60 hover:text-text-ink/85"
@@ -1021,8 +1122,65 @@ export function AppFrame(props: AppFrameProps) {
           })}
         </nav>
 
-        <div ref={taskScrollRef} className={`app-frame-task-scroll mt-5 mx-4 flex-1 overflow-y-auto${taskScrollFade ? " app-frame-task-scroll--faded" : ""}`}>
-          <div className="space-y-3">
+        <div ref={taskScrollRef} className={`app-frame-task-scroll flex-1 overflow-y-auto${taskScrollFade ? " app-frame-task-scroll--faded" : ""}`}>
+          <div className="app-frame-task-list">
+            <div className="app-frame-task-list-header">
+              <span className="app-frame-task-list-header__title">{t("appFrame.taskList.title")}</span>
+              <div className="app-frame-task-list-header__actions">
+                <button
+                  type="button"
+                  aria-label={t("appFrame.taskList.actions")}
+                  title={t("appFrame.taskList.actions")}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    toggleTaskListMenu(sidebarMenuAnchorFromRect(event.currentTarget.getBoundingClientRect()));
+                  }}
+                  className={`app-frame-task-section-action${showingArchived ? " is-active" : ""}`}
+                >
+                  <ListFilter size={14} />
+                </button>
+                {taskListMenuAnchor ? (
+                  <TaskListActionsMenu
+                    anchor={taskListMenuAnchor}
+                    showPreviews={state.agent.sidebarState.view.show_previews}
+                    showArchived={showingArchived}
+                    sort={state.agent.sidebarState.view.sort}
+                    sortMenuOpen={sortMenuOpen}
+                    onTogglePreviews={() => {
+                      setTaskListMenuAnchor(null);
+                      void saveSidebarView({ showPreviews: !state.agent.sidebarState.view.show_previews });
+                    }}
+                    onToggleSortMenu={() => setSortMenuOpen((value) => !value)}
+                    onSelectSort={(sort) => {
+                      setTaskListMenuAnchor(null);
+                      setSortMenuOpen(false);
+                      void saveSidebarView({ sort });
+                    }}
+                    onMarkAllRead={() => {
+                      setTaskListMenuAnchor(null);
+                      markAllTasksRead();
+                    }}
+                    onRefresh={() => {
+                      setTaskListMenuAnchor(null);
+                      void refreshAgentTasks();
+                    }}
+                    onToggleArchived={() => {
+                      setTaskListMenuAnchor(null);
+                      void saveSidebarView({ showProjectArchived: !showingArchived, showArchived: !showingArchived });
+                    }}
+                    onCollapseAll={() => {
+                      setTaskListMenuAnchor(null);
+                      setAllWorkspaceProjectsCollapsed(true);
+                    }}
+                    onExpandAll={() => {
+                      setTaskListMenuAnchor(null);
+                      setAllWorkspaceProjectsCollapsed(false);
+                    }}
+                  />
+                ) : null}
+              </div>
+            </div>
+            <div className="app-frame-task-list__body space-y-3">
             {visibleProjectTree.pinnedTasks.length > 0 || visibleProjectTree.pinnedProjects.length > 0 ? (
               <ProjectTreeSection
                 title={t("common.pin")}
@@ -1031,17 +1189,24 @@ export function AppFrame(props: AppFrameProps) {
                 projects={visibleProjectTree.pinnedProjects}
                 tasks={visibleProjectTree.pinnedTasks}
                 currentSessionKey={highlightedSessionKey}
+                selectedProjectId={selectedSidebarProjectId}
                 showPreviews={state.agent.sidebarState.view.show_previews}
                 projectRegistryState={state.agent.projectRegistryState}
                 onToggleGroup={toggleSidebarGroup}
                 onToggleProject={toggleSidebarGroup}
                 onOpenTask={openAgentTask}
-                onRenameTask={openRenameDialog}
+                onRenameTask={beginTaskRename}
+                renamingSessionKey={inlineRename?.sessionKey ?? null}
+                renameDraft={inlineRenameDraft}
+                onRenameDraftChange={setInlineRenameDraft}
+                onCommitRename={commitInlineRename}
+                onCancelRename={cancelInlineRename}
                 onTaskContextMenu={openTaskContextMenu}
                 onPinTask={pinTask}
                 archiveConfirmSessionKey={archiveConfirmSessionKey}
                 onRequestArchiveTask={requestArchiveTask}
                 onConfirmArchiveTask={archiveTask}
+                onCancelArchiveConfirm={cancelArchiveConfirm}
                 onUnarchiveTask={unarchiveTask}
                 onDeleteArchivedTask={requestDeleteArchivedTask}
                 onProjectContextMenu={openProjectMenu}
@@ -1051,11 +1216,13 @@ export function AppFrame(props: AppFrameProps) {
 
             <ProjectTreeSection
               title={t("appFrame.projects")}
+              showingArchived={showingArchived}
               groupKey="projects"
               collapsedGroups={state.agent.sidebarState.collapsed_groups}
               projects={visibleProjectTree.projects}
               tasks={[]}
               currentSessionKey={highlightedSessionKey}
+              selectedProjectId={selectedSidebarProjectId}
               showPreviews={state.agent.sidebarState.view.show_previews}
               projectRegistryState={state.agent.projectRegistryState}
               emptyText={state.agent.projectRegistryState === "corrupt"
@@ -1064,62 +1231,47 @@ export function AppFrame(props: AppFrameProps) {
               onToggleGroup={toggleSidebarGroup}
               onToggleProject={toggleSidebarGroup}
               onOpenTask={openAgentTask}
-              onRenameTask={openRenameDialog}
+              onRenameTask={beginTaskRename}
+              renamingSessionKey={inlineRename?.sessionKey ?? null}
+              renameDraft={inlineRenameDraft}
+              onRenameDraftChange={setInlineRenameDraft}
+              onCommitRename={commitInlineRename}
+              onCancelRename={cancelInlineRename}
               onTaskContextMenu={openTaskContextMenu}
               onPinTask={pinTask}
               archiveConfirmSessionKey={archiveConfirmSessionKey}
               onRequestArchiveTask={requestArchiveTask}
               onConfirmArchiveTask={archiveTask}
+              onCancelArchiveConfirm={cancelArchiveConfirm}
               onUnarchiveTask={unarchiveTask}
               onDeleteArchivedTask={requestDeleteArchivedTask}
               onProjectContextMenu={openProjectMenu}
               onNewProjectTask={(projectId) => openNewAgent({ kind: "project", projectId })}
-              headerAction={(
-                <div className="flex items-center gap-0.5">
-                  <div className="relative">
-                    <button
-                      type="button"
-                      className="app-frame-task-section-action"
-                      aria-label={t("appFrame.project.add")}
-                      title={t("appFrame.project.add")}
-                      disabled={state.agent.projectRegistryState === "corrupt" || projectMutationId != null}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        setTaskListMenuAnchor(null);
-                        setProjectListMenuAnchor(null);
-                        setSortMenuOpen(false);
-                        setProjectCreateMenuOpen((open) => !open);
-                      }}
-                    >
-                      <Plus size={14} />
-                    </button>
-                    {projectCreateMenuOpen ? (
-                      <div className="app-frame-project-create-menu">
-                        <MenuButton label={t("appFrame.project.createBlank")} onClick={() => void registerProject("blank")} />
-                        <MenuButton label={t("appFrame.project.useExisting")} onClick={() => void registerProject("existing")} />
-                      </div>
-                    ) : null}
-                  </div>
+              headerLeadingAction={(
+                <div className="relative flex items-center">
                   <button
                     type="button"
-                    aria-label={t("appFrame.project.listActions")}
-                    title={t("appFrame.project.listActions")}
+                    className={`app-frame-workspace-add${projectCreateMenuAnchor ? " is-open" : ""}`}
+                    aria-label={t("appFrame.project.add")}
+                    title={t("appFrame.project.add")}
+                    disabled={state.agent.projectRegistryState === "corrupt" || projectMutationId != null}
                     onClick={(event) => {
                       event.stopPropagation();
-                      toggleProjectListMenu(sidebarMenuAnchorFromRect(event.currentTarget.getBoundingClientRect()));
+                      setTaskListMenuAnchor(null);
+                      setSortMenuOpen(false);
+                      const anchor = sidebarMenuAnchorFromRect(event.currentTarget.getBoundingClientRect());
+                      setProjectCreateMenuAnchor((current) => (current ? null : anchor));
                     }}
-                    className="app-frame-task-section-action"
                   >
-                    <MoreHorizontal size={14} />
+                    <FolderPlus size={14} strokeWidth={1.75} aria-hidden="true" />
                   </button>
-                  {projectListMenuAnchor ? (
-                    <ProjectListMoreMenu
-                      anchor={projectListMenuAnchor}
-                      showArchived={showingProjectArchived}
-                      onToggleArchived={() => {
-                        setProjectListMenuAnchor(null);
-                        void saveSidebarView({ showProjectArchived: !showingProjectArchived });
-                      }}
+                  {projectCreateMenuAnchor ? (
+                    <SidebarWorkspacePickerMenu
+                      anchor={projectCreateMenuAnchor}
+                      projects={state.agent.projects}
+                      registryState={state.agent.projectRegistryState}
+                      onSelectProject={selectSidebarWorkspace}
+                      onOpenLocalFolder={() => void registerProject("existing")}
                     />
                   ) : null}
                 </div>
@@ -1128,31 +1280,39 @@ export function AppFrame(props: AppFrameProps) {
 
             <ProjectTreeSection
               title={t("appFrame.tasks")}
+              showingArchived={showingArchived}
               groupKey="standalone"
               collapsedGroups={state.agent.sidebarState.collapsed_groups}
               projects={[]}
               tasks={visibleProjectTree.standaloneTasks}
               currentSessionKey={highlightedSessionKey}
+              selectedProjectId={selectedSidebarProjectId}
               showPreviews={state.agent.sidebarState.view.show_previews}
               projectRegistryState={state.agent.projectRegistryState}
               emptyText={state.agent.isLoadingSessions
                 ? t("appFrame.taskList.loading")
-                : t(showingStandaloneArchived ? "appFrame.taskList.emptyArchived" as MessageKey : "appFrame.taskList.empty")}
+                : t(showingArchived ? "appFrame.taskList.emptyArchived" as MessageKey : "appFrame.taskList.empty")}
               onToggleGroup={toggleSidebarGroup}
               onToggleProject={toggleSidebarGroup}
               onOpenTask={openAgentTask}
-              onRenameTask={openRenameDialog}
+              onRenameTask={beginTaskRename}
+              renamingSessionKey={inlineRename?.sessionKey ?? null}
+              renameDraft={inlineRenameDraft}
+              onRenameDraftChange={setInlineRenameDraft}
+              onCommitRename={commitInlineRename}
+              onCancelRename={cancelInlineRename}
               onTaskContextMenu={openTaskContextMenu}
               onPinTask={pinTask}
               archiveConfirmSessionKey={archiveConfirmSessionKey}
               onRequestArchiveTask={requestArchiveTask}
               onConfirmArchiveTask={archiveTask}
+              onCancelArchiveConfirm={cancelArchiveConfirm}
               onUnarchiveTask={unarchiveTask}
               onDeleteArchivedTask={requestDeleteArchivedTask}
               onProjectContextMenu={openProjectMenu}
               onNewProjectTask={(projectId) => openNewAgent({ kind: "project", projectId })}
               headerAction={(
-                <div className="flex items-center gap-0.5">
+                <div className="app-frame-task-section-header__actions-inner">
                   <button
                     type="button"
                     className="app-frame-task-section-action"
@@ -1165,53 +1325,15 @@ export function AppFrame(props: AppFrameProps) {
                   >
                     <Plus size={14} />
                   </button>
-                  <button
-                    type="button"
-                    aria-label={t("appFrame.taskList.actions")}
-                    title={t("appFrame.taskList.actions")}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      toggleTaskListMenu(sidebarMenuAnchorFromRect(event.currentTarget.getBoundingClientRect()));
-                    }}
-                    className="app-frame-task-section-action"
-                  >
-                    <MoreHorizontal size={14} />
-                  </button>
-                  {taskListMenuAnchor ? (
-                    <SidebarMoreMenu
-                      anchor={taskListMenuAnchor}
-                      showPreviews={state.agent.sidebarState.view.show_previews}
-                      showArchived={showingStandaloneArchived}
-                      sort={state.agent.sidebarState.view.sort}
-                      sortMenuOpen={sortMenuOpen}
-                      onRefresh={() => {
-                        setTaskListMenuAnchor(null);
-                        void refreshAgentTasks();
-                      }}
-                      onTogglePreviews={() => {
-                        setTaskListMenuAnchor(null);
-                        void saveSidebarView({ showPreviews: !state.agent.sidebarState.view.show_previews });
-                      }}
-                      onToggleArchived={() => {
-                        setTaskListMenuAnchor(null);
-                        void saveSidebarView({ showArchived: !showingStandaloneArchived });
-                      }}
-                      onToggleSortMenu={() => setSortMenuOpen((value) => !value)}
-                      onSelectSort={(sort) => {
-                        setTaskListMenuAnchor(null);
-                        setSortMenuOpen(false);
-                        void saveSidebarView({ sort });
-                      }}
-                    />
-                  ) : null}
                 </div>
               )}
             />
+            </div>
           </div>
           {taskContextMenu && (
             <TaskContextMenu
               menu={taskContextMenu}
-              onRename={openRenameDialog}
+              onRename={beginTaskRename}
               onPinTask={pinTask}
               onArchiveTask={requestArchiveTask}
               onUnarchiveTask={unarchiveTask}
@@ -1232,11 +1354,6 @@ export function AppFrame(props: AppFrameProps) {
               onReveal={(project) => {
                 setProjectContextMenu(null);
                 void revealProject(project.id);
-              }}
-              onRename={(project) => {
-                setProjectContextMenu(null);
-                setRenameProjectId(project.id);
-                setRenameProjectValue(project.name);
               }}
               onMarkRead={(project) => {
                 setProjectContextMenu(null);
@@ -1363,48 +1480,6 @@ export function AppFrame(props: AppFrameProps) {
           if (archiveProject) void archiveProjectTasks(archiveProject.id);
         }}
       />
-      <Modal
-        open={renameProject != null}
-        title={t("appFrame.project.rename")}
-        showCloseButton={false}
-        className="rename-dialog"
-        backdropClassName="rename-dialog-backdrop"
-        style={{ width: 360, maxWidth: "calc(100vw - 32px)" }}
-        onClose={() => setRenameProjectId(null)}
-        footer={(
-          <>
-            <Button type="button" variant="soft" size="sm" onClick={() => setRenameProjectId(null)}>
-              {t("dialog.cancel")}
-            </Button>
-            <Button
-              type="button"
-              variant="primary"
-              size="sm"
-              disabled={!renameProjectValue.trim() || projectMutationId != null}
-              onClick={() => {
-                if (!renameProject) return;
-                const value = renameProjectValue.trim();
-                void updateProject(renameProject.id, { name: value }).then((committed) => {
-                  if (committed) {
-                    setRenameProjectId(null);
-                  }
-                });
-              }}
-            >
-              {t("dialog.ok")}
-            </Button>
-          </>
-        )}
-      >
-        <input
-          type="text"
-          maxLength={160}
-          value={renameProjectValue}
-          onChange={(event) => setRenameProjectValue(event.target.value)}
-          className="rename-dialog-input"
-        />
-        {renameProject ? <div className="app-frame-project-path">{renameProject.rootPath}</div> : null}
-      </Modal>
       <ConfirmDialog
         open={deleteConfirmTask != null}
         title={t("appFrame.deleteArchivedTitle")}
@@ -1416,46 +1491,6 @@ export function AppFrame(props: AppFrameProps) {
         onCancel={() => setDeleteConfirmTask(null)}
         onConfirm={() => void confirmDeleteArchivedTask()}
       />
-      <Modal
-        open={renameTarget != null}
-        title={t("appFrame.renameTaskPrompt")}
-        showCloseButton={false}
-        className="rename-dialog"
-        backdropClassName="rename-dialog-backdrop"
-        style={{ width: 360, maxWidth: "calc(100vw - 32px)" }}
-        initialFocusRef={renameInputRef}
-        onClose={closeRenameDialog}
-        footer={(
-          <>
-            <Button type="button" variant="soft" size="sm" onClick={closeRenameDialog}>
-              {t("dialog.cancel")}
-            </Button>
-            <Button type="button" variant="primary" size="sm" onClick={submitRenameDialog}>
-              {t("dialog.ok")}
-            </Button>
-          </>
-        )}
-      >
-        <input
-          ref={renameInputRef}
-          type="text"
-          value={renameValue}
-          maxLength={60}
-          placeholder={t("appFrame.renameTaskPlaceholder")}
-          aria-label={t("appFrame.renameTaskPrompt")}
-          onChange={(event) => setRenameValue(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") {
-              if (isComposingKeyboardEvent(event)) {
-                return;
-              }
-              event.preventDefault();
-              submitRenameDialog();
-            }
-          }}
-          className="w-full px-3 py-2 rounded-input border border-border-stone/40 bg-background-paper text-sm text-text-ink/80 placeholder:text-text-ink/40 outline-none focus:outline-none"
-        />
-      </Modal>
       {deferredGuidanceStep === "improvement" && state.bootstrap?.app.userMode !== "byok" && state.bootstrap?.onboarding.improvementProgram === "unset" && (
         <ImprovementProgramModal
           onChoice={chooseDeferredImprovementProgram}
@@ -1549,6 +1584,7 @@ function CommunityLink(props: { href: string; title: string; detail: string; ext
  */
 function sidebarMenuAnchorFromRect(rect: DOMRect): SidebarMenuAnchor {
   return {
+    left: rect.left,
     right: rect.right,
     bottom: rect.bottom
   };
@@ -1572,6 +1608,28 @@ export function resolveSidebarMenuPlacement(
 
   return {
     right: clamp(viewport.width - anchor.right, size.margin, maxRight),
+    top: clamp(anchor.bottom + size.gap, size.margin, maxTop)
+  };
+}
+
+/**
+ * Left-aligns a menu to a sidebar icon/rail anchor so it stays over the sidebar.
+ *
+ * @param anchor The icon/button anchor (`left` is the alignment edge).
+ * @param viewport The current viewport size.
+ * @param size The menu size and margin configuration.
+ * @returns The menu's fixed left/top coordinates.
+ */
+export function resolveSidebarMenuPlacementStart(
+  anchor: SidebarMenuAnchor,
+  viewport: SidebarMenuViewport,
+  size: SidebarMenuSize
+): SidebarContextMenuPlacement {
+  const maxLeft = Math.max(size.margin, viewport.width - size.width - size.margin);
+  const maxTop = Math.max(size.margin, viewport.height - size.height - size.margin);
+
+  return {
+    left: clamp(anchor.left, size.margin, maxLeft),
     top: clamp(anchor.bottom + size.gap, size.margin, maxTop)
   };
 }
@@ -1614,6 +1672,32 @@ export function resolveSidebarContextMenuPlacement(
   return {
     left: clamp(point.x, size.margin, maxLeft),
     top: clamp(point.y + size.gap, size.margin, maxTop)
+  };
+}
+
+/**
+ * Resolves portal styles for a sidebar context menu opened from a button or pointer.
+ *
+ * @param source Button-anchored or pointer-anchored placement source.
+ * @param viewport The current viewport size.
+ * @param size The menu size and margin configuration.
+ * @returns Fixed positioning styles for the menu portal.
+ */
+export function resolveSidebarContextMenuOverlayStyle(
+  source: SidebarContextMenuPlacementSource,
+  viewport: SidebarMenuViewport,
+  size: SidebarMenuSize
+): CSSProperties {
+  if (source.kind === "anchor") {
+    return {
+      ...resolveSidebarMenuPlacementStart(source.anchor, viewport, size),
+      zIndex: sidebarMenuOverlayZIndex
+    };
+  }
+
+  return {
+    ...resolveSidebarContextMenuPlacement(source, viewport, size),
+    zIndex: sidebarMenuOverlayZIndex
   };
 }
 
@@ -1747,106 +1831,289 @@ export function groupTasksByTime(tasks: AgentTaskView[], now?: Date): TimeGroup[
   return groups;
 }
 
+const PROJECT_SIDEBAR_TASK_PREVIEW_LIMIT = 5;
+
 function ProjectTreeSection(props: {
   title: string;
+  titleBadge?: string;
+  showingArchived?: boolean;
   groupKey: string;
   collapsedGroups: Record<string, boolean>;
   projects: ProjectSidebarNode[];
   tasks: AgentTaskView[];
   currentSessionKey: string | null;
+  selectedProjectId: string | null;
   showPreviews: boolean;
   projectRegistryState: "ready" | "corrupt";
+  /** Always-visible trailing control (e.g. add workspace), outside the fade group. */
+  headerLeadingAction?: ReactNode;
   headerAction?: ReactNode;
   emptyText?: string;
+  renamingSessionKey: string | null;
+  renameDraft: string;
   onToggleGroup: (key: string) => void;
   onToggleProject: (key: string) => void;
   onOpenTask: (task: AgentTaskView) => Promise<void>;
   onRenameTask: (task: AgentTaskView) => void;
+  onRenameDraftChange: (value: string) => void;
+  onCommitRename: () => void;
+  onCancelRename: () => void;
   onTaskContextMenu: (event: MouseEvent, task: AgentTaskView) => void;
   onPinTask: (task: AgentTaskView, pinned: boolean) => void;
   archiveConfirmSessionKey: string | null;
   onRequestArchiveTask: (task: AgentTaskView) => void;
   onConfirmArchiveTask: (task: AgentTaskView) => void;
+  onCancelArchiveConfirm: () => void;
   onUnarchiveTask: (task: AgentTaskView) => void;
   onDeleteArchivedTask: (task: AgentTaskView) => void;
   onProjectContextMenu: (event: MouseEvent, projectId: string) => void;
   onNewProjectTask: (projectId: string) => void;
 }) {
+  const { t } = useTranslation();
+  const [expandedProjectTaskIds, setExpandedProjectTaskIds] = useState<Record<string, boolean>>({});
   const collapsed = Boolean(props.collapsedGroups[props.groupKey]);
   const renderTask = (task: AgentTaskView, nested = false) => (
-    <div key={task.sessionKey} className={nested ? "app-frame-project-task" : undefined}>
-      <TaskRow
-        task={task}
-        isCurrent={props.currentSessionKey === task.sessionKey}
-        showPreview={props.showPreviews}
-        projectRegistryState={props.projectRegistryState}
-        onOpen={() => void props.onOpenTask(task)}
-        onRename={() => props.onRenameTask(task)}
-        onContextMenu={(event) => props.onTaskContextMenu(event, task)}
-        onPin={() => props.onPinTask(task, !task.pinned)}
-        archiveConfirming={props.archiveConfirmSessionKey === task.sessionKey}
-        onRequestArchive={() => props.onRequestArchiveTask(task)}
-        onConfirmArchive={() => props.onConfirmArchiveTask(task)}
-        onUnarchive={() => props.onUnarchiveTask(task)}
-        onDeleteArchived={() => props.onDeleteArchivedTask(task)}
-      />
-    </div>
+    <TaskRow
+      key={task.sessionKey}
+      task={task}
+      depth={nested ? 1 : 0}
+      isCurrent={props.currentSessionKey === task.sessionKey}
+      showPreview={props.showPreviews}
+      projectRegistryState={props.projectRegistryState}
+      renaming={props.renamingSessionKey === task.sessionKey}
+      renameDraft={props.renameDraft}
+      onRenameDraftChange={props.onRenameDraftChange}
+      onCommitRename={props.onCommitRename}
+      onCancelRename={props.onCancelRename}
+      onOpen={() => void props.onOpenTask(task)}
+      onRename={() => props.onRenameTask(task)}
+      onContextMenu={(event) => props.onTaskContextMenu(event, task)}
+      onPin={() => props.onPinTask(task, !task.pinned)}
+      archiveConfirming={props.archiveConfirmSessionKey === task.sessionKey}
+      onRequestArchive={() => props.onRequestArchiveTask(task)}
+      onConfirmArchive={() => props.onConfirmArchiveTask(task)}
+      onCancelArchive={props.onCancelArchiveConfirm}
+      onUnarchive={() => props.onUnarchiveTask(task)}
+      onDeleteArchived={() => props.onDeleteArchivedTask(task)}
+    />
   );
 
   return (
-    <section className="space-y-1">
+    <section className="app-frame-task-section">
       <div
-        className="app-frame-task-section-header flex cursor-pointer items-center justify-between py-1.5 pl-1 pr-0"
+        className="app-frame-task-section-header app-frame-task-section-header--toggle"
         onClick={() => props.onToggleGroup(props.groupKey)}
       >
         <button
           type="button"
-          className="flex min-w-0 flex-1 items-center gap-1.5 text-left text-text-ink/50"
+          className="app-frame-task-section-header__trigger"
           aria-expanded={!collapsed}
         >
-          <span className="app-frame-task-section-header__title min-w-0 truncate">{props.title}</span>
-          {collapsed
-            ? <ChevronRight size={13} aria-hidden="true" className="app-frame-task-section-header__toggle-icon shrink-0" />
-            : <ChevronDown size={13} aria-hidden="true" className="app-frame-task-section-header__toggle-icon shrink-0" />}
+          <span className="app-frame-task-section-header__title min-w-0">
+            <span className="truncate">{props.title}</span>
+            <ChevronDown
+              size={14}
+              aria-hidden="true"
+              className={`app-frame-task-section-header__toggle-icon shrink-0${collapsed ? " is-collapsed" : ""}`}
+            />
+            {props.titleBadge ? (
+              <span className="app-frame-task-section-header__badge">{props.titleBadge}</span>
+            ) : null}
+          </span>
         </button>
-        <div
-          className="app-frame-task-section-header__actions"
-          onClick={(event) => event.stopPropagation()}
-        >
-          {props.headerAction}
+        {props.headerLeadingAction || props.headerAction ? (
+          <div
+            className="app-frame-task-section-header__trailing"
+            onClick={(event) => event.stopPropagation()}
+          >
+            {props.headerLeadingAction}
+            {props.headerAction ? (
+              <div className="app-frame-task-section-header__actions">
+                {props.headerAction}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+      <div className={`app-frame-collapsible${collapsed ? " is-collapsed" : ""}`}>
+        <div className="app-frame-collapsible__inner">
+          <div className="app-frame-task-section-body">
+            {props.tasks.map((task) => renderTask(task))}
+            {props.projects.map((node) => {
+              const projectKey = `project:${node.project.id}`;
+              const projectCollapsed = Boolean(props.collapsedGroups[projectKey]);
+              const showAllTasks = Boolean(expandedProjectTaskIds[node.project.id]);
+              const visibleTasks = node.tasks.length > PROJECT_SIDEBAR_TASK_PREVIEW_LIMIT && !showAllTasks
+                ? node.tasks.slice(0, PROJECT_SIDEBAR_TASK_PREVIEW_LIMIT)
+                : node.tasks;
+              const hiddenTaskCount = node.tasks.length - visibleTasks.length;
+              return (
+                <div key={node.project.id} className="app-frame-project-node">
+                  <ProjectRow
+                    project={node.project}
+                    collapsed={projectCollapsed}
+                    selected={props.selectedProjectId === node.project.id}
+                    onToggle={() => props.onToggleProject(projectKey)}
+                    onContextMenu={(event) => props.onProjectContextMenu(event, node.project.id)}
+                    onNewTask={() => props.onNewProjectTask(node.project.id)}
+                  />
+                  <div
+                    className={`app-frame-collapsible${projectCollapsed ? " is-collapsed" : ""}`}
+                    aria-hidden={projectCollapsed || undefined}
+                  >
+                    <div className="app-frame-collapsible__inner">
+                      <div className="app-frame-project-children">
+                        {node.tasks.length === 0 ? (
+                          <div className="app-frame-task-empty app-frame-task-empty--nested">
+                            {props.showingArchived
+                              ? t("appFrame.taskList.emptyArchived")
+                              : t("appFrame.taskList.empty")}
+                          </div>
+                        ) : (
+                          <>
+                            {visibleTasks.map((task) => renderTask(task, true))}
+                            {node.tasks.length > PROJECT_SIDEBAR_TASK_PREVIEW_LIMIT ? (
+                              <button
+                                type="button"
+                                className="app-frame-project-show-more"
+                                tabIndex={projectCollapsed ? -1 : undefined}
+                                onClick={() => setExpandedProjectTaskIds((current) => ({
+                                  ...current,
+                                  [node.project.id]: !showAllTasks
+                                }))}
+                              >
+                                {showAllTasks
+                                  ? t("appFrame.project.showFewerTasks")
+                                  : t("appFrame.project.showMoreTasks")}
+                                {!showAllTasks && hiddenTaskCount > 0 ? ` · ${hiddenTaskCount}` : ""}
+                              </button>
+                            ) : null}
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+            {!props.tasks.length && !props.projects.length && props.emptyText ? (
+              <div className="app-frame-task-empty">{props.emptyText}</div>
+            ) : null}
+          </div>
         </div>
       </div>
-      {!collapsed ? (
-        <>
-          {props.tasks.map((task) => renderTask(task))}
-          {props.projects.map((node) => {
-            const projectKey = `project:${node.project.id}`;
-            const projectCollapsed = Boolean(props.collapsedGroups[projectKey]);
-            return (
-              <div key={node.project.id} className="app-frame-project-node">
-                <ProjectRow
-                  project={node.project}
-                  collapsed={projectCollapsed}
-                  onToggle={() => props.onToggleProject(projectKey)}
-                  onContextMenu={(event) => props.onProjectContextMenu(event, node.project.id)}
-                  onNewTask={() => props.onNewProjectTask(node.project.id)}
-                />
-                {!projectCollapsed ? node.tasks.map((task) => renderTask(task, true)) : null}
-              </div>
-            );
-          })}
-          {!props.tasks.length && !props.projects.length && props.emptyText ? (
-            <div className="app-frame-task-empty pl-5 py-2 text-text-ink/40">{props.emptyText}</div>
-          ) : null}
-        </>
-      ) : null}
     </section>
+  );
+}
+
+function SidebarMarqueeText(props: {
+  text: string;
+  className?: string;
+}) {
+  const viewportRef = useRef<HTMLSpanElement>(null);
+  const textRef = useRef<HTMLSpanElement>(null);
+  const [distance, setDistance] = useState(0);
+
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current;
+    const label = textRef.current;
+    if (!viewport || !label) {
+      return;
+    }
+
+    const update = () => {
+      setDistance(Math.max(0, label.scrollWidth - viewport.clientWidth));
+    };
+    update();
+    if (typeof ResizeObserver === "undefined") {
+      return;
+    }
+    const observer = new ResizeObserver(update);
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, [props.text]);
+
+  const marqueeStyle = {
+    "--marquee-distance": `${distance}px`,
+    "--marquee-duration": `${Math.min(8, Math.max(2.2, distance / 28))}s`
+  } as CSSProperties;
+
+  return (
+    <span ref={viewportRef} className={`app-frame-sidebar-marquee${props.className ? ` ${props.className}` : ""}`}>
+      <span
+        ref={textRef}
+        className="app-frame-sidebar-marquee__text"
+        style={marqueeStyle}
+        data-overflow={distance > 1 ? "true" : undefined}
+      >
+        {props.text}
+      </span>
+    </span>
+  );
+}
+
+function SidebarInlineRenameInput(props: {
+  value: string;
+  maxLength: number;
+  ariaLabel: string;
+  onChange: (value: string) => void;
+  onCommit: () => void;
+  onCancel: () => void;
+}) {
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const cancelOnBlurRef = useRef(false);
+
+  useLayoutEffect(() => {
+    const input = inputRef.current;
+    if (!input) {
+      return;
+    }
+    input.focus();
+    input.select();
+  }, []);
+
+  return (
+    <input
+      ref={inputRef}
+      type="text"
+      className="app-frame-sidebar-rename-input"
+      value={props.value}
+      maxLength={props.maxLength}
+      aria-label={props.ariaLabel}
+      onChange={(event) => props.onChange(event.target.value)}
+      onClick={(event) => event.stopPropagation()}
+      onDoubleClick={(event) => event.stopPropagation()}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") {
+          if (isComposingKeyboardEvent(event)) {
+            return;
+          }
+          event.preventDefault();
+          cancelOnBlurRef.current = true;
+          props.onCommit();
+          return;
+        }
+        if (event.key === "Escape") {
+          event.preventDefault();
+          cancelOnBlurRef.current = true;
+          props.onCancel();
+        }
+      }}
+      onBlur={() => {
+        if (cancelOnBlurRef.current) {
+          cancelOnBlurRef.current = false;
+          return;
+        }
+        props.onCommit();
+      }}
+    />
   );
 }
 
 function ProjectRow(props: {
   project: MemmyAgentProject;
   collapsed: boolean;
+  selected: boolean;
   onToggle: () => void;
   onContextMenu: (event: MouseEvent) => void;
   onNewTask: () => void;
@@ -1854,27 +2121,51 @@ function ProjectRow(props: {
   const { t } = useTranslation();
   return (
     <div
-      className="app-frame-project-row flex items-center gap-1 rounded-input hover:bg-canvas-oat/55"
+      className={`app-frame-project-row${props.selected ? " app-frame-project-row--selected" : ""}`}
       title={props.project.rootPath}
     >
       <button
         type="button"
-        className="flex min-w-0 flex-1 items-center gap-1.5 py-1.5 pl-1 text-left"
+        className="app-frame-project-row__main"
         aria-expanded={!props.collapsed}
-        onClick={props.onToggle}
+        aria-label={props.collapsed ? t("appFrame.project.expand") : t("appFrame.project.collapse")}
+        onClick={(event) => {
+          props.onToggle();
+          // Avoid sticky :focus-within fill after mouse expand/collapse.
+          event.currentTarget.blur();
+        }}
+        onContextMenu={props.onContextMenu}
       >
-        <Folder size={14} className="shrink-0 text-action-sky/70" />
-        <span className="app-frame-project-title min-w-0 flex-1 truncate text-text-ink/75">{props.project.name}</span>
+        <span className="app-frame-project-row__folder-stack" aria-hidden="true">
+          <Folder
+            size={16}
+            className={`app-frame-project-row__folder${props.collapsed ? " is-active" : ""}`}
+          />
+          <FolderOpen
+            size={16}
+            className={`app-frame-project-row__folder app-frame-project-row__folder--open${!props.collapsed ? " is-active" : ""}`}
+          />
+          <ChevronRight
+            size={16}
+            className={`app-frame-project-row__chevron${props.collapsed ? " is-active" : ""}`}
+          />
+          <ChevronDown
+            size={16}
+            className={`app-frame-project-row__chevron${!props.collapsed ? " is-active" : ""}`}
+          />
+        </span>
+        <SidebarMarqueeText text={props.project.name} className="app-frame-project-title" />
       </button>
-      <div className="app-frame-project-row__actions flex shrink-0 items-center pr-1">
-        <TaskIconButton label={t("appFrame.project.newTask")} onClick={props.onNewTask}>
-          <MessageSquarePlus size={12} />
+      <div className="app-frame-project-row__actions">
+        <TaskIconButton label={t("appFrame.project.newTask")} tooltip={false} onClick={props.onNewTask}>
+          <MessageSquarePlus size={14} />
         </TaskIconButton>
         <TaskIconButton
           label={t("appFrame.project.actions")}
+          tooltip={false}
           onClick={(event) => props.onContextMenu(event)}
         >
-          <MoreHorizontal size={12} />
+          <MoreHorizontal size={14} />
         </TaskIconButton>
       </div>
     </div>
@@ -1890,6 +2181,11 @@ function TaskSection(props: {
   emptyText?: string;
   alwaysShowHeader?: boolean;
   hideWhenEmpty?: boolean;
+  renamingSessionKey?: string | null;
+  renameDraft?: string;
+  onRenameDraftChange?: (value: string) => void;
+  onCommitRename?: () => void;
+  onCancelRename?: () => void;
   onOpenTask: (task: AgentTaskView) => Promise<void>;
   onRenameTask: (task: AgentTaskView) => void;
   onContextMenu: (event: MouseEvent, task: AgentTaskView) => void;
@@ -1897,6 +2193,7 @@ function TaskSection(props: {
   archiveConfirmSessionKey: string | null;
   onRequestArchiveTask: (task: AgentTaskView) => void;
   onConfirmArchiveTask: (task: AgentTaskView) => void;
+  onCancelArchiveConfirm?: () => void;
   onUnarchiveTask: (task: AgentTaskView) => void;
   onDeleteArchivedTask: (task: AgentTaskView) => void;
 }) {
@@ -1905,29 +2202,43 @@ function TaskSection(props: {
   }
 
   return (
-    <section className="space-y-1.5">
-      <div className="app-frame-task-section-header flex items-center justify-between py-1.5 pl-3 pr-0">
-        <div className="app-frame-task-section-header__title text-text-ink/45">{props.title}</div>
-        {props.headerAction}
+    <section className="app-frame-task-section">
+      <div className="app-frame-task-section-header">
+        <div className="app-frame-task-section-header__title">{props.title}</div>
+        {props.headerAction ? (
+          <div className="app-frame-task-section-header__actions">
+            {props.headerAction}
+          </div>
+        ) : null}
       </div>
-      {props.tasks.map((task) => (
-        <TaskRow
-          key={task.sessionKey}
-          task={task}
-          isCurrent={props.currentSessionKey === task.sessionKey}
-          showPreview={props.showPreviews}
-          onOpen={() => void props.onOpenTask(task)}
-          onRename={() => props.onRenameTask(task)}
-          onContextMenu={(event) => props.onContextMenu(event, task)}
-          onPin={() => props.onPinTask(task, !task.pinned)}
-          archiveConfirming={props.archiveConfirmSessionKey === task.sessionKey}
-          onRequestArchive={() => props.onRequestArchiveTask(task)}
-          onConfirmArchive={() => props.onConfirmArchiveTask(task)}
-          onUnarchive={() => props.onUnarchiveTask(task)}
-          onDeleteArchived={() => void props.onDeleteArchivedTask(task)}
-        />
-      ))}
-      {!props.tasks.length && props.emptyText && <div className="app-frame-task-empty pl-3 py-2 text-text-ink/40">{props.emptyText}</div>}
+      <div className="app-frame-task-section-body">
+        {props.tasks.map((task) => (
+          <TaskRow
+            key={task.sessionKey}
+            task={task}
+            isCurrent={props.currentSessionKey === task.sessionKey}
+            showPreview={props.showPreviews}
+            renaming={props.renamingSessionKey === task.sessionKey}
+            renameDraft={props.renameDraft ?? ""}
+            onRenameDraftChange={props.onRenameDraftChange}
+            onCommitRename={props.onCommitRename}
+            onCancelRename={props.onCancelRename}
+            onOpen={() => void props.onOpenTask(task)}
+            onRename={() => props.onRenameTask(task)}
+            onContextMenu={(event) => props.onContextMenu(event, task)}
+            onPin={() => props.onPinTask(task, !task.pinned)}
+            archiveConfirming={props.archiveConfirmSessionKey === task.sessionKey}
+            onRequestArchive={() => props.onRequestArchiveTask(task)}
+            onConfirmArchive={() => props.onConfirmArchiveTask(task)}
+            onCancelArchive={props.onCancelArchiveConfirm}
+            onUnarchive={() => props.onUnarchiveTask(task)}
+            onDeleteArchived={() => void props.onDeleteArchivedTask(task)}
+          />
+        ))}
+        {!props.tasks.length && props.emptyText ? (
+          <div className="app-frame-task-empty">{props.emptyText}</div>
+        ) : null}
+      </div>
     </section>
   );
 }
@@ -1936,7 +2247,13 @@ export function TaskRow(props: {
   task: AgentTaskView;
   isCurrent: boolean;
   showPreview: boolean;
+  depth?: 0 | 1;
   projectRegistryState?: "ready" | "corrupt";
+  renaming?: boolean;
+  renameDraft?: string;
+  onRenameDraftChange?: (value: string) => void;
+  onCommitRename?: () => void;
+  onCancelRename?: () => void;
   onOpen: () => void;
   onRename?: () => void;
   onContextMenu: (event: MouseEvent) => void;
@@ -1944,19 +2261,15 @@ export function TaskRow(props: {
   archiveConfirming: boolean;
   onRequestArchive: () => void;
   onConfirmArchive: () => void;
+  onCancelArchive?: () => void;
   onUnarchive: () => void;
   onDeleteArchived: () => void;
 }) {
   const { t } = useTranslation();
   const [isTaskRowHovered, setIsTaskRowHovered] = useState(false);
   const archived = props.task.archived;
-  const rowStateClass = props.archiveConfirming
-    ? "bg-status-error/5 ring-1 ring-status-error/15"
-    : props.isCurrent
-      ? "app-frame-nav-button--active"
-      : "hover:bg-canvas-oat/50";
-  const titleClass = props.isCurrent ? "text-action-sky-hover" : "text-text-ink/70";
-  const previewClass = props.isCurrent ? "text-action-sky-hover/65" : "text-text-ink/45";
+  const renaming = Boolean(props.renaming);
+  const depth = props.depth ?? 0;
   const hasTaskStatus = props.task.runStartedAt != null || props.task.completedUnseen;
   const projectIssueLabel = props.task.projectId == null || props.task.groupProjectId != null
     ? null
@@ -1964,84 +2277,105 @@ export function TaskRow(props: {
       ? t("appFrame.project.taskRegistryUnavailable")
       : t("appFrame.project.recordUnavailable");
   const projectIssueTitle = projectIssueLabel ? `${projectIssueLabel} · ${props.task.cwd}` : undefined;
-  const shouldShowTaskActions = archived ? isTaskRowHovered : props.archiveConfirming || isTaskRowHovered || hasTaskStatus;
+  const showHoverActions = !renaming && (isTaskRowHovered || props.archiveConfirming);
+  const showStatusSlot = !showHoverActions && !archived && !renaming && hasTaskStatus;
+  const rowClassName = [
+    "app-frame-task-row",
+    depth === 1 ? "app-frame-task-row--depth-1" : "",
+    props.isCurrent ? "app-frame-task-row--current" : "",
+    props.archiveConfirming ? "app-frame-task-row--confirming" : "",
+    renaming ? "app-frame-task-row--renaming" : "",
+    showHoverActions ? "app-frame-task-row--actions-visible" : "",
+    showStatusSlot ? "app-frame-task-row--status-visible" : ""
+  ].filter(Boolean).join(" ");
 
   return (
     <div
-      className={`app-frame-task-row relative flex items-start gap-1 transition-all text-text-ink/65 ${rowStateClass}`}
+      className={rowClassName}
       data-current-session={props.isCurrent ? "true" : undefined}
-      onContextMenu={props.onContextMenu}
+      onContextMenu={renaming ? undefined : props.onContextMenu}
       onMouseEnter={() => setIsTaskRowHovered(true)}
       onMouseLeave={() => setIsTaskRowHovered(false)}
     >
-      <button
-        type="button"
-        aria-current={props.isCurrent ? "page" : undefined}
-        title={projectIssueTitle}
-        onClick={props.onOpen}
-        onDoubleClick={(event) => {
-          if (archived || !props.onRename) {
-            return;
-          }
-          event.preventDefault();
-          event.stopPropagation();
-          props.onRename();
-        }}
-        className="min-w-0 flex-1 text-left pl-1 py-2 cursor-pointer"
-      >
-        <span className="flex min-w-0 items-center gap-1.5">
-          <span className={`app-frame-task-title min-w-0 flex-1 truncate ${titleClass}`}>{props.task.title}</span>
-        </span>
-        {props.showPreview && props.task.preview && (
-          <span className={`app-frame-task-preview mt-1 block truncate ${previewClass}`}>{props.task.preview}</span>
-        )}
-        {projectIssueLabel ? (
-          <span className="app-frame-task-preview mt-1 block truncate text-status-error/70">
-            {projectIssueLabel}
-          </span>
-        ) : null}
-      </button>
-      {shouldShowTaskActions && (
-        <div className="flex self-center shrink-0 items-center justify-center gap-0.5 pr-1.5">
+      {renaming ? (
+        <div className="app-frame-task-row__main">
+          <SidebarInlineRenameInput
+            value={props.renameDraft ?? props.task.title}
+            maxLength={60}
+            ariaLabel={t("appFrame.renameTaskPrompt")}
+            onChange={props.onRenameDraftChange ?? (() => undefined)}
+            onCommit={props.onCommitRename ?? (() => undefined)}
+            onCancel={props.onCancelRename ?? (() => undefined)}
+          />
+        </div>
+      ) : (
+        <button
+          type="button"
+          aria-current={props.isCurrent ? "page" : undefined}
+          title={projectIssueTitle}
+          onClick={props.onOpen}
+          onDoubleClick={(event) => {
+            if (archived || !props.onRename) {
+              return;
+            }
+            event.preventDefault();
+            event.stopPropagation();
+            props.onRename();
+          }}
+          className="app-frame-task-row__main"
+        >
           {archived ? (
+            <span className="app-frame-task-row__title-row">
+              <Archive size={14} className="app-frame-task-row__archive-icon" aria-hidden="true" />
+              <SidebarMarqueeText text={props.task.title} className="app-frame-task-title" />
+            </span>
+          ) : (
+            <SidebarMarqueeText text={props.task.title} className="app-frame-task-title" />
+          )}
+          {props.showPreview && props.task.preview ? (
+            <span className="app-frame-task-preview truncate">{props.task.preview}</span>
+          ) : null}
+          {projectIssueLabel ? (
+            <span className="app-frame-task-preview app-frame-task-preview--error truncate">
+              {projectIssueLabel}
+            </span>
+          ) : null}
+        </button>
+      )}
+      <div className="app-frame-task-row__trail">
+        {renaming ? null : archived ? (
+          showHoverActions ? (
             <>
               <TaskIconButton label={t("appFrame.task.unarchive")} active onClick={props.onUnarchive}>
-                <Archive size={12} />
+                <RotateCcw size={14} />
               </TaskIconButton>
               <TaskIconButton label={t("appFrame.task.deleteArchived")} danger onClick={props.onDeleteArchived}>
-                <Trash2 size={12} />
+                <Trash2 size={14} />
               </TaskIconButton>
             </>
-          ) : props.archiveConfirming ? (
-            <TaskArchiveInlineAction
-              task={props.task}
-              confirming={props.archiveConfirming}
-              onPin={props.onPin}
-              onRequestArchive={props.onRequestArchive}
-              onConfirmArchive={props.onConfirmArchive}
-            />
-          ) : isTaskRowHovered ? (
-            <>
-              <TaskIconButton label={props.task.pinned ? t("appFrame.task.unpin") : t("appFrame.task.pin")} active={props.task.pinned} onClick={props.onPin}>
-                <Pin size={12} />
-              </TaskIconButton>
-              <div className="relative h-6 w-6">
-                <div className="absolute inset-0 transition-opacity opacity-100">
-                  <TaskIconButton label={t("appFrame.task.archive")} onClick={props.onRequestArchive}>
-                    <Archive size={12} />
-                  </TaskIconButton>
-                </div>
-              </div>
-            </>
-          ) : (
-            <div className="relative h-6 w-6">
-              <div className="absolute inset-0 flex items-center justify-center transition-opacity opacity-100">
-                <TaskStatusIndicator task={props.task} />
-              </div>
-            </div>
-          )}
-        </div>
-      )}
+          ) : null
+        ) : props.archiveConfirming ? (
+          <TaskArchiveInlineAction
+            task={props.task}
+            confirming={props.archiveConfirming}
+            onPin={props.onPin}
+            onRequestArchive={props.onRequestArchive}
+            onConfirmArchive={props.onConfirmArchive}
+            onCancelArchive={props.onCancelArchive ?? (() => undefined)}
+          />
+        ) : showHoverActions ? (
+          <>
+            <TaskIconButton label={props.task.pinned ? t("appFrame.task.unpin") : t("appFrame.task.pin")} active={props.task.pinned} onClick={props.onPin}>
+              <Pin size={14} />
+            </TaskIconButton>
+            <TaskIconButton label={t("appFrame.task.archive")} onClick={props.onRequestArchive}>
+              <Archive size={14} />
+            </TaskIconButton>
+          </>
+        ) : showStatusSlot ? (
+          <TaskStatusIndicator task={props.task} />
+        ) : null}
+      </div>
     </div>
   );
 }
@@ -2073,20 +2407,27 @@ export function TaskArchiveInlineAction(props: {
   onPin: () => void;
   onRequestArchive: () => void;
   onConfirmArchive: () => void;
+  onCancelArchive: () => void;
 }) {
   const { t } = useTranslation();
 
   if (props.confirming) {
-    return <InlineConfirmButton ariaLabel={t("appFrame.task.confirmArchive")} label={t("common.confirm")} onClick={props.onConfirmArchive} />;
+    return (
+      <InlineConfirmButton
+        ariaLabel={t("appFrame.task.confirmArchive")}
+        label={t("common.confirm")}
+        onClick={props.onConfirmArchive}
+      />
+    );
   }
 
   return (
     <>
       <TaskIconButton label={props.task.pinned ? t("appFrame.task.unpin") : t("appFrame.task.pin")} active={props.task.pinned} onClick={props.onPin}>
-        <Pin size={12} />
+        <Pin size={14} />
       </TaskIconButton>
       <TaskIconButton label={t("appFrame.task.archive")} onClick={props.onRequestArchive}>
-        <Archive size={12} />
+        <Archive size={14} />
       </TaskIconButton>
     </>
   );
@@ -2096,6 +2437,8 @@ function TaskIconButton(props: {
   label: string;
   active?: boolean;
   danger?: boolean;
+  /** Floating tooltip; keep false for self-evident icons revealed on row hover. */
+  tooltip?: boolean;
   children: ReactNode;
   onClick: (event: MouseEvent<HTMLButtonElement>) => void;
 }) {
@@ -2105,24 +2448,32 @@ function TaskIconButton(props: {
       ? "text-action-sky hover:text-action-sky-hover"
       : "text-text-ink/40 hover:text-text-ink/70";
 
-  return (
-    <Tooltip content={props.label}>
-      <button
-        type="button"
-        aria-label={props.label}
-        onClick={(event) => {
-          event.stopPropagation();
-          props.onClick(event);
-        }}
-        className={`task-icon-button w-6 h-6 inline-flex items-center justify-center rounded-input text-center leading-none hover:bg-background-paper/80 transition-colors cursor-pointer ${colorClass}`}
-      >
-        {props.children}
-      </button>
-    </Tooltip>
+  const button = (
+    <button
+      type="button"
+      aria-label={props.label}
+      onClick={(event) => {
+        event.stopPropagation();
+        props.onClick(event);
+      }}
+      className={`task-icon-button w-6 h-6 inline-flex items-center justify-center rounded-input text-center leading-none hover:bg-background-paper/80 transition-colors cursor-pointer ${colorClass}`}
+    >
+      {props.children}
+    </button>
   );
+
+  if (props.tooltip === false) {
+    return button;
+  }
+
+  return <Tooltip content={props.label}>{button}</Tooltip>;
 }
 
-function InlineConfirmButton(props: { ariaLabel: string; label: string; onClick: () => void }) {
+function InlineConfirmButton(props: {
+  ariaLabel: string;
+  label: string;
+  onClick: () => void;
+}) {
   return (
     <button
       type="button"
@@ -2131,60 +2482,151 @@ function InlineConfirmButton(props: { ariaLabel: string; label: string; onClick:
         event.stopPropagation();
         props.onClick();
       }}
-      className="h-6 px-2.5 inline-flex items-center justify-center rounded-input border border-status-error/35 bg-status-error/10 text-center text-[11px] font-bold leading-none text-status-error hover:bg-status-error/15 transition-colors cursor-pointer"
+      className="app-frame-task-confirm"
     >
       {props.label}
     </button>
   );
 }
 
-function ProjectListMoreMenu(props: {
+function formatSidebarWorkspacePath(rootPath: string): string {
+  return rootPath
+    .replace(/\\/g, "/")
+    .replace(/^\/Users\/[^/]+/, "~")
+    .replace(/^\/home\/[^/]+/, "~");
+}
+
+function formatSidebarCompactWorkspacePath(rootPath: string, maxWidth = 28): string {
+  const displayPath = formatSidebarWorkspacePath(rootPath).replace(/\/+$/, "");
+  if (displayPath.length <= maxWidth) return displayPath;
+  const folder = displayPath.split("/").filter(Boolean).pop() ?? displayPath;
+  const prefix = displayPath.slice(0, Math.max(4, maxWidth - folder.length - 4));
+  return `${prefix}.../${folder}`;
+}
+
+function filterSidebarWorkspaceProjects(projects: MemmyAgentProject[], query: string): MemmyAgentProject[] {
+  const normalized = query.trim().toLocaleLowerCase();
+  const sorted = [...projects].sort((left, right) =>
+    right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id)
+  );
+  if (!normalized) return sorted;
+  return sorted.filter((project) => {
+    const displayPath = formatSidebarWorkspacePath(project.rootPath).toLocaleLowerCase();
+    return project.name.toLocaleLowerCase().includes(normalized)
+      || project.rootPath.toLocaleLowerCase().includes(normalized)
+      || displayPath.includes(normalized);
+  });
+}
+
+function SidebarWorkspacePickerMenu(props: {
   anchor: SidebarMenuAnchor;
-  showArchived: boolean;
-  onToggleArchived: () => void;
+  projects: MemmyAgentProject[];
+  registryState: "ready" | "corrupt";
+  onSelectProject: (projectId: string) => void;
+  onOpenLocalFolder: () => void;
 }) {
   const { t } = useTranslation();
+  const [query, setQuery] = useState("");
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const visibleProjects = props.registryState === "ready"
+    ? filterSidebarWorkspaceProjects(props.projects, query)
+    : [];
+
+  useEffect(() => {
+    searchInputRef.current?.focus();
+  }, []);
 
   if (typeof document === "undefined" || typeof window === "undefined") {
     return null;
   }
 
-  const overlayStyle = resolveSidebarMenuOverlayStyle(
-    props.anchor,
+  const overlayStyle = resolveSidebarContextMenuOverlayStyle(
+    { kind: "anchor", anchor: props.anchor },
     { width: window.innerWidth, height: window.innerHeight },
-    projectListMoreMenuSize
+    projectCreateMenuSize
   );
   const menu = (
     <div
-      className="fixed w-32 rounded-menu border border-border-stone/40 bg-background-paper shadow-lg p-1"
+      className="home-project-picker__menu app-frame-workspace-picker-menu"
       style={overlayStyle}
       onClick={(event) => event.stopPropagation()}
     >
-      <MenuButton
-        icon={<Archive size={12} />}
-        label={props.showArchived
-          ? t("appFrame.project.showAll")
-          : t("appFrame.project.showArchived")}
-        active={props.showArchived}
-        onClick={props.onToggleArchived}
-      />
+      <label className="home-project-picker__search">
+        <input
+          ref={searchInputRef}
+          value={query}
+          placeholder={t("home.project.search")}
+          aria-label={t("home.project.search")}
+          onChange={(event) => setQuery(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") {
+              event.preventDefault();
+              event.stopPropagation();
+            }
+          }}
+        />
+      </label>
+      <div className="home-project-picker__list" role="listbox">
+        <div className="home-project-picker__projects" role="presentation">
+          {props.registryState === "corrupt" ? (
+            <p className="home-project-picker__empty">{t("home.project.registryUnavailable")}</p>
+          ) : visibleProjects.length === 0 ? (
+            <p className="home-project-picker__empty" role="status">{t("home.project.empty")}</p>
+          ) : visibleProjects.map((project) => (
+            <button
+              key={project.id}
+              type="button"
+              role="option"
+              aria-selected="false"
+              className="home-project-picker__option"
+              title={formatSidebarWorkspacePath(project.rootPath)}
+              onClick={() => props.onSelectProject(project.id)}
+            >
+              <Folder size={13} className="shrink-0" aria-hidden="true" />
+              <span className="home-project-picker__path truncate">
+                {formatSidebarCompactWorkspacePath(project.rootPath)}
+              </span>
+            </button>
+          ))}
+        </div>
+        {props.registryState === "ready" ? (
+          <>
+            <div className="home-project-picker__divider" role="separator" />
+            <div className="home-project-picker__actions" role="presentation">
+              <button
+                type="button"
+                role="option"
+                aria-selected="false"
+                className="home-project-picker__option home-project-picker__option--action"
+                onClick={props.onOpenLocalFolder}
+              >
+                <Plus size={13} strokeWidth={1.75} className="shrink-0 home-project-picker__action-icon" aria-hidden="true" />
+                <span>{t("home.project.new")}</span>
+              </button>
+            </div>
+          </>
+        ) : null}
+      </div>
     </div>
   );
 
   return createPortal(menu, document.body);
 }
 
-function SidebarMoreMenu(props: {
+function TaskListActionsMenu(props: {
   anchor: SidebarMenuAnchor;
   showPreviews: boolean;
   showArchived: boolean;
   sort: AgentTaskSort;
   sortMenuOpen: boolean;
-  onRefresh: () => void;
   onTogglePreviews: () => void;
-  onToggleArchived: () => void;
   onToggleSortMenu: () => void;
   onSelectSort: (sort: AgentTaskSort) => void;
+  onMarkAllRead: () => void;
+  onRefresh: () => void;
+  onToggleArchived: () => void;
+  onCollapseAll: () => void;
+  onExpandAll: () => void;
 }) {
   const { t } = useTranslation();
 
@@ -2192,23 +2634,32 @@ function SidebarMoreMenu(props: {
     return null;
   }
 
-  const overlayStyle = resolveSidebarMenuOverlayStyle(
-    props.anchor,
+  const overlayStyle = resolveSidebarContextMenuOverlayStyle(
+    { kind: "anchor", anchor: props.anchor },
     { width: window.innerWidth, height: window.innerHeight },
-    sidebarMoreMenuSize
+    taskListActionsMenuSize
   );
   const menu = (
     <div
-      className="fixed w-32 rounded-menu border border-border-stone/40 bg-background-paper shadow-lg p-1"
+      className="app-frame-sidebar-menu app-frame-sidebar-menu--task-list"
       style={overlayStyle}
       onClick={(event) => event.stopPropagation()}
     >
-      <MenuButton icon={<RefreshCw size={12} />} label={t("appFrame.task.refresh")} onClick={props.onRefresh} />
-      <MenuButton icon={<ListChecks size={12} />} label={props.showPreviews ? t("appFrame.task.hidePreview") : t("appFrame.task.preview")} onClick={props.onTogglePreviews} />
+      <MenuButton
+        icon={props.showArchived ? <Check size={13} /> : <Archive size={13} />}
+        label={t("appFrame.project.showArchived")}
+        active={props.showArchived}
+        onClick={props.onToggleArchived}
+      />
+      <MenuButton
+        icon={<ListChecks size={13} />}
+        label={props.showPreviews ? t("appFrame.task.hidePreview") : t("appFrame.task.preview")}
+        onClick={props.onTogglePreviews}
+      />
       <div className="relative">
-        <MenuButton icon={<LayoutList size={12} />} label={t("appFrame.task.sort")} onClick={props.onToggleSortMenu} />
+        <MenuButton icon={<LayoutList size={13} />} label={t("appFrame.task.sort")} onClick={props.onToggleSortMenu} />
         {props.sortMenuOpen && (
-          <div className="absolute left-full top-0 ml-1 w-28 rounded-menu border border-border-stone/40 bg-background-paper shadow-lg p-1">
+          <div className="app-frame-sidebar-menu app-frame-sidebar-menu--nested app-frame-sidebar-menu--sm">
             {taskSortOptions.map((option) => (
               <MenuButton
                 key={option.value}
@@ -2220,11 +2671,27 @@ function SidebarMoreMenu(props: {
           </div>
         )}
       </div>
+      <div className="app-frame-sidebar-menu__divider" role="separator" />
       <MenuButton
-        icon={<Archive size={12} />}
-        label={props.showArchived ? t("appFrame.task.showAll" as MessageKey) : t("appFrame.task.showArchived" as MessageKey)}
-        active={props.showArchived}
-        onClick={props.onToggleArchived}
+        icon={<CheckCheck size={13} />}
+        label={t("appFrame.project.markAllRead")}
+        onClick={props.onMarkAllRead}
+      />
+      <MenuButton
+        icon={<RefreshCw size={13} />}
+        label={t("appFrame.task.refresh")}
+        onClick={props.onRefresh}
+      />
+      <div className="app-frame-sidebar-menu__divider" role="separator" />
+      <MenuButton
+        icon={<ChevronsDownUp size={13} />}
+        label={t("appFrame.project.collapseAll")}
+        onClick={props.onCollapseAll}
+      />
+      <MenuButton
+        icon={<ChevronsUpDown size={13} />}
+        label={t("appFrame.project.expandAll")}
+        onClick={props.onExpandAll}
       />
     </div>
   );
@@ -2250,15 +2717,15 @@ function TaskContextMenu(props: {
   if (typeof document === "undefined" || typeof window === "undefined") {
     return null;
   }
-  const placement = resolveSidebarContextMenuPlacement(
-    props.menu,
+  const overlayStyle = resolveSidebarContextMenuOverlayStyle(
+    { kind: "point", x: props.menu.x, y: props.menu.y },
     { width: window.innerWidth, height: window.innerHeight },
     taskContextMenuSize
   );
   const menu = (
     <div
-      className="fixed z-50 w-36 rounded-menu border border-border-stone/40 bg-background-paper shadow-lg p-1"
-      style={placement}
+      className="app-frame-sidebar-menu app-frame-sidebar-menu--md"
+      style={overlayStyle}
       onClick={(event) => event.stopPropagation()}
     >
       {task.archived ? (
@@ -2284,7 +2751,6 @@ function ProjectContextMenu(props: {
   archiveTaskCount: number;
   onPin: (project: MemmyAgentProject) => void;
   onReveal: (project: MemmyAgentProject) => void;
-  onRename: (project: MemmyAgentProject) => void;
   onMarkRead: (project: MemmyAgentProject) => void;
   onArchive: (project: MemmyAgentProject) => void;
   onRemove: (project: MemmyAgentProject) => void;
@@ -2300,45 +2766,40 @@ function ProjectContextMenu(props: {
   if (typeof document === "undefined" || typeof window === "undefined") {
     return null;
   }
-  const placement = resolveSidebarContextMenuPlacement(
-    props.menu,
+  const overlayStyle = resolveSidebarContextMenuOverlayStyle(
+    props.menu.placement,
     { width: window.innerWidth, height: window.innerHeight },
     projectContextMenuSize
   );
   const menu = (
     <div
-      className="fixed z-50 w-44 rounded-menu border border-border-stone/40 bg-background-paper shadow-lg p-1"
-      style={placement}
+      className="app-frame-sidebar-menu app-frame-sidebar-menu--project"
+      style={overlayStyle}
       onClick={(event) => event.stopPropagation()}
     >
       <MenuButton
-        icon={<Pin size={12} />}
+        icon={<Pin size={13} />}
         label={project.pinned ? t("appFrame.project.unpin") : t("appFrame.project.pin")}
         onClick={() => run(() => props.onPin(project))}
       />
       <MenuButton
-        icon={<Folder size={12} />}
+        icon={<Folder size={13} />}
         label={t("appFrame.project.reveal")}
         onClick={() => run(() => props.onReveal(project))}
       />
       <MenuButton
-        icon={<Pencil size={12} />}
-        label={t("appFrame.project.rename")}
-        onClick={() => run(() => props.onRename(project))}
-      />
-      <MenuButton
-        icon={<CheckCheck size={12} />}
+        icon={<CheckCheck size={13} />}
         label={t("appFrame.project.markRead")}
         onClick={() => run(() => props.onMarkRead(project))}
       />
       <MenuButton
-        icon={<Archive size={12} />}
+        icon={<Archive size={13} />}
         label={t("appFrame.project.archiveTasks")}
         disabled={props.archiveTaskCount === 0}
         onClick={() => run(() => props.onArchive(project))}
       />
       <MenuButton
-        icon={<Trash2 size={12} />}
+        icon={<Trash2 size={13} />}
         label={t("appFrame.project.remove")}
         danger
         onClick={() => run(() => props.onRemove(project))}
@@ -2356,22 +2817,22 @@ function MenuButton(props: {
   disabled?: boolean;
   onClick: () => void;
 }) {
-  const colorClass = props.disabled
-    ? "cursor-not-allowed text-text-ink/30"
+  const toneClass = props.disabled
+    ? "app-frame-sidebar-menu__item--disabled"
     : props.danger
-      ? "cursor-pointer text-status-error hover:bg-status-error/10"
+      ? "app-frame-sidebar-menu__item--danger"
       : props.active
-        ? "cursor-pointer text-action-sky bg-action-sky/10"
-        : "cursor-pointer text-text-ink/65 hover:bg-canvas-oat/60";
+        ? "app-frame-sidebar-menu__item--active"
+        : "";
   return (
     <button
       type="button"
       disabled={props.disabled}
       onClick={props.onClick}
-      className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-input text-left text-xs ${colorClass}`}
+      className={`app-frame-sidebar-menu__item ${toneClass}`.trim()}
     >
-      {props.icon}
-      <span className="truncate">{props.label}</span>
+      {props.icon ? <span className="app-frame-sidebar-menu__item-icon">{props.icon}</span> : null}
+      <span className="app-frame-sidebar-menu__item-label">{props.label}</span>
     </button>
   );
 }

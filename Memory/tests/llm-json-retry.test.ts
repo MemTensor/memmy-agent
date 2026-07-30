@@ -95,6 +95,39 @@ describe("memory LLM JSON length retry", () => {
     expect(requestBodies(fetchMock).map((body) => body.max_tokens)).toEqual([4096, 4096]);
   });
 
+  it("returns a summary budget error when reasoning exists without final content", async () => {
+    const fetchMock = sequenceFetch([
+      openAiMessageResponse({
+        content: null,
+        reasoning_content: "The model spent its output budget reasoning."
+      }, "length")
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = createLlmClient(llmConfig({ malformedRetries: 1 }));
+    await expect(client.completeJson(
+      [{ role: "user", content: "generate" }],
+      { operation: "capture.summarize" }
+    )).rejects.toThrow("Reasoning exhausted the summary output token budget");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the standard missing-content error when reasoning is also absent", async () => {
+    const fetchMock = sequenceFetch([
+      openAiMessageResponse({ content: null }, "length")
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = createLlmClient(llmConfig({ malformedRetries: 1 }));
+    await expect(client.completeJson(
+      [{ role: "user", content: "generate" }],
+      { operation: "capture.summarize" }
+    )).rejects.toThrow("openai_compatible response missing choices[0].message.content");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("logs truncation recovery with timestamps and token budgets", async () => {
     process.env.MEMMY_LOG_LEVEL = "info";
     const stdout: string[] = [];
@@ -178,9 +211,16 @@ function llmConfig(overrides: Partial<LlmConfig> = {}): LlmConfig {
 }
 
 function openAiResponse(content: string, finishReason?: string): Response {
+  return openAiMessageResponse({ content }, finishReason);
+}
+
+function openAiMessageResponse(
+  message: Record<string, unknown>,
+  finishReason?: string
+): Response {
   return new Response(JSON.stringify({
     choices: [{
-      message: { content },
+      message,
       ...(finishReason ? { finish_reason: finishReason } : {})
     }]
   }), {
