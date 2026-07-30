@@ -522,7 +522,7 @@ export type PromotionInvitation = z.infer<typeof PromotionInvitationSchema>;
 export const PromotionFlagsSchema = z.object({
     loginBanner: z.boolean(),
     improvementGift: z.boolean(),
-    improvementGiftRewardTokens: z.number().int().nonnegative(),
+    improvementGiftRewardTokens: z.number().int().nonnegative().default(0),
     applyMore: z.boolean(),
     agentChatTokenTotal: z.number().int().nonnegative(),
     invitation: PromotionInvitationSchema.optional()
