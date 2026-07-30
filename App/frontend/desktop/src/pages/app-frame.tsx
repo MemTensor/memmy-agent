@@ -435,9 +435,12 @@ export function AppFrame(props: AppFrameProps) {
       }
       // Portal menus live under document.body; ignore presses inside them so item
       // onClick can run (a blanket document click would unmount first).
+      // Inline archive confirm lives in the task row (not a portal); pointerdown
+      // must not clear archiveConfirmSessionKey before its click handler runs.
       if (
         target.closest(".app-frame-sidebar-menu")
         || target.closest(".app-frame-workspace-picker-menu")
+        || target.closest(".app-frame-task-row--confirming")
       ) {
         return;
       }
