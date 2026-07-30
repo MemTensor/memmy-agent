@@ -8099,11 +8099,11 @@ input[type="checkbox"].check-sky:checked::after {
   flex-shrink: 0;
   align-items: center;
   justify-content: center;
-  padding: 0 10px;
-  border: 0;
+  padding: 0 9px;
+  border: 1px solid var(--color-status-error);
   border-radius: var(--radius-input);
-  background: var(--color-status-error);
-  color: white;
+  background: transparent;
+  color: var(--color-status-error);
   font-family: var(--font-sans);
   font-size: var(--codex-text-xs);
   font-weight: 500;
@@ -8111,11 +8111,12 @@ input[type="checkbox"].check-sky:checked::after {
   letter-spacing: 0;
   cursor: pointer;
   transition:
-    background-color var(--duration-fast);
+    background-color var(--duration-fast),
+    color var(--duration-fast);
 }
 
 .app-frame-task-confirm:hover {
-  background: color-mix(in srgb, var(--color-status-error) 85%, black);
+  background: color-mix(in srgb, var(--color-status-error) 10%, transparent);
 }
 
 .app-frame-task-confirm:focus-visible {
