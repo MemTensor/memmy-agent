@@ -237,7 +237,7 @@ describe("AppFrame", () => {
 
   it("positions the task action menu as a top-level viewport overlay", () => {
     const overlayStyle = resolveSidebarMenuOverlayStyle(
-      { right: 188, bottom: 424 },
+      { left: 196, right: 188, bottom: 424 },
       { width: 512, height: 768 },
       { width: 128, height: 128, margin: 8, gap: 4 }
     );
@@ -720,6 +720,7 @@ describe("AppFrame", () => {
           onPin={() => undefined}
           onRequestArchive={() => undefined}
           onConfirmArchive={() => undefined}
+          onCancelArchive={() => undefined}
         />
       </I18nProvider>
     );
@@ -731,6 +732,7 @@ describe("AppFrame", () => {
           onPin={() => undefined}
           onRequestArchive={() => undefined}
           onConfirmArchive={() => undefined}
+          onCancelArchive={() => undefined}
         />
       </I18nProvider>
     );
@@ -742,6 +744,7 @@ describe("AppFrame", () => {
           onPin={() => undefined}
           onRequestArchive={() => undefined}
           onConfirmArchive={() => undefined}
+          onCancelArchive={() => undefined}
         />
       </I18nProvider>
     );

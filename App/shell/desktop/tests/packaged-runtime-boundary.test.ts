@@ -234,6 +234,29 @@ describe("desktop packaged runtime boundaries", () => {
     }
   });
 
+  it("excludes dependency tests and docs from every desktop app archive", () => {
+    for (const configPath of [
+      electronBuilderPath,
+      unsignedElectronBuilderPath,
+      winElectronBuilderPath,
+      winUnsignedBuilderPath
+    ]) {
+      const config = parseYaml(readFileSync(configPath, "utf8")) as {
+        files?: string[];
+      };
+      const files = config.files ?? [];
+
+      expect(files).toContain("dist/**/*");
+      expect(files).toContain("!**/node_modules/**/{test,tests,__tests__,doc,docs,example,examples,coverage,.github}");
+      expect(files).toContain("!**/node_modules/**/{test,tests,__tests__,doc,docs,example,examples,coverage,.github}/**/*");
+      expect(files).toContain("!**/node_modules/**/*.{test,spec}.*");
+      expect(files).toContain(
+        "!**/node_modules/**/{README,README*.md,README*.mdown,README*.markdown,README*.rst,README*.txt,CHANGELOG,CHANGELOG*.md,CHANGELOG*.mdown,CHANGELOG*.markdown,CHANGELOG*.rst,CHANGELOG*.txt,CONTRIBUTING,CONTRIBUTING*.md,CONTRIBUTING*.mdown,CONTRIBUTING*.markdown,CONTRIBUTING*.rst,CONTRIBUTING*.txt,CODE_OF_CONDUCT,CODE_OF_CONDUCT*.md,CODE_OF_CONDUCT*.mdown,CODE_OF_CONDUCT*.markdown,CODE_OF_CONDUCT*.rst,CODE_OF_CONDUCT*.txt,SECURITY,SECURITY*.md,SECURITY*.mdown,SECURITY*.markdown,SECURITY*.rst,SECURITY*.txt}"
+      );
+      expect(files).not.toContain("!**/node_modules/**/*.md");
+    }
+  });
+
   it("unpacks the sqlite-vec native extension in every desktop package variant", () => {
     for (const configPath of [
       electronBuilderPath,
@@ -1017,6 +1040,29 @@ describe("desktop packaged runtime boundaries", () => {
     expect(winSource).toContain("win-unpacked/resources/app.asar.unpacked/dist/runtime");
     expect(winSource).toContain("conpty/OpenConsole.exe");
     expect(winSource).toContain("sqlite-vec-windows-x64/vec0.*");
+  });
+
+  it("prunes third-party package docs and tests from macOS runtime before packaging", () => {
+    const source = readFileSync(packageMacDmgPath, "utf8");
+
+    expect(source).toContain("prune_node_modules_non_runtime_files");
+    expect(source).toContain('prune_node_modules_non_runtime_files "$RUNTIME_DIR"');
+    expect(source).toContain("-name tests");
+    expect(source).toContain("-name docs");
+    expect(source).toContain('-iname "README*.md"');
+    expect(source).toContain('-iname "README*.mdown"');
+    expect(source).toContain('-iname "CHANGELOG*.md"');
+    expect(source).toContain('-iname "SECURITY*.md"');
+    expect(source).toContain('-iname "*.test.js"');
+    expect(source).toContain('-iname "*.test.ts"');
+    expect(source).toContain('! \\( \\');
+    expect(source).toContain('-iname "LICENSE*"');
+    expect(source).toContain('-iname "NOTICE*"');
+    expect(source).toContain('rm -f "$RUNTIME_DIR/memmy-agent/dist/skills/README.md"');
+
+    expect(source.indexOf('prune_node_modules_non_runtime_files "$RUNTIME_DIR"')).toBeLessThan(
+      source.indexOf("npx electron-builder"),
+    );
   });
 
   it("sets an explicit edition in macOS package wrappers", () => {

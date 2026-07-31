@@ -242,7 +242,6 @@ function PickerHarness(props: {
         projects={projects}
         registryState={props.registryState ?? "ready"}
         disabled={false}
-        canChooseOtherFolder
         onToggle={() => setOpen((current) => !current)}
         onClose={() => setOpen(false)}
         onSelect={(nextTarget) => {

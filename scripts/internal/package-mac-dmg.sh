@@ -431,6 +431,97 @@ prune_onnxruntime_native_artifacts() {
   esac
 }
 
+prune_node_modules_non_runtime_files() {
+  local runtime_root="$1"
+
+  if [ ! -d "$runtime_root" ]; then
+    return
+  fi
+
+  local modules_dir
+  while IFS= read -r modules_dir; do
+    if [ ! -d "$modules_dir" ]; then
+      continue
+    fi
+
+    local disposable_list
+    disposable_list="$(mktemp)"
+    find "$modules_dir" -depth -type d \( \
+        -name test -o \
+        -name tests -o \
+        -name __tests__ -o \
+        -name doc -o \
+        -name docs -o \
+        -name example -o \
+        -name examples -o \
+        -name coverage -o \
+        -name .github \
+      \) > "$disposable_list"
+
+    local disposable_dir
+    while IFS= read -r disposable_dir; do
+      rm -rf "$disposable_dir"
+    done < "$disposable_list"
+    rm -f "$disposable_list"
+
+    if [ ! -d "$modules_dir" ]; then
+      continue
+    fi
+
+    find "$modules_dir" -type f \( \
+      -iname "README" -o \
+      -iname "README*.md" -o \
+      -iname "README*.mdown" -o \
+      -iname "README*.markdown" -o \
+      -iname "README*.rst" -o \
+      -iname "README*.txt" -o \
+      -iname "CHANGELOG" -o \
+      -iname "CHANGELOG*.md" -o \
+      -iname "CHANGELOG*.mdown" -o \
+      -iname "CHANGELOG*.markdown" -o \
+      -iname "CHANGELOG*.rst" -o \
+      -iname "CHANGELOG*.txt" -o \
+      -iname "CONTRIBUTING" -o \
+      -iname "CONTRIBUTING*.md" -o \
+      -iname "CONTRIBUTING*.mdown" -o \
+      -iname "CONTRIBUTING*.markdown" -o \
+      -iname "CONTRIBUTING*.rst" -o \
+      -iname "CONTRIBUTING*.txt" -o \
+      -iname "CODE_OF_CONDUCT" -o \
+      -iname "CODE_OF_CONDUCT*.md" -o \
+      -iname "CODE_OF_CONDUCT*.mdown" -o \
+      -iname "CODE_OF_CONDUCT*.markdown" -o \
+      -iname "CODE_OF_CONDUCT*.rst" -o \
+      -iname "CODE_OF_CONDUCT*.txt" -o \
+      -iname "SECURITY" -o \
+      -iname "SECURITY*.md" -o \
+      -iname "SECURITY*.mdown" -o \
+      -iname "SECURITY*.markdown" -o \
+      -iname "SECURITY*.rst" -o \
+      -iname "SECURITY*.txt" \
+    \) ! \( \
+      -iname "LICENSE*" -o \
+      -iname "NOTICE*" -o \
+      -iname "COPYING*" \
+    \) -delete
+
+    find "$modules_dir" -type f \( \
+      -iname "*.test.js" -o \
+      -iname "*.test.cjs" -o \
+      -iname "*.test.mjs" -o \
+      -iname "*.test.ts" -o \
+      -iname "*.test.tsx" -o \
+      -iname "*.spec.js" -o \
+      -iname "*.spec.cjs" -o \
+      -iname "*.spec.mjs" -o \
+      -iname "*.spec.ts" -o \
+      -iname "*.spec.tsx" -o \
+      -iname "test.js" -o \
+      -iname "tests.json" \
+    \) -delete
+  done < <(find "$runtime_root" -type d -name node_modules)
+}
+
 require_packaged_runtime_file() {
   local required_file="$1"
 
@@ -502,6 +593,8 @@ prune_mac_runtime_artifacts() {
 
   echo "Pruning macOS runtime artifacts for darwin-$target_cpu."
   find "$RUNTIME_DIR" -type f -name "*.map" -delete
+  prune_node_modules_non_runtime_files "$RUNTIME_DIR"
+  rm -f "$RUNTIME_DIR/memmy-agent/dist/skills/README.md"
 
   while IFS= read -r module_dir; do
     prune_better_sqlite3_build_artifacts "$module_dir"
