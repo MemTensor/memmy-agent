@@ -24,6 +24,8 @@ interface ChannelCredentialField {
   secret?: boolean;
 }
 
+type FeishuSetupMethod = "scan" | "manual";
+
 const CHANNEL_CREDENTIAL_FIELDS: Partial<Record<ChannelProvider, ChannelCredentialField[]>> = {
   feishu: [
     { key: "appId", labelKey: "tools.channel.appId" },
@@ -59,7 +61,7 @@ const FEISHU_FORM_PERMISSION_NOTE_ITEMS: ReadonlyArray<{
   { scopeKey: "tools.channel.feishuPermissionNoteScope3", descKey: "tools.channel.feishuPermissionNoteDesc3" }
 ];
 
-const QR_CHANNELS: ChannelProvider[] = ["wechat"];
+const QR_CHANNELS: ChannelProvider[] = ["wechat", "feishu"];
 
 const LOCAL_CHANNELS: ChannelProvider[] = ["imessage"];
 
@@ -107,6 +109,7 @@ export function ConnectChannelModal(props: ConnectChannelModalProps) {
   const [activeConnection, setActiveConnection] = useState<IntegrationConnection | undefined>(props.connection);
   const [connectResponse, setConnectResponse] = useState<ConnectChannelResponse | undefined>(props.forcedConnectResponse);
   const [credentials, setCredentials] = useState<Record<string, string>>({});
+  const [feishuSetupMethod, setFeishuSetupMethod] = useState<FeishuSetupMethod>("scan");
   const [errorMessage, setErrorMessage] = useState("");
 
   useEffect(() => {
@@ -140,6 +143,12 @@ export function ConnectChannelModal(props: ConnectChannelModalProps) {
   }, [props.channel?.slug]);
 
   useEffect(() => {
+    if (props.open) {
+      setFeishuSetupMethod("scan");
+    }
+  }, [props.open, props.channel?.slug]);
+
+  useEffect(() => {
     if (!props.open) {
       return undefined;
     }
@@ -164,7 +173,9 @@ export function ConnectChannelModal(props: ConnectChannelModalProps) {
       return;
     }
 
-    const credentialFields = CHANNEL_CREDENTIAL_FIELDS[provider];
+    const credentialFields = provider === "feishu" && feishuSetupMethod === "scan"
+      ? undefined
+      : CHANNEL_CREDENTIAL_FIELDS[provider];
     if (credentialFields && credentialFields.some((field) => !(credentials[field.key] ?? "").trim())) {
       setErrorMessage(t("tools.channel.formRequired"));
       setPhase("error");
@@ -188,7 +199,7 @@ export function ConnectChannelModal(props: ConnectChannelModalProps) {
       setErrorMessage(toErrorMessage(error));
       setPhase("error");
     }
-  }, [credentials, props, provider, t]);
+  }, [credentials, feishuSetupMethod, props, provider, t]);
 
   const handlePoll = useCallback(async () => {
     if (!provider || !connectResponse?.pollToken) {
@@ -287,9 +298,11 @@ export function ConnectChannelModal(props: ConnectChannelModalProps) {
             channel: props.channel,
             connectResponse,
             credentials,
+            feishuSetupMethod,
             errorMessage,
             lastError: activeConnection?.lastError ?? null,
             onCredentialChange: (key, value) => setCredentials((prev) => ({ ...prev, [key]: value })),
+            onFeishuSetupMethodChange: setFeishuSetupMethod,
             onConnect: handleConnect,
             onPoll: handlePoll,
             onDisconnect: handleDisconnect,
@@ -467,9 +480,11 @@ function renderChannelPhaseBody(input: {
   channel: IntegrationMeta;
   connectResponse?: ConnectChannelResponse;
   credentials: Record<string, string>;
+  feishuSetupMethod: FeishuSetupMethod;
   errorMessage: string;
   lastError?: string | null;
   onCredentialChange: (key: string, value: string) => void;
+  onFeishuSetupMethodChange: (method: FeishuSetupMethod) => void;
   onConnect: () => void;
   onPoll: () => void;
   onDisconnect: () => void;
@@ -518,7 +533,11 @@ function renderChannelPhaseBody(input: {
       <>
         <div className="flex items-center gap-2 text-sm text-stone-600">
           <span className="w-2 h-2 rounded-full bg-amber-300" />
-          <span>{input.t("tools.channel.pendingQr", { name: input.channel.name })}</span>
+          <span>
+            {input.provider === "feishu"
+              ? input.t("tools.channel.feishuQrHint")
+              : input.t("tools.channel.pendingQr", { name: input.channel.name })}
+          </span>
         </div>
         <QrCodePreview channel={input.channel} qrCodeDataUrl={input.connectResponse?.qrCodeDataUrl} />
         <button
@@ -595,6 +614,27 @@ function renderChannelPhaseBody(input: {
   // or a QR-code channel (no input, just shows a description + connect button, and transitions to pendingQr on connect).
   const credentialFields = CHANNEL_CREDENTIAL_FIELDS[input.provider];
   const bodyKey = CHANNEL_FORM_BODY_KEY[input.provider];
+  if (input.provider === "feishu" && input.feishuSetupMethod === "scan") {
+    return (
+      <>
+        <p className="text-sm font-normal text-stone-600">{input.t("tools.channel.feishuScanBody")}</p>
+        <button
+          type="button"
+          className="w-full rounded-xl bg-action-sky text-white text-sm font-normal py-2.5 hover:bg-action-sky-hover transition-colors"
+          onClick={input.onConnect}
+        >
+          {input.t("tools.channel.feishuScanConnect")}
+        </button>
+        <button
+          type="button"
+          className="w-full text-xs font-medium text-stone-500 py-1 hover:text-action-sky transition-colors"
+          onClick={() => input.onFeishuSetupMethodChange("manual")}
+        >
+          {input.t("tools.channel.feishuUseManual")}
+        </button>
+      </>
+    );
+  }
   return (
     <>
       {bodyKey ? <p className="text-sm font-normal text-stone-600">{input.t(bodyKey)}</p> : null}
@@ -642,6 +682,15 @@ function renderChannelPhaseBody(input: {
       >
         {input.t("tools.modal.connect")} {input.channel.name}
       </button>
+      {input.provider === "feishu" ? (
+        <button
+          type="button"
+          className="w-full text-xs font-medium text-stone-500 py-1 hover:text-action-sky transition-colors"
+          onClick={() => input.onFeishuSetupMethodChange("scan")}
+        >
+          {input.t("tools.channel.feishuUseScan")}
+        </button>
+      ) : null}
     </>
   );
 }

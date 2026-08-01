@@ -106,15 +106,7 @@ interface FormChannelConnectConfig {
 const FORM_CHANNEL_CONNECT: Partial<Record<ChannelProvider, FormChannelConnectConfig>> = {
   feishu: {
     runtimeChannel: "feishu",
-    buildRuntimePatch: (input) => ({
-      enabled: true,
-      appId: requireNonEmptyString(input.appId ?? "", "appId"),
-      appSecret: requireNonEmptyString(input.appSecret ?? "", "appSecret"),
-      domain: "feishu",
-      streaming: true,
-      groupPolicy: "mention",
-      allowFrom: ["*"]
-    })
+    buildRuntimePatch: (input) => buildFeishuRuntimePatch(input)
   },
   dingtalk: {
     runtimeChannel: "dingtalk",
@@ -187,6 +179,11 @@ export function createChannelService(options: CreateChannelServiceOptions): Chan
         return parseConnectResponse(provider, response.status, response);
       }
 
+      if (provider === "feishu" && !input.appId && !input.appSecret) {
+        const response = await options.memmyAgentAdminClient.startFeishuLogin();
+        return parseConnectResponse(provider, response.status, response);
+      }
+
       const formConnect = FORM_CHANNEL_CONNECT[provider];
       if (formConnect) {
         await options.memmyConfigWriter.patchChannelConfig(formConnect.runtimeChannel, formConnect.buildRuntimePatch(input));
@@ -205,11 +202,27 @@ export function createChannelService(options: CreateChannelServiceOptions): Chan
     },
 
     async pollConnect(provider, pollToken) {
+      const normalizedPollToken = requireNonEmptyString(pollToken, "pollToken");
+      if (provider === "feishu") {
+        const response = await options.memmyAgentAdminClient.pollFeishuLogin(normalizedPollToken);
+        if (response.status !== "connected") {
+          return parseConnectResponse(provider, response.status, response);
+        }
+        const appId = requireNonEmptyString(response.appId ?? "", "appId");
+        const appSecret = requireNonEmptyString(response.appSecret ?? "", "appSecret");
+        await options.memmyConfigWriter.patchChannelConfig(
+          "feishu",
+          buildFeishuRuntimePatch({ appId, appSecret }, response.domain)
+        );
+        const result = await options.memmyAgentAdminClient.configureChannel("feishu");
+        return parseConnectResponse(provider, result.status);
+      }
+
       if (provider !== "wechat") {
         return parseConnectResponse(provider, "unsupported");
       }
 
-      const response = await options.memmyAgentAdminClient.pollWeixinLogin(requireNonEmptyString(pollToken, "pollToken"));
+      const response = await options.memmyAgentAdminClient.pollWeixinLogin(normalizedPollToken);
       return parseConnectResponse(provider, response.status, response);
     },
 
@@ -222,6 +235,21 @@ export function createChannelService(options: CreateChannelServiceOptions): Chan
 
       return OkResponseSchema.parse({ ok: true });
     }
+  };
+}
+
+function buildFeishuRuntimePatch(
+  input: ConnectChannelInput,
+  domain: "feishu" | "lark" = "feishu"
+): Record<string, unknown> {
+  return {
+    enabled: true,
+    appId: requireNonEmptyString(input.appId ?? "", "appId"),
+    appSecret: requireNonEmptyString(input.appSecret ?? "", "appSecret"),
+    domain,
+    streaming: true,
+    groupPolicy: "mention",
+    allowFrom: ["*"]
   };
 }
 

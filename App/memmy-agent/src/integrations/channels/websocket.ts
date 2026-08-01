@@ -1286,6 +1286,10 @@ export class WebSocketChannel extends BaseChannel {
           return httpJsonResponse(await this.channelAdmin.startWeixinLogin());
         case "weixin-login-poll":
           return httpJsonResponse(await this.channelAdmin.pollWeixinLogin(String(value ?? "")));
+        case "feishu-login-start":
+          return httpJsonResponse(await this.channelAdmin.startFeishuLogin());
+        case "feishu-login-poll":
+          return httpJsonResponse(await this.channelAdmin.pollFeishuLogin(String(value ?? "")));
         default:
           return httpError(404, "Not Found");
       }
@@ -1976,6 +1980,9 @@ export class WebSocketChannel extends BaseChannel {
     if (got === "/api/channels/weixin/login/start") return this.handleChannelAdmin(request, "weixin-login-start");
     channelAdminMatch = got.match(/^\/api\/channels\/weixin\/login\/([^/]+)$/);
     if (channelAdminMatch) return this.handleChannelAdmin(request, "weixin-login-poll", decodeURIComponent(channelAdminMatch[1]));
+    if (got === "/api/channels/feishu/login/start") return this.handleChannelAdmin(request, "feishu-login-start");
+    channelAdminMatch = got.match(/^\/api\/channels\/feishu\/login\/([^/]+)$/);
+    if (channelAdminMatch) return this.handleChannelAdmin(request, "feishu-login-poll", decodeURIComponent(channelAdminMatch[1]));
     if (got === "/api/sessions") return this.handleSessionsList(request);
     if (got === "/api/projects") return this.handleProjectCreate(request);
     if (got === "/api/settings") return this.handleSettings(request);

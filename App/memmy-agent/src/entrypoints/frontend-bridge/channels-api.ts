@@ -1,5 +1,9 @@
 import { ChannelManager } from "../../integrations/channels/manager.js";
 import { loadConfig } from "../../config/loader.js";
+import {
+  pollFeishuRegistration,
+  startFeishuRegistration,
+} from "../../integrations/channels/feishu-registration.js";
 
 /** Definition for imessage enabled. */
 const IMESSAGE_ENABLED = process.platform === "darwin";
@@ -37,6 +41,8 @@ export interface ChannelAdminApi {
   stop(runtimeChannel: string): Promise<{ status: ChannelStatus; running: boolean }>;
   startWeixinLogin(): Promise<Record<string, any>>;
   pollWeixinLogin(pollToken: string): Promise<Record<string, any>>;
+  startFeishuLogin(): Promise<Record<string, any>>;
+  pollFeishuLogin(pollToken: string): Promise<Record<string, any>>;
 }
 
 const CHANNEL_DEFINITIONS: ChannelDefinition[] = [
@@ -187,6 +193,14 @@ export function createChannelAdmin(
         void manager.startChannel("weixin", channel);
       }
       return result;
+    },
+
+    async startFeishuLogin() {
+      return startFeishuRegistration();
+    },
+
+    async pollFeishuLogin(pollToken) {
+      return pollFeishuRegistration(pollToken);
     },
   };
 }
