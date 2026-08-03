@@ -42,6 +42,7 @@ describe("model config tester", () => {
     expect(JSON.parse(String(calls[0]?.init.body))).toMatchObject({
       model: "gpt-5.5",
       max_tokens: 1,
+      stream: false,
       messages: [{ role: "user", content: "ping" }]
     });
     expect(JSON.stringify(result)).not.toContain("sk-test-secret");

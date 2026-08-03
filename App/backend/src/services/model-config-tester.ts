@@ -355,6 +355,7 @@ function sendOpenAiCompatibleChatProbe(
     body: JSON.stringify({
       model: input.modelId,
       messages: [{ role: "user", content: "ping" }],
+      stream: false,
       // Reasoning tokens consume the output budget first, so the fallback needs enough budget to emit content.
       [tokenLimitParam]: tokenLimitParam === "max_completion_tokens" ? 128 : input.provider === "baidu" ? 64 : 1
     }),
