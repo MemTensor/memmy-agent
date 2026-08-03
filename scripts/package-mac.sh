@@ -180,7 +180,7 @@ case "$SIGN" in
     ;;
 esac
 
-BASE_SCRIPT="$ROOT_DIR/scripts/internal/package-mac-$ARCH-$SIGN-base.sh"
+BASE_SCRIPT="$ROOT_DIR/scripts/internal/mac/$SIGN-$ARCH.sh"
 if [ ! -f "$BASE_SCRIPT" ]; then
   echo "Missing macOS package base script: $BASE_SCRIPT" >&2
   exit 1

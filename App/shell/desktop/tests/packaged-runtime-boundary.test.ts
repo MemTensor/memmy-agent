@@ -7,15 +7,15 @@ const mainSourcePath = fileURLToPath(new URL("../src/main/main.ts", import.meta.
 const preloadSourcePath = fileURLToPath(new URL("../src/preload/preload.cts", import.meta.url));
 const runtimeServicesPath = fileURLToPath(new URL("../src/main/runtime-services.ts", import.meta.url));
 const devStartPath = fileURLToPath(new URL("../../../../scripts/dev-start.sh", import.meta.url));
-const devMemorySupervisorPath = fileURLToPath(new URL("../../../../scripts/internal/dev-memory-supervisor.mjs", import.meta.url));
+const devMemorySupervisorPath = fileURLToPath(new URL("../../../../scripts/internal/shared/dev-memory-supervisor.mjs", import.meta.url));
 const clearAllPath = fileURLToPath(new URL("../../../../scripts/clear-all.sh", import.meta.url));
 const packageMacPath = fileURLToPath(new URL("../../../../scripts/package-mac.sh", import.meta.url));
-const packageMacDmgPath = fileURLToPath(new URL("../../../../scripts/internal/package-mac-dmg.sh", import.meta.url));
+const packageMacDmgPath = fileURLToPath(new URL("../../../../scripts/internal/mac/build-dmg.sh", import.meta.url));
 const signedMacArm64PackagePath = fileURLToPath(
-  new URL("../../../../scripts/internal/package-mac-arm64-signed-base.sh", import.meta.url)
+  new URL("../../../../scripts/internal/mac/signed-arm64.sh", import.meta.url)
 );
 const packageWinPath = fileURLToPath(new URL("../../../../scripts/package-win.sh", import.meta.url));
-const packageWinX64Path = fileURLToPath(new URL("../../../../scripts/internal/package-win-x64.sh", import.meta.url));
+const packageWinX64Path = fileURLToPath(new URL("../../../../scripts/internal/win/build-nsis.sh", import.meta.url));
 const winUnsignedBuilderPath = fileURLToPath(new URL("../electron-builder.win.unsigned.yml", import.meta.url));
 const winUnsignedInstallerIncludePath = fileURLToPath(new URL("../build/installer-win-unsigned.nsh", import.meta.url));
 const desktopInterfacePath = fileURLToPath(new URL("../interface/src/index.ts", import.meta.url));
@@ -915,7 +915,7 @@ describe("desktop packaged runtime boundaries", () => {
       '"$MEMMY_RUNTIME_NODE_PATH" dist/main.js internal browser-prepare',
     );
     expect(source).toContain("env -u ELECTRON_RUN_AS_NODE npm run dev -w @memmy/desktop");
-    expect(source).toContain("node scripts/internal/dev-memory-supervisor.mjs");
+    expect(source).toContain("node scripts/internal/shared/dev-memory-supervisor.mjs");
     expect(supervisorSource).toContain('["run", "memory:dev"]');
     expect(supervisorSource).toContain("Memory dev process stopped");
     expect(source).toContain('pgrep -f "/Memmy.app/Contents/MacOS/Memmy"');
@@ -976,7 +976,7 @@ describe("desktop packaged runtime boundaries", () => {
   it("builds signed arm64 DMGs through the shared mac packaging script", () => {
     const source = readFileSync(signedMacArm64PackagePath, "utf8");
 
-    expect(source).toMatch(/bash "\$ROOT_DIR\/scripts\/internal\/package-mac-dmg\.sh" \\\s+--arm64 \\/);
+    expect(source).toMatch(/bash "\$ROOT_DIR\/scripts\/internal\/mac\/build-dmg\.sh" \\\s+--arm64 \\/);
     expect(source).not.toContain("npm run package:mac -- --arm64");
   });
 
@@ -992,7 +992,8 @@ describe("desktop packaged runtime boundaries", () => {
     expect(packageWinSource).toContain("export MEMMY_ACCOUNT_CHANNEL=email");
     expect(packageWinSource).toContain("export MEMMY_SKIP_CODESIGN=1");
     expect(packageWinSource).toContain("unset MEMMY_SKIP_CODESIGN");
-    expect(packageWinSource).toContain('scripts/internal/package-win-x64.sh');
+    expect(packageWinSource).toContain('BASE_SCRIPT="$ROOT_DIR/scripts/internal/win/$SIGN-$ARCH.sh"');
+    expect(packageWinSource).toContain('bash "$BASE_SCRIPT" "${PASSTHROUGH_ARGS[@]}"');
 
     expect(scripts["package:win:x64"]).toBe("bash scripts/package-win.sh --version $npm_package_version --arch x64 --edition cn --sign signed");
     expect(scripts["package:win:x64:unsigned"]).toBe("bash scripts/package-win.sh --version $npm_package_version --arch x64 --edition cn --sign unsigned");
@@ -1074,7 +1075,7 @@ describe("desktop packaged runtime boundaries", () => {
     expect(packageMacSource).toContain("export MEMMY_ACCOUNT_CHANNEL=email");
     expect(packageMacSource).toContain("export MEMMY_SKIP_CODESIGN=1");
     expect(packageMacSource).toContain("unset MEMMY_SKIP_CODESIGN");
-    expect(packageMacSource).toContain('BASE_SCRIPT="$ROOT_DIR/scripts/internal/package-mac-$ARCH-$SIGN-base.sh"');
+    expect(packageMacSource).toContain('BASE_SCRIPT="$ROOT_DIR/scripts/internal/mac/$SIGN-$ARCH.sh"');
     expect(packageMacSource).toContain('bash "$BASE_SCRIPT" "${PASSTHROUGH_ARGS[@]}"');
 
     expect(scripts["package:mac:arm64:cn:signed"]).toBe("bash scripts/package-mac.sh --version $npm_package_version --arch arm64 --edition cn --sign signed");

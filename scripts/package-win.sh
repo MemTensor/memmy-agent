@@ -157,9 +157,15 @@ case "$SIGN" in
     ;;
 esac
 
+BASE_SCRIPT="$ROOT_DIR/scripts/internal/win/$SIGN-$ARCH.sh"
+if [ ! -f "$BASE_SCRIPT" ]; then
+  echo "Missing Windows package base script: $BASE_SCRIPT" >&2
+  exit 1
+fi
+
 export MEMMY_DESKTOP_VERSION="$VERSION"
 if [ "${#PASSTHROUGH_ARGS[@]}" -gt 0 ]; then
-  bash "$ROOT_DIR/scripts/internal/package-win-x64.sh" "${PASSTHROUGH_ARGS[@]}"
+  bash "$BASE_SCRIPT" "${PASSTHROUGH_ARGS[@]}"
 else
-  bash "$ROOT_DIR/scripts/internal/package-win-x64.sh"
+  bash "$BASE_SCRIPT"
 fi

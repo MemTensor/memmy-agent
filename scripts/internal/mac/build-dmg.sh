@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 DESKTOP_DIR="$ROOT_DIR/App/shell/desktop"
 AGENT_DIR="$ROOT_DIR/App/memmy-agent"
 MEMORY_DIR="$ROOT_DIR/Memory"
@@ -736,7 +736,7 @@ verify_packaged_mac_unpacked_artifacts "$TARGET_CPU"
 LATEST_DMG="$(ls -t release/*.dmg 2>/dev/null | head -1 || true)"
 if [ -n "$LATEST_DMG" ]; then
   echo "Swapping oversized DMG background for resize tolerance..."
-  bash "$ROOT_DIR/scripts/internal/fix-dmg-window-bounds.sh" "$LATEST_DMG" "Memmy Installer" "$DESKTOP_DIR" || \
+  bash "$ROOT_DIR/scripts/internal/shared/fix-dmg-window-bounds.sh" "$LATEST_DMG" "Memmy Installer" "$DESKTOP_DIR" || \
     echo "Warning: could not swap DMG background — resize may show white edges."
 else
   echo "Packaging completed without a DMG artifact." >&2
