@@ -10,7 +10,7 @@ import {
   AgentGatewaySupervisor,
   preparePackagedBrowser,
   preparePackagedRuntimeConfig,
-  restartExternalMemoryService,
+  reconnectExternalMemoryService,
   spawnNodeService,
   startPackagedBrowserPreparation,
   syncBundledAgentSkills,
@@ -54,7 +54,7 @@ describe("packaged desktop runtime config", () => {
     await Promise.all(tempRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
   });
 
-  it("requests a supervised Memory shutdown and waits for the replacement service", async () => {
+  it("health-checks an externally owned Memory service without shutting it down", async () => {
     let shutdownRequests = 0;
     let activeServer: Server;
     let port = 0;
@@ -71,11 +71,6 @@ describe("packaged desktop runtime config", () => {
           shutdownRequests += 1;
           response.writeHead(200, { "content-type": "application/json" });
           response.end(JSON.stringify({ accepted: true }));
-          response.once("finish", () => {
-            activeServer.close();
-            activeServer.closeAllConnections();
-            setTimeout(() => void startServer(), 250);
-          });
           return;
         }
         response.writeHead(404);
@@ -98,12 +93,12 @@ describe("packaged desktop runtime config", () => {
     };
 
     await startServer();
-    await restartExternalMemoryService({
+    await reconnectExternalMemoryService({
       baseUrl: `http://127.0.0.1:${port}`,
       token: "memory-token"
     });
 
-    expect(shutdownRequests).toBe(1);
+    expect(shutdownRequests).toBe(0);
   });
 
   it("creates missing packaged runtime config under the shared ~/.memmy home", async () => {
@@ -123,6 +118,7 @@ describe("packaged desktop runtime config", () => {
       memoryBaseUrl: "http://127.0.0.1:18960",
       memoryListenHost: "127.0.0.1",
       memoryListenPort: 18960,
+      memoryOwnership: "managed",
       agentGatewayBaseUrl: "http://127.0.0.1:18980",
       agentGatewayBootstrapSecret: "stable-secret"
     });
@@ -157,12 +153,53 @@ describe("packaged desktop runtime config", () => {
           mode: "local",
           backend: "sqlite",
           sqlitePath: join(memmyHome, "memory-service", "memory.sqlite"),
-          endpoint: "http://127.0.0.1:18960"
+          endpoint: "http://127.0.0.1:18960",
+          runtime: "managed"
         }
       }
     });
     await expect(stat(join(memmyHome, "workspace"))).resolves.toBeTruthy();
     await expect(stat(join(memmyHome, "memory-service"))).resolves.toBeTruthy();
+  });
+
+  it("treats remote Memory as externally owned even when it uses loopback", async () => {
+    const memmyHome = await makeTempRoot();
+    const configPath = join(memmyHome, "config.yaml");
+    await writeFile(configPath, YAML.stringify({
+      memmyMemory: {
+        storage: {
+          runtime: "remote",
+          endpoint: "http://127.0.0.1:18960",
+          token: "docker-token"
+        }
+      }
+    }), "utf8");
+
+    const runtime = await preparePackagedRuntimeConfig({
+      env: { MEMMY_HOME: memmyHome },
+      secretFactory: () => "stable-secret"
+    });
+
+    expect(runtime).toMatchObject({
+      memoryBaseUrl: "http://127.0.0.1:18960",
+      memoryToken: "docker-token",
+      memoryOwnership: "remote"
+    });
+    await expect(stat(join(memmyHome, "workspace"))).resolves.toBeTruthy();
+    await expect(stat(join(memmyHome, "memory-service"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("rejects unknown Memory runtime ownership values", async () => {
+    const memmyHome = await makeTempRoot();
+    const configPath = join(memmyHome, "config.yaml");
+    await writeFile(configPath, YAML.stringify({
+      memmyMemory: { storage: { runtime: "docker-ish" } }
+    }), "utf8");
+
+    await expect(preparePackagedRuntimeConfig({
+      env: { MEMMY_HOME: memmyHome },
+      secretFactory: () => "stable-secret"
+    })).rejects.toThrow("memmyMemory.storage.runtime must be managed or remote");
   });
 
   it("preserves existing user model, memory, and websocket settings", async () => {

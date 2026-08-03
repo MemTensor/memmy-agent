@@ -1,0 +1,55 @@
+name: Windows Package
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches:
+      - actions/windows-package/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-package-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.15.0
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            App/memmy-agent/package-lock.json
+
+      - name: Build unsigned Windows x64 China installer
+        run: npm run package:win:x64:cn:unsigned
+
+      - name: Create SHA-256 checksum
+        run: |
+          installer="$(find App/shell/desktop/release -maxdepth 1 -type f -name 'Memmy-*-win32-x64-cn-unsigned.exe' -print -quit)"
+          test -n "$installer"
+          sha256sum "$installer" > "$installer.sha256"
+          ls -lh "$installer" "$installer.sha256"
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: memmy-windows-x64-cn-unsigned-${{ github.sha }}
+          path: |
+            App/shell/desktop/release/Memmy-*-win32-x64-cn-unsigned.exe
+            App/shell/desktop/release/Memmy-*-win32-x64-cn-unsigned.exe.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7

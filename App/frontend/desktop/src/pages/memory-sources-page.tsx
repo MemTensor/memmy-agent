@@ -91,6 +91,7 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
   const scanPercent = scanProgress && hasDeterminateScanProgress ? formatActiveScanPercent(scanProgress.current, scanProgress.total) : 0;
   const scannableSources = state.agentSources.items.filter((source) => source.available);
   const memoryServiceAddress = formatMemoryServiceAddress(clients?.runtimeConfig.memory?.baseUrl);
+  const remoteMemoryService = clients?.runtimeConfig.memory?.ownership === "remote";
 
   useEffect(() => {
     setMemoryServiceStatus((current) => current === "checking" ? memoryServiceStatusFromBootstrap(state.bootstrap?.health.memory) : current);
@@ -214,26 +215,44 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
     setMemoryServiceError("");
     void (async () => {
       try {
-        await restart();
+        const result = await restart();
         clearMemoryPanelCache();
 
         try {
           const health = await clients.memoryRuntime.health();
           if (health.ok && health.storage.ready) {
             setMemoryServiceStatus("ok");
-            setMemoryServiceMessage(t("memory.restartServiceDone"));
+            setMemoryServiceMessage(t(
+              result.action === "reconnected"
+                ? "memory.reconnectServiceDone"
+                : "memory.restartServiceDone"
+            ));
             return;
           }
 
           setMemoryServiceStatus("unavailable");
-          setMemoryServiceError(t("memory.restartServiceStillUnavailable"));
+          setMemoryServiceError(t(
+            remoteMemoryService
+              ? "memory.reconnectServiceStillUnavailable"
+              : "memory.restartServiceStillUnavailable"
+          ));
         } catch (error) {
           setMemoryServiceStatus("unavailable");
-          setMemoryServiceError(t("memory.restartServiceStillUnavailableWithReason", { reason: formatErrorMessage(error) }));
+          setMemoryServiceError(t(
+            remoteMemoryService
+              ? "memory.reconnectServiceStillUnavailableWithReason"
+              : "memory.restartServiceStillUnavailableWithReason",
+            { reason: formatErrorMessage(error) }
+          ));
         }
       } catch (error) {
         setMemoryServiceStatus("unavailable");
-        setMemoryServiceError(t("memory.restartServiceFailed", { reason: formatErrorMessage(error) }));
+        setMemoryServiceError(t(
+          remoteMemoryService
+            ? "memory.reconnectServiceFailed"
+            : "memory.restartServiceFailed",
+          { reason: formatErrorMessage(error) }
+        ));
       } finally {
         setMemoryServiceBusy(false);
       }
@@ -635,7 +654,11 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
             checkingLabel={t("common.loading")}
             value={memoryServiceAddress ?? t("memory.daemonAddressUnavailable")}
             description={t("memory.daemonDescription")}
-            actionLabel={t(memoryServiceBusy ? "memory.restartServiceBusy" : "memory.restartService")}
+            actionLabel={t(
+              remoteMemoryService
+                ? memoryServiceBusy ? "memory.reconnectServiceBusy" : "memory.reconnectService"
+                : memoryServiceBusy ? "memory.restartServiceBusy" : "memory.restartService"
+            )}
             actionTone="success"
             onAction={restartMemoryService}
             actionDisabled={!clients || memoryServiceBusy}

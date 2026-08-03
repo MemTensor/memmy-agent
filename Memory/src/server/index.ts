@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,6 +12,7 @@ import { listenMemoryHttpServer } from "./http.js";
 import { loadCloudServiceEnv } from "../cli/load-env.js";
 
 const logger = createMemoryLogger("server");
+const SERVER_INSTANCE_ID = randomUUID();
 
 export async function main(argv = process.argv.slice(2)): Promise<void> {
     loadCloudServiceEnv();
@@ -93,6 +95,7 @@ export function acquireSqliteServerLock(input: {
     mkdirSync(dirname(lockPath), { recursive: true });
     return acquireLockFile(lockPath, {
         pid: process.pid,
+        instanceId: SERVER_INSTANCE_ID,
         host: input.host,
         port: input.port,
         sqlitePath,
@@ -126,7 +129,8 @@ function acquireLockFile(lockPath: string, payload: Record<string, unknown>): Sq
                 throw error;
             }
             const existing = readServerLock(lockPath);
-            if (!existing || !isProcessAlive(existing.pid)) {
+            const staleReusedPid = existing?.pid === process.pid && existing.instanceId !== SERVER_INSTANCE_ID;
+            if (!existing || staleReusedPid || !isProcessAlive(existing.pid)) {
                 try {
                     unlinkSync(lockPath);
                 } catch (unlinkError) {
@@ -146,9 +150,19 @@ function acquireLockFile(lockPath: string, payload: Record<string, unknown>): Sq
     throw new Error(`failed to acquire Memory sqlite server lock: ${lockPath}`);
 }
 
-function readServerLock(lockPath: string): { pid?: unknown; host?: unknown; port?: unknown } | undefined {
+function readServerLock(lockPath: string): {
+    pid?: unknown;
+    instanceId?: unknown;
+    host?: unknown;
+    port?: unknown;
+} | undefined {
     try {
-        return JSON.parse(readFileSync(lockPath, "utf8")) as { pid?: unknown; host?: unknown; port?: unknown };
+        return JSON.parse(readFileSync(lockPath, "utf8")) as {
+            pid?: unknown;
+            instanceId?: unknown;
+            host?: unknown;
+            port?: unknown;
+        };
     } catch {
         return undefined;
     }

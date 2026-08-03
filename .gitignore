@@ -18,6 +18,7 @@ sessions/
 !.github/workflows/*.yml
 !.github/release-notes/
 !.github/release-notes/*.md
+!.dockerignore
 .env
 .env.*
 !.env.example

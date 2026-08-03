@@ -46,6 +46,37 @@ describe("memoryPanelHtml", () => {
     expect(harness.element("detailJson").textContent).toContain('"source": "second"');
     expect(harness.element("detailJson").textContent).not.toContain('"source": "first"');
   });
+
+  it("uses a fragment token for API requests without leaving it in the address bar", async () => {
+    const harness = createViewerHarness();
+    const stored = new Map<string, string>();
+    let replacedUrl = "";
+    runViewerScript(harness, {
+      window: {
+        location: {
+          hash: "#token=panel-token",
+          pathname: "/",
+          search: ""
+        }
+      },
+      sessionStorage: {
+        getItem: (key: string) => stored.get(key) ?? null,
+        setItem: (key: string, value: string) => stored.set(key, value)
+      },
+      history: {
+        replaceState: (_state: unknown, _title: string, url: string) => {
+          replacedUrl = url;
+        }
+      }
+    });
+    await flushPromises();
+
+    expect(stored.get("memmyMemoryToken")).toBe("panel-token");
+    expect(replacedUrl).toBe("/");
+    expect(harness.requests()).not.toHaveLength(0);
+    expect(harness.requests().every((request) => request.authorization === "Bearer panel-token")).toBe(true);
+    expect(harness.requests().every((request) => !request.path.includes("panel-token"))).toBe(true);
+  });
 });
 
 type FakeRow = FakeElement & {
@@ -55,7 +86,10 @@ type FakeRow = FakeElement & {
 
 type DetailResolver = (body: unknown) => void;
 
-function runViewerScript(harness: ReturnType<typeof createViewerHarness>): void {
+function runViewerScript(
+  harness: ReturnType<typeof createViewerHarness>,
+  browserContext: Record<string, unknown> = {}
+): void {
   const match = memoryPanelHtml().match(/<script>([\s\S]*)<\/script>/);
   const script = match?.[1];
   if (!script) {
@@ -66,7 +100,8 @@ function runViewerScript(harness: ReturnType<typeof createViewerHarness>): void 
     document: harness.document,
     fetch: harness.fetch,
     navigator: { clipboard: { writeText: async () => undefined } },
-    URLSearchParams
+    URLSearchParams,
+    ...browserContext
   });
   new Script(script).runInContext(context);
 }
@@ -74,6 +109,7 @@ function runViewerScript(harness: ReturnType<typeof createViewerHarness>): void 
 function createViewerHarness() {
   const elements = new Map<string, FakeElement>();
   const detailResolvers = new Map<string, DetailResolver>();
+  const requests: Array<{ path: string; authorization?: string }> = [];
   const ids = [
     "errorMessage",
     "stats",
@@ -121,7 +157,8 @@ function createViewerHarness() {
     }
   });
 
-  const fetch = async (path: string) => {
+  const fetch = async (path: string, options: { headers?: Record<string, string> } = {}) => {
+    requests.push({ path, authorization: options.headers?.authorization });
     if (path === "/api/v1/panel/overview") {
       return jsonResponse({ counts: { memories: 2, experiences: 0, worldModels: 0, skills: 0 } });
     }
@@ -174,6 +211,9 @@ function createViewerHarness() {
     },
     rows() {
       return memoryRows.childRows as FakeRow[];
+    },
+    requests() {
+      return requests;
     }
   };
 }

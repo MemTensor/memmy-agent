@@ -41,7 +41,7 @@ import {
 } from "./window-mode.js";
 import {
   preparePackagedRuntimeConfig,
-  restartExternalMemoryService,
+  reconnectExternalMemoryService,
   resolveAgentGatewayRuntimeConfig,
   startPackagedRuntimeServices,
   type PackagedRuntimeServices
@@ -96,7 +96,11 @@ let menuBarTray: Tray | null = null;
 const MENU_BAR_TRAY_GUID = "8B2A0C33-45C0-4C43-8F1C-77F7D4FDF2D4";
 let runtimeServices: PackagedRuntimeServices | null = null;
 let runtimeConfig: DesktopRuntimeConfig | null = null;
-let memoryServiceControl: { baseUrl: string; token: string } | null = null;
+let memoryServiceControl: {
+  baseUrl: string;
+  token: string;
+  ownership: "managed" | "remote";
+} | null = null;
 let memoryServiceRestart: Promise<DesktopMemoryServiceRestartResult> | null = null;
 let packagedRendererServer: PackagedRendererStaticServer | null = null;
 let packagedRendererBaseUrl: string | null = null;
@@ -639,7 +643,11 @@ function showPackagedStartupError(error: unknown): void {
  */
 async function startLocalApi(services: PackagedRuntimeServices | null): Promise<DesktopRuntimeConfig> {
   const databasePath = join(app.getPath("userData"), "app.sqlite");
-  let memoryControl: { baseUrl: string; token: string };
+  let memoryControl: {
+    baseUrl: string;
+    token: string;
+    ownership: "managed" | "remote";
+  };
   if (services) {
     process.env.MEMMY_CONFIG ??= services.memory.configPath;
     process.env.MEMMY_MEMORY_LAYER_URL = services.memory.baseUrl;
@@ -647,7 +655,8 @@ async function startLocalApi(services: PackagedRuntimeServices | null): Promise<
     process.env.MEMMY_MEMORY_DB_PATH = services.memory.databasePath;
     memoryControl = {
       baseUrl: services.memory.baseUrl,
-      token: services.memory.token
+      token: services.memory.token,
+      ownership: services.memory.ownership
     };
   } else {
     const memoryRuntime = await preparePackagedRuntimeConfig({
@@ -662,7 +671,8 @@ async function startLocalApi(services: PackagedRuntimeServices | null): Promise<
     process.env.MEMMY_MEMORY_DB_PATH ??= memoryRuntime.memoryDatabasePath;
     memoryControl = {
       baseUrl: memoryRuntime.memoryBaseUrl,
-      token: memoryRuntime.memoryToken
+      token: memoryRuntime.memoryToken,
+      ownership: memoryRuntime.memoryOwnership
     };
   }
   memoryServiceControl = memoryControl;
@@ -688,7 +698,8 @@ async function startLocalApi(services: PackagedRuntimeServices | null): Promise<
   return {
     ...localBackend.runtimeConfig,
     memory: {
-      baseUrl: memoryControl.baseUrl
+      baseUrl: memoryControl.baseUrl,
+      ownership: memoryControl.ownership
     },
     agentGateway: agentGatewayConfig
   };
@@ -705,14 +716,17 @@ async function restartMemoryService(): Promise<DesktopMemoryServiceRestartResult
   }
 
   const operation = (async (): Promise<DesktopMemoryServiceRestartResult> => {
+    let action: DesktopMemoryServiceRestartResult["action"];
     if (runtimeServices) {
-      await runtimeServices.restartMemory();
+      action = await runtimeServices.restartMemory();
     } else {
-      await restartExternalMemoryService(control);
+      await reconnectExternalMemoryService(control);
+      action = "reconnected";
     }
     return {
       ok: true,
-      baseUrl: control.baseUrl
+      baseUrl: control.baseUrl,
+      action
     };
   })();
   memoryServiceRestart = operation;

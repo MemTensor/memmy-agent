@@ -201,6 +201,8 @@ describe("SourcesSubPage", () => {
     expect(formatMemoryServiceAddress("http://localhost:18888/")).toBe("localhost:18888");
     expect(formatMemoryServiceAddress(undefined)).toBeUndefined();
     expect(zhCNMessages["memory.restartService"]).toBe("重启服务");
+    expect(zhCNMessages["memory.reconnectService"]).toBe("重新连接");
+    expect(enUSMessages["memory.reconnectService"]).toBe("Reconnect");
     expect(zhCNMessages).not.toHaveProperty("memory.daemonAddress");
   });
 

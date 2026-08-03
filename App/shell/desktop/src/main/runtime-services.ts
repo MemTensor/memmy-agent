@@ -19,6 +19,8 @@ const STOP_MANAGED_CHILD_GRACE_MS = 1_000;
 
 type RuntimeEnv = Record<string, string | undefined>;
 type ConfigRecord = Record<string, unknown>;
+export type MemoryServiceOwnership = "managed" | "remote";
+export type MemoryServiceRefreshAction = "restarted" | "reconnected";
 
 export interface PackagedRuntimeServices {
   memory: {
@@ -26,13 +28,14 @@ export interface PackagedRuntimeServices {
     token: string;
     databasePath: string;
     configPath: string;
+    ownership: MemoryServiceOwnership;
   };
   agentGateway: {
     baseUrl: string;
     bootstrapSecret: string;
     configPath: string;
   };
-  restartMemory(): Promise<void>;
+  restartMemory(): Promise<MemoryServiceRefreshAction>;
   close(): Promise<void>;
   terminateSync(): void;
 }
@@ -65,6 +68,7 @@ export interface PackagedRuntimeConfig {
   memoryToken: string;
   memoryListenHost: string;
   memoryListenPort: number;
+  memoryOwnership: MemoryServiceOwnership;
   agentGatewayBaseUrl: string;
   agentGatewayHealthHost: string;
   agentGatewayHealthPort: number;
@@ -125,7 +129,7 @@ export async function startPackagedRuntimeServices(
     {},
     browserPreparationAttemptId
   );
-  let memoryRestart: Promise<void> | null = null;
+  let memoryRestart: Promise<MemoryServiceRefreshAction> | null = null;
   let browserPreparation: PackagedBrowserPreparation | null = null;
   let closing = false;
 
@@ -149,7 +153,8 @@ export async function startPackagedRuntimeServices(
         baseUrl: runtimeConfig.memoryBaseUrl,
         token: runtimeConfig.memoryToken,
         databasePath: runtimeConfig.memoryDatabasePath,
-        configPath: runtimeConfig.configPath
+        configPath: runtimeConfig.configPath,
+        ownership: runtimeConfig.memoryOwnership
       },
       agentGateway: {
         baseUrl: runtimeConfig.agentGatewayBaseUrl,
@@ -161,12 +166,12 @@ export async function startPackagedRuntimeServices(
           throw new Error("Memmy is shutting down");
         }
         if (!memoryRestart) {
-          memoryRestart = restartManagedMemoryService(entries, runtimeConfig, children, options)
+          memoryRestart = refreshMemoryService(entries, runtimeConfig, children, options)
             .finally(() => {
               memoryRestart = null;
             });
         }
-        await memoryRestart;
+        return await memoryRestart;
       },
       async close() {
         closing = true;
@@ -209,6 +214,9 @@ export async function preparePackagedRuntimeConfig(
   const heartbeat = ensureRecord(gateway, "heartbeat");
   const agents = ensureRecord(config, "agents");
   const defaults = ensureRecord(agents, "defaults");
+  const memoryOwnership = memoryServiceOwnership(
+    env.MEMMY_MEMORY_RUNTIME ?? stringValue(storage.runtime) ?? "managed"
+  );
 
   let changed = false;
   if (!Object.prototype.hasOwnProperty.call(config, "fileMemory")) {
@@ -236,6 +244,7 @@ export async function preparePackagedRuntimeConfig(
   changed = setMissing(storage, "backend", "sqlite") || changed;
   changed = setMissing(storage, "sqlitePath", memoryDatabasePath) || changed;
   changed = setMissing(storage, "endpoint", DEFAULT_MEMORY_URL) || changed;
+  changed = setMissing(storage, "runtime", memoryOwnership) || changed;
   changed = setMissing(websocket, "host", LOCAL_HOST) || changed;
   changed = setMissing(websocket, "port", DEFAULT_AGENT_WEBSOCKET_PORT) || changed;
   if (shouldFillMissingAgentSecret && !stringValue(websocket.tokenIssueSecret) && !stringValue(websocket.token)) {
@@ -262,7 +271,9 @@ export async function preparePackagedRuntimeConfig(
   if (shouldEnsureDirectories) {
     await Promise.all([
       mkdir(agentWorkspace, { recursive: true }),
-      mkdir(dirname(memoryDatabasePath), { recursive: true })
+      ...(memoryOwnership === "managed"
+        ? [mkdir(dirname(memoryDatabasePath), { recursive: true })]
+        : [])
     ]);
   }
 
@@ -289,6 +300,7 @@ export async function preparePackagedRuntimeConfig(
     memoryToken,
     memoryListenHost: listenHostFromUrl(memoryUrl),
     memoryListenPort: listenPortFromUrl(memoryUrl),
+    memoryOwnership,
     agentGatewayBaseUrl: `http://${clientHost(agentWebsocketHost)}:${agentWebsocketPort}`,
     agentGatewayHealthHost: gatewayHealthHost,
     agentGatewayHealthPort: gatewayHealthPort,
@@ -533,6 +545,9 @@ async function ensureMemoryService(
   if (probe === "unexpected") {
     throw new Error(`Memory endpoint is occupied by an unexpected service: ${healthUrl}`);
   }
+  if (runtimeConfig.memoryOwnership === "remote") {
+    return;
+  }
 
   const memoryChild = spawnNodeService("memory", entries.memoryEntry, [
     "--config",
@@ -557,6 +572,24 @@ async function ensureMemoryService(
   });
   children.push(memoryChild);
   await waitForHttpService("memory", healthUrl, memoryChild, healthHeaders);
+}
+
+async function refreshMemoryService(
+  entries: RuntimeEntryPaths,
+  runtimeConfig: PackagedRuntimeConfig,
+  children: ManagedChild[],
+  options: StartPackagedRuntimeServicesOptions
+): Promise<MemoryServiceRefreshAction> {
+  if (runtimeConfig.memoryOwnership === "remote") {
+    await reconnectExternalMemoryService({
+      baseUrl: runtimeConfig.memoryBaseUrl,
+      token: runtimeConfig.memoryToken
+    });
+    return "reconnected";
+  }
+
+  await restartManagedMemoryService(entries, runtimeConfig, children, options);
+  return "restarted";
 }
 
 async function restartManagedMemoryService(
@@ -588,7 +621,7 @@ async function restartManagedMemoryService(
   await ensureMemoryService(entries, runtimeConfig, children, options);
 }
 
-export async function restartExternalMemoryService(input: {
+export async function reconnectExternalMemoryService(input: {
   baseUrl: string;
   token: string;
 }): Promise<void> {
@@ -601,10 +634,6 @@ export async function restartExternalMemoryService(input: {
       ? `Memory endpoint returned an unexpected response: ${healthUrl}`
       : `Memory service is not running: ${healthUrl}`);
   }
-
-  await requestMemoryServiceShutdown(input);
-  await waitForHttpServiceStop(healthUrl, healthHeaders);
-  await waitForHttpServiceReady("memory", healthUrl, healthHeaders);
 }
 
 async function requestMemoryServiceShutdown(input: { baseUrl: string; token: string }): Promise<void> {
@@ -1187,6 +1216,13 @@ function repairMemoryActiveProfile(memmyMemory: ConfigRecord): boolean {
 
 function memoryProfileName(value: unknown): "account" | "byok" | undefined {
   return value === "account" || value === "byok" ? value : undefined;
+}
+
+function memoryServiceOwnership(value: unknown): MemoryServiceOwnership {
+  if (value === "managed" || value === "remote") {
+    return value;
+  }
+  throw new Error("memmyMemory.storage.runtime must be managed or remote");
 }
 
 function isRecord(value: unknown): value is ConfigRecord {

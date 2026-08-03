@@ -176,7 +176,8 @@ export const AgentGatewayRuntimeConfigSchema = z.object({
 export type AgentGatewayRuntimeConfig = z.infer<typeof AgentGatewayRuntimeConfigSchema>;
 
 export const MemoryServiceRuntimeConfigSchema = z.object({
-    baseUrl: z.string().url()
+    baseUrl: z.string().url(),
+    ownership: z.enum(["managed", "remote"]).default("managed")
 });
 export type MemoryServiceRuntimeConfig = z.infer<typeof MemoryServiceRuntimeConfigSchema>;
 

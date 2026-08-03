@@ -186,6 +186,20 @@ memmy-memory get <id>
 
 Connects to `http://127.0.0.1:18960` by default; use `--url`, `--token`, `--config`, `--source`, and `--user-id` to specify the target service, authentication, source, and user namespace.
 
+### Docker Memory Service
+
+For a persistent standalone Memory service, use the root `compose.yaml` and
+`Memory/Dockerfile`. It uses Node 24 Debian (not Alpine) for the native
+`better-sqlite3`, `sqlite-vec`, and ONNX dependencies, persists SQLite and the
+Hugging Face model cache in named volumes, and requires a strong
+`MEMMY_MEMORY_TOKEN`. The default host binding is `127.0.0.1:18960`.
+
+When Docker Desktop runs on the same Windows machine, point the desktop config
+at `http://127.0.0.1:18960` and set `memmyMemory.storage.runtime` to `remote`.
+The desktop app then performs health checks only; it does not stop or restart
+the Docker container. Keep LAN deployments behind Caddy or Nginx HTTPS rather
+than exposing port 18960 directly.
+
 ## Core Concepts
 
 - **Workspace** — the Agent's working directory, default `~/.memmy/workspace`; syncs templates, built-in skills, and memory files.

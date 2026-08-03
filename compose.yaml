@@ -1,0 +1,41 @@
+services:
+  memory:
+    build:
+      context: .
+      dockerfile: Memory/Dockerfile
+    image: memmy-memory:local
+    restart: unless-stopped
+    init: true
+    environment:
+      HOME: /home/node
+      MEMMY_MEMORY_HOST: 0.0.0.0
+      MEMMY_MEMORY_PORT: "18960"
+      MEMMY_MEMORY_DB: /data/memory.sqlite
+      MEMMY_MEMORY_TOKEN: "${MEMMY_MEMORY_TOKEN:?Set a strong random MEMMY_MEMORY_TOKEN in .env}"
+    ports:
+      - "127.0.0.1:${MEMMY_MEMORY_HOST_PORT:-18960}:18960"
+    volumes:
+      - memory-data:/data
+      - memory-model-cache:/home/node/.memmy/memory-service/model-cache
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:18960/api/v1/health').then(r=>{if(!r.ok)throw new Error(String(r.status))})
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 15s
+
+volumes:
+  memory-data:
+  memory-model-cache:

@@ -40,7 +40,7 @@ describe("SourcesSubPage local data path", () => {
       runtimeConfig: {
         baseUrl: "http://127.0.0.1:18100",
         localToken: "local-token",
-        memory: { baseUrl: "http://127.0.0.1:18960" }
+        memory: { baseUrl: "http://127.0.0.1:18960", ownership: "remote" }
       },
       localData: {
         getPath,
@@ -69,6 +69,8 @@ describe("SourcesSubPage local data path", () => {
     expect(getPath).toHaveBeenCalledTimes(1);
     expect(listSources).toHaveBeenCalledTimes(1);
     expect(reveal).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("重新连接");
+    expect(container.textContent).not.toContain("重启服务");
     expect(container.textContent).not.toContain("~/.memmy/memory-service");
     expect(container.textContent).not.toContain(windowsDataPath);
 

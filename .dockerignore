@@ -1,0 +1,16 @@
+.git
+.github
+node_modules
+**/node_modules
+**/dist
+release
+**/release
+.env
+.env.*
+!.env.example
+*.log
+*.sqlite
+*.sqlite-*
+.memmy
+.codex
+.pi

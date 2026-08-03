@@ -41,6 +41,55 @@ npm run memory:serve:dev -- \
 
 The built-in Memory panel is available at `/` and `/viewer`.
 
+## Docker
+
+The repository root includes a dedicated Node 24 Debian image and Compose
+configuration. The image intentionally does not use Alpine because Memory has
+native SQLite, sqlite-vec, and ONNX dependencies.
+
+Create a strong, unique token in the root `.env` before starting the service:
+
+```bash
+docker run --rm node:24-bookworm-slim node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
+docker compose up -d --build
+docker compose ps
+```
+
+Set the generated value as `MEMMY_MEMORY_TOKEN`. Compose refuses to start when
+the token is empty. The container listens on `0.0.0.0:18960`, while the default
+published host port is restricted to `127.0.0.1:18960`. SQLite data and the
+Hugging Face model cache use the `memory-data` and `memory-model-cache` named
+volumes.
+
+For Docker Desktop on the same Windows computer, configure the desktop app to
+use loopback and mark the service as remotely owned:
+
+```yaml
+memmyMemory:
+  storage:
+    runtime: remote
+    endpoint: http://127.0.0.1:18960
+    token: <the-same-value-as-MEMMY_MEMORY_TOKEN>
+```
+
+`runtime: remote` means the desktop app only connects to and health-checks the
+service. It never starts, stops, or restarts the container. Agent processes,
+project history scanning, and Skill installation continue to run on the
+Windows host.
+
+When another computer needs access, keep port 18960 off the public Internet and
+put Caddy or Nginx in front of it with HTTPS. Point desktop clients at the HTTPS
+LAN hostname instead of the server IP. The direct `192.168.x.x` address is only
+needed when the container actually runs on another host.
+
+For a host-installed Caddy, the minimal reverse proxy is:
+
+```caddyfile
+memory.example.lan {
+  reverse_proxy 127.0.0.1:18960
+}
+```
+
 ## Configuration
 
 Unless `--config` is provided, the service checks these locations in order:
@@ -57,6 +106,7 @@ memmyMemory:
   version: 1
   activeProfile: byok
   storage:
+    runtime: managed
     mode: local
     backend: sqlite
     sqlitePath: ~/.memmy/memory-service/memory.sqlite

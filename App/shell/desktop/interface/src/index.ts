@@ -12,6 +12,7 @@ export interface DesktopMenuBarIconResult {
 export interface DesktopMemoryServiceRestartResult {
   ok: true;
   baseUrl: string;
+  action: "restarted" | "reconnected";
 }
 
 export interface DesktopAppInfo {

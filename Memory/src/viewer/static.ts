@@ -280,6 +280,21 @@ export function memoryPanelHtml(): string {
     </section>
   </main>
   <script>
+    function resolveMemoryToken() {
+      const hash = typeof window !== "undefined" ? window.location.hash.replace(/^#/, "") : "";
+      const fragmentToken = hash ? new URLSearchParams(hash).get("token") : "";
+      if (fragmentToken && typeof sessionStorage !== "undefined") {
+        sessionStorage.setItem("memmyMemoryToken", fragmentToken);
+      }
+      if (fragmentToken && typeof history !== "undefined") {
+        history.replaceState(null, "", window.location.pathname + window.location.search);
+      }
+      return fragmentToken || (typeof sessionStorage !== "undefined"
+        ? sessionStorage.getItem("memmyMemoryToken") || ""
+        : "");
+    }
+
+    const memoryToken = resolveMemoryToken();
     const state = {
       page: 1,
       pageSize: 20,
@@ -294,7 +309,13 @@ export function memoryPanelHtml(): string {
 
     async function api(path, options = {}) {
       const started = Date.now();
-      const response = await fetch(path, options);
+      const response = await fetch(path, {
+        ...options,
+        headers: {
+          ...(options.headers || {}),
+          ...(memoryToken ? { authorization: "Bearer " + memoryToken } : {})
+        }
+      });
       state.lastRequestMs = Date.now() - started;
       const text = await response.text();
       let body = {};

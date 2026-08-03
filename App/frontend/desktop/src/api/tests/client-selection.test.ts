@@ -5,7 +5,7 @@ import { createAppClients } from "../client-types.js";
 const runtimeConfig: RuntimeConfig = {
   baseUrl: "http://127.0.0.1:18100",
   localToken: "token",
-  memory: { baseUrl: "http://127.0.0.1:18960" }
+  memory: { baseUrl: "http://127.0.0.1:18960", ownership: "managed" }
 };
 
 afterEach(() => {

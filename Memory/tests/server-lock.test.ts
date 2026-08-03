@@ -60,4 +60,31 @@ describe("Memory server sqlite lock", () => {
     expect(payload.port).toBe(18991);
     lock?.release();
   });
+
+  it("replaces a lock left by an earlier container that reused the same pid", () => {
+    const root = mkdtempSync(join(tmpdir(), "mindock-memory-server-reused-pid-lock-"));
+    roots.push(root);
+    const sqlitePath = join(root, "memory.sqlite");
+    const lockPath = `${sqlitePath}.server.lock`;
+    writeFileSync(lockPath, JSON.stringify({
+      pid: process.pid,
+      instanceId: "previous-container-instance",
+      host: "0.0.0.0",
+      port: 18960
+    }), "utf8");
+
+    const lock = acquireSqliteServerLock({
+      sqlitePath,
+      host: "0.0.0.0",
+      port: 18960
+    });
+    const payload = JSON.parse(readFileSync(lockPath, "utf8")) as {
+      pid: number;
+      instanceId: string;
+    };
+
+    expect(payload.pid).toBe(process.pid);
+    expect(payload.instanceId).not.toBe("previous-container-instance");
+    lock?.release();
+  });
 });

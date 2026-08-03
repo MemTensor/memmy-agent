@@ -545,7 +545,7 @@ describe("desktop packaged runtime boundaries", () => {
     expect(packageSource).not.toContain("/usr/local/bin when writable");
   });
 
-  it("restarts the Memory process through the desktop bridge", () => {
+  it("restarts managed Memory and only reconnects external Memory through the desktop bridge", () => {
     const mainSource = readFileSync(mainSourcePath, "utf8");
     const preloadSource = readFileSync(preloadSourcePath, "utf8");
     const runtimeSource = readFileSync(runtimeServicesPath, "utf8");
@@ -555,7 +555,10 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain('ipcMain.handle("memmy:restart-memory-service"');
     expect(mainSource).toContain('ipcMain.removeHandler("memmy:restart-memory-service")');
     expect(mainSource).toContain("await runtimeServices.restartMemory()");
+    expect(mainSource).toContain("await reconnectExternalMemoryService(control)");
     expect(runtimeSource).toContain("restartManagedMemoryService");
+    expect(runtimeSource).toContain("runtimeConfig.memoryOwnership === \"remote\"");
+    expect(runtimeSource).toContain("reconnectExternalMemoryService");
     expect(runtimeSource).toContain("/api/v1/admin/shutdown");
   });
 
