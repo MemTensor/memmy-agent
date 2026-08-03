@@ -15,6 +15,7 @@ import { createCursorSkillTarget } from "../adapters/outbound/skill-writer/curso
 import { createHermesSkillTarget } from "../adapters/outbound/skill-writer/hermes/index.js";
 import { createOpenclawSkillTarget } from "../adapters/outbound/skill-writer/openclaw/index.js";
 import { createOpencodeSkillTarget } from "../adapters/outbound/skill-writer/opencode/index.js";
+import { createPiSkillTarget } from "../adapters/outbound/skill-writer/pi/index.js";
 import { createWorkbuddySkillTarget } from "../adapters/outbound/skill-writer/workbuddy/index.js";
 import { createSkillTargetRegistry, type SkillTargetRegistry } from "../adapters/outbound/skill-writer/target-registry.js";
 import type { CloudClient } from "../adapters/outbound/cloud-client/index.js";
@@ -126,6 +127,7 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       createCursorSkillTarget({ memmyConfigPath: options.memmyConfigPath }),
       createClaudeCodeSkillTarget({ memmyConfigPath: options.memmyConfigPath }),
       createCodexSkillTarget({ memmyConfigPath: options.memmyConfigPath }),
+      createPiSkillTarget({ memmyConfigPath: options.memmyConfigPath }),
       createOpencodeSkillTarget(),
       createOpenclawSkillTarget({ memmyConfigPath: options.memmyConfigPath }),
       createHermesSkillTarget({ memmyConfigPath: options.memmyConfigPath }),

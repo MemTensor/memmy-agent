@@ -52,6 +52,24 @@ export function resolveCodexSessionsDirectory(options: ResolveAgentPathOptions =
   return createAgentPathRuntime(options).pathApi.join(resolveCodexHomeDirectory(options), "sessions");
 }
 
+export function resolvePiHomeDirectory(options: ResolveAgentPathOptions = {}): string {
+  const runtime = createAgentPathRuntime(options);
+  return resolveConfiguredDirectory(
+    runtime.environment.PI_CODING_AGENT_DIR,
+    runtime.pathApi.join(runtime.homeDirectory, ".pi", "agent"),
+    runtime
+  );
+}
+
+export function resolvePiSessionsDirectory(options: ResolveAgentPathOptions = {}): string {
+  const runtime = createAgentPathRuntime(options);
+  return resolveConfiguredDirectory(
+    runtime.environment.PI_CODING_AGENT_SESSION_DIR,
+    runtime.pathApi.join(resolvePiHomeDirectory(options), "sessions"),
+    runtime
+  );
+}
+
 export function resolveOpencodeConfigDirectory(options: ResolveAgentPathOptions = {}): string {
   const runtime = createAgentPathRuntime(options);
   const xdgConfigRoot = resolveConfiguredDirectory(

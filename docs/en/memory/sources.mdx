@@ -1,6 +1,6 @@
 ---
 title: Agent Sources & Scanning
-description: Learn how Memmy scans local history from six built-in Agents and which Hooks, plugins, and live-memory behaviors it installs.
+description: Learn how Memmy scans local history from seven built-in Agents and which Hooks, plugins, and live-memory behaviors it installs.
 icon: ScanSearch
 ---
 
@@ -22,6 +22,7 @@ An Agent Source is Memmy's adapter for reading local history from an external Ag
 | Cursor | `~/Library/Application Support/Cursor/User/workspaceStorage/**/state.vscdb` and `globalStorage/state.vscdb` | Hook |
 | Claude Code | `~/.claude/projects/**/*.jsonl` | Hook |
 | Codex | `~/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-*.jsonl` | Hook |
+| Pi | `${PI_CODING_AGENT_SESSION_DIR:-~/.pi/agent/sessions}/**/*.jsonl` | Native extension |
 | OpenCode | `~/.local/share/opencode/opencode.db` | Native plugin |
 | OpenClaw | Conversation and memory SQLite databases under `~/.openclaw` | Memory plugin |
 | Hermes | `~/.hermes/sessions/**/*.jsonl` and `~/.hermes/state.db` | Memory Provider plugin |
@@ -89,6 +90,7 @@ Memmy connects to live Agent conversations through each host's native **Hooks** 
 | Cursor | Hook | `beforeSubmitPrompt`, `afterAgentResponse`, `stop` | Starts turns, records responses, captures completed turns, and supports `/memmy-resume` |
 | Claude Code | Hook | `UserPromptSubmit`, `Stop` | Recalls and injects memory before a request, captures the completed turn, and supports `/memmy-resume` |
 | Codex | Hook | `UserPromptSubmit`, `Stop` | Recalls and injects memory before a request, captures the completed turn, and supports `/memmy-resume` |
+| Pi | Native extension | `before_agent_start`, `agent_settled`, `input` | Recalls memory before a request, captures only fully settled turns, and supports `/memmy-resume` |
 | OpenCode | Native plugin | Message, tool, text-completion, and session events | Recalls memory, captures responses and tool traces, and exposes native memory tools and `/memmy-resume` |
 | OpenClaw | Memory plugin | `before_prompt_build`, `agent_end` | Injects memory while building the prompt, captures the completed turn, and exposes native memory tools |
 | Hermes | Memory Provider plugin | Provider lifecycle methods such as `prefetch` and `sync_turn` | Recalls and captures automatically, mirrors explicit Hermes memory writes, and exposes native memory tools |
@@ -108,11 +110,11 @@ flowchart LR
 
 Common results after installation:
 
-- **Automatic recall:** Claude Code, Codex, OpenCode, OpenClaw, and Hermes retrieve and inject relevant memory before normal requests run.
+- **Automatic recall:** Claude Code, Codex, Pi, OpenCode, OpenClaw, and Hermes retrieve and inject relevant memory before normal requests run.
 - **Automatic capture:** the Hook or plugin submits the user request, Agent answer, and success/failure status at the end of a turn. The Agent does not need to run `memmy-memory add` manually.
 - **Task resumption:** `/memmy-resume <query>` returns up to five L1 episode candidates. Enter `1`–`5` to load the complete episode and inject continuation context.
 - **On-demand lookup:** the bundled Skill keeps `memmy-memory search` and `memmy-memory get` for cases where automatic context is insufficient.
-- **Source attribution:** captured turns carry `cursor`, `claude_code`, `codex`, `opencode`, `openclaw`, or `hermes`, so you can filter and trace their origin.
+- **Source attribution:** captured turns carry `cursor`, `claude_code`, `codex`, `pi`, `opencode`, `openclaw`, or `hermes`, so you can filter and trace their origin.
 
 <Callout type="warn" icon={false}>
   <div className="mb-2 flex items-center gap-2 text-[1.0625rem] font-semibold leading-6 text-fd-card-foreground">
@@ -120,7 +122,7 @@ Common results after installation:
     <span>Cursor's current Hook focuses on automatic capture and <code>/memmy-resume</code></span>
   </div>
 
-  When a normal Cursor request needs additional memory, the bundled Skill performs an on-demand lookup. The other five integrations inject recalled context before normal requests.
+  When a normal Cursor request needs additional memory, the bundled Skill performs an on-demand lookup. The other six integrations inject recalled context before normal requests.
 </Callout>
 
 ### Cursor: three Hooks
@@ -170,6 +172,21 @@ Written or updated by default:
 - `~/.codex/hooks/memmy-memory-config.json`
 - `~/.codex/AGENTS.md`
 - `~/.codex/skills/memmy-memory/SKILL.md`
+
+### Pi: native extension
+
+| Event | Timing | Behavior |
+| --- | --- | --- |
+| `before_agent_start` | After prompt expansion, before the agent loop | Opens the shared Memmy session, starts the turn, and injects recalled context without blocking Pi if Memory is unavailable |
+| `agent_settled` | After retries, compaction retries, and queued continuations finish | Captures the final Assistant response exactly once for the user run |
+| `input` | Before normal prompt expansion | Converts a pending `/memmy-resume` candidate selection into a continuation request with full episode context |
+
+Written or updated by default:
+
+- `~/.pi/agent/extensions/memmy-memory.ts`
+- `~/.pi/agent/extensions/memmy-memory-config.json`
+- `~/.pi/agent/AGENTS.md`
+- `~/.pi/agent/skills/memmy-memory/SKILL.md`
 
 ### OpenCode: native plugin
 
@@ -242,7 +259,7 @@ Hermes likewise allows one active Memory Provider. Memmy asks for confirmation b
 ### Install, verify, and remove
 
 1. Open **Memory → Cross-Agent access**.
-2. For Cursor, Claude Code, and Codex, click **Install Hook**. For OpenCode, OpenClaw, and Hermes, click **Install plugin**.
+2. For Cursor, Claude Code, and Codex, click **Install Hook**. For Pi, OpenCode, OpenClaw, and Hermes, click **Install plugin**.
 3. If the Agent is already running, restart it or open a new session so it reloads its configuration.
 4. Complete a normal turn, then confirm that the corresponding source appears in Memmy's memory or log views.
 5. Enter `/memmy-resume <keywords>`, confirm that candidates appear, and select an episode with `1`–`5`.

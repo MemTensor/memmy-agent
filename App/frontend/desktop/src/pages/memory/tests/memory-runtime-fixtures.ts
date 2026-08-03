@@ -559,6 +559,7 @@ function filterMemoryItems(input: PanelItemsInput): PanelItemsOutput {
         "cursor",
         "claude_code",
         "codex",
+        "pi",
         "opencode",
         "openclaw",
         "hermes"

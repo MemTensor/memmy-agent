@@ -415,6 +415,7 @@ describe("agent sources local api routes", () => {
     "cursor",
     "claude_code",
     "codex",
+    "pi",
     "opencode",
     "openclaw",
     "hermes",

@@ -22,7 +22,7 @@ export interface FirstEncounterRelayOptInProps {
   onOpenConnections: () => void;
 }
 
-const RELAY_AGENT_IDS = new Set(["cursor", "claude_code", "codex", "opencode", "openclaw", "hermes", "workbuddy"]);
+const RELAY_AGENT_IDS = new Set(["cursor", "claude_code", "codex", "pi", "opencode", "openclaw", "hermes", "workbuddy"]);
 type RelayFeedback =
   | { kind: "copied" }
   | { kind: "copy_failed" }

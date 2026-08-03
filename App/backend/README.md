@@ -26,7 +26,7 @@ npm run db:migrate
 - `adapters/inbound/local-api`: Fastify routes, runtime-token authentication,
   CORS, SSE, and the Composio MCP bridge.
 - `adapters/outbound/agent-source`: built-in history readers for Cursor, Claude
-  Code, Codex, OpenCode, OpenClaw, Hermes, and WorkBuddy.
+  Code, Codex, Pi, OpenCode, OpenClaw, Hermes, and WorkBuddy.
 - `adapters/outbound/skill-writer`: Memory skill, hook, command, and plugin
   installation for the supported agents.
 - `adapters/outbound/agent-adapter`: manifest, loader, and registry contracts
@@ -114,6 +114,7 @@ Every route in this table requires the local runtime token.
 | Cursor      | Windows: `%APPDATA%\Cursor\User`; macOS: `~/Library/Application Support/Cursor/User`; Linux: `${XDG_CONFIG_HOME:-~/.config}/Cursor/User` (`workspaceStorage/*/state.vscdb` and `globalStorage/state.vscdb`) | `~/.cursor/skills/memmy-memory/` and `~/.cursor/hooks.json`                                            |
 | Claude Code | `~/.claude/projects/**/*.jsonl`                                                                                                                                                                             | `~/.claude/CLAUDE.md`, `skills/memmy-memory/`, hooks, and the resume command                           |
 | Codex       | `~/.codex/sessions/**/rollout-*.jsonl`                                                                                                                                                                      | `~/.codex/AGENTS.md`, `skills/memmy-memory/`, and hooks                                                |
+| Pi          | `${PI_CODING_AGENT_SESSION_DIR:-~/.pi/agent/sessions}/**/*.jsonl`                                                                                                                                            | `~/.pi/agent/AGENTS.md`, `skills/memmy-memory/`, and native extension                                  |
 | OpenCode    | `${XDG_DATA_HOME:-~/.local/share}/opencode/opencode.db`                                                                                                                                                     | `${XDG_CONFIG_HOME:-~/.config}/opencode/AGENTS.md`, `skills/memmy-memory/`, plugin, and resume command |
 | OpenClaw    | SQLite databases under `~/.openclaw/`                                                                                                                                                                       | Workspace `AGENTS.md`, `~/.openclaw/skills/memmy-memory/`, and the Memory extension                    |
 | Hermes      | `~/.hermes/sessions/**/*.jsonl` and `~/.hermes/state.db`                                                                                                                                                    | `~/.hermes/SOUL.md`, `skills/memmy-memory/`, and Memory/resume plugins                                 |

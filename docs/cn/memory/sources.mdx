@@ -1,6 +1,6 @@
 ---
 title: Agent 来源与扫描
-description: 了解 Memmy 如何扫描六种内置 Agent 的本地历史，以及安装的 Hook、插件和实时记忆效果。
+description: 了解 Memmy 如何扫描七种内置 Agent 的本地历史，以及安装的 Hook、插件和实时记忆效果。
 icon: ScanSearch
 ---
 
@@ -22,6 +22,7 @@ Agent Source 是 Memmy 读取外部 Agent 本地历史的适配器。来源扫�
 | Cursor | `~/Library/Application Support/Cursor/User/workspaceStorage/**/state.vscdb` 和 `globalStorage/state.vscdb` | Hook |
 | Claude Code | `~/.claude/projects/**/*.jsonl` | Hook |
 | Codex | `~/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-*.jsonl` | Hook |
+| Pi | `${PI_CODING_AGENT_SESSION_DIR:-~/.pi/agent/sessions}/**/*.jsonl` | 原生 Extension |
 | OpenCode | `~/.local/share/opencode/opencode.db` | 原生插件 |
 | OpenClaw | `~/.openclaw` 下的 conversation / memory SQLite | Memory 插件 |
 | Hermes | `~/.hermes/sessions/**/*.jsonl` 和 `~/.hermes/state.db` | Memory Provider 插件 |
@@ -89,6 +90,7 @@ Memmy 通过 Agent 原生支持的 **Hook** 或**插件**接入实时对话。�
 | Cursor | Hook | `beforeSubmitPrompt`、`afterAgentResponse`、`stop` | 建立回合、记录回复、在回合结束时自动采集，并支持 `/memmy-resume` |
 | Claude Code | Hook | `UserPromptSubmit`、`Stop` | 请求前召回并注入相关记忆，结束时自动采集，支持 `/memmy-resume` |
 | Codex | Hook | `UserPromptSubmit`、`Stop` | 请求前召回并注入相关记忆，结束时自动采集，支持 `/memmy-resume` |
+| Pi | 原生 Extension | `before_agent_start`、`agent_settled`、`input` | 请求前召回，只采集完全稳定的回合，并支持 `/memmy-resume` |
 | OpenCode | 原生插件 | 消息、工具、文本完成和会话事件 | 自动召回、采集回复与工具轨迹，并提供原生记忆工具和 `/memmy-resume` |
 | OpenClaw | Memory 插件 | `before_prompt_build`、`agent_end` | 构建提示词前注入记忆，Agent 结束时采集完整回合，并提供原生记忆工具 |
 | Hermes | Memory Provider 插件 | `prefetch`、`sync_turn` 等 Provider 生命周期 | 自动召回和采集，镜像 Hermes 的显式记忆写入，并提供原生记忆工具 |
@@ -108,11 +110,11 @@ flowchart LR
 
 安装后的共同效果：
 
-- **自动召回**：Claude Code、Codex、OpenCode、OpenClaw 和 Hermes 会在正常请求执行前检索相关记忆并注入上下文。
+- **自动召回**：Claude Code、Codex、Pi、OpenCode、OpenClaw 和 Hermes 会在正常请求执行前检索相关记忆并注入上下文。
 - **自动采集**：Hook 或插件会在回合结束时提交用户请求、Agent 回答和成功/失败状态，不需要 Agent 手动执行 `memmy-memory add`。
 - **任务接续**：输入 `/memmy-resume <query>` 会搜索最多 5 个候选 L1 episode；继续输入 `1`–`5` 可读取完整 episode 并注入接续上下文。
 - **按需查询**：随接入安装的 Skill 保留 `memmy-memory search` 和 `memmy-memory get`，只在自动上下文不足时使用。
-- **来源标记**：采集结果会记录 `cursor`、`claude_code`、`codex`、`opencode`、`openclaw` 或 `hermes`，便于过滤和追踪来源。
+- **来源标记**：采集结果会记录 `cursor`、`claude_code`、`codex`、`pi`、`opencode`、`openclaw` 或 `hermes`，便于过滤和追踪来源。
 
 <Callout type="warn" icon={false}>
   <div className="mb-2 flex items-center gap-2 text-[1.0625rem] font-semibold leading-6 text-fd-card-foreground">
@@ -120,7 +122,7 @@ flowchart LR
     <span>Cursor 当前的 Hook 重点负责自动采集和 <code>/memmy-resume</code></span>
   </div>
 
-  普通请求需要额外记忆时，由随 Hook 安装的 Skill 执行按需搜索；其他五个接入会在普通请求前自动注入召回结果。
+  普通请求需要额外记忆时，由随 Hook 安装的 Skill 执行按需搜索；其他六个接入会在普通请求前自动注入召回结果。
 </Callout>
 
 ### Cursor：三个 Hook
@@ -170,6 +172,21 @@ Memmy 会在 `~/.cursor/hooks.json` 中追加自己的 Hook 条目，不会覆�
 - `~/.codex/hooks/memmy-memory-config.json`
 - `~/.codex/AGENTS.md`
 - `~/.codex/skills/memmy-memory/SKILL.md`
+
+### Pi：原生 Extension
+
+| 事件 | 时机 | 行为 |
+| --- | --- | --- |
+| `before_agent_start` | Prompt 展开后、Agent 循环前 | 打开共享 Memmy 会话、启动回合并注入召回上下文；Memory 不可用时不阻断 Pi |
+| `agent_settled` | 重试、压缩重试和队列续跑全部结束后 | 对一次用户运行只采集一次最终 Assistant 回答 |
+| `input` | 正常 Prompt 展开前 | 将待选择的 `/memmy-resume` 候选转换为携带完整 Episode 上下文的续接请求 |
+
+默认写入或更新：
+
+- `~/.pi/agent/extensions/memmy-memory.ts`
+- `~/.pi/agent/extensions/memmy-memory-config.json`
+- `~/.pi/agent/AGENTS.md`
+- `~/.pi/agent/skills/memmy-memory/SKILL.md`
 
 ### OpenCode：原生插件
 
@@ -242,7 +259,7 @@ Hermes 同样只允许一个活动的 Memory Provider；检测到其他 Provider
 ### 安装、验证与移除
 
 1. 打开 **记忆管理 → 跨Agent接入**。
-2. Cursor、Claude Code、Codex 点击 **安装 Hook**；OpenCode、OpenClaw、Hermes 点击 **安装插件**。
+2. Cursor、Claude Code、Codex 点击 **安装 Hook**；Pi、OpenCode、OpenClaw、Hermes 点击 **安装插件**。
 3. 如果 Agent 正在运行，重启 Agent 或新建会话，让它重新加载配置。
 4. 完成一轮普通对话，再到 Memmy 的记忆或日志页面确认对应来源出现新记录。
 5. 输入 `/memmy-resume <关键词>`，确认能看到候选并用 `1`–`5` 选择一个 episode。
