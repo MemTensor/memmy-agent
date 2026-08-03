@@ -444,25 +444,25 @@ prune_node_modules_non_runtime_files() {
       continue
     fi
 
-    local disposable_list
-    disposable_list="$(mktemp)"
-    find "$modules_dir" -depth -type d \( \
-        -name test -o \
-        -name tests -o \
-        -name __tests__ -o \
-        -name doc -o \
-        -name docs -o \
-        -name example -o \
-        -name examples -o \
-        -name coverage -o \
-        -name .github \
-      \) > "$disposable_list"
+    local package_dir disposable_dir
+    for package_dir in "$modules_dir"/* "$modules_dir"/@*/*; do
+      if [ ! -d "$package_dir" ]; then
+        continue
+      fi
 
-    local disposable_dir
-    while IFS= read -r disposable_dir; do
-      rm -rf "$disposable_dir"
-    done < "$disposable_list"
-    rm -f "$disposable_list"
+      for disposable_dir in \
+        "$package_dir/test" \
+        "$package_dir/tests" \
+        "$package_dir/__tests__" \
+        "$package_dir/doc" \
+        "$package_dir/docs" \
+        "$package_dir/example" \
+        "$package_dir/examples" \
+        "$package_dir/coverage" \
+        "$package_dir/.github"; do
+        rm -rf "$disposable_dir"
+      done
+    done
 
     if [ ! -d "$modules_dir" ]; then
       continue
