@@ -553,6 +553,11 @@ run_main() {
   require_command node
   require_command npm
   require_command lsof
+  local desktop_dev_args=""
+  if [[ "$(id -u)" -eq 0 ]]; then
+    desktop_dev_args=" -- --no-sandbox"
+    log "running Electron with --no-sandbox because the development process is root"
+  fi
   export MEMMY_RUNTIME_NODE_PATH="${MEMMY_RUNTIME_NODE_PATH:-$(command -v node)}"
   local runtime_node_dir
   runtime_node_dir="$(cd "$(dirname "$MEMMY_RUNTIME_NODE_PATH")" && pwd)"
@@ -610,7 +615,7 @@ run_main() {
     "bash -c 'set -o pipefail; bash scripts/dev-start.sh --agent-api 2>&1 | tee .tmp/dev-stack/agent-api.log'" \
     "bash -c 'set -o pipefail; bash scripts/dev-start.sh --gateway 2>&1 | tee .tmp/dev-stack/gateway.log'" \
     "bash -c 'set -o pipefail; npm run dev -w @memmy/frontend-desktop -- --host 127.0.0.1 2>&1 | tee .tmp/dev-stack/frontend.log'" \
-    "bash -c 'set -o pipefail; ./node_modules/.bin/wait-on http://127.0.0.1:19000 && env -u ELECTRON_RUN_AS_NODE npm run dev -w @memmy/desktop 2>&1 | tee .tmp/dev-stack/backend.log'"
+    "bash -c 'set -o pipefail; ./node_modules/.bin/wait-on http://127.0.0.1:19000 && env -u ELECTRON_RUN_AS_NODE npm run dev -w @memmy/desktop$desktop_dev_args 2>&1 | tee .tmp/dev-stack/backend.log'"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
