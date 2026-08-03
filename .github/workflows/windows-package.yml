@@ -33,6 +33,9 @@ jobs:
             package-lock.json
             App/memmy-agent/package-lock.json
 
+      - name: Prepare packaging environment
+        run: cp .env.example .env
+
       - name: Build unsigned Windows x64 China installer
         run: npm run package:win:x64:cn:unsigned
 

@@ -22,6 +22,11 @@ describe("Windows package workflow", () => {
     expect(packageJob.defaults.run.shell).toBe("bash");
   });
 
+  it("prepares the non-secret packaging environment from the checked-in template", () => {
+    const prepare = steps.find((step) => step.name === "Prepare packaging environment");
+    expect(prepare?.run).toBe("cp .env.example .env");
+  });
+
   it("builds the existing unsigned China package and uploads only its artifact", () => {
     const build = steps.find((step) => step.name === "Build unsigned Windows x64 China installer");
     const upload = steps.find((step) => step.name === "Upload installer artifact");
