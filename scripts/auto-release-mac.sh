@@ -147,7 +147,7 @@ upload_pkg() {
 CURRENT_STEP="Build and upload Mac domestic signed package"
 log "$CURRENT_STEP"
 set_cloud_service "$CN_CLOUD_SERVICE"
-bash scripts/package-mac-arm64-cn-signed.sh
+bash scripts/package-mac.sh --arch arm64 --edition cn --sign signed
 upload_pkg "$RELEASE_DIR/Memmy-$NEW_VERSION-darwin-arm64-cn-signed.dmg" "darwin-arm64-cn-signed"
 
 # ============================================================
@@ -156,7 +156,7 @@ upload_pkg "$RELEASE_DIR/Memmy-$NEW_VERSION-darwin-arm64-cn-signed.dmg" "darwin-
 CURRENT_STEP="Build and upload Mac international signed package"
 log "$CURRENT_STEP"
 set_cloud_service "$INTL_CLOUD_SERVICE"
-bash scripts/package-mac-arm64-intl-signed.sh
+bash scripts/package-mac.sh --arch arm64 --edition intl --sign signed
 upload_pkg "$RELEASE_DIR/Memmy-$NEW_VERSION-darwin-arm64-intl-signed.dmg" "darwin-arm64-intl-signed"
 
 # ============================================================

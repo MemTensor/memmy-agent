@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+ARCH=""
+EDITION="cn"
+SIGN="unsigned"
+PASSTHROUGH_ARGS=()
+
+usage() {
+  cat <<'USAGE'
+Usage: package-mac.sh --arch <arm64|x64> --edition <cn|intl> --sign <signed|unsigned> [electron-builder args...]
+
+Examples:
+  bash scripts/package-mac.sh --arch arm64 --edition cn --sign signed
+  bash scripts/package-mac.sh --arch arm64 --edition intl --sign unsigned
+  bash scripts/package-mac.sh --arch x64 --edition cn --sign signed --publish never
+
+Defaults:
+  --arch     current machine arch
+  --edition  cn
+  --sign     unsigned
+USAGE
+}
+
+infer_arch() {
+  case "$(uname -m)" in
+    arm64|aarch64)
+      printf '%s\n' "arm64"
+      ;;
+    x86_64|amd64)
+      printf '%s\n' "x64"
+      ;;
+    *)
+      echo "Cannot infer macOS package arch from uname -m. Pass --arch arm64 or --arch x64." >&2
+      exit 1
+      ;;
+  esac
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --arch)
+      if [ "$#" -lt 2 ]; then
+        echo "--arch requires arm64 or x64" >&2
+        exit 1
+      fi
+      ARCH="$2"
+      shift 2
+      ;;
+    --arch=*)
+      ARCH="${1#--arch=}"
+      shift
+      ;;
+    --arm64|arm64)
+      ARCH="arm64"
+      shift
+      ;;
+    --x64|x64)
+      ARCH="x64"
+      shift
+      ;;
+    --edition)
+      if [ "$#" -lt 2 ]; then
+        echo "--edition requires cn or intl" >&2
+        exit 1
+      fi
+      EDITION="$2"
+      shift 2
+      ;;
+    --edition=*)
+      EDITION="${1#--edition=}"
+      shift
+      ;;
+    --cn|cn)
+      EDITION="cn"
+      shift
+      ;;
+    --intl|intl)
+      EDITION="intl"
+      shift
+      ;;
+    --sign|--signing)
+      if [ "$#" -lt 2 ]; then
+        echo "--sign requires signed or unsigned" >&2
+        exit 1
+      fi
+      SIGN="$2"
+      shift 2
+      ;;
+    --sign=*|--signing=*)
+      SIGN="${1#*=}"
+      shift
+      ;;
+    --signed|signed)
+      SIGN="signed"
+      shift
+      ;;
+    --unsigned|unsigned)
+      SIGN="unsigned"
+      shift
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      PASSTHROUGH_ARGS+=("$@")
+      break
+      ;;
+    *)
+      PASSTHROUGH_ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
+
+if [ -z "$ARCH" ]; then
+  ARCH="$(infer_arch)"
+fi
+
+case "$ARCH" in
+  arm64|x64)
+    ;;
+  *)
+    echo "Unsupported macOS package arch: $ARCH" >&2
+    exit 1
+    ;;
+esac
+
+case "$EDITION" in
+  cn)
+    export MEMMY_ACCOUNT_CHANNEL=phone
+    export MEMMY_APP_EDITION=cn
+    ;;
+  intl)
+    export MEMMY_ACCOUNT_CHANNEL=email
+    export MEMMY_APP_EDITION=intl
+    ;;
+  *)
+    echo "Unsupported macOS package edition: $EDITION" >&2
+    exit 1
+    ;;
+esac
+
+case "$SIGN" in
+  signed)
+    unset MEMMY_SKIP_CODESIGN
+    ;;
+  unsigned)
+    export MEMMY_SKIP_CODESIGN=1
+    ;;
+  *)
+    echo "Unsupported macOS signing mode: $SIGN" >&2
+    exit 1
+    ;;
+esac
+
+BASE_SCRIPT="$ROOT_DIR/scripts/internal/package-mac-$ARCH-$SIGN-base.sh"
+if [ ! -f "$BASE_SCRIPT" ]; then
+  echo "Missing macOS package base script: $BASE_SCRIPT" >&2
+  exit 1
+fi
+
+bash "$BASE_SCRIPT" "${PASSTHROUGH_ARGS[@]}"

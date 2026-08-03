@@ -9,23 +9,13 @@ const runtimeServicesPath = fileURLToPath(new URL("../src/main/runtime-services.
 const devStartPath = fileURLToPath(new URL("../../../../scripts/dev-start.sh", import.meta.url));
 const devMemorySupervisorPath = fileURLToPath(new URL("../../../../scripts/internal/dev-memory-supervisor.mjs", import.meta.url));
 const clearAllPath = fileURLToPath(new URL("../../../../scripts/clear-all.sh", import.meta.url));
+const packageMacPath = fileURLToPath(new URL("../../../../scripts/package-mac.sh", import.meta.url));
 const packageMacDmgPath = fileURLToPath(new URL("../../../../scripts/internal/package-mac-dmg.sh", import.meta.url));
 const signedMacArm64PackagePath = fileURLToPath(
   new URL("../../../../scripts/internal/package-mac-arm64-signed-base.sh", import.meta.url)
 );
+const packageWinPath = fileURLToPath(new URL("../../../../scripts/package-win.sh", import.meta.url));
 const packageWinX64Path = fileURLToPath(new URL("../../../../scripts/internal/package-win-x64.sh", import.meta.url));
-const winX64CnUnsignedPackagePath = fileURLToPath(
-  new URL("../../../../scripts/package-win-x64-cn-unsigned.sh", import.meta.url)
-);
-const winX64CnSignedPackagePath = fileURLToPath(
-  new URL("../../../../scripts/package-win-x64-cn-signed.sh", import.meta.url)
-);
-const winX64IntlUnsignedPackagePath = fileURLToPath(
-  new URL("../../../../scripts/package-win-x64-intl-unsigned.sh", import.meta.url)
-);
-const winX64IntlSignedPackagePath = fileURLToPath(
-  new URL("../../../../scripts/package-win-x64-intl-signed.sh", import.meta.url)
-);
 const winUnsignedBuilderPath = fileURLToPath(new URL("../electron-builder.win.unsigned.yml", import.meta.url));
 const winUnsignedInstallerIncludePath = fileURLToPath(new URL("../build/installer-win-unsigned.nsh", import.meta.url));
 const desktopInterfacePath = fileURLToPath(new URL("../interface/src/index.ts", import.meta.url));
@@ -987,24 +977,24 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).not.toContain("npm run package:mac -- --arm64");
   });
 
-  it("builds Windows x64 editions through one shared packaging script", () => {
-    const wrappers = [
-      [readFileSync(winX64CnUnsignedPackagePath, "utf8"), "phone", "cn", true],
-      [readFileSync(winX64CnSignedPackagePath, "utf8"), "phone", "cn", false],
-      [readFileSync(winX64IntlUnsignedPackagePath, "utf8"), "email", "intl", true],
-      [readFileSync(winX64IntlSignedPackagePath, "utf8"), "email", "intl", false]
-    ] as const;
+  it("routes Windows x64 package variants through one public win entrypoint", () => {
+    const packageWinSource = readFileSync(packageWinPath, "utf8");
+    const rootPackage = readJson<PackageJson>(rootPackagePath);
+    const scripts = rootPackage.scripts ?? {};
 
-    for (const [source, accountChannel, edition, unsigned] of wrappers) {
-      expect(source).toContain(`export MEMMY_ACCOUNT_CHANNEL=${accountChannel}`);
-      expect(source).toContain(`export MEMMY_APP_EDITION=${edition}`);
-      expect(source).toContain('scripts/internal/package-win-x64.sh');
-      if (unsigned) {
-        expect(source).toContain("export MEMMY_SKIP_CODESIGN=1");
-      } else {
-        expect(source).toContain("unset MEMMY_SKIP_CODESIGN");
-      }
-    }
+    expect(packageWinSource).toContain("Usage: package-win.sh --arch <x64> --edition <cn|intl> --sign <signed|unsigned>");
+    expect(packageWinSource).toContain("export MEMMY_ACCOUNT_CHANNEL=phone");
+    expect(packageWinSource).toContain("export MEMMY_ACCOUNT_CHANNEL=email");
+    expect(packageWinSource).toContain("export MEMMY_SKIP_CODESIGN=1");
+    expect(packageWinSource).toContain("unset MEMMY_SKIP_CODESIGN");
+    expect(packageWinSource).toContain('scripts/internal/package-win-x64.sh');
+
+    expect(scripts["package:win:x64"]).toBe("bash scripts/package-win.sh --arch x64 --edition cn --sign signed");
+    expect(scripts["package:win:x64:unsigned"]).toBe("bash scripts/package-win.sh --arch x64 --edition cn --sign unsigned");
+    expect(scripts["package:win:x64:cn:signed"]).toBe("bash scripts/package-win.sh --arch x64 --edition cn --sign signed");
+    expect(scripts["package:win:x64:cn:unsigned"]).toBe("bash scripts/package-win.sh --arch x64 --edition cn --sign unsigned");
+    expect(scripts["package:win:x64:intl:signed"]).toBe("bash scripts/package-win.sh --arch x64 --edition intl --sign signed");
+    expect(scripts["package:win:x64:intl:unsigned"]).toBe("bash scripts/package-win.sh --arch x64 --edition intl --sign unsigned");
   });
 
   it("validates the bundled browser runtime during Windows packaging", () => {
@@ -1065,19 +1055,27 @@ describe("desktop packaged runtime boundaries", () => {
     );
   });
 
-  it("sets an explicit edition in macOS package wrappers", () => {
-    for (const [name, accountChannel, edition] of [
-      ["cn-unsigned", "phone", "cn"],
-      ["cn-signed", "phone", "cn"],
-      ["intl-unsigned", "email", "intl"],
-      ["intl-signed", "email", "intl"]
-    ] as const) {
-      const path = fileURLToPath(new URL(`../../../../scripts/package-mac-arm64-${name}.sh`, import.meta.url));
-      const source = readFileSync(path, "utf8");
+  it("routes macOS package variants through one public mac entrypoint", () => {
+    const packageMacSource = readFileSync(packageMacPath, "utf8");
+    const rootPackage = readJson<PackageJson>(rootPackagePath);
+    const scripts = rootPackage.scripts ?? {};
 
-      expect(source).toContain(`export MEMMY_ACCOUNT_CHANNEL=${accountChannel}`);
-      expect(source).toContain(`export MEMMY_APP_EDITION=${edition}`);
-    }
+    expect(packageMacSource).toContain("Usage: package-mac.sh --arch <arm64|x64> --edition <cn|intl> --sign <signed|unsigned>");
+    expect(packageMacSource).toContain("export MEMMY_ACCOUNT_CHANNEL=phone");
+    expect(packageMacSource).toContain("export MEMMY_ACCOUNT_CHANNEL=email");
+    expect(packageMacSource).toContain("export MEMMY_SKIP_CODESIGN=1");
+    expect(packageMacSource).toContain("unset MEMMY_SKIP_CODESIGN");
+    expect(packageMacSource).toContain('BASE_SCRIPT="$ROOT_DIR/scripts/internal/package-mac-$ARCH-$SIGN-base.sh"');
+    expect(packageMacSource).toContain('bash "$BASE_SCRIPT" "${PASSTHROUGH_ARGS[@]}"');
+
+    expect(scripts["package:mac:arm64:cn:signed"]).toBe("bash scripts/package-mac.sh --arch arm64 --edition cn --sign signed");
+    expect(scripts["package:mac:arm64:cn:unsigned"]).toBe("bash scripts/package-mac.sh --arch arm64 --edition cn --sign unsigned");
+    expect(scripts["package:mac:arm64:intl:signed"]).toBe("bash scripts/package-mac.sh --arch arm64 --edition intl --sign signed");
+    expect(scripts["package:mac:arm64:intl:unsigned"]).toBe("bash scripts/package-mac.sh --arch arm64 --edition intl --sign unsigned");
+    expect(scripts["package:mac:x64:cn:signed"]).toBe("bash scripts/package-mac.sh --arch x64 --edition cn --sign signed");
+    expect(scripts["package:mac:x64:cn:unsigned"]).toBe("bash scripts/package-mac.sh --arch x64 --edition cn --sign unsigned");
+    expect(scripts["package:mac:x64:intl:signed"]).toBe("bash scripts/package-mac.sh --arch x64 --edition intl --sign signed");
+    expect(scripts["package:mac:x64:intl:unsigned"]).toBe("bash scripts/package-mac.sh --arch x64 --edition intl --sign unsigned");
   });
 
   it("supports Windows signing through PFX files and SimplySign certificate store thumbprints", () => {
