@@ -158,4 +158,8 @@ case "$SIGN" in
 esac
 
 export MEMMY_DESKTOP_VERSION="$VERSION"
-bash "$ROOT_DIR/scripts/internal/package-win-x64.sh" "${PASSTHROUGH_ARGS[@]}"
+if [ "${#PASSTHROUGH_ARGS[@]}" -gt 0 ]; then
+  bash "$ROOT_DIR/scripts/internal/package-win-x64.sh" "${PASSTHROUGH_ARGS[@]}"
+else
+  bash "$ROOT_DIR/scripts/internal/package-win-x64.sh"
+fi

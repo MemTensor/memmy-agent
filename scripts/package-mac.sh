@@ -187,4 +187,8 @@ if [ ! -f "$BASE_SCRIPT" ]; then
 fi
 
 export MEMMY_DESKTOP_VERSION="$VERSION"
-bash "$BASE_SCRIPT" "${PASSTHROUGH_ARGS[@]}"
+if [ "${#PASSTHROUGH_ARGS[@]}" -gt 0 ]; then
+  bash "$BASE_SCRIPT" "${PASSTHROUGH_ARGS[@]}"
+else
+  bash "$BASE_SCRIPT"
+fi
