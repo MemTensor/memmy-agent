@@ -12,7 +12,7 @@ export function sessionDagRoot(env: NodeJS.ProcessEnv = process.env): string {
   const override = env[SESSION_DAG_DIR_ENV];
   return override && override.trim()
     ? path.resolve(override)
-    : path.join(os.homedir(), ".memmy", "session-dag");
+    : path.join(env.MEMMY_HOME?.trim() || path.join(os.homedir(), ".memmy"), "session-dag");
 }
 
 export function sessionDagDbPath(sessionKey: string, env: NodeJS.ProcessEnv = process.env): string {

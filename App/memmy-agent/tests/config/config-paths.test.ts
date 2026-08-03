@@ -18,6 +18,7 @@ import {
 } from "../../src/config/paths.js";
 
 const originalConfig = process.env.MEMMY_CONFIG;
+const originalMemmyHome = process.env.MEMMY_HOME;
 const originalDataDir = process.env.MEMMY_AGENT_DATA_DIR;
 const originalWorkspace = process.env.MEMMY_AGENT_WORKSPACE;
 const roots: string[] = [];
@@ -36,6 +37,8 @@ afterEach(() => {
   setConfigPath(null);
   if (originalConfig === undefined) delete process.env.MEMMY_CONFIG;
   else process.env.MEMMY_CONFIG = originalConfig;
+  if (originalMemmyHome === undefined) delete process.env.MEMMY_HOME;
+  else process.env.MEMMY_HOME = originalMemmyHome;
   if (originalDataDir === undefined) delete process.env.MEMMY_AGENT_DATA_DIR;
   else process.env.MEMMY_AGENT_DATA_DIR = originalDataDir;
   if (originalWorkspace === undefined) delete process.env.MEMMY_AGENT_WORKSPACE;
@@ -112,6 +115,19 @@ describe("config path helpers", () => {
   it("keeps shared paths global", () => {
     expect(getCliHistoryPath()).toBe(path.join(os.homedir(), ".memmy", "history", "cli_history"));
     expect(getBridgeInstallDir()).toBe(path.join(os.homedir(), ".memmy", "bridge"));
+  });
+
+  it("derives config, workspace, history, and bridge paths from MEMMY_HOME", () => {
+    const memmyHome = path.join(tmpRoot(), ".memmy");
+    process.env.MEMMY_HOME = memmyHome;
+    delete process.env.MEMMY_CONFIG;
+    delete process.env.MEMMY_AGENT_DATA_DIR;
+    delete process.env.MEMMY_AGENT_WORKSPACE;
+
+    expect(getConfigPath()).toBe(path.join(memmyHome, "config.yaml"));
+    expect(getWorkspacePath()).toBe(path.join(memmyHome, "workspace"));
+    expect(getCliHistoryPath()).toBe(path.join(memmyHome, "history", "cli_history"));
+    expect(getBridgeInstallDir()).toBe(path.join(memmyHome, "bridge"));
   });
 
   it("resolves workspace paths explicitly", () => {

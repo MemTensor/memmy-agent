@@ -311,7 +311,24 @@ if not exist "%APP_EXEC%" (
   exit /b 1
 )
 
-if not defined MEMMY_CONFIG if exist "%USERPROFILE%\.memmy\config.yaml" set "MEMMY_CONFIG=%USERPROFILE%\.memmy\config.yaml"
+if defined MEMMY_HOME goto memmy_home_ready
+if exist "%USERPROFILE%\.memmy" (
+  set "MEMMY_HOME=%USERPROFILE%\.memmy"
+  goto memmy_home_ready
+)
+for %%I in ("%APP_DIR%") do set "APP_DRIVE=%%~dI"
+if not defined SystemDrive for %%I in ("%USERPROFILE%") do set "SystemDrive=%%~dI"
+if /I not "%APP_DRIVE%"=="%SystemDrive%" (
+  set "MEMMY_HOME=%APP_DRIVE%\MemmyData\.memmy"
+  goto memmy_home_ready
+)
+set "MEMMY_HOME=%USERPROFILE%\.memmy"
+
+:memmy_home_ready
+if not defined MEMMY_CONFIG set "MEMMY_CONFIG=%MEMMY_HOME%\config.yaml"
+if not defined MEMMY_RUNTIME_CONFIG_PATH set "MEMMY_RUNTIME_CONFIG_PATH=%MEMMY_HOME%\runtime.json"
+if not defined MEMMY_AGENT_DATA_DIR set "MEMMY_AGENT_DATA_DIR=%MEMMY_HOME%"
+if not defined MEMMY_AGENT_SESSION_DAG_DIR set "MEMMY_AGENT_SESSION_DAG_DIR=%MEMMY_HOME%\session-dag"
 set "ELECTRON_RUN_AS_NODE=1"
 if not defined NODE_ENV set "NODE_ENV=production"
 

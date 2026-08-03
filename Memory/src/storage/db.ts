@@ -1,8 +1,8 @@
 import Database from "better-sqlite3";
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { homedir } from "node:os";
 import { getLoadablePath as getSqliteVecLoadablePath } from "sqlite-vec";
+import { resolveMemmyHome } from "../config/index.js";
 import { getSchemaVersion, migrate, SCHEMA_VERSION } from "./schema.js";
 import { SQLITE_VEC_VERSION } from "./sqlite-vec-store.js";
 
@@ -74,6 +74,6 @@ export function defaultDatabasePath(): string {
   const baseDir =
     process.env.MEMMY_MEMORY_HOME ??
     process.env.MEMORY_SERVICE_HOME ??
-    join(homedir(), ".memmy", "memory-service");
+    join(resolveMemmyHome(), "memory-service");
   return join(baseDir, "memory.sqlite");
 }

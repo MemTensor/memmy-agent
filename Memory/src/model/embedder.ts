@@ -1,6 +1,5 @@
-import { homedir } from "node:os";
 import { join } from "node:path";
-import type { EmbeddingConfig } from "../config/index.js";
+import { resolveMemmyHome, type EmbeddingConfig } from "../config/index.js";
 import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
 import { stableHash } from "../utils/id.js";
 import { bearer, postJsonWithRetry, trimTrailingSlash } from "./http.js";
@@ -306,7 +305,7 @@ async function ensureLocalExtractor(model: string): Promise<FeatureExtractor> {
   localExtractorPromise = (async () => {
     const mod = await import("@huggingface/transformers");
     const transformers = mod as unknown as TransformersModule;
-    transformers.env.cacheDir = join(homedir(), ".memmy", "memory-service", "model-cache");
+    transformers.env.cacheDir = join(resolveMemmyHome(), "memory-service", "model-cache");
     const pipeline = transformers.pipeline;
     return await pipeline("feature-extraction", model, {
       dtype: "q8",

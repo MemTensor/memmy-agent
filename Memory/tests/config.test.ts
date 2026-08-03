@@ -299,14 +299,14 @@ describe("memmy memory config", () => {
     expect(config.evolution.thinkingBudget).toBeUndefined();
   });
 
-  it("uses only MEMMY_CONFIG and the default config.yaml candidate", () => {
+  it("uses MEMMY_CONFIG and the MEMMY_HOME config.yaml candidate", () => {
     const root = tempRoot();
     setEnv("MEMMY_CONFIG", join(root, "custom.yaml"));
     setEnv("MEMMY_HOME", join(root, "ignored-home"));
 
     expect(defaultConfigPaths()).toEqual([
       join(root, "custom.yaml"),
-      join(homedir(), ".memmy", "config.yaml")
+      join(root, "ignored-home", "config.yaml")
     ]);
   });
 });

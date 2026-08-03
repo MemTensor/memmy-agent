@@ -69,7 +69,12 @@ function createProviderNameResolver(config: Config): (modelId: string | null) =>
 
 function resolveRuntimeConfigPath(options: ByokTokenUsageInstallOptions): string {
   if (options.runtimeConfigPath) return options.runtimeConfigPath;
-  return path.join(options.homeDir ?? os.homedir(), ".memmy", "runtime.json");
+  const env = options.env ?? process.env;
+  if (env.MEMMY_RUNTIME_CONFIG_PATH?.trim()) return env.MEMMY_RUNTIME_CONFIG_PATH;
+  return path.join(
+    env.MEMMY_HOME?.trim() || path.join(options.homeDir ?? os.homedir(), ".memmy"),
+    "runtime.json"
+  );
 }
 
 function readRuntimeConfig(filePath: string): ByokTokenUsageRuntimeConfig | null {

@@ -4,7 +4,9 @@ import path from "node:path";
 import { getConfigPath as getActiveConfigPath } from "./loader.js";
 
 function expandHome(value: string): string {
-  return value === "~" || value.startsWith("~/") ? path.join(os.homedir(), value.slice(2)) : value;
+  return value === "~" || value.startsWith("~/") || value.startsWith("~\\")
+    ? path.join(os.homedir(), value.slice(2))
+    : value;
 }
 
 function ensureDir(value: string): string {
@@ -13,7 +15,10 @@ function ensureDir(value: string): string {
 }
 
 function defaultWorkspacePath(): string {
-  return expandHome(process.env.MEMMY_AGENT_WORKSPACE || "~/.memmy/workspace");
+  return expandHome(
+    process.env.MEMMY_AGENT_WORKSPACE ||
+    path.join(process.env.MEMMY_HOME || "~/.memmy", "workspace")
+  );
 }
 
 export function getConfigPath(): string {
@@ -45,7 +50,7 @@ export function getWebuiDir(): string {
 }
 
 export function getWorkspacePath(workspace?: string | null): string {
-  return ensureDir(expandHome(workspace || process.env.MEMMY_AGENT_WORKSPACE || "~/.memmy/workspace"));
+  return ensureDir(expandHome(workspace || defaultWorkspacePath()));
 }
 
 export function isDefaultWorkspace(workspace?: string | null): boolean {
@@ -54,9 +59,9 @@ export function isDefaultWorkspace(workspace?: string | null): boolean {
 }
 
 export function getCliHistoryPath(): string {
-  return path.join(os.homedir(), ".memmy", "history", "cli_history");
+  return path.join(getRuntimeSubdir("history"), "cli_history");
 }
 
 export function getBridgeInstallDir(): string {
-  return path.join(os.homedir(), ".memmy", "bridge");
+  return getRuntimeSubdir("bridge");
 }

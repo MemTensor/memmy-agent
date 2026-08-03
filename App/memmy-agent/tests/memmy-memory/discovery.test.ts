@@ -73,6 +73,29 @@ describe("memmy memory discovery", () => {
     ]);
   });
 
+  it("derives config and runtime discovery from MEMMY_HOME", () => {
+    const root = tempRoot();
+    const memmyHome = path.join(root, "relocated", ".memmy");
+    const runtimeDir = path.join(memmyHome, "memory-service");
+    fs.mkdirSync(runtimeDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(runtimeDir, "runtime.json"),
+      JSON.stringify({ url: "http://relocated.test", token: "relocated-token" }),
+      "utf8"
+    );
+
+    expect(memmyMemoryConfigPaths({ env: { MEMMY_HOME: memmyHome }, homeDir: root }))
+      .toEqual([path.join(memmyHome, "config.yaml")]);
+    expect(discoverMemmyMemoryConnection({
+      env: { MEMMY_HOME: memmyHome },
+      homeDir: root
+    })).toMatchObject({
+      baseUrl: "http://relocated.test",
+      token: "relocated-token",
+      source: path.join(runtimeDir, "runtime.json")
+    });
+  });
+
   it("parses memmyMemory.enabled and preserves service fields from memmy-agent config", () => {
     const enabled = new Config({
       app: {

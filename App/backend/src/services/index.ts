@@ -126,7 +126,7 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       createCursorSkillTarget({ memmyConfigPath: options.memmyConfigPath }),
       createClaudeCodeSkillTarget({ memmyConfigPath: options.memmyConfigPath }),
       createCodexSkillTarget({ memmyConfigPath: options.memmyConfigPath }),
-      createOpencodeSkillTarget(),
+      createOpencodeSkillTarget({ memmyConfigPath: options.memmyConfigPath }),
       createOpenclawSkillTarget({ memmyConfigPath: options.memmyConfigPath }),
       createHermesSkillTarget({ memmyConfigPath: options.memmyConfigPath }),
       createWorkbuddySkillTarget()

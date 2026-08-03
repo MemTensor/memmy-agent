@@ -2,7 +2,7 @@ import { type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import YAML from "yaml";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -163,6 +163,37 @@ describe("packaged desktop runtime config", () => {
     });
     await expect(stat(join(memmyHome, "workspace"))).resolves.toBeTruthy();
     await expect(stat(join(memmyHome, "memory-service"))).resolves.toBeTruthy();
+  });
+
+  it("rebases copied legacy default paths to the selected data root", async () => {
+    const memmyHome = await makeTempRoot();
+    const configPath = join(memmyHome, "config.yaml");
+    await writeFile(configPath, YAML.stringify({
+      agents: {
+        defaults: {
+          workspace: join(homedir(), ".memmy", "workspace")
+        }
+      },
+      memmyMemory: {
+        storage: {
+          sqlitePath: join(homedir(), ".memmy", "memory-service", "memory.sqlite")
+        }
+      }
+    }), "utf8");
+
+    const runtime = await preparePackagedRuntimeConfig({
+      ensureDirectories: false,
+      env: { MEMMY_HOME: memmyHome },
+      secretFactory: () => "stable-secret"
+    });
+    const config = await readYaml(configPath);
+
+    expect(runtime.agentWorkspace).toBe(join(memmyHome, "workspace"));
+    expect(runtime.memoryDatabasePath).toBe(join(memmyHome, "memory-service", "memory.sqlite"));
+    expect(recordValue(recordValue(config, "agents"), "defaults").workspace)
+      .toBe(join(memmyHome, "workspace"));
+    expect(recordValue(recordValue(config, "memmyMemory"), "storage").sqlitePath)
+      .toBe(join(memmyHome, "memory-service", "memory.sqlite"));
   });
 
   it("preserves existing user model, memory, and websocket settings", async () => {

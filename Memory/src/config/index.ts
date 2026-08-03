@@ -244,6 +244,13 @@ const ACCOUNT_EVOLUTION_THINKING_BUDGET = 1_000;
 const ASYNC_EVOLUTION_TIMEOUT_MS = 3 * 60_000;
 export const MEMORY_SUMMARY_MAX_TOKENS = 512;
 
+export function resolveMemmyHome(
+  env: Record<string, string | undefined> = process.env,
+  homeDirectory: string = homedir()
+): string {
+  return resolve(env.MEMMY_HOME?.trim() || join(homeDirectory, ".memmy"));
+}
+
 export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
   version: 1,
   domain: "",
@@ -251,7 +258,7 @@ export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
   storage: {
     mode: "local",
     backend: "sqlite",
-    sqlitePath: join(homedir(), ".memmy", "memory-service", "memory.sqlite"),
+    sqlitePath: join(resolveMemmyHome(), "memory-service", "memory.sqlite"),
     endpoint: "http://127.0.0.1:18960",
     token: undefined
   },
@@ -443,7 +450,7 @@ export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
 export function defaultConfigPaths(): string[] {
   return [
     process.env.MEMMY_CONFIG,
-    join(homedir(), ".memmy", "config.yaml")
+    join(resolveMemmyHome(), "config.yaml")
   ].filter((value): value is string => Boolean(value));
 }
 

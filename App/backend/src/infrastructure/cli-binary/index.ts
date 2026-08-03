@@ -6,7 +6,8 @@ import type { RuntimeConfig } from "@memmy/local-api-contracts";
 
 /** Handles resolve default runtime config path. */
 export function resolveDefaultRuntimeConfigPath(): string {
-  return join(homedir(), ".memmy", "runtime.json");
+  return process.env.MEMMY_RUNTIME_CONFIG_PATH?.trim() ||
+    join(process.env.MEMMY_HOME?.trim() || join(homedir(), ".memmy"), "runtime.json");
 }
 
 /** Handles resolve default cli symlink path. */

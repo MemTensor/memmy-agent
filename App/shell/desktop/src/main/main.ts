@@ -73,13 +73,17 @@ import {
   opencodeBinaryCandidates
 } from "./agent-tool-terminal.js";
 import {
-  desktopRuntimeHomeDirectoryName,
   desktopUserDataDirectoryName,
   resolveDesktopEdition,
   resolveDesktopPackageSigning,
   type DesktopEdition,
   type DesktopPackageSigning
 } from "./desktop-edition.js";
+import {
+  applyMemmyDataRootEnvironment,
+  assertMemmyDataRootWritable,
+  resolveMemmyDataRoot
+} from "./memmy-data-root.js";
 import {
   getCurrentLogLevel,
   initLogger,
@@ -285,6 +289,7 @@ async function stopPackagedRendererServer(): Promise<void> {
  */
 async function boot(): Promise<void> {
   try {
+    await assertMemmyDataRootWritable(process.env.MEMMY_HOME!);
     process.env.MEMMY_APP_EDITION = resolveCurrentDesktopEdition();
     initLogger();
     forceLightWindowChrome();
@@ -332,19 +337,19 @@ async function boot(): Promise<void> {
  */
 function configureAppIdentity(): void {
   const edition = resolveCurrentDesktopEdition();
-  const memmyHome = join(homedir(), desktopRuntimeHomeDirectoryName(edition));
+  const dataRoot = resolveMemmyDataRoot({
+    platform: process.platform,
+    homeDirectory: homedir(),
+    executablePath: process.execPath,
+    isPackaged: app.isPackaged,
+    env: process.env
+  });
   app.setName("Memmy");
   if (process.platform === "win32") {
     app.setAppUserModelId(WINDOWS_APP_USER_MODEL_ID);
   }
   app.setPath("userData", join(app.getPath("appData"), desktopUserDataDirectoryName(edition)));
-  if (app.isPackaged) {
-    process.env.MEMMY_HOME = memmyHome;
-    process.env.MEMMY_CONFIG = join(memmyHome, "config.yaml");
-  } else {
-    process.env.MEMMY_HOME ??= memmyHome;
-    process.env.MEMMY_CONFIG ??= join(memmyHome, "config.yaml");
-  }
+  applyMemmyDataRootEnvironment(dataRoot);
 }
 
 /**
@@ -5103,7 +5108,8 @@ async function exportDiagnosticsReport(owner: BrowserWindow | null): Promise<Dia
 function buildDiagnosticsReport(): string {
   const logsDirectory = resolveLogsDirectory();
   const configPath = resolvePathValue(process.env.MEMMY_CONFIG ?? "~/.memmy/config.yaml");
-  const agentWorkspace = process.env.MEMMY_AGENT_WORKSPACE ?? join(homedir(), ".memmy", "workspace");
+  const agentWorkspace = process.env.MEMMY_AGENT_WORKSPACE ??
+    join(process.env.MEMMY_HOME ?? join(homedir(), ".memmy"), "workspace");
   const memoryDatabasePath = runtimeServices?.memory.databasePath ?? "<not-started>";
   const runtimeBaseUrl = runtimeConfig?.baseUrl ?? "<not-ready>";
   const agentGatewayBaseUrl = runtimeConfig?.agentGateway?.baseUrl ?? "<not-ready>";
@@ -5170,7 +5176,9 @@ async function resolveMemoryDatabasePathForExport(): Promise<string> {
 
   const configPath = resolvePathValue(process.env.MEMMY_CONFIG ?? "~/.memmy/config.yaml");
   const configuredPath = await readMemoryDatabasePathFromConfig(configPath);
-  return configuredPath ? resolvePathValue(configuredPath) : join(homedir(), ".memmy", "memory-service", "memory.sqlite");
+  return configuredPath
+    ? resolvePathValue(configuredPath)
+    : join(process.env.MEMMY_HOME ?? join(homedir(), ".memmy"), "memory-service", "memory.sqlite");
 }
 
 async function readMemoryDatabasePathFromConfig(configPath: string): Promise<string | null> {

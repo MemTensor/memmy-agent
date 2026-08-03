@@ -8,7 +8,9 @@ import { Config, FileMemoryConfig } from "./schema.js";
 let configPathOverride: string | null = null;
 
 function expandHome(value: string): string {
-  return value === "~" || value.startsWith("~/") ? path.join(os.homedir(), value.slice(2)) : value;
+  return value === "~" || value.startsWith("~/") || value.startsWith("~\\")
+    ? path.join(os.homedir(), value.slice(2))
+    : value;
 }
 
 export function setConfigPath(configPath: string | null): void {
@@ -17,7 +19,10 @@ export function setConfigPath(configPath: string | null): void {
 
 export function getConfigPath(): string {
   if (configPathOverride) return expandHome(configPathOverride);
-  return expandHome(process.env.MEMMY_CONFIG || "~/.memmy/config.yaml");
+  return expandHome(
+    process.env.MEMMY_CONFIG ||
+    path.join(process.env.MEMMY_HOME || "~/.memmy", "config.yaml")
+  );
 }
 
 export function resolveConfigEnvVars(config: Config): Config {

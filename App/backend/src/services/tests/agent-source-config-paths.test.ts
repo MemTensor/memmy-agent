@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -18,6 +18,14 @@ afterEach(() => {
 });
 
 describe("agent source and config path separation", () => {
+  it("passes the active Memmy config path to every built-in Skill target", () => {
+    const source = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
+
+    expect(source).toContain(
+      "createOpencodeSkillTarget({ memmyConfigPath: options.memmyConfigPath })"
+    );
+  });
+
   it("installs OpenCode Skill when the database exists but the config directory does not", async () => {
     tempDirectory = mkdtempSync(join(tmpdir(), "memmy-opencode-paths-"));
     const databasePath = join(tempDirectory, "data", "opencode.db");

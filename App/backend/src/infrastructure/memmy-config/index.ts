@@ -195,7 +195,8 @@ export function createMemmyConfigWriter(options: CreateMemmyConfigWriterOptions 
  * @returns the absolute path to ~/.memmy/config.yaml.
  */
 export function resolveDefaultMemmyConfigPath(homeDirectory = homedir()): string {
-  return join(homeDirectory, ".memmy", "config.yaml");
+  return process.env.MEMMY_CONFIG?.trim() ||
+    join(process.env.MEMMY_HOME?.trim() || join(homeDirectory, ".memmy"), "config.yaml");
 }
 
 /**

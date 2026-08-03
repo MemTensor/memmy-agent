@@ -21,4 +21,6 @@ First run the Memory service, then install the CLI, and finally install the corr
 
 **Where is my data stored? Does scanning upload it?**
 
-Everything defaults to `~/.memmy`, including config, workspace, the Memory SQLite database, and runtime files. Scanning and ingestion happen entirely locally, with memories written to local SQLite. Participation in the "memory improvement program" is explicitly controlled by a toggle in privacy settings.
+Everything defaults to `~/.memmy`, including config, workspace, the Memory SQLite database, and runtime files. On Windows, a fresh installation on a non-system drive uses `MemmyData\.memmy` at that drive's root when no legacy `.memmy` directory exists in the user profile, for example `D:\MemmyData\.memmy`. Scanning and ingestion happen entirely locally, with memories written to local SQLite. Participation in the "memory improvement program" is explicitly controlled by a toggle in privacy settings.
+
+To migrate an existing Windows installation manually, fully quit Memmy (including its tray and background processes), copy the entire `%USERPROFILE%\.memmy` directory to `D:\MemmyData\.memmy`, then rename the original directory as a backup before starting Memmy. Memmy deliberately keeps using the original while it still exists. Delete the backup only after verifying that projects, conversations, and Memory data are available from the new location.

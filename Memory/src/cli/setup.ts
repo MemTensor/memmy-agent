@@ -34,7 +34,7 @@ export interface MemoryCliSetupOptions {
 }
 
 export async function initMemoryCli(options: MemoryCliSetupOptions = {}): Promise<Record<string, unknown>> {
-  const home = resolve(expandHome(options.home ?? "~/.memmy"));
+  const home = resolve(expandHome(options.home ?? process.env.MEMMY_HOME ?? "~/.memmy"));
   const configPath = resolve(expandHome(options.configPath ?? join(home, "config.yaml")));
   const dbPath = resolve(expandHome(options.dbPath ?? join(home, "memory-service", "memory.sqlite")));
   const endpoint = options.endpoint ?? "http://127.0.0.1:18960";
@@ -75,7 +75,7 @@ export async function initMemoryCli(options: MemoryCliSetupOptions = {}): Promis
 }
 
 export async function installMemoryCli(options: MemoryCliSetupOptions = {}): Promise<Record<string, unknown>> {
-  const home = resolve(expandHome(options.home ?? "~/.memmy"));
+  const home = resolve(expandHome(options.home ?? process.env.MEMMY_HOME ?? "~/.memmy"));
   const binPath = resolve(expandHome(options.binPath ?? join(home, "bin", "memmy-memory")));
   const source = resolve(expandHome(options.sourcePath ?? join(process.cwd(), "dist", "src", "cli", "index.js")));
 

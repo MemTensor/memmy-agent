@@ -222,14 +222,38 @@ export async function preparePackagedRuntimeConfig(
     changed = true;
   }
   changed = repairMemoryActiveProfile(memmyMemory) || changed;
+  const legacyHome = resolvePath("~/.memmy");
   const defaultWorkspace = join(memmyHome, "workspace");
-  const configuredWorkspace = stringValue(defaults.workspace);
+  let configuredWorkspace = stringValue(defaults.workspace);
+  if (
+    configuredWorkspace &&
+    !samePath(memmyHome, legacyHome) &&
+    samePath(resolvePath(configuredWorkspace), join(legacyHome, "workspace"))
+  ) {
+    configuredWorkspace = defaultWorkspace;
+    defaults.workspace = defaultWorkspace;
+    changed = true;
+  }
+  const defaultMemoryDatabasePath = join(memmyHome, "memory-service", "memory.sqlite");
+  let configuredMemoryDatabasePath = stringValue(storage.sqlitePath);
+  if (
+    configuredMemoryDatabasePath &&
+    !samePath(memmyHome, legacyHome) &&
+    samePath(
+      resolvePath(configuredMemoryDatabasePath),
+      join(legacyHome, "memory-service", "memory.sqlite")
+    )
+  ) {
+    configuredMemoryDatabasePath = defaultMemoryDatabasePath;
+    storage.sqlitePath = defaultMemoryDatabasePath;
+    changed = true;
+  }
   const agentWorkspace = resolvePath(env.MEMMY_AGENT_WORKSPACE ?? configuredWorkspace ?? defaultWorkspace);
   const memoryDatabasePath = resolvePath(
     env.MEMMY_MEMORY_DB ??
       env.MEMORY_SERVICE_DB ??
-      stringValue(storage.sqlitePath) ??
-      join(memmyHome, "memory-service", "memory.sqlite")
+      configuredMemoryDatabasePath ??
+      defaultMemoryDatabasePath
   );
 
   changed = setMissing(storage, "mode", "local") || changed;
@@ -1255,6 +1279,12 @@ function numberValue(value: unknown): number | undefined {
 
 function resolvePath(path: string): string {
   return resolve(expandHome(path));
+}
+
+function samePath(left: string, right: string): boolean {
+  return process.platform === "win32"
+    ? left.toLowerCase() === right.toLowerCase()
+    : left === right;
 }
 
 function expandHome(path: string): string {

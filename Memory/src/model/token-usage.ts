@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { resolveMemmyHome } from "../config/index.js";
 
 export type MemoryLlmModelRole = "memory_summary" | "memory_evolution";
 export type MemoryTokenUsageKind = MemoryLlmModelRole | "embedding";
@@ -45,7 +45,7 @@ const EVENT_PATH = "/api/app/byok-token-usage/events";
 const RUNTIME_TOKEN_HEADER = "x-memmy-local-token";
 
 export function resolveDefaultRuntimeConfigPath(): string {
-  return join(homedir(), ".memmy", "runtime.json");
+  return join(resolveMemmyHome(), "runtime.json");
 }
 
 export function extractModelTokenUsage(response: unknown): ModelTokenUsage {

@@ -393,6 +393,44 @@ describe("desktop packaged runtime boundaries", () => {
     expect(includeSource).toContain("CRCCheck off");
   });
 
+  it("validates interactive Windows install directories before extraction", () => {
+    const signedBuilderConfig = readFileSync(winElectronBuilderPath, "utf8");
+    const unsignedBuilderConfig = readFileSync(winUnsignedBuilderPath, "utf8");
+    const includeSource = readFileSync(winUnsignedInstallerIncludePath, "utf8");
+
+    for (const builderConfig of [signedBuilderConfig, unsignedBuilderConfig]) {
+      expect(builderConfig).toContain("perMachine: false");
+      expect(builderConfig).toContain("allowElevation: false");
+      expect(builderConfig).toContain("allowToChangeInstallationDirectory: true");
+    }
+
+    expect(includeSource).toContain("!macro customPageAfterChangeDir");
+    expect(includeSource).toContain("Page custom MemmyValidateInstallDirectoryPage");
+    expect(includeSource).toContain("${Silent}");
+    expect(includeSource).toContain("${isUpdated}");
+    expect(includeSource).toContain("GetTempFileName");
+    expect(includeSource).toContain('CreateDirectory "$R0"');
+    expect(includeSource).toContain('StrCpy $R5 "1"');
+    expect(includeSource).toContain('RMDir "$R0"');
+    expect(includeSource).toContain("FileOpen");
+    expect(includeSource).toContain("FileWrite");
+    expect(includeSource).toContain("Delete");
+    expect(includeSource).toContain("RMDir");
+    expect(includeSource).toContain("Function MemmyResolveDataDirectory");
+    expect(includeSource).toContain('ReadEnvStr $R6 "MEMMY_HOME"');
+    expect(includeSource).toContain('StrCmp $R6 "~" memmy_data_use_legacy');
+    expect(includeSource).toContain('${GetRoot} "$INSTDIR" $R6');
+    expect(includeSource).toContain('StrCpy $R6 "$PROFILE\\.memmy"');
+    expect(includeSource).toContain('StrCpy $R6 "$R6\\MemmyData\\.memmy"');
+    expect(includeSource).toContain("Call MemmyResolveDataDirectory");
+    expect(includeSource).toContain("Call MemmyProbeWritableDirectory");
+    expect(includeSource).toContain("The Memmy data directory is not writable");
+    expect(includeSource).toContain("Memmy 数据目录无法写入");
+    expect(includeSource).toContain("EnableWindow $0 0");
+    expect(includeSource).toContain("D:\\Memmy");
+    expect(includeSource).toContain("Program Files");
+  });
+
   it("adds packaged Windows CLI launchers to the user PATH", () => {
     const signedBuilderConfig = readFileSync(winElectronBuilderPath, "utf8");
     const unsignedBuilderConfig = readFileSync(winUnsignedBuilderPath, "utf8");
@@ -511,7 +549,9 @@ describe("desktop packaged runtime boundaries", () => {
     expect(exportSource).not.toContain("filters:");
     expect(exportSource).not.toContain("All Files");
     expect(source).toContain('import { backupSqliteDatabase } from "./sqlite-backup.js"');
-    expect(source).toContain('join(homedir(), ".memmy", "memory-service", "memory.sqlite")');
+    expect(source).toContain(
+      'join(process.env.MEMMY_HOME ?? join(homedir(), ".memmy"), "memory-service", "memory.sqlite")'
+    );
   });
 
   it("saves and copies generated images through native desktop APIs", () => {
@@ -592,6 +632,9 @@ describe("desktop packaged runtime boundaries", () => {
     expect(agentPackage.bin).toEqual({ memmy: "./dist/main.js" });
     expect(agentPackageLock.packages?.[""]?.bin).toEqual({ memmy: "dist/main.js" });
     expect(mainSource).toContain('const memmyCli = join(cliDirectory, "memmy")');
+    expect(mainSource).toContain("resolveMemmyDataRoot({");
+    expect(mainSource).toContain("applyMemmyDataRootEnvironment(dataRoot)");
+    expect(mainSource).toContain("await assertMemmyDataRootWritable(process.env.MEMMY_HOME!)");
     expect(mainSource).toContain('await Promise.all([access(memoryCli), access(memmyCli)])');
     expect(mainSource).toContain('installSymlink(memmyCli, join(binDirectory, "memmy"))');
     expect(mainSource).not.toContain(['join(cliDirectory, "', 'memmy-agent', '")'].join(""));
@@ -602,6 +645,9 @@ describe("desktop packaged runtime boundaries", () => {
     expect(windowsPackageSource).toContain('create_windows_cli_launcher "$CLI_BIN_DIR/memmy.cmd"');
     expect(windowsPackageSource).toContain('for %%I in ("%RESOURCES_DIR%\\..") do set "APP_DIR=%%~fI"');
     expect(windowsPackageSource).toContain('set "APP_EXEC=%APP_DIR%\\Memmy.exe"');
+    expect(windowsPackageSource).toContain('if exist "%USERPROFILE%\\.memmy"');
+    expect(windowsPackageSource).toContain('set "MEMMY_HOME=%APP_DRIVE%\\MemmyData\\.memmy"');
+    expect(windowsPackageSource).toContain('set "MEMMY_CONFIG=%MEMMY_HOME%\\config.yaml"');
     expect(windowsPackageSource).not.toContain('set "APP_EXEC=%RESOURCES_DIR%\\Memmy.exe"');
     expect(windowsPackageSource).not.toContain(['create_windows_cli_launcher "$CLI_BIN_DIR/', 'memmy-agent', '.cmd"'].join(""));
   });

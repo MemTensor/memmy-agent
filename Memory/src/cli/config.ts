@@ -50,7 +50,7 @@ export function loadCliMemoryConfig(configPath?: string): {
 export function defaultConfigPaths(): string[] {
   return [
     process.env.MEMMY_CONFIG ? resolve(expandHome(process.env.MEMMY_CONFIG)) : undefined,
-    join(homedir(), ".memmy", "config.yaml")
+    join(resolve(process.env.MEMMY_HOME?.trim() || join(homedir(), ".memmy")), "config.yaml")
   ].filter((value): value is string => Boolean(value));
 }
 

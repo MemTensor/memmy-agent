@@ -11,4 +11,6 @@ icon: MessageCircleQuestionMark
 
 先运行 Memory 服务，再安装 CLI，然后 为 Codex、Cursor、Claude Code、Opencode、OpenClaw 或 Hermes 安装对应 Skill。
 
-默认在 `~/.memmy` 下，包括配置、workspace、Memory SQLite 数据库和运行时文件。 扫描和入库都在本地完成，记忆写入本地 SQLite。是否参与「记忆改进计划」由隐私设置中的开关显式控制。
+默认在 `~/.memmy` 下，包括配置、workspace、Memory SQLite 数据库和运行时文件。Windows 新安装到非系统盘且用户目录下没有 `.memmy` 时，数据位于安装盘根目录的 `MemmyData\.memmy`，例如 `D:\MemmyData\.memmy`。扫描和入库都在本地完成，记忆写入本地 SQLite。是否参与「记忆改进计划」由隐私设置中的开关显式控制。
+
+已有 Windows 用户可以手动迁移：先完全退出 Memmy（包括托盘和后台进程），把整个 `%USERPROFILE%\.memmy` 复制到应用安装磁盘创建MemmyData目录下，比如安装在D盘 `D:\MemmyData\.memmy`，再把原目录改名为备份后启动 Memmy。原目录仍存在时 Memmy 会继续优先使用它；请确认项目、会话和记忆数据都正常后再删除备份。

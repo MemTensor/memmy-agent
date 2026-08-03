@@ -20,9 +20,10 @@ function expandHome(value: string, homeDir: string): string {
 export function memmyMemoryConfigPaths(options: MemmyMemoryDiscoveryOptions = {}): string[] {
   const env = options.env ?? process.env;
   const homeDir = options.homeDir ?? os.homedir();
+  const memmyHome = env.MEMMY_HOME?.trim() || path.join(homeDir, ".memmy");
   return [
     env.MEMMY_CONFIG,
-    path.join(homeDir, ".memmy", "config.yaml"),
+    path.join(memmyHome, "config.yaml"),
   ]
     .filter((value): value is string => Boolean(value))
     .map((value) => path.resolve(expandHome(value, homeDir)));
@@ -45,8 +46,11 @@ function readTokenFile(file: string | null | undefined, homeDir: string): string
 }
 
 function runtimePath(env: DiscoveryEnv, homeDir: string): string {
-  void env;
-  return path.join(homeDir, ".memmy", "memory-service", "runtime.json");
+  return path.join(
+    env.MEMMY_HOME?.trim() || path.join(homeDir, ".memmy"),
+    "memory-service",
+    "runtime.json"
+  );
 }
 
 function readRuntimeDiscovery(env: DiscoveryEnv, homeDir: string): Record<string, any> {

@@ -1,3 +1,4 @@
+import path from "node:path";
 import { CronSchedule } from "../cron/types.js";
 import { PROVIDERS, findByName, normalizeProviderName } from "../providers/registry.js";
 import { DEFAULT_MAX_TOKENS } from "../token-budget.js";
@@ -292,7 +293,7 @@ export class ModelPresetConfig extends Base {
 }
 
 export class AgentDefaults extends Base {
-  workspace = "~/.memmy/workspace";
+  workspace = path.join(process.env.MEMMY_HOME || "~/.memmy", "workspace");
   modelPreset: string | null = null;
   model = "anthropic/claude-opus-4-5";
   provider = "auto";

@@ -2,6 +2,10 @@
   !define MEMMY_WM_SETTINGCHANGE 0x001A
 !endif
 
+!ifndef MEMMY_LANG_SIMPCHINESE
+  !define MEMMY_LANG_SIMPCHINESE 2052
+!endif
+
 !macro customHeader
   !ifdef BUILD_UNINSTALLER
     ; Keep unsigned QA uninstallers usable if Windows or transfer tools touch the NSIS stub.
@@ -17,6 +21,174 @@
 !macro customInstallMode
   StrCpy $isForceCurrentInstall "1"
 !macroend
+
+!ifndef BUILD_UNINSTALLER
+  !macro customPageAfterChangeDir
+    Page custom MemmyValidateInstallDirectoryPage
+
+    Function MemmyProbeInstallDirectory
+      ${StrContains} $R4 "${APP_FILENAME}" $INSTDIR
+      ${If} $R4 == ""
+        StrCpy $INSTDIR "$INSTDIR\${APP_FILENAME}"
+      ${EndIf}
+
+      StrCpy $R0 "$INSTDIR"
+      Call MemmyProbeWritableDirectory
+    FunctionEnd
+
+    ; Input: $R0 is the exact directory to validate. Output: pushes "1" when
+    ; that directory supports create/write/delete operations, else "0".
+    Function MemmyProbeWritableDirectory
+      StrCpy $R1 ""
+      StrCpy $R2 ""
+      StrCpy $R3 ""
+      StrCpy $R5 "0"
+
+      ; Probe the final target instead of walking upward, so an inaccessible
+      ; existing path cannot be mistaken for a missing path with a writable parent.
+      ; Remove the target afterward only when this probe created it.
+      IfFileExists "$R0\*.*" memmy_writable_probe_target_ready
+      ClearErrors
+      CreateDirectory "$R0"
+      IfErrors memmy_writable_probe_failed
+      StrCpy $R5 "1"
+
+      memmy_writable_probe_target_ready:
+        ClearErrors
+        GetTempFileName $R1 "$R0"
+        IfErrors memmy_writable_probe_failed
+        Delete "$R1"
+        IfErrors memmy_writable_probe_cleanup_failed
+        CreateDirectory "$R1"
+        IfErrors memmy_writable_probe_cleanup_failed
+        StrCpy $R2 "$R1\write-test.tmp"
+        FileOpen $R3 "$R2" w
+        IfErrors memmy_writable_probe_cleanup_failed
+        FileWrite $R3 "Memmy"
+        IfErrors memmy_writable_probe_close_failed
+        FileClose $R3
+        StrCpy $R3 ""
+        ClearErrors
+        Delete "$R2"
+        IfErrors memmy_writable_probe_cleanup_failed
+        StrCpy $R2 ""
+        ClearErrors
+        RMDir "$R1"
+        IfErrors memmy_writable_probe_cleanup_failed
+        StrCpy $R1 ""
+        ${If} $R5 == "1"
+          ClearErrors
+          RMDir "$R0"
+          IfErrors memmy_writable_probe_failed
+          StrCpy $R5 "0"
+        ${EndIf}
+        Push "1"
+        Return
+
+      memmy_writable_probe_close_failed:
+        FileClose $R3
+        StrCpy $R3 ""
+
+      memmy_writable_probe_cleanup_failed:
+        ClearErrors
+        ${If} $R2 != ""
+          Delete "$R2"
+        ${EndIf}
+        ${If} $R1 != ""
+          Delete "$R1"
+          RMDir "$R1"
+        ${EndIf}
+        ClearErrors
+
+      memmy_writable_probe_failed:
+        ${If} $R5 == "1"
+          ClearErrors
+          RMDir "$R0"
+        ${EndIf}
+        Push "0"
+    FunctionEnd
+
+    ; Keep the install-time preflight aligned with resolveMemmyDataRoot in the
+    ; desktop main process: retain existing legacy data, otherwise place new
+    ; data beside a non-system-drive installation.
+    Function MemmyResolveDataDirectory
+      ClearErrors
+      ReadEnvStr $R6 "MEMMY_HOME"
+      IfErrors memmy_data_no_explicit_home
+      StrCmp $R6 "" memmy_data_no_explicit_home
+      StrCmp $R6 "~" memmy_data_use_legacy
+      StrCpy $R7 $R6 2
+      StrCmp $R7 "~\" memmy_data_expand_explicit_home
+      StrCmp $R7 "~/" memmy_data_expand_explicit_home
+      Return
+
+      memmy_data_expand_explicit_home:
+        StrCpy $R7 $R6 "" 2
+        StrCpy $R6 "$PROFILE\$R7"
+        Return
+
+      memmy_data_no_explicit_home:
+      IfFileExists "$PROFILE\.memmy\*.*" memmy_data_use_legacy
+
+      ${GetRoot} "$INSTDIR" $R6
+      ${GetRoot} "$WINDIR" $R7
+      StrCmp $R6 "" memmy_data_use_legacy
+      StrCmp $R6 $R7 memmy_data_use_legacy
+      StrCpy $R6 "$R6\MemmyData\.memmy"
+      Return
+
+      memmy_data_use_legacy:
+        StrCpy $R6 "$PROFILE\.memmy"
+    FunctionEnd
+
+    Function MemmyValidateInstallDirectoryPage
+      GetDlgItem $0 $HWNDPARENT 1
+      EnableWindow $0 1
+
+      ${If} ${Silent}
+        Abort
+      ${EndIf}
+      ${If} ${isUpdated}
+        Abort
+      ${EndIf}
+
+      Call MemmyProbeInstallDirectory
+      Pop $1
+      StrCmp $1 "1" 0 memmy_install_directory_invalid
+
+      Call MemmyResolveDataDirectory
+      StrCpy $R0 "$R6"
+      Call MemmyProbeWritableDirectory
+      Pop $1
+      StrCmp $1 "1" 0 memmy_data_directory_invalid
+      Abort
+
+      memmy_install_directory_invalid:
+        StrCpy $3 "The selected directory is not writable.$\r$\n$\r$\nChoose a directory your Windows account can write to, such as D:\Memmy. To keep silent updates working, do not choose a directory that requires administrator permission, such as Program Files."
+        StrCmp $LANGUAGE ${MEMMY_LANG_SIMPCHINESE} 0 memmy_install_directory_create_page
+        StrCpy $3 "所选目录无法写入。$\r$\n$\r$\n请选择当前 Windows 账户可写入的目录，例如 D:\Memmy。为保证静默升级，请勿选择需要管理员权限的目录，例如 Program Files。"
+        Goto memmy_install_directory_create_page
+
+      memmy_data_directory_invalid:
+        StrCpy $3 "The Memmy data directory is not writable: $R6.$\r$\n$\r$\nChoose an installation drive whose root directory your Windows account can write to, or install Memmy on the Windows system drive."
+        StrCmp $LANGUAGE ${MEMMY_LANG_SIMPCHINESE} 0 memmy_install_directory_create_page
+        StrCpy $3 "Memmy 数据目录无法写入：$R6。$\r$\n$\r$\n请选择当前 Windows 账户可写入根目录的安装盘，或将 Memmy 安装到 Windows 系统盘。"
+
+      memmy_install_directory_create_page:
+        nsDialogs::Create 1018
+        Pop $2
+        StrCmp $2 error 0 memmy_install_directory_show
+        Abort
+
+      memmy_install_directory_show:
+        ${NSD_CreateLabel} 0 0 100% 70u "$3"
+        Pop $4
+        GetDlgItem $0 $HWNDPARENT 1
+        EnableWindow $0 0
+        nsDialogs::Show
+    FunctionEnd
+  !macroend
+!endif
 
 !ifndef BUILD_UNINSTALLER
   !macro customInstall
