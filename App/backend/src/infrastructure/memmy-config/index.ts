@@ -1258,16 +1258,29 @@ async function writeMemmyConfig(config: Record<string, unknown>, configPath: str
   const configDirectory = dirname(configPath);
   const tempPath = join(configDirectory, `.${basename(configPath)}.${process.pid}.${Date.now()}.tmp`);
   const body = YAML.stringify(config);
+  const content = body.endsWith("\n") ? body : `${body}\n`;
+  const writeOptions = {
+    encoding: "utf8",
+    mode: 0o600
+  } as const;
 
   await mkdir(configDirectory, { recursive: true, mode: 0o700 });
   await chmod(configDirectory, 0o700);
 
   try {
-    await writeFile(tempPath, body.endsWith("\n") ? body : `${body}\n`, {
-      encoding: "utf8",
-      mode: 0o600
-    });
-    await rename(tempPath, configPath);
+    await writeFile(tempPath, content, writeOptions);
+    try {
+      await rename(tempPath, configPath);
+    } catch (error) {
+      if (!isFileReplacementConflict(error)) {
+        throw error;
+      }
+
+      // Windows can deny rename-over-existing when another reader omits delete sharing.
+      await chmod(configPath, 0o600).catch(() => undefined);
+      await writeFile(configPath, content, writeOptions);
+      await rm(tempPath, { force: true }).catch(() => undefined);
+    }
     await chmod(configPath, 0o600);
   } catch (error) {
     await rm(tempPath, { force: true });
@@ -1334,4 +1347,8 @@ function omitUndefined(value: Record<string, unknown>): Record<string, unknown> 
  */
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error;
+}
+
+function isFileReplacementConflict(error: unknown): boolean {
+  return isNodeError(error) && (error.code === "EPERM" || error.code === "EACCES" || error.code === "EBUSY");
 }
