@@ -27,6 +27,7 @@ import { appActions, type AppAction } from "../state/app-actions.js";
 import type { AppState } from "../state/app-reducer.js";
 import { useAppState } from "../state/app-state.js";
 import { AppFrame } from "./app-frame.js";
+import { formatTokenGiftAmount } from "./token-gift.js";
 import usageStyles from "./settings-token-usage.module.css";
 import {
   OptionalModelMissingWarningModal,
@@ -394,7 +395,15 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const giftBarUsedTokens = agentQuota?.usedTokens ?? giftUsedTokens;
   const { usagePercent, isTokenLow } = resolveGiftTokenUsage(giftBarUsedTokens, giftTotalTokens, giftRemainingTokens);
   const showGiftQuota = !isByokMode;
-  const invitationEnabled = bootstrap?.promotions?.invitation?.enabled === true;
+  const invitationPromotion = bootstrap?.promotions?.invitation;
+  const invitationEnabled = invitationPromotion?.enabled === true;
+  const invitationRewardBody = invitationPromotion
+    && invitationPromotion.inviterRewardTokens > 0
+    && invitationPromotion.inviterRewardTokens === invitationPromotion.inviteeRewardTokens
+      ? t("settings.token.invite.bodyWithReward", {
+          count: formatTokenGiftAmount(invitationPromotion.inviterRewardTokens)
+        })
+      : t("settings.token.invite.body");
   const displayInviteCode = invitationInfo?.invitationCode ?? null;
   const inviteDailyLimitReached = invitationInfo?.dailyLimitReached ?? false;
   const showInvitationBanner = invitationEnabled
@@ -1715,7 +1724,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
                     ? t("settings.token.invite.loading")
                     : inviteDailyLimitReached
                       ? t("settings.token.invite.dailyLimit")
-                      : t("settings.token.invite.body")}
+                      : invitationRewardBody}
               </p>
             </div>
             {displayInviteCode ? (
