@@ -444,8 +444,10 @@ verify_windows_agent_native_artifacts() {
 
 verify_packaged_windows_unpacked_artifacts() {
   local unpacked_runtime="$DESKTOP_DIR/release/win-unpacked/resources/app.asar.unpacked/dist/runtime"
+  local app_asar="$DESKTOP_DIR/release/win-unpacked/resources/app.asar"
 
-  require_packaged_runtime_file "$DESKTOP_DIR/release/win-unpacked/resources/app.asar"
+  require_packaged_runtime_file "$app_asar"
+  node "$ROOT_DIR/scripts/internal/verify-packaged-yaml-runtime.mjs" "$app_asar"
   require_packaged_runtime_file "$unpacked_runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/win32/x64/onnxruntime.dll"
   require_packaged_runtime_glob "$unpacked_runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/win32/x64/*.dll"
   require_packaged_runtime_glob "$unpacked_runtime/memory/node_modules/@img/sharp-win32-x64/lib/libvips*.dll"

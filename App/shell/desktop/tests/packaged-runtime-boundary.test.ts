@@ -14,6 +14,9 @@ const signedMacArm64PackagePath = fileURLToPath(
   new URL("../../../../scripts/internal/package-mac-arm64-signed-base.sh", import.meta.url)
 );
 const packageWinX64Path = fileURLToPath(new URL("../../../../scripts/internal/package-win-x64.sh", import.meta.url));
+const verifyPackagedYamlRuntimePath = fileURLToPath(
+  new URL("../../../../scripts/internal/verify-packaged-yaml-runtime.mjs", import.meta.url)
+);
 const winX64CnUnsignedPackagePath = fileURLToPath(
   new URL("../../../../scripts/package-win-x64-cn-unsigned.sh", import.meta.url)
 );
@@ -243,6 +246,8 @@ describe("desktop packaged runtime boundaries", () => {
     ]) {
       const config = parseYaml(readFileSync(configPath, "utf8")) as {
         files?: string[];
+        mac?: { files?: Array<{ filter?: string[]; from?: string }> };
+        win?: { files?: Array<{ filter?: string[]; from?: string }> };
       };
       const files = config.files ?? [];
 
@@ -254,6 +259,11 @@ describe("desktop packaged runtime boundaries", () => {
         "!**/node_modules/**/{README,README*.md,README*.mdown,README*.markdown,README*.rst,README*.txt,CHANGELOG,CHANGELOG*.md,CHANGELOG*.mdown,CHANGELOG*.markdown,CHANGELOG*.rst,CHANGELOG*.txt,CONTRIBUTING,CONTRIBUTING*.md,CONTRIBUTING*.mdown,CONTRIBUTING*.markdown,CONTRIBUTING*.rst,CONTRIBUTING*.txt,CODE_OF_CONDUCT,CODE_OF_CONDUCT*.md,CODE_OF_CONDUCT*.mdown,CODE_OF_CONDUCT*.markdown,CODE_OF_CONDUCT*.rst,CODE_OF_CONDUCT*.txt,SECURITY,SECURITY*.md,SECURITY*.mdown,SECURITY*.markdown,SECURITY*.rst,SECURITY*.txt}"
       );
       expect(files).not.toContain("!**/node_modules/**/*.md");
+      expect(files).toContain("!**/node_modules/**/*.map");
+      const platformFileSets = config.win?.files ?? config.mac?.files ?? [];
+      expect(platformFileSets).toEqual([
+        { from: ".", filter: ["**/node_modules/yaml/dist/doc/*.js"] }
+      ]);
     }
   });
 
@@ -1049,6 +1059,7 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).toContain('prune_node_modules_non_runtime_files "$RUNTIME_DIR"');
     expect(source).toContain("-name tests");
     expect(source).toContain("-name docs");
+    expect(source).toContain('! -path "*/node_modules/yaml/dist/doc"');
     expect(source).toContain('-iname "README*.md"');
     expect(source).toContain('-iname "README*.mdown"');
     expect(source).toContain('-iname "CHANGELOG*.md"');
@@ -1063,6 +1074,21 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source.indexOf('prune_node_modules_non_runtime_files "$RUNTIME_DIR"')).toBeLessThan(
       source.indexOf("npx electron-builder"),
     );
+  });
+
+  it("verifies YAML Document runtime modules in packaged app archives", () => {
+    const macSource = readFileSync(packageMacDmgPath, "utf8");
+    const winSource = readFileSync(packageWinX64Path, "utf8");
+    const verifierSource = readFileSync(verifyPackagedYamlRuntimePath, "utf8");
+
+    for (const source of [macSource, winSource]) {
+      expect(source).toContain("verify-packaged-yaml-runtime.mjs");
+      expect(source).toContain("app.asar");
+    }
+    expect(verifierSource).toContain("listPackage");
+    expect(verifierSource).toContain("yaml/dist/compose/composer.js");
+    expect(verifierSource).toContain("yaml/dist/doc/directives.js");
+    expect(verifierSource).toContain("yaml/dist/doc/Document.js");
   });
 
   it("sets an explicit edition in macOS package wrappers", () => {

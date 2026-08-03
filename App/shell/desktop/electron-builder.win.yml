@@ -13,6 +13,7 @@ files:
   - "!**/node_modules/**/{test,tests,__tests__,doc,docs,example,examples,coverage,.github}/**/*"
   - "!**/node_modules/**/*.{test,spec}.*"
   - "!**/node_modules/**/{README,README*.md,README*.mdown,README*.markdown,README*.rst,README*.txt,CHANGELOG,CHANGELOG*.md,CHANGELOG*.mdown,CHANGELOG*.markdown,CHANGELOG*.rst,CHANGELOG*.txt,CONTRIBUTING,CONTRIBUTING*.md,CONTRIBUTING*.mdown,CONTRIBUTING*.markdown,CONTRIBUTING*.rst,CONTRIBUTING*.txt,CODE_OF_CONDUCT,CODE_OF_CONDUCT*.md,CODE_OF_CONDUCT*.mdown,CODE_OF_CONDUCT*.markdown,CODE_OF_CONDUCT*.rst,CODE_OF_CONDUCT*.txt,SECURITY,SECURITY*.md,SECURITY*.mdown,SECURITY*.markdown,SECURITY*.rst,SECURITY*.txt}"
+  - "!**/node_modules/**/*.map"
 
 asar: true
 asarUnpack:
@@ -35,6 +36,10 @@ extraResources:
     to: icon.ico
 
 win:
+  files:
+    - from: .
+      filter:
+        - "**/node_modules/yaml/dist/doc/*.js"
   icon: build/icon.ico
   target:
     - target: nsis

@@ -456,7 +456,7 @@ prune_node_modules_non_runtime_files() {
         -name examples -o \
         -name coverage -o \
         -name .github \
-      \) > "$disposable_list"
+      \) ! -path "*/node_modules/yaml/dist/doc" > "$disposable_list"
 
     local disposable_dir
     while IFS= read -r disposable_dir; do
@@ -576,8 +576,10 @@ verify_packaged_mac_unpacked_artifacts() {
   local app_path
   app_path="$(resolve_packaged_mac_app_path "$target_cpu")"
   local unpacked_runtime="$app_path/Contents/Resources/app.asar.unpacked/dist/runtime"
+  local app_asar="$app_path/Contents/Resources/app.asar"
 
-  require_packaged_runtime_file "$app_path/Contents/Resources/app.asar"
+  require_packaged_runtime_file "$app_asar"
+  node "$ROOT_DIR/scripts/internal/verify-packaged-yaml-runtime.mjs" "$app_asar"
   require_packaged_runtime_glob "$unpacked_runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/darwin/$target_cpu/libonnxruntime*.dylib"
   require_packaged_runtime_glob "$unpacked_runtime/memory/node_modules/@img/sharp-libvips-darwin-$target_cpu/lib/libvips*.dylib"
   require_packaged_runtime_file "$unpacked_runtime/memmy-agent/node_modules/@memmy/migrations/dist/index.js"
