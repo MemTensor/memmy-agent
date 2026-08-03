@@ -341,6 +341,7 @@ export function OnboardingPage() {
       await startAgentSourceScan({
         clients,
         dispatch,
+        mode: "initial_subset",
         queuedMessage: t("memory.scanQueued"),
         formatError: (error) => formatAgentSourceScanRequestError(error, undefined, t),
         scheduleFallback: (callback, delayMs) => globalThis.setTimeout(callback, delayMs),

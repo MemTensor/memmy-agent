@@ -24,6 +24,7 @@ import {
   createAgentSourceLifecycleAnalytics,
   resolveLoggedInAnalyticsUserId,
 } from "../analytics/agent-source-analytics.js";
+import { createMemoryDesktopAddAnalytics } from "../analytics/memory-add-analytics.js";
 import { createAgentSourceService, type AgentSourceService } from "./agent-source-service.js";
 import { createAgentSourceAutoInjectService, type AgentSourceAutoInjectService } from "./agent-source-auto-inject-service.js";
 import { createBuiltinAgentSourceRegistry } from "./builtin-agent-source-registry.js";
@@ -114,12 +115,6 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
   const sourceRegistry =
     options.sourceRegistry ??
     createBuiltinAgentSourceRegistry();
-  const ingestionService =
-    options.ingestionService ??
-    createIngestionService({
-      memoryClient: options.memoryClient,
-      agentSourceRepository: options.appStateStore.repositories.agentSources
-    });
   const skillTargetRegistry =
     options.skillTargetRegistry ??
     createSkillTargetRegistry([
@@ -141,6 +136,28 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
     createHttpMemmyAgentAdminClient({ bootstrapSecret: options.memmyAgentAdminBootstrapSecret });
   const memmyConfigWriter = options.memmyConfigWriter ?? createUnavailableMemmyConfigWriter();
   const accountSessionRepository = options.appStateStore.repositories.accountSession;
+  const resolveAnalyticsUserId = () => {
+    const session = accountSessionRepository.get();
+    if (!session.authenticated) return null;
+    return resolveLoggedInAnalyticsUserId({
+      cloudUuid: accountSessionRepository.getCloudUuid(),
+      userId: session.profile.userId,
+    });
+  };
+  const resolveAnalyticsUserMode = () => {
+    const mode = options.appStateStore.repositories.bootstrap.getAppSettings().userMode;
+    return mode === "account" || mode === "byok" ? mode : null;
+  };
+  const ingestionService =
+    options.ingestionService ??
+    createIngestionService({
+      memoryClient: options.memoryClient,
+      agentSourceRepository: options.appStateStore.repositories.agentSources,
+      memoryAddAnalytics: createMemoryDesktopAddAnalytics({
+        getUserId: resolveAnalyticsUserId,
+        getUserMode: resolveAnalyticsUserMode,
+      }),
+    });
   const agentSources = createAgentSourceService({
     sourceRegistry,
     agentSourceRepository: options.appStateStore.repositories.agentSources,
@@ -149,18 +166,8 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
     skillDistributionService,
     getScanPermission: () => options.permissionManager.getScanPermission(),
     agentSourceAnalytics: createAgentSourceLifecycleAnalytics({
-      getUserId: () => {
-        const session = accountSessionRepository.get();
-        if (!session.authenticated) return null;
-        return resolveLoggedInAnalyticsUserId({
-          cloudUuid: accountSessionRepository.getCloudUuid(),
-          userId: session.profile.userId,
-        });
-      },
-      getUserMode: () => {
-        const mode = options.appStateStore.repositories.bootstrap.getAppSettings().userMode;
-        return mode === "account" || mode === "byok" ? mode : null;
-      },
+      getUserId: resolveAnalyticsUserId,
+      getUserMode: resolveAnalyticsUserMode,
     }),
   });
 

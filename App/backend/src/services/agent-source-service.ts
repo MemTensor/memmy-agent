@@ -209,7 +209,8 @@ export function createAgentSourceService(options: CreateAgentSourceServiceOption
         sourceId,
         memorySource: source.displayName,
         deferProcessing: true,
-        totalMessages: messages.length
+        totalMessages: messages.length,
+        scanMode: input.mode
       });
       const processingFailures = await processPendingImportSummaries(options, stats.memoryIds, {
         progressSourceId: sourceId
@@ -648,6 +649,7 @@ async function ingestCollectedSource(
       signal: scanOptions.signal,
       deferProcessing: true,
       totalMessages: ingestMessages.length,
+      scanMode: collected.scanMode ?? scanOptions.mode,
       onProgress(progress) {
         emitProgress(scanOptions, {
           sourceId: progress.sourceId,

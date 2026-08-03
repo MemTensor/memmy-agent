@@ -540,12 +540,182 @@ describe("ingestion service", () => {
       )
     ).rejects.toBeInstanceOf(IngestionAssertionError);
   });
+
+  it("emits memory_desktop add analytics for each new addMemory call", async () => {
+    const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
+    const service = createService(
+      {},
+      {},
+      undefined,
+      {
+        trackAddStarted(input) {
+          events.push({ name: "started", payload: { ...input } });
+        },
+        trackAddSucceeded(input) {
+          events.push({ name: "succeeded", payload: { ...input } });
+        },
+        trackAddFailed(input) {
+          events.push({ name: "failed", payload: { ...input } });
+        }
+      }
+    );
+
+    await service.ingest(
+      toAsyncIterable([
+        createMessage("conv-a", 1),
+        createMessage("conv-a", 2),
+        createMessage("conv-b", 3),
+        createMessage("conv-b", 4)
+      ]),
+      { sourceId: "cursor", scanMode: "initial_subset" }
+    );
+
+    expect(events.map((event) => event.name)).toEqual(["started", "succeeded", "started", "succeeded"]);
+    expect(events[0]?.payload).toMatchObject({
+      adapterId: "agent-source:cursor",
+      conversationId: "conv-a",
+      scanMode: "initial_subset"
+    });
+    expect(events[1]?.payload).toMatchObject({
+      adapterId: "agent-source:cursor",
+      conversationId: "conv-a",
+      scanMode: "initial_subset",
+      storedCount: 1
+    });
+    expect(typeof events[0]?.payload.turnId).toBe("string");
+    expect(typeof events[1]?.payload.durationMs).toBe("number");
+  });
+
+  it("forwards scanMode into add analytics payloads", async () => {
+    const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
+    const service = createService(
+      {},
+      {},
+      undefined,
+      {
+        trackAddStarted(input) {
+          events.push({ name: "started", payload: { ...input } });
+        },
+        trackAddSucceeded(input) {
+          events.push({ name: "succeeded", payload: { ...input } });
+        },
+        trackAddFailed(input) {
+          events.push({ name: "failed", payload: { ...input } });
+        }
+      }
+    );
+
+    await service.ingest(
+      toAsyncIterable([createMessage("conv-a", 1), createMessage("conv-a", 2)]),
+      { sourceId: "cursor", scanMode: "full" }
+    );
+
+    expect(events).toHaveLength(2);
+    expect(events[0]?.payload).toMatchObject({
+      adapterId: "agent-source:cursor",
+      scanMode: "full"
+    });
+    expect(events[1]?.payload).toMatchObject({
+      scanMode: "full",
+      storedCount: 1
+    });
+  });
+
+  it("skips memory_desktop add analytics for already-seen turns", async () => {
+    const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
+    const calls: string[] = [];
+    const service = createService(
+      {
+        async addMemory() {
+          calls.push("add");
+          return {
+            id: "memory-existing",
+            kind: "trace",
+            memoryLayer: "L1",
+            status: "activated",
+            title: "Existing memory",
+            summary: "Existing memory",
+            tags: [],
+            createdAt: now(),
+            serverTime: now()
+          };
+        }
+      },
+      {
+        hasSeen: () => true
+      },
+      undefined,
+      {
+        trackAddStarted(input) {
+          events.push({ name: "started", payload: { ...input } });
+        },
+        trackAddSucceeded(input) {
+          events.push({ name: "succeeded", payload: { ...input } });
+        },
+        trackAddFailed(input) {
+          events.push({ name: "failed", payload: { ...input } });
+        }
+      }
+    );
+
+    const stats = await service.ingest(
+      toAsyncIterable([createMessage("conv-a", 1), createMessage("conv-a", 2)]),
+      { sourceId: "cursor" }
+    );
+
+    expect(calls).toEqual(["add"]);
+    expect(stats.dedupedMemories).toBe(1);
+    expect(events).toEqual([]);
+  });
+
+  it("emits add_failed analytics when addMemory throws", async () => {
+    const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
+    const service = createService(
+      {
+        async addMemory() {
+          throw new Error("write failed");
+        }
+      },
+      {},
+      undefined,
+      {
+        trackAddStarted(input) {
+          events.push({ name: "started", payload: { ...input } });
+        },
+        trackAddSucceeded(input) {
+          events.push({ name: "succeeded", payload: { ...input } });
+        },
+        trackAddFailed(input) {
+          events.push({ name: "failed", payload: { ...input } });
+        }
+      }
+    );
+
+    const stats = await service.ingest(
+      toAsyncIterable([createMessage("conv-a", 1), createMessage("conv-a", 2)]),
+      { sourceId: "cursor", scanMode: "incremental" }
+    );
+
+    expect(stats.failedMemories).toBe(1);
+    expect(events.map((event) => event.name)).toEqual(["started", "failed"]);
+    expect(events[1]?.payload).toMatchObject({
+      adapterId: "agent-source:cursor",
+      conversationId: "conv-a",
+      scanMode: "incremental"
+    });
+    expect(events[1]?.payload.error).toBeInstanceOf(Error);
+  });
 });
 
 function createService(
   memoryClientPatch: Partial<MemoryClient>,
   repositoryPatch: Partial<AgentSourceRepository> = {},
-  warn?: (warning: IngestionWarning) => void
+  warn?: (warning: IngestionWarning) => void,
+  memoryAddAnalytics?: {
+    trackAddStarted: (input: Record<string, unknown>) => void;
+    trackAddSucceeded: (input: Record<string, unknown>) => void;
+    trackAddFailed: (input: Record<string, unknown>) => void;
+  }
 ): IngestionService {
   return createIngestionService({
     memoryClient: {
@@ -556,6 +726,7 @@ function createService(
       ...createRepository(),
       ...repositoryPatch
     },
+    memoryAddAnalytics: memoryAddAnalytics as never,
     warn
   });
 }
