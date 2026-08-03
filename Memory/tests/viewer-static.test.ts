@@ -3,6 +3,10 @@ import { describe, expect, it } from "vitest";
 import { memoryPanelHtml } from "../src/viewer/static.js";
 
 describe("memoryPanelHtml", () => {
+  it("uses an inline favicon so the protected server does not receive browser favicon requests", () => {
+    expect(memoryPanelHtml()).toContain('<link rel="icon" href="data:,">');
+  });
+
   it("strips generated Summary prefixes from displayed memory titles", async () => {
     const harness = createViewerHarness();
     runViewerScript(harness);
@@ -77,6 +81,27 @@ describe("memoryPanelHtml", () => {
     expect(harness.requests().every((request) => request.authorization === "Bearer panel-token")).toBe(true);
     expect(harness.requests().every((request) => !request.path.includes("panel-token"))).toBe(true);
   });
+
+  it("validates a manually entered token against a protected panel endpoint", async () => {
+    const harness = createViewerHarness();
+    runViewerScript(harness, {
+      sessionStorage: {
+        getItem: () => null,
+        setItem: () => undefined,
+        removeItem: () => undefined
+      }
+    });
+
+    harness.element("tokenInput").value = "manual-panel-token";
+    const connect = harness.element("connectToken").onclick as () => Promise<void>;
+    await connect();
+    await flushPromises();
+
+    expect(harness.requests()[0]).toEqual({
+      path: "/api/v1/panel/status",
+      authorization: "Bearer manual-panel-token"
+    });
+  });
 });
 
 type FakeRow = FakeElement & {
@@ -100,6 +125,16 @@ function runViewerScript(
     document: harness.document,
     fetch: harness.fetch,
     navigator: { clipboard: { writeText: async () => undefined } },
+    sessionStorage: {
+      getItem: () => "viewer-test-token",
+      setItem: () => undefined,
+      removeItem: () => undefined
+    },
+    setTimeout: (callback: () => void) => {
+      callback();
+      return 0;
+    },
+    clearTimeout: () => undefined,
     URLSearchParams,
     ...browserContext
   });
@@ -111,21 +146,95 @@ function createViewerHarness() {
   const detailResolvers = new Map<string, DetailResolver>();
   const requests: Array<{ path: string; authorization?: string }> = [];
   const ids = [
+    "navDashboard",
+    "navMemories",
+    "navActivity",
+    "navTasks",
+    "navSystem",
+    "viewDashboard",
+    "viewMemories",
+    "viewActivity",
+    "viewTasks",
+    "viewSystem",
+    "pageTitle",
+    "pageSubtitle",
+    "themeToggle",
+    "lockConsole",
+    "sidebarStatusDot",
+    "sidebarStatusText",
+    "sidebarVersion",
     "errorMessage",
     "stats",
+    "analysisMetrics",
+    "activityChart",
+    "activityCaption",
+    "activityTotal",
+    "sourceDistribution",
+    "sourceTotal",
+    "queueSummary",
+    "queueState",
+    "recentActivity",
+    "openActivity",
     "query",
     "layer",
     "status",
+    "sourceAgent",
     "memoryRows",
     "emptyState",
     "listMeta",
+    "memoryResultSummary",
     "pageInput",
     "totalPagesText",
     "prevPage",
     "nextPage",
     "detailTitle",
     "detailId",
+    "detailContent",
     "detailJson",
+    "deleteMemory",
+    "activityQuery",
+    "activityTool",
+    "activitySource",
+    "activityRows",
+    "activityEmpty",
+    "activityMeta",
+    "activityDetailTitle",
+    "activityDetailId",
+    "activityDetailJson",
+    "loadActivity",
+    "clearActivity",
+    "copyActivity",
+    "taskQuery",
+    "searchTasks",
+    "clearTasks",
+    "taskRows",
+    "taskEmpty",
+    "taskMeta",
+    "taskResultSummary",
+    "taskPageText",
+    "prevTaskPage",
+    "nextTaskPage",
+    "taskDetailTitle",
+    "taskDetailId",
+    "taskDetailContent",
+    "taskDetailJson",
+    "copyTask",
+    "deleteTask",
+    "systemHealthBadge",
+    "systemHealth",
+    "systemSchema",
+    "systemStorage",
+    "systemModels",
+    "systemQueues",
+    "configJson",
+    "runWorker",
+    "reloadConfig",
+    "copyConfig",
+    "authScreen",
+    "tokenInput",
+    "authError",
+    "connectToken",
+    "toast",
     "refresh",
     "search",
     "clearFilters",
@@ -162,6 +271,18 @@ function createViewerHarness() {
     if (path === "/api/v1/panel/overview") {
       return jsonResponse({ counts: { memories: 2, experiences: 0, worldModels: 0, skills: 0 } });
     }
+    if (path === "/api/v1/panel/analysis") {
+      return jsonResponse({ metrics: { avgRecallScore: 0.8, recallEvents: 2, activeSkills: 0, recentlyUsedSkills: 0, avgToolLatencyMs: 12, p95ToolLatencyMs: 20 }, dailyMemoryWrites: [], dailySkillEvolutions: [], toolLatency: { tools: [], series: [] } });
+    }
+    if (path === "/api/v1/panel/metrics") {
+      return jsonResponse({ storage: { backend: "sqlite" }, schema: { version: 1 }, changeSeq: 1, feedback: { recent: 0 }, jobs: { queued: 0, leased: 0, succeeded: 0, failed: 0, dead_letter: 0 }, embeddingRetries: { pending: 0, in_progress: 0, succeeded: 0, failed: 0 }, models: {} });
+    }
+    if (path === "/api/v1/panel/status") {
+      return jsonResponse({ health: { ok: true, version: "1.0.4", mode: "dev", activeProfile: "byok", uptimeMs: 10, storage: { backend: "sqlite" } }, serverTime: new Date().toISOString() });
+    }
+    if (path === "/api/v1/panel/activity?limit=20") {
+      return jsonResponse({ entries: [] });
+    }
     if (path.startsWith("/api/v1/panel/items?")) {
       return jsonResponse({
         items: [
@@ -193,7 +314,8 @@ function createViewerHarness() {
           throw new Error(`missing element: ${id}`);
         }
         return element;
-      }
+      },
+      documentElement: new FakeElement()
     },
     element(id: string) {
       return elements.get(id)!;
@@ -229,6 +351,7 @@ class FakeElement {
   onchange: unknown;
   childRows: FakeRow[] = [];
   dataset: Record<string, string> = {};
+  className = "";
   classList = {
     add: () => undefined,
     remove: () => undefined,
@@ -240,6 +363,14 @@ class FakeElement {
   }
 
   select(): void {
+    return undefined;
+  }
+
+  focus(): void {
+    return undefined;
+  }
+
+  setAttribute(): void {
     return undefined;
   }
 }

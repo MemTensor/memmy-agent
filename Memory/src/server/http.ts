@@ -51,6 +51,10 @@ export const API_ROUTES = [
   "GET /api/v1/memory/logs",
   "GET /api/v1/panel/overview",
   "GET /api/v1/panel/analysis",
+  "GET /api/v1/panel/metrics",
+  "GET /api/v1/panel/status",
+  "GET /api/v1/panel/config",
+  "GET /api/v1/panel/activity",
   "GET /api/v1/panel/items",
   "GET /api/v1/panel/tasks",
   "DELETE /api/v1/panel/tasks/:id"
@@ -599,6 +603,36 @@ async function routeRequest(
     requirePanelRead(principal);
     return service.panelAnalysis({
       namespace: principal.namespace
+    });
+  }
+
+  if (method === "GET" && path === "/api/v1/panel/metrics") {
+    requirePanelRead(principal);
+    return service.serviceMetrics({
+      namespace: principal.namespace
+    });
+  }
+
+  if (method === "GET" && path === "/api/v1/panel/status") {
+    requirePanelRead(principal);
+    return service.adminStatus({
+      namespace: principal.namespace
+    }, [...API_ROUTES]);
+  }
+
+  if (method === "GET" && path === "/api/v1/panel/config") {
+    requirePanelRead(principal);
+    return service.configStatus({
+      namespace: principal.namespace
+    });
+  }
+
+  if (method === "GET" && path === "/api/v1/panel/activity") {
+    requirePanelRead(principal);
+    return service.serviceLogs({
+      namespace: principal.namespace,
+      limit: parseNumber(url.searchParams.get("limit")),
+      cursor: url.searchParams.get("cursor") ?? undefined
     });
   }
 

@@ -39,7 +39,7 @@ describe("REST panel contract", () => {
       const viewerHtml = await viewerResponse.text();
       expect(viewerResponse.status).toBe(200);
       expect(viewerResponse.headers.get("content-type")).toContain("text/html");
-      expect(viewerHtml).toContain("Memmy Memory Panel");
+      expect(viewerHtml).toContain("Memmy Memory Console");
       expect(viewerHtml).toContain("/api/v1/panel/items");
       expect(viewerHtml).toContain("/api/v1/memory/");
       expect(viewerHtml).not.toContain("EventSource");
@@ -77,6 +77,24 @@ describe("REST panel contract", () => {
       expect(search.injectedContext).toContain(completed.l1MemoryId);
       const overview = await client.panelOverview() as { counts: { memories: number } };
       expect(overview.counts.memories).toBeGreaterThan(0);
+      const panelHeaders = { authorization: "Bearer panel-token" };
+      const [analysisResponse, metricsResponse, statusResponse, configResponse, activityResponse] = await Promise.all([
+        fetch(`${endpoint}/api/v1/panel/analysis`, { headers: panelHeaders }),
+        fetch(`${endpoint}/api/v1/panel/metrics`, { headers: panelHeaders }),
+        fetch(`${endpoint}/api/v1/panel/status`, { headers: panelHeaders }),
+        fetch(`${endpoint}/api/v1/panel/config`, { headers: panelHeaders }),
+        fetch(`${endpoint}/api/v1/panel/activity?limit=10`, { headers: panelHeaders })
+      ]);
+      expect([
+        analysisResponse.status,
+        metricsResponse.status,
+        statusResponse.status,
+        configResponse.status,
+        activityResponse.status
+      ]).toEqual([200, 200, 200, 200, 200]);
+      const configStatus = await configResponse.json() as { redacted: boolean; config: Record<string, unknown> };
+      expect(configStatus.redacted).toBe(true);
+      expect(configStatus.config).toBeTypeOf("object");
       const items = await client.panelItems({ layer: "L1" }) as { items: Array<{ id: string; metadata?: { source?: string } }> };
       expect(items.items.map((item) => item.id)).toContain(completed.l1MemoryId);
       expect(items.items.find((item) => item.id === completed.l1MemoryId)?.metadata?.source).toBe("openclaw");
