@@ -4,28 +4,44 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 ARCH="x64"
+VERSION=""
 EDITION="cn"
 SIGN="unsigned"
 PASSTHROUGH_ARGS=()
 
 usage() {
   cat <<'USAGE'
-Usage: package-win.sh --arch <x64> --edition <cn|intl> --sign <signed|unsigned> [electron-builder args...]
+Usage: package-win.sh --version <version> --arch <x64> --edition <cn|intl> --sign <signed|unsigned> [electron-builder args...]
 
 Examples:
-  bash scripts/package-win.sh --arch x64 --edition cn --sign signed
-  bash scripts/package-win.sh --arch x64 --edition intl --sign unsigned
-  bash scripts/package-win.sh --edition cn --sign signed --publish never
+  bash scripts/package-win.sh --version 0.0.1 --arch x64 --edition cn --sign signed
+  bash scripts/package-win.sh --version 0.0.1 --arch x64 --edition intl --sign unsigned
+  bash scripts/package-win.sh --version 0.0.1 --edition cn --sign signed
 
 Defaults:
   --arch     x64
   --edition  cn
   --sign     unsigned
+
+Required:
+  --version  package version, for example 0.0.1
 USAGE
 }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --version)
+      if [ "$#" -lt 2 ]; then
+        echo "--version requires a version value" >&2
+        exit 1
+      fi
+      VERSION="$2"
+      shift 2
+      ;;
+    --version=*)
+      VERSION="${1#--version=}"
+      shift
+      ;;
     --arch)
       if [ "$#" -lt 2 ]; then
         echo "--arch requires x64" >&2
@@ -98,6 +114,12 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+if [ -z "$VERSION" ]; then
+  echo "--version is required. Example: --version 0.0.1" >&2
+  usage >&2
+  exit 1
+fi
+
 case "$ARCH" in
   x64)
     ;;
@@ -135,4 +157,5 @@ case "$SIGN" in
     ;;
 esac
 
+export MEMMY_DESKTOP_VERSION="$VERSION"
 bash "$ROOT_DIR/scripts/internal/package-win-x64.sh" "${PASSTHROUGH_ARGS[@]}"

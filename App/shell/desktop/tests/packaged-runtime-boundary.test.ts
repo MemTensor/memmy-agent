@@ -982,19 +982,21 @@ describe("desktop packaged runtime boundaries", () => {
     const rootPackage = readJson<PackageJson>(rootPackagePath);
     const scripts = rootPackage.scripts ?? {};
 
-    expect(packageWinSource).toContain("Usage: package-win.sh --arch <x64> --edition <cn|intl> --sign <signed|unsigned>");
+    expect(packageWinSource).toContain("Usage: package-win.sh --version <version> --arch <x64> --edition <cn|intl> --sign <signed|unsigned>");
+    expect(packageWinSource).toContain("--version is required. Example: --version 0.0.1");
+    expect(packageWinSource).toContain('export MEMMY_DESKTOP_VERSION="$VERSION"');
     expect(packageWinSource).toContain("export MEMMY_ACCOUNT_CHANNEL=phone");
     expect(packageWinSource).toContain("export MEMMY_ACCOUNT_CHANNEL=email");
     expect(packageWinSource).toContain("export MEMMY_SKIP_CODESIGN=1");
     expect(packageWinSource).toContain("unset MEMMY_SKIP_CODESIGN");
     expect(packageWinSource).toContain('scripts/internal/package-win-x64.sh');
 
-    expect(scripts["package:win:x64"]).toBe("bash scripts/package-win.sh --arch x64 --edition cn --sign signed");
-    expect(scripts["package:win:x64:unsigned"]).toBe("bash scripts/package-win.sh --arch x64 --edition cn --sign unsigned");
-    expect(scripts["package:win:x64:cn:signed"]).toBe("bash scripts/package-win.sh --arch x64 --edition cn --sign signed");
-    expect(scripts["package:win:x64:cn:unsigned"]).toBe("bash scripts/package-win.sh --arch x64 --edition cn --sign unsigned");
-    expect(scripts["package:win:x64:intl:signed"]).toBe("bash scripts/package-win.sh --arch x64 --edition intl --sign signed");
-    expect(scripts["package:win:x64:intl:unsigned"]).toBe("bash scripts/package-win.sh --arch x64 --edition intl --sign unsigned");
+    expect(scripts["package:win:x64"]).toBe("bash scripts/package-win.sh --version $npm_package_version --arch x64 --edition cn --sign signed");
+    expect(scripts["package:win:x64:unsigned"]).toBe("bash scripts/package-win.sh --version $npm_package_version --arch x64 --edition cn --sign unsigned");
+    expect(scripts["package:win:x64:cn:signed"]).toBe("bash scripts/package-win.sh --version $npm_package_version --arch x64 --edition cn --sign signed");
+    expect(scripts["package:win:x64:cn:unsigned"]).toBe("bash scripts/package-win.sh --version $npm_package_version --arch x64 --edition cn --sign unsigned");
+    expect(scripts["package:win:x64:intl:signed"]).toBe("bash scripts/package-win.sh --version $npm_package_version --arch x64 --edition intl --sign signed");
+    expect(scripts["package:win:x64:intl:unsigned"]).toBe("bash scripts/package-win.sh --version $npm_package_version --arch x64 --edition intl --sign unsigned");
   });
 
   it("validates the bundled browser runtime during Windows packaging", () => {
@@ -1060,7 +1062,9 @@ describe("desktop packaged runtime boundaries", () => {
     const rootPackage = readJson<PackageJson>(rootPackagePath);
     const scripts = rootPackage.scripts ?? {};
 
-    expect(packageMacSource).toContain("Usage: package-mac.sh --arch <arm64|x64> --edition <cn|intl> --sign <signed|unsigned>");
+    expect(packageMacSource).toContain("Usage: package-mac.sh --version <version> --arch <arm64|x64> --edition <cn|intl> --sign <signed|unsigned>");
+    expect(packageMacSource).toContain("--version is required. Example: --version 0.0.1");
+    expect(packageMacSource).toContain('export MEMMY_DESKTOP_VERSION="$VERSION"');
     expect(packageMacSource).toContain("export MEMMY_ACCOUNT_CHANNEL=phone");
     expect(packageMacSource).toContain("export MEMMY_ACCOUNT_CHANNEL=email");
     expect(packageMacSource).toContain("export MEMMY_SKIP_CODESIGN=1");
@@ -1068,14 +1072,14 @@ describe("desktop packaged runtime boundaries", () => {
     expect(packageMacSource).toContain('BASE_SCRIPT="$ROOT_DIR/scripts/internal/package-mac-$ARCH-$SIGN-base.sh"');
     expect(packageMacSource).toContain('bash "$BASE_SCRIPT" "${PASSTHROUGH_ARGS[@]}"');
 
-    expect(scripts["package:mac:arm64:cn:signed"]).toBe("bash scripts/package-mac.sh --arch arm64 --edition cn --sign signed");
-    expect(scripts["package:mac:arm64:cn:unsigned"]).toBe("bash scripts/package-mac.sh --arch arm64 --edition cn --sign unsigned");
-    expect(scripts["package:mac:arm64:intl:signed"]).toBe("bash scripts/package-mac.sh --arch arm64 --edition intl --sign signed");
-    expect(scripts["package:mac:arm64:intl:unsigned"]).toBe("bash scripts/package-mac.sh --arch arm64 --edition intl --sign unsigned");
-    expect(scripts["package:mac:x64:cn:signed"]).toBe("bash scripts/package-mac.sh --arch x64 --edition cn --sign signed");
-    expect(scripts["package:mac:x64:cn:unsigned"]).toBe("bash scripts/package-mac.sh --arch x64 --edition cn --sign unsigned");
-    expect(scripts["package:mac:x64:intl:signed"]).toBe("bash scripts/package-mac.sh --arch x64 --edition intl --sign signed");
-    expect(scripts["package:mac:x64:intl:unsigned"]).toBe("bash scripts/package-mac.sh --arch x64 --edition intl --sign unsigned");
+    expect(scripts["package:mac:arm64:cn:signed"]).toBe("bash scripts/package-mac.sh --version $npm_package_version --arch arm64 --edition cn --sign signed");
+    expect(scripts["package:mac:arm64:cn:unsigned"]).toBe("bash scripts/package-mac.sh --version $npm_package_version --arch arm64 --edition cn --sign unsigned");
+    expect(scripts["package:mac:arm64:intl:signed"]).toBe("bash scripts/package-mac.sh --version $npm_package_version --arch arm64 --edition intl --sign signed");
+    expect(scripts["package:mac:arm64:intl:unsigned"]).toBe("bash scripts/package-mac.sh --version $npm_package_version --arch arm64 --edition intl --sign unsigned");
+    expect(scripts["package:mac:x64:cn:signed"]).toBe("bash scripts/package-mac.sh --version $npm_package_version --arch x64 --edition cn --sign signed");
+    expect(scripts["package:mac:x64:cn:unsigned"]).toBe("bash scripts/package-mac.sh --version $npm_package_version --arch x64 --edition cn --sign unsigned");
+    expect(scripts["package:mac:x64:intl:signed"]).toBe("bash scripts/package-mac.sh --version $npm_package_version --arch x64 --edition intl --sign signed");
+    expect(scripts["package:mac:x64:intl:unsigned"]).toBe("bash scripts/package-mac.sh --version $npm_package_version --arch x64 --edition intl --sign unsigned");
   });
 
   it("supports Windows signing through PFX files and SimplySign certificate store thumbprints", () => {

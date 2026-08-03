@@ -4,23 +4,27 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 ARCH=""
+VERSION=""
 EDITION="cn"
 SIGN="unsigned"
 PASSTHROUGH_ARGS=()
 
 usage() {
   cat <<'USAGE'
-Usage: package-mac.sh --arch <arm64|x64> --edition <cn|intl> --sign <signed|unsigned> [electron-builder args...]
+Usage: package-mac.sh --version <version> --arch <arm64|x64> --edition <cn|intl> --sign <signed|unsigned> [electron-builder args...]
 
 Examples:
-  bash scripts/package-mac.sh --arch arm64 --edition cn --sign signed
-  bash scripts/package-mac.sh --arch arm64 --edition intl --sign unsigned
-  bash scripts/package-mac.sh --arch x64 --edition cn --sign signed --publish never
+  bash scripts/package-mac.sh --version 0.0.1 --arch arm64 --edition cn --sign signed
+  bash scripts/package-mac.sh --version 0.0.1 --arch arm64 --edition intl --sign unsigned
+  bash scripts/package-mac.sh --version 0.0.1 --arch x64 --edition cn --sign signed
 
 Defaults:
   --arch     current machine arch
   --edition  cn
   --sign     unsigned
+
+Required:
+  --version  package version, for example 0.0.1
 USAGE
 }
 
@@ -41,6 +45,18 @@ infer_arch() {
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --version)
+      if [ "$#" -lt 2 ]; then
+        echo "--version requires a version value" >&2
+        exit 1
+      fi
+      VERSION="$2"
+      shift 2
+      ;;
+    --version=*)
+      VERSION="${1#--version=}"
+      shift
+      ;;
     --arch)
       if [ "$#" -lt 2 ]; then
         echo "--arch requires arm64 or x64" >&2
@@ -117,6 +133,12 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+if [ -z "$VERSION" ]; then
+  echo "--version is required. Example: --version 0.0.1" >&2
+  usage >&2
+  exit 1
+fi
+
 if [ -z "$ARCH" ]; then
   ARCH="$(infer_arch)"
 fi
@@ -164,4 +186,5 @@ if [ ! -f "$BASE_SCRIPT" ]; then
   exit 1
 fi
 
+export MEMMY_DESKTOP_VERSION="$VERSION"
 bash "$BASE_SCRIPT" "${PASSTHROUGH_ARGS[@]}"
