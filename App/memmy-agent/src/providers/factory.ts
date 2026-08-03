@@ -82,7 +82,13 @@ function makeProviderCore(
   } else if (backend === "openai_compat" && !model.startsWith("bedrock/")) {
     const exempt = Boolean(spec?.isOauth || spec?.isLocal || spec?.isDirect);
     if (!providerConfig?.apiKey && !exempt) {
-      throw new ValueError(`No API key configured for provider '${providerName}'.`);
+      if (!providerName && resolved.provider !== "auto") {
+        throw new ValueError(
+          `Provider '${resolved.provider}' is not a known provider. Use a provider name from ` +
+            `the registry, or 'custom' with providers.custom.apiBase set.`,
+        );
+      }
+      throw new ValueError(`No API key configured for provider '${providerName ?? resolved.provider}'.`);
     }
   }
 

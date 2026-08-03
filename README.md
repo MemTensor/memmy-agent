@@ -165,12 +165,15 @@ agents:
 providers:
   openai:
     apiKey: ${OPENAI_API_KEY}   # Supports ${ENV_NAME}-style environment variable references
+    apiBase: https://example.com/v1  # Optional: override the provider's default endpoint
 tools:
   browser:
     enabled: true
     maxSessions: 4
     idleTimeoutS: 900
 ```
+
+`providers.*.apiBase` works with OpenAI-compatible and Anthropic-compatible gateways. For an unregistered OpenAI-compatible gateway, use `provider: custom` and configure `providers.custom.apiKey` plus `providers.custom.apiBase`.
 
 The desktop app and `scripts/dev-start.sh` prepare the matching managed Chromium build before the Agent Gateway starts. Agent requests never download a browser; when the managed executable is unavailable, browser tools are omitted while other Agent features continue to work.
 

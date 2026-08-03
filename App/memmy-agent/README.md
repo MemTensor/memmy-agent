@@ -158,6 +158,7 @@ agents:
 providers:
   openai:
     apiKey: ${OPENAI_API_KEY}
+    apiBase: https://example.com/v1  # Optional: override the provider's default endpoint
 ```
 
 Set the referenced environment variable in the current shell:
@@ -168,6 +169,10 @@ export OPENAI_API_KEY="your-api-key"
 
 `memmy-agent` resolves `${ENV_NAME}` and `${ENV_NAME:fallback}` placeholders
 when it loads the configuration.
+
+`providers.*.apiBase` works with OpenAI-compatible and Anthropic-compatible
+gateways. For an unregistered OpenAI-compatible gateway, use `provider: custom`
+and configure `providers.custom.apiKey` plus `providers.custom.apiBase`.
 
 OAuth providers support explicit login and logout:
 

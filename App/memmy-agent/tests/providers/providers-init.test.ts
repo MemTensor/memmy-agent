@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { Config, ValueError } from "../../src/config/schema.js";
+import { Config } from "../../src/config/schema.js";
 import { AnthropicProvider } from "../../src/providers/anthropic-provider.js";
 import { AzureOpenAIProvider } from "../../src/providers/azure-openai-provider.js";
 import { GitHubCopilotProvider } from "../../src/providers/github-copilot-provider.js";
@@ -32,9 +32,12 @@ describe("provider initialization", () => {
   });
 
   it("validates required provider credentials", () => {
-    expect(() => makeProvider(new Config({ agents: { defaults: { provider: "openai", model: "gpt-4.1" } } }))).toThrow(
-      ValueError,
-    );
+    expect(() =>
+      makeProvider(new Config({ agents: { defaults: { provider: "not_registered", model: "gpt-4.1" } } })),
+    ).toThrow("Provider 'not_registered' is not a known provider");
+    expect(() =>
+      makeProvider(new Config({ agents: { defaults: { provider: "openai", model: "gpt-4.1" } } })),
+    ).toThrow("No API key configured for provider 'openai'");
     expect(() =>
       makeProvider(new Config({ agents: { defaults: { provider: "azure", model: "deployment" } } })),
     ).toThrow("Azure OpenAI requires apiKey and apiBase");

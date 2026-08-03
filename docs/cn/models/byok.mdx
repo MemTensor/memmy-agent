@@ -11,6 +11,23 @@ icon: Key
 
 3. ASR（语音输入，当前固定 Qwen ASR）与图像生成模型，可跳过，不阻塞普通对话与记忆功能。
 
+## 自定义接口地址
+
+通过 `providers.*.apiBase` 可以覆盖 Provider 的默认接口地址。对于未注册的 OpenAI 兼容网关，可以使用内置的 `custom` Provider：
+
+```yaml
+agents:
+  defaults:
+    model: gateway-model
+    provider: custom
+providers:
+  custom:
+    apiKey: ${GATEWAY_API_KEY}
+    apiBase: https://example.com/v1
+```
+
+Anthropic 兼容网关可以使用 `provider: anthropic`，并配置 `providers.anthropic.apiBase`。
+
 ## Provider 默认值
 
 | Provider | 默认 Endpoint | 默认模型占位 |

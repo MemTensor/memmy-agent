@@ -11,6 +11,23 @@ Use your own model quota. Setup takes three steps, each with a real connection t
 
 3. ASR (voice input, currently fixed to Qwen ASR) and the image generation model are skippable — they never block normal chat or memory features.
 
+## Custom Endpoints
+
+Set `providers.*.apiBase` to override a provider's default endpoint. For an unregistered OpenAI-compatible gateway, use the built-in `custom` provider:
+
+```yaml
+agents:
+  defaults:
+    model: gateway-model
+    provider: custom
+providers:
+  custom:
+    apiKey: ${GATEWAY_API_KEY}
+    apiBase: https://example.com/v1
+```
+
+Anthropic-compatible gateways can use `provider: anthropic` with `providers.anthropic.apiBase`.
+
 ## Provider Defaults
 
 | Provider | Default Endpoint | Default Model Placeholder |
