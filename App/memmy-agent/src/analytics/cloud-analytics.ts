@@ -20,7 +20,7 @@ export type PostAnalyticsEventsInput = {
   events: AnalyticsEventInput[];
   /** GA4 / install client id (request body `clientId`). */
   clientId?: string | null;
-  /** Optional GA4 user_id placed into each event's params when present. */
+  /** Optional GA4 user id: request body `userId` (with `clientId`) and each event's `params.user_id`. */
   userId?: string | null;
   /** account | byok; unset/unknown omitted from params. */
   userMode?: string | null;
@@ -217,7 +217,7 @@ export function toTimestampMicros(eventTimeMillis: number): number {
 
 /**
  * POST batched analytics events (no auth):
- * `{ clientId, events: [{ eventName, params }] }`.
+ * `{ clientId, userId?, events: [{ eventName, params }] }`.
  */
 export function postAnalyticsEvents(input: PostAnalyticsEventsInput): Promise<void> {
   const clientId = input.clientId?.trim() || null;
@@ -241,6 +241,7 @@ export function postAnalyticsEvents(input: PostAnalyticsEventsInput): Promise<vo
 
   const body = {
     clientId,
+    ...(userId ? { userId } : {}),
     events: events.map((event) => {
       const eventTimeMillis = event.eventTimeMillis ?? Date.now();
       return {
