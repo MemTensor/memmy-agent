@@ -22,6 +22,8 @@
     "---[Shield]Security---",
     "...security",
     "---[CircleQuestionMark]Help---",
-    "...help"
+    "...help",
+    "---[History]Releases---",
+    "changelog"
   ]
 }

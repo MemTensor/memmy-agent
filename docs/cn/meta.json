@@ -23,6 +23,8 @@
     "---[Shield]安全---",
     "...security",
     "---[CircleQuestionMark]帮助---",
-    "...help"
+    "...help",
+    "---[History]发布---",
+    "changelog"
   ]
 }
