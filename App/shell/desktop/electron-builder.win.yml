@@ -31,6 +31,10 @@ extraResources:
     to: cli
     filter:
       - "**/*"
+  - from: dist/embedding-models
+    to: embedding-models
+    filter:
+      - "**/*"
   - from: ../../../.env
     to: .env
   - from: build/icon.ico

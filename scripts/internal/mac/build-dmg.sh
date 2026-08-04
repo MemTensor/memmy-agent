@@ -10,6 +10,8 @@ RUNTIME_DIR="$DESKTOP_DIR/dist/runtime"
 MIGRATIONS_STAGING_DIR="$DESKTOP_DIR/dist/Migrations"
 CLI_BIN_DIR="$RUNTIME_DIR/bin"
 DMG_HELPER_DIR="$DESKTOP_DIR/dist/dmg"
+EMBEDDING_MODELS_DIR="$DESKTOP_DIR/dist/embedding-models"
+EMBEDDING_MODEL_ID="${MEMMY_EMBEDDING_MODEL:-Xenova/all-MiniLM-L6-v2}"
 
 resolve_target_cpu() {
   local target_cpu=""
@@ -576,11 +578,15 @@ verify_packaged_mac_unpacked_artifacts() {
   local app_path
   app_path="$(resolve_packaged_mac_app_path "$target_cpu")"
   local unpacked_runtime="$app_path/Contents/Resources/app.asar.unpacked/dist/runtime"
+  local packaged_embedding_model="$app_path/Contents/Resources/embedding-models/$EMBEDDING_MODEL_ID"
 
   require_packaged_runtime_file "$app_path/Contents/Resources/app.asar"
   require_packaged_runtime_glob "$unpacked_runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/darwin/$target_cpu/libonnxruntime*.dylib"
   require_packaged_runtime_glob "$unpacked_runtime/memory/node_modules/@img/sharp-libvips-darwin-$target_cpu/lib/libvips*.dylib"
   require_packaged_runtime_file "$unpacked_runtime/memmy-agent/node_modules/@memmy/migrations/dist/index.js"
+  require_packaged_runtime_file "$packaged_embedding_model/config.json"
+  require_packaged_runtime_file "$packaged_embedding_model/tokenizer.json"
+  require_packaged_runtime_file "$packaged_embedding_model/onnx/model_quantized.onnx"
   if [ -L "$unpacked_runtime/memmy-agent/node_modules/@memmy/migrations" ]; then
     echo "Packaged migrations package must not be a symbolic link." >&2
     exit 1
@@ -641,6 +647,7 @@ write_desktop_edition_manifest
 rm -rf "$RUNTIME_DIR"
 rm -rf "$DMG_HELPER_DIR"
 rm -rf "$MIGRATIONS_STAGING_DIR"
+rm -rf "$EMBEDDING_MODELS_DIR"
 mkdir -p "$RUNTIME_DIR/memory" "$RUNTIME_DIR/memmy-agent" "$CLI_BIN_DIR" "$DMG_HELPER_DIR"
 mkdir -p "$MIGRATIONS_STAGING_DIR"
 cp "$MIGRATIONS_DIR/package.json" "$MIGRATIONS_STAGING_DIR/package.json"
@@ -716,6 +723,7 @@ create_dmg_cli_installer_command "$DMG_HELPER_DIR/Install CLI.command"
 prune_mac_runtime_artifacts "$TARGET_CPU"
 verify_mac_memory_native_artifacts "$TARGET_CPU"
 verify_mac_agent_native_artifacts "$TARGET_CPU"
+node "$ROOT_DIR/scripts/internal/shared/prepare-embedding-model.mjs" "$EMBEDDING_MODELS_DIR"
 
 if [ "${MEMMY_PACKAGE_PREPARE_ONLY:-}" = "1" ]; then
   echo "Prepared desktop runtime resources at $RUNTIME_DIR"

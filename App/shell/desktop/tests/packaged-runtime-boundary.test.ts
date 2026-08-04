@@ -11,6 +11,7 @@ const devMemorySupervisorPath = fileURLToPath(new URL("../../../../scripts/inter
 const clearAllPath = fileURLToPath(new URL("../../../../scripts/clear-all.sh", import.meta.url));
 const packageMacPath = fileURLToPath(new URL("../../../../scripts/package-mac.sh", import.meta.url));
 const packageMacDmgPath = fileURLToPath(new URL("../../../../scripts/internal/mac/build-dmg.sh", import.meta.url));
+const prepareEmbeddingModelPath = fileURLToPath(new URL("../../../../scripts/internal/shared/prepare-embedding-model.mjs", import.meta.url));
 const signedMacArm64PackagePath = fileURLToPath(
   new URL("../../../../scripts/internal/mac/signed-arm64.sh", import.meta.url)
 );
@@ -221,6 +222,24 @@ describe("desktop packaged runtime boundaries", () => {
       expect(config.asarUnpack).toContain(
         "dist/runtime/memmy-agent/node_modules/@memmy/migrations/**"
       );
+    }
+  });
+
+  it("bundles the local embedding model in every desktop package variant", () => {
+    for (const configPath of [
+      electronBuilderPath,
+      unsignedElectronBuilderPath,
+      winElectronBuilderPath,
+      winUnsignedBuilderPath
+    ]) {
+      const config = parseYaml(readFileSync(configPath, "utf8")) as {
+        extraResources?: Array<{ from?: string; to?: string; filter?: string[] }>;
+      };
+      expect(config.extraResources).toContainEqual({
+        from: "dist/embedding-models",
+        to: "embedding-models",
+        filter: ["**/*"]
+      });
     }
   });
 
@@ -1038,6 +1057,28 @@ describe("desktop packaged runtime boundaries", () => {
     expect(winSource).toContain("sqlite-vec-windows-x64/vec0.*");
   });
 
+  it("prepares and validates the bundled local embedding model during packaging", () => {
+    const macSource = readFileSync(packageMacDmgPath, "utf8");
+    const winSource = readFileSync(packageWinX64Path, "utf8");
+    const prepareEmbeddingModelSource = readFileSync(prepareEmbeddingModelPath, "utf8");
+
+    for (const source of [macSource, winSource]) {
+      expect(source).toContain('EMBEDDING_MODELS_DIR="$DESKTOP_DIR/dist/embedding-models"');
+      expect(source).toContain('EMBEDDING_MODEL_ID="${MEMMY_EMBEDDING_MODEL:-Xenova/all-MiniLM-L6-v2}"');
+      expect(source).toContain('rm -rf "$EMBEDDING_MODELS_DIR"');
+      expect(source).toContain('node "$ROOT_DIR/scripts/internal/shared/prepare-embedding-model.mjs" "$EMBEDDING_MODELS_DIR"');
+      expect(source).toContain('$packaged_embedding_model/config.json');
+      expect(source).toContain('$packaged_embedding_model/tokenizer.json');
+      expect(source).toContain('$packaged_embedding_model/onnx/model_quantized.onnx');
+      expect(source.indexOf("prepare-embedding-model.mjs")).toBeLessThan(
+        source.indexOf("npx electron-builder")
+      );
+    }
+    expect(prepareEmbeddingModelSource).toContain('const fallbackRemoteHost = "https://hf-mirror.com/";');
+    expect(prepareEmbeddingModelSource).toContain("function resolveRemoteHosts()");
+    expect(prepareEmbeddingModelSource).toContain("env.remoteHost = remoteHost");
+  });
+
   it("prunes third-party package docs and tests from macOS runtime before packaging", () => {
     const source = readFileSync(packageMacDmgPath, "utf8");
 
@@ -1199,6 +1240,12 @@ describe("desktop packaged runtime boundaries", () => {
       expect(config).toContain("from: ../../../.env");
       expect(config).toContain("to: .env");
     }
+  });
+
+  it("points packaged Memory at the bundled local embedding model resources", () => {
+    const source = readFileSync(runtimeServicesPath, "utf8");
+
+    expect(source).toContain('MEMMY_EMBEDDING_MODEL_ROOT: join(options.resourcesPath, "embedding-models")');
   });
 });
 

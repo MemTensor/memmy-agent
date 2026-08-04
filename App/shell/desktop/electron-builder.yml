@@ -35,6 +35,10 @@ extraResources:
     to: MenuBarIconTemplate.png
   - from: build/MenuBarIconTemplate@2x.png
     to: MenuBarIconTemplate@2x.png
+  - from: dist/embedding-models
+    to: embedding-models
+    filter:
+      - "**/*"
   - from: ../../../.env
     to: .env
 
