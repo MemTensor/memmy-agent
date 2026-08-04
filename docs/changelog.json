@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-08-04T11:49:45Z",
+  "releases": [
+    {
+      "version": "1.0.4",
+      "tag": "v1.0.4",
+      "publishedAt": "2026-07-30T07:09:50Z",
+      "releaseUrl": "https://github.com/MemTensor/memmy-agent/releases/tag/v1.0.4",
+      "title": {"cn": "项目工作区、浏览器自动化与长期记忆", "en": "Project workspaces, browser automation, and long-term Memory"},
+      "summary": {"cn": "这次更新让 Memmy 能围绕项目组织工作，并提升 Agent 浏览器操作、长期记忆和本地数据安全。", "en": "This release organizes Memmy work around projects and improves Agent browser tasks, long-term Memory, and local data safety."},
+      "items": [
+        {"id": "v1.0.4-project-workspaces", "section": "newFeatures", "surfaces": ["desktop", "agent"], "text": {"cn": "新增项目级桌面工作区，让对话、工作目录和文件访问始终绑定到所选项目。", "en": "Added project-scoped desktop workspaces that keep conversations, working directories, and file access bound to the selected project."}},
+        {"id": "v1.0.4-browser-automation", "section": "newFeatures", "surfaces": ["agent"], "text": {"cn": "新增内置浏览器自动化和 ui-craft Skill，可完成网页交互、调试、本地预览与界面视觉验收。", "en": "Added built-in browser automation and the ui-craft Skill for web interaction, debugging, local previews, and visual UI validation."}},
+        {"id": "v1.0.4-agent-memory-onboarding", "section": "newFeatures", "surfaces": ["agent", "memory"], "text": {"cn": "新增按需 Agent Memory 接入，可导入所选本地 AI 工具的历史并持续增量同步。", "en": "Added on-demand Agent Memory onboarding to import history from selected local AI tools and keep it synchronized incrementally."}},
+        {"id": "v1.0.4-runtime-cleanup", "section": "improvementsAndBugFixes", "surfaces": ["agent", "cli"], "text": {"cn": "命令取消或超时时会结束子进程树，减少残留任务和输出流。", "en": "Cancelled or timed-out commands now terminate descendant processes to prevent leftover work and output streams."}},
+        {"id": "v1.0.4-memory-reliability", "section": "improvementsAndBugFixes", "surfaces": ["memory", "agent"], "text": {"cn": "改进长期记忆的子目标与避错经验提取，并让完成的对话更快可检索、失败原因更易诊断。", "en": "Improved long-term Memory for reusable subgoals and failure-avoidance lessons, with faster retrieval of completed turns and clearer diagnostics."}},
+        {"id": "v1.0.4-workspace-migration", "section": "improvementsAndBugFixes", "surfaces": ["desktop", "agent"], "text": {"cn": "升级说明：首次启动会迁移旧工作区，并保留已有消息、标题、置顶和归档状态。", "en": "Compatibility note: first launch migrates existing workspaces while preserving messages, titles, pins, and archives."}},
+        {"id": "v1.0.4-consistent-memory-export", "section": "improvementsAndBugFixes", "surfaces": ["desktop", "memory"], "text": {"cn": "记忆数据库导出现在会包含已提交的 WAL 数据，避免得到不完整的 SQLite 快照。", "en": "Memory database exports now include committed WAL data to avoid incomplete SQLite snapshots."}}
+      ]
+    },
+    {
+      "version": "1.0.3",
+      "tag": "v1.0.3",
+      "publishedAt": "2026-07-24T10:03:11Z",
+      "releaseUrl": "https://github.com/MemTensor/memmy-agent/releases/tag/v1.0.3",
+      "title": {"cn": "更可靠的 Agent 与 Memory", "en": "More reliable Agent and Memory workflows"},
+      "summary": {"cn": "这次更新重点增强 Agent 恢复、文件记忆控制和 Memory 处理的可靠性与诊断能力。", "en": "This release focuses on Agent recovery, file-memory controls, and more reliable and diagnosable Memory processing."},
+      "items": [
+        {"id": "v1.0.3-file-memory-control", "section": "newFeatures", "surfaces": ["agent", "memory"], "text": {"cn": "新增 fileMemory.enabled 开关，可独立控制本地文件记忆、Recent History 和 Dream 功能。", "en": "Added the fileMemory.enabled switch for independently controlling local file memory, Recent History, and Dream capabilities."}},
+        {"id": "v1.0.3-output-validation", "section": "newFeatures", "surfaces": ["agent"], "text": {"cn": "Agent 修改受支持文件后会进行有针对性的格式与语法校验。", "en": "Added targeted format and syntax validation after the Agent modifies supported files."}},
+        {"id": "v1.0.3-desktop-reliability", "section": "improvementsAndBugFixes", "surfaces": ["desktop", "general"], "text": {"cn": "升级会保留登录状态和本地 BYOK 配置，并改进 Token 配额状态、任务切换与 Markdown 展示。", "en": "Upgrades now preserve sign-in and local BYOK settings, with clearer token-quota status, more reliable task switching, and improved Markdown rendering."}},
+        {"id": "v1.0.3-agent-recovery", "section": "improvementsAndBugFixes", "surfaces": ["agent"], "text": {"cn": "改进 Agent Gateway 恢复和长回复能力；历史导入遇到损坏的 JSONL 记录时会跳过该记录，而不是中断全部同步。", "en": "Improved Agent Gateway recovery and longer responses; history import now skips malformed JSONL records instead of stopping the entire sync."}},
+        {"id": "v1.0.3-memory-pipeline", "section": "improvementsAndBugFixes", "surfaces": ["memory"], "text": {"cn": "增强记忆导入、嵌入、检索、摘要和演化流程的重试、回退、模型路由与诊断。", "en": "Improved retries, fallbacks, model routing, and diagnostics across Memory import, embedding, retrieval, summarization, and evolution."}},
+        {"id": "v1.0.3-compatibility", "section": "improvementsAndBugFixes", "surfaces": ["agent", "memory"], "text": {"cn": "升级说明：文件记忆默认关闭，需要手动启用 fileMemory.enabled；旧版内置 my 工具及相关配置已移除。", "en": "Compatibility note: file memory is off by default and requires fileMemory.enabled; the legacy built-in my tool and related settings were removed."}}
+      ]
+    },
+    {
+      "version": "1.0.2",
+      "tag": "v1.0.2",
+      "publishedAt": "2026-07-21T17:49:38Z",
+      "releaseUrl": "https://github.com/MemTensor/memmy-agent/releases/tag/v1.0.2",
+      "title": {"cn": "可恢复的记忆同步与更清晰的更新体验", "en": "Resumable Memory sync and clearer updates"},
+      "summary": {"cn": "这次更新让历史与记忆处理可以从中断处继续，并改善桌面更新、错误提示和数据迁移。", "en": "This release makes history and Memory processing resumable and improves desktop updates, error reporting, and data migration."},
+      "items": [
+        {"id": "v1.0.2-jump-to-latest", "section": "newFeatures", "surfaces": ["desktop"], "text": {"cn": "新增“回到最新”控件，可快速返回对话的最新内容。", "en": "Added a jump-to-latest control for quickly returning to the newest conversation activity."}},
+        {"id": "v1.0.2-resumable-sync", "section": "improvementsAndBugFixes", "surfaces": ["agent", "memory"], "text": {"cn": "Agent 历史同步加入持久化检查点和增量扫描，中断或失败后可继续处理。", "en": "Agent history sync now uses persistent checkpoints and incremental scans so interrupted or failed work can resume."}},
+        {"id": "v1.0.2-memory-diagnostics", "section": "improvementsAndBugFixes", "surfaces": ["memory", "general"], "text": {"cn": "记忆处理会展示失败阶段、服务商原因和重试状态，并更准确地区分模型端点的无效响应。", "en": "Memory processing now reports the failed stage, provider reason, and retry state, with clearer distinctions between invalid model-endpoint responses."}},
+        {"id": "v1.0.2-desktop-update-reliability", "section": "improvementsAndBugFixes", "surfaces": ["desktop", "memory"], "text": {"cn": "桌面更新会展示下载进度并等待 Memory 健康检查，同时修复 macOS 隐私设置变化后的重新打开问题。", "en": "Desktop updates now show download progress and wait for Memory health checks, and macOS reopening after privacy-setting changes is more reliable."}},
+        {"id": "v1.0.2-compatibility", "section": "improvementsAndBugFixes", "surfaces": ["memory", "cli"], "text": {"cn": "升级说明：schema-v3 数据库会先备份再迁移到 v4；memmy-memory --version 现在只输出版本号。", "en": "Compatibility note: schema-v3 databases are backed up before migration to v4, and memmy-memory --version now prints only the version number."}}
+      ]
+    },
+    {
+      "version": "1.0.1",
+      "tag": "v1.0.1",
+      "publishedAt": "2026-07-17T06:32:42Z",
+      "releaseUrl": "https://github.com/MemTensor/memmy-agent/releases/tag/v1.0.1",
+      "title": {"cn": "首个公开桌面版本", "en": "First public desktop release"},
+      "summary": {"cn": "Memmy 首次提供面向 macOS Apple Silicon 和 Windows x64 的公开桌面安装包。", "en": "Memmy is now publicly available as a desktop installer for macOS Apple Silicon and Windows x64."},
+      "items": [
+        {"id": "v1.0.1-desktop-installers", "section": "newFeatures", "surfaces": ["general", "desktop"], "text": {"cn": "首次公开提供适用于 macOS Apple Silicon 和 Windows x64 的 Memmy 桌面安装包。", "en": "Published the first Memmy desktop installers for macOS Apple Silicon and Windows x64."}},
+        {"id": "v1.0.1-installation-guidance", "section": "improvementsAndBugFixes", "surfaces": ["desktop"], "text": {"cn": "补充首次安装指引，说明如何在 macOS 隐私与安全性设置或 Windows SmartScreen 中允许 Memmy 运行。", "en": "Added first-install guidance for allowing Memmy through macOS Privacy & Security settings or Windows SmartScreen."}}
+      ]
+    }
+  ]
+}
