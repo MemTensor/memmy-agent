@@ -321,7 +321,11 @@ describe("desktop packaged runtime boundaries", () => {
     const source = readFileSync(mainSourcePath, "utf8");
 
     expect(source).toContain('app.setName("Memmy");');
-    expect(source).toContain('app.setPath("userData", join(app.getPath("appData"), desktopUserDataDirectoryName(edition)));');
+    expect(source).toContain("const userDataPath = resolveDesktopUserDataPath(edition);");
+    expect(source).toContain("const memmyHome = resolveDesktopRuntimeHomePath(edition);");
+    expect(source).toContain('app.setPath("userData", userDataPath);');
+    expect(source).toContain('return join(dirname(process.execPath), "data");');
+    expect(source).toContain("process.env.MEMMY_MEMORY_DB = memoryDatabasePath;");
     expect(source).toMatch(/runtimeServices = app\.isPackaged\s*\?\s*await startPackagedRuntimeServices\(/);
     expect(source).toContain("memmyConfigPath: process.env.MEMMY_CONFIG");
     expect(source).not.toContain("startDesktopRuntimeServices");
@@ -442,6 +446,9 @@ describe("desktop packaged runtime boundaries", () => {
     expect(includeSource).toContain('File /oname=MemmyUpdatePrompt.ps1 "${BUILD_RESOURCES_DIR}\\MemmyUpdatePrompt.ps1"');
     expect(includeSource).toContain('FileOpen $1 "$0\\MemmyLauncher.vbs" w');
     expect(includeSource).toContain('promptPath = $\\"$0\\MemmyUpdatePrompt.ps1$\\"');
+    expect(includeSource).toContain('dataRoot = $\\"$INSTDIR\\data$\\"');
+    expect(includeSource).toContain('languagePath = dataRoot & $\\"\\Memmy\\update-prompt-language.txt$\\"');
+    expect(includeSource).toContain('markerPath = dataRoot & $\\"\\Memmy\\prepared-required-update.json$\\"');
     expect(includeSource).toContain("WindowsPowerShell\\v1.0\\powershell.exe");
     expect(includeSource).toContain('promptMarkerPath = markerPath & $\\".prompt$\\"');
     expect(includeSource).toContain("If fso.FolderExists(lockPath) And fso.FileExists(promptMarkerPath) Then");

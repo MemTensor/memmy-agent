@@ -16,7 +16,7 @@ import type {
 } from "@memmy/desktop-interface";
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, screen, shell, systemPreferences, Tray, type Event as ElectronEvent, type FileFilter, type IpcMainEvent, type MenuItemConstructorOptions, type Rectangle, type WebContents } from "electron";
 import { spawn } from "node:child_process";
-import { constants as fsConstants, existsSync, readFileSync } from "node:fs";
+import { constants as fsConstants, cpSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { access, appendFile, chmod, copyFile, lstat, mkdir, open, readFile, readdir, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
@@ -332,19 +332,86 @@ async function boot(): Promise<void> {
  */
 function configureAppIdentity(): void {
   const edition = resolveCurrentDesktopEdition();
-  const memmyHome = join(homedir(), desktopRuntimeHomeDirectoryName(edition));
+  const userDataPath = resolveDesktopUserDataPath(edition);
+  const memmyHome = resolveDesktopRuntimeHomePath(edition);
+  migratePackagedWindowsDataIfNeeded(edition, userDataPath, memmyHome);
   app.setName("Memmy");
   if (process.platform === "win32") {
     app.setAppUserModelId(WINDOWS_APP_USER_MODEL_ID);
   }
-  app.setPath("userData", join(app.getPath("appData"), desktopUserDataDirectoryName(edition)));
+  app.setPath("userData", userDataPath);
   if (app.isPackaged) {
     process.env.MEMMY_HOME = memmyHome;
     process.env.MEMMY_CONFIG = join(memmyHome, "config.yaml");
+    if (process.platform === "win32") {
+      const memoryDatabasePath = join(memmyHome, "memory-service", "memory.sqlite");
+      process.env.MEMMY_MEMORY_DB = memoryDatabasePath;
+      process.env.MEMORY_SERVICE_DB = memoryDatabasePath;
+    }
   } else {
     process.env.MEMMY_HOME ??= memmyHome;
     process.env.MEMMY_CONFIG ??= join(memmyHome, "config.yaml");
   }
+}
+
+function resolvePackagedWindowsDataRoot(): string | null {
+  if (process.platform !== "win32" || !app.isPackaged) {
+    return null;
+  }
+
+  return join(dirname(process.execPath), "data");
+}
+
+function resolveDesktopUserDataPath(edition: DesktopEdition): string {
+  return join(
+    resolvePackagedWindowsDataRoot() ?? app.getPath("appData"),
+    desktopUserDataDirectoryName(edition)
+  );
+}
+
+function resolveDesktopRuntimeHomePath(edition: DesktopEdition): string {
+  return join(
+    resolvePackagedWindowsDataRoot() ?? homedir(),
+    desktopRuntimeHomeDirectoryName(edition)
+  );
+}
+
+function migratePackagedWindowsDataIfNeeded(
+  edition: DesktopEdition,
+  userDataPath: string,
+  memmyHome: string
+): void {
+  if (!resolvePackagedWindowsDataRoot()) {
+    return;
+  }
+
+  copyDirectoryIfMissing(join(app.getPath("appData"), desktopUserDataDirectoryName(edition)), userDataPath);
+  copyDirectoryIfMissing(join(homedir(), desktopRuntimeHomeDirectoryName(edition)), memmyHome);
+}
+
+function copyDirectoryIfMissing(sourcePath: string, targetPath: string): void {
+  if (
+    pathsEqual(sourcePath, targetPath) ||
+    !existsSync(sourcePath) ||
+    existsSync(targetPath)
+  ) {
+    return;
+  }
+
+  try {
+    mkdirSync(dirname(targetPath), { recursive: true });
+    cpSync(sourcePath, targetPath, { recursive: true });
+  } catch (error) {
+    console.warn(`Failed to migrate Memmy data from ${sourcePath} to ${targetPath}:`, error);
+  }
+}
+
+function pathsEqual(left: string, right: string): boolean {
+  const normalizedLeft = resolve(left);
+  const normalizedRight = resolve(right);
+  return process.platform === "win32"
+    ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+    : normalizedLeft === normalizedRight;
 }
 
 /**
@@ -5103,7 +5170,8 @@ async function exportDiagnosticsReport(owner: BrowserWindow | null): Promise<Dia
 function buildDiagnosticsReport(): string {
   const logsDirectory = resolveLogsDirectory();
   const configPath = resolvePathValue(process.env.MEMMY_CONFIG ?? "~/.memmy/config.yaml");
-  const agentWorkspace = process.env.MEMMY_AGENT_WORKSPACE ?? join(homedir(), ".memmy", "workspace");
+  const agentWorkspace = process.env.MEMMY_AGENT_WORKSPACE ??
+    join(resolvePathValue(process.env.MEMMY_HOME ?? "~/.memmy"), "workspace");
   const memoryDatabasePath = runtimeServices?.memory.databasePath ?? "<not-started>";
   const runtimeBaseUrl = runtimeConfig?.baseUrl ?? "<not-ready>";
   const agentGatewayBaseUrl = runtimeConfig?.agentGateway?.baseUrl ?? "<not-ready>";
