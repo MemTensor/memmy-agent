@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { buildMemorySubPageViewEvent } from "../analytics/page-view.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
 import { useApiClients } from "../app/providers.js";
@@ -10,6 +10,12 @@ import { useAppState } from "../state/app-state.js";
 import { SidebarResizeHandle, useCodexResizableSidebar } from "./sidebar-resize.js";
 import { AnalyticsSubPage } from "./memory/analytics-sub-page.js";
 import { LogsSubPage } from "./memory/logs-sub-page.js";
+import {
+  resolveMemoryReferencePage,
+  type MemoryReferenceOpenRequest,
+  type MemoryReferencePage,
+  type OpenMemoryReference
+} from "./memory/memory-reference-tags.js";
 import { MemoriesSubPage } from "./memory/memories-sub-page.js";
 import { OverviewSubPage } from "./memory/overview-sub-page.js";
 import { PoliciesSubPage } from "./memory/policies-sub-page.js";
@@ -91,12 +97,21 @@ export function MemoryPage(props: MemoryPageProps) {
   const { dispatch } = useAppState();
   const { track, ready: analyticsReady } = useAnalytics();
   const prevSubPageRef = useRef<MemorySubPageId | null>(null);
+  const referenceRequestIdRef = useRef(0);
   const [activePage, setActivePage] = useState<MemorySubPageId>(() => props.initialSubPage ?? readInitialMemorySubPage());
+  const [referenceRequest, setReferenceRequest] = useState<(MemoryReferenceOpenRequest & { page: MemoryReferencePage }) | null>(null);
   const client = clients?.memoryRuntime ?? null;
 
   function handleSubPageChange(page: MemorySubPageId) {
+    setReferenceRequest(null);
     setActivePage(page);
   }
+
+  const handleOpenMemoryReference = useCallback<OpenMemoryReference>((id, fallbackPage) => {
+    const page = resolveMemoryReferencePage(id, fallbackPage);
+    setReferenceRequest({ id, page, requestId: ++referenceRequestIdRef.current });
+    setActivePage(page);
+  }, []);
 
   useEffect(() => {
     if (!analyticsReady) {
@@ -115,20 +130,45 @@ export function MemoryPage(props: MemoryPageProps) {
   const childByPage = useMemo<Record<MemorySubPageId, ReactNode>>(
     () => ({
       overview: <OverviewSubPage client={client} />,
-      memories: <MemoriesSubPage client={client} onOpenSettings={() => dispatch(appActions.navigate("/settings"))} />,
-      tasks: <TasksSubPage client={client} />,
-      policies: <PoliciesSubPage client={client} />,
-      "world-model": <WorldModelSubPage client={client} />,
-      skills: <SkillsSubPage client={client} />,
+      memories: (
+        <MemoriesSubPage
+          client={client}
+          openRequest={referenceRequest?.page === "memories" ? referenceRequest : undefined}
+          onOpenSettings={() => dispatch(appActions.navigate("/settings"))}
+        />
+      ),
+      tasks: <TasksSubPage client={client} openRequest={referenceRequest?.page === "tasks" ? referenceRequest : undefined} />,
+      policies: (
+        <PoliciesSubPage
+          client={client}
+          openRequest={referenceRequest?.page === "policies" ? referenceRequest : undefined}
+          onOpenMemoryReference={handleOpenMemoryReference}
+        />
+      ),
+      "world-model": (
+        <WorldModelSubPage
+          client={client}
+          openRequest={referenceRequest?.page === "world-model" ? referenceRequest : undefined}
+          onOpenMemoryReference={handleOpenMemoryReference}
+        />
+      ),
+      skills: (
+        <SkillsSubPage
+          client={client}
+          openRequest={referenceRequest?.page === "skills" ? referenceRequest : undefined}
+          onOpenMemoryReference={handleOpenMemoryReference}
+        />
+      ),
       analytics: <AnalyticsSubPage client={client} />,
       logs: <LogsSubPage client={client} />,
       sources: <SourcesSubPage />
     }),
-    [client, dispatch]
+    [client, dispatch, handleOpenMemoryReference, referenceRequest]
   );
 
   useEffect(() => {
     if (props.initialSubPage) {
+      setReferenceRequest(null);
       setActivePage(props.initialSubPage);
     }
   }, [props.initialSubPage]);

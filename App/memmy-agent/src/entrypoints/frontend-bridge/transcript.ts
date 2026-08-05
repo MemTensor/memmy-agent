@@ -376,6 +376,11 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
   let activitySegmentCounter = 0;
   const newId = (prefix: string, idx: number): string => `${prefix}-${idx}-${randomUUID().slice(0, 8)}`;
 
+  function modelError(value: any): { category: "quota_exhausted" } | null {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    return value.category === "quota_exhausted" ? { category: "quota_exhausted" } : null;
+  }
+
   function roleCreatedAtPatch(role: "user" | "assistant"): Dict {
     const index = sessionCreatedAtIndexByRole[role];
     sessionCreatedAtIndexByRole[role] = index + 1;
@@ -1089,9 +1094,11 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
 
       const content = typeof rec.text === "string" ? rec.text : "";
       const media = normalizeAssistantMediaAttachments(rec, augmentAssistantMedia);
-      const hasAssistantPayload = Boolean(content.trim() || media.length);
+      const structuredModelError = modelError(rec.model_error);
+      const hasAssistantPayload = Boolean(content.trim() || media.length || structuredModelError);
       const extra: Dict = { content };
       if (media.length) extra.media = media;
+      if (structuredModelError) extra.model_error = structuredModelError;
       if (typeof rec.latency_ms === "number" && rec.latency_ms >= 0) extra.latencyMs = Math.trunc(rec.latency_ms);
       if (isCronProactiveRecord(rec)) {
         if (!hasAssistantPayload) continue;

@@ -1017,12 +1017,12 @@ describe("AppFrame", () => {
     );
 
     expect(resolveSidebarAccountSummary(phoneState, sidebarLabels())).toEqual({
-      name: "138****8000",
-      meta: "138****8000"
+      name: "13800138000",
+      meta: "13800138000"
     });
     expect(resolveSidebarAccountSummary(emailState, sidebarLabels())).toEqual({
-      name: "g***@example.com",
-      meta: "g***@example.com"
+      name: "grace@example.com",
+      meta: "grace@example.com"
     });
   });
 

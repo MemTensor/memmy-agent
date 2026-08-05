@@ -35,6 +35,10 @@ const DEFAULT_LLM_MAX_TOKENS = 2_000;
 const MEMMY_ACCOUNT_AGENT_CHAT_THINKING_BUDGET = 500;
 const GENERATED_ACTIONS_MARKER = "[MEMMY_ACTIONS_JSON]";
 const MAX_GENERATED_OUTPUT_CHARS = 12_000;
+const ACTION_CHAT_ONLY_INSTRUCTION = {
+  "zh-CN": "请只在当前对话中输出结果，不要创建文件，也不要修改任何文件。",
+  "en-US": "Return the result in this conversation only. Do not create files or modify any existing files."
+} as const;
 
 const TOPIC_PATTERNS: ReadonlyArray<{ keyword: string; pattern: RegExp }> = [
   { keyword: "TypeScript", pattern: /\btypescript\b|\bts\b/i },
@@ -632,7 +636,7 @@ async function buildReportResponse(input: {
     secondaryActions,
     signal: input.signal
   }, fallbackActions);
-  const actions = generatedReport?.actions ?? fallbackActions;
+  const actions = appendActionChatOnlyInstruction(generatedReport?.actions ?? fallbackActions, input.locale);
 
   return {
     status: "ready",
@@ -719,7 +723,7 @@ async function* streamReportResponse(input: {
   }
 
   const generatedReport = parseGeneratedReportOutput(rawOutput, fallbackActions);
-  const actions = generatedReport?.actions ?? fallbackActions;
+  const actions = appendActionChatOnlyInstruction(generatedReport?.actions ?? fallbackActions, input.locale);
 
   yield {
     type: "done",
@@ -743,6 +747,17 @@ function buildReportActions(
     primaryAction,
     secondaryActions: buildSecondaryActions(primaryAction.type, profile, sample.queries, locale)
   };
+}
+
+function appendActionChatOnlyInstruction(
+  actions: readonly OnboardingInsightAction[],
+  locale: "zh-CN" | "en-US"
+): OnboardingInsightAction[] {
+  const instruction = ACTION_CHAT_ONLY_INSTRUCTION[locale];
+  return actions.map((action) => ({
+    ...action,
+    suggestedPrompt: `${action.suggestedPrompt.trimEnd()}\n\n${instruction}`
+  }));
 }
 
 function renderFallbackReport(profile: OnboardingInsightProfileSignals, locale: "zh-CN" | "en-US"): string {

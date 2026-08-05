@@ -1,4 +1,5 @@
 import { createProviderAbortError, LLMResponse, ToolCallRequest } from "../base.js";
+import { classifyQuotaExhaustion } from "../provider-error-classifier.js";
 import { parseToolArguments } from "../tool-json.js";
 
 export const FINISH_REASON_MAP: Record<string, string> = {
@@ -56,7 +57,10 @@ export async function* iterSse(response: Response): AsyncGenerator<any> {
   }
 }
 
-export function parseResponseOutput(response: any): LLMResponse {
+export function parseResponseOutput(
+  response: any,
+  provider: string | null = null,
+): LLMResponse {
   const data =
     typeof response?.toJSON === "function"
       ? response.toJSON()
@@ -88,13 +92,51 @@ export function parseResponseOutput(response: any): LLMResponse {
       Object.entries(usageRaw).filter(([key]) => !["prompt_tokens", "input_tokens", "completion_tokens", "output_tokens", "total_tokens"].includes(key)),
     ),
   };
+  const error = data.error && typeof data.error === "object" ? data.error : {};
+  const errorType = normalizeResponseErrorToken(error.type ?? data.type);
+  const errorCode = normalizeResponseErrorToken(error.code ?? data.code);
+  const isError = data.status === "failed" || data.status === "cancelled";
+  const errorCategory = isError
+    ? classifyQuotaExhaustion({
+        provider,
+        httpStatus: null,
+        errorType,
+        errorCode,
+        metadataErrorType: null,
+        baseRespStatusCode: null,
+      })
+    : null;
   return new LLMResponse({
     content: text || null,
     toolCalls: calls,
     finishReason: mapFinishReason(data.status),
     usage,
     reasoningContent: reasoning || null,
+    errorType: isError ? errorType : null,
+    errorCode: isError ? errorCode : null,
+    errorCategory,
   });
+}
+
+function normalizeResponseErrorToken(value: unknown): string | null {
+  if (value == null) return null;
+  const normalized = String(value).trim().toLowerCase();
+  return normalized || null;
+}
+
+function errorSummary(error: unknown): string {
+  if (typeof error === "string") return error;
+  if (error && typeof error === "object") {
+    const record = error as Record<string, unknown>;
+    const summary = record.message ?? record.code ?? record.type;
+    if (summary != null) return String(summary);
+    try {
+      return JSON.stringify(error);
+    } catch {
+      return String(error);
+    }
+  }
+  return String(error ?? "unknown error");
 }
 
 export async function consumeSse(response: Response): Promise<LLMResponse> {
@@ -123,7 +165,8 @@ export async function consumeSdkStream(
     if (signal?.aborted) throw createProviderAbortError();
     const type = event.type;
     if (type === "error" || type === "response.failed") {
-      throw new RuntimeError(`Response failed: ${event.error ?? event.message ?? "unknown error"}`);
+      const error = event.error ?? event.response?.error ?? event.message ?? "unknown error";
+      throw new RuntimeError(`Response failed: ${errorSummary(error)}`, error);
     }
     if (type === "response.output_text.delta") {
       text += event.delta ?? "";
@@ -180,4 +223,12 @@ export async function consumeSdkStream(
   return [text, calls, finish, usage, reasoning];
 }
 
-export class RuntimeError extends Error {}
+export class RuntimeError extends Error {
+  body: unknown;
+
+  constructor(message: string, body: unknown = null) {
+    super(message);
+    this.name = "RuntimeError";
+    this.body = body;
+  }
+}

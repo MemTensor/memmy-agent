@@ -69,6 +69,9 @@ describe("SkillsSubPage", () => {
     expect(html).toContain("适用场景");
     expect(html).toContain("来源经验");
     expect(html).toContain("memory-policy-1");
+    expect(html).toContain("memory-policy-id--link");
+    expect(html).toContain('title="memory-policy-1"');
+    expect(html).not.toContain("来源场域认知");
     expect(html).toContain("进化时间线");
     expect(html).toContain("结晶完成");
     expect(html).toContain("价值评分更新");
@@ -198,6 +201,7 @@ function renderSkills(state: Parameters<typeof SkillsSubPageView>[0]["state"]): 
         onOpenSkill={vi.fn()}
         onDeleteSkill={vi.fn(async () => undefined)}
         onCloseSkill={vi.fn()}
+        onOpenMemoryReference={vi.fn()}
       />
     </I18nProvider>
   );

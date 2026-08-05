@@ -35,6 +35,7 @@ describe("repository sqlite schema contract", () => {
         .all() as Array<{ name: string }>;
       expect(indexes.map((index) => index.name)).toEqual(expect.arrayContaining([
         "idx_memories_layer_status_updated",
+        "idx_memories_layer_status_created",
         "idx_memories_conversation_updated",
         "idx_memories_content_hash_layer",
         "idx_memories_key_layer"

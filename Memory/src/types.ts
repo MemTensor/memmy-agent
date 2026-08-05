@@ -134,6 +134,8 @@ export interface MemoryFilter {
   agentId?: string;
   excludedAgentIds?: string[];
   appId?: string;
+  createdAtGte?: IsoTime;
+  createdAtLt?: IsoTime;
   memoryLayer?: MemoryLayer | MemoryLayer[];
   status?: MemoryStatus | MemoryStatus[];
   tags?: string[];

@@ -32,6 +32,20 @@ function provider(responses: string[] = ["ok"]): any {
   };
 }
 
+function quotaProvider(): any {
+  return {
+    generation: { maxTokens: 100 },
+    chat: vi.fn(async () =>
+      new LLMResponse({
+        content: "raw provider quota detail",
+        finishReason: "error",
+        errorCode: "40309",
+        errorCategory: "quota_exhausted",
+      })),
+    getDefaultModel: () => "test-model",
+  };
+}
+
 function loop(p = provider(), extra: Record<string, any> = {}): AgentLoop {
   const root = workspace();
   return new AgentLoop({
@@ -118,6 +132,69 @@ describe("AgentLoop direct processing", () => {
       sessionUpdateScope: "thread",
     });
     expect(agent.bus.outboundSize).toBe(0);
+  });
+
+  it("propagates a structured quota category through the WebUI state path", async () => {
+    const agent = loop(quotaProvider());
+    agent.sessions.reserveWebuiSessionBinding("websocket:web-quota", {
+      projectId: null,
+      cwd: fs.realpathSync(agent.workspace),
+    });
+
+    const outbound = await agent.processMessage(
+      new InboundMessage({
+        channel: "websocket",
+        chatId: "web-quota",
+        senderId: "user",
+        content: "hello",
+        metadata: { webui: true, webui_language: "zh-CN" },
+      }),
+    );
+
+    expect(outbound?.content).toBe("当前模型额度已用完");
+    expect(outbound?.metadata.modelErrorCategory).toBe("quota_exhausted");
+    const persisted = agent.sessions.getOrCreate("websocket:web-quota").messages;
+    expect(persisted.every((message) => !("errorCategory" in message))).toBe(true);
+    expect(persisted.every((message) => !("modelErrorCategory" in message))).toBe(true);
+  });
+
+  it("propagates a structured quota category through the system-message path", async () => {
+    const agent = loop(quotaProvider());
+
+    const outbound = await agent.processMessage(
+      new InboundMessage({
+        channel: "system",
+        chatId: "websocket:system-quota",
+        senderId: "system",
+        content: "background prompt",
+        metadata: { webui_language: "en" },
+      }),
+    );
+
+    expect(outbound?.channel).toBe("websocket");
+    expect(outbound?.content).toBe("This model's quota has been used up.");
+    expect(outbound?.metadata.modelErrorCategory).toBe("quota_exhausted");
+  });
+
+  it("does not classify quota-like answer text without a structured category", async () => {
+    const agent = loop(provider(["Your quota balance is healthy."]));
+    agent.sessions.reserveWebuiSessionBinding("websocket:web-normal", {
+      projectId: null,
+      cwd: fs.realpathSync(agent.workspace),
+    });
+
+    const outbound = await agent.processMessage(
+      new InboundMessage({
+        channel: "websocket",
+        chatId: "web-normal",
+        senderId: "user",
+        content: "status",
+        metadata: { webui: true, webui_language: "en" },
+      }),
+    );
+
+    expect(outbound?.content).toBe("Your quota balance is healthy.");
+    expect(outbound?.metadata).not.toHaveProperty("modelErrorCategory");
   });
 
   it("replays prior history on the next direct turn without duplicating the current user message", async () => {

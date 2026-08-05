@@ -109,6 +109,38 @@ describe("WebSocket channel", () => {
     });
   });
 
+  it("sends and persists structured quota errors without leaking internal metadata", async () => {
+    tempDataDir();
+    const channel = new WebSocketChannel({}, new MessageBus());
+    const ws = connection();
+    channel.attachConnection(ws, "chat-quota");
+
+    await channel.send(
+      new OutboundMessage({
+        channel: "websocket",
+        chatId: "chat-quota",
+        content: "当前模型额度已用完",
+        metadata: { x: 1, modelErrorCategory: "quota_exhausted" },
+      }),
+    );
+
+    expect(sent(ws)).toMatchObject({
+      event: "message",
+      content: "当前模型额度已用完",
+      metadata: { x: 1 },
+      model_error: { category: "quota_exhausted" },
+    });
+    expect(sent(ws).metadata).not.toHaveProperty("modelErrorCategory");
+    const transcript = fs
+      .readFileSync(webuiTranscriptPath("websocket:chat-quota"), "utf8")
+      .trim()
+      .split(/\n/u)
+      .map((line) => JSON.parse(line));
+    expect(transcript).toHaveLength(1);
+    expect(transcript[0].model_error).toEqual({ category: "quota_exhausted" });
+    expect(transcript[0].metadata).toEqual({ x: 1 });
+  });
+
   it("sends context compaction status as a dedicated WebUI event and transcript row", async () => {
     tempDataDir();
     const channel = new WebSocketChannel({}, new MessageBus());

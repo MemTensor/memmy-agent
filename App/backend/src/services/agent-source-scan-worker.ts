@@ -12,6 +12,7 @@ import {
   createAgentSourceLifecycleAnalytics,
   resolveLoggedInAnalyticsUserId,
 } from "../analytics/agent-source-analytics.js";
+import { createMemoryDesktopAddAnalytics } from "../analytics/memory-add-analytics.js";
 import { createAgentSourceService } from "./agent-source-service.js";
 import { createBuiltinAgentSourceRegistry } from "./builtin-agent-source-registry.js";
 import { createIngestionService } from "./ingestion-service.js";
@@ -84,12 +85,28 @@ async function runWorker(): Promise<void> {
 
 function createAgentSources(appStateStore: AppStateStore, memoryClient: MemoryClient) {
   const sourceRegistry = createBuiltinAgentSourceRegistry();
+  const accountSessionRepository = appStateStore.repositories.accountSession;
+  const resolveAnalyticsUserId = () => {
+    const session = accountSessionRepository.get();
+    if (!session.authenticated) return null;
+    return resolveLoggedInAnalyticsUserId({
+      cloudUuid: accountSessionRepository.getCloudUuid(),
+      userId: session.profile.userId,
+    });
+  };
+  const resolveAnalyticsUserMode = () => {
+    const mode = appStateStore.repositories.bootstrap.getAppSettings().userMode;
+    return mode === "account" || mode === "byok" ? mode : null;
+  };
   const ingestionService = createIngestionService({
     memoryClient,
-    agentSourceRepository: appStateStore.repositories.agentSources
+    agentSourceRepository: appStateStore.repositories.agentSources,
+    memoryAddAnalytics: createMemoryDesktopAddAnalytics({
+      getUserId: resolveAnalyticsUserId,
+      getUserMode: resolveAnalyticsUserMode,
+    }),
   });
 
-  const accountSessionRepository = appStateStore.repositories.accountSession;
   return createAgentSourceService({
     sourceRegistry,
     agentSourceRepository: appStateStore.repositories.agentSources,
@@ -97,18 +114,8 @@ function createAgentSources(appStateStore: AppStateStore, memoryClient: MemoryCl
     memoryClient,
     skillDistributionService: createUnavailableSkillDistributionService(),
     agentSourceAnalytics: createAgentSourceLifecycleAnalytics({
-      getUserId: () => {
-        const session = accountSessionRepository.get();
-        if (!session.authenticated) return null;
-        return resolveLoggedInAnalyticsUserId({
-          cloudUuid: accountSessionRepository.getCloudUuid(),
-          userId: session.profile.userId,
-        });
-      },
-      getUserMode: () => {
-        const mode = appStateStore.repositories.bootstrap.getAppSettings().userMode;
-        return mode === "account" || mode === "byok" ? mode : null;
-      },
+      getUserId: resolveAnalyticsUserId,
+      getUserMode: resolveAnalyticsUserMode,
     }),
   });
 }

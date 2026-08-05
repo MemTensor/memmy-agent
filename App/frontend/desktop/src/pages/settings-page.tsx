@@ -19,7 +19,6 @@ import {
 } from "../app/pet-guide.js";
 import { consumeTokenExhaustedApplyMoreRequest, TOKEN_EXHAUSTED_APPLY_MORE_EVENT } from "../app/token-exhausted-apply-more.js";
 import { getLegalLinkUrl } from "../legal/legal-links.js";
-import { maskAccountIdentifier } from "../utils/mask-account-identifier.js";
 import { isComposingKeyboardEvent } from "../utils/keyboard.js";
 import { openExternalUrl } from "../utils/open-url.js";
 import { useTranslation } from "../i18n/use-translation.js";
@@ -364,11 +363,11 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const [memoryModel, setMemoryModel] = useState<ModelConfig>(() => initialModelForm.memoryModel);
   const [skillModel, setSkillModel] = useState<ModelConfig>(() => initialModelForm.skillModel);
   const accountIdentifier = resolveAccountIdentifier(state);
-  const maskedAccountIdentifier = maskAccountIdentifier(accountIdentifier);
+  const accountDisplayIdentifier = accountIdentifier.trim();
   const accountName = isByokMode
     ? resolveAccountFallback(appSettings?.userMode, t)
-    : state.account.nickname || maskedAccountIdentifier || resolveAccountFallback(appSettings?.userMode, t);
-  const accountMeta = isByokMode ? resolveAccountMeta(appSettings?.userMode, t) : maskedAccountIdentifier || resolveAccountMeta(appSettings?.userMode, t);
+    : state.account.nickname || accountDisplayIdentifier || resolveAccountFallback(appSettings?.userMode, t);
+  const accountMeta = isByokMode ? resolveAccountMeta(appSettings?.userMode, t) : accountDisplayIdentifier || resolveAccountMeta(appSettings?.userMode, t);
   const accountInitial = isByokMode ? "·" : resolveAccountInitials(accountName);
   const registeredAtText = formatRegisteredAt(state.account.registeredAt, t);
   const language = appSettings?.language === "en-US" ? "en-US" : "zh-CN";

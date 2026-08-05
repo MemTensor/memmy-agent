@@ -277,7 +277,7 @@ describe("chatWithRetry", () => {
     expect(provider.delays).toEqual([1]);
   });
 
-  it("stops on non-retryable 429 quota errors", async () => {
+  it("stops on structured quota categories before any retry", async () => {
     const provider = new ScriptedProvider([
       new LLMResponse({
         content: '{"error":{"type":"insufficient_quota","code":"insufficient_quota"}}',
@@ -285,6 +285,7 @@ describe("chatWithRetry", () => {
         errorStatusCode: 429,
         errorType: "insufficient_quota",
         errorCode: "insufficient_quota",
+        errorCategory: "quota_exhausted",
       }),
       new LLMResponse({ content: "ok" }),
     ]);
@@ -292,6 +293,68 @@ describe("chatWithRetry", () => {
     expect(response.finishReason).toBe("error");
     expect(provider.calls).toBe(1);
     expect(provider.delays).toEqual([]);
+  });
+
+  it("does not strip images for structured quota errors", async () => {
+    const provider = new ScriptedProvider([
+      new LLMResponse({
+        content: "quota response",
+        finishReason: "error",
+        errorStatusCode: 429,
+        errorCategory: "quota_exhausted",
+      }),
+      new LLMResponse({ content: "unexpected retry" }),
+    ]);
+
+    const response = await provider.chatWithRetry({ messages: imageMessage() });
+
+    expect(response.errorCategory).toBe("quota_exhausted");
+    expect(provider.calls).toBe(1);
+    expect(provider.delays).toEqual([]);
+  });
+
+  it("stops persistent retry immediately for structured quota errors", async () => {
+    const progress: string[] = [];
+    const provider = new ScriptedProvider([
+      new LLMResponse({
+        content: "quota response",
+        finishReason: "error",
+        errorCategory: "quota_exhausted",
+      }),
+      new LLMResponse({ content: "unexpected retry" }),
+    ]);
+
+    const response = await provider.chatWithRetry({
+      messages: userMessages(),
+      retryMode: "persistent",
+      onRetryWait: (message) => {
+        progress.push(message);
+      },
+    });
+
+    expect(response.errorCategory).toBe("quota_exhausted");
+    expect(provider.calls).toBe(1);
+    expect(provider.delays).toEqual([]);
+    expect(progress).toEqual([]);
+  });
+
+  it("keeps unknown 429 quota-like tokens retryable without a category", async () => {
+    const provider = new ScriptedProvider([
+      new LLMResponse({
+        content: "quota exhausted",
+        finishReason: "error",
+        errorStatusCode: 429,
+        errorType: "insufficient_quota",
+        errorCode: "insufficient_quota",
+      }),
+      new LLMResponse({ content: "ok" }),
+    ]);
+
+    const response = await provider.chatWithRetry({ messages: userMessages() });
+
+    expect(response.content).toBe("ok");
+    expect(provider.calls).toBe(2);
+    expect(provider.delays).toEqual([1]);
   });
 
   it("retries transient structured 429 rate-limit errors", async () => {

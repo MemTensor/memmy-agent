@@ -9,8 +9,10 @@ directories:
 files:
   - dist/**/*
   - package.json
-  - "!**/node_modules/**/{test,tests,__tests__,doc,docs,example,examples,coverage,.github}"
-  - "!**/node_modules/**/{test,tests,__tests__,doc,docs,example,examples,coverage,.github}/**/*"
+  - "!**/node_modules/*/{test,tests,__tests__,doc,docs,example,examples,coverage,.github}"
+  - "!**/node_modules/*/{test,tests,__tests__,doc,docs,example,examples,coverage,.github}/**/*"
+  - "!**/node_modules/@*/*/{test,tests,__tests__,doc,docs,example,examples,coverage,.github}"
+  - "!**/node_modules/@*/*/{test,tests,__tests__,doc,docs,example,examples,coverage,.github}/**/*"
   - "!**/node_modules/**/*.{test,spec}.*"
   - "!**/node_modules/**/{README,README*.md,README*.mdown,README*.markdown,README*.rst,README*.txt,CHANGELOG,CHANGELOG*.md,CHANGELOG*.mdown,CHANGELOG*.markdown,CHANGELOG*.rst,CHANGELOG*.txt,CONTRIBUTING,CONTRIBUTING*.md,CONTRIBUTING*.mdown,CONTRIBUTING*.markdown,CONTRIBUTING*.rst,CONTRIBUTING*.txt,CODE_OF_CONDUCT,CODE_OF_CONDUCT*.md,CODE_OF_CONDUCT*.mdown,CODE_OF_CONDUCT*.markdown,CODE_OF_CONDUCT*.rst,CODE_OF_CONDUCT*.txt,SECURITY,SECURITY*.md,SECURITY*.mdown,SECURITY*.markdown,SECURITY*.rst,SECURITY*.txt}"
 
@@ -33,6 +35,10 @@ extraResources:
     to: MenuBarIconTemplate.png
   - from: build/MenuBarIconTemplate@2x.png
     to: MenuBarIconTemplate@2x.png
+  - from: dist/embedding-models
+    to: embedding-models
+    filter:
+      - "**/*"
   - from: ../../../.env
     to: .env
 

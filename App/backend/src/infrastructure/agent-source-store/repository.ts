@@ -6,8 +6,7 @@ import {
   type ManagedAgentSyncRecipe
 } from "@memmy/local-api-contracts";
 import type { DatabaseSync } from "node:sqlite";
-
-const AGENT_SOURCE_SCOPE_UUID = "local-agent-sources";
+import { INSTALLATION_SCAN_SCOPE_UUID } from "../installation-scan-scope.js";
 
 /** Contract for agent source record. */
 export interface AgentSourceRecord {
@@ -125,7 +124,7 @@ export function createAgentSourceRepository(
             ORDER BY source.builtin DESC, source.display_name ASC
           `
         )
-        .all(AGENT_SOURCE_SCOPE_UUID) as unknown as AgentSourceRow[];
+        .all(INSTALLATION_SCAN_SCOPE_UUID) as unknown as AgentSourceRow[];
 
       return rows.map(toAgentSourceRecord);
     },
@@ -145,7 +144,7 @@ export function createAgentSourceRepository(
               updated_at = excluded.updated_at
           `
       ).run(
-        AGENT_SOURCE_SCOPE_UUID,
+        INSTALLATION_SCAN_SCOPE_UUID,
         input.sourceId,
         input.displayName,
         input.dataPath,
@@ -156,14 +155,14 @@ export function createAgentSourceRepository(
     },
 
     removeSource(sourceId) {
-      db.prepare("DELETE FROM account_agent_sources WHERE uuid = ? AND source_id = ?").run(AGENT_SOURCE_SCOPE_UUID, sourceId);
+      db.prepare("DELETE FROM account_agent_sources WHERE uuid = ? AND source_id = ?").run(INSTALLATION_SCAN_SCOPE_UUID, sourceId);
     },
 
     setStatus(sourceId, status) {
       db.prepare("UPDATE account_agent_sources SET status = ?, updated_at = ? WHERE uuid = ? AND source_id = ?").run(
         status,
         new Date().toISOString(),
-        AGENT_SOURCE_SCOPE_UUID,
+        INSTALLATION_SCAN_SCOPE_UUID,
         sourceId
       );
     },
@@ -172,7 +171,7 @@ export function createAgentSourceRepository(
       db.prepare("UPDATE account_agent_sources SET last_scanned_at = ?, updated_at = ? WHERE uuid = ? AND source_id = ?").run(
         scannedAt,
         new Date().toISOString(),
-        AGENT_SOURCE_SCOPE_UUID,
+        INSTALLATION_SCAN_SCOPE_UUID,
         sourceId
       );
     },
@@ -182,7 +181,7 @@ export function createAgentSourceRepository(
         SELECT source_id, mode, baseline_at, latest_seen_created_at, updated_at
         FROM account_agent_source_watermarks
         WHERE uuid = ? AND source_id = ?
-      `).get(AGENT_SOURCE_SCOPE_UUID, sourceId) as AgentSourceWatermarkRow | undefined;
+      `).get(INSTALLATION_SCAN_SCOPE_UUID, sourceId) as AgentSourceWatermarkRow | undefined;
       return row ? toAgentSourceScanWatermark(row) : null;
     },
 
@@ -202,7 +201,7 @@ export function createAgentSourceRepository(
           latest_seen_created_at = excluded.latest_seen_created_at,
           updated_at = excluded.updated_at
       `).run(
-        AGENT_SOURCE_SCOPE_UUID,
+        INSTALLATION_SCAN_SCOPE_UUID,
         input.sourceId,
         input.mode,
         input.baselineAt,
@@ -216,7 +215,7 @@ export function createAgentSourceRepository(
         SELECT source_id, conversation_id, last_message_id, last_created_at, content_hash, updated_at
         FROM account_agent_source_conversation_checkpoints
         WHERE uuid = ? AND source_id = ? AND conversation_id = ?
-      `).get(AGENT_SOURCE_SCOPE_UUID, sourceId, conversationId) as AgentSourceConversationCheckpointRow | undefined;
+      `).get(INSTALLATION_SCAN_SCOPE_UUID, sourceId, conversationId) as AgentSourceConversationCheckpointRow | undefined;
       return row ? toConversationCheckpoint(row) : null;
     },
 
@@ -231,7 +230,7 @@ export function createAgentSourceRepository(
           content_hash = excluded.content_hash,
           updated_at = excluded.updated_at
       `).run(
-        AGENT_SOURCE_SCOPE_UUID,
+        INSTALLATION_SCAN_SCOPE_UUID,
         input.sourceId,
         input.conversationId,
         input.lastMessageId,
@@ -242,14 +241,14 @@ export function createAgentSourceRepository(
     },
 
     hasSeen(dedupKey) {
-      const row = db.prepare("SELECT dedup_key FROM account_ingestion_seen WHERE uuid = ? AND dedup_key = ?").get(AGENT_SOURCE_SCOPE_UUID, dedupKey);
+      const row = db.prepare("SELECT dedup_key FROM account_ingestion_seen WHERE uuid = ? AND dedup_key = ?").get(INSTALLATION_SCAN_SCOPE_UUID, dedupKey);
       return Boolean(row);
     },
 
     markSeen(dedupKey, sourceId) {
       const result = db
         .prepare("INSERT OR IGNORE INTO account_ingestion_seen (uuid, dedup_key, source_id) VALUES (?, ?, ?)")
-        .run(AGENT_SOURCE_SCOPE_UUID, dedupKey, sourceId);
+        .run(INSTALLATION_SCAN_SCOPE_UUID, dedupKey, sourceId);
       return result.changes > 0;
     }
   };
@@ -264,7 +263,7 @@ function ensureAgentSourceScope(db: DatabaseSync): void {
       created_at,
       updated_at
     ) VALUES (?, ?, ?)`
-  ).run(AGENT_SOURCE_SCOPE_UUID, now, now);
+  ).run(INSTALLATION_SCAN_SCOPE_UUID, now, now);
 }
 
 /** Handles to agent source record. */

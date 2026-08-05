@@ -16,6 +16,12 @@ import { toMemoryDetailErrorMessage } from "./memory-detail-error.js";
 import { cleanMemoryBody, cleanMemoryText, drawerEyebrow } from "./memory-display.js";
 import { displayMemoryId } from "./memory-id.js";
 import {
+  MemoryReferenceTags,
+  type MemoryReferenceOpenRequest,
+  type MemoryReferencePage,
+  type OpenMemoryReference
+} from "./memory-reference-tags.js";
+import {
   clearMemoryPanelCache,
   memoryPanelCacheKey,
   memoryPanelLatestCacheKey,
@@ -64,7 +70,6 @@ interface SkillView {
   decisionGuidance: SkillDecisionGuidance;
   evidenceAnchors: string[];
   sourcePolicyIds: string[];
-  sourceWorldModelIds: string[];
   eta?: number;
   support?: number;
   gain?: number;
@@ -76,6 +81,8 @@ interface SkillView {
 
 export interface SkillsSubPageProps {
   client: MemoryRuntimeClient | null;
+  openRequest?: MemoryReferenceOpenRequest;
+  onOpenMemoryReference: OpenMemoryReference;
 }
 
 export function loadSkillsData(client: MemoryRuntimeClient, query = ""): Promise<PanelItemsOutput> {
@@ -259,9 +266,17 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.client, t, demoEnabled]);
 
+  useEffect(() => {
+    if (props.openRequest) {
+      openSkill(props.openRequest.id);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.openRequest?.requestId]);
+
   return (
     <SkillsSubPageView
       state={state.status === "ready" ? { ...state, detail } : state}
+      detail={detail}
       selectedSkillId={selectedSkillId}
       query={query}
       onQueryChange={changeQuery}
@@ -280,12 +295,14 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
       onOpenSkill={openSkill}
       onDeleteSkill={deleteSkill}
       onCloseSkill={closeSkill}
+      onOpenMemoryReference={props.onOpenMemoryReference}
     />
   );
 }
 
 export interface SkillsSubPageViewProps {
   state: RemoteData<PanelItemsOutput> | ({ status: "ready"; data: PanelItemsOutput; detail: SkillDetailState });
+  detail?: SkillDetailState;
   selectedSkillId?: string | null;
   query: string;
   onQueryChange: (value: string) => void;
@@ -295,6 +312,7 @@ export interface SkillsSubPageViewProps {
   onOpenSkill: (skillId: string) => void;
   onDeleteSkill: (id: string) => Promise<void>;
   onCloseSkill: () => void;
+  onOpenMemoryReference: OpenMemoryReference;
 }
 
 export function SkillsSubPageView(props: SkillsSubPageViewProps) {
@@ -359,9 +377,14 @@ export function SkillsSubPageView(props: SkillsSubPageViewProps) {
             ))}
           </div>
           <MemoryPagination data={props.state.data} onPageChange={props.onPageChange} />
-          <SkillDrawer detail={"detail" in props.state ? props.state.detail : null} onClose={props.onCloseSkill} onDelete={props.onDeleteSkill} />
         </>
       )}
+      <SkillDrawer
+        detail={props.detail ?? ("detail" in props.state ? props.state.detail : null)}
+        onClose={props.onCloseSkill}
+        onDelete={props.onDeleteSkill}
+        onOpenMemoryReference={props.onOpenMemoryReference}
+      />
     </section>
   );
 }
@@ -373,7 +396,12 @@ export function SkillsSubPageView(props: SkillsSubPageViewProps) {
  * @param props.onClose The close callback.
  * @returns The skill detail node.
  */
-function SkillDrawer(props: { detail: SkillDetailState; onClose: () => void; onDelete: (id: string) => Promise<void> }) {
+function SkillDrawer(props: {
+  detail: SkillDetailState;
+  onClose: () => void;
+  onDelete: (id: string) => Promise<void>;
+  onOpenMemoryReference: OpenMemoryReference;
+}) {
   const { t } = useTranslation();
 
   if (!props.detail) {
@@ -405,7 +433,13 @@ function SkillDrawer(props: { detail: SkillDetailState; onClose: () => void; onD
         <div className="memory-drawer__body">
           {props.detail.status === "loading" && <MemoryStateBox message={t("memory.skills.detailLoading")} />}
           {props.detail.status === "error" && <MemoryStateBox message={props.detail.message} tone="error" />}
-          {props.detail.status === "ready" && <SkillDetail detail={props.detail.data.detail} timeline={props.detail.data.timeline} />}
+          {props.detail.status === "ready" && (
+            <SkillDetail
+              detail={props.detail.data.detail}
+              timeline={props.detail.data.timeline}
+              onOpenMemoryReference={props.onOpenMemoryReference}
+            />
+          )}
         </div>
         {readyDetail && <MemoryDrawerDeleteAction onDelete={() => props.onDelete(readyDetail.detail.item.id)} />}
       </aside>
@@ -413,7 +447,11 @@ function SkillDrawer(props: { detail: SkillDetailState; onClose: () => void; onD
   );
 }
 
-function SkillDetail(props: { detail: GetMemoryOutput; timeline: SkillTimelineEntry[] }) {
+function SkillDetail(props: {
+  detail: GetMemoryOutput;
+  timeline: SkillTimelineEntry[];
+  onOpenMemoryReference: OpenMemoryReference;
+}) {
   const { t } = useTranslation();
   const skill = skillFromDetail(props.detail);
   const hasDecisionGuidance = skill.decisionGuidance.preference.length > 0 || skill.decisionGuidance.antiPattern.length > 0;
@@ -461,9 +499,16 @@ function SkillDetail(props: { detail: GetMemoryOutput; timeline: SkillTimelineEn
         title={t("memory.skills.sourceExperience")}
         ids={skill.sourcePolicyIds.length > 0 ? skill.sourcePolicyIds : props.detail.item.sourceMemoryIds}
         empty={t("memory.skills.noSourceExperience")}
+        fallbackPage="policies"
+        onOpen={props.onOpenMemoryReference}
       />
-      <LinkedIdsSection title={t("memory.skills.sourceWorldModels")} ids={skill.sourceWorldModelIds} empty={t("memory.skills.noSourceWorldModels")} />
-      <LinkedIdsSection title={t("memory.skills.evidenceAnchors")} ids={skill.evidenceAnchors} empty={t("memory.skills.noEvidenceAnchors")} />
+      <LinkedIdsSection
+        title={t("memory.skills.evidenceAnchors")}
+        ids={skill.evidenceAnchors}
+        empty={t("memory.skills.noEvidenceAnchors")}
+        fallbackPage="memories"
+        onOpen={props.onOpenMemoryReference}
+      />
     </>
   );
 }
@@ -499,20 +544,22 @@ function GuidanceList(props: { title: string; entries: string[]; tone: "prefer" 
   );
 }
 
-function LinkedIdsSection(props: { title: string; ids: string[]; empty: string }) {
-  const ids = uniqueStrings(props.ids);
+function LinkedIdsSection(props: {
+  title: string;
+  ids: string[];
+  empty: string;
+  fallbackPage: MemoryReferencePage;
+  onOpen: OpenMemoryReference;
+}) {
+  const hasIds = props.ids.some(Boolean);
 
   return (
     <section className="memory-detail-card">
       <h5 className="memory-detail-card__label">{props.title}</h5>
-      {ids.length === 0 ? (
+      {!hasIds ? (
         <div className="memory-policy-empty">{props.empty}</div>
       ) : (
-        <div className="memory-policy-id-list">
-          {ids.map((id) => (
-            <span key={id} className="memory-policy-id">{compactId(id)}</span>
-          ))}
-        </div>
+        <MemoryReferenceTags ids={props.ids} fallbackPage={props.fallbackPage} onOpen={props.onOpen} />
       )}
     </section>
   );
@@ -709,7 +756,6 @@ function skillFromDetail(detail: GetMemoryOutput): SkillView {
     decisionGuidance,
     evidenceAnchors: readEvidenceAnchors(firstDefined(skill.evidenceAnchors, skill.evidence_anchors, internalInfo.evidenceAnchors, internalInfo.evidence_anchors)),
     sourcePolicyIds: stringArray(firstDefined(skill.sourcePolicyIds, skill.source_policy_ids, internalInfo.sourcePolicyIds, internalInfo.source_policy_ids)),
-    sourceWorldModelIds: stringArray(firstDefined(skill.sourceWorldModelIds, skill.source_world_model_ids, internalInfo.sourceWorldModelIds, internalInfo.source_world_model_ids)),
     eta: numberValue(firstDefined(skill.eta, internalInfo.eta, info.eta)),
     support: numberValue(firstDefined(skill.support, internalInfo.support, info.support)),
     gain: numberValue(firstDefined(skill.gain, internalInfo.gain, info.gain)),
@@ -908,10 +954,4 @@ function formatDateTime(value: string | undefined): string {
 
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
-}
-
-function compactId(id: string): string {
-  const parts = id.split("::");
-  const value = parts[parts.length - 1] ?? id;
-  return value.length > 22 ? `${value.slice(0, 18)}...` : value;
 }

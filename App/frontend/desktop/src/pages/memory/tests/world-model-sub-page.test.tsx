@@ -156,6 +156,9 @@ describe("WorldModelSubPage", () => {
     expect(html).not.toContain("po_1");
     expect(html).not.toContain("tr_fake");
     expect(html).toContain("memory-policy-1");
+    expect(html).toContain("memory-policy-id--link");
+    expect(html).toContain('title="memory-policy-1"');
+    expect(html).not.toContain("来源记忆");
   });
 });
 
@@ -177,6 +180,7 @@ function renderWorldModel(
         onOpenWorldModel={vi.fn()}
         onDeleteWorldModel={vi.fn(async () => undefined)}
         onCloseWorldModel={vi.fn()}
+        onOpenMemoryReference={vi.fn()}
       />
     </I18nProvider>
   );

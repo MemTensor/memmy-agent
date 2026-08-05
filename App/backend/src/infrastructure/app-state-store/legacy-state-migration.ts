@@ -1,8 +1,8 @@
 /** Legacy app-state migration module. */
 import type { DatabaseSync } from "node:sqlite";
+import { INSTALLATION_SCAN_SCOPE_UUID } from "../installation-scan-scope.js";
 import { LOCAL_BYOK_ACCOUNT_UUID } from "./account-context.js";
 
-const LOCAL_AGENT_SOURCE_UUID = "local-agent-sources";
 const SNAPSHOT_TABLE = "_legacy_app_state_snapshot";
 const SNAPSHOT_ID = "singleton";
 const SNAPSHOT_VERSION = 1;
@@ -266,6 +266,7 @@ export function restoreLegacyAppState(db: DatabaseSync, snapshot: LegacyAppState
 
   if (stateUuid) {
     restoreOnboarding(db, stateUuid, snapshot);
+    restoreInstallationScanPermission(db, snapshot.onboarding?.scan_permission ?? "unset");
     restorePrivacy(db, stateUuid, snapshot.privacy);
     restoreModelConfig(db, stateUuid, snapshot.modelConfig);
   }
@@ -350,12 +351,30 @@ function restoreOnboarding(db: DatabaseSync, uuid: string, snapshot: LegacyAppSt
     onboarding?.current_step ?? "scan_permission_required",
     onboarding?.has_accepted_terms ?? 0,
     onboarding?.accepted_terms_version ?? null,
-    onboarding?.scan_permission ?? "unset",
+    "unset",
     onboarding?.improvement_program ?? "unset",
     onboarding?.completed_at ?? null,
     onboarding?.created_at ?? now,
     onboarding?.updated_at ?? now
   );
+}
+
+function restoreInstallationScanPermission(db: DatabaseSync, scanPermission: string): void {
+  const now = new Date().toISOString();
+  ensureScopeAccount(db, INSTALLATION_SCAN_SCOPE_UUID);
+  db.prepare(
+    `INSERT OR IGNORE INTO account_onboarding_state (
+      uuid,
+      scan_permission,
+      created_at,
+      updated_at
+    ) VALUES (?, ?, ?, ?)`
+  ).run(INSTALLATION_SCAN_SCOPE_UUID, scanPermission, now, now);
+  db.prepare(
+    `UPDATE account_onboarding_state
+     SET scan_permission = ?, updated_at = ?
+     WHERE uuid = ?`
+  ).run(scanPermission, now, INSTALLATION_SCAN_SCOPE_UUID);
 }
 
 function restorePrivacy(db: DatabaseSync, uuid: string, privacy: LegacyPrivacyRow | null): void {
@@ -451,7 +470,7 @@ function restoreAgentSources(
     return;
   }
 
-  ensureScopeAccount(db, LOCAL_AGENT_SOURCE_UUID);
+  ensureScopeAccount(db, INSTALLATION_SCAN_SCOPE_UUID);
   const sourceIds = new Set(sources.map((source) => source.source_id));
   const insertSource = db.prepare(
     `INSERT OR IGNORE INTO account_agent_sources (
@@ -468,7 +487,7 @@ function restoreAgentSources(
   );
   for (const source of sources) {
     insertSource.run(
-      LOCAL_AGENT_SOURCE_UUID,
+      INSTALLATION_SCAN_SCOPE_UUID,
       source.source_id,
       source.display_name,
       source.data_path,
@@ -490,7 +509,7 @@ function restoreAgentSources(
   );
   for (const seen of ingestionSeen) {
     if (sourceIds.has(seen.source_id)) {
-      insertSeen.run(LOCAL_AGENT_SOURCE_UUID, seen.dedup_key, seen.source_id, seen.created_at);
+      insertSeen.run(INSTALLATION_SCAN_SCOPE_UUID, seen.dedup_key, seen.source_id, seen.created_at);
     }
   }
 }

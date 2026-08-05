@@ -16,6 +16,10 @@ import {
 } from "./openai-responses/index.js";
 import { memmyAccountNoneThinkingStyle } from "./memmy-account.js";
 import { OPENROUTER_ATTRIBUTION_HEADERS } from "./openrouter-attribution.js";
+import {
+  classifyQuotaExhaustion,
+  type ProviderErrorFacts,
+} from "./provider-error-classifier.js";
 import { memmyAccountApiBase } from "./registry.js";
 import { normalizeToolArgumentsString, parseToolArguments } from "./tool-json.js";
 import { stripThink } from "../utils/helpers.js";
@@ -177,7 +181,49 @@ export class OpenAICompatProvider extends LLMProvider {
     this.client.defaultHeaders = this.defaultHeaders;
   }
 
-  static extractErrorMetadata(error: any): Record<string, any> {
+  static extractProviderErrorFacts(
+    payload: any,
+    provider: string | null,
+    httpStatus: number | null,
+  ): ProviderErrorFacts {
+    let data = OpenAICompatProvider.maybeMapping(payload);
+    if (!data && typeof payload === "string" && payload.trim()) {
+      try {
+        data = OpenAICompatProvider.maybeMapping(JSON.parse(payload));
+      } catch {
+        data = null;
+      }
+    }
+    const error = OpenAICompatProvider.maybeMapping(data?.error) ?? {};
+    const metadata = OpenAICompatProvider.maybeMapping(error.metadata) ?? {};
+    const baseResp =
+      OpenAICompatProvider.maybeMapping(data?.base_resp) ??
+      OpenAICompatProvider.maybeMapping(error.base_resp) ??
+      {};
+    return {
+      provider,
+      httpStatus,
+      errorType: LLMProvider.normalizeErrorToken(error.type ?? data?.type),
+      errorCode: LLMProvider.normalizeErrorToken(error.code ?? data?.code),
+      metadataErrorType: LLMProvider.normalizeErrorToken(metadata.error_type),
+      baseRespStatusCode: LLMProvider.normalizeErrorToken(baseResp.status_code),
+    };
+  }
+
+  static errorMetadataFromPayload(
+    payload: any,
+    spec: any,
+    httpStatus: number | null,
+  ): Pick<LLMResponse, "errorType" | "errorCode" | "errorCategory"> {
+    const facts = this.extractProviderErrorFacts(payload, specName(spec), httpStatus);
+    return {
+      errorType: facts.errorType,
+      errorCode: facts.errorCode,
+      errorCategory: classifyQuotaExhaustion(facts),
+    };
+  }
+
+  static extractErrorMetadata(error: any, spec: any = null): Record<string, any> {
     const response = error?.response;
     const headers = response?.headers ?? null;
     let payload = error?.body ?? error?.doc ?? response?.text ?? null;
@@ -190,9 +236,10 @@ export class OpenAICompatProvider extends LLMProvider {
         payload = null;
       }
     }
-    const [errorType, errorCode] = LLMProvider.extractErrorTypeCode(payload);
     const status =
-      error?.statusCode ?? error?.statusCode ?? response?.statusCode ?? response?.status ?? null;
+      error?.statusCode ?? error?.status ?? response?.statusCode ?? response?.status ?? null;
+    const httpStatus = status == null || !Number.isFinite(Number(status)) ? null : Number(status);
+    const errorMetadata = this.errorMetadataFromPayload(payload, spec, httpStatus);
     const shouldRetryHeader = headerValue(headers, "x-should-retry");
     const shouldRetry =
       shouldRetryHeader == null ? null : String(shouldRetryHeader).trim().toLowerCase() === "true";
@@ -217,8 +264,7 @@ export class OpenAICompatProvider extends LLMProvider {
     return {
       errorStatusCode: status == null ? null : Number(status),
       errorKind,
-      errorType,
-      errorCode,
+      ...errorMetadata,
       errorRetryAfterS: LLMProvider.extractRetryAfterFromHeaders(headers),
       errorShouldRetry: shouldRetry,
     };
@@ -233,7 +279,7 @@ export class OpenAICompatProvider extends LLMProvider {
       shouldRetryHeader == null ? null : String(shouldRetryHeader).trim().toLowerCase() === "true";
     const status =
       error?.statusCode ??
-      error?.statusCode ??
+      error?.status ??
       response?.statusCode ??
       response?.status ??
       (String(body).match(/\b([45]\d\d)\b/)
@@ -274,7 +320,7 @@ export class OpenAICompatProvider extends LLMProvider {
     const retryAfter =
       this.extractRetryAfterFromHeaders(headers) ?? this.extractRetryAfter(content);
 
-    const metadata = this.extractErrorMetadata(error);
+    const metadata = this.extractErrorMetadata(error, spec);
     return new LLMResponse({
       content,
       finishReason: "error",
@@ -774,12 +820,49 @@ export class OpenAICompatProvider extends LLMProvider {
     return result;
   }
 
+  static parseStructuredError(response: any, spec: any = null): LLMResponse | null {
+    const responseMap = OpenAICompatProvider.maybeMapping(response);
+    if (!responseMap) return null;
+    const error = OpenAICompatProvider.maybeMapping(responseMap.error);
+    const baseResp =
+      OpenAICompatProvider.maybeMapping(responseMap.base_resp) ??
+      OpenAICompatProvider.maybeMapping(error?.base_resp);
+    const topLevelCode = responseMap.code;
+    const hasTopLevelError =
+      topLevelCode != null &&
+      LLMProvider.normalizeErrorToken(topLevelCode) !== "0";
+    const hasNestedError = Boolean(error && Object.keys(error).length);
+    const hasBaseRespError =
+      baseResp?.status_code != null &&
+      LLMProvider.normalizeErrorToken(baseResp.status_code) !== "0";
+    if (!hasNestedError && !hasTopLevelError && !hasBaseRespError) return null;
+
+    const message = OpenAICompatProvider.extractTextContent(
+      error?.message ?? responseMap.message ?? baseResp?.status_msg,
+    );
+    let serialized = "structured provider error";
+    try {
+      serialized = JSON.stringify(responseMap);
+    } catch {
+      // Keep the structured error terminal even if an SDK wrapper is not serializable.
+    }
+    return new LLMResponse({
+      content: message?.trim()
+        ? `Error calling LLM: ${message.trim().slice(0, 500)}`
+        : `Error calling LLM: ${serialized.slice(0, 500)}`,
+      finishReason: "error",
+      ...this.errorMetadataFromPayload(responseMap, spec, null),
+    });
+  }
+
   parseResponse(response: any): LLMResponse {
     if (typeof response === "string")
       return new LLMResponse({ content: response, finishReason: "stop" });
     const responseMap = OpenAICompatProvider.maybeMapping(response);
     const choices = responseMap?.choices ?? response?.choices ?? [];
     if (!Array.isArray(choices) || choices.length === 0) {
+      const structuredError = OpenAICompatProvider.parseStructuredError(response, this.spec);
+      if (structuredError) return structuredError;
       const content = OpenAICompatProvider.extractTextContent(
         responseMap?.content ?? responseMap?.output_text,
       );
@@ -789,18 +872,6 @@ export class OpenAICompatProvider extends LLMProvider {
           reasoningContent: OpenAICompatProvider.extractTextContent(responseMap?.reasoning_content),
           finishReason: String(responseMap?.finish_reason ?? "stop"),
           usage: OpenAICompatProvider.extractUsage(response),
-        });
-      }
-      // Some gateways (e.g. the memmy account gateway) return business errors (such as quota exceeded) as an HTTP 200 + {code, message} envelope
-      // with no choices. Pass the gateway's message through so upper layers can localize it into a specific message instead of a generic "empty choices".
-      const gatewayMessage = OpenAICompatProvider.extractTextContent(
-        responseMap?.message ?? (response as any)?.message,
-      );
-      const gatewayCode = responseMap?.code ?? (response as any)?.code;
-      if (gatewayMessage && gatewayCode != null && Number(gatewayCode) !== 0) {
-        return new LLMResponse({
-          content: `Error calling LLM: ${gatewayMessage}`,
-          finishReason: "error",
         });
       }
       return new LLMResponse({
@@ -845,7 +916,7 @@ export class OpenAICompatProvider extends LLMProvider {
     return new OpenAICompatProvider().parseResponse(response);
   }
 
-  static parseChunks(chunks: any[]): LLMResponse {
+  static parseChunks(chunks: any[], spec: any = null): LLMResponse {
     const contentParts: string[] = [];
     const reasoningParts: string[] = [];
     const toolBuffers = new Map<
@@ -897,6 +968,8 @@ export class OpenAICompatProvider extends LLMProvider {
       const chunkMap = OpenAICompatProvider.maybeMapping(chunk);
       const choices = chunkMap?.choices ?? chunk?.choices ?? [];
       if (!Array.isArray(choices) || choices.length === 0) {
+        const structuredError = OpenAICompatProvider.parseStructuredError(chunk, spec);
+        if (structuredError) return structuredError;
         usage = OpenAICompatProvider.extractUsage(chunk) || usage;
         const text = OpenAICompatProvider.extractTextContent(
           chunkMap?.content ?? chunkMap?.output_text,
@@ -971,7 +1044,7 @@ export class OpenAICompatProvider extends LLMProvider {
             ? await this.client.responses.create(body, options as any)
             : await this.client.responses.create(body);
           this.recordResponsesSuccess(model, reasoningEffort);
-          return parseResponseOutput(response);
+          return parseResponseOutput(response, specName(this.spec));
         } catch (responsesError) {
           if (isProviderAbortError(responsesError)) throw responsesError;
           if (specName(this.spec) === "github_copilot" || this.apiType === "responses")
@@ -1087,7 +1160,7 @@ export class OpenAICompatProvider extends LLMProvider {
           }
         }
       }
-      return OpenAICompatProvider.parseChunks(chunks);
+      return OpenAICompatProvider.parseChunks(chunks, this.spec);
     } catch (error) {
       if (isProviderAbortError(error)) throw error;
       if ((error as Error).message === "stream_idle_timeout") {

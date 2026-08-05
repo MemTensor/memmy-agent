@@ -235,6 +235,9 @@ describe("onboarding insight service", () => {
       relatedAgents: expect.arrayContaining(["Codex", "Cursor"]),
       suggestedPrompt: expect.stringContaining("dev-jiang 合并 dev")
     });
+    expect([report.primaryAction, ...report.secondaryActions].every((action) =>
+      action?.suggestedPrompt.endsWith("请只在当前对话中输出结果，不要创建文件，也不要修改任何文件。")
+    )).toBe(true);
   });
 
   it("falls back to rule-generated actions when model action JSON is invalid", async () => {
@@ -461,7 +464,7 @@ describe("onboarding insight service", () => {
         reportMarkdown: "Hi，我已经开始读你的最近任务。",
         primaryAction: expect.objectContaining({
           buttonLabel: "继续首登优化",
-          suggestedPrompt: expect.stringContaining("同一次请求")
+          suggestedPrompt: expect.stringMatching(/同一次请求[\s\S]*请只在当前对话中输出结果，不要创建文件，也不要修改任何文件。$/)
         }),
         diagnostics: expect.objectContaining({
           usedLlm: true
@@ -846,6 +849,9 @@ describe("onboarding insight service", () => {
       "Continue this task",
       "Summarize the decisions"
     ]);
+    expect([report.primaryAction, ...report.secondaryActions].every((action) =>
+      action?.suggestedPrompt.endsWith("Return the result in this conversation only. Do not create files or modify any existing files.")
+    )).toBe(true);
   });
 
   it("infers Chinese response preference from Chinese-majority queries with English technical terms", async () => {

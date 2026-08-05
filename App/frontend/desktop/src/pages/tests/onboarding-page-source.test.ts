@@ -115,6 +115,7 @@ describe("OnboardingPage source", () => {
     expect(source).toContain("const activeFirstScanStep = guidanceCompleted ? null : (firstScanStep ?? resumedFirstScanStep);");
     expect(source).toContain("const guidanceCompleted = readGuidanceCompleted(");
     expect(source).toContain("startAgentSourceScan({");
+    expect(source).toContain('mode: "initial_subset"');
     expect(source).toContain(".updateOnboarding(patch)");
     expect(source).toContain("startFirstReport([]);");
     expect(source).toContain("void startFirstScanInBackground().catch((error)");

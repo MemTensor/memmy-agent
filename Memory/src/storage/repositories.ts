@@ -3881,6 +3881,8 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
   addValueClause("conversation_id", filter.conversationId);
   addAgentIdClause(filter.agentId, filter.excludedAgentIds);
   addValueClause("app_id", filter.appId);
+  addRangeClause("created_at", ">=", filter.createdAtGte);
+  addRangeClause("created_at", "<", filter.createdAtLt);
   addArrayClause("memory_layer", filter.memoryLayer);
   addArrayClause("status", filter.status);
   addArrayClause("id", filter.ids);
@@ -3896,6 +3898,12 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
       return;
     }
     clauses.push(`${column} = ?`);
+    params.push(value);
+  }
+
+  function addRangeClause(column: string, operator: ">=" | "<", value: string | undefined): void {
+    if (value === undefined) return;
+    clauses.push(`${column} ${operator} ?`);
     params.push(value);
   }
 

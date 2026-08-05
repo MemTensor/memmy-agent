@@ -17,6 +17,12 @@ import { toMemoryDetailErrorMessage } from "./memory-detail-error.js";
 import { cleanMemoryBody, cleanMemoryText, drawerEyebrow } from "./memory-display.js";
 import { displayMemoryId } from "./memory-id.js";
 import {
+  MemoryReferenceTags,
+  type MemoryReferenceOpenRequest,
+  type MemoryReferencePage,
+  type OpenMemoryReference
+} from "./memory-reference-tags.js";
+import {
   clearMemoryPanelCache,
   memoryPanelCacheKey,
   memoryPanelLatestCacheKey,
@@ -53,13 +59,14 @@ interface WorldModelView {
   body: string;
   summary: string;
   policyIds: string[];
-  sourceMemoryIds: string[];
   structure: WorldModelStructure;
 }
 
 /** Contract for world model sub page props. */
 export interface WorldModelSubPageProps {
   client: MemoryRuntimeClient | null;
+  openRequest?: MemoryReferenceOpenRequest;
+  onOpenMemoryReference: OpenMemoryReference;
 }
 
 /** Reads load world model data. */
@@ -122,8 +129,8 @@ export function WorldModelSubPage(props: WorldModelSubPageProps) {
       });
   }
 
-  function openWorldModel(item: MemoryListItem) {
-    setSelectedWorldModelId(item.id);
+  function openWorldModelById(id: string) {
+    setSelectedWorldModelId(id);
     track(buildMemoryUiDetailOpenedEvent({
       subPage: "world-model",
       filterLayer: worldModelFilterLayer
@@ -134,9 +141,13 @@ export function WorldModelSubPage(props: WorldModelSubPageProps) {
     }
 
     setDetail({ status: "loading" });
-    void loadWorldModelDetail(props.client, item.id)
+    void loadWorldModelDetail(props.client, id)
       .then((data) => setDetail({ status: "ready", data }))
       .catch((error) => setDetail({ status: "error", message: toMemoryDetailErrorMessage(error, t("memory.detailUnavailable")) }));
+  }
+
+  function openWorldModel(item: MemoryListItem) {
+    openWorldModelById(item.id);
   }
 
   function closeWorldModel() {
@@ -198,6 +209,13 @@ export function WorldModelSubPage(props: WorldModelSubPageProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.client, t]);
 
+  useEffect(() => {
+    if (props.openRequest) {
+      openWorldModelById(props.openRequest.id);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.openRequest?.requestId]);
+
   return (
     <WorldModelSubPageView
       state={state}
@@ -220,6 +238,7 @@ export function WorldModelSubPage(props: WorldModelSubPageProps) {
       onOpenWorldModel={openWorldModel}
       onDeleteWorldModel={deleteWorldModel}
       onCloseWorldModel={closeWorldModel}
+      onOpenMemoryReference={props.onOpenMemoryReference}
     />
   );
 }
@@ -237,6 +256,7 @@ export interface WorldModelSubPageViewProps {
   onOpenWorldModel: (item: MemoryListItem) => void;
   onDeleteWorldModel: (id: string) => Promise<void>;
   onCloseWorldModel: () => void;
+  onOpenMemoryReference: OpenMemoryReference;
 }
 
 /** Handles world model sub page view. */
@@ -298,16 +318,26 @@ export function WorldModelSubPageView(props: WorldModelSubPageViewProps) {
               </div>
             </button>
           ))}
-        </div>
-        <MemoryPagination data={props.state.data} onPageChange={props.onPageChange} />
-        <WorldModelDrawer detail={props.detail ?? null} onClose={props.onCloseWorldModel} onDelete={props.onDeleteWorldModel} />
+          </div>
+          <MemoryPagination data={props.state.data} onPageChange={props.onPageChange} />
         </>
       )}
+      <WorldModelDrawer
+        detail={props.detail ?? null}
+        onClose={props.onCloseWorldModel}
+        onDelete={props.onDeleteWorldModel}
+        onOpenMemoryReference={props.onOpenMemoryReference}
+      />
     </section>
   );
 }
 
-function WorldModelDrawer(props: { detail: WorldModelDetailState; onClose: () => void; onDelete: (id: string) => Promise<void> }) {
+function WorldModelDrawer(props: {
+  detail: WorldModelDetailState;
+  onClose: () => void;
+  onDelete: (id: string) => Promise<void>;
+  onOpenMemoryReference: OpenMemoryReference;
+}) {
   const { t } = useTranslation();
 
   if (!props.detail) {
@@ -339,7 +369,9 @@ function WorldModelDrawer(props: { detail: WorldModelDetailState; onClose: () =>
         <div className="memory-drawer__body">
           {props.detail.status === "loading" && <MemoryStateBox message={t("memory.memories.detailLoading")} />}
           {props.detail.status === "error" && <MemoryStateBox message={props.detail.message} tone="error" />}
-          {props.detail.status === "ready" && <WorldModelDetail detail={props.detail.data} />}
+          {props.detail.status === "ready" && (
+            <WorldModelDetail detail={props.detail.data} onOpenMemoryReference={props.onOpenMemoryReference} />
+          )}
         </div>
         {readyDetail && <MemoryDrawerDeleteAction onDelete={() => props.onDelete(readyDetail.item.id)} />}
       </aside>
@@ -347,7 +379,7 @@ function WorldModelDrawer(props: { detail: WorldModelDetailState; onClose: () =>
   );
 }
 
-function WorldModelDetail(props: { detail: GetMemoryOutput }) {
+function WorldModelDetail(props: { detail: GetMemoryOutput; onOpenMemoryReference: OpenMemoryReference }) {
   const { t } = useTranslation();
   const worldModel = worldModelFromDetail(props.detail);
   const hasStructuredCognition = worldModel.structure.environment.length > 0 ||
@@ -363,7 +395,6 @@ function WorldModelDetail(props: { detail: GetMemoryOutput }) {
           <Metric label={t("memory.memories.createdAt")} value={formatDateTime(worldModel.createdAt)} />
           <Metric label={t("memory.memories.updatedAt")} value={formatDateTime(worldModel.updatedAt)} />
           <Metric label={t("memory.worldModel.relatedPolicies")} value={String(worldModel.policyIds.length)} />
-          <Metric label={t("memory.memories.sourceMemoryIds")} value={String(worldModel.sourceMemoryIds.length)} />
         </div>
         {worldModel.source && (
           <div className="memory-policy-source">
@@ -375,10 +406,15 @@ function WorldModelDetail(props: { detail: GetMemoryOutput }) {
 
       {worldModel.summary && <DetailTextSection title={t("memory.memories.summary")} body={worldModel.summary} />}
       {hasStructuredCognition
-        ? <StructureSection structure={worldModel.structure} />
+        ? <StructureSection structure={worldModel.structure} onOpenMemoryReference={props.onOpenMemoryReference} />
         : <DetailTextSection title={t("memory.memories.body")} body={worldModel.body} />}
-      <LinkedIdsSection title={t("memory.worldModel.relatedPolicies")} ids={worldModel.policyIds} empty={t("memory.worldModel.noRelatedPolicies")} />
-      <LinkedIdsSection title={t("memory.memories.sourceMemoryIds")} ids={worldModel.sourceMemoryIds} empty={t("memory.worldModel.noSourceMemories")} />
+      <LinkedIdsSection
+        title={t("memory.worldModel.relatedPolicies")}
+        ids={worldModel.policyIds}
+        empty={t("memory.worldModel.noRelatedPolicies")}
+        fallbackPage="policies"
+        onOpen={props.onOpenMemoryReference}
+      />
     </>
   );
 }
@@ -401,7 +437,7 @@ function DetailTextSection(props: { title: string; body?: string }) {
   );
 }
 
-function StructureSection(props: { structure: WorldModelStructure }) {
+function StructureSection(props: { structure: WorldModelStructure; onOpenMemoryReference: OpenMemoryReference }) {
   const { t } = useTranslation();
   const sections = [
     { title: t("memory.worldModel.environmentTopology"), entries: props.structure.environment },
@@ -426,11 +462,7 @@ function StructureSection(props: { structure: WorldModelStructure }) {
                 <strong>{entry.label}</strong>
                 {entry.description ? ` - ${entry.description}` : ""}
                 {entry.evidenceIds.length > 0 && (
-                  <div className="memory-policy-id-list">
-                    {entry.evidenceIds.map((id) => (
-                      <span key={id} className="memory-policy-id">{compactId(id)}</span>
-                    ))}
-                  </div>
+                  <MemoryReferenceTags ids={entry.evidenceIds} fallbackPage="memories" onOpen={props.onOpenMemoryReference} />
                 )}
               </li>
             ))}
@@ -441,20 +473,22 @@ function StructureSection(props: { structure: WorldModelStructure }) {
   );
 }
 
-function LinkedIdsSection(props: { title: string; ids: string[]; empty: string }) {
-  const ids = uniqueStrings(props.ids);
+function LinkedIdsSection(props: {
+  title: string;
+  ids: string[];
+  empty: string;
+  fallbackPage: MemoryReferencePage;
+  onOpen: OpenMemoryReference;
+}) {
+  const hasIds = props.ids.some(Boolean);
 
   return (
     <section className="memory-detail-card">
       <h5 className="memory-detail-card__label">{props.title}</h5>
-      {ids.length === 0 ? (
+      {!hasIds ? (
         <div className="memory-policy-empty">{props.empty}</div>
       ) : (
-        <div className="memory-policy-id-list">
-          {ids.map((id) => (
-            <span key={id} className="memory-policy-id">{compactId(id)}</span>
-          ))}
-        </div>
+        <MemoryReferenceTags ids={props.ids} fallbackPage={props.fallbackPage} onOpen={props.onOpen} />
       )}
     </section>
   );
@@ -510,7 +544,6 @@ function worldModelFromDetail(detail: GetMemoryOutput): WorldModelView {
     body: cleanMemoryBody(detail.item.body),
     summary: cleanWorldModelText(firstString(layerWorldModel.summary, worldModel.summary, internalInfo.summary)),
     policyIds: stringArray(firstDefined(worldModel.policyIds, worldModel.policy_ids, internalInfo.policyIds, internalInfo.policy_ids)),
-    sourceMemoryIds: detail.item.sourceMemoryIds,
     structure
   };
 }
@@ -651,10 +684,6 @@ function stringArray(value: unknown): string[] {
     .filter((item): item is string => Boolean(item));
 }
 
-function uniqueStrings(values: string[]): string[] {
-  return [...new Set(values.filter(Boolean))];
-}
-
 function formatDateTime(value: string | undefined): string {
   if (!value) {
     return "-";
@@ -662,10 +691,4 @@ function formatDateTime(value: string | undefined): string {
 
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
-}
-
-function compactId(id: string): string {
-  const parts = id.split("::");
-  const value = parts[parts.length - 1] ?? id;
-  return value.length > 22 ? `${value.slice(0, 18)}...` : value;
 }

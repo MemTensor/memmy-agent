@@ -1232,14 +1232,16 @@ If nothing is truly relevant, return {"ranked": [], "sufficient": false}.`,
 
 export const RETRIEVAL_QUERY_EXTRACT_PROMPT = {
   id: "retrieval.query.extract",
-  version: 1,
+  version: 2,
   description:
-    "Extract a compact semantic query and up to five keyword terms for memory retrieval.",
+    "Extract semantic, lexical, and optional time-range constraints for memory retrieval.",
   system: `You prepare memory retrieval input for an AI agent.
 
 Given the complete current user input, return JSON with:
 - queryVecText: a compact semantic query for embedding search and later relevance filtering.
 - keywords: up to 5 short keyword strings for lexical FTS / pattern search.
+- timeFilter: an absolute time range only when the user is constraining which
+  personal history or past activity memories should be searched; otherwise null.
 
 Rules:
 1. Use the complete input as evidence. Do not assume a fixed prompt template.
@@ -1248,11 +1250,24 @@ Rules:
 4. keywords must contain at most 5 items, ordered by retrieval usefulness.
 5. Do not invent keywords not grounded in the input.
 6. Keep queryVecText concise but specific; do not summarize away the user's actual goal.
+7. Set timeFilter only when a time expression limits the user's own remembered
+   conversations, actions, work, or prior events. Questions merely about dates,
+   date parsing, historical facts, schedules, or current external information do
+   not request a memory time filter.
+8. Resolve relative expressions such as today, yesterday, this week, recently,
+   今天, 昨天, 本周, and 最近 using CURRENT_TIME and TIME_ZONE supplied with the
+   request. Approximate expressions may use a reasonable bounded range.
+9. startAt is inclusive and endAt is exclusive. Return ISO-8601 timestamps with
+   an explicit UTC offset. endAt must be later than startAt.
 
 Return JSON only:
 {
   "queryVecText": "semantic retrieval query",
-  "keywords": ["term1", "term2", "term3"]
+  "keywords": ["term1", "term2", "term3"],
+  "timeFilter": null | {
+    "startAt": "ISO-8601 timestamp",
+    "endAt": "ISO-8601 timestamp"
+  }
 }`,
 } as const;
 
@@ -1971,6 +1986,10 @@ export interface CompiledRetrievalQuery {
 export interface RetrievalQueryExtract {
   queryVecText: string;
   keywords: string[];
+  timeFilter?: {
+    startAt: string;
+    endAt: string;
+  };
 }
 
 export type PluginRetrievalQueryContext =

@@ -102,6 +102,32 @@ describe("memory retrieval indexes", () => {
     }
   });
 
+  it("filters memories by an inclusive start and exclusive end creation time", () => {
+    const root = mkdtempSync(join(tmpdir(), "mindock-memory-time-filter-"));
+    try {
+      const db = new MemoryDb({ path: join(root, "memory.sqlite") });
+      const repos = new Repositories(db.db);
+      repos.memories.insert(traceMemory("trace-before", "2026-08-03T23:59:59.000Z"));
+      repos.memories.insert(traceMemory("trace-start", "2026-08-04T00:00:00.000Z"));
+      repos.memories.insert(traceMemory("trace-inside", "2026-08-04T12:00:00.000Z"));
+      repos.memories.insert(traceMemory("trace-end", "2026-08-05T00:00:00.000Z"));
+
+      const filter = {
+        memoryLayer: "L1" as const,
+        createdAtGte: "2026-08-04T00:00:00.000Z",
+        createdAtLt: "2026-08-05T00:00:00.000Z"
+      };
+      expect(repos.memories.list(filter, 10).map((memory) => memory.id)).toEqual([
+        "trace-inside",
+        "trace-start"
+      ]);
+      expect(repos.memories.count(filter)).toBe(2);
+      db.close();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("indexes Skill retrieval metadata and can refresh a legacy FTS row in place", () => {
     const root = mkdtempSync(join(tmpdir(), "mindock-skill-retrieval-index-"));
     try {
