@@ -22,6 +22,7 @@ import {
 } from "../embedding/embedding-pipeline.js";
 import { memoryHasImportPipeline } from "../import/import-job-processor.js";
 import {
+  namespaceIdFromContext as canonicalNamespaceIdFromContext,
   namespaceForMemory,
   namespaceForSession
 } from "../namespace/namespace-scope.js";
@@ -545,11 +546,5 @@ function namespaceIdFromSession(session: SessionRecord): string {
 }
 
 function namespaceIdFromContext(namespace: RuntimeNamespace): string {
-  return [
-    namespace.tenantId,
-    namespace.userId,
-    namespace.projectId ?? namespace.workspaceId,
-    namespace.source,
-    namespace.profileId
-  ].filter(Boolean).join(":");
+  return canonicalNamespaceIdFromContext(namespace);
 }

@@ -194,7 +194,10 @@ async function addMemoryRequest(args: string[], parsed: ParsedArgs): Promise<Cli
       tags: stringArrayOption(parsed, "tags"),
       source: optionString(parsed.options, "source"),
       sessionId: optionString(parsed.options, "session-id"),
-      turnId: optionString(parsed.options, "turn-id")
+      turnId: optionString(parsed.options, "turn-id"),
+      sourceMemoryIds: stringArrayOption(parsed, "source-memory-ids"),
+      supersedesMemoryId: optionString(parsed.options, "supersedes-memory-id"),
+      supersessionReason: optionString(parsed.options, "supersession-reason")
     })
   };
 }

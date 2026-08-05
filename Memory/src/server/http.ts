@@ -9,14 +9,17 @@ import type {
   MemoryLayer,
   MemoryReloadConfigRequest,
   MemorySearchRequest,
+  MemoryMarkdownImportRequest,
   RequestEnvelope,
   RuntimeNamespace,
+  SessionCheckpointRequest,
   SessionOpenRequest,
   TurnCompleteRequest,
   TurnStartRequest
 } from "../types.js";
 import { DEFAULT_NAMESPACE_SOURCE } from "../types.js";
 import { MemoryService } from "../service/memory-service.js";
+import { normalizeNamespace } from "../service/namespace/namespace-scope.js";
 import { MemoryServiceError, statusForCode } from "../utils/error.js";
 import {
   createPluginRuntimeAnalytics,
@@ -37,11 +40,14 @@ export const API_ROUTES = [
   "POST /api/v1/admin/reload-config",
   "POST /api/v1/admin/shutdown",
   "POST /api/v1/sessions/open",
+  "POST /api/v1/sessions/:sessionId/checkpoint",
   "POST /api/v1/sessions/:sessionId/close",
   "POST /api/v1/turns/start",
   "POST /api/v1/turns/:turnId/complete",
   "POST /api/v1/memory/search",
   "POST /api/v1/memory/add",
+  "GET /api/v1/memory/audit/markdown",
+  "POST /api/v1/memory/audit/markdown/import",
   "POST /api/v1/memory/processing/status",
   "POST /api/v1/memory/:id/processing/retry",
   "GET /api/v1/memory/:id",
@@ -410,12 +416,39 @@ async function routeRequest(
       requestId: request.requestId,
       adapterId: request.adapterId,
       namespace: request.namespace,
+      source: request.source ?? request.namespace?.source,
+      profileId: request.profileId ?? request.namespace?.profileId,
+      projectId: request.namespace?.projectId,
+      workspaceId: request.namespace?.workspaceId,
       sessionId: request.sessionId,
-      workspacePath: request.workspacePath
+      workspacePath: request.workspacePath ?? request.namespace?.workspacePath,
+      meta: isRecord(request.meta) ? request.meta : undefined,
+      protocolVersion: typeof request.protocolVersion === "string" ? request.protocolVersion : undefined,
+      provenance: isRecord(request.provenance) ? request.provenance : undefined
     };
     return publicOpenSessionResponse(
       await service.idempotent("sessions.create", publicRequest, publicRequest, () => service.openSession(publicRequest))
     );
+  }
+
+  const sessionCheckpoint = match(path, /^\/api\/v1\/sessions\/([^/]+)\/checkpoint$/);
+  if (method === "POST" && sessionCheckpoint) {
+    requireMemoryWrite(principal);
+    const request = requestWithPrincipal<SessionCheckpointRequest>(body, "sessions.checkpoint", principal);
+    requireStringField(request, "task", "sessions.checkpoint");
+    return service.checkpointSession(decodeMatchSegment(sessionCheckpoint, 1), {
+      namespace: request.namespace,
+      episodeId: request.episodeId,
+      task: request.task,
+      changes: Array.isArray(request.changes) ? request.changes.filter((item): item is string => typeof item === "string") : undefined,
+      validated: Array.isArray(request.validated) ? request.validated.filter((item): item is string => typeof item === "string") : undefined,
+      unverified: Array.isArray(request.unverified) ? request.unverified.filter((item): item is string => typeof item === "string") : undefined,
+      nextSteps: Array.isArray(request.nextSteps) ? request.nextSteps.filter((item): item is string => typeof item === "string") : undefined,
+      sourceTurnIds: Array.isArray(request.sourceTurnIds) ? request.sourceTurnIds.filter((item): item is string => typeof item === "string") : undefined,
+      sourceMemoryIds: Array.isArray(request.sourceMemoryIds) ? request.sourceMemoryIds.filter((item): item is string => typeof item === "string") : undefined,
+      tokenEstimate: typeof request.tokenEstimate === "number" && Number.isFinite(request.tokenEstimate) ? Math.max(0, Math.trunc(request.tokenEstimate)) : undefined,
+      createL1: request.createL1 !== false
+    });
   }
 
   const sessionClose = match(path, /^\/api\/v1\/sessions\/([^/]+)\/close$/);
@@ -443,7 +476,9 @@ async function routeRequest(
       query: request.query,
       turnId: request.turnId,
       contextHints: request.contextHints,
-      contextBudget: request.contextBudget
+      contextBudget: request.contextBudget,
+      protocolVersion: typeof request.protocolVersion === "string" ? request.protocolVersion : undefined,
+      provenance: isRecord(request.provenance) ? request.provenance : undefined
     };
     const result = await trackExternalHookRecall(pluginRuntimeAnalytics, request, () =>
       service.idempotent("turn.start", publicRequest, { request: publicRequest }, () =>
@@ -476,6 +511,8 @@ async function routeRequest(
       toolResults: request.toolResults,
       artifacts: request.artifacts,
       sourceMemoryIds: request.sourceMemoryIds,
+      protocolVersion: typeof request.protocolVersion === "string" ? request.protocolVersion : undefined,
+      provenance: isRecord(request.provenance) ? request.provenance : undefined,
       usage: request.usage,
       status: request.status
     };
@@ -543,7 +580,11 @@ async function routeRequest(
       sessionId: request.sessionId,
       turnId: request.turnId,
       createdAt: typeof request.createdAt === "string" ? request.createdAt : undefined,
-      deferProcessing: request.deferProcessing === true
+      deferProcessing: request.deferProcessing === true,
+      sourceMemoryIds: parseOptionalStringArray(request.sourceMemoryIds, "memory.add sourceMemoryIds"),
+      provenance: isRecord(request.provenance) ? request.provenance : undefined,
+      supersedesMemoryId: typeof request.supersedesMemoryId === "string" ? request.supersedesMemoryId : undefined,
+      supersessionReason: typeof request.supersessionReason === "string" ? request.supersessionReason : undefined
     };
     const result = await trackExternalToolCall(
       pluginRuntimeAnalytics,
@@ -570,7 +611,7 @@ async function routeRequest(
       request.memoryIds,
       "worker.import-summaries.enqueue.memoryIds"
     );
-    const result = service.enqueuePendingImportSummaries(10_000, memoryIds);
+    const result = service.enqueuePendingImportSummaries(10_000, memoryIds, { namespace: principal.namespace });
     if (result.enqueued > 0) {
       autoWorker.schedule();
     }
@@ -661,6 +702,7 @@ async function routeRequest(
   if (method === "GET" && path === "/api/v1/memory/logs") {
     requirePanelRead(principal);
     return service.apiLogs({
+      namespace: principal.namespace,
       tools: parseApiLogTools(url.searchParams.get("tools")),
       sourceAgent: url.searchParams.get("sourceAgent") ?? undefined,
       excludedSourceAgents: url.searchParams.getAll("excludedSourceAgents"),
@@ -697,6 +739,25 @@ async function routeRequest(
   }
 
   const memoryGet = match(path, /^\/api\/v1\/memory\/([^/]+)$/);
+  if (method === "GET" && path === "/api/v1/memory/audit/markdown") {
+    requireMemoryRead(principal);
+    return service.exportMarkdown({
+      namespace: principal.namespace,
+      includeArchived: url.searchParams.get("includeArchived") === "true"
+    });
+  }
+
+  if (method === "POST" && path === "/api/v1/memory/audit/markdown/import") {
+    requireMemoryWrite(principal);
+    const request = requestWithPrincipal<MemoryMarkdownImportRequest>(body, "memory.audit.markdown.import", principal);
+    requireStringField(request, "markdown", "memory.audit.markdown.import");
+    return service.importMarkdown({
+      namespace: request.namespace,
+      markdown: request.markdown,
+      apply: request.apply !== false
+    });
+  }
+
   if (method === "GET" && memoryGet) {
     requireMemoryRead(principal);
     return trackExternalToolCall(
@@ -741,6 +802,9 @@ function publicOpenSessionResponse(result: unknown): Record<string, unknown> {
   const record = responseRecord(result);
   return {
     sessionId: record.sessionId,
+    projectId: record.projectId,
+    workspaceId: record.workspaceId,
+    workspacePath: record.workspacePath,
     status: record.status,
     resumed: record.resumed,
     serverTime: record.serverTime
@@ -815,6 +879,7 @@ function publicSearchResponse(result: unknown): Record<string, unknown> {
       searchEventId: record.searchEventId,
       hits: record.hits,
       sourceMemoryIds: record.sourceMemoryIds,
+      retrievalDebug: record.retrievalDebug,
       status: record.status,
       sections: Array.isArray(injectedContext.sections) ? injectedContext.sections : [],
       tokenEstimate: typeof injectedContext.tokenEstimate === "number" ? injectedContext.tokenEstimate : undefined,
@@ -1118,7 +1183,17 @@ function envelopeWithPrincipal<T extends Record<string, unknown>>(
   principal: AuthPrincipal
 ): T & RequestEnvelope {
   const existing = isRecord(body.namespace) ? body.namespace as unknown as RuntimeNamespace : undefined;
-  const namespace = mergeNamespaces(mergeNamespaces(existing, namespaceFromSource(body.source)), principal.namespace);
+  const mergedNamespace = mergeNamespaces(mergeNamespaces(existing, namespaceFromSource(body.source)), principal.namespace);
+  // Source/profile identify provenance, but cannot establish an isolation
+  // boundary. Keep those fields on the request only when a project, tenant,
+  // or workspace scope is present; legacy source-only REST calls resolve IDs
+  // through their session and remain compatible with the service API.
+  const namespace = mergedNamespace && (
+    Boolean(mergedNamespace.projectId) ||
+    Boolean(mergedNamespace.workspaceId) ||
+    Boolean(mergedNamespace.workspacePath) ||
+    Boolean(mergedNamespace.tenantId)
+  ) ? mergedNamespace : undefined;
   assertNamespaceScope(existing, principal.namespace);
   return {
     ...body,
@@ -1156,8 +1231,20 @@ function assertNamespaceScope(
   requestNamespace: RuntimeNamespace | undefined,
   principalNamespace: RuntimeNamespace | undefined
 ): void {
-  void requestNamespace;
-  void principalNamespace;
+  if (!requestNamespace || !principalNamespace) return;
+  const requested = normalizeNamespace(requestNamespace);
+  const allowed = normalizeNamespace(principalNamespace);
+  const checks: Array<[string, string | undefined, string | undefined]> = [
+    ["tenantId", requestNamespace.tenantId, principalNamespace.tenantId],
+    ["userId", requestNamespace.userId, principalNamespace.userId],
+    ["projectId", requested.projectId, allowed.projectId],
+    ["workspaceId", requested.workspaceId, allowed.workspaceId]
+  ];
+  for (const [field, actual, expected] of checks) {
+    if (actual && expected && actual !== expected) {
+      throw new MemoryServiceError("forbidden", `request namespace exceeds token scope: ${field}`);
+    }
+  }
 }
 
 function requireStringField(record: object, field: string, routeName: string): void {

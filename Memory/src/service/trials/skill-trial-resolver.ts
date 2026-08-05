@@ -28,6 +28,7 @@ import { MemoryServiceError } from "../../utils/error.js";
 import { nowIso } from "../../utils/time.js";
 import { recordApiLog } from "../model-audit/model-call-audit.js";
 import {
+  namespaceIdFromContext as canonicalNamespaceIdFromContext,
   namespaceForMemory
 } from "../namespace/namespace-scope.js";
 import {
@@ -453,13 +454,7 @@ function namespaceIdFromMemory(memory: MemoryRow): string {
 }
 
 function namespaceIdFromContext(namespace: RuntimeNamespace): string {
-  return [
-    namespace.tenantId,
-    namespace.userId,
-    namespace.projectId ?? namespace.workspaceId,
-    namespace.source,
-    namespace.profileId
-  ].filter(Boolean).join(":");
+  return canonicalNamespaceIdFromContext(namespace);
 }
 
 function numberOr(value: unknown, fallback: number): number {

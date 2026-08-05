@@ -14,6 +14,7 @@ import type {
   MemoryLayer,
   MemoryRow
 } from "../../types.js";
+import { projectIdFromMemory } from "../namespace/namespace-scope.js";
 
 export function dedupeStrings(values: readonly string[]): string[] {
   const out: string[] = [];
@@ -37,8 +38,10 @@ export class IndexedCandidatePool {
   retrievalCandidateCount(input: {
     layers: MemoryLayer[];
     tags?: string[];
+    scope: MemoryFilter;
   }): number {
     const baseFilter: MemoryFilter = {
+      ...input.scope,
       memoryLayer: input.layers,
       status: ["activated", "resolving"]
     };
@@ -48,9 +51,11 @@ export class IndexedCandidatePool {
   hasRetrievalVectorCandidates(input: {
     layers: MemoryLayer[];
     tags?: string[];
+    scope: MemoryFilter;
   }): boolean {
     if (input.layers.length === 0) return false;
     const baseFilter: MemoryFilter = {
+      ...input.scope,
       memoryLayer: input.layers,
       status: ["activated", "resolving"]
     };
@@ -63,6 +68,7 @@ export class IndexedCandidatePool {
     layers: MemoryLayer[];
     tags?: string[];
     targetSkillId?: string;
+    scope: MemoryFilter;
     config: {
       tier1TopK: number;
       tier2TopK: number;
@@ -84,6 +90,7 @@ export class IndexedCandidatePool {
 
     for (const layer of layers) {
       const filter: MemoryFilter = {
+        ...input.scope,
         memoryLayer: layer,
         status: ["activated", "resolving"],
         ...(input.tags?.length ? { tags: input.tags } : {})
@@ -132,7 +139,10 @@ export class IndexedCandidatePool {
       channelScoresByMemory.set(hit.id, scores);
     }
     return {
-      memories: this.deps.repos.memories.getMany(candidateIds).filter((memory) => this.isMemoryReadyForRetrieval(memory)),
+      memories: this.deps.repos.memories.getMany(candidateIds).filter((memory) =>
+        this.projectIdForMemory(memory) === input.scope.projectId &&
+        this.isMemoryReadyForRetrieval(memory)
+      ),
       channelScoresByMemory
     };
   }
@@ -174,6 +184,16 @@ export class IndexedCandidatePool {
       return isMemoryReadyForRetrieval(memory);
     }
     return false;
+  }
+
+  private projectIdForMemory(memory: MemoryRow): string {
+    const direct = projectIdFromMemory(memory);
+    if (direct) return direct;
+    if (memory.sessionId) {
+      const session = this.deps.repos.runtime.getSession(memory.sessionId);
+      if (session) return session.projectId ?? "unscoped";
+    }
+    return memory.appId ?? "unscoped";
   }
 
   private retrievalVectorPoolSize(

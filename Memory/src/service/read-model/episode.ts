@@ -84,6 +84,16 @@ export interface EpisodeReadModelRepositories {
     getMany(ids: readonly string[]): MemoryRow[];
     list(filter: { memoryLayer?: MemoryLayer[]; tags?: string[] }, limit: number, cursor: number): MemoryRow[];
     toListItem(memory: MemoryRow): MemoryListItem;
+    relationsFor(id: string): Array<{
+      id: string;
+      projectId?: string;
+      sourceMemoryId: string;
+      targetMemoryId: string;
+      relation: "supersedes";
+      reason?: string;
+      actor: Record<string, unknown>;
+      createdAt: string;
+    }>;
   };
   processing: {
     get(memoryId: string): MemoryProcessingRecord | undefined;
@@ -228,7 +238,10 @@ export class EpisodeReadModel {
     const memory = this.deps.repos.memories.get(id);
     if (!memory) throw this.deps.notFound(`memory not found: ${id}`);
     this.deps.assertMemoryInScope(memory, request.namespace);
-    const detail = this.deps.detailFromMemory(memory, this.deps.repos.processing.get(memory.id));
+    const detail = {
+      ...this.deps.detailFromMemory(memory, this.deps.repos.processing.get(memory.id)),
+      relations: this.deps.repos.memories.relationsFor(memory.id)
+    };
     const refs = this.refsForMemory(memory);
     const item = this.deps.memoryDetailWithLayerPayload(detail, memory);
     if (memory.properties.internal_info.memory_kind === "span") {

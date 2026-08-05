@@ -50,6 +50,7 @@ import type {
 import { newId, stableHash } from "../../utils/id.js";
 import { nowIso } from "../../utils/time.js";
 import { recordApiLog } from "../model-audit/model-call-audit.js";
+import { memoryFilterForNamespace } from "../namespace/namespace-scope.js";
 import {
   sourceMemoryIdsFromMemory
 } from "../read-model/memory.js";
@@ -1214,6 +1215,11 @@ export class RetrievalService {
       budget: number;
       total: number;
     };
+    retrievalDebug: RetrievalResult["debug"] & {
+      candidateCount: number;
+      scopedProjectId?: string;
+      scopedWorkspaceId?: string;
+    };
     status: string[];
     verbose: boolean;
     serverTime: string;
@@ -1240,6 +1246,7 @@ export class RetrievalService {
         )
       : undefined;
     const tuning = this.retrievalTuningConfig();
+    const scope = memoryFilterForNamespace(context.namespace);
     const allowedLayers = retrievalLayersForProfile(retrievalLayersForMode(retrievalMode), tuning);
     const layers = request.layers === undefined
       ? allowedLayers
@@ -1249,7 +1256,8 @@ export class RetrievalService {
       ? 0
       : this.candidatePool.retrievalCandidateCount({
           layers,
-          tags: request.tags
+          tags: request.tags,
+          scope
         });
     const retrievalQuery = focusResearchRetrievalQuery(request.query, tuning.domain).text;
     const queryExtract = candidateCount > 0 ? await this.extractRetrievalQuery(retrievalQuery) : null;
@@ -1264,7 +1272,8 @@ export class RetrievalService {
       limit: retrievalLimit,
       mode: retrievalMode,
       excludeTraceRawTurnIds: recentRawTurnIds,
-      targetSkillId: request.targetSkillId
+      targetSkillId: request.targetSkillId,
+      scope
     });
     const retrieval = retrievalOutput.retrieval;
     const memories = retrievalOutput.memories;
@@ -1333,6 +1342,12 @@ export class RetrievalService {
         budget: budgetAt - rerankAt,
         total: Date.now() - startedAt
       },
+      retrievalDebug: {
+        ...retrieval.debug,
+        candidateCount: memories.length,
+        scopedProjectId: context.namespace.projectId,
+        scopedWorkspaceId: context.namespace.workspaceId
+      },
       status: uniq([
         ...filteredHits.status,
         ...(!this.deps.memoryAddEnabled() ? ["memory_add:disabled:no_recall_log"] : [])
@@ -1384,6 +1399,7 @@ export class RetrievalService {
     mode: RetrievalMode;
     excludeTraceRawTurnIds?: ReadonlySet<string>;
     targetSkillId?: string;
+    scope: ReturnType<typeof memoryFilterForNamespace>;
   }): Promise<{ retrieval: RetrievalResult; memories: MemoryRow[] }> {
     if (input.limit <= 0 || input.layers.length === 0) {
       return { retrieval: emptyRetrievalResult(), memories: [] };
@@ -1399,7 +1415,8 @@ export class RetrievalService {
       });
       const hasVectorCandidates = this.candidatePool.hasRetrievalVectorCandidates({
         layers: input.layers,
-        tags: input.tags
+        tags: input.tags,
+        scope: input.scope
       });
       const queryVector = hasVectorCandidates ? await this.queryVector(queryVectorText) : undefined;
       const candidatePool = await this.candidatePool.indexedRetrievalCandidatePool({
@@ -1408,6 +1425,7 @@ export class RetrievalService {
         layers: input.layers,
         tags: input.tags,
         targetSkillId: input.targetSkillId,
+        scope: input.scope,
         config
       });
       const memories = candidatePool.memories;
@@ -1824,6 +1842,7 @@ export class RetrievalService {
     startedAt: number
   ): ReturnType<RetrievalService["search"]> {
     const total = Date.now() - startedAt;
+    const context = this.deps.resolveContext(request);
     const tuning = this.retrievalTuningConfig();
     const contextPacket = request.includeInjectedContext === false
       ? {
@@ -1857,6 +1876,15 @@ export class RetrievalService {
         rerank: 0,
         budget: 0,
         total
+      },
+      retrievalDebug: {
+        tierSizes: { tier1: 0, tier2: 0, tier3: 0 },
+        kept: { tier1: 0, tier2: 0, tier3: 0 },
+        topRelevance: 0,
+        droppedByThreshold: 0,
+        candidateCount: 0,
+        scopedProjectId: context.namespace.projectId,
+        scopedWorkspaceId: context.namespace.workspaceId
       },
       status: ["memory_search:disabled"],
       verbose: request.verbose === true,

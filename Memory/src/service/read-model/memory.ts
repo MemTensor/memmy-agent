@@ -7,10 +7,21 @@ import { firstLine } from "../../utils/text.js";
 
 export function detailFromMemory(memory: MemoryRow, processing?: MemoryProcessingRecord): MemoryDetailItem {
   const sourceMemoryIds = memory.properties.internal_info.source_memory_ids;
+  const provenance = isRecord(memory.properties.internal_info.provenance)
+    ? memory.properties.internal_info.provenance as unknown as MemoryDetailItem["provenance"]
+    : undefined;
+  const supersedesMemoryIds = stringArray(memory.properties.internal_info.supersedes_memory_ids);
+  const supersededByMemoryId = stringFromMaybeRecord(memory.properties.internal_info, "superseded_by_memory_id");
+  const supersessionReason = stringFromMaybeRecord(memory.properties.internal_info, "supersession_reason");
   return { id: memory.id, kind: kindFromMemory(memory), memoryLayer: memory.memoryLayer, status: memory.status,
     title: detailTitleForMemory(memory), summary: detailSummaryForMemory(memory), tags: panelTagsForMemory(memory, processing),
     updatedAt: memory.updatedAt, version: memory.version, processing, body: memory.memoryValue, createdAt: memory.createdAt,
-    sourceMemoryIds: stringArray(sourceMemoryIds), metadata: { source: panelSourceForMemory(memory), info: memory.info, properties: memory.properties } };
+    sourceMemoryIds: stringArray(sourceMemoryIds),
+    provenance,
+    supersession: supersedesMemoryIds.length || supersededByMemoryId
+      ? { supersedesMemoryIds, supersededByMemoryId, reason: supersessionReason }
+      : undefined,
+    metadata: { source: panelSourceForMemory(memory), info: memory.info, properties: memory.properties } };
 }
 
 export function detailTitleForMemory(memory: MemoryRow): string {

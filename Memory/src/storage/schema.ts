@@ -1,7 +1,7 @@
 import type Database from "better-sqlite3";
 
-export const SCHEMA_VERSION = 4;
-export const SCHEMA_MIGRATION_ID = "004_memory_processing_state";
+export const SCHEMA_VERSION = 5;
+export const SCHEMA_MIGRATION_ID = "005_memory_governance";
 const API_LOG_SOURCE_AGENT_MIGRATION_FROM_VERSION = 2;
 const PROCESSING_TAGS = new Set([
   "摘要排队中",
@@ -58,6 +58,22 @@ const statements = [
     ON memories (content_hash, memory_layer)`,
   `CREATE INDEX IF NOT EXISTS idx_memories_key_layer
     ON memories (memory_key, memory_layer)`,
+
+  `CREATE TABLE IF NOT EXISTS memory_relations (
+    id TEXT PRIMARY KEY,
+    project_id TEXT,
+    source_memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    target_memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    relation TEXT NOT NULL CHECK (relation IN ('supersedes')),
+    reason TEXT,
+    actor_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(actor_json)),
+    created_at TEXT NOT NULL,
+    UNIQUE (source_memory_id, target_memory_id, relation)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_memory_relations_source
+    ON memory_relations (source_memory_id, relation, created_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_memory_relations_target
+    ON memory_relations (target_memory_id, relation, created_at DESC)`,
 
   `CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5 (
     id UNINDEXED,
@@ -460,7 +476,7 @@ export function migrate(db: Database.Database): void {
   const hasMemories = tableExists(db, "memories");
   const version = currentSchemaVersion(db);
 
-  if (hasMemories && version !== SCHEMA_VERSION && version !== 2 && version !== 3) {
+  if (hasMemories && version !== SCHEMA_VERSION && version !== 2 && version !== 3 && version !== 4) {
     throw new Error(
       `Unsupported memory database schema version ${version}; the database was left unchanged`
     );

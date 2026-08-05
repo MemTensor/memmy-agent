@@ -1,5 +1,7 @@
 /** Memmy resume hook template. */
 
+import { MEMMY_AGENT_PROTOCOL_VERSION } from "./memmy-agent-protocol.js";
+
 export type MemmyResumeHookMode = "claude-code" | "codex" | "cursor";
 
 export interface RenderMemmyResumeHookScriptOptions {
@@ -10,12 +12,15 @@ export interface RenderMemmyResumeHookScriptOptions {
 /** Renders the Node hook script used by prompt-submit hooks. */
 export function renderMemmyResumeHookScript(options: RenderMemmyResumeHookScriptOptions): string {
   return String.raw`#!/usr/bin/env node
+import { execFileSync } from "node:child_process";
 import { readFile, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
 const SOURCE = ${JSON.stringify(options.source)};
 const MODE = ${JSON.stringify(options.mode)};
+const ADAPTER_ID = "memmy-" + SOURCE + "-hook";
+const MEMMY_PROTOCOL_VERSION = ${JSON.stringify(MEMMY_AGENT_PROTOCOL_VERSION)};
 const CONFIG_URL = new URL("./memmy-memory-config.json", import.meta.url);
 const STATE_URL = new URL("./memmy-resume-state.json", import.meta.url);
 const DEFAULT_MEMMY_CONFIG_PATH = join(homedir(), ".memmy", "config.yaml");
@@ -172,25 +177,53 @@ async function captureCompletedTurn(payload) {
 
   const client = await createMemmyClient();
   const externalSessionId = memoryExternalSessionId(payload);
+  const currentWorkspacePath = workspacePath(payload) || undefined;
+  const openRequestId = SOURCE + "-open:" + externalSessionId;
+  const openProvenance = buildProtocolProvenance({
+    requestId: openRequestId,
+    sessionId: externalSessionId,
+    workspacePath: currentWorkspacePath
+  });
   const opened = await client.post("/api/v1/sessions/open", {
+    protocolVersion: MEMMY_PROTOCOL_VERSION,
+    adapterId: ADAPTER_ID,
+    requestId: openRequestId,
     sessionId: externalSessionId,
     source: SOURCE,
-    workspacePath: workspacePath(payload) || undefined
+    workspacePath: currentWorkspacePath,
+    provenance: openProvenance,
+    meta: {
+      memmyProtocolVersion: MEMMY_PROTOCOL_VERSION,
+      provenance: openProvenance
+    }
   });
   const sessionId = normalizeText(opened.sessionId) || externalSessionId;
   const turnId = normalizeText(pending && pending.turnId) || platformTurnId(payload) ||
     SOURCE + "-fallback-" + hashText([sessionId, query, answer].join("\\u0000"));
+  const completeRequestId = SOURCE + "-complete:" + turnId + ":" + hashText([status, query, answer].join("\\u0000"));
+  const projectId = normalizeText(opened.projectId) || normalizeText(pending && pending.projectId) || undefined;
 
   await client.post("/api/v1/turns/" + encodeURIComponent(turnId) + "/complete", {
-    adapterId: "memmy-" + SOURCE + "-hook",
-    requestId: SOURCE + "-complete:" + turnId + ":" + hashText([status, query, answer].join("\\u0000")),
+    protocolVersion: MEMMY_PROTOCOL_VERSION,
+    adapterId: ADAPTER_ID,
+    requestId: completeRequestId,
+    namespace: protocolNamespace(currentWorkspacePath, projectId),
     sessionId,
     episodeId: normalizeText(pending && pending.episodeId) || undefined,
     query,
     answer,
     status,
     source: SOURCE,
-    sourceMemoryIds: Array.isArray(pending && pending.sourceMemoryIds) ? pending.sourceMemoryIds : undefined
+    sourceMemoryIds: Array.isArray(pending && pending.sourceMemoryIds) ? pending.sourceMemoryIds : undefined,
+    provenance: buildProtocolProvenance({
+      ...(pending && pending.provenance && typeof pending.provenance === "object" ? pending.provenance : {}),
+      requestId: completeRequestId,
+      sessionId,
+      turnId,
+      workspacePath: currentWorkspacePath,
+      projectId,
+      sourceMemoryIds: Array.isArray(pending && pending.sourceMemoryIds) ? pending.sourceMemoryIds : []
+    })
   });
   await clearTurnState(payload);
 }
@@ -202,20 +235,47 @@ async function startCapturedTurn(payload, prompt) {
   }
   const client = await createMemmyClient();
   const externalSessionId = memoryExternalSessionId(payload);
+  const currentWorkspacePath = workspacePath(payload) || undefined;
+  const openRequestId = SOURCE + "-open:" + externalSessionId;
+  const openProvenance = buildProtocolProvenance({
+    requestId: openRequestId,
+    sessionId: externalSessionId,
+    workspacePath: currentWorkspacePath
+  });
   const opened = await client.post("/api/v1/sessions/open", {
+    protocolVersion: MEMMY_PROTOCOL_VERSION,
+    adapterId: ADAPTER_ID,
+    requestId: openRequestId,
     sessionId: externalSessionId,
     source: SOURCE,
-    workspacePath: workspacePath(payload) || undefined
+    workspacePath: currentWorkspacePath,
+    provenance: openProvenance,
+    meta: {
+      memmyProtocolVersion: MEMMY_PROTOCOL_VERSION,
+      provenance: openProvenance
+    }
   });
   const sessionId = normalizeText(opened.sessionId) || externalSessionId;
+  const projectId = normalizeText(opened.projectId) || undefined;
   const requestedTurnId = platformTurnId(payload) ||
     SOURCE + "-turn-" + hashText([sessionId, query, String(Date.now())].join("\\u0000"));
-  const turn = await client.post("/api/v1/turns/start", {
-    adapterId: "memmy-" + SOURCE + "-hook",
-    requestId: SOURCE + "-start:" + requestedTurnId,
+  const startRequestId = SOURCE + "-start:" + requestedTurnId;
+  const provenance = buildProtocolProvenance({
+    requestId: startRequestId,
     sessionId,
     turnId: requestedTurnId,
-    query
+    workspacePath: currentWorkspacePath,
+    projectId
+  });
+  const turn = await client.post("/api/v1/turns/start", {
+    protocolVersion: MEMMY_PROTOCOL_VERSION,
+    adapterId: ADAPTER_ID,
+    requestId: startRequestId,
+    namespace: protocolNamespace(currentWorkspacePath, projectId),
+    sessionId,
+    turnId: requestedTurnId,
+    query,
+    provenance
   });
   const state = {
     createdAt: new Date().toISOString(),
@@ -224,6 +284,9 @@ async function startCapturedTurn(payload, prompt) {
     episodeId: normalizeText(turn && turn.episodeId) || undefined,
     query,
     sourceMemoryIds: Array.isArray(turn && turn.sourceMemoryIds) ? turn.sourceMemoryIds : undefined,
+    workspacePath: currentWorkspacePath,
+    projectId,
+    provenance,
     answer: ""
   };
   await writeTurnState(payload, state);
@@ -435,6 +498,51 @@ function workspacePath(payload) {
     return "";
   }
   return roots.map(item => normalizeText(item)).find(Boolean) || "";
+}
+
+function protocolNamespace(workspacePathValue, projectId) {
+  return {
+    source: SOURCE,
+    profileId: "default",
+    workspacePath: workspacePathValue,
+    projectId
+  };
+}
+
+function buildProtocolProvenance(input) {
+  const workspacePathValue = normalizeText(input && input.workspacePath) || undefined;
+  const sourceMemoryIds = Array.isArray(input && input.sourceMemoryIds)
+    ? input.sourceMemoryIds.filter(value => typeof value === "string" && value.trim())
+    : [];
+  return {
+    ...(input && typeof input === "object" ? input : {}),
+    ...readGitProvenance(workspacePathValue),
+    sourceAgent: SOURCE,
+    adapterId: ADAPTER_ID,
+    workspacePath: workspacePathValue,
+    sourceMemoryIds,
+    capturedAt: new Date().toISOString()
+  };
+}
+
+function readGitProvenance(workspacePathValue) {
+  if (!workspacePathValue) return {};
+  try {
+    const git = (...args) => execFileSync("git", ["-C", workspacePathValue, ...args], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"]
+    }).trim();
+    const repository = git("rev-parse", "--show-toplevel");
+    const branch = git("rev-parse", "--abbrev-ref", "HEAD");
+    const commit = git("rev-parse", "HEAD");
+    return {
+      ...(repository ? { repository } : {}),
+      ...(branch && branch !== "HEAD" ? { branch } : {}),
+      ...(commit ? { commit } : {})
+    };
+  } catch {
+    return {};
+  }
 }
 
 function completedTurnStatus(payload) {

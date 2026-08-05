@@ -59,7 +59,9 @@ export interface ImportJobProcessorDeps {
   assertMemoryAddEnabled(): void;
   assertMemoryInScope(memory: MemoryRow, namespace: unknown): void;
   sanitizeMemoryAddRequest(request: MemoryAddRequest): MemoryAddRequest;
-  resolveContext(request: MemoryAddRequest): { userId: string; namespace: { source?: string; projectId?: string; profileId?: string } };
+  resolveContext(request: MemoryAddRequest): { userId: string; namespace: {
+    source?: string; tenantId?: string; projectId?: string; profileId?: string; workspaceId?: string; workspacePath?: string;
+  } };
   requireSession(id: string): SessionRecord;
   assertSessionInScope(session: ReturnType<ImportJobProcessorDeps["requireSession"]>, namespace: unknown): void;
   normalizeMemoryAddCreatedAt(value: string | undefined): string | undefined;
@@ -157,6 +159,21 @@ export class ImportJobProcessor {
       internal: {
         source: request.source ?? "manual", title, summary: importSummary ?? firstLine(request.content), turn_id: request.turnId,
         ...(importTrace ? { plugin_algorithm: "memory.add.import_async.v2", trace: importTrace } : {})
+      },
+      provenance: {
+        ...request.provenance,
+        sourceAgent: session?.source ?? request.source?.trim() ?? context.namespace.source,
+        tenantId: context.namespace.tenantId ?? "local",
+        profileId: session?.profileId ?? context.namespace.profileId,
+        projectId: session?.projectId ?? context.namespace.projectId,
+        workspaceId: session?.workspaceId ?? context.namespace.workspaceId,
+        workspacePath: session?.workspacePath ?? context.namespace.workspacePath,
+        sessionId: session?.id ?? request.sessionId,
+        turnId: request.turnId,
+        adapterId: request.adapterId,
+        requestId: request.requestId,
+        sourceMemoryIds: request.sourceMemoryIds ?? [],
+        capturedAt: at
       },
       createdAt: at
     });

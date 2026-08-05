@@ -1,12 +1,17 @@
 /** Pi Memmy extension template. */
 
+import { MEMMY_AGENT_PROTOCOL_VERSION } from "./memmy-agent-protocol.js";
+
 export function renderMemmyPiExtension(): string {
   return String.raw`import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
 const SOURCE = "pi";
+const ADAPTER_ID = "memmy-pi-extension";
+const MEMMY_PROTOCOL_VERSION = ${JSON.stringify(MEMMY_AGENT_PROTOCOL_VERSION)};
 const CONFIG_URL = new URL("./memmy-memory-config.json", import.meta.url);
 const DEFAULT_MEMMY_CONFIG_PATH = join(homedir(), ".memmy", "config.yaml");
 const FETCH_TIMEOUT_MS = 45000;
@@ -40,25 +45,55 @@ export default function memmyPiExtension(pi: ExtensionAPI): void {
     try {
       const memmy = await createMemmyClient();
       const externalSessionId = "pi-memory-" + ctx.sessionManager.getSessionId();
+      const workspacePath = ctx.cwd || undefined;
+      const openRequestId = "pi-open:" + externalSessionId;
+      const openProvenance = buildProtocolProvenance({
+        requestId: openRequestId,
+        sessionId: externalSessionId,
+        workspacePath
+      });
       const opened = await memmy.post("/api/v1/sessions/open", {
+        protocolVersion: MEMMY_PROTOCOL_VERSION,
+        adapterId: ADAPTER_ID,
+        requestId: openRequestId,
         sessionId: externalSessionId,
         source: SOURCE,
-        workspacePath: ctx.cwd || undefined
+        workspacePath,
+        provenance: openProvenance,
+        meta: {
+          memmyProtocolVersion: MEMMY_PROTOCOL_VERSION,
+          provenance: openProvenance
+        }
       });
       const sessionId = normalizeText(opened.sessionId) || externalSessionId;
+      const projectId = normalizeText(opened.projectId) || undefined;
+      const startRequestId = "pi-start:" + requestedTurnId;
+      const provenance = buildProtocolProvenance({
+        requestId: startRequestId,
+        sessionId,
+        turnId: requestedTurnId,
+        workspacePath,
+        projectId
+      });
       const turn = await memmy.post("/api/v1/turns/start", {
-        adapterId: "memmy-pi-extension",
-        requestId: "pi-start:" + requestedTurnId,
+        protocolVersion: MEMMY_PROTOCOL_VERSION,
+        adapterId: ADAPTER_ID,
+        requestId: startRequestId,
+        namespace: protocolNamespace(workspacePath, projectId),
         sessionId,
         turnId: requestedTurnId,
         query: redactSecrets(query),
-        source: SOURCE
+        source: SOURCE,
+        provenance
       });
       pendingTurns.set(requestedTurnId, {
         sessionId,
         turnId: normalizeText(turn.turnId) || requestedTurnId,
         episodeId: normalizeText(turn.episodeId) || undefined,
         sourceMemoryIds: Array.isArray(turn.sourceMemoryIds) ? turn.sourceMemoryIds : undefined,
+        workspacePath,
+        projectId,
+        provenance,
         initialQuery: query,
         startParentId
       });
@@ -177,6 +212,9 @@ interface PendingTurn {
   turnId: string;
   episodeId?: string;
   sourceMemoryIds?: unknown[];
+  workspacePath?: string;
+  projectId?: string;
+  provenance?: Record<string, unknown>;
   initialQuery: string;
   startParentId: string | null;
 }
@@ -210,16 +248,28 @@ async function completeTurn(
   status: "succeeded" | "failed"
 ): Promise<void> {
   const memmy = await createMemmyClient();
+  const requestId = "pi-complete:" + turn.turnId + ":" + hashText(answer);
   await memmy.post("/api/v1/turns/" + encodeURIComponent(turn.turnId) + "/complete", {
-    adapterId: "memmy-pi-extension",
-    requestId: "pi-complete:" + turn.turnId + ":" + hashText(answer),
+    protocolVersion: MEMMY_PROTOCOL_VERSION,
+    adapterId: ADAPTER_ID,
+    requestId,
+    namespace: protocolNamespace(turn.workspacePath, turn.projectId),
     sessionId: turn.sessionId,
     episodeId: turn.episodeId,
     query: redactSecrets(query),
     answer: redactSecrets(answer),
     status,
     source: SOURCE,
-    sourceMemoryIds: turn.sourceMemoryIds
+    sourceMemoryIds: turn.sourceMemoryIds,
+    provenance: buildProtocolProvenance({
+      ...turn.provenance,
+      requestId,
+      sessionId: turn.sessionId,
+      turnId: turn.turnId,
+      workspacePath: turn.workspacePath,
+      projectId: turn.projectId,
+      sourceMemoryIds: turn.sourceMemoryIds
+    })
   });
 }
 
@@ -355,6 +405,60 @@ function renderMemoryContext(markdown: string, query: string): string {
   ].join("\n");
 }
 
+interface ProtocolProvenanceInput {
+  requestId?: string;
+  sessionId?: string;
+  turnId?: string;
+  workspacePath?: string;
+  projectId?: string;
+  sourceMemoryIds?: unknown[];
+  [key: string]: unknown;
+}
+
+function protocolNamespace(workspacePath?: string, projectId?: string): Record<string, unknown> {
+  return {
+    source: SOURCE,
+    profileId: "default",
+    workspacePath,
+    projectId
+  };
+}
+
+function buildProtocolProvenance(input: ProtocolProvenanceInput): Record<string, unknown> {
+  const workspacePath = normalizeText(input.workspacePath) || undefined;
+  return {
+    ...input,
+    ...readGitProvenance(workspacePath),
+    sourceAgent: SOURCE,
+    adapterId: ADAPTER_ID,
+    workspacePath,
+    sourceMemoryIds: Array.isArray(input.sourceMemoryIds)
+      ? input.sourceMemoryIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+      : [],
+    capturedAt: new Date().toISOString()
+  };
+}
+
+function readGitProvenance(workspacePath?: string): Record<string, string> {
+  if (!workspacePath) return {};
+  try {
+    const git = (...args: string[]) => execFileSync("git", ["-C", workspacePath, ...args], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"]
+    }).trim();
+    const repository = git("rev-parse", "--show-toplevel");
+    const branch = git("rev-parse", "--abbrev-ref", "HEAD");
+    const commit = git("rev-parse", "HEAD");
+    return {
+      ...(repository ? { repository } : {}),
+      ...(branch && branch !== "HEAD" ? { branch } : {}),
+      ...(commit ? { commit } : {})
+    };
+  } catch {
+    return {};
+  }
+}
+
 interface MemmyClient {
   get(path: string): Promise<Record<string, unknown>>;
   post(path: string, body: Record<string, unknown>): Promise<Record<string, unknown>>;
@@ -403,12 +507,43 @@ async function readJsonConfig(): Promise<Record<string, unknown>> {
 
 async function readYamlConfig(path: string): Promise<Record<string, string>> {
   const content = await readFile(path, "utf8");
-  const values: Record<string, string> = {};
-  for (const line of content.split(/\r?\n/u)) {
+  return parseStorageBlock(content);
+}
+
+function parseStorageBlock(content: string): Record<string, string> {
+  const storages: Array<Record<string, string>> = [];
+  let activeStorage: Record<string, string> | null = null;
+  let storageIndent = 0;
+  for (const rawLine of content.split(/\r?\n/u)) {
+    const line = rawLine.replace(/#.*$/u, "").replace(/\s+$/u, "");
+    if (!line.trim()) continue;
+    const indent = line.match(/^\s*/u)?.[0].length ?? 0;
+    if (/^\s*storage:\s*$/u.test(line)) {
+      activeStorage = {};
+      storageIndent = indent;
+      storages.push(activeStorage);
+      continue;
+    }
+    if (activeStorage && indent <= storageIndent) activeStorage = null;
+    if (!activeStorage) continue;
     const match = line.match(/^\s+(endpoint|token):\s*(.*?)\s*$/u);
-    if (match && !values[match[1]]) values[match[1]] = match[2].replace(/^['"]|['"]$/gu, "");
+    if (match) activeStorage[match[1]] = parseYamlScalar(match[2]);
   }
-  return values;
+  return storages.find((storage) => storage.endpoint) ?? storages[0] ?? {};
+}
+
+function parseYamlScalar(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  if ((trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+      (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+    try {
+      return JSON.parse(trimmed) as string;
+    } catch {
+      return trimmed.slice(1, -1);
+    }
+  }
+  return trimmed;
 }
 
 function isResumeCommand(value: string): boolean {

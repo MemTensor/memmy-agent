@@ -12,6 +12,7 @@ memmy-memory-*.tgz
 .DS_Store
 App/memmy-agent/package-lock.json
 sessions/
+output/
 .*
 !.github/
 !.github/workflows/

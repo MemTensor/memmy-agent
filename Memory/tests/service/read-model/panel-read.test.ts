@@ -532,7 +532,7 @@ describe("MemoryService / read model / panel", () => {
     db.close();
   });
 
-  it("shows panel change logs, jobs, and overview across namespaces", () => {
+  it("scopes panel change logs, jobs, and overview by namespace", () => {
     const { db, service } = createTestService();
     const namespaceA = {
       source: "codex",
@@ -561,29 +561,29 @@ describe("MemoryService / read model / panel", () => {
 
     const changesA = service.panelChanges({ namespace: namespaceA });
     expect(changesA.changes.map((change) => change.id)).toContain(completeA.l1MemoryId);
-    expect(changesA.changes.map((change) => change.id)).toContain(completeB.l1MemoryId);
+    expect(changesA.changes.map((change) => change.id)).not.toContain(completeB.l1MemoryId);
     expect(changesA.changes.some((change) => change.kind === "job")).toBe(true);
     const jobIdsA = service.panelJobs({ namespace: namespaceA }).items.map((job) => job.id);
     expect(jobIdsA).toEqual(expect.arrayContaining(completeA.jobs.map((job) => job.jobId)));
-    expect(jobIdsA).toEqual(expect.arrayContaining(completeB.jobs.map((job) => job.jobId)));
+    expect(jobIdsA).not.toEqual(expect.arrayContaining(completeB.jobs.map((job) => job.jobId)));
     const overviewA = service.panelOverview({ namespace: namespaceA });
-    expect(overviewA.stats.jobs.queued).toBe(completeA.jobs.length + completeB.jobs.length);
-    expect(overviewA.stats.byLayer.L1).toBe(completeA.l1MemoryIds.length + completeB.l1MemoryIds.length);
-    expect(overviewA.stats.byStatus.activated).toBe(completeA.l1MemoryIds.length + completeB.l1MemoryIds.length);
-    expect(overviewA.stats.episodes.open).toBe(2);
+    expect(overviewA.stats.jobs.queued).toBe(completeA.jobs.length);
+    expect(overviewA.stats.byLayer.L1).toBe(completeA.l1MemoryIds.length);
+    expect(overviewA.stats.byStatus.activated).toBe(completeA.l1MemoryIds.length);
+    expect(overviewA.stats.episodes.open).toBe(1);
 
     const changesB = service.panelChanges({ namespace: namespaceB });
     expect(changesB.changes.map((change) => change.id)).toContain(completeB.l1MemoryId);
-    expect(changesB.changes.map((change) => change.id)).toContain(completeA.l1MemoryId);
+    expect(changesB.changes.map((change) => change.id)).not.toContain(completeA.l1MemoryId);
     expect(changesB.changes.some((change) => change.kind === "job")).toBe(true);
     const jobIdsB = service.panelJobs({ namespace: namespaceB }).items.map((job) => job.id);
     expect(jobIdsB).toEqual(expect.arrayContaining(completeB.jobs.map((job) => job.jobId)));
-    expect(jobIdsB).toEqual(expect.arrayContaining(completeA.jobs.map((job) => job.jobId)));
+    expect(jobIdsB).not.toEqual(expect.arrayContaining(completeA.jobs.map((job) => job.jobId)));
     const overviewB = service.panelOverview({ namespace: namespaceB });
-    expect(overviewB.stats.jobs.queued).toBe(completeA.jobs.length + completeB.jobs.length);
-    expect(overviewB.stats.byLayer.L1).toBe(completeA.l1MemoryIds.length + completeB.l1MemoryIds.length);
-    expect(overviewB.stats.byStatus.activated).toBe(completeA.l1MemoryIds.length + completeB.l1MemoryIds.length);
-    expect(overviewB.stats.episodes.open).toBe(2);
+    expect(overviewB.stats.jobs.queued).toBe(completeB.jobs.length);
+    expect(overviewB.stats.byLayer.L1).toBe(completeB.l1MemoryIds.length);
+    expect(overviewB.stats.byStatus.activated).toBe(completeB.l1MemoryIds.length);
+    expect(overviewB.stats.episodes.open).toBe(1);
 
     db.close();
   });

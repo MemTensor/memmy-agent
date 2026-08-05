@@ -99,6 +99,40 @@ describe("MemoryService / REST contract", () => {
     db.close();
   });
 
+  it("serves structured session checkpoints through the REST client", async () => {
+    const { db, service } = createTestService();
+    const server = createMemoryHttpServer({ service });
+    await withServerClosed(server, async () => {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("expected TCP address");
+      const client = new MemoryRestClient({ endpoint: `http://127.0.0.1:${address.port}` });
+      const opened = await client.openSession({
+        sessionId: "checkpoint-rest-session",
+        source: "codex",
+        workspacePath: "/work/checkpoint-rest"
+      }) as { sessionId: string };
+      const result = await client.checkpointSession(opened.sessionId, {
+        task: "Prepare a resumable handoff",
+        changes: ["Stored structured fields"],
+        validated: ["REST route exercised"],
+        unverified: ["Production load"],
+        nextSteps: ["Resume from checkpoint"]
+      }) as {
+        checkpointId: string;
+        checkpoint: { task: string; nextSteps: string[] };
+        l1MemoryId?: string;
+      };
+      expect(result.checkpointId).toMatch(/^raw_/u);
+      expect(result.checkpoint).toMatchObject({
+        task: "Prepare a resumable handoff",
+        nextSteps: ["Resume from checkpoint"]
+      });
+      expect(result.l1MemoryId).toMatch(/^trace_/u);
+    });
+    db.close();
+  });
+
   it("serves the manual memory-processing retry endpoint", async () => {
     const root = mkdtempSync(join(tmpdir(), "mindock-memory-http-processing-retry-"));
     roots.push(root);
@@ -280,7 +314,10 @@ describe("MemoryService / REST contract", () => {
 
     const completeResponse = await fetch(baseUrl + "/turns/cursor-http-turn/complete", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        "x-memmy-workspace-path": "/tmp/hook-workspace"
+      },
       body: JSON.stringify({
         adapterId: "memmy-cursor-hook",
         requestId: "cursor-complete:http-fields",
@@ -912,7 +949,7 @@ describe("MemoryService / REST contract", () => {
         }
       })
     });
-    expect(crossNamespace.status).toBe(200);
+    expect(crossNamespace.status).toBe(403);
 
     const sessionResponse = await fetch(`${baseUrl}/sessions/open`, {
       method: "POST",
@@ -995,6 +1032,10 @@ describe("MemoryService / REST contract", () => {
     const body = await response.json() as {
       debug: {
         hits: Array<{ id: string; tags: string[] }>;
+        retrievalDebug: {
+          candidateCount: number;
+          tierSizes: Record<string, number>;
+        };
       };
     };
 
@@ -1002,7 +1043,78 @@ describe("MemoryService / REST contract", () => {
     expect(body.debug.hits).toHaveLength(1);
     expect(body.debug.hits[0]?.tags).toContain("conv-26");
     expect(body.debug.hits[0]?.tags).not.toContain("conv-30");
+    expect(body.debug.retrievalDebug.candidateCount).toBe(2);
+    expect(body.debug.retrievalDebug.tierSizes).toBeDefined();
 
+    });
+    db.close();
+  });
+
+  it("serves scoped Markdown audit export, preview, apply, and isolation", async () => {
+    const { db, service } = createTestService();
+    const projectA = {
+      source: "codex",
+      profileId: "main",
+      userId: "markdown-http-user",
+      projectId: "project-a",
+      workspaceId: "workspace-a",
+      workspacePath: "/work/project-a"
+    };
+    const projectB = { ...projectA, projectId: "project-b", workspaceId: "workspace-b", workspacePath: "/work/project-b" };
+    service.addMemory({ namespace: projectA, layer: "L2", title: "Project A policy", content: "Only project A should be exported.", deferProcessing: true });
+    service.addMemory({ namespace: projectB, layer: "L2", title: "Project B policy", content: "This must stay out of project A.", deferProcessing: true });
+    const server = createMemoryHttpServer({
+      service,
+      auth: {
+        cloudAccessTokens: {
+          "markdown-http-token": {
+            source: "codex",
+            profileId: "main",
+            userId: "markdown-http-user",
+            projectId: "project-a",
+            workspaceId: "workspace-a"
+          }
+        }
+      }
+    });
+    await withServerClosed(server, async () => {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("expected TCP address");
+      const endpoint = `http://127.0.0.1:${address.port}/api/v1/memory/audit/markdown`;
+      const headers = { authorization: "Bearer markdown-http-token" };
+      const exported = await fetch(endpoint, { headers });
+      const exportedBody = await exported.json() as { markdown: string; count: number };
+      expect(exported.status).toBe(200);
+      expect(exportedBody.count).toBe(1);
+      expect(exportedBody.markdown).toContain("Project A policy");
+      expect(exportedBody.markdown).not.toContain("Project B policy");
+
+      const editedMarkdown = exportedBody.markdown
+        .replace("Project A policy", "Project A reviewed policy")
+        .replace("Only project A should be exported.", "Project A was reviewed through REST.");
+      const preview = await fetch(endpoint + "/import", {
+        method: "POST",
+        headers: { ...headers, "content-type": "application/json" },
+        body: JSON.stringify({ markdown: editedMarkdown, apply: false })
+      });
+      expect(preview.status).toBe(200);
+      expect(await preview.json()).toMatchObject({ applied: false, count: 1, updated: [expect.any(String)] });
+
+      const applied = await fetch(endpoint + "/import", {
+        method: "POST",
+        headers: { ...headers, "content-type": "application/json" },
+        body: JSON.stringify({ markdown: editedMarkdown, apply: true })
+      });
+      expect(applied.status).toBe(200);
+      expect(await applied.json()).toMatchObject({ applied: true, count: 1, updated: [expect.any(String)] });
+
+      const crossProject = await fetch(endpoint + "/import", {
+        method: "POST",
+        headers: { ...headers, "content-type": "application/json" },
+        body: JSON.stringify({ namespace: projectB, markdown: editedMarkdown, apply: true })
+      });
+      expect(crossProject.status).toBe(403);
     });
     db.close();
   });
@@ -1143,9 +1255,9 @@ describe("MemoryService / REST contract", () => {
         authorization: "Bearer reader-b"
       }
     });
-    const crossUserBody = await crossUserGet.json() as { id: string };
-    expect(crossUserGet.status).toBe(200);
-    expect(crossUserBody.id).toBe(complete.l1MemoryId);
+    const crossUserBody = await crossUserGet.json() as { error: { code: string } };
+    expect(crossUserGet.status).toBe(404);
+    expect(crossUserBody.error.code).toBe("not_found");
     });
     db.close();
   });

@@ -134,6 +134,27 @@ export const MemoryDetailItemSchema = MemoryListItemSchema.extend({
   body: z.string(),
   createdAt: IsoTimeSchema,
   sourceMemoryIds: z.array(NonEmptyStringSchema),
+  provenance: z.object({
+    sourceAgent: NonEmptyStringSchema,
+    profileId: z.string().optional(),
+    projectId: z.string().optional(),
+    workspaceId: z.string().optional(),
+    workspacePath: z.string().optional(),
+    sessionId: z.string().optional(),
+    turnId: z.string().optional(),
+    adapterId: z.string().optional(),
+    requestId: z.string().optional(),
+    sourceMemoryIds: z.array(NonEmptyStringSchema),
+    repository: z.string().optional(),
+    branch: z.string().optional(),
+    commit: z.string().optional(),
+    capturedAt: IsoTimeSchema
+  }).optional(),
+  supersession: z.object({
+    supersedesMemoryIds: z.array(NonEmptyStringSchema),
+    supersededByMemoryId: NonEmptyStringSchema.optional(),
+    reason: z.string().optional()
+  }).optional(),
   metadata: UnknownRecordSchema
 });
 export type MemoryDetailItem = z.infer<typeof MemoryDetailItemSchema>;
@@ -384,7 +405,16 @@ export const AddMemoryInputSchema = RuntimeRequestFieldsSchema.extend({
   sessionId: z.string().optional(),
   turnId: z.string().optional(),
   createdAt: IsoTimeSchema.optional(),
-  deferProcessing: z.boolean().optional()
+  deferProcessing: z.boolean().optional(),
+  sourceMemoryIds: z.array(NonEmptyStringSchema).optional(),
+  provenance: z.object({
+    repository: z.string().optional(),
+    branch: z.string().optional(),
+    commit: z.string().optional(),
+    workspacePath: z.string().optional()
+  }).optional(),
+  supersedesMemoryId: NonEmptyStringSchema.optional(),
+  supersessionReason: z.string().optional()
 });
 export type AddMemoryInput = z.infer<typeof AddMemoryInputSchema>;
 

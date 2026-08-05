@@ -2,10 +2,12 @@ import type {
   HealthResponse,
   MemoryAddRequest,
   MemoryGovernanceRequest,
+  MemoryMarkdownImportRequest,
   MemoryReloadConfigRequest,
   MemoryReloadConfigResponse,
   MemorySearchRequest,
   RequestEnvelope,
+  SessionCheckpointRequest,
   SessionOpenRequest,
   TurnCompleteRequest,
   TurnStartRequest
@@ -53,6 +55,10 @@ export class MemoryRestClient {
     return this.request("POST", `/api/v1/sessions/${encodeURIComponent(sessionId)}/close`, request);
   }
 
+  checkpointSession(sessionId: string, request: SessionCheckpointRequest): Promise<unknown> {
+    return this.request("POST", `/api/v1/sessions/${encodeURIComponent(sessionId)}/checkpoint`, request);
+  }
+
   startTurn(request: TurnStartRequest): Promise<unknown> {
     return this.request("POST", "/api/v1/turns/start", request);
   }
@@ -67,6 +73,14 @@ export class MemoryRestClient {
 
   addMemory(request: MemoryAddRequest): Promise<unknown> {
     return this.request("POST", "/api/v1/memory/add", request);
+  }
+
+  exportMarkdown(includeArchived = false): Promise<unknown> {
+    return this.request("GET", `/api/v1/memory/audit/markdown${queryString({ includeArchived })}`);
+  }
+
+  importMarkdown(request: MemoryMarkdownImportRequest): Promise<unknown> {
+    return this.request("POST", "/api/v1/memory/audit/markdown/import", request);
   }
 
   getMemory(id: string): Promise<unknown> {

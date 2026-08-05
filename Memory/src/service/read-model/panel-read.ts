@@ -3,7 +3,9 @@ import { isRecord } from "../../utils/json.js";
 import type { StorageBackendCapabilities } from "../../storage/backend.js";
 import type {
   ApiLogRecord,
+  AuditLogRecord,
   ChangeLogRecord,
+  EmbeddingRetryRecord,
   EmbeddingRetryStatus,
   EpisodeRecord,
   EvolutionJobRecord,
@@ -11,6 +13,14 @@ import type {
   Repositories
 } from "../../storage/repositories.js";
 import { detailSummaryForMemory } from "./memory.js";
+import {
+  memoryFilterForNamespace,
+  namespaceForMemory,
+  namespaceForSession,
+  namespaceIdFromContext,
+  normalizeNamespace,
+  sameProjectScope
+} from "../namespace/namespace-scope.js";
 import type {
   HealthResponse,
   MemoryFilter,
@@ -92,13 +102,17 @@ export class PanelReadModel {
     items: ReturnType<Repositories["runtime"]["listAudit"]>;
     serverTime: string;
   } {
+    const context = this.deps.resolveContext(input);
+    const limit = input.limit ?? 50;
+    const items = this.deps.repos.runtime.listAudit({
+      userId: input.userId ?? context.userId,
+      targetKind: input.targetKind,
+      targetId: input.targetId,
+      limit: input.namespace ? 10_000 : limit
+    }).filter((audit) => this.auditMatchesNamespace(audit, input.namespace ? context.namespace : undefined))
+      .slice(0, limit);
     return {
-      items: this.deps.repos.runtime.listAudit({
-        userId: input.userId ?? this.deps.resolveContext(input).userId,
-        targetKind: input.targetKind,
-        targetId: input.targetId,
-        limit: input.limit
-      }),
+      items,
       serverTime: this.now()
     };
   }
@@ -131,11 +145,11 @@ export class PanelReadModel {
       limit,
       cursor: input.cursor
     });
-    const audits = this.deps.repos.runtime.listAudit({ limit });
+    const audits = this.auditLogs({ ...input, limit }).items;
     const jobs = [
-      ...this.deps.repos.runtime.listJobs("failed", limit),
-      ...this.deps.repos.runtime.listJobs("dead_letter", limit)
-    ].slice(0, limit);
+      ...this.scopedJobs("failed", input, limit),
+      ...this.scopedJobs("dead_letter", input, limit)
+    ].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)).slice(0, limit);
     const entries = [
       ...changes.items.map((change) => ({
         type: "change" as const,
@@ -181,7 +195,7 @@ export class PanelReadModel {
     };
   }
 
-  apiLogs(input: {
+  apiLogs(input: RequestEnvelope & {
     tools?: Array<"memory_add" | "memory_search" | "skill_generate" | "skill_evolve">;
     sourceAgent?: string;
     excludedSourceAgents?: string[];
@@ -197,19 +211,26 @@ export class PanelReadModel {
   } {
     const limit = Math.max(1, Math.min(input.limit ?? 50, 500));
     const offset = Math.max(0, input.offset ?? 0);
+    const queryLimit = input.namespace ? 10_000 : limit;
     const result = this.deps.repos.runtime.listApiLogs({
       toolNames: input.tools,
       sourceAgent: input.sourceAgent,
       excludedSourceAgents: input.excludedSourceAgents,
-      limit,
-      offset
+      limit: queryLimit,
+      offset: input.namespace ? 0 : offset
     });
+    const context = input.namespace ? this.deps.resolveContext(input) : undefined;
+    const scopedLogs = context
+      ? result.logs.filter((log) => this.apiLogMatchesNamespace(log, context.namespace))
+      : result.logs;
+    const logs = input.namespace ? scopedLogs.slice(offset, offset + limit) : scopedLogs;
+    const total = input.namespace ? scopedLogs.length : result.total;
     return {
-      logs: result.logs.map((log) => this.withCurrentTraceSummaries(log)),
-      total: result.total,
+      logs: logs.map((log) => this.withCurrentTraceSummaries(log)),
+      total,
       limit,
       offset,
-      nextOffset: offset + result.logs.length < result.total ? offset + result.logs.length : undefined,
+      nextOffset: offset + logs.length < total ? offset + logs.length : undefined,
       serverTime: this.now()
     };
   }
@@ -269,7 +290,10 @@ export class PanelReadModel {
       schema: this.deps.schemaVersion(),
       memory: overview.stats,
       changeSeq: overview.latestChangeSeq,
-      feedback: { recent: this.deps.repos.runtime.listFeedback({ limit: 1000 }).length },
+      feedback: {
+        recent: this.deps.repos.runtime.listFeedback({ limit: 1000 })
+          .filter((feedback) => this.entityReferencesNamespace(feedback, input.namespace)).length
+      },
       jobs: overview.stats.jobs,
       embeddingRetries: overview.stats.embeddingRetries,
       models: this.deps.models(),
@@ -284,11 +308,13 @@ export class PanelReadModel {
     deadLetterJobs: EvolutionJobRecord[];
     serverTime: string;
   } {
+    const failedJobs = this.scopedJobs("failed", input, 20);
+    const deadLetterJobs = this.scopedJobs("dead_letter", input, 20);
     return {
       health: this.deps.health(routes),
       overview: this.panelOverview(input),
-      failedJobs: this.deps.repos.runtime.listJobs("failed", 20),
-      deadLetterJobs: this.deps.repos.runtime.listJobs("dead_letter", 20),
+      failedJobs,
+      deadLetterJobs,
       serverTime: this.now()
     };
   }
@@ -308,7 +334,7 @@ export class PanelReadModel {
     };
   }
 
-  panelOverview(_input: RequestEnvelope & { userId?: string } = {}): {
+  panelOverview(input: RequestEnvelope & { userId?: string } = {}): {
     stats: {
       byLayer: Record<MemoryLayer, number>;
       byStatus: Record<"activated" | "resolving" | "archived" | "deleted", number>;
@@ -324,16 +350,20 @@ export class PanelReadModel {
     etag: string;
     serverTime: string;
   } {
-    const byLayer = this.memoryLayerCounts();
-    const byStatus = this.memoryStatusCounts();
-    const latestChangeSeq = this.deps.repos.runtime.latestChangeSeq();
-    const jobs = this.jobStatusCounts();
-    const embeddingRetries = this.embeddingRetryStatusCounts();
+    const memories = this.listAllMemoriesForStats(input);
+    const byLayer = this.memoryLayerCounts(memories);
+    const byStatus = this.memoryStatusCounts(memories);
+    const context = input.namespace ? this.deps.resolveContext(input) : undefined;
+    const namespaceId = context ? namespaceIdFromContext(context.namespace) : undefined;
+    const userId = input.userId ?? context?.userId;
+    const latestChangeSeq = this.deps.repos.runtime.latestChangeSeq(userId, namespaceId);
+    const jobs = this.jobStatusCounts(input);
+    const embeddingRetries = this.embeddingRetryStatusCounts(input);
     return {
       stats: {
         byLayer,
         byStatus,
-        episodes: this.episodeStatusCounts(),
+        episodes: this.episodeStatusCounts(input),
         jobs,
         embeddingRetries,
         lastChangeSeq: latestChangeSeq || undefined
@@ -341,18 +371,18 @@ export class PanelReadModel {
       counts: byLayer,
       queuedJobs: jobs.queued,
       latestChangeSeq,
-      cursor: this.deps.encodeChangeCursor(latestChangeSeq),
+      cursor: this.deps.encodeChangeCursor(latestChangeSeq, context?.namespace),
       etag: `panel-overview-v${latestChangeSeq}`,
       serverTime: this.now()
     };
   }
 
-  panelOverviewSummary(_input: RequestEnvelope & { userId?: string } = {}): {
+  panelOverviewSummary(input: RequestEnvelope & { userId?: string } = {}): {
     counts: { memories: number; skills: number; experiences: number; worldModels: number };
     sourceDistribution: Array<{ source: string; count: number; percentage: number }>;
     dailyActivity: Array<{ date: string; count: number }>;
   } {
-    const memories = this.listAllMemoriesForStats();
+    const memories = this.listAllMemoriesForStats(input);
     const dates = panelDateKeys(this.now(), PANEL_DAILY_ACTIVITY_DAYS);
     return {
       counts: {
@@ -366,7 +396,7 @@ export class PanelReadModel {
     };
   }
 
-  panelAnalysis(_input: RequestEnvelope & { userId?: string } = {}): {
+  panelAnalysis(input: RequestEnvelope & { userId?: string } = {}): {
     metrics: {
       avgRecallScore: number;
       recallEvents: number;
@@ -383,9 +413,9 @@ export class PanelReadModel {
     };
   } {
     const dates = panelLastSevenDateKeys(this.now());
-    const memories = this.listAllMemoriesForStats();
+    const memories = this.listAllMemoriesForStats(input);
     const skillMemories = memories.filter((memory) => memory.memoryLayer === "Skill");
-    const logs = this.deps.repos.runtime.listApiLogs({ limit: 10_000, offset: 0 }).logs
+    const logs = this.apiLogs({ ...input, limit: 10_000, offset: 0 }).logs
       .filter((log) => dates.includes(panelDateKey(log.calledAt)));
     const recallScores = logs
       .filter((log) => log.toolName === "memory_search")
@@ -432,6 +462,8 @@ export class PanelReadModel {
   } {
     const pageSize = normalizePanelItemsLimit(input.limit);
     const filter: MemoryFilter = {
+      ...(input.namespace ? memoryFilterForNamespace(input.namespace) : {}),
+      ...(input.userId ? { userId: input.userId } : {}),
       memoryLayer: input.layer,
       status: input.status,
       tags: input.tags,
@@ -489,13 +521,16 @@ export class PanelReadModel {
   } {
     const pageSize = 20 as const;
     const query = input.q?.trim() || undefined;
-    const userId = input.namespace?.userId;
-    const total = this.deps.repos.runtime.countEpisodes(userId, query);
+    const context = input.namespace ? this.deps.resolveContext(input) : undefined;
+    const userId = input.namespace?.userId ?? context?.userId;
+    const episodes = this.deps.repos.runtime.listEpisodes(userId, 10_000, 0, query)
+      .filter((episode) => this.episodeMatchesNamespace(episode, context?.namespace));
+    const total = episodes.length;
     const totalPages = Math.max(1, Math.ceil(total / pageSize));
     const page = Math.min(normalizePageNumber(input.page), totalPages);
-    const episodes = this.deps.repos.runtime.listEpisodes(userId, pageSize, (page - 1) * pageSize, query);
+    const pageEpisodes = episodes.slice((page - 1) * pageSize, page * pageSize);
     return {
-      tasks: episodes.map((episode) => ({
+      tasks: pageEpisodes.map((episode) => ({
         id: episode.id,
         episode: this.deps.episodeRef(episode),
         memoryIds: episode.l1MemoryIds.filter((memoryId) => Boolean(this.deps.repos.memories.get(memoryId))),
@@ -524,11 +559,14 @@ export class PanelReadModel {
     serverTime: string;
   } {
     const limit = input.limit ?? 50;
-    const cursorSeq = this.deps.decodeChangeCursor(input.cursor);
-    const items = this.deps.repos.runtime.listChanges(undefined, limit, cursorSeq);
+    const context = input.namespace ? this.deps.resolveContext(input) : undefined;
+    const namespaceId = context ? namespaceIdFromContext(context.namespace) : undefined;
+    const userId = input.userId ?? context?.userId;
+    const cursorSeq = this.deps.decodeChangeCursor(input.cursor, context?.namespace);
+    const items = this.deps.repos.runtime.listChanges(userId, limit, cursorSeq, namespaceId);
     const lastSeq = items.reduce((max, item) => Math.max(max, item.seq), cursorSeq);
     return {
-      cursor: this.deps.encodeChangeCursor(lastSeq),
+      cursor: this.deps.encodeChangeCursor(lastSeq, context?.namespace),
       changes: items.map(changeLogToPanelChange),
       hasMore: items.length === limit,
       items,
@@ -546,7 +584,7 @@ export class PanelReadModel {
     nextCursor?: string;
     serverTime: string;
   } {
-    const items = this.deps.repos.runtime.listJobs(input.status, input.limit ?? 50);
+    const items = this.scopedJobs(input.status, input, input.limit ?? 50);
     return {
       jobs: items.map((job) => ({
         ...job,
@@ -557,47 +595,191 @@ export class PanelReadModel {
     };
   }
 
-  private jobStatusCounts(): Record<"queued" | "leased" | "succeeded" | "failed" | "dead_letter", number> {
+  private scopedJobs(
+    status: EvolutionJobRecord["status"] | undefined,
+    input: RequestEnvelope & { userId?: string },
+    limit: number
+  ): EvolutionJobRecord[] {
+    const context = input.namespace ? this.deps.resolveContext(input) : undefined;
+    const userId = input.userId ?? context?.userId;
+    return this.deps.repos.runtime.listJobs(status, input.namespace ? 10_000 : limit, userId)
+      .filter((job) => !userId || job.userId === userId)
+      .filter((job) => this.jobMatchesNamespace(job, context?.namespace))
+      .slice(0, limit);
+  }
+
+  private jobMatchesNamespace(job: EvolutionJobRecord, namespace: RuntimeNamespace | undefined): boolean {
+    if (!namespace) return true;
+    if (job.sessionId) {
+      const session = this.deps.repos.runtime.getSession(job.sessionId);
+      if (session) return sameProjectScope(namespaceForSession(session), namespace);
+    }
+    if (job.episodeId) {
+      const episode = this.deps.repos.runtime.getEpisode(job.episodeId);
+      if (episode) return this.episodeMatchesNamespace(episode, namespace);
+    }
+    if (job.targetMemoryId) {
+      const memory = this.deps.repos.memories.get(job.targetMemoryId);
+      if (memory) return sameProjectScope(namespaceForMemory(memory), namespace);
+    }
+    return this.entityReferencesNamespace(job.payload, namespace);
+  }
+
+  private episodeMatchesNamespace(episode: EpisodeRecord, namespace: RuntimeNamespace | undefined): boolean {
+    if (!namespace) return true;
+    const session = this.deps.repos.runtime.getSession(episode.sessionId);
+    if (session) return sameProjectScope(namespaceForSession(session), namespace);
+    return sameProjectScope({
+      source: "unknown",
+      profileId: "default",
+      userId: episode.userId,
+      tenantId: "local",
+      projectId: episode.projectId
+    }, namespace);
+  }
+
+  private auditMatchesNamespace(audit: AuditLogRecord, namespace: RuntimeNamespace | undefined): boolean {
+    if (!namespace) return true;
+    if (audit.sessionId) {
+      const session = this.deps.repos.runtime.getSession(audit.sessionId);
+      if (session) return sameProjectScope(namespaceForSession(session), namespace);
+    }
+    if (this.entityReferencesNamespace(audit.actor, namespace)) return true;
+    return this.idMatchesNamespace(audit.targetId, namespace) ||
+      this.entityReferencesNamespace(audit.after, namespace) ||
+      this.entityReferencesNamespace(audit.before, namespace);
+  }
+
+  private apiLogMatchesNamespace(log: ApiLogRecord, namespace: RuntimeNamespace): boolean {
+    try {
+      const input = JSON.parse(log.inputJson) as unknown;
+      const output = JSON.parse(log.outputJson) as unknown;
+      return this.entityReferencesNamespace(input, namespace) || this.entityReferencesNamespace(output, namespace);
+    } catch {
+      return false;
+    }
+  }
+
+  private embeddingRetryMatchesNamespace(retry: EmbeddingRetryRecord, namespace: RuntimeNamespace | undefined): boolean {
+    if (!namespace) return true;
+    const memory = this.deps.repos.memories.get(retry.targetId);
+    return Boolean(memory && sameProjectScope(namespaceForMemory(memory), namespace));
+  }
+
+  private entityReferencesNamespace(value: unknown, namespace: RuntimeNamespace | undefined): boolean {
+    if (!namespace) return true;
+    if (!isRecord(value)) return false;
+    const embedded = isRecord(value.namespace) ? value.namespace : value;
+    const embeddedNamespace = runtimeNamespaceFromRecord(embedded);
+    if (embeddedNamespace && sameProjectScope(embeddedNamespace, namespace)) return true;
+
+    for (const key of ["sessionId", "session_id", "episodeId", "episode_id", "rawTurnId", "raw_turn_id", "memoryId", "memory_id", "targetMemoryId", "target_memory_id", "traceId", "trace_id", "spanId", "span_id"]) {
+      const id = value[key];
+      if (typeof id === "string" && this.idMatchesNamespace(id, namespace)) return true;
+    }
+    for (const key of ["details", "candidates", "filtered", "items"]) {
+      const entries = value[key];
+      if (Array.isArray(entries) && entries.some((entry) => this.entityReferencesNamespace(entry, namespace))) return true;
+    }
+    return false;
+  }
+
+  private idMatchesNamespace(id: string, namespace: RuntimeNamespace): boolean {
+    const session = this.deps.repos.runtime.getSession(id);
+    if (session) return sameProjectScope(namespaceForSession(session), namespace);
+    const episode = this.deps.repos.runtime.getEpisode(id);
+    if (episode) return this.episodeMatchesNamespace(episode, namespace);
+    const rawTurn = this.deps.repos.runtime.getRawTurn(id);
+    if (rawTurn) {
+      const rawSession = this.deps.repos.runtime.getSession(rawTurn.sessionId);
+      return Boolean(rawSession && sameProjectScope(namespaceForSession(rawSession), namespace));
+    }
+    const memory = this.deps.repos.memories.get(id);
+    return Boolean(memory && sameProjectScope(namespaceForMemory(memory), namespace));
+  }
+
+  private jobStatusCounts(input: RequestEnvelope & { userId?: string }): Record<"queued" | "leased" | "succeeded" | "failed" | "dead_letter", number> {
     return {
-      queued: this.deps.repos.runtime.listJobs("queued", 1000).length,
-      leased: this.deps.repos.runtime.listJobs("leased", 1000).length,
-      succeeded: this.deps.repos.runtime.listJobs("succeeded", 1000).length,
-      failed: this.deps.repos.runtime.listJobs("failed", 1000).length,
-      dead_letter: this.deps.repos.runtime.listJobs("dead_letter", 1000).length
+      queued: this.scopedJobs("queued", input, 10_000).length,
+      leased: this.scopedJobs("leased", input, 10_000).length,
+      succeeded: this.scopedJobs("succeeded", input, 10_000).length,
+      failed: this.scopedJobs("failed", input, 10_000).length,
+      dead_letter: this.scopedJobs("dead_letter", input, 10_000).length
     };
   }
 
-  private memoryLayerCounts(): Record<MemoryLayer, number> {
-    return this.deps.repos.memories.countByLayer();
+  private memoryLayerCounts(memories: ReturnType<Repositories["memories"]["list"]>): Record<MemoryLayer, number> {
+    return {
+      L1: memories.filter((memory) => memory.memoryLayer === "L1").length,
+      L2: memories.filter((memory) => memory.memoryLayer === "L2").length,
+      L3: memories.filter((memory) => memory.memoryLayer === "L3").length,
+      Skill: memories.filter((memory) => memory.memoryLayer === "Skill").length
+    };
   }
 
-  private memoryStatusCounts(): Record<"activated" | "resolving" | "archived" | "deleted", number> {
-    return this.deps.repos.memories.countByStatus();
+  private memoryStatusCounts(memories: ReturnType<Repositories["memories"]["list"]>): Record<"activated" | "resolving" | "archived" | "deleted", number> {
+    return {
+      activated: memories.filter((memory) => memory.status === "activated").length,
+      resolving: memories.filter((memory) => memory.status === "resolving").length,
+      archived: memories.filter((memory) => memory.status === "archived").length,
+      deleted: memories.filter((memory) => memory.status === "deleted").length
+    };
   }
 
-  private episodeStatusCounts(): Record<"open" | "processing" | "closed", number> {
-    return this.deps.repos.runtime.countEpisodesByStatus();
+  private episodeStatusCounts(input: RequestEnvelope & { userId?: string }): Record<"open" | "processing" | "closed", number> {
+    const context = input.namespace ? this.deps.resolveContext(input) : undefined;
+    const episodes = this.deps.repos.runtime.listEpisodes(input.userId ?? context?.userId, 10_000)
+      .filter((episode) => this.episodeMatchesNamespace(episode, context?.namespace));
+    return {
+      open: episodes.filter((episode) => episode.status === "open").length,
+      processing: episodes.filter((episode) => episode.status === "processing").length,
+      closed: episodes.filter((episode) => episode.status === "closed").length
+    };
   }
 
-  private embeddingRetryStatusCounts(): Record<"pending" | "in_progress" | "succeeded" | "failed", number> {
+  private embeddingRetryStatusCounts(input: RequestEnvelope & { userId?: string }): Record<"pending" | "in_progress" | "succeeded" | "failed", number> {
     const statuses: EmbeddingRetryStatus[] = ["pending", "in_progress", "succeeded", "failed"];
     const counts = { pending: 0, in_progress: 0, succeeded: 0, failed: 0 };
     for (const status of statuses) {
-      counts[status] = this.deps.repos.runtime.countEmbeddingRetriesByStatus(status);
+      counts[status] = this.deps.repos.runtime.listEmbeddingRetries(status, 10_000, input.userId)
+        .filter((retry) => this.embeddingRetryMatchesNamespace(retry, input.namespace)).length;
     }
     return counts;
   }
 
-  private listAllMemoriesForStats() {
+  private listAllMemoriesForStats(input: RequestEnvelope & { userId?: string } = {}) {
     const rows = [] as ReturnType<Repositories["memories"]["list"]>;
     const pageSize = 1000;
+    const context = input.namespace ? this.deps.resolveContext(input) : undefined;
+    const filter: MemoryFilter = {
+      ...(context ? memoryFilterForNamespace(context.namespace) : {}),
+      ...(input.userId ?? context?.userId ? { userId: input.userId ?? context?.userId } : {})
+    };
     for (let offset = 0;; offset += pageSize) {
-      const batch = this.deps.repos.memories.list({}, pageSize, offset);
+      const batch = this.deps.repos.memories.list(filter, pageSize, offset);
       rows.push(...batch);
       if (batch.length < pageSize) break;
     }
     return rows;
   }
+}
+
+function runtimeNamespaceFromRecord(value: Record<string, unknown>): RuntimeNamespace | undefined {
+  const stringValue = (key: string): string | undefined => typeof value[key] === "string" ? value[key] as string : undefined;
+  const projectId = stringValue("projectId") ?? stringValue("project_id");
+  const workspaceId = stringValue("workspaceId") ?? stringValue("workspace_id");
+  const workspacePath = stringValue("workspacePath") ?? stringValue("workspace_path");
+  const tenantId = stringValue("tenantId") ?? stringValue("tenant_id");
+  if (!projectId && !workspaceId && !workspacePath && !tenantId) return undefined;
+  return normalizeNamespace({
+    source: stringValue("source") ?? "unknown",
+    profileId: stringValue("profileId") ?? stringValue("profile_id") ?? "default",
+    userId: stringValue("userId") ?? stringValue("user_id"),
+    tenantId,
+    projectId,
+    workspaceId,
+    workspacePath
+  });
 }
 
 export function redactConfig(value: unknown): unknown {

@@ -53,6 +53,7 @@ import type {
 } from "../feedback/feedback-experience.js";
 import { recordApiLog } from "../model-audit/model-call-audit.js";
 import {
+  memoryFilterForNamespace,
   namespaceForRawTurn,
   namespaceForSession,
   normalizeNamespace,
@@ -304,7 +305,14 @@ export class SessionTurnService {
         return this.deps.withDuplicateFlag(existing.response) as ReturnType<SessionTurnService["openSession"]>;
       }
     }
-    const namespace = normalizeNamespace(request.namespace);
+    const namespace = normalizeNamespace({
+      ...request.namespace,
+      source: request.source ?? request.namespace?.source ?? "unknown",
+      profileId: request.profileId ?? request.namespace?.profileId ?? "default",
+      projectId: request.projectId ?? request.namespace?.projectId,
+      workspaceId: request.workspaceId ?? request.namespace?.workspaceId,
+      workspacePath: request.workspacePath ?? request.namespace?.workspacePath
+    });
     const at = nowIso();
     if (request.sessionId) {
       const existingSession = this.deps.repos.runtime.getSession(request.sessionId);
@@ -377,13 +385,18 @@ export class SessionTurnService {
       source: request.source ?? namespace.source,
       profileId: request.profileId ?? namespace.profileId,
       profileLabel: namespace.profileLabel,
-      projectId: request.projectId ?? namespace.projectId ?? namespace.workspaceId,
-      workspaceId: request.workspaceId ?? namespace.workspaceId,
-      workspacePath: request.workspacePath ?? namespace.workspacePath,
+      projectId: namespace.projectId,
+      workspaceId: namespace.workspaceId,
+      workspacePath: namespace.workspacePath,
       hostSessionKey,
       conversationId: this.deps.stringFromMeta(request.meta, "conversationId"),
       status: "open" as const,
-      meta: request.meta ?? {},
+      meta: {
+        ...(request.meta ?? {}),
+        ...(request.protocolVersion ? { protocolVersion: request.protocolVersion } : {}),
+        ...(request.provenance ? { provenance: request.provenance } : {}),
+        tenant_id: namespace.tenantId ?? "local"
+      },
       openedAt: at,
       lastSeenAt: at,
       updatedAt: at
@@ -539,7 +552,8 @@ export class SessionTurnService {
           contextPacketId,
           sourceTurnIds,
           sourceMemoryIds,
-          tokenEstimate: request.tokenEstimate
+          tokenEstimate: request.tokenEstimate,
+          ...(request.checkpoint ? { checkpoint: request.checkpoint } : {})
         }
       },
       status: "succeeded",
@@ -787,6 +801,8 @@ export class SessionTurnService {
             contextPacketId,
             searchEventId: search.searchEventId,
             sourceMemoryIds: search.sourceMemoryIds,
+            protocolVersion: request.protocolVersion,
+            provenance: request.provenance,
             intent_decision: intentDecision,
             ...(endTopicDecision
               ? {
@@ -924,6 +940,8 @@ export class SessionTurnService {
       const requestToolResults = normalizeCompleteTurnToolResults(completionRequest);
       const requestArtifacts = normalizeCompleteTurnArtifacts(completionRequest);
       const turnStartPayload = {
+        protocolVersion: request.protocolVersion,
+        provenance: request.provenance,
         intent_decision: intentDecision,
         ...(turnStartRecall
           ? {
@@ -964,7 +982,9 @@ export class SessionTurnService {
             turn_start: turnStartPayload,
             turn_complete: {
               completed_at: at,
-              source_memory_ids: sourceMemoryIds
+              source_memory_ids: sourceMemoryIds,
+              protocolVersion: request.protocolVersion,
+              provenance: request.provenance
             }
           },
           status: request.status ?? "succeeded",
@@ -1045,6 +1065,21 @@ export class SessionTurnService {
           appId: session.workspaceId,
           projectId: session.projectId,
           profileId: session.profileId,
+          workspacePath: session.workspacePath,
+          provenance: {
+            ...request.provenance,
+            sourceAgent: session.source,
+            tenantId: namespaceForSession(session).tenantId ?? "local",
+            profileId: session.profileId,
+            projectId: session.projectId,
+            workspaceId: session.workspaceId,
+            workspacePath: session.workspacePath,
+            sessionId: session.id,
+            turnId: step.turnId,
+            adapterId: request.adapterId ?? request.provenance?.adapterId,
+            requestId: request.requestId ?? request.provenance?.requestId,
+            sourceMemoryIds: rawTurn.sourceMemoryIds
+          },
           layer: "L1",
           kind: "trace",
           memoryType: "LongTermMemory",
@@ -1617,6 +1652,7 @@ export class SessionTurnService {
     const policies = this.deps.repos.memories.search(
       query,
       {
+        ...memoryFilterForNamespace(namespaceForSession(input.session)),
         memoryLayer: "L2",
         status: "activated"
       },
@@ -1626,6 +1662,7 @@ export class SessionTurnService {
     const l1Hits = this.deps.repos.memories.search(
       query,
       {
+        ...memoryFilterForNamespace(namespaceForSession(input.session)),
         memoryLayer: "L1",
         status: "activated"
       },
@@ -1874,6 +1911,7 @@ export class SessionTurnService {
     const repairLayers = retrievalLayersForMode("decision_repair");
     const candidates = this.deps.repos.memories.list(
       {
+        ...memoryFilterForNamespace(namespaceForSession(session)),
         memoryLayer: repairLayers,
         status: ["activated", "resolving"]
       },

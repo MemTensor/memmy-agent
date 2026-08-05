@@ -32,6 +32,7 @@ import {
   type SessionRecord
 } from "../storage/repositories.js";
 import type { SerializedMemoryVector } from "../storage/sqlite-vec-store.js";
+import { DEFAULT_NAMESPACE_SOURCE } from "../types.js";
 import type {
   FeedbackRequest,
   HealthResponse,
@@ -42,9 +43,12 @@ import type {
   MemoryExportRequest,
   MemoryGovernanceRequest,
   MemoryImportRequest,
+  MemoryMarkdownExportRequest,
+  MemoryMarkdownImportRequest,
   MemoryKind,
   MemoryLayer,
   MemoryListItem,
+  MemoryProvenance,
   MemoryProcessingRecord,
   MemoryReloadConfigRequest,
   MemoryReloadConfigResponse,
@@ -56,6 +60,8 @@ import type {
   RequestEnvelope,
   RetrievalMode,
   RuntimeNamespace,
+  SessionCheckpointPayload,
+  SessionCheckpointRequest,
   SessionCompactRequest,
   SessionOpenRequest,
   SkillUseRequest,
@@ -97,10 +103,20 @@ import {
 } from "./import/memory-import-pipeline.js";
 import { recordApiLog } from "./model-audit/model-call-audit.js";
 import {
+  parseMemoryMarkdownBundle,
+  renderMemoryMarkdownBundle
+} from "./governance/markdown-audit.js";
+import {
+  hasProjectScope,
+  namespaceIdFromContext as canonicalNamespaceIdFromContext,
   namespaceForMemory,
   namespaceForRawTurn,
   namespaceForSession,
-  normalizeNamespace
+  memoryFilterForNamespace,
+  normalizeNamespace,
+  projectIdFromMemory,
+  sameProjectScope,
+  tenantIdFromSession
 } from "./namespace/namespace-scope.js";
 import {
   EpisodeReadModel,
@@ -779,6 +795,64 @@ export class MemoryService {
     return this.sessionTurns.compactSession(sessionId, request);
   }
 
+  checkpointSession(sessionId: string, request: SessionCheckpointRequest): {
+    checkpointId: string;
+    checkpoint: SessionCheckpointPayload;
+    memorySnapshot: {
+      summary: string;
+      sourceTurnIds: string[];
+      sourceMemoryIds: string[];
+      tokenEstimate?: number;
+    };
+    contextPacketId: string;
+    rawTurnId?: string;
+    l1MemoryId?: string;
+    changeSeq?: number;
+    syncCursor?: string;
+    jobs: JobRef[];
+    serverTime: string;
+  } {
+    if (!request.task.trim()) {
+      throw new MemoryServiceError("invalid_argument", "session checkpoint requires a non-empty task");
+    }
+    const list = (value: string[] | undefined): string[] => Array.isArray(value)
+      ? value.map((item) => item.trim()).filter(Boolean).slice(0, 32)
+      : [];
+    const checkpoint: SessionCheckpointPayload = {
+      task: request.task.trim(),
+      changes: list(request.changes),
+      validated: list(request.validated),
+      unverified: list(request.unverified),
+      nextSteps: list(request.nextSteps)
+    };
+    const summary = [
+      `Task: ${checkpoint.task}`,
+      "Changes:",
+      ...(checkpoint.changes.length ? checkpoint.changes.map((item) => `- ${item}`) : ["- none recorded"]),
+      "Validated:",
+      ...(checkpoint.validated.length ? checkpoint.validated.map((item) => `- ${item}`) : ["- none recorded"]),
+      "Unverified:",
+      ...(checkpoint.unverified.length ? checkpoint.unverified.map((item) => `- ${item}`) : ["- none recorded"]),
+      "Next steps:",
+      ...(checkpoint.nextSteps.length ? checkpoint.nextSteps.map((item) => `- ${item}`) : ["- none recorded"])
+    ].join("\n");
+    const result = this.compactSession(sessionId, {
+      namespace: request.namespace,
+      episodeId: request.episodeId,
+      summary,
+      sourceTurnIds: request.sourceTurnIds,
+      sourceMemoryIds: request.sourceMemoryIds,
+      tokenEstimate: request.tokenEstimate,
+      createL1: request.createL1,
+      checkpoint
+    });
+    return {
+      ...result,
+      checkpointId: result.rawTurnId ?? result.contextPacketId,
+      checkpoint
+    };
+  }
+
   async startTurn(request: TurnStartRequest & Record<string, unknown>): Promise<{
     contextPacketId: string;
     turnId: string;
@@ -924,7 +998,183 @@ export class MemoryService {
     createdAt: string;
     serverTime: string;
   } {
-    return this.importJobs.addMemory(request);
+    const previous = request.supersedesMemoryId
+      ? this.requireExistingMemory(request.supersedesMemoryId)
+      : undefined;
+    if (previous) {
+      this.assertMemoryInScope(previous, request.namespace);
+      if ((request.layer ?? "L1") !== previous.memoryLayer) {
+        throw new MemoryServiceError("conflict", "superseding memories must use the same memory layer");
+      }
+    }
+    const added = this.importJobs.addMemory(request);
+    if (!previous) return added;
+
+    const inserted = this.requireExistingMemory(added.id);
+    const at = nowIso();
+    const supersession = this.repos.transaction(() => this.repos.memories.supersede({
+      oldMemory: previous,
+      newMemory: inserted,
+      projectId: projectIdFromMemory(inserted),
+      reason: request.supersessionReason,
+      actor: request.namespace ? { ...request.namespace } : {},
+      createdAt: at
+    }));
+    this.repos.runtime.appendChange({
+      memoryId: supersession.oldMemory.id,
+      namespaceId: namespaceIdFromMemory(supersession.oldMemory),
+      kind: kindFromMemory(supersession.oldMemory),
+      op: "archived",
+      entityId: supersession.oldMemory.id,
+      userId: supersession.oldMemory.userId,
+      changeType: "superseded",
+      before: previous,
+      after: supersession.oldMemory,
+      source: "memory.supersede",
+      createdAt: at
+    });
+    this.repos.runtime.insertAudit({
+      userId: inserted.userId,
+      sessionId: inserted.sessionId,
+      actor: request.namespace ? { ...request.namespace } : {},
+      action: "supersede",
+      targetKind: kindFromMemory(previous),
+      targetId: previous.id,
+      before: previous,
+      after: supersession.oldMemory,
+      meta: {
+        supersededByMemoryId: inserted.id,
+        relationId: supersession.relation.id,
+        reason: request.supersessionReason
+      },
+      createdAt: at
+    });
+    return added;
+  }
+
+  exportMarkdown(request: MemoryMarkdownExportRequest = {}): {
+    markdown: string;
+    count: number;
+    projectId?: string;
+    generatedAt: string;
+  } {
+    this.assertMemorySearchEnabled();
+    const context = this.resolveContext(request);
+    const memories = this.repos.memories.list({
+      ...memoryFilterForNamespace(context.namespace),
+      status: request.includeArchived ? ["activated", "resolving", "archived"] : ["activated", "resolving"]
+    }, 100_000);
+    return {
+      markdown: renderMemoryMarkdownBundle(memories),
+      count: memories.length,
+      projectId: context.namespace.projectId,
+      generatedAt: nowIso()
+    };
+  }
+
+  importMarkdown(request: MemoryMarkdownImportRequest): {
+    applied: boolean;
+    count: number;
+    updated: string[];
+    created: string[];
+    rejected: Array<{ id: string; reason: string }>;
+    serverTime: string;
+  } {
+    this.assertMemoryAddEnabled();
+    if (!request.markdown?.trim()) {
+      throw new MemoryServiceError("invalid_argument", "markdown audit import requires markdown");
+    }
+    const context = this.resolveContext(request);
+    const documents = parseMemoryMarkdownBundle(request.markdown);
+    const updated: string[] = [];
+    const created: string[] = [];
+    const rejected: Array<{ id: string; reason: string }> = [];
+    for (const document of documents) {
+      try {
+        const existing = this.repos.memories.get(document.frontMatter.id);
+        if (existing) {
+          this.assertMemoryInScope(existing, request.namespace);
+          if (document.frontMatter.memoryLayer !== existing.memoryLayer) {
+            throw new MemoryServiceError("conflict", "markdown audit cannot change memory layer");
+          }
+          if (request.apply !== false) {
+            const at = nowIso();
+            const next = this.repos.memories.update({
+              ...existing,
+              memoryValue: document.body,
+              tags: uniq(document.frontMatter.tags),
+              info: { ...existing.info, title: document.frontMatter.title, tags: uniq(document.frontMatter.tags) },
+              properties: {
+                ...existing.properties,
+                tags: uniq(document.frontMatter.tags),
+                info: { ...existing.properties.info, title: document.frontMatter.title, tags: uniq(document.frontMatter.tags) },
+                internal_info: {
+                  ...existing.properties.internal_info,
+                  title: document.frontMatter.title,
+                  provenance: document.frontMatter.provenance ?? existing.properties.internal_info.provenance
+                }
+              },
+              updatedAt: at,
+              contentHash: stableHash(document.body)
+            });
+            this.repos.runtime.appendChange({
+              memoryId: next.id,
+              namespaceId: namespaceIdFromMemory(next),
+              kind: kindFromMemory(next),
+              op: "updated",
+              entityId: next.id,
+              userId: next.userId,
+              changeType: "markdown_audit_update",
+              before: existing,
+              after: next,
+              source: "markdown.audit",
+              createdAt: at
+            });
+            this.repos.runtime.insertAudit({
+              userId: next.userId,
+              sessionId: next.sessionId,
+              actor: request.namespace ? { ...request.namespace } : {},
+              action: "markdown_update",
+              targetKind: kindFromMemory(next),
+              targetId: next.id,
+              before: existing,
+              after: next,
+              meta: {},
+              createdAt: at
+            });
+          }
+          updated.push(existing.id);
+          continue;
+        }
+        if (request.apply === false) {
+          created.push(document.frontMatter.id);
+          continue;
+        }
+        const added = this.addMemory({
+          namespace: request.namespace,
+          source: context.namespace.source,
+          content: document.body,
+          layer: document.frontMatter.memoryLayer as MemoryLayer,
+          title: document.frontMatter.title,
+          tags: document.frontMatter.tags,
+          provenance: document.frontMatter.provenance
+        });
+        created.push(added.id);
+      } catch (error) {
+        rejected.push({
+          id: document.frontMatter.id,
+          reason: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+    return {
+      applied: request.apply !== false,
+      count: documents.length,
+      updated,
+      created,
+      rejected,
+      serverTime: nowIso()
+    };
   }
 
   timeline(input: RequestEnvelope & {
@@ -1058,7 +1308,10 @@ export class MemoryService {
       this.repos.runtime.exportBundleTables(request.includeRawText === true),
       context.namespace
     );
-    tables.memory_vectors = this.repos.vectors.exportRows().map((row) => ({ ...row }));
+    const scopedMemoryIds = new Set((tables.memories ?? []).map((row) => row.id).filter((id): id is string => typeof id === "string"));
+    tables.memory_vectors = this.repos.vectors.exportRows()
+      .filter((row) => scopedMemoryIds.has(row.memory_id))
+      .map((row) => ({ ...row }));
     if (request.includeAudit === false) {
       delete tables.audit_logs;
     }
@@ -1116,15 +1369,21 @@ export class MemoryService {
       throw new MemoryServiceError("invalid_argument", "import bundle must contain tables");
     }
     const context = this.resolveContext(request);
+    const inputTables = request.bundle.tables as Record<string, Array<Record<string, unknown>>>;
+    const enforceBundleScope = hasProjectScope(context.namespace) || Boolean(context.namespace.tenantId);
+    const scopedInputTables = enforceBundleScope ? scopeBundleTables(inputTables, context.namespace) : inputTables;
+    if (enforceBundleScope && bundleTableRowCount(scopedInputTables) !== bundleTableRowCount(inputTables)) {
+      throw new MemoryServiceError("not_found", "bundle contains records outside the requested namespace");
+    }
     const importedAt = nowIso();
-    const result = this.repos.runtime.importBundleTables(request.bundle.tables, {
+    const result = this.repos.runtime.importBundleTables(scopedInputTables, {
       conflictStrategy: request.conflictStrategy ?? "skip"
     });
-    const importedVectors = importedMemoryVectors(request.bundle.tables.memory_vectors);
+    const importedVectors = importedMemoryVectors(scopedInputTables.memory_vectors);
     this.repos.vectors.importRows(importedVectors);
     result.inserted.memory_vectors = importedVectors.length;
     const reembedMemoryIds = importedReembedMemoryIds(
-      request.bundle.tables,
+      scopedInputTables,
       this.embedder.config.model ?? this.embedder.config.provider
     );
     const audit = this.repos.runtime.insertAudit({
@@ -1416,7 +1675,7 @@ export class MemoryService {
     return this.panelReadModel.serviceLogs(input);
   }
 
-  apiLogs(input: {
+  apiLogs(input: RequestEnvelope & {
     tools?: Array<"memory_add" | "memory_search" | "skill_generate" | "skill_evolve">;
     sourceAgent?: string;
     excludedSourceAgents?: string[];
@@ -1628,12 +1887,22 @@ export class MemoryService {
     return this.importJobs.restartFailedProcessing(at, limit);
   }
 
-  enqueuePendingImportSummaries(limit = 10000, targetMemoryIds?: readonly string[]): {
+  enqueuePendingImportSummaries(limit = 10000, targetMemoryIds?: readonly string[], request: RequestEnvelope = {}): {
     enqueued: number;
     memoryIds: string[];
     serverTime: string;
   } {
-    return this.importJobs.enqueuePendingImportSummaries(limit, targetMemoryIds);
+    const scopedTargetIds = request.namespace
+      ? targetMemoryIds
+        ? targetMemoryIds.filter((id) => {
+          const memory = this.repos.memories.get(id);
+          if (!memory) return false;
+          this.assertMemoryInScope(memory, request.namespace);
+          return true;
+        })
+        : this.repos.memories.list({ ...memoryFilterForNamespace(request.namespace) }, 10_000).map((memory) => memory.id)
+      : targetMemoryIds;
+    return this.importJobs.enqueuePendingImportSummaries(limit, scopedTargetIds);
   }
 
   nextWorkerRunAt(): number | undefined {
@@ -1648,6 +1917,18 @@ export class MemoryService {
     limit = 100,
     request: RequestEnvelope & { targetMemoryIds?: string[] } = {}
   ): ReturnType<WorkerRunner["runWorkerOnce"]> {
+    if (request.namespace && !request.targetMemoryIds) {
+      const targetMemoryIds = this.repos.memories.list({ ...memoryFilterForNamespace(request.namespace) }, 10_000)
+        .map((memory) => memory.id);
+      return this.workerRunner.runWorkerOnce(limit, { ...request, targetMemoryIds });
+    }
+    if (request.namespace && request.targetMemoryIds) {
+      for (const id of request.targetMemoryIds) {
+        const memory = this.repos.memories.get(id);
+        if (!memory) continue;
+        this.assertMemoryInScope(memory, request.namespace);
+      }
+    }
     return this.workerRunner.runWorkerOnce(limit, request);
   }
 
@@ -1686,8 +1967,11 @@ export class MemoryService {
     sessionId?: string;
     agentId?: string;
     appId?: string;
+    tenantId?: string;
     projectId?: string;
     profileId?: string;
+    workspacePath?: string;
+    provenance?: Partial<MemoryProvenance>;
     layer: MemoryLayer;
     kind: MemoryKind;
     lifecycleStatus?: "candidate" | "active" | "archived";
@@ -1703,9 +1987,34 @@ export class MemoryService {
     const tags = uniq(input.tags.filter(Boolean));
     const memoryStatus = memoryStatusForLifecycleStatus(input.lifecycleStatus ?? "active");
     const inputInfo = input.info ?? {};
+    const inputInternal = input.internal ?? {};
+    const sourceSession = input.sessionId ? this.repos.runtime.getSession(input.sessionId) : undefined;
+    const sessionTenantId = sourceSession ? tenantIdFromSession(sourceSession) : undefined;
+    const tenantId = input.tenantId ?? sessionTenantId ?? stringFromMeta(inputInfo, "tenant_id") ?? input.provenance?.tenantId ?? "local";
+    const provenance: MemoryProvenance = {
+      sourceAgent: input.provenance?.sourceAgent ?? input.agentId ?? DEFAULT_NAMESPACE_SOURCE,
+      tenantId,
+      profileId: input.provenance?.profileId ?? input.profileId,
+      projectId: input.provenance?.projectId ?? input.projectId,
+      workspaceId: input.provenance?.workspaceId ?? input.appId,
+      workspacePath: input.provenance?.workspacePath ?? input.workspacePath,
+      sessionId: input.provenance?.sessionId ?? input.sessionId,
+      turnId: input.provenance?.turnId ?? stringFromMeta(inputInfo, "turn_id"),
+      adapterId: input.provenance?.adapterId,
+      requestId: input.provenance?.requestId,
+      sourceMemoryIds: uniq([
+        ...(input.provenance?.sourceMemoryIds ?? []),
+        ...stringArray(inputInternal.source_memory_ids)
+      ]),
+      repository: input.provenance?.repository,
+      branch: input.provenance?.branch,
+      commit: input.provenance?.commit,
+      capturedAt: input.provenance?.capturedAt ?? at
+    };
     const info = {
       ...inputInfo,
       tags: uniq([...tags, ...stringArray(inputInfo.tags)]),
+      tenant_id: tenantId,
       ...(input.projectId ? { project_id: input.projectId } : {}),
       ...(input.profileId ? { profile_id: input.profileId } : {})
     };
@@ -1733,7 +2042,8 @@ export class MemoryService {
           memory_layer: input.layer,
           memory_kind: input.kind,
           schema_version: 1,
-          ...(input.internal ?? {})
+          ...inputInternal,
+          provenance
         }
       },
       memoryLayer: input.layer,
@@ -1770,7 +2080,14 @@ export class MemoryService {
   }
 
   private openSessionNoWrite(request: SessionOpenRequest): ReturnType<MemoryService["openSession"]> {
-    const namespace = normalizeNamespace(request.namespace);
+    const namespace = normalizeNamespace({
+      ...request.namespace,
+      source: request.source ?? request.namespace?.source ?? DEFAULT_NAMESPACE_SOURCE,
+      profileId: request.profileId ?? request.namespace?.profileId ?? "default",
+      projectId: request.projectId ?? request.namespace?.projectId,
+      workspaceId: request.workspaceId ?? request.namespace?.workspaceId,
+      workspacePath: request.workspacePath ?? request.namespace?.workspacePath
+    });
     const existing = request.sessionId
       ? this.repos.runtime.getSession(request.sessionId)
       : namespace.sessionKey
@@ -1808,8 +2125,8 @@ export class MemoryService {
       userId: namespace.userId,
       source: request.source ?? namespace.source,
       profileId: request.profileId ?? namespace.profileId,
-      projectId: request.projectId ?? namespace.projectId ?? namespace.workspaceId,
-      workspaceId: request.workspaceId ?? namespace.workspaceId,
+      projectId: namespace.projectId,
+      workspaceId: namespace.workspaceId,
       conversationId: stringFromMeta(request.meta, "conversationId"),
       status: "open",
       resumed: false,
@@ -1997,23 +2314,41 @@ export class MemoryService {
   }
 
   private assertSessionInScope(session: SessionRecord, namespace?: RuntimeNamespace): void {
-    void session;
-    void namespace;
+    if (namespace && !sameProjectScope(namespaceForSession(session), namespace)) {
+      throw new MemoryServiceError("not_found", `session not found: ${session.id}`);
+    }
   }
 
   private assertMemoryInScope(memory: MemoryRow, namespace?: RuntimeNamespace): void {
-    void memory;
-    void namespace;
+    if (namespace && !sameProjectScope(this.namespaceForMemoryScope(memory), namespace)) {
+      throw new MemoryServiceError("not_found", `memory not found: ${memory.id}`);
+    }
   }
 
   private assertEpisodeInScope(episode: EpisodeRecord, namespace?: RuntimeNamespace): void {
-    void episode;
-    void namespace;
+    const session = this.repos.runtime.getSession(episode.sessionId);
+    const actual = session
+      ? namespaceForSession(session)
+      : { source: DEFAULT_NAMESPACE_SOURCE, profileId: "default", userId: episode.userId, projectId: episode.projectId };
+    if (namespace && !sameProjectScope(actual, namespace)) {
+      throw new MemoryServiceError("not_found", `episode not found: ${episode.id}`);
+    }
   }
 
   private assertRawTurnInScope(rawTurn: RawTurnRecord, namespace?: RuntimeNamespace): void {
-    void rawTurn;
-    void namespace;
+    const session = this.repos.runtime.getSession(rawTurn.sessionId);
+    const actual = session ? namespaceForSession(session) : namespaceForRawTurn(rawTurn);
+    if (namespace && !sameProjectScope(actual, namespace)) {
+      throw new MemoryServiceError("not_found", `raw turn not found: ${rawTurn.id}`);
+    }
+  }
+
+  private namespaceForMemoryScope(memory: MemoryRow): RuntimeNamespace {
+    if (memory.sessionId) {
+      const session = this.repos.runtime.getSession(memory.sessionId);
+      if (session) return namespaceForSession(session);
+    }
+    return namespaceForMemory(memory);
   }
 
 
@@ -2245,21 +2580,156 @@ function namespaceIdFromSession(session: SessionRecord): string {
 }
 
 function namespaceIdFromContext(namespace: RuntimeNamespace): string {
-  return [
-    namespace.tenantId,
-    namespace.userId,
-    namespace.projectId ?? namespace.workspaceId,
-    namespace.source,
-    namespace.profileId
-  ].filter(Boolean).join(":");
+  return canonicalNamespaceIdFromContext(namespace);
 }
 
 function scopeBundleTables(
   tables: Record<string, Array<Record<string, unknown>>>,
   namespace: RuntimeNamespace
 ): Record<string, Array<Record<string, unknown>>> {
-  void namespace;
-  return tables;
+  const normalized = normalizeNamespace(namespace);
+  const memoryIds = new Set<string>();
+  const sessionIds = new Set<string>();
+  const episodeIds = new Set<string>();
+  const rawTurnIds = new Set<string>();
+
+  const memories = tables.memories ?? [];
+  for (const row of memories) {
+    const sessionId = stringField(row, "session_id");
+    const projectId = memoryProjectId(row, tables.sessions);
+    const tenantId = memoryTenantId(row, tables.sessions);
+    if (sameProjectScope({ source: "unknown", profileId: "default", projectId, tenantId, userId: stringField(row, "user_id") }, normalized)) {
+      const id = stringField(row, "id");
+      if (id) memoryIds.add(id);
+      if (sessionId) sessionIds.add(sessionId);
+    }
+  }
+  for (const row of tables.sessions ?? []) {
+    const id = stringField(row, "id");
+    if (!id) continue;
+    const projectId = stringField(row, "project_id") ?? jsonStringField(row, "meta_json", "project_id");
+    const tenantId = jsonStringField(row, "meta_json", "tenant_id") ?? jsonStringField(row, "meta_json", "tenantId");
+    if (sameProjectScope({ source: stringField(row, "source") ?? "unknown", profileId: stringField(row, "profile_id") ?? "default", projectId, tenantId, userId: stringField(row, "user_id") }, normalized)) sessionIds.add(id);
+  }
+  for (const row of tables.episodes ?? []) {
+    const id = stringField(row, "id");
+    const sessionId = stringField(row, "session_id");
+    if (id && ((sessionId && sessionIds.has(sessionId)) || (!sessionId && sameProjectScope({ source: "unknown", profileId: "default", projectId: stringField(row, "project_id"), tenantId: "local", userId: stringField(row, "user_id") }, normalized)))) episodeIds.add(id);
+  }
+  for (const row of tables.raw_turns ?? []) {
+    const id = stringField(row, "id");
+    const sessionId = stringField(row, "session_id");
+    const episodeId = stringField(row, "episode_id");
+    if (id && ((sessionId && sessionIds.has(sessionId)) || (episodeId && episodeIds.has(episodeId)))) rawTurnIds.add(id);
+  }
+
+  const scoped = (table: string, rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> => rows.filter((row) => {
+    if (table === "memories") return memoryIds.has(stringField(row, "id") ?? "");
+    if (table === "memory_vectors") return memoryIds.has(stringField(row, "memory_id") ?? "");
+    if (table === "sessions") return sessionIds.has(stringField(row, "id") ?? "");
+    if (table === "episodes") return episodeIds.has(stringField(row, "id") ?? "");
+    if (table === "raw_turns") return rawTurnIds.has(stringField(row, "id") ?? "");
+    if (table === "memory_relations") return memoryIds.has(stringField(row, "source_memory_id") ?? "") && memoryIds.has(stringField(row, "target_memory_id") ?? "");
+    if (table === "memory_change_log") return stringField(row, "namespace_id") === namespaceIdFromContext(normalized) || memoryIds.has(stringField(row, "memory_id") ?? "") || memoryIds.has(stringField(row, "entity_id") ?? "");
+    if (table === "embedding_retry_queue" || table === "memory_processing_state") return memoryIds.has(stringField(row, "target_id") ?? stringField(row, "memory_id") ?? "");
+    if (table === "trace_policy_links") return memoryIds.has(stringField(row, "l1_memory_id") ?? "") && memoryIds.has(stringField(row, "l2_memory_id") ?? "");
+    if (table === "l2_candidate_pool") return memoryIds.has(stringField(row, "source_memory_id") ?? "");
+    if (table === "skill_trials") return rowReferencesSets(row, sessionIds, episodeIds, rawTurnIds, memoryIds, ["skill_memory_id", "l1_memory_id"]);
+    if (table === "artifacts") return rowReferencesSets(row, sessionIds, episodeIds, rawTurnIds, memoryIds, []);
+    if (table === "feedback" || table === "decision_repairs" || table === "evolution_jobs") return rowReferencesSets(row, sessionIds, episodeIds, rawTurnIds, memoryIds, ["l1_memory_id", "target_memory_id"]);
+    if (table === "recall_events") return stringField(row, "namespace_id") === namespaceIdFromContext(normalized) || rowReferencesSets(row, sessionIds, episodeIds, rawTurnIds, memoryIds, []);
+    if (table === "api_logs" || table === "audit_logs") return bundleLogReferencesScope(row, sessionIds, episodeIds, rawTurnIds, memoryIds, normalized);
+    return false;
+  });
+
+  const result: Record<string, Array<Record<string, unknown>>> = {};
+  for (const [table, rows] of Object.entries(tables)) result[table] = scoped(table, rows);
+  return result;
+}
+
+function bundleTableRowCount(tables: Record<string, Array<Record<string, unknown>>>): number {
+  return Object.values(tables).reduce((total, rows) => total + rows.length, 0);
+}
+
+function stringField(row: Record<string, unknown>, key: string): string | undefined {
+  const value = row[key];
+  return typeof value === "string" && value ? value : undefined;
+}
+
+function jsonStringField(row: Record<string, unknown>, jsonKey: string, key: string): string | undefined {
+  const raw = stringField(row, jsonKey);
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    return typeof parsed[key] === "string" && parsed[key] ? parsed[key] as string : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function memoryProjectId(row: Record<string, unknown>, sessions: Array<Record<string, unknown>> | undefined): string | undefined {
+  const sessionId = stringField(row, "session_id");
+  const session = sessions?.find((candidate) => stringField(candidate, "id") === sessionId);
+  return stringField(row, "project_id") ?? jsonStringField(row, "info_json", "project_id") ?? stringField(row, "app_id") ?? stringField(session ?? {}, "project_id");
+}
+
+function memoryTenantId(row: Record<string, unknown>, sessions: Array<Record<string, unknown>> | undefined): string | undefined {
+  const sessionId = stringField(row, "session_id");
+  const session = sessions?.find((candidate) => stringField(candidate, "id") === sessionId);
+  return jsonStringField(row, "info_json", "tenant_id") ?? jsonStringField(row, "info_json", "tenantId") ?? jsonStringField(session ?? {}, "meta_json", "tenant_id") ?? "local";
+}
+
+function rowReferencesSets(
+  row: Record<string, unknown>,
+  sessions: Set<string>,
+  episodes: Set<string>,
+  rawTurns: Set<string>,
+  memories: Set<string>,
+  extraMemoryKeys: string[]
+): boolean {
+  const refs = [
+    ["session_id", sessions], ["episode_id", episodes], ["raw_turn_id", rawTurns],
+    ...extraMemoryKeys.map((key) => [key, memories] as const)
+  ] as Array<[string, Set<string>]>;
+  return refs.some(([key, ids]) => {
+    const value = stringField(row, key);
+    return Boolean(value && ids.has(value));
+  });
+}
+
+function bundleLogReferencesScope(
+  row: Record<string, unknown>,
+  sessions: Set<string>,
+  episodes: Set<string>,
+  rawTurns: Set<string>,
+  memories: Set<string>,
+  namespace: RuntimeNamespace
+): boolean {
+  const actor = parseBundleJson(row.actor_json);
+  const input = parseBundleJson(row.input_json);
+  const output = parseBundleJson(row.output_json);
+  const namespaceRecord = isRecord(actor) ? actor : undefined;
+  if (namespaceRecord && sameProjectScope({ source: "unknown", profileId: "default", projectId: stringValue(namespaceRecord, "projectId") ?? stringValue(namespaceRecord, "project_id"), tenantId: stringValue(namespaceRecord, "tenantId") ?? stringValue(namespaceRecord, "tenant_id") }, namespace)) return true;
+  return [row, input, output].some((value) => bundleValueReferencesSets(value, sessions, episodes, rawTurns, memories));
+}
+
+function bundleValueReferencesSets(value: unknown, sessions: Set<string>, episodes: Set<string>, rawTurns: Set<string>, memories: Set<string>): boolean {
+  if (Array.isArray(value)) return value.some((item) => bundleValueReferencesSets(item, sessions, episodes, rawTurns, memories));
+  if (!isRecord(value)) return false;
+  for (const [key, next] of Object.entries(value)) {
+    if (typeof next === "string" && ((key.toLowerCase().includes("session") && sessions.has(next)) || (key.toLowerCase().includes("episode") && episodes.has(next)) || (key.toLowerCase().includes("raw_turn") && rawTurns.has(next)) || ((key.toLowerCase().includes("memory") || key.toLowerCase().includes("trace") || key.toLowerCase().includes("span")) && memories.has(next)))) return true;
+    if (bundleValueReferencesSets(next, sessions, episodes, rawTurns, memories)) return true;
+  }
+  return false;
+}
+
+function parseBundleJson(value: unknown): unknown {
+  if (typeof value !== "string" || !value) return undefined;
+  try { return JSON.parse(value) as unknown; } catch { return undefined; }
+}
+
+function stringValue(value: Record<string, unknown>, key: string): string | undefined {
+  return typeof value[key] === "string" && value[key] ? value[key] as string : undefined;
 }
 
 function uniq<T>(values: T[]): T[] {

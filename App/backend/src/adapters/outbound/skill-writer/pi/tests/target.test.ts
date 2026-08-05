@@ -44,6 +44,61 @@ describe("Pi skill target", () => {
       .toContain("A Memmy Memory Hook or plugin is installed for this agent.");
   });
 
+  it("reads the Memory storage endpoint instead of an earlier model endpoint", async () => {
+    const fixture = createFixture();
+    writeFileSync(fixture.memmyConfigPath, [
+      "memmyMemory:",
+      "  profiles:",
+      "    byok:",
+      "      summary:",
+      '        endpoint: "http://model-provider.example/v1"',
+      "  storage:",
+      '    endpoint: "http://127.0.0.1:18960"',
+      '    token: "test-token"',
+      ""
+    ].join("\n"), "utf8");
+
+    const requestedOrigins: string[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (input) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      requestedOrigins.push(url.origin);
+      if (url.pathname === "/api/v1/sessions/open") return jsonResponse({ sessionId: "pi-memory-session" });
+      if (url.pathname === "/api/v1/turns/start") return jsonResponse({ turnId: "pi-live-turn" });
+      return jsonResponse({}, 404);
+    };
+
+    const target = createPiSkillTarget(fixture);
+    await target.installPlugin?.("pi");
+
+    try {
+      const extensionPath = join(fixture.rootDirectory, "extensions", "memmy-memory.ts");
+      const extensionModule = await import(`${pathToFileURL(extensionPath).href}?test=${crypto.randomUUID()}`) as {
+        default: (pi: unknown) => void;
+      };
+      const handlers = new Map<string, (...args: never[]) => unknown>();
+      extensionModule.default({
+        on(event: string, handler: (...args: never[]) => unknown) {
+          handlers.set(event, handler);
+        },
+        registerCommand() {},
+        appendEntry() {}
+      });
+
+      await handlers.get("before_agent_start")?.(
+        { prompt: "Use the configured Memory service" },
+        extensionContext([], "root") as never
+      );
+
+      expect(requestedOrigins).toEqual([
+        "http://127.0.0.1:18960",
+        "http://127.0.0.1:18960"
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("uninstalls only Memmy-owned files", async () => {
     const fixture = createFixture();
     const target = createPiSkillTarget(fixture);

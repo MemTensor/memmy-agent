@@ -35,6 +35,7 @@ import {
 type SqlValue = string | number | Buffer | null;
 const BUNDLE_TABLES = [
   "memories",
+  "memory_relations",
   "sessions",
   "episodes",
   "raw_turns",
@@ -346,6 +347,17 @@ export interface AuditLogRecord {
   before?: unknown;
   after?: unknown;
   meta: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface MemoryRelationRecord {
+  id: string;
+  projectId?: string;
+  sourceMemoryId: string;
+  targetMemoryId: string;
+  relation: "supersedes";
+  reason?: string;
+  actor: Record<string, unknown>;
   createdAt: string;
 }
 
@@ -870,6 +882,112 @@ export class MemoryRepository {
     });
   }
 
+  supersede(input: {
+    oldMemory: MemoryRow;
+    newMemory: MemoryRow;
+    projectId?: string;
+    reason?: string;
+    actor?: Record<string, unknown>;
+    createdAt?: string;
+  }): { oldMemory: MemoryRow; newMemory: MemoryRow; relation: MemoryRelationRecord } {
+    const at = input.createdAt ?? nowIso();
+    const oldInternal = input.oldMemory.properties.internal_info;
+    const newInternal = input.newMemory.properties.internal_info;
+    const updatedOld = this.update({
+      ...input.oldMemory,
+      status: "archived",
+      info: {
+        ...input.oldMemory.info,
+        superseded_by_memory_id: input.newMemory.id,
+        supersession_reason: input.reason
+      },
+      properties: {
+        ...input.oldMemory.properties,
+        status: "archived",
+        internal_info: {
+          ...oldInternal,
+          superseded_by_memory_id: input.newMemory.id,
+          supersession_reason: input.reason
+        }
+      },
+      updatedAt: at
+    });
+    const updatedNew = this.update({
+      ...input.newMemory,
+      info: {
+        ...input.newMemory.info,
+        supersedes_memory_ids: uniq([
+          ...asStringArray(input.newMemory.info.supersedes_memory_ids),
+          input.oldMemory.id
+        ]),
+        supersession_reason: input.reason
+      },
+      properties: {
+        ...input.newMemory.properties,
+        internal_info: {
+          ...newInternal,
+          supersedes_memory_ids: uniq([
+            ...asStringArray(newInternal.supersedes_memory_ids),
+            input.oldMemory.id
+          ]),
+          supersession_reason: input.reason
+        }
+      },
+      updatedAt: at
+    });
+    const relation: MemoryRelationRecord = {
+      id: `relation_${stableHash({ source: updatedNew.id, target: updatedOld.id, relation: "supersedes" }).slice(0, 24)}`,
+      projectId: input.projectId,
+      sourceMemoryId: updatedNew.id,
+      targetMemoryId: updatedOld.id,
+      relation: "supersedes",
+      reason: input.reason,
+      actor: input.actor ?? {},
+      createdAt: at
+    };
+    this.db.prepare(
+      `INSERT INTO memory_relations (
+        id, project_id, source_memory_id, target_memory_id, relation, reason, actor_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(source_memory_id, target_memory_id, relation) DO UPDATE SET
+        reason = excluded.reason,
+        actor_json = excluded.actor_json,
+        created_at = excluded.created_at`
+    ).run(
+      relation.id,
+      relation.projectId ?? null,
+      relation.sourceMemoryId,
+      relation.targetMemoryId,
+      relation.relation,
+      relation.reason ?? null,
+      toJson(relation.actor),
+      relation.createdAt
+    );
+    return { oldMemory: updatedOld, newMemory: updatedNew, relation };
+  }
+
+  relationsFor(id: string): MemoryRelationRecord[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM memory_relations
+       WHERE source_memory_id = ? OR target_memory_id = ?
+       ORDER BY created_at ASC, id ASC`
+    ).all(id, id) as Array<{
+      id: string; project_id: string | null; source_memory_id: string;
+      target_memory_id: string; relation: "supersedes"; reason: string | null;
+      actor_json: string; created_at: string;
+    }>;
+    return rows.map((row) => ({
+      id: row.id,
+      projectId: row.project_id ?? undefined,
+      sourceMemoryId: row.source_memory_id,
+      targetMemoryId: row.target_memory_id,
+      relation: row.relation,
+      reason: row.reason ?? undefined,
+      actor: parseJson(row.actor_json, {}),
+      createdAt: row.created_at
+    }));
+  }
+
   softDelete(id: string, deletedAt = nowIso()): MemoryRow | undefined {
     const memory = this.get(id);
     if (!memory) {
@@ -1365,9 +1483,12 @@ export class RuntimeRepository {
   }
 
   countEpisodesByStatus(userId?: string): Record<"open" | "processing" | "closed", number> {
-    void userId;
     const clauses = ["1=1"];
     const params: SqlValue[] = [];
+    if (userId) {
+      clauses.push("user_id = ?");
+      params.push(userId);
+    }
     const rows = this.db
       .prepare(
         `SELECT status, COUNT(*) AS count
@@ -1911,10 +2032,16 @@ export class RuntimeRepository {
   }
 
   latestChangeSeq(userId?: string, namespaceId?: string): number {
-    void userId;
-    void namespaceId;
     const clauses = ["1=1"];
     const params: SqlValue[] = [];
+    if (userId) {
+      clauses.push("user_id = ?");
+      params.push(userId);
+    }
+    if (namespaceId) {
+      clauses.push("namespace_id = ?");
+      params.push(namespaceId);
+    }
     const row = this.db
       .prepare(`SELECT MAX(seq) AS seq FROM memory_change_log WHERE ${clauses.join(" AND ")}`)
       .get(...params) as
@@ -1924,10 +2051,16 @@ export class RuntimeRepository {
   }
 
   listChanges(userId?: string, limit = 50, cursor?: number, namespaceId?: string): ChangeLogRecord[] {
-    void userId;
-    void namespaceId;
     const clauses = ["1=1"];
     const params: SqlValue[] = [];
+    if (userId) {
+      clauses.push("user_id = ?");
+      params.push(userId);
+    }
+    if (namespaceId) {
+      clauses.push("namespace_id = ?");
+      params.push(namespaceId);
+    }
     if (cursor) {
       clauses.push("seq > ?");
       params.push(cursor);
@@ -2049,12 +2182,15 @@ export class RuntimeRepository {
   }
 
   listJobs(status?: JobStatus, limit = 50, userId?: string): EvolutionJobRecord[] {
-    void userId;
     const clauses: string[] = [];
     const params: SqlValue[] = [];
     if (status) {
       clauses.push("status = ?");
       params.push(status);
+    }
+    if (userId) {
+      clauses.push("user_id = ?");
+      params.push(userId);
     }
     const rows = this.db
       .prepare(
@@ -2475,12 +2611,15 @@ export class RuntimeRepository {
     userId?: string,
     offset = 0
   ): EmbeddingRetryRecord[] {
-    void userId;
     const clauses: string[] = [];
     const params: SqlValue[] = [];
     if (status) {
       clauses.push("q.status = ?");
       params.push(status);
+    }
+    if (userId) {
+      clauses.push("m.user_id = ?");
+      params.push(userId);
     }
     const rows = this.db
       .prepare(
@@ -2499,10 +2638,12 @@ export class RuntimeRepository {
     status: EmbeddingRetryStatus,
     userId?: string
   ): number {
-    void userId;
     const row = this.db
-      .prepare(`SELECT COUNT(*) AS count FROM embedding_retry_queue WHERE status = ?`)
-      .get(status) as { count: number } | undefined;
+      .prepare(`SELECT COUNT(*) AS count
+                FROM embedding_retry_queue q
+                LEFT JOIN memories m ON m.id = q.target_id
+                WHERE q.status = ?${userId ? " AND m.user_id = ?" : ""}`)
+      .get(...(userId ? [status, userId] : [status])) as { count: number } | undefined;
     return row?.count ?? 0;
   }
 
@@ -2758,7 +2899,7 @@ export class RuntimeRepository {
   } = {}): SkillTrialRecord[] {
     const clauses = ["1=1"];
     const params: SqlValue[] = [];
-    void input.userId;
+    addOptional("user_id", input.userId);
     addOptional("skill_memory_id", input.skillMemoryId);
     addOptional("session_id", input.sessionId);
     addOptional("episode_id", input.episodeId);
@@ -3835,6 +3976,9 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
   const clauses = ["deleted_at IS NULL"];
   const params: SqlValue[] = [];
 
+  addTenantClause(filter.tenantId);
+  addValueClause("user_id", filter.userId);
+  addProjectClause(filter.projectId);
   addValueClause("session_id", filter.sessionId);
   addValueClause("conversation_id", filter.conversationId);
   addAgentIdClause(filter.agentId, filter.excludedAgentIds);
@@ -3855,6 +3999,49 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
     }
     clauses.push(`${column} = ?`);
     params.push(value);
+  }
+
+  function addTenantClause(tenantId: string | undefined): void {
+    if (tenantId === undefined) return;
+    const effectiveTenant = `CASE
+      WHEN session_id IS NOT NULL AND EXISTS (
+        SELECT 1 FROM sessions AS tenant_session WHERE tenant_session.id = memories.session_id
+      ) THEN COALESCE(
+        NULLIF(json_extract((SELECT tenant_session.meta_json FROM sessions AS tenant_session WHERE tenant_session.id = memories.session_id), '$.tenant_id'), ''),
+        NULLIF(json_extract((SELECT tenant_session.meta_json FROM sessions AS tenant_session WHERE tenant_session.id = memories.session_id), '$.tenantId'), ''),
+        'local'
+      )
+      ELSE COALESCE(
+        NULLIF(json_extract(info_json, '$.tenant_id'), ''),
+        NULLIF(json_extract(info_json, '$.tenantId'), ''),
+        NULLIF(json_extract(properties_json, '$.internal_info.provenance.tenantId'), ''),
+        'local'
+      )
+    END`;
+    clauses.push(`${effectiveTenant} = ?`);
+    params.push(tenantId);
+  }
+
+  function addProjectClause(projectId: string | undefined): void {
+    if (projectId === undefined) return;
+    const effectiveProject = `CASE
+      WHEN session_id IS NOT NULL AND EXISTS (
+        SELECT 1 FROM sessions AS memory_session WHERE memory_session.id = memories.session_id
+      ) THEN (
+        SELECT memory_session.project_id FROM sessions AS memory_session WHERE memory_session.id = memories.session_id
+      )
+      ELSE COALESCE(
+        NULLIF(json_extract(info_json, '$.project_id'), ''),
+        NULLIF(json_extract(info_json, '$.projectId'), ''),
+        NULLIF(app_id, '')
+      )
+    END`;
+    if (projectId === "unscoped") {
+      clauses.push(`${effectiveProject} IS NULL`);
+      return;
+    }
+    clauses.push(`${effectiveProject} = ?`);
+    params.push(projectId);
   }
 
   function addAgentIdClause(value: string | undefined, excludedValues: string[] | undefined): void {

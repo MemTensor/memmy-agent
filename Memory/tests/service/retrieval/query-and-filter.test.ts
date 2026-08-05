@@ -242,7 +242,8 @@ describe("MemoryService / retrieval / query and filtering", () => {
       namespace: {
         source: "codex",
         profileId: "jiang",
-        userId: memory.userId
+        userId: memory.userId,
+        workspaceId: memory.appId
       },
       query: "query with no lexical overlap",
       layers: ["L1"],
@@ -846,7 +847,8 @@ describe("MemoryService / retrieval / query and filtering", () => {
       namespace: {
         source: "codex",
         profileId: "profile-a",
-        userId: "shared-recall-user"
+        userId: "shared-recall-user",
+        workspaceId: "workspace-recall"
       },
       workspaceId: "workspace-recall"
     });
@@ -906,7 +908,8 @@ describe("MemoryService / retrieval / query and filtering", () => {
       namespace: {
         source: "codex",
         profileId: "profile-a",
-        userId: "shared-recall-user"
+        userId: "shared-recall-user",
+        workspaceId: "workspace-recall"
       },
       userId: "shared-recall-user",
       layers: ["L1"],
@@ -920,7 +923,8 @@ describe("MemoryService / retrieval / query and filtering", () => {
       namespace: {
         source: "codex",
         profileId: "profile-a",
-        userId: "shared-recall-user"
+        userId: "shared-recall-user",
+        workspaceId: "workspace-recall"
       },
       episodeId: profileAMemory.episodeId,
       limit: 10

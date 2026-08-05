@@ -4,6 +4,25 @@ export type Cursor = string;
 export type MemoryLayer = "L1" | "L2" | "L3" | "Skill";
 export type MemoryKind = "trace" | "span" | "policy" | "world_model" | "skill";
 export type MemoryStatus = "activated" | "resolving" | "archived" | "deleted";
+export type MemoryRelation = "supersedes";
+
+export interface MemoryProvenance {
+  sourceAgent: string;
+  tenantId?: string;
+  profileId?: string;
+  projectId?: string;
+  workspaceId?: string;
+  workspacePath?: string;
+  sessionId?: string;
+  turnId?: string;
+  adapterId?: string;
+  requestId?: string;
+  sourceMemoryIds: string[];
+  repository?: string;
+  branch?: string;
+  commit?: string;
+  capturedAt: IsoTime;
+}
 export type RetrievalMode =
   | "search"
   | "turn_start"
@@ -129,6 +148,9 @@ export interface MemoryRow {
 }
 
 export interface MemoryFilter {
+  tenantId?: string;
+  userId?: string;
+  projectId?: string;
   sessionId?: string;
   conversationId?: string;
   agentId?: string;
@@ -192,6 +214,22 @@ export interface MemoryDetailItem extends MemoryListItem {
   createdAt: IsoTime;
   sourceMemoryIds: string[];
   metadata: Record<string, unknown>;
+  provenance?: MemoryProvenance;
+  relations?: Array<{
+    id: string;
+    projectId?: string;
+    sourceMemoryId: string;
+    targetMemoryId: string;
+    relation: MemoryRelation;
+    reason?: string;
+    actor: Record<string, unknown>;
+    createdAt: IsoTime;
+  }>;
+  supersession?: {
+    supersedesMemoryIds: string[];
+    supersededByMemoryId?: string;
+    reason?: string;
+  };
 }
 
 export interface RawTurnSummary {
@@ -227,6 +265,28 @@ export interface SessionCompactRequest extends RequestEnvelope {
   sourceMemoryIds?: string[];
   tokenEstimate?: number;
   createL1?: boolean;
+  checkpoint?: SessionCheckpointPayload;
+}
+
+export interface SessionCheckpointPayload {
+  task: string;
+  changes: string[];
+  validated: string[];
+  unverified: string[];
+  nextSteps: string[];
+}
+
+export interface SessionCheckpointRequest extends RequestEnvelope {
+  episodeId?: string;
+  task: string;
+  changes?: string[];
+  validated?: string[];
+  unverified?: string[];
+  nextSteps?: string[];
+  sourceTurnIds?: string[];
+  sourceMemoryIds?: string[];
+  tokenEstimate?: number;
+  createL1?: boolean;
 }
 
 export interface SessionOpenRequest extends RequestEnvelope {
@@ -237,6 +297,8 @@ export interface SessionOpenRequest extends RequestEnvelope {
   workspacePath?: string;
   sessionId?: string;
   meta?: Record<string, unknown>;
+  protocolVersion?: string;
+  provenance?: Partial<MemoryProvenance>;
 }
 
 export interface TurnStartRequest extends RequestEnvelope {
@@ -245,6 +307,8 @@ export interface TurnStartRequest extends RequestEnvelope {
   turnId?: string;
   contextHints?: Record<string, unknown>;
   contextBudget?: number;
+  protocolVersion?: string;
+  provenance?: Partial<MemoryProvenance>;
 }
 
 export interface TurnCompleteRequest extends RequestEnvelope {
@@ -258,6 +322,8 @@ export interface TurnCompleteRequest extends RequestEnvelope {
   toolResults?: unknown[];
   artifacts?: unknown[];
   sourceMemoryIds?: string[];
+  protocolVersion?: string;
+  provenance?: Partial<MemoryProvenance>;
   usage?: Record<string, unknown>;
   status?: "succeeded" | "failed" | "cancelled";
 }
@@ -324,6 +390,10 @@ export interface MemoryAddRequest extends RequestEnvelope {
   turnId?: string;
   createdAt?: string;
   deferProcessing?: boolean;
+  sourceMemoryIds?: string[];
+  provenance?: Partial<MemoryProvenance>;
+  supersedesMemoryId?: string;
+  supersessionReason?: string;
 }
 
 export interface FeedbackTarget {
@@ -373,6 +443,15 @@ export interface MemoryImportRequest extends RequestEnvelope {
 
 export interface MemoryGovernanceRequest extends RequestEnvelope {
   reason?: string;
+}
+
+export interface MemoryMarkdownExportRequest extends RequestEnvelope {
+  includeArchived?: boolean;
+}
+
+export interface MemoryMarkdownImportRequest extends RequestEnvelope {
+  markdown: string;
+  apply?: boolean;
 }
 
 export interface RawTurnRedactRequest extends RequestEnvelope {

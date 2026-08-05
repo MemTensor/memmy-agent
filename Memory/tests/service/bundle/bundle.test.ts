@@ -9,7 +9,7 @@ const {
 afterEach(cleanup);
 
 describe("MemoryService / bundle", () => {
-  it("exports bundles across namespaces", async () => {
+  it("exports only the requested namespace and its dependency rows", async () => {
     const { db, service } = createTestService();
     const namespaceA = {
       source: "codex",
@@ -56,25 +56,25 @@ describe("MemoryService / bundle", () => {
     const bundleA = service.exportBundle({ namespace: namespaceA });
     const memoryIds = (bundleA.tables.memories as Array<Record<string, unknown>>).map((row) => row.id);
     expect(memoryIds).toContain(completeA.l1MemoryId);
-    expect(memoryIds).toContain(completeB.l1MemoryId);
+    expect(memoryIds).not.toContain(completeB.l1MemoryId);
     const sessionIds = (bundleA.tables.sessions as Array<Record<string, unknown>>).map((row) => row.id);
-    expect(sessionIds.sort()).toEqual([sessionA.sessionId, sessionB.sessionId].sort());
+    expect(sessionIds).toEqual([sessionA.sessionId]);
     const rawTurnIds = (bundleA.tables.raw_turns as Array<Record<string, unknown>>).map((row) => row.id);
     expect(rawTurnIds).toContain(completeA.rawTurnId);
-    expect(rawTurnIds).toContain(completeB.rawTurnId);
+    expect(rawTurnIds).not.toContain(completeB.rawTurnId);
     const recallIds = (bundleA.tables.recall_events as Array<Record<string, unknown>>).map((row) => row.id);
     expect(recallIds).toContain(recallA.searchEventId);
-    expect(recallIds).toContain(recallB.searchEventId);
+    expect(recallIds).not.toContain(recallB.searchEventId);
     const artifactRawTurnIds = (bundleA.tables.artifacts as Array<Record<string, unknown>>)
       .map((row) => row.raw_turn_id);
     expect(artifactRawTurnIds).toEqual([completeA.rawTurnId]);
     const jobSessionIds = new Set((bundleA.tables.evolution_jobs as Array<Record<string, unknown>>)
       .map((row) => row.session_id));
-    expect(jobSessionIds).toEqual(new Set([sessionA.sessionId, sessionB.sessionId]));
+    expect(jobSessionIds).toEqual(new Set([sessionA.sessionId]));
     const changeNamespaces = new Set((bundleA.tables.memory_change_log as Array<Record<string, unknown>>)
       .map((row) => row.namespace_id));
     expect([...changeNamespaces].some((namespace) => String(namespace).includes("workspace-export-a"))).toBe(true);
-    expect([...changeNamespaces].some((namespace) => String(namespace).includes("workspace-export-b"))).toBe(true);
+    expect([...changeNamespaces].some((namespace) => String(namespace).includes("workspace-export-b"))).toBe(false);
 
     db.close();
   });

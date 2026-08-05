@@ -72,10 +72,10 @@ describe("MemoryService / read model / skill list", () => {
     expect(firstPage.skills).toHaveLength(2);
     expect(firstPage.nextCursor).toBe("2");
     const secondPage = service.listSkills({ namespace: namespaceA, limit: 2, cursor: Number(firstPage.nextCursor) });
-    expect(secondPage.skills).toHaveLength(2);
+    expect(secondPage.skills).toHaveLength(1);
     expect(secondPage.nextCursor).toBeUndefined();
     const pagedIds = [...firstPage.skills, ...secondPage.skills].map((skill) => skill.id).sort();
-    expect(pagedIds).toEqual(["skill_page_a_1", "skill_page_a_2", "skill_page_a_3", "skill_page_b_1"].sort());
+    expect(pagedIds).toEqual(["skill_page_a_1", "skill_page_a_2", "skill_page_a_3"].sort());
     const sqliteSkills = service.listSkills({ namespace: namespaceA, tags: ["sqlite"], limit: 10 });
     expect(sqliteSkills.skills.map((skill) => skill.id).sort()).toEqual(["skill_page_a_1", "skill_page_a_3"]);
     expect(sqliteSkills.skills.find((skill) => skill.id === "skill_page_a_3")?.tags).toContain("sqlite");

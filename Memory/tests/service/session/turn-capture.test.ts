@@ -799,7 +799,8 @@ describe("MemoryService / session / turn capture", () => {
       namespace: {
         source: "codex",
         profileId: "jiang",
-        userId: "user-structural"
+        userId: "user-structural",
+        workspaceId: "workspace-structural"
       },
       workspaceId: "workspace-structural"
     });
@@ -835,7 +836,8 @@ describe("MemoryService / session / turn capture", () => {
       namespace: {
         source: "codex",
         profileId: "jiang",
-        userId: "user-structural"
+        userId: "user-structural",
+        workspaceId: "workspace-structural"
       },
       query: "pg_config executable not found",
       layers: ["L1"],

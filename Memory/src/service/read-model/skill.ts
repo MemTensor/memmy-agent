@@ -19,6 +19,7 @@ import type {
   RuntimeNamespace,
   SkillUseRequest
 } from "../../types.js";
+import { memoryFilterForNamespace } from "../namespace/namespace-scope.js";
 
 export type SkillServiceErrorCode =
   | "invalid_argument"
@@ -211,6 +212,8 @@ export class SkillReadModel {
     const limit = input.limit ?? 50;
     const cursor = input.cursor ?? 0;
     const filter: MemoryFilter = {
+      ...(input.namespace ? memoryFilterForNamespace(input.namespace) : {}),
+      ...(input.userId ? { userId: input.userId } : {}),
       memoryLayer: "Skill",
       status: ["activated", "resolving"],
       tags: input.tags

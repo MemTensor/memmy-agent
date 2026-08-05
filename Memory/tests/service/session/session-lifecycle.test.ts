@@ -17,7 +17,8 @@ describe("MemoryService / session / lifecycle", () => {
       namespace: {
         source: "codex",
         profileId: "jiang",
-        userId: "user-1"
+        userId: "user-1",
+        workspaceId: "workspace-1"
       },
       workspaceId: "workspace-1",
       meta: {
@@ -30,7 +31,8 @@ describe("MemoryService / session / lifecycle", () => {
       namespace: {
         source: "codex",
         profileId: "jiang",
-        userId: "user-1"
+        userId: "user-1",
+        workspaceId: "workspace-1"
       },
       workspaceId: "workspace-1",
       meta: {
@@ -207,7 +209,8 @@ describe("MemoryService / session / lifecycle", () => {
       namespace: {
         source: "codex",
         profileId: "jiang",
-        userId: "user-1"
+        userId: "user-1",
+        workspaceId: "workspace-1"
       },
       query: "SQLite 记忆底座服务",
       includeInjectedContext: true
@@ -229,7 +232,8 @@ describe("MemoryService / session / lifecycle", () => {
       namespace: {
         source: "codex",
         profileId: "jiang",
-        userId: "user-1"
+        userId: "user-1",
+        workspaceId: "workspace-1"
       },
       sessionId: session.sessionId,
       retrievalMode: "turn_start",
@@ -250,7 +254,7 @@ describe("MemoryService / session / lifecycle", () => {
       injected_memory_ids_json: string;
       outcome: string;
     } | undefined;
-    expect(recallRow?.namespace_id).toContain("user-1");
+    expect(recallRow?.namespace_id).toBe("local:workspace-1");
     expect(recallRow?.query_hash).toBeTruthy();
     expect(JSON.parse(recallRow!.candidate_memory_ids_json)).toEqual(recall.candidateMemoryIds);
     expect(JSON.parse(recallRow!.injected_memory_ids_json)).toEqual(recall.sourceMemoryIds);

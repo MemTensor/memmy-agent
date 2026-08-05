@@ -44,6 +44,8 @@ import { clip } from "../../utils/text.js";
 import { nowIso } from "../../utils/time.js";
 import { updatePolicyStats } from "../evolution/policy-induction.js";
 import {
+  memoryFilterForNamespace,
+  namespaceIdFromContext as canonicalNamespaceIdFromContext,
   namespaceForMemory,
   namespaceForSession,
   normalizeNamespace,
@@ -214,6 +216,7 @@ async feedback(request: FeedbackRequest): Promise<FeedbackResponse> {
     const attribution = this.resolveFeedbackAttribution(request, context);
     const attributedRequest: FeedbackRequest = {
       ...request,
+      namespace: context.namespace,
       l1MemoryId: request.l1MemoryId ?? attribution.l1MemoryId,
       rawTurnId: request.rawTurnId ?? attribution.rawTurnId,
       episodeId: request.episodeId ?? attribution.episodeId,
@@ -542,7 +545,7 @@ async maybeCreateFeedbackExperience(
       trace
     });
     const vector = await this.deps.embedder.embedOne(draft.vectorText, "query");
-    const existing = this.findSimilarFeedbackExperience(draft, vector);
+    const existing = this.findSimilarFeedbackExperience(draft, vector, context.namespace);
     const at = feedback.createdAt;
     const saved = existing
       ? this.mergeFeedbackExperiencePolicy(existing, draft, vector, at)
@@ -860,10 +863,15 @@ feedbackExperienceEpisodeContext(
 
 findSimilarFeedbackExperience(
     draft: FeedbackExperienceDraft,
-    vector: number[]
+    vector: number[],
+    namespace: RuntimeNamespace
   ): MemoryRow | null {
     let best: { memory: MemoryRow; score: number; policy: PolicyMeta } | null = null;
-    for (const memory of this.deps.repos.memories.list({ memoryLayer: "L2", status: ["activated", "resolving"] }, 1000)) {
+    for (const memory of this.deps.repos.memories.list({
+      ...memoryFilterForNamespace(namespace),
+      memoryLayer: "L2",
+      status: ["activated", "resolving"]
+    }, 1000)) {
       const policy = policyMetaFromMemory(memory);
       if (!policy) continue;
       const sourceFeedbackIds = stringArray(memory.properties.internal_info.source_feedback_ids)
@@ -1118,7 +1126,7 @@ feedbackCandidatePolicyIds(request: FeedbackRequest, feedback: FeedbackRecord): 
       const recall = this.deps.repos.runtime.getRecallEvent(request.recallEventId);
       for (const id of recall?.injectedMemoryIds ?? []) {
         const memory = this.deps.repos.memories.get(id);
-        if (memory?.memoryLayer === "L2") ids.add(memory.id);
+        if (memory?.memoryLayer === "L2" && this.memoryMatchesNamespace(memory, request.namespace)) ids.add(memory.id);
       }
     }
     if (feedback.l1MemoryId) {
@@ -1127,13 +1135,15 @@ feedbackCandidatePolicyIds(request: FeedbackRequest, feedback: FeedbackRecord): 
         l1MemoryId: feedback.l1MemoryId,
         limit: 20
       })) {
-        ids.add(link.l2MemoryId);
+        const memory = this.deps.repos.memories.get(link.l2MemoryId);
+        if (memory && this.memoryMatchesNamespace(memory, request.namespace)) ids.add(memory.id);
       }
     }
     if (ids.size === 0 && feedback.rationale) {
       for (const hit of this.deps.repos.memories.search(
         feedback.rationale,
         {
+          ...memoryFilterForNamespace(normalizeNamespace(request.namespace)),
           memoryLayer: "L2",
           status: "activated"
         },
@@ -1166,6 +1176,8 @@ feedbackRepairEvidence(
     if (request.recallEventId) {
       const recall = this.deps.repos.runtime.getRecallEvent(request.recallEventId);
       for (const id of recall?.injectedMemoryIds ?? []) {
+        const memory = this.deps.repos.memories.get(id);
+        if (!memory || !this.memoryMatchesNamespace(memory, request.namespace)) continue;
         if (feedback.polarity === "negative") {
           low.add(id);
         } else if (feedback.polarity === "positive") {
@@ -1174,6 +1186,7 @@ feedbackRepairEvidence(
       }
     }
     for (const policy of this.deps.repos.memories.getMany(policyIds)) {
+      if (!this.memoryMatchesNamespace(policy, request.namespace)) continue;
       const meta = policyMetaFromMemory(policy);
       if (!meta) continue;
       for (const id of meta.sourceTraceIds) {
@@ -1199,6 +1212,7 @@ feedbackRepairEvidence(
       for (const memory of this.deps.repos.memories.search(
         searchText,
         {
+          ...memoryFilterForNamespace(normalizeNamespace(request.namespace)),
           memoryLayer: "L1",
           status: "activated"
         },
@@ -1214,6 +1228,7 @@ feedbackRepairEvidence(
       for (const memory of this.deps.repos.memories.search(
         searchText,
         {
+          ...memoryFilterForNamespace(normalizeNamespace(request.namespace)),
           memoryLayer: "L1",
           status: "activated"
         },
@@ -1238,6 +1253,13 @@ feedbackRepairEvidence(
       highValueMemoryIds: [...high].slice(0, limit),
       lowValueMemoryIds: [...low].slice(0, limit)
     };
+  }
+
+memoryMatchesNamespace(memory: MemoryRow, namespace: RuntimeNamespace | undefined): boolean {
+    if (!namespace) return true;
+    const filter = memoryFilterForNamespace(namespace);
+    const actual = memoryFilterForNamespace(namespaceForMemory(memory));
+    return actual.tenantId === filter.tenantId && actual.projectId === filter.projectId;
   }
 
 sessionRepairEvidence(
@@ -2842,13 +2864,7 @@ function namespaceIdFromMemory(memory: MemoryRow): string {
 }
 
 function namespaceIdFromContext(namespace: RuntimeNamespace): string {
-  return [
-    namespace.tenantId,
-    namespace.userId,
-    namespace.projectId ?? namespace.workspaceId,
-    namespace.source,
-    namespace.profileId
-  ].filter(Boolean).join(":");
+  return canonicalNamespaceIdFromContext(namespace);
 }
 
 function memoryStatusForLifecycleStatus(status: "candidate" | "active" | "archived"): "activated" | "resolving" | "archived" {

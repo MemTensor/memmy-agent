@@ -180,7 +180,7 @@ describe("MemoryService / evolution / orchestration", () => {
     ).all() as Array<{ namespace_id: string | null; kind: string | null; op: string | null; entity_id: string | null }>;
     expect(workerMemoryChanges.length).toBeGreaterThan(0);
     for (const change of workerMemoryChanges) {
-      expect(change.namespace_id).toContain("user-2");
+      expect(change.namespace_id).toBe("local:unscoped");
       expect(change.kind).toMatch(/^(trace|policy|world_model|skill)$/);
       expect(change.op).toMatch(/^(created|updated)$/);
       expect(change.entity_id).toBeTruthy();

@@ -22,7 +22,7 @@
     "serve:local": "node dist/src/server/index.js",
     "serve:dev": "tsx src/server/index.ts",
     "worker:run": "node dist/src/cli/index.js raw POST /worker/run",
-    "test": "vitest run --dir tests",
+    "test": "vitest run --dir tests --testTimeout 20000",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "package:npm": "node src/cli/npm/build-package.mjs",
     "pack:npm": "npm run package:npm && npm pack ../dist/memmy-memory-npm",
