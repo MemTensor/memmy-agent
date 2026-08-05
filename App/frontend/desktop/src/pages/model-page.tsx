@@ -4,6 +4,7 @@ import { Brain, Check, CheckCircle2, ChevronLeft, Cog, Eye, EyeOff, Lightbulb, L
 import { useApiClients } from "../app/providers.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
 import { PAGE_CORNER_ACTION_CONTAINER_STYLE, PageCornerActionButton } from "../components/language-toggle-button.js";
+import { ModelProviderLogo } from "../components/model-provider-logo.js";
 import { Select } from "../components/Select.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { appActions } from "../state/app-actions.js";
@@ -277,7 +278,8 @@ function ModelCard(props: ModelCardProps) {
             className="select-control--subtle"
             options={PROTOCOL_OPTIONS.map((option) => ({
               value: option.value,
-              label: t(option.labelKey)
+              label: t(option.labelKey),
+              icon: <ModelProviderLogo provider={option.value} size={16} />
             }))}
           />
 

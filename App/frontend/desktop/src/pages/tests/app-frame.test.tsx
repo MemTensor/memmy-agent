@@ -460,6 +460,41 @@ describe("AppFrame", () => {
     expect(source).not.toContain('className={`app-frame-profile-settings shrink-0 inline-flex items-center justify-center transition-colors cursor-pointer');
   });
 
+  it("settingsNav replaces the main sidebar with settings section links", () => {
+    const html = renderToString(
+      <AppProviders>
+        <AppFrame
+          title="设置"
+          settingsNav={{
+            activeTab: "model",
+            onSelectTab: () => undefined
+          }}
+        >
+          <div>设置内容</div>
+        </AppFrame>
+      </AppProviders>
+    );
+
+    expect(html).toContain('id="settings-tab-account"');
+    expect(html).toContain('id="settings-tab-model"');
+    expect(html).toContain('id="settings-tab-tokens"');
+    expect(html).toContain('id="settings-tab-preferences"');
+    expect(html).toContain('id="settings-tab-about"');
+    expect(html).toContain("账户");
+    expect(html).toContain("模型配置");
+    expect(html).toContain("Token 用量");
+    expect(html).toContain("偏好");
+    expect(html).toContain("关于");
+    expect(html).toContain("memory-page-back-button");
+    expect(html).toContain("账户");
+    expect(html).toContain("模型配置");
+    expect(html).toContain("Token 用量");
+    expect(html).toContain("偏好");
+    expect(html).toContain("关于");
+    expect(html).not.toContain("app-frame-task-list");
+    expect(html).not.toContain("app-frame-sidebar-footer");
+  });
+
   it("keeps sidebar account settings icon pinned to the footer right edge", () => {
     const source = readFileSync(resolve(__dirname, "..", "app-frame.tsx"), "utf8");
     const styles = readFileSync(resolve(__dirname, "..", "..", "styles.css"), "utf8");

@@ -5,6 +5,7 @@ import { useAnalytics } from "../analytics/use-analytics.js";
 import { persistLoginModeSelection } from "../app/login-mode.js";
 import { useApiClients } from "../app/providers.js";
 import { PAGE_CORNER_ACTION_CONTAINER_STYLE, PageCornerActionButton } from "../components/language-toggle-button.js";
+import { ModelProviderLogo } from "../components/model-provider-logo.js";
 import { Select } from "../components/Select.js";
 import type { MessageKey } from "../i18n/messages.js";
 import { useTranslation } from "../i18n/use-translation.js";
@@ -237,7 +238,8 @@ export function ApiKeyPage() {
               className="select-control--subtle"
               options={providerOptions.map((option) => ({
                 value: option.value,
-                label: t(option.labelKey)
+                label: t(option.labelKey),
+                icon: <ModelProviderLogo provider={option.value} size={16} />
               }))}
             />
 

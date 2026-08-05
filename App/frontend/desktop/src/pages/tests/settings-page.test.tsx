@@ -14,11 +14,13 @@ import {
   formatUsageUpdatedAt,
   isPendingQuotaRequestError,
   resolveQuotaEligibilityMessage,
+  resolveSettingsTabFromHash,
   readLogLevel,
   shouldSaveAccountNicknameOnKeyDown,
   writeLogLevel
 } from "../settings-page.js";
 import { formatMessage, zhCNMessages } from "../../i18n/messages.js";
+import { availableConnectionProtocols } from "../model-workspace-section.js";
 
 const settingsPageSourcePath = fileURLToPath(new URL("../settings-page.tsx", import.meta.url));
 const updateCoordinatorSourcePath = fileURLToPath(new URL("../../app/update-coordinator.tsx", import.meta.url));
@@ -50,6 +52,31 @@ function createMemoryStorage(): Storage {
     }
   };
 }
+
+describe("多 BYOK 协议入口", () => {
+  it("添加连接时跳过当前空间已存在的协议", () => {
+    const available = availableConnectionProtocols([
+      {
+        id: "openai-1",
+        provider: "openai",
+        endpoint: "https://api.openai.com/v1",
+        apiKeyMasked: "••••1234",
+        models: ["gpt-4o"]
+      },
+      {
+        id: "anthropic-1",
+        provider: "anthropic",
+        endpoint: "https://api.anthropic.com",
+        apiKeyMasked: "••••5678",
+        models: ["claude-sonnet-4"]
+      }
+    ]);
+
+    expect(available).not.toContain("openai");
+    expect(available).not.toContain("anthropic");
+    expect(available[0]).toBe("gemini");
+  });
+});
 
 describe("日志级别本地持久化", () => {
   it("未写入时回退到默认 info", () => {
@@ -92,15 +119,34 @@ describe("formatUsageUpdatedAt", () => {
   });
 });
 
+describe("resolveSettingsTabFromHash", () => {
+  it("把设置深链 hash 映射到对应 Tab", () => {
+    expect(resolveSettingsTabFromHash("#account")).toBe("account");
+    expect(resolveSettingsTabFromHash("#pet-avatar")).toBe("preferences");
+    expect(resolveSettingsTabFromHash("#preferences")).toBe("preferences");
+    expect(resolveSettingsTabFromHash("#model-config")).toBe("model");
+    expect(resolveSettingsTabFromHash("#model-config-add")).toBe("model");
+    expect(resolveSettingsTabFromHash("#token-usage")).toBe("tokens");
+    expect(resolveSettingsTabFromHash("#about")).toBe("about");
+    expect(resolveSettingsTabFromHash("#unknown")).toBeNull();
+  });
+});
+
 describe("SettingsPageView", () => {
   it("对齐 Memmy v2.0 设置页卡片结构和关键内容", () => {
     const html = normalizeSsrHtml(renderSettingsPageView(createReadyState()));
 
     expect(html).toContain("app-frame-page-content max-w-2xl mx-auto py-8");
+    expect(html).toContain('id="settings-panel-account"');
+    expect(html).toContain('id="settings-panel-model"');
+    expect(html).toContain('id="settings-panel-tokens"');
+    expect(html).toContain('id="settings-panel-preferences"');
+    expect(html).toContain('id="settings-panel-about"');
+    expect(html).not.toContain("settings-tabs");
     expect(html).toContain("bg-background-paper rounded-card-lg border-content-panel p-6");
     expect(html).toContain("账户");
     expect(html).toContain("Token 用量");
-    expect(html).toContain("模型配置");
+    expect(html).toContain("模型库");
     expect(html).toContain("通用");
     expect(html).toContain("启动与窗口");
     expect(html).toContain("通知");
@@ -113,16 +159,31 @@ describe("SettingsPageView", () => {
     expect(html).toContain("Agent 任务额度已用 1.4M Token");
     expect(html).toContain("共 5.0M Token");
     expect(html).toContain("平台赠送大模型");
-    expect(html).toContain("自有 API Key");
+    expect(html).toContain("自定义 API Key");
     expect(html).toContain("查看用量详情");
     expect(html).toContain("select-control--compact select-control--subtle");
     expect(html).toContain('role="combobox"');
   });
 
+  it("设置页按账户 / 模型配置 / Token 用量 / 偏好 / 关于拆成五个面板", () => {
+    const html = normalizeSsrHtml(renderSettingsPageView(createReadyState()));
+    const accountPanel = html.indexOf('id="settings-panel-account"');
+    const modelPanel = html.indexOf('id="settings-panel-model"');
+    const tokensPanel = html.indexOf('id="settings-panel-tokens"');
+    const preferencesPanel = html.indexOf('id="settings-panel-preferences"');
+    const aboutPanel = html.indexOf('id="settings-panel-about"');
+
+    expect(accountPanel).toBeGreaterThanOrEqual(0);
+    expect(modelPanel).toBeGreaterThan(accountPanel);
+    expect(tokensPanel).toBeGreaterThan(modelPanel);
+    expect(preferencesPanel).toBeGreaterThan(tokensPanel);
+    expect(aboutPanel).toBeGreaterThan(preferencesPanel);
+  });
+
   it("按 2026-06-09 原型让模型配置排在 Token 用量之前", () => {
     const html = normalizeSsrHtml(renderSettingsPageView(createReadyState()));
-    const modelIndex = html.indexOf("模型配置");
-    const usageIndex = html.indexOf("Token 用量");
+    const modelIndex = html.indexOf('id="model-config"');
+    const usageIndex = html.indexOf('id="token-usage"');
 
     expect(modelIndex).toBeGreaterThanOrEqual(0);
     expect(usageIndex).toBeGreaterThanOrEqual(0);
@@ -134,7 +195,8 @@ describe("SettingsPageView", () => {
 
     expect(html).toContain("lucide-user");
     expect(html).toContain("lucide-zap");
-    expect(html).toContain("lucide-brain");
+    expect(html).toContain("lucide-database");
+    expect(html).toContain("lucide-wrench");
     expect(html).toContain("lucide-palette");
     expect(html).toContain("lucide-rocket");
     expect(html).toContain("lucide-shield");
@@ -338,34 +400,43 @@ describe("SettingsPageView", () => {
     expect(html).not.toContain("本月剩余 3/3 次");
   });
 
-  it("注册账号模式展示账户、Token 用量和平台赠送模型模式", () => {
+  it("注册账号模式展示平台模型和独立自定义模型工作区", () => {
     const html = normalizeSsrHtml(renderSettingsPageView(createAccountModeState()));
-    const modelConfigHtml = html.slice(html.indexOf("模型配置"), html.indexOf("Token 用量"));
+    const modelConfigHtml = html.slice(html.indexOf('id="model-config"'), html.indexOf('id="token-usage"'));
 
     expect(html).toContain("grace@example.com");
     expect(html).not.toContain("g***@example.com");
     expect(html).toContain("注册时间：2026-04-12");
     expect(html).toContain("修改昵称");
     expect(html).toContain("Token 用量");
-    expect(html).toContain("平台赠送 Token");
+    expect(modelConfigHtml).toContain("模型库");
+    expect(modelConfigHtml).toContain("平台提供");
+    expect(modelConfigHtml).toContain("Memmy Platform");
+    expect(modelConfigHtml).toContain("agent_chat");
+    expect(modelConfigHtml).toContain("添加配置");
+    expect(modelConfigHtml).toContain("Agent 任务模型");
+    expect(modelConfigHtml).toContain("Memmy Platform · asr");
+    expect(modelConfigHtml).not.toContain("为语音识别 ASR选择模型 Memmy Platform · agent_chat");
     expect(html).toContain("平台赠送大模型");
-    expect(html).toContain("自有 API Key");
+    expect(html).toContain("自定义 API Key");
     expect(html).toContain("查看用量详情");
-    expect(html).toContain("分别查看平台赠送额度和自有 API Key 消耗");
-    expect(html).not.toContain("协议类型");
-    expect(modelConfigHtml).not.toContain("自有 API Key</span>");
+    expect(modelConfigHtml).not.toContain("当前模式：");
+    expect(modelConfigHtml).not.toContain("切换为自定义 API Key");
+    expect(modelConfigHtml).not.toContain("默认任务模型");
   });
 
-  it("平台 Token 模式下模型配置卡不保留空正文间距", () => {
+  it("设置页不再展示全局平台与自有模型模式切换", () => {
     const html = normalizeSsrHtml(renderSettingsPageView(createAccountModeState()));
-    const modelConfigStart = html.indexOf("模型配置");
-    const tokenUsageStart = html.indexOf("Token 用量");
+    const modelConfigStart = html.indexOf('id="model-config"');
+    const tokenUsageStart = html.indexOf('id="token-usage"');
     const modelConfigHtml = html.slice(modelConfigStart, tokenUsageStart);
 
-    expect(modelConfigHtml).toContain("当前模式：");
-    expect(modelConfigHtml).toContain("平台赠送 Token");
-    expect(modelConfigHtml).toContain("切换为自有 API Key");
-    expect(modelConfigHtml).not.toContain("mb-4");
+    expect(modelConfigHtml).toContain("模型库");
+    expect(modelConfigHtml).not.toContain("当前模式：");
+    expect(modelConfigHtml).not.toContain("平台赠送 Token");
+    expect(modelConfigHtml).not.toContain("切换为自定义 API Key");
+    expect(modelConfigHtml).not.toContain("切换回平台 Token");
+    expect(modelConfigHtml).not.toContain("默认任务模型");
   });
 
   it("手机号注册账号区展示手机号，邮箱注册账号区展示邮箱", () => {
@@ -386,41 +457,35 @@ describe("SettingsPageView", () => {
     expect(html).not.toContain("未绑定邮箱");
   });
 
-  it("注册账号即使已有本地模型配置也先展示平台 Token 原型态", () => {
+  it("注册账号即使已有本地配置也保持账号与本地自定义模型隔离", () => {
     const html = normalizeSsrHtml(renderSettingsPageView(createAccountModeWithSavedModelState()));
-    const modelConfigHtml = html.slice(html.indexOf("模型配置"), html.indexOf("Token 用量"));
+    const modelConfigHtml = html.slice(html.indexOf('id="model-config"'), html.indexOf('id="token-usage"'));
 
     expect(html).toContain("grace@example.com");
     expect(html).not.toContain("g***@example.com");
     expect(html).toContain("注册时间：2026-04-12");
     expect(html).toContain("Token 用量");
-    expect(html).toContain("平台赠送 Token");
-    expect(html).toContain("切换为自有 API Key");
-    expect(modelConfigHtml).not.toContain("自有 API Key</span>");
-    expect(html).not.toContain("Agent 执行任务");
-    expect(html).not.toContain("协议类型");
-    expect(html).not.toContain("API 地址");
+    expect(modelConfigHtml).toContain("模型库");
+    expect(modelConfigHtml).toContain("Memmy Platform");
+    expect(modelConfigHtml).toContain("平台提供");
+    expect(modelConfigHtml).toContain("添加配置");
+    expect(modelConfigHtml).not.toContain("saved-model");
+    expect(modelConfigHtml).not.toContain("切换为自定义 API Key");
+    expect(modelConfigHtml).not.toContain("默认任务模型");
     expect(html).not.toContain("本地模式");
     expect(html).not.toContain("无需注册账号");
   });
 
-  it("注册账号 Token 切换按钮按三态逻辑处理自有 API Key 表单和模式持久化", () => {
+  it("账号模式模型配置使用统一模型工作区，不再挂旧模式切换表单", () => {
     const source = readFileSync(settingsPageSourcePath, "utf8");
 
-    expect(source).toContain("function handleSwitchToCustom()");
-    expect(source).toContain("const hasAccountSession");
-    expect(source).toContain("const hasByokConfig");
-    expect(source).toContain("setShowApiConfig(true)");
-    expect(source).toContain('persistSettings({ userMode: "byok" })');
-    expect(source).toContain('persistSettings({ userMode: "account" })');
-    expect(source).toContain("createMemmyMemoryProviderConfig");
-    expect(source).toContain("configClient?.saveModelConfig(nextConfig)");
-    expect(source).toContain('onClick={handleSwitchToCustom}');
-    expect(source).toContain("{showApiConfig && (");
-    expect(source).toContain('t("settings.model.localEmbeddingModelHint")');
-    expect(source).toContain('t("settings.model.saveConfig")');
+    expect(source).toContain("<ModelWorkspaceSection");
+    expect(source).toContain("mode={workspaceMode}");
+    expect(source).toContain("seedConfig={state.modelConfig}");
+    expect(source).not.toContain("{false &&");
     expect(source).not.toContain("setForcedModelMode");
     expect(source).not.toContain('navigate("/api-key")');
+    expect(source).not.toContain('onClick={handleSwitchToCustom}');
   });
 
   it("Token 用量按原型包含渠道汇总和详情子页结构", () => {
@@ -457,7 +522,9 @@ describe("SettingsPageView", () => {
     expect(styles).toContain(".backButton");
     const backButtonRule = styles.match(/\.backButton\s*\{[^}]*\}/)?.[0] ?? "";
     expect(backButtonRule).toContain("cursor: pointer;");
-    expect(source).toContain("const byKind = orderByScene");
+    expect(source).toContain("const byokUsageByKind = TOKEN_USAGE_SCENES.map");
+    expect(source).toContain("getTaskModelCandidates(workspace, workspaceMode)");
+    expect(source).toContain('"settings.token.modelBreakdownPending"');
     expect(source).toContain("usageSceneMeta(props.usage.scene, t)");
     expect(source).toContain("updateShowUsageDetail(true)");
     expect(source).toContain('reserveTopBar={!showUsageDetail}');
@@ -467,31 +534,21 @@ describe("SettingsPageView", () => {
     expect(source).not.toContain("meta.barClass");
   });
 
-  it("模型测试连接按钮固定位置和尺寸，状态提示展示在按钮左侧", () => {
-    const source = readFileSync(settingsPageSourcePath, "utf8");
-    const messageIndex = source.indexOf("<ValidationMessage validation={llmValidation} stale={isMainModelTestStale} />");
-    const buttonIndex = source.indexOf("<TestButton status={llmValidation.status} onClick={testMainModelConnection} disabled={false} />");
+  it("模型工作区测试连接按钮固定位置和尺寸，状态提示展示在按钮左侧", () => {
+    const workspaceSource = readFileSync(fileURLToPath(new URL("../model-workspace-section.tsx", import.meta.url)), "utf8");
+    const fieldsSource = readFileSync(fileURLToPath(new URL("../api-key-form-fields.tsx", import.meta.url)), "utf8");
 
-    expect(source).toContain('className="flex min-h-9 items-center justify-end gap-3"');
-    expect(source).toContain("inline-flex w-[112px] h-10 shrink-0 items-center justify-center px-4");
-    expect(source).toContain('<span className="inline-flex items-center justify-center gap-1.5">');
-    expect(source).toContain('<CheckCircle2 size={13} className="shrink-0" aria-hidden="true" />');
-    expect(source).toContain('<XCircle size={13} className="shrink-0" aria-hidden="true" />');
-    expect(source).not.toContain("grid-cols-[13px_auto_13px]");
-    expect(source).not.toContain("absolute left-3 top-1/2 -translate-y-1/2");
-    expect(source).not.toContain("function simulateTest");
-    expect(source).toContain("testModelConfigConnection");
-    expect(source).toContain("testEmbeddingConnection");
-    expect(source).toContain('"embedding"');
-    expect(source).toContain("canUseModelConfig");
-    expect(source).toContain("canSaveEmbeddingModelConfig");
-    expect(messageIndex).toBeGreaterThanOrEqual(0);
-    expect(buttonIndex).toBeGreaterThanOrEqual(0);
-    expect(messageIndex).toBeLessThan(buttonIndex);
+    expect(fieldsSource).toContain("inline-flex w-[112px] h-10 shrink-0 items-center justify-center px-4");
+    expect(fieldsSource).toContain('<CheckCircle2 size={13} className="shrink-0" aria-hidden="true" />');
+    expect(fieldsSource).toContain('<XCircle size={13} className="shrink-0" aria-hidden="true" />');
+    expect(workspaceSource).toContain("model-connection-modal__footer-actions");
+    expect(workspaceSource).toContain("<ApiKeyTestButton");
+    expect(workspaceSource).toContain("editorTest.message");
+    expect(workspaceSource).toContain("testEditorConnection");
   });
 
-  it("协议类型切换同步默认 API 地址，并清空模型 ID 和 API Key", () => {
-    const source = readFileSync(settingsPageSourcePath, "utf8");
+  it("模型工作区协议默认地址与模型配置常量保持一致", () => {
+    const workspaceSource = readFileSync(fileURLToPath(new URL("../model-workspace-section.tsx", import.meta.url)), "utf8");
     const modelSource = readFileSync(modelConfigSourcePath, "utf8");
 
     const defaults = [
@@ -512,20 +569,14 @@ describe("SettingsPageView", () => {
       expect(modelSource).toContain(`${protocol}: "${placeholder}"`);
     }
 
-    expect(source).toContain("setEndpoint(DEFAULT_ENDPOINTS[nextProtocol])");
-    expect(source).toContain('setModelId("")');
-    expect(source).toContain('setApiKey("");');
-    expect(source).toContain('setApiKeyMasked("");');
-    expect(source).toContain("props.onPatch(createModelProtocolPatch(value))");
+    expect(workspaceSource).toContain("endpoint: DEFAULT_ENDPOINTS[provider]");
+    expect(workspaceSource).toContain("modelDraft: DEFAULT_MODEL_IDS[provider]");
+    expect(workspaceSource).toContain("endpoint: DEFAULT_ENDPOINTS[provider]");
+    expect(workspaceSource).toContain("modelDraft: DEFAULT_MODEL_IDS[provider]");
     expect(modelSource).toContain("endpoint: DEFAULT_ENDPOINTS[protocol]");
     expect(modelSource).toContain('modelId: ""');
     expect(modelSource).toContain('apiKey: ""');
-    expect(source).toContain("hydrateModelConfigForm(state.modelConfig");
-    expect(source).toContain("useState(initialModelForm.modelId)");
-    expect(source).toContain('placeholder={`${t("apiKey.examplePrefix")} ${DEFAULT_MODEL_IDS[protocol]}`}');
-    expect(source).toContain('placeholder={`${t("apiKey.examplePrefix")} ${DEFAULT_MODEL_IDS[props.cfg.protocol]}`}');
-    expect(source).not.toContain("DEFAULT_MODEL_PLACEHOLDER");
-    expect(source).not.toContain('placeholder="例如 qwen2.5-32b-instruct"');
+    expect(modelSource).not.toContain("DEFAULT_MODEL_PLACEHOLDER");
   });
 
   it("未注册用户退出本地模式前弹出二次确认", () => {
@@ -541,36 +592,32 @@ describe("SettingsPageView", () => {
     expect(source).not.toContain("function ConfirmModal");
   });
 
-  it("自填 API Key 模式仍展示 Token 用量并展示模型配置概要", () => {
+  it("本地自定义模式展示独立连接工作区和能力选择", () => {
     const html = normalizeSsrHtml(renderSettingsPageView(createByokModeState()));
 
     expect(html).toContain("本地模式");
-    expect(html).toContain("无需注册账号 · 使用你自己的大模型 API Key");
+    expect(html).toContain("无需注册账号 · 使用自定义大模型 API Key");
     expect(html).toContain("退出");
-    expect(html).toContain("自有 API Key");
-    expect(html).toContain("修改配置");
-    expect(html).toContain("space-y-2 p-3 bg-canvas-oat/40 rounded-card");
-    expect(html).toContain("Agent 执行任务");
-    expect(html).toContain("主大模型");
+    expect(html).toContain("自定义 API Key");
+    expect(html).toContain("还没有自定义模型");
+    expect(html).toContain("添加配置");
     expect(html).toContain("记忆摘要");
     expect(html).toContain("整理对话 / 历史为记忆");
     expect(html).toContain("技能进化");
     expect(html).toContain("打磨 Agent 技能与偏好");
     expect(html).toContain("Embedding 检索");
     expect(html).toContain("记忆向量化检索");
-    expect(html).toContain("内嵌本地模型 - Xenova/all-MiniLM-L6-v2");
+    expect(html).toContain("本地 · Xenova/all-MiniLM-L6-v2");
     expect(html).toContain("语音识别 ASR");
-    expect(html).toContain("桌宠和主界面语音输入（可选，不配置不影响其他功能）");
-    expect(html).toContain("qwen3-asr-flash");
     expect(html).toContain("生图模型");
-    expect(html).toContain("用于 Agent 生成图片");
-    expect(html).toContain("未设置");
+    expect(html).toContain("未配置");
     expect(html).toContain("Token 用量");
-    expect(html).toContain("自有 API Key");
     expect(html).toContain("查看用量详情");
     expect(html).toContain("查看自有 API Key 消耗");
     expect(html).not.toContain("分别查看平台赠送额度和自有 API Key 消耗");
     expect(html).not.toContain("切换回平台 Token");
+    expect(html).not.toContain("当前模式：");
+    expect(html).not.toContain("默认任务模型");
     expect(html).not.toContain("赠送大模型额度已用");
     expect(html).not.toContain("协议类型");
     expect(html).not.toContain("API 地址");
@@ -599,10 +646,10 @@ describe("SettingsPageView", () => {
     const html = normalizeSsrHtml(renderSettingsPageView(createByokModeWithSavedModelState(), "en-US"));
 
     expect(html).toContain("Speech recognition ASR");
-    expect(html).toContain("Pet and main UI voice input");
+    expect(html).toContain("Used for pet and main UI voice input; text features work without it");
     expect(html).toContain("qwen3-asr-flash");
     expect(html).toContain("Image generation model");
-    expect(html).toContain("Used for Agent image generation");
+    expect(html).toContain("Used for Agent image generation; text features work without it");
     expect(html).toContain("doubao-seedream-4-0-250828");
     expect(html).not.toContain("语音识别 ASR");
   });
@@ -619,65 +666,17 @@ describe("SettingsPageView", () => {
     expect(persistSource).toContain('status: "error"');
   });
 
-  it("设置页模型配置表单展示已保存脱敏 key 状态且保存不回传脱敏值", () => {
-    const source = readFileSync(settingsPageSourcePath, "utf8");
+  it("模型工作区连接编辑展示已保存脱敏 key，且保存不回传脱敏值", () => {
+    const workspaceSource = readFileSync(fileURLToPath(new URL("../model-workspace-section.tsx", import.meta.url)), "utf8");
+    const fieldsSource = readFileSync(fileURLToPath(new URL("../api-key-form-fields.tsx", import.meta.url)), "utf8");
 
-    expect(source).toContain("maskedValue={apiKeyMasked}");
-    expect(source).toContain("maskedValue={embApiKeyMasked}");
-    expect(source).toContain("maskedValue={asrApiKeyMasked}");
-    expect(source).toContain("maskedValue={imageGenApiKeyMasked}");
-    expect(source).toContain("maskedValue={props.cfg.apiKeyMasked}");
-    expect(source).not.toContain('savedLabel={t("apiKey.savedKey")}');
-    expect(source).not.toContain("const showSavedSecret = !props.value.trim() && Boolean(props.maskedValue)");
-    expect(source).not.toContain('{props.savedLabel ?? "Saved"}');
-    expect(source).toContain("const placeholder = !props.value.trim() && props.maskedValue ? props.maskedValue : props.placeholder;");
-    expect(source).toContain("placeholder={placeholder}");
-    expect(source).toContain('apiKeyMasked: apiKey.trim() ? "" : apiKeyMasked');
-    expect(source).toContain('apiKeyMasked: embApiKey.trim() ? "" : embApiKeyMasked');
-    expect(source).toContain("createImageGenProviderConfig(imageGenProtocol, imageGenModel, imageGenEndpoint, imageGenApiKey, imageGenApiKeyMasked)");
-    expect(source).toContain("persistSuccessfulMainModelConnection");
-    expect(source).toContain("preserveSuccessfulTestHydrateRef");
-    expect(source).toContain("configClient?.saveModelConfig(successConfig)");
-    expect(source).toContain("asr: isAsrUsable ? createAsrProviderConfig(");
-    expect(source).toContain('<Mic size={16} className="text-action-sky" />');
-    expect(source).toContain("createAsrModelFormValues");
-    expect(source).toContain("const [asrValidation, setAsrValidation]");
-    expect(source).toContain("const asrFormValues = createAsrModelFormValues(");
-    expect(source).toContain("model={asrModelId || ASR_MODEL_ID}");
-    expect(source).toContain("value={asrModelId || ASR_MODEL_ID}");
-    expect(source).toContain("function testAsrConnection()");
-    expect(source).toContain('capability: "asr"');
-    expect(source).toContain("<ValidationMessage validation={asrValidation} stale={isAsrTestStale} />");
-    expect(source).toContain("<TestButton status={asrValidation.status} onClick={testAsrConnection} disabled={false} />");
-    expect(source).toContain("optionalModelMissingWarning");
-    expect(source).toContain("<OptionalModelMissingWarningModal");
-    expect(source).toContain("setAsrWarningAcknowledged(true)");
-    expect(source).toContain("const isAsrUsable = canSaveModelConfig(asrFormValues, asrValidation)");
-    expect(source).toContain("resolveOptionalModelMissingWarning({");
-    expect(source).toContain("asrMissing: !isAsrUsable && !asrWarningAcknowledged");
-    expect(source).toContain("asr: isAsrUsable");
-    expect(source).not.toContain("showAsrMissingWarning");
-    expect(source).not.toContain("<AsrMissingWarningModal");
-    expect(source).toContain('<ImageIcon size={16} className="text-action-sky" />');
-    expect(source).toContain("IMAGE_PROTOCOL_OPTIONS.map");
-    expect(source).toContain("createImageGenModelFormValues");
-    expect(source).toContain("const [imageGenValidation, setImageGenValidation]");
-    expect(source).toContain("const imageGenFormValues = createImageGenModelFormValues(");
-    expect(source).toContain("function testImageGenConnection()");
-    expect(source).toContain('capability: "image"');
-    expect(source).toContain("placeholder={IMAGE_DEFAULT_MODEL_IDS[imageGenProtocol]}");
-    expect(source).toContain("placeholder={IMAGE_DEFAULT_ENDPOINTS[imageGenProtocol]}");
-    expect(source).toContain("<ValidationMessage validation={imageGenValidation} stale={isImageGenTestStale} />");
-    expect(source).toContain("<TestButton status={imageGenValidation.status} onClick={testImageGenConnection} disabled={false} />");
-    expect(source).toContain("setImageGenWarningAcknowledged(true)");
-    expect(source).toContain("const isImageGenUsable = canSaveModelConfig(imageGenFormValues, imageGenValidation)");
-    expect(source).toContain("imageGenMissing: !isImageGenUsable && !imageGenWarningAcknowledged");
-    expect(source).not.toContain("showImageGenMissingWarning");
-    expect(source).not.toContain("<ImageGenMissingWarningModal");
-    expect(source).toContain("imageGen: isImageGenUsable");
-    expect(source).not.toContain("&& (!isAsrConfigured || canSaveModelConfig(asrFormValues, asrValidation))");
+    expect(workspaceSource).toContain("maskedValue={editor.connectionId && !editorProviderChanged");
+    expect(workspaceSource).toContain("apiKey: editor.apiKey || undefined");
+    expect(workspaceSource).toContain("apiKeyMasked:");
+    expect(fieldsSource).toContain("const placeholder = !props.value.trim() && props.maskedValue ? props.maskedValue : props.placeholder;");
+    expect(fieldsSource).toContain("placeholder={placeholder}");
+    expect(fieldsSource).not.toContain("const showSavedSecret = !props.value.trim() && Boolean(props.maskedValue)");
   });
-
   it("可选模型未填告知弹窗确认后自动继续保存已填的 API 配置", () => {
     const source = readFileSync(settingsPageSourcePath, "utf8");
 

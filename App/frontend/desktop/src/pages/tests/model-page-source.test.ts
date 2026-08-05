@@ -19,7 +19,7 @@ describe("ModelPage source", () => {
     expect(messagesSource).toContain('"apiKey.modelPage.memoryTitle": "记忆摘要"');
     expect(messagesSource).toContain('"apiKey.modelPage.skillTitle": "技能进化"');
     expect(messagesSource).toContain('"apiKey.modelPage.reusePrevious": "沿用上一步的 Agent 任务模型"');
-    expect(messagesSource).toContain('"apiKey.modelPage.memoryHint": "可以换个更便宜的模型（如 30B 级别），性价比更高"');
+    expect(messagesSource).toContain('"apiKey.modelPage.memoryHint": "可用更轻量的模型（如 30B），性价比更高"');
     expect(pageSource).toContain('t("apiKey.modelPage.title")');
     expect(pageSource).toContain('title={t("apiKey.modelPage.memoryTitle")}');
     expect(pageSource).toContain('title={t("apiKey.modelPage.skillTitle")}');

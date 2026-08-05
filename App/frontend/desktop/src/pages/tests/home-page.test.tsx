@@ -92,6 +92,21 @@ describe("HomePage", () => {
     expect(html).not.toContain("未选择任何文件");
   });
 
+  it("在空白和已有会话 composer 都展示按 chatScopeKey 隔离的模型选择器", () => {
+    const source = readFileSync(homePageSourcePath, "utf8");
+    const styles = readFileSync(stylesSourcePath, "utf8");
+
+    expect(source.match(/<AgentModelSelector/g)).toHaveLength(2);
+    expect(source).toContain("scopeKey={modelSelectionScopeKey}");
+    expect(source).toContain("const modelWorkspaceMode = state.bootstrap?.app.userMode");
+    expect(source).toContain("disabled={isCurrentAgentRunning || isCreatingChat || messageSendInFlight}");
+    expect(source).toContain("copyScopedModelSelection(modelWorkspace, modelSelectionScopeKey, chatId)");
+    expect(source).not.toContain('sendMessage({ chatId: state.agent.currentChatId, content: "/model');
+    expect(styles).toContain(".agent-model-selector .agent-model-selector__menu");
+    expect(styles).toContain("top: calc(100% + 6px)");
+    expect(styles).toContain(".agent-model-selector__configure");
+  });
+
   it("hides the agent status line after the websocket is connected", () => {
     expect(agentStatusText("connected", "agent_chat", (key, values) => `${key}:${values?.model ?? ""}`)).toBeNull();
     expect(agentStatusText("connecting", null, (key) => key)).toBe("home.agent.connecting");
@@ -449,7 +464,7 @@ describe("HomePage", () => {
   it("centers the composer controls only while the session composer is one line", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
 
-    expect(source).toContain('${isComposerSingleLine ? "agent-composer-input--single " : ""}block w-full pl-4 pr-20 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40');
+    expect(source).toContain('${isComposerSingleLine ? "agent-composer-input--single " : ""}block w-full pl-4 pr-36 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40');
     expect(source).toContain('centerComposerControls ? "top-1/2 -translate-y-1/2" : "bottom-2"');
     expect(source).toContain("COMPOSER_SINGLE_LINE_HEIGHT_PX = 52");
   });
@@ -878,7 +893,7 @@ describe("HomePage", () => {
 
     expect(sendHtml).toContain("发送");
     expect(sendHtml).toContain('data-icon="send"');
-    expect(sendHtml).toContain("rounded-full w-7 h-7");
+    expect(sendHtml).toContain("composer-action-submit");
     expect(sendHtml).toContain("bg-action-sky");
     expect(sendHtml).toContain("translate-y-[1px]");
     expect(sendHtml).not.toContain("停止");
@@ -886,7 +901,7 @@ describe("HomePage", () => {
     expect(sendHtml).not.toContain('data-icon="stop-square"');
 
     expect(stopHtml).toContain("停止");
-    expect(stopHtml).toContain("rounded-full w-7 h-7");
+    expect(stopHtml).toContain("composer-action-submit");
     expect(stopHtml).toContain("bg-action-sky");
     expect(stopHtml).toContain("block shrink-0 bg-white");
     expect(stopHtml).toContain('width:11px');
