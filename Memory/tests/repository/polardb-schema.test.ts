@@ -15,6 +15,7 @@ describe("repository PolarDB schema contract", () => {
     expect(sql).toContain("properties JSONB");
     expect(sql).toContain("memory_layer TEXT NOT NULL");
     expect(sql).toContain("properties_tsvector_zh TSVECTOR");
+    expect(sql).toContain("idx_memories_layer_status_created");
     expect(sql).toContain("embedding vector");
     expect(sql).toContain("CREATE TABLE IF NOT EXISTS skill_trials");
     expect(sql).toContain("last_seen_at TIMESTAMPTZ NOT NULL");

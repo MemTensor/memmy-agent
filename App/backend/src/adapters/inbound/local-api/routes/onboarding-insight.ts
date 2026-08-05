@@ -30,7 +30,6 @@ export function registerOnboardingInsightRoutes(
         return reply.send(OnboardingInsightReportResponseSchema.parse({
           status: "skipped",
           reportMarkdown: "",
-          secondaryActions: [],
           diagnostics: {
             discoveredAgentCount: 0,
             sampledQueryCount: 0,
@@ -60,7 +59,6 @@ export function registerOnboardingInsightRoutes(
           response: {
             status: "skipped",
             reportMarkdown: "",
-            secondaryActions: [],
             diagnostics: {
               discoveredAgentCount: 0,
               sampledQueryCount: 0,

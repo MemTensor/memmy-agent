@@ -25,6 +25,7 @@ describe("MemoryService / trials / skill trial", () => {
       answer: "applied the sqlite migration checklist and reported the neutral result"
     });
     await service.runWorkerOnce(100);
+    await service.runWorkerOnce(100);
 
     const skillId = "skill_neutral_reward";
     insertActiveSkillMemoryForTest(db, {
@@ -53,11 +54,10 @@ describe("MemoryService / trials / skill trial", () => {
       magnitude: 1,
       rationale: "skill result was inconclusive"
     });
-    expect(feedback.jobs.map((job) => job.jobType)).toEqual(expect.arrayContaining([
-      "reward",
-      "skill_trial_resolve"
-    ]));
+    expect(feedback.jobs.map((job) => job.jobType)).toEqual(["skill_trial_resolve"]);
 
+    service.closeSession(session.sessionId);
+    await service.runWorkerOnce(100);
     await service.runWorkerOnce(100);
 
     const resolvedTrial = db.db.prepare(
@@ -90,13 +90,25 @@ describe("MemoryService / trials / skill trial", () => {
     ).get(trial.trialId) as { source: string };
     expect(trialResolvedChange.source).toBe("worker.reward.updated");
 
+    const retrySession = service.openSession({
+      namespace: {
+        ...namespace,
+        sessionKey: "retry"
+      }
+    });
+    const retryTurn = service.completeTurn("turn-skill-neutral-reward-retry", {
+      sessionId: retrySession.sessionId,
+      episodeId: "episode-skill-neutral-reward-retry",
+      query: "retry the reusable sqlite migration checklist",
+      answer: "applied the checklist again"
+    });
     const retryTrial = service.useSkill(skillId, {
       adapterId: "test-adapter",
       requestId: "skill-neutral-reward-2",
-      sessionId: session.sessionId,
-      episodeId: complete.episodeId,
-      rawTurnId: complete.rawTurnId,
-      turnId: complete.turnId
+      sessionId: retrySession.sessionId,
+      episodeId: retryTurn.episodeId,
+      rawTurnId: retryTurn.rawTurnId,
+      turnId: retryTurn.turnId
     });
     expect(retryTrial.trialId).not.toBe(trial.trialId);
     expect(retryTrial.duplicate).toBeUndefined();
@@ -105,9 +117,8 @@ describe("MemoryService / trials / skill trial", () => {
          SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending,
          COUNT(*) AS total
        FROM skill_trials
-       WHERE skill_memory_id = ?
-         AND episode_id = ?`
-    ).get(skillId, complete.episodeId) as { pending: number; total: number };
+       WHERE skill_memory_id = ?`
+    ).get(skillId) as { pending: number; total: number };
     expect(trialCounts).toMatchObject({
       pending: 1,
       total: 2

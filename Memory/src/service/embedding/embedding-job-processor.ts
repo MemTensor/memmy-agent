@@ -7,7 +7,7 @@ import { clip,firstLine } from "../../utils/text.js";
  * generic job-enqueue policy; this processor owns the job-specific state
  * transitions, model calls, and change records.
  */
-import { traceMetaFromMemory } from "../../algorithm/plugin-algorithms.js";
+import { retrievalDocumentSourceHash,traceMetaFromMemory } from "../../algorithm/plugin-algorithms.js";
 import type { Embedder,LlmClient } from "../../model/types.js";
 import type { EmbeddingRetryRecord,EmbeddingRetryVectorField,EvolutionJobRecord,Repositories } from "../../storage/repositories.js";
 import { kindFromMemory } from "../../storage/repositories.js";
@@ -42,6 +42,7 @@ export interface PreparedEmbeddingJob {
   text: string;
   role: "document" | "query";
   vectorField: EmbeddingRetryVectorField;
+  sourceHash?: string;
 }
 
 export interface EnqueueWorkerJobInput {
@@ -62,6 +63,7 @@ export interface PersistEmbeddingVectorInput {
   vector: number[];
   attemptCount: number;
   source: string;
+  sourceHash?: string;
   allowedProcessingStates?: MemoryProcessingState[];
   finalize?: (saved: MemoryRow, hadProcessing: boolean, at: string) => void;
 }
@@ -142,12 +144,16 @@ export class EmbeddingJobProcessor {
       return { job, memory, text, role: "document", vectorField: "vec_summary" };
     }
 
+    const text = embeddingTextForMemory(memory);
     return {
       job,
       memory,
-      text: embeddingTextForMemory(memory),
+      text,
       role: "query",
-      vectorField: "vec"
+      vectorField: "vec",
+      sourceHash: memory.memoryLayer === "Skill" || memory.memoryLayer === "L3"
+        ? retrievalDocumentSourceHash(memory)
+        : undefined
     };
   }
 
@@ -155,12 +161,14 @@ export class EmbeddingJobProcessor {
     const current = this.deps.repos.memories.get(item.memory.id);
     if (!current) throw new Error(`embedding target not found: ${item.memory.id}`);
     if (!processingJobMatchesMemory(item.job, current)) return;
+    if (item.sourceHash && retrievalDocumentSourceHash(current) !== item.sourceHash) return;
     this.persistEmbeddingVector({
       memoryId: current.id,
       vectorField: item.vectorField,
       vector,
       attemptCount: item.job.attempts,
       source: "worker.embedding",
+      sourceHash: item.sourceHash,
       allowedProcessingStates: ["embedding_pending", "embedding"],
       finalize: (_saved, hadProcessing, at) => {
         if (hadProcessing) this.deps.repos.runtime.completeJob(item.job.id, at);
@@ -177,7 +185,8 @@ export class EmbeddingJobProcessor {
       const vectorized = updateMemoryVectorField(current, input.vectorField, input.vector, {
         model: this.deps.embedder.config.model ?? this.deps.embedder.config.provider,
         provider: this.deps.embedder.config.provider,
-        updatedAt: at
+        updatedAt: at,
+        sourceHash: input.sourceHash
       });
       saved = this.deps.repos.memories.updateMaintenance(
         current.memoryLayer === "L1" ? updateImportPipelineStatus(vectorized, "indexed", at) : vectorized

@@ -140,9 +140,13 @@ export class WorldModelPipeline {
       }
       const rawDraft = enhancement.draft;
       const existing = this.findWorldModelMergeTarget(rawDraft);
-      const draft = existing
+      const mergedDraft = existing
         ? mergeWorldModelDraftForUpdate(rawDraft, existing, this.deps.config.algorithm.l3Abstraction.confidenceDelta)
         : rawDraft;
+      const draft = {
+        ...mergedDraft,
+        body: renderWorldModelBody(mergedDraft.title, mergedDraft.structure)
+      };
       const l3 = this.deps.buildMemory({
         userId,
         conversationId: source?.conversationId,
@@ -169,6 +173,7 @@ export class WorldModelPipeline {
           plugin_algorithm: "l3.abstraction.v7",
           source_memory_ids: draft.policyIds,
           title: draft.title,
+          summary: draft.summary,
           body: draft.body,
           structure: draft.structure,
           domain_tags: draft.domainTags,
@@ -183,6 +188,7 @@ export class WorldModelPipeline {
             cohesion: draft.cohesion,
             admission: draft.admission,
             structure: draft.structure,
+            summary: draft.summary,
             body: draft.body,
             vec: draft.vec
           }
@@ -362,9 +368,11 @@ private async enhanceWorldModelDrafts(
         const selectedPolicies = policies
           .filter((policy) => fallback.policyIds.includes(policy.id))
           .slice(0, 8);
+        const allowedEvidenceIds = new Set<string>();
         const languageSamples: Array<string | null | undefined> = [];
         const policySummaries = selectedPolicies
           .map((policy) => {
+            allowedEvidenceIds.add(policy.id);
             const traces = this.gatherWorldModelEvidence(policy);
             languageSamples.push(
               policy.title,
@@ -374,6 +382,7 @@ private async enhanceWorldModelDrafts(
               policy.boundary
             );
             for (const trace of traces) {
+              allowedEvidenceIds.add(trace.id);
               languageSamples.push(trace.userText, trace.agentText, trace.reflection);
             }
             const traceBlocks = traces
@@ -386,7 +395,7 @@ private async enhanceWorldModelDrafts(
               ].join("\n"))
               .join("\n");
             return capText([
-              `- ${policy.title}`,
+              `- policy ${policy.id}: ${policy.title}`,
               `  trigger=${policy.trigger}`,
               `  procedure=${policy.procedure}`,
               `  verification=${policy.verification}`,
@@ -398,7 +407,7 @@ private async enhanceWorldModelDrafts(
           .join("\n");
         const result = await this.deps.skillLlm.completeJson<{
           title?: unknown;
-          body?: unknown;
+          summary?: unknown;
           structure?: unknown;
           environment?: unknown;
           inference?: unknown;
@@ -436,10 +445,12 @@ private async enhanceWorldModelDrafts(
           continue;
         }
         const title = skillText(result.title);
-        const structure = coerceWorldModelStructure(result, fallback.structure);
-        const body = typeof result.body === "string" && skillMarkdown(result.body)
-          ? skillMarkdown(result.body)
-          : renderWorldModelBody(title, structure);
+        const structure = coerceWorldModelStructure(result, fallback.structure, allowedEvidenceIds);
+        const body = renderWorldModelBody(title, structure);
+        const generatedSummary = skillText(result.summary);
+        const summary = generatedSummary && generatedSummary !== body
+          ? generatedSummary
+          : renderWorldModelSummary(title, structure);
         const domainTags = normaliseWorldModelTags(result.domain_tags);
         const effectiveDomainTags = domainTags.length > 0 ? domainTags : fallback.domainTags;
         out.push({
@@ -447,6 +458,7 @@ private async enhanceWorldModelDrafts(
           draft: {
             ...fallback,
             title,
+            summary,
             body,
             structure,
             confidence: shapeWorldModelConfidence(
@@ -569,19 +581,21 @@ function l3AbstractionInvalidReason(result: unknown): string | null {
 
 function coerceWorldModelStructure(
   result: Record<string, unknown>,
-  fallback: WorldModelDraft["structure"]
+  fallback: WorldModelDraft["structure"],
+  allowedEvidenceIds: ReadonlySet<string>
 ): WorldModelDraft["structure"] {
   const rawStructure = isRecord(result.structure) ? result.structure : {};
   return {
-    environment: coerceWorldModelEntries(rawStructure.environment ?? result.environment, fallback.environment),
-    inference: coerceWorldModelEntries(rawStructure.inference ?? result.inference, fallback.inference),
-    constraints: coerceWorldModelEntries(rawStructure.constraints ?? result.constraints, fallback.constraints)
+    environment: coerceWorldModelEntries(rawStructure.environment ?? result.environment, fallback.environment, allowedEvidenceIds),
+    inference: coerceWorldModelEntries(rawStructure.inference ?? result.inference, fallback.inference, allowedEvidenceIds),
+    constraints: coerceWorldModelEntries(rawStructure.constraints ?? result.constraints, fallback.constraints, allowedEvidenceIds)
   };
 }
 
 function coerceWorldModelEntries(
   value: unknown,
-  fallback: WorldModelDraft["structure"]["environment"]
+  fallback: WorldModelDraft["structure"]["environment"],
+  allowedEvidenceIds: ReadonlySet<string>
 ): WorldModelDraft["structure"]["environment"] {
   if (!Array.isArray(value)) return fallback;
   const entries = value
@@ -590,7 +604,10 @@ function coerceWorldModelEntries(
       const label = skillText(item.label);
       const description = skillMarkdown(firstString(item.description, item.body, item.text));
       if (!label && !description) return null;
-      const evidenceIds = stringArray(item.evidenceIds ?? item.evidence_ids);
+      const evidenceIds = uniq(
+        stringArray(item.evidenceIds ?? item.evidence_ids)
+          .filter((id) => allowedEvidenceIds.has(id))
+      );
       return {
         label: label || description.slice(0, 32),
         description,
@@ -633,6 +650,18 @@ function renderWorldModelBody(
     lines.push("");
   }
   return lines.join("\n").trim();
+}
+
+function renderWorldModelSummary(
+  title: string,
+  structure: WorldModelDraft["structure"]
+): string {
+  const facts = [
+    structure.environment[0]?.description,
+    structure.inference[0]?.description,
+    structure.constraints[0]?.description
+  ].filter((value): value is string => Boolean(value?.trim()));
+  return capText([title, ...facts].join(" — "), 500);
 }
 
 function skillText(value: unknown): string {

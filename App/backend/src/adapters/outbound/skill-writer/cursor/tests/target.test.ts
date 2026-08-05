@@ -209,7 +209,6 @@ describe("cursor skill target", () => {
       if (url.pathname === "/api/v1/turns/start") {
         writeJsonResponse(response, 200, {
           turnId: "cursor-turn-1",
-          episodeId: "cursor-episode-1",
           sourceMemoryIds: ["cursor-memory-1"],
           injectedContext: { markdown: "Cursor historical context" }
         });
@@ -296,7 +295,7 @@ describe("cursor skill target", () => {
         sourceMemoryIds: ["cursor-memory-1"],
         status: "succeeded"
       });
-      expect(requests[3]?.body.episodeId).toBe("cursor-episode-1");
+      expect(requests[3]?.body).not.toHaveProperty("episodeId");
 
       const cancelledEvent = {
         ...eventBase,

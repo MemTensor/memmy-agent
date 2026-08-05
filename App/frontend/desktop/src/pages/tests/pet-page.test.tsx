@@ -774,7 +774,7 @@ describe("PetPageView SSR", () => {
     const source = readFileSync(fileURLToPath(new URL("../onboarding-page.tsx", import.meta.url)), "utf8");
     const completeHandlerIndex = source.indexOf("async function completeOnboarding(mode: PreferredMode)");
     const persistIndex = source.indexOf("await clients.config.updateOnboarding(completionPatch)", completeHandlerIndex);
-    const navigateIndex = source.indexOf("dispatch(appActions.navigate(targetRoute));", completeHandlerIndex);
+    const navigateIndex = source.indexOf("dispatch(appActions.navigate(nextRoute));", completeHandlerIndex);
 
     expect(persistIndex).toBeGreaterThan(completeHandlerIndex);
     expect(navigateIndex).toBeGreaterThan(persistIndex);

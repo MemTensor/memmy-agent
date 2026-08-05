@@ -166,6 +166,46 @@ describe("AgentThreadMessages", () => {
     expect(byokHtml).toContain("API 密钥无效或已过期，请检查后重试");
   });
 
+  it("renders only the localized quota title for structured quota errors", () => {
+    const html = renderToString(
+      <I18nProvider language="zh-CN">
+        <AgentThreadMessages
+          chatScopeKey="chat-quota-error"
+          messages={[
+            {
+              id: "quota-error",
+              role: "assistant",
+              content: "Error calling LLM: raw provider code 40309",
+              modelError: { category: "quota_exhausted" }
+            }
+          ]}
+        />
+      </I18nProvider>
+    );
+
+    expect(html).toContain("当前模型额度已用完");
+    expect(html).not.toContain("raw provider code");
+    expect(html).not.toContain("40309");
+    expect(html).not.toContain("充值");
+    expect(html).not.toContain("更换模型");
+  });
+
+  it("renders quota-like normal answers as ordinary assistant content", () => {
+    const content = "The quota, balance, credit and 额度 values are all healthy.";
+    const html = renderToString(
+      <I18nProvider language="en-US">
+        <AgentThreadMessages
+          chatScopeKey="chat-normal-quota-text"
+          messages={[{ id: "normal", role: "assistant", content }]}
+        />
+      </I18nProvider>
+    );
+
+    expect(html).toContain("The quota, balance, credit and 额度 values are all healthy.");
+    expect(html).not.toContain("This model&#x27;s quota has been used up.");
+    expect(html).not.toContain("agent-model-error-notice");
+  });
+
   it("renders context compaction messages as standalone dividers outside activity clusters", () => {
     const messages = [
       {

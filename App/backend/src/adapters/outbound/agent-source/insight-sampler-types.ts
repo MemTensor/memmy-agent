@@ -18,12 +18,30 @@ export interface OnboardingSampledQuery {
   workspacePath: string | null;
 }
 
+export interface OnboardingSampledMessage extends OnboardingSampledQuery {
+  role: "user" | "assistant" | "tool";
+}
+
+export interface OnboardingConversationReference {
+  sourceId: string;
+  displayName: string;
+  conversationId: string;
+  latestActivityAt: string;
+  workspacePath: string | null;
+}
+
+export interface OnboardingConversationWindow extends OnboardingConversationReference {
+  messages: OnboardingSampledMessage[];
+}
+
 export interface OnboardingSampleResult {
   sourceId: string;
   displayName: string;
   recentSessionCount: number;
   latestActivityAt: string | null;
   queries: OnboardingSampledQuery[];
+  /** Recent visible messages used only to identify the newest conversation. */
+  recentMessages?: OnboardingSampledMessage[];
   errors: Array<{ target: string; reason: string }>;
 }
 
@@ -32,6 +50,13 @@ export interface OnboardingInsightSampler {
   readonly displayName: string;
   detect(): Promise<boolean>;
   sampleRecentUserQueries(options: OnboardingInsightSampleOptions): Promise<OnboardingSampleResult>;
+}
+
+export interface OnboardingConversationWindowReader {
+  readConversation(
+    reference: OnboardingConversationReference,
+    options: Pick<OnboardingInsightSampleOptions, "maxQueryChars" | "deadlineMs" | "signal">
+  ): Promise<OnboardingConversationWindow | null>;
 }
 
 export function emptyOnboardingSampleResult(input: {

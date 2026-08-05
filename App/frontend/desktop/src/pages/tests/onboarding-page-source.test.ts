@@ -80,7 +80,7 @@ describe("OnboardingPage source", () => {
     expect(source).toContain("async function startFirstScanInBackground()");
     expect(source).toContain('if (!firstReportPayload) {');
     expect(source).toContain('setFirstScanStep("preparing_report");');
-    const reportDoneIndex = source.indexOf("onDone: (payload, _meta) => {");
+    const reportDoneIndex = source.indexOf("onDone: (payload, meta) => {");
     const reportDoneEndIndex = source.indexOf("}", source.indexOf("firstScanVisualComplete.current = true;", reportDoneIndex));
     expect(source.slice(reportDoneIndex, reportDoneEndIndex)).not.toContain('setFirstScanStep("report")');
     expect(source).toContain("<OnboardingScanAnimation");
@@ -89,11 +89,11 @@ describe("OnboardingPage source", () => {
     expect(source).toContain("function startFirstReport(seedAgents: DiscoveredAgent[])");
     expect(source).toContain("streamFirstEncounterReport(");
     expect(source).toContain("onAgents: (sampledAgents) => {");
-    expect(source).toContain("onChunk: (_delta) => {");
-    expect(source).toContain("setFirstReportShouldSimulate(true);");
+    expect(source).toContain("onChunk: (_delta, payload) => {");
+    expect(source).toContain("setFirstReportPayload(payload);");
+    expect(source).toContain("setFirstReportShouldSimulate(!meta.streamed);");
     expect(source).toContain("firstScanVisualComplete.current = true;");
     expect(source).toContain("setFirstScanStep(\"report\");");
-    expect(source).not.toContain("setFirstReportShouldSimulate(!meta.streamed);");
     expect(source).toContain("<FirstEncounterReport");
     expect(source).toContain("scheduleMemoryPanelCachePrefetch");
     expect(source).toContain("client: clients.memoryRuntime");
@@ -115,6 +115,7 @@ describe("OnboardingPage source", () => {
     expect(source).toContain("const activeFirstScanStep = guidanceCompleted ? null : (firstScanStep ?? resumedFirstScanStep);");
     expect(source).toContain("const guidanceCompleted = readGuidanceCompleted(");
     expect(source).toContain("startAgentSourceScan({");
+    expect(source).toContain('mode: "initial_subset"');
     expect(source).toContain(".updateOnboarding(patch)");
     expect(source).toContain("startFirstReport([]);");
     expect(source).toContain("void startFirstScanInBackground().catch((error)");
@@ -173,7 +174,7 @@ describe("OnboardingPage source", () => {
     expect(source).toContain("streamFirstEncounterReport");
     expect(source).toContain('event.type === "sampled"');
     expect(source).toContain("handlers.onAgents?.(toDiscoveredAgents(event.diagnostics));");
-    expect(source).toContain("handlers.onChunk(event.delta);");
+    expect(source).toContain("handlers.onChunk(event.delta, payload);");
     expect(source).toContain("handlers.onDone(payload, { streamed });");
     expect(source).toContain("emptyHistory: response.diagnostics.sampledQueryCount === 0");
     expect(streamApiIndex).toBeGreaterThanOrEqual(0);
@@ -229,8 +230,11 @@ describe("OnboardingPage source", () => {
     expect(taskLaunchSource).toContain("consumePendingFirstEncounterTaskLaunch");
     expect(taskLaunchSource).toContain("assistantContent");
     expect(taskLaunchSource).toContain("chatId");
-    expect(onboardingSource).toContain("function seedFirstEncounterReportChat(reportBody: string)");
-    expect(onboardingSource).toContain("void seedFirstEncounterReportChat(payload.body)");
+    expect(onboardingSource).toContain("function seedFirstEncounterReportChat(payload: FirstEncounterReportPayload)");
+    expect(onboardingSource).toContain("const prompt = payload.reportPrompt");
+    expect(onboardingSource).toContain("void seedFirstEncounterReportChat(payload)");
+    expect(onboardingSource).toContain("writeFirstEncounterRelayPrompt(");
+    expect(onboardingSource).toContain("payload.relayPrompt");
     expect(onboardingSource).toContain("seedWebuiChat({");
     expect(onboardingSource).toContain("writeFirstEncounterRelayChat(storage, seeded.chatId)");
     expect(onboardingSource).toContain("armFirstEncounterRelayChat(storage)");

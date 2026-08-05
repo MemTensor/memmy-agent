@@ -129,11 +129,14 @@ export interface MemoryRow {
 }
 
 export interface MemoryFilter {
+  userId?: string;
   sessionId?: string;
   conversationId?: string;
   agentId?: string;
   excludedAgentIds?: string[];
   appId?: string;
+  createdAtGte?: IsoTime;
+  createdAtLt?: IsoTime;
   memoryLayer?: MemoryLayer | MemoryLayer[];
   status?: MemoryStatus | MemoryStatus[];
   tags?: string[];

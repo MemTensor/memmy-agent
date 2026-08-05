@@ -1,40 +1,45 @@
 import { basename } from "node:path";
 import { homedir, userInfo } from "node:os";
 import {
-  OnboardingInsightActionSchema,
   OnboardingInsightReportResponseSchema,
-  type OnboardingInsightAction,
-  type OnboardingInsightActionType,
   type OnboardingInsightReportInput,
   type OnboardingInsightReportResponse,
   type OnboardingInsightReportStreamEvent
 } from "@memmy/local-api-contracts";
 import type {
+  OnboardingConversationReference,
+  OnboardingConversationWindow,
+  OnboardingConversationWindowReader,
   OnboardingInsightSampler,
   OnboardingSampleResult,
   OnboardingSampledQuery
 } from "../adapters/outbound/agent-source/insight-sampler-types.js";
 import { stripInlineMediaPayloads } from "../shared/inline-media-sanitizer.js";
+import type { OnboardingFirstReportMemoryWriter } from "./onboarding-first-report-memory-writer.js";
+import type { OnboardingTaskContextSummary, OnboardingTaskStatus } from "./onboarding-task-context.js";
 
 const DEFAULT_SAMPLE_OPTIONS = {
-  maxSessionFiles: 12,
-  maxQueries: 24,
+  maxSessionFiles: 6,
+  maxQueries: 12,
   maxQueryChars: 600,
   maxBytesPerFile: 768 * 1024,
-  deadlineMs: 10_000
+  deadlineMs: 3_000
 } as const;
 
 const FIRST_LOGIN_SCAN_DEADLINE_MS = DEFAULT_SAMPLE_OPTIONS.deadlineMs;
 const MAX_REPORT_QUERY_CHARS = DEFAULT_SAMPLE_OPTIONS.maxQueryChars;
-const MAX_BALANCED_QUERIES = 96;
-const MAX_RECENT_LLM_QUERIES = 10;
-const MAX_BALANCED_LLM_QUERIES = 50;
-const MAX_LLM_QUERIES = MAX_RECENT_LLM_QUERIES + MAX_BALANCED_LLM_QUERIES;
+const MAX_BALANCED_QUERIES = 84;
+const MAX_PREFERENCE_LLM_QUERIES = 24;
 const DEFAULT_LLM_TIMEOUT_MS = 90_000;
 const DEFAULT_LLM_MAX_TOKENS = 2_000;
 const MEMMY_ACCOUNT_AGENT_CHAT_THINKING_BUDGET = 500;
-const GENERATED_ACTIONS_MARKER = "[MEMMY_ACTIONS_JSON]";
 const MAX_GENERATED_OUTPUT_CHARS = 12_000;
+const GENERATED_REPORT_OPEN = "<memmy_report>";
+const GENERATED_REPORT_CLOSE = "</memmy_report>";
+const GENERATED_TASK_CONTEXT_OPEN = "<memmy_task_context>";
+const GENERATED_TASK_CONTEXT_CLOSE = "</memmy_task_context>";
+const GENERATED_NAKED_JSON_OPEN = "\n{";
+const GENERATED_JSON_FENCE_OPEN = "\n```json";
 
 const TOPIC_PATTERNS: ReadonlyArray<{ keyword: string; pattern: RegExp }> = [
   { keyword: "TypeScript", pattern: /\btypescript\b|\bts\b/i },
@@ -113,7 +118,9 @@ const USER_INSIGHT_RULES: ReadonlyArray<{
 
 export interface CreateOnboardingInsightServiceOptions {
   samplers: readonly OnboardingInsightSampler[];
+  conversationWindowReader?: OnboardingConversationWindowReader | null;
   reportGenerator?: OnboardingInsightReportGenerator | null;
+  memoryWriter?: OnboardingFirstReportMemoryWriter | null;
   agentModelResolver?: OnboardingInsightAgentTaskModelResolver | null;
   now?: () => number;
 }
@@ -128,18 +135,16 @@ export interface OnboardingInsightReportGenerator {
   streamReport?(input: OnboardingInsightGenerationInput): AsyncIterable<string>;
 }
 
-interface GeneratedReportResult {
-  reportMarkdown: string;
-  actions: OnboardingInsightAction[] | null;
-}
-
 export interface OnboardingInsightGenerationInput {
   locale: "zh-CN" | "en-US";
   profile: OnboardingInsightProfileSignals;
   sample: OnboardingInsightSampleSummary;
-  primaryAction: OnboardingInsightAction;
-  secondaryActions: OnboardingInsightAction[];
   signal?: AbortSignal;
+}
+
+interface GeneratedFirstReport {
+  reportMarkdown: string;
+  taskContext: OnboardingTaskContextSummary;
 }
 
 export interface OnboardingInsightSampleSummary {
@@ -152,6 +157,17 @@ export interface OnboardingInsightSampleSummary {
     workspacePath: string | null;
     text: string;
   }>;
+  latestConversation: {
+    agentSource: string;
+    conversationId: string;
+    latestActivityAt: string;
+    workspacePath: string | null;
+    messages: Array<{
+      role: "user" | "assistant" | "tool";
+      createdAt: string;
+      text: string;
+    }>;
+  } | null;
 }
 
 export interface OnboardingInsightProfileSignals {
@@ -165,12 +181,12 @@ export interface OnboardingInsightProfileSignals {
   taskCandidates: TaskCandidate[];
   highSignalQueries: OnboardingSampledQuery[];
   taskLikeQuery: OnboardingSampledQuery | null;
-  actionType: OnboardingInsightActionType;
 }
 
 interface SampleBundle {
   discovered: OnboardingSampleResult[];
   queries: OnboardingSampledQuery[];
+  latestConversation: OnboardingConversationWindow | null;
   elapsedMs: number;
 }
 
@@ -247,29 +263,30 @@ export function createOnboardingInsightService(options: CreateOnboardingInsightS
   return {
     async generateReport(input = {}, signal) {
       const startedAt = now();
-      const sample = await sampleRecentQueries(options.samplers, signal, now);
-      const locale = input.locale ?? inferLocale(sample.queries);
+      const sample = await sampleRecentQueries(options.samplers, options.conversationWindowReader, signal, now);
       const profile = buildProfileSignals(sample);
-      const elapsedMs = Math.max(0, now() - startedAt);
+      const locale = profile.preferredResponseLanguage ?? input.locale ?? inferLocale(sample.queries);
       const response = await buildReportResponse({
         profile,
         sample,
         locale,
-        elapsedMs,
         reportGenerator,
-        signal
+        memoryWriter: options.memoryWriter,
+        signal,
+        startedAt,
+        now
       });
       return OnboardingInsightReportResponseSchema.parse(response);
     },
     async *streamReport(input = {}, signal) {
       const startedAt = now();
-      const sample = await sampleRecentQueries(options.samplers, signal, now);
+      const sample = await sampleRecentQueries(options.samplers, options.conversationWindowReader, signal, now);
+      const profile = buildProfileSignals(sample);
+      const locale = profile.preferredResponseLanguage ?? input.locale ?? inferLocale(sample.queries);
       yield {
         type: "sampled",
-        diagnostics: diagnostics(sample, false, Math.max(0, now() - startedAt))
+        diagnostics: diagnostics(sample, false, Math.max(0, now() - startedAt), locale)
       };
-      const locale = input.locale ?? inferLocale(sample.queries);
-      const profile = buildProfileSignals(sample);
       const elapsedMs = Math.max(0, now() - startedAt);
       yield* streamReportResponse({
         profile,
@@ -277,6 +294,7 @@ export function createOnboardingInsightService(options: CreateOnboardingInsightS
         locale,
         elapsedMs,
         reportGenerator,
+        memoryWriter: options.memoryWriter,
         signal,
         startedAt,
         now
@@ -490,6 +508,7 @@ function createGoogleOnboardingInsightReportGenerator(
 
 async function sampleRecentQueries(
   samplers: readonly OnboardingInsightSampler[],
+  conversationWindowReader: OnboardingConversationWindowReader | null | undefined,
   signal: AbortSignal | undefined,
   now: () => number
 ): Promise<SampleBundle> {
@@ -499,12 +518,71 @@ async function sampleRecentQueries(
   const results = await Promise.all(samplers.map((sampler) => sampleSamplerWithinDeadline(sampler, sampleSignal)));
   const discovered = results.filter((result): result is OnboardingSampleResult => Boolean(result));
   const queries = selectBalancedQueries(discovered, MAX_BALANCED_QUERIES);
+  const latestReference = resolveLatestConversationReference(discovered);
+  const latestConversation = latestReference
+    ? await loadLatestConversation(latestReference, discovered, conversationWindowReader, sampleSignal)
+    : null;
 
   return {
     discovered,
     queries,
+    latestConversation,
     elapsedMs: Math.max(0, now() - startedAt)
   };
+}
+
+function resolveLatestConversationReference(
+  results: readonly OnboardingSampleResult[]
+): OnboardingConversationReference | null {
+  const candidates = results.flatMap((result) => {
+    const messages = result.recentMessages ?? result.queries.map((query) => ({ ...query, role: "user" as const }));
+    return messages
+      .filter((message) => message.role === "user" || message.role === "assistant")
+      .map((message) => ({ result, message }));
+  }).sort((left, right) =>
+    Date.parse(right.message.createdAt) - Date.parse(left.message.createdAt) ||
+    left.result.sourceId.localeCompare(right.result.sourceId) ||
+    left.message.conversationId.localeCompare(right.message.conversationId)
+  );
+  const latest = candidates[0];
+  if (!latest) {
+    return null;
+  }
+  return {
+    sourceId: latest.result.sourceId,
+    displayName: latest.result.displayName,
+    conversationId: latest.message.conversationId,
+    latestActivityAt: latest.message.createdAt,
+    workspacePath: latest.message.workspacePath
+  };
+}
+
+async function loadLatestConversation(
+  reference: OnboardingConversationReference,
+  results: readonly OnboardingSampleResult[],
+  reader: OnboardingConversationWindowReader | null | undefined,
+  signal: AbortSignal
+): Promise<OnboardingConversationWindow | null> {
+  if (reader) {
+    try {
+      const loaded = await reader.readConversation(reference, {
+        maxQueryChars: MAX_REPORT_QUERY_CHARS,
+        deadlineMs: FIRST_LOGIN_SCAN_DEADLINE_MS,
+        signal
+      });
+      if (loaded?.messages.length) {
+        return loaded;
+      }
+    } catch {
+      // The shallow probe below still preserves the latest visible conversation.
+    }
+  }
+
+  const source = results.find((result) => result.sourceId === reference.sourceId);
+  const messages = (source?.recentMessages ?? source?.queries.map((query) => ({ ...query, role: "user" as const })) ?? [])
+    .filter((message) => message.conversationId === reference.conversationId)
+    .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
+  return messages.length > 0 ? { ...reference, messages } : null;
 }
 
 async function sampleSamplerWithinDeadline(
@@ -570,6 +648,8 @@ async function sampleSampler(
 }
 
 function buildProfileSignals(sample: SampleBundle): OnboardingInsightProfileSignals {
+  const taskQueries = latestConversationUserQueries(sample.latestConversation);
+  const taskSignals = taskQueries.length > 0 ? taskQueries : sample.queries;
   const nameHints = resolveNameHints(sample.queries);
   const preferredResponseLanguage = inferPreferredResponseLanguage(sample.queries);
   const topAgents = sample.discovered
@@ -581,14 +661,12 @@ function buildProfileSignals(sample: SampleBundle): OnboardingInsightProfileSign
     }))
     .filter((agent) => agent.queryCount > 0)
     .sort((left, right) => right.queryCount - left.queryCount || left.displayName.localeCompare(right.displayName));
-  const topKeywords = extractTopKeywords(sample.queries);
-  const topProjects = extractTopProjects(sample.queries);
+  const topKeywords = extractTopKeywords(taskSignals);
+  const topProjects = extractTopProjects(taskSignals);
   const userInsights = extractUserInsights(sample.queries);
-  const taskCandidates = extractTaskCandidates(sample.queries, sample.discovered);
-  const taskLikeQuery = taskCandidates[0]?.latestQuery ?? findTaskLikeQuery(sample.queries);
-  const highSignalQueries = sortQueriesRecent(sample.queries.filter((query) => HIGH_SIGNAL_PATTERN.test(query.text))).slice(0, 30);
-  const allText = sample.queries.map((query) => query.text).join("\n");
-  const sharedSignalCount = countSharedSignals(sample.discovered, topKeywords);
+  const taskCandidates = extractTaskCandidates(taskSignals, sample.discovered);
+  const taskLikeQuery = taskCandidates[0]?.latestQuery ?? findTaskLikeQuery(taskSignals);
+  const highSignalQueries = sortQueriesRecent(taskSignals.filter((query) => HIGH_SIGNAL_PATTERN.test(query.text))).slice(0, 30);
 
   return {
     nameHints,
@@ -600,46 +678,54 @@ function buildProfileSignals(sample: SampleBundle): OnboardingInsightProfileSign
     userInsights,
     taskCandidates,
     highSignalQueries,
-    taskLikeQuery,
-    actionType: decideActionType({ sharedSignalCount, allText, taskLikeQuery })
+    taskLikeQuery
   };
+}
+
+function latestConversationUserQueries(conversation: OnboardingConversationWindow | null): OnboardingSampledQuery[] {
+  return conversation?.messages.flatMap((message) => message.role === "user" ? [{
+    sourceId: message.sourceId,
+    conversationId: message.conversationId,
+    messageId: message.messageId,
+    createdAt: message.createdAt,
+    text: message.text,
+    workspacePath: message.workspacePath
+  }] : []) ?? [];
 }
 
 async function buildReportResponse(input: {
   profile: OnboardingInsightProfileSignals;
   sample: SampleBundle;
   locale: "zh-CN" | "en-US";
-  elapsedMs: number;
   reportGenerator: OnboardingInsightReportGenerator | null | undefined;
+  memoryWriter: OnboardingFirstReportMemoryWriter | null | undefined;
   signal: AbortSignal | undefined;
+  startedAt: number;
+  now: () => number;
 }): Promise<OnboardingInsightReportResponse> {
   if (input.sample.queries.length === 0) {
     return {
       status: "ready",
       reportMarkdown: renderEmptyHistoryReport(input.locale),
-      secondaryActions: [],
-      diagnostics: diagnostics(input.sample, false, input.elapsedMs)
+      diagnostics: diagnostics(input.sample, false, Math.max(0, input.now() - input.startedAt), input.locale)
     };
   }
 
-  const { primaryAction, secondaryActions } = buildReportActions(input.profile, input.sample, input.locale);
-  const fallbackActions = [primaryAction, ...secondaryActions];
-  const generatedReport = await generateReportSafely(input.reportGenerator, {
+  const generationInput: OnboardingInsightGenerationInput = {
     locale: input.locale,
     profile: input.profile,
     sample: toSampleSummary(input.sample),
-    primaryAction,
-    secondaryActions,
     signal: input.signal
-  }, fallbackActions);
-  const actions = generatedReport?.actions ?? fallbackActions;
+  };
+  const generatedReport = await generateReportSafely(input.reportGenerator, generationInput);
+  const reportMarkdown = generatedReport?.reportMarkdown ?? renderFallbackReport(input.profile, input.sample, input.locale);
+  const taskContext = generatedReport?.taskContext ?? buildFallbackTaskContext(generationInput);
+  await persistFirstReportMemory(input.memoryWriter, input.sample, input.locale, reportMarkdown, taskContext);
 
   return {
     status: "ready",
-    reportMarkdown: generatedReport?.reportMarkdown ?? renderFallbackReport(input.profile, input.locale),
-    primaryAction: actions[0],
-    secondaryActions: actions.slice(1),
-    diagnostics: diagnostics(input.sample, Boolean(generatedReport), input.elapsedMs)
+    reportMarkdown,
+    diagnostics: diagnostics(input.sample, Boolean(generatedReport), Math.max(0, input.now() - input.startedAt), input.locale)
   };
 }
 
@@ -649,6 +735,7 @@ async function* streamReportResponse(input: {
   locale: "zh-CN" | "en-US";
   elapsedMs: number;
   reportGenerator: OnboardingInsightReportGenerator | null | undefined;
+  memoryWriter: OnboardingFirstReportMemoryWriter | null | undefined;
   signal: AbortSignal | undefined;
   startedAt: number;
   now: () => number;
@@ -659,26 +746,20 @@ async function* streamReportResponse(input: {
       response: {
         status: "ready",
         reportMarkdown: renderEmptyHistoryReport(input.locale),
-        secondaryActions: [],
-        diagnostics: diagnostics(input.sample, false, input.elapsedMs)
+        diagnostics: diagnostics(input.sample, false, input.elapsedMs, input.locale)
       }
     };
     return;
   }
 
-  const { primaryAction, secondaryActions } = buildReportActions(input.profile, input.sample, input.locale);
-  const fallbackActions = [primaryAction, ...secondaryActions];
   const generationInput: OnboardingInsightGenerationInput = {
     locale: input.locale,
     profile: input.profile,
     sample: toSampleSummary(input.sample),
-    primaryAction,
-    secondaryActions,
     signal: input.signal
   };
   let rawOutput = "";
-  let pendingReport = "";
-  let reachedActions = false;
+  const streamParser = new FirstReportStreamParser();
 
   if (input.reportGenerator?.streamReport) {
     try {
@@ -687,66 +768,45 @@ async function* streamReportResponse(input: {
           continue;
         }
         rawOutput += delta;
-        if (reachedActions) {
-          continue;
-        }
-
-        pendingReport += delta;
-        const markerIndex = pendingReport.indexOf(GENERATED_ACTIONS_MARKER);
-        if (markerIndex >= 0) {
-          const reportDelta = pendingReport.slice(0, markerIndex);
+        for (const reportDelta of streamParser.push(delta)) {
           if (reportDelta) {
             yield { type: "chunk", delta: reportDelta };
           }
-          pendingReport = "";
-          reachedActions = true;
-          continue;
         }
-
-        const heldLength = longestMarkerPrefixSuffixLength(pendingReport);
-        const reportDelta = pendingReport.slice(0, pendingReport.length - heldLength);
+      }
+      for (const reportDelta of streamParser.finish()) {
         if (reportDelta) {
           yield { type: "chunk", delta: reportDelta };
         }
-        pendingReport = pendingReport.slice(pendingReport.length - heldLength);
-      }
-      if (!reachedActions && pendingReport) {
-        yield { type: "chunk", delta: pendingReport };
       }
     } catch {
       rawOutput = "";
     }
   }
 
-  const generatedReport = parseGeneratedReportOutput(rawOutput, fallbackActions);
-  const actions = generatedReport?.actions ?? fallbackActions;
+  const generatedReport = input.reportGenerator?.streamReport
+    ? parseGeneratedFirstReport(rawOutput, generationInput)
+    : await generateReportSafely(input.reportGenerator, generationInput);
+  const reportMarkdown = generatedReport?.reportMarkdown ?? renderFallbackReport(input.profile, input.sample, input.locale);
+  const taskContext = generatedReport?.taskContext ?? buildFallbackTaskContext(generationInput);
+  await persistFirstReportMemory(input.memoryWriter, input.sample, input.locale, reportMarkdown, taskContext);
 
   yield {
     type: "done",
     response: {
       status: "ready",
-      reportMarkdown: generatedReport?.reportMarkdown ?? renderFallbackReport(input.profile, input.locale),
-      primaryAction: actions[0],
-      secondaryActions: actions.slice(1),
-      diagnostics: diagnostics(input.sample, Boolean(generatedReport), Math.max(input.elapsedMs, input.now() - input.startedAt))
+      reportMarkdown,
+      diagnostics: diagnostics(input.sample, Boolean(generatedReport), Math.max(input.elapsedMs, input.now() - input.startedAt), input.locale)
     }
   };
 }
 
-function buildReportActions(
+function renderFallbackReport(
   profile: OnboardingInsightProfileSignals,
   sample: SampleBundle,
   locale: "zh-CN" | "en-US"
-): { primaryAction: OnboardingInsightAction; secondaryActions: OnboardingInsightAction[] } {
-  const primaryAction = buildAction(profile.actionType, profile, sample.queries, locale);
-  return {
-    primaryAction,
-    secondaryActions: buildSecondaryActions(primaryAction.type, profile, sample.queries, locale)
-  };
-}
-
-function renderFallbackReport(profile: OnboardingInsightProfileSignals, locale: "zh-CN" | "en-US"): string {
-  return locale === "en-US" ? renderEnglishReport(profile) : renderChineseReport(profile);
+): string {
+  return locale === "en-US" ? renderEnglishReport(profile, sample) : renderChineseReport(profile, sample);
 }
 
 function renderEmptyHistoryReport(locale: "zh-CN" | "en-US"): string {
@@ -761,106 +821,40 @@ function renderEmptyHistoryReport(locale: "zh-CN" | "en-US"): string {
 
 async function generateReportSafely(
   reportGenerator: OnboardingInsightReportGenerator | null | undefined,
-  input: OnboardingInsightGenerationInput,
-  fallbackActions: readonly OnboardingInsightAction[]
-): Promise<GeneratedReportResult | null> {
+  input: OnboardingInsightGenerationInput
+): Promise<GeneratedFirstReport | null> {
   try {
-    return parseGeneratedReportOutput(await reportGenerator?.generateReport(input) ?? null, fallbackActions);
+    return parseGeneratedFirstReport(await reportGenerator?.generateReport(input) ?? null, input);
   } catch {
     return null;
   }
 }
 
-function parseGeneratedReportOutput(
-  output: string | null,
-  fallbackActions: readonly OnboardingInsightAction[]
-): GeneratedReportResult | null {
-  const normalized = normalizeGeneratedOutput(output);
-  if (!normalized) {
-    return null;
+async function persistFirstReportMemory(
+  memoryWriter: OnboardingFirstReportMemoryWriter | null | undefined,
+  sample: SampleBundle,
+  locale: "zh-CN" | "en-US",
+  reportMarkdown: string,
+  taskContext: OnboardingTaskContextSummary
+): Promise<void> {
+  const latestConversation = toSampleSummary(sample).latestConversation;
+  if (!memoryWriter || !latestConversation) {
+    return;
   }
-
-  const markerIndex = normalized.indexOf(GENERATED_ACTIONS_MARKER);
-  const reportMarkdown = sanitizeGeneratedReport(markerIndex >= 0 ? normalized.slice(0, markerIndex) : normalized);
-  if (!reportMarkdown) {
-    return null;
-  }
-
-  return {
+  await memoryWriter.write({
+    locale,
     reportMarkdown,
-    actions: markerIndex >= 0
-      ? parseGeneratedActions(normalized.slice(markerIndex + GENERATED_ACTIONS_MARKER.length), fallbackActions)
-      : null
-  };
-}
-
-function parseGeneratedActions(
-  rawJson: string,
-  fallbackActions: readonly OnboardingInsightAction[]
-): OnboardingInsightAction[] | null {
-  try {
-    const parsed = JSON.parse(rawJson) as { actions?: unknown };
-    if (!Array.isArray(parsed.actions) || parsed.actions.length !== fallbackActions.length) {
-      return null;
+    projects: latestConversation.workspacePath
+      ? [basename(latestConversation.workspacePath)]
+      : taskContext.topic ? [taskContext.topic] : [],
+    keywords: extractTaskContextKeywords(taskContext),
+    taskContext,
+    latestConversation: {
+      agentSource: latestConversation.agentSource,
+      conversationId: latestConversation.conversationId,
+      workspacePath: latestConversation.workspacePath
     }
-    const generatedActions = parsed.actions;
-
-    const actions = fallbackActions.map((fallback, index) => {
-      const candidate = generatedActions[index];
-      if (!candidate || typeof candidate !== "object") {
-        return null;
-      }
-      const fields = candidate as Record<string, unknown>;
-      if (fields.type !== fallback.type) {
-        return null;
-      }
-
-      const buttonLabel = generatedActionText(fields.buttonLabel, 1, 40, false);
-      const description = generatedActionText(fields.description, 1, 160, false);
-      const suggestedPrompt = generatedActionText(fields.suggestedPrompt, 24, 2_000, true);
-      if (!buttonLabel || !description || !suggestedPrompt) {
-        return null;
-      }
-
-      const result = OnboardingInsightActionSchema.safeParse({
-        ...fallback,
-        buttonLabel,
-        description,
-        suggestedPrompt
-      });
-      return result.success ? result.data : null;
-    });
-
-    if (actions.some((action) => !action)) {
-      return null;
-    }
-    const validActions = actions as OnboardingInsightAction[];
-    if (
-      new Set(validActions.map((action) => action.buttonLabel)).size !== validActions.length ||
-      new Set(validActions.map((action) => action.suggestedPrompt)).size !== validActions.length
-    ) {
-      return null;
-    }
-    return validActions;
-  } catch {
-    return null;
-  }
-}
-
-function generatedActionText(value: unknown, minLength: number, maxLength: number, allowLineBreaks: boolean): string | null {
-  if (typeof value !== "string") {
-    return null;
-  }
-  const text = value.trim();
-  if (
-    text.length < minLength ||
-    text.length > maxLength ||
-    text.includes(GENERATED_ACTIONS_MARKER) ||
-    (!allowLineBreaks && /[\r\n]/.test(text))
-  ) {
-    return null;
-  }
-  return text;
+  });
 }
 
 function normalizeGeneratedOutput(output: string | null): string | null {
@@ -868,72 +862,376 @@ function normalizeGeneratedOutput(output: string | null): string | null {
   return trimmed ? trimmed.slice(0, MAX_GENERATED_OUTPUT_CHARS) : null;
 }
 
-function longestMarkerPrefixSuffixLength(value: string): number {
-  const maxLength = Math.min(value.length, GENERATED_ACTIONS_MARKER.length - 1);
+function parseGeneratedFirstReport(
+  output: string | null,
+  input: OnboardingInsightGenerationInput
+): GeneratedFirstReport | null {
+  const normalized = normalizeGeneratedOutput(output);
+  if (!normalized) {
+    return null;
+  }
+
+  const reportStart = normalized.indexOf(GENERATED_REPORT_OPEN);
+  const reportContentStart = reportStart >= 0 ? reportStart + GENERATED_REPORT_OPEN.length : 0;
+  const contextSection = findGeneratedTaskContext(normalized);
+  const reportClose = normalized.indexOf(GENERATED_REPORT_CLOSE, reportContentStart);
+  const reportEnd = [reportClose, contextSection?.start ?? -1]
+    .filter((index) => index >= reportContentStart)
+    .sort((left, right) => left - right)[0] ?? normalized.length;
+
+  const reportMarkdown = sanitizeGeneratedReport(normalized.slice(
+    reportContentStart,
+    reportEnd
+  ));
+  if (!reportMarkdown) {
+    return null;
+  }
+
+  const taskContext = contextSection?.taskContext ?? buildFallbackTaskContext(input);
+
+  return { reportMarkdown, taskContext };
+}
+
+function findGeneratedTaskContext(output: string): { start: number; taskContext: OnboardingTaskContextSummary | null } | null {
+  const taggedStart = output.indexOf(GENERATED_TASK_CONTEXT_OPEN);
+  if (taggedStart >= 0) {
+    const contentStart = taggedStart + GENERATED_TASK_CONTEXT_OPEN.length;
+    const taggedEnd = output.indexOf(GENERATED_TASK_CONTEXT_CLOSE, contentStart);
+    return {
+      start: taggedStart,
+      taskContext: parseGeneratedTaskContext(output.slice(contentStart, taggedEnd >= 0 ? taggedEnd : output.length))
+    };
+  }
+
+  const candidates = [GENERATED_JSON_FENCE_OPEN, GENERATED_NAKED_JSON_OPEN]
+    .flatMap((marker) => {
+      const indexes: number[] = [];
+      let index = output.indexOf(marker);
+      while (index >= 0) {
+        indexes.push(index);
+        index = output.indexOf(marker, index + marker.length);
+      }
+      return indexes;
+    })
+    .sort((left, right) => left - right);
+  for (const start of candidates) {
+    const taskContext = parseGeneratedTaskContext(output.slice(start + 1));
+    if (taskContext) {
+      return { start, taskContext };
+    }
+  }
+  return null;
+}
+
+function parseGeneratedTaskContext(rawContext: string): OnboardingTaskContextSummary | null {
+  const json = rawContext.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+  try {
+    return normalizeGeneratedTaskContext(JSON.parse(json));
+  } catch {
+    return null;
+  }
+}
+
+function normalizeGeneratedTaskContext(value: unknown): OnboardingTaskContextSummary | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const normalized: OnboardingTaskContextSummary = {
+    topic: contextString(record.topic, 160),
+    userGoal: contextString(record.userGoal, 320),
+    latestRequest: contextString(record.latestRequest, 320),
+    status: normalizeTaskStatus(record.status),
+    currentState: contextString(record.currentState, 400),
+    agentActions: contextStringList(record.agentActions, 3, 260),
+    verifiedResults: contextStringList(record.verifiedResults, 3, 260),
+    unresolvedItems: contextStringList(record.unresolvedItems, 3, 260),
+    continuationPoint: contextString(record.continuationPoint, 320),
+    trajectorySummary: contextString(record.trajectorySummary, 800)
+  };
+  return normalized.topic || normalized.userGoal || normalized.latestRequest || normalized.currentState ||
+    normalized.trajectorySummary ? normalized : null;
+}
+
+function normalizeTaskStatus(value: unknown): OnboardingTaskStatus {
+  return value === "pending" || value === "active" || value === "waiting" ||
+    value === "completed" || value === "uncertain" ? value : "uncertain";
+}
+
+function contextString(value: unknown, maxChars: number): string {
+  if (typeof value !== "string") {
+    return "";
+  }
+  return stripInlineMediaPayloads(value).replace(/\s+/g, " ").trim().slice(0, maxChars);
+}
+
+function contextStringList(value: unknown, maxItems: number, maxChars: number): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return uniqueStrings(value.map((item) => contextString(item, maxChars))).slice(0, maxItems);
+}
+
+function extractTaskContextKeywords(context: OnboardingTaskContextSummary): string[] {
+  const text = [
+    context.topic,
+    context.userGoal,
+    context.latestRequest,
+    context.currentState,
+    context.continuationPoint,
+    context.trajectorySummary
+  ].join(" ");
+  return TOPIC_PATTERNS.filter((topic) => topic.pattern.test(text)).map((topic) => topic.keyword).slice(0, 8);
+}
+
+function buildFallbackTaskContext(input: OnboardingInsightGenerationInput): OnboardingTaskContextSummary {
+  const conversation = input.sample.latestConversation;
+  const messages = conversation?.messages ?? [];
+  const userMessages = messages.filter((message) => message.role === "user");
+  const assistantMessages = messages.filter((message) => message.role === "assistant");
+  const toolMessages = messages.filter((message) => message.role === "tool");
+  const firstUser = userMessages[0]?.text ?? "";
+  const latestUser = userMessages.at(-1)?.text ?? "";
+  const latestAssistant = assistantMessages.at(-1)?.text ?? "";
+  const latestTool = toolMessages.at(-1)?.text ?? "";
+  const topic = conversation?.workspacePath
+    ? basename(conversation.workspacePath)
+    : input.profile.taskCandidates[0]?.project ?? input.profile.topProjects[0] ?? input.profile.topKeywords.slice(0, 3).join(", ");
+  const latestRequest = summarizeContextMessage(latestUser, 240);
+  const userGoal = summarizeContextMessage(input.profile.taskCandidates[0]?.summary || firstUser || latestUser, 280);
+  const agentAction = summarizeContextMessage(latestAssistant, 220);
+  const verifiedResult = summarizeContextMessage(latestTool, 220);
+  const status = inferFallbackTaskStatus(messages);
+  const currentState = verifiedResult || agentAction || latestRequest;
+  const continuationPoint = status === "pending" || status === "active"
+    ? (input.locale === "zh-CN" ? `从最近请求继续：${latestRequest}` : `Continue from the latest request: ${latestRequest}`)
+    : status === "waiting"
+      ? (input.locale === "zh-CN" ? "先确认当前等待用户决定的事项，再继续任务。" : "Resolve the item awaiting the user's decision, then continue the task.")
+      : "";
+
+  return {
+    topic,
+    userGoal,
+    latestRequest,
+    status,
+    currentState,
+    agentActions: agentAction ? [agentAction] : [],
+    verifiedResults: verifiedResult ? [verifiedResult] : [],
+    unresolvedItems: [],
+    continuationPoint,
+    trajectorySummary: renderFallbackTrajectory({
+      locale: input.locale,
+      firstUser: summarizeContextMessage(firstUser, 180),
+      latestRequest,
+      agentAction,
+      verifiedResult
+    })
+  };
+}
+
+function summarizeContextMessage(text: string, maxChars: number): string {
+  const normalized = stripInlineMediaPayloads(text)
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (normalized.length <= maxChars) {
+    return normalized;
+  }
+  const sentence = normalized.slice(0, maxChars).replace(/[，,；;：:\s]+\S*$/, "").trim();
+  return `${sentence || normalized.slice(0, maxChars).trim()}…`;
+}
+
+function inferFallbackTaskStatus(
+  messages: ReadonlyArray<{ role: "user" | "assistant" | "tool"; text: string }>
+): OnboardingTaskStatus {
+  let latestUserIndex = -1;
+  let latestAssistantIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const role = messages[index]?.role;
+    if (latestUserIndex < 0 && role === "user") latestUserIndex = index;
+    if (latestAssistantIndex < 0 && role === "assistant") latestAssistantIndex = index;
+    if (latestUserIndex >= 0 && latestAssistantIndex >= 0) break;
+  }
+  if (latestUserIndex < 0) {
+    return "uncertain";
+  }
+  if (latestUserIndex > latestAssistantIndex) {
+    return "pending";
+  }
+  const latestAssistant = latestAssistantIndex >= 0 ? messages[latestAssistantIndex]?.text ?? "" : "";
+  if (/等待|待用户|需要你|请确认|waiting|need your|please confirm/i.test(latestAssistant)) {
+    return "waiting";
+  }
+  if (/已完成|已实现|测试通过|验证通过|已推送|\bdone\b|\bcompleted\b|\bimplemented\b|\btests? passed\b|\bpushed\b/i.test(latestAssistant) &&
+    !/未完成|失败|没有通过|not completed|failed|did not pass/i.test(latestAssistant)) {
+    return "completed";
+  }
+  return "active";
+}
+
+function renderFallbackTrajectory(input: {
+  locale: "zh-CN" | "en-US";
+  firstUser: string;
+  latestRequest: string;
+  agentAction: string;
+  verifiedResult: string;
+}): string {
+  const parts = input.locale === "zh-CN"
+    ? [
+      input.firstUser && input.firstUser !== input.latestRequest ? `任务起点：${input.firstUser}` : "",
+      input.latestRequest ? `最近要求：${input.latestRequest}` : "",
+      input.agentAction ? `Agent 最近反馈：${input.agentAction}` : "",
+      input.verifiedResult ? `最近验证：${input.verifiedResult}` : ""
+    ]
+    : [
+      input.firstUser && input.firstUser !== input.latestRequest ? `Starting point: ${input.firstUser}` : "",
+      input.latestRequest ? `Latest request: ${input.latestRequest}` : "",
+      input.agentAction ? `Latest Agent update: ${input.agentAction}` : "",
+      input.verifiedResult ? `Latest verification: ${input.verifiedResult}` : ""
+    ];
+  return parts.filter(Boolean).join(input.locale === "zh-CN" ? "；" : "; ");
+}
+
+class FirstReportStreamParser {
+  private mode: "prefix" | "report" | "hidden" | "plain" = "prefix";
+  private buffer = "";
+
+  push(delta: string): string[] {
+    if (this.mode === "hidden") {
+      return [];
+    }
+    this.buffer += delta;
+    if (this.mode === "prefix") {
+      const candidate = this.buffer.trimStart();
+      if (!candidate || GENERATED_REPORT_OPEN.startsWith(candidate)) {
+        return [];
+      }
+      if (!candidate.startsWith(GENERATED_REPORT_OPEN)) {
+        this.mode = "plain";
+        return this.drainVisibleText([
+          GENERATED_TASK_CONTEXT_OPEN,
+          GENERATED_REPORT_CLOSE,
+          GENERATED_JSON_FENCE_OPEN,
+          GENERATED_NAKED_JSON_OPEN
+        ]);
+      }
+      this.mode = "report";
+      this.buffer = candidate.slice(GENERATED_REPORT_OPEN.length);
+    }
+    return this.mode === "plain"
+      ? this.drainVisibleText([
+          GENERATED_TASK_CONTEXT_OPEN,
+          GENERATED_REPORT_CLOSE,
+          GENERATED_JSON_FENCE_OPEN,
+          GENERATED_NAKED_JSON_OPEN
+        ])
+      : this.drainVisibleText([
+          GENERATED_REPORT_CLOSE,
+          GENERATED_TASK_CONTEXT_OPEN,
+          GENERATED_JSON_FENCE_OPEN,
+          GENERATED_NAKED_JSON_OPEN
+        ]);
+  }
+
+  finish(): string[] {
+    if (this.mode === "prefix" || this.mode === "report" || this.mode === "plain") {
+      const remainder = this.buffer;
+      this.buffer = "";
+      const isPartialInternalMarker = [
+        GENERATED_REPORT_CLOSE,
+        GENERATED_TASK_CONTEXT_OPEN,
+        GENERATED_JSON_FENCE_OPEN,
+        GENERATED_NAKED_JSON_OPEN
+      ].some((marker) => marker.startsWith(remainder));
+      return remainder && !isPartialInternalMarker ? [remainder] : [];
+    }
+    return [];
+  }
+
+  private drainVisibleText(delimiters: readonly string[]): string[] {
+    const delimiterIndex = delimiters
+      .map((delimiter) => this.buffer.indexOf(delimiter))
+      .filter((index) => index >= 0)
+      .sort((left, right) => left - right)[0];
+    if (delimiterIndex !== undefined) {
+      const report = this.buffer.slice(0, delimiterIndex);
+      this.buffer = "";
+      this.mode = "hidden";
+      return report ? [report] : [];
+    }
+    const retainedChars = Math.max(...delimiters.map((delimiter) => matchingDelimiterSuffixLength(this.buffer, delimiter)));
+    const report = this.buffer.slice(0, this.buffer.length - retainedChars);
+    this.buffer = this.buffer.slice(this.buffer.length - retainedChars);
+    return report ? [report] : [];
+  }
+}
+
+function matchingDelimiterSuffixLength(value: string, delimiter: string): number {
+  const maxLength = Math.min(value.length, delimiter.length - 1);
   for (let length = maxLength; length > 0; length -= 1) {
-    if (GENERATED_ACTIONS_MARKER.startsWith(value.slice(-length))) {
+    if (value.endsWith(delimiter.slice(0, length))) {
       return length;
     }
   }
   return 0;
 }
 
-function renderChineseReport(profile: OnboardingInsightProfileSignals): string {
+function renderChineseReport(profile: OnboardingInsightProfileSignals, sample: SampleBundle): string {
   const lines: string[] = [];
   const nameLine = renderChineseNameLine(profile.nameHints);
   if (nameLine) {
     lines.push(nameLine);
   }
 
-  const primaryTask = profile.taskCandidates[0] ?? null;
-  if (primaryTask) {
-    lines.push(`我看你最近主要在推进 ${primaryTask.title}。${renderChineseTaskSummary(primaryTask)}`);
-  } else if (profile.topProjects.length > 0 || profile.topKeywords.length > 0) {
-    lines.push(`我先捕捉到的重点是 ${[...profile.topProjects.slice(0, 2), ...profile.topKeywords.slice(0, 4)].join("、")}。`);
-  }
+  const preferenceLines = [
+    renderContextLanguagePreference(profile, "zh-CN"),
+    ...profile.userInsights.slice(0, 4).map((insight) => insight.textZh)
+  ].filter((line): line is string => Boolean(line));
+  lines.push(`## 你的偏好\n${preferenceLines.length > 0 ? preferenceLines.map((line) => `- ${line}`).join("\n") : "目前只有少量用户表达，我还不会替你下偏好结论。"}`);
 
-  if (profile.userInsights.length > 0) {
-    lines.push(`你的工作方式也有几个稳定信号：${profile.userInsights.slice(0, 3).map((insight) => insight.textZh).join("")}`);
-  }
+  const conversation = sample.latestConversation;
+  const context = buildFallbackTaskContext({ locale: "zh-CN", profile, sample: toSampleSummary(sample) });
+  const memoryLines = [
+    conversation ? `最近一次会话来自 ${conversation.displayName}${conversation.workspacePath ? `，项目路径是 ${conversation.workspacePath}` : ""}。` : null,
+    context.userGoal ? `用户目标：${context.userGoal}` : null,
+    context.currentState ? `当前状态：${context.currentState}` : null,
+    context.agentActions.length > 0 ? `Agent 已做：${context.agentActions.join("；")}` : null,
+    context.verifiedResults.length > 0 ? `已验证结果：${context.verifiedResults.join("；")}` : "目前没有明确的验证结果。",
+    context.unresolvedItems.length > 0 ? `仍待处理：${context.unresolvedItems.join("；")}` : null
+  ].filter((line): line is string => Boolean(line));
+  lines.push(`## 最近项目记忆\n${memoryLines.join("\n\n")}`);
 
-  const relatedAgents = profile.taskCandidates[0]?.relatedAgents.length
-    ? profile.taskCandidates[0].relatedAgents
-    : profile.activeAgentNames.slice(0, 3);
-  if (relatedAgents.length > 1) {
-    lines.push(`这些线索分散在 ${relatedAgents.join("、")} 里，我可以先帮你合成一段可继续执行的上下文。`);
-  } else {
-    lines.push("我可以先把最近任务整理成一段可继续执行的上下文。");
-  }
+  lines.push(`## 接下来可以做\n${context.continuationPoint ? `1. ${context.continuationPoint}` : "当前记录中没有明确的未完成待办。"}`);
 
   return lines.join("\n\n");
 }
 
-function renderEnglishReport(profile: OnboardingInsightProfileSignals): string {
+function renderEnglishReport(profile: OnboardingInsightProfileSignals, sample: SampleBundle): string {
   const lines: string[] = [];
   const nameLine = renderEnglishNameLine(profile.nameHints);
   if (nameLine) {
     lines.push(nameLine);
   }
 
-  const primaryTask = profile.taskCandidates[0] ?? null;
-  if (primaryTask) {
-    lines.push(`You seem to be focused on ${renderEnglishTaskTitle(primaryTask)}. ${renderEnglishTaskSummary(primaryTask)}`);
-  } else if (profile.topProjects.length > 0 || profile.topKeywords.length > 0) {
-    lines.push(`The strongest signals I see are ${[...profile.topProjects.slice(0, 2), ...profile.topKeywords.slice(0, 4)].join(", ")}.`);
-  }
+  const preferenceLines = [
+    renderContextLanguagePreference(profile, "en-US"),
+    ...profile.userInsights.slice(0, 4).map((insight) => insight.textEn)
+  ].filter((line): line is string => Boolean(line));
+  lines.push(`## Your preferences\n${preferenceLines.length > 0 ? preferenceLines.map((line) => `- ${line}`).join("\n") : "I only have a few user-authored signals, so I will not overstate your preferences yet."}`);
 
-  if (profile.userInsights.length > 0) {
-    lines.push(`Your working style has a few stable signals: ${profile.userInsights.slice(0, 3).map((insight) => insight.textEn).join(" ")}`);
-  }
+  const conversation = sample.latestConversation;
+  const context = buildFallbackTaskContext({ locale: "en-US", profile, sample: toSampleSummary(sample) });
+  const memoryLines = [
+    conversation ? `Your newest conversation is from ${conversation.displayName}${conversation.workspacePath ? `, at ${conversation.workspacePath}` : ""}.` : null,
+    context.userGoal ? `User goal: ${context.userGoal}` : null,
+    context.currentState ? `Current state: ${context.currentState}` : null,
+    context.agentActions.length > 0 ? `Agent actions: ${context.agentActions.join("; ")}` : null,
+    context.verifiedResults.length > 0 ? `Verified results: ${context.verifiedResults.join("; ")}` : "There is no explicit verified result yet.",
+    context.unresolvedItems.length > 0 ? `Still unresolved: ${context.unresolvedItems.join("; ")}` : null
+  ].filter((line): line is string => Boolean(line));
+  lines.push(`## Latest project memory\n${memoryLines.join("\n\n")}`);
 
-  const relatedAgents = profile.taskCandidates[0]?.relatedAgents.length
-    ? profile.taskCandidates[0].relatedAgents
-    : profile.activeAgentNames.slice(0, 3);
-  if (relatedAgents.length > 1) {
-    lines.push(`These clues are spread across ${relatedAgents.join(", ")}. I can turn them into a compact context for the next step.`);
-  } else {
-    lines.push("I can turn the recent task clues into a compact context for the next step.");
-  }
+  lines.push(`## What to do next\n${context.continuationPoint ? `1. ${context.continuationPoint}` : "There is no explicit unfinished action in the current record."}`);
 
   return lines.join("\n\n");
 }
@@ -1003,229 +1301,6 @@ function formatNameForGreeting(value: string): string {
     return `${trimmed.charAt(0).toLocaleUpperCase()}${trimmed.slice(1)}`;
   }
   return trimmed;
-}
-
-function renderChineseTaskSummary(task: TaskCandidate): string {
-  if (/mindock-agent|记忆扫描|首次登录/.test(task.title)) {
-    return "这条线索集中在记忆扫描边界、首次登录报告、跨 Agent 接续和 token 成本控制。";
-  }
-  if (/bitrade/i.test(task.title)) {
-    return "这条线索集中在参考既有项目架构，补齐 TUI、日志、运行方式和错误处理等稳定性能力。";
-  }
-  if (isDocumentDump(task.summary)) {
-    return "这条线索已经有多个相关上下文，可以继续整理成执行计划。";
-  }
-  return trimSentence(task.summary, 120);
-}
-
-function renderEnglishTaskSummary(task: TaskCandidate): string {
-  if (/mindock-agent|memory scan|onboarding|记忆扫描|首次登录/i.test(task.title)) {
-    return "The thread centers on scan boundaries, first-login reporting, cross-agent continuation, and token cost control.";
-  }
-  if (/bitrade/i.test(task.title)) {
-    return "The thread centers on borrowing the existing project architecture and adding TUI, logging, runtime flow, and error handling.";
-  }
-  if (isDocumentDump(task.summary)) {
-    return "There is enough related context to turn it into an execution plan.";
-  }
-  return trimSentence(task.summary, 120);
-}
-
-function renderEnglishTaskTitle(task: TaskCandidate): string {
-  const project = task.project;
-  if (project) {
-    if (/mindock-agent|memmy/i.test(project) || /onboarding|扫描|记忆|memory/i.test(task.title)) {
-      return `${project} memory scanning and first-login experience`;
-    }
-    if (/bitrade/i.test(project)) {
-      return `${project} engineering architecture and stability work`;
-    }
-    return `${project} current task`;
-  }
-  if (/首次登录|onboarding/i.test(task.title)) {
-    return "first-login lightweight scan experience";
-  }
-  if (/扫描|记忆|memory/i.test(task.title)) {
-    return "memory scanning and cross-agent synthesis";
-  }
-  if (/排错|debug|problem/i.test(task.title)) {
-    return "recent debugging task";
-  }
-  return "recent continuing task";
-}
-
-function renderChineseContextTask(task: TaskCandidate): string {
-  if (!isGenericChineseTaskTitle(task.title)) {
-    return task.title;
-  }
-  return trimSentence(task.summary || task.latestQuery.text, 120) || task.title;
-}
-
-function isGenericChineseTaskTitle(title: string): boolean {
-  return title === "最近的连续任务" || /的当前任务$/.test(title);
-}
-
-function renderEnglishContextTask(task: TaskCandidate): string {
-  const title = renderEnglishTaskTitle(task);
-  if (!isGenericEnglishTaskTitle(title)) {
-    return title;
-  }
-  return trimSentence(task.summary || task.latestQuery.text, 140) || title;
-}
-
-function isGenericEnglishTaskTitle(title: string): boolean {
-  return title === "recent continuing task" || / current task$/.test(title);
-}
-
-function buildAction(
-  type: OnboardingInsightActionType,
-  profile: OnboardingInsightProfileSignals,
-  queries: readonly OnboardingSampledQuery[],
-  locale: "zh-CN" | "en-US"
-): OnboardingInsightAction {
-  const agents = (profile.taskCandidates[0]?.relatedAgents.length
-    ? profile.taskCandidates[0].relatedAgents
-    : profile.activeAgentNames
-  ).slice(0, 3);
-  const keywords = profile.topKeywords.slice(0, 5);
-  const contextSummary = summarizeContext(profile, queries, locale);
-
-  if (locale === "en-US") {
-    if (type === "cross_agent_synthesis") {
-      return {
-        type,
-        buttonLabel: "Recover and merge this task",
-        description: agents.length > 1 ? `Recover one task across ${agents.join(", ")}` : "Recover the task context and unfinished work",
-        contextSummary,
-        relatedAgents: agents,
-        topicKeywords: keywords,
-        suggestedPrompt: `Use these recent cross-Agent conversation signals to organize the task background, key decisions, unfinished items, and next execution plan.\n\n${contextSummary}`
-      };
-    }
-
-    if (type === "problem_diagnosis") {
-      return {
-        type,
-        buttonLabel: "Recall how this was debugged",
-        description: "Recap what was tried and continue from the last useful result",
-        contextSummary,
-        relatedAgents: agents,
-        topicKeywords: keywords,
-        suggestedPrompt: `Continue debugging this issue. First recap what has already been tried, then give the smallest verification steps.\n\n${contextSummary}`
-      };
-    }
-
-    if (type === "decision_doc") {
-      return {
-        type,
-        buttonLabel: "Recover the key decisions",
-        description: "Turn previous options and tradeoffs into a usable decision record",
-        contextSummary,
-        relatedAgents: agents,
-        topicKeywords: keywords,
-        suggestedPrompt: `Turn these discussions into a technical decision record covering background, options, tradeoffs, conclusions, and open validation questions.\n\n${contextSummary}`
-      };
-    }
-
-    return {
-      type: "continue_task",
-      buttonLabel: "Continue the unfinished task",
-      description: "Recover the latest state and take the next concrete step",
-      contextSummary,
-      relatedAgents: agents,
-      topicKeywords: keywords,
-      suggestedPrompt: `Use these recent conversation signals to continue the current task.\n\n${contextSummary}`
-    };
-  }
-
-  if (type === "cross_agent_synthesis") {
-    return {
-      type,
-      buttonLabel: "找回并合并这项任务",
-      description: agents.length > 1 ? `找回 ${agents.join("、")} 里的同一项任务` : "找回任务背景、结论和未完成项",
-      contextSummary,
-      relatedAgents: agents,
-      topicKeywords: keywords,
-      suggestedPrompt: `请根据这些最近的跨 Agent 对话线索，帮我整理当前任务背景、关键决策、未完成事项和下一步执行计划。\n\n${contextSummary}`
-    };
-  }
-
-  if (type === "problem_diagnosis") {
-    return {
-      type,
-      buttonLabel: "复盘上次怎么解决",
-      description: "找回已尝试的方法和最后一个有效结果",
-      contextSummary,
-      relatedAgents: agents,
-      topicKeywords: keywords,
-      suggestedPrompt: `请接着排查这个问题，先复盘已尝试内容，再给出最小验证步骤。\n\n${contextSummary}`
-    };
-  }
-
-  if (type === "decision_doc") {
-    return {
-      type,
-      buttonLabel: "找回之前的关键决策",
-      description: "把讨论过的方案、取舍和结论整理成记录",
-      contextSummary,
-      relatedAgents: agents,
-      topicKeywords: keywords,
-      suggestedPrompt: `请把这些讨论整理成技术决策记录，包含背景、选项、取舍、结论和待验证问题。\n\n${contextSummary}`
-    };
-  }
-
-  return {
-    type: "continue_task",
-    buttonLabel: "继续最近未完成的任务",
-    description: "找回最近进度并执行一个明确的下一步",
-    contextSummary,
-    relatedAgents: agents,
-    topicKeywords: keywords,
-    suggestedPrompt: `请基于这些最近对话线索，帮我继续推进当前任务。\n\n${contextSummary}`
-  };
-}
-
-function buildSecondaryActions(
-  primaryType: OnboardingInsightActionType,
-  profile: OnboardingInsightProfileSignals,
-  queries: readonly OnboardingSampledQuery[],
-  locale: "zh-CN" | "en-US"
-): OnboardingInsightAction[] {
-  const candidates: OnboardingInsightActionType[] = ["continue_task", "decision_doc", "problem_diagnosis", "cross_agent_synthesis"];
-  return candidates
-    .filter((type) => type !== primaryType)
-    .slice(0, 2)
-    .map((type) => buildAction(type, profile, queries, locale));
-}
-
-function summarizeContext(
-  profile: OnboardingInsightProfileSignals,
-  queries: readonly OnboardingSampledQuery[],
-  locale: "zh-CN" | "en-US"
-): string {
-  if (locale === "en-US") {
-    const pieces = [
-      profile.topProjects.length > 0 ? `Projects: ${profile.topProjects.slice(0, 3).join(", ")}` : null,
-      profile.topKeywords.length > 0 ? `Topics: ${profile.topKeywords.slice(0, 6).join(", ")}` : null,
-      profile.userInsights.length > 0 ? `User preferences: ${profile.userInsights.slice(0, 3).map((insight) => insight.textEn).join(" ")}` : null,
-      renderContextLanguagePreference(profile, locale),
-      profile.taskCandidates.length > 0
-        ? `Recent tasks: ${profile.taskCandidates.slice(0, 2).map(renderEnglishContextTask).join("; ")}`
-        : `Recent task: ${trimSentence(queries[0]?.text ?? "", 180)}`
-    ].filter((piece): piece is string => Boolean(piece));
-    return pieces.join("; ");
-  }
-
-  const pieces = [
-    profile.topProjects.length > 0 ? `项目：${profile.topProjects.slice(0, 3).join("、")}` : null,
-    profile.topKeywords.length > 0 ? `主题：${profile.topKeywords.slice(0, 6).join("、")}` : null,
-    profile.userInsights.length > 0 ? `用户偏好：${profile.userInsights.slice(0, 3).map((insight) => insight.textZh).join("")}` : null,
-    renderContextLanguagePreference(profile, locale),
-    profile.taskCandidates.length > 0
-      ? `最近任务：${profile.taskCandidates.slice(0, 2).map(renderChineseContextTask).join("；")}`
-      : `最近任务：${trimSentence(queries[0]?.text ?? "", 180)}`
-  ].filter((piece): piece is string => Boolean(piece));
-  return pieces.join("；");
 }
 
 function renderContextLanguagePreference(
@@ -1457,33 +1532,6 @@ function findTaskLikeQuery(queries: readonly OnboardingSampledQuery[]): Onboardi
   return queries.find((query) => PROBLEM_PATTERN.test(query.text) || DECISION_PATTERN.test(query.text)) ?? queries[0] ?? null;
 }
 
-function countSharedSignals(results: readonly OnboardingSampleResult[], keywords: readonly string[]): number {
-  return keywords.filter((keyword) => {
-    const pattern = TOPIC_PATTERNS.find((topic) => topic.keyword === keyword)?.pattern;
-    if (!pattern) {
-      return false;
-    }
-    return results.filter((result) => result.queries.some((query) => pattern.test(query.text))).length > 1;
-  }).length;
-}
-
-function decideActionType(input: {
-  sharedSignalCount: number;
-  allText: string;
-  taskLikeQuery: OnboardingSampledQuery | null;
-}): OnboardingInsightActionType {
-  if (input.sharedSignalCount > 0) {
-    return "cross_agent_synthesis";
-  }
-  if (PROBLEM_PATTERN.test(input.allText)) {
-    return "problem_diagnosis";
-  }
-  if (DECISION_PATTERN.test(input.allText)) {
-    return "decision_doc";
-  }
-  return input.taskLikeQuery ? "continue_task" : "open_ended";
-}
-
 function inferLocale(queries: readonly OnboardingSampledQuery[]): "zh-CN" | "en-US" {
   return inferPreferredResponseLanguage(queries) ?? "en-US";
 }
@@ -1590,7 +1638,7 @@ function sortQueriesRecent(queries: readonly OnboardingSampledQuery[]): Onboardi
 
 function toSampleSummary(sample: SampleBundle): OnboardingInsightSampleSummary {
   const agentNames = new Map(sample.discovered.map((result) => [result.sourceId, result.displayName]));
-  const reportQueries = selectLlmReportQueries(sample.discovered);
+  const reportQueries = selectPreferenceReportQueries(sample.discovered);
   return {
     discoveredAgentCount: sample.discovered.length,
     sampledQueryCount: sample.queries.length,
@@ -1607,25 +1655,50 @@ function toSampleSummary(sample: SampleBundle): OnboardingInsightSampleSummary {
       createdAt: query.createdAt,
       workspacePath: query.workspacePath,
       text: clipReportQueryText(query.text)
-    }))
+    })),
+    latestConversation: sample.latestConversation ? {
+      agentSource: agentNames.get(sample.latestConversation.sourceId) ?? sample.latestConversation.displayName,
+      conversationId: sample.latestConversation.conversationId,
+      latestActivityAt: sample.latestConversation.latestActivityAt,
+      workspacePath: sample.latestConversation.workspacePath,
+      messages: sample.latestConversation.messages.map((message) => ({
+        role: message.role,
+        createdAt: message.createdAt,
+        text: message.text
+      }))
+    } : null
   };
 }
 
-function selectLlmReportQueries(results: readonly OnboardingSampleResult[]): OnboardingSampledQuery[] {
-  const recent = sortQueriesRecent(results.flatMap((result) => result.queries)).slice(0, MAX_RECENT_LLM_QUERIES);
-  const seen = new Set(recent.map(queryKey));
-  const balanced = selectBalancedQueries(results, MAX_LLM_QUERIES)
-    .filter((query) => {
-      const key = queryKey(query);
-      if (seen.has(key)) {
-        return false;
+function selectPreferenceReportQueries(results: readonly OnboardingSampleResult[]): OnboardingSampledQuery[] {
+  const queues = results.map((result) => [...result.queries].sort((left, right) =>
+    scorePreferenceEvidence(right.text) - scorePreferenceEvidence(left.text) ||
+    Date.parse(right.createdAt) - Date.parse(left.createdAt)
+  ));
+  const selected: OnboardingSampledQuery[] = [];
+  for (let index = 0; selected.length < MAX_PREFERENCE_LLM_QUERIES; index += 1) {
+    let added = false;
+    for (const queue of queues) {
+      const query = queue[index];
+      if (!query) {
+        continue;
       }
-      seen.add(key);
-      return true;
-    })
-    .slice(0, MAX_BALANCED_LLM_QUERIES);
+      selected.push(query);
+      added = true;
+      if (selected.length >= MAX_PREFERENCE_LLM_QUERIES) {
+        break;
+      }
+    }
+    if (!added) {
+      break;
+    }
+  }
+  return selected;
+}
 
-  return [...recent, ...balanced].slice(0, MAX_LLM_QUERIES);
+function scorePreferenceEvidence(text: string): number {
+  const explicitPreference = /偏好|习惯|喜欢|不喜欢|不要|必须|希望|倾向|更常|简洁|详细|中文|英文|prefer|usually|always|never|don't|must|concise|detailed/i;
+  return USER_INSIGHT_RULES.reduce((score, rule) => score + (rule.pattern.test(text) ? 2 : 0), explicitPreference.test(text) ? 3 : 0);
 }
 
 function clipReportQueryText(text: string): string {
@@ -1638,31 +1711,34 @@ function buildLlmMessages(input: OnboardingInsightGenerationInput): Array<{ role
     {
       role: "system",
       content: [
-        "你是 Memmy 首次登录初见卡片撰写者，风格接近年度总结/Spotify Wrapped 的私人化开场，不是技术报告。",
-        "只依据输入里的明确证据，不要编造。",
+        "你是 Memmy 首次登录初见报告撰写者。报告要像一位刚接手工作的可靠搭档：私人化、具体、克制，不是技术日志，也不是营销文案。",
+        "只依据输入里的明确证据，不要编造项目、完成情况、错误原因或用户偏好。证据不足时直接说明尚不能确认。",
         "不要把 diagnostics 写给用户，不要出现“轻量样本、采样、query 数、discoveredAgentCount”等实现细节。",
-        "你必须根据 user.profile.nameHints 综合判断用户可能希望被怎么称呼。nameHints.selfDeclaredNames 来自扫描到的用户自称，homePathName 是 home 路径最后一段，computerUserName 是电脑用户名，homeAndComputerMatch 表示 home 路径名和电脑用户名一致。",
+        "你必须根据 profile.nameHints 综合判断用户可能希望被怎么称呼。nameHints.selfDeclaredNames 来自扫描到的用户自称，homePathName 是 home 路径最后一段，computerUserName 是电脑用户名，homeAndComputerMatch 表示 home 路径名和电脑用户名一致。",
         "名字判断默认优先使用 homePathName，因为用户一定有 home 路径；不要因为 selfDeclaredNames 为空就省略称呼。只有当 homePathName 是 admin、administrator、root、ubuntu、user、test、guest、default、runner、ec2-user 这类泛化账号名，或明显不是可称呼名字时，才降低它的优先级。",
         "selfDeclaredNames 和 computerUserName 是辅助判断线索：如果 selfDeclaredNames 有明确人名，可以结合它修正称呼；如果 homePathName 与 computerUserName 一致，说明本机线索更可信。",
         "第一句必须包含你判断出的具体称呼：中文报告以“Hi <称呼>，”开头，英文报告以“Hi <name>, ”开头。不得省略名字，不得把名字替换成“这个线索”“这个称呼”“X”等占位词。",
         "严禁出现“本机账号显示为”“本机用户名/路径名显示为”“local username/path shows”“我检测到你的用户名”这类工程口径。",
         "不要向用户暴露 nameHints、homePathName、computerUserName 这些字段名或来源；如果本机线索只是临时称呼，要用柔和语气表达“如果不对，告诉我就好”。中英文混合名不要使用。",
-        "输出中文或英文由 locale 决定。中文时语气要像产品首登卡片：具体、克制、懂用户、有一点年度总结感，不要像调试日志或分析报告。",
-        "profile.preferredResponseLanguage 来自最近用户 query 的主语言统计，不要求用户明确说“请用中文/英文”。如果有值，可以自然理解为后续回复语言偏好。",
-        "用户偏好/习惯段必须明确写出用户更习惯用中文还是英文交流。如果 profile.preferredResponseLanguage 是 zh-CN，写用户最近更常用中文；如果是 en-US，写用户最近更常用英文。",
-        "这份报告的第一目标是任务接续，不是泛泛画像。优先回答：用户最近正在做什么任务、任务散落在哪些 Agent、哪些上下文可以迁到 Memmy Agent 继续完成。",
-        "必须重点阅读 recentTaskSignals。它代表按时间倒序排列的最近 10 条任务线索；请按任务聚类，提炼主任务、未完成事项、下一步可执行动作。",
-        "必须覆盖：对用户的了解、偏好/习惯、最近正在推进的任务、可跨 Agent 整合或接续的任务。",
-        "正文长度是硬约束：中文 600-800 字，英文 400-600 words。低于或高于这个范围都视为失败；不要输出短卡片，也不要写成长报告。",
-        "正文结构是硬约束：写 5-7 个自然段，每段 2-4 句。段落顺序依次覆盖：开场称呼与总体判断、最近最主要任务、最近 10 条任务线索如何聚类、任务分别来自哪些 Agent、用户工作偏好/协作习惯、当前最适合接续到 Memmy Agent 的事项、下一步执行计划与温和收束。",
-        "每段都必须包含至少一个明确线索、偏好判断或可执行下一步。证据不足时写“我只能先按这些线索判断”，但仍然按上述结构展开。",
-        "要自然引导用户从 Claude Code、Codex、Cursor、Hermes 等 Agent 的上下文切到 Memmy Agent 里继续做事，强调任务接续、上下文整合、决策整理和下一步执行，不要贬低其他工具，不要写营销口号。",
-        "除了报告正文，你还必须为 actionCandidates 中的 3 个行动类型分别生成按钮文案和点击后可直接发送给 Agent 的完整请求。类型和顺序必须与 actionCandidates 完全一致。",
-        "三个按钮必须指向三个不同且具体的后续动作。buttonLabel 要简短；description 要说明点击后会做什么；suggestedPrompt 必须写清具体任务背景、目标和预期产出，不能只写“继续当前任务”“整理最近讨论”之类的泛化句子。",
-        "suggestedPrompt 要把输入中的事实自然组织成通顺请求，不要机械罗列“项目：...；主题：...；用户偏好：...；最近任务：...”等字段，也不要编造输入中不存在的项目、结论或进度。",
-        "中文 buttonLabel 建议 4-12 字、description 不超过 40 字、suggestedPrompt 80-240 字；英文保持同等信息密度。",
-        `输出格式是硬约束：先输出报告正文，然后紧接一行 ${GENERATED_ACTIONS_MARKER}，再输出一行 JSON。JSON 结构必须是 {"actions":[{"type":"...","buttonLabel":"...","description":"...","suggestedPrompt":"..."}]}，包含且只包含 3 个 action。`,
-        "报告正文里严禁出现 Main button、Also available、主按钮、次级按钮、CTA、button label、keep moving 或任何按钮说明。内部标记和 JSON 只能出现在正文之后，不要使用 markdown 代码块，不要输出 markdown 表格，不暴露任何密钥。"
+        "输出中文或英文由 locale 决定。profile.preferredResponseLanguage 来自近期用户请求的主语言统计；有值时要自然说明用户最近更常用中文还是英文。",
+        "偏好结论的唯一原始证据是 preferenceEvidence 中由用户本人发送的消息，profile 里的偏好字段也只是这些用户消息的结构化归纳。仅总结用户明确表达或在多个请求中稳定体现的偏好；不要把旧任务内容本身当成偏好，也严禁使用 assistant、tool 或 latestConversation 推断偏好。",
+        "latestConversation 是所有已扫描 Agent 中时间最新的一个会话，只允许依据这个会话总结最近项目、任务、Bug 或关键词及其当前进度。",
+        "latestConversation.messages 已按首 2 个和尾 12 个对话轮次截取。user 是用户请求，assistant 是 Agent 回复，tool 是脱敏后的简短工具执行信息。",
+        "区分三类进度证据：用户要求做什么、Agent 表示做了什么、工具结果实际验证了什么。只有明确成功的 tool 结果才能写成已验证；只有 assistant 自述时应写成“Agent 表示/对话中提到”，不能当成确定事实。",
+        "把 latestConversation 看作一条随时间演进的任务轨迹：合并重复要求，保留关键转折，并让较新的决定、修复和验证覆盖较早的猜测、失败或阻塞。不要逐条复述消息，不要照抄工具日志。",
+        "正文必须包含三个 Markdown 小节：『你的偏好』『最近项目记忆』『接下来可以做』。可以使用短段落和列表，不要使用表格或代码块。",
+        "『你的偏好』只总结用户本人有证据支持的语言、沟通方式、输出形式、方案取舍、实现约束或验证要求，最多 3-5 条；不要混入项目进度、Agent 行为、工具结果或空泛性格标签。",
+        "『最近项目记忆』说明最新会话来自哪个 Agent、用户目标、已做事项、已验证结果、当前状态、仍待处理内容。workspacePath 有值时必须写清项目具体路径。只写当前有效结论，不展开冗长历史。",
+        "『接下来可以做』只列证据支持且尚未完成的 0-3 条待办，按执行顺序排列。第一条应是当前最小且可立即执行的下一步；任务已完成或没有明确待办时，直接说明暂时没有明确待办，不要补通用建议。",
+        "正文长度要求：中文 300-500 字，英文 180-300 words。重点是准确提炼最近一个项目现场，不要扩展成跨项目年度总结。",
+        "你必须一次输出两个区块，严格使用以下顺序和标签；标签前后不要添加其他文字：",
+        `${GENERATED_REPORT_OPEN}\n这里放给用户看的 Markdown 报告正文\n${GENERATED_REPORT_CLOSE}`,
+        `${GENERATED_TASK_CONTEXT_OPEN}\n这里放一个合法 JSON 对象\n${GENERATED_TASK_CONTEXT_CLOSE}`,
+        "任务上下文 JSON 必须包含且只需包含：topic、userGoal、latestRequest、status、currentState、agentActions、verifiedResults、unresolvedItems、continuationPoint、trajectorySummary。status 只能是 pending、active、waiting、completed、uncertain；后三个集合字段必须是字符串数组。",
+        "任务上下文使用 locale 对应语言，面向任意类型任务，不要使用仅适合 Coding 的固定分类。它只总结最新任务，不得包含用户偏好，也不得复制原始 query、assistant 回复或工具流水。agentActions 写 Agent 已采取的动作，verifiedResults 只写有结果证据支持的结论，unresolvedItems 只写仍然有效的问题，continuationPoint 写其他 Agent 接手时应从哪里继续。",
+        "trajectorySummary 用一个紧凑段落总结：用户目标如何演进、Agent 做了什么、得到什么结果、现在停在哪里。最终状态优先；已经被后续解决的问题不能继续写成当前阻塞。",
+        "任务上下文要短：JSON 必须单行输出、不要缩进、不要代码块；每个普通字段最多一句，三个数组各最多 3 项，trajectorySummary 中文 80-160 字或英文 60-100 words；不要为了填满字段而重复同一事实。",
+        "报告正文不要生成按钮、行动卡片、CTA、JSON、Markdown 代码块或表格；任务上下文区块只放 JSON 对象。不要暴露任何密钥。"
       ].join("\n")
     },
     {
@@ -1670,75 +1746,47 @@ function buildLlmMessages(input: OnboardingInsightGenerationInput): Array<{ role
       content: JSON.stringify({
         locale: input.locale,
         reportGoal: {
-          primary: "task_continuation",
+          primary: "user_preferences_latest_project_memory_and_actionable_todos",
           lengthConstraint: input.locale === "zh-CN"
-            ? "600-800 Chinese characters, 5-7 natural paragraphs, 2-4 sentences per paragraph"
-            : "400-600 English words, 5-7 natural paragraphs, 2-4 sentences per paragraph",
-          mustNotBeShort: true,
-          requiredParagraphPlan: [
+            ? "300-500 Chinese characters"
+            : "180-300 English words",
+          requiredSections: [
             "opening_with_name_or_safe_greeting",
-            "main_recent_task",
-            "cluster_recent_10_task_signals",
-            "agent_context_sources",
-            "user_working_preferences",
-            "best_tasks_to_continue_in_memmy_agent",
-            "next_execution_plan",
-            "warm_closing"
+            "user_preferences",
+            "latest_project_memory",
+            "ordered_actionable_todos"
           ],
           focus: [
-            "最近任务是什么",
-            "这些任务分别来自哪些 Agent 上下文",
-            "哪些任务最适合接续到 Memmy Agent",
-            "如何把跨 Agent 讨论整合成下一步执行计划"
-          ]
+            "用户有哪些有证据支持的稳定偏好",
+            "全局最新会话对应什么项目、任务、Bug 或关键词",
+            "用户要求、Agent 自述和工具验证分别说明了什么进度",
+            "接下来尚未完成且最可行的 0-3 个待办是什么"
+          ],
+          outputEnvelope: {
+            reportTag: GENERATED_REPORT_OPEN,
+            taskContextTag: GENERATED_TASK_CONTEXT_OPEN,
+            taskContextFields: [
+              "topic",
+              "userGoal",
+              "latestRequest",
+              "status",
+              "currentState",
+              "agentActions",
+              "verifiedResults",
+              "unresolvedItems",
+              "continuationPoint",
+              "trajectorySummary"
+            ]
+          }
         },
-        recentTaskSignals: selectRecentTaskSignals(input.sample.queries),
         profile: toLlmProfile(input.profile, input.sample.activeAgents),
         nameDecisionRequirement: buildNameDecisionRequirement(input.profile, input.locale),
-        sample: input.sample,
-        actionCandidates: [input.primaryAction, ...input.secondaryActions].map((action, index) => ({
-          priority: index === 0 ? "primary" : "secondary",
-          type: action.type,
-          objective: renderActionObjective(action.type, input.locale),
-          contextSummary: action.contextSummary,
-          relatedAgents: action.relatedAgents,
-          topicKeywords: action.topicKeywords
-        }))
+        activeAgents: input.sample.activeAgents,
+        preferenceEvidence: input.sample.queries,
+        latestConversation: input.sample.latestConversation
       }, null, 2)
     }
   ];
-}
-
-function renderActionObjective(type: OnboardingInsightActionType, locale: "zh-CN" | "en-US"): string {
-  const objectives: Record<OnboardingInsightActionType, { zh: string; en: string }> = {
-    continue_task: {
-      zh: "选择最具体、最适合立即执行的近期任务并继续推进",
-      en: "Continue the most concrete recent task with an immediately executable next step"
-    },
-    cross_agent_synthesis: {
-      zh: "整合不同 Agent 中属于同一任务的背景、决策、未完成事项和下一步",
-      en: "Merge background, decisions, unfinished work, and next steps for one task across agents"
-    },
-    decision_doc: {
-      zh: "把近期讨论中的方案、取舍、结论和待验证问题整理成决策记录",
-      en: "Turn recent options, tradeoffs, conclusions, and open questions into a decision record"
-    },
-    problem_diagnosis: {
-      zh: "接续一个有明确证据的问题，复盘已尝试内容并给出最小验证步骤",
-      en: "Resume a supported issue, recap prior attempts, and propose the smallest verification steps"
-    },
-    open_ended: {
-      zh: "基于近期线索提出一个具体、可执行的后续动作",
-      en: "Propose one concrete and executable follow-up based on recent evidence"
-    }
-  };
-  return locale === "zh-CN" ? objectives[type].zh : objectives[type].en;
-}
-
-function selectRecentTaskSignals(queries: OnboardingInsightSampleSummary["queries"]): OnboardingInsightSampleSummary["queries"] {
-  return [...queries]
-    .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))
-    .slice(0, 10);
 }
 
 function toLlmProfile(
@@ -2078,12 +2126,17 @@ function extractLlmDelta(body: unknown): string | null {
 }
 
 function sanitizeGeneratedReport(report: string | null): string | null {
-  const trimmed = stripActionCopyFromReport(report ?? "").trim();
+  const withoutInternalContext = (report ?? "")
+    .replaceAll(GENERATED_REPORT_OPEN, "")
+    .split(GENERATED_REPORT_CLOSE, 1)[0]
+    ?.split(GENERATED_TASK_CONTEXT_OPEN, 1)[0] ?? "";
+  const trimmed = stripActionCopyFromReport(withoutInternalContext).trim();
   return trimmed ? trimmed.slice(0, 4_000) : null;
 }
 
 function stripActionCopyFromReport(report: string): string {
-  const paragraphs = report
+  const reportBody = report.split(/\[\s*MEMMY_ACTIONS_JSON\s*\]/i, 1)[0] ?? report;
+  const paragraphs = reportBody
     .replace(/\r\n/g, "\n")
     .split(/\n{2,}/)
     .map((paragraph) => paragraph.trim())
@@ -2149,12 +2202,19 @@ function trimSentence(text: string, maxChars: number): string {
   return normalized.length <= maxChars ? normalized : `${normalized.slice(0, maxChars)}...`;
 }
 
-function diagnostics(sample: SampleBundle, usedLlm: boolean, elapsedMs: number): OnboardingInsightReportResponse["diagnostics"] {
+function diagnostics(
+  sample: SampleBundle,
+  usedLlm: boolean,
+  elapsedMs: number,
+  reportLanguage?: "zh-CN" | "en-US"
+): OnboardingInsightReportResponse["diagnostics"] {
   return {
     discoveredAgentCount: sample.discovered.length,
     sampledQueryCount: sample.queries.length,
     usedLlm,
     elapsedMs: Math.max(elapsedMs, sample.elapsedMs),
+    ...(reportLanguage ? { reportLanguage } : {}),
+    latestWorkspacePath: sample.latestConversation?.workspacePath ?? null,
     agents: sample.discovered.map((result) => ({
       sourceId: result.sourceId,
       displayName: result.displayName,

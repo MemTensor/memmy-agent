@@ -171,7 +171,7 @@ describe("MemoryService / evolution / reward", () => {
       userId: "user-implicit-reward",
       status: "queued"
     }).items.map((job) => job.jobType);
-    expect(queuedOrder.slice(0, 2)).toEqual(["episode_idle_close", "trace_summary"]);
+    expect(queuedOrder.slice(0, 2)).toEqual(["trace_summary", "episode_idle_close"]);
 
     const run = await service.runWorkerOnce(20);
     expect(run.changeSeq).toBeGreaterThan(0);
@@ -203,7 +203,7 @@ describe("MemoryService / evolution / reward", () => {
     db.close();
   });
 
-  it("still reflects unscored L1 memories when an episode already has reward", async () => {
+  it("waits until episode close and scores every trace exactly once", async () => {
     const calls: Array<{
       messages: Array<{ role: string; content: string }>;
       options: { operation: string };
@@ -264,32 +264,13 @@ describe("MemoryService / evolution / reward", () => {
       rationale: "我不是只让你推荐一个吗"
     });
     await service.runWorkerOnce(20);
-    const rewarded = db.db.prepare(
+    const openEpisode = db.db.prepare(
       `SELECT r_task
        FROM episodes
        WHERE id = ?`
     ).get(first.episodeId) as { r_task: number | null };
-    expect(typeof rewarded.r_task).toBe("number");
-    const immediateRewardCall = calls.find((call) =>
-      call.options.operation === "reward.reward.r_human.v7"
-    );
-    expect(immediateRewardCall).toBeTruthy();
-    const immediateRewardInput = JSON.parse(
-      immediateRewardCall!.messages.find((message) => message.role === "user")!.content
-    ) as {
-      turnSummaries: string[];
-      finalExchange: { user: string; assistant: string };
-    };
-    expect(immediateRewardInput.turnSummaries[0]).toBe("LLM batch summary");
-    expect(immediateRewardInput.turnSummaries[0]!.length).toBeLessThanOrEqual(200);
-    expect(immediateRewardInput.turnSummaries[1]).toBe("LLM batch summary");
-    expect(immediateRewardInput.finalExchange).toEqual({
-      user: "水果中和西瓜比较相似有哪些，推荐一个",
-      assistant: "我推荐哈密瓜。"
-    });
-    expect(calls.filter((call) =>
-      call.options.operation === "reward.reward.r_human.v7"
-    )).toHaveLength(1);
+    expect(openEpisode.r_task).toBeNull();
+    expect(calls.filter((call) => call.options.operation === "reward.reward.r_human.v7")).toEqual([]);
     expect(calls.filter((call) => call.options.operation === "capture.summarize")).toHaveLength(2);
 
     const third = service.completeTurn("turn-reward-before-reflection-3", {
@@ -309,6 +290,7 @@ describe("MemoryService / evolution / reward", () => {
     expect(queuedReflection.count).toBe(1);
 
     await service.runWorkerOnce(20);
+    await service.runWorkerOnce(20);
     const reflectedItems = service.panelItems({
       userId: "user-reward-before-reflection",
       layer: "L1"
@@ -316,6 +298,34 @@ describe("MemoryService / evolution / reward", () => {
     expect(reflectedItems).toHaveLength(3);
     expect(reflectedItems.every((item) => item.metrics?.reflectionDone)).toBe(true);
     expect(calls.some((call) => call.options.operation === "capture.reflection.batch.v13")).toBe(true);
+    const rewardCalls = calls.filter((call) => call.options.operation === "reward.reward.r_human.v7");
+    expect(rewardCalls).toHaveLength(1);
+    const rewardInput = JSON.parse(
+      rewardCalls[0]!.messages.find((message) => message.role === "user")!.content
+    ) as {
+      turnSummaries: string[];
+      finalExchange: { user: string; assistant: string };
+      feedbackHistory: Array<{ polarity: string }>;
+    };
+    expect(rewardInput.turnSummaries).toHaveLength(3);
+    expect(rewardInput.finalExchange).toEqual({
+      user: "哈密瓜和西瓜谁的营养价值更高",
+      assistant: "综合营养密度上哈密瓜通常更高一点。"
+    });
+    expect(rewardInput.feedbackHistory).toEqual([
+      expect.objectContaining({ polarity: "negative" })
+    ]);
+    const rewarded = db.db.prepare(
+      `SELECT r_task, reward_detail_json
+       FROM episodes
+       WHERE id = ?`
+    ).get(first.episodeId) as { r_task: number | null; reward_detail_json: string };
+    expect(typeof rewarded.r_task).toBe("number");
+    expect(JSON.parse(rewarded.reward_detail_json)).toMatchObject({
+      phase: "final",
+      traceCount: 3,
+      traceIds: [first.l1MemoryId, second.l1MemoryId, third.l1MemoryId]
+    });
     db.close();
   });
 
@@ -344,6 +354,7 @@ describe("MemoryService / evolution / reward", () => {
     });
     service.closeSession(session.sessionId);
 
+    await service.runWorkerOnce(20);
     await service.runWorkerOnce(20);
 
     const memory = db.db.prepare(
@@ -638,6 +649,12 @@ describe("MemoryService / evolution / reward", () => {
         magnitude: 1,
         rationale: "accepted, but process was only partial"
       },
+      feedbackHistory: [{
+        channel: "explicit",
+        polarity: "positive",
+        magnitude: 1,
+        rationale: "accepted, but process was only partial"
+      }],
       host: {
         agent: "codex"
       }
@@ -732,23 +749,7 @@ describe("MemoryService / evolution / reward", () => {
       rationale: "wrong, use port 443 instead and verify TLS"
     });
 
-    const rewardJob = feedback.jobs.find((job) => job.jobType === "reward");
-    expect(rewardJob?.targetMemoryId).toBeUndefined();
-    const rewardJobRow = db.db.prepare(
-      `SELECT episode_id, target_memory_id, payload_json
-       FROM evolution_jobs
-       WHERE id = ?`
-    ).get(rewardJob!.jobId) as {
-      episode_id: string | null;
-      target_memory_id: string | null;
-      payload_json: string;
-    };
-    expect(rewardJobRow.episode_id).toBe(complete.episodeId);
-    expect(rewardJobRow.target_memory_id).toBeNull();
-    expect(JSON.parse(rewardJobRow.payload_json)).toMatchObject({
-      l1MemoryId: complete.l1MemoryId,
-      feedbackId: feedback.feedbackId
-    });
+    expect(feedback.jobs.map((job) => job.jobType)).not.toContain("reward");
     const feedbackRow = db.db.prepare(
       `SELECT l1_memory_id, raw_turn_id, episode_id, session_id
        FROM feedback
@@ -774,6 +775,32 @@ describe("MemoryService / evolution / reward", () => {
     expect(JSON.parse(episodeIndexes.feedback_ids_json)).toContain(feedback.feedbackId);
     expect(JSON.parse(episodeIndexes.decision_repair_ids_json)).toContain(feedback.repair?.repairId);
 
+    const beforeClose = JSON.parse((db.db.prepare(
+      `SELECT properties_json FROM memories WHERE id = ?`
+    ).get(complete.l1MemoryId) as { properties_json: string }).properties_json) as {
+      internal_info: { trace: { r_human?: number } };
+    };
+    expect(beforeClose.internal_info.trace.r_human).toBeUndefined();
+
+    service.closeSession(session.sessionId);
+    await service.runWorkerOnce(50);
+    const rewardJobRow = db.db.prepare(
+      `SELECT episode_id, target_memory_id, payload_json
+       FROM evolution_jobs
+       WHERE job_type = 'reward'
+         AND episode_id = ?`
+    ).get(complete.episodeId) as {
+      episode_id: string | null;
+      target_memory_id: string | null;
+      payload_json: string;
+    };
+    expect(rewardJobRow.episode_id).toBe(complete.episodeId);
+    expect(rewardJobRow.target_memory_id).toBeNull();
+    expect(JSON.parse(rewardJobRow.payload_json)).toMatchObject({
+      phase: "final",
+      l1MemoryId: complete.l1MemoryId,
+      feedbackId: feedback.feedbackId
+    });
     await service.runWorkerOnce(50);
 
     const memory = db.db.prepare(

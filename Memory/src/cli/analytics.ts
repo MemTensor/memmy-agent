@@ -177,6 +177,7 @@ export function postAnalyticsEvents(input: PostAnalyticsEventsInput): Promise<vo
 
   const body = {
     clientId,
+    ...(userId ? { userId } : {}),
     events: events.map((event) => {
       const eventTimeMillis = event.eventTimeMillis ?? Date.now();
       return {

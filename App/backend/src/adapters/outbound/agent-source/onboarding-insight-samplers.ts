@@ -12,18 +12,32 @@ import {
   resolveOpenclawStateDirectory,
   resolveWorkbuddyProjectsDirectory
 } from "../agent-paths.js";
-import { extractWorkbuddyUserMessage } from "./workbuddy/history-reader.js";
+import { extractWorkbuddyMessage } from "./workbuddy/history-reader.js";
 import { redactSecrets } from "./secret-redactor.js";
+import type { SourceRegistry } from "./source-registry.js";
 import {
   emptyOnboardingSampleResult,
+  type OnboardingConversationWindow,
+  type OnboardingConversationWindowReader,
   type OnboardingInsightSampleOptions,
   type OnboardingInsightSampler,
   type OnboardingSampleResult,
+  type OnboardingSampledMessage,
   type OnboardingSampledQuery
 } from "./insight-sampler-types.js";
 
 const JSONL_CHUNK_SIZE = 64 * 1024;
 const DEFAULT_MAX_SQL_ROWS = 200;
+const MAX_RECENT_PROBE_MESSAGES = 64;
+const CONVERSATION_SCAN_TARGETS = 6;
+const FIRST_CONVERSATION_TURNS = 2;
+const LAST_CONVERSATION_TURNS = 12;
+const MAX_ASSISTANT_MESSAGES_PER_TURN = 2;
+const MAX_TOOL_MESSAGES_PER_TURN = 4;
+const MAX_USER_MESSAGE_CHARS = 1_200;
+const MAX_ASSISTANT_MESSAGE_CHARS = 2_000;
+const MAX_TOOL_MESSAGE_CHARS = 400;
+const MAX_CONVERSATION_WINDOW_CHARS = 24_000;
 
 interface RecentFile {
   filePath: string;
@@ -31,11 +45,11 @@ interface RecentFile {
 }
 
 type JsonRecord = Record<string, unknown>;
-type JsonQueryExtractor = (record: JsonRecord, fallback: {
+type JsonMessageExtractor = (record: JsonRecord, fallback: {
   sourceId: string;
   filePath: string;
   lineIndex: number;
-}) => OnboardingSampledQuery | null;
+}) => OnboardingSampledMessage | null;
 type JsonLineFilter = (line: string) => boolean;
 
 export function createBuiltinOnboardingInsightSamplers(): OnboardingInsightSampler[] {
@@ -50,14 +64,69 @@ export function createBuiltinOnboardingInsightSamplers(): OnboardingInsightSampl
   ];
 }
 
+export function createSourceRegistryOnboardingConversationWindowReader(
+  sourceRegistry: SourceRegistry
+): OnboardingConversationWindowReader {
+  return {
+    async readConversation(reference, options) {
+      const adapter = sourceRegistry.require(reference.sourceId);
+      const deadlineSignal = AbortSignal.timeout(options.deadlineMs);
+      const signal = options.signal ? AbortSignal.any([options.signal, deadlineSignal]) : deadlineSignal;
+      const messages: OnboardingSampledMessage[] = [];
+      let foundConversation = false;
+
+      try {
+        for await (const message of adapter.scan({
+          maxScanTargets: CONVERSATION_SCAN_TARGETS,
+          order: "recent_first",
+          signal
+        })) {
+          if (message.conversationId !== reference.conversationId) {
+            if (foundConversation) {
+              break;
+            }
+            continue;
+          }
+          foundConversation = true;
+          if (message.role === "system") {
+            continue;
+          }
+          messages.push({
+            sourceId: message.sourceId,
+            conversationId: message.conversationId,
+            messageId: message.messageId,
+            role: message.role,
+            createdAt: message.createdAt,
+            text: message.content,
+            workspacePath: message.workspacePath
+          });
+        }
+      } catch (error) {
+        if (!deadlineSignal.aborted && !options.signal?.aborted) {
+          throw error;
+        }
+      }
+
+      const windowMessages = selectConversationWindow(messages);
+      if (windowMessages.length === 0) {
+        return null;
+      }
+      return {
+        ...reference,
+        messages: windowMessages
+      } satisfies OnboardingConversationWindow;
+    }
+  };
+}
+
 export function createWorkbuddyInsightSampler(input: { root: string }): OnboardingInsightSampler {
   return createJsonlInsightSampler({
     sourceId: "workbuddy",
     displayName: "WorkBuddy",
     root: input.root,
     matchesFile: (name) => name.endsWith(".jsonl"),
-    shouldParseLine: isPotentialWorkbuddyUserMessageLine,
-    extractQuery: extractWorkbuddyQuery
+    shouldParseLine: isPotentialWorkbuddyMessageLine,
+    extractMessage: extractWorkbuddySampledMessage
   });
 }
 
@@ -67,8 +136,8 @@ export function createCodexInsightSampler(input: { root: string }): OnboardingIn
     displayName: "Codex",
     root: input.root,
     matchesFile: (name) => name.startsWith("rollout-") && name.endsWith(".jsonl"),
-    shouldParseLine: isPotentialCodexUserMessageLine,
-    extractQuery: extractCodexQuery
+    shouldParseLine: isPotentialCodexMessageLine,
+    extractMessage: extractCodexMessage
   });
 }
 
@@ -78,7 +147,7 @@ export function createClaudeCodeInsightSampler(input: { root: string }): Onboard
     displayName: "Claude Code",
     root: input.root,
     matchesFile: (name) => name.endsWith(".jsonl"),
-    extractQuery: extractClaudeCodeQuery
+    extractMessage: extractClaudeCodeMessage
   });
 }
 
@@ -89,7 +158,7 @@ export function createHermesInsightSampler(input: { root: string }): OnboardingI
     displayName: "Hermes",
     root: join(input.root, "sessions"),
     matchesFile: (name) => name.endsWith(".jsonl"),
-    extractQuery: extractGenericJsonlQuery
+    extractMessage: extractGenericJsonlMessage
   });
 
   return {
@@ -165,7 +234,7 @@ function createJsonlInsightSampler(input: {
   root: string;
   matchesFile(name: string): boolean;
   shouldParseLine?: JsonLineFilter;
-  extractQuery: JsonQueryExtractor;
+  extractMessage: JsonMessageExtractor;
 }): OnboardingInsightSampler {
   return {
     sourceId: input.sourceId,
@@ -181,6 +250,7 @@ function createJsonlInsightSampler(input: {
       const startedAt = Date.now();
       const files = await listRecentFiles(input.root, input.matchesFile, options.maxSessionFiles, options);
       const queries: OnboardingSampledQuery[] = [];
+      const recentMessages: OnboardingSampledMessage[] = [];
       const errors: Array<{ target: string; reason: string }> = [];
       for (const file of files) {
         if (queries.length >= options.maxQueries || deadlineReached(options, startedAt)) {
@@ -189,12 +259,18 @@ function createJsonlInsightSampler(input: {
         try {
           const records = await readRecentJsonlObjects(file.filePath, options, input.shouldParseLine);
           for (const [lineIndex, record] of records.entries()) {
-            if (queries.length >= options.maxQueries) {
+            if (queries.length >= options.maxQueries && recentMessages.length >= MAX_RECENT_PROBE_MESSAGES) {
               break;
             }
-            const query = input.extractQuery(record, { sourceId: input.sourceId, filePath: file.filePath, lineIndex });
-            if (query) {
-              queries.push(limitSampledQuery(query, options.maxQueryChars));
+            const message = input.extractMessage(record, { sourceId: input.sourceId, filePath: file.filePath, lineIndex });
+            if (!message) {
+              continue;
+            }
+            if (recentMessages.length < MAX_RECENT_PROBE_MESSAGES) {
+              recentMessages.push(limitSampledMessage(message, message.role === "tool" ? MAX_TOOL_MESSAGE_CHARS : options.maxQueryChars));
+            }
+            if (message.role === "user" && queries.length < options.maxQueries) {
+              queries.push(limitSampledQuery(message, options.maxQueryChars));
             }
           }
         } catch (error) {
@@ -208,6 +284,7 @@ function createJsonlInsightSampler(input: {
         recentSessionCount: files.length,
         latestActivityAt: files[0] ? new Date(files[0].mtimeMs).toISOString() : null,
         queries: sortQueriesRecent(queries).slice(0, options.maxQueries),
+        recentMessages: sortMessagesRecent(recentMessages).slice(0, MAX_RECENT_PROBE_MESSAGES),
         errors
       };
     }
@@ -303,14 +380,15 @@ async function readRecentJsonlObjects(
   }
 }
 
-function isPotentialCodexUserMessageLine(line: string): boolean {
+function isPotentialCodexMessageLine(line: string): boolean {
   return /"type"\s*:\s*"response_item"/.test(line) &&
     /"type"\s*:\s*"message"/.test(line) &&
-    /"role"\s*:\s*"user"/.test(line);
+    /"role"\s*:\s*"(?:user|assistant)"/.test(line);
 }
 
-function isPotentialWorkbuddyUserMessageLine(line: string): boolean {
-  return /"role"\s*:\s*"(?:user|human)"/u.test(line);
+function isPotentialWorkbuddyMessageLine(line: string): boolean {
+  return /"role"\s*:\s*"(?:user|human|assistant|agent|tool)"/u.test(line) ||
+    /"type"\s*:\s*"(?:tool_call|tool_result|function_call|function_call_output)"/u.test(line);
 }
 
 function sampleHermesStateDb(path: string, options: OnboardingInsightSampleOptions): OnboardingSampleResult {
@@ -323,16 +401,23 @@ function sampleHermesStateDb(path: string, options: OnboardingInsightSampleOptio
       return emptyOnboardingSampleResult({ sourceId: "hermes", displayName: "Hermes" });
     }
     const rows = db.prepare(`
-      SELECT id, session_id, content, timestamp
+      SELECT id, session_id, role, content, timestamp
       FROM messages
-      WHERE role = 'user' AND content IS NOT NULL AND content != ''
+      WHERE role IN ('user', 'assistant', 'tool') AND content IS NOT NULL AND content != ''
       ORDER BY timestamp DESC, id DESC
       LIMIT ?
-    `).all(Math.min(DEFAULT_MAX_SQL_ROWS, options.maxQueries * 4)) as Array<{ id: number; session_id: string; content: string; timestamp: number }>;
+    `).all(Math.min(DEFAULT_MAX_SQL_ROWS, options.maxQueries * 8)) as Array<{
+      id: number;
+      session_id: string;
+      role: "user" | "assistant" | "tool";
+      content: string;
+      timestamp: number;
+    }>;
     return sqlResult("hermes", "Hermes", rows.map((row) => ({
       sourceId: "hermes",
       conversationId: row.session_id,
       messageId: `${row.session_id}:${row.id}`,
+      role: row.role,
       createdAt: normalizeTimestamp(row.timestamp),
       text: row.content,
       workspacePath: null
@@ -370,9 +455,10 @@ function sampleOpencodeDb(path: string, options: OnboardingInsightSampleOptions)
       message_data: string;
       part_data: string | null;
     }>;
-    const queries = rows.flatMap((row) => {
+    const messages = rows.flatMap((row): OnboardingSampledMessage[] => {
       const messageData = parseJsonObject(row.message_data);
-      if (!messageData || messageData.role !== "user") {
+      const role = normalizeSampledRole(messageData?.role);
+      if (!messageData || (role !== "user" && role !== "assistant")) {
         return [];
       }
       const content = getPartText(parseJsonObject(row.part_data ?? "")) ?? stringValue(messageData.text) ?? stringValue(messageData.content);
@@ -380,12 +466,13 @@ function sampleOpencodeDb(path: string, options: OnboardingInsightSampleOptions)
         sourceId: "opencode",
         conversationId: row.session_id,
         messageId: row.id,
+        role,
         createdAt: normalizeTimestamp(row.time_created),
         text: content,
         workspacePath: getNestedString(messageData, "path", "cwd")
       }] : [];
     });
-    return sqlResult("opencode", "Opencode", queries, options);
+    return sqlResult("opencode", "Opencode", messages, options);
   } catch (error) {
     return emptyOnboardingSampleResult({
       sourceId: "opencode",
@@ -401,15 +488,15 @@ function sampleOpenclawDb(path: string, options: OnboardingInsightSampleOptions)
   const db = new DatabaseSync(path, { readOnly: true });
   try {
     if (hasTable(db, "messages")) {
-      const queries = sampleOpenclawTable(db, "messages", options);
-      if (queries) {
-        return sqlResult("openclaw", "OpenClaw", queries, options);
+      const messages = sampleOpenclawTable(db, "messages", options);
+      if (messages) {
+        return sqlResult("openclaw", "OpenClaw", messages, options);
       }
     }
     if (hasTable(db, "chunks")) {
-      const queries = sampleOpenclawTable(db, "chunks", options);
-      if (queries) {
-        return sqlResult("openclaw", "OpenClaw", queries, options);
+      const messages = sampleOpenclawTable(db, "chunks", options);
+      if (messages) {
+        return sqlResult("openclaw", "OpenClaw", messages, options);
       }
     }
     return emptyOnboardingSampleResult({ sourceId: "openclaw", displayName: "OpenClaw" });
@@ -428,7 +515,7 @@ function sampleOpenclawTable(
   db: DatabaseSync,
   tableName: string,
   options: OnboardingInsightSampleOptions
-): OnboardingSampledQuery[] | null {
+): OnboardingSampledMessage[] | null {
   const columns = tableColumns(db, tableName);
   const contentColumn = firstColumn(columns, ["content", "text", "message", "body"]);
   if (!contentColumn) {
@@ -443,7 +530,7 @@ function sampleOpenclawTable(
     .map((column) => quoteIdentifier(column))
     .join(", ");
   const where = roleColumn
-    ? `WHERE LOWER(CAST(${quoteIdentifier(roleColumn)} AS TEXT)) IN ('user', 'human', '1') AND ${quoteIdentifier(contentColumn)} IS NOT NULL AND CAST(${quoteIdentifier(contentColumn)} AS TEXT) != ''`
+    ? `WHERE LOWER(CAST(${quoteIdentifier(roleColumn)} AS TEXT)) IN ('user', 'human', 'assistant', 'agent', 'tool', '1', '2') AND ${quoteIdentifier(contentColumn)} IS NOT NULL AND CAST(${quoteIdentifier(contentColumn)} AS TEXT) != ''`
     : `WHERE ${quoteIdentifier(contentColumn)} IS NOT NULL AND CAST(${quoteIdentifier(contentColumn)} AS TEXT) != ''`;
   const orderBy = createdAtColumn
     ? `ORDER BY ${quoteIdentifier(createdAtColumn)} DESC${idColumn ? `, ${quoteIdentifier(idColumn)} DESC` : ""}`
@@ -463,10 +550,15 @@ function sampleOpenclawTable(
     }
     const id = idColumn ? stringValue(row[idColumn]) : null;
     const conversationId = sessionColumn ? stringValue(row[sessionColumn]) : null;
+    const role = normalizeSampledRole(roleColumn ? row[roleColumn] : "user");
+    if (!role) {
+      return [];
+    }
     return [{
       sourceId: "openclaw",
       conversationId: conversationId ?? `${tableName}:${id ?? index}`,
       messageId: id ?? `${tableName}:${index}`,
+      role,
       createdAt: normalizeTimestamp(createdAtColumn ? row[createdAtColumn] : null),
       text: content,
       workspacePath: null
@@ -477,7 +569,7 @@ function sampleOpenclawTable(
 function sampleCursorDb(path: string, options: OnboardingInsightSampleOptions): OnboardingSampleResult {
   const db = new DatabaseSync(path, { readOnly: true });
   try {
-    const queries: OnboardingSampledQuery[] = [];
+    const messages: OnboardingSampledMessage[] = [];
     if (hasTable(db, "cursorDiskKV")) {
       const rows = db.prepare(`
         SELECT rowid, key, value
@@ -488,7 +580,8 @@ function sampleCursorDb(path: string, options: OnboardingInsightSampleOptions): 
       `).all(Math.min(DEFAULT_MAX_SQL_ROWS, options.maxQueries * 8)) as Array<{ rowid: number; key: string; value: string }>;
       for (const row of rows) {
         const parsed = parseJsonObject(row.value);
-        if (!parsed || parsed.type !== 1) {
+        const role = parsed?.type === 1 ? "user" : parsed?.type === 2 ? "assistant" : null;
+        if (!parsed || !role) {
           continue;
         }
         const text = stringValue(parsed.text);
@@ -496,17 +589,18 @@ function sampleCursorDb(path: string, options: OnboardingInsightSampleOptions): 
         if (!text || keyParts.length !== 3 || !keyParts[1] || !keyParts[2]) {
           continue;
         }
-        queries.push({
+        messages.push({
           sourceId: "cursor",
           conversationId: keyParts[1],
           messageId: stringValue(parsed.bubbleId) ?? keyParts[2],
+          role,
           createdAt: normalizeTimestamp(parsed.createdAt ?? parsed.timestamp ?? row.rowid),
           text,
           workspacePath: null
         });
       }
     }
-    return sqlResult("cursor", "Cursor", queries, options);
+    return sqlResult("cursor", "Cursor", messages, options);
   } catch (error) {
     return emptyOnboardingSampleResult({
       sourceId: "cursor",
@@ -521,35 +615,46 @@ function sampleCursorDb(path: string, options: OnboardingInsightSampleOptions): 
 function sqlResult(
   sourceId: string,
   displayName: string,
-  queries: OnboardingSampledQuery[],
+  messages: OnboardingSampledMessage[],
   options: OnboardingInsightSampleOptions
 ): OnboardingSampleResult {
-  const limited = sortQueriesRecent(queries).slice(0, options.maxQueries).map((query) => limitSampledQuery(query, options.maxQueryChars));
+  const recentMessages = sortMessagesRecent(messages)
+    .slice(0, MAX_RECENT_PROBE_MESSAGES)
+    .map((message) => limitSampledMessage(message, message.role === "tool" ? MAX_TOOL_MESSAGE_CHARS : options.maxQueryChars));
+  const queries = recentMessages
+    .filter((message) => message.role === "user")
+    .slice(0, options.maxQueries)
+    .map(({ role: _role, ...query }) => query);
   return {
     sourceId,
     displayName,
-    recentSessionCount: new Set(limited.map((query) => query.conversationId)).size,
-    latestActivityAt: limited[0]?.createdAt ?? null,
-    queries: limited,
+    recentSessionCount: new Set(recentMessages.map((message) => message.conversationId)).size,
+    latestActivityAt: recentMessages[0]?.createdAt ?? null,
+    queries,
+    recentMessages,
     errors: []
   };
 }
 
 function mergeSampleResults(sourceId: string, displayName: string, results: OnboardingSampleResult[], maxQueries: number): OnboardingSampleResult {
   const queries = sortQueriesRecent(results.flatMap((result) => result.queries)).slice(0, maxQueries);
+  const recentMessages = sortMessagesRecent(results.flatMap((result) => result.recentMessages ?? []))
+    .slice(0, MAX_RECENT_PROBE_MESSAGES);
   return {
     sourceId,
     displayName,
     recentSessionCount: results.reduce((sum, result) => sum + result.recentSessionCount, 0),
-    latestActivityAt: queries[0]?.createdAt ?? results.map((result) => result.latestActivityAt).filter(Boolean).sort().at(-1) ?? null,
+    latestActivityAt: recentMessages[0]?.createdAt ?? queries[0]?.createdAt ?? results.map((result) => result.latestActivityAt).filter(Boolean).sort().at(-1) ?? null,
     queries,
+    recentMessages,
     errors: results.flatMap((result) => result.errors)
   };
 }
 
-function extractCodexQuery(record: JsonRecord, fallback: { sourceId: string; filePath: string; lineIndex: number }): OnboardingSampledQuery | null {
+function extractCodexMessage(record: JsonRecord, fallback: { sourceId: string; filePath: string; lineIndex: number }): OnboardingSampledMessage | null {
   const payload = recordValue(record.payload);
-  if (record.type !== "response_item" || !payload || payload.type !== "message" || payload.role !== "user") {
+  const role = normalizeSampledRole(payload?.role);
+  if (record.type !== "response_item" || !payload || payload.type !== "message" || (role !== "user" && role !== "assistant")) {
     return null;
   }
   const text = contentText(payload.content);
@@ -560,14 +665,16 @@ function extractCodexQuery(record: JsonRecord, fallback: { sourceId: string; fil
     sourceId: fallback.sourceId,
     conversationId: rolloutIdFromPath(fallback.filePath),
     messageId: `${rolloutIdFromPath(fallback.filePath)}:${fallback.lineIndex}`,
+    role,
     createdAt: normalizeTimestamp(record.timestamp),
     text,
     workspacePath: stringValue(record.cwd) ?? stringValue(recordValue(record.payload)?.cwd)
   };
 }
 
-function extractClaudeCodeQuery(record: JsonRecord, fallback: { sourceId: string; lineIndex: number }): OnboardingSampledQuery | null {
-  if (record.type !== "user") {
+function extractClaudeCodeMessage(record: JsonRecord, fallback: { sourceId: string; lineIndex: number }): OnboardingSampledMessage | null {
+  const role = normalizeSampledRole(record.type);
+  if (role !== "user" && role !== "assistant") {
     return null;
   }
   const message = recordValue(record.message);
@@ -580,33 +687,39 @@ function extractClaudeCodeQuery(record: JsonRecord, fallback: { sourceId: string
     sourceId: fallback.sourceId,
     conversationId,
     messageId: stringValue(record.uuid) ?? `${conversationId}:${fallback.lineIndex}`,
+    role,
     createdAt: normalizeTimestamp(record.timestamp),
     text,
     workspacePath: stringValue(record.cwd)
   };
 }
 
-function extractWorkbuddyQuery(
+function extractWorkbuddySampledMessage(
   record: JsonRecord,
   fallback: { sourceId: string; filePath: string; lineIndex: number }
-): OnboardingSampledQuery | null {
-  const message = extractWorkbuddyUserMessage(record, basename(fallback.filePath, ".jsonl"), fallback.lineIndex);
+): OnboardingSampledMessage | null {
+  const message = extractWorkbuddyMessage(record, basename(fallback.filePath, ".jsonl"), fallback.lineIndex);
   if (!message?.content.trim()) {
+    return null;
+  }
+  const role = normalizeSampledRole(message.role);
+  if (!role) {
     return null;
   }
   return {
     sourceId: fallback.sourceId,
     conversationId: message.conversationId,
     messageId: message.messageId,
+    role,
     createdAt: message.createdAt,
     text: message.content,
     workspacePath: message.workspacePath
   };
 }
 
-function extractGenericJsonlQuery(record: JsonRecord, fallback: { sourceId: string; filePath: string; lineIndex: number }): OnboardingSampledQuery | null {
-  const role = stringValue(record.role) ?? stringValue(record.type);
-  if (role !== "user") {
+function extractGenericJsonlMessage(record: JsonRecord, fallback: { sourceId: string; filePath: string; lineIndex: number }): OnboardingSampledMessage | null {
+  const role = normalizeSampledRole(stringValue(record.role) ?? stringValue(record.type));
+  if (!role) {
     return null;
   }
   const text = stringValue(record.content) ?? stringValue(record.text) ?? contentText(record.message);
@@ -618,6 +731,7 @@ function extractGenericJsonlQuery(record: JsonRecord, fallback: { sourceId: stri
     sourceId: fallback.sourceId,
     conversationId,
     messageId: stringValue(record.id) ?? stringValue(record.uuid) ?? `${conversationId}:${fallback.lineIndex}`,
+    role,
     createdAt: normalizeTimestamp(record.timestamp ?? record.createdAt),
     text,
     workspacePath: stringValue(record.cwd) ?? stringValue(record.workspacePath)
@@ -632,6 +746,13 @@ function limitSampledQuery(query: OnboardingSampledQuery, maxChars: number): Onb
   };
 }
 
+function limitSampledMessage(message: OnboardingSampledMessage, maxChars: number): OnboardingSampledMessage {
+  return {
+    ...message,
+    text: clipMessageText(message.text, maxChars)
+  };
+}
+
 function sortQueriesRecent(queries: OnboardingSampledQuery[]): OnboardingSampledQuery[] {
   return [...queries].sort((left, right) =>
     Date.parse(right.createdAt) - Date.parse(left.createdAt) ||
@@ -639,6 +760,95 @@ function sortQueriesRecent(queries: OnboardingSampledQuery[]): OnboardingSampled
     left.conversationId.localeCompare(right.conversationId) ||
     left.messageId.localeCompare(right.messageId)
   );
+}
+
+function sortMessagesRecent(messages: OnboardingSampledMessage[]): OnboardingSampledMessage[] {
+  return [...messages].sort((left, right) =>
+    Date.parse(right.createdAt) - Date.parse(left.createdAt) ||
+    left.sourceId.localeCompare(right.sourceId) ||
+    left.conversationId.localeCompare(right.conversationId) ||
+    left.messageId.localeCompare(right.messageId)
+  );
+}
+
+function selectConversationWindow(messages: readonly OnboardingSampledMessage[]): OnboardingSampledMessage[] {
+  const chronological = [...messages]
+    .filter((message) => message.role === "user" || message.role === "assistant" || message.role === "tool")
+    .sort((left, right) =>
+      Date.parse(left.createdAt) - Date.parse(right.createdAt) || left.messageId.localeCompare(right.messageId)
+    );
+  const turns: OnboardingSampledMessage[][] = [];
+  let currentTurn: OnboardingSampledMessage[] | null = null;
+  for (const message of chronological) {
+    if (message.role === "user") {
+      currentTurn = [message];
+      turns.push(currentTurn);
+      continue;
+    }
+    currentTurn?.push(message);
+  }
+
+  const selectedTurns = [...turns.slice(0, FIRST_CONVERSATION_TURNS), ...turns.slice(-LAST_CONVERSATION_TURNS)];
+  const seen = new Set<string>();
+  const compacted = selectedTurns.flatMap(compactConversationTurn).filter((message) => {
+    if (seen.has(message.messageId)) {
+      return false;
+    }
+    seen.add(message.messageId);
+    return true;
+  }).map((message) => limitSampledMessage(
+    message,
+    message.role === "user"
+      ? MAX_USER_MESSAGE_CHARS
+      : message.role === "assistant"
+        ? MAX_ASSISTANT_MESSAGE_CHARS
+        : MAX_TOOL_MESSAGE_CHARS
+  ));
+  return boundConversationWindowChars(compacted);
+}
+
+function compactConversationTurn(turn: readonly OnboardingSampledMessage[]): OnboardingSampledMessage[] {
+  const assistantIds = new Set(turn.filter((message) => message.role === "assistant")
+    .slice(-MAX_ASSISTANT_MESSAGES_PER_TURN)
+    .map((message) => message.messageId));
+  const toolIds = new Set(turn.filter((message) => message.role === "tool")
+    .slice(-MAX_TOOL_MESSAGES_PER_TURN)
+    .map((message) => message.messageId));
+  return turn.filter((message) =>
+    message.role === "user" || assistantIds.has(message.messageId) || toolIds.has(message.messageId)
+  );
+}
+
+function boundConversationWindowChars(messages: readonly OnboardingSampledMessage[]): OnboardingSampledMessage[] {
+  const totalChars = messages.reduce((sum, message) => sum + message.text.length, 0);
+  if (totalChars <= MAX_CONVERSATION_WINDOW_CHARS) {
+    return [...messages];
+  }
+  const ratio = MAX_CONVERSATION_WINDOW_CHARS / totalChars;
+  return messages.map((message) => limitSampledMessage(message, Math.max(120, Math.floor(message.text.length * ratio))));
+}
+
+function clipMessageText(text: string, maxChars: number): string {
+  const sanitized = stripInlineMediaPayloads(redactSecrets(text)).trim();
+  if (sanitized.length <= maxChars) {
+    return sanitized;
+  }
+  const headLength = Math.max(1, Math.floor(maxChars * 0.35));
+  const tailLength = Math.max(1, maxChars - headLength - 5);
+  return `${sanitized.slice(0, headLength)}\n...\n${sanitized.slice(-tailLength)}`;
+}
+
+function normalizeSampledRole(value: unknown): OnboardingSampledMessage["role"] | null {
+  if (value === "user" || value === "human" || value === "1" || value === 1) {
+    return "user";
+  }
+  if (value === "assistant" || value === "agent" || value === "2" || value === 2) {
+    return "assistant";
+  }
+  if (value === "tool") {
+    return "tool";
+  }
+  return null;
 }
 
 function contentText(value: unknown): string | null {

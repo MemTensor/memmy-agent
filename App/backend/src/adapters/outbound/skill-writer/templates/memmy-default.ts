@@ -50,7 +50,7 @@ export function renderMemmyDefaultContent(source: string): string {
     `memmy-memory turn start --source ${source} --session-id "$SESSION_ID" --query "$USER_QUERY"`,
     "```",
     "",
-    "Use returned `injectedContext` as historical memory context only. Keep the returned `turnId` for completion; `episodeId` identifies the episode selected at turn start. Keep the current user query separate from recalled memory.",
+    "Use returned `injectedContext` as historical memory context only. Keep the returned `turnId` for completion; the final `episodeId` is returned by `turn complete`. Keep the current user query separate from recalled memory.",
     "",
     "At the end of the turn, write the final interaction:",
     "",

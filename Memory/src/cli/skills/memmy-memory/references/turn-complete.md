@@ -17,6 +17,7 @@ API shape:
 - `sessionId`, `query`, and `answer` are required;
 - `status` is optional and normalized to `succeeded` or `failed`.
 - `source` should be passed as `--source <agent-source>` by installed agent skills.
+- the response returns the final `episodeId` after episode routing and turn persistence commit together.
 
 Never store:
 - secrets, credentials, access tokens, private keys, or passwords;
@@ -51,4 +52,5 @@ Working rules:
 - keep `answer` accurate to the actual result;
 - use `--status failed` when the task failed but the result is still useful to remember;
 - do not call this command for a user-cancelled turn;
+- use the returned `episodeId` as the turn's final episode assignment;
 - save returned memory ids when later inspection or deletion may be needed.

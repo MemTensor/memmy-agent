@@ -74,11 +74,21 @@ export class RewardPipeline {
     const rewardSource = this.rewardSourceForJob(job);
     if (!rewardSource) return;
     const { source, trace } = rewardSource;
-    const hasFeedbackSignal =
+    const episode = trace.episodeId ? this.deps.repos.runtime.getEpisode(trace.episodeId) : undefined;
+    if (episode && episode.status !== "closed") return;
+    const phase = episode ? "final" : "feedback";
+    const payloadHasFeedback =
       typeof job.payload.polarity === "string" ||
       typeof job.payload.magnitude === "number" ||
       typeof job.payload.rationale === "string";
-    const fallbackFeedback = heuristicHumanScore(hasFeedbackSignal
+    const episodeFeedback = episode?.feedbackIds
+      .map((id) => this.deps.repos.runtime.getFeedback(id))
+      .filter((item): item is NonNullable<typeof item> => Boolean(item)) ?? [];
+    const latestEpisodeFeedback = [...episodeFeedback].reverse().find((item) => item.channel === "explicit")
+      ?? episodeFeedback[episodeFeedback.length - 1];
+    const fallbackFeedback = heuristicHumanScore(latestEpisodeFeedback
+      ? [latestEpisodeFeedback]
+      : payloadHasFeedback
       ? [{
           channel: job.payload.channel === "implicit" ? "implicit" : "explicit",
           polarity: job.payload.polarity === "negative"
@@ -95,7 +105,7 @@ export class RewardPipeline {
       .map((memory) => this.deps.traceMeta(memory))
       .filter((item): item is TraceMeta => Boolean(item && item.episodeId === trace.episodeId))
       .sort((a, b) => a.ts - b.ts);
-    const skipReason = hasFeedbackSignal
+    const skipReason = episodeFeedback.length > 0 || payloadHasFeedback
       ? null
       : rewardSkipReason(episodeTraces, this.deps.config.algorithm.reward);
     if (skipReason && trace.episodeId) {
@@ -103,6 +113,7 @@ export class RewardPipeline {
       const scoredAt = this.deps.nowIso();
       const rewardDetail = {
         rHuman: 0,
+        phase,
         source: "heuristic",
         axes: { goalAchievement: 0, processQuality: 0, userSatisfaction: 0 },
         reason: skipReason,
@@ -119,7 +130,8 @@ export class RewardPipeline {
           ...(previousEpisode?.meta.closeReason === "finalized"
             ? {}
             : { closeReason: "abandoned", abandonReason: skipReason }),
-          reward: rewardDetail
+          reward: rewardDetail,
+          rewardDirty: null
         }
       });
       if (savedEpisode) {
@@ -152,6 +164,7 @@ export class RewardPipeline {
       const previousEpisode = this.deps.repos.runtime.getEpisode(trace.episodeId);
       const rewardDetail = {
         rHuman: feedback.rHuman,
+        phase,
         source: feedback.source,
         axes: feedback.axes,
         reason: feedback.reason,
@@ -167,7 +180,7 @@ export class RewardPipeline {
       const savedEpisode = this.deps.repos.runtime.updateEpisodeReward(trace.episodeId, {
         rTask: feedback.rHuman,
         rewardDetail,
-        metaPatch: { reward: rewardDetail }
+        metaPatch: { reward: rewardDetail, rewardDirty: null }
       });
       rewardedEpisode = savedEpisode;
       if (savedEpisode) {
@@ -188,10 +201,10 @@ export class RewardPipeline {
           this.deps.config.algorithm.negativeExperience.enabled
           && feedback.rHuman <= this.deps.config.algorithm.negativeExperience.failureRTaskThreshold
         ) {
-          const feedbackId = typeof job.payload.feedbackId === "string"
+          const feedbackId = job.payload.polarity === "negative" && typeof job.payload.feedbackId === "string"
             ? job.payload.feedbackId
             : undefined;
-          const repairId = typeof job.payload.repairId === "string"
+          const repairId = feedbackId && typeof job.payload.repairId === "string"
             ? job.payload.repairId
             : undefined;
           this.deps.enqueueJob({
@@ -346,6 +359,9 @@ export class RewardPipeline {
             episode,
             episodeTraces: input.episodeTraces,
             feedbackPayload: input.payload,
+            feedbackHistory: episode?.feedbackIds
+              .map((id) => this.deps.repos.runtime.getFeedback(id))
+              .filter((item): item is NonNullable<typeof item> => Boolean(item)),
             summaryMaxChars: this.deps.config.algorithm.reward.summaryMaxChars
           }))
         }
@@ -552,6 +568,12 @@ export interface RewardEpisodeInput {
     magnitude: number;
     rationale?: string;
   };
+  feedbackHistory?: Array<{
+    channel: "explicit" | "implicit";
+    polarity: "positive" | "neutral" | "negative";
+    magnitude: number;
+    rationale?: string;
+  }>;
   host?: {
     agent?: string;
     agentIdentity?: string;
@@ -567,6 +589,12 @@ export function buildRewardEpisodeInput(input: {
   episode?: EpisodeRecord;
   episodeTraces: readonly TraceMeta[];
   feedbackPayload: Record<string, unknown>;
+  feedbackHistory?: Array<{
+    channel: "explicit" | "implicit";
+    polarity: "positive" | "neutral" | "negative";
+    magnitude: number;
+    rationale?: string;
+  }>;
   summaryMaxChars: number;
 }): RewardEpisodeInput {
   const traces = input.episodeTraces.length
@@ -579,6 +607,12 @@ export function buildRewardEpisodeInput(input: {
   const first = traces[0] ?? input.trace;
   const last = traces[traces.length - 1] ?? input.trace;
   const feedback = rewardFeedbackInput(input.feedbackPayload);
+  const feedbackHistory = input.feedbackHistory?.map((item) => ({
+    channel: item.channel,
+    polarity: item.polarity,
+    magnitude: item.magnitude,
+    ...(item.rationale ? { rationale: rewardOneLine(item.rationale, 240) } : {})
+  }));
   const host = rewardHostInput(input.source, input.episode);
   return {
     mission: rewardOneLine(rewardEpisodeMission(input.episode, first.userText), 400),
@@ -589,6 +623,7 @@ export function buildRewardEpisodeInput(input: {
     },
     execution: rewardExecutionOutcome(traces),
     ...(feedback ? { feedback } : {}),
+    ...(feedbackHistory?.length ? { feedbackHistory } : {}),
     ...(host ? { host } : {})
   };
 }

@@ -271,7 +271,10 @@ async feedback(request: FeedbackRequest): Promise<FeedbackResponse> {
     if (feedback.polarity !== "negative") {
       jobs.push(...await this.maybeCreateFeedbackExperience(attributedRequest, feedback, context));
     }
-    if (attributedRequest.l1MemoryId || attributedRequest.episodeId) {
+    const rewardEpisode = attributedRequest.episodeId
+      ? this.deps.repos.runtime.getEpisode(attributedRequest.episodeId)
+      : undefined;
+    if ((attributedRequest.l1MemoryId || attributedRequest.episodeId) && rewardEpisode?.status !== "open") {
       jobs.push(
         this.deps.enqueueJob({
           jobType: "reward",
@@ -286,6 +289,7 @@ async feedback(request: FeedbackRequest): Promise<FeedbackResponse> {
             magnitude: feedback.magnitude,
             rationale: feedback.rationale,
             ...(repair?.repairId ? { repairId: repair.repairId } : {}),
+            ...(rewardEpisode?.status === "closed" ? { phase: "final" } : {}),
             trigger: feedback.channel === "implicit" ? "implicit_feedback" : "explicit_feedback"
           }
         })

@@ -134,7 +134,7 @@ export function FirstEncounterReport(props: FirstEncounterReportProps) {
             <div className="agent-user-turn flex min-w-0 max-w-[75%] justify-end">
               <div className="agent-chat-bubble-frame agent-chat-bubble-frame--user max-w-full min-w-0">
                 <div className="agent-chat-bubble agent-chat-bubble--user max-w-full min-w-0 overflow-hidden px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
-                  {t("onboarding.report.userPrompt")}
+                  {props.payload.reportPrompt}
                 </div>
               </div>
             </div>
@@ -165,6 +165,7 @@ export function FirstEncounterReport(props: FirstEncounterReportProps) {
                   <div className="mt-5 shrink-0 animate-in fade-in slide-in-from-bottom-3" style={{ animationDuration: "500ms" }}>
                     <FirstEncounterRelayChallenge
                       agents={props.agents}
+                      prompt={props.payload.relayPrompt}
                       onOpenAgent={props.onOpenAgent}
                       onVerifyMemory={props.onVerifyMemory}
                       onLifecycle={props.onRelayLifecycle}

@@ -24,16 +24,6 @@ const FALLBACK_ERROR_TOKENS = [
   "timeout",
   "timed out",
   "connection",
-  "insufficient_quota",
-  "insufficient quota",
-  "quota_exceeded",
-  "quota exceeded",
-  "quota_exhausted",
-  "quota exhausted",
-  "billing_hard_limit",
-  "insufficient_balance",
-  "balance",
-  "out of credits",
 ];
 const MISSING = Symbol("missing");
 
@@ -117,6 +107,7 @@ export class FallbackProvider extends LLMProvider {
     hasStreamed: boolean[] | null,
   ): Promise<LLMResponse> {
     const primaryModel = args.model ?? this.primary.getDefaultModel();
+    let lastResponse: LLMResponse | null = null;
     if (this.primaryAvailable()) {
       const response = await call(this.primary, args);
       if (response.finishReason !== "error") {
@@ -126,13 +117,15 @@ export class FallbackProvider extends LLMProvider {
       }
       if (hasStreamed?.[0]) return response;
       if (!FallbackProvider.shouldFallback(response)) return response;
-      this.primaryFailures += 1;
-      if (this.primaryFailures >= PRIMARY_FAILURE_THRESHOLD) {
-        this.primaryTrippedAt = Date.now();
+      lastResponse = response;
+      if (response.errorCategory !== "quota_exhausted") {
+        this.primaryFailures += 1;
+        if (this.primaryFailures >= PRIMARY_FAILURE_THRESHOLD) {
+          this.primaryTrippedAt = Date.now();
+        }
       }
     }
 
-    let lastResponse: LLMResponse | null = null;
     for (const fallback of this.fallbackPresets) {
       if (hasStreamed?.[0]) break;
       let fallbackProvider: LLMProvider;
@@ -178,6 +171,7 @@ export class FallbackProvider extends LLMProvider {
   }
 
   static shouldFallback(response: LLMResponse): boolean {
+    if (response.errorCategory === "quota_exhausted") return true;
     if (response.errorShouldRetry === false) return false;
     const status = response.errorStatusCode;
     const kind = (response.errorKind ?? "").toLowerCase();

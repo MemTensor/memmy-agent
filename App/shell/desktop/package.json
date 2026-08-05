@@ -15,8 +15,8 @@
     "build:main": "npm run build -w @memmy/desktop-interface && npm run build -w @memmy/backend && node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json",
     "build:runtime": "npm --prefix ../../.. run memory:build && npm --prefix ../../memmy-agent run build",
     "dev": "npm run build:runtime && npm run build:main && electron dist/main/main.js",
-    "dist:mac": "bash ../../../scripts/internal/package-mac-dmg.sh",
-    "dist:mac:unsigned": "MEMMY_SKIP_CODESIGN=1 bash ../../../scripts/internal/package-mac-dmg.sh",
+    "dist:mac": "bash ../../../scripts/internal/mac/build-dmg.sh",
+    "dist:mac:unsigned": "MEMMY_SKIP_CODESIGN=1 bash ../../../scripts/internal/mac/build-dmg.sh",
     "test": "vitest run tests",
     "typecheck": "npm run build -w @memmy/desktop-interface && npm run build -w @memmy/backend && tsc -p tsconfig.json --noEmit"
   },

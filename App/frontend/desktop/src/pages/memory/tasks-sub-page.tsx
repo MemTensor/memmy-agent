@@ -20,12 +20,14 @@ import {
   writeMemoryPanelCaches
 } from "./memory-panel-cache.js";
 import { type MemoryPageInfo, MemoryPagination, normalizePage } from "./memory-pagination.js";
+import type { MemoryReferenceOpenRequest } from "./memory-reference-tags.js";
 import { MemoryRefreshButton } from "./memory-refresh-button.js";
 import { MemoryStateBox } from "./memory-state-box.js";
 import { type RemoteData, toErrorMessage } from "./remote-state.js";
 
 export interface TasksSubPageProps {
   client: MemoryRuntimeClient | null;
+  openRequest?: MemoryReferenceOpenRequest;
 }
 
 export interface MemoryTasksOutput extends MemoryPageInfo {
@@ -204,6 +206,29 @@ export function TasksSubPage(props: TasksSubPageProps) {
     setSelectedTask(task);
   }
 
+  function openTaskById(id: string) {
+    if (!props.client) {
+      setState({ status: "error", message: t("memory.clientNotReady") });
+      return;
+    }
+
+    const localId = id.split("::").at(-1) ?? id;
+    void loadTasksData(props.client, localId, 1, t)
+      .then((data) => {
+        const task = data.tasks.find((item) => item.id === id || item.id.split("::").at(-1) === localId);
+        if (!task) {
+          setState({ status: "error", message: t("memory.detailUnavailable") });
+          return;
+        }
+
+        setQuery(localId);
+        setPage(1);
+        setState({ status: "ready", data });
+        openTask(task);
+      })
+      .catch((error) => setState({ status: "error", message: toErrorMessage(error) }));
+  }
+
   function changePage(nextPage: number) {
     const normalizedPage = normalizePage(nextPage);
     if (normalizedPage === page) {
@@ -234,6 +259,13 @@ export function TasksSubPage(props: TasksSubPageProps) {
     return () => window.clearTimeout(timeout);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.client, query, page, t, language]);
+
+  useEffect(() => {
+    if (props.openRequest) {
+      openTaskById(props.openRequest.id);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.openRequest?.requestId]);
 
   useEffect(() => {
     if (!props.client) {

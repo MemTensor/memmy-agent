@@ -262,7 +262,7 @@ describe("OpenAI Codex provider", () => {
 
   it.each([
     ['{"error":{"type":"rate_limit_exceeded","code":"rate_limit_exceeded"}}', true],
-    ['{"error":{"type":"insufficient_quota","code":"insufficient_quota"}}', false],
+    ['{"error":{"type":"insufficient_quota","code":"insufficient_quota"}}', true],
   ])("classifies 429 retryability from raw error semantics", (raw, expectedRetry) => {
     const [errorType, errorCode] = LLMProvider.extractErrorTypeCode(raw);
 
@@ -390,6 +390,6 @@ describe("OpenAI Codex provider", () => {
     expect(shouldRetryStatus(400, null, null, "bad request")).toBe(false);
     expect(
       codexErrorResponse(new CodexHTTPError("quota", { statusCode: 429, errorType: "insufficient_quota" })).errorShouldRetry,
-    ).toBe(false);
+    ).toBe(true);
   });
 });

@@ -148,8 +148,27 @@ describe("MemoryService / evolution / policy induction", () => {
 
     service.closeSession(session.sessionId);
     await service.runWorkerOnce(20);
+    await service.runWorkerOnce(20);
+    await service.runWorkerOnce(20);
+    await service.runWorkerOnce(20);
     makeTraceEligibleForL2(db, complete.l1MemoryId);
-    db.db.prepare(`UPDATE evolution_jobs SET status = 'succeeded' WHERE job_type <> 'l2_association'`).run();
+    db.db.prepare(`DELETE FROM trace_policy_links WHERE l1_memory_id = ?`).run(complete.l1MemoryId);
+    db.db.prepare(`UPDATE evolution_jobs SET status = 'succeeded'`).run();
+    const associationAt = new Date().toISOString();
+    db.db.prepare(
+      `INSERT INTO evolution_jobs (
+         id, job_type, status, user_id, session_id, episode_id, target_memory_id,
+         payload_json, attempts, max_attempts, created_at, updated_at
+       ) VALUES (?, 'l2_association', 'queued', ?, ?, ?, ?, '{}', 0, 3, ?, ?)`
+    ).run(
+      "job_best_l2_association",
+      "user-best-l2-association",
+      session.sessionId,
+      complete.episodeId,
+      complete.l1MemoryId,
+      associationAt,
+      associationAt
+    );
     await service.runWorkerOnce(20);
 
     const links = db.db.prepare(
@@ -349,6 +368,9 @@ describe("MemoryService / evolution / policy induction", () => {
     service.closeSession(profileA.sessionId);
     service.closeSession(profileB.sessionId);
     await service.runWorkerOnce(20);
+    await service.runWorkerOnce(20);
+    await service.runWorkerOnce(20);
+    await service.runWorkerOnce(20);
     makeTraceEligibleForL2(db, firstA.l1MemoryId);
     makeTraceEligibleForL2(db, firstB.l1MemoryId);
     db.db.prepare(`UPDATE evolution_jobs SET status = 'succeeded' WHERE job_type <> 'l2_induction'`).run();
@@ -378,6 +400,9 @@ describe("MemoryService / evolution / policy induction", () => {
     await addPositiveFeedbackForTurn(service, profileANext.sessionId, secondA);
     makeTraceEligibleForL2(db, secondA.l1MemoryId);
     service.closeSession(profileANext.sessionId);
+    await service.runWorkerOnce(20);
+    await service.runWorkerOnce(20);
+    await service.runWorkerOnce(20);
     await service.runWorkerOnce(20);
     makeTraceEligibleForL2(db, secondA.l1MemoryId);
     db.db.prepare(`UPDATE evolution_jobs SET status = 'succeeded' WHERE job_type <> 'l2_induction'`).run();
@@ -470,6 +495,9 @@ describe("MemoryService / evolution / policy induction", () => {
     }
     service.closeSession(profileA.sessionId);
     await service.runWorkerOnce(20);
+    await service.runWorkerOnce(20);
+    await service.runWorkerOnce(20);
+    await service.runWorkerOnce(20);
     for (const turn of turnsA) {
       setTraceSignatureAndVectorForTest(db, turn.l1MemoryId, signature, [1, 0, 0]);
     }
@@ -489,6 +517,9 @@ describe("MemoryService / evolution / policy induction", () => {
       setTraceSignatureAndVectorForTest(db, turn.l1MemoryId, signature, [1, 0, 0]);
     }
     service.closeSession(profileB.sessionId);
+    await service.runWorkerOnce(20);
+    await service.runWorkerOnce(20);
+    await service.runWorkerOnce(20);
     await service.runWorkerOnce(20);
     for (const turn of turnsB) {
       setTraceSignatureAndVectorForTest(db, turn.l1MemoryId, signature, [1, 0, 0]);
@@ -907,6 +938,7 @@ describe("MemoryService / evolution / policy induction", () => {
       magnitude: 1,
       rationale: "the focused pytest migration workflow worked"
     });
+    service.closeSession(session.sessionId);
     makeTraceEligibleForL2(db, complete.l1MemoryId);
     for (let i = 0; i < 8; i += 1) {
       await service.runWorkerOnce(50);
@@ -1036,6 +1068,7 @@ describe("MemoryService / evolution / policy induction", () => {
       magnitude: 1,
       rationale: "the focused migration diagnosis worked"
     });
+    service.closeSession(session.sessionId);
     makeTraceEligibleForL2(db, complete.l1MemoryId);
     for (let i = 0; i < 8; i += 1) {
       await service.runWorkerOnce(50);

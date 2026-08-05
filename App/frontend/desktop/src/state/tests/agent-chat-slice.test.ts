@@ -349,6 +349,79 @@ describe("agent chat slice", () => {
     expect(state.messages[4]?.isStreaming).not.toBe(true);
   });
 
+  it("replaces a live assistant draft with a structured quota terminal message", () => {
+    let state = agentReducer(initialAgentState, {
+      type: "agent/wsEvent",
+      event: { event: "ready", chat_id: "chat-quota" }
+    });
+    state = agentReducer(state, {
+      type: "agent/userMessageQueued",
+      chatId: "chat-quota",
+      content: "继续"
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "delta", chat_id: "chat-quota", text: "部分回答" }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "message",
+        chat_id: "chat-quota",
+        text: "当前模型额度已用完",
+        model_error: { category: "quota_exhausted" }
+      }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "turn_end", chat_id: "chat-quota" }
+    });
+
+    const assistant = state.messages.filter((message) => message.role === "assistant");
+    expect(assistant).toHaveLength(1);
+    expect(assistant[0]).toMatchObject({
+      content: "当前模型额度已用完",
+      modelError: { category: "quota_exhausted" },
+      isStreaming: false
+    });
+  });
+
+  it("restores the same structured quota category from thread history", () => {
+    const state = loadHistory(initialAgentState, "websocket:chat-quota", [
+      { role: "user", content: "继续" },
+      {
+        role: "assistant",
+        content: "当前模型额度已用完",
+        model_error: { category: "quota_exhausted" }
+      }
+    ]);
+
+    expect(state.messages[1]).toMatchObject({
+      role: "assistant",
+      content: "当前模型额度已用完",
+      modelError: { category: "quota_exhausted" }
+    });
+  });
+
+  it("ignores unknown model error categories", () => {
+    let state = agentReducer(initialAgentState, {
+      type: "agent/wsEvent",
+      event: { event: "ready", chat_id: "chat-unknown-error" }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "message",
+        chat_id: "chat-unknown-error",
+        text: "ordinary answer",
+        model_error: { category: "unknown" } as any
+      }
+    });
+
+    expect(state.messages[0]).toMatchObject({ content: "ordinary answer" });
+    expect(state.messages[0]).not.toHaveProperty("modelError");
+  });
+
   it("finalizes pending activity tool and file-edit progress only on turn_end", () => {
     let state = agentReducer(initialAgentState, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
     state = agentReducer(state, {

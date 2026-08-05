@@ -290,6 +290,10 @@ export type MemmyAgentSendMessageInput = {
   media?: MemmyAgentMediaInput[];
 };
 
+export type MemmyAgentModelError = {
+  category: "quota_exhausted";
+};
+
 export type MemmyAgentWsEvent = {
   event: string;
   connection_generation?: number;
@@ -307,6 +311,7 @@ export type MemmyAgentWsEvent = {
   client_request_id?: string;
   latency_ms?: number;
   media_urls?: MemmyAgentMediaAttachment[];
+  model_error?: MemmyAgentModelError;
   metadata?: Record<string, unknown>;
   tool_events?: unknown;
   agent_ui?: unknown;

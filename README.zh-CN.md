@@ -36,7 +36,7 @@
 
 ## 🚀 开始体验 Memmy
 
-点击进入[官网下载](https://memmy.cn/)或者 [GitHub Release](https://github.com/MemTensor/memmy-agent/releases)下载。
+点击进入[官网下载](https://memmy.cn/)或者 [GitHub Release](https://github.com/MemTensor/memmy-agent/releases) 下载。
 
 > [!TIP]
 > 注册 Memmy 后，即可获得免费 AI 使用额度，系统会自动进行模型调度，帮助你体验完整的 Memory + Agent Runtime。
@@ -105,7 +105,7 @@ Memmy 不只是一个聊天界面，而是一套运行在本地的 AI Agent 
 | 🔌 Integration Layer | 连接外部生态         | 消息渠道、第三方工具、OpenAI 兼容 API       |
 | 🖥️ User Interface  | 提供使用入口         | Desktop App、CLI/TUI、Web 接口              |
 
-### 仓库架构
+### 系统架构
 
 ![Memmy 系统架构](docs/assets/memmy-architecture-zh.png)
 

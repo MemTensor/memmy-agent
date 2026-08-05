@@ -17,6 +17,7 @@ import {
   type TokenUsageDto
 } from "@memmy/local-api-contracts";
 import type { DatabaseSync, SQLInputValue } from "node:sqlite";
+import { INSTALLATION_SCAN_SCOPE_UUID } from "../../installation-scan-scope.js";
 import {
   ensureAccountDefaults,
   ensureLocalByokAccount,
@@ -182,6 +183,11 @@ export function createBootstrapRepository(db: DatabaseSync): BootstrapRepository
 
     getOnboardingState() {
       const uuid = resolveOnboardingUuidWithDefaults(db);
+      const installationScanPermission = getRequiredRow<Pick<OnboardingStateRow, "scan_permission">>(
+        db,
+        "SELECT scan_permission FROM account_onboarding_state WHERE uuid = ?",
+        [INSTALLATION_SCAN_SCOPE_UUID]
+      );
       const row = getRequiredRow<OnboardingStateRow>(
         db,
         `SELECT
@@ -202,7 +208,7 @@ export function createBootstrapRepository(db: DatabaseSync): BootstrapRepository
         currentStep: row.current_step,
         hasAcceptedTerms: toBoolean(row.has_accepted_terms),
         acceptedTermsVersion: row.accepted_terms_version,
-        scanPermission: row.scan_permission,
+        scanPermission: installationScanPermission.scan_permission,
         improvementProgram: row.improvement_program,
         completedAt: row.completed_at
       });
@@ -210,6 +216,7 @@ export function createBootstrapRepository(db: DatabaseSync): BootstrapRepository
 
     updateOnboarding(patch) {
       const uuid = resolveOnboardingUuidWithDefaults(db);
+      const { scanPermission, ...accountPatch } = patch;
       applyPatch(
         db,
         "account_onboarding_state",
@@ -218,13 +225,21 @@ export function createBootstrapRepository(db: DatabaseSync): BootstrapRepository
           currentStep: { column: "current_step" },
           hasAcceptedTerms: { column: "has_accepted_terms", serialize: toInteger },
           acceptedTermsVersion: { column: "accepted_terms_version" },
-          scanPermission: { column: "scan_permission" },
           improvementProgram: { column: "improvement_program" },
           completedAt: { column: "completed_at" }
         },
-        patch,
+        accountPatch,
         { column: "uuid", value: uuid }
       );
+      if (scanPermission !== undefined) {
+        applyPatch(
+          db,
+          "account_onboarding_state",
+          { scanPermission: { column: "scan_permission" } },
+          { scanPermission },
+          { column: "uuid", value: INSTALLATION_SCAN_SCOPE_UUID }
+        );
+      }
       return this.getOnboardingState();
     },
 

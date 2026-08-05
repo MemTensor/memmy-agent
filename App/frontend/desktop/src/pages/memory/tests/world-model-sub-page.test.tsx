@@ -32,13 +32,14 @@ const worldDetail: GetMemoryOutput = {
       properties: {
         internal_info: {
           world_model: {
+            summary: "Memmy 的本地记忆服务按层暴露记忆，并由管理页直接读取。",
             policyIds: ["memory-policy-1"],
             structure: {
               environment: [
                 {
                   label: "本地记忆底座",
                   description: "记忆服务通过 panel items 暴露 L1/L2/L3/Skill 数据。",
-                  evidenceIds: ["memory-trace-1"]
+                  evidenceIds: ["memory-trace-1", "po_1", "tr_fake"]
                 }
               ],
               inference: [
@@ -147,9 +148,17 @@ describe("WorldModelSubPage", () => {
     expect(html).toContain('data-icon="trash-2"');
     expect(html).toContain("候选");
     expect(html).toContain("结构化认知");
+    expect(html).toContain("Memmy 的本地记忆服务按层暴露记忆，并由管理页直接读取。");
+    expect(html).not.toContain("Memmy 是本地记忆 sidecar，不负责调度外部 Agent 任务队列。");
     expect(html).toContain("环境拓扑");
     expect(html).toContain("本地记忆底座");
+    expect(html).toContain("memory-trace-1");
+    expect(html).not.toContain("po_1");
+    expect(html).not.toContain("tr_fake");
     expect(html).toContain("memory-policy-1");
+    expect(html).toContain("memory-policy-id--link");
+    expect(html).toContain('title="memory-policy-1"');
+    expect(html).not.toContain("来源记忆");
   });
 });
 
@@ -171,6 +180,7 @@ function renderWorldModel(
         onOpenWorldModel={vi.fn()}
         onDeleteWorldModel={vi.fn(async () => undefined)}
         onCloseWorldModel={vi.fn()}
+        onOpenMemoryReference={vi.fn()}
       />
     </I18nProvider>
   );

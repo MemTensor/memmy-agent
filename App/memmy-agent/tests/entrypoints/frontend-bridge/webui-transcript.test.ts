@@ -68,6 +68,59 @@ describe("webui transcript replay", () => {
     expect(messages[2]).not.toHaveProperty("reasoning");
   });
 
+  it("replays structured quota errors under transcript schema version 3", () => {
+    useDataDir();
+    const key = "websocket:t-quota";
+    appendTranscriptObject(key, {
+      event: "message",
+      chat_id: "t-quota",
+      text: "当前模型额度已用完",
+      model_error: { category: "quota_exhausted" },
+    });
+
+    const response = buildWebuiThreadResponse(key, { augmentUserMedia: null });
+
+    expect(response?.schemaVersion).toBe(3);
+    expect(response?.messages).toHaveLength(1);
+    expect(response?.messages[0]).toMatchObject({
+      role: "assistant",
+      content: "当前模型额度已用完",
+      model_error: { category: "quota_exhausted" },
+    });
+  });
+
+  it.each([
+    null,
+    "quota_exhausted",
+    { category: "unknown" },
+    { category: 1 },
+  ])("ignores invalid transcript model_error value %j", (modelError) => {
+    const messages = replayTranscriptToUiMessages([
+      {
+        event: "message",
+        chat_id: "t-invalid-quota",
+        text: "ordinary model error",
+        model_error: modelError,
+      },
+    ]);
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).not.toHaveProperty("model_error");
+  });
+
+  it("does not upgrade legacy quota-like text into a structured category", () => {
+    const messages = replayTranscriptToUiMessages([
+      {
+        event: "message",
+        chat_id: "t-legacy-quota",
+        text: "Error calling LLM: insufficient quota",
+      },
+    ]);
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).not.toHaveProperty("model_error");
+  });
+
   it("replays resuming stream-end drafts as narration activity before the final answer", () => {
     const messages = replayTranscriptToUiMessages([
       { event: "user", chat_id: "t-resuming", text: "q" },

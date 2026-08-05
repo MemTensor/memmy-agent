@@ -16,6 +16,7 @@ export interface RelayAgentOption {
 
 export interface FirstEncounterRelayChallengeProps {
   agents: RelayAgentOption[];
+  prompt: string;
   onOpenAgent?: (sourceId: string, prompt: string) => Promise<boolean>;
   onCopyPrompt?: (prompt: string) => Promise<void>;
   onVerifyMemory?: (sourceId: string, startedAt: string) => Promise<boolean>;
@@ -75,10 +76,9 @@ export function FirstEncounterRelayChallenge(props: FirstEncounterRelayChallenge
     setLaunchingSourceId(agent.sourceId);
     const startedAt = new Date().toISOString();
     try {
-      const prompt = formatRelayAgentPrompt(agent.sourceId, t("onboarding.relay.prompt"));
       const outcome = await launchFirstEncounterRelay({
         sourceId: agent.sourceId,
-        prompt,
+        prompt: props.prompt,
         openAgent: props.onOpenAgent,
         copyPrompt: props.onCopyPrompt
       });
@@ -124,7 +124,7 @@ export function FirstEncounterRelayChallenge(props: FirstEncounterRelayChallenge
 
   async function copyInstruction() {
     try {
-      await (props.onCopyPrompt ?? copyRelayPrompt)(t("onboarding.relay.prompt"));
+      await (props.onCopyPrompt ?? copyRelayPrompt)(props.prompt);
       props.onLifecycle?.("relay_clicked", "", "copy_prompt");
       showTemporaryFeedback({ kind: "copied" });
     } catch {

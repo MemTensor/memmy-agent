@@ -118,6 +118,7 @@ describe("MemoryService / feedback / decision repair", () => {
       });
       makeTraceEligibleForL2(db, complete.l1MemoryId);
     }
+    service.closeSession(session.sessionId);
     for (let i = 0; i < 20; i += 1) {
       await service.runWorkerOnce(100);
     }
@@ -726,6 +727,9 @@ describe("MemoryService / feedback / decision repair", () => {
       magnitude: 1,
       rationale: "wrong, do not repeat the SQL query before inspecting the migration output"
     });
+    service.closeSession(negativeSession.sessionId);
+    await service.runWorkerOnce(100);
+    await service.runWorkerOnce(100);
     await service.runWorkerOnce(100);
 
     const repair = db.db.prepare(
@@ -778,12 +782,6 @@ describe("MemoryService / feedback / decision repair", () => {
       kind: "repair",
       op: "created"
     });
-    expect(service.panelJobs({
-      userId: negativeUserId,
-      status: "queued"
-    }).items).toEqual(expect.arrayContaining([
-      expect.objectContaining({ jobType: "negative_experience" })
-    ]));
     await service.runWorkerOnce(100);
     const policies = service.panelItems({
       userId: negativeUserId,

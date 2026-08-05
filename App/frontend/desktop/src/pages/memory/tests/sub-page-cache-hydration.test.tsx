@@ -21,9 +21,9 @@ describe("memory sub page cache hydration", () => {
     ["overview", () => <OverviewSubPage client={null} />],
     ["memories", () => <MemoriesSubPage client={null} />],
     ["tasks", () => <TasksSubPage client={null} />],
-    ["policies", () => <PoliciesSubPage client={null} />],
-    ["world-model", () => <WorldModelSubPage client={null} />],
-    ["skills", () => <SkillsSubPage client={null} />],
+    ["policies", () => <PoliciesSubPage client={null} onOpenMemoryReference={() => undefined} />],
+    ["world-model", () => <WorldModelSubPage client={null} onOpenMemoryReference={() => undefined} />],
+    ["skills", () => <SkillsSubPage client={null} onOpenMemoryReference={() => undefined} />],
     ["analytics", () => <AnalyticsSubPage client={null} />],
     ["logs", () => <LogsSubPage client={null} />]
   ] as Array<[string, () => ReactElement]>)("does not read sessionStorage during %s first render", (_name, renderSubPage) => {

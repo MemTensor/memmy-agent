@@ -466,9 +466,92 @@ describe("agent source service", () => {
     expect(events).toEqual(["scan:cursor", "scan:custom", "ingest:cursor", "ingest:custom"]);
   });
 
+  it("enqueues every scanned source into one global priority drain", async () => {
+    const baseMemoryClient = createMockMemoryClient();
+    const enqueueCalls: string[][] = [];
+    const workerCalls: Array<{
+      targetMemoryIds?: string[];
+      priorityCohortOnly?: boolean;
+    }> = [];
+    const service = createService({
+      adapters: [
+        createFakeAdapter("cursor", [createMessage("cursor", 1)]),
+        createFakeAdapter("custom", [createMessage("custom", 1)])
+      ],
+      ingestionService: {
+        async ingest(messages, ctx) {
+          for await (const _message of messages) {
+            // Consume the source stream before returning its durable memory id.
+          }
+          return {
+            attempted: 1,
+            written: 1,
+            deduped: 0,
+            failed: 0,
+            writtenMemories: 1,
+            dedupedMemories: 0,
+            failedMemories: 0,
+            memoryIds: [`memory-${ctx.sourceId}`],
+            conversations: 1,
+            completedConversationIds: [],
+            incompleteConversationIds: [],
+            failedConversationIds: [],
+            errors: []
+          };
+        }
+      },
+      memoryClient: {
+        ...baseMemoryClient,
+        async enqueueImportSummaries(memoryIds) {
+          enqueueCalls.push([...(memoryIds ?? [])]);
+          return {
+            enqueued: memoryIds?.length ?? 0,
+            memoryIds: memoryIds ?? [],
+            serverTime: "2026-05-28T10:00:00.000Z"
+          };
+        },
+        async runWorker(input) {
+          workerCalls.push(input);
+          return baseMemoryClient.runWorker(input);
+        },
+        async getMemoryProcessingStatus(memoryIds) {
+          return {
+            items: memoryIds.map((memoryId) => ({
+              memoryId,
+              state: "ready" as const,
+              stage: null,
+              activeJobId: null,
+              attemptCount: 1,
+              manualRetryCount: 0,
+              retryAction: "retry" as const,
+              errorCode: null,
+              errorMessage: null,
+              failedAt: null,
+              updatedAt: "2026-05-28T10:00:00.000Z"
+            })),
+            serverTime: "2026-05-28T10:00:00.000Z"
+          };
+        }
+      }
+    });
+
+    await service.scanAll();
+
+    expect(enqueueCalls).toEqual([["memory-cursor", "memory-custom"]]);
+    expect(workerCalls).toEqual([
+      expect.objectContaining({
+        limit: 4,
+        priorityCohortOnly: true
+      })
+    ]);
+    expect(workerCalls[0]?.targetMemoryIds).toBeUndefined();
+  });
+
   it("reconciles summary progress when another worker finishes the scan memories", async () => {
     const baseMemoryClient = createMockMemoryClient();
     const workerTargets: string[][] = [];
+    const workerLimits: number[] = [];
+    const workerPriorityCohorts: Array<boolean | undefined> = [];
     let enqueueCalls = 0;
     const memoryClient: MemoryClient = {
       ...baseMemoryClient,
@@ -500,6 +583,8 @@ describe("agent source service", () => {
       },
       async runWorker(input) {
         workerTargets.push(input.targetMemoryIds ?? []);
+        workerLimits.push(input.limit);
+        workerPriorityCohorts.push(input.priorityCohortOnly);
         return baseMemoryClient.runWorker(input);
       }
     };
@@ -515,7 +600,9 @@ describe("agent source service", () => {
       }
     })).resolves.toEqual([]);
 
-    expect(workerTargets).toEqual([["memory-a", "memory-b"]]);
+    expect(workerTargets).toEqual([[]]);
+    expect(workerLimits).toEqual([4]);
+    expect(workerPriorityCohorts).toEqual([true]);
     expect(progress).toEqual([
       { current: 0, total: 2 },
       { current: 2, total: 2 }

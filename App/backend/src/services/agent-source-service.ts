@@ -47,9 +47,7 @@ import {
 export type { ScanProgress } from "../adapters/outbound/agent-source/types.js";
 
 const SCAN_MESSAGE_YIELD_INTERVAL = 100;
-const IMPORT_SUMMARY_PRIORITY_LIMIT = 100;
-const IMPORT_SUMMARY_PRIORITY_BATCH_SIZE = 20;
-const IMPORT_SUMMARY_STANDARD_BATCH_SIZE = 100;
+const IMPORT_WORKER_BATCH_SIZE = 4;
 const IMPORT_WORKER_TIMEOUT_MS = 600_000;
 const IMPORT_PROGRESS_POLL_INTERVAL_MS = 250;
 const INITIAL_GLOBAL_MEMORY_LIMIT = 1_000;
@@ -122,13 +120,11 @@ export function createAgentSourceService(options: CreateAgentSourceServiceOption
     async scanAll(scanOptions = {}) {
       const collected = await this.collectAll(scanOptions);
       const results = await this.ingestCollected(collected, scanOptions);
-      for (const result of results) {
-        const failures = await this.processImportSummaries(result.memoryIds ?? [], {
-          ...scanOptions,
-          progressSourceId: result.sourceId
-        });
-        appendProcessingFailures(result, failures);
-      }
+      const failures = await this.processImportSummaries(
+        results.flatMap((result) => result.memoryIds ?? []),
+        { ...scanOptions, progressSourceId: "all" }
+      );
+      appendProcessingFailuresToResults(results, failures);
       return results;
     },
 
@@ -209,7 +205,8 @@ export function createAgentSourceService(options: CreateAgentSourceServiceOption
         sourceId,
         memorySource: source.displayName,
         deferProcessing: true,
-        totalMessages: messages.length
+        totalMessages: messages.length,
+        scanMode: input.mode
       });
       const processingFailures = await processPendingImportSummaries(options, stats.memoryIds, {
         progressSourceId: sourceId
@@ -648,6 +645,7 @@ async function ingestCollectedSource(
       signal: scanOptions.signal,
       deferProcessing: true,
       totalMessages: ingestMessages.length,
+      scanMode: collected.scanMode ?? scanOptions.mode,
       onProgress(progress) {
         emitProgress(scanOptions, {
           sourceId: progress.sourceId,
@@ -986,7 +984,6 @@ async function processPendingImportSummaries(
   const failures: ProcessingFailure[] = [];
   const progressSourceId = scanOptions.progressSourceId ?? "all";
   let indexed = 0;
-  let prioritySummaries = 0;
   let lastProgressAt = Date.now();
   emitProgress(scanOptions, {
     sourceId: progressSourceId,
@@ -998,20 +995,13 @@ async function processPendingImportSummaries(
 
   while (pendingMemoryIds.size > 0) {
     scanOptions.signal?.throwIfAborted();
-    const limit = prioritySummaries < IMPORT_SUMMARY_PRIORITY_LIMIT
-      ? IMPORT_SUMMARY_PRIORITY_BATCH_SIZE
-      : IMPORT_SUMMARY_STANDARD_BATCH_SIZE;
     const result = await options.memoryClient.runWorker({
-      limit,
-      targetMemoryIds: [...pendingMemoryIds],
+      limit: IMPORT_WORKER_BATCH_SIZE,
+      priorityCohortOnly: true,
       signal: scanOptions.signal,
       timeoutMs: IMPORT_WORKER_TIMEOUT_MS
     });
 
-    prioritySummaries += result.jobs.filter((job) =>
-      job.jobType === "import_summary" &&
-      Boolean(job.targetMemoryId && pendingMemoryIds.has(job.targetMemoryId))
-    ).length;
     const refreshed = await options.memoryClient.getMemoryProcessingStatus([...pendingMemoryIds]);
     const processingByMemoryId = new Map(refreshed.items.map((item) => [item.memoryId, item]));
     const activeMemoryIds = new Set(refreshed.items
@@ -1065,6 +1055,20 @@ function appendProcessingFailures(result: ScanResult, failures: readonly Process
     conversationId: failure.memoryId,
     reason: failure.reason
   })));
+}
+
+function appendProcessingFailuresToResults(
+  results: readonly ScanResult[],
+  failures: readonly ProcessingFailure[]
+): void {
+  const resultByMemoryId = new Map<string, ScanResult>();
+  for (const result of results) {
+    for (const memoryId of result.memoryIds ?? []) resultByMemoryId.set(memoryId, result);
+  }
+  for (const failure of failures) {
+    const result = resultByMemoryId.get(failure.memoryId);
+    if (result) appendProcessingFailures(result, [failure]);
+  }
 }
 
 

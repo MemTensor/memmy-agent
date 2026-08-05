@@ -40,7 +40,7 @@ export function createDecisionRepairEvolutionLlm(): LlmClient {
           support_trace_ids: []
         } as unknown as T;
       }
-      if (options.operation === "l3.abstraction.v2") {
+      if (options.operation === "l3.abstraction.v3") {
         return {
           title: "SQLite migration repair environment",
           domain_tags: ["sqlite", "migration"],

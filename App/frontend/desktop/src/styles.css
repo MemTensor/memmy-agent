@@ -4752,6 +4752,19 @@ code {
   padding: 4px 8px;
 }
 
+.memory-policy-id--link {
+  cursor: pointer;
+  transition: border-color 140ms ease, background 140ms ease, color 140ms ease;
+}
+
+.memory-policy-id--link:hover,
+.memory-policy-id--link:focus-visible {
+  border-color: color-mix(in srgb, var(--color-action-sky) 52%, var(--color-border-stone));
+  background: color-mix(in srgb, var(--color-action-sky) 12%, var(--color-background-paper));
+  color: var(--color-text-ink);
+  outline: none;
+}
+
 .memory-source-list {
   display: flex;
   flex-wrap: wrap;

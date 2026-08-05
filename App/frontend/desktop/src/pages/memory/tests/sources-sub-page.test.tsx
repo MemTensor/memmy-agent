@@ -72,13 +72,14 @@ describe("SourcesSubPage", () => {
     expect(html).toContain("跨Agent接入");
     expect(html).toContain("memory-sources-page");
     expect(html).toContain("各 Agent 通过 Hook 或插件接入 memmy-memory，并自动安装 Skill");
-    expect(html).toContain("新发现 Agent 自动安装 Hook/插件");
+    expect(html).toContain("发现新 Agent 时自动接入");
+    expect(html).toContain("自动安装接入组件；关闭后只出现在下方列表，由你手动接入");
     expect(html).toContain("~/.local/bin/memmy-memory");
     expect(html).not.toContain("或安装原生插件接入记忆");
     expect(html).toContain("memory-panel__header memory-panel__header--single-line");
     expect(html).toContain("memory-panel__title");
     expect(html).not.toContain("memory-panel__header-actions");
-    expect(html).toContain("扫描行为");
+    expect(html).toContain("自动同步");
     expect(html).toContain("同步新增");
     expect(html).toContain("点击“同步新增”按钮后，只会读取上次同步后产生的新对话");
     expect(html).not.toContain("上次扫描水位");

@@ -37,7 +37,6 @@ describe("onboarding insight local api routes", () => {
     expect(response.json()).toEqual({
       status: "skipped",
       reportMarkdown: "",
-      secondaryActions: [],
       diagnostics: {
         discoveredAgentCount: 0,
         sampledQueryCount: 0,
@@ -49,7 +48,7 @@ describe("onboarding insight local api routes", () => {
     expect(generateReport).not.toHaveBeenCalled();
   });
 
-  it("streams first-login report chunks and final actions when scan permission is granted", async () => {
+  it("streams first-login report chunks and the final report when scan permission is granted", async () => {
     app = createServer({
       permissionManager: createPermissionManager("scan_only"),
       onboardingInsight: {
@@ -63,16 +62,6 @@ describe("onboarding insight local api routes", () => {
             response: {
               status: "ready",
               reportMarkdown: "你好",
-              primaryAction: {
-                type: "continue_task",
-                buttonLabel: "继续",
-                description: "继续任务",
-                contextSummary: "上下文",
-                relatedAgents: ["Codex"],
-                topicKeywords: ["Memory"],
-                suggestedPrompt: "继续任务"
-              },
-              secondaryActions: [],
               diagnostics: {
                 discoveredAgentCount: 1,
                 sampledQueryCount: 1,

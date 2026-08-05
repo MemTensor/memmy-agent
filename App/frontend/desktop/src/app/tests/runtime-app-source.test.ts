@@ -51,7 +51,9 @@ describe("RuntimeApp bootstrap loading", () => {
     expect(appSource).toContain("<AgentRuntimeBridge taskStateCoordinator={taskStateCoordinator ?? undefined}>");
     expect(appSource.indexOf("<UpdateCoordinatorProvider>")).toBeLessThan(appSource.indexOf("<AppRouter onRetry={retry} />"));
     expect(routerSource).toContain("<GlobalUpdateDialog");
-    expect(routerSource).toContain("suspended={isPetWindowContext || Boolean(petGuideRequest) || tokenModalOpen}");
+    expect(routerSource).toContain("isPetWindowContext\n          || Boolean(petGuideRequest)\n          || tokenModalOpen");
+    expect(routerSource).toContain('|| workspaceGuidanceStep === "product_tour"');
+    expect(routerSource).toContain('|| workspaceGuidanceStep === "nickname"');
   });
 
   it("loads the selected mini-list agent chat when restoring an existing main window", async () => {

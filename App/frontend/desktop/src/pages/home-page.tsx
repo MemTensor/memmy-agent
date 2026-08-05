@@ -67,6 +67,7 @@ import {
   consumeFirstEncounterRelayArm,
   consumePendingFirstEncounterTaskLaunch,
   readFirstEncounterRelayChat,
+  readFirstEncounterRelayPrompt,
   readFirstEncounterRelayReadyChat,
   writeFirstEncounterRelayChat,
   writeFirstEncounterRelayReadyChat,
@@ -886,6 +887,7 @@ export function HomePage() {
       ? (
           <FirstEncounterRelayChallenge
             agents={relayAgents}
+            prompt={readFirstEncounterRelayPrompt(typeof window === "undefined" ? undefined : window.sessionStorage) ?? t("onboarding.relay.prompt")}
             onOpenAgent={openFirstEncounterRelayAgent}
             onVerifyMemory={verifyFirstEncounterRelayMemory}
             onLifecycle={trackFirstEncounterRelayLifecycle}

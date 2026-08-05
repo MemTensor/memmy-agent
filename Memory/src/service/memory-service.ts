@@ -214,6 +214,8 @@ type InternalMemorySearchRequest = MemorySearchRequest & {
   targetSkillId?: string;
   contextHints?: Record<string, unknown>;
   injectedContextQuery?: string;
+  turnIntentDecision?: unknown;
+  routeProposal?: unknown;
   recordEvent?: boolean;
 };
 
@@ -783,8 +785,6 @@ export class MemoryService {
     contextPacketId: string;
     turnId: string;
     sessionId: string;
-    episodeId: string;
-    closedEpisodeIds: string[];
     searchEventId: string;
     hits: RecallHit[];
     injectedContext: InjectedContext;
@@ -1646,7 +1646,10 @@ export class MemoryService {
 
   runWorkerOnce(
     limit = 100,
-    request: RequestEnvelope & { targetMemoryIds?: string[] } = {}
+    request: RequestEnvelope & {
+      targetMemoryIds?: string[];
+      priorityCohortOnly?: boolean;
+    } = {}
   ): ReturnType<WorkerRunner["runWorkerOnce"]> {
     return this.workerRunner.runWorkerOnce(limit, request);
   }
@@ -1840,7 +1843,6 @@ export class MemoryService {
     request: TurnStartRequest & Record<string, unknown>
   ): ReturnType<MemoryService["startTurn"]> {
     const turnId = request.turnId ?? newId("turn");
-    const episodeId = `episode_${stableHash(`readonly:${request.sessionId}:${turnId}`).slice(0, 20)}`;
     const contextHints = turnStartContextHints(request);
     const search = await this.search({
       requestId: request.requestId,
@@ -1858,11 +1860,9 @@ export class MemoryService {
       injectedContextQuery: request.query
     });
     return {
-      contextPacketId: `ctx_${stableHash(`${request.sessionId}:${episodeId}:${turnId}:${search.searchEventId}`).slice(0, 20)}`,
+      contextPacketId: `ctx_${stableHash(`${request.sessionId}:unbound:${turnId}:${search.searchEventId}`).slice(0, 20)}`,
       turnId,
       sessionId: request.sessionId,
-      episodeId,
-      closedEpisodeIds: [],
       searchEventId: search.searchEventId,
       hits: search.hits,
       injectedContext: search.injectedContext,

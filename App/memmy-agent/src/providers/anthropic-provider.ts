@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { createProviderAbortError, isProviderAbortError, LLMProvider, LLMResponse, providerAbortOptions, ToolCallRequest } from "./base.js";
+import { classifyQuotaExhaustion } from "./provider-error-classifier.js";
 import { parseToolArguments } from "./tool-json.js";
 
 const ALNUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
@@ -70,7 +71,7 @@ export class AnthropicProvider extends LLMProvider {
     return new Anthropic(clientOptions);
   }
 
-  static handleError(error: any): LLMResponse {
+  static handleError(error: any, provider: string | null = null): LLMResponse {
     const response = error.response;
     const body = error.body ?? error.doc ?? response?.text ?? error.message ?? "";
     const [errorType, errorCode] = this.extractErrorTypeCode(body);
@@ -84,7 +85,29 @@ export class AnthropicProvider extends LLMProvider {
           : String(shouldRetryHeader).trim().toLowerCase() === "false"
             ? false
             : null;
-    const status = error.statusCode ?? error.statusCode ?? response?.statusCode ?? response?.status;
+    const status = error.statusCode ?? error.status ?? response?.statusCode ?? response?.status;
+    let bodyData = body && typeof body === "object" ? body : null;
+    if (!bodyData && typeof body === "string" && body.trim()) {
+      try {
+        bodyData = JSON.parse(body);
+      } catch {
+        bodyData = null;
+      }
+    }
+    const baseRespStatusCode =
+      bodyData
+        ? LLMProvider.normalizeErrorToken(
+            bodyData.base_resp?.status_code ?? bodyData.error?.base_resp?.status_code,
+          )
+        : null;
+    const errorCategory = classifyQuotaExhaustion({
+      provider,
+      httpStatus: status == null || !Number.isFinite(Number(status)) ? null : Number(status),
+      errorType,
+      errorCode,
+      metadataErrorType: null,
+      baseRespStatusCode,
+    });
     const kind = /timeout|timed out/i.test(String(error.message ?? error.constructor?.name ?? ""))
       ? "timeout"
       : /connection/i.test(String(error.message ?? error.constructor?.name ?? ""))
@@ -104,6 +127,7 @@ export class AnthropicProvider extends LLMProvider {
       errorCode,
       errorRetryAfterS: retryAfter,
       errorShouldRetry: shouldRetry,
+      errorCategory,
     });
   }
 
@@ -449,7 +473,7 @@ export class AnthropicProvider extends LLMProvider {
     } catch (error: any) {
       if (isProviderAbortError(error)) throw error;
       if (AnthropicProvider.isStreamingRequiredError(error)) return this.chatStream(args);
-      return AnthropicProvider.handleError(error);
+      return AnthropicProvider.handleError(error, this.spec?.name ?? null);
     }
   }
 
@@ -474,7 +498,7 @@ export class AnthropicProvider extends LLMProvider {
       return final ?? new LLMResponse({ content: null, finishReason: "stop" });
     } catch (error: any) {
       if (isProviderAbortError(error)) throw error;
-      return AnthropicProvider.handleError(error);
+      return AnthropicProvider.handleError(error, this.spec?.name ?? null);
     }
   }
 }

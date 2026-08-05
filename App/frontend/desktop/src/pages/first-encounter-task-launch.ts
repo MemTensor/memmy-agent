@@ -2,6 +2,7 @@ export const PENDING_FIRST_ENCOUNTER_TASK_LAUNCH_KEY = "memmy.pendingFirstEncoun
 export const FIRST_ENCOUNTER_RELAY_CHAT_KEY = "memmy.firstEncounterRelayChat";
 export const FIRST_ENCOUNTER_RELAY_ARMED_KEY = "memmy.firstEncounterRelayArmed";
 export const FIRST_ENCOUNTER_RELAY_READY_CHAT_KEY = "memmy.firstEncounterRelayReadyChat";
+export const FIRST_ENCOUNTER_RELAY_PROMPT_KEY = "memmy.firstEncounterRelayPrompt";
 
 interface StorageLike {
   getItem(key: string): string | null;
@@ -110,6 +111,18 @@ export function writeFirstEncounterRelayReadyChat(storage: StorageLike | null | 
 
 export function readFirstEncounterRelayReadyChat(storage: StorageLike | null | undefined): string | null {
   return storage?.getItem(FIRST_ENCOUNTER_RELAY_READY_CHAT_KEY)?.trim() || null;
+}
+
+export function writeFirstEncounterRelayPrompt(storage: StorageLike | null | undefined, prompt: string): void {
+  const normalizedPrompt = prompt.trim();
+  if (!storage || !normalizedPrompt) {
+    return;
+  }
+  storage.setItem(FIRST_ENCOUNTER_RELAY_PROMPT_KEY, normalizedPrompt);
+}
+
+export function readFirstEncounterRelayPrompt(storage: StorageLike | null | undefined): string | null {
+  return storage?.getItem(FIRST_ENCOUNTER_RELAY_PROMPT_KEY)?.trim() || null;
 }
 
 /** Arms the next first-created chat for the post-answer relay card. */

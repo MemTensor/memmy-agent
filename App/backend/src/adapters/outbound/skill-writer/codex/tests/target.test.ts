@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createCodexSkillTarget } from "../index.js";
+import type { TrustMemmyCodexHooksOptions } from "../hook-trust.js";
 import type { SkillManifest } from "../../types.js";
 
 let tempDir: string | undefined;
@@ -93,7 +94,7 @@ describe("codex skill target", () => {
 
   it("replaces an app-hosted hook idempotently without changing unrelated hooks", async () => {
     const { rootDirectory, memmyConfigPath } = createFixture();
-    const target = createCodexSkillTarget({ rootDirectory, memmyConfigPath });
+    const target = createCodexSkillTarget({ rootDirectory, memmyConfigPath, trustHooks: noOpTrustHooks });
     const unrelatedHook = { type: "command", command: "'/usr/local/bin/custom-hook'", timeout: 10 };
     const appHostedHook = {
       type: "command",
@@ -121,6 +122,44 @@ describe("codex skill target", () => {
     }
   });
 
+  it("persists trust for the installed user-level hooks before installation completes", async () => {
+    const { rootDirectory, memmyConfigPath } = createFixture();
+    let trustOptions: TrustMemmyCodexHooksOptions | undefined;
+    const target = createCodexSkillTarget({
+      rootDirectory,
+      memmyConfigPath,
+      trustHooks: async (options) => {
+        trustOptions = options;
+        const config = JSON.parse(readFileSync(options.hooksFilePath, "utf8")) as {
+          hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>>;
+        };
+        expect(config.hooks.UserPromptSubmit?.[0]?.hooks[0]?.command).toBe(options.hookCommand);
+        expect(config.hooks.Stop?.[0]?.hooks[0]?.command).toBe(options.hookCommand);
+      }
+    });
+
+    await target.installPlugin?.("codex");
+
+    expect(trustOptions).toMatchObject({
+      codexHomeDirectory: rootDirectory,
+      hooksFilePath: join(rootDirectory, "hooks.json"),
+      hookCommand: expect.stringContaining("memmy-resume-hook.mjs")
+    });
+  });
+
+  it("fails installation when Codex cannot persist hook trust", async () => {
+    const { rootDirectory, memmyConfigPath } = createFixture();
+    const target = createCodexSkillTarget({
+      rootDirectory,
+      memmyConfigPath,
+      trustHooks: async () => {
+        throw new Error("trust failed");
+      }
+    });
+
+    await expect(target.installPlugin?.("codex")).rejects.toThrow("trust failed");
+  });
+
   it("installs a UserPromptSubmit hook that blocks resume commands with top L1 candidates", async () => {
     const { rootDirectory, memmyConfigPath } = createFixture();
     let requestBody: Record<string, unknown> | undefined;
@@ -143,7 +182,7 @@ describe("codex skill target", () => {
       ["storage:", `  endpoint: "http://127.0.0.1:${address.port}"`, '  token: "test-token"', ""].join("\n"),
       "utf8"
     );
-    const target = createCodexSkillTarget({ rootDirectory, memmyConfigPath });
+    const target = createCodexSkillTarget({ rootDirectory, memmyConfigPath, trustHooks: noOpTrustHooks });
     const existingTargetFile = "existing skill bootstrap\n";
     writeFileSync(join(rootDirectory, "AGENTS.md"), existingTargetFile, "utf8");
 
@@ -248,7 +287,6 @@ describe("codex skill target", () => {
       if (request.method === "POST" && url.pathname === "/api/v1/turns/start") {
         writeJsonResponse(response, 200, {
           turnId: "turn-stop-1",
-          episodeId: "episode-1",
           sourceMemoryIds: ["memory-1"],
           injectedContext: { markdown: "Relevant prior context" }
         });
@@ -267,7 +305,7 @@ describe("codex skill target", () => {
       ["storage:", `  endpoint: "http://127.0.0.1:${address.port}"`, '  token: "test-token"', ""].join("\n"),
       "utf8"
     );
-    const target = createCodexSkillTarget({ rootDirectory, memmyConfigPath });
+    const target = createCodexSkillTarget({ rootDirectory, memmyConfigPath, trustHooks: noOpTrustHooks });
 
     try {
       await target.installPlugin?.("codex");
@@ -331,7 +369,7 @@ describe("codex skill target", () => {
         source: "codex",
         sourceMemoryIds: ["memory-1"]
       });
-      expect(requests[3]?.body.episodeId).toBe("episode-1");
+      expect(requests[3]?.body).not.toHaveProperty("episodeId");
     } finally {
       await close(server);
     }
@@ -347,6 +385,8 @@ function createFixture(): { rootDirectory: string; memmyConfigPath: string; mani
     manifest: createManifest("codex")
   };
 }
+
+async function noOpTrustHooks(): Promise<void> {}
 
 function expectSafeNodeHookCommand(command: string | undefined): void {
   expect(command).toContain("memmy-resume-hook.mjs");

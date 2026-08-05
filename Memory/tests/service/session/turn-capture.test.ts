@@ -17,7 +17,7 @@ const {
 afterEach(cleanup);
 
 describe("MemoryService / session / turn capture", () => {
-  it("records a started RawTurn at turn.start and creates L1 only after turn.complete", async () => {
+  it("records only recall audit at turn.start and commits episode, RawTurn, and L1 at turn.complete", async () => {
     const { db, service } = createTestService();
     const session = service.openSession({
       namespace: {
@@ -45,40 +45,26 @@ describe("MemoryService / session / turn capture", () => {
     });
 
     expect(started.turnId).toBe("turn-start-readonly");
-    expect(started.episodeId).toMatch(/^episode_/u);
-    expect(started.closedEpisodeIds).toEqual([]);
+    expect(started).not.toHaveProperty("episodeId");
+    expect(started).not.toHaveProperty("closedEpisodeIds");
     expect(counts()).toEqual({
       ...before,
-      episodes: before.episodes + 1,
-      rawTurns: before.rawTurns + 1,
       recalls: before.recalls + 1,
       apiLogs: before.apiLogs + 1
     });
-    const startedRawTurn = db.db.prepare(
-      `SELECT episode_id, user_text, assistant_text, source_memory_ids_json,
-              message_payload_json, status
-       FROM raw_turns
-       WHERE session_id = ? AND turn_id = ?`
-    ).get(session.sessionId, started.turnId) as {
-      episode_id: string;
-      user_text: string;
-      assistant_text: string | null;
-      source_memory_ids_json: string;
-      message_payload_json: string;
-      status: string;
-    };
-    expect(startedRawTurn).toMatchObject({
-      episode_id: started.episodeId,
-      user_text: "Do not create L1 until the assistant finishes.",
-      assistant_text: null,
-      status: "started"
-    });
-    expect(JSON.parse(startedRawTurn.source_memory_ids_json)).toEqual(started.sourceMemoryIds);
-    expect(JSON.parse(startedRawTurn.message_payload_json)).toMatchObject({
-      turn_start: {
-        contextPacketId: started.contextPacketId,
-        searchEventId: started.searchEventId,
-        sourceMemoryIds: started.sourceMemoryIds
+    expect(db.db.prepare(
+      "SELECT COUNT(*) AS count FROM raw_turns WHERE session_id = ? AND turn_id = ?"
+    ).get(session.sessionId, started.turnId)).toEqual({ count: 0 });
+    const recall = db.db.prepare(
+      `SELECT episode_id, request_json
+       FROM recall_events
+       WHERE id = ?`
+    ).get(started.searchEventId) as { episode_id: string | null; request_json: string };
+    expect(recall.episode_id).toBeNull();
+    expect(JSON.parse(recall.request_json)).toMatchObject({
+      routeProposal: {
+        action: "create_first",
+        relationDecision: { relation: "new_task" }
       }
     });
     expect(db.db.prepare(
@@ -110,6 +96,34 @@ describe("MemoryService / session / turn capture", () => {
       apiLogs: before.apiLogs + 2,
       idempotency: before.idempotency + 1
     });
+    const completedRawTurn = db.db.prepare(
+      `SELECT episode_id, user_text, assistant_text, source_memory_ids_json,
+              message_payload_json, status
+       FROM raw_turns
+       WHERE id = ?`
+    ).get(completed.rawTurnId) as {
+      episode_id: string;
+      user_text: string;
+      assistant_text: string;
+      source_memory_ids_json: string;
+      message_payload_json: string;
+      status: string;
+    };
+    expect(completedRawTurn).toMatchObject({
+      episode_id: completed.episodeId,
+      user_text: "Do not create L1 until the assistant finishes.",
+      assistant_text: "The complete user and assistant turn is now safe to persist.",
+      status: "succeeded"
+    });
+    expect(JSON.parse(completedRawTurn.source_memory_ids_json)).toEqual(started.sourceMemoryIds);
+    expect(JSON.parse(completedRawTurn.message_payload_json)).toMatchObject({
+      turn_start: {
+        contextPacketId: started.contextPacketId,
+        searchEventId: started.searchEventId,
+        sourceMemoryIds: started.sourceMemoryIds,
+        routeProposal: { action: "create_first" }
+      }
+    });
     expect(completed.jobs.map((job) => job.jobType)).toContain("episode_idle_close");
     db.close();
   });
@@ -138,25 +152,15 @@ describe("MemoryService / session / turn capture", () => {
       query: "For that sqlite migration, inspect the schema first."
     });
 
-    expect(replacement.episodeId).toBe(interrupted.episodeId);
+    expect(interrupted).not.toHaveProperty("episodeId");
+    expect(replacement).not.toHaveProperty("episodeId");
     expect(memoryCount()).toBe(beforeMemories);
     expect(db.db.prepare(
       `SELECT turn_id, status, assistant_text
        FROM raw_turns
        WHERE session_id = ?
        ORDER BY created_at ASC, turn_id ASC`
-    ).all(session.sessionId)).toEqual([
-      {
-        turn_id: "turn-interrupted",
-        status: "started",
-        assistant_text: null
-      },
-      {
-        turn_id: "turn-replacement",
-        status: "started",
-        assistant_text: null
-      }
-    ]);
+    ).all(session.sessionId)).toEqual([]);
 
     const completed = service.completeTurn("turn-replacement", {
       sessionId: session.sessionId,
@@ -171,16 +175,10 @@ describe("MemoryService / session / turn capture", () => {
        FROM raw_turns
        WHERE session_id = ?
        ORDER BY created_at ASC, turn_id ASC`
-    ).all(session.sessionId)).toEqual([
-      {
-        turn_id: "turn-interrupted",
-        status: "started"
-      },
-      {
-        turn_id: "turn-replacement",
-        status: "succeeded"
-      }
-    ]);
+    ).all(session.sessionId)).toEqual([{
+      turn_id: "turn-replacement",
+      status: "succeeded"
+    }]);
     expect(db.db.prepare(
       `SELECT json_extract(properties_json, '$.internal_info.raw_turn_id') AS raw_turn_id
        FROM memories
@@ -253,13 +251,83 @@ describe("MemoryService / session / turn capture", () => {
     });
 
     expect(completed.l1MemoryIds).toHaveLength(1);
-    expect(db.db.prepare(
-      "SELECT status, user_text, assistant_text FROM raw_turns WHERE id = ?"
-    ).get(completed.rawTurnId)).toEqual({
+    const raw = db.db.prepare(
+      "SELECT status, user_text, assistant_text, message_payload_json FROM raw_turns WHERE id = ?"
+    ).get(completed.rawTurnId) as {
+      status: string;
+      user_text: string;
+      assistant_text: string;
+      message_payload_json: string;
+    };
+    expect(raw).toMatchObject({
       status: "failed",
       user_text: "Run the deployment.",
       assistant_text: "Deployment failed: connection timed out."
     });
+    expect(JSON.parse(raw.message_payload_json)).toMatchObject({
+      turn_start: {
+        routeProposalStale: true,
+        routeProposal: { action: "create_first" }
+      }
+    });
+    db.close();
+  });
+
+  it("rebinds observed tool data when turn.complete commits a split proposal", async () => {
+    const { db, service } = createTestService();
+    const session = service.openSession({
+      namespace: {
+        source: "codex",
+        profileId: "default",
+        userId: "turn-observed-route-user"
+      }
+    });
+    const first = service.completeTurn("turn-observed-route-first", {
+      sessionId: session.sessionId,
+      query: "Configure nginx TLS",
+      answer: "Use port 443."
+    });
+    await service.startTurn({
+      turnId: "turn-observed-route-split",
+      sessionId: session.sessionId,
+      query: "new task: summarize the hiring plan"
+    });
+    const observed = await service.observeTool({
+      sessionId: session.sessionId,
+      turnId: "turn-observed-route-split",
+      toolCallId: "call-hiring-plan",
+      toolName: "read_file",
+      args: { path: "hiring-plan.md" }
+    });
+    expect(observed.rawTurnId).toMatch(/^raw_/u);
+    expect(db.db.prepare(
+      "SELECT episode_id FROM raw_turns WHERE id = ?"
+    ).get(observed.rawTurnId)).toEqual({ episode_id: first.episodeId });
+
+    const completed = service.completeTurn("turn-observed-route-split", {
+      sessionId: session.sessionId,
+      query: "new task: summarize the hiring plan",
+      answer: "The hiring plan is summarized."
+    });
+    expect(completed.rawTurnId).toBe(observed.rawTurnId);
+    expect(completed.episodeId).not.toBe(first.episodeId);
+    expect(completed.closedEpisodeIds).toEqual([first.episodeId]);
+    expect(db.db.prepare(
+      "SELECT episode_id FROM raw_turns WHERE id = ?"
+    ).get(observed.rawTurnId)).toEqual({ episode_id: completed.episodeId });
+    expect(db.db.prepare(
+      "SELECT DISTINCT episode_id FROM artifacts WHERE raw_turn_id = ?"
+    ).all(observed.rawTurnId)).toEqual([{ episode_id: completed.episodeId }]);
+    const episodeRows = db.db.prepare(
+      "SELECT id, raw_turn_ids_json FROM episodes WHERE id IN (?, ?) ORDER BY id"
+    ).all(first.episodeId, completed.episodeId) as Array<{
+      id: string;
+      raw_turn_ids_json: string;
+    }>;
+    const firstRow = episodeRows.find((row) => row.id === first.episodeId);
+    const completedRow = episodeRows.find((row) => row.id === completed.episodeId);
+    expect(JSON.parse(firstRow!.raw_turn_ids_json)).not.toContain(observed.rawTurnId);
+    expect(JSON.parse(completedRow!.raw_turn_ids_json)).toContain(observed.rawTurnId);
     db.close();
   });
 

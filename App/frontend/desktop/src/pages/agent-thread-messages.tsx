@@ -448,10 +448,17 @@ const SingleMessage = memo(function SingleMessage(props: SingleMessageProps) {
     );
   }
 
-  if (isAgentModelErrorContent(message.content) && !isTechnicalPlatformApiError(message.content)) {
+  if (
+    message.modelError?.category === "quota_exhausted" ||
+    (isAgentModelErrorContent(message.content) && !isTechnicalPlatformApiError(message.content))
+  ) {
     return (
       <div className="flex min-w-0 justify-start">
-        <AgentModelErrorNotice content={message.content} accountMode={props.accountMode === true} />
+        <AgentModelErrorNotice
+          content={message.content}
+          accountMode={props.accountMode === true}
+          modelError={message.modelError}
+        />
       </div>
     );
   }
@@ -543,10 +550,17 @@ function RetryWaitStatusLine(props: { status: AgentRetryWaitStatus }) {
   );
 }
 
-function AgentModelErrorNotice(props: { content: string; accountMode?: boolean }) {
+function AgentModelErrorNotice(props: {
+  content: string;
+  accountMode?: boolean;
+  modelError?: AgentChatMessage["modelError"];
+}) {
   const { t } = useTranslation();
   const [showDetail, setShowDetail] = useState(false);
-  const { title, detail } = formatAgentModelError(props.content, t, { accountMode: props.accountMode === true });
+  const { title, detail } = formatAgentModelError(props.content, t, {
+    accountMode: props.accountMode === true,
+    modelError: props.modelError
+  });
 
   return (
     <div className="agent-model-error-notice" role="alert">

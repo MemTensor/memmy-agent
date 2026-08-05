@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   clearPendingFirstEncounterTaskLaunch,
   consumePendingFirstEncounterTaskLaunch,
+  FIRST_ENCOUNTER_RELAY_PROMPT_KEY,
   PENDING_FIRST_ENCOUNTER_TASK_LAUNCH_KEY,
+  readFirstEncounterRelayPrompt,
+  writeFirstEncounterRelayPrompt,
   writePendingFirstEncounterTaskLaunch
 } from "../first-encounter-task-launch.js";
 
@@ -65,5 +68,14 @@ describe("first encounter task launch", () => {
     clearPendingFirstEncounterTaskLaunch(storage);
 
     expect(consumePendingFirstEncounterTaskLaunch(storage)).toBeNull();
+  });
+
+  it("persists the language- and workspace-aware relay prompt for Home", () => {
+    const storage = new MemoryStorage();
+
+    writeFirstEncounterRelayPrompt(storage, "  项目路径是：/Users/jiang/MyProject/memmy-agent-jiang  ");
+
+    expect(storage.getItem(FIRST_ENCOUNTER_RELAY_PROMPT_KEY)).toBe("项目路径是：/Users/jiang/MyProject/memmy-agent-jiang");
+    expect(readFirstEncounterRelayPrompt(storage)).toBe("项目路径是：/Users/jiang/MyProject/memmy-agent-jiang");
   });
 });
