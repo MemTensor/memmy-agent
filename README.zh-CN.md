@@ -44,6 +44,24 @@
 > 注册赠送 Agent 任务体验 Token，当前额度和使用情况以应用内显示为准
 > 当体验额度用尽后，可切换至 BYOK 模式，使用自己的模型 API。
 
+## Fork 二次修改说明
+
+当前分支是在上游
+[`MemTensor/memmy-agent`](https://github.com/MemTensor/memmy-agent)
+仓库基础上的二次修改版本。当前工作 fork 为
+[`bluewatercg/memmy-agent`](https://github.com/bluewatercg/memmy-agent)，
+分支为 `actions/windows-package/remote-memory`。
+
+以下内容是本 fork 相比原作者 README 新增的更新说明：
+
+- 新增外部 Agent 适配器共享的 `memmy.agent.v1` 生命周期协议，覆盖 Codex、Claude Code 和 Pi hook 模板。
+- 新增 Memory 写入 provenance 捕获：来源 Agent、adapter id、request id、workspace path、project id、source memory ids，以及可用时的 Git repository / branch / commit。
+- 新增按项目隔离的 Memory namespace：不同 workspace 隔离，同一项目内的不同 Agent 可共享上下文。
+- 新增 Memory 治理能力：Markdown audit 导出/导入、稳定 supersession 关系，以及 read model 中的 provenance / supersession 字段。
+- 新增结构化 session checkpoint，用于可恢复的任务交接状态。
+- panel、retrieval、bundle import/export、worker、API log 等视图按 tenant/project namespace 收敛。
+- 忽略生成的 `output/` 产物，并提高 Memory 全量测试 timeout，降低本机或 CI 负载下的偶发超时。
+
 ## 什么是 Memmy？
 
 每一次 AI 协作都会产生新的上下文和经验，但这些信息通常被隔离在不同工具和会话中。当你切换 Agent 或工作场景时，新的 AI 又需要重新认识你。

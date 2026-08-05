@@ -44,6 +44,23 @@ Sign up to get free tokens. Model routing is automatic — start exp
 > **Registration grants Agent task trial tokens; the current amount and usage are shown in the app.**
 > Once the trial credits run out, you can switch to BYOK and use your own model API.
 
+## Fork Updates
+
+This branch is a second-party modification based on the upstream
+[`MemTensor/memmy-agent`](https://github.com/MemTensor/memmy-agent) repository.
+The working fork is [`bluewatercg/memmy-agent`](https://github.com/bluewatercg/memmy-agent),
+branch `actions/windows-package/remote-memory`.
+
+Changes in this fork that are not part of the original upstream README:
+
+- Added the shared `memmy.agent.v1` lifecycle protocol for external adapters, including Codex, Claude Code, and Pi hook templates.
+- Added provenance capture for Memory writes: source agent, adapter id, request id, workspace path, project id, source memory ids, and Git repository / branch / commit where available.
+- Added project-scoped Memory isolation so different workspaces are separated while agents in the same project can share context.
+- Added Memory governance features: Markdown audit export/import, stable supersession relations, and detailed provenance/supersession fields in read models.
+- Added structured session checkpoints for resumable handoff state.
+- Scoped panel, retrieval, bundle import/export, worker, and API log views by tenant/project namespace.
+- Ignored generated `output/` artifacts and raised the Memory test timeout to reduce load-related flakes.
+
 ## What Is Memmy?
 
 Every AI session generates context. Most of it gets thrown away.
