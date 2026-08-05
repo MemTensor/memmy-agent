@@ -75,7 +75,7 @@ export function FirstEncounterRelayChallenge(props: FirstEncounterRelayChallenge
     setLaunchingSourceId(agent.sourceId);
     const startedAt = new Date().toISOString();
     try {
-      const prompt = t("onboarding.relay.prompt");
+      const prompt = formatRelayAgentPrompt(agent.sourceId, t("onboarding.relay.prompt"));
       const outcome = await launchFirstEncounterRelay({
         sourceId: agent.sourceId,
         prompt,
@@ -299,9 +299,10 @@ export interface LaunchFirstEncounterRelayInput {
 }
 
 export async function launchFirstEncounterRelay(input: LaunchFirstEncounterRelayInput): Promise<{ opened: boolean; copied: boolean }> {
+  const prompt = formatRelayAgentPrompt(input.sourceId, input.prompt);
   let copied = false;
   try {
-    await (input.copyPrompt ?? copyRelayPrompt)(input.prompt);
+    await (input.copyPrompt ?? copyRelayPrompt)(prompt);
     copied = true;
   } catch {
     copied = false;
@@ -309,12 +310,33 @@ export async function launchFirstEncounterRelay(input: LaunchFirstEncounterRelay
 
   let opened = false;
   try {
-    opened = await input.openAgent?.(input.sourceId, input.prompt) ?? false;
+    opened = await input.openAgent?.(input.sourceId, prompt) ?? false;
   } catch {
     opened = false;
   }
 
   return { opened, copied };
+}
+
+const WORKBUDDY_MEMORY_COMMAND = "/memmy-memory";
+
+/** WorkBuddy invokes memmy-memory as a slash command before the continuation text. */
+export function formatRelayAgentPrompt(sourceId: string, prompt: string): string {
+  const trimmed = prompt.trim();
+  if (normalizeAgentSourceId(sourceId) !== "workbuddy") {
+    return trimmed;
+  }
+  if (!trimmed) {
+    return WORKBUDDY_MEMORY_COMMAND;
+  }
+  if (
+    trimmed === WORKBUDDY_MEMORY_COMMAND
+    || trimmed.startsWith(`${WORKBUDDY_MEMORY_COMMAND} `)
+    || trimmed.startsWith(`${WORKBUDDY_MEMORY_COMMAND}\n`)
+  ) {
+    return trimmed;
+  }
+  return `${WORKBUDDY_MEMORY_COMMAND} ${trimmed}`;
 }
 
 async function copyRelayPrompt(prompt: string): Promise<void> {
