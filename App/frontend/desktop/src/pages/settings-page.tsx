@@ -1680,7 +1680,9 @@ export function SettingsPageView(props: SettingsPageViewProps) {
               <span className="flex items-center gap-2">
                 <Search size={15} className="text-text-ink/55" />
                 {t("settings.token.viewDetail")}
-                <span className="text-xs text-text-ink/45">{t("settings.token.breakdown")}</span>
+                <span className="text-xs text-text-ink/45">
+                  {t(isByokMode ? "settings.token.byokBreakdown" : "settings.token.breakdown")}
+                </span>
               </span>
               <ChevronRight size={16} className="text-text-ink/45" />
             </button>

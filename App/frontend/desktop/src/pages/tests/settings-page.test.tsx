@@ -351,6 +351,7 @@ describe("SettingsPageView", () => {
     expect(html).toContain("平台赠送大模型");
     expect(html).toContain("自有 API Key");
     expect(html).toContain("查看用量详情");
+    expect(html).toContain("分别查看平台赠送额度和自有 API Key 消耗");
     expect(html).not.toContain("协议类型");
     expect(modelConfigHtml).not.toContain("自有 API Key</span>");
   });
@@ -565,6 +566,8 @@ describe("SettingsPageView", () => {
     expect(html).toContain("Token 用量");
     expect(html).toContain("自有 API Key");
     expect(html).toContain("查看用量详情");
+    expect(html).toContain("查看自有 API Key 消耗");
+    expect(html).not.toContain("分别查看平台赠送额度和自有 API Key 消耗");
     expect(html).not.toContain("切换回平台 Token");
     expect(html).not.toContain("赠送大模型额度已用");
     expect(html).not.toContain("协议类型");
