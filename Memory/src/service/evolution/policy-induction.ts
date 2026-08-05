@@ -20,6 +20,7 @@ import { isRecord } from "../../utils/json.js";
 import { stableHash } from "../../utils/id.js";
 import type { EnqueueJobInput } from "../worker/job-handlers.js";
 import { logEvolutionDecision } from "./evolution-logging.js";
+import { extractProjectEvidence } from "./project-evidence.js";
 
 export type PolicyDraft = ReturnType<typeof buildPolicyDraft>;
 export type PolicyEnhancementResult =
@@ -293,7 +294,7 @@ export class PolicyInductionEngine {
         profileId: this.deps.profileIdFromMemory(source),
         layer: "L2",
         kind: "policy",
-        lifecycleStatus: draft.status,
+        lifecycleStatus: "candidate",
         memoryType: "LongTermMemory",
         key: draft.key,
         value: draft.body,
@@ -304,7 +305,7 @@ export class PolicyInductionEngine {
           gain: draft.gain,
           raw_gain: draft.rawGain,
           policy_confidence: draft.confidence,
-          status: draft.status,
+          status: "candidate",
           source_memory_ids: draft.sourceTraceIds
         },
         internal: {
@@ -321,7 +322,7 @@ export class PolicyInductionEngine {
           gain: draft.gain,
           raw_gain: draft.rawGain,
           policy_confidence: draft.confidence,
-          status: draft.status,
+          status: "candidate",
           source_episode_ids: draft.sourceEpisodeIds,
           source_trace_ids: draft.sourceTraceIds,
           policy: {
@@ -334,7 +335,7 @@ export class PolicyInductionEngine {
             gain: draft.gain,
             raw_gain: draft.rawGain,
             policy_confidence: draft.confidence,
-            status: draft.status,
+            status: "candidate",
             experience_type: "success_pattern",
             evidence_polarity: "positive",
             skill_eligible: true,
@@ -752,7 +753,16 @@ export class PolicyInductionEngine {
   }
 
   isTraceEligibleForL2(trace: TraceMeta): boolean {
-    return trace.value >= this.deps.config.algorithm.l2Induction.minTraceValue &&
+    const evidence = extractProjectEvidence({
+      id: trace.id,
+      userText: trace.userText,
+      agentText: trace.agentText,
+      reflection: trace.reflection,
+      toolCalls: trace.toolCalls,
+      tags: trace.tags,
+      value: trace.value
+    });
+    return evidence.eligible && trace.value >= this.deps.config.algorithm.l2Induction.minTraceValue &&
       Boolean(trace.vecSummary ?? trace.vecAction);
   }
 

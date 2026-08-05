@@ -8,12 +8,17 @@ Gives external Agents or scripts access to the Memory service:
 ```bash
 memmy-memory init
 memmy-memory health
+memmy-memory doctor
+memmy-memory namespace current
+memmy-memory stats --workspace
 memmy-memory search "memory policies in this project"
 memmy-memory add "a piece of knowledge worth saving"
 memmy-memory get <id>
 memmy-memory delete <id>
 ```
 
-Connects to `http://127.0.0.1:18960` by default. Use `--url`, `--token`, `--config`, `--source`, and `--user-id` to specify the target service, authentication, calling source, and user namespace.
+Connects to `http://127.0.0.1:18960` by default. Use `--url`, `--token`, `--config`, `--source`, `--user-id`, `--project-id`, `--workspace-id`, and `--workspace-path` to specify the target service, authentication, source, and namespace. Unless `--no-workspace` is set, the CLI discovers the nearest project root and sends it as the workspace namespace.
+
+`doctor` checks service health, memory evolution, unknown Agent sources, missing workspace bindings, and cross-workspace leakage risk. `stats --workspace` limits layer and queue statistics to the current workspace.
 
 Also supports reload-config, session open/close, turn start/complete, and raw calls.

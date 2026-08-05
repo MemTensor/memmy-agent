@@ -12,6 +12,46 @@ afterEach(() => {
 });
 
 describe("MemoryService / worker / runtime", () => {
+  it("does not synthesize higher layers directly from workspace L1 keyword noise", async () => {
+    const { db, service } = createTestService();
+    const namespace = {
+      source: "codex",
+      profileId: "default",
+      userId: "project-noise-user",
+      projectId: "project-noise",
+      workspaceId: "workspace-noise",
+      workspacePath: "/tmp/project-noise"
+    };
+    const noise = [
+      "Does the CLI filter by project and workspace namespace?",
+      "Can you look at the API architecture?",
+      "Should we run npm test now?",
+      "Continue checking the database service.",
+      "What commands did we discuss for docker?"
+    ];
+    for (const [index, content] of noise.entries()) {
+      service.addMemory({
+        namespace,
+        content,
+        layer: "L1",
+        source: "codex",
+        adapterId: `noise-${index}`,
+        deferProcessing: true
+      });
+    }
+
+    await service.runWorkerOnce(100, { namespace });
+
+    const layers = db.db.prepare(
+      `SELECT memory_layer AS layer, COUNT(*) AS count
+       FROM memories
+       GROUP BY memory_layer`
+    ).all() as Array<{ layer: string; count: number }>;
+    expect(layers).toEqual([{ layer: "L1", count: 5 }]);
+
+    db.close();
+  });
+
   it("selects the earliest worker wake across evolution and embedding queues", () => {
     const { db, service } = createTestService();
     const repos = new Repositories(db.db);

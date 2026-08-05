@@ -78,20 +78,29 @@ describe("REST panel contract", () => {
       const overview = await client.panelOverview() as { counts: { memories: number } };
       expect(overview.counts.memories).toBeGreaterThan(0);
       const panelHeaders = { authorization: "Bearer panel-token" };
-      const [analysisResponse, metricsResponse, statusResponse, configResponse, activityResponse] = await Promise.all([
+      const [analysisResponse, metricsResponse, statusResponse, configResponse, activityResponse, evolutionResponse, contextPackResponse, namespaceAuditResponse] = await Promise.all([
         fetch(`${endpoint}/api/v1/panel/analysis`, { headers: panelHeaders }),
         fetch(`${endpoint}/api/v1/panel/metrics`, { headers: panelHeaders }),
         fetch(`${endpoint}/api/v1/panel/status`, { headers: panelHeaders }),
         fetch(`${endpoint}/api/v1/panel/config`, { headers: panelHeaders }),
-        fetch(`${endpoint}/api/v1/panel/activity?limit=10`, { headers: panelHeaders })
+        fetch(`${endpoint}/api/v1/panel/activity?limit=10`, { headers: panelHeaders }),
+        fetch(`${endpoint}/api/v1/panel/evolution`, { headers: panelHeaders }),
+        fetch(`${endpoint}/api/v1/panel/context-packs`, { headers: panelHeaders }),
+        fetch(`${endpoint}/api/v1/panel/namespace-audit`, { headers: panelHeaders })
       ]);
       expect([
         analysisResponse.status,
         metricsResponse.status,
         statusResponse.status,
         configResponse.status,
-        activityResponse.status
-      ]).toEqual([200, 200, 200, 200, 200]);
+        activityResponse.status,
+        evolutionResponse.status,
+        contextPackResponse.status,
+        namespaceAuditResponse.status
+      ]).toEqual([200, 200, 200, 200, 200, 200, 200, 200]);
+      await expect(evolutionResponse.json()).resolves.toMatchObject({ l2Resolving: { active: expect.any(Boolean) } });
+      await expect(contextPackResponse.json()).resolves.toMatchObject({ packs: [expect.objectContaining({ markdown: expect.stringContaining("Project Memory Pack") })] });
+      await expect(namespaceAuditResponse.json()).resolves.toMatchObject({ summary: { total: expect.any(Number) } });
       const configStatus = await configResponse.json() as { redacted: boolean; config: Record<string, unknown> };
       expect(configStatus.redacted).toBe(true);
       expect(configStatus.config).toBeTypeOf("object");
@@ -100,6 +109,32 @@ describe("REST panel contract", () => {
       expect(items.items.find((item) => item.id === completed.l1MemoryId)?.metadata?.source).toBe("openclaw");
       const detail = await client.getMemory(completed.l1MemoryId) as { item: { id: string } };
       expect(detail.item.id).toBe(completed.l1MemoryId);
+
+      const actionHeaders = { ...panelHeaders, "content-type": "application/json" };
+      const qualityResponse = await fetch(`${endpoint}/api/v1/memory/${completed.l1MemoryId}/quality`, {
+        method: "POST", headers: actionHeaders, body: JSON.stringify({ useful: true })
+      });
+      await expect(qualityResponse.json()).resolves.toMatchObject({ ok: true, useful: true });
+      const promoteResponse = await fetch(`${endpoint}/api/v1/memory/${completed.l1MemoryId}/promote`, {
+        method: "POST", headers: actionHeaders, body: JSON.stringify({ reason: "contract promotion" })
+      });
+      const promoted = await promoteResponse.json() as { id: string; memoryLayer: string };
+      expect(promoted).toMatchObject({ memoryLayer: "L2" });
+
+      const duplicate = service.addMemory({ content: "Duplicate L1 for merge", layer: "L1", source: "openclaw" });
+      const mergeResponse = await fetch(`${endpoint}/api/v1/memory/${completed.l1MemoryId}/merge`, {
+        method: "POST", headers: actionHeaders, body: JSON.stringify({ sourceMemoryId: duplicate.id })
+      });
+      await expect(mergeResponse.json()).resolves.toMatchObject({ ok: true, archivedSourceId: duplicate.id });
+
+      for (const path of ["run", "retry-failed", "promote-candidates"]) {
+        const response = await fetch(`${endpoint}/api/v1/worker/${path}`, {
+          method: "POST", headers: actionHeaders, body: JSON.stringify({ limit: 20 })
+        });
+        const result = await response.json() as { generated?: { L2: number; L3: number; Skill: number } };
+        expect(response.status).toBe(200);
+        expect(result.generated).toMatchObject({ L2: expect.any(Number), L3: expect.any(Number), Skill: expect.any(Number) });
+      }
       const deleted = await client.deleteMemory(completed.l1MemoryId) as {
         ok: boolean;
         id: string;

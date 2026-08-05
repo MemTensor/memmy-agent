@@ -17,6 +17,16 @@ describe("memoryPanelHtml", () => {
     expect(harness.rowHtml()).not.toContain('<div class="memory-title">Summary:');
   });
 
+  it("shows layer counts in the memory layer filter", async () => {
+    const harness = createViewerHarness();
+    runViewerScript(harness);
+    await flushPromises();
+
+    const layerHtml = harness.element("layer").innerHTML;
+    expect(layerHtml).toContain("L1 (1,297)");
+    expect(layerHtml).toContain("L2 (2)");
+  });
+
   it("keeps the right JSON panel on the latest clicked memory detail", async () => {
     const harness = createViewerHarness();
     runViewerScript(harness);
@@ -150,11 +160,13 @@ function createViewerHarness() {
     "navMemories",
     "navActivity",
     "navTasks",
+    "navAudit",
     "navSystem",
     "viewDashboard",
     "viewMemories",
     "viewActivity",
     "viewTasks",
+    "viewAudit",
     "viewSystem",
     "pageTitle",
     "pageSubtitle",
@@ -171,14 +183,29 @@ function createViewerHarness() {
     "activityTotal",
     "sourceDistribution",
     "sourceTotal",
+    "namespaceDistribution",
+    "namespaceTotal",
     "queueSummary",
     "queueState",
     "recentActivity",
     "openActivity",
+    "evolutionPipeline",
+    "l2ResolvingReason",
+    "evolutionJobState",
+    "contextPackMarkdown",
+    "copyContextPack",
+    "isolationAudit",
+    "auditRiskState",
+    "auditIssueCount",
+    "auditRows",
+    "auditEmpty",
+    "auditPacks",
+    "copyAuditPacks",
     "query",
     "layer",
     "status",
     "sourceAgent",
+    "projectScope",
     "memoryRows",
     "emptyState",
     "listMeta",
@@ -192,6 +219,11 @@ function createViewerHarness() {
     "detailContent",
     "detailJson",
     "deleteMemory",
+    "markUseful",
+    "markNotUseful",
+    "mergeMemory",
+    "promoteMemory",
+    "archiveMemory",
     "activityQuery",
     "activityTool",
     "activitySource",
@@ -228,6 +260,8 @@ function createViewerHarness() {
     "systemQueues",
     "configJson",
     "runWorker",
+    "retryFailed",
+    "promoteCandidates",
     "reloadConfig",
     "copyConfig",
     "authScreen",
@@ -239,6 +273,20 @@ function createViewerHarness() {
     "search",
     "clearFilters",
     "copyJson"
+    ,"reviewHeading"
+    ,"reviewCount"
+    ,"reviewCandidates"
+    ,"bulkApproveCandidates"
+    ,"evolutionPipeline"
+    ,"l2ResolvingReason"
+    ,"evolutionJobState"
+    ,"contextPackMarkdown"
+    ,"auditPacks"
+    ,"auditRiskState"
+    ,"isolationAudit"
+    ,"auditIssueCount"
+    ,"auditEmpty"
+    ,"auditRows"
   ];
 
   for (const id of ids) {
@@ -269,7 +317,13 @@ function createViewerHarness() {
   const fetch = async (path: string, options: { headers?: Record<string, string> } = {}) => {
     requests.push({ path, authorization: options.headers?.authorization });
     if (path === "/api/v1/panel/overview") {
-      return jsonResponse({ counts: { memories: 2, experiences: 0, worldModels: 0, skills: 0 } });
+      return jsonResponse({
+        counts: { memories: 2, experiences: 0, worldModels: 0, skills: 0 },
+        layerCounts: { L1: 1297, L2: 2, L3: 0, Skill: 0 },
+        sourceDistribution: [{ source: "codex", count: 2, percentage: 100 }],
+        namespaceDistribution: [{ tenantId: "local", projectId: "demo", workspaceId: "workspace_1", workspacePath: "/tmp/demo", label: "demo", count: 2, percentage: 100 }],
+        dailyActivity: []
+      });
     }
     if (path === "/api/v1/panel/analysis") {
       return jsonResponse({ metrics: { avgRecallScore: 0.8, recallEvents: 2, activeSkills: 0, recentlyUsedSkills: 0, avgToolLatencyMs: 12, p95ToolLatencyMs: 20 }, dailyMemoryWrites: [], dailySkillEvolutions: [], toolLatency: { tools: [], series: [] } });
@@ -282,6 +336,18 @@ function createViewerHarness() {
     }
     if (path === "/api/v1/panel/activity?limit=20") {
       return jsonResponse({ entries: [] });
+    }
+    if (path === "/api/v1/panel/evolution") {
+      return jsonResponse({ layers: [{ layer: "L1", count: 2, candidates: 0, queued: 0, failed: 0 }], l2Resolving: { active: false, count: 0, reason: "没有符合条件的候选" }, recentJobs: [] });
+    }
+    if (path === "/api/v1/panel/context-packs") {
+      return jsonResponse({ packs: [{ markdown: "# Project Memory Pack: demo" }] });
+    }
+    if (path === "/api/v1/panel/namespace-audit") {
+      return jsonResponse({ summary: { total: 2, missingWorkspace: 0, unknownSource: 0, missingAgentSourceTag: 0, crossWorkspaceRisk: 0 }, issues: [] });
+    }
+    if (path === "/api/v1/panel/review/candidates?limit=100") {
+      return jsonResponse({ items: [], total: 0 });
     }
     if (path.startsWith("/api/v1/panel/items?")) {
       return jsonResponse({
@@ -342,6 +408,7 @@ function createViewerHarness() {
 
 class FakeElement {
   html = "";
+  innerHTML = "";
   textContent = "";
   value = "";
   disabled = false;
@@ -386,7 +453,17 @@ function listItem(id: string, title: string) {
     tags: [],
     createdAt: "2026-06-22T00:00:00.000Z",
     updatedAt: "2026-06-22T00:00:00.000Z",
-    version: 1
+    version: 1,
+    metadata: {
+      source: "codex",
+      namespace: {
+        tenantId: "local",
+        projectId: "demo",
+        workspaceId: "workspace_1",
+        workspacePath: "/tmp/demo",
+        label: "demo"
+      }
+    }
   };
 }
 

@@ -50,12 +50,26 @@ export const API_ROUTES = [
   "POST /api/v1/memory/audit/markdown/import",
   "POST /api/v1/memory/processing/status",
   "POST /api/v1/memory/:id/processing/retry",
+  "POST /api/v1/memory/:id/quality",
+  "POST /api/v1/memory/:id/archive",
+  "POST /api/v1/memory/:id/promote",
+  "GET /api/v1/panel/review/candidates",
+  "POST /api/v1/panel/review/candidates/:id/approve",
+  "POST /api/v1/panel/review/candidates/:id/reject",
+  "POST /api/v1/panel/review/candidates/bulk-approve",
+  "POST /api/v1/memory/:id/merge",
   "GET /api/v1/memory/:id",
   "DELETE /api/v1/memory/:id",
   "POST /api/v1/worker/run",
+  "POST /api/v1/worker/retry-failed",
+  "POST /api/v1/worker/promote-candidates",
   "POST /api/v1/worker/import-summaries/enqueue",
   "GET /api/v1/memory/logs",
   "GET /api/v1/panel/overview",
+  "GET /api/v1/panel/evolution",
+  "GET /api/v1/panel/context-pack",
+  "GET /api/v1/panel/context-packs",
+  "GET /api/v1/panel/namespace-audit",
   "GET /api/v1/panel/analysis",
   "GET /api/v1/panel/metrics",
   "GET /api/v1/panel/status",
@@ -624,7 +638,7 @@ async function routeRequest(
       limit?: unknown;
       targetMemoryIds?: unknown;
     };
-    return service.runWorkerOnce(
+    return service.runWorkerWithEvolutionSummary(
       parseNumberValue(request.limit) ?? parseNumber(url.searchParams.get("limit")) ?? 20,
       {
         ...request,
@@ -633,11 +647,48 @@ async function routeRequest(
     );
   }
 
+  if (method === "POST" && path === "/api/v1/worker/retry-failed") {
+    requireMemoryWrite(principal);
+    const request = envelopeWithPrincipal(asObject(body, "worker.retry-failed"), principal) as RequestEnvelope & { limit?: unknown };
+    const limit = parseNumberValue(request.limit) ?? 100;
+    const retry = service.retryFailedWorkerJobs({ ...request, limit });
+    const worker = await service.runWorkerWithEvolutionSummary(limit, request);
+    return { ...retry, worker, generated: worker.generated };
+  }
+
+  if (method === "POST" && path === "/api/v1/worker/promote-candidates") {
+    requireMemoryWrite(principal);
+    const request = envelopeWithPrincipal(asObject(body, "worker.promote-candidates"), principal) as RequestEnvelope & { limit?: unknown };
+    const promotion = service.promoteCandidates(request);
+    const worker = await service.runWorkerWithEvolutionSummary(parseNumberValue(request.limit) ?? 100, request);
+    return { ...promotion, worker, generated: worker.generated };
+  }
+
   if (method === "GET" && path === "/api/v1/panel/overview") {
     requirePanelRead(principal);
     return service.panelOverviewSummary({
       namespace: principal.namespace
     });
+  }
+
+  if (method === "GET" && path === "/api/v1/panel/evolution") {
+    requirePanelRead(principal);
+    return service.evolutionOverview({ namespace: principal.namespace });
+  }
+
+  if (method === "GET" && path === "/api/v1/panel/context-pack") {
+    requirePanelRead(principal);
+    return service.projectContextPack({ namespace: principal.namespace });
+  }
+
+  if (method === "GET" && path === "/api/v1/panel/context-packs") {
+    requirePanelRead(principal);
+    return service.projectContextPacks({ namespace: principal.namespace });
+  }
+
+  if (method === "GET" && path === "/api/v1/panel/namespace-audit") {
+    requirePanelRead(principal);
+    return service.namespaceAudit({ namespace: principal.namespace });
   }
 
   if (method === "GET" && path === "/api/v1/panel/analysis") {
@@ -686,8 +737,44 @@ async function routeRequest(
       q: url.searchParams.get("q") ?? undefined,
       sourceAgent: url.searchParams.get("sourceAgent") ?? undefined,
       excludedSourceAgents: url.searchParams.getAll("excludedSourceAgents"),
+      projectId: url.searchParams.get("projectId") ?? undefined,
+      workspaceId: url.searchParams.get("workspaceId") ?? undefined,
       page: parseNumber(url.searchParams.get("page"))
     }));
+  }
+
+  if (method === "GET" && path === "/api/v1/panel/review/candidates") {
+    requirePanelRead(principal);
+    const layer = parseLayer(url.searchParams.get("layer"));
+    return service.reviewCandidates({ namespace: principal.namespace, layer, limit: parseNumber(url.searchParams.get("limit")) });
+  }
+
+  const reviewApprove = match(path, /^\/api\/v1\/panel\/review\/candidates\/([^/]+)\/approve$/);
+  if (method === "POST" && reviewApprove) {
+    requireMemoryWrite(principal);
+    const request = envelopeWithPrincipal(asObject(body, "panel.review.approve"), principal) as MemoryGovernanceRequest & { content?: unknown; title?: unknown };
+    return service.approveCandidate(decodeMatchSegment(reviewApprove, 1), {
+      ...request,
+      content: typeof request.content === "string" ? request.content : undefined,
+      title: typeof request.title === "string" ? request.title : undefined
+    });
+  }
+
+  const reviewReject = match(path, /^\/api\/v1\/panel\/review\/candidates\/([^/]+)\/reject$/);
+  if (method === "POST" && reviewReject) {
+    requireMemoryWrite(principal);
+    const request = envelopeWithPrincipal(asObject(body, "panel.review.reject"), principal) as MemoryGovernanceRequest;
+    return service.rejectCandidate(decodeMatchSegment(reviewReject, 1), request);
+  }
+
+  if (method === "POST" && path === "/api/v1/panel/review/candidates/bulk-approve") {
+    requireMemoryWrite(principal);
+    const request = envelopeWithPrincipal(asObject(body, "panel.review.bulk-approve"), principal) as MemoryGovernanceRequest & { minimumConfidence?: unknown; layer?: unknown };
+    return service.bulkApproveHighConfidenceCandidates({
+      ...request,
+      minimumConfidence: typeof request.minimumConfidence === "number" ? request.minimumConfidence : undefined,
+      layer: parseLayer(typeof request.layer === "string" ? request.layer : null)
+    });
   }
 
   if (method === "GET" && path === "/api/v1/panel/tasks") {
@@ -736,6 +823,36 @@ async function routeRequest(
     );
     if (result.accepted) autoWorker.schedule();
     return result;
+  }
+
+  const memoryQuality = match(path, /^\/api\/v1\/memory\/([^/]+)\/quality$/);
+  if (method === "POST" && memoryQuality) {
+    requireMemoryWrite(principal);
+    const request = envelopeWithPrincipal(asObject(body, "memory.quality"), principal) as MemoryGovernanceRequest & { useful?: unknown };
+    if (typeof request.useful !== "boolean") throw new MemoryServiceError("invalid_argument", "memory.quality useful must be boolean");
+    return service.rateMemory(decodeMatchSegment(memoryQuality, 1), request.useful, request);
+  }
+
+  const memoryArchive = match(path, /^\/api\/v1\/memory\/([^/]+)\/archive$/);
+  if (method === "POST" && memoryArchive) {
+    requireMemoryWrite(principal);
+    const request = envelopeWithPrincipal(asObject(body, "memory.archive"), principal) as MemoryGovernanceRequest;
+    return service.archiveMemory(decodeMatchSegment(memoryArchive, 1), request);
+  }
+
+  const memoryPromote = match(path, /^\/api\/v1\/memory\/([^/]+)\/promote$/);
+  if (method === "POST" && memoryPromote) {
+    requireMemoryWrite(principal);
+    const request = envelopeWithPrincipal(asObject(body, "memory.promote"), principal) as MemoryGovernanceRequest;
+    return service.promoteL1ToL2(decodeMatchSegment(memoryPromote, 1), request);
+  }
+
+  const memoryMerge = match(path, /^\/api\/v1\/memory\/([^/]+)\/merge$/);
+  if (method === "POST" && memoryMerge) {
+    requireMemoryWrite(principal);
+    const request = envelopeWithPrincipal(asObject(body, "memory.merge"), principal) as MemoryGovernanceRequest & { sourceMemoryId?: unknown };
+    if (typeof request.sourceMemoryId !== "string" || !request.sourceMemoryId.trim()) throw new MemoryServiceError("invalid_argument", "memory.merge sourceMemoryId is required");
+    return service.mergeMemories(decodeMatchSegment(memoryMerge, 1), request.sourceMemoryId, request);
   }
 
   const memoryGet = match(path, /^\/api\/v1\/memory\/([^/]+)$/);

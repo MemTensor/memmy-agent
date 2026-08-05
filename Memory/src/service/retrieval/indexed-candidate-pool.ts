@@ -156,7 +156,7 @@ export class IndexedCandidatePool {
       tagFilter: "auto" | "on" | "off";
     }
   ): MemorySearchIdHit[] {
-    const tags = config.tagFilter === "off" ? [] : compiledQuery.tags;
+    const tags = config.tagFilter === "off" ? [] : retrievalSemanticTags(compiledQuery.tags);
     const search = (anyOfTags?: string[]): MemorySearchIdHit[] => {
       const summary = this.deps.repos.memories.searchVectorIds(queryVector, "vec_summary", filter, vectorPool, {
         anyOfTags
@@ -234,4 +234,11 @@ export class IndexedCandidatePool {
     const total = this.deps.repos.memories.count(filter);
     return total <= 0 ? [] : this.deps.repos.memories.list(filter, total);
   }
+}
+
+function retrievalSemanticTags(tags: readonly string[]): string[] {
+  const ignored = new Set(["agent-source", "codex", "pi", "hermes", "claude_code", "cursor", "opencode", "memmy"]);
+  return tags
+    .map((tag) => tag.trim())
+    .filter((tag) => tag && !ignored.has(tag.toLowerCase()));
 }

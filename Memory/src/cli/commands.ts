@@ -16,6 +16,7 @@ import { renderCliOutput } from "./render/index.js";
 import { initMemoryCli, installMemoryCli } from "./setup.js";
 import { DEFAULT_MEMORY_URL, loadCliMemoryConfig } from "./config.js";
 import { PROJECT_VERSION } from "./project-version.js";
+import { workspaceNamespaceFromOptions } from "./workspace.js";
 
 type Method = "GET" | "POST" | "DELETE";
 const CLI_NAME = "memmy-memory";
@@ -55,6 +56,18 @@ export async function runCommand(context: CommandContext): Promise<unknown> {
 
   if (words[0] === "serve") {
     return serveMemory(parsed);
+  }
+
+  if (words[0] === "namespace" && words[1] === "current") {
+    return currentNamespace(parsed);
+  }
+
+  if (words[0] === "stats") {
+    return executeRequest({ method: "GET", path: "/panel/overview" }, requestOptions(parsed, context.fetch));
+  }
+
+  if (words[0] === "doctor") {
+    return runDoctor(parsed, context.fetch);
   }
 
   const getVerbose = words[0] === "get" && optionBoolean(options, "verbose") === true;
@@ -252,6 +265,47 @@ async function executeRequest(request: CliRequest, options: CliRequestOptions): 
   return sendRequest(request, options);
 }
 
+function currentNamespace(parsed: ParsedArgs): Record<string, unknown> {
+  const workspace = workspaceNamespaceFromOptions({
+    projectId: optionString(parsed.options, "project-id") ?? optionString(parsed.options, "project_id"),
+    workspaceId: optionString(parsed.options, "workspace-id") ?? optionString(parsed.options, "workspace_id"),
+    workspacePath: optionString(parsed.options, "workspace-path") ?? optionString(parsed.options, "workspace_path"),
+    noWorkspace: optionBoolean(parsed.options, "no-workspace") === true
+  });
+  return {
+    source: optionString(parsed.options, "source") ?? "unknown",
+    projectId: workspace.projectId,
+    workspaceId: workspace.workspaceId,
+    workspacePath: workspace.workspacePath,
+    scoped: Boolean(workspace.projectId || workspace.workspaceId || workspace.workspacePath)
+  };
+}
+
+async function runDoctor(parsed: ParsedArgs, fetchImpl?: typeof fetch): Promise<Record<string, unknown>> {
+  const options = requestOptions(parsed, fetchImpl);
+  const [health, audit, evolution] = await Promise.all([
+    executeRequest({ method: "GET", path: "/health" }, options),
+    executeRequest({ method: "GET", path: "/panel/namespace-audit" }, options),
+    executeRequest({ method: "GET", path: "/panel/evolution" }, options)
+  ]);
+  const auditSummary = isRecord(audit) && isRecord(audit.summary) ? audit.summary : {};
+  const healthOk = isRecord(health) && health.ok === true;
+  const riskCount = Number(auditSummary.crossWorkspaceRisk ?? 0);
+  return {
+    ok: healthOk && riskCount === 0,
+    health,
+    namespace: currentNamespace(parsed),
+    audit,
+    evolution,
+    checks: {
+      service: healthOk ? "ok" : "failed",
+      workspaceIsolation: riskCount === 0 ? "ok" : "risk",
+      unknownSources: Number(auditSummary.unknownSource ?? 0),
+      missingAgentSourceTags: Number(auditSummary.missingAgentSourceTag ?? 0)
+    }
+  };
+}
+
 function compactMemoryGetOutput(result: unknown): string | undefined {
   const detail = memoryDetailRecord(result);
   if (!detail) return undefined;
@@ -440,8 +494,17 @@ async function requestBody(
 function requestOptions(parsed: ParsedArgs, fetchImpl?: typeof fetch): CliRequestOptions {
   const configPath = optionString(parsed.options, "config");
   const userId = userIdOption(parsed) ?? loadCliMemoryConfig(configPath).config.userId;
+  const workspace = workspaceNamespaceFromOptions({
+    projectId: optionString(parsed.options, "project-id") ?? optionString(parsed.options, "project_id"),
+    workspaceId: optionString(parsed.options, "workspace-id") ?? optionString(parsed.options, "workspace_id"),
+    workspacePath: optionString(parsed.options, "workspace-path") ?? optionString(parsed.options, "workspace_path"),
+    noWorkspace: optionBoolean(parsed.options, "no-workspace") === true
+  });
   const headers: Record<string, string> = {};
   if (userId) headers["x-memmy-user-id"] = userId;
+  if (workspace.projectId) headers["x-memmy-project-id"] = workspace.projectId;
+  if (workspace.workspaceId) headers["x-memmy-workspace-id"] = workspace.workspaceId;
+  if (workspace.workspacePath) headers["x-memmy-workspace-path"] = workspace.workspacePath;
   return {
     url: optionString(parsed.options, "url"),
     token: optionString(parsed.options, "token"),
@@ -553,6 +616,9 @@ function helpText(): string {
     "  add <content>                Add a memory manually",
     "  get <id>                     Read one memory by id",
     "  delete <id>                  Delete one memory by id",
+    "  doctor                       Check service, evolution, and isolation health",
+    "  namespace current            Show the current workspace namespace",
+    "  stats --workspace            Show statistics scoped to this workspace",
     "  raw <method> <path>          Call an exposed Memory API route directly",
     "",
     "Setup examples:",
@@ -574,6 +640,10 @@ function helpText(): string {
     "  --url <url>                  Memory HTTP service URL",
     "  --token <token>              Memory HTTP bearer token",
     "  --user-id <id>               Memory namespace user id",
+    "  --project-id <id>            Memory project namespace id",
+    "  --workspace-id <id>          Memory workspace namespace id",
+    "  --workspace-path <path>      Memory workspace path; defaults to nearest project root",
+    "  --no-workspace               Do not send workspace namespace headers",
     "  --source <agent>             Calling agent/source id",
     "  --config <path>              Memmy config path",
     "  --skip-agent-skills          Initialize config without installing agent skills",

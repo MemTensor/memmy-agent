@@ -1763,6 +1763,22 @@ export class MemoryService {
     return this.panelReadModel.panelOverviewSummary(input);
   }
 
+  evolutionOverview(input: RequestEnvelope & { userId?: string } = {}) {
+    return this.panelReadModel.evolutionOverview(input);
+  }
+
+  namespaceAudit(input: RequestEnvelope & { userId?: string } = {}) {
+    return this.panelReadModel.namespaceAudit(input);
+  }
+
+  projectContextPack(input: RequestEnvelope & { userId?: string } = {}) {
+    return this.panelReadModel.projectContextPack(input);
+  }
+
+  projectContextPacks(input: RequestEnvelope & { userId?: string } = {}) {
+    return this.panelReadModel.projectContextPacks(input);
+  }
+
   panelAnalysis(input: RequestEnvelope & { userId?: string } = {}): {
     metrics: {
       avgRecallScore: number;
@@ -1790,6 +1806,8 @@ export class MemoryService {
     tags?: string[];
     sourceAgent?: string;
     excludedSourceAgents?: string[];
+    projectId?: string;
+    workspaceId?: string;
     page?: number;
     limit?: number;
     cursor?: string | number;
@@ -1881,6 +1899,234 @@ export class MemoryService {
     serverTime: string;
   } {
     return this.importJobs.retryMemoryProcessing(memoryId, request);
+  }
+
+  rateMemory(id: string, useful: boolean, request: MemoryGovernanceRequest = {}) {
+    this.assertMemoryAddEnabled();
+    const memory = this.requireExistingMemory(id);
+    this.assertMemoryInScope(memory, request.namespace);
+    const at = nowIso();
+    const before = memory;
+    const opposite = useful ? "quality-not-useful" : "quality-useful";
+    const tag = useful ? "quality-useful" : "quality-not-useful";
+    const updated = this.repos.memories.update({
+      ...memory,
+      tags: uniq([...memory.tags.filter((item) => item !== opposite), tag]),
+      info: { ...memory.info, quality_rating: useful ? "useful" : "not_useful", quality_rated_at: at },
+      updatedAt: at
+    });
+    const changeSeq = this.repos.runtime.appendChange({
+      memoryId: updated.id, namespaceId: namespaceIdFromMemory(updated), kind: kindFromMemory(updated), op: "updated",
+      entityId: updated.id, userId: updated.userId, changeType: "quality_rating", before, after: updated,
+      source: "panel.quality", createdAt: at
+    });
+    const audit = this.repos.runtime.insertAudit({
+      userId: updated.userId, sessionId: updated.sessionId, actor: request.namespace ? { ...request.namespace } : {},
+      action: useful ? "mark_useful" : "mark_not_useful", targetKind: kindFromMemory(updated), targetId: updated.id,
+      before, after: updated, meta: { reason: request.reason }, createdAt: at
+    });
+    return { ok: true, id: updated.id, useful, changeSeq, auditId: audit.id, serverTime: at };
+  }
+
+  reviewCandidates(request: RequestEnvelope & { layer?: MemoryLayer; limit?: number } = {}) {
+    const limit = Math.max(1, Math.min(request.limit ?? 100, 1000));
+    const memories = this.repos.memories.list({
+      ...request.namespace ? memoryFilterForNamespace(request.namespace) : {},
+      memoryLayer: request.layer ?? ["L2", "L3", "Skill"],
+      status: "resolving"
+    }, limit);
+    return {
+      items: memories.map((memory) => candidateReviewCard(memory)),
+      total: memories.length,
+      serverTime: nowIso()
+    };
+  }
+
+  approveCandidate(
+    id: string,
+    request: MemoryGovernanceRequest & { content?: string; title?: string } = {}
+  ) {
+    this.assertMemoryAddEnabled();
+    const memory = this.requireReviewCandidate(id, request);
+    const at = nowIso();
+    const title = request.title?.trim();
+    const content = request.content?.trim();
+    const internal = memory.properties.internal_info;
+    const updated = this.repos.memories.update({
+      ...memory,
+      status: "activated",
+      memoryValue: content || memory.memoryValue,
+      tags: uniq([...memory.tags, "review-approved"]),
+      info: {
+        ...memory.info,
+        ...(title ? { title } : {}),
+        review_status: "approved",
+        reviewed_at: at
+      },
+      properties: {
+        ...memory.properties,
+        status: "activated",
+        tags: uniq([...(memory.properties.tags ?? []), "review-approved"]),
+        info: {
+          ...memory.properties.info,
+          ...(title ? { title } : {}),
+          review_status: "approved",
+          reviewed_at: at
+        },
+        internal_info: {
+          ...internal,
+          ...(title ? { title } : {}),
+          review: { status: "approved", reviewed_at: at, edited: Boolean(title || content) }
+        }
+      },
+      contentHash: content ? stableHash(content) : memory.contentHash,
+      updatedAt: at
+    });
+    return this.recordCandidateReview(memory, updated, "approved", request);
+  }
+
+  rejectCandidate(id: string, request: MemoryGovernanceRequest = {}) {
+    this.assertMemoryAddEnabled();
+    const memory = this.requireReviewCandidate(id, request);
+    const at = nowIso();
+    const internal = memory.properties.internal_info;
+    const updated = this.repos.memories.update({
+      ...memory,
+      status: "archived",
+      tags: uniq([...memory.tags, "review-rejected"]),
+      info: { ...memory.info, review_status: "rejected", reviewed_at: at, review_reason: request.reason },
+      properties: {
+        ...memory.properties,
+        status: "archived",
+        tags: uniq([...(memory.properties.tags ?? []), "review-rejected"]),
+        info: { ...memory.properties.info, review_status: "rejected", reviewed_at: at, review_reason: request.reason },
+        internal_info: { ...internal, review: { status: "rejected", reviewed_at: at, reason: request.reason } }
+      },
+      updatedAt: at
+    });
+    return this.recordCandidateReview(memory, updated, "rejected", request);
+  }
+
+  bulkApproveHighConfidenceCandidates(
+    request: MemoryGovernanceRequest & { minimumConfidence?: number; layer?: MemoryLayer } = {}
+  ) {
+    const minimumConfidence = Math.max(0, Math.min(request.minimumConfidence ?? 0.8, 1));
+    const candidates = this.reviewCandidates({ ...request, layer: request.layer, limit: 1000 }).items
+      .filter((candidate) => candidate.confidence >= minimumConfidence);
+    const approved = candidates.map((candidate) => this.approveCandidate(candidate.id, request));
+    return { approved: approved.length, minimumConfidence, ids: approved.map((item) => item.id), serverTime: nowIso() };
+  }
+
+  private requireReviewCandidate(id: string, request: MemoryGovernanceRequest): MemoryRow {
+    const memory = this.requireExistingMemory(id);
+    this.assertMemoryInScope(memory, request.namespace);
+    if (memory.memoryLayer === "L1" || memory.status !== "resolving") {
+      throw new MemoryServiceError("conflict", "only resolving L2/L3/Skill memories can be reviewed");
+    }
+    return memory;
+  }
+
+  private recordCandidateReview(
+    before: MemoryRow,
+    after: MemoryRow,
+    decision: "approved" | "rejected",
+    request: MemoryGovernanceRequest
+  ) {
+    const at = after.updatedAt;
+    const changeSeq = this.repos.runtime.appendChange({
+      memoryId: after.id, namespaceId: namespaceIdFromMemory(after), kind: kindFromMemory(after),
+      op: decision === "approved" ? "updated" : "archived", entityId: after.id, userId: after.userId,
+      changeType: `review_${decision}`, before, after, source: "panel.review", createdAt: at
+    });
+    const audit = this.repos.runtime.insertAudit({
+      userId: after.userId, sessionId: after.sessionId, actor: request.namespace ? { ...request.namespace } : {},
+      action: `review_${decision}`, targetKind: kindFromMemory(after), targetId: after.id, before, after,
+      meta: { reason: request.reason }, createdAt: at
+    });
+    return { ok: true, id: after.id, layer: after.memoryLayer, status: after.status, decision, changeSeq, auditId: audit.id, serverTime: nowIso() };
+  }
+
+  mergeMemories(targetId: string, sourceId: string, request: MemoryGovernanceRequest = {}) {
+    this.assertMemoryAddEnabled();
+    if (targetId === sourceId) throw new MemoryServiceError("invalid_argument", "merge source and target must differ");
+    const target = this.requireExistingMemory(targetId);
+    const source = this.requireExistingMemory(sourceId);
+    this.assertMemoryInScope(target, request.namespace);
+    this.assertMemoryInScope(source, request.namespace);
+    if (target.memoryLayer !== source.memoryLayer) throw new MemoryServiceError("conflict", "merged memories must use the same layer");
+    const at = nowIso();
+    const merged = this.repos.transaction(() => this.repos.memories.supersede({
+      oldMemory: source, newMemory: target, projectId: projectIdFromMemory(target),
+      reason: request.reason ?? `duplicate of ${target.id}`, actor: request.namespace ? { ...request.namespace } : {}, createdAt: at
+    }));
+    const changeSeq = this.repos.runtime.appendChange({
+      memoryId: merged.oldMemory.id, namespaceId: namespaceIdFromMemory(merged.oldMemory), kind: kindFromMemory(merged.oldMemory), op: "archived",
+      entityId: merged.oldMemory.id, userId: merged.oldMemory.userId, changeType: "merged_duplicate", before: source,
+      after: merged.oldMemory, source: "panel.merge", createdAt: at
+    });
+    const audit = this.repos.runtime.insertAudit({
+      userId: target.userId, sessionId: target.sessionId, actor: request.namespace ? { ...request.namespace } : {}, action: "merge",
+      targetKind: kindFromMemory(target), targetId: target.id, before: { target, source }, after: merged,
+      meta: { sourceMemoryId: source.id, relationId: merged.relation.id, reason: request.reason }, createdAt: at
+    });
+    return { ok: true, targetId, archivedSourceId: sourceId, relationId: merged.relation.id, changeSeq, auditId: audit.id, serverTime: at };
+  }
+
+  promoteL1ToL2(id: string, request: MemoryGovernanceRequest = {}) {
+    const source = this.requireExistingMemory(id);
+    this.assertMemoryInScope(source, request.namespace);
+    if (source.memoryLayer !== "L1") throw new MemoryServiceError("invalid_argument", "manual promotion requires an L1 memory");
+    return this.addMemory({
+      ...request,
+      content: source.memoryValue,
+      layer: "L2",
+      title: `Experience: ${firstLine(source.memoryValue).slice(0, 100)}`,
+      tags: uniq([...source.tags, "manual-promotion", "experience"]),
+      source: request.source ?? "memory-console",
+      sessionId: source.sessionId,
+      sourceMemoryIds: [source.id],
+      provenance: { sourceMemoryIds: [source.id] }
+    });
+  }
+
+  promoteCandidates(request: RequestEnvelope = {}) {
+    this.assertMemoryAddEnabled();
+    const candidates = this.repos.runtime.listPendingCandidatePool({ now: nowIso(), limit: 10_000 })
+      .filter((candidate) => {
+        const memory = this.repos.memories.get(candidate.sourceMemoryId);
+        return Boolean(memory && (!request.namespace || sameProjectScope(namespaceForMemory(memory), request.namespace)));
+      });
+    const memoryIds = uniq(candidates.map((candidate) => candidate.sourceMemoryId));
+    const jobs = memoryIds.map((memoryId) => {
+      const memory = this.requireExistingMemory(memoryId);
+      return this.enqueueJob({
+        jobType: "l2_induction", userId: memory.userId, sessionId: memory.sessionId, targetMemoryId: memory.id,
+        payload: { sourceMemoryId: memory.id, reason: "manual_candidate_promotion" }, createdAt: nowIso()
+      });
+    });
+    return { accepted: jobs.length, candidateCount: candidates.length, memoryIds, jobs: jobs.map(jobToRef), serverTime: nowIso() };
+  }
+
+  retryFailedWorkerJobs(request: RequestEnvelope & { limit?: number } = {}) {
+    this.assertMemoryAddEnabled();
+    const limit = Math.max(1, Math.min(request.limit ?? 100, 10_000));
+    const failed = [
+      ...this.panelReadModel.panelJobs({ ...request, status: "failed", limit }).items,
+      ...this.panelReadModel.panelJobs({ ...request, status: "dead_letter", limit }).items
+    ].slice(0, limit);
+    const retried = this.repos.runtime.retryFailedJobIds(failed.map((job) => job.id));
+    for (const { before, after } of retried) this.workerHandlers.appendJobChange(after, "queued", before);
+    return { retried: retried.length, jobIds: retried.map((item) => item.after.id), serverTime: nowIso() };
+  }
+
+  async runWorkerWithEvolutionSummary(limit = 100, request: RequestEnvelope & { targetMemoryIds?: string[] } = {}) {
+    const before = this.panelReadModel.panelOverviewSummary(request).layerCounts;
+    const worker = await this.runWorkerOnce(limit, request);
+    const after = this.panelReadModel.panelOverviewSummary(request).layerCounts;
+    return {
+      ...worker,
+      generated: { L2: Math.max(0, after.L2 - before.L2), L3: Math.max(0, after.L3 - before.L3), Skill: Math.max(0, after.Skill - before.Skill) }
+    };
   }
 
   private restartFailedProcessing(at: string, limit = 10000): number {
@@ -1984,15 +2230,19 @@ export class MemoryService {
     createdAt?: string;
   }): MemoryRow {
     const at = input.createdAt ?? nowIso();
-    const tags = uniq(input.tags.filter(Boolean));
     const memoryStatus = memoryStatusForLifecycleStatus(input.lifecycleStatus ?? "active");
     const inputInfo = input.info ?? {};
     const inputInternal = input.internal ?? {};
+    const semanticTags = uniq(input.tags.map((tag) => tag.trim()).filter(Boolean));
     const sourceSession = input.sessionId ? this.repos.runtime.getSession(input.sessionId) : undefined;
     const sessionTenantId = sourceSession ? tenantIdFromSession(sourceSession) : undefined;
     const tenantId = input.tenantId ?? sessionTenantId ?? stringFromMeta(inputInfo, "tenant_id") ?? input.provenance?.tenantId ?? "local";
+    const sourceAgent = normalizeMemorySourceAgent(
+      input.provenance?.sourceAgent ?? input.agentId ?? stringFromMeta(inputInfo, "source") ?? DEFAULT_NAMESPACE_SOURCE
+    );
+    const tags = normalizeMemoryTagsForSource(semanticTags, sourceAgent);
     const provenance: MemoryProvenance = {
-      sourceAgent: input.provenance?.sourceAgent ?? input.agentId ?? DEFAULT_NAMESPACE_SOURCE,
+      sourceAgent,
       tenantId,
       profileId: input.provenance?.profileId ?? input.profileId,
       projectId: input.provenance?.projectId ?? input.projectId,
@@ -2014,6 +2264,7 @@ export class MemoryService {
     const info = {
       ...inputInfo,
       tags: uniq([...tags, ...stringArray(inputInfo.tags)]),
+      ...(stringFromMeta(inputInfo, "source") ? { source: sourceAgent } : {}),
       tenant_id: tenantId,
       ...(input.projectId ? { project_id: input.projectId } : {}),
       ...(input.profileId ? { profile_id: input.profileId } : {})
@@ -2043,6 +2294,9 @@ export class MemoryService {
           memory_kind: input.kind,
           schema_version: 1,
           ...inputInternal,
+          ...(isRecord(inputInternal.trace)
+            ? { trace: { ...inputInternal.trace, tags: semanticTags } }
+            : {}),
           provenance
         }
       },
@@ -2801,6 +3055,67 @@ function errorMessageFromUnknown(value: unknown): string | undefined {
 
 function cloneMemmyConfig(config: MemmyConfig): MemmyConfig {
   return structuredClone(config);
+}
+
+function normalizeMemorySourceAgent(value: string | undefined): string {
+  const normalized = value?.trim();
+  return normalized || DEFAULT_NAMESPACE_SOURCE;
+}
+
+function normalizeMemoryTagsForSource(tags: string[], sourceAgent: string): string[] {
+  const base = tags.map((tag) => tag.trim()).filter(Boolean);
+  if (sourceAgent === DEFAULT_NAMESPACE_SOURCE) {
+    return uniq(base);
+  }
+  return uniq([...base, "agent-source", sourceAgent]);
+}
+
+function candidateReviewCard(memory: MemoryRow) {
+  const internal = memory.properties.internal_info;
+  const policy = isRecord(internal.policy) ? internal.policy : {};
+  const world = isRecord(internal.world_model) ? internal.world_model : {};
+  const skill = isRecord(internal.skill) ? internal.skill : {};
+  const confidence = clamp01(firstFiniteNumber(
+    memory.info.policy_confidence,
+    memory.info.confidence,
+    memory.info.eta,
+    policy.policy_confidence,
+    world.confidence,
+    skill.eta
+  ) ?? 0);
+  const evidenceIds = uniq([
+    ...stringArray(internal.source_memory_ids),
+    ...stringArray(internal.source_trace_ids),
+    ...stringArray(internal.source_policy_ids),
+    ...stringArray(internal.evidence_anchor_ids)
+  ]).slice(0, 5);
+  const episodeIds = uniq([
+    ...stringArray(internal.source_episode_ids),
+    ...stringArray(policy.source_episode_ids)
+  ]);
+  return {
+    id: memory.id,
+    suggestedLayer: memory.memoryLayer,
+    title: stringFromMeta(memory.info, "title") ?? stringFromMeta(internal, "title") ?? firstLine(memory.memoryValue),
+    conclusion: memory.memoryValue,
+    confidence,
+    confidenceLabel: confidence >= 0.8 ? "high" : confidence >= 0.6 ? "medium" : "low",
+    risk: confidence >= 0.8 && evidenceIds.length >= 2 ? "low" : confidence >= 0.6 ? "medium" : "high",
+    evidence: {
+      episodeCount: episodeIds.length,
+      l1Count: evidenceIds.filter((id) => id.startsWith("trace_")).length,
+      ids: evidenceIds
+    },
+    updatedAt: memory.updatedAt
+  };
+}
+
+function firstFiniteNumber(...values: unknown[]): number | undefined {
+  return values.find((value): value is number => typeof value === "number" && Number.isFinite(value));
+}
+
+function clamp01(value: number): number {
+  return Math.max(0, Math.min(value, 1));
 }
 
 function memoryConfigLogFields(config: MemmyConfig): Record<string, unknown> {

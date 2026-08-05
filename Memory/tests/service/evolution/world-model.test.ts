@@ -401,7 +401,7 @@ describe("MemoryService / evolution / world model", () => {
       updated_at: archivedWorld.updated_at
     });
     expect(fresh).toMatchObject({
-      status: "activated",
+      status: "resolving",
       memory_key: firstWorld!.memory_key
     });
 

@@ -16,7 +16,7 @@ import type {
 } from "../types.js";
 import { DEFAULT_NAMESPACE_SOURCE } from "../types.js";
 import { newId, stableHash } from "../utils/id.js";
-import { asStringArray, parseJson, toJson } from "../utils/json.js";
+import { asStringArray, isRecord, parseJson, toJson } from "../utils/json.js";
 import { nowIso } from "../utils/time.js";
 import {
   attachMemoryVectors,
@@ -1052,6 +1052,7 @@ export class MemoryRepository {
       summary: listSummaryForMemory(memory),
       tags: memory.tags,
       metrics: listMetricsForMemory(memory),
+      metadata: { namespace: namespaceSummaryFromMemory(memory) },
       createdAt: memory.createdAt,
       updatedAt: memory.updatedAt,
       version: memory.version
@@ -2462,6 +2463,33 @@ export class RuntimeRepository {
     return transaction();
   }
 
+  retryFailedJobIds(
+    jobIds: readonly string[],
+    at = nowIso()
+  ): Array<{ before: EvolutionJobRecord; after: EvolutionJobRecord }> {
+    const ids = uniq([...jobIds]);
+    if (ids.length === 0) return [];
+    const placeholders = ids.map(() => "?").join(", ");
+    const transaction = this.db.transaction(() => {
+      const rows = this.db.prepare(
+        `SELECT * FROM evolution_jobs
+         WHERE id IN (${placeholders}) AND status IN ('failed', 'dead_letter')`
+      ).all(...ids) as SqlJobRow[];
+      for (const row of rows) {
+        this.db.prepare(
+          `UPDATE evolution_jobs
+           SET status = 'queued', attempts = 0, leased_until = NULL, last_error = NULL, updated_at = ?
+           WHERE id = ?`
+        ).run(at, row.id);
+      }
+      return rows.map((row) => ({
+        before: jobFromSql(row),
+        after: jobFromSql({ ...row, status: "queued", attempts: 0, leased_until: null, last_error: null, updated_at: at })
+      }));
+    });
+    return transaction();
+  }
+
   requeueLeasedJobsAfterRestart(
     at = nowIso()
   ): Array<{ before: EvolutionJobRecord; after: EvolutionJobRecord }> {
@@ -3726,6 +3754,54 @@ function listSummaryForMemory(memory: MemoryRow): string {
   ) ?? "";
 }
 
+function namespaceSummaryFromMemory(memory: MemoryRow): {
+  tenantId: string;
+  projectId: string;
+  workspaceId?: string;
+  workspacePath?: string;
+  label: string;
+} {
+  const provenance = isRecord(memory.properties.internal_info.provenance)
+    ? memory.properties.internal_info.provenance as Record<string, unknown>
+    : {};
+  const tenantId = firstString(
+    memory.info.tenant_id,
+    memory.info.tenantId,
+    provenance.tenantId
+  ) ?? "local";
+  const projectId = firstString(
+    memory.info.project_id,
+    memory.info.projectId,
+    provenance.projectId,
+    memory.appId
+  ) ?? "unscoped";
+  const workspaceId = firstString(
+    memory.info.workspace_id,
+    memory.info.workspaceId,
+    provenance.workspaceId,
+    memory.appId
+  );
+  const workspacePath = firstString(
+    memory.info.workspace_path,
+    memory.info.workspacePath,
+    provenance.workspacePath
+  );
+  return {
+    tenantId,
+    projectId,
+    workspaceId,
+    workspacePath,
+    label: workspacePath ? workspacePath.split("/").filter(Boolean).pop() || workspacePath : (projectId !== "unscoped" ? projectId : workspaceId ?? "unscoped")
+  };
+}
+
+function firstString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return undefined;
+}
+
 function listMetricsForMemory(memory: MemoryRow): MemoryListItem["metrics"] | undefined {
   const internal = memory.properties.internal_info;
   const trace = recordValue(internal.trace);
@@ -3979,6 +4055,7 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
   addTenantClause(filter.tenantId);
   addValueClause("user_id", filter.userId);
   addProjectClause(filter.projectId);
+  addWorkspaceClause(filter.workspaceId);
   addValueClause("session_id", filter.sessionId);
   addValueClause("conversation_id", filter.conversationId);
   addAgentIdClause(filter.agentId, filter.excludedAgentIds);
@@ -4042,6 +4119,29 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
     }
     clauses.push(`${effectiveProject} = ?`);
     params.push(projectId);
+  }
+
+  function addWorkspaceClause(workspaceId: string | undefined): void {
+    if (workspaceId === undefined) return;
+    const effectiveWorkspace = `CASE
+      WHEN session_id IS NOT NULL AND EXISTS (
+        SELECT 1 FROM sessions AS workspace_session WHERE workspace_session.id = memories.session_id
+      ) THEN (
+        SELECT workspace_session.workspace_id FROM sessions AS workspace_session WHERE workspace_session.id = memories.session_id
+      )
+      ELSE COALESCE(
+        NULLIF(json_extract(info_json, '$.workspace_id'), ''),
+        NULLIF(json_extract(info_json, '$.workspaceId'), ''),
+        NULLIF(json_extract(properties_json, '$.internal_info.provenance.workspaceId'), ''),
+        NULLIF(app_id, '')
+      )
+    END`;
+    if (workspaceId === "unscoped") {
+      clauses.push(`${effectiveWorkspace} IS NULL`);
+      return;
+    }
+    clauses.push(`${effectiveWorkspace} = ?`);
+    params.push(workspaceId);
   }
 
   function addAgentIdClause(value: string | undefined, excludedValues: string[] | undefined): void {

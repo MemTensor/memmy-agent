@@ -183,7 +183,7 @@ export class SkillPipeline {
         profileId: profileIdFromMemory(policyMemory),
         layer: "Skill",
         kind: "skill",
-        lifecycleStatus: verifiedDraft.status,
+        lifecycleStatus: "candidate",
         memoryType: "SkillMemory",
         key: verifiedDraft.key,
         value: verifiedDraft.invocationGuide,
@@ -191,7 +191,7 @@ export class SkillPipeline {
         info: {
           name: verifiedDraft.name,
           eta: verifiedDraft.eta,
-          status: verifiedDraft.status,
+          status: "candidate",
           source_memory_ids: verifiedDraft.sourcePolicyIds
         },
         internal: {
@@ -211,7 +211,7 @@ export class SkillPipeline {
           skill: {
             name: verifiedDraft.name,
             eta: verifiedDraft.eta,
-            status: verifiedDraft.status,
+            status: "candidate",
             support: verifiedDraft.support,
             gain: verifiedDraft.gain,
             policy_content_hash: skillPolicyContentHash(policy),

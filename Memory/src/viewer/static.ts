@@ -196,10 +196,21 @@ export function memoryPanelHtml(): string {
     .progress-track { height: 7px; border-radius: 4px; background: var(--surface-soft); overflow: hidden; }
     .progress-fill { height: 100%; border-radius: inherit; background: var(--blue); }
     .source-count { text-align: right; color: var(--muted); }
+    .namespace-list { display: grid; gap: 9px; }
+    .namespace-row { display: grid; grid-template-columns: minmax(0, 1fr) 44px; gap: 8px; align-items: start; padding: 8px 0; border-bottom: 1px solid var(--line); }
+    .namespace-row:last-child { border-bottom: 0; }
+    .namespace-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .namespace-meta { margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
     .queue-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
     .queue-item { padding: 10px; background: var(--surface-soft); border-radius: 6px; }
     .queue-item strong, .queue-item span { display: block; }
     .queue-item span { color: var(--muted); font-size: 10px; margin-top: 4px; }
+    .pipeline { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+    .pipeline-stage { padding: 11px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-soft); }
+    .pipeline-stage strong, .pipeline-stage span { display: block; }
+    .pipeline-stage strong { font-size: 20px; margin: 6px 0; }
+    .pipeline-stage span, .pipeline-stage small { color: var(--muted); }
+    .audit-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; }
     .toolbar { display: grid; grid-template-columns: minmax(220px, 1fr) 120px 130px 140px auto auto; gap: 7px; align-items: center; margin-bottom: 10px; }
     .workspace { display: grid; grid-template-columns: minmax(500px, 1.15fr) minmax(420px, .85fr); gap: 10px; height: calc(100vh - 150px); min-height: 500px; }
     .panel { min-width: 0; height: 100%; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); overflow: hidden; display: flex; flex-direction: column; }
@@ -244,6 +255,13 @@ export function memoryPanelHtml(): string {
     .system-row span { color: var(--muted); }
     .model-list { display: grid; gap: 8px; }
     .model-item { display: flex; justify-content: space-between; gap: 10px; padding: 9px; border: 1px solid var(--line); border-radius: 6px; }
+    .review-list { display: grid; gap: 8px; }
+    .review-card { padding: 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
+    .review-card-head, .review-card-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+    .review-card h4 { margin: 0; font-size: 13px; }
+    .review-card p { margin: 9px 0; color: var(--ink-secondary); line-height: 1.55; white-space: pre-wrap; }
+    .review-card-meta { display: flex; gap: 6px; flex-wrap: wrap; }
+    .review-card-actions { justify-content: flex-end; margin-top: 10px; }
     .auth-screen { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 18px; background: color-mix(in srgb, var(--canvas) 92%, transparent); backdrop-filter: blur(14px); }
     .auth-dialog { width: min(420px, 100%); border: 1px solid var(--line); border-radius: 8px; background: var(--surface-raised); box-shadow: var(--shadow); padding: 20px; }
     .auth-dialog .brand { padding: 0; margin-bottom: 18px; }
@@ -302,6 +320,7 @@ export function memoryPanelHtml(): string {
         <button id="navMemories" class="nav-item" role="tab" aria-selected="false">记忆</button>
         <button id="navActivity" class="nav-item" role="tab" aria-selected="false">活动</button>
         <button id="navTasks" class="nav-item" role="tab" aria-selected="false">任务</button>
+        <button id="navAudit" class="nav-item" role="tab" aria-selected="false">治理审计</button>
         <button id="navSystem" class="nav-item" role="tab" aria-selected="false">系统</button>
       </nav>
       <div class="sidebar-status">
@@ -336,6 +355,10 @@ export function memoryPanelHtml(): string {
               <div class="data-panel-head"><h3 id="sourceHeading">Agent 来源</h3><span id="sourceTotal" class="muted mono"></span></div>
               <div id="sourceDistribution" class="data-panel-body source-list"></div>
             </section>
+            <section class="data-panel" aria-labelledby="namespaceHeading">
+              <div class="data-panel-head"><h3 id="namespaceHeading">项目 / Workspace</h3><span id="namespaceTotal" class="muted mono"></span></div>
+              <div id="namespaceDistribution" class="data-panel-body namespace-list"></div>
+            </section>
             <section class="data-panel" aria-labelledby="queueHeading">
               <div class="data-panel-head"><h3 id="queueHeading">处理队列</h3><span id="queueState" class="muted"></span></div>
               <div id="queueSummary" class="data-panel-body queue-grid"></div>
@@ -343,6 +366,22 @@ export function memoryPanelHtml(): string {
             <section class="data-panel" aria-labelledby="recentHeading">
               <div class="data-panel-head"><h3 id="recentHeading">最近变化</h3><button id="openActivity" class="ghost">查看全部</button></div>
               <div id="recentActivity" class="data-panel-body system-list"></div>
+            </section>
+            <section class="data-panel" style="grid-column:1 / -1" aria-labelledby="evolutionHeading">
+              <div class="data-panel-head"><div><h3 id="evolutionHeading">L1 → L2 → L3 → Skill 演化流水线</h3><div id="l2ResolvingReason" class="muted" style="margin-top:3px"></div></div><span id="evolutionJobState" class="muted"></span></div>
+              <div id="evolutionPipeline" class="data-panel-body pipeline"></div>
+            </section>
+            <section class="data-panel" style="grid-column:1 / -1" aria-labelledby="reviewHeading">
+              <div class="data-panel-head"><div><h3 id="reviewHeading">待审核提炼</h3><span id="reviewCount" class="muted"></span></div><button id="bulkApproveCandidates">批准全部高置信度</button></div>
+              <div id="reviewCandidates" class="data-panel-body review-list"></div>
+            </section>
+            <section class="data-panel" aria-labelledby="contextPackHeading">
+              <div class="data-panel-head"><h3 id="contextPackHeading">项目上下文包</h3><button id="copyContextPack" class="ghost">复制</button></div>
+              <div class="data-panel-body"><pre id="contextPackMarkdown" style="max-height:280px"></pre></div>
+            </section>
+            <section class="data-panel" aria-labelledby="isolationAuditHeading">
+              <div class="data-panel-head"><h3 id="isolationAuditHeading">来源与项目隔离审计</h3><span id="auditRiskState" class="muted"></span></div>
+              <div id="isolationAudit" class="data-panel-body audit-summary"></div>
             </section>
           </div>
         </section>
@@ -357,6 +396,7 @@ export function memoryPanelHtml(): string {
               <option value="">活动状态</option><option value="activated">已激活</option><option value="resolving">处理中</option><option value="archived">已归档</option><option value="deleted">已删除</option>
             </select>
             <select id="sourceAgent" aria-label="Agent 来源"><option value="">全部来源</option></select>
+            <select id="projectScope" aria-label="项目 / Workspace"><option value="">全部项目</option></select>
             <button id="search">搜索</button>
             <button id="clearFilters">清除</button>
           </div>
@@ -373,7 +413,7 @@ export function memoryPanelHtml(): string {
               <div class="footer"><span id="memoryResultSummary"></span><div class="pager"><button id="prevPage" aria-label="上一页">‹</button><input id="pageInput" class="mono" inputmode="numeric" aria-label="页码" value="1"><span class="mono">/</span><span id="totalPagesText" class="mono">1</span><button id="nextPage" aria-label="下一页">›</button></div></div>
             </section>
             <aside class="panel" aria-labelledby="detailTitle">
-              <div class="panel-head"><div style="min-width:0"><h3 id="detailTitle">选择一条记忆</h3><div id="detailId" class="memory-id mono"></div></div><div class="panel-actions"><button id="copyJson">复制</button><button id="deleteMemory" class="danger" disabled>删除</button></div></div>
+              <div class="panel-head"><div style="min-width:0"><h3 id="detailTitle">选择一条记忆</h3><div id="detailId" class="memory-id mono"></div></div><div class="panel-actions"><button id="markUseful" disabled>有用</button><button id="markNotUseful" disabled>没用</button><button id="mergeMemory" disabled>合并</button><button id="promoteMemory" disabled>提升 L2</button><button id="archiveMemory" disabled>归档</button><button id="copyJson">复制</button><button id="deleteMemory" class="danger" disabled>删除</button></div></div>
               <div id="detailBody" class="detail-body"><div id="detailContent" class="empty">从左侧选择记忆</div><pre id="detailJson" class="hidden">{}</pre></div>
             </aside>
           </div>
@@ -402,8 +442,16 @@ export function memoryPanelHtml(): string {
           </div>
         </section>
 
+        <section id="viewAudit" class="view" role="tabpanel">
+          <div class="section-head"><div><h2>Agent 来源与项目隔离审计</h2><p>检查缺失 workspace、未知来源、旧来源标签与跨项目泄漏风险</p></div><span id="auditIssueCount" class="pill"></span></div>
+          <div class="system-grid">
+            <section class="data-panel" style="grid-column:1 / -1"><div class="data-panel-head"><h3>审计问题</h3><span class="muted">最多显示 500 条</span></div><div class="table-wrap"><table><thead><tr><th>Memory</th><th>问题</th><th>Project / Workspace</th><th>Source</th></tr></thead><tbody id="auditRows"></tbody></table><div id="auditEmpty" class="empty hidden">未发现来源或隔离问题</div></div></section>
+            <section class="data-panel" style="grid-column:1 / -1"><div class="data-panel-head"><h3>Workspace 上下文包</h3><button id="copyAuditPacks">复制全部</button></div><div class="data-panel-body"><pre id="auditPacks" style="max-height:420px"></pre></div></section>
+          </div>
+        </section>
+
         <section id="viewSystem" class="view" role="tabpanel">
-          <div class="section-head"><div><h2>系统状态</h2><p>服务、存储、模型与脱敏配置</p></div><div class="topbar-actions"><button id="runWorker">运行 Worker</button><button id="reloadConfig">重新加载配置</button></div></div>
+          <div class="section-head"><div><h2>系统状态</h2><p>服务、存储、模型与脱敏配置</p></div><div class="topbar-actions"><button id="runWorker">运行 Worker</button><button id="retryFailed">重试失败</button><button id="promoteCandidates">提升候选</button><button id="reloadConfig">重新加载配置</button></div></div>
           <div class="system-grid">
             <section class="data-panel"><div class="data-panel-head"><h3>Memory 服务</h3><span id="systemHealthBadge" class="pill"></span></div><div id="systemHealth" class="data-panel-body system-list"></div></section>
             <section class="data-panel"><div class="data-panel-head"><h3>存储</h3><span id="systemSchema" class="muted mono"></span></div><div id="systemStorage" class="data-panel-body system-list"></div></section>
@@ -445,6 +493,7 @@ export function memoryPanelHtml(): string {
       total: 0,
       totalPages: 1,
       selectedMemoryId: undefined,
+      namespaceOptions: [],
       detailJson: {},
       selectedActivityId: undefined,
       activityJson: {},
@@ -459,6 +508,10 @@ export function memoryPanelHtml(): string {
       metrics: {},
       status: {},
       config: {},
+      evolution: {},
+      reviewCandidates: [],
+      contextPack: {},
+      namespaceAudit: {},
       serviceActivity: {},
       lastRequestMs: 0,
       toastTimer: undefined
@@ -470,6 +523,7 @@ export function memoryPanelHtml(): string {
       memories: ["Memories", "搜索、检查与治理记忆"],
       activity: ["活动日志", "Codex、Pi 与工具调用"],
       tasks: ["任务与 Episodes", "对话批次、Turn 与关联记忆"],
+      audit: ["治理审计", "Agent 来源、Workspace 隔离与项目上下文包"],
       system: ["系统", "服务、存储、模型与配置"]
     };
 
@@ -516,6 +570,20 @@ export function memoryPanelHtml(): string {
     }
     function displayMemoryTitle(title, fallback) { const cleaned = String(title || "").replace(/^\\s*Summary:\\s*/i, "").trim(); return cleaned || fallback; }
     function valueAt(object, path, fallback = undefined) { let value = object; for (const key of path) value = value && typeof value === "object" ? value[key] : undefined; return value === undefined ? fallback : value; }
+    function namespaceLabel(namespace) { return namespace && namespace.label ? namespace.label : namespace && namespace.projectId ? namespace.projectId : "unscoped"; }
+    function namespaceMeta(namespace) {
+      if (!namespace) return "tenant local · project unscoped";
+      const bits = ["tenant " + (namespace.tenantId || "local"), "project " + (namespace.projectId || "unscoped")];
+      if (namespace.workspacePath) bits.push(namespace.workspacePath);
+      else if (namespace.workspaceId) bits.push(namespace.workspaceId);
+      return bits.join(" · ");
+    }
+    function namespaceOptionValue(namespace) {
+      if (!namespace) return "";
+      if (namespace.workspaceId) return "workspace:" + namespace.workspaceId;
+      if (namespace.projectId) return "project:" + namespace.projectId;
+      return "";
+    }
     function jsonText(value) { return JSON.stringify(value || {}, null, 2); }
     function copyJson(value) { return navigator.clipboard.writeText(jsonText(value)).then(() => showToast("已复制")); }
     function requestBody(reason) { return JSON.stringify({ requestId: "panel-" + Date.now(), adapterId: "memory-console", reason }); }
@@ -542,6 +610,7 @@ export function memoryPanelHtml(): string {
         ["L3 世界模型", counts.worldModels, "长期模型"],
         ["Skills", counts.skills, "可复用能力"]
       ].map((item) => '<div class="metric-card"><span>' + esc(item[0]) + '</span><strong>' + esc(formatNumber(item[1])) + '</strong><small>' + esc(item[2]) + '</small></div>').join("");
+      renderLayerFilter(overview);
     }
 
     function renderAnalysis(analysis) {
@@ -582,6 +651,37 @@ export function memoryPanelHtml(): string {
       $("activitySource").value = currentActivitySource;
     }
 
+    function renderNamespaces(overview) {
+      const namespaces = (overview.namespaceDistribution || []).slice(0, 8);
+      const total = namespaces.reduce((sum, namespace) => sum + Number(namespace.count || 0), 0);
+      $("namespaceTotal").textContent = formatNumber(total);
+      $("namespaceDistribution").innerHTML = namespaces.length ? namespaces.map((namespace) =>
+        '<div class="namespace-row"><div><strong class="namespace-title" title="' + esc(namespaceMeta(namespace)) + '">' + esc(namespaceLabel(namespace)) + '</strong><div class="namespace-meta mono">' + esc(namespaceMeta(namespace)) + '</div></div><span class="source-count mono">' + esc(namespace.count) + '</span></div>'
+      ).join("") : '<div class="empty">暂无项目数据</div>';
+      const currentProjectScope = $("projectScope").value;
+      const options = ['<option value="">全部项目</option>'].concat(namespaces.map((namespace) => '<option value="' + esc(namespaceOptionValue(namespace)) + '">' + esc(namespaceLabel(namespace)) + '</option>')).join("");
+      $("projectScope").innerHTML = options;
+      $("projectScope").value = currentProjectScope;
+    }
+
+    function renderLayerFilter(overview) {
+      const layerCounts = overview.layerCounts || (overview.stats && overview.stats.byLayer) || {};
+      const currentLayer = $("layer").value;
+      const options = [
+        ["", "全部层"],
+        ["L1", "L1"],
+        ["L2", "L2"],
+        ["L3", "L3"],
+        ["Skill", "Skill"]
+      ].map(([value, label]) => {
+        const count = value ? Number(layerCounts[value] || 0) : 0;
+        const suffix = value ? " (" + formatNumber(count) + ")" : "";
+        return '<option value="' + esc(value) + '">' + esc(label + suffix) + '</option>';
+      }).join("");
+      $("layer").innerHTML = options;
+      $("layer").value = currentLayer;
+    }
+
     function renderQueues(metrics) {
       const jobs = metrics.jobs || {};
       const retries = metrics.embeddingRetries || {};
@@ -594,6 +694,94 @@ export function memoryPanelHtml(): string {
       ].map((item) => '<div class="queue-item"><strong>' + esc(formatNumber(item[0])) + '</strong><span>' + esc(item[1]) + '</span></div>').join("");
     }
 
+    function renderEvolution(evolution) {
+      const layers = evolution.layers || [];
+      $("evolutionPipeline").innerHTML = layers.map((stage) =>
+        '<div class="pipeline-stage"><span>' + esc(stage.layer) + '</span><strong>' + esc(formatNumber(stage.count)) + '</strong><small>' + esc(formatNumber(stage.candidates)) + ' 候选 · ' + esc(formatNumber(stage.queued)) + ' 排队 · ' + esc(formatNumber(stage.failed)) + ' 失败</small><small class="mono" style="display:block;margin-top:7px">最近：' + esc(stage.recentJob ? stage.recentJob.jobType + ' / ' + stage.recentJob.status + ' / ' + stage.recentJob.id : '无') + '</small></div>'
+      ).join("") || '<div class="empty">暂无流水线数据</div>';
+      $("l2ResolvingReason").textContent = valueAt(evolution, ["l2Resolving", "reason"], "");
+      $("evolutionJobState").textContent = formatNumber((evolution.recentJobs || []).length) + " recent jobs";
+    }
+
+    function renderContextPack(result) {
+      const packs = result.packs || [];
+      const markdown = packs.length
+        ? packs.map((pack) => pack.markdown).join("\\n\\n---\\n\\n")
+        : "暂无项目上下文";
+      $("contextPackMarkdown").textContent = markdown;
+      $("auditPacks").textContent = markdown;
+    }
+    function renderNamespaceAudit(audit) {
+      const summary = audit.summary || {};
+      $("auditRiskState").textContent = Number(summary.crossWorkspaceRisk || 0) ? "存在风险" : "未发现泄漏风险";
+      $("isolationAudit").innerHTML = [
+        [summary.missingWorkspace, "无 Workspace"], [summary.unknownSource, "未知来源"],
+        [summary.missingAgentSourceTag, "缺来源标签"], [summary.crossWorkspaceRisk, "跨 Workspace 风险"]
+      ].map((item) => '<div class="queue-item"><strong>' + esc(formatNumber(item[0])) + '</strong><span>' + esc(item[1]) + '</span></div>').join("");
+      const issues = audit.issues || [];
+      $("auditIssueCount").textContent = formatNumber(issues.length) + " issues";
+      $("auditEmpty").classList.toggle("hidden", issues.length > 0);
+      $("auditRows").innerHTML = issues.map((issue) => '<tr><td class="mono">' + esc(issue.memoryId) + '</td><td><span class="pill status-' + esc(issue.severity) + '">' + esc(issue.issue) + '</span></td><td>' + esc((issue.projectId || "unscoped") + " / " + (issue.workspaceId || "none")) + '</td><td>' + esc(issue.source || "unknown") + '</td></tr>').join("");
+    }
+
+    function renderReviewCandidates(result) {
+      const candidates = Array.isArray(result.items) ? result.items : [];
+      state.reviewCandidates = candidates;
+      $("reviewCount").textContent = candidates.length ? formatNumber(candidates.length) + " 条候选" : "暂无待审核内容";
+      $("bulkApproveCandidates").disabled = !candidates.some((candidate) => Number(candidate.confidence || 0) >= 0.8);
+      $("reviewCandidates").innerHTML = candidates.length ? candidates.map((candidate) => {
+        const evidence = candidate.evidence || {};
+        const confidence = Number(candidate.confidence || 0);
+        const evidenceIds = Array.isArray(evidence.ids) ? evidence.ids : [];
+        return '<article class="review-card" data-review-id="' + esc(candidate.id) + '">' +
+          '<div class="review-card-head"><h4>' + esc(candidate.title || candidate.suggestedLayer || "候选提炼") + '</h4><div class="review-card-meta"><span class="pill layer-' + esc(candidate.suggestedLayer) + '">' + esc(candidate.suggestedLayer || "-") + '</span><span class="pill status-' + esc(candidate.confidenceLabel || "low") + '">' + esc(candidate.confidenceLabel || "low") + ' ' + esc(Math.round(confidence * 100)) + '%</span><span class="pill">风险 ' + esc(candidate.risk || "-") + '</span></div></div>' +
+          '<p>' + esc(candidate.conclusion || "") + '</p>' +
+          '<div class="muted">' + esc(formatNumber(evidence.episodeCount)) + ' episodes · ' + esc(formatNumber(evidence.l1Count)) + ' L1 evidence' + (evidenceIds.length ? ' · ' + esc(evidenceIds.join(", ")) : "") + '</div>' +
+          '<div class="review-card-actions"><button data-review-action="reject" data-review-id="' + esc(candidate.id) + '" class="ghost">拒绝</button><button data-review-action="edit" data-review-id="' + esc(candidate.id) + '" class="ghost">修改后批准</button><button data-review-action="approve" data-review-id="' + esc(candidate.id) + '">批准</button></div>' +
+        '</article>';
+      }).join("") : '<div class="empty">暂无待审核提炼</div>';
+      for (const button of $("reviewCandidates").querySelectorAll("button[data-review-action]")) {
+        button.onclick = () => handleReviewAction(button.dataset.reviewAction, button.dataset.reviewId).catch(showError);
+      }
+    }
+
+    async function loadReviewCandidates() {
+      const result = await api("/api/v1/panel/review/candidates?limit=100");
+      renderReviewCandidates(result);
+    }
+
+    async function handleReviewAction(action, id) {
+      const candidate = state.reviewCandidates.find((item) => item.id === id);
+      if (!candidate) return;
+      if (action === "reject") {
+        const reason = prompt("拒绝原因（可选）") ?? "";
+        await api("/api/v1/panel/review/candidates/" + encodeURIComponent(id) + "/reject", { method: "POST", body: JSON.stringify({ requestId: "panel-" + Date.now(), adapterId: "memory-console", reason }) });
+        showToast("候选已拒绝");
+      } else {
+        let title;
+        let content;
+        if (action === "edit") {
+          title = prompt("修改标题", candidate.title || "");
+          if (title === null) return;
+          content = prompt("修改结论", candidate.conclusion || "");
+          if (content === null || !content.trim()) return;
+        }
+        await api("/api/v1/panel/review/candidates/" + encodeURIComponent(id) + "/approve", { method: "POST", body: JSON.stringify({ requestId: "panel-" + Date.now(), adapterId: "memory-console", ...(title !== undefined ? { title, content } : {}) }) });
+        showToast(action === "edit" ? "已修改并批准" : "候选已批准");
+      }
+      await Promise.all([loadDashboard(), loadReviewCandidates(), loadMemories()]);
+    }
+
+    async function bulkApproveCandidates() {
+      const button = $("bulkApproveCandidates");
+      button.disabled = true;
+      try {
+        const result = await api("/api/v1/panel/review/candidates/bulk-approve", { method: "POST", body: JSON.stringify({ requestId: "panel-" + Date.now(), adapterId: "memory-console", minimumConfidence: 0.8 }) });
+        showToast("已批准 " + formatNumber(result.approved) + " 条高置信度候选");
+        await Promise.all([loadDashboard(), loadReviewCandidates(), loadMemories()]);
+      } finally { button.disabled = false; }
+    }
+
     function renderRecentActivity(activity) {
       const entries = (activity.entries || []).slice(0, 6);
       $("recentActivity").innerHTML = entries.length ? entries.map((entry) =>
@@ -602,11 +790,12 @@ export function memoryPanelHtml(): string {
     }
 
     async function loadDashboard() {
-      const [overview, analysis, metrics, status, activity] = await Promise.all([
-        api("/api/v1/panel/overview"), api("/api/v1/panel/analysis"), api("/api/v1/panel/metrics"), api("/api/v1/panel/status"), api("/api/v1/panel/activity?limit=20")
+      const [overview, analysis, metrics, status, activity, evolution, contextPack, namespaceAudit, reviewCandidates] = await Promise.all([
+        api("/api/v1/panel/overview"), api("/api/v1/panel/analysis"), api("/api/v1/panel/metrics"), api("/api/v1/panel/status"), api("/api/v1/panel/activity?limit=20"),
+        api("/api/v1/panel/evolution"), api("/api/v1/panel/context-packs"), api("/api/v1/panel/namespace-audit"), api("/api/v1/panel/review/candidates?limit=100")
       ]);
-      state.overview = overview; state.analysis = analysis; state.metrics = metrics; state.status = status; state.serviceActivity = activity;
-      renderStats(overview); renderAnalysis(analysis); renderActivityChart(overview); renderSources(overview); renderQueues(metrics); renderRecentActivity(activity); renderConnectionStatus(status);
+      state.overview = overview; state.analysis = analysis; state.metrics = metrics; state.status = status; state.serviceActivity = activity; state.evolution = evolution; state.contextPack = contextPack; state.namespaceAudit = namespaceAudit;
+      renderStats(overview); renderAnalysis(analysis); renderActivityChart(overview); renderSources(overview); renderNamespaces(overview); renderQueues(metrics); renderRecentActivity(activity); renderEvolution(evolution); renderContextPack(contextPack); renderNamespaceAudit(namespaceAudit); renderReviewCandidates(reviewCandidates); renderConnectionStatus(status);
     }
 
     function paramsForList() {
@@ -617,6 +806,11 @@ export function memoryPanelHtml(): string {
       if ($("layer").value) params.set("layer", $("layer").value);
       if ($("status").value) params.set("status", $("status").value);
       if ($("sourceAgent").value) params.set("sourceAgent", $("sourceAgent").value);
+      if ($("projectScope").value) {
+        const parts = $("projectScope").value.split(":");
+        if (parts[0] === "workspace") params.set("workspaceId", parts.slice(1).join(":"));
+        if (parts[0] === "project") params.set("projectId", parts.slice(1).join(":"));
+      }
       return params;
     }
 
@@ -624,9 +818,10 @@ export function memoryPanelHtml(): string {
       $("emptyState").classList.toggle("hidden", items.length > 0);
       $("memoryRows").innerHTML = items.map((item) => {
         const source = valueAt(item, ["metadata", "source"], "unknown");
+        const namespace = valueAt(item, ["metadata", "namespace"], undefined);
         return '<tr data-id="' + esc(item.id) + '" tabindex="0" class="' + (item.id === state.selectedMemoryId ? "selected" : "") + '">' +
           '<td><span class="pill layer-' + esc(item.memoryLayer) + '">' + esc(item.memoryLayer) + '</span></td>' +
-          '<td><div class="memory-title">' + esc(displayMemoryTitle(item.title, item.id)) + '</div><div class="memory-summary">' + esc(item.summary || "") + '</div><div class="memory-id"><span class="mono">' + esc(item.id) + '</span> · ' + esc(source) + '</div></td>' +
+          '<td><div class="memory-title">' + esc(displayMemoryTitle(item.title, item.id)) + '</div><div class="memory-summary">' + esc(item.summary || "") + '</div><div class="memory-id"><span class="mono">' + esc(item.id) + '</span> · ' + esc(source) + ' · ' + esc(namespaceLabel(namespace)) + '</div></td>' +
           '<td><span class="status-' + esc(item.status) + '">' + esc(item.status) + '</span></td>' +
           '<td>' + esc(formatDate(item.updatedAt || item.createdAt)) + '<div class="muted mono" style="margin-top:4px">v' + esc(item.version || 1) + '</div></td></tr>';
       }).join("");
@@ -657,6 +852,7 @@ export function memoryPanelHtml(): string {
       const item = data.item || {};
       const tags = Array.isArray(item.tags) ? item.tags : [];
       const source = valueAt(item, ["metadata", "source"], valueAt(item, ["info", "source"], "unknown"));
+      const namespace = valueAt(item, ["metadata", "namespace"], undefined);
       const summary = item.summary || item.content || valueAt(item, ["properties", "summary"], "");
       $("detailTitle").textContent = displayMemoryTitle(item.title, requestedMemoryId);
       $("detailId").textContent = requestedMemoryId;
@@ -666,12 +862,16 @@ export function memoryPanelHtml(): string {
           '<div class="detail-field"><span>Memory Layer</span><strong>' + esc(item.memoryLayer || item.layer || "-") + '</strong></div>' +
           '<div class="detail-field"><span>Status</span><strong>' + esc(item.status || "-") + '</strong></div>' +
           '<div class="detail-field"><span>Source</span><strong>' + esc(source) + '</strong></div>' +
+          '<div class="detail-field"><span>Project</span><strong>' + esc(namespaceLabel(namespace)) + '</strong></div>' +
+          '<div class="detail-field"><span>Workspace</span><strong>' + esc(namespace && (namespace.workspacePath || namespace.workspaceId) || "-") + '</strong></div>' +
           '<div class="detail-field"><span>Updated</span><strong>' + esc(formatDate(item.updatedAt || item.createdAt, true)) + '</strong></div>' +
         '</div></section>' +
         '<section class="detail-section"><h3>Tags</h3><div class="tag-list">' + (tags.length ? tags.map((tag) => '<span class="pill">' + esc(tag) + '</span>').join("") : '<span class="muted">无</span>') + '</div></section>' +
         '<section class="detail-section"><h3>Raw JSON</h3><pre>' + esc(jsonText(data)) + '</pre></section>';
       $("detailJson").textContent = jsonText(data);
       $("deleteMemory").disabled = false;
+      $("markUseful").disabled = false; $("markNotUseful").disabled = false; $("mergeMemory").disabled = false; $("archiveMemory").disabled = false;
+      $("promoteMemory").disabled = (item.memoryLayer || item.layer) !== "L1";
     }
 
     async function loadMemoryDetail(id) {
@@ -698,6 +898,19 @@ export function memoryPanelHtml(): string {
       await api("/api/v1/memory/" + encodeURIComponent(id), { method: "DELETE", body: requestBody("memory_console_delete") });
       state.selectedMemoryId = undefined; state.detailJson = {}; $("deleteMemory").disabled = true; $("detailTitle").textContent = "选择一条记忆"; $("detailId").textContent = ""; $("detailContent").innerHTML = '<div class="empty">记忆已删除</div>'; showToast("记忆已删除");
       await Promise.all([loadMemories(), loadDashboard()]);
+    }
+
+    async function memoryAction(action, body = {}) {
+      const id = state.selectedMemoryId; if (!id) return;
+      const result = await api("/api/v1/memory/" + encodeURIComponent(id) + "/" + action, { method: "POST", body: JSON.stringify({ requestId: "panel-" + Date.now(), adapterId: "memory-console", ...body }) });
+      showToast(action === "quality" ? "质量标记已保存" : action === "promote" ? "已提升为 L2" : action === "archive" ? "记忆已归档" : "记忆已合并");
+      await Promise.all([loadMemories(), loadDashboard()]);
+      return result;
+    }
+    async function mergeSelectedMemory() {
+      const sourceMemoryId = prompt("输入要合并进当前记忆的重复 Memory ID");
+      if (!sourceMemoryId) return;
+      await memoryAction("merge", { sourceMemoryId, reason: "duplicate memory merged in console" });
     }
 
     function activityParams() {
@@ -787,7 +1000,9 @@ export function memoryPanelHtml(): string {
       state.status = status; state.metrics = metrics; state.config = config; renderSystem(status, metrics, config);
     }
 
-    async function runWorker() { $("runWorker").disabled = true; try { const result = await api("/api/v1/worker/run", { method: "POST", body: JSON.stringify({ limit: 50, adapterId: "memory-console" }) }); showToast("Worker 完成：" + formatNumber(result.processed || result.completed || 0)); await loadSystem(); } finally { $("runWorker").disabled = false; } }
+    function generatedSummary(result) { const generated = result.generated || {}; return "L2 +" + formatNumber(generated.L2) + " · L3 +" + formatNumber(generated.L3) + " · Skill +" + formatNumber(generated.Skill); }
+    async function workerAction(buttonId, path) { $(buttonId).disabled = true; try { const result = await api(path, { method: "POST", body: JSON.stringify({ limit: 100, adapterId: "memory-console" }) }); showToast(generatedSummary(result)); await Promise.all([loadSystem(), loadDashboard(), loadMemories()]); } finally { $(buttonId).disabled = false; } }
+    async function runWorker() { return workerAction("runWorker", "/api/v1/worker/run"); }
     async function reloadConfig() { $("reloadConfig").disabled = true; try { await api("/api/v1/admin/reload-config", { method: "POST", body: JSON.stringify({ reason: "memory_console", adapterId: "memory-console" }) }); showToast("配置已重新加载"); await Promise.all([loadDashboard(), loadSystem()]); } finally { $("reloadConfig").disabled = false; } }
 
     async function refreshCurrentView() {
@@ -798,6 +1013,7 @@ export function memoryPanelHtml(): string {
         else if (state.view === "memories") await loadMemories();
         else if (state.view === "activity") await loadApiActivity();
         else if (state.view === "tasks") await loadTasks();
+        else if (state.view === "audit") await loadDashboard();
         else if (state.view === "system") await loadSystem();
       } catch (error) { showError(error); }
     }
@@ -811,16 +1027,17 @@ export function memoryPanelHtml(): string {
     function applyTheme(theme) { document.documentElement.classList.toggle("dark", theme === "dark"); if (typeof localStorage !== "undefined") localStorage.setItem("memmyMemoryTheme", theme); }
     function initTheme() { const stored = typeof localStorage !== "undefined" ? localStorage.getItem("memmyMemoryTheme") : ""; const preferred = typeof matchMedia !== "undefined" && matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"; applyTheme(stored || preferred); }
 
-    $("navDashboard").onclick = () => setView("dashboard"); $("navMemories").onclick = () => setView("memories"); $("navActivity").onclick = () => setView("activity"); $("navTasks").onclick = () => setView("tasks"); $("navSystem").onclick = () => setView("system");
+    $("navDashboard").onclick = () => setView("dashboard"); $("navMemories").onclick = () => setView("memories"); $("navActivity").onclick = () => setView("activity"); $("navTasks").onclick = () => setView("tasks"); $("navAudit").onclick = () => setView("audit"); $("navSystem").onclick = () => setView("system");
     $("refresh").onclick = refreshCurrentView; $("openActivity").onclick = () => setView("activity");
-    $("search").onclick = applyFilters; $("clearFilters").onclick = () => { $("query").value = ""; $("layer").value = ""; $("status").value = ""; $("sourceAgent").value = ""; applyFilters(); };
+    $("search").onclick = applyFilters; $("clearFilters").onclick = () => { $("query").value = ""; $("layer").value = ""; $("status").value = ""; $("sourceAgent").value = ""; $("projectScope").value = ""; applyFilters(); };
     $("prevPage").onclick = () => { if (state.page > 1) { state.page -= 1; loadMemories(); } }; $("nextPage").onclick = () => { if (state.page < state.totalPages) { state.page += 1; loadMemories(); } };
     $("pageInput").onkeydown = (event) => { if (event.key === "Enter") goToPage(); }; $("pageInput").onfocus = () => $("pageInput").select(); $("pageInput").onchange = goToPage;
-    $("query").onkeydown = (event) => { if (event.key === "Enter") applyFilters(); }; $("layer").onchange = applyFilters; $("status").onchange = applyFilters; $("sourceAgent").onchange = applyFilters;
+    $("query").onkeydown = (event) => { if (event.key === "Enter") applyFilters(); }; $("layer").onchange = applyFilters; $("status").onchange = applyFilters; $("sourceAgent").onchange = applyFilters; $("projectScope").onchange = applyFilters;
     $("copyJson").onclick = () => copyJson(state.detailJson); $("deleteMemory").onclick = () => removeSelectedMemory().catch(showError);
+    $("markUseful").onclick = () => memoryAction("quality", { useful: true }).catch(showError); $("markNotUseful").onclick = () => memoryAction("quality", { useful: false }).catch(showError); $("archiveMemory").onclick = () => memoryAction("archive", { reason: "noise archived in console" }).catch(showError); $("promoteMemory").onclick = () => memoryAction("promote", { reason: "manual L1 promotion" }).catch(showError); $("mergeMemory").onclick = () => mergeSelectedMemory().catch(showError);
     $("loadActivity").onclick = () => loadApiActivity().catch(showError); $("clearActivity").onclick = () => { $("activityQuery").value = ""; $("activityTool").value = ""; $("activitySource").value = ""; loadApiActivity().catch(showError); }; $("activityQuery").onkeydown = (event) => { if (event.key === "Enter") renderActivityRows(state.activityLogs); }; $("activityTool").onchange = () => loadApiActivity().catch(showError); $("activitySource").onchange = () => loadApiActivity().catch(showError); $("copyActivity").onclick = () => copyJson(state.activityJson);
     $("searchTasks").onclick = () => { state.taskPage = 1; loadTasks().catch(showError); }; $("clearTasks").onclick = () => { $("taskQuery").value = ""; state.taskPage = 1; loadTasks().catch(showError); }; $("taskQuery").onkeydown = (event) => { if (event.key === "Enter") { state.taskPage = 1; loadTasks().catch(showError); } }; $("prevTaskPage").onclick = () => { if (state.taskPage > 1) { state.taskPage -= 1; loadTasks().catch(showError); } }; $("nextTaskPage").onclick = () => { if (state.taskPage < state.taskTotalPages) { state.taskPage += 1; loadTasks().catch(showError); } }; $("copyTask").onclick = () => copyJson(state.taskJson); $("deleteTask").onclick = () => removeSelectedTask().catch(showError);
-    $("runWorker").onclick = () => runWorker().catch(showError); $("reloadConfig").onclick = () => reloadConfig().catch(showError); $("copyConfig").onclick = () => copyJson(state.config);
+    $("runWorker").onclick = () => runWorker().catch(showError); $("retryFailed").onclick = () => workerAction("retryFailed", "/api/v1/worker/retry-failed").catch(showError); $("promoteCandidates").onclick = () => workerAction("promoteCandidates", "/api/v1/worker/promote-candidates").catch(showError); $("reloadConfig").onclick = () => reloadConfig().catch(showError); $("copyConfig").onclick = () => copyJson(state.config); $("copyContextPack").onclick = () => navigator.clipboard.writeText((state.contextPack.packs || []).map((pack) => pack.markdown).join("\\n\\n---\\n\\n")).then(() => showToast("上下文包已复制")); $("copyAuditPacks").onclick = $("copyContextPack").onclick; $("bulkApproveCandidates").onclick = () => bulkApproveCandidates().catch(showError);
     $("themeToggle").onclick = () => applyTheme(document.documentElement.classList.contains("dark") ? "light" : "dark");
     $("lockConsole").onclick = () => { memoryToken = ""; if (typeof sessionStorage !== "undefined") sessionStorage.removeItem("memmyMemoryToken"); showAuth(); };
     $("connectToken").onclick = async () => { const token = $("tokenInput").value.trim(); if (!token) { showAuth("请输入访问令牌"); return; } memoryToken = token; if (typeof sessionStorage !== "undefined") sessionStorage.setItem("memmyMemoryToken", token); try { await api("/api/v1/panel/status"); hideAuth(); $("tokenInput").value = ""; await refreshAll(); } catch (error) { showAuth(error.message || String(error)); } };

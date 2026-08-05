@@ -46,6 +46,7 @@ import {
 import {
   panelCountByDate,
   panelListItemFromMemory,
+  panelNamespaceDistribution,
   panelSourceDistribution
 } from "./panel.js";
 
@@ -379,7 +380,9 @@ export class PanelReadModel {
 
   panelOverviewSummary(input: RequestEnvelope & { userId?: string } = {}): {
     counts: { memories: number; skills: number; experiences: number; worldModels: number };
+    layerCounts: Record<MemoryLayer, number>;
     sourceDistribution: Array<{ source: string; count: number; percentage: number }>;
+    namespaceDistribution: Array<{ tenantId: string; projectId: string; workspaceId?: string; workspacePath?: string; label: string; count: number; percentage: number }>;
     dailyActivity: Array<{ date: string; count: number }>;
   } {
     const memories = this.listAllMemoriesForStats(input);
@@ -391,8 +394,175 @@ export class PanelReadModel {
         experiences: memories.filter((memory) => memory.memoryLayer === "L2").length,
         worldModels: memories.filter((memory) => memory.memoryLayer === "L3").length
       },
+      layerCounts: this.memoryLayerCounts(memories),
       dailyActivity: panelCountByDate(memories, dates, (memory) => memory.createdAt),
-      sourceDistribution: panelSourceDistribution(memories)
+      sourceDistribution: panelSourceDistribution(memories),
+      namespaceDistribution: panelNamespaceDistribution(memories, (memory) =>
+        memory.sessionId ? this.deps.repos.runtime.getSession(memory.sessionId) : undefined
+      )
+    };
+  }
+
+  evolutionOverview(input: RequestEnvelope & { userId?: string } = {}): {
+    layers: Array<{
+      layer: MemoryLayer;
+      count: number;
+      candidates: number;
+      failed: number;
+      queued: number;
+      recentJob?: EvolutionJobRecord;
+    }>;
+    l2Resolving: { active: boolean; count: number; reason: string };
+    recentJobs: EvolutionJobRecord[];
+    serverTime: string;
+  } {
+    const memories = this.listAllMemoriesForStats(input);
+    const candidates = this.deps.repos.runtime.listPendingCandidatePool({
+      userId: input.userId,
+      now: this.now(),
+      limit: 10_000
+    }).filter((candidate) => {
+      const memory = this.deps.repos.memories.get(candidate.sourceMemoryId);
+      return Boolean(memory && this.memoryMatchesRequest(memory, input));
+    });
+    const recentJobs = this.scopedJobs(undefined, input, 200);
+    const jobLayers: Record<MemoryLayer, EvolutionJobRecord["jobType"][]> = {
+      L1: ["trace_summary", "import_summary", "reflection", "reward", "span_big_turn", "negative_experience", "embedding"],
+      L2: ["l2_association", "l2_induction"],
+      L3: ["l3_abstraction"],
+      Skill: ["skill_crystallization", "skill_trial_resolve"]
+    };
+    const layers = (["L1", "L2", "L3", "Skill"] as const).map((layer) => {
+      const jobs = recentJobs.filter((job) => jobLayers[layer].includes(job.jobType));
+      return {
+        layer,
+        count: memories.filter((memory) => memory.memoryLayer === layer).length,
+        candidates: layer === "L2"
+          ? candidates.length
+          : memories.filter((memory) => memory.memoryLayer === layer && memory.status === "resolving").length,
+        failed: jobs.filter((job) => job.status === "failed" || job.status === "dead_letter").length,
+        queued: jobs.filter((job) => job.status === "queued" || job.status === "leased").length,
+        recentJob: jobs[0]
+      };
+    });
+    const resolvingCount = memories.filter((memory) => memory.memoryLayer === "L2" && memory.status === "resolving").length;
+    const eligibleEpisodes = new Set(candidates.map((candidate) =>
+      isRecord(candidate.evidence) && typeof candidate.evidence.episodeId === "string"
+        ? candidate.evidence.episodeId
+        : undefined
+    ).filter(Boolean)).size;
+    const requiredEpisodes = this.deps.config().algorithm.l2Induction.minEpisodesForInduction;
+    const reason = resolvingCount > 0
+      ? `${resolvingCount} 条 L2 候选正在等待支持度、增益或试验门槛`
+      : candidates.length === 0
+      ? "没有符合价值与向量条件的 L1 候选"
+      : eligibleEpisodes < requiredEpisodes
+      ? `候选证据不足：${eligibleEpisodes}/${requiredEpisodes} 个独立 episode`
+      : "候选已就绪，等待 l2_induction worker job";
+    return {
+      layers,
+      l2Resolving: { active: resolvingCount > 0, count: resolvingCount, reason },
+      recentJobs: recentJobs.slice(0, 10),
+      serverTime: this.now()
+    };
+  }
+
+  namespaceAudit(input: RequestEnvelope & { userId?: string } = {}): {
+    summary: {
+      total: number;
+      missingWorkspace: number;
+      unknownSource: number;
+      missingAgentSourceTag: number;
+      crossWorkspaceRisk: number;
+    };
+    issues: Array<{ memoryId: string; issue: string; severity: "warning" | "risk"; projectId?: string; workspaceId?: string; source?: string }>;
+    serverTime: string;
+  } {
+    const memories = this.listAllMemoriesForStats(input);
+    const issues: Array<{ memoryId: string; issue: string; severity: "warning" | "risk"; projectId?: string; workspaceId?: string; source?: string }> = [];
+    let missingWorkspace = 0;
+    let unknownSource = 0;
+    let missingAgentSourceTag = 0;
+    let crossWorkspaceRisk = 0;
+    for (const memory of memories) {
+      const namespace = namespaceForMemory(memory);
+      const source = memory.agentId || (typeof memory.info.source === "string" ? memory.info.source : undefined) || "unknown";
+      if (!namespace.workspaceId && !namespace.workspacePath) {
+        missingWorkspace += 1;
+        issues.push({ memoryId: memory.id, issue: "missing_workspace", severity: "risk", projectId: namespace.projectId, source });
+      }
+      if (source === "unknown") {
+        unknownSource += 1;
+        issues.push({ memoryId: memory.id, issue: "unknown_source", severity: "warning", projectId: namespace.projectId, workspaceId: namespace.workspaceId, source });
+      }
+      if (source !== "unknown" && !memory.tags.includes("agent-source")) {
+        missingAgentSourceTag += 1;
+        issues.push({ memoryId: memory.id, issue: "missing_agent_source_tag", severity: "warning", projectId: namespace.projectId, workspaceId: namespace.workspaceId, source });
+      }
+      if (memory.sessionId) {
+        const session = this.deps.repos.runtime.getSession(memory.sessionId);
+        if (session && namespace.workspaceId && session.workspaceId && namespace.workspaceId !== session.workspaceId) {
+          crossWorkspaceRisk += 1;
+          issues.push({ memoryId: memory.id, issue: "workspace_mismatch", severity: "risk", projectId: namespace.projectId, workspaceId: namespace.workspaceId, source });
+        }
+      }
+    }
+    return {
+      summary: { total: memories.length, missingWorkspace, unknownSource, missingAgentSourceTag, crossWorkspaceRisk: crossWorkspaceRisk + missingWorkspace },
+      issues: issues.slice(0, 500),
+      serverTime: this.now()
+    };
+  }
+
+  projectContextPack(input: RequestEnvelope & { userId?: string } = {}): {
+    namespace: RuntimeNamespace;
+    conventions: MemoryListItem[];
+    commands: MemoryListItem[];
+    architectureFacts: MemoryListItem[];
+    recentTasks: Array<{ id: string; title: string; updatedAt: string }>;
+    userPreferences: MemoryListItem[];
+    markdown: string;
+    generatedAt: string;
+  } {
+    const context = this.deps.resolveContext(input);
+    const memories = this.listAllMemoriesForStats({ ...input, namespace: context.namespace })
+      .filter((memory) => memory.status === "activated" || memory.status === "resolving");
+    const select = (pattern: RegExp, limit = 8) => memories
+      .filter((memory) => pattern.test(`${memory.tags.join(" ")} ${detailSummaryForMemory(memory)} ${memory.memoryValue}`))
+      .slice(0, limit)
+      .map((memory) => this.deps.repos.memories.toListItem(memory));
+    const conventions = select(/convention|约定|规范|rule|必须|should/i);
+    const commands = select(/command|命令|npm |pnpm |yarn |cargo |pytest|docker |git /i);
+    const architectureFacts = select(/architecture|架构|module|模块|service|database|repository|api/i);
+    const userPreferences = select(/preference|偏好|喜欢|不喜欢|prefer/i);
+    const recentTasks = this.deps.repos.runtime.listEpisodes(context.userId, 20)
+      .filter((episode) => this.episodeMatchesNamespace(episode, context.namespace))
+      .slice(0, 8)
+      .map((episode) => ({ id: episode.id, title: String(this.deps.episodeRef(episode).title ?? this.deps.episodeRef(episode).summary ?? episode.id), updatedAt: episode.updatedAt }));
+    const section = (title: string, items: MemoryListItem[]) => `## ${title}\n${items.length ? items.map((item) => `- ${item.summary || item.title} (${item.id})`).join("\n") : "- 暂无"}`;
+    const markdown = [
+      `# Project Memory Pack: ${context.namespace.projectId ?? context.namespace.workspaceId ?? "unscoped"}`,
+      section("当前项目约定", conventions),
+      section("常用命令", commands),
+      section("架构事实", architectureFacts),
+      `## 最近任务\n${recentTasks.length ? recentTasks.map((task) => `- ${task.title} (${task.id})`).join("\n") : "- 暂无"}`,
+      section("用户偏好", userPreferences)
+    ].join("\n\n");
+    return { namespace: context.namespace, conventions, commands, architectureFacts, recentTasks, userPreferences, markdown, generatedAt: this.now() };
+  }
+
+  projectContextPacks(input: RequestEnvelope & { userId?: string } = {}) {
+    if (input.namespace) return { packs: [this.projectContextPack(input)], generatedAt: this.now() };
+    const memories = this.listAllMemoriesForStats(input);
+    const namespaces = new Map<string, RuntimeNamespace>();
+    for (const memory of memories) {
+      const namespace = namespaceForMemory(memory);
+      const key = `${namespace.tenantId ?? "local"}:${namespace.projectId ?? "unscoped"}:${namespace.workspaceId ?? namespace.workspacePath ?? ""}`;
+      namespaces.set(key, namespace);
+    }
+    return {
+      packs: [...namespaces.values()].map((namespace) => this.projectContextPack({ ...input, namespace })),
+      generatedAt: this.now()
     };
   }
 
@@ -445,6 +615,8 @@ export class PanelReadModel {
     tags?: string[];
     sourceAgent?: string;
     excludedSourceAgents?: string[];
+    projectId?: string;
+    workspaceId?: string;
     page?: number;
     limit?: number;
     cursor?: string | number;
@@ -468,7 +640,11 @@ export class PanelReadModel {
       status: input.status,
       tags: input.tags,
       agentId: input.sourceAgent,
-      excludedAgentIds: input.excludedSourceAgents
+      excludedAgentIds: input.excludedSourceAgents,
+      ...(input.namespace ? {} : {
+        projectId: input.projectId,
+        workspaceId: input.workspaceId
+      })
     };
     const total = input.q?.trim()
       ? this.deps.repos.memories.searchCount(input.q, { ...filter, status: filter.status ?? ["activated", "resolving"] })
@@ -489,7 +665,8 @@ export class PanelReadModel {
       items: memories.map((memory) => panelListItemFromMemory(
         this.deps.repos.memories.toListItem(memory),
         memory,
-        this.deps.repos.processing.get(memory.id)
+        this.deps.repos.processing.get(memory.id),
+        memory.sessionId ? this.deps.repos.runtime.getSession(memory.sessionId) : undefined
       )),
       page,
       pageSize,
@@ -761,6 +938,11 @@ export class PanelReadModel {
       if (batch.length < pageSize) break;
     }
     return rows;
+  }
+
+  private memoryMatchesRequest(memory: Parameters<Repositories["memories"]["toListItem"]>[0], input: RequestEnvelope & { userId?: string }): boolean {
+    if (input.userId && memory.userId !== input.userId) return false;
+    return !input.namespace || sameProjectScope(namespaceForMemory(memory), input.namespace);
   }
 }
 

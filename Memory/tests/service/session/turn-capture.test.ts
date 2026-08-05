@@ -467,7 +467,7 @@ describe("MemoryService / session / turn capture", () => {
     expect(detail.item.body).toContain("User:\nRun pwd in the terminal.");
     expect(detail.item.body).toContain("Tool calls:\n- terminal_bash");
     expect(detail.item.body).toContain("Agent:\nThe command completed.");
-    expect(detail.item.tags).toEqual(expect.arrayContaining(["shell", "terminal"]));
+    expect(detail.item.tags).toEqual(expect.arrayContaining(["shell", "terminal", "agent-source", "memmy-agent"]));
     expect(detail.item.tags).not.toContain("trace");
     expect(detail.item.tags).not.toContain("turn");
     expect(detail.item.tags).not.toContain("memmy");
@@ -551,6 +551,11 @@ describe("MemoryService / session / turn capture", () => {
     expect(db.db.prepare(
       `SELECT agent_id FROM memories WHERE id = ?`
     ).get(added.id)).toEqual({ agent_id: "unknown" });
+    const addedTags = db.db.prepare(
+      `SELECT tags_json, info_json FROM memories WHERE id = ?`
+    ).get(added.id) as { tags_json: string; info_json: string };
+    expect(JSON.parse(addedTags.tags_json)).not.toContain("agent-source");
+    expect(JSON.parse(addedTags.info_json)).toMatchObject({ source: "unknown" });
     expect(db.db.prepare(
       `SELECT tool_name, source_agent FROM api_logs ORDER BY called_at DESC, id DESC`
     ).all()).toEqual([
@@ -584,16 +589,20 @@ describe("MemoryService / session / turn capture", () => {
     });
 
     const inserted = db.db.prepare(
-      `SELECT memory_value, info_json
+      `SELECT memory_value, agent_id, tags_json, info_json
        FROM memories
        WHERE id = ?`
-    ).get(added.id) as { memory_value: string; info_json: string };
+    ).get(added.id) as { memory_value: string; agent_id: string; tags_json: string; info_json: string };
     expect(inserted.memory_value).toBe("The user prefers dev-jiang for this project.");
     expect(inserted.memory_value).not.toContain("Historical User");
     expect(inserted.memory_value).not.toContain("current_user_request");
+    expect(inserted.agent_id).toBe("codex");
+    expect(JSON.parse(inserted.tags_json)).toEqual(expect.arrayContaining(["agent-source", "codex"]));
     expect(JSON.parse(inserted.info_json)).toMatchObject({
+      source: "codex",
       title: "Project branch preference",
-      summary: "The user prefers dev-jiang for this project."
+      summary: "The user prefers dev-jiang for this project.",
+      tags: expect.arrayContaining(["agent-source", "codex"])
     });
 
     db.close();

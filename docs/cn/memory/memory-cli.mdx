@@ -8,12 +8,17 @@ icon: Terminal
 ```bash
 memmy-memory init
 memmy-memory health
+memmy-memory doctor
+memmy-memory namespace current
+memmy-memory stats --workspace
 memmy-memory search "项目里的记忆策略"
 memmy-memory add "这是一条需要保存的知识"
 memmy-memory get <id>
 memmy-memory delete <id>
 ```
 
-默认连接 `http://127.0.0.1:18960`。可用 `--url`、`--token`、`--config`、`--source`、`--user-id` 指定目标服务、认证、调用来源和用户命名空间。
+默认连接 `http://127.0.0.1:18960`。可用 `--url`、`--token`、`--config`、`--source`、`--user-id`、`--project-id`、`--workspace-id`、`--workspace-path` 指定目标服务、认证、调用来源和命名空间。除非传入 `--no-workspace`，CLI 会自动发现最近的项目根目录并作为 workspace namespace 发送。
+
+`doctor` 会检查服务健康、记忆演化、未知 Agent 来源、缺失 workspace 绑定和跨 workspace 泄漏风险；`stats --workspace` 只返回当前 workspace 的层级与队列统计。
 
 另支持 `reload-config`、`session open/close`、`turn start/complete` 和 `raw` 调用。

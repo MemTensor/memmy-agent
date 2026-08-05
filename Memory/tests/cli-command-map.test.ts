@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -354,6 +354,81 @@ describe("memmy CLI command map", () => {
     expect(requests[0]?.headers["x-memmy-user-id"]).toBe("user_cli_1");
   });
 
+  it("sends the nearest project root as the default workspace namespace header", async () => {
+    const root = mkdtempSync(join(tmpdir(), "memmy-cli-workspace-"));
+    roots.push(root);
+    writeFileSync(join(root, "package.json"), "{}");
+    const nested = join(root, "src");
+    const previousCwd = process.cwd();
+    mkdirSync(nested, { recursive: true });
+    process.chdir(nested);
+    try {
+      const { requests } = await runMappedCommand(["search", "test failures"]);
+      expect(requests[0]?.headers["x-memmy-workspace-path"]).toBe(root);
+    } finally {
+      process.chdir(previousCwd);
+    }
+  });
+
+  it("sends explicit project and workspace namespace headers", async () => {
+    const { requests } = await runMappedCommand([
+      "search", "test failures",
+      "--project-id", "project-alpha",
+      "--workspace-id", "workspace-alpha",
+      "--workspace-path", "/work/project-alpha"
+    ]);
+
+    expect(requests[0]?.headers["x-memmy-project-id"]).toBe("project-alpha");
+    expect(requests[0]?.headers["x-memmy-workspace-id"]).toBe("workspace-alpha");
+    expect(requests[0]?.headers["x-memmy-workspace-path"]).toBe("/work/project-alpha");
+  });
+
+  it("can disable automatic workspace namespace headers", async () => {
+    const { requests } = await runMappedCommand([
+      "search", "test failures",
+      "--no-workspace"
+    ]);
+
+    expect(requests[0]?.headers["x-memmy-project-id"]).toBeUndefined();
+    expect(requests[0]?.headers["x-memmy-workspace-id"]).toBeUndefined();
+    expect(requests[0]?.headers["x-memmy-workspace-path"]).toBeUndefined();
+  });
+
+  it("reports the current workspace namespace without an HTTP call", async () => {
+    const root = mkdtempSync(join(tmpdir(), "memmy-cli-namespace-"));
+    roots.push(root);
+    writeFileSync(join(root, "package.json"), "{}");
+    const previousCwd = process.cwd();
+    process.chdir(root);
+    try {
+      await expect(runCommand({ argv: ["namespace", "current", "--source", "codex"] })).resolves.toMatchObject({
+        source: "codex",
+        workspacePath: root,
+        scoped: true
+      });
+    } finally {
+      process.chdir(previousCwd);
+    }
+  });
+
+  it("maps workspace stats to the scoped overview endpoint", async () => {
+    const { requests } = await runMappedCommand(["stats", "--workspace", "--workspace-id", "workspace-alpha"]);
+    expect(requests[0]?.method).toBe("GET");
+    expect(requests[0]?.url).toBe(`${baseUrl}/api/v1/panel/overview`);
+    expect(requests[0]?.headers["x-memmy-workspace-id"]).toBe("workspace-alpha");
+  });
+
+  it("runs doctor health, audit, and evolution checks", async () => {
+    const requests: CapturedRequest[] = [];
+    const result = await runCommand({ argv: ["doctor", "--url", baseUrl, "--no-workspace"], fetch: mockFetch(requests) });
+    expect(requests.map((request) => new URL(request.url).pathname)).toEqual([
+      "/api/v1/health",
+      "/api/v1/panel/namespace-audit",
+      "/api/v1/panel/evolution"
+    ]);
+    expect(result).toMatchObject({ checks: { service: "ok", workspaceIsolation: "ok" } });
+  });
+
   it("sends source in the request body for CLI memory commands", async () => {
     const { requests } = await runMappedCommand([
       "turn", "start", "test failures",
@@ -513,7 +588,11 @@ function mockFetch(requests: CapturedRequest[]): typeof fetch {
       ? JSON.parse(init.body) as unknown
       : undefined;
     requests.push({ method, url, headers, body });
-    return new Response(JSON.stringify({ ok: true }), {
+    const path = new URL(url).pathname;
+    const response = path === "/api/v1/panel/namespace-audit"
+      ? { summary: { crossWorkspaceRisk: 0, unknownSource: 0, missingAgentSourceTag: 0 } }
+      : { ok: true };
+    return new Response(JSON.stringify(response), {
       status: 200,
       headers: {
         "content-type": "application/json"

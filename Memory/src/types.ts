@@ -151,6 +151,7 @@ export interface MemoryFilter {
   tenantId?: string;
   userId?: string;
   projectId?: string;
+  workspaceId?: string;
   sessionId?: string;
   conversationId?: string;
   agentId?: string;

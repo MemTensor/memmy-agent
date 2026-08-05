@@ -188,6 +188,9 @@ providers:
 ```bash
 memmy-memory init                          # 写入 Memory 配置，并按需为各 Agent 安装 Skill
 memmy-memory health
+memmy-memory doctor
+memmy-memory namespace current
+memmy-memory stats --workspace
 memmy-memory search "项目里的记忆策略"
 memmy-memory add "这是一条需要保存的知识"
 memmy-memory get <id>

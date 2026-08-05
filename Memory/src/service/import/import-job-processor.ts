@@ -204,7 +204,7 @@ export class ImportJobProcessor {
       return { upsert, changeSeq };
     });
     const inserted = persisted.upsert.memory;
-    if (persisted.upsert.created && !d.isAgentSourceImportMemoryAdd(request)) {
+    if (persisted.upsert.created && layer === "L1" && !d.isAgentSourceImportMemoryAdd(request)) {
       d.enqueueJob({ jobType: "episode_idle_close", userId: inserted.userId, sessionId: inserted.sessionId,
         dedupeKey: `episode_idle_close:memory.add:${inserted.id}`,
         payload: { triggerMemoryId: inserted.id, triggerSource: "memory.add", triggeredAt: receivedAt }, createdAt: receivedAt });
@@ -319,7 +319,11 @@ export class ImportJobProcessor {
 
 export function memoryHasImportPipeline(memory: MemoryRow): boolean {
   const algorithm = stringFromRecord(memory.properties.internal_info, "plugin_algorithm");
-  return algorithm?.startsWith("memory.add.import_async.") === true || memory.tags.some((tag) => tag.trim().toLowerCase() === "agent-source");
+  const provenance = isRecord(memory.properties.internal_info.provenance)
+    ? memory.properties.internal_info.provenance
+    : {};
+  const adapterId = stringFromRecord(provenance, "adapterId");
+  return algorithm?.startsWith("memory.add.import_async.") === true || adapterId?.startsWith("agent-source:") === true;
 }
 
 export function memoryNeedsImportSummary(memory: MemoryRow): boolean {

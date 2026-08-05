@@ -153,6 +153,7 @@ export class WorldModelPipeline {
         profileId: source ? profileIdFromMemory(source) : undefined,
         layer: "L3",
         kind: "world_model",
+        lifecycleStatus: "candidate",
         memoryType: "LongTermMemory",
         key: draft.key,
         value: draft.body,

@@ -1,7 +1,7 @@
 import type { MemoryDetailItem, MemoryProcessingRecord, MemoryRow } from "../../types.js";
 import { kindFromMemory } from "../../storage/repositories.js";
 import { policyMetaFromMemory, skillMetaFromMemory, traceMetaFromMemory, worldModelMetaFromMemory } from "../../algorithm/plugin-algorithms.js";
-import { panelSourceForMemory, panelTagsForMemory } from "./panel.js";
+import { panelNamespaceForMemory, panelSourceForMemory, panelTagsForMemory } from "./panel.js";
 import { isRecord } from "../../utils/json.js";
 import { firstLine } from "../../utils/text.js";
 
@@ -21,7 +21,7 @@ export function detailFromMemory(memory: MemoryRow, processing?: MemoryProcessin
     supersession: supersedesMemoryIds.length || supersededByMemoryId
       ? { supersedesMemoryIds, supersededByMemoryId, reason: supersessionReason }
       : undefined,
-    metadata: { source: panelSourceForMemory(memory), info: memory.info, properties: memory.properties } };
+    metadata: { source: panelSourceForMemory(memory), namespace: panelNamespaceForMemory(memory), info: memory.info, properties: memory.properties } };
 }
 
 export function detailTitleForMemory(memory: MemoryRow): string {
