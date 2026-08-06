@@ -1,5 +1,5 @@
 /** Connect channel modal module. */
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import type { ChannelProvider, ConnectChannelInput, ConnectChannelResponse } from "@memmy/local-api-contracts";
 import type { ChannelsClient } from "../api/channels-client.js";
@@ -7,6 +7,7 @@ import type { IntegrationConnection } from "../integrations/connection-state.js"
 import { IntegrationLogoBadge, type IntegrationMeta } from "../integrations/integration-meta.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { openExternalUrl } from "../utils/open-url.js";
+import { TOOL_CONNECTION_CANCELLED_ERROR_CODE } from "./connect-integration-modal.js";
 import {
   deriveChannelConnectResponseAfterConnectionRefresh,
   deriveChannelPhaseAfterConnectionRefresh,
@@ -111,12 +112,16 @@ export function ConnectChannelModal(props: ConnectChannelModalProps) {
   const [credentials, setCredentials] = useState<Record<string, string>>({});
   const [feishuSetupMethod, setFeishuSetupMethod] = useState<FeishuSetupMethod>("scan");
   const [errorMessage, setErrorMessage] = useState("");
+  const inFlightConnectRef = useRef(false);
+  const phaseRef = useRef(phase);
+  phaseRef.current = phase;
 
   useEffect(() => {
     setPhase(deriveInitialChannelPhase(props.connection, props.forcedPhase, props.forcedConnectResponse));
     setActiveConnection(props.connection);
     setConnectResponse(props.forcedConnectResponse);
     setErrorMessage("");
+    inFlightConnectRef.current = false;
   }, [props.open, props.channel?.slug, props.forcedPhase, props.forcedConnectResponse]);
 
   useEffect(() => {
@@ -133,6 +138,7 @@ export function ConnectChannelModal(props: ConnectChannelModalProps) {
     if (nextPhase) {
       setPhase(nextPhase);
       if (nextPhase === "connected" || nextPhase === "error") {
+        inFlightConnectRef.current = false;
         setErrorMessage("");
       }
     }
@@ -148,6 +154,17 @@ export function ConnectChannelModal(props: ConnectChannelModalProps) {
     }
   }, [props.open, props.channel?.slug]);
 
+  const handleClose = useCallback(() => {
+    const currentPhase = phaseRef.current;
+    const shouldReportCancel =
+      inFlightConnectRef.current && (currentPhase === "starting" || currentPhase === "pendingQr");
+    if (shouldReportCancel && provider) {
+      inFlightConnectRef.current = false;
+      void reportChannelConnectCancelled(props.client, provider);
+    }
+    props.onClose();
+  }, [props, provider]);
+
   useEffect(() => {
     if (!props.open) {
       return undefined;
@@ -155,13 +172,13 @@ export function ConnectChannelModal(props: ConnectChannelModalProps) {
 
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        props.onClose();
+        handleClose();
       }
     };
 
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [props]);
+  }, [handleClose, props.open]);
 
   const handleConnect = useCallback(async () => {
     if (!props.channel || !provider) {
@@ -182,6 +199,7 @@ export function ConnectChannelModal(props: ConnectChannelModalProps) {
       return;
     }
 
+    inFlightConnectRef.current = true;
     setPhase("starting");
     setErrorMessage("");
 
@@ -193,9 +211,13 @@ export function ConnectChannelModal(props: ConnectChannelModalProps) {
         setPhase,
         setConnectResponse,
         setActiveConnection,
-        onChanged: props.onChanged
+        onChanged: props.onChanged,
+        onTerminalOutcome: () => {
+          inFlightConnectRef.current = false;
+        }
       });
     } catch (error) {
+      inFlightConnectRef.current = false;
       setErrorMessage(toErrorMessage(error));
       setPhase("error");
     }
@@ -206,6 +228,7 @@ export function ConnectChannelModal(props: ConnectChannelModalProps) {
       return;
     }
 
+    inFlightConnectRef.current = true;
     setPhase("starting");
     setErrorMessage("");
 
@@ -217,9 +240,13 @@ export function ConnectChannelModal(props: ConnectChannelModalProps) {
         setPhase,
         setConnectResponse,
         setActiveConnection,
-        onChanged: props.onChanged
+        onChanged: props.onChanged,
+        onTerminalOutcome: () => {
+          inFlightConnectRef.current = false;
+        }
       });
     } catch (error) {
+      inFlightConnectRef.current = false;
       setErrorMessage(toErrorMessage(error));
       setPhase("error");
     }
@@ -230,6 +257,7 @@ export function ConnectChannelModal(props: ConnectChannelModalProps) {
       return;
     }
 
+    inFlightConnectRef.current = false;
     setPhase("disconnecting");
     setErrorMessage("");
 
@@ -252,7 +280,7 @@ export function ConnectChannelModal(props: ConnectChannelModalProps) {
   const body = (
     <div
       className="fixed inset-0 z-[9999] bg-black/30 backdrop-blur-sm flex items-center justify-center p-4"
-      onMouseDown={props.onClose}
+      onMouseDown={handleClose}
     >
       <div
         role="dialog"
@@ -281,7 +309,7 @@ export function ConnectChannelModal(props: ConnectChannelModalProps) {
             <button
               type="button"
               className="p-1 text-stone-400 hover:text-stone-900 transition-colors rounded-lg hover:bg-stone-100 flex-shrink-0"
-              onClick={props.onClose}
+              onClick={handleClose}
               aria-label={t("common.close")}
             >
               <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
@@ -306,7 +334,7 @@ export function ConnectChannelModal(props: ConnectChannelModalProps) {
             onConnect: handleConnect,
             onPoll: handlePoll,
             onDisconnect: handleDisconnect,
-            onClose: props.onClose,
+            onClose: handleClose,
             onDismiss: () => {
               setErrorMessage("");
               setPhase("idle");
@@ -756,6 +784,25 @@ function QrCodePreview(props: { channel: IntegrationMeta; qrCodeDataUrl?: string
 }
 
 /**
+ * Best-effort analytics when the user closes during QR / starting connect.
+ */
+export async function reportChannelConnectCancelled(
+  client: Pick<ChannelsClient, "reportConnectionEvent">,
+  toolkit: ChannelProvider
+): Promise<void> {
+  try {
+    await client.reportConnectionEvent({
+      surface: "channel",
+      toolkit,
+      event: "failed",
+      errorCode: TOOL_CONNECTION_CANCELLED_ERROR_CODE
+    });
+  } catch (error) {
+    console.warn("[tools] Failed to report channel connection cancel analytics:", error);
+  }
+}
+
+/**
  * Applies the backend connection response to the modal state.
  *
  * @param input the connection response and state setters.
@@ -767,10 +814,12 @@ function applyConnectResponse(input: {
   setConnectResponse: (response: ConnectChannelResponse | undefined) => void;
   setActiveConnection: (connection: IntegrationConnection | undefined) => void;
   onChanged: () => void;
+  onTerminalOutcome?: () => void;
 }) {
   input.setConnectResponse(input.response);
 
   if (input.response.status === "connected") {
+    input.onTerminalOutcome?.();
     input.setActiveConnection({
       id: input.response.connectionId,
       toolkit: input.provider,
@@ -797,10 +846,12 @@ function applyConnectResponse(input: {
   }
 
   if (input.response.status === "unsupported") {
+    input.onTerminalOutcome?.();
     input.setPhase("unsupported");
     return;
   }
 
+  input.onTerminalOutcome?.();
   input.setPhase(input.response.status === "error" || input.response.status === "expired" ? "error" : "idle");
 }
 

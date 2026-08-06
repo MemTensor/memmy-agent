@@ -129,9 +129,16 @@ export function ConnectIntegrationModal(props: ConnectIntegrationModalProps) {
       }
     });
 
-    if (!isCurrentFlow() || result.cancelled) {
+    if (result.cancelled) {
+      void reportIntegrationConnectOutcome(props.client, props.integration.slug, result);
       return;
     }
+
+    if (!isCurrentFlow()) {
+      return;
+    }
+
+    void reportIntegrationConnectOutcome(props.client, props.integration.slug, result);
 
     if (result.phase === "connected" && result.connection) {
       setActiveConnection(result.connection);
@@ -272,6 +279,66 @@ function deriveInitialModalPhase(connection: IntegrationConnection | undefined, 
   }
 
   return "idle";
+}
+
+/** error_code when the user closes / aborts during QR or OAuth. */
+export const TOOL_CONNECTION_CANCELLED_ERROR_CODE = "cancelled";
+
+/**
+ * Best-effort analytics report for OAuth connect outcomes.
+ * Cancelled mid-flow → failed + error_code=cancelled. Idle diagnostic exits are skipped.
+ */
+export async function reportIntegrationConnectOutcome(
+  client: Pick<IntegrationsClient, "reportConnectionEvent">,
+  toolkit: string,
+  result: IntegrationConnectFlowResult
+): Promise<void> {
+  if (result.phase === "idle" && !result.cancelled) {
+    return;
+  }
+
+  try {
+    if (result.cancelled) {
+      await client.reportConnectionEvent({
+        surface: "integration",
+        toolkit,
+        event: "failed",
+        errorCode: TOOL_CONNECTION_CANCELLED_ERROR_CODE
+      });
+      return;
+    }
+
+    if (result.phase === "connected") {
+      await client.reportConnectionEvent({
+        surface: "integration",
+        toolkit,
+        event: "connected"
+      });
+      return;
+    }
+
+    if (result.phase === "error") {
+      await client.reportConnectionEvent({
+        surface: "integration",
+        toolkit,
+        event: "failed",
+        errorCode: toAnalyticsErrorCode(result.error)
+      });
+    }
+  } catch (error) {
+    console.warn("[tools] Failed to report integration connection analytics:", error);
+  }
+}
+
+function toAnalyticsErrorCode(error: unknown): string | undefined {
+  if (error instanceof Error) {
+    const message = error.message.trim();
+    return message ? message.slice(0, 64) : undefined;
+  }
+  if (typeof error === "string" && error.trim()) {
+    return error.trim().slice(0, 64);
+  }
+  return undefined;
 }
 
 /**

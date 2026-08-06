@@ -30,6 +30,7 @@ import {
   resolveLoggedInAnalyticsUserId,
 } from "../analytics/agent-source-analytics.js";
 import { createMemoryDesktopAddAnalytics } from "../analytics/memory-add-analytics.js";
+import { createToolConnectionAnalytics } from "../analytics/tool-connection-analytics.js";
 import { createAgentSourceService, type AgentSourceService } from "./agent-source-service.js";
 import { createAgentSourceAutoInjectService, type AgentSourceAutoInjectService } from "./agent-source-auto-inject-service.js";
 import { createBuiltinAgentSourceRegistry } from "./builtin-agent-source-registry.js";
@@ -178,6 +179,10 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       getUserMode: resolveAnalyticsUserMode,
     }),
   });
+  const toolConnectionAnalytics = createToolConnectionAnalytics({
+    getUserId: resolveAnalyticsUserId,
+    getUserMode: resolveAnalyticsUserMode,
+  });
 
   return {
     memoryClient: options.memoryClient,
@@ -199,11 +204,13 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
     }),
     integrations: createIntegrationService({
       cloudClient: options.cloudClient,
-      composioMachineTokenRepository: options.appStateStore.repositories.composioMachineToken
+      composioMachineTokenRepository: options.appStateStore.repositories.composioMachineToken,
+      toolConnectionAnalytics,
     }),
     channels: createChannelService({
       memmyConfigWriter,
-      memmyAgentAdminClient
+      memmyAgentAdminClient,
+      toolConnectionAnalytics,
     }),
     localData: createLocalDataService({
       localDataStore: options.appStateStore.localDataStore

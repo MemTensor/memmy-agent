@@ -4,6 +4,7 @@ import {
   ChannelDefinitionsResponseSchema,
   ConnectChannelResponseSchema,
   OkResponseSchema,
+  ReportIntegrationConnectionEventInputSchema,
   type ChannelConnectionsResponse,
   type ChannelDefinitionsResponse,
   type ChannelProvider,
@@ -11,9 +12,14 @@ import {
   type ChannelStatus,
   type ConnectChannelInput,
   type ConnectChannelResponse,
-  type OkResponse
+  type OkResponse,
+  type ReportIntegrationConnectionEventInput
 } from "@memmy/local-api-contracts";
 import type { MemmyAgentAdminClient } from "../adapters/outbound/memmy-agent-admin-client/index.js";
+import {
+  createToolConnectionAnalytics,
+  type ToolConnectionAnalytics,
+} from "../analytics/tool-connection-analytics.js";
 import type { MemmyConfigWriter } from "../infrastructure/memmy-config/index.js";
 import { requireNonEmptyString } from "../shared/input-validation.js";
 
@@ -148,6 +154,7 @@ export interface ChannelService {
   connect(provider: ChannelProvider, input: ConnectChannelInput): Promise<ConnectChannelResponse>;
   pollConnect(provider: ChannelProvider, pollToken: string): Promise<ConnectChannelResponse>;
   disconnect(provider: ChannelProvider): Promise<OkResponse>;
+  reportConnectionEvent(input: ReportIntegrationConnectionEventInput): Promise<OkResponse>;
 }
 
 export interface CreateChannelServiceOptions {
@@ -155,10 +162,14 @@ export interface CreateChannelServiceOptions {
   memmyConfigWriter: Pick<MemmyConfigWriter, "patchChannelConfig">;
   /** Memmy agent admin client. */
   memmyAgentAdminClient: MemmyAgentAdminClient;
+  /** Tool connection analytics. */
+  toolConnectionAnalytics?: ToolConnectionAnalytics;
 }
 
 /** Creates create channel service. */
 export function createChannelService(options: CreateChannelServiceOptions): ChannelService {
+  const toolConnectionAnalytics = options.toolConnectionAnalytics ?? createToolConnectionAnalytics();
+
   return {
     async listDefinitions() {
       return CHANNEL_DEFINITIONS;
@@ -169,73 +180,182 @@ export function createChannelService(options: CreateChannelServiceOptions): Chan
     },
 
     async connect(provider, input) {
-      if (provider === "wechat") {
-        await options.memmyConfigWriter.patchChannelConfig("weixin", {
-          enabled: true,
-          appId: input.appId?.trim() || WEIXIN_DEFAULT_APP_ID,
-          allowFrom: ["*"]
-        });
-        const response = await options.memmyAgentAdminClient.startWeixinLogin();
-        return parseConnectResponse(provider, response.status, response);
-      }
+      try {
+        if (provider === "wechat") {
+          await options.memmyConfigWriter.patchChannelConfig("weixin", {
+            enabled: true,
+            appId: input.appId?.trim() || WEIXIN_DEFAULT_APP_ID,
+            allowFrom: ["*"]
+          });
+          const response = await options.memmyAgentAdminClient.startWeixinLogin();
+          return trackChannelConnectResponse(
+            toolConnectionAnalytics,
+            provider,
+            parseConnectResponse(provider, response.status, response)
+          );
+        }
 
-      if (provider === "feishu" && !input.appId && !input.appSecret) {
-        const response = await options.memmyAgentAdminClient.startFeishuLogin();
-        return parseConnectResponse(provider, response.status, response);
-      }
+        if (provider === "feishu" && !input.appId && !input.appSecret) {
+          const response = await options.memmyAgentAdminClient.startFeishuLogin();
+          return trackChannelConnectResponse(
+            toolConnectionAnalytics,
+            provider,
+            parseConnectResponse(provider, response.status, response)
+          );
+        }
 
-      const formConnect = FORM_CHANNEL_CONNECT[provider];
-      if (formConnect) {
-        await options.memmyConfigWriter.patchChannelConfig(formConnect.runtimeChannel, formConnect.buildRuntimePatch(input));
-        const result = await options.memmyAgentAdminClient.configureChannel(formConnect.runtimeChannel);
-        return parseConnectResponse(provider, result.status);
-      }
+        const formConnect = FORM_CHANNEL_CONNECT[provider];
+        if (formConnect) {
+          await options.memmyConfigWriter.patchChannelConfig(formConnect.runtimeChannel, formConnect.buildRuntimePatch(input));
+          const result = await options.memmyAgentAdminClient.configureChannel(formConnect.runtimeChannel);
+          return trackChannelConnectResponse(
+            toolConnectionAnalytics,
+            provider,
+            parseConnectResponse(provider, result.status)
+          );
+        }
 
-      const localConnect = LOCAL_CHANNEL_CONNECT[provider];
-      if (localConnect) {
-        await options.memmyConfigWriter.patchChannelConfig(localConnect.runtimeChannel, localConnect.runtimePatch);
-        const result = await options.memmyAgentAdminClient.configureChannel(localConnect.runtimeChannel);
-        return parseConnectResponse(provider, result.status);
-      }
+        const localConnect = LOCAL_CHANNEL_CONNECT[provider];
+        if (localConnect) {
+          await options.memmyConfigWriter.patchChannelConfig(localConnect.runtimeChannel, localConnect.runtimePatch);
+          const result = await options.memmyAgentAdminClient.configureChannel(localConnect.runtimeChannel);
+          return trackChannelConnectResponse(
+            toolConnectionAnalytics,
+            provider,
+            parseConnectResponse(provider, result.status)
+          );
+        }
 
-      return parseConnectResponse(provider, "unsupported");
+        return trackChannelConnectResponse(
+          toolConnectionAnalytics,
+          provider,
+          parseConnectResponse(provider, "unsupported")
+        );
+      } catch (error) {
+        trackChannelConnectionFailed(toolConnectionAnalytics, provider, error);
+        throw error;
+      }
     },
 
     async pollConnect(provider, pollToken) {
-      const normalizedPollToken = requireNonEmptyString(pollToken, "pollToken");
-      if (provider === "feishu") {
-        const response = await options.memmyAgentAdminClient.pollFeishuLogin(normalizedPollToken);
-        if (response.status !== "connected") {
-          return parseConnectResponse(provider, response.status, response);
+      try {
+        const normalizedPollToken = requireNonEmptyString(pollToken, "pollToken");
+        if (provider === "feishu") {
+          const response = await options.memmyAgentAdminClient.pollFeishuLogin(normalizedPollToken);
+          if (response.status !== "connected") {
+            return trackChannelConnectResponse(
+              toolConnectionAnalytics,
+              provider,
+              parseConnectResponse(provider, response.status, response)
+            );
+          }
+          const appId = requireNonEmptyString(response.appId ?? "", "appId");
+          const appSecret = requireNonEmptyString(response.appSecret ?? "", "appSecret");
+          await options.memmyConfigWriter.patchChannelConfig(
+            "feishu",
+            buildFeishuRuntimePatch({ appId, appSecret }, response.domain)
+          );
+          const result = await options.memmyAgentAdminClient.configureChannel("feishu");
+          return trackChannelConnectResponse(
+            toolConnectionAnalytics,
+            provider,
+            parseConnectResponse(provider, result.status)
+          );
         }
-        const appId = requireNonEmptyString(response.appId ?? "", "appId");
-        const appSecret = requireNonEmptyString(response.appSecret ?? "", "appSecret");
-        await options.memmyConfigWriter.patchChannelConfig(
-          "feishu",
-          buildFeishuRuntimePatch({ appId, appSecret }, response.domain)
+
+        if (provider !== "wechat") {
+          return trackChannelConnectResponse(
+            toolConnectionAnalytics,
+            provider,
+            parseConnectResponse(provider, "unsupported")
+          );
+        }
+
+        const response = await options.memmyAgentAdminClient.pollWeixinLogin(normalizedPollToken);
+        return trackChannelConnectResponse(
+          toolConnectionAnalytics,
+          provider,
+          parseConnectResponse(provider, response.status, response)
         );
-        const result = await options.memmyAgentAdminClient.configureChannel("feishu");
-        return parseConnectResponse(provider, result.status);
+      } catch (error) {
+        trackChannelConnectionFailed(toolConnectionAnalytics, provider, error);
+        throw error;
       }
-
-      if (provider !== "wechat") {
-        return parseConnectResponse(provider, "unsupported");
-      }
-
-      const response = await options.memmyAgentAdminClient.pollWeixinLogin(normalizedPollToken);
-      return parseConnectResponse(provider, response.status, response);
     },
 
     async disconnect(provider) {
-      const runtimeChannel = PRODUCT_TO_RUNTIME[provider];
-      if (provider === "wechat" || FORM_CHANNEL_CONNECT[provider] || LOCAL_CHANNEL_CONNECT[provider]) {
-        await options.memmyConfigWriter.patchChannelConfig(runtimeChannel, { enabled: false });
-        await options.memmyAgentAdminClient.stopChannel(runtimeChannel);
-      }
+      try {
+        const runtimeChannel = PRODUCT_TO_RUNTIME[provider];
+        if (provider === "wechat" || FORM_CHANNEL_CONNECT[provider] || LOCAL_CHANNEL_CONNECT[provider]) {
+          await options.memmyConfigWriter.patchChannelConfig(runtimeChannel, { enabled: false });
+          await options.memmyAgentAdminClient.stopChannel(runtimeChannel);
+        }
 
+        toolConnectionAnalytics.trackConnection({
+          surface: "channel",
+          toolkit: provider,
+          event: "disconnected",
+        });
+        return OkResponseSchema.parse({ ok: true });
+      } catch (error) {
+        trackChannelConnectionFailed(toolConnectionAnalytics, provider, error);
+        throw error;
+      }
+    },
+
+    async reportConnectionEvent(input) {
+      const parsed = ReportIntegrationConnectionEventInputSchema.parse(input);
+      if (parsed.surface !== "channel") {
+        throw new Error(`channel reportConnectionEvent requires surface=channel, got ${parsed.surface}`);
+      }
+      toolConnectionAnalytics.trackConnection({
+        surface: parsed.surface,
+        toolkit: parsed.toolkit,
+        event: parsed.event,
+        errorCode: parsed.errorCode,
+      });
       return OkResponseSchema.parse({ ok: true });
     }
   };
+}
+
+function trackChannelConnectResponse(
+  analytics: ToolConnectionAnalytics,
+  provider: ChannelProvider | string,
+  response: ConnectChannelResponse
+): ConnectChannelResponse {
+  if (response.status === "connected") {
+    analytics.trackConnection({
+      surface: "channel",
+      toolkit: provider,
+      event: "connected",
+    });
+  } else if (
+    response.status === "error" ||
+    response.status === "expired" ||
+    response.status === "unsupported"
+  ) {
+    analytics.trackConnection({
+      surface: "channel",
+      toolkit: provider,
+      event: "failed",
+      errorCode: response.status,
+    });
+  }
+  return response;
+}
+
+function trackChannelConnectionFailed(
+  analytics: ToolConnectionAnalytics,
+  provider: ChannelProvider | string,
+  error: unknown
+): void {
+  analytics.trackConnection({
+    surface: "channel",
+    toolkit: provider,
+    event: "failed",
+    error,
+  });
 }
 
 function buildFeishuRuntimePatch(

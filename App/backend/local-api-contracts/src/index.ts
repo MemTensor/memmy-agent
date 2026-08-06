@@ -1058,6 +1058,20 @@ export const IntegrationConnectionsResponseSchema = z.object({
 });
 export type IntegrationConnectionsResponse = z.infer<typeof IntegrationConnectionsResponseSchema>;
 
+/**
+ * Schema for UI-reported tool connection outcomes (integration OAuth end-state,
+ * channel QR/start abandon, etc.). `errorCode=cancelled` means user closed mid-flow.
+ */
+export const ReportIntegrationConnectionEventInputSchema = z.object({
+  surface: z.enum(["channel", "integration"]),
+  toolkit: z.string().min(1),
+  event: z.enum(["connected", "failed"]),
+  errorCode: z.string().min(1).optional()
+});
+export type ReportIntegrationConnectionEventInput = z.infer<
+  typeof ReportIntegrationConnectionEventInputSchema
+>;
+
 /** Schema for execute integration tool input. */
 export const ExecuteIntegrationToolInputSchema = z.object({
     toolSlug: z.string().min(1),

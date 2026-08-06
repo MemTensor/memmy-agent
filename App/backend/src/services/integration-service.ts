@@ -5,13 +5,19 @@ import {
   IntegrationConnectionsResponseSchema,
   IntegrationToolResultSchema,
   OkResponseSchema,
+  ReportIntegrationConnectionEventInputSchema,
   type AuthorizeIntegrationResponse,
   type IntegrationCapabilitiesResponse,
   type IntegrationConnectionsResponse,
   type IntegrationToolResult,
-  type OkResponse
+  type OkResponse,
+  type ReportIntegrationConnectionEventInput
 } from "@memmy/local-api-contracts";
 import type { CloudClient } from "../adapters/outbound/cloud-client/index.js";
+import {
+  createToolConnectionAnalytics,
+  type ToolConnectionAnalytics,
+} from "../analytics/tool-connection-analytics.js";
 import type { ComposioMachineTokenRepository } from "../infrastructure/app-state-store/repositories/composio-machine-token-repo.js";
 import { requireNonEmptyString } from "../shared/input-validation.js";
 
@@ -21,6 +27,7 @@ export interface IntegrationService {
   authorize(slug: string): Promise<AuthorizeIntegrationResponse>;
   listConnections(): Promise<IntegrationConnectionsResponse>;
   deleteConnection(id: string): Promise<OkResponse>;
+  reportConnectionEvent(input: ReportIntegrationConnectionEventInput): Promise<OkResponse>;
   executeRouterTool(toolSlug: string, toolArguments?: Record<string, unknown>): Promise<IntegrationToolResult>;
 }
 
@@ -35,10 +42,13 @@ export interface CreateIntegrationServiceOptions {
     | "executeIntegrationRouterTool"
   >;
   composioMachineTokenRepository: Pick<ComposioMachineTokenRepository, "getOrCreateToken">;
+  toolConnectionAnalytics?: ToolConnectionAnalytics;
 }
 
 /** Creates create integration service. */
 export function createIntegrationService(options: CreateIntegrationServiceOptions): IntegrationService {
+  const toolConnectionAnalytics = options.toolConnectionAnalytics ?? createToolConnectionAnalytics();
+
   return {
     async listCapabilities() {
       const machineComposioToken = options.composioMachineTokenRepository.getOrCreateToken();
@@ -65,13 +75,47 @@ export function createIntegrationService(options: CreateIntegrationServiceOption
     },
 
     async deleteConnection(id) {
-      const machineComposioToken = options.composioMachineTokenRepository.getOrCreateToken();
-      const response = await options.cloudClient.deleteIntegrationConnection({
-        machineComposioToken,
-        id: requireNonEmptyString(id, "id")
-      });
+      const connectionId = requireNonEmptyString(id, "id");
+      const toolkit = await resolveIntegrationToolkit(options, connectionId);
 
-      return OkResponseSchema.parse(response);
+      try {
+        const machineComposioToken = options.composioMachineTokenRepository.getOrCreateToken();
+        const response = await options.cloudClient.deleteIntegrationConnection({
+          machineComposioToken,
+          id: connectionId
+        });
+        const parsed = OkResponseSchema.parse(response);
+        toolConnectionAnalytics.trackConnection({
+          surface: "integration",
+          toolkit: toolkit ?? connectionId,
+          event: "disconnected",
+        });
+        return parsed;
+      } catch (error) {
+        toolConnectionAnalytics.trackConnection({
+          surface: "integration",
+          toolkit: toolkit ?? connectionId,
+          event: "failed",
+          error,
+        });
+        throw error;
+      }
+    },
+
+    async reportConnectionEvent(input) {
+      const parsed = ReportIntegrationConnectionEventInputSchema.parse(input);
+      if (parsed.surface !== "integration") {
+        throw new Error(
+          `integration reportConnectionEvent requires surface=integration, got ${parsed.surface}`,
+        );
+      }
+      toolConnectionAnalytics.trackConnection({
+        surface: parsed.surface,
+        toolkit: parsed.toolkit,
+        event: parsed.event,
+        errorCode: parsed.errorCode,
+      });
+      return OkResponseSchema.parse({ ok: true });
     },
 
     async executeRouterTool(toolSlug, toolArguments) {
@@ -85,4 +129,18 @@ export function createIntegrationService(options: CreateIntegrationServiceOption
       return IntegrationToolResultSchema.parse(response);
     }
   };
+}
+
+async function resolveIntegrationToolkit(
+  options: CreateIntegrationServiceOptions,
+  connectionId: string
+): Promise<string | null> {
+  try {
+    const machineComposioToken = options.composioMachineTokenRepository.getOrCreateToken();
+    const response = await options.cloudClient.listIntegrationConnections({ machineComposioToken });
+    const parsed = IntegrationConnectionsResponseSchema.parse(response);
+    return parsed.connections.find((connection) => connection.id === connectionId)?.toolkit ?? null;
+  } catch {
+    return null;
+  }
 }

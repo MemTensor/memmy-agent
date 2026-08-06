@@ -6,7 +6,11 @@ import type { IntegrationsClient } from "../../api/integrations-client.js";
 import type { IntegrationConnection } from "../../integrations/connection-state.js";
 import type { IntegrationMeta } from "../../integrations/integration-meta.js";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
-import { ConnectIntegrationModal, runIntegrationConnectFlow } from "../connect-integration-modal.js";
+import {
+  ConnectIntegrationModal,
+  reportIntegrationConnectOutcome,
+  runIntegrationConnectFlow
+} from "../connect-integration-modal.js";
 
 const github: IntegrationMeta = {
   slug: "github",
@@ -116,7 +120,8 @@ describe("ConnectIntegrationModal", () => {
         .fn()
         .mockRejectedValueOnce(new Error("temporary network error"))
         .mockResolvedValueOnce({ connections: [{ id: "conn-github", toolkit: "github", status: "ACTIVE" }] }),
-      deleteConnection: vi.fn(async () => undefined)
+      deleteConnection: vi.fn(async () => undefined),
+      reportConnectionEvent: vi.fn(async () => undefined)
     };
 
     const result = await runIntegrationConnectFlow({
@@ -143,7 +148,8 @@ describe("ConnectIntegrationModal", () => {
         controller.abort();
         return { connections: [] };
       }),
-      deleteConnection: vi.fn(async () => undefined)
+      deleteConnection: vi.fn(async () => undefined),
+      reportConnectionEvent: vi.fn(async () => undefined)
     };
 
     const result = await runIntegrationConnectFlow({
@@ -167,7 +173,8 @@ describe("ConnectIntegrationModal", () => {
       authorize: vi.fn(async () => ({ connectUrl: "https://backend.composio.dev/api/v3/s/live", connectionId: "conn-new" })),
       listCapabilities: vi.fn(async () => ({ toolkits: [] })),
       listConnections: vi.fn(async () => ({ connections: [{ id: "conn-old", toolkit: "github", status: "ACTIVE" as const }] })),
-      deleteConnection: vi.fn(async () => undefined)
+      deleteConnection: vi.fn(async () => undefined),
+      reportConnectionEvent: vi.fn(async () => undefined)
     };
 
     const result = await runIntegrationConnectFlow({
@@ -193,7 +200,8 @@ describe("ConnectIntegrationModal", () => {
       }),
       listCapabilities: vi.fn(async () => ({ toolkits: [] })),
       listConnections: vi.fn(async () => ({ connections: [] })),
-      deleteConnection: vi.fn(async () => undefined)
+      deleteConnection: vi.fn(async () => undefined),
+      reportConnectionEvent: vi.fn(async () => undefined)
     };
 
     const result = await runIntegrationConnectFlow({
@@ -221,6 +229,40 @@ describe("ConnectIntegrationModal", () => {
     await client.deleteConnection("conn-github");
 
     expect(client.deleteConnection).toHaveBeenCalledWith("conn-github");
+  });
+
+  it("OAuth connected/failed/cancelled 会上报 connection-events，纯 idle 不上报", async () => {
+    const client = createFlowClient([]);
+
+    await reportIntegrationConnectOutcome(client, "github", {
+      phase: "connected",
+      connection: { id: "conn-github", toolkit: "github", status: "ACTIVE" }
+    });
+    await reportIntegrationConnectOutcome(client, "github", {
+      phase: "error",
+      error: new Error("Connection timed out")
+    });
+    await reportIntegrationConnectOutcome(client, "github", { phase: "idle", cancelled: true });
+    await reportIntegrationConnectOutcome(client, "github", { phase: "idle" });
+
+    expect(client.reportConnectionEvent).toHaveBeenCalledTimes(3);
+    expect(client.reportConnectionEvent).toHaveBeenNthCalledWith(1, {
+      surface: "integration",
+      toolkit: "github",
+      event: "connected"
+    });
+    expect(client.reportConnectionEvent).toHaveBeenNthCalledWith(2, {
+      surface: "integration",
+      toolkit: "github",
+      event: "failed",
+      errorCode: "Connection timed out"
+    });
+    expect(client.reportConnectionEvent).toHaveBeenNthCalledWith(3, {
+      surface: "integration",
+      toolkit: "github",
+      event: "failed",
+      errorCode: "cancelled"
+    });
   });
 
   it("error 相位和 dismiss 文案可渲染", () => {
@@ -358,6 +400,7 @@ function createFlowClient(responses: IntegrationConnection[]): IntegrationsClien
     authorize: vi.fn(async (slug: string) => ({ connectUrl: `https://backend.composio.dev/api/v3/s/${slug}-test`, connectionId: `conn-${slug}` })),
     listCapabilities: vi.fn(async () => ({ toolkits: [] })),
     listConnections: vi.fn(async () => ({ connections: queue.length ? [queue.shift() as IntegrationConnection] : [] })),
-    deleteConnection: vi.fn(async () => undefined)
+    deleteConnection: vi.fn(async () => undefined),
+    reportConnectionEvent: vi.fn(async () => undefined)
   };
 }

@@ -5,7 +5,11 @@ import type { ChannelsClient } from "../../api/channels-client.js";
 import type { IntegrationConnection } from "../../integrations/connection-state.js";
 import type { IntegrationMeta } from "../../integrations/integration-meta.js";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
-import { ConnectChannelModal, shouldRefreshAfterChannelConnectStatus } from "../connect-channel-modal.js";
+import {
+  ConnectChannelModal,
+  reportChannelConnectCancelled,
+  shouldRefreshAfterChannelConnectStatus
+} from "../connect-channel-modal.js";
 
 const baseChannel: IntegrationMeta = {
   slug: "wechat",
@@ -162,6 +166,17 @@ describe("ConnectChannelModal", () => {
     expect(html).not.toContain("disabled=\"\"");
     expect(html).not.toContain("App ID");
   });
+
+  it("QR/starting 中途取消上报 failed + error_code=cancelled", async () => {
+    const client = createChannelsClient();
+    await reportChannelConnectCancelled(client, "wechat");
+    expect(client.reportConnectionEvent).toHaveBeenCalledWith({
+      surface: "channel",
+      toolkit: "wechat",
+      event: "failed",
+      errorCode: "cancelled"
+    });
+  });
 });
 
 function renderModal(
@@ -189,6 +204,7 @@ function createChannelsClient(): ChannelsClient {
     listConnections: vi.fn(async () => ({ connections: [] })),
     connect: vi.fn(async () => ({ status: "connected" as const, connectionId: "channel-test-local" })),
     pollConnect: vi.fn(async () => ({ status: "connected" as const, connectionId: "channel-test-local" })),
-    disconnect: vi.fn(async () => undefined)
+    disconnect: vi.fn(async () => undefined),
+    reportConnectionEvent: vi.fn(async () => undefined)
   };
 }
