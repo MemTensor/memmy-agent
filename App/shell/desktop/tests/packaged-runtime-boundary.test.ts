@@ -9,6 +9,7 @@ const runtimeServicesPath = fileURLToPath(new URL("../src/main/runtime-services.
 const devStartPath = fileURLToPath(new URL("../../../../scripts/dev-start.sh", import.meta.url));
 const devMemorySupervisorPath = fileURLToPath(new URL("../../../../scripts/internal/shared/dev-memory-supervisor.mjs", import.meta.url));
 const clearAllPath = fileURLToPath(new URL("../../../../scripts/clear-all.sh", import.meta.url));
+const clearAllWindowsPath = fileURLToPath(new URL("../../../../scripts/clear-all-windows.ps1", import.meta.url));
 const packageMacPath = fileURLToPath(new URL("../../../../scripts/package-mac.sh", import.meta.url));
 const packageMacDmgPath = fileURLToPath(new URL("../../../../scripts/internal/mac/build-dmg.sh", import.meta.url));
 const prepareEmbeddingModelPath = fileURLToPath(new URL("../../../../scripts/internal/shared/prepare-embedding-model.mjs", import.meta.url));
@@ -967,6 +968,29 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).toContain('"/usr/local/bin/memmy-memory"');
     expect(source).toContain("# Memmy CLI PATH");
     expect(source).toContain("Fully quit and reopen Codex");
+  });
+
+  it("keeps Windows full uninstall scoped to verified Memmy assets", () => {
+    const source = readFileSync(clearAllWindowsPath, "utf8");
+
+    expect(source).toContain("#Requires -Version 5.1");
+    expect(source).toContain('[CmdletBinding(SupportsShouldProcess = $true');
+    expect(source).toContain('$script:NsisGuid = "886615f7-a04c-57ec-a2dd-9161dbe1a7c4"');
+    expect(source).toContain('Join-Path $env:LOCALAPPDATA "Programs\\Memmy"');
+    expect(source).toContain('Join-Path $env:LOCALAPPDATA "Memmy\\launcher"');
+    expect(source).toContain('Join-Path $env:USERPROFILE ".memmy"');
+    expect(source).toContain('Join-Path $env:APPDATA "Memmy"');
+    expect(source).toContain("function Test-IsVerifiedMemmyInstallRoot");
+    expect(source).toContain('Join-Path $normalized "resources\\app.asar"');
+    expect(source).toContain("function Test-WouldContainProtectedPath");
+    expect(source).toContain("function Test-IntersectsProtectedExternalPath");
+    expect(source).toContain("function Remove-DirectoryWithoutFollowingLinks");
+    expect(source).toContain("external-config-database-retained");
+    expect(source).toContain("retained-external-workspace");
+    expect(source).toContain("InstallLocation is shared-looking or contains a protected path");
+    expect(source).toContain("-IncludeMachineScope requires an already elevated PowerShell session");
+    expect(source).toContain("This script can only run on Windows.");
+    expect(source).toContain("Type CLEAR MEMMY to continue");
   });
 
   it("keeps packaged CLI launchers on Memmy.app and ~/.memmy/config.yaml", () => {
