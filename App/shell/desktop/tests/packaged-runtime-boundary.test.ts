@@ -981,7 +981,8 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).toContain('MEMORY_DIR="$ROOT_DIR/Memory"');
     expect(source).toContain("create_memory_runtime_manifest");
     expect(source).toContain("write_desktop_edition_manifest");
-    expect(source).toContain('"signing": "$package_signing"');
+    expect(source).toContain("write-desktop-package-manifest.mjs");
+    expect(source).toContain('"$package_signing"');
     expect(source).toContain("npm run build -w @memmy/memory");
     expect(source).toContain("npm install --workspace @memmy/frontend-desktop --no-package-lock");
     expect(source).toContain('npm ci --prefix "$AGENT_DIR"');
@@ -1226,7 +1227,8 @@ describe("desktop packaged runtime boundaries", () => {
 
     expect(source).toContain("write_desktop_edition_manifest");
     expect(source).toContain("desktop-edition.json");
-    expect(source).toContain('"signing": "$PACKAGE_SIGNING"');
+    expect(source).toContain("write-desktop-package-manifest.mjs");
+    expect(source).toContain('"$PACKAGE_SIGNING"');
     expect(source).toContain('FINAL_EXE="$DESKTOP_DIR/release/Memmy-$DESKTOP_VERSION-win32-$PACKAGE_ARCH-$PACKAGE_EDITION-$PACKAGE_SIGNING.exe"');
     expect(source).toContain('ARTIFACT_NAME="Memmy-$DESKTOP_VERSION-win32-$PACKAGE_ARCH-$PACKAGE_EDITION-$PACKAGE_SIGNING.\\${ext}"');
     expect(source).toContain('BUILDER_ARGS+=(--config.extraMetadata.version="$DESKTOP_VERSION")');
@@ -1235,7 +1237,8 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).not.toContain("mv -f");
   });
 
-  it("bundles the repo-root .env so packaged apps can resolve MEMMY_CLOUD_SERVICE", () => {
+  it("packages only allowlisted cloud service configuration instead of the repo-root .env", () => {
+    const mainSource = readFileSync(mainSourcePath, "utf8");
     const configs = [
       readFileSync(electronBuilderPath, "utf8"),
       readFileSync(unsignedElectronBuilderPath, "utf8"),
@@ -1244,9 +1247,18 @@ describe("desktop packaged runtime boundaries", () => {
     ];
 
     for (const config of configs) {
-      expect(config).toContain("from: ../../../.env");
-      expect(config).toContain("to: .env");
+      expect(config).not.toContain("from: ../../../.env");
+      expect(config).not.toContain("to: .env");
     }
+
+    for (const source of [
+      readFileSync(packageMacDmgPath, "utf8"),
+      readFileSync(packageWinX64Path, "utf8")
+    ]) {
+      expect(source).toContain("write-desktop-package-manifest.mjs");
+    }
+
+    expect(mainSource).toContain("resolveDesktopCloudService(readCurrentDesktopEditionManifest())");
   });
 
   it("points packaged Memory at the bundled local embedding model resources", () => {

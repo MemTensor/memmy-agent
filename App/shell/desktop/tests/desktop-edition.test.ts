@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   desktopRuntimeHomeDirectoryName,
   desktopUserDataDirectoryName,
+  resolveDesktopCloudService,
   resolveDesktopEdition,
   resolveDesktopPackageSigning
 } from "../src/main/desktop-edition.js";
@@ -39,5 +40,14 @@ describe("desktop edition identity", () => {
   it("falls back to the build signing identity when the manifest is absent", () => {
     expect(resolveDesktopPackageSigning(null)).toBe("signed");
     expect(resolveDesktopPackageSigning(JSON.stringify({ signing: "unknown" }), "unsigned")).toBe("unsigned");
+  });
+
+  it("resolves only a non-empty cloud service value from the packaged manifest", () => {
+    expect(resolveDesktopCloudService(JSON.stringify({ cloudService: " https://cloud.example.com " }))).toBe(
+      "https://cloud.example.com",
+    );
+    expect(resolveDesktopCloudService(JSON.stringify({ cloudService: "" }))).toBeNull();
+    expect(resolveDesktopCloudService(JSON.stringify({ cloudService: 42 }))).toBeNull();
+    expect(resolveDesktopCloudService(null)).toBeNull();
   });
 });

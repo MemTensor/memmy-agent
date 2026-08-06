@@ -39,8 +39,6 @@ extraResources:
     to: embedding-models
     filter:
       - "**/*"
-  - from: ../../../.env
-    to: .env
 
 mac:
   icon: build/icon.icns

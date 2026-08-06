@@ -5,6 +5,7 @@ interface DesktopEditionManifest {
   edition?: unknown;
   accountChannel?: unknown;
   signing?: unknown;
+  cloudService?: unknown;
 }
 
 export function resolveDesktopEdition(rawManifest: string | null | undefined, envAccountChannel?: string): DesktopEdition {
@@ -27,6 +28,13 @@ export function resolveDesktopPackageSigning(rawManifest: string | null | undefi
   }
 
   return envPackageSigning?.trim().toLowerCase() === "unsigned" ? "unsigned" : "signed";
+}
+
+export function resolveDesktopCloudService(rawManifest: string | null | undefined): string | null {
+  const manifest = parseDesktopEditionManifest(rawManifest);
+  return typeof manifest?.cloudService === "string" && manifest.cloudService.trim()
+    ? manifest.cloudService.trim()
+    : null;
 }
 
 export function desktopUserDataDirectoryName(edition: DesktopEdition): string {

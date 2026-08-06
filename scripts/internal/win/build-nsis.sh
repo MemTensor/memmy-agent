@@ -276,13 +276,13 @@ write_desktop_edition_manifest() {
       ;;
   esac
 
-  cat > "$DESKTOP_DIR/dist/main/desktop-edition.json" <<EOF
-{
-  "edition": "$edition",
-  "accountChannel": "$account_channel",
-  "signing": "$PACKAGE_SIGNING"
-}
-EOF
+  node \
+    "$(to_node_readable_path "$ROOT_DIR/scripts/internal/shared/write-desktop-package-manifest.mjs")" \
+    "$(to_node_readable_path "$ROOT_DIR/.env")" \
+    "$(to_node_readable_path "$DESKTOP_DIR/dist/main/desktop-edition.json")" \
+    "$edition" \
+    "$account_channel" \
+    "$PACKAGE_SIGNING"
 }
 
 create_memory_runtime_lock() {

@@ -76,6 +76,7 @@ import {
 import {
   desktopRuntimeHomeDirectoryName,
   desktopUserDataDirectoryName,
+  resolveDesktopCloudService,
   resolveDesktopEdition,
   resolveDesktopPackageSigning,
   type DesktopEdition,
@@ -137,7 +138,11 @@ const PET_WINDOW_DRAG_FRAME_MS = 1000 / 60;
 const PET_WINDOW_CLOSE_ACTIVATE_SUPPRESSION_MS = 500;
 const PET_FULLSCREEN_EXIT_CHECK_MS = 50;
 const PET_FULLSCREEN_EXIT_TIMEOUT_MS = 2500;
-loadCloudServiceEnv();
+if (app.isPackaged) {
+  process.env.MEMMY_CLOUD_SERVICE ??= resolveDesktopCloudService(readCurrentDesktopEditionManifest()) ?? undefined;
+} else {
+  loadCloudServiceEnv();
+}
 const UPDATE_MANIFEST_BASE_URL = resolveCloudServiceBaseUrl(process.env.MEMMY_CLOUD_SERVICE);
 const UPDATE_MANIFEST_PATH = "/api/memmy/desktop/latest";
 const DEFAULT_UPDATE_MANIFEST_URL = `${UPDATE_MANIFEST_BASE_URL}${UPDATE_MANIFEST_PATH}`;

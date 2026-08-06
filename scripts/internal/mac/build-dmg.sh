@@ -84,13 +84,12 @@ write_desktop_edition_manifest() {
       ;;
   esac
 
-  cat > "$DESKTOP_DIR/dist/main/desktop-edition.json" <<EOF
-{
-  "edition": "$edition",
-  "accountChannel": "$account_channel",
-  "signing": "$package_signing"
-}
-EOF
+  node "$ROOT_DIR/scripts/internal/shared/write-desktop-package-manifest.mjs" \
+    "$ROOT_DIR/.env" \
+    "$DESKTOP_DIR/dist/main/desktop-edition.json" \
+    "$edition" \
+    "$account_channel" \
+    "$package_signing"
 }
 
 create_cli_launcher() {
