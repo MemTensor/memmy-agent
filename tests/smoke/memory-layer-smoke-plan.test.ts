@@ -65,11 +65,15 @@ describe("memory layer smoke plan", () => {
         rawTurnId: expect.any(String),
         l1MemoryId: expect.any(String)
       });
-      expect(completed.jobs.map((job) => job.jobType)).toContain("embedding");
+      expect(completed.jobs.map((job) => job.jobType)).toContain("trace_summary");
 
-      const worker = await service.runWorkerOnce(20, { namespace });
-      expect(worker.failed).toBe(0);
-      expect(worker.jobs.map((job) => job.jobType)).toContain("embedding");
+      const summaryWorker = await service.runWorkerOnce(20, { namespace });
+      expect(summaryWorker.failed).toBe(0);
+      expect(summaryWorker.jobs.map((job) => job.jobType)).toContain("trace_summary");
+
+      const embeddingWorker = await service.runWorkerOnce(20, { namespace });
+      expect(embeddingWorker.failed).toBe(0);
+      expect(embeddingWorker.jobs.map((job) => job.jobType)).toContain("embedding");
 
       const detail = service.getMemory(completed.l1MemoryId, { namespace });
       expect(detail).toMatchObject({
