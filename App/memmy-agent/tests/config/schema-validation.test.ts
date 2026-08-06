@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { loadConfig, saveConfig } from "../../src/config/loader.js";
+import { ConfigLoadError, loadConfig, saveConfig } from "../../src/config/loader.js";
 import { WebSocketConfig } from "../../src/integrations/channels/websocket.js";
 import { DEFAULT_MAX_TOKENS } from "../../src/token-budget.js";
 import {
@@ -141,14 +141,12 @@ describe("config schema validation", () => {
     expect(fs.readFileSync(file, "utf8")).toBe(contents);
   });
 
-  it("keeps the existing fallback behavior for unrelated invalid sections", () => {
-    const file = configFile("sessionDag:\n  debugLog: \"true\"\n");
-    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  it("fails loudly for invalid unrelated sections without rewriting them", () => {
+    const contents = "sessionDag:\n  debugLog: \"true\"\n";
+    const file = configFile(contents);
 
-    const loaded = loadConfig(file);
-
-    expect(loaded.sessionDag.debugLog).toBe(true);
-    expect(loaded.fileMemory.enabled).toBe(false);
+    expect(() => loadConfig(file)).toThrow(ConfigLoadError);
+    expect(fs.readFileSync(file, "utf8")).toBe(contents);
   });
 
   it("validates AgentDefaults numeric bounds and enums", () => {
