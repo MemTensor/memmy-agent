@@ -472,6 +472,13 @@ describe("HomePage", () => {
     expect(computed.lineHeight).toBe("24px");
     expect(computed.paddingTop).toBe("14px");
     expect(computed.paddingBottom).toBe("14px");
+    // Must stay scrollable if wrapped content briefly lags behind single-line detection.
+    expect(computed.overflowY).toBe("auto");
+  });
+
+  it("resyncs composer height when the draft or conversation chrome changes", () => {
+    const source = readFileSync(homePageSourcePath, "utf8");
+    expect(source).toContain("useLayoutEffect(() => {\n    if (!inputRef.current) {\n      return;\n    }\n    resizeComposerInput(inputRef.current);\n  }, [input, hasActiveConversation]);");
   });
 
   it("applies the composer single-line treatment only while the textarea is one line", () => {
