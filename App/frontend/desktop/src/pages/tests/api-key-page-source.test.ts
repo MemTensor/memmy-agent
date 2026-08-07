@@ -35,6 +35,10 @@ describe("ApiKeyPage source", () => {
     expect(source).not.toContain("testImageGenConnection");
     expect(source).not.toContain("optionalModelMissingWarning");
     expect(source).not.toContain("<OptionalModelMissingWarningModal");
+    expect(source).not.toContain("showAdvanced");
+    expect(source).not.toContain('t("apiKey.advanced")');
+    expect(source).not.toContain('t("apiKey.maxTokens")');
+    expect(source).not.toContain('t("apiKey.dailyLimit")');
     expect(source).toContain('dispatch(appActions.navigate("/api-key-models"))');
     expect(source).toContain("asr: state.modelConfig.asr ?? null");
     expect(source).toContain("imageGen: state.modelConfig.imageGen ?? null");

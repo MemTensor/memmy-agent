@@ -77,9 +77,6 @@ export function ApiKeyPage() {
   const [apiKey, setApiKey] = useState(initialModelForm.apiKey);
   const [apiKeyMasked, setApiKeyMasked] = useState(initialModelForm.apiKeyMasked);
   const [showApiKey, setShowApiKey] = useState(false);
-  const [showAdvanced, setShowAdvanced] = useState(false);
-  const [maxTokens, setMaxTokens] = useState("");
-  const [dailyLimit, setDailyLimit] = useState("");
   const modelFormValues = {
     provider,
     endpoint,
@@ -254,20 +251,6 @@ export function ApiKeyPage() {
               showPassword={showApiKey}
               onTogglePassword={() => setShowApiKey((value) => !value)}
             />
-
-            <button
-              type="button"
-              onClick={() => setShowAdvanced((value) => !value)}
-              className="flex items-center gap-1.5 text-xs text-text-ink/55 hover:text-text-ink/75 cursor-pointer transition-colors"
-            >
-              {showAdvanced ? "-" : "+"} {t("apiKey.advanced")}
-            </button>
-            {showAdvanced && (
-              <div className="space-y-3.5">
-                <ConfigField label={t("apiKey.maxTokens")} placeholder={t("apiKey.noLimit")} value={maxTokens} onChange={setMaxTokens} suffix="tokens" />
-                <ConfigField label={t("apiKey.dailyLimit")} placeholder={t("apiKey.noLimit")} value={dailyLimit} onChange={setDailyLimit} />
-              </div>
-            )}
 
             <div className="flex min-h-9 items-center justify-end gap-3">
               <ValidationMessage validation={llmValidation} stale={isTestStale} />

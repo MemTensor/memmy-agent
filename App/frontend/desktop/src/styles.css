@@ -547,54 +547,6 @@ body.memmy-window-fullscreen {
   line-height: 1.35;
 }
 
-.agent-model-switch-event {
-  display: flex;
-  min-height: 20px;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-  padding: 3px 0;
-  color: color-mix(in srgb, var(--color-text-ink) 44%, transparent);
-  font-size: 11px;
-  line-height: 16px;
-}
-
-.agent-model-switch-event__text {
-  display: block;
-  line-height: 16px;
-}
-
-.agent-model-switch-event__info {
-  display: inline-flex;
-  width: 16px;
-  height: 16px;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  margin: 0;
-  padding: 0;
-  border: 0;
-  border-radius: 50%;
-  background: transparent;
-  color: inherit;
-  cursor: help;
-  line-height: 0;
-  transform: translateY(-1px);
-}
-
-.agent-model-switch-event__info svg {
-  display: block;
-  width: 13px;
-  height: 13px;
-}
-
-.agent-model-switch-event__info:hover,
-.agent-model-switch-event__info:focus-visible {
-  background: color-mix(in srgb, var(--color-canvas-oat) 62%, transparent);
-  color: color-mix(in srgb, var(--color-text-ink) 68%, transparent);
-  outline: none;
-}
-
 .home-project-picker {
   position: relative;
   z-index: 45;
@@ -2143,12 +2095,6 @@ body:has(.memory-drawer) .window-drag-region {
   font-size: 11px;
   line-height: 1.45;
   color: color-mix(in srgb, var(--color-text-ink) 52%, transparent);
-}
-
-.agent-conversation-model-error {
-  width: fit-content;
-  min-width: min(320px, 100%);
-  margin: 6px 0 2px;
 }
 
 .agent-retry-wait-line--running .agent-retry-wait-line__label {
@@ -6432,26 +6378,6 @@ input[type="checkbox"].check-sky:checked::after {
   display: grid;
   grid-template-columns: minmax(0, 1.5fr) minmax(140px, 1fr);
   gap: var(--space-2);
-}
-
-.model-connection-advanced-fields label {
-  color: color-mix(in srgb, var(--color-text-ink) 65%, transparent);
-  font-size: 12px;
-  font-weight: 400;
-  line-height: 1.25;
-  margin-bottom: 6px;
-}
-
-.model-connection-modal .model-connection-advanced-fields .auth-code-form-input {
-  min-height: 36px;
-  height: 36px;
-  padding: 6px 12px;
-  padding-right: 56px;
-  border-color: color-mix(in srgb, var(--color-border-stone) 70%, white);
-  background: color-mix(in srgb, var(--color-canvas-oat) 30%, transparent);
-  font-size: 12px;
-  font-weight: 400;
-  line-height: 16px;
 }
 
 .model-editor-actions {

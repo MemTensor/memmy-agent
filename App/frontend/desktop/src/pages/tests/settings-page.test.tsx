@@ -27,6 +27,7 @@ const updateCoordinatorSourcePath = fileURLToPath(new URL("../../app/update-coor
 const browserUpdateSourcePath = fileURLToPath(new URL("../../app/browser-update.ts", import.meta.url));
 const tokenUsageStylesPath = fileURLToPath(new URL("../settings-token-usage.module.css", import.meta.url));
 const modelConfigSourcePath = fileURLToPath(new URL("../model-config.ts", import.meta.url));
+const modelWorkspaceSourcePath = fileURLToPath(new URL("../model-workspace-section.tsx", import.meta.url));
 const overflowTooltipSourcePath = fileURLToPath(new URL("../../components/overflow-tooltip-text.tsx", import.meta.url));
 
 function createMemoryStorage(): Storage {
@@ -579,25 +580,24 @@ describe("SettingsPageView", () => {
     expect(modelSource).not.toContain("DEFAULT_MODEL_PLACEHOLDER");
   });
 
-  it("未注册用户退出本地模式前弹出二次确认", () => {
+  it("本地模式账户区提供登录入口且不再提供退出操作", () => {
+    const html = normalizeSsrHtml(renderSettingsPageView(createByokModeState()));
     const source = readFileSync(settingsPageSourcePath, "utf8");
 
-    expect(source).toContain('setConfirm("exitLocal")');
-    expect(source).toContain('import { ConfirmDialog } from "../components/confirm-dialog.js";');
-    expect(source).toContain("<ConfirmDialog");
-    expect(source).toContain('cancelLabel={t("dialog.cancel")}');
-    expect(source).toContain('t("settings.account.exitLocalTitle")');
-    expect(source).toContain('t("settings.account.exitLocalOk")');
-    expect(source).toContain('t("settings.account.exitLocalDesc")');
-    expect(source).not.toContain("function ConfirmModal");
+    expect(html).toContain("未登录");
+    expect(html).toContain("当前使用自定义大模型 API Key");
+    expect(html).toContain("登录 / 注册");
+    expect(source).toContain('dispatch(appActions.navigate("/welcome"))');
+    expect(source).not.toContain('setConfirm("exitLocal")');
+    expect(source).not.toContain("settings.account.exitLocal");
   });
 
   it("本地自定义模式展示独立连接工作区和能力选择", () => {
     const html = normalizeSsrHtml(renderSettingsPageView(createByokModeState()));
 
-    expect(html).toContain("本地模式");
-    expect(html).toContain("无需注册账号 · 使用自定义大模型 API Key");
-    expect(html).toContain("退出");
+    expect(html).toContain("未登录");
+    expect(html).toContain("当前使用自定义大模型 API Key");
+    expect(html).toContain("登录 / 注册");
     expect(html).toContain("自定义 API Key");
     expect(html).toContain("还没有自定义模型");
     expect(html).toContain("添加配置");
@@ -628,6 +628,15 @@ describe("SettingsPageView", () => {
     expect(html).not.toContain("修改昵称");
     expect(html).not.toContain("注册时间：");
     expect(html).not.toContain("注册于");
+  });
+
+  it("模型连接弹窗不展示高级选项和 Token 限额", () => {
+    const source = readFileSync(modelWorkspaceSourcePath, "utf8");
+
+    expect(source).not.toContain("showEditorAdvanced");
+    expect(source).not.toContain('t("apiKey.advanced")');
+    expect(source).not.toContain('t("apiKey.maxTokens")');
+    expect(source).not.toContain('t("apiKey.dailyLimit")');
   });
 
   it("自填 API Key 设置页从完整脱敏配置回填模型概要", () => {

@@ -17,7 +17,6 @@ export interface FeatureEvent {
     | "agent_restart_requested"
     | "agent_send_message"
     | "agent_stop_generation"
-    | "byok_exit_to_register"
     | "model_config_saved"
     | "model_connection_tested"
     | "model_mode_switched"

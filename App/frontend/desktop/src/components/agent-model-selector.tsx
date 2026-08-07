@@ -12,7 +12,6 @@ import {
 } from "../state/model-workspace.js";
 import { useModelWorkspace } from "../state/use-model-workspace.js";
 import {
-  SETTINGS_ADD_MODEL_RETURN_STORAGE_KEY,
   settingsTabHash
 } from "../pages/settings-nav.js";
 import { ModelProviderLogo } from "./model-provider-logo.js";
@@ -23,13 +22,6 @@ export interface AgentModelSelectorProps {
   scopeKey: string;
   disabled: boolean;
   seedConfig?: ModelProviderConfig | null;
-  hasConversationContent?: boolean;
-  onModelSwitch?: (notice: ModelSwitchNotice) => void;
-}
-
-export interface ModelSwitchNotice {
-  from: string;
-  to: string;
 }
 
 /** Frontend-only per-chat model picker. It never calls the runtime `/model`. */
@@ -68,14 +60,6 @@ export function AgentModelSelector(props: AgentModelSelectorProps) {
     ) {
       return;
     }
-    if (
-      resolved.reason === "mode_changed"
-      && props.hasConversationContent
-      && resolved.previousModel
-      && resolved.candidate
-    ) {
-      props.onModelSwitch?.({ from: resolved.previousModel, to: resolved.candidate.model });
-    }
     const saved = commit(setScopedModelSelection(
       workspace,
       props.mode,
@@ -87,11 +71,7 @@ export function AgentModelSelector(props: AgentModelSelectorProps) {
     commit,
     props.mode,
     props.scopeKey,
-    props.hasConversationContent,
-    props.onModelSwitch,
     resolved.candidateId,
-    resolved.candidate,
-    resolved.previousModel,
     resolved.reason,
     workspace
   ]);
@@ -128,24 +108,12 @@ export function AgentModelSelector(props: AgentModelSelectorProps) {
   }
 
   function selectModel(candidateId: string) {
-    const nextCandidate = candidates.find((candidate) => candidate.id === candidateId);
-    const previousModel = resolved.candidate?.model ?? resolved.previousModel;
     const saved = commit(setScopedModelSelection(workspace, props.mode, props.scopeKey, candidateId));
     setSaveFailed(!saved);
-    if (
-      saved
-      && props.hasConversationContent
-      && previousModel
-      && nextCandidate
-      && previousModel !== nextCandidate.model
-    ) {
-      props.onModelSwitch?.({ from: previousModel, to: nextCandidate.model });
-    }
   }
 
   function openCustomModelSettings() {
     if (typeof window !== "undefined") {
-      window.sessionStorage.setItem(SETTINGS_ADD_MODEL_RETURN_STORAGE_KEY, "/main");
       const nextUrl = `${window.location.pathname}${window.location.search}${settingsTabHash("model")}`;
       window.history.replaceState(window.history.state, "", nextUrl);
     }

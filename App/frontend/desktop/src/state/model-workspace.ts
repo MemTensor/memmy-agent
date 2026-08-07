@@ -111,6 +111,11 @@ export interface WorkspaceUsageRow extends WorkspaceUsageTotals {
   breakdownAvailable: boolean;
 }
 
+export interface AccountLogoutByokPreparation {
+  workspace: ModelWorkspace;
+  hasTaskModel: boolean;
+}
+
 interface EventTargetLike {
   addEventListener(type: string, listener: EventListener): void;
   removeEventListener(type: string, listener: EventListener): void;
@@ -256,6 +261,52 @@ export function getTaskModelCandidates(
   if (!selectedIds) return textCandidates;
   const selected = new Set(selectedIds);
   return textCandidates.filter((candidate) => selected.has(candidate.id));
+}
+
+/**
+ * Prepares the machine-local BYOK space before leaving account mode.
+ * Legacy account-space connections are merged into the local space so logout
+ * can stay on the current page without losing configured task models.
+ */
+export function prepareByokWorkspaceForAccountLogout(
+  workspace: ModelWorkspace
+): AccountLogoutByokPreparation {
+  const localConnections = workspace.spaces.byok.connections;
+  const accountConnections = workspace.spaces.account.connections;
+  const mergedConnections = [...localConnections];
+
+  for (const accountConnection of accountConnections) {
+    const index = mergedConnections.findIndex(
+      (connection) => normalizeProvider(connection.provider) === normalizeProvider(accountConnection.provider)
+    );
+    if (index >= 0) {
+      mergedConnections[index] = accountConnection;
+    } else {
+      mergedConnections.push(accountConnection);
+    }
+  }
+
+  const hasTaskModel = mergedConnections.some((connection) => (
+    connection.models.some((model) => (connection.modelCapabilities?.[model] ?? "chat") === "chat")
+  ));
+  if (!hasTaskModel || accountConnections.length === 0) {
+    return { workspace, hasTaskModel };
+  }
+
+  return {
+    hasTaskModel: true,
+    workspace: {
+      ...workspace,
+      spaces: {
+        ...workspace.spaces,
+        byok: {
+          ...workspace.spaces.byok,
+          connections: mergedConnections,
+          taskCandidateIds: undefined
+        }
+      }
+    }
+  };
 }
 
 /** Replaces the Agent candidate subset while preserving product order. */

@@ -10,6 +10,7 @@ import {
   getModelCandidates,
   maskApiKey,
   persistModelWorkspace,
+  prepareByokWorkspaceForAccountLogout,
   readModelWorkspace,
   resolveScopedModelSelection,
   setModelConnectionAvailability,
@@ -56,6 +57,29 @@ describe("model workspace connections", () => {
     expect(getModelCandidates(workspace, "account", "embedding").map((item) => item.model)).toEqual(["embedding"]);
     expect(getModelCandidates(workspace, "account", "asr").map((item) => item.model)).toEqual(["asr"]);
     expect(getModelCandidates(workspace, "account", "image")).toEqual([]);
+  });
+
+  it("moves configured account BYOK into the machine-local workspace on logout", () => {
+    const prepared = prepareByokWorkspaceForAccountLogout(createWorkspaceWithAccountByok());
+
+    expect(prepared.hasTaskModel).toBe(true);
+    expect(prepared.workspace.spaces.byok.connections).toHaveLength(1);
+    expect(prepared.workspace.spaces.byok.connections[0]).toMatchObject({
+      provider: "anthropic",
+      models: ["claude-sonnet-4", "claude-haiku-4"]
+    });
+  });
+
+  it("returns no local fallback when no Agent task BYOK is configured", () => {
+    const imageOnly = upsertModelConnection(createModelWorkspaceSeed(), "account", {
+      provider: "openai",
+      endpoint: "https://api.openai.com/v1",
+      apiKey: "secret",
+      models: ["gpt-image-1"],
+      modelCapabilities: { "gpt-image-1": "image" }
+    }).workspace;
+
+    expect(prepareByokWorkspaceForAccountLogout(imageOnly).hasTaskModel).toBe(false);
   });
 
   it("enforces provider uniqueness inside each space only", () => {

@@ -45,6 +45,7 @@ import {
 
 const homePageSourcePath = fileURLToPath(new URL("../home-page.tsx", import.meta.url));
 const agentRuntimeBridgeSourcePath = fileURLToPath(new URL("../../app/agent-runtime-bridge.tsx", import.meta.url));
+const agentModelSelectorSourcePath = fileURLToPath(new URL("../../components/agent-model-selector.tsx", import.meta.url));
 const stylesSourcePath = fileURLToPath(new URL("../../styles.css", import.meta.url));
 
 function readAgentRuntimeBridgeSource(): string {
@@ -94,6 +95,7 @@ describe("HomePage", () => {
 
   it("在空白和已有会话 composer 都展示按 chatScopeKey 隔离的模型选择器", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
+    const selectorSource = readFileSync(agentModelSelectorSourcePath, "utf8");
     const styles = readFileSync(stylesSourcePath, "utf8");
 
     expect(source.match(/<AgentModelSelector/g)).toHaveLength(2);
@@ -105,6 +107,15 @@ describe("HomePage", () => {
     expect(styles).toContain(".agent-model-selector .agent-model-selector__menu");
     expect(styles).toContain("top: calc(100% + 6px)");
     expect(styles).toContain(".agent-model-selector__configure");
+    expect(source).not.toContain("modelSwitchNotice");
+    expect(selectorSource).not.toContain("onModelSwitch");
+    expect(selectorSource).not.toContain("hasConversationContent");
+    expect(selectorSource).not.toContain("SETTINGS_ADD_MODEL_RETURN_STORAGE_KEY");
+    expect(selectorSource).toContain('settingsTabHash("model")');
+    expect(styles).not.toContain(".agent-model-switch-event");
+    expect(source).toContain("if (resolvedConversationModel.unavailable)");
+    expect(source).toContain('message: "home.modelSelector.unavailable"');
+    expect(source).not.toContain("agent-conversation-model-error");
   });
 
   it("hides the agent status line after the websocket is connected", () => {

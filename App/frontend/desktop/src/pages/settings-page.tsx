@@ -28,6 +28,7 @@ import { useAppState } from "../state/app-state.js";
 import {
   getModelCandidates,
   getTaskModelCandidates,
+  prepareByokWorkspaceForAccountLogout,
   type ModelWorkspaceMode
 } from "../state/model-workspace.js";
 import { useModelWorkspace } from "../state/use-model-workspace.js";
@@ -95,7 +96,7 @@ type LogLevel = "error" | "warn" | "info" | "debug";
 type ModelMode = "platform" | "custom";
 type EmbeddingMode = "cloud" | "local" | "custom";
 type TestStatus = "idle" | "testing" | "success" | "error";
-type ConfirmKind = "logout" | "exitLocal" | null;
+type ConfirmKind = "logout" | null;
 type UsageLoadStatus = "idle" | "loading" | "ready" | "error";
 type DeveloperAction = "openLogs" | "exportDiagnostics";
 type DeveloperFeedbackTone = "success" | "error";
@@ -321,6 +322,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   } = props;
   const { t } = useTranslation();
   const bootstrap = state.bootstrap;
+  const { workspace: modelWorkspace, commit: commitModelWorkspace } = useModelWorkspace(state.modelConfig);
   const [launchAtLogin, setLaunchAtLogin] = useState(false);
   const [closeAction, setCloseAction] = useState<CloseMainWindowAction>(() => {
     return readCloseMainWindowAction(typeof window === "undefined" ? undefined : window.localStorage);
@@ -396,9 +398,6 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const [apiKey, setApiKey] = useState(initialModelForm.apiKey);
   const [apiKeyMasked, setApiKeyMasked] = useState(initialModelForm.apiKeyMasked);
   const [showKey, setShowKey] = useState(false);
-  const [showAdvanced, setShowAdvanced] = useState(false);
-  const [maxTokens, setMaxTokens] = useState("");
-  const [dailyLimit, setDailyLimit] = useState("");
   const mainModelFormValues = {
     provider: fromProtocol(protocol),
     endpoint,
@@ -444,8 +443,8 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const accountIdentifier = resolveAccountIdentifier(state);
   const accountDisplayIdentifier = accountIdentifier.trim();
   const accountName = isByokMode
-    ? resolveAccountFallback(appSettings?.userMode, t)
-    : state.account.nickname || accountDisplayIdentifier || resolveAccountFallback(appSettings?.userMode, t);
+    ? resolveAccountFallback(t)
+    : state.account.nickname || accountDisplayIdentifier || resolveAccountFallback(t);
   const accountMeta = isByokMode ? resolveAccountMeta(appSettings?.userMode, t) : accountDisplayIdentifier || resolveAccountMeta(appSettings?.userMode, t);
   const accountInitial = isByokMode ? "·" : resolveAccountInitials(accountName);
   const registeredAtText = formatRegisteredAt(state.account.registeredAt, t);
@@ -1302,37 +1301,36 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     }
   }
 
-  /**
-   * Handles the confirmation for logging out of the account or exiting local mode.
-   */
+  /** Handles the registered account logout confirmation. */
   async function handleConfirmAccountExit() {
     if (accountBusy) return;
-    const currentConfirm = confirm;
-    if (currentConfirm === "logout") {
-      setAccountBusy(true);
-      setAccountError(null);
-      try {
-        await (accountClient?.logout() ?? Promise.resolve({ ok: true as const }));
-        track({ name: "account_logout", params: { page_path: "/settings" }, consentTier: "basic" });
-        dispatch(appActions.accountCleared());
+    setAccountBusy(true);
+    setAccountError(null);
+    try {
+      const preparedByok = prepareByokWorkspaceForAccountLogout(modelWorkspace);
+      await (accountClient?.logout() ?? Promise.resolve({ ok: true as const }));
+      track({ name: "account_logout", params: { page_path: "/settings" }, consentTier: "basic" });
+      dispatch(appActions.accountCleared());
+      const canEnterByok = preparedByok.hasTaskModel
+        && (
+          preparedByok.workspace === modelWorkspace
+          || commitModelWorkspace(preparedByok.workspace)
+        );
+      if (canEnterByok) {
+        dispatch(appActions.settingsUpdated({ userMode: "byok" }));
+        persistSettings({ userMode: "byok" });
+      } else {
         persistSettings({ userMode: "unset" });
         dispatch(appActions.navigate("/welcome"));
-        setConfirm(null);
-      } catch (error) {
-        console.warn("logout account failed", error);
-        setAccountError(t("settings.account.logoutFailed"));
-        setConfirm(null);
-      } finally {
-        setAccountBusy(false);
       }
-      return;
+      setConfirm(null);
+    } catch (error) {
+      console.warn("logout account failed", error);
+      setAccountError(t("settings.account.logoutFailed"));
+      setConfirm(null);
+    } finally {
+      setAccountBusy(false);
     }
-
-    track({ name: "byok_exit_to_register", params: { page_path: "/settings" }, consentTier: "basic" });
-    persistSettings({ userMode: "unset" });
-    dispatch(appActions.accountCleared());
-    dispatch(appActions.navigate("/welcome"));
-    setConfirm(null);
   }
 
   if (showUsageDetail) {
@@ -1349,7 +1347,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     );
   }
 
-  const confirmDialog = confirm ? resolveAccountConfirmDialog(confirm, t) : null;
+  const confirmDialog = confirm ? resolveAccountConfirmDialog(t) : null;
   return (
     <div
       className="settings-page h-full overflow-y-auto"
@@ -1437,10 +1435,10 @@ export function SettingsPageView(props: SettingsPageViewProps) {
             {isByokMode && (
               <button
                 type="button"
-                onClick={() => setConfirm("exitLocal")}
-                className="settings-account-action shrink-0 flex items-center gap-1.5 px-3.5 py-1.5 text-xs text-action-sky border border-action-sky/30 rounded-btn hover:bg-action-sky/8 transition-colors cursor-pointer"
+                onClick={() => dispatch(appActions.navigate("/welcome"))}
+                className="settings-account-action shrink-0 px-3.5 py-1.5 text-xs text-white bg-action-sky rounded-btn hover:bg-action-sky-hover transition-colors cursor-pointer"
               >
-                <Zap size={12} /> {t("settings.account.exitLocalShort")}
+                {t("login.continue")}
               </button>
             )}
           </div>
@@ -1834,7 +1832,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
           closeLabel={t("common.close")}
           confirmLabel={confirmDialog?.ok ?? t("dialog.ok")}
           confirmDisabled={accountBusy}
-          confirmVariant={confirm === "logout" ? "danger" : "primary"}
+          confirmVariant="danger"
           ariaLabel={confirmDialog?.ariaLabel}
           width={360}
           onCancel={() => setConfirm(null)}
@@ -3189,23 +3187,13 @@ interface AccountConfirmDialogContent {
 }
 
 function resolveAccountConfirmDialog(
-  kind: Exclude<ConfirmKind, null>,
   t: (key: MessageKey, values?: MessageValues) => string
 ): AccountConfirmDialogContent {
-  if (kind === "logout") {
-    return {
-      ariaLabel: t("settings.account.logoutTitle"),
-      title: t("settings.account.logoutTitle"),
-      desc: t("settings.account.logoutDesc"),
-      ok: t("settings.account.logoutOk")
-    };
-  }
-
   return {
-    ariaLabel: t("settings.account.exitLocalTitle"),
-    title: t("settings.account.exitLocalTitle"),
-    desc: t("settings.account.exitLocalDesc"),
-    ok: t("settings.account.exitLocalOk")
+    ariaLabel: t("settings.account.logoutTitle"),
+    title: t("settings.account.logoutTitle"),
+    desc: t("settings.account.logoutDesc"),
+    ok: t("settings.account.logoutOk")
   };
 }
 
@@ -3272,11 +3260,10 @@ function formatRegisteredAt(value: string | null, t: SettingsTranslate): string 
 /**
  * Resolves the fallback text for the account name.
  *
- * @param userMode The current user mode.
  * @returns The display name for the account area.
  */
-function resolveAccountFallback(userMode: AppSettingsDto["userMode"] | undefined, t: SettingsTranslate): string {
-  return userMode === "byok" ? t("settings.account.localMode") : t("settings.account.noAccount");
+function resolveAccountFallback(t: SettingsTranslate): string {
+  return t("settings.account.noAccount");
 }
 
 /**
@@ -3286,7 +3273,7 @@ function resolveAccountFallback(userMode: AppSettingsDto["userMode"] | undefined
  * @returns The account-area description; in account mode it favors neither email nor phone number.
  */
 function resolveAccountMeta(userMode: AppSettingsDto["userMode"] | undefined, t: SettingsTranslate): string {
-  return userMode === "byok" ? t("settings.account.localModeMeta") : t("settings.account.noIdentifier");
+  return userMode === "byok" ? t("settings.account.customApiKeyMeta") : t("settings.account.noIdentifier");
 }
 
 /**

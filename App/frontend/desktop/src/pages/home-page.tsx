@@ -19,9 +19,8 @@ import {
 import type { AnalyticsEvent } from "../analytics/analytics-events.js";
 import { buildOnboardingActivationEvent } from "../analytics/onboarding-analytics.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
-import { AgentModelSelector, type ModelSwitchNotice } from "../components/agent-model-selector.js";
+import { AgentModelSelector } from "../components/agent-model-selector.js";
 import { Memmy } from "../components/mascot/memmy.js";
-import { Tooltip } from "../components/tooltip.js";
 import { formatMessage, type MessageKey, type MessageValues, zhCNMessages } from "../i18n/messages.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import {
@@ -79,7 +78,7 @@ import {
 } from "./first-encounter-task-launch.js";
 import { HistoryDagPanel, type HistoryDagPanelState } from "./history-dag-panel.js";
 import { Mic, Pause, Plus, Send } from "./memory/memory-prototype-icons.js";
-import { AlertCircle, ArrowDown, Check, ChevronDown, Folder, Info, Plus as LucidePlus, RotateCw, X } from "lucide-react";
+import { ArrowDown, Check, ChevronDown, Folder, Plus as LucidePlus, RotateCw, X } from "lucide-react";
 
 export { agentChatScopeKey, updateComposerDraftForScope };
 export { hydrateAgentThreadInBackground };
@@ -691,7 +690,6 @@ export function HomePage() {
   const [firstEncounterRelayReadyChatId, setFirstEncounterRelayReadyChatId] = useState<string | null>(() => (
     readFirstEncounterRelayReadyChat(typeof window === "undefined" ? undefined : window.sessionStorage)
   ));
-  const [modelSwitchNotice, setModelSwitchNotice] = useState<(ModelSwitchNotice & { scopeKey: string }) | null>(null);
   const [isComposerSingleLine, setIsComposerSingleLine] = useState(true);
   const composerDrafts = state.agent.composerDraftsByScope;
   const pendingAttachmentsByScope = state.agent.composerPendingAttachmentsByScope;
@@ -718,9 +716,6 @@ export function HomePage() {
   const asrRecorder = useAsrRecorder(clients?.asr, { emptyAudioMessage: t("home.asrEmptyAudio") });
   const chatScopeKey = agentChatScopeKey(state.agent.currentChatId, state.agent.newChatRequestId);
   const modelSelectionScopeKey = state.agent.currentChatId ?? NEW_TASK_MODEL_SCOPE_KEY;
-  const showModelSwitchNotice = useCallback((notice: ModelSwitchNotice) => {
-    setModelSwitchNotice({ ...notice, scopeKey: modelSelectionScopeKey });
-  }, [modelSelectionScopeKey]);
   const modelWorkspaceMode = state.bootstrap?.app.userMode === "byok" ? "byok" : "account";
   const resolvedConversationModel = resolveScopedModelSelection(
     modelWorkspace,
@@ -746,7 +741,6 @@ export function HomePage() {
     ? state.agent.historyVersionByChatId[state.agent.currentChatId] ?? 0
     : state.agent.newChatRequestId;
   const hasActiveConversation = hasActiveAgentConversation(state.agent.currentChatId, state.agent.messages.length);
-  const hasConversationUserMessage = state.agent.messages.some((message) => message.role === "user");
   const activeConversationTitle = state.agent.currentSessionKey
     ? state.agent.tasks.find((task) => task.sessionKey === state.agent.currentSessionKey)?.title.trim() || t("home.title")
     : t("home.title");
@@ -1419,6 +1413,14 @@ export function HomePage() {
    */
   async function sendMessage() {
     if (runExactLocalSlashCommand(input)) {
+      return;
+    }
+    if (resolvedConversationModel.unavailable) {
+      dispatch(agentActions.operationFailed("chat", createAgentOperationError({
+        source: "send",
+        message: "home.modelSelector.unavailable",
+        ...(state.agent.currentChatId ? { chatId: state.agent.currentChatId } : { scopeKey: chatScopeKey })
+      })));
       return;
     }
     const sendScopeKey = chatScopeKey;
@@ -2181,8 +2183,6 @@ export function HomePage() {
                     scopeKey={modelSelectionScopeKey}
                     disabled={isCurrentAgentRunning || isCreatingChat || messageSendInFlight}
                     seedConfig={state.modelConfig}
-                    hasConversationContent={hasConversationUserMessage}
-                    onModelSwitch={showModelSwitchNotice}
                   />
                   <button
                     type="button"
@@ -2266,35 +2266,6 @@ export function HomePage() {
                 accountMode={isAccountMode}
                 artifactClient={sessionArtifactClient}
               />
-              {resolvedConversationModel.unavailable && (
-                <div className="agent-model-error-notice agent-conversation-model-error" role="alert">
-                  <div className="agent-model-error-notice__header">
-                    <AlertCircle size={13} className="agent-model-error-notice__icon" aria-hidden="true" />
-                    <p className="agent-model-error-notice__title">
-                      {t("home.modelSelector.unavailable")}
-                    </p>
-                  </div>
-                </div>
-              )}
-              {modelSwitchNotice?.scopeKey === modelSelectionScopeKey && (
-                <div className="agent-model-switch-event" role="status">
-                  <span className="agent-model-switch-event__text">
-                    {t("home.modelSelector.switched", {
-                      from: modelSwitchNotice.from,
-                      to: modelSwitchNotice.to
-                    })}
-                  </span>
-                  <Tooltip content={t("home.modelSelector.switchHint")}>
-                    <button
-                      type="button"
-                      className="agent-model-switch-event__info"
-                      aria-label={t("home.modelSelector.switchHint")}
-                    >
-                      <Info size={13} strokeWidth={1.8} aria-hidden="true" />
-                    </button>
-                  </Tooltip>
-                </div>
-              )}
             </div>
           </div>
           {showScrollToBottomFab ? (
@@ -2384,8 +2355,6 @@ export function HomePage() {
                     scopeKey={modelSelectionScopeKey}
                     disabled={isCurrentAgentRunning || isCreatingChat || messageSendInFlight}
                     seedConfig={state.modelConfig}
-                    hasConversationContent={hasConversationUserMessage}
-                    onModelSwitch={showModelSwitchNotice}
                   />
                   <button
                     type="button"

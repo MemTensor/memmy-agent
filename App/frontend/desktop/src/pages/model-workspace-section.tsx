@@ -48,8 +48,6 @@ interface ConnectionEditorState {
   provider: Protocol;
   endpoint: string;
   apiKey: string;
-  maxTokens: string;
-  dailyTokenLimit: string;
   models: Array<{
     name: string;
     capability: ModelCapability;
@@ -92,7 +90,6 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
   const [editor, setEditor] = useState<ConnectionEditorState | null>(null);
   const [editorTest, setEditorTest] = useState<ConnectionTestState>({ status: "idle", message: null });
   const [showEditorApiKey, setShowEditorApiKey] = useState(false);
-  const [showEditorAdvanced, setShowEditorAdvanced] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<ModelConnection | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState(false);
@@ -122,14 +119,11 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
     setFormError(null);
     setEditorTest({ status: "idle", message: null });
     setShowEditorApiKey(false);
-    setShowEditorAdvanced(false);
     setEditor({
       connectionId: null,
       provider,
       endpoint: DEFAULT_ENDPOINTS[provider],
       apiKey: "",
-      maxTokens: "",
-      dailyTokenLimit: "",
       models: [],
       modelDraft: DEFAULT_MODEL_IDS[provider],
       capabilityDraft: "chat",
@@ -180,14 +174,11 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
     setFormError(null);
     setEditorTest(testStates[connection.id] ?? { status: "idle", message: null });
     setShowEditorApiKey(false);
-    setShowEditorAdvanced(false);
     setEditor({
       connectionId: connection.id,
       provider,
       endpoint: connection.endpoint,
       apiKey: "",
-      maxTokens: connection.maxTokens?.toString() ?? "",
-      dailyTokenLimit: connection.dailyTokenLimit?.toString() ?? "",
       models: connection.models.map((model) => ({
         name: model,
         capability: connection.modelCapabilities?.[model] ?? "chat"
@@ -227,12 +218,6 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
 
   function saveConnection() {
     if (!editor) return;
-    const maxTokens = parseOptionalPositiveInteger(editor.maxTokens);
-    const dailyTokenLimit = parseOptionalPositiveInteger(editor.dailyTokenLimit);
-    if (maxTokens === null || dailyTokenLimit === null) {
-      setFormError(t("settings.modelWorkspace.invalidTokenLimit"));
-      return;
-    }
     const resolved = resolveEditorModels();
     if (resolved.error) {
       setFormError(resolved.error);
@@ -250,8 +235,6 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
       endpoint: editor.endpoint,
       apiKey: editor.apiKey || undefined,
       apiKeyMasked: providerChanged ? undefined : existing?.apiKeyMasked,
-      maxTokens,
-      dailyTokenLimit,
       models: resolved.models.map((model) => model.name),
       modelCapabilities: Object.fromEntries(
         resolved.models.map((model) => [model.name, model.capability])
@@ -1025,39 +1008,6 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
             )}
             </div>
           </div>
-          <button
-            type="button"
-            aria-expanded={showEditorAdvanced}
-            onClick={() => setShowEditorAdvanced((show) => !show)}
-            className="inline-flex w-fit items-center gap-1.5 text-xs text-text-ink/55 transition-colors cursor-pointer hover:text-text-ink/75"
-          >
-            <span aria-hidden="true">{showEditorAdvanced ? "−" : "+"}</span>
-            {t("apiKey.advanced")}
-          </button>
-          {showEditorAdvanced && (
-            <div className="model-connection-advanced-fields space-y-3">
-              <ConfigField
-                label={t("apiKey.maxTokens")}
-                placeholder={t("apiKey.noLimit")}
-                value={editor.maxTokens}
-                onChange={(value) => {
-                  setEditor({ ...editor, maxTokens: value });
-                  setFormError(null);
-                }}
-                suffix="tokens"
-              />
-              <ConfigField
-                label={t("apiKey.dailyLimit")}
-                placeholder={t("apiKey.noLimit")}
-                value={editor.dailyTokenLimit}
-                onChange={(value) => {
-                  setEditor({ ...editor, dailyTokenLimit: value });
-                  setFormError(null);
-                }}
-                suffix="tokens"
-              />
-            </div>
-          )}
           {formError && <p className="text-xs text-status-error" role="alert">{formError}</p>}
           {editorTest.message && (
             <p
@@ -1296,14 +1246,6 @@ function modelCapabilityMessageKey(capability: ModelCapability) {
   if (capability === "asr") return "settings.modelWorkspace.capability.asr" as const;
   if (capability === "image") return "settings.modelWorkspace.capability.image" as const;
   return "settings.modelWorkspace.capability.chat" as const;
-}
-
-function parseOptionalPositiveInteger(value: string): number | undefined | null {
-  const normalized = value.trim();
-  if (!normalized) return undefined;
-  if (!/^\d+$/u.test(normalized)) return null;
-  const parsed = Number(normalized);
-  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
 function mutationErrorText(
