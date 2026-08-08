@@ -169,6 +169,43 @@ export const ByokTokenUsageSummarySchema = z.object({
 });
 export type ByokTokenUsageSummary = z.infer<typeof ByokTokenUsageSummarySchema>;
 
+// --- Agent Token Usage Stats (Pi / Codex / Claude Code) ---
+
+export const AgentKindSchema = z.enum(["pi", "codex", "claude_code"]);
+export type AgentKind = z.infer<typeof AgentKindSchema>;
+
+export const AgentTokenStatsDtoSchema = z.object({
+    agent: AgentKindSchema,
+    sessions: z.number().int().nonnegative(),
+    apiCalls: z.number().int().nonnegative(),
+    inputTokens: z.number().int().nonnegative(),
+    outputTokens: z.number().int().nonnegative(),
+    cacheReadTokens: z.number().int().nonnegative(),
+    cacheWriteTokens: z.number().int().nonnegative(),
+    reasoningTokens: z.number().int().nonnegative().optional(),
+    totalTokens: z.number().int().nonnegative(),
+    cost: z.number().nonnegative().optional(),
+    available: z.boolean()
+});
+export type AgentTokenStatsDto = z.infer<typeof AgentTokenStatsDtoSchema>;
+
+export const ProjectTokenStatsDtoSchema = z.object({
+    project: z.string(),
+    agents: z.array(AgentTokenStatsDtoSchema),
+    combinedInputTokens: z.number().int().nonnegative(),
+    combinedOutputTokens: z.number().int().nonnegative(),
+    combinedCacheReadTokens: z.number().int().nonnegative(),
+    combinedTotalTokens: z.number().int().nonnegative(),
+    estimatedCost: z.number().nonnegative().optional()
+});
+export type ProjectTokenStatsDto = z.infer<typeof ProjectTokenStatsDtoSchema>;
+
+export const AgentTokenStatsResponseSchema = z.object({
+    projects: z.array(ProjectTokenStatsDtoSchema),
+    scannedAt: z.string().datetime()
+});
+export type AgentTokenStatsResponse = z.infer<typeof AgentTokenStatsResponseSchema>;
+
 export const AgentGatewayRuntimeConfigSchema = z.object({
     baseUrl: z.string().url(),
     bootstrapSecret: z.string().min(1).optional()

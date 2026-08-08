@@ -11,6 +11,7 @@ import { registerAgentSourceRoutes } from "./routes/agent-sources.js";
 import { registerAgentRuntimeRoutes } from "./routes/agent-runtime/index.js";
 import { registerAsrRoutes } from "./routes/asr.js";
 import { registerByokTokenUsageRoutes } from "./routes/byok-token-usage.js";
+import { registerAgentTokenStatsRoutes } from "./routes/agent-token-stats.js";
 import { registerChannelRoutes } from "./routes/channels.js";
 import { registerComposioMcpRoutes } from "./routes/composio-mcp.js";
 import { registerIntegrationRoutes } from "./routes/integrations.js";
@@ -120,6 +121,10 @@ export function createLocalApiServer(options: CreateLocalApiServerOptions): Fast
   });
   registerByokTokenUsageRoutes(app, {
     byokTokenUsage: options.services.byokTokenUsage,
+    authenticateRuntimeToken
+  });
+  registerAgentTokenStatsRoutes(app, {
+    agentTokenStats: options.services.agentTokenStats,
     authenticateRuntimeToken
   });
   registerAsrRoutes(app, {

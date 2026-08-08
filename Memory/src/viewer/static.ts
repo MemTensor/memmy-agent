@@ -205,6 +205,17 @@ export function memoryPanelHtml(): string {
     .queue-item { padding: 10px; background: var(--surface-soft); border-radius: 6px; }
     .queue-item strong, .queue-item span { display: block; }
     .queue-item span { color: var(--muted); font-size: 10px; margin-top: 4px; }
+    .token-chart { display: flex; align-items: stretch; gap: 12px; min-height: 300px; padding: 24px 20px 12px; overflow-x: auto; border-top: 1px solid var(--line); }
+    .token-chart-month { display: flex; flex: 0 0 92px; min-height: 260px; flex-direction: column; justify-content: flex-end; align-items: center; gap: 8px; }
+    .token-chart-bars { display: flex; align-items: flex-end; justify-content: center; gap: 5px; height: 220px; width: 100%; border-bottom: 1px solid var(--line-strong); }
+    .token-chart-bar { width: 20px; min-height: 2px; border-radius: 4px 4px 0 0; cursor: help; transition: opacity .15s ease; }
+    .token-chart-bar:hover { opacity: .72; }
+    .token-chart-bar.pi { background: var(--accent); }
+    .token-chart-bar.codex { background: var(--blue); }
+    .token-chart-bar.claude_code { background: var(--violet); }
+    .token-chart-label { color: var(--muted); font-size: 11px; white-space: nowrap; }
+    .token-chart-value { font-size: 10px; color: var(--ink-secondary); white-space: nowrap; }
+    .token-chart-empty { width: 100%; display: grid; place-items: center; color: var(--muted); }
     .pipeline { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
     .pipeline-stage { padding: 11px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-soft); }
     .pipeline-stage strong, .pipeline-stage span { display: block; }
@@ -262,6 +273,47 @@ export function memoryPanelHtml(): string {
     .review-card p { margin: 9px 0; color: var(--ink-secondary); line-height: 1.55; white-space: pre-wrap; }
     .review-card-meta { display: flex; gap: 6px; flex-wrap: wrap; }
     .review-card-actions { justify-content: flex-end; margin-top: 10px; }
+    .context-pack-head { align-items: flex-start; }
+    .context-pack-head > div:first-child { min-width: 0; }
+    .context-pack-controls { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+    .context-pack-controls select { width: min(260px, 100%); }
+    .context-pack-tabs { display: inline-flex; gap: 2px; padding: 3px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-soft); }
+    .context-pack-tab { min-height: 28px; padding: 0 10px; border: 0; background: transparent; color: var(--muted); }
+    .context-pack-tab.active { background: var(--surface); color: var(--ink); box-shadow: 0 1px 3px rgba(20, 35, 30, .08); }
+    .context-pack-view { min-height: 260px; max-height: 520px; overflow: auto; }
+    .context-outline { display: grid; gap: 16px; }
+    .context-outline-pack { display: grid; gap: 12px; }
+    .context-outline-pack + .context-outline-pack { padding-top: 16px; border-top: 1px solid var(--line); }
+    .context-outline-title { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+    .context-outline-title span { color: var(--muted); font-size: 10px; }
+    .context-outline-sections { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .context-outline-section { min-width: 0; border-left: 2px solid var(--line-strong); padding-left: 10px; }
+    .context-outline-section h4 { margin: 0 0 6px; font-size: 11px; color: var(--muted); }
+    .context-item { width: 100%; min-height: 0; padding: 7px 8px; border: 0; border-radius: 5px; background: transparent; text-align: left; }
+    .context-item:hover { background: var(--surface-hover); }
+    .context-item strong, .context-item span { display: block; overflow-wrap: anywhere; }
+    .context-item span { margin-top: 3px; color: var(--muted); font-size: 10px; }
+    .context-graph { min-width: 760px; padding: 8px 4px; }
+    .context-graph-pack { display: grid; grid-template-columns: minmax(150px, .7fr) minmax(170px, .8fr) minmax(320px, 2fr); gap: 28px; align-items: center; padding: 18px 0; }
+    .context-graph-pack + .context-graph-pack { border-top: 1px solid var(--line); }
+    .graph-root, .graph-section, .graph-node { position: relative; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
+    .graph-root { padding: 12px; border-color: var(--accent); background: var(--accent-soft); font-weight: 750; }
+    .graph-branches, .graph-leaves { display: grid; gap: 8px; }
+    .graph-section { padding: 8px 10px; color: var(--ink-secondary); font-size: 11px; }
+    .graph-node { width: 100%; min-height: 34px; padding: 7px 9px; text-align: left; }
+    .graph-root::after, .graph-section::before, .graph-section::after, .graph-node::before { content: ""; position: absolute; top: 50%; height: 1px; background: var(--line-strong); }
+    .graph-root::after { left: 100%; width: 28px; }
+    .graph-section::before, .graph-node::before { right: 100%; width: 28px; }
+    .graph-section::after { left: 100%; width: 28px; }
+    .context-markdown { max-height: none; min-height: 260px; }
+    .dialog-screen { position: fixed; inset: 0; z-index: 45; display: grid; place-items: center; padding: 18px; background: rgba(10, 18, 15, .48); }
+    .dialog { width: min(680px, 100%); max-height: min(760px, calc(100vh - 36px)); overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-raised); box-shadow: var(--shadow); }
+    .dialog-head, .dialog-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 11px 14px; border-bottom: 1px solid var(--line); }
+    .dialog-body { display: grid; gap: 12px; padding: 14px; }
+    .dialog-actions { justify-content: flex-end; border-top: 1px solid var(--line); border-bottom: 0; }
+    .dialog label { display: grid; gap: 6px; font-weight: 700; }
+    .dialog textarea { width: 100%; min-height: 220px; resize: vertical; padding: 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .context-detail-body { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; }
     .auth-screen { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 18px; background: color-mix(in srgb, var(--canvas) 92%, transparent); backdrop-filter: blur(14px); }
     .auth-dialog { width: min(420px, 100%); border: 1px solid var(--line); border-radius: 8px; background: var(--surface-raised); box-shadow: var(--shadow); padding: 20px; }
     .auth-dialog .brand { padding: 0; margin-bottom: 18px; }
@@ -289,6 +341,8 @@ export function memoryPanelHtml(): string {
       .toolbar { grid-template-columns: 1fr 1fr; }
       .toolbar input:first-child { grid-column: 1 / -1; }
       .system-grid { grid-template-columns: 1fr; }
+      .context-outline-sections { grid-template-columns: 1fr; }
+      .context-pack-head { display: grid; }
     }
     @media (max-width: 560px) {
       .topbar-actions button:not(.icon-button) { padding: 0 8px; }
@@ -320,6 +374,7 @@ export function memoryPanelHtml(): string {
         <button id="navMemories" class="nav-item" role="tab" aria-selected="false">记忆</button>
         <button id="navActivity" class="nav-item" role="tab" aria-selected="false">活动</button>
         <button id="navTasks" class="nav-item" role="tab" aria-selected="false">任务</button>
+        <button id="navTokenStats" class="nav-item" role="tab" aria-selected="false">Token 用量</button>
         <button id="navAudit" class="nav-item" role="tab" aria-selected="false">治理审计</button>
         <button id="navSystem" class="nav-item" role="tab" aria-selected="false">系统</button>
       </nav>
@@ -375,9 +430,9 @@ export function memoryPanelHtml(): string {
               <div class="data-panel-head"><div><h3 id="reviewHeading">待审核提炼</h3><span id="reviewCount" class="muted"></span></div><button id="bulkApproveCandidates">批准全部高置信度</button></div>
               <div id="reviewCandidates" class="data-panel-body review-list"></div>
             </section>
-            <section class="data-panel" aria-labelledby="contextPackHeading">
-              <div class="data-panel-head"><h3 id="contextPackHeading">项目上下文包</h3><button id="copyContextPack" class="ghost">复制</button></div>
-              <div class="data-panel-body"><pre id="contextPackMarkdown" style="max-height:280px"></pre></div>
+            <section class="data-panel" style="grid-column:1 / -1" aria-labelledby="contextPackHeading">
+              <div class="data-panel-head context-pack-head"><div><h3 id="contextPackHeading">项目上下文包</h3><div class="muted" style="margin-top:3px">由原始记忆实时生成</div></div><div class="context-pack-controls"><select id="contextPackScope" aria-label="上下文包项目 / Workspace"><option value="">全部项目</option></select><div class="context-pack-tabs" role="tablist" aria-label="上下文包视图"><button id="contextPackOutlineTab" class="context-pack-tab active" role="tab" aria-selected="true">知识大纲</button><button id="contextPackGraphTab" class="context-pack-tab" role="tab" aria-selected="false">关系图</button><button id="contextPackMarkdownTab" class="context-pack-tab" role="tab" aria-selected="false">Markdown</button></div><button id="copyContextPack" class="ghost">复制</button><button id="exportContextPack" class="ghost">导出</button></div></div>
+              <div class="data-panel-body"><div id="contextPackOutline" class="context-pack-view"></div><div id="contextPackGraph" class="context-pack-view hidden"></div><pre id="contextPackMarkdown" class="context-pack-view context-markdown hidden"></pre></div>
             </section>
             <section class="data-panel" aria-labelledby="isolationAuditHeading">
               <div class="data-panel-head"><h3 id="isolationAuditHeading">来源与项目隔离审计</h3><span id="auditRiskState" class="muted"></span></div>
@@ -442,6 +497,27 @@ export function memoryPanelHtml(): string {
           </div>
         </section>
 
+        <section id="viewTokenStats" class="view" role="tabpanel">
+          <div class="section-head"><div><h2>Agent Token 用量统计</h2><p>Pi、Codex、Claude Code 各 Agent 的 Token 消耗</p></div></div>
+          <div class="system-grid">
+            <section class="data-panel" style="grid-column:1 / -1">
+              <div class="data-panel-head"><h3>选择项目</h3><span class="muted">按月 Token 用量</span></div>
+              <div class="data-panel-body"><select id="tokenStatsProject" aria-label="项目" style="max-width:720px"></select></div>
+            </section>
+            <section class="data-panel" style="grid-column:1 / -1">
+              <div class="data-panel-head"><h3>月度用量</h3><div id="tokenStatsLegend" class="tag-list"></div></div>
+              <div id="tokenStatsChart" class="token-chart"></div>
+            </section>
+            <section class="data-panel" style="grid-column:1 / -1">
+              <div class="data-panel-head"><h3>项目累计</h3></div>
+              <div id="tokenStatsCombined" class="data-panel-body queue-grid"></div>
+            </section>
+            <section class="data-panel" style="grid-column:1 / -1">
+              <div class="data-panel-body"><small id="tokenStatsScannedAt" class="muted"></small></div>
+            </section>
+          </div>
+        </section>
+
         <section id="viewAudit" class="view" role="tabpanel">
           <div class="section-head"><div><h2>Agent 来源与项目隔离审计</h2><p>检查缺失 workspace、未知来源、旧来源标签与跨项目泄漏风险</p></div><span id="auditIssueCount" class="pill"></span></div>
           <div class="system-grid">
@@ -461,6 +537,17 @@ export function memoryPanelHtml(): string {
           </div>
         </section>
       </main>
+    </div>
+  </div>
+  <div id="contextMemoryDialog" class="dialog-screen hidden" role="dialog" aria-modal="true" aria-labelledby="contextMemoryDialogTitle">
+    <div class="dialog">
+      <div class="dialog-head"><div><h3 id="contextMemoryDialogTitle">记忆详情</h3><div id="contextMemoryDialogId" class="memory-id mono"></div></div><button id="closeContextMemoryDialog" class="icon-button" aria-label="关闭" title="关闭">×</button></div>
+      <div id="contextMemoryDetail" class="dialog-body"></div>
+      <form id="contextMemoryEditForm" class="hidden">
+        <div class="dialog-body"><div class="muted">保存会修改原始记忆，并重新生成上下文包。</div><label>标题<input id="contextMemoryTitle" required></label><label>标签<input id="contextMemoryTags" placeholder="用逗号分隔"></label><label>正文<textarea id="contextMemoryBody" required></textarea></label></div>
+        <div class="dialog-actions"><button id="cancelContextMemoryEdit" type="button">取消</button><button id="saveContextMemory" type="submit" class="primary">保存并重新生成</button></div>
+      </form>
+      <div id="contextMemoryDetailActions" class="dialog-actions"><button id="editContextMemory" class="primary">编辑原始记忆</button></div>
     </div>
   </div>
 
@@ -511,8 +598,11 @@ export function memoryPanelHtml(): string {
       evolution: {},
       reviewCandidates: [],
       contextPack: {},
+      contextPackView: "outline",
+      contextMemory: undefined,
       namespaceAudit: {},
       serviceActivity: {},
+      tokenStats: { projects: [], scannedAt: "" },
       lastRequestMs: 0,
       toastTimer: undefined
     };
@@ -523,6 +613,7 @@ export function memoryPanelHtml(): string {
       memories: ["Memories", "搜索、检查与治理记忆"],
       activity: ["活动日志", "Codex、Pi 与工具调用"],
       tasks: ["任务与 Episodes", "对话批次、Turn 与关联记忆"],
+      tokenStats: ["Token 用量", "Pi、Codex、Claude Code 各 Agent 的 Token 消耗"],
       audit: ["治理审计", "Agent 来源、Workspace 隔离与项目上下文包"],
       system: ["系统", "服务、存储、模型与配置"]
     };
@@ -562,6 +653,16 @@ export function memoryPanelHtml(): string {
     }
     function hideAuth() { $("authScreen").classList.add("hidden"); $("authError").classList.add("hidden"); }
     function formatNumber(value) { const number = Number(value || 0); return Number.isFinite(number) ? number.toLocaleString() : "0"; }
+    function formatTokenCount(value) {
+      const number = Number(value || 0);
+      if (!Number.isFinite(number)) return "0";
+      const absolute = Math.abs(number);
+      const compact = (divisor, unit) => (number / divisor).toLocaleString("zh-CN", { maximumFractionDigits: 2 }) + unit;
+      if (absolute >= 100000000) return compact(100000000, "亿");
+      if (absolute >= 10000) return compact(10000, "万");
+      if (absolute >= 1000) return compact(1000, "千");
+      return number.toLocaleString("zh-CN");
+    }
     function formatDate(value, withSeconds = false) {
       if (!value) return "-";
       const date = new Date(value);
@@ -652,16 +753,20 @@ export function memoryPanelHtml(): string {
     }
 
     function renderNamespaces(overview) {
-      const namespaces = (overview.namespaceDistribution || []).slice(0, 8);
-      const total = namespaces.reduce((sum, namespace) => sum + Number(namespace.count || 0), 0);
+      const allNamespaces = overview.namespaceDistribution || [];
+      const namespaces = allNamespaces.slice(0, 8);
+      const total = allNamespaces.reduce((sum, namespace) => sum + Number(namespace.count || 0), 0);
       $("namespaceTotal").textContent = formatNumber(total);
       $("namespaceDistribution").innerHTML = namespaces.length ? namespaces.map((namespace) =>
         '<div class="namespace-row"><div><strong class="namespace-title" title="' + esc(namespaceMeta(namespace)) + '">' + esc(namespaceLabel(namespace)) + '</strong><div class="namespace-meta mono">' + esc(namespaceMeta(namespace)) + '</div></div><span class="source-count mono">' + esc(namespace.count) + '</span></div>'
       ).join("") : '<div class="empty">暂无项目数据</div>';
       const currentProjectScope = $("projectScope").value;
-      const options = ['<option value="">全部项目</option>'].concat(namespaces.map((namespace) => '<option value="' + esc(namespaceOptionValue(namespace)) + '">' + esc(namespaceLabel(namespace)) + '</option>')).join("");
+      const options = ['<option value="">全部项目</option>'].concat(allNamespaces.map((namespace) => '<option value="' + esc(namespaceOptionValue(namespace)) + '">' + esc(namespaceLabel(namespace)) + '</option>')).join("");
       $("projectScope").innerHTML = options;
       $("projectScope").value = currentProjectScope;
+      const currentContextScope = $("contextPackScope").value;
+      $("contextPackScope").innerHTML = options;
+      $("contextPackScope").value = currentContextScope;
     }
 
     function renderLayerFilter(overview) {
@@ -703,13 +808,167 @@ export function memoryPanelHtml(): string {
       $("evolutionJobState").textContent = formatNumber((evolution.recentJobs || []).length) + " recent jobs";
     }
 
-    function renderContextPack(result) {
+    function contextPackMarkdown(result, selectedScope = "") {
       const packs = result.packs || [];
-      const markdown = packs.length
-        ? packs.map((pack) => pack.markdown).join("\\n\\n---\\n\\n")
+      const visiblePacks = selectedScope
+        ? packs.filter((pack) => namespaceOptionValue(pack.namespace) === selectedScope)
+        : packs;
+      return visiblePacks.length
+        ? visiblePacks.map((pack) => pack.markdown).join("\\n\\n---\\n\\n")
         : "暂无项目上下文";
-      $("contextPackMarkdown").textContent = markdown;
-      $("auditPacks").textContent = markdown;
+    }
+
+    function exportContextPackMarkdown() {
+      const markdown = contextPackMarkdown(state.contextPack || {}, $("contextPackScope").value);
+      const selectedPack = visibleContextPacks(state.contextPack || {})[0];
+      const name = selectedPack ? namespaceLabel(selectedPack.namespace).replace(/[^a-zA-Z0-9._-]+/g, "-") : "all-projects";
+      const url = URL.createObjectURL(new Blob([markdown], { type: "text/markdown;charset=utf-8" }));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "memmy-context-pack-" + name + ".md";
+      link.click();
+      URL.revokeObjectURL(url);
+      showToast("Markdown 已导出");
+    }
+
+    const contextPackSections = [
+      ["conventions", "当前项目约定"],
+      ["commands", "常用命令"],
+      ["architectureFacts", "架构事实"],
+      ["recentTasks", "最近任务"],
+      ["userPreferences", "用户偏好"]
+    ];
+
+    function visibleContextPacks(result) {
+      const selectedScope = $("contextPackScope").value;
+      const packs = result.packs || [];
+      return selectedScope ? packs.filter((pack) => namespaceOptionValue(pack.namespace) === selectedScope) : packs;
+    }
+
+    function contextItemTitle(item) { return displayMemoryTitle(item.title || item.summary, item.id); }
+    function contextItemDescription(item) { return item.summary && item.summary !== item.title ? item.summary : item.updatedAt ? "更新于 " + formatDate(item.updatedAt) : ""; }
+
+    function renderContextOutline(packs) {
+      $("contextPackOutline").innerHTML = packs.length ? '<div class="context-outline">' + packs.map((pack) => {
+        const sections = contextPackSections.map(([key, label]) => {
+          const items = Array.isArray(pack[key]) ? pack[key] : [];
+          const content = items.length ? items.map((item) => '<button class="context-item" data-context-kind="' + (key === "recentTasks" ? "task" : "memory") + '" data-context-id="' + esc(item.id) + '"><strong>' + esc(contextItemTitle(item)) + '</strong>' + (contextItemDescription(item) ? '<span>' + esc(contextItemDescription(item)) + '</span>' : '') + '</button>').join("") : '<div class="muted" style="padding:7px 8px">暂无</div>';
+          return '<section class="context-outline-section"><h4>' + esc(label) + ' · ' + formatNumber(items.length) + '</h4>' + content + '</section>';
+        }).join("");
+        return '<article class="context-outline-pack"><div class="context-outline-title"><h3>' + esc(namespaceLabel(pack.namespace)) + '</h3><span>' + esc(formatDate(pack.generatedAt, true)) + '</span></div><div class="context-outline-sections">' + sections + '</div></article>';
+      }).join("") + '</div>' : '<div class="empty">暂无项目上下文</div>';
+      bindContextNodes($("contextPackOutline"));
+    }
+
+    function renderContextGraph(packs) {
+      $("contextPackGraph").innerHTML = packs.length ? '<div class="context-graph">' + packs.map((pack) => {
+        const populated = contextPackSections.map(([key, label]) => [key, label, Array.isArray(pack[key]) ? pack[key] : []]).filter((section) => section[2].length);
+        const branches = populated.map(([, label, items]) => '<div class="graph-section">' + esc(label) + ' · ' + formatNumber(items.length) + '</div>').join("");
+        const leaves = populated.map(([key, , items]) => '<div class="graph-leaves">' + items.map((item) => '<button class="graph-node" data-context-kind="' + (key === "recentTasks" ? "task" : "memory") + '" data-context-id="' + esc(item.id) + '">' + esc(contextItemTitle(item)) + '</button>').join("") + '</div>').join("");
+        return '<section class="context-graph-pack"><div class="graph-root">' + esc(namespaceLabel(pack.namespace)) + '</div><div class="graph-branches">' + (branches || '<div class="muted">暂无节点</div>') + '</div><div class="graph-leaves">' + leaves + '</div></section>';
+      }).join("") + '</div>' : '<div class="empty">暂无项目上下文</div>';
+      bindContextNodes($("contextPackGraph"));
+    }
+
+    function bindContextNodes(container) {
+      for (const node of container.querySelectorAll("[data-context-id]")) {
+        node.onclick = () => node.dataset.contextKind === "task" ? openContextTask(node.dataset.contextId) : openContextMemory(node.dataset.contextId);
+      }
+    }
+
+    function contextTaskById(id) {
+      for (const pack of visibleContextPacks(state.contextPack || {})) {
+        const task = (pack.recentTasks || []).find((item) => item.id === id);
+        if (task) return task;
+      }
+    }
+
+    function showContextDialog() { $("contextMemoryDialog").classList.remove("hidden"); }
+    function closeContextDialog() { $("contextMemoryDialog").classList.add("hidden"); state.contextMemory = undefined; }
+
+    function openContextTask(id) {
+      const task = contextTaskById(id);
+      if (!task) return;
+      state.contextMemory = undefined;
+      $("contextMemoryDialogTitle").textContent = contextItemTitle(task);
+      $("contextMemoryDialogId").textContent = task.id;
+      $("contextMemoryDetail").innerHTML = '<div><strong>最近任务</strong><div class="muted" style="margin-top:5px">更新于 ' + esc(formatDate(task.updatedAt, true)) + '</div></div>';
+      $("contextMemoryEditForm").classList.add("hidden");
+      $("contextMemoryDetail").classList.remove("hidden");
+      $("contextMemoryDetailActions").classList.add("hidden");
+      showContextDialog();
+    }
+
+    async function openContextMemory(id) {
+      if (!id) return;
+      $("contextMemoryDialogTitle").textContent = "正在加载记忆";
+      $("contextMemoryDialogId").textContent = id;
+      $("contextMemoryDetail").innerHTML = '<div class="empty">正在加载</div>';
+      $("contextMemoryEditForm").classList.add("hidden");
+      $("contextMemoryDetail").classList.remove("hidden");
+      $("contextMemoryDetailActions").classList.add("hidden");
+      showContextDialog();
+      try {
+        const data = await api("/api/v1/memory/" + encodeURIComponent(id));
+        const item = data.item || {};
+        state.contextMemory = item;
+        $("contextMemoryDialogTitle").textContent = contextItemTitle(item);
+        $("contextMemoryDialogId").textContent = item.id || id;
+        $("contextMemoryDetail").innerHTML = '<div class="context-detail-body">' + esc(item.body || item.summary || "暂无内容") + '</div><div class="tag-list">' + ((item.tags || []).map((tag) => '<span class="pill">' + esc(tag) + '</span>').join("") || '<span class="muted">无标签</span>') + '</div><div class="muted">来源 ' + esc(valueAt(item, ["metadata", "source"], "unknown")) + ' · v' + esc(item.version || 1) + ' · ' + esc(formatDate(item.updatedAt, true)) + '</div>';
+        $("contextMemoryDetailActions").classList.remove("hidden");
+      } catch (error) { closeContextDialog(); showError(error); }
+    }
+
+    function beginContextMemoryEdit() {
+      const item = state.contextMemory;
+      if (!item) return;
+      $("contextMemoryTitle").value = contextItemTitle(item);
+      $("contextMemoryTags").value = (item.tags || []).join(", ");
+      $("contextMemoryBody").value = item.body || item.summary || "";
+      $("contextMemoryDetail").classList.add("hidden");
+      $("contextMemoryDetailActions").classList.add("hidden");
+      $("contextMemoryEditForm").classList.remove("hidden");
+      $("contextMemoryTitle").focus();
+    }
+
+    function cancelContextMemoryEdit() {
+      $("contextMemoryEditForm").classList.add("hidden");
+      $("contextMemoryDetail").classList.remove("hidden");
+      $("contextMemoryDetailActions").classList.remove("hidden");
+    }
+
+    async function saveContextMemory(event) {
+      event.preventDefault();
+      const item = state.contextMemory;
+      if (!item) return;
+      const button = $("saveContextMemory");
+      button.disabled = true;
+      try {
+        await api("/api/v1/memory/" + encodeURIComponent(item.id) + "/edit", { method: "POST", body: JSON.stringify({ requestId: "panel-" + Date.now(), adapterId: "memory-console", reason: "edited from generated context pack", title: $("contextMemoryTitle").value, tags: $("contextMemoryTags").value.split(/[,，]/).map((tag) => tag.trim()).filter(Boolean), content: $("contextMemoryBody").value }) });
+        closeContextDialog();
+        await Promise.all([loadDashboard(), loadMemories()]);
+        showToast("原始记忆已更新，上下文包已重新生成");
+      } finally { button.disabled = false; }
+    }
+
+    function setContextPackView(view) {
+      state.contextPackView = view;
+      for (const name of ["outline", "graph", "markdown"]) {
+        const active = name === view;
+        $("contextPack" + name[0].toUpperCase() + name.slice(1)).classList.toggle("hidden", !active);
+        const tab = $("contextPack" + name[0].toUpperCase() + name.slice(1) + "Tab");
+        tab.classList.toggle("active", active);
+        tab.setAttribute("aria-selected", String(active));
+      }
+    }
+
+    function renderContextPack(result) {
+      const packs = visibleContextPacks(result);
+      $("contextPackMarkdown").textContent = contextPackMarkdown(result, $("contextPackScope").value);
+      renderContextOutline(packs);
+      renderContextGraph(packs);
+      setContextPackView(state.contextPackView);
+      $("auditPacks").textContent = contextPackMarkdown(result);
     }
     function renderNamespaceAudit(audit) {
       const summary = audit.summary || {};
@@ -959,6 +1218,63 @@ export function memoryPanelHtml(): string {
       $("taskRows").innerHTML = state.tasks.map((task) => '<button class="task-item ' + (task.id === state.selectedTaskId ? "selected" : "") + '" data-id="' + esc(task.id) + '"><strong>' + esc(taskTitle(task)) + '</strong><div class="task-meta"><span>' + esc(formatNumber((task.turns || []).length)) + ' turns · ' + esc(formatNumber((task.memoryIds || []).length)) + ' memories</span><span>' + esc(formatDate(task.updatedAt)) + '</span></div></button>').join("");
       for (const row of $("taskRows").querySelectorAll("button")) row.onclick = () => selectTask(row.dataset.id);
     }
+
+    async function loadTokenStats() {
+      const data = await api("/api/v1/agent-token-stats");
+      state.tokenStats = data;
+      renderTokenStatsProjectOptions();
+      $("tokenStatsProject").onchange = () => renderTokenStats();
+      $("tokenStatsScannedAt").textContent = "扫描时间: " + new Date(data.scannedAt).toLocaleString() + " · 数据缓存 5 分钟";
+    }
+
+    function renderTokenStatsProjectOptions() {
+      const select = $("tokenStatsProject");
+      const previousProject = select.value ? select.options?.[select.selectedIndex]?.text : "";
+      const projects = state.tokenStats.projects || [];
+      select.innerHTML = projects.map((project, index) => '<option value="' + index + '">' + esc(project.project) + '</option>').join("");
+      const previousIndex = projects.findIndex((project) => project.project === previousProject);
+      select.value = String(previousIndex >= 0 ? previousIndex : 0);
+      renderTokenStats();
+    }
+
+    function agentTokenValue(project, agentName) {
+      const agent = (project?.agents || []).find((item) => item.agent === agentName);
+      return agent ? Number(agent.totalTokens || 0) : 0;
+    }
+
+    function renderTokenStats() {
+      const projects = state.tokenStats.projects || [];
+      const project = projects[Number($("tokenStatsProject").value) || 0];
+      const labels = { pi: "Pi", codex: "Codex", claude_code: "Claude Code" };
+      $("tokenStatsLegend").innerHTML = Object.entries(labels).map(([key, label]) => '<span class="pill"><span class="token-chart-bar ' + key + '" style="display:inline-block;width:10px;height:10px;min-height:0;margin-right:5px"></span>' + label + '</span>').join("");
+      if (!project) {
+        $("tokenStatsChart").innerHTML = '<div class="token-chart-empty">未找到 Token 用量数据</div>';
+        $("tokenStatsCombined").innerHTML = "";
+        return;
+      }
+
+      const monthly = (state.tokenStats.monthly || []).map((entry) => ({
+        month: entry.month,
+        project: (entry.projects || []).find((item) => item.project === project.project)
+      })).filter((entry) => entry.project);
+      const values = monthly.flatMap((entry) => ["pi", "codex", "claude_code"].map((agent) => agentTokenValue(entry.project, agent)));
+      const maxValue = Math.max(...values, 1);
+      $("tokenStatsChart").innerHTML = monthly.length ? monthly.map((entry) => {
+        const bars = ["pi", "codex", "claude_code"].map((agent) => {
+          const value = agentTokenValue(entry.project, agent);
+          const height = value > 0 ? Math.max(3, Math.round(value / maxValue * 210)) : 2;
+          return '<div class="token-chart-bar ' + agent + '" style="height:' + height + 'px" title="' + esc(labels[agent] + ': ' + formatTokenCount(value) + ' Token (' + formatNumber(value) + ')') + '"></div>';
+        }).join("");
+        const monthTotal = Number(entry.project.combinedTotalTokens || 0);
+        return '<div class="token-chart-month"><div class="token-chart-value" title="' + formatNumber(monthTotal) + '">' + formatTokenCount(monthTotal) + '</div><div class="token-chart-bars">' + bars + '</div><div class="token-chart-label">' + esc(entry.month) + '</div></div>';
+      }).join("") : '<div class="token-chart-empty">该项目暂无月度数据</div>';
+
+      $("tokenStatsCombined").innerHTML = '<div class="queue-item" title="' + formatNumber(project.combinedInputTokens) + '"><strong>' + formatTokenCount(project.combinedInputTokens) + '</strong><span>输入 Token</span></div>'
+        + '<div class="queue-item" title="' + formatNumber(project.combinedOutputTokens) + '"><strong>' + formatTokenCount(project.combinedOutputTokens) + '</strong><span>输出 Token</span></div>'
+        + '<div class="queue-item" title="' + formatNumber(project.combinedCacheReadTokens) + '"><strong>' + formatTokenCount(project.combinedCacheReadTokens) + '</strong><span>缓存读取</span></div>'
+        + '<div class="queue-item" title="' + formatNumber(project.combinedTotalTokens) + '"><strong style="color:var(--accent)">' + formatTokenCount(project.combinedTotalTokens) + '</strong><span>总 Token</span></div>'
+        + (project.estimatedCost ? '<div class="queue-item"><strong>$' + project.estimatedCost.toFixed(4) + '</strong><span>预估费用</span></div>' : '');
+    }
     async function loadTasks() {
       const params = new URLSearchParams({ page: String(state.taskPage) }); const q = $("taskQuery").value.trim(); if (q) params.set("q", q);
       renderTasks(await api("/api/v1/panel/tasks?" + params.toString()));
@@ -1013,6 +1329,7 @@ export function memoryPanelHtml(): string {
         else if (state.view === "memories") await loadMemories();
         else if (state.view === "activity") await loadApiActivity();
         else if (state.view === "tasks") await loadTasks();
+        else if (state.view === "tokenStats") await loadTokenStats();
         else if (state.view === "audit") await loadDashboard();
         else if (state.view === "system") await loadSystem();
       } catch (error) { showError(error); }
@@ -1027,17 +1344,20 @@ export function memoryPanelHtml(): string {
     function applyTheme(theme) { document.documentElement.classList.toggle("dark", theme === "dark"); if (typeof localStorage !== "undefined") localStorage.setItem("memmyMemoryTheme", theme); }
     function initTheme() { const stored = typeof localStorage !== "undefined" ? localStorage.getItem("memmyMemoryTheme") : ""; const preferred = typeof matchMedia !== "undefined" && matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"; applyTheme(stored || preferred); }
 
-    $("navDashboard").onclick = () => setView("dashboard"); $("navMemories").onclick = () => setView("memories"); $("navActivity").onclick = () => setView("activity"); $("navTasks").onclick = () => setView("tasks"); $("navAudit").onclick = () => setView("audit"); $("navSystem").onclick = () => setView("system");
+    $("navDashboard").onclick = () => setView("dashboard"); $("navMemories").onclick = () => setView("memories"); $("navActivity").onclick = () => setView("activity"); $("navTasks").onclick = () => setView("tasks"); $("navTokenStats").onclick = () => setView("tokenStats"); $("navAudit").onclick = () => setView("audit"); $("navSystem").onclick = () => setView("system");
     $("refresh").onclick = refreshCurrentView; $("openActivity").onclick = () => setView("activity");
-    $("search").onclick = applyFilters; $("clearFilters").onclick = () => { $("query").value = ""; $("layer").value = ""; $("status").value = ""; $("sourceAgent").value = ""; $("projectScope").value = ""; applyFilters(); };
+    $("search").onclick = applyFilters; $("clearFilters").onclick = () => { $("query").value = ""; $("layer").value = ""; $("status").value = ""; $("sourceAgent").value = ""; $("projectScope").value = ""; $("contextPackScope").value = ""; renderContextPack(state.contextPack || {}); applyFilters(); };
     $("prevPage").onclick = () => { if (state.page > 1) { state.page -= 1; loadMemories(); } }; $("nextPage").onclick = () => { if (state.page < state.totalPages) { state.page += 1; loadMemories(); } };
     $("pageInput").onkeydown = (event) => { if (event.key === "Enter") goToPage(); }; $("pageInput").onfocus = () => $("pageInput").select(); $("pageInput").onchange = goToPage;
     $("query").onkeydown = (event) => { if (event.key === "Enter") applyFilters(); }; $("layer").onchange = applyFilters; $("status").onchange = applyFilters; $("sourceAgent").onchange = applyFilters; $("projectScope").onchange = applyFilters;
+    $("contextPackScope").onchange = () => renderContextPack(state.contextPack || {});
+    $("contextPackOutlineTab").onclick = () => setContextPackView("outline"); $("contextPackGraphTab").onclick = () => setContextPackView("graph"); $("contextPackMarkdownTab").onclick = () => setContextPackView("markdown");
+    $("closeContextMemoryDialog").onclick = closeContextDialog; $("editContextMemory").onclick = beginContextMemoryEdit; $("cancelContextMemoryEdit").onclick = cancelContextMemoryEdit; $("contextMemoryEditForm").onsubmit = (event) => saveContextMemory(event).catch(showError);
     $("copyJson").onclick = () => copyJson(state.detailJson); $("deleteMemory").onclick = () => removeSelectedMemory().catch(showError);
     $("markUseful").onclick = () => memoryAction("quality", { useful: true }).catch(showError); $("markNotUseful").onclick = () => memoryAction("quality", { useful: false }).catch(showError); $("archiveMemory").onclick = () => memoryAction("archive", { reason: "noise archived in console" }).catch(showError); $("promoteMemory").onclick = () => memoryAction("promote", { reason: "manual L1 promotion" }).catch(showError); $("mergeMemory").onclick = () => mergeSelectedMemory().catch(showError);
     $("loadActivity").onclick = () => loadApiActivity().catch(showError); $("clearActivity").onclick = () => { $("activityQuery").value = ""; $("activityTool").value = ""; $("activitySource").value = ""; loadApiActivity().catch(showError); }; $("activityQuery").onkeydown = (event) => { if (event.key === "Enter") renderActivityRows(state.activityLogs); }; $("activityTool").onchange = () => loadApiActivity().catch(showError); $("activitySource").onchange = () => loadApiActivity().catch(showError); $("copyActivity").onclick = () => copyJson(state.activityJson);
     $("searchTasks").onclick = () => { state.taskPage = 1; loadTasks().catch(showError); }; $("clearTasks").onclick = () => { $("taskQuery").value = ""; state.taskPage = 1; loadTasks().catch(showError); }; $("taskQuery").onkeydown = (event) => { if (event.key === "Enter") { state.taskPage = 1; loadTasks().catch(showError); } }; $("prevTaskPage").onclick = () => { if (state.taskPage > 1) { state.taskPage -= 1; loadTasks().catch(showError); } }; $("nextTaskPage").onclick = () => { if (state.taskPage < state.taskTotalPages) { state.taskPage += 1; loadTasks().catch(showError); } }; $("copyTask").onclick = () => copyJson(state.taskJson); $("deleteTask").onclick = () => removeSelectedTask().catch(showError);
-    $("runWorker").onclick = () => runWorker().catch(showError); $("retryFailed").onclick = () => workerAction("retryFailed", "/api/v1/worker/retry-failed").catch(showError); $("promoteCandidates").onclick = () => workerAction("promoteCandidates", "/api/v1/worker/promote-candidates").catch(showError); $("reloadConfig").onclick = () => reloadConfig().catch(showError); $("copyConfig").onclick = () => copyJson(state.config); $("copyContextPack").onclick = () => navigator.clipboard.writeText((state.contextPack.packs || []).map((pack) => pack.markdown).join("\\n\\n---\\n\\n")).then(() => showToast("上下文包已复制")); $("copyAuditPacks").onclick = $("copyContextPack").onclick; $("bulkApproveCandidates").onclick = () => bulkApproveCandidates().catch(showError);
+    $("runWorker").onclick = () => runWorker().catch(showError); $("retryFailed").onclick = () => workerAction("retryFailed", "/api/v1/worker/retry-failed").catch(showError); $("promoteCandidates").onclick = () => workerAction("promoteCandidates", "/api/v1/worker/promote-candidates").catch(showError); $("reloadConfig").onclick = () => reloadConfig().catch(showError); $("copyConfig").onclick = () => copyJson(state.config); $("copyContextPack").onclick = () => navigator.clipboard.writeText(contextPackMarkdown(state.contextPack || {}, $("contextPackScope").value)).then(() => showToast("上下文包已复制")); $("exportContextPack").onclick = exportContextPackMarkdown; $("copyAuditPacks").onclick = () => navigator.clipboard.writeText(contextPackMarkdown(state.contextPack || {})).then(() => showToast("上下文包已复制")); $("bulkApproveCandidates").onclick = () => bulkApproveCandidates().catch(showError);
     $("themeToggle").onclick = () => applyTheme(document.documentElement.classList.contains("dark") ? "light" : "dark");
     $("lockConsole").onclick = () => { memoryToken = ""; if (typeof sessionStorage !== "undefined") sessionStorage.removeItem("memmyMemoryToken"); showAuth(); };
     $("connectToken").onclick = async () => { const token = $("tokenInput").value.trim(); if (!token) { showAuth("请输入访问令牌"); return; } memoryToken = token; if (typeof sessionStorage !== "undefined") sessionStorage.setItem("memmyMemoryToken", token); try { await api("/api/v1/panel/status"); hideAuth(); $("tokenInput").value = ""; await refreshAll(); } catch (error) { showAuth(error.message || String(error)); } };

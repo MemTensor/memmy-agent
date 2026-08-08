@@ -1119,6 +1119,72 @@ describe("MemoryService / REST contract", () => {
     db.close();
   });
 
+  it("edits a context-pack source memory and regenerates the pack without losing provenance", async () => {
+    const { db, service } = createTestService();
+    const namespace = {
+      source: "codex",
+      profileId: "main",
+      userId: "context-pack-editor",
+      projectId: "project-context",
+      workspaceId: "workspace-context",
+      workspacePath: "/work/project-context"
+    };
+    const added = service.addMemory({
+      namespace,
+      layer: "L2",
+      title: "Architecture service boundary",
+      content: "Architecture module uses a repository boundary.",
+      tags: ["architecture"],
+      deferProcessing: true
+    });
+    const server = createMemoryHttpServer({
+      service,
+      auth: { cloudAccessTokens: { "context-editor-token": namespace } }
+    });
+    await withServerClosed(server, async () => {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("expected TCP address");
+      const baseUrl = `http://127.0.0.1:${address.port}/api/v1`;
+      const headers = { authorization: "Bearer context-editor-token" };
+
+      const beforePack = await fetch(`${baseUrl}/panel/context-packs`, { headers });
+      const beforePackBody = await beforePack.json() as { packs: Array<{ architectureFacts: Array<{ id: string; title: string }> }> };
+      expect(beforePackBody.packs[0]?.architectureFacts).toContainEqual(expect.objectContaining({ id: added.id, title: "Architecture service boundary" }));
+
+      const edit = await fetch(`${baseUrl}/memory/${encodeURIComponent(added.id)}/edit`, {
+        method: "POST",
+        headers: { ...headers, "content-type": "application/json" },
+        body: JSON.stringify({
+          title: "Architecture API boundary",
+          content: "Architecture module now uses an API repository boundary.",
+          tags: ["architecture", "api"],
+          reason: "context pack correction"
+        })
+      });
+      expect(edit.status).toBe(200);
+      expect(await edit.json()).toMatchObject({ ok: true, id: added.id, version: 2 });
+
+      const detail = await fetch(`${baseUrl}/memory/${encodeURIComponent(added.id)}`, { headers });
+      const detailBody = await detail.json() as { item: { id: string; title: string; body: string; version: number; provenance?: { sourceAgent?: string; workspaceId?: string } } };
+      expect(detailBody.item).toMatchObject({
+        id: added.id,
+        title: "Architecture API boundary",
+        body: "Architecture module now uses an API repository boundary.",
+        version: 2,
+        provenance: { sourceAgent: "codex", workspaceId: "workspace-context" }
+      });
+
+      const afterPack = await fetch(`${baseUrl}/panel/context-packs`, { headers });
+      const afterPackBody = await afterPack.json() as { packs: Array<{ markdown: string; architectureFacts: Array<{ id: string; title: string; summary: string }> }> };
+      expect(afterPackBody.packs[0]?.architectureFacts).toContainEqual(expect.objectContaining({ id: added.id, title: "Architecture API boundary", summary: "Architecture module now uses an API repository boundary." }));
+      expect(afterPackBody.packs[0]?.architectureFacts).not.toContainEqual(expect.objectContaining({ title: "Architecture service boundary" }));
+      expect(afterPackBody.packs[0]?.markdown).toContain("Architecture module now uses an API repository boundary.");
+      expect(afterPackBody.packs[0]?.markdown).not.toContain("Architecture module uses a repository boundary.");
+    });
+    db.close();
+  });
+
   it("enforces scoped API permissions, idempotency, and shared resource access", async () => {
     const { db, service } = createTestService();
     const server = createMemoryHttpServer({

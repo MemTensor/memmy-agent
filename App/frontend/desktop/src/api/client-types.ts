@@ -7,6 +7,10 @@ import {
   createHttpByokTokenUsageClient,
   type ByokTokenUsageClient
 } from "./byok-token-usage-client.js";
+import {
+  createHttpAgentTokenStatsClient,
+  type AgentTokenStatsClient
+} from "./agent-token-stats-client.js";
 import { createHttpChannelsClient, type ChannelsClient } from "./channels-client.js";
 import { createHttpConfigClient, type ConfigClient } from "./config-client.js";
 import {
@@ -32,6 +36,7 @@ export interface AppClients {
   asr: AsrClient;
   memmyAgent: MemmyAgentClient;
   tokenQuota: TokenQuotaClient;
+  agentTokenStats: AgentTokenStatsClient;
 }
 
 export interface CreateAppClientsInput {
@@ -56,6 +61,7 @@ export function createAppClients(input: CreateAppClientsInput): AppClients {
     byokTokenUsage: createHttpByokTokenUsageClient(input.runtimeConfig),
     asr: createHttpAsrClient(input.runtimeConfig),
     memmyAgent: createMemmyAgentClient(input.runtimeConfig.agentGateway),
-    tokenQuota: createHttpTokenQuotaClient(input.runtimeConfig)
+    tokenQuota: createHttpTokenQuotaClient(input.runtimeConfig),
+    agentTokenStats: createHttpAgentTokenStatsClient(input.runtimeConfig)
   };
 }

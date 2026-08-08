@@ -1928,6 +1928,73 @@ export class MemoryService {
     return { ok: true, id: updated.id, useful, changeSeq, auditId: audit.id, serverTime: at };
   }
 
+  editMemory(id: string, request: MemoryGovernanceRequest & {
+    title: string;
+    content: string;
+    tags: string[];
+  }) {
+    this.assertMemoryAddEnabled();
+    const memory = this.requireExistingMemory(id);
+    this.assertMemoryInScope(memory, request.namespace);
+    const at = nowIso();
+    const before = memory;
+    const title = request.title.trim();
+    const content = request.content.trim();
+    const tags = uniq(request.tags.map((tag) => tag.trim()).filter(Boolean));
+    const updated = this.repos.memories.update({
+      ...memory,
+      memoryValue: content,
+      tags,
+      info: { ...memory.info, title, summary: content, tags },
+      properties: {
+        ...memory.properties,
+        tags,
+        info: { ...memory.properties.info, title, summary: content, tags },
+        internal_info: { ...memory.properties.internal_info, title, summary: content }
+      },
+      contentHash: stableHash(content),
+      updatedAt: at
+    });
+    const changeSeq = this.repos.runtime.appendChange({
+      memoryId: updated.id,
+      namespaceId: namespaceIdFromMemory(updated),
+      kind: kindFromMemory(updated),
+      op: "updated",
+      entityId: updated.id,
+      userId: updated.userId,
+      changeType: "content_edit",
+      before,
+      after: updated,
+      source: "panel.edit",
+      createdAt: at
+    });
+    const audit = this.repos.runtime.insertAudit({
+      userId: updated.userId,
+      sessionId: updated.sessionId,
+      actor: request.namespace ? { ...request.namespace } : {},
+      action: "edit_memory",
+      targetKind: kindFromMemory(updated),
+      targetId: updated.id,
+      before,
+      after: updated,
+      meta: { reason: request.reason, source: "context_pack" },
+      createdAt: at
+    });
+    let embeddingJobId: string | undefined;
+    if (this.config.algorithm.capture.embedAfterCapture) {
+      this.repos.memories.deleteVector(updated.id, updated.memoryLayer === "L1" ? "vec_summary" : "vec");
+      embeddingJobId = this.workerHandlers.enqueueJob({
+        jobType: "embedding",
+        userId: updated.userId,
+        sessionId: updated.sessionId,
+        targetMemoryId: updated.id,
+        payload: { source: "panel.edit", changeSeq, contentHash: updated.contentHash },
+        createdAt: at
+      }).id;
+    }
+    return { ok: true, id: updated.id, version: updated.version, changeSeq, auditId: audit.id, embeddingJobId, serverTime: at };
+  }
+
   reviewCandidates(request: RequestEnvelope & { layer?: MemoryLayer; limit?: number } = {}) {
     const limit = Math.max(1, Math.min(request.limit ?? 100, 1000));
     const memories = this.repos.memories.list({

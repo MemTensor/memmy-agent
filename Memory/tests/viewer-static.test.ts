@@ -7,6 +7,12 @@ describe("memoryPanelHtml", () => {
     expect(memoryPanelHtml()).toContain('<link rel="icon" href="data:,">');
   });
 
+  it("offers a Markdown download for the generated context pack", () => {
+    const html = memoryPanelHtml();
+    expect(html).toContain('id="exportContextPack"');
+    expect(html).toContain('link.download = "memmy-context-pack-" + name + ".md"');
+  });
+
   it("strips generated Summary prefixes from displayed memory titles", async () => {
     const harness = createViewerHarness();
     runViewerScript(harness);
@@ -25,6 +31,19 @@ describe("memoryPanelHtml", () => {
     const layerHtml = harness.element("layer").innerHTML;
     expect(layerHtml).toContain("L1 (1,297)");
     expect(layerHtml).toContain("L2 (2)");
+  });
+
+  it("shows only the selected workspace context pack", async () => {
+    const harness = createViewerHarness();
+    runViewerScript(harness);
+    await flushPromises();
+
+    harness.element("contextPackScope").value = "workspace:workspace_1";
+    const change = harness.element("contextPackScope").onchange as () => void;
+    change();
+
+    expect(harness.element("contextPackMarkdown").textContent).toBe("# Project Memory Pack: demo");
+    expect(harness.element("contextPackMarkdown").textContent).not.toContain("other");
   });
 
   it("keeps the right JSON panel on the latest clicked memory detail", async () => {
@@ -160,12 +179,14 @@ function createViewerHarness() {
     "navMemories",
     "navActivity",
     "navTasks",
+    "navTokenStats",
     "navAudit",
     "navSystem",
     "viewDashboard",
     "viewMemories",
     "viewActivity",
     "viewTasks",
+    "viewTokenStats",
     "viewAudit",
     "viewSystem",
     "pageTitle",
@@ -193,7 +214,27 @@ function createViewerHarness() {
     "l2ResolvingReason",
     "evolutionJobState",
     "contextPackMarkdown",
+    "contextPackOutline",
+    "contextPackGraph",
+    "contextPackOutlineTab",
+    "contextPackGraphTab",
+    "contextPackMarkdownTab",
+    "contextPackScope",
     "copyContextPack",
+    "exportContextPack",
+    "contextMemoryDialog",
+    "contextMemoryDialogTitle",
+    "contextMemoryDialogId",
+    "closeContextMemoryDialog",
+    "contextMemoryDetail",
+    "contextMemoryEditForm",
+    "contextMemoryTitle",
+    "contextMemoryTags",
+    "contextMemoryBody",
+    "cancelContextMemoryEdit",
+    "saveContextMemory",
+    "contextMemoryDetailActions",
+    "editContextMemory",
     "isolationAudit",
     "auditRiskState",
     "auditIssueCount",
@@ -250,6 +291,12 @@ function createViewerHarness() {
     "taskDetailId",
     "taskDetailContent",
     "taskDetailJson",
+    "tokenStatsProject",
+    "tokenStatsLegend",
+    "tokenStatsChart",
+    "tokenStatsAgents",
+    "tokenStatsCombined",
+    "tokenStatsScannedAt",
     "copyTask",
     "deleteTask",
     "systemHealthBadge",
@@ -334,6 +381,9 @@ function createViewerHarness() {
     if (path === "/api/v1/panel/status") {
       return jsonResponse({ health: { ok: true, version: "1.0.4", mode: "dev", activeProfile: "byok", uptimeMs: 10, storage: { backend: "sqlite" } }, serverTime: new Date().toISOString() });
     }
+    if (path === "/api/v1/agent-token-stats") {
+      return jsonResponse({ projects: [], monthly: [], scannedAt: new Date().toISOString() });
+    }
     if (path === "/api/v1/panel/activity?limit=20") {
       return jsonResponse({ entries: [] });
     }
@@ -341,7 +391,10 @@ function createViewerHarness() {
       return jsonResponse({ layers: [{ layer: "L1", count: 2, candidates: 0, queued: 0, failed: 0 }], l2Resolving: { active: false, count: 0, reason: "没有符合条件的候选" }, recentJobs: [] });
     }
     if (path === "/api/v1/panel/context-packs") {
-      return jsonResponse({ packs: [{ markdown: "# Project Memory Pack: demo" }] });
+      return jsonResponse({ packs: [
+        { namespace: { tenantId: "local", projectId: "demo", workspaceId: "workspace_1", workspacePath: "/tmp/demo", label: "demo" }, markdown: "# Project Memory Pack: demo" },
+        { namespace: { tenantId: "local", projectId: "other", workspaceId: "workspace_2", workspacePath: "/tmp/other", label: "other" }, markdown: "# Project Memory Pack: other" }
+      ] });
     }
     if (path === "/api/v1/panel/namespace-audit") {
       return jsonResponse({ summary: { total: 2, missingWorkspace: 0, unknownSource: 0, missingAgentSourceTag: 0, crossWorkspaceRisk: 0 }, issues: [] });

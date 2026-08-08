@@ -30,6 +30,9 @@ services:
     volumes:
       - memory-data:/data
       - memory-model-cache:/home/node/.memmy/memory-service/model-cache
+      - ${HOME}/.pi/agent/sessions:/home/node/.pi/agent/sessions:ro
+      - ${HOME}/.codex/sessions:/home/node/.codex/sessions:ro
+      - ${HOME}/.claude/transcripts:/home/node/.claude/transcripts:ro
     healthcheck:
       test:
         - CMD

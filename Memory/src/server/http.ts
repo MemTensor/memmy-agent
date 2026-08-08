@@ -19,6 +19,7 @@ import type {
 } from "../types.js";
 import { DEFAULT_NAMESPACE_SOURCE } from "../types.js";
 import { MemoryService } from "../service/memory-service.js";
+import { createAgentTokenStatsService } from "../service/agent-token-stats-service.js";
 import { normalizeNamespace } from "../service/namespace/namespace-scope.js";
 import { MemoryServiceError, statusForCode } from "../utils/error.js";
 import {
@@ -34,6 +35,7 @@ import {
 
 const logger = createMemoryLogger("http");
 const workerLogger = createMemoryLogger("worker");
+const agentTokenStatsService = createAgentTokenStatsService();
 
 export const API_ROUTES = [
   "GET /api/v1/health",
@@ -51,6 +53,7 @@ export const API_ROUTES = [
   "POST /api/v1/memory/processing/status",
   "POST /api/v1/memory/:id/processing/retry",
   "POST /api/v1/memory/:id/quality",
+  "POST /api/v1/memory/:id/edit",
   "POST /api/v1/memory/:id/archive",
   "POST /api/v1/memory/:id/promote",
   "GET /api/v1/panel/review/candidates",
@@ -77,7 +80,8 @@ export const API_ROUTES = [
   "GET /api/v1/panel/activity",
   "GET /api/v1/panel/items",
   "GET /api/v1/panel/tasks",
-  "DELETE /api/v1/panel/tasks/:id"
+  "DELETE /api/v1/panel/tasks/:id",
+  "GET /api/v1/agent-token-stats"
 ] as const;
 
 export interface MemoryHttpServerOptions {
@@ -719,6 +723,11 @@ async function routeRequest(
     });
   }
 
+  if (method === "GET" && path === "/api/v1/agent-token-stats") {
+    requirePanelRead(principal);
+    return agentTokenStatsService.getStats();
+  }
+
   if (method === "GET" && path === "/api/v1/panel/activity") {
     requirePanelRead(principal);
     return service.serviceLogs({
@@ -831,6 +840,33 @@ async function routeRequest(
     const request = envelopeWithPrincipal(asObject(body, "memory.quality"), principal) as MemoryGovernanceRequest & { useful?: unknown };
     if (typeof request.useful !== "boolean") throw new MemoryServiceError("invalid_argument", "memory.quality useful must be boolean");
     return service.rateMemory(decodeMatchSegment(memoryQuality, 1), request.useful, request);
+  }
+
+  const memoryEdit = match(path, /^\/api\/v1\/memory\/([^/]+)\/edit$/);
+  if (method === "POST" && memoryEdit) {
+    requireMemoryWrite(principal);
+    const request = envelopeWithPrincipal(asObject(body, "memory.edit"), principal) as MemoryGovernanceRequest & {
+      title?: unknown;
+      content?: unknown;
+      tags?: unknown;
+    };
+    if (typeof request.title !== "string" || !request.title.trim()) {
+      throw new MemoryServiceError("invalid_argument", "memory.edit title is required");
+    }
+    if (typeof request.content !== "string" || !request.content.trim()) {
+      throw new MemoryServiceError("invalid_argument", "memory.edit content is required");
+    }
+    if (!Array.isArray(request.tags) || request.tags.some((tag) => typeof tag !== "string")) {
+      throw new MemoryServiceError("invalid_argument", "memory.edit tags must be an array of strings");
+    }
+    const result = service.editMemory(decodeMatchSegment(memoryEdit, 1), {
+      ...request,
+      title: request.title.trim(),
+      content: request.content.trim(),
+      tags: request.tags.map((tag) => String(tag).trim()).filter(Boolean)
+    });
+    if (result.embeddingJobId) autoWorker.schedule();
+    return result;
   }
 
   const memoryArchive = match(path, /^\/api\/v1\/memory\/([^/]+)\/archive$/);

@@ -37,6 +37,10 @@ import {
   type ByokTokenUsageService
 } from "./byok-token-usage-service.js";
 import {
+  createAgentTokenStatsService,
+  type AgentTokenStatsService
+} from "./agent-token-stats-service.js";
+import {
   createBootstrapService,
   type BootstrapScenario,
   type BootstrapService
@@ -86,6 +90,8 @@ export interface BackendServices {
   asr: AsrService;
   /** Token quota. */
   tokenQuota: TokenQuotaService;
+  /** Agent token stats. */
+  agentTokenStats: AgentTokenStatsService;
 }
 
 export interface CreateBackendServicesOptions {
@@ -235,7 +241,8 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
     tokenQuota: createTokenQuotaService({
       cloudClient: options.cloudClient,
       accountSessionRepository: options.appStateStore.repositories.accountSession
-    })
+    }),
+    agentTokenStats: createAgentTokenStatsService()
   };
 }
 

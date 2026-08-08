@@ -16,11 +16,13 @@ import { PoliciesSubPage } from "./memory/policies-sub-page.js";
 import { SkillsSubPage } from "./memory/skills-sub-page.js";
 import { SourcesSubPage } from "./memory/sources-sub-page.js";
 import { TasksSubPage } from "./memory/tasks-sub-page.js";
+import { TokenStatsSubPage } from "./memory/token-stats-sub-page.js";
 import { WorldModelSubPage } from "./memory/world-model-sub-page.js";
 import {
   ArrowLeft,
   BarChart3,
   BrainCircuit,
+  Gauge,
   Globe2,
   Layers,
   Link2,
@@ -41,7 +43,8 @@ export type MemorySubPageId =
   | "skills"
   | "analytics"
   | "logs"
-  | "sources";
+  | "sources"
+  | "token-stats";
 
 interface MemoryNavSection {
   titleKey: MessageKey;
@@ -70,6 +73,7 @@ const memoryNavSections: MemoryNavSection[] = [
     titleKey: "memory.nav.insights",
     items: [
       { id: "analytics", labelKey: "memory.nav.analytics", icon: <BarChart3 size={16} /> },
+      { id: "token-stats", labelKey: "memory.nav.tokenStats", icon: <Gauge size={16} /> },
       { id: "logs", labelKey: "memory.nav.logs", icon: <ScrollText size={16} /> }
     ]
   },
@@ -121,6 +125,7 @@ export function MemoryPage(props: MemoryPageProps) {
       "world-model": <WorldModelSubPage client={client} />,
       skills: <SkillsSubPage client={client} />,
       analytics: <AnalyticsSubPage client={client} />,
+      "token-stats": <TokenStatsSubPage client={clients?.agentTokenStats ?? null} />,
       logs: <LogsSubPage client={client} />,
       sources: <SourcesSubPage />
     }),
@@ -295,6 +300,7 @@ function createPreviewChildByPage(t: (key: MessageKey) => string): Record<Memory
     "world-model": <div>{t("memory.worldModel.title")}</div>,
     skills: <div>{t("memory.skills.title")}</div>,
     analytics: <div>{t("memory.analytics.title")}</div>,
+    "token-stats": <div>{t("memory.tokenStats.title")}</div>,
     logs: <div>{t("memory.logs.title")}</div>,
     sources: <div>{t("memory.sourcesTitle")} {t("memory.scan")}</div>
   };

@@ -27,6 +27,7 @@ const MEMORY_SUB_PAGE_TITLES: Record<MemorySubPageId, string> = {
   "world-model": "World Model",
   skills: "Skills",
   analytics: "Analytics",
+  "token-stats": "Token Stats",
   logs: "Logs",
   sources: "Sources"
 };

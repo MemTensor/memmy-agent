@@ -550,3 +550,14 @@ export function ImagePlus(props: MemoryIconProps) {
     </IconShell>
   );
 }
+
+export function Gauge(props: MemoryIconProps) {
+  return (
+    <IconShell {...props} name="gauge">
+      <path d="M12 14v-2" />
+      <path d="M19.4 15a1.7 1.7 0 0 0 .4-1V7a2 2 0 0 0-2-2H6.6a2 2 0 0 0-2 2v7a1.7 1.7 0 0 0 .4 1" />
+      <path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Z" />
+      <path d="M12 14l4-4" />
+    </IconShell>
+  );
+}
