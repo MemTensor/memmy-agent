@@ -26,11 +26,33 @@ type ApiContext = {
   sessionLocks: Map<string, Promise<void>>;
 };
 
+type ChatCompletionUsage = {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+};
+
 export function errorJson(status: number, message: string, errType = "invalid_request_error"): Response {
   return Response.json({ error: { message, type: errType, code: status } }, { status });
 }
 
-export function chatCompletionResponse(content: string, model: string): Record<string, any> {
+function tokenCount(value: any): number | null {
+  if (value == null || value === "") return null;
+  const count = Number(value);
+  return Number.isFinite(count) && count >= 0 ? Math.trunc(count) : null;
+}
+
+function normalizeChatUsage(usage: Record<string, any> | null | undefined): ChatCompletionUsage {
+  const promptTokens = tokenCount(usage?.prompt_tokens) ?? 0;
+  const completionTokens = tokenCount(usage?.completion_tokens) ?? 0;
+  return {
+    prompt_tokens: promptTokens,
+    completion_tokens: completionTokens,
+    total_tokens: tokenCount(usage?.total_tokens) ?? promptTokens + completionTokens,
+  };
+}
+
+export function chatCompletionResponse(content: string, model: string, usage?: Record<string, any>): Record<string, any> {
   return {
     id: `chatcmpl-${crypto.randomUUID().slice(0, 12)}`,
     object: "chat.completion",
@@ -43,7 +65,7 @@ export function chatCompletionResponse(content: string, model: string): Record<s
         finish_reason: "stop",
       },
     ],
-    usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+    usage: normalizeChatUsage(usage),
   };
 }
 
@@ -51,6 +73,21 @@ function responseText(value: any): string {
   if (value == null) return "";
   if (typeof value?.content === "string") return value.content;
   return String(value);
+}
+
+function responseUsage(value: any): Record<string, any> {
+  const usage = value?.metadata?.usage;
+  return usage && typeof usage === "object" && !Array.isArray(usage) ? usage : {};
+}
+
+function mergeUsageRecords(left: Record<string, any>, right: Record<string, any>): ChatCompletionUsage {
+  const leftUsage = normalizeChatUsage(left);
+  const rightUsage = normalizeChatUsage(right);
+  return {
+    prompt_tokens: leftUsage.prompt_tokens + rightUsage.prompt_tokens,
+    completion_tokens: leftUsage.completion_tokens + rightUsage.completion_tokens,
+    total_tokens: leftUsage.total_tokens + rightUsage.total_tokens,
+  };
 }
 
 export function sseChunk(delta: string, model: string, chunkId: string, finishReason: string | null = null): string {
@@ -328,14 +365,16 @@ export async function handleChatCompletions(request: Request, ctx?: ApiContext):
     const reply = await withSessionLock(context, sessionKey, async () => {
       const first = await withTimeout(Promise.resolve(callAgent(context, baseArgs)), context.requestTimeout);
       let textResponse = responseText(first);
+      let usage = responseUsage(first);
       if (!textResponse.trim()) {
         const retry = await withTimeout(Promise.resolve(callAgent(context, baseArgs)), context.requestTimeout);
         textResponse = responseText(retry);
+        usage = mergeUsageRecords(usage, responseUsage(retry));
         if (!textResponse.trim()) textResponse = EMPTY_FINAL_RESPONSE_MESSAGE;
       }
-      return textResponse;
+      return { text: textResponse, usage };
     });
-    return Response.json(chatCompletionResponse(reply, context.modelName));
+    return Response.json(chatCompletionResponse(reply.text, context.modelName, reply.usage));
   } catch (err) {
     const message = (err as Error).message ?? "";
     if (message.startsWith("Request timed out")) return errorJson(504, message);

@@ -62,6 +62,7 @@ type AgentLoopResult = [
   hadInjections: boolean,
   finalContentStreamed: boolean,
   errorCategory: ProviderErrorCategory | null,
+  usage: Record<string, any>,
 ];
 
 export enum TurnState {
@@ -102,6 +103,7 @@ export class TurnContext {
   finalContent: string | null = null;
   finalContentStreamed = false;
   errorCategory: ProviderErrorCategory | null = null;
+  usage: Record<string, any> = {};
   toolsUsed: string[] = [];
   allMessages: Record<string, any>[] = [];
   stopReason = "";
@@ -1647,7 +1649,8 @@ export class AgentLoop {
         injectionCallback: ({ limit = 3 } = {}) => this.drainPendingQueue(pendingQueue, limit, session?.key ?? sessionKey),
       }),
     );
-    this.lastUsage = normalizeUsageRecord(result.usage ?? result.response?.usage);
+    const turnUsage = normalizeUsageRecord(result.usage ?? result.response?.usage);
+    this.lastUsage = turnUsage;
     const toolsUsed = (result.toolCalls ?? []).map((call: any) => call?.function?.name ?? call?.name).filter(Boolean);
     return [
       result.finalContent ?? result.content ?? EMPTY_FINAL_RESPONSE_MESSAGE,
@@ -1657,6 +1660,7 @@ export class AgentLoop {
       Boolean(result.hadInjections),
       Boolean(result.finalContentStreamed),
       result.response?.errorCategory ?? null,
+      turnUsage,
     ];
   }
 
@@ -1666,11 +1670,12 @@ export class AgentLoop {
     allMessages: Record<string, any>[],
     stopReason: string,
     hadInjections: boolean,
-    { turnLatencyMs = null, tools = null, finalContentStreamed = false, errorCategory = null }: {
+    { turnLatencyMs = null, tools = null, finalContentStreamed = false, errorCategory = null, usage = null }: {
       turnLatencyMs?: number | null;
       tools?: ToolRegistryInstance | null;
       finalContentStreamed?: boolean;
       errorCategory?: ProviderErrorCategory | null;
+      usage?: Record<string, any> | null;
     } = {},
   ): OutboundMessage | null {
     void allMessages;
@@ -1687,6 +1692,7 @@ export class AgentLoop {
         ...(finalContentStreamed && !["error", "toolError"].includes(stopReason) ? { streamed: true } : {}),
         ...(turnLatencyMs != null ? { latencyMs: Math.trunc(turnLatencyMs) } : {}),
         ...(errorCategory === "quota_exhausted" ? { modelErrorCategory: errorCategory } : {}),
+        ...(usage ? { usage } : {}),
       },
     });
   }
@@ -1824,7 +1830,7 @@ export class AgentLoop {
   }
 
   async stateRun(ctx: TurnContext): Promise<string> {
-    const [finalContent, toolsUsed, allMessages, stopReason, hadInjections, finalContentStreamed, errorCategory] = await this.runAgentLoop(ctx.initialMessages, {
+    const [finalContent, toolsUsed, allMessages, stopReason, hadInjections, finalContentStreamed, errorCategory, usage] = await this.runAgentLoop(ctx.initialMessages, {
       onProgress: ctx.onProgress,
       onStream: ctx.onStream,
       onStreamEnd: ctx.onStreamEnd,
@@ -1859,6 +1865,7 @@ export class AgentLoop {
     ctx.hadInjections = hadInjections;
     ctx.finalContentStreamed = finalContentStreamed;
     ctx.errorCategory = errorCategory;
+    ctx.usage = usage;
     return "ok";
   }
 
@@ -1891,6 +1898,7 @@ export class AgentLoop {
       tools: ctx.tools,
       finalContentStreamed: ctx.finalContentStreamed,
       errorCategory: ctx.errorCategory,
+      usage: ctx.usage,
     });
     return "ok";
   }

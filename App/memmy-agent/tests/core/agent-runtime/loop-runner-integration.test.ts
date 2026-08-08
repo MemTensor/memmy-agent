@@ -107,6 +107,29 @@ describe("AgentLoop direct processing", () => {
     });
   });
 
+  it("attaches each turn's accumulated usage to its own outbound message", async () => {
+    const agent = loop();
+    const usages = [
+      { prompt_tokens: 120, completion_tokens: 45, total_tokens: 165 },
+      { prompt_tokens: 30, completion_tokens: 8, total_tokens: 38 },
+    ];
+    let calls = 0;
+    agent.runner.run = vi.fn(async () =>
+      new AgentRunResult({
+        finalContent: "done",
+        messages: [{ role: "assistant", content: "done" }],
+        stopReason: "completed",
+        usage: usages[calls++],
+      }));
+
+    const first = await agent.processDirect("first", { sessionKey: "cli:usage-a" });
+    const second = await agent.processDirect("second", { sessionKey: "cli:usage-b" });
+
+    expect(first?.metadata.usage).toEqual(usages[0]);
+    expect(second?.metadata.usage).toEqual(usages[1]);
+    expect(agent.lastUsage).toEqual(usages[1]);
+  });
+
   it("publishes a thread session update after early-persisting WebUI user messages", async () => {
     const p = provider(["web answer"]);
     const agent = loop(p);

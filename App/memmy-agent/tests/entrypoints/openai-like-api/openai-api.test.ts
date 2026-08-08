@@ -56,6 +56,16 @@ describe("OpenAI-compatible API response helpers", () => {
     expect(result.choices[0].message.content).toBe("hello world");
     expect(result.choices[0].finish_reason).toBe("stop");
     expect(result.id).toMatch(/^chatcmpl-/);
+    expect(result.usage).toEqual({ prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
+  });
+
+  it("reports normalized usage when the agent supplied it", () => {
+    const result = chatCompletionResponse("hello world", "test-model", {
+      prompt_tokens: "12.9",
+      completion_tokens: 7,
+    });
+
+    expect(result.usage).toEqual({ prompt_tokens: 12, completion_tokens: 7, total_tokens: 19 });
   });
 });
 
@@ -156,6 +166,25 @@ describe("OpenAI-compatible API routing", () => {
       channel: "api",
       chat_id: API_CHAT_ID,
     });
+  });
+
+  it("propagates the turn usage carried by the agent outbound message", async () => {
+    const app = createApp(
+      {
+        processDirect: async () => ({
+          content: "metered response",
+          metadata: { usage: { prompt_tokens: 42, completion_tokens: 17, total_tokens: 59 } },
+        }),
+      },
+      "test-model",
+    );
+
+    const response = await app.fetch(request({ messages: [{ role: "user", content: "hello" }] }));
+    const body = (await response.json()) as any;
+
+    expect(response.status).toBe(200);
+    expect(body.choices[0].message.content).toBe("metered response");
+    expect(body.usage).toEqual({ prompt_tokens: 42, completion_tokens: 17, total_tokens: 59 });
   });
 
   it("uses the same fixed session key across follow-up requests", async () => {
@@ -305,6 +334,34 @@ describe("OpenAI-compatible API routing", () => {
     const fallbackResponse = await fallback.fetch(request({ messages: [{ role: "user", content: "hello" }] }));
     expect(((await fallbackResponse.json()) as any).choices[0].message.content).toBe(EMPTY_FINAL_RESPONSE_MESSAGE);
     expect(fallbackCalls).toBe(2);
+  });
+
+  it("sums usage from both calls when an empty response is retried", async () => {
+    let calls = 0;
+    const app = createApp(
+      {
+        processDirect: async () => {
+          calls += 1;
+          return calls === 1
+            ? {
+                content: "",
+                metadata: { usage: { prompt_tokens: 20, completion_tokens: 0, total_tokens: 20 } },
+              }
+            : {
+                content: "recovered",
+                metadata: { usage: { prompt_tokens: 25, completion_tokens: 9, total_tokens: 34 } },
+              };
+        },
+      },
+      "m",
+    );
+
+    const response = await app.fetch(request({ messages: [{ role: "user", content: "hello" }] }));
+    const body = (await response.json()) as any;
+
+    expect(calls).toBe(2);
+    expect(body.choices[0].message.content).toBe("recovered");
+    expect(body.usage).toEqual({ prompt_tokens: 45, completion_tokens: 9, total_tokens: 54 });
   });
 
   it("forwards media paths through AgentLoop.processDirect", async () => {
