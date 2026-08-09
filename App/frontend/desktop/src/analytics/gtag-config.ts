@@ -7,7 +7,7 @@ export function resolveAnalyticsAppEnv(isProd = import.meta.env.PROD): Analytics
 
 /** Matches legal-links: MEMMY_APP_EDITION=intl → intl, otherwise cn. */
 export function resolveAnalyticsAppEdition(
-  rawEdition = import.meta.env.MEMMY_APP_EDITION as string | undefined
+  rawEdition?: string
 ): AnalyticsAppEdition {
   return rawEdition?.trim().toLowerCase() === "intl" ? "intl" : "cn";
 }
@@ -40,7 +40,7 @@ export function resolveGtagConfigOptions(input?: {
   return {
     send_page_view: false,
     app_env: resolveAnalyticsAppEnv(isProd),
-    app_edition: input?.appEdition ?? resolveAnalyticsAppEdition(),
+    app_edition: input?.appEdition ?? resolveAnalyticsAppEdition(import.meta.env.MEMMY_APP_EDITION as string | undefined),
     ...(debugMode ? { debug_mode: 1 } : {})
   };
 }

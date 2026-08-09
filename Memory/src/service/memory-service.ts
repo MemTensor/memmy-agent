@@ -22,6 +22,7 @@ import {
 } from "../storage/backend.js";
 import type { MemoryDb } from "../storage/db.js";
 import {
+  MemoryVersionConflictError,
   Repositories,
   jobToRef,
   kindFromMemory,
@@ -1941,7 +1942,12 @@ export class MemoryService {
     const title = request.title.trim();
     const content = request.content.trim();
     const tags = uniq(request.tags.map((tag) => tag.trim()).filter(Boolean));
-    const updated = this.repos.memories.update({
+    if (!Number.isInteger(request.version) || request.version! < 1) {
+      throw new MemoryServiceError("invalid_argument", "memory.edit version is required");
+    }
+    let updated: MemoryRow;
+    try {
+      updated = this.repos.memories.update({
       ...memory,
       memoryValue: content,
       tags,
@@ -1954,7 +1960,13 @@ export class MemoryService {
       },
       contentHash: stableHash(content),
       updatedAt: at
-    });
+      }, request.version);
+    } catch (error) {
+      if (error instanceof MemoryVersionConflictError) {
+        throw new MemoryServiceError("conflict", `memory was modified by another agent (current version ${error.actualVersion})`);
+      }
+      throw error;
+    }
     const changeSeq = this.repos.runtime.appendChange({
       memoryId: updated.id,
       namespaceId: namespaceIdFromMemory(updated),
@@ -1993,6 +2005,57 @@ export class MemoryService {
       }).id;
     }
     return { ok: true, id: updated.id, version: updated.version, changeSeq, auditId: audit.id, embeddingJobId, serverTime: at };
+  }
+
+  memoryHistory(id: string, request: RequestEnvelope & { limit?: number } = {}) {
+    const memory = this.requireExistingMemory(id);
+    this.assertMemoryInScope(memory, request.namespace);
+    return {
+      id,
+      currentVersion: memory.version,
+      items: this.repos.runtime.listMemoryChanges(id, request.limit ?? 100).map((change) => ({
+        seq: change.seq,
+        version: change.version,
+        changeType: change.changeType,
+        source: change.source,
+        createdAt: change.createdAt,
+        before: change.before,
+        after: change.after
+      })),
+      serverTime: nowIso()
+    };
+  }
+
+  restoreMemory(id: string, targetVersion: number, request: MemoryGovernanceRequest = {}) {
+    this.assertMemoryAddEnabled();
+    if (!Number.isInteger(targetVersion) || targetVersion < 1) {
+      throw new MemoryServiceError("invalid_argument", "target version must be a positive integer");
+    }
+    const memory = this.requireExistingMemory(id);
+    this.assertMemoryInScope(memory, request.namespace);
+    if (!Number.isInteger(request.version) || request.version! < 1) {
+      throw new MemoryServiceError("invalid_argument", "memory.restore version is required");
+    }
+    const history = this.repos.runtime.listMemoryChanges(id, 500);
+    const target = history.find((change) => change.version === targetVersion && change.after && typeof change.after === "object")?.after;
+    if (!target || typeof target !== "object") throw new MemoryServiceError("not_found", `memory history version not found: ${targetVersion}`);
+    const at = nowIso();
+    const before = memory;
+    let updated: MemoryRow;
+    try {
+      updated = this.repos.memories.update({ ...(target as MemoryRow), id, version: memory.version, updatedAt: at }, request.version);
+    } catch (error) {
+      if (error instanceof MemoryVersionConflictError) throw new MemoryServiceError("conflict", `memory was modified by another agent (current version ${error.actualVersion})`);
+      throw error;
+    }
+    const changeSeq = this.repos.runtime.appendChange({ memoryId: id, namespaceId: namespaceIdFromMemory(updated), kind: kindFromMemory(updated), op: "updated", entityId: id, userId: updated.userId, changeType: "restore", before, after: updated, source: "panel.restore", createdAt: at });
+    const audit = this.repos.runtime.insertAudit({ userId: updated.userId, sessionId: updated.sessionId, actor: request.namespace ? { ...request.namespace } : {}, action: "restore_memory", targetKind: kindFromMemory(updated), targetId: id, before, after: updated, meta: { reason: request.reason, targetVersion }, createdAt: at });
+    let embeddingJobId: string | undefined;
+    if (this.config.algorithm.capture.embedAfterCapture) {
+      this.repos.memories.deleteVector(updated.id, updated.memoryLayer === "L1" ? "vec_summary" : "vec");
+      embeddingJobId = this.workerHandlers.enqueueJob({ jobType: "embedding", userId: updated.userId, sessionId: updated.sessionId, targetMemoryId: updated.id, payload: { source: "panel.restore", changeSeq, contentHash: updated.contentHash }, createdAt: at }).id;
+    }
+    return { ok: true, id, version: updated.version, restoredVersion: targetVersion, changeSeq, auditId: audit.id, embeddingJobId, serverTime: at };
   }
 
   reviewCandidates(request: RequestEnvelope & { layer?: MemoryLayer; limit?: number } = {}) {

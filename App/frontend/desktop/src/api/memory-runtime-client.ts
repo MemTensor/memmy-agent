@@ -11,6 +11,7 @@ import {
   MemoryApiLogsInputSchema,
   MemoryApiLogsOutputSchema,
   MemoryHealthSnapshotSchema,
+  MemoryHistoryOutputSchema,
   MemoryProcessingStatusInputSchema,
   MemoryProcessingStatusOutputSchema,
   MemoryReloadConfigInputSchema,
@@ -21,6 +22,7 @@ import {
   PanelItemsInputSchema,
   PanelItemsOutputSchema,
   PanelOverviewOutputSchema,
+  ProjectContextPackOutputSchema,
   PanelTasksInputSchema,
   PanelTasksOutputSchema,
   SearchInputSchema,
@@ -28,6 +30,8 @@ import {
   StartTurnInputSchema,
   StartTurnOutputSchema,
   RetryMemoryProcessingOutputSchema,
+  RestoreMemoryInputSchema,
+  RestoreMemoryOutputSchema,
   type CloseSessionInput,
   type CloseSessionOutput,
   type CompleteTurnInput,
@@ -40,6 +44,7 @@ import {
   type MemoryApiLogsInput,
   type MemoryApiLogsOutput,
   type MemoryHealthSnapshot,
+  type MemoryHistoryOutput,
   type MemoryProcessingStatusOutput,
   type MemoryReloadConfigInput,
   type MemoryReloadConfigOutput,
@@ -49,6 +54,7 @@ import {
   type PanelItemsInput,
   type PanelItemsOutput,
   type PanelOverviewOutput,
+  type ProjectContextPackOutput,
   type PanelTasksInput,
   type PanelTasksOutput,
   type SearchInput,
@@ -56,6 +62,8 @@ import {
   type StartTurnInput,
   type StartTurnOutput,
   type RetryMemoryProcessingOutput,
+  type RestoreMemoryInput,
+  type RestoreMemoryOutput,
   type RuntimeConfig
 } from "@memmy/local-api-contracts";
 import { ApiRequestError, requestJson } from "./http.js";
@@ -72,10 +80,13 @@ export const MEMORY_RUNTIME_ENDPOINTS = [
   "POST /api/v1/memory/processing/status",
   "POST /api/v1/memory/:id/processing/retry",
   "GET /api/v1/memory/:id",
+  "GET /api/v1/memory/:id/history",
+  "POST /api/v1/memory/:id/history/:version/restore",
   "DELETE /api/v1/memory/:id",
   "GET /api/v1/memory/logs",
   "GET /api/v1/panel/overview",
   "GET /api/v1/panel/analysis",
+  "GET /api/v1/panel/context-pack",
   "GET /api/v1/panel/items",
   "GET /api/v1/panel/tasks",
   "DELETE /api/v1/panel/tasks/:id"
@@ -90,13 +101,16 @@ export interface MemoryRuntimeClient {
   completeTurn(turnId: string, input: CompleteTurnInput): Promise<CompleteTurnOutput>;
   search(input: SearchInput): Promise<SearchOutput>;
   addMemory(input: AddMemoryInput): Promise<AddMemoryOutput>;
-  getMemory(id: string): Promise<GetMemoryOutput>;
+  getMemory(id: string, options?: { signal?: AbortSignal }): Promise<GetMemoryOutput>;
+  getMemoryHistory(id: string, options?: { signal?: AbortSignal }): Promise<MemoryHistoryOutput>;
+  restoreMemory(id: string, targetVersion: number, input: RestoreMemoryInput): Promise<RestoreMemoryOutput>;
   deleteMemory(id: string): Promise<DeleteMemoryOutput>;
   getMemoryProcessingStatus(memoryIds: string[]): Promise<MemoryProcessingStatusOutput>;
   retryMemoryProcessing(id: string): Promise<RetryMemoryProcessingOutput>;
   listMemoryLogs(input: MemoryApiLogsInput): Promise<MemoryApiLogsOutput>;
   getPanelOverview(): Promise<PanelOverviewOutput>;
   getPanelAnalysis(): Promise<PanelAnalysisOutput>;
+  getProjectContextPack(projectId: string): Promise<ProjectContextPackOutput>;
   listPanelItems(input: PanelItemsInput): Promise<PanelItemsOutput>;
   listPanelTasks(input: PanelTasksInput): Promise<PanelTasksOutput>;
   deletePanelTask(id: string): Promise<DeletePanelTaskOutput>;
@@ -156,8 +170,31 @@ export function createHttpMemoryRuntimeClient(config: RuntimeConfig): MemoryRunt
       return requestJson({ config, path: "/api/v1/memory/add", schema: AddMemoryOutputSchema, body: AddMemoryInputSchema.parse(input) });
     },
 
-    async getMemory(id) {
-      return requestJson({ config, path: `/api/v1/memory/${encodeURIComponent(id)}`, schema: GetMemoryOutputSchema });
+    async getMemory(id, options) {
+      return requestJson({
+        config,
+        path: `/api/v1/memory/${encodeURIComponent(id)}`,
+        schema: GetMemoryOutputSchema,
+        init: { signal: options?.signal }
+      });
+    },
+
+    async getMemoryHistory(id, options) {
+      return requestJson({
+        config,
+        path: `/api/v1/memory/${encodeURIComponent(id)}/history`,
+        schema: MemoryHistoryOutputSchema,
+        init: { signal: options?.signal }
+      });
+    },
+
+    async restoreMemory(id, targetVersion, input) {
+      return requestJson({
+        config,
+        path: `/api/v1/memory/${encodeURIComponent(id)}/history/${targetVersion}/restore`,
+        schema: RestoreMemoryOutputSchema,
+        body: RestoreMemoryInputSchema.parse(input)
+      });
     },
 
     async deleteMemory(id) {
@@ -201,6 +238,14 @@ export function createHttpMemoryRuntimeClient(config: RuntimeConfig): MemoryRunt
 
     async getPanelAnalysis() {
       return requestJson({ config, path: "/api/v1/panel/analysis", schema: PanelAnalysisOutputSchema });
+    },
+
+    async getProjectContextPack(projectId) {
+      return requestJson({
+        config,
+        path: withQuery("/api/v1/panel/context-pack", { projectId }),
+        schema: ProjectContextPackOutputSchema
+      });
     },
 
     async listPanelItems(input) {
@@ -276,6 +321,12 @@ export function createUnavailableMemoryRuntimeClient(): MemoryRuntimeClient {
     async getMemory() {
       throw unavailable();
     },
+    async getMemoryHistory() {
+      throw unavailable();
+    },
+    async restoreMemory() {
+      throw unavailable();
+    },
     async deleteMemory() {
       throw unavailable();
     },
@@ -292,6 +343,9 @@ export function createUnavailableMemoryRuntimeClient(): MemoryRuntimeClient {
       throw unavailable();
     },
     async getPanelAnalysis() {
+      throw unavailable();
+    },
+    async getProjectContextPack() {
       throw unavailable();
     },
     async listPanelItems() {

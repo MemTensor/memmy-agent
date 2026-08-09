@@ -113,6 +113,7 @@ describe("MemoryService / governance / provenance and supersession", () => {
       layer: "L2",
       title: "Current migration policy",
       content: "Use the current migration procedure and verify the SQLite backup.",
+      tags: ["architecture"],
       adapterId: "pi-memory-extension",
       requestId: "add-new",
       supersedesMemoryId: old.id,
@@ -152,6 +153,16 @@ describe("MemoryService / governance / provenance and supersession", () => {
         relation: "supersedes"
       })
     ]);
+
+    const contextPack = service.projectContextPack({ namespace });
+    expect(contextPack.graph.nodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: replacement.id }),
+      expect.objectContaining({ id: old.id, external: true })
+    ]));
+    expect(contextPack.graph.edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sourceId: old.id, targetId: replacement.id, relation: "source" }),
+      expect.objectContaining({ sourceId: replacement.id, targetId: old.id, relation: "supersedes" })
+    ]));
 
     const relations = db.db.prepare(
       `SELECT source_memory_id, target_memory_id, relation, reason

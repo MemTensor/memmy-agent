@@ -14,6 +14,7 @@ import type {
   MemoryApiLogsInput,
   MemoryApiLogsOutput,
   MemoryHealthSnapshot,
+  MemoryHistoryOutput,
   MemoryProcessingStatusOutput,
   MemoryReloadConfigInput,
   MemoryReloadConfigOutput,
@@ -21,6 +22,7 @@ import type {
   PanelItemsInput,
   PanelItemsOutput,
   PanelOverviewOutput,
+  ProjectContextPackOutput,
   PanelTasksInput,
   PanelTasksOutput,
   OpenSessionInput,
@@ -30,6 +32,8 @@ import type {
   StartTurnInput,
   StartTurnOutput,
   RetryMemoryProcessingOutput,
+  RestoreMemoryInput,
+  RestoreMemoryOutput,
   WorkerRunOutput
 } from "@memmy/local-api-contracts";
 
@@ -47,6 +51,8 @@ export interface MemoryClient {
   search(input: SearchInput): Promise<SearchOutput>;
   addMemory(input: AddMemoryInput): Promise<AddMemoryOutput>;
   getMemory(input: { memoryId: string }): Promise<GetMemoryOutput>;
+  memoryHistory(memoryId: string): Promise<MemoryHistoryOutput>;
+  restoreMemory(input: RestoreMemoryInput & { memoryId: string; targetVersion: number }): Promise<RestoreMemoryOutput>;
   deleteMemory(input: DeleteMemoryInput & { memoryId: string }): Promise<DeleteMemoryOutput>;
 
   enqueueImportSummaries(memoryIds?: string[]): Promise<EnqueueImportSummariesOutput>;
@@ -61,6 +67,7 @@ export interface MemoryClient {
 
   panelOverview(): Promise<PanelOverviewOutput>;
   panelAnalysis(): Promise<PanelAnalysisOutput>;
+  projectContextPack(projectId: string): Promise<ProjectContextPackOutput>;
   panelItems(input: PanelItemsInput): Promise<PanelItemsOutput>;
   panelTasks(input: PanelTasksInput): Promise<PanelTasksOutput>;
   deletePanelTask(taskId: string): Promise<DeletePanelTaskOutput>;

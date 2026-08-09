@@ -193,6 +193,30 @@ export function createMockMemoryClient(options: CreateMockMemoryClientOptions = 
       };
     },
 
+    async memoryHistory(memoryId) {
+      failIfNeeded();
+      const serverTime = now();
+      return {
+        id: memoryId,
+        currentVersion: 1,
+        items: [{ seq: 1, version: 1, changeType: "created", source: "mock", createdAt: serverTime, after: {} }],
+        serverTime
+      };
+    },
+
+    async restoreMemory(input) {
+      failIfNeeded();
+      return {
+        ok: true,
+        id: input.memoryId,
+        version: input.version + 1,
+        restoredVersion: input.targetVersion,
+        changeSeq: nextChange().changeSeq,
+        auditId: randomUUID(),
+        serverTime: now()
+      };
+    },
+
     async deleteMemory(input) {
       failIfNeeded();
       return {
@@ -277,6 +301,21 @@ export function createMockMemoryClient(options: CreateMockMemoryClientOptions = 
         dailyMemoryWrites: emptyPanelDays(now()),
         dailySkillEvolutions: emptyPanelDays(now()),
         toolLatency: { tools: [], series: [] }
+      };
+    },
+
+    async projectContextPack(projectId) {
+      failIfNeeded();
+      return {
+        namespace: { projectId },
+        conventions: [],
+        commands: [],
+        architectureFacts: [],
+        recentTasks: [],
+        userPreferences: [],
+        graph: { nodes: [], edges: [] },
+        markdown: `# Project Memory Pack: ${projectId}`,
+        generatedAt: now()
       };
     },
 

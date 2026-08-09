@@ -54,6 +54,8 @@ export const API_ROUTES = [
   "POST /api/v1/memory/:id/processing/retry",
   "POST /api/v1/memory/:id/quality",
   "POST /api/v1/memory/:id/edit",
+  "GET /api/v1/memory/:id/history",
+  "POST /api/v1/memory/:id/history/:version/restore",
   "POST /api/v1/memory/:id/archive",
   "POST /api/v1/memory/:id/promote",
   "GET /api/v1/panel/review/candidates",
@@ -849,6 +851,7 @@ async function routeRequest(
       title?: unknown;
       content?: unknown;
       tags?: unknown;
+      version?: unknown;
     };
     if (typeof request.title !== "string" || !request.title.trim()) {
       throw new MemoryServiceError("invalid_argument", "memory.edit title is required");
@@ -859,12 +862,40 @@ async function routeRequest(
     if (!Array.isArray(request.tags) || request.tags.some((tag) => typeof tag !== "string")) {
       throw new MemoryServiceError("invalid_argument", "memory.edit tags must be an array of strings");
     }
+    if (!Number.isInteger(request.version) || Number(request.version) < 1) {
+      throw new MemoryServiceError("invalid_argument", "memory.edit version must be a positive integer");
+    }
     const result = service.editMemory(decodeMatchSegment(memoryEdit, 1), {
       ...request,
       title: request.title.trim(),
       content: request.content.trim(),
       tags: request.tags.map((tag) => String(tag).trim()).filter(Boolean)
     });
+    if (result.embeddingJobId) autoWorker.schedule();
+    return result;
+  }
+
+  const memoryHistory = match(path, /^\/api\/v1\/memory\/([^/]+)\/history$/);
+  if (method === "GET" && memoryHistory) {
+    requireMemoryRead(principal);
+    return service.memoryHistory(decodeMatchSegment(memoryHistory, 1), {
+      namespace: principal.namespace,
+      limit: parseNumber(url.searchParams.get("limit"))
+    });
+  }
+
+  const memoryRestore = match(path, /^\/api\/v1\/memory\/([^/]+)\/history\/(\d+)\/restore$/);
+  if (method === "POST" && memoryRestore) {
+    requireMemoryWrite(principal);
+    const request = envelopeWithPrincipal(asObject(body, "memory.restore"), principal) as MemoryGovernanceRequest;
+    if (!Number.isInteger(request.version) || Number(request.version) < 1) {
+      throw new MemoryServiceError("invalid_argument", "memory.restore version must be a positive integer");
+    }
+    const result = service.restoreMemory(
+      decodeMatchSegment(memoryRestore, 1),
+      Number(decodeMatchSegment(memoryRestore, 2)),
+      request
+    );
     if (result.embeddingJobId) autoWorker.schedule();
     return result;
   }

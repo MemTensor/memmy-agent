@@ -5,9 +5,13 @@ import { describe, expect, it } from "vitest";
 import YAML from "yaml";
 
 const workflowPath = resolve(import.meta.dirname, "../.github/workflows/github-release.yml");
+const dockerWorkflowPath = resolve(import.meta.dirname, "../.github/workflows/docker-publish.yml");
+const memoryDockerfilePath = resolve(import.meta.dirname, "../Memory/Dockerfile");
 const repoRoot = resolve(import.meta.dirname, "..");
 const source = readFileSync(workflowPath, "utf8");
 const workflow = YAML.parse(source);
+const dockerWorkflow = YAML.parse(readFileSync(dockerWorkflowPath, "utf8"));
+const memoryDockerfile = readFileSync(memoryDockerfilePath, "utf8");
 const releaseJob = workflow.jobs.release;
 const steps = releaseJob.steps as Array<Record<string, unknown>>;
 const script = (name: string) => String(steps.find((step) => step.name === name)?.run ?? "");
@@ -151,11 +155,23 @@ describe("GitHub release workflow", () => {
   });
 
   it("uses the release environment, minimal permissions, and per-version concurrency", () => {
-    expect(workflow.permissions).toEqual({ contents: "write" });
+    expect(workflow.permissions).toEqual({});
+    expect(releaseJob.permissions).toEqual({ contents: "write" });
     expect(releaseJob.environment).toBe("release");
     expect(workflow.concurrency["cancel-in-progress"]).toBe(false);
     expect(workflow.concurrency.group).toContain("inputs.version");
     expect(workflow.concurrency.group).toContain("pull_request.head.ref");
+  });
+
+  it("publishes the verified release commit through the reusable Docker workflow", () => {
+    const dockerJob = workflow.jobs.docker;
+    expect(dockerJob.needs).toBe("release");
+    expect(dockerJob.permissions).toEqual({ contents: "read", packages: "write" });
+    expect(dockerJob.uses).toBe("./.github/workflows/docker-publish.yml");
+    expect(dockerJob.with).toEqual({
+      tag: "${{ needs.release.outputs.tag }}",
+      ref: "${{ needs.release.outputs.target_sha }}"
+    });
   });
 
   it("embeds the repository .env required by packaged desktop runtimes", () => {
@@ -167,5 +183,93 @@ describe("GitHub release workflow", () => {
       expect(packagingSource).toMatch(/from:\s+\.\.\/\.\.\/\.\.\/\.env(?:\s|$)/);
       expect(packagingSource).toMatch(/to:\s+\.env(?:\s|$)/);
     }
+  });
+});
+
+describe("Memory Docker publish workflow", () => {
+  const smokeJob = dockerWorkflow.jobs.smoke;
+  const publishJob = dockerWorkflow.jobs.publish;
+  const publishSteps = publishJob.steps as Array<Record<string, unknown>>;
+  const publishStep = publishSteps.find((step) => step.name === "Build and push image");
+
+  it("publishes version tags and supports an explicit manual tag", () => {
+    expect(dockerWorkflow.on.push.tags).toEqual(["v*.*.*"]);
+    expect(dockerWorkflow.on.workflow_call.inputs).toMatchObject({
+      tag: { required: true, type: "string" },
+      ref: { required: true, type: "string" }
+    });
+    expect(dockerWorkflow.on.workflow_dispatch.inputs.tag).toMatchObject({
+      required: true,
+      type: "string"
+    });
+  });
+
+  it("rejects a release tag that disagrees with the package version", () => {
+    const validation = publishSteps.find((step) => step.name === "Validate release tag");
+    expect(validation?.env).toEqual({
+      IMAGE_TAG: "${{ github.event_name == 'push' && github.ref_name || inputs.tag }}"
+    });
+    expect(validation?.run).toContain("require('./package.json').version");
+    expect(validation?.run).toContain('test "$IMAGE_TAG" = "v$version"');
+  });
+
+  it("uses scoped GHCR permissions and the repository token", () => {
+    expect(dockerWorkflow.permissions).toEqual({ contents: "read", packages: "write" });
+    const login = publishSteps.find((step) => step.name === "Log in to GHCR");
+    expect(login?.with).toMatchObject({
+      registry: "ghcr.io",
+      username: "${{ github.actor }}",
+      password: "${{ secrets.GITHUB_TOKEN }}"
+    });
+  });
+
+  it("builds the Memory Dockerfile for amd64 and arm64 with attestations", () => {
+    expect(publishJob.needs).toBe("smoke");
+    expect(publishStep?.uses).toBe("docker/build-push-action@v6");
+    expect(publishStep?.with).toMatchObject({
+      context: ".",
+      file: "Memory/Dockerfile",
+      platforms: "linux/amd64,linux/arm64",
+      push: true,
+      provenance: "mode=max",
+      sbom: true
+    });
+  });
+
+  it("runs the built image through health, history, and restore smoke checks before publishing", () => {
+    const smokeSteps = smokeJob.steps as Array<Record<string, unknown>>;
+    const smokeBuild = smokeSteps.find((step) => step.name === "Build smoke image");
+    expect(smokeBuild?.with).toMatchObject({
+      file: "Memory/Dockerfile",
+      platforms: "linux/amd64",
+      load: true,
+      tags: "memmy-memory:smoke"
+    });
+    const smokeRun = smokeSteps.find((step) => step.name === "Run container smoke test");
+    expect(smokeRun?.run).toContain("node scripts/smoke-memory-docker.mjs");
+    expect(smokeRun?.run).toContain("uid=1000,gid=1000");
+  });
+
+  it("installs a locked production tree and blocks high-severity runtime advisories", () => {
+    const rootManifest = readJson("package.json") as { overrides?: Record<string, unknown> };
+    const memoryManifest = readJson("Memory/package.json") as { overrides?: Record<string, unknown> };
+    const runtimeLock = readJson("Memory/package-lock.json") as {
+      packages?: Record<string, { version?: string }>;
+    };
+
+    expect(rootManifest.overrides).toMatchObject({
+      "@huggingface/transformers": { sharp: "$sharp" }
+    });
+    expect(memoryManifest.overrides).toMatchObject({
+      "@huggingface/transformers": { sharp: "$sharp" }
+    });
+    expect(readJson("Memory/package.json")).toMatchObject({
+      dependencies: { sharp: "0.35.3" }
+    });
+    expect(runtimeLock.packages?.["node_modules/sharp"]?.version).toBe("0.35.3");
+    expect(memoryDockerfile).toContain("cp Memory/package-lock.json /runtime/package-lock.json");
+    expect(memoryDockerfile).toContain("npm ci --omit=dev");
+    expect(memoryDockerfile).toContain("npm audit --omit=dev --audit-level=high");
+    expect(memoryDockerfile).not.toContain("npm install --omit=dev --no-package-lock");
   });
 });

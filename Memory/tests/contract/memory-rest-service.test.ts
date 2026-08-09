@@ -1156,6 +1156,7 @@ describe("MemoryService / REST contract", () => {
         method: "POST",
         headers: { ...headers, "content-type": "application/json" },
         body: JSON.stringify({
+          version: 1,
           title: "Architecture API boundary",
           content: "Architecture module now uses an API repository boundary.",
           tags: ["architecture", "api"],
@@ -1181,6 +1182,44 @@ describe("MemoryService / REST contract", () => {
       expect(afterPackBody.packs[0]?.architectureFacts).not.toContainEqual(expect.objectContaining({ title: "Architecture service boundary" }));
       expect(afterPackBody.packs[0]?.markdown).toContain("Architecture module now uses an API repository boundary.");
       expect(afterPackBody.packs[0]?.markdown).not.toContain("Architecture module uses a repository boundary.");
+
+      const staleEdit = await fetch(`${baseUrl}/memory/${encodeURIComponent(added.id)}/edit`, {
+        method: "POST",
+        headers: { ...headers, "content-type": "application/json" },
+        body: JSON.stringify({ version: 1, title: "Stale title", content: "This must not overwrite version 2.", tags: [] })
+      });
+      expect(staleEdit.status).toBe(409);
+      expect(await staleEdit.json()).toMatchObject({ error: { code: "conflict" } });
+
+      const history = await fetch(`${baseUrl}/memory/${encodeURIComponent(added.id)}/history`, { headers });
+      expect(history.status).toBe(200);
+      expect(await history.json()).toMatchObject({
+        id: added.id,
+        currentVersion: 2,
+        items: expect.arrayContaining([
+          expect.objectContaining({ version: 1 }),
+          expect.objectContaining({ version: 2, changeType: "content_edit" })
+        ])
+      });
+
+      const restore = await fetch(`${baseUrl}/memory/${encodeURIComponent(added.id)}/history/1/restore`, {
+        method: "POST",
+        headers: { ...headers, "content-type": "application/json" },
+        body: JSON.stringify({ version: 2, reason: "restore original wording" })
+      });
+      expect(restore.status).toBe(200);
+      expect(await restore.json()).toMatchObject({ ok: true, id: added.id, version: 3, restoredVersion: 1 });
+
+      const restoredDetail = await fetch(`${baseUrl}/memory/${encodeURIComponent(added.id)}`, { headers });
+      expect(await restoredDetail.json()).toMatchObject({
+        item: { title: "Architecture service boundary", body: "Architecture module uses a repository boundary.", version: 3 }
+      });
+
+      const restoredHistory = await fetch(`${baseUrl}/memory/${encodeURIComponent(added.id)}/history`, { headers });
+      expect(await restoredHistory.json()).toMatchObject({
+        currentVersion: 3,
+        items: expect.arrayContaining([expect.objectContaining({ version: 3, changeType: "restore" })])
+      });
     });
     db.close();
   });

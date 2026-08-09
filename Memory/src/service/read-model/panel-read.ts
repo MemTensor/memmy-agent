@@ -12,7 +12,7 @@ import type {
   RawTurnRecord,
   Repositories
 } from "../../storage/repositories.js";
-import { detailSummaryForMemory } from "./memory.js";
+import { detailSummaryForMemory, sourceMemoryIdsFromMemory } from "./memory.js";
 import {
   memoryFilterForNamespace,
   namespaceForMemory,
@@ -521,6 +521,10 @@ export class PanelReadModel {
     architectureFacts: MemoryListItem[];
     recentTasks: Array<{ id: string; title: string; updatedAt: string }>;
     userPreferences: MemoryListItem[];
+    graph: {
+      nodes: Array<MemoryListItem & { external?: boolean }>;
+      edges: Array<{ sourceId: string; targetId: string; relation: "source" | "supersedes"; reason?: string }>;
+    };
     markdown: string;
     generatedAt: string;
   } {
@@ -539,6 +543,17 @@ export class PanelReadModel {
       .filter((episode) => this.episodeMatchesNamespace(episode, context.namespace))
       .slice(0, 8)
       .map((episode) => ({ id: episode.id, title: String(this.deps.episodeRef(episode).title ?? this.deps.episodeRef(episode).summary ?? episode.id), updatedAt: episode.updatedAt }));
+    const selectedIds = new Set([...conventions, ...commands, ...architectureFacts, ...userPreferences].map((item) => item.id));
+    const selectedMemories = memories.filter((memory) => selectedIds.has(memory.id));
+    const edges = selectedMemories.flatMap((memory) => [
+      ...sourceMemoryIdsFromMemory(memory).map((sourceId) => ({ sourceId, targetId: memory.id, relation: "source" as const })),
+      ...this.deps.repos.memories.relationsFor(memory.id).map((relation) => ({ sourceId: relation.sourceMemoryId, targetId: relation.targetMemoryId, relation: "supersedes" as const, reason: relation.reason }))
+    ]).filter((edge, index, all) => all.findIndex((item) => item.sourceId === edge.sourceId && item.targetId === edge.targetId && item.relation === edge.relation) === index);
+    const graphIds = new Set([...selectedIds, ...edges.flatMap((edge) => [edge.sourceId, edge.targetId])]);
+    const graphNodes = this.deps.repos.memories.getMany([...graphIds]).map((memory) => ({
+      ...this.deps.repos.memories.toListItem(memory),
+      ...(selectedIds.has(memory.id) ? {} : { external: true })
+    }));
     const section = (title: string, items: MemoryListItem[]) => `## ${title}\n${items.length ? items.map((item) => `- ${item.summary || item.title} (${item.id})`).join("\n") : "- 暂无"}`;
     const markdown = [
       `# Project Memory Pack: ${context.namespace.projectId ?? context.namespace.workspaceId ?? "unscoped"}`,
@@ -548,7 +563,7 @@ export class PanelReadModel {
       `## 最近任务\n${recentTasks.length ? recentTasks.map((task) => `- ${task.title} (${task.id})`).join("\n") : "- 暂无"}`,
       section("用户偏好", userPreferences)
     ].join("\n\n");
-    return { namespace: context.namespace, conventions, commands, architectureFacts, recentTasks, userPreferences, markdown, generatedAt: this.now() };
+    return { namespace: context.namespace, conventions, commands, architectureFacts, recentTasks, userPreferences, graph: { nodes: graphNodes, edges }, markdown, generatedAt: this.now() };
   }
 
   projectContextPacks(input: RequestEnvelope & { userId?: string } = {}) {

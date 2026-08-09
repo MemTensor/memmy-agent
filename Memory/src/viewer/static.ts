@@ -293,18 +293,18 @@ export function memoryPanelHtml(): string {
     .context-item:hover { background: var(--surface-hover); }
     .context-item strong, .context-item span { display: block; overflow-wrap: anywhere; }
     .context-item span { margin-top: 3px; color: var(--muted); font-size: 10px; }
-    .context-graph { min-width: 760px; padding: 8px 4px; }
-    .context-graph-pack { display: grid; grid-template-columns: minmax(150px, .7fr) minmax(170px, .8fr) minmax(320px, 2fr); gap: 28px; align-items: center; padding: 18px 0; }
+    .context-graph { min-width: 680px; padding: 8px 4px; }
+    .context-graph-pack { padding: 18px 0; }
     .context-graph-pack + .context-graph-pack { border-top: 1px solid var(--line); }
-    .graph-root, .graph-section, .graph-node { position: relative; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
-    .graph-root { padding: 12px; border-color: var(--accent); background: var(--accent-soft); font-weight: 750; }
-    .graph-branches, .graph-leaves { display: grid; gap: 8px; }
-    .graph-section { padding: 8px 10px; color: var(--ink-secondary); font-size: 11px; }
-    .graph-node { width: 100%; min-height: 34px; padding: 7px 9px; text-align: left; }
-    .graph-root::after, .graph-section::before, .graph-section::after, .graph-node::before { content: ""; position: absolute; top: 50%; height: 1px; background: var(--line-strong); }
-    .graph-root::after { left: 100%; width: 28px; }
-    .graph-section::before, .graph-node::before { right: 100%; width: 28px; }
-    .graph-section::after { left: 100%; width: 28px; }
+    .graph-title { margin: 0 0 10px; }
+    .graph-layout { display: grid; grid-template-columns: minmax(260px, 1fr) minmax(340px, 1.3fr); gap: 14px; align-items: start; }
+    .graph-nodes, .graph-edges { display: grid; gap: 7px; }
+    .graph-node, .graph-edge { min-height: 38px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
+    .graph-node { width: 100%; text-align: left; }
+    .graph-node.external { border-style: dashed; color: var(--muted); }
+    .graph-edge { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 8px; align-items: center; font-size: 10px; }
+    .graph-edge strong { overflow-wrap: anywhere; }
+    .graph-edge span { color: var(--accent); font-weight: 750; text-align: center; }
     .context-markdown { max-height: none; min-height: 260px; }
     .dialog-screen { position: fixed; inset: 0; z-index: 45; display: grid; place-items: center; padding: 18px; background: rgba(10, 18, 15, .48); }
     .dialog { width: min(680px, 100%); max-height: min(760px, calc(100vh - 36px)); overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-raised); box-shadow: var(--shadow); }
@@ -314,6 +314,11 @@ export function memoryPanelHtml(): string {
     .dialog label { display: grid; gap: 6px; font-weight: 700; }
     .dialog textarea { width: 100%; min-height: 220px; resize: vertical; padding: 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
     .context-detail-body { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; }
+    .history-list { display: grid; gap: 8px; }
+    .history-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 9px 0; border-top: 1px solid var(--line); }
+    .history-item:first-child { border-top: 0; }
+    .history-item strong, .history-item span { display: block; overflow-wrap: anywhere; }
+    .history-item span { margin-top: 3px; color: var(--muted); font-size: 10px; }
     .auth-screen { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 18px; background: color-mix(in srgb, var(--canvas) 92%, transparent); backdrop-filter: blur(14px); }
     .auth-dialog { width: min(420px, 100%); border: 1px solid var(--line); border-radius: 8px; background: var(--surface-raised); box-shadow: var(--shadow); padding: 20px; }
     .auth-dialog .brand { padding: 0; margin-bottom: 18px; }
@@ -632,7 +637,7 @@ export function memoryPanelHtml(): string {
       if (!response.ok) {
         if (response.status === 401) showAuth("令牌无效或已过期");
         const message = body.error && body.error.message ? body.error.message : text || response.statusText;
-        throw new Error(message);
+        const error = new Error(message); error.status = response.status; error.code = body.error && body.error.code; throw error;
       }
       return body;
     }
@@ -862,10 +867,11 @@ export function memoryPanelHtml(): string {
 
     function renderContextGraph(packs) {
       $("contextPackGraph").innerHTML = packs.length ? '<div class="context-graph">' + packs.map((pack) => {
-        const populated = contextPackSections.map(([key, label]) => [key, label, Array.isArray(pack[key]) ? pack[key] : []]).filter((section) => section[2].length);
-        const branches = populated.map(([, label, items]) => '<div class="graph-section">' + esc(label) + ' · ' + formatNumber(items.length) + '</div>').join("");
-        const leaves = populated.map(([key, , items]) => '<div class="graph-leaves">' + items.map((item) => '<button class="graph-node" data-context-kind="' + (key === "recentTasks" ? "task" : "memory") + '" data-context-id="' + esc(item.id) + '">' + esc(contextItemTitle(item)) + '</button>').join("") + '</div>').join("");
-        return '<section class="context-graph-pack"><div class="graph-root">' + esc(namespaceLabel(pack.namespace)) + '</div><div class="graph-branches">' + (branches || '<div class="muted">暂无节点</div>') + '</div><div class="graph-leaves">' + leaves + '</div></section>';
+        const graph = pack.graph || { nodes: [], edges: [] };
+        const nodesById = new Map((graph.nodes || []).map((node) => [node.id, node]));
+        const nodes = (graph.nodes || []).map((node) => '<button class="graph-node ' + (node.external ? 'external' : '') + '" data-context-kind="memory" data-context-id="' + esc(node.id) + '"><strong>' + esc(contextItemTitle(node)) + '</strong><span class="muted">' + esc(node.memoryLayer || "-") + ' · ' + esc(node.id) + '</span></button>').join("");
+        const edges = (graph.edges || []).map((edge) => '<div class="graph-edge"><strong>' + esc(contextItemTitle(nodesById.get(edge.sourceId) || { id: edge.sourceId })) + '</strong><span>' + (edge.relation === "supersedes" ? '取代 →' : '来源 →') + '</span><strong>' + esc(contextItemTitle(nodesById.get(edge.targetId) || { id: edge.targetId })) + '</strong></div>').join("");
+        return '<section class="context-graph-pack"><h3 class="graph-title">' + esc(namespaceLabel(pack.namespace)) + '</h3><div class="graph-layout"><div class="graph-nodes">' + (nodes || '<div class="muted">暂无节点</div>') + '</div><div class="graph-edges">' + (edges || '<div class="muted">暂无来源或取代关系</div>') + '</div></div></section>';
       }).join("") + '</div>' : '<div class="empty">暂无项目上下文</div>';
       bindContextNodes($("contextPackGraph"));
     }
@@ -909,12 +915,17 @@ export function memoryPanelHtml(): string {
       $("contextMemoryDetailActions").classList.add("hidden");
       showContextDialog();
       try {
-        const data = await api("/api/v1/memory/" + encodeURIComponent(id));
+        const [data, history] = await Promise.all([
+          api("/api/v1/memory/" + encodeURIComponent(id)),
+          api("/api/v1/memory/" + encodeURIComponent(id) + "/history?limit=100")
+        ]);
         const item = data.item || {};
         state.contextMemory = item;
+        state.contextMemoryHistory = history.items || [];
         $("contextMemoryDialogTitle").textContent = contextItemTitle(item);
         $("contextMemoryDialogId").textContent = item.id || id;
-        $("contextMemoryDetail").innerHTML = '<div class="context-detail-body">' + esc(item.body || item.summary || "暂无内容") + '</div><div class="tag-list">' + ((item.tags || []).map((tag) => '<span class="pill">' + esc(tag) + '</span>').join("") || '<span class="muted">无标签</span>') + '</div><div class="muted">来源 ' + esc(valueAt(item, ["metadata", "source"], "unknown")) + ' · v' + esc(item.version || 1) + ' · ' + esc(formatDate(item.updatedAt, true)) + '</div>';
+        $("contextMemoryDetail").innerHTML = '<div class="context-detail-body">' + esc(item.body || item.summary || "暂无内容") + '</div><div class="tag-list">' + ((item.tags || []).map((tag) => '<span class="pill">' + esc(tag) + '</span>').join("") || '<span class="muted">无标签</span>') + '</div><div class="muted">来源 ' + esc(valueAt(item, ["metadata", "source"], "unknown")) + ' · v' + esc(item.version || 1) + ' · ' + esc(formatDate(item.updatedAt, true)) + '</div><section><h4>版本历史</h4><div class="history-list">' + renderMemoryHistory(history.items || [], item.version) + '</div></section>';
+        for (const button of $("contextMemoryDetail").querySelectorAll("button[data-restore-version]")) button.onclick = () => restoreContextMemory(Number(button.dataset.restoreVersion)).catch(showError);
         $("contextMemoryDetailActions").classList.remove("hidden");
       } catch (error) { closeContextDialog(); showError(error); }
     }
@@ -944,11 +955,37 @@ export function memoryPanelHtml(): string {
       const button = $("saveContextMemory");
       button.disabled = true;
       try {
-        await api("/api/v1/memory/" + encodeURIComponent(item.id) + "/edit", { method: "POST", body: JSON.stringify({ requestId: "panel-" + Date.now(), adapterId: "memory-console", reason: "edited from generated context pack", title: $("contextMemoryTitle").value, tags: $("contextMemoryTags").value.split(/[,，]/).map((tag) => tag.trim()).filter(Boolean), content: $("contextMemoryBody").value }) });
+        await api("/api/v1/memory/" + encodeURIComponent(item.id) + "/edit", { method: "POST", body: JSON.stringify({ requestId: "panel-" + Date.now(), adapterId: "memory-console", reason: "edited from generated context pack", version: item.version, title: $("contextMemoryTitle").value, tags: $("contextMemoryTags").value.split(/[,，]/).map((tag) => tag.trim()).filter(Boolean), content: $("contextMemoryBody").value }) });
         closeContextDialog();
         await Promise.all([loadDashboard(), loadMemories()]);
         showToast("原始记忆已更新，上下文包已重新生成");
+      } catch (error) {
+        if (error.status === 409) { await openContextMemory(item.id); showToast("记忆已被其他 Agent 修改，已加载最新版本"); }
+        throw error;
       } finally { button.disabled = false; }
+    }
+
+    function renderMemoryHistory(items, currentVersion) {
+      return items.length ? items.map((entry) => {
+        const snapshot = entry.after || {};
+        const title = valueAt(snapshot, ["info", "title"], snapshot.memoryValue || entry.changeType || "变更");
+        const isCurrent = Number(entry.version) === Number(currentVersion);
+        return '<div class="history-item"><div><strong>v' + esc(entry.version || "-") + ' · ' + esc(title) + '</strong><span>' + esc(entry.changeType || "updated") + ' · ' + esc(entry.source || "unknown") + ' · ' + esc(formatDate(entry.createdAt, true)) + '</span></div><button type="button" data-restore-version="' + esc(entry.version) + '" ' + (isCurrent ? 'disabled' : '') + '>' + (isCurrent ? '当前版本' : '恢复') + '</button></div>';
+      }).join("") : '<div class="muted">暂无版本记录</div>';
+    }
+
+    async function restoreContextMemory(targetVersion) {
+      const item = state.contextMemory;
+      if (!item || !confirm("恢复到 v" + targetVersion + "？当前内容会保留在版本历史中。")) return;
+      try {
+        await api("/api/v1/memory/" + encodeURIComponent(item.id) + "/history/" + targetVersion + "/restore", { method: "POST", body: JSON.stringify({ requestId: "panel-" + Date.now(), adapterId: "memory-console", reason: "restored from memory console", version: item.version }) });
+        await Promise.all([loadDashboard(), loadMemories()]);
+        await openContextMemory(item.id);
+        showToast("已恢复到 v" + targetVersion);
+      } catch (error) {
+        if (error.status === 409) { await openContextMemory(item.id); showToast("记忆已被其他 Agent 修改，已加载最新版本"); }
+        throw error;
+      }
     }
 
     function setContextPackView(view) {

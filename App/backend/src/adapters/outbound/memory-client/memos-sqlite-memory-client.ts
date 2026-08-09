@@ -278,6 +278,14 @@ export function createMemosSqliteMemoryClient(options: CreateMemosSqliteMemoryCl
       return { item: detail.item, version: detail.version, etag: detail.etag };
     },
 
+    async memoryHistory() {
+      return readOnlyOperationUnavailable();
+    },
+
+    async restoreMemory() {
+      return readOnlyOperationUnavailable();
+    },
+
     async addMemory(_input: AddMemoryInput): Promise<AddMemoryOutput> {
       return readOnlyOperationUnavailable();
     },
@@ -359,6 +367,10 @@ export function createMemosSqliteMemoryClient(options: CreateMemosSqliteMemoryCl
         dailySkillEvolutions: countRowsByDate(skillRows, dates, (item) => item.row.updated_at),
         toolLatency: buildToolLatency(logs, dates)
       };
+    },
+
+    async projectContextPack() {
+      return readOnlyOperationUnavailable();
     },
 
     async panelItems(input: PanelItemsInput): Promise<PanelItemsOutput> {

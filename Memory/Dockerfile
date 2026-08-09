@@ -11,9 +11,11 @@ RUN npm ci \
     && npm run memory:build \
     && mkdir -p /runtime \
     && cp Memory/package.json /runtime/package.json \
+    && cp Memory/package-lock.json /runtime/package-lock.json \
     && cp -R Memory/dist /runtime/dist \
     && cd /runtime \
-    && npm install --omit=dev --no-package-lock
+    && npm ci --omit=dev \
+    && npm audit --omit=dev --audit-level=high
 
 FROM node:24-bookworm-slim AS runtime
 

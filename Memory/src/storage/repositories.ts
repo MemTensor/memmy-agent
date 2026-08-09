@@ -361,6 +361,14 @@ export interface MemoryRelationRecord {
   createdAt: string;
 }
 
+export class MemoryVersionConflictError extends Error {
+  readonly code = "memory_version_conflict";
+  constructor(readonly memoryId: string, readonly expectedVersion: number, readonly actualVersion: number) {
+    super(`memory version conflict for ${memoryId}: expected ${expectedVersion}, actual ${actualVersion}`);
+    this.name = "MemoryVersionConflictError";
+  }
+}
+
 interface SqlApiLogRow {
   id: number;
   tool_name: ApiLogRecord["toolName"];
@@ -400,15 +408,15 @@ export class MemoryRepository {
     return attachMemoryVectors(prepared.memory, prepared.vectors);
   }
 
-  update(memory: MemoryRow): MemoryRow {
-    return this.updateRow(memory, true);
+  update(memory: MemoryRow, expectedVersion?: number): MemoryRow {
+    return this.updateRow(memory, true, expectedVersion);
   }
 
   updateMaintenance(memory: MemoryRow): MemoryRow {
     return this.updateRow(memory, false);
   }
 
-  private updateRow(memory: MemoryRow, bumpVersion: boolean): MemoryRow {
+  private updateRow(memory: MemoryRow, bumpVersion: boolean, expectedVersion?: number): MemoryRow {
     const existing = this.get(memory.id);
     if (!existing) {
       throw new Error(`memory not found: ${memory.id}`);
@@ -418,7 +426,7 @@ export class MemoryRepository {
       ...prepared.memory,
       version: bumpVersion ? memory.version + 1 : existing.version
     };
-    this.db
+    const result = this.db
       .prepare(
         `UPDATE memories
          SET timeline = @timeline,
@@ -440,9 +448,13 @@ export class MemoryRepository {
              version = @version,
              updated_at = @updatedAt,
              deleted_at = @deletedAt
-         WHERE id = @id`
+         WHERE id = @id AND (@expectedVersion IS NULL OR version = @expectedVersion)`
       )
-      .run(memoryToSql(updated));
+      .run({ ...memoryToSql(updated), expectedVersion: expectedVersion ?? null });
+    if (result.changes === 0 && expectedVersion !== undefined) {
+      const actual = this.get(memory.id)?.version ?? 0;
+      throw new MemoryVersionConflictError(memory.id, expectedVersion, actual);
+    }
     const mergedVectors = mergeMemoryVectors(
       attachedMemoryVectorEntries(existing),
       prepared.vectorUpdates
@@ -2089,6 +2101,20 @@ export class RuntimeRepository {
       after: row.after_json ? parseJson(row.after_json, undefined) : undefined,
       source: row.source,
       createdAt: row.created_at
+    }));
+  }
+
+  listMemoryChanges(memoryId: string, limit = 100): ChangeLogRecord[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM memory_change_log WHERE memory_id = ? ORDER BY seq DESC LIMIT ?`
+    ).all(memoryId, Math.max(1, Math.min(limit, 500))) as SqlChangeRow[];
+    return rows.map((row) => ({
+      seq: row.seq, memoryId: row.memory_id, namespaceId: row.namespace_id ?? undefined,
+      kind: row.kind ?? undefined, op: row.op ?? undefined, entityId: row.entity_id ?? undefined,
+      userId: row.user_id, changeType: row.change_type, version: row.version ?? undefined,
+      before: row.before_json ? parseJson(row.before_json, undefined) : undefined,
+      after: row.after_json ? parseJson(row.after_json, undefined) : undefined,
+      source: row.source, createdAt: row.created_at
     }));
   }
 

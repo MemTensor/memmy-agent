@@ -6,7 +6,6 @@ import { isRecord } from "../../utils/json.js";
 import { firstLine } from "../../utils/text.js";
 
 export function detailFromMemory(memory: MemoryRow, processing?: MemoryProcessingRecord): MemoryDetailItem {
-  const sourceMemoryIds = memory.properties.internal_info.source_memory_ids;
   const provenance = isRecord(memory.properties.internal_info.provenance)
     ? memory.properties.internal_info.provenance as unknown as MemoryDetailItem["provenance"]
     : undefined;
@@ -16,7 +15,7 @@ export function detailFromMemory(memory: MemoryRow, processing?: MemoryProcessin
   return { id: memory.id, kind: kindFromMemory(memory), memoryLayer: memory.memoryLayer, status: memory.status,
     title: detailTitleForMemory(memory), summary: detailSummaryForMemory(memory), tags: panelTagsForMemory(memory, processing),
     updatedAt: memory.updatedAt, version: memory.version, processing, body: memory.memoryValue, createdAt: memory.createdAt,
-    sourceMemoryIds: stringArray(sourceMemoryIds),
+    sourceMemoryIds: sourceMemoryIdsFromMemory(memory),
     provenance,
     supersession: supersedesMemoryIds.length || supersededByMemoryId
       ? { supersedesMemoryIds, supersededByMemoryId, reason: supersessionReason }
@@ -56,7 +55,12 @@ export function memoryDetailWithLayerPayload(detail: MemoryDetailItem, memory: M
 }
 
 export function memoryEtag(memory: MemoryRow): string { return `${memory.id}-v${memory.version}`; }
-export function sourceMemoryIdsFromMemory(memory: MemoryRow): string[] { return stringArrayFromInternal(memory, "source_memory_ids").concat(stringArrayFromInternal(memory, "source_l1_memory_ids")).concat(stringArrayFromInternal(memory, "source_policy_ids")).concat(stringArrayFromInternal(memory, "evidence_anchor_ids")); }
+export function sourceMemoryIdsFromMemory(memory: MemoryRow): string[] {
+  const provenance = isRecord(memory.properties.internal_info.provenance)
+    ? stringArray(memory.properties.internal_info.provenance.sourceMemoryIds)
+    : [];
+  return [...new Set(provenance.concat(stringArrayFromInternal(memory, "source_memory_ids"), stringArrayFromInternal(memory, "source_l1_memory_ids"), stringArrayFromInternal(memory, "source_policy_ids"), stringArrayFromInternal(memory, "evidence_anchor_ids")))];
+}
 export function procedureFromSkillMemory(memory: MemoryRow): string[] | undefined { const value = memory.properties.internal_info.procedure_json ?? memory.properties.internal_info.procedure; if (Array.isArray(value)) return value.filter((item): item is string => typeof item === "string"); if (typeof value === "string") { try { const parsed = JSON.parse(value) as unknown; if (Array.isArray(parsed)) return parsed.filter((item): item is string => typeof item === "string"); } catch { return value.split(/\r?\n/).map((line) => line.replace(/^[-*]\s*/, "").trim()).filter(Boolean); } } return undefined; }
 
 function firstReadableDetailMemoryLine(value: string): string | undefined { return value.split(/\r?\n/).map(cleanDetailDisplayText).find((line): line is string => Boolean(line && !isWorldSectionHeadingForDisplay(line) && !isInternalMemoryKeyForDisplay(line))); }

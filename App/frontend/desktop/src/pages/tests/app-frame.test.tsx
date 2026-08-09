@@ -945,13 +945,14 @@ describe("AppFrame", () => {
   });
 
   it("groups active tasks by time buckets (today, yesterday, last 7 days, older)", () => {
-    const now = new Date("2026-07-02T14:00:00+08:00");
+    const now = new Date(2026, 6, 2, 14);
+    const localTimestamp = (month: number, day: number, hour: number) => new Date(2026, month, day, hour).toISOString();
     const groups = groupTasksByTime([
-      task("today-1", { title: "今天的任务", updatedAt: "2026-07-02T10:00:00+08:00" }),
-      task("today-2", { title: "今天的另一个", updatedAt: "2026-07-02T01:00:00+08:00" }),
-      task("yesterday", { title: "昨天的任务", updatedAt: "2026-07-01T18:00:00+08:00" }),
-      task("week", { title: "三天前", updatedAt: "2026-06-29T12:00:00+08:00" }),
-      task("older", { title: "很久以前", updatedAt: "2026-06-20T12:00:00+08:00" }),
+      task("today-1", { title: "今天的任务", updatedAt: localTimestamp(6, 2, 10) }),
+      task("today-2", { title: "今天的另一个", updatedAt: localTimestamp(6, 2, 1) }),
+      task("yesterday", { title: "昨天的任务", updatedAt: localTimestamp(6, 1, 18) }),
+      task("week", { title: "三天前", updatedAt: localTimestamp(5, 29, 12) }),
+      task("older", { title: "很久以前", updatedAt: localTimestamp(5, 20, 12) }),
       task("no-date", { title: "无日期", updatedAt: null })
     ], now);
 

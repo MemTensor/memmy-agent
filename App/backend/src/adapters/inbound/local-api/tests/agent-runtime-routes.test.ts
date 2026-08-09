@@ -29,10 +29,13 @@ describe("agent runtime local api routes", () => {
       { method: "POST", url: "/api/v1/memory/processing/status", payload: { memoryIds: ["memory-1"] } },
       { method: "POST", url: "/api/v1/memory/memory-1/processing/retry", payload: {} },
       { method: "GET", url: "/api/v1/memory/memory-1" },
+      { method: "GET", url: "/api/v1/memory/memory-1/history" },
+      { method: "POST", url: "/api/v1/memory/memory-1/history/1/restore", payload: { version: 1, reason: "desktop restore" } },
       { method: "DELETE", url: "/api/v1/memory/memory-1" },
       { method: "GET", url: "/api/v1/memory/logs?tools=memory_add,memory_search&limit=20&offset=0" },
       { method: "GET", url: "/api/v1/panel/overview" },
       { method: "GET", url: "/api/v1/panel/analysis" },
+      { method: "GET", url: "/api/v1/panel/context-pack?projectId=project-1" },
       { method: "GET", url: "/api/v1/panel/items?layer=L1&status=activated&page=1" },
       { method: "GET", url: "/api/v1/panel/tasks?page=1" },
       { method: "DELETE", url: "/api/v1/panel/tasks/episode-1" }
@@ -360,11 +363,14 @@ function createServer(overrides: Record<string, unknown> = {}): FastifyInstance 
     memoryDetail: {
       async add() { return addMemoryOutput(); },
       async getById() { return getMemoryOutput(); },
+      async history(id: string) { return memoryHistoryOutput(id); },
+      async restore(id: string, targetVersion: number) { return restoreMemoryOutput(id, targetVersion); },
       async delete() { return deleteMemoryOutput(); }
     },
     panel: {
       async overview() { return panelOverviewOutput(); },
       async analysis() { return panelAnalysisOutput(); },
+      async contextPack(projectId: string) { return projectContextPackOutput(projectId); },
       async items() { return panelItemsOutput(); },
       async tasks() { return panelTasksOutput(); },
       async deleteTask(id: string) { return { ok: true as const, id, deletedMemoryIds: [], serverTime: now() }; },
@@ -424,6 +430,20 @@ function searchInput() {
 
 function addMemoryInput() {
   return { content: "remember this", source: "codex" };
+}
+
+function projectContextPackOutput(projectId: string) {
+  return {
+    namespace: { projectId },
+    conventions: [],
+    commands: [],
+    architectureFacts: [],
+    recentTasks: [],
+    userPreferences: [],
+    graph: { nodes: [], edges: [] },
+    markdown: `# Project Memory Pack: ${projectId}`,
+    generatedAt: now()
+  };
 }
 
 function openSessionOutput() {
@@ -509,6 +529,27 @@ function getMemoryOutput() {
       metadata: { source: "codex" }
     },
     version: 1
+  };
+}
+
+function memoryHistoryOutput(id: string) {
+  return {
+    id,
+    currentVersion: 1,
+    items: [{ seq: 1, version: 1, changeType: "created", source: "turn_complete", createdAt: now(), after: {} }],
+    serverTime: now()
+  };
+}
+
+function restoreMemoryOutput(id: string, targetVersion: number) {
+  return {
+    ok: true as const,
+    id,
+    version: 2,
+    restoredVersion: targetVersion,
+    changeSeq: 2,
+    auditId: "audit-restore-1",
+    serverTime: now()
   };
 }
 

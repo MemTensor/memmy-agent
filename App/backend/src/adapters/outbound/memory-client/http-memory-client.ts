@@ -10,16 +10,19 @@ import {
   GetMemoryOutputSchema,
   MemoryApiLogsOutputSchema,
   MemoryHealthSnapshotSchema,
+  MemoryHistoryOutputSchema,
   MemoryProcessingStatusOutputSchema,
   MemoryReloadConfigOutputSchema,
   PanelAnalysisOutputSchema,
   PanelItemsOutputSchema,
   PanelOverviewOutputSchema,
+  ProjectContextPackOutputSchema,
   PanelTasksOutputSchema,
   OpenSessionOutputSchema,
   SearchOutputSchema,
   StartTurnOutputSchema,
   RetryMemoryProcessingOutputSchema,
+  RestoreMemoryOutputSchema,
   WorkerRunOutputSchema
 } from "@memmy/local-api-contracts";
 import type { ZodType } from "zod";
@@ -63,6 +66,7 @@ export function createHttpMemoryClient(
       query?: Readonly<Record<string, unknown>>;
       signal?: AbortSignal;
       timeoutMs?: number;
+      headers?: Readonly<Record<string, string>>;
     } = {}
   ): Promise<Output> {
     const url = appendQuery(buildMemoryLayerUrl(config.baseUrl, pathKey, requestOptions.params), requestOptions.query);
@@ -75,7 +79,8 @@ export function createHttpMemoryClient(
           method,
           headers: {
             ...(hasBody ? { "content-type": "application/json" } : {}),
-            authorization: `Bearer ${config.token}`
+            authorization: `Bearer ${config.token}`,
+            ...requestOptions.headers
           },
           body: hasBody ? JSON.stringify(requestOptions.body) : undefined,
           signal: combineAbortSignals(timeoutSignal, requestOptions.signal)
@@ -160,6 +165,21 @@ export function createHttpMemoryClient(
       });
     },
 
+    async memoryHistory(memoryId) {
+      return request("GET", "memoryHistory", MemoryHistoryOutputSchema, {
+        params: { id: memoryId },
+        query: { limit: 100 }
+      });
+    },
+
+    async restoreMemory(input) {
+      const { memoryId, targetVersion, ...body } = input;
+      return request("POST", "restoreMemory", RestoreMemoryOutputSchema, {
+        params: { id: memoryId, version: String(targetVersion) },
+        body
+      });
+    },
+
     async deleteMemory(input) {
       const { memoryId, ...body } = input;
       return request("DELETE", "deleteMemory", DeleteMemoryOutputSchema, {
@@ -204,6 +224,12 @@ export function createHttpMemoryClient(
 
     async panelAnalysis() {
       return request("GET", "panelAnalysis", PanelAnalysisOutputSchema);
+    },
+
+    async projectContextPack(projectId) {
+      return request("GET", "projectContextPack", ProjectContextPackOutputSchema, {
+        headers: { "x-memmy-project-id": projectId }
+      });
     },
 
     async panelItems(input) {

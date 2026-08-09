@@ -498,6 +498,43 @@ export const GetMemoryOutputSchema = z.object({
 });
 export type GetMemoryOutput = z.infer<typeof GetMemoryOutputSchema>;
 
+export const MemoryHistoryItemSchema = z.object({
+  seq: z.number().int().nonnegative(),
+  version: z.number().int().positive().optional(),
+  changeType: NonEmptyStringSchema,
+  source: NonEmptyStringSchema,
+  createdAt: IsoTimeSchema,
+  before: z.unknown().optional(),
+  after: z.unknown().optional()
+});
+export type MemoryHistoryItem = z.infer<typeof MemoryHistoryItemSchema>;
+
+export const MemoryHistoryOutputSchema = z.object({
+  id: NonEmptyStringSchema,
+  currentVersion: z.number().int().positive(),
+  items: z.array(MemoryHistoryItemSchema),
+  serverTime: IsoTimeSchema
+});
+export type MemoryHistoryOutput = z.infer<typeof MemoryHistoryOutputSchema>;
+
+export const RestoreMemoryInputSchema = z.object({
+  version: z.number().int().positive(),
+  reason: z.string().optional()
+});
+export type RestoreMemoryInput = z.infer<typeof RestoreMemoryInputSchema>;
+
+export const RestoreMemoryOutputSchema = z.object({
+  ok: z.literal(true),
+  id: NonEmptyStringSchema,
+  version: z.number().int().positive(),
+  restoredVersion: z.number().int().positive(),
+  changeSeq: z.number().int().nonnegative(),
+  auditId: z.union([z.string(), z.number()]),
+  embeddingJobId: NonEmptyStringSchema.optional(),
+  serverTime: IsoTimeSchema
+});
+export type RestoreMemoryOutput = z.infer<typeof RestoreMemoryOutputSchema>;
+
 /** Definition for delete memory input. */
 export const DeleteMemoryInputSchema = RuntimeRequestFieldsSchema;
 export type DeleteMemoryInput = z.infer<typeof DeleteMemoryInputSchema>;
@@ -680,6 +717,42 @@ export const PanelAnalysisOutputSchema = z.object({
   })
 });
 export type PanelAnalysisOutput = z.infer<typeof PanelAnalysisOutputSchema>;
+
+/** Schema for a project-scoped context pack generated from active memory. */
+export const ProjectContextPackOutputSchema = z.object({
+  namespace: z.object({
+    userId: z.string().optional(),
+    tenantId: z.string().optional(),
+    projectId: z.string().optional(),
+    workspaceId: z.string().optional(),
+    workspacePath: z.string().optional(),
+    source: z.string().optional(),
+    profileId: z.string().optional(),
+    profileLabel: z.string().optional(),
+    sessionKey: z.string().optional()
+  }),
+  conventions: z.array(MemoryListItemSchema),
+  commands: z.array(MemoryListItemSchema),
+  architectureFacts: z.array(MemoryListItemSchema),
+  recentTasks: z.array(z.object({
+    id: NonEmptyStringSchema,
+    title: z.string(),
+    updatedAt: IsoTimeSchema
+  })),
+  userPreferences: z.array(MemoryListItemSchema),
+  graph: z.object({
+    nodes: z.array(MemoryListItemSchema.extend({ external: z.boolean().optional() })),
+    edges: z.array(z.object({
+      sourceId: NonEmptyStringSchema,
+      targetId: NonEmptyStringSchema,
+      relation: z.enum(["source", "supersedes"]),
+      reason: z.string().optional()
+    }))
+  }),
+  markdown: z.string(),
+  generatedAt: IsoTimeSchema
+});
+export type ProjectContextPackOutput = z.infer<typeof ProjectContextPackOutputSchema>;
 
 /** Schema for panel items output. */
 export const PanelItemsOutputSchema = z.object({

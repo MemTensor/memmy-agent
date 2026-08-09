@@ -13,8 +13,7 @@ on:
         required: true
         type: string
 
-permissions:
-  contents: write
+permissions: {}
 
 concurrency:
   group: release-${{ github.event_name == 'workflow_dispatch' && format('release/v{0}', inputs.version) || github.event.pull_request.head.ref }}
@@ -22,12 +21,17 @@ concurrency:
 
 jobs:
   release:
+    permissions:
+      contents: write
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.pull_request.merged == true &&
        startsWith(github.event.pull_request.head.ref, 'release/v'))
     runs-on: ubuntu-latest
     environment: release
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      target_sha: ${{ steps.release.outputs.target_sha }}
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -201,3 +205,13 @@ jobs:
         run: |
           set -euo pipefail
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+
+  docker:
+    needs: release
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/docker-publish.yml
+    with:
+      tag: ${{ needs.release.outputs.tag }}
+      ref: ${{ needs.release.outputs.target_sha }}

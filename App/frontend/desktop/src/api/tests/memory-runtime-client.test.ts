@@ -12,7 +12,7 @@ describe("memory runtime client", () => {
   });
 
   it("declares the memory runtime endpoints exposed under /api/v1", () => {
-    expect(MEMORY_RUNTIME_ENDPOINTS).toHaveLength(18);
+    expect(MEMORY_RUNTIME_ENDPOINTS).toHaveLength(21);
     expect(MEMORY_RUNTIME_ENDPOINTS).toEqual([
       "GET /api/v1/health",
       "POST /api/v1/admin/reload-config",
@@ -25,10 +25,13 @@ describe("memory runtime client", () => {
       "POST /api/v1/memory/processing/status",
       "POST /api/v1/memory/:id/processing/retry",
       "GET /api/v1/memory/:id",
+      "GET /api/v1/memory/:id/history",
+      "POST /api/v1/memory/:id/history/:version/restore",
       "DELETE /api/v1/memory/:id",
       "GET /api/v1/memory/logs",
       "GET /api/v1/panel/overview",
       "GET /api/v1/panel/analysis",
+      "GET /api/v1/panel/context-pack",
       "GET /api/v1/panel/items",
       "GET /api/v1/panel/tasks",
       "DELETE /api/v1/panel/tasks/:id"
@@ -183,5 +186,89 @@ describe("memory runtime client", () => {
     expect(exactUrl.searchParams.get("page")).toBe("2");
     const otherUrl = fetchMock.mock.calls[1]?.[0] as URL;
     expect(otherUrl.searchParams.getAll("excludedSourceAgents")).toEqual(["memmy-agent", "cursor"]);
+  });
+
+  it("loads a project context pack through the scoped local API route", async () => {
+    const fetchMock = vi.fn(async (_input: URL | RequestInfo) => new Response(JSON.stringify({
+      namespace: { projectId: "project-1" },
+      conventions: [],
+      commands: [],
+      architectureFacts: [],
+      recentTasks: [],
+      userPreferences: [],
+      graph: { nodes: [], edges: [] },
+      markdown: "# Project Memory Pack: project-1",
+      generatedAt: "2026-08-08T12:00:00.000Z"
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = createHttpMemoryRuntimeClient(runtimeConfig);
+    await expect(client.getProjectContextPack("project-1")).resolves.toMatchObject({ namespace: { projectId: "project-1" } });
+
+    const url = fetchMock.mock.calls[0]?.[0] as URL;
+    expect(url.pathname).toBe("/api/v1/panel/context-pack");
+    expect(url.searchParams.get("projectId")).toBe("project-1");
+  });
+
+  it("passes a memory detail abort signal through to fetch", async () => {
+    const fetchMock = vi.fn(async (_input: URL | RequestInfo, _init?: RequestInit) => new Response(JSON.stringify({
+      item: {
+        id: "memory-1",
+        kind: "trace",
+        memoryLayer: "L1",
+        status: "activated",
+        title: "Memory one",
+        summary: "",
+        tags: [],
+        createdAt: "2026-08-08T10:00:00.000Z",
+        updatedAt: "2026-08-08T12:00:00.000Z",
+        version: 1,
+        body: "Body",
+        sourceMemoryIds: [],
+        metadata: {}
+      },
+      version: 1
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+
+    await createHttpMemoryRuntimeClient(runtimeConfig).getMemory("memory-1", { signal: controller.signal });
+
+    expect(fetchMock.mock.calls[0]?.[1]).toEqual(expect.objectContaining({ signal: controller.signal }));
+  });
+
+  it("loads history and restores a selected source version", async () => {
+    const fetchMock = vi.fn(async (input: URL | RequestInfo, _init?: RequestInit) => {
+      const url = input as URL;
+      const restoring = url.pathname.endsWith("/restore");
+      return new Response(JSON.stringify(restoring ? {
+        ok: true,
+        id: "memory-1",
+        version: 4,
+        restoredVersion: 1,
+        changeSeq: 4,
+        auditId: "audit-restore-1",
+        serverTime: "2026-08-08T13:00:00.000Z"
+      } : {
+        id: "memory-1",
+        currentVersion: 3,
+        items: [{ seq: 1, version: 1, changeType: "created", source: "turn_complete", createdAt: "2026-08-07T10:00:00.000Z", after: {} }],
+        serverTime: "2026-08-08T12:00:00.000Z"
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createHttpMemoryRuntimeClient(runtimeConfig);
+
+    await expect(client.getMemoryHistory("memory-1")).resolves.toMatchObject({ currentVersion: 3 });
+    await expect(client.restoreMemory("memory-1", 1, { version: 3, reason: "restored from desktop context pack" }))
+      .resolves.toMatchObject({ version: 4, restoredVersion: 1 });
+
+    const restoreUrl = fetchMock.mock.calls[1]?.[0] as URL;
+    const restoreInit = fetchMock.mock.calls[1]?.[1];
+    expect(restoreUrl.pathname).toBe("/api/v1/memory/memory-1/history/1/restore");
+    expect(restoreInit).toEqual(expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({ version: 3, reason: "restored from desktop context pack" })
+    }));
   });
 });

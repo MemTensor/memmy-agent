@@ -10,6 +10,15 @@ Build or update the image from the source repository:
 docker build -f /root/memmy-agent/Memory/Dockerfile -t memmy-memory:local /root/memmy-agent
 ```
 
+Versioned multi-architecture images are published to GitHub Container Registry
+by `.github/workflows/docker-publish.yml`. Pushing a `vX.Y.Z` tag publishes the
+matching version and immutable commit tag. The workflow can also be dispatched
+manually with an explicit image tag. The GitHub Release workflow calls the same
+reusable workflow with its already verified release commit. It uses the repository `GITHUB_TOKEN`, so
+the workflow requires package write permission but no separate registry secret.
+Before pushing, the workflow starts the built image with the production security
+flags and verifies health, write, edit, history, and restore behavior.
+
 Start and inspect the service from the deployment directory:
 
 ```bash

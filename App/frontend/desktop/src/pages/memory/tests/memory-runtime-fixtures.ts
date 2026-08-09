@@ -397,6 +397,28 @@ export function createMockMemoryRuntimeClient(): MemoryRuntimeClient {
       return { item: detail.item, refs: {}, version: detail.version, etag: detail.etag };
     },
 
+    async getMemoryHistory(id) {
+      const detail = findMemoryDetail(id);
+      return {
+        id,
+        currentVersion: detail.version,
+        items: [{ seq: detail.version, version: detail.version, changeType: "created", source: "fixture", createdAt: detail.item.createdAt, after: {} }],
+        serverTime: now
+      };
+    },
+
+    async restoreMemory(id, targetVersion, input) {
+      return {
+        ok: true,
+        id,
+        version: input.version + 1,
+        restoredVersion: targetVersion,
+        changeSeq: 47,
+        auditId: "audit-restore-fixture",
+        serverTime: now
+      };
+    },
+
     async deleteMemory(id): Promise<DeleteMemoryOutput> {
       return {
         ok: true,
@@ -506,6 +528,19 @@ export function createMockMemoryRuntimeClient(): MemoryRuntimeClient {
     },
     async getPanelAnalysis(): Promise<PanelAnalysisOutput> {
       return mockPanelAnalysis;
+    },
+    async getProjectContextPack(projectId) {
+      return {
+        namespace: { projectId },
+        conventions: [],
+        commands: [],
+        architectureFacts: [],
+        recentTasks: [],
+        userPreferences: [],
+        graph: { nodes: [], edges: [] },
+        markdown: `# Project Memory Pack: ${projectId}`,
+        generatedAt: now
+      };
     },
     async listPanelItems(input): Promise<PanelItemsOutput> {
       return filterMemoryItems(input);

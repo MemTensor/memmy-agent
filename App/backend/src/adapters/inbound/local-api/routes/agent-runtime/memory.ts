@@ -3,7 +3,8 @@ import {
   AddMemoryInputSchema,
   DeleteMemoryInputSchema,
   MemoryApiLogsInputSchema,
-  MemoryProcessingStatusInputSchema
+  MemoryProcessingStatusInputSchema,
+  RestoreMemoryInputSchema
 } from "@memmy/local-api-contracts";
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
@@ -13,6 +14,10 @@ import type { AgentRuntimeRouteDeps } from "./index.js";
 
 const MemoryParamsSchema = z.object({
   id: z.string().min(1)
+});
+
+const MemoryVersionParamsSchema = MemoryParamsSchema.extend({
+  version: z.coerce.number().int().positive()
 });
 
 export function registerMemoryRoutes(app: FastifyInstance, deps: AgentRuntimeRouteDeps): void {
@@ -71,6 +76,25 @@ export function registerMemoryRoutes(app: FastifyInstance, deps: AgentRuntimeRou
     withErrorEnvelope(async (request, reply) => {
       const params = MemoryParamsSchema.parse(request.params);
       return reply.send(await deps.services.memoryDetail.getById(params.id, runtimeContext()));
+    })
+  );
+
+  app.get(
+    "/api/v1/memory/:id/history",
+    { preHandler: deps.authenticateRuntimeToken },
+    withErrorEnvelope(async (request, reply) => {
+      const params = MemoryParamsSchema.parse(request.params);
+      return reply.send(await deps.services.memoryDetail.history(params.id, runtimeContext()));
+    })
+  );
+
+  app.post(
+    "/api/v1/memory/:id/history/:version/restore",
+    { preHandler: deps.authenticateRuntimeToken },
+    withErrorEnvelope(async (request, reply) => {
+      const params = MemoryVersionParamsSchema.parse(request.params);
+      const input = RestoreMemoryInputSchema.parse(request.body);
+      return reply.send(await deps.services.memoryDetail.restore(params.id, params.version, input, runtimeContext()));
     })
   );
 

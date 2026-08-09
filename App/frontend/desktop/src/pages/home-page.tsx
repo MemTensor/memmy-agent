@@ -72,8 +72,9 @@ import {
   writePendingFirstEncounterTaskLaunch
 } from "./first-encounter-task-launch.js";
 import { HistoryDagPanel, type HistoryDagPanelState } from "./history-dag-panel.js";
+import { ProjectContextPackDialog } from "./project-context-pack-dialog.js";
 import { Mic, Pause, Plus, Send } from "./memory/memory-prototype-icons.js";
-import { ArrowDown, Check, ChevronDown, Folder, Plus as LucidePlus, RotateCw, X } from "lucide-react";
+import { ArrowDown, BookOpen, Check, ChevronDown, Folder, Plus as LucidePlus, RotateCw, X } from "lucide-react";
 
 export { agentChatScopeKey, updateComposerDraftForScope };
 export { hydrateAgentThreadInBackground };
@@ -251,6 +252,29 @@ export function isAgentConversationAtBottom(element: Pick<HTMLElement, "scrollTo
 
 export function hasActiveAgentConversation(currentChatId: string | null, messageCount: number): boolean {
   return Boolean(currentChatId) && messageCount > 0;
+}
+
+export function resolveContextPackProject(input: {
+  currentChatId: string | null;
+  currentSessionKey: string | null;
+  sessions: readonly MemmyAgentSessionSummary[];
+  tasks: readonly Pick<AgentState["tasks"][number], "chatId" | "sessionKey" | "projectId">[];
+  projects: readonly MemmyAgentProject[];
+  draftProject: MemmyAgentProject | null;
+}): MemmyAgentProject | null {
+  if (!input.currentChatId) return input.draftProject;
+
+  const sessionProjectId = input.currentSessionKey
+    ? input.sessions.find((session) => session.key === input.currentSessionKey)?.projectId
+    : null;
+  const taskProjectId = input.tasks.find((task) => (
+    task.chatId === input.currentChatId
+    || (input.currentSessionKey !== null && task.sessionKey === input.currentSessionKey)
+  ))?.projectId;
+  const projectId = sessionProjectId ?? taskProjectId ?? null;
+  return projectId
+    ? input.projects.find((project) => project.id === projectId) ?? null
+    : null;
 }
 
 export function shouldAcceptAgentStatusResult(input: {
@@ -674,6 +698,7 @@ export function HomePage() {
   const [historyDagPanel, setHistoryDagPanel] = useState<HistoryDagPanelState>({ open: false });
   const [isCreatingChat, setIsCreatingChat] = useState(false);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
+  const [openContextPackProjectId, setOpenContextPackProjectId] = useState<string | null>(null);
   const [projectPickerOperationId, setProjectPickerOperationId] = useState<string | null>(null);
   const [firstEncounterRelayChatId, setFirstEncounterRelayChatId] = useState<string | null>(() => (
     readFirstEncounterRelayChat(typeof window === "undefined" ? undefined : window.sessionStorage)
@@ -712,6 +737,22 @@ export function HomePage() {
   const selectedDraftProject = draftTarget.kind === "project"
     ? state.agent.projects.find((project) => project.id === draftTarget.projectId) ?? null
     : null;
+  const contextPackProject = resolveContextPackProject({
+    currentChatId: state.agent.currentChatId,
+    currentSessionKey: state.agent.currentSessionKey,
+    sessions: state.agent.sessions,
+    tasks: state.agent.tasks,
+    projects: state.agent.projects,
+    draftProject: selectedDraftProject
+  });
+  const contextPackOpen = contextPackProject?.id === openContextPackProjectId;
+  const previousContextPackProjectIdRef = useRef(contextPackProject?.id ?? null);
+  useEffect(() => {
+    const projectId = contextPackProject?.id ?? null;
+    if (previousContextPackProjectIdRef.current === projectId) return;
+    previousContextPackProjectIdRef.current = projectId;
+    setOpenContextPackProjectId(null);
+  }, [contextPackProject?.id]);
   const currentSessionProjectBlocked = state.agent.projectRegistryState === "corrupt"
     && Boolean(
       state.agent.currentSessionKey
@@ -2075,6 +2116,18 @@ export function HomePage() {
                   onSelect={selectDraftTarget}
                   onChooseOther={() => void selectOtherProjectFolder()}
                 />
+                {contextPackProject ? (
+                  <button
+                    type="button"
+                    className="home-context-pack-trigger"
+                    aria-label={t("home.contextPack.open")}
+                    title={t("home.contextPack.open")}
+                    onClick={() => setOpenContextPackProjectId(contextPackProject.id)}
+                  >
+                    <BookOpen size={13} />
+                    <span>{t("home.contextPack.trigger")}</span>
+                  </button>
+                ) : null}
               </div>
             </div>
             <div className="home-empty-status-area">
@@ -2228,12 +2281,36 @@ export function HomePage() {
                   />
                 </div>
               </div>
+              <div className="home-composer-toolbar home-composer-toolbar--conversation">
+                {contextPackProject ? (
+                  <button
+                    type="button"
+                    className="home-context-pack-trigger"
+                    aria-label={t("home.contextPack.open")}
+                    title={t("home.contextPack.open")}
+                    onClick={() => setOpenContextPackProjectId(contextPackProject.id)}
+                  >
+                    <BookOpen size={13} />
+                    <span>{t("home.contextPack.trigger")}</span>
+                  </button>
+                ) : null}
+              </div>
               <p className="text-center text-[11px] text-text-ink/40 mt-2">{t("home.notice")}</p>
               <input ref={fileInputRef} type="file" accept={AGENT_MEDIA_ACCEPT} multiple hidden className="hidden" onChange={(event) => void selectMedia(event)} />
             </div>
           </div>
         </section>
       )}
+      {contextPackProject ? (
+        <ProjectContextPackDialog
+          open={contextPackOpen}
+          projectId={contextPackProject.id}
+          projectName={contextPackProject.name}
+          client={clients?.memoryRuntime ?? null}
+          t={t}
+          onClose={() => setOpenContextPackProjectId(null)}
+        />
+      ) : null}
     </AppFrame>
   );
 }

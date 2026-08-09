@@ -23,6 +23,8 @@ describe("HttpMemoryClient", () => {
       "/api/v1/memory/search",
       "/api/v1/memory/add",
       "/api/v1/memory/:id",
+      "/api/v1/memory/:id/history",
+      "/api/v1/memory/:id/history/:version/restore",
       "/api/v1/memory/:id",
       "/api/v1/worker/run",
       "/api/v1/worker/import-summaries/enqueue",
@@ -31,6 +33,7 @@ describe("HttpMemoryClient", () => {
       "/api/v1/memory/logs",
       "/api/v1/panel/overview",
       "/api/v1/panel/analysis",
+      "/api/v1/panel/context-pack",
       "/api/v1/panel/items",
       "/api/v1/panel/tasks",
       "/api/v1/panel/tasks/:id"
@@ -48,6 +51,7 @@ describe("HttpMemoryClient", () => {
       method: string;
       path: string;
       authorization: string | undefined;
+      projectId: string | undefined;
       body: unknown;
     }> = [];
     const baseUrl = await startServer(async (request, response) => {
@@ -56,6 +60,7 @@ describe("HttpMemoryClient", () => {
         method: request.method ?? "",
         path: new URL(request.url ?? "/", "http://localhost").pathname,
         authorization: request.headers.authorization,
+        projectId: request.headers["x-memmy-project-id"] as string | undefined,
         body
       });
       sendJson(response, fixtureFor(request.method ?? "", new URL(request.url ?? "/", "http://localhost").pathname, body));
@@ -80,12 +85,15 @@ describe("HttpMemoryClient", () => {
     await expect(client.search({ ...searchInput(), verbose: true })).resolves.toMatchObject({ debug: { hits: [] } });
     await expect(client.addMemory(addMemoryInput())).resolves.toMatchObject({ id: "memory-1" });
     await expect(client.getMemory({ memoryId: "memory-1" })).resolves.toMatchObject({ item: { id: "memory-1" } });
+    await expect(client.memoryHistory("memory-1")).resolves.toMatchObject({ id: "memory-1", currentVersion: 1 });
+    await expect(client.restoreMemory({ memoryId: "memory-1", targetVersion: 1, version: 1, reason: "desktop restore" })).resolves.toMatchObject({ restoredVersion: 1 });
     await expect(client.deleteMemory({ memoryId: "memory-1", source: "codex" })).resolves.toMatchObject({ status: "deleted" });
     await expect(
       client.memoryApiLogs({ tools: ["memory_add", "memory_search"], limit: 20, offset: 0 })
     ).resolves.toMatchObject({ logs: [] });
     await expect(client.panelOverview()).resolves.toMatchObject({ counts: { memories: 0 } });
     await expect(client.panelAnalysis()).resolves.toMatchObject({ metrics: { avgRecallScore: 0 } });
+    await expect(client.projectContextPack("project-1")).resolves.toMatchObject({ namespace: { projectId: "project-1" } });
     await expect(client.panelItems(panelItemsInput())).resolves.toMatchObject({ items: [] });
     await expect(client.panelTasks({ page: 1 })).resolves.toMatchObject({ tasks: [] });
     await expect(client.deletePanelTask("episode-1")).resolves.toMatchObject({ ok: true, id: "episode-1" });
@@ -101,15 +109,19 @@ describe("HttpMemoryClient", () => {
       "POST /api/v1/memory/search",
       "POST /api/v1/memory/add",
       "GET /api/v1/memory/memory-1",
+      "GET /api/v1/memory/memory-1/history",
+      "POST /api/v1/memory/memory-1/history/1/restore",
       "DELETE /api/v1/memory/memory-1",
       "GET /api/v1/memory/logs",
       "GET /api/v1/panel/overview",
       "GET /api/v1/panel/analysis",
+      "GET /api/v1/panel/context-pack",
       "GET /api/v1/panel/items",
       "GET /api/v1/panel/tasks",
       "DELETE /api/v1/panel/tasks/episode-1"
     ]);
     expect(requests.every((request) => request.authorization === "Bearer memory-token")).toBe(true);
+    expect(requests.find((request) => request.path === "/api/v1/panel/context-pack")?.projectId).toBe("project-1");
     expect(
       requests
         .filter((request) => requestBodySource(request.body) !== undefined)
@@ -381,10 +393,13 @@ function fixtureFor(method: string, path: string, body: unknown): unknown {
   if (method === "POST" && path === "/api/v1/memory/search") return searchOutput(body);
   if (method === "POST" && path === "/api/v1/memory/add") return addMemoryOutput(body);
   if (method === "GET" && path === "/api/v1/memory/memory-1") return getMemoryOutput();
+  if (method === "GET" && path === "/api/v1/memory/memory-1/history") return memoryHistoryOutput();
+  if (method === "POST" && path === "/api/v1/memory/memory-1/history/1/restore") return restoreMemoryOutput();
   if (method === "DELETE" && path === "/api/v1/memory/memory-1") return deleteMemoryOutput();
   if (method === "GET" && path === "/api/v1/memory/logs") return memoryApiLogsOutput();
   if (method === "GET" && path === "/api/v1/panel/overview") return panelOverviewOutput();
   if (method === "GET" && path === "/api/v1/panel/analysis") return panelAnalysisOutput();
+  if (method === "GET" && path === "/api/v1/panel/context-pack") return projectContextPackOutput("project-1");
   if (method === "GET" && path === "/api/v1/panel/items") return panelItemsOutput();
   if (method === "GET" && path === "/api/v1/panel/tasks") return panelTasksOutput();
   if (method === "DELETE" && path === "/api/v1/panel/tasks/episode-1") {
@@ -518,6 +533,27 @@ function getMemoryOutput() {
   };
 }
 
+function memoryHistoryOutput() {
+  return {
+    id: "memory-1",
+    currentVersion: 1,
+    items: [{ seq: 1, version: 1, changeType: "created", source: "turn_complete", createdAt: now(), after: {} }],
+    serverTime: now()
+  };
+}
+
+function restoreMemoryOutput() {
+  return {
+    ok: true,
+    id: "memory-1",
+    version: 2,
+    restoredVersion: 1,
+    changeSeq: 2,
+    auditId: "audit-restore-1",
+    serverTime: now()
+  };
+}
+
 function deleteMemoryOutput() {
   return { ok: true, id: "memory-1", kind: "trace", status: "deleted", changeSeq: 2, syncCursor: "cursor-2", auditId: "audit-1", serverTime: now() };
 }
@@ -601,4 +637,11 @@ function addMemoryInput() {
 
 function panelItemsInput() {
   return { layer: "L1" as const, status: "activated" as const, page: 1 };
+}
+
+function projectContextPackOutput(projectId: string) {
+  return {
+    namespace: { projectId }, conventions: [], commands: [], architectureFacts: [], recentTasks: [], userPreferences: [],
+    graph: { nodes: [], edges: [] }, markdown: `# Project Memory Pack: ${projectId}`, generatedAt: now()
+  };
 }

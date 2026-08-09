@@ -10,6 +10,8 @@ export const MEMORY_LAYER_PATHS = Object.freeze({
   search: "/api/v1/memory/search",
   addMemory: "/api/v1/memory/add",
   getMemory: "/api/v1/memory/:id",
+  memoryHistory: "/api/v1/memory/:id/history",
+  restoreMemory: "/api/v1/memory/:id/history/:version/restore",
   deleteMemory: "/api/v1/memory/:id",
   runWorker: "/api/v1/worker/run",
   enqueueImportSummaries: "/api/v1/worker/import-summaries/enqueue",
@@ -18,6 +20,7 @@ export const MEMORY_LAYER_PATHS = Object.freeze({
   memoryApiLogs: "/api/v1/memory/logs",
   panelOverview: "/api/v1/panel/overview",
   panelAnalysis: "/api/v1/panel/analysis",
+  projectContextPack: "/api/v1/panel/context-pack",
   panelItems: "/api/v1/panel/items",
   panelTasks: "/api/v1/panel/tasks",
   deletePanelTask: "/api/v1/panel/tasks/:id"

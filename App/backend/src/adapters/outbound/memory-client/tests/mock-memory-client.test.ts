@@ -6,6 +6,7 @@ import {
   CompleteTurnOutputSchema,
   DeleteMemoryOutputSchema,
   GetMemoryOutputSchema,
+  MemoryHistoryOutputSchema,
   MemoryApiLogsOutputSchema,
   MemoryHealthSnapshotSchema,
   MemoryReloadConfigOutputSchema,
@@ -13,6 +14,7 @@ import {
   PanelAnalysisOutputSchema,
   PanelItemsOutputSchema,
   PanelOverviewOutputSchema,
+  RestoreMemoryOutputSchema,
   SearchOutputSchema,
   StartTurnOutputSchema
 } from "@memmy/local-api-contracts";
@@ -34,6 +36,8 @@ describe("createMockMemoryClient", () => {
     expect(search.debug.hits).toEqual([]);
     expect(AddMemoryOutputSchema.parse(await client.addMemory(addMemoryInput())).id).toBeTruthy();
     expect(GetMemoryOutputSchema.parse(await client.getMemory({ memoryId: "memory-1" })).item.id).toBe("memory-1");
+    expect(MemoryHistoryOutputSchema.parse(await client.memoryHistory("memory-1")).currentVersion).toBe(1);
+    expect(RestoreMemoryOutputSchema.parse(await client.restoreMemory({ memoryId: "memory-1", targetVersion: 1, version: 1 })).restoredVersion).toBe(1);
     expect(DeleteMemoryOutputSchema.parse(await client.deleteMemory({ memoryId: "memory-1" })).status).toBe("deleted");
     expect(MemoryApiLogsOutputSchema.parse(await client.memoryApiLogs({ limit: 20, offset: 0 })).logs).toEqual([]);
     expect(PanelOverviewOutputSchema.parse(await client.panelOverview()).counts.memories).toBe(0);
@@ -53,6 +57,8 @@ describe("createMockMemoryClient", () => {
       () => client.search(searchInput()),
       () => client.addMemory(addMemoryInput()),
       () => client.getMemory({ memoryId: "memory-1" }),
+      () => client.memoryHistory("memory-1"),
+      () => client.restoreMemory({ memoryId: "memory-1", targetVersion: 1, version: 1 }),
       () => client.deleteMemory({ memoryId: "memory-1" }),
       () => client.memoryApiLogs({ limit: 20, offset: 0 }),
       () => client.panelOverview(),
@@ -79,15 +85,18 @@ describe("createMockMemoryClient", () => {
       "deleteMemory",
       "enqueueImportSummaries",
       "getMemory",
+      "memoryHistory",
       "getMemoryProcessingStatus",
       "health",
       "memoryApiLogs",
       "openSession",
       "panelAnalysis",
+      "projectContextPack",
       "panelItems",
       "panelOverview",
       "reloadConfig",
       "retryMemoryProcessing",
+      "restoreMemory",
       "runWorker",
       "search",
       "startTurn"

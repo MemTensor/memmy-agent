@@ -25,6 +25,7 @@ describe("ProjectTargetPicker interactions", () => {
 
   beforeEach(() => {
     Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: scrollIntoView });
+    Object.defineProperty(window, "localStorage", { configurable: true, value: createMemoryStorage() });
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
@@ -321,4 +322,18 @@ function getNewProjectButton(): HTMLButtonElement | null {
 function getStandaloneButton(): HTMLButtonElement | null {
   return Array.from(document.querySelectorAll<HTMLButtonElement>(".home-project-picker__actions [role='option']"))
     .find((button) => button.querySelector(".lucide-x")) ?? null;
+}
+
+function createMemoryStorage(): Storage {
+  const values = new Map<string, string>();
+  return {
+    get length() {
+      return values.size;
+    },
+    clear: () => values.clear(),
+    getItem: (key) => values.get(key) ?? null,
+    key: (index) => Array.from(values.keys())[index] ?? null,
+    removeItem: (key) => values.delete(key),
+    setItem: (key, value) => values.set(key, value)
+  };
 }

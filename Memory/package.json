@@ -31,10 +31,16 @@
   "engines": {
     "node": ">=20"
   },
+  "overrides": {
+    "@huggingface/transformers": {
+      "sharp": "$sharp"
+    }
+  },
   "dependencies": {
     "@huggingface/transformers": "^3.8.0",
     "better-sqlite3": "^12.6.3",
     "dotenv": "^16.6.1",
+    "sharp": "0.35.3",
     "sqlite-vec": "0.1.9",
     "yaml": "^2.9.0"
   },

@@ -444,6 +444,7 @@ export interface MemoryImportRequest extends RequestEnvelope {
 
 export interface MemoryGovernanceRequest extends RequestEnvelope {
   reason?: string;
+  version?: number;
 }
 
 export interface MemoryMarkdownExportRequest extends RequestEnvelope {

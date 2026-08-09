@@ -45,6 +45,8 @@ export function createMemoryRuntimeClientStub(overrides: Partial<MemoryRuntimeCl
     search: notImplemented,
     addMemory: notImplemented,
     getMemory: notImplemented,
+    getMemoryHistory: notImplemented,
+    restoreMemory: notImplemented,
     deleteMemory: notImplemented,
     listMemoryLogs: notImplemented,
     getPanelOverview: notImplemented,

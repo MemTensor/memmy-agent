@@ -8,7 +8,8 @@ import type {
   DeletePanelTaskOutput,
   MemoryApiLogsInput,
   MemoryApiLogsOutput,
-  PanelOverviewOutput
+  PanelOverviewOutput,
+  ProjectContextPackOutput
 } from "@memmy/local-api-contracts";
 import { MemoryLayerError } from "../adapters/outbound/memory-client/index.js";
 import type { MemoryClient } from "../adapters/outbound/memory-client/index.js";
@@ -18,6 +19,7 @@ import type { RuntimeContext } from "./runtime-context.js";
 export interface PanelService {
   overview(ctx: RuntimeContext): Promise<PanelOverviewOutput>;
   analysis(ctx: RuntimeContext): Promise<PanelAnalysisOutput>;
+  contextPack(projectId: string, ctx: RuntimeContext): Promise<ProjectContextPackOutput>;
   items(input: PanelItemsInput, ctx: RuntimeContext): Promise<PanelItemsOutput>;
   tasks(input: PanelTasksInput, ctx: RuntimeContext): Promise<PanelTasksOutput>;
   deleteTask(id: string, ctx: RuntimeContext): Promise<DeletePanelTaskOutput>;
@@ -33,6 +35,10 @@ export function createPanelService(deps: { memoryClient: MemoryClient }): PanelS
 
     async analysis(_ctx) {
       return deps.memoryClient.panelAnalysis();
+    },
+
+    async contextPack(projectId, _ctx) {
+      return deps.memoryClient.projectContextPack(projectId);
     },
 
     async items(input, _ctx) {
