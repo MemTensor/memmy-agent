@@ -84,7 +84,10 @@ describe("local api", () => {
     });
 
     expect(reloadReasons).toEqual([{ reason: "desktop_startup" }]);
-    expect(backend.runtimeConfig.memory).toEqual({ baseUrl: "http://127.0.0.1:18960" });
+    expect(backend.runtimeConfig.memory).toEqual({
+      baseUrl: "http://127.0.0.1:18960",
+      ownership: "managed"
+    });
   });
 
   it("uses the built-in default Cloud client when MEMMY_CLOUD_URL is missing", async () => {
@@ -1007,7 +1010,7 @@ describe("local api", () => {
     }
   });
 
-  it("exposes the seven built-in agent sources in registry order", async () => {
+  it("exposes the eight built-in agent sources in registry order", async () => {
     backend = await createTempBackend();
 
     const response = await fetch(`${backend.runtimeConfig.baseUrl}/api/agent-sources`, {
@@ -1022,6 +1025,7 @@ describe("local api", () => {
       expect.objectContaining({ sourceId: "cursor", displayName: "Cursor" }),
       expect.objectContaining({ sourceId: "claude_code", displayName: "Claude Code" }),
       expect.objectContaining({ sourceId: "codex", displayName: "Codex" }),
+      expect.objectContaining({ sourceId: "pi", displayName: "Pi" }),
       expect.objectContaining({ sourceId: "opencode", displayName: "Opencode" }),
       expect.objectContaining({ sourceId: "openclaw", displayName: "OpenClaw" }),
       expect.objectContaining({ sourceId: "hermes", displayName: "Hermes" }),
