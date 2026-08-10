@@ -95,14 +95,23 @@ Memmy 通过 Agent 原生支持的 **Hook** 或**插件**接入实时对话。�
 | OpenClaw | Memory 插件 | `before_prompt_build`、`agent_end` | 构建提示词前注入记忆，Agent 结束时采集完整回合，并提供原生记忆工具 |
 | Hermes | Memory Provider 插件 | `prefetch`、`sync_turn` 等 Provider 生命周期 | 自动召回和采集，镜像 Hermes 的显式记忆写入，并提供原生记忆工具 |
 
+### 回合开始时的权威项目上下文
+
+Hook 或插件把当前 workspace 解析到项目后，`turn.start` 会先读取该项目已确认的上下文，再召回历史记忆。Memmy 将当前目标、目标约束、焦点工作项、下一步和验收标准放进独立的 `<memmy_project_context>` 区块，然后追加相关历史记忆。
+
+两者职责不同：已批准的项目上下文是当前工作状态，L1/L2/L3/Skill 召回结果是历史证据；当前用户请求仍高于两者。项目边界由项目本身决定，不按 Agent 来源或 profile 切分，因此一个 CLI 批准的目标会自动提供给同一项目中的另一个 CLI；不同项目或 tenant 不会继承。
+
+项目上下文治理在桌面端的**项目上下文包**对话框中完成。候选目标只有批准后才会注入，任一时刻只能有一个焦点工作项。
+
 ### 一次对话中会发生什么
 
 ```mermaid
 flowchart LR
   Request["用户请求"] --> Entry["Hook / 插件"]
   Entry --> Start["打开会话并开始回合"]
-  Start --> Recall["检索相关 Memmy 记忆"]
-  Recall --> Context["作为历史上下文注入"]
+  Start --> Authority["读取已确认项目上下文"]
+  Authority --> Recall["检索相关历史记忆"]
+  Recall --> Context["先注入项目上下文，再注入历史"]
   Context --> Agent["Agent 执行任务"]
   Agent --> Complete["采集回答、状态和可用的工具轨迹"]
   Complete --> Memory["完成回合并写入本地 Memory 服务"]
@@ -110,8 +119,10 @@ flowchart LR
 
 安装后的共同效果：
 
-- **自动召回**：Claude Code、Codex、Pi、OpenCode、OpenClaw 和 Hermes 会在正常请求执行前检索相关记忆并注入上下文。
+- **权威项目上下文**：受支持的接入会先收到当前项目相同的已批准目标、约束和焦点，再收到历史召回。
+- **自动召回**：Claude Code、Codex、Pi、OpenCode、OpenClaw 和 Hermes 会在正常请求执行前检索并注入相关历史记忆。
 - **自动采集**：Hook 或插件会在回合结束时提交用户请求、Agent 回答和成功/失败状态，不需要 Agent 手动执行 `memmy-memory add`。
+
 - **任务接续**：输入 `/memmy-resume <query>` 会搜索最多 5 个候选 L1 episode；继续输入 `1`–`5` 可读取完整 episode 并注入接续上下文。
 - **按需查询**：随接入安装的 Skill 保留 `memmy-memory search` 和 `memmy-memory get`，只在自动上下文不足时使用。
 - **来源标记**：采集结果会记录 `cursor`、`claude_code`、`codex`、`pi`、`opencode`、`openclaw` 或 `hermes`，便于过滤和追踪来源。

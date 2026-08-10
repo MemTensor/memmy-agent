@@ -21,4 +21,6 @@ Connects to `http://127.0.0.1:18960` by default. Use `--url`, `--token`, `--conf
 
 `doctor` checks service health, memory evolution, unknown Agent sources, missing workspace bindings, and cross-workspace leakage risk. `stats --workspace` limits layer and queue statistics to the current workspace.
 
+`turn start` also returns authoritative project context when the workspace resolves to a project. It is rendered separately and before historical-memory recall; confirmed goal and focus state are shared by CLI agents in that project.
+
 Also supports reload-config, session open/close, turn start/complete, and raw calls.

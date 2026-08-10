@@ -95,14 +95,23 @@ Memmy connects to live Agent conversations through each host's native **Hooks** 
 | OpenClaw | Memory plugin | `before_prompt_build`, `agent_end` | Injects memory while building the prompt, captures the completed turn, and exposes native memory tools |
 | Hermes | Memory Provider plugin | Provider lifecycle methods such as `prefetch` and `sync_turn` | Recalls and captures automatically, mirrors explicit Hermes memory writes, and exposes native memory tools |
 
+### Authoritative project context at turn start
+
+When a Hook or plugin resolves the current workspace to a project, `turn.start` reads that project's confirmed context before historical recall. Memmy renders the active goal, goal constraints, focused work item, next step, and acceptance criteria in a separate `<memmy_project_context>` block, then appends any relevant historical memory.
+
+This distinction is intentional: approved project context is the current operating state, while L1/L2/L3/Skill results are historical evidence. The current user request remains authoritative over both. The project boundary is shared across Agent sources and profiles, so a goal approved from one CLI is available automatically to another CLI working in the same project. A different project or tenant does not inherit it.
+
+Project context governance is performed in the desktop **Project Context Pack** dialog. Goal proposals are not injected until approved, and only one work item is focused at a time.
+
 ### What happens during a turn
 
 ```mermaid
 flowchart LR
   Request["User request"] --> Entry["Hook / plugin"]
   Entry --> Start["Open session and start turn"]
-  Start --> Recall["Retrieve relevant Memmy memory"]
-  Recall --> Context["Inject it as historical context"]
+  Start --> Authority["Read confirmed project context"]
+  Authority --> Recall["Retrieve relevant historical memory"]
+  Recall --> Context["Inject project context, then history"]
   Context --> Agent["Agent performs the task"]
   Agent --> Complete["Capture answer, status, and available tool traces"]
   Complete --> Memory["Complete the turn in the local Memory service"]
@@ -110,8 +119,10 @@ flowchart LR
 
 Common results after installation:
 
-- **Automatic recall:** Claude Code, Codex, Pi, OpenCode, OpenClaw, and Hermes retrieve and inject relevant memory before normal requests run.
+- **Authoritative project context:** supported integrations receive the same approved goal, constraints, and selected focus for the resolved project before historical recall.
+- **Automatic recall:** Claude Code, Codex, Pi, OpenCode, OpenClaw, and Hermes retrieve and inject relevant historical memory before normal requests run.
 - **Automatic capture:** the Hook or plugin submits the user request, Agent answer, and success/failure status at the end of a turn. The Agent does not need to run `memmy-memory add` manually.
+
 - **Task resumption:** `/memmy-resume <query>` returns up to five L1 episode candidates. Enter `1`–`5` to load the complete episode and inject continuation context.
 - **On-demand lookup:** the bundled Skill keeps `memmy-memory search` and `memmy-memory get` for cases where automatic context is insufficient.
 - **Source attribution:** captured turns carry `cursor`, `claude_code`, `codex`, `pi`, `opencode`, `openclaw`, or `hermes`, so you can filter and trace their origin.

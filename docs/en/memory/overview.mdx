@@ -10,12 +10,13 @@ Memmy memory is hosted by the local Memory service. The default endpoint is `htt
 The path has seven stages:
 
 1. Before a request reaches the Agent, a Hook or plugin opens or reuses a Memmy session and calls `turn.start`.
-2. On the first turn of a new episode, the Memory service classifies intent and decides whether to recall memory and which layers are allowed.
-3. The request is converted into a semantic query, keywords, short-pattern terms, and structural error fragments.
-4. Recall channels run in parallel, then candidates are fused using memory layer, channel rank, quality, and time decay.
-5. Candidates pass a relative threshold, deduplication, MMR diversity selection, and an optional LLM filter.
-6. Hits are rendered as historical context and injected into the Agent. The current user request always remains authoritative.
-7. At the end of the turn, `turn.complete` stores the raw turn and L1 traces. Background jobs then summarize, reflect, score, embed, and evolve higher-level memory.
+2. When the workspace resolves to a project, the Memory service renders that project's confirmed goal, focused work item, and constraints as authoritative project context.
+3. On the first turn of a new episode, the Memory service classifies intent and decides whether to recall historical memory and which layers are allowed.
+4. The request is converted into a semantic query, keywords, short-pattern terms, and structural error fragments.
+5. Recall channels run in parallel, then candidates are fused using memory layer, channel rank, quality, and time decay.
+6. Candidates pass a relative threshold, deduplication, MMR diversity selection, and an optional LLM filter.
+7. Project context is injected first, followed by any historical-memory hits. The current user request remains authoritative over both.
+8. At the end of the turn, `turn.complete` stores the raw turn and L1 traces. Background jobs then summarize, reflect, score, embed, and evolve higher-level memory.
 
 ## Four Memory Layers
 
@@ -178,6 +179,8 @@ After mechanical ranking, Memmy prefers the evolution model for relevance filter
 The LLM may intentionally drop every candidate. If its output is invalid or the call fails, the top 6 mechanically ranked candidates are retained.
 
 ## How Context Is Injected
+
+When the workspace resolves to a project, `turn.start` prepends a separate `<memmy_project_context>` block before recalled memory. This block contains only confirmed project authority: the active goal, its constraints, and the selected work item and next step. Agent source and profile identify provenance but do not split the project, so Codex, Pi, and other installed integrations in the same workspace receive the same confirmed state. See [Agent Sources & Scanning](/en/memory/sources) for Hook and plugin behavior.
 
 Hits are rendered in this order:
 

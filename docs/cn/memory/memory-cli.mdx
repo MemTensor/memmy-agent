@@ -21,4 +21,6 @@ memmy-memory delete <id>
 
 `doctor` 会检查服务健康、记忆演化、未知 Agent 来源、缺失 workspace 绑定和跨 workspace 泄漏风险；`stats --workspace` 只返回当前 workspace 的层级与队列统计。
 
+workspace 能解析到项目时，`turn start` 还会返回权威项目上下文。它与历史记忆分开渲染并排在召回结果之前；该项目中的 CLI Agent 共享已确认目标和焦点状态。
+
 另支持 `reload-config`、`session open/close`、`turn start/complete` 和 `raw` 调用。
