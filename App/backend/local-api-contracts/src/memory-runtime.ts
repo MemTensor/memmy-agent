@@ -108,6 +108,7 @@ export const MemoryProcessingRecordSchema = z.object({
   errorCode: z.string().nullable().optional(),
   errorMessage: z.string().nullable().optional(),
   failedAt: IsoTimeSchema.nullable().optional(),
+  autoRetryScheduled: z.boolean().optional(),
   updatedAt: IsoTimeSchema
 });
 export type MemoryProcessingRecord = z.infer<typeof MemoryProcessingRecordSchema>;

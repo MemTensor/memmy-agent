@@ -1016,7 +1016,15 @@ export class MemoryProcessingRepository {
 
   get(memoryId: string): MemoryProcessingRecord | undefined {
     const row = this.db.prepare(
-      `SELECT * FROM memory_processing_state WHERE memory_id = ?`
+      `SELECT memory_processing_state.*,
+              EXISTS(
+                SELECT 1 FROM evolution_jobs
+                WHERE evolution_jobs.id = memory_processing_state.active_job_id
+                  AND evolution_jobs.status IN ('failed', 'queued')
+                  AND evolution_jobs.attempts < evolution_jobs.max_attempts
+              ) AS auto_retry_scheduled
+       FROM memory_processing_state
+       WHERE memory_id = ?`
     ).get(memoryId) as SqlMemoryProcessingRow | undefined;
     return row ? memoryProcessingFromSql(row) : undefined;
   }
@@ -1025,7 +1033,14 @@ export class MemoryProcessingRepository {
     if (memoryIds.length === 0) return [];
     const placeholders = memoryIds.map(() => "?").join(", ");
     const rows = this.db.prepare(
-      `SELECT * FROM memory_processing_state
+      `SELECT memory_processing_state.*,
+              EXISTS(
+                SELECT 1 FROM evolution_jobs
+                WHERE evolution_jobs.id = memory_processing_state.active_job_id
+                  AND evolution_jobs.status IN ('failed', 'queued')
+                  AND evolution_jobs.attempts < evolution_jobs.max_attempts
+              ) AS auto_retry_scheduled
+       FROM memory_processing_state
        WHERE memory_id IN (${placeholders})`
     ).all(...memoryIds) as SqlMemoryProcessingRow[];
     const byId = new Map(rows.map((row) => [row.memory_id, memoryProcessingFromSql(row)]));
@@ -1038,7 +1053,14 @@ export class MemoryProcessingRepository {
     if (states.length === 0) return [];
     const placeholders = states.map(() => "?").join(", ");
     return (this.db.prepare(
-      `SELECT * FROM memory_processing_state
+      `SELECT memory_processing_state.*,
+              EXISTS(
+                SELECT 1 FROM evolution_jobs
+                WHERE evolution_jobs.id = memory_processing_state.active_job_id
+                  AND evolution_jobs.status IN ('failed', 'queued')
+                  AND evolution_jobs.attempts < evolution_jobs.max_attempts
+              ) AS auto_retry_scheduled
+       FROM memory_processing_state
        WHERE state IN (${placeholders})
        ORDER BY updated_at ASC, memory_id ASC
        LIMIT ?`
@@ -1046,6 +1068,7 @@ export class MemoryProcessingRepository {
   }
 
   save(record: MemoryProcessingRecord): MemoryProcessingRecord {
+    const { autoRetryScheduled: _derived, ...storedRecord } = record;
     this.db.prepare(
       `INSERT INTO memory_processing_state (
          memory_id, state, stage, active_job_id, attempt_count, manual_retry_count,
@@ -1066,12 +1089,12 @@ export class MemoryProcessingRepository {
          failed_at = excluded.failed_at,
          updated_at = excluded.updated_at`
     ).run({
-      ...record,
-      stage: record.stage ?? null,
-      activeJobId: record.activeJobId ?? null,
-      errorCode: record.errorCode ?? null,
-      errorMessage: record.errorMessage ?? null,
-      failedAt: record.failedAt ?? null
+      ...storedRecord,
+      stage: storedRecord.stage ?? null,
+      activeJobId: storedRecord.activeJobId ?? null,
+      errorCode: storedRecord.errorCode ?? null,
+      errorMessage: storedRecord.errorMessage ?? null,
+      failedAt: storedRecord.failedAt ?? null
     });
     return this.get(record.memoryId) ?? record;
   }
@@ -4369,6 +4392,7 @@ interface SqlMemoryProcessingRow {
   error_code: string | null;
   error_message: string | null;
   failed_at: string | null;
+  auto_retry_scheduled?: number;
   updated_at: string;
 }
 
@@ -4501,6 +4525,7 @@ function memoryProcessingFromSql(row: SqlMemoryProcessingRow): MemoryProcessingR
     errorCode: row.error_code,
     errorMessage: row.error_message,
     failedAt: row.failed_at,
+    autoRetryScheduled: row.auto_retry_scheduled === 1,
     updatedAt: row.updated_at
   };
 }

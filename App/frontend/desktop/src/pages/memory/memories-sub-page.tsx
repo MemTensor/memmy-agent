@@ -11,8 +11,10 @@ import {
 } from "../../analytics/memory-ui-analytics.js";
 import { useAnalytics } from "../../analytics/use-analytics.js";
 import { ApiRequestError } from "../../api/http.js";
+import { ERROR_NOTICE_KEYS } from "../../i18n/error-notice-messages.js";
 import type { MessageKey } from "../../i18n/messages.js";
 import { useTranslation } from "../../i18n/use-translation.js";
+import { ErrorNoticeDetail } from "../error-notice-detail.js";
 import { AlertTriangle, BrainCircuit, CheckCircle2, ChevronRight, Loader2, RefreshCw, Search, Settings2, Sparkles, X } from "./memory-prototype-icons.js";
 import {
   MEMORY_SOURCE_AGENT_EXCLUSIONS,
@@ -708,13 +710,9 @@ function MemoryProcessingFailureCard(props: {
   const feedback = props.retryFeedback?.memoryId === props.item.id ? props.retryFeedback : null;
   const retryError = feedback?.status === "error" ? feedback : null;
   const displayedErrorMessage = retryError?.message ?? processing?.errorMessage ?? null;
-  const displayedFailedAt = retryError?.failedAt ?? processing?.failedAt ?? null;
-  const retryErrorMatchesProcessing = Boolean(
-    retryError &&
-    processing?.errorMessage === retryError.message
-  );
   const processingRetryInProgress = Boolean(
     processing?.errorMessage &&
+    !processing.autoRetryScheduled &&
     processing.state !== "failed" &&
     processing.state !== "ready" &&
     processing.state !== "ready_text_only"
@@ -723,6 +721,7 @@ function MemoryProcessingFailureCard(props: {
   if (
     processing?.state !== "failed" &&
     !retryInProgress &&
+    !processing?.autoRetryScheduled &&
     feedback?.status !== "succeeded" &&
     feedback?.status !== "error"
   ) {
@@ -730,10 +729,6 @@ function MemoryProcessingFailureCard(props: {
   }
 
   const retryDisabled = retryInProgress || feedback?.status === "succeeded";
-  const showPreviousFailure = Boolean(
-    processing?.errorMessage &&
-    (retryInProgress || processing.state !== "failed")
-  );
   const showRetryAction = Boolean(
     props.onRetryProcessing &&
     ((processing?.state === "failed" && processing.retryAction !== "none") ||
@@ -741,43 +736,38 @@ function MemoryProcessingFailureCard(props: {
       feedback?.status === "error" ||
       feedback?.status === "succeeded")
   );
-  const showFailureStage = !showPreviousFailure && (!retryError || retryErrorMatchesProcessing);
+  const title = feedback?.status === "succeeded"
+    ? t("memory.memories.processing.retrySucceeded")
+    : retryInProgress
+      ? t("memory.memories.processing.retrying")
+      : processing?.errorCode === "40309"
+        ? t(ERROR_NOTICE_KEYS.memory.quotaExhausted)
+        : processing?.autoRetryScheduled
+          ? t(ERROR_NOTICE_KEYS.memory.autoRetryScheduled)
+          : t(ERROR_NOTICE_KEYS.memory.failed);
   return (
-    <section className={`memory-detail-card memory-processing-failure${feedback?.status === "succeeded" ? " memory-processing-failure--success" : ""}`}>
-      <div className="memory-processing-failure__heading">
+    <section
+      className={`agent-model-error-notice memory-processing-notice${feedback?.status === "succeeded" ? " memory-processing-notice--success" : ""}`}
+      role={feedback?.status === "succeeded" ? "status" : "alert"}
+    >
+      <div className="agent-model-error-notice__header">
         {feedback?.status === "succeeded"
-          ? <CheckCircle2 size={17} />
+          ? <CheckCircle2 size={16} className="agent-model-error-notice__icon" aria-hidden="true" />
           : retryInProgress
-            ? <Loader2 size={17} className="memory-spin" />
-            : <AlertTriangle size={17} />}
-        <h5>{feedback?.status === "succeeded"
-          ? t("memory.memories.processing.retrySucceeded")
-          : retryInProgress
-            ? t("memory.memories.processing.retrying")
-            : processing?.errorCode === "40309"
-              ? t("memory.memories.processing.quotaExhaustedTitle")
-              : t("memory.memories.processing.failureTitle")}</h5>
+            ? <Loader2 size={16} className="agent-model-error-notice__icon memory-spin" aria-hidden="true" />
+            : <AlertTriangle size={16} className="agent-model-error-notice__icon" aria-hidden="true" />}
+        <h5 className="agent-model-error-notice__title">{title}</h5>
       </div>
-      {displayedErrorMessage && (
-        <dl className="memory-detail-grid" role={retryError ? "alert" : undefined}>
-          {showFailureStage && processing && (
-            <>
-              <dt>{t("memory.memories.processing.stage")}</dt>
-              <dd>{processingStageLabel(processing, t)}</dd>
-            </>
-          )}
-          <dt>{t(showPreviousFailure
-            ? "memory.memories.processing.previousReason"
-            : "memory.memories.processing.reason")}</dt>
-          <dd>{displayedErrorMessage}</dd>
-          <dt>{t(showPreviousFailure
-            ? "memory.memories.processing.previousFailedAt"
-            : "memory.memories.processing.failedAt")}</dt>
-          <dd>{displayedFailedAt ? formatDateTime(displayedFailedAt) : "-"}</dd>
-        </dl>
-      )}
+      {displayedErrorMessage && feedback?.status !== "succeeded" ? (
+        <ErrorNoticeDetail
+          showLabel={t("agent.error.showDetails")}
+          hideLabel={t("agent.error.hideDetails")}
+        >
+          <pre className="agent-model-error-notice__detail">{displayedErrorMessage}</pre>
+        </ErrorNoticeDetail>
+      ) : null}
       <div className="memory-processing-failure__actions">
-        {processing?.state === "failed" && processing.retryAction === "open_settings" && props.onOpenSettings && !retryDisabled && (
+        {((processing?.state === "failed" && processing.retryAction === "open_settings") || processing?.errorCode === "40309") && props.onOpenSettings && !retryDisabled && (
           <button type="button" className="memory-processing-action" onClick={props.onOpenSettings}>
             <Settings2 size={14} />
             {t("memory.memories.processing.openSettings")}
@@ -809,14 +799,6 @@ export function processingRetryErrorMessage(error: unknown, endpointUnavailableM
   return error instanceof ApiRequestError && error.status === 404 && error.code === null
     ? endpointUnavailableMessage
     : toErrorMessage(error);
-}
-
-function processingStageLabel(processing: MemoryProcessingRecord, t: (key: MessageKey) => string): string {
-  return processing.stage === "summary"
-    ? t("memory.memories.processing.stageSummary")
-    : processing.stage === "embedding"
-      ? t("memory.memories.processing.stageEmbedding")
-      : "-";
 }
 
 interface TraceDetail {

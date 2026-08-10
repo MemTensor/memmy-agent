@@ -226,7 +226,7 @@ export class OpenAICompatProvider extends LLMProvider {
   static extractErrorMetadata(error: any, spec: any = null): Record<string, any> {
     const response = error?.response;
     const headers = response?.headers ?? null;
-    let payload = error?.body ?? error?.doc ?? response?.text ?? null;
+    let payload = error?.body ?? error?.doc ?? response?.text ?? error?.error ?? null;
     if (payload == null && response && typeof response.json === "function") {
       try {
         const maybePayload = response.json();
@@ -306,7 +306,7 @@ export class OpenAICompatProvider extends LLMProvider {
 
     const bodyText = typeof body === "string" ? body : JSON.stringify(body);
     let content = bodyText.trim()
-      ? `Error: ${bodyText.trim().slice(0, 500)}`
+      ? `Error: ${bodyText.trim()}`
       : `Error calling LLM: ${error}`;
     const effectiveBase = apiBase ?? error?.apiBase ?? error?.api_base ?? null;
     if (
@@ -848,8 +848,8 @@ export class OpenAICompatProvider extends LLMProvider {
     }
     return new LLMResponse({
       content: message?.trim()
-        ? `Error calling LLM: ${message.trim().slice(0, 500)}`
-        : `Error calling LLM: ${serialized.slice(0, 500)}`,
+        ? `Error calling LLM: ${message.trim()}`
+        : `Error calling LLM: ${serialized}`,
       finishReason: "error",
       ...this.errorMetadataFromPayload(responseMap, spec, null),
     });

@@ -376,9 +376,14 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
   let activitySegmentCounter = 0;
   const newId = (prefix: string, idx: number): string => `${prefix}-${idx}-${randomUUID().slice(0, 8)}`;
 
-  function modelError(value: any): { category: "quota_exhausted" } | null {
+  function modelError(value: any): { category: "quota_exhausted" | "model_failed"; detail?: string } | null {
     if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-    return value.category === "quota_exhausted" ? { category: "quota_exhausted" } : null;
+    return value.category === "quota_exhausted" || value.category === "model_failed"
+      ? {
+          category: value.category,
+          ...(typeof value.detail === "string" ? { detail: value.detail } : {})
+        }
+      : null;
   }
 
   function roleCreatedAtPatch(role: "user" | "assistant"): Dict {

@@ -1837,53 +1837,105 @@ body:has(.memory-drawer) .window-drag-region {
 
 .agent-model-error-notice {
   max-width: min(100%, 32rem);
-  padding: 12px 14px;
+  padding: 20px;
   border: 1px solid color-mix(in srgb, var(--color-status-error) 22%, transparent);
-  border-radius: var(--radius-card);
+  border-radius: 14px;
   background: color-mix(in srgb, var(--color-status-error-soft) 55%, var(--color-background-paper));
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--color-status-error) 5%, transparent);
 }
 
 .agent-model-error-notice__header {
   display: flex;
   align-items: flex-start;
-  gap: 8px;
+  gap: 12px;
 }
 
 .agent-model-error-notice__icon {
-  margin-top: 1px;
+  margin-top: 3px;
   flex-shrink: 0;
   color: var(--color-status-error);
 }
 
 .agent-model-error-notice__title {
   margin: 0;
-  font-size: 13px;
-  line-height: 1.5;
+  font-size: 14px;
+  line-height: 22px;
+  font-weight: 500;
   color: color-mix(in srgb, var(--color-status-error) 88%, var(--color-text-ink));
 }
 
-.agent-model-error-notice__toggle {
-  margin: 6px 0 0 23px;
+.agent-model-error-notice__detail {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  color: color-mix(in srgb, var(--color-text-ink) 68%, transparent);
+}
+
+.error-notice-detail__shell {
+  margin-left: 30px;
+  overflow: hidden;
+  contain: paint;
+  will-change: height;
+}
+
+.error-notice-detail__gap {
+  padding-top: 16px;
+}
+
+.error-notice-detail__panel {
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--color-status-error) 14%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--color-status-error-soft) 28%, var(--color-background-paper));
+  will-change: opacity;
+}
+
+.error-notice-detail__toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 12px 0 0 30px;
   padding: 0;
   border: 0;
   background: transparent;
   color: color-mix(in srgb, var(--color-status-error) 72%, var(--color-text-ink));
-  font-size: 11px;
-  line-height: 1.4;
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 500;
   cursor: pointer;
 }
 
-.agent-model-error-notice__toggle:hover {
+.error-notice-detail__toggle:hover {
   color: var(--color-status-error);
 }
 
-.agent-model-error-notice__detail {
-  margin: 6px 0 0 23px;
-  overflow-wrap: anywhere;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  line-height: 1.45;
-  color: color-mix(in srgb, var(--color-text-ink) 52%, transparent);
+.error-notice-detail__toggle:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--color-action-sky) 28%, transparent);
+  outline-offset: 2px;
+}
+
+.error-notice-detail__chevron {
+  transform: rotate(180deg);
+  transition: transform 220ms cubic-bezier(0, 0, 0.2, 1);
+}
+
+.error-notice-detail__toggle[aria-expanded="false"] .error-notice-detail__chevron {
+  transform: rotate(0deg);
+  transition-timing-function: cubic-bezier(0.4, 0, 1, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .error-notice-detail__shell,
+  .error-notice-detail__panel {
+    will-change: auto;
+  }
+
+  .error-notice-detail__chevron {
+    transition: none;
+  }
 }
 
 .agent-retry-wait-line--running .agent-retry-wait-line__label {
@@ -3925,32 +3977,14 @@ code {
   text-transform: uppercase;
 }
 
-.memory-processing-failure {
-  border-color: color-mix(in srgb, var(--color-status-error) 38%, transparent);
-  background: color-mix(in srgb, var(--color-status-error) 6%, var(--color-background-paper));
-}
-
-.memory-processing-failure--success {
+.memory-processing-notice--success {
   border-color: color-mix(in srgb, var(--color-status-success) 40%, transparent);
   background: color-mix(in srgb, var(--color-status-success) 7%, var(--color-background-paper));
 }
 
-.memory-processing-failure__heading {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 12px;
-  color: var(--color-status-error);
-}
-
-.memory-processing-failure--success .memory-processing-failure__heading {
+.memory-processing-notice--success .agent-model-error-notice__icon,
+.memory-processing-notice--success .agent-model-error-notice__title {
   color: var(--color-status-success);
-}
-
-.memory-processing-failure__heading h5 {
-  margin: 0;
-  font-size: 13px;
-  font-weight: 600;
 }
 
 .memory-processing-failure__actions {

@@ -8,6 +8,7 @@ import {
   type LlmCompletionOptions,
   type LlmMessage
 } from "../../../src/index.js";
+import { ModelHttpError } from "../../../src/model/http.js";
 import { Repositories } from "../../../src/storage/repositories.js";
 import {
   accountRuntimeConfig,
@@ -504,7 +505,9 @@ describe("MemoryService / import / processing", () => {
     expect(service.memoryProcessingStatus([added.id], { namespace }).items[0]).toMatchObject({
       state: "summary_pending",
       stage: "summary",
-      ...firstFailure
+      errorCode: "transient_provider_error",
+      errorMessage: "429 second provider failure",
+      autoRetryScheduled: true
     });
     await service.runWorkerOnce(1);
     await service.runWorkerOnce(1);
@@ -551,6 +554,72 @@ describe("MemoryService / import / processing", () => {
     expect(llmCalls.filter((call) => call.options.operation === "capture.summarize")).toHaveLength(1);
 
     db.close();
+  });
+
+  it("persists quota details and derives automatic retry state after reopening", async () => {
+    const root = createTestRoot("mindock-memory-processing-quota-");
+    const dbPath = join(root, "memory.sqlite");
+    const db = new MemoryDb({ path: dbPath });
+    const detail = `Error:\n40309\n${"x".repeat(1_100)}\nTAIL`;
+    const baseLlm = createFailingLlm();
+    const llm: LlmClient = {
+      ...baseLlm,
+      async completeJson() {
+        throw new ModelHttpError(
+          "openai_compatible HTTP 403: quota exhausted",
+          "openai_compatible",
+          403,
+          "40309",
+          detail
+        );
+      }
+    };
+    const service = createTestMemoryService({
+      db,
+      mode: "dev",
+      llm,
+      embedder: createCapturingEmbedder([])
+    });
+    const namespace = { source: "codex", profileId: "default", userId: "quota-user" };
+    const added = addAgentSourceImport(service, namespace, "quota failure", "quota-failure");
+
+    await service.runWorkerOnce(1);
+
+    expect(service.memoryProcessingStatus([added.id], { namespace }).items[0]).toMatchObject({
+      state: "summary_pending",
+      stage: "summary",
+      attemptCount: 1,
+      retryAction: "retry",
+      errorCode: "40309",
+      errorMessage: detail,
+      autoRetryScheduled: true
+    });
+    db.close();
+
+    const reopened = new MemoryDb({ path: dbPath });
+    const repos = new Repositories(reopened.db);
+    expect(repos.processing.get(added.id)).toMatchObject({
+      errorCode: "40309",
+      errorMessage: detail,
+      autoRetryScheduled: true
+    });
+    reopened.db.prepare(
+      `UPDATE evolution_jobs SET status = 'queued' WHERE target_memory_id = ?`
+    ).run(added.id);
+    expect(repos.processing.get(added.id)?.autoRetryScheduled).toBe(true);
+    reopened.db.prepare(
+      `UPDATE evolution_jobs SET status = 'leased' WHERE target_memory_id = ?`
+    ).run(added.id);
+    expect(repos.processing.get(added.id)?.autoRetryScheduled).toBe(false);
+    reopened.db.prepare(
+      `UPDATE evolution_jobs SET status = 'failed', attempts = max_attempts WHERE target_memory_id = ?`
+    ).run(added.id);
+    expect(repos.processing.get(added.id)?.autoRetryScheduled).toBe(false);
+    reopened.db.prepare(
+      `DELETE FROM evolution_jobs WHERE target_memory_id = ?`
+    ).run(added.id);
+    expect(repos.processing.get(added.id)?.autoRetryScheduled).toBe(false);
+    reopened.close();
   });
 
   it("classifies an HTML model response as a model endpoint configuration failure", async () => {

@@ -92,14 +92,16 @@ describe("Memmy Account quota errors", () => {
   });
 
   it("classifies a streaming business error chunk with code 40309", () => {
+    const detail = `account quota exhausted\n${"x".repeat(600)}\nTAIL`;
     const response = OpenAICompatProvider.parseChunks(
-      [{ code: "40309", message: "account quota exhausted" }],
+      [{ code: "40309", message: detail }],
       findByName("memmy_account"),
     );
 
     expect(response.finishReason).toBe("error");
     expect(response.errorCode).toBe("40309");
     expect(response.errorCategory).toBe("quota_exhausted");
+    expect(response.content).toBe(`Error calling LLM: ${detail}`);
   });
 
   it.each([0, "0", 40308])("does not classify business code %j", (code) => {

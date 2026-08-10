@@ -176,9 +176,12 @@ describe("AgentLoop direct processing", () => {
 
     expect(outbound?.content).toBe("当前模型额度已用完");
     expect(outbound?.metadata.modelErrorCategory).toBe("quota_exhausted");
+    expect(outbound?.metadata.modelErrorDetail).toBe("raw provider quota detail");
     const persisted = agent.sessions.getOrCreate("websocket:web-quota").messages;
-    expect(persisted.every((message) => !("errorCategory" in message))).toBe(true);
-    expect(persisted.every((message) => !("modelErrorCategory" in message))).toBe(true);
+    expect(persisted.at(-1)?.model_error).toEqual({
+      category: "quota_exhausted",
+      detail: "raw provider quota detail"
+    });
   });
 
   it("propagates a structured quota category through the system-message path", async () => {
@@ -197,6 +200,7 @@ describe("AgentLoop direct processing", () => {
     expect(outbound?.channel).toBe("websocket");
     expect(outbound?.content).toBe("This model's quota has been used up.");
     expect(outbound?.metadata.modelErrorCategory).toBe("quota_exhausted");
+    expect(outbound?.metadata.modelErrorDetail).toBe("raw provider quota detail");
   });
 
   it("does not classify quota-like answer text without a structured category", async () => {

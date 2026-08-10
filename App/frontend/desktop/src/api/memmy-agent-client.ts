@@ -291,7 +291,8 @@ export type MemmyAgentSendMessageInput = {
 };
 
 export type MemmyAgentModelError = {
-  category: "quota_exhausted";
+  category: "quota_exhausted" | "model_failed";
+  detail?: string;
 };
 
 export type MemmyAgentWsEvent = {

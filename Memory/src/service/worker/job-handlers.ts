@@ -13,9 +13,9 @@ import type {
   Repositories,
   SessionRecord
 } from "../../storage/repositories.js";
+import { ModelHttpError } from "../../model/http.js";
 import type { JobType,MemoryRow,RuntimeNamespace } from "../../types.js";
 import { newId,stableHash } from "../../utils/id.js";
-import { clip } from "../../utils/text.js";
 import {
   embeddingRetryTargetKindForMemory,
   embeddingRetryVectorFieldForMemory
@@ -462,19 +462,31 @@ export function processingJobMatchesMemory(job: EvolutionJobRecord, memory: Memo
 }
 
 export function sanitizeProcessingError(error: unknown): string {
-  const message = (error instanceof Error ? error.message : String(error))
+  const detail = error instanceof ModelHttpError
+    ? error.detail
+    : error instanceof Error ? error.message : String(error);
+  const message = detail
     .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
     .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, "[redacted]")
-    .replace(/\b(api[_-]?key)\s*[:=]\s*\S+/gi, "$1=[redacted]")
-    .trim();
-  return clip(message || "Unknown processing error", 1000);
+    .replace(/\b(api[_-]?key)\s*[:=]\s*\S+/gi, "$1=[redacted]");
+  return message.trim() ? message : "Unknown processing error";
 }
 
-export function classifyProcessingError(message: string): {
+export function classifyProcessingError(error: unknown): {
   code: string;
   retryAction: "retry" | "open_settings" | "none";
 } {
+  if (error instanceof ModelHttpError && error.errorCode === "40309") {
+    return { code: "40309", retryAction: "open_settings" };
+  }
+  const hasStructuredCode = error instanceof ModelHttpError && error.errorCode !== undefined;
+  const message = error instanceof ModelHttpError
+    ? `${error.message}\n${error.detail}`
+    : error instanceof Error ? error.message : String(error);
   const normalized = message.toLowerCase();
+  if (!hasStructuredCode && /\b40309\b/.test(normalized)) {
+    return { code: "40309", retryAction: "open_settings" };
+  }
   if (/api.?key|unauthorized|forbidden|\b401\b|\b403\b|\b404\b|model.+not configured|missing.+model|expected json|html instead of json|configured model endpoint/.test(normalized)) {
     return { code: "model_configuration", retryAction: "open_settings" };
   }

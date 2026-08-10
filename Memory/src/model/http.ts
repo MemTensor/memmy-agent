@@ -2,6 +2,20 @@ import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
 
 const logger = createMemoryLogger("model-http");
 
+export class ModelHttpError extends Error {
+  override readonly name = "ModelHttpError";
+
+  constructor(
+    message: string,
+    readonly provider: string,
+    readonly httpStatus: number,
+    readonly errorCode: string | undefined,
+    readonly detail: string
+  ) {
+    super(message);
+  }
+}
+
 export async function postJsonWithRetry<T>(
   input: {
     provider: string;
@@ -30,8 +44,15 @@ export async function postJsonWithRetry<T>(
           signal: controller.signal
         });
         const text = await response.text();
-        if (!response.ok) {
-          throw new Error(formatHttpFailure(input.provider, response, text));
+        const failure = parseProviderFailure(text);
+        if (!response.ok || failure.isBusinessError) {
+          throw new ModelHttpError(
+            formatHttpFailure(input.provider, response, text),
+            input.provider,
+            response.status,
+            failure.errorCode,
+            failure.detail
+          );
         }
         return parseJsonResponse<T>(input.provider, response, text);
       } finally {
@@ -113,18 +134,51 @@ function formatHttpFailure(provider: string, response: Response, text: string): 
 }
 
 function extractProviderErrorMessage(text: string): string | undefined {
+  return parseProviderFailure(text).message;
+}
+
+function parseProviderFailure(text: string): {
+  detail: string;
+  errorCode?: string;
+  isBusinessError: boolean;
+  message?: string;
+} {
   try {
     const parsed = JSON.parse(text) as {
-      error?: string | { message?: unknown };
+      code?: unknown;
+      error?: string | { code?: unknown; message?: unknown };
       message?: unknown;
     };
-    if (typeof parsed.error === "string" && parsed.error.trim()) return parsed.error.trim();
-    if (parsed.error && typeof parsed.error === "object" && typeof parsed.error.message === "string") {
-      return parsed.error.message.trim() || undefined;
+    const rawCode = parsed.error && typeof parsed.error === "object"
+      ? parsed.error.code ?? parsed.code
+      : parsed.code;
+    const errorCode = typeof rawCode === "string" || typeof rawCode === "number"
+      ? String(rawCode)
+      : undefined;
+    const normalizedCode = errorCode?.trim().toLowerCase();
+    const isQuotaCode = normalizedCode === "40309";
+    if (typeof parsed.error === "string" && parsed.error.trim()) {
+      return { detail: parsed.error, errorCode, isBusinessError: true, message: parsed.error.trim() };
     }
-    return typeof parsed.message === "string" && parsed.message.trim() ? parsed.message.trim() : undefined;
+    if (parsed.error && typeof parsed.error === "object" && typeof parsed.error.message === "string") {
+      return {
+        detail: parsed.error.message,
+        errorCode,
+        isBusinessError: true,
+        message: parsed.error.message.trim() || undefined
+      };
+    }
+    if (typeof parsed.message === "string" && parsed.message.trim()) {
+      return {
+        detail: parsed.message,
+        errorCode,
+        isBusinessError: isQuotaCode,
+        message: parsed.message.trim()
+      };
+    }
+    return { detail: text, errorCode, isBusinessError: isQuotaCode };
   } catch {
-    return undefined;
+    return { detail: text, isBusinessError: false };
   }
 }
 

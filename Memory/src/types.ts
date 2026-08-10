@@ -35,6 +35,7 @@ export interface MemoryProcessingRecord {
   errorCode?: string | null;
   errorMessage?: string | null;
   failedAt?: IsoTime | null;
+  autoRetryScheduled?: boolean;
   updatedAt: IsoTime;
 }
 export type JobType =

@@ -109,7 +109,7 @@ describe("WebSocket channel", () => {
     });
   });
 
-  it("sends and persists structured quota errors without leaking internal metadata", async () => {
+  it("sends and persists structured model errors without leaking internal metadata", async () => {
     tempDataDir();
     const channel = new WebSocketChannel({}, new MessageBus());
     const ws = connection();
@@ -120,7 +120,11 @@ describe("WebSocket channel", () => {
         channel: "websocket",
         chatId: "chat-quota",
         content: "当前模型额度已用完",
-        metadata: { x: 1, modelErrorCategory: "quota_exhausted" },
+        metadata: {
+          x: 1,
+          modelErrorCategory: "quota_exhausted",
+          modelErrorDetail: "Error: raw provider detail 40309"
+        },
       }),
     );
 
@@ -128,17 +132,35 @@ describe("WebSocket channel", () => {
       event: "message",
       content: "当前模型额度已用完",
       metadata: { x: 1 },
-      model_error: { category: "quota_exhausted" },
+      model_error: { category: "quota_exhausted", detail: "Error: raw provider detail 40309" },
     });
     expect(sent(ws).metadata).not.toHaveProperty("modelErrorCategory");
+    expect(sent(ws).metadata).not.toHaveProperty("modelErrorDetail");
     const transcript = fs
       .readFileSync(webuiTranscriptPath("websocket:chat-quota"), "utf8")
       .trim()
       .split(/\n/u)
       .map((line) => JSON.parse(line));
     expect(transcript).toHaveLength(1);
-    expect(transcript[0].model_error).toEqual({ category: "quota_exhausted" });
+    expect(transcript[0].model_error).toEqual({
+      category: "quota_exhausted",
+      detail: "Error: raw provider detail 40309"
+    });
     expect(transcript[0].metadata).toEqual({ x: 1 });
+
+    await channel.send(new OutboundMessage({
+      channel: "websocket",
+      chatId: "chat-quota",
+      content: "平台服务响应异常，请稍后重试。",
+      metadata: {
+        modelErrorCategory: "model_failed",
+        modelErrorDetail: "Error: raw provider failure"
+      }
+    }));
+    expect(sent(ws, 1).model_error).toEqual({
+      category: "model_failed",
+      detail: "Error: raw provider failure"
+    });
   });
 
   it("sends context compaction status as a dedicated WebUI event and transcript row", async () => {

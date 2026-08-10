@@ -47,6 +47,25 @@ describe("provider error metadata", () => {
     expect(response.errorShouldRetry).toBe(false);
   });
 
+  it("classifies an SDK streaming error from the Memmy Account gateway", () => {
+    const detail = `agent_chat token 用量不足，请申请更多额度后再试。\n${"x".repeat(600)}\nTAIL`;
+    const error: any = new Error(detail);
+    error.error = {
+      message: error.message,
+      type: "insufficient_quota",
+      code: "40309",
+    };
+    error.type = "insufficient_quota";
+    error.code = "40309";
+
+    const response = OpenAICompatProvider.handleError(error, findByName("memmy_account"));
+
+    expect(response.errorCode).toBe("40309");
+    expect(response.errorType).toBe("insufficient_quota");
+    expect(response.errorCategory).toBe("quota_exhausted");
+    expect(response.content).toBe(`Error: ${detail}`);
+  });
+
   it("normalizes retry-after metadata from Azure and Anthropic errors", () => {
     const azure = AzureOpenAIProvider.handleError({
       response: { headers: { "Retry-After": "20" }, text: "{}" },

@@ -74,6 +74,10 @@ describe("AgentLoop WebUI API error localization", () => {
 
     expect(outbound?.content).toBe("平台服务响应异常，请稍后重试。");
     expect(outbound?.content).not.toContain("API returned empty choices");
+    expect(outbound?.metadata).toMatchObject({
+      modelErrorCategory: "model_failed",
+      modelErrorDetail: "Error: API returned empty choices."
+    });
   });
 
   it("uses an English fallback for WebUI API errors in English mode", async () => {
@@ -92,6 +96,10 @@ describe("AgentLoop WebUI API error localization", () => {
 
     expect(outbound?.content).toBe("The platform service returned an unexpected response. Please try again later.");
     expect(outbound?.content).not.toContain("API returned empty choices");
+    expect(outbound?.metadata).toMatchObject({
+      modelErrorCategory: "model_failed",
+      modelErrorDetail: "Error: API returned empty choices."
+    });
   });
 
   it("shows a quota-specific Chinese message when the model token quota is exhausted", async () => {
