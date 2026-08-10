@@ -4,6 +4,13 @@ import type { AddressInfo } from "node:net";
 import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
 import { memoryPanelHtml } from "../viewer/static.js";
 import type {
+  ProjectGoalDecisionRequest,
+  ProjectWorkItemCreateRequest,
+  ProjectWorkItemSelectRequest,
+  ProjectWorkItemUpdateRequest
+} from "../service/project-context/project-context-service.js";
+import type { ProjectContextProposeGoalRequest } from "../service/project-context/project-context-types.js";
+import type {
   MemoryAddRequest,
   MemoryGovernanceRequest,
   MemoryLayer,
@@ -73,6 +80,13 @@ export const API_ROUTES = [
   "GET /api/v1/panel/overview",
   "GET /api/v1/panel/evolution",
   "GET /api/v1/panel/context-pack",
+  "GET /api/v1/project-context/state",
+  "POST /api/v1/project-context/goals/propose",
+  "POST /api/v1/project-context/goals/:id/approve",
+  "POST /api/v1/project-context/goals/:id/reject",
+  "POST /api/v1/project-context/work-items",
+  "PATCH /api/v1/project-context/work-items/:id",
+  "PUT /api/v1/project-context/focus",
   "GET /api/v1/panel/context-packs",
   "GET /api/v1/panel/namespace-audit",
   "GET /api/v1/panel/analysis",
@@ -681,10 +695,60 @@ async function routeRequest(
     requirePanelRead(principal);
     return service.evolutionOverview({ namespace: principal.namespace });
   }
-
+  if (method === "GET" && path === "/api/v1/project-context/state") {
+    requirePanelRead(principal);
+    const namespace = projectContextNamespace(url, principal);
+    const state = service.readProjectContext(namespace);
+    return { ...state, activeGoal: state.activeGoal ?? null, focusedWorkItem: state.focusedWorkItem ?? null };
+  }
+  if (method === "POST" && path === "/api/v1/project-context/goals/propose") {
+    requirePanelWrite(principal);
+    const request = projectContextProposeGoal(body, "project-context.goals.propose", principal);
+    return service.idempotent("project-context.goals.propose", request, request, () => service.proposeProjectGoal(request));
+  }
+  const goalApprove = match(path, /^\/api\/v1\/project-context\/goals\/([^/]+)\/approve$/);
+  if (method === "POST" && goalApprove) {
+    requirePanelWrite(principal);
+    const request = projectContextGoalDecision(body, "project-context.goals.approve", principal);
+    const candidateId = decodeMatchSegment(goalApprove, 1);
+    return service.idempotent("project-context.goals.approve", request, { candidateId, request }, () => service.approveProjectGoal({ namespace: request.namespace, candidateId }));
+  }
+  const goalReject = match(path, /^\/api\/v1\/project-context\/goals\/([^/]+)\/reject$/);
+  if (method === "POST" && goalReject) {
+    requirePanelWrite(principal);
+    const request = projectContextGoalDecision(body, "project-context.goals.reject", principal);
+    const candidateId = decodeMatchSegment(goalReject, 1);
+    return service.idempotent("project-context.goals.reject", request, { candidateId, request }, () => service.rejectProjectGoal({ namespace: request.namespace, candidateId }));
+  }
+  if (method === "POST" && path === "/api/v1/project-context/work-items") {
+    requirePanelWrite(principal);
+    const request = projectContextWorkItemCreate(body, "project-context.work-items.create", principal);
+    return service.idempotent("project-context.work-items.create", request, request, () => service.createProjectWorkItem(request));
+  }
+  const workItemUpdate = match(path, /^\/api\/v1\/project-context\/work-items\/([^/]+)$/);
+  if (method === "PATCH" && workItemUpdate) {
+    requirePanelWrite(principal);
+    const request = projectContextWorkItemUpdate(body, "project-context.work-items.update", principal);
+    const workItemId = decodeMatchSegment(workItemUpdate, 1);
+    return service.idempotent("project-context.work-items.update", request, { workItemId, request }, () => service.updateProjectWorkItem({ ...request, workItemId }));
+  }
+  if (method === "PUT" && path === "/api/v1/project-context/focus") {
+    requirePanelWrite(principal);
+    const request = projectContextFocus(body, "project-context.focus", principal);
+    return service.idempotent("project-context.focus", request, request, () => service.selectProjectWorkItem(request) ?? null);
+  }
   if (method === "GET" && path === "/api/v1/panel/context-pack") {
     requirePanelRead(principal);
-    return service.projectContextPack({ namespace: principal.namespace });
+    const pack = service.projectContextPack({ namespace: principal.namespace });
+    if (!principal.namespace) return pack;
+    const state = service.readProjectContext(principal.namespace);
+    return {
+      ...pack,
+      authoritative: {
+        state: { ...state, activeGoal: state.activeGoal ?? null, focusedWorkItem: state.focusedWorkItem ?? null },
+        stable: service.renderStableProjectContext(principal.namespace)
+      }
+    };
   }
 
   if (method === "GET" && path === "/api/v1/panel/context-packs") {
@@ -1040,10 +1104,13 @@ function publicStartTurnResponse(result: unknown): Record<string, unknown> {
     contextPacketId: record.contextPacketId,
     sessionId: record.sessionId,
     episodeId: record.episodeId,
+    closedEpisodeIds: record.closedEpisodeIds,
     searchEventId: record.searchEventId,
     injectedContext: record.injectedContext,
+    projectContext: record.projectContext,
     sourceMemoryIds: record.sourceMemoryIds,
     hits: record.hits,
+    droppedDueToBudget: record.droppedDueToBudget,
     status: record.status,
     serverTime: record.serverTime
   };
@@ -1324,6 +1391,10 @@ function requireMemoryWrite(principal: AuthPrincipal): void {
 function requirePanelRead(principal: AuthPrincipal): void {
   requireAnyScope(principal, ["panel:read", "panel:write", "memory:read", "memory:write", "admin:read", "admin:write"]);
 }
+function requirePanelWrite(principal: AuthPrincipal): void {
+  requireAnyScope(principal, ["panel:write", "memory:write", "admin:write"]);
+}
+
 
 function requireAdminWrite(principal: AuthPrincipal): void {
   requireAnyScope(principal, ["admin:write"]);
@@ -1385,6 +1456,78 @@ function envelopeWithPrincipal<T extends Record<string, unknown>>(
   } as T & RequestEnvelope;
 }
 
+function projectContextNamespace(url: URL, principal: AuthPrincipal): RuntimeNamespace {
+  const raw = url.searchParams.get("namespace");
+  let requested: RuntimeNamespace | undefined;
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      requested = isRecord(parsed) ? parsed as unknown as RuntimeNamespace : undefined;
+    } catch {
+      throw new MemoryServiceError("invalid_argument", "project-context namespace must be valid JSON");
+    }
+  }
+  const namespace = mergeNamespaces(requested, principal.namespace);
+  assertNamespaceScope(requested, principal.namespace);
+  if (!namespace) throw new MemoryServiceError("invalid_argument", "project-context namespace is required");
+  return namespace;
+}
+
+function projectContextMutation(body: unknown, routeName: string, principal: AuthPrincipal): RequestEnvelope & Record<string, unknown> & { namespace: RuntimeNamespace; provenance: Record<string, unknown> } {
+  const raw = asObject(body, routeName);
+  if (!isRecord(raw.namespace)) throw new MemoryServiceError("invalid_argument", `${routeName} namespace is required`);
+  if (!isRecord(raw.provenance)) throw new MemoryServiceError("invalid_argument", `${routeName} provenance is required`);
+  requireStringField(raw, "source", routeName);
+  requireStringField(raw, "adapterId", routeName);
+  requireStringField(raw, "requestId", routeName);
+  requireStringField(raw.provenance, "sourceAgent", `${routeName} provenance`);
+  requireStringField(raw.provenance, "capturedAt", `${routeName} provenance`);
+  if (!Array.isArray(raw.provenance.sourceMemoryIds) || raw.provenance.sourceMemoryIds.some((id) => typeof id !== "string" || !id.trim())) throw new MemoryServiceError("invalid_argument", `${routeName} provenance sourceMemoryIds must be an array of strings`);
+  const request = envelopeWithPrincipal(raw, principal);
+  if (!request.namespace) throw new MemoryServiceError("invalid_argument", `${routeName} project namespace is required`);
+  return { ...request, namespace: request.namespace, provenance: raw.provenance };
+}
+
+function projectContextProposeGoal(body: unknown, routeName: string, principal: AuthPrincipal): ProjectContextProposeGoalRequest & RequestEnvelope {
+  const request = projectContextMutation(body, routeName, principal);
+  if (typeof request.title !== "string" || !request.title.trim() || typeof request.summary !== "string" || typeof request.detail !== "string") throw new MemoryServiceError("invalid_argument", `${routeName} goal fields are required`);
+  return { ...request, namespace: request.namespace, title: request.title, summary: request.summary, detail: request.detail, acceptanceCriteria: stringList(request.acceptanceCriteria, routeName), constraints: stringList(request.constraints, routeName), sourceMemoryIds: stringList(request.sourceMemoryIds, routeName), provenance: request.provenance };
+}
+
+function projectContextGoalDecision(body: unknown, routeName: string, principal: AuthPrincipal): ProjectGoalDecisionRequest & RequestEnvelope {
+  const request = projectContextMutation(body, routeName, principal);
+  return { ...request, namespace: request.namespace, candidateId: "" };
+}
+
+function projectContextWorkItemCreate(body: unknown, routeName: string, principal: AuthPrincipal): ProjectWorkItemCreateRequest & RequestEnvelope {
+  const request = projectContextMutation(body, routeName, principal);
+  if (typeof request.title !== "string" || !request.title.trim() || typeof request.summary !== "string" || typeof request.nextStep !== "string") throw new MemoryServiceError("invalid_argument", `${routeName} work item fields are required`);
+  return { ...request, namespace: request.namespace, title: request.title, summary: request.summary, nextStep: request.nextStep, goalId: optionalString(request.goalId), status: workItemStatus(request.status, routeName), acceptanceCriteria: stringList(request.acceptanceCriteria, routeName), constraints: stringList(request.constraints, routeName), sourceMemoryIds: stringList(request.sourceMemoryIds, routeName), provenance: request.provenance };
+}
+
+function projectContextWorkItemUpdate(body: unknown, routeName: string, principal: AuthPrincipal): Omit<ProjectWorkItemUpdateRequest, "workItemId"> & RequestEnvelope {
+  const request = projectContextMutation(body, routeName, principal);
+  return { ...request, namespace: request.namespace, goalId: nullableString(request.goalId, routeName), title: nullableString(request.title, routeName), summary: nullableString(request.summary, routeName), nextStep: nullableString(request.nextStep, routeName), status: nullableWorkItemStatus(request.status, routeName), acceptanceCriteria: nullableStringList(request.acceptanceCriteria, routeName), constraints: nullableStringList(request.constraints, routeName), sourceMemoryIds: nullableStringList(request.sourceMemoryIds, routeName), provenance: request.provenance };
+}
+
+function projectContextFocus(body: unknown, routeName: string, principal: AuthPrincipal): ProjectWorkItemSelectRequest & RequestEnvelope {
+  const request = projectContextMutation(body, routeName, principal);
+  if (request.workItemId !== null && typeof request.workItemId !== "string") throw new MemoryServiceError("invalid_argument", `${routeName} workItemId must be a string or null`);
+  return { ...request, namespace: request.namespace, workItemId: request.workItemId };
+}
+
+function stringList(value: unknown, routeName: string): string[] | undefined { return parseOptionalStringArray(value, routeName); }
+function nullableStringList(value: unknown, routeName: string): string[] | null | undefined { return value === null ? null : stringList(value, routeName); }
+function optionalString(value: unknown): string | undefined { return typeof value === "string" ? value : undefined; }
+function nullableString(value: unknown, routeName: string): string | null | undefined { if (value === undefined || value === null || typeof value === "string") return value; throw new MemoryServiceError("invalid_argument", `${routeName} field must be a string or null`); }
+function workItemStatus(value: unknown, routeName: string): ProjectWorkItemCreateRequest["status"] | undefined {
+  if (value === undefined) return undefined;
+  if (value === "pending" || value === "active" || value === "blocked" || value === "completed" || value === "archived") return value;
+  throw new MemoryServiceError("invalid_argument", `${routeName} status is invalid`);
+}
+function nullableWorkItemStatus(value: unknown, routeName: string): ProjectWorkItemUpdateRequest["status"] {
+  return value === null ? null : workItemStatus(value, routeName);
+}
 function namespaceFromSource(source: unknown): RuntimeNamespace | undefined {
   if (typeof source !== "string" || !source.trim()) {
     return undefined;

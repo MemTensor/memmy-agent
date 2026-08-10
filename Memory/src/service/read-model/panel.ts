@@ -170,6 +170,18 @@ export function panelSourceForMemory(memory: MemoryRow): string {
   return explicitSources.some(panelIsInternalSourceValue) ? "memmy" : "unknown";
 }
 
+export function panelMemoryMatchesSourceFilter(
+  memory: MemoryRow,
+  sourceAgent: string | undefined,
+  excludedSourceAgents: readonly string[] | undefined
+): boolean {
+  const sourceKey = panelSourceKey(panelSourceForMemory(memory));
+  const selectedSourceKey = panelSourceKey(sourceAgent);
+  if (selectedSourceKey) return sourceKey === selectedSourceKey;
+  const excludedSourceKeys = new Set((excludedSourceAgents ?? []).map(panelSourceKey).filter(Boolean));
+  return !excludedSourceKeys.has(sourceKey);
+}
+
 function panelNormalizeExplicitSource(value: unknown): string | undefined {
   if (typeof value !== "string" || !value.trim()) return undefined;
   const normalized = value.trim().toLowerCase();
@@ -188,13 +200,22 @@ function panelNamespaceLabel(projectId: string, workspacePath: string | undefine
 
 function panelNormalizeKnownSource(value: unknown): string | undefined {
   if (typeof value !== "string" || !value.trim()) return undefined;
-  const normalized = value.trim().toLowerCase();
+  const normalized = value.trim().toLowerCase().replace(/[\s_:/\\]+/gu, "-");
   if (normalized === "claude" || normalized.startsWith("claude-")) return "claude-code";
   if (normalized === "open-code" || normalized.startsWith("open-code-")) return "opencode";
-  for (const source of ["hermes", "openclaw", "codex", "cursor", "claude-code", "opencode", "manual", "memmy"]) {
+  for (const source of ["hermes", "openclaw", "codex", "cursor", "claude-code", "opencode", "pi", "workbuddy", "omp", "manual", "memmy"]) {
     if (normalized === source || normalized.startsWith(`${source}-`)) return source;
   }
   return undefined;
+}
+
+function panelSourceKey(value: unknown): string {
+  if (typeof value !== "string" || !value.trim()) return "";
+  const normalized = value.trim().toLowerCase().replace(/[\s_:/\\-]+/gu, "_");
+  if (normalized === "claude") return "claude_code";
+  if (normalized === "open_code") return "opencode";
+  if (normalized === "memmy_agent") return "memmy";
+  return normalized;
 }
 
 function panelNormalizeSourceAgent(value: unknown): string | undefined {

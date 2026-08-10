@@ -83,7 +83,10 @@ describe("repository sqlite schema contract", () => {
         "memory_processing_state",
         "artifacts",
         "audit_logs",
-        "memory_vector_entries"
+        "memory_vector_entries",
+        "project_context_goals",
+        "project_context_work_items",
+        "project_context_facts",
       ]));
       expect(tables.map((table) => table.name)).not.toEqual(expect.arrayContaining([
         "memory_embeddings",
@@ -216,6 +219,18 @@ describe("repository sqlite schema contract", () => {
       expect(apiLogColumns.map((column) => column.name)).toContain("source_agent");
       const apiLogIndexes = db.db.prepare(`PRAGMA index_list(api_logs)`).all() as Array<{ name: string }>;
       expect(apiLogIndexes.map((index) => index.name)).toContain("idx_api_logs_tool_source_time");
+      const goalIndexes = db.db.prepare(`PRAGMA index_list(project_context_goals)`).all() as Array<{ name: string; partial: number }>;
+      expect(goalIndexes).toEqual(expect.arrayContaining([
+        expect.objectContaining({ name: "uq_project_context_active_goal", partial: 1 })
+      ]));
+      const workItemIndexes = db.db.prepare(`PRAGMA index_list(project_context_work_items)`).all() as Array<{ name: string; partial: number }>;
+      expect(workItemIndexes).toEqual(expect.arrayContaining([
+        expect.objectContaining({ name: "uq_project_context_focused_work_item", partial: 1 })
+      ]));
+      const workItemForeignKeys = db.db.prepare(`PRAGMA foreign_key_list(project_context_work_items)`).all() as Array<{ from: string; table: string }>;
+      expect(workItemForeignKeys).toEqual(expect.arrayContaining([
+        expect.objectContaining({ from: "goal_id", table: "project_context_goals" })
+      ]));
       db.close();
     } finally {
       rmSync(root, { recursive: true, force: true });

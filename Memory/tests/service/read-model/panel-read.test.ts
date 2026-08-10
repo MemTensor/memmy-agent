@@ -314,6 +314,9 @@ describe("MemoryService / read model / panel", () => {
     const codexSession = service.openSession({
       namespace: { source: "codex", profileId: "default", userId }
     });
+    const ompSession = service.openSession({
+      namespace: { source: "omp", profileId: "default", userId }
+    });
     const cursorMemory = service.completeTurn("turn-panel-source-cursor", {
       sessionId: cursorSession.sessionId,
       query: "cursor panel source memory",
@@ -329,6 +332,11 @@ describe("MemoryService / read model / panel", () => {
       query: "other panel source memory",
       answer: "other answer"
     });
+    const ompMemory = service.completeTurn("turn-panel-source-omp", {
+      sessionId: ompSession.sessionId,
+      query: "omp panel source memory",
+      answer: "omp answer"
+    });
     db.db.prepare("UPDATE memories SET agent_id = 'test_agent', session_id = NULL WHERE id = ?")
       .run(otherMemory.l1MemoryId);
 
@@ -340,13 +348,47 @@ describe("MemoryService / read model / panel", () => {
       total: 1,
       items: [{ id: memmyMemory.l1MemoryId }]
     });
+    expect(service.panelItems({ layer: "L1", sourceAgent: "omp", limit: 1 })).toMatchObject({
+      total: 1,
+      items: [{ id: ompMemory.l1MemoryId, metadata: { source: "omp" } }]
+    });
     expect(service.panelItems({
       layer: "L1",
-      excludedSourceAgents: ["memmy-agent", "cursor", "claude_code", "codex", "opencode", "openclaw", "hermes"],
+      excludedSourceAgents: ["memmy-agent", "cursor", "claude_code", "codex", "pi", "opencode", "openclaw", "hermes", "workbuddy", "omp"],
       limit: 1
     })).toMatchObject({
       total: 1,
       items: [{ id: otherMemory.l1MemoryId, metadata: { source: "test_agent" } }]
+    });
+    db.close();
+  });
+
+  it("derives OMP panel sources from imported session ids", () => {
+    const { db, service } = createTestService();
+    const session = service.openSession({
+      namespace: { source: "codex", profileId: "default", userId: "user-panel-omp" }
+    });
+    const completed = service.completeTurn("turn-panel-omp", {
+      sessionId: session.sessionId,
+      query: "omp panel source memory",
+      answer: "omp answer"
+    });
+    db.db.prepare("UPDATE memories SET agent_id = 'codex', session_id = 'omp::session-imported' WHERE id = ?")
+      .run(completed.l1MemoryId);
+
+    expect(service.panelItems({ layer: "L1" })).toMatchObject({
+      items: [{ id: completed.l1MemoryId, metadata: { source: "omp" } }]
+    });
+    expect(service.panelOverviewSummary({}).sourceDistribution).toContainEqual(
+      expect.objectContaining({ source: "omp", count: 1 })
+    );
+    expect(service.panelItems({ layer: "L1", sourceAgent: "omp" })).toMatchObject({
+      total: 1,
+      items: [{ id: completed.l1MemoryId, metadata: { source: "omp" } }]
+    });
+    expect(service.panelItems({ layer: "L1", excludedSourceAgents: ["omp"] })).toMatchObject({
+      total: 0,
+      items: []
     });
     db.close();
   });

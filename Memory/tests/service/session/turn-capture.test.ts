@@ -113,6 +113,245 @@ describe("MemoryService / session / turn capture", () => {
     expect(completed.jobs.map((job) => job.jobType)).toContain("episode_idle_close");
     db.close();
   });
+  it("prepends fresh authoritative project context and persists its metadata", async () => {
+    const { db, service } = createTestService();
+    const namespace = { source: "codex", profileId: "default", userId: "project-turn-user", workspacePath: "/tmp/project-turn" };
+    const supplemental = service.addMemory({ namespace, content: "Supplemental unrelated question guidance", layer: "L2" });
+    const session = service.openSession({ namespace });
+    const candidate = service.proposeProjectGoal({ namespace, title: "Ship context", summary: "Authoritative goal", detail: "Details", constraints: ["Hard constraint"], sourceMemoryIds: [supplemental.id] });
+    const active = service.approveProjectGoal({ namespace, candidateId: candidate.id });
+    const first = await service.startTurn({ sessionId: session.sessionId, query: "Supplemental unrelated question guidance", contextBudget: 300 });
+    expect(first.projectContext.version).toBe(active.version);
+    expect(first.projectContext.status).toBe("ready");
+    expect(first.projectContext.markdown).toContain("Ship context");
+    expect(first.projectContext.markdown).toContain("Hard constraint");
+    expect(first.injectedContext.markdown.indexOf("<memmy_project_context")).toBeLessThan(first.injectedContext.markdown.indexOf("Supplemental unrelated question guidance"));
+    expect(first.sourceMemoryIds).toEqual([...new Set(first.sourceMemoryIds)]);
+    expect(first.sourceMemoryIds.filter((id) => id === supplemental.id)).toHaveLength(1);
+    const raw = db.db.prepare("SELECT source_memory_ids_json, message_payload_json FROM raw_turns WHERE session_id = ? AND turn_id = ?").get(session.sessionId, first.turnId) as { source_memory_ids_json: string; message_payload_json: string };
+    const payload = JSON.parse(raw.message_payload_json) as { turn_start: Record<string, unknown> };
+    expect(JSON.parse(raw.source_memory_ids_json)).toEqual(first.sourceMemoryIds);
+    expect(payload.turn_start).toMatchObject({ projectContextVersion: first.projectContext.version, projectContextStatus: first.projectContext.status, sourceMemoryIds: first.sourceMemoryIds });
+    const revision = service.proposeProjectGoal({ namespace, title: "Ship revision", summary: "Revised authoritative goal", detail: "Revision", sourceMemoryIds: [supplemental.id] });
+    const revised = service.approveProjectGoal({ namespace, candidateId: revision.id });
+    const next = await service.startTurn({ sessionId: session.sessionId, query: "Another unrelated question", contextBudget: 300 });
+    expect(next.projectContext.version).toBe(revised.version);
+    expect(next.projectContext.version).toBeGreaterThan(first.projectContext.version);
+    const otherNamespace = { ...namespace, workspacePath: "/tmp/other" };
+    const otherSession = service.openSession({ namespace: otherNamespace });
+    const other = await service.startTurn({ sessionId: otherSession.sessionId, query: "Other workspace", contextBudget: 300 });
+    expect(other.projectContext.status).toBe("no_confirmed_goal");
+    expect(other.injectedContext.markdown).not.toContain("Ship revision");
+    db.close();
+  });
+
+  it("shares approved project context across CLI agents in the same workspace", async () => {
+    const { db, service } = createTestService();
+    const workspacePath = "/tmp/cross-cli-project";
+    const codexNamespace = {
+      source: "codex",
+      profileId: "codex-default",
+      userId: "cross-cli-user",
+      workspacePath
+    };
+    const piNamespace = {
+      source: "pi",
+      profileId: "pi-default",
+      userId: "cross-cli-user",
+      workspacePath
+    };
+    const candidate = service.proposeProjectGoal({
+      namespace: codexNamespace,
+      title: "Ship cross-CLI context",
+      summary: "Keep every agent aligned to the approved project goal",
+      detail: "Codex approves the goal and Pi receives it automatically",
+      constraints: ["Do not treat historical recall as project authority"]
+    });
+    const approved = service.approveProjectGoal({
+      namespace: codexNamespace,
+      candidateId: candidate.id
+    });
+    const workItem = service.createProjectWorkItem({
+      namespace: codexNamespace,
+      goalId: approved.id,
+      title: "Verify Pi turn injection",
+      summary: "Open a Pi session in the same workspace",
+      nextStep: "Start the next Pi turn"
+    });
+    service.selectProjectWorkItem({
+      namespace: codexNamespace,
+      workItemId: workItem.id
+    });
+
+    const piSession = service.openSession({ namespace: piNamespace });
+    const started = await service.startTurn({
+      adapterId: "memmy-pi-hook",
+      requestId: "pi-start:cross-cli",
+      sessionId: piSession.sessionId,
+      query: "Continue the current project"
+    });
+
+    expect(started.projectContext).toMatchObject({
+      status: "ready",
+      goal: { id: approved.id, title: "Ship cross-CLI context" },
+      focusedWorkItem: { id: workItem.id, title: "Verify Pi turn injection" }
+    });
+    expect(started.injectedContext.markdown).toContain("Ship cross-CLI context");
+    expect(started.injectedContext.markdown).toContain("Verify Pi turn injection");
+    expect(started.injectedContext.markdown).toContain("Do not treat historical recall as project authority");
+    expect(started.injectedContext.markdown.indexOf("<memmy_project_context")).toBe(0);
+    db.close();
+  });
+
+  it("reserves turn context budget for authoritative context and recomputes the combined estimate", async () => {
+    const { db, service } = createTestService();
+    const namespace = { source: "codex", profileId: "default", userId: "turn-budget-user", workspacePath: "/tmp/turn-budget" };
+    const supplemental = service.addMemory({ namespace, content: "Budgeted supplemental retrieval guidance", layer: "L2" });
+    const session = service.openSession({ namespace });
+    const candidate = service.proposeProjectGoal({
+      namespace,
+      title: "Budget authority",
+      summary: "Authoritative project context",
+      detail: "Keep authority ahead of supplemental recall"
+    });
+    service.approveProjectGoal({ namespace, candidateId: candidate.id });
+    const contextBudget = 300;
+
+    const started = await service.startTurn({
+      sessionId: session.sessionId,
+      query: "Budgeted supplemental retrieval guidance",
+      contextBudget
+    });
+
+    const projectEstimate = Math.ceil(started.projectContext.markdown.length / 4);
+    const recallRequest = db.db.prepare(
+      "SELECT request_json FROM recall_events WHERE id = ?"
+    ).get(started.searchEventId) as { request_json: string };
+    expect(JSON.parse(recallRequest.request_json)).toMatchObject({
+      contextBudget: contextBudget - projectEstimate
+    });
+    expect(started.injectedContext.markdown).toContain("Budget authority");
+    expect(started.injectedContext.markdown).toContain("Budgeted supplemental retrieval guidance");
+    expect(started.injectedContext.tokenEstimate).toBe(Math.ceil(started.injectedContext.markdown.length / 4));
+    expect(started.injectedContext.tokenEstimate).toBeLessThanOrEqual(contextBudget);
+    expect(started.hits.map((hit) => hit.id)).toContain(supplemental.id);
+    expect(started.droppedDueToBudget).not.toContainEqual(expect.objectContaining({ id: supplemental.id }));
+    db.close();
+  });
+
+  it("keeps mandatory project context and suppresses supplemental recall for a tiny token budget", async () => {
+    const { db, service } = createTestService();
+    const namespace = { source: "codex", profileId: "default", userId: "tiny-turn-budget-user", workspacePath: "/tmp/tiny-turn-budget" };
+    const supplemental = service.addMemory({ namespace, content: "Tiny budget supplemental guidance", layer: "L2" });
+    const session = service.openSession({ namespace });
+    const candidate = service.proposeProjectGoal({
+      namespace,
+      title: "Mandatory authority",
+      summary: "Must remain injected",
+      detail: "Even when the caller budget is below the renderer minimum"
+    });
+    service.approveProjectGoal({ namespace, candidateId: candidate.id });
+
+    const request = {
+      sessionId: session.sessionId,
+      turnId: "tiny-budget-dropped-replay",
+      query: "Tiny budget supplemental guidance",
+      contextBudget: 5
+    };
+    const started = await service.startTurn(request);
+
+    const recallRequest = db.db.prepare(
+      "SELECT request_json FROM recall_events WHERE id = ?"
+    ).get(started.searchEventId) as { request_json: string };
+    expect(JSON.parse(recallRequest.request_json)).toMatchObject({ contextBudget: 0 });
+    expect(started.injectedContext.markdown).toBe(started.projectContext.markdown);
+    expect(started.injectedContext.markdown).toContain("<memmy_project_context");
+    expect(started.injectedContext.markdown).not.toContain("Tiny budget supplemental guidance");
+    expect(started.injectedContext.tokenEstimate).toBe(Math.ceil(started.projectContext.markdown.length / 4));
+    expect(started.injectedContext.tokenEstimate).toBeGreaterThan(5);
+    expect(started.hits.map((hit) => hit.id)).toContain(supplemental.id);
+    expect(started.sourceMemoryIds).not.toContain(supplemental.id);
+    const droppedSupplemental = started.droppedDueToBudget.filter((dropped) => dropped.id === supplemental.id);
+    expect(droppedSupplemental).toHaveLength(1);
+    expect(droppedSupplemental[0]).toMatchObject({
+      id: supplemental.id,
+      kind: "policy",
+      memoryLayer: "L2",
+      reason: "token_budget"
+    });
+    expect(droppedSupplemental[0]?.tokenEstimate).toEqual(expect.any(Number));
+    const retried = await service.startTurn(request);
+    expect(retried.droppedDueToBudget).toEqual(started.droppedDueToBudget);
+    expect(retried).toEqual(started);
+    db.close();
+  });
+  it("returns the exact persisted turn-start response when a raw turn is retried", async () => {
+    const { db, service } = createTestService();
+    const namespace = { source: "codex", profileId: "default", userId: "turn-retry-user", workspacePath: "/tmp/turn-retry" };
+    const originalSource = service.addMemory({ namespace, content: "Original retry retrieval source", layer: "L2" });
+    const session = service.openSession({ namespace });
+    const originalGoal = service.proposeProjectGoal({
+      namespace,
+      title: "Original retry goal",
+      summary: "Keep the first packet stable",
+      detail: "Original project context",
+      sourceMemoryIds: [originalSource.id]
+    });
+    service.approveProjectGoal({ namespace, candidateId: originalGoal.id });
+    const request = {
+      sessionId: session.sessionId,
+      turnId: "turn-retry-persisted-packet",
+      query: "Original retry retrieval source",
+      contextBudget: 300
+    };
+    const first = await service.startTurn(request);
+
+    const revision = service.proposeProjectGoal({
+      namespace,
+      title: "Revised retry goal",
+      summary: "This must not replace the original packet",
+      detail: "Revised project context"
+    });
+    service.approveProjectGoal({ namespace, candidateId: revision.id });
+    const changedSource = service.addMemory({ namespace, content: "Changed retrieval source", layer: "L2" });
+    const retried = await service.startTurn({ ...request, query: "Changed retrieval source" });
+
+    expect(retried).toEqual(first);
+    expect(retried.contextPacketId).toBe(first.contextPacketId);
+    expect(retried.searchEventId).toBe(first.searchEventId);
+    expect(retried.projectContext.version).toBe(first.projectContext.version);
+    expect(retried.sourceMemoryIds).toEqual(first.sourceMemoryIds);
+    expect(retried.sourceMemoryIds).not.toContain(changedSource.id);
+    expect(retried.injectedContext).toEqual(first.injectedContext);
+    const recallCount = db.db.prepare("SELECT COUNT(*) AS count FROM recall_events WHERE session_id = ? AND turn_id = ?").pluck().get(session.sessionId, request.turnId);
+    expect(recallCount).toBe(1);
+    db.close();
+  });
+
+  it("returns bounded no-goal project context when turn writes are disabled", async () => {
+    const root = createTestRoot("memmy-turn-no-write-project-context-");
+    const db = new MemoryDb({ path: join(root, "memory.sqlite") });
+    const service = createTestMemoryService({
+      db,
+      mode: "dev",
+      config: {
+        ...DEFAULT_MEMMY_CONFIG,
+        algorithm: { ...DEFAULT_MEMMY_CONFIG.algorithm, enableMemoryAdd: false }
+      }
+    });
+    const started = await service.startTurn({
+      sessionId: "no-write-session",
+      namespace: { source: "codex", profileId: "default", userId: "no-write-user", workspacePath: "/tmp/no-write" },
+      query: "Read-only turn",
+      contextBudget: 120
+    });
+    expect(started.projectContext).toMatchObject({ version: 0, status: "no_confirmed_goal", goal: null, focusedWorkItem: null, facts: [], sourceMemoryIds: [] });
+    expect(started.projectContext.markdown.length).toBeLessThanOrEqual(120);
+    expect(started.injectedContext.markdown).toContain('<memmy_project_context version="0" status="no_confirmed_goal">');
+    db.close();
+  });
+
+
 
   it("does not capture an interrupted started turn when a newer turn completes", async () => {
     const { db, service } = createTestService();

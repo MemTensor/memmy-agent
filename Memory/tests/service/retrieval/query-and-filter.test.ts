@@ -120,6 +120,60 @@ describe("MemoryService / retrieval / query and filtering", () => {
     db.close();
   });
 
+  it("keeps synchronous turn-start recall to one bounded LLM stage", async () => {
+    const summaryCalls: Array<{
+      messages: Array<{ role: string; content: string }>;
+      options: { operation: string; timeoutMs?: number; maxRetries?: number };
+    }> = [];
+    const evolutionCalls: typeof summaryCalls = [];
+    const config = {
+      ...DEFAULT_MEMMY_CONFIG,
+      algorithm: {
+        ...DEFAULT_MEMMY_CONFIG.algorithm,
+        retrieval: {
+          ...DEFAULT_MEMMY_CONFIG.algorithm.retrieval,
+          relativeThresholdFloor: 0,
+          smartSeed: false,
+          llmFilterEnabled: true,
+          llmFilterMinCandidates: 1
+        }
+      }
+    };
+    const { db, service } = createTestService({
+      config,
+      llm: createQueryRewriteLlm(summaryCalls, []),
+      skillLlm: createQueryRewriteLlm(evolutionCalls, []),
+      embedder: createCapturingEmbedder([])
+    });
+    const namespace = {
+      source: "omp",
+      profileId: "jiang",
+      userId: "user-turn-start-llm-budget"
+    };
+    service.addMemory({
+      namespace,
+      layer: "L2",
+      title: "OMP handler deadline",
+      content: "Keep automatic memory recall within the OMP handler deadline."
+    });
+    await service.runWorkerOnce(20);
+    const session = service.openSession({ namespace });
+
+    await service.startTurn({
+      namespace,
+      sessionId: session.sessionId,
+      turnId: "turn-start-llm-budget",
+      query: "How should automatic memory recall stay within the OMP handler deadline?"
+    });
+
+    expect(summaryCalls.map((call) => call.options.operation)).toEqual([
+      "retrieval.retrieval.filter.v5"
+    ]);
+    expect(summaryCalls[0]?.options.timeoutMs).toBe(20_000);
+    expect(evolutionCalls).toEqual([]);
+    db.close();
+  });
+
   it("rewrites the retrieval query only when enabled", async () => {
     const summaryCalls: Array<{
       messages: Array<{ role: string; content: string }>;

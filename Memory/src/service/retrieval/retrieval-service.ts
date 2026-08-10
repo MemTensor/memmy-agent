@@ -80,7 +80,7 @@ type TraceMeta = NonNullable<ReturnType<typeof traceMetaFromMemory>>;
 
 const RETRIEVAL_QUERY_EXTRACT_TIMEOUT_MS = 60_000;
 
-const RETRIEVAL_FILTER_TIMEOUT_MS = 30_000;
+const RETRIEVAL_FILTER_TIMEOUT_MS = 20_000;
 
 const QUERY_REWRITE_TIMEOUT_MS = 30_000;
 
@@ -1260,7 +1260,11 @@ export class RetrievalService {
           scope
         });
     const retrievalQuery = focusResearchRetrievalQuery(request.query, tuning.domain).text;
-    const queryExtract = candidateCount > 0 ? await this.extractRetrievalQuery(retrievalQuery) : null;
+    // Turn-start recall runs inside agent hook deadlines. Keep it to one LLM stage:
+    // filtering actual candidates is more useful here than extracting the query first.
+    const queryExtract = candidateCount > 0 && retrievalMode !== "turn_start"
+      ? await this.extractRetrievalQuery(retrievalQuery)
+      : null;
     const queryVectorText = queryExtract?.queryVecText?.trim() || retrievalQuery;
     const retrievalLimit = request.limit ?? this.deps.turnStartRetrievalLimit();
     const retrievalOutput = await this.retrieveSearchMemories({
@@ -1278,7 +1282,9 @@ export class RetrievalService {
     const retrieval = retrievalOutput.retrieval;
     const memories = retrievalOutput.memories;
     const rerankAt = Date.now();
-    const filteredHits = await this.filterRecallHits(queryVectorText, retrieval.hits);
+    const filteredHits = await this.filterRecallHits(queryVectorText, retrieval.hits, {
+      allowModelFallback: retrievalMode !== "turn_start"
+    });
     const hits = filterL1TraceSpanRecallHits(filteredHits.hits,memories);
     const contextPacket = buildInjectedContext(
       hits,
@@ -1477,7 +1483,11 @@ export class RetrievalService {
     };
   }
 
-  private async filterRecallHits(query: string, hits: RecallHit[]): Promise<{
+  private async filterRecallHits(
+    query: string,
+    hits: RecallHit[],
+    options: { allowModelFallback: boolean }
+  ): Promise<{
     hits: RecallHit[];
     status: string[];
   }> {
@@ -1543,7 +1553,8 @@ export class RetrievalService {
       try {
         result = await completeFilter(filterLlm, usesSummaryLlm);
       } catch (primaryError) {
-        const evolutionFallback = usesSummaryLlm &&
+        const evolutionFallback = options.allowModelFallback &&
+          usesSummaryLlm &&
           this.deps.skillLlm.isConfigured() &&
           this.deps.skillLlm !== filterLlm
           ? this.deps.skillLlm

@@ -40,7 +40,8 @@ import type {
   ToolCallPayload,
   ToolObserveRequest,
   TurnCompleteRequest,
-  TurnStartRequest
+  TurnStartRequest,
+  TurnStartResponse
 } from "../../types.js";
 import { MemoryServiceError } from "../../utils/error.js";
 import { newId,stableHash,stableStringify } from "../../utils/id.js";
@@ -51,6 +52,8 @@ import type {
   DecisionRepairLlmDraft,
   SynthesizeDecisionRepairDraft
 } from "../feedback/feedback-experience.js";
+import type { DecisionRepairSummary } from "../evolution/reward-pipeline.js";
+import type { ProjectContextService } from "../project-context/project-context-service.js";
 import { recordApiLog } from "../model-audit/model-call-audit.js";
 import {
   memoryFilterForNamespace,
@@ -82,9 +85,9 @@ type TraceMeta = NonNullable<ReturnType<typeof traceMetaFromMemory>>;
 interface ToolFailureRecord { toolId: string; context: string; step: number; reason: string; ts: number; rawTurnId?: string; sessionId?: string; episodeId?: string; }
 interface ToolFailureState { toolId: string; context: string; firstSeen: number; lastSeen: number; windowStart: number; occurrences: ToolFailureRecord[]; }
 interface ToolFailureBurst extends ToolFailureState { contextHash: string; failureCount: number; }
-interface DecisionRepairSummary { repairId?: string; contextHash?: string; skipped?: boolean; reason?: string; attachedPolicyIds?: string[]; }
 type SessionTurnDependencies = {
   repos: Repositories;
+  projectContext: ProjectContextService;
   readonly config: MemmyConfig;
   readonly llm: LlmClient;
   readonly skillLlm: LlmClient;
@@ -180,6 +183,38 @@ function endTopicDecisionFromRawTurn(rawTurn: RawTurnRecord): EndTopicDecision |
     signals: decision.signals,
     ...(typeof decision.llmModel === "string" ? { llmModel: decision.llmModel } : {})
   };
+}
+
+function persistedTurnStartResponse(rawTurn: RawTurnRecord): TurnStartResponse | undefined {
+  const turnStart = isRecord(rawTurn.messagePayload?.turn_start)
+    ? rawTurn.messagePayload.turn_start
+    : undefined;
+  const response = turnStart?.response;
+  if (!isPersistedTurnStartResponse(response)) return undefined;
+  return response;
+}
+
+function isPersistedTurnStartResponse(value: unknown): value is TurnStartResponse {
+  if (!isRecord(value)) return false;
+  return typeof value.contextPacketId === "string"
+    && typeof value.turnId === "string"
+    && typeof value.sessionId === "string"
+    && typeof value.episodeId === "string"
+    && Array.isArray(value.closedEpisodeIds)
+    && typeof value.searchEventId === "string"
+    && Array.isArray(value.hits)
+    && isRecord(value.injectedContext)
+    && typeof value.injectedContext.markdown === "string"
+    && Array.isArray(value.injectedContext.sections)
+    && isRecord(value.projectContext)
+    && typeof value.projectContext.namespaceId === "string"
+    && typeof value.projectContext.version === "number"
+    && typeof value.projectContext.markdown === "string"
+    && Array.isArray(value.projectContext.sourceMemoryIds)
+    && Array.isArray(value.sourceMemoryIds)
+    && Array.isArray(value.droppedDueToBudget)
+    && Array.isArray(value.status)
+    && typeof value.serverTime === "string";
 }
 
 function rawTurnIsExcludedFromMemory(rawTurn: RawTurnRecord): boolean {
@@ -710,26 +745,7 @@ export class SessionTurnService {
     };
   }
 
-  async startTurn(request: TurnStartRequest & Record<string, unknown>): Promise<{
-    contextPacketId: string;
-    turnId: string;
-    sessionId: string;
-    episodeId: string;
-    closedEpisodeIds: string[];
-    searchEventId: string;
-    hits: RecallHit[];
-    injectedContext: InjectedContext;
-    sourceMemoryIds: string[];
-    droppedDueToBudget: Array<{
-      id: string;
-      kind: MemoryKind;
-      memoryLayer: MemoryLayer;
-      reason: "token_budget";
-      tokenEstimate?: number;
-    }>;
-    status: string[];
-    serverTime: string;
-  }> {
+  async startTurn(request: TurnStartRequest & Record<string, unknown>): Promise<TurnStartResponse> {
     request = sanitizeTurnStartRequest(request);
     if (!this.deps.memoryAddEnabled()) {
       return this.deps.startTurnNoWrite(request);
@@ -737,12 +753,23 @@ export class SessionTurnService {
     const session = this.deps.requireOpenSession(request.sessionId);
     this.deps.assertSessionInScope(session, request.namespace);
     const turnId = request.turnId ?? newId("turn");
-    const intentDecision = classifyIntent(request.query);
-    const endTopicDecision = explicitEndTopicDecision(request.query);
     const existingRawTurn = this.deps.repos.runtime.getRawTurnBySessionTurn(session.id, turnId);
     if (existingRawTurn) {
       this.deps.assertRawTurnInScope(existingRawTurn, request.namespace);
+      const persistedResponse = persistedTurnStartResponse(existingRawTurn);
+      if (persistedResponse) return persistedResponse;
     }
+    const requestedContextBudget = typeof request.contextBudget === "number" ? request.contextBudget : undefined;
+    const projectContext = this.deps.projectContext.renderStable(
+      namespaceForSession(session),
+      requestedContextBudget === undefined ? 4_000 : Math.max(120, requestedContextBudget * 4)
+    );
+    const projectTokenEstimate = Math.ceil(projectContext.markdown.length / 4);
+    const supplementalContextBudget = requestedContextBudget === undefined
+      ? undefined
+      : Math.max(0, requestedContextBudget - projectTokenEstimate);
+    const intentDecision = classifyIntent(request.query);
+    const endTopicDecision = explicitEndTopicDecision(request.query);
     const latestEpisodeBefore = existingRawTurn
       ? undefined
       : this.deps.repos.runtime.latestEpisodeForSession(session.id);
@@ -774,13 +801,69 @@ export class SessionTurnService {
         ? []
         : this.deps.memoryLayersForIntent(intentDecision.kind),
       limit: this.deps.turnStartRetrievalLimit(),
-      contextBudget: typeof request.contextBudget === "number" ? request.contextBudget : undefined,
+      contextBudget: supplementalContextBudget,
       includeInjectedContext: true,
       retrievalMode: "turn_start",
       contextHints,
       injectedContextQuery: request.query
     });
+    const supplementalMarkdown = search.injectedContext.markdown.trim();
+    const combinedMarkdown = supplementalMarkdown
+      ? `${projectContext.markdown}\n\n${supplementalMarkdown}`
+      : projectContext.markdown;
+    const combinedTokenEstimate = Math.ceil(combinedMarkdown.length / 4);
+    const includeSupplemental = supplementalContextBudget !== 0
+      && (requestedContextBudget === undefined || combinedTokenEstimate <= requestedContextBudget);
+    const droppedDueToBudget = includeSupplemental
+      ? search.droppedDueToBudget
+      : [...search.hits.reduce(
+          (droppedById: Map<string, TurnStartResponse["droppedDueToBudget"][number]>, hit: TurnStartResponse["hits"][number]) => {
+            if (droppedById.has(hit.id)) return droppedById;
+            const section = search.injectedContext.sections.find((candidate: InjectedContext["sections"][number]) =>
+              candidate.id === `memory-${hit.id}` || candidate.memoryIds.includes(hit.id)
+            );
+            droppedById.set(hit.id, {
+              id: hit.id,
+              kind: hit.kind,
+              memoryLayer: hit.memoryLayer,
+              reason: "token_budget",
+              ...(section?.tokenEstimate === undefined ? {} : { tokenEstimate: section.tokenEstimate })
+            });
+            return droppedById;
+          },
+          new Map<string, TurnStartResponse["droppedDueToBudget"][number]>(search.droppedDueToBudget.map((dropped: TurnStartResponse["droppedDueToBudget"][number]) => [dropped.id, dropped]))
+        ).values()];
+    const sourceMemoryIds = uniq([
+      ...projectContext.sourceMemoryIds,
+      ...(includeSupplemental ? search.sourceMemoryIds : [])
+    ]);
+    const injectedContext: InjectedContext = {
+      ...(includeSupplemental ? search.injectedContext : { sections: [] }),
+      markdown: includeSupplemental ? combinedMarkdown : projectContext.markdown,
+      tokenEstimate: includeSupplemental ? combinedTokenEstimate : projectTokenEstimate
+    };
     const contextPacketId = `ctx_${stableHash(`${session.id}:${episode.id}:${turnId}:${search.searchEventId}`).slice(0, 20)}`;
+    const response: TurnStartResponse = {
+      contextPacketId,
+      turnId,
+      sessionId: session.id,
+      episodeId: episode.id,
+      closedEpisodeIds,
+      searchEventId: search.searchEventId,
+      hits: search.hits,
+      injectedContext,
+      projectContext,
+      sourceMemoryIds,
+      droppedDueToBudget,
+      status: [
+        ...search.status,
+        ...(intentDecision.kind === "chitchat" || intentDecision.kind === "meta"
+          ? [`intent:${intentDecision.kind}:retrieval_skipped`]
+          : []),
+        ...(endTopicDecision ? ["relation:end_topic"] : [])
+      ],
+      serverTime: nowIso()
+    };
     if (!existingRawTurn) {
       const at = nowIso();
       this.deps.repos.runtime.touchSession(session.id, at);
@@ -794,13 +877,15 @@ export class SessionTurnService {
         userText: request.query,
         toolCalls: [],
         toolResults: [],
-        sourceMemoryIds: search.sourceMemoryIds,
+        sourceMemoryIds,
         usage: {},
         messagePayload: {
           turn_start: {
             contextPacketId,
             searchEventId: search.searchEventId,
-            sourceMemoryIds: search.sourceMemoryIds,
+            sourceMemoryIds,
+            projectContextVersion: projectContext.version,
+            projectContextStatus: projectContext.status,
             protocolVersion: request.protocolVersion,
             provenance: request.provenance,
             intent_decision: intentDecision,
@@ -811,7 +896,8 @@ export class SessionTurnService {
                     decision: endTopicDecision
                   }
                 }
-              : {})
+              : {}),
+            response
           }
         },
         status: "started",
@@ -832,26 +918,7 @@ export class SessionTurnService {
       });
     }
 
-    return {
-      contextPacketId,
-      turnId,
-      sessionId: session.id,
-      episodeId: episode.id,
-      closedEpisodeIds,
-      searchEventId: search.searchEventId,
-      hits: search.hits,
-      injectedContext: search.injectedContext,
-      sourceMemoryIds: search.sourceMemoryIds,
-      droppedDueToBudget: search.droppedDueToBudget,
-      status: [
-        ...search.status,
-        ...(intentDecision.kind === "chitchat" || intentDecision.kind === "meta"
-          ? [`intent:${intentDecision.kind}:retrieval_skipped`]
-          : []),
-        ...(endTopicDecision ? ["relation:end_topic"] : [])
-      ],
-      serverTime: nowIso()
-    };
+    return response;
   }
 
   completeTurn(turnId: string, request: TurnCompleteRequest & Record<string, unknown>): CompleteTurnResponse {
@@ -939,6 +1006,9 @@ export class SessionTurnService {
       const requestToolCalls = normalizeCompleteTurnToolCalls(completionRequest);
       const requestToolResults = normalizeCompleteTurnToolResults(completionRequest);
       const requestArtifacts = normalizeCompleteTurnArtifacts(completionRequest);
+      const persistedStartResponse = existingRawTurn
+        ? persistedTurnStartResponse(existingRawTurn)
+        : undefined;
       const turnStartPayload = {
         protocolVersion: request.protocolVersion,
         provenance: request.provenance,
@@ -959,7 +1029,8 @@ export class SessionTurnService {
                 decision: endTopicDecision
               }
             }
-          : {})
+          : {}),
+        ...(persistedStartResponse ? { response: persistedStartResponse } : {})
       };
 
       const insertedRawTurn: RawTurnRecord =

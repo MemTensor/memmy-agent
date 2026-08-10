@@ -1,3 +1,5 @@
+import type { ProjectContextStableResult } from "./service/project-context/project-context-types.js";
+
 export type IsoTime = string;
 export const DEFAULT_NAMESPACE_SOURCE = "unknown";
 export type Cursor = string;
@@ -89,6 +91,16 @@ export interface RequestEnvelope {
   source?: string;
   namespace?: RuntimeNamespace;
 }
+
+export type {
+  ProjectContextProposeGoalRequest,
+  ProjectContextReadState,
+  ProjectContextRequest,
+  ProjectContextStableResult,
+  ProjectFactRecord,
+  ProjectGoalRecord,
+  ProjectWorkItemRecord
+} from "./service/project-context/project-context-types.js";
 
 export interface ApiErrorBody {
   error: {
@@ -300,6 +312,22 @@ export interface SessionOpenRequest extends RequestEnvelope {
   meta?: Record<string, unknown>;
   protocolVersion?: string;
   provenance?: Partial<MemoryProvenance>;
+}
+
+export interface TurnStartResponse {
+  contextPacketId: string;
+  turnId: string;
+  sessionId: string;
+  episodeId: string;
+  closedEpisodeIds: string[];
+  searchEventId: string;
+  hits: RecallHit[];
+  injectedContext: InjectedContext;
+  projectContext: ProjectContextStableResult;
+  sourceMemoryIds: string[];
+  droppedDueToBudget: Array<{ id: string; kind: MemoryKind; memoryLayer: MemoryLayer; reason: "token_budget"; tokenEstimate?: number }>;
+  status: string[];
+  serverTime: string;
 }
 
 export interface TurnStartRequest extends RequestEnvelope {

@@ -237,7 +237,7 @@ export class IndexedCandidatePool {
 }
 
 function retrievalSemanticTags(tags: readonly string[]): string[] {
-  const ignored = new Set(["agent-source", "codex", "pi", "hermes", "claude_code", "cursor", "opencode", "memmy"]);
+  const ignored = new Set(["agent-source", "codex", "pi", "hermes", "claude_code", "cursor", "opencode", "omp", "memmy"]);
   return tags
     .map((tag) => tag.trim())
     .filter((tag) => tag && !ignored.has(tag.toLowerCase()));

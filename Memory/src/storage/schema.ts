@@ -1,7 +1,7 @@
 import type Database from "better-sqlite3";
 
-export const SCHEMA_VERSION = 5;
-export const SCHEMA_MIGRATION_ID = "005_memory_governance";
+export const SCHEMA_VERSION = 6;
+export const SCHEMA_MIGRATION_ID = "006_project_context";
 const API_LOG_SOURCE_AGENT_MIGRATION_FROM_VERSION = 2;
 const PROCESSING_TAGS = new Set([
   "摘要排队中",
@@ -466,7 +466,73 @@ const statements = [
     created_at TEXT NOT NULL
   )`,
   `CREATE INDEX IF NOT EXISTS idx_audit_logs_user_created
-    ON audit_logs (user_id, created_at DESC)`
+    ON audit_logs (user_id, created_at DESC)`,
+  `CREATE TABLE IF NOT EXISTS project_context_goals (
+    id TEXT PRIMARY KEY,
+    namespace_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    project_id TEXT,
+    workspace_id TEXT,
+    workspace_path TEXT,
+    title TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    acceptance_criteria_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(acceptance_criteria_json)),
+    constraints_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(constraints_json)),
+    status TEXT NOT NULL CHECK (status IN ('candidate', 'active', 'completed', 'archived')),
+    version INTEGER NOT NULL,
+    supersedes_id TEXT REFERENCES project_context_goals(id),
+    source_memory_ids_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(source_memory_ids_json)),
+    provenance_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(provenance_json)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS uq_project_context_active_goal
+    ON project_context_goals(namespace_id) WHERE status = 'active'`,
+  `CREATE INDEX IF NOT EXISTS idx_project_context_goals_namespace
+    ON project_context_goals(namespace_id, updated_at DESC)`,
+  `CREATE TABLE IF NOT EXISTS project_context_work_items (
+    id TEXT PRIMARY KEY,
+    namespace_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    project_id TEXT,
+    workspace_id TEXT,
+    workspace_path TEXT,
+    goal_id TEXT REFERENCES project_context_goals(id),
+    title TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    next_step TEXT NOT NULL,
+    acceptance_criteria_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(acceptance_criteria_json)),
+    constraints_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(constraints_json)),
+    status TEXT NOT NULL CHECK (status IN ('pending', 'active', 'blocked', 'completed', 'archived')),
+    focused INTEGER NOT NULL DEFAULT 0 CHECK (focused IN (0, 1)),
+    source_memory_ids_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(source_memory_ids_json)),
+    provenance_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(provenance_json)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS uq_project_context_focused_work_item
+    ON project_context_work_items(namespace_id) WHERE focused = 1`,
+  `CREATE INDEX IF NOT EXISTS idx_project_context_work_items_namespace
+    ON project_context_work_items(namespace_id, updated_at DESC)`,
+  `CREATE TABLE IF NOT EXISTS project_context_facts (
+    id TEXT PRIMARY KEY,
+    namespace_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    project_id TEXT,
+    workspace_id TEXT,
+    workspace_path TEXT,
+    kind TEXT NOT NULL CHECK (kind IN ('decision', 'constraint')),
+    content TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('candidate', 'active', 'superseded', 'archived')),
+    supersedes_id TEXT REFERENCES project_context_facts(id),
+    source_memory_ids_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(source_memory_ids_json)),
+    provenance_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(provenance_json)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_project_context_facts_namespace
+    ON project_context_facts(namespace_id, status, updated_at DESC)`
 ];
 
 export function migrate(db: Database.Database): void {
@@ -476,7 +542,7 @@ export function migrate(db: Database.Database): void {
   const hasMemories = tableExists(db, "memories");
   const version = currentSchemaVersion(db);
 
-  if (hasMemories && version !== SCHEMA_VERSION && version !== 2 && version !== 3 && version !== 4) {
+  if (hasMemories && version !== SCHEMA_VERSION && version !== 2 && version !== 3 && version !== 4 && version !== 5) {
     throw new Error(
       `Unsupported memory database schema version ${version}; the database was left unchanged`
     );

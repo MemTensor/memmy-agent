@@ -1,3 +1,4 @@
+import type { ProjectFactRecord, ProjectGoalRecord, ProjectWorkItemRecord } from "../service/project-context/project-context-types.js";
 import type Database from "better-sqlite3";
 import type {
   FeedbackRequest,
@@ -36,6 +37,9 @@ type SqlValue = string | number | Buffer | null;
 const BUNDLE_TABLES = [
   "memories",
   "memory_relations",
+  "project_context_goals",
+  "project_context_work_items",
+  "project_context_facts",
   "sessions",
   "episodes",
   "raw_turns",
@@ -3609,16 +3613,130 @@ export class RuntimeRepository {
   }
 }
 
+export class ProjectContextRepository {
+  constructor(private readonly db: Database.Database) {}
+
+  getActiveGoal(namespaceId: string): ProjectGoalRecord | undefined {
+    return goalFromSql(this.db.prepare(`SELECT * FROM project_context_goals WHERE namespace_id = ? AND status = 'active'`).get(namespaceId) as ProjectGoalSqlRow | undefined);
+  }
+  getGoal(id: string): ProjectGoalRecord | undefined {
+    return goalFromSql(this.db.prepare(`SELECT * FROM project_context_goals WHERE id = ?`).get(id) as ProjectGoalSqlRow | undefined);
+  }
+  listGoals(namespaceId: string): ProjectGoalRecord[] {
+    return (this.db.prepare(`SELECT * FROM project_context_goals WHERE namespace_id = ? ORDER BY version DESC`).all(namespaceId) as ProjectGoalSqlRow[]).map((row) => goalFromSql(row)!);
+  }
+  insertGoal(goal: ProjectGoalRecord): ProjectGoalRecord {
+    if (goal.supersedesId && this.getGoal(goal.supersedesId)?.namespaceId !== goal.namespaceId) throw new Error("project goal namespace mismatch");
+    try {
+      this.db.prepare(`INSERT INTO project_context_goals (id, namespace_id, user_id, project_id, workspace_id, workspace_path, title, summary, detail, acceptance_criteria_json, constraints_json, status, version, supersedes_id, source_memory_ids_json, provenance_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(goal.id, goal.namespaceId, goal.userId, goal.projectId ?? null, goal.workspaceId ?? null, goal.workspacePath ?? null, goal.title, goal.summary, goal.detail, toJson(goal.acceptanceCriteria), toJson(goal.constraints), goal.status, goal.version, goal.supersedesId ?? null, toJson(goal.sourceMemoryIds), toJson(goal.provenance), goal.createdAt, goal.updatedAt);
+    } catch (error) {
+      if (error instanceof Error && (error.message.includes("uq_project_context_active_goal") || (error.message.includes("project_context_goals.namespace_id") && goal.status === "active"))) throw new Error(`active project goal already exists for namespace ${goal.namespaceId}`);
+      throw error;
+    }
+    return goal;
+  }
+  replaceActiveGoal(next: ProjectGoalRecord): ProjectGoalRecord {
+    return this.db.transaction(() => {
+      const previous = this.getActiveGoal(next.namespaceId);
+      if (next.status !== "active" || (previous && next.supersedesId !== previous.id)) throw new Error("replacement active project goal must supersede the current namespace goal");
+      this.db.prepare(`UPDATE project_context_goals SET status = 'archived', updated_at = ? WHERE namespace_id = ? AND status = 'active'`).run(next.updatedAt, next.namespaceId);
+      return this.insertGoal(next);
+    })();
+  }
+  archiveGoalCandidate(id: string, namespaceId: string, at: string): ProjectGoalRecord {
+    const goal = this.getGoal(id);
+    if (!goal || goal.namespaceId !== namespaceId) throw new Error("project goal namespace mismatch");
+    if (goal.status !== "candidate") throw new Error("only candidate project goals can be archived");
+    this.db.prepare(`UPDATE project_context_goals SET status = 'archived', updated_at = ? WHERE id = ? AND namespace_id = ? AND status = 'candidate'`).run(at, id, namespaceId);
+    return { ...goal, status: "archived", updatedAt: at };
+  }
+
+  getFocusedWorkItem(namespaceId: string): ProjectWorkItemRecord | undefined {
+    return workItemFromSql(this.db.prepare(`SELECT * FROM project_context_work_items WHERE namespace_id = ? AND focused = 1`).get(namespaceId) as ProjectWorkItemSqlRow | undefined);
+  }
+  listWorkItems(namespaceId: string): ProjectWorkItemRecord[] {
+    return (this.db.prepare(`SELECT * FROM project_context_work_items WHERE namespace_id = ? ORDER BY updated_at DESC, id ASC`).all(namespaceId) as ProjectWorkItemSqlRow[]).map((row) => workItemFromSql(row)!);
+  }
+  insertWorkItem(item: ProjectWorkItemRecord): ProjectWorkItemRecord {
+    this.assertWorkItemGoalNamespace(item);
+    this.db.prepare(`INSERT INTO project_context_work_items (id, namespace_id, user_id, project_id, workspace_id, workspace_path, goal_id, title, summary, next_step, acceptance_criteria_json, constraints_json, status, focused, source_memory_ids_json, provenance_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(item.id, item.namespaceId, item.userId, item.projectId ?? null, item.workspaceId ?? null, item.workspacePath ?? null, item.goalId ?? null, item.title, item.summary, item.nextStep, toJson(item.acceptanceCriteria), toJson(item.constraints), item.status, item.focused ? 1 : 0, toJson(item.sourceMemoryIds), toJson(item.provenance), item.createdAt, item.updatedAt);
+    return item;
+  }
+  updateWorkItem(item: ProjectWorkItemRecord): ProjectWorkItemRecord {
+    const stored = workItemFromSql(this.db.prepare(`SELECT * FROM project_context_work_items WHERE id = ?`).get(item.id) as ProjectWorkItemSqlRow | undefined);
+    if (!stored || stored.namespaceId !== item.namespaceId) throw new Error("work item namespace mismatch");
+    const next = { ...item, userId: stored.userId, projectId: stored.projectId, workspaceId: stored.workspaceId, workspacePath: stored.workspacePath, createdAt: stored.createdAt };
+    this.assertWorkItemGoalNamespace(next);
+    this.db.prepare(`UPDATE project_context_work_items SET goal_id = ?, title = ?, summary = ?, next_step = ?, acceptance_criteria_json = ?, constraints_json = ?, status = ?, focused = ?, source_memory_ids_json = ?, provenance_json = ?, updated_at = ? WHERE id = ?`).run(next.goalId ?? null, next.title, next.summary, next.nextStep, toJson(next.acceptanceCriteria), toJson(next.constraints), next.status, next.focused ? 1 : 0, toJson(next.sourceMemoryIds), toJson(next.provenance), next.updatedAt, next.id);
+    return next;
+  }
+  setFocusedWorkItem(namespaceId: string, itemId: string | null, at: string): ProjectWorkItemRecord | undefined {
+    return this.db.transaction(() => {
+      const item = itemId ? workItemFromSql(this.db.prepare(`SELECT * FROM project_context_work_items WHERE id = ?`).get(itemId) as ProjectWorkItemSqlRow | undefined) : undefined;
+      if (itemId && !item) throw new Error(`work item not found: ${itemId}`);
+      if (item && item.namespaceId !== namespaceId) throw new Error("work item namespace mismatch");
+      this.db.prepare(`UPDATE project_context_work_items SET focused = 0, updated_at = ? WHERE namespace_id = ? AND focused = 1`).run(at, namespaceId);
+      if (!item) return undefined;
+      this.db.prepare(`UPDATE project_context_work_items SET focused = 1, updated_at = ? WHERE id = ?`).run(at, item.id);
+      return { ...item, focused: true, updatedAt: at };
+    })();
+  }
+  listActiveFacts(namespaceId: string): ProjectFactRecord[] {
+    return (this.db.prepare(`SELECT * FROM project_context_facts WHERE namespace_id = ? AND status = 'active' ORDER BY updated_at DESC, id ASC`).all(namespaceId) as ProjectFactSqlRow[]).map(factFromSql);
+  }
+  insertFact(fact: ProjectFactRecord): ProjectFactRecord {
+    if (fact.supersedesId) {
+      const previous = this.db.prepare(`SELECT namespace_id FROM project_context_facts WHERE id = ?`).get(fact.supersedesId) as { namespace_id: string } | undefined;
+      if (!previous || previous.namespace_id !== fact.namespaceId) throw new Error("fact namespace mismatch");
+    }
+    this.db.prepare(`INSERT INTO project_context_facts (id, namespace_id, user_id, project_id, workspace_id, workspace_path, kind, content, status, supersedes_id, source_memory_ids_json, provenance_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(fact.id, fact.namespaceId, fact.userId, fact.projectId ?? null, fact.workspaceId ?? null, fact.workspacePath ?? null, fact.kind, fact.content, fact.status, fact.supersedesId ?? null, toJson(fact.sourceMemoryIds), toJson(fact.provenance), fact.createdAt, fact.updatedAt);
+    return fact;
+  }
+  supersedeFact(previousId: string, next: ProjectFactRecord): ProjectFactRecord {
+    return this.db.transaction(() => {
+      const previous = this.db.prepare(`SELECT namespace_id FROM project_context_facts WHERE id = ?`).get(previousId) as { namespace_id: string } | undefined;
+      if (!previous || previous.namespace_id !== next.namespaceId) throw new Error("fact namespace mismatch");
+      if (next.supersedesId !== previousId || next.status !== "active") throw new Error("replacement fact must be active and supersede the previous fact");
+      this.db.prepare(`UPDATE project_context_facts SET status = 'superseded', updated_at = ? WHERE id = ?`).run(next.updatedAt, previousId);
+      return this.insertFact(next);
+    })();
+  }
+  private assertWorkItemGoalNamespace(item: ProjectWorkItemRecord): void {
+    if (item.goalId && this.getGoal(item.goalId)?.namespaceId !== item.namespaceId) throw new Error("work item namespace mismatch");
+  }
+}
+
+interface ProjectContextSqlBase { id: string; namespace_id: string; user_id: string; project_id: string | null; workspace_id: string | null; workspace_path: string | null; source_memory_ids_json: string; provenance_json: string; created_at: string; updated_at: string }
+interface ProjectGoalSqlRow extends ProjectContextSqlBase { title: string; summary: string; detail: string; acceptance_criteria_json: string; constraints_json: string; status: ProjectGoalRecord["status"]; version: number; supersedes_id: string | null }
+interface ProjectWorkItemSqlRow extends ProjectContextSqlBase { goal_id: string | null; title: string; summary: string; next_step: string; acceptance_criteria_json: string; constraints_json: string; status: ProjectWorkItemRecord["status"]; focused: number }
+interface ProjectFactSqlRow extends ProjectContextSqlBase { kind: ProjectFactRecord["kind"]; content: string; status: ProjectFactRecord["status"]; supersedes_id: string | null }
+
+function projectContextBase(row: ProjectContextSqlBase) {
+  const provenance = parseJson<unknown>(row.provenance_json, {});
+  return { id: row.id, namespaceId: row.namespace_id, userId: row.user_id, projectId: row.project_id ?? undefined, workspaceId: row.workspace_id ?? undefined, workspacePath: row.workspace_path ?? undefined, sourceMemoryIds: asStringArray(parseJson<unknown>(row.source_memory_ids_json, [])), provenance: isRecord(provenance) ? provenance : {}, createdAt: row.created_at, updatedAt: row.updated_at };
+}
+function goalFromSql(row: ProjectGoalSqlRow | undefined): ProjectGoalRecord | undefined {
+  return row ? { ...projectContextBase(row), title: row.title, summary: row.summary, detail: row.detail, acceptanceCriteria: asStringArray(parseJson<unknown>(row.acceptance_criteria_json, [])), constraints: asStringArray(parseJson<unknown>(row.constraints_json, [])), status: row.status, version: row.version, supersedesId: row.supersedes_id ?? undefined } : undefined;
+}
+function workItemFromSql(row: ProjectWorkItemSqlRow | undefined): ProjectWorkItemRecord | undefined {
+  return row ? { ...projectContextBase(row), goalId: row.goal_id ?? undefined, title: row.title, summary: row.summary, nextStep: row.next_step, acceptanceCriteria: asStringArray(parseJson<unknown>(row.acceptance_criteria_json, [])), constraints: asStringArray(parseJson<unknown>(row.constraints_json, [])), status: row.status, focused: row.focused === 1 } : undefined;
+}
+function factFromSql(row: ProjectFactSqlRow): ProjectFactRecord {
+  return { ...projectContextBase(row), kind: row.kind, content: row.content, status: row.status, supersedesId: row.supersedes_id ?? undefined };
+}
+
 export class Repositories {
   readonly memories: MemoryRepository;
   readonly processing: MemoryProcessingRepository;
   readonly runtime: RuntimeRepository;
+  readonly projectContext: ProjectContextRepository;
   readonly vectors: SqliteVecStore;
 
   constructor(readonly db: Database.Database) {
     this.vectors = new SqliteVecStore(db);
     this.memories = new MemoryRepository(db, this.vectors);
     this.processing = new MemoryProcessingRepository(db);
+    this.projectContext = new ProjectContextRepository(db);
     this.runtime = new RuntimeRepository(db);
   }
 

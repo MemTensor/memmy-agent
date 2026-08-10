@@ -71,7 +71,8 @@ import type {
   ToolCallPayload,
   ToolObserveRequest,
   TurnCompleteRequest,
-  TurnStartRequest
+  TurnStartRequest,
+  TurnStartResponse
 } from "../types.js";
 import { MemoryServiceError } from "../utils/error.js";
 import { newId,stableHash,stableStringify } from "../utils/id.js";
@@ -131,6 +132,19 @@ import {
   procedureFromSkillMemory
 } from "./read-model/memory.js";
 import { PanelReadModel } from "./read-model/panel-read.js";
+import { ProjectContextService } from "./project-context/project-context-service.js";
+import type {
+  ProjectContextProposeGoalRequest,
+  ProjectContextReadState,
+  ProjectContextStableResult,
+  ProjectGoalRecord,
+  ProjectWorkItemRecord
+} from "./project-context/project-context-types.js";
+import type {
+  ProjectWorkItemCreateRequest,
+  ProjectWorkItemSelectRequest,
+  ProjectWorkItemUpdateRequest
+} from "./project-context/project-context-service.js";
 import {
   SkillReadModel
 } from "./read-model/skill.js";
@@ -249,6 +263,7 @@ export class MemoryService {
   private readonly episodeReadModel: EpisodeReadModel;
   private readonly importJobs: ImportJobProcessor;
   private readonly panelReadModel: PanelReadModel;
+  private readonly projectContext: ProjectContextService;
   private readonly retrieval: RetrievalService;
   private readonly sessionTurns: SessionTurnService;
   private readonly skillReadModel: SkillReadModel;
@@ -507,12 +522,14 @@ export class MemoryService {
       namespaceIdFromContext,
       withTimeout
     });
+    this.projectContext = new ProjectContextService({ repositories: this.repos });
     const sessionTurnOwner = this;
     this.sessionTurns = new SessionTurnService({
       repos: this.repos,
       get config() { return sessionTurnOwner.config; },
       get llm() { return sessionTurnOwner.llm; },
       get skillLlm() { return sessionTurnOwner.skillLlm; },
+      projectContext: this.projectContext,
       assertEpisodeInScope: this.assertEpisodeInScope.bind(this),
       assertMemoryAddEnabled: this.assertMemoryAddEnabled.bind(this),
       assertRawTurnInScope: this.assertRawTurnInScope.bind(this),
@@ -854,26 +871,7 @@ export class MemoryService {
     };
   }
 
-  async startTurn(request: TurnStartRequest & Record<string, unknown>): Promise<{
-    contextPacketId: string;
-    turnId: string;
-    sessionId: string;
-    episodeId: string;
-    closedEpisodeIds: string[];
-    searchEventId: string;
-    hits: RecallHit[];
-    injectedContext: InjectedContext;
-    sourceMemoryIds: string[];
-    droppedDueToBudget: Array<{
-      id: string;
-      kind: MemoryKind;
-      memoryLayer: MemoryLayer;
-      reason: "token_budget";
-      tokenEstimate?: number;
-    }>;
-    status: string[];
-    serverTime: string;
-  }> {
+  async startTurn(request: TurnStartRequest & Record<string, unknown>): Promise<TurnStartResponse> {
     return this.sessionTurns.startTurn(request);
   }
 
@@ -1768,6 +1766,52 @@ export class MemoryService {
     return this.panelReadModel.evolutionOverview(input);
   }
 
+  readProjectContext(namespace: RuntimeNamespace): ProjectContextReadState {
+    this.assertProjectContextScope(namespace);
+    return this.projectContext.read(namespace);
+  }
+
+  proposeProjectGoal(input: ProjectContextProposeGoalRequest): ProjectGoalRecord {
+    this.assertProjectContextScope(input.namespace);
+    return this.projectContext.proposeGoal(input);
+  }
+
+  approveProjectGoal(input: { namespace: RuntimeNamespace; candidateId: string }): ProjectGoalRecord {
+    this.assertProjectContextScope(input.namespace);
+    return this.projectContext.approveGoal(input);
+  }
+
+  rejectProjectGoal(input: { namespace: RuntimeNamespace; candidateId: string }): ProjectGoalRecord {
+    this.assertProjectContextScope(input.namespace);
+    return this.projectContext.rejectGoal(input);
+  }
+
+  createProjectWorkItem(input: ProjectWorkItemCreateRequest): ProjectWorkItemRecord {
+    this.assertProjectContextScope(input.namespace);
+    return this.projectContext.createWorkItem(input);
+  }
+
+  updateProjectWorkItem(input: ProjectWorkItemUpdateRequest): ProjectWorkItemRecord {
+    this.assertProjectContextScope(input.namespace);
+    return this.projectContext.updateWorkItem(input);
+  }
+
+  selectProjectWorkItem(input: ProjectWorkItemSelectRequest): ProjectWorkItemRecord | undefined {
+    this.assertProjectContextScope(input.namespace);
+    return this.projectContext.selectWorkItem(input);
+  }
+
+  renderStableProjectContext(namespace: RuntimeNamespace, budget?: number): ProjectContextStableResult {
+    this.assertProjectContextScope(namespace);
+    return this.projectContext.renderStable(namespace, budget);
+  }
+
+  private assertProjectContextScope(namespace: RuntimeNamespace): void {
+    if (!hasProjectScope(namespace)) {
+      throw new MemoryServiceError("invalid_argument", "project context requires projectId, workspaceId, or workspacePath");
+    }
+  }
+
   namespaceAudit(input: RequestEnvelope & { userId?: string } = {}) {
     return this.panelReadModel.namespaceAudit(input);
   }
@@ -2558,6 +2602,20 @@ export class MemoryService {
       contextHints,
       injectedContextQuery: request.query
     });
+    const noWriteNamespace = normalizeNamespace(request.namespace);
+    const noGoalMarkdown = '<memmy_project_context version="0" status="no_confirmed_goal">\nNo confirmed project goal.\n</memmy_project_context>';
+    const projectContext: ProjectContextStableResult = {
+      namespaceId: namespaceIdFromContext(noWriteNamespace),
+      status: "no_confirmed_goal",
+      version: 0,
+      goal: null,
+      focusedWorkItem: null,
+      facts: [],
+      markdown: noGoalMarkdown,
+      sourceMemoryIds: [],
+      generatedAt: nowIso()
+    };
+    const supplementalMarkdown = search.injectedContext.markdown.trim();
     return {
       contextPacketId: `ctx_${stableHash(`${request.sessionId}:${episodeId}:${turnId}:${search.searchEventId}`).slice(0, 20)}`,
       turnId,
@@ -2566,8 +2624,12 @@ export class MemoryService {
       closedEpisodeIds: [],
       searchEventId: search.searchEventId,
       hits: search.hits,
-      injectedContext: search.injectedContext,
-      sourceMemoryIds: search.sourceMemoryIds,
+      injectedContext: {
+        ...search.injectedContext,
+        markdown: supplementalMarkdown ? `${projectContext.markdown}\n\n${supplementalMarkdown}` : projectContext.markdown
+      },
+      projectContext,
+      sourceMemoryIds: uniq([...projectContext.sourceMemoryIds, ...search.sourceMemoryIds]),
       droppedDueToBudget: search.droppedDueToBudget,
       status: uniq([...search.status, "memory_add:disabled:no_turn_write"]),
       serverTime: nowIso()

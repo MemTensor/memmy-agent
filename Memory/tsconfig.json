@@ -3,7 +3,7 @@
   "compilerOptions": {
     "outDir": "dist",
     "rootDir": ".",
-    "declaration": false,
+    "declaration": true,
     "sourceMap": false,
     "types": ["node", "vitest/globals"]
   },

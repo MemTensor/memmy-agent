@@ -98,6 +98,59 @@ describe("MemoryService / REST contract", () => {
     });
     db.close();
   });
+  it("serves all project-context routes with strict inputs, auth, idempotency, and null focus", async () => {
+    const { db, service } = createTestService();
+    const server = createMemoryHttpServer({ service, auth: { localServiceToken: "memory-token" } });
+    await withServerClosed(server, async () => {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("expected TCP address");
+      const base = `http://127.0.0.1:${address.port}`;
+      const namespace = { source: "codex", profileId: "default", userId: "rest-user", projectId: "project-4" };
+      const provenance = { sourceAgent: "codex", sourceMemoryIds: [], capturedAt: "2026-06-08T10:00:00.000Z", adapterId: "adapter-4", requestId: "req-4" };
+      const headers = { authorization: "Bearer memory-token", "content-type": "application/json" };
+      const goalInput = { namespace, source: "codex", adapterId: "adapter-4", requestId: "req-goal", provenance: { ...provenance, requestId: "req-goal" }, title: "Ship Task 4", summary: "Finish context API", detail: "All routes are covered", acceptanceCriteria: ["REST works"], constraints: ["strict schemas"] };
+      const createGoal = await fetch(`${base}/api/v1/project-context/goals/propose`, { method: "POST", headers, body: JSON.stringify(goalInput) });
+      const goal = await createGoal.json() as { id: string; status: string };
+      expect(createGoal.status).toBe(200);
+      expect(goal.status).toBe("candidate");
+      const duplicateGoal = await fetch(`${base}/api/v1/project-context/goals/propose`, { method: "POST", headers, body: JSON.stringify(goalInput) });
+      const duplicateGoalBody = await duplicateGoal.json() as { id: string; duplicate?: boolean };
+      expect(duplicateGoalBody.id).toBe(goal.id);
+      expect(duplicateGoalBody.duplicate).toBe(true);
+      const state = await fetch(`${base}/api/v1/project-context/state?namespace=${encodeURIComponent(JSON.stringify(namespace))}`, { headers: { authorization: "Bearer memory-token" } });
+      expect(state.status).toBe(200);
+      expect((await state.json()).goals).toHaveLength(1);
+      const decision = { namespace, source: "codex", adapterId: "adapter-4", requestId: "req-decision", provenance: { ...provenance, requestId: "req-decision" } };
+      const rejectedCandidateResponse = await fetch(`${base}/api/v1/project-context/goals/propose`, { method: "POST", headers, body: JSON.stringify({ ...goalInput, requestId: "req-reject-candidate", provenance: { ...provenance, requestId: "req-reject-candidate" }, title: "Discard me" }) });
+      const rejectedCandidate = await rejectedCandidateResponse.json() as { id: string };
+      const rejected = await fetch(`${base}/api/v1/project-context/goals/${encodeURIComponent(rejectedCandidate.id)}/reject`, { method: "POST", headers, body: JSON.stringify({ ...decision, requestId: "req-reject", provenance: { ...provenance, requestId: "req-reject" } }) });
+      expect((await rejected.json()).status).toBe("archived");
+      const approved = await fetch(`${base}/api/v1/project-context/goals/${encodeURIComponent(goal.id)}/approve`, { method: "POST", headers, body: JSON.stringify(decision) });
+      expect((await approved.json()).status).toBe("active");
+      const workInput = { ...decision, requestId: "req-work", provenance: { ...provenance, requestId: "req-work" }, title: "Implement tests", summary: "Add route tests", nextStep: "Review failures" };
+      const workResponse = await fetch(`${base}/api/v1/project-context/work-items`, { method: "POST", headers, body: JSON.stringify(workInput) });
+      const work = await workResponse.json() as { id: string };
+      expect(workResponse.status).toBe(200);
+      const update = await fetch(`${base}/api/v1/project-context/work-items/${encodeURIComponent(work.id)}`, { method: "PATCH", headers, body: JSON.stringify({ ...decision, requestId: "req-update", provenance: { ...provenance, requestId: "req-update" }, status: "active" }) });
+      expect((await update.json()).status).toBe("active");
+      const focused = await fetch(`${base}/api/v1/project-context/focus`, { method: "PUT", headers, body: JSON.stringify({ ...decision, requestId: "req-focus", provenance: { ...provenance, requestId: "req-focus" }, workItemId: work.id }) });
+      expect((await focused.json()).focused).toBe(true);
+      const cleared = await fetch(`${base}/api/v1/project-context/focus`, { method: "PUT", headers, body: JSON.stringify({ ...decision, requestId: "req-clear", provenance: { ...provenance, requestId: "req-clear" }, workItemId: null }) });
+      expect(await cleared.json()).toBeNull();
+      const missing = await fetch(`${base}/api/v1/project-context/goals/propose`, { method: "POST", headers, body: JSON.stringify({ ...goalInput, requestId: "req-invalid", provenance: { ...provenance, requestId: "req-invalid" }, source: undefined }) });
+      expect(missing.status).toBe(400);
+      const unauthorized = await fetch(`${base}/api/v1/project-context/state?namespace=${encodeURIComponent(JSON.stringify(namespace))}`);
+      for (const field of ["namespace", "source", "adapterId", "requestId", "provenance"] as const) {
+        const invalid: Record<string, unknown> = { ...goalInput, requestId: `req-invalid-${field}`, provenance: { ...provenance, requestId: `req-invalid-${field}` } };
+        delete invalid[field];
+        const response = await fetch(`${base}/api/v1/project-context/goals/propose`, { method: "POST", headers, body: JSON.stringify(invalid) });
+        expect(response.status, field).toBe(400);
+      }
+      expect(unauthorized.status).toBe(401);
+    });
+    db.close();
+  });
 
   it("serves structured session checkpoints through the REST client", async () => {
     const { db, service } = createTestService();
@@ -249,10 +302,17 @@ describe("MemoryService / REST contract", () => {
       episodeId: string;
       searchEventId: string;
       turnId: string;
+      closedEpisodeIds: string[];
+      droppedDueToBudget: unknown[];
+      projectContext: { version: number; status: string; goal: unknown; focusedWorkItem: unknown; markdown: string };
     };
     expect(startResponse.status).toBe(200);
     expect(started.turnId).toBe("cursor-http-turn");
     expect(started.episodeId).toMatch(/^episode_/u);
+    expect(started.projectContext).toMatchObject({ version: 0, status: "no_confirmed_goal", goal: null, focusedWorkItem: null });
+    expect(started.projectContext.markdown).toContain('<memmy_project_context version="0" status="no_confirmed_goal">');
+    expect(started.closedEpisodeIds).toEqual([]);
+    expect(started.droppedDueToBudget).toEqual([]);
     const afterFirstStart = {
       episodes: (db.db.prepare("SELECT COUNT(*) AS count FROM episodes").get() as { count: number }).count,
       rawTurns: (db.db.prepare("SELECT COUNT(*) AS count FROM raw_turns").get() as { count: number }).count,

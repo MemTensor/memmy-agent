@@ -46,6 +46,7 @@ import {
 import {
   panelCountByDate,
   panelListItemFromMemory,
+  panelMemoryMatchesSourceFilter,
   panelNamespaceDistribution,
   panelSourceDistribution
 } from "./panel.js";
@@ -654,28 +655,43 @@ export class PanelReadModel {
       memoryLayer: input.layer,
       status: input.status,
       tags: input.tags,
-      agentId: input.sourceAgent,
-      excludedAgentIds: input.excludedSourceAgents,
       ...(input.namespace ? {} : {
         projectId: input.projectId,
         workspaceId: input.workspaceId
       })
     };
-    const total = input.q?.trim()
+    const hasSourceFilter = Boolean(
+      input.sourceAgent?.trim() || input.excludedSourceAgents?.some((source) => source.trim())
+    );
+    const candidateTotal = input.q?.trim()
       ? this.deps.repos.memories.searchCount(input.q, { ...filter, status: filter.status ?? ["activated", "resolving"] })
       : this.deps.repos.memories.count(filter);
+    const sourceFilteredMemories = hasSourceFilter
+      ? (input.q?.trim()
+          ? this.deps.repos.memories.getMany(this.deps.repos.memories.searchPanelIds(
+              input.q,
+              { ...filter, status: filter.status ?? ["activated", "resolving"] },
+              candidateTotal,
+              0
+            ).map((hit) => hit.id))
+          : this.deps.repos.memories.list(filter, candidateTotal, 0))
+        .filter((memory) => panelMemoryMatchesSourceFilter(memory, input.sourceAgent, input.excludedSourceAgents))
+      : undefined;
+    const total = sourceFilteredMemories?.length ?? candidateTotal;
     const totalPages = Math.max(1, Math.ceil(total / pageSize));
     const requestedPage = normalizePageNumber(input.page);
     const page = Math.min(requestedPage, totalPages);
     const offset = normalizeOffsetCursor(input.cursor) ?? ((page - 1) * pageSize);
-    const memories = input.q?.trim()
-      ? this.deps.repos.memories.getMany(this.deps.repos.memories.searchPanelIds(
-          input.q,
-          { ...filter, status: filter.status ?? ["activated", "resolving"] },
-          pageSize,
-          offset
-        ).map((hit) => hit.id))
-      : this.deps.repos.memories.list(filter, pageSize, offset);
+    const memories = sourceFilteredMemories
+      ? sourceFilteredMemories.slice(offset, offset + pageSize)
+      : input.q?.trim()
+        ? this.deps.repos.memories.getMany(this.deps.repos.memories.searchPanelIds(
+            input.q,
+            { ...filter, status: filter.status ?? ["activated", "resolving"] },
+            pageSize,
+            offset
+          ).map((hit) => hit.id))
+        : this.deps.repos.memories.list(filter, pageSize, offset);
     return {
       items: memories.map((memory) => panelListItemFromMemory(
         this.deps.repos.memories.toListItem(memory),
