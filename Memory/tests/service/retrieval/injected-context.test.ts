@@ -348,8 +348,8 @@ describe("MemoryService / retrieval / injected context", () => {
     });
 
     expect(prepared.hits.length).toBeGreaterThan(1);
-    expect(prepared.sourceMemoryIds.length).toBeGreaterThanOrEqual(prepared.hits.length);
-    expect(prepared.droppedDueToBudget).toEqual([]);
+    expect(prepared.sourceMemoryIds).toEqual([]);
+    expect(prepared.droppedDueToBudget.map(({ id }) => id).sort()).toEqual(prepared.hits.map(({ id }) => id).sort());
 
     expect(db.db.prepare(
       `SELECT turn_id, json_extract(request_json, '$.retrievalMode') AS retrieval_mode

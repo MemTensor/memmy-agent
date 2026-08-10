@@ -51,7 +51,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
       query: "Training turn should not retrieve memory."
     });
     expect(start.hits).toEqual([]);
-    expect(start.injectedContext.markdown).toBe("");
+    expect(start.injectedContext.markdown).toContain('<memmy_project_context version="0" status="no_confirmed_goal">');
     expect(start.sourceMemoryIds).toEqual([]);
     expect(start.status).toContain("memory_search:disabled");
 

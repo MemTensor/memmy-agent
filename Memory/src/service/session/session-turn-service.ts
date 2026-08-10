@@ -964,11 +964,14 @@ export class SessionTurnService {
       if (existingRawTurn) {
         this.deps.assertRawTurnInScope(existingRawTurn, request.namespace);
       }
+      const persistedStartResponse = existingRawTurn
+        ? persistedTurnStartResponse(existingRawTurn)
+        : undefined;
       const turnStartRecall = this.deps.repos.runtime.getTurnStartRecallEvent(session.id, turnId);
       const requestSourceMemoryIds = normalizeCompleteTurnSourceMemoryIds(request);
       const sourceMemoryIds = requestSourceMemoryIds.length > 0
         ? requestSourceMemoryIds
-        : turnStartRecall?.injectedMemoryIds ?? [];
+        : persistedStartResponse?.sourceMemoryIds ?? turnStartRecall?.injectedMemoryIds ?? [];
       const completionRequest = sourceMemoryIds === requestSourceMemoryIds
         ? request
         : { ...request, sourceMemoryIds };
@@ -1006,9 +1009,6 @@ export class SessionTurnService {
       const requestToolCalls = normalizeCompleteTurnToolCalls(completionRequest);
       const requestToolResults = normalizeCompleteTurnToolResults(completionRequest);
       const requestArtifacts = normalizeCompleteTurnArtifacts(completionRequest);
-      const persistedStartResponse = existingRawTurn
-        ? persistedTurnStartResponse(existingRawTurn)
-        : undefined;
       const turnStartPayload = {
         protocolVersion: request.protocolVersion,
         provenance: request.provenance,
