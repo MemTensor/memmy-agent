@@ -17,7 +17,7 @@ afterEach(() => {
   }
 });
 
-describe("app state store migrations", () => {
+describe("app state store migrations", { timeout: 60_000 }, () => {
   it("creates initial tables and seed rows idempotently", () => {
     tempDir = mkdtempSync(join(tmpdir(), "memmy-app-state-"));
     const databasePath = join(tempDir, "app.sqlite");

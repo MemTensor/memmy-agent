@@ -26,6 +26,11 @@ function findRepoEnvFile(startDir: string): string | null {
 
 const envPath = findRepoEnvFile(moduleDir);
 const parsed = envPath ? (loadDotenv({ path: envPath, processEnv: {} }).parsed ?? {}) : {};
+const configuredMaxWorkers = Number.parseInt(process.env.MEMMY_TEST_MAX_WORKERS ?? "", 10);
+const isWindowsMountedWorkspace = process.platform === "linux" && /^\/mnt\/[a-z]\//iu.test(moduleDir);
+const maxWorkers = Number.isInteger(configuredMaxWorkers) && configuredMaxWorkers > 0
+  ? configuredMaxWorkers
+  : isWindowsMountedWorkspace ? 1 : 4;
 const testEnv = {
   ...parsed,
   MEMMY_CLOUD_SERVICE: "https://cloud.test.invalid"
@@ -33,6 +38,8 @@ const testEnv = {
 
 export default defineConfig({
   test: {
+    maxWorkers,
+    testTimeout: 10_000,
     env: testEnv,
     coverage: {
       provider: "v8",
