@@ -93,6 +93,35 @@ write_desktop_edition_manifest() {
 EOF
 }
 
+# Resolves NSMicrophoneUsageDescription from the package edition (cn/intl).
+resolve_microphone_usage_description() {
+  local edition="${MEMMY_APP_EDITION:-}"
+
+  if [ -z "$edition" ]; then
+    case "${MEMMY_ACCOUNT_CHANNEL:-phone}" in
+      email)
+        edition="intl"
+        ;;
+      *)
+        edition="cn"
+        ;;
+    esac
+  fi
+
+  case "$edition" in
+    intl)
+      printf '%s' "Memmy uses the microphone only when you start voice input."
+      ;;
+    cn)
+      printf '%s' "Memmy 仅在你开始语音输入时使用麦克风"
+      ;;
+    *)
+      echo "Unsupported package edition for microphone usage description: $edition" >&2
+      exit 1
+      ;;
+  esac
+}
+
 create_cli_launcher() {
   local output_path="$1"
   local asar_entry="$2"
@@ -733,10 +762,14 @@ fi
 cd "$DESKTOP_DIR"
 # DMG background images are committed static assets and are no longer generated during packaging.
 # For style changes, see the historical generator in git history.
+MEMMY_MICROPHONE_USAGE_DESCRIPTION="$(resolve_microphone_usage_description)"
+echo "Using edition microphone usage description: $MEMMY_MICROPHONE_USAGE_DESCRIPTION"
+
 BUILDER_ARGS=(--config "$BUILDER_CONFIG")
 if [ -n "${MEMMY_ELECTRON_DIST:-}" ]; then
   BUILDER_ARGS+=(--config.electronDist="$MEMMY_ELECTRON_DIST")
 fi
+BUILDER_ARGS+=(--config.mac.extendInfo.NSMicrophoneUsageDescription="$MEMMY_MICROPHONE_USAGE_DESCRIPTION")
 
 npx electron-builder "${BUILDER_ARGS[@]}" --mac dmg "$@"
 verify_packaged_mac_unpacked_artifacts "$TARGET_CPU"

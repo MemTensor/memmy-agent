@@ -843,6 +843,7 @@ describe("desktop packaged runtime boundaries", () => {
     const electronBuilderSource = readFileSync(electronBuilderPath, "utf8");
     const macEntitlementsSource = readFileSync(macEntitlementsPath, "utf8");
     const macEntitlementsInheritSource = readFileSync(macEntitlementsInheritPath, "utf8");
+    const packageMacDmgSource = readFileSync(packageMacDmgPath, "utf8");
 
     expect(electronBuilderSource).toContain("NSMicrophoneUsageDescription");
     expect(electronBuilderSource).toContain("entitlements: build/entitlements.mac.plist");
@@ -853,6 +854,10 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain('ipcMain.handle("memmy:request-microphone-access"');
     expect(preloadSource).toContain("getMicrophoneAccessStatus(): Promise<MicrophoneAccessStatus>;");
     expect(preloadSource).toContain("requestMicrophoneAccess(): Promise<MicrophoneAccessStatus>;");
+    expect(packageMacDmgSource).toContain("resolve_microphone_usage_description()");
+    expect(packageMacDmgSource).toContain('printf \'%s\' "Memmy 仅在你开始语音输入时使用麦克风"');
+    expect(packageMacDmgSource).toContain('printf \'%s\' "Memmy uses the microphone only when you start voice input."');
+    expect(packageMacDmgSource).toContain("--config.mac.extendInfo.NSMicrophoneUsageDescription=");
   });
 
   it("uses the Memmy mascot icon for packaged app artifacts", () => {
