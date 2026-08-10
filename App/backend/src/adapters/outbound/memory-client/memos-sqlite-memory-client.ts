@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { getLoadablePath as getSqliteVecLoadablePath } from "sqlite-vec";
+import { MemoryDb, ProjectContextService, Repositories } from "@memmy/memory";
 import type {
   AddMemoryInput,
   AddMemoryOutput,
@@ -40,6 +41,16 @@ import type { MemoryClient } from "./types.js";
 const SOURCE_ID_SEPARATOR = "::";
 const DEFAULT_MEMORY_HOME = join(homedir(), ".memmy");
 const PANEL_DAILY_ACTIVITY_DAYS = 371;
+export interface EmbeddedProjectContextService {
+  readProjectContext(namespace: Parameters<MemoryClient["projectContextState"]>[0]): Awaited<ReturnType<MemoryClient["projectContextState"]>>;
+  proposeProjectGoal(input: Parameters<MemoryClient["proposeProjectGoal"]>[0]): Awaited<ReturnType<MemoryClient["proposeProjectGoal"]>>;
+  approveProjectGoal(input: { namespace: Parameters<MemoryClient["projectContextState"]>[0]; candidateId: string }): Awaited<ReturnType<MemoryClient["approveProjectGoal"]>>;
+  rejectProjectGoal(input: { namespace: Parameters<MemoryClient["projectContextState"]>[0]; candidateId: string }): Awaited<ReturnType<MemoryClient["rejectProjectGoal"]>>;
+  createProjectWorkItem(input: Parameters<MemoryClient["createProjectWorkItem"]>[0]): Awaited<ReturnType<MemoryClient["createProjectWorkItem"]>>;
+  updateProjectWorkItem(input: Parameters<MemoryClient["updateProjectWorkItem"]>[1] & { workItemId: string }): Awaited<ReturnType<MemoryClient["updateProjectWorkItem"]>>;
+  selectProjectWorkItem(input: Parameters<MemoryClient["setProjectFocus"]>[0]): Awaited<ReturnType<MemoryClient["setProjectFocus"]>> | undefined;
+}
+
 
 export interface MemosSqliteSource {
   id: string;
@@ -50,6 +61,7 @@ export interface MemosSqliteSource {
 export interface CreateMemosSqliteMemoryClientOptions {
   sources: readonly MemosSqliteSource[];
   now?: () => string;
+  memoryService?: EmbeddedProjectContextService;
 }
 
 interface LocalMemoryRow {
@@ -160,6 +172,7 @@ export function discoverMemosSqliteSources(env: NodeJS.ProcessEnv = process.env)
 export function createMemosSqliteMemoryClient(options: CreateMemosSqliteMemoryClientOptions): MemoryClient {
   const now = options.now ?? (() => new Date().toISOString());
   const sources = options.sources.filter((source) => existsSync(source.dbPath));
+  const memoryService = options.memoryService ?? createEmbeddedProjectContextService(sources);
 
   return {
     async health() {
@@ -345,7 +358,7 @@ export function createMemosSqliteMemoryClient(options: CreateMemosSqliteMemoryCl
     async panelAnalysis(): Promise<PanelAnalysisOutput> {
       const rows = listMemoryRows(sources);
       const dates = lastSevenDateKeys(now());
-      const logs = listApiLogRows(sources, {}, 10_000)
+      const logs = readApiLogRows(sources, {}, 10_000).rows
         .filter((row) => dates.includes(dateKey(row.called_at)));
       const skillRows = rows.filter((item) => item.row.memory_layer === "Skill");
       const recallScores = logs
@@ -371,6 +384,35 @@ export function createMemosSqliteMemoryClient(options: CreateMemosSqliteMemoryCl
 
     async projectContextPack() {
       return readOnlyOperationUnavailable();
+    },
+
+    async projectContextState(namespace) {
+      const state = requireProjectContextService(memoryService).readProjectContext(namespace);
+      return { ...state, activeGoal: state.activeGoal ?? null, focusedWorkItem: state.focusedWorkItem ?? null };
+    },
+
+    async proposeProjectGoal(input) {
+      return requireProjectContextService(memoryService).proposeProjectGoal(input);
+    },
+
+    async approveProjectGoal(goalId, input) {
+      return requireProjectContextService(memoryService).approveProjectGoal({ namespace: input.namespace, candidateId: goalId });
+    },
+
+    async rejectProjectGoal(goalId, input) {
+      return requireProjectContextService(memoryService).rejectProjectGoal({ namespace: input.namespace, candidateId: goalId });
+    },
+
+    async createProjectWorkItem(input) {
+      return requireProjectContextService(memoryService).createProjectWorkItem(input);
+    },
+
+    async updateProjectWorkItem(workItemId, input) {
+      return requireProjectContextService(memoryService).updateProjectWorkItem({ ...input, workItemId });
+    },
+
+    async setProjectFocus(input) {
+      return requireProjectContextService(memoryService).selectProjectWorkItem(input) ?? null;
     },
 
     async panelItems(input: PanelItemsInput): Promise<PanelItemsOutput> {
@@ -446,7 +488,8 @@ export function createMemosSqliteMemoryClient(options: CreateMemosSqliteMemoryCl
     async memoryApiLogs(input: MemoryApiLogsInput): Promise<MemoryApiLogsOutput> {
       const limit = normalizeLimit(input.limit);
       const offset = normalizeOffset(input.offset);
-      const rows = listApiLogRows(sources, input, limit + offset);
+      const result = readApiLogRows(sources, input, limit + offset);
+      const rows = result.rows;
 
       return {
         logs: rows.slice(offset, offset + limit).map((row) => ({
@@ -454,12 +497,12 @@ export function createMemosSqliteMemoryClient(options: CreateMemosSqliteMemoryCl
           toolName: row.tool_name,
           ...(row.source_agent ? { sourceAgent: row.source_agent } : {}),
           inputJson: row.input_json,
-          outputJson: apiLogOutputWithCurrentTraceSummary(row),
+          outputJson: row.output_json,
           durationMs: nonNegativeInt(row.duration_ms, 0),
           success: row.success !== 0,
           calledAt: normalizeIsoTime(row.called_at)
         })),
-        total: countApiLogRows(sources, input),
+        total: result.total,
         limit,
         offset,
         nextOffset: rows.length > offset + limit ? offset + limit : undefined,
@@ -467,6 +510,33 @@ export function createMemosSqliteMemoryClient(options: CreateMemosSqliteMemoryCl
       };
     }
   };
+}
+
+function createEmbeddedProjectContextService(sources: readonly MemosSqliteSource[]): EmbeddedProjectContextService | undefined {
+  const source = sources.find((candidate) => basename(candidate.dbPath) === "memory.sqlite") ?? sources[0];
+  if (!source) return undefined;
+  const invoke = <Result>(operation: (service: ProjectContextService) => Result): Result => {
+    const db = new MemoryDb({ path: source.dbPath });
+    try {
+      return operation(new ProjectContextService({ repositories: new Repositories(db.db) }));
+    } finally {
+      db.close();
+    }
+  };
+  return {
+    readProjectContext: (namespace) => invoke((service) => { const state = service.read(namespace); return { ...state, activeGoal: state.activeGoal ?? null, focusedWorkItem: state.focusedWorkItem ?? null }; }),
+    proposeProjectGoal: (input) => invoke((service) => service.proposeGoal(input)),
+    approveProjectGoal: (input) => invoke((service) => service.approveGoal(input)),
+    rejectProjectGoal: (input) => invoke((service) => service.rejectGoal(input)),
+    createProjectWorkItem: (input) => invoke((service) => service.createWorkItem(input)),
+    updateProjectWorkItem: (input) => invoke((service) => service.updateWorkItem(input)),
+    selectProjectWorkItem: (input) => invoke((service) => service.selectWorkItem(input))
+  };
+}
+
+function requireProjectContextService(service: EmbeddedProjectContextService | undefined): EmbeddedProjectContextService {
+  if (!service) throw new MemoryLayerError("memory_layer_unavailable", 503, "project context requires a Memory service SQLite source");
+  return service;
 }
 
 /**
@@ -497,21 +567,20 @@ function listMemoryRows(sources: readonly MemosSqliteSource[]): MemoryRow[] {
  * @param maxRows the maximum number of rows to prefetch for cross-source merge sorting.
  * @returns log rows sorted by call time in descending order.
  */
-function listApiLogRows(
+function readApiLogRows(
   sources: readonly MemosSqliteSource[],
   input: MemoryApiLogsInput,
   maxRows: number
-): LocalApiLogRow[] {
+): { rows: LocalApiLogRow[]; total: number } {
   const tools = normalizeApiLogTools(input.tools);
   const placeholders = tools.map(() => "?").join(", ");
   const agentFilter = apiLogSourceAgentFilter(input);
-  return sources
-    .flatMap((source) => withDb(source, (db) => {
+  const sourceResults = sources.map((source) => withDb(source, (db) => {
       if (!tableExists(db, "api_logs")) {
-        return [];
+        return { rows: [] as LocalApiLogRow[], total: 0 };
       }
 
-      return db
+      const rows = db
         .prepare(
           `SELECT id, tool_name, source_agent, input_json, output_json, duration_ms, success, called_at
            FROM api_logs
@@ -521,13 +590,28 @@ function listApiLogRows(
            LIMIT ?`
         )
         .all(...tools, ...agentFilter.parameters, maxRows)
-        .map((row) => ({ ...row as unknown as Omit<LocalApiLogRow, "source">, source }));
-    }))
+        .map((row) => {
+          const logRow = { ...row as unknown as Omit<LocalApiLogRow, "source">, source };
+          return {
+            ...logRow,
+            output_json: apiLogOutputWithCurrentTraceSummary(logRow, db)
+          };
+        });
+      const countRow = db
+        .prepare(`SELECT COUNT(*) AS count FROM api_logs WHERE tool_name IN (${placeholders}) ${agentFilter.sql}`)
+        .get(...tools, ...agentFilter.parameters) as { count: number };
+      return { rows, total: nonNegativeInt(countRow.count, 0) };
+    }));
+  return {
+    rows: sourceResults
+      .flatMap((result) => result.rows)
     .sort((a, b) => b.called_at.localeCompare(a.called_at) || b.id - a.id)
-    .slice(0, maxRows);
+      .slice(0, maxRows),
+    total: sourceResults.reduce((total, result) => total + result.total, 0)
+  };
 }
 
-function apiLogOutputWithCurrentTraceSummary(row: LocalApiLogRow): string {
+function apiLogOutputWithCurrentTraceSummary(row: LocalApiLogRow, db: DatabaseSync): string {
   if (row.tool_name !== "memory_add") return row.output_json;
 
   try {
@@ -543,10 +627,9 @@ function apiLogOutputWithCurrentTraceSummary(row: LocalApiLogRow): string {
       const memoryId = stringValue(role === "span" ? record.spanId : record.traceId) ?? stringValue(record.traceId);
       if (!memoryId) return detail;
 
-      const memory = withDb(row.source, (db) => {
-        if (!tableExists(db, "memories")) return undefined;
-        return db.prepare("SELECT * FROM memories WHERE id = ?").get(memoryId) as LocalMemoryRow | undefined;
-      });
+      const memory = tableExists(db, "memories")
+        ? db.prepare("SELECT * FROM memories WHERE id = ?").get(memoryId) as LocalMemoryRow | undefined
+        : undefined;
       const value = memory
         ? role === "span"
           ? spanGoalFromParsed(parsedRow(memory))
@@ -562,29 +645,6 @@ function apiLogOutputWithCurrentTraceSummary(row: LocalApiLogRow): string {
   } catch {
     return row.output_json;
   }
-}
-
-/**
- * Counts the Memory API logs in local SQLite data sources.
- *
- * @param sources the list of SQLite data sources.
- * @param input the log filter conditions.
- * @returns the total number of logs matching the filter conditions.
- */
-function countApiLogRows(sources: readonly MemosSqliteSource[], input: MemoryApiLogsInput): number {
-  const tools = normalizeApiLogTools(input.tools);
-  const placeholders = tools.map(() => "?").join(", ");
-  const agentFilter = apiLogSourceAgentFilter(input);
-  return sources.reduce((total, source) => total + withDb(source, (db) => {
-    if (!tableExists(db, "api_logs")) {
-      return 0;
-    }
-
-    const row = db
-      .prepare(`SELECT COUNT(*) AS count FROM api_logs WHERE tool_name IN (${placeholders}) ${agentFilter.sql}`)
-      .get(...tools, ...agentFilter.parameters) as { count: number };
-    return nonNegativeInt(row.count, 0);
-  }), 0);
 }
 
 function apiLogSourceAgentFilter(input: MemoryApiLogsInput): { sql: string; parameters: string[] } {
@@ -1161,21 +1221,21 @@ function sourceLabelFromParsed(parsed: ParsedRow): string | undefined {
 }
 
 function sourceLabelFromSessionId(value: string | null): string | undefined {
-  const normalized = value?.trim().toLowerCase();
+  const normalized = value?.trim().toLowerCase().replace(/[\s_:/\\]+/gu, "-");
   if (!normalized) return undefined;
   if (normalized === "claude" || normalized.startsWith("claude-")) return "claude-code";
   if (normalized === "open-code" || normalized.startsWith("open-code-")) return "opencode";
-  for (const source of ["hermes", "openclaw", "codex", "cursor", "claude-code", "opencode", "workbuddy"]) {
+  for (const source of ["hermes", "openclaw", "codex", "cursor", "claude-code", "opencode", "workbuddy", "omp"]) {
     if (normalized === source || normalized.startsWith(`${source}-`)) return source;
   }
   return undefined;
 }
 
 function normalizedAgentSource(value: string | undefined): string | undefined {
-  const normalized = value?.trim().toLowerCase();
+  const normalized = value?.trim().toLowerCase().replace(/[\s_:/\\]+/gu, "-");
   if (normalized === "claude") return "claude-code";
   if (normalized === "open-code") return "opencode";
-  return ["hermes", "openclaw", "codex", "cursor", "claude-code", "opencode", "workbuddy"].includes(normalized ?? "")
+  return ["hermes", "openclaw", "codex", "cursor", "claude-code", "opencode", "workbuddy", "omp"].includes(normalized ?? "")
     ? normalized
     : undefined;
 }

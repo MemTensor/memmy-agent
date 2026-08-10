@@ -6,6 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import { getLoadablePath as getSqliteVecLoadablePath } from "sqlite-vec";
 import { afterEach, describe, expect, it } from "vitest";
 import { createMemosSqliteMemoryClient } from "../memos-sqlite-memory-client.js";
+import { MemoryDb } from "@memmy/memory";
 
 const NOW = "2026-06-08T10:00:00.000Z";
 
@@ -18,7 +19,45 @@ afterEach(() => {
   }
 });
 
-describe("createMemosSqliteMemoryClient", () => {
+describe("createMemosSqliteMemoryClient", { timeout: 10_000 }, () => {
+  it("delegates all project-context operations to the embedded Memory service", async () => {
+    const calls: Array<{ operation: string; input: unknown }> = [];
+    const namespace = { source: "codex", profileId: "default", userId: "user-4", projectId: "project-4" };
+    const goal = projectGoalRecord();
+    const work = projectWorkItemRecord();
+    const memoryService = {
+      readProjectContext(input: unknown) { calls.push({ operation: "read", input }); return { namespaceId: "ns-1", activeGoal: null, goals: [], workItems: [], focusedWorkItem: null, facts: [] }; },
+      proposeProjectGoal(input: unknown) { calls.push({ operation: "propose", input }); return goal; },
+      approveProjectGoal(input: unknown) { calls.push({ operation: "approve", input }); return { ...goal, status: "active" as const, version: 1 }; },
+      rejectProjectGoal(input: unknown) { calls.push({ operation: "reject", input }); return { ...goal, status: "archived" as const }; },
+      createProjectWorkItem(input: unknown) { calls.push({ operation: "create", input }); return work; },
+      updateProjectWorkItem(input: unknown) { calls.push({ operation: "update", input }); return { ...work, status: "active" as const }; },
+      selectProjectWorkItem(input: unknown) { calls.push({ operation: "focus", input }); return (input as { workItemId: string | null }).workItemId ? { ...work, focused: true } : undefined; }
+    };
+    const client = createMemosSqliteMemoryClient({ sources: [], memoryService });
+    const mutation = projectMutation(namespace);
+    await client.projectContextState(namespace);
+    await client.proposeProjectGoal({ ...mutation, title: "Task 4", summary: "", detail: "" });
+    await client.approveProjectGoal("goal-1", mutation);
+    await client.rejectProjectGoal("goal-1", mutation);
+    await client.createProjectWorkItem({ ...mutation, title: "Tests", summary: "", nextStep: "Fix" });
+    await client.updateProjectWorkItem("work-1", { ...mutation, status: "active" });
+    await expect(client.setProjectFocus({ ...mutation, workItemId: null })).resolves.toBeNull();
+    expect(calls.map(({ operation }) => operation)).toEqual(["read", "propose", "approve", "reject", "create", "update", "focus"]);
+  });
+  it("uses the packaged Memory service when no delegate is supplied", async () => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-project-context-"));
+    const dbPath = join(tempDir, "memory.sqlite");
+    const db = new MemoryDb({ path: dbPath });
+    db.close();
+    const namespace = { source: "codex", profileId: "default", userId: "user-4", projectId: "project-4" };
+    const client = createMemosSqliteMemoryClient({ sources: [{ id: "memmy-memory", label: "memmy", dbPath }] });
+    const input = projectMutation(namespace);
+    const goal = await client.proposeProjectGoal({ ...input, title: "Task 4", summary: "API", detail: "Authoritative" });
+    const state = await client.projectContextState(namespace);
+    expect(state.goals.map((item) => item.id)).toEqual([goal.id]);
+    expect(state.goals[0]?.title).toBe("Task 4");
+  });
   it("preserves Span memory kinds in panel responses", async () => {
     const dbPath = createMemoryDatabase({
       id: "span_sqlite_1",
@@ -116,6 +155,29 @@ describe("createMemosSqliteMemoryClient", () => {
     const detail = await client.getMemory({ memoryId: "memmy-memory::trace_hermes_1" });
     expect(detail.item.metadata.source).toBe("hermes");
     expect(detail.item.metrics).toEqual({ value: 0.42, alpha: 0.8, reflectionDone: true });
+  });
+
+  it("derives OMP source from the session id when the row agent is the default", async () => {
+    const dbPath = createMemoryDatabase({
+      id: "trace_omp_1",
+      sessionId: "omp::session-20260608",
+      agentId: "codex",
+      tagsJson: JSON.stringify(["trace"]),
+      infoJson: "{}",
+      propertiesJson: JSON.stringify({ internal_info: { source: "turn.complete" } })
+    });
+    const client = createMemosSqliteMemoryClient({
+      sources: [{ id: "memmy-memory", label: "memmy", dbPath }],
+      now: () => NOW
+    });
+
+    const list = await client.panelItems({ layer: "L1", page: 1 });
+    expect(list.items[0]?.tags).toEqual(["omp", "trace"]);
+    expect(list.items[0]?.metadata?.source).toBe("omp");
+    await expect(client.panelItems({ layer: "L1", sourceAgent: "omp", page: 1 }))
+      .resolves.toMatchObject({ total: 1, items: [{ id: expect.stringContaining("trace_omp_1") }] });
+    await expect(client.panelItems({ layer: "L1", sourceAgent: "codex", page: 1 }))
+      .resolves.toMatchObject({ total: 0, items: [] });
   });
 
   it("filters custom L1 panel item sources as other", async () => {
@@ -461,7 +523,8 @@ describe("createMemosSqliteMemoryClient", () => {
       memoryValue: "Delete this exact SQLite memory.",
       tagsJson: JSON.stringify(["trace", "codex", "delete-me"]),
       infoJson: JSON.stringify({ source: "codex" }),
-      propertiesJson: JSON.stringify({ internal_info: { source: "codex", memory_kind: "trace" } })
+      propertiesJson: JSON.stringify({ internal_info: { source: "codex", memory_kind: "trace" } }),
+      withVector: true
     });
     const client = createMemosSqliteMemoryClient({
       sources: [{ id: "memmy-memory", label: "memmy", dbPath }],
@@ -519,6 +582,18 @@ describe("createMemosSqliteMemoryClient", () => {
   });
 });
 
+function projectMutation(namespace: { source: string; profileId: string; userId: string; projectId: string }) {
+  return { namespace, source: "codex", adapterId: "adapter-4", requestId: "req-4", provenance: { sourceAgent: "codex", sourceMemoryIds: [], capturedAt: NOW } };
+}
+
+function projectGoalRecord() {
+  return { id: "goal-1", namespaceId: "ns-1", userId: "user-4", projectId: "project-4", title: "Task 4", summary: "", detail: "", acceptanceCriteria: [], constraints: [], status: "candidate" as const, version: 0, sourceMemoryIds: [], provenance: {}, createdAt: NOW, updatedAt: NOW };
+}
+
+function projectWorkItemRecord() {
+  return { id: "work-1", namespaceId: "ns-1", userId: "user-4", projectId: "project-4", title: "Tests", summary: "", nextStep: "Fix", acceptanceCriteria: [], constraints: [], status: "pending" as const, focused: false, sourceMemoryIds: [], provenance: {}, createdAt: NOW, updatedAt: NOW };
+}
+
 function createMemoryDatabase(row: {
   id: string;
   sessionId: string | null;
@@ -536,11 +611,14 @@ function createMemoryDatabase(row: {
     id: string;
     toolCalls: Array<Record<string, unknown>>;
   };
+  withVector?: boolean;
 }): string {
   tempDir = mkdtempSync(join(tmpdir(), "memmy-sqlite-client-"));
   const dbPath = join(tempDir, "memory.sqlite");
-  const db = new DatabaseSync(dbPath, { allowExtension: true });
-  db.loadExtension(getSqliteVecLoadablePath());
+  const db = new DatabaseSync(dbPath, { allowExtension: row.withVector === true });
+  if (row.withVector) {
+    db.loadExtension(getSqliteVecLoadablePath());
+  }
   db.exec(`
     CREATE TABLE memories (
       id TEXT PRIMARY KEY,
@@ -596,26 +674,28 @@ function createMemoryDatabase(row: {
     NOW,
     null
   );
-  db.exec(`
-    CREATE TABLE memory_vector_entries (
-      id INTEGER PRIMARY KEY,
-      memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
-      vector_field TEXT NOT NULL,
-      embedding_model TEXT,
-      embedding_provider TEXT,
-      embedding_dim INTEGER NOT NULL,
-      updated_at TEXT NOT NULL,
-      UNIQUE (memory_id, vector_field)
-    );
-    CREATE VIRTUAL TABLE memory_vec_3 USING vec0(embedding float[3] distance_metric=cosine);
-  `);
-  db.prepare(`
-    INSERT INTO memory_vector_entries (
-      id, memory_id, vector_field, embedding_model, embedding_provider, embedding_dim, updated_at
-    ) VALUES (1, ?, 'vec_summary', 'test', 'openai_compatible', 3, ?)
-  `).run(row.id, NOW);
-  db.prepare(`INSERT INTO memory_vec_3 (rowid, embedding) VALUES (?, ?)`)
-    .run(1n, Buffer.from(new Float32Array([1, 0, 0]).buffer));
+  if (row.withVector) {
+    db.exec(`
+      CREATE TABLE memory_vector_entries (
+        id INTEGER PRIMARY KEY,
+        memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+        vector_field TEXT NOT NULL,
+        embedding_model TEXT,
+        embedding_provider TEXT,
+        embedding_dim INTEGER NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (memory_id, vector_field)
+      );
+      CREATE VIRTUAL TABLE memory_vec_3 USING vec0(embedding float[3] distance_metric=cosine);
+    `);
+    db.prepare(`
+      INSERT INTO memory_vector_entries (
+        id, memory_id, vector_field, embedding_model, embedding_provider, embedding_dim, updated_at
+      ) VALUES (1, ?, 'vec_summary', 'test', 'openai_compatible', 3, ?)
+    `).run(row.id, NOW);
+    db.prepare(`INSERT INTO memory_vec_3 (rowid, embedding) VALUES (?, ?)`)
+      .run(1n, Buffer.from(new Float32Array([1, 0, 0]).buffer));
+  }
   if (row.rawTurn) {
     db.exec(`
       CREATE TABLE raw_turns (

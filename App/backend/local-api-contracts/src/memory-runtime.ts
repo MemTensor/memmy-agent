@@ -333,7 +333,7 @@ export type StartTurnOutput = z.infer<typeof StartTurnOutputSchema>;
 
 /** Definition for complete turn input. */
 export const CompleteTurnInputSchema = RuntimeRequestFieldsSchema.extend({
-  sessionId: NonEmptyStringSchema,
+  contextPacketId: NonEmptyStringSchema.optional(),
   episodeId: NonEmptyStringSchema.optional(),
   query: NonEmptyStringSchema,
   answer: NonEmptyStringSchema,
@@ -750,9 +750,172 @@ export const ProjectContextPackOutputSchema = z.object({
     }))
   }),
   markdown: z.string(),
+  authoritative: z.object({
+    state: z.lazy(() => ProjectContextStateSchema),
+    stable: z.lazy(() => ProjectContextStableStateSchema)
+  }).optional(),
   generatedAt: IsoTimeSchema
 });
 export type ProjectContextPackOutput = z.infer<typeof ProjectContextPackOutputSchema>;
+/** Schema for a runtime namespace used by project context operations. */
+export const RuntimeNamespaceSchema = z.object({
+  source: NonEmptyStringSchema,
+  profileId: NonEmptyStringSchema,
+  profileLabel: NonEmptyStringSchema.optional(),
+  projectId: NonEmptyStringSchema.optional(),
+  workspaceId: NonEmptyStringSchema.optional(),
+  workspacePath: NonEmptyStringSchema.optional(),
+  sessionKey: NonEmptyStringSchema.optional(),
+  userId: NonEmptyStringSchema.optional(),
+  tenantId: NonEmptyStringSchema.optional()
+}).strict();
+export type RuntimeNamespace = z.infer<typeof RuntimeNamespaceSchema>;
+
+/** Schema for project-context mutation provenance. */
+export const ProjectContextProvenanceSchema = z.object({
+  sourceAgent: NonEmptyStringSchema,
+  sourceMemoryIds: z.array(NonEmptyStringSchema),
+  capturedAt: IsoTimeSchema,
+  tenantId: NonEmptyStringSchema.optional(),
+  profileId: NonEmptyStringSchema.optional(),
+  projectId: NonEmptyStringSchema.optional(),
+  workspaceId: NonEmptyStringSchema.optional(),
+  workspacePath: NonEmptyStringSchema.optional(),
+  sessionId: NonEmptyStringSchema.optional(),
+  turnId: NonEmptyStringSchema.optional(),
+  adapterId: NonEmptyStringSchema.optional(),
+  requestId: NonEmptyStringSchema.optional(),
+  repository: NonEmptyStringSchema.optional(),
+  branch: NonEmptyStringSchema.optional(),
+  commit: NonEmptyStringSchema.optional()
+}).strict();
+export type ProjectContextProvenance = z.infer<typeof ProjectContextProvenanceSchema>;
+
+const ProjectContextMutationFieldsSchema = z.object({
+  namespace: RuntimeNamespaceSchema,
+  source: NonEmptyStringSchema,
+  adapterId: NonEmptyStringSchema,
+  requestId: NonEmptyStringSchema,
+  provenance: ProjectContextProvenanceSchema
+}).strict();
+
+const ProjectGoalSchema = z.object({
+  id: NonEmptyStringSchema,
+  namespaceId: NonEmptyStringSchema,
+  userId: NonEmptyStringSchema,
+  projectId: NonEmptyStringSchema.optional(),
+  workspaceId: NonEmptyStringSchema.optional(),
+  workspacePath: NonEmptyStringSchema.optional(),
+  title: NonEmptyStringSchema,
+  summary: z.string(),
+  detail: z.string(),
+  acceptanceCriteria: z.array(z.string()),
+  constraints: z.array(z.string()),
+  status: z.enum(["candidate", "active", "completed", "archived"]),
+  version: z.number().int().nonnegative(),
+  supersedesId: NonEmptyStringSchema.optional(),
+  sourceMemoryIds: z.array(NonEmptyStringSchema),
+  provenance: z.record(z.string(), z.unknown()),
+  createdAt: IsoTimeSchema,
+  updatedAt: IsoTimeSchema
+}).strict();
+export const ProjectGoalRecordSchema = ProjectGoalSchema;
+export type ProjectGoalRecord = z.infer<typeof ProjectGoalRecordSchema>;
+
+const ProjectWorkItemSchema = z.object({
+  id: NonEmptyStringSchema,
+  namespaceId: NonEmptyStringSchema,
+  userId: NonEmptyStringSchema,
+  projectId: NonEmptyStringSchema.optional(),
+  workspaceId: NonEmptyStringSchema.optional(),
+  workspacePath: NonEmptyStringSchema.optional(),
+  goalId: NonEmptyStringSchema.optional(),
+  title: NonEmptyStringSchema,
+  summary: z.string(),
+  nextStep: z.string(),
+  acceptanceCriteria: z.array(z.string()),
+  constraints: z.array(z.string()),
+  status: z.enum(["pending", "active", "blocked", "completed", "archived"]),
+  focused: z.boolean(),
+  sourceMemoryIds: z.array(NonEmptyStringSchema),
+  provenance: z.record(z.string(), z.unknown()),
+  createdAt: IsoTimeSchema,
+  updatedAt: IsoTimeSchema
+}).strict();
+export const ProjectWorkItemRecordSchema = ProjectWorkItemSchema;
+export type ProjectWorkItemRecord = z.infer<typeof ProjectWorkItemRecordSchema>;
+
+export const ProjectFactRecordSchema = z.object({
+  id: NonEmptyStringSchema,
+  namespaceId: NonEmptyStringSchema,
+  userId: NonEmptyStringSchema,
+  projectId: NonEmptyStringSchema.optional(),
+  workspaceId: NonEmptyStringSchema.optional(),
+  workspacePath: NonEmptyStringSchema.optional(),
+  kind: z.enum(["decision", "constraint"]),
+  content: NonEmptyStringSchema,
+  status: z.enum(["candidate", "active", "superseded", "archived"]),
+  supersedesId: NonEmptyStringSchema.optional(),
+  sourceMemoryIds: z.array(NonEmptyStringSchema),
+  provenance: z.record(z.string(), z.unknown()),
+  createdAt: IsoTimeSchema,
+  updatedAt: IsoTimeSchema
+}).strict();
+export type ProjectFactRecord = z.infer<typeof ProjectFactRecordSchema>;
+
+export const ProjectContextStateSchema = z.object({
+  namespaceId: NonEmptyStringSchema,
+  activeGoal: ProjectGoalRecordSchema.nullable(),
+  goals: z.array(ProjectGoalRecordSchema),
+  workItems: z.array(ProjectWorkItemRecordSchema),
+  focusedWorkItem: ProjectWorkItemRecordSchema.nullable(),
+  facts: z.array(ProjectFactRecordSchema)
+}).strict();
+export type ProjectContextState = z.infer<typeof ProjectContextStateSchema>;
+
+export const ProjectContextStableStateSchema = z.object({
+  namespaceId: NonEmptyStringSchema,
+  status: z.enum(["ready", "no_confirmed_goal", "conflict"]),
+  version: z.number().int().nonnegative(),
+  goal: ProjectGoalRecordSchema.nullable(),
+  focusedWorkItem: ProjectWorkItemRecordSchema.nullable(),
+  facts: z.array(ProjectFactRecordSchema),
+  markdown: z.string(),
+  sourceMemoryIds: z.array(NonEmptyStringSchema),
+  generatedAt: IsoTimeSchema
+}).strict();
+export type ProjectContextStableState = z.infer<typeof ProjectContextStableStateSchema>;
+
+export const ProjectContextReadStateSchema = ProjectContextStateSchema;
+export type ProjectContextReadState = z.infer<typeof ProjectContextReadStateSchema>;
+export const ProjectContextProposeGoalInputSchema = ProjectContextMutationFieldsSchema.extend({
+  title: NonEmptyStringSchema,
+  summary: z.string(),
+  detail: z.string(),
+  acceptanceCriteria: z.array(z.string()).optional(),
+  constraints: z.array(z.string()).optional(),
+  sourceMemoryIds: z.array(NonEmptyStringSchema).optional()
+}).strict();
+export type ProjectContextProposeGoalInput = z.infer<typeof ProjectContextProposeGoalInputSchema>;
+export const ProjectContextGoalDecisionInputSchema = ProjectContextMutationFieldsSchema.strict();
+export type ProjectContextGoalDecisionInput = z.infer<typeof ProjectContextGoalDecisionInputSchema>;
+export const ProjectContextWorkItemCreateInputSchema = ProjectContextMutationFieldsSchema.extend({
+  goalId: NonEmptyStringSchema.optional(),
+  title: NonEmptyStringSchema,
+  summary: z.string(),
+  nextStep: z.string(),
+  acceptanceCriteria: z.array(z.string()).optional(),
+  constraints: z.array(z.string()).optional(),
+  status: z.enum(["pending", "active", "blocked", "completed", "archived"]).optional(),
+  sourceMemoryIds: z.array(NonEmptyStringSchema).optional()
+}).strict();
+export type ProjectContextWorkItemCreateInput = z.infer<typeof ProjectContextWorkItemCreateInputSchema>;
+export const ProjectContextWorkItemUpdateInputSchema = ProjectContextMutationFieldsSchema.extend({
+  goalId: NonEmptyStringSchema.nullable().optional(), title: NonEmptyStringSchema.nullable().optional(), summary: z.string().nullable().optional(), nextStep: z.string().nullable().optional(), acceptanceCriteria: z.array(z.string()).nullable().optional(), constraints: z.array(z.string()).nullable().optional(), status: z.enum(["pending", "active", "blocked", "completed", "archived"]).nullable().optional(), sourceMemoryIds: z.array(NonEmptyStringSchema).nullable().optional()
+}).strict();
+export type ProjectContextWorkItemUpdateInput = z.infer<typeof ProjectContextWorkItemUpdateInputSchema>;
+export const ProjectContextFocusInputSchema = ProjectContextMutationFieldsSchema.extend({ workItemId: NonEmptyStringSchema.nullable() }).strict();
+export type ProjectContextFocusInput = z.infer<typeof ProjectContextFocusInputSchema>;
 
 /** Schema for panel items output. */
 export const PanelItemsOutputSchema = z.object({

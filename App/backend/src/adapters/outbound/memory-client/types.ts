@@ -23,6 +23,15 @@ import type {
   PanelItemsOutput,
   PanelOverviewOutput,
   ProjectContextPackOutput,
+  ProjectContextFocusInput,
+  ProjectContextGoalDecisionInput,
+  ProjectContextProposeGoalInput,
+  ProjectContextReadState,
+  ProjectContextWorkItemCreateInput,
+  ProjectContextWorkItemUpdateInput,
+  ProjectGoalRecord,
+  ProjectWorkItemRecord,
+  RuntimeNamespace,
   PanelTasksInput,
   PanelTasksOutput,
   OpenSessionInput,
@@ -68,6 +77,13 @@ export interface MemoryClient {
   panelOverview(): Promise<PanelOverviewOutput>;
   panelAnalysis(): Promise<PanelAnalysisOutput>;
   projectContextPack(projectId: string): Promise<ProjectContextPackOutput>;
+  projectContextState(namespace: RuntimeNamespace): Promise<ProjectContextReadState>;
+  proposeProjectGoal(input: ProjectContextProposeGoalInput): Promise<ProjectGoalRecord>;
+  approveProjectGoal(goalId: string, input: ProjectContextGoalDecisionInput): Promise<ProjectGoalRecord>;
+  rejectProjectGoal(goalId: string, input: ProjectContextGoalDecisionInput): Promise<ProjectGoalRecord>;
+  createProjectWorkItem(input: ProjectContextWorkItemCreateInput): Promise<ProjectWorkItemRecord>;
+  updateProjectWorkItem(workItemId: string, input: ProjectContextWorkItemUpdateInput): Promise<ProjectWorkItemRecord>;
+  setProjectFocus(input: ProjectContextFocusInput): Promise<ProjectWorkItemRecord | null>;
   panelItems(input: PanelItemsInput): Promise<PanelItemsOutput>;
   panelTasks(input: PanelTasksInput): Promise<PanelTasksOutput>;
   deletePanelTask(taskId: string): Promise<DeletePanelTaskOutput>;

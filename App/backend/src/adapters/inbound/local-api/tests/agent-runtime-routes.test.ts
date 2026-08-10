@@ -36,6 +36,13 @@ describe("agent runtime local api routes", () => {
       { method: "GET", url: "/api/v1/panel/overview" },
       { method: "GET", url: "/api/v1/panel/analysis" },
       { method: "GET", url: "/api/v1/panel/context-pack?projectId=project-1" },
+      { method: "GET", url: `/api/v1/project-context/state?namespace=${encodeURIComponent(JSON.stringify(projectNamespace()))}` },
+      { method: "POST", url: "/api/v1/project-context/goals/propose", payload: { ...projectMutation(), title: "Ship context", summary: "", detail: "" } },
+      { method: "POST", url: "/api/v1/project-context/goals/goal-1/approve", payload: projectMutation() },
+      { method: "POST", url: "/api/v1/project-context/goals/goal-1/reject", payload: projectMutation() },
+      { method: "POST", url: "/api/v1/project-context/work-items", payload: { ...projectMutation(), title: "Verify context", summary: "", nextStep: "Run smoke" } },
+      { method: "PATCH", url: "/api/v1/project-context/work-items/work-1", payload: { ...projectMutation(), status: "active" } },
+      { method: "PUT", url: "/api/v1/project-context/focus", payload: { ...projectMutation(), workItemId: "work-1" } },
       { method: "GET", url: "/api/v1/panel/items?layer=L1&status=activated&page=1" },
       { method: "GET", url: "/api/v1/panel/tasks?page=1" },
       { method: "DELETE", url: "/api/v1/panel/tasks/episode-1" }
@@ -49,7 +56,7 @@ describe("agent runtime local api routes", () => {
         payload: request.payload
       });
 
-      expect(response.statusCode, `${request.method} ${request.url}`).toBe(200);
+      expect(response.statusCode, `${request.method} ${request.url}: ${response.body}`).toBe(200);
     }
   });
 
@@ -215,6 +222,24 @@ describe("agent runtime local api routes", () => {
     });
   });
 
+  it("returns invalid_argument for malformed project namespace JSON", async () => {
+    app = createServer();
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/v1/project-context/state?namespace=%7Bbroken",
+      headers: { "x-memmy-local-token": "test-token", "x-request-id": "req-namespace" }
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({
+      error: {
+        code: "invalid_argument",
+        requestId: "req-namespace"
+      }
+    });
+  });
+
   it("unwraps duplicate service responses", async () => {
     app = createServer({
       turn: {
@@ -263,6 +288,64 @@ describe("agent runtime local api routes", () => {
         requestId: "req-7"
       }
     });
+  });
+
+  it("forwards project context governance through the authenticated local API", async () => {
+    const calls: Array<{ operation: string; id?: string; input: unknown; context?: unknown }> = [];
+    app = createServer({
+      panel: {
+        async projectContextState(input: unknown, context: unknown) {
+          calls.push({ operation: "state", input, context });
+          return projectContextStateOutput();
+        },
+        async proposeProjectGoal(input: unknown, context: unknown) {
+          calls.push({ operation: "propose", input, context });
+          return projectGoalOutput("candidate");
+        },
+        async approveProjectGoal(id: string, input: unknown, context: unknown) {
+          calls.push({ operation: "approve", id, input, context });
+          return projectGoalOutput("active");
+        },
+        async rejectProjectGoal(id: string, input: unknown, context: unknown) {
+          calls.push({ operation: "reject", id, input, context });
+          return projectGoalOutput("archived");
+        },
+        async createProjectWorkItem(input: unknown, context: unknown) {
+          calls.push({ operation: "create-work", input, context });
+          return projectWorkItemOutput();
+        },
+        async updateProjectWorkItem(id: string, input: unknown, context: unknown) {
+          calls.push({ operation: "update-work", id, input, context });
+          return projectWorkItemOutput();
+        },
+        async setProjectFocus(input: unknown, context: unknown) {
+          calls.push({ operation: "focus", input, context });
+          return projectWorkItemOutput();
+        }
+      }
+    });
+    const headers = { "x-memmy-local-token": "test-token", "x-request-id": "route-request" };
+    const requests = [
+      { method: "GET", url: `/api/v1/project-context/state?namespace=${encodeURIComponent(JSON.stringify(projectNamespace()))}` },
+      { method: "POST", url: "/api/v1/project-context/goals/propose", payload: { ...projectMutation(), title: "Ship context", summary: "", detail: "" } },
+      { method: "POST", url: "/api/v1/project-context/goals/goal-1/approve", payload: projectMutation() },
+      { method: "POST", url: "/api/v1/project-context/goals/goal-1/reject", payload: projectMutation() },
+      { method: "POST", url: "/api/v1/project-context/work-items", payload: { ...projectMutation(), title: "Verify context", summary: "", nextStep: "Run smoke" } },
+      { method: "PATCH", url: "/api/v1/project-context/work-items/work-1", payload: { ...projectMutation(), status: "active" } },
+      { method: "PUT", url: "/api/v1/project-context/focus", payload: { ...projectMutation(), workItemId: "work-1" } }
+    ];
+
+    for (const request of requests) {
+      const response = await app.inject({ ...request, headers });
+      expect(response.statusCode, `${request.method} ${request.url}: ${response.body}`).toBe(200);
+    }
+
+    expect(calls.map(({ operation, id }) => id ? `${operation}:${id}` : operation)).toEqual([
+      "state", "propose", "approve:goal-1", "reject:goal-1", "create-work", "update-work:work-1", "focus"
+    ]);
+    expect(calls[0]?.input).toEqual(projectNamespace());
+    expect(hasRuntimeProvenance(calls[0]?.context, "runtime", "route-request")).toBe(true);
+    expect(calls.slice(1).every(({ context }) => hasRuntimeProvenance(context, "runtime", "client-request"))).toBe(true);
   });
 });
 
@@ -374,7 +457,14 @@ function createServer(overrides: Record<string, unknown> = {}): FastifyInstance 
       async items() { return panelItemsOutput(); },
       async tasks() { return panelTasksOutput(); },
       async deleteTask(id: string) { return { ok: true as const, id, deletedMemoryIds: [], serverTime: now() }; },
-      async memoryApiLogs() { return { logs: [], total: 0, limit: 20, offset: 0, serverTime: now() }; }
+      async memoryApiLogs() { return { logs: [], total: 0, limit: 20, offset: 0, serverTime: now() }; },
+      async projectContextState() { return projectContextStateOutput(); },
+      async proposeProjectGoal() { return projectGoalOutput("candidate"); },
+      async approveProjectGoal() { return projectGoalOutput("active"); },
+      async rejectProjectGoal() { return projectGoalOutput("archived"); },
+      async createProjectWorkItem() { return projectWorkItemOutput(); },
+      async updateProjectWorkItem() { return projectWorkItemOutput(); },
+      async setProjectFocus() { return projectWorkItemOutput(); },
     },
     ...overrides
   } as unknown as BackendServices;
@@ -384,6 +474,48 @@ function createServer(overrides: Record<string, unknown> = {}): FastifyInstance 
     services,
     heartbeatIntervalMs: 20
   });
+}
+
+function projectNamespace() {
+  return { source: "codex", profileId: "default", userId: "user-1", projectId: "project-1" };
+}
+
+function projectMutation() {
+  return {
+    namespace: projectNamespace(),
+    source: "desktop",
+    adapterId: "desktop-client",
+    requestId: "client-request",
+    provenance: { sourceAgent: "desktop", sourceMemoryIds: [], capturedAt: now() }
+  };
+}
+
+function hasRuntimeProvenance(input: unknown, adapterId: string, requestId: string): boolean {
+  if (!input || typeof input !== "object") return false;
+  if (!("adapterId" in input) || !("requestId" in input)) return false;
+  return input.adapterId === adapterId && input.requestId === requestId;
+}
+
+function projectGoalOutput(status: "candidate" | "active" | "archived") {
+  return {
+    id: "goal-1", namespaceId: "local:project-1", userId: "user-1", projectId: "project-1",
+    title: "Ship context", summary: "", detail: "", acceptanceCriteria: [], constraints: [], status,
+    version: 1, sourceMemoryIds: [], provenance: {}, createdAt: now(), updatedAt: now()
+  };
+}
+
+function projectWorkItemOutput() {
+  return {
+    id: "work-1", namespaceId: "local:project-1", userId: "user-1", projectId: "project-1", goalId: "goal-1",
+    title: "Verify context", summary: "", nextStep: "Run smoke", acceptanceCriteria: [], constraints: [],
+    status: "active" as const, focused: true, sourceMemoryIds: [], provenance: {}, createdAt: now(), updatedAt: now()
+  };
+}
+
+function projectContextStateOutput() {
+  const goal = projectGoalOutput("active");
+  const workItem = projectWorkItemOutput();
+  return { namespaceId: "local:project-1", activeGoal: goal, goals: [goal], workItems: [workItem], focusedWorkItem: workItem, facts: [] };
 }
 
 function memoryModels() {

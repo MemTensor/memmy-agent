@@ -4,6 +4,7 @@ export {
   createMemosSqliteMemoryClient,
   discoverMemosSqliteSources,
   type CreateMemosSqliteMemoryClientOptions,
+  type EmbeddedProjectContextService,
   type MemosSqliteSource
 } from "./memos-sqlite-memory-client.js";
 export { MemoryLayerError, MemoryLayerNetworkError } from "./errors.js";

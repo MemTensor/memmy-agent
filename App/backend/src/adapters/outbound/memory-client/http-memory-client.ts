@@ -17,6 +17,9 @@ import {
   PanelItemsOutputSchema,
   PanelOverviewOutputSchema,
   ProjectContextPackOutputSchema,
+  ProjectContextReadStateSchema,
+  ProjectGoalRecordSchema,
+  ProjectWorkItemRecordSchema,
   PanelTasksOutputSchema,
   OpenSessionOutputSchema,
   SearchOutputSchema,
@@ -57,7 +60,7 @@ export function createHttpMemoryClient(
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
 
   async function request<Output>(
-    method: "GET" | "POST" | "DELETE",
+    method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
     pathKey: PathKey,
     responseSchema: ZodType<Output>,
     requestOptions: {
@@ -230,6 +233,35 @@ export function createHttpMemoryClient(
       return request("GET", "projectContextPack", ProjectContextPackOutputSchema, {
         headers: { "x-memmy-project-id": projectId }
       });
+    },
+    async projectContextState(namespace) {
+      return request("GET", "projectContextState", ProjectContextReadStateSchema, {
+        query: { namespace: JSON.stringify(namespace) }
+      });
+    },
+
+    async proposeProjectGoal(input) {
+      return request("POST", "proposeProjectGoal", ProjectGoalRecordSchema, { body: input });
+    },
+
+    async approveProjectGoal(goalId, input) {
+      return request("POST", "approveProjectGoal", ProjectGoalRecordSchema, { params: { id: goalId }, body: input });
+    },
+
+    async rejectProjectGoal(goalId, input) {
+      return request("POST", "rejectProjectGoal", ProjectGoalRecordSchema, { params: { id: goalId }, body: input });
+    },
+
+    async createProjectWorkItem(input) {
+      return request("POST", "createProjectWorkItem", ProjectWorkItemRecordSchema, { body: input });
+    },
+
+    async updateProjectWorkItem(workItemId, input) {
+      return request("PATCH", "updateProjectWorkItem", ProjectWorkItemRecordSchema, { params: { id: workItemId }, body: input });
+    },
+
+    async setProjectFocus(input) {
+      return request("PUT", "setProjectFocus", ProjectWorkItemRecordSchema.nullable(), { body: input });
     },
 
     async panelItems(input) {

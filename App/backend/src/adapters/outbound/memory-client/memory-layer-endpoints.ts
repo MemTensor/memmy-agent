@@ -21,6 +21,13 @@ export const MEMORY_LAYER_PATHS = Object.freeze({
   panelOverview: "/api/v1/panel/overview",
   panelAnalysis: "/api/v1/panel/analysis",
   projectContextPack: "/api/v1/panel/context-pack",
+  projectContextState: "/api/v1/project-context/state",
+  proposeProjectGoal: "/api/v1/project-context/goals/propose",
+  approveProjectGoal: "/api/v1/project-context/goals/:id/approve",
+  rejectProjectGoal: "/api/v1/project-context/goals/:id/reject",
+  createProjectWorkItem: "/api/v1/project-context/work-items",
+  updateProjectWorkItem: "/api/v1/project-context/work-items/:id",
+  setProjectFocus: "/api/v1/project-context/focus",
   panelItems: "/api/v1/panel/items",
   panelTasks: "/api/v1/panel/tasks",
   deletePanelTask: "/api/v1/panel/tasks/:id"

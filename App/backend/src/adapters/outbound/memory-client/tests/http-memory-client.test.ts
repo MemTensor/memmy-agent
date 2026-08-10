@@ -34,6 +34,13 @@ describe("HttpMemoryClient", () => {
       "/api/v1/panel/overview",
       "/api/v1/panel/analysis",
       "/api/v1/panel/context-pack",
+      "/api/v1/project-context/state",
+      "/api/v1/project-context/goals/propose",
+      "/api/v1/project-context/goals/:id/approve",
+      "/api/v1/project-context/goals/:id/reject",
+      "/api/v1/project-context/work-items",
+      "/api/v1/project-context/work-items/:id",
+      "/api/v1/project-context/focus",
       "/api/v1/panel/items",
       "/api/v1/panel/tasks",
       "/api/v1/panel/tasks/:id"
@@ -143,6 +150,42 @@ describe("HttpMemoryClient", () => {
       content: "remember this",
       source: "codex"
     });
+  });
+  it("uses the exact methods, paths, bodies, query, and response schemas for project context", async () => {
+    const requests: Array<{ method: string; url: URL; body: unknown }> = [];
+    const baseUrl = await startServer(async (request, response) => {
+      const body = await readJson(request);
+      const url = new URL(request.url ?? "/", "http://localhost");
+      requests.push({ method: request.method ?? "", url, body });
+      if (url.pathname.endsWith("/state")) return sendJson(response, projectContextStateOutput());
+      if (url.pathname.endsWith("/focus")) return sendJson(response, body && (body as { workItemId?: unknown }).workItemId === null ? null : projectWorkItemOutput());
+      if (url.pathname.includes("work-items")) return sendJson(response, projectWorkItemOutput());
+      return sendJson(response, projectGoalOutput(url.pathname.endsWith("/reject") ? "archived" : url.pathname.endsWith("/approve") ? "active" : "candidate"));
+    });
+    const client = createHttpMemoryClient({ baseUrl, token: "memory-token", timeoutMs: 500, maxRetries: 0 });
+    const namespace = projectNamespace();
+    const mutation = projectMutation();
+    await client.projectContextState(namespace);
+    await client.proposeProjectGoal({ ...mutation, title: "Task 4", summary: "", detail: "" });
+    await client.approveProjectGoal("goal 1", mutation);
+    await client.rejectProjectGoal("goal 1", { ...mutation, requestId: "req-reject" });
+    await client.createProjectWorkItem({ ...mutation, title: "Tests", summary: "", nextStep: "Fix" });
+    await client.updateProjectWorkItem("work 1", { ...mutation, status: "active" });
+    await expect(client.setProjectFocus({ ...mutation, workItemId: null })).resolves.toBeNull();
+    expect(requests.map(({ method, url }) => `${method} ${url.pathname}`)).toEqual([
+      "GET /api/v1/project-context/state", "POST /api/v1/project-context/goals/propose", "POST /api/v1/project-context/goals/goal%201/approve",
+      "POST /api/v1/project-context/goals/goal%201/reject", "POST /api/v1/project-context/work-items", "PATCH /api/v1/project-context/work-items/work%201", "PUT /api/v1/project-context/focus"
+    ]);
+    expect(JSON.parse(requests[0]!.url.searchParams.get("namespace")!)).toEqual(namespace);
+    expect(requests.slice(1).map(({ body }) => body)).toEqual([
+      { ...mutation, title: "Task 4", summary: "", detail: "" }, mutation, { ...mutation, requestId: "req-reject" },
+      { ...mutation, title: "Tests", summary: "", nextStep: "Fix" }, { ...mutation, status: "active" }, { ...mutation, workItemId: null }
+    ]);
+  });
+  it("rejects schema-invalid project-context responses", async () => {
+    const baseUrl = await startServer(async (_request, response) => sendJson(response, { id: "missing-fields" }));
+    const client = createHttpMemoryClient({ baseUrl, token: "", timeoutMs: 500, maxRetries: 0 });
+    await expect(client.proposeProjectGoal({ ...projectMutation(), title: "Task 4", summary: "", detail: "" })).rejects.toThrow();
   });
 
   it("forwards memory log Agent filters to the Memory service", async () => {
@@ -600,15 +643,27 @@ function now() {
 }
 
 function panelDays() {
-  return [
-    "2026-05-23",
-    "2026-05-24",
-    "2026-05-25",
-    "2026-05-26",
-    "2026-05-27",
-    "2026-05-28",
-    "2026-05-29"
-  ].map((date) => ({ date, count: 0 }));
+  return ["2026-05-23", "2026-05-24", "2026-05-25", "2026-05-26", "2026-05-27", "2026-05-28", "2026-05-29"].map((date) => ({ date, count: 0 }));
+}
+
+function projectNamespace() {
+  return { source: "codex", profileId: "default", userId: "user-4", projectId: "project-4" };
+}
+
+function projectMutation() {
+  return { namespace: projectNamespace(), source: "codex", adapterId: "adapter-4", requestId: "req-4", provenance: { sourceAgent: "codex", sourceMemoryIds: [], capturedAt: now(), adapterId: "adapter-4", requestId: "req-4" } };
+}
+
+function projectGoalOutput(status: "candidate" | "active" | "archived") {
+  return { id: "goal-1", namespaceId: "ns-1", userId: "user-4", projectId: "project-4", title: "Task 4", summary: "", detail: "", acceptanceCriteria: [], constraints: [], status, version: status === "active" ? 1 : 0, sourceMemoryIds: [], provenance: {}, createdAt: now(), updatedAt: now() };
+}
+
+function projectWorkItemOutput() {
+  return { id: "work-1", namespaceId: "ns-1", userId: "user-4", projectId: "project-4", title: "Tests", summary: "", nextStep: "Fix", acceptanceCriteria: [], constraints: [], status: "active", focused: true, sourceMemoryIds: [], provenance: {}, createdAt: now(), updatedAt: now() };
+}
+
+function projectContextStateOutput() {
+  return { namespaceId: "ns-1", activeGoal: null, goals: [], workItems: [], focusedWorkItem: null, facts: [] };
 }
 
 function openSessionInput() {
