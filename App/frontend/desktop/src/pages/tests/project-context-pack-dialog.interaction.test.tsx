@@ -3,7 +3,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { GetMemoryOutput, MemoryListItem, ProjectContextPackOutput } from "@memmy/local-api-contracts";
+import type { GetMemoryOutput, MemoryListItem, ProjectContextPackOutput, ProjectContextReadState, ProjectGoalRecord } from "@memmy/local-api-contracts";
 import type { MemoryRuntimeClient } from "../../api/memory-runtime-client.js";
 import type { MessageKey } from "../../i18n/messages.js";
 import { ProjectContextPackDialog } from "../project-context-pack-dialog.js";
@@ -188,6 +188,31 @@ describe("ProjectContextPackDialog", () => {
     expect(document.body.textContent).toContain("home.contextPack.history.success");
     expect(document.body.textContent).toContain("v1");
   });
+  it("loads governance state and approves a candidate goal", async () => {
+    const getProjectContextPack = vi.fn(async () => contextPack());
+    const getProjectContextState = vi.fn(async () => contextState());
+    const approveProjectGoal = vi.fn(async () => goalRecord("active"));
+
+    await act(async () => {
+      root.render(<ProjectContextPackDialog open projectId="project-1" projectName="Memmy Agent" client={dialogClient({ getProjectContextPack, getProjectContextState, approveProjectGoal })} t={translate} onClose={() => undefined} />);
+    });
+
+    expect(getProjectContextState).toHaveBeenCalledWith(expect.objectContaining({ projectId: "project-1" }));
+    expect(document.body.textContent).toContain("home.contextPack.governance.approve");
+    await act(async () => buttonContaining("home.contextPack.governance.approve").click());
+    expect(approveProjectGoal).toHaveBeenCalledWith("goal-1", expect.objectContaining({ namespace: expect.objectContaining({ projectId: "project-1" }) }));
+    expect(getProjectContextPack).toHaveBeenCalledTimes(2);
+  });
+
+  it("sets and clears the focused work item through governance controls", async () => {
+    const getProjectContextState = vi.fn(async () => contextState());
+    const setProjectFocus = vi.fn(async () => null);
+    await act(async () => {
+      root.render(<ProjectContextPackDialog open projectId="project-1" projectName="Memmy Agent" client={dialogClient({ getProjectContextPack: vi.fn(async () => contextPack()), getProjectContextState, setProjectFocus })} t={translate} onClose={() => undefined} />);
+    });
+    await act(async () => buttonContaining("home.contextPack.governance.setFocus").click());
+    expect(setProjectFocus).toHaveBeenCalledWith(expect.objectContaining({ workItemId: "work-1" }));
+  });
 
   it("shows detail loading and recovers from a failed request", async () => {
     const pending = deferred<GetMemoryOutput>();
@@ -362,8 +387,17 @@ function memoryHistory(id: string) {
   };
 }
 
+function goalRecord(status: ProjectGoalRecord["status"] = "candidate"): ProjectGoalRecord {
+  return { id: "goal-1", namespaceId: "namespace-1", userId: "user-1", projectId: "project-1", title: "Ship authoritative context", summary: "", detail: "", acceptanceCriteria: [], constraints: [], status, version: 1, sourceMemoryIds: ["memory-1"], provenance: {}, createdAt: "2026-08-08T12:00:00.000Z", updatedAt: "2026-08-08T12:00:00.000Z" };
+}
+
+function contextState(): ProjectContextReadState {
+  const workItem = { id: "work-1", namespaceId: "namespace-1", userId: "user-1", projectId: "project-1", goalId: "goal-1", title: "Wire desktop governance", summary: "", nextStep: "Approve and focus", acceptanceCriteria: [], constraints: [], status: "active" as const, focused: false, sourceMemoryIds: ["memory-1"], provenance: {}, createdAt: "2026-08-08T12:00:00.000Z", updatedAt: "2026-08-08T12:00:00.000Z" };
+  return { namespaceId: "namespace-1", activeGoal: null, goals: [goalRecord()], workItems: [workItem], focusedWorkItem: null, facts: [] };
+}
+
 function dialogClient(
-  overrides: Partial<Pick<MemoryRuntimeClient, "getProjectContextPack" | "getMemory" | "getMemoryHistory" | "restoreMemory">> = {}
+  overrides: Partial<Pick<MemoryRuntimeClient, "getProjectContextPack" | "getMemory" | "getMemoryHistory" | "restoreMemory" | "getProjectContextState" | "approveProjectGoal" | "rejectProjectGoal" | "setProjectFocus">> = {}
 ) {
   return {
     getProjectContextPack: async () => contextPack(),
@@ -378,6 +412,10 @@ function dialogClient(
       auditId: "audit-restore",
       serverTime: "2026-08-08T13:00:00.000Z"
     }),
+    getProjectContextState: async () => contextState(),
+    approveProjectGoal: async () => goalRecord("active"),
+    rejectProjectGoal: async () => goalRecord("archived"),
+    setProjectFocus: async () => null,
     ...overrides
   };
 }

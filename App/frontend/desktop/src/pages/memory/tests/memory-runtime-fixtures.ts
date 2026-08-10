@@ -542,6 +542,27 @@ export function createMockMemoryRuntimeClient(): MemoryRuntimeClient {
         generatedAt: now
       };
     },
+    async getProjectContextState() {
+      return { namespaceId: "fixture-namespace", activeGoal: null, goals: [], workItems: [], focusedWorkItem: null, facts: [] };
+    },
+    async proposeProjectGoal(input) {
+      return { id: "fixture-goal", namespaceId: "fixture-namespace", userId: "fixture-user", projectId: input.namespace.projectId, title: input.title, summary: input.summary, detail: input.detail, acceptanceCriteria: input.acceptanceCriteria ?? [], constraints: input.constraints ?? [], status: "candidate" as const, version: 0, sourceMemoryIds: input.sourceMemoryIds ?? [], provenance: input.provenance, createdAt: now, updatedAt: now };
+    },
+    async approveProjectGoal(id, input) {
+      return { id, namespaceId: "fixture-namespace", userId: "fixture-user", projectId: input.namespace.projectId, title: "Fixture goal", summary: "", detail: "", acceptanceCriteria: [], constraints: [], status: "active" as const, version: 1, sourceMemoryIds: [], provenance: input.provenance, createdAt: now, updatedAt: now };
+    },
+    async rejectProjectGoal(id, input) {
+      return { id, namespaceId: "fixture-namespace", userId: "fixture-user", projectId: input.namespace.projectId, title: "Fixture goal", summary: "", detail: "", acceptanceCriteria: [], constraints: [], status: "archived" as const, version: 1, sourceMemoryIds: [], provenance: input.provenance, createdAt: now, updatedAt: now };
+    },
+    async createProjectWorkItem(input) {
+      return { id: "fixture-work", namespaceId: "fixture-namespace", userId: "fixture-user", projectId: input.namespace.projectId, goalId: input.goalId, title: input.title, summary: input.summary, nextStep: input.nextStep, acceptanceCriteria: input.acceptanceCriteria ?? [], constraints: input.constraints ?? [], status: input.status ?? "pending", focused: false, sourceMemoryIds: input.sourceMemoryIds ?? [], provenance: input.provenance, createdAt: now, updatedAt: now };
+    },
+    async updateProjectWorkItem(id, input) {
+      return { id, namespaceId: "fixture-namespace", userId: "fixture-user", projectId: input.namespace.projectId, goalId: input.goalId ?? undefined, title: input.title ?? "Fixture work", summary: input.summary ?? "", nextStep: input.nextStep ?? "", acceptanceCriteria: input.acceptanceCriteria ?? [], constraints: input.constraints ?? [], status: input.status ?? "pending", focused: false, sourceMemoryIds: input.sourceMemoryIds ?? [], provenance: input.provenance, createdAt: now, updatedAt: now };
+    },
+    async setProjectFocus() {
+      return null;
+    },
     async listPanelItems(input): Promise<PanelItemsOutput> {
       return filterMemoryItems(input);
     },

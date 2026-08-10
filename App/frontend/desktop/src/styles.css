@@ -727,6 +727,39 @@ body.memmy-window-fullscreen {
 
 .project-context-pack-dialog__copy { flex-shrink: 0; padding: 6px 9px; }
 
+.project-context-governance {
+  display: grid;
+  gap: 10px;
+  padding: 14px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-border-stone) 45%, transparent);
+}
+
+.project-context-governance__heading { display: flex; align-items: center; gap: 7px; color: var(--color-text-ink); }
+.project-context-governance__heading h3 { margin: 0; font-size: var(--codex-text-sm); font-weight: 700; letter-spacing: 0; }
+.project-context-governance__current { display: grid; grid-template-columns: max-content minmax(0, 1fr) max-content; align-items: center; gap: 5px 10px; }
+.project-context-governance__current span,
+.project-context-governance__row span { color: color-mix(in srgb, var(--color-text-ink) 55%, transparent); font-size: var(--codex-text-xs); }
+.project-context-governance__current strong,
+.project-context-governance__row strong { min-width: 0; overflow-wrap: anywhere; font-size: var(--codex-text-sm); font-weight: 600; }
+.project-context-governance__row { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 10px; border: 1px solid color-mix(in srgb, var(--color-border-stone) 45%, transparent); border-radius: var(--radius-input); }
+.project-context-governance__row > div:first-child { display: grid; min-width: 0; gap: 2px; }
+.project-context-governance__row small { color: color-mix(in srgb, var(--color-text-ink) 62%, transparent); font-size: var(--codex-text-xs); overflow-wrap: anywhere; }
+.project-context-governance__actions { display: flex; flex-shrink: 0; gap: 6px; }
+.project-context-governance button,
+.project-context-governance__status button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 6px 9px; border: 1px solid color-mix(in srgb, var(--color-border-stone) 70%, transparent); border-radius: var(--radius-input); background: var(--color-bg-elevated); color: var(--color-text-ink); font: inherit; font-size: var(--codex-text-xs); cursor: pointer; }
+.project-context-governance button:disabled { opacity: .55; cursor: wait; }
+.project-context-governance .project-context-governance__primary { border-color: transparent; background: var(--color-action-sky); color: white; }
+.project-context-governance__status { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 0; color: color-mix(in srgb, var(--color-text-ink) 55%, transparent); font-size: var(--codex-text-xs); }
+.project-context-governance__status--error,
+.project-context-governance__error { color: var(--color-status-error, #b42318); }
+.project-context-governance__error { margin: 0; font-size: var(--codex-text-xs); }
+
+@media (max-width: 560px) {
+  .project-context-governance__current { grid-template-columns: 1fr; }
+  .project-context-governance__row { align-items: stretch; flex-direction: column; }
+  .project-context-governance__actions { justify-content: flex-end; }
+}
+
 .project-context-pack-dialog__sections { display: grid; }
 
 .project-context-pack-dialog__section {

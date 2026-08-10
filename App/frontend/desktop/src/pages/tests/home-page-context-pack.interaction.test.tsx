@@ -75,7 +75,19 @@ function SessionHarness(props: {
   const { setClients } = useApiClients();
 
   useEffect(() => {
-    setClients({ memoryRuntime: { getProjectContextPack: props.getProjectContextPack } } as unknown as AppClients);
+    setClients({
+      memoryRuntime: {
+        getProjectContextPack: props.getProjectContextPack,
+        getProjectContextState: async (namespace: { projectId?: string }) => ({
+          namespaceId: `local:${namespace.projectId ?? "unscoped"}`,
+          activeGoal: null,
+          goals: [],
+          workItems: [],
+          focusedWorkItem: null,
+          facts: []
+        })
+      }
+    } as unknown as AppClients);
     dispatch(agentActions.sessionSnapshotApplied({
       projectRegistryState: "ready",
       projects: [

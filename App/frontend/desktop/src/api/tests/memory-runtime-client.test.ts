@@ -12,7 +12,7 @@ describe("memory runtime client", () => {
   });
 
   it("declares the memory runtime endpoints exposed under /api/v1", () => {
-    expect(MEMORY_RUNTIME_ENDPOINTS).toHaveLength(21);
+    expect(MEMORY_RUNTIME_ENDPOINTS).toHaveLength(28);
     expect(MEMORY_RUNTIME_ENDPOINTS).toEqual([
       "GET /api/v1/health",
       "POST /api/v1/admin/reload-config",
@@ -32,6 +32,13 @@ describe("memory runtime client", () => {
       "GET /api/v1/panel/overview",
       "GET /api/v1/panel/analysis",
       "GET /api/v1/panel/context-pack",
+      "GET /api/v1/project-context/state",
+      "POST /api/v1/project-context/goals/propose",
+      "POST /api/v1/project-context/goals/:id/approve",
+      "POST /api/v1/project-context/goals/:id/reject",
+      "POST /api/v1/project-context/work-items",
+      "PATCH /api/v1/project-context/work-items/:id",
+      "PUT /api/v1/project-context/focus",
       "GET /api/v1/panel/items",
       "GET /api/v1/panel/tasks",
       "DELETE /api/v1/panel/tasks/:id"
@@ -208,6 +215,32 @@ describe("memory runtime client", () => {
     const url = fetchMock.mock.calls[0]?.[0] as URL;
     expect(url.pathname).toBe("/api/v1/panel/context-pack");
     expect(url.searchParams.get("projectId")).toBe("project-1");
+  });
+
+  it("reads and mutates authoritative project context through typed routes", async () => {
+    const fetchMock = vi.fn(async (input: URL | RequestInfo, _init?: RequestInit) => {
+      const path = (input as URL).pathname;
+      const body = path.endsWith("/state")
+        ? { namespaceId: "namespace-1", activeGoal: null, goals: [], workItems: [], focusedWorkItem: null, facts: [] }
+        : path.endsWith("/focus")
+          ? null
+          : { id: "goal-1", namespaceId: "namespace-1", userId: "user-1", projectId: "project-1", title: "Goal", summary: "", detail: "", acceptanceCriteria: [], constraints: [], status: "active", version: 1, sourceMemoryIds: [], provenance: {}, createdAt: "2026-08-08T12:00:00.000Z", updatedAt: "2026-08-08T12:00:00.000Z" };
+      return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createHttpMemoryRuntimeClient(runtimeConfig);
+    const namespace = { source: "desktop", profileId: "default", projectId: "project-1" };
+    const mutation = { namespace, source: "desktop", adapterId: "memmy-desktop", requestId: "request-1", provenance: { sourceAgent: "memmy-desktop", sourceMemoryIds: [], capturedAt: "2026-08-08T12:00:00.000Z", projectId: "project-1" } };
+
+    await client.getProjectContextState(namespace);
+    await client.approveProjectGoal("goal/1", mutation);
+    await client.setProjectFocus({ ...mutation, workItemId: null });
+
+    expect((fetchMock.mock.calls[0]?.[0] as URL).pathname).toBe("/api/v1/project-context/state");
+    expect((fetchMock.mock.calls[0]?.[0] as URL).searchParams.get("namespace")).toBe(JSON.stringify(namespace));
+    expect((fetchMock.mock.calls[1]?.[0] as URL).pathname).toBe("/api/v1/project-context/goals/goal%2F1/approve");
+    expect(fetchMock.mock.calls[1]?.[1]).toEqual(expect.objectContaining({ body: JSON.stringify(mutation) }));
+    expect((fetchMock.mock.calls[2]?.[0] as URL).pathname).toBe("/api/v1/project-context/focus");
   });
 
   it("passes a memory detail abort signal through to fetch", async () => {

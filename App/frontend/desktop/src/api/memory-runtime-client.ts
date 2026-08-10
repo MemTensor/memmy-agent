@@ -23,6 +23,15 @@ import {
   PanelItemsOutputSchema,
   PanelOverviewOutputSchema,
   ProjectContextPackOutputSchema,
+  ProjectContextFocusInputSchema,
+  ProjectContextGoalDecisionInputSchema,
+  ProjectContextProposeGoalInputSchema,
+  ProjectContextReadStateSchema,
+  ProjectContextWorkItemCreateInputSchema,
+  ProjectContextWorkItemUpdateInputSchema,
+  ProjectGoalRecordSchema,
+  ProjectWorkItemRecordSchema,
+  RuntimeNamespaceSchema,
   PanelTasksInputSchema,
   PanelTasksOutputSchema,
   SearchInputSchema,
@@ -55,6 +64,15 @@ import {
   type PanelItemsOutput,
   type PanelOverviewOutput,
   type ProjectContextPackOutput,
+  type ProjectContextFocusInput,
+  type ProjectContextGoalDecisionInput,
+  type ProjectContextProposeGoalInput,
+  type ProjectContextReadState,
+  type ProjectContextWorkItemCreateInput,
+  type ProjectContextWorkItemUpdateInput,
+  type ProjectGoalRecord,
+  type ProjectWorkItemRecord,
+  type RuntimeNamespace,
   type PanelTasksInput,
   type PanelTasksOutput,
   type SearchInput,
@@ -87,6 +105,13 @@ export const MEMORY_RUNTIME_ENDPOINTS = [
   "GET /api/v1/panel/overview",
   "GET /api/v1/panel/analysis",
   "GET /api/v1/panel/context-pack",
+  "GET /api/v1/project-context/state",
+  "POST /api/v1/project-context/goals/propose",
+  "POST /api/v1/project-context/goals/:id/approve",
+  "POST /api/v1/project-context/goals/:id/reject",
+  "POST /api/v1/project-context/work-items",
+  "PATCH /api/v1/project-context/work-items/:id",
+  "PUT /api/v1/project-context/focus",
   "GET /api/v1/panel/items",
   "GET /api/v1/panel/tasks",
   "DELETE /api/v1/panel/tasks/:id"
@@ -111,6 +136,13 @@ export interface MemoryRuntimeClient {
   getPanelOverview(): Promise<PanelOverviewOutput>;
   getPanelAnalysis(): Promise<PanelAnalysisOutput>;
   getProjectContextPack(projectId: string): Promise<ProjectContextPackOutput>;
+  getProjectContextState(namespace: RuntimeNamespace): Promise<ProjectContextReadState>;
+  proposeProjectGoal(input: ProjectContextProposeGoalInput): Promise<ProjectGoalRecord>;
+  approveProjectGoal(id: string, input: ProjectContextGoalDecisionInput): Promise<ProjectGoalRecord>;
+  rejectProjectGoal(id: string, input: ProjectContextGoalDecisionInput): Promise<ProjectGoalRecord>;
+  createProjectWorkItem(input: ProjectContextWorkItemCreateInput): Promise<ProjectWorkItemRecord>;
+  updateProjectWorkItem(id: string, input: ProjectContextWorkItemUpdateInput): Promise<ProjectWorkItemRecord>;
+  setProjectFocus(input: ProjectContextFocusInput): Promise<ProjectWorkItemRecord | null>;
   listPanelItems(input: PanelItemsInput): Promise<PanelItemsOutput>;
   listPanelTasks(input: PanelTasksInput): Promise<PanelTasksOutput>;
   deletePanelTask(id: string): Promise<DeletePanelTaskOutput>;
@@ -247,6 +279,34 @@ export function createHttpMemoryRuntimeClient(config: RuntimeConfig): MemoryRunt
         schema: ProjectContextPackOutputSchema
       });
     },
+    async getProjectContextState(namespace) {
+      const parsed = RuntimeNamespaceSchema.parse(namespace);
+      return requestJson({ config, path: withQuery("/api/v1/project-context/state", { namespace: JSON.stringify(parsed) }), schema: ProjectContextReadStateSchema });
+    },
+
+    async proposeProjectGoal(input) {
+      return requestJson({ config, path: "/api/v1/project-context/goals/propose", schema: ProjectGoalRecordSchema, body: ProjectContextProposeGoalInputSchema.parse(input) });
+    },
+
+    async approveProjectGoal(id, input) {
+      return requestJson({ config, path: `/api/v1/project-context/goals/${encodeURIComponent(id)}/approve`, schema: ProjectGoalRecordSchema, body: ProjectContextGoalDecisionInputSchema.parse(input) });
+    },
+
+    async rejectProjectGoal(id, input) {
+      return requestJson({ config, path: `/api/v1/project-context/goals/${encodeURIComponent(id)}/reject`, schema: ProjectGoalRecordSchema, body: ProjectContextGoalDecisionInputSchema.parse(input) });
+    },
+
+    async createProjectWorkItem(input) {
+      return requestJson({ config, path: "/api/v1/project-context/work-items", schema: ProjectWorkItemRecordSchema, body: ProjectContextWorkItemCreateInputSchema.parse(input) });
+    },
+
+    async updateProjectWorkItem(id, input) {
+      return requestJson({ config, path: `/api/v1/project-context/work-items/${encodeURIComponent(id)}`, schema: ProjectWorkItemRecordSchema, body: ProjectContextWorkItemUpdateInputSchema.parse(input), init: { method: "PATCH" } });
+    },
+
+    async setProjectFocus(input) {
+      return requestJson({ config, path: "/api/v1/project-context/focus", schema: ProjectWorkItemRecordSchema.nullable(), body: ProjectContextFocusInputSchema.parse(input), init: { method: "PUT" } });
+    },
 
     async listPanelItems(input) {
       return requestJson({ config, path: withQuery("/api/v1/panel/items", PanelItemsInputSchema.parse(input)), schema: PanelItemsOutputSchema });
@@ -348,6 +408,13 @@ export function createUnavailableMemoryRuntimeClient(): MemoryRuntimeClient {
     async getProjectContextPack() {
       throw unavailable();
     },
+    async getProjectContextState() { throw unavailable(); },
+    async proposeProjectGoal() { throw unavailable(); },
+    async approveProjectGoal() { throw unavailable(); },
+    async rejectProjectGoal() { throw unavailable(); },
+    async createProjectWorkItem() { throw unavailable(); },
+    async updateProjectWorkItem() { throw unavailable(); },
+    async setProjectFocus() { throw unavailable(); },
     async listPanelItems() {
       throw unavailable();
     },
