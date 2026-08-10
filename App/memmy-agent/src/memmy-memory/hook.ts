@@ -149,6 +149,7 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
           sessionId,
           query: userText || "(conversation continued)",
         }));
+        turn.contextPacketId = stringOrUndefined(response?.contextPacketId);
         turn.episodeId = stringOrUndefined(response?.episodeId);
         turn.sourceMemoryIds = arrayOfStrings(response?.sourceMemoryIds);
         turn.hasInjectedContext = hasInjectedContextValue(response?.injectedContext);
@@ -227,6 +228,7 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
         const response = await this.client.completeTurn(turn.turnId, compact({
           ...this.requestEnvelope(sessionKey, ctx),
           requestId: completeRequestId(turn.turnId, status, turn.userText, answer),
+          contextPacketId: turn.contextPacketId,
           sessionId: turn.sessionId,
           episodeId: turn.episodeId,
           query: turn.userText,

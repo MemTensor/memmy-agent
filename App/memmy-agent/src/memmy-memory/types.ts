@@ -57,6 +57,7 @@ export type MemmyMemoryTurnState = {
   turnId: string;
   userText: string;
   messageStartIndex: number;
+  contextPacketId?: string;
   episodeId?: string;
   sourceMemoryIds?: string[];
   rawTurnId?: string;

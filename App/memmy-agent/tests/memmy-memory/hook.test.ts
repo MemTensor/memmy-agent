@@ -14,8 +14,9 @@ function fakeClient() {
       turnId,
       sessionId: body.sessionId,
       episodeId: "ep-1",
+      contextPacketId: "ctx-packet-1",
       sourceMemoryIds: ["trace-source"],
-      injectedContext: { markdown: "Relevant prior memory." },
+      injectedContext: { markdown: "## Confirmed project context\nGoal: Ship authoritative context.\n\n## Relevant prior memory\nRelevant prior memory." },
     })),
     completeTurn: vi.fn(async () => ({ rawTurnId: "raw-1", l1MemoryId: "l1-1" })),
     closeSession: vi.fn(async (sessionId: string) => ({ ok: true, sessionId, status: "closed" })),
@@ -98,7 +99,7 @@ describe("MemmyMemoryHook", () => {
     expect(messages[0].content).toBe("System prompt");
     const userBlocks = messages[1].content as unknown as Array<{ type: string; text: string }>;
     expect(userBlocks.map((block) => block.text)).toEqual([
-      '<memmy_memory_context source="turn_start">\nRelevant prior memory.\n</memmy_memory_context>',
+      '<memmy_memory_context source="turn_start">\n## Confirmed project context\nGoal: Ship authoritative context.\n\n## Relevant prior memory\nRelevant prior memory.\n</memmy_memory_context>',
       "<current_user_request>",
       "Please continue\n\n",
       "</current_user_request>",
@@ -116,6 +117,7 @@ describe("MemmyMemoryHook", () => {
     expect(completeBody).toMatchObject({
       sessionId: "session-generated-1",
       episodeId: "ep-1",
+      contextPacketId: "ctx-packet-1",
       query: "Please continue",
       answer: "Done",
       sourceMemoryIds: ["trace-source"],
