@@ -30,6 +30,7 @@ import {
   writeMemoryPanelCaches
 } from "./memory-panel-cache.js";
 import { MemoryPagination, normalizePage } from "./memory-pagination.js";
+import type { MemoryReferenceOpenRequest } from "./memory-reference-tags.js";
 import { MemoryRefreshButton } from "./memory-refresh-button.js";
 import { MemoryStateBox } from "./memory-state-box.js";
 import { type RemoteData, toErrorMessage } from "./remote-state.js";
@@ -57,6 +58,7 @@ const MEMORIES_REFRESH_INTERVAL_MS = 5_000;
 
 export interface MemoriesSubPageProps {
   client: MemoryRuntimeClient | null;
+  openRequest?: MemoryReferenceOpenRequest;
   onOpenSettings?: () => void;
 }
 
@@ -204,9 +206,9 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
     setPage(normalizedPage);
   }
 
-  function openDetail(item: PanelItemsOutput["items"][number]) {
+  function openDetailById(id: string) {
     const requestId = ++detailRequestIdRef.current;
-    setSelectedMemoryId(item.id);
+    setSelectedMemoryId(id);
     track(buildMemoryUiDetailOpenedEvent({
       subPage: "memories",
       filterLayer: memoriesFilterLayer(sourceAgent)
@@ -218,7 +220,7 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
     }
 
     setDetail({ status: "loading" });
-    void loadMemoryDetail(props.client, item)
+    void props.client.getMemory(id)
       .then((data) => {
         if (requestId === detailRequestIdRef.current) {
           setDetail({ status: "ready", data });
@@ -229,6 +231,10 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
           setDetail({ status: "error", message: toMemoryDetailErrorMessage(error, t("memory.detailUnavailable")) });
         }
       });
+  }
+
+  function openDetail(item: PanelItemsOutput["items"][number]) {
+    openDetailById(item.id);
   }
 
   async function deleteMemoryDetail(id: string) {
@@ -339,6 +345,13 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
   }, [props.client, query, sourceAgent, page, t]);
 
   useEffect(() => {
+    if (props.openRequest) {
+      openDetailById(props.openRequest.id);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.openRequest?.requestId]);
+
+  useEffect(() => {
     if (state.status !== "ready" || !state.data.items.some(memoryProcessingStatus)) {
       return;
     }
@@ -358,6 +371,7 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
   return (
     <MemoriesSubPageView
       state={state.status === "ready" ? { ...state, detail } : state}
+      detail={detail}
       query={query}
       sourceAgent={sourceAgent}
       onQueryChange={changeQuery}
@@ -391,6 +405,7 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
 
 export interface MemoriesSubPageViewProps {
   state: RemoteData<PanelItemsOutput> | ({ status: "ready"; data: PanelItemsOutput; detail: DetailState });
+  detail?: DetailState;
   query: string;
   sourceAgent: string;
   onQueryChange: (value: string) => void;
@@ -450,6 +465,14 @@ export function MemoriesSubPageView(props: MemoriesSubPageViewProps) {
         </div>
       </div>
       <MemoryListState props={props} />
+      <MemoryDetailPanel
+        detail={props.detail ?? ("detail" in props.state ? props.state.detail : null)}
+        onClose={props.onCloseDetail}
+        onDelete={props.onDeleteDetail}
+        onRetryProcessing={props.onRetryProcessing}
+        onOpenSettings={props.onOpenSettings}
+        retryFeedback={props.retryFeedback ?? null}
+      />
     </section>
   );
 }
@@ -517,14 +540,6 @@ function MemoryListState(input: { props: MemoriesSubPageViewProps }) {
         })}
       </div>
       <MemoryPagination data={props.state.data} onPageChange={props.onPageChange} />
-      <MemoryDetailPanel
-        detail={"detail" in props.state ? props.state.detail : null}
-        onClose={props.onCloseDetail}
-        onDelete={props.onDeleteDetail}
-        onRetryProcessing={props.onRetryProcessing}
-        onOpenSettings={props.onOpenSettings}
-        retryFeedback={props.retryFeedback ?? null}
-      />
     </>
   );
 }
@@ -924,7 +939,7 @@ function TraceTurnEventBlock(props: { event: TraceTurnEvent }) {
 
   if (event.kind === "tool") {
     return (
-      <MemoryTurnBlock label={`${t("memory.memories.toolCalls")} · ${event.call.name}`} tone="tool">
+      <MemoryTurnBlock label={t("memory.memories.toolCalls")} tone="tool">
         <div className="memory-tool-list">
           <MemoryToolCallCard call={event.call} index={event.index} />
         </div>

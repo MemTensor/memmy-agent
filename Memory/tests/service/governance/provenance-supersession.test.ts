@@ -46,7 +46,6 @@ describe("MemoryService / governance / provenance and supersession", () => {
       adapterId: "memmy-codex-hook",
       requestId: "codex-complete:lifecycle",
       sessionId: opened.sessionId,
-      episodeId: started.episodeId,
       query: "Capture the adapter provenance",
       answer: "The lifecycle provenance is now captured.",
       sourceMemoryIds: started.sourceMemoryIds,

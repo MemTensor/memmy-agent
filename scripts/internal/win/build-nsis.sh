@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 DESKTOP_DIR="$ROOT_DIR/App/shell/desktop"
 AGENT_DIR="$ROOT_DIR/App/memmy-agent"
 MEMORY_DIR="$ROOT_DIR/Memory"
@@ -9,6 +9,8 @@ MIGRATIONS_DIR="$ROOT_DIR/Migrations"
 RUNTIME_DIR="$DESKTOP_DIR/dist/runtime"
 MIGRATIONS_STAGING_DIR="$DESKTOP_DIR/dist/Migrations"
 CLI_BIN_DIR="$RUNTIME_DIR/bin"
+EMBEDDING_MODELS_DIR="$DESKTOP_DIR/dist/embedding-models"
+EMBEDDING_MODEL_ID="${MEMMY_EMBEDDING_MODEL:-Xenova/all-MiniLM-L6-v2}"
 PACKAGE_ARCH="x64"
 WINDOWS_SIGNING_BUILDER_ARGS=()
 
@@ -444,12 +446,16 @@ verify_windows_agent_native_artifacts() {
 
 verify_packaged_windows_unpacked_artifacts() {
   local unpacked_runtime="$DESKTOP_DIR/release/win-unpacked/resources/app.asar.unpacked/dist/runtime"
+  local packaged_embedding_model="$DESKTOP_DIR/release/win-unpacked/resources/embedding-models/$EMBEDDING_MODEL_ID"
 
   require_packaged_runtime_file "$DESKTOP_DIR/release/win-unpacked/resources/app.asar"
   require_packaged_runtime_file "$unpacked_runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/win32/x64/onnxruntime.dll"
   require_packaged_runtime_glob "$unpacked_runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/win32/x64/*.dll"
   require_packaged_runtime_glob "$unpacked_runtime/memory/node_modules/@img/sharp-win32-x64/lib/libvips*.dll"
   require_packaged_runtime_file "$unpacked_runtime/memmy-agent/node_modules/@memmy/migrations/dist/index.js"
+  require_packaged_runtime_file "$packaged_embedding_model/config.json"
+  require_packaged_runtime_file "$packaged_embedding_model/tokenizer.json"
+  require_packaged_runtime_file "$packaged_embedding_model/onnx/model_quantized.onnx"
   if [ -L "$unpacked_runtime/memmy-agent/node_modules/@memmy/migrations" ]; then
     echo "Packaged migrations package must not be a symbolic link." >&2
     exit 1
@@ -506,6 +512,7 @@ write_desktop_edition_manifest
 log "Preparing Windows x64 packaged runtime"
 rm -rf "$RUNTIME_DIR"
 rm -rf "$MIGRATIONS_STAGING_DIR"
+rm -rf "$EMBEDDING_MODELS_DIR"
 mkdir -p "$RUNTIME_DIR/memory" "$RUNTIME_DIR/memmy-agent" "$CLI_BIN_DIR"
 mkdir -p "$MIGRATIONS_STAGING_DIR"
 cp "$MIGRATIONS_DIR/package.json" "$MIGRATIONS_STAGING_DIR/package.json"
@@ -576,6 +583,7 @@ verify_windows_agent_native_artifacts
 log "Creating Windows CLI launchers"
 create_windows_cli_launcher "$CLI_BIN_DIR/memmy-memory.cmd" "dist\\runtime\\memory\\src\\cli\\index.js"
 create_windows_cli_launcher "$CLI_BIN_DIR/memmy.cmd" "dist\\runtime\\memmy-agent\\dist\\main.js"
+node "$ROOT_DIR/scripts/internal/shared/prepare-embedding-model.mjs" "$EMBEDDING_MODELS_DIR"
 
 patch_electron_builder_nsis_refresh
 

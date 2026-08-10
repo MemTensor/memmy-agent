@@ -123,10 +123,18 @@ describe("MemoryService / evolution / negative experience", () => {
 
     expect(service.panelItems({ namespace, layer: "L2" }).items).toEqual([]);
     expect(feedback.jobs.map((job) => job.jobType)).not.toContain("negative_experience");
-    expect(feedback.jobs.map((job) => job.jobType)).toContain("reward");
+    expect(feedback.jobs.map((job) => job.jobType)).not.toContain("reward");
 
+    service.closeSession(session.sessionId);
     await service.runWorkerOnce(50);
     expect(service.panelItems({ namespace, layer: "L2" }).items).toEqual([]);
+    expect(service.panelJobs({ namespace, status: "queued" }).items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ jobType: "reward" })
+      ])
+    );
+
+    await service.runWorkerOnce(50);
     expect(service.panelJobs({ namespace, status: "queued" }).items).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ jobType: "negative_experience" })
@@ -161,10 +169,8 @@ describe("MemoryService / evolution / negative experience", () => {
     });
     expect(detail.body).toContain("Wrong port");
     expect(detail.body).toContain("443");
-    expect(operations).toEqual([
-      "capture.summarize",
-      "reward.reward.r_human.v7"
-    ]);
+    expect(operations[0]).toBe("capture.summarize");
+    expect(operations.filter((operation) => operation === "reward.reward.r_human.v7")).toHaveLength(1);
     const negativePolicy = (detail.metadata.properties as {
       internal_info: {
         policy: {
@@ -176,10 +182,9 @@ describe("MemoryService / evolution / negative experience", () => {
 
     const initialVersion = policies[0]!.version;
     await service.runWorkerOnce(50);
-    expect(embeddedTexts).toEqual([
-      [negativePolicy.title, negativePolicy.trigger].join("\n")
-    ]);
-    expect(embeddingRoles).toEqual(["query"]);
+    const policyEmbeddingText = [negativePolicy.title, negativePolicy.trigger].join("\n");
+    expect(embeddedTexts).toContain(policyEmbeddingText);
+    expect(embeddingRoles[embeddedTexts.indexOf(policyEmbeddingText)]).toBe("query");
     expect(service.panelItems({ namespace, layer: "L2" }).items).toEqual([
       expect.objectContaining({ id: policies[0]!.id, version: initialVersion })
     ]);
@@ -200,7 +205,7 @@ describe("MemoryService / evolution / negative experience", () => {
     db.close();
   });
 
-  it("admits an episode exactly at the configured negative rTask boundary", async () => {
+  it("does not turn a weak negative score at the boundary into a policy", async () => {
     const operations: string[] = [];
     const llm = createCountingLlm(operations, {
       goal_achievement: -0.15,
@@ -261,6 +266,13 @@ describe("MemoryService / evolution / negative experience", () => {
       magnitude: 1
     });
 
+    service.closeSession(session.sessionId);
+    await service.runWorkerOnce(50);
+    expect(service.panelJobs({ namespace, status: "queued" }).items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ jobType: "reward" })
+      ])
+    );
     await service.runWorkerOnce(50);
     expect(service.panelJobs({ namespace, status: "queued" }).items).toEqual(
       expect.arrayContaining([
@@ -270,14 +282,9 @@ describe("MemoryService / evolution / negative experience", () => {
     await service.runWorkerOnce(50);
 
     const policies = service.panelItems({ namespace, layer: "L2" }).items;
-    expect(policies).toHaveLength(1);
-    expect(service.getMemory(policies[0]!.id, { namespace }).body).toContain(
-      "TLS verification was skipped"
-    );
-    expect(operations).toEqual([
-      "capture.summarize",
-      "reward.reward.r_human.v7"
-    ]);
+    expect(policies).toEqual([]);
+    expect(operations[0]).toBe("capture.summarize");
+    expect(operations.filter((operation) => operation === "reward.reward.r_human.v7")).toHaveLength(1);
     db.close();
   });
 
@@ -335,6 +342,8 @@ describe("MemoryService / evolution / negative experience", () => {
         magnitude: 1,
         rationale: "Wrong port: use 443 and verify TLS before reporting completion."
       });
+      service.closeSession(session.sessionId);
+      await service.runWorkerOnce(50);
       await service.runWorkerOnce(50);
       await service.runWorkerOnce(50);
       const recall = await service.search({
@@ -383,6 +392,8 @@ describe("MemoryService / evolution / negative experience", () => {
       magnitude: 1,
       rationale: "Wrong port: use 443 and verify TLS before reporting completion."
     });
+    service.closeSession(otherSession.sessionId);
+    await service.runWorkerOnce(50);
     await service.runWorkerOnce(50);
     await service.runWorkerOnce(50);
     const otherRecall = await service.search({
@@ -450,6 +461,9 @@ describe("MemoryService / evolution / negative experience", () => {
       rationale: "Be careful."
     });
 
+    service.closeSession(session.sessionId);
+    await service.runWorkerOnce(50);
+    await service.runWorkerOnce(50);
     await service.runWorkerOnce(50);
 
     expect(service.panelItems({ namespace, layer: "L2" }).items).toEqual([]);
@@ -503,8 +517,10 @@ describe("MemoryService / evolution / negative experience", () => {
         magnitude: 1,
         rationale: `TLS_ROTATION_GUARD_${index} verify certificate rotation before completion.`
       });
+      service.closeSession(session.sessionId);
       if (index === 24) targetSessionId = session.sessionId;
     }
+    await service.runWorkerOnce(1000);
     await service.runWorkerOnce(1000);
     await service.runWorkerOnce(1000);
     const crossUserPolicy = db.db.prepare(

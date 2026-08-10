@@ -38,7 +38,11 @@ function apiErrorResponse(): LLMResponse {
 }
 
 function quotaErrorResponse(): LLMResponse {
-  return new LLMResponse({ content: "Error calling LLM: REQUEST_TOKEN_QUOTA_EXCEEDED_ERROR", finishReason: "error" });
+  return new LLMResponse({
+    content: "Error calling LLM: provider detail",
+    finishReason: "error",
+    errorCategory: "quota_exhausted",
+  });
 }
 
 function reserveStandaloneSession(agent: AgentLoop, chatId: string): void {
@@ -104,7 +108,8 @@ describe("AgentLoop WebUI API error localization", () => {
       }),
     );
 
-    expect(outbound?.content).toBe("当前账号的模型 Token 额度已用完，请充值或更换模型后重试。");
+    expect(outbound?.content).toBe("当前模型额度已用完");
+    expect(outbound?.metadata.modelErrorCategory).toBe("quota_exhausted");
     expect(outbound?.content).not.toBe("平台服务响应异常，请稍后重试。");
   });
 
@@ -122,7 +127,8 @@ describe("AgentLoop WebUI API error localization", () => {
       }),
     );
 
-    expect(outbound?.content).toBe("Your model token quota has been used up. Please top up or switch models, then try again.");
+    expect(outbound?.content).toBe("This model's quota has been used up.");
+    expect(outbound?.metadata.modelErrorCategory).toBe("quota_exhausted");
   });
 
   it("keeps the raw provider error outside WebUI", async () => {

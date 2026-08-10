@@ -18,6 +18,14 @@ import {
   thinkingStylesFor,
   usesOpenRouterAttribution,
 } from "../../src/providers/openai-compat-provider.js";
+import { findByName } from "../../src/providers/registry.js";
+
+function providerError(body: Record<string, any>, statusCode?: number): any {
+  const error: any = new Error("provider error");
+  error.body = body;
+  if (statusCode != null) error.statusCode = statusCode;
+  return error;
+}
 
 describe("provider error metadata", () => {
   it("captures retry and structured metadata from OpenAI-compatible errors", () => {
@@ -102,5 +110,74 @@ describe("provider error metadata", () => {
       if (old == null) delete process.env.MEMMY_AGENT_OPENAI_COMPAT_TIMEOUT_S;
       else process.env.MEMMY_AGENT_OPENAI_COMPAT_TIMEOUT_S = old;
     }
+  });
+
+  it.each([
+    ["openai", { error: { code: "credit_balance_exhausted" } }, 429],
+    [
+      "openrouter",
+      { error: { metadata: { error_type: "payment_required" } } },
+      429,
+    ],
+    ["openrouter", { error: { type: "provider_error" } }, 402],
+    ["deepseek", { error: { type: "provider_error" } }, 402],
+    ["dashscope", { error: { code: "AllocationQuota.FreeTierOnly" } }, 403],
+    ["zhipu", { error: { code: "1310" } }, 429],
+    ["moonshot", { error: { type: "exceeded_current_quota_error" } }, 429],
+    ["minimax", { base_resp: { status_code: 1008 } }, 400],
+    ["stepfun", { error: { type: "provider_error" } }, 402],
+    ["longcat", { error: { code: "insufficient_quota" } }, 429],
+    ["qianfan", { error: { code: "account_overdue" } }, 403],
+    ["qianfan", { error: { code: "coding_plan_week_quota_exceeded" } }, 429],
+  ] as const)("classifies %s structured quota metadata", (provider, body, statusCode) => {
+    const response = OpenAICompatProvider.handleError(
+      providerError(body, statusCode),
+      findByName(provider),
+    );
+
+    expect(response.errorCategory).toBe("quota_exhausted");
+  });
+
+  it("classifies MiniMax Anthropic nested quota metadata", () => {
+    const response = AnthropicProvider.handleError(
+      providerError({ base_resp: { status_code: 2056 } }, 400),
+      "minimax_anthropic",
+    );
+
+    expect(response.errorCategory).toBe("quota_exhausted");
+  });
+
+  it("classifies MiniMax Anthropic quota metadata from a JSON body", () => {
+    const error = providerError({}, 400);
+    error.body = JSON.stringify({ base_resp: { status_code: 1008 } });
+
+    const response = AnthropicProvider.handleError(error, "minimax_anthropic");
+
+    expect(response.errorCategory).toBe("quota_exhausted");
+  });
+
+  it.each([
+    ["anthropic", { error: { type: "billing_error" } }, 402],
+    ["gemini", { error: { type: "RESOURCE_EXHAUSTED" } }, 429],
+    ["dashscope", { error: { code: "insufficient_quota" } }, 429],
+    ["zhipu", { error: { code: "1302" } }, 429],
+    ["qianfan", { error: { code: "rpm_rate_limit_exceeded" } }, 429],
+    ["siliconflow", { error: { type: "provider_error" } }, 403],
+  ] as const)("does not classify ambiguous %s errors", (provider, body, statusCode) => {
+    const response = OpenAICompatProvider.handleError(
+      providerError(body, statusCode),
+      findByName(provider),
+    );
+
+    expect(response.errorCategory).toBeNull();
+  });
+
+  it("does not infer a status-only quota signature from error text", () => {
+    const error = new Error("provider returned 402 payment required");
+
+    const response = OpenAICompatProvider.handleError(error, findByName("deepseek"));
+
+    expect(response.errorStatusCode).toBe(402);
+    expect(response.errorCategory).toBeNull();
   });
 });

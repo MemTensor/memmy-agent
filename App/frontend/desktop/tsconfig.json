@@ -9,5 +9,6 @@
     "allowSyntheticDefaultImports": true,
     "noEmit": true
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "vite.config.ts"]
+  "include": ["src/**/*.ts", "src/**/*.tsx", "vite.config.ts"],
+  "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx", "src/**/tests/**/*"]
 }

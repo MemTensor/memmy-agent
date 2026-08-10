@@ -51,8 +51,10 @@ describe("Memory HTTP startup", () => {
     let runs = 0;
     let timerFired = false;
     let timerObservedBeforeSecondRun = false;
+    const limits: number[] = [];
     const service = stubService(() => undefined);
-    service.runWorkerOnce = async () => {
+    service.runWorkerOnce = async (limit) => {
+      limits.push(limit ?? 100);
       runs += 1;
       if (runs === 1) {
         setTimeout(() => {
@@ -73,6 +75,7 @@ describe("Memory HTTP startup", () => {
 
     await waitFor(() => runs >= 2);
     expect(timerObservedBeforeSecondRun).toBe(true);
+    expect(limits).toEqual([4, 4]);
   });
 });
 

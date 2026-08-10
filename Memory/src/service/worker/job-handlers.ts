@@ -331,12 +331,27 @@ export function enqueueEpisodeRewardAfterReflection(
     episode.status !== "closed" ||
     episodeHasRewardForReflection(episode) ||
     episodeRewardWasSkipped(episode) ||
-    deps.repos.runtime.hasEpisodeJob(episode.id, "reward", ["queued", "leased", "failed"])
+    (
+      deps.repos.runtime.hasEpisodeJob(episode.id, "reward", ["queued", "leased", "failed"])
+      && !episode.meta.rewardDirty
+    )
   ) return [];
   const target = deps.feedbackTargetFromEpisode(episode);
   if (!target) return [];
+  const feedback = [...episode.feedbackIds]
+    .reverse()
+    .map((id) => deps.repos.runtime.getFeedback(id))
+    .find((item) => Boolean(item));
   const feedbackWindowSec = Math.max(1, deps.reward.feedbackWindowSec);
-  const runAfter = new Date(Date.parse(at) + feedbackWindowSec * 1000).toISOString();
+  const runAfter = feedback
+    ? at
+    : new Date(Date.parse(at) + feedbackWindowSec * 1000).toISOString();
+  const repair = feedback
+    ? [...episode.decisionRepairIds]
+        .reverse()
+        .map((id) => deps.repos.runtime.getDecisionRepair(id))
+        .find((item) => item?.feedbackId === feedback.id)
+    : undefined;
   return [enqueueJob(deps, {
     jobType: "reward",
     userId: episode.userId,
@@ -346,6 +361,15 @@ export function enqueueEpisodeRewardAfterReflection(
       l1MemoryId: target.id,
       trigger,
       targetKind: "episode",
+      phase: "final",
+      ...(feedback ? {
+        feedbackId: feedback.id,
+        channel: feedback.channel,
+        polarity: feedback.polarity,
+        magnitude: feedback.magnitude,
+        rationale: feedback.rationale
+      } : {}),
+      ...(repair ? { repairId: repair.id } : {}),
       runAfter
     },
     createdAt: at
@@ -406,7 +430,17 @@ export function enqueueImportSummaryIfMissing(
 }
 
 export function episodeHasRewardForReflection(episode: EpisodeRecord): boolean {
-  return typeof episode.rTask === "number" && !episodeRewardWasSkipped(episode);
+  if (
+    episode.status !== "closed" ||
+    typeof episode.rTask !== "number" ||
+    episode.rewardDetail.phase !== "final" ||
+    episodeRewardWasSkipped(episode)
+  ) return false;
+  const traceIds = Array.isArray(episode.rewardDetail.traceIds)
+    ? episode.rewardDetail.traceIds.filter((id): id is string => typeof id === "string")
+    : [];
+  return traceIds.length === episode.l1MemoryIds.length &&
+    traceIds.every((id, index) => id === episode.l1MemoryIds[index]);
 }
 
 export function episodeRewardWasSkipped(episode: EpisodeRecord): boolean {

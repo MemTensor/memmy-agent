@@ -393,26 +393,6 @@ export const AgentSourceScanInputSchema = z.preprocess(
 );
 export type AgentSourceScanInput = z.infer<typeof AgentSourceScanInputSchema>;
 
-export const OnboardingInsightActionTypeSchema = z.enum([
-    "continue_task",
-    "cross_agent_synthesis",
-    "decision_doc",
-    "problem_diagnosis",
-    "open_ended"
-]);
-export type OnboardingInsightActionType = z.infer<typeof OnboardingInsightActionTypeSchema>;
-
-export const OnboardingInsightActionSchema = z.object({
-    type: OnboardingInsightActionTypeSchema,
-    buttonLabel: z.string().min(1),
-    description: z.string().min(1),
-    contextSummary: z.string().min(1),
-    relatedAgents: z.array(z.string().min(1)).default([]),
-    topicKeywords: z.array(z.string().min(1)).default([]),
-    suggestedPrompt: z.string().min(1)
-});
-export type OnboardingInsightAction = z.infer<typeof OnboardingInsightActionSchema>;
-
 export const OnboardingInsightReportInputSchema = z.object({
     locale: z.enum(["zh-CN", "en-US"]).optional(),
     stream: z.boolean().optional()
@@ -424,6 +404,8 @@ export const OnboardingInsightDiagnosticsSchema = z.object({
     sampledQueryCount: z.number().int().nonnegative(),
     usedLlm: z.boolean(),
     elapsedMs: z.number().int().nonnegative(),
+    reportLanguage: z.enum(["zh-CN", "en-US"]).optional(),
+    latestWorkspacePath: z.string().nullable().optional(),
     agents: z.array(z.object({
         sourceId: z.string().min(1),
         displayName: z.string().min(1),
@@ -437,8 +419,6 @@ export type OnboardingInsightDiagnostics = z.infer<typeof OnboardingInsightDiagn
 export const OnboardingInsightReportResponseSchema = z.object({
     status: z.enum(["ready", "fallback", "skipped"]),
     reportMarkdown: z.string(),
-    primaryAction: OnboardingInsightActionSchema.optional(),
-    secondaryActions: z.array(OnboardingInsightActionSchema).default([]),
     diagnostics: OnboardingInsightDiagnosticsSchema
 });
 export type OnboardingInsightReportResponse = z.infer<typeof OnboardingInsightReportResponseSchema>;

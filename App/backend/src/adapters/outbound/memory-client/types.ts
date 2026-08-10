@@ -70,6 +70,7 @@ export interface MemoryClient {
   runWorker(input: {
     limit: number;
     targetMemoryIds?: string[];
+    priorityCohortOnly?: boolean;
     signal?: AbortSignal;
     timeoutMs?: number;
   }): Promise<WorkerRunOutput>;

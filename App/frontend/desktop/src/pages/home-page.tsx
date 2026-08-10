@@ -17,6 +17,7 @@ import {
   type WebuiSessionTarget
 } from "../api/memmy-agent-client.js";
 import type { AnalyticsEvent } from "../analytics/analytics-events.js";
+import { buildOnboardingActivationEvent } from "../analytics/onboarding-analytics.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
 import { Memmy } from "../components/mascot/memmy.js";
 import { formatMessage, type MessageKey, type MessageValues, zhCNMessages } from "../i18n/messages.js";
@@ -66,6 +67,7 @@ import {
   consumeFirstEncounterRelayArm,
   consumePendingFirstEncounterTaskLaunch,
   readFirstEncounterRelayChat,
+  readFirstEncounterRelayPrompt,
   readFirstEncounterRelayReadyChat,
   writeFirstEncounterRelayChat,
   writeFirstEncounterRelayReadyChat,
@@ -96,6 +98,8 @@ const SLASH_COMMAND_RETRY_DELAYS_MS = [300, 1000, 2500];
  * immediately, regardless of what triggered that scroll event.
  */
 const AGENT_CONVERSATION_USER_SCROLL_INTENT_MS = 600;
+const FIRST_ENCOUNTER_MEMORY_VERIFY_TIMEOUT_MS = 60_000;
+const FIRST_ENCOUNTER_MEMORY_VERIFY_INTERVAL_MS = 2_000;
 /** Definition for stop confirmation grace ms. */
 export const STOP_CONFIRMATION_GRACE_MS = 8000;
 const TRANSLATABLE_AGENT_ERROR_KEYS = new Set<MessageKey>([
@@ -805,6 +809,8 @@ export function HomePage() {
     sourceId: source.sourceId,
     displayName: source.displayName,
     available: source.available,
+    builtin: source.builtin,
+    messageCount: source.messageCount,
     status: source.status
   }));
   const relayAgents = relayAgentOptions(agentSourceOptions);
@@ -838,6 +844,15 @@ export function HomePage() {
         firstEncounterRelayChatId
       );
       setFirstEncounterRelayReadyChatId(firstEncounterRelayChatId);
+      const completedAt = state.bootstrap?.onboarding.completedAt
+        ? Date.parse(state.bootstrap.onboarding.completedAt)
+        : Number.NaN;
+      track(buildOnboardingActivationEvent({
+        name: "onboarding_first_task_completed",
+        pagePath: "/main",
+        scanPermission: state.bootstrap?.onboarding.scanPermission,
+        ...(Number.isFinite(completedAt) ? { durationMs: Math.max(0, Date.now() - completedAt) } : {})
+      }));
     }
   }, [
     firstEncounterRelayAnswerMessageId,
@@ -846,7 +861,10 @@ export function HomePage() {
     isCurrentAgentRunning,
     isFirstEncounterFollowUpChat,
     state.agent.lastTaskCompletion?.chatId,
-    state.agent.messages
+    state.agent.messages,
+    state.bootstrap?.onboarding.completedAt,
+    state.bootstrap?.onboarding.scanPermission,
+    track
   ]);
 
   const openFirstEncounterRelayAgent = useCallback(async (sourceId: string, prompt: string): Promise<boolean> => {
@@ -858,13 +876,64 @@ export function HomePage() {
     }
   }, []);
 
+  const verifyFirstEncounterRelayMemory = useCallback(async (sourceId: string, startedAt: string): Promise<boolean> => {
+    const client = clients?.memoryRuntime;
+    if (!client) {
+      return false;
+    }
+    const startedAtMs = Date.parse(startedAt);
+    const deadline = Date.now() + FIRST_ENCOUNTER_MEMORY_VERIFY_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      try {
+        const output = await client.listMemoryLogs({
+          tools: ["memory_search"],
+          sourceAgent: sourceId,
+          limit: 20,
+          offset: 0
+        });
+        if (output.logs.some((log) => log.success && Date.parse(log.calledAt) >= startedAtMs)) {
+          return true;
+        }
+      } catch {
+        // The logs route may be unavailable while the local Memory service is starting.
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, FIRST_ENCOUNTER_MEMORY_VERIFY_INTERVAL_MS));
+    }
+    return false;
+  }, [clients?.memoryRuntime]);
+
+  const trackFirstEncounterRelayLifecycle = useCallback((
+    event: "relay_clicked" | "memory_verified",
+    sourceId: string,
+    action: string
+  ) => {
+    track(buildOnboardingActivationEvent({
+      name: event === "memory_verified"
+        ? "onboarding_external_memory_verified"
+        : "onboarding_relay_clicked",
+      pagePath: "/main",
+      scanPermission: state.bootstrap?.onboarding.scanPermission,
+      action,
+      sourceId: sourceId || undefined
+    }));
+  }, [state.bootstrap?.onboarding.scanPermission, track]);
+
   const openFirstEncounterRelayConnections = useCallback(() => {
     dispatch(appActions.navigate("/memory-sources"));
   }, [dispatch]);
 
-  const firstEncounterRelayContent = firstEncounterRelayAnchorMessageId && hasDetectedAgents
-    ? firstEncounterFollowUp === "relay"
-      ? <FirstEncounterRelayChallenge agents={relayAgents} onOpenAgent={openFirstEncounterRelayAgent} />
+  // scan_and_write_skill → relay list; scan_only → opt-in install card.
+  const firstEncounterRelayContent = firstEncounterRelayAnchorMessageId
+    ? firstEncounterFollowUp === "relay" && hasDetectedAgents
+      ? (
+          <FirstEncounterRelayChallenge
+            agents={relayAgents}
+            prompt={readFirstEncounterRelayPrompt(typeof window === "undefined" ? undefined : window.sessionStorage) ?? t("onboarding.relay.prompt")}
+            onOpenAgent={openFirstEncounterRelayAgent}
+            onVerifyMemory={verifyFirstEncounterRelayMemory}
+            onLifecycle={trackFirstEncounterRelayLifecycle}
+          />
+        )
       : firstEncounterFollowUp === "connect"
         ? <FirstEncounterRelayOptIn onOpenConnections={openFirstEncounterRelayConnections} />
         : null
@@ -1013,8 +1082,61 @@ export function HomePage() {
     }
 
     const memmyAgent = clients.memmyAgent;
-    const pendingPrompt = consumePendingFirstEncounterTaskLaunch(typeof window === "undefined" ? undefined : window.sessionStorage);
-    if (!pendingPrompt) {
+    const storage = typeof window === "undefined" ? undefined : window.sessionStorage;
+    const pendingLaunch = consumePendingFirstEncounterTaskLaunch(storage);
+    if (!pendingLaunch) {
+      return;
+    }
+
+    // Onboarding first report: open seeded chat history (prefer chatId written at report-done).
+    if (pendingLaunch.chatId || pendingLaunch.assistantContent) {
+      setIsCreatingChat(true);
+      void (async () => {
+        const seeded = pendingLaunch.chatId
+          ? {
+              chat_id: pendingLaunch.chatId,
+              session_key: pendingLaunch.sessionKey || memmyAgent.chatIdToSessionKey(pendingLaunch.chatId)
+            }
+          : await memmyAgent.seedWebuiChat({
+              userText: pendingLaunch.prompt,
+              assistantText: pendingLaunch.assistantContent!,
+              title: t("onboarding.report.title")
+            });
+        ensureChatSubscription(seeded.chat_id);
+        dispatch(agentActions.newChatCreated(seeded.chat_id));
+        rememberFirstEncounterRelayChatIfArmed(seeded.chat_id);
+        writeFirstEncounterRelayChat(storage, seeded.chat_id);
+        writeFirstEncounterRelayReadyChat(storage, seeded.chat_id);
+        setFirstEncounterRelayChatId(seeded.chat_id);
+        setFirstEncounterRelayReadyChatId(seeded.chat_id);
+        const requestId = nextAgentHistoryRequestId(seeded.chat_id);
+        dispatch(agentActions.historyLoading(seeded.session_key, seeded.chat_id, requestId));
+        const thread = await memmyAgent.readWebuiThread(seeded.session_key);
+        dispatch(agentActions.historyLoaded(thread, requestId));
+        taskStateCoordinator.refreshTaskState({
+          expectedChatId: seeded.chat_id,
+          reason: "new-chat",
+          state: state.agent
+        });
+        const completedAt = state.bootstrap?.onboarding.completedAt
+          ? Date.parse(state.bootstrap.onboarding.completedAt)
+          : Number.NaN;
+        track(buildOnboardingActivationEvent({
+          name: "onboarding_first_task_completed",
+          pagePath: "/main",
+          scanPermission: state.bootstrap?.onboarding.scanPermission,
+          ...(Number.isFinite(completedAt) ? { durationMs: Math.max(0, Date.now() - completedAt) } : {})
+        }));
+      })().catch((error) => {
+        console.warn("open first encounter report chat failed", error);
+        writePendingFirstEncounterTaskLaunch(storage, pendingLaunch.prompt, {
+          ...(pendingLaunch.assistantContent ? { assistantContent: pendingLaunch.assistantContent } : {}),
+          ...(pendingLaunch.chatId ? { chatId: pendingLaunch.chatId } : {}),
+          ...(pendingLaunch.sessionKey ? { sessionKey: pendingLaunch.sessionKey } : {})
+        });
+      }).finally(() => {
+        setIsCreatingChat(false);
+      });
       return;
     }
 
@@ -1023,7 +1145,7 @@ export function HomePage() {
       target: { kind: "standalone" },
       connection,
       ensureChatSubscription,
-      content: pendingPrompt,
+      content: pendingLaunch.prompt,
       language,
       pendingAttachments: [],
       uploadAgentMedia: (attachments) => memmyAgent.uploadAgentMedia(attachments),
@@ -1044,10 +1166,7 @@ export function HomePage() {
       }
     }).then((sent) => {
       if (!sent) {
-        writePendingFirstEncounterTaskLaunch(
-          typeof window === "undefined" ? undefined : window.sessionStorage,
-          pendingPrompt
-        );
+        writePendingFirstEncounterTaskLaunch(storage, pendingLaunch.prompt);
       }
     });
   }, [
@@ -1058,6 +1177,9 @@ export function HomePage() {
     language,
     rememberFirstEncounterRelayChatIfArmed,
     state.agent,
+    state.bootstrap?.onboarding.completedAt,
+    state.bootstrap?.onboarding.scanPermission,
+    t,
     taskStateCoordinator,
     track
   ]);
@@ -1279,11 +1401,14 @@ export function HomePage() {
   // this closes the race where fast-streaming tokens grow scrollHeight while
   // a deferred native "scroll" event from our own assignment is still in
   // flight, which could otherwise be misread as the user scrolling away.
+  // Also re-pin when the first-encounter relay card mounts after turn_end:
+  // messages stop changing before `afterMessageContent` appears, so omitting
+  // that dependency leaves "Switch AI and keep going" below the fold.
   useLayoutEffect(() => {
     if (shouldAutoScrollAgentConversationRef.current) {
       scrollAgentConversationToBottom();
     }
-  }, [chatScopeKey, state.agent.messages]);
+  }, [chatScopeKey, firstEncounterRelayAnchorMessageId, state.agent.messages]);
 
   function scrollAgentConversationToBottom() {
     const element = scrollRef.current;
@@ -1533,7 +1658,6 @@ export function HomePage() {
       loadSlashCommands({ resetAttempts: true });
     }
   }
-
 
   /**
    * Automatically shrinks or expands the input box height.

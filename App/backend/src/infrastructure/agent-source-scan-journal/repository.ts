@@ -1,8 +1,7 @@
 /** Agent source scan journal repository module. */
 import type { AgentSourceScanMode, ScanResult } from "@memmy/local-api-contracts";
 import type { DatabaseSync } from "node:sqlite";
-
-const AGENT_SOURCE_SCOPE_UUID = "local-agent-sources";
+import { INSTALLATION_SCAN_SCOPE_UUID } from "../installation-scan-scope.js";
 
 export interface JournalConversationMessage {
   messageId: string;
@@ -123,7 +122,7 @@ export function createAgentSourceScanJournal(db: DatabaseSync): AgentSourceScanJ
         SELECT phase
         FROM account_agent_source_scan_jobs
         WHERE uuid = ? AND job_id = ?
-      `).get(AGENT_SOURCE_SCOPE_UUID, jobId) as JobRow | undefined;
+      `).get(INSTALLATION_SCAN_SCOPE_UUID, jobId) as JobRow | undefined;
       if (!job) {
         return null;
       }
@@ -140,7 +139,7 @@ export function createAgentSourceScanJournal(db: DatabaseSync): AgentSourceScanJ
         WHERE uuid = ?
         ORDER BY updated_at DESC, created_at DESC, job_id DESC
         LIMIT 1
-      `).get(AGENT_SOURCE_SCOPE_UUID) as JobRow | undefined;
+      `).get(INSTALLATION_SCAN_SCOPE_UUID) as JobRow | undefined;
       if (!row) return null;
       const messageCount = countJobRows(db, "account_agent_source_scan_messages", row.job_id);
       const sourceCount = countJobRows(db, "account_agent_source_scan_source_state", row.job_id);
@@ -165,7 +164,7 @@ export function createAgentSourceScanJournal(db: DatabaseSync): AgentSourceScanJ
 function countJobRows(db: DatabaseSync, table: string, jobId: string): number {
   const row = db.prepare(
     `SELECT COUNT(*) AS count FROM ${table} WHERE uuid = ? AND job_id = ?`
-  ).get(AGENT_SOURCE_SCOPE_UUID, jobId) as { count: number };
+  ).get(INSTALLATION_SCAN_SCOPE_UUID, jobId) as { count: number };
   return Number(row.count);
 }
 
@@ -177,7 +176,7 @@ function ensureAgentSourceScope(db: DatabaseSync): void {
       created_at,
       updated_at
     ) VALUES (?, ?, ?)`
-  ).run(AGENT_SOURCE_SCOPE_UUID, now, now);
+  ).run(INSTALLATION_SCAN_SCOPE_UUID, now, now);
 }
 
 function upsertJob(db: DatabaseSync, input: WriteScanResumeInput): void {
@@ -193,7 +192,7 @@ function upsertJob(db: DatabaseSync, input: WriteScanResumeInput): void {
       updated_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?)
   `).run(
-    AGENT_SOURCE_SCOPE_UUID,
+    INSTALLATION_SCAN_SCOPE_UUID,
     input.jobId,
     input.sourceId,
     input.mode ?? null,
@@ -238,7 +237,7 @@ function writeCollectedSources(db: DatabaseSync, jobId: string, collected: reado
 
   for (const [sourceIndex, source] of collected.entries()) {
     insertSource.run(
-      AGENT_SOURCE_SCOPE_UUID,
+      INSTALLATION_SCAN_SCOPE_UUID,
       jobId,
       source.sourceId,
       source.scanMode ?? null,
@@ -252,7 +251,7 @@ function writeCollectedSources(db: DatabaseSync, jobId: string, collected: reado
 
     for (const [messageIndex, message] of source.messages.entries()) {
       insertMessage.run(
-        AGENT_SOURCE_SCOPE_UUID,
+        INSTALLATION_SCAN_SCOPE_UUID,
         jobId,
         source.sourceId,
         messageIndex,
@@ -288,7 +287,7 @@ function writeResults(db: DatabaseSync, jobId: string, results: readonly ScanRes
 
   for (const [resultIndex, result] of results.entries()) {
     insertResult.run(
-      AGENT_SOURCE_SCOPE_UUID,
+      INSTALLATION_SCAN_SCOPE_UUID,
       jobId,
       result.sourceId,
       resultIndex,
@@ -314,7 +313,7 @@ function readCollectedSources(db: DatabaseSync, jobId: string): JournalCollected
     FROM account_agent_source_scan_source_state
     WHERE uuid = ? AND job_id = ?
     ORDER BY source_order ASC
-  `).all(AGENT_SOURCE_SCOPE_UUID, jobId) as unknown as SourceStateRow[];
+  `).all(INSTALLATION_SCAN_SCOPE_UUID, jobId) as unknown as SourceStateRow[];
 
   return sourceRows.map((row) => ({
     sourceId: row.source_id,
@@ -341,7 +340,7 @@ function readSourceMessages(db: DatabaseSync, jobId: string, sourceId: string): 
     FROM account_agent_source_scan_messages
     WHERE uuid = ? AND job_id = ? AND source_id = ?
     ORDER BY message_order ASC
-  `).all(AGENT_SOURCE_SCOPE_UUID, jobId, sourceId) as unknown as MessageRow[];
+  `).all(INSTALLATION_SCAN_SCOPE_UUID, jobId, sourceId) as unknown as MessageRow[];
 
   return rows.map((row) => ({
     messageId: row.message_id,
@@ -368,7 +367,7 @@ function readResults(db: DatabaseSync, jobId: string): ScanResult[] {
     FROM account_agent_source_scan_results
     WHERE uuid = ? AND job_id = ?
     ORDER BY result_order ASC
-  `).all(AGENT_SOURCE_SCOPE_UUID, jobId) as unknown as ResultRow[];
+  `).all(INSTALLATION_SCAN_SCOPE_UUID, jobId) as unknown as ResultRow[];
 
   return rows.map((row) => ({
     sourceId: row.source_id,
@@ -381,10 +380,10 @@ function readResults(db: DatabaseSync, jobId: string): ScanResult[] {
 }
 
 function deleteJobRows(db: DatabaseSync, jobId: string): void {
-  db.prepare("DELETE FROM account_agent_source_scan_messages WHERE uuid = ? AND job_id = ?").run(AGENT_SOURCE_SCOPE_UUID, jobId);
-  db.prepare("DELETE FROM account_agent_source_scan_source_state WHERE uuid = ? AND job_id = ?").run(AGENT_SOURCE_SCOPE_UUID, jobId);
-  db.prepare("DELETE FROM account_agent_source_scan_results WHERE uuid = ? AND job_id = ?").run(AGENT_SOURCE_SCOPE_UUID, jobId);
-  db.prepare("DELETE FROM account_agent_source_scan_jobs WHERE uuid = ? AND job_id = ?").run(AGENT_SOURCE_SCOPE_UUID, jobId);
+  db.prepare("DELETE FROM account_agent_source_scan_messages WHERE uuid = ? AND job_id = ?").run(INSTALLATION_SCAN_SCOPE_UUID, jobId);
+  db.prepare("DELETE FROM account_agent_source_scan_source_state WHERE uuid = ? AND job_id = ?").run(INSTALLATION_SCAN_SCOPE_UUID, jobId);
+  db.prepare("DELETE FROM account_agent_source_scan_results WHERE uuid = ? AND job_id = ?").run(INSTALLATION_SCAN_SCOPE_UUID, jobId);
+  db.prepare("DELETE FROM account_agent_source_scan_jobs WHERE uuid = ? AND job_id = ?").run(INSTALLATION_SCAN_SCOPE_UUID, jobId);
 }
 
 function parseJsonArray<T>(value: string): T[] {

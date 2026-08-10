@@ -375,7 +375,8 @@ describe("AppFrame", () => {
     const onboardingSource = readFileSync(resolve(__dirname, "..", "onboarding-page.tsx"), "utf8");
 
     expect(onboardingSource).toContain("dispatch(appActions.onboardingUpdated(completionPatch));");
-    expect(onboardingSource).toContain("dispatch(appActions.navigate(targetRoute));");
+    expect(onboardingSource).toContain("dispatch(appActions.navigate(nextRoute));");
+    expect(onboardingSource).toContain("productTourStartRoute(includeLogs)");
     expect(onboardingSource).toContain("void persistReportConversationCompletion(completionPatch)");
     // Handles expect.
     expect(appFrameSource).not.toContain("consumeReportTaskDeferredImprovement");
@@ -387,28 +388,41 @@ describe("AppFrame", () => {
     // Handles expect.
     expect(appFrameSource).toContain('if (deferredGuidanceStep !== "armed")');
     expect(appFrameSource).toContain('state.bootstrap?.app.userMode !== "byok" && state.bootstrap?.onboarding.improvementProgram === "unset" ? "improvement" : "product_tour"');
-    expect(appFrameSource).toContain("writeDeferredGuidanceStep(typeof window === \"undefined\" ? undefined : window.sessionStorage, firstStep);");
+    expect(appFrameSource).toContain("writeDeferredGuidanceStep(storage, firstStep)");
     expect(appFrameSource).toContain("readDeferredGuidanceStep(typeof window === \"undefined\" ? undefined : window.sessionStorage)");
-    expect(appFrameSource).toContain("clearDeferredGuidanceStep(typeof window === \"undefined\" ? undefined : window.sessionStorage)");
-    // Handles expect.
     expect(appFrameSource).toContain("handleFirstSidebarInteraction();");
     expect(appFrameSource).toContain('deferredGuidanceStep === "improvement" && state.bootstrap?.app.userMode !== "byok" && state.bootstrap?.onboarding.improvementProgram === "unset"');
-    // Handles expect.
-    expect(appFrameSource).toContain('writeDeferredGuidanceStep(typeof window === "undefined" ? undefined : window.sessionStorage, "product_tour");');
-    expect(appFrameSource).toContain('deferredGuidanceStep === "product_tour"');
-    expect(appFrameSource).toContain("<ProductTourGuide");
+    expect(appFrameSource).toContain('writeDeferredGuidanceStep(storage, "product_tour")');
+    expect(appFrameSource).toContain('setDeferredGuidanceStep("product_tour")');
+    expect(appFrameSource).toContain("productTourIncludesLogs");
+    expect(appFrameSource).toContain("productTourStartRoute(includeLogs)");
     expect(appFrameSource).toContain("<ImprovementProgramModal");
     expect(appFrameSource).toContain('openExternalUrl(getLegalLinkUrl("data", language, state.bootstrap?.legal))');
     expect(appFrameSource).toContain("function chooseDeferredImprovementProgram(accepted: boolean)");
     expect(appFrameSource).toContain(".setImprovementProgram(accepted)");
     expect(appFrameSource).not.toContain("setShowGuide(true)");
-    // Handles expect.
-    expect(appFrameSource).toContain('writeDeferredGuidanceStep(typeof window === "undefined" ? undefined : window.sessionStorage, "nickname");');
-    expect(appFrameSource).toContain('deferredGuidanceStep === "nickname"');
-    expect(appFrameSource).toContain("<NicknameModal");
-    expect(appFrameSource).toContain("function submitDeferredNickname()");
-    expect(appFrameSource).toContain("persistNickname({");
-    expect(appFrameSource).toContain('isByok: state.bootstrap?.app.userMode === "byok"');
+    // Product tour + nickname overlays live on AppRouter (covers /memory & /tools without AppFrame).
+    const routerSource = readFileSync(resolve(__dirname, "..", "..", "app", "router.tsx"), "utf8");
+    expect(routerSource).toContain("<ProductTourGuide");
+    expect(routerSource).toContain('workspaceGuidanceStep === "product_tour"');
+    expect(routerSource).toContain("productTourIncludesLogs(state.bootstrap?.onboarding.scanPermission)");
+    expect(routerSource).toContain('writeDeferredGuidanceStep(storage, "nickname")');
+    expect(routerSource).toContain("clearDeferredGuidanceStep");
+    expect(routerSource).toContain("<NicknameModal");
+    expect(routerSource).toContain("function submitDeferredNickname()");
+    expect(routerSource).toContain("persistNickname({");
+    expect(routerSource).toContain('isByok: state.bootstrap?.app.userMode === "byok"');
+    expect(routerSource).toContain("buildProductTourStepEvent");
+    expect(routerSource).toContain('choice: "viewed"');
+    expect(routerSource).toContain('if (result === "skipped")');
+    expect(routerSource).toContain('choice: "skipped"');
+    expect(routerSource).not.toContain('choice: "completed"');
+    expect(routerSource).toContain('step: "nickname"');
+    expect(routerSource).toContain("buildOnboardingCompletedEvent(scanPermission)");
+    expect(routerSource).not.toContain("buildProductTourStepViewedEvent");
+    expect(routerSource).not.toContain('step: "product_tour"');
+    expect(appFrameSource).toContain("buildOnboardingStepCompletedEvent");
+    expect(appFrameSource).toContain('step: "improvement_program"');
   });
 
   it("never shows the improvement plan modal in BYOK mode", () => {
@@ -1018,12 +1032,12 @@ describe("AppFrame", () => {
     );
 
     expect(resolveSidebarAccountSummary(phoneState, sidebarLabels())).toEqual({
-      name: "138****8000",
-      meta: "138****8000"
+      name: "13800138000",
+      meta: "13800138000"
     });
     expect(resolveSidebarAccountSummary(emailState, sidebarLabels())).toEqual({
-      name: "g***@example.com",
-      meta: "g***@example.com"
+      name: "grace@example.com",
+      meta: "grace@example.com"
     });
   });
 

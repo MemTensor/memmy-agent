@@ -36,7 +36,25 @@ describe("SkillsSubPage", () => {
     const html = renderSkills({
       status: "ready",
       data: skillPanelItemsFixture,
-      detail: { status: "ready", data: { detail: skillPanelDetailFixture, timeline: skillTimelineEntries() } }
+      detail: {
+        status: "ready",
+        data: {
+          detail: {
+            ...skillPanelDetailFixture,
+            item: {
+              ...skillPanelDetailFixture.item,
+              skill: {
+                invocationGuide: skillPanelDetailFixture.item.body,
+                retrievalBlurb: "根据仓库真实代码补齐中文文件级、函数级和字段含义注释。",
+                triggerContext: "当用户要求补充或修正中文代码注释时使用。",
+                sourcePolicyIds: ["memory-policy-1"],
+                sourceWorldModelIds: []
+              }
+            }
+          },
+          timeline: skillTimelineEntries()
+        }
+      }
     });
     expect(html).toContain("根据仓库真实代码补齐中文文件级、函数级和字段含义注释。");
     expect(html).toContain("先读文件");
@@ -48,9 +66,12 @@ describe("SkillsSubPage", () => {
     expect(html).toContain("memory-delete-button");
     expect(html).toContain('data-icon="trash-2"');
     expect(html).not.toContain(">v4<");
-    expect(html).toContain("调用指南");
+    expect(html).toContain("适用场景");
     expect(html).toContain("来源经验");
     expect(html).toContain("memory-policy-1");
+    expect(html).toContain("memory-policy-id--link");
+    expect(html).toContain('title="memory-policy-1"');
+    expect(html).not.toContain("来源场域认知");
     expect(html).toContain("进化时间线");
     expect(html).toContain("结晶完成");
     expect(html).toContain("价值评分更新");
@@ -89,6 +110,18 @@ describe("SkillsSubPage", () => {
     expect(html).not.toContain("Use this skill when");
     expect(html).not.toContain("skill_0f56cfb9815a96aa67d");
     expect(html).not.toContain(">resolving<");
+  });
+
+  it("旧技能缺少短召回字段时不把完整正文重复显示为适用场景", () => {
+    const html = renderSkills({
+      status: "ready",
+      data: skillPanelItemsFixture,
+      detail: { status: "ready", data: { detail: skillPanelDetailFixture, timeline: [] } }
+    });
+
+    expect(html).toContain("SKILL.md 内容");
+    expect(html).not.toContain("适用场景");
+    expect(html).not.toContain("根据仓库真实代码补齐中文文件级、函数级和字段含义注释。");
   });
 
   it("技能列表生命周期和详情技能状态使用同一套展示状态", () => {
@@ -168,6 +201,7 @@ function renderSkills(state: Parameters<typeof SkillsSubPageView>[0]["state"]): 
         onOpenSkill={vi.fn()}
         onDeleteSkill={vi.fn(async () => undefined)}
         onCloseSkill={vi.fn()}
+        onOpenMemoryReference={vi.fn()}
       />
     </I18nProvider>
   );

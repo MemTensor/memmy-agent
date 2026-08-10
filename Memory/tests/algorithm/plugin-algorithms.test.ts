@@ -1644,6 +1644,55 @@ describe("plugin algorithm parity helpers", () => {
     expect(result.hits.map((hit) => hit.id)).toEqual(["policy-active"]);
   });
 
+  it("filters malformed failure-avoidance policies whose preference repeats the anti-pattern", () => {
+    const malformed = policyMemory(
+      "policy_5608950f4a75b91d2db4",
+      "黄金与比特币分析纠错",
+      "active",
+      [1, 0]
+    );
+    const malformedPolicy = malformed.properties.internal_info.policy as Record<string, unknown>;
+    Object.assign(malformedPolicy, {
+      experience_type: "failure_avoidance",
+      evidence_polarity: "negative",
+      skill_eligible: false,
+      policy_confidence: 1,
+      decision_guidance: {
+        preference: ["我说的是黄金，不是比特币"],
+        anti_pattern: ["我说的是黄金，不是比特币"]
+      }
+    });
+    const actionable = policyMemory(
+      "policy-actionable-correction",
+      "TLS port correction",
+      "active",
+      [1, 0]
+    );
+    const actionablePolicy = actionable.properties.internal_info.policy as Record<string, unknown>;
+    Object.assign(actionablePolicy, {
+      experience_type: "failure_avoidance",
+      evidence_polarity: "negative",
+      skill_eligible: false,
+      policy_confidence: 0.75,
+      decision_guidance: {
+        preference: ["Use port 443 and verify TLS before reporting completion"],
+        anti_pattern: ["Configure port 80 and skip TLS verification"]
+      }
+    });
+
+    const result = retrievePluginMemories({
+      query: "TLS port correction 黄金 比特币",
+      queryVector: [1, 0],
+      memories: [malformed, actionable],
+      layers: ["L2"],
+      limit: 5,
+      mode: "search",
+      now: Date.parse("2026-05-29T00:00:00.000Z")
+    });
+
+    expect(result.hits.map((hit) => hit.id)).toEqual(["policy-actionable-correction"]);
+  });
+
   it("uses plugin Tier-2 experience salience for feedback-derived L2 policies", () => {
     const plainPolicy = policyMemory("policy-plain", "python pytest policy", "active", [1, 0]);
     const feedbackPolicy = policyMemory("policy-feedback", "python pytest policy", "active", [1, 0]);

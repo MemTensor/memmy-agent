@@ -9,17 +9,23 @@ export interface RelayAgentOption {
   sourceId: string;
   displayName?: string;
   available: boolean;
+  builtin: boolean;
+  messageCount: number;
   status: AgentSourceStatus;
 }
 
 export interface FirstEncounterRelayChallengeProps {
   agents: RelayAgentOption[];
+  prompt: string;
   onOpenAgent?: (sourceId: string, prompt: string) => Promise<boolean>;
   onCopyPrompt?: (prompt: string) => Promise<void>;
+  onVerifyMemory?: (sourceId: string, startedAt: string) => Promise<boolean>;
+  onLifecycle?: (event: "relay_clicked" | "memory_verified", sourceId: string, action: string) => void;
 }
 
 export interface FirstEncounterRelayOptInProps {
-  onOpenConnections: () => void;
+  /** When omitted, the card stays informational without a connect CTA. */
+  onOpenConnections?: () => void;
 }
 
 const RELAY_AGENT_IDS = new Set(["cursor", "claude_code", "codex", "pi", "opencode", "openclaw", "hermes", "workbuddy"]);
@@ -29,19 +35,27 @@ type RelayFeedback =
   | { kind: "opened_and_copied"; agent: RelayAgentOption }
   | { kind: "opened_copy_failed"; agent: RelayAgentOption }
   | { kind: "copy_fallback"; agent: RelayAgentOption }
-  | { kind: "failed"; agent: RelayAgentOption };
+  | { kind: "failed"; agent: RelayAgentOption }
+  | { kind: "waiting"; agent: RelayAgentOption }
+  | { kind: "verified"; agent: RelayAgentOption }
+  | { kind: "verify_timeout"; agent: RelayAgentOption };
 
 export function FirstEncounterRelayChallenge(props: FirstEncounterRelayChallengeProps) {
   const { t } = useTranslation();
   const [feedback, setFeedback] = useState<RelayFeedback | null>(null);
   const [launchingSourceId, setLaunchingSourceId] = useState<string | null>(null);
   const feedbackTimerRef = useRef<number | null>(null);
+  const mountedRef = useRef(true);
   const agents = useMemo(() => relayAgentOptions(props.agents), [props.agents]);
 
-  useEffect(() => () => {
-    if (feedbackTimerRef.current !== null) {
-      window.clearTimeout(feedbackTimerRef.current);
-    }
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (feedbackTimerRef.current !== null) {
+        window.clearTimeout(feedbackTimerRef.current);
+      }
+    };
   }, []);
 
   function showTemporaryFeedback(nextFeedback: RelayFeedback) {
@@ -60,15 +74,22 @@ export function FirstEncounterRelayChallenge(props: FirstEncounterRelayChallenge
       return;
     }
     setLaunchingSourceId(agent.sourceId);
+    const startedAt = new Date().toISOString();
     try {
-      const prompt = t("onboarding.relay.prompt");
       const outcome = await launchFirstEncounterRelay({
         sourceId: agent.sourceId,
-        prompt,
+        prompt: props.prompt,
         openAgent: props.onOpenAgent,
         copyPrompt: props.onCopyPrompt
       });
-      if (outcome.opened) {
+      props.onLifecycle?.(
+        "relay_clicked",
+        agent.sourceId,
+        outcome.opened ? "opened" : outcome.copied ? "copied_fallback" : "failed"
+      );
+      if (outcome.copied && props.onVerifyMemory) {
+        beginMemoryVerification(agent, startedAt);
+      } else if (outcome.opened) {
         showTemporaryFeedback({ agent, kind: outcome.copied ? "opened_and_copied" : "opened_copy_failed" });
       } else {
         showTemporaryFeedback({ agent, kind: outcome.copied ? "copy_fallback" : "failed" });
@@ -80,9 +101,31 @@ export function FirstEncounterRelayChallenge(props: FirstEncounterRelayChallenge
     }
   }
 
+  function beginMemoryVerification(agent: RelayAgentOption, startedAt: string) {
+    if (feedbackTimerRef.current !== null) {
+      window.clearTimeout(feedbackTimerRef.current);
+      feedbackTimerRef.current = null;
+    }
+    setFeedback({ kind: "waiting", agent });
+    void props.onVerifyMemory?.(agent.sourceId, startedAt).then((verified) => {
+      if (!mountedRef.current) {
+        return;
+      }
+      setFeedback({ kind: verified ? "verified" : "verify_timeout", agent });
+      if (verified) {
+        props.onLifecycle?.("memory_verified", agent.sourceId, "memory_search");
+      }
+    }).catch(() => {
+      if (mountedRef.current) {
+        setFeedback({ kind: "verify_timeout", agent });
+      }
+    });
+  }
+
   async function copyInstruction() {
     try {
-      await (props.onCopyPrompt ?? copyRelayPrompt)(t("onboarding.relay.prompt"));
+      await (props.onCopyPrompt ?? copyRelayPrompt)(props.prompt);
+      props.onLifecycle?.("relay_clicked", "", "copy_prompt");
       showTemporaryFeedback({ kind: "copied" });
     } catch {
       showTemporaryFeedback({ kind: "copy_failed" });
@@ -154,6 +197,7 @@ export function FirstEncounterRelayChallenge(props: FirstEncounterRelayChallenge
 
 export function FirstEncounterRelayOptIn(props: FirstEncounterRelayOptInProps) {
   const { t } = useTranslation();
+  const showAction = Boolean(props.onOpenConnections);
   return (
     <div className="mt-4 rounded-xl border border-action-sky/20 bg-action-sky/6 px-4 py-3.5">
       <div className="flex items-start gap-3">
@@ -162,16 +206,20 @@ export function FirstEncounterRelayOptIn(props: FirstEncounterRelayOptInProps) {
         </div>
         <div className="min-w-0 flex-1">
           <div className="text-sm font-semibold text-text-ink/85">{t("onboarding.relay.optInTitle")}</div>
-          <p className="mt-0.5 text-xs leading-relaxed text-text-ink/50">{t("onboarding.relay.optInBody")}</p>
+          <p className="mt-0.5 text-xs leading-relaxed text-text-ink/50">
+            {t(showAction ? "onboarding.relay.optInBody" : "onboarding.relay.optInHint")}
+          </p>
         </div>
-        <button
-          type="button"
-          onClick={props.onOpenConnections}
-          className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg bg-action-sky px-3 text-[11px] font-semibold text-white transition-colors hover:bg-action-sky-hover"
-        >
-          {t("onboarding.relay.optInAction")}
-          <ArrowRight size={13} aria-hidden="true" />
-        </button>
+        {showAction ? (
+          <button
+            type="button"
+            onClick={props.onOpenConnections}
+            className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg bg-action-sky px-3 text-[11px] font-semibold text-white transition-colors hover:bg-action-sky-hover"
+          >
+            {t("onboarding.relay.optInAction")}
+            <ArrowRight size={13} aria-hidden="true" />
+          </button>
+        ) : null}
       </div>
     </div>
   );
@@ -181,7 +229,9 @@ export function relayAgentOptions(agents: RelayAgentOption[]): RelayAgentOption[
   const seen = new Set<string>();
   return agents.filter((agent) => {
     const sourceId = normalizeAgentSourceId(agent.sourceId);
-    if (!agent.available || agent.status === "not_connected" || !RELAY_AGENT_IDS.has(sourceId) || seen.has(sourceId)) {
+    // Same presence gate as the onboarding scan list; only keep agents we can launch.
+    const present = agent.available && (agent.builtin || agent.messageCount > 0);
+    if (!present || !RELAY_AGENT_IDS.has(sourceId) || seen.has(sourceId)) {
       return false;
     }
     seen.add(sourceId);
@@ -189,9 +239,13 @@ export function relayAgentOptions(agents: RelayAgentOption[]): RelayAgentOption[
   });
 }
 
-/** True when at least one supported agent binary/history source was detected on this machine. */
+/** True when at least one launchable agent source is present on this machine. */
 export function hasDetectedRelayAgents(agents: RelayAgentOption[]): boolean {
-  return agents.some((agent) => agent.available && RELAY_AGENT_IDS.has(normalizeAgentSourceId(agent.sourceId)));
+  return agents.some((agent) => (
+    agent.available
+    && (agent.builtin || agent.messageCount > 0)
+    && RELAY_AGENT_IDS.has(normalizeAgentSourceId(agent.sourceId))
+  ));
 }
 
 export function firstEncounterFollowUpMode(permission: ScanPermission): "relay" | "connect" | null {
@@ -220,6 +274,12 @@ function relayFeedbackStatus(
   }
   const agent = relayAgentName(feedback.agent);
   switch (feedback.kind) {
+    case "waiting":
+      return { tone: "info", text: t("onboarding.relay.waiting", { agent }) };
+    case "verified":
+      return { tone: "info", text: t("onboarding.relay.verified", { agent }) };
+    case "verify_timeout":
+      return { tone: "info", text: t("onboarding.relay.verifyTimeout") };
     case "opened_and_copied":
       return { tone: "info", text: t("onboarding.relay.openedCopied", { agent }) };
     case "copy_fallback":
@@ -239,9 +299,10 @@ export interface LaunchFirstEncounterRelayInput {
 }
 
 export async function launchFirstEncounterRelay(input: LaunchFirstEncounterRelayInput): Promise<{ opened: boolean; copied: boolean }> {
+  const prompt = formatRelayAgentPrompt(input.sourceId, input.prompt);
   let copied = false;
   try {
-    await (input.copyPrompt ?? copyRelayPrompt)(input.prompt);
+    await (input.copyPrompt ?? copyRelayPrompt)(prompt);
     copied = true;
   } catch {
     copied = false;
@@ -249,12 +310,33 @@ export async function launchFirstEncounterRelay(input: LaunchFirstEncounterRelay
 
   let opened = false;
   try {
-    opened = await input.openAgent?.(input.sourceId, input.prompt) ?? false;
+    opened = await input.openAgent?.(input.sourceId, prompt) ?? false;
   } catch {
     opened = false;
   }
 
   return { opened, copied };
+}
+
+const WORKBUDDY_MEMORY_COMMAND = "/memmy-memory";
+
+/** WorkBuddy invokes memmy-memory as a slash command before the continuation text. */
+export function formatRelayAgentPrompt(sourceId: string, prompt: string): string {
+  const trimmed = prompt.trim();
+  if (normalizeAgentSourceId(sourceId) !== "workbuddy") {
+    return trimmed;
+  }
+  if (!trimmed) {
+    return WORKBUDDY_MEMORY_COMMAND;
+  }
+  if (
+    trimmed === WORKBUDDY_MEMORY_COMMAND
+    || trimmed.startsWith(`${WORKBUDDY_MEMORY_COMMAND} `)
+    || trimmed.startsWith(`${WORKBUDDY_MEMORY_COMMAND}\n`)
+  ) {
+    return trimmed;
+  }
+  return `${WORKBUDDY_MEMORY_COMMAND} ${trimmed}`;
 }
 
 async function copyRelayPrompt(prompt: string): Promise<void> {

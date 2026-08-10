@@ -497,6 +497,11 @@ describe("HomePage", () => {
     expect(isAgentConversationAtBottom({ scrollTop: 300, clientHeight: 600, scrollHeight: 1000 })).toBe(false);
   });
 
+  it("re-pins conversation scroll when the first-encounter relay card mounts", () => {
+    const source = readFileSync(homePageSourcePath, "utf8");
+    expect(source).toContain("}, [chatScopeKey, firstEncounterRelayAnchorMessageId, state.agent.messages]);");
+  });
+
   it("完整模式当前会话消息会同步回桌宠 TaskBus", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
 

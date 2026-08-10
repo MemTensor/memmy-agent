@@ -2,14 +2,14 @@ import {
   OnboardingInsightReportInputSchema,
   OnboardingInsightReportResponseSchema,
   OnboardingInsightReportStreamEventSchema,
-  type OnboardingInsightAction,
   type OnboardingInsightDiagnostics,
   type OnboardingInsightReportResponse,
   type OnboardingInsightReportStreamEvent
 } from "@memmy/local-api-contracts";
 import { requestJson } from "../api/http.js";
 import { getRuntimeConfig } from "../api/runtime-config.js";
-import type { ResolvedLanguage } from "../i18n/messages.js";
+import { enUSMessages, zhCNMessages, type ResolvedLanguage } from "../i18n/messages.js";
+import { buildFirstEncounterRelayPrompt } from "./first-encounter-relay-prompt.js";
 
 export interface DiscoveredAgent {
   sourceId: string;
@@ -23,17 +23,14 @@ export interface FirstEncounterReportRequest {
   language: ResolvedLanguage;
 }
 
-export interface FirstEncounterTaskAction {
-  buttonLabel: string;
-  description: string;
-  suggestedPrompt: string;
-}
-
 export interface FirstEncounterReportPayload {
   body: string;
-  actions: FirstEncounterTaskAction[];
   agents: DiscoveredAgent[];
   emptyHistory: boolean;
+  language: ResolvedLanguage;
+  workspacePath: string | null;
+  reportPrompt: string;
+  relayPrompt: string;
 }
 
 export interface FirstEncounterReportStreamDoneMeta {
@@ -42,7 +39,7 @@ export interface FirstEncounterReportStreamDoneMeta {
 
 export interface FirstEncounterReportStreamHandlers {
   onAgents?: (agents: DiscoveredAgent[]) => void;
-  onChunk: (delta: string) => void;
+  onChunk: (delta: string, payload: FirstEncounterReportPayload) => void;
   onDone: (payload: FirstEncounterReportPayload, meta: FirstEncounterReportStreamDoneMeta) => void;
 }
 
@@ -56,7 +53,7 @@ export async function loadFirstEncounterReport(request: FirstEncounterReportRequ
       locale: request.language
     })
   });
-  const payload = toFirstEncounterReportPayload(response);
+  const payload = toFirstEncounterReportPayload(response, request.language);
   if (!payload) {
     throw new Error("first encounter report response is empty");
   }
@@ -87,15 +84,29 @@ export async function streamFirstEncounterReport(
     }
 
     let streamed = false;
+    let streamedBody = "";
+    let latestDiagnostics: OnboardingInsightDiagnostics | null = null;
     for await (const event of readInsightReportStreamEvents(response.body)) {
       if (event.type === "sampled") {
+        latestDiagnostics = event.diagnostics;
         handlers.onAgents?.(toDiscoveredAgents(event.diagnostics));
       } else if (event.type === "chunk") {
+        streamedBody += event.delta;
+        const payload = latestDiagnostics
+          ? toFirstEncounterReportPayload({
+              status: "ready",
+              reportMarkdown: streamedBody,
+              diagnostics: latestDiagnostics
+            }, request.language)
+          : null;
+        if (!payload) {
+          continue;
+        }
         streamed = true;
-        handlers.onChunk(event.delta);
+        handlers.onChunk(event.delta, payload);
       } else {
         handlers.onAgents?.(toDiscoveredAgents(event.response.diagnostics));
-        const payload = toFirstEncounterReportPayload(event.response);
+        const payload = toFirstEncounterReportPayload(event.response, request.language);
         if (!payload) {
           throw new Error("first encounter report response is empty");
         }
@@ -177,26 +188,23 @@ function parseInsightReportStreamFrame(frame: string): OnboardingInsightReportSt
   }
 }
 
-function toFirstEncounterTaskAction(action: OnboardingInsightAction): FirstEncounterTaskAction {
-  return {
-    buttonLabel: action.buttonLabel,
-    description: action.description,
-    suggestedPrompt: action.suggestedPrompt
-  };
-}
-
-function toFirstEncounterReportPayload(response: OnboardingInsightReportResponse): FirstEncounterReportPayload | null {
+function toFirstEncounterReportPayload(
+  response: OnboardingInsightReportResponse,
+  fallbackLanguage: ResolvedLanguage
+): FirstEncounterReportPayload | null {
   const body = response.reportMarkdown.trim();
-  const actions = [
-    response.primaryAction,
-    ...response.secondaryActions
-  ].filter((action): action is OnboardingInsightAction => Boolean(action)).map(toFirstEncounterTaskAction);
+  const language = response.diagnostics.reportLanguage ?? fallbackLanguage;
+  const workspacePath = response.diagnostics.latestWorkspacePath?.trim() || null;
+  const messages = language === "zh-CN" ? zhCNMessages : enUSMessages;
 
   return body ? {
     body,
-    actions,
     agents: toDiscoveredAgents(response.diagnostics),
-    emptyHistory: response.diagnostics.sampledQueryCount === 0
+    emptyHistory: response.diagnostics.sampledQueryCount === 0,
+    language,
+    workspacePath,
+    reportPrompt: messages["onboarding.report.userPrompt"],
+    relayPrompt: buildFirstEncounterRelayPrompt(language, workspacePath)
   } : null;
 }
 

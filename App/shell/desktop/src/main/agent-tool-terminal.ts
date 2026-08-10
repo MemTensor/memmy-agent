@@ -53,6 +53,8 @@ export const HERMES_TERMINAL_SCRIPT = [
   "end run"
 ].join("\n");
 
+export const WORKBUDDY_APP_PATH = "/Applications/WorkBuddy.app";
+
 export function openClawBinaryCandidates(homeDirectory: string): string[] {
   return [`${homeDirectory}/.openclaw/bin/openclaw`, `${homeDirectory}/.local/bin/openclaw`, "/opt/homebrew/bin/openclaw", "/usr/local/bin/openclaw"];
 }

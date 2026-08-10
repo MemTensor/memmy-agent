@@ -1,7 +1,11 @@
+// @vitest-environment happy-dom
+
 /** Product tour layout tests. */
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  findClosestScrollableAncestor,
   resolveProductTourStepLayout,
+  scrollProductTourHighlightIntoView,
   type ProductTourAnchorLookup,
   type ProductTourBubblePlacement,
   type ProductTourHighlightSpec,
@@ -23,7 +27,8 @@ describe("resolveProductTourStepLayout", () => {
     expect(resolveProductTourStepLayout(highlight, bubble, anchors(["memory-nav"]))).toEqual({
       highlight: { top: "184px", left: "8px", width: "300px", height: "40px" },
       extraHighlights: [],
-      bubblePosition: { top: "204px", left: "324px", transform: "translateY(-50%)" }
+      bubblePosition: { top: "204px", left: "324px", transform: "translateY(-50%)" },
+      arrow: "left"
     });
   });
 
@@ -59,7 +64,8 @@ describe("resolveProductTourStepLayout", () => {
     ).toEqual({
       highlight: { top: "149px", left: "196px", width: "980px", height: "635px" },
       extraHighlights: [{ top: "120px", left: "8px", width: "160px", height: "36px" }],
-      bubblePosition: { top: "169px", right: "28px" }
+      bubblePosition: { top: "169px", right: "28px" },
+      arrow: "left"
     });
   });
 
@@ -101,6 +107,140 @@ describe("resolveProductTourStepLayout", () => {
     };
 
     expect(resolveProductTourStepLayout(highlight, bubble, anchors())).toBeNull();
+  });
+
+  it("above 把气泡放在遮罩上方并朝下指向高亮", () => {
+    const highlight: ProductTourHighlightSpec = {
+      anchorId: "scan-preferences",
+      padding: { top: 8, right: 8, bottom: 8, left: 8 }
+    };
+    const bubble: ProductTourBubblePlacement = {
+      anchorId: "scan-preferences",
+      side: "above",
+      align: "start",
+      gap: 12
+    };
+
+    expect(
+      resolveProductTourStepLayout(
+        highlight,
+        bubble,
+        anchors(
+          [["scan-preferences", { top: 560, left: 220, width: 720, height: 180 }]],
+          { width: 1200, height: 800 }
+        )
+      )
+    ).toEqual({
+      highlight: { top: "552px", left: "212px", width: "736px", height: "196px" },
+      extraHighlights: [],
+      // 560 - 12 - 200 = 348
+      bubblePosition: { top: "348px", left: "220px" },
+      arrow: "bottom"
+    });
+  });
+
+  it("侧栏气泡锚点远离底部遮罩时，仍贴着遮罩自适应（不钉在导航旁）", () => {
+    const highlight: ProductTourHighlightSpec = {
+      anchorId: "scan-preferences",
+      padding: { top: 8, right: 8, bottom: 8, left: 8 }
+    };
+    const bubble: ProductTourBubblePlacement = {
+      anchorId: "sources-nav",
+      side: "right",
+      align: "center",
+      gap: 12
+    };
+
+    // Nav mid-left; Auto sync near bottom — preferred slot does not overlap mask.
+    expect(
+      resolveProductTourStepLayout(
+        highlight,
+        bubble,
+        anchors(
+          [
+            ["sources-nav", { top: 280, left: 12, width: 168, height: 36 }],
+            ["scan-preferences", { top: 560, left: 220, width: 720, height: 180 }]
+          ],
+          { width: 1200, height: 800 }
+        )
+      )
+    ).toEqual({
+      highlight: { top: "552px", left: "212px", width: "736px", height: "196px" },
+      extraHighlights: [],
+      // below mask does not fit; pin bottom edge 12px above padded highlight top (552)
+      bubblePosition: { bottom: "260px", left: "212px" },
+      arrow: "bottom"
+    });
+  });
+});
+
+describe("scrollProductTourHighlightIntoView", () => {
+  afterEach(() => {
+    document.body.replaceChildren();
+    vi.restoreAllMocks();
+  });
+
+  it("page-start 把最近可滚动祖先滚回顶部，而不是把高亮居中", () => {
+    const scroller = document.createElement("div");
+    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 1200 });
+    Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 400 });
+    scroller.style.overflowY = "auto";
+    scroller.scrollTop = 320;
+    const scrollTo = vi.fn();
+    scroller.scrollTo = scrollTo as unknown as typeof scroller.scrollTo;
+
+    const highlight = document.createElement("div");
+    scroller.appendChild(highlight);
+    document.body.appendChild(scroller);
+
+    const originalGetComputedStyle = window.getComputedStyle.bind(window);
+    vi.spyOn(window, "getComputedStyle").mockImplementation((element) => {
+      if (element === scroller) {
+        return { overflowY: "auto" } as CSSStyleDeclaration;
+      }
+      return originalGetComputedStyle(element);
+    });
+
+    scrollProductTourHighlightIntoView(highlight, "page-start");
+
+    expect(findClosestScrollableAncestor(highlight)).toBe(scroller);
+    expect(scrollTo).toHaveBeenCalledWith({ top: 0, behavior: "auto" });
+  });
+
+  it("nearest 模式只做最近对齐，不强制回顶", () => {
+    const highlight = document.createElement("div");
+    const scrollIntoView = vi.fn();
+    highlight.scrollIntoView = scrollIntoView;
+    document.body.appendChild(highlight);
+
+    scrollProductTourHighlightIntoView(highlight, "nearest");
+
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: "nearest", inline: "nearest", behavior: "auto" });
+  });
+
+  it("page-end 把滚动容器滚到最底，用于自动同步等页底锚点", () => {
+    const scroller = document.createElement("div");
+    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 1200 });
+    Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 400 });
+    scroller.style.overflowY = "auto";
+    const scrollTo = vi.fn();
+    scroller.scrollTo = scrollTo as unknown as typeof scroller.scrollTo;
+
+    const highlight = document.createElement("div");
+    scroller.appendChild(highlight);
+    document.body.appendChild(scroller);
+
+    const originalGetComputedStyle = window.getComputedStyle.bind(window);
+    vi.spyOn(window, "getComputedStyle").mockImplementation((element) => {
+      if (element === scroller) {
+        return { overflowY: "auto" } as CSSStyleDeclaration;
+      }
+      return originalGetComputedStyle(element);
+    });
+
+    scrollProductTourHighlightIntoView(highlight, "page-end");
+
+    expect(scrollTo).toHaveBeenCalledWith({ top: 800, behavior: "auto" });
   });
 });
 

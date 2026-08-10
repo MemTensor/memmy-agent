@@ -63,7 +63,7 @@ export function createCapturingL2Llm(calls: Array<{
           support_trace_ids: []
         }) as unknown as T;
       }
-      if (options.operation === "l3.abstraction.v2") {
+      if (options.operation === "l3.abstraction.v3") {
         return (l3AbstractionResponse ?? {
           title: "Pytest sqlite migration environment",
           domain_tags: ["pytest", "sqlite"],
@@ -163,7 +163,7 @@ export function createCapturingL2Llm(calls: Array<{
 export function createNoToolSkillLlm(calls: Array<{
   messages: Array<{ role: string; content: string }>;
   options: { operation: string };
-}> = []): LlmClient {
+}> = [], l3AbstractionResponse?: Record<string, unknown>): LlmClient {
   const base = createCapturingL2Llm(calls, {
     name: "memory_workflow_pytest_retry",
     retrieval_blurb: "Use for python REST memory workflows and pytest retry workflows that require focused verification.",
@@ -178,7 +178,7 @@ export function createNoToolSkillLlm(calls: Array<{
     }],
     tools: [],
     tags: ["pytest", "retry"]
-  });
+  }, undefined, l3AbstractionResponse);
   return {
     ...base,
     async completeJson<T extends Record<string, unknown>>(

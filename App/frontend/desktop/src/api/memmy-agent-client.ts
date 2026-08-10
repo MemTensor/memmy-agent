@@ -106,6 +106,11 @@ const WebuiThreadSchema = z.object({
   messages: z.array(z.record(z.string(), z.unknown()))
 });
 
+const SeedWebuiChatResponseSchema = z.object({
+  chat_id: z.string().min(1),
+  session_key: z.string().min(1)
+});
+
 const LastCompactionSchema = z.object({
   available: z.boolean(),
   sessionKey: z.string(),
@@ -194,6 +199,7 @@ export type MemmyAgentProject = z.infer<typeof ProjectSchema>;
 export type MemmyAgentSessionSnapshot = z.infer<typeof SessionSnapshotSchema>;
 export type MemmyAgentSidebarState = z.infer<typeof SidebarStateSchema>;
 export type MemmyAgentWebuiThread = z.infer<typeof WebuiThreadSchema>;
+export type MemmyAgentSeededChat = z.infer<typeof SeedWebuiChatResponseSchema>;
 export type MemmyAgentLastCompaction = z.infer<typeof LastCompactionSchema>;
 export type ResolvedAgentArtifact = z.infer<typeof ResolvedArtifactSchema>;
 export type UploadedAgentImage = z.infer<typeof UploadedAgentImageSchema>;
@@ -284,6 +290,10 @@ export type MemmyAgentSendMessageInput = {
   media?: MemmyAgentMediaInput[];
 };
 
+export type MemmyAgentModelError = {
+  category: "quota_exhausted";
+};
+
 export type MemmyAgentWsEvent = {
   event: string;
   connection_generation?: number;
@@ -301,6 +311,7 @@ export type MemmyAgentWsEvent = {
   client_request_id?: string;
   latency_ms?: number;
   media_urls?: MemmyAgentMediaAttachment[];
+  model_error?: MemmyAgentModelError;
   metadata?: Record<string, unknown>;
   tool_events?: unknown;
   agent_ui?: unknown;
@@ -347,6 +358,11 @@ export interface MemmyAgentClient {
     options?: MemmyAgentRequestOptions
   ): Promise<MemmyAgentProjectDeleteResult>;
   readWebuiThread(sessionKey: string): Promise<MemmyAgentWebuiThread>;
+  seedWebuiChat(input: {
+    userText: string;
+    assistantText: string;
+    title?: string;
+  }): Promise<MemmyAgentSeededChat>;
   readLastCompaction(sessionKey: string): Promise<MemmyAgentLastCompaction>;
   renameSession(sessionKey: string, title: string): Promise<MemmyAgentSessionSummary>;
   deleteSession(sessionKey: string): Promise<boolean>;
@@ -677,6 +693,22 @@ class HttpMemmyAgentClient implements MemmyAgentClient {
 
   async readWebuiThread(sessionKey: string): Promise<MemmyAgentWebuiThread> {
     return this.request(`/api/sessions/${encodeURIComponent(sessionKey)}/webui-thread`, WebuiThreadSchema);
+  }
+
+  async seedWebuiChat(input: {
+    userText: string;
+    assistantText: string;
+    title?: string;
+  }): Promise<MemmyAgentSeededChat> {
+    const title = input.title?.trim();
+    return this.request("/api/webui/seed-chat", SeedWebuiChatResponseSchema, {
+      method: "POST",
+      body: {
+        user_text: input.userText,
+        assistant_text: input.assistantText,
+        ...(title ? { title } : {})
+      }
+    });
   }
 
   async readLastCompaction(sessionKey: string): Promise<MemmyAgentLastCompaction> {

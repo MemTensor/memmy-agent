@@ -54,13 +54,14 @@ describe("ConnectChannelModal", () => {
     expect(shouldRefreshAfterChannelConnectStatus("connected")).toBe(true);
   });
 
-  it("Feishu 表单相位显示 App ID 和 App Secret 输入", () => {
+  it("Feishu 默认相位显示扫码创建入口", () => {
     const html = renderModal({ ...baseChannel, slug: "feishu", name: "Feishu", authKind: "apiKey" });
 
     expect(html).toContain("Connect Feishu");
+    expect(html).toContain("Scan with the Feishu app to create a bot and connect it automatically.");
+    expect(html).toContain("Scan to create and connect");
     expect(html).toContain("App ID");
-    expect(html).toContain("App Secret");
-    expect(html).toContain("Connect Feishu");
+    expect(html).not.toContain("App Secret");
     expect(html).not.toContain("Scan with WeChat");
   });
 
@@ -81,12 +82,12 @@ describe("ConnectChannelModal", () => {
     expect(html).toContain("target=\"_blank\"");
   });
 
-  it("Feishu 表单相位展示指向飞书官方教程的外链，教用户获取 App ID / Secret", () => {
+  it("Feishu 扫码相位保留手动输入入口且不展示手动教程", () => {
     const html = renderModal({ ...baseChannel, slug: "feishu", name: "Feishu", authKind: "apiKey" });
 
-    expect(html).toContain("https://open.feishu.cn/document/develop-process/self-built-application-development-process");
-    expect(html).toContain("How to create a Feishu custom app");
-    expect(html).toContain("target=\"_blank\"");
+    expect(html).toContain("Already have a Feishu app? Enter App ID / Secret");
+    expect(html).not.toContain("https://open.feishu.cn/document/develop-process/self-built-application-development-process");
+    expect(html).not.toContain("How to create a Feishu custom app");
     expect(html).not.toContain("open.dingtalk.com");
   });
 

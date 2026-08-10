@@ -169,6 +169,8 @@ export interface MemoryFilter {
   agentId?: string;
   excludedAgentIds?: string[];
   appId?: string;
+  createdAtGte?: IsoTime;
+  createdAtLt?: IsoTime;
   memoryLayer?: MemoryLayer | MemoryLayer[];
   status?: MemoryStatus | MemoryStatus[];
   tags?: string[];
@@ -318,8 +320,6 @@ export interface TurnStartResponse {
   contextPacketId: string;
   turnId: string;
   sessionId: string;
-  episodeId: string;
-  closedEpisodeIds: string[];
   searchEventId: string;
   hits: RecallHit[];
   injectedContext: InjectedContext;

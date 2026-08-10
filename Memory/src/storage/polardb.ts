@@ -42,6 +42,8 @@ export function polardbMigrationSql(): string[] {
     )`,
     `CREATE INDEX IF NOT EXISTS idx_memories_layer_status_updated
       ON memories (memory_layer, status, updated_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_memories_layer_status_created
+      ON memories (memory_layer, status, created_at DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_memories_conversation_updated
       ON memories (conversation_id, updated_at DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_memories_agent_app

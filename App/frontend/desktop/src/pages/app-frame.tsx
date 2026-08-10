@@ -1,9 +1,15 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { PRODUCT_TOUR_MEMORY_NAV_ANCHOR, PRODUCT_TOUR_TOOLS_NAV_ANCHOR } from "../app/product-tour-layout.js";
+import {
+  productTourIncludesLogs,
+  productTourStartMemorySubPage,
+  productTourStartRoute
+} from "../app/product-tour.js";
+import { PRODUCT_TOUR_CHAT_CONTENT_ANCHOR, PRODUCT_TOUR_MEMORY_NAV_ANCHOR, PRODUCT_TOUR_TOOLS_NAV_ANCHOR } from "../app/product-tour-layout.js";
 import type { AppRoutePath } from "../app/routes.js";
-import { clearDeferredGuidanceStep, clearFocusedAgentTarget, clearProductTourStep, readDeferredGuidanceStep, readGuidanceCompleted, routeTable, writeDeferredGuidanceStep, writeGuidanceCompleted } from "../app/routes.js";
+import { clearFocusedAgentTarget, clearProductTourStep, readDeferredGuidanceStep, readGuidanceCompleted, routeTable, writeDeferredGuidanceStep } from "../app/routes.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
+import { buildOnboardingStepCompletedEvent } from "../analytics/onboarding-analytics.js";
 import {
   useOptionalAgentRuntimeBridge,
   type AgentTaskStateCoordinator,
@@ -25,14 +31,10 @@ import { useAppState } from "../state/app-state.js";
 import { agentChatScopeKey } from "../state/agent-composer-state.js";
 import type { AgentTaskView } from "../state/agent-chat-slice.js";
 import { decideTaskDoneNotification } from "../state/task-done-notification.js";
-import { maskAccountIdentifier } from "../utils/mask-account-identifier.js";
 import { openExternalUrl } from "../utils/open-url.js";
 import { isComposingKeyboardEvent } from "../utils/keyboard.js";
 import { ImprovementProgramModal } from "./improvement-program-modal.js";
-import { NicknameModal } from "../components/nickname-modal.js";
-import { randomNickname } from "../lib/nickname.js";
-import { ProductTourGuide, productTourTabRoute, type ProductTourTab } from "../app/product-tour.js";
-import { persistNickname } from "../app/nickname.js";
+import { writeMemorySubPage } from "./memory-page.js";
 import { SearchPalette } from "../components/search-palette.js";
 import { SidebarResizeHandle, useCodexResizableSidebar } from "./sidebar-resize.js";
 import {
@@ -267,7 +269,6 @@ export function AppFrame(props: AppFrameProps) {
   const [deferredGuidanceStep, setDeferredGuidanceStep] = useState(() =>
     readDeferredGuidanceStep(typeof window === "undefined" ? undefined : window.sessionStorage)
   );
-  const [deferredNickname, setDeferredNickname] = useState("");
   const [sidebarHidden, setSidebarHidden] = useState(false);
   const communityMenuRef = useRef<HTMLDivElement | null>(null);
   const taskScrollRef = useRef<HTMLDivElement | null>(null);
@@ -538,39 +539,36 @@ export function AppFrame(props: AppFrameProps) {
     if (deferredGuidanceStep !== "armed") {
       return;
     }
+    const storage = typeof window === "undefined" ? undefined : window.sessionStorage;
     const firstStep = state.bootstrap?.app.userMode !== "byok" && state.bootstrap?.onboarding.improvementProgram === "unset" ? "improvement" : "product_tour";
     if (firstStep === "product_tour") {
-      clearProductTourStep(typeof window === "undefined" ? undefined : window.sessionStorage);
+      const includeLogs = productTourIncludesLogs(state.bootstrap?.onboarding.scanPermission);
+      clearProductTourStep(storage);
+      writeMemorySubPage(storage, productTourStartMemorySubPage(includeLogs));
+      dispatch(appActions.navigate(productTourStartRoute(includeLogs)));
     }
-    writeDeferredGuidanceStep(typeof window === "undefined" ? undefined : window.sessionStorage, firstStep);
+    writeDeferredGuidanceStep(storage, firstStep);
     setDeferredGuidanceStep(firstStep);
-  }
-
-  function submitDeferredNickname() {
-    void persistNickname({
-      rawNickname: deferredNickname,
-      language,
-      isByok: state.bootstrap?.app.userMode === "byok",
-      storage: typeof window === "undefined" ? undefined : window.localStorage,
-      current: state.account,
-      updateProfile: (nickname) => clients?.account.updateProfile({ nickname }) ?? Promise.resolve(null)
-    }).then((update) => dispatch(appActions.accountUpdated(update)));
-    track({ name: "onboarding_step_completed", params: { step: "nickname", step_index: 0 }, consentTier: "basic" });
-    writeGuidanceCompleted(typeof window === "undefined" ? undefined : window.localStorage);
-    clearDeferredGuidanceStep(typeof window === "undefined" ? undefined : window.sessionStorage);
-    setDeferredGuidanceStep(null);
   }
 
   function chooseDeferredImprovementProgram(accepted: boolean) {
     const onboardingPatch = { improvementProgram: accepted ? "accepted" : "declined" } as const;
     const privacyPatch = { allowMemoryImprovementUpload: accepted };
+    const storage = typeof window === "undefined" ? undefined : window.sessionStorage;
+    const includeLogs = productTourIncludesLogs(state.bootstrap?.onboarding.scanPermission);
 
-    clearProductTourStep(typeof window === "undefined" ? undefined : window.sessionStorage);
-    writeDeferredGuidanceStep(typeof window === "undefined" ? undefined : window.sessionStorage, "product_tour");
+    clearProductTourStep(storage);
+    writeMemorySubPage(storage, productTourStartMemorySubPage(includeLogs));
+    writeDeferredGuidanceStep(storage, "product_tour");
     setDeferredGuidanceStep("product_tour");
+    dispatch(appActions.navigate(productTourStartRoute(includeLogs)));
     dispatch(appActions.onboardingUpdated(onboardingPatch));
     dispatch(appActions.privacyUpdated(privacyPatch));
-    track({ name: "onboarding_step_completed", params: { step: "improvement_program", step_index: 2, choice: accepted ? "accepted" : "declined" }, consentTier: "basic" });
+    track(buildOnboardingStepCompletedEvent({
+      step: "improvement_program",
+      choice: accepted ? "accepted" : "declined",
+      scanPermission: state.bootstrap?.onboarding.scanPermission
+    }));
 
     void clients?.config
       .setImprovementProgram(accepted)
@@ -1438,6 +1436,7 @@ export function AppFrame(props: AppFrameProps) {
           </header>
         )}
         <div
+          data-tour-anchor={PRODUCT_TOUR_CHAT_CONTENT_ANCHOR}
           className={`min-h-0 h-full flex-1 overflow-hidden${
             sidebarHidden && !props.topBarBorder ? " app-frame-content-body--sidebar-hidden" : ""
           }`}
@@ -1500,32 +1499,6 @@ export function AppFrame(props: AppFrameProps) {
             && (state.bootstrap?.promotions?.improvementGiftRewardTokens ?? 0) > 0
           }
           giftTokens={state.bootstrap?.promotions?.improvementGiftRewardTokens ?? 0}
-        />
-      )}
-      {deferredGuidanceStep === "product_tour" && (
-        <ProductTourGuide
-          onDismiss={() => {
-            // Increment 3: after the product tour ends, enter the final DGS step — the nickname modal (set for both account and BYOK).
-            // The tour has ended; clear the persisted step index so the next tour doesn't resume from a mid-tour step.
-            clearProductTourStep(typeof window === "undefined" ? undefined : window.sessionStorage);
-            setDeferredNickname(randomNickname(language));
-            writeDeferredGuidanceStep(typeof window === "undefined" ? undefined : window.sessionStorage, "nickname");
-            setDeferredGuidanceStep("nickname");
-          }}
-          onTabChange={(tab: ProductTourTab) => {
-            // The memory step maps to /main (stay on the main workspace and highlight the memory entry icon) rather than the standalone /memory page —
-            // /memory doesn't host the tour overlay, so navigating there would lose the tour and strand the user on the memory page. See productTourTabRoute for the mapping.
-            dispatch(appActions.navigate(productTourTabRoute(tab)));
-          }}
-        />
-      )}
-      {deferredGuidanceStep === "nickname" && (
-        <NicknameModal
-          open
-          nickname={deferredNickname}
-          onNicknameChange={setDeferredNickname}
-          onShuffle={() => setDeferredNickname(randomNickname(language))}
-          onSubmit={submitDeferredNickname}
         />
       )}
       <SearchPalette
@@ -2874,12 +2847,11 @@ export function resolveSidebarAccountSummary(state: AppState, labels: SidebarAcc
   }
 
   if (userMode === "account") {
-    const accountIdentifier = state.account.email || state.account.phoneNumber || "";
-    const maskedIdentifier = maskAccountIdentifier(accountIdentifier);
+    const accountIdentifier = (state.account.email || state.account.phoneNumber || "").trim();
 
     return {
-      name: state.account.nickname || maskedIdentifier || labels.accountFallback,
-      meta: maskedIdentifier || labels.accountMetaFallback
+      name: state.account.nickname || accountIdentifier || labels.accountFallback,
+      meta: accountIdentifier || labels.accountMetaFallback
     };
   }
 

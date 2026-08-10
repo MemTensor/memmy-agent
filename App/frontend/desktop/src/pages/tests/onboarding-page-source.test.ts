@@ -27,14 +27,15 @@ describe("OnboardingPage source", () => {
     expect(cloudMarkIndex).toBeGreaterThan(accountGuardIndex);
   });
 
-  it("产品导览已下沉到主页 app-frame DGS，不再挂在 /onboarding，也不由 router 直接展示", () => {
+  it("产品导览挂在 AppRouter（覆盖无 AppFrame 的记忆/工具页），不再挂在 /onboarding", () => {
     const source = readFileSync(onboardingPageSourcePath, "utf8");
     const appFrameSource = readFileSync(fileURLToPath(new URL("../app-frame.tsx", import.meta.url)), "utf8");
     const routerSource = readFileSync(fileURLToPath(new URL("../../app/router.tsx", import.meta.url)), "utf8");
 
     expect(source).not.toContain("ProductTourGuide");
-    expect(appFrameSource).toContain("<ProductTourGuide");
-    expect(routerSource).not.toContain("<ProductTourGuide");
+    expect(appFrameSource).not.toContain("<ProductTourGuide");
+    expect(routerSource).toContain("<ProductTourGuide");
+    expect(routerSource).toContain("productTourIncludesLogs(state.bootstrap?.onboarding.scanPermission)");
     expect(routerSource).not.toContain("hasDismissedProductTour");
     expect(routerSource).not.toContain("FORCE_FIRST_SCAN_PREVIEW");
   });
@@ -79,7 +80,7 @@ describe("OnboardingPage source", () => {
     expect(source).toContain("async function startFirstScanInBackground()");
     expect(source).toContain('if (!firstReportPayload) {');
     expect(source).toContain('setFirstScanStep("preparing_report");');
-    const reportDoneIndex = source.indexOf("onDone: (payload, _meta) => {");
+    const reportDoneIndex = source.indexOf("onDone: (payload, meta) => {");
     const reportDoneEndIndex = source.indexOf("}", source.indexOf("firstScanVisualComplete.current = true;", reportDoneIndex));
     expect(source.slice(reportDoneIndex, reportDoneEndIndex)).not.toContain('setFirstScanStep("report")');
     expect(source).toContain("<OnboardingScanAnimation");
@@ -88,25 +89,24 @@ describe("OnboardingPage source", () => {
     expect(source).toContain("function startFirstReport(seedAgents: DiscoveredAgent[])");
     expect(source).toContain("streamFirstEncounterReport(");
     expect(source).toContain("onAgents: (sampledAgents) => {");
-    expect(source).toContain("onChunk: (_delta) => {");
-    expect(source).toContain("setFirstReportShouldSimulate(true);");
+    expect(source).toContain("onChunk: (_delta, payload) => {");
+    expect(source).toContain("setFirstReportPayload(payload);");
+    expect(source).toContain("setFirstReportShouldSimulate(!meta.streamed);");
     expect(source).toContain("firstScanVisualComplete.current = true;");
     expect(source).toContain("setFirstScanStep(\"report\");");
-    expect(source).not.toContain("setFirstReportShouldSimulate(!meta.streamed);");
     expect(source).toContain("<FirstEncounterReport");
     expect(source).toContain("scheduleMemoryPanelCachePrefetch");
     expect(source).toContain("client: clients.memoryRuntime");
-    expect(source).toContain("function continueAfterReport()");
+    expect(source).toContain("function continueFromReport()");
+    expect(source).toContain("function completeReportFlow(createConversation: boolean)");
     expect(source).toContain('const patch = { currentStep: "product_tour_required" } as const;');
-    expect(source).toContain("function startReportTask(action: FirstEncounterTaskAction)");
-    expect(source).toContain("function startFirstConversation()");
-    expect(source).toContain("clearPendingFirstEncounterTaskLaunch");
-    expect(source).toContain("enterConversationAfterReport();");
     expect(source).not.toContain("markReportTaskDeferredImprovement");
     expect(source).toContain("writePendingFirstEncounterTaskLaunch");
+    expect(source).toContain("armFirstEncounterRelayChat");
     expect(source).not.toContain("composerDraftUpdated(agentChatScopeKey");
     expect(source).toContain("dispatch(appActions.onboardingUpdated(completionPatch));");
-    expect(source).toContain("dispatch(appActions.navigate(targetRoute));");
+    expect(source).toContain("dispatch(appActions.navigate(nextRoute));");
+    expect(source).toContain("productTourStartRoute(includeLogs)");
     expect(source).toContain("async function persistReportConversationCompletion");
     expect(source).toContain("const hasRenderableOnboardingStep = Boolean(activeFirstScanStep || scanOpen || productTourOpen);");
     expect(source).toContain('dispatch(appActions.navigate("/main"));');
@@ -115,6 +115,7 @@ describe("OnboardingPage source", () => {
     expect(source).toContain("const activeFirstScanStep = guidanceCompleted ? null : (firstScanStep ?? resumedFirstScanStep);");
     expect(source).toContain("const guidanceCompleted = readGuidanceCompleted(");
     expect(source).toContain("startAgentSourceScan({");
+    expect(source).toContain('mode: "initial_subset"');
     expect(source).toContain(".updateOnboarding(patch)");
     expect(source).toContain("startFirstReport([]);");
     expect(source).toContain("void startFirstScanInBackground().catch((error)");
@@ -133,13 +134,13 @@ describe("OnboardingPage source", () => {
     expect(source).not.toContain(".setImprovementProgram(accepted)");
   });
 
-  it("初见报告复用对话 Markdown 渲染并按流式文本展开", () => {
+  it("初见报告复用对话 Markdown 渲染并按流式文本展开，接续区替换多轮任务按钮", () => {
     const source = readFileSync(firstEncounterReportSourcePath, "utf8");
 
     expect(source).toContain('import { AgentMessageContent } from "./agent-message-content.js";');
     expect(source).toContain("const [displayedText, setDisplayedText] = useState(\"\");");
     expect(source).toContain("const scrollRef = useRef<HTMLDivElement | null>(null);");
-    expect(source).toContain("const contentIsStreaming = props.isStreaming || (props.simulateStreaming && !showActions);");
+    expect(source).toContain("const contentIsStreaming = props.isStreaming || (props.simulateStreaming && !showFollowUps);");
     expect(source).toContain("setDisplayedText(report);");
     expect(source).toContain("setDisplayedText(report.slice(0, index));");
     expect(source).toContain("<AgentMessageContent content={displayedText} isStreaming={contentIsStreaming} />");
@@ -152,15 +153,13 @@ describe("OnboardingPage source", () => {
     expect(source).toContain("payload: FirstEncounterReportPayload;");
     expect(source).toContain("isStreaming: boolean;");
     expect(source).toContain("simulateStreaming: boolean;");
-    expect(source).toContain("const primaryAction = props.payload.actions[0] ?? null;");
-    expect(source).toContain("const secondaryActions = props.payload.actions.slice(1, 3);");
-    expect(source).toContain("const emptyHistory = props.payload.emptyHistory;");
-    expect(source).toContain('t("onboarding.report.firstConversation")');
-    expect(source).toContain('t("onboarding.report.firstConversationDescription")');
-    expect(source).toContain("<ReportPrimaryAction {...mainAction} />");
-    expect(source).toContain("showActions && !emptyHistory");
-    expect(source).toContain("setShowActions(true);");
-    expect(source).toContain('t("onboarding.report.alternatives")');
+    expect(source).toContain('followUpMode: "relay" | "connect" | null;');
+    expect(source).toContain("<FirstEncounterRelayChallenge");
+    expect(source).toContain("<FirstEncounterRelayOptIn");
+    expect(source).toContain("onClick={props.onContinue}");
+    expect(source).toContain("setShowFollowUps(true);");
+    expect(source).not.toContain("<ReportPrimaryAction");
+    expect(source).not.toContain('t("onboarding.report.alternatives")');
   });
 
   it("初见报告协议只调用本地 onboarding insight API，失败时抛错且不降级 mock", () => {
@@ -175,7 +174,7 @@ describe("OnboardingPage source", () => {
     expect(source).toContain("streamFirstEncounterReport");
     expect(source).toContain('event.type === "sampled"');
     expect(source).toContain("handlers.onAgents?.(toDiscoveredAgents(event.diagnostics));");
-    expect(source).toContain("handlers.onChunk(event.delta);");
+    expect(source).toContain("handlers.onChunk(event.delta, payload);");
     expect(source).toContain("handlers.onDone(payload, { streamed });");
     expect(source).toContain("emptyHistory: response.diagnostics.sampledQueryCount === 0");
     expect(streamApiIndex).toBeGreaterThanOrEqual(0);
@@ -191,13 +190,16 @@ describe("OnboardingPage source", () => {
     const reportSource = readFileSync(firstEncounterReportSourcePath, "utf8");
     const scanSource = readFileSync(onboardingScanAnimationSourcePath, "utf8");
 
-    expect(reportSource).toContain("fixed inset-0 z-50 flex items-center justify-center bg-canvas-oat overflow-hidden");
-    expect(reportSource).toContain("my-8 flex max-h-[calc(100vh-64px)] flex-col");
+    expect(reportSource).toContain("fixed inset-0 z-50 overflow-y-auto bg-canvas-oat");
+    expect(reportSource).toContain("flex min-h-screen items-center justify-center px-6 py-8");
+    expect(reportSource).not.toMatch(/className="[^"]*min-h-full/);
     expect(reportSource).toContain('style={{ width: "min(calc(100vw - 48px), clamp(600px, 64vw, 760px))" }}');
-    expect(reportSource).toContain("bg-background-paper rounded-card shadow-[0_2px_12px_rgba(0,0,0,0.06)] p-6 mb-4 flex min-h-0 flex-col");
-    expect(reportSource).toContain("text-sm text-text-ink/80 leading-[1.8] whitespace-pre-line min-h-[120px] overflow-y-auto pr-1");
+    expect(reportSource).toContain("flex flex-col rounded-card bg-background-paper p-6 shadow-[0_2px_12px_rgba(0,0,0,0.06)]");
+    expect(reportSource).toContain("min-h-[120px] overflow-y-auto pr-1 text-sm leading-[1.8] whitespace-pre-line text-text-ink/80");
     expect(reportSource).toContain('style={{ maxHeight: "min(42vh, 360px)" }}');
     expect(reportSource).not.toContain("border-t border-border-stone/35");
+    expect(reportSource).not.toContain("overflow-hidden\">");
+    expect(reportSource).not.toContain("max-h-[calc(100vh-64px)]");
     expect(scanSource).toContain("fixed inset-0 z-50 flex items-center justify-center bg-canvas-oat");
     expect(scanSource).toContain("w-full max-w-[460px] mx-4");
     expect(scanSource).toContain("bg-background-paper rounded-card shadow-[0_2px_12px_rgba(0,0,0,0.06)] p-5");
@@ -218,7 +220,7 @@ describe("OnboardingPage source", () => {
     expect(scanSource).toContain("isPending={agent.conversations === null}");
   });
 
-  it("初见报告任务按钮跨路由后由主页直接发送,不落到输入框草稿", () => {
+  it("初见报告生成完成后立刻 seed-chat，主页只打开已写入会话", () => {
     const onboardingSource = readFileSync(onboardingPageSourcePath, "utf8");
     const homeSource = readFileSync(fileURLToPath(new URL("../home-page.tsx", import.meta.url)), "utf8");
     const taskLaunchSource = readFileSync(firstEncounterTaskLaunchSourcePath, "utf8");
@@ -226,27 +228,38 @@ describe("OnboardingPage source", () => {
     expect(taskLaunchSource).toContain("PENDING_FIRST_ENCOUNTER_TASK_LAUNCH_KEY");
     expect(taskLaunchSource).toContain("writePendingFirstEncounterTaskLaunch");
     expect(taskLaunchSource).toContain("consumePendingFirstEncounterTaskLaunch");
-    expect(onboardingSource).toContain("writePendingFirstEncounterTaskLaunch(typeof window === \"undefined\" ? undefined : window.sessionStorage, action.suggestedPrompt);");
+    expect(taskLaunchSource).toContain("assistantContent");
+    expect(taskLaunchSource).toContain("chatId");
+    expect(onboardingSource).toContain("function seedFirstEncounterReportChat(payload: FirstEncounterReportPayload)");
+    expect(onboardingSource).toContain("const prompt = payload.reportPrompt");
+    expect(onboardingSource).toContain("void seedFirstEncounterReportChat(payload)");
+    expect(onboardingSource).toContain("writeFirstEncounterRelayPrompt(");
+    expect(onboardingSource).toContain("payload.relayPrompt");
+    expect(onboardingSource).toContain("seedWebuiChat({");
+    expect(onboardingSource).toContain("writeFirstEncounterRelayChat(storage, seeded.chatId)");
+    expect(onboardingSource).toContain("armFirstEncounterRelayChat(storage)");
     expect(onboardingSource).not.toContain("composerDraftUpdated(agentChatScopeKey");
     expect(homeSource).toContain("consumePendingFirstEncounterTaskLaunch");
-    expect(homeSource).toContain("content: pendingPrompt");
+    expect(homeSource).toContain("pendingLaunch.chatId");
+    expect(homeSource).toContain("seedWebuiChat({");
+    expect(homeSource).toContain("writeFirstEncounterRelayReadyChat(storage, seeded.chat_id)");
+    expect(homeSource).toContain("content: pendingLaunch.prompt");
     expect(homeSource).toContain("chatId: null");
     expect(homeSource).toContain("void submitAgentComposerMessage({");
   });
 
-  it("空历史报告按钮清除待发送任务并进入无预填内容的新对话", () => {
+  it("初见报告继续后创建可接续对话，拒绝授权完成引导不写 pending task", () => {
     const onboardingSource = readFileSync(onboardingPageSourcePath, "utf8");
     const reportSource = readFileSync(firstEncounterReportSourcePath, "utf8");
-    const startIndex = onboardingSource.indexOf("function startFirstConversation()");
-    const clearIndex = onboardingSource.indexOf("clearPendingFirstEncounterTaskLaunch", startIndex);
-    const enterIndex = onboardingSource.indexOf("enterConversationAfterReport();", startIndex);
+    const completeReportIndex = onboardingSource.indexOf("async function completeReportFlow(createConversation: boolean)");
+    const completeOnboardingIndex = onboardingSource.indexOf("async function completeOnboarding(mode: PreferredMode)");
 
-    expect(reportSource).toContain("onStartConversation: () => void;");
-    expect(reportSource).toContain("onClick: props.onStartConversation");
-    expect(onboardingSource).toContain("onStartConversation={startFirstConversation}");
-    expect(startIndex).toBeGreaterThanOrEqual(0);
-    expect(clearIndex).toBeGreaterThan(startIndex);
-    expect(enterIndex).toBeGreaterThan(clearIndex);
+    expect(reportSource).toContain("onContinue: () => void;");
+    expect(reportSource).toContain("onClick={props.onContinue}");
+    expect(onboardingSource).toContain("onContinue={continueFromReport}");
+    expect(completeReportIndex).toBeGreaterThanOrEqual(0);
+    expect(onboardingSource.slice(completeReportIndex, completeOnboardingIndex)).toContain("writePendingFirstEncounterTaskLaunch");
+    expect(onboardingSource.slice(completeOnboardingIndex)).not.toContain("writePendingFirstEncounterTaskLaunch");
     expect(onboardingSource).toContain("dispatch(agentActions.newChatRequested());");
     expect(onboardingSource).not.toContain("composerDraftUpdated(agentChatScopeKey");
   });
@@ -260,11 +273,41 @@ describe("OnboardingPage source", () => {
     expect(source).not.toContain("submitNickname");
     expect(source).toContain('onboarding.currentStep !== "product_tour_required"');
     expect(source).toContain('void completeOnboarding("full");');
-    expect(source).toContain('writeDeferredGuidanceStep(typeof window === "undefined" ? undefined : window.sessionStorage, "armed");');
+    expect(source).toContain("writeDeferredGuidanceStep(storage, guidanceStep)");
     const completeHandlerIndex = source.indexOf("async function completeOnboarding(mode: PreferredMode)");
     const persistIndex = source.indexOf("await clients.config.updateOnboarding(completionPatch)", completeHandlerIndex);
     expect(completeHandlerIndex).toBeGreaterThanOrEqual(0);
     expect(persistIndex).toBeGreaterThan(completeHandlerIndex);
+  });
+
+  it("拒绝扫描授权完成引导时走 4 步导览入口（跨 Agent），不进日志步", () => {
+    const source = readFileSync(onboardingPageSourcePath, "utf8");
+    const completeHandlerIndex = source.indexOf("async function completeOnboarding(mode: PreferredMode)");
+    const completeBody = source.slice(completeHandlerIndex);
+
+    expect(completeBody).toContain("productTourIncludesLogs");
+    expect(completeBody).toContain("productTourStartRoute(includeLogs)");
+    expect(completeBody).toContain("productTourStartMemorySubPage(includeLogs)");
+    expect(completeBody).not.toContain('writeMemorySubPage(storage, "logs");');
+  });
+
+  it("onboarding 埋点复用历史事件并补 flow；初见报告走 first_report step", () => {
+    const source = readFileSync(onboardingPageSourcePath, "utf8");
+    const routerSource = readFileSync(fileURLToPath(new URL("../../app/router.tsx", import.meta.url)), "utf8");
+    expect(source).toContain("buildOnboardingStepCompletedEvent");
+    expect(source).toContain("buildOnboardingActivationEvent");
+    expect(source).toContain('step: "scan_permission"');
+    expect(source).toContain('step: "first_report"');
+    expect(source).toContain('choice: "viewed"');
+    expect(source).not.toContain('choice: "continued"');
+    expect(source).toContain('name: "first_entry"');
+    expect(source).not.toContain("buildOnboardingCompletedEvent");
+    expect(routerSource).toContain("buildOnboardingCompletedEvent(scanPermission)");
+    expect(routerSource).toContain('step: "nickname"');
+    expect(source).not.toContain('step: "mode_selection"');
+    expect(source).not.toContain("onboarding_report_viewed");
+    expect(source).not.toContain("onboarding_report_action_clicked");
+    expect(source).not.toContain('params: { step: "scan_permission", step_index: 1');
   });
 });
 

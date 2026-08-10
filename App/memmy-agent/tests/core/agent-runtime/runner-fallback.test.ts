@@ -19,6 +19,7 @@ function makeResponse(
     errorType?: string | null;
     errorCode?: string | null;
     errorShouldRetry?: boolean | null;
+    errorCategory?: "quota_exhausted" | null;
   } = {},
 ): LLMResponse {
   return new LLMResponse({
@@ -29,6 +30,7 @@ function makeResponse(
     errorType: opts.errorType ?? null,
     errorCode: opts.errorCode ?? null,
     errorShouldRetry: opts.errorShouldRetry ?? null,
+    errorCategory: opts.errorCategory ?? null,
   });
 }
 
@@ -321,6 +323,91 @@ describe("FallbackProvider failover", () => {
 
     expect(result.content).toBe("fallback ok");
     expect(factory).toHaveBeenCalledOnce();
+  });
+
+  it("fails over on a structured quota error before streaming content", async () => {
+    const primary = new FakeProvider(
+      "primary",
+      makeResponse("raw primary quota", "error", {
+        errorStatusCode: 403,
+        errorShouldRetry: false,
+        errorCategory: "quota_exhausted",
+      }),
+    );
+    const fb = new FakeProvider("fallback", makeResponse("fallback ok"));
+    const provider = new FallbackProvider({
+      primary,
+      fallbackPresets: [fallback("fallback-a")],
+      providerFactory: vi.fn(() => fb),
+    });
+
+    const result = await provider.chat({ messages: [{ role: "user", content: "hi" }] });
+
+    expect(result.content).toBe("fallback ok");
+    expect(result.errorCategory).toBeNull();
+    expect(provider.primaryFailures).toBe(0);
+    expect(provider.primaryTrippedAt).toBeNull();
+  });
+
+  it("does not fail over on a structured quota error after streaming content", async () => {
+    const primary = new FakeProvider(
+      "primary",
+      makeResponse("partial response", "error", { errorCategory: "quota_exhausted" }),
+    );
+    const factory = vi.fn();
+    const provider = new FallbackProvider({
+      primary,
+      fallbackPresets: [fallback("fallback-a")],
+      providerFactory: factory,
+    });
+
+    const result = await provider.chatStream({
+      messages: [{ role: "user", content: "hi" }],
+      onContentDelta: async () => undefined,
+    });
+
+    expect(result.errorCategory).toBe("quota_exhausted");
+    expect(factory).not.toHaveBeenCalled();
+    expect(provider.primaryFailures).toBe(0);
+  });
+
+  it("returns the primary quota response when no fallback can be created", async () => {
+    const quota = makeResponse("raw primary quota", "error", {
+      errorCategory: "quota_exhausted",
+    });
+    const provider = new FallbackProvider({
+      primary: new FakeProvider("primary", quota),
+      fallbackPresets: [fallback("fallback-a")],
+      providerFactory: () => {
+        throw new Error("missing key");
+      },
+    });
+
+    const result = await provider.chat({ messages: [{ role: "user", content: "hi" }] });
+
+    expect(result).toBe(quota);
+    expect(result.errorCategory).toBe("quota_exhausted");
+  });
+
+  it("returns the final fallback quota category when all candidates fail", async () => {
+    const primary = new FakeProvider(
+      "primary",
+      makeResponse("primary quota", "error", { errorCategory: "quota_exhausted" }),
+    );
+    const finalQuota = makeResponse("fallback quota", "error", {
+      errorCategory: "quota_exhausted",
+    });
+    const provider = new FallbackProvider({
+      primary,
+      fallbackPresets: [fallback("fallback-a")],
+      providerFactory: () => new FakeProvider("fallback", finalQuota),
+    });
+
+    const result = await provider.chat({ messages: [{ role: "user", content: "hi" }] });
+
+    expect(result).toBe(finalQuota);
+    expect(result.errorCategory).toBe("quota_exhausted");
+    expect(result.content).toBe("fallback quota");
   });
 
   it("does not fail over on bad request errors", async () => {

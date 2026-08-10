@@ -134,15 +134,20 @@ export async function runAgentSourceScanJob(
     }
 
     callbacks.onResumeChanged({ phase: "summarize", results });
+    const failures = await agentSources.processImportSummaries(
+      results.flatMap((result) => result.memoryIds ?? []),
+      { ...scanOptions, progressSourceId: job.sourceId }
+    );
+    const resultByMemoryId = new Map<string, ScanResult>();
     for (const result of results) {
-      const failures = await agentSources.processImportSummaries(result.memoryIds ?? [], {
-        ...scanOptions,
-        progressSourceId: result.sourceId
-      });
-      result.errors.push(...failures.map((failure) => ({
+      for (const memoryId of result.memoryIds ?? []) resultByMemoryId.set(memoryId, result);
+    }
+    for (const failure of failures) {
+      const result = resultByMemoryId.get(failure.memoryId);
+      result?.errors.push({
         conversationId: failure.memoryId,
         reason: failure.reason
-      })));
+      });
     }
     if (job.controller.signal.aborted) {
       return;

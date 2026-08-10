@@ -1,8 +1,13 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { buildMemorySubPageViewEvent } from "../analytics/page-view.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
 import { useApiClients } from "../app/providers.js";
-import { PRODUCT_TOUR_MEMORY_NAV_ANCHOR } from "../app/product-tour-layout.js";
+import {
+  PRODUCT_TOUR_MEMORY_LOGS_NAV_ANCHOR,
+  PRODUCT_TOUR_MEMORY_NAV_ANCHOR,
+  PRODUCT_TOUR_MEMORY_OVERVIEW_NAV_ANCHOR,
+  PRODUCT_TOUR_MEMORY_SOURCES_NAV_ANCHOR
+} from "../app/product-tour-layout.js";
 import type { MessageKey } from "../i18n/messages.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { appActions } from "../state/app-actions.js";
@@ -10,6 +15,12 @@ import { useAppState } from "../state/app-state.js";
 import { SidebarResizeHandle, useCodexResizableSidebar } from "./sidebar-resize.js";
 import { AnalyticsSubPage } from "./memory/analytics-sub-page.js";
 import { LogsSubPage } from "./memory/logs-sub-page.js";
+import {
+  resolveMemoryReferencePage,
+  type MemoryReferenceOpenRequest,
+  type MemoryReferencePage,
+  type OpenMemoryReference
+} from "./memory/memory-reference-tags.js";
 import { MemoriesSubPage } from "./memory/memories-sub-page.js";
 import { OverviewSubPage } from "./memory/overview-sub-page.js";
 import { PoliciesSubPage } from "./memory/policies-sub-page.js";
@@ -95,12 +106,21 @@ export function MemoryPage(props: MemoryPageProps) {
   const { dispatch } = useAppState();
   const { track, ready: analyticsReady } = useAnalytics();
   const prevSubPageRef = useRef<MemorySubPageId | null>(null);
+  const referenceRequestIdRef = useRef(0);
   const [activePage, setActivePage] = useState<MemorySubPageId>(() => props.initialSubPage ?? readInitialMemorySubPage());
+  const [referenceRequest, setReferenceRequest] = useState<(MemoryReferenceOpenRequest & { page: MemoryReferencePage }) | null>(null);
   const client = clients?.memoryRuntime ?? null;
 
   function handleSubPageChange(page: MemorySubPageId) {
+    setReferenceRequest(null);
     setActivePage(page);
   }
+
+  const handleOpenMemoryReference = useCallback<OpenMemoryReference>((id, fallbackPage) => {
+    const page = resolveMemoryReferencePage(id, fallbackPage);
+    setReferenceRequest({ id, page, requestId: ++referenceRequestIdRef.current });
+    setActivePage(page);
+  }, []);
 
   useEffect(() => {
     if (!analyticsReady) {
@@ -119,22 +139,52 @@ export function MemoryPage(props: MemoryPageProps) {
   const childByPage = useMemo<Record<MemorySubPageId, ReactNode>>(
     () => ({
       overview: <OverviewSubPage client={client} />,
-      memories: <MemoriesSubPage client={client} onOpenSettings={() => dispatch(appActions.navigate("/settings"))} />,
-      tasks: <TasksSubPage client={client} />,
-      policies: <PoliciesSubPage client={client} />,
-      "world-model": <WorldModelSubPage client={client} />,
-      skills: <SkillsSubPage client={client} />,
+      memories: (
+        <MemoriesSubPage
+          client={client}
+          openRequest={referenceRequest?.page === "memories" ? referenceRequest : undefined}
+          onOpenSettings={() => dispatch(appActions.navigate("/settings"))}
+        />
+      ),
+      tasks: <TasksSubPage client={client} openRequest={referenceRequest?.page === "tasks" ? referenceRequest : undefined} />,
+      policies: (
+        <PoliciesSubPage
+          client={client}
+          openRequest={referenceRequest?.page === "policies" ? referenceRequest : undefined}
+          onOpenMemoryReference={handleOpenMemoryReference}
+        />
+      ),
+      "world-model": (
+        <WorldModelSubPage
+          client={client}
+          openRequest={referenceRequest?.page === "world-model" ? referenceRequest : undefined}
+          onOpenMemoryReference={handleOpenMemoryReference}
+        />
+      ),
+      skills: (
+        <SkillsSubPage
+          client={client}
+          openRequest={referenceRequest?.page === "skills" ? referenceRequest : undefined}
+          onOpenMemoryReference={handleOpenMemoryReference}
+        />
+      ),
       analytics: <AnalyticsSubPage client={client} />,
       "token-stats": <TokenStatsSubPage client={clients?.agentTokenStats ?? null} />,
       logs: <LogsSubPage client={client} />,
       sources: <SourcesSubPage />
     }),
-    [client, dispatch]
+    [client, dispatch, handleOpenMemoryReference, referenceRequest]
   );
 
   useEffect(() => {
     if (props.initialSubPage) {
+      setReferenceRequest(null);
       setActivePage(props.initialSubPage);
+      return;
+    }
+    const stored = typeof window === "undefined" ? null : readMemorySubPage(window.sessionStorage);
+    if (stored) {
+      setActivePage(stored);
     }
   }, [props.initialSubPage]);
 
@@ -172,6 +222,19 @@ export function readMemorySubPage(storage: Storage | undefined): MemorySubPageId
 
 export function writeMemorySubPage(storage: Storage | undefined, page: MemorySubPageId): void {
   storage?.setItem(MEMORY_SUB_PAGE_STORAGE_KEY, page);
+}
+
+function resolveMemoryNavTourAnchor(page: MemorySubPageId): string | undefined {
+  switch (page) {
+    case "logs":
+      return PRODUCT_TOUR_MEMORY_LOGS_NAV_ANCHOR;
+    case "overview":
+      return PRODUCT_TOUR_MEMORY_OVERVIEW_NAV_ANCHOR;
+    case "sources":
+      return PRODUCT_TOUR_MEMORY_SOURCES_NAV_ANCHOR;
+    default:
+      return undefined;
+  }
 }
 
 export interface MemoryPageViewProps {
@@ -235,6 +298,7 @@ export function MemoryPageView(props: MemoryPageViewProps) {
                   <div key={item.id}>
                     <button
                       type="button"
+                      data-tour-anchor={resolveMemoryNavTourAnchor(item.id)}
                       onClick={() => props.onActivePageChange(item.id)}
                       className={`app-frame-nav-button relative flex items-center gap-2.5 px-3 py-2 transition-all cursor-pointer ${
                         active

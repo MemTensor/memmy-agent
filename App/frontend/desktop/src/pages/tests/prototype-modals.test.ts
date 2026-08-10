@@ -94,7 +94,7 @@ describe("2026-06-04 prototype modals", () => {
 });
 
 describe("2026-06-09 prototype modals", () => {
-  it("新的新人导览挂在 /onboarding flow 内，不再由主工作台路由直接弹出", () => {
+  it("新的新人导览挂在全局 Router，由 onboarding 完成状态触发", () => {
     const onboardingSource = readSource(resolve(pageDir, "onboarding-page.tsx"));
     const routerSource = readSource(resolve(appDir, "app/router.tsx"));
     const tourSource = readSource(resolve(appDir, "app/product-tour.tsx"));
@@ -102,11 +102,11 @@ describe("2026-06-09 prototype modals", () => {
 
     const appFrameSource = readSource(resolve(pageDir, "app-frame.tsx"));
     expect(onboardingSource).not.toContain("ProductTourGuide");
-    expect(appFrameSource).toContain("<ProductTourGuide");
-    expect(routerSource).not.toContain("<ProductTourGuide");
+    expect(appFrameSource).not.toContain("<ProductTourGuide");
+    expect(routerSource).toContain("<ProductTourGuide");
     expect(messagesSource).toContain('"productTour.memory.title": "记忆管理"');
     expect(messagesSource).toContain('"productTour.tools.title": "连接与工具"');
-    expect(tourSource).toContain('t("productTour.memory.title")');
+    expect(tourSource).toContain('t("onboarding.featureDig.memory.title")');
   });
 
   it("记忆插件冲突弹窗挂在扫描授权「全部允许」后的检测流程上", () => {

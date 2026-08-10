@@ -7,6 +7,7 @@
  */
 import type {
   MemmyAgentMediaAttachment,
+  MemmyAgentModelError,
   MemmyAgentProject,
   MemmyAgentRunStatusSnapshot,
   MemmyAgentSessionSnapshot,
@@ -114,6 +115,7 @@ export interface AgentChatMessage {
   latencyMs?: number;
   isStreaming?: boolean;
   stoppedByUser?: boolean;
+  modelError?: MemmyAgentModelError;
 }
 
 export interface AgentRetryWaitStatus {
@@ -2881,9 +2883,17 @@ function assistantMessageHasMedia(event: MemmyAgentWsEvent): boolean {
     && event.media_urls.length > 0;
 }
 
+function normalizeModelError(value: unknown): MemmyAgentModelError | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  return (value as Record<string, unknown>).category === "quota_exhausted"
+    ? { category: "quota_exhausted" }
+    : undefined;
+}
+
 function appendAssistantMessage(state: AgentState, event: MemmyAgentWsEvent): AgentState {
   const text = typeof event.text === "string" ? event.text : typeof event.content === "string" ? event.content : "";
   const media = Array.isArray(event.media_urls) ? normalizeMedia(event.media_urls) : undefined;
+  const modelError = normalizeModelError(event.model_error);
   const messages = [...state.messages];
   const forceNewAssistant = isCronProactiveEvent(event);
   const last = messages.at(-1);
@@ -2908,13 +2918,14 @@ function appendAssistantMessage(state: AgentState, event: MemmyAgentWsEvent): Ag
     const target = messages[targetIndex]!;
     messages[targetIndex] = {
       ...target,
-      content: text || target.content,
+      content: modelError ? text : text || target.content,
       ...(media?.length ? { media } : {}),
+      ...(modelError ? { modelError } : {}),
       ...(typeof event.latency_ms === "number" ? { latencyMs: event.latency_ms } : {}),
       isStreaming: true
     };
   } else {
-    if (!text.trim() && !media?.length) {
+    if (!text.trim() && !media?.length && !modelError) {
       return closedActivity ? syncCurrentMessages({ ...state, messages }) : state;
     }
     const next: AgentChatMessage = {
@@ -2923,6 +2934,7 @@ function appendAssistantMessage(state: AgentState, event: MemmyAgentWsEvent): Ag
       content: text,
       createdAt: Date.now(),
       ...(media?.length ? { media } : {}),
+      ...(modelError ? { modelError } : {}),
       ...(typeof event.latency_ms === "number" ? { latencyMs: event.latency_ms } : {})
     };
     messages.push(next);
@@ -3386,6 +3398,7 @@ function normalizeThreadMessage(message: Record<string, unknown>, index: number)
         ? message.tool_events
         : undefined;
     const fileEdits = Array.isArray(message.fileEdits) ? normalizeFileEdits(message.fileEdits) : undefined;
+    const modelError = normalizeModelError(message.modelError ?? message.model_error);
     const content = kind === "context_compaction"
       ? String(message.content ?? "") || contextCompactionFallbackText(compactionStatus)
       : String(message.content ?? "");
@@ -3405,7 +3418,8 @@ function normalizeThreadMessage(message: Record<string, unknown>, index: number)
       ...(kind !== "context_compaction" && typeof message.activitySegmentId === "string" ? { activitySegmentId: message.activitySegmentId } : {}),
       ...(kind === "context_compaction" ? { compactionId, compactionStatus } : {}),
       ...(createdAt == null ? {} : { createdAt }),
-      ...(latencyMs == null ? {} : { latencyMs })
+      ...(latencyMs == null ? {} : { latencyMs }),
+      ...(role === "assistant" && modelError ? { modelError } : {})
     } satisfies AgentChatMessage;
     return splitNarrativeTraceMessage(normalized);
 }

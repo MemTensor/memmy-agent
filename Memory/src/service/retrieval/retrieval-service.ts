@@ -7,6 +7,7 @@ import { clip } from "../../utils/text.js";
 import {
   compileRetrievalQuery,
   displayReflectionText,
+  failureAvoidancePolicyIsRetrievalEligible,
   focusResearchRetrievalQuery,
   isRepositoryRepairPrompt,
   isResearchDomain,
@@ -38,6 +39,7 @@ import {
 } from "../../storage/repositories.js";
 import type {
   InjectedContext,
+  MemoryFilter,
   MemoryKind,
   MemoryLayer,
   MemoryRow,
@@ -72,11 +74,16 @@ type InternalMemorySearchRequest = MemorySearchRequest & {
   targetSkillId?: string;
   contextHints?: Record<string, unknown>;
   injectedContextQuery?: string;
+  turnIntentDecision?: unknown;
+  routeProposal?: unknown;
+  projectContextVersion?: number;
+  projectContextStatus?: string;
   recordEvent?: boolean;
 };
 
 type PolicyMeta = NonNullable<ReturnType<typeof policyMetaFromMemory>>;
 type TraceMeta = NonNullable<ReturnType<typeof traceMetaFromMemory>>;
+type RetrievalTimeFilter = NonNullable<RetrievalQueryExtract["timeFilter"]>;
 
 const RETRIEVAL_QUERY_EXTRACT_TIMEOUT_MS = 60_000;
 
@@ -93,6 +100,14 @@ const QUERY_REWRITE_COUNT = 3;
 const QUERY_REWRITE_RRF_CONSTANT = 8;
 
 const QUERY_REWRITE_PER_QUERY_MIN_KEEP = 3;
+
+const TIME_FILTERED_TRACE_LIMIT = 20;
+
+const ONBOARDING_FIRST_REPORT_AGENT_ID = "memmy-onboarding";
+
+const ONBOARDING_FIRST_REPORT_TAG = "first-encounter-report";
+
+const ONBOARDING_FIRST_REPORT_MAX_SNIPPET_BODY_CHARS = 5_000;
 
 const pipelineLogger = createMemoryLogger("pipeline");
 
@@ -167,21 +182,40 @@ function uniqMemories(memories: readonly MemoryRow[]): MemoryRow[] {
   return out;
 }
 
-function searchCandidateFromHit(hit: RecallHit, memory?: MemoryRow): Record<string, unknown> {
-  const formatted = renderInjectedSnippet(hit, memory, {
-    skillInjectionMode: "summary",
-    skillSummaryChars: MEMORY_PACKET_SKILL_SUMMARY_CHARS
-  });
+function searchCandidateFromHit(
+  hit: RecallHit,
+  memory?: MemoryRow,
+  contentOverride?: string
+): Record<string, unknown> {
+  const content = contentOverride ?? (
+    memory && isOnboardingFirstReportMemory(memory)
+      ? renderOnboardingFirstReportSearchLogBody(hit, memory)
+      : renderInjectedSnippet(hit, memory, {
+          skillInjectionMode: "summary",
+          skillSummaryChars: MEMORY_PACKET_SKILL_SUMMARY_CHARS
+        })?.body ?? ""
+  );
   return {
     refKind: hit.kind,
     refId: hit.id,
     score: hit.score,
-    content: formatted?.body ?? "",
+    content,
     snippet: hit.snippet,
     summary: hit.title,
     origin: hit.source,
     tier: hit.memoryLayer
   };
+}
+
+function timeFilteredSearchCandidateContent(hit: RecallHit, memory?: MemoryRow): string {
+  const trace = memory ? traceMetaFromMemory(memory) : null;
+  return [
+    `id: ${hit.id}`,
+    `timestamp: ${formatInjectedTimestamp(trace?.ts, hit.updatedAt)}`,
+    "",
+    "Summary:",
+    hit.snippet
+  ].join("\n");
 }
 
 export function memoryMatchesTags(memory: MemoryRow, tags: string[] | undefined): boolean {
@@ -203,6 +237,84 @@ function emptyRetrievalResult(): RetrievalResult {
       droppedByThreshold: 0
     }
   };
+}
+
+function isOnboardingFirstReportContinuationQuery(query: string): boolean {
+  return /memmy/i.test(query) &&
+    /(?:初见报告|首次登录报告|first\s+(?:encounter\s+)?report|onboarding\s+report)/i.test(query) &&
+    /(?:接着|继续|接续|刚才|continue|resume|pick\s+up)/i.test(query);
+}
+
+function directRetrievalResult(hit: RecallHit): RetrievalResult {
+  return {
+    hits: [hit],
+    debug: {
+      tierSizes: { tier1: 0, tier2: 1, tier3: 0 },
+      kept: { tier1: 0, tier2: 1, tier3: 0 },
+      topRelevance: hit.score,
+      droppedByThreshold: 0
+    }
+  };
+}
+
+function onboardingFirstReportRecallHit(memory: MemoryRow): RecallHit | null {
+  const trace = traceMetaFromMemory(memory);
+  if (!trace) return null;
+  return {
+    id: memory.id,
+    kind: kindFromMemory(memory),
+    memoryLayer: memory.memoryLayer,
+    status: memory.status,
+    title: localizedFirstReportTitle(trace),
+    snippet: trace.summary.trim() || clip(trace.agentText, 500),
+    score: 1,
+    tags: memory.tags,
+    updatedAt: memory.updatedAt,
+    source: "search"
+  };
+}
+
+function timeFilteredTraceHit(memory: MemoryRow, trace: TraceMeta): RecallHit {
+  return {
+    id: memory.id,
+    kind: "trace",
+    memoryLayer: "L1",
+    status: memory.status,
+    title: trace.summary,
+    snippet: trace.summary,
+    score: 0,
+    tags: memory.tags,
+    updatedAt: memory.updatedAt,
+    source: "search"
+  };
+}
+
+function compareTimeFilteredTraceRecency(left: MemoryRow, right: MemoryRow): number {
+  return right.createdAt.localeCompare(left.createdAt) ||
+    right.id.localeCompare(left.id);
+}
+
+function compareTimeFilteredTraceTime(left: MemoryRow, right: MemoryRow): number {
+  const leftTs = traceMetaFromMemory(left)?.ts ?? Date.parse(left.createdAt);
+  const rightTs = traceMetaFromMemory(right)?.ts ?? Date.parse(right.createdAt);
+  return leftTs - rightTs || left.id.localeCompare(right.id);
+}
+
+function normalizeRetrievalTimeFilter(value: unknown): RetrievalTimeFilter | undefined {
+  if (!isRecord(value)) return undefined;
+  const startAt = typeof value.startAt === "string" ? value.startAt.trim() : "";
+  const endAt = typeof value.endAt === "string" ? value.endAt.trim() : "";
+  const startMs = Date.parse(startAt);
+  const endMs = Date.parse(endAt);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return undefined;
+  return {
+    startAt: new Date(startMs).toISOString(),
+    endAt: new Date(endMs).toISOString()
+  };
+}
+
+function runtimeTimeZone(): string {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 }
 
 export function retrievedMemorySourceIds(memory: MemoryRow): string[] {
@@ -335,6 +447,71 @@ export function buildInjectedContext(
   };
 }
 
+function buildTimeFilteredInjectedContext(
+  memories: MemoryRow[],
+  timeZone: string
+): {
+  injectedContext: InjectedContext;
+  sourceMemoryIds: string[];
+  droppedDueToBudget: [];
+} {
+  const items = memories.flatMap((memory) => {
+    const trace = traceMetaFromMemory(memory);
+    const summary = trace?.summary.replace(/\s+/g, " ").trim();
+    if (!trace || !summary) return [];
+    return [{
+      memory,
+      line: `[${formatTimeFilteredTraceTimestamp(trace.ts, timeZone)}] [${displaySourceAgent(memory.agentId)}] ${summary}`
+    }];
+  });
+  if (items.length === 0) {
+    return {
+      injectedContext: emptyInjectedContext(),
+      sourceMemoryIds: [],
+      droppedDueToBudget: []
+    };
+  }
+  const content = items.map((item) => item.line).join("\n");
+  const sourceMemoryIds = items.map((item) => item.memory.id);
+  return {
+    injectedContext: {
+      markdown: content,
+      sections: [{
+        id: "time-filtered-l1-traces",
+        title: "L1 Trace Summaries",
+        kind: "trace",
+        memoryLayer: "L1",
+        memoryIds: sourceMemoryIds,
+        content,
+        tokenEstimate: estimateTokens(content)
+      }],
+      tokenEstimate: estimateTokens(content)
+    },
+    sourceMemoryIds,
+    droppedDueToBudget: []
+  };
+}
+
+function formatTimeFilteredTraceTimestamp(timestamp: number, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23"
+  }).formatToParts(new Date(timestamp));
+  const part = (type: Intl.DateTimeFormatPartTypes): string =>
+    parts.find((item) => item.type === type)?.value ?? "";
+  return `${part("year")}-${part("month")}-${part("day")} ${part("hour")}:${part("minute")}`;
+}
+
+function displaySourceAgent(agentId: string | undefined): string {
+  const source = agentId?.trim() || "unknown";
+  return source.charAt(0).toUpperCase() + source.slice(1);
+}
+
 function renderInjectedSection(
   hit: RecallHit,
   memory: MemoryRow | undefined,
@@ -425,6 +602,13 @@ function renderInjectedSnippet(
   if (hit.kind === "trace" || hit.memoryLayer === "L1") {
     const trace = memory ? traceMetaFromMemory(memory) : null;
     if (!trace) return null;
+    if (memory && isOnboardingFirstReportMemory(memory)) {
+      return {
+        refKind: "trace",
+        title: localizedFirstReportTitle(trace),
+        body: renderInjectedOnboardingFirstReportBody(hit, trace)
+      };
+    }
     return {
       refKind: "trace",
       title: "Trace",
@@ -500,6 +684,66 @@ function renderInjectedTraceBody(hit: RecallHit, trace: TraceMeta): string {
     "",
     ...labeledInjectedBlock("Historical assistant response", trace.agentText || "(empty)")
   ].join("\n");
+}
+
+function isOnboardingFirstReportMemory(memory: MemoryRow): boolean {
+  return (memory.agentId ?? "").trim().toLowerCase() === ONBOARDING_FIRST_REPORT_AGENT_ID &&
+    memory.tags.some((tag) => tag.trim().toLowerCase() === ONBOARDING_FIRST_REPORT_TAG);
+}
+
+function renderInjectedOnboardingFirstReportBody(hit: RecallHit, trace: TraceMeta): string {
+  const language = onboardingFirstReportLanguage(trace);
+  const summary = trace.summary.trim() || "(not provided)";
+  const report = trace.agentText.trim() || "(not provided)";
+  const prefix = [
+    `id: ${hit.id}`,
+    `timestamp: ${formatInjectedTimestamp(trace.ts, hit.updatedAt)}`,
+    "",
+    ...localizedFirstReportBlock(language === "zh" ? "摘要" : "Summary", summary, language),
+    "",
+    language === "zh" ? "初见报告：" : "First report:"
+  ].join("\n");
+  const suffix = [
+    "",
+    language === "zh" ? "完整记忆：" : "Full memory:",
+    language === "zh"
+      ? `如需更多细节，使用 \`memmy_memory_get(id)\` 查询 id \`${hit.id}\`。`
+      : `If more detail is needed, use \`memmy_memory_get(id)\` with id \`${hit.id}\`.`
+  ].join("\n");
+  const reportBudget = ONBOARDING_FIRST_REPORT_MAX_SNIPPET_BODY_CHARS - prefix.length - suffix.length - 2;
+  const renderedReport = report.length <= reportBudget
+    ? report
+    : `${report.slice(0, Math.max(0, reportBudget - 16))}\n...[truncated]`;
+  return `${prefix}\n${renderedReport}\n${suffix}`;
+}
+
+function renderOnboardingFirstReportSearchLogBody(hit: RecallHit, memory: MemoryRow): string {
+  const trace = traceMetaFromMemory(memory);
+  if (!trace) return "";
+  const language = onboardingFirstReportLanguage(trace);
+  return [
+    `id: ${hit.id}`,
+    `timestamp: ${formatInjectedTimestamp(trace.ts, hit.updatedAt)}`,
+    "",
+    ...localizedFirstReportBlock(language === "zh" ? "用户请求" : "User query", trace.userText || "(empty)", language),
+    "",
+    ...localizedFirstReportBlock(language === "zh" ? "助手回复" : "Assistant response", trace.agentText || "(empty)", language)
+  ].join("\n");
+}
+
+function onboardingFirstReportLanguage(trace: TraceMeta): "zh" | "en" {
+  if (/语言[：:]\s*中文/.test(trace.userText)) return "zh";
+  if (/Language:\s*English/i.test(trace.userText)) return "en";
+  return /\p{Script=Han}/u.test(`${trace.userText}\n${trace.agentText}`) ? "zh" : "en";
+}
+
+function localizedFirstReportTitle(trace: TraceMeta): string {
+  return onboardingFirstReportLanguage(trace) === "zh" ? "Memmy 初见报告" : "Memmy First Encounter Report";
+}
+
+function localizedFirstReportBlock(label: string, value: string, language: "zh" | "en"): string[] {
+  const body = value.trim();
+  return [`${label}${language === "zh" ? "：" : ":"}`, body || (language === "zh" ? "（空）" : "(empty)")];
 }
 
 function renderInjectedEpisodeBody(hit: RecallHit): string {
@@ -914,7 +1158,11 @@ function contextMemoriesForInjectedSources(memories: MemoryRow[], sourceMemoryId
     if (visibleIds.has(memory.id)) return true;
     if (memory.memoryLayer !== "L2") return false;
     const policy = policyMetaFromMemory(memory);
-    if (!policy || !policyHasDecisionGuidance(policy)) return false;
+    if (
+      !policy ||
+      !policyHasDecisionGuidance(policy) ||
+      !failureAvoidancePolicyIsRetrievalEligible(policy)
+    ) return false;
     if (legacySkillSourcePolicyIds.has(memory.id)) return true;
     return policy.sourceTraceIds.some((id) => visibleIds.has(id)) ||
       policy.sourceEpisodeIds.some((id) => visibleEpisodeIds.has(id));
@@ -944,7 +1192,11 @@ function contextMemoriesForRecallHits(hits: RecallHit[], memories: MemoryRow[]):
   for (const memory of memories) {
     if (memory.memoryLayer !== "L2") continue;
     const policy = policyMetaFromMemory(memory);
-    if (!policy || !policyHasDecisionGuidance(policy)) continue;
+    if (
+      !policy ||
+      !policyHasDecisionGuidance(policy) ||
+      !failureAvoidancePolicyIsRetrievalEligible(policy)
+    ) continue;
     const traceOverlap = policy.sourceTraceIds.some((id) => hitTraceIds.has(id));
     const episodeOverlap = policy.sourceEpisodeIds.some((id) => hitEpisodeIds.has(id));
     const legacySkillFallback = legacySkillSourcePolicyIds.has(memory.id);
@@ -1023,6 +1275,7 @@ function failureAvoidanceSection(memories: MemoryRow[]): InjectedContext["sectio
     const policy = policyMetaFromMemory(memory);
     if (
       !policy
+      || !failureAvoidancePolicyIsRetrievalEligible(policy)
       || (
         policy.experienceType !== "failure_avoidance"
         && policy.evidencePolarity !== "negative"
@@ -1238,6 +1491,21 @@ export class RetrievalService {
     if (episode) {
       this.deps.assertEpisodeInScope(episode, request.namespace);
     }
+    const onboardingFirstReportSearchHit = isOnboardingFirstReportContinuationQuery(request.query)
+      ? this.deps.repos.memories.search("", {
+          userId: context.userId,
+          agentId: ONBOARDING_FIRST_REPORT_AGENT_ID,
+          memoryLayer: "L1",
+          status: ["activated", "resolving"],
+          tags: [ONBOARDING_FIRST_REPORT_TAG]
+        }, 1)[0]
+      : undefined;
+    const onboardingFirstReportMemory = onboardingFirstReportSearchHit
+      ? this.deps.repos.memories.getMany([onboardingFirstReportSearchHit.id])[0]
+      : undefined;
+    const onboardingFirstReportHit = onboardingFirstReportMemory
+      ? onboardingFirstReportRecallHit(onboardingFirstReportMemory)
+      : null;
     const recentRawTurnIds = retrievalMode === "turn_start" && request.sessionId
       ? new Set(
           this.deps.repos.runtime
@@ -1248,53 +1516,82 @@ export class RetrievalService {
     const tuning = this.retrievalTuningConfig();
     const scope = memoryFilterForNamespace(context.namespace);
     const allowedLayers = retrievalLayersForProfile(retrievalLayersForMode(retrievalMode), tuning);
-    const layers = request.layers === undefined
+    const semanticLayers = request.layers === undefined
       ? allowedLayers
       : request.layers.filter((layer) => allowedLayers.includes(layer));
     const searchAt = Date.now();
-    const candidateCount = layers.length === 0
+    const candidateCount = onboardingFirstReportHit
+      ? 1
+      : semanticLayers.length === 0
       ? 0
       : this.candidatePool.retrievalCandidateCount({
-          layers,
+          layers: semanticLayers,
           tags: request.tags,
           scope
         });
     const retrievalQuery = focusResearchRetrievalQuery(request.query, tuning.domain).text;
     // Turn-start recall runs inside agent hook deadlines. Keep it to one LLM stage:
     // filtering actual candidates is more useful here than extracting the query first.
-    const queryExtract = candidateCount > 0 && retrievalMode !== "turn_start"
+    const queryExtract = candidateCount > 0 && !onboardingFirstReportHit && retrievalMode !== "turn_start"
       ? await this.extractRetrievalQuery(retrievalQuery)
       : null;
     const queryVectorText = queryExtract?.queryVecText?.trim() || retrievalQuery;
-    const retrievalLimit = request.limit ?? this.deps.turnStartRetrievalLimit();
-    const retrievalOutput = await this.retrieveSearchMemories({
-      query: retrievalQuery,
-      queryVectorText,
-      queryExtract,
-      layers,
-      tags: request.tags,
-      limit: retrievalLimit,
-      mode: retrievalMode,
-      excludeTraceRawTurnIds: recentRawTurnIds,
-      targetSkillId: request.targetSkillId,
-      scope
-    });
+    const timeFilter = semanticLayers.includes("L1") ? queryExtract?.timeFilter : undefined;
+    const layers: MemoryLayer[] = onboardingFirstReportHit || timeFilter ? ["L1"] : semanticLayers;
+    const retrievalLimit = timeFilter
+      ? TIME_FILTERED_TRACE_LIMIT
+      : request.limit ?? this.deps.turnStartRetrievalLimit();
+    const retrievalOutput = onboardingFirstReportHit && onboardingFirstReportMemory
+      ? {
+          retrieval: directRetrievalResult(onboardingFirstReportHit),
+          memories: [onboardingFirstReportMemory]
+        }
+      : timeFilter
+      ? this.retrieveTimeFilteredTraceMemories({
+          timeFilter,
+          tags: request.tags,
+          limit: retrievalLimit,
+          scope
+        })
+      : await this.retrieveSearchMemories({
+          query: retrievalQuery,
+          queryVectorText,
+          queryExtract,
+          layers,
+          tags: request.tags,
+          limit: retrievalLimit,
+          mode: retrievalMode,
+          excludeTraceRawTurnIds: recentRawTurnIds,
+          targetSkillId: request.targetSkillId,
+          scope
+        });
     const retrieval = retrievalOutput.retrieval;
     const memories = retrievalOutput.memories;
     const rerankAt = Date.now();
-    const filteredHits = await this.filterRecallHits(queryVectorText, retrieval.hits, {
-      allowModelFallback: retrievalMode !== "turn_start"
-    });
-    const hits = filterL1TraceSpanRecallHits(filteredHits.hits,memories);
-    const contextPacket = buildInjectedContext(
-      hits,
-      request.contextBudget ?? 1800,
-      contextMemoriesForRecallHits(hits, memories),
-      retrievalMode,
-      request.contextHints,
-      request.injectedContextQuery ?? request.query,
-      tuning
-    );
+    const filteredHits = onboardingFirstReportHit
+      ? { hits: retrieval.hits, status: ["first_report_handoff:latest_only"] }
+      : timeFilter
+      ? { hits: retrieval.hits, status: ["time_filter:l1"] }
+      : await this.filterRecallHits(queryVectorText, retrieval.hits, {
+          allowModelFallback: retrievalMode !== "turn_start"
+        });
+    const hits = onboardingFirstReportHit || timeFilter
+      ? filteredHits.hits
+      : filterL1TraceSpanRecallHits(filteredHits.hits, memories);
+    const contextPacket = timeFilter
+      ? buildTimeFilteredInjectedContext(
+          memories.filter((memory) => hits.some((hit) => hit.id === memory.id)),
+          runtimeTimeZone()
+        )
+      : buildInjectedContext(
+          hits,
+          request.contextBudget ?? 1800,
+          contextMemoriesForRecallHits(hits, memories),
+          retrievalMode,
+          request.contextHints,
+          request.injectedContextQuery ?? request.query,
+          tuning
+        );
     const injectedContext = contextPacket.injectedContext;
     const budgetAt = Date.now();
     const recallEventId = newId("recall");
@@ -1330,7 +1627,7 @@ export class RetrievalService {
         hitMemoryIds: hits.map((hit) => hit.id),
         dropped,
         outcome: "pending",
-        request,
+        request: timeFilter ? { ...request, timeFilter } : request,
         createdAt: nowIso()
       });
     }
@@ -1364,15 +1661,22 @@ export class RetrievalService {
     if (shouldRecordEvent) {
       const keptIds = new Set(hits.map((hit) => hit.id));
       const logMemoryById = new Map(memories.map((memory) => [memory.id, memory]));
-      const toSearchCandidateLog = (hit: RecallHit): Record<string, unknown> =>
-        searchCandidateFromHit(hit, logMemoryById.get(hit.id));
+      const toSearchCandidateLog = (hit: RecallHit): Record<string, unknown> => {
+        const memory = logMemoryById.get(hit.id);
+        return searchCandidateFromHit(
+          hit,
+          memory,
+          timeFilter ? timeFilteredSearchCandidateContent(hit, memory) : undefined
+        );
+      };
       const sourceAgent = request.source?.trim() || context.namespace.source;
       recordApiLog(this.deps.repos.runtime, "memory_search", {
         query: request.query,
         sessionId: request.sessionId,
         episodeId: episode?.id,
         layers,
-        retrievalMode
+        retrievalMode,
+        ...(timeFilter ? { timeFilter } : {})
       }, {
         candidates: retrieval.hits.map(toSearchCandidateLog),
         filtered: hits.map(toSearchCandidateLog),
@@ -1393,6 +1697,49 @@ export class RetrievalService {
       }, Date.now() - startedAt, true, response.serverTime, sourceAgent);
     }
     return response;
+  }
+
+  private retrieveTimeFilteredTraceMemories(input: {
+    timeFilter: RetrievalTimeFilter;
+    tags?: string[];
+    limit: number;
+    scope: ReturnType<typeof memoryFilterForNamespace>;
+  }): { retrieval: RetrievalResult; memories: MemoryRow[] } {
+    const filter: MemoryFilter = {
+      ...input.scope,
+      memoryLayer: "L1",
+      status: ["activated", "resolving"],
+      createdAtGte: input.timeFilter.startAt,
+      createdAtLt: input.timeFilter.endAt,
+      ...(input.tags?.length ? { tags: input.tags } : {})
+    };
+    const candidateCount = this.deps.repos.memories.count(filter);
+    const candidates = this.deps.repos.memories
+      .list(filter, candidateCount)
+      .filter((memory) => this.isMemoryReadyForRetrieval(memory))
+      .filter((memory) => Boolean(traceMetaFromMemory(memory)?.summary.trim()));
+    const selected = [...candidates]
+      .sort(compareTimeFilteredTraceRecency)
+      .slice(0, Math.max(0, input.limit))
+      .sort(compareTimeFilteredTraceTime);
+    const hits = selected.flatMap((memory) => {
+      const trace = traceMetaFromMemory(memory);
+      return trace ? [timeFilteredTraceHit(memory, trace)] : [];
+    });
+    return {
+      memories: selected,
+      retrieval: {
+        hits,
+        debug: {
+          tierSizes: { tier1: 0, tier2: candidates.length, tier3: 0 },
+          kept: { tier1: 0, tier2: hits.length, tier3: 0 },
+          topRelevance: candidates.length
+            ? Math.max(...candidates.map((memory) => traceMetaFromMemory(memory)?.value ?? 0))
+            : 0,
+          droppedByThreshold: Math.max(0, candidates.length - hits.length)
+        }
+      }
+    };
   }
 
   private async retrieveSearchMemories(input: {
@@ -1688,11 +2035,12 @@ export class RetrievalService {
       const result = await this.deps.skillLlm.completeJson<{
         queryVecText?: unknown;
         keywords?: unknown;
+        timeFilter?: unknown;
       }>(
         [
           {
             role: "system",
-            content: RETRIEVAL_QUERY_EXTRACT_PROMPT.system
+            content: `${RETRIEVAL_QUERY_EXTRACT_PROMPT.system}\n\nCURRENT_TIME: ${nowIso()}\nTIME_ZONE: ${runtimeTimeZone()}`
           },
           {
             role: "user",
@@ -1711,7 +2059,8 @@ export class RetrievalService {
       );
       const queryVecText = typeof result.queryVecText === "string" ? result.queryVecText.trim() : "";
       const keywords = normalizeRetrievalExtractKeywords(result.keywords);
-      if (!queryVecText && keywords.length === 0) {
+      const timeFilter = normalizeRetrievalTimeFilter(result.timeFilter);
+      if (!queryVecText && keywords.length === 0 && !timeFilter) {
         pipelineLogger.warn("fallback.used", {
           operation: `${RETRIEVAL_QUERY_EXTRACT_PROMPT.id}.v${RETRIEVAL_QUERY_EXTRACT_PROMPT.version}`,
           pipeline: "retrieval.query_extract",
@@ -1720,7 +2069,11 @@ export class RetrievalService {
         });
         return null;
       }
-      return { queryVecText, keywords };
+      return {
+        queryVecText,
+        keywords,
+        ...(timeFilter ? { timeFilter } : {})
+      };
     } catch (error) {
       pipelineLogger.warn("fallback.used", {
         operation: `${RETRIEVAL_QUERY_EXTRACT_PROMPT.id}.v${RETRIEVAL_QUERY_EXTRACT_PROMPT.version}`,

@@ -171,6 +171,87 @@ describe("MemoryService / retrieval / query and filtering", () => {
     ]);
     expect(summaryCalls[0]?.options.timeoutMs).toBe(20_000);
     expect(evolutionCalls).toEqual([]);
+  });
+
+  it("uses an extracted time range to inject at most 20 recent L1 summaries", async () => {
+    const calls: Array<{ messages: LlmMessage[]; options: LlmCompletionOptions }> = [];
+    const seenEmbeddings: string[] = [];
+    const { db, service } = createTestService({
+      skillLlm: createTimeFilterLlm(calls, {
+        startAt: "2026-08-04T00:00:00.000Z",
+        endAt: "2026-08-05T00:00:00.000Z"
+      }),
+      embedder: createCapturingEmbedder(seenEmbeddings)
+    });
+    const repos = new Repositories(db.db);
+    for (let index = 0; index < 25; index += 1) {
+      repos.memories.insert(timeFilteredTraceMemory({
+        id: `trace-time-filter-${index}`,
+        at: new Date(Date.UTC(2026, 7, 4, 0, index)).toISOString(),
+        value: 25 - index,
+        agentId: index % 2 === 0 ? "codex" : "cursor",
+        summary: `time-filtered activity ${index}`
+      }));
+    }
+    repos.memories.insert(timeFilteredTraceMemory({
+      id: "trace-time-filter-outside",
+      at: "2026-08-03T23:59:59.000Z",
+      value: 100,
+      agentId: "cursor",
+      summary: "outside the requested range"
+    }));
+
+    const recall = await service.search({
+      namespace: {
+        source: "codex",
+        profileId: "jiang",
+        userId: "user-time-filter"
+      },
+      query: "我今天做了什么，总结一下",
+      limit: 100
+    });
+
+    expect(calls.map((call) => call.options.operation)).toEqual([
+      "retrieval.retrieval.query.extract.v2"
+    ]);
+    expect(calls[0]?.messages[0]?.content).toContain("CURRENT_TIME:");
+    expect(calls[0]?.messages[0]?.content).toContain("TIME_ZONE:");
+    expect(seenEmbeddings).toEqual([]);
+    expect(recall.status).toContain("time_filter:l1");
+    expect(recall.hits).toHaveLength(20);
+    expect(recall.hits.map((hit) => hit.id)).toEqual(
+      Array.from({ length: 20 }, (_, index) => `trace-time-filter-${index + 5}`)
+    );
+    expect(recall.hits.every((hit) => hit.score === 0)).toBe(true);
+    expect(recall.hits.map((hit) => hit.id)).not.toContain("trace-time-filter-outside");
+    expect(recall.sourceMemoryIds).toEqual(recall.hits.map((hit) => hit.id));
+    const lines = recall.injectedContext.markdown.split("\n");
+    expect(lines).toHaveLength(20);
+    expect(lines[0]).toMatch(/^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\] \[Cursor\] time-filtered activity 5$/);
+    expect(recall.injectedContext.markdown).not.toContain("Time-filtered L1 traces");
+    expect(recall.injectedContext.markdown).not.toContain("Range:");
+    expect(recall.injectedContext.markdown).not.toContain("value=");
+    expect(recall.injectedContext.markdown).not.toContain("Historical user statement");
+    const latestSearchLog = service.apiLogs({ tools: ["memory_search"], limit: 1 }).logs[0];
+    const logOutput = JSON.parse(latestSearchLog!.outputJson) as {
+      candidates: Array<{ score?: number; content?: string; summary?: string }>;
+    };
+    expect(logOutput.candidates).toHaveLength(20);
+    expect(logOutput.candidates.every((candidate) => candidate.score === 0)).toBe(true);
+    expect(logOutput.candidates.map((candidate, index) => candidate.content)).toEqual(
+      Array.from({ length: 20 }, (_, index) => {
+        const activityIndex = index + 5;
+        return [
+          `id: trace-time-filter-${activityIndex}`,
+          `timestamp: ${new Date(Date.UTC(2026, 7, 4, 0, activityIndex)).toISOString()}`,
+          "",
+          "Summary:",
+          `time-filtered activity ${activityIndex}`
+        ].join("\n");
+      })
+    );
+    expect(logOutput.candidates.every((candidate) => candidate.content?.endsWith(`Summary:\n${candidate.summary}`))).toBe(true);
+    expect(logOutput.candidates.some((candidate) => candidate.content?.includes("Historical user statement"))).toBe(false);
     db.close();
   });
 
@@ -632,7 +713,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
         if (summaryFails && options.operation === "retrieval.retrieval.filter.v5") {
           throw new Error("summary filter unavailable");
         }
-        if (options.operation === "retrieval.retrieval.query.extract.v1") {
+        if (options.operation === "retrieval.retrieval.query.extract.v2") {
           return {
             queryVecText: messages.find((message) => message.role === "user")?.content.replace(/^COMPLETE USER INPUT:\n/, "") ?? "",
             keywords: []
@@ -736,7 +817,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
     });
 
     expect(summaryCalls.map((call) => call.operation)).toContain("retrieval.retrieval.filter.v5");
-    expect(evolutionCalls.map((call) => call.operation)).toEqual(["retrieval.retrieval.query.extract.v1"]);
+    expect(evolutionCalls.map((call) => call.operation)).toEqual(["retrieval.retrieval.query.extract.v2"]);
     expect(evolutionCalls.every((call) => call.thinkingMode === "disabled")).toBe(true);
     expect(recall.hits).toHaveLength(1);
 
@@ -754,7 +835,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
 
     expect(summaryCalls).toHaveLength(0);
     expect(evolutionCalls.map((call) => call.operation)).toEqual([
-      "retrieval.retrieval.query.extract.v1",
+      "retrieval.retrieval.query.extract.v2",
       "retrieval.retrieval.filter.v5"
     ]);
     expect(evolutionCalls.every((call) => call.thinkingMode === "disabled")).toBe(true);
@@ -775,7 +856,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
 
     expect(summaryCalls.map((call) => call.operation)).toEqual(["retrieval.retrieval.filter.v5"]);
     expect(evolutionCalls.map((call) => call.operation)).toEqual([
-      "retrieval.retrieval.query.extract.v1",
+      "retrieval.retrieval.query.extract.v2",
       "retrieval.retrieval.filter.v5"
     ]);
     expect(failedSummaryRecall.hits).toHaveLength(1);
@@ -1002,7 +1083,7 @@ function seededScoreTraceMemory(): MemoryRow {
     userId: "user-first-stage-score",
     sessionId: "session-first-stage-score",
     agentId: "codex",
-    appId: "workspace-first-stage-score",
+    appId: undefined,
     memoryType: "LongTermMemory",
     status: "activated",
     visibility: "private",
@@ -1045,6 +1126,85 @@ function seededScoreTraceMemory(): MemoryRow {
   };
 }
 
+function timeFilteredTraceMemory(input: {
+  id: string;
+  at: string;
+  value: number;
+  agentId: string;
+  summary: string;
+}): MemoryRow {
+  const base = seededScoreTraceMemory();
+  const trace = base.properties.internal_info.trace as Record<string, unknown>;
+  return {
+    ...base,
+    id: input.id,
+    timeline: input.at,
+    userId: "user-time-filter",
+    appId: undefined,
+    sessionId: `session-${input.agentId}`,
+    agentId: input.agentId,
+    memoryKey: `trace:${input.id}`,
+    memoryValue: `Summary: ${input.summary}`,
+    info: { summary: input.summary },
+    properties: {
+      ...base.properties,
+      internal_info: {
+        ...base.properties.internal_info,
+        trace: {
+          ...trace,
+          key: `trace:${input.id}`,
+          ts: Date.parse(input.at),
+          summary: input.summary,
+          value: input.value,
+          priority: input.value
+        }
+      }
+    },
+    contentHash: `${input.id}-hash`,
+    createdAt: input.at,
+    updatedAt: input.at
+  };
+}
+
+function createTimeFilterLlm(
+  calls: Array<{ messages: LlmMessage[]; options: LlmCompletionOptions }>,
+  timeFilter: { startAt: string; endAt: string }
+): LlmClient {
+  return {
+    config: {
+      ...DEFAULT_MEMMY_CONFIG.evolution,
+      provider: "host",
+      endpoint: "http://127.0.0.1/time-filter",
+      model: "time-filter"
+    },
+    isConfigured() {
+      return true;
+    },
+    async complete() {
+      return "{}";
+    },
+    async completeJson<T extends Record<string, unknown>>(
+      messages: LlmMessage[],
+      options: LlmCompletionOptions
+    ): Promise<T> {
+      calls.push({ messages, options });
+      return {
+        queryVecText: "",
+        keywords: [],
+        timeFilter
+      } as unknown as T;
+    },
+    status() {
+      return {
+        provider: "host",
+        model: "time-filter",
+        configured: true,
+        remote: true
+      };
+    }
+  };
+}
+
 function createRankedRetrievalFilterLlm(
   calls: Array<{
     messages: Array<{ role: string; content: string }>;
@@ -1069,7 +1229,7 @@ function createRankedRetrievalFilterLlm(
       messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
       options: { operation: string }
     ): Promise<T> {
-      if (options.operation === "retrieval.retrieval.query.extract.v1") {
+      if (options.operation === "retrieval.retrieval.query.extract.v2") {
         return {
           queryVecText: messages.find((message) => message.role === "user")?.content.replace(/^COMPLETE USER INPUT:\n/, "") ?? "",
           keywords: []
@@ -1117,7 +1277,7 @@ function createQueryRewriteLlm(
       options: { operation: string; timeoutMs?: number; maxRetries?: number }
     ): Promise<T> {
       calls.push({ messages, options });
-      if (options.operation === "retrieval.retrieval.query.extract.v1") {
+      if (options.operation === "retrieval.retrieval.query.extract.v2") {
         return {
           queryVecText: messages.find((message) => message.role === "user")?.content.replace(/^COMPLETE USER INPUT:\n/, "") ?? "",
           keywords: []

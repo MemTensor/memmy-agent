@@ -1,5 +1,6 @@
 import type { ProjectFactRecord, ProjectGoalRecord, ProjectWorkItemRecord } from "../service/project-context/project-context-types.js";
 import type Database from "better-sqlite3";
+import { retrievalDocumentForMemory } from "../algorithm/plugin-algorithms.js";
 import type {
   FeedbackRequest,
   JobRef,
@@ -408,7 +409,7 @@ export class MemoryRepository {
       )
       .run(memoryToSql(prepared.memory));
     this.vectors.replace(prepared.memory.id, prepared.vectors, prepared.memory.updatedAt);
-    this.indexFts(prepared.memory);
+    this.reindexFts(prepared.memory);
     return attachMemoryVectors(prepared.memory, prepared.vectors);
   }
 
@@ -470,7 +471,7 @@ export class MemoryRepository {
         this.vectors.upsert(updated.id, vector, updated.updatedAt);
       }
     }
-    this.indexFts(updated);
+    this.reindexFts(updated);
     return attachMemoryVectors(updated, updated.deletedAt || updated.status === "deleted" ? [] : mergedVectors);
   }
 
@@ -1075,13 +1076,13 @@ export class MemoryRepository {
     };
   }
 
-  private indexFts(memory: MemoryRow): void {
+  reindexFts(memory: MemoryRow): void {
     try {
       this.db.prepare(`DELETE FROM memories_fts WHERE id = ?`).run(memory.id);
       if (!memory.deletedAt && memory.status !== "deleted") {
         this.db
           .prepare(`INSERT INTO memories_fts (id, identifier, memory_value, tags) VALUES (?, ?, ?, ?)`)
-          .run(memory.id, memory.id, memory.memoryValue, memory.tags.join(" "));
+          .run(memory.id, memory.id, retrievalDocumentForMemory(memory), memory.tags.join(" "));
       }
     } catch {
       // The service search path is deterministic JS scoring; FTS is maintained
@@ -1476,8 +1477,9 @@ export class RuntimeRepository {
   reopenEpisode(episodeId: string, metaPatch: Record<string, unknown> = {}, at = nowIso()): EpisodeRecord | undefined {
     const episode = this.getEpisode(episodeId);
     if (!episode) return undefined;
+    const { reward: _staleReward, ...baseMeta } = episode.meta;
     const meta = {
-      ...episode.meta,
+      ...baseMeta,
       ...metaPatch
     };
     this.db
@@ -1485,6 +1487,8 @@ export class RuntimeRepository {
         `UPDATE episodes
          SET status = 'open',
              closed_at = NULL,
+             r_task = NULL,
+             reward_detail_json = '{}',
              meta_json = ?,
              updated_at = ?
          WHERE id = ?`
@@ -1494,6 +1498,8 @@ export class RuntimeRepository {
       ...episode,
       status: "open",
       closedAt: null,
+      rTask: undefined,
+      rewardDetail: {},
       meta,
       updatedAt: at
     };
@@ -1697,6 +1703,32 @@ export class RuntimeRepository {
     };
   }
 
+  rebindRawTurnEpisode(
+    rawTurnId: string,
+    fromEpisodeId: string,
+    toEpisodeId: string,
+    at = nowIso()
+  ): void {
+    if (fromEpisodeId === toEpisodeId) return;
+    const fromEpisode = this.getEpisode(fromEpisodeId);
+    if (!fromEpisode || !this.getEpisode(toEpisodeId)) {
+      throw new Error("cannot rebind a raw turn to a missing episode");
+    }
+    const remainingRawTurnIds = fromEpisode.rawTurnIds.filter((id) => id !== rawTurnId);
+    this.db
+      .prepare(
+        `UPDATE episodes
+         SET raw_turn_ids_json = ?,
+             turn_count = ?,
+             updated_at = ?
+         WHERE id = ?`
+      )
+      .run(toJson(remainingRawTurnIds), remainingRawTurnIds.length, at, fromEpisodeId);
+    this.db.prepare("UPDATE raw_turns SET episode_id = ? WHERE id = ?").run(toEpisodeId, rawTurnId);
+    this.db.prepare("UPDATE artifacts SET episode_id = ? WHERE raw_turn_id = ?").run(toEpisodeId, rawTurnId);
+    this.appendEpisodeRawTurn(toEpisodeId, rawTurnId, at);
+  }
+
   appendEpisodeFeedback(episodeId: string, feedbackId: string, at = nowIso()): EpisodeRecord | undefined {
     return this.appendEpisodeArrayValue(episodeId, "feedbackIds", "feedback_ids_json", feedbackId, at);
   }
@@ -1818,7 +1850,8 @@ export class RuntimeRepository {
     this.db
       .prepare(
         `UPDATE raw_turns
-         SET user_text = @userText,
+         SET episode_id = @episodeId,
+             user_text = @userText,
              assistant_text = @assistantText,
              reasoning_summary = @reasoningSummary,
              tool_calls_json = @toolCallsJson,
@@ -1833,6 +1866,7 @@ export class RuntimeRepository {
       )
       .run({
         id: rawTurn.id,
+        episodeId: rawTurn.episodeId,
         userText: rawTurn.userText ?? null,
         assistantText: rawTurn.assistantText ?? null,
         reasoningSummary: rawTurn.reasoningSummary ?? null,
@@ -2353,7 +2387,8 @@ export class RuntimeRepository {
   leaseQueuedJobs(
     limit = 10,
     leaseSeconds = 60,
-    targetMemoryIds?: readonly string[]
+    targetMemoryIds?: readonly string[],
+    priorityCohortOnly = false
   ): EvolutionJobRecord[] {
     if (targetMemoryIds?.length === 0) {
       return [];
@@ -2364,9 +2399,9 @@ export class RuntimeRepository {
       ? `AND target_memory_id IN (${targetMemoryIds.map(() => "?").join(", ")})`
       : "";
     const transaction = this.db.transaction(() => {
-      const rows = this.db
+      const candidates = this.db
         .prepare(
-          `SELECT *
+          `SELECT *, ${evolutionJobPrioritySql()} AS queue_priority
            FROM evolution_jobs
            WHERE (status = 'queued'
               OR (status = 'leased' AND leased_until IS NOT NULL AND leased_until <= ?))
@@ -2404,7 +2439,13 @@ export class RuntimeRepository {
            ORDER BY ${evolutionJobOrderSql()}
            LIMIT ?`
         )
-        .all(at, at, ...(targetMemoryIds ?? []), limit) as SqlJobRow[];
+        .all(at, at, ...(targetMemoryIds ?? []), limit) as Array<SqlJobRow & {
+          queue_priority: number;
+        }>;
+      const queuePriority = candidates[0]?.queue_priority;
+      const rows = priorityCohortOnly && queuePriority !== undefined
+        ? candidates.filter((row) => row.queue_priority === queuePriority)
+        : candidates;
 
       for (const row of rows) {
         this.db
@@ -2685,7 +2726,7 @@ export class RuntimeRepository {
          FROM embedding_retry_queue q
          LEFT JOIN memories m ON m.id = q.target_id
          ${clauses.length ? `WHERE ${clauses.join(" AND ")}` : ""}
-         ORDER BY q.next_attempt_at ASC, q.created_at ASC
+         ORDER BY ${embeddingRetryOrderSql()}
          LIMIT ? OFFSET ?`
       )
       .all(...params, limit, offset) as SqlEmbeddingRetryRow[];
@@ -2761,20 +2802,21 @@ export class RuntimeRepository {
     }
     const limit = Math.max(1, Math.min(200, Math.floor(input.limit ?? 25)));
     const targetFilter = input.targetMemoryIds
-      ? `AND target_id IN (${input.targetMemoryIds.map(() => "?").join(", ")})`
+      ? `AND q.target_id IN (${input.targetMemoryIds.map(() => "?").join(", ")})`
       : "";
     const transaction = this.db.transaction(() => {
       const rows = this.db
         .prepare(
-          `SELECT *
-           FROM embedding_retry_queue
+          `SELECT q.*
+           FROM embedding_retry_queue q
+           LEFT JOIN memories m ON m.id = q.target_id
            WHERE (
-             status = 'pending'
-             OR (status = 'in_progress' AND lease_until IS NOT NULL AND lease_until <= ?)
+             q.status = 'pending'
+             OR (q.status = 'in_progress' AND q.lease_until IS NOT NULL AND q.lease_until <= ?)
            )
-             AND next_attempt_at <= ?
+             AND q.next_attempt_at <= ?
              ${targetFilter}
-           ORDER BY next_attempt_at ASC, created_at ASC
+           ORDER BY ${embeddingRetryOrderSql()}
            LIMIT ?`
         )
         .all(input.now, input.now, ...(input.targetMemoryIds ?? []), limit) as SqlEmbeddingRetryRow[];
@@ -4204,6 +4246,8 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
   addValueClause("conversation_id", filter.conversationId);
   addAgentIdClause(filter.agentId, filter.excludedAgentIds);
   addValueClause("app_id", filter.appId);
+  addRangeClause("created_at", ">=", filter.createdAtGte);
+  addRangeClause("created_at", "<", filter.createdAtLt);
   addArrayClause("memory_layer", filter.memoryLayer);
   addArrayClause("status", filter.status);
   addArrayClause("id", filter.ids);
@@ -4286,6 +4330,12 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
     }
     clauses.push(`${effectiveWorkspace} = ?`);
     params.push(workspaceId);
+  }
+
+  function addRangeClause(column: string, operator: ">=" | "<", value: string | undefined): void {
+    if (value === undefined) return;
+    clauses.push(`${column} ${operator} ?`);
+    params.push(value);
   }
 
   function addAgentIdClause(value: string | undefined, excludedValues: string[] | undefined): void {
@@ -5229,27 +5279,42 @@ function isSerializedBuffer(value: unknown): value is { __memmy_type: "buffer"; 
 }
 
 function evolutionJobOrderSql(): string {
-  const summaryPlaceholderSql = importSummaryPlaceholderSql();
-  const importIndexingSql = importIndexingSqlPredicate();
-  return `CASE WHEN status = 'leased' THEN 0 ELSE 1 END ASC,
+  const memoryProcessingJob = `job_type IN ('trace_summary', 'import_summary', 'embedding')
+    AND target_memory_id IS NOT NULL`;
+  return `${evolutionJobPrioritySql()} ASC,
+           CASE WHEN ${memoryProcessingJob}
+             THEN COALESCE(
+               (SELECT created_at FROM memories WHERE memories.id = evolution_jobs.target_memory_id),
+               created_at
+             )
+             ELSE ''
+           END DESC,
            CASE
+             WHEN job_type IN ('trace_summary', 'import_summary') THEN 0
+             WHEN job_type = 'embedding' THEN 1
+             ELSE 2
+           END ASC,
+           CASE WHEN status = 'leased' THEN 0 ELSE 1 END ASC,
+           created_at ASC,
+           rowid ASC`;
+}
+
+function evolutionJobPrioritySql(): string {
+  const onboardingFirstReportTarget = targetMemoryMatchesSql(onboardingFirstReportMemorySql("memories"));
+  const importedTarget = targetMemoryMatchesSql(agentSourceMemorySql("memories"));
+  const interactiveL1Target = targetMemoryMatchesSql(
+    `memories.memory_layer = 'L1' AND NOT (${agentSourceMemorySql("memories")})`
+  );
+  return `CASE
+             WHEN job_type IN ('trace_summary', 'import_summary', 'embedding')
+               AND ${onboardingFirstReportTarget} THEN -100
              WHEN json_extract(payload_json, '$.source') = 'memory.processing.manual_retry' THEN 0
-             WHEN job_type = 'episode_idle_close' THEN 1
-             WHEN job_type = 'embedding' AND EXISTS (
-               SELECT 1
-               FROM memories
-               WHERE memories.id = evolution_jobs.target_memory_id
-                 AND ${importIndexingSql}
-             ) THEN 4
-             WHEN job_type = 'trace_summary' THEN 5
-             WHEN job_type = 'import_summary' THEN 6
-             WHEN job_type = 'embedding' AND EXISTS (
-               SELECT 1
-               FROM memories
-               WHERE memories.id = evolution_jobs.target_memory_id
-                 AND ${summaryPlaceholderSql}
-             ) THEN 7
-             WHEN job_type = 'embedding' THEN 10
+             WHEN job_type = 'trace_summary'
+               OR (job_type = 'embedding' AND ${interactiveL1Target}) THEN 1
+             WHEN job_type = 'import_summary'
+               OR (job_type = 'embedding' AND ${importedTarget}) THEN 2
+             WHEN job_type = 'embedding' THEN 3
+             WHEN job_type = 'episode_idle_close' THEN 10
              WHEN job_type = 'reflection' THEN 20
              WHEN job_type = 'reward' THEN 30
              WHEN job_type = 'span_big_turn' THEN 35
@@ -5259,36 +5324,52 @@ function evolutionJobOrderSql(): string {
              WHEN job_type = 'skill_crystallization' THEN 70
              WHEN job_type = 'skill_trial_resolve' THEN 80
              ELSE 100
-           END ASC,
-           CASE
-             WHEN job_type IN ('trace_summary', 'import_summary') OR (
-               job_type = 'embedding' AND EXISTS (
-                 SELECT 1
-                 FROM memories
-                 WHERE memories.id = evolution_jobs.target_memory_id
-                   AND ${summaryPlaceholderSql}
-               )
-             )
-             THEN COALESCE((SELECT updated_at FROM memories WHERE memories.id = evolution_jobs.target_memory_id), updated_at)
-             ELSE ''
-           END DESC,
-           created_at ASC,
-           rowid ASC`;
+           END`;
 }
 
-function importSummaryPlaceholderSql(): string {
-  const summary = "COALESCE(json_extract(memories.info_json, '$.summary'), '')";
-  const firstLine = `TRIM(REPLACE(REPLACE(CASE WHEN instr(${summary}, char(10)) > 0 THEN substr(${summary}, 1, instr(${summary}, char(10)) - 1) ELSE ${summary} END, '#', ''), char(13), ''))`;
-  return `${firstLine} IN ('user', 'assistant', 'system', 'tool', 'developer', '摘要排队中', '摘要整理中')`;
-}
-
-function importIndexingSqlPredicate(): string {
+function targetMemoryMatchesSql(predicate: string): string {
   return `EXISTS (
     SELECT 1
-    FROM memory_processing_state
-    WHERE memory_processing_state.memory_id = memories.id
-      AND memory_processing_state.state IN ('embedding_pending', 'embedding')
+    FROM memories
+    WHERE memories.id = evolution_jobs.target_memory_id
+      AND ${predicate}
   )`;
+}
+
+function agentSourceMemorySql(alias: string): string {
+  return `(
+    json_extract(${alias}.properties_json, '$.internal_info.plugin_algorithm') LIKE 'memory.add.import_async.%'
+    OR EXISTS (
+      SELECT 1
+      FROM json_each(${alias}.tags_json)
+      WHERE lower(json_each.value) = 'agent-source'
+    )
+  )`;
+}
+
+function onboardingFirstReportMemorySql(alias: string): string {
+  return `(
+    lower(COALESCE(${alias}.agent_id, '')) = 'memmy-onboarding'
+    OR EXISTS (
+      SELECT 1
+      FROM json_each(${alias}.tags_json)
+      WHERE lower(json_each.value) IN ('first-encounter-report', 'onboarding-report')
+    )
+  )`;
+}
+
+function embeddingRetryOrderSql(): string {
+  const onboardingFirstReport = onboardingFirstReportMemorySql("m");
+  const importedMemory = agentSourceMemorySql("m");
+  return `CASE
+             WHEN ${onboardingFirstReport} THEN -100
+             WHEN q.target_kind = 'trace' AND m.memory_layer = 'L1' AND NOT (${importedMemory}) THEN 0
+             WHEN q.target_kind = 'trace' AND m.memory_layer = 'L1' AND ${importedMemory} THEN 1
+             ELSE 2
+           END ASC,
+           m.created_at DESC,
+           q.next_attempt_at ASC,
+           q.created_at ASC`;
 }
 
 export function jobToRef(job: EvolutionJobRecord): JobRef {

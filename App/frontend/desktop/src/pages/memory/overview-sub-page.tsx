@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import type { PanelOverviewOutput } from "@memmy/local-api-contracts";
+import { PRODUCT_TOUR_MEMORY_OVERVIEW_COUNTS_ANCHOR } from "../../app/product-tour-layout.js";
 import type { MemoryRuntimeClient } from "../../api/memory-runtime-client.js";
 import { Tooltip } from "../../components/tooltip.js";
 import type { MessageKey } from "../../i18n/messages.js";
@@ -116,7 +117,11 @@ function OverviewContent(props: { data: PanelOverviewOutput }) {
 
   return (
     <>
-      <div className="grid gap-4 mb-5" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 150px), 1fr))" }}>
+      <div
+        data-tour-anchor={PRODUCT_TOUR_MEMORY_OVERVIEW_COUNTS_ANCHOR}
+        className="grid gap-4 mb-5"
+        style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 150px), 1fr))" }}
+      >
         {countCards.map((item) => (
           <CountCard key={item.id} item={item} />
         ))}

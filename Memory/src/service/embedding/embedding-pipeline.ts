@@ -7,6 +7,8 @@ import type {
 } from "../../storage/repositories.js";
 import {
   policyMetaFromMemory,
+  RETRIEVAL_DOCUMENT_VERSION,
+  retrievalDocumentForMemory,
   skillMetaFromMemory,
   traceMetaFromMemory,
   worldModelMetaFromMemory
@@ -49,11 +51,11 @@ export function embeddingTextForMemory(memory: MemoryRow): string {
   }
   const skill = skillMetaFromMemory(memory);
   if (skill) {
-    return [skill.name, skill.invocationGuide].filter(Boolean).join("\n");
+    return retrievalDocumentForMemory(memory);
   }
   const world = worldModelMetaFromMemory(memory);
   if (world) {
-    return [world.title, world.body, world.domainTags.join(" ")].filter(Boolean).join("\n");
+    return retrievalDocumentForMemory(memory);
   }
   return memory.memoryValue;
 }
@@ -129,7 +131,7 @@ export function updateMemoryVectorField(
   memory: MemoryRow,
   vectorField: EmbeddingRetryVectorField,
   vector: number[],
-  input: { provider: string; model: string; updatedAt: string }
+  input: { provider: string; model: string; updatedAt: string; sourceHash?: string }
 ): MemoryRow {
   const internal = memory.properties.internal_info;
   const nextInternal: Record<string, unknown> = { ...internal };
@@ -141,6 +143,13 @@ export function updateMemoryVectorField(
     nextInternal.world_model = { ...internal.world_model };
   } else if (memory.memoryLayer === "Skill" && isRecord(internal.skill)) {
     nextInternal.skill = { ...internal.skill };
+  }
+  if ((memory.memoryLayer === "L3" || memory.memoryLayer === "Skill") && input.sourceHash) {
+    nextInternal.retrieval_index = {
+      version: RETRIEVAL_DOCUMENT_VERSION,
+      source_hash: input.sourceHash,
+      indexed_at: input.updatedAt
+    };
   }
 
   const updated = {

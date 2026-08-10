@@ -5,8 +5,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createBuiltinOnboardingInsightSamplers,
   createCodexInsightSampler,
+  createSourceRegistryOnboardingConversationWindowReader,
   createWorkbuddyInsightSampler
 } from "../onboarding-insight-samplers.js";
+import { createSourceRegistry } from "../source-registry.js";
 
 const roots: string[] = [];
 
@@ -80,6 +82,7 @@ describe("onboarding insight samplers", () => {
       text: "首次登陆扫描要跳过 Codex tool 原始记录。",
       workspacePath: "/tmp/project"
     });
+    expect(result.recentMessages?.map((message) => message.role)).toEqual(["user"]);
   });
 
   it("samples only recent WorkBuddy user messages across current and migrated history shapes", async () => {
@@ -113,5 +116,74 @@ describe("onboarding insight samplers", () => {
       "Current WorkBuddy question",
       "Migrated WorkBuddy question"
     ]);
+    expect(result.recentMessages?.some((message) => message.role === "assistant")).toBe(true);
+  });
+
+  it("reads the first two and last twelve turns from the newest conversation and compacts tools", async () => {
+    const baseTime = Date.parse("2026-07-20T10:00:00.000Z");
+    const messages = Array.from({ length: 15 }, (_, index) => {
+      const conversationId = "latest-conversation";
+      return [
+        conversationMessage(index * 3, `user-${index}`, "user", `user ${index}`, conversationId),
+        conversationMessage(index * 3 + 1, `tool-${index}`, "tool", `Tool: shell\n${"x".repeat(700)}\nStatus: success`, conversationId),
+        conversationMessage(index * 3 + 2, `assistant-${index}`, "assistant", `assistant ${index}`, conversationId)
+      ];
+    }).flat().map((message, index) => ({
+      ...message,
+      createdAt: new Date(baseTime + index * 1000).toISOString()
+    }));
+    const sourceRegistry = createSourceRegistry([{
+      descriptor: {
+        sourceId: "codex",
+        displayName: "Codex",
+        builtin: true,
+        dataPath: "/tmp/codex"
+      },
+      async detect() {
+        return true;
+      },
+      async *scan() {
+        yield* messages;
+      }
+    }]);
+    const reader = createSourceRegistryOnboardingConversationWindowReader(sourceRegistry);
+
+    const window = await reader.readConversation({
+      sourceId: "codex",
+      displayName: "Codex",
+      conversationId: "latest-conversation",
+      latestActivityAt: messages.at(-1)?.createdAt ?? new Date(baseTime).toISOString(),
+      workspacePath: "/tmp/project"
+    }, {
+      maxQueryChars: 600,
+      deadlineMs: 5_000
+    });
+
+    const userIds = window?.messages.filter((message) => message.role === "user").map((message) => message.messageId);
+    expect(userIds).toEqual(["user-0", "user-1", ...Array.from({ length: 12 }, (_, index) => `user-${index + 3}`)]);
+    expect(window?.messages.filter((message) => message.role === "assistant")).toHaveLength(14);
+    expect(window?.messages.filter((message) => message.role === "tool")).toHaveLength(14);
+    expect(window?.messages.find((message) => message.role === "tool")?.text.length).toBeLessThanOrEqual(405);
+    expect(window?.messages.find((message) => message.role === "tool")?.text).toContain("Status: success");
   });
 });
+
+function conversationMessage(
+  offset: number,
+  messageId: string,
+  role: "user" | "assistant" | "tool",
+  content: string,
+  conversationId: string
+) {
+  return {
+    sourceId: "codex",
+    conversationId,
+    messageId,
+    role,
+    content,
+    createdAt: new Date(Date.parse("2026-07-20T10:00:00.000Z") + offset * 1000).toISOString(),
+    workspacePath: "/tmp/project",
+    gitRoot: "/tmp/project",
+    rawMeta: Object.freeze({})
+  };
+}

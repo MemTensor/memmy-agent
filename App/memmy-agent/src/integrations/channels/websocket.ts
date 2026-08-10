@@ -16,7 +16,9 @@ import type { CronService } from "../../cron/service.js";
 import { goalStateWsBlob } from "../../core/session/goal-state.js";
 import {
   readWebuiSessionBinding,
-  type Session,
+  Session,
+  WEBUI_PROJECT_ID_METADATA_KEY,
+  WEBUI_WORKSPACE_CWD_METADATA_KEY,
 } from "../../core/session/manager.js";
 import { websocketTurnWallStartedAt, websocketTurnWallStartTimes } from "../../core/session/webui-turns.js";
 import type { WebuiTitleService } from "../../core/session/webui-title.js";
@@ -1045,6 +1047,75 @@ export class WebSocketChannel extends BaseChannel {
     return httpJsonResponse(readWebuiSidebarState());
   }
 
+  /**
+   * Seeds a finished WebUI chat from an already-generated user/assistant pair
+   * (e.g. onboarding first report) without running the agent again.
+   */
+  handleWebuiSeedChat(request: any): HttpLikeResponse {
+    if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+    if ((request.method ?? "GET").toUpperCase() !== "POST") return httpError(405, "method not allowed");
+    if (!this.sessionManager) return httpError(503, "session manager unavailable");
+
+    let decoded: any;
+    try {
+      decoded = JSON.parse(requestBodyText(request));
+    } catch {
+      return httpError(400, "body must be JSON");
+    }
+    if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) {
+      return httpError(400, "body must be an object");
+    }
+
+    const userText = typeof decoded.user_text === "string" ? decoded.user_text.trim() : "";
+    const assistantText = typeof decoded.assistant_text === "string" ? decoded.assistant_text.trim() : "";
+    const title = typeof decoded.title === "string" ? decoded.title.trim() : "";
+    if (!userText || !assistantText) {
+      return httpError(400, "user_text and assistant_text are required");
+    }
+
+    let cwd: string;
+    try {
+      cwd = assertWebuiWorkspaceAvailable(this.workspacePath);
+    } catch {
+      return httpError(422, "workspace_unavailable");
+    }
+
+    const chatId = crypto.randomUUID();
+    const sessionKey = `websocket:${chatId}`;
+    const session = new Session({ key: sessionKey });
+    session.metadata.webui = true;
+    session.metadata[WEBUI_PROJECT_ID_METADATA_KEY] = null;
+    session.metadata[WEBUI_WORKSPACE_CWD_METADATA_KEY] = cwd;
+    if (title) {
+      session.metadata.title = title;
+      session.metadata.titleUserEdited = true;
+    }
+    session.addMessage("user", userText);
+    session.addMessage("assistant", assistantText);
+    this.sessionManager.save(session, { fsync: true });
+
+    this.tryAppendWebuiTranscript(chatId, {
+      event: "user",
+      chat_id: chatId,
+      text: userText,
+    });
+    this.tryAppendWebuiTranscript(chatId, {
+      event: "message",
+      chat_id: chatId,
+      text: assistantText,
+      content: assistantText,
+    });
+    this.tryAppendWebuiTranscript(chatId, {
+      event: "turn_end",
+      chat_id: chatId,
+    });
+
+    return httpJsonResponse({
+      chat_id: chatId,
+      session_key: sessionKey,
+    });
+  }
+
   handleWebuiSidebarStateUpdate(request: any): HttpLikeResponse {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
     let decoded: any;
@@ -1286,6 +1357,10 @@ export class WebSocketChannel extends BaseChannel {
           return httpJsonResponse(await this.channelAdmin.startWeixinLogin());
         case "weixin-login-poll":
           return httpJsonResponse(await this.channelAdmin.pollWeixinLogin(String(value ?? "")));
+        case "feishu-login-start":
+          return httpJsonResponse(await this.channelAdmin.startFeishuLogin());
+        case "feishu-login-poll":
+          return httpJsonResponse(await this.channelAdmin.pollFeishuLogin(String(value ?? "")));
         default:
           return httpError(404, "Not Found");
       }
@@ -1976,12 +2051,16 @@ export class WebSocketChannel extends BaseChannel {
     if (got === "/api/channels/weixin/login/start") return this.handleChannelAdmin(request, "weixin-login-start");
     channelAdminMatch = got.match(/^\/api\/channels\/weixin\/login\/([^/]+)$/);
     if (channelAdminMatch) return this.handleChannelAdmin(request, "weixin-login-poll", decodeURIComponent(channelAdminMatch[1]));
+    if (got === "/api/channels/feishu/login/start") return this.handleChannelAdmin(request, "feishu-login-start");
+    channelAdminMatch = got.match(/^\/api\/channels\/feishu\/login\/([^/]+)$/);
+    if (channelAdminMatch) return this.handleChannelAdmin(request, "feishu-login-poll", decodeURIComponent(channelAdminMatch[1]));
     if (got === "/api/sessions") return this.handleSessionsList(request);
     if (got === "/api/projects") return this.handleProjectCreate(request);
     if (got === "/api/settings") return this.handleSettings(request);
     if (got === "/api/commands") return this.handleCommands(request);
     if (got === "/api/webui/sidebar-state") return this.handleWebuiSidebarState(request);
     if (got === "/api/webui/sidebar-state/update") return this.handleWebuiSidebarStateUpdate(request);
+    if (got === "/api/webui/seed-chat") return this.handleWebuiSeedChat(request);
     if (got === "/api/webui/artifacts/resolve") return this.handleArtifactResolve(request);
     if (got === "/api/webui/artifacts/reveal") return this.handleArtifactReveal(request);
     if (got === "/api/webui/artifacts/open") return this.handleArtifactOpen(request);
@@ -2760,14 +2839,20 @@ export class WebSocketChannel extends BaseChannel {
     const targets = message.chatId === "*" ? [...this.connectionChats.keys()] : [...(this.subscriptions.get(message.chatId) ?? [])];
     const wireText = this.rewriteLocalMarkdownImages(message.content, `websocket:${message.chatId}`);
     const turnId = this.turnIdFromMetadata(message.metadata);
+    const publicMetadata = { ...(message.metadata ?? {}) };
+    const modelErrorCategory = publicMetadata.modelErrorCategory;
+    delete publicMetadata.modelErrorCategory;
     const payload: Record<string, any> = {
       event: "message",
       chat_id: message.chatId,
       text: wireText,
       content: wireText,
-      metadata: message.metadata ?? {},
+      metadata: publicMetadata,
       media: message.media ?? [],
       ...(turnId ? { turn_id: turnId } : {}),
+      ...(modelErrorCategory === "quota_exhausted"
+        ? { model_error: { category: "quota_exhausted" } }
+        : {}),
     };
     const mediaUrls = (message.media ?? [])
       .map((entry) => this.webuiMediaAttachmentForPath(entry, `websocket:${message.chatId}`))

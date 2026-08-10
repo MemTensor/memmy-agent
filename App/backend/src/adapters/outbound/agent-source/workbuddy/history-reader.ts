@@ -43,8 +43,16 @@ export async function* readWorkbuddyHistory(
 }
 
 export function extractWorkbuddyUserMessage(record: Record<string, unknown>, fallbackConversationId: string, lineNumber: number): RawWorkbuddyMessage | null {
-  const message = toRawWorkbuddyMessage(record, fallbackConversationId, lineNumber);
+  const message = extractWorkbuddyMessage(record, fallbackConversationId, lineNumber);
   return message?.role === "user" ? message : null;
+}
+
+export function extractWorkbuddyMessage(
+  record: Record<string, unknown>,
+  fallbackConversationId: string,
+  lineNumber: number
+): RawWorkbuddyMessage | null {
+  return toRawWorkbuddyMessage(record, fallbackConversationId, lineNumber);
 }
 
 function toRawWorkbuddyMessage(

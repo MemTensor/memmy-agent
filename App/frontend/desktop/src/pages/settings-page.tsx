@@ -19,7 +19,6 @@ import {
 } from "../app/pet-guide.js";
 import { consumeTokenExhaustedApplyMoreRequest, TOKEN_EXHAUSTED_APPLY_MORE_EVENT } from "../app/token-exhausted-apply-more.js";
 import { getLegalLinkUrl } from "../legal/legal-links.js";
-import { maskAccountIdentifier } from "../utils/mask-account-identifier.js";
 import { isComposingKeyboardEvent } from "../utils/keyboard.js";
 import { openExternalUrl } from "../utils/open-url.js";
 import { useTranslation } from "../i18n/use-translation.js";
@@ -27,6 +26,7 @@ import { appActions, type AppAction } from "../state/app-actions.js";
 import type { AppState } from "../state/app-reducer.js";
 import { useAppState } from "../state/app-state.js";
 import { AppFrame } from "./app-frame.js";
+import { formatTokenGiftAmount } from "./token-gift.js";
 import usageStyles from "./settings-token-usage.module.css";
 import {
   OptionalModelMissingWarningModal,
@@ -363,11 +363,11 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const [memoryModel, setMemoryModel] = useState<ModelConfig>(() => initialModelForm.memoryModel);
   const [skillModel, setSkillModel] = useState<ModelConfig>(() => initialModelForm.skillModel);
   const accountIdentifier = resolveAccountIdentifier(state);
-  const maskedAccountIdentifier = maskAccountIdentifier(accountIdentifier);
+  const accountDisplayIdentifier = accountIdentifier.trim();
   const accountName = isByokMode
     ? resolveAccountFallback(appSettings?.userMode, t)
-    : state.account.nickname || maskedAccountIdentifier || resolveAccountFallback(appSettings?.userMode, t);
-  const accountMeta = isByokMode ? resolveAccountMeta(appSettings?.userMode, t) : maskedAccountIdentifier || resolveAccountMeta(appSettings?.userMode, t);
+    : state.account.nickname || accountDisplayIdentifier || resolveAccountFallback(appSettings?.userMode, t);
+  const accountMeta = isByokMode ? resolveAccountMeta(appSettings?.userMode, t) : accountDisplayIdentifier || resolveAccountMeta(appSettings?.userMode, t);
   const accountInitial = isByokMode ? "·" : resolveAccountInitials(accountName);
   const registeredAtText = formatRegisteredAt(state.account.registeredAt, t);
   const language = appSettings?.language === "en-US" ? "en-US" : "zh-CN";
@@ -394,7 +394,15 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const giftBarUsedTokens = agentQuota?.usedTokens ?? giftUsedTokens;
   const { usagePercent, isTokenLow } = resolveGiftTokenUsage(giftBarUsedTokens, giftTotalTokens, giftRemainingTokens);
   const showGiftQuota = !isByokMode;
-  const invitationEnabled = bootstrap?.promotions?.invitation?.enabled === true;
+  const invitationPromotion = bootstrap?.promotions?.invitation;
+  const invitationEnabled = invitationPromotion?.enabled === true;
+  const invitationRewardBody = invitationPromotion
+    && invitationPromotion.inviterRewardTokens > 0
+    && invitationPromotion.inviterRewardTokens === invitationPromotion.inviteeRewardTokens
+      ? t("settings.token.invite.bodyWithReward", {
+          count: formatTokenGiftAmount(invitationPromotion.inviterRewardTokens)
+        })
+      : t("settings.token.invite.body");
   const displayInviteCode = invitationInfo?.invitationCode ?? null;
   const inviteDailyLimitReached = invitationInfo?.dailyLimitReached ?? false;
   const showInvitationBanner = invitationEnabled
@@ -1680,7 +1688,9 @@ export function SettingsPageView(props: SettingsPageViewProps) {
               <span className="flex items-center gap-2">
                 <Search size={15} className="text-text-ink/55" />
                 {t("settings.token.viewDetail")}
-                <span className="text-xs text-text-ink/45">{t("settings.token.breakdown")}</span>
+                <span className="text-xs text-text-ink/45">
+                  {t(isByokMode ? "settings.token.byokBreakdown" : "settings.token.breakdown")}
+                </span>
               </span>
               <ChevronRight size={16} className="text-text-ink/45" />
             </button>
@@ -1715,7 +1725,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
                     ? t("settings.token.invite.loading")
                     : inviteDailyLimitReached
                       ? t("settings.token.invite.dailyLimit")
-                      : t("settings.token.invite.body")}
+                      : invitationRewardBody}
               </p>
             </div>
             {displayInviteCode ? (

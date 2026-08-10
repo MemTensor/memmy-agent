@@ -6,7 +6,8 @@ import type {
 import {
   createAgentTaskModelOnboardingInsightReportGenerator,
   createOnboardingInsightService,
-  createOpenAiCompatibleOnboardingInsightReportGenerator
+  createOpenAiCompatibleOnboardingInsightReportGenerator,
+  type OnboardingInsightGenerationInput
 } from "../onboarding-insight-service.js";
 
 afterEach(() => {
@@ -14,7 +15,7 @@ afterEach(() => {
 });
 
 describe("onboarding insight service", () => {
-  it("generates a cross-agent report from recent user queries without writing memory", async () => {
+  it("uses all sources for preferences but bases the project report on only the latest conversation", async () => {
     const service = createOnboardingInsightService({
       samplers: [
         sampler("cursor", "Cursor", [
@@ -38,8 +39,7 @@ describe("onboarding insight service", () => {
     expect(report.reportMarkdown).not.toContain("用户 query");
     expect(report.reportMarkdown).not.toContain("本机账号显示");
     expect(report.reportMarkdown).not.toContain("本机用户名/路径名显示");
-    expect(report.primaryAction?.type).toBe("cross_agent_synthesis");
-    expect(report.primaryAction?.relatedAgents).toEqual(expect.arrayContaining(["Cursor", "Claude Code"]));
+    expect(report.reportMarkdown).toContain("Claude Code");
     expect(report.diagnostics).toMatchObject({
       discoveredAgentCount: 2,
       sampledQueryCount: 3,
@@ -60,7 +60,7 @@ describe("onboarding insight service", () => {
 
     const report = await service.generateReport({ locale: "zh-CN" });
 
-    expect(report.reportMarkdown).not.toContain("Grace江");
+    expect(report.reportMarkdown.split("\n")[0]).not.toContain("Grace江");
     expect(report.reportMarkdown).toContain("Hi");
   });
 
@@ -77,17 +77,19 @@ describe("onboarding insight service", () => {
 
     const report = await service.generateReport({ locale: "zh-CN" });
 
-    expect(report.reportMarkdown).not.toContain("部署在云服务器上使用的");
+    expect(report.reportMarkdown.split("\n")[0]).not.toContain("部署在云服务器上使用的");
     expect(report.reportMarkdown).toContain("Hi");
   });
 
   it("returns a fixed Memmy introduction when agents have no sampled memory", async () => {
     const generateReport = vi.fn(async () => "should not be used");
+    const write = vi.fn(async () => undefined);
     const service = createOnboardingInsightService({
       samplers: [
         sampler("codex", "Codex", [])
       ],
       reportGenerator: { generateReport },
+      memoryWriter: { write },
       now: () => 100
     });
 
@@ -95,19 +97,17 @@ describe("onboarding insight service", () => {
 
     expect(report.status).toBe("ready");
     expect(report.reportMarkdown).toBe([
-      "这台设备上还没有 Memmy 可以读取的记录，不过从现在开始，你和 Agent 对话中产生的经验、决策和上下文，Memmy 会帮你持续沉淀下来。下一次开新对话或者切换 Agent 时，Memmy 可以直接注入相关记忆，不用你每次重新解释背景。",
-      "比如项目里的命名约定、你偏好的实现方式、某个问题踩过的坑、一次排查最终定位到的原因——这些在日常工作中反复出现却不该反复解释的东西，之后都会变成可复用的长期记忆。",
-      "如果你在 Cursor、Codex 等不同 Agent 之间切换工作，Memmy 也能把分散的上下文串起来——迁移的不是聊天记录，而是可以继续执行的任务现场。从这次对话开始，Memmy 就正式上班了。"
+      "这台设备上还没有可读取的 Agent 历史，所以我不会假装已经了解你。",
+      "先告诉 Memmy 一件你正在做的真实任务。它会记住有用的背景、决策和下一步；之后新开对话，或换到 Cursor、Codex，也不用再从头解释。"
     ].join("\n\n"));
     expect(report.reportMarkdown).not.toContain("not enough recent user messages");
-    expect(report.primaryAction).toBeUndefined();
-    expect(report.secondaryActions).toEqual([]);
     expect(report.diagnostics).toMatchObject({
       discoveredAgentCount: 1,
       sampledQueryCount: 0,
       usedLlm: false
     });
     expect(generateReport).not.toHaveBeenCalled();
+    expect(write).not.toHaveBeenCalled();
   });
 
   it("localizes the fixed empty-history report for English UI", async () => {
@@ -130,9 +130,8 @@ describe("onboarding insight service", () => {
 
     expect(report.status).toBe("ready");
     expect(report.reportMarkdown).toBe([
-      "There are no records on this device that Memmy can read yet. From now on, though, Memmy will keep capturing the experience, decisions, and context that emerge from your conversations with Agents. The next time you start a new conversation or switch Agents, Memmy can inject the relevant memories directly, so you do not have to explain the background all over again.",
-      "That includes project naming conventions, your preferred implementation style, pitfalls you have already encountered, and the root cause uncovered by a debugging session—things that recur in daily work but should not need to be explained repeatedly. They will become reusable long-term memory.",
-      "If you switch between Agents such as Cursor and Codex, Memmy can also connect the context scattered across them. What moves is not merely a chat log, but a working task state that can be continued. Starting with this conversation, Memmy is officially on the job."
+      "There is no readable Agent history on this device yet, so there is nothing useful to pretend I already know.",
+      "Tell Memmy about one real task. It will preserve the useful background, decisions, and next step so a new conversation—or another Agent such as Cursor or Codex—can continue without making you explain it again."
     ].join("\n\n"));
     expect(report.reportMarkdown).not.toContain("我没有在本机扫描到");
     expect(events).toEqual([
@@ -143,6 +142,8 @@ describe("onboarding insight service", () => {
           sampledQueryCount: 0,
           usedLlm: false,
           elapsedMs: 0,
+          reportLanguage: "en-US",
+          latestWorkspacePath: null,
           agents: []
         }
       },
@@ -150,8 +151,7 @@ describe("onboarding insight service", () => {
         type: "done",
         response: expect.objectContaining({
           status: "ready",
-          reportMarkdown: expect.stringContaining("There are no records on this device that Memmy can read yet"),
-          secondaryActions: [],
+          reportMarkdown: expect.stringContaining("There is no readable Agent history on this device yet"),
           diagnostics: expect.objectContaining({
             discoveredAgentCount: 0,
             sampledQueryCount: 0,
@@ -193,25 +193,47 @@ describe("onboarding insight service", () => {
     }));
   });
 
-  it("uses model-generated copy for all three report actions", async () => {
+  it("stores the model-summarized task trajectory instead of the raw conversation", async () => {
+    const write = vi.fn(async () => undefined);
+    const taskContext = {
+      topic: "Memmy onboarding handoff",
+      userGoal: "让新 Agent 准确接续最近任务。",
+      latestRequest: "改用归纳后的任务轨迹作为接续上下文。",
+      status: "active",
+      currentState: "双区块输出方案已确定，等待实现验证。",
+      agentActions: ["梳理了报告与任务上下文的边界。"],
+      verifiedResults: [],
+      unresolvedItems: ["尚未验证跨 Agent 召回。"],
+      continuationPoint: "实现双区块解析并运行测试。",
+      trajectorySummary: "用户先发现原始对话导致接续混乱，随后确定改为通用任务轨迹摘要；当前进入实现阶段。"
+    };
+    const service = createOnboardingInsightService({
+      samplers: [
+        sampler("codex", "Codex", [query("codex", "1", "不要保存原始对话，改成任务轨迹摘要")])
+      ],
+      reportGenerator: {
+        async generateReport() {
+          return `<memmy_report>## 最近项目记忆\n已改用任务轨迹摘要。</memmy_report>\n<memmy_task_context>${JSON.stringify(taskContext)}</memmy_task_context>`;
+        }
+      },
+      memoryWriter: { write },
+      now: () => 100
+    });
+
+    const report = await service.generateReport({ locale: "zh-CN" });
+
+    expect(report.reportMarkdown).toBe("## 最近项目记忆\n已改用任务轨迹摘要。");
+    expect(write).toHaveBeenCalledWith(expect.objectContaining({
+      reportMarkdown: "## 最近项目记忆\n已改用任务轨迹摘要。",
+      taskContext
+    }));
+  });
+
+  it("returns only the model-generated report without action protocol fields", async () => {
     const generateReport = vi.fn(async (input) => {
-      const candidates = [input.primaryAction, ...input.secondaryActions];
-      return [
-        "Hi jiang，我已经把最近分散在不同 Agent 里的任务线索整理好了。",
-        "  [MEMMY_ACTIONS_JSON]   ",
-        JSON.stringify({
-          actions: candidates.map((action, index) => ({
-            type: action.type,
-            buttonLabel: ["整合合并任务", "继续修复按钮", "沉淀技术决策"][index],
-            description: ["汇总分支合并背景并形成执行计划", "接着修复首登报告按钮生成链路", "记录模型生成与规则校验的取舍"][index],
-            suggestedPrompt: [
-              "请整合 Codex 和 Cursor 中关于 dev-jiang 合并 dev 的讨论，归纳已经确认的保留方案、尚未解决的冲突以及下一步验证和提交计划。",
-              "请继续修复首次登录扫描报告的三个行动按钮，让按钮内容结合最近任务由模型生成，并检查点击后发送的请求是否具体、通顺且可以直接执行。",
-              "请把首次登录报告按钮采用模型生成、规则限定类型和元数据、异常时回退模板的方案整理成技术决策记录，并列出验证标准。"
-            ][index]
-          }))
-        })
-      ].join("\n");
+      expect(input).not.toHaveProperty("primaryAction");
+      expect(input).not.toHaveProperty("secondaryActions");
+      return "Hi jiang，我已经把最近分散在不同 Agent 里的任务线索整理好了。";
     });
     const service = createOnboardingInsightService({
       samplers: [
@@ -225,19 +247,11 @@ describe("onboarding insight service", () => {
     const report = await service.generateReport({ locale: "zh-CN" });
 
     expect(report.reportMarkdown).toBe("Hi jiang，我已经把最近分散在不同 Agent 里的任务线索整理好了。");
-    expect(report.reportMarkdown).not.toContain("MEMMY_ACTIONS");
-    expect([report.primaryAction, ...report.secondaryActions].map((action) => action?.buttonLabel)).toEqual([
-      "整合合并任务",
-      "继续修复按钮",
-      "沉淀技术决策"
-    ]);
-    expect(report.primaryAction).toMatchObject({
-      relatedAgents: expect.arrayContaining(["Codex", "Cursor"]),
-      suggestedPrompt: expect.stringContaining("dev-jiang 合并 dev")
-    });
+    expect(report).not.toHaveProperty("primaryAction");
+    expect(report).not.toHaveProperty("secondaryActions");
   });
 
-  it("falls back to rule-generated actions when model action JSON is invalid", async () => {
+  it("strips a legacy action payload from model output", async () => {
     const service = createOnboardingInsightService({
       samplers: [
         sampler("codex", "Codex", [query("codex", "1", "继续实现首次登录报告按钮")])
@@ -253,8 +267,6 @@ describe("onboarding insight service", () => {
     const report = await service.generateReport({ locale: "zh-CN" });
 
     expect(report.reportMarkdown).toBe("这是一段有效的模型报告。");
-    expect(report.primaryAction?.buttonLabel).toBe("继续这个任务");
-    expect(report.secondaryActions).toHaveLength(2);
     expect(report.diagnostics.usedLlm).toBe(true);
   });
 
@@ -330,10 +342,10 @@ describe("onboarding insight service", () => {
     await service.generateReport({ locale: "zh-CN" });
 
     expect(sampleRecentUserQueries).toHaveBeenCalledWith(expect.objectContaining({
-      maxSessionFiles: 12,
-      maxQueries: 24,
+      maxSessionFiles: 6,
+      maxQueries: 12,
       maxQueryChars: 600,
-      deadlineMs: 10_000
+      deadlineMs: 3_000
     }));
   });
 
@@ -352,12 +364,12 @@ describe("onboarding insight service", () => {
     await service.generateReport({ locale: "zh-CN" });
 
     const generationInput = generateReport.mock.calls[0]?.[0];
-    expect(generationInput?.sample.sampledQueryCount).toBe(96);
-    expect(generationInput?.sample.queries).toHaveLength(60);
+    expect(generationInput?.sample.sampledQueryCount).toBe(84);
+    expect(generationInput?.sample.queries).toHaveLength(24);
     expect(new Set(generationInput?.sample.queries.map((item) => item.agentSource))).toEqual(new Set(["Codex", "Cursor", "Claude Code"]));
   });
 
-  it("puts the newest ten queries first before filling the model context with balanced samples", async () => {
+  it("keeps the preference model context balanced across sources", async () => {
     const generateReport = vi.fn(async () => "这是一段正常生成的初见报告。");
     const service = createOnboardingInsightService({
       samplers: [
@@ -372,11 +384,9 @@ describe("onboarding insight service", () => {
     await service.generateReport({ locale: "zh-CN" });
 
     const queries = generateReport.mock.calls[0]?.[0].sample.queries ?? [];
-    expect(queries).toHaveLength(60);
-    expect(queries.slice(0, 10).map((item) => `${item.agentSource}:${item.text}`)).toEqual(
-      Array.from({ length: 10 }, (_, index) => `Codex:codex recent ${20 - index}`)
-    );
-    expect(new Set(queries.slice(10).map((item) => item.agentSource))).toEqual(new Set(["Codex", "Cursor", "Claude Code"]));
+    expect(queries).toHaveLength(24);
+    expect(queries.slice(0, 3).map((item) => item.agentSource)).toEqual(["Codex", "Cursor", "Claude Code"]);
+    expect(new Set(queries.map((item) => item.agentSource))).toEqual(new Set(["Codex", "Cursor", "Claude Code"]));
   });
 
   it("strips inline image base64 before sending sampled user queries to the report model", async () => {
@@ -402,7 +412,44 @@ describe("onboarding insight service", () => {
     expect(payloadText).not.toContain("iVBORw0KGgo");
   });
 
-  it("streams generated first-report text while hiding and parsing final model actions", async () => {
+  it("selects the globally latest visible conversation and sends assistant and compact tool context to the report model", async () => {
+    const generateReport = vi.fn(async () => "这是一段正常生成的初见报告。");
+    const readConversation = vi.fn(async (reference) => ({
+      ...reference,
+      messages: [
+        { ...query("cursor", "latest-user", "修复最新构建错误"), role: "user" as const },
+        { ...query("cursor", "latest-assistant", "Agent 表示已经完成修改"), role: "assistant" as const },
+        { ...query("cursor", "latest-tool", "pnpm test: success"), role: "tool" as const }
+      ]
+    }));
+    const service = createOnboardingInsightService({
+      samplers: [
+        samplerWithRecentMessages("codex", "Codex", "2026-06-01T10:00:00.000Z"),
+        samplerWithRecentMessages("cursor", "Cursor", "2026-06-02T10:00:00.000Z")
+      ],
+      conversationWindowReader: { readConversation },
+      reportGenerator: { generateReport },
+      now: () => 100
+    });
+
+    await service.generateReport({ locale: "zh-CN" });
+
+    expect(readConversation).toHaveBeenCalledWith(expect.objectContaining({
+      sourceId: "cursor",
+      displayName: "Cursor",
+      conversationId: "cursor-conversation"
+    }), expect.objectContaining({ deadlineMs: 3_000 }));
+    const sample = generateReport.mock.calls[0]?.[0].sample;
+    expect(sample?.latestConversation).toMatchObject({
+      agentSource: "Cursor",
+      conversationId: "cursor-conversation"
+    });
+    expect(sample?.latestConversation?.messages.map((message) => message.role)).toEqual(["user", "assistant", "tool"]);
+    expect(sample?.latestConversation?.messages[2]?.text).toBe("pnpm test: success");
+  });
+
+  it("streams only report text and persists the first-report memory before done", async () => {
+    const write = vi.fn(async () => undefined);
     const service = createOnboardingInsightService({
       samplers: [
         sampler("codex", "Codex", [
@@ -413,33 +460,22 @@ describe("onboarding insight service", () => {
         async generateReport() {
           throw new Error("generateReport not used");
         },
-        async *streamReport(input) {
-          const candidates = [input.primaryAction, ...input.secondaryActions];
+        async *streamReport() {
           yield "Hi，";
           yield "我已经开始读你的最近任务。\r\n";
-          yield "[";
-          yield "MEMMY_ACTIONS";
-          yield "_JSON]   \r\n";
-          yield JSON.stringify({
-            actions: candidates.map((action, index) => ({
-              type: action.type,
-              buttonLabel: ["继续首登优化", "整理实现决策", "排查流式输出"][index],
-              description: ["接着完成当前首登报告优化", "记录模型按钮生成方案", "验证内部数据不会显示在页面"][index],
-              suggestedPrompt: [
-                "请继续优化首次登录报告生成链路，重点确认报告正文和三个模型按钮可以在同一次请求中稳定返回。",
-                "请整理首次登录按钮由模型生成、规则限制行动类型并在异常时回退的技术决策和验证标准。",
-                "请排查首次登录报告的流式输出，验证内部 action 标记和 JSON 不会显示到页面，同时最终按钮内容能够正确解析。"
-              ][index]
-            }))
-          });
+          yield "## 接下来可以做\n1. 先验证记忆已完成摘要和索引。";
         }
       },
+      memoryWriter: { write },
       now: () => 100
     });
 
     const events = [];
     for await (const event of service.streamReport({ locale: "zh-CN" })) {
       events.push(event);
+      if (event.type === "done") {
+        expect(write).toHaveBeenCalledTimes(1);
+      }
     }
 
     expect(events[0]).toMatchObject({
@@ -450,24 +486,114 @@ describe("onboarding insight service", () => {
         usedLlm: false
       }
     });
-    expect(events[1]).toEqual({ type: "chunk", delta: "Hi，" });
-    expect(events[2]).toEqual({ type: "chunk", delta: "我已经开始读你的最近任务。\r\n" });
-    expect(events.filter((event) => event.type === "chunk").map((event) => event.delta).join(""))
-      .not.toMatch(/MEMMY_ACTIONS_JSON|"actions"/);
-    expect(events[3]).toMatchObject({
+    expect(events
+      .filter((event): event is { type: "chunk"; delta: string } => event.type === "chunk")
+      .map((event) => event.delta)
+      .join("")).toBe("Hi，我已经开始读你的最近任务。\r\n## 接下来可以做\n1. 先验证记忆已完成摘要和索引。");
+    expect(events[4]).toMatchObject({
       type: "done",
       response: {
         status: "ready",
-        reportMarkdown: "Hi，我已经开始读你的最近任务。",
-        primaryAction: expect.objectContaining({
-          buttonLabel: "继续首登优化",
-          suggestedPrompt: expect.stringContaining("同一次请求")
-        }),
+        reportMarkdown: "Hi，我已经开始读你的最近任务。\n## 接下来可以做\n1. 先验证记忆已完成摘要和索引。",
         diagnostics: expect.objectContaining({
           usedLlm: true
         })
       }
     });
+    expect(write).toHaveBeenCalledWith(expect.objectContaining({
+      reportMarkdown: expect.stringContaining("先验证记忆已完成摘要和索引"),
+      latestConversation: expect.objectContaining({ agentSource: "Codex" })
+    }));
+  });
+
+  it("keeps task context hidden even when the model omits the report closing tag", async () => {
+    const write = vi.fn(async () => undefined);
+    const service = createOnboardingInsightService({
+      samplers: [
+        sampler("codex", "Codex", [query("codex", "1", "把最近任务归纳后用于跨 Agent 接续")])
+      ],
+      reportGenerator: {
+        async generateReport() {
+          throw new Error("generateReport not used");
+        },
+        async *streamReport() {
+          yield "<memmy_";
+          yield "report>## 最近项目记忆\n";
+          yield "任务轨迹已归纳。<memmy_task_";
+          yield "context>{\"topic\":\"Memmy 初见报告\",\"userGoal\":\"跨 Agent 接续任务\",\"latestRequest\":\"保存归纳后的轨迹\",\"status\":\"active\",\"currentState\":\"等待验证\",\"agentActions\":[\"已完成摘要设计\"],\"verifiedResults\":[],\"unresolvedItems\":[\"召回尚未验证\"],\"continuationPoint\":\"运行接续测试\",\"trajectorySummary\":\"方案已经确定，当前等待验证。\"}</memmy_task_context>";
+        }
+      },
+      memoryWriter: { write },
+      now: () => 100
+    });
+
+    const events = await collectStreamEvents(service.streamReport({ locale: "zh-CN" }));
+    const visibleText = events
+      .filter((event): event is { type: "chunk"; delta: string } =>
+        Boolean(event && typeof event === "object" && (event as { type?: unknown }).type === "chunk"))
+      .map((event) => event.delta)
+      .join("");
+    const done = events.find((event) =>
+      event && typeof event === "object" && (event as { type?: unknown }).type === "done"
+    ) as { response: { reportMarkdown: string } } | undefined;
+
+    expect(visibleText).toBe("## 最近项目记忆\n任务轨迹已归纳。");
+    expect(visibleText).not.toContain("memmy_task_context");
+    expect(visibleText).not.toContain("trajectorySummary");
+    expect(done?.response.reportMarkdown).toBe("## 最近项目记忆\n任务轨迹已归纳。");
+    expect(write).toHaveBeenCalledWith(expect.objectContaining({
+      taskContext: expect.objectContaining({
+        topic: "Memmy 初见报告",
+        status: "active",
+        continuationPoint: "运行接续测试"
+      })
+    }));
+  });
+
+  it("keeps a naked task-context JSON out of the streamed and final report", async () => {
+    const write = vi.fn(async () => undefined);
+    const taskContext = {
+      topic: "Memmy onboarding",
+      userGoal: "缩短初见报告等待时间。",
+      latestRequest: "不要把内部 JSON 显示给用户。",
+      status: "active",
+      currentState: "正文已经生成，等待记忆索引。",
+      agentActions: ["已开始流式输出正文。"],
+      verifiedResults: [],
+      unresolvedItems: [],
+      continuationPoint: "等待索引完成。",
+      trajectorySummary: "报告正文已经可见，内部任务摘要继续在后台生成。"
+    };
+    const service = createOnboardingInsightService({
+      samplers: [sampler("codex", "Codex", [query("codex", "1", "隐藏初见报告后的 JSON")])],
+      reportGenerator: {
+        async generateReport() {
+          throw new Error("generateReport not used");
+        },
+        async *streamReport() {
+          yield "## 最近项目记忆\n正文先展示。";
+          yield "\n{";
+          yield `${JSON.stringify(taskContext).slice(1)}`;
+        }
+      },
+      memoryWriter: { write },
+      now: () => 100
+    });
+
+    const events = await collectStreamEvents(service.streamReport({ locale: "zh-CN" }));
+    const visibleText = events
+      .filter((event): event is { type: "chunk"; delta: string } =>
+        Boolean(event && typeof event === "object" && (event as { type?: unknown }).type === "chunk"))
+      .map((event) => event.delta)
+      .join("");
+    const done = events.find((event) =>
+      event && typeof event === "object" && (event as { type?: unknown }).type === "done"
+    ) as { response: { reportMarkdown: string } } | undefined;
+
+    expect(visibleText).toBe("## 最近项目记忆\n正文先展示。");
+    expect(visibleText).not.toContain("trajectorySummary");
+    expect(done?.response.reportMarkdown).toBe("## 最近项目记忆\n正文先展示。");
+    expect(write).toHaveBeenCalledWith(expect.objectContaining({ taskContext }));
   });
 
   it("releases a buffered opening bracket when it is ordinary report text", async () => {
@@ -527,7 +653,7 @@ describe("onboarding insight service", () => {
     });
 
     const eventsPromise = collectStreamEvents(service.streamReport({ locale: "zh-CN" }));
-    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.advanceTimersByTimeAsync(3_000);
     const events = await eventsPromise;
 
     expect(events[0]).toMatchObject({
@@ -576,8 +702,10 @@ describe("onboarding insight service", () => {
 
     const body = JSON.parse(String(fetchImpl.mock.calls[0]?.[1]?.body));
     expect(body.stream).toBe(true);
-    expect(body.messages[0].content).toContain("正文长度是硬约束");
-    expect(body.messages[0].content).toContain("正文结构是硬约束");
+    expect(body.messages[0].content).toContain("最近项目记忆");
+    expect(body.messages[0].content).toContain("接下来可以做");
+    expect(body.messages[1].content).toContain('"role": "tool"');
+    expect(body.messages[1].content).toContain("npm test: success");
     expect(chunks).toEqual(["Hi", " there"]);
   });
 
@@ -638,19 +766,24 @@ describe("onboarding insight service", () => {
     expect(body.thinking_budget).toBe(500);
     expect(body).not.toHaveProperty("reasoning_effort");
     expect(body.messages[0].content).not.toContain("保持 4-6 个短段落");
-    expect(body.messages[0].content).toContain("这份报告的第一目标是任务接续");
-    expect(body.messages[0].content).toContain("根据 user.profile.nameHints 综合判断");
+    expect(body.messages[0].content).toContain("latestConversation 是所有已扫描 Agent 中时间最新的一个会话");
+    expect(body.messages[0].content).toContain("『你的偏好』");
+    expect(body.messages[0].content).toContain("偏好结论的唯一原始证据是 preferenceEvidence 中由用户本人发送的消息");
+    expect(body.messages[0].content).toContain("严禁使用 assistant、tool 或 latestConversation 推断偏好");
+    expect(body.messages[0].content).not.toContain("我对你的工作偏好");
+    expect(body.messages[0].content).toContain("根据 profile.nameHints 综合判断");
     expect(body.messages[0].content).toContain("默认优先使用 homePathName");
     expect(body.messages[0].content).toContain("admin、administrator、root、ubuntu");
     expect(body.messages[0].content).toContain("不得把名字替换成“这个线索”");
-    expect(body.messages[0].content).toContain("用户偏好/习惯段必须明确写出用户更习惯用中文还是英文交流");
-    expect(body.messages[0].content).toContain("[MEMMY_ACTIONS_JSON]");
-    expect(body.messages[0].content).toContain("不能只写“继续当前任务”");
+    expect(body.messages[0].content).toContain("有值时要自然说明用户最近更常用中文还是英文");
+    expect(body.messages[0].content).toContain("不要生成按钮、行动卡片、CTA");
+    expect(body.messages[0].content).not.toContain("[MEMMY_ACTIONS_JSON]");
     const userPayload = JSON.parse(String(body.messages[1].content));
-    expect(userPayload.reportGoal.primary).toBe("task_continuation");
-    expect(userPayload.reportGoal.mustNotBeShort).toBe(true);
-    expect(userPayload.reportGoal.lengthConstraint).toContain("5-7 natural paragraphs");
-    expect(userPayload.reportGoal.requiredParagraphPlan).toContain("best_tasks_to_continue_in_memmy_agent");
+    expect(userPayload.reportGoal.primary).toBe("user_preferences_latest_project_memory_and_actionable_todos");
+    expect(userPayload.reportGoal.lengthConstraint).toContain("300-500 Chinese characters");
+    expect(userPayload.reportGoal.requiredSections).toContain("latest_project_memory");
+    expect(userPayload.reportGoal.requiredSections).toContain("user_preferences");
+    expect(userPayload.reportGoal.outputEnvelope.taskContextFields).toContain("trajectorySummary");
     expect(userPayload.profile.nameHints).toMatchObject({
       selfDeclaredNames: ["Grace"],
       homePathName: "jiang",
@@ -666,16 +799,15 @@ describe("onboarding insight service", () => {
       mustIncludeDisplayNameInFirstSentence: true,
       defaultPriority: "homePathName"
     });
-    expect(userPayload.recentTaskSignals).toEqual([expect.objectContaining({
+    expect(userPayload.preferenceEvidence).toEqual([expect.objectContaining({
       agentSource: "Codex",
       text: "Continue the first report."
     })]);
-    expect(userPayload.actionCandidates).toHaveLength(3);
-    expect(userPayload.actionCandidates[0]).toMatchObject({
-      priority: "primary",
-      type: "continue_task",
-      objective: expect.stringContaining("选择最具体")
-    });
+    expect(userPayload.latestConversation.messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({ role: "assistant", text: "The report prompt is updated." }),
+      expect.objectContaining({ role: "tool", text: "npm test: success" })
+    ]));
+    expect(userPayload).not.toHaveProperty("actionCandidates");
     expect(userPayload).not.toHaveProperty("actions");
   });
 
@@ -817,7 +949,7 @@ describe("onboarding insight service", () => {
     });
   });
 
-  it("localizes first-report actions and carries inferred response language preference in context only", async () => {
+  it("localizes the report and includes the inferred response language preference", async () => {
     const service = createOnboardingInsightService({
       samplers: [
         sampler("codex", "Codex", [
@@ -836,16 +968,10 @@ describe("onboarding insight service", () => {
     const report = await service.generateReport({ locale: "en-US" });
 
     expect(report.reportMarkdown).toContain("Hi");
-    expect(report.primaryAction?.buttonLabel).toBe("Alright, pull it together");
-    expect(report.primaryAction?.description).toContain("Codex");
-    expect(report.primaryAction?.contextSummary).toContain("Language preference: recent conversations lean English");
-    expect(report.primaryAction?.suggestedPrompt).not.toContain("Response language preference");
-    expect(report.primaryAction?.suggestedPrompt).toContain("Projects:");
-    expect(report.primaryAction?.suggestedPrompt).not.toContain("项目：");
-    expect(report.secondaryActions.map((action) => action.buttonLabel)).toEqual([
-      "Continue this task",
-      "Summarize the decisions"
-    ]);
+    expect(report.reportMarkdown).toContain("Language preference: recent conversations lean English");
+    expect(report.reportMarkdown).toContain("## Your preferences");
+    expect(report).not.toHaveProperty("primaryAction");
+    expect(report).not.toHaveProperty("secondaryActions");
   });
 
   it("infers Chinese response preference from Chinese-majority queries with English technical terms", async () => {
@@ -863,11 +989,59 @@ describe("onboarding insight service", () => {
 
     const report = await service.generateReport({ locale: "en-US" });
 
-    expect(report.primaryAction?.contextSummary).toContain("Language preference: recent conversations lean Chinese");
-    expect(report.primaryAction?.suggestedPrompt).not.toContain("Response language preference");
+    expect(report.reportMarkdown).toContain("语言偏好：最近对话更常使用中文");
+    expect(report.diagnostics).toMatchObject({
+      reportLanguage: "zh-CN",
+      latestWorkspacePath: "/Users/test/Memmy"
+    });
   });
 
-  it("uses concrete query snippets instead of generic Chinese task titles in action prompts", async () => {
+  it("uses the scanned response-language preference instead of the App locale for generation and storage", async () => {
+    const generateReport = vi.fn(async (input: OnboardingInsightGenerationInput) => (
+      input.locale === "en-US" ? "English preferred-language report." : "中文报告。"
+    ));
+    const write = vi.fn(async () => undefined);
+    const service = createOnboardingInsightService({
+      samplers: [
+        sampler("codex", "Codex", [
+          query("codex", "1", "Please keep the report concise and continue the latest implementation task."),
+          query("codex", "2", "Use English for the response and include concrete next steps."),
+          query("codex", "3", "Verify the build before giving me the final answer.")
+        ])
+      ],
+      reportGenerator: { generateReport },
+      memoryWriter: { write },
+      now: () => 100
+    });
+
+    const report = await service.generateReport({ locale: "zh-CN" });
+    const events = await collectStreamEvents(service.streamReport({ locale: "zh-CN" }));
+
+    expect(report.reportMarkdown).toBe("English preferred-language report.");
+    expect(generateReport).toHaveBeenCalledWith(expect.objectContaining({ locale: "en-US" }));
+    expect(write).toHaveBeenCalledWith(expect.objectContaining({
+      locale: "en-US",
+      latestConversation: expect.objectContaining({ workspacePath: "/Users/test/Memmy" })
+    }));
+    expect(report.diagnostics).toMatchObject({
+      reportLanguage: "en-US",
+      latestWorkspacePath: "/Users/test/Memmy"
+    });
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: "done",
+        response: expect.objectContaining({
+          reportMarkdown: "English preferred-language report.",
+          diagnostics: expect.objectContaining({
+            reportLanguage: "en-US",
+            latestWorkspacePath: "/Users/test/Memmy"
+          })
+        })
+      })
+    ]));
+  });
+
+  it("uses only the globally latest conversation in the report", async () => {
     const service = createOnboardingInsightService({
       samplers: [
         sampler("codex", "Codex", [
@@ -889,11 +1063,8 @@ describe("onboarding insight service", () => {
 
     const report = await service.generateReport({ locale: "zh-CN" });
 
-    expect(report.primaryAction?.suggestedPrompt).toContain("最近任务：");
-    expect(report.primaryAction?.suggestedPrompt).toContain("push 到 dev-jiang 分支");
-    expect(report.primaryAction?.suggestedPrompt).toContain("继续整理当前任务上下文");
-    expect(report.primaryAction?.suggestedPrompt).not.toContain("jiang 的当前任务");
-    expect(report.primaryAction?.suggestedPrompt).not.toContain("最近的连续任务");
+    expect(report.reportMarkdown).toContain("push 到 dev-jiang 分支");
+    expect(report.reportMarkdown).not.toContain("继续整理当前任务上下文");
   });
 });
 
@@ -919,6 +1090,40 @@ function sampler(sourceId: string, displayName: string, queries: OnboardingSampl
         recentSessionCount: 1,
         latestActivityAt: queries[0]?.createdAt ?? null,
         queries,
+        errors: []
+      };
+    }
+  };
+}
+
+function samplerWithRecentMessages(sourceId: string, displayName: string, latestAt: string): OnboardingInsightSampler {
+  const user = {
+    ...query(sourceId, `${sourceId}-user`, `请继续 ${sourceId} 的最近任务`),
+    createdAt: new Date(Date.parse(latestAt) - 1_000).toISOString()
+  };
+  return {
+    sourceId,
+    displayName,
+    async detect() {
+      return true;
+    },
+    async sampleRecentUserQueries() {
+      return {
+        sourceId,
+        displayName,
+        recentSessionCount: 1,
+        latestActivityAt: latestAt,
+        queries: [user],
+        recentMessages: [
+          { ...user, role: "user" as const },
+          {
+            ...user,
+            messageId: `${sourceId}-assistant`,
+            role: "assistant" as const,
+            createdAt: latestAt,
+            text: `${displayName} recent answer`
+          }
+        ],
         errors: []
       };
     }
@@ -971,8 +1176,7 @@ function generationInput(): Parameters<ReturnType<typeof createOpenAiCompatibleO
       userInsights: [],
       taskCandidates: [],
       highSignalQueries: [],
-      taskLikeQuery: null,
-      actionType: "continue_task"
+      taskLikeQuery: null
     },
     sample: {
       discoveredAgentCount: 1,
@@ -983,36 +1187,18 @@ function generationInput(): Parameters<ReturnType<typeof createOpenAiCompatibleO
         createdAt: "2026-06-01T10:00:00.000Z",
         workspacePath: "/Users/test/Memmy",
         text: "Continue the first report."
-      }]
-    },
-    primaryAction: {
-      type: "continue_task",
-      buttonLabel: "Continue",
-      description: "Continue",
-      contextSummary: "Current task",
-      relatedAgents: ["Codex"],
-      topicKeywords: ["Memory"],
-      suggestedPrompt: "Continue"
-    },
-    secondaryActions: [
-      {
-        type: "decision_doc",
-        buttonLabel: "Decide",
-        description: "Decide",
-        contextSummary: "Current task",
-        relatedAgents: ["Codex"],
-        topicKeywords: ["Memory"],
-        suggestedPrompt: "Decide"
-      },
-      {
-        type: "problem_diagnosis",
-        buttonLabel: "Debug",
-        description: "Debug",
-        contextSummary: "Current task",
-        relatedAgents: ["Codex"],
-        topicKeywords: ["Memory"],
-        suggestedPrompt: "Debug"
+      }],
+      latestConversation: {
+        agentSource: "Codex",
+        conversationId: "codex-conversation",
+        latestActivityAt: "2026-06-01T10:00:00.000Z",
+        workspacePath: "/Users/test/Memmy",
+        messages: [
+          { role: "user", createdAt: "2026-06-01T10:00:00.000Z", text: "Continue the first report." },
+          { role: "assistant", createdAt: "2026-06-01T10:00:01.000Z", text: "The report prompt is updated." },
+          { role: "tool", createdAt: "2026-06-01T10:00:02.000Z", text: "npm test: success" }
+        ]
       }
-    ]
+    }
   };
 }

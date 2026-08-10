@@ -245,6 +245,10 @@ type InternalMemorySearchRequest = MemorySearchRequest & {
   targetSkillId?: string;
   contextHints?: Record<string, unknown>;
   injectedContextQuery?: string;
+  turnIntentDecision?: unknown;
+  routeProposal?: unknown;
+  projectContextVersion?: number;
+  projectContextStatus?: string;
   recordEvent?: boolean;
 };
 
@@ -2293,7 +2297,10 @@ export class MemoryService {
     return { retried: retried.length, jobIds: retried.map((item) => item.after.id), serverTime: nowIso() };
   }
 
-  async runWorkerWithEvolutionSummary(limit = 100, request: RequestEnvelope & { targetMemoryIds?: string[] } = {}) {
+  async runWorkerWithEvolutionSummary(
+    limit = 100,
+    request: RequestEnvelope & { targetMemoryIds?: string[]; priorityCohortOnly?: boolean } = {}
+  ) {
     const before = this.panelReadModel.panelOverviewSummary(request).layerCounts;
     const worker = await this.runWorkerOnce(limit, request);
     const after = this.panelReadModel.panelOverviewSummary(request).layerCounts;
@@ -2335,7 +2342,10 @@ export class MemoryService {
 
   runWorkerOnce(
     limit = 100,
-    request: RequestEnvelope & { targetMemoryIds?: string[] } = {}
+    request: RequestEnvelope & {
+      targetMemoryIds?: string[];
+      priorityCohortOnly?: boolean;
+    } = {}
   ): ReturnType<WorkerRunner["runWorkerOnce"]> {
     if (request.namespace && !request.targetMemoryIds) {
       const targetMemoryIds = this.repos.memories.list({ ...memoryFilterForNamespace(request.namespace) }, 10_000)
@@ -2585,7 +2595,6 @@ export class MemoryService {
     request: TurnStartRequest & Record<string, unknown>
   ): ReturnType<MemoryService["startTurn"]> {
     const turnId = request.turnId ?? newId("turn");
-    const episodeId = `episode_${stableHash(`readonly:${request.sessionId}:${turnId}`).slice(0, 20)}`;
     const contextHints = turnStartContextHints(request);
     const search = await this.search({
       requestId: request.requestId,
@@ -2617,11 +2626,9 @@ export class MemoryService {
     };
     const supplementalMarkdown = search.injectedContext.markdown.trim();
     return {
-      contextPacketId: `ctx_${stableHash(`${request.sessionId}:${episodeId}:${turnId}:${search.searchEventId}`).slice(0, 20)}`,
+      contextPacketId: `ctx_${stableHash(`${request.sessionId}:unbound:${turnId}:${search.searchEventId}`).slice(0, 20)}`,
       turnId,
       sessionId: request.sessionId,
-      episodeId,
-      closedEpisodeIds: [],
       searchEventId: search.searchEventId,
       hits: search.hits,
       injectedContext: {

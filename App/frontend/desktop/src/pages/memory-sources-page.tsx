@@ -7,6 +7,10 @@ import {
   type ScanPreferences
 } from "@memmy/local-api-contracts";
 import { ApiRequestError } from "../api/http.js";
+import {
+  PRODUCT_TOUR_MEMORY_AGENTS_LIST_ANCHOR,
+  PRODUCT_TOUR_MEMORY_SCAN_PREFERENCES_ANCHOR
+} from "../app/product-tour-layout.js";
 import { useApiClients } from "../app/providers.js";
 import type { MessageKey } from "../i18n/messages.js";
 import { useTranslation } from "../i18n/use-translation.js";
@@ -751,6 +755,7 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
 
       {state.agentSources.error && <Banner tone="danger">{state.agentSources.error}</Banner>}
 
+      <div data-tour-anchor={PRODUCT_TOUR_MEMORY_AGENTS_LIST_ANCHOR}>
       <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
         <div className="min-w-0">
           <div className="text-xs font-semibold text-text-ink/60">{t("memory.sources", { count: state.agentSources.items.length })}</div>
@@ -862,6 +867,7 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
           );
         })}
       </div>
+      </div>
 
       <div className="mt-3 rounded-card border-content-panel bg-action-sky/8 px-4 py-3">
         <button
@@ -881,7 +887,7 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
               type="button"
               onClick={openFullScanConfirm}
               disabled={isScanning}
-              className="flex items-start gap-3 rounded-card border-content-panel bg-status-error-soft/50 p-3 text-left transition-all hover:bg-status-error-soft/60 disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer outline-none focus:outline-none focus-visible:ring-2 focus-visible:ring-status-error/20"
+              className="flex items-start gap-3 rounded-card border-content-panel bg-background-paper/70 p-3 text-left transition-all hover:bg-background-paper disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer outline-none focus:outline-none focus-visible:ring-2 focus-visible:ring-status-error/20"
             >
               <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-btn bg-background-paper/80 text-status-error">
                 <Radar size={14} />
@@ -908,8 +914,11 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
         )}
       </div>
 
-      <div className="mt-6 bg-background-paper border-content-panel rounded-card p-5">
-        <div className="flex items-center gap-2 mb-3">
+      <div
+        data-tour-anchor={PRODUCT_TOUR_MEMORY_SCAN_PREFERENCES_ANCHOR}
+        className="mt-6 bg-background-paper border-content-panel rounded-card p-5"
+      >
+        <div className="inline-flex items-center gap-2 mb-3">
           <Settings2 size={14} className="text-text-ink/60" />
           <span className="text-sm font-medium text-text-ink/75">{t("memory.preferences")}</span>
         </div>
@@ -917,15 +926,13 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
           <ToggleRow
             label={t("memory.autoScan")}
             description={t("memory.autoScanDescription")}
-            checked={state.agentSources.scanPreferences.autoScanKnownAgents}
-            onChange={(checked) => updateScanPreferences({ autoScanKnownAgents: checked })}
-          />
-          <Divider />
-          <ToggleRow
-            label={t("memory.watchFiles")}
-            description={t("memory.watchFilesDescription")}
-            checked={state.agentSources.scanPreferences.watchFileChanges}
-            onChange={(checked) => updateScanPreferences({ watchFileChanges: checked })}
+            checked={
+              state.agentSources.scanPreferences.autoScanKnownAgents
+              || state.agentSources.scanPreferences.watchFileChanges
+            }
+            onChange={(checked) =>
+              updateScanPreferences({ autoScanKnownAgents: checked, watchFileChanges: checked })
+            }
           />
           <Divider />
           <ToggleRow

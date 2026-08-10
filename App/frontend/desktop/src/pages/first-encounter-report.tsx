@@ -1,17 +1,25 @@
 import { useEffect, useLayoutEffect, useRef, useState, type UIEvent } from "react";
-import { MessageCircle, Sparkles } from "lucide-react";
+import { ArrowRight, Sparkles } from "lucide-react";
 import { Memmy } from "../components/mascot/memmy.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { AgentMessageContent } from "./agent-message-content.js";
-import type { FirstEncounterReportPayload, FirstEncounterTaskAction } from "./first-encounter-protocol.js";
+import type { FirstEncounterReportPayload } from "./first-encounter-protocol.js";
+import {
+  FirstEncounterRelayChallenge,
+  FirstEncounterRelayOptIn,
+  type RelayAgentOption
+} from "./first-encounter-relay-challenge.js";
 
 export interface FirstEncounterReportProps {
   payload: FirstEncounterReportPayload;
   isStreaming: boolean;
   simulateStreaming: boolean;
-  onTaskClick: (action: FirstEncounterTaskAction) => void;
-  onStartConversation: () => void;
-  onSkip: () => void;
+  followUpMode: "relay" | "connect" | null;
+  agents: RelayAgentOption[];
+  onOpenAgent?: (sourceId: string, prompt: string) => Promise<boolean>;
+  onVerifyMemory?: (sourceId: string, startedAt: string) => Promise<boolean>;
+  onRelayLifecycle?: (event: "relay_clicked" | "memory_verified", sourceId: string, action: string) => void;
+  onContinue: () => void;
 }
 
 const PUNCTUATION = new Set(["。", "！", "？", "，", "、", "；", "：", ".", "!", "?", ",", ";", ":", "\n"]);
@@ -26,36 +34,24 @@ function isReportContentAtBottom(element: Pick<HTMLElement, "scrollTop" | "scrol
 export function FirstEncounterReport(props: FirstEncounterReportProps) {
   const { t } = useTranslation();
   const [displayedText, setDisplayedText] = useState("");
-  const [showActions, setShowActions] = useState(false);
+  const [showFollowUps, setShowFollowUps] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const shouldAutoScrollReportRef = useRef(true);
   const isProgrammaticReportScrollRef = useRef(false);
   const userScrollIntentUntilRef = useRef(0);
   const report = props.payload.body;
-  const emptyHistory = props.payload.emptyHistory;
-  const primaryAction = props.payload.actions[0] ?? null;
-  const secondaryActions = props.payload.actions.slice(1, 3);
-  const mainAction = emptyHistory ? {
-    buttonLabel: t("onboarding.report.firstConversation"),
-    description: t("onboarding.report.firstConversationDescription"),
-    onClick: props.onStartConversation
-  } : primaryAction ? {
-    buttonLabel: primaryAction.buttonLabel,
-    description: primaryAction.description,
-    onClick: () => props.onTaskClick(primaryAction)
-  } : null;
-  const contentIsStreaming = props.isStreaming || (props.simulateStreaming && !showActions);
+  const contentIsStreaming = props.isStreaming || (props.simulateStreaming && !showFollowUps);
 
   useEffect(() => {
     if (props.isStreaming) {
       setDisplayedText(report);
-      setShowActions(false);
+      setShowFollowUps(false);
       return;
     }
 
     if (!props.simulateStreaming) {
       setDisplayedText(report);
-      setShowActions(true);
+      setShowFollowUps(true);
       return;
     }
 
@@ -66,11 +62,11 @@ export function FirstEncounterReport(props: FirstEncounterReportProps) {
     let index = 0;
     let timer: number | undefined;
     setDisplayedText("");
-    setShowActions(false);
+    setShowFollowUps(false);
 
     const tick = () => {
       if (index >= report.length) {
-        timer = window.setTimeout(() => setShowActions(true), 300);
+        timer = window.setTimeout(() => setShowFollowUps(true), 300);
         return;
       }
 
@@ -86,13 +82,13 @@ export function FirstEncounterReport(props: FirstEncounterReportProps) {
         window.clearTimeout(timer);
       }
     };
-  }, [primaryAction, props.isStreaming, props.simulateStreaming, report]);
+  }, [props.isStreaming, props.simulateStreaming, report]);
 
   useLayoutEffect(() => {
     if (shouldAutoScrollReportRef.current) {
-      scrollReportToBottom(showActions ? "smooth" : "auto");
+      scrollReportToBottom(showFollowUps ? "smooth" : "auto");
     }
-  }, [displayedText, showActions]);
+  }, [displayedText, showFollowUps]);
 
   function scrollReportToBottom(behavior: ScrollBehavior = "auto") {
     const target = scrollRef.current;
@@ -126,89 +122,82 @@ export function FirstEncounterReport(props: FirstEncounterReportProps) {
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-canvas-oat overflow-hidden">
-      <div
-        className="my-8 flex max-h-[calc(100vh-64px)] flex-col"
-        style={{ width: "min(calc(100vw - 48px), clamp(600px, 64vw, 760px))" }}
-      >
-        <div className="mb-6 flex shrink-0 items-center gap-3">
-          <Memmy pose="celebrate" size={64} />
-          <div>
-            <div className="flex items-center gap-2">
-              <Sparkles size={16} className="text-action-sky" />
-              <h2 className="text-base font-bold text-text-ink">{t("onboarding.report.title")}</h2>
+    // Outer scrolls on small screens; inner min-h-screen + items-center centers when content fits.
+    // Use min-h-screen (not min-h-full): prebuilt utilities omit min-h-full.
+    <div className="fixed inset-0 z-50 overflow-y-auto bg-canvas-oat">
+      <div className="flex min-h-screen items-center justify-center px-6 py-8">
+        <div
+          className="flex flex-col"
+          style={{ width: "min(calc(100vw - 48px), clamp(600px, 64vw, 760px))" }}
+        >
+          <div className="mb-4 flex shrink-0 justify-end">
+            <div className="agent-user-turn flex min-w-0 max-w-[75%] justify-end">
+              <div className="agent-chat-bubble-frame agent-chat-bubble-frame--user max-w-full min-w-0">
+                <div className="agent-chat-bubble agent-chat-bubble--user max-w-full min-w-0 overflow-hidden px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+                  {props.payload.reportPrompt}
+                </div>
+              </div>
             </div>
-            <p className="text-xs text-text-ink/50 mt-0.5">{t("onboarding.report.subtitle")}</p>
-          </div>
-        </div>
-
-        <div className="bg-background-paper rounded-card shadow-[0_2px_12px_rgba(0,0,0,0.06)] p-6 mb-4 flex min-h-0 flex-col">
-          <div
-            ref={scrollRef}
-            className="text-sm text-text-ink/80 leading-[1.8] whitespace-pre-line min-h-[120px] overflow-y-auto pr-1"
-            style={{ maxHeight: "min(42vh, 360px)" }}
-            onScroll={handleReportScroll}
-            onWheel={markReportUserScrollIntent}
-            onTouchMove={markReportUserScrollIntent}
-          >
-            <AgentMessageContent content={displayedText} isStreaming={contentIsStreaming} />
           </div>
 
-          {showActions && mainAction && (
-            <div className="mt-5 shrink-0 animate-in fade-in slide-in-from-bottom-3" style={{ animationDuration: "500ms" }}>
-              <ReportPrimaryAction {...mainAction} />
-              {!emptyHistory && secondaryActions.length > 0 && (
-                <div className="mt-4">
-                  <span className="text-[11px] text-text-ink/35 font-normal">{t("onboarding.report.alternatives")}</span>
-                  <div className="flex flex-wrap gap-2 mt-1.5">
-                    {secondaryActions.map((secondaryAction) => (
-                      <button
-                        key={secondaryAction.suggestedPrompt}
-                        type="button"
-                        onClick={() => props.onTaskClick(secondaryAction)}
-                        className="px-3.5 py-2 text-xs font-normal text-text-ink/55 bg-canvas-oat/60 border border-border-stone/20 rounded-lg hover:bg-canvas-oat hover:text-text-ink/75 hover:border-border-stone/35 transition-all cursor-pointer"
-                      >
-                        <span className="whitespace-normal text-center">{secondaryAction.buttonLabel}</span>
-                      </button>
-                    ))}
+          <div className="flex items-start gap-3">
+            <div className="mt-1 shrink-0">
+              <Memmy pose="celebrate" size={56} />
+            </div>
+            <div className="flex min-w-0 flex-1 flex-col">
+              <div className="flex flex-col rounded-card bg-background-paper p-6 shadow-[0_2px_12px_rgba(0,0,0,0.06)]">
+                <div className="mb-3 flex shrink-0 items-center gap-1.5">
+                  <Sparkles size={14} className="text-action-sky" />
+                  <h2 className="text-sm font-bold text-text-ink">{t("onboarding.report.title")}</h2>
+                </div>
+                <div
+                  ref={scrollRef}
+                  className="min-h-[120px] overflow-y-auto pr-1 text-sm leading-[1.8] whitespace-pre-line text-text-ink/80"
+                  style={{ maxHeight: "min(42vh, 360px)" }}
+                  onScroll={handleReportScroll}
+                  onWheel={markReportUserScrollIntent}
+                  onTouchMove={markReportUserScrollIntent}
+                >
+                  <AgentMessageContent content={displayedText} isStreaming={contentIsStreaming} />
+                </div>
+
+                {showFollowUps && props.followUpMode === "relay" && (
+                  <div className="mt-5 shrink-0 animate-in fade-in slide-in-from-bottom-3" style={{ animationDuration: "500ms" }}>
+                    <FirstEncounterRelayChallenge
+                      agents={props.agents}
+                      prompt={props.payload.relayPrompt}
+                      onOpenAgent={props.onOpenAgent}
+                      onVerifyMemory={props.onVerifyMemory}
+                      onLifecycle={props.onRelayLifecycle}
+                    />
                   </div>
+                )}
+
+                {showFollowUps && props.followUpMode === "connect" && (
+                  <div className="mt-5 shrink-0 animate-in fade-in slide-in-from-bottom-3" style={{ animationDuration: "500ms" }}>
+                    {/* scan_only: keep the value card, omit the connect button — this screen cannot install Agents. */}
+                    <FirstEncounterRelayOptIn />
+                  </div>
+                )}
+              </div>
+
+              {showFollowUps && (
+                <div className="mt-4 flex shrink-0 items-center justify-between px-1 animate-in fade-in" style={{ animationDuration: "600ms" }}>
+                  <p className="text-xs leading-relaxed text-text-ink/40">{t("onboarding.report.disclaimer")}</p>
+                  <button
+                    type="button"
+                    onClick={props.onContinue}
+                    className="ml-4 inline-flex shrink-0 cursor-pointer items-center gap-1.5 rounded-btn bg-action-sky px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-action-sky-hover"
+                  >
+                    {t("onboarding.report.continue")}
+                    <ArrowRight size={13} aria-hidden="true" />
+                  </button>
                 </div>
               )}
             </div>
-          )}
-        </div>
-
-        {showActions && !emptyHistory && (
-          <div className="flex shrink-0 items-center justify-between px-1 animate-in fade-in" style={{ animationDuration: "600ms" }}>
-            <p className="text-xs text-text-ink/40 leading-relaxed">{t("onboarding.report.disclaimer")}</p>
-            <button
-              type="button"
-              onClick={props.onSkip}
-              className="text-xs font-normal text-text-ink/45 hover:text-action-sky transition-colors cursor-pointer shrink-0 ml-4"
-            >
-              {t("onboarding.report.skip")}
-            </button>
           </div>
-        )}
+        </div>
       </div>
     </div>
-  );
-}
-
-function ReportPrimaryAction(props: { buttonLabel: string; description: string; onClick: () => void }) {
-  return (
-    <button
-      type="button"
-      onClick={props.onClick}
-      className="w-full flex items-center gap-3 px-4 py-3.5 bg-action-sky/6 border border-action-sky/20 rounded-xl hover:bg-action-sky/10 transition-all cursor-pointer group"
-    >
-      <div className="w-9 h-9 rounded-lg bg-action-sky/12 flex items-center justify-center shrink-0 group-hover:bg-action-sky/20 transition-colors">
-        <MessageCircle size={17} className="text-action-sky" />
-      </div>
-      <div className="flex-1 min-w-0 text-left">
-        <div className="text-sm font-semibold text-text-ink/85">{props.buttonLabel}</div>
-        <div className="text-xs text-text-ink/45 mt-0.5">{props.description}</div>
-      </div>
-    </button>
   );
 }

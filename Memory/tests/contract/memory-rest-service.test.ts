@@ -299,19 +299,15 @@ describe("MemoryService / REST contract", () => {
       body: JSON.stringify(startRequestBody)
     });
     const started = await startResponse.json() as {
-      episodeId: string;
       searchEventId: string;
       turnId: string;
-      closedEpisodeIds: string[];
       droppedDueToBudget: unknown[];
       projectContext: { version: number; status: string; goal: unknown; focusedWorkItem: unknown; markdown: string };
     };
     expect(startResponse.status).toBe(200);
     expect(started.turnId).toBe("cursor-http-turn");
-    expect(started.episodeId).toMatch(/^episode_/u);
     expect(started.projectContext).toMatchObject({ version: 0, status: "no_confirmed_goal", goal: null, focusedWorkItem: null });
     expect(started.projectContext.markdown).toContain('<memmy_project_context version="0" status="no_confirmed_goal">');
-    expect(started.closedEpisodeIds).toEqual([]);
     expect(started.droppedDueToBudget).toEqual([]);
     const afterFirstStart = {
       episodes: (db.db.prepare("SELECT COUNT(*) AS count FROM episodes").get() as { count: number }).count,
@@ -322,8 +318,6 @@ describe("MemoryService / REST contract", () => {
     };
     expect(afterFirstStart).toEqual({
       ...beforeStart,
-      episodes: beforeStart.episodes + 1,
-      rawTurns: beforeStart.rawTurns + 1,
       recalls: beforeStart.recalls + 1,
       apiLogs: beforeStart.apiLogs + 1,
       idempotency: beforeStart.idempotency + 1
@@ -332,11 +326,7 @@ describe("MemoryService / REST contract", () => {
       `SELECT episode_id, assistant_text, status
        FROM raw_turns
        WHERE session_id = ? AND turn_id = ?`
-    ).get(opened.sessionId, started.turnId)).toEqual({
-      episode_id: started.episodeId,
-      assistant_text: null,
-      status: "started"
-    });
+    ).get(opened.sessionId, started.turnId)).toBeUndefined();
     expect(db.db.prepare(
       `SELECT tool_name, json_extract(input_json, '$.retrievalMode') AS retrieval_mode
        FROM api_logs
@@ -352,7 +342,6 @@ describe("MemoryService / REST contract", () => {
       body: JSON.stringify(startRequestBody)
     });
     const duplicateStarted = await duplicateStartResponse.json() as {
-      episodeId: string;
       searchEventId: string;
       turnId: string;
     };
@@ -397,7 +386,7 @@ describe("MemoryService / REST contract", () => {
     });
     const completed = await completeResponse.json() as { episodeId: string; rawTurnId: string };
     expect(completeResponse.status).toBe(200);
-    expect(completed.episodeId).toBe(started.episodeId);
+    expect(completed.episodeId).toMatch(/^episode_/u);
 
     const sessionRow = db.db.prepare(
       "SELECT source, profile_id, workspace_path FROM sessions WHERE id = ?"

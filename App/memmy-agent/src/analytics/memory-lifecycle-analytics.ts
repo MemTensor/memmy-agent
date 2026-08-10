@@ -25,6 +25,8 @@ export const MEMORY_OP_MODES = {
   turnStart: "turn_start",
   tool: "tool",
   turnComplete: "turn_complete",
+  /** Agent-source scan ingestion via memory add (Desktop local backend). */
+  agentSourceScan: "agent_source_scan",
 } as const;
 
 export type MemoryOpMode = (typeof MEMORY_OP_MODES)[keyof typeof MEMORY_OP_MODES];

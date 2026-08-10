@@ -301,6 +301,58 @@ describe("WebSocket HTTP route helpers", () => {
     expect(payload.messages.map((msg: any) => msg.role)).toEqual(["user", "assistant"]);
   });
 
+  it("seeds a finished webui chat without running the agent", async ({ task }) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), `memmy-ws-seed-${task.id}-`));
+    tmpDirs.push(root);
+    const manager = new SessionManager(root);
+    const channel = new WebSocketChannel(
+      { enabled: true, allowFrom: ["*"], host: "127.0.0.1", port: 0, path: "/", websocketRequiresToken: false },
+      new MessageBus(),
+      { sessionManager: manager, workspacePath: root },
+    );
+    running.push(channel);
+    await channel.start();
+    const port = (channel as any).server.address().port;
+
+    const boot = await fetch(`http://127.0.0.1:${port}/webui/bootstrap`);
+    expect(boot.status).toBe(200);
+    const body = await boot.json() as Record<string, any>;
+    const headers = {
+      Authorization: `Bearer ${body.token}`,
+      "Content-Type": "application/json",
+    };
+
+    const seeded = await fetch(`http://127.0.0.1:${port}/api/webui/seed-chat`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        user_text: "Organize my latest project",
+        assistant_text: "Hi Xiaoyan,\n\nFirst report body.",
+        title: "First report",
+      }),
+    });
+    expect(seeded.status).toBe(200);
+    const seededBody = await seeded.json() as Record<string, any>;
+    expect(seededBody.chat_id).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(seededBody.session_key).toBe(`websocket:${seededBody.chat_id}`);
+
+    const thread = await fetch(
+      `http://127.0.0.1:${port}/api/sessions/${encodeURIComponent(seededBody.session_key)}/webui-thread`,
+      { headers },
+    );
+    expect(thread.status).toBe(200);
+    const threadBody = await thread.json() as Record<string, any>;
+    expect(threadBody.last_turn_closed).toBe(true);
+    expect(threadBody.messages.map((msg: any) => msg.role)).toEqual(["user", "assistant"]);
+    expect(threadBody.messages[0].content).toBe("Organize my latest project");
+    expect(threadBody.messages[1].content).toContain("First report body");
+
+    const listing = await fetch(`http://127.0.0.1:${port}/api/sessions`, { headers });
+    expect(listing.status).toBe(200);
+    const sessions = (await listing.json() as any).sessions;
+    expect(sessions.some((row: any) => row.key === seededBody.session_key && row.title === "First report")).toBe(true);
+  });
+
   it("allows local renderer CORS preflight for WebUI bootstrap", async () => {
     const channel = makeChannel({ config: { tokenIssueSecret: "secret" } });
     const port = await startChannel(channel);

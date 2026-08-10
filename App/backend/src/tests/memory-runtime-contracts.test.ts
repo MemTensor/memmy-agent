@@ -225,11 +225,11 @@ function closeSessionOutput() {
 }
 
 function startTurnOutput() {
-  return { turnId: "turn-1", contextPacketId: "context-1", sessionId: "session-1", episodeId: "episode-1", injectedContext: injectedContext(), searchEventId: "search-1", sourceMemoryIds: ["memory-1"], hits: [recallHit()], status: [], serverTime: ISO };
+  return { turnId: "turn-1", contextPacketId: "context-1", sessionId: "session-1", injectedContext: injectedContext(), searchEventId: "search-1", sourceMemoryIds: ["memory-1"], hits: [recallHit()], status: [], serverTime: ISO };
 }
 
 function completeTurnOutput() {
-  return { turnId: "turn-1", sessionId: "session-1", l1MemoryId: "memory-1", rawTurnId: "raw-1", episodeId: "episode-1", scheduledEvolution: true, jobs: [jobRef()], changeSeq: 3, serverTime: ISO };
+  return { turnId: "turn-1", sessionId: "session-1", l1MemoryId: "memory-1", l1MemoryIds: ["memory-1"], closedEpisodeIds: [], rawTurnId: "raw-1", episodeId: "episode-1", scheduledEvolution: true, jobs: [jobRef()], changeSeq: 3, serverTime: ISO };
 }
 
 function searchOutput() {

@@ -563,6 +563,7 @@ async function ensureMemoryService(
     MEMMY_MEMORY_URL: runtimeConfig.memoryBaseUrl,
     MEMMY_MEMORY_TOKEN: runtimeConfig.memoryToken,
     MEMMY_MEMORY_DB: runtimeConfig.memoryDatabasePath,
+    MEMMY_EMBEDDING_MODEL_ROOT: join(options.resourcesPath, "embedding-models"),
     MEMORY_SERVICE_URL: runtimeConfig.memoryBaseUrl,
     MEMORY_SERVICE_TOKEN: runtimeConfig.memoryToken,
     MEMORY_SERVICE_DB: runtimeConfig.memoryDatabasePath

@@ -126,7 +126,7 @@ Memmy is not just a chat interface — it is an AI Agent Runtime t
 | 🔌 Integration Layer | Connect external ecosystems        | Messaging channels, third-party tools, OpenAI-compatible API                      |
 | 🖥️ User Interface  | Provide entry points               | Desktop App, CLI/TUI, Web API                                                     |
 
-### Repository Architecture
+### System Architecture
 
 ![Memmy System Architecture](docs/assets/memmy-architecture-en.png)
 

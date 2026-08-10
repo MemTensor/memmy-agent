@@ -24,7 +24,14 @@ afterEach(cleanup);
 
 describe("MemoryService / evolution / world model", () => {
   it("merges L3 world models by policy overlap even when the domain key changes", async () => {
-    const { db, service } = createTestService({ skillLlm: createNoToolSkillLlm() });
+    const calls: Array<{
+      messages: Array<{ role: string; content: string }>;
+      options: { operation: string };
+    }> = [];
+    const l3Response: Record<string, unknown> = {};
+    const { db, service } = createTestService({
+      skillLlm: createNoToolSkillLlm(calls, l3Response)
+    });
     const session = service.openSession({
       namespace: {
         source: "codex",
@@ -38,6 +45,24 @@ describe("MemoryService / evolution / world model", () => {
       episodeId: "episode-l3-policy-overlap",
       query: "python pytest l3 overlap merge",
       answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result."
+    });
+    Object.assign(l3Response, {
+      title: "Pytest sqlite migration environment",
+      domain_tags: ["pytest", "sqlite"],
+      environment: [{
+        label: "verified evidence",
+        description: "The environment is supported by a policy and its source trace.",
+        evidenceIds: [
+          "policy_l3_policy_overlap",
+          complete.l1MemoryId,
+          "po_1",
+          "trace_missing"
+        ]
+      }],
+      inference: [],
+      constraints: [],
+      summary: "Pytest migration behavior is supported by verified evidence.",
+      confidence: 0.82
     });
     insertActivePolicyMemory(db, {
       id: "policy_l3_policy_overlap",
@@ -100,6 +125,12 @@ describe("MemoryService / evolution / world model", () => {
           domain_tags?: string[];
           confidence?: number;
           body?: string;
+          structure?: {
+            environment?: Array<{
+              label?: string;
+              evidenceIds?: string[];
+            }>;
+          };
         };
       };
     };
@@ -107,6 +138,15 @@ describe("MemoryService / evolution / world model", () => {
     expect(world.internal_info?.world_model?.domain_tags).toEqual(expect.arrayContaining(["legacy", "pytest", "sqlite"]));
     expect(world.internal_info?.world_model_confidence).toBeCloseTo(0.65);
     expect(world.internal_info?.world_model?.confidence).toBeCloseTo(0.65);
+    expect(world.internal_info?.world_model?.structure?.environment
+      ?.find((entry) => entry.label === "verified evidence")?.evidenceIds).toEqual([
+        "policy_l3_policy_overlap",
+        complete.l1MemoryId
+      ]);
+    const l3Call = calls.find((call) => call.options.operation === "l3.abstraction.v3");
+    expect(l3Call?.messages[0]?.content).toContain("Never abbreviate, rewrite, or invent an evidence ID");
+    expect(l3Call?.messages[2]?.content).toContain("policy policy_l3_policy_overlap:");
+    expect(l3Call?.messages[2]?.content).toContain(`trace ${complete.l1MemoryId}`);
     expect(worlds[0]!.memory_value).not.toContain("Merged policies:");
     expect(world.internal_info?.body).not.toContain("Merged policies:");
     expect(world.internal_info?.world_model?.body).not.toContain("Merged policies:");
@@ -507,12 +547,12 @@ describe("MemoryService / evolution / world model", () => {
     );
     for (let i = 0; i < 20; i += 1) {
       await service.runWorkerOnce(100);
-      if (calls.some((call) => call.options.operation === "l3.abstraction.v2")) {
+      if (calls.some((call) => call.options.operation === "l3.abstraction.v3")) {
         break;
       }
     }
 
-    expect(calls.some((call) => call.options.operation === "l3.abstraction.v2")).toBe(true);
+    expect(calls.some((call) => call.options.operation === "l3.abstraction.v3")).toBe(true);
     const l3Count = db.db.prepare(
       `SELECT COUNT(*) AS count
        FROM memories

@@ -152,10 +152,12 @@ describe("MemoryService / feedback / experience", () => {
     expect(beforeWorker).toHaveLength(1);
     expect(beforeWorker[0]!.id).toBe(created[0]!.id);
     expect(avoid.jobs.map((job) => job.jobType)).not.toContain("negative_experience");
-    expect(avoid.jobs.map((job) => job.jobType)).toContain("reward");
+    expect(avoid.jobs.map((job) => job.jobType)).not.toContain("reward");
     expect(avoid.jobs.map((job) => job.jobType)).not.toContain("l3_abstraction");
     expect(avoid.jobs.map((job) => job.jobType)).not.toContain("skill_crystallization");
 
+    service.closeSession(session.sessionId);
+    await service.runWorkerOnce(100);
     await service.runWorkerOnce(100);
     await service.runWorkerOnce(100);
 
@@ -194,7 +196,7 @@ describe("MemoryService / feedback / experience", () => {
           evidence_polarity?: string;
           skill_eligible?: boolean;
           source_feedback_ids?: string[];
-          decision_guidance?: { anti_pattern?: string[] };
+          decision_guidance?: { preference?: string[]; anti_pattern?: string[] };
         };
       };
     }).internal_info.policy;
@@ -203,7 +205,8 @@ describe("MemoryService / feedback / experience", () => {
     expect(negativePolicy.evidence_polarity).toBe("negative");
     expect(negativePolicy.skill_eligible).toBe(false);
     expect(negativePolicy.source_feedback_ids).toEqual([avoid.feedbackId]);
-    expect(negativePolicy.decision_guidance?.anti_pattern?.join("\n")).toContain("filename");
+    expect(negativePolicy.decision_guidance?.anti_pattern?.join("\n")).toContain("validated the issuer field");
+    expect(negativePolicy.decision_guidance?.preference?.join("\n")).toContain("filename");
     db.close();
   });
 
@@ -267,7 +270,9 @@ describe("MemoryService / feedback / experience", () => {
 
     expect(calls.find((call) => call.options.operation === "failure.experience.sink.v5")).toBeUndefined();
     expect(feedbackResponse.jobs.map((job) => job.jobType)).not.toContain("negative_experience");
-    expect(feedbackResponse.jobs.map((job) => job.jobType)).toContain("reward");
+    expect(feedbackResponse.jobs.map((job) => job.jobType)).not.toContain("reward");
+    service.closeSession(session.sessionId);
+    await service.runWorkerOnce(100);
     await service.runWorkerOnce(100);
     await service.runWorkerOnce(100);
 
@@ -287,6 +292,7 @@ describe("MemoryService / feedback / experience", () => {
           verification?: string;
           decision_guidance?: { anti_pattern?: string[] };
           policy_confidence?: number;
+          evidence_strength?: number;
         };
       };
     }).internal_info.policy;
@@ -294,7 +300,8 @@ describe("MemoryService / feedback / experience", () => {
     expect(policy.procedure).toContain("filename");
     expect(policy.verification).toContain("historical failure mode");
     expect(policy.decision_guidance?.anti_pattern?.join("\n")).toContain("filename");
-    expect(policy.policy_confidence).toBeGreaterThanOrEqual(0.91);
+    expect(policy.policy_confidence).toBeGreaterThanOrEqual(0.6);
+    expect(policy.evidence_strength).toBe(1);
 
     const skillRow = db.db.prepare(
       `SELECT id, properties_json

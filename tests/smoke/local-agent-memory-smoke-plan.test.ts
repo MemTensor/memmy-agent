@@ -91,7 +91,9 @@ describe("local agent memory smoke plan", () => {
       query: "release attachments",
       source: "memmy-agent",
       sessionId: "memmy-agent::cli:smoke",
-      layers: ["L1"]
+      layers: ["L1"],
+      episodeId: "episode-smoke",
+      turnId: "turn-smoke"
     });
   });
 });

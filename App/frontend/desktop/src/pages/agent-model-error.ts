@@ -1,3 +1,4 @@
+import type { MemmyAgentModelError } from "../api/memmy-agent-client.js";
 import type { MessageKey, MessageValues } from "../i18n/messages.js";
 import type { AgentChatMessage, AgentRetryWaitStatus } from "../state/agent-chat-slice.js";
 
@@ -58,9 +59,13 @@ export interface AgentModelErrorPresentation {
 export interface AgentModelErrorFormatOptions {
   /** Account mode (memmy_account): the credential is the projected login token, not a user-supplied API key. */
   accountMode?: boolean;
+  modelError?: MemmyAgentModelError | null;
 }
 
 export function formatAgentModelError(content: string, t: Translate, options?: AgentModelErrorFormatOptions): AgentModelErrorPresentation {
+  if (options?.modelError?.category === "quota_exhausted") {
+    return { title: t("agent.error.quotaExceeded"), detail: null };
+  }
   const text = content.trim();
   if (text === PERSISTED_MODEL_ERROR_PLACEHOLDER) {
     return { title: t("agent.error.modelFailed"), detail: null };
@@ -69,9 +74,6 @@ export function formatAgentModelError(content: string, t: Translate, options?: A
   const normalized = text.replace(/^Error(?: calling LLM)?:\s*/i, "").trim();
   const haystack = `${text}\n${normalized}`.toLowerCase();
 
-  if (new RegExp(`quota|${"\u989d\u5ea6"}`).test(haystack)) {
-    return { title: t("agent.error.quotaExceeded"), detail: null };
-  }
   if (/401|403|unauthorized|invalid.*api.*key|authentication|api key/.test(haystack)) {
     return {
       title: t(options?.accountMode === true ? "agent.error.loginExpired" : "agent.error.authFailed"),
@@ -95,19 +97,17 @@ export function formatAgentModelError(content: string, t: Translate, options?: A
 }
 
 export function shouldSuppressRetryWaitStatus(status: AgentRetryWaitStatus, messages: AgentChatMessage[]): boolean {
-  if (!isRetryWaitGivingUp(status.text)) {
-    return false;
-  }
-
   const anchorIndex = status.anchorMessageId
     ? messages.findIndex((message) => message.id === status.anchorMessageId)
     : findLastUserIndex(messages);
   const start = anchorIndex >= 0 ? anchorIndex + 1 : 0;
   for (let index = start; index < messages.length; index += 1) {
     const message = messages[index];
-    if (message?.role === "assistant" && message.kind !== "trace" && isAgentModelErrorContent(message.content)) {
+    if (message?.role !== "assistant" || message.kind === "trace") continue;
+    if (message.modelError?.category === "quota_exhausted") {
       return true;
     }
+    if (isRetryWaitGivingUp(status.text) && isAgentModelErrorContent(message.content)) return true;
   }
   return false;
 }

@@ -1,6 +1,6 @@
 {
   "name": "@memtensor/memmy-memory-cli",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "Memmy Memory CLI for local agent memory.",
   "type": "module",
   "bin": {

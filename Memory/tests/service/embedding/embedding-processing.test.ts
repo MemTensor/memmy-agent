@@ -6,7 +6,14 @@ import {
   type Embedder,
   type MemoryRow
 } from "../../../src/index.js";
-import { embeddingTextForMemory } from "../../../src/service/embedding/embedding-pipeline.js";
+import {
+  retrievalDocumentIsCurrent,
+  retrievalDocumentSourceHash
+} from "../../../src/algorithm/plugin-algorithms.js";
+import {
+  embeddingTextForMemory,
+  updateMemoryVectorField
+} from "../../../src/service/embedding/embedding-pipeline.js";
 import { Repositories } from "../../../src/storage/repositories.js";
 import {
   createBatchReflectionLlm,
@@ -25,6 +32,50 @@ const {
 afterEach(cleanup);
 
 describe("MemoryService / embedding / processing", () => {
+  it("embeds Skill retrieval metadata instead of the full SKILL.md when short metadata exists", () => {
+    const text = embeddingTextForMemory(skillMemory({
+      retrievalBlurb: "Use for safe SQLite schema migrations.",
+      triggerContext: "Trigger when a task changes tables or indexes."
+    }));
+
+    expect(text).toContain("Use for safe SQLite schema migrations.");
+    expect(text).toContain("Trigger when a task changes tables or indexes.");
+    expect(text).not.toContain("PROCEDURE_ONLY_SENTINEL");
+  });
+
+  it("keeps legacy Skill memories searchable through their invocation guide", () => {
+    expect(embeddingTextForMemory(skillMemory())).toContain("PROCEDURE_ONLY_SENTINEL");
+  });
+
+  it("marks a replacement Skill vector with its retrieval document version and source hash", () => {
+    const memory = skillMemory({
+      retrievalBlurb: "Use for safe SQLite schema migrations.",
+      triggerContext: "Trigger when a task changes tables or indexes."
+    });
+    const sourceHash = retrievalDocumentSourceHash(memory);
+    const updated = updateMemoryVectorField(memory, "vec", [1, 0], {
+      provider: "test",
+      model: "test",
+      updatedAt: "2026-07-24T01:00:00.000Z",
+      sourceHash
+    });
+
+    expect(updated.properties.internal_info.retrieval_index).toEqual({
+      version: 2,
+      source_hash: sourceHash,
+      indexed_at: "2026-07-24T01:00:00.000Z"
+    });
+    expect(retrievalDocumentIsCurrent(updated)).toBe(true);
+  });
+
+  it("embeds L3 summary and structure without duplicating the rendered body", () => {
+    const text = embeddingTextForMemory(worldModelMemory());
+
+    expect(text).toContain("Schema migrations require staged verification.");
+    expect(text).toContain("Environment: SQLite database");
+    expect(text).not.toContain("BODY_ONLY_SENTINEL");
+  });
+
   it("falls back to title when negative L2 title and trigger exceed 2048 mixed-language tokens", () => {
     const title = "Avoid";
     const triggerAtLimit = [
@@ -215,11 +266,13 @@ describe("MemoryService / embedding / processing", () => {
       layers: ["L1"]
     });
     expect(recall.hits.some((hit) => hit.id === complete.l1MemoryId)).toBe(true);
-    const openEpisodeRun = await service.runWorkerOnce(10);
-    expect(openEpisodeRun.jobs.map((job) => job.jobType)).toEqual(["episode_idle_close", "trace_summary"]);
+    const openEpisodeRun = await service.runWorkerOnce(10, { priorityCohortOnly: true });
+    expect(openEpisodeRun.jobs.map((job) => job.jobType)).toEqual(["trace_summary"]);
     expect(llmCalls.filter((call) => call.options.operation === "capture.summarize")).toHaveLength(1);
-    const embeddingRun = await service.runWorkerOnce(10);
+    const embeddingRun = await service.runWorkerOnce(10, { priorityCohortOnly: true });
     expect(embeddingRun.jobs.map((job) => job.jobType)).toEqual(["embedding"]);
+    const episodeRun = await service.runWorkerOnce(10, { priorityCohortOnly: true });
+    expect(episodeRun.jobs.map((job) => job.jobType)).toEqual(["episode_idle_close"]);
     expect(embeddingTexts).toHaveLength(1);
     expect(db.db.prepare(
       `SELECT COUNT(*) AS count FROM evolution_jobs
@@ -281,6 +334,79 @@ function negativePolicyMemory(title: string, trigger: string): MemoryRow {
       }
     },
     memoryLayer: "L2",
+    version: 1,
+    createdAt: now,
+    updatedAt: now
+  };
+}
+
+function skillMemory(short?: {
+  retrievalBlurb: string;
+  triggerContext: string;
+}): MemoryRow {
+  const now = "2026-07-24T00:00:00.000Z";
+  return {
+    id: "skill_retrieval_document",
+    timeline: now,
+    userId: "skill-retrieval-user",
+    memoryType: "SkillMemory",
+    status: "activated",
+    visibility: "private",
+    memoryKey: "skill:sqlite-migration",
+    memoryValue: "# SQLite migration\n\nPROCEDURE_ONLY_SENTINEL",
+    tags: ["sqlite", "migration"],
+    info: {},
+    properties: {
+      internal_info: {
+        memory_layer: "Skill",
+        memory_kind: "skill",
+        skill: {
+          name: "SQLite migration",
+          status: "active",
+          invocation_guide: "# SQLite migration\n\nPROCEDURE_ONLY_SENTINEL",
+          ...(short ? { procedure_json: short } : {})
+        }
+      }
+    },
+    memoryLayer: "Skill",
+    version: 1,
+    createdAt: now,
+    updatedAt: now
+  };
+}
+
+function worldModelMemory(): MemoryRow {
+  const now = "2026-07-24T00:00:00.000Z";
+  return {
+    id: "world_model_retrieval_document",
+    timeline: now,
+    userId: "world-retrieval-user",
+    memoryType: "LongTermMemory",
+    status: "activated",
+    visibility: "private",
+    memoryKey: "world-model:sqlite-migrations",
+    memoryValue: "# SQLite migrations\n\nBODY_ONLY_SENTINEL",
+    tags: ["sqlite", "migration"],
+    info: {},
+    properties: {
+      internal_info: {
+        memory_layer: "L3",
+        memory_kind: "world_model",
+        world_model: {
+          title: "SQLite migrations",
+          domain_key: "engineering|database",
+          domain_tags: ["sqlite", "migration"],
+          summary: "Schema migrations require staged verification.",
+          body: "# SQLite migrations\n\nBODY_ONLY_SENTINEL",
+          structure: {
+            environment: [{ label: "Environment", description: "SQLite database" }],
+            inference: [{ label: "Inference", description: "Verify focused paths first" }],
+            constraints: [{ label: "Constraint", description: "Preserve old readers" }]
+          }
+        }
+      }
+    },
+    memoryLayer: "L3",
     version: 1,
     createdAt: now,
     updatedAt: now

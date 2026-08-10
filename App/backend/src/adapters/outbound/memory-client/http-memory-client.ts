@@ -214,7 +214,8 @@ export function createHttpMemoryClient(
       return request("POST", "runWorker", WorkerRunOutputSchema, {
         body: {
           limit: input.limit,
-          targetMemoryIds: input.targetMemoryIds
+          targetMemoryIds: input.targetMemoryIds,
+          priorityCohortOnly: input.priorityCohortOnly
         },
         signal: input.signal,
         timeoutMs: input.timeoutMs

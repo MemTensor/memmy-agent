@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { EmbeddingConfig } from "../config/index.js";
@@ -33,10 +34,16 @@ type FeatureExtractor = (text: string, options?: Record<string, unknown>) => Pro
 type PipelineFn = (task: string, model: string, options?: Record<string, unknown>) => Promise<unknown>;
 interface TransformersModule {
   env: {
+    allowLocalModels?: boolean;
+    allowRemoteModels?: boolean;
     cacheDir: string | null;
+    localModelPath?: string;
   };
   pipeline: PipelineFn;
 }
+
+const DEFAULT_LOCAL_EMBEDDING_MODEL = "Xenova/all-MiniLM-L6-v2";
+const EMBEDDED_EMBEDDING_MODEL_ROOT = "embedding-models";
 
 let localExtractorPromise: Promise<FeatureExtractor> | null = null;
 let localExtractorModel: string | null = null;
@@ -151,7 +158,7 @@ class HttpEmbedder implements Embedder {
     };
     logger.debug("request.started", fields);
     try {
-      const model = this.config.model || "Xenova/all-MiniLM-L6-v2";
+      const model = this.config.model || DEFAULT_LOCAL_EMBEDDING_MODEL;
       const extractor = await ensureLocalExtractor(model);
       const vectors: number[][] = [];
       for (const text of texts) {
@@ -307,16 +314,47 @@ async function ensureLocalExtractor(model: string): Promise<FeatureExtractor> {
     const mod = await import("@huggingface/transformers");
     const transformers = mod as unknown as TransformersModule;
     transformers.env.cacheDir = join(homedir(), ".memmy", "memory-service", "model-cache");
-    const pipeline = transformers.pipeline;
-    return await pipeline("feature-extraction", model, {
+    transformers.env.allowLocalModels = true;
+    transformers.env.allowRemoteModels = true;
+    const pipelineOptions: Record<string, unknown> = {
       dtype: "q8",
       device: "cpu"
-    }) as FeatureExtractor;
+    };
+    const embeddedModelRoot = resolveEmbeddedEmbeddingModelRoot(model);
+    if (embeddedModelRoot) {
+      transformers.env.localModelPath = embeddedModelRoot;
+      transformers.env.allowRemoteModels = false;
+      pipelineOptions.local_files_only = true;
+    }
+    const pipeline = transformers.pipeline;
+    return await pipeline("feature-extraction", model, pipelineOptions) as FeatureExtractor;
   })().catch((error) => {
     localExtractorPromise = null;
     throw error;
   });
   return localExtractorPromise;
+}
+
+function resolveEmbeddedEmbeddingModelRoot(model: string): string | null {
+  for (const root of candidateEmbeddedEmbeddingModelRoots()) {
+    if (existsSync(join(root, model))) {
+      return root;
+    }
+  }
+  return null;
+}
+
+function candidateEmbeddedEmbeddingModelRoots(): string[] {
+  const roots: string[] = [];
+  const explicitRoot = process.env.MEMMY_EMBEDDING_MODEL_ROOT?.trim();
+  if (explicitRoot) {
+    roots.push(explicitRoot);
+  }
+  const resourcesPath = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath;
+  if (resourcesPath) {
+    roots.push(join(resourcesPath, EMBEDDED_EMBEDDING_MODEL_ROOT));
+  }
+  return roots;
 }
 
 function cohereUsagePayload(response: CohereEmbeddingResponse): unknown {

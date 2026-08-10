@@ -2,6 +2,7 @@
 import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { resolveCodexHomeDirectory } from "../../agent-paths.js";
 import { createNodeHookCommand } from "../hook-command.js";
 import { readMemmyMemoryServiceConfig } from "../memmy-runtime-config.js";
 import { removeMemmySkillDirectory, replaceMemmySkillDirectory } from "../skill-directory.js";
@@ -9,7 +10,7 @@ import { renderMemmyPluginSkillManifest } from "../templates/memmy-plugin.js";
 import { renderMemmyResumeHookScript } from "../templates/memmy-resume-hook.js";
 import { renderMemmySkillBootstrapManifest } from "../templates/memmy-skill-directory.js";
 import type { SkillManifest, SkillTarget } from "../types.js";
-import { resolveCodexHomeDirectory } from "../../agent-paths.js";
+import { trustMemmyCodexHooks, type TrustMemmyCodexHooks } from "./hook-trust.js";
 
 const CODEX_TARGET_ID = "codex";
 const CODEX_DISPLAY_NAME = "Codex";
@@ -30,12 +31,15 @@ export interface CreateCodexSkillTargetDeps {
   rootDirectory?: string;
   /** Memmy config path. */
   memmyConfigPath?: string;
+  /** Persists trust for the installed user-level Memmy hooks. */
+  trustHooks?: TrustMemmyCodexHooks;
 }
 
 /** Creates create codex skill target. */
 export function createCodexSkillTarget(deps: CreateCodexSkillTargetDeps = {}): SkillTarget {
   const rootDirectory = deps.rootDirectory ?? resolveCodexHomeDirectory();
   const memmyConfigPath = deps.memmyConfigPath ?? join(homedir(), ".memmy", "config.yaml");
+  const trustHooks = deps.trustHooks ?? trustMemmyCodexHooks;
 
   return {
     targetId: CODEX_TARGET_ID,
@@ -92,7 +96,9 @@ export function createCodexSkillTarget(deps: CreateCodexSkillTargetDeps = {}): S
         `${JSON.stringify({ memmy_config_path: memmyConfigPath, ...(await readMemmyMemoryServiceConfig(memmyConfigPath)) }, null, 2)}\n`
       );
       await writeFileAtomically(hookScriptPath, renderMemmyResumeHookScript({ source: CODEX_TARGET_ID, mode: "codex" }));
-      await upsertCodexHookConfig(join(root, HOOKS_FILE_NAME), hookScriptPath);
+      const hooksFilePath = join(root, HOOKS_FILE_NAME);
+      const hookCommand = createNodeHookCommand(hookScriptPath);
+      await upsertCodexHookConfig(hooksFilePath, hookCommand);
       await rm(join(root, HOOK_DIRECTORY_NAME, LEGACY_HOOK_SCRIPT_FILE_NAME), { force: true });
 
       const manifest = renderMemmyPluginSkillManifest(_targetId);
@@ -102,6 +108,11 @@ export function createCodexSkillTarget(deps: CreateCodexSkillTargetDeps = {}): S
         upsertMarkerBlock(await readTextFile(filePath), renderMemmySkillBootstrapManifest(manifest))
       );
       await replaceMemmySkillDirectory(root, manifest);
+      await trustHooks({
+        codexHomeDirectory: root,
+        hooksFilePath,
+        hookCommand
+      });
     },
 
     async uninstallPlugin(_targetId) {
@@ -175,7 +186,7 @@ function removeLegacyMarkerBlock(existing: string): string {
   return existing.replace(createMarkerBlockPattern(LEGACY_CLI_START_MARKER, LEGACY_CLI_END_MARKER), "");
 }
 
-async function upsertCodexHookConfig(filePath: string, hookScriptPath: string): Promise<void> {
+async function upsertCodexHookConfig(filePath: string, hookCommand: string): Promise<void> {
   const config = await readJsonConfig(filePath);
   const hooks = toMutableRecord(config.hooks);
   hooks.UserPromptSubmit = [
@@ -184,7 +195,7 @@ async function upsertCodexHookConfig(filePath: string, hookScriptPath: string): 
       hooks: [
         {
           type: "command",
-          command: createNodeHookCommand(hookScriptPath),
+          command: hookCommand,
           timeout: HOOK_TIMEOUT_SECONDS,
           statusMessage: "Searching Memmy resume candidates"
         }
@@ -197,7 +208,7 @@ async function upsertCodexHookConfig(filePath: string, hookScriptPath: string): 
       hooks: [
         {
           type: "command",
-          command: createNodeHookCommand(hookScriptPath),
+          command: hookCommand,
           timeout: HOOK_TIMEOUT_SECONDS,
           statusMessage: "Saving Memmy turn"
         }

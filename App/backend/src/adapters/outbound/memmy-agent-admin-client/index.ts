@@ -12,4 +12,13 @@ export interface MemmyAgentAdminClient {
   stopChannel(runtimeChannel: string): Promise<{ status: ChannelStatus; running: boolean }>;
   startWeixinLogin(): Promise<{ status: ChannelStatus; qrCodeDataUrl?: string; pollToken?: string }>;
   pollWeixinLogin(pollToken: string): Promise<{ status: ChannelStatus; qrCodeDataUrl?: string; pollToken?: string }>;
+  startFeishuLogin(): Promise<{ status: ChannelStatus; qrCodeDataUrl?: string; pollToken?: string }>;
+  pollFeishuLogin(pollToken: string): Promise<{
+    status: ChannelStatus;
+    qrCodeDataUrl?: string;
+    pollToken?: string;
+    appId?: string;
+    appSecret?: string;
+    domain?: "feishu" | "lark";
+  }>;
 }

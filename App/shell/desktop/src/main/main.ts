@@ -62,6 +62,7 @@ import {
   OPENCLAW_RELAY_SESSION_LABEL,
   OPENCLAW_TERMINAL_SCRIPT,
   OPENCODE_TERMINAL_SCRIPT,
+  WORKBUDDY_APP_PATH,
   appendOpenClawSessionToDashboardUrl,
   claudeCodeBinaryCandidates,
   codexBinaryCandidates,
@@ -5261,6 +5262,10 @@ async function openAgentTool(rawSourceId: unknown, rawPrompt: unknown): Promise<
   if (deepLink && await tryOpenRegisteredAgentToolDeepLink(deepLink)) {
     return { opened: true };
   }
+  if (request.sourceId === "workbuddy") {
+    // GUI-only handoff (like Cursor's deeplink). Do not fall back to Terminal.
+    return { opened: await openWorkBuddyAppFallback() };
+  }
   if (request.sourceId === "claude_code") {
     const cliDeepLink = buildAgentToolCliPromptDeepLink(request.sourceId, request.prompt);
     if (cliDeepLink && await tryOpenRegisteredAgentToolDeepLink(cliDeepLink)) {
@@ -5290,6 +5295,18 @@ async function tryOpenRegisteredAgentToolDeepLink(deepLink: string): Promise<boo
     }
     await shell.openExternal(deepLink);
     return true;
+  } catch {
+    return false;
+  }
+}
+
+async function openWorkBuddyAppFallback(): Promise<boolean> {
+  if (process.platform !== "darwin" || !existsSync(WORKBUDDY_APP_PATH)) {
+    return false;
+  }
+  try {
+    const openError = await shell.openPath(WORKBUDDY_APP_PATH);
+    return !openError;
   } catch {
     return false;
   }

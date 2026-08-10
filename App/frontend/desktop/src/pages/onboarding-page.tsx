@@ -1,10 +1,28 @@
 /** Onboarding page module. */
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { PenLine, Search, type LucideIcon } from "lucide-react";
 import type { AgentSourceMemoryPluginConflict, ScanPermission } from "@memmy/local-api-contracts";
 import { useApiClients } from "../app/providers.js";
-import { buildOnboardingCompletionPatch, readGuidanceCompleted, resolvePostOnboardingRoute, writeDeferredGuidanceStep, writePreferredMode, type PreferredMode } from "../app/routes.js";
+import {
+  productTourIncludesLogs,
+  productTourStartMemorySubPage,
+  productTourStartRoute
+} from "../app/product-tour.js";
+import {
+  buildOnboardingCompletionPatch,
+  clearProductTourStep,
+  readGuidanceCompleted,
+  resolvePostOnboardingRoute,
+  writeDeferredGuidanceStep,
+  writePreferredMode,
+  type AppRoutePath,
+  type PreferredMode
+} from "../app/routes.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
+import {
+  buildOnboardingActivationEvent,
+  buildOnboardingStepCompletedEvent
+} from "../analytics/onboarding-analytics.js";
 import { resolveAnalyticsPageLocation } from "../analytics/page-location.js";
 import { Memmy } from "../components/mascot/memmy.js";
 import { useTranslation } from "../i18n/use-translation.js";
@@ -13,21 +31,34 @@ import { useAppState } from "../state/app-state.js";
 import { startAgentSourceScan } from "./memory-source-scan.js";
 import { formatAgentSourceScanRequestError } from "./agent-source-scan-error.js";
 import { FirstEncounterReport } from "./first-encounter-report.js";
-import { armFirstEncounterRelayChat, clearPendingFirstEncounterTaskLaunch, writePendingFirstEncounterTaskLaunch } from "./first-encounter-task-launch.js";
+import {
+  firstEncounterFollowUpMode,
+  hasDetectedRelayAgents,
+  type RelayAgentOption
+} from "./first-encounter-relay-challenge.js";
 import {
   streamFirstEncounterReport,
   type DiscoveredAgent,
-  type FirstEncounterReportPayload,
-  type FirstEncounterTaskAction
+  type FirstEncounterReportPayload
 } from "./first-encounter-protocol.js";
+import {
+  armFirstEncounterRelayChat,
+  writeFirstEncounterRelayChat,
+  writeFirstEncounterRelayPrompt,
+  writeFirstEncounterRelayReadyChat,
+  writePendingFirstEncounterTaskLaunch
+} from "./first-encounter-task-launch.js";
 import { HomePage } from "./home-page.js";
 import { MemoryPluginConflictModal } from "./memory-plugin-conflict-modal.js";
 import { scheduleMemoryPanelCachePrefetch } from "./memory/memory-panel-prefetch.js";
+import { writeMemorySubPage } from "./memory-page.js";
 import { OnboardingScanAnimation } from "./onboarding-scan-animation.js";
 
 type FirstScanStep = "checking_plugins" | "plugin_conflict" | "scanning" | "preparing_report" | "report";
 
 const FIRST_SCAN_ANIMATION_MIN_MS = 2_000;
+const FIRST_ENCOUNTER_MEMORY_VERIFY_TIMEOUT_MS = 60_000;
+const FIRST_ENCOUNTER_MEMORY_VERIFY_INTERVAL_MS = 2_000;
 
 /** Handles onboarding page. */
 export function OnboardingPage() {
@@ -50,8 +81,11 @@ export function OnboardingPage() {
   const hasStartedAgentSourceScan = useRef(false);
   const hasResumedFirstScan = useRef(false);
   const hasStartedFirstReport = useRef(false);
+  const hasTrackedFirstReportView = useRef(false);
   const firstScanStepRef = useRef<FirstScanStep | null>(null);
   const firstScanVisualComplete = useRef(false);
+  const firstReportSeedPromiseRef = useRef<Promise<{ chatId: string; sessionKey: string } | null> | null>(null);
+  const firstReportSeededChatRef = useRef<{ chatId: string; sessionKey: string } | null>(null);
   const onboarding = state.bootstrap?.onboarding;
   const isAccountMode = state.bootstrap?.app.userMode === "account";
   const guidanceCompleted = readGuidanceCompleted(typeof window === "undefined" ? undefined : window.localStorage);
@@ -83,6 +117,19 @@ export function OnboardingPage() {
   useEffect(() => {
     firstScanStepRef.current = firstScanStep;
   }, [firstScanStep]);
+
+  useEffect(() => {
+    if (activeFirstScanStep !== "report" || !firstReportPayload || hasTrackedFirstReportView.current) {
+      return;
+    }
+    hasTrackedFirstReportView.current = true;
+    track(buildOnboardingStepCompletedEvent({
+      step: "first_report",
+      choice: "viewed",
+      scanPermission: onboarding?.scanPermission,
+      emptyHistory: firstReportPayload.emptyHistory
+    }));
+  }, [activeFirstScanStep, firstReportPayload, onboarding?.scanPermission, track]);
 
   useEffect(() => {
     if (!shouldResumeFirstScan || firstScanStep || !clients || hasResumedFirstScan.current) {
@@ -155,7 +202,11 @@ export function OnboardingPage() {
 
     dispatch(appActions.onboardingUpdated(patch));
     dispatch(appActions.scanPreferencesUpdated(preferences));
-    track({ name: "onboarding_step_completed", params: { step: "scan_permission", step_index: 1, choice: permission }, consentTier: "basic" });
+    track(buildOnboardingStepCompletedEvent({
+      step: "scan_permission",
+      choice: permission,
+      scanPermission: permission
+    }));
     if (permission !== "none") {
       prepareFirstScanUi(permission === "scan_and_write_skill" ? "checking_plugins" : "scanning");
       if (clients) {
@@ -230,6 +281,7 @@ export function OnboardingPage() {
     setFirstScanAnimationStartedAt(null);
     hasStartedAgentSourceScan.current = false;
     hasStartedFirstReport.current = false;
+    hasTrackedFirstReportView.current = false;
     firstScanVisualComplete.current = false;
     setFirstScanStep(step);
   }
@@ -341,6 +393,7 @@ export function OnboardingPage() {
       await startAgentSourceScan({
         clients,
         dispatch,
+        mode: "initial_subset",
         queuedMessage: t("memory.scanQueued"),
         formatError: (error) => formatAgentSourceScanRequestError(error, undefined, t),
         scheduleFallback: (callback, delayMs) => globalThis.setTimeout(callback, delayMs),
@@ -379,6 +432,8 @@ export function OnboardingPage() {
     setFirstReportIsStreaming(false);
     setFirstReportShouldSimulate(false);
     setFirstReportError(null);
+    firstReportSeedPromiseRef.current = null;
+    firstReportSeededChatRef.current = null;
     if (clients) {
       scheduleMemoryPanelCachePrefetch({
         client: clients.memoryRuntime,
@@ -386,22 +441,31 @@ export function OnboardingPage() {
         t
       });
     }
+
     void streamFirstEncounterReport(
       { agents: seedAgents, nickname: state.account.nickname, language },
       {
         onAgents: (sampledAgents) => {
           setFirstScanAgents(sampledAgents);
         },
-        onChunk: (_delta) => {
+        onChunk: (_delta, payload) => {
           setFirstReportIsStreaming(true);
-          setFirstReportShouldSimulate(true);
-        },
-        onDone: (payload, _meta) => {
-          setFirstReportIsStreaming(false);
-          setFirstReportShouldSimulate(true);
+          setFirstReportShouldSimulate(false);
           setFirstReportPayload(payload);
+        },
+        onDone: (payload, meta) => {
+          setFirstReportIsStreaming(false);
+          setFirstReportShouldSimulate(!meta.streamed);
+          setFirstReportPayload(payload);
+          writeFirstEncounterRelayPrompt(
+            typeof window === "undefined" ? undefined : window.sessionStorage,
+            payload.relayPrompt
+          );
           setFirstScanAgents(payload.agents.length > 0 ? payload.agents : seedAgents);
           firstScanVisualComplete.current = true;
+          // Persist into a real chat as soon as the report exists, so later
+          // navigation / WS timing cannot drop the generated content.
+          void seedFirstEncounterReportChat(payload);
         }
       }
     ).catch((error) => {
@@ -417,52 +481,139 @@ export function OnboardingPage() {
     });
   }
 
-  function continueAfterReport() {
-    const patch = { currentStep: "product_tour_required" } as const;
+  const openFirstEncounterRelayAgent = useCallback(async (sourceId: string, prompt: string): Promise<boolean> => {
+    try {
+      const result = await window.memmy?.openAgentTool?.(sourceId, prompt);
+      return result?.opened === true;
+    } catch {
+      return false;
+    }
+  }, []);
 
-    setFirstScanStep(null);
-    setFirstScanAgents(null);
-    setFirstReportPayload(null);
-    setFirstReportIsStreaming(false);
-    setFirstReportShouldSimulate(false);
-    setFirstReportError(null);
-    setFirstScanAnimationStartedAt(null);
-    hasStartedAgentSourceScan.current = false;
-    hasStartedFirstReport.current = false;
-    firstScanVisualComplete.current = false;
-    dispatch(appActions.onboardingUpdated(patch));
-    void clients?.config
-      .updateOnboarding(patch)
-      .then((persistedPatch) => dispatch(appActions.onboardingUpdated(persistedPatch)))
-      .catch((error) => {
-        console.warn("save post scan onboarding step failed", error);
+  const verifyFirstEncounterRelayMemory = useCallback(async (sourceId: string, startedAt: string): Promise<boolean> => {
+    const client = clients?.memoryRuntime;
+    if (!client) {
+      return false;
+    }
+    const startedAtMs = Date.parse(startedAt);
+    const deadline = Date.now() + FIRST_ENCOUNTER_MEMORY_VERIFY_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      try {
+        const output = await client.listMemoryLogs({
+          tools: ["memory_search"],
+          sourceAgent: sourceId,
+          limit: 20,
+          offset: 0
+        });
+        if (output.logs.some((log) => log.success && Date.parse(log.calledAt) >= startedAtMs)) {
+          return true;
+        }
+      } catch {
+        // Memory service may still be starting during onboarding.
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, FIRST_ENCOUNTER_MEMORY_VERIFY_INTERVAL_MS));
+    }
+    return false;
+  }, [clients?.memoryRuntime]);
+
+  const trackFirstEncounterRelayLifecycle = useCallback((
+    event: "relay_clicked" | "memory_verified",
+    sourceId: string,
+    action: string
+  ) => {
+    track(buildOnboardingActivationEvent({
+      name: event === "memory_verified"
+        ? "onboarding_external_memory_verified"
+        : "onboarding_relay_clicked",
+      pagePath: "/onboarding",
+      scanPermission: onboarding?.scanPermission,
+      action,
+      sourceId: sourceId || undefined
+    }));
+  }, [onboarding?.scanPermission, track]);
+
+  function continueFromReport() {
+    void completeReportFlow(true);
+  }
+
+  function seedFirstEncounterReportChat(payload: FirstEncounterReportPayload): Promise<{ chatId: string; sessionKey: string } | null> {
+    const assistantContent = payload.body.trim();
+    const prompt = payload.reportPrompt;
+    const storage = typeof window === "undefined" ? undefined : window.sessionStorage;
+    if (!assistantContent) {
+      return Promise.resolve(null);
+    }
+
+    // Keep the report body queued even before seed finishes, so Home can retry.
+    writePendingFirstEncounterTaskLaunch(storage, prompt, { assistantContent });
+
+    const memmyAgent = clients?.memmyAgent;
+    if (!memmyAgent) {
+      return Promise.resolve(null);
+    }
+
+    const seedPromise = memmyAgent.seedWebuiChat({
+      userText: prompt,
+      assistantText: assistantContent,
+      title: t("onboarding.report.title")
+    }).then((seeded) => {
+      const next = { chatId: seeded.chat_id, sessionKey: seeded.session_key };
+      firstReportSeededChatRef.current = next;
+      writePendingFirstEncounterTaskLaunch(storage, prompt, {
+        assistantContent,
+        chatId: next.chatId,
+        sessionKey: next.sessionKey
       });
+      return next;
+    }).catch((error) => {
+      console.warn("seed first encounter report chat on generate failed", error);
+      return null;
+    });
+    firstReportSeedPromiseRef.current = seedPromise;
+    return seedPromise;
   }
 
-  function startReportTask(action: FirstEncounterTaskAction) {
-    writePendingFirstEncounterTaskLaunch(typeof window === "undefined" ? undefined : window.sessionStorage, action.suggestedPrompt);
-    enterConversationAfterReport();
-  }
-
-  function startFirstConversation() {
-    clearPendingFirstEncounterTaskLaunch(typeof window === "undefined" ? undefined : window.sessionStorage);
-    enterConversationAfterReport();
-  }
-
-  function enterConversationAfterReport() {
+  async function completeReportFlow(createConversation: boolean) {
     const completionPatch = buildOnboardingCompletionPatch(new Date().toISOString());
-    const targetRoute = resolvePostOnboardingRoute("full");
+    const storage = typeof window === "undefined" ? undefined : window.sessionStorage;
+    const localStorageRef = typeof window === "undefined" ? undefined : window.localStorage;
+    const guidanceStep = isAccountMode && state.bootstrap?.onboarding.improvementProgram === "unset"
+      ? "improvement"
+      : "product_tour";
+    const nextRoute: AppRoutePath = guidanceStep === "product_tour"
+      ? "/memory"
+      : resolvePostOnboardingRoute("full");
 
-    writePreferredMode(typeof window === "undefined" ? undefined : window.localStorage, "full");
-    dispatch(agentActions.newChatRequested());
+    writePreferredMode(localStorageRef, "full");
+    if (createConversation) {
+      const prompt = firstReportPayload?.reportPrompt ?? t("onboarding.report.userPrompt");
+      const assistantContent = firstReportPayload?.body?.trim() || undefined;
+      // Prefer the chat seeded at report-done; wait if still in flight, then retry once.
+      const seeded = firstReportSeededChatRef.current
+        ?? (await firstReportSeedPromiseRef.current)
+        ?? (firstReportPayload ? await seedFirstEncounterReportChat(firstReportPayload) : null);
+      writePendingFirstEncounterTaskLaunch(storage, prompt, {
+        ...(assistantContent ? { assistantContent } : {}),
+        ...(seeded ? { chatId: seeded.chatId, sessionKey: seeded.sessionKey } : {})
+      });
+      if (seeded) {
+        writeFirstEncounterRelayChat(storage, seeded.chatId);
+        writeFirstEncounterRelayReadyChat(storage, seeded.chatId);
+      } else {
+        armFirstEncounterRelayChat(storage);
+      }
+      dispatch(agentActions.newChatRequested());
+    }
     dispatch(appActions.preferredModeUpdated("full"));
     dispatch(appActions.onboardingUpdated(completionPatch));
-    armFirstEncounterRelayChat(typeof window === "undefined" ? undefined : window.sessionStorage);
-    writeDeferredGuidanceStep(typeof window === "undefined" ? undefined : window.sessionStorage, "armed");
-    dispatch(appActions.navigate(targetRoute));
-    track({ name: "onboarding_step_completed", params: { step: "mode_selection", step_index: 3, choice: "full" }, consentTier: "basic" });
-    track({ name: "onboarding_completed", params: {}, consentTier: "basic" });
-    track({ name: "first_entry", params: { page_location: resolveAnalyticsPageLocation(targetRoute) }, consentTier: "basic" });
+    clearProductTourStep(storage);
+    if (guidanceStep === "product_tour") {
+      writeMemorySubPage(storage, "logs");
+    }
+    writeDeferredGuidanceStep(storage, guidanceStep);
+    dispatch(appActions.navigate(nextRoute));
+    // first_entry = first workspace entry; onboarding_completed fires later after nickname.
+    track({ name: "first_entry", params: { page_location: resolveAnalyticsPageLocation(nextRoute) }, consentTier: "basic" });
     void persistReportConversationCompletion(completionPatch).catch((error) => {
       console.warn("persist report conversation onboarding completion failed", error);
     });
@@ -512,11 +663,25 @@ export function OnboardingPage() {
       writePreferredMode(typeof window === "undefined" ? undefined : window.localStorage, mode);
       dispatch(appActions.preferredModeUpdated(mode));
       dispatch(appActions.onboardingUpdated(persistedPatch ?? completionPatch));
-      track({ name: "onboarding_step_completed", params: { step: "mode_selection", step_index: 3, choice: mode }, consentTier: "basic" });
-      track({ name: "onboarding_completed", params: {}, consentTier: "basic" });
-      track({ name: "first_entry", params: { page_location: resolveAnalyticsPageLocation(targetRoute) }, consentTier: "basic" });
-      writeDeferredGuidanceStep(typeof window === "undefined" ? undefined : window.sessionStorage, "armed");
-      dispatch(appActions.navigate(targetRoute));
+      const storage = typeof window === "undefined" ? undefined : window.sessionStorage;
+      const guidanceStep = isAccountMode && state.bootstrap?.onboarding.improvementProgram === "unset"
+        ? "improvement"
+        : "product_tour";
+      // Deny-scan skips the logs tour step and opens on cross-agent sources (4/4).
+      const includeLogs = productTourIncludesLogs(
+        persistedPatch?.scanPermission ?? state.bootstrap?.onboarding.scanPermission
+      );
+      const nextRoute: AppRoutePath = guidanceStep === "product_tour"
+        ? productTourStartRoute(includeLogs)
+        : targetRoute;
+      if (guidanceStep === "product_tour") {
+        clearProductTourStep(storage);
+        writeMemorySubPage(storage, productTourStartMemorySubPage(includeLogs));
+      }
+      writeDeferredGuidanceStep(storage, guidanceStep);
+      dispatch(appActions.navigate(nextRoute));
+      // first_entry = first workspace entry; onboarding_completed fires later after nickname.
+      track({ name: "first_entry", params: { page_location: resolveAnalyticsPageLocation(nextRoute) }, consentTier: "basic" });
     } catch (error) {
       console.error("complete onboarding failed", error);
       setCompletionFeedback(t("onboarding.complete.error"));
@@ -582,15 +747,20 @@ export function OnboardingPage() {
       );
     }
 
+    const relayAgents = resolveReportRelayAgents(state.agentSources.items, firstReportPayload.agents);
+
     return (
       <main className="min-h-screen bg-canvas-oat">
         <FirstEncounterReport
           payload={firstReportPayload}
           isStreaming={firstReportIsStreaming}
           simulateStreaming={firstReportShouldSimulate}
-          onTaskClick={startReportTask}
-          onStartConversation={startFirstConversation}
-          onSkip={continueAfterReport}
+          followUpMode={firstEncounterFollowUpMode(state.bootstrap?.onboarding.scanPermission ?? "unset")}
+          agents={relayAgents}
+          onOpenAgent={openFirstEncounterRelayAgent}
+          onVerifyMemory={verifyFirstEncounterRelayMemory}
+          onRelayLifecycle={trackFirstEncounterRelayLifecycle}
+          onContinue={continueFromReport}
         />
       </main>
     );
@@ -657,6 +827,40 @@ export function OnboardingPage() {
 
     </main>
   );
+}
+
+/** Prefer live scan sources; fall back to report agents so the relay card still renders in mock. */
+function resolveReportRelayAgents(
+  sources: Array<{
+    sourceId: string;
+    displayName?: string;
+    available: boolean;
+    builtin: boolean;
+    messageCount: number;
+    status: RelayAgentOption["status"];
+  }>,
+  reportAgents: DiscoveredAgent[]
+): RelayAgentOption[] {
+  const fromSources: RelayAgentOption[] = sources.map((source) => ({
+    sourceId: source.sourceId,
+    displayName: source.displayName,
+    available: source.available,
+    builtin: source.builtin,
+    messageCount: source.messageCount,
+    status: source.status
+  }));
+  if (hasDetectedRelayAgents(fromSources)) {
+    return fromSources;
+  }
+
+  return reportAgents.map((agent) => ({
+    sourceId: agent.sourceId,
+    displayName: agent.name,
+    available: true,
+    builtin: true,
+    messageCount: Math.max(1, agent.conversations ?? 1),
+    status: "not_connected" as const
+  }));
 }
 
 /** Handles to readable first report error. */

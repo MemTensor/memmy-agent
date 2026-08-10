@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 CERT_DIR="${MEMMY_MAC_CERT_DIR:-$ROOT_DIR/Mac软件打包}"
 SIGNING_DIR="$ROOT_DIR/.signing-local"
 KEYCHAIN="${CSC_KEYCHAIN:-/private/tmp/memmy-build-arm64.keychain-db}"
@@ -153,7 +153,7 @@ main() {
   export APPLE_API_KEY
   export APPLE_API_KEY_ID
   export APPLE_API_ISSUER
-  bash "$ROOT_DIR/scripts/internal/package-mac-dmg.sh" \
+  bash "$ROOT_DIR/scripts/internal/mac/build-dmg.sh" \
     --arm64 \
     "$@" \
     --config.extraMetadata.version="$DESKTOP_VERSION" \

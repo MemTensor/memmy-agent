@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { OpenAICompatProvider } from "../../src/providers/openai-compat-provider.js";
+import { findByName } from "../../src/providers/registry.js";
 import {
   consumeSdkStream,
   convertMessages,
@@ -404,6 +406,37 @@ describe("OpenAI Responses parseResponseOutput", () => {
 
     expect(result.usage).toEqual({ prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 });
   });
+
+  it("classifies failed OpenAI responses from an exact structured code", () => {
+    const result = parseResponseOutput(
+      {
+        output: [],
+        status: "failed",
+        error: { type: "insufficient_quota", code: "credit_balance_exhausted" },
+        usage: {},
+      },
+      "openai",
+    );
+
+    expect(result.finishReason).toBe("error");
+    expect(result.errorType).toBe("insufficient_quota");
+    expect(result.errorCode).toBe("credit_balance_exhausted");
+    expect(result.errorCategory).toBe("quota_exhausted");
+  });
+
+  it("does not classify failed OpenAI rate-limit responses as quota errors", () => {
+    const result = parseResponseOutput(
+      {
+        output: [],
+        status: "failed",
+        error: { type: "rate_limit_error", code: "rate_limit_exceeded" },
+        usage: {},
+      },
+      "openai",
+    );
+
+    expect(result.errorCategory).toBeNull();
+  });
 });
 
 describe("OpenAI Responses consumeSdkStream", () => {
@@ -492,6 +525,37 @@ describe("OpenAI Responses consumeSdkStream", () => {
 
   it("throws on failed events", async () => {
     await expect(consumeSdkStream(streamFrom([{ type: "response.failed", error: "server_error" }]))).rejects.toThrow(/Response failed.*server_error/);
+  });
+
+  it("preserves structured failed-event errors for outer provider classification", async () => {
+    let thrown: any = null;
+    try {
+      await consumeSdkStream(
+        streamFrom([
+          {
+            type: "response.failed",
+            response: {
+              error: {
+                type: "insufficient_quota",
+                code: "organization_spend_limit_exceeded",
+                message: "raw provider detail",
+              },
+            },
+          },
+        ]),
+      );
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown?.body).toEqual({
+      type: "insufficient_quota",
+      code: "organization_spend_limit_exceeded",
+      message: "raw provider detail",
+    });
+    const response = OpenAICompatProvider.handleError(thrown, findByName("openai"));
+    expect(response.errorCode).toBe("organization_spend_limit_exceeded");
+    expect(response.errorCategory).toBe("quota_exhausted");
   });
 
   it("repairs malformed streaming tool arguments when possible", async () => {

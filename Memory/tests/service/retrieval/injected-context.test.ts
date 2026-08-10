@@ -20,6 +20,121 @@ const {
 afterEach(cleanup);
 
 describe("MemoryService / retrieval / injected context", () => {
+  it("injects only the latest complete Memmy first report for bilingual handoff queries", async () => {
+    const { db, service } = createTestService();
+    const namespace = {
+      source: "hermes",
+      profileId: "jiang",
+      userId: "user-first-report-handoff"
+    };
+    const session = service.openSession({ namespace });
+    const addFirstReport = (input: {
+      requestId: string;
+      createdAt: string;
+      userText: string;
+      report: string;
+    }) => service.addMemory({
+      namespace,
+      adapterId: "agent-source:memmy-onboarding",
+      requestId: input.requestId,
+      layer: "L1",
+      source: "memmy-onboarding",
+      tags: [
+        "agent-source",
+        "memmy",
+        "memmy-first-report",
+        "first-encounter-report",
+        "onboarding-report",
+        "continue-from-first-report"
+      ],
+      title: "Memmy 初见报告 / First Encounter Report",
+      turnId: `first-report:${input.requestId}`,
+      content: [
+        `## user\n\n${input.userText}`,
+        `## assistant\n\n${input.report}`
+      ].join("\n\n"),
+      createdAt: input.createdAt,
+      deferProcessing: true
+    });
+    const oldReport = addFirstReport({
+      requestId: "old",
+      createdAt: "2026-08-04T10:00:00.000Z",
+      userText: "OLD_SCANNED_TRANSCRIPT",
+      report: "STALE_FIRST_REPORT"
+    });
+    const fullReport = [
+      "The latest Memmy first report.",
+      "Confirmed implementation details. ".repeat(45),
+      "FINAL_NEXT_STEP_MARKER"
+    ].join("\n");
+    const latestReport = addFirstReport({
+      requestId: "latest",
+      createdAt: "2026-08-05T10:00:00.000Z",
+      userText: `语言：中文\nSCANNED_TRANSCRIPT_MUST_NOT_BE_INJECTED ${"history ".repeat(2_000)}`,
+      report: fullReport
+    });
+    service.addMemory({
+      namespace,
+      adapterId: "agent-source:codex",
+      requestId: "related-but-unrelated-memory",
+      layer: "L1",
+      source: "codex",
+      tags: ["agent-source", "memmy", "onboarding-report"],
+      title: "Related onboarding history",
+      turnId: "codex:related:0",
+      content: [
+        "## user\n\nPlease continue the Memmy onboarding report.",
+        "## assistant\n\nUNRELATED_MEMORY_MUST_NOT_BE_INJECTED"
+      ].join("\n\n"),
+      createdAt: "2026-08-05T11:00:00.000Z",
+      deferProcessing: true
+    });
+
+    for (const query of [
+      "请接着我刚才在 Memmy 里的初见报告继续聊天。先告诉我我们已经确定了什么，再给出一个最合适的下一步。",
+      "Please continue from the first report I just had in Memmy. First tell me what we already decided, then give me the single best next step."
+    ]) {
+      const recall = await service.search({
+        sessionId: session.sessionId,
+        query,
+        layers: ["Skill", "L2", "L1", "L3"],
+        limit: 10,
+        includeInjectedContext: true
+      });
+
+      expect(recall.hits.map((hit) => hit.id)).toEqual([latestReport.id]);
+      expect(recall.candidateMemoryIds).toEqual([latestReport.id]);
+      expect(recall.sourceMemoryIds).toEqual([latestReport.id]);
+      expect(recall.status).toContain("first_report_handoff:latest_only");
+      expect(recall.injectedContext.markdown).toContain("FINAL_NEXT_STEP_MARKER");
+      expect(recall.injectedContext.markdown).toContain(`id \`${latestReport.id}\``);
+      expect(recall.injectedContext.markdown).toContain("memmy_memory_get(id)");
+      expect(recall.injectedContext.markdown).not.toContain("...[truncated]");
+      expect(recall.injectedContext.markdown).not.toContain("SCANNED_TRANSCRIPT_MUST_NOT_BE_INJECTED");
+      expect(recall.injectedContext.markdown).not.toContain("UNRELATED_MEMORY_MUST_NOT_BE_INJECTED");
+      expect(recall.injectedContext.markdown).not.toContain("STALE_FIRST_REPORT");
+
+      const searchLog = service.apiLogs({ tools: ["memory_search"], limit: 1 }).logs[0];
+      const searchOutput = JSON.parse(searchLog?.outputJson ?? "{}") as {
+        candidates?: Array<{ refId?: string; content?: string }>;
+      };
+      expect(searchOutput.candidates).toEqual([
+        expect.objectContaining({
+          refId: latestReport.id,
+          content: expect.stringContaining("用户请求：")
+        })
+      ]);
+      expect(searchOutput.candidates?.[0]?.content).toContain("SCANNED_TRANSCRIPT_MUST_NOT_BE_INJECTED");
+      expect(searchOutput.candidates?.[0]?.content).toContain("助手回复：");
+      expect(searchOutput.candidates?.[0]?.content).not.toContain("User query");
+      expect(searchOutput.candidates?.[0]?.content).not.toContain("Assistant response");
+      expect(searchOutput.candidates?.[0]?.content).toContain("FINAL_NEXT_STEP_MARKER");
+      expect(searchOutput.candidates?.[0]?.content).not.toContain("...[truncated]");
+    }
+    expect(oldReport.id).not.toBe(latestReport.id);
+    db.close();
+  });
+
   it("injects repository repair protocol on turn start even without memory hits", async () => {
     const { db } = createTestService();
     const service = createTestMemoryService({
@@ -375,7 +490,8 @@ describe("MemoryService / retrieval / injected context", () => {
       query: "fix sqlite budget migration",
       answer: "The sqlite budget migration is fixed."
     });
-    expect(completed.episodeId).toBe(prepared.episodeId);
+    expect(prepared).not.toHaveProperty("episodeId");
+    expect(completed.episodeId).toMatch(/^episode_/u);
     const rawTurn = db.db.prepare(
       "SELECT source_memory_ids_json, message_payload_json FROM raw_turns WHERE id = ?"
     ).get(completed.rawTurnId) as {
@@ -787,7 +903,7 @@ describe("MemoryService / retrieval / injected context", () => {
     });
 
     expect(unknown.status).not.toContain("intent:chitchat:retrieval_skipped");
-    expect(db.db.prepare("SELECT COUNT(*) AS count FROM episodes").get()).toEqual({ count: 3 });
+    expect(db.db.prepare("SELECT COUNT(*) AS count FROM episodes").get()).toEqual({ count: 0 });
     expect(db.db.prepare("SELECT COUNT(*) AS count FROM recall_events").get()).toEqual({ count: 3 });
     expect(db.db.prepare(
       "SELECT tool_name, COUNT(*) AS count FROM api_logs GROUP BY tool_name"

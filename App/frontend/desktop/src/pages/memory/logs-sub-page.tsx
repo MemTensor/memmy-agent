@@ -4,6 +4,7 @@ import ReactMarkdown, { type Components } from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import { ApiRequestError } from "../../api/http.js";
+import { PRODUCT_TOUR_MEMORY_LOGS_LIST_ANCHOR } from "../../app/product-tour-layout.js";
 import {
   buildLogsFilterLayer,
   buildMemoryUiDetailOpenedEvent,
@@ -189,6 +190,36 @@ export function LogsSubPageView(props: LogsSubPageViewProps) {
     });
   };
 
+  const renderLogCard = (log: (typeof filteredLogs)[number]) => {
+    const input = parseJson(log.inputJson);
+    const output = parseJson(log.outputJson);
+    const isExpanded = expanded.has(log.id);
+    const summary = buildSummary(log, input, output, t);
+    return (
+      <article key={log.id} className={`memory-log-card${isExpanded ? " memory-log-card--expanded" : ""}`}>
+        <button
+          type="button"
+          onClick={() => toggleExpanded(log.id)}
+          className="memory-log-card__button"
+        >
+          <span className={`memory-log-tool ${logToolClass(log.toolName)}`}>
+            {log.toolName}
+          </span>
+          <span className={`memory-log-card__summary${summary.tail ? " memory-log-card__summary--with-tail" : ""}`}>{summary.text}</span>
+          {summary.tail && <span className="memory-log-card__summary-tail">{summary.tail}</span>}
+          <span className="memory-log-card__meta">{formatDuration(log.durationMs)}</span>
+          <span className="memory-log-card__meta">{formatDate(log.calledAt)}</span>
+          <span className="memory-log-card__action">{isExpanded ? t("memory.logs.collapse") : t("memory.logs.expand")}</span>
+        </button>
+        {isExpanded && (
+          <div className="memory-log-card__details">
+            <LogDetail log={log} input={input} output={output} />
+          </div>
+        )}
+      </article>
+    );
+  };
+
   return (
     <section className="memory-panel">
       <div className="memory-panel__header memory-panel__header--single-line">
@@ -241,40 +272,28 @@ export function LogsSubPageView(props: LogsSubPageViewProps) {
         </div>
       </div>
 
-      {props.state.status === "loading" && <StateBox message={t("memory.logs.loading")} />}
-      {props.state.status === "error" && <StateBox message={props.state.message} tone="error" />}
-      {props.state.status === "ready" && filteredLogs.length === 0 && <StateBox message={t("memory.logs.empty")} />}
+      {/* Keep the tour list anchor mounted even when empty/loading so step 1/5 can resolve layout. */}
+      {props.state.status === "loading" && (
+        <div data-tour-anchor={PRODUCT_TOUR_MEMORY_LOGS_LIST_ANCHOR}>
+          <StateBox message={t("memory.logs.loading")} />
+        </div>
+      )}
+      {props.state.status === "error" && (
+        <div data-tour-anchor={PRODUCT_TOUR_MEMORY_LOGS_LIST_ANCHOR}>
+          <StateBox message={props.state.message} tone="error" />
+        </div>
+      )}
+      {props.state.status === "ready" && filteredLogs.length === 0 && (
+        <div data-tour-anchor={PRODUCT_TOUR_MEMORY_LOGS_LIST_ANCHOR}>
+          <StateBox message={t("memory.logs.empty")} />
+        </div>
+      )}
       {props.state.status === "ready" && filteredLogs.length > 0 && (
         <div className="memory-list">
-          {filteredLogs.map((log) => {
-            const input = parseJson(log.inputJson);
-            const output = parseJson(log.outputJson);
-            const isExpanded = expanded.has(log.id);
-            const summary = buildSummary(log, input, output, t);
-            return (
-              <article key={log.id} className={`memory-log-card${isExpanded ? " memory-log-card--expanded" : ""}`}>
-                <button
-                  type="button"
-                  onClick={() => toggleExpanded(log.id)}
-                  className="memory-log-card__button"
-                >
-                  <span className={`memory-log-tool ${logToolClass(log.toolName)}`}>
-                    {log.toolName}
-                  </span>
-                  <span className={`memory-log-card__summary${summary.tail ? " memory-log-card__summary--with-tail" : ""}`}>{summary.text}</span>
-                  {summary.tail && <span className="memory-log-card__summary-tail">{summary.tail}</span>}
-                  <span className="memory-log-card__meta">{formatDuration(log.durationMs)}</span>
-                  <span className="memory-log-card__meta">{formatDate(log.calledAt)}</span>
-                  <span className="memory-log-card__action">{isExpanded ? t("memory.logs.collapse") : t("memory.logs.expand")}</span>
-                </button>
-                {isExpanded && (
-                  <div className="memory-log-card__details">
-                    <LogDetail log={log} input={input} output={output} />
-                  </div>
-                )}
-              </article>
-            );
-          })}
+          <div data-tour-anchor={PRODUCT_TOUR_MEMORY_LOGS_LIST_ANCHOR}>
+            {filteredLogs.slice(0, 2).map(renderLogCard)}
+          </div>
+          {filteredLogs.slice(2).map(renderLogCard)}
         </div>
       )}
       {pagination && (

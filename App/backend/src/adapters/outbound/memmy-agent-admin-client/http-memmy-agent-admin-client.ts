@@ -24,6 +24,12 @@ const WeixinLoginResponseSchema = z.object({
   pollToken: z.string().min(1).optional()
 });
 
+const FeishuLoginResponseSchema = WeixinLoginResponseSchema.extend({
+  appId: z.string().min(1).optional(),
+  appSecret: z.string().min(1).optional(),
+  domain: z.enum(["feishu", "lark"]).optional()
+});
+
 export interface CreateHttpMemmyAgentAdminClientOptions {
   /** Memmy-agent WebUI HTTP base URL. */
   baseUrl?: string;
@@ -73,6 +79,14 @@ class HttpMemmyAgentAdminClient implements MemmyAgentAdminClient {
 
   async pollWeixinLogin(pollToken: string) {
     return this.request(`/api/channels/weixin/login/${encodeURIComponent(pollToken)}`, WeixinLoginResponseSchema);
+  }
+
+  async startFeishuLogin() {
+    return this.request("/api/channels/feishu/login/start", FeishuLoginResponseSchema, { method: "POST" });
+  }
+
+  async pollFeishuLogin(pollToken: string) {
+    return this.request(`/api/channels/feishu/login/${encodeURIComponent(pollToken)}`, FeishuLoginResponseSchema);
   }
 
   private async request<T>(path: string, schema: { parse(value: unknown): T }, init: RequestInit = {}, retried = false): Promise<T> {

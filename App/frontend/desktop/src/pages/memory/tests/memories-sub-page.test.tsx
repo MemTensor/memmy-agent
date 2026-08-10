@@ -200,8 +200,10 @@ describe("MemoriesSubPage", () => {
     expect(html).toContain("摘要");
     expect(html).toContain("阅读策略、指标和组合模型相关文件。");
     expect(html).toContain("相关步骤");
-    expect(html).toContain("工具调用 · rg");
-    expect(html).toContain("工具调用 · npm_test");
+    expect(html).not.toContain("工具调用 · rg");
+    expect(html).not.toContain("工具调用 · npm_test");
+    expect(html).toContain('memory-tool-card__name">rg');
+    expect(html).toContain('memory-tool-card__name">npm_test');
     expect(html).not.toContain("正文");
     expect(html).not.toContain("Goal:");
     expect(html).not.toContain("Summary:");
@@ -522,7 +524,7 @@ describe("MemoriesSubPage", () => {
     });
 
     const firstThinkingIndex = html.indexOf("先调用系统命令检查内存。");
-    const toolIndex = html.indexOf("工具调用 · exec");
+    const toolIndex = html.indexOf('memory-tool-card__name">exec');
     const secondThinkingIndex = html.indexOf("工具返回 16 GB 后确认答案。");
     const assistantIndex = html.indexOf("这台电脑的内存是 16 GB。");
     expect(firstThinkingIndex).toBeGreaterThan(-1);
@@ -630,8 +632,9 @@ describe("MemoriesSubPage", () => {
     expect(html).toContain("用户");
     expect(html).not.toContain("用户 Query");
     expect(html).toContain("<strong>记忆管理</strong>");
-    expect(html).toContain("工具调用 · read_file");
-    expect(html).toContain("read_file");
+    expect(html).not.toContain("工具调用 · read_file");
+    expect(html.match(/read_file/g)?.length).toBe(1);
+    expect(html).toContain('memory-tool-card__name">read_file');
     expect(html).toContain("输入");
     expect(html).toContain("输出");
     expect(html).toContain("读取 MemoryPage 页面结构。");

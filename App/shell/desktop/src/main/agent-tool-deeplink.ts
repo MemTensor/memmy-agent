@@ -1,7 +1,22 @@
+const WORKBUDDY_MEMORY_COMMAND = "/memmy-memory";
+
+/** WorkBuddy needs the memmy-memory slash command before the continuation prompt. */
+export function formatWorkBuddyAgentPrompt(prompt: string): string {
+  const trimmed = prompt.trim();
+  if (!trimmed) {
+    return WORKBUDDY_MEMORY_COMMAND;
+  }
+  if (trimmed === WORKBUDDY_MEMORY_COMMAND || trimmed.startsWith(`${WORKBUDDY_MEMORY_COMMAND} `) || trimmed.startsWith(`${WORKBUDDY_MEMORY_COMMAND}\n`)) {
+    return trimmed;
+  }
+  return `${WORKBUDDY_MEMORY_COMMAND} ${trimmed}`;
+}
+
 const AGENT_TOOL_PROMPT_DEEPLINK_BUILDERS: Readonly<Record<string, (prompt: string) => string>> = {
   cursor: (prompt) => `cursor://anysphere.cursor-deeplink/prompt?text=${encodeURIComponent(prompt)}`,
   claude_code: (prompt) => `claude://claude.ai/new?q=${encodeURIComponent(prompt)}`,
-  workbuddy: () => "workbuddy://"
+  // WorkBuddy desktop task deeplink (not command?text — that host is unimplemented).
+  workbuddy: (prompt) => `workbuddy://task?action=start&prompt=${encodeURIComponent(formatWorkBuddyAgentPrompt(prompt))}`
 };
 
 const AGENT_TOOL_CLI_DEEPLINK_BUILDERS: Readonly<Record<string, (prompt: string) => string>> = {
