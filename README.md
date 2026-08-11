@@ -3,9 +3,7 @@
 <div align="center">
   <a href="https://memmy.bot/">
     <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-dark.svg">
-      <source media="(prefers-color-scheme: light)" srcset="docs/assets/logo-light.svg">
-      <img alt="Memmy Logo" src="docs/assets/logo-light.svg" width="50%">
+      <img alt="Memmy Logo" src="docs/assets/banner-en.png">
     </picture>
   </a>
 </div>
@@ -14,14 +12,16 @@
 <p align="center">
     <a href="https://memmy.bot/docs/"><img src="https://img.shields.io/badge/Docs-Get--Start-006400?labelColor=gray&style=for-the-badge&logo=googledocs&logoColor=white" alt="Docs"></a>
     <a href="https://github.com/MemTensor/memmy-agent/releases"><img src="https://img.shields.io/badge/News-ED8D45?labelColor=gray&style=for-the-badge&logo=applenews&logoColor=white" alt="applenews"></a>
-    <a href="https://www.producthunt.com/products/memmy?launch=memmy-agent"><img src="https://img.shields.io/badge/Memmy--Agent-DA552F?labelColor=gray&style=for-the-badge&logo=producthunt&logoColor=white" alt="producthunt"></a>
     <a href="https://discord.gg/zfhKKn52wP"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fdiscord.com%2Fapi%2Fv10%2Finvites%2FzfhKKn52wP%3Fwith_counts%3Dtrue&query=%24.approximate_presence_count&suffix=%20online&label=Discord&color=404EED&labelColor=gray&style=for-the-badge&logo=discord&logoColor=white" alt="Discord"></a>
     <a href="https://x.com/Memmy_ai"><img src="https://img.shields.io/badge/Follow-Memmy-000000?labelColor=gray&style=for-the-badge&logo=x&logoColor=white" alt="X"></a>
-  </p>
+</p>
+<p align="center">
+    <a href="https://www.producthunt.com/products/memmy?embed=true&amp;utm_source=badge-top-post-badge&amp;utm_medium=badge&amp;utm_campaign=badge-memmy-agent" target="_blank" rel="noopener noreferrer"><img alt="Memmy Agent - Let every AI remember the same you. | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/top-post-badge.svg?post_id=1203499&amp;theme=light&amp;period=daily&amp;t=1786083567983"></a>
+</p>
 
 <div align="center">
   
-## Memmy is your personal memory hub — and a dedicated Agent that knows you best.
+## Memmy is your personal AI agent & local memory hub  for all AI agents — it lets every AI connect to the same memory and keep evolving through collaboration.
 
 </div>
 
@@ -29,7 +29,7 @@
 
 **English** • [简体中文](README.zh-CN.md)
 
-![image](docs/assets/banner-en.png)
+
 
 </div>
 
