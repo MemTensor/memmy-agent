@@ -21,7 +21,7 @@
 
 <div align="center">
   
-## Memmy is your personal AI agent & local memory hub  for all AI agents — it lets every AI connect to the same memory and keep evolving through collaboration.
+## Memmy is your personal AI agent & local memory hub  for all AI agents — it lets every AI connect to the same memory and keep self-evolving.
 
 </div>
 
