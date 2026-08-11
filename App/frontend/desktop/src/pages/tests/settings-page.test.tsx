@@ -93,6 +93,17 @@ describe("formatUsageUpdatedAt", () => {
 });
 
 describe("SettingsPageView", () => {
+  it("国际版首次安装时将未配置的 system 语言显示为 English", () => {
+    const state = appReducer(
+      createInitialAppState(),
+      appActions.bootstrapLoaded(mockBootstrap, "/settings")
+    );
+    const html = normalizeSsrHtml(renderSettingsPageView(state, "en-US"));
+
+    expect(html).toMatch(/select-control__value[^>]*>English<\/span>/);
+    expect(html).not.toMatch(/select-control__value[^>]*>中文<\/span>/);
+  });
+
   it("对齐 Memmy v2.0 设置页卡片结构和关键内容", () => {
     const html = normalizeSsrHtml(renderSettingsPageView(createReadyState()));
 

@@ -266,7 +266,7 @@ export function shouldSaveAccountNicknameOnKeyDown(event: import("react").Keyboa
  */
 export function SettingsPageView(props: SettingsPageViewProps) {
   const { state, dispatch, accountClient, configClient, byokTokenUsageClient, tokenQuotaClient, update, track = noopTrackAnalyticsEvent, onUsageDetailVisibleChange } = props;
-  const { t } = useTranslation();
+  const { t, language } = useTranslation();
   const bootstrap = state.bootstrap;
   const [launchAtLogin, setLaunchAtLogin] = useState(false);
   const [closeAction, setCloseAction] = useState<CloseMainWindowAction>(() => {
@@ -371,7 +371,6 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const accountMeta = isByokMode ? resolveAccountMeta(appSettings?.userMode, t) : maskedAccountIdentifier || resolveAccountMeta(appSettings?.userMode, t);
   const accountInitial = isByokMode ? "·" : resolveAccountInitials(accountName);
   const registeredAtText = formatRegisteredAt(state.account.registeredAt, t);
-  const language = appSettings?.language === "en-US" ? "en-US" : "zh-CN";
   const defaultLaunchMode = appSettings?.defaultLaunchMode ?? state.navigation.preferredMode ?? "last";
   const autoUpdateEnabled = appSettings?.autoUpdateEnabled ?? true;
   const taskDoneNotificationEnabled = appSettings?.taskDoneNotificationEnabled ?? true;
