@@ -550,6 +550,121 @@ describe("onboarding insight service", () => {
     }));
   });
 
+  it("accepts simplified report tags without exposing markup or task context", async () => {
+    const write = vi.fn(async () => undefined);
+    const taskContext = {
+      topic: "Memmy 初见报告",
+      userGoal: "生成不含内部协议标签的初见报告。",
+      latestRequest: "兼容模型输出的简化标签。",
+      status: "completed",
+      currentState: "报告正文已经生成。",
+      agentActions: ["生成了初见报告。"],
+      verifiedResults: ["报告正文可正常展示。"],
+      unresolvedItems: [],
+      continuationPoint: "",
+      trajectorySummary: "模型使用了简化包装标签，报告正文仍应正常展示，内部任务上下文不得泄漏。"
+    };
+    const service = createOnboardingInsightService({
+      samplers: [sampler("codex", "Codex", [query("codex", "1", "生成我的初见报告")])],
+      reportGenerator: {
+        async generateReport() {
+          throw new Error("generateReport not used");
+        },
+        async *streamReport() {
+          yield "<rep";
+          yield "ort>Hi jiacz，\n\n## 你的偏好\n偏好简洁、可执行的结论。";
+          yield "</rep";
+          yield "ort>\n<task";
+          yield `Context>${JSON.stringify(taskContext)}</taskContext>`;
+        }
+      },
+      memoryWriter: { write },
+      now: () => 100
+    });
+
+    const events = await collectStreamEvents(service.streamReport({ locale: "zh-CN" }));
+    const visibleText = events
+      .filter((event): event is { type: "chunk"; delta: string } =>
+        Boolean(event && typeof event === "object" && (event as { type?: unknown }).type === "chunk"))
+      .map((event) => event.delta)
+      .join("");
+    const done = events.find((event) =>
+      event && typeof event === "object" && (event as { type?: unknown }).type === "done"
+    ) as { response: { reportMarkdown: string } } | undefined;
+
+    expect(visibleText).toBe("Hi jiacz，\n\n## 你的偏好\n偏好简洁、可执行的结论。");
+    expect(visibleText).not.toContain("<report>");
+    expect(visibleText).not.toContain("<taskContext>");
+    expect(visibleText).not.toContain("trajectorySummary");
+    expect(done?.response.reportMarkdown).toBe("Hi jiacz，\n\n## 你的偏好\n偏好简洁、可执行的结论。");
+    expect(write).toHaveBeenCalledWith(expect.objectContaining({
+      reportMarkdown: "Hi jiacz，\n\n## 你的偏好\n偏好简洁、可执行的结论。",
+      taskContext
+    }));
+  });
+
+  it("preserves simplified tag names when they are part of ordinary report text", async () => {
+    const reportText = "Hi。最近修复了 `<report>` 与 `<taskContext>` 标签泄漏。";
+    const service = createOnboardingInsightService({
+      samplers: [sampler("codex", "Codex", [query("codex", "1", "总结标签清理任务")])],
+      reportGenerator: {
+        async generateReport() {
+          throw new Error("generateReport not used");
+        },
+        async *streamReport() {
+          yield "Hi。最近修复了 `<rep";
+          yield "ort>` 与 `<task";
+          yield "Context>` 标签泄漏。";
+        }
+      },
+      now: () => 100
+    });
+
+    const events = await collectStreamEvents(service.streamReport({ locale: "zh-CN" }));
+    const visibleText = events
+      .filter((event): event is { type: "chunk"; delta: string } =>
+        Boolean(event && typeof event === "object" && (event as { type?: unknown }).type === "chunk"))
+      .map((event) => event.delta)
+      .join("");
+    const done = events.find((event) =>
+      event && typeof event === "object" && (event as { type?: unknown }).type === "done"
+    ) as { response: { reportMarkdown: string } } | undefined;
+
+    expect(visibleText).toBe(reportText);
+    expect(done?.response.reportMarkdown).toBe(reportText);
+  });
+
+  it("preserves simplified tag names inside a wrapped report body", async () => {
+    const reportText = "Hi。正文会说明 `<taskContext>` 标签的兼容处理。";
+    const service = createOnboardingInsightService({
+      samplers: [sampler("codex", "Codex", [query("codex", "1", "总结标签兼容方案")])],
+      reportGenerator: {
+        async generateReport() {
+          throw new Error("generateReport not used");
+        },
+        async *streamReport() {
+          yield "<report>Hi。正文会说明 `<task";
+          yield "Context>` 标签的兼容处理。</rep";
+          yield "ort>";
+        }
+      },
+      now: () => 100
+    });
+
+    const events = await collectStreamEvents(service.streamReport({ locale: "zh-CN" }));
+    const visibleText = events
+      .filter((event): event is { type: "chunk"; delta: string } =>
+        Boolean(event && typeof event === "object" && (event as { type?: unknown }).type === "chunk"))
+      .map((event) => event.delta)
+      .join("");
+    const done = events.find((event) =>
+      event && typeof event === "object" && (event as { type?: unknown }).type === "done"
+    ) as { response: { reportMarkdown: string } } | undefined;
+
+    expect(visibleText).toBe(reportText);
+    expect(done?.response.reportMarkdown).toBe(reportText);
+  });
+
   it("keeps a naked task-context JSON out of the streamed and final report", async () => {
     const write = vi.fn(async () => undefined);
     const taskContext = {

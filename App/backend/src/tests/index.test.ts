@@ -593,11 +593,12 @@ describe("local api", () => {
     });
     expect(deleteResponse.status).toBe(200);
     await expect(deleteResponse.json()).resolves.toEqual({ ok: true });
-    expect(cloudClient.calls).toHaveLength(4);
+    expect(cloudClient.calls).toHaveLength(5);
     expect(cloudClient.calls[0]).toMatch(/^listIntegrationCapabilities:mct_/);
     expect(cloudClient.calls[1]).toMatch(/^authorizeIntegration:mct_.*:github$/);
     expect(cloudClient.calls[2]).toMatch(/^listIntegrationConnections:mct_/);
-    expect(cloudClient.calls[3]).toMatch(/^deleteIntegrationConnection:mct_.*:conn-github$/);
+    expect(cloudClient.calls[3]).toMatch(/^listIntegrationConnections:mct_/);
+    expect(cloudClient.calls[4]).toMatch(/^deleteIntegrationConnection:mct_.*:conn-github$/);
     expect(new Set(cloudClient.calls.map(readRecordedMachineToken)).size).toBe(1);
   });
 
@@ -978,6 +979,14 @@ describe("local api", () => {
         {
           method: "POST",
           url: "/api/composio/integrations/airtable/authorize",
+          body: {},
+          apiKey: undefined,
+          authorization: undefined,
+          machineComposioToken: expect.stringMatching(/^mct_/)
+        },
+        {
+          method: "GET",
+          url: "/api/composio/connections",
           body: {},
           apiKey: undefined,
           authorization: undefined,

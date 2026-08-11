@@ -216,6 +216,7 @@ export function SettingsPage() {
       <SettingsPageView
         state={state}
         dispatch={dispatch}
+        platform={typeof window === "undefined" ? undefined : window.memmy?.platform}
         accountClient={clients?.account}
         configClient={clients?.config}
         byokTokenUsageClient={clients?.byokTokenUsage}
@@ -234,6 +235,7 @@ export function SettingsPage() {
  * Field meanings:
  * - state: The current global UI state, providing bootstrap, navigation, and legacy-test-compatible data.
  * - dispatch: The settings-change event dispatch function.
+ * - platform: The desktop runtime platform used for platform-specific window copy.
  * - accountClient: The account session client, used for nickname updates and logout.
  * - configClient: The live config write client; may be omitted in SSR tests.
  * - byokTokenUsageClient: The BYOK API Key Token usage client; may be omitted in SSR tests.
@@ -244,6 +246,7 @@ export function SettingsPage() {
 export interface SettingsPageViewProps {
   state: AppState;
   dispatch: Dispatch<AppAction>;
+  platform?: string;
   accountClient?: AccountClient;
   configClient?: ConfigClient;
   byokTokenUsageClient?: ByokTokenUsageClient;
@@ -265,7 +268,7 @@ export function shouldSaveAccountNicknameOnKeyDown(event: import("react").Keyboa
  * @returns The settings page content node matching the prototype structure.
  */
 export function SettingsPageView(props: SettingsPageViewProps) {
-  const { state, dispatch, accountClient, configClient, byokTokenUsageClient, tokenQuotaClient, update, track = noopTrackAnalyticsEvent, onUsageDetailVisibleChange } = props;
+  const { state, dispatch, platform, accountClient, configClient, byokTokenUsageClient, tokenQuotaClient, update, track = noopTrackAnalyticsEvent, onUsageDetailVisibleChange } = props;
   const { t, language } = useTranslation();
   const bootstrap = state.bootstrap;
   const [launchAtLogin, setLaunchAtLogin] = useState(false);
@@ -1822,7 +1825,12 @@ export function SettingsPageView(props: SettingsPageViewProps) {
               ]}
             />
             <Divider />
-            <ToggleRow label={t("settings.window.menuBarIcon")} description={t("settings.window.menuBarIconDesc")} checked={menuBarIcon} onChange={handleMenuBarIconChange} />
+            <ToggleRow
+              label={t("settings.window.menuBarIcon")}
+              description={t(platform === "win32" ? "settings.window.menuBarIconDescWindows" : "settings.window.menuBarIconDesc")}
+              checked={menuBarIcon}
+              onChange={handleMenuBarIconChange}
+            />
           </div>
         </Section>
 
