@@ -10,8 +10,12 @@ import {
   resolveHermesHomeDirectory,
   resolveOpencodeDatabasePath,
   resolveOpenclawStateDirectory,
+  resolvePiSessionsDirectory,
+  resolveQwenworkProjectsDirectory,
   resolveWorkbuddyProjectsDirectory
 } from "../agent-paths.js";
+import { extractPiMessage } from "./pi/history-reader.js";
+import { extractQwenworkMessage } from "./qwenwork/history-reader.js";
 import { extractWorkbuddyMessage } from "./workbuddy/history-reader.js";
 import { redactSecrets } from "./secret-redactor.js";
 import type { SourceRegistry } from "./source-registry.js";
@@ -60,7 +64,9 @@ export function createBuiltinOnboardingInsightSamplers(): OnboardingInsightSampl
     createOpencodeInsightSampler({ databasePath: resolveOpencodeDatabasePath() }),
     createOpenclawInsightSampler({ root: resolveOpenclawStateDirectory() }),
     createHermesInsightSampler({ root: resolveHermesHomeDirectory() }),
-    createWorkbuddyInsightSampler({ root: resolveWorkbuddyProjectsDirectory() })
+    createWorkbuddyInsightSampler({ root: resolveWorkbuddyProjectsDirectory() }),
+    createPiInsightSampler({ root: resolvePiSessionsDirectory() }),
+    createQwenworkInsightSampler({ root: resolveQwenworkProjectsDirectory() })
   ];
 }
 
@@ -127,6 +133,28 @@ export function createWorkbuddyInsightSampler(input: { root: string }): Onboardi
     matchesFile: (name) => name.endsWith(".jsonl"),
     shouldParseLine: isPotentialWorkbuddyMessageLine,
     extractMessage: extractWorkbuddySampledMessage
+  });
+}
+
+export function createPiInsightSampler(input: { root: string }): OnboardingInsightSampler {
+  return createJsonlInsightSampler({
+    sourceId: "pi",
+    displayName: "Pi",
+    root: input.root,
+    matchesFile: (name) => name.endsWith(".jsonl"),
+    shouldParseLine: (line) => /"type"\s*:\s*"message"/u.test(line),
+    extractMessage: extractPiSampledMessage
+  });
+}
+
+export function createQwenworkInsightSampler(input: { root: string }): OnboardingInsightSampler {
+  return createJsonlInsightSampler({
+    sourceId: "qwenwork",
+    displayName: "qwenwork",
+    root: input.root,
+    matchesFile: (name) => name.endsWith(".jsonl"),
+    shouldParseLine: (line) => /"type"\s*:\s*"(?:user|assistant|system)"/u.test(line),
+    extractMessage: extractQwenworkSampledMessage
   });
 }
 
@@ -708,6 +736,50 @@ function extractWorkbuddySampledMessage(
   }
   return {
     sourceId: fallback.sourceId,
+    conversationId: message.conversationId,
+    messageId: message.messageId,
+    role,
+    createdAt: message.createdAt,
+    text: message.content,
+    workspacePath: message.workspacePath
+  };
+}
+
+function extractPiSampledMessage(
+  record: JsonRecord,
+  fallback: { sourceId: string; filePath: string; lineIndex: number }
+): OnboardingSampledMessage | null {
+  return toSampledMessage(
+    fallback.sourceId,
+    extractPiMessage(record, basename(fallback.filePath, ".jsonl"), fallback.lineIndex)
+  );
+}
+
+function extractQwenworkSampledMessage(
+  record: JsonRecord,
+  fallback: { sourceId: string; filePath: string; lineIndex: number }
+): OnboardingSampledMessage | null {
+  return toSampledMessage(
+    fallback.sourceId,
+    extractQwenworkMessage(record, basename(fallback.filePath, ".jsonl"), fallback.lineIndex)
+  );
+}
+
+function toSampledMessage(
+  sourceId: string,
+  message: {
+    conversationId: string;
+    messageId: string;
+    role: "user" | "assistant" | "tool" | "system";
+    createdAt: string;
+    content: string;
+    workspacePath: string | null;
+  } | null
+): OnboardingSampledMessage | null {
+  const role = normalizeSampledRole(message?.role);
+  if (!message || !role || !message.content.trim()) return null;
+  return {
+    sourceId,
     conversationId: message.conversationId,
     messageId: message.messageId,
     role,

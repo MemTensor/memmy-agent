@@ -52,6 +52,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
             service,
             host,
             port,
+            timeZone: config.timeZone,
             onShutdownRequested: () => {
                 setTimeout(() => process.kill(process.pid, "SIGTERM"), 0);
             },

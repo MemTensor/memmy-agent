@@ -99,7 +99,7 @@ Memmy is designed to guarantee your control over your personal data a
 
 After installing Memmy, it can automatically scan the history of your existing AI Agents. Within minutes, the project context, work habits, and preferences you have accumulated over the past months are converted into personal long-term memory, along with a personalized "First Meeting Report".
 
-Now supported: Cursor, Claude Code, Codex, OpenCode, OpenClaw, Hermes Agent.
+Now supported: Cursor, Claude Code, Codex, OpenCode, OpenClaw, Hermes, WorkBuddy, Pi, and qwenwork Agents.
 
 [See the full support list](https://memmy.bot/docs/memory/sources)
 
@@ -166,7 +166,7 @@ agents:
   defaults:
     model: openai/gpt-4.1
     provider: openai
-    timezone: Asia/Shanghai
+    timezone: "+08:00"
 providers:
   openai:
     apiKey: ${OPENAI_API_KEY}   # Supports ${ENV_NAME}-style environment variable references

@@ -11,8 +11,8 @@ export function createSearchService(deps: {
   memoryClient: MemoryClient;
 }): SearchService {
   return {
-    async search(input, _ctx) {
-      return deps.memoryClient.search(input);
+    async search(input, ctx) {
+      return deps.memoryClient.search(input, ctx);
     }
   };
 }

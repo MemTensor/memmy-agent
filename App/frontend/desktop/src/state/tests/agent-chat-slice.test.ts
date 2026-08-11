@@ -369,7 +369,7 @@ describe("agent chat slice", () => {
         event: "message",
         chat_id: "chat-quota",
         text: "当前模型额度已用完",
-        model_error: { category: "quota_exhausted" }
+        model_error: { category: "quota_exhausted", detail: "Error: raw provider detail 40309" }
       }
     });
     state = agentReducer(state, {
@@ -381,7 +381,7 @@ describe("agent chat slice", () => {
     expect(assistant).toHaveLength(1);
     expect(assistant[0]).toMatchObject({
       content: "当前模型额度已用完",
-      modelError: { category: "quota_exhausted" },
+      modelError: { category: "quota_exhausted", detail: "Error: raw provider detail 40309" },
       isStreaming: false
     });
   });
@@ -392,14 +392,35 @@ describe("agent chat slice", () => {
       {
         role: "assistant",
         content: "当前模型额度已用完",
-        model_error: { category: "quota_exhausted" }
+        model_error: { category: "quota_exhausted", detail: "Error: persisted raw provider detail 40309" }
       }
     ]);
 
     expect(state.messages[1]).toMatchObject({
       role: "assistant",
       content: "当前模型额度已用完",
-      modelError: { category: "quota_exhausted" }
+      modelError: { category: "quota_exhausted", detail: "Error: persisted raw provider detail 40309" }
+    });
+  });
+
+  it("preserves a structured generic model failure from live events", () => {
+    const ready = agentReducer(initialAgentState, {
+      type: "agent/wsEvent",
+      event: { event: "ready", chat_id: "chat-model-failed" }
+    });
+    const state = agentReducer(ready, {
+      type: "agent/wsEvent",
+      event: {
+        event: "message",
+        chat_id: "chat-model-failed",
+        text: "平台服务响应异常，请稍后重试。",
+        model_error: { category: "model_failed", detail: "Error: raw provider failure" }
+      }
+    });
+
+    expect(state.messages[0]?.modelError).toEqual({
+      category: "model_failed",
+      detail: "Error: raw provider failure"
     });
   });
 

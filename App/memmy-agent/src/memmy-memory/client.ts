@@ -1,4 +1,5 @@
 import type { MemmyMemoryConnection, MemmyMemoryRequestEnvelope, JsonRecord } from "./types.js";
+import { normalizeTimeZoneOffset } from "../utils/time-zone.js";
 
 export class MemmyMemoryHttpError extends Error {
   status: number;
@@ -20,12 +21,14 @@ export class MemmyMemoryClient {
   baseUrl: string;
   token: string | null;
   timeoutMs: number;
+  timeZone: string;
   private fetchImpl: FetchLike;
 
   constructor(connection: MemmyMemoryConnection, fetchImpl: FetchLike = fetch) {
     this.baseUrl = connection.baseUrl.replace(/\/+$/, "");
     this.token = connection.token ?? null;
     this.timeoutMs = connection.timeoutMs ?? DEFAULT_MEMOS_MEMORY_TIMEOUT_MS;
+    this.timeZone = normalizeTimeZoneOffset(connection.timeZone);
     this.fetchImpl = fetchImpl;
   }
 
@@ -40,6 +43,7 @@ export class MemmyMemoryClient {
 
   private async request<T>(method: string, path: string, opts: { query?: Record<string, any>; body?: any } = {}): Promise<T> {
     const headers: Record<string, string> = { accept: "application/json" };
+    headers["x-memmy-time-zone"] = this.timeZone;
     if (this.token) headers.authorization = `Bearer ${this.token}`;
     if (opts.body !== undefined) headers["content-type"] = "application/json";
     const requestId = opts.body && typeof opts.body === "object" ? opts.body.requestId : null;

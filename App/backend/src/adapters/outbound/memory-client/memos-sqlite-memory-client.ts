@@ -1153,7 +1153,7 @@ function sourceLabelFromSessionId(value: string | null): string | undefined {
   if (!normalized) return undefined;
   if (normalized === "claude" || normalized.startsWith("claude-")) return "claude-code";
   if (normalized === "open-code" || normalized.startsWith("open-code-")) return "opencode";
-  for (const source of ["hermes", "openclaw", "codex", "cursor", "claude-code", "opencode", "workbuddy"]) {
+  for (const source of ["hermes", "openclaw", "codex", "cursor", "claude-code", "opencode", "workbuddy", "pi", "qwenwork"]) {
     if (normalized === source || normalized.startsWith(`${source}-`)) return source;
   }
   return undefined;
@@ -1163,7 +1163,7 @@ function normalizedAgentSource(value: string | undefined): string | undefined {
   const normalized = value?.trim().toLowerCase();
   if (normalized === "claude") return "claude-code";
   if (normalized === "open-code") return "opencode";
-  return ["hermes", "openclaw", "codex", "cursor", "claude-code", "opencode", "workbuddy"].includes(normalized ?? "")
+  return ["hermes", "openclaw", "codex", "cursor", "claude-code", "opencode", "workbuddy", "pi", "qwenwork"].includes(normalized ?? "")
     ? normalized
     : undefined;
 }

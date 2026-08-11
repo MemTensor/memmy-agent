@@ -100,9 +100,17 @@ type ImportResult = {
   errors: Array<{ conversationId: string; reason: string }>;
 };
 
+export type VerifiedAgentInstallation = {
+  installationPath: string;
+  identity: string;
+};
+
+export type InstallationPathOrigin = "discovered" | "user_provided";
+
 export class AgentSourceTool extends Tool {
   static scopes = new Set(["core"]);
   private readonly workspace: string;
+  private readonly verifiedInstallations = new Map<string, VerifiedAgentInstallation>();
 
   constructor(options: { workspace?: string } = {}) {
     super();
@@ -118,7 +126,7 @@ export class AgentSourceTool extends Tool {
   }
 
   get description(): string {
-    return "Provision a GUI-managed Agent source: inspect its persisted status, render its Memmy Skill, import a normalized bootstrap manifest, save the reusable automatic-sync recipe, or update Skill installation state. Use only in an explicitly requested agent-memory-onboarding task.";
+    return "Provision a GUI-managed Agent source: verify the requested Agent against a real local installation, inspect its persisted status, render its Memmy Skill, import a normalized bootstrap manifest, save the reusable automatic-sync recipe, or update Skill installation state. Verification is mandatory before any provisioning mutation. Use only in an explicitly requested agent-memory-onboarding task.";
   }
 
   override get readOnly(): boolean {
@@ -131,9 +139,18 @@ export class AgentSourceTool extends Tool {
       properties: {
         action: {
           type: "string",
-          enum: ["get_status", "render_skill", "import_manifest", "save_sync_recipe", "set_skill_status"]
+          enum: ["get_status", "verify_installation", "render_skill", "import_manifest", "save_sync_recipe", "set_skill_status"]
         },
         source_id: { type: "string" },
+        installation_path: {
+          type: "string",
+          description: "Absolute path to a pre-existing executable, .app bundle, package directory, or package.json belonging to the requested Agent."
+        },
+        installation_path_origin: {
+          type: "string",
+          enum: ["discovered", "user_provided"],
+          description: "Use user_provided only when the user explicitly supplied this installation path in the conversation."
+        },
         manifest_path: { type: "string" },
         mode: { type: "string", enum: ["initial_subset", "incremental"] },
         data_path: { type: "string" },
@@ -166,7 +183,27 @@ export class AgentSourceTool extends Tool {
       });
     }
 
+    if (action === "verify_installation") {
+      const source = await readAgentSource(runtime, sourceId);
+      const installationPathOrigin = requiredInstallationPathOrigin(params.installation_path_origin);
+      const verified = verifyAgentInstallation(
+        source.displayName,
+        requiredString(params.installation_path, "installation_path"),
+        installationPathOrigin
+      );
+      this.verifiedInstallations.set(sourceId, verified);
+      return JSON.stringify({
+        sourceId,
+        verified: true,
+        displayName: source.displayName,
+        installationPath: verified.installationPath,
+        identity: verified.identity,
+        installationPathOrigin
+      });
+    }
+
     if (action === "render_skill") {
+      this.requireVerifiedInstallation(sourceId);
       const source = await readAgentSource(runtime, sourceId);
       return JSON.stringify(renderFullMemorySkill(
         this.workspace,
@@ -179,6 +216,7 @@ export class AgentSourceTool extends Tool {
       if (typeof params.skill_installed !== "boolean") {
         throw new Error("skill_installed must be a boolean");
       }
+      if (params.skill_installed) this.requireVerifiedInstallation(sourceId);
       const source = await localApiRequest<AgentSourceView>(
         runtime,
         "PATCH",
@@ -196,6 +234,7 @@ export class AgentSourceTool extends Tool {
     }
 
     if (action === "save_sync_recipe") {
+      this.requireVerifiedInstallation(sourceId);
       if (!params.sync_recipe || typeof params.sync_recipe !== "object" || Array.isArray(params.sync_recipe)) {
         throw new Error("sync_recipe must be an object");
       }
@@ -221,6 +260,8 @@ export class AgentSourceTool extends Tool {
     if (action !== "import_manifest") {
       throw new Error(`Unsupported action: ${action}`);
     }
+
+    this.requireVerifiedInstallation(sourceId);
 
     const mode = requiredString(params.mode, "mode");
     if (mode !== "initial_subset" && mode !== "incremental") {
@@ -276,6 +317,88 @@ export class AgentSourceTool extends Tool {
       syncBoundaryAt: results.at(-1)?.syncBoundaryAt ?? syncBoundaryAt
     });
   }
+
+  private requireVerifiedInstallation(sourceId: string): VerifiedAgentInstallation {
+    const verified = this.verifiedInstallations.get(sourceId);
+    if (!verified || !fs.existsSync(verified.installationPath)) {
+      throw new Error(
+        "Agent installation is not verified. Call verify_installation with authoritative pre-existing installation evidence before provisioning."
+      );
+    }
+    return verified;
+  }
+}
+
+export function normalizeAgentIdentity(value: string): string {
+  return value.normalize("NFKC").toLocaleLowerCase("en-US").replace(/[^\p{L}\p{N}]+/gu, "");
+}
+
+export function verifyAgentInstallation(
+  agentName: string,
+  requestedPath: string,
+  origin: InstallationPathOrigin
+): VerifiedAgentInstallation {
+  if (!path.isAbsolute(requestedPath)) {
+    throw new Error("installation_path must be absolute");
+  }
+  const installationPath = path.resolve(requestedPath);
+  let identities: string[];
+  try {
+    identities = installationIdentityCandidates(installationPath);
+  } catch {
+    throw agentInstallationNotFound(agentName);
+  }
+  const normalizedAgentName = normalizeAgentIdentity(agentName);
+  const identity = identities.find((candidate) => normalizeAgentIdentity(candidate) === normalizedAgentName)
+    ?? (origin === "user_provided" ? identities[0] : undefined);
+  if (!identity) {
+    throw agentInstallationNotFound(agentName);
+  }
+  return { installationPath, identity };
+}
+
+function agentInstallationNotFound(agentName: string): Error {
+  return new Error(
+    `Agent installation not found for "${agentName}": the installation identity does not match after case and separator normalization.`
+  );
+}
+
+function installationIdentityCandidates(installationPath: string): string[] {
+  const stat = fs.statSync(installationPath);
+  const identities: string[] = [];
+
+  if (stat.isDirectory() && installationPath.toLocaleLowerCase("en-US").endsWith(".app")) {
+    identities.push(path.basename(installationPath, path.extname(installationPath)));
+  }
+
+  const packageJsonPath = stat.isFile() && path.basename(installationPath) === "package.json"
+    ? installationPath
+    : stat.isDirectory() && fs.existsSync(path.join(installationPath, "package.json"))
+      ? path.join(installationPath, "package.json")
+      : null;
+  if (packageJsonPath) identities.push(...readPackageIdentities(packageJsonPath));
+
+  const executableSuffix = /\.(?:exe|cmd|bat)$/iu.test(installationPath);
+  if (stat.isFile() && ((stat.mode & 0o111) !== 0 || executableSuffix)) {
+    identities.push(path.basename(installationPath, path.extname(installationPath)));
+    const realPath = fs.realpathSync(installationPath);
+    identities.push(path.basename(realPath, path.extname(realPath)));
+  }
+
+  return [...new Set(identities.filter(Boolean))];
+}
+
+function readPackageIdentities(packageJsonPath: string): string[] {
+  const manifest = JSON.parse(fs.readFileSync(packageJsonPath, "utf8")) as Record<string, unknown>;
+  const identities = [manifest.name, manifest.productName, manifest.displayName]
+    .filter((value): value is string => typeof value === "string" && Boolean(value.trim()));
+  if (typeof manifest.name === "string" && manifest.name.includes("/")) {
+    identities.push(manifest.name.slice(manifest.name.lastIndexOf("/") + 1));
+  }
+  if (manifest.bin && typeof manifest.bin === "object" && !Array.isArray(manifest.bin)) {
+    identities.push(...Object.keys(manifest.bin));
+  }
+  return identities;
 }
 
 export function renderFullMemorySkill(
@@ -520,6 +643,13 @@ function readRuntimeConfig(): RuntimeConfig {
 function requiredString(value: unknown, name: string): string {
   if (typeof value !== "string" || !value.trim()) throw new Error(`${name} is required`);
   return value.trim();
+}
+
+function requiredInstallationPathOrigin(value: unknown): InstallationPathOrigin {
+  if (value !== "discovered" && value !== "user_provided") {
+    throw new Error("installation_path_origin must be discovered or user_provided");
+  }
+  return value;
 }
 
 function optionalString(value: unknown): string | undefined {

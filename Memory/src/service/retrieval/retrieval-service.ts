@@ -50,7 +50,7 @@ import type {
   RuntimeNamespace
 } from "../../types.js";
 import { newId, stableHash } from "../../utils/id.js";
-import { nowIso } from "../../utils/time.js";
+import { formatZonedTime, nowIso, resolveTimeZone } from "../../utils/time.js";
 import { recordApiLog } from "../model-audit/model-call-audit.js";
 import {
   sourceMemoryIdsFromMemory
@@ -182,14 +182,16 @@ function uniqMemories(memories: readonly MemoryRow[]): MemoryRow[] {
 function searchCandidateFromHit(
   hit: RecallHit,
   memory?: MemoryRow,
-  contentOverride?: string
+  contentOverride?: string,
+  timeZone?: string
 ): Record<string, unknown> {
   const content = contentOverride ?? (
     memory && isOnboardingFirstReportMemory(memory)
-      ? renderOnboardingFirstReportSearchLogBody(hit, memory)
+      ? renderOnboardingFirstReportSearchLogBody(hit, memory, timeZone)
       : renderInjectedSnippet(hit, memory, {
           skillInjectionMode: "summary",
-          skillSummaryChars: MEMORY_PACKET_SKILL_SUMMARY_CHARS
+          skillSummaryChars: MEMORY_PACKET_SKILL_SUMMARY_CHARS,
+          timeZone
         })?.body ?? ""
   );
   return {
@@ -204,11 +206,11 @@ function searchCandidateFromHit(
   };
 }
 
-function timeFilteredSearchCandidateContent(hit: RecallHit, memory?: MemoryRow): string {
+function timeFilteredSearchCandidateContent(hit: RecallHit, memory: MemoryRow | undefined, timeZone: string): string {
   const trace = memory ? traceMetaFromMemory(memory) : null;
   return [
     `id: ${hit.id}`,
-    `timestamp: ${formatInjectedTimestamp(trace?.ts, hit.updatedAt)}`,
+    `timestamp: ${formatInjectedTimestamp(trace?.ts, hit.updatedAt, timeZone)}`,
     "",
     "Summary:",
     hit.snippet
@@ -310,10 +312,6 @@ function normalizeRetrievalTimeFilter(value: unknown): RetrievalTimeFilter | und
   };
 }
 
-function runtimeTimeZone(): string {
-  return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
-}
-
 export function retrievedMemorySourceIds(memory: MemoryRow): string[] {
   const policy = policyMetaFromMemory(memory);
   const skill = skillMetaFromMemory(memory);
@@ -357,6 +355,7 @@ interface InjectedRenderOptions {
   skillInjectionMode?: "summary" | "full";
   skillSummaryChars?: number;
   domain?: "" | "research";
+  timeZone?: string;
 }
 
 export function buildInjectedContext(
@@ -370,6 +369,7 @@ export function buildInjectedContext(
     skillInjectionMode?: "summary" | "full";
     skillSummaryChars?: number;
     domain?: "" | "research";
+    timeZone?: string;
   }
 ): {
   injectedContext: InjectedContext;
@@ -387,7 +387,8 @@ export function buildInjectedContext(
     query,
     skillInjectionMode: tuning?.skillInjectionMode ?? "summary",
     skillSummaryChars: tuning?.skillSummaryChars ?? MEMORY_PACKET_SKILL_SUMMARY_CHARS,
-    domain: tuning?.domain
+    domain: tuning?.domain,
+    timeZone: tuning?.timeZone
   };
   const memoryById = new Map(contextMemories.map((memory) => [memory.id, memory]));
   const rendered = hits.flatMap((hit) => {
@@ -573,7 +574,7 @@ function renderInjectedSnippet(
     return {
       refKind: "episode",
       title: "Episode",
-      body: truncateInjectedSnippet(renderInjectedEpisodeBody(hit))
+      body: truncateInjectedSnippet(renderInjectedEpisodeBody(hit, options.timeZone))
     };
   }
 
@@ -603,13 +604,13 @@ function renderInjectedSnippet(
       return {
         refKind: "trace",
         title: localizedFirstReportTitle(trace),
-        body: renderInjectedOnboardingFirstReportBody(hit, trace)
+        body: renderInjectedOnboardingFirstReportBody(hit, trace, options.timeZone)
       };
     }
     return {
       refKind: "trace",
       title: "Trace",
-      body: truncateInjectedSnippet(renderInjectedTraceBody(hit, trace))
+      body: truncateInjectedSnippet(renderInjectedTraceBody(hit, trace, options.timeZone))
     };
   }
 
@@ -672,10 +673,10 @@ function renderInjectedExperienceUseHint(policy: NonNullable<ReturnType<typeof p
   return "Use as prior successful guidance when the current task matches.";
 }
 
-function renderInjectedTraceBody(hit: RecallHit, trace: TraceMeta): string {
+function renderInjectedTraceBody(hit: RecallHit, trace: TraceMeta, timeZone?: string): string {
   return [
     `id: ${hit.id}`,
-    `timestamp: ${formatInjectedTimestamp(trace.ts, hit.updatedAt)}`,
+    `timestamp: ${formatInjectedTimestamp(trace.ts, hit.updatedAt, timeZone ?? trace.timeZone)}`,
     "",
     ...labeledInjectedBlock("Historical user statement", trace.userText || "(empty)"),
     "",
@@ -688,13 +689,13 @@ function isOnboardingFirstReportMemory(memory: MemoryRow): boolean {
     memory.tags.some((tag) => tag.trim().toLowerCase() === ONBOARDING_FIRST_REPORT_TAG);
 }
 
-function renderInjectedOnboardingFirstReportBody(hit: RecallHit, trace: TraceMeta): string {
+function renderInjectedOnboardingFirstReportBody(hit: RecallHit, trace: TraceMeta, timeZone?: string): string {
   const language = onboardingFirstReportLanguage(trace);
   const summary = trace.summary.trim() || "(not provided)";
   const report = trace.agentText.trim() || "(not provided)";
   const prefix = [
     `id: ${hit.id}`,
-    `timestamp: ${formatInjectedTimestamp(trace.ts, hit.updatedAt)}`,
+    `timestamp: ${formatInjectedTimestamp(trace.ts, hit.updatedAt, timeZone ?? trace.timeZone)}`,
     "",
     ...localizedFirstReportBlock(language === "zh" ? "摘要" : "Summary", summary, language),
     "",
@@ -714,13 +715,13 @@ function renderInjectedOnboardingFirstReportBody(hit: RecallHit, trace: TraceMet
   return `${prefix}\n${renderedReport}\n${suffix}`;
 }
 
-function renderOnboardingFirstReportSearchLogBody(hit: RecallHit, memory: MemoryRow): string {
+function renderOnboardingFirstReportSearchLogBody(hit: RecallHit, memory: MemoryRow, timeZone?: string): string {
   const trace = traceMetaFromMemory(memory);
   if (!trace) return "";
   const language = onboardingFirstReportLanguage(trace);
   return [
     `id: ${hit.id}`,
-    `timestamp: ${formatInjectedTimestamp(trace.ts, hit.updatedAt)}`,
+    `timestamp: ${formatInjectedTimestamp(trace.ts, hit.updatedAt, timeZone ?? trace.timeZone)}`,
     "",
     ...localizedFirstReportBlock(language === "zh" ? "用户请求" : "User query", trace.userText || "(empty)", language),
     "",
@@ -743,10 +744,10 @@ function localizedFirstReportBlock(label: string, value: string, language: "zh" 
   return [`${label}${language === "zh" ? "：" : ":"}`, body || (language === "zh" ? "（空）" : "(empty)")];
 }
 
-function renderInjectedEpisodeBody(hit: RecallHit): string {
+function renderInjectedEpisodeBody(hit: RecallHit, timeZone?: string): string {
   return [
     `id: ${hit.id}`,
-    `timestamp: ${formatInjectedTimestamp(undefined, hit.updatedAt)}`,
+    `timestamp: ${formatInjectedTimestamp(undefined, hit.updatedAt, timeZone)}`,
     "",
     stripInternalReflectionLines(stripEpisodePromptMetrics(hit.snippet))
   ].filter(Boolean).join("\n");
@@ -1095,10 +1096,10 @@ function stripInternalReflectionLines(value: string): string {
     .trim();
 }
 
-function formatInjectedTimestamp(traceTs?: number, updatedAt?: string): string {
-  if (Number.isFinite(traceTs)) return new Date(traceTs!).toISOString();
+function formatInjectedTimestamp(traceTs?: number, updatedAt?: string, timeZone?: string): string {
+  if (Number.isFinite(traceTs)) return formatZonedTime(traceTs!, timeZone);
   const parsed = updatedAt ? Date.parse(updatedAt) : NaN;
-  return new Date(Number.isFinite(parsed) ? parsed : Date.now()).toISOString();
+  return formatZonedTime(Number.isFinite(parsed) ? parsed : Date.now(), timeZone);
 }
 
 function stripRedundantInjectedTitle(
@@ -1470,6 +1471,7 @@ export class RetrievalService {
     serverTime: string;
   }> {
     const startedAt = Date.now();
+    const timeZone = resolveTimeZone(request.timeZone);
     if (!this.deps.memorySearchEnabled()) {
       return this.searchNoRead(request, startedAt);
     }
@@ -1521,7 +1523,7 @@ export class RetrievalService {
         });
     const retrievalQuery = focusResearchRetrievalQuery(request.query, tuning.domain).text;
     const queryExtract = candidateCount > 0 && !onboardingFirstReportHit
-      ? await this.extractRetrievalQuery(retrievalQuery)
+      ? await this.extractRetrievalQuery(retrievalQuery, timeZone)
       : null;
     const queryVectorText = queryExtract?.queryVecText?.trim() || retrievalQuery;
     const timeFilter = semanticLayers.includes("L1") ? queryExtract?.timeFilter : undefined;
@@ -1565,7 +1567,7 @@ export class RetrievalService {
     const contextPacket = timeFilter
       ? buildTimeFilteredInjectedContext(
           memories.filter((memory) => hits.some((hit) => hit.id === memory.id)),
-          runtimeTimeZone()
+          timeZone
         )
       : buildInjectedContext(
           hits,
@@ -1574,7 +1576,7 @@ export class RetrievalService {
           retrievalMode,
           request.contextHints,
           request.injectedContextQuery ?? request.query,
-          tuning
+          { ...tuning, timeZone }
         );
     const injectedContext = contextPacket.injectedContext;
     const budgetAt = Date.now();
@@ -1644,7 +1646,8 @@ export class RetrievalService {
         return searchCandidateFromHit(
           hit,
           memory,
-          timeFilter ? timeFilteredSearchCandidateContent(hit, memory) : undefined
+          timeFilter ? timeFilteredSearchCandidateContent(hit, memory, timeZone) : undefined,
+          timeZone
         );
       };
       const sourceAgent = request.source?.trim() || context.namespace.source;
@@ -1654,7 +1657,8 @@ export class RetrievalService {
         episodeId: episode?.id,
         layers,
         retrievalMode,
-        ...(timeFilter ? { timeFilter } : {})
+        ...(timeFilter ? { timeFilter } : {}),
+        timeZone
       }, {
         candidates: retrieval.hits.map(toSearchCandidateLog),
         filtered: hits.map(toSearchCandidateLog),
@@ -1996,7 +2000,7 @@ export class RetrievalService {
     }
   }
 
-  private async extractRetrievalQuery(rawQuery: string): Promise<RetrievalQueryExtract | null> {
+  private async extractRetrievalQuery(rawQuery: string, timeZone: string): Promise<RetrievalQueryExtract | null> {
     const raw = rawQuery.trim();
     if (!raw || !this.deps.skillLlm.isConfigured()) return null;
     try {
@@ -2008,7 +2012,7 @@ export class RetrievalService {
         [
           {
             role: "system",
-            content: `${RETRIEVAL_QUERY_EXTRACT_PROMPT.system}\n\nCURRENT_TIME: ${nowIso()}\nTIME_ZONE: ${runtimeTimeZone()}`
+            content: `${RETRIEVAL_QUERY_EXTRACT_PROMPT.system}\n\nCURRENT_TIME: ${formatZonedTime(Date.now(), timeZone)}\nTIME_ZONE: ${timeZone}`
           },
           {
             role: "user",

@@ -35,6 +35,7 @@ export interface MemoryProcessingRecord {
   errorCode?: string | null;
   errorMessage?: string | null;
   failedAt?: IsoTime | null;
+  autoRetryScheduled?: boolean;
   updatedAt: IsoTime;
 }
 export type JobType =
@@ -69,6 +70,8 @@ export interface RequestEnvelope {
   adapterId?: string;
   source?: string;
   namespace?: RuntimeNamespace;
+  /** IANA timezone for user-facing calendar and relative-time semantics. */
+  timeZone?: string;
 }
 
 export interface ApiErrorBody {

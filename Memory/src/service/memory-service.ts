@@ -70,7 +70,7 @@ import { MemoryServiceError } from "../utils/error.js";
 import { newId,stableHash,stableStringify } from "../utils/id.js";
 import { isRecord,stringifyForMemory } from "../utils/json.js";
 import { clip,firstLine } from "../utils/text.js";
-import { nowIso } from "../utils/time.js";
+import { nowIso, resolveTimeZone } from "../utils/time.js";
 import {
   EmbeddingJobProcessor
 } from "./embedding/embedding-job-processor.js";
@@ -658,6 +658,13 @@ export class MemoryService {
     };
   }
 
+  private withTimeZone<T extends RequestEnvelope>(request: T): T {
+    return {
+      ...request,
+      timeZone: resolveTimeZone(this.config.timeZone ?? request.timeZone)
+    };
+  }
+
   async idempotent<T>(
     operation: string,
     request: RequestEnvelope,
@@ -747,7 +754,7 @@ export class MemoryService {
     openedAt: string;
     serverTime: string;
   } {
-    return this.sessionTurns.openSession(request);
+    return this.sessionTurns.openSession(this.withTimeZone(request));
   }
 
   closeSession(sessionId: string, request: RequestEnvelope = {}): {
@@ -760,7 +767,7 @@ export class MemoryService {
     closedAt: string;
     serverTime: string;
   } {
-    return this.sessionTurns.closeSession(sessionId, request);
+    return this.sessionTurns.closeSession(sessionId, this.withTimeZone(request));
   }
 
   compactSession(sessionId: string, request: SessionCompactRequest = {}): {
@@ -778,7 +785,7 @@ export class MemoryService {
     jobs: JobRef[];
     serverTime: string;
   } {
-    return this.sessionTurns.compactSession(sessionId, request);
+    return this.sessionTurns.compactSession(sessionId, this.withTimeZone(request));
   }
 
   async startTurn(request: TurnStartRequest & Record<string, unknown>): Promise<{
@@ -799,11 +806,11 @@ export class MemoryService {
     status: string[];
     serverTime: string;
   }> {
-    return this.sessionTurns.startTurn(request);
+    return this.sessionTurns.startTurn(this.withTimeZone(request));
   }
 
   completeTurn(turnId: string, request: TurnCompleteRequest & Record<string, unknown>): CompleteTurnResponse {
-    return this.sessionTurns.completeTurn(turnId, request);
+    return this.sessionTurns.completeTurn(turnId, this.withTimeZone(request));
   }
 
   async observeTool(input: ToolObserveRequest): Promise<{
@@ -815,7 +822,7 @@ export class MemoryService {
     syncCursor?: string;
     serverTime: string;
   }> {
-    return this.sessionTurns.observeTool(input);
+    return this.sessionTurns.observeTool(this.withTimeZone(input));
   }
 
 
@@ -828,11 +835,11 @@ export class MemoryService {
     syncCursor: string;
     serverTime: string;
   } {
-    return this.sessionTurns.subagentStart(input);
+    return this.sessionTurns.subagentStart(this.withTimeZone(input));
   }
 
   subagentComplete(input: SubagentCompleteRequest): CompleteTurnResponse {
-    return this.sessionTurns.subagentComplete(input);
+    return this.sessionTurns.subagentComplete(this.withTimeZone(input));
   }
 
   async repairSuggestion(input: RepairSuggestionRequest): Promise<{
@@ -848,7 +855,7 @@ export class MemoryService {
     reason?: string;
     sourceMemoryIds: string[];
   }> {
-    return this.sessionTurns.repairSuggestion(input);
+    return this.sessionTurns.repairSuggestion(this.withTimeZone(input));
   }
 
   async search(request: InternalMemorySearchRequest): Promise<{
@@ -874,7 +881,7 @@ export class MemoryService {
     verbose: boolean;
     serverTime: string;
   }> {
-    return this.retrieval.search(request);
+    return this.retrieval.search(this.withTimeZone(request));
   }
 
 
@@ -924,7 +931,7 @@ export class MemoryService {
     createdAt: string;
     serverTime: string;
   } {
-    return this.importJobs.addMemory(request);
+    return this.importJobs.addMemory(this.withTimeZone(request));
   }
 
   timeline(input: RequestEnvelope & {
@@ -944,11 +951,11 @@ export class MemoryService {
     nextCursor?: string;
     serverTime: string;
   } {
-    return this.episodeReadModel.timeline(input);
+    return this.episodeReadModel.timeline(this.withTimeZone(input));
   }
 
   getMemory(id: string, request: RequestEnvelope = {}): MemoryGetResponse {
-    return this.episodeReadModel.getMemory(id, request);
+    return this.episodeReadModel.getMemory(id, this.withTimeZone(request));
   }
 
   async worldModelQuery(input: InternalMemorySearchRequest): Promise<{
@@ -966,7 +973,7 @@ export class MemoryService {
     status: string[];
     serverTime: string;
   }> {
-    return this.retrieval.worldModelQuery(input);
+    return this.retrieval.worldModelQuery(this.withTimeZone(input));
   }
 
   listSkills(input: RequestEnvelope & {
@@ -994,7 +1001,7 @@ export class MemoryService {
     nextCursor?: string;
     serverTime: string;
   } {
-    return this.skillReadModel.listSkills(input);
+    return this.skillReadModel.listSkills(this.withTimeZone(input));
   }
 
   getSkill(skillId: string, request: RequestEnvelope = {}): MemoryDetailItem & {
@@ -1020,7 +1027,7 @@ export class MemoryService {
       trialsPassed: number;
     };
   } {
-    return this.skillReadModel.getSkill(skillId, request);
+    return this.skillReadModel.getSkill(skillId, this.withTimeZone(request));
   }
 
   useSkill(skillId: string, request: SkillUseRequest): {
@@ -1032,7 +1039,7 @@ export class MemoryService {
     serverTime: string;
     duplicate?: boolean;
   } {
-    return this.skillReadModel.useSkill(skillId, request);
+    return this.skillReadModel.useSkill(skillId, this.withTimeZone(request));
   }
 
   async feedback(request: FeedbackRequest): Promise<FeedbackResponse> {
@@ -1484,7 +1491,7 @@ export class MemoryService {
     etag: string;
     serverTime: string;
   } {
-    return this.panelReadModel.panelOverview(input);
+    return this.panelReadModel.panelOverview(this.withTimeZone(input));
   }
 
   panelOverviewSummary(input: RequestEnvelope & { userId?: string } = {}): {
@@ -1501,7 +1508,7 @@ export class MemoryService {
     }>;
     dailyActivity: Array<{ date: string; count: number }>;
   } {
-    return this.panelReadModel.panelOverviewSummary(input);
+    return this.panelReadModel.panelOverviewSummary(this.withTimeZone(input));
   }
 
   panelAnalysis(input: RequestEnvelope & { userId?: string } = {}): {
@@ -1520,7 +1527,7 @@ export class MemoryService {
       series: Array<{ name: string; points: Array<{ date: string; avgMs: number }> }>;
     };
   } {
-    return this.panelReadModel.panelAnalysis(input);
+    return this.panelReadModel.panelAnalysis(this.withTimeZone(input));
   }
 
   panelItems(input: RequestEnvelope & {
@@ -1546,7 +1553,7 @@ export class MemoryService {
     nextCursor?: string;
     serverTime: string;
   } {
-    return this.panelReadModel.panelItems(input);
+    return this.panelReadModel.panelItems(this.withTimeZone(input));
   }
 
   panelTasks(input: RequestEnvelope & { q?: string; page?: number }): {
@@ -1565,7 +1572,7 @@ export class MemoryService {
     hasPrev: boolean;
     serverTime: string;
   } {
-    return this.panelReadModel.panelTasks(input);
+    return this.panelReadModel.panelTasks(this.withTimeZone(input));
   }
 
   panelChanges(input: RequestEnvelope & {

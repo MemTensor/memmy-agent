@@ -19,7 +19,7 @@ import { kindFromMemory,type EpisodeRecord,type EvolutionJobRecord,type Reposito
 import type { MemoryRow } from "../../types.js";
 import { isRecord } from "../../utils/json.js";
 import { stableHash } from "../../utils/id.js";
-import { nowIso } from "../../utils/time.js";
+import { formatZonedTime, nowIso } from "../../utils/time.js";
 import { recordApiLog } from "../model-audit/model-call-audit.js";
 import { profileIdFromMemory,projectIdFromMemory } from "../namespace/namespace-scope.js";
 import { skillBetaPosterior,skillSuccessRate } from "../read-model/skill.js";
@@ -525,6 +525,7 @@ private async enhanceSkillDraft(
             evidence: evidenceTraces.slice(0, this.deps.config.algorithm.skill.evidenceLimit).map((trace) => ({
               id: trace.id,
               episodeId: trace.episodeId,
+              captured_at: formatZonedTime(trace.ts, trace.timeZone),
               episode_outcome: skillEvidenceEpisodeOutcome(skillEvidenceEpisode(this.deps.repos.runtime, trace.episodeId)),
               episode_r_task: skillEvidenceEpisode(this.deps.repos.runtime, trace.episodeId)?.rTask ?? null,
               reflection: trace.reflection,
@@ -539,6 +540,7 @@ private async enhanceSkillDraft(
                   counter_examples: counterExamples.slice(0, 5).map((trace) => ({
                     id: trace.id,
                     episodeId: trace.episodeId,
+                    captured_at: formatZonedTime(trace.ts, trace.timeZone),
                     reflection: trace.reflection,
                     user: trace.userText,
                     agent: trace.agentText,
@@ -564,6 +566,7 @@ private async enhanceSkillDraft(
                   incremental_evidence: rebuild.incrementalEvidence.map((trace) => ({
                     id: trace.id,
                     episodeId: trace.episodeId,
+                    captured_at: formatZonedTime(trace.ts, trace.timeZone),
                     user: trace.userText,
                     agent: trace.agentText,
                     reflection: trace.reflection,

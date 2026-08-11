@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConfigLoadError, loadConfig, saveConfig } from "../../src/config/loader.js";
 import { WebSocketConfig } from "../../src/integrations/channels/websocket.js";
 import { DEFAULT_MAX_TOKENS } from "../../src/token-budget.js";
+import { systemUtcOffset } from "../../src/utils/time-zone.js";
 import {
   AgentDefaults,
   ApiConfig,
@@ -153,6 +154,8 @@ describe("config schema validation", () => {
     expect(DEFAULT_MAX_TOKENS).toBe(65_536);
     expect(new AgentDefaults().maxTokens).toBe(DEFAULT_MAX_TOKENS);
     expect(new AgentDefaults().temperature).toBe(0.7);
+    expect(new AgentDefaults().timezone).toBe(systemUtcOffset());
+    expect(new AgentDefaults({ timezone: "Asia/Shanghai" }).timezone).toBe("+08:00");
     expect(() => new AgentDefaults({ maxConcurrentSubagents: 0 })).toThrow(/maxConcurrentSubagents/);
     expect(() => new AgentDefaults({ providerRetryMode: "forever" })).toThrow(/providerRetryMode/);
     expect(() => new AgentDefaults({ toolHintMaxLength: 19 })).toThrow(/toolHintMaxLength/);

@@ -2885,9 +2885,12 @@ function assistantMessageHasMedia(event: MemmyAgentWsEvent): boolean {
 
 function normalizeModelError(value: unknown): MemmyAgentModelError | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-  return (value as Record<string, unknown>).category === "quota_exhausted"
-    ? { category: "quota_exhausted" }
-    : undefined;
+  const record = value as Record<string, unknown>;
+  if (record.category !== "quota_exhausted" && record.category !== "model_failed") return undefined;
+  return {
+    category: record.category,
+    ...(typeof record.detail === "string" ? { detail: record.detail } : {})
+  };
 }
 
 function appendAssistantMessage(state: AgentState, event: MemmyAgentWsEvent): AgentState {

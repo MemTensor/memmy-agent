@@ -11,6 +11,7 @@ import {
   type ModelProvider
 } from "@memmy/local-api-contracts";
 import YAML from "yaml";
+import { normalizeTimeZoneOffset, systemUtcOffset } from "../../utils/time-zone.js";
 
 const MEMMY_ACCOUNT_PROVIDER = "memmy_account";
 const MEMMY_ACCOUNT_MODEL = "agent_chat";
@@ -231,6 +232,24 @@ export async function readRuntimeMemmyConfigState(
   }
 
   return deriveRuntimeMemmyConfigState(parsed, configPath);
+}
+
+/** Reads agents.defaults.timezone without inventing a configured value. */
+export async function readConfiguredAgentTimeZone(
+  configPath = resolveDefaultMemmyConfigPath()
+): Promise<string | undefined> {
+  const content = await readMemmyConfigContent(configPath);
+  if (!content?.trim()) return undefined;
+  const parsed = YAML.parse(content) as unknown;
+  const agents = asRecord(asRecord(parsed)?.agents);
+  const defaults = asRecord(agents?.defaults);
+  const timeZone = existingString(defaults?.timezone);
+  if (!timeZone) return undefined;
+  try {
+    return normalizeTimeZoneOffset(timeZone);
+  } catch {
+    throw new Error(`invalid agents.defaults.timezone: ${timeZone}`);
+  }
 }
 
 /**
@@ -699,6 +718,7 @@ function patchAgentDefaults(config: Record<string, unknown>, input: { provider: 
   const defaults = isRecord(agents.defaults) ? { ...agents.defaults } : {};
   defaults.provider = input.provider;
   defaults.model = input.model;
+  defaults.timezone ??= systemUtcOffset();
   agents.defaults = defaults;
   config.agents = agents;
 }

@@ -52,11 +52,12 @@ export function panelSourceDistribution(memories: MemoryRow[]): Array<{ source: 
 export function panelCountByDate<T>(
   rows: T[],
   dates: string[],
-  getTime: (row: T) => string | undefined
+  getTime: (row: T) => string | undefined,
+  timeZone?: string
 ): Array<{ date: string; count: number }> {
   const counts = new Map(dates.map((date) => [date, 0]));
   for (const row of rows) {
-    const key = panelDateKey(getTime(row));
+    const key = panelDateKey(getTime(row), timeZone);
     if (counts.has(key)) counts.set(key, (counts.get(key) ?? 0) + 1);
   }
   return dates.map((date) => ({ date, count: counts.get(date) ?? 0 }));

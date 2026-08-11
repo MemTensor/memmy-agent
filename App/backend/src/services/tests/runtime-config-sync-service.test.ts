@@ -6,6 +6,7 @@ import YAML from "yaml";
 import { afterEach, describe, expect, it } from "vitest";
 import { LOCAL_BYOK_ACCOUNT_UUID } from "../../infrastructure/app-state-store/account-context.js";
 import { createAppStateStore, type AppStateStore } from "../../infrastructure/app-state-store/index.js";
+import { systemUtcOffset } from "../../utils/time-zone.js";
 import { syncRuntimeConfigWithAppState } from "../runtime-config-sync-service.js";
 
 let tempDir: string | undefined;
@@ -207,7 +208,8 @@ describe("syncRuntimeConfigWithAppState", () => {
     const parsed = YAML.parse(readFileSync(context.memmyConfigPath, "utf8")) as any;
     expect(parsed.agents.defaults).toEqual({
       provider: "openai",
-      model: "gpt-4.1-mini"
+      model: "gpt-4.1-mini",
+      timezone: systemUtcOffset()
     });
     expect(parsed.providers.openai).toMatchObject({
       apiBase: "https://api.example.com/v1",

@@ -293,7 +293,13 @@ function transcriptMessageFromRecord(record) {
   const role = normalizeText(message.role) || normalizeText(record.role) ||
     (record.type === "user" || record.type === "assistant" ? record.type : "");
   if (role === "user" || role === "assistant") {
-    const text = contentText(message.content || record.content || record.text);
+    const content = message.content || record.content || record.text;
+    if (role === "user" && hasToolResultContent(content)) {
+      // Claude Code transcripts store tool results as user records; capturing
+      // them as user text would turn tool output into the turn's query.
+      return { role: "tool", text: contentText(content) || "tool" };
+    }
+    const text = contentText(content);
     return text ? { role, text } : null;
   }
   if (role === "tool") {
@@ -369,6 +375,11 @@ function contentText(value) {
     return normalizeText(value.text) || contentText(value.content);
   }
   return "";
+}
+
+function hasToolResultContent(value) {
+  return Array.isArray(value) &&
+    value.some((item) => item && typeof item === "object" && item.type === "tool_result");
 }
 
 function parseResumeQuery(prompt) {

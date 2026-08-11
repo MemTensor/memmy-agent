@@ -5,7 +5,8 @@ import {
   ChannelProviderSchema,
   ConnectChannelInputSchema,
   ConnectChannelResponseSchema,
-  OkResponseSchema
+  OkResponseSchema,
+  ReportIntegrationConnectionEventInputSchema
 } from "@memmy/local-api-contracts";
 import { z } from "zod";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -74,6 +75,16 @@ export function registerChannelRoutes(app: FastifyInstance, options: RegisterCha
     withErrorEnvelope(async (request, reply) => {
       const { provider } = ChannelProviderParamsSchema.parse(request.params);
       const response = OkResponseSchema.parse(await options.channels.disconnect(provider));
+      return reply.send(response);
+    })
+  );
+
+  app.post(
+    "/api/v1/channels/connection-events",
+    { preHandler: options.authenticateRuntimeToken },
+    withErrorEnvelope(async (request, reply) => {
+      const input = ReportIntegrationConnectionEventInputSchema.parse(request.body);
+      const response = OkResponseSchema.parse(await options.channels.reportConnectionEvent(input));
       return reply.send(response);
     })
   );

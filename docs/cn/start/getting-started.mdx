@@ -49,10 +49,11 @@ memmy agent --message "你好，介绍一下当前工作区"
 memmy
 ```
 
-打开「记忆管理 → 跨Agent接入」，扫描 Cursor、Claude Code、Codex、OpenCode、OpenClaw、Hermes 的历史对话并入库。首次引导会让你选择是否只扫描，或同时为检测到的 Agent 安装对应的 Hook/插件；Skill 会随实时接入一并安装。
+打开「记忆管理 → 跨Agent接入」，扫描 Cursor、Claude Code、Codex、OpenCode、OpenClaw、Hermes、WorkBuddy、Pi 和 qwenwork 的历史对话并入库。首次引导会让你选择是否只扫描，或同时为检测到的 Agent 安装对应的 Hook、插件或 Skill。
 
-接入后，Hook 或插件会在新对话中自动采集完整回合，并在支持的 Agent 中自动注入相关记忆。详见 [Agent 来源与扫描](/docs/memory/sources) 中的 Hook 与插件说明。
+接入后，Hook 或插件会在新对话中自动采集完整回合并注入相关记忆；WorkBuddy、Pi 和 qwenwork 则通过 Skill 按需读写记忆。详见 [Agent 来源与扫描](/docs/memory/sources)。
 
+内置列表之外的 Agent 可以在 **高级操作 → 添加其他 Agent** 中接入。你可以选择 `kimi code`、`zcode`、`minimax code`、`coder`，或输入其他名称；Memmy 会自动发现历史位置与格式、安装 Skill 并完成首次导入。
 
 打开「工具」页：
 

@@ -37,7 +37,7 @@ describe("MemmyMemoryClient", () => {
   it("sends bearer token and JSON request bodies", async () => {
     const calls: Array<{ url: string; init: RequestInit }> = [];
     const client = new MemmyMemoryClient(
-      { baseUrl: "http://memory.test/", token: "secret", timeoutMs: 1000 },
+      { baseUrl: "http://memory.test/", token: "secret", timeoutMs: 1000, timeZone: "Asia/Shanghai" },
       vi.fn(async (url, init) => {
         calls.push({ url: String(url), init: init ?? {} });
         return response({ ok: true, sessionId: "s1" });
@@ -49,6 +49,7 @@ describe("MemmyMemoryClient", () => {
     expect(calls[0].url).toBe("http://memory.test/api/v1/sessions/open");
     expect((calls[0].init.headers as any).authorization).toBe("Bearer secret");
     expect((calls[0].init.headers as any)["x-request-id"]).toBe("req-1");
+    expect((calls[0].init.headers as any)["x-memmy-time-zone"]).toBe("+08:00");
     expect(JSON.parse(String(calls[0].init.body))).toEqual({ requestId: "req-1", sessionId: "s1" });
   });
 

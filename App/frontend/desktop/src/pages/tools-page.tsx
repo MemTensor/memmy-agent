@@ -267,7 +267,8 @@ function createUnavailableIntegrationsClient(message: string): IntegrationsClien
     listCapabilities: async () => unavailable(),
     authorize: async () => unavailable(),
     listConnections: async () => unavailable(),
-    deleteConnection: async () => unavailable()
+    deleteConnection: async () => unavailable(),
+    reportConnectionEvent: async () => unavailable()
   };
 }
 
@@ -287,6 +288,7 @@ function createUnavailableChannelsClient(message: string): ChannelsClient {
     listConnections: async () => unavailable(),
     connect: async () => unavailable(),
     pollConnect: async () => unavailable(),
-    disconnect: async () => unavailable()
+    disconnect: async () => unavailable(),
+    reportConnectionEvent: async () => unavailable()
   };
 }

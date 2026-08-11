@@ -67,6 +67,8 @@ describe("agent adapter plugin manifest", () => {
   it("identifies builtin agent kinds without blocking custom plugin kinds", () => {
     expect(isBuiltinAgentKind("cursor")).toBe(true);
     expect(isBuiltinAgentKind("workbuddy")).toBe(true);
+    expect(isBuiltinAgentKind("pi")).toBe(true);
+    expect(isBuiltinAgentKind("qwenwork")).toBe(true);
     expect(isBuiltinAgentKind("third_party_agent")).toBe(false);
     expect(isBuiltinAgentKind(1)).toBe(false);
     expect(parseAgentAdapterPluginManifest({ ...createManifest(), kind: "third_party_agent" }).kind).toBe(

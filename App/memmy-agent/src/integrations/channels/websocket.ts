@@ -2841,7 +2841,11 @@ export class WebSocketChannel extends BaseChannel {
     const turnId = this.turnIdFromMetadata(message.metadata);
     const publicMetadata = { ...(message.metadata ?? {}) };
     const modelErrorCategory = publicMetadata.modelErrorCategory;
+    const modelErrorDetail = typeof publicMetadata.modelErrorDetail === "string"
+      ? publicMetadata.modelErrorDetail
+      : undefined;
     delete publicMetadata.modelErrorCategory;
+    delete publicMetadata.modelErrorDetail;
     const payload: Record<string, any> = {
       event: "message",
       chat_id: message.chatId,
@@ -2850,8 +2854,13 @@ export class WebSocketChannel extends BaseChannel {
       metadata: publicMetadata,
       media: message.media ?? [],
       ...(turnId ? { turn_id: turnId } : {}),
-      ...(modelErrorCategory === "quota_exhausted"
-        ? { model_error: { category: "quota_exhausted" } }
+      ...(modelErrorCategory === "quota_exhausted" || modelErrorCategory === "model_failed"
+        ? {
+            model_error: {
+              category: modelErrorCategory,
+              ...(modelErrorDetail !== undefined ? { detail: modelErrorDetail } : {})
+            }
+          }
         : {}),
     };
     const mediaUrls = (message.media ?? [])

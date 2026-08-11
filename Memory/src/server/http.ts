@@ -18,6 +18,7 @@ import type {
 import { DEFAULT_NAMESPACE_SOURCE } from "../types.js";
 import { MemoryService } from "../service/memory-service.js";
 import { MemoryServiceError, statusForCode } from "../utils/error.js";
+import { resolveTimeZone } from "../utils/time.js";
 import {
   createPluginRuntimeAnalytics,
   hitCountFromGetResponse,
@@ -58,6 +59,8 @@ export const API_ROUTES = [
 
 export interface MemoryHttpServerOptions {
   service: MemoryService;
+  /** Configured agent timezone. Request headers are used only when this is absent. */
+  timeZone?: string;
   apiKey?: string;
   auth?: MemoryHttpAuthOptions;
   workerStartupFallbackMs?: number;
@@ -82,6 +85,7 @@ interface AuthPrincipal {
   tokenId?: string;
   namespace?: RuntimeNamespace;
   scopes: string[];
+  timeZone?: string;
 }
 
 interface AutoWorkerDrain {
@@ -120,10 +124,13 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
         response.once("finish", () => autoWorker.afterHealthCheck());
       }
       if (request.method === "GET" && isViewerPath(url.pathname)) {
-        writeHtml(response, memoryPanelHtml());
+        writeHtml(response, memoryPanelHtml(options.timeZone));
         return;
       }
-      const principal = authenticate(request, url, options);
+      const principal = {
+        ...authenticate(request, url, options),
+        timeZone: requestTimeZone(request, options.timeZone)
+      };
       const body = await readJson(request);
       const result = await routeRequest(
         options.service,
@@ -377,6 +384,7 @@ async function routeRequest(
       requestId: typeof request.requestId === "string" ? request.requestId : undefined,
       adapterId: typeof request.adapterId === "string" ? request.adapterId : undefined,
       reason: typeof request.reason === "string" ? request.reason : undefined,
+      timeZone: request.timeZone,
       restartFailedProcessing: typeof request.restartFailedProcessing === "boolean"
         ? request.restartFailedProcessing
         : undefined
@@ -401,6 +409,7 @@ async function routeRequest(
       requestId: request.requestId,
       adapterId: request.adapterId,
       namespace: request.namespace,
+      timeZone: request.timeZone,
       sessionId: request.sessionId,
       workspacePath: request.workspacePath
     };
@@ -430,6 +439,7 @@ async function routeRequest(
       requestId: request.requestId,
       adapterId: request.adapterId,
       namespace: request.namespace,
+      timeZone: request.timeZone,
       sessionId: request.sessionId,
       query: request.query,
       turnId: request.turnId,
@@ -457,6 +467,7 @@ async function routeRequest(
       requestId: request.requestId,
       adapterId: request.adapterId,
       namespace: request.namespace,
+      timeZone: request.timeZone,
       sessionId: request.sessionId,
       episodeId: request.episodeId,
       query: request.query,
@@ -492,6 +503,7 @@ async function routeRequest(
       requestId: request.requestId,
       adapterId: request.adapterId,
       namespace: request.namespace,
+      timeZone: request.timeZone,
       query: request.query,
       sessionId: request.sessionId,
       episodeId: request.episodeId,
@@ -526,6 +538,7 @@ async function routeRequest(
       requestId: request.requestId,
       adapterId: request.adapterId,
       namespace: request.namespace,
+      timeZone: request.timeZone,
       content: request.content,
       layer: parseLayerValue(request.layer),
       title: request.title,
@@ -588,14 +601,16 @@ async function routeRequest(
   if (method === "GET" && path === "/api/v1/panel/overview") {
     requirePanelRead(principal);
     return service.panelOverviewSummary({
-      namespace: principal.namespace
+      namespace: principal.namespace,
+      timeZone: principal.timeZone
     });
   }
 
   if (method === "GET" && path === "/api/v1/panel/analysis") {
     requirePanelRead(principal);
     return service.panelAnalysis({
-      namespace: principal.namespace
+      namespace: principal.namespace,
+      timeZone: principal.timeZone
     });
   }
 
@@ -603,6 +618,7 @@ async function routeRequest(
     requirePanelRead(principal);
     return publicPanelItemsResponse(service.panelItems({
       namespace: principal.namespace,
+      timeZone: principal.timeZone,
       layer: parseLayer(url.searchParams.get("layer")),
       status: parseStatus(url.searchParams.get("status")),
       q: url.searchParams.get("q") ?? undefined,
@@ -616,6 +632,7 @@ async function routeRequest(
     requirePanelRead(principal);
     return publicPanelTasksResponse(service.panelTasks({
       namespace: principal.namespace,
+      timeZone: principal.timeZone,
       q: url.searchParams.get("q") ?? undefined,
       page: parseNumber(url.searchParams.get("page"))
     }));
@@ -673,7 +690,7 @@ async function routeRequest(
       () =>
         service.getMemory(
           decodeMatchSegment(memoryGet, 1),
-          { namespace: principal.namespace }
+          { namespace: principal.namespace, timeZone: principal.timeZone }
         ),
       (result) => ({ hit_count: hitCountFromGetResponse(result) }),
     );
@@ -1087,8 +1104,20 @@ function envelopeWithPrincipal<T extends Record<string, unknown>>(
   assertNamespaceScope(existing, principal.namespace);
   return {
     ...body,
-    namespace
+    namespace,
+    timeZone: principal.timeZone ?? (typeof body.timeZone === "string" ? body.timeZone : undefined)
   } as T & RequestEnvelope;
+}
+
+function requestTimeZone(request: IncomingMessage, configuredTimeZone?: string): string {
+  try {
+    return resolveTimeZone(configuredTimeZone ?? headerString(request, "x-memmy-time-zone"));
+  } catch (error) {
+    throw new MemoryServiceError(
+      "invalid_argument",
+      error instanceof Error ? error.message : "invalid timezone"
+    );
+  }
 }
 
 function namespaceFromSource(source: unknown): RuntimeNamespace | undefined {
@@ -1154,7 +1183,8 @@ function setCors(response: ServerResponse): void {
       "x-memmy-workspace-path",
       "x-memmy-profile-id",
       "x-memmy-profile-label",
-      "x-memmy-session-key"
+      "x-memmy-session-key",
+      "x-memmy-time-zone"
     ].join(",")
   );
 }

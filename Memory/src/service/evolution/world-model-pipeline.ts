@@ -15,7 +15,7 @@ import { kindFromMemory,type EvolutionJobRecord,type Repositories } from "../../
 import type { MemoryRow } from "../../types.js";
 import { stableHash } from "../../utils/id.js";
 import { isRecord } from "../../utils/json.js";
-import { nowIso } from "../../utils/time.js";
+import { formatZonedTime, nowIso } from "../../utils/time.js";
 import { profileIdFromMemory,projectIdFromMemory } from "../namespace/namespace-scope.js";
 import type { EnqueueJobInput } from "../worker/job-handlers.js";
 import { logEvolutionDecision } from "./evolution-logging.js";
@@ -388,6 +388,7 @@ private async enhanceWorldModelDrafts(
             const traceBlocks = traces
               .map((trace) => [
                 `  trace ${trace.id} (V=${roundNumber(trace.value)}):`,
+                `  captured_at: ${formatZonedTime(trace.ts, trace.timeZone)}`,
                 `  tags: ${trace.tags.join(",") || "-"}`,
                 `  user: ${capText(trace.userText, 160)}`,
                 `  agent: ${capText(trace.agentText, 240)}`,

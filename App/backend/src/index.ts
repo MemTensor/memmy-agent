@@ -15,6 +15,7 @@ import {
 import { resolveDefaultRuntimeConfigPath, writeRuntimeConfigFile } from "./infrastructure/cli-binary/index.js";
 import {
   createMemmyConfigWriter,
+  readConfiguredAgentTimeZone,
   readAgentGatewayBootstrapSecret
 } from "./infrastructure/memmy-config/index.js";
 import { createPermissionManager } from "./permission/index.js";
@@ -111,6 +112,7 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
         pluginDirectories: options.agentAdapterPluginDirectories
       });
     const memmyConfigWriter = createMemmyConfigWriter({ configPath: memmyConfigPath });
+    const configuredTimeZone = await readConfiguredAgentTimeZone(memmyConfigPath);
     const services = createBackendServices({
       appStateStore,
       agentAdapterRegistry,
@@ -128,6 +130,7 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       permissionManager,
       services,
       composioMcpToken,
+      timeZone: configuredTimeZone,
       heartbeatIntervalMs: options.heartbeatIntervalMs,
       scanWorker
     });
@@ -149,6 +152,7 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
     const runtimeConfig = RuntimeConfigSchema.parse({
       baseUrl: `http://127.0.0.1:${(address as AddressInfo).port}`,
       localToken,
+      timeZone: configuredTimeZone,
       memory: options.memoryBaseUrl ? { baseUrl: options.memoryBaseUrl } : undefined
     });
     await writeRuntimeConfigFile(runtimeConfig, options.runtimeConfigPath ?? resolveDefaultRuntimeConfigPath());

@@ -107,8 +107,8 @@ describe("SettingsPageView", () => {
     expect(html).toContain("隐私");
     expect(html).toContain("高级 / 开发者");
     expect(html).toContain("关于");
-    expect(html).toContain("grace@example.com");
-    expect(html).not.toContain("g***@example.com");
+    expect(html).toContain("g***@example.com");
+    expect(html).not.toContain("grace@example.com");
     expect(html).toContain("注册时间：2026-04-12");
     expect(html).toContain("Agent 任务额度已用 1.4M Token");
     expect(html).toContain("共 5.0M Token");
@@ -266,6 +266,18 @@ describe("SettingsPageView", () => {
     expect(source).toContain("onChange={handleMenuBarIconChange}");
   });
 
+  it("Windows 端使用 Windows 状态栏提示文案", () => {
+    const windowsHtml = normalizeSsrHtml(renderSettingsPageView(createReadyState(), "zh-CN", createUpdateViewModel(), "win32"));
+    const windowsEnglishHtml = normalizeSsrHtml(renderSettingsPageView(createReadyState(), "en-US", createUpdateViewModel(), "win32"));
+    const macHtml = normalizeSsrHtml(renderSettingsPageView(createReadyState(), "zh-CN", createUpdateViewModel(), "darwin"));
+
+    expect(windowsHtml).toContain("在 Windows 状态栏常驻 Memmy 图标，便于随时呼出");
+    expect(windowsHtml).not.toContain("在 macOS 状态栏常驻 Memmy 图标，便于随时呼出");
+    expect(windowsEnglishHtml).toContain("Keep a Memmy icon in the Windows system tray for quick access");
+    expect(windowsEnglishHtml).not.toContain("Keep a Memmy icon in the macOS status bar for quick access");
+    expect(macHtml).toContain("在 macOS 状态栏常驻 Memmy 图标，便于随时呼出");
+  });
+
   it("日志级别下拉选择走 handleLogLevelChange 持久化到 localStorage 与主进程 IPC", () => {
     const source = readFileSync(settingsPageSourcePath, "utf8");
 
@@ -295,8 +307,8 @@ describe("SettingsPageView", () => {
   it("注册用户平台 Token 态对齐 PRD 的原型数据和状态", () => {
     const html = normalizeSsrHtml(renderSettingsPageView(createReadyState()));
 
-    expect(html).toContain("grace@example.com");
-    expect(html).not.toContain("g***@example.com");
+    expect(html).toContain("g***@example.com");
+    expect(html).not.toContain("grace@example.com");
     expect(html).toContain("注册时间：2026-04-12");
     expect(html).toContain("桌宠模式");
     expect(html).toContain("中文");
@@ -342,8 +354,8 @@ describe("SettingsPageView", () => {
     const html = normalizeSsrHtml(renderSettingsPageView(createAccountModeState()));
     const modelConfigHtml = html.slice(html.indexOf("模型配置"), html.indexOf("Token 用量"));
 
-    expect(html).toContain("grace@example.com");
-    expect(html).not.toContain("g***@example.com");
+    expect(html).toContain("g***@example.com");
+    expect(html).not.toContain("grace@example.com");
     expect(html).toContain("注册时间：2026-04-12");
     expect(html).toContain("修改昵称");
     expect(html).toContain("Token 用量");
@@ -372,11 +384,11 @@ describe("SettingsPageView", () => {
     const phoneHtml = normalizeSsrHtml(renderSettingsPageView(createPhoneAccountModeState()));
     const emailHtml = normalizeSsrHtml(renderSettingsPageView(createAccountModeState()));
 
-    expect(phoneHtml).toContain("13800138000");
-    expect(phoneHtml).not.toContain("138****8000");
+    expect(phoneHtml).toContain("138****8000");
+    expect(phoneHtml).not.toContain("13800138000");
     expect(phoneHtml).not.toContain("未绑定邮箱");
-    expect(emailHtml).toContain("grace@example.com");
-    expect(emailHtml).not.toContain("g***@example.com");
+    expect(emailHtml).toContain("g***@example.com");
+    expect(emailHtml).not.toContain("grace@example.com");
   });
 
   it("注册账号缺少账号标识时不误提示未绑定邮箱", () => {
@@ -390,8 +402,8 @@ describe("SettingsPageView", () => {
     const html = normalizeSsrHtml(renderSettingsPageView(createAccountModeWithSavedModelState()));
     const modelConfigHtml = html.slice(html.indexOf("模型配置"), html.indexOf("Token 用量"));
 
-    expect(html).toContain("grace@example.com");
-    expect(html).not.toContain("g***@example.com");
+    expect(html).toContain("g***@example.com");
+    expect(html).not.toContain("grace@example.com");
     expect(html).toContain("注册时间：2026-04-12");
     expect(html).toContain("Token 用量");
     expect(html).toContain("平台赠送 Token");
@@ -736,9 +748,9 @@ describe("SettingsPageView", () => {
 
     expect(html).toContain("settings-account-summary");
     expect(html).toContain("悠然麦穗春日记忆助手版");
-    expect(html).toContain("grace@superlongcompanydomain.example.com");
+    expect(html).toContain("g***@superlongcompanydomain.example.com");
     expect(html).not.toContain("悠然麦穗春日记忆助手…");
-    expect(html).not.toContain("grace@superlongcompany…");
+    expect(html).not.toContain("g***@superlongcompanydom…");
     expect(source).toContain("OverflowTooltipText");
     const overflowSource = readFileSync(overflowTooltipSourcePath, "utf8");
     expect(overflowSource).toContain("function OverflowTooltipText");
@@ -862,11 +874,12 @@ function createLowTokenState(applyMore: boolean): AppState {
 function renderSettingsPageView(
   state: AppState,
   language: "zh-CN" | "en-US" = "zh-CN",
-  update = createUpdateViewModel()
+  update = createUpdateViewModel(),
+  platform?: string
 ): string {
   return renderToString(
     <I18nProvider language={language}>
-      <SettingsPageView state={state} dispatch={vi.fn()} update={update} />
+      <SettingsPageView state={state} dispatch={vi.fn()} update={update} platform={platform} />
     </I18nProvider>
   );
 }

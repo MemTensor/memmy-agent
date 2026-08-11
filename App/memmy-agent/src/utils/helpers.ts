@@ -163,9 +163,8 @@ export function currentTimeStr(timezone: string | null = null): string {
   const parts = Object.fromEntries(
     formatter.formatToParts(now).map((part) => [part.type, part.value]),
   );
-  const tzName = timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone ?? "UTC";
   const offset = normalizeUtcOffset(String(parts.timeZoneName ?? "GMT+00:00"));
-  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute} (${parts.weekday}) (${tzName}, ${offset})`;
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute} (${parts.weekday}) (${offset})`;
 }
 
 export function safeFilename(name: string): string {

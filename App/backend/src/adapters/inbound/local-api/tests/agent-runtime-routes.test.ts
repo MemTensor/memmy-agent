@@ -62,6 +62,51 @@ describe("agent runtime local api routes", () => {
     expect(response.statusCode).toBe(401);
   });
 
+  it("forwards the renderer timezone to memory services", async () => {
+    let receivedContext: unknown;
+    app = createServer({
+      search: {
+        async search(_input: unknown, context: unknown) {
+          receivedContext = context;
+          return searchOutput();
+        }
+      }
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/v1/memory/search",
+      headers: {
+        "x-memmy-local-token": "test-token",
+        "x-memmy-time-zone": "Asia/Shanghai"
+      },
+      payload: searchInput()
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(receivedContext).toMatchObject({ adapterId: "runtime", timeZone: "+08:00" });
+
+    await app.close();
+    app = createServer({
+      search: {
+        async search(_input: unknown, context: unknown) {
+          receivedContext = context;
+          return searchOutput();
+        }
+      }
+    }, "UTC");
+    await app.inject({
+      method: "POST",
+      url: "/api/v1/memory/search",
+      headers: {
+        "x-memmy-local-token": "test-token",
+        "x-memmy-time-zone": "Asia/Shanghai"
+      },
+      payload: searchInput()
+    });
+    expect(receivedContext).toMatchObject({ adapterId: "runtime", timeZone: "+00:00" });
+  });
+
   it("reloads the latest model config before retrying one failed memory", async () => {
     const calls: unknown[] = [];
     app = createServer({
@@ -263,7 +308,7 @@ describe("agent runtime local api routes", () => {
   });
 });
 
-function createServer(overrides: Record<string, unknown> = {}): FastifyInstance {
+function createServer(overrides: Record<string, unknown> = {}, timeZone?: string): FastifyInstance {
   const services = {
     memoryClient: {
       async health() {
@@ -376,6 +421,7 @@ function createServer(overrides: Record<string, unknown> = {}): FastifyInstance 
   return createLocalApiServer({
     permissionManager: createPermissionManager(),
     services,
+    timeZone,
     heartbeatIntervalMs: 20
   });
 }

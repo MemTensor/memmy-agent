@@ -47,6 +47,67 @@ async function withServerClosed(
 
 describe("MemoryService / REST contract", () => {
 
+  it("uses the caller timezone for offset-less memory times and rejects invalid zones", async () => {
+    const { db, service } = createTestService();
+    const server = createMemoryHttpServer({ service });
+    await withServerClosed(server, async () => {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("expected TCP address");
+      const endpoint = `http://127.0.0.1:${address.port}`;
+      const client = new MemoryRestClient({ endpoint, timeZone: "Asia/Shanghai" });
+
+      const added = await client.addMemory({
+        content: "timezone-aware import",
+        layer: "L2",
+        createdAt: "2026-08-06T12:30:00"
+      }) as { id: string; createdAt: string };
+      expect(added.createdAt).toBe("2026-08-06T04:30:00.000Z");
+      expect(new Repositories(db.db).memories.get(added.id)?.info.time_zone).toBe("+08:00");
+
+      const opened = await client.openSession({ sessionId: "timezone-aware-session" }) as { sessionId: string };
+      const completed = await client.completeTurn("timezone-aware-turn", {
+        sessionId: opened.sessionId,
+        query: "remember my local time",
+        answer: "stored with timezone context"
+      }) as { l1MemoryId: string };
+      expect(new Repositories(db.db).memories.get(completed.l1MemoryId)?.info.time_zone)
+        .toBe("+08:00");
+
+      const invalid = await fetch(`${endpoint}/api/v1/panel/overview`, {
+        headers: { "x-memmy-time-zone": "Mars/Base" }
+      });
+      expect(invalid.status).toBe(400);
+      await expect(invalid.json()).resolves.toMatchObject({
+        error: { code: "invalid_argument", message: "invalid timezone: Mars/Base" }
+      });
+    });
+    db.close();
+  });
+
+  it("prefers the configured timezone over the caller timezone", async () => {
+    const { db, service } = createTestService();
+    const server = createMemoryHttpServer({ service, timeZone: "UTC" });
+    await withServerClosed(server, async () => {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("expected TCP address");
+      const client = new MemoryRestClient({
+        endpoint: `http://127.0.0.1:${address.port}`,
+        timeZone: "Asia/Shanghai"
+      });
+
+      const added = await client.addMemory({
+        content: "configured timezone wins",
+        layer: "L2",
+        createdAt: "2026-08-06T12:30:00"
+      }) as { id: string; createdAt: string };
+      expect(added.createdAt).toBe("2026-08-06T12:30:00.000Z");
+      expect(new Repositories(db.db).memories.get(added.id)?.info.time_zone).toBe("+00:00");
+    });
+    db.close();
+  });
+
   it("serves the REST health endpoint", async () => {
     const { db, service } = createTestService();
     const server = createMemoryHttpServer({ service });

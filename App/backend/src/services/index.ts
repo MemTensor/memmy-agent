@@ -18,6 +18,8 @@ import { createCursorSkillTarget } from "../adapters/outbound/skill-writer/curso
 import { createHermesSkillTarget } from "../adapters/outbound/skill-writer/hermes/index.js";
 import { createOpenclawSkillTarget } from "../adapters/outbound/skill-writer/openclaw/index.js";
 import { createOpencodeSkillTarget } from "../adapters/outbound/skill-writer/opencode/index.js";
+import { createPiSkillTarget } from "../adapters/outbound/skill-writer/pi/index.js";
+import { createQwenworkSkillTarget } from "../adapters/outbound/skill-writer/qwenwork/index.js";
 import { createWorkbuddySkillTarget } from "../adapters/outbound/skill-writer/workbuddy/index.js";
 import { createSkillTargetRegistry, type SkillTargetRegistry } from "../adapters/outbound/skill-writer/target-registry.js";
 import type { CloudClient } from "../adapters/outbound/cloud-client/index.js";
@@ -28,6 +30,7 @@ import {
   resolveLoggedInAnalyticsUserId,
 } from "../analytics/agent-source-analytics.js";
 import { createMemoryDesktopAddAnalytics } from "../analytics/memory-add-analytics.js";
+import { createToolConnectionAnalytics } from "../analytics/tool-connection-analytics.js";
 import { createAgentSourceService, type AgentSourceService } from "./agent-source-service.js";
 import { createAgentSourceAutoInjectService, type AgentSourceAutoInjectService } from "./agent-source-auto-inject-service.js";
 import { createBuiltinAgentSourceRegistry } from "./builtin-agent-source-registry.js";
@@ -128,7 +131,9 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       createOpencodeSkillTarget(),
       createOpenclawSkillTarget({ memmyConfigPath: options.memmyConfigPath }),
       createHermesSkillTarget({ memmyConfigPath: options.memmyConfigPath }),
-      createWorkbuddySkillTarget()
+      createWorkbuddySkillTarget(),
+      createPiSkillTarget(),
+      createQwenworkSkillTarget()
     ]);
   const skillDistributionService =
     options.skillDistributionService ??
@@ -174,6 +179,10 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       getUserMode: resolveAnalyticsUserMode,
     }),
   });
+  const toolConnectionAnalytics = createToolConnectionAnalytics({
+    getUserId: resolveAnalyticsUserId,
+    getUserMode: resolveAnalyticsUserMode,
+  });
 
   return {
     memoryClient: options.memoryClient,
@@ -195,11 +204,13 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
     }),
     integrations: createIntegrationService({
       cloudClient: options.cloudClient,
-      composioMachineTokenRepository: options.appStateStore.repositories.composioMachineToken
+      composioMachineTokenRepository: options.appStateStore.repositories.composioMachineToken,
+      toolConnectionAnalytics,
     }),
     channels: createChannelService({
       memmyConfigWriter,
-      memmyAgentAdminClient
+      memmyAgentAdminClient,
+      toolConnectionAnalytics,
     }),
     localData: createLocalDataService({
       localDataStore: options.appStateStore.localDataStore

@@ -53,7 +53,8 @@ describe("toolsActions", () => {
       listConnections: vi.fn(async () => ({
         connections: [{ id: "conn-github", toolkit: "github", status: "ACTIVE" }]
       })),
-      deleteConnection: vi.fn(async () => undefined)
+      deleteConnection: vi.fn(async () => undefined),
+      reportConnectionEvent: vi.fn(async () => undefined)
     };
 
     await toolsActions.loadConnections(client, createChannelsClient([]), dispatch);
@@ -79,7 +80,8 @@ function createFailingIntegrationsClient(error: unknown): IntegrationsClient {
     listConnections: vi.fn(async () => {
       throw error;
     }),
-    deleteConnection: vi.fn(async () => undefined)
+    deleteConnection: vi.fn(async () => undefined),
+    reportConnectionEvent: vi.fn(async () => undefined)
   };
 }
 
@@ -90,6 +92,7 @@ function createChannelsClient(connections: Awaited<ReturnType<ChannelsClient["li
     listConnections: vi.fn(async () => ({ connections })),
     connect: vi.fn(async () => ({ status: "connected" as const, connectionId: "channel-test-local" })),
     pollConnect: vi.fn(async () => ({ status: "connected" as const, connectionId: "channel-test-local" })),
-    disconnect: vi.fn(async () => undefined)
+    disconnect: vi.fn(async () => undefined),
+    reportConnectionEvent: vi.fn(async () => undefined)
   };
 }

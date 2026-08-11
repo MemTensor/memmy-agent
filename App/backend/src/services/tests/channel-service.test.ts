@@ -1,11 +1,19 @@
 /** Channel service tests. */
 import { describe, expect, it, vi } from "vitest";
-import { createChannelService } from "../channel-service.js";
+import type { ToolConnectionAnalytics, ToolConnectionTrackInput } from "../../analytics/tool-connection-analytics.js";
 import type { MemmyAgentAdminClient } from "../../adapters/outbound/memmy-agent-admin-client/index.js";
 import type { MemmyConfigWriter } from "../../infrastructure/memmy-config/index.js";
+import { createChannelService } from "../channel-service.js";
 
 function createHarness() {
   const patchCalls: Array<{ name: string; patch: Record<string, unknown> }> = [];
+  const tracked: ToolConnectionTrackInput[] = [];
+  const toolConnectionAnalytics: ToolConnectionAnalytics = {
+    trackConnection(input) {
+      tracked.push(input);
+    },
+    flush: async () => undefined,
+  };
   const memmyConfigWriter: MemmyConfigWriter = {
     writeAccountModelProjection: vi.fn(async () => undefined),
     writeByokModelProjection: vi.fn(async () => undefined),
@@ -23,14 +31,26 @@ function createHarness() {
       qrCodeDataUrl: "data:image/png;base64,qr",
       pollToken: "poll-1"
     })),
-    pollWeixinLogin: vi.fn(async () => ({ status: "connected" }))
+    pollWeixinLogin: vi.fn(async () => ({ status: "connected" })),
+    startFeishuLogin: vi.fn(async () => ({
+      status: "pendingQr",
+      qrCodeDataUrl: "data:image/png;base64,feishu",
+      pollToken: "feishu-poll-1"
+    })),
+    pollFeishuLogin: vi.fn(async () => ({
+      status: "connected",
+      appId: "cli_a",
+      appSecret: "secret",
+      domain: "feishu" as const
+    }))
   };
 
   return {
     patchCalls,
+    tracked,
     memmyConfigWriter,
     memmyAgentAdminClient,
-    service: createChannelService({ memmyConfigWriter, memmyAgentAdminClient })
+    service: createChannelService({ memmyConfigWriter, memmyAgentAdminClient, toolConnectionAnalytics })
   };
 }
 
@@ -202,5 +222,44 @@ describe("channel service", () => {
     expect(memmyAgentAdminClient.pollWeixinLogin).toHaveBeenCalledWith("poll-1");
     expect(patchCalls).toEqual([{ name: "feishu", patch: { enabled: false } }]);
     expect(memmyAgentAdminClient.stopChannel).toHaveBeenCalledWith("feishu");
+  });
+
+  it("reportConnectionEvent forwards UI cancel analytics for channels", async () => {
+    const { service, tracked } = createHarness();
+
+    await expect(
+      service.reportConnectionEvent({
+        surface: "channel",
+        toolkit: "wechat",
+        event: "failed",
+        errorCode: "cancelled",
+      }),
+    ).resolves.toEqual({ ok: true });
+
+    expect(tracked).toEqual([
+      { surface: "channel", toolkit: "wechat", event: "failed", errorCode: "cancelled" },
+    ]);
+  });
+
+  it("tracks connected/disconnected/failed channel connection analytics", async () => {
+    const { service, tracked, memmyAgentAdminClient } = createHarness();
+
+    await service.connect("wechat", {});
+    expect(tracked).toEqual([]);
+
+    await service.pollConnect("wechat", "poll-1");
+    await service.connect("feishu", { appId: "cli_a", appSecret: "secret" });
+    await service.disconnect("discord");
+    await service.connect("unknown" as any, {});
+    await expect(service.connect("discord", {})).rejects.toThrow(/token/);
+
+    expect(tracked).toEqual([
+      { surface: "channel", toolkit: "wechat", event: "connected" },
+      { surface: "channel", toolkit: "feishu", event: "connected" },
+      { surface: "channel", toolkit: "discord", event: "disconnected" },
+      { surface: "channel", toolkit: "unknown", event: "failed", errorCode: "unsupported" },
+      { surface: "channel", toolkit: "discord", event: "failed", error: expect.any(Error) },
+    ]);
+    expect(memmyAgentAdminClient.pollWeixinLogin).toHaveBeenCalledWith("poll-1");
   });
 });

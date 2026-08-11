@@ -24,6 +24,7 @@ export type MemmyMemoryConnection = {
   token?: string | null;
   source?: string | null;
   timeoutMs?: number;
+  timeZone?: string;
 };
 
 export type MemmyMemoryResolvedConfig = {

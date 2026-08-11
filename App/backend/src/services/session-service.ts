@@ -35,7 +35,7 @@ export function createSessionService(deps: {
           body: input,
           responseSchema: OpenSessionOutputSchema
         },
-        () => deps.memoryClient.openSession(input)
+        () => deps.memoryClient.openSession(input, ctx)
       );
     },
 
@@ -48,7 +48,7 @@ export function createSessionService(deps: {
           body: input,
           responseSchema: CloseSessionOutputSchema
         },
-        () => deps.memoryClient.closeSession({ ...input, sessionId })
+        () => deps.memoryClient.closeSession({ ...input, sessionId }, ctx)
       );
     }
   };

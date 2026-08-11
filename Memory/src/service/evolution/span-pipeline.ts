@@ -19,7 +19,7 @@ import type { MemoryRow,ToolCallPayload } from "../../types.js";
 import { stableStringify } from "../../utils/id.js";
 import { isRecord,stringifyForMemory } from "../../utils/json.js";
 import { clip,firstLine } from "../../utils/text.js";
-import { nowIso } from "../../utils/time.js";
+import { formatZonedTime, nowIso } from "../../utils/time.js";
 import type { ScheduleEmbeddingAfterTextUpdateInput } from "../embedding/embedding-job-processor.js";
 import {
   importStatusTags,
@@ -170,6 +170,7 @@ private async reflectSingleTrace(
       {
         role: "user",
         content: traceReflectionScorePayload({
+          capturedAt: formatZonedTime(trace.ts, trace.timeZone),
           taskSummary,
           userText,
           agentThinking,
@@ -497,7 +498,8 @@ private batchReflectionPayload(episode: EpisodeRecord, memories: MemoryRow[]): R
       host_context: {
         reflectionProvider: this.deps.skillLlm.config.provider,
         reflectionModel: this.deps.skillLlm.config.model,
-        sessionId: episode.sessionId
+        sessionId: episode.sessionId,
+        timeZone: traceMetaFromMemory(memories[0]!)?.timeZone
       },
       task_context: reflectionContextIncludesTask(this.deps.config.algorithm.capture.reflectionContextMode)
         ? batchTaskContext(episode, rawTurns, this.deps.config.algorithm.capture.taskContextMaxChars)
@@ -509,6 +511,7 @@ private batchReflectionPayload(episode: EpisodeRecord, memories: MemoryRow[]): R
         const toolCalls = trace?.toolCalls ?? [];
         return {
           idx: index,
+          captured_at: trace ? formatZonedTime(trace.ts, trace.timeZone) : undefined,
           state: clip(userText, cfg.reflectionBatchStepStateChars),
           thinking: clip(traceAgentThinking(memory) ?? "", cfg.reflectionBatchStepThinkingChars),
           action: clip(agentText, cfg.reflectionBatchStepActionChars) || "(none)",
@@ -547,6 +550,7 @@ private async synthesizeTraceReflection(input: {
         {
           role: "user",
           content: traceReflectionSynthPayload({
+            capturedAt: formatZonedTime(input.trace.ts, input.trace.timeZone),
             taskSummary: input.taskSummary,
             userText: input.userText,
             agentThinking: input.agentThinking,
@@ -1129,6 +1133,7 @@ function traceDownstreamPreviewBlock(memory: MemoryRow, offset: number, maxChars
 }
 
 function traceReflectionScorePayload(input: {
+  capturedAt: string;
   taskSummary: string;
   userText: string;
   agentThinking?: string;
@@ -1138,6 +1143,8 @@ function traceReflectionScorePayload(input: {
   reflectionText: string;
 }): string {
   return [
+    `CAPTURED AT: ${input.capturedAt}`,
+    "",
     "TASK CONTEXT:",
     clip(input.taskSummary, 1200) || "(none)",
     "",
@@ -1165,6 +1172,7 @@ function traceReflectionScorePayload(input: {
 }
 
 function traceReflectionSynthPayload(input: {
+  capturedAt: string;
   taskSummary: string;
   userText: string;
   agentThinking?: string;
@@ -1173,6 +1181,8 @@ function traceReflectionSynthPayload(input: {
   downstreamPreview: string;
 }): string {
   return [
+    `CAPTURED AT: ${input.capturedAt}`,
+    "",
     "TASK CONTEXT:",
     clip(input.taskSummary, 1200) || "(none)",
     "",
@@ -1202,12 +1212,13 @@ function traceReflectionSynthPayload(input: {
 }
 
 function traceSummaryPayload(input: {
+  trace: TraceMeta;
   userText: string;
   agentText: string;
   toolCalls: ToolCallPayload[];
   reflectionText: string;
 }): string {
-  const parts: string[] = [];
+  const parts: string[] = [`CAPTURED AT: ${formatZonedTime(input.trace.ts, input.trace.timeZone)}`];
   if (input.userText) {
     parts.push(`USER:\n${clip(input.userText, 1400)}`);
   }

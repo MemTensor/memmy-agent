@@ -5,9 +5,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AgentSourceTool,
   buildCompleteTurns,
+  normalizeAgentIdentity,
   renderFullMemorySkill,
   resolveSyncBoundaryAt,
-  selectTurns
+  selectTurns,
+  verifyAgentInstallation
 } from "../../../../src/core/agent-runtime/tools/agent-source.js";
 
 const tempRoots: string[] = [];
@@ -93,6 +95,61 @@ describe("AgentSourceTool history selection", () => {
 });
 
 describe("AgentSourceTool Skill rendering", () => {
+  it("matches only case and separator variants of an installed Agent identity", () => {
+    expect(normalizeAgentIdentity("KIMI-Code")).toBe(normalizeAgentIdentity("kimi code"));
+    expect(normalizeAgentIdentity("kimi_code")).toBe(normalizeAgentIdentity("KIMI Code"));
+    expect(normalizeAgentIdentity("我自己的agent")).not.toBe(normalizeAgentIdentity("memmy-agent"));
+
+    const installationRoot = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-agent-identity-"));
+    tempRoots.push(installationRoot);
+    const executablePath = path.join(installationRoot, "kimi_code");
+    fs.writeFileSync(executablePath, "#!/bin/sh\n");
+    fs.chmodSync(executablePath, 0o755);
+
+    expect(verifyAgentInstallation("KIMI-Code", executablePath, "discovered")).toEqual({
+      installationPath: executablePath,
+      identity: "kimi_code"
+    });
+
+    const appPath = path.join(installationRoot, "Kimi Code.app");
+    fs.mkdirSync(appPath);
+    expect(verifyAgentInstallation("kimi-code", appPath, "discovered")).toEqual({
+      installationPath: appPath,
+      identity: "Kimi Code"
+    });
+
+    const packageRoot = path.join(installationRoot, "minimax-package");
+    fs.mkdirSync(packageRoot);
+    fs.writeFileSync(
+      path.join(packageRoot, "package.json"),
+      JSON.stringify({ name: "@example/minimax-code" })
+    );
+    expect(verifyAgentInstallation("MiniMax_Code", packageRoot, "discovered")).toEqual({
+      installationPath: packageRoot,
+      identity: "minimax-code"
+    });
+
+    expect(() => verifyAgentInstallation("我自己的agent", executablePath, "discovered")).toThrow(
+      'Agent installation not found for "我自己的agent"'
+    );
+    expect(verifyAgentInstallation("我自己的agent", executablePath, "user_provided")).toEqual({
+      installationPath: executablePath,
+      identity: "kimi_code"
+    });
+    expect(() =>
+      verifyAgentInstallation("我自己的agent", path.join(installationRoot, "missing"), "user_provided")
+    ).toThrow('Agent installation not found for "我自己的agent"');
+  });
+
+  it("does not accept a same-named history directory as installation evidence", () => {
+    const historyRoot = fs.mkdtempSync(path.join(os.tmpdir(), "my-agent-history-"));
+    tempRoots.push(historyRoot);
+
+    expect(() => verifyAgentInstallation(path.basename(historyRoot), historyRoot, "user_provided")).toThrow(
+      "Agent installation not found"
+    );
+  });
+
   it("keeps the onboarding Skill and every bundled reference English-only", () => {
     const skillRoot = path.resolve("src/skills/agent-memory-onboarding");
     const files = listTextFiles(skillRoot);
@@ -124,6 +181,8 @@ describe("AgentSourceTool Skill rendering", () => {
     const recipe = parameters.properties.sync_recipe;
 
     expect(parameters.properties.action.enum).toContain("get_status");
+    expect(parameters.properties.action.enum).toContain("verify_installation");
+    expect(parameters.properties.installation_path_origin.enum).toEqual(["discovered", "user_provided"]);
     expect(recipe.required).toEqual(["version", "format", "path", "fields", "timestampFormat"]);
     expect(recipe.properties?.version?.enum).toEqual([1]);
     expect(recipe.properties?.format?.enum).toEqual(["jsonl", "json", "sqlite"]);
@@ -157,6 +216,74 @@ describe("AgentSourceTool Skill rendering", () => {
     expect(skill).toContain("syncBoundaryAt != null");
     expect(skill).toContain("syncReady == true");
     expect(skill).toContain("Imported memories are only bootstrap and validation evidence.");
+  });
+
+  it("requires installation identity verification before provisioning mutations", async () => {
+    const memmyHome = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-agent-verification-home-"));
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-agent-verification-workspace-"));
+    const installationRoot = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-agent-verification-install-"));
+    tempRoots.push(memmyHome, workspace, installationRoot);
+    fs.writeFileSync(
+      path.join(memmyHome, "runtime.json"),
+      JSON.stringify({ baseUrl: "http://127.0.0.1:19001", localToken: "local-token" })
+    );
+    const executablePath = path.join(installationRoot, "kimi_code");
+    fs.writeFileSync(executablePath, "#!/bin/sh\n");
+    fs.chmodSync(executablePath, 0o755);
+    const previousMemmyHome = process.env.MEMMY_HOME;
+    process.env.MEMMY_HOME = memmyHome;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      new Response(
+        JSON.stringify([{
+          sourceId: "manual-id-1",
+          displayName: "KIMI-Code",
+          dataPath: "__MEMMY_DISCOVERY_PENDING__",
+          builtin: false,
+          available: true,
+          status: "not_connected",
+          messageCount: 0,
+          lastScannedAt: null
+        }]),
+        { status: 200 }
+      )
+    );
+    const tool = new AgentSourceTool({ workspace });
+
+    try {
+      await expect(tool.execute({
+        action: "render_skill",
+        source_id: "manual-id-1"
+      })).rejects.toThrow("Agent installation is not verified");
+
+      const verification = JSON.parse(await tool.execute({
+        action: "verify_installation",
+        source_id: "manual-id-1",
+        installation_path: executablePath,
+        installation_path_origin: "discovered"
+      }));
+      expect(verification).toMatchObject({ verified: true, identity: "kimi_code" });
+
+      const rendered = JSON.parse(await tool.execute({
+        action: "render_skill",
+        source_id: "manual-id-1"
+      }));
+      expect(fs.existsSync(rendered.skillPath)).toBe(true);
+    } finally {
+      fetchMock.mockRestore();
+      if (previousMemmyHome === undefined) delete process.env.MEMMY_HOME;
+      else process.env.MEMMY_HOME = previousMemmyHome;
+    }
+  });
+
+  it("tells onboarding to stop instead of substituting another product", () => {
+    const skill = fs.readFileSync(path.resolve("src/skills/agent-memory-onboarding/SKILL.md"), "utf8");
+
+    expect(skill).toContain("## Installation Identity Gate");
+    expect(skill).toContain('action="verify_installation"');
+    expect(skill).toContain("If no automatically discovered evidence passes `verify_installation`, stop and report that the requested Agent was not found.");
+    expect(skill).toContain("Never substitute Memmy's own workspace or the current Agent surface");
+    expect(skill).toContain('installation_path_origin="user_provided"');
+    expect(skill).toContain("Do not keep searching or guess paths after asking.");
   });
 
   it("selects a scannable native projection before falling back to an event ledger", () => {

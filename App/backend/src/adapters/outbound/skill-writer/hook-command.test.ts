@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveNodeExecutable, type NodeExecutableRuntime } from "./hook-command.js";
+import { createNodeHookCommand, resolveNodeExecutable, type NodeExecutableRuntime } from "./hook-command.js";
 
 const HOME = "/Users/test";
 
@@ -56,14 +56,36 @@ describe("resolveNodeExecutable", () => {
   });
 });
 
+describe("createNodeHookCommand", () => {
+  it("single-quotes the command on POSIX platforms", () => {
+    expect(createNodeHookCommand("/Users/me/Library/Application Support/hook.mjs", runtime()))
+      .toBe("'node' '/Users/me/Library/Application Support/hook.mjs'");
+  });
+
+  it("double-quotes paths on Windows so cmd.exe and PowerShell can run them", () => {
+    const nodePath = "C:/Program Files/nodejs/node.exe";
+    expect(createNodeHookCommand("C:/Users/me/.codex/hooks/memmy-resume-hook.mjs", runtime({
+      platform: "win32",
+      env: { MEMMY_HOOK_NODE: nodePath },
+      executable: [nodePath]
+    }))).toBe("\"C:/Program Files/nodejs/node.exe\" \"C:/Users/me/.codex/hooks/memmy-resume-hook.mjs\"");
+  });
+
+  it("leaves a bare command name unquoted on Windows", () => {
+    expect(createNodeHookCommand("C:/Users/me/.codex/hooks/memmy-resume-hook.mjs", runtime({ platform: "win32" })))
+      .toBe("node \"C:/Users/me/.codex/hooks/memmy-resume-hook.mjs\"");
+  });
+});
+
 function runtime(overrides: {
+  platform?: NodeJS.Platform;
   env?: NodeJS.ProcessEnv;
   execPath?: string;
   executable?: string[];
 } = {}): NodeExecutableRuntime {
   const executable = new Set(overrides.executable ?? []);
   return {
-    platform: "darwin",
+    platform: overrides.platform ?? "darwin",
     env: overrides.env ?? {},
     execPath: overrides.execPath ?? "/missing/runtime/node",
     hermesHomeDirectory: HOME,

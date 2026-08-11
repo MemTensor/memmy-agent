@@ -166,7 +166,7 @@ describe("AgentThreadMessages", () => {
     expect(byokHtml).toContain("API 密钥无效或已过期，请检查后重试");
   });
 
-  it("renders only the localized quota title for structured quota errors", () => {
+  it("renders the localized quota title with its raw detail expanded by default", () => {
     const html = renderToString(
       <I18nProvider language="zh-CN">
         <AgentThreadMessages
@@ -176,18 +176,40 @@ describe("AgentThreadMessages", () => {
               id: "quota-error",
               role: "assistant",
               content: "Error calling LLM: raw provider code 40309",
-              modelError: { category: "quota_exhausted" }
+              modelError: { category: "quota_exhausted", detail: "Error calling LLM: raw provider code 40309" }
             }
           ]}
         />
       </I18nProvider>
     );
 
-    expect(html).toContain("当前模型额度已用完");
-    expect(html).not.toContain("raw provider code");
-    expect(html).not.toContain("40309");
+    expect(html).toContain("当前模型 Token 余额不足，请更换模型后重试");
+    expect(html).toContain("Error calling LLM: raw provider code 40309");
+    expect(html).toContain("收起详情");
+    expect(html).toContain('aria-expanded="true"');
+    expect(html.indexOf("raw provider code")).toBeLessThan(html.indexOf("收起详情"));
     expect(html).not.toContain("充值");
-    expect(html).not.toContain("更换模型");
+  });
+
+  it("renders a structured generic model failure instead of the localized fallback bubble", () => {
+    const html = renderToString(
+      <I18nProvider language="zh-CN">
+        <AgentThreadMessages
+          chatScopeKey="chat-model-failed"
+          messages={[{
+            id: "model-failed",
+            role: "assistant",
+            content: "平台服务响应异常，请稍后重试。",
+            modelError: { category: "model_failed", detail: "Error: raw provider failure" }
+          }]}
+        />
+      </I18nProvider>
+    );
+
+    expect(html).toContain("模型请求失败，请稍后重试");
+    expect(html).toContain("Error: raw provider failure");
+    expect(html).toContain("收起详情");
+    expect(html).not.toContain("agent-chat-bubble--assistant");
   });
 
   it("renders quota-like normal answers as ordinary assistant content", () => {
@@ -202,7 +224,7 @@ describe("AgentThreadMessages", () => {
     );
 
     expect(html).toContain("The quota, balance, credit and 额度 values are all healthy.");
-    expect(html).not.toContain("This model&#x27;s quota has been used up.");
+    expect(html).not.toContain("The current model has insufficient tokens.");
     expect(html).not.toContain("agent-model-error-notice");
   });
 
@@ -902,7 +924,8 @@ describe("AgentThreadMessages", () => {
     expect(html).toContain('role="alert"');
     expect(html).not.toContain("agent-chat-bubble--assistant");
     expect(html).not.toContain("agent-retry-wait-line");
-    expect(html).not.toContain("upstream connect error");
+    expect(html).toContain("upstream connect error");
+    expect(html).toContain("收起详情");
   });
 
   it("renders activity reasoning and plain content as context rather than steps", () => {

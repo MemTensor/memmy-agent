@@ -62,7 +62,7 @@ export interface ImportJobProcessorDeps {
   resolveContext(request: MemoryAddRequest): { userId: string; namespace: { source?: string; projectId?: string; profileId?: string } };
   requireSession(id: string): SessionRecord;
   assertSessionInScope(session: ReturnType<ImportJobProcessorDeps["requireSession"]>, namespace: unknown): void;
-  normalizeMemoryAddCreatedAt(value: string | undefined): string | undefined;
+  normalizeMemoryAddCreatedAt(value: string | undefined, timeZone?: string): string | undefined;
   memoryAddImportTrace(request: MemoryAddRequest, at: string): Record<string, unknown> | null;
   isAgentSourceImportMemoryAdd(request: MemoryAddRequest): boolean;
   titleFromImportTrace(trace: Record<string, unknown>): string | undefined;
@@ -130,7 +130,7 @@ export class ImportJobProcessor {
 
     const layer = request.layer ?? "L1";
     const kind = kindForLayer(layer);
-    const at = d.normalizeMemoryAddCreatedAt(request.createdAt) ?? receivedAt;
+    const at = d.normalizeMemoryAddCreatedAt(request.createdAt, request.timeZone) ?? receivedAt;
     const importTrace = layer === "L1" ? d.memoryAddImportTrace(request, at) : null;
     const importTitle = importTrace && d.isAgentSourceImportMemoryAdd(request) ? d.titleFromImportTrace(importTrace) : undefined;
     const title = importTitle ?? (request.title?.trim() || firstLine(request.content).slice(0, 120) || "Untitled memory");
@@ -153,9 +153,9 @@ export class ImportJobProcessor {
         reflection: { text: null, alpha: IMPORT_DEFAULT_ALPHA }, value: IMPORT_DEFAULT_VALUE, priority: IMPORT_DEFAULT_PRIORITY
       }) : request.content,
       tags,
-      info: { title, summary: importSummary ?? firstLine(request.content), source: request.source ?? "manual", turn_id: request.turnId },
+      info: { title, summary: importSummary ?? firstLine(request.content), source: request.source ?? "manual", turn_id: request.turnId, time_zone: request.timeZone },
       internal: {
-        source: request.source ?? "manual", title, summary: importSummary ?? firstLine(request.content), turn_id: request.turnId,
+        source: request.source ?? "manual", title, summary: importSummary ?? firstLine(request.content), turn_id: request.turnId, time_zone: request.timeZone,
         ...(importTrace ? { plugin_algorithm: "memory.add.import_async.v2", trace: importTrace } : {})
       },
       createdAt: at

@@ -21,7 +21,7 @@ const DEFAULT_HEARTBEAT_INTERVAL_MS = 15_000;
 const LOCAL_API_SERVICE_NAME = "memmy-local-api";
 const RUNTIME_TOKEN_HEADER = "x-memmy-local-token";
 const CORS_ALLOWED_METHODS = "GET,POST,PUT,PATCH,DELETE,OPTIONS";
-const CORS_ALLOWED_HEADERS = `content-type,${RUNTIME_TOKEN_HEADER}`;
+const CORS_ALLOWED_HEADERS = `content-type,${RUNTIME_TOKEN_HEADER},x-memmy-time-zone`;
 const DEFAULT_ALLOWED_LOCAL_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 const OPAQUE_ORIGIN = "null";
 const FILE_ORIGIN = "file://";
@@ -29,6 +29,8 @@ const FILE_ORIGIN = "file://";
 export interface CreateLocalApiServerOptions {
   permissionManager: PermissionManager;
   services: BackendServices;
+  /** Configured agent timezone. Renderer headers are used only when absent. */
+  timeZone?: string;
   /**
    * Local validation token for the Composio MCP bridge; the agent carries it in mcpServers.composio.headers to access /mcp/composio.
    */
@@ -133,6 +135,7 @@ export function createLocalApiServer(options: CreateLocalApiServerOptions): Fast
   });
   registerAgentRuntimeRoutes(app, {
     services: options.services,
+    timeZone: options.timeZone,
     authenticateRuntimeToken
   });
 

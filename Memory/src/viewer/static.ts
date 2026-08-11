@@ -1,4 +1,4 @@
-export function memoryPanelHtml(): string {
+export function memoryPanelHtml(configuredTimeZone?: string): string {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -280,6 +280,11 @@ export function memoryPanelHtml(): string {
     </section>
   </main>
   <script>
+    const systemOffsetMinutes = -new Date().getTimezoneOffset();
+    const systemOffsetSign = systemOffsetMinutes < 0 ? "-" : "+";
+    const systemOffsetAbsolute = Math.abs(systemOffsetMinutes);
+    const systemTimeZone = systemOffsetSign + String(Math.floor(systemOffsetAbsolute / 60)).padStart(2, "0") + ":" + String(systemOffsetAbsolute % 60).padStart(2, "0");
+    const userTimeZone = ${JSON.stringify(configuredTimeZone ?? null)} || systemTimeZone;
     const state = {
       page: 1,
       pageSize: 20,
@@ -294,7 +299,13 @@ export function memoryPanelHtml(): string {
 
     async function api(path, options = {}) {
       const started = Date.now();
-      const response = await fetch(path, options);
+      const response = await fetch(path, {
+        ...options,
+        headers: {
+          "x-memmy-time-zone": userTimeZone,
+          ...(options.headers || {})
+        }
+      });
       state.lastRequestMs = Date.now() - started;
       const text = await response.text();
       let body = {};
@@ -331,7 +342,7 @@ export function memoryPanelHtml(): string {
       if (!value) return "";
       const date = new Date(value);
       if (Number.isNaN(date.getTime())) return String(value);
-      return date.toLocaleString(undefined, { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+      return date.toLocaleString(undefined, { timeZone: userTimeZone, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
     }
 
     function displayMemoryTitle(title, fallback) {

@@ -464,7 +464,12 @@ async function listSources(options: CreateAgentSourceServiceOptions): Promise<Ag
     const existing = persistedById.get(adapter.descriptor.sourceId);
     if (existing) {
       persistedById.delete(adapter.descriptor.sourceId);
-      return toAgentSourceView(existing, available);
+      return {
+        ...toAgentSourceView(existing, available),
+        displayName: adapter.descriptor.displayName,
+        dataPath: adapter.descriptor.dataPath,
+        builtin: adapter.descriptor.builtin
+      };
     }
 
     return {

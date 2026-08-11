@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { PanelTaskItem } from "@memmy/local-api-contracts";
 import type { MemoryRuntimeClient } from "../../api/memory-runtime-client.js";
+import { formatUserDateTime, formatUserTime } from "../../lib/user-time-zone.js";
 import {
   buildMemoryUiDeletedEvent,
   buildMemoryUiDetailOpenedEvent,
@@ -706,13 +707,11 @@ function removeFirstTurnThinking(source: string, segment: string): string {
 }
 
 function formatDateTime(value: string): string {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+  return formatUserDateTime(value);
 }
 
 function formatTime(value: string): string {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleTimeString();
+  return formatUserTime(value);
 }
 
 function formatDecimal(value: number | undefined, digits = 3): string {

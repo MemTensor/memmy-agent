@@ -102,6 +102,54 @@ describe("memory retrieval indexes", () => {
     }
   });
 
+  it("keeps short ascii pattern terms out of raw JSON metadata columns", () => {
+    const root = mkdtempSync(join(tmpdir(), "mindock-memory-pattern-json-noise-"));
+    try {
+      const db = new MemoryDb({ path: join(root, "memory.sqlite") });
+      const repos = new Repositories(db.db);
+      repos.memories.insert({
+        ...traceMemory("trace-birthday-party"),
+        memoryValue: [
+          "Summary: planned a birthday party",
+          "User:",
+          "help me plan a birthday party",
+          "Agent:",
+          "balloons and cake are ready."
+        ].join("\n")
+      });
+      repos.memories.insert({
+        ...traceMemory("trace-build-error"),
+        memoryValue: [
+          "Summary: ts build error in web",
+          "User:",
+          "fix my ts build",
+          "Agent:",
+          "done, the build is green."
+        ].join("\n")
+      });
+
+      // Every trace row carries the JSON key "ts" inside properties_json, so a
+      // two-character query token must only match real content columns.
+      const hits = repos.memories.searchPatternIds(["ts"], { memoryLayer: "L1" }, 5)
+        .map((hit) => hit.id);
+      expect(hits).toContain("trace-build-error");
+      expect(hits).not.toContain("trace-birthday-party");
+
+      // CJK bigrams cannot collide with ASCII JSON keys and keep their reach
+      // into metadata values.
+      repos.memories.insert({
+        ...traceMemory("trace-cjk-metadata-only"),
+        memoryValue: "Summary: metadata-only cjk row"
+      });
+      expect(repos.memories.searchPatternIds(["科幻"], { memoryLayer: "L1" }, 5)
+        .map((hit) => hit.id)).toContain("trace-cjk-metadata-only");
+
+      db.close();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("filters memories by an inclusive start and exclusive end creation time", () => {
     const root = mkdtempSync(join(tmpdir(), "mindock-memory-time-filter-"));
     try {

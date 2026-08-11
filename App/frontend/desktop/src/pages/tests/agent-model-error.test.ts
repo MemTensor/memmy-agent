@@ -6,7 +6,7 @@ const t = (key: string, values?: Record<string, string | number>) => {
   if (key === "agent.error.retrying") return `${values?.seconds}s 后重试（第 ${values?.attempt} 次）`;
   if (key === "agent.error.givingUp") return "模型请求多次重试后仍失败";
   if (key === "agent.error.modelFailed") return "模型请求失败";
-  if (key === "agent.error.quotaExceeded") return "当前模型额度已用完";
+  if (key === "agent.error.quotaExceeded") return "当前模型 Token 余额不足，请更换模型后重试";
   return key;
 };
 
@@ -31,18 +31,50 @@ describe("agent-model-error", () => {
     expect(formatAgentModelError("Error: invalid api key provided", t, { accountMode: false }).title).toBe("agent.error.authFailed");
   });
 
-  it("formats only a structured quota category as quota exhausted", () => {
+  it("formats a structured quota category without dropping its raw detail", () => {
     expect(
-      formatAgentModelError("raw provider detail", t, {
-        modelError: { category: "quota_exhausted" }
+      formatAgentModelError("localized fallback", t, {
+        modelError: { category: "quota_exhausted", detail: "Error: raw provider detail 40309" }
       })
-    ).toEqual({ title: "当前模型额度已用完", detail: null });
+    ).toEqual({
+      title: "当前模型 Token 余额不足，请更换模型后重试",
+      detail: "Error: raw provider detail 40309"
+    });
+  });
+
+  it("formats a structured generic model failure without dropping its raw detail", () => {
+    expect(
+      formatAgentModelError("localized fallback", t, {
+        modelError: { category: "model_failed", detail: "Error: raw provider failure" }
+      })
+    ).toEqual({
+      title: "模型请求失败",
+      detail: "Error: raw provider failure"
+    });
+  });
+
+  it("keeps specific auth classification for structured model failures", () => {
+    expect(
+      formatAgentModelError("localized fallback", t, {
+        modelError: { category: "model_failed", detail: "Error calling LLM: 401 Unauthorized" }
+      })
+    ).toEqual({
+      title: "agent.error.authFailed",
+      detail: "Error calling LLM: 401 Unauthorized"
+    });
+  });
+
+  it("classifies an exact legacy 40309 before the generic 403 auth branch", () => {
+    expect(formatAgentModelError("Error calling LLM: code 40309\nraw provider detail", t)).toEqual({
+      title: "当前模型 Token 余额不足，请更换模型后重试",
+      detail: "Error calling LLM: code 40309\nraw provider detail"
+    });
   });
 
   it("does not infer quota exhaustion from error text", () => {
     expect(formatAgentModelError("Error calling LLM: insufficient quota", t)).toEqual({
       title: "模型请求失败",
-      detail: "insufficient quota"
+      detail: "Error calling LLM: insufficient quota"
     });
   });
 

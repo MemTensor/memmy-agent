@@ -1,7 +1,8 @@
 import type { ApiLogRecord } from "../../storage/repositories.js";
 import { isRecord } from "../../utils/json.js";
+import { resolveTimeZone, zonedDateKey } from "../../utils/time.js";
 
-export function panelToolLatency(logs: ApiLogRecord[], dates: string[]): {
+export function panelToolLatency(logs: ApiLogRecord[], dates: string[], timeZone?: string): {
   tools: Array<{ name: string; calls: number; avgMs: number; p95Ms: number }>;
   series: Array<{ name: string; points: Array<{ date: string; avgMs: number }> }>;
 } {
@@ -32,7 +33,7 @@ export function panelToolLatency(logs: ApiLogRecord[], dates: string[]): {
         name: tool.name,
         points: dates.map((date) => {
           const durations = rows
-            .filter((row) => panelDateKey(row.calledAt) === date)
+            .filter((row) => panelDateKey(row.calledAt, timeZone) === date)
             .map((row) => Math.max(0, Math.round(row.durationMs)));
           return { date, avgMs: panelRoundInt(panelAverage(durations)) };
         })
@@ -48,13 +49,14 @@ export function panelRecallScore(outputJson: string): number | undefined {
   return typeof score === "number" && Number.isFinite(score) ? Math.max(0, score) : undefined;
 }
 
-export function panelLastSevenDateKeys(now: string): string[] {
-  return panelDateKeys(now, 7);
+export function panelLastSevenDateKeys(now: string, timeZone?: string): string[] {
+  return panelDateKeys(now, 7, timeZone);
 }
 
-export function panelDateKeys(now: string, days: number): string[] {
-  const parsed = Date.parse(now);
-  const end = Number.isFinite(parsed) ? new Date(parsed) : new Date();
+export function panelDateKeys(now: string, days: number, timeZone?: string): string[] {
+  const zone = resolveTimeZone(timeZone);
+  const endKey = zonedDateKey(now, zone) || zonedDateKey(new Date(), zone);
+  const end = new Date(`${endKey}T00:00:00.000Z`);
   return Array.from({ length: days }, (_item, index) => {
     const day = new Date(end);
     day.setUTCDate(end.getUTCDate() - (days - 1 - index));
@@ -62,9 +64,8 @@ export function panelDateKeys(now: string, days: number): string[] {
   });
 }
 
-export function panelDateKey(value: string | undefined): string {
-  const parsed = Date.parse(value ?? "");
-  return Number.isFinite(parsed) ? new Date(parsed).toISOString().slice(0, 10) : "";
+export function panelDateKey(value: string | undefined, timeZone?: string): string {
+  return value ? zonedDateKey(value, timeZone) : "";
 }
 
 export function panelAverage(values: number[]): number {

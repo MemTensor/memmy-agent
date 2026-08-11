@@ -1,6 +1,7 @@
 import { CronSchedule } from "../cron/types.js";
 import { PROVIDERS, findByName, normalizeProviderName } from "../providers/registry.js";
 import { DEFAULT_MAX_TOKENS } from "../token-budget.js";
+import { normalizeTimeZoneOffset, systemUtcOffset } from "../utils/time-zone.js";
 
 type Dict<T = any> = Record<string, T>;
 type MemoryProfileName = "account" | "byok";
@@ -307,7 +308,7 @@ export class AgentDefaults extends Base {
   providerRetryMode = "standard";
   toolHintMaxLength = 40;
   reasoningEffort: string | null = null;
-  timezone = "UTC";
+  timezone = systemUtcOffset();
   botName = "memmy";
   botIcon = "🍚";
   unifiedSession = false;
@@ -342,7 +343,7 @@ export class AgentDefaults extends Base {
     this.providerRetryMode = pick(init, ["providerRetryMode"], this.providerRetryMode);
     this.toolHintMaxLength = pick(init, ["toolHintMaxLength"], this.toolHintMaxLength);
     this.reasoningEffort = pick(init, ["reasoningEffort"], null);
-    this.timezone = pick(init, ["timezone"], this.timezone);
+    this.timezone = normalizeTimeZoneOffset(pick(init, ["timezone"], this.timezone));
     this.botName = pick(init, ["botName"], this.botName);
     this.botIcon = pick(init, ["botIcon"], this.botIcon);
     this.unifiedSession = pick(init, ["unifiedSession"], false);

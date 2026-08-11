@@ -30,7 +30,13 @@ export function createMemmyMemoryIntegration(
 ): MemmyMemoryIntegration {
   const resolved = resolveMemmyMemoryConfig(config);
   if (!resolved.enabled) return { enabled: false };
-  const connection = discoverMemmyMemoryConnection();
+  const defaults = config && typeof config === "object"
+    ? (config as Record<string, any>).agents?.defaults
+    : undefined;
+  const connection = {
+    ...discoverMemmyMemoryConnection(),
+    timeZone: typeof defaults?.timezone === "string" ? defaults.timezone : undefined
+  };
   const client = new MemmyMemoryClient(connection);
   const hook = new MemmyMemoryHook(client, {
     workspace: options.workspace ?? null,

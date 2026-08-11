@@ -16,7 +16,7 @@ import type {
 } from "@memmy/desktop-interface";
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, screen, shell, systemPreferences, Tray, type Event as ElectronEvent, type FileFilter, type IpcMainEvent, type MenuItemConstructorOptions, type Rectangle, type WebContents } from "electron";
 import { spawn } from "node:child_process";
-import { constants as fsConstants, existsSync, readFileSync } from "node:fs";
+import { constants as fsConstants, cpSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { access, appendFile, chmod, copyFile, lstat, mkdir, open, readFile, readdir, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
@@ -89,6 +89,11 @@ import {
 } from "./logger.js";
 import { persistSharedAnalyticsClientId } from "./analytics-client-id-store.js";
 import { backupSqliteDatabase } from "./sqlite-backup.js";
+import {
+  resolveStartupSplashHtml,
+  resolveStartupSplashLanguage,
+  type StartupSplashLanguage
+} from "./startup-splash.js";
 
 let mainWindow: BrowserWindow | null = null;
 let petWindow: BrowserWindow | null = null;
@@ -333,19 +338,86 @@ async function boot(): Promise<void> {
  */
 function configureAppIdentity(): void {
   const edition = resolveCurrentDesktopEdition();
-  const memmyHome = join(homedir(), desktopRuntimeHomeDirectoryName(edition));
+  const userDataPath = resolveDesktopUserDataPath(edition);
+  const memmyHome = resolveDesktopRuntimeHomePath(edition);
+  migratePackagedWindowsDataIfNeeded(edition, userDataPath, memmyHome);
   app.setName("Memmy");
   if (process.platform === "win32") {
     app.setAppUserModelId(WINDOWS_APP_USER_MODEL_ID);
   }
-  app.setPath("userData", join(app.getPath("appData"), desktopUserDataDirectoryName(edition)));
+  app.setPath("userData", userDataPath);
   if (app.isPackaged) {
     process.env.MEMMY_HOME = memmyHome;
     process.env.MEMMY_CONFIG = join(memmyHome, "config.yaml");
+    if (process.platform === "win32") {
+      const memoryDatabasePath = join(memmyHome, "memory-service", "memory.sqlite");
+      process.env.MEMMY_MEMORY_DB = memoryDatabasePath;
+      process.env.MEMORY_SERVICE_DB = memoryDatabasePath;
+    }
   } else {
     process.env.MEMMY_HOME ??= memmyHome;
     process.env.MEMMY_CONFIG ??= join(memmyHome, "config.yaml");
   }
+}
+
+function resolvePackagedWindowsDataRoot(): string | null {
+  if (process.platform !== "win32" || !app.isPackaged) {
+    return null;
+  }
+
+  return join(dirname(process.execPath), "data");
+}
+
+function resolveDesktopUserDataPath(edition: DesktopEdition): string {
+  return join(
+    resolvePackagedWindowsDataRoot() ?? app.getPath("appData"),
+    desktopUserDataDirectoryName(edition)
+  );
+}
+
+function resolveDesktopRuntimeHomePath(edition: DesktopEdition): string {
+  return join(
+    resolvePackagedWindowsDataRoot() ?? homedir(),
+    desktopRuntimeHomeDirectoryName(edition)
+  );
+}
+
+function migratePackagedWindowsDataIfNeeded(
+  edition: DesktopEdition,
+  userDataPath: string,
+  memmyHome: string
+): void {
+  if (!resolvePackagedWindowsDataRoot()) {
+    return;
+  }
+
+  copyDirectoryIfMissing(join(app.getPath("appData"), desktopUserDataDirectoryName(edition)), userDataPath);
+  copyDirectoryIfMissing(join(homedir(), desktopRuntimeHomeDirectoryName(edition)), memmyHome);
+}
+
+function copyDirectoryIfMissing(sourcePath: string, targetPath: string): void {
+  if (
+    pathsEqual(sourcePath, targetPath) ||
+    !existsSync(sourcePath) ||
+    existsSync(targetPath)
+  ) {
+    return;
+  }
+
+  try {
+    mkdirSync(dirname(targetPath), { recursive: true });
+    cpSync(sourcePath, targetPath, { recursive: true });
+  } catch (error) {
+    console.warn(`Failed to migrate Memmy data from ${sourcePath} to ${targetPath}:`, error);
+  }
+}
+
+function pathsEqual(left: string, right: string): boolean {
+  const normalizedLeft = resolve(left);
+  const normalizedRight = resolve(right);
+  return process.platform === "win32"
+    ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+    : normalizedLeft === normalizedRight;
 }
 
 /**
@@ -1248,7 +1320,7 @@ async function writeWindowsUpdatePromptLanguage(language: WindowsUpdatePromptLan
 async function ensureWindowsUpdatePromptLanguageFile(): Promise<string> {
   const languagePath = resolveWindowsUpdatePromptLanguagePath();
   if (!existsSync(languagePath)) {
-    await writeWindowsUpdatePromptLanguage(resolveDefaultWindowsUpdatePromptLanguage());
+    await writeWindowsUpdatePromptLanguage(resolveDefaultDesktopDisplayLanguage());
   }
   return languagePath;
 }
@@ -1268,15 +1340,15 @@ function resolveWindowsUpdatePromptLanguageFromAppSettings(): WindowsUpdatePromp
     void writePackagedStartupLog(`windows-update-prompt-language-failed:${String(error)}`);
   }
 
-  return resolveDefaultWindowsUpdatePromptLanguage();
+  return resolveDefaultDesktopDisplayLanguage();
 }
 
 /**
- * Windows update prompt language used when the app has no explicitly selected language.
+ * Display language used before the app settings are available.
  *
  * @returns The default display language of the current edition.
  */
-function resolveDefaultWindowsUpdatePromptLanguage(): WindowsUpdatePromptLanguage {
+function resolveDefaultDesktopDisplayLanguage(): StartupSplashLanguage {
   return resolveCurrentDesktopEdition() === "intl" ? "en-US" : "zh-CN";
 }
 
@@ -3046,23 +3118,6 @@ let splashCloseTimer: ReturnType<typeof setTimeout> | null = null;
 const SPLASH_MAX_VISIBLE_MS = 15 * 1000;
 
 /**
- * The splash page HTML (purely static, inline data URL, no extra files or preload needed).
- *
- * @returns The splash HTML string.
- */
-function resolveSplashHtml(): string {
-  return `<!doctype html><html><head><meta charset="utf-8"><style>
-html,body{margin:0;height:100%;overflow:hidden;font-family:-apple-system,"Segoe UI",sans-serif;}
-body{display:flex;align-items:center;justify-content:center;background:#1f2937;color:#f9fafb;-webkit-user-select:none;cursor:default;}
-.box{display:flex;flex-direction:column;align-items:center;gap:16px;}
-.title{font-size:22px;font-weight:600;letter-spacing:1px;}
-.hint{font-size:13px;color:#9ca3af;}
-.spinner{width:28px;height:28px;border:3px solid rgba(255,255,255,.2);border-top-color:#34d399;border-radius:50%;animation:spin .8s linear infinite;}
-@keyframes spin{to{transform:rotate(360deg);}}
-</style></head><body><div class="box"><div class="spinner"></div><div class="title">Memmy</div><div class="hint">正在启动…</div></div></body></html>`;
-}
-
-/**
  * Shows the startup splash. Only called on the normal boot path; creation failures do not affect the boot flow.
  *
  * @returns Nothing.
@@ -3093,7 +3148,11 @@ function showSplashWindow(): void {
         splash.show();
       }
     });
-    void splash.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(resolveSplashHtml())}`);
+    const language = resolveStartupSplashLanguage(
+      join(app.getPath("userData"), "app.sqlite"),
+      resolveDefaultDesktopDisplayLanguage()
+    );
+    void splash.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(resolveStartupSplashHtml(language))}`);
     splashCloseTimer = setTimeout(closeSplashWindow, SPLASH_MAX_VISIBLE_MS);
     splashCloseTimer.unref?.();
   } catch (error) {
@@ -5104,7 +5163,8 @@ async function exportDiagnosticsReport(owner: BrowserWindow | null): Promise<Dia
 function buildDiagnosticsReport(): string {
   const logsDirectory = resolveLogsDirectory();
   const configPath = resolvePathValue(process.env.MEMMY_CONFIG ?? "~/.memmy/config.yaml");
-  const agentWorkspace = process.env.MEMMY_AGENT_WORKSPACE ?? join(homedir(), ".memmy", "workspace");
+  const agentWorkspace = process.env.MEMMY_AGENT_WORKSPACE ??
+    join(resolvePathValue(process.env.MEMMY_HOME ?? "~/.memmy"), "workspace");
   const memoryDatabasePath = runtimeServices?.memory.databasePath ?? "<not-started>";
   const runtimeBaseUrl = runtimeConfig?.baseUrl ?? "<not-ready>";
   const agentGatewayBaseUrl = runtimeConfig?.agentGateway?.baseUrl ?? "<not-ready>";

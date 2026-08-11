@@ -53,6 +53,7 @@ import {
   type ToolTraceCategory,
 } from "../state/agent-tool-traces.js";
 import { AgentAttachmentCard, splitAgentAttachmentName } from "./agent-file-attachment-chip.js";
+import { ErrorNoticeDetail } from "./error-notice-detail.js";
 import {
   formatAgentModelError,
   formatRetryWaitStatus,
@@ -449,7 +450,7 @@ const SingleMessage = memo(function SingleMessage(props: SingleMessageProps) {
   }
 
   if (
-    message.modelError?.category === "quota_exhausted" ||
+    message.modelError != null ||
     (isAgentModelErrorContent(message.content) && !isTechnicalPlatformApiError(message.content))
   ) {
     return (
@@ -556,7 +557,6 @@ function AgentModelErrorNotice(props: {
   modelError?: AgentChatMessage["modelError"];
 }) {
   const { t } = useTranslation();
-  const [showDetail, setShowDetail] = useState(false);
   const { title, detail } = formatAgentModelError(props.content, t, {
     accountMode: props.accountMode === true,
     modelError: props.modelError
@@ -565,21 +565,16 @@ function AgentModelErrorNotice(props: {
   return (
     <div className="agent-model-error-notice" role="alert">
       <div className="agent-model-error-notice__header">
-        <AlertCircle size={15} className="agent-model-error-notice__icon" aria-hidden="true" />
+        <AlertCircle size={16} className="agent-model-error-notice__icon" aria-hidden="true" />
         <p className="agent-model-error-notice__title">{title}</p>
       </div>
       {detail ? (
-        <>
-          <button
-            type="button"
-            className="agent-model-error-notice__toggle"
-            aria-expanded={showDetail}
-            onClick={() => setShowDetail((current) => !current)}
-          >
-            {showDetail ? t("agent.error.hideDetails") : t("agent.error.showDetails")}
-          </button>
-          {showDetail ? <p className="agent-model-error-notice__detail">{detail}</p> : null}
-        </>
+        <ErrorNoticeDetail
+          showLabel={t("agent.error.showDetails")}
+          hideLabel={t("agent.error.hideDetails")}
+        >
+          <pre className="agent-model-error-notice__detail">{detail}</pre>
+        </ErrorNoticeDetail>
       ) : null}
     </div>
   );

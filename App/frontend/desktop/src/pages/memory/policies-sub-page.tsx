@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { GetMemoryOutput, MemoryListItem, PanelItemsOutput } from "@memmy/local-api-contracts";
 import type { MemoryRuntimeClient } from "../../api/memory-runtime-client.js";
+import { formatUserDateTime } from "../../lib/user-time-zone.js";
 import {
   buildMemoryUiDeletedEvent,
   buildMemoryUiDetailOpenedEvent,
@@ -586,6 +587,5 @@ function formatDateTime(value: string | undefined): string {
     return "-";
   }
 
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+  return formatUserDateTime(value);
 }

@@ -20,6 +20,19 @@ afterEach(() => {
 });
 
 describe("memmy memory config", () => {
+  it("reads the configured agent timezone and leaves it absent for system detection", () => {
+    const root = tempRoot();
+    const configPath = join(root, "config.yaml");
+    writeFileSync(configPath, YAML.stringify({
+      agents: { defaults: { timezone: "UTC" } },
+      memmyMemory: {}
+    }));
+
+    expect(loadMemmyConfig(configPath).config.timeZone).toBe("+00:00");
+    writeFileSync(configPath, YAML.stringify({ memmyMemory: {} }));
+    expect(loadMemmyConfig(configPath).config.timeZone).toBeUndefined();
+  });
+
   it("defaults memory gates and retrieval config", () => {
     const root = tempRoot();
     const configPath = join(root, "config.yaml");

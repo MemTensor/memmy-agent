@@ -124,6 +124,32 @@ export function resolveWorkbuddyProjectsDirectory(options: ResolveAgentPathOptio
   return createAgentPathRuntime(options).pathApi.join(resolveWorkbuddyHomeDirectory(options), "projects");
 }
 
+export function resolvePiAgentDirectory(options: ResolveAgentPathOptions = {}): string {
+  const runtime = createAgentPathRuntime(options);
+  return resolveConfiguredDirectory(
+    runtime.environment.PI_CODING_AGENT_DIR,
+    runtime.pathApi.join(runtime.homeDirectory, ".pi", "agent"),
+    runtime
+  );
+}
+
+export function resolvePiSessionsDirectory(options: ResolveAgentPathOptions = {}): string {
+  return createAgentPathRuntime(options).pathApi.join(resolvePiAgentDirectory(options), "sessions");
+}
+
+export function resolveQwenworkHomeDirectory(options: ResolveAgentPathOptions = {}): string {
+  const runtime = createAgentPathRuntime(options);
+  return resolveConfiguredDirectory(
+    runtime.environment.QWENWORK_CONFIG_DIR,
+    runtime.pathApi.join(runtime.homeDirectory, ".qwenworkcn"),
+    runtime
+  );
+}
+
+export function resolveQwenworkProjectsDirectory(options: ResolveAgentPathOptions = {}): string {
+  return createAgentPathRuntime(options).pathApi.join(resolveQwenworkHomeDirectory(options), "projects");
+}
+
 export function resolveCursorDataPaths(options: ResolveCursorDataPathsOptions = {}): CursorDataPaths {
   const runtime = createAgentPathRuntime(options);
   const platform = options.platform ?? process.platform;

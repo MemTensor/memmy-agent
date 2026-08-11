@@ -459,7 +459,10 @@ export class SessionTurnService {
       hostSessionKey,
       conversationId: this.deps.stringFromMeta(request.meta, "conversationId"),
       status: "open" as const,
-      meta: request.meta ?? {},
+      meta: {
+        ...(request.meta ?? {}),
+        ...(request.timeZone ? { time_zone: request.timeZone } : {})
+      },
       openedAt: at,
       lastSeenAt: at,
       updatedAt: at
@@ -611,6 +614,7 @@ export class SessionTurnService {
       sourceMemoryIds,
       usage: {},
       messagePayload: {
+        time_zone: request.timeZone ?? stringFromMaybeRecord(session.meta, "time_zone"),
         compact: {
           contextPacketId,
           sourceTurnIds,
@@ -638,6 +642,7 @@ export class SessionTurnService {
     let l1MemoryId: string | undefined;
     const jobs: EvolutionJobRecord[] = [];
     if (request.createL1 !== false) {
+      const timeZone = request.timeZone ?? stringFromMaybeRecord(session.meta, "time_zone");
       const l1 = this.deps.buildMemory({
         id: `trace_${stableHash(`compact:L1:${rawTurn.id}`).slice(0, 20)}`,
         userId: session.userId,
@@ -665,7 +670,8 @@ export class SessionTurnService {
           raw_turn_id: rawTurn.id,
           episode_id: episode.id,
           summary,
-          source_memory_ids: sourceMemoryIds
+          source_memory_ids: sourceMemoryIds,
+          time_zone: timeZone
         },
         internal: {
           source: "session.compact",
@@ -677,12 +683,14 @@ export class SessionTurnService {
           alpha: 0.5,
           value: 0,
           priority: 0.5,
+          time_zone: timeZone,
           raw_turn_id: rawTurn.id,
           raw_span: { compact: true },
           error_signatures: [],
           trace: {
             key: `${episode.id}:${Date.parse(at)}:compact`,
             ts: Date.parse(at),
+            time_zone: timeZone,
             turn_id: turnId,
             raw_turn_id: rawTurn.id,
             raw_span: { compact: true },
@@ -1088,7 +1096,8 @@ export class SessionTurnService {
             turn_start: turnStartPayload,
             turn_complete: {
               completed_at: at,
-              source_memory_ids: sourceMemoryIds
+              source_memory_ids: sourceMemoryIds,
+              time_zone: request.timeZone ?? stringFromMaybeRecord(session.meta, "time_zone")
             }
           },
           status: request.status ?? "succeeded",
@@ -1187,7 +1196,8 @@ export class SessionTurnService {
             raw_turn_id: stepRawTurnId,
             episode_id: episode.id,
             status: rawTurn.status,
-            summary: ""
+            summary: "",
+            time_zone: step.timeZone
           },
           internal: {
             source: "turn.complete",
@@ -1199,6 +1209,7 @@ export class SessionTurnService {
             alpha: step.reflection.alpha,
             value: step.value,
             priority: step.priority,
+            time_zone: step.timeZone,
             raw_turn_id: stepRawTurnId,
             raw_span: {
               user_text: Boolean(step.userText),
@@ -1209,6 +1220,7 @@ export class SessionTurnService {
             trace: {
               key: step.key,
               ts: step.ts,
+              time_zone: step.timeZone,
               turn_id: step.turnId,
               raw_turn_id: stepRawTurnId,
               raw_span: {
@@ -2125,6 +2137,8 @@ export class SessionTurnService {
         toolCalls: rawTurn.toolCalls.filter(isToolCallPayload),
         toolResults: rawTurn.toolResults,
         createdAtIso: rawTurn.createdAt || at,
+        timeZone: stringFromMaybeRecord(rawTurn.messagePayload, "time_zone") ??
+          stringFromMaybeRecord(rawTurn.messagePayload?.turn_complete, "time_zone"),
         maxTextChars: this.deps.config.algorithm.capture.maxTextChars,
         maxToolOutputChars: this.deps.config.algorithm.capture.maxToolOutputChars
       }).map((step) => ({ ...step, rawTurnId: rawTurn.id }))

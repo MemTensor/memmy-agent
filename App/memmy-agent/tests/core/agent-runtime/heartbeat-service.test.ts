@@ -264,7 +264,7 @@ describe("HeartbeatService", () => {
     expect(capturedMessages[1]).toMatchObject({ role: "user" });
     expect(capturedMessages[1].content).toContain("Current Time:");
     expect(capturedMessages[1].content).toMatch(
-      /Current Time: \d{4}-\d{2}-\d{2} \d{2}:\d{2} \([^)]+\) \(Asia\/Shanghai, UTC[+-]\d{2}:\d{2}\)/,
+      /Current Time: \d{4}-\d{2}-\d{2} \d{2}:\d{2} \([^)]+\) \(UTC[+-]\d{2}:\d{2}\)/,
     );
   });
 });

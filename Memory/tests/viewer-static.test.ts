@@ -1,8 +1,29 @@
 import { Script, createContext } from "node:vm";
 import { describe, expect, it } from "vitest";
+import { systemTimeZone } from "../src/utils/time.js";
 import { memoryPanelHtml } from "../src/viewer/static.js";
 
 describe("memoryPanelHtml", () => {
+  it("sends the browser timezone with panel requests", async () => {
+    const harness = createViewerHarness();
+    runViewerScript(harness);
+    await flushPromises();
+
+    expect(harness.requests[0]?.options?.headers).toMatchObject({
+      "x-memmy-time-zone": systemTimeZone()
+    });
+  });
+
+  it("uses the configured timezone before the browser timezone", async () => {
+    const harness = createViewerHarness();
+    runViewerScript(harness, "+00:00");
+    await flushPromises();
+
+    expect(harness.requests[0]?.options?.headers).toMatchObject({
+      "x-memmy-time-zone": "+00:00"
+    });
+  });
+
   it("strips generated Summary prefixes from displayed memory titles", async () => {
     const harness = createViewerHarness();
     runViewerScript(harness);
@@ -55,8 +76,8 @@ type FakeRow = FakeElement & {
 
 type DetailResolver = (body: unknown) => void;
 
-function runViewerScript(harness: ReturnType<typeof createViewerHarness>): void {
-  const match = memoryPanelHtml().match(/<script>([\s\S]*)<\/script>/);
+function runViewerScript(harness: ReturnType<typeof createViewerHarness>, timeZone?: string): void {
+  const match = memoryPanelHtml(timeZone).match(/<script>([\s\S]*)<\/script>/);
   const script = match?.[1];
   if (!script) {
     throw new Error("viewer script not found");
@@ -74,6 +95,7 @@ function runViewerScript(harness: ReturnType<typeof createViewerHarness>): void 
 function createViewerHarness() {
   const elements = new Map<string, FakeElement>();
   const detailResolvers = new Map<string, DetailResolver>();
+  const requests: Array<{ path: string; options?: Record<string, any> }> = [];
   const ids = [
     "errorMessage",
     "stats",
@@ -121,7 +143,8 @@ function createViewerHarness() {
     }
   });
 
-  const fetch = async (path: string) => {
+  const fetch = async (path: string, options?: Record<string, any>) => {
+    requests.push({ path, options });
     if (path === "/api/v1/panel/overview") {
       return jsonResponse({ counts: { memories: 2, experiences: 0, worldModels: 0, skills: 0 } });
     }
@@ -158,6 +181,7 @@ function createViewerHarness() {
         return element;
       }
     },
+    requests,
     element(id: string) {
       return elements.get(id)!;
     },

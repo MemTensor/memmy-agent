@@ -4,6 +4,8 @@ import cursorLogoUrl from "../assets/agent-logos/cursor.svg";
 import hermesLogoUrl from "../assets/agent-logos/hermes.svg";
 import openclawLogoUrl from "../assets/agent-logos/openclaw.svg";
 import opencodeLogoUrl from "../assets/agent-logos/opencode.svg";
+import piLogoUrl from "../assets/agent-logos/pi.svg";
+import qwenworkLogoUrl from "../assets/agent-logos/qwenwork.svg";
 import workbuddyLogoUrl from "../assets/agent-logos/workbuddy.png";
 import memmyRiceLogoUrl from "../assets/mascot/memmy-rice.png";
 
@@ -15,7 +17,9 @@ export const MEMORY_AGENT_SOURCE_VALUES = [
   "opencode",
   "openclaw",
   "hermes",
-  "workbuddy"
+  "workbuddy",
+  "pi",
+  "qwenwork"
 ] as const;
 
 const AGENT_SOURCE_DISPLAY_NAMES: Record<string, string> = {
@@ -27,7 +31,9 @@ const AGENT_SOURCE_DISPLAY_NAMES: Record<string, string> = {
   opencode: "OpenCode",
   openclaw: "OpenClaw",
   hermes: "Hermes",
-  workbuddy: "WorkBuddy"
+  workbuddy: "WorkBuddy",
+  pi: "Pi",
+  qwenwork: "qwenwork"
 };
 
 export const AGENT_SOURCE_LOGOS: Partial<Record<string, string>> = {
@@ -38,6 +44,8 @@ export const AGENT_SOURCE_LOGOS: Partial<Record<string, string>> = {
   openclaw: openclawLogoUrl,
   hermes: hermesLogoUrl,
   workbuddy: workbuddyLogoUrl,
+  pi: piLogoUrl,
+  qwenwork: qwenworkLogoUrl,
   memmy: memmyRiceLogoUrl,
   memmy_agent: memmyRiceLogoUrl
 };

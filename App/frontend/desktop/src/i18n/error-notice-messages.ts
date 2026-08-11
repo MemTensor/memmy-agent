@@ -1,0 +1,88 @@
+/** User-facing copy for governed Agent and memory-processing errors. */
+export const zhCNErrorNoticeMessages = {
+  "agent.error.modelFailed": "模型请求失败，请稍后重试",
+  "agent.error.connectionFailed": "无法连接到模型服务，请检查网络或 API 配置",
+  "agent.error.authFailed": "API 密钥无效或已过期，请检查后重试",
+  "agent.error.loginExpired": "登录已过期，请重新登录",
+  "agent.error.rateLimited": "请求过于频繁，请稍后再试",
+  "agent.error.quotaExceeded": "当前模型 Token 余额不足，请更换模型后重试",
+  "agent.error.retrying": "模型请求失败，{seconds} 秒后重试（第 {attempt} 次）",
+  "agent.error.retryWait": "模型请求重试中，{seconds} 秒后继续（第 {attempt} 次）",
+  "agent.error.givingUp": "模型请求多次重试后仍失败",
+  "agent.error.persistentStopped": "连续出现相同错误，已停止重试",
+  "agent.error.showDetails": "查看详情",
+  "agent.error.hideDetails": "收起详情",
+  "memory.memories.processing.summary": "摘要总结中",
+  "memory.memories.processing.index": "索引建立中",
+  "memory.memories.processing.reflection": "反思生成中",
+  "memory.memories.processing.failed": "处理失败",
+  "memory.memories.processing.stage": "失败阶段",
+  "memory.memories.processing.stageSummary": "摘要总结",
+  "memory.memories.processing.stageEmbedding": "索引建立",
+  "memory.memories.processing.reason": "失败原因",
+  "memory.memories.processing.failedAt": "失败时间",
+  "memory.memories.processing.previousReason": "上次失败原因",
+  "memory.memories.processing.previousFailedAt": "上次失败时间",
+  "memory.memories.processing.retry": "立即重试",
+  "memory.memories.processing.retrying": "正在重试",
+  "memory.memories.processing.retrySucceeded": "重试成功",
+  "memory.memories.processing.openSettings": "检查模型设置",
+  "memory.memories.processing.retryFailed": "重试后仍未处理成功",
+  "memory.memories.processing.retryTimeout": "重试等待超时，请稍后再试",
+  "memory.memories.processing.retryError": "本次重试未成功：{message}",
+  "memory.memories.processing.retryEndpointUnavailable": "本地记忆服务尚未加载重试功能，请完全退出并重新打开 Memmy 后再试",
+  "memory.memories.processing.missing": "没有找到这条记忆的处理状态",
+  "memory.memories.processing.failureTitle": "这条记忆处理失败",
+  "memory.memories.processing.quotaExhaustedTitle": "当前模型 Token 余额不足，记忆处理失败，请更换模型后重试",
+  "memory.memories.processing.autoRetryScheduledTitle": "记忆处理失败，稍后将自动重试"
+} as const;
+
+export const enUSErrorNoticeMessages = {
+  "agent.error.modelFailed": "The model request failed. Please try again later.",
+  "agent.error.connectionFailed": "Could not connect to the model service. Check your network or API settings.",
+  "agent.error.authFailed": "The API key is invalid or expired. Check your settings and try again.",
+  "agent.error.loginExpired": "Your login has expired. Please sign in again.",
+  "agent.error.rateLimited": "Too many requests. Please wait a moment and try again.",
+  "agent.error.quotaExceeded": "The current model has insufficient tokens. Switch models and try again.",
+  "agent.error.retrying": "Model request failed. Retrying in {seconds}s (attempt {attempt}).",
+  "agent.error.retryWait": "Waiting to retry the model request in {seconds}s (attempt {attempt}).",
+  "agent.error.givingUp": "The model request failed after several retries",
+  "agent.error.persistentStopped": "Stopped retrying after repeated identical errors",
+  "agent.error.showDetails": "Show details",
+  "agent.error.hideDetails": "Hide details",
+  "memory.memories.processing.summary": "Preparing summary",
+  "memory.memories.processing.index": "Indexing",
+  "memory.memories.processing.reflection": "Generating reflection",
+  "memory.memories.processing.failed": "Processing failed",
+  "memory.memories.processing.stage": "Failed stage",
+  "memory.memories.processing.stageSummary": "Summary",
+  "memory.memories.processing.stageEmbedding": "Indexing",
+  "memory.memories.processing.reason": "Reason",
+  "memory.memories.processing.failedAt": "Failed at",
+  "memory.memories.processing.previousReason": "Previous failure",
+  "memory.memories.processing.previousFailedAt": "Previous failure time",
+  "memory.memories.processing.retry": "Retry now",
+  "memory.memories.processing.retrying": "Retrying",
+  "memory.memories.processing.retrySucceeded": "Retry succeeded",
+  "memory.memories.processing.openSettings": "Check model settings",
+  "memory.memories.processing.retryFailed": "Processing still failed after retry",
+  "memory.memories.processing.retryTimeout": "Retry timed out. Try again later.",
+  "memory.memories.processing.retryError": "This retry did not succeed: {message}",
+  "memory.memories.processing.retryEndpointUnavailable": "The local memory service has not loaded retry support. Quit and reopen Memmy, then try again.",
+  "memory.memories.processing.missing": "Processing status is unavailable for this memory",
+  "memory.memories.processing.failureTitle": "This memory could not be processed",
+  "memory.memories.processing.quotaExhaustedTitle": "The current model has insufficient tokens. Memory processing failed. Switch models and try again.",
+  "memory.memories.processing.autoRetryScheduledTitle": "Memory processing failed. It will retry automatically later."
+} satisfies Record<keyof typeof zhCNErrorNoticeMessages, string>;
+
+export const ERROR_NOTICE_KEYS = {
+  agent: {
+    modelFailed: "agent.error.modelFailed",
+    quotaExhausted: "agent.error.quotaExceeded"
+  },
+  memory: {
+    failed: "memory.memories.processing.failureTitle",
+    quotaExhausted: "memory.memories.processing.quotaExhaustedTitle",
+    autoRetryScheduled: "memory.memories.processing.autoRetryScheduledTitle"
+  }
+} as const;

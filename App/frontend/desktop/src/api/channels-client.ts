@@ -4,12 +4,14 @@ import {
   ConnectChannelResponseSchema,
   OkResponseSchema,
   PollChannelConnectResponseSchema,
+  ReportIntegrationConnectionEventInputSchema,
   type ChannelConnectionsResponse,
   type ChannelDefinitionsResponse,
   type ChannelProvider,
   type ConnectChannelInput,
   type ConnectChannelResponse,
   type PollChannelConnectResponse,
+  type ReportIntegrationConnectionEventInput,
   type RuntimeConfig
 } from "@memmy/local-api-contracts";
 import { requestJson } from "./http.js";
@@ -20,6 +22,7 @@ export interface ChannelsClient {
   connect(provider: ChannelProvider, input?: ConnectChannelInput): Promise<ConnectChannelResponse>;
   pollConnect(provider: ChannelProvider, pollToken: string): Promise<PollChannelConnectResponse>;
   disconnect(provider: ChannelProvider): Promise<void>;
+  reportConnectionEvent(input: ReportIntegrationConnectionEventInput): Promise<void>;
 }
 
 export const channelEndpointPaths = {
@@ -28,7 +31,8 @@ export const channelEndpointPaths = {
   connect: (provider: ChannelProvider) => `/api/v1/channels/${encodeURIComponent(provider)}/connect`,
   pollConnect: (provider: ChannelProvider, pollToken: string) =>
     `/api/v1/channels/${encodeURIComponent(provider)}/connect/${encodeURIComponent(pollToken)}`,
-  disconnect: (provider: ChannelProvider) => `/api/v1/channels/${encodeURIComponent(provider)}/disconnect`
+  disconnect: (provider: ChannelProvider) => `/api/v1/channels/${encodeURIComponent(provider)}/disconnect`,
+  reportConnectionEvent: "/api/v1/channels/connection-events"
 };
 
 /**
@@ -75,6 +79,16 @@ export function createHttpChannelsClient(config: RuntimeConfig): ChannelsClient 
         path: channelEndpointPaths.disconnect(provider),
         schema: OkResponseSchema,
         init: { method: "POST" }
+      });
+    },
+    async reportConnectionEvent(input) {
+      const body = ReportIntegrationConnectionEventInputSchema.parse(input);
+      await requestJson({
+        config,
+        path: channelEndpointPaths.reportConnectionEvent,
+        schema: OkResponseSchema,
+        init: { method: "POST" },
+        body
       });
     }
   };

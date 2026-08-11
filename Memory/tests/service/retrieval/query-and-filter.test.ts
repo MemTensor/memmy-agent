@@ -154,6 +154,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
         profileId: "jiang",
         userId: "user-time-filter"
       },
+      timeZone: "Asia/Shanghai",
       query: "我今天做了什么，总结一下",
       limit: 100
     });
@@ -190,7 +191,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
         const activityIndex = index + 5;
         return [
           `id: trace-time-filter-${activityIndex}`,
-          `timestamp: ${new Date(Date.UTC(2026, 7, 4, 0, activityIndex)).toISOString()}`,
+          `timestamp: 2026-08-04 08:${String(activityIndex).padStart(2, "0")}:00 UTC+08:00`,
           "",
           "Summary:",
           `time-filtered activity ${activityIndex}`

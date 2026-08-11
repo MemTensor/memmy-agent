@@ -48,6 +48,7 @@ describe("HttpMemoryClient", () => {
       method: string;
       path: string;
       authorization: string | undefined;
+      timeZone: string | undefined;
       body: unknown;
     }> = [];
     const baseUrl = await startServer(async (request, response) => {
@@ -56,6 +57,7 @@ describe("HttpMemoryClient", () => {
         method: request.method ?? "",
         path: new URL(request.url ?? "/", "http://localhost").pathname,
         authorization: request.headers.authorization,
+        timeZone: request.headers["x-memmy-time-zone"] as string | undefined,
         body
       });
       sendJson(response, fixtureFor(request.method ?? "", new URL(request.url ?? "/", "http://localhost").pathname, body));
@@ -84,7 +86,7 @@ describe("HttpMemoryClient", () => {
     await expect(
       client.memoryApiLogs({ tools: ["memory_add", "memory_search"], limit: 20, offset: 0 })
     ).resolves.toMatchObject({ logs: [] });
-    await expect(client.panelOverview()).resolves.toMatchObject({ counts: { memories: 0 } });
+    await expect(client.panelOverview({ timeZone: "Asia/Shanghai" })).resolves.toMatchObject({ counts: { memories: 0 } });
     await expect(client.panelAnalysis()).resolves.toMatchObject({ metrics: { avgRecallScore: 0 } });
     await expect(client.panelItems(panelItemsInput())).resolves.toMatchObject({ items: [] });
     await expect(client.panelTasks({ page: 1 })).resolves.toMatchObject({ tasks: [] });
@@ -110,6 +112,8 @@ describe("HttpMemoryClient", () => {
       "DELETE /api/v1/panel/tasks/episode-1"
     ]);
     expect(requests.every((request) => request.authorization === "Bearer memory-token")).toBe(true);
+    expect(requests.find((request) => request.path === "/api/v1/panel/overview")?.timeZone)
+      .toBe("+08:00");
     expect(
       requests
         .filter((request) => requestBodySource(request.body) !== undefined)

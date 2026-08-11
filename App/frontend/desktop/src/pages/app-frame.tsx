@@ -31,6 +31,7 @@ import { useAppState } from "../state/app-state.js";
 import { agentChatScopeKey } from "../state/agent-composer-state.js";
 import type { AgentTaskView } from "../state/agent-chat-slice.js";
 import { decideTaskDoneNotification } from "../state/task-done-notification.js";
+import { maskAccountIdentifier } from "../utils/mask-account-identifier.js";
 import { openExternalUrl } from "../utils/open-url.js";
 import { isComposingKeyboardEvent } from "../utils/keyboard.js";
 import { ImprovementProgramModal } from "./improvement-program-modal.js";
@@ -2847,11 +2848,12 @@ export function resolveSidebarAccountSummary(state: AppState, labels: SidebarAcc
   }
 
   if (userMode === "account") {
-    const accountIdentifier = (state.account.email || state.account.phoneNumber || "").trim();
+    const accountIdentifier = state.account.email || state.account.phoneNumber || "";
+    const maskedIdentifier = maskAccountIdentifier(accountIdentifier);
 
     return {
-      name: state.account.nickname || accountIdentifier || labels.accountFallback,
-      meta: accountIdentifier || labels.accountMetaFallback
+      name: state.account.nickname || maskedIdentifier || labels.accountFallback,
+      meta: maskedIdentifier || labels.accountMetaFallback
     };
   }
 

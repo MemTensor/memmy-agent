@@ -17,6 +17,7 @@ import { createHttpLocalDataClient, type LocalDataClient } from "./local-data-cl
 import { createHttpMemoryRuntimeClient, type MemoryRuntimeClient } from "./memory-runtime-client.js";
 import { createMemmyAgentClient, type MemmyAgentClient } from "./memmy-agent-client.js";
 import { createHttpTokenQuotaClient, type TokenQuotaClient } from "./token-quota-client.js";
+import { configureUserTimeZone } from "../lib/user-time-zone.js";
 
 export interface AppClients {
   runtimeConfig: RuntimeConfig;
@@ -42,6 +43,7 @@ export function createAppClients(input: CreateAppClientsInput): AppClients {
   if (!input.runtimeConfig) {
     throw new Error("Runtime config is required.");
   }
+  configureUserTimeZone(input.runtimeConfig.timeZone);
 
   return {
     runtimeConfig: input.runtimeConfig,

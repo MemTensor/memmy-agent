@@ -13,6 +13,7 @@ import {
 import { useAnalytics } from "../../analytics/use-analytics.js";
 import { MEMORY_ADD_STATUS_SUMMARIES, type MessageKey, type MessageValues } from "../../i18n/messages.js";
 import type { MemoryRuntimeClient } from "../../api/memory-runtime-client.js";
+import { formatUserDateTime } from "../../lib/user-time-zone.js";
 import { useTranslation } from "../../i18n/use-translation.js";
 import {
   MEMORY_SOURCE_AGENT_EXCLUSIONS,
@@ -733,11 +734,7 @@ function formatDuration(value: number): string {
 }
 
 function formatDate(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-  return date.toLocaleString();
+  return formatUserDateTime(value);
 }
 
 function isMissingLogsRoute(error: unknown): boolean {

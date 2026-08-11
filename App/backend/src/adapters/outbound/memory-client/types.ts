@@ -34,20 +34,24 @@ import type {
 } from "@memmy/local-api-contracts";
 
 /** Contract for memory client. */
+export interface MemoryRequestContext {
+  timeZone?: string;
+}
+
 export interface MemoryClient {
   health(): Promise<MemoryHealthSnapshot>;
   reloadConfig(input?: MemoryReloadConfigInput): Promise<MemoryReloadConfigOutput>;
 
-  openSession(input: OpenSessionInput): Promise<OpenSessionOutput>;
-  closeSession(input: CloseSessionInput & { sessionId: string }): Promise<CloseSessionOutput>;
+  openSession(input: OpenSessionInput, context?: MemoryRequestContext): Promise<OpenSessionOutput>;
+  closeSession(input: CloseSessionInput & { sessionId: string }, context?: MemoryRequestContext): Promise<CloseSessionOutput>;
 
-  startTurn(input: StartTurnInput): Promise<StartTurnOutput>;
-  completeTurn(input: CompleteTurnInput & { turnId: string }): Promise<CompleteTurnOutput>;
+  startTurn(input: StartTurnInput, context?: MemoryRequestContext): Promise<StartTurnOutput>;
+  completeTurn(input: CompleteTurnInput & { turnId: string }, context?: MemoryRequestContext): Promise<CompleteTurnOutput>;
 
-  search(input: SearchInput): Promise<SearchOutput>;
-  addMemory(input: AddMemoryInput): Promise<AddMemoryOutput>;
-  getMemory(input: { memoryId: string }): Promise<GetMemoryOutput>;
-  deleteMemory(input: DeleteMemoryInput & { memoryId: string }): Promise<DeleteMemoryOutput>;
+  search(input: SearchInput, context?: MemoryRequestContext): Promise<SearchOutput>;
+  addMemory(input: AddMemoryInput, context?: MemoryRequestContext): Promise<AddMemoryOutput>;
+  getMemory(input: { memoryId: string }, context?: MemoryRequestContext): Promise<GetMemoryOutput>;
+  deleteMemory(input: DeleteMemoryInput & { memoryId: string }, context?: MemoryRequestContext): Promise<DeleteMemoryOutput>;
 
   enqueueImportSummaries(memoryIds?: string[]): Promise<EnqueueImportSummariesOutput>;
   getMemoryProcessingStatus(memoryIds: string[]): Promise<MemoryProcessingStatusOutput>;
@@ -60,10 +64,10 @@ export interface MemoryClient {
     timeoutMs?: number;
   }): Promise<WorkerRunOutput>;
 
-  panelOverview(): Promise<PanelOverviewOutput>;
-  panelAnalysis(): Promise<PanelAnalysisOutput>;
-  panelItems(input: PanelItemsInput): Promise<PanelItemsOutput>;
-  panelTasks(input: PanelTasksInput): Promise<PanelTasksOutput>;
-  deletePanelTask(taskId: string): Promise<DeletePanelTaskOutput>;
-  memoryApiLogs(input: MemoryApiLogsInput): Promise<MemoryApiLogsOutput>;
+  panelOverview(context?: MemoryRequestContext): Promise<PanelOverviewOutput>;
+  panelAnalysis(context?: MemoryRequestContext): Promise<PanelAnalysisOutput>;
+  panelItems(input: PanelItemsInput, context?: MemoryRequestContext): Promise<PanelItemsOutput>;
+  panelTasks(input: PanelTasksInput, context?: MemoryRequestContext): Promise<PanelTasksOutput>;
+  deletePanelTask(taskId: string, context?: MemoryRequestContext): Promise<DeletePanelTaskOutput>;
+  memoryApiLogs(input: MemoryApiLogsInput, context?: MemoryRequestContext): Promise<MemoryApiLogsOutput>;
 }

@@ -25,8 +25,8 @@ export function createTurnService(deps: {
   idempotencyStore: IdempotencyStore;
 }): TurnService {
   return {
-    async start(input, _ctx) {
-      return deps.memoryClient.startTurn(input);
+    async start(input, ctx) {
+      return deps.memoryClient.startTurn(input, ctx);
     },
 
     async complete(turnId, input, ctx) {
@@ -38,7 +38,7 @@ export function createTurnService(deps: {
           body: input,
           responseSchema: CompleteTurnOutputSchema
         },
-        () => deps.memoryClient.completeTurn({ ...input, turnId })
+        () => deps.memoryClient.completeTurn({ ...input, turnId }, ctx)
       );
     }
   };

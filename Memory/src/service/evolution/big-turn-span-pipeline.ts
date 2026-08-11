@@ -10,6 +10,7 @@ import { stableHash,stableStringify } from "../../utils/id.js";
 import { isRecord } from "../../utils/json.js";
 import { redactSensitiveText } from "../../utils/sensitive-data.js";
 import { clip } from "../../utils/text.js";
+import { formatZonedTime } from "../../utils/time.js";
 import type { EnqueueJobInput } from "../worker/job-handlers.js";
 
 export const SPAN_BIG_TURN_ENABLED = true;
@@ -265,8 +266,13 @@ function bigTurnPromptPayload(
 ): Record<string, unknown> {
   const internal = source.properties.internal_info;
   const trace = isRecord(internal.trace) ? internal.trace : {};
+  const traceTimestamp = number(trace.ts);
+  const traceTimeZone = text(trace.time_zone);
   return {
     sourceTraceId: redactSensitiveText(source.id),
+    capturedAt: traceTimestamp === undefined
+      ? undefined
+      : formatZonedTime(traceTimestamp, traceTimeZone),
     userRequest: redactAndClip(rawTurn.userText ?? "", 2_000),
     assistantFinalAnswer: redactAndClip(rawTurn.assistantText ?? "", 2_000),
     traceSummary: redactAndClip(

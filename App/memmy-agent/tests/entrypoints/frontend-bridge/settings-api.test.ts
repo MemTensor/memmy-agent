@@ -112,11 +112,11 @@ describe("webui settings api", () => {
     });
 
     expect(payload.requires_restart).toBe(true);
-    expect(payload.agent.timezone).toBe("Asia/Shanghai");
+    expect(payload.agent.timezone).toBe("+08:00");
     expect(payload.agent.bot_name).toBe("memmy");
     expect(payload.agent.tool_hint_max_length).toBe(80);
     const saved = loadConfig(file);
-    expect(saved.agents.defaults.timezone).toBe("Asia/Shanghai");
+    expect(saved.agents.defaults.timezone).toBe("+08:00");
     expect(saved.agents.defaults.botName).toBe("memmy");
     expect(saved.fileMemory.enabled).toBe(false);
     expect(() => updateAgentSettings({ timezone: ["Mars/Base"] })).toThrow(/invalid timezone/);

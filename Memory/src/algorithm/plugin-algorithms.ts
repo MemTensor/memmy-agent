@@ -10,10 +10,12 @@ import type { LlmClient } from "../model/types.js";
 import { MEMORY_SUMMARY_MAX_TOKENS } from "../config/index.js";
 import { memoryVector } from "../storage/memory-vector-state.js";
 import { stableHash } from "../utils/id.js";
+import { formatZonedTime } from "../utils/time.js";
 
 export interface CapturedTraceStep {
   key: string;
   ts: number;
+  timeZone?: string;
   turnId: string;
   rawTurnId?: string;
   stepIndex: number;
@@ -42,6 +44,7 @@ export interface TraceMemoryMeta {
   id: string;
   memory: MemoryRow;
   ts: number;
+  timeZone?: string;
   turnId?: string;
   rawTurnId?: string;
   episodeId?: string;
@@ -3133,6 +3136,7 @@ export function captureTurnSteps(input: {
   toolCalls?: ToolCallPayload[];
   toolResults?: unknown[];
   createdAtIso: string;
+  timeZone?: string;
   maxTextChars?: number;
   maxToolOutputChars?: number;
 }): CapturedTraceStep[] {
@@ -3145,6 +3149,7 @@ export function captureTurnSteps(input: {
   const rawSteps: Array<Omit<CapturedTraceStep, "summary" | "tags" | "vecSummary" | "vecAction" | "errorSignatures">> = [{
     key: `${input.episodeId}:${input.turnId}:turn`,
     ts: Number.isFinite(baseTs) ? baseTs : Date.now(),
+    timeZone: input.timeZone,
     turnId: input.turnId,
     stepIndex: 0,
     subStepTotal: 1,
@@ -3193,6 +3198,7 @@ export function traceMetaFromMemory(memory: MemoryRow): TraceMemoryMeta | null {
     id: memory.id,
     memory,
     ts: numberField(trace, "ts") ?? Date.parse(memory.timeline),
+    timeZone: stringField(trace, "time_zone") ?? stringField(memory.info, "time_zone"),
     turnId: stringField(trace, "turn_id"),
     rawTurnId: stringField(trace, "raw_turn_id"),
     episodeId: stringField(trace, "episode_id"),
@@ -3614,6 +3620,7 @@ export function packL2InductionTraces(
       "---",
       `id: ${trace.id}`,
       `episode: ${trace.episodeId ?? "-"}`,
+      `captured_at: ${formatZonedTime(trace.ts, trace.timeZone)}`,
       `tags: ${trace.tags.join(",") || "-"}`,
       `user: ${truncateText(trace.userText, 200)}`,
       `agent: ${truncateText(trace.agentText, 300)}`,

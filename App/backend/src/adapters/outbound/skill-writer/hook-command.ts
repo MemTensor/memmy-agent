@@ -13,8 +13,11 @@ export interface NodeExecutableRuntime {
 }
 
 /** Creates a shell command that runs a hook script with Node, never Electron. */
-export function createNodeHookCommand(hookScriptPath: string): string {
-  return `${shellQuote(resolveNodeExecutable())} ${shellQuote(hookScriptPath)}`;
+export function createNodeHookCommand(
+  hookScriptPath: string,
+  runtime: NodeExecutableRuntime = defaultNodeExecutableRuntime()
+): string {
+  return `${shellQuote(resolveNodeExecutable(runtime), runtime.platform)} ${shellQuote(hookScriptPath, runtime.platform)}`;
 }
 
 /** Resolves Node without ever selecting a packaged desktop application host. */
@@ -76,6 +79,12 @@ function isPackagedApplicationExecutable(value: string): boolean {
   return name.includes("electron") || /\.app[\\/]contents[\\/]macos[\\/]/i.test(value);
 }
 
-function shellQuote(value: string): string {
+function shellQuote(value: string, platform: NodeJS.Platform): string {
+  if (platform === "win32") {
+    // cmd.exe treats single quotes as literal characters and PowerShell parses
+    // them as string expressions, so the POSIX form never executes on Windows.
+    if (!/[\s"\\/]/.test(value)) return value;
+    return `"${value.replace(/"/g, '\\"')}"`;
+  }
   return `'${value.replace(/'/g, "'\\''")}'`;
 }

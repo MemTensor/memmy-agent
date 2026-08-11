@@ -11,6 +11,7 @@ import { registerTurnRoutes } from "./turns.js";
 
 export interface AgentRuntimeRouteDeps {
   services: BackendServices;
+  timeZone?: string;
   authenticateRuntimeToken: (request: FastifyRequest, reply: FastifyReply) => Promise<unknown>;
 }
 

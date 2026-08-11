@@ -3,7 +3,8 @@ import {
   AuthorizeIntegrationResponseSchema,
   IntegrationCapabilitiesResponseSchema,
   IntegrationConnectionsResponseSchema,
-  OkResponseSchema
+  OkResponseSchema,
+  ReportIntegrationConnectionEventInputSchema
 } from "@memmy/local-api-contracts";
 import { z } from "zod";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -50,6 +51,16 @@ export function registerIntegrationRoutes(app: FastifyInstance, options: Registe
     { preHandler: options.authenticateRuntimeToken },
     withErrorEnvelope(async (_request, reply) => {
       const response = IntegrationConnectionsResponseSchema.parse(await options.integrations.listConnections());
+      return reply.send(response);
+    })
+  );
+
+  app.post(
+    "/api/v1/integrations/connection-events",
+    { preHandler: options.authenticateRuntimeToken },
+    withErrorEnvelope(async (request, reply) => {
+      const input = ReportIntegrationConnectionEventInputSchema.parse(request.body);
+      const response = OkResponseSchema.parse(await options.integrations.reportConnectionEvent(input));
       return reply.send(response);
     })
   );

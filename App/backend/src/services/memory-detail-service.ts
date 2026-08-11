@@ -19,16 +19,16 @@ export function createMemoryDetailService(deps: {
   memoryClient: MemoryClient;
 }): MemoryDetailService {
   return {
-    async add(input, _ctx) {
-      return deps.memoryClient.addMemory(input);
+    async add(input, ctx) {
+      return deps.memoryClient.addMemory(input, ctx);
     },
 
-    async getById(id, _ctx) {
-      return deps.memoryClient.getMemory({ memoryId: id });
+    async getById(id, ctx) {
+      return deps.memoryClient.getMemory({ memoryId: id }, ctx);
     },
 
-    async delete(id, input, _ctx) {
-      return deps.memoryClient.deleteMemory({ ...input, memoryId: id });
+    async delete(id, input, ctx) {
+      return deps.memoryClient.deleteMemory({ ...input, memoryId: id }, ctx);
     }
   };
 }

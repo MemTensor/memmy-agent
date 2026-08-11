@@ -216,7 +216,8 @@ function createClient(connections: IntegrationConnection[]): IntegrationsClient 
     authorize: vi.fn(async (slug: string) => ({ connectUrl: `https://backend.composio.dev/api/v3/s/${slug}-test`, connectionId: `conn-${slug}` })),
     listCapabilities: vi.fn(async () => ({ toolkits: ["github"] })),
     listConnections: vi.fn(async () => ({ connections })),
-    deleteConnection: vi.fn(async () => undefined)
+    deleteConnection: vi.fn(async () => undefined),
+    reportConnectionEvent: vi.fn(async () => undefined)
   };
 }
 
@@ -232,6 +233,7 @@ function createChannelsClient(connections: Awaited<ReturnType<ChannelsClient["li
     listConnections: vi.fn(async () => ({ connections })),
     connect: vi.fn(async () => ({ status: "connected" as const, connectionId: "channel-test-local" })),
     pollConnect: vi.fn(async () => ({ status: "connected" as const, connectionId: "channel-test-local" })),
-    disconnect: vi.fn(async () => undefined)
+    disconnect: vi.fn(async () => undefined),
+    reportConnectionEvent: vi.fn(async () => undefined)
   };
 }

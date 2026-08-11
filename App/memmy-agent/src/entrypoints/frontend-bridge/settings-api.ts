@@ -14,6 +14,7 @@ import {
   imageGenProviderNames,
 } from "../../providers/image-generation.js";
 import { findByName, PROVIDERS } from "../../providers/registry.js";
+import { normalizeTimeZoneOffset } from "../../utils/time-zone.js";
 
 type QueryParams = Record<string, string[]>;
 
@@ -126,9 +127,9 @@ function parseBool(value: string, field: string): boolean {
   return ["1", "true", "yes"].includes(normalized);
 }
 
-function validateTimezone(timezone: string): void {
+function normalizedTimezone(timezone: string): string {
   try {
-    new Intl.DateTimeFormat("en-US", { timeZone: timezone }).format(new Date(0));
+    return normalizeTimeZoneOffset(timezone);
   } catch {
     throw new WebUISettingsError("invalid timezone");
   }
@@ -372,9 +373,9 @@ export function updateAgentSettings(query: QueryParams): Record<string, any> {
   if (timezone !== null) {
     const value = timezone.trim();
     if (!value) throw new WebUISettingsError("timezone is required");
-    validateTimezone(value);
-    if (defaults.timezone !== value) {
-      defaults.timezone = value;
+    const normalized = normalizedTimezone(value);
+    if (defaults.timezone !== normalized) {
+      defaults.timezone = normalized;
       changed = true;
       restartRequired = true;
     }

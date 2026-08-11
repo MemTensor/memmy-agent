@@ -21,7 +21,7 @@ import type {
   RequestEnvelope,
   RuntimeNamespace
 } from "../../types.js";
-import { nowIso } from "../../utils/time.js";
+import { nowIso, resolveTimeZone } from "../../utils/time.js";
 import {
   panelAverage,
   panelDateKey,
@@ -347,13 +347,14 @@ export class PanelReadModel {
     };
   }
 
-  panelOverviewSummary(_input: RequestEnvelope & { userId?: string } = {}): {
+  panelOverviewSummary(input: RequestEnvelope & { userId?: string } = {}): {
     counts: { memories: number; skills: number; experiences: number; worldModels: number };
     sourceDistribution: Array<{ source: string; count: number; percentage: number }>;
     dailyActivity: Array<{ date: string; count: number }>;
   } {
     const memories = this.listAllMemoriesForStats();
-    const dates = panelDateKeys(this.now(), PANEL_DAILY_ACTIVITY_DAYS);
+    const timeZone = resolveTimeZone(input.timeZone);
+    const dates = panelDateKeys(this.now(), PANEL_DAILY_ACTIVITY_DAYS, timeZone);
     return {
       counts: {
         memories: memories.filter((memory) => memory.memoryLayer === "L1").length,
@@ -361,12 +362,12 @@ export class PanelReadModel {
         experiences: memories.filter((memory) => memory.memoryLayer === "L2").length,
         worldModels: memories.filter((memory) => memory.memoryLayer === "L3").length
       },
-      dailyActivity: panelCountByDate(memories, dates, (memory) => memory.createdAt),
+      dailyActivity: panelCountByDate(memories, dates, (memory) => memory.createdAt, timeZone),
       sourceDistribution: panelSourceDistribution(memories)
     };
   }
 
-  panelAnalysis(_input: RequestEnvelope & { userId?: string } = {}): {
+  panelAnalysis(input: RequestEnvelope & { userId?: string } = {}): {
     metrics: {
       avgRecallScore: number;
       recallEvents: number;
@@ -382,11 +383,12 @@ export class PanelReadModel {
       series: Array<{ name: string; points: Array<{ date: string; avgMs: number }> }>;
     };
   } {
-    const dates = panelLastSevenDateKeys(this.now());
+    const timeZone = resolveTimeZone(input.timeZone);
+    const dates = panelLastSevenDateKeys(this.now(), timeZone);
     const memories = this.listAllMemoriesForStats();
     const skillMemories = memories.filter((memory) => memory.memoryLayer === "Skill");
     const logs = this.deps.repos.runtime.listApiLogs({ limit: 10_000, offset: 0 }).logs
-      .filter((log) => dates.includes(panelDateKey(log.calledAt)));
+      .filter((log) => dates.includes(panelDateKey(log.calledAt, timeZone)));
     const recallScores = logs
       .filter((log) => log.toolName === "memory_search")
       .map((log) => panelRecallScore(log.outputJson))
@@ -397,13 +399,13 @@ export class PanelReadModel {
         avgRecallScore: panelRoundDecimal(panelAverage(recallScores), 2),
         recallEvents: logs.filter((log) => log.toolName === "memory_search").length,
         activeSkills: skillMemories.filter((memory) => memory.status === "activated").length,
-        recentlyUsedSkills: skillMemories.filter((memory) => dates.includes(panelDateKey(memory.updatedAt))).length,
+        recentlyUsedSkills: skillMemories.filter((memory) => dates.includes(panelDateKey(memory.updatedAt, timeZone))).length,
         avgToolLatencyMs: panelRoundInt(panelAverage(durations)),
         p95ToolLatencyMs: panelPercentile95(durations)
       },
-      dailyMemoryWrites: panelCountByDate(memories, dates, (memory) => memory.createdAt),
-      dailySkillEvolutions: panelCountByDate(skillMemories, dates, (memory) => memory.updatedAt),
-      toolLatency: panelToolLatency(logs, dates)
+      dailyMemoryWrites: panelCountByDate(memories, dates, (memory) => memory.createdAt, timeZone),
+      dailySkillEvolutions: panelCountByDate(skillMemories, dates, (memory) => memory.updatedAt, timeZone),
+      toolLatency: panelToolLatency(logs, dates, timeZone)
     };
   }
 

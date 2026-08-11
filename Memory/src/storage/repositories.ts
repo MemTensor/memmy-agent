@@ -980,22 +980,11 @@ export class MemoryRepository {
       ...filter,
       status: filter.status ?? ["activated", "resolving"]
     });
-    const clauses = normalized.map(() => {
-      const columns = [
-        "lower(memories.id) LIKE ? ESCAPE '\\'",
-        "lower(COALESCE(memories.memory_key, '')) LIKE ? ESCAPE '\\'",
-        "lower(memories.memory_value) LIKE ? ESCAPE '\\'",
-        "lower(memories.properties_json) LIKE ? ESCAPE '\\'",
-        "lower(memories.info_json) LIKE ? ESCAPE '\\'"
-      ];
-      if (includeTags) columns.push("lower(memories.tags_json) LIKE ? ESCAPE '\\'");
-      return `(${columns.join(" OR ")})`;
-    });
-    const params = normalized.flatMap((term) => {
+    const termColumns = normalized.map((term) => likeColumnsForTerm(term, includeTags));
+    const clauses = termColumns.map((columns) => `(${columns.join(" OR ")})`);
+    const params = normalized.flatMap((term, index) => {
       const pattern = `%${escapeLikePattern(term)}%`;
-      return includeTags
-        ? [pattern, pattern, pattern, pattern, pattern, pattern]
-        : [pattern, pattern, pattern, pattern, pattern];
+      return termColumns[index]!.map(() => pattern);
     });
     const rows = this.db
       .prepare(
@@ -1016,7 +1005,15 @@ export class MemoryProcessingRepository {
 
   get(memoryId: string): MemoryProcessingRecord | undefined {
     const row = this.db.prepare(
-      `SELECT * FROM memory_processing_state WHERE memory_id = ?`
+      `SELECT memory_processing_state.*,
+              EXISTS(
+                SELECT 1 FROM evolution_jobs
+                WHERE evolution_jobs.id = memory_processing_state.active_job_id
+                  AND evolution_jobs.status IN ('failed', 'queued')
+                  AND evolution_jobs.attempts < evolution_jobs.max_attempts
+              ) AS auto_retry_scheduled
+       FROM memory_processing_state
+       WHERE memory_id = ?`
     ).get(memoryId) as SqlMemoryProcessingRow | undefined;
     return row ? memoryProcessingFromSql(row) : undefined;
   }
@@ -1025,7 +1022,14 @@ export class MemoryProcessingRepository {
     if (memoryIds.length === 0) return [];
     const placeholders = memoryIds.map(() => "?").join(", ");
     const rows = this.db.prepare(
-      `SELECT * FROM memory_processing_state
+      `SELECT memory_processing_state.*,
+              EXISTS(
+                SELECT 1 FROM evolution_jobs
+                WHERE evolution_jobs.id = memory_processing_state.active_job_id
+                  AND evolution_jobs.status IN ('failed', 'queued')
+                  AND evolution_jobs.attempts < evolution_jobs.max_attempts
+              ) AS auto_retry_scheduled
+       FROM memory_processing_state
        WHERE memory_id IN (${placeholders})`
     ).all(...memoryIds) as SqlMemoryProcessingRow[];
     const byId = new Map(rows.map((row) => [row.memory_id, memoryProcessingFromSql(row)]));
@@ -1038,7 +1042,14 @@ export class MemoryProcessingRepository {
     if (states.length === 0) return [];
     const placeholders = states.map(() => "?").join(", ");
     return (this.db.prepare(
-      `SELECT * FROM memory_processing_state
+      `SELECT memory_processing_state.*,
+              EXISTS(
+                SELECT 1 FROM evolution_jobs
+                WHERE evolution_jobs.id = memory_processing_state.active_job_id
+                  AND evolution_jobs.status IN ('failed', 'queued')
+                  AND evolution_jobs.attempts < evolution_jobs.max_attempts
+              ) AS auto_retry_scheduled
+       FROM memory_processing_state
        WHERE state IN (${placeholders})
        ORDER BY updated_at ASC, memory_id ASC
        LIMIT ?`
@@ -1046,6 +1057,7 @@ export class MemoryProcessingRepository {
   }
 
   save(record: MemoryProcessingRecord): MemoryProcessingRecord {
+    const { autoRetryScheduled: _derived, ...storedRecord } = record;
     this.db.prepare(
       `INSERT INTO memory_processing_state (
          memory_id, state, stage, active_job_id, attempt_count, manual_retry_count,
@@ -1066,12 +1078,12 @@ export class MemoryProcessingRepository {
          failed_at = excluded.failed_at,
          updated_at = excluded.updated_at`
     ).run({
-      ...record,
-      stage: record.stage ?? null,
-      activeJobId: record.activeJobId ?? null,
-      errorCode: record.errorCode ?? null,
-      errorMessage: record.errorMessage ?? null,
-      failedAt: record.failedAt ?? null
+      ...storedRecord,
+      stage: storedRecord.stage ?? null,
+      activeJobId: storedRecord.activeJobId ?? null,
+      errorCode: storedRecord.errorCode ?? null,
+      errorMessage: storedRecord.errorMessage ?? null,
+      failedAt: storedRecord.failedAt ?? null
     });
     return this.get(record.memoryId) ?? record;
   }
@@ -3855,6 +3867,30 @@ function escapeLikePattern(value: string): string {
   return value.replace(/[\\%_]/g, (match) => `\\${match}`);
 }
 
+function likeColumnsForTerm(term: string, includeTags: boolean): string[] {
+  const columns = [
+    "lower(memories.id) LIKE ? ESCAPE '\\'",
+    "lower(COALESCE(memories.memory_key, '')) LIKE ? ESCAPE '\\'",
+    "lower(memories.memory_value) LIKE ? ESCAPE '\\'"
+  ];
+  // Short ASCII terms ("ts", "id", ...) are substrings of JSON keys present in
+  // every row's metadata blobs, so matching them there ranks unrelated recent
+  // memories above real hits. Longer terms and CJK bigrams cannot collide with
+  // JSON structure and keep their reach into metadata values.
+  if (!isShortAsciiTerm(term)) {
+    columns.push(
+      "lower(memories.properties_json) LIKE ? ESCAPE '\\'",
+      "lower(memories.info_json) LIKE ? ESCAPE '\\'"
+    );
+  }
+  if (includeTags) columns.push("lower(memories.tags_json) LIKE ? ESCAPE '\\'");
+  return columns;
+}
+
+function isShortAsciiTerm(term: string): boolean {
+  return /^[\x20-\x7e]{1,2}$/.test(term);
+}
+
 function normalizeAgentIdKey(value: string): string {
   return value.trim().toLowerCase().replace(/[\s-]+/gu, "_");
 }
@@ -4369,6 +4405,7 @@ interface SqlMemoryProcessingRow {
   error_code: string | null;
   error_message: string | null;
   failed_at: string | null;
+  auto_retry_scheduled?: number;
   updated_at: string;
 }
 
@@ -4501,6 +4538,7 @@ function memoryProcessingFromSql(row: SqlMemoryProcessingRow): MemoryProcessingR
     errorCode: row.error_code,
     errorMessage: row.error_message,
     failedAt: row.failed_at,
+    autoRetryScheduled: row.auto_retry_scheduled === 1,
     updatedAt: row.updated_at
   };
 }

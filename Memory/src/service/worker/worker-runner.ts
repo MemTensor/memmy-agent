@@ -470,7 +470,7 @@ export class WorkerRunner {
     };
     const failOp = failedJob.status === "dead_letter" ? "dead_letter" : "failed";
     this.deps.appendJobChange(failedJob, failOp, job);
-    this.updateProcessingAfterJobFailure(failedJob, errorMessage);
+    this.updateProcessingAfterJobFailure(failedJob, error);
     workerLogger.error("job.failed", {
       ...workerJobLogFields(failedJob),
       terminal: failedJob.status === "dead_letter",
@@ -512,18 +512,16 @@ export class WorkerRunner {
     if (!memory || !processingJobMatchesMemory(job, memory)) return;
     const message = sanitizeProcessingError(error);
     const terminal = job.status === "dead_letter";
-    const classification = classifyProcessingError(message);
+    const classification = classifyProcessingError(error);
     this.deps.repos.processing.update(job.targetMemoryId, {
       state: terminal ? "failed" : stage === "summary" ? "summary_pending" : "embedding_pending",
       stage,
       activeJobId: terminal ? null : job.id,
       attemptCount: job.attempts,
       retryAction: terminal ? classification.retryAction : "retry",
-      ...(terminal ? {
-        errorCode: classification.code,
-        errorMessage: message,
-        failedAt: this.deps.nowIso()
-      } : {}),
+      errorCode: classification.code,
+      errorMessage: message,
+      failedAt: this.deps.nowIso(),
       updatedAt: this.deps.nowIso()
     }, stage === "summary"
       ? ["summary_pending", "summarizing", "failed"]

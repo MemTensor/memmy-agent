@@ -68,6 +68,29 @@ describe("agent source service", () => {
     ]);
   });
 
+  it("uses current builtin metadata instead of persisted display metadata", async () => {
+    const repository = createRepository();
+    repository.upsertSource({
+      sourceId: "cursor",
+      displayName: "Legacy Cursor Name",
+      dataPath: "/tmp/legacy-cursor",
+      builtin: true
+    });
+    const service = createService({
+      repository,
+      adapters: [createFakeAdapter("cursor")]
+    });
+
+    await expect(service.list()).resolves.toEqual([
+      expect.objectContaining({
+        sourceId: "cursor",
+        displayName: "Cursor",
+        dataPath: "/tmp/cursor",
+        builtin: true
+      })
+    ]);
+  });
+
   it("marks unavailable builtin sources without removing them from the list", async () => {
     const service = createService({
       adapters: [createFakeAdapter("claude_code", [], undefined, false)]

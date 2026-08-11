@@ -26,7 +26,8 @@ import type { ZodType } from "zod";
 import { MemoryLayerError, MemoryLayerNetworkError } from "./errors.js";
 import { buildMemoryLayerUrl, MEMORY_LAYER_PATHS } from "./memory-layer-endpoints.js";
 import { retryWithBackoff } from "./retry.js";
-import type { MemoryClient } from "./types.js";
+import type { MemoryClient, MemoryRequestContext } from "./types.js";
+import { normalizeTimeZoneOffset } from "../../../utils/time-zone.js";
 
 export interface MemoryLayerConfig {
   /** Base url. */
@@ -63,6 +64,7 @@ export function createHttpMemoryClient(
       query?: Readonly<Record<string, unknown>>;
       signal?: AbortSignal;
       timeoutMs?: number;
+      context?: MemoryRequestContext;
     } = {}
   ): Promise<Output> {
     const url = appendQuery(buildMemoryLayerUrl(config.baseUrl, pathKey, requestOptions.params), requestOptions.query);
@@ -75,6 +77,7 @@ export function createHttpMemoryClient(
           method,
           headers: {
             ...(hasBody ? { "content-type": "application/json" } : {}),
+            "x-memmy-time-zone": normalizeTimeZoneOffset(requestOptions.context?.timeZone),
             authorization: `Bearer ${config.token}`
           },
           body: hasBody ? JSON.stringify(requestOptions.body) : undefined,
@@ -122,49 +125,53 @@ export function createHttpMemoryClient(
       return request("POST", "reloadConfig", MemoryReloadConfigOutputSchema, { body: input });
     },
 
-    async openSession(input) {
-      return request("POST", "openSession", OpenSessionOutputSchema, { body: input });
+    async openSession(input, context) {
+      return request("POST", "openSession", OpenSessionOutputSchema, { body: input, context });
     },
 
-    async closeSession(input) {
+    async closeSession(input, context) {
       const { sessionId, ...body } = input;
       return request("POST", "closeSession", CloseSessionOutputSchema, {
         params: { sessionId },
-        body
+        body,
+        context
       });
     },
 
-    async startTurn(input) {
-      return request("POST", "startTurn", StartTurnOutputSchema, { body: input });
+    async startTurn(input, context) {
+      return request("POST", "startTurn", StartTurnOutputSchema, { body: input, context });
     },
 
-    async completeTurn(input) {
+    async completeTurn(input, context) {
       const { turnId, ...body } = input;
       return request("POST", "completeTurn", CompleteTurnOutputSchema, {
         params: { turnId },
-        body
+        body,
+        context
       });
     },
 
-    async search(input) {
-      return request("POST", "search", SearchOutputSchema, { body: input });
+    async search(input, context) {
+      return request("POST", "search", SearchOutputSchema, { body: input, context });
     },
 
-    async addMemory(input) {
-      return request("POST", "addMemory", AddMemoryOutputSchema, { body: input });
+    async addMemory(input, context) {
+      return request("POST", "addMemory", AddMemoryOutputSchema, { body: input, context });
     },
 
-    async getMemory(input) {
+    async getMemory(input, context) {
       return request("GET", "getMemory", GetMemoryOutputSchema, {
-        params: { id: input.memoryId }
+        params: { id: input.memoryId },
+        context
       });
     },
 
-    async deleteMemory(input) {
+    async deleteMemory(input, context) {
       const { memoryId, ...body } = input;
       return request("DELETE", "deleteMemory", DeleteMemoryOutputSchema, {
         params: { id: memoryId },
-        body
+        body,
+        context
       });
     },
 
@@ -199,31 +206,33 @@ export function createHttpMemoryClient(
       });
     },
 
-    async panelOverview() {
-      return request("GET", "panelOverview", PanelOverviewOutputSchema);
+    async panelOverview(context) {
+      return request("GET", "panelOverview", PanelOverviewOutputSchema, { context });
     },
 
-    async panelAnalysis() {
-      return request("GET", "panelAnalysis", PanelAnalysisOutputSchema);
+    async panelAnalysis(context) {
+      return request("GET", "panelAnalysis", PanelAnalysisOutputSchema, { context });
     },
 
-    async panelItems(input) {
-      return request("GET", "panelItems", PanelItemsOutputSchema, { query: input });
+    async panelItems(input, context) {
+      return request("GET", "panelItems", PanelItemsOutputSchema, { query: input, context });
     },
 
-    async panelTasks(input) {
-      return request("GET", "panelTasks", PanelTasksOutputSchema, { query: input });
+    async panelTasks(input, context) {
+      return request("GET", "panelTasks", PanelTasksOutputSchema, { query: input, context });
     },
 
-    async deletePanelTask(taskId) {
+    async deletePanelTask(taskId, context) {
       return request("DELETE", "deletePanelTask", DeletePanelTaskOutputSchema, {
         params: { id: taskId },
-        body: {}
+        body: {},
+        context
       });
     },
 
-    async memoryApiLogs(input) {
+    async memoryApiLogs(input, context) {
       return request("GET", "memoryApiLogs", MemoryApiLogsOutputSchema, {
+        context,
         query: {
           ...input,
           tools: input.tools?.join(",")

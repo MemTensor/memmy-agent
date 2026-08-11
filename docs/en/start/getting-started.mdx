@@ -49,10 +49,11 @@ memmy agent --message "Hi, introduce the current workspace"
 memmy
 ```
 
-Open "Memory → Cross-Agent access" and scan conversation history from Cursor, Claude Code, Codex, OpenCode, OpenClaw, and Hermes into the memory store. First-run onboarding lets you scan only or also install the matching Hook/plugin for detected Agents; the Skill is installed with the live integration.
+Open "Memory → Cross-Agent access" and scan conversation history from Cursor, Claude Code, Codex, OpenCode, OpenClaw, Hermes, WorkBuddy, Pi, and qwenwork into the memory store. First-run onboarding lets you scan only or also install the matching Hook, plugin, or Skill for detected Agents.
 
-After connection, the Hook or plugin captures completed turns automatically and injects relevant memory in supported Agents. See the Hook and plugin section in [Agent Sources & Scanning](/docs/memory/sources) for the exact events and installed files.
+After connection, Hooks and plugins capture completed turns and inject relevant memory automatically; WorkBuddy, Pi, and qwenwork use the Skill for on-demand memory access. See [Agent Sources & Scanning](/docs/memory/sources) for details.
 
+To connect an Agent outside the built-in list, open **Advanced actions → Add another Agent**. Select `kimi code`, `zcode`, `minimax code`, or `coder`, or enter another name; Memmy discovers its history location and format, installs the Skill, and completes the first import.
 Open the "Tools" page:
 
 - Messaging channels: Telegram, Discord, iMessage, WeChat, Feishu, DingTalk.

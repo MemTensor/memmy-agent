@@ -1,6 +1,7 @@
 import type { MemoryAddRequest, MemoryLayer, ToolCallPayload } from "../../types.js";
 import { captureTurnSteps, signatureFromTraceParts } from "../../algorithm/plugin-algorithms.js";
 import { MemoryServiceError } from "../../utils/error.js";
+import { isoTimeToUtc } from "../../utils/time.js";
 import { stableHash } from "../../utils/id.js";
 import { clip, firstLine } from "../../utils/text.js";
 
@@ -38,13 +39,13 @@ export function isAgentSourceImportMemoryAdd(request: MemoryAddRequest): boolean
   return request.adapterId?.startsWith("agent-source:") === true || request.tags?.some((tag) => tag.trim().toLowerCase() === "agent-source") === true;
 }
 
-export function normalizeMemoryAddCreatedAt(value: string | undefined): string | undefined {
+export function normalizeMemoryAddCreatedAt(value: string | undefined, timeZone?: string): string | undefined {
   if (value === undefined) return undefined;
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
+  try {
+    return isoTimeToUtc(value, timeZone);
+  } catch {
     throw new MemoryServiceError("invalid_argument", "memory.add createdAt must be an ISO timestamp");
   }
-  return date.toISOString();
 }
 
 export function memoryAddImportTrace(request: MemoryAddRequest, at: string): Record<string, unknown> {
@@ -74,6 +75,7 @@ export function memoryAddImportTrace(request: MemoryAddRequest, at: string): Rec
   return {
     key: `memory.add:${stableHash(`${request.source ?? "manual"}:${turnId}:${request.content}`).slice(0, 20)}`,
     ts: Date.parse(at),
+    time_zone: request.timeZone,
     turn_id: turnId,
     step_index: 0,
     sub_step_total: 1,

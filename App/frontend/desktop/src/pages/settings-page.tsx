@@ -19,6 +19,7 @@ import {
 } from "../app/pet-guide.js";
 import { consumeTokenExhaustedApplyMoreRequest, TOKEN_EXHAUSTED_APPLY_MORE_EVENT } from "../app/token-exhausted-apply-more.js";
 import { getLegalLinkUrl } from "../legal/legal-links.js";
+import { maskAccountIdentifier } from "../utils/mask-account-identifier.js";
 import { isComposingKeyboardEvent } from "../utils/keyboard.js";
 import { openExternalUrl } from "../utils/open-url.js";
 import { useTranslation } from "../i18n/use-translation.js";
@@ -215,6 +216,7 @@ export function SettingsPage() {
       <SettingsPageView
         state={state}
         dispatch={dispatch}
+        platform={typeof window === "undefined" ? undefined : window.memmy?.platform}
         accountClient={clients?.account}
         configClient={clients?.config}
         byokTokenUsageClient={clients?.byokTokenUsage}
@@ -233,6 +235,7 @@ export function SettingsPage() {
  * Field meanings:
  * - state: The current global UI state, providing bootstrap, navigation, and legacy-test-compatible data.
  * - dispatch: The settings-change event dispatch function.
+ * - platform: The desktop runtime platform used for platform-specific window copy.
  * - accountClient: The account session client, used for nickname updates and logout.
  * - configClient: The live config write client; may be omitted in SSR tests.
  * - byokTokenUsageClient: The BYOK API Key Token usage client; may be omitted in SSR tests.
@@ -243,6 +246,7 @@ export function SettingsPage() {
 export interface SettingsPageViewProps {
   state: AppState;
   dispatch: Dispatch<AppAction>;
+  platform?: string;
   accountClient?: AccountClient;
   configClient?: ConfigClient;
   byokTokenUsageClient?: ByokTokenUsageClient;
@@ -264,7 +268,7 @@ export function shouldSaveAccountNicknameOnKeyDown(event: import("react").Keyboa
  * @returns The settings page content node matching the prototype structure.
  */
 export function SettingsPageView(props: SettingsPageViewProps) {
-  const { state, dispatch, accountClient, configClient, byokTokenUsageClient, tokenQuotaClient, update, track = noopTrackAnalyticsEvent, onUsageDetailVisibleChange } = props;
+  const { state, dispatch, platform, accountClient, configClient, byokTokenUsageClient, tokenQuotaClient, update, track = noopTrackAnalyticsEvent, onUsageDetailVisibleChange } = props;
   const { t } = useTranslation();
   const bootstrap = state.bootstrap;
   const [launchAtLogin, setLaunchAtLogin] = useState(false);
@@ -363,11 +367,11 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const [memoryModel, setMemoryModel] = useState<ModelConfig>(() => initialModelForm.memoryModel);
   const [skillModel, setSkillModel] = useState<ModelConfig>(() => initialModelForm.skillModel);
   const accountIdentifier = resolveAccountIdentifier(state);
-  const accountDisplayIdentifier = accountIdentifier.trim();
+  const maskedAccountIdentifier = maskAccountIdentifier(accountIdentifier);
   const accountName = isByokMode
     ? resolveAccountFallback(appSettings?.userMode, t)
-    : state.account.nickname || accountDisplayIdentifier || resolveAccountFallback(appSettings?.userMode, t);
-  const accountMeta = isByokMode ? resolveAccountMeta(appSettings?.userMode, t) : accountDisplayIdentifier || resolveAccountMeta(appSettings?.userMode, t);
+    : state.account.nickname || maskedAccountIdentifier || resolveAccountFallback(appSettings?.userMode, t);
+  const accountMeta = isByokMode ? resolveAccountMeta(appSettings?.userMode, t) : maskedAccountIdentifier || resolveAccountMeta(appSettings?.userMode, t);
   const accountInitial = isByokMode ? "·" : resolveAccountInitials(accountName);
   const registeredAtText = formatRegisteredAt(state.account.registeredAt, t);
   const language = appSettings?.language === "en-US" ? "en-US" : "zh-CN";
@@ -1822,7 +1826,12 @@ export function SettingsPageView(props: SettingsPageViewProps) {
               ]}
             />
             <Divider />
-            <ToggleRow label={t("settings.window.menuBarIcon")} description={t("settings.window.menuBarIconDesc")} checked={menuBarIcon} onChange={handleMenuBarIconChange} />
+            <ToggleRow
+              label={t("settings.window.menuBarIcon")}
+              description={t(platform === "win32" ? "settings.window.menuBarIconDescWindows" : "settings.window.menuBarIconDesc")}
+              checked={menuBarIcon}
+              onChange={handleMenuBarIconChange}
+            />
           </div>
         </Section>
 

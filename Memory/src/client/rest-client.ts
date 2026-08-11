@@ -10,6 +10,7 @@ import type {
   TurnCompleteRequest,
   TurnStartRequest
 } from "../types.js";
+import { resolveTimeZone } from "../utils/time.js";
 
 export type MemoryRestQueryValue =
   | string
@@ -24,17 +25,20 @@ export interface MemoryRestClientOptions {
   endpoint: string;
   token?: string;
   headers?: Record<string, string>;
+  timeZone?: string;
 }
 
 export class MemoryRestClient {
   private readonly endpoint: string;
   private readonly token?: string;
   private readonly headers: Record<string, string>;
+  private readonly timeZone: string;
 
   constructor(options: MemoryRestClientOptions) {
     this.endpoint = options.endpoint.replace(/\/+$/, "");
     this.token = options.token;
     this.headers = options.headers ?? {};
+    this.timeZone = resolveTimeZone(options.timeZone);
   }
 
   health(): Promise<HealthResponse> {
@@ -94,6 +98,7 @@ export class MemoryRestClient {
       method,
       headers: {
         ...this.headers,
+        "x-memmy-time-zone": this.timeZone,
         ...(body === undefined ? {} : { "content-type": "application/json" }),
         ...(this.token ? { authorization: `Bearer ${this.token}` } : {})
       },

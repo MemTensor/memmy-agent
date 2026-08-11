@@ -1,10 +1,12 @@
 import { z } from "zod";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { detectedUserTimeZone } from "../../lib/user-time-zone.js";
 import { ApiRequestError, requestJson } from "../http.js";
 
 const runtimeConfig = {
   baseUrl: "http://127.0.0.1:18100",
-  localToken: "local-token"
+  localToken: "local-token",
+  timeZone: "+00:00"
 };
 
 describe("requestJson", () => {
@@ -69,6 +71,52 @@ describe("requestJson", () => {
         body: undefined,
         headers: expect.not.objectContaining({
           "content-type": "application/json"
+        })
+      })
+    );
+  });
+
+  it("sends the configured timezone with every request", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await requestJson({
+      config: runtimeConfig,
+      path: "/api/health",
+      schema: z.object({ ok: z.literal(true) })
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      new URL("/api/health", runtimeConfig.baseUrl),
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          "x-memmy-time-zone": "+00:00"
+        })
+      })
+    );
+  });
+
+  it("detects the system timezone only when config is absent", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await requestJson({
+      config: { baseUrl: runtimeConfig.baseUrl, localToken: runtimeConfig.localToken },
+      path: "/api/health",
+      schema: z.object({ ok: z.literal(true) })
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      new URL("/api/health", runtimeConfig.baseUrl),
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          "x-memmy-time-zone": detectedUserTimeZone()
         })
       })
     );
