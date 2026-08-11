@@ -275,3 +275,6 @@ The point of open source is to let good ideas flow, and we hope Me
 ## Contributors
 
 Thanks to every contributor who makes Memmy better ❤️
+<a href="https://github.com/MemTensor/memmy-agent/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=MemTensor/memmy-agent" />
+</a>

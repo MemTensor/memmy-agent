@@ -269,3 +269,6 @@ Memmy 站在一群优秀的开源项目肩上，我们对此心怀感激。
 ## 贡献者
 
 感谢每一位让 Memmy 变得更好的贡献者 ❤️
+<a href="https://github.com/MemTensor/memmy-agent/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=MemTensor/memmy-agent" />
+</a>
