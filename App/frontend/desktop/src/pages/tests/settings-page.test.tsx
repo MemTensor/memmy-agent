@@ -266,6 +266,18 @@ describe("SettingsPageView", () => {
     expect(source).toContain("onChange={handleMenuBarIconChange}");
   });
 
+  it("Windows 端使用 Windows 状态栏提示文案", () => {
+    const windowsHtml = normalizeSsrHtml(renderSettingsPageView(createReadyState(), "zh-CN", createUpdateViewModel(), "win32"));
+    const windowsEnglishHtml = normalizeSsrHtml(renderSettingsPageView(createReadyState(), "en-US", createUpdateViewModel(), "win32"));
+    const macHtml = normalizeSsrHtml(renderSettingsPageView(createReadyState(), "zh-CN", createUpdateViewModel(), "darwin"));
+
+    expect(windowsHtml).toContain("在 Windows 状态栏常驻 Memmy 图标，便于随时呼出");
+    expect(windowsHtml).not.toContain("在 macOS 状态栏常驻 Memmy 图标，便于随时呼出");
+    expect(windowsEnglishHtml).toContain("Keep a Memmy icon in the Windows system tray for quick access");
+    expect(windowsEnglishHtml).not.toContain("Keep a Memmy icon in the macOS status bar for quick access");
+    expect(macHtml).toContain("在 macOS 状态栏常驻 Memmy 图标，便于随时呼出");
+  });
+
   it("日志级别下拉选择走 handleLogLevelChange 持久化到 localStorage 与主进程 IPC", () => {
     const source = readFileSync(settingsPageSourcePath, "utf8");
 
@@ -862,11 +874,12 @@ function createLowTokenState(applyMore: boolean): AppState {
 function renderSettingsPageView(
   state: AppState,
   language: "zh-CN" | "en-US" = "zh-CN",
-  update = createUpdateViewModel()
+  update = createUpdateViewModel(),
+  platform?: string
 ): string {
   return renderToString(
     <I18nProvider language={language}>
-      <SettingsPageView state={state} dispatch={vi.fn()} update={update} />
+      <SettingsPageView state={state} dispatch={vi.fn()} update={update} platform={platform} />
     </I18nProvider>
   );
 }
