@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 const srcDir = resolve(__dirname, "..", "..");
 
 const allowedSourceFiles = new Set([
+  "i18n/error-notice-messages.ts",
   "i18n/messages.ts",
   "lib/nickname.ts",
   "pages/memory/skill-demo-data.ts",
