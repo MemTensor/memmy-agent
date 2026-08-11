@@ -58,6 +58,11 @@ It distills your knowledge, preferences, and project experience into pe
 
 Available as a desktop app, CLI, and API. You can use the same long-term memory whatever the ways you like to use. **Build it once, use it everywhere.**
 
+
+
+https://github.com/user-attachments/assets/a4ec7f6c-b79f-4e7b-bf40-38346c828bcf
+
+
 ###  Cross-Agent Memory Layer
 
 Memmy provides a unified personal memory layer for all AI Agents.
