@@ -65,7 +65,7 @@ export const EXPERT_PROFILES: ExpertProfile[] = [
     roleCard: `${ROLE_CARD_DIR}/su-xiang.md`,
     duties: [
       "人物小传、性格言行一致性、成长弧光、关系网",
-      "防"标签式纸片人"：行为心理逻辑校验",
+      "防「标签式纸片人」：行为心理逻辑校验",
     ],
     outputs: ["《人物档案集》→ 写入本书作品档案"],
     trigger: "立项/新人物",
