@@ -1,0 +1,645 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>memmy-agent 二次开发调研 · 小说写作系统（主编 + 11 位专家）</title>
+<style>
+  :root {
+    --paper: #faf7f1;
+    --paper-deep: #f3eee4;
+    --ink: #1c1a17;
+    --ink-soft: #4a453d;
+    --ink-faint: #8a8377;
+    --cinnabar: #b3402a;
+    --cinnabar-deep: #8f2f1e;
+    --line: #ddd5c6;
+    --line-soft: #e9e2d4;
+    --card: #ffffff;
+    --code-bg: #f1ece2;
+    --tag-bg: #efe7d8;
+    --serif: "Noto Serif SC", "Source Han Serif SC", "Songti SC", "STSong", SimSun, serif;
+    --sans: "Noto Sans SC", "Source Han Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+    --mono: "JetBrains Mono", "IBM Plex Mono", "Cascadia Code", Consolas, monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--sans);
+    line-height: 1.85;
+    font-size: 15.5px;
+    -webkit-font-smoothing: antialiased;
+  }
+  ::selection { background: var(--cinnabar); color: #fff; }
+
+  /* ── masthead ─────────────────────────────── */
+  .masthead {
+    border-bottom: 1px solid var(--line);
+    padding: 14px 0;
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 16px;
+    max-width: 1180px;
+    margin: 0 auto;
+    padding-left: 32px;
+    padding-right: 32px;
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    color: var(--ink-faint);
+    text-transform: uppercase;
+  }
+  .masthead .edition { font-family: var(--serif); font-weight: 600; color: var(--ink); letter-spacing: 0.18em; }
+  .masthead .rule { flex: 1; height: 1px; background: var(--line); }
+
+  /* ── hero ─────────────────────────────────── */
+  .hero {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 96px 32px 72px;
+    position: relative;
+  }
+  .hero .kicker {
+    display: inline-flex; align-items: center; gap: 10px;
+    font-size: 13px; letter-spacing: 0.22em; color: var(--cinnabar);
+    font-weight: 600; text-transform: uppercase;
+    margin-bottom: 28px;
+  }
+  .hero .kicker::before { content: ""; width: 34px; height: 2px; background: var(--cinnabar); }
+  .hero h1 {
+    font-family: var(--serif);
+    font-weight: 900;
+    font-size: clamp(38px, 5.4vw, 66px);
+    line-height: 1.18;
+    letter-spacing: 0.01em;
+    max-width: 18em;
+  }
+  .hero h1 .accent { color: var(--cinnabar); }
+  .hero .sub {
+    margin-top: 26px;
+    font-size: 17px;
+    color: var(--ink-soft);
+    max-width: 640px;
+    line-height: 1.9;
+  }
+  .hero .meta-row {
+    margin-top: 40px;
+    display: flex; flex-wrap: wrap; gap: 12px;
+  }
+  .meta-chip {
+    border: 1px solid var(--line);
+    background: var(--card);
+    padding: 9px 18px;
+    font-size: 13px;
+    color: var(--ink-soft);
+    border-radius: 999px;
+    display: inline-flex; align-items: center; gap: 8px;
+  }
+  .meta-chip b { color: var(--ink); font-weight: 700; }
+  .hero .verdict {
+    margin-top: 56px;
+    border-left: 3px solid var(--cinnabar);
+    background: var(--paper-deep);
+    padding: 26px 30px;
+    max-width: 760px;
+  }
+  .hero .verdict .v-label {
+    font-size: 12px; letter-spacing: 0.2em; text-transform: uppercase;
+    color: var(--cinnabar); font-weight: 700; margin-bottom: 8px;
+  }
+  .hero .verdict p { font-size: 16px; color: var(--ink); font-family: var(--serif); line-height: 1.9; }
+  .hero .verdict p b { color: var(--cinnabar-deep); }
+
+  /* ── layout ───────────────────────────────── */
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 0 32px; }
+  section { padding: 72px 0; border-top: 1px solid var(--line); }
+  .sec-head { display: flex; align-items: baseline; gap: 22px; margin-bottom: 40px; }
+  .sec-num {
+    font-family: var(--serif); font-weight: 900;
+    font-size: 15px; color: var(--cinnabar);
+    letter-spacing: 0.1em;
+    border: 1.5px solid var(--cinnabar);
+    width: 44px; height: 44px; flex: 0 0 44px;
+    display: inline-flex; align-items: center; justify-content: center;
+    border-radius: 50%;
+  }
+  .sec-title { font-family: var(--serif); font-weight: 900; font-size: 30px; letter-spacing: 0.02em; }
+  .sec-sub { color: var(--ink-faint); font-size: 14px; margin-top: 6px; }
+
+  h3.block { font-family: var(--serif); font-size: 19px; font-weight: 800; margin: 38px 0 16px; }
+  h3.block::before { content: "§ "; color: var(--cinnabar); }
+  p.lead { color: var(--ink-soft); max-width: 820px; margin-bottom: 16px; }
+  p.lead strong, p.lead b { color: var(--ink); }
+  code { font-family: var(--mono); font-size: 0.88em; background: var(--code-bg); padding: 2px 7px; border-radius: 4px; color: var(--cinnabar-deep); }
+  .path { font-family: var(--mono); font-size: 0.86em; background: var(--code-bg); padding: 2px 8px; border-radius: 4px; color: #5a4a3a; word-break: break-all; }
+
+  /* ── cards ────────────────────────────────── */
+  .grid2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; }
+  .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 26px 26px 24px;
+    position: relative;
+    transition: transform .22s ease, box-shadow .22s ease, border-color .22s ease;
+  }
+  .card:hover { transform: translateY(-3px); box-shadow: 0 14px 34px rgba(60,42,20,.10); border-color: #c9bfab; }
+  .card .c-icon { font-size: 22px; margin-bottom: 14px; }
+  .card h4 { font-family: var(--serif); font-size: 17px; font-weight: 800; margin-bottom: 8px; }
+  .card p { font-size: 13.5px; color: var(--ink-soft); line-height: 1.8; }
+  .card .c-tag { display: inline-block; margin-top: 12px; font-size: 11px; letter-spacing: .06em; color: var(--cinnabar); background: var(--tag-bg); padding: 3px 10px; border-radius: 999px; }
+
+  /* ── 编委会 table ─────────────────────────── */
+  .crew-table { width: 100%; border-collapse: collapse; font-size: 14px; background: var(--card); }
+  .crew-table thead th {
+    text-align: left; font-family: var(--serif); font-weight: 800; font-size: 13px;
+    letter-spacing: .08em; color: var(--ink-faint);
+    border-bottom: 2px solid var(--ink); padding: 14px 18px; white-space: nowrap;
+  }
+  .crew-table tbody td {
+    border-bottom: 1px solid var(--line-soft); padding: 15px 18px; vertical-align: top; line-height: 1.7;
+  }
+  .crew-table tbody tr:hover { background: var(--paper-deep); }
+  .crew-table .role-name { font-family: var(--serif); font-weight: 800; font-size: 15px; white-space: nowrap; }
+  .crew-table .role-main { color: var(--cinnabar); }
+  .crew-table .duty { color: var(--ink-soft); font-size: 13.5px; }
+  .crew-table .sep { text-align: center; color: var(--ink-faint); font-size: 12px; }
+
+  /* ── path tree ────────────────────────────── */
+  .filetree {
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 26px 30px; font-family: var(--mono); font-size: 13px; line-height: 2.1;
+    overflow-x: auto;
+  }
+  .filetree .dir { color: var(--ink); font-weight: 700; }
+  .filetree .file { color: var(--ink-soft); }
+  .filetree .note { color: var(--ink-faint); }
+  .filetree .hot { color: var(--cinnabar); font-weight: 700; }
+
+  /* ── phases ───────────────────────────────── */
+  .phase { display: grid; grid-template-columns: 88px 1fr; gap: 26px; margin-bottom: 22px; }
+  .phase .ph-badge {
+    font-family: var(--serif); font-weight: 900; font-size: 14px; letter-spacing: .05em;
+    color: var(--card); background: var(--ink); border-radius: 8px;
+    height: fit-content; padding: 10px 14px; text-align: center;
+  }
+  .phase .ph-badge.alt { background: var(--cinnabar); }
+  .phase .ph-body { border-left: 1px solid var(--line); padding-left: 26px; padding-bottom: 26px; }
+  .phase .ph-title { font-family: var(--serif); font-weight: 800; font-size: 18px; margin-bottom: 6px; }
+  .phase .ph-title small { font-family: var(--sans); font-weight: 400; color: var(--ink-faint); font-size: 13px; margin-left: 10px; }
+  .phase .ph-body p { color: var(--ink-soft); font-size: 14px; }
+  .phase .ph-body ul { margin: 10px 0 0 2px; padding-left: 20px; color: var(--ink-soft); font-size: 13.5px; }
+  .phase .ph-body li { margin-bottom: 6px; }
+
+  /* ── risk list ────────────────────────────── */
+  .risk { display: grid; grid-template-columns: 120px 1fr 1fr; gap: 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; margin-bottom: 14px; background: var(--card); }
+  .risk .r-lv { padding: 16px 18px; font-weight: 700; font-size: 13px; letter-spacing: .06em; display: flex; align-items: center; border-right: 1px solid var(--line-soft); }
+  .risk .r-lv.hi { color: var(--cinnabar-deep); background: #f9ece6; }
+  .risk .r-lv.mid { color: #9a6a12; background: #f8f1e0; }
+  .risk .r-lv.lo { color: #3d6b35; background: #edf3e8; }
+  .risk .r-t { padding: 16px 20px; font-weight: 700; font-size: 14px; border-right: 1px solid var(--line-soft); display: flex; align-items: center; }
+  .risk .r-d { padding: 16px 20px; font-size: 13px; color: var(--ink-soft); line-height: 1.75; display: flex; align-items: center; }
+
+  /* ── conclusion ───────────────────────────── */
+  .conclusion {
+    background: var(--ink); color: var(--paper); border-radius: 14px;
+    padding: 56px 56px 50px; margin-top: 24px; position: relative; overflow: hidden;
+  }
+  .conclusion::after {
+    content: "文"; position: absolute; right: -30px; bottom: -60px;
+    font-family: var(--serif); font-size: 260px; font-weight: 900;
+    color: rgba(255,255,255,.045); line-height: 1;
+  }
+  .conclusion h3 { font-family: var(--serif); font-size: 26px; font-weight: 900; margin-bottom: 20px; }
+  .conclusion h3 span { color: #e08a6a; }
+  .conclusion p { color: rgba(250,247,241,.82); max-width: 860px; margin-bottom: 14px; font-size: 15px; }
+  .conclusion .cz { display: inline-block; margin-top: 18px; border: 1px solid rgba(250,247,241,.4); padding: 12px 22px; border-radius: 8px; font-family: var(--serif); font-size: 16px; color: var(--paper); }
+
+  /* ── footer ───────────────────────────────── */
+  footer {
+    border-top: 1px solid var(--line); margin-top: 40px;
+    padding: 34px 32px 44px; text-align: center; color: var(--ink-faint); font-size: 12.5px; letter-spacing: .04em;
+  }
+  footer .f-mark { font-family: var(--serif); font-size: 15px; color: var(--ink); margin-bottom: 6px; letter-spacing: .3em; }
+
+  /* ── responsive ───────────────────────────── */
+  @media (max-width: 900px) {
+    .grid2, .grid3 { grid-template-columns: 1fr; }
+    .hero { padding: 64px 24px 48px; }
+    .wrap { padding: 0 24px; }
+    .risk { grid-template-columns: 1fr; }
+    .risk .r-lv { border-right: none; border-bottom: 1px solid var(--line-soft); }
+    .risk .r-t { border-right: none; border-bottom: 1px solid var(--line-soft); }
+    .phase { grid-template-columns: 1fr; }
+    .conclusion { padding: 40px 30px; }
+  }
+  @media print {
+    body { font-size: 12.5px; }
+    section { page-break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ═══════════ masthead ═══════════ -->
+<div class="masthead">
+  <span class="edition">MEMOTENSOR · 内部调研</span>
+  <span class="rule"></span>
+  <span>2026-08-13 · Vol. 01</span>
+</div>
+
+<!-- ═══════════ hero ═══════════ -->
+<header class="hero">
+  <div class="kicker">二次开发可行性调研报告</div>
+  <h1>从"个人记忆 Agent"到<br><span class="accent">"编委会制"小说写作系统</span></h1>
+  <p class="sub">目标：在 memmy-agent 之上二次开发一套内置 <b>主编 + 11 位专家</b> 的网文写作系统 —— 主编负责拆解任务与终审，11 位专家覆盖选题、世界观、剧情、人设、大纲、开篇、爽点、文笔、对话、审稿、对标拆解全流程。</p>
+  <div class="meta-row">
+    <span class="meta-chip">对象 <b>memmy-agent v0.1.0</b></span>
+    <span class="meta-chip">代码量 <b>≈ 10+ 万行 TS</b></span>
+    <span class="meta-chip">形态 <b>Electron 桌面 + CLI + API</b></span>
+    <span class="meta-chip">结论 <b style="color:var(--cinnabar)">高度可行</b></span>
+  </div>
+  <div class="verdict">
+    <div class="v-label">调研结论 · Verdict</div>
+    <p>memmy-agent 天生自带 <b>多 Agent 编排（SubagentManager）、任务分解 DAG、四层记忆引擎（世界模型）、技能系统</b> 四大资产 —— "主编 + 11 位专家"不是从零造轮子，而是<strong>在现有 Agent 运行时上叠加一层"编委会编排层"</strong>。推荐路径：先以 Skills + 角色卡快速验证（2 周 MVP），再升级为 Agent Runtime 原生编排层（4–6 周完整版）。</p>
+  </div>
+</header>
+
+<!-- ═══════════ 一、项目本质 ═══════════ -->
+<section id="s1">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="sec-num">一</span>
+      <div>
+        <div class="sec-title">项目本质：memmy-agent 是什么</div>
+        <div class="sec-sub">一句话：本地优先的"个人记忆中心 + 通用 Agent 运行时"，定位类似 OpenClaw / Hermes，但核心卖点是跨 Agent 共享的记忆底座（MemOS）</div>
+      </div>
+    </div>
+    <p class="lead">memmy-agent 是一个 <strong>TypeScript npm workspaces monorepo</strong>（Node ≥ 22，Electron 桌面壳），由四个相互独立、可单独运行的子系统组成。它不是"聊天机器人"，而是一套完整的 <strong>Agent 运行时基础设施</strong>：记忆服务（:18960）、Agent 执行引擎、桌面本地后端（Fastify + SQLite）、前端 React 工作台，外加 CLI/TUI 与 OpenAI 兼容 API 等多个入口。</p>
+    <div class="grid2" style="margin-top:8px">
+      <div class="card"><div class="c-icon">🧠</div><h4>Memory Service（记忆底座）</h4><p>独立本地服务，SQLite 存储 + LLM 驱动的四层记忆（trace 痕迹 / policy 策略 / world_model 世界模型 / skill 技能），向量 + 关键词混合检索，Dream 定时整理并做 git 版本化，支持一键回滚。<span class="c-tag">目录 Memory/</span></p></div>
+      <div class="card"><div class="c-icon">🤖</div><h4>Agent Runtime（执行引擎）</h4><p>消息循环、工具注册、MCP、会话管理、自动压缩、技能加载、长期目标（long_task）、以及关键的 <b>SubagentManager 子代理编排</b> 与会话任务 DAG。<span class="c-tag">App/memmy-agent/src/</span></p></div>
+      <div class="card"><div class="c-icon">🖥️</div><h4>Local Backend（桌面后端）</h4><p>Fastify + SQLite 的应用状态层：账号、模型配置、渠道接入、Agent 来源扫描、Skill 分发、面板与搜索服务，是前端所有操作的 API 网关。<span class="c-tag">App/backend/src/</span></p></div>
+      <div class="card"><div class="c-icon">📖</div><h4>Frontend Desktop（前端工作台）</h4><p>React + Vite 的桌面 UI：聊天、记忆面板、历史 DAG 视图、工具管理、模型设置等页面；路由/状态/主题体系完整，可直接挂载新业务页面。<span class="c-tag">App/frontend/desktop/</span></p></div>
+    </div>
+    <h3 class="block">多入口形态（同一个 Agent 与记忆，处处可触达）</h3>
+    <p class="lead">桌面 App、CLI/TUI（memmy agent）、OpenAI 兼容 API（memmy serve :18990）、消息渠道（Telegram / Discord / 微信 / 飞书 / 钉钉）共享同一套 Agents、记忆与配置 —— 这意味着小说写作系统将来可以"在电脑上写、在微信里催更、在 CLI 里批量跑"。</p>
+  </div>
+</section>
+
+<!-- ═══════════ 二、关键资产 ═══════════ -->
+<section id="s2">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="sec-num">二</span>
+      <div>
+        <div class="sec-title">四大资产：与"编委会制写作"的天然契合点</div>
+        <div class="sec-sub">以下能力全部已有现成代码，二次开发直接复用 —— 这是本方案可行性的核心依据</div>
+      </div>
+    </div>
+
+    <h3 class="block">资产 ①　多 Agent 编排 —— 主编派单给专家的"操作系统"</h3>
+    <p class="lead"><code>App/memmy-agent/src/core/agent-runtime/subagent.ts</code> 中的 <strong>SubagentManager</strong> 已经实现了完整的子代理生命周期：<b>spawn 派发 → 并发控制（maxConcurrentSubagents）→ 状态跟踪（pending/running/complete/failed/cancelled）→ 生命周期钩子（subagentStart/subagentStop）→ 结果自动回传主会话</b>。这恰恰就是"主编把任务拆给 11 位专家、收集成果、汇总交付"所需的全部机制。<span class="path">App/memmy-agent/src/core/agent-runtime/subagent.ts</span></p>
+    <div class="grid3">
+      <div class="card"><div class="c-icon">🎯</div><h4>spawn(task, label, …)</h4><p>带描述、标签、会话归属地派发一个子代理任务；返回任务 ID，完成后自动通过消息总线把结果公布回主会话。</p></div>
+      <div class="card"><div class="c-icon">🛡️</div><h4>并发与取消</h4><p>按会话统计运行中任务，支持 cancelBySession 一键终止某会话的全部专家任务，防止失控。</p></div>
+      <div class="card"><div class="c-icon">🔌</div><h4>生命周期钩子</h4><p>AgentHook 提供 subagentStart / subagentStop，可挂接前端进度条、写作日志、token 统计。</p></div>
+    </div>
+    <p class="lead" style="margin-top:22px">配套的 <strong>Session DAG</strong>（<span class="path">App/memmy-agent/src/session-dag/</span>）把会话中的任务组织成图：节点类型 task / subtask / decision，边类型 decomposes（分解）/ continues / blocks（阻塞）/ supersedes（取代）。一部小说的创作流程 —— 立项 → 世界观 → 人设 → 卷纲 → 章纲 → 正文 → 审稿 —— 天然就是一张 DAG，前端已有 <code>history-dag-panel.tsx</code> 可视化组件可改造成"创作进度看板"。</p>
+
+    <h3 class="block">资产 ②　四层记忆引擎 —— 长篇小说的"设定保险柜"</h3>
+    <p class="lead">长篇写作最大的痛点是<b>一致性</b>：人物名字、力量体系数值、时间线、伏笔回收。memmy 的记忆引擎恰好为此设计 —— <strong>world_model（世界模型）</strong>记忆层专门沉淀"环境的稳定事实"，可以直接存储世界观设定、人物档案、战力规则；<strong>policy（策略）</strong>层沉淀"怎么写更好"，用于学习用户的文风偏好；<b>Dream 机制</b>周期性把散落对话蒸馏进记忆并 git 版本化，可回滚 —— 等于给小说项目一个自动维护的"设定百科 + 版本控制"。<span class="path">Memory/src/algorithm/plugin-algorithms.ts</span></p>
+    <div class="grid3">
+      <div class="card"><div class="c-icon">📜</div><h4>trace → policy → world_model → skill</h4><p>从交互痕迹逐级提炼可复用策略与稳定事实，写作经验会越用越多（LLM 归纳 + 置信度评分）。</p></div>
+      <div class="card"><div class="c-icon">💬</div><h4>反馈学习</h4><p>系统自带中英文反馈分类器（偏好 / 纠错 / 约束 / 正负评价），用户说"主角太圣母了"会被解析成可沉淀的策略。</p></div>
+      <div class="card"><div class="c-icon">🗂️</div><h4>混合检索</h4><p>向量 + 关键词 + LLM 相关性过滤三级召回，写作时自动注入相关设定，避免"写嗨了忘记设定"。</p></div>
+    </div>
+
+    <h3 class="block">资产 ③　Skills 技能系统 —— 写作技能包的安装位</h3>
+    <p class="lead">每个技能 = 一个含 <code>SKILL.md</code> 的目录（YAML frontmatter 声明名称/描述/依赖），Agent 在上下文中按需加载。工作区技能（<span class="path">~/.memmy/workspace/skills/</span>）与内置技能（<span class="path">App/memmy-agent/src/skills/</span>）双层加载 —— <b>"网文写作技能集"（大纲模板、黄金三章 checklist、审稿清单）可以直接做成一组内置技能</b>，用户还能自定义。加载器支持 requirements 检查（缺哪个 CLI/环境变量一目了然）。<span class="path">App/memmy-agent/src/core/agent-runtime/skills.ts</span></p>
+
+    <h3 class="block">资产 ④　命令系统 + 人格模板 —— 角色卡与写作命令</h3>
+    <p class="lead">命令路由支持 <code>router.priority / exact / prefix</code> 注册（<span class="path">App/memmy-agent/src/command/router.ts</span>），现有命令如 /new、/goal、/dream、/history-dag 均按此注册 —— 新增 <b>/新书、/大纲、/人设、/写正文、/审稿、/开编委会</b> 等写作命令零架构改动。<br>人格系统：Agent 的"灵魂"来自模板文件（<span class="path">App/memmy-agent/src/templates/SOUL.md</span> 定义我是谁/执行原则，<span class="path">templates/agent/subagent-system.md</span> 定义子代理提示词）—— <b>每个专家 = 一份专属角色卡模板</b>，这正是"主编 + 11 位专家"的实现入口。</p>
+  </div>
+</section>
+
+<!-- ═══════════ 三、编委会阵容 ═══════════ -->
+<section id="s3">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="sec-num">三</span>
+      <div>
+        <div class="sec-title">编委会阵容：1 位主编 + 11 位专家</div>
+        <div class="sec-sub">建议角色构成（可调整）—— 按网文创作价值链排布，覆盖 选题 → 设定 → 剧情 → 人设 → 大纲 → 开篇 → 爽点 → 文笔 → 对话 → 审稿 → 对标</div>
+      </div>
+    </div>
+    <table class="crew-table">
+      <thead>
+        <tr><th style="width:64px">编号</th><th style="width:210px">角色</th><th>核心职责</th><th style="width:120px">调用时机</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="sep">总编</td>
+          <td class="role-name role-main">主编 · Editor-in-Chief</td>
+          <td class="duty">理解创作诉求 → 拆解为专家任务 → 派单与调度 → 汇总各专家产出 → 质量终审 → 统一文风 → 向用户交付；全书风格与进程的总负责人（主 Agent 扮演）。</td>
+          <td class="sep">贯穿全程</td>
+        </tr>
+        <tr><td class="sep">01</td><td class="role-name">市场选题分析师</td><td class="duty">扫榜研判题材热度、读者画像与差异化定位；给出题材/类型/卖点组合建议。</td><td class="sep">立项</td></tr>
+        <tr><td class="sep">02</td><td class="role-name">世界观架构师</td><td class="duty">设定体系、力量规则、地图疆域、战力数值与底层逻辑；保证设定自洽并沉淀为 world_model。</td><td class="sep">立项 / 开新卷</td></tr>
+        <tr><td class="sep">03</td><td class="role-name">剧情架构师</td><td class="duty">主线 / 支线 / 卷结构、伏笔布置与回收、悬念与反转设计。</td><td class="sep">立项 / 每卷</td></tr>
+        <tr><td class="sep">04</td><td class="role-name">人设专家</td><td class="duty">人物小传、性格与言行一致性、成长弧光、人物关系网。</td><td class="sep">立项 / 新人物</td></tr>
+        <tr><td class="sep">05</td><td class="role-name">大纲规划师</td><td class="duty">卷纲 / 章纲、剧情节奏曲线、章末钩子规划。</td><td class="sep">每卷 / 每章前</td></tr>
+        <tr><td class="sep">06</td><td class="role-name">开篇专家</td><td class="duty">黄金三章打磨：开篇钩子、代入感、信息释放节奏、弃书点排查。</td><td class="sep">开书</td></tr>
+        <tr><td class="sep">07</td><td class="role-name">爽点设计师</td><td class="duty">爽点密度与排列、期待感管理、情绪节奏曲线（燃点/泪点/笑点）。</td><td class="sep">大纲 / 成稿后</td></tr>
+        <tr><td class="sep">08</td><td class="role-name">文笔润色师</td><td class="duty">语言风格统一、画面感描写、句式节奏、去 AI 味。</td><td class="sep">成稿后</td></tr>
+        <tr><td class="sep">09</td><td class="role-name">对话编剧</td><td class="duty">对白性格化、潜台词、冲突推进；检查"千人一声"。</td><td class="sep">成稿后</td></tr>
+        <tr><td class="sep">10</td><td class="role-name">审稿编辑</td><td class="duty">逻辑漏洞、设定查重（对照 world_model）、时间线校对、前后一致性。</td><td class="sep">每章 / 每卷</td></tr>
+        <tr><td class="sep">11</td><td class="role-name">爆款拆解师</td><td class="duty">对标作品结构拆解、数据化分析（章节节奏、套路迁移），为选题/大纲提供实证参照。</td><td class="sep">立项 / 卡文时</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ═══════════ 四、实现路径 ═══════════ -->
+<section id="s4">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="sec-num">四</span>
+      <div>
+        <div class="sec-title">二次开发路径：三条路，推荐 B</div>
+        <div class="sec-sub">按改动深度与投入排序；三条路径可递进演进，不必一次到位</div>
+      </div>
+    </div>
+
+    <div class="phase">
+      <div class="ph-badge">路径 A<br>MVP · 2 周</div>
+      <div class="ph-body">
+        <div class="ph-title">Skills + 角色卡方案 <small>零架构改动，先跑通"编委会"体验</small></div>
+        <p>不碰运行时代码：把"主编 + 11 位专家"做成一组内置 <b>SKILL.md</b>（每个专家一份角色卡，主编一份编排指令），加一个 <b>novel-orchestration</b> 技能指导主编何时调用子代理。前端零改动（沿用聊天界面），写作产物落盘为 markdown 文件。</p>
+        <ul>
+          <li><b>优点</b>：两天内可演示；全部复用现有 SubagentManager 与技能加载</li>
+          <li><b>缺点</b>：没有项目管理/章节存储/审稿看板；专家协作深度受单会话上下文限制</li>
+          <li><b>落点</b>：新增 <span class="path">App/memmy-agent/src/skills/novel-*/SKILL.md</span> + 角色卡模板</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="phase">
+      <div class="ph-badge alt">路径 B ★<br>推荐 · 4–6 周</div>
+      <div class="ph-body">
+        <div class="ph-title">Agent Runtime 原生"编委会编排层" <small>核心方案</small></div>
+        <p>在 <span class="path">App/memmy-agent/src/</span> 下新增 <b>novel/ 命名空间</b>：NovelProject（项目与章节存储）、ExpertRegistry（12 位角色卡注册表）、ChiefDesk（主编调度器，基于 SubagentManager 派单 + 收集）、写作用户态写入 Memory 的 novel 命名空间。前端新增"小说工作台"页面（项目列表 / 章节树 / 编辑器 / 审稿面板 / 专家进度看板，复用 history-dag 可视化）。</p>
+        <ul>
+          <li><b>优点</b>：专家是"一等公民"，支持并行写作、章节级审稿、设定自动记忆；能力完整可产品化</li>
+          <li><b>改动</b>：Agent 运行时新增 ~3–4 千行 + 后端写作 API + 前端 3–4 个页面</li>
+          <li><b>落点</b>：<span class="path">App/memmy-agent/src/novel/</span> · <span class="path">App/backend/src/services/novel-*</span> · <span class="path">App/frontend/desktop/src/pages/novel-*</span></li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="phase">
+      <div class="ph-badge">路径 C<br>重投入 · 8–12 周</div>
+      <div class="ph-body">
+        <div class="ph-title">独立小说引擎服务 <small>产品级全栈</small></div>
+        <p>在 Memory 服务旁新增独立的 <b>novel-service</b>（自有数据库、章节版本控制、协作队列、导出管线：EPUB / DOCX / 全平台分发），前端做完整编辑器（分屏、批注、修订）。适合要做成独立产品的场景。</p>
+        <ul>
+          <li><b>优点</b>：彻底解耦，性能与扩展性最好，可支持多人协作</li>
+          <li><b>缺点</b>：工作量大，前期与 memmy 现有能力重复度高</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════ 五、改动清单 ═══════════ -->
+<section id="s5">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="sec-num">五</span>
+      <div>
+        <div class="sec-title">改动清单（按路径 B）</div>
+        <div class="sec-sub">全部落点基于本次调研的真实代码位置，可直接作为开发排期</div>
+      </div>
+    </div>
+    <div class="filetree">
+      <div><span class="dir">App/memmy-agent/src/</span> <span class="note">← 核心改动区</span></div>
+      <div>&nbsp;&nbsp;├─ <span class="dir">novel/</span> <span class="hot">【新增】编委会编排层</span></div>
+      <div>&nbsp;&nbsp;│&nbsp;&nbsp;├─ expert-registry.ts　　<span class="note">12 份角色卡注册表（主编 + 11 专家）</span></div>
+      <div>&nbsp;&nbsp;│&nbsp;&nbsp;├─ chief-desk.ts　　　　 <span class="note">主编调度器：拆解 → 派单 → 汇总 → 终审</span></div>
+      <div>&nbsp;&nbsp;│&nbsp;&nbsp;├─ novel-project.ts　　　<span class="note">项目 / 卷 / 章节模型与文件布局</span></div>
+      <div>&nbsp;&nbsp;│&nbsp;&nbsp;├─ novel-memory.ts　　　 <span class="note">设定 → Memory world_model 的读写适配</span></div>
+      <div>&nbsp;&nbsp;│&nbsp;&nbsp;└─ commands.ts　　　　　<span class="note">/新书 /大纲 /人设 /写正文 /审稿 /开编委会</span></div>
+      <div>&nbsp;&nbsp;├─ <span class="dir">skills/</span> <span class="hot">【新增】写作技能集</span></div>
+      <div>&nbsp;&nbsp;│&nbsp;&nbsp;├─ novel-outline/ · novel-golden3/ · novel-payoff/ · novel-review/ …</div>
+      <div>&nbsp;&nbsp;├─ <span class="dir">templates/</span> <span class="hot">【新增】角色卡模板</span></div>
+      <div>&nbsp;&nbsp;│&nbsp;&nbsp;└─ novel/experts/*.md　　　<span class="note">主编卡 + 11 位专家卡（子代理系统提示词）</span></div>
+      <div>&nbsp;&nbsp;└─ <span class="dir">core/agent-runtime/</span> <span class="note">【微调】</span></div>
+      <div>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;├─ subagent.ts　　　　　 <span class="note">暴露专家并发上限（默认 maxConcurrentSubagents=1 需调高）</span></div>
+      <div>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;└─ skills.ts　　　　　　 <span class="note">注册 novel-* 内置技能</span></div>
+      <div><span class="dir">App/backend/src/services/</span> <span class="note">← 新增</span></div>
+      <div>&nbsp;&nbsp;├─ novel-service.ts　　　<span class="note">项目 CRUD / 章节读写 / 审稿任务队列 / 写作进度 API</span></div>
+      <div>&nbsp;&nbsp;└─ novel-session.ts　　　<span class="note">把写作会话接入现有 turn/session 服务</span></div>
+      <div><span class="dir">App/frontend/desktop/src/pages/</span> <span class="note">← 新增</span></div>
+      <div>&nbsp;&nbsp;├─ novel-workspace.tsx　<span class="note">小说工作台：项目列表 + 章节树 + 编辑器</span></div>
+      <div>&nbsp;&nbsp;├─ novel-review.tsx　　　<span class="note">审稿面板：专家批注 / 设定查重结果 / 一键修改</span></div>
+      <div>&nbsp;&nbsp;├─ novel-crew.tsx　　　　<span class="note">编委会视图：12 角色卡片 / 各专家进度 / 调用记录</span></div>
+      <div>&nbsp;&nbsp;└─ app/router.tsx　　　　<span class="note">【微调】注册新页面路由与导航入口</span></div>
+      <div><span class="dir">Memory/src/</span> <span class="note">← 微调</span></div>
+      <div>&nbsp;&nbsp;└─ service/memory-service.ts　<span class="note">启用 novel 命名空间（设定/人设/时间线/文风偏好）</span></div>
+    </div>
+
+    <h3 class="block">三个必须知道的工程前提</h3>
+    <div class="grid3">
+      <div class="card"><div class="c-icon">⚙️</div><h4>并发上限默认 1</h4><p><code>AgentDefaults.maxConcurrentSubagents = 1</code>（config/schema.ts 第 304 行）。并行调用多位专家前必须调高，并考虑限流与预算控制。</p></div>
+      <div class="card"><div class="c-icon">💰</div><h4>Token 成本线性放大</h4><p>12 角色 × 每任务多次 LLM 调用。建议角色卡精炼（系统提示词控制在 800–1500 字）、审稿用便宜模型、正文用强模型的分层路由。</p></div>
+      <div class="card"><div class="c-icon">🔗</div><h4>一致性命脉在 Memory</h4><p>长篇设定一致性依赖 embedding 质量与 world_model 写入纪律：每章成稿后必须把新设定/新人物回写记忆，审稿编辑对照查重。</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════ 六、里程碑 ═══════════ -->
+<section id="s6">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="sec-num">六</span>
+      <div>
+        <div class="sec-title">里程碑规划</div>
+        <div class="sec-sub">两周见 Demo，两个月成产品</div>
+      </div>
+    </div>
+    <div class="phase">
+      <div class="ph-badge">M1<br>第 1–2 周</div>
+      <div class="ph-body">
+        <div class="ph-title">编委会 MVP（路径 A）</div>
+        <p>12 份角色卡 + novel-orchestration 技能 + 3 个写作技能（大纲 / 开篇 / 审稿）。验收：用户在聊天界面说"帮我开一本仙侠书"，主编自动召集 01–05 号专家产出《立项书》（题材定位 + 世界观 + 剧情主干 + 人设 + 三章大纲），全部落盘 markdown。</p>
+      </div>
+    </div>
+    <div class="phase">
+      <div class="ph-badge alt">M2<br>第 3–4 周</div>
+      <div class="ph-body">
+        <div class="ph-title">写作工作台（路径 B 起步）</div>
+        <p>novel 命名空间 + 章节存储 + 写作 API + 前端"小说工作台"页面。验收：可建项目、写卷/章、正文编辑器、设定自动入记忆。</p>
+      </div>
+    </div>
+    <div class="phase">
+      <div class="ph-badge alt">M3<br>第 5–6 周</div>
+      <div class="ph-body">
+        <div class="ph-title">完整编委会流程</div>
+        <p>主编调度器（派单/并行/汇总/终审）+ 审稿面板 + 编委会视图 + 写作命令集。验收：一键"今日日更"——主编按大纲派 05 大纲规划师拆章纲 → 并行写 3 章 → 07/08/09 逐章加工 → 10 审稿编辑查重 → 主编终审交付。</p>
+      </div>
+    </div>
+    <div class="phase">
+      <div class="ph-badge">M4<br>第 7–8 周</div>
+      <div class="ph-body">
+        <div class="ph-title">进化与打磨</div>
+        <p>反馈学习闭环（用户评价 → 文风 policy 沉淀）、爆款拆解师接入扫榜数据、导出管线（TXT/Markdown → EPUB/DOCX）、记忆回滚演练。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════ 七、风险 ═══════════ -->
+<section id="s7">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="sec-num">七</span>
+      <div>
+        <div class="sec-title">风险与对策</div>
+        <div class="sec-sub">依据代码现状识别，非泛泛之谈</div>
+      </div>
+    </div>
+    <div class="risk">
+      <div class="r-lv hi">高</div><div class="r-t">长篇一致性失控</div><div class="r-d">几十万字后人物/设定/时间线漂移。对策：world_model 强制写入纪律 + 审稿编辑对照查重 + Dream 定期整理设定库，形成"写作 → 回写 → 查重"闭环。</div>
+    </div>
+    <div class="risk">
+      <div class="r-lv hi">高</div><div class="r-t">Token 成本失控</div><div class="r-d">12 角色串行会指数级放大成本。对策：模型分层（规划用小模型、正文用大模型）、专家并行上限、角色卡精简、按需召唤（不是每章都全员上阵）。</div>
+    </div>
+    <div class="risk">
+      <div class="r-lv mid">中</div><div class="r-t">并发编排的工程复杂度</div><div class="r-d">SubagentManager 已支持并发，但"主编收集多专家产出再汇总"需要任务结果协议（结构化 JSON 回传）。对策：为专家定义统一产出 schema（title/summary/detail/refs），主编按 schema 解析。</div>
+    </div>
+    <div class="risk">
+      <div class="r-lv mid">中</div><div class="r-t">前端改动面</div><div class="r-d">现有前端以聊天/记忆为核心，新增工作台涉及路由、导航、状态切片。对策：沿用现有 app-actions / app-state 模式新增 novel 切片，页面独立挂载，不侵入现有聊天流。</div>
+    </div>
+    <div class="risk">
+      <div class="r-lv lo">低</div><div class="r-t">"AI 味"文本</div><div class="r-d">网文读者对 AI 文风敏感。对策：文笔润色师角色卡内置去 AI 味清单（禁模板句式、禁滥用排比/感叹、口语化校验），并接入现有反馈分类器持续纠偏。</div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════ 结语 ═══════════ -->
+<section id="s8">
+  <div class="wrap">
+    <div class="conclusion">
+      <h3>结语：<span>这栋楼是为"编辑部"盖的</span></h3>
+      <p>memmy-agent 的核心抽象 —— 记忆是"设定库"、子代理是"专家"、会话 DAG 是"任务看板"、技能是"写作手册"、SOUL 模板是"角色卡" —— 与小说写作系统的需求几乎一一对应。把它改造成"编委会制"写作系统，不是逆向重构，而是<b>顺着现有架构做一层业务封装</b>。</p>
+      <p>建议立即启动 M1：先写 12 份角色卡与 3 个写作技能，用两天跑通"开书 → 立项书"的完整编委会演示，再决定 M2 的工程化深度。每一步都有现成代码托底，风险可控。</p>
+      <span class="cz">下一步：输出角色卡 V1 + 主编编排指令草案</span>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="f-mark">MEMOTENSOR · 调研纪要</div>
+  基于 D:/HeyCode/memmy-agent 源码实测调研 · 2026-08-13<br>
+  Node ≥ 22 · TypeScript · Electron · Fastify · SQLite · React
+</footer>
+
+<div data-mirawork-brand data-mirawork-tid="66598ed4-0d5a-4925-a786-d7358a3bc129"><style data-mirawork-brand-style>
+[data-mirawork-brand]{
+  --mw-brand-bg:rgba(255,255,255,.92);
+  --mw-brand-border:rgba(20,24,23,.1);
+  --mw-brand-shadow:0 10px 30px rgba(20,30,27,.09);
+  --mw-brand-ink:#141817;
+  --mw-brand-cta-bg:#fff;
+  --mw-brand-cta-border:rgba(20,24,23,.1);
+  --mw-brand-cta-ink:#303735;
+  --mw-brand-cta-hover-ink:#087d68;
+  --mw-brand-cta-hover-border:rgba(16,198,162,.3);
+  --mw-brand-logo-border:rgba(20,24,23,.08);
+  --mw-brand-close:#a0a6a3;
+  --mw-brand-close-hover-ink:#303735;
+  --mw-brand-close-hover-bg:rgba(20,24,23,.06);
+  position:fixed!important;z-index:2147483000!important;
+  left:50%!important;right:auto!important;top:auto!important;bottom:22px!important;
+  width:min(264px,calc(100vw - 24px))!important;max-width:calc(100vw - 24px)!important;
+  margin:0!important;transform:translateX(-50%)!important;
+  box-sizing:border-box!important;pointer-events:auto!important;
+}
+[data-mirawork-brand][hidden]{display:none!important}
+@media (prefers-color-scheme:dark){
+  [data-mirawork-brand]{
+    --mw-brand-bg:rgba(28,32,30,.92);
+    --mw-brand-border:rgba(255,255,255,.12);
+    --mw-brand-shadow:0 10px 30px rgba(0,0,0,.35);
+    --mw-brand-ink:#f2f4f3;
+    --mw-brand-cta-bg:rgba(255,255,255,.08);
+    --mw-brand-cta-border:rgba(255,255,255,.16);
+    --mw-brand-cta-ink:#f2f4f3;
+    --mw-brand-cta-hover-ink:#7dffd8;
+    --mw-brand-cta-hover-border:rgba(16,198,162,.45);
+    --mw-brand-logo-border:rgba(255,255,255,.14);
+    --mw-brand-close:#8a918e;
+    --mw-brand-close-hover-ink:#f2f4f3;
+    --mw-brand-close-hover-bg:rgba(255,255,255,.1);
+  }
+}
+.mw-brand-card{
+  position:relative;width:100%;display:flex;align-items:center;
+  box-sizing:border-box;
+  border:1px solid var(--mw-brand-border);border-radius:14px;
+  background:var(--mw-brand-bg);box-shadow:var(--mw-brand-shadow);
+  backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+  color:var(--mw-brand-ink);
+  font:600 10px/1.2 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  transition:.22s;
+}
+.mw-brand-card__hit{
+  display:flex;align-items:center;gap:8px;flex:1;min-width:0;
+  padding:8px 28px 8px 8px;box-sizing:border-box;
+  color:inherit;text-decoration:none;cursor:pointer;
+}
+.mw-brand-card__logo{
+  flex:none;width:32px;height:32px;object-fit:cover;
+  border:1px solid var(--mw-brand-logo-border);border-radius:9px;background:#fff;
+}
+.mw-brand-card__copy{min-width:0;flex:1;line-height:1.2}
+.mw-brand-card__copy strong{display:block;font-size:10px;white-space:nowrap;font-weight:700}
+.mw-brand-card__try{
+  flex:none;padding:7px 9px;
+  border:1px solid var(--mw-brand-cta-border);border-radius:9px;
+  color:var(--mw-brand-cta-ink);background:var(--mw-brand-cta-bg);
+  font-size:9px;font-weight:700;
+}
+.mw-brand-card__hit:hover .mw-brand-card__try{
+  color:var(--mw-brand-cta-hover-ink);border-color:var(--mw-brand-cta-hover-border);
+}
+.mw-brand-card__close{
+  position:absolute;top:4px;right:4px;z-index:1;
+  width:20px;height:20px;display:grid;place-items:center;
+  padding:0;border:0;border-radius:50%;
+  color:var(--mw-brand-close);background:transparent;
+  cursor:pointer;font:14px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+}
+.mw-brand-card__close:hover{
+  color:var(--mw-brand-close-hover-ink);background:var(--mw-brand-close-hover-bg);
+}
+</style><aside class="mw-brand-card" aria-label="Mirawork 产品提示"><a class="mw-brand-card__hit" href="https://home.mirawork.com/?utm_source=generated_html&utm_medium=brand_card&aid=d46e0bcf4923504f1d04395383daf581&tid=66598ed4-0d5a-4925-a786-d7358a3bc129" target="_blank" rel="noopener"><svg class="mw-brand-card__logo" width="32" height="32" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><rect width="1024" height="1024" rx="229" fill="#fff"/><path d="M723.2 601.6V332.8h-11.9L565.5 426.4q-26.5 17-58 16.2-31.4-.8-57-19.1L323.9 332.8h-29.5v313.6q0 18.6 13.1 31.7 13.1 13.1 31.7 13.1h288q10.6 0 10.6 12.8v89.6q0 12.8-10.6 12.8h-288q-66.3 0-113.2-46.9-46.8-46.8-46.8-113.1V313.6q0-39.8 28.1-67.9 28.1-28.1 67.9-28.1h34.3q50.1 0 92.9 29.9l107.9 77.3 127.4-81.8q38.7-24.9 84.5-24.9h18q39.8 0 67.9 28.1 28.1 28.1 28.1 67.9v288q0 12.8-12.8 12.8h-89.6q-10.6 0-10.6-12.8z" fill="#010000"/><rect x="723.2" y="691.2" width="115.2" height="115.2" rx="12.8" fill="#0BC8A1"/><rect x="367.3" y="474.1" width="74.1" height="128.1" rx="12.8" fill="#010000"/><rect x="584" y="474.1" width="74.1" height="128.1" rx="12.8" fill="#010000"/></svg><span class="mw-brand-card__copy"><strong>本页由 Mirawork 生成</strong></span><span class="mw-brand-card__try">试用</span></a><button type="button" class="mw-brand-card__close" data-mirawork-brand-close aria-label="关闭提示">×</button></aside><script data-mirawork-brand-script>
+(function(){
+  var root=document.querySelector("[data-mirawork-brand]");
+  if(!root)return;
+  try{if(sessionStorage.getItem("mirawork-brand-card-hidden")==="1"){root.setAttribute("hidden","");root.setAttribute("aria-hidden","true");}}catch(e){}
+  var closeBtn=root.querySelector("[data-mirawork-brand-close]");
+  if(!closeBtn)return;
+  closeBtn.addEventListener("click",function(ev){
+    ev.preventDefault();
+    ev.stopPropagation();
+    root.setAttribute("hidden","");
+    root.setAttribute("aria-hidden","true");
+    try{sessionStorage.setItem("mirawork-brand-card-hidden","1");}catch(e){}
+  });
+})();
+</script></div></body>
+</html>
