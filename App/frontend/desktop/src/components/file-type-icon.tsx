@@ -267,7 +267,7 @@ export function FileTypeIcon(props: {
 
 export function FolderTypeIcon(props: {
   open?: boolean;
-  /** Opt-in only; knowledge lists stay on the custom SVG to avoid native icon IPC storms. */
+  /** Opt-in only so repeated folder rows do not trigger native icon IPC storms. */
   preferSystemIcon?: boolean;
   systemKind?: DesktopSystemFolderIconKind;
   surface?: FileTypeIconSurface;

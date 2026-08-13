@@ -12,7 +12,7 @@ export const LITREV_CONTEXT_STORAGE_KEY = "memmy.literatureReviewDemoContexts";
 export const LITREV_PROJECT_CONTEXT_STORAGE_KEY = "memmy.literatureReviewDemoProjectId";
 
 export interface LitrevLaunchContext {
-  kind: "kb" | "path";
+  kind: "path";
   id: string;
   label: string;
 }
@@ -22,24 +22,25 @@ export const LITREV_DEFAULT_PROMPT = "帮我梳理近 5 年大模型长期记忆
 /* ---------------------------------- 需求澄清 ---------------------------------- */
 
 export interface LitrevSetupQuestion {
-  id: "focus" | "time" | "language" | "length" | "citation";
+  id: "topic" | "time";
   text: string;
   options: string[];
 }
 
-const ALL_SETUP_QUESTIONS: Array<LitrevSetupQuestion & { skipPattern: RegExp }> = [
-  { id: "focus", text: "这篇综述更关注哪个方向？", options: ["方法与系统对比", "系统综述", "应用落地", "理论脉络"], skipPattern: /(方法|系统|应用|理论)/ },
-  { id: "time", text: "希望覆盖什么时间范围？", options: ["近 3 年", "近 5 年", "近 10 年", "不限"], skipPattern: /(近\s*[0-9]|20\d{2}|时间|不限)/ },
-  { id: "language", text: "正文使用什么语言？", options: ["中文", "英文", "中英双语"], skipPattern: /(中文|英文|双语)/ },
-  { id: "length", text: "希望正文大约多长？", options: ["3–5 页", "8–12 页", "长文"], skipPattern: /(页|字|长文|篇幅)/ },
-  { id: "citation", text: "使用哪种引用格式？", options: ["APA 7", "GB/T 7714", "IEEE"], skipPattern: /(APA|IEEE|GB\/T|国标|引用格式)/i }
+const ALL_SETUP_QUESTIONS: LitrevSetupQuestion[] = [
+  { id: "topic", text: "这篇文献综述的主题 / 研究领域是什么？", options: ["沿用当前描述", "方法与系统", "应用与实践", "理论与发展脉络"] },
+  { id: "time", text: "希望论文覆盖什么时间范围？", options: ["近 3 年", "近 5 年", "近 10 年", "不限"] }
 ];
 
-/** Builds the clarification questions, skipping anything the prompt already answers. */
+/** Builds the two research-scope confirmations; other writing preferences stay agent-managed. */
 export function buildLitrevSetupQuestions(prompt: string): LitrevSetupQuestion[] {
-  return ALL_SETUP_QUESTIONS
-    .filter((question) => !question.skipPattern.test(prompt))
-    .map(({ id, text, options }) => ({ id, text, options }));
+  return ALL_SETUP_QUESTIONS.map((question) => {
+    if (question.id !== "time") return question;
+    const matched = question.options.find((option) => prompt.replace(/\s/g, "").includes(option.replace(/\s/g, "")));
+    return matched
+      ? { ...question, options: [matched, ...question.options.filter((option) => option !== matched)] }
+      : question;
+  });
 }
 
 export const LITREV_TOPIC_QUESTION = "文献综述的研究主题/领域是什么？";
@@ -134,17 +135,17 @@ export interface LitrevReference {
   id: string;
   title: string;
   meta: string;
-  /** Where the paper comes from: online search, knowledge base, or project files. */
-  source: "web" | "knowledge" | "project";
+  /** Where the paper comes from: online search or user-provided local files. */
+  source: "web" | "local";
   selected: boolean;
 }
 
 export function buildDemoReferences(): LitrevReference[] {
   return [
     { id: "r1", title: "MemGPT: Towards LLMs as Operating Systems", meta: "Packer et al. · 2023", source: "web", selected: true },
-    { id: "r2", title: "MemoryBank: Enhancing Large Language Models with Long-Term Memory", meta: "Zhong et al. · 2024", source: "knowledge", selected: true },
+    { id: "r2", title: "MemoryBank: Enhancing Large Language Models with Long-Term Memory", meta: "Zhong et al. · 2024", source: "local", selected: true },
     { id: "r3", title: "LongMemEval: Benchmarking Chat Assistants on Long-Term Interactive Memory", meta: "Wu et al. · 2024", source: "web", selected: true },
-    { id: "r4", title: "Generative Agents: Interactive Simulacra of Human Behavior", meta: "Park et al. · 2023", source: "project", selected: false },
+    { id: "r4", title: "Generative Agents: Interactive Simulacra of Human Behavior", meta: "Park et al. · 2023", source: "local", selected: false },
     { id: "r5", title: "A Survey on the Memory Mechanism of LLM-based Agents", meta: "2024 · 仅摘要", source: "web", selected: true }
   ];
 }
@@ -176,7 +177,7 @@ export const LITREV_SEARCH_PHASE: LitrevThinkingPhase = {
 
 export const LITREV_EXECUTION_PHASE: LitrevThinkingPhase = {
   title: "正在生成执行计划",
-  stages: ["确认最终纳入文献与全文状态", "准备任务文件与知识库收录", "生成自动执行 To-do"]
+  stages: ["确认最终纳入文献与全文状态", "准备任务文件", "生成自动执行 To-do"]
 };
 
 /** Tool-call history lines accumulated in the conversation while the wizard advances. */
@@ -281,7 +282,7 @@ export function litrevPreviewContentFor(path: string): LitrevPreviewContent {
   if (path.includes("正文")) return BODY_PREVIEW;
   return {
     title: path.split("/").pop() ?? path,
-    sections: [{ heading: "文件预览", body: "该文件的内容会在这里展示，可确认任务材料、项目文件或知识库资料。" }]
+    sections: [{ heading: "文件预览", body: "该文件的内容会在这里展示，可确认任务材料、项目文件或本机资料。" }]
   };
 }
 
@@ -307,12 +308,13 @@ export function buildHomeCapabilities(): HomeCapabilityItem[] {
 
 export interface HomeReferenceItem {
   path: string;
-  kind: "file";
+  kind: "file" | "folder";
   meta: string;
 }
 
 export function buildHomeReferenceItems(): HomeReferenceItem[] {
   return [
+    { path: "本地文献/", kind: "folder", meta: "12 个文件" },
     { path: "开题报告.docx", kind: "file", meta: "DOCX" },
     { path: "研究范围.md", kind: "file", meta: "Markdown" },
     { path: "文献对照表.xlsx", kind: "file", meta: "Excel" }

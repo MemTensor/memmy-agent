@@ -10,7 +10,6 @@ const allowedSourceFiles = new Set([
   "i18n/messages.ts",
   "lib/nickname.ts",
   "pages/memory/skill-demo-data.ts",
-  "pages/knowledge-demo-data.ts",
   "pages/literature-review-demo-data.ts",
   // English ui coverage tests.
   "dev-agent-preview.tsx"

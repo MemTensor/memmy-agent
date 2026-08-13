@@ -17,18 +17,16 @@ import {
   type ReactNode,
   type Ref
 } from "react";
-import { AtSign, LibraryBig, Plus, SquareSlash } from "lucide-react";
+import { AtSign, Plus, SquareSlash } from "lucide-react";
 import { FileTypeIcon, FolderTypeIcon } from "../components/file-type-icon.js";
 import { Tooltip } from "../components/tooltip.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import type { ComposerContextReference } from "../state/agent-composer-state.js";
 import { AgentAttachmentCard } from "./agent-file-attachment-chip.js";
-import { buildDemoKnowledgeBases, type KbKnowledgeBase } from "./knowledge-demo-data.js";
 import { buildHomeReferenceItems, type HomeReferenceItem } from "./literature-review-demo-data.js";
 
 export type ComposerContextChip = ComposerContextReference;
 
-const HOME_KNOWLEDGE_BASES: KbKnowledgeBase[] = buildDemoKnowledgeBases();
 const HOME_REFERENCE_ITEMS: HomeReferenceItem[] = buildHomeReferenceItems();
 
 /** Extracts a trailing `@token` mention query from the composer input, or null. */
@@ -199,9 +197,9 @@ export function ComposerHighlightedTextarea(props: {
     </div>
   );
 }
-
 export function ComposerQuickActionButtons(props: {
   onAttach: () => void;
+  onAttachFolder?: () => void;
   onInsertMention: () => void;
   onInsertSlash: () => void;
   /** Anchored directly under the @ button. */
@@ -211,20 +209,62 @@ export function ComposerQuickActionButtons(props: {
 }) {
   const { t } = useTranslation();
   const buttonClass = "composer-quick-actions__btn";
+  const [attachOpen, setAttachOpen] = useState(false);
+  const attachAnchorRef = useRef<HTMLDivElement | null>(null);
   const referenceOpen = Boolean(props.referenceMenu);
   const slashOpen = Boolean(props.slashMenu);
+
+  useEffect(() => {
+    if (!attachOpen) return;
+    const close = (event: PointerEvent) => {
+      if (!attachAnchorRef.current?.contains(event.target as Node)) setAttachOpen(false);
+    };
+    document.addEventListener("pointerdown", close);
+    return () => document.removeEventListener("pointerdown", close);
+  }, [attachOpen]);
+
   return (
     <div className="composer-quick-actions" data-composer-quick-actions-root>
-      <Tooltip content={t("home.quick.attachHint")}>
-        <button
-          type="button"
-          aria-label={t("home.quick.attach")}
-          className={buttonClass}
-          onClick={props.onAttach}
-        >
-          <Plus size={15} />
-        </button>
-      </Tooltip>
+      <div ref={attachAnchorRef} className="composer-quick-actions__anchor">
+        <Tooltip content={t("home.quick.attachHint")}>
+          <button
+            type="button"
+            aria-label={t("home.quick.attach")}
+            aria-expanded={props.onAttachFolder ? attachOpen : undefined}
+            className={`${buttonClass}${attachOpen ? " composer-quick-actions__btn--active" : ""}`}
+            onClick={() => {
+              if (props.onAttachFolder) setAttachOpen((open) => !open);
+              else props.onAttach();
+            }}
+          >
+            <Plus size={15} />
+          </button>
+        </Tooltip>
+        {attachOpen && props.onAttachFolder ? (
+          <div className="composer-quick-actions__popover composer-quick-actions__popover--attach" role="menu">
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setAttachOpen(false);
+                props.onAttach();
+              }}
+            >
+              {t("home.quick.uploadFile")}
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setAttachOpen(false);
+                props.onAttachFolder?.();
+              }}
+            >
+              {t("home.quick.uploadFolder")}
+            </button>
+          </div>
+        ) : null}
+      </div>
       <div className="composer-quick-actions__anchor">
         <Tooltip content={t("home.quick.referenceHint")}>
           <button
@@ -267,14 +307,13 @@ export function ComposerQuickActionButtons(props: {
 
 /**
  * Reference panel anchored under the `@` button when mention/reference is active.
- * Searchable list of knowledge bases and files (no folders).
+ * Searchable list of local files and folders.
  */
 export function ComposerReferencePanel(props: {
   open: boolean;
   /** Query synced from a trailing `@token` in the composer, if any. */
   externalQuery?: string | null;
   onClose: () => void;
-  onPickKnowledgeBase: (base: KbKnowledgeBase) => void;
   onPickReference: (item: HomeReferenceItem) => void;
 }) {
   const { t } = useTranslation();
@@ -283,7 +322,6 @@ export function ComposerReferencePanel(props: {
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const wasOpenRef = useRef(false);
   const query = localQuery.trim().toLowerCase();
-  const bases = HOME_KNOWLEDGE_BASES.filter((base) => !query || base.name.toLowerCase().includes(query));
   const items = HOME_REFERENCE_ITEMS.filter((item) => !query || item.path.toLowerCase().includes(query));
 
   useEffect(() => {
@@ -334,24 +372,7 @@ export function ComposerReferencePanel(props: {
         </label>
       </header>
       <div className="home-reference-panel__list">
-        <div className="home-reference-panel__heading">{t("home.quick.kbSection")}</div>
-        {bases.map((base) => (
-          <button
-            type="button"
-            key={base.id}
-            className="home-reference-panel__item"
-            role="option"
-            onClick={() => props.onPickKnowledgeBase(base)}
-          >
-            <span className="home-reference-panel__icon"><LibraryBig size={14} /></span>
-            <span className="home-reference-panel__text">
-              <strong>{base.name}</strong>
-              <small>{t("home.quick.kbSearchScope", { count: base.fileIds.length })}</small>
-            </span>
-            <code>{t("home.quick.kind.kb")}</code>
-          </button>
-        ))}
-        <div className="home-reference-panel__heading">{t("home.quick.fileSection")}</div>
+        <div className="home-reference-panel__heading">{t("home.quick.localSection")}</div>
         {items.map((item) => (
           <button
             type="button"
@@ -360,15 +381,17 @@ export function ComposerReferencePanel(props: {
             role="option"
             onClick={() => props.onPickReference(item)}
           >
-            <FileTypeIcon name={item.path} surface="row" />
+            {item.kind === "folder"
+              ? <FolderTypeIcon surface="row" />
+              : <FileTypeIcon name={item.path} surface="row" />}
             <span className="home-reference-panel__text">
               <strong>{item.path}</strong>
               <small>{item.meta}</small>
             </span>
-            <code>{t("home.quick.kind.file")}</code>
+            <code>{t(item.kind === "folder" ? "home.quick.kind.folder" : "home.quick.kind.file")}</code>
           </button>
         ))}
-        {!bases.length && !items.length ? (
+        {!items.length ? (
           <div className="home-reference-panel__empty">{t("home.quick.noMatches")}</div>
         ) : null}
       </div>
@@ -386,11 +409,9 @@ export function HomeContextChips(props: {
     <div className="home-context-chips">
       {props.chips.map((chip) => {
         const folder = chip.kind === "path" && chip.label.endsWith("/");
-        const kindLabel = chip.kind === "kb"
-          ? t("home.quick.kind.kb")
-          : folder
-            ? t("home.quick.kind.folder")
-            : t("home.quick.kind.file");
+        const kindLabel = folder
+          ? t("home.quick.kind.folder")
+          : t("home.quick.kind.file");
         return (
           <AgentAttachmentCard
             key={`${chip.kind}:${chip.id}`}
@@ -402,11 +423,7 @@ export function HomeContextChips(props: {
             removeLabel={props.onRemove ? t("common.remove") : undefined}
             onRemove={props.onRemove ? () => props.onRemove?.(chip) : undefined}
             leading={(
-              chip.kind === "kb" ? (
-                <span className="home-context-card__icon home-context-card__icon--kb">
-                  <LibraryBig size={16} aria-hidden="true" />
-                </span>
-              ) : folder ? (
+              folder ? (
                 <FolderTypeIcon surface="card" />
               ) : (
                 <FileTypeIcon name={chip.label} surface="card" />

@@ -18,6 +18,7 @@ import type {
   WebuiSessionTarget
 } from "../api/memmy-agent-client.js";
 import { chatIdToSessionKey } from "../api/memmy-agent-client.js";
+import { parsePathReferencesFromComposerContent } from "../lib/composer-file-reference.js";
 import type { ComposerContextReference, PendingAttachment } from "./agent-composer-state.js";
 import {
   mergeFileEdits,
@@ -3438,19 +3439,23 @@ function normalizeThreadMessage(message: Record<string, unknown>, index: number)
         : undefined;
     const fileEdits = Array.isArray(message.fileEdits) ? normalizeFileEdits(message.fileEdits) : undefined;
     const modelError = normalizeModelError(message.modelError ?? message.model_error);
-    const content = kind === "context_compaction"
+    const rawContent = kind === "context_compaction"
       ? String(message.content ?? "") || contextCompactionFallbackText(compactionStatus)
       : String(message.content ?? "");
+    const parsedContent = role === "user" && kind !== "context_compaction"
+      ? parsePathReferencesFromComposerContent(rawContent)
+      : { content: rawContent, references: [] };
     const normalized = {
       id: String(message.id ?? `${role}-${index}`),
       role,
-      content,
+      content: parsedContent.content,
       ...(turnId ? { turnId } : {}),
       ...(kind ? { kind } : {}),
       ...(typeof message.reasoning === "string" ? { reasoning: message.reasoning } : {}),
       ...(typeof message.reasoningStreaming === "boolean" ? { reasoningStreaming: message.reasoningStreaming } : {}),
       ...(typeof message.isStreaming === "boolean" ? { isStreaming: message.isStreaming } : {}),
       ...(Array.isArray(message.media) ? { media: normalizeMedia(message.media) } : {}),
+      ...(parsedContent.references.length ? { contextReferences: parsedContent.references } : {}),
       ...(kind !== "context_compaction" && Array.isArray(message.traces) ? { traces: message.traces.map(String) } : {}),
       ...(kind !== "context_compaction" && rawToolEvents ? { toolEvents: normalizeToolProgressEvents(rawToolEvents) } : {}),
       ...(kind !== "context_compaction" && fileEdits?.length ? { fileEdits } : {}),

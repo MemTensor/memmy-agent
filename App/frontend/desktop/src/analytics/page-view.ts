@@ -16,7 +16,6 @@ const ROUTE_PAGE_TITLES: Record<AppRoutePath, string> = {
   "/tools": "Tools",
   "/memory": "Memory",
   "/memory-sources": "Memory Sources",
-  "/knowledge": "Knowledge Base",
   "/literature-review": "Literature Review",
   "/settings": "Settings"
 };

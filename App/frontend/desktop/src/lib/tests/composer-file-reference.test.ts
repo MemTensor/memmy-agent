@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  composerFolderReferenceFromFiles,
   MEMMY_COMPOSER_REFERENCE_MIME,
   mergeComposerContextReferences,
+  parsePathReferencesFromComposerContent,
   readComposerReferenceDrag,
   writeComposerReferenceDrag
 } from "../composer-file-reference.js";
@@ -36,8 +38,37 @@ describe("composer file references", () => {
 
   it("deduplicates references by kind and id", () => {
     const first = { kind: "path" as const, id: "paper.pdf", label: "paper.pdf" };
-    const base = { kind: "kb" as const, id: "kb-1", label: "研究资料" };
+    const folder = { kind: "path" as const, id: "研究资料", label: "研究资料/" };
 
-    expect(mergeComposerContextReferences([first], [first, base])).toEqual([first, base]);
+    expect(mergeComposerContextReferences([first], [first, folder])).toEqual([first, folder]);
+  });
+
+  it("collapses a directory selection into one folder reference", () => {
+    const file = new File(["paper"], "paper.pdf");
+    Object.defineProperty(file, "webkitRelativePath", { value: "Papers/2026/paper.pdf" });
+
+    expect(composerFolderReferenceFromFiles(
+      [file],
+      () => "/Users/memmy/Papers/2026/paper.pdf"
+    )).toEqual({
+      kind: "path",
+      id: "/Users/memmy/Papers",
+      label: "Papers/"
+    });
+  });
+
+  it("restores sent references from canonical thread content", () => {
+    expect(parsePathReferencesFromComposerContent(
+      "请结合这些资料\n\n<memmy-context>\n"
+      + "- file: paper.pdf (/Users/memmy/paper.pdf)\n"
+      + "- folder: Papers/ (/Users/memmy/Papers)\n"
+      + "</memmy-context>"
+    )).toEqual({
+      content: "请结合这些资料",
+      references: [
+        { kind: "path", id: "/Users/memmy/paper.pdf", label: "paper.pdf" },
+        { kind: "path", id: "/Users/memmy/Papers", label: "Papers/" }
+      ]
+    });
   });
 });

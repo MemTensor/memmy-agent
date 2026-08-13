@@ -17,7 +17,6 @@ import {
   Files,
   Folder,
   GripVertical,
-  LibraryBig,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRight,
@@ -26,7 +25,7 @@ import {
   Send,
   X
 } from "lucide-react";
-import { FileTypeIcon } from "../components/file-type-icon.js";
+import { FileTypeIcon, FolderTypeIcon } from "../components/file-type-icon.js";
 import { useApiClients } from "../app/providers.js";
 import { AppFrame } from "./app-frame.js";
 import { AgentAttachmentCard } from "./agent-file-attachment-chip.js";
@@ -34,16 +33,15 @@ import { SidebarResizeHandle, useResizableSidebar } from "./sidebar-resize.js";
 import { Button } from "../components/button.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import {
+  composerFolderReferenceFromFiles,
   dataTransferHasComposerReference,
   mergeComposerContextReferences,
   readComposerReferenceDrag,
   writeComposerReferenceDrag
 } from "../lib/composer-file-reference.js";
-import { registerAgentManagedFiles } from "../lib/agent-managed-files.js";
 import { agentActions } from "../state/app-actions.js";
 import { agentChatScopeKey, type ComposerContextReference } from "../state/agent-composer-state.js";
 import { useAppState } from "../state/app-state.js";
-import { buildDemoKnowledgeBases, buildDemoLibraryFiles, type KbKnowledgeBase } from "./knowledge-demo-data.js";
 import { ComposerQuickActionButtons, ComposerReferencePanel, HomeContextChips } from "./home-composer-quick-actions.js";
 import { mergeVoiceTranscript, useAsrRecorder } from "./asr-recorder.js";
 import { Mic, Pause } from "./memory/memory-prototype-icons.js";
@@ -88,18 +86,20 @@ const LITREV_PREVIEW_WIDTH_STORAGE_KEY = "memmy.literatureReview.previewWidth";
 const LITREV_FILE_BROWSER_WIDTH_STORAGE_KEY = "memmy.literatureReview.fileBrowserWidth";
 
 type ThinkingKind = "planning" | "outline" | "search" | "execution";
-type LitrevStageKind = "questions" | "keywords" | "outline" | "references" | "tasks";
-type PreviewScope = "task" | "knowledge" | "project";
+type LitrevStageKind = "questions" | "sources" | "keywords" | "outline" | "references" | "tasks";
+type PreviewScope = "task" | "project";
 type QuestionCardStatus = "preparing" | "waiting" | "cancelled";
 
 type LitrevPhase =
   | { kind: "setup" }
+  | { kind: "sources" }
   | { kind: "thinking"; thinking: ThinkingKind; stage: number }
   | { kind: "wizard"; step: 0 | 1 | 2 }
   | { kind: "task" };
 
 function stageKindForPhase(phase: LitrevPhase): LitrevStageKind {
   if (phase.kind === "setup") return "questions";
+  if (phase.kind === "sources") return "sources";
   if (phase.kind === "wizard") return phase.step === 0 ? "keywords" : phase.step === 1 ? "outline" : "references";
   if (phase.kind === "task") return "tasks";
   return phase.thinking === "planning"
@@ -143,7 +143,7 @@ function readInitialContexts(): LitrevLaunchContext[] {
     if (!Array.isArray(parsed)) return [];
     return parsed.filter((item): item is LitrevLaunchContext => (
       item != null
-      && (item.kind === "kb" || item.kind === "path")
+      && item.kind === "path"
       && typeof item.id === "string"
       && typeof item.label === "string"
     ));
@@ -219,7 +219,7 @@ export function LiteratureReviewPage() {
   const [phase, setPhase] = useState<LitrevPhase>(readInitialPhase);
   const [questionIndex, setQuestionIndex] = useState(() => {
     const initial = readInitialPhase();
-    return initial.kind === "task" || initial.kind === "thinking" ? Number.MAX_SAFE_INTEGER : 0;
+    return initial.kind === "setup" ? 0 : Number.MAX_SAFE_INTEGER;
   });
   const [todoProgress, setTodoProgress] = useState(() => (
     readInitialPhase().kind === "task" ? 3 : 0
@@ -237,6 +237,7 @@ export function LiteratureReviewPage() {
     const current = stageKindForPhase(readInitialPhase());
     return {
       questions: current === "questions",
+      sources: current === "sources",
       keywords: current === "keywords",
       outline: current === "outline",
       references: current === "references",
@@ -244,17 +245,21 @@ export function LiteratureReviewPage() {
     };
   });
   const [answers, setAnswers] = useState<Array<{ question: string; answer: string }>>([]);
+  const [sourceReferences, setSourceReferences] = useState<ComposerContextReference[]>(() => (
+    launchContexts.map((context) => ({ kind: "path", id: context.id, label: context.label }))
+  ));
   const [keywords, setKeywords] = useState<LitrevKeyword[]>(buildDemoKeywords);
   const [keywordDraft, setKeywordDraft] = useState("");
   const [outline, setOutline] = useState<LitrevOutlineItem[]>(buildDemoOutline);
   const [references, setReferences] = useState<LitrevReference[]>(buildDemoReferences);
-  const [referenceTargetKbIds, setReferenceTargetKbIds] = useState<string[]>([]);
-  const [knowledgeBases] = useState<KbKnowledgeBase[]>(buildDemoKnowledgeBases);
   const [supplements, setSupplements] = useState<SupplementEntry[]>([]);
   const [composerDraft, setComposerDraft] = useState("");
   const [referencePickerOpen, setReferencePickerOpen] = useState(false);
   const composerInputRef = useRef<HTMLTextAreaElement | null>(null);
   const composerFileInputRef = useRef<HTMLInputElement | null>(null);
+  const composerFolderInputRef = useRef<HTMLInputElement | null>(null);
+  const sourceFileInputRef = useRef<HTMLInputElement | null>(null);
+  const sourceFolderInputRef = useRef<HTMLInputElement | null>(null);
   const composerScopeKey = agentChatScopeKey(appState.agent.currentChatId, appState.agent.newChatRequestId);
   const composerReferences = appState.agent.composerContextReferencesByScope[composerScopeKey] ?? [];
   const [fileContextMenu, setFileContextMenu] = useState<{
@@ -263,9 +268,6 @@ export function LiteratureReviewPage() {
     y: number;
   } | null>(null);
   const [previewScope, setPreviewScope] = useState<PreviewScope>("task");
-  const [knowledgeScope, setKnowledgeScope] = useState<string>(() => (
-    launchContexts.find((context) => context.kind === "kb")?.id ?? "all"
-  ));
   const [previewPath, setPreviewPath] = useState(LITREV_OUTLINE_ARTIFACT);
   const [openPreviewTabs, setOpenPreviewTabs] = useState<string[]>([
     LITREV_OUTLINE_ARTIFACT,
@@ -281,30 +283,11 @@ export function LiteratureReviewPage() {
   const previewScopeMenuRef = useRef<HTMLDetailsElement | null>(null);
   const taskFiles = useMemo(() => buildDemoTaskFiles(), []);
   const projectFiles = useMemo(() => (
-    buildHomeReferenceItems().map((file) => ({
+    buildHomeReferenceItems().filter((file) => file.kind === "file").map((file) => ({
       path: `project/${file.path}`,
       name: file.path
     }))
   ), []);
-
-  useEffect(() => {
-    if (phase.kind !== "task" || todoProgress < LITREV_TODO_ITEMS.length) return;
-    const managedFiles = taskFiles
-      .filter((file) => file.folder === "references" || file.folder === "outputs")
-      .map((file) => {
-        const generated = file.folder === "outputs";
-        return {
-          id: `agent-managed:${file.folder}:${file.name}`,
-          path: `${t("kb.files.agentRoot")}/${t(generated ? "kb.files.generatedFolder" : "kb.files.downloadedFolder")}/${file.name}`,
-          name: file.name,
-          size: "—",
-          updated: t("kb.updatedJustNow"),
-          source: generated ? "agent-generated" as const : "agent-downloaded" as const
-        };
-      });
-    registerAgentManagedFiles(managedFiles, window.localStorage, window);
-  }, [phase.kind, taskFiles, t, todoProgress]);
-  const libraryFiles = useMemo(() => buildDemoLibraryFiles(), []);
 
   const setupDone = questionIndex >= questions.length;
   const activeStage = stageKindForPhase(phase);
@@ -368,7 +351,7 @@ export function LiteratureReviewPage() {
 
   useEffect(() => {
     if (setupDone && phase.kind === "setup" && !workflowEnded) {
-      setPhase({ kind: "thinking", thinking: "planning", stage: 0 });
+      setPhase({ kind: "sources" });
     }
   }, [setupDone, phase.kind, workflowEnded]);
 
@@ -397,6 +380,20 @@ export function LiteratureReviewPage() {
       answer: pendingAnswers[index] ?? ""
     })));
     setQuestionIndex(questions.length);
+  }
+
+  function confirmSources() {
+    setPhase({ kind: "thinking", thinking: "planning", stage: 0 });
+  }
+
+  function addSourceReferences(references: ComposerContextReference[]) {
+    setSourceReferences((current) => mergeComposerContextReferences(current, references));
+  }
+
+  function removeSourceReference(reference: ComposerContextReference) {
+    setSourceReferences((current) => current.filter((item) => (
+      item.kind !== reference.kind || item.id !== reference.id
+    )));
   }
 
   function updateQuestionAnswer(index: number, answer: string) {
@@ -441,6 +438,28 @@ export function LiteratureReviewPage() {
     return { kind: "path", id: path, label: name };
   }
 
+  function referencesFromFiles(files: File[]): ComposerContextReference[] {
+    return files.map((file) => {
+      let path = file.name;
+      try {
+        path = window.memmy?.getPathForFile(file) || file.name;
+      } catch {
+        path = file.name;
+      }
+      return fileReference(path, file.name);
+    });
+  }
+
+  function folderReferenceFromFiles(files: File[]): ComposerContextReference | null {
+    return composerFolderReferenceFromFiles(files, (file) => {
+      try {
+        return window.memmy?.getPathForFile(file) || file.name;
+      } catch {
+        return file.name;
+      }
+    });
+  }
+
   function beginFileDrag(event: DragEvent<HTMLElement>, path: string, name: string) {
     writeComposerReferenceDrag(event.dataTransfer, fileReference(path, name));
   }
@@ -455,24 +474,28 @@ export function LiteratureReviewPage() {
   }
 
   function handleComposerFilesPicked(event: ChangeEvent<HTMLInputElement>) {
-    const references = Array.from(event.target.files ?? []).map((file) => {
-      let path = file.name;
-      try {
-        path = window.memmy?.getPathForFile(file) || file.name;
-      } catch {
-        path = file.name;
-      }
-      return fileReference(path, file.name);
-    });
+    const references = referencesFromFiles(Array.from(event.target.files ?? []));
     if (references.length) addComposerReferences(references);
     event.target.value = "";
     composerInputRef.current?.focus();
   }
 
-  function pickComposerKnowledgeBase(base: KbKnowledgeBase) {
-    addComposerReferences([{ kind: "kb", id: base.id, label: base.name }]);
-    setReferencePickerOpen(false);
+  function handleComposerFolderPicked(event: ChangeEvent<HTMLInputElement>) {
+    const reference = folderReferenceFromFiles(Array.from(event.target.files ?? []));
+    if (reference) addComposerReferences([reference]);
+    event.target.value = "";
     composerInputRef.current?.focus();
+  }
+
+  function handleSourceFilesPicked(event: ChangeEvent<HTMLInputElement>) {
+    addSourceReferences(referencesFromFiles(Array.from(event.target.files ?? [])));
+    event.target.value = "";
+  }
+
+  function handleSourceFolderPicked(event: ChangeEvent<HTMLInputElement>) {
+    const reference = folderReferenceFromFiles(Array.from(event.target.files ?? []));
+    if (reference) addSourceReferences([reference]);
+    event.target.value = "";
   }
 
   function pickComposerReference(item: HomeReferenceItem) {
@@ -575,6 +598,7 @@ export function LiteratureReviewPage() {
 
   function completedStageLabel(stage: LitrevStageKind): string {
     if (stage === "questions") return t("litrev.stageActivity.questions.done");
+    if (stage === "sources") return t("litrev.stageActivity.sources.done");
     if (stage === "keywords") return t("litrev.stageActivity.keywords.done");
     if (stage === "outline") return t("litrev.stageActivity.outline.done");
     if (stage === "references") return t("litrev.stageActivity.references.done");
@@ -583,6 +607,7 @@ export function LiteratureReviewPage() {
 
   function stageOutputFor(stage: Exclude<LitrevStageKind, "tasks">): string {
     if (stage === "questions") return t("litrev.stageOutput.questions");
+    if (stage === "sources") return t("litrev.stageOutput.sources");
     if (stage === "keywords") return t("litrev.stageOutput.keywords");
     if (stage === "outline") return t("litrev.stageOutput.outline");
     return t("litrev.stageOutput.references");
@@ -599,6 +624,7 @@ export function LiteratureReviewPage() {
         ? t("litrev.stageActivity.questions.generating")
         : t("litrev.stageActivity.questions.waiting");
     }
+    if (stage === "sources") return t("litrev.stageActivity.sources.waiting");
     if (stage === "tasks") {
       return phase.kind === "thinking"
         ? t("litrev.stageActivity.tasks.generating")
@@ -620,6 +646,11 @@ export function LiteratureReviewPage() {
 
   function renderCompletedStageContent(stage: LitrevStageKind): ReactNode {
     if (stage === "questions") return renderRequirementSummary();
+    if (stage === "sources") {
+      return sourceReferences.length
+        ? <HomeContextChips chips={sourceReferences} />
+        : <p className="litrev-stage-empty">{t("litrev.sources.none")}</p>;
+    }
     if (stage === "keywords") {
       return (
         <div className="litrev-stage-text-card">
@@ -651,7 +682,7 @@ export function LiteratureReviewPage() {
   function renderCurrentStageContent(stage: LitrevStageKind): ReactNode {
     if (workflowEnded) return <p className="litrev-cancelled-activity__body">{t("litrev.workflow.cancelledDetail")}</p>;
     if (phase.kind === "thinking") return renderThinkingCopy();
-    if (stage === "questions") return null;
+    if (stage === "questions" || stage === "sources") return null;
     if (phase.kind === "wizard") return null;
     return renderTodoList();
   }
@@ -791,13 +822,11 @@ export function LiteratureReviewPage() {
                 key={`${context.kind}:${context.id}`}
                 kind="file"
                 name={context.label}
-                subline={context.kind === "kb" ? t("home.quick.kind.kb") : t("home.quick.kind.file")}
+                subline={context.label.endsWith("/") ? t("home.quick.kind.folder") : t("home.quick.kind.file")}
                 align="right"
-                leading={context.kind === "kb" ? (
-                  <span className="litrev-user-message__kb-icon"><LibraryBig size={16} /></span>
-                ) : (
-                  <FileTypeIcon name={context.id} surface="card" />
-                )}
+                leading={context.label.endsWith("/")
+                  ? <FolderTypeIcon surface="card" />
+                  : <FileTypeIcon name={context.id} surface="card" />}
               />
             ))}
           </div>
@@ -913,6 +942,67 @@ export function LiteratureReviewPage() {
             onClick={confirmAnswers}
           >
             {t("common.confirm")}
+          </Button>
+        </footer>
+      </section>
+    );
+  }
+
+  function renderSourceCard(): ReactNode {
+    if (phase.kind !== "sources" || workflowEnded) return null;
+    return (
+      <section className="litrev-wizard-card litrev-source-card" aria-label={t("litrev.sources.title")}>
+        <header className="litrev-wizard-card__head">
+          <strong>{t("litrev.sources.title")}</strong>
+          <div className="litrev-wizard-card__head-actions">
+            {sourceReferences.length ? (
+              <span className="litrev-wizard-card__count">
+                {t("litrev.sources.count", { count: sourceReferences.length })}
+              </span>
+            ) : null}
+            <button
+              type="button"
+              className="litrev-wizard-card__close"
+              aria-label={t("litrev.workflow.close")}
+              onClick={cancelWorkflow}
+            >
+              <X size={15} />
+            </button>
+          </div>
+        </header>
+        <div className="litrev-wizard-card__body litrev-source-card__body">
+          <p className="litrev-section-hint">
+            {t(sourceReferences.length ? "litrev.sources.existingHint" : "litrev.sources.hint")}
+          </p>
+          {sourceReferences.length ? (
+            <HomeContextChips chips={sourceReferences} onRemove={removeSourceReference} />
+          ) : (
+            <div className="litrev-source-card__empty">{t("litrev.sources.empty")}</div>
+          )}
+          <div className="litrev-source-card__actions">
+            <Button type="button" variant="secondary" size="sm" onClick={() => sourceFileInputRef.current?.click()}>
+              <Plus size={12} /> {t("litrev.sources.addFiles")}
+            </Button>
+            <Button type="button" variant="secondary" size="sm" onClick={() => sourceFolderInputRef.current?.click()}>
+              <Folder size={13} /> {t("litrev.sources.addFolder")}
+            </Button>
+          </div>
+          <input ref={sourceFileInputRef} type="file" hidden multiple onChange={handleSourceFilesPicked} />
+          <input
+            ref={(node) => {
+              sourceFolderInputRef.current = node;
+              node?.setAttribute("webkitdirectory", "");
+            }}
+            type="file"
+            hidden
+            multiple
+            onChange={handleSourceFolderPicked}
+          />
+        </div>
+        <footer className="litrev-wizard-card__foot">
+          <i />
+          <Button type="button" variant="primary" size="sm" onClick={confirmSources}>
+            {t(sourceReferences.length ? "litrev.sources.confirm" : "litrev.sources.skip")}
           </Button>
         </footer>
       </section>
@@ -1072,7 +1162,7 @@ export function LiteratureReviewPage() {
               checked={reference.selected}
               onChange={(event) => setReferences((items) => items.map((item, itemIndex) => (itemIndex === index ? { ...item, selected: event.target.checked } : item)))}
             />
-            <span className={`kb-checkbox${reference.selected ? " kb-checkbox--checked" : ""}`}>{reference.selected ? <Check size={11} /> : null}</span>
+            <span className={`litrev-checkbox${reference.selected ? " litrev-checkbox--checked" : ""}`}>{reference.selected ? <Check size={11} /> : null}</span>
             <span className="litrev-ref-row__text">
               <strong>{reference.title}</strong>
               <small>{reference.meta}</small>
@@ -1094,42 +1184,6 @@ export function LiteratureReviewPage() {
         <header className="litrev-wizard-card__head">
           <strong>{stepTitles[phase.step]}</strong>
           <div className="litrev-wizard-card__head-actions">
-            {phase.step === 2 ? (
-              <details className="litrev-wizard-card__kb-picker">
-                <summary title={t("litrev.refs.addToKbHint")}>
-                  <span>
-                    {referenceTargetKbIds.length
-                      ? t("litrev.refs.selectedKbCount", { count: referenceTargetKbIds.length })
-                      : t("litrev.refs.addToKb")}
-                  </span>
-                  <ChevronDown size={12} aria-hidden="true" />
-                </summary>
-                <div className="litrev-wizard-card__kb-menu" role="menu" aria-label={t("litrev.refs.targetKb")}>
-                  <strong>{t("litrev.refs.targetKb")}</strong>
-                  {knowledgeBases.map((base) => {
-                    const selected = referenceTargetKbIds.includes(base.id);
-                    return (
-                      <button
-                        type="button"
-                        role="menuitemcheckbox"
-                        aria-checked={selected}
-                        key={base.id}
-                        onClick={() => setReferenceTargetKbIds((ids) => (
-                          ids.includes(base.id)
-                            ? ids.filter((id) => id !== base.id)
-                            : [...ids, base.id]
-                        ))}
-                      >
-                        <span className={`kb-checkbox${selected ? " kb-checkbox--checked" : ""}`}>
-                          {selected ? <Check size={11} /> : null}
-                        </span>
-                        <span>{base.name}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </details>
-            ) : null}
             <span className="litrev-wizard-card__count">{phase.step + 1} / 3</span>
             <button
               type="button"
@@ -1282,28 +1336,15 @@ export function LiteratureReviewPage() {
   /* --------------------------------- 预览面板 --------------------------------- */
 
   function renderPreviewPane(): ReactNode {
-    const activeKb = knowledgeScope === "all"
-      ? null
-      : knowledgeBases.find((base) => base.id === knowledgeScope) ?? null;
-    const kbFiles = libraryFiles
-      .filter((file) => !activeKb || activeKb.fileIds.includes(file.id))
-      .map((file) => ({ path: file.path, name: file.name }));
     const previewedContent = litrevPreviewContentFor(previewPath);
     const folders: LitrevPreviewFolder[] = ["uploads", "references", "outputs"];
     const fileName = (path: string) => path.split("/").pop() ?? path;
     const scopeForPath = (path: string): PreviewScope => {
       if (taskFiles.some((file) => file.path === path)) return "task";
-      if (projectFiles.some((file) => file.path === path)) return "project";
-      return "knowledge";
-    };
-    const selectFirstKnowledgeFile = (scope: string) => {
-      const base = scope === "all" ? null : knowledgeBases.find((item) => item.id === scope) ?? null;
-      const first = libraryFiles.find((file) => !base || base.fileIds.includes(file.id));
-      if (first) selectPreviewFile(first.path);
+      return "project";
     };
     const scopeOptions: Array<{ value: PreviewScope; label: string; icon: ReactNode }> = [
       { value: "task", label: t("litrev.preview.taskFiles"), icon: <Files size={14} /> },
-      { value: "knowledge", label: t("litrev.preview.knowledge"), icon: <LibraryBig size={14} /> },
       ...(launchProjectId
         ? [{ value: "project" as const, label: t("litrev.preview.projectSpace"), icon: <Folder size={14} /> }]
         : [])
@@ -1317,77 +1358,14 @@ export function LiteratureReviewPage() {
           ? previewPath
           : (openPreviewTabs.find((path) => taskFiles.some((file) => file.path === path)) ?? LITREV_OUTLINE_ARTIFACT);
         setPreviewPath(taskPath);
-      } else if (value === "knowledge") {
-        selectFirstKnowledgeFile(knowledgeScope);
       } else {
         const first = projectFiles[0];
         if (first) selectPreviewFile(first.path);
       }
     };
-    const renderKnowledgeFileTree = (
-      files: Array<{ path: string; name: string }>,
-      parentPath = ""
-    ): ReactNode => {
-      const prefix = parentPath ? `${parentPath}/` : "";
-      const folderNames = new Set<string>();
-      const directFiles: Array<{ path: string; name: string }> = [];
-
-      for (const file of files) {
-        if (!file.path.startsWith(prefix)) continue;
-        const rest = file.path.slice(prefix.length);
-        const slash = rest.indexOf("/");
-        if (slash === -1) directFiles.push(file);
-        else folderNames.add(rest.slice(0, slash));
-      }
-
-      return (
-        <>
-          {[...folderNames].sort((a, b) => a.localeCompare(b, "zh-CN")).map((folderName) => {
-            const folderPath = parentPath ? `${parentPath}/${folderName}` : folderName;
-            const collapseKey = `knowledge:${folderPath}`;
-            const collapsed = collapsedPreviewFolders[collapseKey] === true;
-            return (
-              <div key={folderPath} className="litrev-file-folder">
-                <button
-                  type="button"
-                  className="litrev-file-folder__toggle"
-                  onClick={() => setCollapsedPreviewFolders((state) => ({ ...state, [collapseKey]: !collapsed }))}
-                >
-                  {collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
-                  <strong>{folderName}</strong>
-                </button>
-                {!collapsed ? (
-                  <div className="litrev-file-folder__children">
-                    {renderKnowledgeFileTree(files, folderPath)}
-                  </div>
-                ) : null}
-              </div>
-            );
-          })}
-          {directFiles
-            .slice()
-            .sort((a, b) => a.name.localeCompare(b.name, "zh-CN"))
-            .map((file) => (
-              <button
-                type="button"
-                key={file.path}
-                className={`litrev-file-item${previewPath === file.path ? " litrev-file-item--active" : ""}`}
-                draggable
-                onDragStart={(event) => beginFileDrag(event, file.path, file.name)}
-                onContextMenu={(event) => openFileContextMenu(event, file.path, file.name)}
-                onClick={() => selectPreviewFile(file.path)}
-              >
-                <FileTypeIcon name={file.name} surface="inline" /> <span>{file.name}</span>
-              </button>
-            ))}
-        </>
-      );
-    };
     const crumbScope = previewScope === "task"
       ? t("litrev.preview.taskFiles")
-      : previewScope === "project"
-        ? t("litrev.preview.projectSpace")
-        : activeKb?.name ?? t("litrev.preview.allFiles");
+      : t("litrev.preview.projectSpace");
     return (
       <aside className="litrev-preview-pane litrev-preview-pane--lifted" style={previewResize.sidebarStyle}>
         <header className="litrev-preview-toolbar">
@@ -1413,7 +1391,6 @@ export function LiteratureReviewPage() {
                     onClick={() => {
                       const nextScope = scopeForPath(path);
                       setPreviewScope(nextScope);
-                      if (nextScope === "knowledge") setKnowledgeScope("all");
                       setPreviewPath(path);
                     }}
                   >
@@ -1469,35 +1446,6 @@ export function LiteratureReviewPage() {
                     </div>
                   </details>
                 </div>
-                {previewScope === "knowledge" ? (
-                  <div className="litrev-preview-scope">
-                    <details className="litrev-preview-scope-menu litrev-preview-scope-menu--knowledge">
-                      <summary aria-label={t("litrev.preview.knowledgeScope")}>
-                        <strong>{activeKb?.name ?? t("litrev.preview.allFiles")}</strong>
-                        <ChevronDown size={12} aria-hidden="true" />
-                      </summary>
-                      <div className="litrev-preview-scope-menu__popover" role="menu">
-                        {[{ id: "all", name: t("litrev.preview.allFiles") }, ...knowledgeBases].map((base) => (
-                          <button
-                            key={base.id}
-                            type="button"
-                            role="menuitemradio"
-                            aria-checked={knowledgeScope === base.id}
-                            className={knowledgeScope === base.id ? "litrev-preview-scope-menu__option litrev-preview-scope-menu__option--active" : "litrev-preview-scope-menu__option"}
-                            onClick={(event) => {
-                              setKnowledgeScope(base.id);
-                              selectFirstKnowledgeFile(base.id);
-                              event.currentTarget.closest("details")?.removeAttribute("open");
-                            }}
-                          >
-                            <span>{base.name}</span>
-                            {knowledgeScope === base.id ? <Check size={14} aria-hidden="true" /> : null}
-                          </button>
-                        ))}
-                      </div>
-                    </details>
-                  </div>
-                ) : null}
                 <nav className="litrev-file-list">
                   {previewScope === "task" ? folders.map((folder) => {
                     const children = taskFiles.filter((file) => file.folder === folder);
@@ -1531,9 +1479,7 @@ export function LiteratureReviewPage() {
                         ) : null}
                       </div>
                     );
-                  }) : previewScope === "knowledge" ? (
-                    renderKnowledgeFileTree(kbFiles)
-                  ) : (
+                  }) : (
                     projectFiles.map((file) => (
                       <button
                         type="button"
@@ -1612,13 +1558,13 @@ export function LiteratureReviewPage() {
         />
         <ComposerQuickActionButtons
           onAttach={() => composerFileInputRef.current?.click()}
+          onAttachFolder={() => composerFolderInputRef.current?.click()}
           onInsertMention={() => setReferencePickerOpen((open) => !open)}
           onInsertSlash={insertComposerSlash}
           referenceMenu={referencePickerOpen ? (
             <ComposerReferencePanel
               open
               onClose={() => setReferencePickerOpen(false)}
-              onPickKnowledgeBase={pickComposerKnowledgeBase}
               onPickReference={pickComposerReference}
             />
           ) : null}
@@ -1629,6 +1575,16 @@ export function LiteratureReviewPage() {
           hidden
           multiple
           onChange={handleComposerFilesPicked}
+        />
+        <input
+          ref={(node) => {
+            composerFolderInputRef.current = node;
+            node?.setAttribute("webkitdirectory", "");
+          }}
+          type="file"
+          hidden
+          multiple
+          onChange={handleComposerFolderPicked}
         />
         <div className="litrev-composer__actions">
           <button
@@ -1691,6 +1647,7 @@ export function LiteratureReviewPage() {
             </div>
             <div className="litrev-dock">
               {phase.kind === "setup" ? renderQuestionCard() : null}
+              {phase.kind === "sources" ? renderSourceCard() : null}
               {phase.kind === "wizard" ? renderWizardCard() : null}
               {renderComposer("litrev.composer.setup")}
             </div>

@@ -12,7 +12,7 @@ import type { UploadedAgentMedia } from "../api/memmy-agent-client.js";
 export type ComposerDraftValue = string | ((currentValue: string) => string);
 
 export interface ComposerContextReference {
-  kind: "kb" | "path";
+  kind: "path";
   id: string;
   label: string;
 }

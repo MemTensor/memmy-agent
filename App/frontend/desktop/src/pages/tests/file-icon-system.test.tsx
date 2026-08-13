@@ -56,7 +56,6 @@ describe("shared file icon system", () => {
 
   it("routes user-visible file surfaces through shared icons", () => {
     const sourceUrls = [
-      new URL("../knowledge-page.tsx", import.meta.url),
       new URL("../home-composer-quick-actions.tsx", import.meta.url),
       new URL("../agent-message-content.tsx", import.meta.url),
       new URL("../literature-review-page.tsx", import.meta.url)
@@ -108,19 +107,15 @@ describe("shared file icon system", () => {
     expect(home).toContain("window.memmy.getPathForFile(file)");
     expect(home).toContain("filePath={item.localPath}");
     expect(attachments).toContain("filePath={props.filePath}");
-    // Knowledge lists must not opt into native folder icons (IPC storm / Electron SIGTRAP).
-    expect(readFileSync(new URL("../knowledge-page.tsx", import.meta.url), "utf8")).not.toContain("preferSystemIcon");
     expect(styles).toContain(".file-type-icon__native-image");
   });
 
   it("pins each UI density to the intended icon surface", () => {
-    const knowledge = readFileSync(new URL("../knowledge-page.tsx", import.meta.url), "utf8");
     const references = readFileSync(new URL("../home-composer-quick-actions.tsx", import.meta.url), "utf8");
     const messages = readFileSync(new URL("../agent-message-content.tsx", import.meta.url), "utf8");
     const literature = readFileSync(new URL("../literature-review-page.tsx", import.meta.url), "utf8");
     const attachments = readFileSync(new URL("../agent-file-attachment-chip.tsx", import.meta.url), "utf8");
 
-    expect(knowledge).toContain('<FileTypeIcon name={file.name} surface="row" />');
     expect(references).toContain('<FileTypeIcon name={item.path} surface="row" />');
     expect(references).toContain('<FileTypeIcon name={chip.label} surface="card" />');
     expect(messages).toContain('surface="inline"');

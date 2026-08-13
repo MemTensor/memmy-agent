@@ -33,6 +33,7 @@ import {
 import { encodeAgentImage, type AgentImageMime } from "../lib/agent-image-encode.js";
 import { formatConversationTitleForDisplay } from "../lib/format-conversation-title.js";
 import {
+  composerFolderReferenceFromFiles,
   dataTransferHasComposerReference,
   mergeComposerContextReferences,
   readComposerReferenceDrag
@@ -89,7 +90,6 @@ import {
   stripMentionFromInput,
   type ComposerContextChip
 } from "./home-composer-quick-actions.js";
-import type { KbKnowledgeBase } from "./knowledge-demo-data.js";
 import {
   LITREV_CONTEXT_STORAGE_KEY,
   LITREV_PROJECT_CONTEXT_STORAGE_KEY,
@@ -244,9 +244,7 @@ export function composerContentWithReferences(
   const text = content.trim();
   if (!references.length) return text;
   const context = references.map((reference) => (
-    reference.kind === "kb"
-      ? `- knowledge-base: ${reference.label} (${reference.id})`
-      : `- file: ${reference.label} (${reference.id})`
+    `- ${reference.label.endsWith("/") ? "folder" : "file"}: ${reference.label} (${reference.id})`
   )).join("\n");
   return [text, `<memmy-context>\n${context}\n</memmy-context>`].filter(Boolean).join("\n\n");
 }
@@ -876,6 +874,7 @@ export function HomePage() {
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const composerShellRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const folderInputRef = useRef<HTMLInputElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const pendingStatusChatRef = useRef<string | null>(null);
   const pendingLastCompactionChatRef = useRef<string | null>(null);
@@ -898,7 +897,7 @@ export function HomePage() {
   const chatScopeKey = agentChatScopeKey(state.agent.currentChatId, state.agent.newChatRequestId);
   const input = composerDrafts[chatScopeKey] ?? "";
   const pendingAttachments = pendingAttachmentsByScope[chatScopeKey] ?? [];
-  const contextChips = contextReferencesByScope[chatScopeKey] ?? [];
+  const contextChips = (contextReferencesByScope[chatScopeKey] ?? []).filter((reference) => reference.kind === "path");
   const draftTarget = state.agent.draftTargetsByScope[chatScopeKey] ?? { kind: "standalone" as const };
   const selectedDraftProject = draftTarget.kind === "project"
     ? state.agent.projects.find((project) => project.id === draftTarget.projectId) ?? null
@@ -1914,14 +1913,6 @@ export function HomePage() {
     });
   }
 
-  function pickMentionKnowledgeBase(base: KbKnowledgeBase) {
-    addComposerContextChip({ kind: "kb", id: base.id, label: base.name });
-    setCurrentComposerDraft((draft) => stripMentionFromInput(draft));
-    setMentionMenuDismissed(true);
-    setReferencePickerOpen(false);
-    inputRef.current?.focus();
-  }
-
   function pickMentionReference(item: HomeReferenceItem) {
     addComposerContextChip({ kind: "path", id: item.path, label: item.path });
     setCurrentComposerDraft((draft) => stripMentionFromInput(draft));
@@ -2202,6 +2193,10 @@ export function HomePage() {
     fileInputRef.current?.click();
   }
 
+  function openFolderPicker() {
+    folderInputRef.current?.click();
+  }
+
   /**
    * Starts voice input on the main interface.
    */
@@ -2337,6 +2332,22 @@ export function HomePage() {
     } finally {
       event.target.value = "";
     }
+  }
+
+  function selectFolder(event: ChangeEvent<HTMLInputElement>) {
+    const reference = composerFolderReferenceFromFiles(
+      Array.from(event.target.files ?? []),
+      (file) => {
+        try {
+          return window.memmy?.getPathForFile(file) || file.name;
+        } catch {
+          return file.name;
+        }
+      }
+    );
+    if (reference) addComposerContextChip(reference);
+    event.target.value = "";
+    inputRef.current?.focus();
   }
 
   function handleComposerPaste(event: ClipboardEvent<HTMLTextAreaElement>) {
@@ -2538,13 +2549,13 @@ export function HomePage() {
                         open
                         externalQuery={mentionQuery}
                         onClose={() => setMentionMenuDismissed(true)}
-                        onPickKnowledgeBase={pickMentionKnowledgeBase}
                         onPickReference={pickMentionReference}
                       />
                     </ComposerCaretMenu>
                   ) : null}
                   <ComposerQuickActionButtons
                     onAttach={openMediaFilePicker}
+                    onAttachFolder={openFolderPicker}
                     onInsertMention={insertComposerMentionTrigger}
                     onInsertSlash={insertComposerSlashTrigger}
                     referenceMenu={referencePickerOpen && !slashMenuOpen ? (
@@ -2555,7 +2566,6 @@ export function HomePage() {
                           setReferencePickerOpen(false);
                           setMentionMenuDismissed(true);
                         }}
-                        onPickKnowledgeBase={pickMentionKnowledgeBase}
                         onPickReference={pickMentionReference}
                       />
                     ) : null}
@@ -2639,6 +2649,17 @@ export function HomePage() {
               <p className="text-center text-[11px] text-text-ink/40 mt-3">{t("home.notice")}</p>
             </div>
             <input ref={fileInputRef} type="file" accept={AGENT_MEDIA_ACCEPT} multiple hidden className="hidden" onChange={(event) => void selectMedia(event)} />
+            <input
+              ref={(node) => {
+                folderInputRef.current = node;
+                node?.setAttribute("webkitdirectory", "");
+              }}
+              type="file"
+              multiple
+              hidden
+              className="hidden"
+              onChange={selectFolder}
+            />
           </div>
         </section>
       ) : (
@@ -2781,21 +2802,42 @@ export function HomePage() {
                       open
                       externalQuery={mentionQuery}
                       onClose={() => setMentionMenuDismissed(true)}
-                      onPickKnowledgeBase={pickMentionKnowledgeBase}
                       onPickReference={pickMentionReference}
                     />
                   </ComposerCaretMenu>
                 ) : null}
                 <div className={`absolute right-2.5 flex items-center gap-1 z-10 ${centerComposerControls ? "top-1/2 -translate-y-1/2" : "bottom-2"}`}>
-                  <button
-                    type="button"
-                    aria-label={t("home.media.menu")}
-                    title={t("home.media.menu")}
-                    onClick={openMediaFilePicker}
-                    className="p-1.5 text-text-ink/45 hover:text-text-ink/65 hover:bg-canvas-oat/60 rounded-lg transition-all cursor-pointer"
-                  >
-                    <Plus size={15} />
-                  </button>
+                  <details className="agent-composer-attach-menu">
+                    <summary
+                      aria-label={t("home.media.menu")}
+                      title={t("home.media.menu")}
+                      className="p-1.5 text-text-ink/45 hover:text-text-ink/65 hover:bg-canvas-oat/60 rounded-lg transition-all cursor-pointer"
+                    >
+                      <Plus size={15} />
+                    </summary>
+                    <div className="agent-composer-attach-menu__popover" role="menu">
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={(event) => {
+                          event.currentTarget.closest("details")?.removeAttribute("open");
+                          openMediaFilePicker();
+                        }}
+                      >
+                        {t("home.quick.uploadFile")}
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={(event) => {
+                          event.currentTarget.closest("details")?.removeAttribute("open");
+                          openFolderPicker();
+                        }}
+                      >
+                        {t("home.quick.uploadFolder")}
+                      </button>
+                    </div>
+                  </details>
                   <button
                     type="button"
                     aria-label={t("home.voiceInput")}
@@ -2818,6 +2860,17 @@ export function HomePage() {
               </div>
               <p className="text-center text-[11px] text-text-ink/40 mt-2">{t("home.notice")}</p>
               <input ref={fileInputRef} type="file" accept={AGENT_MEDIA_ACCEPT} multiple hidden className="hidden" onChange={(event) => void selectMedia(event)} />
+              <input
+                ref={(node) => {
+                  folderInputRef.current = node;
+                  node?.setAttribute("webkitdirectory", "");
+                }}
+                type="file"
+                multiple
+                hidden
+                className="hidden"
+                onChange={selectFolder}
+              />
             </div>
           </div>
         </section>
