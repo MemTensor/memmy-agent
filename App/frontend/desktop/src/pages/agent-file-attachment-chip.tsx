@@ -1,17 +1,10 @@
 import type { KeyboardEventHandler, MouseEventHandler, ReactNode } from "react";
-import { BookText, FileSpreadsheet, FileText, NotepadText, Presentation, X, type LucideIcon } from "lucide-react";
+import { X } from "lucide-react";
+import { FileTypeIcon } from "../components/file-type-icon.js";
+import { resolveFileType, type FileDisplayKind, type ResolvedFileType } from "../lib/file-type.js";
 
-export type AgentFileDisplayKind = "pdf" | "docx" | "xlsx" | "pptx" | "file";
-
-export interface AgentFileVisual {
-  kind: AgentFileDisplayKind;
-  label: string;
-  shortLabel: "PDF" | "DOC" | "XLS" | "PPT" | "FILE";
-  typeLabel: string;
-  icon: LucideIcon;
-  tileClassName: string;
-  labelClassName: string;
-}
+export type AgentFileDisplayKind = FileDisplayKind;
+export type AgentFileVisual = ResolvedFileType;
 
 export interface AgentAttachmentNameParts {
   displayName: string;
@@ -22,12 +15,14 @@ export interface AgentAttachmentCardProps {
   kind: "image" | "file";
   name: string;
   mime?: string;
+  filePath?: string;
   previewUrl?: string;
   subline?: string;
   busyLabel?: string;
   title?: string;
   removable?: boolean;
   removeLabel?: string;
+  leading?: ReactNode;
   thumbnailOverlay?: ReactNode;
   onRemove?: () => void;
   onClick?: () => void;
@@ -38,39 +33,8 @@ export interface AgentAttachmentCardProps {
   align?: "left" | "right";
 }
 
-const TEXT_FILE_EXTENSIONS = new Set([
-  ".txt",
-  ".md",
-  ".csv",
-  ".json",
-  ".xml",
-  ".html",
-  ".htm",
-  ".log",
-  ".yaml",
-  ".yml",
-  ".toml",
-  ".ini",
-  ".cfg",
-]);
-
 export function resolveAgentFileVisual(name: string, mime?: string): AgentFileVisual {
-  const extension = fileExtension(name);
-  const normalizedMime = String(mime ?? "").toLowerCase();
-  const kind: AgentFileDisplayKind =
-    extension === ".pdf" || normalizedMime === "application/pdf"
-      ? "pdf"
-      : extension === ".docx" || normalizedMime.includes("wordprocessingml")
-        ? "docx"
-        : extension === ".xlsx" || normalizedMime.includes("spreadsheetml")
-          ? "xlsx"
-          : extension === ".pptx" || normalizedMime.includes("presentationml")
-            ? "pptx"
-            : TEXT_FILE_EXTENSIONS.has(extension)
-              ? "file"
-              : "file";
-
-  return visualForKind(kind, attachmentTypeLabel(name));
+  return resolveFileType(name, mime);
 }
 
 export function splitAgentAttachmentName(name: string, fallbackExtension?: string): AgentAttachmentNameParts {
@@ -88,23 +52,17 @@ export function splitAgentAttachmentName(name: string, fallbackExtension?: strin
 export function AgentFileIconTile(props: {
   name: string;
   mime?: string;
+  filePath?: string;
   size?: "sm" | "md";
 }) {
-  const visual = resolveAgentFileVisual(props.name, props.mime);
-  const Icon = visual.icon;
-  const sizeClassName = props.size === "md" ? "agent-attachment-card__file-tile--md" : "agent-attachment-card__file-tile--sm";
-  const iconSize = props.size === "md" ? 16 : 14;
   return (
-    <span
-      className={`agent-attachment-card__file-tile ${sizeClassName} ${visual.tileClassName}`}
-      aria-label={visual.label}
-      data-testid={`agent-file-icon-${visual.kind}`}
-    >
-      <Icon size={iconSize} strokeWidth={2.1} aria-hidden={true} />
-      <span className={visual.labelClassName}>
-        {visual.shortLabel}
-      </span>
-    </span>
+    <FileTypeIcon
+      name={props.name}
+      mime={props.mime}
+      filePath={props.filePath}
+      surface={props.size === "md" ? "card" : "row"}
+      className="agent-attachment-card__file-type-icon"
+    />
   );
 }
 
@@ -126,7 +84,7 @@ export function AgentAttachmentCard(props: AgentAttachmentCardProps) {
   ].filter(Boolean).join(" ");
   const mainContent = (
     <>
-      {props.kind === "image" ? (
+      {props.leading ? props.leading : props.kind === "image" ? (
         <span className="agent-attachment-card__preview">
           {props.previewUrl ? (
             <img
@@ -145,7 +103,7 @@ export function AgentAttachmentCard(props: AgentAttachmentCardProps) {
           ) : null}
         </span>
       ) : (
-        <AgentFileIconTile name={props.name} mime={props.mime} size="md" />
+        <AgentFileIconTile name={props.name} mime={props.mime} filePath={props.filePath} size="md" />
       )}
       <span className="agent-attachment-card__body">
         <span className="agent-attachment-card__name">
@@ -233,72 +191,6 @@ export function AgentAttachmentCard(props: AgentAttachmentCardProps) {
       {content}
     </div>
   );
-}
-
-function visualForKind(kind: AgentFileDisplayKind, typeLabel: string): AgentFileVisual {
-  switch (kind) {
-    case "pdf":
-      return {
-        kind,
-        label: "PDF file",
-        shortLabel: "PDF",
-        typeLabel,
-        icon: FileText,
-        tileClassName: "agent-attachment-card__file-tile--pdf",
-        labelClassName: "agent-attachment-card__file-label"
-      };
-    case "docx":
-      return {
-        kind,
-        label: "Word document",
-        shortLabel: "DOC",
-        typeLabel,
-        icon: BookText,
-        tileClassName: "agent-attachment-card__file-tile--docx",
-        labelClassName: "agent-attachment-card__file-label"
-      };
-    case "xlsx":
-      return {
-        kind,
-        label: "Spreadsheet file",
-        shortLabel: "XLS",
-        typeLabel,
-        icon: FileSpreadsheet,
-        tileClassName: "agent-attachment-card__file-tile--xlsx",
-        labelClassName: "agent-attachment-card__file-label"
-      };
-    case "pptx":
-      return {
-        kind,
-        label: "Presentation file",
-        shortLabel: "PPT",
-        typeLabel,
-        icon: Presentation,
-        tileClassName: "agent-attachment-card__file-tile--pptx",
-        labelClassName: "agent-attachment-card__file-label"
-      };
-    case "file":
-    default:
-      return {
-        kind: "file",
-        label: "File attachment",
-        shortLabel: "FILE",
-        typeLabel,
-        icon: NotepadText,
-        tileClassName: "agent-attachment-card__file-tile--file",
-        labelClassName: "agent-attachment-card__file-label"
-      };
-  }
-}
-
-function attachmentTypeLabel(name: string): string {
-  return fileExtension(name).replace(/^\./, "").slice(0, 4).toUpperCase() || "FILE";
-}
-
-function fileExtension(name: string): string {
-  const base = basenameWithoutQuery(name);
-  const index = base.lastIndexOf(".");
-  return index > 0 ? base.slice(index).toLowerCase() : "";
 }
 
 function basenameWithoutQuery(name: string): string {

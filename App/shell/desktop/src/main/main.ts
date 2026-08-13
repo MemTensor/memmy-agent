@@ -7,6 +7,8 @@ import type {
   DesktopMemoryServiceRestartResult,
   DesktopProjectDirectorySelection,
   DesktopRuntimeConfig,
+  DesktopSystemFileIconResult,
+  DesktopSystemFolderIconKind,
   DesktopUpdateCheckResult,
   DesktopUpdateDownloadProgress,
   DesktopUpdateDownloadOptions,
@@ -19,7 +21,7 @@ import { spawn } from "node:child_process";
 import { constants as fsConstants, cpSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { access, appendFile, chmod, copyFile, lstat, mkdir, open, readFile, readdir, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import YAML from "yaml";
 import {
   fullWindowOptions,
@@ -798,6 +800,32 @@ async function restartMemoryService(): Promise<DesktopMemoryServiceRestartResult
   }
 }
 
+function resolveShowItemInFolderPath(filePath: string): string | null {
+  const trimmed = filePath.trim();
+  if (!trimmed) return null;
+  const target = isAbsolute(trimmed)
+    ? resolve(trimmed)
+    : (() => {
+        const [rootName, ...relativeParts] = trimmed.split(/[\\/]+/).filter(Boolean);
+        const root = rootName === "文稿" || rootName === "Documents"
+          ? app.getPath("documents")
+          : rootName === "下载" || rootName === "Downloads"
+            ? app.getPath("downloads")
+            : rootName === "桌面" || rootName === "Desktop"
+              ? app.getPath("desktop")
+              : join(homedir(), rootName ?? "");
+        return join(root, ...relativeParts);
+      })();
+
+  let existingTarget = target;
+  while (!existsSync(existingTarget)) {
+    const parent = dirname(existingTarget);
+    if (parent === existingTarget) return null;
+    existingTarget = parent;
+  }
+  return existingTarget;
+}
+
 /**
  * Registers the IPC handlers the renderer uses to read the runtime config.
  * @returns Nothing.
@@ -841,6 +869,44 @@ function registerIpcHandlers(): void {
   ipcMain.handle("memmy:save-image", async (event, request: DesktopImageActionRequest) => (
     saveDesktopImage(request, event.sender.getURL(), BrowserWindow.fromWebContents(event.sender))
   ));
+
+  ipcMain.handle("memmy:get-system-file-icon", async (_event, filePath: string): Promise<DesktopSystemFileIconResult> => {
+    if (typeof filePath !== "string" || !isAbsolute(filePath) || !existsSync(filePath)) {
+      return null;
+    }
+    try {
+      const icon = await app.getFileIcon(filePath, { size: "large" });
+      return icon.isEmpty() ? null : icon.toDataURL();
+    } catch {
+      return null;
+    }
+  });
+
+  ipcMain.handle("memmy:get-system-folder-icon", async (_event, kind: DesktopSystemFolderIconKind): Promise<DesktopSystemFileIconResult> => {
+    // Generic "folder" used to call getFileIcon(temp) and could SIGTRAP under load; skip it.
+    const pathName = kind === "documents"
+      ? "documents"
+      : kind === "downloads"
+        ? "downloads"
+        : kind === "desktop"
+          ? "desktop"
+          : null;
+    if (!pathName) return null;
+    try {
+      const folderPath = app.getPath(pathName);
+      if (!existsSync(folderPath)) return null;
+      const icon = await app.getFileIcon(folderPath, { size: "normal" });
+      return icon.isEmpty() ? null : icon.toDataURL();
+    } catch {
+      return null;
+    }
+  });
+
+  ipcMain.handle("memmy:show-item-in-folder", async (_event, filePath: string): Promise<void> => {
+    if (typeof filePath !== "string") return;
+    const target = resolveShowItemInFolderPath(filePath);
+    if (target) shell.showItemInFolder(target);
+  });
 
   ipcMain.handle("memmy:notify-task-done", (_event, payload: { title: string; body: string; silent: boolean }) => {
     showTaskDoneNotification(payload);
@@ -4719,6 +4785,9 @@ async function cleanupBeforeQuit(): Promise<void> {
   ipcMain.removeHandler("memmy:openMailto");
   ipcMain.removeHandler("memmy:copy-image-to-clipboard");
   ipcMain.removeHandler("memmy:save-image");
+  ipcMain.removeHandler("memmy:get-system-file-icon");
+  ipcMain.removeHandler("memmy:get-system-folder-icon");
+  ipcMain.removeHandler("memmy:show-item-in-folder");
   ipcMain.removeHandler("memmy:export-memory-database");
   ipcMain.removeHandler("memmy:install-cli-tools");
   ipcMain.removeHandler("memmy:restart-memory-service");

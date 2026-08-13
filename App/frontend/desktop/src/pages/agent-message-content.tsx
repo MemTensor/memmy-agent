@@ -1,5 +1,5 @@
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from "react";
-import { ExternalLink, FileText, Image as ImageIcon } from "lucide-react";
+import { ExternalLink, Image as ImageIcon } from "lucide-react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import { Prism as SyntaxHighlighter, type SyntaxHighlighterProps } from "react-syntax-highlighter";
 import { oneLight } from "react-syntax-highlighter/dist/esm/styles/prism";
@@ -9,6 +9,7 @@ import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import type { MemmyAgentClient, ResolvedAgentArtifact } from "../api/memmy-agent-client.js";
+import { FileTypeIcon } from "../components/file-type-icon.js";
 import { useTranslation } from "../i18n/use-translation.js";
 
 export type AgentArtifactClient = {
@@ -458,7 +459,7 @@ function FileReferenceChip(props: {
         disabled={actionState === "working" || (!resolved && !failed)}
         className={`agent-message-content__file-chip inline-flex max-w-full min-w-0 items-center gap-1.5 overflow-hidden rounded-tag border px-2 py-1 align-baseline text-xs disabled:cursor-wait disabled:opacity-70 ${failed || actionState === "error" ? "border-status-error/30 bg-status-error/5 text-status-error" : "border-border-stone/40 bg-canvas-oat/70 text-text-ink/65 hover:text-action-sky"}`}
       >
-        <FileText size={12} className="shrink-0" />
+        <FileTypeIcon name={resolved?.name ?? cleanPath} surface="inline" />
         <span className="min-w-0 truncate">{actionState === "working" ? t("agent.attachment.opening") : label}</span>
       </button>
       {actionState === "error" ? (

@@ -13,6 +13,7 @@ import { buildAgentDisplayUnits } from "../agent-thread-messages.js";
 import {
   AGENT_RESTART_STATE_STORAGE_KEY,
   AGENT_MEDIA_ACCEPT,
+  addCapabilityBlockToDraft,
   ComposerMediaPreviewStrip,
   ComposerSubmitButton,
   HomePage,
@@ -22,9 +23,12 @@ import {
   agentChatScopeKey,
   attachmentFilesFromDataTransfer,
   clipboardImageFilesFromDataTransfer,
+  composerContentWithReferences,
   dataTransferHasAttachmentFiles,
   hasActiveAgentConversation,
+  homeSuggestionDraft,
   hydrateAgentThreadInBackground,
+  insertCapabilityAtSelection,
   isAgentConversationAtBottom,
   isComposingKeyboardEvent,
   isSingleLineComposerInput,
@@ -33,6 +37,8 @@ import {
   requestNewSessionReset,
   requestAgentRestart,
   requestAgentStop,
+  replaceSlashQueryAtSelection,
+  replaceTrailingSlashQuery,
   shouldAcceptAgentStatusResult,
   submitAgentComposerMessage,
   updateComposerDraftForScope,
@@ -42,8 +48,16 @@ import {
   validateAgentMediaFiles,
   type PendingFileAttachment
 } from "../home-page.js";
+import {
+  ComposerHighlightedTextarea,
+  composerHighlightSegments,
+  mentionQueryFromInput,
+  removeHighlightedCommandAtCaret
+} from "../home-composer-quick-actions.js";
 
 const homePageSourcePath = fileURLToPath(new URL("../home-page.tsx", import.meta.url));
+const literatureReviewSourcePath = fileURLToPath(new URL("../literature-review-page.tsx", import.meta.url));
+const knowledgePageSourcePath = fileURLToPath(new URL("../knowledge-page.tsx", import.meta.url));
 const agentRuntimeBridgeSourcePath = fileURLToPath(new URL("../../app/agent-runtime-bridge.tsx", import.meta.url));
 const stylesSourcePath = fileURLToPath(new URL("../../styles.css", import.meta.url));
 
@@ -60,6 +74,241 @@ function mockCallOrder(fn: { mock: { invocationCallOrder: readonly number[] } },
 }
 
 describe("HomePage", () => {
+  it("carries launch contexts into a switchable literature-review file browser", () => {
+    const source = readFileSync(literatureReviewSourcePath, "utf8");
+
+    expect(source).toContain("function readInitialContexts()");
+    expect(source).toContain("function readInitialSourceInput()");
+    expect(source).toContain("function renderLaunchUserMessage()");
+    expect(source).toContain('className="litrev-user-command"');
+    expect(source).toContain("sourceInput.split(/(\\/literature-review\\b)/gi)");
+    expect(source).toContain('type PreviewScope = "task" | "knowledge" | "project";');
+    expect(source).toContain("launchContexts.find((context) => context.kind === \"kb\")?.id ?? \"all\"");
+    expect(source).toContain('{ value: "knowledge", label: t("litrev.preview.knowledge"), icon: <LibraryBig size={14} /> }');
+    expect(source).toContain("const [launchProjectId] = useState(readInitialProjectId);");
+    expect(source).toContain("...(launchProjectId");
+    expect(source).toContain('{ value: "project" as const, label: t("litrev.preview.projectSpace"), icon: <Folder size={14} /> }');
+    expect(source).toContain('className="litrev-preview-scope-menu"');
+    expect(source).toContain('className="litrev-preview-scope-switcher"');
+    expect(source).toContain("<PanelLeftClose size={16} />");
+    expect(source).toContain("<PanelLeftOpen size={16} />");
+    expect(source).toContain("const previewResize = useResizableSidebar({");
+    expect(source).toContain("const fileBrowserResize = useResizableSidebar({");
+    expect(source).toContain('label={t("litrev.workspace.resize")}');
+    expect(source).toContain('label={t("litrev.preview.resizeFiles")}');
+    expect(source).toContain("const renderKnowledgeFileTree = (");
+    expect(source).not.toContain("FolderTypeIcon");
+    expect(source).toContain("renderKnowledgeFileTree(kbFiles)");
+    expect(source).toContain('role="menuitemradio"');
+    expect(source).toContain('className="litrev-preview-scope-menu litrev-preview-scope-menu--knowledge"');
+    expect(source).toContain('[{ id: "all", name: t("litrev.preview.allFiles") }, ...knowledgeBases]');
+    expect(source).toContain("litrev-file-browser--collapsed");
+    expect(source).toContain('<section className="litrev-preview-main">');
+    expect(source).toContain("{workspaceOpen ? (");
+    expect(source).toContain("function renderWorkspaceToggle()");
+    expect(source).toContain('aria-pressed={workspaceOpen}');
+    expect(source.match(/\{renderWorkspaceToggle\(\)\}/g)).toHaveLength(2);
+    expect(source).toContain('const [workspaceOpen, setWorkspaceOpen] = useState(() => readInitialPhase().kind === "task")');
+    expect(source).toContain('type QuestionCardStatus = "preparing" | "waiting" | "cancelled";');
+    expect(source).toContain("questions.map((question, itemIndex)");
+    expect(source).toContain("questions.map((question) => question.options[0] ??");
+    expect(source).toContain("onClick={() => updateQuestionAnswer(itemIndex, option)}");
+    expect(source).not.toContain("<span>{itemIndex + 1}</span>");
+    expect(source).not.toContain('aria-label={t("litrev.question.answered")}');
+    expect(source).toContain('className="litrev-question-list"');
+    expect(source).toContain('className="litrev-question-card__foot"');
+    expect(source).toContain("onClick={confirmAnswers}");
+    expect(source).toContain("setQuestionIndex(questions.length)");
+    expect(source).toContain('className="litrev-question-supplement"');
+    expect(source).toContain('type LitrevStageKind = "questions" | "keywords" | "outline" | "references" | "tasks";');
+    expect(source).toContain("function stageKindForPhase(phase: LitrevPhase): LitrevStageKind");
+    expect(source).toContain("const [reachedStages, setReachedStages]");
+    expect(source).toContain("const [preparationDetailsOpen, setPreparationDetailsOpen]");
+    expect(source).toContain("const [stageDetailsOpen, setStageDetailsOpen]");
+    expect(source).toContain("function renderStageActivity(stage: LitrevStageKind)");
+    expect(source).toContain("return reachedStages.map((stage) =>");
+    expect(source).toContain('t("litrev.stageActivity.questions.waiting")');
+    expect(source).toContain('t("litrev.stageActivity.keywords.generating")');
+    expect(source).toContain('t("litrev.stageActivity.outline.waiting")');
+    expect(source).toContain('t("litrev.stageActivity.references.done")');
+    expect(source).toContain('t("litrev.stageActivity.tasks.done")');
+    expect(source).toContain('t("litrev.stageActivity.preparation.done")');
+    expect(source).toContain('function renderPreparationSummary(stages: Array<Exclude<LitrevStageKind, "tasks">>)');
+    expect(source).toContain('stage !== "tasks"');
+    expect(source).toContain("function renderStageOutput(stage: Exclude<LitrevStageKind, \"tasks\">)");
+    expect(source).toContain('className="litrev-assistant-copy litrev-stage-output-message"');
+    expect(source).toContain("const TODO_STEP_MS = 2800");
+    expect(source).not.toContain("renderThinkingDetails");
+    expect(source).toContain("function renderThinkingCopy()");
+    expect(source).toContain("thinkingPhaseData(phase.thinking).title");
+    expect(source).not.toContain('t("litrev.stage.done")');
+    expect(source).not.toContain('t("litrev.stage.current")');
+    expect(source).not.toContain("appendActivityTimeline");
+    expect(source).not.toContain("appendToolLog");
+    expect(source).not.toContain("<Wrench");
+    expect(source).not.toContain("completedThinkingActivities");
+    expect(source).not.toContain("thinkingDetailsOpen");
+    expect(source).toContain('if (stage === "questions") return null;');
+    expect(source).toContain('{phase.kind === "setup" ? renderQuestionCard() : null}');
+    expect(source).toContain('{phase.kind === "wizard" ? renderWizardCard() : null}');
+    expect(source).not.toContain("controlsDockCard");
+    expect(source).toContain('className="litrev-todo__list litrev-stage-text-card"');
+    expect(source).toContain("function todoOutputForIndex(index: number)");
+    expect(source).toContain("function renderTaskOutputMessages()");
+    expect(source).toContain('className="litrev-assistant-copy litrev-task-output-message"');
+    expect(source).toContain("{renderTaskOutputMessages()}");
+    expect(source).toContain("function renderTaskProcess(finished: boolean)");
+    expect(source).toContain("const [processDetailsOpen, setProcessDetailsOpen] = useState(false)");
+    expect(source).toContain('className="agent-activity-cluster__body litrev-task-process__body"');
+    expect(source).toContain('t("agent.activity.workedFor", { duration })');
+    expect(source).toContain("setStageDetailsOpen((state) => ({ ...state, tasks: false }))");
+    expect(source).not.toContain("litrevRunningLine");
+    expect(source.match(/onClick=\{cancelWorkflow\}/g)).toHaveLength(2);
+    expect(source).toContain('className="litrev-wizard-card__close"');
+    expect(source).toContain('if (phase.kind !== "wizard" || workflowEnded) return null;');
+    expect(source).toContain('{renderComposer("litrev.composer.setup")}');
+    expect(source).toContain('if (phase.kind === "setup" && questionCardStatus !== "cancelled")');
+    expect(source).toContain('if (phase.kind === "wizard")');
+    expect(source).toContain("writeComposerReferenceDrag(event.dataTransfer");
+    expect(source).toContain('t("composer.addToChat")');
+    expect(source).not.toContain("selectedKnowledgeContexts");
+    expect(source).toContain("phase.step === 2");
+    expect(source).toContain('className="litrev-wizard-card__kb-picker"');
+    expect(source).toContain("referenceTargetKbIds.includes(base.id)");
+    expect(source).toContain("registerAgentManagedFiles(managedFiles, window.localStorage, window)");
+    expect(source).not.toContain('className="litrev-kb-policy"');
+    expect(source).not.toContain('index === 0 ? <em>{t("litrev.question.recommended")}</em>');
+  });
+
+  it("adds a capability block without clearing the existing draft", () => {
+    expect(addCapabilityBlockToDraft("/literature-review", "比较两篇论文")).toBe(
+      "/literature-review  比较两篇论文"
+    );
+    expect(addCapabilityBlockToDraft("/literature-review", "")).toBe("/literature-review  ");
+    expect(replaceTrailingSlashQuery("比较两篇论文 /lit", "/literature-review", true)).toBe(
+      "比较两篇论文 /literature-review "
+    );
+  });
+
+  it("locks a suggested workflow into a leading capability chip", () => {
+    expect(homeSuggestionDraft("写一篇完整综述", "/literature-review")).toBe(
+      "/literature-review  写一篇完整综述"
+    );
+    expect(homeSuggestionDraft("总结本周工作")).toBe("总结本周工作");
+  });
+
+  it("inserts and replaces a capability at the active caret", () => {
+    expect(insertCapabilityAtSelection("前文后文", "/literature-review", 2)).toEqual({
+      value: "前文  /literature-review  后文",
+      caret: 24
+    });
+    expect(replaceSlashQueryAtSelection("前文 /lit 后文", "/literature-review", 7, 7, true)).toEqual({
+      value: "前文 /literature-review  后文",
+      caret: 22
+    });
+  });
+
+  it("adds selected file and knowledge references to agent context", () => {
+    expect(composerContentWithReferences("请结合这些资料", [
+      { kind: "path", id: "references/paper.pdf", label: "paper.pdf" },
+      { kind: "kb", id: "kb-1", label: "长期记忆" }
+    ])).toBe(
+      "请结合这些资料\n\n<memmy-context>\n"
+      + "- file: paper.pdf (references/paper.pdf)\n"
+      + "- knowledge-base: 长期记忆 (kb-1)\n"
+      + "</memmy-context>"
+    );
+  });
+
+  it("adds knowledge and literature-review files to the active chat", () => {
+    const knowledgeSource = readFileSync(knowledgePageSourcePath, "utf8");
+    const literatureSource = readFileSync(literatureReviewSourcePath, "utf8");
+
+    expect(knowledgeSource).toContain("options.onMoveFilesToFolder ? (selected ? selectedFileIds : [file.id]) : []");
+    expect(knowledgeSource).toContain("onContextMenu={(event) => openFileContextMenu(event, actionTarget)}");
+    expect(knowledgeSource).toContain("onClick={(event) => openFileContextMenu(event, target)}");
+    expect(knowledgeSource).toContain("showActionTargetInFolder(fileContextMenu)");
+    expect(knowledgeSource).toContain("window.memmy?.showItemInFolder(menu.path)");
+    expect(knowledgeSource).toContain('fileContextMenu.context === "detail"');
+    expect(knowledgeSource).toContain('className="kb-file-table__row kb-file-table__row--static kb-file-table__row--inline-folder"');
+    expect(knowledgeSource).toContain("options.onMoveFilesToFolder?.(draggedKbFileIdsRef.current, entry.moveTargetId!)");
+    expect(knowledgeSource).toContain('className="composer-file-context-menu__submenu-trigger"');
+    expect(knowledgeSource).toContain("virtualFolderId: entry.moveTargetId");
+    expect(knowledgeSource).toContain("startFolderRename(");
+    expect(knowledgeSource).toContain("commitFolderRename()");
+    expect(knowledgeSource).toContain('fileContextMenu.context === "library"');
+    expect(knowledgeSource).toContain("addFileIdsToBase(fileContextMenu.fileIds, base.id)");
+    expect(knowledgeSource).toContain('className="composer-file-context-menu__submenu-anchor"');
+    expect(knowledgeSource).toContain("dropFolderId === ROOT_DROP_TARGET");
+    expect(knowledgeSource).toContain("options.onMoveFilesToFolder?.(draggedKbFileIdsRef.current, null)");
+    expect(knowledgeSource).not.toContain('t("kb.folder.moveTo")');
+    expect(knowledgeSource).toContain("setDeleteFileIds([...fileContextMenu.fileIds])");
+    expect(knowledgeSource).toContain('t("kb.deleteFilesConfirm.desc"');
+    expect(knowledgeSource).toContain("deleteKnowledgeFolder(false)");
+    expect(knowledgeSource).toContain("deleteKnowledgeFolder(true)");
+    expect(knowledgeSource).toContain('t("kb.folder.deleteWithFiles")');
+    expect(knowledgeSource).toContain('t("kb.detail.remove")');
+    expect(knowledgeSource).toContain('dispatch(appActions.navigate("/main"))');
+    expect(literatureSource).toContain("onDragStart={(event) => beginFileDrag(event, file.path, file.name)}");
+    expect(literatureSource).toContain("onContextMenu={(event) => openFileContextMenu(event, file.path, file.name)}");
+    expect(literatureSource).toContain('className="litrev-composer"');
+    expect(literatureSource).toContain("<HomeContextChips chips={composerReferences}");
+    expect(literatureSource).toContain("<ComposerQuickActionButtons");
+    expect(literatureSource).toContain("onAttach={() => composerFileInputRef.current?.click()}");
+    expect(literatureSource).toContain("onInsertMention={() => setReferencePickerOpen((open) => !open)}");
+    expect(literatureSource).toContain("onInsertSlash={insertComposerSlash}");
+    expect(literatureSource).toContain("toggleComposerVoiceInput()");
+  });
+
+  it("recognizes a reference trigger after a capability block", () => {
+    expect(mentionQueryFromInput("/literature-review @")).toBe("");
+    expect(mentionQueryFromInput("/literature-review @memory")).toBe("memory");
+  });
+
+  it("renders a selected capability inline without replacing the textarea", () => {
+    const html = renderToString(
+      <ComposerHighlightedTextarea
+        value="/literature-review "
+        highlightedCommands={["/literature-review"]}
+        placeholder="分配一个任务或提问任何问题..."
+      />
+    );
+
+    expect(html).toContain("composer-slash-chip");
+    expect(html).toContain(">/literature-review </textarea>");
+    expect(html).toContain("分配一个任务或提问任何问题...");
+  });
+
+  it("keeps unselected slash text editable instead of turning it into a capability chip", () => {
+    const html = renderToString(
+      <ComposerHighlightedTextarea
+        value="/AI Memory"
+        highlightedCommands={["/literature-review"]}
+        placeholder="分配一个任务或提问任何问题..."
+      />
+    );
+
+    expect(html).not.toContain("composer-slash-chip");
+    expect(html).toContain("/AI Memory");
+  });
+
+  it("highlights and removes a selected capability at an inline caret position", () => {
+    expect(composerHighlightSegments(
+      "前文 /literature-review 后文",
+      ["/literature-review"]
+    )).toEqual([
+      { text: "前文 ", command: false },
+      { text: "/literature-review", command: true },
+      { text: " 后文", command: false }
+    ]);
+    expect(removeHighlightedCommandAtCaret(
+      "前文 /literature-review 后文",
+      ["/literature-review"],
+      21,
+      "Backspace"
+    )).toEqual({ value: "前文 后文", caret: 3 });
+  });
+
   it("renders the first-phase agent input controls", () => {
     const html = renderToString(
       <AppProviders>
@@ -70,9 +319,14 @@ describe("HomePage", () => {
     );
 
     expect(html).toContain("分配一个任务或提问任何问题...");
-    expect(html).toContain("添加图片和文件");
+    expect(html).toContain("添加文件");
+    expect(html).toContain("引用");
+    expect(html).toContain("能力");
     expect(html).toContain("语音输入");
     expect(html).toContain("发送");
+    expect(html).toContain("帮我写一篇关于 AI Memory 研究的文献综述");
+    expect(html).toContain("帮我总结一下本周的工作");
+    expect(html).toContain("梳理我最近的一个任务，并列出可行的待办");
     expect(html).toContain("Agent 正在连接");
     expect(html).not.toContain('aria-haspopup="menu"');
     expect(html).toContain('class="home-project-picker__trigger"');
@@ -80,7 +334,7 @@ describe("HomePage", () => {
     expect(html).toContain(`accept="${AGENT_MEDIA_ACCEPT}"`);
     expect(html).toContain("hidden");
     expect(html).toContain('class="hidden"');
-    expect(html).toContain('data-icon="plus"');
+    expect(html).toContain("lucide-plus");
     expect(html).toContain('data-icon="mic"');
     expect(html).toContain('data-icon="send"');
     expect(html).not.toContain("添加照片和文件");
@@ -88,7 +342,7 @@ describe("HomePage", () => {
     expect(html).not.toContain('data-icon="image-plus"');
     expect(html).not.toContain('data-icon="pause"');
     expect(html).toContain("内容由 AI 生成，请仔细甄别");
-    expect(html).toContain("text-center text-[11px] text-text-ink/40 mt-4");
+    expect(html).toContain("text-center text-[11px] text-text-ink/40 mt-3");
     expect(html).not.toContain("未选择任何文件");
   });
 
@@ -106,7 +360,7 @@ describe("HomePage", () => {
       source.indexOf("  useEffect(() => {\n    if (!clients?.memmyAgent)")
     );
     const updateComposerInputBlock = source.slice(
-      source.indexOf("function updateComposerInput(value: string)"),
+      source.indexOf("function updateComposerInput(value: string,"),
       source.indexOf("  /**\n   * 自动收缩或展开输入框高度。")
     );
 
@@ -128,11 +382,22 @@ describe("HomePage", () => {
     expect(updateComposerInputBlock).toContain("loadSlashCommands({ resetAttempts: true });");
   });
 
-  it("keeps slash menu rendering and command panels on their existing boundaries", () => {
+  it("anchors typed slash menus at the caret and button-triggered menus at the button", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
 
     expect(source).toContain("const slashMenuOpen = filteredSlashCommands.length > 0;");
-    expect(source.match(/\{slashMenuOpen && \(/g)).toHaveLength(2);
+    expect(source).toContain("function ComposerCaretMenu(props:");
+    expect(source).toContain('mirror.style.whiteSpace = "pre-wrap";');
+    expect(source).toContain("const caretTop = caretMarker.offsetTop;");
+    expect(source).not.toContain("context?.measureText(currentLine)");
+    expect(source.match(/\{slashMenuOpen && !slashPickerOpen \? \(/g)).toHaveLength(2);
+    expect(source).toContain("slashMenu={slashMenuOpen && slashPickerOpen ? (");
+    expect(source).toContain("{slashMenuOpen && slashPickerOpen && (");
+    expect(source).toContain("const mentionQuery = mentionMenuDismissed || slashPickerOpen");
+    expect(source).not.toContain('slashPickerOpen || /^\\s*\\//.test(input)');
+    expect(source).toContain("{referenceMenuOpen && !referencePickerOpen && !slashMenuOpen ? (");
+    expect(source).toContain("{referenceMenuOpen && !slashMenuOpen ? (");
+    expect(source).toContain("referenceMenu={referencePickerOpen && !slashMenuOpen ? (");
     expect(source).toContain("const [lastCompactionPanel, setLastCompactionPanel] = useState<StatusPanelState>({ open: false });");
     expect(source).toContain("const lastCompactionSlashCommand: SlashCommandPaletteItem = {");
     expect(source).toContain('command: "/last-compaction"');
@@ -367,6 +632,15 @@ describe("HomePage", () => {
 
     expect(sendBlock).toContain("if (runExactLocalSlashCommand(input))");
     expect(sendBlock.indexOf("runExactLocalSlashCommand(input)")).toBeLessThan(sendBlock.indexOf("submitAgentComposerMessage({"));
+    expect(localSlashBlock).toContain("LITREV_CONTEXT_STORAGE_KEY");
+    expect(localSlashBlock).toContain("LITREV_SOURCE_INPUT_STORAGE_KEY");
+    expect(localSlashBlock).toContain("sourceInput");
+    expect(localSlashBlock).toContain('/(?:^|\\s)\\/literature-review(?=\\s|$)/i');
+    expect(localSlashBlock).toContain("JSON.stringify(contextChips)");
+    expect(localSlashBlock).toContain("composerContextReferencesUpdated(chatScopeKey, [])");
+    expect(localSlashBlock).toContain('draftTarget.kind === "project"');
+    expect(localSlashBlock).toContain("LITREV_PROJECT_CONTEXT_STORAGE_KEY");
+    expect(localSlashBlock).toContain("removeItem(LITREV_PROJECT_CONTEXT_STORAGE_KEY)");
     expect(localSlashBlock).toContain("if (pendingAttachments.length > 0) return false;");
     expect(localSlashBlock).toContain('normalized === "/last-compaction"');
     expect(localSlashBlock).toContain("requestLastCompactionPanel();");
@@ -840,32 +1114,36 @@ describe("HomePage", () => {
     expect(html).toContain(">table<");
     expect(html).toContain(">data<");
     expect(html).toContain(">payload<");
-    expect(html).toContain(">PDF<");
-    expect(html).toContain(">DOC<");
-    expect(html).toContain(">XLS<");
-    expect(html).toContain(">PPT<");
-    expect(html).toContain(">FILE<");
+    expect(html).toContain("file-type-icon__paper");
+    expect(html).toContain("file-type-icon__glyph");
+    expect(html).toContain("file-type-icon__format-label");
+    expect(html).toContain(">PDF</text>");
+    expect(html).toContain(">DOC</text>");
+    expect(html).toContain(">XLS</text>");
+    expect(html).toContain(">PPT</text>");
     expect(compactHtml).toContain("XLSX · 2.0 KB");
     expect(compactHtml).toContain("PPTX · 1.5 KB");
     expect(compactHtml).toContain("TXT · 512 B");
     expect(compactHtml).toContain("CSV · 768 B");
     expect(compactHtml).toContain("JSON · 1.0 KB");
     expect(compactHtml).toContain("XML · 640 B");
-    expect(html).toContain('data-testid="agent-file-icon-pdf"');
-    expect(html).toContain('data-testid="agent-file-icon-docx"');
-    expect(html).toContain('data-testid="agent-file-icon-xlsx"');
-    expect(html).toContain('data-testid="agent-file-icon-pptx"');
-    expect(html).toContain('data-testid="agent-file-icon-file"');
-    expect(html).toContain("agent-attachment-card__file-tile--pdf");
-    expect(html).toContain("agent-attachment-card__file-tile--docx");
-    expect(html).toContain("agent-attachment-card__file-tile--xlsx");
-    expect(html).toContain("agent-attachment-card__file-tile--pptx");
-    expect(html).toContain("agent-attachment-card__file-tile--file");
-    expect(html).toContain('aria-label="PDF file"');
+    expect(html).toContain('data-testid="file-type-icon-pdf"');
+    expect(html).toContain('data-testid="file-type-icon-word"');
+    expect(html).toContain('data-testid="file-type-icon-spreadsheet"');
+    expect(html).toContain('data-testid="file-type-icon-presentation"');
+    expect(html).toContain('data-testid="file-type-icon-text"');
+    expect(html).toContain('data-testid="file-type-icon-code"');
+    expect(html).toContain("file-type-icon--pdf");
+    expect(html).toContain("file-type-icon--word");
+    expect(html).toContain("file-type-icon--spreadsheet");
+    expect(html).toContain("file-type-icon--presentation");
+    expect(html).toContain("file-type-icon--text");
+    expect(html).toContain("file-type-icon--code");
+    expect(html).toContain('aria-label="PDF document"');
     expect(html).toContain('aria-label="Word document"');
-    expect(html).toContain('aria-label="Spreadsheet file"');
-    expect(html).toContain('aria-label="Presentation file"');
-    expect(html).toContain('aria-label="File attachment"');
+    expect(html).toContain('aria-label="Spreadsheet"');
+    expect(html).toContain('aria-label="Presentation"');
+    expect(html).toContain('aria-label="Text document"');
     expect(html).not.toContain("absolute -right-1 -bottom-1");
     expect(html).not.toContain('data-testid="composer-file-kind-');
     expect(compactHtml).toContain("PNG · 2.0 KB");

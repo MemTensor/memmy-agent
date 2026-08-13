@@ -65,6 +65,10 @@ export interface DesktopImageActionRequest {
   data?: Uint8Array;
 }
 
+export type DesktopSystemFileIconResult = string | null;
+
+export type DesktopSystemFolderIconKind = "folder" | "documents" | "downloads" | "desktop";
+
 export type DesktopImageSaveResult =
   | { canceled: true }
   | { canceled: false; filePath: string; bytes: number };

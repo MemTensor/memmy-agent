@@ -38,6 +38,7 @@ import {
   type AttachmentDownloadStarter,
   type AttachmentCopyTarget,
 } from "./agent-message-content.js";
+import { HomeContextChips } from "./home-composer-quick-actions.js";
 import { Memmy } from "../components/mascot/memmy.js";
 import { Tooltip } from "../components/tooltip.js";
 import { useTranslation } from "../i18n/use-translation.js";
@@ -412,6 +413,9 @@ const SingleMessage = memo(function SingleMessage(props: SingleMessageProps) {
     return (
       <div className="agent-user-turn flex min-w-0 justify-end">
         <div className="flex min-w-0 max-w-[75%] flex-col items-end gap-2">
+          {message.contextReferences?.length ? (
+            <HomeContextChips chips={message.contextReferences} />
+          ) : null}
           {message.media?.length ? (
             <UserMediaPreviewGrid media={message.media} artifactClient={props.artifactClient} />
           ) : null}

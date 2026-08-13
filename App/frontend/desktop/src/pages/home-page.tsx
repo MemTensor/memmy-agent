@@ -1,5 +1,5 @@
 /** Home page module. */
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type CSSProperties, type DragEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type SetStateAction, type UIEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type CSSProperties, type DragEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject, type SetStateAction, type UIEvent } from "react";
 import { hydrateAgentThreadInBackground, refreshAgentTaskList, useAgentRuntimeBridge, type AgentTaskStateCoordinator } from "../app/agent-runtime-bridge.js";
 import { useApiClients } from "../app/providers.js";
 import { FOCUSED_AGENT_CHAT_STORAGE_KEY, clearFocusedAgentTarget, normalizeAgentChatId, readLaunchAgentChatId, removeLaunchAgentChatIdFromUrl } from "../app/routes.js";
@@ -32,6 +32,11 @@ import {
 } from "../lib/agent-attachment.js";
 import { encodeAgentImage, type AgentImageMime } from "../lib/agent-image-encode.js";
 import { formatConversationTitleForDisplay } from "../lib/format-conversation-title.js";
+import {
+  dataTransferHasComposerReference,
+  mergeComposerContextReferences,
+  readComposerReferenceDrag
+} from "../lib/composer-file-reference.js";
 import { useTaskBus, type TaskBusAgentMessage } from "../lib/task-bus.js";
 import type { AppAction } from "../state/app-actions.js";
 import { agentActions, appActions, createAgentOperationError } from "../state/app-actions.js";
@@ -41,6 +46,7 @@ import { isComposingKeyboardEvent } from "../utils/keyboard.js";
 import {
   agentChatScopeKey,
   updateComposerDraftForScope,
+  type ComposerContextReference,
   type PendingAttachment,
   type PendingAttachmentBase,
   type PendingFileAttachment,
@@ -74,8 +80,25 @@ import {
   writePendingFirstEncounterTaskLaunch
 } from "./first-encounter-task-launch.js";
 import { HistoryDagPanel, type HistoryDagPanelState } from "./history-dag-panel.js";
+import {
+  ComposerHighlightedTextarea,
+  ComposerQuickActionButtons,
+  ComposerReferencePanel,
+  HomeContextChips,
+  mentionQueryFromInput,
+  stripMentionFromInput,
+  type ComposerContextChip
+} from "./home-composer-quick-actions.js";
+import type { KbKnowledgeBase } from "./knowledge-demo-data.js";
+import {
+  LITREV_CONTEXT_STORAGE_KEY,
+  LITREV_PROJECT_CONTEXT_STORAGE_KEY,
+  LITREV_PROMPT_STORAGE_KEY,
+  LITREV_SOURCE_INPUT_STORAGE_KEY,
+  type HomeReferenceItem
+} from "./literature-review-demo-data.js";
 import { Mic, Pause, Plus, Send } from "./memory/memory-prototype-icons.js";
-import { ArrowDown, Check, ChevronDown, Folder, Plus as LucidePlus, RotateCw, X } from "lucide-react";
+import { ArrowDown, BookOpenText, CalendarCheck2, Check, ChevronDown, Folder, History, Plus as LucidePlus, RotateCw, X } from "lucide-react";
 
 export { agentChatScopeKey, updateComposerDraftForScope };
 export { hydrateAgentThreadInBackground };
@@ -199,6 +222,7 @@ export interface SubmitAgentComposerMessageInput {
   } | null;
   ensureChatSubscription?: (chatId: string) => void;
   content: string;
+  contextReferences?: ComposerContextReference[];
   language?: MemmyAgentUiLanguage;
   pendingAttachments: PendingAttachment[];
   uploadAgentMedia: (attachments: UploadAgentMediaInput[]) => Promise<UploadedAgentMedia[]>;
@@ -211,6 +235,20 @@ export interface SubmitAgentComposerMessageInput {
   chatSelectionEpoch?: number;
   getChatSelectionEpoch?: () => number;
   scopeKey?: string;
+}
+
+export function composerContentWithReferences(
+  content: string,
+  references: ComposerContextReference[]
+): string {
+  const text = content.trim();
+  if (!references.length) return text;
+  const context = references.map((reference) => (
+    reference.kind === "kb"
+      ? `- knowledge-base: ${reference.label} (${reference.id})`
+      : `- file: ${reference.label} (${reference.id})`
+  )).join("\n");
+  return [text, `<memmy-context>\n${context}\n</memmy-context>`].filter(Boolean).join("\n\n");
 }
 
 export interface RequestAgentStopInput {
@@ -247,6 +285,73 @@ export function isSingleLineComposerInput(element: HTMLTextAreaElement): boolean
   const paddingBottom = Number.parseFloat(style.paddingBottom) || 0;
   const singleLineHeight = (Number.isFinite(lineHeight) ? lineHeight : element.clientHeight) + paddingTop + paddingBottom;
   return element.scrollHeight <= singleLineHeight + COMPOSER_HEIGHT_EPSILON;
+}
+
+/** Adds a selected capability block without replacing the user's draft. */
+export function addCapabilityBlockToDraft(command: string, draft: string): string {
+  const existingDraft = draft.trim();
+  return existingDraft ? `${command}  ${existingDraft}` : `${command}  `;
+}
+
+/** Builds a suggestion draft with its capability locked in as a visible prefix chip. */
+export function homeSuggestionDraft(text: string, capability?: "/literature-review"): string {
+  return capability ? `${capability}  ${text}` : text;
+}
+
+/** Replaces only the trailing slash query, preserving text before it. */
+export function replaceTrailingSlashQuery(input: string, command: string, appendSpace: boolean): string {
+  const suffix = appendSpace ? " " : "";
+  return input.replace(/(^|\s)\/[^\s/]*$/, `$1${command}${suffix}`);
+}
+
+export interface ComposerTextEdit {
+  value: string;
+  caret: number;
+}
+
+/** Inserts a selected capability at the current textarea selection. */
+export function insertCapabilityAtSelection(
+  input: string,
+  command: string,
+  selectionStart: number,
+  selectionEnd = selectionStart
+): ComposerTextEdit {
+  const start = Math.max(0, Math.min(selectionStart, input.length));
+  const end = Math.max(start, Math.min(selectionEnd, input.length));
+  const before = input.slice(0, start);
+  const after = input.slice(end);
+  const leadingSpace = before && !/\s$/.test(before) ? "  " : "";
+  const trailingSpace = /^\s/.test(after) ? " " : "  ";
+  const insertion = `${leadingSpace}${command}${trailingSpace}`;
+  return {
+    value: `${before}${insertion}${after}`,
+    caret: before.length + insertion.length
+  };
+}
+
+/** Replaces the slash query immediately before the caret while preserving following text. */
+export function replaceSlashQueryAtSelection(
+  input: string,
+  command: string,
+  selectionStart: number,
+  selectionEnd = selectionStart,
+  appendSpace = true
+): ComposerTextEdit {
+  const start = Math.max(0, Math.min(selectionStart, input.length));
+  const end = Math.max(start, Math.min(selectionEnd, input.length));
+  const beforeCaret = input.slice(0, start);
+  const match = /(^|\s)\/[^\s/]*$/.exec(beforeCaret);
+  if (!match) {
+    return insertCapabilityAtSelection(input, command, start, end);
+  }
+  const queryStart = (match.index ?? 0) + (match[1]?.length ?? 0);
+  const before = input.slice(0, queryStart);
+  const after = input.slice(end);
+  const suffix = appendSpace ? (/^\s/.test(after) ? " " : "  ") : "";
+  return {
+    value: `${before}${command}${suffix}${after}`,
+    caret: before.length + command.length + suffix.length
+  };
 }
 
 export function isAgentConversationAtBottom(element: Pick<HTMLElement, "scrollTop" | "scrollHeight" | "clientHeight">): boolean {
@@ -361,6 +466,7 @@ export function ComposerFileAttachmentChip(props: {
       kind="file"
       name={item.fileName}
       mime={item.uploadMime}
+      filePath={item.localPath}
       subline={`${extensionLabel} · ${formatBytes(item.uploadBytes ?? item.originalBytes)}`}
       removable
       removeLabel={props.removeLabel}
@@ -522,7 +628,9 @@ export function requestNewSessionReset(input: RequestNewSessionResetInput): bool
 
 export async function submitAgentComposerMessage(input: SubmitAgentComposerMessageInput): Promise<boolean> {
   const text = input.content.trim();
-  if ((!text && !input.pendingAttachments.length) || !input.connection) {
+  const contextReferences = input.contextReferences ?? [];
+  const agentContent = composerContentWithReferences(text, contextReferences);
+  if ((!text && !input.pendingAttachments.length && !contextReferences.length) || !input.connection) {
     return false;
   }
   const expectedGeneration = input.connection.getReadyGeneration();
@@ -583,7 +691,7 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
   const payload = {
     type: "message",
     chat_id: chatId,
-    content: text,
+    content: agentContent,
     webui: true,
     client_request_id: clientRequestId,
     ...(capturedTarget ? { target: capturedTarget } : {}),
@@ -605,7 +713,7 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
   try {
     await input.connection.sendMessage({
       chatId,
-      content: text,
+      content: agentContent,
       clientRequestId,
       ...(capturedTarget ? { target: capturedTarget } : {}),
       ...(input.language ? { language: input.language } : {}),
@@ -639,6 +747,7 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
   input.dispatch(agentActions.userMessageQueued({
     chatId,
     content: text,
+    ...(contextReferences.length ? { contextReferences } : {}),
     media: uploadedAttachments.map((item) => ({ url: item.url, name: item.name, kind: item.kind, path: item.path })),
     focus,
     ...(capturedTarget ? { target: capturedTarget } : {})
@@ -648,6 +757,77 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
     input.onNewChatMessageSent?.(chatId);
   }
   return true;
+}
+
+function ComposerCaretMenu(props: {
+  textareaRef: RefObject<HTMLTextAreaElement | null>;
+  containerRef: RefObject<HTMLDivElement | null>;
+  value: string;
+  children: ReactNode;
+}) {
+  const [position, setPosition] = useState<{ left: number; top: number; width: number } | null>(null);
+
+  useLayoutEffect(() => {
+    const textarea = props.textareaRef.current;
+    const container = props.containerRef.current;
+    if (!textarea || !container) {
+      setPosition(null);
+      return;
+    }
+    const style = window.getComputedStyle(textarea);
+    const fontSize = Number.parseFloat(style.fontSize) || 14;
+    const lineHeight = Number.parseFloat(style.lineHeight) || fontSize * 1.6;
+    const selectionStart = textarea.selectionStart ?? textarea.value.length;
+    const mirror = document.createElement("div");
+    mirror.style.position = "fixed";
+    mirror.style.left = "-10000px";
+    mirror.style.top = "0";
+    mirror.style.visibility = "hidden";
+    mirror.style.pointerEvents = "none";
+    mirror.style.boxSizing = style.boxSizing;
+    mirror.style.width = `${textarea.offsetWidth}px`;
+    mirror.style.padding = style.padding;
+    mirror.style.borderWidth = style.borderWidth;
+    mirror.style.borderStyle = "solid";
+    mirror.style.fontFamily = style.fontFamily;
+    mirror.style.fontSize = style.fontSize;
+    mirror.style.fontStyle = style.fontStyle;
+    mirror.style.fontWeight = style.fontWeight;
+    mirror.style.letterSpacing = style.letterSpacing;
+    mirror.style.lineHeight = style.lineHeight;
+    mirror.style.textAlign = style.textAlign;
+    mirror.style.textIndent = style.textIndent;
+    mirror.style.textTransform = style.textTransform;
+    mirror.style.whiteSpace = "pre-wrap";
+    mirror.style.overflowWrap = "break-word";
+    mirror.style.wordBreak = style.wordBreak;
+    mirror.textContent = textarea.value.slice(0, selectionStart);
+    const caretMarker = document.createElement("span");
+    caretMarker.textContent = "\u200b";
+    mirror.append(caretMarker);
+    document.body.append(mirror);
+    const caretLeft = caretMarker.offsetLeft;
+    const caretTop = caretMarker.offsetTop;
+    mirror.remove();
+
+    const textareaRect = textarea.getBoundingClientRect();
+    const containerRect = container.getBoundingClientRect();
+    const width = Math.min(360, Math.max(180, container.clientWidth - 16));
+    const desiredLeft = textareaRect.left - containerRect.left + caretLeft - textarea.scrollLeft;
+    const left = Math.max(8, Math.min(desiredLeft, container.clientWidth - width - 8));
+    const top = textareaRect.top - containerRect.top + caretTop + lineHeight - textarea.scrollTop + 4;
+    setPosition({ left, top, width });
+  }, [props.containerRef, props.textareaRef, props.value]);
+
+  if (!position) return null;
+  return (
+    <div
+      className="composer-caret-menu"
+      style={{ left: position.left, top: position.top, width: position.width }}
+    >
+      {props.children}
+    </div>
+  );
 }
 
 /**
@@ -671,13 +851,17 @@ export function HomePage() {
   const slashCommandsRetryTimerRef = useRef<number | null>(null);
   const slashCommandsAttemptRef = useRef(0);
   const [slashMenuDismissed, setSlashMenuDismissed] = useState(false);
+  const [slashPickerOpen, setSlashPickerOpen] = useState(false);
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
+  const [composerSelection, setComposerSelection] = useState({ start: 0, end: 0 });
   const [recentSlashCommands, setRecentSlashCommands] = useState<string[]>(() => readRecentSlashCommands());
   const [statusPanel, setStatusPanel] = useState<StatusPanelState>({ open: false });
   const [lastCompactionPanel, setLastCompactionPanel] = useState<StatusPanelState>({ open: false });
   const [historyDagPanel, setHistoryDagPanel] = useState<HistoryDagPanelState>({ open: false });
   const [isCreatingChat, setIsCreatingChat] = useState(false);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
+  const [mentionMenuDismissed, setMentionMenuDismissed] = useState(false);
+  const [referencePickerOpen, setReferencePickerOpen] = useState(false);
   const [projectPickerOperationId, setProjectPickerOperationId] = useState<string | null>(null);
   const [firstEncounterRelayChatId, setFirstEncounterRelayChatId] = useState<string | null>(() => (
     readFirstEncounterRelayChat(typeof window === "undefined" ? undefined : window.sessionStorage)
@@ -688,7 +872,9 @@ export function HomePage() {
   const [isComposerSingleLine, setIsComposerSingleLine] = useState(true);
   const composerDrafts = state.agent.composerDraftsByScope;
   const pendingAttachmentsByScope = state.agent.composerPendingAttachmentsByScope;
+  const contextReferencesByScope = state.agent.composerContextReferencesByScope;
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const composerShellRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const pendingStatusChatRef = useRef<string | null>(null);
@@ -712,6 +898,7 @@ export function HomePage() {
   const chatScopeKey = agentChatScopeKey(state.agent.currentChatId, state.agent.newChatRequestId);
   const input = composerDrafts[chatScopeKey] ?? "";
   const pendingAttachments = pendingAttachmentsByScope[chatScopeKey] ?? [];
+  const contextChips = contextReferencesByScope[chatScopeKey] ?? [];
   const draftTarget = state.agent.draftTargetsByScope[chatScopeKey] ?? { kind: "standalone" as const };
   const selectedDraftProject = draftTarget.kind === "project"
     ? state.agent.projects.find((project) => project.id === draftTarget.projectId) ?? null
@@ -1281,9 +1468,26 @@ export function HomePage() {
     argHint: "",
     synthetic: true
   };
-  const slashQuery = slashMenuDismissed ? null : slashQueryFromInput(input);
+  const literatureReviewSlashCommand: SlashCommandPaletteItem = {
+    command: "/literature-review",
+    title: t("home.capability.literatureReview"),
+    description: t("home.capability.literatureReviewHint"),
+    icon: "book-open",
+    argHint: t("home.capability.literatureReviewArgHint"),
+    synthetic: true
+  };
+  const slashQuery = slashMenuDismissed
+    ? null
+    : slashPickerOpen
+      ? ""
+      : slashQueryFromInput(input.slice(0, Math.min(composerSelection.start, input.length)));
+  const mentionQuery = mentionMenuDismissed || slashPickerOpen
+    ? null
+    : mentionQueryFromInput(input);
+  const referenceMenuOpen = referencePickerOpen || mentionQuery != null;
   const localizedSlashCommands = localizeSlashCommands(slashCommands, language, t);
   const slashCommandsWithLocal = [
+    literatureReviewSlashCommand,
     lastCompactionSlashCommand,
     ...localizedSlashCommands.filter((command) => command.command !== "/last-compaction")
   ];
@@ -1307,21 +1511,29 @@ export function HomePage() {
   const isAccountMode = state.bootstrap?.app.userMode === "account";
   const sanitizePlatformApiErrors = isAccountMode;
   const hasBlockedPendingMedia = pendingAttachments.some((item) => item.status !== "ready");
-  const hasComposerPayload = Boolean(input.trim() || pendingAttachments.some((item) => item.status === "ready"));
+  const hasComposerPayload = Boolean(
+    input.trim()
+    || contextChips.length
+    || pendingAttachments.some((item) => item.status === "ready")
+  );
   const stopInFlight = state.agent.currentChatId ? Boolean(state.agent.stopInFlightByChatId[state.agent.currentChatId]) : false;
+  // Runs fully client-side, so it must stay sendable even while the agent connection is down.
+  const isLocalWorkflowCommand = /(?:^|\s)\/literature-review(?=\s|$)/i.test(input);
   const composerSubmitDisabled = isCurrentAgentRunning
     ? stopInFlight
-    : stopInFlight
-      || !hasComposerPayload
-      || hasBlockedPendingMedia
-      || !connection
-      || isCreatingChat
-      || messageSendInFlight
-      || currentSessionProjectBlocked
-      || draftProjectBlocked
-      || state.agent.connectionStatus !== "connected"
-      || state.agent.recoveringGeneration !== null;
-  const centerComposerControls = isComposerSingleLine && pendingAttachments.length === 0;
+    : isLocalWorkflowCommand
+      ? false
+      : stopInFlight
+        || !hasComposerPayload
+        || hasBlockedPendingMedia
+        || !connection
+        || isCreatingChat
+        || messageSendInFlight
+        || currentSessionProjectBlocked
+        || draftProjectBlocked
+        || state.agent.connectionStatus !== "connected"
+        || state.agent.recoveringGeneration !== null;
+  const centerComposerControls = isComposerSingleLine && pendingAttachments.length === 0 && contextChips.length === 0;
 
   useEffect(() => {
     if (selectedCommandIndex >= filteredSlashCommands.length) {
@@ -1332,6 +1544,10 @@ export function HomePage() {
   useEffect(() => {
     composerDraftsRef.current = composerDrafts;
   }, [composerDrafts]);
+
+  useEffect(() => {
+    if (mentionQuery != null) setProjectPickerOpen(false);
+  }, [mentionQuery]);
 
   useEffect(() => {
     if (
@@ -1417,6 +1633,7 @@ export function HomePage() {
         connection,
         ensureChatSubscription,
         content: input,
+        contextReferences: contextChips,
         language,
         pendingAttachments,
         uploadAgentMedia: (attachments) => clients!.memmyAgent.uploadAgentMedia(attachments),
@@ -1497,6 +1714,32 @@ export function HomePage() {
 
   function runExactLocalSlashCommand(command: string): boolean {
     const normalized = command.trim().toLowerCase();
+    if (/(?:^|\s)\/literature-review(?=\s|$)/i.test(command)) {
+      const sourceInput = command.trim();
+      const request = sourceInput
+        .replace(/(?:^|\s)\/literature-review(?=\s|$)/i, " ")
+        .replace(/(?:^|\s)@\S+/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+      try {
+        window.sessionStorage.setItem(LITREV_PROMPT_STORAGE_KEY, request);
+        window.sessionStorage.setItem(LITREV_SOURCE_INPUT_STORAGE_KEY, sourceInput);
+        window.sessionStorage.setItem(LITREV_CONTEXT_STORAGE_KEY, JSON.stringify(contextChips));
+        if (draftTarget.kind === "project") {
+          window.sessionStorage.setItem(LITREV_PROJECT_CONTEXT_STORAGE_KEY, draftTarget.projectId);
+        } else {
+          window.sessionStorage.removeItem(LITREV_PROJECT_CONTEXT_STORAGE_KEY);
+        }
+      } catch {
+        // Losing launch context only means the demo flow falls back to its defaults.
+      }
+      rememberSlashCommand("/literature-review");
+      setCurrentComposerDraft("");
+      dispatch(agentActions.composerContextReferencesUpdated(chatScopeKey, []));
+      setMentionMenuDismissed(true);
+      dispatch(appActions.navigate("/literature-review"));
+      return true;
+    }
     if (pendingAttachments.length > 0) return false;
     if (normalized === "/last-compaction") {
       rememberSlashCommand("/last-compaction");
@@ -1604,9 +1847,15 @@ export function HomePage() {
    *
    * @param value The latest input box content.
    */
-  function updateComposerInput(value: string) {
+  function updateComposerInput(value: string, selectionStart = value.length, selectionEnd = selectionStart) {
     setCurrentComposerDraft(value);
+    setComposerSelection({ start: selectionStart, end: selectionEnd });
+    setSlashPickerOpen(false);
+    if (mentionQueryFromInput(value) != null) {
+      setReferencePickerOpen(false);
+    }
     setSlashMenuDismissed(false);
+    setMentionMenuDismissed(false);
     setSelectedCommandIndex(0);
     if (
       slashQueryFromInput(value) != null &&
@@ -1633,6 +1882,76 @@ export function HomePage() {
     requestAnimationFrame(() => {
       element.scrollTop = element.scrollHeight;
     });
+  }
+
+  function addComposerContextChip(chip: ComposerContextChip) {
+    const next = contextChips.some((existing) => existing.kind === chip.kind && existing.id === chip.id)
+      ? contextChips
+      : [...contextChips, chip];
+    dispatch(agentActions.composerContextReferencesUpdated(chatScopeKey, next));
+  }
+
+  function removeComposerContextChip(chip: ComposerContextChip) {
+    dispatch(agentActions.composerContextReferencesUpdated(
+      chatScopeKey,
+      contextChips.filter((existing) => !(existing.kind === chip.kind && existing.id === chip.id))
+    ));
+  }
+
+  function selectHomeSuggestion(text: string, capability?: "/literature-review") {
+    const nextDraft = homeSuggestionDraft(text, capability);
+    setCurrentComposerDraft(nextDraft);
+    setComposerSelection({ start: nextDraft.length, end: nextDraft.length });
+    setReferencePickerOpen(false);
+    setMentionMenuDismissed(true);
+    setSlashMenuDismissed(true);
+    window.requestAnimationFrame(() => {
+      if (inputRef.current) {
+        resizeComposerInput(inputRef.current);
+        inputRef.current.focus();
+        inputRef.current.setSelectionRange(nextDraft.length, nextDraft.length);
+      }
+    });
+  }
+
+  function pickMentionKnowledgeBase(base: KbKnowledgeBase) {
+    addComposerContextChip({ kind: "kb", id: base.id, label: base.name });
+    setCurrentComposerDraft((draft) => stripMentionFromInput(draft));
+    setMentionMenuDismissed(true);
+    setReferencePickerOpen(false);
+    inputRef.current?.focus();
+  }
+
+  function pickMentionReference(item: HomeReferenceItem) {
+    addComposerContextChip({ kind: "path", id: item.path, label: item.path });
+    setCurrentComposerDraft((draft) => stripMentionFromInput(draft));
+    setMentionMenuDismissed(true);
+    setReferencePickerOpen(false);
+    inputRef.current?.focus();
+  }
+
+  function insertComposerMentionTrigger() {
+    setProjectPickerOpen(false);
+    setSlashMenuDismissed(true);
+    setMentionMenuDismissed(false);
+    setReferencePickerOpen((open) => !open);
+  }
+
+  function insertComposerSlashTrigger() {
+    setProjectPickerOpen(false);
+    setReferencePickerOpen(false);
+    setMentionMenuDismissed(true);
+    setSlashMenuDismissed(false);
+    setSlashPickerOpen((open) => !open);
+    setSelectedCommandIndex(0);
+    if (
+      clients?.memmyAgent &&
+      slashCommandsRef.current.length === 0 &&
+      !slashCommandsInFlightRef.current
+    ) {
+      loadSlashCommands({ resetAttempts: true });
+    }
+    inputRef.current?.focus();
   }
 
   useLayoutEffect(() => {
@@ -1679,6 +1998,7 @@ export function HomePage() {
 
   function resetTransientConversationUi() {
     setSlashMenuDismissed(true);
+    setSlashPickerOpen(false);
     setSelectedCommandIndex(0);
     setStatusPanel({ open: false });
     closeLastCompactionPanel();
@@ -1803,6 +2123,10 @@ export function HomePage() {
    * @param command The command item the user selected.
    */
   function selectSlashCommand(command: SlashCommandPaletteItem) {
+    const selectedFromCapabilityPicker = slashPickerOpen;
+    const selectionStart = inputRef.current?.selectionStart ?? composerSelection.start;
+    const selectionEnd = inputRef.current?.selectionEnd ?? composerSelection.end;
+    setSlashPickerOpen(false);
     if (command.command === "/stop") {
       if (state.agent.isSending) {
         stopCurrentTurn();
@@ -1853,9 +2177,22 @@ export function HomePage() {
     }
 
     rememberSlashCommand(command.command);
-    setCurrentComposerDraft(command.argHint ? `${command.command} ` : command.command);
+    const edit = selectedFromCapabilityPicker
+      ? insertCapabilityAtSelection(input, command.command, selectionStart, selectionEnd)
+      : replaceSlashQueryAtSelection(
+          input,
+          command.command,
+          selectionStart,
+          selectionEnd,
+          Boolean(command.argHint)
+        );
+    setCurrentComposerDraft(edit.value);
+    setComposerSelection({ start: edit.caret, end: edit.caret });
     setSlashMenuDismissed(true);
-    inputRef.current?.focus();
+    window.requestAnimationFrame(() => {
+      inputRef.current?.focus();
+      inputRef.current?.setSelectionRange(edit.caret, edit.caret);
+    });
   }
 
   /**
@@ -1938,6 +2275,7 @@ export function HomePage() {
       }
       if (event.key === "Escape") {
         event.preventDefault();
+        setSlashPickerOpen(false);
         setSlashMenuDismissed(true);
         return;
       }
@@ -2012,7 +2350,10 @@ export function HomePage() {
   }
 
   function handleComposerDragOver(event: DragEvent<HTMLElement>) {
-    if (!dataTransferHasAttachmentFiles(event.dataTransfer)) {
+    if (
+      !dataTransferHasComposerReference(event.dataTransfer)
+      && !dataTransferHasAttachmentFiles(event.dataTransfer)
+    ) {
       return;
     }
 
@@ -2021,6 +2362,16 @@ export function HomePage() {
   }
 
   function handleComposerDrop(event: DragEvent<HTMLElement>) {
+    const reference = readComposerReferenceDrag(event.dataTransfer);
+    if (reference) {
+      event.preventDefault();
+      dispatch(agentActions.composerContextReferencesUpdated(
+        chatScopeKey,
+        mergeComposerContextReferences(contextChips, [reference])
+      ));
+      inputRef.current?.focus();
+      return;
+    }
     if (!dataTransferHasAttachmentFiles(event.dataTransfer)) {
       return;
     }
@@ -2118,99 +2469,174 @@ export function HomePage() {
       topBarBorder={hasActiveConversation}
     >
       {!hasActiveConversation ? (
-        <section className="app-frame-page-content home-empty-screen flex flex-col items-center justify-center h-full">
-          <div className="text-center mb-8">
-            <div className="home-empty-brand-mascot flex justify-center">
-              <Memmy pose="think" size={165} className="memmy-bob" />
+        <section className="app-frame-page-content home-empty-screen">
+          {/* Mid row stays vertically centered like the original empty home. */}
+          <div className="home-empty-mid">
+            <div className="text-center mb-8">
+              <div className="home-empty-brand-mascot flex justify-center">
+                <Memmy pose="think" size={165} className="memmy-bob" />
+              </div>
+              <h1 className="text-2xl font-bold text-text-ink">{t("home.subtitle")}</h1>
             </div>
-            <h1 className="text-2xl font-bold text-text-ink">{t("home.subtitle")}</h1>
-          </div>
-          <div className="w-full max-w-2xl">
-            <AgentOperationErrorSlot message={agentError} />
-            <div className="home-empty-composer-stack">
-              <div
-                className="relative home-empty-composer agent-composer-shell rounded-card-lg"
-                onDragOver={handleComposerDragOver}
-                onDrop={handleComposerDrop}
-              >
-                {slashMenuOpen && (
-                  <div className="absolute left-0 bottom-full mb-3 z-40" style={{ width: "min(448px, 100%)" }}>
-                    <AgentCommandPalette commands={filteredSlashCommands} heading={t("home.commandPalette.commands")} selectedIndex={selectedCommandIndex} onSelect={selectSlashCommand} />
+            <div className="home-empty-mid__composer">
+              <AgentOperationErrorSlot message={agentError} />
+              <div className="home-empty-composer-stack">
+                <div
+                  ref={composerShellRef}
+                  className={`relative home-empty-composer agent-composer-shell rounded-card-lg${slashMenuOpen || referenceMenuOpen ? " home-empty-composer--menu-open" : ""}`}
+                  onDragOver={handleComposerDragOver}
+                  onDrop={handleComposerDrop}
+                >
+                  {lastCompactionPanel.open && !slashMenuOpen && (
+                    <div className="absolute left-0 bottom-full mb-3 z-30 w-full" style={{ right: 0 }}>
+                      <AgentStatusPanel state={lastCompactionPanel} closeLabel={t("common.close")} loadingLabel={t("home.agent.connecting")} onClose={closeLastCompactionPanel} />
+                    </div>
+                  )}
+                  {pendingAttachments.length || contextChips.length ? (
+                    <div className="composer-context-attachments">
+                      <ComposerMediaPreviewStrip
+                        items={pendingAttachments}
+                        onRemove={removePendingMedia}
+                        removeLabel={t("common.remove")}
+                        selectedLabel={t("home.media.addPhotoFile")}
+                        t={t}
+                      />
+                      <HomeContextChips chips={contextChips} onRemove={removeComposerContextChip} />
+                    </div>
+                  ) : null}
+                  <ComposerHighlightedTextarea
+                    textareaRef={inputRef}
+                    value={input}
+                    highlightedCommands={slashCommandsWithLocal.map((command) => command.command)}
+                    placeholder={t("home.input")}
+                    rows={3}
+                    onChange={(event) => {
+                      updateComposerInput(
+                        event.target.value,
+                        event.target.selectionStart,
+                        event.target.selectionEnd
+                      );
+                      resizeComposerInput(event.target);
+                    }}
+                    onKeyDown={handleComposerKeyDown}
+                    onPaste={handleComposerPaste}
+                    className="w-full px-5 pt-4 pb-12 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40"
+                  />
+                  {slashMenuOpen && !slashPickerOpen ? (
+                    <ComposerCaretMenu textareaRef={inputRef} containerRef={composerShellRef} value={input}>
+                      <AgentCommandPalette
+                        commands={filteredSlashCommands}
+                        heading={t("home.commandPalette.commands")}
+                        selectedIndex={selectedCommandIndex}
+                        onSelect={selectSlashCommand}
+                      />
+                    </ComposerCaretMenu>
+                  ) : null}
+                  {referenceMenuOpen && !referencePickerOpen && !slashMenuOpen ? (
+                    <ComposerCaretMenu textareaRef={inputRef} containerRef={composerShellRef} value={input}>
+                      <ComposerReferencePanel
+                        open
+                        externalQuery={mentionQuery}
+                        onClose={() => setMentionMenuDismissed(true)}
+                        onPickKnowledgeBase={pickMentionKnowledgeBase}
+                        onPickReference={pickMentionReference}
+                      />
+                    </ComposerCaretMenu>
+                  ) : null}
+                  <ComposerQuickActionButtons
+                    onAttach={openMediaFilePicker}
+                    onInsertMention={insertComposerMentionTrigger}
+                    onInsertSlash={insertComposerSlashTrigger}
+                    referenceMenu={referencePickerOpen && !slashMenuOpen ? (
+                      <ComposerReferencePanel
+                        open
+                        externalQuery={mentionQuery}
+                        onClose={() => {
+                          setReferencePickerOpen(false);
+                          setMentionMenuDismissed(true);
+                        }}
+                        onPickKnowledgeBase={pickMentionKnowledgeBase}
+                        onPickReference={pickMentionReference}
+                      />
+                    ) : null}
+                    slashMenu={slashMenuOpen && slashPickerOpen ? (
+                      <AgentCommandPalette
+                        commands={filteredSlashCommands}
+                        heading={t("home.commandPalette.commands")}
+                        selectedIndex={selectedCommandIndex}
+                        onSelect={selectSlashCommand}
+                      />
+                    ) : null}
+                  />
+                  <div className="absolute bottom-3 right-4 flex items-center gap-2 z-10">
+                    <button
+                      type="button"
+                      aria-label={t("home.voiceInput")}
+                      title={t("home.voiceInput")}
+                      disabled={asrRecorder.isTranscribing || asrRecorder.isStarting}
+                      onClick={toggleVoiceInput}
+                      className={`p-1.5 hover:bg-canvas-oat/60 rounded-lg transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${asrRecorder.isRecording ? "text-action-sky" : "text-text-ink/45 hover:text-text-ink/65"}`}
+                    >
+                      {asrRecorder.isRecording ? <Pause size={15} /> : <Mic size={15} />}
+                    </button>
+                    <ComposerSubmitButton
+                      isSending={isCurrentAgentRunning}
+                      disabled={composerSubmitDisabled}
+                      sendLabel={t("home.send")}
+                      stopLabel={t("home.stop")}
+                      onClick={isCurrentAgentRunning ? stopCurrentTurn : () => void sendMessage()}
+                    />
                   </div>
-                )}
-                {lastCompactionPanel.open && !slashMenuOpen && (
-                  <div className="absolute left-0 bottom-full mb-3 z-30 w-full" style={{ right: 0 }}>
-                    <AgentStatusPanel state={lastCompactionPanel} closeLabel={t("common.close")} loadingLabel={t("home.agent.connecting")} onClose={closeLastCompactionPanel} />
-                  </div>
-                )}
-                <ComposerMediaPreviewStrip
-                  items={pendingAttachments}
-                  onRemove={removePendingMedia}
-                  removeLabel={t("common.remove")}
-                  selectedLabel={t("home.media.addPhotoFile")}
-                  t={t}
-                />
-                <textarea
-                  ref={inputRef}
-                  value={input}
-                  placeholder={t("home.input")}
-                  rows={3}
-                  onChange={(event) => {
-                    updateComposerInput(event.target.value);
-                    resizeComposerInput(event.target);
-                  }}
-                  onKeyDown={handleComposerKeyDown}
-                  onPaste={handleComposerPaste}
-                  className="w-full px-5 pt-4 pb-12 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40"
-                />
-                <div className="absolute bottom-3 right-4 flex items-center gap-2 z-10">
-                  <button
-                    type="button"
-                    aria-label={t("home.media.menu")}
-                    title={t("home.media.menu")}
-                    onClick={openMediaFilePicker}
-                    className="p-1.5 inline-flex items-center justify-center rounded-lg text-text-ink/45 hover:bg-canvas-oat/60 hover:text-text-ink/65 transition-all cursor-pointer"
-                  >
-                    <Plus size={15} />
-                  </button>
-                  <button
-                    type="button"
-                    aria-label={t("home.voiceInput")}
-                    title={t("home.voiceInput")}
-                    disabled={asrRecorder.isTranscribing || asrRecorder.isStarting}
-                    onClick={toggleVoiceInput}
-                    className={`p-1.5 hover:bg-canvas-oat/60 rounded-lg transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${asrRecorder.isRecording ? "text-action-sky" : "text-text-ink/45 hover:text-text-ink/65"}`}
-                  >
-                    {asrRecorder.isRecording ? <Pause size={15} /> : <Mic size={15} />}
-                  </button>
-                  <ComposerSubmitButton
-                    isSending={isCurrentAgentRunning}
-                    disabled={composerSubmitDisabled}
-                    sendLabel={t("home.send")}
-                    stopLabel={t("home.stop")}
-                    onClick={isCurrentAgentRunning ? stopCurrentTurn : () => void sendMessage()}
+                </div>
+                <div className="home-composer-toolbar">
+                  <ProjectTargetPicker
+                    open={projectPickerOpen}
+                    target={draftTarget}
+                    selectedProject={selectedDraftProject}
+                    projects={state.agent.projects}
+                    sessions={state.agent.sessions}
+                    registryState={state.agent.projectRegistryState}
+                    disabled={messageSendInFlight || projectPickerOperationId != null}
+                    onToggle={() => {
+                      setReferencePickerOpen(false);
+                      setSlashMenuDismissed(true);
+                      setProjectPickerOpen((open) => !open);
+                    }}
+                    onClose={() => setProjectPickerOpen(false)}
+                    onSelect={selectDraftTarget}
+                    onChooseOther={() => void selectOtherProjectFolder()}
                   />
                 </div>
               </div>
-              <div className="home-composer-toolbar">
-                <ProjectTargetPicker
-                  open={projectPickerOpen}
-                  target={draftTarget}
-                  selectedProject={selectedDraftProject}
-                  projects={state.agent.projects}
-                  sessions={state.agent.sessions}
-                  registryState={state.agent.projectRegistryState}
-                  disabled={messageSendInFlight || projectPickerOperationId != null}
-                  onToggle={() => setProjectPickerOpen((open) => !open)}
-                  onClose={() => setProjectPickerOpen(false)}
-                  onSelect={selectDraftTarget}
-                  onChooseOther={() => void selectOtherProjectFolder()}
-                />
+              <div className="home-prompt-suggestions" aria-label={t("home.empty")}>
+                <button
+                  type="button"
+                  onClick={() => selectHomeSuggestion(t("home.suggestionPrompt.one"), "/literature-review")}
+                >
+                  <span className="home-prompt-suggestions__icon" aria-hidden="true"><BookOpenText size={15} /></span>
+                  <span>{t("home.suggestion.one")}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => selectHomeSuggestion(t("home.suggestionPrompt.two"))}
+                >
+                  <span className="home-prompt-suggestions__icon" aria-hidden="true"><CalendarCheck2 size={15} /></span>
+                  <span>{t("home.suggestion.two")}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => selectHomeSuggestion(t("home.suggestionPrompt.three"))}
+                >
+                  <span className="home-prompt-suggestions__icon" aria-hidden="true"><History size={15} /></span>
+                  <span>{t("home.suggestion.three")}</span>
+                </button>
               </div>
             </div>
+          </div>
+          <div className="home-empty-below">
             <div className="home-empty-status-area">
-              {statusText && <p className="text-center text-xs text-text-ink/45 mt-4">{statusText}</p>}
-              <p className="text-center text-[11px] text-text-ink/40 mt-4">{t("home.notice")}</p>
+              {statusText && <p className="text-center text-xs text-text-ink/45 mt-3">{statusText}</p>}
+              <p className="text-center text-[11px] text-text-ink/40 mt-3">{t("home.notice")}</p>
             </div>
             <input ref={fileInputRef} type="file" accept={AGENT_MEDIA_ACCEPT} multiple hidden className="hidden" onChange={(event) => void selectMedia(event)} />
           </div>
@@ -2268,11 +2694,12 @@ export function HomePage() {
               ) : null}
               <AgentOperationErrorSlot message={agentError} />
               <div
+                ref={composerShellRef}
                 className="relative agent-composer-shell rounded-card-lg"
                 onDragOver={handleComposerDragOver}
                 onDrop={handleComposerDrop}
               >
-                {slashMenuOpen && (
+                {slashMenuOpen && slashPickerOpen && (
                   <div className="absolute left-0 bottom-full mb-3 z-40" style={{ width: "min(448px, 100%)" }}>
                     <AgentCommandPalette commands={filteredSlashCommands} heading={t("home.commandPalette.commands")} selectedIndex={selectedCommandIndex} onSelect={selectSlashCommand} />
                   </div>
@@ -2309,26 +2736,56 @@ export function HomePage() {
                     />
                   </div>
                 )}
-                <ComposerMediaPreviewStrip
-                  items={pendingAttachments}
-                  onRemove={removePendingMedia}
-                  removeLabel={t("common.remove")}
-                  selectedLabel={t("home.media.addPhotoFile")}
-                  t={t}
-                />
+                {pendingAttachments.length || contextChips.length ? (
+                  <div className="composer-context-attachments">
+                    <ComposerMediaPreviewStrip
+                      items={pendingAttachments}
+                      onRemove={removePendingMedia}
+                      removeLabel={t("common.remove")}
+                      selectedLabel={t("home.media.addPhotoFile")}
+                      t={t}
+                    />
+                    <HomeContextChips chips={contextChips} onRemove={removeComposerContextChip} />
+                  </div>
+                ) : null}
                 <textarea
                   ref={inputRef}
                   value={input}
                   placeholder={t("home.input")}
                   rows={1}
                   onChange={(event) => {
-                    updateComposerInput(event.target.value);
+                    updateComposerInput(
+                      event.target.value,
+                      event.target.selectionStart,
+                      event.target.selectionEnd
+                    );
                     resizeComposerInput(event.target);
                   }}
                   onKeyDown={handleComposerKeyDown}
                   onPaste={handleComposerPaste}
                   className={`${isComposerSingleLine ? "agent-composer-input--single " : ""}block w-full pl-4 pr-20 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40`}
                 />
+                {slashMenuOpen && !slashPickerOpen ? (
+                  <ComposerCaretMenu textareaRef={inputRef} containerRef={composerShellRef} value={input}>
+                    <AgentCommandPalette
+                      commands={filteredSlashCommands}
+                      heading={t("home.commandPalette.commands")}
+                      selectedIndex={selectedCommandIndex}
+                      onSelect={selectSlashCommand}
+                    />
+                  </ComposerCaretMenu>
+                ) : null}
+                {referenceMenuOpen && !slashMenuOpen ? (
+                  <ComposerCaretMenu textareaRef={inputRef} containerRef={composerShellRef} value={input}>
+                    <ComposerReferencePanel
+                      open
+                      externalQuery={mentionQuery}
+                      onClose={() => setMentionMenuDismissed(true)}
+                      onPickKnowledgeBase={pickMentionKnowledgeBase}
+                      onPickReference={pickMentionReference}
+                    />
+                  </ComposerCaretMenu>
+                ) : null}
                 <div className={`absolute right-2.5 flex items-center gap-1 z-10 ${centerComposerControls ? "top-1/2 -translate-y-1/2" : "bottom-2"}`}>
                   <button
                     type="button"
@@ -3110,6 +3567,7 @@ export function fileToPendingAttachment(file: File, sourceKey: string, classific
     throw new Error("home.media.error.sendUnsupported");
   }
   if (classification.kind === "file") {
+    const localPath = localPathForAgentAttachment(file);
     return {
       id: randomPendingAttachmentId("file"),
       sourceKey,
@@ -3117,6 +3575,7 @@ export function fileToPendingAttachment(file: File, sourceKey: string, classific
       kind: "file",
       status: "ready",
       originalBytes: file.size,
+      ...(localPath ? { localPath } : {}),
       uploadBlob: file,
       uploadMime: classification.mime as UploadedAgentMedia["mime"],
       uploadBytes: file.size,
@@ -3132,6 +3591,15 @@ export function fileToPendingAttachment(file: File, sourceKey: string, classific
     status: "encoding",
     originalBytes: file.size
   };
+}
+
+function localPathForAgentAttachment(file: File): string | undefined {
+  if (typeof window === "undefined" || !window.memmy) return undefined;
+  try {
+    return window.memmy.getPathForFile(file) || undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 async function encodePendingAgentImage(file: File): Promise<{ blob: Blob; mime: AgentImageMime; bytes: number; normalized: boolean }> {

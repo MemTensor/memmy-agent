@@ -52,6 +52,37 @@
   --color-role-assistant: #8ba1f3;
   --color-role-assistant-soft: #e2e8fc;
 
+  /* File resources: light paper with familiar, full-strength format colors. */
+  --file-icon-inline-size: 16px;
+  --file-icon-row-size: 22px;
+  --file-icon-card-size: 36px;
+  --file-icon-inline-radius: 0;
+  --file-icon-row-radius: 0;
+  --file-icon-card-radius: 0;
+  --file-icon-paper: #f3f6f5;
+  --file-icon-paper-sheen: #ffffff;
+  --file-icon-paper-edge: #c8d0ce;
+  --file-icon-paper-fold: #e1e8e6;
+  --file-icon-paper-fold-edge: #b9c4c1;
+  --file-icon-shadow: rgba(17, 29, 28, 0.16);
+  --file-icon-glyph-generic: #5f6b73;
+  --file-icon-glyph-pdf: #e5484d;
+  --file-icon-glyph-word: #2f6fdb;
+  --file-icon-glyph-spreadsheet: #1f9d63;
+  --file-icon-glyph-presentation: #e56f2d;
+  --file-icon-glyph-markdown: #3f6f9e;
+  --file-icon-glyph-text: #5f6b73;
+  --file-icon-glyph-code: #7357b8;
+  --file-icon-glyph-image: #8a55b5;
+  --file-icon-glyph-video: #7658b6;
+  --file-icon-glyph-audio: #d06b32;
+  --file-icon-glyph-archive: #a56b28;
+  --file-icon-folder-back: #79c5ef;
+  --file-icon-folder-front: #49a9e2;
+  --file-icon-folder-edge: #2e89bd;
+  --file-icon-folder-highlight: rgba(255, 255, 255, 0.72);
+  --file-icon-folder-paper: #f7f4ec;
+
   /* Font sans stack. */
   --font-sans: "Nunito", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable", "Segoe UI", "Helvetica Neue", "Apple Color Emoji", "Segoe UI Emoji", sans-serif;
   /* Font chat stack. */

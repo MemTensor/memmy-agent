@@ -6,9 +6,12 @@ import { initGtag } from "./analytics/gtag-init.js";
 import { NicknameModal } from "./components/nickname-modal.js";
 import { I18nProvider } from "./i18n/i18n-provider.js";
 import { randomNickname } from "./lib/nickname.js";
+import { KnowledgePage } from "./pages/knowledge-page.js";
+import { LiteratureReviewPage } from "./pages/literature-review-page.js";
 import { MemoryPage } from "./pages/memory-page.js";
 import { MemoryPluginConflictModal } from "./pages/memory-plugin-conflict-modal.js";
 import { StartupScreen } from "./pages/startup-screen.js";
+import { KB_ONBOARDED_STORAGE_KEY } from "./pages/knowledge-demo-data.js";
 import { applyWindowPlatformClass } from "./utils/window-fullscreen.js";
 import rendererLog from "electron-log/renderer";
 import "./styles.css";
@@ -73,6 +76,29 @@ function MemorySkillsPreview() {
   );
 }
 
+/** Design-complete KB mock: skips Electron bootstrap so product demos never hang. */
+function KnowledgePreview() {
+  try {
+    window.sessionStorage.setItem(KB_ONBOARDED_STORAGE_KEY, "1");
+  } catch {
+    // Preview still works; the page just starts from onboarding.
+  }
+  return (
+    <AppProviders>
+      <KnowledgePage />
+    </AppProviders>
+  );
+}
+
+/** Design-complete literature-review mock: no backend required. */
+function LiteratureReviewPreview() {
+  return (
+    <AppProviders>
+      <LiteratureReviewPage />
+    </AppProviders>
+  );
+}
+
 const root = document.getElementById("root");
 
 if (!root) {
@@ -95,6 +121,10 @@ createRoot(root).render(
       <MemoryPluginConflictModalPreview />
     ) : previewMode === "memory-skills" ? (
       <MemorySkillsPreview />
+    ) : previewMode === "knowledge" ? (
+      <KnowledgePreview />
+    ) : previewMode === "literature-review" ? (
+      <LiteratureReviewPreview />
     ) : (
       <App />
     )}

@@ -173,11 +173,8 @@ export function AgentCommandPalette(props: AgentCommandPaletteProps) {
 }
 
 export function slashQueryFromInput(input: string): string | null {
-  if (!input.startsWith("/")) {
-    return null;
-  }
-  const token = input.slice(1);
-  return /\s/.test(token) ? null : token.toLowerCase();
+  const match = /(?:^|\s)\/([^\s/]*)$/.exec(input);
+  return match ? (match[1] ?? "").toLowerCase() : null;
 }
 
 export function buildVisibleSlashCommands(

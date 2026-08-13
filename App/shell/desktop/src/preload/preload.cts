@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer }: typeof import("electron") = require("electron");
+const { contextBridge, ipcRenderer, webUtils }: typeof import("electron") = require("electron");
 type IpcRendererEvent = import("electron").IpcRendererEvent;
 type DesktopAppInfo = import("@memmy/desktop-interface").DesktopAppInfo;
 type DesktopUpdateCheckResult = import("@memmy/desktop-interface").DesktopUpdateCheckResult;
@@ -8,6 +8,8 @@ type DesktopUpdateInstallResult = import("@memmy/desktop-interface").DesktopUpda
 type DesktopMenuBarIconResult = import("@memmy/desktop-interface").DesktopMenuBarIconResult;
 type DesktopImageActionRequest = import("@memmy/desktop-interface").DesktopImageActionRequest;
 type DesktopImageSaveResult = import("@memmy/desktop-interface").DesktopImageSaveResult;
+type DesktopSystemFileIconResult = import("@memmy/desktop-interface").DesktopSystemFileIconResult;
+type DesktopSystemFolderIconKind = import("@memmy/desktop-interface").DesktopSystemFolderIconKind;
 type DesktopMemoryServiceRestartResult = import("@memmy/desktop-interface").DesktopMemoryServiceRestartResult;
 type DesktopProjectDirectorySelection = import("@memmy/desktop-interface").DesktopProjectDirectorySelection;
 type MicrophoneAccessStatus = import("@memmy/desktop-interface").MicrophoneAccessStatus;
@@ -34,6 +36,10 @@ interface MemmyPreloadApi {
   openMailto(mailtoUrl: string): Promise<void>;
   copyImageToClipboard(request: DesktopImageActionRequest): Promise<void>;
   saveImage(request: DesktopImageActionRequest): Promise<DesktopImageSaveResult>;
+  getPathForFile(file: File): string;
+  getSystemFileIcon(filePath: string): Promise<DesktopSystemFileIconResult>;
+  getSystemFolderIcon(kind: DesktopSystemFolderIconKind): Promise<DesktopSystemFileIconResult>;
+  showItemInFolder(filePath: string): Promise<void>;
   exportMemoryDatabase(): Promise<unknown>;
   installCliTools(): Promise<unknown>;
   restartMemoryService(): Promise<DesktopMemoryServiceRestartResult>;
@@ -156,6 +162,22 @@ const memmyPreloadApi: MemmyPreloadApi = {
 
   async saveImage(request: DesktopImageActionRequest): Promise<DesktopImageSaveResult> {
     return ipcRenderer.invoke("memmy:save-image", request);
+  },
+
+  getPathForFile(file: File): string {
+    return webUtils.getPathForFile(file);
+  },
+
+  async getSystemFileIcon(filePath: string): Promise<DesktopSystemFileIconResult> {
+    return ipcRenderer.invoke("memmy:get-system-file-icon", filePath);
+  },
+
+  async getSystemFolderIcon(kind: DesktopSystemFolderIconKind): Promise<DesktopSystemFileIconResult> {
+    return ipcRenderer.invoke("memmy:get-system-folder-icon", kind);
+  },
+
+  async showItemInFolder(filePath: string): Promise<void> {
+    return ipcRenderer.invoke("memmy:show-item-in-folder", filePath);
   },
 
   async notifyTaskDone(payload: { title: string; body: string; silent: boolean }): Promise<void> {

@@ -10,6 +10,7 @@ interface MainWindowActionRequest {
 
 interface ExposedMemmyApi {
   platform: string;
+  getPathForFile(file: File): string;
   onMainWindowActionRequest(callback: (request: MainWindowActionRequest) => void): () => void;
 }
 
@@ -40,6 +41,9 @@ function loadPreload(): {
       removeListener(channel: string, listener: (event: unknown, payload: unknown) => void): void {
         listeners.get(channel)?.delete(listener);
       }
+    },
+    webUtils: {
+      getPathForFile: vi.fn(() => "/Users/example/report.docx")
     }
   };
   const module = { exports: {} };
@@ -70,6 +74,13 @@ describe("main window action preload buffer", () => {
     const preload = loadPreload();
 
     expect(preload.memmy.platform).toBe(process.platform);
+  });
+
+  it("exposes the native local path for a renderer File", () => {
+    const preload = loadPreload();
+    const file = new File(["report"], "report.docx");
+
+    expect(preload.memmy.getPathForFile(file)).toBe("/Users/example/report.docx");
   });
 
   it("delivers a close request that arrives before the renderer subscribes", () => {

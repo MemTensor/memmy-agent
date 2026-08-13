@@ -56,7 +56,7 @@ import {
   Trash2,
   User
 } from "./memory/memory-prototype-icons.js";
-import { Check, CheckCheck, ChevronDown, ChevronRight, ChevronsDownUp, ChevronsUpDown, Folder, FolderOpen, FolderPlus, ListFilter, MoreHorizontal, Plus, RotateCcw } from "lucide-react";
+import { Check, CheckCheck, ChevronDown, ChevronRight, ChevronsDownUp, ChevronsUpDown, Folder, FolderOpen, FolderPlus, LibraryBig, ListFilter, MoreHorizontal, Plus, RotateCcw } from "lucide-react";
 
 export interface AppFrameProps {
   title: string;
@@ -171,6 +171,7 @@ const navItems: NavItem[] = [
   { action: "search", icon: <Search size={16} />, labelKey: "appFrame.search" },
   { path: "/tools", icon: <Link2 size={16} /> },
   { path: "/memory", icon: <BrainCircuit size={16} /> },
+  { path: "/knowledge", icon: <LibraryBig size={16} /> },
   { action: "community", icon: <MessageCircle size={16} />, labelKey: "welcome.joinCommunity" }
 ];
 
