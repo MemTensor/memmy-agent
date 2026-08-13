@@ -1,8 +1,8 @@
 /**
  * Composer quick actions for the new-task screen (design-complete mock).
  *
- * Implements the prototype's composer affordances: attach (+), reference (@)
- * and capability (/) triggers with popovers anchored under each button, plus
+ * Implements the prototype's composer affordances: attach (+) and capability
+ * (/) triggers with popovers anchored under each button, plus
  * selected context chips in the composer toolbar.
  */
 import {
@@ -17,28 +17,14 @@ import {
   type ReactNode,
   type Ref
 } from "react";
-import { AtSign, Plus, SquareSlash } from "lucide-react";
+import { Plus, SquareSlash } from "lucide-react";
 import { FileTypeIcon, FolderTypeIcon } from "../components/file-type-icon.js";
 import { Tooltip } from "../components/tooltip.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import type { ComposerContextReference } from "../state/agent-composer-state.js";
 import { AgentAttachmentCard } from "./agent-file-attachment-chip.js";
-import { buildHomeReferenceItems, type HomeReferenceItem } from "./literature-review-demo-data.js";
 
 export type ComposerContextChip = ComposerContextReference;
-
-const HOME_REFERENCE_ITEMS: HomeReferenceItem[] = buildHomeReferenceItems();
-
-/** Extracts a trailing `@token` mention query from the composer input, or null. */
-export function mentionQueryFromInput(input: string): string | null {
-  const match = /(?:^|\s)@([^\s@]*)$/.exec(input);
-  return match ? (match[1] ?? "") : null;
-}
-
-/** Replaces the trailing `@token` mention in the input after a pick. */
-export function stripMentionFromInput(input: string): string {
-  return input.replace(/(^|\s)@[^\s@]*$/, "$1");
-}
 
 interface ComposerHighlightSegment {
   text: string;
@@ -200,10 +186,7 @@ export function ComposerHighlightedTextarea(props: {
 export function ComposerQuickActionButtons(props: {
   onAttach: () => void;
   onAttachFolder?: () => void;
-  onInsertMention: () => void;
   onInsertSlash: () => void;
-  /** Anchored directly under the @ button. */
-  referenceMenu?: ReactNode;
   /** Anchored directly under the / button. */
   slashMenu?: ReactNode;
 }) {
@@ -211,7 +194,6 @@ export function ComposerQuickActionButtons(props: {
   const buttonClass = "composer-quick-actions__btn";
   const [attachOpen, setAttachOpen] = useState(false);
   const attachAnchorRef = useRef<HTMLDivElement | null>(null);
-  const referenceOpen = Boolean(props.referenceMenu);
   const slashOpen = Boolean(props.slashMenu);
 
   useEffect(() => {
@@ -266,24 +248,6 @@ export function ComposerQuickActionButtons(props: {
         ) : null}
       </div>
       <div className="composer-quick-actions__anchor">
-        <Tooltip content={t("home.quick.referenceHint")}>
-          <button
-            type="button"
-            aria-label={t("home.quick.reference")}
-            aria-expanded={referenceOpen}
-            className={`${buttonClass}${referenceOpen ? " composer-quick-actions__btn--active" : ""}`}
-            onClick={props.onInsertMention}
-          >
-            <AtSign size={15} />
-          </button>
-        </Tooltip>
-        {referenceOpen ? (
-          <div className="composer-quick-actions__popover composer-quick-actions__popover--reference" data-composer-quick-popover="reference">
-            {props.referenceMenu}
-          </div>
-        ) : null}
-      </div>
-      <div className="composer-quick-actions__anchor">
         <Tooltip content={t("home.quick.capabilityHint")}>
           <button
             type="button"
@@ -299,100 +263,6 @@ export function ComposerQuickActionButtons(props: {
           <div className="composer-quick-actions__popover composer-quick-actions__popover--slash" data-composer-quick-popover="slash">
             {props.slashMenu}
           </div>
-        ) : null}
-      </div>
-    </div>
-  );
-}
-
-/**
- * Reference panel anchored under the `@` button when mention/reference is active.
- * Searchable list of local files and folders.
- */
-export function ComposerReferencePanel(props: {
-  open: boolean;
-  /** Query synced from a trailing `@token` in the composer, if any. */
-  externalQuery?: string | null;
-  onClose: () => void;
-  onPickReference: (item: HomeReferenceItem) => void;
-}) {
-  const { t } = useTranslation();
-  const [localQuery, setLocalQuery] = useState("");
-  const rootRef = useRef<HTMLDivElement | null>(null);
-  const searchInputRef = useRef<HTMLInputElement | null>(null);
-  const wasOpenRef = useRef(false);
-  const query = localQuery.trim().toLowerCase();
-  const items = HOME_REFERENCE_ITEMS.filter((item) => !query || item.path.toLowerCase().includes(query));
-
-  useEffect(() => {
-    if (props.open && !wasOpenRef.current) {
-      setLocalQuery(props.externalQuery ?? "");
-      queueMicrotask(() => searchInputRef.current?.focus());
-    }
-    wasOpenRef.current = props.open;
-  }, [props.open, props.externalQuery]);
-
-  useEffect(() => {
-    if (!props.open || props.externalQuery == null) return;
-    setLocalQuery(props.externalQuery);
-  }, [props.externalQuery, props.open]);
-
-  useEffect(() => {
-    if (!props.open) return;
-    const closeOnOutsidePointer = (event: PointerEvent) => {
-      const target = event.target as HTMLElement | null;
-      if (rootRef.current?.contains(target as Node)) return;
-      if (target?.closest("[data-composer-quick-actions-root]")) return;
-      props.onClose();
-    };
-    document.addEventListener("pointerdown", closeOnOutsidePointer);
-    return () => document.removeEventListener("pointerdown", closeOnOutsidePointer);
-  }, [props.onClose, props.open]);
-
-  if (!props.open) return null;
-
-  return (
-    <div ref={rootRef} className="home-reference-panel" role="listbox" aria-label={t("home.quick.reference")}>
-      <header className="home-reference-panel__head">
-        <strong>{t("home.quick.reference")}</strong>
-        <label className="home-reference-panel__search">
-          <input
-            ref={searchInputRef}
-            value={localQuery}
-            placeholder={t("home.quick.referenceSearch")}
-            aria-label={t("home.quick.referenceSearch")}
-            onChange={(event) => setLocalQuery(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Escape") {
-                event.preventDefault();
-                props.onClose();
-              }
-            }}
-          />
-        </label>
-      </header>
-      <div className="home-reference-panel__list">
-        <div className="home-reference-panel__heading">{t("home.quick.localSection")}</div>
-        {items.map((item) => (
-          <button
-            type="button"
-            key={item.path}
-            className="home-reference-panel__item"
-            role="option"
-            onClick={() => props.onPickReference(item)}
-          >
-            {item.kind === "folder"
-              ? <FolderTypeIcon surface="row" />
-              : <FileTypeIcon name={item.path} surface="row" />}
-            <span className="home-reference-panel__text">
-              <strong>{item.path}</strong>
-              <small>{item.meta}</small>
-            </span>
-            <code>{t(item.kind === "folder" ? "home.quick.kind.folder" : "home.quick.kind.file")}</code>
-          </button>
-        ))}
-        {!items.length ? (
-          <div className="home-reference-panel__empty">{t("home.quick.noMatches")}</div>
         ) : null}
       </div>
     </div>

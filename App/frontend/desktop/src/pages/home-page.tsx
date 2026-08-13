@@ -38,6 +38,7 @@ import {
   mergeComposerContextReferences,
   readComposerReferenceDrag
 } from "../lib/composer-file-reference.js";
+import { assessLiteratureSourceBatch } from "../lib/literature-source-files.js";
 import { useTaskBus, type TaskBusAgentMessage } from "../lib/task-bus.js";
 import type { AppAction } from "../state/app-actions.js";
 import { agentActions, appActions, createAgentOperationError } from "../state/app-actions.js";
@@ -84,18 +85,14 @@ import { HistoryDagPanel, type HistoryDagPanelState } from "./history-dag-panel.
 import {
   ComposerHighlightedTextarea,
   ComposerQuickActionButtons,
-  ComposerReferencePanel,
   HomeContextChips,
-  mentionQueryFromInput,
-  stripMentionFromInput,
   type ComposerContextChip
 } from "./home-composer-quick-actions.js";
 import {
   LITREV_CONTEXT_STORAGE_KEY,
   LITREV_PROJECT_CONTEXT_STORAGE_KEY,
   LITREV_PROMPT_STORAGE_KEY,
-  LITREV_SOURCE_INPUT_STORAGE_KEY,
-  type HomeReferenceItem
+  LITREV_SOURCE_INPUT_STORAGE_KEY
 } from "./literature-review-demo-data.js";
 import { Mic, Pause, Plus, Send } from "./memory/memory-prototype-icons.js";
 import { ArrowDown, BookOpenText, CalendarCheck2, Check, ChevronDown, Folder, History, Plus as LucidePlus, RotateCw, X } from "lucide-react";
@@ -858,8 +855,6 @@ export function HomePage() {
   const [historyDagPanel, setHistoryDagPanel] = useState<HistoryDagPanelState>({ open: false });
   const [isCreatingChat, setIsCreatingChat] = useState(false);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
-  const [mentionMenuDismissed, setMentionMenuDismissed] = useState(false);
-  const [referencePickerOpen, setReferencePickerOpen] = useState(false);
   const [projectPickerOperationId, setProjectPickerOperationId] = useState<string | null>(null);
   const [firstEncounterRelayChatId, setFirstEncounterRelayChatId] = useState<string | null>(() => (
     readFirstEncounterRelayChat(typeof window === "undefined" ? undefined : window.sessionStorage)
@@ -1480,10 +1475,6 @@ export function HomePage() {
     : slashPickerOpen
       ? ""
       : slashQueryFromInput(input.slice(0, Math.min(composerSelection.start, input.length)));
-  const mentionQuery = mentionMenuDismissed || slashPickerOpen
-    ? null
-    : mentionQueryFromInput(input);
-  const referenceMenuOpen = referencePickerOpen || mentionQuery != null;
   const localizedSlashCommands = localizeSlashCommands(slashCommands, language, t);
   const slashCommandsWithLocal = [
     literatureReviewSlashCommand,
@@ -1543,10 +1534,6 @@ export function HomePage() {
   useEffect(() => {
     composerDraftsRef.current = composerDrafts;
   }, [composerDrafts]);
-
-  useEffect(() => {
-    if (mentionQuery != null) setProjectPickerOpen(false);
-  }, [mentionQuery]);
 
   useEffect(() => {
     if (
@@ -1735,7 +1722,6 @@ export function HomePage() {
       rememberSlashCommand("/literature-review");
       setCurrentComposerDraft("");
       dispatch(agentActions.composerContextReferencesUpdated(chatScopeKey, []));
-      setMentionMenuDismissed(true);
       dispatch(appActions.navigate("/literature-review"));
       return true;
     }
@@ -1850,11 +1836,7 @@ export function HomePage() {
     setCurrentComposerDraft(value);
     setComposerSelection({ start: selectionStart, end: selectionEnd });
     setSlashPickerOpen(false);
-    if (mentionQueryFromInput(value) != null) {
-      setReferencePickerOpen(false);
-    }
     setSlashMenuDismissed(false);
-    setMentionMenuDismissed(false);
     setSelectedCommandIndex(0);
     if (
       slashQueryFromInput(value) != null &&
@@ -1901,8 +1883,6 @@ export function HomePage() {
     const nextDraft = homeSuggestionDraft(text, capability);
     setCurrentComposerDraft(nextDraft);
     setComposerSelection({ start: nextDraft.length, end: nextDraft.length });
-    setReferencePickerOpen(false);
-    setMentionMenuDismissed(true);
     setSlashMenuDismissed(true);
     window.requestAnimationFrame(() => {
       if (inputRef.current) {
@@ -1913,25 +1893,8 @@ export function HomePage() {
     });
   }
 
-  function pickMentionReference(item: HomeReferenceItem) {
-    addComposerContextChip({ kind: "path", id: item.path, label: item.path });
-    setCurrentComposerDraft((draft) => stripMentionFromInput(draft));
-    setMentionMenuDismissed(true);
-    setReferencePickerOpen(false);
-    inputRef.current?.focus();
-  }
-
-  function insertComposerMentionTrigger() {
-    setProjectPickerOpen(false);
-    setSlashMenuDismissed(true);
-    setMentionMenuDismissed(false);
-    setReferencePickerOpen((open) => !open);
-  }
-
   function insertComposerSlashTrigger() {
     setProjectPickerOpen(false);
-    setReferencePickerOpen(false);
-    setMentionMenuDismissed(true);
     setSlashMenuDismissed(false);
     setSlashPickerOpen((open) => !open);
     setSelectedCommandIndex(0);
@@ -2335,8 +2298,9 @@ export function HomePage() {
   }
 
   function selectFolder(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files ?? []);
     const reference = composerFolderReferenceFromFiles(
-      Array.from(event.target.files ?? []),
+      files,
       (file) => {
         try {
           return window.memmy?.getPathForFile(file) || file.name;
@@ -2345,7 +2309,14 @@ export function HomePage() {
         }
       }
     );
-    if (reference) addComposerContextChip(reference);
+    if (reference) {
+      const literatureSources = assessLiteratureSourceBatch(files).accepted;
+      addComposerContextChip({
+        ...reference,
+        fileCount: literatureSources.length,
+        totalBytes: literatureSources.reduce((total, file) => total + file.size, 0)
+      });
+    }
     event.target.value = "";
     inputRef.current?.focus();
   }
@@ -2494,7 +2465,7 @@ export function HomePage() {
               <div className="home-empty-composer-stack">
                 <div
                   ref={composerShellRef}
-                  className={`relative home-empty-composer agent-composer-shell rounded-card-lg${slashMenuOpen || referenceMenuOpen ? " home-empty-composer--menu-open" : ""}`}
+                  className={`relative home-empty-composer agent-composer-shell rounded-card-lg${slashMenuOpen ? " home-empty-composer--menu-open" : ""}`}
                   onDragOver={handleComposerDragOver}
                   onDrop={handleComposerDrop}
                 >
@@ -2543,32 +2514,10 @@ export function HomePage() {
                       />
                     </ComposerCaretMenu>
                   ) : null}
-                  {referenceMenuOpen && !referencePickerOpen && !slashMenuOpen ? (
-                    <ComposerCaretMenu textareaRef={inputRef} containerRef={composerShellRef} value={input}>
-                      <ComposerReferencePanel
-                        open
-                        externalQuery={mentionQuery}
-                        onClose={() => setMentionMenuDismissed(true)}
-                        onPickReference={pickMentionReference}
-                      />
-                    </ComposerCaretMenu>
-                  ) : null}
                   <ComposerQuickActionButtons
                     onAttach={openMediaFilePicker}
                     onAttachFolder={openFolderPicker}
-                    onInsertMention={insertComposerMentionTrigger}
                     onInsertSlash={insertComposerSlashTrigger}
-                    referenceMenu={referencePickerOpen && !slashMenuOpen ? (
-                      <ComposerReferencePanel
-                        open
-                        externalQuery={mentionQuery}
-                        onClose={() => {
-                          setReferencePickerOpen(false);
-                          setMentionMenuDismissed(true);
-                        }}
-                        onPickReference={pickMentionReference}
-                      />
-                    ) : null}
                     slashMenu={slashMenuOpen && slashPickerOpen ? (
                       <AgentCommandPalette
                         commands={filteredSlashCommands}
@@ -2608,7 +2557,6 @@ export function HomePage() {
                     registryState={state.agent.projectRegistryState}
                     disabled={messageSendInFlight || projectPickerOperationId != null}
                     onToggle={() => {
-                      setReferencePickerOpen(false);
                       setSlashMenuDismissed(true);
                       setProjectPickerOpen((open) => !open);
                     }}
@@ -2793,16 +2741,6 @@ export function HomePage() {
                       heading={t("home.commandPalette.commands")}
                       selectedIndex={selectedCommandIndex}
                       onSelect={selectSlashCommand}
-                    />
-                  </ComposerCaretMenu>
-                ) : null}
-                {referenceMenuOpen && !slashMenuOpen ? (
-                  <ComposerCaretMenu textareaRef={inputRef} containerRef={composerShellRef} value={input}>
-                    <ComposerReferencePanel
-                      open
-                      externalQuery={mentionQuery}
-                      onClose={() => setMentionMenuDismissed(true)}
-                      onPickReference={pickMentionReference}
                     />
                   </ComposerCaretMenu>
                 ) : null}

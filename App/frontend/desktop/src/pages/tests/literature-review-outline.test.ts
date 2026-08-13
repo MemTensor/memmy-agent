@@ -23,6 +23,17 @@ describe("literature review outline hierarchy", () => {
     ]);
   });
 
+  it("promotes a level-two item when dropped at the same position", () => {
+    const moved = moveOutlineItem(outline, 1, 1, 0);
+
+    expect(moved.map((item) => [item.id, item.level])).toEqual([
+      ["a", 0],
+      ["a-1", 0],
+      ["b", 0],
+      ["c", 0]
+    ]);
+  });
+
   it("prevents an orphan level-two item at the beginning", () => {
     const moved = moveOutlineItem(outline, 2, 0, 1);
 

@@ -51,12 +51,13 @@ import {
 import {
   ComposerHighlightedTextarea,
   composerHighlightSegments,
-  mentionQueryFromInput,
   removeHighlightedCommandAtCaret
 } from "../home-composer-quick-actions.js";
+import { buildDemoKeywords, buildDemoTaskFiles } from "../literature-review-demo-data.js";
 
 const homePageSourcePath = fileURLToPath(new URL("../home-page.tsx", import.meta.url));
 const literatureReviewSourcePath = fileURLToPath(new URL("../literature-review-page.tsx", import.meta.url));
+const composerQuickActionsSourcePath = fileURLToPath(new URL("../home-composer-quick-actions.tsx", import.meta.url));
 const agentRuntimeBridgeSourcePath = fileURLToPath(new URL("../../app/agent-runtime-bridge.tsx", import.meta.url));
 const stylesSourcePath = fileURLToPath(new URL("../../styles.css", import.meta.url));
 
@@ -73,12 +74,63 @@ function mockCallOrder(fn: { mock: { invocationCallOrder: readonly number[] } },
 }
 
 describe("HomePage", () => {
+  it("matches the designed keyword selection and hierarchical outline controls", () => {
+    const source = readFileSync(literatureReviewSourcePath, "utf8");
+    const styles = readFileSync(stylesSourcePath, "utf8");
+
+    expect(buildDemoKeywords().every((keyword) => keyword.selected)).toBe(true);
+    expect(Math.max(...buildDemoKeywords().map((keyword) => keyword.weight))).toBe(10);
+    expect(source).toContain('className="litrev-keyword-select-all"');
+    expect(source).toContain('className="litrev-keyword-row__weight"');
+    expect(source).toContain("max={10}");
+    expect(styles).toContain('input[type="range"]::-webkit-slider-thumb');
+    expect(styles).toContain("--litrev-weight-progress");
+    expect(source).toContain("keyword.selected");
+    expect(source).toContain('className="litrev-outline-row__marker"');
+    expect(source).toContain('t("litrev.outline.addSubsection")');
+    expect(source).toContain("<Trash2");
+  });
+
+  it("renders reference confirmation as a selectable status table", () => {
+    const source = readFileSync(literatureReviewSourcePath, "utf8");
+    const styles = readFileSync(stylesSourcePath, "utf8");
+
+    expect(source).toContain('className="litrev-ref-summary"');
+    expect(source).toContain('className="litrev-ref-table"');
+    expect(source).toContain('className="litrev-ref-table__select-all"');
+    expect(source).toContain('t("litrev.refs.selected"');
+    expect(source).toContain('t("litrev.refs.abstractOnly")');
+    expect(source).not.toContain('t("litrev.refs.useDefault")');
+    expect(source).not.toContain("Personal Library");
+    expect(styles).toContain("grid-template-columns: 28px 24px minmax(0, 1fr) 104px;");
+  });
+
+  it("keeps referenced local inputs out of task files and groups fetched files as downloads", () => {
+    const files = buildDemoTaskFiles();
+
+    expect(files.filter((file) => file.folder === "downloads")).toHaveLength(3);
+    expect(files.filter((file) => file.folder === "outputs")).toHaveLength(2);
+    expect(files.some((file) => file.path.startsWith("uploads/"))).toBe(false);
+    expect(files.some((file) => file.path.startsWith("references/"))).toBe(false);
+  });
+
   it("carries local sources into the literature-review workflow", () => {
+    const homeSource = readFileSync(homePageSourcePath, "utf8");
     const source = readFileSync(literatureReviewSourcePath, "utf8");
 
+    expect(homeSource).toContain("fileCount: literatureSources.length");
+    expect(homeSource).toContain("totalBytes: literatureSources.reduce");
     expect(source).toContain("function readInitialContexts()");
     expect(source).toContain("function readInitialSourceInput()");
+    expect(source).toContain("fileCount: context.fileCount ??");
+    expect(source).toContain("totalBytes: context.totalBytes ?? 0");
     expect(source).toContain("function renderLaunchUserMessage()");
+    const launchMessageBlock = source.slice(
+      source.indexOf("function renderLaunchUserMessage()"),
+      source.indexOf("function renderConversation()")
+    );
+    expect(launchMessageBlock).toContain("launchContexts.map((reference)");
+    expect(launchMessageBlock).not.toContain("sourceReferences.map((reference)");
     expect(source).toContain('className="litrev-user-command"');
     expect(source).toContain("sourceInput.split(/(\\/literature-review\\b)/gi)");
     expect(source).toContain('type PreviewScope = "task" | "project";');
@@ -227,14 +279,20 @@ describe("HomePage", () => {
     expect(literatureSource).toContain("<ComposerQuickActionButtons");
     expect(literatureSource).toContain("onAttach={() => composerFileInputRef.current?.click()}");
     expect(literatureSource).toContain("onAttachFolder={() => composerFolderInputRef.current?.click()}");
-    expect(literatureSource).toContain("onInsertMention={() => setReferencePickerOpen((open) => !open)}");
+    expect(literatureSource).not.toContain("onInsertMention");
     expect(literatureSource).toContain("onInsertSlash={insertComposerSlash}");
     expect(literatureSource).toContain("toggleComposerVoiceInput()");
   });
 
-  it("recognizes a reference trigger after a capability block", () => {
-    expect(mentionQueryFromInput("/literature-review @")).toBe("");
-    expect(mentionQueryFromInput("/literature-review @memory")).toBe("memory");
+  it("does not expose the removed @ reference entry", () => {
+    const homeSource = readFileSync(homePageSourcePath, "utf8");
+    const literatureSource = readFileSync(literatureReviewSourcePath, "utf8");
+    const quickActionsSource = readFileSync(composerQuickActionsSourcePath, "utf8");
+
+    expect(homeSource).not.toContain("mentionQueryFromInput");
+    expect(homeSource).not.toContain("ComposerReferencePanel");
+    expect(literatureSource).not.toContain("ComposerReferencePanel");
+    expect(quickActionsSource).not.toContain("AtSign");
   });
 
   it("renders a selected capability inline without replacing the textarea", () => {
@@ -292,7 +350,7 @@ describe("HomePage", () => {
 
     expect(html).toContain("分配一个任务或提问任何问题...");
     expect(html).toContain("添加资料");
-    expect(html).toContain("引用");
+    expect(html).not.toContain('aria-label="引用"');
     expect(html).toContain("能力");
     expect(html).toContain("语音输入");
     expect(html).toContain("发送");
@@ -365,11 +423,9 @@ describe("HomePage", () => {
     expect(source.match(/\{slashMenuOpen && !slashPickerOpen \? \(/g)).toHaveLength(2);
     expect(source).toContain("slashMenu={slashMenuOpen && slashPickerOpen ? (");
     expect(source).toContain("{slashMenuOpen && slashPickerOpen && (");
-    expect(source).toContain("const mentionQuery = mentionMenuDismissed || slashPickerOpen");
     expect(source).not.toContain('slashPickerOpen || /^\\s*\\//.test(input)');
-    expect(source).toContain("{referenceMenuOpen && !referencePickerOpen && !slashMenuOpen ? (");
-    expect(source).toContain("{referenceMenuOpen && !slashMenuOpen ? (");
-    expect(source).toContain("referenceMenu={referencePickerOpen && !slashMenuOpen ? (");
+    expect(source).not.toContain("referenceMenuOpen");
+    expect(source).not.toContain("referencePickerOpen");
     expect(source).toContain("const [lastCompactionPanel, setLastCompactionPanel] = useState<StatusPanelState>({ open: false });");
     expect(source).toContain("const lastCompactionSlashCommand: SlashCommandPaletteItem = {");
     expect(source).toContain('command: "/last-compaction"');

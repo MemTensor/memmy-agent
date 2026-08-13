@@ -15,6 +15,8 @@ export interface ComposerContextReference {
   kind: "path";
   id: string;
   label: string;
+  fileCount?: number;
+  totalBytes?: number;
 }
 
 export interface PendingAttachmentBase {

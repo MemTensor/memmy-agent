@@ -15,6 +15,8 @@ export interface LitrevLaunchContext {
   kind: "path";
   id: string;
   label: string;
+  fileCount?: number;
+  totalBytes?: number;
 }
 
 export const LITREV_DEFAULT_PROMPT = "帮我梳理近 5 年大模型长期记忆的研究进展，最后写成一篇中文综述。";
@@ -49,7 +51,7 @@ export const LITREV_TOPIC_QUESTION = "文献综述的研究主题/领域是什�
 
 export const LITREV_ASSISTANT_INTRO = "我会先补齐缺失信息；你已经描述过的内容不会重复询问。";
 export const LITREV_EXECUTION_INTRO = "研究方案已经确认。我先把任务列出来，然后整理资料、撰写正文并检查引用；有补充要求可以随时告诉我。";
-export const LITREV_RESULT_LINE = "综述已经完成。我生成了 Markdown 大纲和正文，内容包含主要方法与系统对比、评测总结和参考文献。";
+export const LITREV_RESULT_LINE = "综述已经完成。我生成了可编辑的 LaTeX 源文件和编译后的 PDF，内容包含主要方法与系统对比、评测总结和参考文献。";
 export const LITREV_SUPPLEMENT_ACK = "已记录这条补充，会在检索和写作时一并参考。";
 
 export function litrevRunningLine(taskName: string): string {
@@ -62,14 +64,15 @@ export interface LitrevKeyword {
   id: string;
   text: string;
   weight: number;
+  selected: boolean;
 }
 
 export function buildDemoKeywords(): LitrevKeyword[] {
   return [
-    { id: "k1", text: "long-term memory", weight: 5 },
-    { id: "k2", text: "LLM memory", weight: 5 },
-    { id: "k3", text: "memory-augmented generation", weight: 4 },
-    { id: "k4", text: "memory evaluation", weight: 3 }
+    { id: "k1", text: "long-term memory", weight: 10, selected: true },
+    { id: "k2", text: "LLM memory", weight: 10, selected: true },
+    { id: "k3", text: "memory-augmented generation", weight: 8, selected: true },
+    { id: "k4", text: "memory evaluation", weight: 6, selected: true }
   ];
 }
 
@@ -194,11 +197,11 @@ export function litrevReferencesConfirmedLog(count: number): string {
 
 /* ---------------------------------- To-do ---------------------------------- */
 
-export const LITREV_TODO_ITEMS = ["下载并验证文献", "批量阅读", "撰写正文", "生成参考文献", "引用检查"];
+export const LITREV_TODO_ITEMS = ["下载并验证文献", "批量阅读", "撰写 LaTeX 正文", "生成参考文献", "编译 PDF 并检查引用"];
 
 /* ---------------------------------- 预览文件 ---------------------------------- */
 
-export type LitrevPreviewFolder = "uploads" | "references" | "outputs";
+export type LitrevPreviewFolder = "downloads" | "outputs";
 
 export interface LitrevTaskFile {
   folder: LitrevPreviewFolder;
@@ -207,21 +210,16 @@ export interface LitrevTaskFile {
 }
 
 /** Primary artifacts produced by the mocked execution run. */
-export const LITREV_OUTLINE_ARTIFACT = "outputs/大模型长期记忆-大纲.md";
-export const LITREV_BODY_ARTIFACT = "outputs/大模型长期记忆-正文.md";
-
-/** Default file selected when the workspace drawer opens. */
-export const LITREV_DEFAULT_WORKSPACE_FILE = "uploads/研究要求.docx";
+export const LITREV_LATEX_ARTIFACT = "outputs/大模型长期记忆-文献综述.tex";
+export const LITREV_PDF_ARTIFACT = "outputs/大模型长期记忆-文献综述.pdf";
 
 export function buildDemoTaskFiles(): LitrevTaskFile[] {
   return [
-    { folder: "uploads", path: "uploads/研究要求.docx", name: "研究要求.docx" },
-    { folder: "references", path: "references/MemGPT.pdf", name: "MemGPT.pdf" },
-    { folder: "references", path: "references/MemoryBank.pdf", name: "MemoryBank.pdf" },
-    { folder: "references", path: "references/LongMemEval.pdf", name: "LongMemEval.pdf" },
-    { folder: "outputs", path: "outputs/大模型长期记忆-大纲.md", name: "大模型长期记忆-大纲.md" },
-    { folder: "outputs", path: "outputs/大模型长期记忆-正文.md", name: "大模型长期记忆-正文.md" },
-    { folder: "outputs", path: "outputs/大模型长期记忆-正文.docx", name: "大模型长期记忆-正文.docx" }
+    { folder: "downloads", path: "downloads/MemGPT.pdf", name: "MemGPT.pdf" },
+    { folder: "downloads", path: "downloads/MemoryBank.pdf", name: "MemoryBank.pdf" },
+    { folder: "downloads", path: "downloads/LongMemEval.pdf", name: "LongMemEval.pdf" },
+    { folder: "outputs", path: LITREV_LATEX_ARTIFACT, name: "大模型长期记忆-文献综述.tex" },
+    { folder: "outputs", path: LITREV_PDF_ARTIFACT, name: "大模型长期记忆-文献综述.pdf" }
   ];
 }
 
@@ -235,15 +233,11 @@ export interface LitrevPreviewContent {
   sections: LitrevPreviewSection[];
 }
 
-const OUTLINE_PREVIEW: LitrevPreviewContent = {
-  title: "大模型长期记忆：文献综述大纲",
+const LATEX_PREVIEW: LitrevPreviewContent = {
+  title: "大模型长期记忆：LaTeX 源文件",
   sections: [
-    { heading: "1. 引言与研究范围", body: "梳理大模型长期记忆的发展脉络、核心问题与研究边界；明确综述覆盖近 5 年方法与系统，不含纯参数编辑。" },
-    { heading: "2. 记忆表征与存储", body: "比较向量记忆、结构化记忆和混合记忆方案，讨论记忆粒度与索引结构的取舍。" },
-    { heading: "3. 写入、更新与遗忘机制", body: "分析记忆生命周期和冲突处理机制：写入门控、重要性评分、淘汰与压缩策略。" },
-    { heading: "4. 检索与上下文注入", body: "总结查询构造、重排序与上下文注入方式对长程一致性的影响。" },
-    { heading: "5. 评测方法与公开基准", body: "汇总 LongMemEval、MemBench 等基准的任务设定与指标，比较不同系统的可复现实验结果。" },
-    { heading: "6. 开放问题与未来方向", body: "指出跨会话个性化、隐私与遗忘合规、多智能体共享记忆等开放问题。" }
+    { heading: "main.tex", body: "\\documentclass[UTF8]{ctexart}\n\\usepackage{booktabs,hyperref}\n\\title{大模型长期记忆：方法、系统与评测}\n\\begin{document}\n\\maketitle\n\\input{sections/body}\n\\bibliographystyle{plain}\n\\bibliography{references}\n\\end{document}" },
+    { heading: "可继续编辑", body: "LaTeX 源文件包含正文、表格、引用和参考文献配置，可直接修改后重新编译 PDF。" }
   ]
 };
 
@@ -266,20 +260,11 @@ const PDF_PREVIEW: LitrevPreviewContent = {
   ]
 };
 
-const DOCX_PREVIEW: LitrevPreviewContent = {
-  title: "Office 文档预览",
-  sections: [
-    { heading: "文档已就绪", body: "该文件将使用 Office 预览打开；导出的 .docx 与 Markdown 正文内容保持一致。" }
-  ]
-};
-
 /** Resolves the mocked preview content for a given file path. */
 export function litrevPreviewContentFor(path: string): LitrevPreviewContent {
+  if (path === LITREV_PDF_ARTIFACT) return BODY_PREVIEW;
   if (path.endsWith(".pdf")) return PDF_PREVIEW;
-  if (path.endsWith(".docx") && !path.includes("正文")) return DOCX_PREVIEW;
-  if (path.endsWith(".docx")) return DOCX_PREVIEW;
-  if (path.includes("大纲")) return OUTLINE_PREVIEW;
-  if (path.includes("正文")) return BODY_PREVIEW;
+  if (path === LITREV_LATEX_ARTIFACT || path.endsWith(".tex")) return LATEX_PREVIEW;
   return {
     title: path.split("/").pop() ?? path,
     sections: [{ heading: "文件预览", body: "该文件的内容会在这里展示，可确认任务材料、项目文件或本机资料。" }]

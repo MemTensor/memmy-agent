@@ -127,6 +127,8 @@ describe("Agent attachment cards", () => {
     const styles = readFileSync(stylesUrl, "utf8");
 
     expect(styles).toContain(".composer-media-preview-strip");
+    expect(styles).toContain(".composer-context-attachments .agent-attachment-card");
+    expect(styles).toContain("width: calc((100% - 20px) / 3)");
     expect(styles).toContain(".agent-attachment-card");
     expect(styles).toContain(".agent-attachment-card__action");
     expect(styles).toContain(".file-type-icon--pdf");

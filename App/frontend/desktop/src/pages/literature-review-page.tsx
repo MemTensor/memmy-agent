@@ -7,7 +7,7 @@
  * preview workspace on the right. All content comes from
  * `literature-review-demo-data.ts`; no backend calls are made.
  */
-import { Fragment, useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent, type MouseEvent, type ReactNode } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type ChangeEvent, type CSSProperties, type DragEvent, type MouseEvent, type ReactNode } from "react";
 import {
   Check,
   ChevronDown,
@@ -23,6 +23,7 @@ import {
   Pencil,
   Plus,
   Send,
+  Trash2,
   X
 } from "lucide-react";
 import { FileTypeIcon, FolderTypeIcon } from "../components/file-type-icon.js";
@@ -39,21 +40,27 @@ import {
   readComposerReferenceDrag,
   writeComposerReferenceDrag
 } from "../lib/composer-file-reference.js";
+import {
+  LITERATURE_SOURCE_ACCEPT,
+  assessLiteratureSourceBatch,
+  formatLiteratureSourceSize,
+  isSupportedLiteratureSourceName
+} from "../lib/literature-source-files.js";
 import { agentActions } from "../state/app-actions.js";
 import { agentChatScopeKey, type ComposerContextReference } from "../state/agent-composer-state.js";
 import { useAppState } from "../state/app-state.js";
-import { ComposerQuickActionButtons, ComposerReferencePanel, HomeContextChips } from "./home-composer-quick-actions.js";
+import { ComposerQuickActionButtons, HomeContextChips } from "./home-composer-quick-actions.js";
 import { mergeVoiceTranscript, useAsrRecorder } from "./asr-recorder.js";
 import { Mic, Pause } from "./memory/memory-prototype-icons.js";
 import {
   LITREV_ASSISTANT_INTRO,
-  LITREV_BODY_ARTIFACT,
   LITREV_CONTEXT_STORAGE_KEY,
   LITREV_DEFAULT_PROMPT,
   LITREV_EXECUTION_PHASE,
   LITREV_EXECUTION_INTRO,
-  LITREV_OUTLINE_ARTIFACT,
+  LITREV_LATEX_ARTIFACT,
   LITREV_OUTLINE_PHASE,
+  LITREV_PDF_ARTIFACT,
   LITREV_PLANNING_PHASE,
   LITREV_PROJECT_CONTEXT_STORAGE_KEY,
   LITREV_PROMPT_STORAGE_KEY,
@@ -71,7 +78,6 @@ import {
   buildLitrevSetupQuestions,
   litrevPreviewContentFor,
   moveOutlineItem,
-  type HomeReferenceItem,
   type LitrevKeyword,
   type LitrevLaunchContext,
   type LitrevOutlineItem,
@@ -96,6 +102,14 @@ type LitrevPhase =
   | { kind: "thinking"; thinking: ThinkingKind; stage: number }
   | { kind: "wizard"; step: 0 | 1 | 2 }
   | { kind: "task" };
+
+interface LiteratureSourceItem {
+  reference: ComposerContextReference;
+  fileCount: number | null;
+  totalBytes: number;
+}
+
+type SourceUploadNotice = { kind: "unsupported"; count: number };
 
 function stageKindForPhase(phase: LitrevPhase): LitrevStageKind {
   if (phase.kind === "setup") return "questions";
@@ -245,16 +259,28 @@ export function LiteratureReviewPage() {
     };
   });
   const [answers, setAnswers] = useState<Array<{ question: string; answer: string }>>([]);
-  const [sourceReferences, setSourceReferences] = useState<ComposerContextReference[]>(() => (
-    launchContexts.map((context) => ({ kind: "path", id: context.id, label: context.label }))
+  const [sourceItems, setSourceItems] = useState<LiteratureSourceItem[]>(() => (
+    launchContexts
+      .filter((context) => context.label.endsWith("/") || isSupportedLiteratureSourceName(context.label))
+      .map((context) => ({
+        reference: { kind: "path", id: context.id, label: context.label },
+        fileCount: context.fileCount ?? (context.label.endsWith("/") ? null : 1),
+        totalBytes: context.totalBytes ?? 0
+      }))
   ));
+  const [sourceUploadNotice, setSourceUploadNotice] = useState<SourceUploadNotice | null>(null);
+  const sourceReferences = useMemo(() => sourceItems.map((item) => item.reference), [sourceItems]);
+  const sourceTotals = useMemo(() => ({
+    fileCount: sourceItems.reduce((count, item) => count + (item.fileCount ?? 0), 0),
+    complete: sourceItems.every((item) => item.fileCount != null)
+  }), [sourceItems]);
   const [keywords, setKeywords] = useState<LitrevKeyword[]>(buildDemoKeywords);
   const [keywordDraft, setKeywordDraft] = useState("");
+  const [keywordDraftWeight, setKeywordDraftWeight] = useState(6);
   const [outline, setOutline] = useState<LitrevOutlineItem[]>(buildDemoOutline);
   const [references, setReferences] = useState<LitrevReference[]>(buildDemoReferences);
   const [supplements, setSupplements] = useState<SupplementEntry[]>([]);
   const [composerDraft, setComposerDraft] = useState("");
-  const [referencePickerOpen, setReferencePickerOpen] = useState(false);
   const composerInputRef = useRef<HTMLTextAreaElement | null>(null);
   const composerFileInputRef = useRef<HTMLInputElement | null>(null);
   const composerFolderInputRef = useRef<HTMLInputElement | null>(null);
@@ -268,16 +294,17 @@ export function LiteratureReviewPage() {
     y: number;
   } | null>(null);
   const [previewScope, setPreviewScope] = useState<PreviewScope>("task");
-  const [previewPath, setPreviewPath] = useState(LITREV_OUTLINE_ARTIFACT);
+  const [previewPath, setPreviewPath] = useState(LITREV_LATEX_ARTIFACT);
   const [openPreviewTabs, setOpenPreviewTabs] = useState<string[]>([
-    LITREV_OUTLINE_ARTIFACT,
-    LITREV_BODY_ARTIFACT,
-    "references/MemGPT.pdf"
+    LITREV_LATEX_ARTIFACT,
+    LITREV_PDF_ARTIFACT,
+    "downloads/MemGPT.pdf"
   ]);
   const [fileTreeOpen, setFileTreeOpen] = useState(true);
   const [collapsedPreviewFolders, setCollapsedPreviewFolders] = useState<Record<string, boolean>>({});
   const [workspaceOpen, setWorkspaceOpen] = useState(() => readInitialPhase().kind === "task");
   const dragOutlineState = useRef<{ index: number; startX: number; level: 0 | 1 } | null>(null);
+  const dragOutlinePointerStartX = useRef<number | null>(null);
   const [outlineDropTarget, setOutlineDropTarget] = useState<{ index: number; level: 0 | 1 } | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const previewScopeMenuRef = useRef<HTMLDetailsElement | null>(null);
@@ -386,14 +413,26 @@ export function LiteratureReviewPage() {
     setPhase({ kind: "thinking", thinking: "planning", stage: 0 });
   }
 
-  function addSourceReferences(references: ComposerContextReference[]) {
-    setSourceReferences((current) => mergeComposerContextReferences(current, references));
+  function addSourceItems(items: LiteratureSourceItem[]) {
+    setSourceItems((current) => {
+      const next = [...current];
+      for (const item of items) {
+        if (!next.some((existing) => (
+          existing.reference.kind === item.reference.kind
+          && existing.reference.id === item.reference.id
+        ))) {
+          next.push(item);
+        }
+      }
+      return next;
+    });
   }
 
   function removeSourceReference(reference: ComposerContextReference) {
-    setSourceReferences((current) => current.filter((item) => (
-      item.kind !== reference.kind || item.id !== reference.id
+    setSourceItems((current) => current.filter((item) => (
+      item.reference.kind !== reference.kind || item.reference.id !== reference.id
     )));
+    setSourceUploadNotice(null);
   }
 
   function updateQuestionAnswer(index: number, answer: string) {
@@ -488,24 +527,49 @@ export function LiteratureReviewPage() {
   }
 
   function handleSourceFilesPicked(event: ChangeEvent<HTMLInputElement>) {
-    addSourceReferences(referencesFromFiles(Array.from(event.target.files ?? [])));
+    const existingIds = new Set(sourceReferences.map((reference) => reference.id));
+    const candidates = Array.from(event.target.files ?? []).filter((file) => (
+      !existingIds.has(referencesFromFiles([file])[0]?.id ?? file.name)
+    ));
+    const assessment = assessLiteratureSourceBatch(candidates);
+    addSourceItems(assessment.accepted.map((file) => ({
+      reference: referencesFromFiles([file])[0] ?? fileReference(file.name, file.name),
+      fileCount: 1,
+      totalBytes: file.size
+    })));
+    setSourceUploadNotice(
+      assessment.unsupportedCount
+        ? { kind: "unsupported", count: assessment.unsupportedCount }
+        : null
+    );
     event.target.value = "";
   }
 
   function handleSourceFolderPicked(event: ChangeEvent<HTMLInputElement>) {
-    const reference = folderReferenceFromFiles(Array.from(event.target.files ?? []));
-    if (reference) addSourceReferences([reference]);
+    const files = Array.from(event.target.files ?? []);
+    const reference = folderReferenceFromFiles(files);
+    const alreadyAdded = reference && sourceReferences.some((item) => item.id === reference.id);
+    if (reference && !alreadyAdded) {
+      const assessment = assessLiteratureSourceBatch(files);
+      if (assessment.accepted.length) {
+        addSourceItems([{
+          reference,
+          fileCount: assessment.accepted.length,
+          totalBytes: assessment.accepted.reduce((total, file) => total + file.size, 0)
+        }]);
+        setSourceUploadNotice(
+          assessment.unsupportedCount
+            ? { kind: "unsupported", count: assessment.unsupportedCount }
+            : null
+        );
+      } else if (assessment.unsupportedCount) {
+        setSourceUploadNotice({ kind: "unsupported", count: assessment.unsupportedCount });
+      }
+    }
     event.target.value = "";
   }
 
-  function pickComposerReference(item: HomeReferenceItem) {
-    addComposerReferences([fileReference(item.path, item.path)]);
-    setReferencePickerOpen(false);
-    composerInputRef.current?.focus();
-  }
-
   function insertComposerSlash() {
-    setReferencePickerOpen(false);
     setComposerDraft((draft) => `${draft}${draft && !/\s$/.test(draft) ? " " : ""}/`);
     window.requestAnimationFrame(() => composerInputRef.current?.focus());
   }
@@ -578,7 +642,7 @@ export function LiteratureReviewPage() {
       if (tabs.length <= 1) return tabs;
       const next = tabs.filter((tab) => tab !== path);
       if (previewPath === path) {
-        setPreviewPath(next[next.length - 1] ?? LITREV_OUTLINE_ARTIFACT);
+        setPreviewPath(next[next.length - 1] ?? LITREV_LATEX_ARTIFACT);
       }
       return next;
     });
@@ -647,14 +711,14 @@ export function LiteratureReviewPage() {
   function renderCompletedStageContent(stage: LitrevStageKind): ReactNode {
     if (stage === "questions") return renderRequirementSummary();
     if (stage === "sources") {
-      return sourceReferences.length
-        ? <HomeContextChips chips={sourceReferences} />
+      return sourceItems.length
+        ? renderSourceList(false)
         : <p className="litrev-stage-empty">{t("litrev.sources.none")}</p>;
     }
     if (stage === "keywords") {
       return (
         <div className="litrev-stage-text-card">
-          {keywords.map((keyword) => (
+          {keywords.filter((keyword) => keyword.selected).map((keyword) => (
             <div key={keyword.id}><strong>{keyword.text}</strong><small>{t("litrev.keywords.weight")} {keyword.weight}</small></div>
           ))}
         </div>
@@ -817,16 +881,16 @@ export function LiteratureReviewPage() {
         </div>
         {launchContexts.length ? (
           <div className="litrev-user-message__contexts">
-            {launchContexts.map((context) => (
+            {launchContexts.map((reference) => (
               <AgentAttachmentCard
-                key={`${context.kind}:${context.id}`}
+                key={`${reference.kind}:${reference.id}`}
                 kind="file"
-                name={context.label}
-                subline={context.label.endsWith("/") ? t("home.quick.kind.folder") : t("home.quick.kind.file")}
+                name={reference.label}
+                subline={reference.label.endsWith("/") ? t("home.quick.kind.folder") : t("home.quick.kind.file")}
                 align="right"
-                leading={context.label.endsWith("/")
+                leading={reference.label.endsWith("/")
                   ? <FolderTypeIcon surface="card" />
-                  : <FileTypeIcon name={context.id} surface="card" />}
+                  : <FileTypeIcon name={reference.id} surface="card" />}
               />
             ))}
           </div>
@@ -955,9 +1019,11 @@ export function LiteratureReviewPage() {
         <header className="litrev-wizard-card__head">
           <strong>{t("litrev.sources.title")}</strong>
           <div className="litrev-wizard-card__head-actions">
-            {sourceReferences.length ? (
+            {sourceItems.length && sourceTotals.complete ? (
               <span className="litrev-wizard-card__count">
-                {t("litrev.sources.count", { count: sourceReferences.length })}
+                {t("litrev.sources.count", {
+                  count: sourceTotals.fileCount
+                })}
               </span>
             ) : null}
             <button
@@ -971,14 +1037,22 @@ export function LiteratureReviewPage() {
           </div>
         </header>
         <div className="litrev-wizard-card__body litrev-source-card__body">
-          <p className="litrev-section-hint">
-            {t(sourceReferences.length ? "litrev.sources.existingHint" : "litrev.sources.hint")}
+          {sourceItems.length ? (
+            <p className="litrev-section-hint">{t("litrev.sources.existingHint")}</p>
+          ) : null}
+          <p className="litrev-source-card__policy">
+            {t("litrev.sources.policy")}
           </p>
-          {sourceReferences.length ? (
-            <HomeContextChips chips={sourceReferences} onRemove={removeSourceReference} />
+          {sourceItems.length ? (
+            renderSourceList(true)
           ) : (
             <div className="litrev-source-card__empty">{t("litrev.sources.empty")}</div>
           )}
+          {sourceUploadNotice ? (
+            <p className="litrev-source-card__notice" role="alert">
+              {t("litrev.sources.unsupported", { count: sourceUploadNotice.count })}
+            </p>
+          ) : null}
           <div className="litrev-source-card__actions">
             <Button type="button" variant="secondary" size="sm" onClick={() => sourceFileInputRef.current?.click()}>
               <Plus size={12} /> {t("litrev.sources.addFiles")}
@@ -987,7 +1061,14 @@ export function LiteratureReviewPage() {
               <Folder size={13} /> {t("litrev.sources.addFolder")}
             </Button>
           </div>
-          <input ref={sourceFileInputRef} type="file" hidden multiple onChange={handleSourceFilesPicked} />
+          <input
+            ref={sourceFileInputRef}
+            type="file"
+            hidden
+            multiple
+            accept={LITERATURE_SOURCE_ACCEPT}
+            onChange={handleSourceFilesPicked}
+          />
           <input
             ref={(node) => {
               sourceFolderInputRef.current = node;
@@ -996,66 +1077,158 @@ export function LiteratureReviewPage() {
             type="file"
             hidden
             multiple
+            accept={LITERATURE_SOURCE_ACCEPT}
             onChange={handleSourceFolderPicked}
           />
         </div>
         <footer className="litrev-wizard-card__foot">
           <i />
           <Button type="button" variant="primary" size="sm" onClick={confirmSources}>
-            {t(sourceReferences.length ? "litrev.sources.confirm" : "litrev.sources.skip")}
+            {t(sourceItems.length ? "litrev.sources.confirm" : "litrev.sources.skip")}
           </Button>
         </footer>
       </section>
     );
   }
 
+  function renderSourceList(removable: boolean): ReactNode {
+    return (
+      <div className="litrev-source-list">
+        {sourceItems.map((item) => {
+          const { reference } = item;
+          const folder = reference.label.endsWith("/");
+          return (
+            <div className="litrev-source-list__row" key={`${reference.kind}:${reference.id}`}>
+              {folder
+                ? <FolderTypeIcon surface="row" />
+                : <FileTypeIcon name={reference.label} filePath={reference.id} surface="row" />}
+              <span className="litrev-source-list__name" title={reference.id}>{reference.label}</span>
+              <small>
+                {folder
+                  ? item.fileCount == null
+                    ? t("litrev.sources.folderSelected")
+                    : t("litrev.sources.folderMeta", {
+                      count: item.fileCount,
+                      size: formatLiteratureSourceSize(item.totalBytes)
+                    })
+                  : formatLiteratureSourceSize(item.totalBytes)}
+              </small>
+              {removable ? (
+                <button
+                  type="button"
+                  aria-label={`${t("common.remove")}: ${reference.label}`}
+                  onClick={() => removeSourceReference(reference)}
+                >
+                  <X size={13} />
+                </button>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+
   /* --------------------------------- 向导卡片 --------------------------------- */
 
   function renderKeywordStep(): ReactNode {
+    const allKeywordsSelected = keywords.length > 0 && keywords.every((keyword) => keyword.selected);
+    const selectedKeywordCount = keywords.filter((keyword) => keyword.selected).length;
     return (
       <>
         <p className="litrev-section-hint">{t("litrev.keywords.hint")}</p>
+        <label className="litrev-keyword-select-all">
+          <input
+            type="checkbox"
+            checked={allKeywordsSelected}
+            onChange={(event) => setKeywords((items) => items.map((item) => ({ ...item, selected: event.target.checked })))}
+          />
+          <span className={`litrev-checkbox${allKeywordsSelected ? " litrev-checkbox--checked" : ""}`}>
+            {allKeywordsSelected ? <Check size={11} /> : null}
+          </span>
+          <strong>{t("litrev.keywords.selectAll")}</strong>
+          <small>{selectedKeywordCount} / {keywords.length}</small>
+        </label>
         <div className="litrev-keyword-rows">
           {keywords.map((keyword, index) => (
-            <div className="litrev-keyword-row" key={keyword.id}>
+            <div className={`litrev-keyword-row${keyword.selected ? "" : " litrev-keyword-row--unselected"}`} key={keyword.id}>
+              <label className="litrev-keyword-row__select">
+                <input
+                  type="checkbox"
+                  checked={keyword.selected}
+                  aria-label={`${t("litrev.keywords.itemLabel")}: ${keyword.text}`}
+                  onChange={(event) => setKeywords((items) => items.map((item, itemIndex) => (
+                    itemIndex === index ? { ...item, selected: event.target.checked } : item
+                  )))}
+                />
+                <span className={`litrev-checkbox${keyword.selected ? " litrev-checkbox--checked" : ""}`}>
+                  {keyword.selected ? <Check size={11} /> : null}
+                </span>
+              </label>
               <input
                 type="text"
                 value={keyword.text}
+                maxLength={100}
                 aria-label={t("litrev.keywords.itemLabel")}
                 onChange={(event) => setKeywords((items) => items.map((item, itemIndex) => (itemIndex === index ? { ...item, text: event.target.value } : item)))}
               />
-              <label>{t("litrev.keywords.weight")}</label>
-              <input
-                type="range"
-                min={1}
-                max={5}
-                value={keyword.weight}
-                onChange={(event) => setKeywords((items) => items.map((item, itemIndex) => (itemIndex === index ? { ...item, weight: Number(event.target.value) } : item)))}
-              />
-              <strong>{keyword.weight}</strong>
-              <button
-                type="button"
-                className="litrev-icon-button"
-                aria-label={t("common.remove")}
-                onClick={() => setKeywords((items) => items.filter((_, itemIndex) => itemIndex !== index))}
-              >
-                <X size={13} />
-              </button>
+              <span className="litrev-keyword-row__divider" />
+              <label className="litrev-keyword-row__weight">
+                <span>{t("litrev.keywords.weight")}</span>
+                <input
+                  type="range"
+                  min={1}
+                  max={10}
+                  value={keyword.weight}
+                  style={{ "--litrev-weight-progress": `${((keyword.weight - 1) / 9) * 100}%` } as CSSProperties}
+                  aria-label={`${t("litrev.keywords.weight")}: ${keyword.text}`}
+                  onChange={(event) => setKeywords((items) => items.map((item, itemIndex) => (itemIndex === index ? { ...item, weight: Number(event.target.value) } : item)))}
+                />
+                <output>{keyword.weight}</output>
+              </label>
             </div>
           ))}
         </div>
         <form
-          className="litrev-add-row"
+          className="litrev-keyword-add-form"
           onSubmit={(event) => {
             event.preventDefault();
             const text = keywordDraft.trim();
             if (!text) return;
-            setKeywords((items) => [...items, { id: `k-${Date.now()}`, text, weight: 3 }]);
+            setKeywords((items) => [...items, { id: `k-${Date.now()}`, text, weight: keywordDraftWeight, selected: true }]);
             setKeywordDraft("");
+            setKeywordDraftWeight(6);
           }}
         >
-          <input value={keywordDraft} placeholder={t("litrev.keywords.addPlaceholder")} onChange={(event) => setKeywordDraft(event.target.value)} />
-          <Button type="submit" variant="secondary" size="sm" disabled={!keywordDraft.trim()}><Plus size={12} /> {t("litrev.keywords.add")}</Button>
+          <div className="litrev-keyword-add-row">
+            <span className="litrev-checkbox litrev-checkbox--checked"><Check size={11} /></span>
+            <div className="litrev-keyword-add-row__field">
+              <input
+                value={keywordDraft}
+                maxLength={100}
+                placeholder={t("litrev.keywords.addPlaceholder")}
+                onChange={(event) => setKeywordDraft(event.target.value)}
+              />
+              <small>{keywordDraft.length} / 100</small>
+            </div>
+            <span className="litrev-keyword-row__divider" />
+            <label className="litrev-keyword-row__weight">
+              <span>{t("litrev.keywords.weight")}</span>
+              <input
+                type="range"
+                min={1}
+                max={10}
+                value={keywordDraftWeight}
+                style={{ "--litrev-weight-progress": `${((keywordDraftWeight - 1) / 9) * 100}%` } as CSSProperties}
+                aria-label={t("litrev.keywords.weight")}
+                onChange={(event) => setKeywordDraftWeight(Number(event.target.value))}
+              />
+              <output>{keywordDraftWeight}</output>
+            </label>
+          </div>
+          <Button type="submit" variant="secondary" size="sm" disabled={!keywordDraft.trim()}>
+            <Plus size={12} /> {t("litrev.keywords.add")}
+          </Button>
         </form>
       </>
     );
@@ -1098,21 +1271,26 @@ export function LiteratureReviewPage() {
                 const from = dragOutlineState.current?.index;
                 const level = levelAtPointer(event);
                 dragOutlineState.current = null;
+                dragOutlinePointerStartX.current = null;
                 setOutlineDropTarget(null);
                 if (from == null) return;
                 setOutline((items) => moveOutlineItem(items, from, index, level));
               }}
             >
+              <span className="litrev-outline-row__marker" aria-hidden="true" />
               <button
                 type="button"
                 className="litrev-outline-row__grip"
                 draggable
                 aria-label={t("litrev.outline.dragHint")}
                 title={t("litrev.outline.dragHint")}
+                onMouseDown={(event) => {
+                  dragOutlinePointerStartX.current = event.clientX;
+                }}
                 onDragStart={(event) => {
                   dragOutlineState.current = {
                     index,
-                    startX: event.clientX,
+                    startX: dragOutlinePointerStartX.current ?? event.clientX,
                     level: item.level
                   };
                   event.dataTransfer.effectAllowed = "move";
@@ -1120,6 +1298,7 @@ export function LiteratureReviewPage() {
                 }}
                 onDragEnd={() => {
                   dragOutlineState.current = null;
+                  dragOutlinePointerStartX.current = null;
                   setOutlineDropTarget(null);
                 }}
               >
@@ -1127,17 +1306,44 @@ export function LiteratureReviewPage() {
               </button>
               <input
                 value={item.text}
+                maxLength={2000}
                 aria-label={t("litrev.outline.itemLabel")}
                 onChange={(event) => setOutline((items) => items.map((entry, entryIndex) => (entryIndex === index ? { ...entry, text: event.target.value } : entry)))}
               />
-              <button
-                type="button"
-                className="litrev-icon-button"
-                aria-label={t("common.remove")}
-                onClick={() => setOutline((items) => items.filter((_, entryIndex) => entryIndex !== index))}
-              >
-                <X size={13} />
-              </button>
+              <div className="litrev-outline-row__actions">
+                {item.level === 0 ? (
+                  <button
+                    type="button"
+                    className="litrev-icon-button"
+                    aria-label={t("litrev.outline.addSubsection")}
+                    title={t("litrev.outline.addSubsection")}
+                    onClick={() => setOutline((items) => {
+                      let insertIndex = index + 1;
+                      while (items[insertIndex]?.level === 1) insertIndex += 1;
+                      return [
+                        ...items.slice(0, insertIndex),
+                        { id: `o-${Date.now()}`, text: t("litrev.outline.newSubsection"), level: 1 },
+                        ...items.slice(insertIndex)
+                      ];
+                    })}
+                  >
+                    <Plus size={13} />
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  className="litrev-icon-button"
+                  aria-label={t("common.remove")}
+                  onClick={() => setOutline((items) => {
+                    if (item.level === 1) return items.filter((_, entryIndex) => entryIndex !== index);
+                    let blockEnd = index + 1;
+                    while (items[blockEnd]?.level === 1) blockEnd += 1;
+                    return [...items.slice(0, index), ...items.slice(blockEnd)];
+                  })}
+                >
+                  <Trash2 size={13} />
+                </button>
+              </div>
             </div>
           ))}
         </div>
@@ -1153,26 +1359,58 @@ export function LiteratureReviewPage() {
   }
 
   function renderReferenceStep(): ReactNode {
+    const selectedCount = references.filter((reference) => reference.selected).length;
+    const allSelected = references.length > 0 && selectedCount === references.length;
     return (
-      <div className="litrev-ref-list">
-        {references.map((reference, index) => (
-          <label key={reference.id} className={`litrev-ref-row${reference.selected ? " litrev-ref-row--selected" : ""}`}>
-            <input
-              type="checkbox"
-              checked={reference.selected}
-              onChange={(event) => setReferences((items) => items.map((item, itemIndex) => (itemIndex === index ? { ...item, selected: event.target.checked } : item)))}
-            />
-            <span className={`litrev-checkbox${reference.selected ? " litrev-checkbox--checked" : ""}`}>{reference.selected ? <Check size={11} /> : null}</span>
-            <span className="litrev-ref-row__text">
-              <strong>{reference.title}</strong>
-              <small>{reference.meta}</small>
-            </span>
-            <span className={`litrev-ref-row__source${reference.source === "web" ? " litrev-ref-row__source--web" : ""}`}>
-              {reference.source === "web" ? t("litrev.refs.fromWeb") : t("litrev.refs.local")}
-            </span>
-          </label>
-        ))}
-      </div>
+      <>
+        <div className="litrev-ref-summary">
+          <p>{t("litrev.refs.note")}</p>
+          <strong>{t("litrev.refs.selected", { selected: selectedCount, total: references.length })}</strong>
+        </div>
+        <div className="litrev-ref-table" role="table" aria-label={t("litrev.wizard.step.references")}>
+          <div className="litrev-ref-table__head" role="row">
+            <span aria-hidden="true" />
+            <label className="litrev-ref-table__select-all">
+              <input
+                type="checkbox"
+                checked={allSelected}
+                aria-label={t("litrev.refs.selectAll")}
+                onChange={(event) => setReferences((items) => items.map((item) => ({ ...item, selected: event.target.checked })))}
+              />
+              <span className={`litrev-checkbox${allSelected ? " litrev-checkbox--checked" : ""}`}>
+                {allSelected ? <Check size={11} /> : null}
+              </span>
+            </label>
+            <strong>{t("litrev.refs.referenceColumn")}</strong>
+            <strong>{t("litrev.refs.statusColumn")}</strong>
+          </div>
+          {references.map((reference, index) => {
+            const abstractOnly = /仅摘要|abstract/i.test(reference.meta);
+            return (
+              <label key={reference.id} className={`litrev-ref-row${reference.selected ? " litrev-ref-row--selected" : ""}`} role="row">
+                <span className="litrev-ref-row__index">{index + 1}</span>
+                <input
+                  type="checkbox"
+                  checked={reference.selected}
+                  onChange={(event) => setReferences((items) => items.map((item, itemIndex) => (itemIndex === index ? { ...item, selected: event.target.checked } : item)))}
+                />
+                <span className={`litrev-checkbox${reference.selected ? " litrev-checkbox--checked" : ""}`}>{reference.selected ? <Check size={11} /> : null}</span>
+                <span className="litrev-ref-row__text">
+                  <strong>{reference.title}</strong>
+                  <small>{reference.meta}</small>
+                </span>
+                <span className={`litrev-ref-row__source${reference.source === "web" ? " litrev-ref-row__source--web" : ""}`}>
+                  {abstractOnly
+                    ? t("litrev.refs.abstractOnly")
+                    : reference.source === "web"
+                      ? t("litrev.refs.fromWeb")
+                      : t("litrev.refs.local")}
+                </span>
+              </label>
+            );
+          })}
+        </div>
+      </>
     );
   }
 
@@ -1201,12 +1439,7 @@ export function LiteratureReviewPage() {
         <footer className="litrev-wizard-card__foot">
           <i />
           {phase.step === 2 ? (
-            <>
-              <Button variant="secondary" size="sm" onClick={() => setReferences((items) => items.map((item) => ({ ...item, selected: true })))}>
-                {t("litrev.refs.useDefault")}
-              </Button>
-              <Button variant="primary" size="sm" onClick={confirmReferencesAndStart}>{t("litrev.refs.confirmStart")}</Button>
-            </>
+            <Button variant="primary" size="sm" onClick={confirmReferencesAndStart}>{t("litrev.refs.confirmStart")}</Button>
           ) : (
             <Button variant="primary" size="sm" onClick={phase.step === 0 ? confirmKeywords : confirmOutline}>
               {phase.step === 0 ? t("litrev.keywords.confirm") : t("litrev.outline.confirm")}
@@ -1300,7 +1533,7 @@ export function LiteratureReviewPage() {
           <>
             <p className="litrev-assistant-copy">{LITREV_RESULT_LINE}</p>
             <div className="litrev-file-cards">
-              {[LITREV_OUTLINE_ARTIFACT, LITREV_BODY_ARTIFACT].map((path) => (
+              {[LITREV_LATEX_ARTIFACT, LITREV_PDF_ARTIFACT].map((path) => (
                 <button
                   type="button"
                   key={path}
@@ -1313,7 +1546,7 @@ export function LiteratureReviewPage() {
                   <FileTypeIcon name={path} surface="card" />
                   <span className="litrev-file-card__text">
                     <strong>{path.split("/").pop()}</strong>
-                    <small>Markdown</small>
+                    <small>{path.endsWith(".tex") ? "LaTeX" : "PDF"}</small>
                   </span>
                 </button>
               ))}
@@ -1337,7 +1570,7 @@ export function LiteratureReviewPage() {
 
   function renderPreviewPane(): ReactNode {
     const previewedContent = litrevPreviewContentFor(previewPath);
-    const folders: LitrevPreviewFolder[] = ["uploads", "references", "outputs"];
+    const folders: LitrevPreviewFolder[] = ["downloads", "outputs"];
     const fileName = (path: string) => path.split("/").pop() ?? path;
     const scopeForPath = (path: string): PreviewScope => {
       if (taskFiles.some((file) => file.path === path)) return "task";
@@ -1356,7 +1589,7 @@ export function LiteratureReviewPage() {
       if (value === "task") {
         const taskPath = taskFiles.some((file) => file.path === previewPath)
           ? previewPath
-          : (openPreviewTabs.find((path) => taskFiles.some((file) => file.path === path)) ?? LITREV_OUTLINE_ARTIFACT);
+          : (openPreviewTabs.find((path) => taskFiles.some((file) => file.path === path)) ?? LITREV_LATEX_ARTIFACT);
         setPreviewPath(taskPath);
       } else {
         const first = projectFiles[0];
@@ -1559,15 +1792,7 @@ export function LiteratureReviewPage() {
         <ComposerQuickActionButtons
           onAttach={() => composerFileInputRef.current?.click()}
           onAttachFolder={() => composerFolderInputRef.current?.click()}
-          onInsertMention={() => setReferencePickerOpen((open) => !open)}
           onInsertSlash={insertComposerSlash}
-          referenceMenu={referencePickerOpen ? (
-            <ComposerReferencePanel
-              open
-              onClose={() => setReferencePickerOpen(false)}
-              onPickReference={pickComposerReference}
-            />
-          ) : null}
         />
         <input
           ref={composerFileInputRef}
