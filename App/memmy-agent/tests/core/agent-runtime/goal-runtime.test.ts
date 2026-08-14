@@ -646,11 +646,15 @@ describe("GoalRuntime control and inbox arbitration", () => {
         webui_queue_surface: "chat_composer",
         webui: true,
         queued_at: "2026-08-10T12:00:00.000Z",
-        turn_source: { kind: "gui", channel: "websocket" },
       },
       sessionKeyOverride: SESSION_KEY,
       turnSource: { kind: "gui", channel: "websocket" },
     }));
+
+    expect(runtime.inbox(SESSION_KEY)[0]?.metadata.turn_source).toEqual({
+      kind: "gui",
+      channel: "websocket",
+    });
 
     await expect(runtime.beginQueueSteerTransfer(
       SESSION_KEY,
@@ -687,6 +691,45 @@ describe("GoalRuntime control and inbox arbitration", () => {
     });
     await runtime.completeQueueSteerTransfer(SESSION_KEY, clientRequestId);
     expect(runtime.queueSteerTransfers(SESSION_KEY)).toEqual([]);
+  });
+
+  it("recovers a legacy WebUI Goal inbox source while transferring it", async () => {
+    const { runtime } = createRuntime();
+    await createGoal(runtime);
+    const clientRequestId = "23232323-2323-4232-8232-232323232323";
+    await runtime.enqueueUserMessage(SESSION_KEY, new InboundMessage({
+      channel: "websocket",
+      chatId: ROUTE.chatId,
+      senderId: "user",
+      content: "legacy GUI adjustment",
+      metadata: {
+        client_request_id: clientRequestId,
+        webui_request_digest: "legacy-goal-steer-digest",
+        webui_queue_surface: "chat_composer",
+        webui: true,
+        queued_at: "2026-08-10T12:00:00.000Z",
+      },
+      sessionKeyOverride: SESSION_KEY,
+    }));
+
+    await expect(runtime.beginQueueSteerTransfer(
+      SESSION_KEY,
+      clientRequestId,
+      "turn-active",
+      "chat_composer",
+      ROUTE,
+    )).resolves.toMatchObject({
+      outcome: "transferred",
+      transfer: {
+        descriptor: {
+          source: { kind: "gui", channel: "websocket" },
+        },
+      },
+    });
+    expect(runtime.route(SESSION_KEY)).toEqual({
+      ...ROUTE,
+      source: { kind: "gui", channel: "websocket" },
+    });
   });
 
   it("rejects missing WebUI dedupe fields and drops unsupported metadata", () => {

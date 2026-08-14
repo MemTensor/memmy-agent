@@ -40,7 +40,7 @@ describe("SourcesSubPage", () => {
   });
 
   it("同步按钮在扫描中旋转，完成后进入不可重复点击的勾选状态", () => {
-    const sourceIds = ["cursor", "claude_code", "codex", "opencode", "openclaw", "hermes", "workbuddy", "pi", "qwenwork"];
+    const sourceIds = ["cursor", "claude_code", "codex", "opencode", "openclaw", "hermes", "deepseek_harness", "workbuddy", "pi", "qwenwork"];
     for (const sourceId of sourceIds) {
       const otherSourceId = sourceIds.find((candidate) => candidate !== sourceId)!;
       expect(resolveAgentSourceScanButtonState(sourceId, true, sourceId, new Set())).toBe("running");
@@ -64,9 +64,10 @@ describe("SourcesSubPage", () => {
     expect(agentSourceLogoUrl("workbuddy")).toContain("workbuddy.png");
   });
 
-  it("使用用户提供的 Pi 和 qwenwork 图标", () => {
+  it("使用用户提供的 Pi、QwenWork 与黑色 DeepSeek Harness 图标", () => {
     expect(agentSourceLogoUrl("pi")).toContain("%3ctitle%3ePi%3c/title%3e");
     expect(agentSourceLogoUrl("qwenwork")).toContain("%3ctitle%3eQwen%3c/title%3e");
+    expect(agentSourceLogoUrl("deepseek_harness")).toContain("%23000000");
   });
 
   it("隐藏未安装的内置 Agent 和尚未验证的自定义 Agent 草稿", () => {
@@ -296,6 +297,8 @@ describe("SourcesSubPage", () => {
     expect(resolveAgentSourceConnectionAction(createSource("openclaw", "not_connected"))).toBe("install_plugin");
     expect(resolveAgentSourceConnectionAction(createSource("hermes", "skill_installed"))).toBe("install_plugin");
     expect(resolveAgentSourceConnectionAction(createSource("hermes", "plugin_installed"))).toBe("remove_plugin");
+    expect(resolveAgentSourceConnectionAction(createSource("deepseek_harness", "not_connected"))).toBe("install_plugin");
+    expect(resolveAgentSourceConnectionAction(createSource("deepseek_harness", "plugin_installed"))).toBe("remove_plugin");
     expect(resolveAgentSourceConnectionAction(createSource("opencode", "plugin_installed"))).toBe("remove_plugin");
     expect(resolveAgentSourceConnectionAction(createSource("cursor", "not_connected"))).toBe("install_hook");
     expect(resolveAgentSourceConnectionAction(createSource("codex", "skill_installed"))).toBe("install_hook");

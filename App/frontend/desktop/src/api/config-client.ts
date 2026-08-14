@@ -718,13 +718,14 @@ function isModelConfigChanged(error: unknown): boolean {
 
 function fromModelConfigView(view: ModelConfigView): ModelProviderConfig {
   const selected = findAssignedPreset(view, "byok", "agent") ?? findAssignedPreset(view, "account", "agent");
+  const selectedMode = selected?.source === "account" ? "account" : "byok";
   const selectedEndpoint = selected ? findEndpoint(view, selected) : null;
-  const embeddingPreset = findAssignedPreset(view, "byok", "embedding") ?? findAssignedPreset(view, "account", "embedding");
+  const embeddingPreset = findAssignedPreset(view, selectedMode, "embedding");
   const embeddingEndpoint = embeddingPreset ? findEndpoint(view, embeddingPreset) : null;
-  const summaryPreset = findAssignedPreset(view, "byok", "memory_summary") ?? findAssignedPreset(view, "account", "memory_summary");
-  const evolutionPreset = findAssignedPreset(view, "byok", "memory_evolution") ?? findAssignedPreset(view, "account", "memory_evolution");
-  const asrPreset = findAssignedPreset(view, "byok", "asr") ?? findAssignedPreset(view, "account", "asr");
-  const imagePreset = findAssignedPreset(view, "byok", "image_generation") ?? findAssignedPreset(view, "account", "image_generation");
+  const summaryPreset = findAssignedPreset(view, selectedMode, "memory_summary");
+  const evolutionPreset = findAssignedPreset(view, selectedMode, "memory_evolution");
+  const asrPreset = findAssignedPreset(view, selectedMode, "asr");
+  const imagePreset = findAssignedPreset(view, selectedMode, "image_generation");
   return {
     catalog: view,
     configRevision: view.configRevision,

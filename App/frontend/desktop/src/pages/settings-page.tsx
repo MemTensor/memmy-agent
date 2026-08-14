@@ -1,6 +1,6 @@
 /** Settings page for account, model, token usage, and desktop preferences. */
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type Dispatch, type ReactNode } from "react";
-import { Brain, Palette, Rocket, Settings2, Shield, User, Zap, ArrowRight, ArrowLeft, Bell, ExternalLink, FolderOpen, Gift, Info, KeyRound, LogOut, Wrench, Search, Eye, EyeOff, ChevronDown, ChevronUp, ChevronRight, Database, Loader2, CheckCircle2, XCircle, Check, AlertTriangle, Mic, Image as ImageIcon, Copy} from "lucide-react";
+import { Brain, Palette, Rocket, Settings2, Shield, User, Zap, ArrowRight, Bell, ExternalLink, FolderOpen, Gift, Info, KeyRound, LogOut, Wrench, Eye, EyeOff, ChevronDown, ChevronUp, Database, Loader2, CheckCircle2, XCircle, Check, AlertTriangle, Mic, Image as ImageIcon, Copy} from "lucide-react";
 import type { AccountInvitationView, AppSettingsDto, ByokTokenUsageByKind, ByokTokenUsageByModel, ByokTokenUsageCapability, ByokTokenUsageKind, ByokTokenUsageSummary, Language, PrivacySettingsDto, TokenQuotaEligibility, TokenSceneUsageDto, TokenUsageDto } from "@memmy/local-api-contracts";
 import { useApiClients } from "../app/providers.js";
 import { copyInvitationCode } from "../app/invitation-analytics.js";
@@ -11,7 +11,7 @@ import { useAnalytics } from "../analytics/use-analytics.js";
 import type { AccountClient } from "../api/account-client.js";
 import type { ByokTokenUsageClient } from "../api/byok-token-usage-client.js";
 import type { TokenQuotaClient } from "../api/token-quota-client.js";
-import type { ConfigClient, ModelProviderConfig } from "../api/config-client.js";
+import type { ConfigClient } from "../api/config-client.js";
 import {
   readCloseMainWindowAction,
   writeCloseMainWindowAction,
@@ -224,15 +224,11 @@ export function SettingsPage() {
   const { track } = useAnalytics();
   const { t } = useTranslation();
   const update = useUpdateCoordinator();
-  const [showUsageDetail, setShowUsageDetail] = useState(false);
   const [activeTab, setActiveTab] = useState<SettingsTabId>(() => {
     return readInitialSettingsTab(typeof window === "undefined" ? undefined : window.location.hash);
   });
 
   function selectSettingsTab(tab: SettingsTabId) {
-    // Sidebar clicks must leave the usage-detail sub-page; otherwise the
-    // highlighted section changes while the detail view stays on screen.
-    setShowUsageDetail(false);
     setActiveTab(tab);
     writeSettingsTabHash(tab);
   }
@@ -240,7 +236,6 @@ export function SettingsPage() {
   return (
     <AppFrame
       title={t("settings.title")}
-      reserveTopBar={!showUsageDetail}
       settingsNav={{
         activeTab,
         onSelectTab: selectSettingsTab
@@ -257,8 +252,6 @@ export function SettingsPage() {
         update={update}
         track={track}
         activeTab={activeTab}
-        showUsageDetail={showUsageDetail}
-        onUsageDetailVisibleChange={setShowUsageDetail}
       />
     </AppFrame>
   );
@@ -276,7 +269,6 @@ export function SettingsPage() {
  * - byokTokenUsageClient: The BYOK API Key Token usage client; may be omitted in SSR tests.
  * - update: The app-level desktop update state and primary action.
  * - track: The analytics-tracking function; may be omitted in pure-view tests and default to a no-op.
- * - onUsageDetailVisibleChange: Notifies the outer layout to collapse the draggable top bar when the Token usage detail sub-page's visibility changes.
  */
 export interface SettingsPageViewProps {
   state: AppState;
@@ -290,8 +282,6 @@ export interface SettingsPageViewProps {
   track?: TrackAnalyticsEvent;
   activeTab?: SettingsTabId;
   onActiveTabChange?: (tab: SettingsTabId) => void;
-  showUsageDetail?: boolean;
-  onUsageDetailVisibleChange?: (visible: boolean) => void;
 }
 
 /** Returns whether a nickname input key event should save the current draft. */
@@ -317,9 +307,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     update,
     track = noopTrackAnalyticsEvent,
     activeTab: activeTabProp,
-    onActiveTabChange,
-    showUsageDetail: showUsageDetailProp,
-    onUsageDetailVisibleChange
+    onActiveTabChange
   } = props;
   const { t, language } = useTranslation();
   const bootstrap = state.bootstrap;
@@ -338,33 +326,18 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const [nicknameDraft, setNicknameDraft] = useState("");
   const [accountBusy, setAccountBusy] = useState(false);
   const [accountError, setAccountError] = useState<string | null>(null);
-  const [showUsageDetailState, setShowUsageDetailState] = useState(false);
   const [activeTabState, setActiveTabState] = useState<SettingsTabId>(() => {
     return readInitialSettingsTab(typeof window === "undefined" ? undefined : window.location.hash);
   });
   const activeTab = activeTabProp ?? activeTabState;
-  const showUsageDetail = showUsageDetailProp ?? showUsageDetailState;
 
   function setActiveTab(tab: SettingsTabId) {
-    if (showUsageDetail) {
-      updateShowUsageDetail(false);
-    }
     if (onActiveTabChange) {
       onActiveTabChange(tab);
       return;
     }
     setActiveTabState(tab);
     writeSettingsTabHash(tab);
-  }
-
-  /** Syncs the Token usage detail sub-page's visibility so the AppFrame draggable top bar does not cover the back button. */
-  function updateShowUsageDetail(next: boolean) {
-    if (onUsageDetailVisibleChange) {
-      onUsageDetailVisibleChange(next);
-    }
-    if (showUsageDetailProp === undefined) {
-      setShowUsageDetailState(next);
-    }
   }
 
   const [showApplyMore, setShowApplyMore] = useState(false);
@@ -461,15 +434,14 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const modelDotClass = modelMode === "platform" ? "bg-action-sky" : "bg-status-success";
   const modelHeaderSpacing = modelMode === "platform" && !showApiConfig ? "" : " mb-4";
   const tokenUsage = bootstrap?.tokenUsage ?? FALLBACK_TOKEN_USAGE;
-  const giftUsedTokens = tokenUsage.usedTokens;
-  // The summary bar tracks Agent 任务 (the task model), not the plan total:
-  // that scene is what blocks the user first. Red / "request more" still use
-  // the original rule — remaining <= 0 or usage >= 80% — on those figures.
+  // The low-balance prompt tracks Agent 任务 (the task model), because that
+  // scene blocks the user first. It keeps the existing remaining <= 0 or
+  // usage >= 80% rule on those figures.
   const agentQuota = tokenUsage.sceneUsages.find((scene) => scene.scene === "agent_chat");
   const giftTotalTokens = agentQuota?.totalTokens ?? tokenUsage.totalTokens;
   const giftRemainingTokens = agentQuota?.remainingTokens ?? tokenUsage.remainingTokens;
-  const giftBarUsedTokens = agentQuota?.usedTokens ?? giftUsedTokens;
-  const { usagePercent, isTokenLow } = resolveGiftTokenUsage(giftBarUsedTokens, giftTotalTokens, giftRemainingTokens);
+  const giftBarUsedTokens = agentQuota?.usedTokens ?? tokenUsage.usedTokens;
+  const { isTokenLow } = resolveGiftTokenUsage(giftBarUsedTokens, giftTotalTokens, giftRemainingTokens);
   const showGiftQuota = !isByokMode;
   const invitationPromotion = bootstrap?.promotions?.invitation;
   const invitationEnabled = invitationPromotion?.enabled === true;
@@ -492,7 +464,6 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const quotaEligibilityText = quotaEligibilityMessage
     ? t(quotaEligibilityMessage.key, quotaEligibilityMessage.values)
     : null;
-  const customUsedTokens = byokUsage.totalTokens;
   const primaryModelId = state.modelConfig.configured ? modelId || state.modelConfig.model : "";
   const mainModelTestKey = createModelConfigValidationKey(mainModelFormValues);
   const isMainModelTestStale = Boolean(llmValidation.testedKey && llmValidation.testedKey !== mainModelTestKey);
@@ -711,9 +682,8 @@ export function SettingsPageView(props: SettingsPageViewProps) {
       return;
     }
 
-    // Controlled pages already initialize activeTab from the hash in SettingsPage.
-    // Do not call onActiveTabChange here: sidebar handlers also close usage detail,
-    // which would immediately bounce "查看用量详情" back out after open.
+    // Controlled pages already initialize activeTab from the hash in SettingsPage;
+    // only the standalone view needs to synchronize its local tab state here.
     if (activeTabProp === undefined) {
       const tabFromHash = resolveSettingsTabFromHash(window.location.hash);
       if (tabFromHash) {
@@ -1199,20 +1169,6 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     }
   }
 
-  if (showUsageDetail) {
-    return (
-      <UsageDetailView
-        showPlatform={showGiftQuota}
-        platformUsage={tokenUsage}
-        byokUsage={byokUsage}
-        byokUsageStatus={byokUsageStatus}
-        workspaceMode={workspaceMode}
-        seedConfig={state.modelConfig}
-        onBack={() => updateShowUsageDetail(false)}
-      />
-    );
-  }
-
   const confirmDialog = confirm ? resolveAccountConfirmDialog(t) : null;
   return (
     <div
@@ -1380,90 +1336,6 @@ export function SettingsPageView(props: SettingsPageViewProps) {
           aria-labelledby="settings-tab-tokens"
           hidden={activeTab !== "tokens"}
         >
-        <Section icon={<Zap size={16} className="text-text-ink/60" />} title={t("settings.tokens")} sectionId="token-usage">
-          <div className="space-y-4">
-            {showGiftQuota && (
-              <div>
-                <div className="flex justify-between text-xs text-text-ink/65 mb-2">
-                  <span>
-                    {agentQuota
-                      ? t("settings.token.agentQuotaUsed", { count: formatNumber(giftBarUsedTokens) })
-                      : t("settings.token.giftUsed", { count: formatNumber(giftBarUsedTokens) })}
-                  </span>
-                  <span>{t("settings.token.total", { count: formatNumber(giftTotalTokens) })}</span>
-                </div>
-                <div className="h-3 bg-canvas-oat rounded-pill overflow-hidden">
-                  <div
-                    className={`h-full rounded-pill transition-all ${isTokenLow ? "bg-status-error" : "bg-action-sky"}`}
-                    style={{ width: `${usagePercent}%` }}
-                  />
-                </div>
-                <div className="mt-2">
-                  <span className="text-xs text-text-ink/50">{t("settings.token.remaining", { count: formatNumber(giftRemainingTokens) })}</span>
-                </div>
-              </div>
-            )}
-
-            <div className={`grid gap-3 ${showGiftQuota ? "grid-cols-2" : "grid-cols-1"}`}>
-              {showGiftQuota && (
-                <ChannelStat
-                  label={t("settings.token.platformModel")}
-                  value={giftUsedTokens}
-                  hint={t("settings.token.used")}
-                  tone="sky"
-                />
-              )}
-              <ChannelStat
-                label={t("settings.token.customModel")}
-                value={customUsedTokens}
-                hint={t("settings.token.used")}
-                tone="success"
-              />
-            </div>
-
-            {(isTokenLow || quotaEligibilityText) && showGiftQuota && (
-              <div className="flex items-center gap-2.5 p-4 bg-status-error-soft rounded-card border border-status-error/20">
-                <Info size={14} className="text-status-error mt-0.5 shrink-0" />
-                <p className="flex-1 text-xs text-status-error/85 leading-relaxed">
-                  {quotaEligibilityText ?? t("settings.token.lowHint")}
-                </p>
-                {quotaRequestPending ? (
-                  <button
-                    type="button"
-                    disabled
-                    className="shrink-0 px-3 py-1.5 text-xs font-normal text-white bg-status-error rounded-btn hover:opacity-90 transition-opacity cursor-pointer disabled:opacity-55 disabled:cursor-not-allowed"
-                  >
-                    {applyMoreButtonLabel}
-                  </button>
-                ) : canApplyMoreByPromotion && isTokenLow && (!quotaEligibility || quotaEligibility.state === "available") ? (
-                  <button
-                    type="button"
-                    onClick={openApplyMore}
-                    className="shrink-0 px-3 py-1.5 text-xs font-normal text-white bg-status-error rounded-btn hover:opacity-90 transition-opacity cursor-pointer"
-                  >
-                    {applyMoreButtonLabel}
-                  </button>
-                ) : null}
-              </div>
-            )}
-
-            <button
-              type="button"
-              onClick={() => updateShowUsageDetail(true)}
-              className="flex items-center justify-between w-full px-4 py-3 text-sm text-text-ink/75 bg-canvas-oat/40 border-content-panel rounded-card hover:bg-canvas-oat/70 transition-colors cursor-pointer"
-            >
-              <span className="flex items-center gap-2">
-                <Search size={15} className="text-text-ink/55" />
-                {t("settings.token.viewDetail")}
-                <span className="text-xs text-text-ink/45">
-                  {t(showGiftQuota ? "settings.token.breakdown" : "settings.token.breakdownByok")}
-                </span>
-              </span>
-              <ChevronRight size={16} className="text-text-ink/45" />
-            </button>
-          </div>
-        </Section>
-
         {isAccountMode && showGiftQuota && showInvitationBanner ? (
           <div
             className={`mb-6 flex items-center gap-3 px-4 py-3 rounded-card-lg border ${
@@ -1547,6 +1419,49 @@ export function SettingsPageView(props: SettingsPageViewProps) {
             ) : null}
           </div>
         ) : null}
+
+        <div id="token-usage" className="mb-6">
+          <div className="flex items-center justify-between gap-4 mb-3">
+            <div className="flex items-center gap-2">
+              <Zap size={16} className="text-text-ink/60" />
+              <h2 className="text-sm font-semibold text-text-ink">{t("settings.tokens")}</h2>
+            </div>
+            <UsageStatusLabel status={byokUsageStatus} updatedAt={byokUsage.updatedAt} />
+          </div>
+
+          {(isTokenLow || quotaEligibilityText) && showGiftQuota && (
+            <div className="mb-4 flex items-center gap-2.5 p-4 bg-status-error-soft rounded-card border border-status-error/20">
+              <Info size={14} className="text-status-error mt-0.5 shrink-0" />
+              <p className="flex-1 text-xs text-status-error/85 leading-relaxed">
+                {quotaEligibilityText ?? t("settings.token.lowHint")}
+              </p>
+              {quotaRequestPending ? (
+                <button
+                  type="button"
+                  disabled
+                  className="shrink-0 px-3 py-1.5 text-xs font-normal text-white bg-status-error rounded-btn hover:opacity-90 transition-opacity cursor-pointer disabled:opacity-55 disabled:cursor-not-allowed"
+                >
+                  {applyMoreButtonLabel}
+                </button>
+              ) : canApplyMoreByPromotion && isTokenLow && (!quotaEligibility || quotaEligibility.state === "available") ? (
+                <button
+                  type="button"
+                  onClick={openApplyMore}
+                  className="shrink-0 px-3 py-1.5 text-xs font-normal text-white bg-status-error rounded-btn hover:opacity-90 transition-opacity cursor-pointer"
+                >
+                  {applyMoreButtonLabel}
+                </button>
+              ) : null}
+            </div>
+          )}
+
+          <UsageDetails
+            showPlatform={showGiftQuota}
+            platformUsage={tokenUsage}
+            byokUsage={byokUsage}
+            byokUsageStatus={byokUsageStatus}
+          />
+        </div>
         </div>
 
         <div
@@ -1803,70 +1718,28 @@ export function SettingsPageView(props: SettingsPageViewProps) {
 }
 
 /**
- * Channel stat card props.
- *
- * Field meanings:
- * - label: The channel name.
- * - value: The cumulative Token count.
- * - hint: The value description.
- * - tone: The channel color; sky for platform, success for BYOK.
- */
-interface ChannelStatProps {
-  label: string;
-  value: number;
-  hint: string;
-  tone: "sky" | "success";
-}
-
-/**
- * Renders the channel summary card within the Token usage section.
- *
- * @param props The channel stat card props.
- * @returns A single channel's cumulative usage card.
- */
-function ChannelStat(props: ChannelStatProps) {
-  return (
-    <div className="p-3.5 bg-canvas-oat/40 rounded-card border-content-panel">
-      <div className="flex items-center gap-1.5 mb-1.5">
-        <span className={`w-1.5 h-1.5 rounded-full ${props.tone === "sky" ? "bg-action-sky" : "bg-status-success"}`} />
-        <span className="text-xs text-text-ink/60">{props.label}</span>
-      </div>
-      <div className="text-lg font-bold text-text-ink/85">
-        {props.tone === "success" ? formatTokenSummary(props.value) : formatNumber(props.value)}
-        <span className="text-xs font-normal text-text-ink/45 ml-1">Token</span>
-      </div>
-      <div className="text-[11px] text-text-ink/45 mt-0.5">{props.hint}</div>
-    </div>
-  );
-}
-
-/**
- * Token usage detail page props.
+ * Inline Token usage details props.
  *
  * Field meanings:
  * - showPlatform: Whether to show the platform-gifted channel.
  * - platformUsage: Platform quota aggregate and scene details.
  * - byokUsage: The local BYOK API Key Token usage summary.
  * - byokUsageStatus: The local usage loading status.
- * - onBack: The callback to return to the settings page.
  */
-export interface UsageDetailViewProps {
+export interface UsageDetailsProps {
   showPlatform: boolean;
   platformUsage: TokenUsageDto;
   byokUsage: ByokTokenUsageSummary;
   byokUsageStatus: UsageLoadStatus;
-  workspaceMode?: ModelWorkspaceMode;
-  seedConfig?: ModelProviderConfig | null;
-  onBack: () => void;
 }
 
 /**
- * Renders the Token usage detail sub-page.
+ * Renders the complete Token usage breakdown inline.
  *
- * @param props The Token usage detail page props.
- * @returns A detail page split by the platform-gifted and BYOK API Key channels.
+ * @param props The Token usage details props.
+ * @returns Platform-gifted and BYOK API Key usage sections.
  */
-export function UsageDetailView(props: UsageDetailViewProps) {
+export function UsageDetails(props: UsageDetailsProps) {
   const { t } = useTranslation();
   const [selectedUsageModelId, setSelectedUsageModelId] = useState("all");
   // Neither panel invents rows. The platform grants quota per scene and does
@@ -1913,27 +1786,7 @@ export function UsageDetailView(props: UsageDetailViewProps) {
   const describeScenesInByok = !showPlatform;
 
   return (
-    <div className={`${usageStyles.detailPage} settings-page`}>
-      <div className={`app-frame-page-content ${usageStyles.page}`}>
-        <button
-          type="button"
-          onClick={props.onBack}
-          className={usageStyles.backButton}
-        >
-          <ArrowLeft size={16} />
-          {t("settings.back")}
-        </button>
-
-        <div className={usageStyles.titlebar}>
-          <h1 className={usageStyles.title}>
-            <span className={usageStyles.titleMark}>
-              <Zap className={usageStyles.bolt} />
-            </span>
-            {t("settings.token.detail")}
-          </h1>
-          <UsageStatusLabel status={props.byokUsageStatus} updatedAt={props.byokUsage.updatedAt} />
-        </div>
-
+    <div className={usageStyles.detailContent}>
         {showPlatform && (
           <section className={usageStyles.usageSection}>
             <UsageSectionHead
@@ -2046,7 +1899,6 @@ export function UsageDetailView(props: UsageDetailViewProps) {
             </div>
           )}
         </section>
-      </div>
     </div>
   );
 }

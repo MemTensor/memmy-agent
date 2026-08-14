@@ -4,6 +4,7 @@ import {
   createMemmyAgentClient,
   DEFAULT_MEMMY_AGENT_WEBUI_BASE_URL,
   defaultMemmyAgentBaseUrl,
+  MemmyAgentMessageRejectedError,
   sessionKeyToChatId,
   type MemmyAgentClient,
   type MemmyAgentSidebarState,
@@ -790,6 +791,56 @@ describe("memmy-agent client", () => {
       chatId: "server-chat",
       modelPreset: "desktop-openai-gpt-5",
       modelSelection
+    });
+  });
+
+  it("newChat preserves a structured unavailable-model rejection and clears pending state", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    const client = createMemmyAgentClient({
+      baseUrl: "https://agent.local:18980",
+      clientId: "frontend-test",
+      fetchFn: vi.fn(async () => json(bootstrap)) as typeof fetch,
+      webSocketFactory: (url) => {
+        const socket = new FakeSocket(url);
+        sockets.push(socket);
+        return socket;
+      }
+    });
+
+    const connection = await connectReady(client, sockets);
+    const clientRequestId = "22222222-2222-4222-8222-222222222222";
+    const pending = connection.newChat(1, 100, "deleted-account-model", clientRequestId);
+    const rejection = pending.catch((error: unknown) => error);
+
+    sockets[0]?.emit({
+      event: "error",
+      client_request_id: clientRequestId,
+      detail: "new_chat_rejected",
+      reason: "model_selection_unavailable"
+    });
+    await vi.advanceTimersByTimeAsync(100);
+
+    const error = await rejection;
+    expect(error).toEqual(expect.objectContaining({
+      name: "MemmyAgentMessageRejectedError",
+      detail: "new_chat_rejected",
+      reason: "model_selection_unavailable"
+    }));
+    expect(error).toBeInstanceOf(MemmyAgentMessageRejectedError);
+
+    const second = connection.newChat(1);
+    const secondRequest = JSON.parse(sockets[0]!.sent.at(-1)!);
+    sockets[0]?.emit({
+      event: "attached",
+      chat_id: "server-chat-after-rejection",
+      client_request_id: secondRequest.client_request_id,
+      model_preset: "desktop-openai-gpt-5",
+      model_selection: modelSelectionWire
+    });
+    await expect(second).resolves.toMatchObject({
+      chatId: "server-chat-after-rejection",
+      modelPreset: "desktop-openai-gpt-5"
     });
   });
 

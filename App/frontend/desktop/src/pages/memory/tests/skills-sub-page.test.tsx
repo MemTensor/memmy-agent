@@ -76,6 +76,8 @@ describe("SkillsSubPage", () => {
     expect(html).toContain("结晶完成");
     expect(html).toContain("价值评分更新");
     expect(html).toContain("中文注释技能");
+    expect(html).toContain("耗时 42ms");
+    expect(html).not.toContain("耗时 8ms");
     expect(html).toContain('data-icon="search"');
     expect(html).toContain("搜索技能");
     expect(html).toContain("记忆分页");

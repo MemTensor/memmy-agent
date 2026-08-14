@@ -387,6 +387,16 @@ describe("MemoryService / evolution / orchestration", () => {
         mean: 2 / 3
       }
     });
+    const trialUpdateLog = db.db.prepare(
+      `SELECT duration_ms
+       FROM api_logs
+       WHERE tool_name = 'skill_evolve'
+         AND json_extract(input_json, '$.skillId') = ?
+         AND json_extract(input_json, '$.reason') = 'skill_trial_update'
+       ORDER BY id DESC
+       LIMIT 1`
+    ).get(skillId) as { duration_ms: number } | undefined;
+    expect(trialUpdateLog?.duration_ms).toBeGreaterThan(0);
     const updatedSkills = service.listSkills({ userId: "user-2" });
     expect(updatedSkills.skills.find((item) => item.id === skillId)).toMatchObject({
       usageCount: 1,

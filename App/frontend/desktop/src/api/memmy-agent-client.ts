@@ -1826,6 +1826,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     } else if (normalized.event === "message_queue_removed") {
       this.resolveRemovedMessageAttempt(normalized);
     } else if (normalized.event === "error") {
+      this.rejectPendingNewChatAttempt(normalized, generation);
       this.rejectPendingMessageAttempt(normalized);
     } else if (normalized.event === "goal_control_result") {
       this.resolvePendingGoalControl(normalized);
@@ -2247,6 +2248,22 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     this.pendingNewChat = null;
     clearTimeout(pending.timer);
     pending.reject(error);
+  }
+
+  private rejectPendingNewChatAttempt(event: MemmyAgentWsEvent, generation: number): void {
+    const pending = this.pendingNewChat;
+    if (
+      !pending
+      || pending.generation !== generation
+      || event.client_request_id !== pending.clientRequestId
+      || event.detail !== "new_chat_rejected"
+    ) {
+      return;
+    }
+    this.rejectPendingNewChat(new MemmyAgentMessageRejectedError(
+      typeof event.detail === "string" ? event.detail : "new_chat_rejected",
+      typeof event.reason === "string" ? event.reason : "message_rejected"
+    ));
   }
 
   private resolveRunStatusSnapshot(chatId: string, event: MemmyAgentWsEvent, generation: number): void {

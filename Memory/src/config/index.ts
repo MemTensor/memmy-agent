@@ -228,6 +228,7 @@ export interface AlgorithmConfig {
     mmrLambda: number;
     rrfConstant: number;
     relativeThresholdFloor: number;
+    minRecallScore: number;
     minSkillEta: number;
     minTraceSim: number;
     episodeGoalMinSim: number;
@@ -447,6 +448,7 @@ export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
       mmrLambda: 0.7,
       rrfConstant: 60,
       relativeThresholdFloor: 0.2,
+      minRecallScore: 0.2,
       minSkillEta: 0.1,
       minTraceSim: 0.25,
       episodeGoalMinSim: 0.45,
@@ -1049,6 +1051,7 @@ function normalizeAlgorithm(input: Record<string, unknown>): AlgorithmConfig {
       mmrLambda: numberValue(retrieval.mmrLambda, DEFAULT_MEMMY_CONFIG.algorithm.retrieval.mmrLambda),
       rrfConstant: numberValue(retrieval.rrfConstant, DEFAULT_MEMMY_CONFIG.algorithm.retrieval.rrfConstant),
       relativeThresholdFloor: numberValue(retrieval.relativeThresholdFloor, DEFAULT_MEMMY_CONFIG.algorithm.retrieval.relativeThresholdFloor),
+      minRecallScore: numberValue(retrieval.minRecallScore, DEFAULT_MEMMY_CONFIG.algorithm.retrieval.minRecallScore),
       minSkillEta: numberValue(retrieval.minSkillEta, DEFAULT_MEMMY_CONFIG.algorithm.retrieval.minSkillEta),
       minTraceSim: numberValue(retrieval.minTraceSim, DEFAULT_MEMMY_CONFIG.algorithm.retrieval.minTraceSim),
       episodeGoalMinSim: numberValue(retrieval.episodeGoalMinSim, DEFAULT_MEMMY_CONFIG.algorithm.retrieval.episodeGoalMinSim),

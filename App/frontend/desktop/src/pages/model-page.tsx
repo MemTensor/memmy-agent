@@ -133,10 +133,12 @@ export function ModelPage() {
       const latest = await clients.config.getModelConfig();
       let workspace = createModelWorkspace(latest);
       const memoryValues = createModelFormValues(mem, primaryModel);
-      const assignedMemoryEndpointId = assignedCatalogEndpointId(workspace, "byok", "memory_summary")
-        ?? (!memoryValues.apiKey.trim() && memoryValues.apiKeyMasked
-          ? assignedCatalogEndpointId(workspace, "byok", "agent")
-          : undefined);
+      const assignedMemoryEndpointId = mem.reuse
+        ? assignedCatalogEndpointId(workspace, "byok", "agent")
+        : assignedCatalogEndpointId(workspace, "byok", "memory_summary")
+          ?? (!memoryValues.apiKey.trim() && memoryValues.apiKeyMasked
+            ? assignedCatalogEndpointId(workspace, "byok", "agent")
+            : undefined);
       const memory = upsertByokPreset(workspace, {
         provider: memoryValues.provider,
         ...(memoryValues.apiKeyMasked && assignedMemoryEndpointId ? { endpointId: assignedMemoryEndpointId } : {}),
@@ -149,10 +151,12 @@ export function ModelPage() {
       });
       workspace = assignCatalogPreset(memory.workspace, "byok", "memory_summary", memory.presetId);
       const evolutionValues = createModelFormValues(skill, primaryModel);
-      const assignedEvolutionEndpointId = assignedCatalogEndpointId(workspace, "byok", "memory_evolution")
-        ?? (!evolutionValues.apiKey.trim() && evolutionValues.apiKeyMasked
-          ? assignedCatalogEndpointId(workspace, "byok", "agent")
-          : undefined);
+      const assignedEvolutionEndpointId = skill.reuse
+        ? assignedCatalogEndpointId(workspace, "byok", "agent")
+        : assignedCatalogEndpointId(workspace, "byok", "memory_evolution")
+          ?? (!evolutionValues.apiKey.trim() && evolutionValues.apiKeyMasked
+            ? assignedCatalogEndpointId(workspace, "byok", "agent")
+            : undefined);
       const evolution = upsertByokPreset(workspace, {
         provider: evolutionValues.provider,
         ...(evolutionValues.apiKeyMasked && assignedEvolutionEndpointId ? { endpointId: assignedEvolutionEndpointId } : {}),
@@ -170,7 +174,7 @@ export function ModelPage() {
       track({ name: "model_config_saved", params: { page_path: "/api-key-models" }, consentTier: "basic" });
     } catch (error) {
       console.error("save byok role model config failed", error);
-      setSaveFeedback({ text: t("login.error.modePersistenceFailed"), tone: "error" });
+      setSaveFeedback({ text: modelPageSaveErrorText(error, t), tone: "error" });
     } finally {
       setSavePending(false);
     }
@@ -233,6 +237,19 @@ export function ModelPage() {
       </div>
     </div>
   );
+}
+
+function modelPageSaveErrorText(
+  error: unknown,
+  t: ReturnType<typeof useTranslation>["t"]
+): string {
+  const code = error && typeof error === "object" && "code" in error ? error.code : null;
+  const message = error instanceof Error ? error.message : "";
+  if (code === "model_config_changed" || message.includes("endpoint identity")) {
+    return t("settings.model.configChanged");
+  }
+  if (code === "config_write_busy") return t("settings.modelWorkspace.saveBusy");
+  return message || t("settings.modelWorkspace.saveFailed");
 }
 
 function chatProtocol(provider: string) {

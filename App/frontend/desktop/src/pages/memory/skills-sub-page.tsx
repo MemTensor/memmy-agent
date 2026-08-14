@@ -589,7 +589,9 @@ function SkillTimelineSection(props: { entries: SkillTimelineEntry[] }) {
                   <span className="memory-skill-timeline__time">{formatDateTime(entry.ts)}</span>
                 </div>
                 {entry.summary && <div className="memory-skill-timeline__summary">{entry.summary}</div>}
-                <div className="memory-skill-timeline__meta">{t("memory.skills.timeline.duration", { duration: entry.durationMs })}</div>
+                {skillTimelineShowsDuration(entry) && (
+                  <div className="memory-skill-timeline__meta">{t("memory.skills.timeline.duration", { duration: entry.durationMs })}</div>
+                )}
               </div>
             </div>
           ))}
@@ -687,6 +689,10 @@ function skillTimelineTone(entry: SkillTimelineEntry): SkillTimelineTone {
     return "skipped";
   }
   return "succeeded";
+}
+
+function skillTimelineShowsDuration(entry: SkillTimelineEntry): boolean {
+  return entry.kind === "skill.crystallized" || entry.kind === "skill.rebuilt" || entry.kind === "skill_generate";
 }
 
 function skillTimelineLabel(kind: string, phase: string | undefined, t: (key: MessageKey) => string): string {

@@ -20,7 +20,7 @@ import type { MemoryRow } from "../../types.js";
 import { isRecord } from "../../utils/json.js";
 import { stableHash } from "../../utils/id.js";
 import { formatZonedTime, nowIso } from "../../utils/time.js";
-import { recordApiLog } from "../model-audit/model-call-audit.js";
+import { elapsedApiLogMs,recordApiLog } from "../model-audit/model-call-audit.js";
 import { profileIdFromMemory,projectIdFromMemory } from "../namespace/namespace-scope.js";
 import { skillBetaPosterior,skillSuccessRate } from "../read-model/skill.js";
 import type { EnqueueJobInput } from "../worker/job-handlers.js";
@@ -69,6 +69,7 @@ export class SkillPipeline {
           .list({ memoryLayer: "L2", status: "activated" }, 1000);
 
     for (const policyMemory of policyMemories) {
+      const startedAt = performance.now();
       const policy = policyMetaFromMemory(policyMemory);
       if (!policy) continue;
       const evidenceTraces = this.gatherSkillEvidence(policy);
@@ -258,9 +259,9 @@ export class SkillPipeline {
           eta: verifiedDraft.eta,
           sourcePolicyIds: verifiedDraft.sourcePolicyIds
         },
-        0,
+        elapsedApiLogMs(startedAt),
         true,
-        at
+        nowIso()
       );
       if (this.deps.config.algorithm.capture.embedAfterCapture) {
         this.deps.enqueueJob({
@@ -401,6 +402,7 @@ private capSkillEvidenceTrace(trace: TraceMeta): TraceMeta {
           skill.sourcePolicyIds.includes(policy.id))
       );
     for (const skill of skills) {
+      const startedAt = performance.now();
       const eta = skillEtaAfterRewardDrift({
         currentEta: skill.eta,
         magnitude: policy.gain
@@ -444,9 +446,9 @@ private capSkillEvidenceTrace(trace: TraceMeta): TraceMeta {
           eta,
           reason: "reward drift"
         },
-        0,
+        elapsedApiLogMs(startedAt),
         true,
-        at
+        nowIso()
       );
     }
   }

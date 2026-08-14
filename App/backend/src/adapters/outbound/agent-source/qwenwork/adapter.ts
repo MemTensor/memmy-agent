@@ -22,7 +22,7 @@ export function createQwenworkSourceAdapter(deps: CreateQwenworkSourceAdapterDep
     (deps.rootDirectory ? join(rootDirectory, "projects") : resolveQwenworkProjectsDirectory());
   const descriptor = deps.descriptor ?? Object.freeze({
     sourceId: QWENWORK_SOURCE_ID,
-    displayName: "qwenwork",
+    displayName: "QwenWork",
     builtin: true,
     dataPath: projectsRoot
   });

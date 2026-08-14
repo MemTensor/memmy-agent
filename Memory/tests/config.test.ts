@@ -60,6 +60,7 @@ describe("memmy memory config", () => {
     expect(loadMemmyConfig(configPath).config.algorithm.enableMemoryAdd).toBe(true);
     expect(loadMemmyConfig(configPath).config.algorithm.enableMemorySearch).toBe(true);
     expect(loadMemmyConfig(configPath).config.algorithm.enableQueryRewrite).toBe(false);
+    expect(loadMemmyConfig(configPath).config.algorithm.retrieval.minRecallScore).toBe(0.2);
     expect(loadMemmyConfig(configPath).config.algorithm.negativeExperience).toMatchObject({
       enabled: true,
       failureRTaskThreshold: -0.15,
@@ -134,7 +135,8 @@ describe("memmy memory config", () => {
           enableMemorySearch: false,
           enableQueryRewrite: true,
           retrieval: {
-            llmFilterEnabled: false
+            llmFilterEnabled: false,
+            minRecallScore: 0.35
           }
         }
       }
@@ -144,6 +146,7 @@ describe("memmy memory config", () => {
     expect(loadMemmyConfig(configPath).config.algorithm.enableMemorySearch).toBe(false);
     expect(loadMemmyConfig(configPath).config.algorithm.enableQueryRewrite).toBe(true);
     expect(loadMemmyConfig(configPath).config.algorithm.retrieval.llmFilterEnabled).toBe(false);
+    expect(loadMemmyConfig(configPath).config.algorithm.retrieval.minRecallScore).toBe(0.35);
 
     setEnv("MEMMY_ENABLE_MEMORY_ADD", "true");
     setEnv("MEMMY_ENABLE_MEMORY_SEARCH", "1");

@@ -103,12 +103,17 @@ describe("desktop packaged runtime boundaries", () => {
       bin: { "memmy-memory": "./dist/src/cli/index.js" }
     });
     expect(memoryPackage.dependencies).toMatchObject({
+      "@memmy/local-api-contracts": "0.0.0",
+      "@memmy/migrations": "0.0.0",
       "@huggingface/transformers": expect.any(String),
       "better-sqlite3": expect.any(String),
       "sqlite-vec": "0.1.9",
       yaml: expect.any(String)
     });
     expect(memoryPackage.dependencies ?? {}).not.toHaveProperty("zod");
+    expect(memoryPackage.scripts?.prebuild).toBe("npm run version:sync");
+    expect(memoryPackage.scripts?.pretypecheck).toBe("npm run version:sync");
+    expect(memoryPackage.scripts?.pretest).toBe("npm run version:sync");
     expect(backendPackage.dependencies).toHaveProperty("zod");
     expect(backendPackage.dependencies).toHaveProperty("sqlite-vec", "0.1.9");
     expect(frontendPackage.dependencies).toHaveProperty("zod");
@@ -237,6 +242,26 @@ describe("desktop packaged runtime boundaries", () => {
     expect(winSource.indexOf('run build --prefix "$MIGRATIONS_DIR"')).toBeLessThan(
       winSource.indexOf('ci --prefix "$AGENT_DIR"'),
     );
+  });
+
+  it("materializes private Memory workspace packages in the Windows runtime", () => {
+    const source = readFileSync(packageWinX64Path, "utf8");
+
+    expect(source).toContain("run build -w @memmy/local-api-contracts");
+    expect(source).toContain('delete dependencies["@memmy/local-api-contracts"]');
+    expect(source).toContain('delete dependencies["@memmy/migrations"]');
+    expect(source).toContain("Object.assign(dependencies, contractsPackage.dependencies, migrationsPackage.dependencies)");
+    expect(source).toContain('cp -R "$ROOT_DIR/App/backend/local-api-contracts/dist" "$RUNTIME_DIR/memory/node_modules/@memmy/local-api-contracts/dist"');
+    expect(source).toContain('cp -R "$MIGRATIONS_STAGING_DIR/dist" "$RUNTIME_DIR/memory/node_modules/@memmy/migrations/dist"');
+    expect(source).toContain('require_packaged_runtime_file "$RUNTIME_DIR/memory/node_modules/@memmy/local-api-contracts/dist/index.js"');
+    expect(source).toContain('require_packaged_runtime_file "$RUNTIME_DIR/memory/node_modules/@memmy/migrations/dist/index.js"');
+    expect(source.indexOf('cp -R "$ROOT_DIR/App/backend/local-api-contracts/dist"')).toBeGreaterThan(
+      source.indexOf('npm_ci_win_x64 "$RUNTIME_DIR/memory"'),
+    );
+    expect(source.indexOf("run build -w @memmy/local-api-contracts")).toBeLessThan(
+      source.indexOf("run build -w @memmy/memory"),
+    );
+    expect(source).not.toContain('cp "$MEMORY_DIR/package-lock.json"');
   });
 
   it("unpacks the migrations runtime in every desktop package variant", () => {

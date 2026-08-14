@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SkillManifest } from "../../types.js";
 import { createOpenclawSkillTarget } from "../index.js";
+import { MEMMY_VERSION } from "../../../../../project-version.js";
 
 let tempDir: string | undefined;
 
@@ -116,6 +117,7 @@ describe("openclaw skill target", () => {
     const pluginManifest = JSON.parse(readFileSync(join(pluginDirectory, "openclaw.plugin.json"), "utf8")) as {
       id?: string;
       kind?: string;
+      version?: string;
       activation?: { onStartup?: boolean };
       contracts?: { tools?: string[] };
       commandAliases?: Array<{ name?: string; kind?: string }>;
@@ -124,6 +126,7 @@ describe("openclaw skill target", () => {
     const pluginPackage = JSON.parse(readFileSync(join(pluginDirectory, "package.json"), "utf8")) as {
       name?: string;
       type?: string;
+      version?: string;
       openclaw?: { id?: string; kind?: string; extensions?: string[] };
     };
     const pluginIndex = readFileSync(join(pluginDirectory, "index.mjs"), "utf8");
@@ -140,6 +143,7 @@ describe("openclaw skill target", () => {
 
     expect(existsSync(join(pluginDirectory, "package.json"))).toBe(true);
     expect(pluginPackage.name).toBe("memmy-memory");
+    expect(pluginPackage.version).toBe(MEMMY_VERSION);
     expect(pluginPackage.type).toBe("module");
     expect(pluginPackage.openclaw).toEqual({
       id: "memmy-memory",
@@ -147,6 +151,7 @@ describe("openclaw skill target", () => {
       extensions: ["./index.mjs"]
     });
     expect(pluginManifest.id).toBe("memmy-memory");
+    expect(pluginManifest.version).toBe(MEMMY_VERSION);
     expect(pluginManifest.kind).toBe("memory");
     expect(pluginManifest.activation?.onStartup).toBe(true);
     expect(pluginManifest.contracts?.tools).toEqual([
@@ -258,7 +263,7 @@ describe("openclaw skill target", () => {
       source: "path",
       sourcePath: pluginDirectory,
       installPath: pluginDirectory,
-      version: "0.1.0"
+      version: MEMMY_VERSION
     });
     expect(config.plugins?.installs?.["memmy-memory"]?.installedAt).toEqual(expect.any(String));
     expect(skillFile).toContain("# Memmy Memory");

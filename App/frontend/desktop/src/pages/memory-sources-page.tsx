@@ -1272,7 +1272,7 @@ function SourceStatusBadge(props: { source: Pick<AgentSourceView, "sourceId" | "
   return <span className="text-[10px] px-2 py-0.5 bg-canvas-oat/60 text-text-ink/55 border-content-panel rounded-tag font-normal shrink-0 whitespace-nowrap">{t(labelKey)}</span>;
 }
 
-const NATIVE_PLUGIN_AGENT_SOURCE_IDS = new Set(["opencode", "openclaw", "hermes"]);
+const NATIVE_PLUGIN_AGENT_SOURCE_IDS = new Set(["opencode", "openclaw", "hermes", "deepseek_harness"]);
 const HOOK_AGENT_SOURCE_IDS = new Set(["codex", "claude_code", "cursor"]);
 
 export function visibleAgentSources<T extends Pick<AgentSourceView, "builtin" | "available" | "dataPath">>(sources: readonly T[]): T[] {

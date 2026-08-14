@@ -71,9 +71,10 @@ describe("MemoriesSubPage", () => {
       "OpenCode",
       "OpenClaw",
       "Hermes",
+      "DeepSeek Harness",
       "WorkBuddy",
       "Pi",
-      "qwenwork"
+      "QwenWork"
     ]);
     expect(agentSourceDisplayName("MEMMY_AGENT")).toBe("Memmy");
     expect(agentSourceDisplayName("claude-code")).toBe("Claude Code");

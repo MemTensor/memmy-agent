@@ -286,11 +286,10 @@ describe("SettingsPageView", () => {
     expect(html).toContain("g***@example.com");
     expect(html).not.toContain("grace@example.com");
     expect(html).toContain("注册时间：2026-04-12");
-    expect(html).toContain("Agent 任务额度已用 1.4M Token");
-    expect(html).toContain("共 5.0M Token");
-    expect(html).toContain("平台赠送大模型");
-    expect(html).toContain("自定义 API Key");
-    expect(html).toContain("查看用量详情");
+    expect(html).toContain("平台赠送额度");
+    expect(html).toContain(">1.4M</strong><span>/</span><span>5M</span><em>Token</em>");
+    expect(html).toContain("自定义 API Key 消耗");
+    expect(html).not.toContain("查看用量详情");
     expect(html).toContain("select-control--compact select-control--subtle");
     expect(html).toContain('role="combobox"');
   });
@@ -506,19 +505,19 @@ describe("SettingsPageView", () => {
     expect(html).toContain("中文");
     expect(html).not.toContain("<select");
     expect(html).toContain("已关闭行为数据收集");
-    expect(html).toContain("Agent 任务额度已用 1.4M Token");
+    expect(html).toContain(">1.4M</strong><span>/</span><span>5M</span><em>Token</em>");
     expect(html).not.toContain("已使用 0 Token");
     expect(html).not.toContain("System");
     expect(html).not.toContain("注册于");
   });
 
-  it("Token 用量展示国际邮箱账号参与改进计划后的 300,000 Token 增量", () => {
+  it("Token 用量不再展示计划总额概览", () => {
     const html = normalizeSsrHtml(renderSettingsPageView(createImprovementBonusState()));
 
-    expect(html).toContain("赠送大模型额度已用 0.0M Token");
-    expect(html).toContain("共 30.3M Token");
-    expect(html).toContain("剩余 30.3M Token");
-    expect(html).not.toContain("共 30.0M Token");
+    expect(html).toContain("自定义 API Key 消耗");
+    expect(html).not.toContain("赠送大模型额度已用");
+    expect(html).not.toContain("共 30.3M Token");
+    expect(html).not.toContain("剩余 30.3M Token");
   });
 
   it("注册时间只展示年月日", () => {
@@ -559,9 +558,9 @@ describe("SettingsPageView", () => {
     expect(modelConfigHtml).toContain("Agent 任务模型");
     expect(modelConfigHtml).toContain("Memmy Platform · ASR");
     expect(modelConfigHtml).not.toContain("为语音识别 ASR选择模型 Memmy Platform · 通用文本");
-    expect(html).toContain("平台赠送大模型");
-    expect(html).toContain("自定义 API Key");
-    expect(html).toContain("查看用量详情");
+    expect(html).toContain("平台赠送额度");
+    expect(html).toContain("自定义 API Key 消耗");
+    expect(html).not.toContain("查看用量详情");
     expect(modelConfigHtml).not.toContain("当前模式：");
     expect(modelConfigHtml).not.toContain("切换为自定义 API Key");
     expect(modelConfigHtml).not.toContain("默认任务模型");
@@ -630,7 +629,7 @@ describe("SettingsPageView", () => {
     expect(source).not.toContain('onClick={handleSwitchToCustom}');
   });
 
-  it("Token 用量按原型包含渠道汇总和详情子页结构", () => {
+  it("Token 用量直接展示平台与自定义用量明细", () => {
     const source = readFileSync(settingsPageSourcePath, "utf8");
     const styles = readFileSync(tokenUsageStylesPath, "utf8");
 
@@ -642,16 +641,16 @@ describe("SettingsPageView", () => {
     expect(source).toContain("mb-6 flex items-center gap-3");
     expect(source).toContain("byokTokenUsageClient.getSummary");
     expect(source).toContain("EMPTY_BYOK_TOKEN_USAGE");
-    expect(source).toContain("function ChannelStat");
-    expect(source).toContain("function UsageDetailView");
+    expect(source).not.toContain("function ChannelStat");
+    expect(source).toContain("function UsageDetails");
     expect(source).toContain("function PlatformQuotaRow");
     expect(source).toContain("function ByokUsageRow");
     expect(source).toContain("function UsageSectionHead");
     expect(source).toContain("function formatTokenSummary");
     expect(source).toContain('return abbreviated === "0.0M" ? formatTokens(value) : abbreviated;');
     expect(source).toContain('import usageStyles from "./settings-token-usage.module.css";');
-    expect(source).toContain("usageStyles.detailPage");
-    expect(source).toContain("app-frame-page-content ${usageStyles.page}");
+    expect(source).toContain("usageStyles.detailContent");
+    expect(source).not.toContain("usageStyles.detailPage");
     expect(source).toContain("usageStyles.platformQuotaList");
     expect(source).toContain("usageStyles.byokUsageList");
     expect(source).toContain("usageStyles.usageSection");
@@ -659,11 +658,7 @@ describe("SettingsPageView", () => {
     expect(source).toContain("usageStyles.meter");
     expect(styles).toContain(".platformQuotaList");
     expect(styles).toContain(".byokUsageList");
-    const pageRule = styles.match(/\.page\s*\{[^}]*\}/)?.[0] ?? "";
-    expect(pageRule).toContain("box-sizing: border-box;");
-    expect(styles).toContain(".backButton");
-    const backButtonRule = styles.match(/\.backButton\s*\{[^}]*\}/)?.[0] ?? "";
-    expect(backButtonRule).toContain("cursor: pointer;");
+    expect(styles).not.toContain(".backButton");
     expect(source).toContain("const byokUsageByKind = TOKEN_USAGE_SCENES.map");
     expect(source).toContain("props.byokUsage.byModel.map");
     expect(source).toContain("function ByokModelUsageRow");
@@ -671,8 +666,9 @@ describe("SettingsPageView", () => {
     expect(source).not.toContain("getTaskModelCandidates(workspace, workspaceMode)");
     expect(source).toContain('"settings.token.modelBreakdownPending"');
     expect(source).toContain("usageSceneMeta(props.usage.scene, t)");
-    expect(source).toContain("updateShowUsageDetail(true)");
-    expect(source).toContain('reserveTopBar={!showUsageDetail}');
+    expect(source).not.toContain("updateShowUsageDetail");
+    expect(source).not.toContain("showUsageDetail");
+    expect(source).not.toContain("settings.token.viewDetail");
     expect(source).toContain('t("settings.token.input")');
     expect(source).toContain('t("settings.token.output")');
     expect(source).toContain('t("settings.token.cacheHit")');
@@ -756,8 +752,8 @@ describe("SettingsPageView", () => {
     expect(html).toContain("生图模型");
     expect(html).toContain("未配置");
     expect(html).toContain("Token 用量");
-    expect(html).toContain("查看用量详情");
-    expect(html).toContain("查看自定义 API Key 消耗");
+    expect(html).toContain("自定义 API Key 消耗");
+    expect(html).not.toContain("查看用量详情");
     expect(html).not.toContain("分别查看平台赠送额度和自定义 API Key 消耗");
     expect(html).not.toContain("切换回平台 Token");
     expect(html).not.toContain("当前模式：");
@@ -810,10 +806,12 @@ describe("SettingsPageView", () => {
   it("catalog 读取或保存失败时在模型工作区展示错误", () => {
     const source = readFileSync(modelWorkspaceSourcePath, "utf8");
 
-    expect(source).toContain("error instanceof Error && error.message");
-    expect(source).toContain("{saveError && (");
+    expect(source).toContain("modelWorkspaceErrorText(error, t)");
+    expect(source).not.toContain("MessageToast");
     expect(source).toContain('role="alert"');
     expect(source).toContain("{saveError}");
+    expect(source).toContain("mutationErrorText(result.error, t)");
+    expect(source.indexOf("{saveError}")).toBeLessThan(source.indexOf('t("settings.modelWorkspace.bindingTitle")'));
   });
 
   it("模型工作区用同步 busy gate 阻止快速连续 PUT，且迟到的初始 GET 不覆盖本地 mutation", () => {

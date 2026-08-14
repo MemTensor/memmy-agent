@@ -13,6 +13,7 @@ const BUILTIN_AGENT_KINDS = [
   "opencode",
   "openclaw",
   "hermes",
+  "deepseek_harness",
   "workbuddy",
   "pi",
   "qwenwork"

@@ -951,6 +951,152 @@ describe("AgentLoop Turn admission", () => {
     await running;
   });
 
+  it("steers a GUI Goal inbox item into a legacy continuation without source metadata", async () => {
+    const loop = makeLoop();
+    const sessionKey = "websocket:legacy-goal-steer";
+    const chatId = "legacy-goal-steer";
+    const clientRequestId = "78787878-7878-4878-8878-787878787878";
+    loop.sessions.getOrCreate(sessionKey);
+    const goal = await loop.goalRuntime.create({
+      sessionKey,
+      objective: "Finish the legacy Goal",
+      route: { channel: "websocket", chatId },
+      turnId: "goal-create-turn",
+    });
+    loop.goalRuntime.releaseTurn(sessionKey, "goal-create-turn");
+    let releaseActive!: () => void;
+    const activeGate = new Promise<void>((resolve) => {
+      releaseActive = resolve;
+    });
+    loop.processMessageInternal = vi.fn(async (message: InboundMessage, _key, options: any) => {
+      if (message.internal?.kind === "goal_continuation") {
+        options.slot.acceptingSteer = true;
+        await activeGate;
+      }
+      options.slot.stopReason = "completed";
+      return null;
+    }) as any;
+
+    const running = loop.run();
+    const activeTurnId = "legacy-goal-active-turn";
+    expect(loop.goalRuntime.reserveWork(sessionKey, activeTurnId, "continuation")).toBe(true);
+    await loop.bus.publishInbound(new InboundMessage({
+      channel: "websocket",
+      chatId,
+      content: "Continue the Goal",
+      metadata: { turn_id: activeTurnId },
+      internal: {
+        kind: "goal_continuation",
+        goalId: goal.goalId,
+        goalUpdatedAt: goal.updatedAt,
+      },
+      sessionKeyOverride: sessionKey,
+    }));
+    await waitUntil(() => (loop.turnSlots.get(sessionKey) as any[])?.[0]?.acceptingSteer === true);
+    await loop.bus.publishInbound(new InboundMessage({
+      channel: "websocket",
+      chatId,
+      content: "put it on the desktop",
+      metadata: {
+        client_request_id: clientRequestId,
+        webui_request_digest: "legacy-goal-steer-digest",
+        webui_queue_surface: "chat_composer",
+        webui: true,
+      },
+      sessionKeyOverride: sessionKey,
+      turnSource: { kind: "gui", channel: "websocket" },
+    }));
+    await waitUntil(() => loop.goalRuntime.inbox(sessionKey).length === 1);
+
+    await expect(loop.steerQueuedWebuiMessage(
+      sessionKey,
+      clientRequestId,
+      activeTurnId,
+    )).resolves.toMatchObject({
+      outcome: "steered",
+      turnId: activeTurnId,
+    });
+    expect(loop.goalRuntime.route(sessionKey)).toEqual({
+      channel: "websocket",
+      chatId,
+      source: { kind: "gui", channel: "websocket" },
+    });
+
+    releaseActive();
+    await waitUntil(() => !loop.isSessionBusy(sessionKey));
+    loop.stop();
+    await running;
+  });
+
+  it("does not treat a source-less WebSocket turn outside the Goal route as steerable", async () => {
+    const loop = makeLoop();
+    const sessionKey = "websocket:legacy-goal-route-mismatch";
+    const goalChatId = "goal-route";
+    const otherChatId = "other-route";
+    const clientRequestId = "89898989-8989-4898-8898-898989898989";
+    loop.sessions.getOrCreate(sessionKey);
+    const goal = await loop.goalRuntime.create({
+      sessionKey,
+      objective: "Keep steering on the Goal route",
+      route: { channel: "websocket", chatId: goalChatId },
+      turnId: "goal-route-create-turn",
+    });
+    loop.goalRuntime.releaseTurn(sessionKey, "goal-route-create-turn");
+    let releaseActive!: () => void;
+    const activeGate = new Promise<void>((resolve) => {
+      releaseActive = resolve;
+    });
+    loop.processMessageInternal = vi.fn(async (_message: InboundMessage, _key, options: any) => {
+      options.slot.acceptingSteer = true;
+      await activeGate;
+      options.slot.stopReason = "completed";
+      return null;
+    }) as any;
+
+    const running = loop.run();
+    const activeTurnId = "legacy-goal-route-mismatch-turn";
+    expect(loop.goalRuntime.reserveWork(sessionKey, activeTurnId, "continuation")).toBe(true);
+    await loop.bus.publishInbound(new InboundMessage({
+      channel: "websocket",
+      chatId: otherChatId,
+      content: "A different source-less WebSocket turn",
+      metadata: { turn_id: activeTurnId },
+      internal: {
+        kind: "goal_continuation",
+        goalId: goal.goalId,
+        goalUpdatedAt: goal.updatedAt,
+      },
+      sessionKeyOverride: sessionKey,
+    }));
+    await waitUntil(() => (loop.turnSlots.get(sessionKey) as any[])?.[0]?.acceptingSteer === true);
+    await loop.goalRuntime.enqueueUserMessage(sessionKey, new InboundMessage({
+      channel: "websocket",
+      chatId: otherChatId,
+      content: "Do not steer this into the Goal",
+      metadata: {
+        client_request_id: clientRequestId,
+        webui_request_digest: "legacy-goal-route-mismatch-digest",
+        webui_queue_surface: "chat_composer",
+        webui: true,
+      },
+      sessionKeyOverride: sessionKey,
+      turnSource: { kind: "gui", channel: "websocket" },
+    }));
+
+    await expect(loop.steerQueuedWebuiMessage(
+      sessionKey,
+      clientRequestId,
+      activeTurnId,
+    )).resolves.toMatchObject({ outcome: "not_steerable" });
+    await expect(loop.removeQueuedWebuiMessage(sessionKey, clientRequestId))
+      .resolves.toMatchObject({ outcome: "removed" });
+
+    releaseActive();
+    await waitUntil(() => !loop.isSessionBusy(sessionKey));
+    loop.stop();
+    await running;
+  });
+
   it("leaves stale, cross-surface, and slash queue items untouched", async () => {
     const loop = makeLoop();
     const sessionKey = "websocket:queue-steer-reject";

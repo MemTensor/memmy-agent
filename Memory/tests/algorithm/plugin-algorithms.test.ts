@@ -1550,6 +1550,35 @@ describe("plugin algorithm parity helpers", () => {
     expect(withoutBypass.hits.map((hit) => hit.id)).not.toContain("trace-ranker-multi-channel");
   });
 
+  it("drops recall hits below the absolute final-score floor", () => {
+    const weak = traceMemory("trace-below-score-floor", "episode-below-score-floor", "generic assistant capability", 0, [0.1, 0.994987]);
+    const input = {
+      query: "build a thunder game",
+      queryVector: [1, 0],
+      memories: [weak],
+      layers: ["L1" as const],
+      limit: 5,
+      mode: "search" as const,
+      now: Date.parse("2026-05-29T00:00:00.000Z"),
+      config: {
+        minTraceSim: 0,
+        relativeThresholdFloor: 0,
+        smartSeed: false,
+        minRecallScore: 0
+      }
+    };
+    const withoutFloor = retrievePluginMemories(input);
+    const withFloor = retrievePluginMemories({
+      ...input,
+      config: { ...input.config, minRecallScore: 0.2 }
+    });
+
+    expect(withoutFloor.hits).toEqual([expect.objectContaining({ id: weak.id })]);
+    expect(withoutFloor.hits[0]!.score).toBeLessThan(0.2);
+    expect(withFloor.hits).toEqual([]);
+    expect(withFloor.debug.droppedByThreshold).toBeGreaterThan(0);
+  });
+
   it("uses plugin smart-seed MMR when choosing each tier seed", () => {
     const result = retrievePluginMemories({
       query: "specialterm",

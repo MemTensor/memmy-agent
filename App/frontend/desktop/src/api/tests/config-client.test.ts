@@ -48,6 +48,39 @@ describe("config-client canonical model catalog", () => {
     expect(saved.catalog?.configRevision).toBe("revision-2");
   });
 
+  it("BYOK 主模型不会从账号 assignment 回退职责或可选模型", async () => {
+    const view = catalogWithAccountModels("revision-1");
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(view)));
+
+    const loaded = await createHttpConfigClient(config).getModelConfig();
+
+    expect(loaded.memmyMemory?.summary).toMatchObject({
+      mode: "follow",
+      provider: "openai",
+      endpoint: "https://api.openai.com/v1",
+      model: "gpt-4o"
+    });
+    expect(loaded.memmyMemory?.evolution.mode).toBe("follow");
+    expect(loaded.asr).toBeNull();
+    expect(loaded.imageGen).toBeNull();
+  });
+
+  it("仅账号主模型仍读取账号职责和可选模型", async () => {
+    const view = catalogWithAccountModels("revision-1");
+    view.modelAssignments.byok.agent = { candidates: [], default: null };
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(view)));
+
+    const loaded = await createHttpConfigClient(config).getModelConfig();
+
+    expect(loaded.memmyMemory?.summary).toMatchObject({
+      mode: "fixed",
+      provider: "memmy_account",
+      model: "memory_summary"
+    });
+    expect(loaded.asr?.model).toBe("asr");
+    expect(loaded.imageGen?.model).toBe("image_gen");
+  });
+
   it("View 回写不会泄露 masked secret，脱敏扩展字段通过省略触发后端保留", async () => {
     let body: any;
     vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
@@ -268,6 +301,50 @@ function catalog(configRevision: string): ModelConfigView {
     configured: true,
     updatedAt: "2026-08-11T00:00:00.000Z"
   };
+}
+
+function catalogWithAccountModels(configRevision: string): ModelConfigView {
+  const view = catalog(configRevision);
+  const capabilities = ["agent", "memory_summary", "memory_evolution", "asr", "image_generation"] as const;
+  view.providers.push({
+    provider: "memmy_account",
+    configured: true,
+    hasApiKey: true,
+    apiKeyMasked: "••••",
+    apiKey: "",
+    ownerAccountId: "owner-a",
+    endpoints: [{
+      endpointId: "platform",
+      apiBase: "https://account.example/v1",
+      protocol: "memmy-account",
+      hasApiKey: false,
+      apiKeyMasked: "",
+      apiKey: ""
+    }],
+    accountManaged: true,
+    editable: false,
+    models: capabilities.map((capability) => ({
+      presetId: `account-${capability}`,
+      provider: "memmy_account",
+      endpointId: "platform",
+      protocol: "memmy-account",
+      model: capability === "agent" ? "agent_chat" : capability === "image_generation" ? "image_gen" : capability,
+      source: "account",
+      ownerAccountId: "owner-a",
+      capabilities: [capability],
+      available: true
+    }))
+  });
+  view.modelAssignments.account = {
+    ownerAccountId: "owner-a",
+    agent: { candidates: ["account-agent"], default: "account-agent" },
+    memorySummary: "account-memory_summary",
+    memoryEvolution: "account-memory_evolution",
+    embedding: null,
+    asr: "account-asr",
+    imageGeneration: "account-image_generation"
+  };
+  return view;
 }
 
 function inputFromCatalog(view: ModelConfigView): ModelConfigInput {

@@ -109,6 +109,24 @@ describe("AgentLoop direct processing", () => {
     });
   });
 
+  it("passes the structured Turn source into tool request metadata", async () => {
+    const agent = loop(provider(["ok"]));
+    const source = { kind: "gui", channel: "websocket" } as const;
+    const contextSpy = vi.spyOn(agent, "setToolContext");
+
+    await agent.processMessage(new InboundMessage({
+      channel: "websocket",
+      chatId: "goal-source",
+      content: "create a Goal",
+      turnSource: source,
+    }));
+
+    expect(contextSpy.mock.calls.some((call) => (
+      call[3]?.turn_source?.kind === source.kind
+      && call[3]?.turn_source?.channel === source.channel
+    ))).toBe(true);
+  });
+
   it("keeps a projected CLI Session on its canonical workspace across the whole turn", async () => {
     const root = workspace();
     process.env.MEMMY_AGENT_DATA_DIR = path.join(root, "data");

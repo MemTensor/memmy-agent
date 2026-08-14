@@ -405,6 +405,44 @@ describe("canonical model workspace adapter", () => {
     expect(saved.providers[0]!.models.map((model) => model.model)).not.toContain("embedding-delete");
   });
 
+  it("真实 Backend catalog：从账号空间删除共享 DashScope 配置并清理双空间引用", async () => {
+    const file = catalogFixture();
+    const empty = await readModelConfigCatalog(file);
+    let workspace = createModelWorkspace(empty);
+    const created = upsertByokPreset(workspace, {
+      provider: "dashscope",
+      endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      protocol: "openai-chat-completions",
+      apiKey: "sk-dashscope-delete",
+      model: "qwen-max",
+      capabilities: ["agent"]
+    });
+    workspace = assignCatalogPreset(created.workspace, "byok", "agent", created.presetId);
+    workspace = assignCatalogPreset(workspace, "account", "agent", created.presetId);
+    const base = await persistModelCatalogMutation(modelConfigInput(workspace), {
+      read: () => readModelConfigCatalog(file),
+      write: (input) => writeModelConfigCatalog(file, input)
+    }, empty);
+
+    workspace = createModelWorkspace(base);
+    const connection = workspace.spaces.account.connections.find((item) => item.provider === "dashscope")!;
+    const deleted = deleteModelConnection(workspace, "account", connection.id);
+
+    expect(deleted.error).toBeNull();
+    expect(deleted.workspace.catalog.modelAssignments.byok.agent).toEqual({ candidates: [], default: null });
+    expect(deleted.workspace.catalog.modelAssignments.account.agent).toEqual({ candidates: [], default: null });
+
+    const saved = await persistModelCatalogMutation(modelConfigInput(deleted.workspace), {
+      read: () => readModelConfigCatalog(file),
+      write: (input) => writeModelConfigCatalog(file, input)
+    }, base);
+    const raw = YAML.parse(readFileSync(file, "utf8")) as any;
+
+    expect(saved.providers.some((provider) => provider.provider === "dashscope")).toBe(false);
+    expect(raw.providers?.dashscope).toBeUndefined();
+    expect(Object.values(raw.modelPresets ?? {})).not.toContainEqual(expect.objectContaining({ provider: "dashscope" }));
+  });
+
   it("真实 Backend catalog：删除遇到不可见 Key 并发轮换时拒绝重放", async () => {
     const file = catalogFixture();
     const base = await deletionCatalogFixture(file);
@@ -663,7 +701,7 @@ describe("canonical model workspace adapter", () => {
       models: ["text-embedding-3-large"],
       modelCapabilities: { "text-embedding-3-large": "embedding" }
     });
-    expect(invalid.error).toBe("invalid_model");
+    expect(invalid.error).toBe("incompatible_model_capabilities");
   });
 
   it("编辑连接切换 Provider 会从旧 Provider 原子移除 endpoint/preset 并保留服务端 presetId", () => {
@@ -696,6 +734,21 @@ describe("canonical model workspace adapter", () => {
 
     expect(assigned.catalog.modelAssignments.account.agent).toEqual({ candidates: ["byok-agent"], default: "byok-agent" });
     expect(assigned.catalog.modelAssignments.byok).toEqual(originalByok);
+  });
+
+  it("删除账号空间可见的共享 BYOK 连接时同步清理两个空间的引用", () => {
+    const result = deleteModelConnection(createModelWorkspace(catalog()), "account", "openai:chat");
+
+    expect(result.error).toBeNull();
+    expect(result.workspace.catalog.providers.find((provider) => provider.provider === "openai")?.endpoints)
+      .toEqual([expect.objectContaining({ endpointId: "embedding" })]);
+    expect(result.workspace.catalog.modelAssignments.byok.agent)
+      .toEqual({ candidates: [], default: null });
+    expect(result.workspace.catalog.modelAssignments.account.agent)
+      .toEqual({ candidates: ["account-agent"], default: "account-agent" });
+    expect(result.workspace.catalog.effectiveCandidates.byok).toEqual([]);
+    expect(result.workspace.catalog.effectiveCandidates.account.map((candidate) => candidate.presetId))
+      .toEqual(["account-agent"]);
   });
 
   it("Agent 多选/default 与其他任务单选引用 preset ID", () => {

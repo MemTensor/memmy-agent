@@ -1,4 +1,4 @@
-import { Gauge, Pause, Pencil, Play, Trash2, type LucideIcon } from "lucide-react";
+import { Pause, Pencil, Play, Trash2, type LucideIcon } from "lucide-react";
 import {
   useEffect,
   useLayoutEffect,
@@ -15,12 +15,13 @@ import type { I18nContextValue } from "../i18n/i18n-provider.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import type { AgentGoalRunClock } from "../state/agent-chat-slice.js";
 
+type AgentGoalBarControlAction = Exclude<AgentGoalControlAction, "set_budget">;
+
 export type AgentGoalControlRequest = {
   chatId: string;
   goalId: string;
-  action: AgentGoalControlAction;
+  action: AgentGoalBarControlAction;
   objective?: string;
-  tokenBudget?: number | null;
 };
 
 export interface AgentGoalBarProps {
@@ -31,9 +32,11 @@ export interface AgentGoalBarProps {
   onControl: (request: AgentGoalControlRequest) => void;
 }
 
-type GoalForm =
-  | { kind: "edit"; chatId: string; goalId: string; value: string }
-  | { kind: "budget"; chatId: string; goalId: string; value: string };
+type GoalForm = {
+  chatId: string;
+  goalId: string;
+  value: string;
+};
 
 const OBJECTIVE_MAX_LENGTH = 12_000;
 
@@ -47,13 +50,6 @@ export function displayedGoalTimeSeconds(
   }
   const elapsedSeconds = Math.max(0, Math.floor(nowMs / 1000 - clock.startedAt));
   return Math.max(goal.time_used_seconds, clock.baseSeconds + elapsedSeconds);
-}
-
-export function formatCompactGoalTokenCount(value: number, language: "zh-CN" | "en-US"): string {
-  return new Intl.NumberFormat(language, {
-    notation: "compact",
-    maximumFractionDigits: 1
-  }).format(value);
 }
 
 export function formatGoalDuration(totalSeconds: number, t: I18nContextValue["t"]): string {
@@ -74,7 +70,7 @@ export function formatGoalDuration(totalSeconds: number, t: I18nContextValue["t"
 }
 
 export function AgentGoalBar(props: AgentGoalBarProps) {
-  const { language, t } = useTranslation();
+  const { t } = useTranslation();
   const [form, setForm] = useState<GoalForm | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
@@ -106,68 +102,39 @@ export function AgentGoalBar(props: AgentGoalBarProps) {
     : status === "budget_limited"
       ? t("home.goal.budgetLimitedHint")
       : null;
-  const usageLabel = t("home.goal.usage", {
-    used: props.goal.tokens_used,
-    budget: props.goal.token_budget ?? t("home.goal.noLimit")
-  });
   const timeLabel = formatGoalDuration(timeUsedSeconds, t);
-  const compactUsageLabel = [
-    formatCompactGoalTokenCount(props.goal.tokens_used, language),
-    props.goal.token_budget === null
-      ? "∞"
-      : formatCompactGoalTokenCount(props.goal.token_budget, language)
-  ].join("/");
 
-  const control = (action: AgentGoalControlAction) => {
+  const control = (action: AgentGoalBarControlAction) => {
     props.onControl({ chatId: props.chatId, goalId, action });
   };
 
   const openEdit = () => {
     setValidationError(null);
-    setForm({ kind: "edit", chatId: props.chatId, goalId, value: props.goal.objective });
-  };
-
-  const openBudget = () => {
-    setValidationError(null);
     setForm({
-      kind: "budget",
       chatId: props.chatId,
       goalId,
-      value: props.goal.token_budget === null ? "" : String(props.goal.token_budget)
+      value: props.goal.objective
     });
+  };
+
+  const submitControl = (request: AgentGoalControlRequest) => {
+    setForm(null);
+    setValidationError(null);
+    props.onControl(request);
   };
 
   const submitForm = () => {
     if (!form) return;
-    if (form.kind === "edit") {
-      const objective = form.value.trim();
-      if (!objective || objective.length > OBJECTIVE_MAX_LENGTH) {
-        setValidationError(t("home.goal.objectiveInvalid"));
-        return;
-      }
-      props.onControl({
-        chatId: form.chatId,
-        goalId: form.goalId,
-        action: "edit",
-        objective
-      });
+    const objective = form.value.trim();
+    if (!objective || objective.length > OBJECTIVE_MAX_LENGTH) {
+      setValidationError(t("home.goal.objectiveInvalid"));
       return;
     }
-
-    if (!/^[1-9]\d*$/.test(form.value.trim())) {
-      setValidationError(t("home.goal.budgetInvalid"));
-      return;
-    }
-    const tokenBudget = Number(form.value);
-    if (!Number.isSafeInteger(tokenBudget)) {
-      setValidationError(t("home.goal.budgetInvalid"));
-      return;
-    }
-    props.onControl({
+    submitControl({
       chatId: form.chatId,
       goalId: form.goalId,
-      action: "set_budget",
-      tokenBudget
+      action: "edit",
+      objective
     });
   };
 
@@ -185,18 +152,7 @@ export function AgentGoalBar(props: AgentGoalBarProps) {
 
         <GoalObjectiveMarquee objective={props.goal.objective} />
 
-        <span className="agent-goal-bar__usage" aria-label={`${usageLabel} · ${timeLabel}`}>
-          <span className="agent-goal-bar__usage-full" aria-hidden="true">
-            <span className="agent-goal-bar__tokens">{usageLabel}</span>
-            <span className="agent-goal-bar__separator">·</span>
-            <span className="agent-goal-bar__time">{timeLabel}</span>
-          </span>
-          <span className="agent-goal-bar__usage-compact" aria-hidden="true">
-            <span className="agent-goal-bar__tokens">{compactUsageLabel}</span>
-            <span className="agent-goal-bar__separator">·</span>
-            <span className="agent-goal-bar__time">{timeLabel}</span>
-          </span>
-        </span>
+        <span className="agent-goal-bar__time">{timeLabel}</span>
 
         <div className="agent-goal-bar__actions">
           {status === "active" ? (
@@ -224,12 +180,6 @@ export function AgentGoalBar(props: AgentGoalBarProps) {
             />
           ) : null}
           <GoalIconButton
-            icon={Gauge}
-            label={t("home.goal.budget")}
-            disabled={props.pending}
-            onClick={openBudget}
-          />
-          <GoalIconButton
             icon={Trash2}
             label={t("home.goal.clear")}
             disabled={props.pending}
@@ -241,46 +191,19 @@ export function AgentGoalBar(props: AgentGoalBarProps) {
 
       {form ? (
         <div className="agent-goal-bar__form">
-          {form.kind === "edit" ? (
-            <textarea
-              value={form.value}
-              maxLength={OBJECTIVE_MAX_LENGTH + 1}
-              disabled={props.pending}
-              aria-label={t("home.goal.objective")}
-              onChange={(event) => {
-                setValidationError(null);
-                setForm({ ...form, value: event.target.value });
-              }}
-            />
-          ) : (
-            <input
-              value={form.value}
-              inputMode="numeric"
-              disabled={props.pending}
-              aria-label={t("home.goal.budget")}
-              placeholder={t("home.goal.budgetPlaceholder")}
-              onChange={(event) => {
-                setValidationError(null);
-                setForm({ ...form, value: event.target.value });
-              }}
-            />
-          )}
+          <textarea
+            value={form.value}
+            maxLength={OBJECTIVE_MAX_LENGTH + 1}
+            disabled={props.pending}
+            aria-label={t("home.goal.objective")}
+            onChange={(event) => {
+              setValidationError(null);
+              setForm({ ...form, value: event.target.value });
+            }}
+          />
           {validationError ? <p role="alert" className="agent-goal-bar__validation">{validationError}</p> : null}
           <div className="agent-goal-bar__form-actions">
             <GoalFormButton disabled={props.pending} onClick={submitForm}>{t("common.save")}</GoalFormButton>
-            {form.kind === "budget" ? (
-              <GoalFormButton
-                disabled={props.pending}
-                onClick={() => props.onControl({
-                  chatId: form.chatId,
-                  goalId: form.goalId,
-                  action: "set_budget",
-                  tokenBudget: null
-                })}
-              >
-                {t("home.goal.removeLimit")}
-              </GoalFormButton>
-            ) : null}
             <GoalFormButton disabled={props.pending} onClick={() => setForm(null)}>{t("common.cancel")}</GoalFormButton>
           </div>
         </div>

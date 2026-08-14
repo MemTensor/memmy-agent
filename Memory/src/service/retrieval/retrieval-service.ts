@@ -2002,9 +2002,9 @@ export class RetrievalService {
 
   private async extractRetrievalQuery(rawQuery: string, timeZone: string): Promise<RetrievalQueryExtract | null> {
     const raw = rawQuery.trim();
-    if (!raw || !this.deps.skillLlm.isConfigured()) return null;
+    if (!raw || !this.deps.llm.isConfigured()) return null;
     try {
-      const result = await this.deps.skillLlm.completeJson<{
+      const result = await this.deps.llm.completeJson<{
         queryVecText?: unknown;
         keywords?: unknown;
         timeFilter?: unknown;
@@ -2067,6 +2067,7 @@ export class RetrievalService {
     mmrLambda: number;
     rrfConstant: number;
     relativeThresholdFloor: number;
+    minRecallScore: number;
     minSkillEta: number;
     minTraceSim: number;
     episodeGoalMinSim: number;
@@ -2095,6 +2096,7 @@ export class RetrievalService {
       mmrLambda: retrieval.mmrLambda,
       rrfConstant: retrieval.rrfConstant,
       relativeThresholdFloor: retrieval.relativeThresholdFloor,
+      minRecallScore: retrieval.minRecallScore,
       minSkillEta: retrieval.minSkillEta,
       minTraceSim: retrieval.minTraceSim,
       episodeGoalMinSim: retrieval.episodeGoalMinSim,

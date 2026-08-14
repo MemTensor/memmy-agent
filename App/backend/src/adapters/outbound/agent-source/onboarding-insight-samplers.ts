@@ -7,6 +7,7 @@ import {
   resolveClaudeCodeProjectsDirectory,
   resolveCodexSessionsDirectory,
   resolveCursorDataPaths,
+  resolveDeepseekHarnessHomeDirectory,
   resolveHermesHomeDirectory,
   resolveOpencodeDatabasePath,
   resolveOpenclawStateDirectory,
@@ -17,6 +18,7 @@ import {
 import { extractPiMessage } from "./pi/history-reader.js";
 import { extractQwenworkMessage } from "./qwenwork/history-reader.js";
 import { extractWorkbuddyMessage } from "./workbuddy/history-reader.js";
+import { createDeepseekHarnessSourceAdapter } from "./deepseek-harness/index.js";
 import { redactSecrets } from "./secret-redactor.js";
 import type { SourceRegistry } from "./source-registry.js";
 import {
@@ -64,6 +66,7 @@ export function createBuiltinOnboardingInsightSamplers(): OnboardingInsightSampl
     createOpencodeInsightSampler({ databasePath: resolveOpencodeDatabasePath() }),
     createOpenclawInsightSampler({ root: resolveOpenclawStateDirectory() }),
     createHermesInsightSampler({ root: resolveHermesHomeDirectory() }),
+    createDeepseekHarnessInsightSampler({ root: resolveDeepseekHarnessHomeDirectory() }),
     createWorkbuddyInsightSampler({ root: resolveWorkbuddyProjectsDirectory() }),
     createPiInsightSampler({ root: resolvePiSessionsDirectory() }),
     createQwenworkInsightSampler({ root: resolveQwenworkProjectsDirectory() })
@@ -150,7 +153,7 @@ export function createPiInsightSampler(input: { root: string }): OnboardingInsig
 export function createQwenworkInsightSampler(input: { root: string }): OnboardingInsightSampler {
   return createJsonlInsightSampler({
     sourceId: "qwenwork",
-    displayName: "qwenwork",
+    displayName: "QwenWork",
     root: input.root,
     matchesFile: (name) => name.endsWith(".jsonl"),
     shouldParseLine: (line) => /"type"\s*:\s*"(?:user|assistant|system)"/u.test(line),
@@ -201,6 +204,49 @@ export function createHermesInsightSampler(input: { root: string }): OnboardingI
         jsonl.sampleRecentUserQueries(options)
       ]);
       return mergeSampleResults("hermes", "Hermes", [dbResult, jsonlResult], options.maxQueries);
+    }
+  };
+}
+
+export function createDeepseekHarnessInsightSampler(input: { root: string }): OnboardingInsightSampler {
+  const adapter = createDeepseekHarnessSourceAdapter({ rootDirectory: input.root });
+  return {
+    sourceId: "deepseek_harness",
+    displayName: "DeepSeek Harness",
+    detect: () => adapter.detect(),
+    async sampleRecentUserQueries(options) {
+      const messages: OnboardingSampledMessage[] = [];
+      const errors: Array<{ target: string; reason: string }> = [];
+      try {
+        for await (const message of adapter.scan({
+          maxScanTargets: options.maxSessionFiles,
+          order: "recent_first",
+          signal: options.signal
+        })) {
+          if (message.role !== "user" && message.role !== "assistant" && message.role !== "tool") continue;
+          messages.push(limitSampledMessage({
+            sourceId: message.sourceId,
+            conversationId: message.conversationId,
+            messageId: message.messageId,
+            role: message.role,
+            createdAt: message.createdAt,
+            text: message.content,
+            workspacePath: message.workspacePath
+          }, message.role === "tool" ? MAX_TOOL_MESSAGE_CHARS : options.maxQueryChars));
+        }
+      } catch (error) {
+        errors.push({ target: input.root, reason: error instanceof Error ? error.message : "read failed" });
+      }
+      const sorted = sortMessagesRecent(messages);
+      return {
+        sourceId: "deepseek_harness",
+        displayName: "DeepSeek Harness",
+        recentSessionCount: new Set(messages.map((message) => message.conversationId)).size,
+        latestActivityAt: sorted[0]?.createdAt ?? null,
+        queries: sorted.filter((message) => message.role === "user").slice(0, options.maxQueries),
+        recentMessages: sorted.slice(0, MAX_RECENT_PROBE_MESSAGES),
+        errors
+      };
     }
   };
 }

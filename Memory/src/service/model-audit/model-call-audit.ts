@@ -3,6 +3,10 @@ import { nowIso } from "../../utils/time.js";
 
 type ApiLogRepository = Pick<Repositories["runtime"], "insertApiLog">;
 
+export function elapsedApiLogMs(startedAt: number, endedAt = performance.now()): number {
+  return Math.max(0, Math.ceil(endedAt - startedAt));
+}
+
 export function recordApiLog(
   runtime: ApiLogRepository,
   toolName: ApiLogRecord["toolName"],

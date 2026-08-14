@@ -20,7 +20,7 @@ afterEach(() => {
 });
 
 describe("onboarding insight samplers", () => {
-  it("keeps all nine built-in Agents in the first-login scan", () => {
+  it("keeps all ten built-in Agents in the first-login scan", () => {
     expect(createBuiltinOnboardingInsightSamplers().map((sampler) => sampler.sourceId)).toEqual([
       "cursor",
       "claude_code",
@@ -28,6 +28,7 @@ describe("onboarding insight samplers", () => {
       "opencode",
       "openclaw",
       "hermes",
+      "deepseek_harness",
       "workbuddy",
       "pi",
       "qwenwork"

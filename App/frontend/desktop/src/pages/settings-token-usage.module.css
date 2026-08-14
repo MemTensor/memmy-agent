@@ -1,12 +1,10 @@
-.detailPage {
+.detailContent {
   --usage-ink: #111d1c;
   --usage-secondary: #3d514c;
   --usage-muted: #7f938d;
   --usage-track: color-mix(in srgb, var(--color-border-stone) 52%, transparent);
   --usage-row-bg: color-mix(in srgb, var(--color-canvas-oat) 40%, transparent);
   --usage-row-hover: color-mix(in srgb, var(--color-canvas-oat) 75%, transparent);
-  height: 100%;
-  overflow-y: auto;
   background: transparent;
   color: var(--usage-ink);
   font-family: var(--font-sans);
@@ -15,89 +13,13 @@
   letter-spacing: 0;
 }
 
-/*
- * Mirrors the settings page wrapper (`app-frame-page-content max-w-2xl mx-auto`)
- * so both pages land on the same content edges. The horizontal padding comes
- * from `app-frame-page-content`, so only the vertical padding is set here.
- */
-.page {
-  box-sizing: border-box;
-  max-width: 672px;
-  margin: 0 auto;
-  padding-top: calc(var(--codex-toolbar-height) + 8px);
-  padding-bottom: 40px;
-}
-
-.backButton {
-  position: relative;
-  z-index: 10000;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 44px;
-  margin: 0 0 6px -12px;
-  padding: 8px 12px;
-  border: 0;
-  border-radius: 999px;
-  background: transparent;
-  color: var(--usage-muted);
-  font-size: var(--codex-text-sm);
-  line-height: var(--codex-leading-sm);
-  cursor: pointer;
-  pointer-events: auto;
-  touch-action: manipulation;
-  transition: color var(--duration-fast) ease;
-  -webkit-app-region: no-drag;
-}
-
-.backButton:hover {
-  color: var(--usage-ink);
-}
-
-/* --- Page header --- */
-
-.titlebar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 24px;
-}
-
-.title {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin: 0;
-  font-size: 18px;
-  line-height: 24px;
-  font-weight: 700;
-  letter-spacing: -0.01em;
-}
-
-.titleMark {
-  display: grid;
-  place-items: center;
-  width: 28px;
-  height: 28px;
-  flex: 0 0 auto;
-  border-radius: var(--radius-btn);
-  background: color-mix(in srgb, var(--color-action-sky) 15%, transparent);
-  color: var(--color-action-sky-hover);
-}
-
-.bolt {
-  width: 15px;
-  height: 15px;
-}
-
 .updated,
 .statusError {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   flex: 0 0 auto;
-  color: var(--usage-muted);
+  color: var(--usage-muted, #7f938d);
   font-size: var(--codex-text-xs);
   line-height: var(--codex-leading-xs);
   font-variant-numeric: tabular-nums;
@@ -188,8 +110,7 @@
 }
 
 /*
- * Mirrors the settings sections: the panel keeps the 24px inset of `p-6`, and
- * the cards inside keep the 14px inset of `ChannelStat`'s `p-3.5`.
+ * Mirrors the settings sections with a 24px panel inset.
  */
 .platformQuotaList,
 .byokUsageList {
@@ -547,15 +468,6 @@
 /* --- Responsive --- */
 
 @media (max-width: 640px) {
-  .titlebar {
-    display: block;
-  }
-
-  .titlebar .updated,
-  .titlebar .statusError {
-    margin-top: 8px;
-  }
-
   .sectionHead {
     display: block;
   }

@@ -418,6 +418,7 @@ describe("agent sources local api routes", () => {
     "opencode",
     "openclaw",
     "hermes",
+    "deepseek_harness",
     "workbuddy",
     "pi",
     "qwenwork"

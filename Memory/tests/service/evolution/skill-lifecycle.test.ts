@@ -136,6 +136,15 @@ describe("MemoryService / evolution / skill lifecycle", () => {
        LIMIT 1`
     ).get() as { id: string; updated_at: string } | undefined;
     expect(createdSkill).toBeTruthy();
+    const generationLog = db.db.prepare(
+      `SELECT duration_ms
+       FROM api_logs
+       WHERE tool_name = 'skill_generate'
+         AND json_extract(output_json, '$.skillId') = ?
+       ORDER BY id DESC
+       LIMIT 1`
+    ).get(createdSkill!.id) as { duration_ms: number } | undefined;
+    expect(generationLog?.duration_ms).toBeGreaterThan(0);
 
     db.db.prepare(`UPDATE evolution_jobs SET status = 'succeeded'`).run();
     const secondAt = new Date().toISOString();
@@ -717,6 +726,16 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       change_type: "skill_reward_drift",
       source: "worker.skill_lifecycle.v7"
     });
+    const driftLog = db.db.prepare(
+      `SELECT duration_ms
+       FROM api_logs
+       WHERE tool_name = 'skill_evolve'
+         AND json_extract(input_json, '$.skillId') = ?
+         AND json_extract(input_json, '$.reason') = 'reward_drift'
+       ORDER BY id DESC
+       LIMIT 1`
+    ).get(skillRow!.id) as { duration_ms: number } | undefined;
+    expect(driftLog?.duration_ms).toBeGreaterThan(0);
 
     db.close();
   });

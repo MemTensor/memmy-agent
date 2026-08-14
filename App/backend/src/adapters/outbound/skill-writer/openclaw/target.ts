@@ -12,6 +12,7 @@ import { removeMemmySkillDirectory, replaceMemmySkillDirectory } from "../skill-
 import { renderMemmyPluginSkillManifest } from "../templates/memmy-plugin.js";
 import { renderMemmySkillBootstrapManifest } from "../templates/memmy-skill-directory.js";
 import type { MemoryPluginConflict, SkillManifest, SkillTarget } from "../types.js";
+import { MEMMY_VERSION } from "../../../../project-version.js";
 
 const OPENCLAW_TARGET_ID = "openclaw";
 const OPENCLAW_DISPLAY_NAME = "OpenClaw";
@@ -21,7 +22,6 @@ const PLUGIN_DIRECTORY_NAME = "memmy-memory";
 const RESUME_COMMAND_NAME = "memmy-resume";
 const PLUGIN_PACKAGE_FILE_NAME = "package.json";
 const PLUGIN_MANIFEST_FILE_NAME = "openclaw.plugin.json";
-const PLUGIN_VERSION = "0.1.0";
 const START_MARKER = "<!-- memmy:start v=1 -->";
 const END_MARKER = "<!-- memmy:end v=1 -->";
 const LEGACY_CLI_START_MARKER = "<!-- memmy-memory cli : start -->";
@@ -257,7 +257,7 @@ async function upsertOpenclawPluginConfig(
     source: "path",
     sourcePath: memmyConfig.pluginDirectory,
     installPath: memmyConfig.pluginDirectory,
-    version: PLUGIN_VERSION,
+    version: MEMMY_VERSION,
     installedAt: normalizeString(existingInstall.installedAt) || new Date().toISOString()
   };
 
@@ -324,7 +324,7 @@ async function detectOpenclawMemoryPluginConflict(filePath: string): Promise<Mem
 function createOpenclawPluginPackageManifest(): Record<string, unknown> {
   return {
     name: PLUGIN_ID,
-    version: PLUGIN_VERSION,
+    version: MEMMY_VERSION,
     description: "Memmy local memory adapter for OpenClaw",
     type: "module",
     private: true,
@@ -341,7 +341,7 @@ function createOpenclawPluginManifest(): Record<string, unknown> {
     id: PLUGIN_ID,
     name: "Memmy Memory",
     description: "Memmy local memory adapter for OpenClaw",
-    version: PLUGIN_VERSION,
+    version: MEMMY_VERSION,
     kind: "memory",
     activation: {
       onStartup: true

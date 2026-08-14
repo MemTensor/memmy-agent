@@ -7,7 +7,7 @@ import { I18nProvider } from "../../i18n/i18n-provider.js";
 import type { ByokTokenUsageSummary, TokenUsageDto } from "@memmy/local-api-contracts";
 import { appActions } from "../../state/app-actions.js";
 import { appReducer, createInitialAppState } from "../../state/app-reducer.js";
-import { SettingsPageView, UsageDetailView } from "../settings-page.js";
+import { SettingsPageView, UsageDetails } from "../settings-page.js";
 import { mockBootstrap } from "./fixtures/bootstrap.js";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -31,7 +31,7 @@ describe("SettingsPage platform scene quota details", () => {
     document.body.replaceChildren();
   });
 
-  it("shows the aggregate on settings and all three scene totals in usage details", () => {
+  it("shows all three platform scene totals inline without a detail-page click", () => {
     const bootstrap = {
       ...mockBootstrap,
       app: {
@@ -96,14 +96,6 @@ describe("SettingsPage platform scene quota details", () => {
       );
     });
 
-    expect(container.textContent).toContain("Agent 任务额度已用 6.0M Token");
-    expect(container.textContent).toContain("共 5.0M Token");
-
-    const detailsButton = [...container.querySelectorAll("button")]
-      .find((button) => button.textContent?.includes("查看用量详情"));
-    expect(detailsButton).toBeDefined();
-    act(() => detailsButton?.click());
-
     expect(container.textContent).toContain("平台赠送额度");
     expect(container.textContent).toContain("Agent 任务");
     expect(container.textContent).toContain("6M/5MToken");
@@ -111,6 +103,12 @@ describe("SettingsPage platform scene quota details", () => {
     expect(container.textContent).toContain("15M/20MToken");
     expect(container.textContent).toContain("记忆进化");
     expect(container.textContent).toContain("2M/5MToken");
+    expect(container.textContent).toContain("申请更多");
+    expect(container.textContent).not.toContain("查看用量详情");
+    expect(container.textContent).not.toContain("Token 用量详情");
+    const applyMoreButton = [...container.querySelectorAll("button")]
+      .find((button) => button.textContent === "申请更多");
+    expect(applyMoreButton?.className).toContain("bg-status-error rounded-btn");
 
     const sceneHeading = [...container.querySelectorAll("h2")]
       .find((heading) => heading.textContent === "平台赠送额度");
@@ -148,13 +146,11 @@ describe("SettingsPage platform scene quota details", () => {
     act(() => {
       root.render(
         <I18nProvider language="zh-CN">
-          <UsageDetailView
+          <UsageDetails
             showPlatform
             platformUsage={emptyPlatformUsage()}
             byokUsage={byokUsage}
             byokUsageStatus="ready"
-            workspaceMode="account"
-            onBack={vi.fn()}
           />
         </I18nProvider>
       );
@@ -172,13 +168,11 @@ describe("SettingsPage platform scene quota details", () => {
     act(() => {
       root.render(
         <I18nProvider language="zh-CN">
-          <UsageDetailView
+          <UsageDetails
             showPlatform={false}
             platformUsage={emptyPlatformUsage()}
             byokUsage={byokUsage}
             byokUsageStatus="ready"
-            workspaceMode="byok"
-            onBack={vi.fn()}
           />
         </I18nProvider>
       );
@@ -186,6 +180,47 @@ describe("SettingsPage platform scene quota details", () => {
 
     expect(container.textContent).not.toContain("平台赠送额度");
     expect(container.textContent).toContain("自定义 API Key 消耗");
+  });
+
+  it("places the BYOK updated time beside the outer Token usage heading", async () => {
+    const byokUsage: ByokTokenUsageSummary = {
+      inputTokens: 1,
+      outputTokens: 1,
+      totalTokens: 2,
+      cachedInputTokens: 0,
+      cacheCreationInputTokens: 0,
+      updatedAt: "2026-08-11T12:00:00.000Z",
+      byKind: [],
+      byProvider: [],
+      byModel: []
+    };
+
+    await act(async () => {
+      root.render(
+        <I18nProvider language="zh-CN">
+          <SettingsPageView
+            state={createInitialAppState()}
+            dispatch={vi.fn()}
+            byokTokenUsageClient={{ getSummary: vi.fn(async () => byokUsage) }}
+            update={{
+              appVersion: "1.0.4",
+              phase: "idle",
+              preparedUpdatePath: null,
+              downloadProgress: null,
+              feedback: null,
+              requestPrimaryAction: vi.fn(async () => undefined)
+            }}
+          />
+        </I18nProvider>
+      );
+      await Promise.resolve();
+    });
+
+    const tokenUsageHeading = [...container.querySelectorAll("#token-usage h2")]
+      .find((heading) => heading.textContent === "Token 用量");
+    const tokenUsageHeader = tokenUsageHeading?.parentElement?.parentElement;
+    expect(tokenUsageHeader?.textContent).toContain("更新于");
+    expect(tokenUsageHeader?.className).toContain("justify-between");
   });
 });
 

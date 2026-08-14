@@ -28,6 +28,7 @@ interface ConfigFieldProps {
   placeholder: string;
   value: string;
   onChange: (value: string) => void;
+  maxLength?: number;
   suffix?: string;
   readOnly?: boolean;
 }
@@ -67,6 +68,7 @@ export function ConfigField(props: ConfigFieldProps) {
           placeholder={props.placeholder}
           value={props.value}
           readOnly={props.readOnly}
+          maxLength={props.maxLength}
           onChange={(event) => props.onChange(event.target.value)}
           className={`${API_KEY_INPUT_CLASS} w-full read-only:cursor-default${props.suffix ? " pr-14" : ""}`}
         />

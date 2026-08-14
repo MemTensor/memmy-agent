@@ -27,6 +27,7 @@ import {
   ModelConfigTestInputSchema,
   ModelConfigTestResultSchema,
   ModelConfigViewSchema,
+  MODEL_NAME_MAX_LENGTH,
   PatchAppSettingsInputSchema,
   PatchOnboardingInputSchema,
   PatchPrivacyInputSchema,
@@ -37,10 +38,41 @@ import {
   SetImprovementProgramResponseSchema,
   SetSkinInputSchema,
   RequestConnectUrlResponseSchema,
+  TextModelItemInputSchema,
+  TextModelItemViewSchema,
   VerifyCodeInputSchema
 } from "@memmy/local-api-contracts";
 
 describe("local app contracts", () => {
+  it("limits newly saved model names without constraining normal names", () => {
+    const modelInput = {
+      endpointId: "primary",
+      source: "byok" as const,
+      capabilities: ["agent" as const]
+    };
+
+    expect(TextModelItemInputSchema.parse({
+      ...modelInput,
+      model: "gpt-4.1-mini"
+    }).model).toBe("gpt-4.1-mini");
+    expect(TextModelItemInputSchema.safeParse({
+      ...modelInput,
+      model: "m".repeat(MODEL_NAME_MAX_LENGTH)
+    }).success).toBe(true);
+    expect(TextModelItemInputSchema.safeParse({
+      ...modelInput,
+      model: "m".repeat(MODEL_NAME_MAX_LENGTH + 1)
+    }).success).toBe(false);
+    expect(TextModelItemViewSchema.safeParse({
+      ...modelInput,
+      presetId: "legacy-long-model",
+      provider: "openai",
+      protocol: "openai-chat-completions",
+      model: "m".repeat(MODEL_NAME_MAX_LENGTH + 1),
+      available: true
+    }).success).toBe(true);
+  });
+
   it("accepts canonical BYOK and account ASR response identities", () => {
     expect(AsrTranscriptionResponseSchema.parse({
       text: "你好",

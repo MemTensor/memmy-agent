@@ -12,6 +12,7 @@ import type { MessageKey } from "../i18n/messages.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { appActions } from "../state/app-actions.js";
 import { useAppState } from "../state/app-state.js";
+import { writeSettingsTabHash } from "./settings-nav.js";
 import { SidebarResizeHandle, useCodexResizableSidebar } from "./sidebar-resize.js";
 import { AnalyticsSubPage } from "./memory/analytics-sub-page.js";
 import { LogsSubPage } from "./memory/logs-sub-page.js";
@@ -139,7 +140,10 @@ export function MemoryPage(props: MemoryPageProps) {
         <MemoriesSubPage
           client={client}
           openRequest={referenceRequest?.page === "memories" ? referenceRequest : undefined}
-          onOpenSettings={() => dispatch(appActions.navigate("/settings"))}
+          onOpenSettings={() => {
+            writeSettingsTabHash("model");
+            dispatch(appActions.navigate("/settings"));
+          }}
         />
       ),
       tasks: <TasksSubPage client={client} openRequest={referenceRequest?.page === "tasks" ? referenceRequest : undefined} />,

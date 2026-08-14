@@ -110,6 +110,19 @@ export function resolveHermesHomeDirectory(options: ResolveAgentPathOptions = {}
   );
 }
 
+export function resolveDeepseekHarnessHomeDirectory(options: ResolveAgentPathOptions = {}): string {
+  const runtime = createAgentPathRuntime(options);
+  return resolveConfiguredDirectory(
+    runtime.environment.DSH_HOME,
+    runtime.pathApi.join(runtime.homeDirectory, ".dsh"),
+    runtime
+  );
+}
+
+export function resolveDeepseekHarnessSessionsDirectory(options: ResolveAgentPathOptions = {}): string {
+  return createAgentPathRuntime(options).pathApi.join(resolveDeepseekHarnessHomeDirectory(options), "sessions");
+}
+
 export function resolveWorkbuddyHomeDirectory(options: ResolveAgentPathOptions = {}): string {
   const runtime = createAgentPathRuntime(options);
   return resolveConfiguredDirectory(

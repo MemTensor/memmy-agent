@@ -954,6 +954,7 @@ export class MemoryService {
     mmrLambda: number;
     rrfConstant: number;
     relativeThresholdFloor: number;
+    minRecallScore: number;
     minSkillEta: number;
     minTraceSim: number;
     episodeGoalMinSim: number;

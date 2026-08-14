@@ -26,6 +26,11 @@ for (const relativePath of derivedManifests) {
   });
 }
 
+await updateText(
+  "App/backend/src/project-version.ts",
+  `/** Generated from the root package.json by scripts/sync-project-version.mjs. */\nexport const MEMMY_VERSION = ${JSON.stringify(version)};\n`
+);
+
 await updateJson("package-lock.json", (json) => {
   json.version = version;
   json.packages[""].version = version;
@@ -50,6 +55,17 @@ async function updateJson(relativePath, update) {
   const json = JSON.parse(currentText);
   update(json);
   const nextText = `${JSON.stringify(json, null, 2)}\n`;
+  if (nextText === currentText) return;
+  if (checkOnly) {
+    staleFiles.push(relativePath);
+    return;
+  }
+  await writeFile(absolutePath, nextText, "utf8");
+}
+
+async function updateText(relativePath, nextText) {
+  const absolutePath = join(root, relativePath);
+  const currentText = await readFile(absolutePath, "utf8");
   if (nextText === currentText) return;
   if (checkOnly) {
     staleFiles.push(relativePath);

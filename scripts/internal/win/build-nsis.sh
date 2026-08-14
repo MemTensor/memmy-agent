@@ -239,18 +239,24 @@ install_better_sqlite3_prebuild_with_download_fallback() {
 }
 
 create_memory_runtime_manifest() {
-  node - "$ROOT_DIR/package.json" "$MEMORY_DIR/package.json" "$RUNTIME_DIR/memory/package.json" <<'NODE'
+  node - "$ROOT_DIR/package.json" "$MEMORY_DIR/package.json" "$ROOT_DIR/App/backend/local-api-contracts/package.json" "$MIGRATIONS_DIR/package.json" "$RUNTIME_DIR/memory/package.json" <<'NODE'
 const { readFileSync, writeFileSync } = require("node:fs");
 
-const [projectPackagePath, sourcePackagePath, runtimePackagePath] = process.argv.slice(2);
+const [projectPackagePath, sourcePackagePath, contractsPackagePath, migrationsPackagePath, runtimePackagePath] = process.argv.slice(2);
 const projectPackage = JSON.parse(readFileSync(projectPackagePath, "utf8"));
 const sourcePackage = JSON.parse(readFileSync(sourcePackagePath, "utf8"));
+const contractsPackage = JSON.parse(readFileSync(contractsPackagePath, "utf8"));
+const migrationsPackage = JSON.parse(readFileSync(migrationsPackagePath, "utf8"));
+const dependencies = { ...(sourcePackage.dependencies ?? {}) };
+delete dependencies["@memmy/local-api-contracts"];
+delete dependencies["@memmy/migrations"];
+Object.assign(dependencies, contractsPackage.dependencies, migrationsPackage.dependencies);
 const runtimePackage = {
   name: "@memmy/packaged-memory-runtime",
   version: projectPackage.version,
   private: true,
   type: "module",
-  dependencies: sourcePackage.dependencies ?? {}
+  dependencies
 };
 
 writeFileSync(runtimePackagePath, `${JSON.stringify(runtimePackage, null, 2)}\n`);
@@ -286,11 +292,6 @@ EOF
 }
 
 create_memory_runtime_lock() {
-  if [ -f "$MEMORY_DIR/package-lock.json" ]; then
-    cp "$MEMORY_DIR/package-lock.json" "$RUNTIME_DIR/memory/package-lock.json"
-    return
-  fi
-
   npm install --prefix "$RUNTIME_DIR/memory" --package-lock-only --ignore-scripts --os=win32 --cpu=x64
 }
 
@@ -381,6 +382,9 @@ EOF
 
 verify_windows_native_module() {
   local better_sqlite_node="$RUNTIME_DIR/memory/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
+
+  require_packaged_runtime_file "$RUNTIME_DIR/memory/node_modules/@memmy/local-api-contracts/dist/index.js"
+  require_packaged_runtime_file "$RUNTIME_DIR/memory/node_modules/@memmy/migrations/dist/index.js"
 
   if [ ! -f "$better_sqlite_node" ]; then
     echo "Missing better-sqlite3 native module: $better_sqlite_node" >&2
@@ -496,6 +500,9 @@ npm_with_configured_script_shell install --workspace @memmy/migrations --include
 log "Building migrations package"
 npm_with_configured_script_shell run build --prefix "$MIGRATIONS_DIR"
 
+log "Building local API contracts package"
+npm_with_configured_script_shell run build -w @memmy/local-api-contracts
+
 log "Installing memmy-agent dependencies"
 PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm_with_configured_script_shell ci --prefix "$AGENT_DIR"
 
@@ -523,6 +530,11 @@ create_memory_runtime_manifest
 
 log "Installing Windows x64 Memory runtime dependencies"
 npm_ci_win_x64 "$RUNTIME_DIR/memory"
+mkdir -p "$RUNTIME_DIR/memory/node_modules/@memmy/local-api-contracts" "$RUNTIME_DIR/memory/node_modules/@memmy/migrations"
+cp "$ROOT_DIR/App/backend/local-api-contracts/package.json" "$RUNTIME_DIR/memory/node_modules/@memmy/local-api-contracts/package.json"
+cp -R "$ROOT_DIR/App/backend/local-api-contracts/dist" "$RUNTIME_DIR/memory/node_modules/@memmy/local-api-contracts/dist"
+cp "$MIGRATIONS_STAGING_DIR/package.json" "$RUNTIME_DIR/memory/node_modules/@memmy/migrations/package.json"
+cp -R "$MIGRATIONS_STAGING_DIR/dist" "$RUNTIME_DIR/memory/node_modules/@memmy/migrations/dist"
 install_better_sqlite3_win_x64
 verify_windows_native_module
 verify_windows_onnxruntime_module

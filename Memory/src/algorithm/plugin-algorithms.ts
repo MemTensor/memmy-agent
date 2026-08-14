@@ -1567,6 +1567,7 @@ export interface RetrievalTuningConfig {
   mmrLambda?: number;
   rrfConstant?: number;
   relativeThresholdFloor?: number;
+  minRecallScore?: number;
   minSkillEta?: number;
   minTraceSim?: number;
   episodeGoalMinSim?: number;
@@ -3108,6 +3109,7 @@ const DEFAULT_RETRIEVAL_TUNING: Required<RetrievalTuningConfig> = {
   mmrLambda: 0.7,
   rrfConstant: 60,
   relativeThresholdFloor: 0.2,
+  minRecallScore: 0.2,
   minSkillEta: 0.1,
   minTraceSim: 0.25,
   episodeGoalMinSim: 0.45,
@@ -4236,8 +4238,14 @@ export function retrievePluginMemories(input: {
       )
     : thresholdSurvivors;
 
+  const ranked = mmrSelect(survivors, input.limit, config);
+  const minRecallScore = mode === "skill_invoke" ? 0 : config.minRecallScore;
+  const scoreSurvivors = minRecallScore > 0
+    ? ranked.filter((candidate) => candidate.score >= minRecallScore)
+    : ranked;
+  droppedByThreshold += ranked.length - scoreSurvivors.length;
   const selected = suppressFeedbackExperiencesCoveredBySkills(
-    dedupeTraceEpisodeByEpisodeId(mmrSelect(survivors, input.limit, config))
+    dedupeTraceEpisodeByEpisodeId(scoreSurvivors)
   );
   const kept = {
     tier1: selected.filter((candidate) => candidate.tier === "tier1").length,
@@ -5396,6 +5404,7 @@ function retrievalTuning(input: RetrievalTuningConfig | undefined): Required<Ret
     mmrLambda: clamp01(finiteOr(input?.mmrLambda, DEFAULT_RETRIEVAL_TUNING.mmrLambda)),
     rrfConstant: Math.max(1, finiteOr(input?.rrfConstant, DEFAULT_RETRIEVAL_TUNING.rrfConstant)),
     relativeThresholdFloor: clamp01(finiteOr(input?.relativeThresholdFloor, DEFAULT_RETRIEVAL_TUNING.relativeThresholdFloor)),
+    minRecallScore: clamp01(finiteOr(input?.minRecallScore, DEFAULT_RETRIEVAL_TUNING.minRecallScore)),
     minSkillEta: clamp01(finiteOr(input?.minSkillEta, DEFAULT_RETRIEVAL_TUNING.minSkillEta)),
     minTraceSim: clamp01(finiteOr(input?.minTraceSim, DEFAULT_RETRIEVAL_TUNING.minTraceSim)),
     episodeGoalMinSim: clamp01(finiteOr(input?.episodeGoalMinSim, DEFAULT_RETRIEVAL_TUNING.episodeGoalMinSim)),

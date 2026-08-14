@@ -2,6 +2,7 @@ import { createClaudeCodeSourceAdapter } from "../adapters/outbound/agent-source
 import { createCodexSourceAdapter } from "../adapters/outbound/agent-source/codex/index.js";
 import { createCursorSourceAdapter } from "../adapters/outbound/agent-source/cursor/index.js";
 import { createHermesSourceAdapter } from "../adapters/outbound/agent-source/hermes/index.js";
+import { createDeepseekHarnessSourceAdapter } from "../adapters/outbound/agent-source/deepseek-harness/index.js";
 import { createOpenclawSourceAdapter } from "../adapters/outbound/agent-source/openclaw/index.js";
 import { createOpencodeSourceAdapter } from "../adapters/outbound/agent-source/opencode/index.js";
 import { createPiSourceAdapter } from "../adapters/outbound/agent-source/pi/index.js";
@@ -17,6 +18,7 @@ export function createBuiltinAgentSourceRegistry(): SourceRegistry {
     createOpencodeSourceAdapter(),
     createOpenclawSourceAdapter(),
     createHermesSourceAdapter(),
+    createDeepseekHarnessSourceAdapter(),
     createWorkbuddySourceAdapter(),
     createPiSourceAdapter(),
     createQwenworkSourceAdapter()

@@ -1,5 +1,5 @@
 import { AlertTriangle, Check, CheckCircle2, ChevronDown, ChevronUp, Database, Info, KeyRound, Loader2, Pencil, Plus, Trash2, Wrench, X, XCircle } from "lucide-react";
-import type { ModelEndpointProtocol } from "@memmy/local-api-contracts";
+import { MODEL_NAME_MAX_LENGTH, type ModelEndpointProtocol } from "@memmy/local-api-contracts";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ConfigClient, ModelProviderConfig } from "../api/config-client.js";
 import { Button } from "../components/button.js";
@@ -39,6 +39,14 @@ import {
   settingsTabHash,
   shouldOpenAddModelFromHash
 } from "./settings-nav.js";
+import {
+  connectionTestSignature,
+  readConnectionTestStates,
+  removeConnectionTestState,
+  writeConnectionTestState,
+  type StoredConnectionTestState,
+  type StoredConnectionTestStatus
+} from "./model-workspace-connection-test-state.js";
 
 type TestStatus = "idle" | "testing" | "success" | "error";
 export type ModelKind = "text" | "embedding" | "asr" | "image";
@@ -110,8 +118,12 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
   const [savePending, setSavePending] = useState(false);
   const saveInFlightRef = useRef(false);
   const hasMutatedRef = useRef(false);
-  const [testStates, setTestStates] = useState<Record<string, ConnectionTestState>>({});
+  const [testStates, setTestStates] = useState<Record<string, StoredConnectionTestState>>({});
   const space = workspace.spaces[props.mode];
+  const connectionTestIdentity = space.connections
+    .map((connection) => `${connection.id}:${connectionTestSignature(connection)}`)
+    .sort()
+    .join("|");
   const textCandidates = getModelCandidates(workspace, props.mode, "chat");
   const memorySummaryCandidates = getModelCandidates(workspace, props.mode, "memorySummary");
   const memoryEvolutionCandidates = getModelCandidates(workspace, props.mode, "memoryEvolution");
@@ -130,7 +142,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
   const nextAvailableProvider = availableProviders[0];
   const canAddConnection = Boolean(nextAvailableProvider);
 
-  function commitWorkspace(next: typeof workspace): boolean {
+  function commitWorkspace(next: typeof workspace, onSaved?: (savedWorkspace: typeof workspace) => void): boolean {
     if (saveInFlightRef.current) return false;
     setWorkspace(next);
     setSaveError(null);
@@ -141,10 +153,12 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
       void (async () => {
         try {
           const saved = await props.configClient!.saveModelCatalog(modelConfigInput(next));
-          setWorkspace(createModelWorkspace(saved));
+          const savedWorkspace = createModelWorkspace(saved);
+          setWorkspace(savedWorkspace);
           props.onConfigSaved?.(saved);
+          onSaved?.(savedWorkspace);
         } catch (error) {
-          setSaveError(error instanceof Error && error.message ? error.message : t("settings.modelWorkspace.saveFailed"));
+          setSaveError(modelWorkspaceErrorText(error, t));
           try {
             const latest = await props.configClient!.getModelConfig();
             setWorkspace(createModelWorkspace(latest));
@@ -157,6 +171,8 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
           setSavePending(false);
         }
       })();
+    } else {
+      onSaved?.(next);
     }
     return true;
   }
@@ -166,13 +182,29 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
   }, [props.seedConfig]);
 
   useEffect(() => {
+    const restored = readConnectionTestStates(
+      space.connections,
+      modelConnectionTestStorage()
+    );
+    setTestStates((current) => {
+      const currentValid = Object.fromEntries(space.connections.flatMap((connection) => {
+        const state = current[connection.id];
+        return state?.signature === connectionTestSignature(connection)
+          ? [[connection.id, state]]
+          : [];
+      }));
+      return { ...restored, ...currentValid };
+    });
+  }, [connectionTestIdentity]);
+
+  useEffect(() => {
     if (!props.configClient) return;
     let active = true;
     void props.configClient.getModelConfig().then((saved) => {
       if (!active || hasMutatedRef.current) return;
       setWorkspace(createModelWorkspace(saved));
       props.onConfigSaved?.(saved);
-    }).catch((error) => setSaveError(error instanceof Error && error.message ? error.message : t("settings.modelWorkspace.saveFailed")));
+    }).catch((error) => setSaveError(modelWorkspaceErrorText(error, t)));
     return () => { active = false; };
   }, [props.configClient]);
 
@@ -234,8 +266,11 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
 
   function openEditConnection(connection: ModelConnection) {
     const provider = protocolFromConnection(connection.provider);
+    const savedTest = connectionTestState(connection, testStates);
     setFormError(null);
-    setEditorTest(testStates[connection.id] ?? { status: "idle", message: null });
+    setEditorTest(savedTest
+      ? { status: savedTest, message: connectionTestMessage(savedTest, t) }
+      : { status: "idle", message: null });
     setShowEditorApiKey(false);
     setEditor({
       connectionId: connection.id,
@@ -361,10 +396,35 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
           [...new Set([...existingTaskIds, ...savedTaskIds])]
         )
       : workspaceWithAvailability;
-    if (commitWorkspace(nextWorkspace)) {
-      if (savedConnection && editorTest.status !== "idle") {
-        setTestStates((current) => ({ ...current, [savedConnection.id]: editorTest }));
+    const savedTestStatus: StoredConnectionTestStatus | null = editorTest.status === "success" || editorTest.status === "error"
+      ? editorTest.status
+      : null;
+    const persistTestState = (savedWorkspace: typeof workspace) => {
+      const storage = modelConnectionTestStorage();
+      if (editor.connectionId && editor.connectionId !== savedConnection?.id) {
+        removeConnectionTestState(editor.connectionId, storage);
       }
+      if (!savedConnection) return;
+      const canonicalConnection = savedWorkspace.spaces[props.mode].connections
+        .find((connection) => connection.id === savedConnection.id);
+      if (savedTestStatus && canonicalConnection) {
+        writeConnectionTestState(canonicalConnection, savedTestStatus, storage);
+      } else {
+        removeConnectionTestState(savedConnection.id, storage);
+      }
+    };
+    if (commitWorkspace(nextWorkspace, persistTestState)) {
+      setTestStates((current) => {
+        const next = { ...current };
+        if (editor.connectionId) delete next[editor.connectionId];
+        if (savedConnection && savedTestStatus) {
+          next[savedConnection.id] = {
+            status: savedTestStatus,
+            signature: connectionTestSignature(savedConnection)
+          };
+        }
+        return next;
+      });
       closeEditor();
     }
   }
@@ -455,12 +515,21 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
 
   function confirmDeleteConnection() {
     if (!deleteTarget) return;
+    const deletedConnectionId = deleteTarget.id;
     const result = deleteModelConnection(workspace, props.mode, deleteTarget.id);
     if (result.error) {
-      setSaveError(t("settings.modelWorkspace.saveFailed"));
+      setSaveError(mutationErrorText(result.error, t));
       return;
     }
-    if (commitWorkspace(result.workspace)) {
+    if (commitWorkspace(result.workspace, () => removeConnectionTestState(
+      deletedConnectionId,
+      modelConnectionTestStorage()
+    ))) {
+      setTestStates((current) => {
+        const next = { ...current };
+        delete next[deletedConnectionId];
+        return next;
+      });
       setDeleteTarget(null);
     }
   }
@@ -627,6 +696,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
           </button>
         </div>
       )}
+      <div>
       <section>
         <div className="mb-3 flex items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-2">
@@ -706,11 +776,14 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
           )}
 
           {space.connections.map((connection) => {
-            const test = testStates[connection.id] ?? (
+            const storedTestStatus = connectionTestState(connection, testStates);
+            const test = storedTestStatus
+              ? { status: storedTestStatus, message: connectionTestMessage(storedTestStatus, t) }
+              : (
               connection.available === false
                 ? { status: "error" as const, message: t("settings.modelWorkspace.testFailed") }
                 : { status: "idle" as const, message: null }
-            );
+              );
             return (
               <article key={connection.id} className="rounded-card border-content-panel bg-canvas-oat/40 p-4">
                 <div className="flex items-start justify-between gap-3">
@@ -733,8 +806,9 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
                     <button
                       type="button"
                       onClick={() => setDeleteTarget(connection)}
+                      disabled={props.mode === "byok" && space.connections.length <= 1}
                       aria-label={t("settings.modelWorkspace.deleteConnection", { provider: connection.provider })}
-                      className="rounded-btn p-1.5 text-text-ink/45 hover:bg-status-error-soft hover:text-status-error"
+                      className="rounded-btn p-1.5 text-text-ink/45 hover:bg-status-error-soft hover:text-status-error disabled:cursor-not-allowed disabled:opacity-35"
                     >
                       <Trash2 size={13} aria-hidden="true" />
                     </button>
@@ -771,7 +845,14 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
         </div>
       </section>
 
-      <section>
+      {saveError && (
+        <div className="mt-2 mb-5 flex items-center gap-2 rounded-card bg-status-error-soft px-3 py-2 text-xs text-status-error" role="alert">
+          <AlertTriangle size={13} aria-hidden="true" />
+          {saveError}
+        </div>
+      )}
+
+      <section className={saveError ? undefined : "mt-8"}>
         <div className="mb-3 flex items-center gap-2">
           <Wrench size={16} className="text-text-ink/60" aria-hidden="true" />
           <h3 className="text-sm font-semibold text-text-ink">{t("settings.modelWorkspace.bindingTitle")}</h3>
@@ -834,7 +915,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
                             disabled={lastSelected}
                             title={lastSelected ? t("settings.modelWorkspace.taskAtLeastOne") : undefined}
                             onClick={() => toggleTaskCandidate(candidate.id)}
-                            className="contents"
+                            className="task-model-picker__choice"
                           >
                           <span className={`task-model-picker__checkbox${selected ? " is-selected" : ""}`}>
                             {selected && <Check size={11} strokeWidth={3} aria-hidden="true" />}
@@ -853,7 +934,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
                               type="button"
                               aria-pressed={isDefault}
                               onClick={() => chooseDefaultTaskCandidate(candidate.id)}
-                              className="ml-2 shrink-0 text-[10px] text-action-sky"
+                              className="task-model-picker__default-button shrink-0"
                             >
                               {isDefault
                                 ? t("settings.modelWorkspace.defaultModel")
@@ -919,13 +1000,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
           </div>
         </div>
       </section>
-
-      {saveError && (
-        <div className="flex items-center gap-2 rounded-card bg-status-error-soft px-3 py-2 text-xs text-status-error" role="alert">
-          <AlertTriangle size={13} aria-hidden="true" />
-          {saveError}
-        </div>
-      )}
+      </div>
 
       {editor && (
         <Modal
@@ -1040,7 +1115,9 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
                   onClick={() => setEditor({
                     ...editor,
                     modelDraft: "",
-                    capabilityDrafts: [...DEFAULT_TEXT_CAPABILITIES],
+                    capabilityDrafts: editorExistingConnection
+                      ? editorCapabilitiesForProtocol(editorExistingConnection.protocol)
+                      : [...DEFAULT_TEXT_CAPABILITIES],
                     addingModel: true,
                     editingModelIndex: null
                   })}
@@ -1079,8 +1156,9 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
                 <ConfigField
                   label={t("apiKey.model")}
                   value={editor.modelDraft}
+                  maxLength={MODEL_NAME_MAX_LENGTH}
                   onChange={(value) => {
-                    setEditor({ ...editor, modelDraft: value });
+                    setEditor({ ...editor, modelDraft: value.slice(0, MODEL_NAME_MAX_LENGTH) });
                     setFormError(null);
                   }}
                   placeholder={t("settings.modelWorkspace.modelPlaceholder")}
@@ -1143,7 +1221,9 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
       <ConfirmDialog
         open={Boolean(deleteTarget)}
         title={t("settings.modelWorkspace.deleteTitle")}
-        message={t("settings.modelWorkspace.deleteConfirm", { provider: deleteTarget?.provider ?? "" })}
+        message={t("settings.modelWorkspace.deleteConfirm", {
+          provider: deleteTarget ? connectionProtocolLabel(deleteTarget.provider, t) : ""
+        })}
         cancelLabel={t("common.cancel")}
         closeLabel={t("common.close")}
         confirmLabel={t("common.delete")}
@@ -1187,7 +1267,7 @@ function ProviderModelList(props: {
             index > 0 ? "border-t border-border-stone/30" : ""
           }`}
         >
-          <span className="min-w-0 truncate text-sm text-text-ink/70" title={item.model}>
+          <span className="min-w-0 flex-1 truncate text-sm text-text-ink/70" title={item.model}>
             {item.model}
           </span>
           <div className="flex shrink-0 items-center gap-1.5">
@@ -1305,6 +1385,32 @@ function ConnectionStatus(props: { status: TestStatus }) {
   );
 }
 
+function connectionTestState(
+  connection: ModelConnection,
+  states: Record<string, StoredConnectionTestState>
+): StoredConnectionTestStatus | null {
+  const state = states[connection.id];
+  return state?.signature === connectionTestSignature(connection) ? state.status : null;
+}
+
+function connectionTestMessage(
+  status: StoredConnectionTestStatus,
+  t: ReturnType<typeof useTranslation>["t"]
+): string {
+  return t(status === "success"
+    ? "settings.modelWorkspace.testSuccess"
+    : "settings.modelWorkspace.testFailed");
+}
+
+function modelConnectionTestStorage(): Storage | undefined {
+  if (typeof window === "undefined") return undefined;
+  try {
+    return window.sessionStorage;
+  } catch {
+    return undefined;
+  }
+}
+
 function candidateOption(
   value: string,
   providerLabel: string,
@@ -1352,6 +1458,13 @@ function protocolForEditor(provider: Protocol, capability: ModelCapability): Mod
   if (provider === "anthropic") return "anthropic-messages";
   if (provider === "gemini") return "gemini-generate-content";
   return "openai-chat-completions";
+}
+
+function editorCapabilitiesForProtocol(protocol: ModelEndpointProtocol): ModelCapability[] {
+  if (protocol === "openai-embeddings") return ["embedding"];
+  if (protocol === "dashscope-input-audio-chat") return ["asr"];
+  if (protocol === "openai-images" || protocol === "dashscope-multimodal-generation") return ["image"];
+  return [...DEFAULT_TEXT_CAPABILITIES];
 }
 
 export function editorProtocolForCapabilities(
@@ -1456,8 +1569,21 @@ function mutationErrorText(
   if (error === "duplicate_provider") return t("settings.modelWorkspace.duplicateProvider");
   if (error === "duplicate_model") return t("settings.modelWorkspace.duplicateModel");
   if (error === "invalid_model") return t("settings.modelWorkspace.invalidModel");
+  if (error === "incompatible_model_capabilities") return t("settings.modelWorkspace.incompatibleModelCapabilities");
   if (error === "connection_not_found") return t("settings.modelWorkspace.connectionMissing");
   return t("settings.modelWorkspace.invalidConnection");
+}
+
+function modelWorkspaceErrorText(
+  error: unknown,
+  t: ReturnType<typeof useTranslation>["t"]
+): string {
+  const code = error && typeof error === "object" && "code" in error ? error.code : null;
+  if (code === "model_config_changed") return t("settings.model.configChanged");
+  if (code === "config_write_busy") return t("settings.modelWorkspace.saveBusy");
+  return error instanceof Error && error.message
+    ? error.message
+    : t("settings.modelWorkspace.saveFailed");
 }
 
 async function simulateConnectionTest(): Promise<{ ok: boolean }> {

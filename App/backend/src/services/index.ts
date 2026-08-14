@@ -12,6 +12,7 @@ import { createClaudeCodeSkillTarget } from "../adapters/outbound/skill-writer/c
 import { createCodexSkillTarget } from "../adapters/outbound/skill-writer/codex/index.js";
 import { createCursorSkillTarget } from "../adapters/outbound/skill-writer/cursor/index.js";
 import { createHermesSkillTarget } from "../adapters/outbound/skill-writer/hermes/index.js";
+import { createDeepseekHarnessSkillTarget } from "../adapters/outbound/skill-writer/deepseek-harness/index.js";
 import { createOpenclawSkillTarget } from "../adapters/outbound/skill-writer/openclaw/index.js";
 import { createOpencodeSkillTarget } from "../adapters/outbound/skill-writer/opencode/index.js";
 import { createPiSkillTarget } from "../adapters/outbound/skill-writer/pi/index.js";
@@ -127,6 +128,7 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       createOpencodeSkillTarget(),
       createOpenclawSkillTarget({ memmyConfigPath: options.memmyConfigPath }),
       createHermesSkillTarget({ memmyConfigPath: options.memmyConfigPath }),
+      createDeepseekHarnessSkillTarget({ memmyConfigPath: options.memmyConfigPath }),
       createWorkbuddySkillTarget(),
       createPiSkillTarget(),
       createQwenworkSkillTarget()

@@ -1986,13 +1986,20 @@ export class AgentLoop {
         return { outcome: "already_dequeued" as const, revision };
       }
       const slots = this.turnSlots.get(sessionKey) ?? [];
-      const activeSlot = slots.find((slot) => (
-        slot.turnId === expectedTurnId
-        && slot.state === "running"
-        && slot.acceptingSteer
-        && sharedTurnSource(slot.root)?.kind === "gui"
-        && sharedTurnSource(slot.root)?.channel === "websocket"
-      ));
+      const activeGoal = this.goalRuntime.get(sessionKey);
+      const activeGoalRoute = this.goalRuntime.route(sessionKey);
+      const activeSlot = slots.find((slot) => {
+        const source = sharedTurnSource(slot.root);
+        const ownsGuiTurn = source?.kind === "gui" && source.channel === "websocket";
+        const ownsLegacyGuiGoalTurn = !source
+          && activeGoal?.status === "active"
+          && activeGoalRoute?.channel === slot.root.channel
+          && activeGoalRoute.chatId === slot.root.chatId;
+        return slot.turnId === expectedTurnId
+          && slot.state === "running"
+          && slot.acceptingSteer
+          && (ownsGuiTurn || ownsLegacyGuiGoalTurn);
+      });
       if (!activeSlot) return { outcome: "not_steerable" as const, revision };
 
       const queuedSlot = slots.find((slot) => (
@@ -3705,7 +3712,11 @@ export class AgentLoop {
       ctx.msg.channel,
       ctx.msg.chatId,
       ctx.msg.metadata?.message_id ?? ctx.msg.metadata?.messageId ?? null,
-      { ...(ctx.msg.metadata ?? {}), ...turnMetadata(ctx.turnId) },
+      {
+        ...(ctx.msg.metadata ?? {}),
+        ...(sharedTurnSource(ctx.msg) ? { turn_source: sharedTurnSource(ctx.msg)! } : {}),
+        ...turnMetadata(ctx.turnId),
+      },
       ctx.sessionKey,
       sessionWorkspace,
       ctx.tools,

@@ -8,6 +8,7 @@ import { renderMemmyPluginSkillManifest } from "../templates/memmy-plugin.js";
 import { renderMemmySkillBootstrapManifest } from "../templates/memmy-skill-directory.js";
 import type { MemoryPluginConflict, SkillManifest, SkillTarget } from "../types.js";
 import { resolveHermesHomeDirectory } from "../../agent-paths.js";
+import { MEMMY_VERSION } from "../../../../project-version.js";
 
 const HERMES_TARGET_ID = "hermes";
 const HERMES_DISPLAY_NAME = "Hermes";
@@ -328,13 +329,13 @@ function isNodeError(error: unknown): error is NodeJS.ErrnoException {
 }
 
 const HERMES_PLUGIN_YAML = `name: memmy-memory
-version: 0.1.0
+version: ${MEMMY_VERSION}
 kind: exclusive
 description: "Memmy local memory provider."
 `;
 
 const HERMES_COMMAND_PLUGIN_YAML = `name: memmy-resume
-version: 0.1.0
+version: ${MEMMY_VERSION}
 kind: standalone
 description: "Direct Memmy resume slash command."
 `;

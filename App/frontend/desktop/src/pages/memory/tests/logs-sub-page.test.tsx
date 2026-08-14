@@ -620,6 +620,7 @@ describe("LogsSubPage", () => {
     expect(html).toContain("memory-log-tool memory-log-tool--add");
     expect(html).toContain("memory-log-tool memory-log-tool--search");
     expect(html).toContain("memory-log-card");
+    expect(html).toContain("memory-log-tour-group");
     expect(html).not.toContain("rounded-card text-text-ink");
     expect(html).toContain("hermes");
     expect(html).toContain("memory-log-card__summary-tail");
@@ -627,6 +628,15 @@ describe("LogsSubPage", () => {
     expect(html).not.toContain("候选 0，保留 0");
     expect(html).not.toContain("query &quot;hermes&quot;");
     expect(html).not.toContain("h-2.5 w-2.5 rounded-full");
+  });
+
+  it("keeps the product-tour log group at the normal list spacing", () => {
+    const styles = readFileSync(stylesPath, "utf8");
+    const tourGroupRule = cssRule(styles, ".memory-log-tour-group");
+
+    expect(tourGroupRule).toContain("display: flex;");
+    expect(tourGroupRule).toContain("flex-direction: column;");
+    expect(tourGroupRule).toContain("gap: 10px;");
   });
 
   it("caps long log summaries before fixed search counts, duration, and date columns", () => {

@@ -38,6 +38,8 @@ describe("ModelPage source", () => {
     expect(pageSource).toContain('assignCatalogPreset(memory.workspace, "byok", "memory_summary"');
     expect(pageSource).toContain('assignCatalogPreset(evolution.workspace, "byok", "memory_evolution"');
     expect(pageSource).toContain('assignedCatalogEndpointId(workspace, "byok", "agent")');
+    expect(pageSource).toContain("const assignedMemoryEndpointId = mem.reuse");
+    expect(pageSource).toContain("const assignedEvolutionEndpointId = skill.reuse");
     expect(pageSource).toContain("!memoryValues.apiKey.trim() && memoryValues.apiKeyMasked");
     expect(pageSource).toContain("!evolutionValues.apiKey.trim() && evolutionValues.apiKeyMasked");
     expect(pageSource).toContain("createModelFormValues");
@@ -60,6 +62,10 @@ describe("ModelPage source", () => {
     expect(pageSource).not.toContain("RoleCard");
     expect(pageSource).not.toContain("function simulateTest");
     expect(pageSource).not.toContain("window.setTimeout");
+    expect(pageSource).toContain("modelPageSaveErrorText(error, t)");
+    expect(pageSource).not.toContain('t("login.error.modePersistenceFailed")');
+    expect(pageSource).not.toContain("MessageToast");
+    expect(pageSource).toContain('text-red-500">{saveFeedback.text}</p>');
     expect(routerSource).toContain('import { ModelPage } from "../pages/model-page.js";');
     expect(routerSource).toContain('case "/api-key-models":');
     expect(routerSource).toContain('case "/api-key-optional":');

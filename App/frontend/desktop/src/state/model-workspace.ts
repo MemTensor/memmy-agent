@@ -21,6 +21,7 @@ export type ModelWorkspaceMutationError =
   | "duplicate_model"
   | "invalid_connection"
   | "invalid_model"
+  | "incompatible_model_capabilities"
   | "connection_not_found";
 
 export interface ModelConnection {
@@ -402,7 +403,7 @@ export function upsertModelConnection(
   }
   const protocol = input.protocol ?? protocolFor(providerId, entries[0]!.capabilities[0]!);
   if (!protocolSupportsModelCapabilities(protocol, entries.flatMap((entry) => entry.capabilities))) {
-    return { workspace, error: "invalid_model" };
+    return { workspace, error: "incompatible_model_capabilities" };
   }
 
   const previousEndpointId = existingConnection?.endpointId;
@@ -494,16 +495,13 @@ export function deleteModelConnection(
   const provider = next.providers.find((item) => item.provider === connection.provider && !item.accountManaged);
   if (!provider) return { workspace, error: "connection_not_found" };
   const removedIds = provider.models.filter((item) => item.endpointId === connection.endpointId).map((item) => item.presetId);
-  const otherMode = mode === "account" ? "byok" : "account";
-  if (removedIds.some((presetId) => assignmentReferences(next.modelAssignments[otherMode], presetId))) {
-    return { workspace, error: "invalid_connection" };
-  }
   provider.endpoints = provider.endpoints.filter((item) => item.endpointId !== connection.endpointId);
   provider.models = provider.models.filter((item) => item.endpointId !== connection.endpointId);
   if (!provider.endpoints.length || !provider.models.length) {
     next.providers = next.providers.filter((item) => item !== provider);
   }
-  clearAssignmentReferences(next.modelAssignments[mode], removedIds);
+  clearAssignmentReferences(next.modelAssignments.byok, removedIds);
+  clearAssignmentReferences(next.modelAssignments.account, removedIds);
   refreshEffectiveCandidates(next);
   return { workspace: createModelWorkspace(next), error: null };
 }
@@ -792,16 +790,6 @@ function clearAssignmentReferences(assignment: ModelAssignment, removedIds: stri
   for (const key of ["memorySummary", "memoryEvolution", "embedding", "asr", "imageGeneration"] as const) {
     if (assignment[key] && removed.has(assignment[key]!)) assignment[key] = null;
   }
-}
-
-function assignmentReferences(assignment: ModelAssignment, presetId: string): boolean {
-  return assignment.agent.candidates.includes(presetId)
-    || assignment.agent.default === presetId
-    || assignment.memorySummary === presetId
-    || assignment.memoryEvolution === presetId
-    || assignment.embedding === presetId
-    || assignment.asr === presetId
-    || assignment.imageGeneration === presetId;
 }
 
 function refreshEffectiveCandidates(catalog: ModelConfigView): void {

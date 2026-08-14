@@ -151,7 +151,8 @@ function normalizedAgentSource(value: string | undefined): string | undefined {
   const normalized = value?.trim().toLowerCase();
   if (normalized === "claude") return "claude-code";
   if (normalized === "open-code") return "opencode";
-  return ["hermes", "openclaw", "codex", "cursor", "claude-code", "opencode", "workbuddy", "pi", "qwenwork"].includes(normalized ?? "")
+  if (normalized === "deepseek_harness") return "deepseek-harness";
+  return ["deepseek-harness", "hermes", "openclaw", "codex", "cursor", "claude-code", "opencode", "workbuddy", "pi", "qwenwork"].includes(normalized ?? "")
     ? normalized
     : undefined;
 }

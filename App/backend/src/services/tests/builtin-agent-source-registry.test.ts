@@ -12,12 +12,13 @@ describe("built-in agent source registry", () => {
       "opencode",
       "openclaw",
       "hermes",
+      "deepseek_harness",
       "workbuddy",
       "pi",
       "qwenwork"
     ]);
     expect(registry.require("workbuddy").descriptor.displayName).toBe("WorkBuddy");
     expect(registry.require("pi").descriptor.displayName).toBe("Pi");
-    expect(registry.require("qwenwork").descriptor.displayName).toBe("qwenwork");
+    expect(registry.require("qwenwork").descriptor.displayName).toBe("QwenWork");
   });
 });

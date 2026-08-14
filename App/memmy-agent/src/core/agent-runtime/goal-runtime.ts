@@ -938,7 +938,14 @@ export class GoalRuntime {
       }
       const entry = inbox[index]!;
       if (entry.turnId !== null) return { value: { outcome: "reserved" as const } };
-      const source = parseTurnSource(entry.metadata.turn_source);
+      const persistedSource = parseTurnSource(entry.metadata.turn_source);
+      const source = persistedSource ?? (
+        entry.channel === "websocket"
+        && entry.metadata.webui === true
+        && entry.metadata.webui_queue_surface === requiredQueueSurface
+          ? { kind: "gui" as const, channel: "websocket" }
+          : null
+      );
       if (
         source?.kind !== "gui"
         || source.channel !== "websocket"
@@ -968,12 +975,24 @@ export class GoalRuntime {
           senderId: entry.senderId,
           content: entry.content,
           media: [...entry.media],
-          metadata: structuredClone(entry.metadata),
+          metadata: {
+            ...structuredClone(entry.metadata),
+            turn_source: source,
+          },
           timestamp: entry.receivedAt,
           sessionKey,
           turnSource: source,
         },
       };
+      const goalRoute = readGoalRoute(session.metadata);
+      if (
+        goalRoute
+        && !goalRoute.source
+        && goalRoute.channel === entry.channel
+        && goalRoute.chatId === entry.chatId
+      ) {
+        session.metadata[GOAL_ROUTE_KEY] = { ...goalRoute, source };
+      }
       session.metadata[GOAL_TURN_INBOX_KEY] = inbox.filter(
         (_, itemIndex) => itemIndex !== index,
       );
@@ -1059,7 +1078,11 @@ export class GoalRuntime {
   }
 
   async enqueueUserMessage(sessionKey: string, message: InboundMessage): Promise<GoalTurnInboxEntry> {
-    const metadata = sanitizeGoalInboxMetadata(message.channel, message.metadata ?? {});
+    const source = message.turnSource ?? parseTurnSource(message.metadata?.turn_source);
+    const metadata = sanitizeGoalInboxMetadata(message.channel, {
+      ...(message.metadata ?? {}),
+      ...(source ? { turn_source: source } : {}),
+    });
     const id = typeof metadata.client_request_id === "string" ? metadata.client_request_id : randomUUID();
     return this.mutate(sessionKey, (session) => {
       const inbox = parseInbox(session.metadata[GOAL_TURN_INBOX_KEY]);

@@ -291,7 +291,7 @@ export function LogsSubPageView(props: LogsSubPageViewProps) {
       )}
       {props.state.status === "ready" && filteredLogs.length > 0 && (
         <div className="memory-list">
-          <div data-tour-anchor={PRODUCT_TOUR_MEMORY_LOGS_LIST_ANCHOR}>
+          <div className="memory-log-tour-group" data-tour-anchor={PRODUCT_TOUR_MEMORY_LOGS_LIST_ANCHOR}>
             {filteredLogs.slice(0, 2).map(renderLogCard)}
           </div>
           {filteredLogs.slice(2).map(renderLogCard)}

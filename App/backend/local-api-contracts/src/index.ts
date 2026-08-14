@@ -805,10 +805,12 @@ export const CatalogEndpointInputSchema = z.object({
 });
 export type CatalogEndpointInput = z.infer<typeof CatalogEndpointInputSchema>;
 
+export const MODEL_NAME_MAX_LENGTH = 128;
+
 export const TextModelItemInputSchema = z.object({
     presetId: z.string().trim().min(1).optional(),
     endpointId: z.string().trim().min(1),
-    model: z.string().trim().min(1),
+    model: z.string().trim().min(1).max(MODEL_NAME_MAX_LENGTH),
     source: ModelSourceSchema,
     ownerAccountId: z.string().trim().min(1).optional(),
     capabilities: z.array(ModelCapabilitySchema).min(1)

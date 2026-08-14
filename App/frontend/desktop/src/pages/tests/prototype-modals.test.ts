@@ -66,7 +66,7 @@ describe("2026-06-04 prototype modals", () => {
     expect(settingsSource).toContain("TOKEN_EXHAUSTED_APPLY_MORE_EVENT");
     expect(settingsSource).toContain("canApplyMoreByPromotion");
     expect(settingsSource).toContain('id="model-config"');
-    expect(settingsSource).toContain('sectionId="token-usage"');
+    expect(settingsSource).toContain('id="token-usage"');
   });
 
   it("保留旧弹窗偏好读取工具，但 Router 启动时不再全局阻断", () => {
