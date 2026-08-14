@@ -89,7 +89,7 @@ import {
 import { HistoryDagPanel, type HistoryDagPanelState } from "./history-dag-panel.js";
 import { LlmProviderLogo } from "./llm-provider-logo.js";
 import { Mic, Pause, Plus, Send } from "./memory/memory-prototype-icons.js";
-import { ArrowDown, Check, ChevronDown, CircleX, Folder, Plus as LucidePlus, RotateCw, X } from "lucide-react";
+import { ArrowDown, Check, ChevronDown, Folder, Plus as LucidePlus, RotateCw, Target, X } from "lucide-react";
 
 export { agentChatScopeKey, updateComposerDraftForScope };
 export { hydrateAgentThreadInBackground };
@@ -114,6 +114,7 @@ export function updateAgentComposerOverlayHeight(
 }
 const COMPOSER_SINGLE_LINE_HEIGHT_PX = 52;
 const COMPOSER_GOAL_COMMAND = "/goal" as const;
+const GOAL_MODE_AUXILIARY_COMMANDS = new Set(["/status", "/history-dag", "/last-compaction"]);
 const AGENT_CONVERSATION_BOTTOM_EPSILON_PX = 4;
 const SLASH_COMMAND_RETRY_DELAYS_MS = [300, 1000, 2500];
 /**
@@ -153,6 +154,28 @@ export function buildComposerCommandDraft(command: string | null, text: string):
     return text;
   }
   return `${command} ${text}`;
+}
+
+/** Resolves the visual command token only after an explicit palette selection. */
+export function resolveComposerCommandDraft(
+  draft: string,
+  selectedCommand: typeof COMPOSER_GOAL_COMMAND | null
+): ComposerCommandDraft {
+  const parsed = parseComposerCommandDraft(draft);
+  return selectedCommand === COMPOSER_GOAL_COMMAND && parsed.command === COMPOSER_GOAL_COMMAND
+    ? parsed
+    : { command: null, text: draft };
+}
+
+/** Keeps only non-destructive slash actions while composing a Goal objective. */
+export function filterGoalModeSlashCommands(
+  commands: SlashCommandPaletteItem[],
+  hasActiveConversation: boolean
+): SlashCommandPaletteItem[] {
+  return commands.filter((command) => (
+    GOAL_MODE_AUXILIARY_COMMANDS.has(command.command)
+    && (hasActiveConversation || command.command === "/last-compaction")
+  ));
 }
 const TRANSLATABLE_AGENT_ERROR_KEYS = new Set<MessageKey>([
   "home.media.error.sendUnsupported",
@@ -500,22 +523,24 @@ export function agentComposerPrimaryAction(input: {
 /** Displays the selected slash command as a removable composer token. */
 export function ComposerCommandChip(props: {
   command: string;
+  label?: string;
   removeLabel: string;
   onRemove: () => void;
 }) {
-  const label = props.command.replace(/^\//, "");
+  const label = props.label ?? props.command.replace(/^\//, "");
   return (
     <div className="composer-command-chip">
-      <span className="composer-command-chip__label">{label}</span>
       <button
         type="button"
-        className="composer-command-chip__remove"
+        className="composer-command-chip__leading"
         aria-label={`${props.removeLabel} ${label}`}
         title={`${props.removeLabel} ${label}`}
         onClick={props.onRemove}
       >
-        <CircleX size={14} aria-hidden="true" />
+        <Target size={14} strokeWidth={2} aria-hidden="true" className="composer-command-chip__icon composer-command-chip__icon--target" />
+        <X size={13} strokeWidth={2.25} aria-hidden="true" className="composer-command-chip__icon composer-command-chip__icon--remove" />
       </button>
+      <span className="composer-command-chip__label">{label}</span>
     </div>
   );
 }
@@ -812,6 +837,7 @@ export function HomePage() {
   const slashCommandsAttemptRef = useRef(0);
   const [slashMenuDismissed, setSlashMenuDismissed] = useState(false);
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
+  const [selectedComposerCommandsByScope, setSelectedComposerCommandsByScope] = useState<Record<string, typeof COMPOSER_GOAL_COMMAND>>({});
   const [recentSlashCommands, setRecentSlashCommands] = useState<string[]>(() => readRecentSlashCommands());
   const [statusPanel, setStatusPanel] = useState<StatusPanelState>({ open: false });
   const [lastCompactionPanel, setLastCompactionPanel] = useState<StatusPanelState>({ open: false });
@@ -866,7 +892,10 @@ export function HomePage() {
     selectedModelPreset
   );
   const input = composerDrafts[chatScopeKey] ?? "";
-  const composerCommandDraft = parseComposerCommandDraft(input);
+  const composerCommandDraft = resolveComposerCommandDraft(
+    input,
+    selectedComposerCommandsByScope[chatScopeKey] ?? null
+  );
   const selectedComposerCommand = composerCommandDraft.command;
   const composerInput = composerCommandDraft.text;
   const pendingAttachments = pendingAttachmentsByScope[chatScopeKey] ?? [];
@@ -1463,16 +1492,17 @@ export function HomePage() {
     argHint: "",
     synthetic: true
   };
-  const slashQuery = slashMenuDismissed || selectedComposerCommand
-    ? null
-    : slashQueryFromInput(composerInput);
+  const slashQuery = slashMenuDismissed ? null : slashQueryFromInput(composerInput);
   const localizedSlashCommands = localizeSlashCommands(slashCommands, language, t);
   const slashCommandsWithLocal = [
     lastCompactionSlashCommand,
     ...localizedSlashCommands.filter((command) => command.command !== "/last-compaction")
   ];
   const visibleSlashCommands = buildVisibleSlashCommands(slashCommandsWithLocal, state.agent.isSending, stopSlashCommand);
-  const filteredSlashCommands = slashQuery == null ? [] : filterSlashCommands(visibleSlashCommands, slashQuery, recentSlashCommands);
+  const modeVisibleSlashCommands = selectedComposerCommand
+    ? filterGoalModeSlashCommands(visibleSlashCommands, Boolean(state.agent.currentChatId))
+    : visibleSlashCommands;
+  const filteredSlashCommands = slashQuery == null ? [] : filterSlashCommands(modeVisibleSlashCommands, slashQuery, recentSlashCommands);
   const slashMenuOpen = filteredSlashCommands.length > 0;
   const displayConnectionStatus = state.agent.recoveryKind === "initial"
     ? "connecting"
@@ -1511,7 +1541,6 @@ export function HomePage() {
     hasIntent: hasComposerIntent
   });
   const composerSubmitDisabled = composerPrimaryAction === "stop" ? composerStopDisabled : composerSendDisabled;
-  const centerComposerControls = isComposerSingleLine && pendingAttachments.length === 0;
 
   useEffect(() => {
     if (selectedCommandIndex >= filteredSlashCommands.length) {
@@ -1991,6 +2020,19 @@ export function HomePage() {
     setComposerDraftForScope(chatScopeKey, value);
   }
 
+  function setSelectedComposerCommandForScope(scopeKey: string, command: typeof COMPOSER_GOAL_COMMAND | null) {
+    setSelectedComposerCommandsByScope((current) => {
+      if (current[scopeKey] === command) return current;
+      const next = { ...current };
+      if (command) {
+        next[scopeKey] = command;
+      } else {
+        delete next[scopeKey];
+      }
+      return next;
+    });
+  }
+
   function setPendingAttachmentsForScope(scopeKey: string, value: SetStateAction<PendingAttachment[]>) {
     const currentMap = pendingAttachmentsRef.current;
     const currentValue = currentMap[scopeKey] ?? [];
@@ -2038,7 +2080,6 @@ export function HomePage() {
     setSlashMenuDismissed(false);
     setSelectedCommandIndex(0);
     if (
-      !selectedComposerCommand &&
       slashQueryFromInput(value) != null &&
       clients?.memmyAgent &&
       slashCommandsRef.current.length === 0 &&
@@ -2050,6 +2091,7 @@ export function HomePage() {
 
   /** Removes the selected command token while preserving the typed message. */
   function clearSelectedComposerCommand() {
+    setSelectedComposerCommandForScope(chatScopeKey, null);
     setCurrentComposerDraft(composerInput);
     setSlashMenuDismissed(true);
     setSelectedCommandIndex(0);
@@ -2096,6 +2138,7 @@ export function HomePage() {
   }
 
   function resetComposerDraftUi(scopeKey = chatScopeKey) {
+    setSelectedComposerCommandForScope(scopeKey, null);
     for (const item of pendingAttachmentsRef.current[scopeKey] ?? []) {
       revokePendingAttachment(item);
     }
@@ -2240,6 +2283,10 @@ export function HomePage() {
    *
    * @param command The command item the user selected.
    */
+  function clearAuxiliarySlashQuery() {
+    setCurrentComposerDraft(buildComposerCommandDraft(selectedComposerCommand, ""));
+  }
+
   function selectSlashCommand(command: SlashCommandPaletteItem) {
     if (command.command === "/stop") {
       if (state.agent.isSending) {
@@ -2252,7 +2299,7 @@ export function HomePage() {
 
     if (command.command === "/status") {
       rememberSlashCommand(command.command);
-      setCurrentComposerDraft("");
+      clearAuxiliarySlashQuery();
       requestStatusPanel();
       inputRef.current?.focus();
       return;
@@ -2260,7 +2307,7 @@ export function HomePage() {
 
     if (command.command === "/last-compaction") {
       rememberSlashCommand(command.command);
-      setCurrentComposerDraft("");
+      clearAuxiliarySlashQuery();
       requestLastCompactionPanel();
       inputRef.current?.focus();
       return;
@@ -2268,8 +2315,17 @@ export function HomePage() {
 
     if (command.command === "/history-dag") {
       rememberSlashCommand(command.command);
-      setCurrentComposerDraft("");
+      clearAuxiliarySlashQuery();
       requestHistoryDagPanel();
+      inputRef.current?.focus();
+      return;
+    }
+
+    if (command.command === COMPOSER_GOAL_COMMAND) {
+      rememberSlashCommand(command.command);
+      setSelectedComposerCommandForScope(chatScopeKey, COMPOSER_GOAL_COMMAND);
+      setCurrentComposerDraft(`${COMPOSER_GOAL_COMMAND} `);
+      setSlashMenuDismissed(true);
       inputRef.current?.focus();
       return;
     }
@@ -2593,6 +2649,7 @@ export function HomePage() {
                   <div className="composer-command-chip-slot composer-command-chip-slot--home">
                     <ComposerCommandChip
                       command={selectedComposerCommand}
+                      label={t("home.command.goalChip")}
                       removeLabel={t("common.remove")}
                       onRemove={clearSelectedComposerCommand}
                     />
@@ -2601,7 +2658,7 @@ export function HomePage() {
                 <textarea
                   ref={inputRef}
                   value={composerInput}
-                  placeholder={t("home.input")}
+                  placeholder={selectedComposerCommand ? t("home.goal.input") : t("home.input")}
                   rows={3}
                   onChange={(event) => {
                     updateComposerInput(event.target.value);
@@ -2713,7 +2770,7 @@ export function HomePage() {
             </button>
           ) : null}
           <div ref={composerOverlayRef} className="agent-conversation-composer">
-            <div className="max-w-3xl mx-auto">
+            <div className="max-w-2xl mx-auto">
               <div className="agent-composer-flow">
                 {slashMenuOpen && (
                   <div className="agent-composer-popover absolute left-0 bottom-full mb-3 z-40" style={{ width: "min(448px, 100%)" }}>
@@ -2785,7 +2842,7 @@ export function HomePage() {
                     />
                   ) : null}
                   <div
-                    className="relative agent-composer-shell rounded-card-lg"
+                    className="relative agent-composer-shell agent-composer-shell--expanded rounded-card-lg"
                     onDragOver={handleComposerDragOver}
                     onDrop={handleComposerDrop}
                   >
@@ -2796,19 +2853,10 @@ export function HomePage() {
                       selectedLabel={t("home.media.addPhotoFile")}
                       t={t}
                     />
-                    {selectedComposerCommand ? (
-                      <div className={`composer-command-chip-slot composer-command-chip-slot--conversation ${centerComposerControls ? "top-1/2 -translate-y-1/2" : "bottom-2"}`}>
-                        <ComposerCommandChip
-                          command={selectedComposerCommand}
-                          removeLabel={t("common.remove")}
-                          onRemove={clearSelectedComposerCommand}
-                        />
-                      </div>
-                    ) : null}
                     <textarea
                       ref={inputRef}
                       value={composerInput}
-                      placeholder={t("home.input")}
+                      placeholder={selectedComposerCommand ? t("home.goal.input") : t("home.input")}
                       rows={1}
                       onChange={(event) => {
                         updateComposerInput(event.target.value);
@@ -2818,40 +2866,52 @@ export function HomePage() {
                       onPaste={handleComposerPaste}
                       className={`${isComposerSingleLine ? "agent-composer-input--single " : ""}${selectedComposerCommand ? "agent-composer-input--command-selected " : ""}agent-composer-input--conversation block w-full pl-4 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40`}
                     />
-                    <div className={`composer-actions absolute right-2.5 z-50 ${centerComposerControls ? "top-1/2 -translate-y-1/2" : "bottom-2"}`}>
-                      <AgentModelSelector
-                        mode={modelWorkspaceMode}
-                        scopeKey={modelSelectionScopeKey}
-                        disabled={isCurrentAgentRunning || isCreatingChat || messageSendInFlight}
-                        seedConfig={state.modelConfig}
-                      />
-                      <button
-                        type="button"
-                        aria-label={t("home.media.menu")}
-                        title={t("home.media.menu")}
-                        onClick={openMediaFilePicker}
-                        className="composer-action-btn"
-                      >
-                        <Plus size={15} strokeWidth={2} />
-                      </button>
-                      <button
-                        type="button"
-                        aria-label={t("home.voiceInput")}
-                        title={t("home.voiceInput")}
-                        disabled={asrRecorder.isTranscribing || asrRecorder.isStarting}
-                        onClick={toggleVoiceInput}
-                        className={`composer-action-btn${asrRecorder.isRecording ? " composer-action-btn--active" : ""}`}
-                      >
-                        {asrRecorder.isRecording ? <Pause size={15} strokeWidth={2} /> : <Mic size={15} strokeWidth={2} />}
-                      </button>
-                      <ComposerSubmitButton
-                        isSending={composerPrimaryAction === "stop"}
-                        disabled={composerSubmitDisabled}
-                        sendLabel={t("home.send")}
-                        stopLabel={t("home.stop")}
-                        variant="compact"
-                        onClick={composerPrimaryAction === "stop" ? stopCurrentTurn : () => void sendMessage()}
-                      />
+                    <div className="agent-composer-toolbar">
+                      <div className="agent-composer-toolbar__leading">
+                        {selectedComposerCommand ? (
+                          <ComposerCommandChip
+                            command={selectedComposerCommand}
+                            label={t("home.command.goalChip")}
+                            removeLabel={t("common.remove")}
+                            onRemove={clearSelectedComposerCommand}
+                          />
+                        ) : null}
+                      </div>
+                      <div className="composer-actions">
+                        <AgentModelSelector
+                          mode={modelWorkspaceMode}
+                          scopeKey={modelSelectionScopeKey}
+                          disabled={isCurrentAgentRunning || isCreatingChat || messageSendInFlight}
+                          seedConfig={state.modelConfig}
+                        />
+                        <button
+                          type="button"
+                          aria-label={t("home.media.menu")}
+                          title={t("home.media.menu")}
+                          onClick={openMediaFilePicker}
+                          className="composer-action-btn"
+                        >
+                          <Plus size={15} strokeWidth={2} />
+                        </button>
+                        <button
+                          type="button"
+                          aria-label={t("home.voiceInput")}
+                          title={t("home.voiceInput")}
+                          disabled={asrRecorder.isTranscribing || asrRecorder.isStarting}
+                          onClick={toggleVoiceInput}
+                          className={`composer-action-btn${asrRecorder.isRecording ? " composer-action-btn--active" : ""}`}
+                        >
+                          {asrRecorder.isRecording ? <Pause size={15} strokeWidth={2} /> : <Mic size={15} strokeWidth={2} />}
+                        </button>
+                        <ComposerSubmitButton
+                          isSending={composerPrimaryAction === "stop"}
+                          disabled={composerSubmitDisabled}
+                          sendLabel={t("home.send")}
+                          stopLabel={t("home.stop")}
+                          variant="compact"
+                          onClick={composerPrimaryAction === "stop" ? stopCurrentTurn : () => void sendMessage()}
+                        />
+                      </div>
                     </div>
                   </div>
                 </div>

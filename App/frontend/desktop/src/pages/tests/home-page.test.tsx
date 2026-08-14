@@ -8,7 +8,7 @@ import { MemmyAgentMessageRejectedError, MemmyAgentRequestError } from "../../ap
 import { AgentRuntimeBridge } from "../../app/agent-runtime-bridge.js";
 import { AppProviders } from "../../app/providers.js";
 import { FOCUSED_AGENT_CHAT_STORAGE_KEY } from "../../app/routes.js";
-import type { SlashCommandStorageLike } from "../agent-command-palette.js";
+import type { SlashCommandPaletteItem, SlashCommandStorageLike } from "../agent-command-palette.js";
 import { buildAgentDisplayUnits } from "../agent-thread-messages.js";
 import {
   AGENT_RESTART_STATE_STORAGE_KEY,
@@ -38,11 +38,13 @@ import {
   requestNewSessionReset,
   requestAgentRestart,
   requestAgentStop,
+  resolveComposerCommandDraft,
   shouldAcceptAgentStatusResult,
   submitAgentComposerMessage,
   updateAgentComposerOverlayHeight,
   updateComposerDraftForScope,
   fileToPendingAttachment,
+  filterGoalModeSlashCommands,
   filterProjectTargetPickerProjects,
   resolveProjectTargetPickerActiveIndex,
   validateAgentMediaFiles,
@@ -109,7 +111,7 @@ describe("HomePage", () => {
 
   it("renders Goal as a removable composer token without changing its wire-format command", () => {
     const html = renderToString(
-      <ComposerCommandChip command="/goal" removeLabel="移除" onRemove={() => undefined} />
+      <ComposerCommandChip command="/goal" label="目标" removeLabel="移除" onRemove={() => undefined} />
     );
     const source = readFileSync(homePageSourcePath, "utf8");
     const styles = readFileSync(stylesSourcePath, "utf8");
@@ -121,21 +123,57 @@ describe("HomePage", () => {
     expect(parseComposerCommandDraft("/goal ")).toEqual({ command: "/goal", text: "" });
     expect(parseComposerCommandDraft("/goal 完成目标")).toEqual({ command: "/goal", text: "完成目标" });
     expect(parseComposerCommandDraft("/goalkeeper")).toEqual({ command: null, text: "/goalkeeper" });
+    expect(resolveComposerCommandDraft("/goal", null)).toEqual({ command: null, text: "/goal" });
+    expect(resolveComposerCommandDraft("/goal ", "/goal")).toEqual({ command: "/goal", text: "" });
+    expect(resolveComposerCommandDraft("/goal 完成目标", "/goal")).toEqual({ command: "/goal", text: "完成目标" });
     expect(buildComposerCommandDraft("/goal", "完成目标")).toBe("/goal 完成目标");
     expect(buildComposerCommandDraft(null, "普通消息")).toBe("普通消息");
     expect(html).toContain('class="composer-command-chip"');
-    expect(html).toContain(">goal</span>");
-    expect(html).toContain('aria-label="移除 goal"');
-    expect(html).toContain("lucide-circle-x");
-    expect(chipStyles).toContain("height: 30px;");
-    expect(chipStyles).toContain("border-radius: 10px;");
+    expect(html).toContain(">目标</span>");
+    expect(html).toContain('aria-label="移除 目标"');
+    expect(html).toContain("lucide-target");
+    expect(html).toContain("lucide-x");
+    expect(chipStyles).toContain("height: 32px;");
+    expect(chipStyles).toContain("border-radius: 9px;");
+    expect(chipStyles).toContain("bottom: 12px;");
     expect(chipStyles).toContain(".composer-command-chip:hover");
+    expect(chipStyles).toContain("border: 0;");
     expect(chipStyles).toContain("opacity: 0;");
     expect(chipStyles).toContain("opacity: 1;");
+    expect(chipStyles).toContain("font-weight: 500;");
     expect(source.match(/<ComposerCommandChip/g)).toHaveLength(2);
     expect(source.match(/value=\{composerInput\}/g)).toHaveLength(2);
     expect(source).toContain("setCurrentComposerDraft(buildComposerCommandDraft(selectedComposerCommand, value));");
-    expect(styles).toContain(".agent-composer-shell textarea.agent-composer-input--command-selected");
+    expect(source).toContain("selectedComposerCommandsByScope[chatScopeKey] ?? null");
+    expect(source).toContain("setSelectedComposerCommandForScope(chatScopeKey, COMPOSER_GOAL_COMMAND);");
+    expect(source).toContain('label={t("home.command.goalChip")}');
+    expect(source).toContain('placeholder={selectedComposerCommand ? t("home.goal.input") : t("home.input")}');
+    expect(styles).toContain(".agent-composer-shell--expanded textarea.agent-composer-input--conversation");
+  });
+
+  it("allows only non-destructive slash actions while composing a Goal", () => {
+    const command = (value: string): SlashCommandPaletteItem => ({
+      command: value,
+      title: value,
+      description: value,
+      icon: "terminal",
+      argHint: "",
+      synthetic: true
+    });
+    const commands = ["/goal", "/new", "/status", "/history-dag", "/last-compaction"].map(command);
+    const source = readFileSync(homePageSourcePath, "utf8");
+
+    expect(filterGoalModeSlashCommands(commands, true).map((item) => item.command)).toEqual([
+      "/status",
+      "/history-dag",
+      "/last-compaction"
+    ]);
+    expect(filterGoalModeSlashCommands(commands, false).map((item) => item.command)).toEqual([
+      "/last-compaction"
+    ]);
+    expect(source).toContain("const slashQuery = slashMenuDismissed ? null : slashQueryFromInput(composerInput);");
+    expect(source).toContain("clearAuxiliarySlashQuery();");
+    expect(source).toContain('setCurrentComposerDraft(buildComposerCommandDraft(selectedComposerCommand, ""));');
   });
 
   it("在空白和已有会话 composer 都展示由 Agent state 隔离的 catalog preset 选择器", () => {
@@ -220,6 +258,7 @@ describe("HomePage", () => {
     expect(source).toContain("const lastCompactionSlashCommand: SlashCommandPaletteItem = {");
     expect(source).toContain('command: "/last-compaction"');
     expect(source).toContain("const slashCommandsWithLocal = [");
+    expect(source).toContain("lastCompactionSlashCommand,");
     expect(source).toContain('...localizedSlashCommands.filter((command) => command.command !== "/last-compaction")');
     expect(source).toContain("buildVisibleSlashCommands(slashCommandsWithLocal, state.agent.isSending, stopSlashCommand)");
     expect(source).toContain("{statusPanel.open && !slashMenuOpen && (");
@@ -537,24 +576,26 @@ describe("HomePage", () => {
     expect(isComposingKeyboardEvent({ nativeEvent: { isComposing: false, keyCode: 13 } } as any)).toBe(false);
   });
 
-  it("centers the composer controls only while the session composer is one line", () => {
+  it("keeps the conversation composer on the same expanded two-row layout as a new chat", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
 
     expect(source).toContain('${isComposerSingleLine ? "agent-composer-input--single " : ""}${selectedComposerCommand ? "agent-composer-input--command-selected " : ""}agent-composer-input--conversation block w-full pl-4 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40');
-    expect(source).toContain('centerComposerControls ? "top-1/2 -translate-y-1/2" : "bottom-2"');
+    expect(source).toContain('className="relative agent-composer-shell agent-composer-shell--expanded rounded-card-lg"');
+    expect(source).toContain('className="agent-composer-toolbar"');
+    expect(source).toContain('<div className="max-w-2xl mx-auto">');
     expect(source).toContain("COMPOSER_SINGLE_LINE_HEIGHT_PX = 52");
   });
 
-  it("reserves the conversation composer action rail from long text", () => {
+  it("lets expanded conversation text use the full width above the action footer", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
     const composerStart = source.indexOf('className="agent-conversation-composer"');
     const textareaStart = source.indexOf("<textarea", composerStart);
-    const actionsStart = source.indexOf("composer-actions absolute", textareaStart);
-    const textareaSource = source.slice(textareaStart, actionsStart);
+    const toolbarStart = source.indexOf('className="agent-composer-toolbar"', textareaStart);
+    const textareaSource = source.slice(textareaStart, toolbarStart);
 
     expect(composerStart).toBeGreaterThan(0);
     expect(textareaStart).toBeGreaterThan(composerStart);
-    expect(actionsStart).toBeGreaterThan(textareaStart);
+    expect(toolbarStart).toBeGreaterThan(textareaStart);
     expect(textareaSource).toContain("agent-composer-input--conversation");
     expect(textareaSource).not.toContain("pr-36");
 
@@ -564,13 +605,13 @@ describe("HomePage", () => {
     window.document.head.append(style);
 
     const shell = window.document.createElement("div");
-    shell.className = "agent-composer-shell";
+    shell.className = "agent-composer-shell agent-composer-shell--expanded";
     const textarea = window.document.createElement("textarea");
     textarea.className = "agent-composer-input--conversation";
     shell.append(textarea);
     window.document.body.append(shell);
 
-    expect(window.getComputedStyle(textarea).paddingRight).toBe("304px");
+    expect(window.getComputedStyle(textarea).paddingRight).toBe("16px");
   });
 
   it("keeps the single-line composer text and caret vertically centered", () => {
@@ -704,7 +745,7 @@ describe("HomePage", () => {
     const normalizedSource = source.replace(/\r\n/g, "\n");
     const submitDisabledBlock = normalizedSource.slice(
       normalizedSource.indexOf("const composerSubmitDisabled"),
-      normalizedSource.indexOf("const centerComposerControls")
+      normalizedSource.indexOf("\n\n  useEffect", normalizedSource.indexOf("const composerSubmitDisabled"))
     );
 
     expect(source).toContain("const stopInFlight = state.agent.currentChatId ? Boolean(state.agent.stopInFlightByChatId[state.agent.currentChatId]) : false;");
@@ -1359,7 +1400,7 @@ describe("HomePage", () => {
     const stackStart = source.indexOf('<div className="agent-composer-stack">', slashStart);
     const queueStart = source.indexOf("<AgentQueuedMessageList", stackStart);
     const goalStart = source.indexOf("<AgentGoalBar", stackStart);
-    const shellStart = source.indexOf('className="relative agent-composer-shell rounded-card-lg"', stackStart);
+    const shellStart = source.indexOf('className="relative agent-composer-shell agent-composer-shell--expanded rounded-card-lg"', stackStart);
 
     expect(flowStart).toBeGreaterThan(0);
     expect(slashStart).toBeGreaterThan(flowStart);

@@ -348,54 +348,97 @@ body.memmy-window-fullscreen {
   left: 16px;
 }
 
-.composer-command-chip-slot--conversation {
-  left: 10px;
-}
-
 .composer-command-chip {
   display: inline-flex;
-  height: 30px;
+  height: 32px;
   align-items: center;
-  gap: 5px;
-  padding: 0 7px;
-  border-radius: 10px;
-  background: transparent;
+  gap: 6px;
+  padding: 0 7px 0 9px;
+  border: 0;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--color-canvas-oat) 48%, var(--color-background-paper));
   color: color-mix(in srgb, var(--color-text-ink) 68%, transparent);
-  font-size: 11px;
+  font-size: 12px;
+  font-weight: 500;
   line-height: 1;
   transition: background 140ms ease, color 140ms ease;
 }
 
 .composer-command-chip:hover,
 .composer-command-chip:focus-within {
-  background: color-mix(in srgb, var(--color-canvas-oat) 62%, var(--color-background-paper));
+  background: color-mix(in srgb, var(--color-canvas-oat) 78%, var(--color-background-paper));
   color: var(--color-text-ink);
+}
+
+.composer-command-chip__icon {
+  position: absolute;
+  color: color-mix(in srgb, var(--color-action-sky) 48%, var(--color-text-ink));
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+
+.composer-command-chip__icon--target {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.composer-command-chip__icon--remove {
+  opacity: 0;
+  transform: scale(0.75);
 }
 
 .composer-command-chip__label {
   white-space: nowrap;
 }
 
-.composer-command-chip__remove {
+.composer-command-chip__leading {
+  position: relative;
   display: inline-flex;
-  width: 16px;
-  height: 16px;
+  width: 14px;
+  height: 18px;
   flex-shrink: 0;
   align-items: center;
   justify-content: center;
   padding: 0;
   border: 0;
-  border-radius: 999px;
   background: transparent;
   color: currentColor;
-  opacity: 0;
   cursor: pointer;
-  transition: opacity 140ms ease;
 }
 
-.composer-command-chip:hover .composer-command-chip__remove,
-.composer-command-chip:focus-within .composer-command-chip__remove {
+.composer-command-chip:hover .composer-command-chip__icon--target,
+.composer-command-chip:focus-within .composer-command-chip__icon--target {
+  opacity: 0;
+  transform: scale(0.75);
+}
+
+.composer-command-chip:hover .composer-command-chip__icon--remove,
+.composer-command-chip:focus-within .composer-command-chip__icon--remove {
   opacity: 1;
+  transform: scale(1);
+}
+
+.agent-composer-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.agent-composer-toolbar__leading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+}
+
+.agent-composer-shell--expanded .agent-composer-toolbar {
+  position: relative;
+  z-index: 50;
+  min-height: 40px;
+  padding: 0 10px 8px;
+}
+
+.agent-composer-toolbar .composer-actions {
+  margin-left: auto;
 }
 
 /* Composer bottom-right controls: one shared hit size / color / spacing. */
@@ -2687,11 +2730,11 @@ button {
   padding: 12px 16px 4px;
 }
 
-/* Reserve the complete action rail: model selector (180px), three 32px
-   buttons, gaps, and the right inset. This must be explicit because the
-   committed utility sheet does not include the former `pr-36` class. */
-.agent-composer-shell textarea.agent-composer-input--conversation {
-  padding-right: 19rem;
+/* Conversation composers keep controls in a dedicated footer, allowing every
+   text line to use the full content width. */
+.agent-composer-shell--expanded textarea.agent-composer-input--conversation {
+  padding-right: 1rem;
+  padding-bottom: 6px;
 }
 
 /* Keep this more specific than `.agent-composer-shell textarea` above so its generic line-height cannot shift the caret.
@@ -2703,10 +2746,6 @@ button {
   overflow-x: hidden;
   overflow-y: auto;
   line-height: 24px;
-}
-
-.agent-composer-shell textarea.agent-composer-input--command-selected {
-  padding-left: 86px;
 }
 
 .agent-attachment-card {
