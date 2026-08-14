@@ -21,7 +21,7 @@
 
 <div align="center">
   
-## Memmy 是你的个人记忆中枢，也是懂你的专属 Agent —— 让所有 AI 连接同一份记忆，在协同中持续记忆自进化。
+## 让你的工作在 WorkBuddy、Claude Code 和 Codex 等 Agent 之间接着做。
 
 </div>
 
@@ -34,7 +34,7 @@
 
 ## 🚀 直接体验 Memmy
 
-点击进入[官网下载](https://memmy.cn/)或者 [GitHub Release](https://github.com/MemTensor/memmy-agent/releases) 下载。
+点击[官网](https://memmy.cn/)或者 [GitHub Release](https://github.com/MemTensor/memmy-agent/releases) 下载。
 
 > [!TIP]
 > 注册 Memmy 后，即可获得免费 Token，体验完整的 Memory + Agent Runtime。<br>
@@ -44,21 +44,14 @@
 
 ## 什么是 Memmy？
 
-每一次 AI 协作都会产生新的上下文和经验，但这些信息通常被隔离在不同工具和会话中。当你切换 Agent 或工作场景时，新的 AI 又需要重新认识你。
+让你的工作在 WorkBuddy、Claude Code、Codex 和 Cursor 之间接着做。Memmy 在本地保存项目目标、决定、约束和失败尝试，并把相关内容交给下一个 Agent。
 
-通过 Memmy，Cursor、Claude Code、Codex、OpenClaw、Hermes Agent 等 AI Agent 可以基于统一上下文持续协作，让 AI 从一次性对话变成长期理解你的 Agent。
-
-它将你的知识、偏好和项目经验沉淀为个人记忆，并让不同 Agent 共享同一份上下文。
-
-提供桌面应用、CLI 和 API，让你以不同方式使用同一套长期记忆。一次积累，多处使用。
+<!-- https://github.com/user-attachments/assets/f12473e5-3250-4e8b-b2da-e57d7b785baf -->
 
 
+### 跨 Agent 任务延续
 
-https://github.com/user-attachments/assets/f12473e5-3250-4e8b-b2da-e57d7b785baf
-
-
-
-### 🧠 跨 Agent 记忆层
+![跨 Agent 任务延续](docs/assets/cross-agent-task-continuity-cn.gif)
 
 Memmy 为所有 AI Agent 提供统一的个人记忆层。
 

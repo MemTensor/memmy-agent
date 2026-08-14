@@ -1,4 +1,3 @@
-
 <br>
 <div align="center">
   <a href="https://memmy.bot/">
@@ -16,54 +15,33 @@
     <a href="https://x.com/Memmy_ai"><img src="https://img.shields.io/badge/Follow-Memmy-000000?labelColor=gray&style=for-the-badge&logo=x&logoColor=white" alt="X"></a>
 </p>
 <p align="center">
-    <a href="https://www.producthunt.com/products/memmy?embed=true&amp;utm_source=badge-top-post-badge&amp;utm_medium=badge&amp;utm_campaign=badge-memmy-agent" target="_blank" rel="noopener noreferrer"><img alt="Memmy Agent - Let every AI remember the same you. | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/top-post-badge.svg?post_id=1203499&amp;theme=light&amp;period=daily&amp;t=1786083567983"></a>
+    <a href="https://www.producthunt.com/products/memmy?embed=true&utm_source=badge-top-post-badge&utm_medium=badge&utm_campaign=badge-memmy-agent" target="_blank" rel="noopener noreferrer"><img alt="Memmy Agent - Let every AI remember the same you. | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/top-post-badge.svg?post_id=1203499&theme=light&period=daily&t=1786083567983"></a>
 </p>
 
 <div align="center">
-  
-## Memmy is your personal AI agent & local memory hub  for all AI agents — it lets every AI connect to the same memory and keep self-evolving.
-
-</div>
 
 <div align="center">
-
-**English** • [简体中文](README.zh-CN.md)
-
-
-
-</div>
 
 ## 🆓 Sign-up for Free Trial
 
 Get Memmy from [Official Website](https://memmy.bot/) or [GitHub Release](https://github.com/MemTensor/memmy-agent/releases).
 
-
 > [!TIP]
-> Sign up to get free tokens. Start exploring the full Memory + Agent Runtime with zero config.<br>
-> **Trial credits:** <br>
-> **Registration grants Agent task trial tokens; the current amount and usage are shown in the app.**<br>
+> Sign up to get free tokens. Start exploring the full Memory + Agent Runtime with zero config.
+> **Trial credits:**
+> **Registration grants Agent task trial tokens; the current amount and usage are shown in the app.**
 > Once the trial credits run out, you can switch to BYOK and use your own model API.
 
 ## What Is Memmy?
 
-Every AI session generates context. Most of it gets thrown away.
+Continue the same work across WorkBuddy, Claude Code, Codex, and Cursor.Memmy keeps project goals, decisions, constraints, and failed attempts locally, then brings the relevant context to the next Agent.
+**Build it once, use it everywhere.**
 
-Switch agents, close a tab, start a new session, and you're re-introducing yourself from scratch.
+<!-- https://github.com/user-attachments/assets/a4ec7f6c-b79f-4e7b-bf40-38346c828bcf -->
 
-Memmy fixes that.
+###  Cross-Agent Task Continuity
 
-With a unified memory layer shared across Cursor, Claude Code, Codex, OpenClaw 🦞, Hermes Agent and more, your agents build on each other's context instead of starting over. One-shot conversations become a long-term working relationship.
-
-It distills your knowledge, preferences, and project experience into personal memory, and share the same context across every Agents.
-
-Available as a desktop app, CLI, and API. You can use the same long-term memory whatever the ways you like to use. **Build it once, use it everywhere.**
-
-
-
-https://github.com/user-attachments/assets/a4ec7f6c-b79f-4e7b-bf40-38346c828bcf
-
-
-###  Cross-Agent Memory Layer
+![Memmy: Cross-Agent Task Continuity](docs/assets/cross-agent-task-continuity.gif)
 
 Memmy provides a unified personal memory layer for all AI Agents.
 
@@ -280,8 +258,6 @@ The point of open source is to let good ideas flow, and we hope Me
 ## Contributors
 
 Thanks to every contributor who makes Memmy better ❤️
-<br>
-<br>
-<a href="https://github.com/MemTensor/memmy-agent/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=MemTensor/memmy-agent" />
-</a>
+
+
+<a href="https://github.com/MemTensor/memmy-agent/graphs/contributors">  </a>
