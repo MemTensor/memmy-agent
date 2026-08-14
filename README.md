@@ -19,8 +19,16 @@
 </p>
 
 <div align="center">
+  
+## Continue the same work across WorkBuddy, Claude Code, Codex, and etc.
+
+</div>
 
 <div align="center">
+
+**English** • [简体中文](README.zh-CN.md)
+
+</div>
 
 ## 🆓 Sign-up for Free Trial
 
