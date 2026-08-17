@@ -9992,7 +9992,7 @@ input[type="checkbox"].check-sky:checked::after {
 
 .litrev-qa-summary {
   display: grid;
-  width: min(560px, 92%);
+  width: 100%;
   gap: 10px;
   margin-top: 4px;
   padding: 12px 14px;
@@ -10111,7 +10111,7 @@ input[type="checkbox"].check-sky:checked::after {
   flex-direction: column;
   gap: 8px;
   margin-top: 14px;
-  width: min(720px, 100%);
+  width: 100%;
 }
 
 .litrev-conversation .agent-activity-timeline-item,
@@ -10159,25 +10159,24 @@ input[type="checkbox"].check-sky:checked::after {
 
 .litrev-completed-activity,
 .litrev-cancelled-activity {
-  width: fit-content;
-  max-width: 100%;
+  width: 100%;
 }
 
 .litrev-completed-activity .agent-activity-cluster__body,
 .litrev-cancelled-activity .agent-activity-cluster__body {
-  width: min(560px, 100%);
+  width: 100%;
 }
 
 .litrev-stage-activity {
-  width: min(620px, 100%);
+  width: 100%;
 }
 
 .litrev-preparation-summary {
-  width: min(620px, 100%);
+  width: 100%;
 }
 
 .litrev-task-process {
-  width: min(620px, 100%);
+  width: 100%;
 }
 
 .litrev-task-process__body {
@@ -10238,7 +10237,7 @@ input[type="checkbox"].check-sky:checked::after {
 }
 
 .litrev-preparation-stage > .litrev-stage-text-card {
-  width: min(520px, 100%);
+  width: 100%;
 }
 
 .litrev-stage-activity__body {
@@ -10267,6 +10266,14 @@ input[type="checkbox"].check-sky:checked::after {
   padding: 9px 14px;
   border-radius: 14px;
   background: color-mix(in srgb, var(--color-canvas-oat) 72%, var(--color-background-paper));
+}
+
+.litrev-cancelled-stage-notice {
+  width: min(620px, 100%);
+  margin: 4px 0;
+  color: color-mix(in srgb, var(--color-text-ink) 38%, transparent);
+  font-size: 11px;
+  line-height: 1.45;
 }
 
 .litrev-stage-text-card > div {
@@ -10333,6 +10340,7 @@ input[type="checkbox"].check-sky:checked::after {
 }
 
 .litrev-question-card {
+  width: 100%;
   border: 1px solid color-mix(in srgb, var(--color-border-stone) 50%, transparent);
   border-radius: var(--radius-card-lg, 16px);
   background: var(--color-background-paper);
@@ -10519,6 +10527,7 @@ input[type="checkbox"].check-sky:checked::after {
 }
 
 .litrev-wizard-card {
+  width: 100%;
   border: 1px solid color-mix(in srgb, var(--color-border-stone) 50%, transparent);
   border-radius: var(--radius-card-lg, 16px);
   background: var(--color-background-paper);
@@ -11391,13 +11400,16 @@ input[type="checkbox"].check-sky:checked::after {
 }
 
 .litrev-file-cards {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  width: 100%;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
 }
 
 .litrev-file-card {
   display: flex;
+  min-width: 0;
+  width: 100%;
   align-items: center;
   gap: 10px;
   padding: 10px 14px;
@@ -11409,6 +11421,14 @@ input[type="checkbox"].check-sky:checked::after {
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
+.litrev-file-card:only-child {
+  grid-column: 1 / -1;
+}
+
+.litrev-file-card__text {
+  min-width: 0;
+}
+
 .litrev-file-card:hover {
   border-color: color-mix(in srgb, var(--color-action-sky) 55%, transparent);
   box-shadow: 0 6px 16px rgba(17, 29, 28, 0.06);
@@ -11416,9 +11436,12 @@ input[type="checkbox"].check-sky:checked::after {
 
 .litrev-file-card__text strong {
   display: block;
+  overflow: hidden;
   font-size: 13px;
   font-weight: 500;
   color: var(--color-text-ink);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .litrev-file-card__text small {
@@ -11555,16 +11578,6 @@ input[type="checkbox"].check-sky:checked::after {
   background: color-mix(in srgb, var(--color-canvas-oat) 45%, transparent);
 }
 
-.litrev-preview-scope {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 4px;
-  flex: none;
-  padding: 4px 8px;
-  border-bottom: 1px solid color-mix(in srgb, var(--color-border-stone) 36%, transparent);
-}
-
 .litrev-preview-body {
   display: flex;
   flex: 1;
@@ -11602,118 +11615,6 @@ input[type="checkbox"].check-sky:checked::after {
   background: color-mix(in srgb, var(--color-canvas-oat) 65%, transparent);
 }
 
-.litrev-preview-scope-switcher {
-  position: relative;
-  z-index: 19;
-  flex: none;
-  padding: 4px 8px;
-  border-bottom: 1px solid color-mix(in srgb, var(--color-border-stone) 36%, transparent);
-}
-
-.litrev-preview-scope-menu {
-  position: relative;
-  flex: 1;
-  width: 100%;
-  min-width: 0;
-}
-
-.litrev-preview-scope-menu > summary {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  width: 100%;
-  height: 30px;
-  min-width: 0;
-  padding: 0 7px;
-  border-radius: 7px;
-  color: color-mix(in srgb, var(--color-text-ink) 72%, transparent);
-  font-size: 12px;
-  line-height: 16px;
-  cursor: pointer;
-  list-style: none;
-}
-
-.litrev-preview-scope-menu > summary::-webkit-details-marker {
-  display: none;
-}
-
-.litrev-preview-scope-menu > summary:hover {
-  background: color-mix(in srgb, var(--color-canvas-oat) 65%, transparent);
-}
-
-.litrev-preview-scope-menu > summary strong {
-  min-width: 0;
-  flex: 1;
-  overflow: hidden;
-  color: var(--color-text-ink);
-  font-size: inherit;
-  font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.litrev-preview-scope-menu > summary > svg {
-  flex: none;
-  color: color-mix(in srgb, var(--color-text-ink) 45%, transparent);
-  transition: transform 140ms ease;
-}
-
-.litrev-preview-scope-menu[open] > summary > svg {
-  transform: rotate(180deg);
-}
-
-.litrev-preview-scope-menu__icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: none;
-  color: color-mix(in srgb, var(--color-text-ink) 68%, transparent);
-}
-
-.litrev-preview-scope-menu__popover {
-  position: absolute;
-  top: calc(100% + 6px);
-  left: 0;
-  z-index: 50;
-  display: grid;
-  width: 100%;
-  gap: 2px;
-  padding: 5px;
-  border: 1px solid color-mix(in srgb, var(--color-border-stone) 55%, transparent);
-  border-radius: 10px;
-  background: var(--color-background-paper);
-  box-shadow: 0 12px 30px rgba(17, 29, 28, 0.16);
-}
-
-.litrev-preview-scope-menu__option {
-  display: grid;
-  grid-template-columns: 18px minmax(0, 1fr) 16px;
-  align-items: center;
-  gap: 7px;
-  min-height: 32px;
-  padding: 0 7px;
-  border-radius: 7px;
-  color: color-mix(in srgb, var(--color-text-ink) 82%, transparent);
-  font-size: 12px;
-  text-align: left;
-  cursor: pointer;
-}
-
-.litrev-preview-scope-menu__option:hover,
-.litrev-preview-scope-menu__option--active {
-  background: color-mix(in srgb, var(--color-canvas-oat) 72%, transparent);
-}
-
-.litrev-preview-scope-menu__option > span:first-child {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.litrev-preview-scope-menu__option > svg {
-  color: var(--color-action-sky-hover);
-}
-
 .litrev-file-list {
   flex: 1;
   width: auto;
@@ -11728,6 +11629,30 @@ input[type="checkbox"].check-sky:checked::after {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+}
+
+.litrev-preview-empty {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 7px;
+  padding: 24px;
+  color: color-mix(in srgb, var(--color-text-ink) 38%, transparent);
+  text-align: center;
+}
+
+.litrev-preview-empty strong {
+  color: color-mix(in srgb, var(--color-text-ink) 66%, transparent);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.litrev-preview-empty small {
+  max-width: 260px;
+  font-size: 11px;
+  line-height: 1.5;
 }
 
 .litrev-file-folder__toggle {

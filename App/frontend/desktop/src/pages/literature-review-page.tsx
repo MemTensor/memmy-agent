@@ -14,7 +14,6 @@ import {
   ChevronLeft,
   ChevronRight,
   CircleDashed,
-  Files,
   Folder,
   GripVertical,
   PanelLeftClose,
@@ -56,6 +55,7 @@ import {
   LITREV_ASSISTANT_INTRO,
   LITREV_CONTEXT_STORAGE_KEY,
   LITREV_DEFAULT_PROMPT,
+  LITREV_DOCX_ARTIFACT,
   LITREV_EXECUTION_PHASE,
   LITREV_EXECUTION_INTRO,
   LITREV_LATEX_ARTIFACT,
@@ -67,7 +67,7 @@ import {
   LITREV_SOURCE_INPUT_STORAGE_KEY,
   LITREV_RESULT_LINE,
   LITREV_SEARCH_PHASE,
-  LITREV_SUPPLEMENT_ACK,
+  LITREV_MESSAGE_ACK,
   LITREV_TODO_ITEMS,
   LITREV_TOPIC_QUESTION,
   buildDemoKeywords,
@@ -93,8 +93,7 @@ const LITREV_FILE_BROWSER_WIDTH_STORAGE_KEY = "memmy.literatureReview.fileBrowse
 
 type ThinkingKind = "planning" | "outline" | "search" | "execution";
 type LitrevStageKind = "questions" | "sources" | "keywords" | "outline" | "references" | "tasks";
-type PreviewScope = "task" | "project";
-type QuestionCardStatus = "preparing" | "waiting" | "cancelled";
+type QuestionCardStatus = "preparing" | "waiting";
 
 type LitrevPhase =
   | { kind: "setup" }
@@ -125,10 +124,11 @@ function stageKindForPhase(phase: LitrevPhase): LitrevStageKind {
         : "tasks";
 }
 
-interface SupplementEntry {
+interface ConversationEntry {
   id: number;
   text: string;
   contexts: ComposerContextReference[];
+  skippedStage?: Exclude<LitrevStageKind, "tasks">;
 }
 
 function readInitialPrompt(): string {
@@ -243,7 +243,7 @@ export function LiteratureReviewPage() {
   ));
   const [questionSupplements, setQuestionSupplements] = useState<Record<number, string>>({});
   const [questionCardStatus, setQuestionCardStatus] = useState<QuestionCardStatus>("preparing");
-  const [workflowEnded, setWorkflowEnded] = useState(false);
+  const [skippedStages, setSkippedStages] = useState<LitrevStageKind[]>([]);
   const [reachedStages, setReachedStages] = useState<LitrevStageKind[]>(() => [stageKindForPhase(readInitialPhase())]);
   const [preparationDetailsOpen, setPreparationDetailsOpen] = useState(false);
   const [processDetailsOpen, setProcessDetailsOpen] = useState(false);
@@ -279,7 +279,7 @@ export function LiteratureReviewPage() {
   const [keywordDraftWeight, setKeywordDraftWeight] = useState(6);
   const [outline, setOutline] = useState<LitrevOutlineItem[]>(buildDemoOutline);
   const [references, setReferences] = useState<LitrevReference[]>(buildDemoReferences);
-  const [supplements, setSupplements] = useState<SupplementEntry[]>([]);
+  const [conversationEntries, setConversationEntries] = useState<ConversationEntry[]>([]);
   const [composerDraft, setComposerDraft] = useState("");
   const composerInputRef = useRef<HTMLTextAreaElement | null>(null);
   const composerFileInputRef = useRef<HTMLInputElement | null>(null);
@@ -293,28 +293,37 @@ export function LiteratureReviewPage() {
     x: number;
     y: number;
   } | null>(null);
-  const [previewScope, setPreviewScope] = useState<PreviewScope>("task");
-  const [previewPath, setPreviewPath] = useState(LITREV_LATEX_ARTIFACT);
-  const [openPreviewTabs, setOpenPreviewTabs] = useState<string[]>([
-    LITREV_LATEX_ARTIFACT,
-    LITREV_PDF_ARTIFACT,
-    "downloads/MemGPT.pdf"
-  ]);
-  const [fileTreeOpen, setFileTreeOpen] = useState(true);
-  const [collapsedPreviewFolders, setCollapsedPreviewFolders] = useState<Record<string, boolean>>({});
-  const [workspaceOpen, setWorkspaceOpen] = useState(() => readInitialPhase().kind === "task");
-  const dragOutlineState = useRef<{ index: number; startX: number; level: 0 | 1 } | null>(null);
-  const dragOutlinePointerStartX = useRef<number | null>(null);
-  const [outlineDropTarget, setOutlineDropTarget] = useState<{ index: number; level: 0 | 1 } | null>(null);
-  const scrollRef = useRef<HTMLDivElement | null>(null);
-  const previewScopeMenuRef = useRef<HTMLDetailsElement | null>(null);
   const taskFiles = useMemo(() => buildDemoTaskFiles(), []);
-  const projectFiles = useMemo(() => (
+  const projectSourceFiles = useMemo(() => (
     buildHomeReferenceItems().filter((file) => file.kind === "file").map((file) => ({
       path: `project/${file.path}`,
       name: file.path
     }))
   ), []);
+  const generatedFiles = phase.kind === "task" ? taskFiles : [];
+  const projectFiles = useMemo(() => (
+    launchProjectId
+      ? [
+        ...projectSourceFiles,
+        ...generatedFiles.map((file) => ({
+          path: `project/${file.path}`,
+          name: file.name,
+          folder: file.folder
+        }))
+      ]
+      : []
+  ), [generatedFiles, launchProjectId, projectSourceFiles]);
+  const workspaceFiles = launchProjectId ? projectFiles : generatedFiles;
+  const initialPreviewPath = workspaceFiles[0]?.path ?? null;
+  const [previewPath, setPreviewPath] = useState<string | null>(initialPreviewPath);
+  const [openPreviewTabs, setOpenPreviewTabs] = useState<string[]>(initialPreviewPath ? [initialPreviewPath] : []);
+  const [fileTreeOpen, setFileTreeOpen] = useState(true);
+  const [collapsedPreviewFolders, setCollapsedPreviewFolders] = useState<Record<string, boolean>>({});
+  const [workspaceOpen, setWorkspaceOpen] = useState(false);
+  const dragOutlineState = useRef<{ index: number; startX: number; level: 0 | 1 } | null>(null);
+  const dragOutlinePointerStartX = useRef<number | null>(null);
+  const [outlineDropTarget, setOutlineDropTarget] = useState<{ index: number; level: 0 | 1 } | null>(null);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
 
   const setupDone = questionIndex >= questions.length;
   const activeStage = stageKindForPhase(phase);
@@ -370,22 +379,22 @@ export function LiteratureReviewPage() {
   }, [phase.kind, todoProgress]);
 
   useEffect(() => {
-    if (phase.kind !== "setup" || setupDone || workflowEnded) return;
+    if (phase.kind !== "setup" || setupDone) return;
     setQuestionCardStatus("preparing");
     const timer = window.setTimeout(() => setQuestionCardStatus("waiting"), 450);
     return () => window.clearTimeout(timer);
-  }, [phase.kind, setupDone, workflowEnded]);
+  }, [phase.kind, setupDone]);
 
   useEffect(() => {
-    if (setupDone && phase.kind === "setup" && !workflowEnded) {
+    if (setupDone && phase.kind === "setup") {
       setPhase({ kind: "sources" });
     }
-  }, [setupDone, phase.kind, workflowEnded]);
+  }, [setupDone, phase.kind]);
 
   useEffect(() => {
     const element = scrollRef.current;
     if (element) element.scrollTop = element.scrollHeight;
-  }, [phase, questionCardStatus, supplements, todoProgress]);
+  }, [phase, questionCardStatus, conversationEntries, todoProgress]);
 
   useEffect(() => {
     if (!fileContextMenu) return;
@@ -441,10 +450,28 @@ export function LiteratureReviewPage() {
     )));
   }
 
-  function cancelWorkflow() {
-    setWorkflowEnded(true);
-    setQuestionCardStatus("cancelled");
-    setQuestionSupplements({});
+  function skipCurrentCard() {
+    const skippedStage = stageKindForPhase(phase);
+    setSkippedStages((stages) => (stages.includes(skippedStage) ? stages : [...stages, skippedStage]));
+    if (phase.kind === "setup") {
+      setAnswers([]);
+      setQuestionSupplements({});
+      setQuestionIndex(questions.length);
+      return;
+    }
+    if (phase.kind === "sources") {
+      confirmSources();
+      return;
+    }
+    if (phase.kind === "wizard") {
+      if (phase.step === 0) {
+        confirmKeywords();
+      } else if (phase.step === 1) {
+        confirmOutline();
+      } else {
+        confirmReferencesAndStart();
+      }
+    }
   }
 
   function confirmKeywords() {
@@ -592,31 +619,25 @@ export function LiteratureReviewPage() {
     }
   }
 
-  function submitSupplement() {
+  function submitConversationMessage() {
     const text = composerDraft.trim();
     if (!text && !composerReferences.length) return;
-    setSupplements((items) => [...items, {
+    const skippedStage: Exclude<LitrevStageKind, "tasks"> | undefined = (
+      phase.kind === "sources"
+      || phase.kind === "wizard"
+      || (phase.kind === "setup" && questionCardStatus === "waiting")
+    )
+      ? stageKindForPhase(phase) as Exclude<LitrevStageKind, "tasks">
+      : undefined;
+    setConversationEntries((items) => [...items, {
       id: Date.now(),
       text,
-      contexts: composerReferences
+      contexts: composerReferences,
+      skippedStage
     }]);
     setComposerDraft("");
     dispatch(agentActions.composerContextReferencesUpdated(composerScopeKey, []));
-    if (workflowEnded) return;
-    if (phase.kind === "setup" && questionCardStatus !== "cancelled") {
-      setAnswers([]);
-      setQuestionIndex(questions.length);
-      return;
-    }
-    if (phase.kind === "wizard") {
-      if (phase.step === 0) {
-        confirmKeywords();
-      } else if (phase.step === 1) {
-        confirmOutline();
-      } else {
-        confirmReferencesAndStart();
-      }
-    }
+    if (skippedStage) skipCurrentCard();
   }
 
   function handleComposerDragOver(event: DragEvent<HTMLElement>) {
@@ -639,18 +660,17 @@ export function LiteratureReviewPage() {
 
   function closePreviewTab(path: string) {
     setOpenPreviewTabs((tabs) => {
-      if (tabs.length <= 1) return tabs;
       const next = tabs.filter((tab) => tab !== path);
       if (previewPath === path) {
-        setPreviewPath(next[next.length - 1] ?? LITREV_LATEX_ARTIFACT);
+        setPreviewPath(next[next.length - 1] ?? null);
       }
       return next;
     });
   }
 
   function openArtifact(path: string) {
-    setPreviewScope("task");
-    selectPreviewFile(path);
+    selectPreviewFile(launchProjectId ? `project/${path}` : path);
+    setWorkspaceOpen(true);
   }
 
   /* --------------------------------- 会话渲染 --------------------------------- */
@@ -661,12 +681,29 @@ export function LiteratureReviewPage() {
   }
 
   function completedStageLabel(stage: LitrevStageKind): string {
+    if (skippedStages.includes(stage)) {
+      return t("litrev.stageActivity.skipped", { stage: stageDisplayName(stage) });
+    }
     if (stage === "questions") return t("litrev.stageActivity.questions.done");
     if (stage === "sources") return t("litrev.stageActivity.sources.done");
     if (stage === "keywords") return t("litrev.stageActivity.keywords.done");
     if (stage === "outline") return t("litrev.stageActivity.outline.done");
     if (stage === "references") return t("litrev.stageActivity.references.done");
     return t("litrev.stageActivity.tasks.done");
+  }
+
+  function stageDisplayName(stage: LitrevStageKind): string {
+    if (stage === "questions") return t("litrev.question.cardTitle");
+    if (stage === "sources") return t("litrev.sources.title");
+    if (stage === "keywords") return t("litrev.wizard.step.keywords");
+    if (stage === "outline") return t("litrev.wizard.step.outline");
+    if (stage === "references") return t("litrev.wizard.step.references");
+    return t("litrev.preview.files");
+  }
+
+  function renderCancelledStageNotice(stage: Exclude<LitrevStageKind, "tasks">): ReactNode {
+    const title = t("litrev.workflow.skippedTitle", { stage: stageDisplayName(stage) });
+    return <p className="litrev-cancelled-stage-notice">{title}</p>;
   }
 
   function stageOutputFor(stage: Exclude<LitrevStageKind, "tasks">): string {
@@ -682,7 +719,6 @@ export function LiteratureReviewPage() {
   }
 
   function currentStageLabel(stage: LitrevStageKind): string {
-    if (workflowEnded) return t("litrev.workflow.cancelled");
     if (stage === "questions") {
       return questionCardStatus === "preparing"
         ? t("litrev.stageActivity.questions.generating")
@@ -709,6 +745,7 @@ export function LiteratureReviewPage() {
   }
 
   function renderCompletedStageContent(stage: LitrevStageKind): ReactNode {
+    if (skippedStages.includes(stage) && stage !== "tasks") return renderCancelledStageNotice(stage);
     if (stage === "questions") return renderRequirementSummary();
     if (stage === "sources") {
       return sourceItems.length
@@ -744,7 +781,6 @@ export function LiteratureReviewPage() {
   }
 
   function renderCurrentStageContent(stage: LitrevStageKind): ReactNode {
-    if (workflowEnded) return <p className="litrev-cancelled-activity__body">{t("litrev.workflow.cancelledDetail")}</p>;
     if (phase.kind === "thinking") return renderThinkingCopy();
     if (stage === "questions" || stage === "sources") return null;
     if (phase.kind === "wizard") return null;
@@ -806,6 +842,15 @@ export function LiteratureReviewPage() {
         {preparationDetailsOpen ? (
           <div className="agent-activity-cluster__body litrev-preparation-summary__body">
             {stages.map((stage) => {
+              if (skippedStages.includes(stage)) {
+                const entry = conversationEntries.find((item) => item.skippedStage === stage);
+                return (
+                  <Fragment key={stage}>
+                    {renderCancelledStageNotice(stage)}
+                    {entry ? renderConversationEntry(entry) : null}
+                  </Fragment>
+                );
+              }
               const open = stageDetailsOpen[stage];
               return (
                 <Fragment key={stage}>
@@ -842,12 +887,23 @@ export function LiteratureReviewPage() {
         </>
       );
     }
-    return reachedStages.map((stage) => (
-      <Fragment key={stage}>
-        {renderStageActivity(stage)}
-        {stage !== activeStage && stage !== "tasks" ? renderStageOutput(stage) : null}
-      </Fragment>
-    ));
+    return reachedStages.map((stage) => {
+      if (skippedStages.includes(stage) && stage !== activeStage && stage !== "tasks") {
+        const entry = conversationEntries.find((item) => item.skippedStage === stage);
+        return (
+          <Fragment key={stage}>
+            {renderCancelledStageNotice(stage)}
+            {entry ? renderConversationEntry(entry) : null}
+          </Fragment>
+        );
+      }
+      return (
+        <Fragment key={stage}>
+          {renderStageActivity(stage)}
+          {stage !== activeStage && stage !== "tasks" ? renderStageOutput(stage) : null}
+        </Fragment>
+      );
+    });
   }
 
   function renderRequirementSummary(): ReactNode {
@@ -899,20 +955,24 @@ export function LiteratureReviewPage() {
     );
   }
 
+  function renderConversationEntry(entry: ConversationEntry): ReactNode {
+    return (
+      <div key={entry.id} className="litrev-supplement">
+        <div className="litrev-user-message">
+          {entry.text ? <div className="agent-chat-bubble agent-chat-bubble--user litrev-user-bubble">{entry.text}</div> : null}
+          <HomeContextChips chips={entry.contexts} />
+        </div>
+        <p className="litrev-assistant-copy">{LITREV_MESSAGE_ACK}</p>
+      </div>
+    );
+  }
+
   function renderConversation(): ReactNode {
     return (
       <div className="litrev-conversation">
         {renderLaunchUserMessage()}
         <p className="litrev-assistant-copy">{LITREV_ASSISTANT_INTRO}</p>
-        {supplements.map((entry) => (
-          <div key={entry.id} className="litrev-supplement">
-            <div className="litrev-user-message">
-              {entry.text ? <div className="agent-chat-bubble agent-chat-bubble--user litrev-user-bubble">{entry.text}</div> : null}
-              <HomeContextChips chips={entry.contexts} />
-            </div>
-            <p className="litrev-assistant-copy">{LITREV_SUPPLEMENT_ACK}</p>
-          </div>
-        ))}
+        {conversationEntries.filter((entry) => !entry.skippedStage).map(renderConversationEntry)}
         {renderStageActivities()}
       </div>
     );
@@ -924,7 +984,6 @@ export function LiteratureReviewPage() {
     if (
       phase.kind !== "setup"
       || questionCardStatus !== "waiting"
-      || workflowEnded
     ) return null;
     return (
       <section className="litrev-question-card" aria-label={t("litrev.question.cardTitle")}>
@@ -932,7 +991,7 @@ export function LiteratureReviewPage() {
           <h2>{t("litrev.question.cardTitle")}</h2>
           <div className="litrev-question-card__meta">
             <span>{t("litrev.question.count", { count: questions.length })}</span>
-            <button type="button" aria-label={t("litrev.workflow.close")} onClick={cancelWorkflow}>
+            <button type="button" aria-label={t("litrev.workflow.close")} onClick={skipCurrentCard}>
               <X size={15} />
             </button>
           </div>
@@ -1013,7 +1072,7 @@ export function LiteratureReviewPage() {
   }
 
   function renderSourceCard(): ReactNode {
-    if (phase.kind !== "sources" || workflowEnded) return null;
+    if (phase.kind !== "sources") return null;
     return (
       <section className="litrev-wizard-card litrev-source-card" aria-label={t("litrev.sources.title")}>
         <header className="litrev-wizard-card__head">
@@ -1030,7 +1089,7 @@ export function LiteratureReviewPage() {
               type="button"
               className="litrev-wizard-card__close"
               aria-label={t("litrev.workflow.close")}
-              onClick={cancelWorkflow}
+              onClick={skipCurrentCard}
             >
               <X size={15} />
             </button>
@@ -1415,7 +1474,7 @@ export function LiteratureReviewPage() {
   }
 
   function renderWizardCard(): ReactNode {
-    if (phase.kind !== "wizard" || workflowEnded) return null;
+    if (phase.kind !== "wizard") return null;
     const stepTitles = [t("litrev.wizard.step.keywords"), t("litrev.wizard.step.outline"), t("litrev.wizard.step.references")] as const;
     return (
       <section className="litrev-wizard-card" aria-label={stepTitles[phase.step]}>
@@ -1427,7 +1486,7 @@ export function LiteratureReviewPage() {
               type="button"
               className="litrev-wizard-card__close"
               aria-label={t("litrev.workflow.close")}
-              onClick={cancelWorkflow}
+              onClick={skipCurrentCard}
             >
               <X size={15} />
             </button>
@@ -1489,6 +1548,33 @@ export function LiteratureReviewPage() {
     ));
   }
 
+  function renderTaskResult(): ReactNode {
+    return (
+      <>
+        <p className="litrev-assistant-copy">{LITREV_RESULT_LINE}</p>
+        <div className="litrev-file-cards">
+          {[LITREV_LATEX_ARTIFACT, LITREV_PDF_ARTIFACT, LITREV_DOCX_ARTIFACT].map((path) => (
+            <button
+              type="button"
+              key={path}
+              className="litrev-file-card"
+              draggable
+              onDragStart={(event) => beginFileDrag(event, path, fileNameFromPath(path))}
+              onContextMenu={(event) => openFileContextMenu(event, path, fileNameFromPath(path))}
+              onClick={() => openArtifact(path)}
+            >
+              <FileTypeIcon name={path} surface="card" />
+              <span className="litrev-file-card__text">
+                <strong>{path.split("/").pop()}</strong>
+                <small>{path.endsWith(".tex") ? "LaTeX" : path.endsWith(".pdf") ? "PDF" : "DOCX"}</small>
+              </span>
+            </button>
+          ))}
+        </div>
+      </>
+    );
+  }
+
   function renderTaskProcess(finished: boolean): ReactNode {
     const processContent = (
       <>
@@ -1529,39 +1615,8 @@ export function LiteratureReviewPage() {
       <div className="litrev-conversation">
         {renderLaunchUserMessage()}
         {renderTaskProcess(finished)}
-        {finished ? (
-          <>
-            <p className="litrev-assistant-copy">{LITREV_RESULT_LINE}</p>
-            <div className="litrev-file-cards">
-              {[LITREV_LATEX_ARTIFACT, LITREV_PDF_ARTIFACT].map((path) => (
-                <button
-                  type="button"
-                  key={path}
-                  className="litrev-file-card"
-                  draggable
-                  onDragStart={(event) => beginFileDrag(event, path, fileNameFromPath(path))}
-                  onContextMenu={(event) => openFileContextMenu(event, path, fileNameFromPath(path))}
-                  onClick={() => openArtifact(path)}
-                >
-                  <FileTypeIcon name={path} surface="card" />
-                  <span className="litrev-file-card__text">
-                    <strong>{path.split("/").pop()}</strong>
-                    <small>{path.endsWith(".tex") ? "LaTeX" : "PDF"}</small>
-                  </span>
-                </button>
-              ))}
-            </div>
-          </>
-        ) : null}
-        {supplements.map((entry) => (
-          <div key={entry.id} className="litrev-supplement">
-            <div className="litrev-user-message">
-              {entry.text ? <div className="agent-chat-bubble agent-chat-bubble--user litrev-user-bubble">{entry.text}</div> : null}
-              <HomeContextChips chips={entry.contexts} />
-            </div>
-            <p className="litrev-assistant-copy">{LITREV_SUPPLEMENT_ACK}</p>
-          </div>
-        ))}
+        {finished ? renderTaskResult() : null}
+        {conversationEntries.filter((entry) => !entry.skippedStage).map(renderConversationEntry)}
       </div>
     );
   }
@@ -1569,48 +1624,39 @@ export function LiteratureReviewPage() {
   /* --------------------------------- 预览面板 --------------------------------- */
 
   function renderPreviewPane(): ReactNode {
-    const previewedContent = litrevPreviewContentFor(previewPath);
+    const previewedContent = previewPath ? litrevPreviewContentFor(previewPath) : null;
     const folders: LitrevPreviewFolder[] = ["downloads", "outputs"];
     const fileName = (path: string) => path.split("/").pop() ?? path;
-    const scopeForPath = (path: string): PreviewScope => {
-      if (taskFiles.some((file) => file.path === path)) return "task";
-      return "project";
-    };
-    const scopeOptions: Array<{ value: PreviewScope; label: string; icon: ReactNode }> = [
-      { value: "task", label: t("litrev.preview.taskFiles"), icon: <Files size={14} /> },
-      ...(launchProjectId
-        ? [{ value: "project" as const, label: t("litrev.preview.projectSpace"), icon: <Folder size={14} /> }]
-        : [])
-    ];
-    const activeScopeOption = scopeOptions.find((option) => option.value === previewScope) ?? scopeOptions[0]!;
-    const selectPreviewScope = (value: PreviewScope) => {
-      setPreviewScope(value);
-      previewScopeMenuRef.current?.removeAttribute("open");
-      if (value === "task") {
-        const taskPath = taskFiles.some((file) => file.path === previewPath)
-          ? previewPath
-          : (openPreviewTabs.find((path) => taskFiles.some((file) => file.path === path)) ?? LITREV_LATEX_ARTIFACT);
-        setPreviewPath(taskPath);
-      } else {
-        const first = projectFiles[0];
-        if (first) selectPreviewFile(first.path);
-      }
-    };
-    const crumbScope = previewScope === "task"
-      ? t("litrev.preview.taskFiles")
-      : t("litrev.preview.projectSpace");
+    const workspaceRootLabel = launchProjectId
+      ? t("litrev.preview.currentProject")
+      : t("litrev.preview.taskFolder");
+    const renderFileButton = (file: { path: string; name: string }) => (
+      <button
+        type="button"
+        key={file.path}
+        className={`litrev-file-item${previewPath === file.path ? " litrev-file-item--active" : ""}`}
+        draggable
+        onDragStart={(event) => beginFileDrag(event, file.path, file.name)}
+        onContextMenu={(event) => openFileContextMenu(event, file.path, file.name)}
+        onClick={() => selectPreviewFile(file.path)}
+      >
+        <FileTypeIcon name={file.name} surface="inline" /> <span>{file.name}</span>
+      </button>
+    );
     return (
       <aside className="litrev-preview-pane litrev-preview-pane--lifted" style={previewResize.sidebarStyle}>
         <header className="litrev-preview-toolbar">
-          <button
-            type="button"
-            className="litrev-file-browser__toggle"
-            aria-label={t("litrev.preview.toggleFiles")}
-            aria-expanded={fileTreeOpen}
-            onClick={() => setFileTreeOpen((open) => !open)}
-          >
-            {fileTreeOpen ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}
-          </button>
+          {workspaceFiles.length ? (
+            <button
+              type="button"
+              className="litrev-file-browser__toggle"
+              aria-label={t("litrev.preview.toggleFiles")}
+              aria-expanded={fileTreeOpen}
+              onClick={() => setFileTreeOpen((open) => !open)}
+            >
+              {fileTreeOpen ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}
+            </button>
+          ) : null}
           <div className="litrev-file-tabs" role="tablist" aria-label={t("litrev.preview.openFiles")}>
             {openPreviewTabs.map((path) => {
               const active = previewPath === path;
@@ -1621,27 +1667,21 @@ export function LiteratureReviewPage() {
                     role="tab"
                     aria-selected={active}
                     title={path}
-                    onClick={() => {
-                      const nextScope = scopeForPath(path);
-                      setPreviewScope(nextScope);
-                      setPreviewPath(path);
-                    }}
+                    onClick={() => setPreviewPath(path)}
                   >
                     {fileName(path)}
                   </button>
-                  {openPreviewTabs.length > 1 ? (
-                    <button
-                      type="button"
-                      className="litrev-file-tab__close"
-                      aria-label={t("common.close")}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        closePreviewTab(path);
-                      }}
-                    >
-                      <X size={11} />
-                    </button>
-                  ) : null}
+                  <button
+                    type="button"
+                    className="litrev-file-tab__close"
+                    aria-label={t("common.close")}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      closePreviewTab(path);
+                    }}
+                  >
+                    <X size={11} />
+                  </button>
                 </div>
               );
             })}
@@ -1649,39 +1689,16 @@ export function LiteratureReviewPage() {
         </header>
         <div className="litrev-preview-body">
           <aside
-            className={`litrev-file-browser${fileTreeOpen ? "" : " litrev-file-browser--collapsed"}`}
+            className={`litrev-file-browser${fileTreeOpen && workspaceFiles.length ? "" : " litrev-file-browser--collapsed"}`}
             style={fileBrowserResize.sidebarStyle}
           >
-            {fileTreeOpen ? (
-              <>
-                <div className="litrev-preview-scope-switcher">
-                  <details ref={previewScopeMenuRef} className="litrev-preview-scope-menu">
-                    <summary aria-label={t("litrev.preview.scope")}>
-                      <span className="litrev-preview-scope-menu__icon" aria-hidden="true">{activeScopeOption.icon}</span>
-                      <strong>{activeScopeOption.label}</strong>
-                      <ChevronDown size={12} aria-hidden="true" />
-                    </summary>
-                    <div className="litrev-preview-scope-menu__popover" role="menu">
-                      {scopeOptions.map((option) => (
-                        <button
-                          key={option.value}
-                          type="button"
-                          role="menuitemradio"
-                          aria-checked={previewScope === option.value}
-                          className={previewScope === option.value ? "litrev-preview-scope-menu__option litrev-preview-scope-menu__option--active" : "litrev-preview-scope-menu__option"}
-                          onClick={() => selectPreviewScope(option.value)}
-                        >
-                          <span aria-hidden="true">{option.icon}</span>
-                          <span>{option.label}</span>
-                          {previewScope === option.value ? <Check size={14} aria-hidden="true" /> : null}
-                        </button>
-                      ))}
-                    </div>
-                  </details>
-                </div>
-                <nav className="litrev-file-list">
-                  {previewScope === "task" ? folders.map((folder) => {
+            {fileTreeOpen && workspaceFiles.length ? (
+              <nav className="litrev-file-list">
+                {launchProjectId
+                  ? workspaceFiles.map(renderFileButton)
+                  : folders.map((folder) => {
                     const children = taskFiles.filter((file) => file.folder === folder);
+                    if (!children.length) return null;
                     const collapsed = collapsedPreviewFolders[folder] === true;
                     return (
                       <div key={folder} className="litrev-file-folder">
@@ -1695,43 +1712,16 @@ export function LiteratureReviewPage() {
                         </button>
                         {!collapsed ? (
                           <div className="litrev-file-folder__children">
-                            {children.map((file) => (
-                              <button
-                                type="button"
-                                key={file.path}
-                                className={`litrev-file-item${previewPath === file.path ? " litrev-file-item--active" : ""}`}
-                                draggable
-                                onDragStart={(event) => beginFileDrag(event, file.path, file.name)}
-                                onContextMenu={(event) => openFileContextMenu(event, file.path, file.name)}
-                                onClick={() => selectPreviewFile(file.path)}
-                              >
-                                <FileTypeIcon name={file.name} surface="inline" /> <span>{file.name}</span>
-                              </button>
-                            ))}
+                            {children.map(renderFileButton)}
                           </div>
                         ) : null}
                       </div>
                     );
-                  }) : (
-                    projectFiles.map((file) => (
-                      <button
-                        type="button"
-                        key={file.path}
-                        className={`litrev-file-item${previewPath === file.path ? " litrev-file-item--active" : ""}`}
-                        draggable
-                        onDragStart={(event) => beginFileDrag(event, file.path, file.name)}
-                        onContextMenu={(event) => openFileContextMenu(event, file.path, file.name)}
-                        onClick={() => selectPreviewFile(file.path)}
-                      >
-                        <FileTypeIcon name={file.name} surface="inline" /> <span>{file.name}</span>
-                      </button>
-                    ))
-                  )}
-                </nav>
-              </>
+                  })}
+              </nav>
             ) : null}
           </aside>
-          {fileTreeOpen ? (
+          {fileTreeOpen && workspaceFiles.length ? (
             <SidebarResizeHandle
               label={t("litrev.preview.resizeFiles")}
               width={fileBrowserResize.width}
@@ -1743,18 +1733,26 @@ export function LiteratureReviewPage() {
             />
           ) : null}
           <section className="litrev-preview-main">
-            <article className="litrev-preview-document">
-              <div className="litrev-preview-crumb">
-                {crumbScope} › {fileName(previewPath)}
+            {previewPath && previewedContent ? (
+              <article className="litrev-preview-document">
+                <div className="litrev-preview-crumb">
+                  {workspaceRootLabel} › {fileName(previewPath)}
+                </div>
+                <h2>{previewedContent.title}</h2>
+                {previewedContent.sections.map((section) => (
+                  <section key={section.heading}>
+                    <h3>{section.heading}</h3>
+                    <p>{section.body}</p>
+                  </section>
+                ))}
+              </article>
+            ) : (
+              <div className="litrev-preview-empty">
+                <Folder size={28} aria-hidden="true" />
+                <strong>{t(launchProjectId ? "litrev.preview.projectEmpty" : "litrev.preview.taskEmpty")}</strong>
+                <small>{t(launchProjectId ? "litrev.preview.projectEmptyDetail" : "litrev.preview.taskEmptyDetail")}</small>
               </div>
-              <h2>{previewedContent.title}</h2>
-              {previewedContent.sections.map((section) => (
-                <section key={section.heading}>
-                  <h3>{section.heading}</h3>
-                  <p>{section.body}</p>
-                </section>
-              ))}
-            </article>
+            )}
           </section>
         </div>
       </aside>
@@ -1785,7 +1783,7 @@ export function LiteratureReviewPage() {
           onKeyDown={(event) => {
             if (event.key === "Enter" && !event.shiftKey) {
               event.preventDefault();
-              submitSupplement();
+              submitConversationMessage();
             }
           }}
         />
@@ -1827,7 +1825,7 @@ export function LiteratureReviewPage() {
             className={`litrev-composer__send${canSend ? " litrev-composer__send--ready" : ""}`}
             aria-label={t("home.send")}
             disabled={!canSend}
-            onClick={submitSupplement}
+            onClick={submitConversationMessage}
           >
             <Send size={14} />
           </button>

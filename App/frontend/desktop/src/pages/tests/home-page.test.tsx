@@ -53,7 +53,7 @@ import {
   composerHighlightSegments,
   removeHighlightedCommandAtCaret
 } from "../home-composer-quick-actions.js";
-import { buildDemoKeywords, buildDemoTaskFiles } from "../literature-review-demo-data.js";
+import { buildDemoKeywords, buildDemoTaskFiles, buildLitrevSetupQuestions } from "../literature-review-demo-data.js";
 
 const homePageSourcePath = fileURLToPath(new URL("../home-page.tsx", import.meta.url));
 const literatureReviewSourcePath = fileURLToPath(new URL("../literature-review-page.tsx", import.meta.url));
@@ -74,6 +74,15 @@ function mockCallOrder(fn: { mock: { invocationCallOrder: readonly number[] } },
 }
 
 describe("HomePage", () => {
+  it("uses research fields instead of writing angles for the topic question", () => {
+    expect(buildLitrevSetupQuestions("研究大模型长期记忆")[0]?.options).toEqual([
+      "AI / 计算机技术",
+      "金融 / 经济",
+      "医学 / 生命科学",
+      "社科 / 教育 / 管理"
+    ]);
+  });
+
   it("matches the designed keyword selection and hierarchical outline controls", () => {
     const source = readFileSync(literatureReviewSourcePath, "utf8");
     const styles = readFileSync(stylesSourcePath, "utf8");
@@ -109,7 +118,8 @@ describe("HomePage", () => {
     const files = buildDemoTaskFiles();
 
     expect(files.filter((file) => file.folder === "downloads")).toHaveLength(3);
-    expect(files.filter((file) => file.folder === "outputs")).toHaveLength(2);
+    expect(files.filter((file) => file.folder === "outputs")).toHaveLength(3);
+    expect(files.some((file) => file.path.endsWith(".docx"))).toBe(true);
     expect(files.some((file) => file.path.startsWith("uploads/"))).toBe(false);
     expect(files.some((file) => file.path.startsWith("references/"))).toBe(false);
   });
@@ -117,6 +127,7 @@ describe("HomePage", () => {
   it("carries local sources into the literature-review workflow", () => {
     const homeSource = readFileSync(homePageSourcePath, "utf8");
     const source = readFileSync(literatureReviewSourcePath, "utf8");
+    const styles = readFileSync(stylesSourcePath, "utf8");
 
     expect(homeSource).toContain("fileCount: literatureSources.length");
     expect(homeSource).toContain("totalBytes: literatureSources.reduce");
@@ -133,13 +144,18 @@ describe("HomePage", () => {
     expect(launchMessageBlock).not.toContain("sourceReferences.map((reference)");
     expect(source).toContain('className="litrev-user-command"');
     expect(source).toContain("sourceInput.split(/(\\/literature-review\\b)/gi)");
-    expect(source).toContain('type PreviewScope = "task" | "project";');
+    expect(source).not.toContain("type PreviewScope");
     expect(source).not.toContain('value: "knowledge"');
     expect(source).toContain("const [launchProjectId] = useState(readInitialProjectId);");
-    expect(source).toContain("...(launchProjectId");
-    expect(source).toContain('{ value: "project" as const, label: t("litrev.preview.projectSpace"), icon: <Folder size={14} /> }');
-    expect(source).toContain('className="litrev-preview-scope-menu"');
-    expect(source).toContain('className="litrev-preview-scope-switcher"');
+    expect(source).toContain("const workspaceFiles = launchProjectId ? projectFiles : generatedFiles;");
+    expect(source).toContain('t("litrev.preview.currentProject")');
+    expect(source).toContain('t("litrev.preview.taskFolder")');
+    expect(source).not.toContain('className="litrev-preview-scope-menu"');
+    expect(source).not.toContain('className="litrev-preview-scope-switcher"');
+    expect(source).not.toContain('className="litrev-file-root"');
+    expect(source).not.toContain('className="litrev-file-list__empty"');
+    expect(source).toContain('className="litrev-preview-empty"');
+    expect(source).toContain("fileTreeOpen && workspaceFiles.length");
     expect(source).toContain("<PanelLeftClose size={16} />");
     expect(source).toContain("<PanelLeftOpen size={16} />");
     expect(source).toContain("const previewResize = useResizableSidebar({");
@@ -148,7 +164,6 @@ describe("HomePage", () => {
     expect(source).toContain('label={t("litrev.preview.resizeFiles")}');
     expect(source).not.toContain("renderKnowledgeFileTree");
     expect(source).toContain("FolderTypeIcon");
-    expect(source).toContain('role="menuitemradio"');
     expect(source).not.toContain("knowledgeScope");
     expect(source).toContain("litrev-file-browser--collapsed");
     expect(source).toContain('<section className="litrev-preview-main">');
@@ -156,8 +171,8 @@ describe("HomePage", () => {
     expect(source).toContain("function renderWorkspaceToggle()");
     expect(source).toContain('aria-pressed={workspaceOpen}');
     expect(source.match(/\{renderWorkspaceToggle\(\)\}/g)).toHaveLength(2);
-    expect(source).toContain('const [workspaceOpen, setWorkspaceOpen] = useState(() => readInitialPhase().kind === "task")');
-    expect(source).toContain('type QuestionCardStatus = "preparing" | "waiting" | "cancelled";');
+    expect(source).toContain("const [workspaceOpen, setWorkspaceOpen] = useState(false);");
+    expect(source).toContain('type QuestionCardStatus = "preparing" | "waiting";');
     expect(source).toContain("questions.map((question, itemIndex)");
     expect(source).toContain("questions.map((question) => question.options[0] ??");
     expect(source).toContain("onClick={() => updateQuestionAnswer(itemIndex, option)}");
@@ -182,6 +197,12 @@ describe("HomePage", () => {
     expect(source).toContain('t("litrev.stageActivity.tasks.done")');
     expect(source).toContain('t("litrev.stageActivity.preparation.done")');
     expect(source).toContain('function renderPreparationSummary(stages: Array<Exclude<LitrevStageKind, "tasks">>)');
+    const preparationSummaryBlock = source.slice(
+      source.indexOf('function renderPreparationSummary(stages: Array<Exclude<LitrevStageKind, "tasks">>)'),
+      source.indexOf("function renderStageActivities()")
+    );
+    expect(preparationSummaryBlock).toContain("if (skippedStages.includes(stage))");
+    expect(preparationSummaryBlock).toContain("{entry ? renderConversationEntry(entry) : null}");
     expect(source).toContain('stage !== "tasks"');
     expect(source).toContain("function renderStageOutput(stage: Exclude<LitrevStageKind, \"tasks\">)");
     expect(source).toContain('className="litrev-assistant-copy litrev-stage-output-message"');
@@ -207,17 +228,55 @@ describe("HomePage", () => {
     expect(source).toContain('className="litrev-assistant-copy litrev-task-output-message"');
     expect(source).toContain("{renderTaskOutputMessages()}");
     expect(source).toContain("function renderTaskProcess(finished: boolean)");
+    expect(source).toContain("function renderTaskResult()");
+    const taskProcessBlock = source.slice(
+      source.indexOf("function renderTaskProcess(finished: boolean)"),
+      source.indexOf("function renderTaskConversation()")
+    );
+    expect(taskProcessBlock).not.toContain("{finished ? renderTaskResult() : null}");
+    const taskConversationBlock = source.slice(
+      source.indexOf("function renderTaskConversation()"),
+      source.indexOf("function renderPreviewPane()")
+    );
+    expect(taskConversationBlock).toContain("{finished ? renderTaskResult() : null}");
+    expect(taskConversationBlock).not.toContain("skippedStages.map");
+    expect(styles).toContain(".litrev-question-card {\n  width: 100%;");
+    expect(styles).toContain(".litrev-wizard-card {\n  width: 100%;");
+    expect(styles).toContain(".litrev-stage-activity {\n  width: 100%;");
+    expect(styles).toContain("grid-template-columns: repeat(2, minmax(0, 1fr));");
+    expect(styles).toContain(".litrev-file-card:only-child {\n  grid-column: 1 / -1;");
+    expect(styles).toContain(".litrev-preparation-summary {\n  width: 100%;");
+    expect(styles).toContain(".litrev-task-process {\n  width: 100%;");
     expect(source).toContain("const [processDetailsOpen, setProcessDetailsOpen] = useState(false)");
     expect(source).toContain('className="agent-activity-cluster__body litrev-task-process__body"');
     expect(source).toContain('t("agent.activity.workedFor", { duration })');
     expect(source).toContain("setStageDetailsOpen((state) => ({ ...state, tasks: false }))");
     expect(source).not.toContain("litrevRunningLine");
-    expect(source.match(/onClick=\{cancelWorkflow\}/g)).toHaveLength(3);
+    expect(source.match(/onClick=\{skipCurrentCard\}/g)).toHaveLength(3);
+    expect(source).toContain("function skipCurrentCard()");
+    expect(source).toContain("function renderCancelledStageNotice(");
+    expect(source).toContain('className="litrev-cancelled-stage-notice"');
+    expect(source).not.toContain("litrev-skipped-card");
+    expect(styles).toContain(".litrev-cancelled-stage-notice");
+    expect(styles).not.toContain(".litrev-skipped-card");
+    expect(source).not.toContain("cancelWorkflow");
+    expect(source).not.toContain("workflowEnded");
     expect(source).toContain('className="litrev-wizard-card__close"');
-    expect(source).toContain('if (phase.kind !== "wizard" || workflowEnded) return null;');
+    expect(source).toContain('if (phase.kind !== "wizard") return null;');
     expect(source).toContain('{renderComposer("litrev.composer.setup")}');
-    expect(source).toContain('if (phase.kind === "setup" && questionCardStatus !== "cancelled")');
-    expect(source).toContain('if (phase.kind === "wizard")');
+    const submitMessageBlock = source.slice(
+      source.indexOf("function submitConversationMessage()"),
+      source.indexOf("function handleComposerDragOver")
+    );
+    expect(submitMessageBlock).toContain("setConversationEntries");
+    expect(submitMessageBlock).toContain("skippedStage");
+    expect(submitMessageBlock).toContain("if (skippedStage) skipCurrentCard()");
+    expect(submitMessageBlock).not.toContain("setQuestionIndex");
+    expect(submitMessageBlock).not.toContain("confirmKeywords");
+    expect(submitMessageBlock).not.toContain("confirmOutline");
+    expect(submitMessageBlock).not.toContain("confirmReferencesAndStart");
+    expect(source).toContain("{renderCancelledStageNotice(stage)}");
+    expect(source).toContain("{entry ? renderConversationEntry(entry) : null}");
     expect(source).toContain("writeComposerReferenceDrag(event.dataTransfer");
     expect(source).toContain('t("composer.addToChat")');
     expect(source).not.toContain("selectedKnowledgeContexts");

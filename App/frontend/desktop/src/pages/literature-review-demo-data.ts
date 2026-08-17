@@ -30,7 +30,7 @@ export interface LitrevSetupQuestion {
 }
 
 const ALL_SETUP_QUESTIONS: LitrevSetupQuestion[] = [
-  { id: "topic", text: "这篇文献综述的主题 / 研究领域是什么？", options: ["沿用当前描述", "方法与系统", "应用与实践", "理论与发展脉络"] },
+  { id: "topic", text: "这篇文献综述的主题 / 研究领域是什么？", options: ["AI / 计算机技术", "金融 / 经济", "医学 / 生命科学", "社科 / 教育 / 管理"] },
   { id: "time", text: "希望论文覆盖什么时间范围？", options: ["近 3 年", "近 5 年", "近 10 年", "不限"] }
 ];
 
@@ -51,8 +51,8 @@ export const LITREV_TOPIC_QUESTION = "文献综述的研究主题/领域是什�
 
 export const LITREV_ASSISTANT_INTRO = "我会先补齐缺失信息；你已经描述过的内容不会重复询问。";
 export const LITREV_EXECUTION_INTRO = "研究方案已经确认。我先把任务列出来，然后整理资料、撰写正文并检查引用；有补充要求可以随时告诉我。";
-export const LITREV_RESULT_LINE = "综述已经完成。我生成了可编辑的 LaTeX 源文件和编译后的 PDF，内容包含主要方法与系统对比、评测总结和参考文献。";
-export const LITREV_SUPPLEMENT_ACK = "已记录这条补充，会在检索和写作时一并参考。";
+export const LITREV_RESULT_LINE = "综述已经完成。我生成了可编辑的 LaTeX 源文件、编译后的 PDF 和 DOCX 文档，内容包含主要方法与系统对比、评测总结和参考文献。";
+export const LITREV_MESSAGE_ACK = "收到，我会结合当前任务继续处理。";
 
 export function litrevRunningLine(taskName: string): string {
   return `正在${taskName}，后续步骤将自动完成…`;
@@ -197,7 +197,7 @@ export function litrevReferencesConfirmedLog(count: number): string {
 
 /* ---------------------------------- To-do ---------------------------------- */
 
-export const LITREV_TODO_ITEMS = ["下载并验证文献", "批量阅读", "撰写 LaTeX 正文", "生成参考文献", "编译 PDF 并检查引用"];
+export const LITREV_TODO_ITEMS = ["下载并验证文献", "批量阅读", "撰写 LaTeX 正文", "生成参考文献", "生成 PDF、DOCX 并检查引用"];
 
 /* ---------------------------------- 预览文件 ---------------------------------- */
 
@@ -212,6 +212,7 @@ export interface LitrevTaskFile {
 /** Primary artifacts produced by the mocked execution run. */
 export const LITREV_LATEX_ARTIFACT = "outputs/大模型长期记忆-文献综述.tex";
 export const LITREV_PDF_ARTIFACT = "outputs/大模型长期记忆-文献综述.pdf";
+export const LITREV_DOCX_ARTIFACT = "outputs/大模型长期记忆-文献综述.docx";
 
 export function buildDemoTaskFiles(): LitrevTaskFile[] {
   return [
@@ -219,7 +220,8 @@ export function buildDemoTaskFiles(): LitrevTaskFile[] {
     { folder: "downloads", path: "downloads/MemoryBank.pdf", name: "MemoryBank.pdf" },
     { folder: "downloads", path: "downloads/LongMemEval.pdf", name: "LongMemEval.pdf" },
     { folder: "outputs", path: LITREV_LATEX_ARTIFACT, name: "大模型长期记忆-文献综述.tex" },
-    { folder: "outputs", path: LITREV_PDF_ARTIFACT, name: "大模型长期记忆-文献综述.pdf" }
+    { folder: "outputs", path: LITREV_PDF_ARTIFACT, name: "大模型长期记忆-文献综述.pdf" },
+    { folder: "outputs", path: LITREV_DOCX_ARTIFACT, name: "大模型长期记忆-文献综述.docx" }
   ];
 }
 
@@ -262,7 +264,7 @@ const PDF_PREVIEW: LitrevPreviewContent = {
 
 /** Resolves the mocked preview content for a given file path. */
 export function litrevPreviewContentFor(path: string): LitrevPreviewContent {
-  if (path === LITREV_PDF_ARTIFACT) return BODY_PREVIEW;
+  if (path.endsWith(LITREV_PDF_ARTIFACT) || path.endsWith(LITREV_DOCX_ARTIFACT)) return BODY_PREVIEW;
   if (path.endsWith(".pdf")) return PDF_PREVIEW;
   if (path === LITREV_LATEX_ARTIFACT || path.endsWith(".tex")) return LATEX_PREVIEW;
   return {
