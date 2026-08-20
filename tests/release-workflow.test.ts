@@ -233,7 +233,7 @@ describe("GitHub Draft Release v2 workflow", () => {
     }
   });
 
-  it("creates Draft Releases only from merged release/vX.Y.Z PRs and keeps manual fallback", () => {
+  it("creates Draft Releases only from merged vX.Y.Z or release/vX.Y.Z PRs and keeps manual fallback", () => {
     expect(draftWorkflow.on.pull_request_target).toEqual({
       types: ["closed"],
       branches: ["main"],
@@ -252,17 +252,17 @@ describe("GitHub Draft Release v2 workflow", () => {
       "github.event_name == 'workflow_dispatch' || " +
       "(github.event.pull_request.merged == true && " +
       "github.event.pull_request.head.repo.full_name == github.repository && " +
-      "startsWith(github.event.pull_request.head.ref, 'release/v'))",
+      "(startsWith(github.event.pull_request.head.ref, 'v') || " +
+      "startsWith(github.event.pull_request.head.ref, 'release/v')))",
     );
 
     const resolve = draftScript("Resolve and validate release");
     expect(resolve).toContain('if [[ "$EVENT_NAME" == "pull_request_target" ]]');
     expect(resolve).toContain(
-      "^release/v((0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*))$",
+      "^(release/)?v((0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*))$",
     );
-    expect(resolve).toContain("Release branch must match release/vX.Y.Z");
-    expect(resolve).not.toContain("vX.Y.Z or release/vX.Y.Z");
-    expect(resolve).toContain('version="${BASH_REMATCH[1]}"');
+    expect(resolve).toContain("Release branch must match vX.Y.Z or release/vX.Y.Z");
+    expect(resolve).toContain('version="${BASH_REMATCH[2]}"');
     expect(resolve).toContain('target_sha="$PR_MERGE_SHA"');
     expect(resolve).toContain('preflight_level="full"');
     expect(resolve).toContain('create_draft="true"');
