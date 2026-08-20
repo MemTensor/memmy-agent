@@ -1129,7 +1129,7 @@ async function installPreparedRequiredUpdateBeforeBoot(): Promise<boolean> {
     }
 
     const safeFilePath = resolveDownloadedUpdatePath(preparedUpdate.filePath);
-    await access(safeFilePath, fsConstants.R_OK);
+    await ensurePreparedUpdatePackageUsable(safeFilePath);
     showUpdateInstallSplashWindow(targetVersion);
     hideMacDockForPreparedUpdateInstall();
     await writePackagedStartupLog(`boot:prepared-required-update ${targetVersion}`);
@@ -1144,7 +1144,11 @@ async function installPreparedRequiredUpdateBeforeBoot(): Promise<boolean> {
     // Record the target version of this attempt; if this install still fails, the next launch uses
     // it to self-heal and open a window normally.
     await writePreparedRequiredUpdateAttempt(targetVersion);
-    const installResult = await openBackgroundUpdateInstaller(safeFilePath);
+    const installResult = await openBackgroundUpdateInstaller(safeFilePath, {
+      quitCurrentApp: true,
+      openAfterInstall: true,
+      expectedVersion: preparedUpdate.latestVersion
+    });
     return Boolean(installResult.willQuit);
   } catch (error) {
     console.warn("prepared required app update skipped:", error);
@@ -1193,7 +1197,7 @@ async function waitForWindowsPreparedRequiredUpdateBeforeBoot(): Promise<boolean
     }
 
     const safeFilePath = resolveDownloadedUpdatePath(preparedUpdate.filePath);
-    await access(safeFilePath, fsConstants.R_OK);
+    await ensurePreparedUpdatePackageUsable(safeFilePath);
     await writePackagedStartupLog(`boot:prepared-required-update win32 ${targetVersion}`);
     await writePreparedRequiredUpdateAttempt(targetVersion);
     const showUpdatePrompt = preparedUpdate.showUpdatePrompt === true;
@@ -1493,11 +1497,9 @@ async function installPreparedRequiredUpdateOnQuit(): Promise<void> {
       // Since the user has already quit, the silent update only replaces the install directory; the
       // user opens the new version manually next time.
       openAfterInstall: false,
-      showUpdatePrompt: preparedUpdate.showUpdatePrompt === true
+      showUpdatePrompt: preparedUpdate.showUpdatePrompt === true,
+      expectedVersion: preparedUpdate.latestVersion
     };
-    if (process.platform === "win32") {
-      installOptions.expectedVersion = preparedUpdate.latestVersion;
-    }
     const installResult = await openBackgroundUpdateInstaller(safeFilePath, installOptions);
     if (process.platform === "darwin" && installResult.background && !(await waitForPreparedRequiredUpdateLockStart())) {
       await writePackagedStartupLog("quit:prepared-required-update lock-start-timeout");
@@ -1540,12 +1542,7 @@ function shouldManageRequiredUpdates(): boolean {
   return process.platform === "win32";
 }
 
-/**
- * Determines whether the target update has already been downloaded and recorded.
- *
- * @param update The update check result.
- * @returns True when the local prepared record is still valid.
- */
+
 async function hasPreparedRequiredUpdate(update: DesktopUpdateCheckResult): Promise<boolean> {
   const preparedUpdate = await readPreparedRequiredUpdate();
   if (!preparedUpdate) {
@@ -1558,12 +1555,43 @@ async function hasPreparedRequiredUpdate(update: DesktopUpdateCheckResult): Prom
 
   try {
     const safeFilePath = resolveDownloadedUpdatePath(preparedUpdate.filePath);
-    await access(safeFilePath, fsConstants.R_OK);
+    await ensurePreparedUpdatePackageUsable(safeFilePath);
     return true;
   } catch {
+    await removePreparedUpdatePackage(preparedUpdate.filePath).catch(() => undefined);
     await clearPreparedRequiredUpdate();
+    await clearPreparedRequiredUpdateAttempt();
     return false;
   }
+}
+
+
+async function ensurePreparedUpdatePackageUsable(filePath: string): Promise<void> {
+  const safeFilePath = resolveDownloadedUpdatePath(filePath);
+  await access(safeFilePath, fsConstants.R_OK);
+  if (!shouldInstallMacDmgUpdateInBackground(safeFilePath)) {
+    return;
+  }
+
+  const stagedAppPath = resolveStagedMacUpdateAppPath(safeFilePath);
+  const stagedReadyPath = resolveStagedMacUpdateReadyPath(safeFilePath);
+  if (existsSync(stagedAppPath) && existsSync(stagedReadyPath)) {
+    return;
+  }
+
+  await stageMacDmgUpdatePackage(safeFilePath);
+}
+
+
+async function removePreparedUpdatePackage(filePath: string): Promise<void> {
+  const safeFilePath = resolveDownloadedUpdatePath(filePath);
+  await removeFileIfExists(safeFilePath).catch(() => undefined);
+  if (process.platform !== "darwin") {
+    return;
+  }
+
+  await rm(resolveStagedMacUpdateAppPath(safeFilePath), { recursive: true, force: true }).catch(() => undefined);
+  await removeFileIfExists(resolveStagedMacUpdateReadyPath(safeFilePath)).catch(() => undefined);
 }
 
 /**
@@ -1918,10 +1946,16 @@ async function downloadUpdate(
   await downloadUpdatePackageToFile(response, filePath, downloadUrl, progressTarget);
 
   if (options.openInstaller === false) {
-    await stageMacDmgUpdatePackage(filePath).catch(async (error) => {
+    try {
+      await ensurePreparedUpdatePackageUsable(filePath);
+    } catch (error) {
       console.warn("mac update package staging skipped:", error);
       await writePackagedStartupLog(`mac-update-stage skipped\n${formatStartupError(error)}`);
-    });
+      await removePreparedUpdatePackage(filePath).catch(() => undefined);
+      await clearPreparedRequiredUpdate().catch(() => undefined);
+      await clearPreparedRequiredUpdateAttempt().catch(() => undefined);
+      throw error;
+    }
     await writePreparedRequiredUpdate(update, filePath);
     return { filePath, opened: false };
   }
@@ -1990,6 +2024,10 @@ async function downloadUpdatePackageToFile(
       publishProgress(true);
     }
 
+    if (totalBytes !== null && transferredBytes !== totalBytes) {
+      throw new Error(`update package download incomplete: ${transferredBytes}/${totalBytes}`);
+    }
+
     await removeFileIfExists(filePath);
     await rename(temporaryFilePath, filePath);
   } catch (error) {
@@ -2055,6 +2093,7 @@ async function removeFileIfExists(filePath: string): Promise<void> {
 async function openUpdateInstaller(filePath: string): Promise<DesktopUpdateInstallResult> {
   const safeFilePath = resolveDownloadedUpdatePath(filePath);
   if (shouldInstallMacDmgUpdateInBackground(safeFilePath)) {
+    await ensurePreparedUpdatePackageUsable(safeFilePath);
     const result = await installMacDmgUpdateInBackground(safeFilePath);
     if (!result.background) {
       await clearPreparedRequiredUpdate().catch(() => undefined);
@@ -2096,6 +2135,7 @@ async function openBackgroundUpdateInstaller(
 ): Promise<DesktopUpdateInstallResult> {
   const safeFilePath = resolveDownloadedUpdatePath(filePath);
   if (shouldInstallMacDmgUpdateInBackground(safeFilePath)) {
+    await ensurePreparedUpdatePackageUsable(safeFilePath);
     return installMacDmgUpdateInBackground(safeFilePath, options);
   }
 
@@ -2160,10 +2200,11 @@ async function installMacDmgUpdateInBackground(
   const stagedReadyPath = resolveStagedMacUpdateReadyPath(filePath);
   const stagedAppArg = existsSync(stagedAppPath) && existsSync(stagedReadyPath) ? stagedAppPath : "";
   const stagedReadyArg = stagedAppArg ? stagedReadyPath : "";
+  const expectedVersion = options.expectedVersion ?? parseUpdatePackageVersion(basename(filePath)) ?? "";
   await writeFile(helperPath, createMacDmgUpdateInstallScript(), { mode: 0o700 });
   await chmod(helperPath, 0o700).catch(() => undefined);
 
-  const helper = spawn("/bin/zsh", [helperPath, filePath, destinationAppPath, logPath, String(process.pid), options.openAfterInstall ? "1" : "0", markerPath, stagedAppArg, stagedReadyArg], {
+  const helper = spawn("/bin/zsh", [helperPath, filePath, destinationAppPath, logPath, String(process.pid), options.openAfterInstall ? "1" : "0", markerPath, stagedAppArg, stagedReadyArg, expectedVersion], {
     detached: true,
     stdio: "ignore"
   });
@@ -2221,6 +2262,7 @@ OPEN_AFTER_INSTALL="\${5:-1}"
 MARKER_PATH="\${6:-}"
 STAGED_APP_PATH="\${7:-}"
 STAGED_READY_PATH="\${8:-}"
+EXPECTED_VERSION="\${9:-}"
 REOPEN_AFTER_INSTALL="$OPEN_AFTER_INSTALL"
 SCRIPT_PATH="$0"
 MOUNT_POINT=""
@@ -2246,6 +2288,10 @@ cleanup() {
   if [[ -n "$LOCK_DIR" && -d "$LOCK_DIR" ]]; then
     /bin/rmdir "$LOCK_DIR" 2>/dev/null || true
   fi
+  if [[ "$INSTALL_SUCCEEDED" != "1" && "$REOPEN_AFTER_INSTALL" == "1" && -d "$DEST_APP_PATH" ]]; then
+    /bin/sleep 0.1
+    /usr/bin/open -n "$DEST_APP_PATH" >/dev/null 2>&1 || true
+  fi
   /bin/rm -f "$SCRIPT_PATH" || true
 }
 trap cleanup EXIT
@@ -2268,6 +2314,14 @@ validate_app_bundle() {
   if [[ -z "$bundle_executable" || ! -x "$app_path/Contents/MacOS/$bundle_executable" ]]; then
     echo "Memmy app executable missing: $app_path"
     exit 1
+  fi
+  if [[ -n "$EXPECTED_VERSION" ]]; then
+    local bundle_version
+    bundle_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app_path/Contents/Info.plist" 2>/dev/null || true)"
+    if [[ "$bundle_version" != "$EXPECTED_VERSION" ]]; then
+      echo "Memmy app version mismatch: expected $EXPECTED_VERSION, got \${bundle_version:-unknown}"
+      exit 1
+    fi
   fi
 }
 
