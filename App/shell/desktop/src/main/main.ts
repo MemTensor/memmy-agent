@@ -185,6 +185,8 @@ const AGENT_SOURCE_AUTO_INJECT_TRIGGER_DEBOUNCE_MS = 10 * 1000;
 
 let agentSourceAutoInjectInFlight = false;
 let lastAgentSourceAutoInjectTriggeredAt = 0;
+const updatePackageDownloadLocks = new Map<string, Promise<void>>();
+const updatePackagePreparationLocks = new Map<string, Promise<void>>();
 
 /**
  * Computes one background update check interval with jitter applied.
@@ -1579,7 +1581,21 @@ async function ensurePreparedUpdatePackageUsable(filePath: string): Promise<void
     return;
   }
 
-  await stageMacDmgUpdatePackage(safeFilePath);
+  const existingPreparation = updatePackagePreparationLocks.get(safeFilePath);
+  if (existingPreparation) {
+    await existingPreparation;
+    return;
+  }
+
+  const preparation = stageMacDmgUpdatePackage(safeFilePath);
+  updatePackagePreparationLocks.set(safeFilePath, preparation);
+  try {
+    await preparation;
+  } finally {
+    if (updatePackagePreparationLocks.get(safeFilePath) === preparation) {
+      updatePackagePreparationLocks.delete(safeFilePath);
+    }
+  }
 }
 
 
@@ -1935,15 +1951,10 @@ async function downloadUpdate(
   }
 
   const downloadUrl = normalizeHttpUrl(update.downloadUrl);
-  const response = await fetch(downloadUrl, { cache: "no-store" });
-  if (!response.ok) {
-    throw new Error(`update package download failed: ${response.status}`);
-  }
-
   const updatesDirectory = resolveUpdatesDirectory();
   await mkdir(updatesDirectory, { recursive: true });
   const filePath = join(updatesDirectory, resolveUpdatePackageFileName(downloadUrl, update.latestVersion));
-  await downloadUpdatePackageToFile(response, filePath, downloadUrl, progressTarget);
+  await downloadUpdatePackageWithLock(downloadUrl, filePath, progressTarget);
 
   if (options.openInstaller === false) {
     try {
@@ -1967,13 +1978,45 @@ async function downloadUpdate(
   return openUpdateInstaller(filePath);
 }
 
+async function downloadUpdatePackageWithLock(
+  downloadUrl: string,
+  filePath: string,
+  progressTarget?: WebContents
+): Promise<void> {
+  const downloadKey = `${downloadUrl}\n${filePath}`;
+  const existingDownload = updatePackageDownloadLocks.get(downloadKey);
+  if (existingDownload) {
+    await existingDownload;
+    await emitCompletedUpdateDownloadProgress(downloadUrl, filePath, progressTarget);
+    return;
+  }
+
+  const downloadTask = (async () => {
+    const response = await fetch(downloadUrl, { cache: "no-store" });
+    if (!response.ok) {
+      throw new Error(`update package download failed: ${response.status}`);
+    }
+
+    await downloadUpdatePackageToFile(response, filePath, downloadUrl, progressTarget);
+  })();
+
+  updatePackageDownloadLocks.set(downloadKey, downloadTask);
+  try {
+    await downloadTask;
+  } finally {
+    if (updatePackageDownloadLocks.get(downloadKey) === downloadTask) {
+      updatePackageDownloadLocks.delete(downloadKey);
+    }
+  }
+}
+
 async function downloadUpdatePackageToFile(
   response: Response,
   filePath: string,
   downloadUrl: string,
   progressTarget?: WebContents
 ): Promise<void> {
-  const temporaryFilePath = `${filePath}.download`;
+  const temporaryFilePath = `${filePath}.${process.pid}.${Date.now()}.download`;
   const totalBytes = readDownloadContentLength(response.headers);
   let transferredBytes = 0;
   let lastPublishedAt = 0;
@@ -2074,6 +2117,19 @@ function emitUpdateDownloadProgress(
   }
 
   progressTarget.send(UPDATE_DOWNLOAD_PROGRESS_CHANNEL, progress);
+}
+
+async function emitCompletedUpdateDownloadProgress(
+  downloadUrl: string,
+  filePath: string,
+  progressTarget?: WebContents
+): Promise<void> {
+  if (!progressTarget || progressTarget.isDestroyed()) {
+    return;
+  }
+
+  const downloadedPackage = await stat(filePath);
+  emitUpdateDownloadProgress(progressTarget, createUpdateDownloadProgress(downloadUrl, filePath, downloadedPackage.size, downloadedPackage.size));
 }
 
 async function removeFileIfExists(filePath: string): Promise<void> {
