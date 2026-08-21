@@ -364,13 +364,24 @@ function buildPersistedRawProfile(
 ): Record<string, unknown> {
   const result = stripCloudCredential(rawProfile);
   delete result[LOCAL_AUTH_CHANNEL_FIELD];
-  const persistedChannel = authChannel ?? resolveExplicitAccountAuthChannel(previous);
+  const persistedChannel = authChannel ?? resolveAccountAuthChannel(previous);
   if (persistedChannel) result[LOCAL_AUTH_CHANNEL_FIELD] = persistedChannel;
   return result;
 }
 
 function resolveAccountAuthChannel(row: AccountSessionRow | null): AccountChannel | null {
-  return resolveExplicitAccountAuthChannel(row);
+  const explicitChannel = resolveExplicitAccountAuthChannel(row);
+  if (explicitChannel || !row) return explicitChannel;
+
+  // Older sessions predate channel tagging; only recover them when one contact type is present.
+  const rawProfile = row.raw_profile_json ? parseRawProfile(row.raw_profile_json) : null;
+  const email = readRawProfileString(row.email) ?? readRawProfileString(rawProfile?.email);
+  const phone = readRawProfileString(row.phone)
+    ?? readRawProfileString(rawProfile?.phoneNumber)
+    ?? readRawProfileString(rawProfile?.phone);
+  if (email && !phone) return "email";
+  if (phone && !email) return "phone";
+  return null;
 }
 
 function resolveExplicitAccountAuthChannel(row: AccountSessionRow | null): AccountChannel | null {

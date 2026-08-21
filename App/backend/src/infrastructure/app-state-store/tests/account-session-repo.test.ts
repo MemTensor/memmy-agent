@@ -299,6 +299,58 @@ describe("account session repository", () => {
     store.close();
   });
 
+  it("infers the channel for legacy sessions only when the contact field is unambiguous", () => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-account-session-"));
+    const store = createAppStateStore({ databasePath: join(tempDir, "app.sqlite") });
+
+    store.repositories.accountSession.upsert({
+      profile: {
+        userId: "legacy-email", email: "legacy@example.com", phoneNumber: null, nickname: "legacy-email",
+        avatarUrl: null, planType: "free", hasFinishedGuide: false, region: null, registeredAt: null,
+        rawProfile: { id: "legacy-email", email: "legacy@example.com" }
+      },
+      uuid: "legacy-email",
+      cloudUuid: "legacy.email.token"
+    });
+    expect(store.repositories.accountSession.getAuthChannel()).toBe("email");
+    store.repositories.accountSession.upsert({
+      profile: {
+        userId: "legacy-email", email: "legacy@example.com", phoneNumber: null, nickname: "legacy-email",
+        avatarUrl: null, planType: "free", hasFinishedGuide: true, region: null, registeredAt: null,
+        rawProfile: { id: "legacy-email", email: "legacy@example.com" }
+      },
+      uuid: "legacy-email"
+    });
+    const migratedEmailRow = store.db.prepare(
+      "SELECT raw_profile_json FROM cloud_accounts WHERE uuid = ?"
+    ).get("legacy-email") as { raw_profile_json: string };
+    expect(JSON.parse(migratedEmailRow.raw_profile_json)._memmyAuthChannel).toBe("email");
+
+    store.repositories.accountSession.upsert({
+      profile: {
+        userId: "legacy-phone", email: null, phoneNumber: "13800138000", nickname: "legacy-phone",
+        avatarUrl: null, planType: "free", hasFinishedGuide: false, region: null, registeredAt: null,
+        rawProfile: { id: "legacy-phone", phoneNumber: "13800138000" }
+      },
+      uuid: "legacy-phone",
+      cloudUuid: "legacy.phone.token"
+    });
+    expect(store.repositories.accountSession.getAuthChannel()).toBe("phone");
+
+    store.repositories.accountSession.upsert({
+      profile: {
+        userId: "legacy-ambiguous", email: "both@example.com", phoneNumber: "13900139000",
+        nickname: "legacy-ambiguous", avatarUrl: null, planType: "free", hasFinishedGuide: false,
+        region: null, registeredAt: null,
+        rawProfile: { id: "legacy-ambiguous", email: "both@example.com", phoneNumber: "13900139000" }
+      },
+      uuid: "legacy-ambiguous",
+      cloudUuid: "legacy.ambiguous.token"
+    });
+    expect(store.repositories.accountSession.getAuthChannel()).toBeNull();
+    store.close();
+  });
+
   it("repairs missing phone column from raw cloud profile", () => {
     tempDir = mkdtempSync(join(tmpdir(), "memmy-account-session-"));
     const store = createAppStateStore({ databasePath: join(tempDir, "app.sqlite") });
