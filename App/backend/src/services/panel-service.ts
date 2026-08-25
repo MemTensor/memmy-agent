@@ -25,31 +25,32 @@ export interface PanelService {
 }
 
 /** Creates create panel service. */
-export function createPanelService(deps: { memoryClient: MemoryClient }): PanelService {
+export function createPanelService(deps: { memoryClient: MemoryClient; getUserId: () => string }): PanelService {
+  const context = (ctx: RuntimeContext): RuntimeContext => ({ ...ctx, userId: deps.getUserId() });
   return {
     async overview(ctx) {
-      return deps.memoryClient.panelOverview(ctx);
+      return deps.memoryClient.panelOverview(context(ctx));
     },
 
     async analysis(ctx) {
-      return deps.memoryClient.panelAnalysis(ctx);
+      return deps.memoryClient.panelAnalysis(context(ctx));
     },
 
     async items(input, ctx) {
-      return deps.memoryClient.panelItems(input, ctx);
+      return deps.memoryClient.panelItems(input, context(ctx));
     },
 
     async tasks(input, ctx) {
-      return deps.memoryClient.panelTasks(input, ctx);
+      return deps.memoryClient.panelTasks(input, context(ctx));
     },
 
     async deleteTask(id, ctx) {
-      return deps.memoryClient.deletePanelTask(id, ctx);
+      return deps.memoryClient.deletePanelTask(id, context(ctx));
     },
 
     async memoryApiLogs(input, ctx) {
       try {
-        return await deps.memoryClient.memoryApiLogs(input, ctx);
+        return await deps.memoryClient.memoryApiLogs(input, context(ctx));
       } catch (error) {
         if (isMissingMemoryLogsRoute(error)) {
           return {

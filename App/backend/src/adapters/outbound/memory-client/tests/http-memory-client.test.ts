@@ -24,6 +24,7 @@ describe("HttpMemoryClient", () => {
       "/api/v1/memory/add",
       "/api/v1/memory/:id",
       "/api/v1/memory/:id",
+      "/api/v1/memory/recalls/:queryId",
       "/api/v1/worker/run",
       "/api/v1/worker/import-summaries/enqueue",
       "/api/v1/memory/processing/status",
@@ -49,6 +50,7 @@ describe("HttpMemoryClient", () => {
       path: string;
       authorization: string | undefined;
       timeZone: string | undefined;
+      userId: string | undefined;
       body: unknown;
     }> = [];
     const baseUrl = await startServer(async (request, response) => {
@@ -58,6 +60,7 @@ describe("HttpMemoryClient", () => {
         path: new URL(request.url ?? "/", "http://localhost").pathname,
         authorization: request.headers.authorization,
         timeZone: request.headers["x-memmy-time-zone"] as string | undefined,
+        userId: request.headers["x-memmy-user-id"] as string | undefined,
         body
       });
       sendJson(response, fixtureFor(request.method ?? "", new URL(request.url ?? "/", "http://localhost").pathname, body));
@@ -85,12 +88,21 @@ describe("HttpMemoryClient", () => {
     await expect(client.addMemory(addMemoryInput())).resolves.toMatchObject({ id: "memory-1" });
     await expect(client.getMemory({ memoryId: "memory-1" })).resolves.toMatchObject({ item: { id: "memory-1" } });
     await expect(client.deleteMemory({ memoryId: "memory-1", source: "codex" })).resolves.toMatchObject({ status: "deleted" });
+    await expect(client.recallEvidence("turn-1")).resolves.toMatchObject({
+      queryId: "turn-1",
+      hits: [],
+      diagnostics: {
+        candidateMemoryIds: ["memory-1"],
+        injectedMemoryIds: ["memory-1"],
+        capture: { status: "completed" }
+      }
+    });
     await expect(
       client.memoryApiLogs({ tools: ["memory_add", "memory_search"], limit: 20, offset: 0 })
     ).resolves.toMatchObject({ logs: [] });
     await expect(client.panelOverview({ timeZone: "Asia/Shanghai" })).resolves.toMatchObject({ counts: { memories: 0 } });
     await expect(client.panelAnalysis()).resolves.toMatchObject({ metrics: { avgRecallScore: 0 } });
-    await expect(client.panelItems(panelItemsInput())).resolves.toMatchObject({ items: [] });
+    await expect(client.panelItems(panelItemsInput(), { userId: "account-user-1" })).resolves.toMatchObject({ items: [] });
     await expect(client.panelTasks({ page: 1 })).resolves.toMatchObject({ tasks: [] });
     await expect(client.deletePanelTask("episode-1")).resolves.toMatchObject({ ok: true, id: "episode-1" });
 
@@ -106,6 +118,7 @@ describe("HttpMemoryClient", () => {
       "POST /api/v1/memory/add",
       "GET /api/v1/memory/memory-1",
       "DELETE /api/v1/memory/memory-1",
+      "GET /api/v1/memory/recalls/turn-1",
       "GET /api/v1/memory/logs",
       "GET /api/v1/panel/overview",
       "GET /api/v1/panel/analysis",
@@ -116,6 +129,8 @@ describe("HttpMemoryClient", () => {
     expect(requests.every((request) => request.authorization === "Bearer memory-token")).toBe(true);
     expect(requests.find((request) => request.path === "/api/v1/panel/overview")?.timeZone)
       .toBe("+08:00");
+    expect(requests.find((request) => request.path === "/api/v1/panel/items")?.userId)
+      .toBe("account-user-1");
     expect(
       requests
         .filter((request) => requestBodySource(request.body) !== undefined)
@@ -402,6 +417,21 @@ function fixtureFor(method: string, path: string, body: unknown): unknown {
   if (method === "POST" && path === "/api/v1/memory/add") return addMemoryOutput(body);
   if (method === "GET" && path === "/api/v1/memory/memory-1") return getMemoryOutput();
   if (method === "DELETE" && path === "/api/v1/memory/memory-1") return deleteMemoryOutput();
+  if (method === "GET" && path === "/api/v1/memory/recalls/turn-1") {
+    return {
+      recallEventId: "recall-1",
+      queryId: "turn-1",
+      query: "remember",
+      hits: [],
+      diagnostics: {
+        candidateMemoryIds: ["memory-1"],
+        injectedMemoryIds: ["memory-1"],
+        capture: { status: "completed" }
+      },
+      createdAt: now(),
+      serverTime: now()
+    };
+  }
   if (method === "GET" && path === "/api/v1/memory/logs") return memoryApiLogsOutput();
   if (method === "GET" && path === "/api/v1/panel/overview") return panelOverviewOutput();
   if (method === "GET" && path === "/api/v1/panel/analysis") return panelAnalysisOutput();
@@ -551,7 +581,7 @@ function memoryApiLogsOutput() {
 }
 
 function panelOverviewOutput() {
-  return { counts: { memories: 0, skills: 0, experiences: 0, worldModels: 0 }, dailyActivity: panelDays(), sourceDistribution: [] };
+  return { counts: { memories: 0, userMemories: 0, skills: 0, experiences: 0, worldModels: 0 }, dailyActivity: panelDays(), sourceDistribution: [] };
 }
 
 function panelAnalysisOutput() {

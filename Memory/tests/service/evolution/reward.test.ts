@@ -7,7 +7,8 @@ import {
 } from "../../../src/index.js";
 import {
   createBatchReflectionLlm,
-  createMemoryServiceFixture
+  createMemoryServiceFixture,
+  runWorkerRounds
 } from "../../fixtures/memory-service-fixture.js";
 
 const {
@@ -41,6 +42,17 @@ function createEmptyRewardSummaryLlm(calls: Array<{
       options: { operation: string }
     ): Promise<T> {
       calls.push({ messages, options });
+      if (options.operation === "capture.summarize") {
+        const payload = messages.find((message) => message.role === "user")?.content ?? "";
+        const turnSummary = payload.match(/\bUSER:\s*(.*?)\s+ASSISTANT:/)?.[1]?.trim() ?? "completed task turn";
+        return {
+          l1: {
+            summary: turnSummary,
+            evidence: [{ quote: turnSummary, role: "user", kind: "task_outcome" }]
+          },
+          user: null
+        } as unknown as T;
+      }
       return {} as T;
     },
     status() {
@@ -84,6 +96,22 @@ function createCapturingRewardSummaryLlm(calls: Array<{
       }
     ): Promise<T> {
       calls.push({ messages, options });
+      if (options.operation === "capture.summarize") {
+        const payload = messages.find((message) => message.role === "user")?.content ?? "";
+        const turnSummary = payload.includes("verify reward scoring prompt")
+          ? "verify reward scoring prompt"
+          : payload.includes("now summarize the final reward result")
+            ? "now summarize the final reward result"
+            : "completed task turn";
+        const userQuote = payload.match(/\bUSER:\s*(.*?)\s+ASSISTANT:/)?.[1]?.trim() ?? turnSummary;
+        return {
+          l1: {
+            summary: turnSummary,
+            evidence: [{ quote: userQuote, role: "user", kind: "task_outcome" }]
+          },
+          user: null
+        } as unknown as T;
+      }
       if (options.operation === "reward.reward.r_human.v7") {
         return {
           goal_achievement: 1,
@@ -99,6 +127,98 @@ function createCapturingRewardSummaryLlm(calls: Array<{
       return {
         provider: "host",
         model: "reward-summary-capturing",
+        configured: true,
+        remote: true
+      };
+    }
+  };
+}
+
+function createRejectingCaptureLlm(calls: string[]): LlmClient {
+  return {
+    config: {
+      ...DEFAULT_MEMMY_CONFIG.summary,
+      provider: "host",
+      endpoint: "http://127.0.0.1/rejecting-capture",
+      model: "rejecting-capture"
+    },
+    isConfigured() {
+      return true;
+    },
+    async complete() {
+      return "{}";
+    },
+    async completeJson<T extends Record<string, unknown>>(
+      _messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
+      options: { operation: string }
+    ): Promise<T> {
+      calls.push(options.operation);
+      if (options.operation !== "capture.summarize") {
+        throw new Error(`unexpected downstream model call: ${options.operation}`);
+      }
+      return {
+        l1: null,
+        user: null
+      } as unknown as T;
+    },
+    status() {
+      return {
+        provider: "host",
+        model: "rejecting-capture",
+        configured: true,
+        remote: true
+      };
+    }
+  };
+}
+
+function createMixedCaptureLlm(calls: Array<{ operation: string; stepCount?: number }>): LlmClient {
+  return {
+    config: {
+      ...DEFAULT_MEMMY_CONFIG.summary,
+      provider: "host",
+      endpoint: "http://127.0.0.1/mixed-capture",
+      model: "mixed-capture"
+    },
+    isConfigured() {
+      return true;
+    },
+    async complete() {
+      return "{}";
+    },
+    async completeJson<T extends Record<string, unknown>>(
+      messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
+      options: { operation: string }
+    ): Promise<T> {
+      const payload = messages.find((message) => message.role === "user")?.content ?? "";
+      if (options.operation === "capture.reflection.batch.v13") {
+        const parsed = JSON.parse(payload) as { steps?: Array<{ idx: number }> };
+        calls.push({ operation: options.operation, stepCount: parsed.steps?.length ?? 0 });
+        return {
+          scores: (parsed.steps ?? []).map((step) => ({
+            idx: step.idx,
+            relevance: "RELATED",
+            reason: "accepted trace only"
+          }))
+        } as unknown as T;
+      }
+      calls.push({ operation: options.operation });
+      if (options.operation === "capture.summarize") {
+        const accepted = payload.includes("implement the durable migration");
+        return {
+          l1: accepted ? {
+            summary: "Implement the durable migration.",
+            evidence: [{ quote: "implement the durable migration", role: "user", kind: "task_request" }]
+          } : null,
+          user: null
+        } as unknown as T;
+      }
+      return {} as T;
+    },
+    status() {
+      return {
+        provider: "host",
+        model: "mixed-capture",
         configured: true,
         remote: true
       };
@@ -287,15 +407,16 @@ describe("MemoryService / evolution / reward", () => {
        WHERE job_type = 'reflection'
          AND episode_id = ?`
     ).get(first.episodeId) as { count: number };
-    expect(queuedReflection.count).toBe(1);
+    expect(queuedReflection.count).toBe(0);
 
+    await service.runWorkerOnce(20);
     await service.runWorkerOnce(20);
     await service.runWorkerOnce(20);
     const reflectedItems = service.panelItems({
       userId: "user-reward-before-reflection",
       layer: "L1"
-    }).items.filter((item) => [first.l1MemoryId, second.l1MemoryId, third.l1MemoryId].includes(item.id));
-    expect(reflectedItems).toHaveLength(3);
+    }).items.filter((item) => [second.l1MemoryId, third.l1MemoryId].includes(item.id));
+    expect(reflectedItems).toHaveLength(2);
     expect(reflectedItems.every((item) => item.metrics?.reflectionDone)).toBe(true);
     expect(calls.some((call) => call.options.operation === "capture.reflection.batch.v13")).toBe(true);
     const rewardCalls = calls.filter((call) => call.options.operation === "reward.reward.r_human.v7");
@@ -326,6 +447,141 @@ describe("MemoryService / evolution / reward", () => {
       traceCount: 3,
       traceIds: [first.l1MemoryId, second.l1MemoryId, third.l1MemoryId]
     });
+    db.close();
+  });
+
+  it("does not start episode evolution before a candidate L1 is rejected", async () => {
+    const calls: string[] = [];
+    const { db, service } = createTestService({
+      llm: createRejectingCaptureLlm(calls)
+    });
+    const session = service.openSession({
+      namespace: {
+        source: "codex",
+        profileId: "jiang",
+        userId: "user-rejected-capture-barrier"
+      }
+    });
+    const complete = service.completeTurn("turn-rejected-capture-barrier", {
+      sessionId: session.sessionId,
+      query: "What did I ask before?",
+      answer: "There is no durable task result in this turn."
+    });
+
+    service.closeSession(session.sessionId);
+    expect(db.db.prepare(
+      `SELECT COUNT(*) AS count
+       FROM evolution_jobs
+       WHERE episode_id = ?
+         AND job_type IN ('reflection', 'reward')`
+    ).get(complete.episodeId)).toEqual({ count: 0 });
+
+    await runWorkerRounds(service, 4, 20);
+
+    expect(db.db.prepare(
+      `SELECT status FROM memories WHERE id = ?`
+    ).get(complete.l1MemoryId)).toEqual({ status: "deleted" });
+    expect(db.db.prepare(
+      `SELECT l1_memory_ids_json FROM episodes WHERE id = ?`
+    ).get(complete.episodeId)).toEqual({
+      l1_memory_ids_json: JSON.stringify([complete.l1MemoryId])
+    });
+    expect(db.db.prepare(
+      `SELECT COUNT(*) AS count
+       FROM evolution_jobs
+       WHERE episode_id = ?
+         AND job_type IN ('reflection', 'reward', 'embedding')`
+    ).get(complete.episodeId)).toEqual({ count: 0 });
+    expect(db.db.prepare(
+      `SELECT COUNT(*) AS count
+       FROM evolution_jobs
+       WHERE status = 'dead_letter'`
+    ).get()).toEqual({ count: 0 });
+    expect(calls).toEqual(["capture.summarize"]);
+
+    const staleEmbeddingJobId = "job_stale_rejected_capture_embedding";
+    const createdAt = new Date().toISOString();
+    db.db.prepare(
+      `INSERT INTO evolution_jobs (
+        id, job_type, status, user_id, session_id, episode_id, target_memory_id,
+        payload_json, attempts, max_attempts, leased_until, last_error, created_at, updated_at
+      ) VALUES (?, 'embedding', 'queued', ?, ?, ?, ?, '{}', 0, 1, NULL, NULL, ?, ?)`
+    ).run(
+      staleEmbeddingJobId,
+      "user-rejected-capture-barrier",
+      session.sessionId,
+      complete.episodeId,
+      complete.l1MemoryId,
+      createdAt,
+      createdAt
+    );
+    await service.runWorkerOnce(20);
+    expect(db.db.prepare(
+      `SELECT status, last_error FROM evolution_jobs WHERE id = ?`
+    ).get(staleEmbeddingJobId)).toEqual({ status: "succeeded", last_error: null });
+    db.close();
+  });
+
+  it("reflects only accepted L1 after every candidate in the episode is decided", async () => {
+    const calls: Array<{ operation: string; stepCount?: number }> = [];
+    const { db, service } = createTestService({
+      llm: createMixedCaptureLlm(calls),
+      config: {
+        ...DEFAULT_MEMMY_CONFIG,
+        algorithm: {
+          ...DEFAULT_MEMMY_CONFIG.algorithm,
+          capture: {
+            ...DEFAULT_MEMMY_CONFIG.algorithm.capture,
+            embedAfterCapture: false
+          }
+        }
+      }
+    });
+    const session = service.openSession({
+      namespace: {
+        source: "codex",
+        profileId: "jiang",
+        userId: "user-mixed-capture-barrier"
+      }
+    });
+    const accepted = service.completeTurn("turn-mixed-capture-accepted", {
+      sessionId: session.sessionId,
+      episodeId: "episode-mixed-capture-barrier",
+      query: "implement the durable migration",
+      answer: "I will implement it."
+    });
+    const rejected = service.completeTurn("turn-mixed-capture-rejected", {
+      sessionId: session.sessionId,
+      episodeId: accepted.episodeId,
+      query: "What did I ask before?",
+      answer: "You asked about a migration."
+    });
+
+    service.closeSession(session.sessionId);
+    expect(db.db.prepare(
+      `SELECT COUNT(*) AS count FROM evolution_jobs
+       WHERE episode_id = ? AND job_type = 'reflection'`
+    ).get(accepted.episodeId)).toEqual({ count: 0 });
+
+    await service.runWorkerOnce(20);
+    expect(db.db.prepare(
+      `SELECT id, status FROM memories WHERE id IN (?, ?) ORDER BY id`
+    ).all(accepted.l1MemoryId, rejected.l1MemoryId)).toEqual([
+      { id: accepted.l1MemoryId, status: "activated" },
+      { id: rejected.l1MemoryId, status: "deleted" }
+    ].sort((left, right) => left.id.localeCompare(right.id)));
+    expect(db.db.prepare(
+      `SELECT COUNT(*) AS count FROM evolution_jobs
+       WHERE episode_id = ? AND job_type = 'reflection'`
+    ).get(accepted.episodeId)).toEqual({ count: 1 });
+
+    await service.runWorkerOnce(20);
+    expect(calls.filter((call) => call.operation === "capture.reflection.batch.v13")).toEqual([
+      { operation: "capture.reflection.batch.v13", stepCount: 1 }
+    ]);
+    expect(db.db.prepare(
+      `SELECT COUNT(*) AS count FROM evolution_jobs WHERE status = 'dead_letter'`
+    ).get()).toEqual({ count: 0 });
     db.close();
   });
 

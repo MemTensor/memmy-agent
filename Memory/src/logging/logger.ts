@@ -310,6 +310,8 @@ function jobTypeTag(value: string): string {
   const tags: Record<string, string> = {
     skill_crystallization: "skill.crystallize",
     l3_abstraction: "l3.abstraction",
+    l3_world_model_update: "l3.world_model.update",
+    project_environment_profile: "project.environment.profile",
     l2_induction: "l2.induction",
     trace_summary: "memory.summary",
     import_summary: "memory.import_summary",

@@ -106,6 +106,67 @@ describe("UpdateCoordinatorProvider", () => {
     expect(downloadUpdate).toHaveBeenCalledTimes(1);
   });
 
+  it("downloads from the inline account action without opening the installer dialog", async () => {
+    let resolveDownload!: (result: DesktopUpdateInstallResult) => void;
+    const downloadPromise = new Promise<DesktopUpdateInstallResult>((resolve) => {
+      resolveDownload = resolve;
+    });
+    const checkForUpdates = vi.fn(async () => ({
+      status: "available" as const,
+      currentVersion: "2.1.0",
+      latestVersion: "2.2.0",
+      downloadUrl: "https://updates.example.com/Memmy.dmg"
+    }));
+    const downloadUpdate = vi.fn(() => downloadPromise);
+    setDesktopBridge({
+      platform: "darwin",
+      getAppInfo: vi.fn(async () => ({
+        name: "Memmy",
+        version: "2.1.0",
+        platform: "darwin",
+        arch: "arm64"
+      })),
+      checkForUpdates,
+      downloadUpdate
+    });
+
+    await act(async () => {
+      root.render(
+        <AppStateProvider>
+          <I18nProvider language="zh-CN">
+            <UpdateCoordinatorProvider>
+              <UpdateHarness />
+            </UpdateCoordinatorProvider>
+          </I18nProvider>
+        </AppStateProvider>
+      );
+    });
+
+    await act(async () => {
+      getButtonByLabel("update-action").click();
+      await Promise.resolve();
+    });
+    act(() => getButtonByText("稍后再说").click());
+    expect(readOutput("phase")).toBe("available");
+
+    await act(async () => {
+      getButtonByLabel("inline-update-action").click();
+      await Promise.resolve();
+    });
+    expect(readOutput("phase")).toBe("downloading");
+    expect(downloadUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ latestVersion: "2.2.0" }),
+      { openInstaller: false }
+    );
+
+    await act(async () => {
+      resolveDownload({ filePath: "/tmp/Memmy-2.2.0.dmg", opened: false });
+      await downloadPromise;
+    });
+    expect(readOutput("phase")).toBe("prepared");
+    expect(container.textContent).not.toContain("安装包已准备好，是否重启并安装更新？");
+  });
+
   it("keeps the prepared installer path when launching the installer fails", async () => {
     const checkForUpdates = vi.fn(async () => ({
       status: "available" as const,
@@ -249,13 +310,22 @@ function UpdateHarness() {
         Toggle route
       </button>
       {routeContentVisible && (
-        <button
-          type="button"
-          aria-label="update-action"
-          onClick={() => void update.requestPrimaryAction()}
-        >
-          {update.phase}
-        </button>
+        <>
+          <button
+            type="button"
+            aria-label="update-action"
+            onClick={() => void update.requestPrimaryAction()}
+          >
+            {update.phase}
+          </button>
+          <button
+            type="button"
+            aria-label="inline-update-action"
+            onClick={() => void update.requestInlineAction()}
+          >
+            {update.phase}
+          </button>
+        </>
       )}
       <output aria-label="phase">{update.phase}</output>
       <output aria-label="prepared-path">{update.preparedUpdatePath ?? ""}</output>

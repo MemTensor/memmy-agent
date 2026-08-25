@@ -31,6 +31,7 @@ describe("memory-add-analytics", () => {
     const fetchImpl = vi.fn(async () => new Response(null, { status: 204 }));
     const analytics = createMemoryDesktopAddAnalytics({
       getClientId: () => "client-1",
+      getInstallationId: () => "install-1",
       getUserId: () => "user-1",
       getUserMode: () => "account",
       appEnv: "dev",
@@ -66,6 +67,7 @@ describe("memory-add-analytics", () => {
 
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     const body = JSON.parse(String(fetchImpl.mock.calls[0]?.[1]?.body));
+    expect(body).toMatchObject({ clientId: "client-1", userId: "user-1", installationId: "install-1" });
     const names = body.events.map((event: { eventName: string }) => event.eventName);
     expect(names).toEqual([
       MEMORY_DESKTOP_ADD_ANALYTICS_EVENTS.addStarted,
@@ -73,10 +75,12 @@ describe("memory-add-analytics", () => {
       MEMORY_DESKTOP_ADD_ANALYTICS_EVENTS.addFailed,
     ]);
     expect(body.events[0]?.params).toMatchObject({
+      user_id: "user-1",
+      user_mode: "account",
+      source: "memmy-agent",
       mode: MEMORY_DESKTOP_ADD_MODE_AGENT_SOURCE_SCAN,
       scan_mode: "full",
       adapter_id: "agent-source:cursor",
-      source: "memmy-agent",
     });
     expect(body.events[1]?.params).toMatchObject({
       success: true,

@@ -25,8 +25,10 @@ type DiagnosticsReportExportResult = { canceled: true } | DiagnosticsReportExpor
 
 interface MemmyPreloadApi {
   platform: string;
+  notifyRendererReady(): void;
   getRuntimeConfig(): Promise<unknown>;
   getAppInfo(): Promise<DesktopAppInfo>;
+  getInstallationId(): Promise<string>;
   checkForUpdates(): Promise<DesktopUpdateCheckResult>;
   downloadUpdate(update: DesktopUpdateCheckResult, options?: DesktopUpdateDownloadOptions): Promise<DesktopUpdateInstallResult>;
   onUpdateDownloadProgress(callback: (progress: DesktopUpdateDownloadProgress) => void): () => void;
@@ -116,12 +118,20 @@ ipcRenderer.on("memmy:main-window-action-requested", (_event: IpcRendererEvent, 
 const memmyPreloadApi: MemmyPreloadApi = {
   platform: process.platform,
 
+  notifyRendererReady(): void {
+    ipcRenderer.send("memmy:renderer-ready");
+  },
+
   async getRuntimeConfig(): Promise<unknown> {
     return ipcRenderer.invoke("memmy:get-runtime-config");
   },
 
   async getAppInfo(): Promise<DesktopAppInfo> {
     return ipcRenderer.invoke("memmy:get-app-info");
+  },
+
+  async getInstallationId(): Promise<string> {
+    return ipcRenderer.invoke("memmy:get-installation-id");
   },
 
   async checkForUpdates(): Promise<DesktopUpdateCheckResult> {

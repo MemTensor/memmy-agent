@@ -12,13 +12,16 @@ export function evolutionJobLogFields(job: EvolutionJobRecord): Record<string, u
     maxAttempts: job.maxAttempts,
     sessionId: job.sessionId,
     episodeId: job.episodeId,
-    targetMemoryId: job.targetMemoryId
+    targetMemoryId: job.targetMemoryId,
+    targetField: typeof job.payload.targetField === "string" ? job.payload.targetField : undefined,
+    scopeKey: job.scopeKey,
+    scopeSeq: job.scopeSeq
   };
 }
 
 export function logEvolutionDecision(
   job: EvolutionJobRecord,
-  stage: "l2_induction" | "l3_abstraction" | "skill_crystallization",
+  stage: "l2_induction" | "l3_abstraction" | "l3_world_model_update" | "skill_crystallization",
   reason: string,
   fields: Record<string, unknown> = {}
 ): void {

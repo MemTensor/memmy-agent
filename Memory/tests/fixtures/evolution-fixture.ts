@@ -60,6 +60,9 @@ export function insertActivePolicyMemory(db: MemoryDb, input: {
     preference?: string[];
     anti_pattern?: string[];
   };
+  freshnessClass?: "stable" | "dynamic";
+  lastVerifiedAt?: string;
+  revalidateAfter?: string;
 }): void {
   const at = new Date().toISOString();
   const policy = {
@@ -76,6 +79,9 @@ export function insertActivePolicyMemory(db: MemoryDb, input: {
     experience_type: "success_pattern",
     evidence_polarity: "positive",
     skill_eligible: true,
+    freshness_class: input.freshnessClass ?? "stable",
+    last_verified_at: input.lastVerifiedAt ?? at,
+    ...(input.revalidateAfter ? { revalidate_after: input.revalidateAfter } : {}),
     signature: "python|pytest|_|_",
     source_episode_ids: [input.sourceEpisodeId],
     source_trace_ids: [input.sourceTraceId],
@@ -135,6 +141,32 @@ export function insertActivePolicyMemory(db: MemoryDb, input: {
   upsertMemoryVectorForTest(db, input.id, "vec", [1, 0, 0]);
 }
 
+export function setPolicyLifecycleStatusForTest(
+  db: MemoryDb,
+  policyId: string,
+  status: "candidate" | "active" | "verification_required" | "quarantined" | "superseded" | "archived"
+): void {
+  const row = db.db.prepare(
+    `SELECT info_json, properties_json FROM memories WHERE id = ?`
+  ).get(policyId) as { info_json: string; properties_json: string } | undefined;
+  if (!row) throw new Error(`policy not found: ${policyId}`);
+  const memoryStatus = status === "active" ? "activated" : status === "candidate" ? "resolving" : "archived";
+  const info = JSON.parse(row.info_json) as Record<string, unknown>;
+  const properties = JSON.parse(row.properties_json) as {
+    status?: string;
+    internal_info?: { policy?: Record<string, unknown> };
+  };
+  info.status = status;
+  properties.status = memoryStatus;
+  if (!properties.internal_info?.policy) throw new Error(`policy metadata not found: ${policyId}`);
+  properties.internal_info.policy.status = status;
+  db.db.prepare(
+    `UPDATE memories
+     SET status = ?, info_json = ?, properties_json = ?, updated_at = ?
+     WHERE id = ?`
+  ).run(memoryStatus, JSON.stringify(info), JSON.stringify(properties), new Date().toISOString(), policyId);
+}
+
 export function insertActiveSkillMemoryForTest(db: MemoryDb, input: {
   id: string;
   userId: string;
@@ -148,6 +180,7 @@ export function insertActiveSkillMemoryForTest(db: MemoryDb, input: {
   tags?: string[];
   name?: string;
   invocationGuide?: string;
+  procedureJson?: Record<string, unknown>;
 }): void {
   const at = new Date().toISOString();
   const tags = input.tags ?? ["skill", "neutral_reward"];
@@ -161,7 +194,7 @@ export function insertActiveSkillMemoryForTest(db: MemoryDb, input: {
     source_world_model_ids: input.sourceWorldModelIds ?? [],
     evidence_anchor_ids: input.evidenceAnchorIds ?? [],
     invocation_guide: input.invocationGuide ?? "Use the neutral reward skill checklist when sqlite migration work needs a cautious next step.",
-    procedure_json: {
+    procedure_json: input.procedureJson ?? {
       summary: "Apply the checklist and wait for outcome evidence before updating reliability."
     },
     trials_attempted: 0,
@@ -213,6 +246,8 @@ export function insertActiveSkillMemoryForTest(db: MemoryDb, input: {
         memory_layer: "Skill",
         memory_kind: "skill",
         schema_version: 1,
+        read_only: false,
+        generated_by_memory_base: true,
         source_memory_ids: [...skill.source_policy_ids, ...skill.source_world_model_ids],
         source_policy_ids: skill.source_policy_ids,
         source_world_model_ids: skill.source_world_model_ids,

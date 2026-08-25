@@ -55,6 +55,7 @@ export function buildToolConnectionParams(input: ToolConnectionTrackInput): Anal
 
 export function createToolConnectionAnalytics(options: {
   getClientId?: () => string | null | undefined;
+  getInstallationId?: () => string | null | undefined;
   getUserId?: () => string | null | undefined;
   getUserMode?: () => string | null | undefined;
   appEnv?: AnalyticsAppEnv | null;
@@ -66,6 +67,7 @@ export function createToolConnectionAnalytics(options: {
   const queued = createQueuedAnalytics({
     source: TOOL_CONNECTION_ANALYTICS_SOURCE,
     getClientId: options.getClientId ?? (() => readAnalyticsClientId()),
+    getInstallationId: options.getInstallationId,
     getUserId: options.getUserId,
     getUserMode: options.getUserMode,
     appEnv: options.appEnv,

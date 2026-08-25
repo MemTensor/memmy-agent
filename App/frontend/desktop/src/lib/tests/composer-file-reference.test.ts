@@ -3,7 +3,6 @@ import {
   composerFolderReferenceFromFiles,
   MEMMY_COMPOSER_REFERENCE_MIME,
   mergeComposerContextReferences,
-  parsePathReferencesFromComposerContent,
   readComposerReferenceDrag,
   writeComposerReferenceDrag
 } from "../composer-file-reference.js";
@@ -54,21 +53,6 @@ describe("composer file references", () => {
       kind: "path",
       id: "/Users/memmy/Papers",
       label: "Papers/"
-    });
-  });
-
-  it("restores sent references from canonical thread content", () => {
-    expect(parsePathReferencesFromComposerContent(
-      "请结合这些资料\n\n<memmy-context>\n"
-      + "- file: paper.pdf (/Users/memmy/paper.pdf)\n"
-      + "- folder: Papers/ (/Users/memmy/Papers)\n"
-      + "</memmy-context>"
-    )).toEqual({
-      content: "请结合这些资料",
-      references: [
-        { kind: "path", id: "/Users/memmy/paper.pdf", label: "paper.pdf" },
-        { kind: "path", id: "/Users/memmy/Papers", label: "Papers/" }
-      ]
     });
   });
 });

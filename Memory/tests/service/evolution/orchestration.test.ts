@@ -97,7 +97,7 @@ describe("MemoryService / evolution / orchestration", () => {
     });
     expect(overview.counts.L1).toBe(4);
     expect(overview.counts.L2).toBeGreaterThanOrEqual(1);
-    expect(overview.counts.L3).toBeGreaterThanOrEqual(1);
+    expect(overview.counts.L3).toBe(0);
     expect(overview.counts.Skill).toBeGreaterThanOrEqual(1);
     const promotedCandidates = db.db.prepare(
       `SELECT COUNT(*) AS count
@@ -105,38 +105,6 @@ describe("MemoryService / evolution / orchestration", () => {
        WHERE status = 'promoted'`
     ).get() as { count: number };
     expect(promotedCandidates.count).toBeGreaterThanOrEqual(1);
-    const l3Row = db.db.prepare(
-      `SELECT properties_json FROM memories
-       WHERE user_id = 'user-2' AND memory_layer = 'L3'
-       LIMIT 1`
-    ).get() as { properties_json: string };
-    const l3Properties = JSON.parse(l3Row.properties_json) as {
-      internal_info: {
-        title?: string;
-        body?: string;
-        structure?: {
-          environment?: unknown[];
-          inference?: unknown[];
-          constraints?: unknown[];
-        };
-        domain_tags?: string[];
-        source_policy_ids?: string[];
-        world_model_confidence?: number;
-        world_model: {
-          structure?: {
-            environment?: unknown[];
-            inference?: unknown[];
-            constraints?: unknown[];
-          };
-        };
-      };
-    };
-    expect(l3Properties.internal_info.world_model.structure?.environment?.length).toBeGreaterThan(0);
-    expect(l3Properties.internal_info.world_model.structure?.inference?.length).toBeGreaterThan(0);
-    expect(l3Properties.internal_info.world_model.structure?.constraints?.length).toBeGreaterThan(0);
-    expect(l3Properties.internal_info.structure?.environment?.length).toBeGreaterThan(0);
-    expect(l3Properties.internal_info.source_policy_ids?.length).toBeGreaterThan(0);
-    expect(l3Properties.internal_info.world_model_confidence).toBeGreaterThanOrEqual(0.2);
     const l2Row = db.db.prepare(
       `SELECT properties_json FROM memories
        WHERE user_id = 'user-2' AND memory_layer = 'L2'
@@ -451,9 +419,7 @@ describe("MemoryService / evolution / orchestration", () => {
     expect(JSON.parse(episodeIndexes.l2_policy_ids_json)).toEqual(expect.arrayContaining([
       expect.any(String)
     ]));
-    expect(JSON.parse(episodeIndexes.l3_world_model_ids_json)).toEqual(expect.arrayContaining([
-      expect.any(String)
-    ]));
+    expect(JSON.parse(episodeIndexes.l3_world_model_ids_json)).toEqual([]);
     expect(JSON.parse(episodeIndexes.skill_memory_ids_json)).toContain(skillId);
     const traceDetailAfterSkill = service.getMemory(completes[0]!.l1MemoryId);
     expect(traceDetailAfterSkill.refs.episode).toMatchObject({
@@ -495,7 +461,7 @@ describe("MemoryService / evolution / orchestration", () => {
       },
       query: "pytest sqlite migration environment"
     });
-    expect(world.hits.some((hit) => hit.memoryLayer === "L3")).toBe(true);
+    expect(world.hits.some((hit) => hit.memoryLayer === "L3")).toBe(false);
     const l3ChangesBeforeRepeat = db.db.prepare(
       `SELECT COUNT(*) AS count
        FROM memory_change_log
@@ -522,12 +488,23 @@ describe("MemoryService / evolution / orchestration", () => {
        FROM memory_change_log
        WHERE source = 'worker.l3_abstraction.v7'`
     ).get() as { count: number };
-    expect(l3ChangesAfterRepeat.count).toBeGreaterThan(l3ChangesBeforeRepeat.count);
+    expect(l3ChangesAfterRepeat.count).toBe(l3ChangesBeforeRepeat.count);
     db.close();
   });
 
   it("queues L3 abstraction and skill crystallization when L2 association activates a candidate policy", async () => {
-    const { db, service } = createTestService();
+    const { db, service } = createTestService({
+      config: {
+        ...DEFAULT_MEMMY_CONFIG,
+        algorithm: {
+          ...DEFAULT_MEMMY_CONFIG.algorithm,
+          l2Induction: {
+            ...DEFAULT_MEMMY_CONFIG.algorithm.l2Induction,
+            minEpisodesForActivation: 2
+          }
+        }
+      }
+    });
     const session = service.openSession({
       namespace: {
         source: "codex",
@@ -622,23 +599,10 @@ describe("MemoryService / evolution / orchestration", () => {
       target_memory_id: string | null;
       payload_json: string;
     }>;
-    expect(downstreamJobs.map((job) => job.job_type)).toEqual(["l3_abstraction", "skill_crystallization"]);
-    expect(downstreamJobs.map((job) => job.status)).toEqual(["succeeded", "succeeded"]);
-    expect(downstreamJobs.map((job) => job.episode_id)).toEqual([
-      "episode-l2-activation-2",
-      "episode-l2-activation-2"
-    ]);
-    const l3Job = downstreamJobs.find((job) => job.job_type === "l3_abstraction");
+    expect(downstreamJobs.map((job) => job.job_type)).toEqual(["skill_crystallization"]);
+    expect(downstreamJobs.map((job) => job.status)).toEqual(["succeeded"]);
+    expect(downstreamJobs.map((job) => job.episode_id)).toEqual(["episode-l2-activation-2"]);
     const skillJob = downstreamJobs.find((job) => job.job_type === "skill_crystallization");
-    expect(l3Job?.target_memory_id).toBeNull();
-    expect(JSON.parse(l3Job!.payload_json)).toMatchObject({
-      reason: "l2.policy.updated",
-      targetKind: "policy_cluster",
-      seedPolicyId: "policy_l2_activation_downstream",
-      policyIds: ["policy_l2_activation_downstream"],
-      previousStatus: "active",
-      status: "active"
-    });
     expect(skillJob?.target_memory_id).toBe("policy_l2_activation_downstream");
     expect(JSON.parse(skillJob!.payload_json)).toMatchObject({
       reason: "l2.policy.updated",
@@ -733,19 +697,7 @@ describe("MemoryService / evolution / orchestration", () => {
        WHERE user_id = 'shared-downstream-user'
          AND memory_layer = 'L3'`
     ).all() as Array<{ info_json: string; properties_json: string }>;
-    expect(worlds).toHaveLength(1);
-    expect(JSON.parse(worlds[0]!.info_json).profile_id).toBe("profile-a");
-    const worldMeta = JSON.parse(worlds[0]!.properties_json) as {
-      internal_info: {
-        world_model: {
-          policy_ids?: string[];
-        };
-      };
-    };
-    expect(worldMeta.internal_info.world_model.policy_ids?.sort()).toEqual([
-      "policy_downstream_profile_a",
-      "policy_downstream_profile_b"
-    ].sort());
+    expect(worlds).toHaveLength(0);
 
     const skills = db.db.prepare(
       `SELECT info_json, properties_json

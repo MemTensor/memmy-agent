@@ -37,7 +37,7 @@ export interface CreateLocalApiServerOptions {
   composioMcpToken: string;
   heartbeatIntervalMs?: number;
   allowedOrigins?: readonly string[];
-  scanWorker?: {
+  scanProcess?: {
     databasePath: string;
   };
 }
@@ -88,7 +88,7 @@ export function createLocalApiServer(options: CreateLocalApiServerOptions): Fast
     progressBus: options.services.progressBus,
     permissionManager: options.permissionManager,
     authenticateRuntimeToken,
-    scanWorker: options.scanWorker
+    scanProcess: options.scanProcess
   });
   registerAppConfigRoutes(app, {
     appConfig: options.services.appConfig,

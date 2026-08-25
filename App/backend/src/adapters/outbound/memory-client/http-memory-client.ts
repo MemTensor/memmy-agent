@@ -12,6 +12,7 @@ import {
   MemoryHealthSnapshotSchema,
   MemoryProcessingStatusOutputSchema,
   MemoryReloadConfigOutputSchema,
+  RecallEvidenceOutputSchema,
   PanelAnalysisOutputSchema,
   PanelItemsOutputSchema,
   PanelOverviewOutputSchema,
@@ -79,6 +80,7 @@ export function createHttpMemoryClient(
           headers: {
             ...(hasBody ? { "content-type": "application/json" } : {}),
             "x-memmy-time-zone": normalizeTimeZoneOffset(requestOptions.context?.timeZone),
+            ...(requestOptions.context?.userId ? { "x-memmy-user-id": requestOptions.context.userId } : {}),
             authorization: `Bearer ${config.token}`
           },
           body: hasBody ? JSON.stringify(requestOptions.body) : undefined,
@@ -172,6 +174,13 @@ export function createHttpMemoryClient(
       return request("DELETE", "deleteMemory", DeleteMemoryOutputSchema, {
         params: { id: memoryId },
         body,
+        context
+      });
+    },
+
+    async recallEvidence(queryId, context) {
+      return request("GET", "recallEvidence", RecallEvidenceOutputSchema, {
+        params: { queryId },
         context
       });
     },

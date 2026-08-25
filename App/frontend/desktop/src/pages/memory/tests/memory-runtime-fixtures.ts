@@ -210,6 +210,7 @@ export const mockMemoryDetails: Record<string, GetMemoryOutput> = {
 export const mockPanelOverview: PanelOverviewOutput = {
   counts: {
     memories: 9,
+    userMemories: 5,
     skills: 2,
     experiences: 4,
     worldModels: 3

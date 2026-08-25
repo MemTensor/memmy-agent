@@ -1,10 +1,12 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { zstdCompressSync } from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
 import { createDeepseekHarnessSourceAdapter, readDeepseekHarnessSession } from "../index.js";
 
+const openAiKeyFixture = ["sk-", "abcdefghijklmnopqrstuvwxyz", "ABCDEFGHIJKLMN"].join("");
+const secretMessageFixture = `Remember OPENAI_API_KEY=${openAiKeyFixture}`;
 let tempDir: string | undefined;
 
 afterEach(() => {
@@ -25,7 +27,7 @@ describe("DeepSeek Harness source adapter", () => {
         messageId: "user-1",
         conversationId: "dsh-session-1",
         role: "user",
-        content: "Remember OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN",
+        content: secretMessageFixture,
         workspacePath: fixture.workspacePath
       }),
       expect.objectContaining({
@@ -36,6 +38,26 @@ describe("DeepSeek Harness source adapter", () => {
         workspacePath: fixture.workspacePath
       })
     ]);
+  });
+
+  it("ignores an incomplete trailing Zstandard frame", async () => {
+    const fixture = createFixture("session.jsonl.zstd");
+    const incompleteFrame = zstdCompressSync(Buffer.from(JSON.stringify({
+      type: "user/message",
+      seq: 4,
+      time: 1780404003000,
+      data: {
+        id: "incomplete-user",
+        role: "user",
+        source: { kind: "user" },
+        content: [{ type: "text", text: "This frame is still being written" }]
+      }
+    }) + "\n"));
+    appendFileSync(fixture.sessionFilePath, incompleteFrame.subarray(0, incompleteFrame.length - 8));
+
+    const messages = await readDeepseekHarnessSession(fixture.sessionFilePath);
+
+    expect(messages.map((message) => message.messageId)).toEqual(["user-1", "assistant-1"]);
   });
 
   it("discovers sessions and redacts secrets during source scans", async () => {
@@ -105,7 +127,7 @@ function createFixture(fileName: "session.jsonl" | "session.jsonl.zstd"): {
         id: "user-1",
         role: "user",
         source: { kind: "user" },
-        content: [{ type: "text", text: "Remember OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN" }]
+        content: [{ type: "text", text: secretMessageFixture }]
       }
     },
     {

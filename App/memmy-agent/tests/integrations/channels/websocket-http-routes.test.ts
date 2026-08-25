@@ -7,18 +7,22 @@ import { ChannelManager } from "../../../src/integrations/channels/manager.js";
 import { WebSocketChannel, normalizeConfigPath, stripTrailingSlash } from "../../../src/integrations/channels/websocket.js";
 import { Session, SessionManager } from "../../../src/core/session/manager.js";
 import { appendTranscriptObject, webuiTranscriptPath } from "../../../src/entrypoints/frontend-bridge/transcript.js";
+import { ProjectStore } from "../../../src/entrypoints/frontend-bridge/projects.js";
 import { loadConfig } from "../../../src/config/loader.js";
+import { INBOUND_META_RUNTIME_CONTROL, RUNTIME_CONTROL_ACK, RUNTIME_CONTROL_MCP_RELOAD } from "../../../src/core/runtime-messages/events.js";
 
 const routeMocks = vi.hoisted(() => ({
   mcpPresetsSettingsAction: vi.fn(),
 }));
 const childProcessMocks = vi.hoisted(() => ({
+  execFile: vi.fn((_command?: string, _args?: string[], _options?: unknown, callback?: (...args: any[]) => void) => callback?.(null, "", "")),
   spawn: vi.fn(() => ({ unref: vi.fn() })),
   spawnSync: vi.fn(() => ({ status: 0, stderr: "" })),
 }));
 
 vi.mock("node:child_process", async (importOriginal: () => Promise<typeof import("node:child_process")>) => ({
   ...await importOriginal(),
+  execFile: childProcessMocks.execFile,
   spawn: childProcessMocks.spawn,
   spawnSync: childProcessMocks.spawnSync,
 }));
@@ -40,6 +44,7 @@ afterEach(async () => {
   await Promise.all(running.splice(0).map((channel) => channel.stop()));
   for (const dir of tmpDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
   vi.restoreAllMocks();
+  childProcessMocks.execFile.mockClear();
   childProcessMocks.spawn.mockClear();
   childProcessMocks.spawnSync.mockClear();
   routeMocks.mcpPresetsSettingsAction.mockReset();
@@ -103,6 +108,7 @@ describe("WebSocket HTTP route helpers", () => {
 
   function makeChannel({
     sessionManager = null,
+    projectStore = null,
     staticDistPath = null,
     runtimeModelName = null,
     runtimeToolNames = null,
@@ -113,6 +119,7 @@ describe("WebSocket HTTP route helpers", () => {
     config = {},
   }: {
     sessionManager?: SessionManager | null;
+    projectStore?: ProjectStore | null;
     staticDistPath?: string | null;
     runtimeModelName?: (() => string | null | undefined) | null;
     runtimeToolNames?: (() => string[] | null | undefined) | null;
@@ -135,6 +142,7 @@ describe("WebSocket HTTP route helpers", () => {
       new MessageBus(),
       {
         sessionManager,
+        projectStore,
         staticDistPath,
         runtimeModelName,
         runtimeToolNames,
@@ -175,6 +183,27 @@ describe("WebSocket HTTP route helpers", () => {
     const configPath = path.join(root, "config.yaml");
     fs.writeFileSync(configPath, `model: ${model}\n`, "utf8");
     process.env.MEMMY_CONFIG = configPath;
+  }
+
+  function mockDirtyGitWorkspace(root: string): void {
+    let currentBranch = "zy_git_v1.0.7";
+    childProcessMocks.execFile.mockImplementation((_command?: string, args: string[] = [], _options?: unknown, callback?: (...args: any[]) => void) => {
+      if (args[0] === "rev-parse") return callback?.(null, `${root}\n`, "");
+      if (args[0] === "status") {
+        return callback?.(null, `# branch.oid 84d10f8f00\u0000# branch.head ${currentBranch}\u00001 .M N... 100644 100644 100644 abc abc tracked.ts\u0000`, "");
+      }
+      if (args[0] === "for-each-ref") return callback?.(null, "zy_git_v1.0.7\nmain\n", "");
+      if (args[0] === "check-ref-format") return callback?.(null, args.at(-1) ?? "", "");
+      if (args[0] === "switch") {
+        currentBranch = args.at(-1) ?? currentBranch;
+        return callback?.(null, "", "");
+      }
+      if (args[0] === "diff" && args.includes("--numstat")) {
+        return callback?.(null, "2\t1\ttracked.ts\0", "");
+      }
+      if (args[0] === "diff") return callback?.(null, "+changed\n", "");
+      return callback?.(new Error("unexpected git command"), "", "unexpected git command");
+    });
   }
 
   function configImageModel(root: string): void {
@@ -297,6 +326,93 @@ describe("WebSocket HTTP route helpers", () => {
     });
     expect(admin.configure).toHaveBeenCalledWith("feishu");
     expect(admin.stop).toHaveBeenCalledWith("feishu");
+  });
+
+  it("serves a read-only workspace environment and selected diff", async () => {
+    const root = tmpRoot();
+    fs.writeFileSync(path.join(root, "tracked.ts"), "changed\n", "utf8");
+    const manager = seedSession(path.join(root, "sessions"), "websocket:environment", root);
+    const channel = makeChannel({ sessionManager: manager, workspacePath: root });
+    const headers = withApiToken(channel);
+    mockDirtyGitWorkspace(root);
+
+    const encoded = encodeURIComponent("websocket:environment");
+    const snapshotResponse = await channel.dispatchHttp(localConnection, {
+      path: `/api/sessions/${encoded}/environment`,
+      headers,
+    });
+    expect(snapshotResponse?.status).toBe(200);
+    const environment = responseJson(snapshotResponse!);
+    expect(environment).toMatchObject({
+      snapshot: {
+        scope_kind: "session",
+        scope_key: "websocket:environment",
+        status: "ready",
+        repository: { branch: "zy_git_v1.0.7", head_sha: "84d10f8f00" },
+        changes: { file_count: 1, additions: 2, deletions: 1 },
+      },
+      files: [{ path: "tracked.ts", status: ".M" }],
+      branches: ["zy_git_v1.0.7", "main"],
+    });
+
+    const diffResponse = await channel.dispatchHttp(localConnection, {
+      path: `/api/sessions/${encoded}/environment/diff?path=tracked.ts`,
+      headers,
+    });
+    expect(responseJson(diffResponse!)).toMatchObject({ path: "tracked.ts", diff: "+changed\n" });
+
+    const branchResponse = await channel.dispatchHttp(localConnection, {
+      path: `/api/sessions/${encoded}/environment/branch`,
+      method: "POST",
+      headers,
+      body: JSON.stringify({ branch: "main", expected_revision: environment.snapshot.revision }),
+    });
+    expect(responseJson(branchResponse!)).toMatchObject({
+      snapshot: { scope_kind: "session", repository: { branch: "main" } },
+    });
+
+    const createBranchResponse = await channel.dispatchHttp(localConnection, {
+      path: `/api/sessions/${encoded}/environment/branch`,
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        branch: "feature/new-branch",
+        expected_revision: responseJson(branchResponse!).snapshot.revision,
+        create: true,
+      }),
+    });
+    expect(responseJson(createBranchResponse!)).toMatchObject({
+      snapshot: { scope_kind: "session", repository: { branch: "feature/new-branch" } },
+    });
+  });
+
+  it("serves the selected project environment before a Session exists", async () => {
+    const root = tmpRoot();
+    const workspace = path.join(root, "workspace");
+    fs.mkdirSync(workspace);
+    fs.writeFileSync(path.join(workspace, "tracked.ts"), "changed\n", "utf8");
+    const projectStore = new ProjectStore({ filePath: path.join(root, "projects.json") });
+    const project = projectStore.add(workspace, "existing");
+    const channel = makeChannel({ projectStore, workspacePath: workspace });
+    const headers = withApiToken(channel);
+    mockDirtyGitWorkspace(workspace);
+
+    const response = await channel.dispatchHttp(localConnection, {
+      path: `/api/projects/${encodeURIComponent(project.id)}/environment`,
+      headers,
+    });
+
+    expect(response?.status).toBe(200);
+    expect(responseJson(response!)).toMatchObject({
+      snapshot: {
+        scope_kind: "project",
+        scope_key: project.id,
+        cwd: fs.realpathSync(workspace),
+        status: "ready",
+        repository: { branch: "zy_git_v1.0.7" },
+        goal: null,
+      },
+    });
   });
 
   it("serves bootstrap, session listing, and session messages behind API tokens", async ({ task }) => {
@@ -552,6 +668,42 @@ describe("WebSocket HTTP route helpers", () => {
     });
     expect(tools.status).toBe(200);
     expect(((await tools.json()) as any).last_action.message).toBe("tools:docs MCP config reloaded.");
+  });
+
+  it("reloads MCP runtime settings through an authenticated admin route", async () => {
+    const channel = makeChannel({ sessionManager: seedSession(tmpRoot()) });
+    const port = await startChannel(channel);
+
+    const denied = await fetch(`http://127.0.0.1:${port}/api/settings/mcp-presets/reload`, { method: "POST" });
+    expect(denied.status).toBe(401);
+
+    const headers = await authHeaders(port);
+    const token = headers.Authorization.slice("Bearer ".length);
+    const rejectedQueryToken = await fetch(`http://127.0.0.1:${port}/api/settings/mcp-presets/reload?token=${encodeURIComponent(token)}`, {
+      method: "POST",
+    });
+    expect(rejectedQueryToken.status).toBe(401);
+    const rejectedGet = await fetch(`http://127.0.0.1:${port}/api/settings/mcp-presets/reload`, { headers });
+    expect(rejectedGet.status).toBe(405);
+    expect(channel.bus.inbound.getNowait()).toBeUndefined();
+
+    const responsePromise = channel.handleSettingsMcpPresets({
+      method: "POST",
+      headers,
+      path: "/api/settings/mcp-presets/reload",
+    }, "reload");
+    const control = await channel.bus.consumeInbound();
+    expect(control.metadata[INBOUND_META_RUNTIME_CONTROL]).toBe(RUNTIME_CONTROL_MCP_RELOAD);
+    control.metadata[RUNTIME_CONTROL_ACK].resolve({
+      ok: true,
+      message: "MCP config reloaded without restarting memmy.",
+      requires_restart: false,
+    });
+
+    const response = await responsePromise;
+    expect(response.status).toBe(200);
+    expect(await responseJson(response)).toEqual(expect.objectContaining({ ok: true, requires_restart: false }));
+    expect(channel.bus.inbound.getNowait()).toBeUndefined();
   });
 
   it("serves image generation tool settings without accepting retired catalog fields", async () => {

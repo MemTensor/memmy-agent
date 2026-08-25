@@ -638,7 +638,12 @@ describe("SettingsPageView", () => {
     expect(source).toContain("requestAccountInvitation(accountClient, accountKey)");
     expect(source).not.toContain("resolveDisplayInviteCode");
     expect(source).toContain('t("settings.token.invite.title")');
-    expect(source).toContain("mb-6 flex items-center gap-3");
+    expect(source).toContain("usageStyles.invitationCard");
+    expect(styles).toContain(".invitationCard");
+    const compactStyles = styles.slice(styles.indexOf("@media (max-width: 640px)"));
+    expect(compactStyles).toContain("grid-template-columns: auto minmax(0, 1fr)");
+    expect(compactStyles).toContain("grid-column: 2");
+    expect(compactStyles).toContain("flex-wrap: wrap");
     expect(source).toContain("byokTokenUsageClient.getSummary");
     expect(source).toContain("EMPTY_BYOK_TOKEN_USAGE");
     expect(source).not.toContain("function ChannelStat");
@@ -1027,6 +1032,7 @@ function createUpdateViewModel(
     preparedUpdatePath: null,
     downloadProgress: null,
     feedback: null,
+    requestInlineAction: vi.fn(async () => undefined),
     requestPrimaryAction: vi.fn(async () => undefined),
     ...overrides
   };

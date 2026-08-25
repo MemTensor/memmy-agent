@@ -23,6 +23,7 @@ const ROUTE_PAGE_TITLES: Record<AppRoutePath, string> = {
 const MEMORY_SUB_PAGE_TITLES: Record<MemorySubPageId, string> = {
   overview: "Overview",
   memories: "Memories",
+  "user-memories": "User Memories",
   tasks: "Tasks",
   policies: "Policies",
   "world-model": "World Model",

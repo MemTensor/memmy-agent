@@ -46,6 +46,8 @@ export { DEFAULT_MEMMY_CONFIG, loadMemmyConfig, resolveEvolutionConfig } from ".
 export { DEFAULT_NAMESPACE_SOURCE } from "./types.js";
 export { createEmbedder } from "./model/embedder.js";
 export { createLlmClient } from "./model/llm.js";
+export { resolveWorkspaceIdentity } from "./service/namespace/workspace-identity.js";
+export type { ResolvedWorkspaceIdentity } from "./service/namespace/workspace-identity.js";
 export type * from "./types.js";
 export type * from "./config/index.js";
 export type * from "./model/types.js";

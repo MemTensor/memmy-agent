@@ -644,7 +644,7 @@ function isAppRoutePath(value: string | null): value is AppRoutePath {
 }
 
 function isRestorableRoute(path: AppRoutePath): boolean {
-  return path === "/main" || path === "/pet" || path === "/tools" || path === "/memory" || path === "/memory-sources" || path === "/settings";
+  return path === "/main" || path === "/pet" || path === "/tools" || path === "/memory" || path === "/memory-sources" || path === "/literature-review" || path === "/settings";
 }
 
 function isPostOnboardingRoute(path: AppRoutePath): boolean {

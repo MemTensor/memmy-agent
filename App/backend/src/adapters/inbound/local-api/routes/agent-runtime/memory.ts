@@ -15,7 +15,23 @@ const MemoryParamsSchema = z.object({
   id: z.string().min(1)
 });
 
+const RecallParamsSchema = z.object({
+  queryId: z.string().min(1)
+});
+
 export function registerMemoryRoutes(app: FastifyInstance, deps: AgentRuntimeRouteDeps): void {
+  app.get(
+    "/api/v1/memory/recalls/:queryId",
+    { preHandler: deps.authenticateRuntimeToken },
+    withErrorEnvelope(async (request, reply) => {
+      const params = RecallParamsSchema.parse(request.params);
+      return reply.send(await deps.services.memoryDetail.recallEvidence(
+        params.queryId,
+        runtimeContextFromRequest(request, deps.timeZone)
+      ));
+    })
+  );
+
   app.post(
     "/api/v1/memory/add",
     { preHandler: deps.authenticateRuntimeToken },

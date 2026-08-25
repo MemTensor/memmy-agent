@@ -5,6 +5,7 @@ import {
   AccountProfileViewSchema,
   AccountSessionViewSchema,
   SendCodeResponseSchema,
+  type AccountChannel,
   type AccountInvitationView,
   type AccountLoginResultView,
   type AccountProfileView,
@@ -46,6 +47,8 @@ export interface CreateAccountServiceOptions {
   memoryClient?: Pick<MemoryClient, "reloadConfig">;
   /** Now. */
   now?: () => Date;
+  /** Verification channel supported by the current desktop package. */
+  accountChannel?: AccountChannel;
 }
 
 /** Creates create account service. */
@@ -54,6 +57,7 @@ export function createAccountService(options: CreateAccountServiceOptions): Acco
 
   return {
     async sendCode(input) {
+      assertExpectedAccountChannel(input.channel, options.accountChannel);
       const key = toCodeKey(input);
       const sentAt = options.accountSessionRepository.getLastCodeSentAt(key);
       const remaining = getRemainingResendSeconds(sentAt, now());
@@ -79,6 +83,7 @@ export function createAccountService(options: CreateAccountServiceOptions): Acco
     },
 
     async verifyCode(input) {
+      assertExpectedAccountChannel(input.channel, options.accountChannel);
       const loginResult = await options.cloudClient.login({
         ...(input.email ? { email: input.email } : {}),
         ...(input.phoneNumber ? { phoneNumber: input.phoneNumber } : {}),
@@ -100,7 +105,8 @@ export function createAccountService(options: CreateAccountServiceOptions): Acco
           profile: toSessionProfileInput(loginResult.profile),
           uuid: loginResult.accountUuid,
           cloudUuid: loginResult.uuid,
-          isNewUser: loginResult.isNewUser
+          isNewUser: loginResult.isNewUser,
+          authChannel: input.channel
         })
       );
 
@@ -197,6 +203,16 @@ export function createAccountService(options: CreateAccountServiceOptions): Acco
       });
     }
   };
+}
+
+function assertExpectedAccountChannel(
+  actualChannel: AccountChannel,
+  expectedChannel: AccountChannel | undefined
+): void {
+  if (!expectedChannel || actualChannel === expectedChannel) return;
+  throw Object.assign(new Error(`Account channel ${actualChannel} is not supported by this desktop package`), {
+    code: "invalid_argument" as const
+  });
 }
 
 async function reloadMemoryConfigIfNeeded(

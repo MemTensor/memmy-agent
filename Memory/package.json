@@ -1,6 +1,6 @@
 {
   "name": "@memmy/memory",
-  "version": "1.0.8",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "main": "./dist/src/index.js",
@@ -37,14 +37,18 @@
     "@huggingface/transformers": "^3.8.0",
     "better-sqlite3": "^12.6.3",
     "dotenv": "^16.6.1",
+    "fast-xml-parser": "^5.8.0",
+    "ignore": "^7.0.5",
+    "jsonc-parser": "^3.3.1",
     "sqlite-vec": "0.1.9",
+    "smol-toml": "1.7.0",
+    "typescript": "^6.0.3",
     "yaml": "^2.9.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^25.9.1",
     "tsx": "^4.22.3",
-    "typescript": "^6.0.3",
     "vitest": "^4.1.7"
   }
 }

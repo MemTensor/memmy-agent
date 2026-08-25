@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
   AccountProfileViewSchema,
   AccountSessionViewSchema,
+  type AccountChannel,
   type AccountProfileView,
   type AccountSessionView
 } from "@memmy/local-api-contracts";
@@ -12,12 +13,16 @@ import type { SecretStore } from "../secret-store.js";
 
 export interface AccountSessionRepository {
   get(): AccountSessionView;
+  /** Reads the explicit channel used to create the active login session. */
+  getAuthChannel(): AccountChannel | null;
+  /** Reads the channel bound to a persisted cloud credential without activating it. */
+  getAuthChannelByCloudUuid(cloudUuid: string): AccountChannel | null;
   /** Reads get cloud uuid. */
   getCloudUuid(): string | null;
   /** Reads get latest cloud uuid. */
   getLatestCloudUuid(): string | null;
   /** Handles activate by cloud uuid. */
-  activateByCloudUuid(cloudUuid: string): boolean;
+  activateByCloudUuid(cloudUuid: string, accountChannel?: AccountChannel): boolean;
   upsert(input: UpsertAccountSessionInput): AccountSessionView;
   clear(): void;
   getLastCodeSentAt(key: string): string | null;
@@ -36,6 +41,8 @@ export interface UpsertAccountSessionInput {
   cloudUuid?: string;
   /** Is new user. */
   isNewUser?: boolean | null;
+  /** Verification channel used by this login. */
+  authChannel?: AccountChannel;
 }
 
 interface AccountSessionRow {
@@ -57,6 +64,8 @@ interface VerificationThrottleRow {
   last_code_sent_at: string;
 }
 
+const LOCAL_AUTH_CHANNEL_FIELD = "_memmyAuthChannel";
+
 /** Creates create account session repository. */
 export function createAccountSessionRepository(db: DatabaseSync, secretStore: SecretStore): AccountSessionRepository {
   return {
@@ -73,6 +82,19 @@ export function createAccountSessionRepository(db: DatabaseSync, secretStore: Se
       });
     },
 
+    getAuthChannel() {
+      return resolveAccountAuthChannel(getActiveAccountRow(db));
+    },
+
+    getAuthChannelByCloudUuid(cloudUuid) {
+      const normalizedCloudUuid = cloudUuid.trim();
+      if (!normalizedCloudUuid) return null;
+      const row = listRowsWithCloudUuidRef(db).find(
+        (candidate) => getCloudUuidFromRow(secretStore, candidate) === normalizedCloudUuid
+      );
+      return resolveAccountAuthChannel(row ?? null);
+    },
+
     getCloudUuid() {
       return getCloudUuidFromRow(secretStore, getActiveAccountRow(db));
     },
@@ -81,7 +103,7 @@ export function createAccountSessionRepository(db: DatabaseSync, secretStore: Se
       return findLatestCloudUuid(db, secretStore);
     },
 
-    activateByCloudUuid(cloudUuid) {
+    activateByCloudUuid(cloudUuid, accountChannel) {
       const normalizedCloudUuid = cloudUuid.trim();
       if (!normalizedCloudUuid) {
         setActiveAccountUuid(db, null);
@@ -90,6 +112,9 @@ export function createAccountSessionRepository(db: DatabaseSync, secretStore: Se
 
       const rows = listRowsWithCloudUuidRef(db);
       for (const row of rows) {
+        if (accountChannel && resolveAccountAuthChannel(row) !== accountChannel) {
+          continue;
+        }
         if (getCloudUuidFromRow(secretStore, row) !== normalizedCloudUuid) {
           continue;
         }
@@ -99,7 +124,6 @@ export function createAccountSessionRepository(db: DatabaseSync, secretStore: Se
         return true;
       }
 
-      setActiveAccountUuid(db, null);
       return false;
     },
 
@@ -158,7 +182,7 @@ export function createAccountSessionRepository(db: DatabaseSync, secretStore: Se
         toNullableInteger(input.profile.hasFinishedGuide),
         input.profile.region,
         registeredAt,
-        JSON.stringify(stripCloudCredential(input.profile.rawProfile)),
+        JSON.stringify(buildPersistedRawProfile(previous, input.profile.rawProfile, input.authChannel)),
         previous?.cloud_uuid_ref ?? null,
         now,
         now,
@@ -331,6 +355,50 @@ function parseRawProfile(rawProfileJson: string): Record<string, unknown> | null
   } catch {
     return null;
   }
+}
+
+function buildPersistedRawProfile(
+  previous: AccountSessionRow | null,
+  rawProfile: Record<string, unknown>,
+  authChannel: AccountChannel | undefined
+): Record<string, unknown> {
+  const result = stripCloudCredential(rawProfile);
+  delete result[LOCAL_AUTH_CHANNEL_FIELD];
+  const persistedChannel = authChannel ?? resolveAccountAuthChannel(previous);
+  if (persistedChannel) result[LOCAL_AUTH_CHANNEL_FIELD] = persistedChannel;
+  return result;
+}
+
+function resolveAccountAuthChannel(row: AccountSessionRow | null): AccountChannel | null {
+  return resolveExplicitAccountAuthChannel(row) ?? resolveLegacyAccountAuthChannel(row);
+}
+
+function resolveExplicitAccountAuthChannel(row: AccountSessionRow | null): AccountChannel | null {
+  if (!row?.raw_profile_json) return null;
+  const value = parseRawProfile(row.raw_profile_json)?.[LOCAL_AUTH_CHANNEL_FIELD];
+  return value === "email" || value === "phone" ? value : null;
+}
+
+/**
+ * Infers the login channel for sessions written before `_memmyAuthChannel` existed.
+ *
+ * Only a single bound contact is trusted: an account containing both email and phone remains
+ * ambiguous and must still be rejected when a package requires a specific login channel.
+ *
+ * @param row the persisted account row.
+ * @returns the unambiguous legacy channel, or null when it cannot be inferred safely.
+ */
+function resolveLegacyAccountAuthChannel(row: AccountSessionRow | null): AccountChannel | null {
+  if (!row) return null;
+  const rawProfile = row.raw_profile_json ? parseRawProfile(row.raw_profile_json) : null;
+  const hasEmail = Boolean(row.email?.trim() || readRawProfileString(rawProfile?.email));
+  const hasPhone = Boolean(
+    row.phone?.trim()
+    || readRawProfileString(rawProfile?.phoneNumber)
+    || readRawProfileString(rawProfile?.phone)
+  );
+  if (hasEmail === hasPhone) return null;
+  return hasEmail ? "email" : "phone";
 }
 
 /**

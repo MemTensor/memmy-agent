@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { deriveWorkspaceHostId } from "@memmy/local-api-contracts";
 import { createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
 
 const {
@@ -357,6 +358,222 @@ describe("MemoryService / session / lifecycle", () => {
     db.close();
   });
 
+  it("derives and fixes protocol-v2 project scope from canonical workspace identity", () => {
+    const { db, service } = createTestService();
+    const workspaceHostId = deriveWorkspaceHostId("session-lifecycle-installation");
+    const base = {
+      l3WorldModelProtocolVersion: 2 as const,
+      l3WorldModelTransition: "allow_legacy_rollover" as const,
+      workspaceUri: "file:///workspace/project" as const,
+      workspaceHostId,
+      namespace: {
+        source: "codex",
+        profileId: "default",
+        sessionKey: "codex-memory-v2-project",
+        userId: "v2-user"
+      },
+      meta: {
+        l3_world_model_protocol_version: 99,
+        workspace_uri: "file:///forged",
+        workspace_host_id: "forged",
+        custom: "preserved"
+      }
+    };
+    const opened = service.openSession(base);
+    expect(opened.projectId).toMatch(/^ws_[a-f0-9]{64}$/u);
+    expect(opened.sessionId).toMatch(/^session_/u);
+    const resumed = service.openSession({
+      ...base,
+      l3WorldModelTransition: "resume_only",
+      sessionId: opened.sessionId,
+      workspaceUri: undefined,
+      workspaceHostId: undefined,
+      namespace: {
+        ...base.namespace,
+        projectId: opened.projectId ?? undefined
+      }
+    });
+    expect(resumed).toMatchObject({ sessionId: opened.sessionId, resumed: true, projectId: opened.projectId });
+
+    const sameWorkspaceOtherAgent = service.openSession({
+      ...base,
+      namespace: {
+        source: "openclaw",
+        profileId: "main",
+        sessionKey: "openclaw-memory-v2-project",
+        userId: "v2-user"
+      }
+    });
+    expect(sameWorkspaceOtherAgent.projectId).toBe(opened.projectId);
+    const otherHost = service.openSession({
+      ...base,
+      workspaceHostId: deriveWorkspaceHostId("other-installation"),
+      namespace: {
+        ...base.namespace,
+        sessionKey: "codex-memory-v2-other-host"
+      }
+    });
+    expect(otherHost.projectId).not.toBe(opened.projectId);
+    const noProject = service.openSession({
+      l3WorldModelProtocolVersion: 2,
+      l3WorldModelTransition: "resume_only",
+      namespace: {
+        source: "codex",
+        profileId: "default",
+        sessionKey: "codex-memory-v2-no-project",
+        userId: "v2-user"
+      }
+    });
+    expect(noProject.projectId).toBeNull();
+
+    const row = db.db.prepare(
+      `SELECT project_id, workspace_id, meta_json FROM sessions WHERE id = ?`
+    ).get(opened.sessionId) as { project_id: string; workspace_id: string; meta_json: string };
+    const meta = JSON.parse(row.meta_json) as Record<string, unknown>;
+    expect(row.project_id).toBe(opened.projectId);
+    expect(row.workspace_id).toMatch(/^[a-f0-9]{64}$/u);
+    expect(meta).toMatchObject({
+      l3_world_model_protocol_version: 2,
+      workspace_uri: base.workspaceUri,
+      workspace_host_id: workspaceHostId,
+      custom: "preserved"
+    });
+    expect(db.db.prepare(
+      `SELECT user_id, project_id, workspace_uri
+       FROM l3_world_model_scopes WHERE project_id = ?`
+    ).get(opened.projectId)).toEqual({
+      user_id: "v2-user",
+      project_id: opened.projectId,
+      workspace_uri: base.workspaceUri
+    });
+    expect(() => service.openSession({
+      ...base,
+      l3WorldModelTransition: "resume_only",
+      sessionId: opened.sessionId,
+      workspaceHostId: deriveWorkspaceHostId("conflicting-installation")
+    })).toThrow(/scope_conflict/u);
+    const complete = service.completeTurn("v2-project-turn", {
+      sessionId: opened.sessionId,
+      query: "add a project rule",
+      answer: "the project rule was added"
+    });
+    expect(db.db.prepare(
+      `SELECT l1_memory_id, raw_turn_id, trace_seq
+       FROM l3_world_model_input_traces WHERE session_id = ?`
+    ).all(opened.sessionId)).toEqual([
+      { l1_memory_id: complete.l1MemoryId, raw_turn_id: complete.rawTurnId, trace_seq: 1 }
+    ]);
+    service.closeSession(opened.sessionId);
+    expect(db.db.prepare(
+      `SELECT target_field FROM l3_world_model_batch_targets ORDER BY target_field`
+    ).all()).toEqual([
+      { target_field: "domain_knowledge" },
+      { target_field: "project_contract" }
+    ]);
+    expect(db.db.prepare(
+      `SELECT job_type, scope_seq, json_extract(payload_json, '$.targetField') AS target_field
+       FROM evolution_jobs WHERE job_type = 'l3_world_model_update' ORDER BY target_field`
+    ).all()).toEqual([
+      { job_type: "l3_world_model_update", scope_seq: 1, target_field: "domain_knowledge" },
+      { job_type: "l3_world_model_update", scope_seq: 1, target_field: "project_contract" }
+    ]);
+    db.close();
+  });
+
+  it("rejects a conflicting or missing saved workspace binding without touching the resumed session", () => {
+    const { db, service } = createTestService();
+    const request = {
+      l3WorldModelProtocolVersion: 2 as const,
+      l3WorldModelTransition: "resume_only" as const,
+      workspaceUri: "file:///workspace/transactional-binding" as const,
+      workspaceHostId: deriveWorkspaceHostId("transactional-binding-host"),
+      namespace: {
+        source: "codex",
+        profileId: "default",
+        sessionKey: "codex-memory-v2-transactional-binding",
+        userId: "transactional-binding-user"
+      }
+    };
+    const opened = service.openSession(request);
+    const before = db.db.prepare(
+      `SELECT last_seen_at, updated_at FROM sessions WHERE id = ?`
+    ).get(opened.sessionId);
+
+    db.db.prepare(
+      `UPDATE l3_world_model_scopes SET workspace_uri = 'file:///workspace/conflict'
+       WHERE user_id = ? AND project_id = ?`
+    ).run(request.namespace.userId, opened.projectId);
+    expect(() => service.openSession({
+      ...request,
+      sessionId: opened.sessionId,
+      workspaceUri: undefined,
+      workspaceHostId: undefined
+    })).toThrow(/scope_conflict/u);
+    expect(db.db.prepare(
+      `SELECT last_seen_at, updated_at FROM sessions WHERE id = ?`
+    ).get(opened.sessionId)).toEqual(before);
+
+    db.db.prepare(
+      `UPDATE l3_world_model_scopes SET workspace_uri = ? WHERE user_id = ? AND project_id = ?`
+    ).run(request.workspaceUri, request.namespace.userId, opened.projectId);
+    db.db.prepare(
+      `UPDATE sessions SET meta_json = json_remove(meta_json, '$.workspace_uri') WHERE id = ?`
+    ).run(opened.sessionId);
+    expect(() => service.openSession({
+      ...request,
+      sessionId: opened.sessionId,
+      workspaceUri: undefined,
+      workspaceHostId: undefined
+    })).toThrow(/workspace_missing/u);
+
+    db.close();
+  });
+
+  it("rolls a legacy host session into protocol v2 only on an explicit lifecycle transition", () => {
+    const { db, service } = createTestService();
+    const namespace = {
+      source: "codex",
+      profileId: "default",
+      sessionKey: "codex-memory-legacy-rollover",
+      userId: "rollover-user"
+    };
+    const legacy = service.openSession({ namespace });
+    const complete = service.completeTurn("legacy-rollover-turn", {
+      sessionId: legacy.sessionId,
+      query: "legacy task",
+      answer: "legacy result"
+    });
+    expect(() => service.openSession({
+      l3WorldModelProtocolVersion: 2,
+      l3WorldModelTransition: "resume_only",
+      namespace
+    })).toThrow(/l3_world_model_v2_session_not_open/u);
+    expect(db.db.prepare(`SELECT status FROM sessions WHERE id = ?`).get(legacy.sessionId))
+      .toEqual({ status: "open" });
+
+    const rolled = service.openSession({
+      l3WorldModelProtocolVersion: 2,
+      l3WorldModelTransition: "allow_legacy_rollover",
+      namespace
+    });
+    expect(rolled.sessionId).not.toBe(legacy.sessionId);
+    expect(rolled.resumed).toBe(false);
+    expect(db.db.prepare(
+      `SELECT status, json_extract(meta_json, '$.close_reason') AS close_reason
+       FROM sessions WHERE id = ?`
+    ).get(legacy.sessionId)).toEqual({
+      status: "closed",
+      close_reason: "l3_world_model_protocol_v2"
+    });
+    expect(db.db.prepare(`SELECT status FROM episodes WHERE id = ?`).get(complete.episodeId))
+      .toEqual({ status: "closed" });
+    expect(db.db.prepare(
+      `SELECT json_extract(meta_json, '$.l3_world_model_protocol_version') AS protocol
+       FROM sessions WHERE id = ?`
+    ).get(rolled.sessionId)).toEqual({ protocol: 2 });
+    db.close();
+  });
+
   it("records turn artifacts in the artifact table and change log", () => {
     const { db, service } = createTestService();
     const namespace = {
@@ -425,6 +642,137 @@ describe("MemoryService / session / lifecycle", () => {
     const bundle = service.exportBundle({ namespace });
     expect((bundle.tables.artifacts as Array<Record<string, unknown>>)
       .some((row) => row.id === artifacts[0]!.id)).toBe(true);
+    db.close();
+  });
+});
+
+describe("L3 World Model trace boundaries", () => {
+  it("reads the trace head and freezes exactly through the submitted original L1", () => {
+    const { db, service } = createTestService();
+    const namespace = {
+      source: "codex",
+      profileId: "default",
+      sessionKey: "trace-boundary-session",
+      userId: "trace-boundary-user"
+    };
+    const opened = service.openSession({
+      l3WorldModelProtocolVersion: 2,
+      l3WorldModelTransition: "resume_only",
+      namespace
+    });
+    const first = service.completeTurn("trace-boundary-turn-1", {
+      sessionId: opened.sessionId,
+      query: "Do not overwrite files without confirmation.",
+      answer: "I preserved the original file.",
+      toolCalls: [{ name: "write", input: { path: "a.txt" } }],
+      toolResults: [{ name: "write", output: "confirmation required", exitCode: 1 }]
+    });
+    const second = service.completeTurn("trace-boundary-turn-2", {
+      sessionId: opened.sessionId,
+      query: "Keep destructive operations recoverable.",
+      answer: "I moved the file to trash.",
+      toolCalls: [{ name: "trash", input: { path: "b.txt" } }],
+      toolResults: [{ name: "trash", output: "ok", exitCode: 0 }]
+    });
+    const envelope = {
+      requestId: "f476cd4c-a075-4d28-ae39-355ce9511b22",
+      adapterId: "codex-memory",
+      source: "codex",
+      namespace
+    };
+
+    expect(service.l3WorldModelTraceHead(opened.sessionId, envelope)).toEqual({
+      throughL1MemoryId: second.l1MemoryId,
+      traceSeq: 2
+    });
+    const firstBoundary = service.l3WorldModelBoundary(opened.sessionId, {
+      ...envelope,
+      trigger: "token_compaction",
+      throughL1MemoryId: first.l1MemoryId
+    });
+    expect(firstBoundary).toMatchObject({
+      scheduled: true,
+      throughL1MemoryId: first.l1MemoryId,
+      throughTraceSeq: 1,
+      targetCount: 1
+    });
+    expect(service.l3WorldModelBoundary(opened.sessionId, {
+      ...envelope,
+      requestId: "a926dcce-c31c-412e-a70d-9dd1062f8ac5",
+      trigger: "token_compaction",
+      throughL1MemoryId: first.l1MemoryId
+    })).toMatchObject({
+      scheduled: false,
+      throughTraceSeq: 1,
+      batchIds: [],
+      targetCount: 0
+    });
+    const secondBoundary = service.l3WorldModelBoundary(opened.sessionId, {
+      ...envelope,
+      requestId: "4e77dd07-3f8c-42ec-9700-75e23cc1b88e",
+      trigger: "token_compaction_attempt",
+      throughL1MemoryId: second.l1MemoryId
+    });
+    expect(secondBoundary).toMatchObject({ scheduled: true, throughTraceSeq: 2, targetCount: 1 });
+    expect(db.db.prepare(
+      `SELECT trigger, start_trace_seq, end_trace_seq
+       FROM l3_world_model_evidence_batches ORDER BY scope_seq`
+    ).all()).toEqual([
+      { trigger: "token_compaction", start_trace_seq: 1, end_trace_seq: 1 },
+      { trigger: "token_compaction_attempt", start_trace_seq: 2, end_trace_seq: 2 }
+    ]);
+
+    db.close();
+  });
+
+  it("rejects legacy Sessions, mismatched scope, and unregistered L1 IDs", () => {
+    const { db, service } = createTestService();
+    const legacy = service.openSession({
+      namespace: {
+        source: "codex",
+        profileId: "default",
+        sessionKey: "legacy-trace-boundary",
+        userId: "trace-boundary-user"
+      }
+    });
+    expect(() => service.l3WorldModelTraceHead(legacy.sessionId, {
+      requestId: "79a25576-86cd-4280-ad44-ce5063a26410",
+      adapterId: "codex-memory",
+      source: "codex",
+      namespace: {
+        source: "codex",
+        profileId: "default",
+        sessionKey: "legacy-trace-boundary",
+        userId: "trace-boundary-user"
+      }
+    })).toThrow("l3_world_model_protocol_v2_required");
+
+    const namespace = {
+      source: "codex",
+      profileId: "default",
+      sessionKey: "v2-trace-boundary-errors",
+      userId: "trace-boundary-user"
+    };
+    const opened = service.openSession({
+      l3WorldModelProtocolVersion: 2,
+      l3WorldModelTransition: "resume_only",
+      namespace
+    });
+    expect(() => service.l3WorldModelTraceHead(opened.sessionId, {
+      requestId: "e4880aaa-e635-4c60-a58f-eec7c21677af",
+      adapterId: "codex-memory",
+      source: "codex",
+      namespace: { ...namespace, userId: "other-user" }
+    })).toThrow("l3_world_model_session_scope_conflict");
+    expect(() => service.l3WorldModelBoundary(opened.sessionId, {
+      requestId: "9c7e85f5-5fb3-44b5-a91e-6c92d3ae5239",
+      adapterId: "codex-memory",
+      source: "codex",
+      namespace,
+      trigger: "token_compaction",
+      throughL1MemoryId: "missing-l1"
+    })).toThrow("through L1 memory was not registered");
+
     db.close();
   });
 });

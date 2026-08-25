@@ -1,7 +1,7 @@
 import type Database from "better-sqlite3";
 
-export const SCHEMA_VERSION = 4;
-export const SCHEMA_MIGRATION_ID = "004_memory_processing_state";
+export const SCHEMA_VERSION = 6;
+export const SCHEMA_MIGRATION_ID = "006_l3_world_model";
 const API_LOG_SOURCE_AGENT_MIGRATION_FROM_VERSION = 2;
 const PROCESSING_TAGS = new Set([
   "摘要排队中",
@@ -61,6 +61,56 @@ const statements = [
   `CREATE INDEX IF NOT EXISTS idx_memories_key_layer
     ON memories (memory_key, memory_layer)`,
 
+  `CREATE TABLE IF NOT EXISTS l3_world_model_scopes (
+    scope_key TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    project_id TEXT,
+    workspace_uri TEXT,
+    memory_id TEXT UNIQUE REFERENCES memories(id) ON DELETE SET NULL,
+    next_scope_seq INTEGER NOT NULL DEFAULT 1 CHECK (next_scope_seq >= 1),
+    updated_at TEXT NOT NULL,
+    CHECK (workspace_uri IS NULL OR (project_id IS NOT NULL AND length(workspace_uri) > 0))
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS uq_l3_world_model_scopes_general
+    ON l3_world_model_scopes (user_id)
+    WHERE project_id IS NULL`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS uq_l3_world_model_scopes_project
+    ON l3_world_model_scopes (user_id, project_id)
+    WHERE project_id IS NOT NULL`,
+
+  `CREATE TABLE IF NOT EXISTS user_memories (
+    id TEXT PRIMARY KEY,
+    source_turn_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    memory_types_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(memory_types_json)),
+    content TEXT NOT NULL,
+    normalized_user_text_hash TEXT NOT NULL,
+    source_turn_refs_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(source_turn_refs_json)),
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived', 'deleted')),
+    replaces_memory_id TEXT,
+    replaced_by_memory_id TEXT,
+    archived_at TEXT,
+    archive_reason TEXT,
+    embedding_json TEXT CHECK (embedding_json IS NULL OR json_valid(embedding_json)),
+    embedding_model TEXT,
+    embedding_provider TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    deleted_at TEXT
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_user_memories_user_status_updated
+    ON user_memories (user_id, status, updated_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_user_memories_source_turn
+    ON user_memories (source_turn_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_user_memories_exact_text
+    ON user_memories (user_id, normalized_user_text_hash, status, updated_at DESC)`,
+  `CREATE VIRTUAL TABLE IF NOT EXISTS user_memories_fts USING fts5 (
+    id UNINDEXED,
+    content,
+    memory_types,
+    tokenize='unicode61'
+  )`,
+
   `CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5 (
     id UNINDEXED,
     identifier,
@@ -106,6 +156,12 @@ const statements = [
     ON sessions (host_session_key)`,
   `CREATE INDEX IF NOT EXISTS idx_sessions_host_scope
     ON sessions (user_id, source, profile_id, host_session_key, status)`,
+
+  `CREATE TABLE IF NOT EXISTS l3_world_model_session_cursors (
+    session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+    last_scheduled_seq INTEGER NOT NULL DEFAULT 0 CHECK (last_scheduled_seq >= 0),
+    updated_at TEXT NOT NULL
+  )`,
 
   `CREATE TABLE IF NOT EXISTS episodes (
     id TEXT PRIMARY KEY,
@@ -165,6 +221,19 @@ const statements = [
   `CREATE INDEX IF NOT EXISTS idx_raw_turns_episode_created
     ON raw_turns (episode_id, created_at ASC)`,
 
+  `CREATE TABLE IF NOT EXISTS l3_world_model_input_traces (
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    trace_seq INTEGER NOT NULL CHECK (trace_seq >= 1),
+    l1_memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    raw_turn_id TEXT NOT NULL REFERENCES raw_turns(id) ON DELETE CASCADE,
+    episode_id TEXT REFERENCES episodes(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (session_id, trace_seq),
+    UNIQUE (session_id, l1_memory_id)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_l3_world_model_input_traces_raw_turn
+    ON l3_world_model_input_traces (raw_turn_id, session_id, trace_seq)`,
+
   `CREATE TABLE IF NOT EXISTS feedback (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
@@ -194,6 +263,51 @@ const statements = [
     ON feedback (raw_turn_id, created_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_feedback_context
     ON feedback (user_id, project_id, context_hash, created_at DESC)`,
+
+  `CREATE TABLE IF NOT EXISTS l3_world_model_evidence_batches (
+    id TEXT PRIMARY KEY,
+    scope_key TEXT NOT NULL REFERENCES l3_world_model_scopes(scope_key) ON DELETE CASCADE,
+    scope_seq INTEGER NOT NULL CHECK (scope_seq >= 1),
+    user_id TEXT NOT NULL,
+    project_id TEXT,
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    trigger TEXT NOT NULL CHECK (trigger IN (
+      'new_task', 'token_compaction', 'token_compaction_attempt', 'session_close', 'episode_idle_close'
+    )),
+    start_trace_seq INTEGER NOT NULL CHECK (start_trace_seq >= 1),
+    end_trace_seq INTEGER NOT NULL CHECK (end_trace_seq >= start_trace_seq),
+    l1_memory_ids_json TEXT NOT NULL CHECK (json_valid(l1_memory_ids_json)),
+    raw_turn_ids_json TEXT NOT NULL CHECK (json_valid(raw_turn_ids_json)),
+    feedback_ids_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(feedback_ids_json)),
+    payload_hash TEXT NOT NULL,
+    terminal_outcome TEXT CHECK (terminal_outcome IS NULL OR terminal_outcome IN (
+      'applied', 'partial_dead_letter', 'dead_letter'
+    )),
+    completed_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (scope_key, scope_seq)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_l3_world_model_batches_session_trace
+    ON l3_world_model_evidence_batches (session_id, end_trace_seq)`,
+
+  `CREATE TABLE IF NOT EXISTS l3_world_model_batch_targets (
+    batch_id TEXT NOT NULL REFERENCES l3_world_model_evidence_batches(id) ON DELETE CASCADE,
+    target_field TEXT NOT NULL CHECK (target_field IN (
+      'general_rules_and_safety_constraints', 'project_contract', 'domain_knowledge'
+    )),
+    field_scope_key TEXT NOT NULL,
+    scope_seq INTEGER NOT NULL CHECK (scope_seq >= 1),
+    status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'applied', 'dead_letter')),
+    no_change INTEGER NOT NULL DEFAULT 0 CHECK (no_change IN (0, 1)),
+    applied_at TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (batch_id, target_field),
+    UNIQUE (field_scope_key, scope_seq),
+    CHECK (status = 'applied' OR no_change = 0)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_l3_world_model_targets_field_status
+    ON l3_world_model_batch_targets (field_scope_key, status, scope_seq)`,
 
   `CREATE TABLE IF NOT EXISTS decision_repairs (
     id TEXT PRIMARY KEY,
@@ -301,6 +415,11 @@ const statements = [
     dropped_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(dropped_json)),
     outcome TEXT NOT NULL DEFAULT 'pending' CHECK (outcome IN ('pending', 'positive', 'negative', 'ignored')),
     request_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(request_json)),
+    query_id TEXT,
+    user_memory_candidate_ids_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(user_memory_candidate_ids_json)),
+    l1_candidate_ids_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(l1_candidate_ids_json)),
+    merged_source_turn_ids_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(merged_source_turn_ids_json)),
+    member_memory_ids_by_source_turn_id_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(member_memory_ids_by_source_turn_id_json)),
     created_at TEXT NOT NULL
   )`,
   `CREATE INDEX IF NOT EXISTS idx_recall_events_session_created
@@ -349,6 +468,23 @@ const statements = [
     expires_at TEXT
   )`,
 
+  `CREATE TABLE IF NOT EXISTS l3_world_model_project_environment_state (
+    user_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    project_kind TEXT NOT NULL DEFAULT 'unknown' CHECK (project_kind IN ('unknown', 'code', 'folder')),
+    status TEXT NOT NULL DEFAULT 'uninitialized' CHECK (status IN (
+      'uninitialized', 'queued', 'scanning', 'summarizing', 'clean', 'failed'
+    )),
+    current_scan_id TEXT,
+    applied_scan_id TEXT,
+    fingerprint TEXT,
+    last_error TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, project_id)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_l3_world_model_project_environment_status
+    ON l3_world_model_project_environment_state (status, updated_at)`,
+
   `CREATE TABLE IF NOT EXISTS evolution_jobs (
     id TEXT PRIMARY KEY,
     job_type TEXT NOT NULL,
@@ -359,6 +495,8 @@ const statements = [
     session_id TEXT,
     episode_id TEXT,
     target_memory_id TEXT,
+    scope_key TEXT,
+    scope_seq INTEGER,
     payload_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(payload_json)),
     attempts INTEGER NOT NULL DEFAULT 0,
     max_attempts INTEGER NOT NULL DEFAULT 3,
@@ -371,6 +509,13 @@ const statements = [
     ON evolution_jobs (status, created_at ASC)`,
   `CREATE INDEX IF NOT EXISTS idx_evolution_jobs_target
     ON evolution_jobs (target_memory_id, job_type)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS uq_evolution_jobs_l3_immutable_dedupe
+    ON evolution_jobs (dedupe_key)
+    WHERE dedupe_key IS NOT NULL
+      AND job_type IN ('l3_world_model_update', 'project_environment_profile')`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS uq_evolution_jobs_scope_seq
+    ON evolution_jobs (scope_key, scope_seq)
+    WHERE scope_key IS NOT NULL`,
 
   `CREATE TABLE IF NOT EXISTS embedding_retry_queue (
     id TEXT PRIMARY KEY,
@@ -462,7 +607,7 @@ export function migrate(db: Database.Database): void {
   const hasMemories = tableExists(db, "memories");
   const version = currentSchemaVersion(db);
 
-  if (hasMemories && version !== SCHEMA_VERSION && version !== 2 && version !== 3) {
+  if (hasMemories && version !== SCHEMA_VERSION && version !== 2 && version !== 3 && version !== 4 && version !== 5) {
     throw new Error(
       `Unsupported memory database schema version ${version}; the database was left unchanged`
     );
@@ -480,8 +625,19 @@ export function migrate(db: Database.Database): void {
           !columnExists(db, "api_logs", "source_agent")) {
         db.prepare(`ALTER TABLE api_logs ADD COLUMN source_agent TEXT`).run();
       }
+      if (version > 0 && version < 6) {
+        addColumnIfMissing(db, "evolution_jobs", "scope_key", "TEXT");
+        addColumnIfMissing(db, "evolution_jobs", "scope_seq", "INTEGER");
+      }
       for (const statement of statements) {
         db.prepare(statement).run();
+      }
+      if (version > 0 && version < 5) {
+        addColumnIfMissing(db, "recall_events", "query_id", "TEXT");
+        addColumnIfMissing(db, "recall_events", "user_memory_candidate_ids_json", "TEXT NOT NULL DEFAULT '[]'");
+        addColumnIfMissing(db, "recall_events", "l1_candidate_ids_json", "TEXT NOT NULL DEFAULT '[]'");
+        addColumnIfMissing(db, "recall_events", "merged_source_turn_ids_json", "TEXT NOT NULL DEFAULT '[]'");
+        addColumnIfMissing(db, "recall_events", "member_memory_ids_by_source_turn_id_json", "TEXT NOT NULL DEFAULT '{}'");
       }
       db.prepare(
         `CREATE UNIQUE INDEX IF NOT EXISTS uq_evolution_jobs_active_dedupe
@@ -489,9 +645,13 @@ export function migrate(db: Database.Database): void {
          WHERE dedupe_key IS NOT NULL AND status IN ('queued', 'leased', 'failed')`
       ).run();
 
-      if (hasMemories && version < SCHEMA_VERSION) {
+      if (hasMemories && version > 0 && version < 5) {
         backfillMemoryProcessingState(db, now);
         removeLegacyProcessingMetadata(db);
+      }
+      if (hasMemories && version > 0 && version < 6) {
+        migrateLegacyWorldModels(db, now);
+        backfillLegacyAdapterHostSessionKeys(db, now);
       }
 
       db.prepare(
@@ -505,6 +665,70 @@ export function migrate(db: Database.Database): void {
     })();
   } finally {
     db.pragma(`foreign_keys = ${foreignKeys ? "ON" : "OFF"}`);
+  }
+}
+
+function migrateLegacyWorldModels(db: Database.Database, now: string): void {
+  db.prepare(
+    `UPDATE evolution_jobs
+     SET status = 'dead_letter',
+         leased_until = NULL,
+         last_error = 'replaced_by_l3_world_model_v1',
+         updated_at = ?
+     WHERE job_type = 'l3_abstraction'
+       AND status IN ('queued', 'leased', 'failed')`
+  ).run(now);
+
+  db.prepare(
+    `UPDATE memories
+     SET status = 'archived',
+         properties_json = json_set(properties_json, '$.status', 'archived'),
+         updated_at = ?
+     WHERE memory_layer = 'L3'
+       AND (
+         json_extract(properties_json, '$.internal_info.source') = 'worker.l3_abstraction.v7'
+         OR json_extract(properties_json, '$.internal_info.plugin_algorithm') = 'l3.abstraction.v7'
+       )`
+  ).run(now);
+}
+
+function backfillLegacyAdapterHostSessionKeys(db: Database.Database, now: string): void {
+  db.prepare(
+    `UPDATE sessions AS candidate
+     SET host_session_key = candidate.id,
+         updated_at = ?
+     WHERE candidate.status = 'open'
+       AND candidate.host_session_key IS NULL
+       AND (
+         (candidate.source = 'codex' AND substr(candidate.id, 1, length('codex-memory-')) = 'codex-memory-')
+         OR (candidate.source = 'cursor' AND substr(candidate.id, 1, length('cursor-memory-')) = 'cursor-memory-')
+         OR (candidate.source = 'claude_code' AND substr(candidate.id, 1, length('claude_code-memory-')) = 'claude_code-memory-')
+         OR (candidate.source = 'opencode' AND substr(candidate.id, 1, length('opencode-memory-')) = 'opencode-memory-')
+         OR (candidate.source = 'openclaw' AND substr(candidate.id, 1, length('openclaw-memory-')) = 'openclaw-memory-')
+         OR (candidate.source = 'hermes' AND substr(candidate.id, 1, length('hermes-memory-')) = 'hermes-memory-')
+         OR (candidate.source = 'deepseek_harness' AND substr(candidate.id, 1, length('deepseek-harness-')) = 'deepseek-harness-')
+       )
+       AND NOT EXISTS (
+         SELECT 1
+         FROM sessions AS existing
+         WHERE existing.id != candidate.id
+           AND existing.status = 'open'
+           AND existing.user_id = candidate.user_id
+           AND existing.source = candidate.source
+           AND existing.profile_id = candidate.profile_id
+           AND existing.host_session_key = candidate.id
+       )`
+  ).run(now);
+}
+
+function addColumnIfMissing(
+  db: Database.Database,
+  table: string,
+  column: string,
+  definition: string
+): void {
+  if (!columnExists(db, table, column)) {
+    db.prepare(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`).run();
   }
 }
 

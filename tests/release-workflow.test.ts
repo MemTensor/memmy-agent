@@ -9,8 +9,10 @@ const repoRoot = resolve(import.meta.dirname, "..");
 const legacyWorkflowPath = resolve(repoRoot, ".github/workflows/github-release.yml");
 const draftWorkflowPath = resolve(repoRoot, ".github/workflows/github-draft-release-v2.yml");
 const releaseCompareScriptPath = resolve(repoRoot, "scripts/build-release-compare.mjs");
+const ossIntegrityScriptPath = resolve(repoRoot, "scripts/internal/shared/oss-object-integrity.mjs");
 const draftSource = readFileSync(draftWorkflowPath, "utf8");
 const releaseCompareSource = readFileSync(releaseCompareScriptPath, "utf8");
+const ossIntegritySource = readFileSync(ossIntegrityScriptPath, "utf8");
 const draftWorkflow = YAML.parse(draftSource);
 const draftJob = draftWorkflow.jobs.release;
 const draftSteps = draftJob.steps as Array<Record<string, unknown>>;
@@ -356,22 +358,27 @@ describe("GitHub Draft Release v2 workflow", () => {
     expect(draftSource).not.toContain("Publish release as latest");
   });
 
-  it("downloads all four OSS artifacts and verifies Content-MD5", () => {
+  it("downloads all four OSS artifacts and verifies Normal MD5 or Multipart CRC64", () => {
     expect(draftSteps.find((step) => step.name === "Download and verify OSS artifacts")?.if).toBe(
       "${{ steps.release.outputs.preflight_level == 'full' }}",
     );
     const download = draftScript("Download and verify OSS artifacts");
     expect(download).toContain("curl --fail --location --retry 5 --retry-all-errors");
-    expect(download).toContain("Content-MD5");
+    expect(download).toContain("verify-oss-object-integrity.mjs");
+    expect(download).toContain("OSS_VERIFICATION.json");
     expect(download).toContain("Installer asset is missing");
-    expect(download).toContain("Installer checksum header missing");
     expect(download).toContain("Installer download failed");
-    expect(download).toContain("Installer checksum mismatch");
+    expect(download).toContain("Installer checksum verification failed");
     expect(download).toContain('[[ ! -s "release-assets/$artifact" ]]');
     expect(download).toContain("Installer download is empty");
     expect(download.match(/Memmy-\$VERSION-/g)).toHaveLength(4);
     expect(download).toContain("MD5SUMS.txt");
     expect(download).toContain("SHA256SUMS.txt");
+    expect(ossIntegritySource).toContain('metadata.objectType === "Normal"');
+    expect(ossIntegritySource).toContain('metadata.objectType === "Multipart"');
+    expect(ossIntegritySource).toContain("Content-MD5 mismatch");
+    expect(ossIntegritySource).toContain("CRC64/XZ mismatch");
+    expect(draftSource).toContain("ossIntegrity: $ossIntegrity[0]");
   });
 
   it("does not expect a nonexistent head_commit in GitHub Compare metadata", () => {

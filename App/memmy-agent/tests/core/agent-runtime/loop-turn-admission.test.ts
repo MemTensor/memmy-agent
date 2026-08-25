@@ -34,6 +34,61 @@ async function waitUntil(predicate: () => boolean | Promise<boolean>, timeoutMs 
   expect(await predicate()).toBe(true);
 }
 
+async function startBlockedGoalTurn(
+  loop: AgentLoop,
+  {
+    sessionKey,
+    chatId,
+    activeTurnId,
+    sourceKind,
+  }: {
+    sessionKey: string;
+    chatId: string;
+    activeTurnId: string;
+    sourceKind: "gui" | "tui";
+  },
+): Promise<{ releaseActive: () => void; running: Promise<void> }> {
+  loop.sessions.getOrCreate(sessionKey);
+  const source = { kind: sourceKind, channel: "websocket" } as const;
+  const goal = await loop.goalRuntime.create({
+    sessionKey,
+    objective: "Keep working on the Goal",
+    route: { channel: "websocket", chatId, source },
+    turnId: "goal-create-turn",
+  });
+  loop.goalRuntime.releaseTurn(sessionKey, "goal-create-turn");
+  while (loop.bus.outboundSize) await loop.bus.consumeOutbound();
+  let releaseActive!: () => void;
+  const activeGate = new Promise<void>((resolve) => {
+    releaseActive = resolve;
+  });
+  loop.processMessageInternal = vi.fn(async (message: InboundMessage, _key, options: any) => {
+    if (message.internal?.kind === "goal_continuation") {
+      options.slot.acceptingSteer = true;
+      await activeGate;
+    }
+    options.slot.stopReason = "completed";
+    return null;
+  }) as any;
+  const running = loop.run();
+  expect(loop.goalRuntime.reserveWork(sessionKey, activeTurnId, "continuation")).toBe(true);
+  await loop.bus.publishInbound(new InboundMessage({
+    channel: "websocket",
+    chatId,
+    content: "Continue the Goal",
+    metadata: { turn_id: activeTurnId },
+    internal: {
+      kind: "goal_continuation",
+      goalId: goal.goalId,
+      goalUpdatedAt: goal.updatedAt,
+    },
+    sessionKeyOverride: sessionKey,
+    turnSource: source,
+  }));
+  await waitUntil(() => (loop.turnSlots.get(sessionKey) as any[])?.[0]?.acceptingSteer === true);
+  return { releaseActive, running };
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
@@ -141,6 +196,337 @@ describe("AgentLoop Turn admission", () => {
 
     releaseActive();
     await waitUntil(() => !loop.isSessionBusy("cli:turns"));
+    loop.stop();
+    await running;
+  });
+
+  it("admits a TUI Steer into the active TUI-owned Goal Turn before the Goal inbox", async () => {
+    const loop = makeLoop();
+    const sessionKey = "websocket:tui-goal-steer";
+    const chatId = "tui-goal-steer";
+    const activeTurnId = "11111111-1111-4111-8111-111111111111";
+    const clientRequestId = "12121212-1212-4212-8212-121212121212";
+    loop.sessions.getOrCreate(sessionKey);
+    const goal = await loop.goalRuntime.create({
+      sessionKey,
+      objective: "Keep implementing the Goal",
+      route: {
+        channel: "websocket",
+        chatId,
+        source: { kind: "tui", channel: "websocket" },
+      },
+      turnId: "goal-create-turn",
+    });
+    loop.goalRuntime.releaseTurn(sessionKey, "goal-create-turn");
+    while (loop.bus.outboundSize) await loop.bus.consumeOutbound();
+
+    let releaseActive!: () => void;
+    const activeGate = new Promise<void>((resolve) => {
+      releaseActive = resolve;
+    });
+    loop.processMessageInternal = vi.fn(async (message: InboundMessage, _key, options: any) => {
+      if (message.internal?.kind === "goal_continuation") {
+        options.slot.acceptingSteer = true;
+        await activeGate;
+      }
+      options.slot.stopReason = "completed";
+      return null;
+    }) as any;
+
+    const running = loop.run();
+    expect(loop.goalRuntime.reserveWork(sessionKey, activeTurnId, "continuation")).toBe(true);
+    await loop.bus.publishInbound(new InboundMessage({
+      channel: "websocket",
+      chatId,
+      content: "Continue the Goal",
+      metadata: { turn_id: activeTurnId },
+      internal: {
+        kind: "goal_continuation",
+        goalId: goal.goalId,
+        goalUpdatedAt: goal.updatedAt,
+      },
+      sessionKeyOverride: sessionKey,
+      turnSource: { kind: "tui", channel: "websocket" },
+    }));
+    await waitUntil(() => (loop.turnSlots.get(sessionKey) as any[])?.[0]?.acceptingSteer === true);
+    expect(await loop.getQueueSnapshot(sessionKey)).toMatchObject({ revision: 0, items: [] });
+
+    await loop.bus.publishInbound(new InboundMessage({
+      channel: "websocket",
+      chatId,
+      content: "Also verify the TUI path",
+      media: ["/tmp/tui-goal-reference.png"],
+      metadata: {
+        client_request_id: clientRequestId,
+        webui_request_digest: "tui-goal-steer-digest",
+      },
+      sessionKeyOverride: sessionKey,
+      turnAdmission: "steer",
+      expectedTurnId: activeTurnId,
+      turnSource: { kind: "tui", channel: "websocket" },
+    }));
+
+    await waitUntil(() => ((loop.turnSlots.get(sessionKey) as any[])?.[0]?.pendingSteer.size ?? 0) === 1);
+    const slot = (loop.turnSlots.get(sessionKey) as any[])[0];
+    expect(slot.pendingSteer.getNowait()).toMatchObject({
+      content: "Also verify the TUI path",
+      media: ["/tmp/tui-goal-reference.png"],
+      expectedTurnId: activeTurnId,
+      turnSource: { kind: "tui", channel: "websocket" },
+      metadata: {
+        client_request_id: clientRequestId,
+        turn_id: activeTurnId,
+        turnId: activeTurnId,
+      },
+    });
+    expect(loop.goalRuntime.inbox(sessionKey)).toEqual([]);
+    expect(await loop.getQueueSnapshot(sessionKey)).toMatchObject({
+      revision: 0,
+      items: [],
+      startedItems: [],
+    });
+    const outbound = [];
+    while (loop.bus.outboundSize) outbound.push(await loop.bus.consumeOutbound());
+    expect(outbound.filter((message) => message.metadata?.webuiMessageSteered)).toEqual([
+      expect.objectContaining({
+        metadata: expect.objectContaining({
+          clientRequestId,
+          turnId: activeTurnId,
+        }),
+      }),
+    ]);
+    expect(outbound.some((message) => message.metadata?.webuiMessageQueued)).toBe(false);
+
+    releaseActive();
+    await waitUntil(() => !loop.isSessionBusy(sessionKey));
+    loop.stop();
+    await running;
+  });
+
+  it("queues Enter, stale TUI Steer, and slash TUI Steer once during an active Goal", async () => {
+    const loop = makeLoop();
+    const sessionKey = "websocket:tui-goal-fallback";
+    const chatId = "tui-goal-fallback";
+    const activeTurnId = "13131313-1313-4313-8313-131313131313";
+    loop.sessions.getOrCreate(sessionKey);
+    const goal = await loop.goalRuntime.create({
+      sessionKey,
+      objective: "Keep the Goal queue ordered",
+      route: {
+        channel: "websocket",
+        chatId,
+        source: { kind: "tui", channel: "websocket" },
+      },
+      turnId: "goal-create-turn",
+    });
+    loop.goalRuntime.releaseTurn(sessionKey, "goal-create-turn");
+    while (loop.bus.outboundSize) await loop.bus.consumeOutbound();
+
+    let releaseActive!: () => void;
+    const activeGate = new Promise<void>((resolve) => {
+      releaseActive = resolve;
+    });
+    loop.processMessageInternal = vi.fn(async (message: InboundMessage, _key, options: any) => {
+      if (message.internal?.kind === "goal_continuation") {
+        options.slot.acceptingSteer = true;
+        await activeGate;
+      }
+      options.slot.stopReason = "completed";
+      return null;
+    }) as any;
+
+    const running = loop.run();
+    expect(loop.goalRuntime.reserveWork(sessionKey, activeTurnId, "continuation")).toBe(true);
+    await loop.bus.publishInbound(new InboundMessage({
+      channel: "websocket",
+      chatId,
+      content: "Continue the Goal",
+      metadata: { turn_id: activeTurnId },
+      internal: {
+        kind: "goal_continuation",
+        goalId: goal.goalId,
+        goalUpdatedAt: goal.updatedAt,
+      },
+      sessionKeyOverride: sessionKey,
+      turnSource: { kind: "tui", channel: "websocket" },
+    }));
+    await waitUntil(() => (loop.turnSlots.get(sessionKey) as any[])?.[0]?.acceptingSteer === true);
+
+    const messages = [
+      new InboundMessage({
+        channel: "websocket",
+        chatId,
+        content: "queue this with Enter",
+        metadata: {
+          webui: true,
+          client_request_id: "14141414-1414-4414-8414-141414141414",
+          webui_request_digest: "tui-goal-enter-digest",
+        },
+        sessionKeyOverride: sessionKey,
+        turnSource: { kind: "tui", channel: "websocket" },
+      }),
+      new InboundMessage({
+        channel: "websocket",
+        chatId,
+        content: "stale correction",
+        metadata: {
+          webui: true,
+          client_request_id: "15151515-1515-4515-8515-151515151515",
+          webui_request_digest: "tui-goal-stale-digest",
+        },
+        sessionKeyOverride: sessionKey,
+        turnAdmission: "steer",
+        expectedTurnId: "stale-turn-id",
+        turnSource: { kind: "tui", channel: "websocket" },
+      }),
+      new InboundMessage({
+        channel: "websocket",
+        chatId,
+        content: "/help",
+        metadata: {
+          webui: true,
+          client_request_id: "16161616-1616-4616-8616-161616161616",
+          webui_request_digest: "tui-goal-slash-digest",
+        },
+        sessionKeyOverride: sessionKey,
+        turnAdmission: "steer",
+        expectedTurnId: activeTurnId,
+        turnSource: { kind: "tui", channel: "websocket" },
+      }),
+    ];
+    for (const message of messages) await loop.bus.publishInbound(message);
+
+    await waitUntil(() => loop.goalRuntime.inbox(sessionKey).length === messages.length);
+    expect(loop.goalRuntime.inbox(sessionKey).map((entry) => entry.content)).toEqual([
+      "queue this with Enter",
+      "stale correction",
+      "/help",
+    ]);
+    expect((loop.turnSlots.get(sessionKey) as any[])[0].pendingSteer.size).toBe(0);
+    expect(await loop.getQueueSnapshot(sessionKey)).toMatchObject({
+      revision: 3,
+      items: [
+        expect.objectContaining({ content: "queue this with Enter" }),
+        expect.objectContaining({ content: "stale correction" }),
+        expect.objectContaining({ content: "/help" }),
+      ],
+    });
+    const outbound = [];
+    while (loop.bus.outboundSize) outbound.push(await loop.bus.consumeOutbound());
+    expect(outbound.filter((message) => message.metadata?.webuiMessageQueued)).toHaveLength(3);
+    expect(outbound.some((message) => message.metadata?.webuiMessageSteered)).toBe(false);
+
+    releaseActive();
+    await waitUntil(() => !loop.isSessionBusy(sessionKey));
+    loop.stop();
+    await running;
+  });
+
+  it("does not let a TUI Steer enter a GUI-owned Goal Turn", async () => {
+    const loop = makeLoop();
+    const sessionKey = "websocket:gui-owned-goal";
+    const chatId = "gui-owned-goal";
+    const activeTurnId = "19191919-1919-4919-8919-191919191919";
+    const clientRequestId = "20202020-2020-4020-8020-202020202020";
+    const { releaseActive, running } = await startBlockedGoalTurn(loop, {
+      sessionKey,
+      chatId,
+      activeTurnId,
+      sourceKind: "gui",
+    });
+
+    await loop.bus.publishInbound(new InboundMessage({
+      channel: "websocket",
+      chatId,
+      content: "Do not inject this into the GUI Turn",
+      metadata: {
+        webui: true,
+        client_request_id: clientRequestId,
+        webui_request_digest: "gui-owned-goal-digest",
+      },
+      sessionKeyOverride: sessionKey,
+      turnAdmission: "steer",
+      expectedTurnId: activeTurnId,
+      turnSource: { kind: "tui", channel: "websocket" },
+    }));
+
+    await waitUntil(() => loop.goalRuntime.inbox(sessionKey).length === 1);
+    expect(loop.goalRuntime.inbox(sessionKey)).toEqual([
+      expect.objectContaining({ id: clientRequestId, content: "Do not inject this into the GUI Turn" }),
+    ]);
+    expect((loop.turnSlots.get(sessionKey) as any[])[0].pendingSteer.size).toBe(0);
+    expect(await loop.getQueueSnapshot(sessionKey)).toMatchObject({ revision: 1 });
+    const outbound = [];
+    while (loop.bus.outboundSize) outbound.push(await loop.bus.consumeOutbound());
+    expect(outbound.filter((message) => message.metadata?.webuiMessageQueued)).toHaveLength(1);
+    expect(outbound.some((message) => message.metadata?.webuiMessageSteered)).toBe(false);
+
+    releaseActive();
+    await waitUntil(() => !loop.isSessionBusy(sessionKey));
+    loop.stop();
+    await running;
+  });
+
+  it("queues TUI Goal Steer when the source channel mismatches or the Turn is settling", async () => {
+    const loop = makeLoop();
+    const sessionKey = "websocket:tui-goal-race";
+    const chatId = "tui-goal-race";
+    const activeTurnId = "21212121-2121-4121-8121-212121212121";
+    const { releaseActive, running } = await startBlockedGoalTurn(loop, {
+      sessionKey,
+      chatId,
+      activeTurnId,
+      sourceKind: "tui",
+    });
+
+    await loop.bus.publishInbound(new InboundMessage({
+      channel: "websocket",
+      chatId,
+      content: "Wrong trusted source channel",
+      metadata: {
+        webui: true,
+        client_request_id: "22222222-2222-4222-8222-222222222222",
+        webui_request_digest: "tui-goal-channel-digest",
+      },
+      sessionKeyOverride: sessionKey,
+      turnAdmission: "steer",
+      expectedTurnId: activeTurnId,
+      turnSource: { kind: "tui", channel: "cli" },
+    }));
+    await waitUntil(() => loop.goalRuntime.inbox(sessionKey).length === 1);
+
+    const slot = (loop.turnSlots.get(sessionKey) as any[])[0];
+    slot.acceptingSteer = false;
+    slot.state = "settling";
+    await loop.bus.publishInbound(new InboundMessage({
+      channel: "websocket",
+      chatId,
+      content: "The Turn is already settling",
+      metadata: {
+        webui: true,
+        client_request_id: "23232323-2323-4323-8323-232323232323",
+        webui_request_digest: "tui-goal-settling-digest",
+      },
+      sessionKeyOverride: sessionKey,
+      turnAdmission: "steer",
+      expectedTurnId: activeTurnId,
+      turnSource: { kind: "tui", channel: "websocket" },
+    }));
+
+    await waitUntil(() => loop.goalRuntime.inbox(sessionKey).length === 2);
+    expect(loop.goalRuntime.inbox(sessionKey).map((entry) => entry.content)).toEqual([
+      "Wrong trusted source channel",
+      "The Turn is already settling",
+    ]);
+    expect(slot.pendingSteer.size).toBe(0);
+    expect(await loop.getQueueSnapshot(sessionKey)).toMatchObject({ revision: 2 });
+    const outbound = [];
+    while (loop.bus.outboundSize) outbound.push(await loop.bus.consumeOutbound());
+    expect(outbound.filter((message) => message.metadata?.webuiMessageQueued)).toHaveLength(2);
+    expect(outbound.some((message) => message.metadata?.webuiMessageSteered)).toBe(false);
+
+    releaseActive();
+    await waitUntil(() => !loop.isSessionBusy(sessionKey));
     loop.stop();
     await running;
   });

@@ -69,6 +69,7 @@ export function buildMemoryDesktopScanAddParams(input: MemoryDesktopScanAddBaseI
 
 export function createMemoryDesktopAddAnalytics(options: {
   getClientId?: () => string | null | undefined;
+  getInstallationId?: () => string | null | undefined;
   getUserId?: () => string | null | undefined;
   getUserMode?: () => string | null | undefined;
   appEnv?: AnalyticsAppEnv | null;
@@ -80,6 +81,7 @@ export function createMemoryDesktopAddAnalytics(options: {
   const queued = createQueuedAnalytics({
     source: MEMORY_ADD_ANALYTICS_SOURCE,
     getClientId: options.getClientId ?? (() => readAnalyticsClientId()),
+    getInstallationId: options.getInstallationId,
     getUserId: options.getUserId,
     getUserMode: options.getUserMode,
     appEnv: options.appEnv,

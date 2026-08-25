@@ -1263,7 +1263,7 @@ function ProviderModelList(props: {
       {props.items.map((item, index) => (
         <div
           key={item.id}
-          className={`flex min-w-0 items-center justify-between gap-3 py-2.5 ${
+          className={`provider-model-list__row flex min-w-0 items-center justify-between gap-3 py-2.5 ${
             index > 0 ? "border-t border-border-stone/30" : ""
           }`}
         >

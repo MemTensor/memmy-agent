@@ -1,6 +1,6 @@
 {
   "name": "memmy-agent",
-  "version": "1.0.8",
+  "version": "1.1.0",
   "description": "TypeScript refactor of memmy's agent runtime.",
   "type": "module",
   "main": "./dist/index.js",
@@ -47,7 +47,6 @@
     "dotenv": "^16.6.1",
     "eventsource": "^4.1.0",
     "exceljs": "^4.4.0",
-    "fast-glob": "^3.3.3",
     "fast-xml-parser": "^5.8.0",
     "grammy": "^1.43.0",
     "html-validate": "10.17.0",
@@ -79,7 +78,6 @@
     "tiktoken": "^1.0.22",
     "turndown": "^7.2.4",
     "typescript": "^5.9.3",
-    "undici": "^6.27.0",
     "which": "^5.0.0",
     "ws": "^8.21.0",
     "yaml": "^2.8.2",

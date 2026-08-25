@@ -89,6 +89,7 @@ describe("SettingsPage platform scene quota details", () => {
               preparedUpdatePath: null,
               downloadProgress: null,
               feedback: null,
+              requestInlineAction: vi.fn(async () => undefined),
               requestPrimaryAction: vi.fn(async () => undefined)
             }}
           />
@@ -208,6 +209,7 @@ describe("SettingsPage platform scene quota details", () => {
               preparedUpdatePath: null,
               downloadProgress: null,
               feedback: null,
+              requestInlineAction: vi.fn(async () => undefined),
               requestPrimaryAction: vi.fn(async () => undefined)
             }}
           />

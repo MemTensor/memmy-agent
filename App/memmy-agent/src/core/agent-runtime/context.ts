@@ -258,6 +258,7 @@ export class ContextBuilder {
       channel,
       sessionSummary,
       workspace: sessionWorkspace,
+      sessionKey,
     });
     hook?.onBuildSystemPrompt(ctx);
     return ctx.render();

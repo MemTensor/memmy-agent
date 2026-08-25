@@ -256,7 +256,7 @@ export function createMockMemoryClient(options: CreateMockMemoryClientOptions = 
     async panelOverview() {
       failIfNeeded();
       return {
-        counts: { memories: 0, skills: 0, experiences: 0, worldModels: 0 },
+        counts: { memories: 0, userMemories: 0, skills: 0, experiences: 0, worldModels: 0 },
         dailyActivity: emptyPanelDays(now()),
         sourceDistribution: []
       };

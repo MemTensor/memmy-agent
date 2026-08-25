@@ -34,6 +34,7 @@ export interface IngestionContext {
   deferProcessing?: boolean;
   totalMessages?: number;
   scanMode?: MemoryDesktopAddScanMode;
+  replaySeenConversationIds?: ReadonlySet<string>;
   onProgress?: (progress: IngestionProgress) => void;
 }
 
@@ -213,37 +214,32 @@ async function processConversation(
 
     const dedupKeys = turn.messages.map((message) => createDedupKey(ctx.sourceId, message.messageId));
     const allSeen = dedupKeys.every((dedupKey) => options.agentSourceRepository.hasSeen(dedupKey));
-    // Skip analytics for already-seen turns: addMemory still runs for idempotent replay,
-    // but those calls do not create new memories and would flood scan telemetry.
-    const shouldTrackAddAnalytics = !allSeen;
+    if (allSeen && !ctx.replaySeenConversationIds?.has(turn.conversationId)) {
+      stats.deduped += turn.messages.length;
+      stats.dedupedMemories += 1;
+      emitIngestionProgress(ctx, stats);
+      continue;
+    }
+
     const addAnalyticsBase = {
       adapterId: request.adapterId,
       conversationId: turn.conversationId,
       turnId: request.turnId,
       ...(ctx.scanMode ? { scanMode: ctx.scanMode } : {})
     };
-    if (shouldTrackAddAnalytics) {
-      options.memoryAddAnalytics?.trackAddStarted(addAnalyticsBase);
-    }
+    options.memoryAddAnalytics?.trackAddStarted(addAnalyticsBase);
     const addStartedAt = Date.now();
 
     try {
       const added = await options.memoryClient.addMemory(request);
-      if (allSeen) {
-        stats.deduped += turn.messages.length;
-        stats.dedupedMemories += 1;
-      } else {
-        stats.written += turn.messages.length;
-        stats.writtenMemories += 1;
-      }
+      stats.written += turn.messages.length;
+      stats.writtenMemories += 1;
       stats.memoryIds.push(added.id);
-      if (shouldTrackAddAnalytics) {
-        options.memoryAddAnalytics?.trackAddSucceeded({
-          ...addAnalyticsBase,
-          durationMs: Date.now() - addStartedAt,
-          storedCount: 1
-        });
-      }
+      options.memoryAddAnalytics?.trackAddSucceeded({
+        ...addAnalyticsBase,
+        durationMs: Date.now() - addStartedAt,
+        storedCount: 1
+      });
 
       for (const dedupKey of dedupKeys) {
         options.agentSourceRepository.markSeen(dedupKey, ctx.sourceId);
@@ -257,13 +253,11 @@ async function processConversation(
         conversationId: turn.conversationId,
         reason: error instanceof Error ? error.message : "ingestion failed"
       });
-      if (shouldTrackAddAnalytics) {
-        options.memoryAddAnalytics?.trackAddFailed({
-          ...addAnalyticsBase,
-          durationMs: Date.now() - addStartedAt,
-          error
-        });
-      }
+      options.memoryAddAnalytics?.trackAddFailed({
+        ...addAnalyticsBase,
+        durationMs: Date.now() - addStartedAt,
+        error
+      });
       emitIngestionProgress(ctx, stats);
     }
   }

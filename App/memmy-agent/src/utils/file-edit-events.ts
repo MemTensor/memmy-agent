@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { scanPatchEnvelopePrefix } from "../core/agent-runtime/tools/patch-envelope.js";
 import {
   bindUiToolCallId,
   createUiToolCallId,
@@ -122,7 +123,13 @@ export function displayFileEditPath(filePath: string, workspace?: string | null)
   return path.resolve(filePath).split(path.sep).join("/");
 }
 
-export function readFileSnapshot(filePath: string, { maxBytes = MAX_SNAPSHOT_BYTES }: { maxBytes?: number } = {}): FileSnapshot {
+export function readFileSnapshot(
+  filePath: string,
+  {
+    maxBytes = MAX_SNAPSHOT_BYTES,
+    fatalUtf8 = false,
+  }: { maxBytes?: number; fatalUtf8?: boolean } = {},
+): FileSnapshot {
   const resolved = path.resolve(filePath);
   try {
     if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
@@ -133,7 +140,10 @@ export function readFileSnapshot(filePath: string, { maxBytes = MAX_SNAPSHOT_BYT
     const raw = fs.readFileSync(resolved);
     if (raw.includes(0)) return new FileSnapshot({ path: resolved, exists: true, text: null, binary: true });
     try {
-      return new FileSnapshot({ path: resolved, exists: true, text: raw.toString("utf8").replace(/\r\n/g, "\n") });
+      const text = fatalUtf8
+        ? new TextDecoder("utf-8", { fatal: true }).decode(raw)
+        : raw.toString("utf8");
+      return new FileSnapshot({ path: resolved, exists: true, text: text.replace(/\r\n/g, "\n") });
     } catch {
       return new FileSnapshot({ path: resolved, exists: true, text: null, binary: true });
     }
@@ -190,20 +200,24 @@ export function resolveFileEditPaths(toolName: string, tool: any, workspace: str
   return filePath ? [filePath] : [];
 }
 
-function resolveRawFileEditPath(tool: any, workspace: string | null | undefined, raw: string): string | null {
-  return resolveWithTool(tool, workspace, raw);
-}
-
-function resolveApplyPatchPaths(tool: any, workspace: string | null | undefined, params?: Record<string, any> | null): string[] {
-  if (!params || !Array.isArray(params.edits) || params.dryRun === true) return [];
+function resolveApplyPatchPaths(tool: any, _workspace: string | null | undefined, params?: Record<string, any> | null): string[] {
+  if (!params || typeof params.input !== "string" || typeof tool?.resolve !== "function") return [];
   const out: string[] = [];
   const seen = new Set<string>();
-  for (const edit of params.edits) {
-    if (!edit || typeof edit !== "object" || typeof edit.path !== "string" || !edit.path.trim()) continue;
-    const resolved = resolveRawFileEditPath(tool, workspace, edit.path);
-    if (resolved && !seen.has(resolved)) {
-      seen.add(resolved);
-      out.push(resolved);
+  for (const file of scanPatchEnvelopePrefix(`${params.input}\n`)) {
+    for (const relativePath of [file.path, file.moveTo]) {
+      if (!relativePath) continue;
+      let resolved: string;
+      try {
+        resolved = path.resolve(tool.resolve(relativePath));
+      } catch {
+        continue;
+      }
+      const key = process.platform === "win32" ? resolved.toLowerCase() : resolved;
+      if (!seen.has(key)) {
+        seen.add(key);
+        out.push(resolved);
+      }
     }
   }
   return out;
@@ -231,8 +245,9 @@ export function prepareFileEditTrackers({
   return resolveFileEditPaths(name, tool, workspace, params)
     .filter((filePath) => {
       const resolved = path.resolve(filePath);
-      if (seen.has(resolved)) return false;
-      seen.add(resolved);
+      const key = process.platform === "win32" ? resolved.toLowerCase() : resolved;
+      if (seen.has(key)) return false;
+      seen.add(key);
       return true;
     })
     .map((filePath) => new FileEditTracker({
@@ -241,7 +256,7 @@ export function prepareFileEditTrackers({
       tool: name,
       path: path.resolve(filePath),
       displayPath: displayFileEditPath(filePath, workspace),
-      before: readFileSnapshot(filePath),
+      before: readFileSnapshot(filePath, { fatalUtf8: name === "apply_patch" }),
     }));
 }
 
@@ -308,7 +323,7 @@ export function buildFileEditEndEvent(
       unchanged: true,
     };
   }
-  const after = readFileSnapshot(tracker.path);
+  const after = readFileSnapshot(tracker.path, { fatalUtf8: tracker.tool === "apply_patch" });
   let counted = false;
   let added = 0;
   let deleted = 0;
@@ -458,15 +473,6 @@ export function extractCompleteJsonString(source: string, key: string): string |
   return extractJsonStringPrefix(source, key, true);
 }
 
-function jsonBoolTrue(source: string, key: string): boolean {
-  return new RegExp(`"${key}"\\s*:\\s*true\\b`).test(source);
-}
-
-function pathMatches(source: string): Array<{ rawPath: string; start: number; end: number }> {
-  const matches = [...source.matchAll(/"path"\s*:\s*"([^"]+)"/g)].map((m) => ({ rawPath: m[1], start: m.index ?? 0, end: 0 }));
-  return matches.map((item, idx) => ({ ...item, end: matches[idx + 1]?.start ?? source.length }));
-}
-
 class StreamingPatchFileState {
   tracker: FileEditTracker;
   emittedOnce = false;
@@ -612,6 +618,9 @@ export class StreamingFileEditState {
   oldTextField = new StreamingJsonStringField("old_text");
   newTextField = new StreamingJsonStringField("new_text");
   patchFiles = new Map<string, StreamingPatchFileState>();
+  inputPrefix = "";
+  inputClosed = false;
+  boundFinal = false;
   emittedOnce = false;
   lastEmittedAdded = -1;
   lastEmittedDeleted = -1;
@@ -636,6 +645,8 @@ export class StreamingFileEditState {
       this.oldTextField.reset();
       this.newTextField.reset();
       this.patchFiles.clear();
+      this.inputPrefix = "";
+      this.inputClosed = false;
       return;
     }
     const delta = payload.arguments_delta ?? payload.argumentsDelta;
@@ -686,7 +697,9 @@ export class StreamingFileEditState {
   matchesFinalToolCall(toolCall: any): boolean {
     if (toolCall?.id && this.callId && toolCall.id === this.callId) return true;
     if (toolCall?.name !== this.name) return false;
-    if (this.name === "apply_patch") return Array.isArray(toolCall?.arguments?.edits) && this.arguments.includes('"edits"');
+    if (this.name === "apply_patch") {
+      return typeof toolCall?.arguments?.input === "string" && toolCall.arguments.input === this.inputPrefix;
+    }
     const finalPath = toolCall?.arguments?.path;
     if (this.path == null && typeof finalPath === "string") {
       this.path = finalPath;
@@ -765,35 +778,56 @@ export class StreamingFileEditTracker {
   }
 
   private async updateApplyPatch(state: StreamingFileEditState): Promise<void> {
-    if (jsonBoolTrue(state.arguments, "dryRun")) return;
+    state.inputPrefix = extractJsonStringPrefix(state.arguments, "input") ?? "";
+    state.inputClosed = extractCompleteJsonString(state.arguments, "input") != null;
+    if (!state.inputPrefix) return;
+
     const tool = typeof this.tools?.get === "function" ? this.tools.get("apply_patch") : undefined;
+    if (typeof tool?.resolve !== "function") return;
     const events: Record<string, any>[] = [];
     const now = Date.now();
-    for (const match of pathMatches(state.arguments)) {
-      const segment = state.arguments.slice(match.start, match.end);
-      const action = /"action"\s*:\s*"(replace|add|delete)"/.exec(segment)?.[1] ?? "replace";
-      const oldText = extractJsonStringPrefix(segment, "oldText") ?? "";
-      const newText = extractJsonStringPrefix(segment, "newText") ?? "";
-      let added = ["replace", "add"].includes(action) ? textLineCount(newText) : 0;
-      let deleted = ["replace", "delete"].includes(action) ? textLineCount(oldText) : 0;
-      let fileState = state.patchFiles.get(match.rawPath);
+    const getFileState = (relativePath: string): StreamingPatchFileState | null => {
+      let filePath: string;
+      try {
+        filePath = path.resolve(tool.resolve(relativePath));
+      } catch {
+        return null;
+      }
+      const key = process.platform === "win32" ? filePath.toLowerCase() : filePath;
+      let fileState = state.patchFiles.get(key);
       if (!fileState) {
-        const filePath = resolveRawFileEditPath(tool, this.workspace, match.rawPath);
-        if (!filePath) continue;
         fileState = new StreamingPatchFileState(new FileEditTracker({
           callId: state.callId,
           uiToolCallId: state.uiToolCallId,
           tool: "apply_patch",
           path: filePath,
           displayPath: displayFileEditPath(filePath, this.workspace),
-          before: readFileSnapshot(filePath),
+          before: readFileSnapshot(filePath, { fatalUtf8: true }),
         }));
-        state.patchFiles.set(match.rawPath, fileState);
+        state.patchFiles.set(key, fileState);
       }
-      if (action === "delete" && added === 0 && deleted === 0 && fileState.tracker.before.countable) deleted = textLineCount(fileState.tracker.before.text ?? "");
-      if (fileState.shouldEmit(added, deleted, now)) {
-        fileState.markEmitted(added, deleted, now);
-        events.push(buildFileEditLiveEvent(fileState.tracker, { added, deleted }));
+      return fileState;
+    };
+    const emitFile = (fileState: StreamingPatchFileState, added: number, deleted: number): void => {
+      if (!fileState.shouldEmit(added, deleted, now)) return;
+      fileState.markEmitted(added, deleted, now);
+      events.push(buildFileEditLiveEvent(fileState.tracker, { added, deleted }));
+    };
+
+    for (const file of scanPatchEnvelopePrefix(state.inputPrefix)) {
+      const sourceState = getFileState(file.path);
+      if (!sourceState) continue;
+      const beforeLines = sourceState.tracker.before.countable
+        ? textLineCount(sourceState.tracker.before.text ?? "")
+        : 0;
+      if (file.moveTo) {
+        emitFile(sourceState, 0, beforeLines);
+        const targetState = getFileState(file.moveTo);
+        if (targetState) emitFile(targetState, Math.max(0, beforeLines + file.added - file.deleted), 0);
+      } else if (file.kind === "delete") {
+        emitFile(sourceState, 0, beforeLines);
+      } else {
+        emitFile(sourceState, file.added, file.deleted);
       }
     }
     if (events.length) await this.emit(events);
@@ -837,11 +871,17 @@ export class StreamingFileEditTracker {
     const boundStates = new Set<StreamingFileEditState>();
     const boundCalls = new Set<any>();
 
-    const bind = (state: StreamingFileEditState, toolCall: any): void => {
-      if (boundStates.has(state) || boundCalls.has(toolCall)) return;
+    const canBind = (state: StreamingFileEditState, toolCall: any): boolean => {
+      if (state.name !== "apply_patch") return true;
+      return toolCall?.name === "apply_patch" && typeof toolCall?.arguments?.input === "string";
+    };
+    const bind = (state: StreamingFileEditState, toolCall: any): boolean => {
+      if (boundStates.has(state) || boundCalls.has(toolCall) || !canBind(state, toolCall)) return false;
       bindUiToolCallId(toolCall, state.uiToolCallId);
       boundStates.add(state);
       boundCalls.add(toolCall);
+      state.boundFinal = true;
+      return true;
     };
 
     for (const state of states) {
@@ -873,20 +913,44 @@ export class StreamingFileEditTracker {
       }
     }
 
+    const inputStates = new Map<string, StreamingFileEditState[]>();
+    const inputCalls = new Map<string, any[]>();
+    for (const state of states) {
+      if (boundStates.has(state) || state.name !== "apply_patch" || !state.inputClosed) continue;
+      const key = `apply_patch\0${state.inputPrefix}`;
+      const matching = inputStates.get(key) ?? [];
+      matching.push(state);
+      inputStates.set(key, matching);
+    }
+    for (const toolCall of finalToolCalls) {
+      const input = toolCall?.arguments?.input;
+      if (boundCalls.has(toolCall) || toolCall?.name !== "apply_patch" || typeof input !== "string") continue;
+      const key = `apply_patch\0${input}`;
+      const matching = inputCalls.get(key) ?? [];
+      matching.push(toolCall);
+      inputCalls.set(key, matching);
+    }
+    for (const [key, matchingStates] of inputStates) {
+      const matchingCalls = inputCalls.get(key) ?? [];
+      if (matchingStates.length === 1 && matchingCalls.length === 1) {
+        bind(matchingStates[0], matchingCalls[0]);
+      }
+    }
+
     const remainingStates = states.filter((state) => !boundStates.has(state));
     const remainingCalls = finalToolCalls.filter((toolCall) => !boundCalls.has(toolCall));
-    for (let index = 0; index < Math.min(remainingStates.length, remainingCalls.length); index += 1) {
-      bind(remainingStates[index], remainingCalls[index]);
+    for (const state of remainingStates) {
+      const callIndex = remainingCalls.findIndex((toolCall) => !boundCalls.has(toolCall) && canBind(state, toolCall));
+      if (callIndex >= 0) bind(state, remainingCalls[callIndex]);
     }
     for (const toolCall of finalToolCalls) getOrCreateUiToolCallId(toolCall);
   }
 
-  async errorUnmatched(finalToolCalls: any[], error: string): Promise<void> {
+  async errorUnmatched(_finalToolCalls: any[], error: string): Promise<void> {
     if (this.closed) return;
     const events: Record<string, any>[] = [];
     for (const state of this.states.values()) {
-      const matched = finalToolCalls.some((call) => state.matchesFinalToolCall(call));
-      if (matched) continue;
+      if (state.boundFinal) continue;
       for (const fileState of state.patchFiles.values()) events.push(buildFileEditErrorEvent(fileState.tracker, error));
       if (state.tracker) events.push(buildFileEditErrorEvent(state.tracker, error));
     }

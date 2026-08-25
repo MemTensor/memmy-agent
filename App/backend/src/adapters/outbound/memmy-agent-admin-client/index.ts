@@ -21,4 +21,5 @@ export interface MemmyAgentAdminClient {
     appSecret?: string;
     domain?: "feishu" | "lark";
   }>;
+  reloadMcpConfig(): Promise<{ ok: boolean; message: string; requires_restart: boolean }>;
 }

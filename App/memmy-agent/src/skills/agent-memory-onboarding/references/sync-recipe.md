@@ -71,6 +71,7 @@ These names are invalid and must not be used:
 
 Optional common fields:
 
+- `wslDistro`: include only when Memmy runs on Windows and `path` belongs to WSL. Keep `path` in absolute Linux form and use the exact distribution name returned by `wsl --list --quiet`; Memmy resolves it through that distribution for automatic sync.
 - `fields.messageId`: a stable source record id. If omitted for a file recipe, Memmy hashes the relative file path and record position.
 - `fields.conversationId`: a stable source conversation id. If omitted for a file recipe, Memmy hashes the relative file path.
 - `fields.workspacePath` and `fields.gitRoot`.
@@ -131,6 +132,26 @@ Use `format: "sqlite"` with one read-only `SELECT` statement. The query must con
 Use SQLite JSON functions in the `SELECT` when message fields are stored inside JSON columns.
 
 The SQLite extractor executes the query without parameter bindings. Do not include `?`, `$name`, or `:name` placeholders. Select the native records needed to reconstruct history; Memmy applies the permanent sync boundary after extraction.
+
+During Windows-to-WSL onboarding, a missing `sqlite3` executable does not block SQLite recipes. Inspect the schema and preflight the query with Python's standard-library `sqlite3` module, then save the absolute Linux `path` and exact `wslDistro`; the Windows backend performs later reads without depending on the WSL CLI:
+
+```json
+{
+  "version": 1,
+  "format": "sqlite",
+  "path": "/home/user/.agent/history.db",
+  "wslDistro": "UbuntuCustom",
+  "query": "SELECT message_id, conversation_id, role, content, created_at FROM messages ORDER BY created_at, message_id",
+  "fields": {
+    "messageId": "message_id",
+    "conversationId": "conversation_id",
+    "role": "role",
+    "content": "content",
+    "createdAt": "created_at"
+  },
+  "timestampFormat": "auto"
+}
+```
 
 If the initial manifest transformed an id, reproduce it in the query. For example:
 

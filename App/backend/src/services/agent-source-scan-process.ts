@@ -1,4 +1,3 @@
-import { parentPort, workerData } from "node:worker_threads";
 import {
   createHttpMemoryClient,
   createMemosSqliteMemoryClient,
@@ -6,21 +5,22 @@ import {
   type MemoryClient,
   type MemoryLayerConfig
 } from "../adapters/outbound/memory-client/index.js";
-import { createAppStateStore, type AppStateStore } from "../infrastructure/app-state-store/index.js";
-import { createAgentSourceScanJournal, type AgentSourceScanJournal } from "../infrastructure/agent-source-scan-journal/index.js";
 import {
   createAgentSourceLifecycleAnalytics,
   resolveLoggedInAnalyticsUserId,
 } from "../analytics/agent-source-analytics.js";
 import { createMemoryDesktopAddAnalytics } from "../analytics/memory-add-analytics.js";
+import { createAppStateStore, type AppStateStore } from "../infrastructure/app-state-store/index.js";
+import { createAgentSourceScanJournal, type AgentSourceScanJournal } from "../infrastructure/agent-source-scan-journal/index.js";
 import { createAgentSourceService } from "./agent-source-service.js";
 import { createBuiltinAgentSourceRegistry } from "./builtin-agent-source-registry.js";
+import { createBuiltinSkillTargetRegistry } from "./builtin-skill-target-registry.js";
 import { createIngestionService } from "./ingestion-service.js";
-import type { SkillDistributionService } from "./skill-distribution-service.js";
+import { createSkillDistributionService } from "./skill-distribution-service.js";
 import {
-  type AgentSourceScanWorkerCommand,
-  type AgentSourceScanWorkerData,
-  type AgentSourceScanWorkerMessage,
+  type AgentSourceScanProcessCommand,
+  type AgentSourceScanProcessData,
+  type AgentSourceScanProcessMessage,
   isScanResumeStateReference,
   type ScanResumeState,
   type ScanResumeStateReference,
@@ -29,30 +29,38 @@ import {
 
 const DEFAULT_MEMORY_LAYER_TIMEOUT_MS = 20_000;
 
-if (!parentPort) {
-  throw new Error("Agent source scan worker requires a parent port");
+if (!process.send) {
+  throw new Error("Agent source scan process requires an IPC channel");
 }
 
 const controller = new AbortController();
-parentPort.on("message", (message: AgentSourceScanWorkerCommand) => {
+let started = false;
+
+process.on("message", (message: AgentSourceScanProcessCommand) => {
   if (message.type === "abort") {
     controller.abort();
+    return;
   }
+
+  if (started) return;
+  started = true;
+  void runProcess(message.data).catch((error: unknown) => {
+    if (!controller.signal.aborted) {
+      postProcessMessage({
+        type: "failed",
+        message: error instanceof Error ? error.message : "Agent source scan process failed"
+      });
+    }
+  }).finally(() => {
+    if (process.connected) process.disconnect?.();
+  });
 });
 
-void runWorker().catch((error: unknown) => {
-  if (!controller.signal.aborted) {
-    postWorkerMessage({
-      type: "failed",
-      message: error instanceof Error ? error.message : "Agent source scan worker failed"
-    });
-  }
-}).finally(() => {
-  parentPort?.close();
+process.once("disconnect", () => {
+  controller.abort();
 });
 
-async function runWorker(): Promise<void> {
-  const data = workerData as AgentSourceScanWorkerData;
+async function runProcess(data: AgentSourceScanProcessData): Promise<void> {
   let appStateStore: AppStateStore | null = null;
   try {
     appStateStore = createAppStateStore({ databasePath: data.databasePath });
@@ -68,13 +76,13 @@ async function runWorker(): Promise<void> {
       agentSources,
       {
         onProgress(progress) {
-          postWorkerMessage({ type: "progress", progress });
+          postProcessMessage({ type: "progress", progress });
         },
         onResumeChanged(resume) {
-          postWorkerMessage({ type: "resume", resume: resume ? writeResumeState(scanJournal, data, resume) : null });
+          postProcessMessage({ type: "resume", resume: resume ? writeResumeState(scanJournal, data, resume) : null });
         },
         onCompleted(results) {
-          postWorkerMessage({ type: "completed", results });
+          postProcessMessage({ type: "completed", results });
         }
       }
     );
@@ -112,7 +120,9 @@ function createAgentSources(appStateStore: AppStateStore, memoryClient: MemoryCl
     agentSourceRepository: appStateStore.repositories.agentSources,
     ingestionService,
     memoryClient,
-    skillDistributionService: createUnavailableSkillDistributionService(),
+    skillDistributionService: createSkillDistributionService({
+      targetRegistry: createBuiltinSkillTargetRegistry()
+    }),
     agentSourceAnalytics: createAgentSourceLifecycleAnalytics({
       getUserId: resolveAnalyticsUserId,
       getUserMode: resolveAnalyticsUserMode,
@@ -150,20 +160,7 @@ function readMemoryLayerConfig(env: NodeJS.ProcessEnv): MemoryLayerConfig | null
   };
 }
 
-function createUnavailableSkillDistributionService(): SkillDistributionService {
-  const unavailable = async () => {
-    throw new Error("Skill distribution is not available in agent source scan worker");
-  };
-
-  return {
-    install: unavailable,
-    uninstall: unavailable,
-    installPlugin: unavailable,
-    uninstallPlugin: unavailable
-  };
-}
-
-function readResumeState(scanJournal: AgentSourceScanJournal, resume: AgentSourceScanWorkerData["job"]["resume"]): ScanResumeState | null {
+function readResumeState(scanJournal: AgentSourceScanJournal, resume: AgentSourceScanProcessData["job"]["resume"]): ScanResumeState | null {
   if (!resume) {
     return null;
   }
@@ -177,7 +174,7 @@ function readResumeState(scanJournal: AgentSourceScanJournal, resume: AgentSourc
 
 function writeResumeState(
   scanJournal: AgentSourceScanJournal,
-  data: AgentSourceScanWorkerData,
+  data: AgentSourceScanProcessData,
   resume: ScanResumeState
 ): ScanResumeStateReference {
   scanJournal.writeResume({
@@ -207,6 +204,6 @@ function writeResumeState(
   };
 }
 
-function postWorkerMessage(message: AgentSourceScanWorkerMessage): void {
-  parentPort?.postMessage(message);
+function postProcessMessage(message: AgentSourceScanProcessMessage): void {
+  if (process.connected) process.send?.(message);
 }

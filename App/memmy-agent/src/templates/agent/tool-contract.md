@@ -35,7 +35,6 @@ records general tool contracts and less obvious usage patterns.
 
 - For code or configuration changes, the default loop is: locate (`find_files`/`grep`), inspect (`read_file`), edit (`apply_patch`), then verify (`exec` or reread).
 - Use `apply_patch` as the default code editing tool, especially for multi-file changes, structural edits, generated code, moves, additions, or deletions.
-- When a patch is uncertain and you want validation and a change summary before writing, use `apply_patch dry_run=true`.
 - Use `edit_file` only for small exact replacements in a single file, with `old_text` copied from `read_file`; when ambiguity matters, add `occurrence`, `line_hint`, or `expected_replacements`.
 - Use `write_file` for new files or intentional full-file rewrites, not routine local edits.
 - If a write tool returns `No changes made`, do not repeat the same tool call with identical arguments. Re-read the target and change the arguments or editing strategy.

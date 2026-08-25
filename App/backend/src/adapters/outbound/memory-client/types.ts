@@ -17,6 +17,7 @@ import type {
   MemoryProcessingStatusOutput,
   MemoryReloadConfigInput,
   MemoryReloadConfigOutput,
+  RecallEvidenceOutput,
   PanelAnalysisOutput,
   PanelItemsInput,
   PanelItemsOutput,
@@ -36,6 +37,7 @@ import type {
 /** Contract for memory client. */
 export interface MemoryRequestContext {
   timeZone?: string;
+  userId?: string;
 }
 
 export interface MemoryClient {
@@ -52,6 +54,7 @@ export interface MemoryClient {
   addMemory(input: AddMemoryInput, context?: MemoryRequestContext): Promise<AddMemoryOutput>;
   getMemory(input: { memoryId: string }, context?: MemoryRequestContext): Promise<GetMemoryOutput>;
   deleteMemory(input: DeleteMemoryInput & { memoryId: string }, context?: MemoryRequestContext): Promise<DeleteMemoryOutput>;
+  recallEvidence(queryId: string, context?: MemoryRequestContext): Promise<RecallEvidenceOutput>;
 
   enqueueImportSummaries(memoryIds?: string[]): Promise<EnqueueImportSummariesOutput>;
   getMemoryProcessingStatus(memoryIds: string[]): Promise<MemoryProcessingStatusOutput>;

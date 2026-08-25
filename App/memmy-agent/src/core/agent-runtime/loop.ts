@@ -86,7 +86,13 @@ import { imageGenerationPrompt } from "../../utils/image-generation-intent.js";
 import { LLMRuntime } from "../../utils/llm-runtime.js";
 import { withProgressCapabilities } from "../../utils/progress-events.js";
 import { EMPTY_FINAL_RESPONSE_MESSAGE } from "../../utils/runtime.js";
-import { AgentRunner, AgentRunSpec, type AgentInternalTurnContext } from "./runner.js";
+import {
+  AgentRunner,
+  AgentRunSpec,
+  type AgentInternalTurnContext,
+  type FollowupModelContextUpdate,
+  type FollowupModelRequestContext,
+} from "./runner.js";
 import {
   GoalRuntime,
   GoalRuntimeError,
@@ -102,16 +108,21 @@ import { RequestContext, ToolContext } from "./tools/context.js";
 import { ExecSessionManager } from "./tools/exec-session.js";
 import { MessageTool, type MessageSendCallback } from "./tools/message.js";
 import { FileStateStore } from "./tools/file-state.js";
-import { connectMissingServers, runtimeLines as mcpRuntimeLines, sessionExtra as mcpSessionExtra } from "./tools/mcp.js";
+import { connectMissingServers, handleRuntimeControl, reloadLock, runtimeLines as mcpRuntimeLines, sessionExtra as mcpSessionExtra } from "./tools/mcp.js";
 import { BrowserSessionManager, type BrowserScope } from "./tools/browser.js";
 import { ContextBuilder } from "./context.js";
 import { BUILTIN_SKILLS_DIR } from "./skills.js";
-import { Consolidator, Dream, type TokenCompactionStatus } from "./memory.js";
+import {
+  Consolidator,
+  Dream,
+  type TokenCompactionEvent,
+  type TokenCompactionStatus,
+} from "./memory.js";
 import { AgentHook, AgentHookContext, CompositeAgentHook } from "./hook.js";
 import { SubagentManager } from "./subagent.js";
 import { AutoCompact } from "./autocompact.js";
 import { configuredModelPresets, defaultSelectionSignature, makePresetSnapshotLoader, normalizePresetName } from "./model-presets.js";
-import { installMemmyMemory } from "../../memmy-memory/index.js";
+import { installMemmyMemory, type MemmyMemoryIntegration } from "../../memmy-memory/index.js";
 import { createByokTokenUsageRecorder, installByokTokenUsage } from "../../integrations/byok-token-usage/index.js";
 import {
   SessionDagQueueManager,
@@ -218,6 +229,22 @@ type AgentLoopResult = [
   failedModel: string | null,
 ];
 
+type MidTurnContextDescriptor = {
+  transcriptStartIndex: number;
+  protectedSessionMessageStart: number;
+  sessionTailMessagesRepresentedInTranscript: number;
+  rebuildProjection: (
+    session: Session,
+    currentTurnMessages: readonly Record<string, any>[],
+    options?: {
+      visibleMessageStart?: number;
+      summaryOverride?: string | null;
+    },
+  ) => Record<string, any>[];
+};
+
+type TokenCompactionEventCallback = (event: TokenCompactionEvent) => Promise<void> | void;
+
 export enum TurnState {
   RESTORE = "restore",
   COMPACT = "compact",
@@ -292,6 +319,8 @@ export class TurnContext {
   actualModel: string | null = null;
   consolidator: Consolidator | null = null;
   slot: TurnSlot | null = null;
+  midTurnContext: MidTurnContextDescriptor | null = null;
+  onTokenCompactionEvent: TokenCompactionEventCallback | null = null;
 
   constructor(init: {
     msg: InboundMessage;
@@ -733,6 +762,7 @@ export class AgentLoop {
   mcpConnected: boolean;
   mcpConnecting: boolean;
   private browserRegistryInitialized = false;
+  private readonly memmyMemoryIntegration: MemmyMemoryIntegration;
   subagentPendingWaitMs = 300_000;
   static readonly RUNTIME_CHECKPOINT_KEY = "runtimeCheckpoint";
   static readonly PENDING_USER_TURN_KEY = "pendingUserTurn";
@@ -772,7 +802,10 @@ export class AgentLoop {
     this.fileMemoryEnabled = this.config.fileMemory.enabled;
     const defaults = this.config.agents.defaults;
     this.workspace = path.resolve(getWorkspacePath(init.workspace ?? defaults.workspace ?? process.cwd()));
-    installMemmyMemory(this.config, { workspace: this.workspace, hooks: this.extraHooks });
+    this.memmyMemoryIntegration = installMemmyMemory(this.config, {
+      workspace: this.workspace,
+      hooks: this.extraHooks,
+    });
     installByokTokenUsage(this.config, { hooks: this.extraHooks });
     this.provider = init.provider ?? makeProvider(this.config);
     this.model = init.model ?? defaults.model ?? this.provider?.model ?? null;
@@ -1030,6 +1063,7 @@ export class AgentLoop {
         contextWindowTokens: selection.snapshot.contextWindowTokens,
         modelPreset: selection.preset,
         modelProvider: selection.provider,
+        actualModelContext: persistedModelSelection(selection),
       }),
     };
   }
@@ -1108,6 +1142,7 @@ export class AgentLoop {
   async closeRuntimeTools(): Promise<void> {
     await this.browserSessionManager.close();
     await this.closeMcp();
+    await this.memmyMemoryIntegration.dispose?.();
   }
 
   async closeBrowserSession(
@@ -1624,6 +1659,40 @@ export class AgentLoop {
       this.queueMutationLocks.set(key, lock);
     }
     return lock;
+  }
+
+  private async tryAdmitDirectSteer(
+    sessionKey: string,
+    message: InboundMessage,
+  ): Promise<string | null> {
+    if (message.turnAdmission !== "steer") return null;
+    const route = `${message.channel}\0${String(message.chatId)}`;
+    const requestedSource = sharedTurnSource(message);
+    return this.queueMutationLockFor(sessionKey).runExclusive(async () => {
+      const activeSlot = (this.turnSlots.get(sessionKey) ?? []).find((slot) => {
+        if (
+          slot.state !== "running"
+          || !slot.acceptingSteer
+          || slot.route !== route
+        ) return false;
+        if (requestedSource?.kind !== "tui") return true;
+        const activeSource = sharedTurnSource(slot.root);
+        return slot.turnId === message.expectedTurnId
+          && activeSource?.kind === "tui"
+          && activeSource.channel === requestedSource.channel;
+      });
+      if (!activeSlot) return null;
+      const steer = this.cloneInboundMessage(
+        message,
+        requestedSource?.kind === "tui" ? { turnId: activeSlot.turnId } : {},
+      );
+      try {
+        activeSlot.pendingSteer.put(steer);
+        return activeSlot.turnId;
+      } catch {
+        return null;
+      }
+    });
   }
 
   private queueRevision(sessionKey: string): number {
@@ -2921,6 +2990,126 @@ export class AgentLoop {
     });
   }
 
+  private sessionSummaryText(session: Session): string | null {
+    const summary = session.metadata?.lastSummary;
+    if (typeof summary === "string") return summary;
+    return summary && typeof summary === "object" && typeof summary.text === "string"
+      ? summary.text
+      : null;
+  }
+
+  private createMidTurnContextDescriptor(
+    session: Session,
+    initialMessages: Record<string, any>[],
+    sessionTailMessagesRepresentedInTranscript: number,
+    modelSelection: ResolvedModelSelection | null,
+    buildMessages: (
+      history: Record<string, any>[],
+      summary: string | null,
+      currentSession: Session,
+    ) => Record<string, any>[],
+  ): MidTurnContextDescriptor {
+    const protectedTailCount = Math.max(
+      0,
+      Math.min(sessionTailMessagesRepresentedInTranscript, session.messages.length),
+    );
+    const protectedSessionMessageStart = session.messages.length - protectedTailCount;
+    return {
+      transcriptStartIndex: Math.max(0, initialMessages.length - 1),
+      protectedSessionMessageStart,
+      sessionTailMessagesRepresentedInTranscript: protectedTailCount,
+      rebuildProjection: (currentSession, currentTurnMessages, options = {}) => {
+        const visibleMessageStart = Math.max(
+          0,
+          Math.min(options.visibleMessageStart ?? currentSession.lastConsolidated, currentSession.messages.length),
+        );
+        const view = new Session({
+          key: currentSession.key,
+          messages: currentSession.messages,
+          metadata: currentSession.metadata,
+          lastConsolidated: visibleMessageStart,
+          createdAt: currentSession.createdAt,
+          updatedAt: currentSession.updatedAt,
+        });
+        const visibleHistory = view.getHistory({
+          maxMessages: this.maxMessages,
+          maxTokens: this.replayTokenBudget(modelSelection),
+          includeTimestamps: true,
+          targetProvider: modelSelection?.provider,
+        });
+        const retainedHistory = protectedTailCount > 0
+          ? visibleHistory.slice(0, Math.max(0, visibleHistory.length - protectedTailCount))
+          : visibleHistory;
+        const hasSummaryOverride = Object.prototype.hasOwnProperty.call(options, "summaryOverride");
+        const summary = hasSummaryOverride
+          ? options.summaryOverride ?? null
+          : this.sessionSummaryText(currentSession);
+        const rebuilt = buildMessages(retainedHistory, summary, currentSession);
+        const systemMessages = rebuilt.filter((message) => message.role === "system");
+        return [
+          ...systemMessages,
+          ...retainedHistory,
+          ...currentTurnMessages.map((message) => ({ ...message })),
+        ];
+      },
+    };
+  }
+
+  private async compactBeforeFollowupModelRequest(
+    session: Session,
+    consolidator: Consolidator,
+    descriptor: MidTurnContextDescriptor,
+    request: FollowupModelRequestContext,
+    onCompactionEvent: TokenCompactionEventCallback | null,
+  ): Promise<FollowupModelContextUpdate> {
+    if (request.inputTokenBudget == null || request.inputTokenBudget <= 0) return null;
+    try {
+      const result = await consolidator.maybeConsolidateByTokens(session, {
+        replayMaxMessages: this.maxMessages,
+        inputTokenBudget: request.inputTokenBudget,
+        maxMessageEndExclusive: descriptor.protectedSessionMessageStart,
+        estimateProjectionTokens: (candidateSession, projection) => {
+          const messages = descriptor.rebuildProjection(
+            candidateSession,
+            request.currentTurnMessages,
+            projection,
+          );
+          return [request.estimatePromptTokens(messages), "runner-live"];
+        },
+        ...(onCompactionEvent
+          ? {
+              notifyOnLockWait: true,
+              onCompactionEvent,
+            }
+          : {}),
+      });
+      if (!result.changed) return null;
+      const currentSession = this.sessions.get(session.key) ?? session;
+      try {
+        return {
+          messages: descriptor.rebuildProjection(
+            currentSession,
+            request.currentTurnMessages,
+          ),
+        };
+      } catch {
+        try {
+          await onCompactionEvent?.({
+            kind: "token",
+            status: "error",
+            replayMaxMessages: this.maxMessages,
+            changed: true,
+          });
+        } catch {
+          // UI notification is best-effort and must not affect the active turn.
+        }
+        return null;
+      }
+    } catch {
+      return null;
+    }
+  }
+
   async dispatchCommandInline(msg: InboundMessage, key: string, raw: string, dispatchFn: (ctx: CommandContext) => Promise<OutboundMessage | null> | OutboundMessage | null): Promise<void> {
     const result = await dispatchFn(new CommandContext({ msg, session: null, key, raw, loop: this }));
     if (!result) return;
@@ -3265,9 +3454,13 @@ export class AgentLoop {
       boundary = null,
       tools = null,
       sessionWorkspace = this.workspace,
+      hostProjectId = null,
       modelSelection = null,
       internalTurnContext = null,
       onMaxFinalizationStarting = null,
+      midTurnContext = null,
+      consolidator = null,
+      onTokenCompactionEvent = null,
     }: {
       onProgress?: any;
       onStream?: any;
@@ -3285,9 +3478,13 @@ export class AgentLoop {
       boundary?: TurnCancellationBoundary | null;
       tools?: ToolRegistryInstance | null;
       sessionWorkspace?: string;
+      hostProjectId?: string | null;
       modelSelection?: ResolvedModelSelection | null;
       internalTurnContext?: AgentInternalTurnContext | null;
       onMaxFinalizationStarting?: (() => void) | null;
+      midTurnContext?: MidTurnContextDescriptor | null;
+      consolidator?: Consolidator | null;
+      onTokenCompactionEvent?: TokenCompactionEventCallback | null;
     } = {},
   ): Promise<AgentLoopResult> {
     if (!modelSelection) this.refreshProviderSnapshot();
@@ -3336,6 +3533,7 @@ export class AgentLoop {
         toolResultMaxCharsByName: SESSION_TOOL_RESULT_MAX_CHARS_BY_NAME,
         workspace: sessionWorkspace,
         sessionKey: activeSessionKey,
+        hostProjectId,
         contextWindowTokens: activeContextWindowTokens,
         contextBlockLimit: this.contextBlockLimit,
         providerRetryMode: this.providerRetryMode,
@@ -3355,6 +3553,16 @@ export class AgentLoop {
         internalTurnContext,
         actualModelContext: modelSelection ? persistedModelSelection(modelSelection) : null,
         onMaxFinalizationStarting,
+        currentTurnMessageStartIndex: midTurnContext?.transcriptStartIndex ?? null,
+        beforeFollowupModelRequest: midTurnContext && session && consolidator
+          ? (request) => this.compactBeforeFollowupModelRequest(
+              session,
+              consolidator,
+              midTurnContext,
+              request,
+              onTokenCompactionEvent,
+            )
+          : null,
       }),
     );
     const rawUsage = result.usage ?? result.response?.usage;
@@ -3672,16 +3880,23 @@ export class AgentLoop {
     if (revalidated.cwd !== sessionWorkspace || revalidated.projectId !== ctx.sessionProjectId) {
       throw new SessionWorkspaceError("workspace_conflict");
     }
+    await this.lifecycleHook().beforeBuildSystemPrompt(new AgentHookContext({
+      session: ctx.session,
+      sessionKey: ctx.sessionKey,
+      reason: "system_prompt_build",
+      spec: { hostProjectId: ctx.sessionProjectId, workspace: sessionWorkspace },
+      metadata: { lifecycle: "system_prompt" },
+    }));
     const compactionOptions: {
       replayMaxMessages: number | null;
       notifyOnLockWait?: boolean;
-      onCompactionEvent?: (event: { status: TokenCompactionStatus }) => Promise<void>;
+      onCompactionEvent?: TokenCompactionEventCallback;
     } = {
       replayMaxMessages: this.maxMessages,
     };
     if (ctx.msg.channel === "websocket" || ctx.mirrorTurn) {
       compactionOptions.notifyOnLockWait = true;
-      compactionOptions.onCompactionEvent = async (event) => {
+      ctx.onTokenCompactionEvent = async (event) => {
         const text = this.contextCompactionLabel(ctx, event.status);
         if (ctx.mirrorTurn) {
           if (ctx.boundary?.shouldEmitLive() !== false) {
@@ -3695,6 +3910,7 @@ export class AgentLoop {
           await this.publishWebuiContextCompaction(ctx, event.status);
         }
       };
+      compactionOptions.onCompactionEvent = ctx.onTokenCompactionEvent;
     }
     await (ctx.consolidator ?? this.consolidator).maybeConsolidateByTokens(
       ctx.session!,
@@ -3741,6 +3957,34 @@ export class AgentLoop {
       ctx.history,
       ctx.pendingSummary,
       sessionWorkspace,
+    );
+    ctx.midTurnContext = this.createMidTurnContextDescriptor(
+      ctx.session!,
+      ctx.initialMessages,
+      ctx.userPersistedEarly ? 1 : 0,
+      ctx.modelSelection,
+      (history, summary, currentSession) => this.context.buildMessages({
+        history,
+        currentMessage: imageGenerationPrompt(ctx.msg.content, ctx.msg.metadata),
+        media: ctx.msg.media.length ? ctx.msg.media : null,
+        channel: ctx.msg.channel,
+        chatId: this.runtimeChatId(ctx.msg),
+        senderId: ctx.msg.senderId,
+        sessionSummary: summary,
+        sessionMetadata: currentSession.metadata,
+        responseLanguage: ctx.msg.metadata?.[WEBUI_LANGUAGE_METADATA_KEY]
+          ?? currentSession.metadata?.[WEBUI_LANGUAGE_METADATA_KEY]
+          ?? null,
+        sessionKey: currentSession.key,
+        unifiedSession: this.unifiedSession,
+        currentRuntimeLines: [
+          ...mcpRuntimeLines(ctx.msg, {
+            availableServerNames: new Set(Object.keys(this.mcpServers ?? {})),
+          }),
+        ],
+        hook: this.lifecycleHook(),
+        sessionWorkspace,
+      }),
     );
     ctx.onProgress ??= await this.buildBusProgressCallback(ctx);
     if (ctx.mirrorTurn && this.guiTranscriptMirror) {
@@ -3818,6 +4062,7 @@ export class AgentLoop {
       boundary: ctx.boundary,
       tools: ctx.tools,
       sessionWorkspace: ctx.sessionWorkspace ?? this.workspace,
+      hostProjectId: ctx.sessionProjectId,
       modelSelection: ctx.modelSelection,
       internalTurnContext: ctx.msg.internal?.kind === "goal_continuation" && ctx.dagGoalContext
         ? {
@@ -3827,6 +4072,9 @@ export class AgentLoop {
           }
         : null,
       onMaxFinalizationStarting: settleSlot,
+      midTurnContext: ctx.midTurnContext,
+      consolidator: ctx.consolidator ?? this.consolidator,
+      onTokenCompactionEvent: ctx.onTokenCompactionEvent,
     });
     ctx.stopReason = stopReason;
     if (ctx.slot) ctx.slot.stopReason = stopReason;
@@ -3967,11 +4215,6 @@ export class AgentLoop {
       ctx.modelSelection,
       ctx.dagGoalContext,
     );
-    const followupCompaction = (ctx.consolidator ?? this.consolidator).maybeConsolidateByTokens(ctx.session!, {
-      replayMaxMessages: this.maxMessages,
-    });
-    if (ctx.sessionKey.startsWith("cli:")) await followupCompaction;
-    else this.scheduleBackground(followupCompaction);
     return "ok";
   }
 
@@ -4074,6 +4317,13 @@ export class AgentLoop {
       sessionBindingOverride ?? null,
     );
     const sessionWorkspace = sessionBinding.cwd;
+    await this.lifecycleHook().beforeBuildSystemPrompt(new AgentHookContext({
+      session,
+      sessionKey: key,
+      reason: "system_prompt_build",
+      spec: { hostProjectId: sessionBinding.projectId, workspace: sessionWorkspace },
+      metadata: { lifecycle: "system_prompt" },
+    }));
     if (this.restoreRuntimeCheckpoint(session)) this.sessions.save(session);
     if (this.restorePendingUserTurn(session)) this.sessions.save(session);
 
@@ -4096,7 +4346,8 @@ export class AgentLoop {
     );
 
     const isSubagent = msg.senderId === "subagent";
-    if (isSubagent && this.persistSubagentFollowup(session, msg)) this.sessions.save(session);
+    const subagentFollowupPersisted = isSubagent && this.persistSubagentFollowup(session, msg);
+    if (subagentFollowupPersisted) this.sessions.save(session);
     this.setToolContext(
       channel,
       chatId,
@@ -4136,6 +4387,36 @@ export class AgentLoop {
       hook: this.lifecycleHook(),
       sessionWorkspace,
     });
+    const midTurnContext = this.createMidTurnContextDescriptor(
+      session,
+      messages,
+      subagentFollowupPersisted ? 1 : 0,
+      modelSelection,
+      (visibleHistory, summary, currentSession) => this.context.buildMessages({
+        history: visibleHistory,
+        currentMessage: isSubagent ? "" : msg.content,
+        channel,
+        chatId,
+        currentRole,
+        senderId: msg.senderId,
+        sessionSummary: summary,
+        sessionMetadata: currentSession.metadata,
+        responseLanguage: msg.metadata?.[WEBUI_LANGUAGE_METADATA_KEY]
+          ?? currentSession.metadata?.[WEBUI_LANGUAGE_METADATA_KEY]
+          ?? null,
+        sessionKey: currentSession.key,
+        unifiedSession: this.unifiedSession,
+        currentRuntimeLines: isSubagent
+          ? []
+          : [
+              ...mcpRuntimeLines(msg, {
+                availableServerNames: new Set(Object.keys(this.mcpServers ?? {})),
+              }),
+            ],
+        hook: this.lifecycleHook(),
+        sessionWorkspace,
+      }),
+    );
 
     const started = Date.now();
     const [
@@ -4165,7 +4446,10 @@ export class AgentLoop {
       abortSignal,
       tools,
       sessionWorkspace,
+      hostProjectId: sessionBinding.projectId,
       modelSelection,
+      midTurnContext,
+      consolidator: scopedConsolidator,
     });
     if (abortSignal?.aborted || stopReason === "cancelled") {
       throw createTaskCancelledError();
@@ -4205,9 +4489,6 @@ export class AgentLoop {
       session.messages.length,
       modelSelection,
     );
-    this.scheduleBackground(scopedConsolidator.maybeConsolidateByTokens(session, {
-      replayMaxMessages: this.maxMessages,
-    }));
 
     const metadata: Record<string, any> = {};
     if (channel === "slack" && key.startsWith("slack:") && key.split(":").length >= 3) {
@@ -4431,6 +4712,7 @@ export class AgentLoop {
       this.lastUsageBySession.delete(sessionKey);
       await prepare();
       await this.goalRuntime.drainSessionDeletion(sessionKey);
+      void this.memmyMemoryIntegration.closeSession?.(sessionKey, "deleted").catch(() => undefined);
       const result = await this.withSessionTurnBarrier(sessionKey, operation);
       this.scheduledGoalSessions.delete(sessionKey);
       this.lastUsageBySession.delete(sessionKey);
@@ -4944,6 +5226,8 @@ export class AgentLoop {
         continue;
       }
       const msg = this.normalizeSharedInboundMessage(inbound);
+      const canReloadMcp = this.activeTasks.size === 0 && this.pendingQueues.size === 0 && this.turnSlots.size === 0;
+      if (await handleRuntimeControl(this, msg, this.tools, canReloadMcp)) continue;
       const raw = msg.content.trim();
       const effectiveKey = this.effectiveSessionKey(msg);
       const deletionQueue = this.sessionDeletionQueues.get(effectiveKey);
@@ -4982,6 +5266,18 @@ export class AgentLoop {
       ) {
         await this.dispatchCommandInline(msg, effectiveKey, raw, (ctx) => this.commands.dispatch(ctx));
         continue;
+      }
+      const shouldTryEarlyTuiSteer = msg.turnAdmission === "steer"
+        && sharedTurnSource(msg)?.kind === "tui"
+        && !msg.content.trimStart().startsWith("/");
+      let didTryDirectSteer = false;
+      if (shouldTryEarlyTuiSteer) {
+        didTryDirectSteer = true;
+        const steeredTurnId = await this.tryAdmitDirectSteer(effectiveKey, msg);
+        if (steeredTurnId) {
+          await this.publishWebuiMessageSteered(msg, steeredTurnId);
+          continue;
+        }
       }
       const goal = this.goalRuntime.get(effectiveKey);
       const shouldPersistGoalInbox = !msg.internal
@@ -5038,34 +5334,9 @@ export class AgentLoop {
         await this.dispatchCommandInline(msg, effectiveKey, raw, (ctx) => this.commands.dispatch(ctx));
         continue;
       }
-      if (msg.turnAdmission === "steer") {
-        let steeredTurnId: string | null = null;
+      if (msg.turnAdmission === "steer" && !didTryDirectSteer) {
         const requestedSource = sharedTurnSource(msg);
-        await this.queueMutationLockFor(effectiveKey).runExclusive(async () => {
-          const currentSlots = this.turnSlots.get(effectiveKey) ?? [];
-          const activeSlot = currentSlots.find((slot) => (
-            slot.state === "running"
-            && slot.acceptingSteer
-            && slot.route === route
-            && (
-              requestedSource?.kind === "tui"
-                ? slot.turnId === msg.expectedTurnId
-                  && sharedTurnSource(slot.root)?.kind === "tui"
-                : true
-            )
-          ));
-          if (!activeSlot) return;
-          const steer = this.cloneInboundMessage(
-            msg,
-            requestedSource?.kind === "tui" ? { turnId: activeSlot.turnId } : {},
-          );
-          try {
-            activeSlot.pendingSteer.put(steer);
-            steeredTurnId = activeSlot.turnId;
-          } catch {
-            // A closing active Slot safely falls back to a queued Turn.
-          }
-        });
+        const steeredTurnId = await this.tryAdmitDirectSteer(effectiveKey, msg);
         if (steeredTurnId) {
           if (requestedSource?.kind === "tui") {
             await this.publishWebuiMessageSteered(msg, steeredTurnId);
@@ -5185,25 +5456,26 @@ export class AgentLoop {
       abortSignal?: AbortSignal | null;
     } = {},
   ): Promise<OutboundMessage | null> {
-    await this.initializeRuntimeTools();
+    await reloadLock(this);
     const key = sessionKey.startsWith("cli:")
       ? sessionKey
       : this.unifiedSession
         ? UNIFIED_SESSION_KEY
         : sessionKey;
-    const msg = new InboundMessage({
-      channel,
-      chatId,
-      senderId: "user",
-      content,
-      media,
-      metadata,
-      sessionKey: key,
-    });
     const turnId = cryptoRandomId();
     const pendingMarker = new AsyncQueue<InboundMessage>();
     this.pendingQueues.set(key, pendingMarker);
     try {
+      await this.initializeRuntimeTools();
+      const msg = new InboundMessage({
+        channel,
+        chatId,
+        senderId: "user",
+        content,
+        media,
+        metadata,
+        sessionKey: key,
+      });
       return await this.lockFor(key).runExclusive(() => this.withTerminalTurn(
         key,
         channel,

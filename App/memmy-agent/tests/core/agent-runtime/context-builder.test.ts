@@ -191,6 +191,9 @@ describe("Bundled Tool Contract", () => {
     expect(content).toContain("A request to change external state is incomplete");
     expect(content).toContain("## File and Coding Workflows");
     expect(content).toContain("apply_patch");
+    expect(content).not.toContain("apply_patch dry_run=true");
+    expect(content).not.toContain("*** Begin Patch");
+    expect(content).not.toContain("*** Move to:");
     expect(content).toContain("Keep long-running services in the foreground");
     expect(content).toContain("Do not use `&`, `nohup`, `disown`, or daemon mode");
     expect(content).toContain("pass its permitted local path directly to `browser_navigate`");

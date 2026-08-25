@@ -118,7 +118,7 @@ describe("ReadFileTool", () => {
     expect(result[0].type).toBe("image_url");
     expect(result[0].image_url.url).toMatch(/^data:image\/png;base64,/);
     expect(result[0].meta.path).toBe(file);
-    expect(result[1]).toEqual({ type: "text", text: `(Image file: ${file})` });
+    expect(result).toHaveLength(1);
   });
 
   it("reports missing files", async () => {

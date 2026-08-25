@@ -252,6 +252,10 @@ describe("claude code skill target", () => {
       const url = new URL(request.url || "/", "http://127.0.0.1");
       const body = request.method === "POST" ? JSON.parse(await readRequestBody(request)) as Record<string, unknown> : {};
       requests.push({ path: url.pathname, body });
+      if (request.method === "GET" && url.pathname === "/api/v1/health") {
+        writeJsonResponse(response, 200, { features: {} });
+        return;
+      }
       if (url.pathname === "/api/v1/sessions/open") {
         writeJsonResponse(response, 200, { sessionId: "claude-memory-session", status: "open" });
         return;
@@ -310,29 +314,31 @@ describe("claude code skill target", () => {
       expect(stop.status).toBe(0);
       expect(JSON.parse(stop.stdout)).toEqual({ continue: true, suppressOutput: true });
       expect(requests.map((item) => item.path)).toEqual([
+        "/api/v1/health",
         "/api/v1/sessions/open",
         "/api/v1/turns/start",
+        "/api/v1/health",
         "/api/v1/sessions/open",
         "/api/v1/turns/claude-turn-1/complete"
       ]);
-      expect(requests[0]?.body).toMatchObject({
+      expect(requests[1]?.body).toMatchObject({
         sessionId: "claude_code-memory-claude-session-1",
         source: "claude_code",
         workspacePath: "/tmp/claude-project"
       });
-      expect(requests[1]?.body).toMatchObject({
+      expect(requests[2]?.body).toMatchObject({
         adapterId: "memmy-claude_code-hook",
         sessionId: "claude-memory-session",
         query: "继续修复 episode 切换问题"
       });
-      expect(requests[3]?.body).toMatchObject({
+      expect(requests[5]?.body).toMatchObject({
         adapterId: "memmy-claude_code-hook",
         sessionId: "claude-memory-session",
         query: "继续修复 episode 切换问题",
         answer: "修复已经完成",
         sourceMemoryIds: ["claude-memory-1"]
       });
-      expect(requests[3]?.body).not.toHaveProperty("episodeId");
+      expect(requests[5]?.body).not.toHaveProperty("episodeId");
     } finally {
       await close(server);
     }

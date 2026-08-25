@@ -1,5 +1,17 @@
 /** Memory runtime module. */
 import { z } from "zod";
+import {
+  L3WorldModelFeaturesSchema,
+  L3WorldModelFieldsSchema,
+  L3WorldModelRequestEnvelopeSchema
+} from "./memory-l3-world-model.js";
+import {
+  L3WorldModelProtocolVersionSchema,
+  L3WorldModelTransitionSchema,
+  WorkspaceIdentityFieldsSchema,
+  WorkspaceHostIdSchema,
+  WorkspaceUriSchema
+} from "./memory-workspace-identity.js";
 
 /** Schema for iso time. */
 export const IsoTimeSchema = z.string().datetime();
@@ -10,12 +22,14 @@ export const CursorSchema = z.string();
 export type Cursor = z.infer<typeof CursorSchema>;
 
 /** Schema for memory kind. */
-export const MemoryKindSchema = z.enum(["trace", "span", "policy", "world_model", "skill"]);
+export const MemoryKindSchema = z.enum(["user_memory", "trace", "span", "policy", "world_model", "skill"]);
 export type MemoryKind = z.infer<typeof MemoryKindSchema>;
 
 /** Schema for memory layer. */
 export const MemoryLayerSchema = z.enum(["L1", "L2", "L3", "Skill"]);
 export type MemoryLayer = z.infer<typeof MemoryLayerSchema>;
+export const RecallMemoryLayerSchema = z.enum(["UserMemory", "L1", "L2", "L3", "Skill"]);
+export type RecallMemoryLayer = z.infer<typeof RecallMemoryLayerSchema>;
 
 /** Schema for memory status. */
 export const MemoryStatusSchema = z.enum(["activated", "resolving", "archived", "deleted"]);
@@ -29,6 +43,7 @@ export type JobStatus = z.infer<typeof JobStatusSchema>;
 export const JobTypeSchema = z.enum([
   "episode_idle_close",
   "trace_summary",
+  "user_memory_embedding",
   "import_summary",
   "reflection",
   "embedding",
@@ -37,6 +52,8 @@ export const JobTypeSchema = z.enum([
   "l2_association",
   "l2_induction",
   "l3_abstraction",
+  "l3_world_model_update",
+  "project_environment_profile",
   "skill_crystallization",
   "skill_trial_resolve"
 ]);
@@ -49,7 +66,7 @@ export const InjectedContextSectionSchema = z.object({
   id: NonEmptyStringSchema,
   title: NonEmptyStringSchema,
   kind: MemoryKindSchema,
-  memoryLayer: MemoryLayerSchema,
+  memoryLayer: RecallMemoryLayerSchema,
   memoryIds: z.array(NonEmptyStringSchema),
   content: z.string(),
   tokenEstimate: z.number().int().nonnegative().optional()
@@ -67,16 +84,65 @@ export type InjectedContext = z.infer<typeof InjectedContextSchema>;
 export const RecallHitSchema = z.object({
   id: NonEmptyStringSchema,
   kind: MemoryKindSchema,
-  memoryLayer: MemoryLayerSchema,
+  memoryLayer: RecallMemoryLayerSchema,
   status: MemoryStatusSchema,
   title: z.string().optional(),
   snippet: z.string(),
   score: z.number(),
   tags: z.array(z.string()),
+  createdAt: IsoTimeSchema.optional(),
   updatedAt: IsoTimeSchema.optional(),
-  source: z.enum(["search", "episode", "rule", "skill"])
+  source: z.enum(["search", "episode", "rule", "skill"]),
+  sourceTurnId: z.string().optional(),
+  memberMemoryIds: z.array(NonEmptyStringSchema).optional(),
+  retrievalRoutes: z.array(z.enum(["user_memory", "l1", "agent_memory"])).optional(),
+  sourceAgentId: z.string().optional(),
+  sourceSkillId: z.string().optional(),
+  sourceSkillVersion: z.string().optional(),
+  readOnly: z.boolean().optional(),
+  members: z.array(z.object({
+    id: NonEmptyStringSchema,
+    kind: MemoryKindSchema,
+    memoryLayer: RecallMemoryLayerSchema,
+    status: z.union([MemoryStatusSchema, z.enum(["active", "archived", "deleted"])]),
+    content: z.string(),
+    createdAt: IsoTimeSchema,
+    updatedAt: IsoTimeSchema,
+    retrievalRoute: z.enum(["user_memory", "l1", "agent_memory"])
+  })).optional()
 });
 export type RecallHit = z.infer<typeof RecallHitSchema>;
+
+const MemoryCaptureDiagnosticsSchema = z.object({
+  status: z.enum(["pending", "completed"]),
+  decided_at: IsoTimeSchema.optional(),
+  l1: z.array(z.object({
+    memory_id: NonEmptyStringSchema,
+    written: z.boolean(),
+    policy_eligible: z.boolean()
+  })).optional(),
+  user_memory: z.object({
+    written: z.boolean(),
+    action: z.enum(["none", "created", "updated", "confirmed", "corrected"]),
+    memory_id: NonEmptyStringSchema.optional(),
+    target_memory_id: NonEmptyStringSchema.optional()
+  }).optional()
+});
+
+export const RecallEvidenceOutputSchema = z.object({
+  recallEventId: NonEmptyStringSchema,
+  queryId: NonEmptyStringSchema,
+  query: z.string(),
+  hits: z.array(RecallHitSchema),
+  diagnostics: z.object({
+    candidateMemoryIds: z.array(NonEmptyStringSchema),
+    injectedMemoryIds: z.array(NonEmptyStringSchema),
+    capture: MemoryCaptureDiagnosticsSchema.optional()
+  }).optional(),
+  createdAt: IsoTimeSchema,
+  serverTime: IsoTimeSchema
+});
+export type RecallEvidenceOutput = z.infer<typeof RecallEvidenceOutputSchema>;
 
 /** Schema for memory metrics. */
 export const MemoryMetricsSchema = z.object({
@@ -116,7 +182,7 @@ export type MemoryProcessingRecord = z.infer<typeof MemoryProcessingRecordSchema
 export const MemoryListItemSchema = z.object({
   id: NonEmptyStringSchema,
   kind: MemoryKindSchema,
-  memoryLayer: MemoryLayerSchema,
+  memoryLayer: RecallMemoryLayerSchema,
   status: MemoryStatusSchema,
   title: NonEmptyStringSchema,
   summary: z.string(),
@@ -129,6 +195,21 @@ export const MemoryListItemSchema = z.object({
   version: z.number().int().nonnegative()
 });
 export type MemoryListItem = z.infer<typeof MemoryListItemSchema>;
+
+export const WorldModelScopeSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("general") }).strict(),
+  z.object({
+    kind: z.literal("project"),
+    projectLabel: z.string().nullable(),
+    workspaceDisplayPath: z.string().nullable()
+  }).strict()
+]);
+export type WorldModelScope = z.infer<typeof WorldModelScopeSchema>;
+
+export const PanelMemoryListItemSchema = MemoryListItemSchema.extend({
+  worldModelScope: WorldModelScopeSchema.optional()
+});
+export type PanelMemoryListItem = z.infer<typeof PanelMemoryListItemSchema>;
 
 /** Definition for memory detail item. */
 export const MemoryDetailItemSchema = MemoryListItemSchema.extend({
@@ -235,6 +316,7 @@ export const MemoryHealthSnapshotSchema = z.object({
     memoryLayers: z.array(MemoryLayerSchema),
     supportsCli: z.boolean()
   }),
+  features: L3WorldModelFeaturesSchema.optional(),
   models: MemoryModelsStatusSchema,
   serverTime: IsoTimeSchema
 });
@@ -254,11 +336,39 @@ export const MemoryReloadConfigOutputSchema = z.object({
 });
 export type MemoryReloadConfigOutput = z.infer<typeof MemoryReloadConfigOutputSchema>;
 
-/** Definition for open session input. */
-export const OpenSessionInputSchema = RuntimeRequestFieldsSchema.extend({
+const LegacyOpenSessionInputSchema = RuntimeRequestFieldsSchema.extend({
   sessionId: NonEmptyStringSchema.optional(),
   workspacePath: z.string().optional()
+}).strict();
+
+const V2OpenSessionInputSchema = L3WorldModelRequestEnvelopeSchema.safeExtend({
+  sessionId: NonEmptyStringSchema.optional(),
+  l3WorldModelProtocolVersion: L3WorldModelProtocolVersionSchema,
+  l3WorldModelTransition: L3WorldModelTransitionSchema,
+  workspaceUri: WorkspaceUriSchema.optional(),
+  workspaceHostId: WorkspaceHostIdSchema.optional(),
+  meta: UnknownRecordSchema.optional()
+}).strict().superRefine((value, context) => {
+  const identity = WorkspaceIdentityFieldsSchema.safeParse({
+    workspaceUri: value.workspaceUri,
+    workspaceHostId: value.workspaceHostId
+  });
+  if (!identity.success) {
+    for (const issue of identity.error.issues) {
+      context.addIssue({ ...issue, path: issue.path });
+    }
+  }
+  if (!value.sessionId && (value.namespace.projectId || value.namespace.workspaceId)) {
+    context.addIssue({
+      code: "custom",
+      path: ["namespace", value.namespace.projectId ? "projectId" : "workspaceId"],
+      message: "new v2 sessions must derive project scope from workspace identity"
+    });
+  }
 });
+
+/** Definition for open session input. */
+export const OpenSessionInputSchema = z.union([V2OpenSessionInputSchema, LegacyOpenSessionInputSchema]);
 export type OpenSessionInput = z.infer<typeof OpenSessionInputSchema>;
 
 /** Schema for open session output. */
@@ -267,6 +377,7 @@ export const OpenSessionOutputSchema = z.object({
   status: z.literal("open"),
   episodeId: NonEmptyStringSchema.optional(),
   resumed: z.boolean(),
+  projectId: NonEmptyStringSchema.nullable().optional(),
   serverTime: IsoTimeSchema
 });
 export type OpenSessionOutput = z.infer<typeof OpenSessionOutputSchema>;
@@ -324,7 +435,11 @@ export const CompleteTurnInputSchema = RuntimeRequestFieldsSchema.extend({
   artifacts: z.array(z.unknown()).optional(),
   sourceMemoryIds: z.array(NonEmptyStringSchema).optional(),
   usage: z.record(z.string(), z.unknown()).optional(),
-  status: z.enum(["succeeded", "failed"]).optional()
+  status: z.enum(["succeeded", "failed"]).optional(),
+  userMemoryCorrection: z.object({
+    targetMemoryId: NonEmptyStringSchema,
+    revisedContent: NonEmptyStringSchema
+  }).optional()
 });
 export type CompleteTurnInput = z.infer<typeof CompleteTurnInputSchema>;
 
@@ -334,6 +449,8 @@ export const CompleteTurnOutputSchema = z.object({
   sessionId: NonEmptyStringSchema,
   episodeId: NonEmptyStringSchema,
   rawTurnId: NonEmptyStringSchema,
+  userMemoryId: z.string().optional(),
+  userMemoryIds: z.array(NonEmptyStringSchema).optional(),
   l1MemoryId: z.string(),
   l1MemoryIds: z.array(NonEmptyStringSchema),
   closedEpisodeIds: z.array(NonEmptyStringSchema),
@@ -388,7 +505,12 @@ export const AddMemoryInputSchema = RuntimeRequestFieldsSchema.extend({
   sessionId: z.string().optional(),
   turnId: z.string().optional(),
   createdAt: IsoTimeSchema.optional(),
-  deferProcessing: z.boolean().optional()
+  deferProcessing: z.boolean().optional(),
+  sourceAgentId: z.string().optional(),
+  sourceSkillId: z.string().optional(),
+  sourceSkillPath: z.string().optional(),
+  sourceSkillVersion: z.string().optional(),
+  sourceContentHash: z.string().optional()
 });
 export type AddMemoryInput = z.infer<typeof AddMemoryInputSchema>;
 
@@ -405,6 +527,18 @@ export const AddMemoryOutputSchema = z.object({
   serverTime: IsoTimeSchema
 });
 export type AddMemoryOutput = z.infer<typeof AddMemoryOutputSchema>;
+
+const LegacyWorldModelDetailSchema = z.object({
+  sourceMemoryIds: z.array(NonEmptyStringSchema),
+  confidence: z.number().optional(),
+  summary: z.string().optional()
+}).strict();
+
+const V2WorldModelDetailSchema = L3WorldModelFieldsSchema.safeExtend({
+  schemaVersion: z.literal(2),
+  sourceMemoryIds: z.array(NonEmptyStringSchema),
+  summary: z.string().optional()
+}).strict();
 
 /** Schema for get memory output. */
 export const GetMemoryOutputSchema = z.object({
@@ -425,11 +559,7 @@ export const GetMemoryOutputSchema = z.object({
       })
       .optional(),
     worldModel: z
-      .object({
-        sourceMemoryIds: z.array(NonEmptyStringSchema),
-        confidence: z.number().optional(),
-        summary: z.string().optional()
-      })
+      .union([V2WorldModelDetailSchema, LegacyWorldModelDetailSchema])
       .optional(),
     skill: z
       .object({
@@ -547,7 +677,7 @@ export type RetryMemoryProcessingOutput = z.infer<typeof RetryMemoryProcessingOu
 
 /** Schema for panel items input. */
 export const PanelItemsInputSchema = z.object({
-  layer: MemoryLayerSchema.optional(),
+  layer: RecallMemoryLayerSchema.optional(),
   status: MemoryStatusSchema.optional(),
   q: z.string().optional(),
   sourceAgent: z.string().trim().min(1).optional(),
@@ -606,6 +736,7 @@ export type PanelJobsInput = z.infer<typeof PanelJobsInputSchema>;
 export const PanelOverviewOutputSchema = z.object({
   counts: z.object({
     memories: z.number().int().nonnegative(),
+    userMemories: z.number().int().nonnegative().default(0),
     skills: z.number().int().nonnegative(),
     experiences: z.number().int().nonnegative(),
     worldModels: z.number().int().nonnegative()
@@ -660,7 +791,7 @@ export type PanelAnalysisOutput = z.infer<typeof PanelAnalysisOutputSchema>;
 
 /** Schema for panel items output. */
 export const PanelItemsOutputSchema = z.object({
-  items: z.array(MemoryListItemSchema),
+  items: z.array(PanelMemoryListItemSchema),
   page: z.number().int().positive(),
   pageSize: z.literal(20),
   total: z.number().int().nonnegative(),

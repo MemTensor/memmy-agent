@@ -1,11 +1,13 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { Config } from "../../../src/config/schema.js";
 import {
   AgentLoop,
   SessionWorkspaceError,
 } from "../../../src/core/agent-runtime/loop.js";
+import { AgentRunResult } from "../../../src/core/agent-runtime/runner.js";
 import { InboundMessage } from "../../../src/core/runtime-messages/events.js";
 import {
   readWebuiSessionBinding,
@@ -23,6 +25,7 @@ function tempRoot(prefix: string): string {
 
 function makeLoop(profileWorkspace: string, projectStore: ProjectStore | null = null): AgentLoop {
   return new AgentLoop({
+    config: new Config({ memmyMemory: { enabled: false } }),
     workspace: profileWorkspace,
     projectStore,
     provider: {
@@ -163,5 +166,50 @@ describe("AgentLoop Session workspace", () => {
     expect(identity).toContain(`Your workspace is at: ${fs.realpathSync(projectRoot)}`);
     expect(identity).not.toContain(`Your workspace is at: ${fs.realpathSync(profile)}`);
     expect(identity).not.toContain("Memmy profile workspace:");
+  });
+
+  it("passes the immutable project binding through ordinary and system root execution paths", async () => {
+    const profile = tempRoot("memmy-profile-");
+    const projectRoot = tempRoot("memmy-project-");
+    const projectCwd = fs.realpathSync(projectRoot);
+    const store = new ProjectStore({ filePath: path.join(profile, "projects.json") });
+    const project = store.add(projectRoot, "existing");
+    const loop = makeLoop(profile, store);
+    const captured: Array<{ hostProjectId: string | null; workspace: string | null }> = [];
+    loop.runner.run = vi.fn(async (spec: any) => {
+      captured.push({
+        hostProjectId: spec.hostProjectId ?? null,
+        workspace: spec.workspace ?? null,
+      });
+      return new AgentRunResult({
+        finalContent: "done",
+        messages: [
+          ...spec.initialMessages,
+          { role: "assistant", content: "done" },
+        ],
+        stopReason: "completed",
+      });
+    });
+    const binding = { projectId: project.id, cwd: projectCwd };
+
+    await loop.processMessage(new InboundMessage({
+      channel: "websocket",
+      chatId: "ordinary-root",
+      senderId: "user",
+      content: "ordinary",
+      metadata: { webui: true },
+    }), undefined, { sessionBindingOverride: binding });
+    await loop.processSystemMessage(new InboundMessage({
+      channel: "websocket",
+      chatId: "websocket:system-root",
+      senderId: "system",
+      content: "system",
+      metadata: { webui: true },
+    }), "websocket:system-root", { sessionBindingOverride: binding });
+
+    expect(captured).toEqual([
+      { hostProjectId: project.id, workspace: projectCwd },
+      { hostProjectId: project.id, workspace: projectCwd },
+    ]);
   });
 });

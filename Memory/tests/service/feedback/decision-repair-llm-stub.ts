@@ -27,7 +27,7 @@ export function createDecisionRepairEvolutionLlm(): LlmClient {
           reason: "explicit positive feedback confirms successful completion"
         } as unknown as T;
       }
-      if (options.operation === "l2.induction.v3") {
+      if (options.operation === "l2.induction.v4") {
         return {
           title: "Use focused sqlite repair checks",
           trigger: "sqlite migration repair requires deterministic verification",

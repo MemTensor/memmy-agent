@@ -4,14 +4,15 @@ import { resolve } from "node:path";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { AppProviders } from "../../app/providers.js";
+import type { UpdateCoordinatorValue } from "../../app/update-coordinator.js";
 import type { MemmyAgentProject } from "../../api/memmy-agent-client.js";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
-import { enUSMessages, zhCNMessages, type MessageKey } from "../../i18n/messages.js";
+import { enUSMessages, formatMessage, zhCNMessages, type MessageKey, type MessageValues } from "../../i18n/messages.js";
 import { appActions } from "../../state/app-actions.js";
 import { appReducer, createInitialAppState } from "../../state/app-reducer.js";
 import type { AgentTaskView } from "../../state/agent-chat-slice.js";
 import { mockBootstrap } from "./fixtures/bootstrap.js";
-import { AppFrame, TaskArchiveInlineAction, TaskRow, countProjectTasksToArchive, deriveSidebarPlacement, deriveVisibleSidebarPlacement, groupAgentTasks, groupTasksByTime, resolveSidebarAccountSummary, resolveSidebarContextMenuPlacement, resolveSidebarMenuOverlayStyle, resolveTaskAncestorGroupKeys, shouldCreateNewAgentDraft, truncateAccountDisplayText } from "../app-frame.js";
+import { AppFrame, TaskArchiveInlineAction, TaskRow, countProjectTasksToArchive, deriveSidebarPlacement, deriveVisibleSidebarPlacement, groupAgentTasks, groupTasksByTime, resolveSidebarAccountSummary, resolveSidebarContextMenuPlacement, resolveSidebarMenuOverlayStyle, resolveSidebarUpdateAction, resolveTaskAncestorGroupKeys, shouldCreateNewAgentDraft, truncateAccountDisplayText } from "../app-frame.js";
 
 describe("AppFrame", () => {
   it("使用原型 MainLayout 的侧栏图标与导航文案", () => {
@@ -313,7 +314,7 @@ describe("AppFrame", () => {
     expect(overlayStyle).toEqual({
       right: 324,
       top: 428,
-      zIndex: 9999
+      zIndex: 10010
     });
   });
 
@@ -420,6 +421,7 @@ describe("AppFrame", () => {
     expect(shouldCreateNewAgentDraft(newAgentDraftState({ blankDraftActive: true }))).toBe(false);
     expect(shouldCreateNewAgentDraft(newAgentDraftState({ composerDraftsByScope: { "draft-3": "未发送" } }))).toBe(false);
     expect(shouldCreateNewAgentDraft(newAgentDraftState({ composerPendingAttachmentsByScope: { "draft-3": [{} as never] } }))).toBe(false);
+    expect(shouldCreateNewAgentDraft(newAgentDraftState({ composerContextReferencesByScope: { "draft-3": [{ kind: "path", id: "/docs", label: "docs/" }] } }))).toBe(false);
     expect(source).toContain("function openNewAgent(target?: WebuiSessionTarget)");
     expect(source).toContain("clearFocusedAgentTarget(");
     expect(source).toContain("if (shouldCreateNewAgentDraft(state.agent))");
@@ -528,6 +530,42 @@ describe("AppFrame", () => {
     expect(source).not.toContain('className={`app-frame-profile-settings shrink-0 inline-flex items-center justify-center transition-colors cursor-pointer');
   });
 
+  it("resolves account footer update states for the inline update button", () => {
+    const t = zhTestTranslate;
+
+    expect(resolveSidebarUpdateAction(null, t)).toBeNull();
+    expect(resolveSidebarUpdateAction(updateViewModel({ phase: "idle" }), t)).toBeNull();
+    expect(resolveSidebarUpdateAction(updateViewModel({ phase: "available" }), t)).toMatchObject({
+      kind: "available",
+      label: "更新",
+      disabled: false
+    });
+    expect(resolveSidebarUpdateAction(updateViewModel({
+      phase: "downloading",
+      downloadProgress: {
+        downloadUrl: "https://updates.example.com/Memmy.dmg",
+        filePath: "/tmp/Memmy.dmg",
+        transferredBytes: 12,
+        totalBytes: 100,
+        percent: 12.3
+      }
+    }), t)).toMatchObject({
+      kind: "downloading",
+      label: "12%",
+      disabled: true
+    });
+    expect(resolveSidebarUpdateAction(updateViewModel({ phase: "installing" }), t)).toMatchObject({
+      kind: "installing",
+      label: "正在安装",
+      disabled: true
+    });
+    expect(resolveSidebarUpdateAction(updateViewModel({ phase: "prepared" }), t)).toMatchObject({
+      kind: "prepared",
+      label: "重启",
+      disabled: false
+    });
+  });
+
   it("settingsNav replaces the main sidebar with settings section links", () => {
     const html = renderToString(
       <AppProviders>
@@ -566,6 +604,7 @@ describe("AppFrame", () => {
   it("keeps sidebar account settings icon pinned to the footer right edge", () => {
     const source = readFileSync(resolve(__dirname, "..", "app-frame.tsx"), "utf8");
     const styles = readFileSync(resolve(__dirname, "..", "..", "styles.css"), "utf8");
+    const tokens = readFileSync(resolve(__dirname, "..", "..", "theme", "tokens.css"), "utf8");
     const profileTextRule = styles.match(/\.app-frame-profile-text\s*\{[^}]*\}/)?.[0] ?? "";
 
     expect(source).toContain('className="flex w-full items-center gap-2 px-2 py-1.5"');
@@ -831,17 +870,20 @@ describe("AppFrame", () => {
   it("turns the sidebar into a dismissible overlay on compact viewports", () => {
     const source = readFileSync(resolve(__dirname, "..", "app-frame.tsx"), "utf8");
     const styles = readFileSync(resolve(__dirname, "..", "..", "styles.css"), "utf8");
+    const tokens = readFileSync(resolve(__dirname, "..", "..", "theme", "tokens.css"), "utf8");
 
     expect(source).toContain('const COMPACT_APP_FRAME_QUERY = "(max-width: 720px)";');
     expect(source).toContain("window.matchMedia(COMPACT_APP_FRAME_QUERY).matches");
     expect(source).toContain("if (matches) setCompactSidebarOpen(false);");
     expect(source).toContain("const sidebarHidden = compactViewport ? !compactSidebarOpen : desktopSidebarHidden;");
     expect(source).toContain("closeCompactSidebar();");
+    expect(source).toContain("const sidebarMenuOverlayZIndex = 10010;");
     expect(source).toContain('className="app-frame-sidebar-backdrop"');
     expect(styles).toContain("@media (max-width: 720px)");
     expect(styles).toContain(".sidebar-shell .app-frame-sidebar");
     expect(styles).toContain("width: min(280px, calc(100vw - 48px));");
     expect(styles).toContain(".sidebar-shell > .sidebar-resize-handle");
+    expect(tokens).toContain("--z-modal: 10020;");
   });
 
   it("renders archive as an inline confirmation instead of a modal-style action", () => {
@@ -1191,6 +1233,23 @@ function sidebarLabels() {
   };
 }
 
+function zhTestTranslate(key: MessageKey, values?: MessageValues): string {
+  return formatMessage(zhCNMessages[key], values);
+}
+
+function updateViewModel(overrides: Partial<UpdateCoordinatorValue> = {}): UpdateCoordinatorValue {
+  return {
+    appVersion: "1.0.6",
+    phase: "idle",
+    preparedUpdatePath: null,
+    downloadProgress: null,
+    feedback: null,
+    requestInlineAction: async () => undefined,
+    requestPrimaryAction: async () => undefined,
+    ...overrides
+  };
+}
+
 function task(chatId: string, overrides: Partial<ReturnType<typeof baseTask>> = {}) {
   return { ...baseTask(chatId), ...overrides };
 }
@@ -1232,6 +1291,7 @@ function newAgentDraftState(overrides: Partial<NewAgentDraftTestState> = {}): Ne
     newChatRequestId: 3,
     composerDraftsByScope: {},
     composerPendingAttachmentsByScope: {},
+    composerContextReferencesByScope: {},
     ...overrides
   };
 }

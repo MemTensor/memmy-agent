@@ -81,6 +81,47 @@ afterEach(() => {
 });
 
 describe("webui settings api current catalog boundary", () => {
+  it("projects mapped token defaults for a BYOK preset missing both fields", () => {
+    const file = useConfigFile({
+      ...configuredCatalog(),
+      agents: { defaults: { modelPreset: "known" } },
+      modelPresets: {
+        ...configuredCatalog().modelPresets,
+        known: {
+          provider: "openai",
+          endpoint: "chat",
+          model: "gpt-5.6",
+          source: "byok",
+          capabilities: ["agent"],
+        },
+      },
+      modelAssignments: {
+        ...configuredCatalog().modelAssignments,
+        byok: {
+          ...configuredCatalog().modelAssignments.byok,
+          agent: { candidates: ["known"], default: "known" },
+        },
+      },
+    });
+    const raw = YAML.parse(fs.readFileSync(file, "utf8")) as any;
+    delete raw.modelPresets.known.maxTokens;
+    delete raw.modelPresets.known.contextWindowTokens;
+    fs.writeFileSync(file, YAML.stringify(raw), "utf8");
+
+    const payload = settingsPayload();
+    const known = payload.model_presets.find((preset: any) => preset.name === "known");
+
+    expect(payload.agent).toMatchObject({
+      model_preset: "known",
+      max_tokens: 128_000,
+      context_window_tokens: 1_050_000,
+    });
+    expect(known).toMatchObject({
+      max_tokens: 128_000,
+      context_window_tokens: 1_050_000,
+    });
+  });
+
   it("creates a UUID preset without a label and assigns it to BYOK agent", () => {
     const file = useConfigFile(configuredCatalog());
     const payload = createModelConfiguration({

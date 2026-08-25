@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   extractManagedAgentHistory,
+  resolveManagedAgentHistoryPath,
   selectIncrementalManagedMessages
 } from "../managed-agent-history.js";
 
@@ -18,6 +19,25 @@ afterEach(() => {
 });
 
 describe("managed Agent automatic history extraction", () => {
+  it("maps a WSL Linux path into the owning distribution's Windows share", () => {
+    expect(resolveManagedAgentHistoryPath(
+      "/home/hackerlin/.hermes/state.db",
+      "UbuntuCustom",
+      "win32"
+    )).toBe("\\\\wsl.localhost\\UbuntuCustom\\home\\hackerlin\\.hermes\\state.db");
+
+    expect(() => resolveManagedAgentHistoryPath(
+      "/home/hackerlin/.hermes/state.db",
+      "../UbuntuCustom",
+      "win32"
+    )).toThrow("distribution name is invalid");
+    expect(() => resolveManagedAgentHistoryPath(
+      "home/hackerlin/.hermes/state.db",
+      "UbuntuCustom",
+      "win32"
+    )).toThrow("absolute Linux path");
+  });
+
   it("reuses a JSONL recipe and keeps only complete turns after the initial boundary", () => {
     tempDir = mkdtempSync(join(tmpdir(), "memmy-managed-jsonl-"));
     const historyPath = join(tempDir, "history.jsonl");

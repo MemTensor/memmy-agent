@@ -83,6 +83,25 @@ describe("agent source contracts", () => {
       format: "jsonl",
       timestampFormat: "auto"
     });
+
+    expect(ManagedAgentSyncRecipeSchema.parse({
+      version: 1,
+      format: "sqlite",
+      path: "/home/test/.agent/history.db",
+      wslDistro: "UbuntuCustom",
+      query: "SELECT id, conversation_id, role, content, created_at FROM messages",
+      fields: {
+        messageId: "id",
+        conversationId: "conversation_id",
+        role: "role",
+        content: "content",
+        createdAt: "created_at"
+      },
+      timestampFormat: "auto"
+    })).toMatchObject({
+      path: "/home/test/.agent/history.db",
+      wslDistro: "UbuntuCustom"
+    });
   });
 
   it("includes agent source scan progress and completion in the SSE union", () => {

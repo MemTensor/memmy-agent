@@ -1,7 +1,11 @@
 import crypto from "node:crypto";
 import path from "node:path";
-import { FallbackProvider } from "../../providers/fallback-provider.js";
 import { LLMProvider, LLMResponse, ToolCallRequest } from "../../providers/base.js";
+import {
+  coversInputModalities,
+  getModelInputModalities,
+  requiredInputModalities,
+} from "../../providers/model-input-capabilities.js";
 import type { ActualModelContext } from "@memmy/local-api-contracts";
 import { CONTEXT_SAFETY_BUFFER_TOKENS } from "../../token-budget.js";
 import { ToolRegistry } from "./tools/registry.js";
@@ -83,6 +87,29 @@ type PrepareMessagesOptions = {
   reservedPromptTokens?: number;
 };
 
+export type FollowupModelRequestKind = "iteration" | "max_iterations_finalization";
+
+export type FollowupModelRequestContext = {
+  requestKind: FollowupModelRequestKind;
+  iteration: number;
+  transcriptMessages: readonly Record<string, any>[];
+  currentTurnMessages: readonly Record<string, any>[];
+  modelMessages: readonly Record<string, any>[];
+  toolsForRequest: Record<string, any>[] | null;
+  reservedPromptTokens: number;
+  inputTokenBudget: number | null;
+  estimatePromptTokens: (messages: Record<string, any>[]) => number;
+};
+
+export type FollowupModelContextUpdate = {
+  messages: Record<string, any>[];
+} | null;
+
+type ModelContextProjection = {
+  messages: Record<string, any>[];
+  transcriptLength: number;
+};
+
 type TurnImageRecord = {
   identity: string;
   label: string;
@@ -128,6 +155,7 @@ export class AgentRunSpec {
   maxIterationsFinalPrompt: string | null;
   workspace?: string | null;
   sessionKey?: string | null;
+  hostProjectId?: string | null;
   contextWindowTokens?: number | null;
   contextBlockLimit?: number | null;
   providerRetryMode: string;
@@ -143,6 +171,8 @@ export class AgentRunSpec {
   internalTurnContext?: AgentInternalTurnContext | null;
   actualModelContext?: ActualModelContext | null;
   onMaxFinalizationStarting?: (() => void) | null;
+  currentTurnMessageStartIndex?: number | null;
+  beforeFollowupModelRequest?: ((ctx: FollowupModelRequestContext) => Promise<FollowupModelContextUpdate>) | null;
 
   constructor(init: {
     messages?: Record<string, any>[];
@@ -164,6 +194,7 @@ export class AgentRunSpec {
     maxIterationsFinalPrompt?: string | null;
     workspace?: string | null;
     sessionKey?: string | null;
+    hostProjectId?: string | null;
     contextWindowTokens?: number | null;
     contextBlockLimit?: number | null;
     providerRetryMode?: string;
@@ -179,6 +210,8 @@ export class AgentRunSpec {
     internalTurnContext?: AgentInternalTurnContext | null;
     actualModelContext?: ActualModelContext | null;
     onMaxFinalizationStarting?: (() => void) | null;
+    currentTurnMessageStartIndex?: number | null;
+    beforeFollowupModelRequest?: ((ctx: FollowupModelRequestContext) => Promise<FollowupModelContextUpdate>) | null;
   } = {}) {
     this.messages = this.initialMessages = init.messages ?? init.initialMessages ?? [];
     this.provider = init.provider;
@@ -198,6 +231,7 @@ export class AgentRunSpec {
     this.maxIterationsFinalPrompt = init.maxIterationsFinalPrompt ?? null;
     this.workspace = init.workspace ?? null;
     this.sessionKey = init.sessionKey ?? null;
+    this.hostProjectId = init.hostProjectId ?? null;
     this.contextWindowTokens = init.contextWindowTokens ?? null;
     this.contextBlockLimit = init.contextBlockLimit ?? null;
     this.providerRetryMode = init.providerRetryMode ?? "standard";
@@ -213,6 +247,8 @@ export class AgentRunSpec {
     this.internalTurnContext = init.internalTurnContext ?? null;
     this.actualModelContext = init.actualModelContext ?? null;
     this.onMaxFinalizationStarting = init.onMaxFinalizationStarting ?? null;
+    this.currentTurnMessageStartIndex = init.currentTurnMessageStartIndex ?? null;
+    this.beforeFollowupModelRequest = init.beforeFollowupModelRequest ?? null;
   }
 }
 
@@ -531,7 +567,7 @@ export class AgentRunner {
 
   private canRunAccountImageTextFallback(
     spec: AgentRunSpec,
-    response: LLMResponse,
+    actualProvider: string | null | undefined,
   ): boolean {
     const provider = spec.provider ?? this.provider;
     if (
@@ -540,9 +576,9 @@ export class AgentRunner {
       || !provider.supportsAccountImageTextFallback()
     ) return false;
     const modelContext = spec.actualModelContext;
-    if (!modelContext) return !(provider instanceof FallbackProvider);
+    if (!modelContext) return false;
     if (modelContext.source !== "account" || modelContext.provider !== "memmy_account") return false;
-    return response.actualProvider == null || response.actualProvider === "memmy_account";
+    return actualProvider == null || actualProvider === "memmy_account";
   }
 
   private async requestAccountImageText(
@@ -613,6 +649,121 @@ export class AgentRunner {
       if (timer) clearTimeout(timer);
       parentSignal?.removeEventListener("abort", onAbort);
     }
+  }
+
+  private combinedResponseUsage(...responses: Array<LLMResponse | null | undefined>): Record<string, any> {
+    const usage: Record<string, any> = {};
+    for (const response of responses) this.accumulateUsage(usage, this.usageDict(response?.usage));
+    return usage;
+  }
+
+  private async requestModelWithImagePolicy(
+    spec: AgentRunSpec,
+    messages: Record<string, any>[],
+    hook: AgentHook,
+    context: AgentHookContext,
+    imageTextState: TurnImageTextState,
+    options: ModelRequestOptions = {},
+  ): Promise<LLMResponse> {
+    if (spec.abortSignal?.aborted) return abortedResponse();
+
+    const messagesForModel = this.prepareImageMessages(messages, imageTextState);
+    const model = spec.actualModelContext?.model ?? spec.model;
+    const required = requiredInputModalities(messagesForModel);
+    const supported = getModelInputModalities(model);
+    const missing = required.filter((modality) => !supported.includes(modality));
+    const canUseAccountFallback = missing.length === 1
+      && missing[0] === "image"
+      && this.canRunAccountImageTextFallback(spec, null);
+
+    let initialResponse: LLMResponse | null = null;
+    if (coversInputModalities(supported, required)) {
+      initialResponse = await this.requestModel(spec, messagesForModel, hook, context, options);
+      const canRecoverExplicitRejection = initialResponse.errorCategory === "image_input_unsupported"
+        && !context.streamedContent
+        && !context.streamedReasoning
+        && initialResponse.toolCalls.length === 0
+        && this.canRunAccountImageTextFallback(spec, initialResponse.actualProvider);
+      if (!canRecoverExplicitRejection) return initialResponse;
+    } else if (!canUseAccountFallback) {
+      return new LLMResponse({
+        content: "Current model does not support image input.",
+        finishReason: "error",
+        errorCategory: "image_input_unsupported",
+        errorShouldRetry: false,
+        actualProvider: spec.actualModelContext?.provider ?? null,
+        actualModel: model ?? null,
+      });
+    }
+
+    const pendingBatch = this.collectPendingImageBatch(messagesForModel, imageTextState);
+    if (!pendingBatch) {
+      return initialResponse ?? new LLMResponse({
+        content: "Current model does not support image input.",
+        finishReason: "error",
+        errorCategory: "image_input_unsupported",
+        errorShouldRetry: false,
+        actualProvider: spec.actualModelContext?.provider ?? null,
+        actualModel: model ?? null,
+      });
+    }
+
+    const mainActualProvider = initialResponse?.actualProvider
+      ?? spec.actualModelContext?.provider
+      ?? null;
+    const mainActualModel = initialResponse?.actualModel
+      ?? model
+      ?? null;
+    const imageResponse = await this.requestAccountImageText(spec, pendingBatch);
+    if (spec.abortSignal?.aborted || imageResponse.errorKind === "aborted") {
+      const response = abortedResponse();
+      response.usage = this.combinedResponseUsage(initialResponse, imageResponse);
+      return response;
+    }
+    if (
+      imageResponse.finishReason === "error"
+      || isBlankText(imageResponse.content)
+      || imageResponse.toolCalls.length > 0
+    ) {
+      const failureDetail = imageResponse.finishReason === "error"
+        ? imageResponse.content
+        : isBlankText(imageResponse.content)
+          ? "image2text returned an empty description"
+          : "image2text returned an unexpected tool call";
+      return new LLMResponse({
+        content: failureDetail || "Image analysis failed.",
+        finishReason: "error",
+        usage: this.combinedResponseUsage(initialResponse, imageResponse),
+        errorStatusCode: imageResponse.errorStatusCode,
+        errorKind: imageResponse.errorKind,
+        errorType: imageResponse.errorType,
+        errorCode: imageResponse.errorCode,
+        errorRetryAfterS: imageResponse.errorRetryAfterS,
+        errorShouldRetry: false,
+        actualProvider: mainActualProvider,
+        actualModel: mainActualModel,
+        failedProvider: "memmy_account",
+        failedModel: "image2text",
+        errorCategory: imageResponse.errorCategory === "quota_exhausted"
+          ? "quota_exhausted"
+          : "image_analysis_failed",
+      });
+    }
+
+    const batchId = imageTextState.nextBatchId;
+    imageTextState.nextBatchId += 1;
+    const description = AgentRunner.safeImageAnalysisDescription(imageResponse.content ?? "");
+    for (const record of pendingBatch.records) record.batchId = batchId;
+    imageTextState.batches.set(batchId, {
+      id: batchId,
+      identities: pendingBatch.records.map((record) => record.identity),
+      description,
+    });
+
+    const retryMessages = this.prepareImageMessages(messagesForModel, imageTextState);
+    const retryResponse = await this.requestModel(spec, retryMessages, hook, context, options);
+    retryResponse.usage = this.combinedResponseUsage(initialResponse, imageResponse, retryResponse);
+    return retryResponse;
   }
 
   private static terminalImageError(response: LLMResponse): boolean {
@@ -779,18 +930,18 @@ export class AgentRunner {
     }
   }
 
-  private async requestFinalizationRetry(spec: AgentRunSpec, messages: Record<string, any>[]): Promise<LLMResponse> {
-    const provider = spec.provider ?? this.provider;
-    if (!provider) throw new Error("AgentRunSpec.provider is required");
+  private async requestFinalizationRetry(
+    spec: AgentRunSpec,
+    messages: Record<string, any>[],
+    hook: AgentHook,
+    context: AgentHookContext,
+    imageTextState: TurnImageTextState,
+  ): Promise<LLMResponse> {
     const retryMessages = [...messages, buildFinalizationRetryMessage()];
-    const args = this.buildRequestArgs(spec, retryMessages, null);
-    if (spec.abortSignal) args.signal = spec.abortSignal;
-    try {
-      return await withAbort(this.callProvider(provider, args, false), spec.abortSignal);
-    } catch (error) {
-      if (isAbortError(error)) return abortedResponse();
-      throw error;
-    }
+    return this.requestModelWithImagePolicy(spec, retryMessages, hook, context, imageTextState, {
+      toolsOverride: null,
+      forceNonStreaming: true,
+    });
   }
 
   private usageDict(usage: Record<string, any> | null | undefined): Record<string, number> {
@@ -1136,6 +1287,98 @@ export class AgentRunner {
     return out;
   }
 
+  private inputTokenBudget(spec: AgentRunSpec): number | null {
+    if (!spec.contextWindowTokens) return null;
+    const generation = ((spec.provider ?? this.provider) as any)?.generation;
+    const providerMaxTokens = generation?.maxTokens ?? 4096;
+    const maxOutput = Number.isInteger(spec.maxTokens)
+      ? spec.maxTokens
+      : Number.isInteger(providerMaxTokens)
+        ? Number(providerMaxTokens)
+        : 4096;
+    const budget = spec.contextBlockLimit
+      ?? spec.contextWindowTokens - maxOutput - CONTEXT_SAFETY_BUFFER_TOKENS;
+    return Number.isFinite(budget) ? budget : null;
+  }
+
+  private prepareMessagesBeforeSnip(
+    spec: AgentRunSpec,
+    messages: Record<string, any>[],
+  ): Record<string, any>[] {
+    let prepared = AgentRunner.dropOrphanToolResults(messages);
+    prepared = AgentRunner.backfillMissingToolResults(prepared);
+    prepared = AgentRunner.microcompact(prepared);
+    return this.applyToolResultBudget(spec, prepared);
+  }
+
+  private estimateMessagesBeforeSnip(
+    spec: AgentRunSpec,
+    messages: Record<string, any>[],
+    options: PrepareMessagesOptions,
+  ): number {
+    const prepared = this.prepareMessagesBeforeSnip(spec, messages);
+    const estimateResult = estimatePromptTokensChain(
+      spec.provider ?? this.provider,
+      spec.model ?? null,
+      prepared,
+      options.toolsForRequest ?? [],
+    );
+    const estimate = Array.isArray(estimateResult) ? estimateResult[0] : estimateResult;
+    return Math.max(0, Number(estimate) + Math.max(0, options.reservedPromptTokens ?? 0));
+  }
+
+  private modelContextMessages(
+    transcriptMessages: Record<string, any>[],
+    projection: ModelContextProjection | null,
+  ): Record<string, any>[] {
+    if (!projection) return transcriptMessages;
+    return [
+      ...projection.messages,
+      ...transcriptMessages.slice(projection.transcriptLength),
+    ];
+  }
+
+  private async updateProjectionBeforeFollowup(
+    spec: AgentRunSpec,
+    transcriptMessages: Record<string, any>[],
+    projection: ModelContextProjection | null,
+    {
+      requestKind,
+      iteration,
+      toolsForRequest,
+      reservedPromptTokens,
+    }: {
+      requestKind: FollowupModelRequestKind;
+      iteration: number;
+      toolsForRequest: Record<string, any>[] | null;
+      reservedPromptTokens: number;
+    },
+  ): Promise<ModelContextProjection | null> {
+    if (!spec.beforeFollowupModelRequest || spec.currentTurnMessageStartIndex == null) return projection;
+    const modelMessages = this.modelContextMessages(transcriptMessages, projection);
+    const currentTurnStart = Math.max(
+      0,
+      Math.min(spec.currentTurnMessageStartIndex, transcriptMessages.length),
+    );
+    const options = { toolsForRequest, reservedPromptTokens };
+    const update = await spec.beforeFollowupModelRequest({
+      requestKind,
+      iteration,
+      transcriptMessages,
+      currentTurnMessages: transcriptMessages.slice(currentTurnStart),
+      modelMessages,
+      toolsForRequest,
+      reservedPromptTokens,
+      inputTokenBudget: this.inputTokenBudget(spec),
+      estimatePromptTokens: (messages) => this.estimateMessagesBeforeSnip(spec, messages, options),
+    });
+    if (!update) return projection;
+    return {
+      messages: update.messages.map((message) => ({ ...message })),
+      transcriptLength: transcriptMessages.length,
+    };
+  }
+
   snipHistory(
     spec: AgentRunSpec,
     messages: Record<string, any>[],
@@ -1145,15 +1388,8 @@ export class AgentRunner {
     },
   ): Record<string, any>[] {
     if (!messages.length || !spec.contextWindowTokens) return messages;
-    const generation = ((spec.provider ?? this.provider) as any)?.generation;
-    const providerMaxTokens = generation?.maxTokens ?? 4096;
-    const maxOutput = Number.isInteger(spec.maxTokens)
-      ? spec.maxTokens
-      : Number.isInteger(providerMaxTokens)
-        ? Number(providerMaxTokens)
-        : 4096;
-    const baseBudget = spec.contextBlockLimit
-      ?? spec.contextWindowTokens - maxOutput - CONTEXT_SAFETY_BUFFER_TOKENS;
+    const baseBudget = this.inputTokenBudget(spec);
+    if (baseBudget == null) return messages;
     const budget = baseBudget - Math.max(0, options.reservedPromptTokens ?? 0);
     if (budget <= 0) return messages;
     const estimateResult = estimatePromptTokensChain(
@@ -1206,10 +1442,7 @@ export class AgentRunner {
     options: PrepareMessagesOptions,
   ): Record<string, any>[] {
     try {
-      let prepared = AgentRunner.dropOrphanToolResults(messages);
-      prepared = AgentRunner.backfillMissingToolResults(prepared);
-      prepared = AgentRunner.microcompact(prepared);
-      prepared = this.applyToolResultBudget(spec, prepared);
+      let prepared = this.prepareMessagesBeforeSnip(spec, messages);
       prepared = this.snipHistory(spec, prepared, options);
       prepared = AgentRunner.dropOrphanToolResults(prepared);
       return AgentRunner.backfillMissingToolResults(prepared);
@@ -1270,28 +1503,55 @@ export class AgentRunner {
       images: new Map(),
       batches: new Map(),
     };
+    let modelContextProjection: ModelContextProjection | null = null;
 
     const runCtx = new AgentHookContext({ spec, messages });
     await hook.beforeRun(runCtx);
 
     for (let iteration = 0; iteration < spec.maxIterations; iteration += 1) {
-      let messagesForModel = messages;
       if (spec.abortSignal?.aborted) {
         finalContent = "Error: task cancelled";
         stopReason = "cancelled";
         error = finalContent;
         break;
       }
+      const toolsForRequest = spec.tools?.getDefinitions?.() ?? [];
+      if (iteration > 0) {
+        modelContextProjection = await this.updateProjectionBeforeFollowup(
+          spec,
+          messages,
+          modelContextProjection,
+          {
+            requestKind: "iteration",
+            iteration,
+            toolsForRequest,
+            reservedPromptTokens: 0,
+          },
+        );
+        if (spec.abortSignal?.aborted) {
+          finalContent = "Error: task cancelled";
+          stopReason = "cancelled";
+          error = finalContent;
+          break;
+        }
+      }
+      let messagesForModel = this.modelContextMessages(messages, modelContextProjection);
       messagesForModel = this.prepareMessagesForModel(spec, messagesForModel, {
-        toolsForRequest: spec.tools?.getDefinitions?.() ?? [],
+        toolsForRequest,
         reservedPromptTokens: 0,
       });
       messagesForModel = this.prepareImageMessages(messagesForModel, imageTextState);
 
       const context = new AgentHookContext({ spec, messages, iteration, usage });
       await hook.beforeIteration(context);
-      response = await this.requestModel(spec, messagesForModel, hook, context);
-      let iterationUsage = this.usageDict(response.usage);
+      response = await this.requestModelWithImagePolicy(
+        spec,
+        messagesForModel,
+        hook,
+        context,
+        imageTextState,
+      );
+      const iterationUsage = this.usageDict(response.usage);
       this.accumulateUsage(usage, iterationUsage);
       if (spec.abortSignal?.aborted || response.errorKind === "aborted") {
         finalContent = "Error: task cancelled";
@@ -1302,81 +1562,6 @@ export class AgentRunner {
         context.stopReason = stopReason;
         await hook.afterIteration(context);
         break;
-      }
-
-      if (
-        response.errorCategory === "image_input_unsupported"
-        && !context.streamedContent
-        && !context.streamedReasoning
-        && response.toolCalls.length === 0
-        && this.canRunAccountImageTextFallback(spec, response)
-      ) {
-        const pendingBatch = this.collectPendingImageBatch(messagesForModel, imageTextState);
-        if (pendingBatch) {
-          const mainActualProvider = response.actualProvider
-            ?? spec.actualModelContext?.provider
-            ?? null;
-          const mainActualModel = response.actualModel
-            ?? spec.actualModelContext?.model
-            ?? spec.model
-            ?? null;
-          const imageResponse = await this.requestAccountImageText(spec, pendingBatch);
-          const imageUsage = this.usageDict(imageResponse.usage);
-          this.accumulateUsage(usage, imageUsage);
-          iterationUsage = this.mergeUsage(iterationUsage, imageUsage);
-
-          if (spec.abortSignal?.aborted || imageResponse.errorKind === "aborted") {
-            response = abortedResponse();
-          } else if (
-            imageResponse.finishReason === "error"
-            || isBlankText(imageResponse.content)
-            || imageResponse.toolCalls.length > 0
-          ) {
-            const failureDetail = imageResponse.finishReason === "error"
-              ? imageResponse.content
-              : isBlankText(imageResponse.content)
-                ? "image2text returned an empty description"
-                : "image2text returned an unexpected tool call";
-            response = new LLMResponse({
-              content: failureDetail || "Image analysis failed.",
-              finishReason: "error",
-              usage: imageResponse.usage,
-              errorStatusCode: imageResponse.errorStatusCode,
-              errorKind: imageResponse.errorKind,
-              errorType: imageResponse.errorType,
-              errorCode: imageResponse.errorCode,
-              errorRetryAfterS: imageResponse.errorRetryAfterS,
-              errorShouldRetry: false,
-              actualProvider: mainActualProvider,
-              actualModel: mainActualModel,
-              failedProvider: "memmy_account",
-              failedModel: "image2text",
-              errorCategory: imageResponse.errorCategory === "quota_exhausted"
-                ? "quota_exhausted"
-                : "image_analysis_failed",
-            });
-          } else {
-            const batchId = imageTextState.nextBatchId;
-            imageTextState.nextBatchId += 1;
-            const description = AgentRunner.safeImageAnalysisDescription(imageResponse.content ?? "");
-            for (const record of pendingBatch.records) record.batchId = batchId;
-            imageTextState.batches.set(batchId, {
-              id: batchId,
-              identities: pendingBatch.records.map((record) => record.identity),
-              description,
-            });
-
-            messagesForModel = this.prepareMessagesForModel(spec, messages, {
-              toolsForRequest: spec.tools?.getDefinitions?.() ?? [],
-              reservedPromptTokens: 0,
-            });
-            messagesForModel = this.prepareImageMessages(messagesForModel, imageTextState);
-            response = await this.requestModel(spec, messagesForModel, hook, context);
-            const retryUsage = this.usageDict(response.usage);
-            this.accumulateUsage(usage, retryUsage);
-            iterationUsage = this.mergeUsage(iterationUsage, retryUsage);
-          }
-        }
       }
 
       (context as any).response = response;
@@ -1500,7 +1685,13 @@ export class AgentRunner {
         if (hook.wantsStreaming()) {
           await hook.onStreamEnd(context, { resuming: false });
         }
-        response = await this.requestFinalizationRetry(spec, messagesForModel);
+        response = await this.requestFinalizationRetry(
+          spec,
+          messagesForModel,
+          hook,
+          context,
+          imageTextState,
+        );
         const retryUsage = this.usageDict(response.usage);
         this.accumulateUsage(usage, retryUsage);
         context.usage = this.mergeUsage(iterationUsage, retryUsage);
@@ -1611,147 +1802,97 @@ export class AgentRunner {
         });
       if (spec.maxIterationsFinalPrompt) {
         spec.onMaxFinalizationStarting?.();
-        const preparedMessages = this.prepareMessagesForModel(spec, messages, {
-          toolsForRequest: null,
-          reservedPromptTokens: estimateMessageTokens({ role: "user", content: spec.maxIterationsFinalPrompt }),
-        }).map((message) => ({ ...message }));
-        AgentRunner.appendInjectedMessages(preparedMessages, [{
+        const reservedPromptTokens = estimateMessageTokens({
           role: "user",
           content: spec.maxIterationsFinalPrompt,
-        }]);
-        let requestMessages = this.prepareImageMessages(preparedMessages, imageTextState);
-        const context = new AgentHookContext({
-          spec,
-          messages,
-          iteration: spec.maxIterations,
-          usage,
         });
-        try {
-          response = await this.requestModel(spec, requestMessages, hook, context, {
-            toolsOverride: null,
-            forceNonStreaming: true,
+        if (!spec.abortSignal?.aborted) {
+          modelContextProjection = await this.updateProjectionBeforeFollowup(
+            spec,
+            messages,
+            modelContextProjection,
+            {
+              requestKind: "max_iterations_finalization",
+              iteration: spec.maxIterations,
+              toolsForRequest: null,
+              reservedPromptTokens,
+            },
+          );
+        }
+        if (spec.abortSignal?.aborted) {
+          finalContent = "Error: task cancelled";
+          stopReason = "cancelled";
+          error = finalContent;
+        } else {
+          const finalizationMessages = this.modelContextMessages(messages, modelContextProjection);
+          const preparedMessages = this.prepareMessagesForModel(spec, finalizationMessages, {
+            toolsForRequest: null,
+            reservedPromptTokens,
+          }).map((message) => ({ ...message }));
+          AgentRunner.appendInjectedMessages(preparedMessages, [{
+            role: "user",
+            content: spec.maxIterationsFinalPrompt,
+          }]);
+          const requestMessages = this.prepareImageMessages(preparedMessages, imageTextState);
+          const context = new AgentHookContext({
+            spec,
+            messages,
+            iteration: spec.maxIterations,
+            usage,
           });
-          const finalUsage = this.usageDict(response.usage);
-          this.accumulateUsage(usage, finalUsage);
-          let recoveredImageInput = false;
-          if (
-            response.errorCategory === "image_input_unsupported"
-            && response.toolCalls.length === 0
-            && this.canRunAccountImageTextFallback(spec, response)
-          ) {
-            const pendingBatch = this.collectPendingImageBatch(requestMessages, imageTextState);
-            if (pendingBatch) {
-              recoveredImageInput = true;
-              const mainActualProvider = response.actualProvider
-                ?? spec.actualModelContext?.provider
-                ?? null;
-              const mainActualModel = response.actualModel
-                ?? spec.actualModelContext?.model
-                ?? spec.model
-                ?? null;
-              const imageResponse = await this.requestAccountImageText(spec, pendingBatch);
-              this.accumulateUsage(usage, this.usageDict(imageResponse.usage));
-              if (spec.abortSignal?.aborted || imageResponse.errorKind === "aborted") {
-                response = abortedResponse();
-              } else if (
-                imageResponse.finishReason === "error"
-                || isBlankText(imageResponse.content)
-                || imageResponse.toolCalls.length > 0
-              ) {
-                const failureDetail = imageResponse.finishReason === "error"
-                  ? imageResponse.content
-                  : isBlankText(imageResponse.content)
-                    ? "image2text returned an empty description"
-                    : "image2text returned an unexpected tool call";
-                response = new LLMResponse({
-                  content: failureDetail || "Image analysis failed.",
-                  finishReason: "error",
-                  usage: imageResponse.usage,
-                  errorStatusCode: imageResponse.errorStatusCode,
-                  errorKind: imageResponse.errorKind,
-                  errorType: imageResponse.errorType,
-                  errorCode: imageResponse.errorCode,
-                  errorRetryAfterS: imageResponse.errorRetryAfterS,
-                  errorShouldRetry: false,
-                  actualProvider: mainActualProvider,
-                  actualModel: mainActualModel,
-                  failedProvider: "memmy_account",
-                  failedModel: "image2text",
-                  errorCategory: imageResponse.errorCategory === "quota_exhausted"
-                    ? "quota_exhausted"
-                    : "image_analysis_failed",
-                });
-              } else {
-                const batchId = imageTextState.nextBatchId;
-                imageTextState.nextBatchId += 1;
-                const description = AgentRunner.safeImageAnalysisDescription(imageResponse.content ?? "");
-                for (const record of pendingBatch.records) record.batchId = batchId;
-                imageTextState.batches.set(batchId, {
-                  id: batchId,
-                  identities: pendingBatch.records.map((record) => record.identity),
-                  description,
-                });
-                const retryMessages = this.prepareMessagesForModel(spec, messages, {
-                  toolsForRequest: null,
-                  reservedPromptTokens: estimateMessageTokens({
-                    role: "user",
-                    content: spec.maxIterationsFinalPrompt,
-                  }),
-                }).map((message) => ({ ...message }));
-                AgentRunner.appendInjectedMessages(retryMessages, [{
-                  role: "user",
-                  content: spec.maxIterationsFinalPrompt,
-                }]);
-                requestMessages = this.prepareImageMessages(retryMessages, imageTextState);
-                response = await this.requestModel(spec, requestMessages, hook, context, {
-                  toolsOverride: null,
-                  forceNonStreaming: true,
-                });
-                this.accumulateUsage(usage, this.usageDict(response.usage));
-              }
+          try {
+            response = await this.requestModelWithImagePolicy(
+              spec,
+              requestMessages,
+              hook,
+              context,
+              imageTextState,
+              {
+                toolsOverride: null,
+                forceNonStreaming: true,
+              },
+            );
+            const finalUsage = this.usageDict(response.usage);
+            this.accumulateUsage(usage, finalUsage);
+            if (spec.abortSignal?.aborted || response.errorKind === "aborted") {
+              finalContent = "Error: task cancelled";
+              stopReason = "cancelled";
+              error = finalContent;
+            } else if (response.finishReason === "error" && AgentRunner.terminalImageError(response)) {
+              const [, cleanedContent] = extractReasoning(
+                response.reasoningContent,
+                response.thinkingBlocks,
+                response.content,
+              );
+              response.content = cleanedContent;
+              finalContent = hook.finalizeContent(context, response.content)
+                || spec.errorMessage
+                || DEFAULT_ERROR_MESSAGE;
+              stopReason = "error";
+              error = finalContent;
+              AgentRunner.appendModelErrorPlaceholder(messages);
+            } else {
+              const [, cleanedContent] = extractReasoning(
+                response.reasoningContent,
+                response.thinkingBlocks,
+                response.content,
+              );
+              response.content = cleanedContent;
+              const clean = hook.finalizeContent(context, response.content);
+              finalContent = response.finishReason !== "error" && !isBlankText(clean)
+                ? clean
+                : fallback;
+              AgentRunner.appendFinalMessage(messages, finalContent);
             }
-          }
-          if (spec.abortSignal?.aborted || response.errorKind === "aborted") {
-            finalContent = "Error: task cancelled";
-            stopReason = "cancelled";
-            error = finalContent;
-          } else if (
-            response.finishReason === "error"
-            && (recoveredImageInput || AgentRunner.terminalImageError(response))
-          ) {
-            const [, cleanedContent] = extractReasoning(
-              response.reasoningContent,
-              response.thinkingBlocks,
-              response.content,
-            );
-            response.content = cleanedContent;
-            finalContent = hook.finalizeContent(context, response.content)
-              || spec.errorMessage
-              || DEFAULT_ERROR_MESSAGE;
-            stopReason = "error";
-            error = finalContent;
-            AgentRunner.appendModelErrorPlaceholder(messages);
-          } else {
-            const [, cleanedContent] = extractReasoning(
-              response.reasoningContent,
-              response.thinkingBlocks,
-              response.content,
-            );
-            response.content = cleanedContent;
-            const clean = hook.finalizeContent(context, response.content);
-            finalContent = response.finishReason !== "error" && !isBlankText(clean)
-              ? clean
-              : fallback;
-            AgentRunner.appendFinalMessage(messages, finalContent);
-          }
-        } catch (requestError) {
-          if (isAbortError(requestError) || spec.abortSignal?.aborted) {
-            finalContent = "Error: task cancelled";
-            stopReason = "cancelled";
-            error = finalContent;
-          } else {
-            finalContent = fallback;
-            AgentRunner.appendFinalMessage(messages, finalContent);
+          } catch (requestError) {
+            if (isAbortError(requestError) || spec.abortSignal?.aborted) {
+              finalContent = "Error: task cancelled";
+              stopReason = "cancelled";
+              error = finalContent;
+            } else {
+              finalContent = fallback;
+              AgentRunner.appendFinalMessage(messages, finalContent);
+            }
           }
         }
       } else {

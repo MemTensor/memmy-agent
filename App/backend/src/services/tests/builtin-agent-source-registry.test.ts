@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createBuiltinAgentSourceRegistry } from "../builtin-agent-source-registry.js";
 
 describe("built-in agent source registry", () => {
-  it("keeps every built-in source available to both the main service and scan worker", () => {
+  it("keeps every built-in source available to both the main service and scan process", () => {
     const registry = createBuiltinAgentSourceRegistry();
 
     expect(registry.list().map((adapter) => adapter.descriptor.sourceId)).toEqual([

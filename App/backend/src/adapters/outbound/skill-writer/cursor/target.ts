@@ -8,6 +8,7 @@ import { removeMemmySkillDirectory, replaceMemmySkillDirectory } from "../skill-
 import { renderMemmyPluginSkillManifest } from "../templates/memmy-plugin.js";
 import { renderMemmyResumeHookScript } from "../templates/memmy-resume-hook.js";
 import type { SkillManifest, SkillTarget } from "../types.js";
+import { loadMemmyWorkspaceBridgeRuntimeAsset } from "../workspace-bridge/runtime-loader.js";
 
 const CURSOR_TARGET_ID = "cursor";
 const CURSOR_DISPLAY_NAME = "Cursor";
@@ -16,6 +17,7 @@ const HOOK_DIRECTORY_NAME = "hooks";
 const HOOK_SCRIPT_FILE_NAME = "memmy-resume-hook.mjs";
 const LEGACY_HOOK_SCRIPT_FILE_NAME = "memmy-memory-resume-hook.mjs";
 const HOOK_CONFIG_FILE_NAME = "memmy-memory-config.json";
+const WORKSPACE_BRIDGE_FILE_NAME = "memmy-workspace-bridge.mjs";
 const HOOK_TIMEOUT_SECONDS = 60;
 
 /** Contract for create cursor skill target deps. */
@@ -64,6 +66,10 @@ export function createCursorSkillTarget(deps: CreateCursorSkillTargetDeps = {}):
         hookScriptPath,
         renderMemmyResumeHookScript({ source: CURSOR_TARGET_ID, mode: "cursor" })
       );
+      await writeFileAtomically(
+        join(hookDirectory, WORKSPACE_BRIDGE_FILE_NAME),
+        await loadMemmyWorkspaceBridgeRuntimeAsset()
+      );
       await upsertCursorHookConfig(join(cursorRootDirectory, HOOKS_FILE_NAME), hookScriptPath);
       await rm(join(cursorRootDirectory, HOOK_DIRECTORY_NAME, LEGACY_HOOK_SCRIPT_FILE_NAME), { force: true });
 
@@ -76,6 +82,7 @@ export function createCursorSkillTarget(deps: CreateCursorSkillTargetDeps = {}):
       await rm(join(cursorRootDirectory, HOOK_DIRECTORY_NAME, HOOK_SCRIPT_FILE_NAME), { force: true });
       await rm(join(cursorRootDirectory, HOOK_DIRECTORY_NAME, LEGACY_HOOK_SCRIPT_FILE_NAME), { force: true });
       await rm(join(cursorRootDirectory, HOOK_DIRECTORY_NAME, HOOK_CONFIG_FILE_NAME), { force: true });
+      await rm(join(cursorRootDirectory, HOOK_DIRECTORY_NAME, WORKSPACE_BRIDGE_FILE_NAME), { force: true });
       await removeMemmySkillDirectory(cursorRootDirectory);
     }
   };
@@ -128,6 +135,9 @@ async function upsertCursorHookConfig(filePath: string, hookScriptPath: string):
       timeout: HOOK_TIMEOUT_SECONDS
     }
   ];
+  hooks.sessionStart = cursorHookEntries(hooks.sessionStart, hookScriptPath);
+  hooks.preCompact = cursorHookEntries(hooks.preCompact, hookScriptPath);
+  hooks.sessionEnd = cursorHookEntries(hooks.sessionEnd, hookScriptPath);
   config.version = 1;
   config.hooks = hooks;
   await writeFileAtomically(filePath, `${JSON.stringify(config, null, 2)}\n`);
@@ -159,6 +169,11 @@ async function removeCursorHookConfig(filePath: string): Promise<void> {
   } else {
     delete hooks.stop;
   }
+  for (const event of ["sessionStart", "preCompact", "sessionEnd"] as const) {
+    const eventEntries = removeCursorResumeHookEntries(hooks[event]);
+    if (eventEntries.length > 0) hooks[event] = eventEntries;
+    else delete hooks[event];
+  }
 
   if (Object.keys(hooks).length > 0) {
     config.hooks = hooks;
@@ -167,6 +182,13 @@ async function removeCursorHookConfig(filePath: string): Promise<void> {
   }
 
   await writeFileAtomically(filePath, `${JSON.stringify(config, null, 2)}\n`);
+}
+
+function cursorHookEntries(value: unknown, hookScriptPath: string): Record<string, unknown>[] {
+  return [
+    ...removeCursorResumeHookEntries(value),
+    { command: createNodeHookCommand(hookScriptPath), timeout: HOOK_TIMEOUT_SECONDS },
+  ];
 }
 
 function removeCursorResumeHookEntries(value: unknown): Record<string, unknown>[] {

@@ -265,6 +265,10 @@ describe("MemoryService / retrieval / injected context", () => {
     expect(recall.hits.some((hit) => hit.memoryLayer === "L1")).toBe(true);
     expect(recall.hits.some((hit) => hit.memoryLayer === "L3")).toBe(true);
     expect(recall.injectedContext.markdown).not.toContain("# Memory context");
+    expect(recall.injectedContext.markdown).toContain("# Recalled historical evidence");
+    expect(recall.injectedContext.markdown).toContain("paraphrase, negation, comparison, chronology, or concise synthesis");
+    expect(recall.injectedContext.markdown).toContain("the user's question alone is not support");
+    expect(recall.injectedContext.markdown).toContain("do not invent a missing value");
     expect(recall.injectedContext.markdown).toContain("## Skill Memories");
     expect(recall.injectedContext.markdown).toContain("id: skill_injected_packet");
     expect(recall.injectedContext.markdown).toContain("## L1 Trace Memories");

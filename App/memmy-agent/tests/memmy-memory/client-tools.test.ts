@@ -27,6 +27,27 @@ function setRegistryContext(registry: ToolRegistry, ctx: RequestContext): void {
   }
 }
 
+function validHealth(
+  features?: Record<string, unknown>,
+  schemaVersion = "v6",
+): Record<string, unknown> {
+  return {
+    ok: true,
+    version: "1.0.9",
+    uptimeMs: 10,
+    mode: "local",
+    storage: { backend: "sqlite", schemaVersion, ready: true },
+    capabilities: { routes: [], tools: [], memoryLayers: ["L1", "L2", "L3", "Skill"], supportsCli: true },
+    ...(features === undefined ? {} : { features }),
+    models: {
+      summary: { configured: true, provider: "host", model: "test", remote: false, routing: "fixed" },
+      evolution: { configured: true, provider: "host", model: "test", remote: false, routing: "fixed" },
+      embedding: { configured: true, provider: "local", model: "test", remote: false, mode: "local" },
+    },
+    serverTime: "2026-08-19T00:00:00.000Z",
+  };
+}
+
 describe("MemmyMemoryClient", () => {
   it("uses a 20s default request timeout", () => {
     const client = new MemmyMemoryClient({ baseUrl: "http://memory.test" });
@@ -61,6 +82,113 @@ describe("MemmyMemoryClient", () => {
       status: 401,
       message: "bad token",
     } satisfies Partial<MemmyMemoryHttpError>);
+  });
+
+  it("strictly reads L3 capability versions without inferring them from storage", async () => {
+    const values = [
+      validHealth({ l3WorldModelProtocolVersions: [2] }),
+      validHealth(undefined, "v999"),
+      validHealth({ l3WorldModelProtocolVersions: ["2"] }),
+    ];
+    const client = new MemmyMemoryClient(
+      { baseUrl: "http://memory.test", timeoutMs: 1000 },
+      vi.fn(async () => response(values.shift())) as any,
+    );
+
+    await expect(client.health()).resolves.toMatchObject({
+      features: {
+        l3WorldModelProtocolVersions: [2],
+      },
+    });
+    await expect(client.health()).resolves.toMatchObject({
+      storage: { schemaVersion: "v999" },
+    });
+    await expect(client.health()).rejects.toThrow();
+  });
+
+  it("uses the shared v2 transport for context, Trace Head, and boundary", async () => {
+    const calls: Array<{ method: string; url: URL; headers: Record<string, string>; body: unknown }> = [];
+    const client = new MemmyMemoryClient(
+      { baseUrl: "http://memory.test", timeoutMs: 1000 },
+      vi.fn(async (url, init) => {
+        const target = new URL(String(url));
+        const headers = init?.headers as Record<string, string>;
+        calls.push({
+          method: String(init?.method),
+          url: target,
+          headers,
+          body: init?.body === undefined ? undefined : JSON.parse(String(init.body)),
+        });
+        if (target.pathname.endsWith("l3-world-model-trace-head")) {
+          return response({ throughL1MemoryId: "l1-1", traceSeq: 7 });
+        }
+        if (target.pathname.endsWith("/context")) {
+          return response({
+            schemaVersion: 2,
+            projectId: "project-1",
+            memoryId: "memory-1",
+            memoryVersion: 3,
+            renderedContext: "项目契约：保持边界。",
+            sourceMemoryIds: ["l1-1"],
+            generalRulesAndSafetyConstraints: null,
+            projectEnvironmentProfile: "语言：TypeScript",
+            projectContract: "保持边界。",
+            domainKnowledge: null,
+            serverTime: "2026-08-19T00:00:00.000Z",
+          });
+        }
+        if (target.pathname.endsWith("l3-world-model-boundary")) {
+          return response({
+            scheduled: true,
+            throughL1MemoryId: "l1-1",
+            throughTraceSeq: 7,
+            batchIds: ["batch-1"],
+            targetCount: 2,
+            serverTime: "2026-08-19T00:00:00.000Z",
+          });
+        }
+        return response({}, 404);
+      }) as any,
+    );
+    const envelope = {
+      requestId: "5f9bd35e-6b75-42ab-9e25-9a9ce4dc4980",
+      adapterId: "memmy-agent",
+      source: "memmy-agent",
+      namespace: {
+        source: "memmy-agent",
+        profileId: "default",
+        userId: "user-1",
+        projectId: "project-1",
+        sessionKey: "websocket:one",
+      },
+    } as const;
+
+    await client.l3WorldModelTraceHead("session-1", envelope);
+    await client.l3WorldModelContext("session-1", envelope);
+    await client.l3WorldModelBoundary("session-1", {
+      ...envelope,
+      trigger: "token_compaction",
+      throughL1MemoryId: "l1-1",
+    });
+    for (const call of [calls[0]!, calls[1]!]) {
+      expect(call.method).toBe("GET");
+      expect(call.body).toBeUndefined();
+      expect(Object.fromEntries(call.url.searchParams)).toEqual(expect.objectContaining({
+        adapterId: "memmy-agent",
+        source: "memmy-agent",
+      }));
+      expect(call.headers).toMatchObject({
+        "x-request-id": envelope.requestId,
+        "x-memmy-user-id": "user-1",
+        "x-memmy-project-id": "project-1",
+        "x-memmy-profile-id": "default",
+        "x-memmy-session-key": "websocket:one",
+      });
+    }
+    expect(calls[2]).toMatchObject({
+      method: "POST",
+      body: { trigger: "token_compaction", throughL1MemoryId: "l1-1" },
+    });
   });
 });
 

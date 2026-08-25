@@ -1,4 +1,4 @@
-import { setDesktopAnalyticsClientId, trackCloudAnalyticsEvent } from "./cloud-analytics.js";
+import { setDesktopAnalyticsClientId, setDesktopAnalyticsContext, trackCloudAnalyticsEvent } from "./cloud-analytics.js";
 import {
   resolveAnalyticsAppEdition,
   resolveAnalyticsAppEnv,
@@ -18,6 +18,7 @@ let initialized = false;
 
 export function initGtag(): void {
   if (initialized) return;
+  void initializeDesktopAnalyticsContext();
   if (!MEASUREMENT_ID) {
     console.log("[analytics] initGtag skipped: MEMMY_GA4_MEASUREMENT_ID not set");
     return;
@@ -64,6 +65,24 @@ export function initGtag(): void {
     window.gtag("event", "app_launch");
     console.log("[analytics] app_launch sent via gtag");
   };
+}
+
+async function initializeDesktopAnalyticsContext(): Promise<void> {
+  const memmy = window.memmy;
+  if (!memmy) return;
+  try {
+    const [installationId, appInfo] = await Promise.all([
+      memmy.getInstallationId(),
+      memmy.getAppInfo(),
+    ]);
+    setDesktopAnalyticsContext({
+      installationId,
+      appVersion: appInfo.version,
+      platform: appInfo.platform,
+    });
+  } catch (error) {
+    console.warn("[analytics] failed to initialize desktop analytics context:", error);
+  }
 }
 
 /**

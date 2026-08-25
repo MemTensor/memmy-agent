@@ -82,6 +82,28 @@ describe("model preset runtime", () => {
     expect(loop.dream?.model).toBe("openai/gpt-4.1");
   });
 
+  it("switches mapped token defaults without retaining the previous model budget", () => {
+    const loop = makeLoop({
+      large: modelPreset({ model: "gpt-5.6" }),
+      small: modelPreset({ model: "gpt-4o" }),
+    });
+
+    loop.modelPreset = "large";
+    expect(loop.contextWindowTokens).toBe(1_050_000);
+    expect(loop.provider.generation.maxTokens).toBe(128_000);
+    expect(loop.consolidator.contextWindowTokens).toBe(1_050_000);
+    expect(loop.consolidator.maxCompletionTokens).toBe(128_000);
+
+    loop.modelPreset = "small";
+    expect(loop.model).toBe("gpt-4o");
+    expect(loop.contextWindowTokens).toBe(128_000);
+    expect(loop.provider.generation.maxTokens).toBe(16_384);
+    expect(loop.subagents.model).toBe("gpt-4o");
+    expect(loop.consolidator.contextWindowTokens).toBe(128_000);
+    expect(loop.consolidator.maxCompletionTokens).toBe(16_384);
+    expect(loop.dream?.model).toBe("gpt-4o");
+  });
+
   it("publishes runtime model updates when setModelPreset is called", () => {
     const published: Array<[string | null, string | null | undefined]> = [];
     const loop = new AgentLoop({

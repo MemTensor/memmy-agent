@@ -146,7 +146,7 @@ function createViewerHarness() {
   const fetch = async (path: string, options?: Record<string, any>) => {
     requests.push({ path, options });
     if (path === "/api/v1/panel/overview") {
-      return jsonResponse({ counts: { memories: 2, experiences: 0, worldModels: 0, skills: 0 } });
+      return jsonResponse({ counts: { memories: 2, userMemories: 0, experiences: 0, worldModels: 0, skills: 0 } });
     }
     if (path.startsWith("/api/v1/panel/items?")) {
       return jsonResponse({

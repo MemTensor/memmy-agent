@@ -218,7 +218,7 @@ describe("AgentRunner expanded behavior", () => {
       new AgentRunSpec({
         initialMessages: [{ role: "user", content: "describe image" }],
         tools,
-        model: "test-model",
+        model: "gpt-4.1",
         maxIterations: 2,
       }),
     );

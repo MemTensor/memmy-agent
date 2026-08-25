@@ -82,15 +82,21 @@ describe("opencode skill target", () => {
       endpoint?: string;
       memmy_config_path?: string;
       token?: string;
+      userId?: string;
+      workspaceHostId?: string;
     };
     const commandSource = readFileSync(commandPath, "utf8");
     const skillSource = readFileSync(join(rootDirectory, "skills", "memmy-memory", "SKILL.md"), "utf8");
 
-    expect(pluginConfig).toEqual({
+    expect(pluginConfig).toMatchObject({
       memmy_config_path: memmyConfigPath,
       endpoint: "http://127.0.0.1:18991",
-      token: "opencode-token"
+      token: "opencode-token",
+      userId: "local-user",
+      workspaceHostId: expect.stringMatching(/^[a-f0-9]{64}$/u)
     });
+    const bridgePath = join(rootDirectory, "plugins", "memmy-workspace-bridge.mjs");
+    expect(existsSync(bridgePath)).toBe(true);
     expect(pluginSource).toContain('import { tool } from "@opencode-ai/plugin";');
     expect(pluginSource).toContain("export const MemmyMemoryPlugin");
     expect(pluginSource).toContain('"chat.message"');
@@ -113,6 +119,7 @@ describe("opencode skill target", () => {
 
     expect(existsSync(pluginPath)).toBe(false);
     expect(existsSync(pluginConfigPath)).toBe(false);
+    expect(existsSync(bridgePath)).toBe(false);
     expect(existsSync(commandPath)).toBe(false);
     expect(existsSync(join(rootDirectory, "skills", "memmy-memory"))).toBe(false);
     expect(readTargetFile(rootDirectory)).toBe("manual instructions\n");

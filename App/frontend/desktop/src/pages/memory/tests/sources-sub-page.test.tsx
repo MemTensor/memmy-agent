@@ -194,6 +194,7 @@ describe("SourcesSubPage", () => {
     expect(prompt).toContain("explicitly supplied by the user in the GUI");
     expect(prompt).toContain("inspect this scoped candidate first, and verify it before use");
     expect(prompt).toContain("ask for a corrected path instead of silently replacing it");
+    expect(prompt).toContain("If Memmy runs on Windows and the Agent data lives in WSL");
     expect(prompt).not.toMatch(/[\u3400-\u9fff]/u);
   });
 

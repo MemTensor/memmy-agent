@@ -13,10 +13,14 @@ import {
   preparePackagedBrowser,
   preparePackagedRuntimeConfig,
   readLiveMemoryServerLock,
+  resolveDevelopmentRuntimeExecutable,
+  resolveDevelopmentRuntimeEntryPaths,
   resolvePackagedRuntimeMigrationTargets,
+  resolveRuntimeEntryPaths,
   runPackagedMigrationCommand,
   restartExternalMemoryService,
   spawnNodeService,
+  startAgentGatewayWithRecovery,
   startPackagedBrowserPreparation,
   stopManagedChild,
   syncBundledAgentSkills,
@@ -836,6 +840,89 @@ describe("AgentGatewaySupervisor", () => {
     expect(harness.supervisor.restartTimer).toBeNull();
   });
 
+  it("keeps retrying after an explicitly recoverable initial startup failure", async () => {
+    vi.useFakeTimers();
+    const waitForHttpService = vi.fn()
+      .mockRejectedValueOnce(new Error("invalid runtime config"))
+      .mockRejectedValueOnce(new Error("runtime config is still invalid"))
+      .mockResolvedValueOnce(undefined);
+    const harness = createSupervisorHarness({
+      waitForHttpService,
+      stopManagedChild: vi.fn(async (child: ManagedChild) => {
+        emitChildClose(child, 1);
+      })
+    });
+
+    await expect(harness.supervisor.ensureStarted()).rejects.toThrow("invalid runtime config");
+    harness.supervisor.startRecovery();
+    await vi.advanceTimersByTimeAsync(249);
+    expect(harness.spawn).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(harness.spawn).toHaveBeenCalledTimes(2);
+    expect(harness.supervisor.hasReachedReady).toBe(false);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(harness.spawn).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(harness.spawn).toHaveBeenCalledTimes(3);
+    expect(harness.supervisor.hasReachedReady).toBe(true);
+    expect(harness.supervisor.restartTimer).toBeNull();
+  });
+
+  it("cancels pending initial recovery during shutdown", async () => {
+    vi.useFakeTimers();
+    const harness = createSupervisorHarness({
+      waitForHttpService: vi.fn(async () => {
+        throw new Error("invalid runtime config");
+      }),
+      stopManagedChild: vi.fn(async (child: ManagedChild) => {
+        emitChildClose(child, 1);
+      })
+    });
+
+    await expect(harness.supervisor.ensureStarted()).rejects.toThrow("invalid runtime config");
+    harness.supervisor.startRecovery();
+    await harness.supervisor.close();
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(harness.spawn).toHaveBeenCalledTimes(1);
+    expect(harness.supervisor.restartTimer).toBeNull();
+  });
+
+  it("contains the initial Agent failure and enables background recovery", async () => {
+    const failure = new Error("invalid runtime config");
+    const supervisor = {
+      ensureStarted: vi.fn(async () => {
+        throw failure;
+      }),
+      startRecovery: vi.fn()
+    };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    await expect(startAgentGatewayWithRecovery(supervisor)).resolves.toBeNull();
+
+    expect(supervisor.startRecovery).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(
+      "Agent gateway unavailable during desktop startup: invalid runtime config"
+    );
+  });
+
+  it("classifies a rejected model config without exposing the startup error", async () => {
+    const supervisor = {
+      ensureStarted: vi.fn(async () => {
+        throw new Error(
+          "agent-gateway exited before it became ready (code 1). stderr: memmy: Failed to load config from C:/Memmy/config.yaml: providers current contract does not accept legacy field 'apiBase'"
+        );
+      }),
+      startRecovery: vi.fn()
+    };
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    await expect(startAgentGatewayWithRecovery(supervisor)).resolves.toBe("model_config_invalid");
+    expect(supervisor.startRecovery).toHaveBeenCalledTimes(1);
+  });
+
   it("restarts an owned gateway with bounded escalating delays and ignores old child callbacks", async () => {
     vi.useFakeTimers();
     const harness = createSupervisorHarness();
@@ -1056,6 +1143,24 @@ describe("spawnNodeService 落盘与 env 注入", () => {
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
 
     expect(await readFile(logFile, "utf8")).toContain("hello-from-child");
+  });
+
+  it("把 Agent Gateway 子进程 stderr 落盘到 agent-gateway.log", async () => {
+    const root = await makeTempRoot();
+    const entry = join(root, "entry.js");
+    await writeFile(entry, "process.stderr.write('[session-dag] compaction failed SQLITE_CANTOPEN\\n');\n");
+    const logFile = join(root, "agent-gateway.log");
+
+    const managed = spawnNodeService("agent-gateway", entry, [], {}, {
+      logFilePath: logFile,
+      logLevel: "info"
+    });
+    await new Promise<void>((done) => managed.process.once("exit", () => done()));
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+
+    const logText = await readFile(logFile, "utf8");
+    expect(logText).toContain("[session-dag] compaction failed");
+    expect(logText).toContain("SQLITE_CANTOPEN");
   });
 
   it("把 MEMMY_LOG_LEVEL 注入子进程环境", async () => {

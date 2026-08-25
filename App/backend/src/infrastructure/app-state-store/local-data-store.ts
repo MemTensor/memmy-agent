@@ -30,7 +30,9 @@ export interface CreateFilesystemLocalDataStoreOptions {
 const DEFAULT_MEMORY_HOME = join(homedir(), ".memmy");
 const MEMORY_DATA_TABLES = [
   "memories_fts",
+  "user_memories_fts",
   "memory_vector_entries",
+  "memory_processing_state",
   "trace_policy_links",
   "skill_trials",
   "feedback",
@@ -47,6 +49,7 @@ const MEMORY_DATA_TABLES = [
   "api_logs",
   "memory_change_log",
   "idempotency_keys",
+  "user_memories",
   "memories"
 ] as const;
 

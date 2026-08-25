@@ -21,3 +21,4 @@ sessions/
 .env
 .env.*
 !.env.example
+App/backend/src/adapters/outbound/skill-writer/workspace-bridge/memmy-workspace-bridge.mjs

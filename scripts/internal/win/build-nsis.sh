@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+source "$ROOT_DIR/scripts/internal/shared/package-logging.sh"
 DESKTOP_DIR="$ROOT_DIR/App/shell/desktop"
 AGENT_DIR="$ROOT_DIR/App/memmy-agent"
 MEMORY_DIR="$ROOT_DIR/Memory"
@@ -122,9 +123,12 @@ esac
 
 FINAL_EXE="$DESKTOP_DIR/release/Memmy-$DESKTOP_VERSION-win32-$PACKAGE_ARCH-$PACKAGE_EDITION-$PACKAGE_SIGNING.exe"
 ARTIFACT_NAME="Memmy-$DESKTOP_VERSION-win32-$PACKAGE_ARCH-$PACKAGE_EDITION-$PACKAGE_SIGNING.\${ext}"
+package_log_init "win-$DESKTOP_VERSION-$PACKAGE_ARCH-$PACKAGE_EDITION-$PACKAGE_SIGNING" "$DESKTOP_DIR/release/logs"
+package_install_error_trap
+package_log "Windows package context: version=$DESKTOP_VERSION arch=$PACKAGE_ARCH edition=$PACKAGE_EDITION signing=$PACKAGE_SIGNING installer=$FINAL_EXE"
 
 log() {
-  printf '\n[%s] %s\n' "$(date '+%H:%M:%S')" "$*"
+  package_log "$*"
 }
 
 run_with_retries() {
@@ -605,38 +609,44 @@ install_better_sqlite3_win_x64() {
   )
 }
 
+package_step_start "Validate Windows signing configuration"
 if [ "${MEMMY_SKIP_CODESIGN:-}" != "1" ]; then
   require_windows_signing_env
 else
   log "MEMMY_SKIP_CODESIGN=1, building unsigned Windows smoke package"
 fi
 
+package_step_start "Install root workspace dependencies if needed"
 if [ ! -d "$ROOT_DIR/node_modules" ]; then
   log "Installing root workspace dependencies"
   npm_with_configured_script_shell install
+else
+  log "Root workspace dependencies already available"
 fi
+package_step_start "Install migrations workspace dev dependencies"
 npm_with_configured_script_shell install --workspace @memmy/migrations --include=dev
 
-log "Building migrations package"
+package_step_start "Build migrations package"
 npm_with_configured_script_shell run build --prefix "$MIGRATIONS_DIR"
 
-log "Building local API contracts package"
+package_step_start "Build local API contracts package"
 npm_with_configured_script_shell run build -w @memmy/local-api-contracts
 
-log "Installing memmy-agent dependencies"
+package_step_start "Install memmy-agent workspace dependencies"
 PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm_with_configured_script_shell ci --prefix "$AGENT_DIR"
 
-log "Building Memory workspace"
+package_step_start "Build Memory workspace"
 npm_with_configured_script_shell run build -w @memmy/memory
 
-log "Building memmy-agent CLI"
+package_step_start "Build memmy-agent runtime"
 npm_with_configured_script_shell run build --prefix "$AGENT_DIR"
 
-log "Building Electron desktop shell"
+package_step_start "Build Electron desktop shell"
 npm_with_configured_script_shell run build -w @memmy/desktop
+package_step_start "Write desktop edition manifest"
 write_desktop_edition_manifest
 
-log "Preparing Windows x64 packaged runtime"
+package_step_start "Prepare Windows x64 packaged runtime"
 rm -rf "$RUNTIME_DIR"
 rm -rf "$MIGRATIONS_STAGING_DIR"
 rm -rf "$EMBEDDING_MODELS_DIR"
@@ -646,9 +656,10 @@ cp "$MIGRATIONS_DIR/package.json" "$MIGRATIONS_STAGING_DIR/package.json"
 cp -R "$MIGRATIONS_DIR/dist" "$MIGRATIONS_STAGING_DIR/dist"
 
 cp -R "$MEMORY_DIR/dist/src" "$RUNTIME_DIR/memory/src"
+package_step_start "Create Windows Memory runtime manifest"
 create_memory_runtime_manifest
 
-log "Installing Windows x64 Memory runtime dependencies"
+package_step_start "Install Windows x64 Memory runtime dependencies"
 npm_ci_win_x64 "$RUNTIME_DIR/memory"
 mkdir -p "$RUNTIME_DIR/memory/node_modules/@memmy/local-api-contracts" "$RUNTIME_DIR/memory/node_modules/@memmy/migrations"
 cp "$ROOT_DIR/App/backend/local-api-contracts/package.json" "$RUNTIME_DIR/memory/node_modules/@memmy/local-api-contracts/package.json"
@@ -656,18 +667,21 @@ cp -R "$ROOT_DIR/App/backend/local-api-contracts/dist" "$RUNTIME_DIR/memory/node
 cp "$MIGRATIONS_STAGING_DIR/package.json" "$RUNTIME_DIR/memory/node_modules/@memmy/migrations/package.json"
 cp -R "$MIGRATIONS_STAGING_DIR/dist" "$RUNTIME_DIR/memory/node_modules/@memmy/migrations/dist"
 install_better_sqlite3_win_x64 "$RUNTIME_DIR/memory"
+package_step_start "Verify Windows x64 Memory runtime artifacts"
 verify_windows_native_module
 verify_windows_better_sqlite3_runtime "$RUNTIME_DIR/memory"
 verify_windows_onnxruntime_module
 verify_windows_sharp_module
 
+package_step_start "Stage Windows memmy-agent runtime files"
 cp -R "$AGENT_DIR/dist" "$RUNTIME_DIR/memmy-agent/dist"
 cp "$AGENT_DIR/package.json" "$RUNTIME_DIR/memmy-agent/package.json"
 cp "$AGENT_DIR/package-lock.json" "$RUNTIME_DIR/memmy-agent/package-lock.json"
 
-log "Installing Windows x64 memmy-agent runtime dependencies"
+package_step_start "Install Windows x64 memmy-agent runtime dependencies"
 npm_ci_win_x64 "$RUNTIME_DIR/memmy-agent"
 install_better_sqlite3_win_x64 "$RUNTIME_DIR/memmy-agent"
+package_step_start "Stage Windows memmy-agent workspace runtime packages"
 RUNTIME_LOCAL_API_CONTRACTS_DIR="$RUNTIME_DIR/memmy-agent/node_modules/@memmy/local-api-contracts"
 rm -rf "$RUNTIME_LOCAL_API_CONTRACTS_DIR"
 mkdir -p "$RUNTIME_LOCAL_API_CONTRACTS_DIR"
@@ -699,8 +713,10 @@ if [ -e "$MIGRATIONS_STAGING_DIR" ]; then
   echo "Migrations staging directory was not removed." >&2
   exit 1
 fi
+package_step_start "Verify Windows memmy-agent runtime artifacts"
 verify_windows_agent_native_artifacts
 verify_windows_better_sqlite3_runtime "$RUNTIME_DIR/memmy-agent"
+package_step_start "Verify Windows memmy-agent runtime exports"
 (
   cd "$RUNTIME_DIR/memmy-agent"
   node --input-type=module --eval '
@@ -732,23 +748,25 @@ verify_windows_better_sqlite3_runtime "$RUNTIME_DIR/memmy-agent"
     if (!fs.existsSync(path.join(path.dirname(playwrightPath), "cli.js"))) throw new Error("Playwright runtime CLI is missing");
     const commandEntrypoint = "./dist/entrypoints/cli/commands.js";
     if (!fs.readFileSync(commandEntrypoint, "utf8").includes("browser-prepare")) throw new Error("browser-prepare command is missing");
-  '
+	  '
 )
 
+package_step_start "Prune and verify Windows runtime versions"
 node "$ROOT_DIR/scripts/internal/shared/prune-runtime-env-files.mjs" "$RUNTIME_DIR"
 RUNTIME_NODE_DIR="$(to_node_readable_path "$RUNTIME_DIR")"
 node "$ROOT_DIR/scripts/internal/shared/verify-package-version.mjs" \
   --expected "$DESKTOP_VERSION" \
   --runtime-root "$RUNTIME_NODE_DIR"
 
-log "Creating Windows CLI launchers"
+package_step_start "Create Windows CLI launchers and embedding model"
 create_windows_cli_launcher "$CLI_BIN_DIR/memmy-memory.cmd" "dist\\runtime\\memory\\src\\cli\\index.js"
 create_windows_cli_launcher "$CLI_BIN_DIR/memmy.cmd" "dist\\runtime\\memmy-agent\\dist\\main.js"
 node "$ROOT_DIR/scripts/internal/shared/prepare-embedding-model.mjs" "$EMBEDDING_MODELS_DIR"
 
+package_step_start "Patch electron-builder NSIS template"
 patch_electron_builder_nsis_refresh
 
-log "Packaging Windows x64 installer"
+package_step_start "Run electron-builder Windows NSIS packaging"
 cd "$DESKTOP_DIR"
 
 BUILDER_ARGS=(--config "$BUILDER_CONFIG")
@@ -763,6 +781,7 @@ if [ "${#WINDOWS_SIGNING_BUILDER_ARGS[@]}" -gt 0 ]; then
 fi
 
 npx electron-builder "${BUILDER_ARGS[@]}" --win nsis --x64 "$@" --config.artifactName="$ARTIFACT_NAME"
+package_step_start "Verify packaged Windows app artifacts"
 verify_packaged_windows_unpacked_artifacts
 
 if [ ! -f "$FINAL_EXE" ]; then
@@ -770,4 +789,5 @@ if [ ! -f "$FINAL_EXE" ]; then
   exit 1
 fi
 
+package_log_finish 0
 log "Done. Windows installer is ready: $FINAL_EXE"

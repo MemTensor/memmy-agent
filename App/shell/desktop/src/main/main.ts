@@ -1,5 +1,5 @@
-import { createLocalBackend, loadCloudServiceEnv, trackAnalyticsEvent, type BootstrapScenario, type LocalBackend } from "@memmy/backend";
-import { resolveCloudServiceBaseUrl } from "@memmy/local-api-contracts";
+import { createHttpMemmyAgentAdminClient, createLocalBackend, loadCloudServiceEnv, syncRuntimeConfigForStartup, trackAnalyticsEvent, type BootstrapScenario, type LocalBackend } from "@memmy/backend";
+import { resolveCloudServiceBaseUrl, type AccountChannel } from "@memmy/local-api-contracts";
 import type {
   DesktopAppInfo,
   DesktopImageActionRequest,
@@ -18,7 +18,7 @@ import type {
 } from "@memmy/desktop-interface";
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, screen, shell, systemPreferences, Tray, type Event as ElectronEvent, type FileFilter, type IpcMainEvent, type MenuItemConstructorOptions, type Rectangle, type WebContents } from "electron";
 import { spawn } from "node:child_process";
-import { constants as fsConstants, cpSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { constants as fsConstants, existsSync, readFileSync } from "node:fs";
 import { access, appendFile, chmod, copyFile, lstat, mkdir, open, readFile, readdir, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -45,8 +45,10 @@ import {
   preparePackagedRuntimeConfig,
   restartExternalMemoryService,
   resolveAgentGatewayRuntimeConfig,
-  startPackagedRuntimeServices,
-  type PackagedRuntimeServices
+  resolveDevelopmentRuntimeEntryPaths,
+  resolveDevelopmentRuntimeExecutable,
+  startManagedRuntimeServices,
+  type ManagedRuntimeServices
 } from "./runtime-services.js";
 import { resolveRendererContextMenuCommands, resolveRendererContextMenuMaxLabelWidth, type RendererContextMenuCommand } from "./renderer-context-menu.js";
 import { startPackagedRendererStaticServer, type PackagedRendererStaticServer } from "./renderer-static-server.js";
@@ -90,24 +92,38 @@ import {
   type LogLevel
 } from "./logger.js";
 import { persistSharedAnalyticsClientId } from "./analytics-client-id-store.js";
+import { getOrCreateInstallationId } from "./installation-id-store.js";
 import { backupSqliteDatabase } from "./sqlite-backup.js";
 import {
   resolveStartupSplashHtml,
   resolveStartupSplashLanguage,
+  resolveUpdateSplashHtml,
   type StartupSplashLanguage
 } from "./startup-splash.js";
+import {
+  advanceWindowsDataMigrationAfterBoot,
+  readWindowsDataMigrationConsistency,
+  recoverWindowsDataMigrationForStartup,
+  recordWindowsDataLayoutAfterBoot,
+  resolveWindowsDataLayout,
+  type WindowsDataMigrationConsistency,
+  type WindowsDataLayout
+} from "./windows-data-layout.js";
 
 let mainWindow: BrowserWindow | null = null;
 let petWindow: BrowserWindow | null = null;
 let localBackend: LocalBackend | null = null;
 let menuBarTray: Tray | null = null;
 const MENU_BAR_TRAY_GUID = "8B2A0C33-45C0-4C43-8F1C-77F7D4FDF2D4";
-let runtimeServices: PackagedRuntimeServices | null = null;
+let runtimeServices: ManagedRuntimeServices | null = null;
 let runtimeConfig: DesktopRuntimeConfig | null = null;
 let memoryServiceControl: { baseUrl: string; token: string } | null = null;
 let memoryServiceRestart: Promise<DesktopMemoryServiceRestartResult> | null = null;
 let packagedRendererServer: PackagedRendererStaticServer | null = null;
 let packagedRendererBaseUrl: string | null = null;
+let windowsDataLayout: WindowsDataLayout | null = null;
+const rendererReadyWebContentsIds = new Set<number>();
+const rendererReadyWaiters = new Map<number, (verified: boolean) => void>();
 let queuedPetWindowClose: ReturnType<typeof setTimeout> | null = null;
 let petWindowCloseActivateSuppressionTimer: ReturnType<typeof setTimeout> | null = null;
 let latestPetWindowLayout: PetWindowLayout | null = null;
@@ -183,6 +199,8 @@ const AGENT_SOURCE_AUTO_INJECT_TRIGGER_DEBOUNCE_MS = 10 * 1000;
 
 let agentSourceAutoInjectInFlight = false;
 let lastAgentSourceAutoInjectTriggeredAt = 0;
+const updatePackageDownloadLocks = new Map<string, Promise<void>>();
+const updatePackagePreparationLocks = new Map<string, Promise<void>>();
 
 /**
  * Computes one background update check interval with jitter applied.
@@ -308,28 +326,87 @@ async function boot(): Promise<void> {
     registerIpcHandlers();
     await installBundledCliIfNeeded();
     await startPackagedRendererServerIfNeeded();
-    runtimeServices = app.isPackaged
-      ? await startPackagedRuntimeServices({
-        appPath: app.getAppPath(),
-        appDatabaseFile: join(app.getPath("userData"), "app.sqlite"),
-        resourcesPath: process.resourcesPath,
-        logDirectory: app.getPath("logs"),
-        logLevel: getCurrentLogLevel()
-      })
-      : null;
+    let windowsMigrationConsistency: WindowsDataMigrationConsistency | undefined;
+    if (windowsDataLayout) {
+      try {
+        windowsMigrationConsistency = await readWindowsDataMigrationConsistency(windowsDataLayout);
+      } catch (error) {
+        const recovery = await recoverWindowsDataMigrationForStartup(
+          windowsDataLayout,
+          `migration state could not be read: ${formatStartupError(error)}`
+        );
+        await writePackagedStartupLog(`boot:data-migration-state-failed-open:${JSON.stringify(recovery)}`);
+      }
+    }
+    const appDatabaseFile = join(app.getPath("userData"), "app.sqlite");
+    runtimeServices = await startManagedRuntimeServices({
+      appPath: app.getAppPath(),
+      appDatabaseFile,
+      resourcesPath: process.resourcesPath,
+      logDirectory: app.getPath("logs"),
+      logLevel: getCurrentLogLevel(),
+      beforeStartServices: async ({ databasePath, configPath }) => {
+        const syncOptions = {
+          databasePath,
+          memmyConfigPath: configPath,
+          accountChannel: resolveCurrentDesktopAccountChannel()
+        };
+        try {
+          await syncRuntimeConfigForStartup({
+            ...syncOptions,
+            ...(windowsMigrationConsistency ? { migrationConsistency: windowsMigrationConsistency } : {})
+          });
+        } catch (error) {
+          if (!windowsDataLayout || !isWindowsDataMigrationConsistencyError(error)) throw error;
+          const recovery = await recoverWindowsDataMigrationForStartup(
+            windowsDataLayout,
+            formatStartupError(error)
+          );
+          windowsMigrationConsistency = undefined;
+          await writePackagedStartupLog(`boot:data-migration-consistency-failed-open:${JSON.stringify(recovery)}`);
+          await syncRuntimeConfigForStartup(syncOptions);
+        }
+      },
+      runtimeEntries: app.isPackaged
+        ? undefined
+        : resolveDevelopmentRuntimeEntryPaths(import.meta.dirname),
+      runtimeExecutable: app.isPackaged
+        ? undefined
+        : resolveDevelopmentRuntimeExecutable()
+    });
     runtimeConfig = await startLocalApi(runtimeServices);
     isBootReady = true;
-    createInitialWindow();
+    const initialWindow = createInitialWindow();
     triggerAgentSourceAutoInject("boot");
     if (process.platform === "darwin") {
       syncMenuBarTray(resolveMenuBarIconEnabled());
     }
     setDevelopmentDockIcon();
-    await writePackagedStartupLog("boot:ready");
+    const rendererVerified = !windowsDataLayout || await waitForInitialRendererVerification(initialWindow);
+    await writePackagedStartupLog(rendererVerified ? "boot:ready" : "boot:ready-data-migration-verification-deferred");
+    if (windowsDataLayout && rendererVerified) {
+      await recordWindowsDataLayoutAfterBoot(
+        windowsDataLayout,
+        resolveDesktopAppVersion()
+      ).catch(async (error: unknown) => {
+        console.warn("Windows data layout record deferred:", error);
+        await writePackagedStartupLog(`boot:data-layout-record-deferred\n${formatStartupError(error)}`);
+      });
+      await advanceWindowsDataMigrationAfterBoot(
+        windowsDataLayout,
+        [join(homedir(), ".memmy")]
+      ).catch(async (error: unknown) => {
+        console.warn("Windows data migration cleanup deferred:", error);
+        await writePackagedStartupLog(`boot:data-migration-cleanup-deferred\n${formatStartupError(error)}`);
+      });
+    }
     startRequiredUpdateBackgroundChecks();
     // Fallback cleanup of leftover packages in the updates directory: deferred and async, to avoid
     // the startup peak and not block the window from showing.
-    setTimeout(() => void pruneUpdatesDirectory(), UPDATES_PRUNE_STARTUP_DELAY_MS);
+    setTimeout(() => {
+      void pruneUpdatesDirectory();
+      void pruneWindowsLegacyUpdateCaches();
+    }, UPDATES_PRUNE_STARTUP_DELAY_MS);
   } catch (error) {
     await runtimeServices?.close();
     runtimeServices = null;
@@ -343,9 +420,17 @@ async function boot(): Promise<void> {
  */
 function configureAppIdentity(): void {
   const edition = resolveCurrentDesktopEdition();
-  const userDataPath = resolveDesktopUserDataPath(edition);
-  const memmyHome = resolveDesktopRuntimeHomePath(edition);
-  migratePackagedWindowsDataIfNeeded(edition, userDataPath, memmyHome);
+  windowsDataLayout = resolveWindowsDataLayout({
+    platform: process.platform,
+    isPackaged: app.isPackaged,
+    isWindowsStore: Boolean((process as NodeJS.Process & { windowsStore?: boolean }).windowsStore),
+    executablePath: process.execPath,
+    appDataPath: app.getPath("appData"),
+    localAppDataPath: process.env.LOCALAPPDATA?.trim() ?? "",
+    homeDirectory: homedir()
+  });
+  const userDataPath = windowsDataLayout?.userDataPath ?? resolveDesktopUserDataPath(edition);
+  const memmyHome = windowsDataLayout?.runtimeHomePath ?? resolveDesktopRuntimeHomePath(edition);
   app.setName("Memmy");
   if (process.platform === "win32") {
     app.setAppUserModelId(WINDOWS_APP_USER_MODEL_ID);
@@ -365,64 +450,12 @@ function configureAppIdentity(): void {
   }
 }
 
-function resolvePackagedWindowsDataRoot(): string | null {
-  if (process.platform !== "win32" || !app.isPackaged) {
-    return null;
-  }
-
-  return join(dirname(process.execPath), "data");
-}
-
 function resolveDesktopUserDataPath(edition: DesktopEdition): string {
-  return join(
-    resolvePackagedWindowsDataRoot() ?? app.getPath("appData"),
-    desktopUserDataDirectoryName(edition)
-  );
+  return join(app.getPath("appData"), desktopUserDataDirectoryName(edition));
 }
 
 function resolveDesktopRuntimeHomePath(edition: DesktopEdition): string {
-  return join(
-    resolvePackagedWindowsDataRoot() ?? homedir(),
-    desktopRuntimeHomeDirectoryName(edition)
-  );
-}
-
-function migratePackagedWindowsDataIfNeeded(
-  edition: DesktopEdition,
-  userDataPath: string,
-  memmyHome: string
-): void {
-  if (!resolvePackagedWindowsDataRoot()) {
-    return;
-  }
-
-  copyDirectoryIfMissing(join(app.getPath("appData"), desktopUserDataDirectoryName(edition)), userDataPath);
-  copyDirectoryIfMissing(join(homedir(), desktopRuntimeHomeDirectoryName(edition)), memmyHome);
-}
-
-function copyDirectoryIfMissing(sourcePath: string, targetPath: string): void {
-  if (
-    pathsEqual(sourcePath, targetPath) ||
-    !existsSync(sourcePath) ||
-    existsSync(targetPath)
-  ) {
-    return;
-  }
-
-  try {
-    mkdirSync(dirname(targetPath), { recursive: true });
-    cpSync(sourcePath, targetPath, { recursive: true });
-  } catch (error) {
-    console.warn(`Failed to migrate Memmy data from ${sourcePath} to ${targetPath}:`, error);
-  }
-}
-
-function pathsEqual(left: string, right: string): boolean {
-  const normalizedLeft = resolve(left);
-  const normalizedRight = resolve(right);
-  return process.platform === "win32"
-    ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
-    : normalizedLeft === normalizedRight;
+  return join(homedir(), desktopRuntimeHomeDirectoryName(edition));
 }
 
 /**
@@ -431,6 +464,10 @@ function pathsEqual(left: string, right: string): boolean {
  */
 function resolveCurrentDesktopEdition(): DesktopEdition {
   return resolveDesktopEdition(readCurrentDesktopEditionManifest(), process.env.MEMMY_ACCOUNT_CHANNEL);
+}
+
+function resolveCurrentDesktopAccountChannel(): AccountChannel {
+  return resolveCurrentDesktopEdition() === "intl" ? "email" : "phone";
 }
 
 /**
@@ -715,7 +752,7 @@ function showPackagedStartupError(error: unknown): void {
  * Starts the local API backend.
  * @returns The runtime config the main process stores and exposes to the renderer.
  */
-async function startLocalApi(services: PackagedRuntimeServices | null): Promise<DesktopRuntimeConfig> {
+async function startLocalApi(services: ManagedRuntimeServices | null): Promise<DesktopRuntimeConfig> {
   const databasePath = join(app.getPath("userData"), "app.sqlite");
   let memoryControl: { baseUrl: string; token: string };
   if (services) {
@@ -751,16 +788,28 @@ async function startLocalApi(services: PackagedRuntimeServices | null): Promise<
     // bootstrapScenario: overrides the first-launch state during development/debugging.
     bootstrapScenario: getBootstrapScenario(),
     desktopInstallFingerprint,
+    accountChannel: resolveCurrentDesktopAccountChannel(),
+    memmyAgentAdminClient: services
+      ? createHttpMemmyAgentAdminClient({
+          baseUrl: services.agentGateway.baseUrl,
+          bootstrapSecret: services.agentGateway.bootstrapSecret
+        })
+      : undefined,
     memmyConfigPath: process.env.MEMMY_CONFIG,
     memoryBaseUrl: memoryControl.baseUrl,
+    memoryReady: services?.memory.ready,
     runtimeConfigPath: process.env.MEMMY_HOME ? join(process.env.MEMMY_HOME, "runtime.json") : undefined
   });
-  const agentGateway = services?.agentGateway ?? await resolveAgentGatewayRuntimeConfig();
+  const agentGateway: NonNullable<DesktopRuntimeConfig["agentGateway"]> =
+    services?.agentGateway ?? await resolveAgentGatewayRuntimeConfig();
   const agentGatewayConfig: NonNullable<DesktopRuntimeConfig["agentGateway"]> = {
     baseUrl: agentGateway.baseUrl
   };
   if (agentGateway.bootstrapSecret) {
     agentGatewayConfig.bootstrapSecret = agentGateway.bootstrapSecret;
+  }
+  if (agentGateway.startupIssue) {
+    agentGatewayConfig.startupIssue = agentGateway.startupIssue;
   }
 
   return {
@@ -840,6 +889,12 @@ function registerIpcHandlers(): void {
 
   areIpcHandlersRegistered = true;
 
+  ipcMain.on("memmy:renderer-ready", (event) => {
+    const senderId = event.sender.id;
+    rendererReadyWebContentsIds.add(senderId);
+    rendererReadyWaiters.get(senderId)?.(true);
+  });
+
   ipcMain.handle("memmy:get-runtime-config", () => {
     if (!runtimeConfig) {
       throw new Error("Memmy runtime config is not ready");
@@ -849,6 +904,7 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.handle("memmy:get-app-info", () => getDesktopAppInfo());
+  ipcMain.handle("memmy:get-installation-id", () => getOrCreateInstallationId());
 
   ipcMain.handle("memmy:check-for-updates", async () => checkForUpdates());
 
@@ -1170,6 +1226,8 @@ async function installPreparedRequiredUpdateBeforeBoot(): Promise<boolean> {
 
     const safeFilePath = resolveDownloadedUpdatePath(preparedUpdate.filePath);
     await access(safeFilePath, fsConstants.R_OK);
+    await stageMacDmgUpdatePackageOrDiscard(safeFilePath);
+    showUpdateInstallSplashWindow(targetVersion);
     hideMacDockForPreparedUpdateInstall();
     await writePackagedStartupLog(`boot:prepared-required-update ${targetVersion}`);
     if (existsSync(resolvePreparedRequiredUpdateLockPath())) {
@@ -1187,6 +1245,7 @@ async function installPreparedRequiredUpdateBeforeBoot(): Promise<boolean> {
     return Boolean(installResult.willQuit);
   } catch (error) {
     console.warn("prepared required app update skipped:", error);
+    closeSplashWindow();
     await clearPreparedRequiredUpdate();
     await clearPreparedRequiredUpdateAttempt();
     await writePackagedStartupLog(`boot:prepared-required-update skipped\n${formatStartupError(error)}`);
@@ -1486,7 +1545,11 @@ async function prepareRequiredUpdateAfterBoot(): Promise<void> {
     }
 
     await writePackagedStartupLog(`boot:managed-update prepare ${update.currentVersion}->${targetVersion}`);
-    const preparedFilePath = update.preparedUpdatePath ?? (await downloadUpdate(update, { openInstaller: false })).filePath;
+    const reusablePreparedFilePath = await resolvePreparedUpdatePackagePath(update.downloadUrl, update.latestVersion);
+    const preparedFilePath = reusablePreparedFilePath ?? (await downloadUpdate(update, { openInstaller: false })).filePath;
+    if (reusablePreparedFilePath) {
+      await stageMacDmgUpdatePackageOrDiscard(preparedFilePath);
+    }
     await writePreparedRequiredUpdate(update, preparedFilePath);
     preparedManagedBackgroundUpdateVersion = targetVersion;
     await writePackagedStartupLog(`boot:managed-update prepared ${targetVersion}`);
@@ -1525,6 +1588,7 @@ async function installPreparedRequiredUpdateOnQuit(): Promise<void> {
 
     const safeFilePath = resolveDownloadedUpdatePath(preparedUpdate.filePath);
     await access(safeFilePath, fsConstants.R_OK);
+    await stageMacDmgUpdatePackageOrDiscard(safeFilePath);
     await writePackagedStartupLog(`quit:prepared-required-update ${preparedUpdate.latestVersion ?? "unknown"}`);
     const installOptions: BackgroundUpdateInstallOptions = {
       quitCurrentApp: false,
@@ -1536,7 +1600,10 @@ async function installPreparedRequiredUpdateOnQuit(): Promise<void> {
     if (process.platform === "win32") {
       installOptions.expectedVersion = preparedUpdate.latestVersion;
     }
-    await openBackgroundUpdateInstaller(safeFilePath, installOptions);
+    const installResult = await openBackgroundUpdateInstaller(safeFilePath, installOptions);
+    if (process.platform === "darwin" && installResult.background && !(await waitForPreparedRequiredUpdateLockStart())) {
+      await writePackagedStartupLog("quit:prepared-required-update lock-start-timeout");
+    }
   } catch (error) {
     console.warn("prepared required app update on quit skipped:", error);
     if (isMissingFileError(error)) {
@@ -1594,6 +1661,7 @@ async function hasPreparedRequiredUpdate(update: DesktopUpdateCheckResult): Prom
   try {
     const safeFilePath = resolveDownloadedUpdatePath(preparedUpdate.filePath);
     await access(safeFilePath, fsConstants.R_OK);
+    await stageMacDmgUpdatePackageOrDiscard(safeFilePath);
     return true;
   } catch {
     await clearPreparedRequiredUpdate();
@@ -1762,7 +1830,26 @@ function resolvePreparedRequiredUpdatePath(): string {
  * @returns The lock directory path next to the marker file.
  */
 function resolvePreparedRequiredUpdateLockPath(): string {
+  const relayLockPath = resolveWindowsUpgradeRelayLockPath();
+  if (relayLockPath && existsSync(relayLockPath)) {
+    return relayLockPath;
+  }
   return `${resolvePreparedRequiredUpdatePath()}.lock`;
+}
+
+/**
+ * Resolves the install-independent lock held by the Windows legacy-upgrade relay.
+ *
+ * The relay moves the old install-local data directory out of the way, so the legacy marker lock
+ * temporarily disappears. New Windows builds prefer this external lock while preserving the old
+ * marker lock as a fallback for updates that do not need the relay.
+ *
+ * @returns The relay lock path on Windows, or null when it cannot be resolved.
+ */
+function resolveWindowsUpgradeRelayLockPath(): string | null {
+  if (process.platform !== "win32") return null;
+  const localAppData = process.env.LOCALAPPDATA?.trim();
+  return localAppData ? join(localAppData, "Memmy", "upgrade-staging", "active.lock") : null;
 }
 
 /**
@@ -1942,21 +2029,14 @@ async function downloadUpdate(
   }
 
   const downloadUrl = normalizeHttpUrl(update.downloadUrl);
-  const response = await fetch(downloadUrl, { cache: "no-store" });
-  if (!response.ok) {
-    throw new Error(`update package download failed: ${response.status}`);
-  }
-
   const updatesDirectory = resolveUpdatesDirectory();
   await mkdir(updatesDirectory, { recursive: true });
   const filePath = join(updatesDirectory, resolveUpdatePackageFileName(downloadUrl, update.latestVersion));
-  await downloadUpdatePackageToFile(response, filePath, downloadUrl, progressTarget);
+  await downloadUpdatePackageWithLock(downloadUrl, filePath, progressTarget);
+  await stageMacDmgUpdatePackageOrDiscard(filePath);
 
   if (options.openInstaller === false) {
-    await stageMacDmgUpdatePackage(filePath).catch(async (error) => {
-      console.warn("mac update package staging skipped:", error);
-      await writePackagedStartupLog(`mac-update-stage skipped\n${formatStartupError(error)}`);
-    });
+    await writePreparedRequiredUpdate(update, filePath);
     return { filePath, opened: false };
   }
 
@@ -1967,20 +2047,56 @@ async function downloadUpdate(
   return openUpdateInstaller(filePath);
 }
 
+async function downloadUpdatePackageWithLock(
+  downloadUrl: string,
+  filePath: string,
+  progressTarget?: WebContents
+): Promise<void> {
+  const downloadKey = `${downloadUrl}\n${filePath}`;
+  const existingDownload = updatePackageDownloadLocks.get(downloadKey);
+  if (existingDownload) {
+    await existingDownload;
+    await emitCompletedUpdateDownloadProgress(downloadUrl, filePath, progressTarget);
+    return;
+  }
+
+  const downloadTask = (async () => {
+    const response = await fetch(downloadUrl, { cache: "no-store" });
+    if (!response.ok) {
+      throw new Error(`update package download failed: ${response.status}`);
+    }
+
+    await downloadUpdatePackageToFile(response, filePath, downloadUrl, progressTarget);
+  })();
+
+  updatePackageDownloadLocks.set(downloadKey, downloadTask);
+  try {
+    await downloadTask;
+  } finally {
+    if (updatePackageDownloadLocks.get(downloadKey) === downloadTask) {
+      updatePackageDownloadLocks.delete(downloadKey);
+    }
+  }
+}
+
 async function downloadUpdatePackageToFile(
   response: Response,
   filePath: string,
   downloadUrl: string,
   progressTarget?: WebContents
 ): Promise<void> {
-  const temporaryFilePath = `${filePath}.download`;
+  const temporaryFilePath = `${filePath}.${process.pid}.${Date.now()}.download`;
   const totalBytes = readDownloadContentLength(response.headers);
   let transferredBytes = 0;
+  let downloadCompleted = false;
   let lastPublishedAt = 0;
   let lastPublishedPercent: number | null = null;
 
   const publishProgress = (force = false) => {
-    const progress = createUpdateDownloadProgress(downloadUrl, filePath, transferredBytes, totalBytes);
+    const currentProgress = createUpdateDownloadProgress(downloadUrl, filePath, transferredBytes, totalBytes);
+    const progress = !downloadCompleted && currentProgress.percent === 100
+      ? { ...currentProgress, percent: 99 }
+      : currentProgress;
     const now = Date.now();
     if (!force && now - lastPublishedAt < 100 && progress.percent === lastPublishedPercent) {
       return;
@@ -1999,7 +2115,6 @@ async function downloadUpdatePackageToFile(
       const buffer = Buffer.from(await response.arrayBuffer());
       transferredBytes = buffer.byteLength;
       await writeFile(temporaryFilePath, buffer);
-      publishProgress(true);
     } else {
       const reader = response.body.getReader();
       const fileHandle = await open(temporaryFilePath, "w");
@@ -2021,11 +2136,23 @@ async function downloadUpdatePackageToFile(
         reader.releaseLock();
         await fileHandle.close().catch(() => undefined);
       }
-      publishProgress(true);
+    }
+
+    const downloadedPackage = await stat(temporaryFilePath);
+    if (downloadedPackage.size <= 0) {
+      throw new Error("update package download is empty");
+    }
+    if (downloadedPackage.size !== transferredBytes) {
+      throw new Error(`update package write incomplete: ${downloadedPackage.size}/${transferredBytes}`);
+    }
+    if (totalBytes !== null && downloadedPackage.size !== totalBytes) {
+      throw new Error(`update package download incomplete: ${downloadedPackage.size}/${totalBytes}`);
     }
 
     await removeFileIfExists(filePath);
     await rename(temporaryFilePath, filePath);
+    downloadCompleted = true;
+    publishProgress(true);
   } catch (error) {
     await removeFileIfExists(temporaryFilePath).catch(() => undefined);
     throw error;
@@ -2033,6 +2160,11 @@ async function downloadUpdatePackageToFile(
 }
 
 function readDownloadContentLength(headers: Headers): number | null {
+  const contentEncoding = headers.get("content-encoding")?.trim().toLowerCase();
+  if (contentEncoding && contentEncoding !== "identity") {
+    return null;
+  }
+
   const value = headers.get("content-length");
   if (!value) {
     return null;
@@ -2070,6 +2202,19 @@ function emitUpdateDownloadProgress(
   }
 
   progressTarget.send(UPDATE_DOWNLOAD_PROGRESS_CHANNEL, progress);
+}
+
+async function emitCompletedUpdateDownloadProgress(
+  downloadUrl: string,
+  filePath: string,
+  progressTarget?: WebContents
+): Promise<void> {
+  if (!progressTarget || progressTarget.isDestroyed()) {
+    return;
+  }
+
+  const downloadedPackage = await stat(filePath);
+  emitUpdateDownloadProgress(progressTarget, createUpdateDownloadProgress(downloadUrl, filePath, downloadedPackage.size, downloadedPackage.size));
 }
 
 async function removeFileIfExists(filePath: string): Promise<void> {
@@ -2255,6 +2400,7 @@ OPEN_AFTER_INSTALL="\${5:-1}"
 MARKER_PATH="\${6:-}"
 STAGED_APP_PATH="\${7:-}"
 STAGED_READY_PATH="\${8:-}"
+REOPEN_AFTER_INSTALL="$OPEN_AFTER_INSTALL"
 SCRIPT_PATH="$0"
 MOUNT_POINT=""
 LOCK_DIR=""
@@ -2327,6 +2473,10 @@ fi
 LEFTOVER_PIDS="$(/usr/bin/pgrep -f "$DEST_APP_PATH/Contents/MacOS/" || true)"
 if [[ -n "$LEFTOVER_PIDS" ]]; then
   echo "terminating leftover Memmy runtime processes: $LEFTOVER_PIDS"
+  if [[ "$OPEN_AFTER_INSTALL" != "1" ]]; then
+    REOPEN_AFTER_INSTALL="1"
+    echo "detected reopen while background update is installing; will reopen after replacement"
+  fi
   /bin/kill $LEFTOVER_PIDS >/dev/null 2>&1 || true
   for _ in 1 2 3 4 5; do
     LEFTOVER_PIDS="$(/usr/bin/pgrep -f "$DEST_APP_PATH/Contents/MacOS/" || true)"
@@ -2371,7 +2521,7 @@ if [[ -n "$MARKER_PATH" ]]; then
 fi
 /bin/rm -rf "$BACKUP_APP_PATH" >/dev/null 2>&1 || true
 INSTALL_SUCCEEDED=1
-if [[ "$OPEN_AFTER_INSTALL" == "1" ]]; then
+if [[ "$REOPEN_AFTER_INSTALL" == "1" ]]; then
   /bin/sleep 0.1
   /usr/bin/open -n "$DEST_APP_PATH" >/dev/null 2>&1 || true
 fi
@@ -2393,11 +2543,56 @@ async function stageMacDmgUpdatePackage(filePath: string): Promise<void> {
 
   const stagedAppPath = resolveStagedMacUpdateAppPath(filePath);
   const stagedReadyPath = resolveStagedMacUpdateReadyPath(filePath);
+  if (existsSync(stagedAppPath) && existsSync(stagedReadyPath)) {
+    return;
+  }
   const helperPath = join(resolveUpdatesDirectory(), `stage-mac-update-${Date.now()}.zsh`);
   const logPath = join(resolveUpdatesDirectory(), "mac-update-install.log");
   await writeFile(helperPath, createMacDmgUpdateStageScript(), { mode: 0o700 });
   await chmod(helperPath, 0o700).catch(() => undefined);
-  await runHelperScript(helperPath, [filePath, stagedAppPath, stagedReadyPath, logPath]);
+  try {
+    await runHelperScript(helperPath, [filePath, stagedAppPath, stagedReadyPath, logPath]);
+  } finally {
+    await removeFileIfExists(helperPath).catch(() => undefined);
+  }
+}
+
+async function stageMacDmgUpdatePackageWithLock(filePath: string): Promise<void> {
+  const safeFilePath = resolveDownloadedUpdatePath(filePath);
+  const existingPreparation = updatePackagePreparationLocks.get(safeFilePath);
+  if (existingPreparation) {
+    await existingPreparation;
+    return;
+  }
+
+  const preparation = stageMacDmgUpdatePackage(safeFilePath);
+  updatePackagePreparationLocks.set(safeFilePath, preparation);
+  try {
+    await preparation;
+  } finally {
+    if (updatePackagePreparationLocks.get(safeFilePath) === preparation) {
+      updatePackagePreparationLocks.delete(safeFilePath);
+    }
+  }
+}
+
+async function stageMacDmgUpdatePackageOrDiscard(filePath: string): Promise<void> {
+  if (!shouldInstallMacDmgUpdateInBackground(filePath)) {
+    return;
+  }
+
+  try {
+    await stageMacDmgUpdatePackageWithLock(filePath);
+  } catch (error) {
+    console.warn("mac update package staging failed:", error);
+    await writePackagedStartupLog(`mac-update-stage failed\n${formatStartupError(error)}`).catch(() => undefined);
+    await Promise.all([
+      removeFileIfExists(filePath).catch(() => undefined),
+      rm(resolveStagedMacUpdateAppPath(filePath), { recursive: true, force: true }).catch(() => undefined),
+      removeFileIfExists(resolveStagedMacUpdateReadyPath(filePath)).catch(() => undefined)
+    ]);
+    throw error;
+  }
 }
 
 /**
@@ -2832,7 +3027,7 @@ function scheduleQuitForManualUpdateInstall(): void {
  * @returns The local update package directory.
  */
 function resolveUpdatesDirectory(): string {
-  return join(app.getPath("userData"), "updates");
+  return windowsDataLayout?.updatesPath ?? join(app.getPath("userData"), "updates");
 }
 
 /**
@@ -2922,6 +3117,33 @@ async function pruneUpdatesDirectory(): Promise<void> {
     }
   } catch (error) {
     console.warn("prune updates directory skipped:", error);
+  }
+}
+
+/**
+ * Removes obsolete Windows installer caches after a successful boot. These paths contain copied
+ * installers and relay helpers, not account or memory data. An active unified update lock always
+ * suppresses cleanup so recovery still has every file it needs.
+ */
+async function pruneWindowsLegacyUpdateCaches(): Promise<void> {
+  if (process.platform !== "win32" || !app.isPackaged || !windowsDataLayout) return;
+  const relayLockPath = resolveWindowsUpgradeRelayLockPath();
+  if (!relayLockPath || existsSync(relayLockPath)) return;
+
+  const legacyUserDataUpdatesPath = join(app.getPath("userData"), "updates");
+  if (resolve(legacyUserDataUpdatesPath).toLowerCase() !== resolve(windowsDataLayout.updatesPath).toLowerCase()) {
+    await rm(legacyUserDataUpdatesPath, { recursive: true, force: true }).catch(() => undefined);
+  }
+
+  const stagingRoot = dirname(relayLockPath);
+  const stagingEntries = await readdir(stagingRoot).catch(() => []);
+  await Promise.all(stagingEntries
+    .filter((entry) => entry.toLowerCase() !== "active.lock")
+    .map((entry) => rm(join(stagingRoot, entry), { recursive: true, force: true }).catch(() => undefined)));
+
+  const localAppData = process.env.LOCALAPPDATA?.trim();
+  if (localAppData) {
+    await rm(join(localAppData, "@memmydesktop-updater"), { recursive: true, force: true }).catch(() => undefined);
   }
 }
 
@@ -3185,6 +3407,7 @@ let splashCloseTimer: ReturnType<typeof setTimeout> | null = null;
 // Fallback: regardless of whether the close signal arrives, force-close after at most this long, so
 // it never blocks the UI permanently.
 const SPLASH_MAX_VISIBLE_MS = 15 * 1000;
+const UPDATE_SPLASH_MAX_VISIBLE_MS = 60 * 1000;
 
 /**
  * Shows the startup splash. Only called on the normal boot path; creation failures do not affect the boot flow.
@@ -3192,13 +3415,30 @@ const SPLASH_MAX_VISIBLE_MS = 15 * 1000;
  * @returns Nothing.
  */
 function showSplashWindow(): void {
+  const language = resolveCurrentStartupSplashLanguage();
+  showSplashHtml(resolveStartupSplashHtml(language), 300, 200, SPLASH_MAX_VISIBLE_MS);
+}
+
+function showUpdateInstallSplashWindow(version?: string): void {
+  const language = resolveCurrentStartupSplashLanguage();
+  showSplashHtml(resolveUpdateSplashHtml(language, version), 360, 220, UPDATE_SPLASH_MAX_VISIBLE_MS);
+}
+
+function resolveCurrentStartupSplashLanguage(): StartupSplashLanguage {
+  return resolveStartupSplashLanguage(
+    join(app.getPath("userData"), "app.sqlite"),
+    resolveDefaultDesktopDisplayLanguage()
+  );
+}
+
+function showSplashHtml(html: string, width: number, height: number, maxVisibleMs: number): void {
   try {
     if (splashWindow && !splashWindow.isDestroyed()) {
       return;
     }
     const splash = new BrowserWindow({
-      width: 300,
-      height: 200,
+      width,
+      height,
       frame: false,
       resizable: false,
       movable: false,
@@ -3217,12 +3457,8 @@ function showSplashWindow(): void {
         splash.show();
       }
     });
-    const language = resolveStartupSplashLanguage(
-      join(app.getPath("userData"), "app.sqlite"),
-      resolveDefaultDesktopDisplayLanguage()
-    );
-    void splash.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(resolveStartupSplashHtml(language))}`);
-    splashCloseTimer = setTimeout(closeSplashWindow, SPLASH_MAX_VISIBLE_MS);
+    void splash.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+    splashCloseTimer = setTimeout(closeSplashWindow, maxVisibleMs);
     splashCloseTimer.unref?.();
   } catch (error) {
     console.warn("splash window skipped:", error);
@@ -3246,14 +3482,50 @@ function closeSplashWindow(): void {
   }
 }
 
-function createInitialWindow(): void {
+function createInitialWindow(): BrowserWindow | null {
   if (resolveInitialWindowMode() === "pet") {
     setPetWindowMode(true);
     closeSplashWindow(); // Pet mode starts fast; no splash needed
-    return;
+    return petWindow;
   }
 
-  createMainWindow();
+  return createMainWindow();
+}
+
+function waitForInitialRendererVerification(targetWindow: BrowserWindow | null): Promise<boolean> {
+  if (!targetWindow || targetWindow.isDestroyed()) return Promise.resolve(false);
+  const webContentsId = targetWindow.webContents.id;
+  if (rendererReadyWebContentsIds.has(webContentsId)) return Promise.resolve(true);
+  return new Promise((resolveVerification) => {
+    let settled = false;
+    const finish = (verified: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      targetWindow.webContents.removeListener("did-fail-load", handleFailed);
+      targetWindow.removeListener("closed", handleClosed);
+      if (rendererReadyWaiters.get(webContentsId) === finish) {
+        rendererReadyWaiters.delete(webContentsId);
+      }
+      resolveVerification(verified);
+    };
+    const handleFailed = (_event: ElectronEvent, _errorCode: number, _errorDescription: string, _validatedUrl: string, isMainFrame: boolean) => {
+      if (isMainFrame) finish(false);
+    };
+    const handleClosed = () => finish(false);
+    const timeout = setTimeout(() => finish(false), 30_000);
+    timeout.unref?.();
+    rendererReadyWaiters.set(webContentsId, finish);
+    targetWindow.webContents.on("did-fail-load", handleFailed);
+    targetWindow.once("closed", handleClosed);
+    if (rendererReadyWebContentsIds.has(webContentsId)) finish(true);
+  });
+}
+
+function isWindowsDataMigrationConsistencyError(error: unknown): boolean {
+  return error instanceof Error
+    && "code" in error
+    && error.code === "windows_data_migration_inconsistent";
 }
 
 /**
@@ -4500,7 +4772,7 @@ function parseRendererRouteTarget(value: unknown): RendererRouteTarget | null {
   }
 
   const record = value as Record<string, unknown>;
-  const route = typeof record.route === "string" && ["/welcome", "/token-detail", "/login", "/api-key", "/api-key-models", "/api-key-optional", "/onboarding", "/main", "/tools", "/memory", "/memory-sources", "/settings"].includes(record.route) ? record.route : null;
+  const route = typeof record.route === "string" && ["/welcome", "/token-detail", "/login", "/api-key", "/api-key-models", "/api-key-optional", "/onboarding", "/main", "/tools", "/memory", "/memory-sources", "/literature-review", "/settings"].includes(record.route) ? record.route : null;
   const hash = typeof record.hash === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(record.hash) ? record.hash : null;
   const agentChatId = route === "/main" && typeof record.agentChatId === "string" && /^[A-Za-z0-9_:-]{1,128}$/.test(record.agentChatId) ? record.agentChatId : null;
   const petIntent = record.petIntent === "user" ? "user" : null;
@@ -4642,6 +4914,12 @@ app.whenReady().then(async () => {
     return;
   }
 
+  const windowsUpgradeLockPath = resolveWindowsUpgradeRelayLockPath();
+  if (windowsUpgradeLockPath && existsSync(windowsUpgradeLockPath)) {
+    app.exit(0);
+    return;
+  }
+
   await boot();
 }).catch(async (error: unknown) => {
   console.error(error);
@@ -4780,6 +5058,7 @@ async function cleanupBeforeQuit(): Promise<void> {
   await installPreparedRequiredUpdateOnQuit();
   ipcMain.removeHandler("memmy:get-runtime-config");
   ipcMain.removeHandler("memmy:get-app-info");
+  ipcMain.removeHandler("memmy:get-installation-id");
   ipcMain.removeHandler("memmy:check-for-updates");
   ipcMain.removeHandler("memmy:download-update");
   ipcMain.removeHandler("memmy:open-update-installer");

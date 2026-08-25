@@ -136,6 +136,7 @@ export function buildAgentSourceConflictParams(input: AgentSourceConflictInput):
 
 export function createAgentSourceLifecycleAnalytics(options: {
   getClientId?: () => string | null | undefined;
+  getInstallationId?: () => string | null | undefined;
   getUserId?: () => string | null | undefined;
   getUserMode?: () => string | null | undefined;
   appEnv?: AnalyticsAppEnv | null;
@@ -147,6 +148,7 @@ export function createAgentSourceLifecycleAnalytics(options: {
   const queued = createQueuedAnalytics({
     source: AGENT_SOURCE_ANALYTICS_SOURCE,
     getClientId: options.getClientId ?? (() => readAnalyticsClientId()),
+    getInstallationId: options.getInstallationId,
     getUserId: options.getUserId,
     getUserMode: options.getUserMode,
     appEnv: options.appEnv,

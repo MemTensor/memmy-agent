@@ -13,10 +13,9 @@
     "declaration": true,
     "sourceMap": true,
     "rootDir": ".",
-    "baseUrl": ".",
     "paths": {
-      "memmy-agent": ["src/index.ts"],
-      "memmy-agent/*": ["src/*"]
+      "memmy-agent": ["./src/index.ts"],
+      "memmy-agent/*": ["./src/*"]
     },
     "types": ["node", "vitest/globals"]
   },

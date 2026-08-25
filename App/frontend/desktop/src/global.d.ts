@@ -27,8 +27,10 @@ declare global {
   interface Window {
     memmy?: {
       platform: string;
+      notifyRendererReady(): void;
       getRuntimeConfig(): Promise<unknown>;
       getAppInfo(): Promise<DesktopAppInfo>;
+      getInstallationId(): Promise<string>;
       checkForUpdates(): Promise<DesktopUpdateCheckResult>;
       downloadUpdate(update: DesktopUpdateCheckResult, options?: import("@memmy/desktop-interface").DesktopUpdateDownloadOptions): Promise<DesktopUpdateInstallResult>;
       onUpdateDownloadProgress(callback: (progress: DesktopUpdateDownloadProgress) => void): () => void;

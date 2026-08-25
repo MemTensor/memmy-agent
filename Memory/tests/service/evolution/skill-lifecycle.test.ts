@@ -1,8 +1,9 @@
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { DEFAULT_MEMMY_CONFIG, MemoryDb } from "../../../src/index.js";
+import { DEFAULT_MEMMY_CONFIG, MemoryDb, type LlmClient } from "../../../src/index.js";
 import {
   insertActivePolicyMemory,
+  insertActiveSkillMemoryForTest,
   makeTraceEligibleForL2,
   queueSkillCrystallizationJobForTest,
   setSkillLifecycleForTest
@@ -23,6 +24,121 @@ const {
 afterEach(cleanup);
 
 describe("MemoryService / evolution / skill lifecycle", () => {
+  it("[BC-24] keeps scanned and memory.add Skills immutable while updating only a memory-generated Skill", async () => {
+    const { db, service } = createTestService({ skillLlm: createSkillRebuildLlm() });
+    const userId = "bc-24-user";
+    const session = service.openSession({
+      namespace: { source: "codex", profileId: "jiang", userId },
+      workspaceId: "bc-24-workspace"
+    });
+    const complete = service.completeTurn("bc-24-evidence", {
+      sessionId: session.sessionId,
+      episodeId: "bc-24-episode",
+      query: "python pytest inspect failure retry after fixing issue",
+      answer: "Run pytest, inspect the failure, apply the fix, and verify the result."
+    });
+    makeTraceEligibleForL2(db, complete.l1MemoryId);
+    insertActivePolicyMemory(db, {
+      id: "policy_bc24",
+      userId,
+      sessionId: session.sessionId,
+      agentId: "codex",
+      appId: "bc-24-workspace",
+      profileId: "jiang",
+      sourceTraceId: complete.l1MemoryId,
+      sourceEpisodeId: complete.episodeId
+    });
+    insertActiveSkillMemoryForTest(db, {
+      id: "skill_bc24_generated",
+      userId,
+      sessionId: session.sessionId,
+      agentId: "codex",
+      appId: "bc-24-workspace",
+      profileId: "jiang",
+      sourcePolicyIds: ["policy_bc24"],
+      tags: ["skill", "python", "pytest"],
+      name: "pytest_retry_workflow",
+      invocationGuide: "Retry pytest without the new focused verification.",
+      procedureJson: {
+        summary: "Old generated procedure.",
+        steps: [{
+          id: "old-step",
+          title: "Retry",
+          body: "Retry pytest.",
+          supportingPolicyIds: ["policy_bc24"]
+        }]
+      }
+    });
+    const scanned = service.addMemory({
+      namespace: { source: "codex", profileId: "jiang", userId },
+      requestId: "bc-24-scanned",
+      layer: "Skill",
+      title: "external pytest review",
+      content: "External Agent procedure must remain byte-for-byte unchanged.",
+      source: "agent-b",
+      sourceAgentId: "agent-b",
+      sourceSkillId: "external-pytest-review",
+      sourceSkillVersion: "1"
+    });
+    const added = service.addMemory({
+      namespace: { source: "codex", profileId: "jiang", userId },
+      requestId: "bc-24-memory-add",
+      layer: "Skill",
+      title: "manually added pytest review",
+      content: "Manually added procedure must remain byte-for-byte unchanged.",
+      source: "manual",
+      sourceAgentId: "manual",
+      sourceSkillId: "manual-pytest-review",
+      sourceSkillVersion: "1"
+    });
+    const readonlyBefore = db.db.prepare(
+      `SELECT id, status, memory_value, properties_json
+       FROM memories WHERE id IN (?, ?) ORDER BY id`
+    ).all(scanned.id, added.id);
+
+    db.db.prepare(`UPDATE evolution_jobs SET status = 'succeeded'`).run();
+    queueSkillCrystallizationJobForTest(db, {
+      id: "job_bc24_update",
+      userId,
+      sessionId: session.sessionId,
+      episodeId: complete.episodeId,
+      policyId: "policy_bc24"
+    });
+    await service.runWorkerOnce(20);
+
+    expect(db.db.prepare(
+      `SELECT id, status, memory_value, properties_json
+       FROM memories WHERE id IN (?, ?) ORDER BY id`
+    ).all(scanned.id, added.id)).toEqual(readonlyBefore);
+    const flags = db.db.prepare(
+      `SELECT id,
+              json_extract(properties_json, '$.internal_info.read_only') AS read_only,
+              json_extract(properties_json, '$.internal_info.generated_by_memory_base') AS generated
+       FROM memories WHERE id IN (?, ?, ?) ORDER BY id`
+    ).all(scanned.id, added.id, "skill_bc24_generated");
+    expect(flags).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: scanned.id, read_only: 1, generated: null }),
+      expect.objectContaining({ id: added.id, read_only: 1, generated: null }),
+      expect.objectContaining({ id: "skill_bc24_generated", read_only: 0, generated: 1 })
+    ]));
+    const generated = db.db.prepare(
+      `SELECT properties_json FROM memories WHERE id = 'skill_bc24_generated'`
+    ).get() as { properties_json: string };
+    expect(JSON.parse(generated.properties_json)).toMatchObject({
+      internal_info: {
+        skill: {
+          procedure_json: {
+            steps: expect.arrayContaining([
+              expect.objectContaining({ title: "Inspect failure" }),
+              expect.objectContaining({ title: "Verify result" })
+            ])
+          }
+        }
+      }
+    });
+    db.close();
+  });
+
   it("does not crystallize failure-only policies into skills", async () => {
     const { db, service } = createTestService();
     const at = new Date().toISOString();
@@ -182,6 +298,213 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       policyId: "policy_fresh_skill_skip",
       reason: "llm-failed: skill.crystallize.invalid: missing retrieval_blurb"
     });
+
+    db.close();
+  });
+
+  it("[BC-19] merges compatible skills in place and preserves all policy sources", async () => {
+    const { db, service } = createTestService({ skillLlm: createSkillRebuildLlm() });
+    const userId = "user-compatible-skill-merge";
+    const session = service.openSession({
+      namespace: {
+        source: "codex",
+        profileId: "jiang",
+        userId
+      },
+      workspaceId: "workspace-compatible-skill-merge"
+    });
+    const complete = service.completeTurn("turn-compatible-skill-merge", {
+      sessionId: session.sessionId,
+      episodeId: "episode-compatible-skill-merge",
+      query: "python pytest inspect failure retry after fixing issue",
+      answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result."
+    });
+    makeTraceEligibleForL2(db, complete.l1MemoryId);
+    insertActivePolicyMemory(db, {
+      id: "policy-compatible-skill-target",
+      userId,
+      sessionId: session.sessionId,
+      agentId: "codex",
+      appId: "workspace-compatible-skill-merge",
+      profileId: "jiang",
+      sourceTraceId: complete.l1MemoryId,
+      sourceEpisodeId: complete.episodeId
+    });
+    insertActiveSkillMemoryForTest(db, {
+      id: "skill-compatible-a",
+      userId,
+      sessionId: session.sessionId,
+      agentId: "codex",
+      appId: "workspace-compatible-skill-merge",
+      profileId: "jiang",
+      sourcePolicyIds: ["policy-source-a", "policy-compatible-skill-target"],
+      tags: ["skill", "python", "pytest"],
+      name: "pytest_retry_workflow",
+      invocationGuide: "Run pytest, inspect the failure, retry after fixing issue, and verify the result.",
+      procedureJson: {
+        summary: "Inspect and retry pytest failures.",
+        steps: [{
+          id: "step-source-a",
+          title: "Inspect source A",
+          body: "Inspect the source A failure.",
+          supportingPolicyIds: ["policy-source-a"]
+        }, {
+          id: "step-target-policy",
+          title: "Apply target policy",
+          body: "Apply the target policy fix.",
+          supportingPolicyIds: ["policy-compatible-skill-target"]
+        }]
+      }
+    });
+    insertActiveSkillMemoryForTest(db, {
+      id: "skill-compatible-b",
+      userId,
+      sessionId: session.sessionId,
+      agentId: "codex",
+      appId: "workspace-compatible-skill-merge",
+      profileId: "jiang",
+      sourcePolicyIds: ["policy-source-b"],
+      tags: ["skill", "python", "pytest"],
+      name: "pytest_failure_retry",
+      invocationGuide: "Run pytest, inspect the failure, retry after fixing issue, and verify the result.",
+      procedureJson: {
+        summary: "Verify the retry outcome.",
+        steps: [{
+          id: "step-source-b",
+          title: "Verify source B",
+          body: "Verify the source B result.",
+          supportingPolicyIds: ["policy-source-b"]
+        }]
+      }
+    });
+    db.db.prepare(`UPDATE evolution_jobs SET status = 'succeeded'`).run();
+    queueSkillCrystallizationJobForTest(db, {
+      id: "job-compatible-skill-merge",
+      userId,
+      sessionId: session.sessionId,
+      episodeId: complete.episodeId,
+      policyId: "policy-compatible-skill-target"
+    });
+
+    await service.runWorkerOnce(20);
+
+    const rows = db.db.prepare(
+      `SELECT id, status, properties_json
+       FROM memories
+       WHERE user_id = ? AND memory_layer = 'Skill'
+       ORDER BY id`
+    ).all(userId) as Array<{ id: string; status: string; properties_json: string }>;
+    expect(rows).toHaveLength(2);
+    const active = rows.find((row) => row.status !== "archived");
+    const archived = rows.find((row) => row.status === "archived");
+    expect(active?.id).toMatch(/^skill-compatible-[ab]$/);
+    expect(archived?.id).toMatch(/^skill-compatible-[ab]$/);
+    const activeInternal = JSON.parse(active!.properties_json) as {
+      internal_info?: {
+        source_policy_ids?: string[];
+        skill?: {
+          procedure_json?: {
+            steps?: Array<{ id?: string; supportingPolicyIds?: string[] }>;
+          };
+        };
+      };
+    };
+    expect(activeInternal.internal_info?.source_policy_ids).toEqual(expect.arrayContaining([
+      "policy-source-a",
+      "policy-source-b",
+      "policy-compatible-skill-target"
+    ]));
+    expect(activeInternal.internal_info?.skill?.procedure_json?.steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "step-source-a", supportingPolicyIds: ["policy-source-a"] }),
+      expect.objectContaining({ id: "step-source-b", supportingPolicyIds: ["policy-source-b"] })
+    ]));
+    const archivedInternal = JSON.parse(archived!.properties_json) as {
+      internal_info?: { merged_into_skill_id?: string };
+    };
+    expect(archivedInternal.internal_info?.merged_into_skill_id).toBe(active!.id);
+
+    db.close();
+  });
+
+  it("fans out one policy update without merging incompatible skills that share it", async () => {
+    const { db, service } = createTestService({ skillLlm: createSkillRebuildLlm() });
+    const userId = "user-shared-policy-skill-fanout";
+    const session = service.openSession({
+      namespace: { source: "codex", profileId: "jiang", userId },
+      workspaceId: "workspace-shared-policy-skill-fanout"
+    });
+    const complete = service.completeTurn("turn-shared-policy-skill-fanout", {
+      sessionId: session.sessionId,
+      episodeId: "episode-shared-policy-skill-fanout",
+      query: "python pytest inspect failure retry after fixing issue",
+      answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result."
+    });
+    makeTraceEligibleForL2(db, complete.l1MemoryId);
+    const policyId = "policy-shared-by-distinct-skills";
+    insertActivePolicyMemory(db, {
+      id: policyId,
+      userId,
+      sessionId: session.sessionId,
+      agentId: "codex",
+      appId: "workspace-shared-policy-skill-fanout",
+      profileId: "jiang",
+      sourceTraceId: complete.l1MemoryId,
+      sourceEpisodeId: complete.episodeId
+    });
+    insertActiveSkillMemoryForTest(db, {
+      id: "skill-shared-policy-pytest",
+      userId,
+      sessionId: session.sessionId,
+      agentId: "codex",
+      appId: "workspace-shared-policy-skill-fanout",
+      profileId: "jiang",
+      sourcePolicyIds: [policyId],
+      tags: ["skill", "python", "pytest"],
+      name: "pytest_retry_workflow",
+      invocationGuide: "Inspect pytest failure output, fix it, and rerun the focused test."
+    });
+    insertActiveSkillMemoryForTest(db, {
+      id: "skill-shared-policy-terraform",
+      userId,
+      sessionId: session.sessionId,
+      agentId: "codex",
+      appId: "workspace-shared-policy-skill-fanout",
+      profileId: "jiang",
+      sourcePolicyIds: [policyId],
+      tags: ["skill", "terraform", "infrastructure"],
+      name: "terraform_state_recovery",
+      invocationGuide: "Recover Terraform state safely after infrastructure drift."
+    });
+    db.db.prepare(`UPDATE evolution_jobs SET status = 'succeeded'`).run();
+    queueSkillCrystallizationJobForTest(db, {
+      id: "job-shared-policy-skill-fanout",
+      userId,
+      sessionId: session.sessionId,
+      episodeId: complete.episodeId,
+      policyId
+    });
+
+    await service.runWorkerOnce(20);
+    await service.runWorkerOnce(20);
+
+    const rows = db.db.prepare(
+      `SELECT id, status
+       FROM memories
+       WHERE user_id = ? AND memory_layer = 'Skill'
+       ORDER BY id`
+    ).all(userId) as Array<{ id: string; status: string }>;
+    expect(rows).toHaveLength(2);
+    expect(rows.map((row) => row.id)).toEqual([
+      "skill-shared-policy-pytest",
+      "skill-shared-policy-terraform"
+    ]);
+    const merges = db.db.prepare(
+      `SELECT entity_id, after_json
+       FROM memory_change_log
+       WHERE user_id = ? AND change_type = 'skill_merged_into_canonical'`
+    ).all(userId) as Array<{ entity_id: string; after_json: string }>;
+    expect(merges).toEqual([]);
+    expect(rows.map((row) => row.status)).toEqual(["resolving", "resolving"]);
 
     db.close();
   });
@@ -356,6 +679,8 @@ describe("MemoryService / evolution / skill lifecycle", () => {
         memory_layer: "Skill",
         memory_kind: "skill",
         schema_version: 1,
+        read_only: false,
+        generated_by_memory_base: true,
         source_memory_ids: ["policy_source_policy_skill_skip"],
         source_policy_ids: ["policy_source_policy_skill_skip"],
         name: "existing_policy_sourced_skill",
@@ -575,7 +900,6 @@ describe("MemoryService / evolution / skill lifecycle", () => {
        FROM memories
        WHERE user_id = 'user-archived-skill-recreate'
          AND memory_layer = 'Skill'
-         AND memory_key = 'skill:policy_archived_skill_recreate'
        ORDER BY created_at ASC`
     ).all() as Array<{ id: string; status: string; updated_at: string; properties_json: string }>;
     expect(skillRows).toHaveLength(2);
@@ -867,13 +1191,17 @@ describe("MemoryService / evolution / skill lifecycle", () => {
        WHERE user_id = ? AND memory_layer = 'Skill'
        LIMIT 1`
     ).get(userId) as { memory_key: string; properties_json: string };
-    const sourcePolicyId = skillRow.memory_key.replace(/^skill:/, "");
+    const skillSourceProperties = JSON.parse(skillRow.properties_json) as {
+      internal_info?: { source_policy_ids?: string[] };
+    };
+    const sourcePolicyId = skillSourceProperties.internal_info?.source_policy_ids?.[0];
+    expect(sourcePolicyId).toBeTruthy();
     const policyRow = db.db.prepare(
       `SELECT id, properties_json
        FROM memories
        WHERE id = ? AND user_id = ? AND memory_layer = 'L2'
        LIMIT 1`
-    ).get(sourcePolicyId, userId) as { id: string; properties_json: string };
+    ).get(sourcePolicyId!, userId) as { id: string; properties_json: string };
     const policyProperties = JSON.parse(policyRow.properties_json) as {
       internal_info?: {
         title?: string;
@@ -914,7 +1242,8 @@ describe("MemoryService / evolution / skill lifecycle", () => {
         };
       };
     };
-    expect(skillRow.memory_key).toBe(`skill:${policyRow.id}`);
+    expect(skillRow.memory_key).toMatch(/^skill:[a-f0-9]{20}$/);
+    expect(skillRow.memory_key).not.toBe(`skill:${policyRow.id}`);
     expect(skillProperties.internal_info?.name).toBe(expectedName);
     expect(skillProperties.internal_info?.skill?.name).toBe(expectedName);
     expect(policyTitle).toBeTruthy();
@@ -1218,3 +1547,41 @@ describe("MemoryService / evolution / skill lifecycle", () => {
     db.close();
   });
 });
+
+function createSkillRebuildLlm(): LlmClient {
+  const base = createNoToolSkillLlm();
+  return {
+    ...base,
+    async completeJson<T extends Record<string, unknown>>(
+      messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
+      options: { operation: string }
+    ): Promise<T> {
+      if (options.operation === "skill.rebuild.v3") {
+        return {
+          name: "pytest_retry_workflow",
+          retrieval_blurb: "Use for pytest failures that require inspection, a focused retry, and verification.",
+          trigger_context: "Use when a pytest failure must be inspected before retrying.",
+          summary: "Inspect the failure, apply the targeted fix, and rerun the focused test.",
+          parameters: [],
+          preconditions: ["A pytest run has concrete failure output."],
+          steps: [{
+            title: "Inspect failure",
+            body: "Read the pytest failure output before applying a targeted fix."
+          }, {
+            title: "Verify result",
+            body: "Rerun the exact focused pytest test and confirm it passes."
+          }],
+          examples: [],
+          tools: [],
+          decision_guidance: {
+            preference: ["Prefer focused verification after the fix."],
+            anti_pattern: ["Avoid blind retries."]
+          },
+          tags: ["pytest", "retry"],
+          changed_sections: ["steps", "decisionGuidance"]
+        } as unknown as T;
+      }
+      return base.completeJson<T>(messages, options);
+    }
+  };
+}

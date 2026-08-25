@@ -10,6 +10,7 @@ import { OverviewSubPage } from "../overview-sub-page.js";
 import { PoliciesSubPage } from "../policies-sub-page.js";
 import { SkillsSubPage } from "../skills-sub-page.js";
 import { TasksSubPage } from "../tasks-sub-page.js";
+import { UserMemoriesSubPage } from "../user-memories-sub-page.js";
 import { WorldModelSubPage } from "../world-model-sub-page.js";
 
 describe("memory sub page cache hydration", () => {
@@ -20,6 +21,7 @@ describe("memory sub page cache hydration", () => {
   it.each([
     ["overview", () => <OverviewSubPage client={null} onNavigate={() => undefined} />],
     ["memories", () => <MemoriesSubPage client={null} />],
+    ["user-memories", () => <UserMemoriesSubPage client={null} />],
     ["tasks", () => <TasksSubPage client={null} />],
     ["policies", () => <PoliciesSubPage client={null} onOpenMemoryReference={() => undefined} />],
     ["world-model", () => <WorldModelSubPage client={null} onOpenMemoryReference={() => undefined} />],

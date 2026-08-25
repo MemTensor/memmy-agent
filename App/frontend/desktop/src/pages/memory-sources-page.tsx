@@ -1462,6 +1462,7 @@ export function buildManagedAgentTaskPrompt(
     ...(normalizedUserProvidedDataPath ? [
       "The data_path was explicitly supplied by the user in the GUI as this Agent's conversation-history location. Resolve a leading ~ to the user's home directory, inspect this scoped candidate first, and verify it before use. If it is invalid, report the exact mismatch and ask for a corrected path instead of silently replacing it."
     ] : []),
+    "If Memmy runs on Windows and the Agent data lives in WSL, resolve ~ inside that distribution rather than the Windows home, preserve the absolute Linux path, identify the owning WSL distribution, and follow the Skill's WSL fields and preflight instructions.",
     "Require a matching pre-existing installation identity. If it is absent, report that the Agent was not found; never substitute Memmy or another product's history.",
     "",
     JSON.stringify(task, null, 2)

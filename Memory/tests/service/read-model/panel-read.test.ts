@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { type MemoryRow } from "../../../src/index.js";
 import { updateTraceSummary } from "../../../src/service/embedding/embedding-job-processor.js";
-import { changeLogToPanelChange } from "../../../src/service/read-model/panel-read.js";
+import {
+  changeLogToPanelChange,
+  workspaceUriDisplay
+} from "../../../src/service/read-model/panel-read.js";
 import { Repositories } from "../../../src/storage/repositories.js";
 import {
   createCapturingEmbedder,
@@ -441,6 +444,94 @@ describe("MemoryService / read model / panel", () => {
     expect(detail.item.summary).not.toBe("Environment");
 
     db.close();
+  });
+
+  it("adds typed general and project scope to L3 panel items with one batched lookup", () => {
+    const { db, service } = createTestService();
+    const repos = (service as unknown as { repos: Repositories }).repos;
+    const general = repos.l3WorldModels.upsertField({
+      userId: "world-panel-scope-user",
+      targetField: "general_rules_and_safety_constraints",
+      value: "Do not delete files without confirmation."
+    })!;
+    repos.l3WorldModels.bindWorkspaceUri(
+      "world-panel-scope-user",
+      "project-panel-scope",
+      "file:///Users/test/Code/My%20Project"
+    );
+    const project = repos.l3WorldModels.upsertField({
+      userId: "world-panel-scope-user",
+      projectId: "project-panel-scope",
+      targetField: "project_environment_profile",
+      value: "TypeScript project."
+    })!;
+    const unboundProject = repos.l3WorldModels.upsertField({
+      userId: "world-panel-scope-user",
+      projectId: "project-panel-unbound",
+      targetField: "project_environment_profile",
+      value: "Legacy project without a workspace binding."
+    })!;
+    const scopeLookup = vi.spyOn(repos.l3WorldModels, "getScopesByMemoryIds");
+
+    const panel = service.panelItems({ layer: "L3", limit: 20 });
+
+    expect(scopeLookup).toHaveBeenCalledTimes(1);
+    expect(scopeLookup).toHaveBeenCalledWith(expect.arrayContaining([general.id, project.id, unboundProject.id]));
+    expect(panel.items.find((item) => item.id === general.id)?.worldModelScope).toEqual({ kind: "general" });
+    expect(panel.items.find((item) => item.id === project.id)?.worldModelScope).toEqual({
+      kind: "project",
+      projectLabel: "My Project",
+      workspaceDisplayPath: "/Users/test/Code/My Project"
+    });
+    expect(panel.items.find((item) => item.id === unboundProject.id)?.worldModelScope).toEqual({
+      kind: "project",
+      projectLabel: null,
+      workspaceDisplayPath: null
+    });
+    expect(service.getMemory(project.id).item).not.toHaveProperty("worldModelScope");
+
+    db.close();
+  });
+
+  it("does not expose a workspace path when scope ownership is corrupted", () => {
+    const { db, service } = createTestService();
+    const repos = (service as unknown as { repos: Repositories }).repos;
+    repos.l3WorldModels.bindWorkspaceUri("scope-owner", "scope-project", "file:///safe/project");
+    const project = repos.l3WorldModels.upsertField({
+      userId: "scope-owner",
+      projectId: "scope-project",
+      targetField: "project_environment_profile",
+      value: "Project profile."
+    })!;
+    db.db.prepare(`UPDATE memories SET user_id = 'different-owner' WHERE id = ?`).run(project.id);
+
+    expect(service.panelItems({ layer: "L3" }).items.find((item) => item.id === project.id))
+      .not.toHaveProperty("worldModelScope");
+
+    db.close();
+  });
+
+  it("derives display labels and paths without depending on the host operating system", () => {
+    expect(workspaceUriDisplay("file:///C:/Users/Alice/My%20Project/")).toEqual({
+      projectLabel: "My Project",
+      workspaceDisplayPath: "C:/Users/Alice/My Project/"
+    });
+    expect(workspaceUriDisplay("file://server/share/My%20Project")).toEqual({
+      projectLabel: "My Project",
+      workspaceDisplayPath: "//server/share/My Project"
+    });
+    expect(workspaceUriDisplay("vscode-remote://ssh-remote+host/workspaces/demo")).toEqual({
+      projectLabel: "demo",
+      workspaceDisplayPath: "vscode-remote://ssh-remote+host/workspaces/demo"
+    });
+    expect(workspaceUriDisplay("file:///workspace/name%2Fwith-slash")).toEqual({
+      projectLabel: "name/with-slash",
+      workspaceDisplayPath: "/workspace/name/with-slash"
+    });
+    expect(workspaceUriDisplay("file:///bad/%E0%A4%A")).toEqual({
+      projectLabel: null,
+      workspaceDisplayPath: null
+    });
   });
 
   it("normalizes internal panel source labels for overview distribution", () => {

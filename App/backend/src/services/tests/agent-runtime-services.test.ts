@@ -46,7 +46,7 @@ describe("agent runtime services", () => {
     await createMemoryDetailService({ memoryClient }).add({ content: "remember this", source: "codex" }, runtimeCtx());
     await createMemoryDetailService({ memoryClient }).getById("memory-1", runtimeCtx());
     await createMemoryDetailService({ memoryClient }).delete("memory-1", { source: "codex" }, runtimeCtx());
-    const panelService = createPanelService({ memoryClient });
+    const panelService = createPanelService({ memoryClient, getUserId: () => "user-1" });
     await panelService.overview(runtimeCtx());
     await panelService.analysis(runtimeCtx());
     await panelService.items({ layer: "L1" }, runtimeCtx());
@@ -61,13 +61,38 @@ describe("agent runtime services", () => {
       }
     };
 
-    await expect(createPanelService({ memoryClient }).memoryApiLogs({ limit: 20, offset: 0 }, runtimeCtx()))
+    await expect(createPanelService({ memoryClient, getUserId: () => "user-1" }).memoryApiLogs({ limit: 20, offset: 0 }, runtimeCtx()))
       .resolves.toMatchObject({
         logs: [],
         total: 0,
         limit: 20,
         offset: 0
       });
+  });
+
+  it("adds the current account user to panel memory requests", async () => {
+    const baseClient = createClient();
+    const contexts: unknown[] = [];
+    const memoryClient: MemoryClient = {
+      ...baseClient,
+      async panelOverview(context) {
+        contexts.push(context);
+        return baseClient.panelOverview(context);
+      },
+      async panelItems(input, context) {
+        contexts.push(context);
+        return baseClient.panelItems(input, context);
+      }
+    };
+    const service = createPanelService({ memoryClient, getUserId: () => "account-user-1" });
+
+    await service.overview(runtimeCtx());
+    await service.items({ layer: "UserMemory" }, runtimeCtx());
+
+    expect(contexts).toEqual([
+      expect.objectContaining({ adapterId: "cursor/main", userId: "account-user-1" }),
+      expect.objectContaining({ adapterId: "cursor/main", userId: "account-user-1" })
+    ]);
   });
 
   it("wraps turn completion in idempotency and rejects duplicate body mismatches", async () => {

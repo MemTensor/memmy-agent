@@ -349,9 +349,9 @@ describe("Session DAG integration", () => {
     const result = await consolidator.maybeConsolidateByTokens(session, { replayMaxMessages: 2 });
 
     expect(result).toMatchObject({ started: true, changed: true, error: null });
-    expect(queue.waitUntilProcessed).toHaveBeenCalledWith(sessionKey, "turn-2", 10);
+    expect(queue.waitUntilProcessed).toHaveBeenCalledWith(sessionKey, "turn-1", 10);
     expect(archive).not.toHaveBeenCalled();
-    expect(session.lastConsolidated).toBe(4);
+    expect(session.lastConsolidated).toBe(2);
     expect(session.metadata.lastSummary).toMatchObject({
       mode: "dag",
       text: expect.stringContaining("[Working Memory DAG Snapshot]"),
@@ -377,6 +377,141 @@ describe("Session DAG integration", () => {
       expect(graphAfterCompaction.snapshotText).toBe(snapshotText);
     } finally {
       reopenedStore.close();
+    }
+  });
+
+  it.each([
+    { basePromptTokens: 500, expectedError: "Session DAG snapshot has no remaining token budget" },
+    { basePromptTokens: 490, expectedError: "Session DAG active path exceeds the remaining snapshot token budget" },
+  ])("does not commit DAG state when the retained projection exhausts the snapshot budget", async ({
+    basePromptTokens,
+    expectedError,
+  }) => {
+    const root = tmpRoot();
+    const sessionKey = `cli:dag-budget-${basePromptTokens}`;
+    const sessions = new SessionManager(path.join(root, "sessions"));
+    const session = new Session({
+      key: sessionKey,
+      messages: [
+        { role: "user", content: "u0" },
+        { role: "assistant", content: "a0" },
+        { role: "user", content: "u1" },
+        { role: "assistant", content: "a1" },
+      ],
+    });
+    sessions.save(session);
+    const storePath = sessionDagDbPath(sessionKey, { MEMMY_AGENT_SESSION_DAG_DIR: path.join(root, "dag") });
+    const seedStore = new SessionDagStore({ sessionKey, dbPath: storePath });
+    seedCompactionGraph(seedStore, session.messages.length);
+    seedStore.close();
+    const queue = { waitUntilProcessed: vi.fn(async () => true) };
+    const consolidator = new Consolidator({
+      store: new MemoryStore(root),
+      provider: provider(),
+      model: "test-model",
+      sessions,
+      contextWindowTokens: 10_000,
+      maxCompletionTokens: 100,
+      consolidationRatio: 0.5,
+      buildMessages: ({ history }: any) => history,
+      getToolDefinitions: () => [],
+      summaryMode: "dag",
+      dagQueue: queue as any,
+      dagCatchupTimeoutMs: 10,
+      createDagStore: (key) => new SessionDagStore({ sessionKey: key, dbPath: storePath }),
+    });
+
+    const result = await consolidator.maybeConsolidateByTokens(session, {
+      replayMaxMessages: 2,
+      inputTokenBudget: 1_000,
+      estimateProjectionTokens: (_candidateSession, projection) => {
+        if (projection.visibleMessageStart === 0) return [100, "live"];
+        if (projection.summaryOverride == null) return [basePromptTokens, "live"];
+        return [400, "live"];
+      },
+    });
+
+    expect(result).toMatchObject({ started: true, changed: false, error: expectedError });
+    expect(session.lastConsolidated).toBe(0);
+    expect(session.metadata.lastSummary).toBeUndefined();
+    const reopenedStore = new SessionDagStore({ sessionKey, dbPath: storePath });
+    try {
+      expect(reopenedStore.readGraphForHistoryDag().snapshotText).toBe("");
+    } finally {
+      reopenedStore.close();
+    }
+  });
+
+  it("logs a structured DAG compaction failure without changing session state", async () => {
+    const root = tmpRoot();
+    const dagRoot = path.join(root, "dag");
+    const sessionKey = "websocket:dag-cant-open";
+    const sessions = new SessionManager(path.join(root, "sessions"));
+    const session = new Session({ key: sessionKey });
+    session.messages = [
+      { role: "user", content: "private-user-message-0" },
+      { role: "assistant", content: "private-assistant-message-0" },
+      { role: "user", content: "private-user-message-1" },
+      { role: "assistant", content: "private-assistant-message-1" },
+    ];
+    sessions.save(session);
+    const messagesBefore = session.messages.map((message) => ({ ...message }));
+    const queue = { waitUntilProcessed: vi.fn(async () => true) };
+    const cantOpenError = Object.assign(new Error("unable to open database file"), {
+      name: "SqliteError",
+      code: "SQLITE_CANTOPEN",
+    });
+    const consolidator = new Consolidator({
+      store: new MemoryStore(root),
+      provider: provider(),
+      model: "test-model",
+      sessions,
+      contextWindowTokens: 10_000,
+      maxCompletionTokens: 100,
+      buildMessages: ({ history }: any) => history,
+      getToolDefinitions: () => [],
+      summaryMode: "dag",
+      dagQueue: queue as any,
+      createDagStore: () => {
+        throw cantOpenError;
+      },
+    });
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const previousDagRoot = process.env.MEMMY_AGENT_SESSION_DAG_DIR;
+    process.env.MEMMY_AGENT_SESSION_DAG_DIR = dagRoot;
+
+    try {
+      await expect(
+        consolidator.maybeConsolidateByTokens(session, { replayMaxMessages: 2 }),
+      ).rejects.toBe(cantOpenError);
+
+      expect(consoleError).toHaveBeenCalledTimes(1);
+      const [prefix, serialized] = consoleError.mock.calls[0] ?? [];
+      expect(prefix).toBe("[session-dag] compaction failed");
+      expect(serialized).toEqual(expect.any(String));
+      const record = JSON.parse(String(serialized));
+      expect(new Date(record.timestamp).toISOString()).toBe(record.timestamp);
+      expect(record).toMatchObject({
+        event: "session_dag_compaction_failed",
+        platform: process.platform,
+        pid: process.pid,
+        sessionKey,
+        databasePath: sessionDagDbPath(sessionKey),
+        summaryMode: "dag",
+        errorName: "SqliteError",
+        errorCode: "SQLITE_CANTOPEN",
+        message: "unable to open database file",
+        stack: expect.stringContaining("unable to open database file"),
+      });
+      expect(serialized).not.toContain("private-user-message");
+      expect(serialized).not.toContain("private-assistant-message");
+      expect(queue.waitUntilProcessed).not.toHaveBeenCalled();
+      expect(session.lastConsolidated).toBe(0);
+      expect(session.metadata.lastSummary).toBeUndefined();
+      expect(session.messages).toEqual(messagesBefore);
+    } finally {
+      if (previousDagRoot === undefined) delete process.env.MEMMY_AGENT_SESSION_DAG_DIR;
+      else process.env.MEMMY_AGENT_SESSION_DAG_DIR = previousDagRoot;
     }
   });
 

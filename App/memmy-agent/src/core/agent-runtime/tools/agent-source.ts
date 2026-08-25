@@ -20,7 +20,14 @@ const MANAGED_AGENT_SYNC_RECIPE_SCHEMA = {
   properties: {
     version: { type: "integer", enum: [1] },
     format: { type: "string", enum: ["jsonl", "json", "sqlite"] },
-    path: { type: "string", description: "Absolute path to the native history file or directory." },
+    path: {
+      type: "string",
+      description: "Absolute native history path. Use an absolute Linux path together with wslDistro for WSL."
+    },
+    wslDistro: {
+      type: "string",
+      description: "Windows only: WSL distribution that owns the absolute Linux path."
+    },
     fileSuffix: { type: "string" },
     recordsPath: { type: "string" },
     query: {
@@ -151,6 +158,10 @@ export class AgentSourceTool extends Tool {
           enum: ["discovered", "user_provided"],
           description: "Use user_provided only when the user explicitly supplied this installation path in the conversation."
         },
+        wsl_distro: {
+          type: "string",
+          description: "Windows only: WSL distribution that owns installation_path."
+        },
         manifest_path: { type: "string" },
         mode: { type: "string", enum: ["initial_subset", "incremental"] },
         data_path: { type: "string" },
@@ -189,7 +200,8 @@ export class AgentSourceTool extends Tool {
       const verified = verifyAgentInstallation(
         source.displayName,
         requiredString(params.installation_path, "installation_path"),
-        installationPathOrigin
+        installationPathOrigin,
+        optionalString(params.wsl_distro)
       );
       this.verifiedInstallations.set(sourceId, verified);
       return JSON.stringify({
@@ -198,7 +210,8 @@ export class AgentSourceTool extends Tool {
         displayName: source.displayName,
         installationPath: verified.installationPath,
         identity: verified.identity,
-        installationPathOrigin
+        installationPathOrigin,
+        ...(optionalString(params.wsl_distro) ? { wslDistro: optionalString(params.wsl_distro) } : {})
       });
     }
 
@@ -336,12 +349,14 @@ export function normalizeAgentIdentity(value: string): string {
 export function verifyAgentInstallation(
   agentName: string,
   requestedPath: string,
-  origin: InstallationPathOrigin
+  origin: InstallationPathOrigin,
+  wslDistro?: string
 ): VerifiedAgentInstallation {
-  if (!path.isAbsolute(requestedPath)) {
+  const hostPath = wslDistro ? resolveWslPathForWindows(requestedPath, wslDistro) : requestedPath;
+  if (!path.isAbsolute(hostPath)) {
     throw new Error("installation_path must be absolute");
   }
-  const installationPath = path.resolve(requestedPath);
+  const installationPath = path.resolve(hostPath);
   let identities: string[];
   try {
     identities = installationIdentityCandidates(installationPath);
@@ -355,6 +370,21 @@ export function verifyAgentInstallation(
     throw agentInstallationNotFound(agentName);
   }
   return { installationPath, identity };
+}
+
+/** Converts an absolute Linux path into the Windows UNC namespace exposed by WSL. */
+export function resolveWslPathForWindows(linuxPath: string, wslDistro: string): string {
+  if (!path.posix.isAbsolute(linuxPath)) {
+    throw new Error("WSL installation_path must be an absolute Linux path");
+  }
+  const distribution = wslDistro.trim();
+  if (!distribution || /[\\/\0]/u.test(distribution)) {
+    throw new Error("wsl_distro is invalid");
+  }
+  const relativePath = path.posix.normalize(linuxPath).slice(1);
+  return relativePath
+    ? path.win32.join(`\\\\wsl.localhost\\${distribution}`, ...relativePath.split("/"))
+    : `\\\\wsl.localhost\\${distribution}\\`;
 }
 
 function agentInstallationNotFound(agentName: string): Error {

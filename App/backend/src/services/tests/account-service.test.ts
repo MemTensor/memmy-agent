@@ -3,6 +3,37 @@ import { describe, expect, it } from "vitest";
 import { createAccountService } from "../account-service.js";
 
 describe("AccountService", () => {
+  it("rejects verification channels that are not supported by the desktop package", async () => {
+    let cloudCalls = 0;
+    const service = createAccountService({
+      accountChannel: "phone",
+      cloudClient: {
+        ...createCloudClientStub(),
+        async sendEmailCode() {
+          cloudCalls += 1;
+        },
+        async login() {
+          cloudCalls += 1;
+          throw new Error("unexpected cloud login");
+        }
+      },
+      accountSessionRepository: createAccountSessionRepositoryStub()
+    });
+
+    await expect(service.sendCode({
+      channel: "email",
+      email: "hello@example.com",
+      locale: "zh"
+    })).rejects.toMatchObject({ code: "invalid_argument" });
+    await expect(service.verifyCode({
+      channel: "email",
+      email: "hello@example.com",
+      verificationCode: "123456",
+      loginSource: "Memmy"
+    })).rejects.toMatchObject({ code: "invalid_argument" });
+    expect(cloudCalls).toBe(0);
+  });
+
   it("sends verification codes through cloud-client and rate-limits by channel address", async () => {
     const calls: string[] = [];
     let lastCodeSentAt: string | null = null;
@@ -161,7 +192,8 @@ describe("AccountService", () => {
           profile: cloudProfile(),
           isNewUser: true,
           uuid: "cloud-account-user-1",
-          cloudUuid: "cloud.login.uuid"
+          cloudUuid: "cloud.login.uuid",
+          authChannel: "email"
         }
       },
       {

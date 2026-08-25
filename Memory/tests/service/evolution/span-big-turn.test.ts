@@ -77,8 +77,14 @@ function createSpanBigTurnLlm(
         } as unknown as T;
       }
       if (options.operation === "capture.summarize") {
+        const payload = messages.find((message) => message.role === "user")?.content ?? "";
+        const userQuote = payload.match(/\bUSER:\s*(.*?)\s+ASSISTANT:/)?.[1]?.trim() ?? "";
         return {
-          summary: "定位构建失败、修改依赖配置并验证修复结果"
+          l1: {
+            summary: "定位构建失败、修改依赖配置并验证修复结果",
+            evidence: [{ quote: userQuote, role: "user", kind: "task_outcome" }]
+          },
+          user: null
         } as unknown as T;
       }
       if (options.operation === "reward.reward.r_human.v7") {

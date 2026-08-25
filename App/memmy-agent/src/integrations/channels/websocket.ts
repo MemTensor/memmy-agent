@@ -14,7 +14,6 @@ import { requestMcpReload } from "../../core/agent-runtime/tools/mcp.js";
 import { BaseChannel, type ChannelHandleMessageOptions } from "./base.js";
 import {
   OUTBOUND_META_AGENT_UI,
-  MessageBus,
   OutboundMessage,
   parseTurnSource,
   type TurnSource,
@@ -40,11 +39,7 @@ import type {
 } from "../../core/agent-runtime/loop.js";
 import { getMediaDir, getWorkspacePath } from "../../config/paths.js";
 import type { CronService } from "../../cron/service.js";
-import {
-  GOAL_TURN_INBOX_KEY,
-  goalStateWsBlob,
-  type GoalStatus,
-} from "../../core/session/goal-state.js";
+import { goalStateWsBlob, type GoalStatus } from "../../core/session/goal-state.js";
 import {
   readWebuiSessionBinding,
   Session,
@@ -55,6 +50,14 @@ import { websocketTurnWallStartedAt, websocketTurnWallStartTimes } from "../../c
 import type { WebuiTitleService } from "../../core/session/webui-title.js";
 import { visibleWebuiUserContent } from "../../core/session/webui-user-content.js";
 import { TerminalRunControl } from "../../core/session/terminal-session-control.js";
+import {
+  createOrCheckoutWorkspaceBranch,
+  readWorkspaceEnvironment,
+  readWorkspaceFileDiff,
+  switchWorkspaceBranch,
+  WorkspaceEnvironmentError,
+  type WorkspaceEnvironmentContext,
+} from "../../core/session/workspace-environment.js";
 import { scrubSubagentMessagesForChannel } from "../../utils/subagent-channel-display.js";
 import {
   mcpPresetsSettingsAction,
@@ -109,6 +112,9 @@ import { MAX_FILE_SIZE } from "../../utils/media-decode.js";
 type Query = Record<string, string[]>;
 type HttpRequestLike = { path: string; method?: string; headers?: http.IncomingHttpHeaders | Record<string, any>; body?: Buffer | string };
 type HttpLikeResponse = { status: number; headers: Record<string, string>; body: Buffer | string };
+type WorkspaceEnvironmentContextResult =
+  | { ok: true; context: WorkspaceEnvironmentContext }
+  | { ok: false; response: HttpLikeResponse };
 type RuntimeModelNameResolver = (() => string | null | undefined) | null;
 type RuntimeToolNamesResolver = (() => string[] | null | undefined) | null;
 type WebuiMediaKind = "image" | "video" | "file";
@@ -242,6 +248,7 @@ const MCP_PRESET_ACTIONS_BY_PATH: Record<string, string> = {
   "/api/settings/mcp-presets/import": "import",
   "/api/settings/mcp-presets/import-cursor": "import-cursor",
   "/api/settings/mcp-presets/tools": "tools",
+  "/api/settings/mcp-presets/reload": "reload",
 };
 
 const MAX_ATTACHMENTS_PER_MESSAGE = 4;
@@ -1649,6 +1656,89 @@ export class WebSocketChannel extends BaseChannel {
     }
   }
 
+  async handleProjectWorkspaceEnvironment(
+    request: HttpRequestLike,
+    rawId: string,
+    view: "environment" | "diff" | "branch",
+  ): Promise<HttpLikeResponse> {
+    if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+    const expectedMethod = view === "branch" ? "POST" : "GET";
+    if ((request.method ?? "GET").toUpperCase() !== expectedMethod) return httpError(405, "method not allowed");
+    try {
+      const id = decodeApiKey(rawId);
+      if (!id) throw new WebuiProjectError("project_not_found", 404);
+      const project = this.activeProject(id);
+      const cwd = assertWebuiWorkspaceAvailable(project.rootPath);
+      if (cwd !== project.rootPath) throw new WebuiProjectError("project_directory_unavailable", 422);
+      const context: WorkspaceEnvironmentContext = {
+        scope: { kind: "project", key: id },
+        cwd,
+        metadata: {
+          [WEBUI_PROJECT_ID_METADATA_KEY]: id,
+          [WEBUI_WORKSPACE_CWD_METADATA_KEY]: cwd,
+        },
+      };
+      return await this.workspaceEnvironmentResponse(request, context, view);
+    } catch (error) {
+      return this.projectErrorResponse(error);
+    }
+  }
+
+  private async workspaceEnvironmentResponse(
+    request: HttpRequestLike,
+    context: WorkspaceEnvironmentContext,
+    view: "environment" | "diff" | "branch",
+  ): Promise<HttpLikeResponse> {
+    try {
+      const environment = await readWorkspaceEnvironment(context);
+      if (view === "environment") return httpJsonResponse(environment);
+      if (view === "branch") {
+        let body: unknown;
+        try {
+          body = JSON.parse(requestBodyText(request));
+        } catch {
+          return httpError(400, "workspace_branch_request_invalid");
+        }
+        const bodyRecord = body && typeof body === "object" && !Array.isArray(body)
+          ? body as Record<string, unknown>
+          : null;
+        const branch = bodyRecord?.branch;
+        const expectedRevision = bodyRecord?.expected_revision;
+        const create = bodyRecord?.create;
+        if (
+          !bodyRecord
+          || typeof branch !== "string"
+          || typeof expectedRevision !== "string"
+          || (create !== undefined && typeof create !== "boolean")
+        ) {
+          return httpError(400, "workspace_branch_request_invalid");
+        }
+        const next = create === true
+          ? await createOrCheckoutWorkspaceBranch(
+            context,
+            environment,
+            branch,
+            expectedRevision,
+          )
+          : await switchWorkspaceBranch(
+            context,
+            environment,
+            branch,
+            expectedRevision,
+          );
+        return httpJsonResponse(next);
+      }
+      const [, query] = parseRequestPath(String(request.path ?? ""));
+      const relativePath = queryFirst(query, "path");
+      if (!relativePath) return httpError(400, "missing path");
+      const diff = await readWorkspaceFileDiff(environment, relativePath);
+      return diff ? httpJsonResponse(diff) : httpError(404, "changed file not found");
+    } catch (error) {
+      if (error instanceof WorkspaceEnvironmentError) return httpError(error.status, error.code);
+      throw error;
+    }
+  }
+
   settingsErrorResponse(error: any): HttpLikeResponse {
     if (error instanceof WebUISettingsError || typeof error?.status === "number") {
       return httpError(error.status ?? 400, error.message ?? String(error));
@@ -1704,6 +1794,11 @@ export class WebSocketChannel extends BaseChannel {
   async handleSettingsMcpPresets(request: any, action: string | null = null): Promise<HttpLikeResponse> {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
     try {
+      if (action === "reload") {
+        if (!bearerToken(request?.headers)) return httpError(401, "Unauthorized");
+        if (String(request?.method ?? "GET").toUpperCase() !== "POST") return httpError(405, "Method Not Allowed");
+        return httpJsonResponse(await requestMcpReload(this.bus));
+      }
       const payload = await mcpPresetsSettingsAction(action, parseMcpSettingsQuery(request), {
         reloadMcp: () => requestMcpReload(this.bus),
       });
@@ -1815,6 +1910,43 @@ export class WebSocketChannel extends BaseChannel {
     }
     this.augmentMediaUrls(data, resolved.canonicalSessionKey);
     return httpJsonResponse(data);
+  }
+
+  private workspaceEnvironmentSession(key: string): WorkspaceEnvironmentContextResult {
+    if (!this.sessionManager) return { ok: false, response: httpError(503, "session manager unavailable") };
+    const decodedKey = decodeGuiSessionApiKey(key);
+    if (decodedKey == null) return { ok: false, response: invalidGuiSessionKeyResponse(key) };
+    const resolved = this.resolveGuiSessionResponse(decodedKey);
+    if ("status" in resolved) return { ok: false, response: resolved };
+    const session = this.sessionManager.get?.(resolved.canonicalSessionKey) as Session | null;
+    if (!session) return { ok: false, response: httpError(404, "session not found") };
+    let cwd: string | null = null;
+    try {
+      cwd = readWebuiSessionBinding(session).cwd;
+    } catch {
+      // Preserve the session scope so the service can report workspace_unavailable.
+    }
+    return {
+      ok: true,
+      context: {
+        scope: { kind: "session", key: resolved.guiSessionKey },
+        cwd,
+        metadata: session.metadata,
+      },
+    };
+  }
+
+  async handleWorkspaceEnvironment(
+    request: HttpRequestLike,
+    key: string,
+    view: "environment" | "diff" | "branch",
+  ): Promise<HttpLikeResponse> {
+    if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+    const expectedMethod = view === "branch" ? "POST" : "GET";
+    if ((request.method ?? "GET").toUpperCase() !== expectedMethod) return httpError(405, "method not allowed");
+    const result = this.workspaceEnvironmentSession(key);
+    if (!result.ok) return result.response;
+    return this.workspaceEnvironmentResponse(request, result.context, view);
   }
 
   handleWebuiThreadGet(request: any, key: string): HttpLikeResponse {
@@ -2606,6 +2738,12 @@ export class WebSocketChannel extends BaseChannel {
     if (MCP_PRESET_ACTIONS_BY_PATH[got]) return this.handleSettingsMcpPresets(request, MCP_PRESET_ACTIONS_BY_PATH[got]);
     let match = got.match(/^\/api\/sessions\/([^/]+)\/messages$/);
     if (match) return this.handleSessionMessages(request, match[1]);
+    match = got.match(/^\/api\/sessions\/([^/]+)\/environment$/);
+    if (match) return this.handleWorkspaceEnvironment(request, match[1], "environment");
+    match = got.match(/^\/api\/sessions\/([^/]+)\/environment\/diff$/);
+    if (match) return this.handleWorkspaceEnvironment(request, match[1], "diff");
+    match = got.match(/^\/api\/sessions\/([^/]+)\/environment\/branch$/);
+    if (match) return this.handleWorkspaceEnvironment(request, match[1], "branch");
     match = got.match(/^\/api\/sessions\/([^/]+)\/webui-thread$/);
     if (match) return this.handleWebuiThreadGet(request, match[1]);
     match = got.match(/^\/api\/sessions\/([^/]+)\/last-compaction$/);
@@ -2614,6 +2752,12 @@ export class WebSocketChannel extends BaseChannel {
     if (match) return this.handleSessionDelete(request, match[1]);
     match = got.match(/^\/api\/sessions\/([^/]+)\/title$/);
     if (match) return this.handleSessionTitleUpdate(request, match[1]);
+    match = got.match(/^\/api\/projects\/([^/]+)\/environment$/);
+    if (match) return this.handleProjectWorkspaceEnvironment(request, match[1], "environment");
+    match = got.match(/^\/api\/projects\/([^/]+)\/environment\/diff$/);
+    if (match) return this.handleProjectWorkspaceEnvironment(request, match[1], "diff");
+    match = got.match(/^\/api\/projects\/([^/]+)\/environment\/branch$/);
+    if (match) return this.handleProjectWorkspaceEnvironment(request, match[1], "branch");
     match = got.match(/^\/api\/projects\/([^/]+)\/reveal$/);
     if (match) return this.handleProjectReveal(request, match[1]);
     match = got.match(/^\/api\/projects\/([^/]+)$/);

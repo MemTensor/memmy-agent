@@ -17,10 +17,12 @@ describe("MemoryPageView", () => {
     expect(html).toContain('data-tour-anchor="product-tour-memory-nav"');
     expect(html).toContain('data-icon="layers"');
     expect(html).toContain('data-icon="brain-circuit"');
+    expect(html).toContain('data-icon="user-round"');
     expect(html).toContain("M12 5a3 3 0 1 0-5.997.125");
     expect(html).toContain('data-icon="link-2"');
     expect(html).toContain("概览");
     expect(html).toContain("记忆");
+    expect(html).toContain("用户记忆");
     expect(html).toContain("任务");
     expect(html).toContain("技能");
     expect(html).toContain("分析");
@@ -62,6 +64,9 @@ describe("MemoryPageView", () => {
 
     writeMemorySubPage(storage, "memories");
     expect(readMemorySubPage(storage)).toBe("memories");
+
+    writeMemorySubPage(storage, "user-memories");
+    expect(readMemorySubPage(storage)).toBe("user-memories");
 
     storage.setItem("memmy.memorySubPage", "unknown");
     expect(readMemorySubPage(storage)).toBeNull();

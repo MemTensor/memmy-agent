@@ -3,6 +3,11 @@ import {
   LLMProvider,
   LLMResponse,
 } from "./base.js";
+import {
+  coversInputModalities,
+  getModelInputModalities,
+  requiredInputModalities,
+} from "./model-input-capabilities.js";
 
 const PRIMARY_FAILURE_THRESHOLD = 3;
 const PRIMARY_COOLDOWN_MS = 60_000;
@@ -148,8 +153,11 @@ export class FallbackProvider extends LLMProvider {
       }
     }
 
+    const required = requiredInputModalities(args.messages ?? []);
     for (const fallback of this.fallbackPresets) {
       if (hasStreamed?.[0]) break;
+      const supported = getModelInputModalities(fallback.model);
+      if (!coversInputModalities(supported, required)) continue;
       let fallbackProvider: LLMProvider;
       try {
         fallbackProvider = this.providerFactory(fallback);

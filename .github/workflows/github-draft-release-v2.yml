@@ -395,6 +395,7 @@ jobs:
             "Memmy-$VERSION-darwin-arm64-cn-signed.dmg"
             "Memmy-$VERSION-darwin-arm64-intl-signed.dmg"
           )
+          : > release-assets/OSS_VERIFICATION.jsonl
 
           for artifact in "${artifacts[@]}"; do
             url="$base/$artifact"
@@ -404,12 +405,6 @@ jobs:
               echo "::error title=Installer asset is missing::$artifact was not found at $url. Manual recovery: confirm the packaging/upload workflow finished for version $VERSION, then re-run this workflow." >&2
               exit 1
             fi
-            content_md5="$(awk 'BEGIN { IGNORECASE=1 } /^Content-MD5:/ { gsub("\\r", "", $2); value=$2 } END { print value }' "$headers")"
-            if [[ -z "$content_md5" ]]; then
-              echo "::error title=Installer checksum header missing::OSS did not return Content-MD5 for $artifact. Manual recovery: verify the OSS object metadata or re-upload the installer." >&2
-              exit 1
-            fi
-
             if ! curl --fail --location --retry 5 --retry-all-errors \
               --output "release-assets/$artifact" "$url"; then
               echo "::error title=Installer download failed::Could not download $artifact after retries. Manual recovery: check OSS/CDN availability, then re-run this workflow." >&2
@@ -420,14 +415,16 @@ jobs:
               exit 1
             fi
 
-            expected_md5="$(printf '%s' "$content_md5" | base64 --decode | xxd -p -c 256)"
-            actual_md5="$(md5sum "release-assets/$artifact" | awk '{print $1}')"
-            if [[ "$actual_md5" != "$expected_md5" ]]; then
-              echo "::error title=Installer checksum mismatch::Content-MD5 mismatch for $artifact. Manual recovery: do not publish; rebuild or re-upload the installer, then re-run." >&2
+            if ! integrity="$(node scripts/verify-oss-object-integrity.mjs "$headers" "release-assets/$artifact")"; then
+              echo "::error title=Installer checksum verification failed::$artifact did not match its fail-closed OSS integrity metadata. Normal objects require Content-MD5; Multipart objects require x-oss-hash-crc64ecma. Manual recovery: do not publish; repair or re-upload the object, then re-run." >&2
               exit 1
             fi
+            printf '%s\n' "$integrity" \
+              | jq -c --arg artifact "$artifact" '. + {artifact: $artifact}' \
+              >> release-assets/OSS_VERIFICATION.jsonl
           done
 
+          jq -s '.' release-assets/OSS_VERIFICATION.jsonl > release-assets/OSS_VERIFICATION.json
           (cd release-assets && md5sum Memmy-* > MD5SUMS.txt)
           (cd release-assets && sha256sum Memmy-* > SHA256SUMS.txt)
 
@@ -710,7 +707,7 @@ jobs:
 
           ## Checksums
 
-          Verify downloads with MD5SUMS.txt or SHA256SUMS.txt attached to this release. The workflow also verifies every OSS object against its Content-MD5 header before publishing.
+          Verify downloads with MD5SUMS.txt or SHA256SUMS.txt attached to this release. Before creating the Draft, the workflow verifies Normal OSS objects with Content-MD5 and Multipart objects with OSS CRC-64/XZ.
 
           <!-- doc-agent: source-id=memmy-official-changelog-v2 -->
           <!-- memmy-release-evidence
@@ -793,6 +790,7 @@ jobs:
             --slurpfile compare release-assets/COMPARE.json \
             --slurpfile pullRequests release-assets/PULL_REQUESTS.json \
             --slurpfile artifacts release-assets/ARTIFACTS.json \
+            --slurpfile ossIntegrity release-assets/OSS_VERIFICATION.json \
             '{
               schema: "memmy.release.evidence.v2",
               schemaVersion: 2,
@@ -837,7 +835,8 @@ jobs:
               releaseNotesSource: $releaseNotesSource,
               releaseNotesNeedsReview: $releaseNotesNeedsReview,
               artifactManifest: "SHA256SUMS.txt",
-              artifacts: $artifacts[0]
+              artifacts: $artifacts[0],
+              ossIntegrity: $ossIntegrity[0]
             }' > release-assets/RELEASE_EVIDENCE.json
 
           {
@@ -866,6 +865,7 @@ jobs:
             release-assets/TARGET_COMMIT_METADATA.json
             release-assets/COMPARE.json
             release-assets/PULL_REQUESTS.json
+            release-assets/OSS_VERIFICATION.json
             release-assets/RELEASE_EVIDENCE.json
             release-assets/MD5SUMS.txt
             release-assets/SHA256SUMS.txt

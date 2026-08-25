@@ -230,6 +230,8 @@ describe("HomePage", () => {
     expect(chipStyles).toContain("opacity: 0;");
     expect(chipStyles).toContain("opacity: 1;");
     expect(chipStyles).toContain("font-weight: 500;");
+    expect(chipStyles).toMatch(/\.composer-command-chip__icon\s*{[^}]*position:\s*absolute;/s);
+    expect(chipStyles).toMatch(/\.composer-command-chip__leading\s*{[^}]*display:\s*inline-flex;/s);
     expect(source.match(/<ComposerCommandChip/g)).toHaveLength(1);
     expect(source.match(/\{renderComposerLeadingActions\(\)\}/g)).toHaveLength(2);
     expect(source.match(/<ComposerHighlightedTextarea/g)).toHaveLength(1);
@@ -306,6 +308,13 @@ describe("HomePage", () => {
     expect(agentStatusText("connecting", null, (key) => key)).toBe("home.agent.connecting");
     expect(agentStatusText("reconnecting", null, (key) => key)).toBe("home.agent.reconnecting");
     expect(agentStatusText("error", null, (key) => key)).toBe("home.agent.failed");
+    expect(agentStatusText("error", null, (key) => key, {
+      startupIssue: "model_config_invalid"
+    })).toBe("home.modelSelector.unavailable");
+    expect(agentStatusText("error", null, (key) => key, {
+      startupIssue: "model_config_invalid",
+      hasConnected: true
+    })).toBe("home.agent.failed");
   });
 
   it("shows the specific queue steer failure messages", () => {
@@ -386,12 +395,12 @@ describe("HomePage", () => {
     expect(source).toContain("const activeConversationTitle = state.agent.currentSessionKey");
     expect(source).toContain("const activeImTitleDisplay = imChannelTitleDisplay(activeConversationTitle);");
     expect(source).toContain("formatConversationTitleForDisplay(activeImTitleDisplay?.title ?? activeConversationTitle)");
-    expect(source).toContain("topBar={hasActiveConversation ? (");
-    expect(source).toContain('<h1 className="agent-conversation-title" title={activeConversationTitle}>');
-    expect(source).toContain('<span className="agent-conversation-title__text">{activeConversationTitleDisplay}</span>');
-    expect(source).toContain('<ImChannelTitleIcon slug={activeImTitleDisplay.slug} name={activeImTitleDisplay.channelName} />');
-    expect(source).toContain("{activeConversationTitleDisplay}");
-    expect(source).toContain("topBarBorder={hasActiveConversation}");
+    expect(source).toContain("topBar={hasActiveConversation || environmentScope ? (");
+    expect(source).toContain('<div className="agent-conversation-topbar">');
+    expect(source).toContain('title={hasActiveConversation ? activeConversationTitle : selectedDraftProject?.name}');
+    expect(source).toContain("{hasActiveConversation ? activeConversationTitleDisplay : selectedDraftProject?.name}");
+    expect(source).toContain('{hasActiveConversation && activeImTitleDisplay ? <ImChannelTitleIcon slug={activeImTitleDisplay.slug} name={activeImTitleDisplay.channelName} /> : null}');
+    expect(source).toContain("topBarBorder={Boolean(hasActiveConversation || environmentScope)}");
     expect(source).not.toContain("agent-conversation-titlebar");
     expect(source).toContain("app-frame-page-content agent-conversation-scroll flex-1 overflow-y-auto");
     expect(source).toContain("onScroll={handleAgentConversationScroll}");
@@ -696,12 +705,34 @@ describe("HomePage", () => {
 
   it("keeps the conversation composer on the same expanded two-row layout as a new chat", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
+    const styles = readFileSync(stylesSourcePath, "utf8");
 
-    expect(source).toContain('${isComposerSingleLine ? "agent-composer-input--single " : ""}${selectedComposerCommand ? "agent-composer-input--command-selected " : ""}agent-composer-input--conversation block w-full pl-4 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40');
+    expect(source).toContain('${isComposerSingleLine ? "agent-composer-input--single " : ""}agent-composer-input--conversation block w-full pl-4 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40');
+    expect(source).not.toContain("agent-composer-input--command-selected");
+    expect(styles).not.toContain("padding-left: 86px;");
     expect(source).toContain('className="relative agent-composer-shell agent-composer-shell--expanded rounded-card-lg"');
     expect(source).toContain('className="agent-composer-toolbar"');
-    expect(source).toContain('<div className="max-w-2xl mx-auto">');
+    expect(source).toContain('<div className="agent-conversation-content agent-conversation-content--composer max-w-3xl mx-auto">');
+    expect(styles).toMatch(/\.agent-composer-toolbar\s*{[^}]*display:\s*flex;/s);
+    expect(styles).toMatch(/\.agent-composer-toolbar \.composer-actions\s*{[^}]*margin-left:\s*auto;/s);
     expect(source).toContain("COMPOSER_SINGLE_LINE_HEIGHT_PX = 52");
+  });
+
+  it("shifts the conversation without resizing it when the environment panel has room", () => {
+    const source = readFileSync(homePageSourcePath, "utf8");
+    const styles = readFileSync(stylesSourcePath, "utf8");
+
+    expect(source).toContain('agent-workspace-layout${environmentPanelOpen ? " agent-workspace-layout--environment-open" : ""}');
+    expect(source).toContain('className="agent-conversation-content max-w-3xl mx-auto space-y-3"');
+    expect(source).toContain('className="agent-conversation-content agent-conversation-content--composer max-w-3xl mx-auto"');
+    const composerRule = styles.match(/\.agent-conversation-composer\s*\{[^}]*\}/)?.[0] ?? "";
+    expect(composerRule).toContain("padding: 40px var(--codex-content-padding-x) 12px;");
+    expect(styles).toContain("container-name: agent-workspace;");
+    expect(styles).toContain("@container agent-workspace (min-width: 1240px)");
+    expect(styles).toContain(".agent-workspace-layout--environment-open .agent-conversation-content");
+    expect(styles).toMatch(/--agent-conversation-shift:\s*\d+px;/);
+    expect(styles).toContain("transform: translateX(calc(0px - var(--agent-conversation-shift)));");
+    expect(styles).toMatch(/\.agent-environment-panel\s*{[^}]*position:\s*absolute;/s);
   });
 
   it("lets expanded conversation text use the full width above the action footer", () => {

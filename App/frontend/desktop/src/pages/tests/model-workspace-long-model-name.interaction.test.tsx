@@ -47,7 +47,12 @@ describe("模型工作区长模型名称", () => {
     const stylesSource = readFileSync(stylesPath, "utf8");
     const modelListRule = stylesSource.match(/\.provider-model-list\s*\{[^}]*\}/s)?.[0] ?? "";
     expect(modelListRule).toContain("max-width: 100%;");
+    expect(modelListRule).toContain("--provider-model-visible-rows: 6;");
+    expect(modelListRule).toContain("max-height: calc(var(--provider-model-row-height) * var(--provider-model-visible-rows));");
     expect(modelListRule).toContain("overflow-x: hidden;");
+
+    const rowRule = stylesSource.match(/\.provider-model-list__row\s*\{[^}]*\}/s)?.[0] ?? "";
+    expect(rowRule).toContain("height: var(--provider-model-row-height);");
   });
 
   it("限制编辑器中的模型名称输入长度", () => {

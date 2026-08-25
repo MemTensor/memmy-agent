@@ -37,6 +37,8 @@ export interface AgentSourcesState {
 
 /** Contract for account state. */
 export interface AccountState {
+  /** Cloud account id; null in BYOK / signed-out mode. */
+  userId: string | null;
   email: string;
   phoneNumber: string | null;
   nickname: string;
@@ -129,6 +131,7 @@ export function createInitialAppState(): AppState {
       scanPreferences: defaultScanPreferences
     },
     account: {
+      userId: null,
       email: "",
       phoneNumber: null,
       nickname: "",
@@ -334,6 +337,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return {
         ...state,
         account: {
+          userId: action.userId ?? state.account.userId,
           email: action.email ?? state.account.email,
           phoneNumber: Object.prototype.hasOwnProperty.call(action, "phoneNumber") ? (action.phoneNumber ?? null) : state.account.phoneNumber,
           nickname: action.nickname ?? state.account.nickname,
@@ -344,6 +348,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return {
         ...state,
         account: {
+          userId: null,
           email: "",
           phoneNumber: null,
           nickname: "",

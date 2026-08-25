@@ -1,4 +1,4 @@
-import { mergeAnalyticsEventParams } from "./analytics-context.js";
+import { getAnalyticsUserId, mergeAnalyticsEventParams } from "./analytics-context.js";
 import {
   resolveAnalyticsAppEdition,
   resolveAnalyticsAppEnv,
@@ -19,6 +19,9 @@ const DESKTOP_ANALYTICS_SOURCE = "memmy-desktop";
 
 /** Session-scoped gtag client_id. Never read ~/.memmy/analytics-client-id here. */
 let sessionClientId: string | null = null;
+let installationId: string | null = null;
+let appVersion: string | null = null;
+let platform: string | null = null;
 let pending: PendingCloudEvent[] = [];
 let lastEventTimeMillis = 0;
 let inflight: Promise<void> = Promise.resolve();
@@ -48,6 +51,17 @@ export function getDesktopAnalyticsClientId(): string | null {
   return sessionClientId;
 }
 
+export function setDesktopAnalyticsContext(input: {
+  installationId: string;
+  appVersion?: string | null;
+  platform?: string | null;
+}): void {
+  installationId = input.installationId.trim() || null;
+  appVersion = input.appVersion?.trim() || null;
+  platform = normalizePlatform(input.platform);
+  if (installationId) scheduleFlush();
+}
+
 export function trackCloudAnalyticsEvent(
   eventName: string,
   params?: CloudAnalyticsParams
@@ -59,7 +73,7 @@ export function trackCloudAnalyticsEvent(
   lastEventTimeMillis = eventTimeMillis;
   pending.push({
     eventName: name,
-    params: mergeAnalyticsEventParams(params),
+    params: { ...(params ?? {}) },
     eventTimeMillis
   });
 
@@ -77,6 +91,9 @@ export function resetDesktopCloudAnalyticsForTests(options?: {
   fetchImpl?: typeof fetch;
 }): void {
   sessionClientId = null;
+  installationId = null;
+  appVersion = null;
+  platform = null;
   pending = [];
   lastEventTimeMillis = 0;
   inflight = Promise.resolve();
@@ -98,10 +115,11 @@ function flushNow(): Promise<void> {
   pending = [];
   if (batch.length === 0) return inflight;
 
-  const clientId = sessionClientId;
+  const currentInstallationId = installationId;
+  const currentClientId = sessionClientId;
   const baseUrl = resolveDesktopAnalyticsBaseUrl();
-  if (!clientId || !baseUrl) {
-    // Keep waiting for client_id; drop only when base URL is missing.
+  if (!currentInstallationId || !currentClientId || !baseUrl) {
+    // Keep waiting for both analytics identifiers; drop only when the base URL is missing.
     if (!baseUrl) {
       console.log("[analytics] cloud flush dropped (MEMMY_CLOUD_SERVICE unset):", batch.length);
       return inflight;
@@ -110,7 +128,14 @@ function flushNow(): Promise<void> {
     return inflight;
   }
 
-  const run = () => postCloudAnalyticsEvents({ baseUrl, clientId, events: batch });
+  const run = () => postCloudAnalyticsEvents({
+    baseUrl,
+    installationId: currentInstallationId,
+    analyticsClientId: currentClientId,
+    appVersion,
+    platform,
+    events: batch,
+  });
   inflight = inflight.then(run, run).then(
     () => undefined,
     () => undefined
@@ -126,25 +151,35 @@ function compactParams(params: CloudAnalyticsParams): CloudAnalyticsParams {
 
 async function postCloudAnalyticsEvents(input: {
   baseUrl: string;
-  clientId: string;
+  installationId: string;
+  analyticsClientId: string;
+  appVersion: string | null;
+  platform: string | null;
   events: PendingCloudEvent[];
 }): Promise<void> {
   const appEnv = resolveAnalyticsAppEnv();
   const appEdition = resolveAnalyticsAppEdition();
   const debugMode = resolveGtagDebugMode();
+  const userId = getAnalyticsUserId();
 
+  const commonParams = mergeAnalyticsEventParams();
   const body = {
-    clientId: input.clientId,
+    clientId: input.analyticsClientId,
+    ...(userId ? { userId } : {}),
+    installationId: input.installationId,
     events: input.events.map((event) => ({
       eventName: event.eventName,
       params: compactParams({
         engagement_time_msec: DEFAULT_ENGAGEMENT_TIME_MSEC,
         source: DESKTOP_ANALYTICS_SOURCE,
+        ...commonParams,
         ...event.params,
+        ...(userId ? { user_id: userId } : {}),
         app_env: appEnv,
         app_edition: appEdition,
+        ...(input.appVersion ? { app_version: input.appVersion } : {}),
         ...(debugMode ? { debug_mode: 1 } : {}),
-        timestamp_micros: Math.max(0, Math.trunc(event.eventTimeMillis)) * 1000
+        timestamp_micros: Math.max(0, Math.trunc(event.eventTimeMillis)) * 1000,
       })
     }))
   };
@@ -152,8 +187,8 @@ async function postCloudAnalyticsEvents(input: {
   console.log(
     "[analytics] cloud post:",
     input.events.map((event) => event.eventName),
-    "clientId=",
-    input.clientId
+    "installationId=",
+    input.installationId
   );
 
   try {
@@ -169,4 +204,11 @@ async function postCloudAnalyticsEvents(input: {
   } catch {
     // Match backend transport: swallow network errors.
   }
+}
+
+function normalizePlatform(value: string | null | undefined): string | null {
+  if (value === "darwin" || value === "macos") return "macos";
+  if (value === "win32" || value === "windows") return "windows";
+  if (value === "linux") return "linux";
+  return value?.trim() || null;
 }

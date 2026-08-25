@@ -34,6 +34,16 @@ describe("AgentRunner max-iterations finalization", () => {
     const onMaxFinalizationStarting = vi.fn(() => {
       expect(calls).toHaveLength(1);
     });
+    const beforeFollowupModelRequest = vi.fn(async (context: any) => {
+      expect(onMaxFinalizationStarting).toHaveBeenCalledOnce();
+      expect(context).toMatchObject({
+        requestKind: "max_iterations_finalization",
+        iteration: 1,
+        toolsForRequest: null,
+      });
+      expect(context.reservedPromptTokens).toBeGreaterThan(0);
+      return null;
+    });
     const registry = tools();
 
     const result = await new AgentRunner(provider as any).run(new AgentRunSpec({
@@ -44,6 +54,8 @@ describe("AgentRunner max-iterations finalization", () => {
       maxIterations: 1,
       maxIterationsFinalPrompt: "Summarize truthfully now.",
       onMaxFinalizationStarting,
+      currentTurnMessageStartIndex: 0,
+      beforeFollowupModelRequest,
     }));
 
     expect(calls).toHaveLength(2);
@@ -57,6 +69,7 @@ describe("AgentRunner max-iterations finalization", () => {
     expect(result.messages.some((message) => String(message.content).includes("Summarize truthfully now."))).toBe(false);
     expect(result.messages.at(-1)).toMatchObject({ role: "assistant", content: "Honest final answer" });
     expect(onMaxFinalizationStarting).toHaveBeenCalledTimes(1);
+    expect(beforeFollowupModelRequest).toHaveBeenCalledTimes(1);
   });
 
   it("does not perform the terminal injection drain when finalization is enabled", async () => {
@@ -156,6 +169,7 @@ describe("AgentRunner max-iterations finalization", () => {
 
   it("preserves the legacy max behavior when no final prompt is configured", async () => {
     const injectionCallback = vi.fn(async () => [{ role: "user", content: "legacy terminal injection" }]);
+    const beforeFollowupModelRequest = vi.fn(async () => null);
     const provider = {
       getDefaultModel: () => "test-model",
       chatWithRetry: vi.fn(),
@@ -167,9 +181,12 @@ describe("AgentRunner max-iterations finalization", () => {
       tools: tools(),
       maxIterations: 0,
       injectionCallback,
+      currentTurnMessageStartIndex: 0,
+      beforeFollowupModelRequest,
     }));
 
     expect(injectionCallback).toHaveBeenCalledTimes(1);
+    expect(beforeFollowupModelRequest).not.toHaveBeenCalled();
     expect(result.hadInjections).toBe(true);
     expect(result.messages.some((message) => String(message.content).includes("legacy terminal injection"))).toBe(true);
   });

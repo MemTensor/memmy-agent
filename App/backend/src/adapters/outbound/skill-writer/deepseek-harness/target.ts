@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { resolveDeepseekHarnessHomeDirectory } from "../../agent-paths.js";
 import { removeMemmySkillDirectory, replaceMemmySkillDirectory } from "../skill-directory.js";
+import { readMemmyMemoryServiceConfig } from "../memmy-runtime-config.js";
 import {
   createDeepseekHarnessPluginPackageManifest,
   DEEPSEEK_HARNESS_PLUGIN_CLIENT,
@@ -10,6 +11,7 @@ import {
 } from "../templates/memmy-deepseek-harness-plugin.js";
 import { renderMemmyPluginSkillManifest } from "../templates/memmy-plugin.js";
 import type { SkillTarget } from "../types.js";
+import { loadMemmyWorkspaceBridgeRuntimeAsset } from "../workspace-bridge/runtime-loader.js";
 
 const TARGET_ID = "deepseek_harness";
 const DISPLAY_NAME = "DeepSeek Harness";
@@ -55,10 +57,12 @@ export function createDeepseekHarnessSkillTarget(
       const pluginSource = await readTextFile(join(pluginDirectory, "index.mjs"));
       const clientSource = await readTextFile(join(pluginDirectory, "client.js"));
       const packageSource = await readTextFile(join(pluginDirectory, "package.json"));
+      const bridgeSource = await readTextFile(join(pluginDirectory, "memmy-workspace-bridge.mjs"));
       return patch.includes("name: " + yamlString(PLUGIN_PACKAGE_NAME)) &&
         pluginSource === DEEPSEEK_HARNESS_PLUGIN_INDEX &&
         clientSource === DEEPSEEK_HARNESS_PLUGIN_CLIENT &&
-        packageSource === JSON.stringify(createDeepseekHarnessPluginPackageManifest(), null, 2) + "\n";
+        packageSource === JSON.stringify(createDeepseekHarnessPluginPackageManifest(), null, 2) + "\n" &&
+        bridgeSource === await loadMemmyWorkspaceBridgeRuntimeAsset();
     },
 
     async installPlugin() {
@@ -72,6 +76,14 @@ export function createDeepseekHarnessSkillTarget(
       );
       await writeFileAtomically(join(pluginDirectory, "index.mjs"), DEEPSEEK_HARNESS_PLUGIN_INDEX);
       await writeFileAtomically(join(pluginDirectory, "client.js"), DEEPSEEK_HARNESS_PLUGIN_CLIENT);
+      await writeFileAtomically(
+        join(pluginDirectory, "memmy-workspace-bridge.mjs"),
+        await loadMemmyWorkspaceBridgeRuntimeAsset()
+      );
+      await writeFileAtomically(
+        join(pluginDirectory, "memmy-memory-config.json"),
+        JSON.stringify({ memmy_config_path: memmyConfigPath, ...(await readMemmyMemoryServiceConfig(memmyConfigPath)) }, null, 2) + "\n"
+      );
       await upsertPatch(patchPath, renderPluginPatch(memmyConfigPath));
       await replaceMemmySkillDirectory(rootDirectory, renderMemmyPluginSkillManifest(TARGET_ID));
     },

@@ -82,6 +82,9 @@ describe("Goal continuation template", () => {
     const goal = await createGoal(loop);
     const content = (loop as any).renderGoalContinuation(goal) as string;
 
+    expect(content).toMatch(/^<memmy_internal_context source="goal">\n/);
+    expect(content).toMatch(/\n<\/memmy_internal_context>$/);
+    expect(content.toLowerCase()).not.toContain("codex");
     expect(content).toContain("Implement and verify Goal mode");
     expect(content).toContain("Tokens used: 0");
     expect(content).toContain("Token budget: 20000");

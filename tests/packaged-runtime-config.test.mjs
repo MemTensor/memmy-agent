@@ -202,6 +202,12 @@ async function createAsarFixture(root, name, version, includeEnv = false, includ
   );
   mkdirSync(dirname(contracts), { recursive: true });
   writeFileSync(contracts, "export {};\n");
+  const lifecycleSidecar = join(
+    source,
+    "node_modules/@memmy/backend/dist/src/adapters/outbound/skill-writer/workspace-bridge/memmy-workspace-bridge.mjs",
+  );
+  mkdirSync(dirname(lifecycleSidecar), { recursive: true });
+  writeFileSync(lifecycleSidecar, "export {};\n");
   if (includeEnv) writeFileSync(join(source, ".env.production"), "TOKEN=decoy\n");
   await createPackage(source, asar);
   return asar;

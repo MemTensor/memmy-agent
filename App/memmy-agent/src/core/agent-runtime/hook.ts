@@ -17,6 +17,7 @@ export class SystemPromptBuildContext {
   channel: string | null;
   sessionSummary: string | null;
   workspace: string | null;
+  readonly sessionKey: string | null;
   metadata: Record<string, any>;
 
   constructor(init: {
@@ -25,6 +26,7 @@ export class SystemPromptBuildContext {
     channel?: string | null;
     sessionSummary?: string | null;
     workspace?: string | null;
+    sessionKey?: string | null;
     metadata?: Record<string, any>;
   } = {}) {
     this.sections = [...(init.sections ?? [])];
@@ -32,6 +34,7 @@ export class SystemPromptBuildContext {
     this.channel = init.channel ?? null;
     this.sessionSummary = init.sessionSummary ?? null;
     this.workspace = init.workspace ?? null;
+    this.sessionKey = init.sessionKey ?? null;
     this.metadata = init.metadata ?? {};
   }
 
@@ -130,28 +133,29 @@ export class AgentHook {
     return false;
   }
 
-  async beforeIteration(ctx: AgentHookContext): Promise<void> {}
-  async onStream(ctx: AgentHookContext, delta: string): Promise<void> {}
-  async onStreamEnd(ctx: AgentHookContext, opts: { resuming?: boolean } = {}): Promise<void> {}
-  async beforeExecuteTools(ctx: AgentHookContext): Promise<void> {}
-  async emitReasoning(reasoningContent?: string | null): Promise<void> {}
+  async beforeIteration(ctx: AgentHookContext): Promise<void> { void ctx; }
+  async onStream(ctx: AgentHookContext, delta: string): Promise<void> { void ctx; void delta; }
+  async onStreamEnd(ctx: AgentHookContext, opts: { resuming?: boolean } = {}): Promise<void> { void ctx; void opts; }
+  async beforeExecuteTools(ctx: AgentHookContext): Promise<void> { void ctx; }
+  async emitReasoning(reasoningContent?: string | null): Promise<void> { void reasoningContent; }
   async emitReasoningEnd(): Promise<void> {}
   finalizeContent(ctx: AgentHookContext, content: string | null): string | null {
     return content;
   }
-  onRegisterTools(ctx: AgentToolRegistrationContext): void {}
-  onBuildSystemPrompt(ctx: SystemPromptBuildContext): void {}
-  async beforeRun(ctx: AgentHookContext): Promise<void> {}
-  async afterRun(ctx: AgentHookContext, result: any): Promise<void> {}
-  async beforeToolCall(ctx: AgentHookContext, toolCall: any): Promise<void> {}
-  async afterToolCall(ctx: AgentHookContext, toolCall: any, result: any): Promise<void> {}
-  async afterIteration(ctx: AgentHookContext): Promise<void> {}
-  async sessionStart(ctx: AgentHookContext): Promise<void> {}
-  async sessionEnd(ctx: AgentHookContext): Promise<void> {}
-  async beforeCompaction(ctx: AgentHookContext): Promise<void> {}
-  async afterCompaction(ctx: AgentHookContext): Promise<void> {}
-  async subagentStart(ctx: AgentHookContext): Promise<void> {}
-  async subagentStop(ctx: AgentHookContext): Promise<void> {}
+  onRegisterTools(ctx: AgentToolRegistrationContext): void { void ctx; }
+  onBuildSystemPrompt(ctx: SystemPromptBuildContext): void { void ctx; }
+  async beforeBuildSystemPrompt(ctx: AgentHookContext): Promise<void> { void ctx; }
+  async beforeRun(ctx: AgentHookContext): Promise<void> { void ctx; }
+  async afterRun(ctx: AgentHookContext, result: any): Promise<void> { void ctx; void result; }
+  async beforeToolCall(ctx: AgentHookContext, toolCall: any): Promise<void> { void ctx; void toolCall; }
+  async afterToolCall(ctx: AgentHookContext, toolCall: any, result: any): Promise<void> { void ctx; void toolCall; void result; }
+  async afterIteration(ctx: AgentHookContext): Promise<void> { void ctx; }
+  async sessionStart(ctx: AgentHookContext): Promise<void> { void ctx; }
+  async sessionEnd(ctx: AgentHookContext): Promise<void> { void ctx; }
+  async beforeCompaction(ctx: AgentHookContext): Promise<void> { void ctx; }
+  async afterCompaction(ctx: AgentHookContext): Promise<void> { void ctx; }
+  async subagentStart(ctx: AgentHookContext): Promise<void> { void ctx; }
+  async subagentStop(ctx: AgentHookContext): Promise<void> { void ctx; }
 }
 
 export class CompositeHook extends AgentHook {
@@ -223,6 +227,9 @@ export class CompositeHook extends AgentHook {
   }
   override onBuildSystemPrompt(ctx: SystemPromptBuildContext): void {
     this.forEachHookSyncSafe("onBuildSystemPrompt", ctx);
+  }
+  override async beforeBuildSystemPrompt(ctx: AgentHookContext): Promise<void> {
+    await this.forEachHookSafe("beforeBuildSystemPrompt", ctx);
   }
   override async afterRun(ctx: AgentHookContext, result: any): Promise<void> {
     await this.forEachHookSafe("afterRun", ctx, result);

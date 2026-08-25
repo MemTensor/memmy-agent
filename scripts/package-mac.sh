@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT_DIR/scripts/internal/shared/package-logging.sh"
 
 ARCH=""
 VERSION=""
@@ -139,6 +140,10 @@ if [ -z "$VERSION" ]; then
   exit 1
 fi
 
+package_log_init "package-mac-$VERSION-${ARCH:-auto}-$EDITION-$SIGN" "$ROOT_DIR/App/shell/desktop/release/logs"
+package_install_error_trap
+package_log "Package request: platform=mac version=$VERSION arch=${ARCH:-auto} edition=$EDITION sign=$SIGN"
+
 if [ "${#PASSTHROUGH_ARGS[@]}" -gt 0 ]; then
   for passthrough_arg in "${PASSTHROUGH_ARGS[@]}"; do
     case "$passthrough_arg" in
@@ -150,7 +155,8 @@ if [ "${#PASSTHROUGH_ARGS[@]}" -gt 0 ]; then
   done
 fi
 
-node "$ROOT_DIR/scripts/internal/shared/verify-package-version.mjs" --expected "$VERSION"
+package_run_step "Verify package version metadata" \
+  node "$ROOT_DIR/scripts/internal/shared/verify-package-version.mjs" --expected "$VERSION"
 export MEMMY_VERSION_SYNC_CHECK_ONLY=1
 
 if [ -z "$ARCH" ]; then
@@ -201,8 +207,10 @@ if [ ! -f "$BASE_SCRIPT" ]; then
 fi
 
 export MEMMY_DESKTOP_VERSION="$VERSION"
+package_step_start "Run macOS internal package script"
 if [ "${#PASSTHROUGH_ARGS[@]}" -gt 0 ]; then
   bash "$BASE_SCRIPT" "${PASSTHROUGH_ARGS[@]}"
 else
   bash "$BASE_SCRIPT"
 fi
+package_log_finish 0

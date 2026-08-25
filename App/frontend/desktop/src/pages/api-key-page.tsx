@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Brain, ChevronLeft, Search } from "lucide-react";
 import { useAnalytics } from "../analytics/use-analytics.js";
 import { persistLoginModeSelection } from "../app/login-mode.js";
@@ -52,6 +52,11 @@ interface ProviderOption {
   labelKey: MessageKey;
   endpoint: string;
   defaultModelId: string;
+}
+
+interface SavedEndpointIdentity {
+  endpointId: string;
+  credentialSignature: string;
 }
 
 const providerOptions: ProviderOption[] = [
@@ -112,10 +117,39 @@ export function ApiKeyPage() {
   const [embeddingValidation, setEmbeddingValidation] = useState<ModelConfigValidationState>(initialModelForm.embValidation);
   const canSave = canSaveModelConfig(modelFormValues, llmValidation)
     && canSaveOptionalModelConfig(true, embeddingFormValues, embeddingValidation);
+  const [savePending, setSavePending] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const testedKey = createModelConfigValidationKey(modelFormValues);
   const isTestStale = Boolean(llmValidation.testedKey && llmValidation.testedKey !== testedKey);
   const embeddingTestKey = createModelConfigValidationKey(embeddingFormValues);
   const isEmbeddingTestStale = Boolean(embeddingValidation.testedKey && embeddingValidation.testedKey !== embeddingTestKey);
+  const agentCredentialSignature = endpointCredentialSignature(
+    provider,
+    chatProtocol(provider),
+    endpoint,
+    apiKey,
+    apiKeyMasked
+  );
+  const embeddingCredentialSignature = endpointCredentialSignature(
+    "openai",
+    "openai-embeddings",
+    embeddingConfig.endpoint,
+    embeddingConfig.apiKey,
+    embeddingConfig.apiKeyMasked
+  );
+  const saveSignature = `${testedKey}\n${embeddingTestKey}`;
+  const savedCatalogSignatureRef = useRef<string | null>(null);
+  const initialWorkspace = createModelWorkspace(state.modelConfig);
+  const initialAgentEndpointId = assignedCatalogEndpointId(initialWorkspace, "byok", "agent");
+  const initialEmbeddingEndpointId = assignedCatalogEndpointId(initialWorkspace, "byok", "embedding");
+  const savedEndpointIdentitiesRef = useRef<Partial<Record<"agent" | "embedding", SavedEndpointIdentity>>>({
+    ...(initialAgentEndpointId
+      ? { agent: { endpointId: initialAgentEndpointId, credentialSignature: agentCredentialSignature } }
+      : {}),
+    ...(initialEmbeddingEndpointId
+      ? { embedding: { endpointId: initialEmbeddingEndpointId, credentialSignature: embeddingCredentialSignature } }
+      : {})
+  });
 
   function changeProvider(nextProvider: string) {
     const next = providerOptions.find((option) => option.value === nextProvider) ?? defaultProvider;
@@ -152,46 +186,71 @@ export function ApiKeyPage() {
   }
 
   async function saveConfig() {
-    if (!canSave || !clients?.config) {
+    if (!canSave || !clients?.config || savePending) {
       return;
     }
+    setSaveError(null);
+    setSavePending(true);
     try {
-      const latest = await clients.config.getModelConfig();
-      let workspace = createModelWorkspace(latest);
-      const assignedAgentEndpointId = assignedCatalogEndpointId(workspace, "byok", "agent");
-      const agent = upsertByokPreset(workspace, {
-        provider,
-        ...(apiKeyMasked && assignedAgentEndpointId ? { endpointId: assignedAgentEndpointId } : {}),
-        endpoint,
-        protocol: chatProtocol(provider),
-        ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
-        ...(apiKeyMasked ? { apiKeyMasked } : {}),
-        model,
-        capabilities: ["agent"]
-      });
-      workspace = assignCatalogPreset(agent.workspace, "byok", "agent", agent.presetId);
-      const assignedEmbeddingEndpointId = assignedCatalogEndpointId(workspace, "byok", "embedding");
-      const embedding = upsertByokPreset(workspace, {
-        provider: "openai",
-        ...(embeddingConfig.apiKeyMasked && assignedEmbeddingEndpointId ? { endpointId: assignedEmbeddingEndpointId } : {}),
-        endpoint: embeddingConfig.endpoint,
-        protocol: "openai-embeddings",
-        ...(embeddingConfig.apiKey.trim() ? { apiKey: embeddingConfig.apiKey.trim() } : {}),
-        ...(embeddingConfig.apiKeyMasked ? { apiKeyMasked: embeddingConfig.apiKeyMasked } : {}),
-        model: embeddingConfig.model,
-        capabilities: ["embedding"]
-      });
-      workspace = assignCatalogPreset(embedding.workspace, "byok", "embedding", embedding.presetId);
-      const saved = await clients.config.saveModelCatalog(modelConfigInput(workspace));
-      if (!saved.catalog?.modelAssignments.byok.agent.candidates.length) {
-        throw new Error("persisted BYOK Agent assignment is empty");
+      if (savedCatalogSignatureRef.current !== saveSignature) {
+        const latest = await clients.config.getModelConfig();
+        let workspace = createModelWorkspace(latest);
+        const savedAgentIdentity = savedEndpointIdentitiesRef.current.agent;
+        const agentEndpointId = savedAgentIdentity?.credentialSignature === agentCredentialSignature
+          ? savedAgentIdentity.endpointId
+          : undefined;
+        const agent = upsertByokPreset(workspace, {
+          provider,
+          ...(agentEndpointId ? { endpointId: agentEndpointId } : {}),
+          endpoint,
+          protocol: chatProtocol(provider),
+          ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
+          ...(apiKeyMasked ? { apiKeyMasked } : {}),
+          model,
+          capabilities: ["agent"]
+        });
+        workspace = assignCatalogPreset(agent.workspace, "byok", "agent", agent.presetId);
+        const savedEmbeddingIdentity = savedEndpointIdentitiesRef.current.embedding;
+        const embeddingEndpointId = savedEmbeddingIdentity?.credentialSignature === embeddingCredentialSignature
+          ? savedEmbeddingIdentity.endpointId
+          : undefined;
+        const embedding = upsertByokPreset(workspace, {
+          provider: "openai",
+          ...(embeddingEndpointId ? { endpointId: embeddingEndpointId } : {}),
+          endpoint: embeddingConfig.endpoint,
+          protocol: "openai-embeddings",
+          ...(embeddingConfig.apiKey.trim() ? { apiKey: embeddingConfig.apiKey.trim() } : {}),
+          ...(embeddingConfig.apiKeyMasked ? { apiKeyMasked: embeddingConfig.apiKeyMasked } : {}),
+          model: embeddingConfig.model,
+          capabilities: ["embedding"]
+        });
+        workspace = assignCatalogPreset(embedding.workspace, "byok", "embedding", embedding.presetId);
+        const saved = await clients.config.saveModelCatalog(modelConfigInput(workspace));
+        if (!saved.catalog?.modelAssignments.byok.agent.candidates.length) {
+          throw new Error("persisted BYOK Agent assignment is empty");
+        }
+        track({ name: "model_config_saved", params: { page_path: "/api-key" }, consentTier: "basic" });
+        dispatch(appActions.modelConfigUpdated(saved));
+        const savedWorkspace = createModelWorkspace(saved);
+        const savedAgentEndpointId = assignedCatalogEndpointId(savedWorkspace, "byok", "agent");
+        const savedEmbeddingEndpointId = assignedCatalogEndpointId(savedWorkspace, "byok", "embedding");
+        savedEndpointIdentitiesRef.current = {
+          ...(savedAgentEndpointId
+            ? { agent: { endpointId: savedAgentEndpointId, credentialSignature: agentCredentialSignature } }
+            : {}),
+          ...(savedEmbeddingEndpointId
+            ? { embedding: { endpointId: savedEmbeddingEndpointId, credentialSignature: embeddingCredentialSignature } }
+            : {})
+        };
+        savedCatalogSignatureRef.current = saveSignature;
       }
-      track({ name: "model_config_saved", params: { page_path: "/api-key" }, consentTier: "basic" });
-      dispatch(appActions.modelConfigUpdated(saved));
       await persistLoginModeSelection({ configClient: clients.config, dispatch, userMode: "byok" });
       dispatch(appActions.navigate("/api-key-models"));
     } catch (error) {
-      console.warn("save byok model config failed", error);
+      console.error("save byok model config failed", error);
+      setSaveError(firstStepSaveErrorText(error, t));
+    } finally {
+      setSavePending(false);
     }
   }
 
@@ -308,15 +367,45 @@ export function ApiKeyPage() {
 
         <button
           type="button"
-          disabled={!canSave}
-          onClick={saveConfig}
+          disabled={!canSave || !clients?.config || savePending}
+          onClick={() => void saveConfig()}
           className={`w-full ${API_KEY_PRIMARY_BTN_CLASS}`}
         >
           {t("apiKey.next")}
         </button>
+        {saveError ? <p className="mt-3 text-[12px] text-left leading-relaxed text-red-500" role="alert">{saveError}</p> : null}
       </div>
     </div>
   );
+}
+
+function endpointCredentialSignature(
+  provider: string,
+  protocol: string,
+  endpoint: string,
+  apiKey: string,
+  apiKeyMasked: string
+): string {
+  const normalizedApiKey = apiKey.trim();
+  const normalizedMaskedApiKey = apiKeyMasked.trim();
+  return JSON.stringify({
+    provider: provider.trim().toLowerCase(),
+    protocol,
+    endpoint: endpoint.trim().replace(/\/+$/, ""),
+    credential: normalizedMaskedApiKey ? `masked:${normalizedMaskedApiKey}` : `raw:${normalizedApiKey}`
+  });
+}
+
+function firstStepSaveErrorText(
+  error: unknown,
+  t: ReturnType<typeof useTranslation>["t"]
+): string {
+  const code = error && typeof error === "object" && "code" in error ? error.code : null;
+  if (code === "model_config_changed") return t("settings.model.configChanged");
+  if (code === "config_write_busy") return t("settings.modelWorkspace.saveBusy");
+  return error instanceof Error && error.message
+    ? error.message
+    : t("settings.modelWorkspace.saveFailed");
 }
 
 function chatProtocol(provider: string) {

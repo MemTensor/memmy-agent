@@ -13,6 +13,7 @@ import {
   BrowserToolsConfig,
   Config,
   ContextCompactionConfig,
+  DEFAULT_CONTEXT_WINDOW_TOKENS,
   GatewayConfig,
   InlineFallbackConfig,
   MCPServerConfig,
@@ -256,9 +257,77 @@ describe("config schema validation", () => {
     expect(() => new InlineFallbackConfig({ provider: "", model: "gpt-4.1" })).toThrow(/fallback provider/);
 
     expect(new ModelPresetConfig({ ...base, model: "gpt-4.1" }).model).toBe("gpt-4.1");
-    expect(new ModelPresetConfig({ ...base, model: "gpt-4.1" }).maxTokens).toBe(DEFAULT_MAX_TOKENS);
+    expect(new ModelPresetConfig({ ...base, model: "gpt-4.1" }).maxTokens).toBe(32_768);
     expect(new ModelPresetConfig({ ...base, model: "gpt-4.1" }).temperature).toBe(0.7);
     expect(new InlineFallbackConfig({ provider: "openai", model: "gpt-4.1" }).provider).toBe("openai");
+  });
+
+  it("resolves model token defaults only for BYOK text-generation presets", () => {
+    const preset = (overrides: Record<string, unknown> = {}) => new ModelPresetConfig({
+      endpoint: "chat",
+      model: "gpt-5.6",
+      provider: "openai",
+      source: "byok",
+      capabilities: ["agent"],
+      ...overrides,
+    });
+
+    const defaults = new AgentDefaults();
+    expect(defaults.maxTokens).toBe(DEFAULT_MAX_TOKENS);
+    expect(defaults.contextWindowTokens).toBe(DEFAULT_CONTEXT_WINDOW_TOKENS);
+    expect(preset()).toMatchObject({ maxTokens: 128_000, contextWindowTokens: 1_050_000 });
+    expect(preset({ provider: "custom-openai" })).toMatchObject({
+      maxTokens: 128_000,
+      contextWindowTokens: 1_050_000,
+    });
+    expect(preset({ model: "private-model" })).toMatchObject({
+      maxTokens: DEFAULT_MAX_TOKENS,
+      contextWindowTokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
+    });
+    expect(preset({ source: "account", ownerAccountId: "account-1" })).toMatchObject({
+      maxTokens: DEFAULT_MAX_TOKENS,
+      contextWindowTokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
+    });
+
+    for (const capability of ["embedding", "asr", "image_generation"]) {
+      expect(preset({ capabilities: [capability] })).toMatchObject({
+        maxTokens: DEFAULT_MAX_TOKENS,
+        contextWindowTokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
+      });
+    }
+    for (const capability of ["agent", "memory_summary", "memory_evolution"]) {
+      expect(preset({ capabilities: [capability] })).toMatchObject({
+        maxTokens: 128_000,
+        contextWindowTokens: 1_050_000,
+      });
+    }
+
+    expect(preset({ maxTokens: 12_345 })).toMatchObject({
+      maxTokens: 12_345,
+      contextWindowTokens: 1_050_000,
+    });
+    expect(preset({ contextWindowTokens: 345_678 })).toMatchObject({
+      maxTokens: 128_000,
+      contextWindowTokens: 345_678,
+    });
+    expect(preset({ maxTokens: 12_345, contextWindowTokens: 345_678 })).toMatchObject({
+      maxTokens: 12_345,
+      contextWindowTokens: 345_678,
+    });
+
+    for (const model of ["Gpt-5.6", " gpt-5.6 ", "gpt-5.6-unknown-snapshot"]) {
+      expect(preset({ model })).toMatchObject({
+        maxTokens: DEFAULT_MAX_TOKENS,
+        contextWindowTokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
+      });
+    }
+
+    const config = new Config();
+    config.agents.defaults.model = "gpt-5.6";
+    expect(config.resolvePreset("default")).toMatchObject({
+      maxTokens: DEFAULT_MAX_TOKENS,
+      contextWindowTokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
+    });
   });
 
   it("declares MCP server fields with camelCase defaults while preserving extensions", () => {

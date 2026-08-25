@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+source "$ROOT_DIR/scripts/internal/shared/package-logging.sh"
 CERT_DIR="${MEMMY_MAC_CERT_DIR:-$ROOT_DIR/Mac软件打包}"
 SIGNING_DIR="$ROOT_DIR/.signing-local"
 KEYCHAIN="${CSC_KEYCHAIN:-/private/tmp/memmy-build-x64.keychain-db}"
@@ -34,7 +35,7 @@ DMG="$ROOT_DIR/App/shell/desktop/release/Memmy-$DESKTOP_VERSION-darwin-x64-$PACK
 ARTIFACT_NAME="Memmy-$DESKTOP_VERSION-darwin-x64-$PACKAGE_EDITION-signed.\${ext}"
 
 log() {
-  printf '\n[%s] %s\n' "$(date '+%H:%M:%S')" "$*"
+  package_step_start "$*"
 }
 
 require_file() {
@@ -141,6 +142,9 @@ verify_dmg() {
 
 main() {
   cd "$ROOT_DIR"
+  package_log_init "mac-signed-x64-$DESKTOP_VERSION-$PACKAGE_EDITION" "$ROOT_DIR/App/shell/desktop/release/logs"
+  package_install_error_trap
+  package_log "macOS signed package context: version=$DESKTOP_VERSION arch=x64 edition=$PACKAGE_EDITION dmg=$DMG"
 
   require_file "$P12_FILE" "Developer ID p12 certificate"
   require_file "$APPLE_API_KEY" "Apple API key"
@@ -162,7 +166,7 @@ main() {
   sign_and_notarize_dmg
   verify_dmg
 
-  log "Done"
+  package_log_finish 0
   echo "Signed x64 DMG is ready:"
   echo "  $DMG"
 }

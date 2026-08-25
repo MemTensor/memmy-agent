@@ -1,6 +1,11 @@
 /** World model sub page module. */
 import { useEffect, useState } from "react";
-import type { GetMemoryOutput, MemoryListItem, PanelItemsOutput } from "@memmy/local-api-contracts";
+import type {
+  GetMemoryOutput,
+  MemoryListItem,
+  PanelItemsOutput,
+  PanelMemoryListItem
+} from "@memmy/local-api-contracts";
 import type { MemoryRuntimeClient } from "../../api/memory-runtime-client.js";
 import { formatUserDateTime } from "../../lib/user-time-zone.js";
 import {
@@ -52,6 +57,7 @@ interface WorldModelStructure {
 }
 
 interface WorldModelView {
+  schemaVersion: 1 | 2;
   title: string;
   status: string;
   source?: string;
@@ -61,6 +67,7 @@ interface WorldModelView {
   summary: string;
   policyIds: string[];
   structure: WorldModelStructure;
+  fields: Array<{ title: MessageKey; body: string }>;
 }
 
 /** Contract for world model sub page props. */
@@ -207,14 +214,12 @@ export function WorldModelSubPage(props: WorldModelSubPageProps) {
 
   useEffect(() => {
     void search().catch(() => undefined);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.client, t]);
 
   useEffect(() => {
     if (props.openRequest) {
       openWorldModelById(props.openRequest.id);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.openRequest?.requestId]);
 
   return (
@@ -305,7 +310,12 @@ export function WorldModelSubPageView(props: WorldModelSubPageViewProps) {
               className={`memory-card${props.selectedWorldModelId === item.id ? " memory-card--selected" : ""}`}
             >
               <div className="memory-card__body">
-                <div className="memory-card__title">{displayWorldModelTitle(item)}</div>
+                <div className="memory-card__title">{displayWorldModelListTitle(item, t)}</div>
+                {item.worldModelScope?.kind === "project" && item.worldModelScope.workspaceDisplayPath !== null && (
+                  <div className="memory-card__summary" title={item.worldModelScope.workspaceDisplayPath}>
+                    {item.worldModelScope.workspaceDisplayPath}
+                  </div>
+                )}
                 <div className="memory-card__meta">
                   <WorldModelStatusPill status={item.status} />
                   <span>{t("memory.memories.updatedAt")}: {formatDateTime(item.updatedAt)}</span>
@@ -395,7 +405,9 @@ function WorldModelDetail(props: { detail: GetMemoryOutput; onOpenMemoryReferenc
           <Metric label={t("memory.memories.status")} value={worldModelStatusLabel(worldModel.status, t)} />
           <Metric label={t("memory.memories.createdAt")} value={formatDateTime(worldModel.createdAt)} />
           <Metric label={t("memory.memories.updatedAt")} value={formatDateTime(worldModel.updatedAt)} />
-          <Metric label={t("memory.worldModel.relatedPolicies")} value={String(worldModel.policyIds.length)} />
+          {worldModel.schemaVersion === 1 && (
+            <Metric label={t("memory.worldModel.relatedPolicies")} value={String(worldModel.policyIds.length)} />
+          )}
         </div>
         {worldModel.source && (
           <div className="memory-policy-source">
@@ -405,17 +417,25 @@ function WorldModelDetail(props: { detail: GetMemoryOutput; onOpenMemoryReferenc
         )}
       </section>
 
-      {worldModel.summary && <DetailTextSection title={t("memory.memories.summary")} body={worldModel.summary} />}
-      {hasStructuredCognition
-        ? <StructureSection structure={worldModel.structure} onOpenMemoryReference={props.onOpenMemoryReference} />
-        : <DetailTextSection title={t("memory.memories.body")} body={worldModel.body} />}
-      <LinkedIdsSection
-        title={t("memory.worldModel.relatedPolicies")}
-        ids={worldModel.policyIds}
-        empty={t("memory.worldModel.noRelatedPolicies")}
-        fallbackPage="policies"
-        onOpen={props.onOpenMemoryReference}
-      />
+      {worldModel.schemaVersion === 2 ? (
+        worldModel.fields.map((field) => (
+          <DetailTextSection key={field.title} title={t(field.title)} body={field.body} />
+        ))
+      ) : (
+        <>
+          {worldModel.summary && <DetailTextSection title={t("memory.memories.summary")} body={worldModel.summary} />}
+          {hasStructuredCognition
+            ? <StructureSection structure={worldModel.structure} onOpenMemoryReference={props.onOpenMemoryReference} />
+            : <DetailTextSection title={t("memory.memories.body")} body={worldModel.body} />}
+          <LinkedIdsSection
+            title={t("memory.worldModel.relatedPolicies")}
+            ids={worldModel.policyIds}
+            empty={t("memory.worldModel.noRelatedPolicies")}
+            fallbackPage="policies"
+            onOpen={props.onOpenMemoryReference}
+          />
+        </>
+      )}
     </>
   );
 }
@@ -531,12 +551,14 @@ function worldModelFromDetail(detail: GetMemoryOutput): WorldModelView {
   const properties = recordValue(metadata.properties);
   const internalInfo = recordValue(properties.internal_info);
   const layerWorldModel = recordValue(detail.item.worldModel);
+  const schemaVersion = layerWorldModel.schemaVersion === 2 ? 2 : 1;
   const worldModel = recordValue(firstDefined(internalInfo.world_model, internalInfo.worldModel, metadata.world_model, metadata.worldModel));
   const structure = readWorldModelStructure(
     firstDefined(worldModel.structure, internalInfo.structure, properties.structure, metadata.structure)
   );
 
   return {
+    schemaVersion,
     title: displayWorldModelTitle(detail.item, firstString(worldModel.title, internalInfo.title)),
     status: firstString(worldModel.status, internalInfo.status, detail.item.status) ?? detail.item.status,
     source: firstString(metadata.source, internalInfo.source),
@@ -545,8 +567,22 @@ function worldModelFromDetail(detail: GetMemoryOutput): WorldModelView {
     body: cleanMemoryBody(detail.item.body),
     summary: cleanWorldModelText(firstString(layerWorldModel.summary, worldModel.summary, internalInfo.summary)),
     policyIds: stringArray(firstDefined(worldModel.policyIds, worldModel.policy_ids, internalInfo.policyIds, internalInfo.policy_ids)),
-    structure
+    structure,
+    fields: schemaVersion === 2 ? v2WorldModelFields(layerWorldModel) : [],
   };
+}
+
+function v2WorldModelFields(worldModel: Record<string, unknown>): WorldModelView["fields"] {
+  const candidates: Array<[MessageKey, unknown]> = [
+    ["memory.worldModel.generalRules", worldModel.generalRulesAndSafetyConstraints],
+    ["memory.worldModel.projectEnvironment", worldModel.projectEnvironmentProfile],
+    ["memory.worldModel.projectContract", worldModel.projectContract],
+    ["memory.worldModel.domainKnowledge", worldModel.domainKnowledge],
+  ];
+  return candidates.flatMap(([title, value]) => {
+    const body = typeof value === "string" ? value.trim() : "";
+    return body ? [{ title, body }] : [];
+  });
 }
 
 function readWorldModelStructure(value: unknown): WorldModelStructure {
@@ -611,6 +647,18 @@ function displayWorldModelTitle(
   return displayMemoryId(item.id);
 }
 
+export function displayWorldModelListTitle(
+  item: PanelMemoryListItem,
+  t: (key: MessageKey) => string
+): string {
+  if (item.worldModelScope?.kind === "general") return t("memory.worldModel.generalRules");
+  if (item.worldModelScope?.kind === "project") {
+    const title = t("memory.worldModel.projectTitle");
+    return item.worldModelScope.projectLabel ? `${title} · ${item.worldModelScope.projectLabel}` : title;
+  }
+  return displayWorldModelTitle(item);
+}
+
 function firstReadableWorldBodyLine(body?: string): string | undefined {
   return cleanMemoryBody(body)
     .split(/\r?\n/)
@@ -663,7 +711,7 @@ function parseJsonString(value: unknown): unknown {
   }
 
   const trimmed = value.trim();
-  if (!trimmed || !/^[\[{"]/.test(trimmed)) {
+  if (!trimmed || !/^[[{"]/.test(trimmed)) {
     return value;
   }
 

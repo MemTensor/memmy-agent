@@ -280,6 +280,10 @@ describe("codex skill target", () => {
       const url = new URL(request.url || "/", "http://127.0.0.1");
       const body = request.method === "POST" ? JSON.parse(await readRequestBody(request)) as Record<string, unknown> : {};
       requests.push({ path: url.pathname, body });
+      if (request.method === "GET" && url.pathname === "/api/v1/health") {
+        writeJsonResponse(response, 200, { features: {} });
+        return;
+      }
       if (request.method === "POST" && url.pathname === "/api/v1/sessions/open") {
         writeJsonResponse(response, 200, { sessionId: "memmy-session-1", status: "open" });
         return;
@@ -342,24 +346,26 @@ describe("codex skill target", () => {
       expect(run.stderr).toBe("");
       expect(JSON.parse(run.stdout)).toEqual({ continue: true, suppressOutput: true });
       expect(requests.map((item) => item.path)).toEqual([
+        "/api/v1/health",
         "/api/v1/sessions/open",
         "/api/v1/turns/start",
+        "/api/v1/health",
         "/api/v1/sessions/open",
         "/api/v1/turns/turn-stop-1/complete"
       ]);
-      expect(requests[0]?.body).toMatchObject({
+      expect(requests[1]?.body).toMatchObject({
         sessionId: "codex-memory-codex-session-1",
         source: "codex",
         workspacePath: "/tmp/memmy-project"
       });
-      expect(requests[1]?.body).toMatchObject({
+      expect(requests[2]?.body).toMatchObject({
         adapterId: "memmy-codex-hook",
         requestId: "codex-start:turn-stop-1",
         sessionId: "memmy-session-1",
         turnId: "turn-stop-1",
         query: "请继续完成数据分析报告"
       });
-      expect(requests[3]?.body).toMatchObject({
+      expect(requests[5]?.body).toMatchObject({
         adapterId: "memmy-codex-hook",
         requestId: expect.stringMatching(/^codex-complete:turn-stop-1:/u),
         sessionId: "memmy-session-1",
@@ -369,7 +375,7 @@ describe("codex skill target", () => {
         source: "codex",
         sourceMemoryIds: ["memory-1"]
       });
-      expect(requests[3]?.body).not.toHaveProperty("episodeId");
+      expect(requests[5]?.body).not.toHaveProperty("episodeId");
     } finally {
       await close(server);
     }

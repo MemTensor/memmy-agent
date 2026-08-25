@@ -110,9 +110,10 @@ describe("migration runner", () => {
       "v1.0.7/0001-normalize-runtime-model-catalog",
       "v1.0.7/0003-normalize-goal-state",
       "v1.0.7/0004-add-goal-dag-boundary",
+      "v1.0.9/0001-repair-runtime-model-catalog",
     ]);
     expect(first.deferred).toEqual(["v1.0.7/0002-import-legacy-app-state-model-config"]);
-    expect(first.results).toEqual({ scanned: 3, changed: 2, ignored: 1 });
+    expect(first.results).toEqual({ scanned: 4, changed: 2, ignored: 2 });
     expect(second).toEqual({
       applied: [],
       skipped: [
@@ -120,6 +121,7 @@ describe("migration runner", () => {
         "v1.0.7/0001-normalize-runtime-model-catalog",
         "v1.0.7/0003-normalize-goal-state",
         "v1.0.7/0004-add-goal-dag-boundary",
+        "v1.0.9/0001-repair-runtime-model-catalog",
       ],
       deferred: ["v1.0.7/0002-import-legacy-app-state-model-config"],
       results: { scanned: 0, changed: 0, ignored: 0 },
@@ -159,6 +161,15 @@ describe("migration runner", () => {
         target: {
           type: "session-dag",
           key: expect.stringMatching(/^[a-f0-9]{64}$/),
+        },
+      },
+      {
+        id: "v1.0.9/0001-repair-runtime-model-catalog",
+        introducedIn: "1.0.9",
+        appliedAt: expect.stringMatching(/Z$/),
+        target: {
+          type: "runtime-config",
+          key: runtimeConfigTargetKey(configPath),
         },
       },
     ]);

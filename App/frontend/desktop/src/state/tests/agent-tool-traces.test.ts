@@ -3,6 +3,7 @@
  */
 import { describe, expect, it } from "vitest";
 import {
+  extractApplyPatchSummaryPaths,
   formatToolCallTrace,
   mergeFileEdits,
   mergeToolProgressEvents,
@@ -261,5 +262,63 @@ describe("agent tool trace helpers", () => {
 
   it("parses stringified JSON arguments so they aren't shown as raw text", () => {
     expect(formatToolCallTrace({ phase: "end", name: "exec", arguments: '{"command":"npm test"}' })).toBe("Ran npm test");
+  });
+
+  it("summarizes exact apply_patch calls without exposing the patch body", () => {
+    const singleInput = [
+      "*** Begin Patch",
+      "*** Update File: src/app.ts",
+      "@@",
+      "-old secret body",
+      "+new secret body",
+      "*** End Patch",
+    ].join("\n");
+    const multiInput = [
+      "*** Begin Patch",
+      "*** Update File: src/old.ts",
+      "*** Move to: src/new.ts",
+      "*** Add File: src/extra.ts",
+      "+extra",
+      "*** End Patch",
+    ].join("\n");
+
+    expect(summarizeToolCall({ name: "apply_patch", arguments: { input: singleInput } })).toMatchObject({
+      line: "Patched app.ts",
+      category: "edit",
+    });
+    expect(summarizeToolCall({ name: "apply_patch", arguments: JSON.stringify({ input: multiInput }) })).toMatchObject({
+      line: "Patched 3 files",
+      category: "edit",
+    });
+    expect(formatToolCallTrace({ name: "apply_patch", arguments: { input: "*** Begin Pat" } })).toBe(
+      "Applied patch",
+    );
+    expect(formatToolCallTrace({ name: "apply_patch", arguments: { input: singleInput } })).not.toContain(
+      "secret body",
+    );
+  });
+
+  it("extracts normalized unique apply_patch paths and stops at invalid control input", () => {
+    const input = [
+      "*** Begin Patch",
+      "*** Add File: ./src//a.ts",
+      "+*** Update File: fake.ts",
+      "*** Update File: src\\a.ts",
+      "@@",
+      "-old",
+      "+new",
+      "invalid",
+      "*** Add File: ignored.ts",
+      "+ignored",
+      "*** End Patch",
+    ].join("\n");
+
+    expect(extractApplyPatchSummaryPaths(input)).toEqual(["src/a.ts"]);
+  });
+
+  it("keeps non-exact apply patch aliases on the existing edit_file summary path", () => {
+    for (const name of ["applypatch", "patch", "mcp_server_apply_patch"]) {
+      expect(formatToolCallTrace({ name, arguments: { path: "src/legacy.ts" } })).toBe("Edited legacy.ts");
+    }
   });
 });

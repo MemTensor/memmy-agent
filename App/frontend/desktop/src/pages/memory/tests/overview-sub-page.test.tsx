@@ -23,12 +23,14 @@ describe("OverviewSubPage", () => {
 
     expect(html).toContain('data-icon="layers"');
     expect(html).toContain("记忆数量");
+    expect(html).toContain("用户记忆数量");
     expect(html).toContain("技能数量");
     expect(html).toContain("经验数量");
     expect(html).toContain("场域认知数量");
     expect(html.indexOf("记忆数量")).toBeLessThan(html.indexOf("经验数量"));
     expect(html.indexOf("经验数量")).toBeLessThan(html.indexOf("场域认知数量"));
     expect(html.indexOf("场域认知数量")).toBeLessThan(html.indexOf("技能数量"));
+    expect(html.indexOf("技能数量")).toBeLessThan(html.indexOf("用户记忆数量"));
     expect(html).toContain("每日统计");
     expect(html).toContain("按创建日期统计最近一年的新增记忆。");
     expect(html).toContain('data-daily-activity-card="true"');

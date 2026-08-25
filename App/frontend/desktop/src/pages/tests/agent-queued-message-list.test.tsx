@@ -1,5 +1,8 @@
 // @vitest-environment happy-dom
 
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -7,6 +10,8 @@ import type { AgentQueuedMessage } from "../../state/agent-chat-slice.js";
 import { AgentQueuedMessageList } from "../agent-queued-message-list.js";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+const stylesSourcePath = resolve(dirname(fileURLToPath(import.meta.url)), "../../styles.css");
 
 function queued(
   clientRequestId: string,
@@ -111,6 +116,18 @@ describe("AgentQueuedMessageList", () => {
     ]);
     act(() => rows[0]?.querySelector<HTMLButtonElement>(".agent-queue-item__steer")?.click());
     expect(onSteer).toHaveBeenCalledWith("gui");
+  });
+
+  it("keeps the Steer action themed and on one line", () => {
+    const styles = readFileSync(stylesSourcePath, "utf8");
+    const sharedControlRule = styles.match(/\.agent-queue-item__remove,\s*\.agent-queue-item__steer\s*\{[^}]*\}/)?.[0] ?? "";
+    const steerRules = [...styles.matchAll(/\.agent-queue-item__steer\s*\{[^}]*\}/g)]
+      .map((match) => match[0])
+      .join("\n");
+
+    expect(sharedControlRule).toContain("display: inline-flex;");
+    expect(steerRules).toContain("color: var(--color-action-sky);");
+    expect(steerRules).toContain("white-space: nowrap;");
   });
 
   it("falls back to MessageCircle for unknown or failed IM logos", () => {

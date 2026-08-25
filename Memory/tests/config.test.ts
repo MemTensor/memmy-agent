@@ -60,7 +60,7 @@ describe("memmy memory config", () => {
     expect(loadMemmyConfig(configPath).config.algorithm.enableMemoryAdd).toBe(true);
     expect(loadMemmyConfig(configPath).config.algorithm.enableMemorySearch).toBe(true);
     expect(loadMemmyConfig(configPath).config.algorithm.enableQueryRewrite).toBe(false);
-    expect(loadMemmyConfig(configPath).config.algorithm.retrieval.minRecallScore).toBe(0.2);
+    expect(loadMemmyConfig(configPath).config.algorithm.retrieval.minRecallScore).toBe(0.12);
     expect(loadMemmyConfig(configPath).config.algorithm.negativeExperience).toMatchObject({
       enabled: true,
       failureRTaskThreshold: -0.15,

@@ -39,10 +39,15 @@ export interface UpdateCoordinatorValue {
   preparedUpdatePath: string | null;
   downloadProgress: DesktopUpdateDownloadProgress | null;
   feedback: UpdateFeedback | null;
+  requestInlineAction(): Promise<void>;
   requestPrimaryAction(): Promise<void>;
 }
 
 type UpdateDialogKind = "download-confirm" | "install-confirm" | null;
+
+interface DownloadUpdateOptions {
+  showInstallDialog?: boolean;
+}
 
 interface UpdateCoordinatorState {
   phase: UpdatePhase;
@@ -60,7 +65,7 @@ interface UpdateCoordinatorContextValue extends UpdateCoordinatorValue {
   confirmDialog(): Promise<void>;
 }
 
-const UPDATE_NOTIFICATION_FIRST_CHECK_DELAY_MS = 60_000;
+const UPDATE_NOTIFICATION_FIRST_CHECK_DELAY_MS = 5_000;
 const UPDATE_NOTIFICATION_INTERVAL_MS = 60 * 60 * 1000;
 
 const INITIAL_UPDATE_STATE: UpdateCoordinatorState = {
@@ -179,7 +184,7 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
     return request;
   }, [appVersion]);
 
-  const downloadUpdate = useCallback(async (update: DesktopUpdateCheckResult): Promise<void> => {
+  const downloadUpdate = useCallback(async (update: DesktopUpdateCheckResult, options: DownloadUpdateOptions = {}): Promise<void> => {
     if (downloadInFlightRef.current) {
       await downloadInFlightRef.current;
       return;
@@ -237,7 +242,7 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
         preparedUpdatePath: installResult.filePath,
         downloadProgress: null,
         feedback: { key: "settings.about.silentReady", values: { version } },
-        dialog: "install-confirm"
+        dialog: options.showInstallDialog === false ? null : "install-confirm"
       }));
     } catch (error) {
       if (!mountedRef.current) {
@@ -421,6 +426,23 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
     await checkManually();
   }, [checkManually, commitUpdateState]);
 
+  const requestInlineAction = useCallback(async (): Promise<void> => {
+    const current = updateStateRef.current;
+    if (isUpdateBusy(current.phase)) {
+      return;
+    }
+    if (current.phase === "prepared" && current.result && current.preparedUpdatePath) {
+      await installPreparedUpdate();
+      return;
+    }
+    if (current.phase === "available" && current.result?.downloadUrl) {
+      await downloadUpdate(current.result, { showInstallDialog: false });
+      return;
+    }
+
+    await checkManually();
+  }, [checkManually, downloadUpdate, installPreparedUpdate]);
+
   const dismissDialog = useCallback(() => {
     commitUpdateState((state) => ({ ...state, dialog: null }));
   }, [commitUpdateState]);
@@ -436,10 +458,39 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
     }
   }, [downloadUpdate, installPreparedUpdate]);
 
+  const commitPassiveAvailableUpdate = useCallback((result: DesktopUpdateCheckResult): void => {
+    const version = result.latestVersion ?? result.currentVersion;
+    commitUpdateState((current) => {
+      if (isForegroundUpdateFlow(current)) {
+        return current;
+      }
+      if (result.preparedUpdatePath) {
+        return {
+          phase: "prepared",
+          result,
+          preparedUpdatePath: result.preparedUpdatePath ?? null,
+          downloadProgress: null,
+          feedback: { key: "settings.about.silentReady", values: { version } },
+          dialog: null
+        };
+      }
+      return {
+        phase: "available",
+        result,
+        preparedUpdatePath: null,
+        downloadProgress: null,
+        feedback: result.downloadUrl
+          ? { key: "settings.about.updateReady", values: { version } }
+          : { key: "settings.about.updateAvailableNoLink", values: { version } },
+        dialog: null
+      };
+    });
+  }, [commitUpdateState]);
+
   const startupReady = appState.startup.status === "ready";
   useEffect(() => {
     const bridge = typeof window === "undefined" ? undefined : window.memmy;
-    if (!startupReady || !bridge?.checkForUpdates || !bridge.notifyUpdateAvailable) {
+    if (!startupReady || !bridge?.checkForUpdates) {
       return;
     }
 
@@ -454,6 +505,9 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
         if (disposed) {
           return;
         }
+        if (result.status === "available") {
+          commitPassiveAvailableUpdate(result);
+        }
         const notificationContext = notificationContextRef.current;
         const plan = decideUpdateNotification({
           enabled: notificationContext.enabled,
@@ -466,6 +520,9 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
           return;
         }
 
+        if (!bridge.notifyUpdateAvailable) {
+          return;
+        }
         lastNotifiedUpdateVersionRef.current = plan.version;
         void bridge.notifyUpdateAvailable({
           title: notificationContext.translate("notification.update.title"),
@@ -489,7 +546,7 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
       clearTimeout(firstCheckTimer);
       clearInterval(intervalTimer);
     };
-  }, [requestUpdateResult, startupReady]);
+  }, [commitPassiveAvailableUpdate, requestUpdateResult, startupReady]);
 
   const value = useMemo<UpdateCoordinatorContextValue>(() => ({
     appVersion,
@@ -499,10 +556,11 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
     feedback: updateState.feedback,
     result: updateState.result,
     dialog: updateState.dialog,
+    requestInlineAction,
     requestPrimaryAction,
     dismissDialog,
     confirmDialog
-  }), [appVersion, confirmDialog, dismissDialog, requestPrimaryAction, updateState]);
+  }), [appVersion, confirmDialog, dismissDialog, requestInlineAction, requestPrimaryAction, updateState]);
 
   return (
     <UpdateCoordinatorContext.Provider value={value}>
@@ -514,6 +572,11 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
 /** Reads the stable app-level update state. */
 export function useUpdateCoordinator(): UpdateCoordinatorValue {
   return useUpdateCoordinatorContext();
+}
+
+/** Reads the app-level update state when a provider is present. */
+export function useOptionalUpdateCoordinator(): UpdateCoordinatorValue | null {
+  return useContext(UpdateCoordinatorContext);
 }
 
 /** Renders the update dialog above route-specific pages. */

@@ -1,10 +1,45 @@
 /** Skill distribution service tests. */
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createSkillTargetRegistry } from "../../adapters/outbound/skill-writer/target-registry.js";
 import type { MemoryPluginConflict, SkillManifest, SkillTarget } from "../../adapters/outbound/skill-writer/types.js";
 import { createSkillDistributionService } from "../skill-distribution-service.js";
 
 describe("skill distribution service", () => {
+  it("scans other Agent skills as source-attributed immutable versions", async () => {
+    const rootDirectory = mkdtempSync(join(tmpdir(), "memmy-agent-skills-"));
+    try {
+      mkdirSync(join(rootDirectory, "skills", "review-code"), { recursive: true });
+      mkdirSync(join(rootDirectory, "skills", "memmy-memory"), { recursive: true });
+      writeFileSync(
+        join(rootDirectory, "skills", "review-code", "SKILL.md"),
+        "---\nname: review-code\nversion: 2\n---\nReview changed code.\n",
+        "utf8"
+      );
+      writeFileSync(join(rootDirectory, "skills", "memmy-memory", "SKILL.md"), "internal", "utf8");
+      const service = createSkillDistributionService({
+        targetRegistry: createSkillTargetRegistry([
+          createFakeTarget({ resolveRootDirectory: () => rootDirectory })
+        ])
+      });
+
+      await expect(service.listSkills?.("cursor")).resolves.toEqual([
+        expect.objectContaining({
+          sourceAgentId: "cursor",
+          sourceSkillId: "review-code",
+          sourceSkillVersion: "2",
+          title: "review-code",
+          content: expect.stringContaining("Review changed code."),
+          sourceContentHash: expect.stringMatching(/^[a-f0-9]{64}$/)
+        })
+      ]);
+    } finally {
+      rmSync(rootDirectory, { recursive: true, force: true });
+    }
+  });
+
   it("renders and installs the fixed Memmy skill manifest", async () => {
     let installed: SkillManifest | undefined;
     const service = createSkillDistributionService({

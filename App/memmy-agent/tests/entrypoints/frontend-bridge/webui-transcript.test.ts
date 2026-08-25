@@ -8,9 +8,11 @@ import {
   appendTranscriptObject,
   buildWebuiThreadResponse,
   lastTranscriptTurnState,
+  readTranscriptChunk,
   readTranscriptLines,
   replayTranscriptToUiMessages,
   toolTraceLinesFromEvents,
+  webuiTranscriptPath,
 } from "../../../src/entrypoints/frontend-bridge/transcript.js";
 import { WebSocketChannel } from "../../../src/integrations/channels/websocket.js";
 
@@ -83,6 +85,29 @@ describe("webui transcript replay", () => {
 
     expect(lines).toHaveLength(1);
     expect(lines[0].text).toBe("hello");
+  });
+
+  it("accepts transcript records above the legacy 8 MiB limit", () => {
+    useDataDir();
+    const key = "websocket:t-large-record";
+    const text = "x".repeat(8 * 1024 * 1024 + 1);
+
+    appendTranscriptObject(key, { event: "message", chat_id: "t-large-record", text });
+
+    expect(readTranscriptLines(key)).toEqual([
+      { event: "message", chat_id: "t-large-record", text },
+    ]);
+  });
+
+  it("rejects transcript files above the 128 MiB limit", () => {
+    useDataDir();
+    const key = "websocket:t-oversized-file";
+    const file = webuiTranscriptPath(key);
+    fs.writeFileSync(file, "", "utf8");
+    fs.truncateSync(file, 128 * 1024 * 1024 + 1);
+
+    expect(readTranscriptLines(key)).toEqual([]);
+    expect(readTranscriptChunk(key, 0)).toBeNull();
   });
 
   it("replays assistant deltas, reasoning, and turn-end latency", () => {
@@ -755,6 +780,47 @@ describe("webui transcript replay", () => {
       toolEvents: [{ phase: "end", call_id: "call-write", name: "write_file" }],
     });
     expect(messages[1].activitySegmentId).toBe(messages[2].activitySegmentId);
+  });
+
+  it("replays apply_patch arguments and multi-file rows under one UI call", () => {
+    const patchInput = [
+      "*** Begin Patch",
+      "*** Update File: src/old.ts",
+      "*** Move to: src/new.ts",
+      "*** End Patch",
+    ].join("\n");
+    const edits = [
+      { call_id: "provider-final", ui_tool_call_id: "ui-patch", tool: "apply_patch", path: "src/old.ts", phase: "end", status: "done" },
+      { call_id: "provider-final", ui_tool_call_id: "ui-patch", tool: "apply_patch", path: "src/new.ts", phase: "end", status: "done" },
+    ];
+    const messages = replayTranscriptToUiMessages([
+      {
+        event: "message",
+        turn_id: "turn-patch",
+        kind: "progress",
+        tool_events: [{
+          phase: "end",
+          call_id: "provider-final",
+          ui_tool_call_id: "ui-patch",
+          name: "apply_patch",
+          arguments: { input: patchInput },
+          result: "Patch applied:\n- move src/old.ts -> src/new.ts",
+        }],
+      },
+      { event: "file_edit", turn_id: "turn-patch", edits },
+    ]);
+
+    const toolMessage = messages.find((message) => message.toolEvents);
+    const fileMessage = messages.find((message) => message.fileEdits);
+    expect(toolMessage?.toolEvents).toEqual([
+      expect.objectContaining({
+        name: "apply_patch",
+        arguments: { input: patchInput },
+        result: "Patch applied:\n- move src/old.ts -> src/new.ts",
+      }),
+    ]);
+    expect(fileMessage?.fileEdits).toEqual(edits);
+    expect(fileMessage?.activitySegmentId).toBe(toolMessage?.activitySegmentId);
   });
 
   it("replays file edit rows with an earlier tool progress segment", () => {

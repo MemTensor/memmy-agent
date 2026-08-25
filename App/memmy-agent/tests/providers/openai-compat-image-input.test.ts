@@ -52,6 +52,26 @@ describe("OpenAI-compatible image input", () => {
     expect(create).toHaveBeenCalledOnce();
   });
 
+  it("sends image blocks to the exact DeepSeek experimental vision model", async () => {
+    const create = vi.fn(async () => ({
+      choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+    }));
+    const provider = new OpenAICompatProvider({
+      apiKey: "deepseek-key",
+      defaultModel: "deepseek-v4-flash-vision-exp",
+      spec: findByName("deepseek"),
+    });
+    provider.client = { chat: { completions: { create } }, responses: { create: vi.fn() } };
+
+    const response = await provider.chat({ messages: imageMessages() });
+
+    expect(response.content).toBe("ok");
+    const [body] = create.mock.calls[0] as unknown as [Record<string, any>];
+    expect(body.messages[0].content).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "image_url" }),
+    ]));
+  });
+
   it("still sends image blocks for other OpenAI-compatible providers", async () => {
     const create = vi.fn(async () => ({
       choices: [{ message: { content: "ok" }, finish_reason: "stop" }],

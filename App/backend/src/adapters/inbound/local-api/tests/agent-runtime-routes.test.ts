@@ -30,6 +30,7 @@ describe("agent runtime local api routes", () => {
       { method: "POST", url: "/api/v1/memory/memory-1/processing/retry", payload: {} },
       { method: "GET", url: "/api/v1/memory/memory-1" },
       { method: "DELETE", url: "/api/v1/memory/memory-1" },
+      { method: "GET", url: "/api/v1/memory/recalls/turn-1" },
       { method: "GET", url: "/api/v1/memory/logs?tools=memory_add,memory_search&limit=20&offset=0" },
       { method: "GET", url: "/api/v1/panel/overview" },
       { method: "GET", url: "/api/v1/panel/analysis" },
@@ -405,7 +406,17 @@ function createServer(overrides: Record<string, unknown> = {}, timeZone?: string
     memoryDetail: {
       async add() { return addMemoryOutput(); },
       async getById() { return getMemoryOutput(); },
-      async delete() { return deleteMemoryOutput(); }
+      async delete() { return deleteMemoryOutput(); },
+      async recallEvidence() {
+        return {
+          recallEventId: "recall-1",
+          queryId: "turn-1",
+          query: "question",
+          hits: [],
+          createdAt: now(),
+          serverTime: now()
+        };
+      }
     },
     panel: {
       async overview() { return panelOverviewOutput(); },
@@ -574,7 +585,7 @@ function deleteMemoryOutput() {
 
 function panelOverviewOutput() {
   return {
-    counts: { memories: 0, skills: 0, experiences: 0, worldModels: 0 },
+    counts: { memories: 0, userMemories: 0, skills: 0, experiences: 0, worldModels: 0 },
     dailyActivity: panelDays(),
     sourceDistribution: []
   };

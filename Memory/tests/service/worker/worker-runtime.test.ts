@@ -12,6 +12,76 @@ afterEach(() => {
 });
 
 describe("MemoryService / worker / runtime", () => {
+  it("leases L3 World Model updates FIFO per field while allowing different fields in parallel", () => {
+    const { db } = createTestService();
+    const repos = new Repositories(db.db);
+    const at = "2026-01-01T00:00:00.000Z";
+    const insertFieldJob = (id: string, scopeKey: string, scopeSeq: number): void => {
+      repos.l3WorldModels.insertImmutableJob({
+        id,
+        jobType: "l3_world_model_update",
+        status: "queued",
+        dedupeKey: `dedupe:${id}`,
+        userId: "user-l3-fifo",
+        scopeKey,
+        scopeSeq,
+        payload: { batchId: `batch:${scopeSeq}`, targetField: scopeKey },
+        attempts: 0,
+        maxAttempts: 3,
+        createdAt: at,
+        updatedAt: at
+      });
+    };
+    insertFieldJob("contract-1", "project:contract", 1);
+    insertFieldJob("contract-2", "project:contract", 2);
+    insertFieldJob("knowledge-1", "project:knowledge", 1);
+
+    const firstLease = repos.runtime.leaseQueuedJobs(10, 60);
+    expect(firstLease.map((job) => job.id).sort()).toEqual(["contract-1", "knowledge-1"]);
+    expect(repos.runtime.leaseQueuedJobs(10, 60)).toEqual([]);
+
+    repos.runtime.completeJob("contract-1");
+    expect(repos.runtime.leaseQueuedJobs(10, 60).map((job) => job.id)).toEqual(["contract-2"]);
+
+    db.close();
+  });
+
+  it("keeps a later L3 field update blocked by failure and releases it after dead letter", () => {
+    const { db } = createTestService();
+    const repos = new Repositories(db.db);
+    const at = "2026-01-01T00:00:00.000Z";
+    for (const [id, scopeSeq, maxAttempts] of [
+      ["field-1", 1, 2],
+      ["field-2", 2, 3]
+    ] as const) {
+      repos.l3WorldModels.insertImmutableJob({
+        id,
+        jobType: "l3_world_model_update",
+        status: "queued",
+        dedupeKey: `dedupe:${id}`,
+        userId: "user-l3-failure-fifo",
+        scopeKey: "project:contract",
+        scopeSeq,
+        payload: { batchId: `batch:${scopeSeq}`, targetField: "project_contract" },
+        attempts: 0,
+        maxAttempts,
+        createdAt: at,
+        updatedAt: at
+      });
+    }
+
+    expect(repos.runtime.leaseQueuedJobs(10, 60).map((job) => job.id)).toEqual(["field-1"]);
+    expect(repos.runtime.failJob("field-1", "retry")?.status).toBe("failed");
+    expect(repos.runtime.leaseQueuedJobs(10, 60)).toEqual([]);
+
+    repos.runtime.requeueFailedJobs();
+    expect(repos.runtime.leaseQueuedJobs(10, 60).map((job) => job.id)).toEqual(["field-1"]);
+    expect(repos.runtime.failJob("field-1", "terminal")?.status).toBe("dead_letter");
+    expect(repos.runtime.leaseQueuedJobs(10, 60).map((job) => job.id)).toEqual(["field-2"]);
+
+    db.close();
+  });
+
   it("selects the earliest worker wake across evolution and embedding queues", () => {
     const { db, service } = createTestService();
     const repos = new Repositories(db.db);

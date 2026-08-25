@@ -1,5 +1,5 @@
 /** Src module. */
-import { RuntimeConfigSchema, type AppSettingsDto, type LastLaunchMode, type RuntimeConfig } from "@memmy/local-api-contracts";
+import { RuntimeConfigSchema, type AccountChannel, type AppSettingsDto, type LastLaunchMode, type RuntimeConfig } from "@memmy/local-api-contracts";
 import { randomBytes } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { createDefaultAgentAdapterRegistry, type AgentAdapterRegistry } from "./adapters/outbound/agent-adapter/index.js";
@@ -28,12 +28,18 @@ import {
 } from "./services/agent-source-auto-scan-service.js";
 import { resolveCloudClientConfig, type CloudClientConfig } from "./config/service-urls.js";
 import { resetAccountRuntimeForDesktopInstallChange } from "./services/desktop-install-state-service.js";
-import { syncRuntimeConfigWithAppState } from "./services/runtime-config-sync-service.js";
+import {
+  syncRuntimeConfigForStartup,
+  syncRuntimeConfigWithAppState
+} from "./services/runtime-config-sync-service.js";
 import { loadCloudServiceEnv } from "./load-env.js";
+import type { MemmyAgentAdminClient } from "./adapters/outbound/memmy-agent-admin-client/index.js";
 
 export type { BootstrapScenario };
 export { loadCloudServiceEnv };
+export { syncRuntimeConfigForStartup };
 export { trackAnalyticsEvent } from "./analytics/analytics-transport.js";
+export { createHttpMemmyAgentAdminClient } from "./adapters/outbound/memmy-agent-admin-client/http-memmy-agent-admin-client.js";
 
 const DEFAULT_MEMORY_LAYER_TIMEOUT_MS = 20_000;
 
@@ -51,12 +57,18 @@ export interface CreateLocalBackendOptions {
   memmyConfigPath?: string;
   /** Memory service address exposed to desktop and browser-debug clients. */
   memoryBaseUrl?: string;
+  /** Resolves when the managed Memory service is ready for startup config reload. */
+  memoryReady?: Promise<void>;
   /** Desktop install fingerprint. */
   desktopInstallFingerprint?: string;
+  /** Login channel supported by the current desktop package. */
+  accountChannel?: AccountChannel;
   /** Agent source auto scan interval in ms. Defaults to one hour. */
   agentSourceAutoScanIntervalMs?: number;
   /** Agent source startup scan delay in ms. Defaults to five minutes. */
   agentSourceAutoScanInitialDelayMs?: number;
+  /** Running Agent Gateway client; when present, refreshes MCP after startup config writes. */
+  memmyAgentAdminClient?: MemmyAgentAdminClient;
 }
 
 export interface LocalBackend {
@@ -89,7 +101,8 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
     }
     await syncRuntimeConfigWithAppState({
       appStateStore,
-      memmyConfigPath
+      memmyConfigPath,
+      accountChannel: options.accountChannel
     });
 
     const permissionManager = createPermissionManager({
@@ -97,8 +110,15 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       runtimeToken: options.localToken
     });
     const memoryClient = options.memoryClient ?? createDefaultMemoryClient(process.env);
-    await memoryClient.reloadConfig({ reason: "desktop_startup" });
-    const scanWorker = options.memoryClient ? undefined : { databasePath: appStateStore.databasePath };
+    const memoryConfigReload = options.memoryReady
+      ? options.memoryReady.then(() => memoryClient.reloadConfig({ reason: "desktop_startup" }))
+      : memoryClient.reloadConfig({ reason: "desktop_startup" });
+    void memoryConfigReload.catch((error) => {
+      console.warn(
+        `Memory config reload failed during desktop startup: ${error instanceof Error ? error.message : String(error)}`
+      );
+    });
+    const scanProcess = options.memoryClient ? undefined : { databasePath: appStateStore.databasePath };
     const cloudConfig = resolveCloudClientConfig(process.env);
     const cloudClient = options.cloudClient ?? createDefaultCloudClient(
       cloudConfig,
@@ -120,6 +140,8 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       bootstrapScenario: options.bootstrapScenario,
       memmyConfigWriter,
       memmyConfigPath,
+      accountChannel: options.accountChannel,
+      memmyAgentAdminClient: options.memmyAgentAdminClient,
       memmyAgentAdminBootstrapSecret: await readAgentGatewayBootstrapSecret(memmyConfigPath)
     });
     const localToken = await permissionManager.getRuntimeToken();
@@ -130,7 +152,7 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       composioMcpToken,
       timeZone: configuredTimeZone,
       heartbeatIntervalMs: options.heartbeatIntervalMs,
-      scanWorker
+      scanProcess
     });
     await server.listen({ host: "127.0.0.1", port: 0 });
 
@@ -146,6 +168,14 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       headers: { "x-memmy-mcp-token": composioMcpToken },
       toolTimeout: 60
     });
+    if (options.memmyAgentAdminClient) {
+      try {
+        const result = await options.memmyAgentAdminClient.reloadMcpConfig();
+        if (!result.ok) console.warn(`Agent MCP reload did not complete: ${result.message}`);
+      } catch (error) {
+        console.warn(`Agent MCP reload unavailable during backend startup: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
 
     const runtimeConfig = RuntimeConfigSchema.parse({
       baseUrl: `http://127.0.0.1:${(address as AddressInfo).port}`,

@@ -15,8 +15,9 @@ import {
   OkResponseSchema
 } from "@memmy/local-api-contracts";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { fork, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { Worker } from "node:worker_threads";
+import { fileURLToPath } from "node:url";
 import type { PermissionManager } from "../../../../permission/index.js";
 import { withErrorEnvelope } from "../../../../services/error-envelope.js";
 import type { AgentSourceAutoInjectService } from "../../../../services/agent-source-auto-inject-service.js";
@@ -28,9 +29,9 @@ import {
 import type { ProgressBus } from "../../../../services/progress-bus.js";
 import {
   type AgentSourceScanJobState,
-  type AgentSourceScanWorkerCommand,
-  type AgentSourceScanWorkerData,
-  type AgentSourceScanWorkerMessage,
+  type AgentSourceScanProcessCommand,
+  type AgentSourceScanProcessData,
+  type AgentSourceScanProcessMessage,
   isScanResumeStateReference,
   type PipelineProgress,
   progressForResume,
@@ -46,7 +47,7 @@ export interface RegisterAgentSourceRoutesOptions {
   progressBus: ProgressBus;
   permissionManager: Pick<PermissionManager, "canScanAgentSource">;
   authenticateRuntimeToken: (request: FastifyRequest, reply: FastifyReply) => Promise<unknown>;
-  scanWorker?: {
+  scanProcess?: {
     databasePath: string;
   };
 }
@@ -55,7 +56,7 @@ export interface RegisterAgentSourceRoutesOptions {
 export function registerAgentSourceRoutes(app: FastifyInstance, options: RegisterAgentSourceRoutesOptions): void {
   type ActiveScanJob = Omit<AgentSourceScanJobState, "resume"> & {
     resume: RouteScanResumeState | null;
-    worker?: Worker;
+    process?: ChildProcess;
   };
 
   let activeScanJob: ActiveScanJob | null = null;
@@ -66,7 +67,7 @@ export function registerAgentSourceRoutes(app: FastifyInstance, options: Registe
     lastProgress: PipelineProgress & { jobId: string };
     resume: RouteScanResumeState | null;
   };
-  const restoredScanJob = toPausedScanJob(readLatestPersistedScanResume(options.scanWorker?.databasePath));
+  const restoredScanJob = toPausedScanJob(readLatestPersistedScanResume(options.scanProcess?.databasePath));
   let pausedScanJob: PausedScanJob | null = restoredScanJob;
   let lastScanProgress: (PipelineProgress & { jobId: string }) | null = restoredScanJob?.lastProgress ?? null;
   let lastScanCompletion: {
@@ -85,7 +86,7 @@ export function registerAgentSourceRoutes(app: FastifyInstance, options: Registe
     activeScanJob = null;
     abortScanJob(closingJob);
     pausedScanJob = null;
-    await closingJob.worker?.terminate().catch(() => undefined);
+    closingJob.process?.kill();
   });
 
   app.get("/api/agent-sources", { preHandler: options.authenticateRuntimeToken }, async (_request, reply) => {
@@ -324,7 +325,7 @@ export function registerAgentSourceRoutes(app: FastifyInstance, options: Registe
 
   function startScanJob(scanJob: ActiveScanJob): void {
     if (scanJob.controller.signal.aborted) {
-      if (!options.scanWorker) {
+      if (!options.scanProcess) {
         startInlineScanJob(scanJob);
       }
       return;
@@ -334,8 +335,8 @@ export function registerAgentSourceRoutes(app: FastifyInstance, options: Registe
       return;
     }
 
-    if (options.scanWorker) {
-      startWorkerScanJob(scanJob);
+    if (options.scanProcess) {
+      startProcessScanJob(scanJob);
       return;
     }
 
@@ -344,7 +345,7 @@ export function registerAgentSourceRoutes(app: FastifyInstance, options: Registe
 
   function startInlineScanJob(scanJob: ActiveScanJob): void {
     if (scanJob.resume && isScanResumeStateReference(scanJob.resume)) {
-      handleWorkerFailure(scanJob.jobId, new Error("SQLite-backed scan resume requires the scan worker"));
+      handleProcessFailure(scanJob.jobId, new Error("SQLite-backed scan resume requires the scan process"));
       return;
     }
 
@@ -383,13 +384,13 @@ export function registerAgentSourceRoutes(app: FastifyInstance, options: Registe
     });
   }
 
-  function startWorkerScanJob(scanJob: ActiveScanJob): void {
-    if (!options.scanWorker) {
+  function startProcessScanJob(scanJob: ActiveScanJob): void {
+    if (!options.scanProcess) {
       return;
     }
 
-    const workerData: AgentSourceScanWorkerData = {
-      databasePath: options.scanWorker.databasePath,
+    const processData: AgentSourceScanProcessData = {
+      databasePath: options.scanProcess.databasePath,
       job: {
         jobId: scanJob.jobId,
         sourceId: scanJob.sourceId,
@@ -398,31 +399,41 @@ export function registerAgentSourceRoutes(app: FastifyInstance, options: Registe
         resume: scanJob.resume
       }
     };
-    let worker: Worker;
+    let child: ChildProcess;
     try {
-      worker = new Worker(resolveAgentSourceScanWorkerUrl(), { workerData });
+      child = fork(fileURLToPath(resolveAgentSourceScanProcessUrl()), [], {
+        env: createScanProcessEnvironment(process.env)
+      });
     } catch (error) {
-      handleWorkerFailure(scanJob.jobId, error instanceof Error ? error : new Error("Agent source scan worker failed to start"));
+      handleProcessFailure(scanJob.jobId, error instanceof Error ? error : new Error("Agent source scan process failed to start"));
       return;
     }
-    scanJob.worker = worker;
+    scanJob.process = child;
 
-    worker.on("message", (message: AgentSourceScanWorkerMessage) => {
-      handleWorkerMessage(scanJob.jobId, message);
+    child.on("message", (message) => {
+      handleProcessMessage(scanJob.jobId, message as AgentSourceScanProcessMessage);
     });
-    worker.on("error", (error) => {
-      handleWorkerFailure(scanJob.jobId, error instanceof Error ? error : new Error("Agent source scan worker failed"));
+    child.on("error", (error) => {
+      handleProcessFailure(scanJob.jobId, error instanceof Error ? error : new Error("Agent source scan process failed"));
     });
-    worker.on("exit", (code) => {
+    child.on("exit", (code, signal) => {
       if (code !== 0 && activeScanJob?.jobId === scanJob.jobId && !scanJob.controller.signal.aborted) {
-        handleWorkerFailure(scanJob.jobId, new Error(`Agent source scan worker exited with code ${code}`));
+        handleProcessFailure(
+          scanJob.jobId,
+          new Error(`Agent source scan process exited with ${signal ? `signal ${signal}` : `code ${code}`}`)
+        );
         return;
       }
       finishActiveScanJob(scanJob.jobId);
     });
+
+    const startCommand: AgentSourceScanProcessCommand = { type: "start", data: processData };
+    child.send(startCommand, (error) => {
+      if (error) handleProcessFailure(scanJob.jobId, error);
+    });
   }
 
-  function handleWorkerMessage(jobId: string, message: AgentSourceScanWorkerMessage): void {
+  function handleProcessMessage(jobId: string, message: AgentSourceScanProcessMessage): void {
     if (activeScanJob?.jobId !== jobId && pausedScanJob?.jobId === jobId && message.type === "resume") {
       pausedScanJob.resume = message.resume;
       return;
@@ -457,10 +468,10 @@ export function registerAgentSourceRoutes(app: FastifyInstance, options: Registe
       return;
     }
 
-    handleWorkerFailure(jobId, new Error(message.message));
+    handleProcessFailure(jobId, new Error(message.message));
   }
 
-  function handleWorkerFailure(jobId: string, error: Error): void {
+  function handleProcessFailure(jobId: string, error: Error): void {
     if (activeScanJob?.jobId !== jobId) {
       return;
     }
@@ -521,11 +532,11 @@ export function registerAgentSourceRoutes(app: FastifyInstance, options: Registe
 
   function abortScanJob(job: ActiveScanJob): void {
     job.controller.abort();
-    const command: AgentSourceScanWorkerCommand = { type: "abort" };
+    const command: AgentSourceScanProcessCommand = { type: "abort" };
     try {
-      job.worker?.postMessage(command);
+      if (job.process?.connected) job.process.send(command);
     } catch {
-      // The worker may already have exited while the HTTP stop/cancel request is being handled.
+      // The process may already have exited while the HTTP stop/cancel request is being handled.
     }
   }
 
@@ -534,7 +545,7 @@ export function registerAgentSourceRoutes(app: FastifyInstance, options: Registe
       return;
     }
 
-    deletePersistedScanResume(options.scanWorker?.databasePath, resume.jobId);
+    deletePersistedScanResume(options.scanProcess?.databasePath, resume.jobId);
   }
 }
 
@@ -587,7 +598,13 @@ function recentScanCompletion<T extends { completedAt: string }>(completion: T |
   return Date.now() - Date.parse(completion.completedAt) <= 60_000 ? completion : null;
 }
 
-function resolveAgentSourceScanWorkerUrl(): URL {
+function resolveAgentSourceScanProcessUrl(): URL {
   const extension = import.meta.url.endsWith(".ts") ? "ts" : "js";
-  return new URL(`../../../../services/agent-source-scan-worker.${extension}`, import.meta.url);
+  return new URL(`../../../../services/agent-source-scan-process.${extension}`, import.meta.url);
+}
+
+function createScanProcessEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return process.versions.electron
+    ? { ...env, ELECTRON_RUN_AS_NODE: "1" }
+    : env;
 }

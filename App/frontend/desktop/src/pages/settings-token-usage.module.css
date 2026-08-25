@@ -13,6 +13,22 @@
   letter-spacing: 0;
 }
 
+.invitationCard {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-radius: var(--radius-card-lg);
+}
+
+.invitationActions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+}
+
 .updated,
 .statusError {
   display: inline-flex;
@@ -468,6 +484,20 @@
 /* --- Responsive --- */
 
 @media (max-width: 640px) {
+  .invitationCard {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .invitationActions,
+  .invitationCard > button {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .invitationActions {
+    flex-wrap: wrap;
+  }
+
   .sectionHead {
     display: block;
   }

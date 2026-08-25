@@ -66,6 +66,23 @@ describe("ApiKeyPage source", () => {
     expect(stateIndex).toBeGreaterThan(saveIndex);
     expect(persistIndex).toBeGreaterThan(stateIndex);
     expect(navigateIndex).toBeGreaterThan(persistIndex);
+    expect(source).toContain("const [savePending, setSavePending] = useState(false)");
+    expect(source).toContain("const [saveError, setSaveError] = useState<string | null>(null)");
+    expect(source).toContain("if (!canSave || !clients?.config || savePending)");
+    expect(source).toContain("disabled={!canSave || !clients?.config || savePending}");
+    expect(source).toContain("setSaveError(firstStepSaveErrorText(error, t))");
+    expect(source).toContain("const savedCatalogSignatureRef = useRef<string | null>(null)");
+    expect(source).toContain("savedCatalogSignatureRef.current !== saveSignature");
+    expect(source).toContain("savedCatalogSignatureRef.current = saveSignature");
+    expect(source).toContain("const savedEndpointIdentitiesRef = useRef");
+    expect(source).toContain("savedAgentIdentity?.credentialSignature === agentCredentialSignature");
+    expect(source).toContain("savedEmbeddingIdentity?.credentialSignature === embeddingCredentialSignature");
+    expect(source).toContain("endpointCredentialSignature(");
+    expect(source).toContain("provider: provider.trim().toLowerCase()");
+    expect(source).toContain('endpoint: endpoint.trim().replace(/\\/+$/, "")');
+    expect(source).toContain("credential: normalizedMaskedApiKey ?");
+    expect(source).toContain('role="alert"');
+    expect(source).toContain("} finally {");
   });
 
   it("重新进入 BYOK 第一步时从已保存模型配置 hydrate 主模型与 Embedding", () => {

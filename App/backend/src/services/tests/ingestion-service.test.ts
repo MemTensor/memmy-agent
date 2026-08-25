@@ -150,7 +150,7 @@ describe("ingestion service", () => {
     }));
   });
 
-  it("keeps the trace identity stable while changing the idempotency key for revised content", async () => {
+  it("keeps the trace identity stable while changing the idempotency key for explicitly revised content", async () => {
     const added: Array<{ requestId?: string; turnId?: string }> = [];
     const service = createService({
       async addMemory(input) {
@@ -172,10 +172,46 @@ describe("ingestion service", () => {
     const revised = [first[0]!, { ...first[1]!, content: "revised assistant response" }];
 
     await service.ingest(toAsyncIterable(first), { sourceId: "cursor" });
-    await service.ingest(toAsyncIterable(revised), { sourceId: "cursor" });
+    await service.ingest(toAsyncIterable(revised), {
+      sourceId: "cursor",
+      replaySeenConversationIds: new Set(["conv-a"])
+    });
 
     expect(added[0]?.turnId).toBe(added[1]?.turnId);
     expect(added[0]?.requestId).not.toBe(added[1]?.requestId);
+  });
+
+  it("skips seen turns while importing a newly appended turn in the same conversation", async () => {
+    const memoryClient = createMockMemoryClient({ now });
+    const addMemory = vi.fn(memoryClient.addMemory);
+    const service = createService({ addMemory });
+
+    await service.ingest(
+      toAsyncIterable([createMessage("conv-a", 1), createMessage("conv-a", 2)]),
+      { sourceId: "cursor" }
+    );
+    const stats = await service.ingest(
+      toAsyncIterable([
+        createMessage("conv-a", 1),
+        createMessage("conv-a", 2),
+        createMessage("conv-a", 3),
+        createMessage("conv-a", 4)
+      ]),
+      { sourceId: "cursor" }
+    );
+
+    expect(addMemory).toHaveBeenCalledTimes(2);
+    expect(addMemory.mock.calls[1]?.[0].content).toBe("## user\n\nmessage 3\n\n## assistant\n\nmessage 4");
+    expect(stats).toMatchObject({
+      written: 2,
+      deduped: 2,
+      failed: 0,
+      writtenMemories: 1,
+      dedupedMemories: 1,
+      failedMemories: 0,
+      completedConversationIds: ["conv-a"],
+      errors: []
+    });
   });
 
   it("counts add failures and continues with later conversations", async () => {
@@ -374,45 +410,40 @@ describe("ingestion service", () => {
     });
   });
 
-  it("replays an already-seen conversation idempotently to recover its memory id", async () => {
-    const calls: string[] = [];
+  it("skips an already-seen turn before memory.add so request-shape changes cannot conflict", async () => {
+    const addMemory = vi.fn(async () => {
+      throw new Error("already-seen turns must not call memory.add");
+    });
+    const markSeen = vi.fn(() => false);
     const service = createService(
+      { addMemory },
       {
-        async addMemory() {
-          calls.push("add");
-          return {
-            id: "memory-existing",
-            kind: "trace",
-            memoryLayer: "L1",
-            status: "activated",
-            title: "Existing memory",
-            summary: "Existing memory",
-            tags: [],
-            createdAt: now(),
-            serverTime: now()
-          };
-        }
-      },
-      {
-        hasSeen: () => true
+        hasSeen: () => true,
+        markSeen
       }
     );
 
     const stats = await service.ingest(
-      toAsyncIterable([createMessage("conv-a", 1), createMessage("conv-a", 2), createMessage("conv-a", 3)]),
+      toAsyncIterable([createMessage("conv-a", 1), createMessage("conv-a", 2)]),
       { sourceId: "cursor" }
     );
 
-    expect(calls).toEqual(["add"]);
-    expect(stats).toMatchObject({
-      attempted: 3,
+    expect(addMemory).not.toHaveBeenCalled();
+    expect(markSeen).not.toHaveBeenCalled();
+    expect(stats).toEqual({
+      attempted: 2,
       written: 0,
-      deduped: 3,
+      deduped: 2,
       failed: 0,
-      conversations: 1,
+      writtenMemories: 0,
       dedupedMemories: 1,
-      memoryIds: ["memory-existing"],
-      incompleteConversationIds: ["conv-a"]
+      failedMemories: 0,
+      memoryIds: [],
+      conversations: 1,
+      completedConversationIds: ["conv-a"],
+      incompleteConversationIds: [],
+      failedConversationIds: [],
+      errors: []
     });
   });
 
@@ -621,26 +652,13 @@ describe("ingestion service", () => {
     });
   });
 
-  it("skips memory_desktop add analytics for already-seen turns", async () => {
+  it("does not call memory.add or emit add analytics for already-seen turns", async () => {
     const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
-    const calls: string[] = [];
+    const addMemory = vi.fn(async () => {
+      throw new Error("already-seen turns must not call memory.add");
+    });
     const service = createService(
-      {
-        async addMemory() {
-          calls.push("add");
-          return {
-            id: "memory-existing",
-            kind: "trace",
-            memoryLayer: "L1",
-            status: "activated",
-            title: "Existing memory",
-            summary: "Existing memory",
-            tags: [],
-            createdAt: now(),
-            serverTime: now()
-          };
-        }
-      },
+      { addMemory },
       {
         hasSeen: () => true
       },
@@ -663,7 +681,7 @@ describe("ingestion service", () => {
       { sourceId: "cursor" }
     );
 
-    expect(calls).toEqual(["add"]);
+    expect(addMemory).not.toHaveBeenCalled();
     expect(stats.dedupedMemories).toBe(1);
     expect(events).toEqual([]);
   });

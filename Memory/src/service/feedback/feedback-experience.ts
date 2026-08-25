@@ -574,31 +574,17 @@ async maybeCreateFeedbackExperience(
         }));
       }
     }
-    jobs.push(
-      this.deps.enqueueJob({
-        jobType: "skill_crystallization",
-        userId: saved.userId,
-        sessionId: saved.sessionId,
-        episodeId: feedback.episodeId,
-        targetMemoryId: saved.id,
-        payload: { reason: "feedback.experience", feedbackId: feedback.id },
-        createdAt: at
-      }),
-      this.deps.enqueueJob({
-        jobType: "l3_abstraction",
-        userId: saved.userId,
-        sessionId: saved.sessionId,
-        episodeId: feedback.episodeId,
-        payload: {
-          reason: "feedback.experience",
-          targetKind: "policy_cluster",
-          seedPolicyId: saved.id,
-          policyIds: [saved.id],
-          feedbackId: feedback.id
-        },
-        createdAt: at
-      })
-    );
+    const savedPolicy = policyMetaFromMemory(saved);
+    if (savedPolicy?.status !== "active") return jobs;
+    jobs.push(this.deps.enqueueJob({
+      jobType: "skill_crystallization",
+      userId: saved.userId,
+      sessionId: saved.sessionId,
+      episodeId: feedback.episodeId,
+      targetMemoryId: saved.id,
+      payload: { reason: "feedback.experience", feedbackId: feedback.id },
+      createdAt: at
+    }));
     return jobs;
   }
 
@@ -655,7 +641,13 @@ maybeMintRepairCandidateSkill(
       kind: "skill",
       lifecycleStatus: "candidate",
       memoryType: "SkillMemory",
-      key: `skill:${policy.id}`,
+      key: `skill:${stableHash({
+        userId: policyMemory.userId,
+        projectId: projectIdFromMemory(policyMemory) ?? context.namespace.projectId,
+        profileId: profileIdFromMemory(policyMemory) ?? context.namespace.profileId,
+        name,
+        trigger: policy.trigger
+      }).slice(0, 20)}`,
       value: invocationGuide,
       tags: uniq(["skill", "repair_candidate", ...policyMemory.tags.filter((tag) => tag !== "policy")]).slice(0, 12),
       info: {
@@ -903,7 +895,7 @@ insertFeedbackExperiencePolicy(
       profileId: context.namespace.profileId,
       layer: "L2",
       kind: "policy",
-      lifecycleStatus: draft.salience >= 0.5 ? "active" : "candidate",
+      lifecycleStatus: "candidate",
       memoryType: "LongTermMemory",
       key,
       value: renderFeedbackExperienceBody(draft),
@@ -912,7 +904,7 @@ insertFeedbackExperiencePolicy(
         support: 1,
         gain: Math.max(0.02, draft.salience),
         policy_confidence: draft.confidence,
-        status: draft.salience >= 0.5 ? "active" : "candidate",
+        status: "candidate",
         source_memory_ids: draft.sourceTraceIds,
         source_feedback_ids: draft.sourceFeedbackIds,
         experience_type: draft.type,
@@ -933,7 +925,7 @@ insertFeedbackExperiencePolicy(
         gain: Math.max(0.02, draft.salience),
         raw_gain: draft.salience,
         policy_confidence: draft.confidence,
-        status: draft.salience >= 0.5 ? "active" : "candidate",
+        status: "candidate",
         source_episode_ids: draft.sourceEpisodeIds,
         source_trace_ids: draft.sourceTraceIds,
         policy: {
@@ -946,7 +938,7 @@ insertFeedbackExperiencePolicy(
           gain: Math.max(0.02, draft.salience),
           raw_gain: draft.salience,
           policy_confidence: draft.confidence,
-          status: draft.salience >= 0.5 ? "active" : "candidate",
+          status: "candidate",
           experience_type: draft.type,
           evidence_polarity: draft.polarity,
           salience: draft.salience,
@@ -997,11 +989,17 @@ mergeFeedbackExperiencePolicy(
     const skillEligible = Boolean((policy?.skillEligible ?? true) || draft.skillEligible);
     const support = Math.max(1, policy?.support ?? 0) + 1;
     const gain = Math.max(policy?.gain ?? 0, draft.salience, 0.02);
-    const status = memoryStatusForLifecycleStatus(memory.status === "archived" ? "archived" : "active");
+    const sourceEpisodeIds = uniq([...(policy?.sourceEpisodeIds ?? []), ...draft.sourceEpisodeIds]);
+    const activationReady = sourceEpisodeIds.length >= this.deps.config.algorithm.l2Induction.minEpisodesForActivation;
+    const lifecycleStatus = memory.status === "archived"
+      ? "archived"
+      : activationReady
+        ? "active"
+        : "candidate";
+    const status = memoryStatusForLifecycleStatus(lifecycleStatus);
     const experienceType: FeedbackExperienceType = skillEligible && polarity === "mixed"
       ? "repair_validated"
       : (policy?.experienceType ?? draft.type);
-    const sourceEpisodeIds = uniq([...(policy?.sourceEpisodeIds ?? []), ...draft.sourceEpisodeIds]);
     const sourceTraceIds = uniq([...(policy?.sourceTraceIds ?? []), ...draft.sourceTraceIds]);
     const sourceFeedbackIds = uniq([
       ...stringArray(internalPolicy.source_feedback_ids),
@@ -1021,7 +1019,7 @@ mergeFeedbackExperiencePolicy(
       support,
       gain,
       raw_gain: Math.max(numberOr(internalPolicy.raw_gain, 0), draft.salience),
-      status: memory.status === "archived" ? "archived" : "active",
+      status: lifecycleStatus,
       experience_type: experienceType,
       evidence_polarity: polarity,
       salience: Math.max(numberOr(internalPolicy.salience, 0), draft.salience),
@@ -1375,7 +1373,11 @@ applyRecallOutcome(
             1
           );
           const status = policyStatusAfterGain({
-            currentStatus: policy.status,
+            currentStatus: policy.status === "active"
+              ? "active"
+              : policy.status === "candidate"
+                ? "candidate"
+                : "archived",
             support: policy.support,
             gain: nextGain,
             minSupport: this.deps.config.algorithm.l2Induction.minEpisodesForInduction,
@@ -1717,7 +1719,8 @@ function updateRecallStats(memory: MemoryRow, input: {
 }
 
 function isRepairCandidatePolicyForSkill(policy: PolicyMeta): boolean {
-  return policy.evidencePolarity === "negative" &&
+  return policy.status === "active" &&
+    policy.evidencePolarity === "negative" &&
     policy.skillEligible === false &&
     policy.decisionGuidance.preference.some((item) => item.trim().length > 0);
 }

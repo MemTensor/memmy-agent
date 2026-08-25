@@ -5,7 +5,7 @@ import type { MemoryRuntimeClient } from "../../api/memory-runtime-client.js";
 import { Tooltip } from "../../components/tooltip.js";
 import type { MessageKey } from "../../i18n/messages.js";
 import { useTranslation } from "../../i18n/use-translation.js";
-import { BarChart3, BrainCircuit, Globe2, Layers, Sparkles, Wand2 } from "./memory-prototype-icons.js";
+import { BarChart3, BrainCircuit, Globe2, Layers, Sparkles, UserRound, Wand2 } from "./memory-prototype-icons.js";
 import {
   memoryPanelCacheKey,
   readMemoryPanelCache,
@@ -14,7 +14,7 @@ import {
 import { type RemoteData, toErrorMessage } from "./remote-state.js";
 
 interface OverviewCountCard {
-  id: "memories" | "skills" | "experiences" | "worldModels";
+  id: "memories" | "userMemories" | "skills" | "experiences" | "worldModels";
   targetPage: OverviewCountTargetPage;
   labelKey: MessageKey;
   value: number;
@@ -22,7 +22,7 @@ interface OverviewCountCard {
   icon: ReactNode;
 }
 
-type OverviewCountTargetPage = "memories" | "policies" | "world-model" | "skills";
+type OverviewCountTargetPage = "memories" | "policies" | "world-model" | "skills" | "user-memories";
 
 interface DailyActivityCell {
   date: string;
@@ -148,7 +148,8 @@ function buildCountCards(data: PanelOverviewOutput): OverviewCountCard[] {
     { id: "memories", targetPage: "memories", labelKey: "memory.overview.memories", value: data.counts.memories, hintKey: "memory.overview.memoriesHint", icon: <BrainCircuit size={18} /> },
     { id: "experiences", targetPage: "policies", labelKey: "memory.overview.policies", value: data.counts.experiences, hintKey: "memory.overview.policiesHint", icon: <Sparkles size={18} /> },
     { id: "worldModels", targetPage: "world-model", labelKey: "memory.overview.worldModels", value: data.counts.worldModels, hintKey: "memory.overview.worldModelsHint", icon: <Globe2 size={18} /> },
-    { id: "skills", targetPage: "skills", labelKey: "memory.overview.skills", value: data.counts.skills, hintKey: "memory.overview.skillsHint", icon: <Wand2 size={18} /> }
+    { id: "skills", targetPage: "skills", labelKey: "memory.overview.skills", value: data.counts.skills, hintKey: "memory.overview.skillsHint", icon: <Wand2 size={18} /> },
+    { id: "userMemories", targetPage: "user-memories", labelKey: "memory.overview.userMemories", value: data.counts.userMemories, hintKey: "memory.overview.userMemoriesHint", icon: <UserRound size={18} /> }
   ];
 }
 

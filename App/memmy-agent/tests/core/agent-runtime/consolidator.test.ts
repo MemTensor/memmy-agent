@@ -413,7 +413,125 @@ describe("Consolidator token and replay-window compaction", () => {
     expect(session.lastConsolidated).toBeGreaterThan(0);
   });
 
-  it("advances lastConsolidated when raw archive fallback fires", async () => {
+  it("uses the live projection estimator without crossing the protected Session boundary", async () => {
+    const { cache, consolidator } = makeMockConsolidator();
+    consolidator.safetyBuffer = 0;
+    const session = new Session({
+      key: "test:protected-boundary",
+      messages: [
+        { role: "user", content: "old-1" },
+        { role: "assistant", content: "old-answer-1" },
+        { role: "user", content: "old-2" },
+        { role: "assistant", content: "old-answer-2" },
+        { role: "user", content: "current-user" },
+      ],
+    });
+    cache[session.key] = session;
+    const projections: Array<{ visibleMessageStart: number; summaryOverride: string | null }> = [];
+    const estimateProjectionTokens = vi.fn((_candidateSession: Session, projection: any): [number, string] => {
+      projections.push({ ...projection });
+      return [projection.visibleMessageStart === 0 ? 1_200 : 100, "live"];
+    });
+    const boundary = vi.spyOn(consolidator, "pickConsolidationBoundary").mockReturnValue([4, 100]);
+    const archive = vi.spyOn(consolidator, "archive").mockResolvedValue("old summary");
+
+    await consolidator.maybeConsolidateByTokens(session, {
+      inputTokenBudget: 1_000,
+      maxMessageEndExclusive: 4,
+      estimateProjectionTokens,
+    });
+
+    expect(boundary).toHaveBeenCalledWith(session, 700, 4, true);
+    expect(archive.mock.calls[0][0].map((message) => message.content)).toEqual([
+      "old-1",
+      "old-answer-1",
+      "old-2",
+      "old-answer-2",
+    ]);
+    expect(session.lastConsolidated).toBe(4);
+    expect(session.messages[4].content).toBe("current-user");
+    expect(projections).toEqual([
+      { visibleMessageStart: 0, summaryOverride: null },
+      { visibleMessageStart: 4, summaryOverride: "old summary" },
+    ]);
+  });
+
+  it("accepts an explicit mid-turn protection point as the final legal boundary", () => {
+    const { consolidator } = makeMockConsolidator();
+    const session = new Session({
+      key: "test:explicit-hard-boundary",
+      messages: [
+        { role: "user", content: "old" },
+        { role: "assistant", content: "old answer" },
+        { role: "user", content: "protected current user" },
+      ],
+    });
+
+    expect(consolidator.pickConsolidationBoundary(session, 10_000, 2)).toBeNull();
+    expect(consolidator.pickConsolidationBoundary(session, 10_000, 2, true)?.[0]).toBe(2);
+  });
+
+  it("restores summary and cursor when the atomic Session save fails", async () => {
+    const { cache, sessions, consolidator } = makeMockConsolidator();
+    consolidator.safetyBuffer = 0;
+    const previousSummary = { text: "previous", mode: "text" };
+    const session = new Session({
+      key: "test:save-rollback",
+      metadata: { lastSummary: previousSummary },
+      messages: [
+        { role: "user", content: "old" },
+        { role: "assistant", content: "answer" },
+        { role: "user", content: "recent" },
+      ],
+    });
+    cache[session.key] = session;
+    vi.spyOn(consolidator, "estimateSessionPromptTokens").mockReturnValue([1_200, "test"]);
+    vi.spyOn(consolidator, "pickConsolidationBoundary").mockReturnValue([2, 100]);
+    vi.spyOn(consolidator, "archive").mockResolvedValue("replacement");
+    sessions.save.mockImplementation(() => {
+      throw new Error("disk full");
+    });
+
+    await expect(consolidator.maybeConsolidateByTokens(session)).rejects.toThrow("disk full");
+
+    expect(session.lastConsolidated).toBe(0);
+    expect(session.metadata.lastSummary).toBe(previousSummary);
+  });
+
+  it("keeps a committed round when a later atomic Session save fails", async () => {
+    const { cache, sessions, consolidator } = makeMockConsolidator();
+    consolidator.safetyBuffer = 0;
+    const session = new Session({
+      key: "test:later-save-rollback",
+      messages: [
+        { role: "user", content: "u0" },
+        { role: "assistant", content: "a0" },
+        { role: "user", content: "u1" },
+        { role: "assistant", content: "a1" },
+        { role: "user", content: "u2" },
+      ],
+    });
+    cache[session.key] = session;
+    vi.spyOn(consolidator, "estimateSessionPromptTokens").mockReturnValue([1_200, "test"]);
+    vi.spyOn(consolidator, "pickConsolidationBoundary").mockImplementation((currentSession: Session) => (
+      currentSession.lastConsolidated === 0 ? [2, 100] : [4, 100]
+    ));
+    vi.spyOn(consolidator, "archive")
+      .mockResolvedValueOnce("first summary")
+      .mockResolvedValueOnce("second summary");
+    sessions.save
+      .mockImplementationOnce(() => {})
+      .mockImplementationOnce(() => {
+        throw new Error("second save failed");
+      });
+
+    await expect(consolidator.maybeConsolidateByTokens(session)).rejects.toThrow("second save failed");
+
+    expect(session.lastConsolidated).toBe(2);
+    expect(session.metadata.lastSummary.text).toBe("first summary");
+  });
+
+  it("does not advance lastConsolidated when raw archive fallback fires", async () => {
     const { cache, consolidator } = makeMockConsolidator();
     consolidator.safetyBuffer = 0;
     const session = new Session({ key: "test:key", metadata: {} });
@@ -424,7 +542,8 @@ describe("Consolidator token and replay-window compaction", () => {
 
     await consolidator.maybeConsolidateByTokens(session);
 
-    expect(session.lastConsolidated).toBe(50);
+    expect(session.lastConsolidated).toBe(0);
+    expect(session.metadata.lastSummary).toBeUndefined();
   });
 
   it("breaks the consolidation round loop after raw archive fallback", async () => {
@@ -582,7 +701,11 @@ describe("Consolidator stale session refresh", () => {
 
     await consolidator.maybeConsolidateByTokens(staleEmpty);
 
-    expect(seen).toBe(fresh);
+    const observed = seen as Session | null;
+    expect(observed).not.toBe(staleEmpty);
+    expect(observed?.key).toBe(fresh.key);
+    expect(observed?.messages).toBe(fresh.messages);
+    expect(fresh.lastConsolidated).toBe(0);
   });
 
   it("reloads stale session references after idle compact", async () => {

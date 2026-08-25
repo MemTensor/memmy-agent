@@ -42,7 +42,8 @@ function createHarness() {
       appId: "cli_a",
       appSecret: "secret",
       domain: "feishu" as const
-    }))
+    })),
+    reloadMcpConfig: vi.fn(async () => ({ ok: true, message: "reloaded", requires_restart: false }))
   };
 
   return {

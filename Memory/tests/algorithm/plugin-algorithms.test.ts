@@ -1204,6 +1204,24 @@ describe("plugin algorithm parity helpers", () => {
     expect(draft.status).toBe("active");
   });
 
+  it("requires two successful episodes when the activation support threshold is three", () => {
+    const oneSuccess = [
+      trace("trace-success", "episode-success", 0.8, [1, 0]),
+      trace("trace-neutral-a", "episode-neutral-a", 0, [1, 0]),
+      trace("trace-neutral-b", "episode-neutral-b", 0, [1, 0])
+    ];
+    const draft = buildPolicyDraft({
+      signature: "python|pytest|_",
+      evidenceTraces: oneSuccess,
+      allTraces: oneSuccess,
+      minSupport: 3,
+      minGain: -1
+    });
+
+    expect(draft.support).toBe(3);
+    expect(draft.status).toBe("candidate");
+  });
+
   it("counts L2 support by distinct positive evidence episode", () => {
     const evidence = [
       trace("trace-one", "episode-shared", 0.8, [1, 0]),
@@ -1813,6 +1831,7 @@ function policy(id: string, title: string, vec: number[], gain: number): PolicyM
       preference: [],
       antiPattern: []
     },
+    freshnessClass: "stable",
     salience: gain,
     vec,
     updatedAtMs: 0

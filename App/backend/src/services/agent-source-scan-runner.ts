@@ -60,18 +60,23 @@ export interface AgentSourceScanJobState {
   resume: ScanResumeState | null;
 }
 
-export interface AgentSourceScanWorkerData {
+export interface AgentSourceScanProcessData {
   databasePath: string;
   job: Omit<AgentSourceScanJobState, "controller" | "resume"> & {
     resume: RouteScanResumeState | null;
   };
 }
 
-export type AgentSourceScanWorkerCommand = {
-  type: "abort";
-};
+export type AgentSourceScanProcessCommand =
+  | {
+    type: "start";
+    data: AgentSourceScanProcessData;
+  }
+  | {
+    type: "abort";
+  };
 
-export type AgentSourceScanWorkerMessage =
+export type AgentSourceScanProcessMessage =
   | {
     type: "progress";
     progress: PipelineProgress;

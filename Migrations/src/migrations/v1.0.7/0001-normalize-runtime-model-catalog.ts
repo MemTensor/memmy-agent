@@ -212,7 +212,10 @@ function authValueEquals(left: unknown, right: unknown): boolean {
   return stableJson(left ?? null) === stableJson(right ?? null);
 }
 
-function normalizeProviderCatalog(config: JsonObject): ProviderCatalogNormalization {
+function normalizeProviderCatalog(
+  config: JsonObject,
+  migrationId: string,
+): ProviderCatalogNormalization {
   const providers = objectAt(config, "providers") ?? {};
   const normalizedProviders: JsonObject = {};
   const defaultEndpoints: Record<string, string> = {};
@@ -228,7 +231,7 @@ function normalizeProviderCatalog(config: JsonObject): ProviderCatalogNormalizat
       throw new MigrationError(
         "migration_config_invalid",
         `Provider ${legacyId} must be an object`,
-        { migrationId: MIGRATION_ID, scope: "runtime-config" },
+        { migrationId, scope: "runtime-config" },
       );
     }
     const providerId = canonicalProviderId(legacyId);
@@ -247,7 +250,7 @@ function normalizeProviderCatalog(config: JsonObject): ProviderCatalogNormalizat
         throw new MigrationError(
           "migration_config_invalid",
           `Endpoint ${legacyId}/${endpointId} must be an object`,
-          { migrationId: MIGRATION_ID, scope: "runtime-config" },
+          { migrationId, scope: "runtime-config" },
         );
       }
       const endpoint = structuredClone(rawEndpoint);
@@ -257,7 +260,7 @@ function normalizeProviderCatalog(config: JsonObject): ProviderCatalogNormalizat
         throw new MigrationError(
           "migration_config_invalid",
           `Endpoint ${legacyId}/${endpointId} is missing apiBase`,
-          { migrationId: MIGRATION_ID, scope: "runtime-config" },
+          { migrationId, scope: "runtime-config" },
         );
       }
       endpoint.apiBase = normalizeApiBase(apiBase);
@@ -599,7 +602,11 @@ function rewritePresetReference(
   }
 }
 
-function normalizePresets(config: JsonObject, normalization: ProviderCatalogNormalization): void {
+function normalizePresets(
+  config: JsonObject,
+  normalization: ProviderCatalogNormalization,
+  migrationId: string,
+): void {
   const { defaultEndpoints, endpointReferences } = normalization;
   const presets = objectAt(config, "modelPresets") ?? {};
   const providers = objectAt(config, "providers") ?? {};
@@ -638,7 +645,7 @@ function normalizePresets(config: JsonObject, normalization: ProviderCatalogNorm
         throw new MigrationError(
           "migration_config_invalid",
           "Legacy account model preset is missing an owner account ID",
-          { migrationId: MIGRATION_ID, scope: "runtime-config" },
+          { migrationId, scope: "runtime-config" },
         );
       }
       const replacements: Partial<Record<CatalogCapability, string>> = {};
@@ -968,7 +975,7 @@ function hasCurrentAccountCatalog(config: RuntimeConfigDocument): boolean {
   return Boolean(endpoint && endpoint.protocol === "memmy-account" && isHttpUrl(endpoint.apiBase));
 }
 
-function normalizeRuntimeCatalog(config: RuntimeConfigDocument): void {
+function normalizeRuntimeCatalog(config: RuntimeConfigDocument, migrationId: string): void {
   flattenLegacyMemoryModelConfig(config);
   liftLegacyRoots(config);
   const legacy = captureLegacyConnections(config);
@@ -988,8 +995,8 @@ function normalizeRuntimeCatalog(config: RuntimeConfigDocument): void {
   );
 
   removeInvalidByokAccountPresets(config);
-  const normalization = normalizeProviderCatalog(config);
-  normalizePresets(config, normalization);
+  const normalization = normalizeProviderCatalog(config, migrationId);
+  normalizePresets(config, normalization, migrationId);
   ensureAccountCatalog(config);
   mergeLegacyByokCatalog(config, legacy);
   removeLegacyRuntimeModelFields(config);
@@ -1007,35 +1014,40 @@ function normalizeRuntimeCatalog(config: RuntimeConfigDocument): void {
   config.app = app;
 }
 
-function wrapError(error: unknown): never {
+function wrapError(error: unknown, migrationId: string): never {
   if (error instanceof MigrationError) {
-    if (error.migrationId !== null) throw error;
+    if (error.migrationId === migrationId) throw error;
     throw new MigrationError(error.code, error.message, {
-      migrationId: MIGRATION_ID,
+      migrationId,
       scope: "runtime-config",
       cause: error.cause,
     });
   }
   throw new MigrationError("migration_config_invalid", "Unable to normalize runtime model catalog", {
-    migrationId: MIGRATION_ID,
+    migrationId,
     scope: "runtime-config",
     cause: error,
   });
 }
 
-async function migrate(context: AgentWorkspaceMigrationContext): Promise<MigrationResult> {
+export async function runRuntimeModelCatalogMigration(
+  context: AgentWorkspaceMigrationContext,
+  migrationId: string,
+): Promise<MigrationResult> {
   try {
-    const mutator = (config: RuntimeConfigDocument): void => normalizeRuntimeCatalog(config);
+    const mutator = (config: RuntimeConfigDocument): void => normalizeRuntimeCatalog(config, migrationId);
     const options = { createIfMissing: false as const };
     const result = context.runtimeConfigLock
       ? await mutateRuntimeConfigLockHeld(context.runtimeConfigLock, mutator, options)
       : await mutateRuntimeConfig(context.runtimeConfigFile, mutator, options);
-    if (!result.sourceExists) return { scanned: 0, changed: 0, ignored: 1 };
+    if (!result.sourceExists) {
+      return { scanned: 0, changed: 0, ignored: 0, deferred: true };
+    }
     return result.changed
       ? { scanned: 1, changed: 1, ignored: 0 }
       : { scanned: 1, changed: 0, ignored: 1 };
   } catch (error) {
-    wrapError(error);
+    wrapError(error, migrationId);
   }
 }
 
@@ -1044,11 +1056,11 @@ export const normalizeRuntimeModelCatalogV107: MigrationDefinition = {
   introducedIn: "1.0.7",
   scope: "runtime-config",
   description: "Normalize legacy model settings into the runtime model catalog",
-  up: migrate,
+  up: (context) => runRuntimeModelCatalogMigration(context, MIGRATION_ID),
 };
 
 export function normalizeRuntimeModelCatalogForTest(
   context: AgentWorkspaceMigrationContext,
 ): Promise<MigrationResult> {
-  return migrate(context);
+  return runRuntimeModelCatalogMigration(context, MIGRATION_ID);
 }

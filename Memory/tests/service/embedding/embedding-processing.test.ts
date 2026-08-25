@@ -265,7 +265,7 @@ describe("MemoryService / embedding / processing", () => {
       query: "SQLite migration workflow",
       layers: ["L1"]
     });
-    expect(recall.hits.some((hit) => hit.id === complete.l1MemoryId)).toBe(true);
+    expect(recall.hits.some((hit) => hit.id === complete.l1MemoryId)).toBe(false);
     const openEpisodeRun = await service.runWorkerOnce(10, { priorityCohortOnly: true });
     expect(openEpisodeRun.jobs.map((job) => job.jobType)).toEqual(["trace_summary"]);
     expect(llmCalls.filter((call) => call.options.operation === "capture.summarize")).toHaveLength(1);

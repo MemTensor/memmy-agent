@@ -9,6 +9,7 @@ import { renderMemmyOpencodePlugin, renderMemmyOpencodeResumeCommand } from "../
 import { renderMemmyPluginSkillManifest } from "../templates/memmy-plugin.js";
 import { renderMemmySkillBootstrapManifest } from "../templates/memmy-skill-directory.js";
 import type { SkillManifest, SkillTarget } from "../types.js";
+import { loadMemmyWorkspaceBridgeRuntimeAsset } from "../workspace-bridge/runtime-loader.js";
 
 const OPENCODE_TARGET_ID = "opencode";
 const OPENCODE_DISPLAY_NAME = "Opencode";
@@ -16,6 +17,7 @@ const TARGET_FILE_NAME = "AGENTS.md";
 const PLUGIN_DIRECTORY_NAME = "plugins";
 const PLUGIN_FILE_NAME = "memmy-memory.js";
 const PLUGIN_CONFIG_FILE_NAME = "memmy-memory-config.json";
+const WORKSPACE_BRIDGE_FILE_NAME = "memmy-workspace-bridge.mjs";
 const COMMAND_DIRECTORY_NAME = "commands";
 const RESUME_COMMAND_FILE_NAME = "memmy-resume.md";
 const START_MARKER = "<!-- memmy:start v=1 -->";
@@ -82,6 +84,10 @@ export function createOpencodeSkillTarget(deps: CreateOpencodeSkillTargetDeps = 
         }, null, 2)}\n`
       );
       await writeFileAtomically(join(pluginDirectory, PLUGIN_FILE_NAME), renderMemmyOpencodePlugin());
+      await writeFileAtomically(
+        join(pluginDirectory, WORKSPACE_BRIDGE_FILE_NAME),
+        await loadMemmyWorkspaceBridgeRuntimeAsset()
+      );
       await writeFileAtomically(join(commandDirectory, RESUME_COMMAND_FILE_NAME), renderMemmyOpencodeResumeCommand());
 
       const manifest = renderMemmyPluginSkillManifest(_targetId);
@@ -104,6 +110,7 @@ export function createOpencodeSkillTarget(deps: CreateOpencodeSkillTargetDeps = 
 
       await rm(join(root, PLUGIN_DIRECTORY_NAME, PLUGIN_FILE_NAME), { force: true });
       await rm(join(root, PLUGIN_DIRECTORY_NAME, PLUGIN_CONFIG_FILE_NAME), { force: true });
+      await rm(join(root, PLUGIN_DIRECTORY_NAME, WORKSPACE_BRIDGE_FILE_NAME), { force: true });
       await rm(join(root, COMMAND_DIRECTORY_NAME, RESUME_COMMAND_FILE_NAME), { force: true });
       const filePath = join(root, TARGET_FILE_NAME);
       const existing = await readTextFile(filePath);

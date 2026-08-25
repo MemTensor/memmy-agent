@@ -1,10 +1,14 @@
 /** Memmy runtime config helpers. */
 import { readFile } from "node:fs/promises";
 import YAML from "yaml";
+import { deriveWorkspaceHostId } from "@memmy/local-api-contracts";
+import { getOrCreateInstallationId } from "../../../analytics/analytics-transport.js";
 
 export interface MemmyMemoryServiceConfig {
   endpoint: string;
   token: string;
+  userId: string;
+  workspaceHostId: string;
 }
 
 /** Reads Memmy memory service endpoint and token from the local config file. */
@@ -15,6 +19,7 @@ export async function readMemmyMemoryServiceConfig(configPath: string): Promise<
   const memmyMemory = toMutableRecord(root.memmyMemory);
   const storage = toMutableRecord(memmyMemory.storage);
   const legacyStorage = toMutableRecord(root.storage);
+  const app = toMutableRecord(root.app);
   return {
     endpoint: normalizeString(storage.endpoint) ||
       normalizeString(memmyMemory.endpoint) ||
@@ -22,7 +27,9 @@ export async function readMemmyMemoryServiceConfig(configPath: string): Promise<
       "http://127.0.0.1:18960",
     token: normalizeString(storage.token) ||
       normalizeString(memmyMemory.token) ||
-      normalizeString(legacyStorage.token)
+      normalizeString(legacyStorage.token),
+    userId: normalizeString(app.userId) || normalizeString(memmyMemory.userId) || "local-user",
+    workspaceHostId: deriveWorkspaceHostId(getOrCreateInstallationId())
   };
 }
 

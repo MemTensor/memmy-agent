@@ -10,6 +10,7 @@ import { renderMemmyResumeHookScript } from "../templates/memmy-resume-hook.js";
 import { renderMemmySkillBootstrapManifest } from "../templates/memmy-skill-directory.js";
 import type { SkillManifest, SkillTarget } from "../types.js";
 import { resolveClaudeCodeHomeDirectory } from "../../agent-paths.js";
+import { loadMemmyWorkspaceBridgeRuntimeAsset } from "../workspace-bridge/runtime-loader.js";
 
 const CLAUDE_CODE_TARGET_ID = "claude_code";
 const CLAUDE_CODE_DISPLAY_NAME = "Claude Code";
@@ -19,6 +20,7 @@ const HOOK_DIRECTORY_NAME = "hooks";
 const HOOK_SCRIPT_FILE_NAME = "memmy-resume-hook.mjs";
 const LEGACY_HOOK_SCRIPT_FILE_NAME = "memmy-memory-resume-hook.mjs";
 const HOOK_CONFIG_FILE_NAME = "memmy-memory-config.json";
+const WORKSPACE_BRIDGE_FILE_NAME = "memmy-workspace-bridge.mjs";
 const HOOK_TIMEOUT_SECONDS = 60;
 const COMMAND_DIRECTORY_NAME = "commands";
 const RESUME_COMMAND_FILE_NAME = "memmy-resume.md";
@@ -100,6 +102,10 @@ export function createClaudeCodeSkillTarget(deps: CreateClaudeCodeSkillTargetDep
         hookScriptPath,
         renderMemmyResumeHookScript({ source: CLAUDE_CODE_TARGET_ID, mode: "claude-code" })
       );
+      await writeFileAtomically(
+        join(hookDirectory, WORKSPACE_BRIDGE_FILE_NAME),
+        await loadMemmyWorkspaceBridgeRuntimeAsset()
+      );
       await writeFileAtomically(join(root, COMMAND_DIRECTORY_NAME, RESUME_COMMAND_FILE_NAME), CLAUDE_CODE_RESUME_COMMAND);
       await upsertClaudeCodeHookSettings(join(root, SETTINGS_FILE_NAME), hookScriptPath);
       await rm(join(root, HOOK_DIRECTORY_NAME, LEGACY_HOOK_SCRIPT_FILE_NAME), { force: true });
@@ -124,6 +130,7 @@ export function createClaudeCodeSkillTarget(deps: CreateClaudeCodeSkillTargetDep
       await rm(join(root, HOOK_DIRECTORY_NAME, HOOK_SCRIPT_FILE_NAME), { force: true });
       await rm(join(root, HOOK_DIRECTORY_NAME, LEGACY_HOOK_SCRIPT_FILE_NAME), { force: true });
       await rm(join(root, HOOK_DIRECTORY_NAME, HOOK_CONFIG_FILE_NAME), { force: true });
+      await rm(join(root, HOOK_DIRECTORY_NAME, WORKSPACE_BRIDGE_FILE_NAME), { force: true });
       await rm(join(root, COMMAND_DIRECTORY_NAME, RESUME_COMMAND_FILE_NAME), { force: true });
       const filePath = join(root, TARGET_FILE_NAME);
       await writeFileAtomically(filePath, removeMarkerBlock(removeLegacyMarkerBlock(await readTextFile(filePath))));
@@ -242,6 +249,9 @@ async function upsertClaudeCodeHookSettings(filePath: string, hookScriptPath: st
       ]
     }
   ];
+  hooks.SessionStart = claudeHookEntries(hooks.SessionStart, hookScriptPath);
+  hooks.PostCompact = claudeHookEntries(hooks.PostCompact, hookScriptPath);
+  hooks.SessionEnd = claudeHookEntries(hooks.SessionEnd, hookScriptPath);
   config.hooks = hooks;
   await writeFileAtomically(filePath, `${JSON.stringify(config, null, 2)}\n`);
 }
@@ -266,6 +276,11 @@ async function removeClaudeCodeHookSettings(filePath: string): Promise<void> {
   } else {
     delete hooks.Stop;
   }
+  for (const event of ["SessionStart", "PostCompact", "SessionEnd"] as const) {
+    const eventEntries = removeClaudeCodeResumeHookEntries(hooks[event]);
+    if (eventEntries.length > 0) hooks[event] = eventEntries;
+    else delete hooks[event];
+  }
 
   if (Object.keys(hooks).length > 0) {
     config.hooks = hooks;
@@ -274,6 +289,16 @@ async function removeClaudeCodeHookSettings(filePath: string): Promise<void> {
   }
 
   await writeFileAtomically(filePath, `${JSON.stringify(config, null, 2)}\n`);
+}
+
+function claudeHookEntries(value: unknown, hookScriptPath: string): Record<string, unknown>[] {
+  return [
+    ...removeClaudeCodeResumeHookEntries(value),
+    {
+      matcher: "",
+      hooks: [{ type: "command", command: createNodeHookCommand(hookScriptPath), timeout: HOOK_TIMEOUT_SECONDS }],
+    },
+  ];
 }
 
 function removeClaudeCodeResumeHookEntries(value: unknown): Record<string, unknown>[] {

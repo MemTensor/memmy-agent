@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentLoop } from "../../../src/core/agent-runtime/loop.js";
 import { MessageBus } from "../../../src/core/runtime-messages/index.js";
 import { Config } from "../../../src/config/schema.js";
-import { LLMResponse } from "../../../src/providers/base.js";
+import { LLMResponse, ToolCallRequest } from "../../../src/providers/base.js";
 
 const roots: string[] = [];
 
@@ -26,7 +26,10 @@ function makeLoop({ estimatedTokens, contextWindowTokens }: { estimatedTokens: n
   };
   const loop = new AgentLoop({
     bus: new MessageBus(),
-    config: new Config({ contextCompaction: { summaryMode: "text" } }),
+    config: new Config({
+      contextCompaction: { summaryMode: "text" },
+      memmyMemory: { enabled: false },
+    }),
     provider,
     workspace: tmpRoot(),
     model: "test-model",
@@ -204,5 +207,88 @@ describe("AgentLoop replay token budget", () => {
     expect(order).toContain("consolidate");
     expect(order).toContain("llm");
     expect(order.indexOf("consolidate")).toBeLessThan(order.indexOf("llm"));
+  });
+
+  it("checks live context before a follow-up sample and protects the persisted current user", async () => {
+    const loop = makeLoop({ estimatedTokens: 100, contextWindowTokens: 10_000 });
+    const session = addMessages(loop, "cli:test", ["old user", "old answer"]);
+    let modelCalls = 0;
+    (loop.provider as any).chatWithRetry = vi.fn(async () => {
+      modelCalls += 1;
+      if (modelCalls === 1) {
+        return new LLMResponse({
+          content: "checking",
+          toolCalls: [new ToolCallRequest({ id: "goal-1", name: "get_goal", arguments: {} })],
+        });
+      }
+      return new LLMResponse({ content: "done" });
+    });
+    const compactionOptions: Record<string, any>[] = [];
+    loop.consolidator.maybeConsolidateByTokens = vi.fn(async (currentSession, options: Record<string, any>) => {
+      compactionOptions.push(options);
+      if (options.estimateProjectionTokens) {
+        const [estimated] = options.estimateProjectionTokens(currentSession, {
+          visibleMessageStart: currentSession.lastConsolidated,
+          summaryOverride: null,
+        });
+        expect(estimated).toBe(100);
+      }
+      return {
+        kind: "token" as const,
+        replayMaxMessages: loop.maxMessages,
+        changed: false,
+        summary: null,
+        error: null,
+        started: false,
+      };
+    });
+
+    await loop.processDirect("current user", { sessionKey: session.key });
+
+    expect(compactionOptions).toHaveLength(2);
+    expect(compactionOptions[0]).toEqual({ replayMaxMessages: loop.maxMessages });
+    expect(compactionOptions[1]).toMatchObject({
+      replayMaxMessages: loop.maxMessages,
+      maxMessageEndExclusive: 2,
+    });
+    expect(compactionOptions[1].inputTokenBudget).toBeGreaterThan(0);
+    expect(compactionOptions[1].estimateProjectionTokens).toBeTypeOf("function");
+    const estimatedRequests = vi.mocked((loop.provider as any).estimatePromptTokens).mock.calls;
+    expect(estimatedRequests.some((call: any[]) => (
+      (call[0] as Record<string, any>[]).some((message) => message.tool_call_id === "goal-1")
+    ))).toBe(true);
+  });
+
+  it("continues the active turn when mid-turn compaction fails", async () => {
+    const loop = makeLoop({ estimatedTokens: 100, contextWindowTokens: 10_000 });
+    const session = addMessages(loop, "cli:test", ["old user", "old answer"]);
+    let modelCalls = 0;
+    (loop.provider as any).chatWithRetry = vi.fn(async () => {
+      modelCalls += 1;
+      if (modelCalls === 1) {
+        return new LLMResponse({
+          content: "checking",
+          toolCalls: [new ToolCallRequest({ id: "goal-1", name: "get_goal", arguments: {} })],
+        });
+      }
+      return new LLMResponse({ content: "done" });
+    });
+    loop.consolidator.maybeConsolidateByTokens = vi.fn(async (_currentSession, options: Record<string, any>) => {
+      if (options.estimateProjectionTokens) throw new Error("compaction failed");
+      return {
+        kind: "token" as const,
+        replayMaxMessages: loop.maxMessages,
+        changed: false,
+        summary: null,
+        error: null,
+        started: false,
+      };
+    });
+
+    const result = await loop.processDirect("current user", { sessionKey: session.key });
+
+    expect(modelCalls).toBe(2);
+    expect(result?.content).toBe("done");
+    expect(session.lastConsolidated).toBe(0);
   });
 });

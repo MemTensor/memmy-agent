@@ -77,6 +77,10 @@ export type RuntimeMemmyConfigState =
       status: "invalid_yaml" | "no_model_config" | "conflict";
       configPath: string;
       reason: string;
+      accountProjection?: {
+        cloudUuid: string;
+        userId?: string;
+      };
     }
   | {
       status: "valid_account";
@@ -89,6 +93,10 @@ export type RuntimeMemmyConfigState =
       configPath: string;
       context: Readonly<ActualModelContext>;
       provider: Readonly<ResolvedProviderSnapshot>;
+      accountProjection?: {
+        cloudUuid: string;
+        userId?: string;
+      };
     };
 
 export interface RuntimeProjectionResult {
@@ -122,7 +130,7 @@ export interface MemmyConfigWriter {
   /**
    * Clear the account-mode runtime login projection.
    */
-  clearAccountModelProjection?(input?: { ownerAccountId?: string }): Promise<RuntimeProjectionResult>;
+  clearAccountModelProjection?(input?: { ownerAccountId?: string; force?: boolean }): Promise<RuntimeProjectionResult>;
 
   /**
    * Patch a single memmy-agent channel config.
@@ -377,24 +385,51 @@ function deriveRuntimeMemmyConfigState(
   configPath: string,
   mode?: UserMode
 ): RuntimeMemmyConfigState {
+  const appCloudUuid = existingString(asRecord(config.app)?.cloudUuid);
+  const providerCloudUuid = existingString(
+    asRecord(asRecord(config.providers)?.[MEMMY_ACCOUNT_PROVIDER])?.apiKey
+  );
+  if (appCloudUuid && providerCloudUuid && appCloudUuid !== providerCloudUuid) {
+    return runtimeConfigProblem(
+      "conflict",
+      configPath,
+      "account_runtime_credentials_conflict",
+      { cloudUuid: appCloudUuid }
+    );
+  }
   const userMode = mode ?? existingString(asRecord(config.app)?.userMode);
   const byok = resolveRuntimeAgentSelection(config, "byok");
   if (userMode === "byok") {
     return byok.ok
-      ? deriveByokRuntimeConfigState(configPath, byok)
-      : runtimeConfigProblem("no_model_config", configPath, "Active BYOK assignment is not locally usable");
+      ? deriveByokRuntimeConfigState(config, configPath, byok)
+      : runtimeConfigProblem(
+          "no_model_config",
+          configPath,
+          "Active BYOK assignment is not locally usable",
+          readAccountProjection(config)
+        );
   }
   if (userMode === "account") {
     return hasAccountProjection(config)
       ? deriveAccountRuntimeConfigState(config, configPath)
-      : runtimeConfigProblem("no_model_config", configPath, "Active account assignment is not locally usable");
+      : runtimeConfigProblem(
+          "no_model_config",
+          configPath,
+          "Active account assignment is not locally usable",
+          readAccountProjection(config)
+        );
   }
   if (hasAccountProjection(config)) return deriveAccountRuntimeConfigState(config, configPath);
   if (byok.ok) {
-    return deriveByokRuntimeConfigState(configPath, byok);
+    return deriveByokRuntimeConfigState(config, configPath, byok);
   }
 
-  return runtimeConfigProblem("no_model_config", configPath, "Missing a locally usable default text model");
+  return runtimeConfigProblem(
+    "no_model_config",
+    configPath,
+    "Missing a locally usable default text model",
+    readAccountProjection(config)
+  );
 }
 
 function hasAccountProjection(config: Record<string, unknown>): boolean {
@@ -441,15 +476,28 @@ function deriveAccountRuntimeConfigState(
 }
 
 function deriveByokRuntimeConfigState(
+  config: Record<string, unknown>,
   configPath: string,
   resolved: Extract<ModelSelectionResolution, { ok: true }>
 ): RuntimeMemmyConfigState {
-  return {
+  return omitUndefined({
     status: "valid_byok",
     configPath,
     context: resolved.context,
-    provider: resolved.provider
-  };
+    provider: resolved.provider,
+    accountProjection: readAccountProjection(config)
+  }) as RuntimeMemmyConfigState;
+}
+
+function readAccountProjection(
+  config: Record<string, unknown>
+): { cloudUuid: string; userId?: string } | undefined {
+  const cloudUuid = existingString(asRecord(config.app)?.cloudUuid)
+    ?? existingString(asRecord(asRecord(config.providers)?.[MEMMY_ACCOUNT_PROVIDER])?.apiKey);
+  if (!cloudUuid) return undefined;
+  const userId = existingString(asRecord(config.app)?.userId)
+    ?? existingString(asRecord(asRecord(config.providers)?.[MEMMY_ACCOUNT_PROVIDER])?.ownerAccountId);
+  return userId ? { cloudUuid, userId } : { cloudUuid };
 }
 
 /**
@@ -546,13 +594,32 @@ export async function writeAccountModelProjectionToMemmyConfig(
  */
 export async function clearAccountModelProjectionFromMemmyConfig(
   configPath = resolveDefaultMemmyConfigPath(),
-  input: { ownerAccountId?: string } = {}
+  input: { ownerAccountId?: string; force?: boolean } = {}
 ): Promise<RuntimeProjectionResult> {
   const requestedOwnerAccountId = input.ownerAccountId?.trim();
   const result = await mutateRuntimeConfig(configPath, (config) => {
     const appConfig = isRecord(config.app) ? { ...config.app } : {};
     const providers = isRecord(config.providers) ? { ...config.providers } : {};
     const accountProvider = asRecord(providers[MEMMY_ACCOUNT_PROVIDER]);
+    if (input.force) {
+      delete appConfig.cloudUuid;
+      delete appConfig.userId;
+      setAppConfig(config, appConfig);
+      delete config.uuid;
+      delete config.identity;
+      delete providers[MEMMY_ACCOUNT_PROVIDER];
+      config.providers = providers;
+      const presets = isRecord(config.modelPresets) ? { ...config.modelPresets } : {};
+      for (const [presetId, value] of Object.entries(presets)) {
+        if (isRecord(value) && value.source === "account") delete presets[presetId];
+      }
+      config.modelPresets = presets;
+      replaceRemovedAccountDefault(config, presets);
+      const assignments = isRecord(config.modelAssignments) ? { ...config.modelAssignments } : {};
+      delete assignments.account;
+      config.modelAssignments = assignments;
+      return { memoryConfigAffected: false };
+    }
     const ownerAccountId = requestedOwnerAccountId
       ?? existingString(appConfig.userId)
       ?? existingString(accountProvider?.ownerAccountId);
@@ -725,13 +792,15 @@ function replaceRemovedAccountDefault(
 function runtimeConfigProblem(
   status: Extract<RuntimeConfigStateStatus, "invalid_yaml" | "no_model_config" | "conflict">,
   configPath: string,
-  reason: string
+  reason: string,
+  accountProjection?: { cloudUuid: string; userId?: string }
 ): RuntimeMemmyConfigState {
-  return {
+  return omitUndefined({
     status,
     configPath,
-    reason
-  };
+    reason,
+    accountProjection
+  }) as RuntimeMemmyConfigState;
 }
 
 async function readMemmyConfigContent(configPath: string): Promise<string | null> {

@@ -564,6 +564,83 @@ describe("LogsSubPage", () => {
     expect(html).not.toContain("保留 1");
   });
 
+  it("shows a retained UserMemory that is missing from legacy candidate logs", () => {
+    const userMemory = {
+      refKind: "user_memory",
+      refId: "user_memory_1",
+      score: 0.527,
+      tier: "UserMemory",
+      content: "我比较喜欢定期清理服务器"
+    };
+    const html = renderToString(
+      <I18nProvider language="zh-CN">
+        <MemorySearchDetail
+          input={{ query: "定期拉取新闻" }}
+          output={{
+            candidates: [],
+            filtered: [userMemory],
+            stats: {
+              ranked: 0,
+              finalReturned: 1,
+              llmFilter: { kept: 1, dropped: 0 }
+            }
+          }}
+        />
+      </I18nProvider>
+    );
+
+    expect(html).toContain("我比较喜欢定期清理服务器");
+    expect(html).toContain(">User</span>");
+    expect(html).toContain("无过滤记忆");
+    expect(html.match(/memory-log-candidate/g)?.length).toBeGreaterThan(0);
+  });
+
+  it("normalizes legacy UserMemory search summaries to a valid kept ratio", () => {
+    const html = renderToString(
+      <I18nProvider language="zh-CN">
+        <LogsSubPageView
+          state={{
+            status: "ready",
+            data: {
+              logs: [{
+                id: 1,
+                toolName: "memory_search",
+                inputJson: JSON.stringify({ query: "定期拉取新闻" }),
+                outputJson: JSON.stringify({
+                  candidates: [],
+                  filtered: [{ refKind: "user_memory", refId: "user_memory_1", tier: "UserMemory" }],
+                  stats: {
+                    raw: 5,
+                    ranked: 0,
+                    finalReturned: 1,
+                    llmFilter: { kept: 1, dropped: 0, outcome: "kept" }
+                  }
+                }),
+                durationMs: 20,
+                success: true,
+                calledAt: "2026-08-21T03:05:50.211Z"
+              }],
+              total: 1,
+              limit: 20,
+              offset: 0,
+              serverTime: "2026-08-21T03:05:50.211Z"
+            }
+          }}
+          tool="memory_search"
+          sourceAgent=""
+          onToolChange={vi.fn()}
+          onSourceAgentChange={vi.fn()}
+          onPageChange={vi.fn()}
+          onRefresh={vi.fn()}
+          onOpenDetail={vi.fn()}
+        />
+      </I18nProvider>
+    );
+
+    expect(html).toContain("· 保留 1/1");
+    expect(html).not.toContain("· 保留 1/0");
+  });
+
   it("renders tool tags with distinct colors and no leading status dot", () => {
     const html = renderToString(
       <I18nProvider language="zh-CN">
@@ -824,6 +901,7 @@ describe("LogsSubPage", () => {
     expect(memorySearchCandidateLayerLabel({ memoryLayer: "L2", refKind: "policy" })).toBe("L2");
     expect(memorySearchCandidateLayerLabel({ refKind: "world_model" })).toBe("L3");
     expect(memorySearchCandidateLayerLabel({ tier: "Skill", refKind: "skill" })).toBe("Skill");
+    expect(memorySearchCandidateLayerLabel({ tier: "UserMemory", refKind: "user_memory" })).toBe("User");
   });
 
   it("does not render the memory_search retrieval funnel card", () => {

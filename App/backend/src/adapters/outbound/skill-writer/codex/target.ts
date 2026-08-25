@@ -11,6 +11,7 @@ import { renderMemmyResumeHookScript } from "../templates/memmy-resume-hook.js";
 import { renderMemmySkillBootstrapManifest } from "../templates/memmy-skill-directory.js";
 import type { SkillManifest, SkillTarget } from "../types.js";
 import { trustMemmyCodexHooks, type TrustMemmyCodexHooks } from "./hook-trust.js";
+import { loadMemmyWorkspaceBridgeRuntimeAsset } from "../workspace-bridge/runtime-loader.js";
 
 const CODEX_TARGET_ID = "codex";
 const CODEX_DISPLAY_NAME = "Codex";
@@ -20,6 +21,7 @@ const HOOK_DIRECTORY_NAME = "hooks";
 const HOOK_SCRIPT_FILE_NAME = "memmy-resume-hook.mjs";
 const LEGACY_HOOK_SCRIPT_FILE_NAME = "memmy-memory-resume-hook.mjs";
 const HOOK_CONFIG_FILE_NAME = "memmy-memory-config.json";
+const WORKSPACE_BRIDGE_FILE_NAME = "memmy-workspace-bridge.mjs";
 const HOOK_TIMEOUT_SECONDS = 60;
 const START_MARKER = "<!-- memmy:start v=1 -->";
 const END_MARKER = "<!-- memmy:end v=1 -->";
@@ -96,6 +98,10 @@ export function createCodexSkillTarget(deps: CreateCodexSkillTargetDeps = {}): S
         `${JSON.stringify({ memmy_config_path: memmyConfigPath, ...(await readMemmyMemoryServiceConfig(memmyConfigPath)) }, null, 2)}\n`
       );
       await writeFileAtomically(hookScriptPath, renderMemmyResumeHookScript({ source: CODEX_TARGET_ID, mode: "codex" }));
+      await writeFileAtomically(
+        join(hookDirectory, WORKSPACE_BRIDGE_FILE_NAME),
+        await loadMemmyWorkspaceBridgeRuntimeAsset()
+      );
       const hooksFilePath = join(root, HOOKS_FILE_NAME);
       const hookCommand = createNodeHookCommand(hookScriptPath);
       await upsertCodexHookConfig(hooksFilePath, hookCommand);
@@ -125,6 +131,7 @@ export function createCodexSkillTarget(deps: CreateCodexSkillTargetDeps = {}): S
       await rm(join(root, HOOK_DIRECTORY_NAME, HOOK_SCRIPT_FILE_NAME), { force: true });
       await rm(join(root, HOOK_DIRECTORY_NAME, LEGACY_HOOK_SCRIPT_FILE_NAME), { force: true });
       await rm(join(root, HOOK_DIRECTORY_NAME, HOOK_CONFIG_FILE_NAME), { force: true });
+      await rm(join(root, HOOK_DIRECTORY_NAME, WORKSPACE_BRIDGE_FILE_NAME), { force: true });
       const filePath = join(root, TARGET_FILE_NAME);
       await writeFileAtomically(filePath, removeMarkerBlock(removeLegacyMarkerBlock(await readTextFile(filePath))));
       await removeMemmySkillDirectory(root);
@@ -215,6 +222,9 @@ async function upsertCodexHookConfig(filePath: string, hookCommand: string): Pro
       ]
     }
   ];
+  hooks.SessionStart = codexHookEntries(hooks.SessionStart, hookCommand, "Loading Memmy world model");
+  hooks.PostCompact = codexHookEntries(hooks.PostCompact, hookCommand, "Updating Memmy world model");
+  hooks.SessionEnd = codexHookEntries(hooks.SessionEnd, hookCommand, "Closing Memmy memory session");
   config.hooks = hooks;
   await writeFileAtomically(filePath, `${JSON.stringify(config, null, 2)}\n`);
 }
@@ -239,6 +249,11 @@ async function removeCodexHookConfig(filePath: string): Promise<void> {
   } else {
     delete hooks.Stop;
   }
+  for (const event of ["SessionStart", "PostCompact", "SessionEnd"] as const) {
+    const entries = removeCodexResumeHookEntries(hooks[event]);
+    if (entries.length > 0) hooks[event] = entries;
+    else delete hooks[event];
+  }
 
   if (Object.keys(hooks).length > 0) {
     config.hooks = hooks;
@@ -247,6 +262,13 @@ async function removeCodexHookConfig(filePath: string): Promise<void> {
   }
 
   await writeFileAtomically(filePath, `${JSON.stringify(config, null, 2)}\n`);
+}
+
+function codexHookEntries(value: unknown, hookCommand: string, statusMessage: string): Record<string, unknown>[] {
+  return [
+    ...removeCodexResumeHookEntries(value),
+    { hooks: [{ type: "command", command: hookCommand, timeout: HOOK_TIMEOUT_SECONDS, statusMessage }] },
+  ];
 }
 
 function removeCodexResumeHookEntries(value: unknown): Record<string, unknown>[] {

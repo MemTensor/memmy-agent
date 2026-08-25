@@ -109,6 +109,9 @@ describe("filesystem local data store", () => {
     const memoryDb = new DatabaseSync(memoryDatabasePath, { readOnly: true, allowExtension: true });
     memoryDb.loadExtension(getSqliteVecLoadablePath());
     const memoryCount = memoryDb.prepare("SELECT COUNT(*) AS count FROM memories").get() as { count: number };
+    const userMemoryCount = memoryDb.prepare("SELECT COUNT(*) AS count FROM user_memories").get() as { count: number };
+    const userMemoryFtsCount = memoryDb.prepare("SELECT COUNT(*) AS count FROM user_memories_fts").get() as { count: number };
+    const processingCount = memoryDb.prepare("SELECT COUNT(*) AS count FROM memory_processing_state").get() as { count: number };
     const vectorCount = memoryDb.prepare("SELECT COUNT(*) AS count FROM memory_vec_3").get() as { count: number };
     const apiLogCount = memoryDb.prepare("SELECT COUNT(*) AS count FROM api_logs").get() as { count: number };
     const migrationCount = memoryDb.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get() as { count: number };
@@ -128,6 +131,9 @@ describe("filesystem local data store", () => {
     expect(seenCount.count).toBe(0);
     expect(watermarkCount.count).toBe(0);
     expect(memoryCount.count).toBe(0);
+    expect(userMemoryCount.count).toBe(0);
+    expect(userMemoryFtsCount.count).toBe(0);
+    expect(processingCount.count).toBe(0);
     expect(vectorCount.count).toBe(0);
     expect(apiLogCount.count).toBe(0);
     expect(migrationCount.count).toBe(1);
@@ -140,6 +146,9 @@ function createMemoryDatabase(databasePath: string): void {
   db.exec(`
     CREATE TABLE schema_migrations (id TEXT PRIMARY KEY);
     CREATE TABLE memories (id TEXT PRIMARY KEY, memory_value TEXT NOT NULL);
+    CREATE TABLE user_memories (id TEXT PRIMARY KEY, content TEXT NOT NULL);
+    CREATE VIRTUAL TABLE user_memories_fts USING fts5(id, content);
+    CREATE TABLE memory_processing_state (memory_id TEXT PRIMARY KEY, state TEXT NOT NULL);
     CREATE TABLE memory_vector_entries (
       id INTEGER PRIMARY KEY,
       memory_id TEXT NOT NULL,
@@ -151,6 +160,9 @@ function createMemoryDatabase(databasePath: string): void {
     CREATE TABLE api_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, tool_name TEXT NOT NULL);
     INSERT INTO schema_migrations (id) VALUES ('001_runtime_schema');
     INSERT INTO memories (id, memory_value) VALUES ('memory-1', 'remember this');
+    INSERT INTO user_memories (id, content) VALUES ('user-memory-1', 'prefers concise code');
+    INSERT INTO user_memories_fts (id, content) VALUES ('user-memory-1', 'prefers concise code');
+    INSERT INTO memory_processing_state (memory_id, state) VALUES ('memory-1', 'summarizing');
     INSERT INTO memory_vector_entries VALUES (1, 'memory-1', 'vec_summary', 3, '2026-01-01');
     INSERT INTO api_logs (tool_name) VALUES ('memory_add');
   `);

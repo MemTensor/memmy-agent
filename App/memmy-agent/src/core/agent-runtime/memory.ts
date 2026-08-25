@@ -6,7 +6,12 @@ import { CONTEXT_SAFETY_BUFFER_TOKENS } from "../../token-budget.js";
 import { GitStore } from "../../utils/gitstore.js";
 import { ensureDir, estimatePromptTokensChain, stripThink, truncateText } from "../../utils/helpers.js";
 import { renderTemplate } from "../../utils/prompt-templates.js";
-import { DagSnapshotBuilder, SessionDagStore, type SessionDagQueueManager } from "../../session-dag/index.js";
+import {
+  buildDagSnapshotText,
+  SessionDagStore,
+  sessionDagDbPath,
+  type SessionDagQueueManager,
+} from "../../session-dag/index.js";
 import { AgentHook, AgentHookContext } from "./hook.js";
 import { AgentRunner, AgentRunSpec } from "./runner.js";
 import { EditFileTool, ReadFileTool, WriteFileTool } from "./tools/filesystem.js";
@@ -37,11 +42,75 @@ export interface TokenCompactionResult {
 
 type TokenCompactionEventCallback = (event: TokenCompactionEvent) => Promise<void> | void;
 
-type TokenCompactionOptions = {
+export type CompactionProjectionInput = {
+  visibleMessageStart: number;
+  summaryOverride: string | null;
+};
+
+export type TokenCompactionOptions = {
   replayMaxMessages?: number | null;
   onCompactionEvent?: TokenCompactionEventCallback;
   notifyOnLockWait?: boolean;
+  inputTokenBudget?: number;
+  estimateProjectionTokens?: (
+    session: Session | any,
+    projection: CompactionProjectionInput,
+  ) => [number, string];
+  maxMessageEndExclusive?: number;
 };
+
+type DagCompactionFailureRecord = {
+  event: "session_dag_compaction_failed";
+  timestamp: string;
+  platform: NodeJS.Platform;
+  pid: number;
+  sessionKey: string;
+  databasePath: string;
+  summaryMode: "dag";
+  errorName: string;
+  errorCode: string | null;
+  message: string;
+  stack: string | null;
+};
+
+function dagCompactionFailureRecord(sessionKey: string, caught: unknown): DagCompactionFailureRecord {
+  const errorName = caught instanceof Error
+    ? caught.name.trim() || "Error"
+    : typeof caught;
+  let errorCode: string | null = null;
+  if (caught && typeof caught === "object" && "code" in caught) {
+    const code = (caught as { code?: unknown }).code;
+    if (typeof code === "string" || typeof code === "number") errorCode = String(code);
+  }
+  const message = caught instanceof Error ? caught.message : String(caught);
+  const stack = caught instanceof Error && typeof caught.stack === "string" && caught.stack.trim()
+    ? caught.stack
+    : null;
+  return {
+    event: "session_dag_compaction_failed",
+    timestamp: new Date().toISOString(),
+    platform: process.platform,
+    pid: process.pid,
+    sessionKey,
+    databasePath: sessionDagDbPath(sessionKey),
+    summaryMode: "dag",
+    errorName,
+    errorCode,
+    message,
+    stack,
+  };
+}
+
+function firstDagTurnCoveringBoundary(
+  store: SessionDagStore,
+  plannedMessageEnd: number,
+  hardMessageEnd: number,
+): { turn_id: string; message_end: number; dag_status: string } | null {
+  return store
+    .listTurns()
+    .filter((turn) => turn.message_end >= plannedMessageEnd && turn.message_end <= hardMessageEnd)
+    .sort((left, right) => left.message_end - right.message_end)[0] ?? null;
+}
 
 export interface HistoryEntry {
   cursor?: unknown;
@@ -710,13 +779,19 @@ export class Consolidator {
     return this.contextWindowTokens - this.maxCompletionTokens - this.safetyBuffer;
   }
 
-  pickConsolidationBoundary(session: Session | any, tokensToRemove: number): [number, number] | null {
+  pickConsolidationBoundary(
+    session: Session | any,
+    tokensToRemove: number,
+    maxMessageEndExclusive = session.messages.length,
+    allowHardBoundary = false,
+  ): [number, number] | null {
     const start = session.lastConsolidated ?? 0;
-    if (start >= session.messages.length || tokensToRemove <= 0) return null;
+    const hardEnd = Math.max(start, Math.min(maxMessageEndExclusive, session.messages.length));
+    if (start >= hardEnd || tokensToRemove <= 0) return null;
 
     let removedTokens = 0;
     let lastBoundary: [number, number] | null = null;
-    for (let idx = start; idx < session.messages.length; idx += 1) {
+    for (let idx = start; idx < hardEnd; idx += 1) {
       const message = session.messages[idx];
       if (idx > start && message.role === "user") {
         lastBoundary = [idx, removedTokens];
@@ -724,7 +799,109 @@ export class Consolidator {
       }
       removedTokens += estimateMessageTokens(message);
     }
+    if (allowHardBoundary && hardEnd > start) return [hardEnd, removedTokens];
     return lastBoundary;
+  }
+
+  private currentSummaryText(session: Session | any): string | null {
+    const summary = session.metadata?.lastSummary;
+    if (typeof summary === "string") return summary;
+    return summary && typeof summary === "object" && typeof summary.text === "string"
+      ? summary.text
+      : null;
+  }
+
+  private sessionProjectionView(
+    session: Session | any,
+    projection: CompactionProjectionInput,
+  ): Session | any {
+    const view = Object.assign(
+      Object.create(Object.getPrototypeOf(session) ?? Object.prototype),
+      session,
+    );
+    view.lastConsolidated = Math.max(
+      0,
+      Math.min(projection.visibleMessageStart, session.messages?.length ?? 0),
+    );
+    view.metadata = { ...(session.metadata ?? {}) };
+    if (projection.summaryOverride == null) {
+      delete view.metadata.lastSummary;
+    } else {
+      const current = view.metadata.lastSummary;
+      view.metadata.lastSummary = {
+        ...(current && typeof current === "object" && !Array.isArray(current) ? current : {}),
+        text: projection.summaryOverride,
+      };
+    }
+    return view;
+  }
+
+  private estimateProjectionTokens(
+    session: Session | any,
+    projection: CompactionProjectionInput,
+    opts: TokenCompactionOptions,
+  ): [number, string] {
+    if (opts.estimateProjectionTokens) {
+      return opts.estimateProjectionTokens(session, projection);
+    }
+    return this.estimateSessionPromptTokens(this.sessionProjectionView(session, projection));
+  }
+
+  private planTokenCompactionBoundary(
+    session: Session | any,
+    {
+      replayMaxMessages,
+      estimatedTokens,
+      targetPromptTokens,
+      hardMessageEnd,
+      tokenPressureActive,
+      allowHardBoundary,
+    }: {
+      replayMaxMessages: number | null;
+      estimatedTokens: number;
+      targetPromptTokens: number;
+      hardMessageEnd: number;
+      tokenPressureActive: boolean;
+      allowHardBoundary: boolean;
+    },
+  ): number | null {
+    const last = session.lastConsolidated ?? 0;
+    if (last >= hardMessageEnd) return null;
+    const replayBoundary = Consolidator.replayOverflowBoundary(session, replayMaxMessages);
+    const cappedReplayBoundary = replayBoundary == null
+      ? null
+      : Math.min(replayBoundary, hardMessageEnd);
+    const tokenBoundary = tokenPressureActive && estimatedTokens > targetPromptTokens
+      ? this.pickConsolidationBoundary(
+          session,
+          Math.max(1, estimatedTokens - targetPromptTokens),
+          hardMessageEnd,
+          allowHardBoundary,
+        )?.[0] ?? null
+      : null;
+    const planned = Math.max(last, cappedReplayBoundary ?? last, tokenBoundary ?? last);
+    return planned > last && planned <= hardMessageEnd ? planned : null;
+  }
+
+  private commitSessionSummary(
+    session: Session | any,
+    lastSummary: Record<string, any>,
+    lastConsolidated: number,
+  ): void {
+    session.metadata ??= {};
+    const hadSummary = Object.prototype.hasOwnProperty.call(session.metadata, "lastSummary");
+    const previousSummary = session.metadata.lastSummary;
+    const previousLastConsolidated = session.lastConsolidated ?? 0;
+    try {
+      session.metadata.lastSummary = lastSummary;
+      session.lastConsolidated = lastConsolidated;
+      this.saveSession(session);
+    } catch (error) {
+      if (hadSummary) session.metadata.lastSummary = previousSummary;
+      else delete session.metadata.lastSummary;
+      session.lastConsolidated = previousLastConsolidated;
+      throw error;
+    }
   }
 
   static fullUnconsolidatedHistory(session: Session | any, { includeTimestamps = false }: { includeTimestamps?: boolean } = {}): Record<string, any>[] {
@@ -898,60 +1075,69 @@ export class Consolidator {
         const fresh = this.getSession(session.key);
         if (fresh && fresh !== session) session = fresh;
         currentSession = session;
-        const beforeLastConsolidated = session.lastConsolidated ?? 0;
-        const beforeMessageCount = session.messages?.length ?? 0;
         if (!session.messages?.length) return;
 
-        const budget = this.inputTokenBudget;
-        const target = Math.floor(budget * this.consolidationRatio);
-        let lastSummary = await this.consolidateReplayOverflow(session, replayMaxMessages, notifyRunning);
-        if (lastSummary) summary = lastSummary;
-        let estimated: number;
-        let source: string;
+        const effectiveInputTokenBudget = opts.inputTokenBudget ?? this.inputTokenBudget;
+        if (opts.inputTokenBudget != null && effectiveInputTokenBudget <= 0) return;
+        const hardMessageEnd = Math.max(
+          session.lastConsolidated ?? 0,
+          Math.min(opts.maxMessageEndExclusive ?? session.messages.length, session.messages.length),
+        );
+        const targetPromptTokens = Math.floor(effectiveInputTokenBudget * this.consolidationRatio);
+        let estimated = 0;
         try {
-          [estimated, source] = this.estimateSessionPromptTokens(session);
-          void source;
+          [estimated] = this.estimateProjectionTokens(session, {
+            visibleMessageStart: session.lastConsolidated ?? 0,
+            summaryOverride: this.currentSummaryText(session),
+          }, opts);
         } catch {
           estimated = 0;
         }
-        if (estimated <= 0 || estimated < budget) {
-          this.persistLastSummary(session, lastSummary);
-          changed = changed || beforeLastConsolidated !== (session.lastConsolidated ?? 0) || beforeMessageCount !== (session.messages?.length ?? 0);
-          return;
-        }
+        const replayOverflow = Consolidator.replayOverflowBoundary(session, replayMaxMessages);
+        const tokenPressureActive = estimated >= effectiveInputTokenBudget;
+        if (replayOverflow == null && (!tokenPressureActive || estimated <= 0)) return;
 
         for (let round = 0; round < this.maxConsolidationRounds; round += 1) {
-          if (estimated <= target) break;
-          const boundary = this.pickConsolidationBoundary(session, Math.max(1, estimated - target));
-          if (!boundary) break;
-          const [endIdx] = boundary;
+          const plannedMessageEnd = this.planTokenCompactionBoundary(session, {
+            replayMaxMessages,
+            estimatedTokens: estimated,
+            targetPromptTokens,
+            hardMessageEnd,
+            tokenPressureActive,
+            allowHardBoundary: opts.maxMessageEndExclusive != null,
+          });
+          if (plannedMessageEnd == null) break;
           const last = session.lastConsolidated ?? 0;
-          const chunk = session.messages.slice(last, endIdx);
+          const chunk = session.messages.slice(last, plannedMessageEnd);
           if (!chunk.length) break;
           await notifyRunning();
           const archived = await this.archive(chunk, { sessionKey });
-          if (archived) {
-            lastSummary = archived;
-            summary = archived;
+          if (!archived) {
+            error = "Text compaction did not produce a summary";
+            break;
           }
-          session.lastConsolidated = endIdx;
-          this.saveSession(session);
-          if (!archived) break;
+          this.commitSessionSummary(session, {
+            text: archived,
+            mode: "text",
+            lastActive: session.updatedAt ?? new Date().toISOString(),
+          }, plannedMessageEnd);
+          summary = archived;
+          changed = true;
           try {
-            [estimated, source] = this.estimateSessionPromptTokens(session);
-            void source;
+            [estimated] = this.estimateProjectionTokens(session, {
+              visibleMessageStart: plannedMessageEnd,
+              summaryOverride: archived,
+            }, opts);
           } catch {
             estimated = 0;
           }
           if (estimated <= 0) break;
         }
-        this.persistLastSummary(session, lastSummary);
-        changed = changed || beforeLastConsolidated !== (session.lastConsolidated ?? 0) || beforeMessageCount !== (session.messages?.length ?? 0);
       });
       if (started) {
         await emitCompactionEvent({
           kind: "token",
-          status: "done",
+          status: error ? "error" : "done",
           replayMaxMessages,
           changed,
         });
@@ -1029,15 +1215,35 @@ export class Consolidator {
         currentSession = session;
         if (!session.messages?.length) return;
 
+        const effectiveInputTokenBudget = opts.inputTokenBudget ?? this.inputTokenBudget;
+        if (opts.inputTokenBudget != null && effectiveInputTokenBudget <= 0) return;
+        const hardMessageEnd = Math.max(
+          session.lastConsolidated ?? 0,
+          Math.min(opts.maxMessageEndExclusive ?? session.messages.length, session.messages.length),
+        );
+        const targetPromptTokens = Math.floor(effectiveInputTokenBudget * this.consolidationRatio);
         const replayOverflow = Consolidator.replayOverflowBoundary(session, replayMaxMessages);
         let estimated = 0;
         try {
-          [estimated] = this.estimateSessionPromptTokens(session);
+          [estimated] = this.estimateProjectionTokens(session, {
+            visibleMessageStart: session.lastConsolidated ?? 0,
+            summaryOverride: this.currentSummaryText(session),
+          }, opts);
         } catch {
           estimated = 0;
         }
-        const budget = this.inputTokenBudget;
-        if (replayOverflow == null && (estimated <= 0 || estimated < budget)) return;
+        const tokenPressureActive = estimated >= effectiveInputTokenBudget;
+        if (replayOverflow == null && (!tokenPressureActive || estimated <= 0)) return;
+
+        const plannedMessageEnd = this.planTokenCompactionBoundary(session, {
+          replayMaxMessages,
+          estimatedTokens: estimated,
+          targetPromptTokens,
+          hardMessageEnd,
+          tokenPressureActive,
+          allowHardBoundary: opts.maxMessageEndExclusive != null,
+        });
+        if (plannedMessageEnd == null) return;
 
         if (!this.dagQueue) {
           error = "Session DAG queue is not available for dag compaction";
@@ -1046,32 +1252,88 @@ export class Consolidator {
 
         const store = this.createDagStore ? this.createDagStore(sessionKey) : new SessionDagStore({ sessionKey });
         try {
-          const target = latestDagTurnForSessionPrefix(store, session.messages.length);
-          if (!target) return;
-          if (target.message_end <= (session.lastConsolidated ?? 0)) return;
+          const coverageTarget = firstDagTurnCoveringBoundary(
+            store,
+            plannedMessageEnd,
+            hardMessageEnd,
+          );
+          if (!coverageTarget) return;
           await notifyRunning();
-          const caughtUp = await this.dagQueue.waitUntilProcessed(sessionKey, target.turn_id, this.dagCatchupTimeoutMs);
+          const caughtUp = await this.dagQueue.waitUntilProcessed(
+            sessionKey,
+            coverageTarget.turn_id,
+            this.dagCatchupTimeoutMs,
+          );
           if (!caughtUp) {
-            error = `Session DAG did not catch up to turn ${target.turn_id}`;
+            error = `Session DAG did not catch up to turn ${coverageTarget.turn_id}`;
             return;
           }
-          const refreshedTarget = store.getTurn(target.turn_id);
-          if (!refreshedTarget || refreshedTarget.dag_status !== "done") {
-            error = `Session DAG turn ${target.turn_id} is not done`;
+          const lastProcessedTurnId = store.getMeta("last_processed_turn_id");
+          const lastProcessedTurn = lastProcessedTurnId
+            ? store.getTurn(lastProcessedTurnId)
+            : null;
+          if (
+            !lastProcessedTurnId
+            || !lastProcessedTurn
+            || lastProcessedTurn.dag_status !== "done"
+            || lastProcessedTurn.message_end < plannedMessageEnd
+          ) {
+            error = `Session DAG has not processed through message ${plannedMessageEnd}`;
             return;
           }
-          const tokenBudget = Math.max(128, Math.floor(this.inputTokenBudget * this.consolidationRatio));
-          const snapshot = new DagSnapshotBuilder(store).build({ turnId: target.turn_id, tokenBudget });
+
+          let basePromptTokens = 0;
+          try {
+            [basePromptTokens] = this.estimateProjectionTokens(session, {
+              visibleMessageStart: plannedMessageEnd,
+              summaryOverride: null,
+            }, opts);
+          } catch {
+            basePromptTokens = 0;
+          }
+          if (basePromptTokens <= 0) {
+            error = "Session DAG could not estimate the retained prompt";
+            return;
+          }
+          const snapshotTokenBudget = Math.floor(targetPromptTokens - basePromptTokens);
+          if (snapshotTokenBudget <= 0) {
+            error = "Session DAG snapshot has no remaining token budget";
+            return;
+          }
+          const candidate = buildDagSnapshotText(
+            store.readGraphForHistoryDag(),
+            snapshotTokenBudget,
+          );
+          if (candidate.tokenEstimate > snapshotTokenBudget) {
+            error = "Session DAG active path exceeds the remaining snapshot token budget";
+            return;
+          }
+          let finalPromptTokens = 0;
+          try {
+            [finalPromptTokens] = this.estimateProjectionTokens(session, {
+              visibleMessageStart: plannedMessageEnd,
+              summaryOverride: candidate.text,
+            }, opts);
+          } catch {
+            finalPromptTokens = 0;
+          }
+          if (finalPromptTokens <= 0 || finalPromptTokens >= effectiveInputTokenBudget) {
+            error = "Session DAG snapshot does not fit the model input budget";
+            return;
+          }
+          const snapshot = store.createSnapshot(
+            lastProcessedTurnId,
+            candidate.text,
+            candidate.json,
+            candidate.tokenEstimate,
+          );
           summary = snapshot.snapshot_text;
-          session.metadata ??= {};
-          session.metadata.lastSummary = {
+          this.commitSessionSummary(session, {
             text: snapshot.snapshot_text,
             mode: "dag",
             dagSnapshotId: snapshot.id,
             lastActive: session.updatedAt ?? new Date().toISOString(),
-          };
-          session.lastConsolidated = target.message_end;
-          this.saveSession(session);
+          }, plannedMessageEnd);
           changed = true;
         } finally {
           store.close();
@@ -1086,7 +1348,9 @@ export class Consolidator {
         });
       }
     } catch (caught) {
-      error = caught instanceof Error ? caught.message : String(caught);
+      const failure = dagCompactionFailureRecord(sessionKey, caught);
+      error = failure.message;
+      console.error("[session-dag] compaction failed", JSON.stringify(failure));
       if (started) {
         await emitCompactionEvent({
           kind: "token",
@@ -1196,14 +1460,6 @@ export class Consolidator {
     if (typeof this.sessions?.invalidate === "function") this.sessions.invalidate(key);
     else if (typeof this.sessions?.sessions?.delete === "function") this.sessions.sessions.delete(key);
   }
-}
-
-function latestDagTurnForSessionPrefix(store: SessionDagStore, messageEnd: number): { turn_id: string; message_end: number; dag_status: string } | null {
-  const candidates = store
-    .listTurns()
-    .filter((turn) => turn.message_end <= messageEnd)
-    .sort((left, right) => right.message_end - left.message_end);
-  return candidates[0] ?? null;
 }
 
 type DreamInit = {

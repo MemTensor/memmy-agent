@@ -13,6 +13,7 @@ import {
   isResearchDomain,
   isStandaloneMathFinalAnswerTask,
   policyMetaFromMemory,
+  policyRequiresRevalidation,
   renderMathFinalAnswerProtocol,
   renderRepositoryRepairProtocol,
   RETRIEVAL_FILTER_PROMPT,
@@ -33,6 +34,7 @@ import {
 import { createMemoryLogger, memoryErrorFields } from "../../logging/logger.js";
 import type { Embedder, LlmClient } from "../../model/types.js";
 import {
+  isStrictL3WorldModelV2Memory,
   kindFromMemory,
   Repositories,
   type EpisodeRecord
@@ -45,9 +47,11 @@ import type {
   MemoryRow,
   MemorySearchRequest,
   RecallHit,
+  RecallMemoryLayer,
   RequestEnvelope,
   RetrievalMode,
-  RuntimeNamespace
+  RuntimeNamespace,
+  UserMemoryRecord
 } from "../../types.js";
 import { newId, stableHash } from "../../utils/id.js";
 import { formatZonedTime, nowIso, resolveTimeZone } from "../../utils/time.js";
@@ -55,6 +59,7 @@ import { recordApiLog } from "../model-audit/model-call-audit.js";
 import {
   sourceMemoryIdsFromMemory
 } from "../read-model/memory.js";
+import { isDynamicCurrentFactQuery } from "../user-memory/user-memory.js";
 import { mergeRetrievalResults, normalizeQueryRewriteQueries } from "../retrieval/query-rewrite.js";
 import {
   normalizeRetrievalExtractKeywords
@@ -157,6 +162,8 @@ function describeRetrievalFilterCandidate(hit: RecallHit, bodyChars: number): st
   const body = clip(hit.snippet, bodyChars);
   const title = clip(hit.title ?? hit.id, 120);
   switch (hit.memoryLayer) {
+    case "UserMemory":
+      return `[USER MEMORY] ${title}${body ? `\n   ${body}` : ""}`;
     case "Skill":
       return `[SKILL] ${title}${body ? `\n   ${body}` : ""}`;
     case "L1":
@@ -236,6 +243,171 @@ function emptyRetrievalResult(): RetrievalResult {
       droppedByThreshold: 0
     }
   };
+}
+
+function userMemoryRecallHit(memory: UserMemoryRecord, score: number): RecallHit {
+  return {
+    id: memory.id,
+    kind: "user_memory",
+    memoryLayer: "UserMemory",
+    status: "activated",
+    title: memory.memoryTypes.join(" / "),
+    snippet: memory.content,
+    score,
+    tags: memory.memoryTypes,
+    createdAt: memory.createdAt,
+    updatedAt: memory.updatedAt,
+    source: "search",
+    sourceTurnId: memory.sourceTurnId,
+    memberMemoryIds: [memory.id],
+    retrievalRoutes: ["user_memory"],
+    members: [{
+      id: memory.id,
+      kind: "user_memory",
+      memoryLayer: "UserMemory",
+      status: memory.status,
+      content: memory.content,
+      createdAt: memory.createdAt,
+      updatedAt: memory.updatedAt,
+      retrievalRoute: "user_memory"
+    }]
+  };
+}
+
+function sourceTurnIdFromAgentMemory(memory: MemoryRow): string | undefined {
+  const internal = memory.properties.internal_info;
+  const direct = internal.source_raw_turn_id ?? internal.raw_turn_id;
+  if (typeof direct === "string" && direct) return direct;
+  const trace = isRecord(internal.trace) ? internal.trace : undefined;
+  return trace && typeof trace.raw_turn_id === "string" ? trace.raw_turn_id : undefined;
+}
+
+export function mergeSameTurnRecallHits(
+  agentHits: RecallHit[],
+  agentMemories: MemoryRow[],
+  userHits: RecallHit[]
+): { hits: RecallHit[]; mergedSourceTurnIds: string[]; membersBySourceTurnId: Record<string, string[]> } {
+  const memoryById = new Map(agentMemories.map((memory) => [memory.id, memory]));
+  const annotatedAgentHits = agentHits.map((hit) => {
+    const memory = memoryById.get(hit.id);
+    const sourceTurnId = memory?.memoryLayer === "L1" ? sourceTurnIdFromAgentMemory(memory) : undefined;
+    const internal = memory?.properties.internal_info;
+    return {
+      ...hit,
+      sourceTurnId,
+      createdAt: memory?.createdAt ?? hit.createdAt,
+      memberMemoryIds: [hit.id],
+      retrievalRoutes: [memory?.memoryLayer === "L1" ? "l1" as const : "agent_memory" as const],
+      ...(memory ? {
+        members: [{
+          id: memory.id,
+          kind: kindFromMemory(memory),
+          memoryLayer: memory.memoryLayer,
+          status: memory.status,
+          content: hit.snippet,
+          createdAt: memory.createdAt,
+          updatedAt: memory.updatedAt,
+          retrievalRoute: memory.memoryLayer === "L1" ? "l1" as const : "agent_memory" as const
+        }]
+      } : {}),
+      ...(memory?.memoryLayer === "Skill" && internal?.read_only === true
+        ? {
+            readOnly: true,
+            ...(typeof internal.source_agent_id === "string" ? { sourceAgentId: internal.source_agent_id } : {}),
+            ...(typeof internal.source_skill_id === "string" ? { sourceSkillId: internal.source_skill_id } : {}),
+            ...(typeof internal.source_skill_version === "string" ? { sourceSkillVersion: internal.source_skill_version } : {})
+          }
+        : {})
+    };
+  });
+  const l1ByTurn = new Map<string, RecallHit[]>();
+  for (const hit of annotatedAgentHits) {
+    if (hit.memoryLayer !== "L1" || !hit.sourceTurnId) continue;
+    const bucket = l1ByTurn.get(hit.sourceTurnId) ?? [];
+    bucket.push(hit);
+    l1ByTurn.set(hit.sourceTurnId, bucket);
+  }
+  const userByTurn = new Map<string, RecallHit[]>();
+  for (const hit of userHits) {
+    if (!hit.sourceTurnId) continue;
+    const bucket = userByTurn.get(hit.sourceTurnId) ?? [];
+    bucket.push(hit);
+    userByTurn.set(hit.sourceTurnId, bucket);
+  }
+
+  const mergedSourceTurnIds = [...l1ByTurn.keys()].filter((id) => userByTurn.has(id));
+  const mergedTurns = new Set(mergedSourceTurnIds);
+  const membersBySourceTurnId: Record<string, string[]> = {};
+  const mergedHits = mergedSourceTurnIds.map((sourceTurnId) => {
+    const members = [...(l1ByTurn.get(sourceTurnId) ?? []), ...(userByTurn.get(sourceTurnId) ?? [])];
+    const representative = [...members].sort((left, right) => {
+      const leftL1 = left.memoryLayer === "L1" ? 1 : 0;
+      const rightL1 = right.memoryLayer === "L1" ? 1 : 0;
+      return rightL1 - leftL1 || right.score - left.score;
+    })[0]!;
+    const memberMemoryIds = uniq(members.flatMap((hit) => hit.memberMemoryIds ?? [hit.id]));
+    membersBySourceTurnId[sourceTurnId] = memberMemoryIds;
+    return {
+      ...representative,
+      score: Math.max(...members.map((hit) => hit.score)),
+      sourceTurnId,
+      memberMemoryIds,
+      retrievalRoutes: ["user_memory", "l1"] as Array<"user_memory" | "l1" | "agent_memory">,
+      members: members.flatMap((hit) => hit.members ?? [])
+    };
+  });
+  return {
+    hits: [
+      ...annotatedAgentHits.filter((hit) => !hit.sourceTurnId || !mergedTurns.has(hit.sourceTurnId)),
+      ...userHits.filter((hit) => !hit.sourceTurnId || !mergedTurns.has(hit.sourceTurnId)),
+      ...mergedHits
+    ],
+    mergedSourceTurnIds,
+    membersBySourceTurnId
+  };
+}
+
+export function mmrRecallHits(hits: RecallHit[], limit: number, lambda: number): RecallHit[] {
+  const pool = [...hits];
+  const selected: RecallHit[] = [];
+  while (selected.length < limit && pool.length > 0) {
+    let bestIndex = 0;
+    let bestScore = Number.NEGATIVE_INFINITY;
+    for (let index = 0; index < pool.length; index += 1) {
+      const candidate = pool[index]!;
+      const redundancy = selected.length === 0
+        ? 0
+        : Math.max(...selected.map((prior) =>
+            candidate.memoryLayer === "UserMemory" && prior.memoryLayer === "UserMemory"
+              ? 0
+              : recallTextSimilarity(candidate.snippet, prior.snippet)
+          ));
+      const score = lambda * candidate.score - (1 - lambda) * redundancy;
+      if (score > bestScore) {
+        bestIndex = index;
+        bestScore = score;
+      }
+    }
+    const [winner] = pool.splice(bestIndex, 1);
+    if (winner) selected.push(winner);
+  }
+  return selected;
+}
+
+function recallTextSimilarity(left: string, right: string): number {
+  const terms = (value: string) => new Set(
+    value.toLowerCase().match(/[\p{Script=Han}]|[a-z0-9_:-]{2,}/gu) ?? []
+  );
+  const a = terms(left);
+  const b = terms(right);
+  if (a.size === 0 || b.size === 0) return 0;
+  let overlap = 0;
+  for (const term of a) if (b.has(term)) overlap += 1;
+  return overlap / Math.max(a.size, b.size);
+}
+
+export function parallelMemoryLaneLimit(limit: number): number {
+  return Math.ceil(1.5 * limit);
 }
 
 function isOnboardingFirstReportContinuationQuery(query: string): boolean {
@@ -326,6 +498,16 @@ export function retrievedMemorySourceIds(memory: MemoryRow): string[] {
   ];
 }
 
+function memoryUsesStalePolicy(memory: MemoryRow, stalePolicyIds: ReadonlySet<string>): boolean {
+  if (stalePolicyIds.has(memory.id)) return true;
+  const sourcePolicyIds = memory.memoryLayer === "Skill"
+    ? skillMetaFromMemory(memory)?.sourcePolicyIds ?? []
+    : memory.memoryLayer === "L3"
+      ? worldModelMetaFromMemory(memory)?.policyIds ?? []
+      : [];
+  return sourcePolicyIds.some((policyId) => stalePolicyIds.has(policyId));
+}
+
 function llmFilterFallbackCap(hits: RecallHit[], maxKeep: number): RecallHit[] {
   const capped = Math.max(0, maxKeep);
   return capped === 0 ? [] : hits.slice(0, capped);
@@ -337,7 +519,7 @@ function stringArray(value: unknown): string[] { return Array.isArray(value) ? v
 function stringValue(value: unknown): string | undefined { return typeof value === "string" && value.trim() ? value.trim() : undefined; }
 function uniq<T>(values: readonly T[]): T[] { return [...new Set(values)]; }
 
-type InjectedSnippetRefKind = "skill" | "episode" | "trace" | "experience" | "world-model";
+type InjectedSnippetRefKind = "user-memory" | "skill" | "episode" | "trace" | "experience" | "world-model";
 
 interface RenderedInjectedSection {
   refKind: InjectedSnippetRefKind;
@@ -348,6 +530,7 @@ interface RenderedInjectedSection {
 const MEMORY_PACKET_MAX_SNIPPET_BODY_CHARS = 640;
 
 const MEMORY_PACKET_SKILL_SUMMARY_CHARS = 200;
+const TURN_START_RECENT_RAW_TURN_EXCLUSION_LIMIT = 8;
 
 interface InjectedRenderOptions {
   contextHints?: Record<string, unknown>;
@@ -377,7 +560,7 @@ export function buildInjectedContext(
   droppedDueToBudget: Array<{
     id: string;
     kind: MemoryKind;
-    memoryLayer: MemoryLayer;
+    memoryLayer: RecallMemoryLayer;
     reason: "token_budget";
     tokenEstimate?: number;
   }>;
@@ -391,10 +574,10 @@ export function buildInjectedContext(
     timeZone: tuning?.timeZone
   };
   const memoryById = new Map(contextMemories.map((memory) => [memory.id, memory]));
-  const rendered = hits.flatMap((hit) => {
-    const section = renderInjectedSection(hit, memoryById.get(hit.id), options);
+  const rendered = hits.flatMap((hit) => splitUserMemoryMembersForInjection(hit).flatMap((memberHit) => {
+    const section = renderInjectedSection(memberHit, memoryById.get(memberHit.id), options);
     return section ? [section] : [];
-  });
+  }));
   const memories = isStandaloneMathInjected(options)
     ? suppressLowSpecificityStandaloneMathSections(
         suppressIsolatedMathSkillSections(rendered),
@@ -405,11 +588,11 @@ export function buildInjectedContext(
   void budget;
   const sections: InjectedContext["sections"] = memories.map((section) => section.section);
   const renderedSections: RenderedInjectedSection[] = [...memories];
-  const sourceMemoryIds: string[] = memories.map((section) => section.hitId);
+  const sourceMemoryIds: string[] = memories.flatMap((section) => section.section.memoryIds);
   const droppedDueToBudget: Array<{
     id: string;
     kind: MemoryKind;
-    memoryLayer: MemoryLayer;
+    memoryLayer: RecallMemoryLayer;
     reason: "token_budget";
     tokenEstimate?: number;
   }> = [];
@@ -526,11 +709,43 @@ function renderInjectedSection(
       title: rendered.title,
       kind: hit.kind,
       memoryLayer: hit.memoryLayer,
-      memoryIds: [hit.id],
+      memoryIds: hit.memberMemoryIds ?? [hit.id],
       content,
       tokenEstimate: estimateTokens(`${rendered.title}\n${content}`)
     }
   };
+}
+
+function splitUserMemoryMembersForInjection(hit: RecallHit): RecallHit[] {
+  if (hit.memoryLayer === "UserMemory") return [hit];
+  const userMembers = (hit.members ?? []).filter((member) => member.memoryLayer === "UserMemory");
+  if (userMembers.length === 0) return [hit];
+  const agentMembers = (hit.members ?? []).filter((member) => member.memoryLayer !== "UserMemory");
+  const agentIds = agentMembers.map((member) => member.id);
+  return [
+    {
+      ...hit,
+      memberMemoryIds: agentIds.length > 0 ? agentIds : [hit.id],
+      members: agentMembers
+    },
+    ...userMembers.map((member): RecallHit => ({
+      id: member.id,
+      kind: "user_memory",
+      memoryLayer: "UserMemory",
+      status: "activated",
+      title: "User Memory",
+      snippet: member.content,
+      score: hit.score,
+      tags: [],
+      createdAt: member.createdAt,
+      updatedAt: member.updatedAt,
+      source: "search",
+      sourceTurnId: hit.sourceTurnId,
+      memberMemoryIds: [member.id],
+      retrievalRoutes: ["user_memory"],
+      members: [member]
+    }))
+  ];
 }
 
 function renderInjectedSnippet(
@@ -538,6 +753,21 @@ function renderInjectedSnippet(
   memory: MemoryRow | undefined,
   options: InjectedRenderOptions
 ): { refKind: InjectedSnippetRefKind; title: string; body: string } | null {
+  if (hit.kind === "user_memory" || hit.memoryLayer === "UserMemory") {
+    return {
+      refKind: "user-memory",
+      title: hit.id,
+      body: truncateInjectedSnippet([
+        ...(hit.memberMemoryIds && hit.memberMemoryIds.length > 1
+          ? [`member ids: ${hit.memberMemoryIds.join(", ")}`]
+          : []),
+        ...(hit.createdAt ? [`created at: ${formatInjectedTimestamp(undefined, hit.createdAt, options.timeZone)}`] : []),
+        ...(hit.updatedAt ? [`updated at: ${formatInjectedTimestamp(undefined, hit.updatedAt, options.timeZone)}`] : []),
+        "",
+        ...labeledInjectedBlock("Historical user statement", hit.snippet)
+      ].join("\n"))
+    };
+  }
   if (hit.kind === "skill" || hit.memoryLayer === "Skill") {
     const skill = memory ? skillMetaFromMemory(memory) : null;
     const name = skill?.name || hit.title || "Skill";
@@ -549,6 +779,9 @@ function renderInjectedSnippet(
         title: "Skill",
         body: truncateInjectedSnippet([
           `id: ${hit.id}`,
+          ...(hit.sourceAgentId ? [`source agent: ${hit.sourceAgentId}`] : []),
+          ...(hit.sourceSkillId ? [`source skill: ${hit.sourceSkillId}`] : []),
+          ...(hit.sourceSkillVersion ? [`source version: ${hit.sourceSkillVersion}`] : []),
           "",
           ...labeledInjectedBlock("Name", name),
           "",
@@ -558,6 +791,9 @@ function renderInjectedSnippet(
     }
     const lines = [
       `id: ${hit.id}`,
+      ...(hit.sourceAgentId ? [`source agent: ${hit.sourceAgentId}`] : []),
+      ...(hit.sourceSkillId ? [`source skill: ${hit.sourceSkillId}`] : []),
+      ...(hit.sourceSkillVersion ? [`source version: ${hit.sourceSkillVersion}`] : []),
       "",
       ...labeledInjectedBlock("Name", name),
       "",
@@ -609,7 +845,7 @@ function renderInjectedSnippet(
     }
     return {
       refKind: "trace",
-      title: "Trace",
+      title: hit.id,
       body: truncateInjectedSnippet(renderInjectedTraceBody(hit, trace, options.timeZone))
     };
   }
@@ -652,12 +888,15 @@ function renderInjectedSnippet(
   ];
   return {
     refKind: "experience",
-    title: "Experience",
+    title: policy?.status === "candidate" ? "Candidate Experience (unverified)" : "Experience",
     body: truncateInjectedSnippet(parts.join("\n") || hit.snippet)
   };
 }
 
 function renderInjectedExperienceUseHint(policy: NonNullable<ReturnType<typeof policyMetaFromMemory>>): string {
+  if (policy.status === "candidate") {
+    return "Candidate, unverified guidance. Treat it as a hypothesis and verify it in the current task before use.";
+  }
   if (policy.experienceType === "failure_avoidance" || policy.evidencePolarity === "negative") {
     return "Use as a guardrail before planning.";
   }
@@ -675,7 +914,6 @@ function renderInjectedExperienceUseHint(policy: NonNullable<ReturnType<typeof p
 
 function renderInjectedTraceBody(hit: RecallHit, trace: TraceMeta, timeZone?: string): string {
   return [
-    `id: ${hit.id}`,
     `timestamp: ${formatInjectedTimestamp(trace.ts, hit.updatedAt, timeZone ?? trace.timeZone)}`,
     "",
     ...labeledInjectedBlock("Historical user statement", trace.userText || "(empty)"),
@@ -777,12 +1015,13 @@ function renderInjectedMarkdown(
     parts.push(renderMathFinalAnswerProtocol(options.query));
   }
   const skills = sections.filter((section) => section.refKind === "skill");
+  const userMemories = sections.filter((section) => section.refKind === "user-memory");
   const episodes = sections.filter((section) => section.refKind === "episode");
   const traces = sections.filter((section) => section.refKind === "trace");
   const experiences = sections.filter((section) => section.refKind === "experience");
   const worlds = sections.filter((section) => section.refKind === "world-model");
 
-  parts.push(...renderInjectedMemoriesSection(traces, episodes));
+  parts.push(...renderInjectedMemoriesSection(userMemories, traces, episodes));
 
   if (experiences.length > 0) {
     parts.push("## L2 Experience Memories\n");
@@ -845,11 +1084,18 @@ function prependResearchPlaybook(markdown: string, domain?: string): string {
 }
 
 function renderInjectedMemoriesSection(
+  userMemories: RenderedInjectedSection[],
   traces: RenderedInjectedSection[],
   episodes: RenderedInjectedSection[]
 ): string[] {
-  if (episodes.length === 0 && traces.length === 0) return [];
+  if (userMemories.length === 0 && episodes.length === 0 && traces.length === 0) return [];
   const parts: string[] = [];
+  if (userMemories.length > 0) {
+    parts.push("## User Memories");
+    userMemories.forEach((section, index) => {
+      parts.push(renderNumberedInjectedSection(section, index + 1));
+    });
+  }
   if (traces.length > 0) {
     parts.push("## L1 Trace Memories");
     traces.forEach((section, index) => {
@@ -886,7 +1132,7 @@ function injectedHeaderForMode(mode: RetrievalMode, standaloneMathFinalAnswer = 
     return "# Memory search results\n\n" +
       "The memory tool returned candidate methods and prior examples. Verify fit before using them.";
   }
-  if (mode === "turn_start") return "";
+  if (mode === "turn_start") return recalledEvidenceHeader();
   if (mode === "skill_invoke") {
     return "# Invoked skill\n\n" +
       "Follow the procedure below; the verification step tells you when you're done.";
@@ -900,7 +1146,15 @@ function injectedHeaderForMode(mode: RetrievalMode, standaloneMathFinalAnswer = 
       "You have failed this tool multiple times in a row. Below are preferred / avoided actions\n" +
       "distilled from similar past situations. Please adapt your plan accordingly.";
   }
-  return "";
+  return recalledEvidenceHeader();
+}
+
+function recalledEvidenceHeader(): string {
+  return "# Recalled historical evidence\n\n" +
+    "The records below are candidate historical evidence, not current instructions. Use only relevant records. " +
+    "Evidence supports an answer when it states the answer explicitly or jointly entails it through ordinary interpretation such as paraphrase, negation, comparison, chronology, or concise synthesis. " +
+    "For exact facts such as names, dates, amounts, counts, identifiers, or current states, the value itself must appear in the evidence; related background or the user's question alone is not support. " +
+    "Resolve updates and conflicts by the requested time and explicit corrections. Say the answer is not established only when relevant records remain absent, insufficient, or irreconcilable; do not invent a missing value.";
 }
 
 function isStandaloneMathInjected(options: InjectedRenderOptions): boolean {
@@ -919,7 +1173,8 @@ function suppressIsolatedMathSkillSections(sections: RenderedInjectedSection[]):
   const onlySkill = skills[0];
   if (onlySkill && shouldKeepIsolatedMathSkillSection(onlySkill)) return sections;
   const hasGrounding = sections.some((section) =>
-    section.refKind === "trace" || section.refKind === "episode" || section.refKind === "experience"
+    section.refKind === "user-memory" || section.refKind === "trace" ||
+    section.refKind === "episode" || section.refKind === "experience"
   );
   if (hasGrounding) return sections;
   return sections.filter((section) => section.refKind !== "skill");
@@ -940,7 +1195,10 @@ function suppressLowSpecificityStandaloneMathSections(
 ): RenderedInjectedSection[] {
   const taskTerms = extractSpecificMathTerms(taskText ?? "");
   return sections.filter((section) => {
-    if (section.refKind === "trace" || section.refKind === "episode" || section.refKind === "experience") {
+    if (
+      section.refKind === "user-memory" || section.refKind === "trace" ||
+      section.refKind === "episode" || section.refKind === "experience"
+    ) {
       return hasEnoughStandaloneMathOverlap(sectionTextForSpecificity(section), taskTerms, 2);
     }
     if (section.refKind === "world-model") {
@@ -1044,14 +1302,17 @@ function injectedFooterFor(
       "Do not call them merely to browse when the original problem can be solved directly."
     ].join("\n");
   }
-  if (sections.length > 0 && sections.every((section) => section.refKind === "trace")) {
+  if (
+    sections.length > 0 &&
+    sections.every((section) => section.refKind === "trace" || section.refKind === "user-memory")
+  ) {
     return "";
   }
   void skillMode;
   return [
     "## Follow-up memory tools",
     "",
-    "If details are needed, use `memmy_memory_get(id)` with one of the ids above.",
+    "If details are needed, use `memmy_memory_get(id)` with a non-User-Memory id above; User Memory entries are complete as shown.",
     "Use `memmy_memory_search(query)` only when the recalled memory is insufficient or ambiguous."
   ].join("\n");
 }
@@ -1456,7 +1717,7 @@ export class RetrievalService {
     droppedDueToBudget: Array<{
       id: string;
       kind: MemoryKind;
-      memoryLayer: MemoryLayer;
+      memoryLayer: RecallMemoryLayer;
       reason: "token_budget";
       tokenEstimate?: number;
     }>;
@@ -1503,24 +1764,40 @@ export class RetrievalService {
     const recentRawTurnIds = retrievalMode === "turn_start" && request.sessionId
       ? new Set(
           this.deps.repos.runtime
-            .listRecentRawTurnsBySession(request.sessionId, 8)
+            .listRecentRawTurnsBySession(request.sessionId, TURN_START_RECENT_RAW_TURN_EXCLUSION_LIMIT)
             .map((turn) => turn.id)
         )
       : undefined;
     const tuning = this.retrievalTuningConfig();
     const allowedLayers = retrievalLayersForProfile(retrievalLayersForMode(retrievalMode), tuning);
-    const semanticLayers = request.layers === undefined
+    const requestedSemanticLayers = request.layers === undefined
       ? allowedLayers
       : request.layers.filter((layer) => allowedLayers.includes(layer));
+    const dynamicCurrentQuery = isDynamicCurrentFactQuery(request.query);
+    const stalePolicyIds = new Set(this.deps.repos.memories
+      .list({ memoryLayer: "L2", status: "activated" }, 1000)
+      .map(policyMetaFromMemory)
+      .filter((policy): policy is NonNullable<ReturnType<typeof policyMetaFromMemory>> =>
+        Boolean(policy && policyRequiresRevalidation(policy))
+      )
+      .map((policy) => policy.id));
+    const semanticLayers = dynamicCurrentQuery
+      ? requestedSemanticLayers.filter((layer) => layer !== "L1")
+      : requestedSemanticLayers;
     const searchAt = Date.now();
+    const includeUserMemory = !onboardingFirstReportHit && semanticLayers.includes("L1");
+    const userMemoryCount = includeUserMemory
+      ? this.deps.repos.userMemories.listActive(context.userId).length
+      : 0;
     const candidateCount = onboardingFirstReportHit
       ? 1
       : semanticLayers.length === 0
       ? 0
       : this.candidatePool.retrievalCandidateCount({
+          userId: context.userId,
           layers: semanticLayers,
           tags: request.tags
-        });
+        }) + userMemoryCount;
     const retrievalQuery = focusResearchRetrievalQuery(request.query, tuning.domain).text;
     const queryExtract = candidateCount > 0 && !onboardingFirstReportHit
       ? await this.extractRetrievalQuery(retrievalQuery, timeZone)
@@ -1531,6 +1808,9 @@ export class RetrievalService {
     const retrievalLimit = timeFilter
       ? TIME_FILTERED_TRACE_LIMIT
       : request.limit ?? this.deps.turnStartRetrievalLimit();
+    const agentLaneLimit = includeUserMemory
+      ? parallelMemoryLaneLimit(retrievalLimit)
+      : retrievalLimit;
     const retrievalOutput = onboardingFirstReportHit && onboardingFirstReportMemory
       ? {
           retrieval: directRetrievalResult(onboardingFirstReportHit),
@@ -1543,27 +1823,59 @@ export class RetrievalService {
           limit: retrievalLimit
         })
       : await this.retrieveSearchMemories({
+          userId: context.userId,
           query: retrievalQuery,
           queryVectorText,
           queryExtract,
           layers,
           tags: request.tags,
-          limit: retrievalLimit,
+          limit: agentLaneLimit,
           mode: retrievalMode,
           excludeTraceRawTurnIds: recentRawTurnIds,
-          targetSkillId: request.targetSkillId
+          targetSkillId: request.targetSkillId,
+          currentAgentId: context.namespace.source
         });
-    const retrieval = retrievalOutput.retrieval;
-    const memories = retrievalOutput.memories;
+    const memories = retrievalOutput.memories.filter((memory) =>
+      !memoryUsesStalePolicy(memory, stalePolicyIds) &&
+      (retrievalMode !== "turn_start" || !isStrictL3WorldModelV2Memory(memory))
+    );
+    const allowedMemoryIds = new Set(memories.map((memory) => memory.id));
+    const allowedEpisodeIds = new Set(memories.flatMap((memory) => {
+      const episodeId = traceMetaFromMemory(memory)?.episodeId;
+      return episodeId ? [episodeId] : [];
+    }));
+    const retrieval = {
+      ...retrievalOutput.retrieval,
+      hits: retrievalOutput.retrieval.hits.filter((hit) =>
+        allowedMemoryIds.has(hit.id) ||
+        allowedEpisodeIds.has(hit.id) ||
+        (hit.memberMemoryIds ?? []).some((id) => allowedMemoryIds.has(id)) ||
+        (hit.members ?? []).some((member) => allowedMemoryIds.has(member.id))
+      )
+    };
+    const userMemoryOutput = includeUserMemory && !timeFilter
+      ? await this.retrieveUserMemories({
+          userId: context.userId,
+          query: retrievalQuery,
+          queryVectorText,
+          queryExtract,
+          limit: retrievalLimit,
+          excludeSourceTurnIds: recentRawTurnIds
+        })
+      : { hits: [] as RecallHit[], memories: [] as UserMemoryRecord[] };
+    const agentHits = onboardingFirstReportHit || timeFilter
+      ? retrieval.hits
+      : filterL1TraceSpanRecallHits(retrieval.hits, memories);
+    const merged = mergeSameTurnRecallHits(agentHits, memories, userMemoryOutput.hits);
     const rerankAt = Date.now();
     const filteredHits = onboardingFirstReportHit
       ? { hits: retrieval.hits, status: ["first_report_handoff:latest_only"] }
       : timeFilter
       ? { hits: retrieval.hits, status: ["time_filter:l1"] }
-      : await this.filterRecallHits(queryVectorText, retrieval.hits);
+      : await this.filterRecallHits(queryVectorText, merged.hits);
     const hits = onboardingFirstReportHit || timeFilter
       ? filteredHits.hits
-      : filterL1TraceSpanRecallHits(filteredHits.hits,memories);
+      : mmrRecallHits(filteredHits.hits, retrievalLimit, tuning.mmrLambda);
     const contextPacket = timeFilter
       ? buildTimeFilteredInjectedContext(
           memories.filter((memory) => hits.some((hit) => hit.id === memory.id)),
@@ -1581,9 +1893,17 @@ export class RetrievalService {
     const injectedContext = contextPacket.injectedContext;
     const budgetAt = Date.now();
     const recallEventId = newId("recall");
-    const candidateMemoryIds = memories.map((memory) => memory.id);
+    const queryId = request.turnId ?? `query_${stableHash(`${recallEventId}:${request.query}`).slice(0, 20)}`;
+    const userMemoryCandidateIds = userMemoryOutput.memories.map((memory) => memory.id);
+    const l1CandidateIds = memories
+      .filter((memory) => memory.memoryLayer === "L1")
+      .map((memory) => memory.id);
+    const candidateMemoryIds = uniq([
+      ...memories.map((memory) => memory.id),
+      ...userMemoryCandidateIds
+    ]);
     const sourceMemoryIds = contextPacket.sourceMemoryIds;
-    const hitIds = new Set(hits.map((hit) => hit.id));
+    const hitIds = new Set(hits.flatMap((hit) => hit.memberMemoryIds ?? [hit.id]));
     const dropped = [
       ...contextPacket.droppedDueToBudget,
       ...memories
@@ -1594,10 +1914,30 @@ export class RetrievalService {
           kind: kindFromMemory(memory),
           memoryLayer: memory.memoryLayer,
           reason: "rank_threshold" as const
+        })),
+      ...userMemoryOutput.memories
+        .filter((memory) => !hitIds.has(memory.id))
+        .slice(0, 50)
+        .map((memory) => ({
+          id: memory.id,
+          kind: "user_memory" as const,
+          memoryLayer: "UserMemory" as const,
+          reason: "rank_threshold" as const
         }))
     ];
     const shouldRecordEvent = this.deps.memoryAddEnabled() && request.recordEvent !== false;
     if (shouldRecordEvent) {
+      const injectedIds = new Set(injectedContext.sections.flatMap((section) => section.memoryIds));
+      const injectedHits = hits.flatMap((hit) => {
+        const members = (hit.members ?? []).filter((member) => injectedIds.has(member.id));
+        const memoryIds = (hit.memberMemoryIds ?? [hit.id]).filter((id) => injectedIds.has(id));
+        if (members.length === 0 && memoryIds.length === 0 && !injectedIds.has(hit.id)) return [];
+        return [{
+          ...hit,
+          memberMemoryIds: memoryIds.length > 0 ? memoryIds : [hit.id],
+          ...(hit.members ? { members } : {})
+        }];
+      });
       this.deps.repos.runtime.insertRecallEvent({
         id: recallEventId,
         namespaceId: this.deps.namespaceIdFromContext(context.namespace),
@@ -1607,13 +1947,25 @@ export class RetrievalService {
         userId: context.userId,
         query: request.query,
         queryHash: stableHash(request.query),
+        queryId,
         layers,
         candidateMemoryIds,
+        userMemoryCandidateIds,
+        l1CandidateIds,
+        mergedSourceTurnIds: merged.mergedSourceTurnIds,
+        memberMemoryIdsBySourceTurnId: merged.membersBySourceTurnId,
         injectedMemoryIds: sourceMemoryIds,
-        hitMemoryIds: hits.map((hit) => hit.id),
+        hitMemoryIds: hits.flatMap((hit) => hit.memberMemoryIds ?? [hit.id]),
         dropped,
         outcome: "pending",
-        request: timeFilter ? { ...request, timeFilter } : request,
+        request: {
+          ...request,
+          ...(timeFilter ? { timeFilter } : {}),
+          recallEvidence: {
+            hits: injectedHits,
+            sections: injectedContext.sections
+          }
+        },
         createdAt: nowIso()
       });
     }
@@ -1633,6 +1985,8 @@ export class RetrievalService {
       },
       status: uniq([
         ...filteredHits.status,
+        ...(dynamicCurrentQuery ? ["dynamic_current:refresh_required"] : []),
+        ...(stalePolicyIds.size > 0 ? ["policy:revalidation_required"] : []),
         ...(!this.deps.memoryAddEnabled() ? ["memory_add:disabled:no_recall_log"] : [])
       ]),
       verbose: request.verbose === true,
@@ -1660,18 +2014,18 @@ export class RetrievalService {
         ...(timeFilter ? { timeFilter } : {}),
         timeZone
       }, {
-        candidates: retrieval.hits.map(toSearchCandidateLog),
+        candidates: merged.hits.map(toSearchCandidateLog),
         filtered: hits.map(toSearchCandidateLog),
-        droppedByLlm: retrieval.hits.filter((hit) => !keptIds.has(hit.id)).map(toSearchCandidateLog),
+        droppedByLlm: merged.hits.filter((hit) => !keptIds.has(hit.id)).map(toSearchCandidateLog),
         stats: {
-          raw: memories.length,
-          ranked: retrieval.hits.length,
+          raw: candidateMemoryIds.length,
+          ranked: merged.hits.length,
           droppedByThreshold: retrieval.debug.droppedByThreshold,
           topRelevance: retrieval.debug.topRelevance,
           llmFilter: {
             outcome: filteredHits.status.length > 0 ? filteredHits.status.join(",") : "kept",
             kept: hits.length,
-            dropped: Math.max(0, retrieval.hits.length - hits.length)
+            dropped: Math.max(0, merged.hits.length - hits.length)
           },
           finalReturned: hits.length
         },
@@ -1722,7 +2076,65 @@ export class RetrievalService {
     };
   }
 
+  private async retrieveUserMemories(input: {
+    userId: string;
+    query: string;
+    queryVectorText: string;
+    queryExtract: RetrievalQueryExtract | null;
+    limit: number;
+    excludeSourceTurnIds?: ReadonlySet<string>;
+  }): Promise<{ hits: RecallHit[]; memories: UserMemoryRecord[] }> {
+    if (input.limit <= 0) return { hits: [], memories: [] };
+    const compiled = compileRetrievalQuery(input.query, input.queryExtract, {
+      domain: this.retrievalTuningConfig().domain
+    });
+    const active = this.deps.repos.userMemories.listActive(input.userId);
+    if (active.length === 0) return { hits: [], memories: [] };
+    const excludedCount = active.filter((memory) =>
+      input.excludeSourceTurnIds?.has(memory.sourceTurnId)
+    ).length;
+    const routeLimit = input.limit + excludedCount;
+    const queryVector = active.some((memory) => memory.embedding?.length)
+      ? await this.queryVector(input.queryVectorText)
+      : undefined;
+    const routeHits = [
+      ...this.deps.repos.userMemories.searchFtsIds(
+        input.userId,
+        compiled.ftsMatch,
+        routeLimit
+      ),
+      ...this.deps.repos.userMemories.searchPatternIds(
+        input.userId,
+        compiled.patternTerms,
+        routeLimit
+      ),
+      ...(queryVector
+        ? this.deps.repos.userMemories.searchVectorIds(input.userId, queryVector, routeLimit)
+        : [])
+    ];
+    const bestScoreById = new Map<string, number>();
+    for (const hit of routeHits) {
+      bestScoreById.set(hit.id, Math.max(bestScoreById.get(hit.id) ?? 0, hit.score));
+    }
+    const memories = this.deps.repos.userMemories.getMany([...bestScoreById.keys()])
+      .sort((left, right) =>
+        (bestScoreById.get(right.id) ?? 0) - (bestScoreById.get(left.id) ?? 0) ||
+        right.updatedAt.localeCompare(left.updatedAt)
+      )
+      .slice(0, routeLimit);
+    const injectableMemories = memories
+      .filter((memory) => !input.excludeSourceTurnIds?.has(memory.sourceTurnId))
+      .slice(0, input.limit);
+    return {
+      memories,
+      hits: injectableMemories.map((memory) =>
+        userMemoryRecallHit(memory, bestScoreById.get(memory.id) ?? 0)
+      )
+    };
+  }
+
   private async retrieveSearchMemories(input: {
+    userId: string;
     query: string;
     queryVectorText: string;
     queryExtract: RetrievalQueryExtract | null;
@@ -1732,6 +2144,7 @@ export class RetrievalService {
     mode: RetrievalMode;
     excludeTraceRawTurnIds?: ReadonlySet<string>;
     targetSkillId?: string;
+    currentAgentId?: string;
   }): Promise<{ retrieval: RetrievalResult; memories: MemoryRow[] }> {
     if (input.limit <= 0 || input.layers.length === 0) {
       return { retrieval: emptyRetrievalResult(), memories: [] };
@@ -1746,16 +2159,19 @@ export class RetrievalService {
         domain: config.domain
       });
       const hasVectorCandidates = this.candidatePool.hasRetrievalVectorCandidates({
+        userId: input.userId,
         layers: input.layers,
         tags: input.tags
       });
       const queryVector = hasVectorCandidates ? await this.queryVector(queryVectorText) : undefined;
       const candidatePool = await this.candidatePool.indexedRetrievalCandidatePool({
+        userId: input.userId,
         compiledQuery,
         queryVector,
         layers: input.layers,
         tags: input.tags,
         targetSkillId: input.targetSkillId,
+        currentAgentId: input.currentAgentId,
         config
       });
       const memories = candidatePool.memories;

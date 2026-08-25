@@ -8,6 +8,7 @@ export interface RuntimeContext {
   requestId?: string;
   signal?: AbortSignal;
   timeZone?: string;
+  userId?: string;
 }
 
 /** Builds runtime context from renderer request headers. */

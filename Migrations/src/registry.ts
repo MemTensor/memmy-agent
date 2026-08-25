@@ -3,6 +3,7 @@ import { normalizeRuntimeModelCatalogV107 } from "./migrations/v1.0.7/0001-norma
 import { importLegacyAppStateModelConfigV107 } from "./migrations/v1.0.7/0002-import-legacy-app-state-model-config.js";
 import { normalizeGoalStateV107 } from "./migrations/v1.0.7/0003-normalize-goal-state.js";
 import { addGoalDagBoundaryV107 } from "./migrations/v1.0.7/0004-add-goal-dag-boundary.js";
+import { repairRuntimeModelCatalogV109 } from "./migrations/v1.0.9/0001-repair-runtime-model-catalog.js";
 import { MigrationError, type MigrationDefinition } from "./types.js";
 
 const STABLE_SEMVER_PATTERN =
@@ -22,6 +23,7 @@ export const migrations: readonly MigrationDefinition[] = [
   importLegacyAppStateModelConfigV107,
   normalizeGoalStateV107,
   addGoalDagBoundaryV107,
+  repairRuntimeModelCatalogV109,
 ];
 
 function definitionError(message: string, migrationId: string | null = null): never {

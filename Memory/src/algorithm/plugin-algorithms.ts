@@ -11,6 +11,10 @@ import { MEMORY_SUMMARY_MAX_TOKENS } from "../config/index.js";
 import { memoryVector } from "../storage/memory-vector-state.js";
 import { stableHash } from "../utils/id.js";
 import { formatZonedTime } from "../utils/time.js";
+import {
+  renderL3WorldModelFields,
+  type L3WorldModelFields
+} from "@memmy/local-api-contracts";
 
 export interface CapturedTraceStep {
   key: string;
@@ -77,7 +81,7 @@ export interface PolicyMemoryMeta {
   support: number;
   gain: number;
   confidence: number;
-  status: "candidate" | "active" | "archived";
+  status: "candidate" | "active" | "verification_required" | "quarantined" | "superseded" | "archived";
   experienceType: "success_pattern" | "repair_validated" | "failure_avoidance" | "repair_instruction" | "preference" | "verifier_feedback";
   evidencePolarity: "positive" | "negative" | "mixed" | "neutral";
   skillEligible: boolean;
@@ -89,6 +93,9 @@ export interface PolicyMemoryMeta {
     preference: string[];
     antiPattern: string[];
   };
+  freshnessClass: "stable" | "dynamic";
+  lastVerifiedAt?: string;
+  revalidateAfter?: string;
   salience: number;
   vec: number[] | null;
   updatedAtMs: number;
@@ -951,7 +958,7 @@ export type PromptLanguage = "auto" | "zh" | "en";
 
 export const L2_INDUCTION_PROMPT = {
   id: "l2.induction",
-  version: 3,
+  version: 4,
   description:
     "Distill an L2 policy (procedural sub-task strategy) from a cluster of similar L1 traces, with explicit boundaries against L3 world-model drift.",
   system: `You induce reusable **procedural policies** from agent experience.
@@ -972,6 +979,10 @@ Produce ONE policy describing the action pattern. The policy must:
 - Note at least one CAVEAT or failure mode observed in the traces — a
   step-level pitfall, NOT a generic environment taboo.
 - Generalize across the input traces, not restate one of them.
+- Return should_generate=false when the evidence has no reusable task action,
+  is only a user preference or factual statement, duplicates an existing rule,
+  or contains unresolved contradictory feedback. Do not invent a policy merely
+  to satisfy the output schema.
 
 Source-specific entity boundary:
 - Names, locations, product names, file names, one-off requested targets,
@@ -1033,15 +1044,27 @@ libs by default":
 
 Return JSON:
 {
+  "should_generate": true | false,
   "title": "short imperative title",
   "trigger": "state-level condition the agent can detect",
   "action": "templated step or step sequence",
+  "expected_outcome": "observable result expected after the action",
+  "verification": "how to verify that result",
+  "exclusions": ["condition where this policy must not be used", ...],
   "rationale": "why this action works ON THESE TRACES (not why the
                 environment behaves this way)",
   "caveats": ["step-level pitfall string", ...],
   "confidence": number in [0, 1],
+  "freshness_class": "stable" | "dynamic",
+  "revalidate_after_days": number | null,
   "support_trace_ids": ["tr_...", ...]
-}`,
+}
+
+Use freshness_class="dynamic" when the policy depends on changing business data,
+external APIs, current product behavior, market conditions, live data sources, or
+other assumptions that can expire. Set revalidate_after_days to a positive bounded
+interval for dynamic policies. Use freshness_class="stable" and null for durable
+techniques whose trigger and verification remain self-contained.`,
 } as const;
 
 export const REWARD_R_HUMAN_PROMPT = {
@@ -1517,6 +1540,8 @@ export interface WorldModelMemoryMeta {
   summary?: string;
   body: string;
   vec: number[] | null;
+  schemaVersion?: 2;
+  fields?: L3WorldModelFields;
 }
 
 export interface WorldModelStructureEntry {
@@ -3109,7 +3134,7 @@ const DEFAULT_RETRIEVAL_TUNING: Required<RetrievalTuningConfig> = {
   mmrLambda: 0.7,
   rrfConstant: 60,
   relativeThresholdFloor: 0.2,
-  minRecallScore: 0.2,
+  minRecallScore: 0.12,
   minSkillEta: 0.1,
   minTraceSim: 0.25,
   episodeGoalMinSim: 0.45,
@@ -3253,7 +3278,14 @@ export function policyMetaFromMemory(memory: MemoryRow): PolicyMemoryMeta | null
     support: numberField(policy, "support") ?? 0,
     gain: numberField(policy, "gain") ?? 0,
     confidence: numberField(policy, "policy_confidence") ?? numberField(policy, "confidence") ?? clamp01(0.5 + (numberField(policy, "gain") ?? 0)),
-    status: statusField(policy, "status", ["candidate", "active", "archived"]) ?? "candidate",
+    status: statusField(policy, "status", [
+      "candidate",
+      "active",
+      "verification_required",
+      "quarantined",
+      "superseded",
+      "archived"
+    ]) ?? "candidate",
     experienceType: statusField(policy, "experience_type", [
       "success_pattern",
       "repair_validated",
@@ -3285,10 +3317,27 @@ export function policyMetaFromMemory(memory: MemoryRow): PolicyMemoryMeta | null
           ])
         : []
     },
+    freshnessClass: statusField(policy, "freshness_class", ["stable", "dynamic"]) ?? "stable",
+    lastVerifiedAt: stringField(policy, "last_verified_at"),
+    revalidateAfter: stringField(policy, "revalidate_after"),
     salience: numberField(policy, "salience") ?? numberField(policy, "raw_gain") ?? numberField(policy, "gain") ?? 0,
     vec: memoryVector(memory, "vec"),
     updatedAtMs: Date.parse(memory.updatedAt)
   };
+}
+
+export function policyRequiresRevalidation(policy: PolicyMemoryMeta, now = Date.now()): boolean {
+  if (policy.freshnessClass !== "dynamic") return false;
+  if (!policy.revalidateAfter) return true;
+  const revalidateAt = Date.parse(policy.revalidateAfter);
+  return !Number.isFinite(revalidateAt) || revalidateAt <= now;
+}
+
+export function policyIsEligibleForDownstream(
+  policy: PolicyMemoryMeta,
+  now = Date.now()
+): boolean {
+  return policy.status === "active" && !policyRequiresRevalidation(policy, now);
 }
 
 export function failureAvoidancePolicyIsRetrievalEligible(policy: PolicyMemoryMeta): boolean {
@@ -3355,6 +3404,28 @@ export function worldModelMetaFromMemory(memory: MemoryRow): WorldModelMemoryMet
   if (memory.memoryLayer !== "L3") return null;
   const wm = getInternal<Record<string, unknown>>(memory, "world_model");
   if (!wm) return null;
+  const v2Fields = l3WorldModelV2Fields(memory, wm);
+  if (v2Fields) {
+    const project = typeof memory.info.project_id === "string" && memory.info.project_id.length > 0;
+    const sourceMemoryIds = stringArrayField(memory.properties.internal_info as Record<string, unknown>, "source_memory_ids");
+    return {
+      id: memory.id,
+      memory,
+      title: project ? "项目场域认知" : "通用规则与安全约束",
+      domainKey: project ? `project:${memory.info.project_id as string}` : "general:no_project",
+      domainTags: project ? ["project"] : ["general_rules"],
+      policyIds: sourceMemoryIds,
+      confidence: 0,
+      cohesion: 1,
+      admission: "strict",
+      structure: { environment: [], inference: [], constraints: [] },
+      summary: renderL3WorldModelFields(v2Fields),
+      body: memory.memoryValue,
+      vec: memoryVector(memory, "vec"),
+      schemaVersion: 2,
+      fields: v2Fields
+    };
+  }
   return {
     id: memory.id,
     memory,
@@ -3370,6 +3441,32 @@ export function worldModelMetaFromMemory(memory: MemoryRow): WorldModelMemoryMet
     body: stringField(wm, "body") ?? memory.memoryValue,
     vec: memoryVector(memory, "vec")
   };
+}
+
+function l3WorldModelV2Fields(
+  memory: MemoryRow,
+  worldModel: Record<string, unknown>
+): L3WorldModelFields | null {
+  if (memory.properties.internal_info.schema_version !== 2) return null;
+  const expectedKeys = [
+    "domain_knowledge",
+    "general_rules_and_safety_constraints",
+    "project_contract",
+    "project_environment_profile"
+  ];
+  if (Object.keys(worldModel).sort().join(",") !== expectedKeys.join(",")) return null;
+  const value = (key: string): string | null | undefined => {
+    const field = worldModel[key];
+    return field === null || typeof field === "string" ? field : undefined;
+  };
+  const fields = {
+    generalRulesAndSafetyConstraints: value("general_rules_and_safety_constraints"),
+    projectEnvironmentProfile: value("project_environment_profile"),
+    projectContract: value("project_contract"),
+    domainKnowledge: value("domain_knowledge")
+  };
+  if (Object.values(fields).some((field) => field === undefined)) return null;
+  return fields as L3WorldModelFields;
 }
 
 export const RETRIEVAL_DOCUMENT_VERSION = 2;
@@ -3526,14 +3623,24 @@ export function buildPolicyDraft(args: {
     alpha: args.gainEmaAlpha ?? 0.4,
     isFirst: args.currentSupport === undefined || args.currentSupport === 0
   });
-  const status = policyStatusAfterGain({
+  const minSupport = args.minSupport ?? 1;
+  let status = policyStatusAfterGain({
     currentStatus: args.currentStatus ?? "candidate",
     support,
     gain,
-    minSupport: args.minSupport ?? 1,
+    minSupport,
     minGain: args.minGain ?? 0.02,
     archiveGain: args.archiveGain ?? -0.05
   });
+  if (status === "active" && minSupport >= 3) {
+    const successfulEpisodes = distinct(
+      args.evidenceTraces
+        .filter((trace) => trace.value > 0)
+        .map((trace) => trace.episodeId || trace.id)
+        .filter(isString)
+    ).length;
+    if (successfulEpisodes < 2) status = "candidate";
+  }
   const tags = distinct(args.evidenceTraces.flatMap((trace) => trace.tags)).slice(0, 10);
   const confidence = clamp01(0.5 + rawGain);
   const label = signatureLabel(args.signature, tags);
@@ -3852,7 +3959,11 @@ export function buildSkillDraft(args: {
     tools: toolsFromSignature(args.policy.signature)
   };
   return {
-    key: `skill:${args.policy.id}`,
+    key: `skill:${stableHash({
+      name,
+      trigger: args.policy.trigger,
+      tools: toolsFromSignature(args.policy.signature)
+    }).slice(0, 20)}`,
     name,
     status: "candidate",
     eta,
@@ -4670,7 +4781,7 @@ export function policyStatusAfterGain(input: {
   if (input.currentStatus === "candidate") {
     return input.support >= input.minSupport && input.gain >= input.minGain ? "active" : "candidate";
   }
-  return input.gain < input.archiveGain || input.support <= 0 ? "archived" : "active";
+  return input.gain < input.archiveGain || input.support < input.minSupport ? "archived" : "active";
 }
 
 function buildPolicyProcedure(evidence: TraceMemoryMeta[]): string {
@@ -4900,6 +5011,13 @@ interface RankedMemoryCandidate {
 
 export function isMemoryReadyForRetrieval(memory: MemoryRow): boolean {
   if (memory.status === "deleted" || memory.status === "archived") return false;
+  const evidenceStatus = memory.properties.internal_info.evidence_status;
+  if (evidenceStatus === "provisional" || evidenceStatus === "disputed") return false;
+  const policy = memory.memoryLayer === "L2" ? policyMetaFromMemory(memory) : null;
+  if (policy && policy.status !== "candidate" && policy.status !== "active") return false;
+  if (policy && policyRequiresRevalidation(policy)) return false;
+  const skill = memory.memoryLayer === "Skill" ? skillMetaFromMemory(memory) : null;
+  if (skill && skill.status !== "candidate" && skill.status !== "active") return false;
   if (hasMemoryRetrievalIndex(memory)) return true;
   if (hasPendingImportPipeline(memory)) return false;
   return hasSearchableText(memory);

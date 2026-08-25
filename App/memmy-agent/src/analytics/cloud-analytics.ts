@@ -1,28 +1,37 @@
-import { existsSync as nodeExistsSync, readFileSync as nodeReadFileSyncFs } from "node:fs";
+import { randomUUID } from "node:crypto";
+import {
+  existsSync as nodeExistsSync,
+  mkdirSync as nodeMkdirSync,
+  readFileSync as nodeReadFileSyncFs,
+  writeFileSync as nodeWriteFileSync,
+} from "node:fs";
 import { homedir as nodeHomedir } from "node:os";
 import { join as nodeJoin } from "node:path";
 import { loadConfig } from "../config/loader.js";
+import { VERSION } from "../version.js";
 
 export type AnalyticsAppEnv = "dev" | "prod";
 export type AnalyticsAppEdition = "cn" | "intl";
-export type AnalyticsUserMode = "account" | "byok";
+export type AnalyticsUserMode = "account" | "account_byok" | "byok";
 
 export type AnalyticsParams = Record<string, string | number | boolean>;
 
 export type AnalyticsEventInput = {
   eventName: string;
   params?: AnalyticsParams;
-  /** Epoch millis; converted to params.timestamp_micros for the batch API. */
+  /** Epoch millis; serialized as `params.timestamp_micros`. */
   eventTimeMillis?: number;
+  source?: string;
 };
 
 export type PostAnalyticsEventsInput = {
   events: AnalyticsEventInput[];
-  /** GA4 / install client id (request body `clientId`). */
+  installationId?: string | null;
+  /** Optional GA4 client id, serialized as `analytics_client_id`. */
   clientId?: string | null;
-  /** Optional GA4 user id: request body `userId` (with `clientId`) and each event's `params.user_id`. */
+  /** Optional original account user id, serialized as `user_id`. */
   userId?: string | null;
-  /** account | byok; unset/unknown omitted from params. */
+  /** account | account_byok | byok; unset/unknown omitted. */
   userMode?: string | null;
   appEnv?: AnalyticsAppEnv | null;
   appEdition?: AnalyticsAppEdition | null;
@@ -44,6 +53,7 @@ export type QueuedAnalytics = {
 const DEFAULT_ENGAGEMENT_TIME_MSEC = 100;
 const ANALYTICS_PATH = "/api/analytics/events";
 const CLIENT_ID_FILENAME = "analytics-client-id";
+const INSTALLATION_ID_FILENAME = "installation-id";
 
 export function resolveAnalyticsBaseUrl(env: NodeJS.ProcessEnv = process.env): string | null {
   const raw = env.MEMMY_CLOUD_SERVICE?.trim();
@@ -136,6 +146,30 @@ export function readAnalyticsClientId(options: {
   }
 }
 
+export function getOrCreateInstallationId(options: {
+  env?: NodeJS.ProcessEnv;
+  homeDir?: string;
+} = {}): string {
+  const homeDir = options.homeDir ?? nodeHomedir();
+  const memmyHome = (options.env?.MEMMY_HOME?.trim() || nodeJoin(homeDir, ".memmy")).replace(
+    /^~(?=$|[/\\])/,
+    homeDir,
+  );
+  const filePath = nodeJoin(memmyHome, INSTALLATION_ID_FILENAME);
+  try {
+    if (nodeExistsSync(filePath)) {
+      const existing = nodeReadFileSyncFs(filePath, "utf8").trim();
+      if (existing) return existing;
+    }
+  } catch {
+    // Recreate an unreadable or empty identifier below.
+  }
+  const installationId = randomUUID();
+  nodeMkdirSync(memmyHome, { recursive: true });
+  nodeWriteFileSync(filePath, `${installationId}\n`, "utf8");
+  return installationId;
+}
+
 export function normalizeAnalyticsUserId(userId: string | null | undefined): string | null {
   const trimmed = userId?.trim() || null;
   if (!trimmed || trimmed === "local-user") return null;
@@ -145,14 +179,16 @@ export function normalizeAnalyticsUserId(userId: string | null | undefined): str
 export function resolveAnalyticsUserMode(
   mode: string | null | undefined,
 ): AnalyticsUserMode | null {
-  return mode === "account" || mode === "byok" ? mode : null;
+  return mode === "account" || mode === "account_byok" || mode === "byok" ? mode : null;
 }
 
 export function resolveAnalyticsUserModeParams(
   mode: string | null | undefined,
+  userId?: string | null,
 ): AnalyticsParams {
   const resolved = resolveAnalyticsUserMode(mode);
-  return resolved ? { user_mode: resolved } : {};
+  if (!userId) return { user_mode: "byok" };
+  return { user_mode: resolved === "byok" || resolved === "account_byok" ? "account_byok" : "account" };
 }
 
 export function resolveLoggedInAnalyticsUserId(
@@ -193,17 +229,20 @@ export function resolveAnalyticsUserModeFromConfig(
     : "";
   const cloudUuid = typeof app?.cloudUuid === "string" ? app.cloudUuid.trim() : "";
   const userId = typeof app?.userId === "string" ? app.userId.trim() : "";
-  if (cloudUuid && owner && (!userId || owner === userId)) return "account";
+  const hasAccount = Boolean(cloudUuid && owner && (!userId || owner === userId));
 
   const byok = assignments?.byok;
   const candidates = Array.isArray(byok?.agent?.candidates) ? byok.agent.candidates : [];
-  if (candidates.length || [
+  const hasByok = Boolean(candidates.length || [
     byok?.memorySummary,
     byok?.memoryEvolution,
     byok?.embedding,
     byok?.asr,
     byok?.imageGeneration,
-  ].some((value) => typeof value === "string" && value.trim())) return "byok";
+  ].some((value) => typeof value === "string" && value.trim()));
+  if (hasAccount && hasByok) return "account_byok";
+  if (hasAccount) return "account";
+  if (hasByok) return "byok";
   return null;
 }
 
@@ -243,19 +282,19 @@ export function toTimestampMicros(eventTimeMillis: number): number {
 }
 
 /**
- * POST batched analytics events (no auth):
- * `{ clientId, userId?, events: [{ eventName, params }] }`.
+ * POST batched analytics events (no auth).
  */
 export function postAnalyticsEvents(input: PostAnalyticsEventsInput): Promise<void> {
   const clientId = input.clientId?.trim() || null;
+  const installationId = input.installationId?.trim() || getOrCreateInstallationId({ env: input.env });
   const userId = normalizeAnalyticsUserId(input.userId);
-  const userModeParams = resolveAnalyticsUserModeParams(input.userMode);
+  const userModeParams = resolveAnalyticsUserModeParams(input.userMode, userId);
   const env = input.env ?? process.env;
   const resolvedBase =
     input.baseUrl !== undefined ? input.baseUrl : resolveAnalyticsBaseUrl(env);
   const baseUrl = resolvedBase?.replace(/\/+$/, "") || null;
   const events = Array.isArray(input.events) ? input.events : [];
-  if (!baseUrl || !clientId || events.length === 0) {
+  if (!baseUrl || !installationId || events.length === 0) {
     return Promise.resolve();
   }
 
@@ -267,18 +306,21 @@ export function postAnalyticsEvents(input: PostAnalyticsEventsInput): Promise<vo
   });
 
   const body = {
-    clientId,
+    ...(clientId ? { clientId } : {}),
     ...(userId ? { userId } : {}),
+    installationId,
     events: events.map((event) => {
       const eventTimeMillis = event.eventTimeMillis ?? Date.now();
       return {
         eventName: event.eventName,
         params: compactAnalyticsParams({
           engagement_time_msec: DEFAULT_ENGAGEMENT_TIME_MSEC,
+          source: event.source ?? "memmy-agent",
           ...userModeParams,
           ...(event.params ?? {}),
           ...(userId ? { user_id: userId } : {}),
           ...envParams,
+          app_version: VERSION,
           timestamp_micros: toTimestampMicros(eventTimeMillis),
         }),
       };
@@ -314,6 +356,7 @@ export function trackAnalyticsEvent(input: TrackAnalyticsEventInput): Promise<vo
  */
 export function createQueuedAnalytics(options: {
   getClientId?: () => string | null | undefined;
+  getInstallationId?: () => string | null | undefined;
   getUserId?: () => string | null | undefined;
   getUserMode?: () => string | null | undefined;
   source?: string;
@@ -326,6 +369,7 @@ export function createQueuedAnalytics(options: {
 } = {}): QueuedAnalytics {
   const source = options.source;
   const getClientId = options.getClientId ?? (() => readAnalyticsClientId({ env: options.env }));
+  const getInstallationId = options.getInstallationId ?? (() => getOrCreateInstallationId({ env: options.env }));
   const getUserId = options.getUserId ?? (() => null);
   const getUserMode = options.getUserMode ?? (() => null);
   let pending: AnalyticsEventInput[] = [];
@@ -338,7 +382,8 @@ export function createQueuedAnalytics(options: {
     lastEventTimeMillis = eventTimeMillis;
     pending.push({
       eventName,
-      params: source ? { source, ...params } : { ...params },
+      params: { ...params },
+      source,
       eventTimeMillis,
     });
   };
@@ -352,6 +397,7 @@ export function createQueuedAnalytics(options: {
       postAnalyticsEvents({
         events: batch,
         clientId: getClientId(),
+        installationId: getInstallationId(),
         userId: getUserId(),
         userMode: getUserMode(),
         appEnv: options.appEnv,

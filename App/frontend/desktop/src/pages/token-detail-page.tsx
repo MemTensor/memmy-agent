@@ -8,6 +8,7 @@ import { resolveInvitationToastKind } from "../app/invitation-result.js";
 import { persistLoginModeSelection } from "../app/login-mode.js";
 import { useApiClients } from "../app/providers.js";
 import { buildAccountOnboardingStartPatch, resolvePostLoginRoute } from "../app/routes.js";
+import { setAnalyticsUserId } from "../analytics/analytics-context.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
 import { AuthCodeForm } from "../components/auth-code-form.js";
 import { LanguageToggleButton, PAGE_CORNER_ACTION_CONTAINER_STYLE, PageCornerActionButton } from "../components/language-toggle-button.js";
@@ -67,6 +68,8 @@ export function TokenDetailPage() {
       return;
     }
     const session = loginResult.session;
+    // Set before the signup event so it is attributed to the cloud account.
+    setAnalyticsUserId(session.profile.userId);
     const invitationToastKind = resolveInvitationToastKind(loginResult.invitationResult);
     if (invitationToastKind) {
       dispatch(appActions.showInvitationToast(invitationToastKind));
@@ -79,6 +82,7 @@ export function TokenDetailPage() {
     }));
 
     dispatch(appActions.accountUpdated({
+      userId: session.profile.userId,
       email: session.profile.email ?? "",
       phoneNumber: session.profile.phoneNumber,
       nickname: session.profile.nickname,

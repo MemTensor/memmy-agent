@@ -104,6 +104,10 @@ describe("model config catalog", () => {
     expect(raw.providers.openai.extraBody.token).toBe("provider-body-secret");
     expect(raw.providers.openai.endpoints.chat.extraHeaders["x-api-key"]).toBe("endpoint-header-secret");
     expect(raw.providers.openai.endpoints.chat.extraBody.token).toBe("endpoint-body-secret");
+    for (const preset of Object.values(raw.modelPresets) as any[]) {
+      expect(preset).not.toHaveProperty("maxTokens");
+      expect(preset).not.toHaveProperty("contextWindowTokens");
+    }
     expect(JSON.stringify(raw)).not.toContain("label");
     const serializedView = JSON.stringify(second);
     expect(serializedView).not.toContain("sk-new-secret");

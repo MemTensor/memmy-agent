@@ -62,6 +62,17 @@ function createUnusableReflectionLlm(): LlmClient {
           }))
         } as unknown as T;
       }
+      if (options.operation === "capture.summarize") {
+        const payload = messages.find((message) => message.role === "user")?.content ?? "";
+        const userQuote = payload.match(/\bUSER:\s*(.*?)\s+ASSISTANT:/)?.[1]?.trim() ?? "";
+        return {
+          l1: {
+            summary: "unusable reflection summary",
+            evidence: [{ quote: userQuote, role: "user", kind: "task_outcome" }]
+          },
+          user: null
+        } as unknown as T;
+      }
       return {
         summary: "unusable reflection summary",
         reflection: "tautological reflection",
@@ -103,6 +114,17 @@ function createCapturingReflectionLlm(calls: Array<{
       options: { operation: string }
     ): Promise<T> {
       calls.push({ messages, options });
+      if (options.operation === "capture.summarize") {
+        const payload = messages.find((message) => message.role === "user")?.content ?? "";
+        const userQuote = payload.match(/\bUSER:\s*(.*?)\s+ASSISTANT:/)?.[1]?.trim() ?? "";
+        return {
+          l1: {
+            summary: "sqlite migration reflection summary",
+            evidence: [{ quote: userQuote, role: "user", kind: "task_outcome" }]
+          },
+          user: null
+        } as unknown as T;
+      }
       return {
         summary: "sqlite migration reflection summary",
         reflection: "I inspected the sqlite migration output before retrying.",
@@ -196,8 +218,8 @@ describe("MemoryService / evolution / reflection", () => {
     });
     const complete = service.completeTurn("turn-reflection-durable", {
       sessionId: session.sessionId,
-      query: "Hi, my default shell is zsh",
-      answer: "I will remember that your default shell is zsh."
+      query: "Record that the deployment verification command runs through zsh.",
+      answer: "The deployment verification command runs through zsh."
     });
     await service.feedback({
       sessionId: session.sessionId,
@@ -528,8 +550,8 @@ describe("MemoryService / evolution / reflection", () => {
 
     service.completeTurn("turn-reflection-evolution", {
       sessionId: session.sessionId,
-      query: "记住我旅行时更喜欢自然景观",
-      answer: "好的，我记住了。"
+      query: "分析旅行规划任务中的自然景观筛选流程",
+      answer: "先按季节和交通条件筛选自然景观，再核验开放状态。"
     });
 
     await closeSessionAndRunWorkerRounds(service, session.sessionId);
@@ -541,7 +563,7 @@ describe("MemoryService / evolution / reflection", () => {
     expect(summaryCalls.some((call) => call.options.operation === "capture.reflection.batch.v13")).toBe(false);
     const summaryCall = summaryCalls.find((call) => call.options.operation === "capture.summarize");
     expect(summaryCall).toBeTruthy();
-    expect(summaryCall!.messages[0]?.content).toContain("single user/agent exchange");
+    expect(summaryCall!.messages[0]?.content).toContain("Judge L1 and User Memory");
     expect(summaryCall!.messages[1]?.content).not.toContain("REFLECTION:");
     expect(summaryCalls.some((call) => call.options.operation === "capture.reflected_trace_summary.v1")).toBe(false);
     const payload = JSON.parse(
@@ -834,7 +856,7 @@ describe("MemoryService / evolution / reflection", () => {
     expect(payload.task_context).toContain("sqlite migration");
     const summaryCall = calls.find((call) => call.options.operation === "capture.summarize");
     expect(summaryCall).toBeTruthy();
-    expect(summaryCall!.messages[0]?.content).toContain("single user/agent exchange");
+    expect(summaryCall!.messages[0]?.content).toContain("Judge L1 and User Memory");
     const summaryPayload = summaryCall!.messages.find((message) => message.role === "user")?.content ?? "";
     expect(summaryPayload).not.toContain("REFLECTION:");
     expect(summaryPayload).toContain("TOOLS:");

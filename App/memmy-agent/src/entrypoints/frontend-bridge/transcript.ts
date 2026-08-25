@@ -7,7 +7,7 @@ import { parseTurnSource } from "../../core/runtime-messages/events.js";
 
 export const WEBUI_TRANSCRIPT_SCHEMA_VERSION = 3;
 
-const MAX_TRANSCRIPT_FILE_BYTES = 8 * 1024 * 1024;
+const MAX_TRANSCRIPT_FILE_BYTES = 128 * 1024 * 1024;
 const MARKDOWN_LOCAL_IMAGE_RE = /!\[([^\]]*)\]\((<[^>]+>|[^)\s]+)(\s+(?:"[^"]*"|'[^']*'))?\)/g;
 const INLINE_MARKDOWN_IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
 const UNSAFE_FILENAME_CHARS = /[<>:"/\\|?*]/g;

@@ -12,6 +12,7 @@ import { AuthCodeForm } from "../components/auth-code-form.js";
 import { LanguageToggleButton } from "../components/language-toggle-button.js";
 import { Memmy } from "../components/mascot/memmy.js";
 import { useVerificationCodeAuth } from "../components/use-verification-code-auth.js";
+import { setAnalyticsUserId } from "../analytics/analytics-context.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
 import { getLegalLinkUrl } from "../legal/legal-links.js";
 import { openExternalUrl } from "../utils/open-url.js";
@@ -74,6 +75,8 @@ export function WelcomePage() {
       return;
     }
     const session = loginResult.session;
+    // Set before the signup event so it is attributed to the cloud account.
+    setAnalyticsUserId(session.profile.userId);
     const invitationToastKind = resolveInvitationToastKind(loginResult.invitationResult);
     if (invitationToastKind) {
       dispatch(appActions.showInvitationToast(invitationToastKind));
@@ -86,6 +89,7 @@ export function WelcomePage() {
     }));
 
     dispatch(appActions.accountUpdated({
+      userId: session.profile.userId,
       email: session.profile.email ?? "",
       phoneNumber: session.profile.phoneNumber,
       nickname: session.profile.nickname,

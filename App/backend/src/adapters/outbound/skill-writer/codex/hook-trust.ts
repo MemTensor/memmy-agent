@@ -6,7 +6,13 @@ import { basename, join, normalize } from "node:path";
 const APP_SERVER_REQUEST_TIMEOUT_MS = 10_000;
 const APP_SERVER_CLOSE_TIMEOUT_MS = 1_000;
 const MAX_STDERR_LENGTH = 8_192;
-const MEMMY_HOOK_EVENTS = new Set(["userPromptSubmit", "stop"]);
+const MEMMY_HOOK_EVENTS = new Set([
+  "userPromptSubmit",
+  "stop",
+  "sessionStart",
+  "postCompact",
+  "sessionEnd",
+]);
 
 export interface TrustMemmyCodexHooksOptions {
   codexHomeDirectory: string;
@@ -43,7 +49,7 @@ interface CodexAppServerClient {
   close(): Promise<void>;
 }
 
-/** Trusts only the two user-level Memmy hooks that Codex discovered from hooks.json. */
+/** Trusts only the five user-level Memmy hooks that Codex discovered from hooks.json. */
 export async function trustMemmyCodexHooks(options: TrustMemmyCodexHooksOptions): Promise<void> {
   const client = createCodexAppServerClient(options);
   try {
@@ -124,7 +130,7 @@ function selectMemmyHooks(
   );
   const selectedEvents = new Set(selected.map((hook) => hook.eventName));
   if (selected.length !== MEMMY_HOOK_EVENTS.size || selectedEvents.size !== MEMMY_HOOK_EVENTS.size) {
-    throw new Error("Codex did not discover both installed Memmy hooks");
+    throw new Error("Codex did not discover every installed Memmy hook");
   }
   return selected;
 }

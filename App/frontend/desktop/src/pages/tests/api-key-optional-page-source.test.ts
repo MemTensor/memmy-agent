@@ -23,4 +23,25 @@ describe("ApiKeyOptionalPage catalog source", () => {
     expect(source).not.toContain("maxTokens");
     expect(source).not.toContain("dailyTokenLimit");
   });
+
+  it("保存失败时展示可重试的持久化错误", () => {
+    const source = readFileSync(sourcePath, "utf8");
+
+    expect(source).toContain("const [saveError, setSaveError] = useState<string | null>(null)");
+    expect(source).toContain("setSaveError(null)");
+    expect(source).toContain("setSaveError(optionalStepSaveErrorText(error, t))");
+    expect(source).toContain("optionalStepSaveErrorText");
+    expect(source).toContain("const savedCatalogSignatureRef = useRef<string | null>(null)");
+    expect(source).toContain("savedCatalogSignatureRef.current !== saveSignature");
+    expect(source).toContain("savedCatalogSignatureRef.current = saveSignature");
+    expect(source).toContain("const savedEndpointIdentitiesRef = useRef");
+    expect(source).toContain("savedAsrIdentity?.credentialSignature === asrCredentialSignature");
+    expect(source).toContain("savedImageIdentity?.credentialSignature === imageGenCredentialSignature");
+    expect(source).toContain("endpointCredentialSignature(");
+    expect(source).toContain("provider: provider.trim().toLowerCase()");
+    expect(source).toContain('endpoint: endpoint.trim().replace(/\\/+$/, "")');
+    expect(source).toContain("credential: normalizedMaskedApiKey ?");
+    expect(source).toContain('role="alert"');
+    expect(source).toContain("disabled={modePersistencePending}");
+  });
 });

@@ -634,7 +634,6 @@ export class ReadFileTool extends Tool {
             image_url: { url: `data:${mime};base64,${data.toString("base64")}` },
             meta: { path: target },
           },
-          { type: "text", text: `(Image file: ${target})` },
         ];
       }
       const content = await fs.readFile(target, "utf8");

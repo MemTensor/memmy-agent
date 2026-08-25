@@ -21,7 +21,7 @@ describe("OverviewSubPage interaction", () => {
     container.remove();
   });
 
-  it.each(["memories", "policies", "world-model", "skills"] as const)(
+  it.each(["memories", "policies", "world-model", "skills", "user-memories"] as const)(
     "点击数量卡片后跳转到 %s 页面",
     (targetPage) => {
       const onNavigate = vi.fn();

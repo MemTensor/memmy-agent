@@ -21,7 +21,7 @@ afterEach(() => {
 });
 
 describe("memory layer smoke plan", () => {
-  it("stores, processes, reads, and recalls a turn through the real Memory service", async () => {
+  it("stores, processes, reads, and recalls a verified turn through the real Memory service", async () => {
     const root = mkdtempSync(join(tmpdir(), "memmy-memory-smoke-"));
     tempRoots.push(root);
     const db = new MemoryDb({ path: join(root, "memory.sqlite") });
@@ -55,6 +55,15 @@ describe("memory layer smoke plan", () => {
         sessionId: session.sessionId,
         query: "How should the v1.0.2 release workflow be verified?",
         answer: "Run the release contracts and publish only after every attachment succeeds.",
+        toolCalls: [{
+          id: "smoke-release-contracts",
+          name: "verify_release_contracts",
+          input: { version: "v1.0.2" }
+        }],
+        toolResults: [{
+          toolCallId: "smoke-release-contracts",
+          output: { attachmentsVerified: true }
+        }],
         status: "succeeded"
       });
 
@@ -79,7 +88,14 @@ describe("memory layer smoke plan", () => {
       expect(detail).toMatchObject({
         id: completed.l1MemoryId,
         kind: "trace",
-        memoryLayer: "L1"
+        memoryLayer: "L1",
+        metadata: {
+          properties: {
+            internal_info: {
+              evidence_status: "verified"
+            }
+          }
+        }
       });
 
       const recall = await service.search({

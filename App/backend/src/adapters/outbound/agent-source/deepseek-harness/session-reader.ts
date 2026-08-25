@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
-import { zstdDecompressSync } from "node:zlib";
+import { decompress, ZstdErrorCode } from "fzstd";
 
 const ZSTD_FRAME_MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
 
@@ -26,18 +26,25 @@ export async function readDeepseekHarnessSession(
 }
 
 function decompressFrames(bytes: Buffer): string {
-  const offsets: number[] = [];
-  for (let offset = 0; offset <= bytes.length - ZSTD_FRAME_MAGIC.length; offset += 1) {
-    if (bytes.subarray(offset, offset + ZSTD_FRAME_MAGIC.length).equals(ZSTD_FRAME_MAGIC)) {
-      offsets.push(offset);
-    }
-  }
-  if (offsets.length === 0 || offsets[0] !== 0) {
+  if (!bytes.subarray(0, ZSTD_FRAME_MAGIC.length).equals(ZSTD_FRAME_MAGIC)) {
     throw new Error("DeepSeek Harness session has no Zstandard frame header");
   }
-  return offsets.map((offset, index) =>
-    zstdDecompressSync(bytes.subarray(offset, offsets[index + 1] ?? bytes.length)).toString("utf8")
-  ).join("");
+
+  try {
+    return Buffer.from(decompress(bytes)).toString("utf8");
+  } catch (error) {
+    if (!isUnexpectedEndOfFile(error)) throw error;
+    const trailingFrameOffset = bytes.lastIndexOf(ZSTD_FRAME_MAGIC);
+    if (trailingFrameOffset <= 0) throw error;
+    return Buffer.from(decompress(bytes.subarray(0, trailingFrameOffset))).toString("utf8");
+  }
+}
+
+function isUnexpectedEndOfFile(error: unknown): boolean {
+  return typeof error === "object"
+    && error !== null
+    && "code" in error
+    && error.code === ZstdErrorCode.UnexpectedEOF;
 }
 
 function parseSessionRows(

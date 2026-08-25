@@ -99,7 +99,7 @@ export interface CreateAgentSourceServiceOptions {
   sourceRegistry: SourceRegistry;
   agentSourceRepository: AgentSourceRepository;
   ingestionService: IngestionService;
-  memoryClient: Pick<MemoryClient, "enqueueImportSummaries" | "getMemoryProcessingStatus" | "runWorker">;
+  memoryClient: Pick<MemoryClient, "addMemory" | "enqueueImportSummaries" | "getMemoryProcessingStatus" | "runWorker">;
   skillDistributionService: SkillDistributionService;
   agentSourceAnalytics?: AgentSourceLifecycleAnalytics;
   getScanPermission?: () => Promise<ScanPermission>;
@@ -652,6 +652,7 @@ async function ingestCollectedSource(
       deferProcessing: true,
       totalMessages: ingestMessages.length,
       scanMode: collected.scanMode ?? scanOptions.mode,
+      replaySeenConversationIds: findContentRevisedConversationIds(options, collected),
       onProgress(progress) {
         emitProgress(scanOptions, {
           sourceId: progress.sourceId,
@@ -688,6 +689,7 @@ async function ingestCollectedSource(
   ) {
     updateScanWatermark(options, collected, scanOptions, scannedAt);
   }
+  errors.push(...await ingestSourceSkills(options, collected.sourceId, scanOptions));
   return {
     sourceId: collected.sourceId,
     discoveredConversations: collected.conversationIds.length,
@@ -696,6 +698,53 @@ async function ingestCollectedSource(
     memoryIds: stats?.memoryIds ?? [],
     errors
   };
+}
+
+async function ingestSourceSkills(
+  options: CreateAgentSourceServiceOptions,
+  sourceId: string,
+  scanOptions: AgentSourceScanOptions
+): Promise<Array<{ conversationId: string; reason: string }>> {
+  if (!options.skillDistributionService.listSkills) return [];
+
+  const errors: Array<{ conversationId: string; reason: string }> = [];
+  let skills;
+  try {
+    skills = await options.skillDistributionService.listSkills(sourceId);
+  } catch (error) {
+    return [{
+      conversationId: "skills",
+      reason: error instanceof Error ? error.message : "Agent Skill scan failed"
+    }];
+  }
+
+  for (const skill of skills) {
+    scanOptions.signal?.throwIfAborted();
+    try {
+      await options.memoryClient.addMemory({
+        requestId: `agent-source-skill:${sourceId}:${skill.sourceSkillId}:${skill.sourceContentHash}`,
+        adapterId: `agent-source:${sourceId}`,
+        content: skill.content,
+        layer: "Skill",
+        title: skill.title,
+        tags: ["agent-source", "cross-agent-skill", sourceId],
+        source: sourceId,
+        turnId: `skill:${skill.sourceSkillId}:${skill.sourceSkillVersion}`,
+        createdAt: skill.updatedAt,
+        sourceAgentId: sourceId,
+        sourceSkillId: skill.sourceSkillId,
+        sourceSkillPath: skill.sourceSkillPath,
+        sourceSkillVersion: skill.sourceSkillVersion,
+        sourceContentHash: skill.sourceContentHash
+      });
+    } catch (error) {
+      errors.push({
+        conversationId: `skill:${skill.sourceSkillId}`,
+        reason: error instanceof Error ? error.message : "Agent Skill import failed"
+      });
+    }
+  }
+  return errors;
 }
 
 function filterCheckpointedConversations(
@@ -720,6 +769,29 @@ function filterCheckpointedConversations(
     conversationIds: collected.conversationIds.filter((id) => included.has(id)),
     messages: collected.messages.filter((message) => included.has(message.conversationId))
   };
+}
+
+function findContentRevisedConversationIds(
+  options: CreateAgentSourceServiceOptions,
+  collected: CollectedSourceScan
+): ReadonlySet<string> {
+  const revised = new Set<string>();
+  for (const [conversationId, messages] of groupMessagesByConversation(collected.messages)) {
+    const latest = latestConversationMessage(messages);
+    const checkpoint = options.agentSourceRepository.getConversationCheckpoint(
+      collected.sourceId,
+      conversationId
+    );
+    if (
+      latest &&
+      checkpoint &&
+      compareMessageCursor(latest, checkpoint) === 0 &&
+      checkpoint.contentHash !== conversationContentHash(messages)
+    ) {
+      revised.add(conversationId);
+    }
+  }
+  return revised;
 }
 
 function updateConversationCheckpoints(

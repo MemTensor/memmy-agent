@@ -127,7 +127,7 @@
   --shadow-popover: 0 18px 52px rgba(17, 29, 28, 0.16);
   --duration-fast: 150ms;
   --duration-normal: 220ms;
-  --z-modal: 50;
+  --z-modal: 10020;
   --z-drawer: 10001;
 
   /* Color canvas color token. */

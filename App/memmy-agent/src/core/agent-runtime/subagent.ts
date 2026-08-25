@@ -11,6 +11,7 @@ import { AgentDefaults, Config } from "../../config/schema.js";
 import { readTemplate } from "../../templates/index.js";
 import { ContextBuilder } from "./context.js";
 import { SkillsLoader } from "./skills.js";
+import type { ActualModelContext } from "../../providers/model-catalog.js";
 
 export class SubagentStatus {
   static PENDING = "pending";
@@ -79,6 +80,7 @@ export class SubagentHook extends AgentHook {
 
   override async beforeExecuteTools(context: AgentHookContext): Promise<void> {
     // Hook point retained for parity with memmy logging and tests.
+    void context;
   }
 
   override async afterIteration(context: AgentHookContext): Promise<void> {
@@ -250,6 +252,7 @@ export class SubagentManager {
     contextWindowTokens?: number;
     modelPreset?: string | null;
     modelProvider?: string | null;
+    actualModelContext?: ActualModelContext | null;
   }, label: string | null = null, originChannel = "cli", originChatId = "direct", sessionKey: string | null = null, originMessageId: string | null = null, temperature: number | null = null): Promise<string> {
     const args = typeof input === "string" ? { task: input, label, originChannel, originChatId, sessionKey, originMessageId, temperature } : input;
     const task = String(args.task ?? "");
@@ -266,6 +269,12 @@ export class SubagentManager {
       contextWindowTokens: args.contextWindowTokens ?? this.contextWindowTokens,
       modelPreset: args.modelPreset ?? null,
       modelProvider: args.modelProvider ?? null,
+      actualModelContext: args.actualModelContext == null
+        ? null
+        : Object.freeze({
+            ...args.actualModelContext,
+            capabilities: Object.freeze([...args.actualModelContext.capabilities]),
+          }),
     };
     const status = new SubagentStatus({
       taskId,
@@ -380,6 +389,7 @@ export class SubagentManager {
         llmTimeoutS: this.llmWallTimeoutForSession?.(sessKey) ?? null,
         abortSignal: signal,
         hook: new SubagentHook(taskId, status),
+        actualModelContext: origin.actualModelContext ?? null,
       }));
       if (isCancelled()) {
         status.phase = SubagentStatus.CANCELLED;

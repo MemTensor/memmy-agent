@@ -39,10 +39,21 @@ function createCountingLlm(
       return "{}";
     },
     async completeJson<T extends Record<string, unknown>>(
-      _messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
+      messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
       options: { operation: string }
     ): Promise<T> {
       operations.push(options.operation);
+      if (options.operation === "capture.summarize") {
+        const payload = messages.find((message) => message.role === "user")?.content ?? "";
+        const userQuote = payload.match(/\bUSER:\s*(.*?)\s+ASSISTANT:/)?.[1]?.trim() ?? "";
+        return {
+          l1: {
+            summary: "completed task turn",
+            evidence: [{ quote: userQuote, role: "user", kind: "task_outcome" }]
+          },
+          user: null
+        } as unknown as T;
+      }
       if (options.operation === "reward.reward.r_human.v7" && reward) {
         return reward as unknown as T;
       }
@@ -126,6 +137,7 @@ describe("MemoryService / evolution / negative experience", () => {
     expect(feedback.jobs.map((job) => job.jobType)).not.toContain("reward");
 
     service.closeSession(session.sessionId);
+    await service.runWorkerOnce(50);
     await service.runWorkerOnce(50);
     expect(service.panelItems({ namespace, layer: "L2" }).items).toEqual([]);
     expect(service.panelJobs({ namespace, status: "queued" }).items).toEqual(
@@ -267,6 +279,7 @@ describe("MemoryService / evolution / negative experience", () => {
     });
 
     service.closeSession(session.sessionId);
+    await service.runWorkerOnce(50);
     await service.runWorkerOnce(50);
     expect(service.panelJobs({ namespace, status: "queued" }).items).toEqual(
       expect.arrayContaining([

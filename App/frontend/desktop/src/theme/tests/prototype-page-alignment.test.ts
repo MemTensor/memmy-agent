@@ -56,8 +56,9 @@ describe("prototype page structure alignment", () => {
     expect(source("pages/home-page.tsx")).toContain("max-w-3xl mx-auto space-y-3");
     expect(source("pages/home-page.tsx")).toContain("relative agent-composer-shell");
     expect(source("pages/home-page.tsx")).not.toContain("relative overflow-hidden agent-composer-shell rounded-card-lg");
-    expect(source("pages/home-page.tsx")).toContain('${isComposerSingleLine ? "agent-composer-input--single " : ""}${selectedComposerCommand ? "agent-composer-input--command-selected " : ""}agent-composer-input--conversation block w-full pl-4 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40');
-    expect(source("pages/home-page.tsx")).toContain('<div className="max-w-2xl mx-auto">');
+    expect(source("pages/home-page.tsx")).toContain('${isComposerSingleLine ? "agent-composer-input--single " : ""}agent-composer-input--conversation block w-full pl-4 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40');
+    expect(source("pages/home-page.tsx")).not.toContain("agent-composer-input--command-selected");
+    expect(source("pages/home-page.tsx")).toContain('<div className="agent-conversation-content agent-conversation-content--composer max-w-3xl mx-auto">');
     expect(source("pages/home-page.tsx")).toContain('className="relative agent-composer-shell agent-composer-shell--expanded rounded-card-lg"');
     expect(source("pages/home-page.tsx")).toContain('className="agent-composer-toolbar"');
   });

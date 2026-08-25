@@ -6,6 +6,7 @@ import { AgentHookContext } from "../../../src/core/agent-runtime/hook.js";
 import { AgentRunResult } from "../../../src/core/agent-runtime/runner.js";
 import { SubagentManager, SubagentStatus, SubagentHook } from "../../../src/core/agent-runtime/subagent.js";
 import { MessageBus } from "../../../src/core/runtime-messages/queue.js";
+import { LLMProvider, LLMResponse, ToolCallRequest } from "../../../src/providers/base.js";
 import { DEFAULT_MAX_TOKENS } from "../../../src/token-budget.js";
 
 function tmpDir(): string {
@@ -117,11 +118,23 @@ describe("SubagentManager", () => {
       return new AgentRunResult({ finalContent: "done", messages: [], stopReason: "completed" });
     });
     sm.announceResult = vi.fn(async () => undefined) as any;
+    const actualModelContext = {
+      presetId: "account-default",
+      provider: "memmy_account",
+      endpointId: "platform",
+      protocol: "openai-chat-completions" as const,
+      model: "agent_chat",
+      source: "account" as const,
+      ownerAccountId: "account-1",
+      capability: "agent" as const,
+      capabilities: ["agent" as const],
+    };
 
     const out = await sm.spawn({
       task: "A long task that needs a short display label",
       sessionKey: "cli:direct",
       temperature: 0.9,
+      actualModelContext,
     });
     expect(out).toContain("started");
     expect(sm.getRunningCount()).toBe(1);
@@ -144,8 +157,83 @@ describe("SubagentManager", () => {
     expect(seenSpec.llmTimeoutS).toBe(0);
     expect(seenSpec.abortSignal).toBeInstanceOf(AbortSignal);
     expect(seenSpec.checkpointCallback).toBeTypeOf("function");
+    expect(seenSpec.actualModelContext).toEqual(actualModelContext);
+    expect(Object.isFrozen(seenSpec.actualModelContext)).toBe(true);
+    expect(Object.isFrozen(seenSpec.actualModelContext.capabilities)).toBe(true);
     expect(sm.getRunningCount()).toBe(0);
     expect(sm.getRunningCountBySession("cli:direct")).toBe(0);
+  });
+
+  it("uses inherited account model context when a subagent read_file result contains an image", async () => {
+    const workspace = tmpDir();
+    const imagePath = path.join(workspace, "input.png");
+    fs.writeFileSync(imagePath, Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.alloc(16),
+    ]));
+
+    class AccountProvider extends LLMProvider {
+      mainCalls: any[] = [];
+      imageCalls: any[] = [];
+
+      getDefaultModel(): string {
+        return "agent_chat";
+      }
+
+      supportsAccountImageTextFallback(): boolean {
+        return true;
+      }
+
+      async chat(args: any): Promise<LLMResponse> {
+        this.mainCalls.push(args);
+        if (this.mainCalls.length === 1) {
+          return new LLMResponse({
+            content: "",
+            finishReason: "tool_calls",
+            toolCalls: [new ToolCallRequest({
+              id: "read-image",
+              name: "read_file",
+              arguments: { path: imagePath },
+            })],
+          });
+        }
+        return new LLMResponse({ content: "The image is a test fixture." });
+      }
+
+      async runAccountImageTextFallback(args: any): Promise<LLMResponse> {
+        this.imageCalls.push(args);
+        return new LLMResponse({ content: "Image 1: a test fixture" });
+      }
+    }
+
+    const provider = new AccountProvider();
+    const sm = manager({ provider, workspace, model: "agent_chat", maxIterations: 3 });
+    sm.announceResult = vi.fn(async () => undefined) as any;
+
+    await sm.spawn({
+      task: `Read and describe ${imagePath}`,
+      workspace,
+      provider,
+      model: "agent_chat",
+      actualModelContext: {
+        presetId: "account-default",
+        provider: "memmy_account",
+        endpointId: "platform",
+        protocol: "openai-chat-completions",
+        model: "agent_chat",
+        source: "account",
+        ownerAccountId: "account-1",
+        capability: "agent",
+        capabilities: ["agent"],
+      },
+    });
+    await Promise.all([...sm.runningTasks.values()]);
+
+    expect(provider.mainCalls).toHaveLength(2);
+    expect(provider.imageCalls).toHaveLength(1);
+    expect(JSON.stringify(provider.imageCalls[0].messages)).toContain("data:image/png;base64");
+    expect(JSON.stringify(provider.mainCalls[1].messages)).toContain("Image 1: a test fixture");
+    expect(JSON.stringify(provider.mainCalls[1].messages)).not.toContain('"type":"image_url"');
   });
 
   it("forwards an explicit provider maxTokens value without replacing it", async () => {

@@ -7,6 +7,7 @@ import {
   buildCompleteTurns,
   normalizeAgentIdentity,
   renderFullMemorySkill,
+  resolveWslPathForWindows,
   resolveSyncBoundaryAt,
   selectTurns,
   verifyAgentInstallation
@@ -141,6 +142,17 @@ describe("AgentSourceTool Skill rendering", () => {
     ).toThrow('Agent installation not found for "我自己的agent"');
   });
 
+  it("converts scoped WSL paths without accepting a distribution path escape", () => {
+    expect(resolveWslPathForWindows(
+      "/home/hackerlin/.hermes/hermes-agent/package.json",
+      "UbuntuCustom"
+    )).toBe("\\\\wsl.localhost\\UbuntuCustom\\home\\hackerlin\\.hermes\\hermes-agent\\package.json");
+    expect(() => resolveWslPathForWindows("relative/package.json", "UbuntuCustom"))
+      .toThrow("absolute Linux path");
+    expect(() => resolveWslPathForWindows("/home/user/package.json", "../UbuntuCustom"))
+      .toThrow("wsl_distro is invalid");
+  });
+
   it("does not accept a same-named history directory as installation evidence", () => {
     const historyRoot = fs.mkdtempSync(path.join(os.tmpdir(), "my-agent-history-"));
     tempRoots.push(historyRoot);
@@ -183,9 +195,11 @@ describe("AgentSourceTool Skill rendering", () => {
     expect(parameters.properties.action.enum).toContain("get_status");
     expect(parameters.properties.action.enum).toContain("verify_installation");
     expect(parameters.properties.installation_path_origin.enum).toEqual(["discovered", "user_provided"]);
+    expect(parameters.properties.wsl_distro.type).toBe("string");
     expect(recipe.required).toEqual(["version", "format", "path", "fields", "timestampFormat"]);
     expect(recipe.properties?.version?.enum).toEqual([1]);
     expect(recipe.properties?.format?.enum).toEqual(["jsonl", "json", "sqlite"]);
+    expect(recipe.properties?.wslDistro?.type).toBe("string");
     expect(recipe.properties?.fields?.required).toEqual(["role", "content", "createdAt"]);
     expect(recipe.properties?.timestampFormat?.enum).toEqual(["auto", "iso", "unix_seconds", "unix_milliseconds"]);
 
@@ -216,6 +230,8 @@ describe("AgentSourceTool Skill rendering", () => {
     expect(skill).toContain("syncBoundaryAt != null");
     expect(skill).toContain("syncReady == true");
     expect(skill).toContain("Imported memories are only bootstrap and validation evidence.");
+    expect(skill).toContain("Python's standard-library `sqlite3` module");
+    expect(skill).toContain('"wslDistro": "<exact distribution name>"');
   });
 
   it("requires installation identity verification before provisioning mutations", async () => {

@@ -174,6 +174,87 @@ const SessionSnapshotSchema = z.object({
   sessions: z.array(SessionSummarySchema)
 });
 
+const WorkspaceEnvironmentFileSchema = z.object({
+  path: z.string(),
+  status: z.string(),
+  staged: z.boolean(),
+  unstaged: z.boolean(),
+  untracked: z.boolean(),
+  conflict: z.boolean(),
+  additions: z.number().nullable(),
+  deletions: z.number().nullable(),
+  attribution: z.union([
+    z.literal("goal"),
+    z.literal("preexisting"),
+    z.literal("uncertain"),
+    z.literal("unattributed")
+  ])
+});
+
+const WorkspaceEnvironmentSnapshotSchema = z.object({
+  scope_kind: z.union([z.literal("session"), z.literal("project")]),
+  scope_key: z.string(),
+  cwd: z.string(),
+  status: z.union([
+    z.literal("ready"),
+    z.literal("not_git"),
+    z.literal("workspace_unavailable"),
+    z.literal("error")
+  ]),
+  revision: z.string(),
+  captured_at: z.string(),
+  repository: z.object({
+    display_name: z.string(),
+    root: z.string(),
+    head_sha: z.string(),
+    branch: z.string().nullable(),
+    detached: z.boolean(),
+    upstream: z.string().nullable(),
+    ahead: z.number(),
+    behind: z.number(),
+    worktree: z.union([z.literal("clean"), z.literal("dirty")])
+  }).nullable(),
+  changes: z.object({
+    file_count: z.number(),
+    additions: z.number().nullable(),
+    deletions: z.number().nullable(),
+    conflicts: z.number(),
+    staged: z.number(),
+    unstaged: z.number(),
+    untracked: z.number()
+  }).nullable(),
+  goal: z.object({
+    goal_id: z.string(),
+    base_head: z.string().nullable(),
+    base_branch: z.string().nullable(),
+    goal_files: z.number(),
+    preexisting_files: z.number(),
+    uncertain_files: z.number(),
+    verification: z.union([
+      z.literal("not_run"),
+      z.literal("running"),
+      z.literal("passed"),
+      z.literal("failed"),
+      z.literal("stale")
+    ]),
+    completion_audit: z.union([z.literal("pending"), z.literal("risk"), z.literal("satisfied")]),
+    baseline_status: z.union([z.literal("captured"), z.literal("unavailable")])
+  }).nullable()
+});
+
+const WorkspaceEnvironmentStateSchema = z.object({
+  snapshot: WorkspaceEnvironmentSnapshotSchema,
+  files: z.array(WorkspaceEnvironmentFileSchema),
+  branches: z.array(z.string())
+});
+
+const WorkspaceEnvironmentDiffSchema = z.object({
+  path: z.string(),
+  diff: z.string(),
+  truncated: z.boolean(),
+  unavailable_reason: z.string().nullable()
+});
+
 const ProjectMutationResponseSchema = z.object({
   project: ProjectSchema,
   snapshot: SessionSnapshotSchema
@@ -346,6 +427,11 @@ export type MemmyAgentBootstrap = z.infer<typeof BootstrapSchema>;
 export type ChatModelPreset = z.infer<typeof ChatModelPresetSchema>;
 export type MemmyAgentSettings = z.infer<typeof AgentSettingsSchema>;
 export type MemmyAgentSessionSummary = z.infer<typeof SessionSummarySchema>;
+export type WorkspaceEnvironmentSnapshot = z.infer<typeof WorkspaceEnvironmentSnapshotSchema>;
+export type WorkspaceEnvironmentFile = z.infer<typeof WorkspaceEnvironmentFileSchema>;
+export type WorkspaceEnvironmentState = z.infer<typeof WorkspaceEnvironmentStateSchema>;
+export type WorkspaceEnvironmentDiff = z.infer<typeof WorkspaceEnvironmentDiffSchema>;
+export type WorkspaceEnvironmentScope = { kind: "session" | "project"; key: string };
 export type MemmyAgentProject = z.infer<typeof ProjectSchema>;
 export type MemmyAgentSessionSnapshot = z.infer<typeof SessionSnapshotSchema>;
 export type MemmyAgentSidebarState = z.infer<typeof SidebarStateSchema>;
@@ -555,6 +641,18 @@ export interface MemmyAgentClient {
   getSettings(): Promise<MemmyAgentSettings>;
   getSessionSnapshot(options?: MemmyAgentRequestOptions): Promise<MemmyAgentSessionSnapshot>;
   listSessions(): Promise<MemmyAgentSessionSummary[]>;
+  readWorkspaceEnvironment(scope: WorkspaceEnvironmentScope): Promise<WorkspaceEnvironmentState>;
+  readWorkspaceEnvironmentDiff(scope: WorkspaceEnvironmentScope, path: string): Promise<WorkspaceEnvironmentDiff>;
+  switchWorkspaceEnvironmentBranch(
+    scope: WorkspaceEnvironmentScope,
+    branch: string,
+    expectedRevision: string
+  ): Promise<WorkspaceEnvironmentState>;
+  createOrCheckoutWorkspaceEnvironmentBranch(
+    scope: WorkspaceEnvironmentScope,
+    branch: string,
+    expectedRevision: string
+  ): Promise<WorkspaceEnvironmentState>;
   listSlashCommands(): Promise<MemmyAgentSlashCommand[]>;
   readSidebarState(): Promise<MemmyAgentSidebarState>;
   writeSidebarState(
@@ -882,6 +980,49 @@ class HttpMemmyAgentClient implements MemmyAgentClient {
 
   async listSessions(): Promise<MemmyAgentSessionSummary[]> {
     return (await this.getSessionSnapshot()).sessions;
+  }
+
+  async readWorkspaceEnvironment(scope: WorkspaceEnvironmentScope): Promise<WorkspaceEnvironmentState> {
+    const collection = scope.kind === "session" ? "sessions" : "projects";
+    return this.request(
+      `/api/${collection}/${encodeURIComponent(scope.key)}/environment`,
+      WorkspaceEnvironmentStateSchema
+    );
+  }
+
+  async readWorkspaceEnvironmentDiff(scope: WorkspaceEnvironmentScope, path: string): Promise<WorkspaceEnvironmentDiff> {
+    const collection = scope.kind === "session" ? "sessions" : "projects";
+    const query = new URLSearchParams({ path });
+    return this.request(
+      `/api/${collection}/${encodeURIComponent(scope.key)}/environment/diff?${query.toString()}`,
+      WorkspaceEnvironmentDiffSchema
+    );
+  }
+
+  async switchWorkspaceEnvironmentBranch(
+    scope: WorkspaceEnvironmentScope,
+    branch: string,
+    expectedRevision: string
+  ): Promise<WorkspaceEnvironmentState> {
+    const collection = scope.kind === "session" ? "sessions" : "projects";
+    return this.request(
+      `/api/${collection}/${encodeURIComponent(scope.key)}/environment/branch`,
+      WorkspaceEnvironmentStateSchema,
+      { method: "POST", body: { branch, expected_revision: expectedRevision } }
+    );
+  }
+
+  async createOrCheckoutWorkspaceEnvironmentBranch(
+    scope: WorkspaceEnvironmentScope,
+    branch: string,
+    expectedRevision: string
+  ): Promise<WorkspaceEnvironmentState> {
+    const collection = scope.kind === "session" ? "sessions" : "projects";
+    return this.request(
+      `/api/${collection}/${encodeURIComponent(scope.key)}/environment/branch`,
+      WorkspaceEnvironmentStateSchema,
+      { method: "POST", body: { branch, expected_revision: expectedRevision, create: true } }
+    );
   }
 
   async listSlashCommands(): Promise<MemmyAgentSlashCommand[]> {

@@ -6,7 +6,6 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { Agent as UndiciAgent } from "undici";
 import {
   INBOUND_META_RUNTIME_CONTROL,
   InboundMessage,
@@ -79,85 +78,54 @@ class SdkClientSession {
     return this.client.listTools();
   }
 
-  async callTool(name: string, args: Record<string, any>): Promise<any> {
-    return this.client.callTool({ name, arguments: args });
+  async callTool(name: string, args: Record<string, any>, timeout: number): Promise<any> {
+    return this.client.callTool(
+      { name, arguments: args },
+      undefined,
+      { timeout: timeout * 1000 },
+    );
   }
 
   async listResources(): Promise<any> {
     return this.client.listResources();
   }
 
-  async readResource(uri: string): Promise<any> {
-    return this.client.readResource({ uri });
+  async readResource(uri: string, timeout: number): Promise<any> {
+    return this.client.readResource({ uri }, { timeout: timeout * 1000 });
   }
 
   async listPrompts(): Promise<any> {
     return this.client.listPrompts();
   }
 
-  async getPrompt(name: string, args: Record<string, any>): Promise<any> {
-    return this.client.getPrompt({ name, arguments: args });
+  async getPrompt(name: string, args: Record<string, any>, timeout: number): Promise<any> {
+    return this.client.getPrompt(
+      { name, arguments: args },
+      { timeout: timeout * 1000 },
+    );
   }
 }
 
 async function loadRuntime(): Promise<Runtime> {
-  const httpTransportOptions = (opts: any = {}) => {
-    const dispatcher = new UndiciAgent({ keepAliveTimeout: 1, keepAliveMaxTimeout: 1 });
-    const controllers = new Set<AbortController>();
-    const responses = new Set<Response>();
-    const fetchWithDispatcher = async (url: Parameters<typeof fetch>[0], init?: RequestInit) => {
-      const headers = new Headers(init?.headers ?? undefined);
-      if (!headers.has("connection")) headers.set("connection", "close");
-      const controller = new AbortController();
-      const signal = init?.signal ?? null;
-      const abort = () => controller.abort();
-      if (signal?.aborted) controller.abort();
-      else signal?.addEventListener("abort", abort, { once: true });
-      controllers.add(controller);
-      try {
-        const response = await fetch(url, { ...(init ?? {}), headers, signal: controller.signal, dispatcher } as any);
-        responses.add(response);
-        return response;
-      } finally {
-        signal?.removeEventListener("abort", abort);
-      }
-    };
-    const transportResources = {
-      async destroy() {
-        for (const controller of controllers) controller.abort();
-        await Promise.allSettled([...responses].map((response) => response.body?.cancel?.()));
-        dispatcher.destroy();
-      },
-    };
-    return [
-      {
-        requestInit: opts.headers ? { headers: opts.headers } : undefined,
-        fetch: fetchWithDispatcher,
-      },
-      transportResources,
-    ] as const;
-  };
+  const rejectRedirects = (url: string | URL, init?: RequestInit) =>
+    fetch(url, { ...init, redirect: "error" });
+  const httpTransportOptions = (opts: any = {}) => ({
+    requestInit: { headers: opts.headers },
+    fetch: rejectRedirects,
+  });
   if (runtimeOverride) return runtimeOverride;
   return {
     ClientSession: SdkClientSession as any,
     StdioServerParameters: SdkStdioServerParameters as any,
     stdioClient: (params: any) => [new StdioClientTransport(params), null],
-    sseClient: (url: string, opts: any = {}) => {
-      const [transportOptions, dispatcher] = httpTransportOptions(opts);
-      return [
-        new SSEClientTransport(new URL(url), transportOptions as any),
-        null,
-        dispatcher,
-      ];
-    },
-    streamableHttpClient: (url: string, opts: any = {}) => {
-      const [transportOptions, dispatcher] = httpTransportOptions(opts);
-      return [
-        new StreamableHTTPClientTransport(new URL(url), transportOptions as any),
-        null,
-        dispatcher,
-      ];
-    },
+    sseClient: (url: string, opts: any = {}) => [new SSEClientTransport(new URL(url), {
+      ...httpTransportOptions(opts),
+      eventSourceInit: { fetch: rejectRedirects },
+    } as any), null],
+    streamableHttpClient: (url: string, opts: any = {}) => [
+      new StreamableHTTPClientTransport(new URL(url), httpTransportOptions(opts) as any),
+      null,
+    ],
   };
 }
 
@@ -423,7 +391,7 @@ export class MCPToolWrapper extends Tool {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
         const result: any = await timeoutPromise(
-          this.session.callTool(this.originalName, params),
+          this.session.callTool(this.originalName, params, this.toolTimeout),
           this.toolTimeout,
           "timeout",
         );
@@ -476,7 +444,11 @@ export class MCPResourceWrapper extends Tool {
   async execute(): Promise<string> {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        const result: any = await timeoutPromise(this.session.readResource(this.uri), this.resourceTimeout, "timeout");
+        const result: any = await timeoutPromise(
+          this.session.readResource(this.uri, this.resourceTimeout),
+          this.resourceTimeout,
+          "timeout",
+        );
         return (result.contents ?? [])
           .map((block: any) => {
             if (block && typeof block.text === "string") return block.text;
@@ -540,7 +512,11 @@ export class MCPPromptWrapper extends Tool {
   async execute(params: Record<string, any> = {}): Promise<string> {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        const result: any = await timeoutPromise(this.session.getPrompt(this.promptName, params), this.promptTimeout, "timeout");
+        const result: any = await timeoutPromise(
+          this.session.getPrompt(this.promptName, params, this.promptTimeout),
+          this.promptTimeout,
+          "timeout",
+        );
         return (result.messages ?? [])
           .flatMap((message: any) => (Array.isArray(message.content) ? message.content : [message.content]))
           .map(textFromContentBlock)
@@ -641,8 +617,24 @@ export async function connectMcpServers(
 
       const session = new runtime.ClientSession(read, write);
       const liveSession = typeof session.enter === "function" ? await enterMaybe(session, closers) : session;
-      await liveSession.initialize?.();
-      const tools = await liveSession.listTools?.();
+      const discovered = await timeoutPromise((async () => {
+        await liveSession.initialize?.();
+        const tools = await liveSession.listTools?.();
+        let resources: any[] = [];
+        let prompts: any[] = [];
+        try {
+          resources = (await liveSession.listResources?.())?.resources ?? [];
+        } catch {
+          // Resource discovery is optional for MCP servers that do not implement it.
+        }
+        try {
+          prompts = (await liveSession.listPrompts?.())?.prompts ?? [];
+        } catch {
+          // Prompt discovery is optional for MCP servers that do not implement it.
+        }
+        return { tools, resources, prompts };
+      })(), 15, `MCP server '${name}' discovery timed out`);
+      const tools = discovered.tools;
       const enabledTools = new Set(cfgValue(cfg, "enabled_tools", "enabledTools") ?? ["*"]);
       const allowAll = enabledTools.has("*");
       const matched = new Set<string>();
@@ -665,21 +657,11 @@ export async function connectMcpServers(
           );
         }
       }
-      try {
-        const resources = await liveSession.listResources?.();
-        for (const resource of resources?.resources ?? []) {
-          registry.register(new MCPResourceWrapper(liveSession, name, resource, cfgValue(cfg, "tool_timeout", "toolTimeout") ?? 30));
-        }
-      } catch {
-        // Resource discovery is optional for MCP servers that do not implement it.
+      for (const resource of discovered.resources) {
+        registry.register(new MCPResourceWrapper(liveSession, name, resource, cfgValue(cfg, "tool_timeout", "toolTimeout") ?? 30));
       }
-      try {
-        const prompts = await liveSession.listPrompts?.();
-        for (const prompt of prompts?.prompts ?? []) {
-          registry.register(new MCPPromptWrapper(liveSession, name, prompt, cfgValue(cfg, "tool_timeout", "toolTimeout") ?? 30));
-        }
-      } catch {
-        // Prompt discovery is optional for MCP servers that do not implement it.
+      for (const prompt of discovered.prompts) {
+        registry.register(new MCPPromptWrapper(liveSession, name, prompt, cfgValue(cfg, "tool_timeout", "toolTimeout") ?? 30));
       }
       stacks[name] = {
         close: async () => {
@@ -1005,21 +987,34 @@ function resolveAck(ack: any, result: Record<string, any>): void {
   else if (typeof ack.resolve === "function") ack.resolve(result);
 }
 
-export async function handleRuntimeControl(state: McpState, msg: InboundMessage, registry: ToolRegistry): Promise<boolean> {
+export async function handleRuntimeControl(
+  state: McpState,
+  msg: InboundMessage,
+  registry: ToolRegistry,
+  canReload = true,
+): Promise<boolean> {
   const metadata = msg?.metadata && typeof msg.metadata === "object" ? msg.metadata : {};
   const control = metadata[INBOUND_META_RUNTIME_CONTROL];
   if (control !== RUNTIME_CONTROL_MCP_RELOAD) return false;
 
   let result: Record<string, any>;
-  try {
-    result = await reloadServers(state, registry);
-  } catch (error) {
+  if (!canReload) {
     result = {
       ok: false,
-      message: "MCP hot reload failed. Restart memmy to pick up changes.",
+      message: "MCP hot reload was skipped while agent turns were active. Restart memmy to pick up changes.",
       requires_restart: true,
-      error: String((error as Error).message ?? error),
     };
+  } else {
+    try {
+      result = await reloadServers(state, registry);
+    } catch (error) {
+      result = {
+        ok: false,
+        message: "MCP hot reload failed. Restart memmy to pick up changes.",
+        requires_restart: true,
+        error: String((error as Error).message ?? error),
+      };
+    }
   }
   resolveAck(metadata[RUNTIME_CONTROL_ACK], result);
   return true;

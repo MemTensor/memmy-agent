@@ -5,7 +5,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import YAML from "yaml";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CloudClient } from "../adapters/outbound/cloud-client/index.js";
 import type { MemoryClient } from "../adapters/outbound/memory-client/index.js";
 import { createLocalBackend, readMemoryLayerConfig, type LocalBackend } from "../index.js";
@@ -85,6 +85,80 @@ describe("local api", () => {
 
     expect(reloadReasons).toEqual([{ reason: "desktop_startup" }]);
     expect(backend.runtimeConfig.memory).toEqual({ baseUrl: "http://127.0.0.1:18960" });
+  });
+
+  it("reloads Agent MCP only after writing the current Composio bridge config", async () => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-backend-mcp-startup-reload-"));
+    const memmyConfigPath = join(tempDir, "config.yaml");
+    const snapshots: unknown[] = [];
+
+    backend = await createLocalBackend({
+      databasePath: join(tempDir, "app.sqlite"),
+      runtimeConfigPath: join(tempDir, "runtime.json"),
+      localToken: "test-token",
+      memoryClient: createMockMemoryClient(),
+      cloudClient: createMockCloudClient(),
+      memmyConfigPath,
+      memmyAgentAdminClient: {
+        getChannelDefinitions: async () => ({ channels: [] }),
+        getChannelConnections: async () => ({ connections: [] }),
+        configureChannel: async () => ({ status: "connected", running: true }),
+        stopChannel: async () => ({ status: "disabled", running: false }),
+        startWeixinLogin: async () => ({ status: "pendingQr" }),
+        pollWeixinLogin: async () => ({ status: "connected" }),
+        startFeishuLogin: async () => ({ status: "pendingQr" }),
+        pollFeishuLogin: async () => ({ status: "connected" }),
+        async reloadMcpConfig() {
+          snapshots.push(YAML.parse(readFileSync(memmyConfigPath, "utf8")));
+          return { ok: true, message: "reloaded", requires_restart: false };
+        }
+      }
+    });
+
+    expect(snapshots).toHaveLength(1);
+    expect(snapshots[0]).toMatchObject({
+      tools: {
+        mcpServers: {
+          composio: {
+            type: "streamableHttp",
+            url: `${backend.runtimeConfig.baseUrl}/mcp/composio`,
+            headers: { "x-memmy-mcp-token": expect.stringMatching(/^mmt_/) }
+          }
+        }
+      }
+    });
+  });
+
+  it("does not block local API startup while managed Memory is still initializing", async () => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-backend-memory-ready-"));
+    const baseClient = createMockMemoryClient();
+    const reloadReasons: unknown[] = [];
+    let markMemoryReady: (() => void) | undefined;
+    const memoryReady = new Promise<void>((resolveReady) => {
+      markMemoryReady = resolveReady;
+    });
+    const memoryClient: MemoryClient = {
+      ...baseClient,
+      async reloadConfig(input) {
+        reloadReasons.push(input);
+        return baseClient.reloadConfig(input);
+      }
+    };
+
+    backend = await createLocalBackend({
+      databasePath: join(tempDir, "app.sqlite"),
+      runtimeConfigPath: join(tempDir, "runtime.json"),
+      localToken: "test-token",
+      memoryBaseUrl: "http://127.0.0.1:18960",
+      memoryReady,
+      memoryClient,
+      cloudClient: createMockCloudClient(),
+      memmyConfigPath: join(tempDir, "config.yaml")
+    });
+
+    expect(reloadReasons).toEqual([]);
+    markMemoryReady?.();
+    await vi.waitFor(() => expect(reloadReasons).toEqual([{ reason: "desktop_startup" }]));
   });
 
   it("uses the built-in default Cloud client when MEMMY_CLOUD_URL is missing", async () => {

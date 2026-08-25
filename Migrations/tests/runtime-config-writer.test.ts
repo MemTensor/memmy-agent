@@ -102,4 +102,45 @@ describe("runtime config writer", () => {
     expect(acl).not.toContain("(I)");
     expect(acl.match(/\(F\)/g)).toHaveLength(2);
   });
+
+  it.runIf(process.platform === "win32")(
+    "uses verified Windows system ACL tools instead of PATH shadows",
+    async () => {
+      const configPath = await configFixture({});
+      const windowsDirectory = process.env.SystemRoot ?? process.env.WINDIR;
+      if (!windowsDirectory) throw new Error("Windows directory is unavailable");
+      const whereExecutable = path.join(windowsDirectory, "System32", "where.exe");
+      const shadowRoot = path.join(path.dirname(configPath), "shadow-windows-root");
+      const shadowSystemDirectory = path.join(shadowRoot, "System32");
+      await fs.mkdir(shadowSystemDirectory, { recursive: true });
+      await Promise.all([
+        fs.copyFile(whereExecutable, path.join(shadowSystemDirectory, "whoami.exe")),
+        fs.copyFile(whereExecutable, path.join(shadowSystemDirectory, "icacls.exe")),
+      ]);
+      const originalCurrentDirectory = process.cwd();
+      const originalPath = process.env.PATH;
+      const originalSystemRoot = process.env.SystemRoot;
+      const originalWindowsDirectory = process.env.WINDIR;
+      process.chdir(path.dirname(configPath));
+      process.env.SystemRoot = path.basename(shadowRoot);
+      process.env.WINDIR = path.basename(shadowRoot);
+      process.env.PATH = `${shadowSystemDirectory};${originalPath ?? ""}`;
+      try {
+        await expect(mutateRuntimeConfig(configPath, (config) => {
+          config.asyncWrite = true;
+        })).resolves.toMatchObject({ changed: true });
+        expect(mutateRuntimeConfigSync(configPath, (config) => {
+          config.syncWrite = true;
+        })).toMatchObject({ changed: true });
+      } finally {
+        process.chdir(originalCurrentDirectory);
+        if (originalSystemRoot === undefined) delete process.env.SystemRoot;
+        else process.env.SystemRoot = originalSystemRoot;
+        if (originalWindowsDirectory === undefined) delete process.env.WINDIR;
+        else process.env.WINDIR = originalWindowsDirectory;
+        if (originalPath === undefined) delete process.env.PATH;
+        else process.env.PATH = originalPath;
+      }
+    },
+  );
 });

@@ -114,6 +114,7 @@ describe("AgentLoop turn persistence", () => {
     const webuiCompactionOptions = capturedOptions.value;
     expect(webuiCompactionOptions).toMatchObject({ replayMaxMessages: loop.maxMessages, notifyOnLockWait: true });
     expect(webuiCompactionOptions.onCompactionEvent).toEqual(expect.any(Function));
+    expect(ctx.onTokenCompactionEvent).toBe(webuiCompactionOptions.onCompactionEvent);
     expect(compactionMessages.map((message) => message.content)).toEqual(["会话压缩中", "压缩已完成"]);
     expect(compactionMessages.map((message) => message.chatId)).toEqual(["compaction", "compaction"]);
     expect(compactionMessages.map((message) => message.metadata.compactionId)).toEqual(["context-compaction:turn-ctx", "context-compaction:turn-ctx"]);
@@ -204,7 +205,7 @@ describe("AgentLoop turn persistence", () => {
     );
   });
 
-  it("keeps post-save background compaction silent", async () => {
+  it("does not run token compaction after saving the turn", async () => {
     const bus = new MessageBus();
     const loop = makeLoop({ bus });
     const session = new Session({ key: "websocket:post-save-compaction" });
@@ -225,7 +226,8 @@ describe("AgentLoop turn persistence", () => {
 
     await loop.stateSave(ctx);
 
-    expect(capturedOptions).toEqual({ replayMaxMessages: loop.maxMessages });
+    expect(capturedOptions).toBeNull();
+    expect(loop.consolidator.maybeConsolidateByTokens).not.toHaveBeenCalled();
     expect(bus.outboundSize).toBe(0);
   });
 
@@ -524,6 +526,31 @@ describe("AgentLoop turn persistence", () => {
     ]);
   });
 
+  it("persists a read_file image as one path placeholder without the data URL", () => {
+    const loop = makeLoop();
+    const session = new Session({ key: "read-file-image" });
+
+    loop.saveTurn(
+      session,
+      [{
+        role: "tool",
+        tool_call_id: "read_image",
+        name: "read_file",
+        content: [{
+          type: "image_url",
+          image_url: { url: "data:image/png;base64,abc" },
+          meta: { path: "/tmp/image.png" },
+        }],
+      }],
+      0,
+    );
+
+    expect(session.messages[0].content).toEqual([
+      { type: "text", text: "[image: /tmp/image.png]" },
+    ]);
+    expect(JSON.stringify(session.messages)).not.toContain("data:image");
+  });
+
   it("rehydrates runtime checkpoints with completed and pending tools", () => {
     const loop = makeLoop();
     const session = new Session({
@@ -774,6 +801,11 @@ describe("AgentLoop turn persistence", () => {
       expect(opts.channel).toBe("cli");
       expect(opts.chatId).toBe("test");
       expect(opts.sessionKey).toBe("cli:test");
+      expect(opts.midTurnContext).toMatchObject({
+        protectedSessionMessageStart: 2,
+        sessionTailMessagesRepresentedInTranscript: 1,
+      });
+      expect(opts.consolidator).toBe(loop.consolidator);
       return ["done", [], [...initialMessages, { role: "assistant", content: "done" }], "stop", false];
     });
 
@@ -791,6 +823,7 @@ describe("AgentLoop turn persistence", () => {
     expect(nonSystem[1].content).toContain("working");
     expect(nonSystem[2].content).toContain("subagent result");
     expect(nonSystem[2].content).toContain("Current Time:");
+    expect(loop.consolidator.maybeConsolidateByTokens).toHaveBeenCalledTimes(1);
 
     loop.sessions.invalidate("cli:test");
     expect(loop.sessions.getOrCreate("cli:test").messages.map((message) => ({

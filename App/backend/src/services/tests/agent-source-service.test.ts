@@ -128,6 +128,53 @@ describe("agent source service", () => {
     });
   });
 
+  it("imports scanned Agent skills with immutable source provenance", async () => {
+    const added: Parameters<MemoryClient["addMemory"]>[0][] = [];
+    const memoryClient = createMockMemoryClient();
+    const service = createService({
+      adapters: [createFakeAdapter("cursor", createCompleteMemoryMessages("cursor", 1, "2026-05-28T10:00:00.000Z"))],
+      memoryClient: {
+        ...memoryClient,
+        async addMemory(input, context) {
+          added.push(input);
+          return memoryClient.addMemory(input, context);
+        }
+      },
+      skillDistributionService: {
+        async listSkills() {
+          return [{
+            sourceAgentId: "cursor",
+            sourceSkillId: "review-code",
+            sourceSkillPath: "/tmp/cursor/skills/review-code/SKILL.md",
+            sourceSkillVersion: "v2",
+            sourceContentHash: "hash-v2",
+            title: "review-code",
+            content: "Review changed code.",
+            updatedAt: "2026-05-28T09:00:00.000Z"
+          }];
+        },
+        async install() {},
+        async uninstall() {},
+        async installPlugin() {},
+        async uninstallPlugin() {}
+      }
+    });
+
+    await service.scanOne("cursor");
+
+    expect(added).toEqual([
+      expect.objectContaining({
+        layer: "Skill",
+        sourceAgentId: "cursor",
+        sourceSkillId: "review-code",
+        sourceSkillPath: "/tmp/cursor/skills/review-code/SKILL.md",
+        sourceSkillVersion: "v2",
+        sourceContentHash: "hash-v2",
+        tags: ["agent-source", "cross-agent-skill", "cursor"]
+      })
+    ]);
+  });
+
   it("completes the scan and advances checkpoints when every memory is skipped", async () => {
     const repository = createRepository();
     const messages = createCompleteMemoryMessages("cursor", 1, "2026-05-28T10:00:00.000Z");
@@ -811,8 +858,16 @@ describe("agent source service", () => {
   it("rescans a conversation when its content changes without changing the message cursor", async () => {
     const repository = createRepository();
     let messages = createCompleteMemoryMessages("cursor", 1, "2026-05-28T10:00:02.000Z");
+    const replayedConversationIds: string[][] = [];
+    const ingestionService = createFakeIngestionService();
     const service = createService({
       repository,
+      ingestionService: {
+        async ingest(input, context) {
+          replayedConversationIds.push([...(context.replaySeenConversationIds ?? [])]);
+          return ingestionService.ingest(input, context);
+        }
+      },
       adapters: [createFakeAdapter("cursor", [], async function* () {
         for (const message of messages) yield message;
       })]
@@ -831,6 +886,24 @@ describe("agent source service", () => {
     await service.ingestCollected([revised]);
     const unchanged = await service.collectOne("cursor");
     expect(unchanged.messages).toEqual([]);
+
+    messages = [
+      ...messages,
+      {
+        ...messages[0]!,
+        messageId: "cursor-turn-2-user",
+        content: "follow-up question",
+        createdAt: "2026-05-28T10:01:00.000Z"
+      },
+      {
+        ...messages[1]!,
+        messageId: "cursor-turn-2-assistant",
+        content: "follow-up answer",
+        createdAt: "2026-05-28T10:01:01.000Z"
+      }
+    ];
+    await service.ingestCollected([await service.collectOne("cursor")]);
+    expect(replayedConversationIds).toEqual([[], ["cursor-conv-1"], []]);
   });
 
   it("groups messages by conversation before handing them to ingestion", async () => {

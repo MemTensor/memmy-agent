@@ -1,5 +1,6 @@
 /** Home page module. */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type CSSProperties, type DragEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject, type SetStateAction, type UIEvent } from "react";
+import type { AgentGatewayStartupIssue } from "@memmy/local-api-contracts";
 import { hydrateAgentThreadInBackground, refreshAgentTaskList, useAgentRuntimeBridge, type AgentTaskStateCoordinator } from "../app/agent-runtime-bridge.js";
 import { useApiClients } from "../app/providers.js";
 import { FOCUSED_AGENT_CHAT_STORAGE_KEY, clearFocusedAgentTarget, isAccountTokenQuotaExhausted, normalizeAgentChatId, readLaunchAgentChatId, removeLaunchAgentChatIdFromUrl } from "../app/routes.js";
@@ -19,6 +20,7 @@ import {
   type WebuiSessionTarget
 } from "../api/memmy-agent-client.js";
 import type { AnalyticsEvent } from "../analytics/analytics-events.js";
+import { setAnalyticsModelSource } from "../analytics/analytics-context.js";
 import { buildOnboardingActivationEvent } from "../analytics/onboarding-analytics.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
 import { AgentModelSelector } from "../components/agent-model-selector.js";
@@ -72,9 +74,11 @@ import {
   type SlashCommandStorageLike
 } from "./agent-command-palette.js";
 import { AgentAttachmentCard, splitAgentAttachmentName } from "./agent-file-attachment-chip.js";
+import { AgentEnvironmentPanel } from "./agent-environment-panel.js";
 import { AgentGoalBar, type AgentGoalControlRequest } from "./agent-goal-bar.js";
 import { AgentQueuedMessageList } from "./agent-queued-message-list.js";
 import { AgentThreadMessages, ChatImageLightbox } from "./agent-thread-messages.js";
+import { AgentWorkspaceContext } from "./agent-workspace-context.js";
 import { AppFrame } from "./app-frame.js";
 import {
   MicrophonePermissionError,
@@ -107,7 +111,8 @@ import {
   LITREV_SOURCE_INPUT_STORAGE_KEY
 } from "./literature-review-model.js";
 import { Mic, Pause, Plus, Send } from "./memory/memory-prototype-icons.js";
-import { ArrowDown, BookOpenText, CalendarCheck2, Check, ChevronDown, Folder, History, Plus as LucidePlus, RotateCw, SquareSlash, Target, X } from "lucide-react";
+import { resolveWorkspaceEnvironmentScope, useWorkspaceEnvironment } from "./use-workspace-environment.js";
+import { ArrowDown, BookOpenText, CalendarCheck2, Check, ChevronDown, Folder, History, Plus as LucidePlus, RotateCw, SlidersHorizontal, SquareSlash, Target, X } from "lucide-react";
 
 export { agentChatScopeKey, updateComposerDraftForScope };
 export { hydrateAgentThreadInBackground };
@@ -1001,6 +1006,7 @@ export function HomePage() {
   const [statusPanel, setStatusPanel] = useState<StatusPanelState>({ open: false });
   const [lastCompactionPanel, setLastCompactionPanel] = useState<StatusPanelState>({ open: false });
   const [historyDagPanel, setHistoryDagPanel] = useState<HistoryDagPanelState>({ open: false });
+  const [environmentPanelOpen, setEnvironmentPanelOpen] = useState(false);
   const [isCreatingChat, setIsCreatingChat] = useState(false);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
   const [projectPickerOperationId, setProjectPickerOperationId] = useState<string | null>(null);
@@ -1053,6 +1059,10 @@ export function HomePage() {
     modelWorkspaceMode,
     selectedModelPreset
   );
+  useEffect(() => {
+    setAnalyticsModelSource(resolvedConversationModel.candidate?.source ?? null);
+    return () => setAnalyticsModelSource(null);
+  }, [resolvedConversationModel.candidate?.source]);
   const input = composerDrafts[chatScopeKey] ?? "";
   const composerCommandDraft = resolveComposerCommandDraft(
     input,
@@ -1066,6 +1076,10 @@ export function HomePage() {
   const selectedDraftProject = draftTarget.kind === "project"
     ? state.agent.projects.find((project) => project.id === draftTarget.projectId) ?? null
     : null;
+  const environmentScope = resolveWorkspaceEnvironmentScope(
+    state.agent.currentSessionKey,
+    selectedDraftProject?.id ?? null,
+  );
   const currentSessionProjectBlocked = state.agent.projectRegistryState === "corrupt"
     && Boolean(
       state.agent.currentSessionKey
@@ -1122,6 +1136,11 @@ export function HomePage() {
       state.agent.runStartedAtByChatId[state.agent.currentChatId] ||
       state.agent.optimisticSendingByChatId[state.agent.currentChatId]
     )
+  );
+  const workspaceEnvironment = useWorkspaceEnvironment(
+    clients?.memmyAgent ?? null,
+    environmentScope,
+    environmentScope?.kind === "session" && isCurrentAgentRunning,
   );
   const goalMutationPending = state.agent.currentChatId
     ? state.agent.goalMutationPendingByChatId[state.agent.currentChatId] ?? null
@@ -1697,7 +1716,10 @@ export function HomePage() {
     : state.agent.recoveryKind === "reconnect"
       ? "reconnecting"
       : state.agent.connectionStatus;
-  const statusText = agentStatusText(displayConnectionStatus, state.agent.modelName, t);
+  const statusText = agentStatusText(displayConnectionStatus, state.agent.modelName, t, {
+    startupIssue: clients?.runtimeConfig.agentGateway?.startupIssue,
+    hasConnected: state.agent.hasConnectedSinceStartup
+  });
   const operationErrorNotice = state.agent.operationErrorNotice;
   const visibleOperationError = operationErrorNotice
     && (operationErrorNotice.scopeKey
@@ -3000,27 +3022,56 @@ export function HomePage() {
     );
   }
 
+  const environmentPanel = environmentPanelOpen && environmentScope ? (
+    <AgentEnvironmentPanel
+      client={clients?.memmyAgent ?? null}
+      scope={environmentScope.kind}
+      scopeKey={environmentScope.key}
+      environment={workspaceEnvironment.data}
+      loading={workspaceEnvironment.loading}
+      error={workspaceEnvironment.error}
+      onRefresh={workspaceEnvironment.refresh}
+      onClose={() => setEnvironmentPanelOpen(false)}
+    />
+  ) : null;
+
   return (
     <AppFrame
       title={t("home.title")}
-      topBar={hasActiveConversation ? (
-        <h1 className="agent-conversation-title" title={activeConversationTitle}>
-          <span className="agent-conversation-title__text">{activeConversationTitleDisplay}</span>
-          {activeImTitleDisplay ? <ImChannelTitleIcon slug={activeImTitleDisplay.slug} name={activeImTitleDisplay.channelName} /> : null}
-        </h1>
+      topBar={hasActiveConversation || environmentScope ? (
+        <div className="agent-conversation-topbar">
+          <h1 className="agent-conversation-title" title={hasActiveConversation ? activeConversationTitle : selectedDraftProject?.name}>
+            <span className="agent-conversation-title__text">
+              {hasActiveConversation ? activeConversationTitleDisplay : selectedDraftProject?.name}
+            </span>
+            {hasActiveConversation && activeImTitleDisplay ? <ImChannelTitleIcon slug={activeImTitleDisplay.slug} name={activeImTitleDisplay.channelName} /> : null}
+          </h1>
+          <button
+            type="button"
+            className={`agent-environment-toggle${environmentPanelOpen ? " agent-environment-toggle--active" : ""}`}
+            data-agent-environment-toggle
+            aria-label={t("home.environment.title")}
+            aria-pressed={environmentPanelOpen}
+            title={t("home.environment.title")}
+            onClick={() => setEnvironmentPanelOpen((open) => !open)}
+          >
+            <SlidersHorizontal size={16} aria-hidden="true" />
+          </button>
+        </div>
       ) : null}
-      topBarBorder={hasActiveConversation}
+      topBarBorder={Boolean(hasActiveConversation || environmentScope)}
     >
-      {!hasActiveConversation ? (
-        <section className="app-frame-page-content home-empty-screen">
-          {/* Mid row stays vertically centered like the original empty home. */}
-          <div className="home-empty-mid">
-            <div className="text-center mb-8">
-              <div className="home-empty-brand-mascot flex justify-center">
-                <Memmy pose="think" size={165} className="memmy-bob" />
+      <div className={`agent-workspace-layout${environmentPanelOpen ? " agent-workspace-layout--environment-open" : ""}`}>
+        {!hasActiveConversation ? (
+          <section className="app-frame-page-content home-empty-screen">
+            {/* Mid row stays vertically centered like the original empty home. */}
+            <div className="home-empty-mid">
+              <div className="text-center mb-8">
+                <div className="home-empty-brand-mascot flex justify-center">
+                  <Memmy pose="think" size={165} className="memmy-bob" />
+                </div>
+                <h1 className="text-2xl font-bold text-text-ink">{t("home.subtitle")}</h1>
               </div>
-              <h1 className="text-2xl font-bold text-text-ink">{t("home.subtitle")}</h1>
-            </div>
             <div className="home-empty-mid__composer">
               <AgentOperationErrorSlot message={agentError} />
               <div className="home-empty-composer-stack">
@@ -3118,6 +3169,14 @@ export function HomePage() {
                     onSelect={selectDraftTarget}
                     onChooseOther={() => void selectOtherProjectFolder()}
                   />
+                  <AgentWorkspaceContext
+                    snapshot={workspaceEnvironment.data?.snapshot ?? null}
+                    branches={workspaceEnvironment.data?.branches ?? []}
+                    loading={workspaceEnvironment.loading}
+                    error={workspaceEnvironment.error}
+                    onSwitchBranch={workspaceEnvironment.switchBranch}
+                    onCreateOrCheckoutBranch={workspaceEnvironment.createOrCheckoutBranch}
+                  />
                 </div>
               </div>
               <div className="home-prompt-suggestions" aria-label={t("home.empty")}>
@@ -3164,7 +3223,7 @@ export function HomePage() {
             />
           </div>
         </section>
-      ) : (
+        ) : (
         <section ref={conversationPanelRef} className="agent-conversation-panel flex flex-col h-full">
           <div
             ref={scrollRef}
@@ -3173,11 +3232,11 @@ export function HomePage() {
             onWheel={markAgentConversationUserScrollIntent}
             onTouchMove={markAgentConversationUserScrollIntent}
           >
-            <div className="max-w-3xl mx-auto space-y-3">
+            <div className="agent-conversation-content max-w-3xl mx-auto space-y-3">
               {displayConnectionStatus !== "connected" && (
                 <div className="text-center">
                   <span className="inline-flex text-[11px] px-3 py-1 rounded-tag bg-background-paper text-text-ink/55 border border-border-stone/30">
-                    {agentStatusText(displayConnectionStatus, state.agent.modelName, t)}
+                    {statusText}
                   </span>
                 </div>
               )}
@@ -3193,6 +3252,7 @@ export function HomePage() {
                 isSending={state.agent.isSending}
                 sanitizePlatformApiErrors={sanitizePlatformApiErrors}
                 artifactClient={sessionArtifactClient}
+                memoryRuntimeClient={clients?.memoryRuntime ?? null}
               />
             </div>
           </div>
@@ -3208,7 +3268,7 @@ export function HomePage() {
             </button>
           ) : null}
           <div ref={composerOverlayRef} className="agent-conversation-composer">
-            <div className="max-w-2xl mx-auto">
+            <div className="agent-conversation-content agent-conversation-content--composer max-w-3xl mx-auto">
               <div className="agent-composer-flow">
                 {statusPanel.open && !slashMenuOpen && (
                   <div className="agent-composer-popover absolute left-0 bottom-full mb-3 z-30 w-full" style={{ right: 0 }}>
@@ -3275,6 +3335,7 @@ export function HomePage() {
                     />
                   ) : null}
                   <div
+                    ref={composerShellRef}
                     className="relative agent-composer-shell agent-composer-shell--expanded rounded-card-lg"
                     onDragOver={handleComposerDragOver}
                     onDrop={handleComposerDrop}
@@ -3306,7 +3367,7 @@ export function HomePage() {
                       }}
                       onKeyDown={handleComposerKeyDown}
                       onPaste={handleComposerPaste}
-                      className={`${isComposerSingleLine ? "agent-composer-input--single " : ""}${selectedComposerCommand ? "agent-composer-input--command-selected " : ""}agent-composer-input--conversation block w-full pl-4 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40`}
+                      className={`${isComposerSingleLine ? "agent-composer-input--single " : ""}agent-composer-input--conversation block w-full pl-4 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40`}
                     />
                     {slashMenuOpen && !slashPickerOpen ? (
                       <ComposerCaretMenu textareaRef={inputRef} containerRef={composerShellRef} value={composerInput}>
@@ -3368,7 +3429,9 @@ export function HomePage() {
             </div>
           </div>
         </section>
-      )}
+        )}
+        {environmentPanel}
+      </div>
     </AppFrame>
   );
 }
@@ -3846,12 +3909,19 @@ const AGENT_OPERATION_ERROR_MESSAGE_KEYS: Record<string, MessageKey> = {
   attachment_read_failed: "home.media.error.sendReadFailed"
 };
 
-export function agentStatusText(status: string, modelName: string | null, t: HomeTranslate): string | null {
+export function agentStatusText(
+  status: string,
+  modelName: string | null,
+  t: HomeTranslate,
+  context: { startupIssue?: AgentGatewayStartupIssue; hasConnected?: boolean } = {}
+): string | null {
   if (status === "connected") {
     return null;
   }
   if (status === "error") {
-    return t("home.agent.failed");
+    return t(context.startupIssue === "model_config_invalid" && !context.hasConnected
+      ? "home.modelSelector.unavailable"
+      : "home.agent.failed");
   }
   if (status === "reconnecting") {
     return t("home.agent.reconnecting");

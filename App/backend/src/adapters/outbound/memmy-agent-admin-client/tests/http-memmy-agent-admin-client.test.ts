@@ -1,6 +1,6 @@
 /** Http memmy agent admin client tests. */
 import { createServer, type ServerResponse } from "node:http";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHttpMemmyAgentAdminClient } from "../http-memmy-agent-admin-client.js";
 
 let server: ReturnType<typeof createServer> | undefined;
@@ -17,6 +17,24 @@ afterEach(async () => {
 });
 
 describe("http memmy-agent admin client", () => {
+  it("applies one hard timeout to MCP reload bootstrap and admin requests", async () => {
+    const signals: Array<AbortSignal | null | undefined> = [];
+    const fetchFn = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      signals.push(init?.signal);
+      const path = new URL(String(input)).pathname;
+      return Response.json(path === "/webui/bootstrap"
+        ? { token: "boot-token" }
+        : { ok: true, message: "reloaded", requires_restart: false });
+    });
+    const client = createHttpMemmyAgentAdminClient({ fetchFn: fetchFn as typeof fetch });
+
+    await client.reloadMcpConfig();
+
+    expect(signals).toHaveLength(2);
+    expect(signals[0]).toBe(signals[1]);
+    expect(signals[0]).toBeInstanceOf(AbortSignal);
+  });
+
   it("bootstraps once and calls channel admin routes with bearer auth", async () => {
     const requests: Array<{ method: string | undefined; path: string; authorization: string | undefined }> = [];
     server = createServer((request, response) => {
@@ -44,6 +62,10 @@ describe("http memmy-agent admin client", () => {
         sendJson(response, { status: "pendingQr", qrCodeDataUrl: "data:image/png;base64,qr", pollToken: "poll-1" });
         return;
       }
+      if (request.url === "/api/settings/mcp-presets/reload") {
+        sendJson(response, { ok: true, message: "MCP config reloaded.", requires_restart: false });
+        return;
+      }
 
       response.statusCode = 404;
       response.end();
@@ -58,11 +80,17 @@ describe("http memmy-agent admin client", () => {
     });
     await expect(client.configureChannel("feishu")).resolves.toEqual({ status: "connected", running: true });
     await expect(client.startWeixinLogin()).resolves.toMatchObject({ status: "pendingQr", pollToken: "poll-1" });
+    await expect(client.reloadMcpConfig()).resolves.toEqual({
+      ok: true,
+      message: "MCP config reloaded.",
+      requires_restart: false
+    });
     expect(requests).toEqual([
       { method: "GET", path: "/webui/bootstrap", authorization: undefined },
       { method: "GET", path: "/api/channels/status", authorization: "Bearer boot-token" },
       { method: "POST", path: "/api/channels/feishu/configure", authorization: "Bearer boot-token" },
-      { method: "POST", path: "/api/channels/weixin/login/start", authorization: "Bearer boot-token" }
+      { method: "POST", path: "/api/channels/weixin/login/start", authorization: "Bearer boot-token" },
+      { method: "POST", path: "/api/settings/mcp-presets/reload", authorization: "Bearer boot-token" }
     ]);
   });
 

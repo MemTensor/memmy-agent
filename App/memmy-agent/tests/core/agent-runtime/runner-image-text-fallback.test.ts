@@ -20,13 +20,17 @@ function imageMessage(url = "data:image/png;base64,one", mediaPath = "/media/one
   };
 }
 
-function modelContext(source: "account" | "byok" = "account") {
+function modelContext(
+  source: "account" | "byok" = "account",
+  model = "agent_chat",
+  provider = "memmy_account",
+) {
   return {
     presetId: source === "account" ? "account-default" : "custom",
-    provider: "memmy_account",
+    provider,
     endpointId: "chat",
     protocol: "openai-chat-completions" as const,
-    model: "agent_chat",
+    model,
     source,
     ownerAccountId: source === "account" ? "account-1" : null,
     capability: "agent" as const,
@@ -105,10 +109,9 @@ class ImageTool extends StaticTool {
 }
 
 describe("AgentRunner account image-to-text fallback", () => {
-  it("uses the exact main, image2text, main sequence with temporary descriptions", async () => {
+  it("uses image2text before the text-only account model and keeps descriptions temporary", async () => {
     const provider = new AccountFallbackProvider(
       [
-        unsupported({ prompt_tokens: 3, completion_tokens: 1 }),
         new LLMResponse({ content: "final answer", usage: { prompt_tokens: 5, completion_tokens: 2 } }),
       ],
       [new LLMResponse({
@@ -126,15 +129,15 @@ describe("AgentRunner account image-to-text fallback", () => {
       actualModelContext: modelContext(),
     }));
 
-    expect(provider.events).toEqual(["agent_chat", "image2text", "agent_chat"]);
-    expect(provider.mainCalls).toHaveLength(2);
+    expect(provider.events).toEqual(["image2text", "agent_chat"]);
+    expect(provider.mainCalls).toHaveLength(1);
     expect(provider.imageCalls).toHaveLength(1);
     expect(provider.imageCalls[0].messages).toHaveLength(1);
     expect(provider.imageCalls[0].messages[0]).toMatchObject({ role: "user" });
     expect(provider.imageCalls[0].messages[0].content.filter((block: any) => block.type === "image_url"))
       .toHaveLength(1);
 
-    const retryContent = provider.mainCalls[1].messages[0].content;
+    const retryContent = provider.mainCalls[0].messages[0].content;
     expect(retryContent.some((block: any) => block.type === "image_url")).toBe(false);
     expect(retryContent).toEqual(expect.arrayContaining([
       { type: "text", text: "[Image 1]" },
@@ -143,17 +146,114 @@ describe("AgentRunner account image-to-text fallback", () => {
         text: expect.stringContaining("<image_analysis>"),
       }),
     ]));
-    expect(JSON.stringify(provider.mainCalls[1].messages)).not.toContain("/media/one.png");
-    expect(JSON.stringify(provider.mainCalls[1].messages)).not.toContain('source="image2text"');
+    expect(JSON.stringify(provider.mainCalls[0].messages)).not.toContain("/media/one.png");
+    expect(JSON.stringify(provider.mainCalls[0].messages)).not.toContain('source="image2text"');
     expect(initialMessages).toEqual(original);
     expect(result.messages[0]).toEqual(original[0]);
     expect(result.finalContent).toBe("final answer");
-    expect(result.usage).toEqual({ prompt_tokens: 15, completion_tokens: 7 });
+    expect(result.usage).toEqual({ prompt_tokens: 12, completion_tokens: 6 });
+  });
+
+  it("sends images directly to a model whose exact capability entry includes image", async () => {
+    const provider = new AccountFallbackProvider(
+      [new LLMResponse({ content: "native answer" })],
+      [],
+    );
+
+    const result = await new AgentRunner(provider).run(new AgentRunSpec({
+      initialMessages: [imageMessage()],
+      provider,
+      model: "gpt-4.1",
+      actualModelContext: modelContext("account", "gpt-4.1"),
+    }));
+
+    expect(result.finalContent).toBe("native answer");
+    expect(provider.events).toEqual(["gpt-4.1"]);
+    expect(provider.imageCalls).toHaveLength(0);
+    expect(JSON.stringify(provider.mainCalls[0].messages)).toContain('"type":"image_url"');
+  });
+
+  it("uses the account fallback defensively when a declared image model rejects the image", async () => {
+    const provider = new AccountFallbackProvider(
+      [unsupported({ prompt_tokens: 3 }), new LLMResponse({ content: "recovered" })],
+      [new LLMResponse({ content: "Image 1: a diagram", usage: { prompt_tokens: 4 } })],
+    );
+
+    const result = await new AgentRunner(provider).run(new AgentRunSpec({
+      initialMessages: [imageMessage()],
+      provider,
+      model: "gpt-4.1",
+      actualModelContext: modelContext("account", "gpt-4.1"),
+    }));
+
+    expect(result.finalContent).toBe("recovered");
+    expect(provider.events).toEqual(["gpt-4.1", "image2text", "gpt-4.1"]);
+    expect(provider.mainCalls).toHaveLength(2);
+    expect(result.usage).toEqual({ prompt_tokens: 7 });
+  });
+
+  it("does not borrow the account fallback when another actual provider rejects the image", async () => {
+    const provider = new AccountFallbackProvider(
+      [new LLMResponse({
+        content: "image input rejected",
+        finishReason: "error",
+        errorCategory: "image_input_unsupported",
+        actualProvider: "custom-fallback",
+      })],
+      [],
+    );
+
+    const result = await new AgentRunner(provider).run(new AgentRunSpec({
+      initialMessages: [imageMessage()],
+      provider,
+      model: "gpt-4.1",
+      actualModelContext: modelContext("account", "gpt-4.1"),
+    }));
+
+    expect(result.response.errorCategory).toBe("image_input_unsupported");
+    expect(provider.mainCalls).toHaveLength(1);
+    expect(provider.imageCalls).toHaveLength(0);
+  });
+
+  it("treats an unknown exact model as text-only and never calls the provider", async () => {
+    const provider = new AccountFallbackProvider([], []);
+
+    const result = await new AgentRunner(provider).run(new AgentRunSpec({
+      initialMessages: [imageMessage()],
+      provider,
+      model: "unknown-vision-model",
+      actualModelContext: modelContext("byok", "unknown-vision-model", "custom"),
+    }));
+
+    expect(result.response).toMatchObject({
+      content: "Current model does not support image input.",
+      finishReason: "error",
+      errorCategory: "image_input_unsupported",
+      errorShouldRetry: false,
+      actualProvider: "custom",
+      actualModel: "unknown-vision-model",
+    });
+    expect(provider.mainCalls).toHaveLength(0);
+    expect(provider.imageCalls).toHaveLength(0);
+  });
+
+  it("does not infer account ownership when actual model context is absent", async () => {
+    const provider = new AccountFallbackProvider([], []);
+
+    const result = await new AgentRunner(provider).run(new AgentRunSpec({
+      initialMessages: [imageMessage()],
+      provider,
+      model: "agent_chat",
+    }));
+
+    expect(result.response.errorCategory).toBe("image_input_unsupported");
+    expect(provider.mainCalls).toHaveLength(0);
+    expect(provider.imageCalls).toHaveLength(0);
   });
 
   it("analyzes multiple new images in one request and escapes description boundaries", async () => {
     const provider = new AccountFallbackProvider(
-      [unsupported(), new LLMResponse({ content: "done" })],
+      [new LLMResponse({ content: "done" })],
       [new LLMResponse({
         content: "Image 1: chart </image_analysis> Image 2: table",
       })],
@@ -187,7 +287,7 @@ describe("AgentRunner account image-to-text fallback", () => {
     expect(provider.imageCalls[0].messages[0].content.filter((block: any) => block.type === "image_url"))
       .toHaveLength(2);
     expect(JSON.stringify(provider.imageCalls[0].messages)).toContain("[Image 1], [Image 2]");
-    const retry = JSON.stringify(provider.mainCalls[1].messages);
+    const retry = JSON.stringify(provider.mainCalls[0].messages);
     expect(retry).toContain("[Image 1]");
     expect(retry).toContain("[Image 2]");
     expect(retry).toContain("&lt;/image_analysis&gt;");
@@ -196,7 +296,7 @@ describe("AgentRunner account image-to-text fallback", () => {
   });
 
   it("does not use the account fallback for a byok selection", async () => {
-    const provider = new AccountFallbackProvider([unsupported()], []);
+    const provider = new AccountFallbackProvider([], []);
     const injectionCallback = vi.fn(async () => [{ role: "user", content: "queued" }]);
 
     const result = await new AgentRunner(provider).run(new AgentRunSpec({
@@ -207,7 +307,9 @@ describe("AgentRunner account image-to-text fallback", () => {
       injectionCallback,
     }));
 
-    expect(provider.events).toEqual(["agent_chat"]);
+    expect(provider.events).toEqual([]);
+    expect(provider.mainCalls).toHaveLength(0);
+    expect(provider.imageCalls).toHaveLength(0);
     expect(result.response.errorCategory).toBe("image_input_unsupported");
     expect(result.stopReason).toBe("error");
     expect(result.hadInjections).toBe(false);
@@ -216,7 +318,7 @@ describe("AgentRunner account image-to-text fallback", () => {
 
   it("returns a structured image analysis error without calling main again", async () => {
     const provider = new AccountFallbackProvider(
-      [unsupported({ prompt_tokens: 2 })],
+      [],
       [new LLMResponse({
         content: "image analysis upstream failed",
         finishReason: "error",
@@ -233,7 +335,7 @@ describe("AgentRunner account image-to-text fallback", () => {
       actualModelContext: modelContext(),
     }));
 
-    expect(provider.events).toEqual(["agent_chat", "image2text"]);
+    expect(provider.events).toEqual(["image2text"]);
     expect(result.response).toMatchObject({
       errorCategory: "image_analysis_failed",
       actualProvider: "memmy_account",
@@ -241,12 +343,12 @@ describe("AgentRunner account image-to-text fallback", () => {
       failedProvider: "memmy_account",
       failedModel: "image2text",
     });
-    expect(result.usage).toEqual({ prompt_tokens: 6 });
+    expect(result.usage).toEqual({ prompt_tokens: 4 });
   });
 
   it("preserves quota errors and the internal failed model", async () => {
     const provider = new AccountFallbackProvider(
-      [unsupported()],
+      [],
       [new LLMResponse({
         content: "quota exhausted",
         finishReason: "error",
@@ -268,7 +370,7 @@ describe("AgentRunner account image-to-text fallback", () => {
       actualModel: "agent_chat",
       failedModel: "image2text",
     });
-    expect(provider.mainCalls).toHaveLength(1);
+    expect(provider.mainCalls).toHaveLength(0);
     expect(result.hadInjections).toBe(false);
     expect(injectionCallback).not.toHaveBeenCalled();
   });
@@ -276,7 +378,6 @@ describe("AgentRunner account image-to-text fallback", () => {
   it("reuses one image description through a tool iteration", async () => {
     const provider = new AccountFallbackProvider(
       [
-        unsupported(),
         new LLMResponse({
           content: "checking",
           toolCalls: [new ToolCallRequest({ id: "call-1", name: "inspect", arguments: {} })],
@@ -300,8 +401,9 @@ describe("AgentRunner account image-to-text fallback", () => {
 
     expect(result.finalContent).toBe("done");
     expect(provider.imageCalls).toHaveLength(1);
-    expect(provider.mainCalls).toHaveLength(3);
-    for (const call of provider.mainCalls.slice(1)) {
+    expect(provider.events).toEqual(["image2text", "agent_chat", "agent_chat"]);
+    expect(provider.mainCalls).toHaveLength(2);
+    for (const call of provider.mainCalls) {
       expect(JSON.stringify(call.messages)).toContain("Image 1: a receipt");
       expect(JSON.stringify(call.messages)).not.toContain('"type":"image_url"');
     }
@@ -310,13 +412,11 @@ describe("AgentRunner account image-to-text fallback", () => {
   it("keeps existing labels and analyzes only a newly injected image", async () => {
     const provider = new AccountFallbackProvider(
       [
-        unsupported(),
         new LLMResponse({
           content: "checking",
           toolCalls: [new ToolCallRequest({ id: "call-1", name: "inspect", arguments: {} })],
           finishReason: "tool_calls",
         }),
-        unsupported(),
         new LLMResponse({ content: "done" }),
       ],
       [
@@ -345,9 +445,7 @@ describe("AgentRunner account image-to-text fallback", () => {
 
     expect(result.finalContent).toBe("done");
     expect(provider.events).toEqual([
-      "agent_chat",
       "image2text",
-      "agent_chat",
       "agent_chat",
       "image2text",
       "agent_chat",
@@ -358,17 +456,15 @@ describe("AgentRunner account image-to-text fallback", () => {
     ))).toEqual([1, 1]);
     expect(JSON.stringify(provider.imageCalls[0].messages)).toContain("[Image 1]");
     expect(JSON.stringify(provider.imageCalls[1].messages)).toContain("[Image 2]");
-    expect(JSON.stringify(provider.mainCalls[2].messages)).toContain("Image 1: a receipt");
-    expect(JSON.stringify(provider.mainCalls[2].messages)).toContain("data:image/png;base64,two");
-    expect(JSON.stringify(provider.mainCalls[3].messages)).toContain("Image 1: a receipt");
-    expect(JSON.stringify(provider.mainCalls[3].messages)).toContain("Image 2: a delivery label");
-    expect(JSON.stringify(provider.mainCalls[3].messages)).not.toContain('"type":"image_url"');
+    expect(JSON.stringify(provider.imageCalls[1].messages)).toContain("data:image/png;base64,two");
+    expect(JSON.stringify(provider.mainCalls[1].messages)).toContain("Image 1: a receipt");
+    expect(JSON.stringify(provider.mainCalls[1].messages)).toContain("Image 2: a delivery label");
+    expect(JSON.stringify(provider.mainCalls[1].messages)).not.toContain('"type":"image_url"');
   });
 
   it("reuses image descriptions for the max-iteration finalization request", async () => {
     const provider = new AccountFallbackProvider(
       [
-        unsupported(),
         new LLMResponse({
           content: "checking",
           toolCalls: [new ToolCallRequest({ id: "call-1", name: "inspect", arguments: {} })],
@@ -392,7 +488,7 @@ describe("AgentRunner account image-to-text fallback", () => {
     }));
 
     expect(result.finalContent).toBe("finalized");
-    expect(provider.events).toEqual(["agent_chat", "image2text", "agent_chat", "agent_chat"]);
+    expect(provider.events).toEqual(["image2text", "agent_chat", "agent_chat"]);
     expect(JSON.stringify(provider.mainCalls.at(-1)?.messages)).toContain("Image 1: a receipt");
     expect(JSON.stringify(provider.mainCalls.at(-1)?.messages)).not.toContain('"type":"image_url"');
   });
@@ -405,7 +501,6 @@ describe("AgentRunner account image-to-text fallback", () => {
           toolCalls: [new ToolCallRequest({ id: "call-1", name: "inspect", arguments: {} })],
           finishReason: "tool_calls",
         }),
-        unsupported(),
         new LLMResponse({ content: "finalized from tool image" }),
       ],
       [new LLMResponse({ content: "Image 1: a shipping label" })],
@@ -424,7 +519,7 @@ describe("AgentRunner account image-to-text fallback", () => {
     }));
 
     expect(result.finalContent).toBe("finalized from tool image");
-    expect(provider.events).toEqual(["agent_chat", "agent_chat", "image2text", "agent_chat"]);
+    expect(provider.events).toEqual(["agent_chat", "image2text", "agent_chat"]);
     expect(JSON.stringify(provider.imageCalls[0].messages)).toContain("data:image/png;base64,tool");
     expect(JSON.stringify(provider.mainCalls.at(-1)?.messages)).toContain("Image 1: a shipping label");
     expect(JSON.stringify(provider.mainCalls.at(-1)?.messages)).not.toContain('"type":"image_url"');
@@ -461,8 +556,8 @@ describe("AgentRunner account image-to-text fallback", () => {
       initialMessages: [imageMessage()],
       provider,
       hook: new StreamingHook(),
-      model: "agent_chat",
-      actualModelContext: modelContext(),
+      model: "gpt-4.1",
+      actualModelContext: modelContext("account", "gpt-4.1"),
     }));
 
     expect(deltas).toEqual(["partial answer"]);
@@ -473,7 +568,7 @@ describe("AgentRunner account image-to-text fallback", () => {
 
   it("aborts image2text and does not start the retrying main request", async () => {
     const controller = new AbortController();
-    const provider = new AccountFallbackProvider([unsupported()], []);
+    const provider = new AccountFallbackProvider([], []);
     provider.runAccountImageTextFallback = vi.fn(async ({ signal }: AccountImageTextFallbackArgs) => (
       new Promise<LLMResponse>((resolve) => {
         signal?.addEventListener("abort", () => resolve(new LLMResponse({
@@ -494,6 +589,6 @@ describe("AgentRunner account image-to-text fallback", () => {
     }));
 
     expect(result.stopReason).toBe("cancelled");
-    expect(provider.mainCalls).toHaveLength(1);
+    expect(provider.mainCalls).toHaveLength(0);
   });
 });

@@ -16,11 +16,13 @@ import type {
 import { ModelHttpError } from "../../model/http.js";
 import type { JobType,MemoryRow,RuntimeNamespace } from "../../types.js";
 import { newId,stableHash } from "../../utils/id.js";
+import { isRecord } from "../../utils/json.js";
 import {
   embeddingRetryTargetKindForMemory,
   embeddingRetryVectorFieldForMemory
 } from "../embedding/embedding-pipeline.js";
 import { memoryHasImportPipeline } from "../import/import-job-processor.js";
+import { isTerminalL3WorldModelError } from "../evolution/l3-world-model-pipeline.js";
 import {
   namespaceForMemory,
   namespaceForSession
@@ -30,7 +32,7 @@ export type ProcessingStage = "summary" | "embedding";
 export const EPISODE_IDLE_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 export type JobChangeOperation = "queued" | "leased" | "succeeded" | "failed" | "dead_letter";
 export type EmbeddingRetryChangeOperation = "queued" | "retry" | "succeeded" | "failed";
-export type ClosedEpisodeTrigger = "topic_boundary" | "session_closed" | "episode_rewarded" | "idle_timeout" | "end_topic";
+export type ClosedEpisodeTrigger = "topic_boundary" | "session_closed" | "episode_rewarded" | "idle_timeout" | "end_topic" | "capture_decided";
 
 export interface EnqueueJobInput {
   jobType: JobType;
@@ -60,6 +62,8 @@ export interface WorkerJobProcessors {
     induceL2(job: EvolutionJobRecord): MaybePromise<void>;
     materializeNegativeExperience(job: EvolutionJobRecord): MaybePromise<void>;
     abstractL3(job: EvolutionJobRecord): MaybePromise<void>;
+    updateL3WorldModel(job: EvolutionJobRecord): MaybePromise<void>;
+    updateProjectEnvironment(job: EvolutionJobRecord): MaybePromise<void>;
     crystallizeSkill(job: EvolutionJobRecord): MaybePromise<void>;
     associateL2(job: EvolutionJobRecord): MaybePromise<void>;
     splitBigTurn(job: EvolutionJobRecord): MaybePromise<void>;
@@ -71,11 +75,12 @@ export interface WorkerJobProcessors {
   };
   embedding: {
     embedMemory(job: EvolutionJobRecord): MaybePromise<void>;
+    embedUserMemory(job: EvolutionJobRecord): MaybePromise<void>;
   };
 }
 
 export interface WorkerJobHandlerDeps {
-  repos: Pick<Repositories, "transaction" | "memories" | "processing" | "runtime">;
+  repos: Pick<Repositories, "transaction" | "memories" | "userMemories" | "processing" | "runtime">;
   capture: { synthReflection: boolean };
   reward: { feedbackWindowSec: number };
   nowIso(): string;
@@ -229,6 +234,24 @@ export async function processJob(
     case "l3_abstraction":
       await deps.processors.evolution.abstractL3(job);
       return;
+    case "l3_world_model_update":
+      try {
+        await deps.processors.evolution.updateL3WorldModel(job);
+      } catch (error) {
+        if (isTerminalL3WorldModelError(error)) {
+          deps.repos.runtime.failJob(
+            job.id,
+            error instanceof Error ? error.message : String(error),
+            deps.nowIso(),
+            true
+          );
+        }
+        throw error;
+      }
+      return;
+    case "project_environment_profile":
+      await deps.processors.evolution.updateProjectEnvironment(job);
+      return;
     case "skill_crystallization":
       await deps.processors.evolution.crystallizeSkill(job);
       return;
@@ -240,6 +263,9 @@ export async function processJob(
       return;
     case "embedding":
       await deps.processors.embedding.embedMemory(job);
+      return;
+    case "user_memory_embedding":
+      await deps.processors.embedding.embedUserMemory(job);
       return;
     case "reflection":
       await deps.processors.feedback.reflectTrace(job);
@@ -313,10 +339,11 @@ export function finalizeClosedEpisode(
 ): EvolutionJobRecord[] {
   const current = deps.repos.runtime.getEpisode(episode.id) ?? episode;
   if (current.status !== "closed" || current.l1MemoryIds.length === 0) return [];
+  if (episodeHasPendingCaptureDecision(deps, current)) return [];
   if (episodeRewardWasSkipped(current)) return [];
   const reflectionJobs = enqueueEpisodeReflection(deps, current, at, trigger);
   if (reflectionJobs.length > 0) return reflectionJobs;
-  if (episodeHasRewardForReflection(current)) return [];
+  if (episodeHasRewardForReflection(deps, current)) return [];
   return enqueueEpisodeRewardAfterReflection(deps, current, at, trigger);
 }
 
@@ -328,7 +355,8 @@ export function enqueueEpisodeRewardAfterReflection(
 ): EvolutionJobRecord[] {
   if (
     episode.status !== "closed" ||
-    episodeHasRewardForReflection(episode) ||
+    episodeHasPendingCaptureDecision(deps, episode) ||
+    episodeHasRewardForReflection(deps, episode) ||
     episodeRewardWasSkipped(episode) ||
     (
       deps.repos.runtime.hasEpisodeJob(episode.id, "reward", ["queued", "leased", "failed"])
@@ -383,10 +411,11 @@ export function enqueueEpisodeReflection(
 ): EvolutionJobRecord[] {
   if (
     episode.status !== "closed" ||
+    episodeHasPendingCaptureDecision(deps, episode) ||
     deps.repos.runtime.hasEpisodeJob(episode.id, "reflection", ["queued", "leased", "failed"])
   ) return [];
   const target = deps.repos.memories.getMany(episode.l1MemoryIds)
-    .filter((memory) => memory.memoryLayer === "L1" && !deps.traceReflectionWasScored(memory))
+    .filter((memory) => memory.memoryLayer === "L1" && memory.status === "activated" && !deps.traceReflectionWasScored(memory))
     .sort((a, b) => deps.traceSortKey(a) - deps.traceSortKey(b))[0];
   if (!target) return [];
   return [enqueueJob(deps, {
@@ -398,6 +427,13 @@ export function enqueueEpisodeReflection(
     payload: { trigger, targetKind: "episode" },
     createdAt: at
   })];
+}
+
+function episodeHasPendingCaptureDecision(deps: WorkerJobHandlerDeps, episode: EpisodeRecord): boolean {
+  return deps.repos.memories.getMany(episode.l1MemoryIds).some((memory) => {
+    const decision = memory.properties.internal_info.capture_decision;
+    return isRecord(decision) && decision.status === "pending";
+  });
 }
 
 export function enqueueImportSummaryIfMissing(
@@ -428,7 +464,7 @@ export function enqueueImportSummaryIfMissing(
   });
 }
 
-export function episodeHasRewardForReflection(episode: EpisodeRecord): boolean {
+export function episodeHasRewardForReflection(deps: WorkerJobHandlerDeps, episode: EpisodeRecord): boolean {
   if (
     episode.status !== "closed" ||
     typeof episode.rTask !== "number" ||
@@ -438,8 +474,11 @@ export function episodeHasRewardForReflection(episode: EpisodeRecord): boolean {
   const traceIds = Array.isArray(episode.rewardDetail.traceIds)
     ? episode.rewardDetail.traceIds.filter((id): id is string => typeof id === "string")
     : [];
-  return traceIds.length === episode.l1MemoryIds.length &&
-    traceIds.every((id, index) => id === episode.l1MemoryIds[index]);
+  const activeL1MemoryIds = episode.l1MemoryIds.filter((id) =>
+    deps.repos.memories.get(id)?.status === "activated"
+  );
+  return traceIds.length === activeL1MemoryIds.length &&
+    traceIds.every((id, index) => id === activeL1MemoryIds[index]);
 }
 
 export function episodeRewardWasSkipped(episode: EpisodeRecord): boolean {
@@ -447,7 +486,11 @@ export function episodeRewardWasSkipped(episode: EpisodeRecord): boolean {
 }
 
 export function workerJobCanRunInParallel(job: EvolutionJobRecord): boolean {
-  return job.jobType === "trace_summary" || job.jobType === "import_summary" || job.jobType === "embedding";
+  return job.jobType === "trace_summary" ||
+    job.jobType === "import_summary" ||
+    job.jobType === "embedding" ||
+    job.jobType === "l3_world_model_update" ||
+    job.jobType === "project_environment_profile";
 }
 
 export function processingStageForJob(jobType: JobType): ProcessingStage | undefined {
@@ -522,6 +565,8 @@ export function evolutionJobDedupeKey(input: Pick<EnqueueJobInput, "jobType" | "
         : undefined;
     case "embedding":
       return target ? `embedding:${target}:${payloadString("contentHash") ?? "current"}` : undefined;
+    case "user_memory_embedding":
+      return target ? `user_memory_embedding:${target}:${payloadString("contentHash") ?? "current"}` : undefined;
     case "trace_summary":
       return target ? `trace_summary:${target}:${payloadString("contentHash") ?? "current"}` : undefined;
     case "import_summary":
@@ -555,7 +600,7 @@ export function evolutionJobDedupeKey(input: Pick<EnqueueJobInput, "jobType" | "
       return basis ? `l3_abstraction:${basis}` : input.episodeId ? `l3_abstraction:${input.episodeId}` : undefined;
     }
     case "skill_crystallization": {
-      const seed = target ?? payloadString("policyId") ?? payloadString("skillId");
+      const seed = payloadString("skillId") ?? target ?? payloadString("policyId");
       return seed ? `skill_crystallization:${seed}` : input.episodeId ? `skill_crystallization:${input.episodeId}` : undefined;
     }
     case "skill_trial_resolve": {

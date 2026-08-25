@@ -167,7 +167,7 @@ describe("MemoryService / session / episode relation", () => {
     expect(completed.closedEpisodeIds).toEqual([first.episodeId]);
     expect(completed.l1MemoryId).toBe("");
     expect(completed.l1MemoryIds).toEqual([]);
-    expect(completed.jobs.map((job) => job.jobType)).toContain("reflection");
+    expect(completed.jobs.map((job) => job.jobType)).not.toContain("reflection");
     expect(completed.jobs.map((job) => job.jobType)).not.toContain("episode_idle_close");
     const detail = service.getMemory(first.episodeId);
     expect(detail).toMatchObject({

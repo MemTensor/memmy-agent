@@ -1,6 +1,10 @@
 import type { MemoryRow, RuntimeNamespace, SessionOpenRequest } from "../../types.js";
 import { DEFAULT_NAMESPACE_SOURCE } from "../../types.js";
 import type { RawTurnRecord, SessionRecord } from "../../storage/repositories.js";
+import {
+  resolveWorkspaceIdentity,
+  type ResolvedWorkspaceIdentity
+} from "./workspace-identity.js";
 
 export function normalizeNamespace(namespace?: RuntimeNamespace): RuntimeNamespace & { userId: string; source: string; profileId: string } {
   return {
@@ -24,6 +28,16 @@ export function sessionScopeForOpenRequest(request: SessionOpenRequest, namespac
     workspaceId: request.workspaceId ?? request.namespace?.workspaceId,
     workspacePath: request.workspacePath ?? request.namespace?.workspacePath ?? namespace.workspacePath
   };
+}
+
+export function resolveV2WorkspaceIdentityForOpenRequest(
+  request: SessionOpenRequest,
+  namespace: RuntimeNamespace & { userId: string }
+): ResolvedWorkspaceIdentity {
+  return resolveWorkspaceIdentity(namespace.userId, {
+    workspaceUri: request.workspaceUri,
+    workspaceHostId: request.workspaceHostId
+  });
 }
 
 export function namespaceForSession(session: SessionRecord): RuntimeNamespace {

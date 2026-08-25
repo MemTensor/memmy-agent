@@ -15,7 +15,7 @@ afterEach(() => {
 });
 
 describe("Codex hook trust", () => {
-  it("persists and verifies trust for only the two Memmy user hooks", async () => {
+  it("persists and verifies trust for only the five Memmy user hooks", async () => {
     tempDir = mkdtempSync(join(tmpdir(), "memmy-codex-hook-trust-"));
 
     await expect(trustMemmyCodexHooks({
@@ -27,7 +27,7 @@ describe("Codex hook trust", () => {
     })).resolves.toBeUndefined();
   });
 
-  it("rejects success when Codex does not discover both Memmy hooks", async () => {
+  it("rejects success when Codex does not discover every Memmy hook", async () => {
     tempDir = mkdtempSync(join(tmpdir(), "memmy-codex-hook-trust-missing-"));
 
     await expect(trustMemmyCodexHooks({
@@ -36,7 +36,7 @@ describe("Codex hook trust", () => {
       hookCommand: `node '${join(tempDir, "hooks", "memmy-resume-hook.mjs")}'`,
       codexExecutable: process.execPath,
       appServerArguments: ["-e", FAKE_CODEX_APP_SERVER, "missing-stop"]
-    })).rejects.toThrow("Codex did not discover both installed Memmy hooks");
+    })).rejects.toThrow("Codex did not discover every installed Memmy hook");
   });
 });
 
@@ -63,6 +63,9 @@ const hook = (key, eventName, hash, command = "node '" + scriptPath + "'") => ({
 const hooks = () => [
   hook(sourcePath + ":user_prompt_submit:0:0", "userPromptSubmit", "sha256:prompt"),
   ...(missingStop ? [] : [hook(sourcePath + ":stop:0:0", "stop", "sha256:stop")]),
+  hook(sourcePath + ":session_start:0:0", "sessionStart", "sha256:session-start"),
+  hook(sourcePath + ":post_compact:0:0", "postCompact", "sha256:post-compact"),
+  hook(sourcePath + ":session_end:0:0", "sessionEnd", "sha256:session-end"),
   hook(sourcePath + ":pre_tool_use:0:0", "preToolUse", "sha256:unrelated", "node '/tmp/unrelated.mjs'")
 ];
 const respond = (id, result) => process.stdout.write(JSON.stringify({ id, result }) + "\n");
@@ -79,14 +82,20 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   if (message.method === "config/batchWrite") {
     const edit = message.params.edits[0];
     const keys = Object.keys(edit.value).sort();
-    const expected = [sourcePath + ":stop:0:0", sourcePath + ":user_prompt_submit:0:0"].sort();
+    const expected = [
+      sourcePath + ":stop:0:0",
+      sourcePath + ":user_prompt_submit:0:0",
+      sourcePath + ":session_start:0:0",
+      sourcePath + ":post_compact:0:0",
+      sourcePath + ":session_end:0:0"
+    ].sort();
     const valid = edit.keyPath === "hooks.state" &&
       edit.mergeStrategy === "upsert" &&
       message.params.reloadUserConfig === true &&
       JSON.stringify(keys) === JSON.stringify(expected) &&
       edit.value[expected[0]].enabled === true &&
       edit.value[expected[1]].enabled === true &&
-      new Set(keys.map((key) => edit.value[key].trusted_hash)).size === 2;
+      new Set(keys.map((key) => edit.value[key].trusted_hash)).size === 5;
     if (!valid) {
       process.stdout.write(JSON.stringify({ id: message.id, error: { message: "invalid trust write" } }) + "\n");
       return;

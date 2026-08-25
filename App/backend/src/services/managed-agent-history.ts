@@ -118,7 +118,8 @@ export function selectIncrementalManagedMessages(
 function readFileRecords(
   recipe: Extract<ManagedAgentSyncRecipe, { format: "json" | "jsonl" }>
 ): SourceRecord[] {
-  const files = listHistoryFiles(recipe.path, recipe.fileSuffix);
+  const historyPath = resolveManagedAgentHistoryPath(recipe.path, recipe.wslDistro);
+  const files = listHistoryFiles(historyPath, recipe.fileSuffix);
   let totalBytes = 0;
   const records: SourceRecord[] = [];
   for (const filePath of files) {
@@ -128,7 +129,7 @@ function readFileRecords(
       throw new Error("Managed Agent history exceeds 500 MB");
     }
     const raw = fs.readFileSync(filePath, "utf8");
-    const relativePath = path.relative(recipe.path, filePath) || path.basename(filePath);
+    const relativePath = path.relative(historyPath, filePath) || path.basename(filePath);
     const values = recipe.format === "jsonl"
       ? raw.split(/\r?\n/u).filter((line) => line.trim()).map((line, index) =>
         parseObject(JSON.parse(line) as unknown, `${relativePath}:${index + 1}`)
@@ -161,9 +162,7 @@ function readJsonValues(
 function readSqliteRecords(
   recipe: Extract<ManagedAgentSyncRecipe, { format: "sqlite" }>
 ): SourceRecord[] {
-  if (!path.isAbsolute(recipe.path)) {
-    throw new Error("Managed Agent recipe path must be absolute");
-  }
+  const historyPath = resolveManagedAgentHistoryPath(recipe.path, recipe.wslDistro);
   if (!recipe.fields.messageId || !recipe.fields.conversationId) {
     throw new Error("SQLite sync recipes require stable messageId and conversationId fields");
   }
@@ -172,7 +171,7 @@ function readSqliteRecords(
     throw new Error("Managed Agent SQLite recipe must contain one read-only SELECT statement");
   }
 
-  const db = new DatabaseSync(recipe.path, { readOnly: true });
+  const db = new DatabaseSync(historyPath, { readOnly: true });
   try {
     const rows = db.prepare(query).all() as unknown[];
     return rows.map((row, index) => ({
@@ -183,6 +182,39 @@ function readSqliteRecords(
   } finally {
     db.close();
   }
+}
+
+/** Resolves a native history path into the filesystem namespace used by the desktop backend. */
+export function resolveManagedAgentHistoryPath(
+  inputPath: string,
+  wslDistro: string | undefined,
+  platform: NodeJS.Platform = process.platform
+): string {
+  if (!wslDistro) {
+    if (!path.isAbsolute(inputPath)) {
+      throw new Error("Managed Agent recipe path must be absolute");
+    }
+    return inputPath;
+  }
+  if (platform !== "win32") {
+    throw new Error("Managed Agent WSL recipes require the Windows desktop backend");
+  }
+  if (!path.posix.isAbsolute(inputPath)) {
+    throw new Error("Managed Agent WSL recipe path must be an absolute Linux path");
+  }
+  const distribution = normalizeWslDistributionName(wslDistro);
+  const relativePath = path.posix.normalize(inputPath).slice(1);
+  return relativePath
+    ? path.win32.join(`\\\\wsl.localhost\\${distribution}`, ...relativePath.split("/"))
+    : `\\\\wsl.localhost\\${distribution}\\`;
+}
+
+function normalizeWslDistributionName(value: string): string {
+  const distribution = value.trim();
+  if (!distribution || /[\\/\0]/u.test(distribution)) {
+    throw new Error("Managed Agent WSL distribution name is invalid");
+  }
+  return distribution;
 }
 
 function listHistoryFiles(inputPath: string, fileSuffix: string | undefined): string[] {

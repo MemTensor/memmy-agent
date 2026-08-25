@@ -541,6 +541,74 @@ describe("FallbackProvider failover", () => {
     expect(provider.primaryTrippedAt).toBeNull();
   });
 
+  it("skips a text-only fallback candidate for a retryable image request", async () => {
+    const primaryError = makeResponse("primary timeout", "error", { errorKind: "timeout" });
+    const primary = new FakeProvider("primary", primaryError);
+    const factory = vi.fn(() => new FakeProvider("fallback", makeResponse("must not run")));
+    const provider = new FallbackProvider({
+      primary,
+      fallbackPresets: [fallback("agent_chat")],
+      providerFactory: factory,
+    });
+
+    const result = await provider.chat({ messages: [{
+      role: "user",
+      content: [{ type: "image_url", image_url: { url: "data:image/png;base64,one" } }],
+    }] });
+
+    expect(result).toBe(primaryError);
+    expect(factory).not.toHaveBeenCalled();
+  });
+
+  it("skips incompatible candidates and calls the first image-capable fallback", async () => {
+    const primary = new FakeProvider(
+      "primary",
+      makeResponse("primary timeout", "error", { errorKind: "timeout" }),
+    );
+    const imageFallback = new FakeProvider("image-fallback", makeResponse("fallback ok"));
+    const factory = vi.fn((preset: { model: string }) => {
+      expect(preset.model).toBe("gpt-4.1");
+      return imageFallback;
+    });
+    const provider = new FallbackProvider({
+      primary,
+      fallbackPresets: [fallback("agent_chat"), fallback("gpt-4.1")],
+      providerFactory: factory,
+    });
+
+    const result = await provider.chat({ messages: [{
+      role: "user",
+      content: [{ type: "image_url", image_url: { url: "data:image/png;base64,one" } }],
+    }] });
+
+    expect(result.content).toBe("fallback ok");
+    expect(factory).toHaveBeenCalledTimes(1);
+    expect(imageFallback.chatCalls).toHaveLength(1);
+    expect(imageFallback.chatCalls[0].model).toBe("gpt-4.1");
+  });
+
+  it("keeps the circuit-open error when every image fallback is incompatible", async () => {
+    const primary = new FakeProvider("primary", makeResponse("unused"));
+    const factory = vi.fn();
+    const provider = new FallbackProvider({
+      primary,
+      fallbackPresets: [fallback("agent_chat")],
+      providerFactory: factory,
+    });
+    provider.primaryFailures = 3;
+    provider.primaryTrippedAt = Date.now();
+
+    const result = await provider.chat({ messages: [{
+      role: "user",
+      content: [{ type: "image_url", image_url: { url: "data:image/png;base64,one" } }],
+    }] });
+
+    expect(result.finishReason).toBe("error");
+    expect(result.content).toContain("circuit open and no fallbacks available");
+    expect(primary.chatCalls).toHaveLength(0);
+    expect(factory).not.toHaveBeenCalled();
+  });
+
   it("does not fail over on auth errors", async () => {
     const primary = new FakeProvider(
       "primary",

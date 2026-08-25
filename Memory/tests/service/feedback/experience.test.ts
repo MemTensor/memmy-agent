@@ -100,10 +100,8 @@ describe("MemoryService / feedback / experience", () => {
       rationale: "Verifier feedback: passed. The SEC 13F parsing result is correct.",
       rawPayload: { source: "verifier", score: 1 }
     });
-    expect(ok.jobs.map((job) => job.jobType)).toEqual(expect.arrayContaining([
-      "skill_crystallization",
-      "l3_abstraction"
-    ]));
+    expect(ok.jobs.map((job) => job.jobType)).not.toContain("skill_crystallization");
+    expect(ok.jobs.map((job) => job.jobType)).not.toContain("l3_abstraction");
 
     const created = db.db.prepare(
       `SELECT id, memory_value, properties_json

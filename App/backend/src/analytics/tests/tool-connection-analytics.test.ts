@@ -54,6 +54,7 @@ describe("tool-connection-analytics", () => {
     const fetchImpl = vi.fn(async () => new Response(null, { status: 204 }));
     const analytics = createToolConnectionAnalytics({
       getClientId: () => "client-1",
+      getInstallationId: () => "install-1",
       getUserId: () => "user-1",
       getUserMode: () => "account",
       appEnv: "dev",
@@ -84,19 +85,28 @@ describe("tool-connection-analytics", () => {
 
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     const body = JSON.parse(String(fetchImpl.mock.calls[0]?.[1]?.body));
-    expect(body.clientId).toBe("client-1");
-    expect(body.userId).toBe("user-1");
+    expect(body).toMatchObject({
+      clientId: "client-1",
+      userId: "user-1",
+      installationId: "install-1",
+    });
     expect(body.events).toHaveLength(2);
     expect(body.events.map((event: { eventName: string }) => event.eventName)).toEqual([
       TOOL_CONNECTION_ANALYTICS_EVENTS.connection,
       TOOL_CONNECTION_ANALYTICS_EVENTS.connection,
     ]);
     expect(body.events[0]?.params).toMatchObject({
+      engagement_time_msec: 100,
+      user_id: "user-1",
+      user_mode: "account",
       source: "memmy-backend",
+      app_env: "dev",
+      app_edition: "cn",
       surface: "channel",
       toolkit: "wechat",
       event: "connected",
       occurred_at_ms: 100,
+      timestamp_micros: expect.any(Number),
     });
     expect(body.events[1]?.params).toMatchObject({
       surface: "integration",

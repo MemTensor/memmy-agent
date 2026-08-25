@@ -11,10 +11,9 @@ describe("coding tool descriptions", () => {
     const editFile = new EditFileTool().description.toLowerCase();
     const writeFile = new WriteFileTool().description.toLowerCase();
 
-    expect(applyPatch).toContain("default tool for code edits");
-    expect(applyPatch).toContain("multi-file");
-    expect(applyPatch).toContain("dryrun=true");
-    expect(applyPatch).toContain("edit_file only for small exact replacements");
+    expect(applyPatch).toBe(
+      "apply a patch to add, update, delete, or move one or more workspace-relative files.",
+    );
 
     expect(editFile).toContain("small, exact replacement");
     expect(editFile).toContain("copied from read_file");
@@ -22,6 +21,18 @@ describe("coding tool descriptions", () => {
 
     expect(writeFile).toContain("replace an entire file");
     expect(writeFile).toContain("prefer apply_patch");
+  });
+
+  it("keeps the patch protocol in the input parameter description", () => {
+    const tool = new ApplyPatchTool();
+    const description = tool.parameters.properties.input.description;
+
+    expect(description).toContain("*** Begin Patch");
+    expect(description).toContain("*** Add File:");
+    expect(description).toContain("*** Update File:");
+    expect(description).toContain("*** Delete File:");
+    expect(description).toContain("*** Move to:");
+    expect(description).toContain("*** End of File");
   });
 
   it("steers discovery and shell usage", () => {

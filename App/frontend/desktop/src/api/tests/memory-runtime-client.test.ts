@@ -12,7 +12,7 @@ describe("memory runtime client", () => {
   });
 
   it("declares the memory runtime endpoints exposed under /api/v1", () => {
-    expect(MEMORY_RUNTIME_ENDPOINTS).toHaveLength(18);
+    expect(MEMORY_RUNTIME_ENDPOINTS).toHaveLength(19);
     expect(MEMORY_RUNTIME_ENDPOINTS).toEqual([
       "GET /api/v1/health",
       "POST /api/v1/admin/reload-config",
@@ -26,6 +26,7 @@ describe("memory runtime client", () => {
       "POST /api/v1/memory/:id/processing/retry",
       "GET /api/v1/memory/:id",
       "DELETE /api/v1/memory/:id",
+      "GET /api/v1/memory/recalls/:queryId",
       "GET /api/v1/memory/logs",
       "GET /api/v1/panel/overview",
       "GET /api/v1/panel/analysis",

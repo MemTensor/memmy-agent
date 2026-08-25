@@ -13,6 +13,8 @@ import { renderMemmyPluginSkillManifest } from "../templates/memmy-plugin.js";
 import { renderMemmySkillBootstrapManifest } from "../templates/memmy-skill-directory.js";
 import type { MemoryPluginConflict, SkillManifest, SkillTarget } from "../types.js";
 import { MEMMY_VERSION } from "../../../../project-version.js";
+import { readMemmyMemoryServiceConfig as readSharedMemmyMemoryServiceConfig } from "../memmy-runtime-config.js";
+import { loadMemmyWorkspaceBridgeRuntimeAsset } from "../workspace-bridge/runtime-loader.js";
 
 const OPENCLAW_TARGET_ID = "openclaw";
 const OPENCLAW_DISPLAY_NAME = "OpenClaw";
@@ -106,6 +108,14 @@ export function createOpenclawSkillTarget(deps: CreateOpenclawSkillTargetDeps = 
         `${JSON.stringify(createOpenclawPluginManifest(), null, 2)}\n`
       );
       await writeFileAtomically(join(pluginDirectory, "index.mjs"), OPENCLAW_PLUGIN_INDEX);
+      await writeFileAtomically(
+        join(pluginDirectory, "memmy-workspace-bridge.mjs"),
+        await loadMemmyWorkspaceBridgeRuntimeAsset()
+      );
+      await writeFileAtomically(
+        join(pluginDirectory, "memmy-memory-config.json"),
+        `${JSON.stringify({ memmy_config_path: memmyConfigPath, ...(await readSharedMemmyMemoryServiceConfig(memmyConfigPath)) }, null, 2)}\n`
+      );
       await upsertOpenclawPluginConfig(configPath, {
         memmyConfigPath,
         pluginDirectory,
@@ -440,12 +450,21 @@ import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import {
+  closeRuntimeSession,
+  loadRuntimeL3,
+  notifyRuntimeBoundary,
+  openRuntimeSession
+} from "./memmy-workspace-bridge.mjs";
 
 const PLUGIN_ID = "memmy-memory";
 const DEFAULT_MEMMY_CONFIG_PATH = join(homedir(), ".memmy", "config.yaml");
 const pendingTurns = new Map();
 const pendingResumeSelections = new Map();
 const sessionCache = new Map();
+const runtimeSessionCache = new Map();
+const l3InjectOnce = new Map();
+const CONFIG_URL = new URL("./memmy-memory-config.json", import.meta.url);
 const completedTurns = new Set();
 const MEMMY_FETCH_TIMEOUT_MS = 45000;
 const MEMMY_RECALL_TIMEOUT_MS = 45000;
@@ -601,6 +620,39 @@ export default {
       { name: "memmy_memory_add" }
     );
 
+    api.on("session_start", async (event, ctx) => {
+      if (normalizeText(event && event.reason).toLowerCase() === "compaction" && runtimeSessionCache.has(resolveExternalSessionId(ctx))) return;
+      try {
+        const runtimeSession = await ensureRuntimeSession(ctx);
+        const loaded = await loadRuntimeL3(runtimeSession);
+        if (loaded.additionalContext) l3InjectOnce.set(resolveExternalSessionId(ctx), loaded.additionalContext);
+      } catch (error) {
+        api.logger.warn("memmy-memory: L3 session start failed: " + formatError(error));
+      }
+    });
+
+    api.on("after_compaction", async (event, ctx) => {
+      if (event && event.error) return;
+      try {
+        const runtimeSession = await ensureRuntimeSession(ctx);
+        await notifyRuntimeBoundary(runtimeSession, "token_compaction");
+        const loaded = await loadRuntimeL3(runtimeSession);
+        if (loaded.additionalContext) l3InjectOnce.set(resolveExternalSessionId(ctx), loaded.additionalContext);
+      } catch (error) {
+        api.logger.warn("memmy-memory: L3 compaction refresh failed: " + formatError(error));
+      }
+    });
+
+    api.on("session_end", async (event, ctx) => {
+      if (normalizeText(event && event.reason).toLowerCase() === "compaction") return;
+      const externalSessionId = resolveExternalSessionId(ctx);
+      const runtimeSession = runtimeSessionCache.get(externalSessionId);
+      if (runtimeSession) await closeRuntimeSession(runtimeSession).catch(() => undefined);
+      runtimeSessionCache.delete(externalSessionId);
+      sessionCache.delete(externalSessionId);
+      l3InjectOnce.delete(externalSessionId);
+    });
+
     api.on("before_prompt_build", async (event, ctx) => {
       const messages = Array.isArray(event && event.messages) ? event.messages : [];
       const query = resolvePromptQuery(event, messages);
@@ -612,7 +664,9 @@ export default {
         const resumeContext = await resolveResumeSelectionContext(cfg, query, ctx);
         if (resumeContext) {
           latestCurrentUserRequest = "Continue the selected Memmy episode.";
-          return { prependContext: resumeContext };
+          const l3 = l3InjectOnce.get(resolveExternalSessionId(ctx)) || "";
+          l3InjectOnce.delete(resolveExternalSessionId(ctx));
+          return { prependContext: [l3, resumeContext].filter(Boolean).join("\n\n") };
         }
       } catch (error) {
         api.logger.warn("memmy-memory: resume selection failed: " + formatError(error));
@@ -639,8 +693,10 @@ export default {
         });
 
         const markdown = turn && turn.injectedContext && turn.injectedContext.markdown;
-        if (typeof markdown === "string" && markdown.trim()) {
-          return { prependContext: renderMemmyContextPacket(markdown, "turn_start", query) };
+        const l3 = l3InjectOnce.get(resolveExternalSessionId(ctx)) || "";
+        l3InjectOnce.delete(resolveExternalSessionId(ctx));
+        if ((typeof markdown === "string" && markdown.trim()) || l3) {
+          return { prependContext: [l3, typeof markdown === "string" && markdown.trim() ? renderMemmyContextPacket(markdown, "turn_start", query) : ""].filter(Boolean).join("\n\n") };
         }
       } catch (error) {
         api.logger.warn("memmy-memory: recall failed: " + formatError(error));
@@ -972,18 +1028,27 @@ async function ensureSession(client, ctx) {
     return cached;
   }
 
-  const opened = await client.post("/api/v1/sessions/open", {
-    sessionId: externalSessionId,
-    source: "openclaw",
-    profileId: normalizeOptionalText(ctx && ctx.agentId) || "main",
-    workspacePath: normalizeOptionalText(ctx && ctx.workspaceDir) || undefined,
-    meta: {
-      sessionKey: normalizeOptionalText(ctx && ctx.sessionKey) || undefined,
-      sessionId: normalizeOptionalText(ctx && ctx.sessionId) || undefined
-    }
-  });
+  const opened = await ensureRuntimeSession(ctx);
   sessionCache.set(externalSessionId, opened.sessionId);
   return opened.sessionId;
+}
+
+async function ensureRuntimeSession(ctx) {
+  const externalSessionId = resolveExternalSessionId(ctx);
+  const cached = runtimeSessionCache.get(externalSessionId);
+  if (cached) return cached;
+  const opened = await openRuntimeSession({
+    configUrl: CONFIG_URL,
+    source: "openclaw",
+    adapterId: "memmy-openclaw-plugin",
+    profileId: normalizeOptionalText(ctx && ctx.agentId) || "main",
+    sessionKey: externalSessionId,
+    workspaceRoot: normalizeOptionalText(ctx && ctx.workspaceDir) || null,
+    transition: "allow_legacy_rollover"
+  });
+  if (!opened) throw new Error("Memmy session unavailable");
+  runtimeSessionCache.set(externalSessionId, opened);
+  return opened;
 }
 
 function resolveExternalSessionId(ctx) {

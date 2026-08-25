@@ -171,14 +171,38 @@ function currentUserSid(source: string): string {
   return match[1]!;
 }
 
+type WindowsAclExecutable = "whoami.exe" | "icacls.exe";
+
+function windowsSystemExecutable(executable: WindowsAclExecutable): string {
+  const systemDirectories = [
+    process.env.SystemRoot && path.isAbsolute(process.env.SystemRoot)
+      ? path.join(process.env.SystemRoot, "System32")
+      : null,
+    process.env.WINDIR && path.isAbsolute(process.env.WINDIR)
+      ? path.join(process.env.WINDIR, "System32")
+      : null,
+    process.env.ComSpec && path.isAbsolute(process.env.ComSpec)
+      ? path.dirname(process.env.ComSpec)
+      : null,
+  ];
+  for (const directory of new Set(systemDirectories)) {
+    if (!directory) continue;
+    const candidate = path.join(directory, executable);
+    if (fsSync.existsSync(candidate)) return candidate;
+  }
+  throw new Error(`Unable to find Windows system executable: ${executable}`);
+}
+
 async function restrictWindowsAcl(filePath: string): Promise<void> {
   if (process.platform !== "win32") return;
-  const { stdout } = await execFileAsync("whoami", ["/user", "/fo", "csv", "/nh"], {
-    windowsHide: true,
-  });
+  const { stdout } = await execFileAsync(
+    windowsSystemExecutable("whoami.exe"),
+    ["/user", "/fo", "csv", "/nh"],
+    { windowsHide: true },
+  );
   const sid = currentUserSid(stdout);
   await execFileAsync(
-    "icacls",
+    windowsSystemExecutable("icacls.exe"),
     [filePath, "/inheritance:r", "/grant:r", `*${sid}:(F)`, "*S-1-5-18:(F)"],
     { windowsHide: true },
   );
@@ -186,13 +210,14 @@ async function restrictWindowsAcl(filePath: string): Promise<void> {
 
 function restrictWindowsAclSync(filePath: string): void {
   if (process.platform !== "win32") return;
-  const stdout = execFileSync("whoami", ["/user", "/fo", "csv", "/nh"], {
-    encoding: "utf8",
-    windowsHide: true,
-  });
+  const stdout = execFileSync(
+    windowsSystemExecutable("whoami.exe"),
+    ["/user", "/fo", "csv", "/nh"],
+    { encoding: "utf8", windowsHide: true },
+  );
   const sid = currentUserSid(stdout);
   execFileSync(
-    "icacls",
+    windowsSystemExecutable("icacls.exe"),
     [filePath, "/inheritance:r", "/grant:r", `*${sid}:(F)`, "*S-1-5-18:(F)"],
     { stdio: "ignore", windowsHide: true },
   );

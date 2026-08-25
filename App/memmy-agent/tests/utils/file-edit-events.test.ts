@@ -15,6 +15,7 @@ import {
   readFileSnapshot,
 } from "../../src/utils/file-edit-events.js";
 import { getOrCreateUiToolCallId } from "../../src/utils/progress-events.js";
+import { ApplyPatchTool } from "../../src/core/agent-runtime/tools/apply-patch.js";
 
 const roots: string[] = [];
 
@@ -166,18 +167,24 @@ describe("file edit event helpers", () => {
     const deleteMe = path.join(root, "src", "delete_me.ts");
     fs.writeFileSync(existing, "old\nkeep\n", "utf8");
     fs.writeFileSync(deleteMe, "gone\n", "utf8");
-    const edits = [
-      { path: "src/new.ts", action: "add", newText: "fresh" },
-      { path: "src/existing.ts", action: "replace", oldText: "old", newText: "new" },
-      { path: "src/delete_me.ts", action: "delete", oldText: "gone\n" },
-    ];
+    const patchInput = [
+      "*** Begin Patch",
+      "*** Add File: src/new.ts",
+      "+fresh",
+      "*** Update File: src/existing.ts",
+      "@@",
+      "-old",
+      "+new",
+      "*** Delete File: src/delete_me.ts",
+      "*** End Patch",
+    ].join("\n");
 
     const trackers = prepareFileEditTrackers({
       callId: "call-patch",
       toolName: "apply_patch",
-      tool: null,
+      tool: new ApplyPatchTool({ workspace: root }),
       workspace: root,
-      params: { edits },
+      params: { input: patchInput, extra: true },
     });
 
     expect(trackers.map((tracker) => tracker.displayPath)).toEqual([
@@ -189,26 +196,30 @@ describe("file edit event helpers", () => {
     fs.writeFileSync(path.join(root, "src", "new.ts"), "fresh\n", "utf8");
     fs.writeFileSync(existing, "new\nkeep\n", "utf8");
     fs.unlinkSync(deleteMe);
-    const events = trackers.map((tracker) => buildFileEditEndEvent(tracker, { edits }));
+    const events = trackers.map((tracker) => buildFileEditEndEvent(tracker, { input: patchInput }));
     const byPath = Object.fromEntries(events.map((event) => [event.path, event]));
     expect([byPath["src/new.ts"].added, byPath["src/new.ts"].deleted]).toEqual([1, 0]);
     expect([byPath["src/existing.ts"].added, byPath["src/existing.ts"].deleted]).toEqual([1, 1]);
     expect([byPath["src/delete_me.ts"].added, byPath["src/delete_me.ts"].deleted]).toEqual([0, 1]);
   });
 
-  it("does not prepare apply_patch trackers for dry runs", () => {
+  it("requires a string input and the safe apply_patch resolver", () => {
     const root = tmpRoot();
     fs.writeFileSync(path.join(root, "file.txt"), "old\n", "utf8");
 
     expect(prepareFileEditTrackers({
       callId: "call-patch",
       toolName: "apply_patch",
+      tool: new ApplyPatchTool({ workspace: root }),
+      workspace: root,
+      params: { edits: [{ path: "file.txt" }] },
+    })).toEqual([]);
+    expect(prepareFileEditTrackers({
+      callId: "call-patch",
+      toolName: "apply_patch",
       tool: null,
       workspace: root,
-      params: {
-        dryRun: true,
-        edits: [{ path: "file.txt", action: "replace", oldText: "old", newText: "new" }],
-      },
+      params: { input: "*** Begin Patch\n*** Delete File: file.txt\n*** End Patch" },
     })).toEqual([]);
   });
 
@@ -266,17 +277,29 @@ describe("file edit event helpers", () => {
     fs.mkdirSync(path.join(root, "src"));
     fs.writeFileSync(path.join(root, "src", "existing.ts"), "old\nkeep\n", "utf8");
     const events: Record<string, any>[] = [];
-    const tracker = new StreamingFileEditTracker({ workspace: root, tools: {}, emit: (batch) => { events.push(...batch); } });
+    const tools = new Map([["apply_patch", new ApplyPatchTool({ workspace: root })]]);
+    const tracker = new StreamingFileEditTracker({ workspace: root, tools, emit: (batch) => { events.push(...batch); } });
+
+    const patchInput = [
+      "*** Begin Patch",
+      "*** Update File: src/existing.ts",
+      "@@",
+      "-old",
+      "+new",
+      "*** Add File: src/new.ts",
+      "+fresh",
+      "*** End Patch",
+    ].join("\n");
+    const encoded = JSON.stringify({ input: patchInput });
 
     await tracker.update({
       index: 0,
       call_id: "call-patch",
       name: "apply_patch",
-      arguments_delta: (
-        '{"edits":[{"path":"src/existing.ts","action":"replace","oldText":"old","newText":"new"}'
-        + ',{"path":"src/new.ts","action":"add","newText":"fresh"}]}'
-      ),
+      arguments_delta: encoded.slice(0, Math.floor(encoded.length / 2)),
     });
+    await tracker.update({ index: 0, arguments_delta: encoded.slice(Math.floor(encoded.length / 2)) });
+    await tracker.flush();
 
     const byPath = Object.fromEntries(events.map((event) => [event.path, event]));
     expect(byPath["src/existing.ts"].tool).toBe("apply_patch");
@@ -286,7 +309,7 @@ describe("file edit event helpers", () => {
     expect([byPath["src/new.ts"].added, byPath["src/new.ts"].deleted]).toEqual([1, 0]);
   });
 
-  it("skips streaming apply_patch dry runs", async () => {
+  it("does not stream apply_patch paths without the safe resolver", async () => {
     const root = tmpRoot();
     const events: Record<string, any>[] = [];
     const tracker = new StreamingFileEditTracker({ workspace: root, tools: {}, emit: (batch) => { events.push(...batch); } });
@@ -295,10 +318,52 @@ describe("file edit event helpers", () => {
       index: 0,
       call_id: "call-patch",
       name: "apply_patch",
-      arguments_delta: '{"dryRun":true,"edits":[{"path":"dry.md","action":"add","newText":"preview"}]}',
+      arguments_delta: JSON.stringify({
+        input: "*** Begin Patch\n*** Add File: dry.md\n+preview\n*** End Patch",
+      }),
     });
 
     expect(events).toEqual([]);
+  });
+
+  it("streams move source deletion and target addition counts", async () => {
+    const root = tmpRoot();
+    fs.writeFileSync(path.join(root, "source.txt"), "one\ntwo\nthree\n", "utf8");
+    const events: Record<string, any>[] = [];
+    const tools = new Map([["apply_patch", new ApplyPatchTool({ workspace: root })]]);
+    const tracker = new StreamingFileEditTracker({
+      workspace: root,
+      tools,
+      emit: (batch) => { events.push(...batch); },
+    });
+    await tracker.update({
+      index: 0,
+      name: "apply_patch",
+      arguments_delta: JSON.stringify({
+        input: [
+          "*** Begin Patch",
+          "*** Update File: source.txt",
+          "*** Move to: target.txt",
+          "@@",
+          "-two",
+          "+changed",
+          "*** End Patch",
+        ].join("\n"),
+      }),
+    });
+
+    const byPath = Object.fromEntries(events.map((event) => [event.path, event]));
+    expect([byPath["source.txt"].added, byPath["source.txt"].deleted]).toEqual([0, 3]);
+    expect([byPath["target.txt"].added, byPath["target.txt"].deleted]).toEqual([3, 0]);
+  });
+
+  it("uses fatal UTF-8 decoding only when requested", () => {
+    const root = tmpRoot();
+    const target = path.join(root, "invalid.txt");
+    fs.writeFileSync(target, Buffer.from([0xff, 0xfe]));
+
+    expect(readFileSnapshot(target).binary).toBe(false);
+    expect(readFileSnapshot(target, { fatalUtf8: true }).binary).toBe(true);
   });
 
   it("emits a pending write_file event before the path arrives", async () => {
@@ -456,6 +521,46 @@ describe("file edit event helpers", () => {
     expect(getOrCreateUiToolCallId(finalA)).not.toBe(getOrCreateUiToolCallId(finalB));
   });
 
+  it("binds a unique closed apply_patch input when indexes and Provider ids are unavailable", async () => {
+    const root = tmpRoot();
+    const tools = new Map([["apply_patch", new ApplyPatchTool({ workspace: root })]]);
+    const tracker = new StreamingFileEditTracker({ workspace: root, tools, emit: () => undefined });
+    const patchInput = "*** Begin Patch\n*** Add File: exact.txt\n+one\n*** End Patch";
+    await tracker.update({
+      call_id: "stream-only",
+      name: "apply_patch",
+      arguments_delta: JSON.stringify({ input: patchInput }),
+    });
+    const final = { id: "", name: "apply_patch", arguments: { input: patchInput } };
+
+    tracker.bindFinalToolCalls([final]);
+
+    const state = tracker.states.get("id:stream-only");
+    expect(state?.inputClosed).toBe(true);
+    expect(state?.boundFinal).toBe(true);
+    expect(getOrCreateUiToolCallId(final)).toBe(state?.uiToolCallId);
+  });
+
+  it("does not bind an apply_patch stream state to another tool or missing string input", async () => {
+    const root = tmpRoot();
+    const tools = new Map([["apply_patch", new ApplyPatchTool({ workspace: root })]]);
+    const tracker = new StreamingFileEditTracker({ workspace: root, tools, emit: () => undefined });
+    await tracker.update({
+      index: 0,
+      name: "apply_patch",
+      arguments_delta: JSON.stringify({
+        input: "*** Begin Patch\n*** Add File: a.txt\n+x\n*** End Patch",
+      }),
+    });
+
+    tracker.bindFinalToolCalls([
+      { name: "write_file", arguments: { path: "a.txt" } },
+      { name: "apply_patch", arguments: {} },
+    ]);
+
+    expect(tracker.states.get("idx:0")?.boundFinal).toBe(false);
+  });
+
   it("flushes a small pending edit_file count", async () => {
     const root = tmpRoot();
     fs.writeFileSync(path.join(root, "small.ts"), "old\n", "utf8");
@@ -505,9 +610,11 @@ describe("file edit event helpers", () => {
       name: "write_file",
       arguments_delta: '{"path":"matched.md","content":"one\\n',
     });
-    await tracker.errorUnmatched([
+    const finalCalls = [
       { id: "final-call", name: "write_file", arguments: { path: "matched.md", content: "one\n" } },
-    ], "Tool call did not complete.");
+    ];
+    tracker.bindFinalToolCalls(finalCalls);
+    await tracker.errorUnmatched(finalCalls, "Tool call did not complete.");
 
     expect(events.length).toBeGreaterThan(0);
     expect(events.every((event) => event.status === "editing")).toBe(true);

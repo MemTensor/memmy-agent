@@ -1,5 +1,5 @@
-export const POLARDB_SCHEMA_VERSION = "runtime-v1";
-export const POLARDB_MIGRATION_ID = "001_memmy_memory_service_runtime_schema";
+export const POLARDB_SCHEMA_VERSION = "runtime-v2";
+export const POLARDB_MIGRATION_ID = "002_memmy_l3_world_model_runtime_schema";
 
 export function polardbMigrationSql(): string[] {
   return [
@@ -286,6 +286,67 @@ export function polardbMigrationSql(): string[] {
       created_at TIMESTAMPTZ NOT NULL,
       expires_at TIMESTAMPTZ
     )`,
+    `CREATE TABLE IF NOT EXISTS l3_world_model_scopes (
+      scope_key TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      project_id TEXT,
+      workspace_uri TEXT,
+      memory_id TEXT REFERENCES memories(id) ON DELETE SET NULL,
+      next_scope_seq BIGINT NOT NULL DEFAULT 1 CHECK (next_scope_seq >= 1),
+      updated_at TIMESTAMPTZ NOT NULL,
+      CHECK (workspace_uri IS NULL OR (project_id IS NOT NULL AND length(workspace_uri) > 0))
+    )`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS uq_l3_world_model_scope_owner
+      ON l3_world_model_scopes (user_id, project_id) NULLS NOT DISTINCT`,
+    `CREATE TABLE IF NOT EXISTS l3_world_model_session_cursors (
+      session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+      last_scheduled_seq BIGINT NOT NULL DEFAULT 0 CHECK (last_scheduled_seq >= 0),
+      updated_at TIMESTAMPTZ NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS l3_world_model_input_traces (
+      session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+      trace_seq BIGINT NOT NULL CHECK (trace_seq >= 1),
+      l1_memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+      raw_turn_id TEXT NOT NULL REFERENCES raw_turns(id) ON DELETE CASCADE,
+      episode_id TEXT,
+      created_at TIMESTAMPTZ NOT NULL,
+      PRIMARY KEY (session_id, trace_seq),
+      UNIQUE (session_id, l1_memory_id),
+      UNIQUE (session_id, raw_turn_id)
+    )`,
+    `CREATE TABLE IF NOT EXISTS l3_world_model_evidence_batches (
+      id TEXT PRIMARY KEY,
+      scope_key TEXT NOT NULL REFERENCES l3_world_model_scopes(scope_key) ON DELETE CASCADE,
+      scope_seq BIGINT NOT NULL CHECK (scope_seq >= 1),
+      user_id TEXT NOT NULL,
+      project_id TEXT,
+      session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+      trigger TEXT NOT NULL,
+      start_trace_seq BIGINT NOT NULL,
+      end_trace_seq BIGINT NOT NULL,
+      l1_memory_ids JSONB NOT NULL,
+      raw_turn_ids JSONB NOT NULL,
+      feedback_ids JSONB NOT NULL,
+      payload_hash TEXT NOT NULL,
+      terminal_outcome TEXT,
+      completed_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL,
+      UNIQUE (scope_key, scope_seq)
+    )`,
+    `CREATE TABLE IF NOT EXISTS l3_world_model_batch_targets (
+      batch_id TEXT NOT NULL REFERENCES l3_world_model_evidence_batches(id) ON DELETE CASCADE,
+      target_field TEXT NOT NULL CHECK (target_field IN (
+        'general_rules_and_safety_constraints', 'project_contract', 'domain_knowledge'
+      )),
+      field_scope_key TEXT NOT NULL,
+      scope_seq BIGINT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'applied', 'dead_letter')),
+      no_change BOOLEAN NOT NULL DEFAULT false,
+      applied_at TIMESTAMPTZ,
+      updated_at TIMESTAMPTZ NOT NULL,
+      PRIMARY KEY (batch_id, target_field)
+    )`,
     `CREATE TABLE IF NOT EXISTS evolution_jobs (
       id TEXT PRIMARY KEY,
       job_type TEXT NOT NULL,
@@ -296,6 +357,8 @@ export function polardbMigrationSql(): string[] {
       session_id TEXT,
       episode_id TEXT,
       target_memory_id TEXT,
+      scope_key TEXT,
+      scope_seq BIGINT,
       payload JSONB NOT NULL DEFAULT '{}'::jsonb,
       attempts INTEGER NOT NULL DEFAULT 0,
       max_attempts INTEGER NOT NULL DEFAULT 3,
@@ -306,6 +369,8 @@ export function polardbMigrationSql(): string[] {
     )`,
     `CREATE INDEX IF NOT EXISTS idx_evolution_jobs_status_created
       ON evolution_jobs (status, created_at ASC)`,
+    `CREATE INDEX IF NOT EXISTS idx_evolution_jobs_l3_scope
+      ON evolution_jobs (job_type, scope_key, scope_seq, status)`,
     `CREATE UNIQUE INDEX IF NOT EXISTS uq_evolution_jobs_active_dedupe
       ON evolution_jobs (dedupe_key)
       WHERE dedupe_key IS NOT NULL AND status IN ('queued', 'leased', 'failed')`,

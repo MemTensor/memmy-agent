@@ -213,6 +213,7 @@ const CANONICAL_TOOL_NAMES = new Set([
 function canonicalToolName(name: string): string {
   const trimmed = name.trim();
   const lower = trimmed.toLowerCase();
+  if (lower === "apply_patch") return "apply_patch";
   if (TOOL_NAME_ALIASES[lower]) return TOOL_NAME_ALIASES[lower]!;
   if (CANONICAL_TOOL_NAMES.has(lower)) return lower;
   // Match prefixed variants like `mcp_<server>_<tool>` or `namespace.action`
@@ -266,6 +267,13 @@ function buildToolSummary(
   args: Record<string, unknown>
 ): { verb: string; detail: string; category: ToolTraceCategory } {
   switch (canonicalName) {
+    case "apply_patch": {
+      const paths = typeof args.input === "string" ? extractApplyPatchSummaryPaths(args.input) : [];
+      const detail = paths.length === 1 ? basename(paths[0]!) : paths.length > 1 ? `${paths.length} files` : "";
+      return paths.length
+        ? { verb: "Patched", detail, category: "edit" }
+        : { verb: "Applied", detail: "patch", category: "edit" };
+    }
     case "exec": {
       const command = firstStringField(args, ["command", "cmd", "script", "code"]);
       return { verb: "Ran", detail: command ? truncate(collapseWhitespace(command), 140) : "", category: "shell" };
@@ -354,6 +362,89 @@ function buildToolSummary(
         category: "generic"
       };
   }
+}
+
+function normalizeApplyPatchSummaryPath(raw: string): string | null {
+  const value = raw.trim();
+  if (
+    !value ||
+    value.includes("\0") ||
+    value.startsWith("~") ||
+    value.startsWith("/") ||
+    value.startsWith("\\") ||
+    /^[A-Za-z]:/u.test(value)
+  ) {
+    return null;
+  }
+  const segments = value.replace(/\\/gu, "/").split("/");
+  if (segments.some((segment) => segment === "..")) return null;
+  const normalized = segments.filter((segment) => segment && segment !== ".").join("/");
+  return normalized || null;
+}
+
+export function extractApplyPatchSummaryPaths(input: string): string[] {
+  const lines = input.replace(/\r\n?/gu, "\n").split("\n");
+  if (lines[0] !== "*** Begin Patch") return [];
+  const paths: string[] = [];
+  const seen = new Set<string>();
+  let kind: "add" | "update" | "delete" | null = null;
+  let updatePhase: "before-hunk" | "hunk" | "after-eof" = "before-hunk";
+  let updateChanged = false;
+  let updateMoved = false;
+  const addPath = (raw: string): boolean => {
+    const normalized = normalizeApplyPatchSummaryPath(raw);
+    if (!normalized) return false;
+    if (!seen.has(normalized)) {
+      seen.add(normalized);
+      paths.push(normalized);
+    }
+    return true;
+  };
+  const canClose = (): boolean => {
+    if (kind !== "update") return true;
+    return updatePhase !== "hunk" || updateChanged;
+  };
+
+  for (let index = 1; index < lines.length; index += 1) {
+    const line = lines[index]!;
+    if (line === "*** End Patch") break;
+    const header = /^(\*\*\* (Add|Update|Delete) File: )(.*)$/u.exec(line);
+    if (header) {
+      if (!canClose() || !addPath(header[3]!)) break;
+      kind = header[2]!.toLowerCase() as "add" | "update" | "delete";
+      updatePhase = "before-hunk";
+      updateChanged = false;
+      updateMoved = false;
+      continue;
+    }
+    if (!kind) break;
+    if (kind === "add") {
+      if (!line.startsWith("+")) break;
+      continue;
+    }
+    if (kind === "delete") break;
+
+    if (updatePhase === "before-hunk" && line.startsWith("*** Move to: ")) {
+      if (updateMoved) break;
+      if (!addPath(line.slice("*** Move to: ".length))) break;
+      updateMoved = true;
+      continue;
+    }
+    if (line === "*** End of File") {
+      if (updatePhase !== "hunk" || !updateChanged) break;
+      updatePhase = "after-eof";
+      continue;
+    }
+    if (line === "@@" || (line.startsWith("@@ ") && line.length > 3 && !line.endsWith(" @@"))) {
+      if (updatePhase === "after-eof" || (updatePhase === "hunk" && !updateChanged)) break;
+      updatePhase = "hunk";
+      updateChanged = false;
+      continue;
+    }
+    if (updatePhase !== "hunk" || ![" ", "+", "-"].includes(line[0] ?? "")) break;
+    if (line.startsWith("+") || line.startsWith("-")) updateChanged = true;
+  }
+  return paths;
 }
 
 function firstStringField(args: Record<string, unknown>, keys: string[]): string | null {

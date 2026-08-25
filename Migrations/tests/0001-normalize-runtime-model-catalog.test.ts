@@ -282,7 +282,7 @@ describe("v1.0.7/0001-normalize-runtime-model-catalog", () => {
     expect(config.modelPresets.stable.futurePreset.keep).toBe(true);
   });
 
-  it("ignores a missing config without creating it", async () => {
+  it("defers a missing config without creating it", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "memmy-model-catalog-missing-"));
     roots.push(root);
     const configPath = path.join(root, "config.yaml");
@@ -296,7 +296,8 @@ describe("v1.0.7/0001-normalize-runtime-model-catalog", () => {
     await expect(normalizeRuntimeModelCatalogForTest(context)).resolves.toEqual({
       scanned: 0,
       changed: 0,
-      ignored: 1,
+      ignored: 0,
+      deferred: true,
     });
     await expect(fs.stat(configPath)).rejects.toMatchObject({ code: "ENOENT" });
   });

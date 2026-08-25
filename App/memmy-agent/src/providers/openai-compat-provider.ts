@@ -16,6 +16,7 @@ import {
   parseResponseOutput,
 } from "./openai-responses/index.js";
 import { memmyAccountNoneThinkingStyle } from "./memmy-account.js";
+import { getModelInputModalities } from "./model-input-capabilities.js";
 import { OPENROUTER_ATTRIBUTION_HEADERS } from "./openrouter-attribution.js";
 import {
   classifyQuotaExhaustion,
@@ -461,11 +462,15 @@ export class OpenAICompatProvider extends LLMProvider {
     return [...parts, content];
   }
 
-  sanitizeMessages(messages: Record<string, any>[]): Record<string, any>[] {
+  sanitizeMessages(
+    messages: Record<string, any>[],
+    model = this.getDefaultModel(),
+  ): Record<string, any>[] {
     const sanitized = LLMProvider.sanitizeRequestMessages(messages, ALLOWED_MSG_KEYS);
     const idMap = new Map<string, string>();
     const pendingToolIds = new Map<string, string[]>();
-    const forceStringContent = specName(this.spec) === "deepseek";
+    const forceStringContent = specName(this.spec) === "deepseek"
+      && !getModelInputModalities(model).includes("image");
     const normalizeToolIds = this.shouldNormalizeToolCallIds();
 
     const mapId = (value: any): any => {
@@ -597,7 +602,7 @@ export class OpenAICompatProvider extends LLMProvider {
     const temperature = args.temperature ?? this.generation.temperature;
     const kwargs: Record<string, any> = {
       model: modelName,
-      messages: this.sanitizeMessages(messages),
+      messages: this.sanitizeMessages(messages, modelName),
     };
 
     if (OpenAICompatProvider.supportsTemperature(modelName, reasoningEffort))
@@ -737,6 +742,7 @@ export class OpenAICompatProvider extends LLMProvider {
     if (this.spec?.stripModelPrefix) modelName = modelName.split("/").at(-1) ?? modelName;
     const sanitizedMessages = this.sanitizeMessages(
       LLMProvider.sanitizeEmptyContent(args.messages),
+      modelName,
     );
     const [instructions, input] = convertMessages(sanitizedMessages);
     const reasoningEffort = args.reasoningEffort ?? null;
@@ -1052,7 +1058,12 @@ export class OpenAICompatProvider extends LLMProvider {
   }
 
   private imageInputUnsupportedResponse(args: ChatArgs): LLMResponse | null {
-    if (specName(this.spec) !== "deepseek" || !LLMProvider.containsImageInput(args.messages)) {
+    const model = args.model ?? this.getDefaultModel();
+    if (
+      specName(this.spec) !== "deepseek"
+      || !LLMProvider.containsImageInput(args.messages)
+      || getModelInputModalities(model).includes("image")
+    ) {
       return null;
     }
     return new LLMResponse({

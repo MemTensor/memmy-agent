@@ -24,6 +24,13 @@ export const IMPORT_DEFAULT_PRIORITY = 0.5;
 const IMPORT_TOOL_PAYLOAD_MAX_CHARS = 20_000;
 
 export function memoryAddKey(request: MemoryAddRequest, layer: MemoryLayer, title: string): string {
+  if (layer === "Skill" && request.sourceAgentId && (request.sourceSkillId || request.sourceSkillPath)) {
+    return `skill.import:${stableHash([
+      request.sourceAgentId,
+      request.sourceSkillId ?? request.sourceSkillPath,
+      request.sourceSkillVersion ?? request.sourceContentHash ?? stableHash(request.content)
+    ]).slice(0, 20)}`;
+  }
   if (isAgentSourceImportMemoryAdd(request) && request.adapterId && request.turnId) return `memory.add:${request.adapterId}:turn:${request.turnId}`;
   if (request.adapterId && request.requestId) return `memory.add:${request.adapterId}:${request.requestId}`;
   return `manual:${stableHash(`${layer}:${title}:${request.content}`).slice(0, 20)}`;

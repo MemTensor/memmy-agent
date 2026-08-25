@@ -20,8 +20,9 @@ import { MemmyAgentRequestError } from "../api/memmy-agent-client.js";
 import { communityLinks } from "../community/community-links.js";
 import { ConfirmDialog } from "../components/confirm-dialog.js";
 import { Tooltip } from "../components/tooltip.js";
-import type { MessageKey } from "../i18n/messages.js";
+import type { MessageKey, MessageValues } from "../i18n/messages.js";
 import { useTranslation } from "../i18n/use-translation.js";
+import { useOptionalUpdateCoordinator, type UpdateCoordinatorValue } from "../app/update-coordinator.js";
 import type { MemmyAgentProject, WebuiSessionTarget } from "../api/memmy-agent-client.js";
 import { getLegalLinkUrl } from "../legal/legal-links.js";
 import { useTaskBus } from "../lib/task-bus.js";
@@ -62,7 +63,7 @@ import {
   Wand2
 } from "./memory/memory-prototype-icons.js";
 import { SETTINGS_NAV_ITEMS, type SettingsTabId } from "./settings-nav.js";
-import { Check, CheckCheck, ChevronDown, ChevronRight, ChevronsDownUp, ChevronsUpDown, Folder, FolderOpen, FolderPlus, ListFilter, MoreHorizontal, Plus, RotateCcw } from "lucide-react";
+import { Check, CheckCheck, ChevronDown, ChevronRight, ChevronsDownUp, ChevronsUpDown, Download, Folder, FolderOpen, FolderPlus, ListFilter, MoreHorizontal, Plus, RotateCcw } from "lucide-react";
 
 export interface SettingsSidebarNav {
   activeTab: SettingsTabId;
@@ -158,7 +159,7 @@ interface SidebarContextMenuPlacement {
 }
 
 type AgentTaskSort = AppState["agent"]["sidebarState"]["view"]["sort"];
-type NewAgentDraftState = Pick<AppState["agent"], "blankDraftActive" | "newChatRequestId" | "composerDraftsByScope" | "composerPendingAttachmentsByScope">;
+type NewAgentDraftState = Pick<AppState["agent"], "blankDraftActive" | "newChatRequestId" | "composerDraftsByScope" | "composerPendingAttachmentsByScope" | "composerContextReferencesByScope">;
 
 export interface SidebarAccountLabels {
   brandName: string;
@@ -177,6 +178,16 @@ export interface SidebarAccountSummary {
 export interface AccountDisplayText {
   text: string;
   truncated: boolean;
+}
+
+type AppFrameTranslate = (key: MessageKey, values?: MessageValues) => string;
+
+interface SidebarUpdateActionView {
+  kind: "available" | "downloading" | "installing" | "prepared";
+  label: string;
+  ariaLabel: string;
+  title: string;
+  disabled: boolean;
 }
 
 const navItems: NavItem[] = [
@@ -216,7 +227,7 @@ const projectCreateMenuSize: SidebarMenuSize = {
   margin: 8,
   gap: 2
 };
-const sidebarMenuOverlayZIndex = 9999;
+const sidebarMenuOverlayZIndex = 10010;
 const SIDEBAR_PROFILE_NAME_MAX_VISUAL_WIDTH = 10;
 const SIDEBAR_PROFILE_META_MAX_VISUAL_WIDTH = 12;
 const ACCOUNT_DISPLAY_ELLIPSIS = "…";
@@ -243,7 +254,8 @@ export function shouldCreateNewAgentDraft(agent: NewAgentDraftState): boolean {
   }
   const draftScopeKey = agentChatScopeKey(null, agent.newChatRequestId);
   return !agent.composerDraftsByScope[draftScopeKey]
-    && !(agent.composerPendingAttachmentsByScope[draftScopeKey]?.length);
+    && !(agent.composerPendingAttachmentsByScope[draftScopeKey]?.length)
+    && !(agent.composerContextReferencesByScope[draftScopeKey]?.length);
 }
 
 /** Sidebar workspace highlight: only when a blank new-task draft targets a project. */
@@ -262,6 +274,7 @@ export function AppFrame(props: AppFrameProps) {
   const { state, dispatch } = useAppState();
   const { clients } = useOptionalApiClients();
   const { t, language } = useTranslation();
+  const update = useOptionalUpdateCoordinator();
   const { track } = useAnalytics();
   const taskStateCoordinator = useOptionalAgentRuntimeBridge()?.taskStateCoordinator
     ?? standaloneRenderTaskStateCoordinator;
@@ -308,6 +321,7 @@ export function AppFrame(props: AppFrameProps) {
   });
   const accountNameLine = truncateAccountDisplayText(accountSummary.name, SIDEBAR_PROFILE_NAME_MAX_VISUAL_WIDTH);
   const accountMetaLine = truncateAccountDisplayText(accountSummary.meta, SIDEBAR_PROFILE_META_MAX_VISUAL_WIDTH);
+  const sidebarUpdateAction = resolveSidebarUpdateAction(update, t);
   const visibleTasks = state.agent.tasks;
   const projectTree = useMemo(
     () => deriveSidebarPlacement(visibleTasks, state.agent.projects),
@@ -1492,7 +1506,63 @@ export function AppFrame(props: AppFrameProps) {
         </div>
         )}
 
-        {props.settingsNav ? null : (
+        {props.settingsNav ? null : sidebarUpdateAction ? (
+          <div className="app-frame-sidebar-footer app-frame-sidebar-footer--compound">
+            <button
+              type="button"
+              onClick={openSettingsFromSidebar}
+              title={t("settings.title")}
+              aria-label={t("settings.title")}
+              className="app-frame-sidebar-footer--button app-frame-sidebar-footer-account"
+            >
+              <span className="flex w-full min-w-0 items-center gap-2 px-2 py-1.5">
+                <span className="w-6 h-6 rounded-full bg-action-sky/15 flex items-center justify-center shrink-0" aria-hidden="true">
+                  <User size={13} className="text-action-sky" />
+                </span>
+                <span className="app-frame-profile-text flex-1 min-w-0">
+                  <SidebarProfileTextLine
+                    className="app-frame-profile-name text-text-ink/70 truncate"
+                    fullText={accountSummary.name}
+                    line={accountNameLine}
+                  />
+                  <SidebarProfileTextLine
+                    className="app-frame-profile-meta text-text-ink/45 truncate"
+                    fullText={accountSummary.meta}
+                    line={accountMetaLine}
+                  />
+                </span>
+              </span>
+            </button>
+            <button
+              type="button"
+              className={`app-frame-sidebar-update-button app-frame-sidebar-update-button--${sidebarUpdateAction.kind}`}
+              aria-label={sidebarUpdateAction.ariaLabel}
+              title={sidebarUpdateAction.title}
+              disabled={sidebarUpdateAction.disabled}
+              aria-live="polite"
+              onClick={(event) => {
+                event.stopPropagation();
+                void update?.requestInlineAction();
+              }}
+            >
+              {renderSidebarUpdateActionIcon(sidebarUpdateAction.kind)}
+              <span className="app-frame-sidebar-update-button__label">{sidebarUpdateAction.label}</span>
+            </button>
+            <button
+              type="button"
+              onClick={openSettingsFromSidebar}
+              title={t("settings.title")}
+              aria-label={t("settings.title")}
+              className={`app-frame-profile-settings app-frame-profile-settings-button shrink-0 inline-flex items-center justify-center transition-colors ${
+                state.navigation.currentPath === "/settings"
+                  ? "app-frame-profile-settings--active text-action-sky"
+                  : "text-text-ink/45"
+              }`}
+            >
+              <Settings2 size={14} />
+            </button>
+          </div>
+        ) : (
           <button
             type="button"
             onClick={openSettingsFromSidebar}
@@ -2952,6 +3022,75 @@ function MenuButton(props: {
       <span className="app-frame-sidebar-menu__item-label">{props.label}</span>
     </button>
   );
+}
+
+export function resolveSidebarUpdateAction(
+  update: UpdateCoordinatorValue | null,
+  t: AppFrameTranslate
+): SidebarUpdateActionView | null {
+  if (!update) {
+    return null;
+  }
+
+  if (update.phase === "available") {
+    return {
+      kind: "available",
+      label: t("appFrame.update.available"),
+      ariaLabel: t("appFrame.update.availableAria"),
+      title: t("appFrame.update.availableAria"),
+      disabled: false
+    };
+  }
+
+  if (update.phase === "downloading") {
+    const percent = normalizeUpdateDownloadPercent(update.downloadProgress?.percent);
+    return {
+      kind: "downloading",
+      label: percent === null ? t("appFrame.update.downloading") : t("appFrame.update.progress", { percent }),
+      ariaLabel: percent === null ? t("appFrame.update.downloadingAria") : t("appFrame.update.progressAria", { percent }),
+      title: percent === null ? t("appFrame.update.downloadingAria") : t("appFrame.update.progressAria", { percent }),
+      disabled: true
+    };
+  }
+
+  if (update.phase === "installing") {
+    return {
+      kind: "installing",
+      label: t("appFrame.update.installing"),
+      ariaLabel: t("appFrame.update.installingAria"),
+      title: t("appFrame.update.installingAria"),
+      disabled: true
+    };
+  }
+
+  if (update.phase === "prepared") {
+    return {
+      kind: "prepared",
+      label: t("appFrame.update.restart"),
+      ariaLabel: t("appFrame.update.restartAria"),
+      title: t("appFrame.update.restartAria"),
+      disabled: false
+    };
+  }
+
+  return null;
+}
+
+function normalizeUpdateDownloadPercent(percent: number | null | undefined): number | null {
+  if (typeof percent !== "number" || !Number.isFinite(percent)) {
+    return null;
+  }
+  return Math.min(100, Math.max(0, Math.round(percent)));
+}
+
+function renderSidebarUpdateActionIcon(kind: SidebarUpdateActionView["kind"]): ReactNode {
+  if (kind === "available") {
+    return <Download size={14} strokeWidth={2.2} aria-hidden="true" />;
+  }
+  if (kind === "prepared") {
+    return <RefreshCw size={13} strokeWidth={2.1} aria-hidden="true" />;
+  }
+  return null;
 }
 
 function SidebarProfileTextLine(props: { className: string; fullText: string; line: AccountDisplayText }) {

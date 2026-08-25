@@ -202,6 +202,10 @@ describe("cursor skill target", () => {
       const url = new URL(request.url || "/", "http://127.0.0.1");
       const body = request.method === "POST" ? JSON.parse(await readRequestBody(request)) as Record<string, unknown> : {};
       requests.push({ path: url.pathname, body });
+      if (request.method === "GET" && url.pathname === "/api/v1/health") {
+        writeJsonResponse(response, 200, { features: {} });
+        return;
+      }
       if (url.pathname === "/api/v1/sessions/open") {
         writeJsonResponse(response, 200, { sessionId: "cursor-memory-session", status: "open" });
         return;
@@ -270,24 +274,26 @@ describe("cursor skill target", () => {
       expect(stop.status).toBe(0);
       expect(JSON.parse(stop.stdout)).toEqual({});
       expect(requests.map((item) => item.path)).toEqual([
+        "/api/v1/health",
         "/api/v1/sessions/open",
         "/api/v1/turns/start",
+        "/api/v1/health",
         "/api/v1/sessions/open",
         "/api/v1/turns/cursor-turn-1/complete"
       ]);
-      expect(requests[0]?.body).toMatchObject({
+      expect(requests[1]?.body).toMatchObject({
         sessionId: "cursor-memory-cursor-conversation-1",
         source: "cursor",
         workspacePath: "/tmp/cursor-project"
       });
-      expect(requests[1]?.body).toMatchObject({
+      expect(requests[2]?.body).toMatchObject({
         adapterId: "memmy-cursor-hook",
         requestId: "cursor-start:cursor-generation-1",
         sessionId: "cursor-memory-session",
         turnId: "cursor-generation-1",
         query: "继续检查 episode 生命周期"
       });
-      expect(requests[3]?.body).toMatchObject({
+      expect(requests[5]?.body).toMatchObject({
         adapterId: "memmy-cursor-hook",
         sessionId: "cursor-memory-session",
         query: "继续检查 episode 生命周期",
@@ -295,7 +301,7 @@ describe("cursor skill target", () => {
         sourceMemoryIds: ["cursor-memory-1"],
         status: "succeeded"
       });
-      expect(requests[3]?.body).not.toHaveProperty("episodeId");
+      expect(requests[5]?.body).not.toHaveProperty("episodeId");
 
       const cancelledEvent = {
         ...eventBase,
@@ -325,7 +331,8 @@ describe("cursor skill target", () => {
           status: "cancelled"
         })
       );
-      expect(requests.slice(4).map((item) => item.path)).toEqual([
+      expect(requests.slice(6).map((item) => item.path)).toEqual([
+        "/api/v1/health",
         "/api/v1/sessions/open",
         "/api/v1/turns/start"
       ]);
@@ -338,7 +345,7 @@ describe("cursor skill target", () => {
           status: "completed"
         })
       );
-      expect(requests).toHaveLength(6);
+      expect(requests).toHaveLength(9);
 
       const incompleteEvent = {
         ...eventBase,
@@ -367,7 +374,8 @@ describe("cursor skill target", () => {
           transcript_path: transcriptPath
         })
       );
-      expect(requests.slice(6).map((item) => item.path)).toEqual([
+      expect(requests.slice(9).map((item) => item.path)).toEqual([
+        "/api/v1/health",
         "/api/v1/sessions/open",
         "/api/v1/turns/start"
       ]);

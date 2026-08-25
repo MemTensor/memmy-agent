@@ -1,5 +1,19 @@
 import type Database from "better-sqlite3";
+import {
+  canonicalJson,
+  renderL3WorldModelFields,
+  sha256Hex,
+  type JsonValue,
+  type L3WorldModelFieldName,
+  type L3WorldModelFields,
+  type L3WorldModelTraceHeadResponse,
+  type WorkspaceUri
+} from "@memmy/local-api-contracts";
 import { retrievalDocumentForMemory } from "../algorithm/plugin-algorithms.js";
+import type {
+  ProjectEnvironmentKind,
+  ProjectEnvironmentStateRecord
+} from "../service/project-environment/types.js";
 import type {
   FeedbackRequest,
   JobRef,
@@ -14,7 +28,10 @@ import type {
   MemoryRow,
   MemoryStatsRow,
   MemoryStatus,
-  RecallHit
+  RecallHit,
+  UserMemoryRecord,
+  UserMemoryStatus,
+  UserMemoryType
 } from "../types.js";
 import { DEFAULT_NAMESPACE_SOURCE } from "../types.js";
 import { newId, stableHash } from "../utils/id.js";
@@ -37,10 +54,16 @@ import {
 type SqlValue = string | number | Buffer | null;
 const BUNDLE_TABLES = [
   "memories",
+  "l3_world_model_scopes",
+  "user_memories",
   "sessions",
+  "l3_world_model_session_cursors",
   "episodes",
   "raw_turns",
+  "l3_world_model_input_traces",
   "feedback",
+  "l3_world_model_evidence_batches",
+  "l3_world_model_batch_targets",
   "decision_repairs",
   "l2_candidate_pool",
   "trace_policy_links",
@@ -48,6 +71,7 @@ const BUNDLE_TABLES = [
   "recall_events",
   "api_logs",
   "memory_change_log",
+  "l3_world_model_project_environment_state",
   "evolution_jobs",
   "embedding_retry_queue",
   "memory_processing_state",
@@ -186,11 +210,37 @@ export interface RecallEventRecord {
   layers: MemoryLayer[];
   candidateMemoryIds?: string[];
   injectedMemoryIds?: string[];
+  queryId?: string;
+  userMemoryCandidateIds?: string[];
+  l1CandidateIds?: string[];
+  mergedSourceTurnIds?: string[];
+  memberMemoryIdsBySourceTurnId?: Record<string, string[]>;
   hitMemoryIds: string[];
   dropped?: unknown[];
   outcome?: "pending" | "positive" | "negative" | "ignored";
   request: unknown;
   createdAt: string;
+}
+
+interface UserMemorySqlRow {
+  id: string;
+  source_turn_id: string;
+  user_id: string;
+  memory_types_json: string;
+  content: string;
+  normalized_user_text_hash: string;
+  source_turn_refs_json: string;
+  status: UserMemoryStatus;
+  replaces_memory_id: string | null;
+  replaced_by_memory_id: string | null;
+  archived_at: string | null;
+  archive_reason: string | null;
+  embedding_json: string | null;
+  embedding_model: string | null;
+  embedding_provider: string | null;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
 }
 
 export interface ApiLogRecord {
@@ -213,6 +263,8 @@ export interface EvolutionJobRecord {
   sessionId?: string;
   episodeId?: string;
   targetMemoryId?: string;
+  scopeKey?: string;
+  scopeSeq?: number;
   payload: Record<string, unknown>;
   attempts: number;
   maxAttempts: number;
@@ -220,6 +272,87 @@ export interface EvolutionJobRecord {
   lastError?: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export type L3WorldModelBatchTrigger =
+  | "new_task"
+  | "token_compaction"
+  | "token_compaction_attempt"
+  | "session_close"
+  | "episode_idle_close";
+
+export type L3WorldModelTargetField = Exclude<L3WorldModelFieldName, "project_environment_profile">;
+
+export interface L3WorldModelScopeRecord {
+  scopeKey: string;
+  userId: string;
+  projectId?: string;
+  workspaceUri?: WorkspaceUri;
+  memoryId?: string;
+  nextScopeSeq: number;
+  updatedAt: string;
+}
+
+export interface L3WorldModelInputTraceRecord {
+  sessionId: string;
+  traceSeq: number;
+  l1MemoryId: string;
+  rawTurnId: string;
+  episodeId?: string;
+  createdAt: string;
+}
+
+export interface L3WorldModelEvidenceBatchRecord {
+  id: string;
+  scopeKey: string;
+  scopeSeq: number;
+  userId: string;
+  projectId?: string;
+  sessionId: string;
+  trigger: L3WorldModelBatchTrigger;
+  startTraceSeq: number;
+  endTraceSeq: number;
+  l1MemoryIds: string[];
+  rawTurnIds: string[];
+  feedbackIds: string[];
+  payloadHash: string;
+  terminalOutcome?: "applied" | "partial_dead_letter" | "dead_letter";
+  completedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface L3WorldModelBatchTargetRecord {
+  batchId: string;
+  targetField: L3WorldModelTargetField;
+  fieldScopeKey: string;
+  scopeSeq: number;
+  status: "queued" | "applied" | "dead_letter";
+  noChange: boolean;
+  appliedAt?: string;
+  updatedAt: string;
+}
+
+export interface FreezeL3WorldModelBatchesResult {
+  scheduled: boolean;
+  throughL1MemoryId?: string;
+  throughTraceSeq?: number;
+  batchIds: string[];
+  targetCount: number;
+}
+
+export type L3WorldModelTraceTargetOperation = "noop" | "create" | "update";
+
+export interface ApplyL3WorldModelTraceTargetResult {
+  alreadyApplied: boolean;
+  noChange: boolean;
+  memory?: MemoryRow;
+}
+
+export interface DeleteL3WorldModelScopeResult {
+  before: MemoryRow;
+  deleted: MemoryRow;
+  scope: L3WorldModelScopeRecord;
 }
 
 export type EmbeddingRetryTargetKind = "trace" | "policy" | "world_model" | "skill";
@@ -518,6 +651,62 @@ export class MemoryRepository {
       )
       .get(memoryLayer, key) as MemorySqlRow | undefined;
     return row ? this.hydrate(memoryFromSql(row)) : undefined;
+  }
+
+  getByKeyIncludingDeleted(memoryLayer: MemoryLayer, key: string): MemoryRow | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM memories
+         WHERE memory_layer = ? AND memory_key = ?
+         ORDER BY updated_at DESC, id DESC LIMIT 1`
+      )
+      .get(memoryLayer, key) as MemorySqlRow | undefined;
+    return row ? this.hydrate(memoryFromSql(row)) : undefined;
+  }
+
+  archivePriorReadOnlySkillVersions(input: {
+    sourceAgentId: string;
+    sourceSkillIdentity: string;
+    currentMemoryId: string;
+    at: string;
+  }): MemoryRow[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM memories
+       WHERE memory_layer = 'Skill'
+         AND id != ?
+         AND deleted_at IS NULL
+         AND status IN ('activated', 'resolving')
+         AND json_extract(properties_json, '$.internal_info.read_only') = 1
+         AND json_extract(properties_json, '$.internal_info.source_agent_id') = ?
+         AND COALESCE(
+           json_extract(properties_json, '$.internal_info.source_skill_id'),
+           json_extract(properties_json, '$.internal_info.source_skill_path')
+         ) = ?`
+    ).all(
+      input.currentMemoryId,
+      input.sourceAgentId,
+      input.sourceSkillIdentity
+    ) as MemorySqlRow[];
+    return rows.map((row) => {
+      const memory = this.hydrate(memoryFromSql(row));
+      const internalSkill = isRecordLike(memory.properties.internal_info.skill)
+        ? memory.properties.internal_info.skill
+        : {};
+      return this.update({
+        ...memory,
+        status: "archived",
+        properties: {
+          ...memory.properties,
+          status: "archived",
+          internal_info: {
+            ...memory.properties.internal_info,
+            superseded_by_skill_id: input.currentMemoryId,
+            skill: { ...internalSkill, status: "archived" }
+          }
+        },
+        updatedAt: input.at
+      });
+    });
   }
 
   getMany(ids: string[]): MemoryRow[] {
@@ -1043,6 +1232,259 @@ export class MemoryRepository {
   }
 }
 
+export class UserMemoryRepository {
+  constructor(private readonly db: Database.Database) {}
+
+  upsertExact(memory: UserMemoryRecord): {
+    memory: UserMemoryRecord;
+    created: boolean;
+    previous?: UserMemoryRecord;
+  } {
+    const previous = this.getActiveByNormalizedText(memory.userId, memory.normalizedUserTextHash);
+    if (!previous) return { memory: this.insert(memory), created: true };
+    const updated = this.update({
+      ...previous,
+      memoryTypes: uniq([...previous.memoryTypes, ...memory.memoryTypes]),
+      sourceTurnRefs: uniq([...previous.sourceTurnRefs, ...memory.sourceTurnRefs]),
+      updatedAt: Date.parse(memory.updatedAt) > Date.parse(previous.updatedAt)
+        ? memory.updatedAt
+        : previous.updatedAt
+    });
+    return { memory: updated, created: false, previous };
+  }
+
+  confirmExisting(input: {
+    id: string;
+    userId: string;
+    sourceTurnId: string;
+    memoryTypes: UserMemoryType[];
+    updatedAt: string;
+  }): { memory: UserMemoryRecord; previous: UserMemoryRecord } | undefined {
+    const previous = this.get(input.id);
+    if (!previous || previous.userId !== input.userId || previous.status !== "active") return undefined;
+    const memory = this.update({
+      ...previous,
+      memoryTypes: uniq([...previous.memoryTypes, ...input.memoryTypes]),
+      sourceTurnRefs: uniq([...previous.sourceTurnRefs, input.sourceTurnId]),
+      updatedAt: Date.parse(input.updatedAt) > Date.parse(previous.updatedAt)
+        ? input.updatedAt
+        : previous.updatedAt
+    });
+    return { memory, previous };
+  }
+
+  insert(memory: UserMemoryRecord): UserMemoryRecord {
+    this.db.prepare(
+      `INSERT INTO user_memories (
+         id, source_turn_id, user_id, memory_types_json, content,
+         normalized_user_text_hash, source_turn_refs_json, status,
+         replaces_memory_id, replaced_by_memory_id, archived_at, archive_reason,
+         embedding_json, embedding_model, embedding_provider,
+         created_at, updated_at, deleted_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      memory.id, memory.sourceTurnId, memory.userId, toJson(memory.memoryTypes), memory.content,
+      memory.normalizedUserTextHash, toJson(memory.sourceTurnRefs), memory.status,
+      memory.replacesMemoryId ?? null, memory.replacedByMemoryId ?? null,
+      memory.archivedAt ?? null, memory.archiveReason ?? null,
+      memory.embedding ? toJson(memory.embedding) : null,
+      memory.embeddingModel ?? null, memory.embeddingProvider ?? null,
+      memory.createdAt, memory.updatedAt, memory.deletedAt ?? null
+    );
+    this.reindexFts(memory);
+    return memory;
+  }
+
+  update(memory: UserMemoryRecord): UserMemoryRecord {
+    this.db.prepare(
+      `UPDATE user_memories SET
+         source_turn_id = ?, user_id = ?, memory_types_json = ?, content = ?,
+         normalized_user_text_hash = ?, source_turn_refs_json = ?, status = ?,
+         replaces_memory_id = ?, replaced_by_memory_id = ?, archived_at = ?, archive_reason = ?,
+         embedding_json = ?, embedding_model = ?, embedding_provider = ?,
+         updated_at = ?, deleted_at = ?
+       WHERE id = ?`
+    ).run(
+      memory.sourceTurnId, memory.userId, toJson(memory.memoryTypes), memory.content,
+      memory.normalizedUserTextHash, toJson(memory.sourceTurnRefs), memory.status,
+      memory.replacesMemoryId ?? null, memory.replacedByMemoryId ?? null,
+      memory.archivedAt ?? null, memory.archiveReason ?? null,
+      memory.embedding ? toJson(memory.embedding) : null,
+      memory.embeddingModel ?? null, memory.embeddingProvider ?? null,
+      memory.updatedAt, memory.deletedAt ?? null, memory.id
+    );
+    this.reindexFts(memory);
+    return memory;
+  }
+
+  get(id: string): UserMemoryRecord | undefined {
+    const row = this.db.prepare(
+      `SELECT * FROM user_memories WHERE id = ? AND deleted_at IS NULL`
+    ).get(id) as UserMemorySqlRow | undefined;
+    return row ? userMemoryFromSql(row) : undefined;
+  }
+
+  getIncludingDeleted(id: string): UserMemoryRecord | undefined {
+    const row = this.db.prepare(`SELECT * FROM user_memories WHERE id = ?`)
+      .get(id) as UserMemorySqlRow | undefined;
+    return row ? userMemoryFromSql(row) : undefined;
+  }
+
+  getMany(ids: readonly string[]): UserMemoryRecord[] {
+    if (ids.length === 0) return [];
+    const rows = this.db.prepare(
+      `SELECT * FROM user_memories
+       WHERE id IN (SELECT CAST(value AS TEXT) FROM json_each(?)) AND deleted_at IS NULL`
+    ).all(toJson(ids)) as UserMemorySqlRow[];
+    const byId = new Map(rows.map((row) => [row.id, userMemoryFromSql(row)]));
+    return ids.map((id) => byId.get(id)).filter((item): item is UserMemoryRecord => Boolean(item));
+  }
+
+  listActive(userId: string, limit = 2000): UserMemoryRecord[] {
+    return (this.db.prepare(
+      `SELECT * FROM user_memories
+       WHERE user_id = ? AND status = 'active' AND deleted_at IS NULL
+       ORDER BY updated_at DESC, id DESC LIMIT ?`
+    ).all(userId, limit) as UserMemorySqlRow[]).map(userMemoryFromSql);
+  }
+
+  listForPanel(input: {
+    userId: string;
+    status?: UserMemoryStatus;
+    query?: string;
+    limit: number;
+    offset: number;
+  }): UserMemoryRecord[] {
+    const { where, params } = userMemoryPanelFilter(input);
+    return (this.db.prepare(
+      `SELECT * FROM user_memories
+       WHERE ${where}
+       ORDER BY updated_at DESC, id DESC
+       LIMIT ? OFFSET ?`
+    ).all(...params, input.limit, input.offset) as UserMemorySqlRow[]).map(userMemoryFromSql);
+  }
+
+  countForPanel(input: {
+    userId: string;
+    status?: UserMemoryStatus;
+    query?: string;
+  }): number {
+    const { where, params } = userMemoryPanelFilter(input);
+    const row = this.db.prepare(`SELECT COUNT(*) AS count FROM user_memories WHERE ${where}`)
+      .get(...params) as { count: number };
+    return row.count;
+  }
+
+  getActiveByNormalizedText(userId: string, hash: string): UserMemoryRecord | undefined {
+    const row = this.db.prepare(
+      `SELECT * FROM user_memories
+       WHERE user_id = ? AND normalized_user_text_hash = ?
+         AND status = 'active' AND deleted_at IS NULL
+       ORDER BY updated_at DESC, id DESC LIMIT 1`
+    ).get(userId, hash) as UserMemorySqlRow | undefined;
+    return row ? userMemoryFromSql(row) : undefined;
+  }
+
+  archiveForCorrection(id: string, replacementId: string, at: string): UserMemoryRecord | undefined {
+    const memory = this.get(id);
+    if (!memory || memory.status !== "active") return undefined;
+    return this.update({
+      ...memory,
+      status: "archived",
+      archivedAt: at,
+      archiveReason: "user_correction",
+      replacedByMemoryId: replacementId,
+      updatedAt: at
+    });
+  }
+
+  softDelete(id: string, at = nowIso()): UserMemoryRecord | undefined {
+    const memory = this.get(id);
+    return memory
+      ? this.update({
+          ...memory,
+          memoryTypes: [],
+          content: "[DELETED]",
+          sourceTurnRefs: [],
+          status: "deleted",
+          embedding: undefined,
+          embeddingModel: undefined,
+          embeddingProvider: undefined,
+          deletedAt: at,
+          updatedAt: at
+        })
+      : undefined;
+  }
+
+  updateEmbedding(
+    id: string,
+    embedding: number[],
+    input: { model?: string; provider?: string; updatedAt: string }
+  ): UserMemoryRecord | undefined {
+    const memory = this.get(id);
+    return memory ? this.update({
+      ...memory,
+      embedding,
+      embeddingModel: input.model,
+      embeddingProvider: input.provider,
+      // updatedAt describes the latest user expression, not background indexing.
+      updatedAt: memory.updatedAt
+    }) : undefined;
+  }
+
+  searchFtsIds(userId: string, ftsMatch: string | undefined | null, limit: number): MemorySearchIdHit[] {
+    if (!ftsMatch || limit <= 0) return [];
+    try {
+      const rows = this.db.prepare(
+        `SELECT user_memories.id AS id
+         FROM user_memories_fts
+         JOIN user_memories ON user_memories.id = user_memories_fts.id
+         WHERE user_memories.user_id = ?
+           AND user_memories.status = 'active'
+           AND user_memories.deleted_at IS NULL
+           AND user_memories_fts MATCH ?
+         ORDER BY rank LIMIT ?`
+      ).all(userId, ftsMatch, limit) as Array<{ id: string }>;
+      return rows.map((row, index) => ({ id: row.id, score: 1 / (index + 1), channel: "fts" }));
+    } catch {
+      return [];
+    }
+  }
+
+  searchPatternIds(userId: string, terms: readonly string[], limit: number): MemorySearchIdHit[] {
+    const normalized = terms.map((term) => term.trim().toLowerCase()).filter(Boolean).slice(0, 16);
+    if (normalized.length === 0 || limit <= 0) return [];
+    const clauses = normalized.map(() => `lower(content) LIKE ? ESCAPE '\\'`);
+    const rows = this.db.prepare(
+      `SELECT id FROM user_memories
+       WHERE user_id = ? AND status = 'active' AND deleted_at IS NULL
+         AND (${clauses.join(" OR ")})
+       ORDER BY updated_at DESC, id DESC LIMIT ?`
+    ).all(userId, ...normalized.map((term) => `%${escapeLikePattern(term)}%`), limit) as Array<{ id: string }>;
+    return rows.map((row, index) => ({ id: row.id, score: 1 / (index + 1), channel: "pattern" }));
+  }
+
+  searchVectorIds(userId: string, query: readonly number[], limit: number): MemorySearchIdHit[] {
+    if (query.length === 0 || limit <= 0) return [];
+    return this.listActive(userId)
+      .flatMap((memory) => memory.embedding?.length === query.length
+        ? [{ id: memory.id, score: cosineVectors(query, memory.embedding), channel: "vec" as const }]
+        : [])
+      .filter((hit) => hit.score > 0)
+      .sort((a, b) => b.score - a.score || a.id.localeCompare(b.id))
+      .slice(0, limit);
+  }
+
+  private reindexFts(memory: UserMemoryRecord): void {
+    this.db.prepare(`DELETE FROM user_memories_fts WHERE id = ?`).run(memory.id);
+    if (memory.status === "active" && !memory.deletedAt) {
+      this.db.prepare(
+        `INSERT INTO user_memories_fts (id, content, memory_types) VALUES (?, ?, ?)`
+      ).run(memory.id, memory.content, memory.memoryTypes.join(" "));
+    }
+  }
+}
+
 export class MemoryProcessingRepository {
   constructor(private readonly db: Database.Database) {}
 
@@ -1139,6 +1581,10 @@ export class MemoryProcessingRepository {
     const current = this.get(memoryId);
     if (!current || (expectedStates && !expectedStates.includes(current.state))) return undefined;
     return this.save({ ...current, ...patch, memoryId });
+  }
+
+  delete(memoryId: string): boolean {
+    return this.db.prepare(`DELETE FROM memory_processing_state WHERE memory_id = ?`).run(memoryId).changes > 0;
   }
 }
 
@@ -1266,6 +1712,19 @@ export class RuntimeRepository {
         lastSeenAt: updated.lastSeenAt ?? at,
         updatedAt: updated.updatedAt
       });
+    return this.getSession(id);
+  }
+
+  updateSessionMeta(
+    id: string,
+    patch: Record<string, unknown>,
+    at = nowIso()
+  ): SessionRecord | undefined {
+    const existing = this.getSession(id);
+    if (!existing) return undefined;
+    this.db.prepare(
+      `UPDATE sessions SET meta_json = ?, updated_at = ? WHERE id = ?`
+    ).run(toJson({ ...existing.meta, ...patch }), at, id);
     return this.getSession(id);
   }
 
@@ -1914,8 +2373,11 @@ export class RuntimeRepository {
         `INSERT INTO recall_events (
           id, namespace_id, session_id, episode_id, turn_id, user_id, query,
           query_hash, layers_json, candidate_memory_ids_json, injected_memory_ids_json,
-          hit_memory_ids_json, dropped_json, outcome, request_json, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          hit_memory_ids_json, dropped_json, outcome, request_json,
+          query_id, user_memory_candidate_ids_json, l1_candidate_ids_json,
+          merged_source_turn_ids_json, member_memory_ids_by_source_turn_id_json,
+          created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         event.id,
@@ -1933,6 +2395,11 @@ export class RuntimeRepository {
         toJson(event.dropped ?? []),
         event.outcome ?? "pending",
         toJson(event.request),
+        event.queryId ?? event.turnId ?? null,
+        toJson(event.userMemoryCandidateIds ?? []),
+        toJson(event.l1CandidateIds ?? []),
+        toJson(event.mergedSourceTurnIds ?? []),
+        toJson(event.memberMemoryIdsBySourceTurnId ?? {}),
         event.createdAt
       );
     return event;
@@ -1942,6 +2409,18 @@ export class RuntimeRepository {
     const row = this.db
       .prepare(`SELECT * FROM recall_events WHERE id = ?`)
       .get(id) as SqlRecallEventRow | undefined;
+    return row ? recallEventFromSql(row) : undefined;
+  }
+
+  getRecallEventByQueryId(queryId: string): RecallEventRecord | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM recall_events
+         WHERE query_id = ?
+         ORDER BY created_at DESC
+         LIMIT 1`
+      )
+      .get(queryId) as SqlRecallEventRow | undefined;
     return row ? recallEventFromSql(row) : undefined;
   }
 
@@ -2121,11 +2600,11 @@ export class RuntimeRepository {
         .prepare(
           `INSERT INTO evolution_jobs (
             id, job_type, status, dedupe_key, user_id, session_id, episode_id, target_memory_id,
-            payload_json, attempts, max_attempts, leased_until, last_error,
+            scope_key, scope_seq, payload_json, attempts, max_attempts, leased_until, last_error,
             created_at, updated_at
           ) VALUES (
             @id, @jobType, @status, @dedupeKey, @userId, @sessionId, @episodeId, @targetMemoryId,
-            @payloadJson, @attempts, @maxAttempts, @leasedUntil, @lastError,
+            @scopeKey, @scopeSeq, @payloadJson, @attempts, @maxAttempts, @leasedUntil, @lastError,
             @createdAt, @updatedAt
           )`
         )
@@ -2135,6 +2614,8 @@ export class RuntimeRepository {
           sessionId: job.sessionId ?? null,
           episodeId: job.episodeId ?? null,
           targetMemoryId: job.targetMemoryId ?? null,
+          scopeKey: job.scopeKey ?? null,
+          scopeSeq: job.scopeSeq ?? null,
           payloadJson: toJson(job.payload),
           leasedUntil: job.leasedUntil ?? null,
           lastError: job.lastError ?? null
@@ -2251,6 +2732,18 @@ export class RuntimeRepository {
     return row ? jobFromSql(row) : undefined;
   }
 
+  getJobByDedupeKey(dedupeKey: string): EvolutionJobRecord | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM evolution_jobs
+         WHERE dedupe_key = ?
+         ORDER BY created_at ASC, id ASC
+         LIMIT 1`
+      )
+      .get(dedupeKey) as SqlJobRow | undefined;
+    return row ? jobFromSql(row) : undefined;
+  }
+
   getPendingJob(
     targetMemoryId: string,
     jobType: JobType,
@@ -2344,6 +2837,29 @@ export class RuntimeRepository {
              AND (
                json_extract(payload_json, '$.runAfter') IS NULL
                OR CAST(json_extract(payload_json, '$.runAfter') AS TEXT) <= ?
+             )
+             AND (
+               job_type <> 'l3_world_model_update'
+               OR (
+                 scope_key IS NOT NULL
+                 AND scope_seq IS NOT NULL
+                 AND NOT EXISTS (
+                   SELECT 1
+                   FROM evolution_jobs AS leased_l3_job
+                   WHERE leased_l3_job.job_type = 'l3_world_model_update'
+                     AND leased_l3_job.scope_key = evolution_jobs.scope_key
+                     AND leased_l3_job.status = 'leased'
+                     AND leased_l3_job.id <> evolution_jobs.id
+                 )
+                 AND NOT EXISTS (
+                   SELECT 1
+                   FROM evolution_jobs AS earlier_l3_job
+                   WHERE earlier_l3_job.job_type = 'l3_world_model_update'
+                     AND earlier_l3_job.scope_key = evolution_jobs.scope_key
+                     AND earlier_l3_job.scope_seq < evolution_jobs.scope_seq
+                     AND earlier_l3_job.status IN ('queued', 'leased', 'failed')
+                 )
+               )
              )
              ${targetFilter}
            ORDER BY ${evolutionJobOrderSql()}
@@ -2484,23 +3000,59 @@ export class RuntimeRepository {
     return transaction();
   }
 
-  failJob(id: string, error: string, at = nowIso()): EvolutionJobRecord | undefined {
-    const row = this.db
-      .prepare(`SELECT attempts, max_attempts FROM evolution_jobs WHERE id = ?`)
-      .get(id) as { attempts: number; max_attempts: number } | undefined;
-    const status: JobStatus =
-      row && row.attempts >= row.max_attempts ? "dead_letter" : "failed";
-    this.db
-      .prepare(
-        `UPDATE evolution_jobs
-         SET status = ?,
-             leased_until = NULL,
-             last_error = ?,
-             updated_at = ?
-         WHERE id = ?`
-      )
-      .run(status, error, at, id);
-    return this.getJob(id);
+  failJob(
+    id: string,
+    error: string,
+    at = nowIso(),
+    forceDeadLetter = false
+  ): EvolutionJobRecord | undefined {
+    return this.db.transaction(() => {
+      const row = this.db
+        .prepare(`SELECT * FROM evolution_jobs WHERE id = ?`)
+        .get(id) as SqlJobRow | undefined;
+      if (!row) return undefined;
+      if (row.status === "dead_letter") return jobFromSql(row);
+      const status: JobStatus = forceDeadLetter || row.attempts >= row.max_attempts
+        ? "dead_letter"
+        : "failed";
+      this.db
+        .prepare(
+          `UPDATE evolution_jobs
+           SET status = ?,
+               leased_until = NULL,
+               last_error = ?,
+               updated_at = ?
+           WHERE id = ?`
+        )
+        .run(status, error, at, id);
+      if (status === "dead_letter" && row.job_type === "l3_world_model_update") {
+        const payload = parseJson<Record<string, unknown>>(row.payload_json, {});
+        const batchId = typeof payload.batchId === "string" ? payload.batchId : undefined;
+        const targetField = typeof payload.targetField === "string" ? payload.targetField : undefined;
+        if (batchId && isL3WorldModelTargetField(targetField)) {
+          this.db.prepare(
+            `UPDATE l3_world_model_batch_targets
+             SET status = 'dead_letter', no_change = 0, applied_at = NULL, updated_at = ?
+             WHERE batch_id = ? AND target_field = ? AND status = 'queued'`
+          ).run(at, batchId, targetField);
+          updateL3WorldModelBatchTerminalOutcome(this.db, batchId, at);
+        }
+      }
+      if (status === "dead_letter" && row.job_type === "project_environment_profile") {
+        const payload = parseJson<Record<string, unknown>>(row.payload_json, {});
+        const userId = typeof payload.userId === "string" ? payload.userId : undefined;
+        const projectId = typeof payload.projectId === "string" ? payload.projectId : undefined;
+        const scanId = typeof payload.scanId === "string" ? payload.scanId : undefined;
+        if (userId && projectId && scanId) {
+          this.db.prepare(
+            `UPDATE l3_world_model_project_environment_state
+             SET status = 'failed', last_error = ?, updated_at = ?
+            WHERE user_id = ? AND project_id = ? AND current_scan_id = ?`
+          ).run(error, at, userId, projectId, scanId);
+        }
+      }
+      return this.getJob(id);
+    })();
   }
 
   enqueueEmbeddingRetry(input: {
@@ -3342,7 +3894,7 @@ export class RuntimeRepository {
         includeRawText ? row : redactBundleRow(table, row)
       ));
     }
-    return tables;
+    return includeRawText ? tables : normalizeRedactedL3WorldModelBundle(tables);
   }
 
   importBundleTables(
@@ -3382,20 +3934,17 @@ export class RuntimeRepository {
         const rows = Array.isArray(tables[table]) ? tables[table] as Array<Record<string, unknown>> : [];
         for (const row of rows) {
           const normalized = applyBundleDefaults(table, deserializeBundleRow(row));
-          const primaryKey = primaryKeyColumn(table);
-          const primaryValue = primaryKey ? normalized[primaryKey] : undefined;
-          if (primaryKey && (typeof primaryValue === "string" || typeof primaryValue === "number")) {
-            recordMigrationMap(result.migrationMap, table, primaryValue, primaryValue);
+          const identity = bundleIdentity(table, normalized);
+          if (identity) {
+            recordMigrationMap(result.migrationMap, table, identity.sourceId, identity.sourceId);
           }
-          const existed = primaryKey !== undefined &&
-            (typeof primaryValue === "string" || typeof primaryValue === "number") &&
-            this.rowExists(table, primaryKey, primaryValue);
+          const existed = identity !== undefined && this.rowExists(table, identity.columns, identity.values);
           if (existed && conflictStrategy === "skip") {
             result.conflicts.push({
               table,
-              primaryKey: primaryKey!,
-              sourceId: String(primaryValue),
-              targetId: String(primaryValue),
+              primaryKey: identity!.primaryKey,
+              sourceId: identity!.sourceId,
+              targetId: identity!.sourceId,
               action: "skipped"
             });
             result.skipped[table] = (result.skipped[table] ?? 0) + 1;
@@ -3404,12 +3953,12 @@ export class RuntimeRepository {
           if (existed && conflictStrategy === "error") {
             result.conflicts.push({
               table,
-              primaryKey: primaryKey!,
-              sourceId: String(primaryValue),
-              targetId: String(primaryValue),
+              primaryKey: identity!.primaryKey,
+              sourceId: identity!.sourceId,
+              targetId: identity!.sourceId,
               action: "error"
             });
-            throw new Error(`import conflict for ${table}.${primaryKey}=${String(primaryValue)}`);
+            throw new Error(`import conflict for ${table}.${identity!.primaryKey}=${identity!.sourceId}`);
           }
           const columns = Object.keys(normalized)
             .filter((column) => this.tableColumns(table).includes(column));
@@ -3425,9 +3974,9 @@ export class RuntimeRepository {
           if (existed) {
             result.conflicts.push({
               table,
-              primaryKey: primaryKey!,
-              sourceId: String(primaryValue),
-              targetId: String(primaryValue),
+              primaryKey: identity!.primaryKey,
+              sourceId: identity!.sourceId,
+              targetId: identity!.sourceId,
               action: "replaced"
             });
             result.replaced[table] = (result.replaced[table] ?? 0) + 1;
@@ -3441,11 +3990,13 @@ export class RuntimeRepository {
     return result;
   }
 
-  private rowExists(table: BundleTableName, column: string, value: string | number): boolean {
-    if (!this.tableColumns(table).includes(column)) {
+  private rowExists(table: BundleTableName, columns: string[], values: Array<string | number>): boolean {
+    const tableColumns = this.tableColumns(table);
+    if (columns.length === 0 || columns.some((column) => !tableColumns.includes(column))) {
       return false;
     }
-    const row = this.db.prepare(`SELECT 1 AS ok FROM ${table} WHERE ${column} = ? LIMIT 1`).get(value) as
+    const where = columns.map((column) => `${column} = ?`).join(" AND ");
+    const row = this.db.prepare(`SELECT 1 AS ok FROM ${table} WHERE ${where} LIMIT 1`).get(...values) as
       | { ok: number }
       | undefined;
     return Boolean(row);
@@ -3533,22 +4084,1212 @@ export class RuntimeRepository {
   }
 }
 
+export class L3WorldModelScopeWorkspaceConflictError extends Error {
+  constructor() {
+    super("l3_world_model_scope_workspace_conflict");
+    this.name = "L3WorldModelScopeWorkspaceConflictError";
+  }
+}
+
+export class L3WorldModelRepository {
+  constructor(
+    private readonly db: Database.Database,
+    private readonly memories: MemoryRepository
+  ) {}
+
+  getScope(userId: string, projectId?: string | null): L3WorldModelScopeRecord | undefined {
+    const row = this.db.prepare(
+      `SELECT * FROM l3_world_model_scopes
+       WHERE user_id = ? AND project_id IS ?`
+    ).get(userId, projectId ?? null) as SqlL3WorldModelScopeRow | undefined;
+    return row ? l3WorldModelScopeFromSql(row) : undefined;
+  }
+
+  ensureScope(userId: string, projectId?: string | null, at = nowIso()): L3WorldModelScopeRecord {
+    const scopeKey = l3WorldModelScopeKey(userId, projectId);
+    this.db.prepare(
+      `INSERT INTO l3_world_model_scopes (
+         scope_key, user_id, project_id, memory_id, next_scope_seq, updated_at
+       ) VALUES (?, ?, ?, NULL, 1, ?)
+       ON CONFLICT(scope_key) DO NOTHING`
+    ).run(scopeKey, userId, projectId ?? null, at);
+    const scope = this.getScope(userId, projectId);
+    if (!scope || scope.scopeKey !== scopeKey || scope.userId !== userId || (scope.projectId ?? null) !== (projectId ?? null)) {
+      throw new Error("corrupt L3 World Model scope ownership");
+    }
+    return scope;
+  }
+
+  bindWorkspaceUri(
+    userId: string,
+    projectId: string,
+    workspaceUri: WorkspaceUri,
+    at = nowIso()
+  ): L3WorldModelScopeRecord {
+    const scope = this.ensureScope(userId, projectId, at);
+    if (scope.workspaceUri && scope.workspaceUri !== workspaceUri) {
+      throw new L3WorldModelScopeWorkspaceConflictError();
+    }
+    if (!scope.workspaceUri) {
+      this.db.prepare(
+        `UPDATE l3_world_model_scopes
+         SET workspace_uri = ?, updated_at = ?
+         WHERE scope_key = ? AND workspace_uri IS NULL`
+      ).run(workspaceUri, at, scope.scopeKey);
+    }
+    const bound = this.getScope(userId, projectId);
+    if (!bound || bound.workspaceUri !== workspaceUri) {
+      throw new L3WorldModelScopeWorkspaceConflictError();
+    }
+    return bound;
+  }
+
+  getScopesByMemoryIds(memoryIds: readonly string[]): L3WorldModelScopeRecord[] {
+    const ids = uniq(memoryIds.filter(Boolean));
+    if (ids.length === 0) return [];
+    const placeholders = ids.map(() => "?").join(", ");
+    return (this.db.prepare(
+      `SELECT * FROM l3_world_model_scopes WHERE memory_id IN (${placeholders})`
+    ).all(...ids) as SqlL3WorldModelScopeRow[]).map(l3WorldModelScopeFromSql);
+  }
+
+  registerInputTrace(input: {
+    sessionId: string;
+    l1MemoryId: string;
+    rawTurnId: string;
+    episodeId?: string | null;
+    createdAt?: string;
+  }): L3WorldModelInputTraceRecord {
+    const session = this.requireV2Session(input.sessionId);
+    const existing = this.db.prepare(
+      `SELECT * FROM l3_world_model_input_traces
+       WHERE session_id = ? AND l1_memory_id = ?`
+    ).get(input.sessionId, input.l1MemoryId) as SqlL3WorldModelInputTraceRow | undefined;
+    if (existing) return l3WorldModelInputTraceFromSql(existing);
+    const next = this.db.prepare(
+      `SELECT COALESCE(MAX(trace_seq), 0) + 1 AS trace_seq
+       FROM l3_world_model_input_traces WHERE session_id = ?`
+    ).get(session.id) as { trace_seq: number };
+    const createdAt = input.createdAt ?? nowIso();
+    this.db.prepare(
+      `INSERT INTO l3_world_model_input_traces (
+         session_id, trace_seq, l1_memory_id, raw_turn_id, episode_id, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?)`
+    ).run(session.id, next.trace_seq, input.l1MemoryId, input.rawTurnId, input.episodeId ?? null, createdAt);
+    return {
+      sessionId: session.id,
+      traceSeq: next.trace_seq,
+      l1MemoryId: input.l1MemoryId,
+      rawTurnId: input.rawTurnId,
+      episodeId: input.episodeId ?? undefined,
+      createdAt
+    };
+  }
+
+  traceHead(sessionId: string): L3WorldModelTraceHeadResponse {
+    this.requireV2Session(sessionId);
+    const row = this.db.prepare(
+      `SELECT l1_memory_id, trace_seq
+       FROM l3_world_model_input_traces
+       WHERE session_id = ?
+       ORDER BY trace_seq DESC LIMIT 1`
+    ).get(sessionId) as { l1_memory_id: string; trace_seq: number } | undefined;
+    return row
+      ? { throughL1MemoryId: row.l1_memory_id, traceSeq: row.trace_seq }
+      : { throughL1MemoryId: null, traceSeq: null };
+  }
+
+  inputTraceByL1MemoryId(
+    sessionId: string,
+    l1MemoryId: string
+  ): L3WorldModelInputTraceRecord | undefined {
+    this.requireV2Session(sessionId);
+    const row = this.db.prepare(
+      `SELECT * FROM l3_world_model_input_traces
+       WHERE session_id = ? AND l1_memory_id = ?`
+    ).get(sessionId, l1MemoryId) as SqlL3WorldModelInputTraceRow | undefined;
+    return row ? l3WorldModelInputTraceFromSql(row) : undefined;
+  }
+
+  freezeBatches(input: {
+    sessionId: string;
+    trigger: L3WorldModelBatchTrigger;
+    throughL1MemoryId?: string;
+    episodeId?: string;
+    at?: string;
+  }): FreezeL3WorldModelBatchesResult {
+    return this.db.transaction(() => this.freezeBatchesInTransaction(input))();
+  }
+
+  getBatch(batchId: string): L3WorldModelEvidenceBatchRecord | undefined {
+    const row = this.db.prepare(
+      `SELECT * FROM l3_world_model_evidence_batches WHERE id = ?`
+    ).get(batchId) as SqlL3WorldModelEvidenceBatchRow | undefined;
+    return row ? l3WorldModelEvidenceBatchFromSql(row) : undefined;
+  }
+
+  getTarget(batchId: string, targetField: L3WorldModelTargetField): L3WorldModelBatchTargetRecord | undefined {
+    const row = this.db.prepare(
+      `SELECT * FROM l3_world_model_batch_targets
+       WHERE batch_id = ? AND target_field = ?`
+    ).get(batchId, targetField) as SqlL3WorldModelBatchTargetRow | undefined;
+    return row ? l3WorldModelBatchTargetFromSql(row) : undefined;
+  }
+
+  listBatchTraces(batchId: string): L3WorldModelInputTraceRecord[] {
+    const batch = this.getBatch(batchId);
+    if (!batch) return [];
+    return (this.db.prepare(
+      `SELECT *
+       FROM l3_world_model_input_traces
+       WHERE session_id = ? AND trace_seq >= ? AND trace_seq <= ?
+       ORDER BY trace_seq ASC`
+    ).all(batch.sessionId, batch.startTraceSeq, batch.endTraceSeq) as SqlL3WorldModelInputTraceRow[])
+      .map(l3WorldModelInputTraceFromSql);
+  }
+
+  getMemory(userId: string, projectId?: string | null): MemoryRow | undefined {
+    const scope = this.getScope(userId, projectId);
+    if (!scope?.memoryId) return undefined;
+    const memory = this.memories.get(scope.memoryId);
+    if (!memory) throw new Error(`corrupt L3 World Model scope memory: ${scope.memoryId}`);
+    validateL3WorldModelMemory(memory, userId, projectId);
+    return memory;
+  }
+
+  fields(userId: string, projectId?: string | null): L3WorldModelFields {
+    const memory = this.getMemory(userId, projectId);
+    return memory ? fieldsFromL3WorldModelMemory(memory) : emptyL3WorldModelFields();
+  }
+
+  upsertField(input: {
+    userId: string;
+    projectId?: string | null;
+    targetField: L3WorldModelFieldName;
+    value: string | null;
+    eligibleL1MemoryIds?: string[];
+    projectEnvironmentAppliedScanId?: string | null;
+    at?: string;
+    source?: string;
+  }): MemoryRow | undefined {
+    return this.db.transaction(() => this.upsertFieldInTransaction(input))();
+  }
+
+  applyTraceTarget(input: {
+    batchId: string;
+    targetField: L3WorldModelTargetField;
+    operation: L3WorldModelTraceTargetOperation;
+    value: string;
+    expectedFieldHash: string;
+    expectedProfileHash?: string;
+    eligibleL1MemoryIds: string[];
+    at?: string;
+  }): ApplyL3WorldModelTraceTargetResult {
+    return this.db.transaction(() => {
+      const at = input.at ?? nowIso();
+      const batch = this.getBatch(input.batchId);
+      if (!batch) throw new Error(`L3 World Model batch not found: ${input.batchId}`);
+      const target = this.getTarget(input.batchId, input.targetField);
+      if (!target) throw new Error(`L3 World Model target not found: ${input.batchId}:${input.targetField}`);
+      if (target.status === "applied") {
+        return {
+          alreadyApplied: true,
+          noChange: target.noChange,
+          memory: this.getMemory(batch.userId, batch.projectId)
+        };
+      }
+      if (target.status === "dead_letter") {
+        throw new Error(`L3 World Model target is terminal: ${input.batchId}:${input.targetField}`);
+      }
+      const expectedScopeKey = l3WorldModelFieldScopeKey(
+        l3WorldModelScopeKey(batch.userId, batch.projectId),
+        input.targetField
+      );
+      if (target.fieldScopeKey !== expectedScopeKey || target.scopeSeq !== batch.scopeSeq) {
+        throw new Error("corrupt L3 World Model target ownership");
+      }
+      assertL3WorldModelFieldOwnership(batch.projectId ?? null, input.targetField);
+
+      const fields = this.fields(batch.userId, batch.projectId);
+      const currentField = fields[l3WorldModelFieldProperty(input.targetField)];
+      if (sha256Hex(currentField ?? "") !== input.expectedFieldHash) {
+        throw new Error("stale_l3_base");
+      }
+      if (input.targetField !== "general_rules_and_safety_constraints") {
+        if (!input.expectedProfileHash) throw new TypeError("project target requires expectedProfileHash");
+        if (sha256Hex(fields.projectEnvironmentProfile ?? "") !== input.expectedProfileHash) {
+          throw new Error("stale_l3_base");
+        }
+      }
+
+      let noChange = false;
+      let memory = this.getMemory(batch.userId, batch.projectId);
+      if (input.operation === "noop") {
+        if (input.value !== "") throw new TypeError("noop L3 World Model output must be empty");
+        noChange = true;
+      } else if (input.operation === "create") {
+        if (currentField !== null || !input.value.trim()) {
+          throw new TypeError("create L3 World Model output requires an empty base and non-empty value");
+        }
+        memory = this.upsertFieldInTransaction({
+          userId: batch.userId,
+          projectId: batch.projectId,
+          targetField: input.targetField,
+          value: input.value,
+          eligibleL1MemoryIds: input.eligibleL1MemoryIds,
+          at
+        });
+      } else {
+        if (currentField === null || input.value === currentField) {
+          throw new TypeError("update L3 World Model output requires a non-empty changed base");
+        }
+        memory = this.upsertFieldInTransaction({
+          userId: batch.userId,
+          projectId: batch.projectId,
+          targetField: input.targetField,
+          value: input.value || null,
+          eligibleL1MemoryIds: input.eligibleL1MemoryIds,
+          at
+        });
+      }
+      this.db.prepare(
+        `UPDATE l3_world_model_batch_targets
+         SET status = 'applied', no_change = ?, applied_at = ?, updated_at = ?
+         WHERE batch_id = ? AND target_field = ? AND status = 'queued'`
+      ).run(noChange ? 1 : 0, at, at, input.batchId, input.targetField);
+      updateL3WorldModelBatchTerminalOutcome(this.db, input.batchId, at);
+      return { alreadyApplied: false, noChange, memory };
+    })();
+  }
+
+  deleteScopeMemory(memoryId: string, at = nowIso()): DeleteL3WorldModelScopeResult | undefined {
+    return this.db.transaction(() => {
+      const scopeRow = this.db.prepare(
+        `SELECT * FROM l3_world_model_scopes WHERE memory_id = ?`
+      ).get(memoryId) as SqlL3WorldModelScopeRow | undefined;
+      if (!scopeRow) return undefined;
+      const scope = l3WorldModelScopeFromSql(scopeRow);
+      const before = this.memories.get(memoryId);
+      if (!before) throw new Error(`corrupt L3 World Model scope memory: ${memoryId}`);
+      validateL3WorldModelMemory(before, scope.userId, scope.projectId);
+      const deleted = this.memories.softDelete(memoryId, at);
+      if (!deleted) throw new Error(`failed to delete L3 World Model memory: ${memoryId}`);
+      this.db.prepare(
+        `UPDATE l3_world_model_scopes SET memory_id = NULL, updated_at = ? WHERE scope_key = ?`
+      ).run(at, scope.scopeKey);
+
+      const pendingTargets = this.db.prepare(
+        `SELECT target.batch_id, target.target_field
+         FROM l3_world_model_batch_targets AS target
+         JOIN l3_world_model_evidence_batches AS batch ON batch.id = target.batch_id
+         WHERE batch.scope_key = ? AND target.status = 'queued'`
+      ).all(scope.scopeKey) as Array<{ batch_id: string; target_field: L3WorldModelTargetField }>;
+      const affectedBatchIds = new Set<string>();
+      for (const target of pendingTargets) {
+        const job = this.db.prepare(
+          `SELECT id FROM evolution_jobs
+           WHERE job_type = 'l3_world_model_update'
+             AND json_extract(payload_json, '$.batchId') = ?
+             AND json_extract(payload_json, '$.targetField') = ?
+             AND status IN ('queued', 'leased', 'failed')`
+        ).get(target.batch_id, target.target_field) as { id: string } | undefined;
+        if (!job) continue;
+        this.db.prepare(
+          `UPDATE l3_world_model_batch_targets
+           SET status = 'applied', no_change = 1, applied_at = ?, updated_at = ?
+           WHERE batch_id = ? AND target_field = ? AND status = 'queued'`
+        ).run(at, at, target.batch_id, target.target_field);
+        this.db.prepare(
+          `UPDATE evolution_jobs
+           SET status = 'succeeded', leased_until = NULL, updated_at = ? WHERE id = ?`
+        ).run(at, job.id);
+        affectedBatchIds.add(target.batch_id);
+      }
+      for (const batchId of affectedBatchIds) {
+        updateL3WorldModelBatchTerminalOutcome(this.db, batchId, at);
+      }
+
+      if (scope.projectId) {
+        this.db.prepare(
+          `UPDATE evolution_jobs
+           SET status = 'succeeded', leased_until = NULL, last_error = NULL, updated_at = ?
+           WHERE job_type = 'project_environment_profile'
+             AND user_id = ?
+             AND json_extract(payload_json, '$.projectId') = ?
+             AND status IN ('queued', 'failed')`
+        ).run(at, scope.userId, scope.projectId);
+        this.db.prepare(
+          `UPDATE l3_world_model_project_environment_state
+           SET project_kind = 'unknown', status = 'uninitialized', current_scan_id = NULL,
+               applied_scan_id = NULL, fingerprint = NULL, last_error = NULL, updated_at = ?
+           WHERE user_id = ? AND project_id = ?`
+        ).run(at, scope.userId, scope.projectId);
+      }
+      return { before, deleted, scope };
+    })();
+  }
+
+  insertImmutableJob(job: EvolutionJobRecord): EvolutionJobRecord {
+    if (job.jobType !== "l3_world_model_update" && job.jobType !== "project_environment_profile") {
+      throw new TypeError("immutable L3 job must use an L3 World Model job type");
+    }
+    if (!job.dedupeKey) {
+      throw new TypeError("immutable L3 job requires dedupeKey");
+    }
+    if (job.jobType === "l3_world_model_update" && (!job.scopeKey || job.scopeSeq === undefined)) {
+      throw new TypeError("L3 field update job requires scopeKey and scopeSeq");
+    }
+    if (job.jobType === "project_environment_profile" && (job.scopeKey || job.scopeSeq !== undefined)) {
+      throw new TypeError("project environment job must not enter Trace field FIFO");
+    }
+    if (job.status !== "queued" || job.attempts !== 0) {
+      throw new TypeError("immutable L3 job must start queued with zero attempts");
+    }
+    this.db.prepare(
+      `INSERT INTO evolution_jobs (
+         id, job_type, status, dedupe_key, user_id, session_id, episode_id,
+         target_memory_id, scope_key, scope_seq, payload_json, attempts,
+         max_attempts, leased_until, last_error, created_at, updated_at
+       ) VALUES (
+         @id, @jobType, @status, @dedupeKey, @userId, @sessionId, @episodeId,
+         @targetMemoryId, @scopeKey, @scopeSeq, @payloadJson, @attempts,
+         @maxAttempts, @leasedUntil, @lastError, @createdAt, @updatedAt
+       )`
+    ).run({
+      ...job,
+      sessionId: job.sessionId ?? null,
+      episodeId: job.episodeId ?? null,
+      targetMemoryId: job.targetMemoryId ?? null,
+      scopeKey: job.scopeKey ?? null,
+      scopeSeq: job.scopeSeq ?? null,
+      payloadJson: toJson(job.payload),
+      leasedUntil: job.leasedUntil ?? null,
+      lastError: job.lastError ?? null
+    });
+    return job;
+  }
+
+  private freezeBatchesInTransaction(input: {
+    sessionId: string;
+    trigger: L3WorldModelBatchTrigger;
+    throughL1MemoryId?: string;
+    episodeId?: string;
+    at?: string;
+  }): FreezeL3WorldModelBatchesResult {
+    const session = this.requireV2Session(input.sessionId);
+    const at = input.at ?? nowIso();
+    this.db.prepare(
+      `INSERT INTO l3_world_model_session_cursors (session_id, last_scheduled_seq, updated_at)
+       VALUES (?, 0, ?)
+       ON CONFLICT(session_id) DO NOTHING`
+    ).run(session.id, at);
+    const cursor = this.db.prepare(
+      `SELECT last_scheduled_seq FROM l3_world_model_session_cursors WHERE session_id = ?`
+    ).get(session.id) as { last_scheduled_seq: number };
+
+    let endTraceSeq: number;
+    if (input.throughL1MemoryId) {
+      const through = this.db.prepare(
+        `SELECT trace_seq FROM l3_world_model_input_traces
+         WHERE session_id = ? AND l1_memory_id = ?`
+      ).get(session.id, input.throughL1MemoryId) as { trace_seq: number } | undefined;
+      if (!through) throw new Error("through L1 memory does not belong to the L3 World Model session trace");
+      endTraceSeq = through.trace_seq;
+    } else if (input.trigger === "episode_idle_close") {
+      if (!input.episodeId) throw new TypeError("episode_idle_close requires episodeId");
+      const end = this.db.prepare(
+        `SELECT COALESCE(MAX(trace_seq), 0) AS trace_seq
+         FROM l3_world_model_input_traces
+         WHERE session_id = ? AND episode_id = ?`
+      ).get(session.id, input.episodeId) as { trace_seq: number };
+      endTraceSeq = end.trace_seq;
+    } else {
+      const end = this.db.prepare(
+        `SELECT COALESCE(MAX(trace_seq), 0) AS trace_seq
+         FROM l3_world_model_input_traces WHERE session_id = ?`
+      ).get(session.id) as { trace_seq: number };
+      endTraceSeq = end.trace_seq;
+    }
+
+    if (endTraceSeq <= cursor.last_scheduled_seq) {
+      return {
+        scheduled: false,
+        throughL1MemoryId: input.throughL1MemoryId,
+        throughTraceSeq: endTraceSeq || undefined,
+        batchIds: [],
+        targetCount: 0
+      };
+    }
+    const traces = (this.db.prepare(
+      `SELECT * FROM l3_world_model_input_traces
+       WHERE session_id = ? AND trace_seq > ? AND trace_seq <= ?
+       ORDER BY trace_seq ASC`
+    ).all(session.id, cursor.last_scheduled_seq, endTraceSeq) as SqlL3WorldModelInputTraceRow[])
+      .map(l3WorldModelInputTraceFromSql);
+    if (traces.length === 0) {
+      return { scheduled: false, batchIds: [], targetCount: 0 };
+    }
+
+    const chunks = splitL3TracesByRawTurn(traces, 20);
+    const scope = this.ensureScope(session.userId, session.projectId, at);
+    const batchIds: string[] = [];
+    let targetCount = 0;
+    for (const chunk of chunks) {
+      const claimed = this.db.prepare(
+        `UPDATE l3_world_model_scopes
+         SET next_scope_seq = next_scope_seq + 1, updated_at = ?
+         WHERE scope_key = ?
+         RETURNING next_scope_seq - 1 AS scope_seq`
+      ).get(at, scope.scopeKey) as { scope_seq: number } | undefined;
+      if (!claimed) throw new Error("failed to claim L3 World Model scope sequence");
+      const l1MemoryIds = chunk.map((trace) => trace.l1MemoryId);
+      const rawTurnIds = [...new Set(chunk.map((trace) => trace.rawTurnId))];
+      const feedbackIds = this.feedbackIdsForBatch(l1MemoryIds, rawTurnIds);
+      const payload = {
+        scopeKey: scope.scopeKey,
+        scopeSeq: claimed.scope_seq,
+        userId: session.userId,
+        projectId: session.projectId ?? null,
+        sessionId: session.id,
+        trigger: input.trigger,
+        startTraceSeq: chunk[0]!.traceSeq,
+        endTraceSeq: chunk.at(-1)!.traceSeq,
+        l1MemoryIds,
+        rawTurnIds,
+        feedbackIds
+      };
+      const batchId = newId("l3wm_batch");
+      const payloadHash = sha256Hex(canonicalJson(payload));
+      this.db.prepare(
+        `INSERT INTO l3_world_model_evidence_batches (
+           id, scope_key, scope_seq, user_id, project_id, session_id, trigger,
+           start_trace_seq, end_trace_seq, l1_memory_ids_json, raw_turn_ids_json,
+           feedback_ids_json, payload_hash, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        batchId,
+        scope.scopeKey,
+        claimed.scope_seq,
+        session.userId,
+        session.projectId ?? null,
+        session.id,
+        input.trigger,
+        payload.startTraceSeq,
+        payload.endTraceSeq,
+        toJson(l1MemoryIds),
+        toJson(rawTurnIds),
+        toJson(feedbackIds),
+        payloadHash,
+        at,
+        at
+      );
+      const targetFields: L3WorldModelTargetField[] = session.projectId
+        ? ["project_contract", "domain_knowledge"]
+        : ["general_rules_and_safety_constraints"];
+      for (const targetField of targetFields) {
+        const fieldScopeKey = l3WorldModelFieldScopeKey(scope.scopeKey, targetField);
+        this.db.prepare(
+          `INSERT INTO l3_world_model_batch_targets (
+             batch_id, target_field, field_scope_key, scope_seq, status, no_change, updated_at
+           ) VALUES (?, ?, ?, ?, 'queued', 0, ?)`
+        ).run(batchId, targetField, fieldScopeKey, claimed.scope_seq, at);
+        this.insertImmutableJob({
+          id: newId("job"),
+          jobType: "l3_world_model_update",
+          status: "queued",
+          dedupeKey: `l3_world_model:${batchId}:${targetField}`,
+          userId: session.userId,
+          sessionId: session.id,
+          scopeKey: fieldScopeKey,
+          scopeSeq: claimed.scope_seq,
+          payload: { batchId, targetField },
+          attempts: 0,
+          maxAttempts: 3,
+          createdAt: at,
+          updatedAt: at
+        });
+        targetCount += 1;
+      }
+      batchIds.push(batchId);
+    }
+    this.db.prepare(
+      `UPDATE l3_world_model_session_cursors
+       SET last_scheduled_seq = ?, updated_at = ? WHERE session_id = ?`
+    ).run(endTraceSeq, at, session.id);
+    return {
+      scheduled: true,
+      throughL1MemoryId: traces.at(-1)?.l1MemoryId,
+      throughTraceSeq: endTraceSeq,
+      batchIds,
+      targetCount
+    };
+  }
+
+  private upsertFieldInTransaction(input: {
+    userId: string;
+    projectId?: string | null;
+    targetField: L3WorldModelFieldName;
+    value: string | null;
+    eligibleL1MemoryIds?: string[];
+    projectEnvironmentAppliedScanId?: string | null;
+    at?: string;
+    source?: string;
+  }): MemoryRow | undefined {
+    const projectId = input.projectId ?? null;
+    assertL3WorldModelFieldOwnership(projectId, input.targetField);
+    const at = input.at ?? nowIso();
+    const scope = this.ensureScope(input.userId, projectId, at);
+    const existing = scope.memoryId ? this.memories.get(scope.memoryId) : undefined;
+    if (scope.memoryId && !existing) throw new Error(`corrupt L3 World Model scope memory: ${scope.memoryId}`);
+    if (existing) validateL3WorldModelMemory(existing, input.userId, projectId);
+    const fields = existing ? fieldsFromL3WorldModelMemory(existing) : emptyL3WorldModelFields();
+    const property = l3WorldModelFieldProperty(input.targetField);
+    fields[property] = normalizeL3WorldModelFieldValue(input.value);
+    const memoryValue = renderL3WorldModelFields(fields);
+    if (!existing && !memoryValue) return undefined;
+
+    const existingSourceMemoryIds = l3WorldModelSourceMemoryIds(existing);
+    const sourceMemoryIds = input.eligibleL1MemoryIds === undefined
+      ? existingSourceMemoryIds
+      : this.orderedRecentSourceMemoryIds(
+          scope.scopeKey,
+          existingSourceMemoryIds,
+          input.eligibleL1MemoryIds,
+          256
+        );
+    const title = projectId ? "项目场域认知" : "通用规则与安全约束";
+    const summary = [...memoryValue.replace(/\s+/gu, " ").trim()].slice(0, 240).join("");
+    const tags = ["world_model", "l3_world_model", projectId ? "scope:project" : "scope:no_project"];
+    const info: Record<string, unknown> = {
+      ...(projectId ? { project_id: projectId } : {}),
+      source_memory_ids: sourceMemoryIds
+    };
+    const existingScanId = existing?.info.project_environment_applied_scan_id;
+    const scanId = input.projectEnvironmentAppliedScanId === undefined
+      ? existingScanId
+      : input.projectEnvironmentAppliedScanId;
+    if (projectId && typeof scanId === "string" && scanId) {
+      info.project_environment_applied_scan_id = scanId;
+    }
+    const status = memoryValue ? "activated" as const : "archived" as const;
+    const memory: MemoryRow = {
+      id: existing?.id ?? newId("memory"),
+      timeline: existing?.timeline ?? at,
+      userId: input.userId,
+      memoryType: "LongTermMemory",
+      status,
+      visibility: "private",
+      memoryKey: l3WorldModelMemoryKey(input.userId, projectId),
+      memoryValue,
+      tags,
+      info,
+      properties: {
+        memory_type: "LongTermMemory",
+        status,
+        tags,
+        info: { ...info },
+        internal_info: {
+          memory_layer: "L3",
+          memory_kind: "world_model",
+          schema_version: 2,
+          source: "worker.l3_world_model.v1",
+          plugin_algorithm: "l3_world_model.v1",
+          source_memory_ids: sourceMemoryIds,
+          title,
+          summary,
+          body: memoryValue,
+          world_model: {
+            general_rules_and_safety_constraints: fields.generalRulesAndSafetyConstraints,
+            project_environment_profile: fields.projectEnvironmentProfile,
+            project_contract: fields.projectContract,
+            domain_knowledge: fields.domainKnowledge
+          }
+        }
+      },
+      memoryLayer: "L3",
+      contentHash: sha256Hex(memoryValue),
+      version: existing?.version ?? 1,
+      createdAt: existing?.createdAt ?? at,
+      updatedAt: at,
+      deletedAt: null
+    };
+    const saved = existing ? this.memories.update(memory) : this.memories.insert(memory);
+    this.db.prepare(
+      `UPDATE l3_world_model_scopes SET memory_id = ?, updated_at = ? WHERE scope_key = ?`
+    ).run(saved.id, at, scope.scopeKey);
+    this.db.prepare(
+      `INSERT INTO memory_change_log (
+         memory_id, namespace_id, kind, op, entity_id, user_id,
+         change_type, version, before_json, after_json, source, created_at
+       ) VALUES (?, ?, 'world_model', ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      saved.id,
+      scope.scopeKey,
+      existing ? (status === "archived" ? "archived" : "updated") : "created",
+      saved.id,
+      input.userId,
+      existing ? "l3_world_model_update" : "l3_world_model_create",
+      saved.version,
+      existing ? toJson(existing) : null,
+      toJson(saved),
+      input.source ?? "worker.l3_world_model.v1",
+      at
+    );
+    return saved;
+  }
+
+  private feedbackIdsForBatch(l1MemoryIds: string[], rawTurnIds: string[]): string[] {
+    const l1Placeholders = l1MemoryIds.map(() => "?").join(", ");
+    const rawPlaceholders = rawTurnIds.map(() => "?").join(", ");
+    const rows = this.db.prepare(
+      `SELECT id FROM feedback
+       WHERE raw_turn_id IN (${rawPlaceholders})
+          OR l1_memory_id IN (${l1Placeholders})
+       ORDER BY created_at ASC, id ASC`
+    ).all(...rawTurnIds, ...l1MemoryIds) as Array<{ id: string }>;
+    return [...new Set(rows.map((row) => row.id))];
+  }
+
+  private orderedRecentSourceMemoryIds(
+    scopeKey: string,
+    existing: string[],
+    incoming: string[],
+    limit: number
+  ): string[] {
+    const candidates = new Set([...existing, ...incoming.filter(Boolean)]);
+    if (candidates.size === 0) return [];
+    const rows = this.db.prepare(
+      `SELECT batch.scope_seq, trace.trace_seq, trace.l1_memory_id
+       FROM l3_world_model_evidence_batches AS batch
+       JOIN l3_world_model_input_traces AS trace
+         ON trace.session_id = batch.session_id
+        AND trace.trace_seq BETWEEN batch.start_trace_seq AND batch.end_trace_seq
+       WHERE batch.scope_key = ?
+       ORDER BY batch.scope_seq ASC, trace.trace_seq ASC, trace.l1_memory_id ASC`
+    ).all(scopeKey) as Array<{ scope_seq: number; trace_seq: number; l1_memory_id: string }>;
+    const ordered: string[] = [];
+    const ranked = new Set<string>();
+    for (const row of rows) {
+      if (!candidates.has(row.l1_memory_id) || ranked.has(row.l1_memory_id)) continue;
+      ranked.add(row.l1_memory_id);
+      ordered.push(row.l1_memory_id);
+    }
+    const unranked = [...candidates].filter((id) => !ranked.has(id));
+    const merged = [...unranked, ...ordered];
+    return merged.slice(Math.max(0, merged.length - limit));
+  }
+
+  private requireV2Session(sessionId: string): SessionRecord {
+    const row = this.db.prepare(`SELECT * FROM sessions WHERE id = ?`).get(sessionId) as SqlSessionRow | undefined;
+    if (!row) throw new Error(`session not found: ${sessionId}`);
+    const session = sessionFromSql(row);
+    if (session.meta.l3_world_model_protocol_version !== 2) {
+      throw new Error("l3_world_model_protocol_v2_required");
+    }
+    return session;
+  }
+}
+
+interface SqlProjectEnvironmentStateRow {
+  user_id: string;
+  project_id: string;
+  project_kind: ProjectEnvironmentKind;
+  status: ProjectEnvironmentStateRecord["status"];
+  current_scan_id: string | null;
+  applied_scan_id: string | null;
+  fingerprint: string | null;
+  last_error: string | null;
+  updated_at: string;
+}
+
+export class ProjectEnvironmentRepository {
+  constructor(
+    private readonly db: Database.Database,
+    private readonly l3WorldModels: L3WorldModelRepository,
+    private readonly runtime: RuntimeRepository
+  ) {}
+
+  getState(userId: string, projectId: string): ProjectEnvironmentStateRecord | undefined {
+    const row = this.db.prepare(
+      `SELECT * FROM l3_world_model_project_environment_state
+       WHERE user_id = ? AND project_id = ?`
+    ).get(userId, projectId) as SqlProjectEnvironmentStateRow | undefined;
+    return row ? projectEnvironmentStateFromSql(row) : undefined;
+  }
+
+  requestScan(input: {
+    userId: string;
+    projectId: string;
+    sessionId: string;
+    trigger: "session_start" | "token_compaction";
+    dedupeKey: string;
+    at?: string;
+  }): { job: EvolutionJobRecord; enqueued: boolean } {
+    return this.db.transaction(() => {
+      const existing = this.runtime.getJobByDedupeKey(input.dedupeKey);
+      if (existing) return { job: existing, enqueued: false };
+      const at = input.at ?? nowIso();
+      const scanId = newId("l3wm_scan");
+      this.l3WorldModels.ensureScope(input.userId, input.projectId, at);
+      this.db.prepare(
+        `INSERT INTO l3_world_model_project_environment_state (
+           user_id, project_id, project_kind, status, current_scan_id,
+           applied_scan_id, fingerprint, last_error, updated_at
+         ) VALUES (?, ?, 'unknown', 'queued', ?, NULL, NULL, NULL, ?)
+         ON CONFLICT(user_id, project_id) DO UPDATE SET
+           status = 'queued', current_scan_id = excluded.current_scan_id,
+           last_error = NULL, updated_at = excluded.updated_at`
+      ).run(input.userId, input.projectId, scanId, at);
+      const job: EvolutionJobRecord = {
+        id: newId("job"),
+        jobType: "project_environment_profile",
+        status: "queued",
+        dedupeKey: input.dedupeKey,
+        userId: input.userId,
+        sessionId: input.sessionId,
+        payload: {
+          userId: input.userId,
+          projectId: input.projectId,
+          scanId,
+          trigger: input.trigger
+        },
+        attempts: 0,
+        maxAttempts: 3,
+        createdAt: at,
+        updatedAt: at
+      };
+      this.l3WorldModels.insertImmutableJob(job);
+      return { job, enqueued: true };
+    })();
+  }
+
+  beginScan(userId: string, projectId: string, scanId: string, at = nowIso()): boolean {
+    const result = this.db.prepare(
+      `UPDATE l3_world_model_project_environment_state
+       SET status = 'scanning', last_error = NULL, updated_at = ?
+       WHERE user_id = ? AND project_id = ? AND current_scan_id = ?`
+    ).run(at, userId, projectId, scanId);
+    return result.changes === 1;
+  }
+
+  markSummarizing(userId: string, projectId: string, scanId: string, at = nowIso()): boolean {
+    const result = this.db.prepare(
+      `UPDATE l3_world_model_project_environment_state
+       SET status = 'summarizing', updated_at = ?
+       WHERE user_id = ? AND project_id = ? AND current_scan_id = ?`
+    ).run(at, userId, projectId, scanId);
+    return result.changes === 1;
+  }
+
+  markCleanWithoutModel(input: {
+    userId: string;
+    projectId: string;
+    scanId: string;
+    projectKind: Exclude<ProjectEnvironmentKind, "unknown">;
+    at?: string;
+  }): boolean {
+    const at = input.at ?? nowIso();
+    const result = this.db.prepare(
+      `UPDATE l3_world_model_project_environment_state
+       SET project_kind = ?, status = 'clean', last_error = NULL, updated_at = ?
+       WHERE user_id = ? AND project_id = ? AND current_scan_id = ?`
+    ).run(
+      input.projectKind,
+      at,
+      input.userId,
+      input.projectId,
+      input.scanId
+    );
+    return result.changes === 1;
+  }
+
+  applyProfile(input: {
+    userId: string;
+    projectId: string;
+    scanId: string;
+    projectKind: Exclude<ProjectEnvironmentKind, "unknown">;
+    fingerprint: string;
+    expectedCurrentProfile: string | null;
+    operation: "noop" | "create" | "update";
+    profile: string;
+    at?: string;
+  }): { stale: boolean } {
+    return this.db.transaction(() => {
+      const at = input.at ?? nowIso();
+      const state = this.getState(input.userId, input.projectId);
+      if (!state || state.currentScanId !== input.scanId) return { stale: true };
+      const currentProfile = this.l3WorldModels.fields(input.userId, input.projectId).projectEnvironmentProfile;
+      if (currentProfile !== input.expectedCurrentProfile) {
+        throw new Error("project_environment_profile_concurrent_update");
+      }
+      const typeChanged = state.projectKind !== "unknown" && state.projectKind !== input.projectKind;
+      if (typeChanged && currentProfile !== null && input.operation === "noop") {
+        throw new Error("project_environment_profile_type_change_requires_update");
+      }
+
+      let nextProfile = currentProfile;
+      if (input.operation === "noop") {
+        if (input.profile !== "") throw new TypeError("noop project profile must be empty");
+      } else if (input.operation === "create") {
+        if (currentProfile !== null || !input.profile.trim()) throw new TypeError("invalid project profile create");
+        nextProfile = input.profile;
+      } else {
+        if (
+          currentProfile === null ||
+          input.profile === currentProfile ||
+          (input.profile !== "" && !input.profile.trim())
+        ) throw new TypeError("invalid project profile update");
+        nextProfile = input.profile || null;
+      }
+
+      const emptyNoop = input.operation === "noop" && nextProfile === null;
+      const existingMemory = this.l3WorldModels.getMemory(input.userId, input.projectId);
+      if (!emptyNoop && (nextProfile !== null || existingMemory)) {
+        this.l3WorldModels.upsertField({
+          userId: input.userId,
+          projectId: input.projectId,
+          targetField: "project_environment_profile",
+          value: nextProfile,
+          projectEnvironmentAppliedScanId: input.scanId,
+          at,
+          source: "project_environment"
+        });
+      }
+      const result = this.db.prepare(
+        `UPDATE l3_world_model_project_environment_state
+         SET project_kind = ?, status = 'clean', applied_scan_id = ?, fingerprint = ?,
+             last_error = NULL, updated_at = ?
+         WHERE user_id = ? AND project_id = ? AND current_scan_id = ?`
+      ).run(
+        input.projectKind,
+        emptyNoop ? null : input.scanId,
+        emptyNoop ? null : input.fingerprint,
+        at,
+        input.userId,
+        input.projectId,
+        input.scanId
+      );
+      return { stale: result.changes !== 1 };
+    })();
+  }
+
+  failCurrentScan(userId: string, projectId: string, scanId: string, error: string, at = nowIso()): void {
+    this.db.prepare(
+      `UPDATE l3_world_model_project_environment_state
+       SET status = 'failed', last_error = ?, updated_at = ?
+       WHERE user_id = ? AND project_id = ? AND current_scan_id = ?`
+    ).run(error, at, userId, projectId, scanId);
+  }
+}
+
+function projectEnvironmentStateFromSql(row: SqlProjectEnvironmentStateRow): ProjectEnvironmentStateRecord {
+  return {
+    userId: row.user_id,
+    projectId: row.project_id,
+    projectKind: row.project_kind,
+    status: row.status,
+    currentScanId: row.current_scan_id ?? undefined,
+    appliedScanId: row.applied_scan_id ?? undefined,
+    fingerprint: row.fingerprint ?? undefined,
+    lastError: row.last_error ?? undefined,
+    updatedAt: row.updated_at
+  };
+}
+
 export class Repositories {
   readonly memories: MemoryRepository;
+  readonly userMemories: UserMemoryRepository;
   readonly processing: MemoryProcessingRepository;
   readonly runtime: RuntimeRepository;
+  readonly l3WorldModels: L3WorldModelRepository;
+  readonly projectEnvironments: ProjectEnvironmentRepository;
   readonly vectors: SqliteVecStore;
 
   constructor(readonly db: Database.Database) {
     this.vectors = new SqliteVecStore(db);
     this.memories = new MemoryRepository(db, this.vectors);
+    this.userMemories = new UserMemoryRepository(db);
     this.processing = new MemoryProcessingRepository(db);
     this.runtime = new RuntimeRepository(db);
+    this.l3WorldModels = new L3WorldModelRepository(db, this.memories);
+    this.projectEnvironments = new ProjectEnvironmentRepository(db, this.l3WorldModels, this.runtime);
   }
 
   transaction<T>(fn: () => T): T {
     return this.db.transaction(fn)();
   }
+}
+
+interface SqlL3WorldModelScopeRow {
+  scope_key: string;
+  user_id: string;
+  project_id: string | null;
+  workspace_uri: string | null;
+  memory_id: string | null;
+  next_scope_seq: number;
+  updated_at: string;
+}
+
+interface SqlL3WorldModelInputTraceRow {
+  session_id: string;
+  trace_seq: number;
+  l1_memory_id: string;
+  raw_turn_id: string;
+  episode_id: string | null;
+  created_at: string;
+}
+
+interface SqlL3WorldModelEvidenceBatchRow {
+  id: string;
+  scope_key: string;
+  scope_seq: number;
+  user_id: string;
+  project_id: string | null;
+  session_id: string;
+  trigger: L3WorldModelBatchTrigger;
+  start_trace_seq: number;
+  end_trace_seq: number;
+  l1_memory_ids_json: string;
+  raw_turn_ids_json: string;
+  feedback_ids_json: string;
+  payload_hash: string;
+  terminal_outcome: L3WorldModelEvidenceBatchRecord["terminalOutcome"] | null;
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface SqlL3WorldModelBatchTargetRow {
+  batch_id: string;
+  target_field: L3WorldModelTargetField;
+  field_scope_key: string;
+  scope_seq: number;
+  status: L3WorldModelBatchTargetRecord["status"];
+  no_change: number;
+  applied_at: string | null;
+  updated_at: string;
+}
+
+export function l3WorldModelScopeKey(userId: string, projectId?: string | null): string {
+  return `l3wm:${sha256Hex(canonicalJson({ userId, projectId: projectId ?? null }))}`;
+}
+
+export function l3WorldModelFieldScopeKey(
+  scopeKey: string,
+  targetField: L3WorldModelTargetField
+): string {
+  return `${scopeKey}:${targetField}`;
+}
+
+export function l3WorldModelMemoryKey(userId: string, projectId?: string | null): string {
+  return projectId
+    ? `world_model:project:${userId}:${projectId}`
+    : `world_model:general_rules:${userId}:no_project`;
+}
+
+export function isL3WorldModelV2Memory(memory: MemoryRow): boolean {
+  try {
+    validateL3WorldModelMemory(
+      memory,
+      memory.userId,
+      projectIdFromL3WorldModelMemory(memory)
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function fieldsFromL3WorldModelMemory(memory: MemoryRow): L3WorldModelFields {
+  const world = memory.properties.internal_info.world_model;
+  if (!isRecordLike(world)) throw new Error(`invalid L3 World Model v2 fields: ${memory.id}`);
+  return {
+    generalRulesAndSafetyConstraints: nullableString(world.general_rules_and_safety_constraints, memory.id),
+    projectEnvironmentProfile: nullableString(world.project_environment_profile, memory.id),
+    projectContract: nullableString(world.project_contract, memory.id),
+    domainKnowledge: nullableString(world.domain_knowledge, memory.id)
+  };
+}
+
+function validateL3WorldModelMemory(
+  memory: MemoryRow,
+  expectedUserId: string,
+  expectedProjectId?: string | null
+): void {
+  const internal = memory.properties.internal_info;
+  const world = internal.world_model;
+  const expectedFields = [
+    "general_rules_and_safety_constraints",
+    "project_environment_profile",
+    "project_contract",
+    "domain_knowledge"
+  ];
+  if (internal.schema_version !== 2 || !isRecordLike(world)) {
+    throw new Error(`memory is not an L3 World Model v2 record: ${memory.id}`);
+  }
+  const actualKeys = Object.keys(world).sort();
+  if (actualKeys.length !== expectedFields.length || expectedFields.some((field) => !actualKeys.includes(field))) {
+    throw new Error(`invalid L3 World Model v2 field set: ${memory.id}`);
+  }
+  const fields = fieldsFromL3WorldModelMemory(memory);
+  const projectId = expectedProjectId ?? null;
+  if (memory.memoryLayer !== "L3" || internal.memory_kind !== "world_model") {
+    throw new Error(`invalid L3 World Model layer or kind: ${memory.id}`);
+  }
+  if (memory.userId !== expectedUserId || projectIdFromL3WorldModelMemory(memory) !== projectId) {
+    throw new Error(`invalid L3 World Model owner: ${memory.id}`);
+  }
+  if (memory.memoryKey !== l3WorldModelMemoryKey(expectedUserId, projectId)) {
+    throw new Error(`invalid L3 World Model key: ${memory.id}`);
+  }
+  if (projectId && fields.generalRulesAndSafetyConstraints !== null) {
+    throw new Error(`project L3 World Model contains general rules: ${memory.id}`);
+  }
+  if (!projectId && (
+    fields.projectEnvironmentProfile !== null || fields.projectContract !== null || fields.domainKnowledge !== null
+  )) {
+    throw new Error(`general L3 World Model contains project fields: ${memory.id}`);
+  }
+}
+
+export function isStrictL3WorldModelV2Memory(memory: MemoryRow): boolean {
+  if (memory.properties.internal_info.schema_version !== 2) return false;
+  try {
+    validateL3WorldModelMemory(memory, memory.userId, projectIdFromL3WorldModelMemory(memory));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function projectIdFromL3WorldModelMemory(memory: MemoryRow): string | null {
+  const value = memory.info.project_id;
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string" || !value) throw new Error(`invalid L3 World Model project ID: ${memory.id}`);
+  return value;
+}
+
+function nullableString(value: unknown, memoryId: string): string | null {
+  if (value === null || typeof value === "string") return value;
+  throw new Error(`invalid L3 World Model field value: ${memoryId}`);
+}
+
+function emptyL3WorldModelFields(): L3WorldModelFields {
+  return {
+    generalRulesAndSafetyConstraints: null,
+    projectEnvironmentProfile: null,
+    projectContract: null,
+    domainKnowledge: null
+  };
+}
+
+function l3WorldModelFieldProperty(field: L3WorldModelFieldName): keyof L3WorldModelFields {
+  if (field === "general_rules_and_safety_constraints") return "generalRulesAndSafetyConstraints";
+  if (field === "project_environment_profile") return "projectEnvironmentProfile";
+  if (field === "project_contract") return "projectContract";
+  return "domainKnowledge";
+}
+
+function assertL3WorldModelFieldOwnership(projectId: string | null, field: L3WorldModelFieldName): void {
+  if (projectId === null && field !== "general_rules_and_safety_constraints") {
+    throw new TypeError("a no-project L3 World Model can only own general rules");
+  }
+  if (projectId !== null && field === "general_rules_and_safety_constraints") {
+    throw new TypeError("a project L3 World Model cannot own general rules");
+  }
+}
+
+function normalizeL3WorldModelFieldValue(value: string | null): string | null {
+  if (value === null) return null;
+  return value.trim() ? value : null;
+}
+
+function l3WorldModelSourceMemoryIds(memory?: MemoryRow): string[] {
+  if (!memory) return [];
+  const value = memory.properties.internal_info.source_memory_ids;
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && Boolean(item)) : [];
+}
+
+function splitL3TracesByRawTurn(
+  traces: L3WorldModelInputTraceRecord[],
+  maxRawTurns: number
+): L3WorldModelInputTraceRecord[][] {
+  const groups: L3WorldModelInputTraceRecord[][] = [];
+  for (const trace of traces) {
+    const last = groups.at(-1);
+    if (last?.[0]?.rawTurnId === trace.rawTurnId) {
+      last.push(trace);
+    } else {
+      groups.push([trace]);
+    }
+  }
+  const chunks: L3WorldModelInputTraceRecord[][] = [];
+  for (let index = 0; index < groups.length; index += maxRawTurns) {
+    chunks.push(groups.slice(index, index + maxRawTurns).flat());
+  }
+  return chunks;
+}
+
+function l3WorldModelScopeFromSql(row: SqlL3WorldModelScopeRow): L3WorldModelScopeRecord {
+  return {
+    scopeKey: row.scope_key,
+    userId: row.user_id,
+    projectId: row.project_id ?? undefined,
+    workspaceUri: row.workspace_uri ? row.workspace_uri as WorkspaceUri : undefined,
+    memoryId: row.memory_id ?? undefined,
+    nextScopeSeq: row.next_scope_seq,
+    updatedAt: row.updated_at
+  };
+}
+
+function l3WorldModelInputTraceFromSql(row: SqlL3WorldModelInputTraceRow): L3WorldModelInputTraceRecord {
+  return {
+    sessionId: row.session_id,
+    traceSeq: row.trace_seq,
+    l1MemoryId: row.l1_memory_id,
+    rawTurnId: row.raw_turn_id,
+    episodeId: row.episode_id ?? undefined,
+    createdAt: row.created_at
+  };
+}
+
+function l3WorldModelEvidenceBatchFromSql(
+  row: SqlL3WorldModelEvidenceBatchRow
+): L3WorldModelEvidenceBatchRecord {
+  return {
+    id: row.id,
+    scopeKey: row.scope_key,
+    scopeSeq: row.scope_seq,
+    userId: row.user_id,
+    projectId: row.project_id ?? undefined,
+    sessionId: row.session_id,
+    trigger: row.trigger,
+    startTraceSeq: row.start_trace_seq,
+    endTraceSeq: row.end_trace_seq,
+    l1MemoryIds: asStringArray(parseJson(row.l1_memory_ids_json, [])),
+    rawTurnIds: asStringArray(parseJson(row.raw_turn_ids_json, [])),
+    feedbackIds: asStringArray(parseJson(row.feedback_ids_json, [])),
+    payloadHash: row.payload_hash,
+    terminalOutcome: row.terminal_outcome ?? undefined,
+    completedAt: row.completed_at ?? undefined,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function l3WorldModelBatchTargetFromSql(
+  row: SqlL3WorldModelBatchTargetRow
+): L3WorldModelBatchTargetRecord {
+  return {
+    batchId: row.batch_id,
+    targetField: row.target_field,
+    fieldScopeKey: row.field_scope_key,
+    scopeSeq: row.scope_seq,
+    status: row.status,
+    noChange: row.no_change === 1,
+    appliedAt: row.applied_at ?? undefined,
+    updatedAt: row.updated_at
+  };
 }
 
 export function memoryFromSql(row: MemorySqlRow): MemoryRow {
@@ -3594,6 +5335,65 @@ export function memoryFromSql(row: MemorySqlRow): MemoryRow {
     updatedAt: row.updated_at,
     deletedAt: row.deleted_at
   };
+}
+
+function userMemoryFromSql(row: UserMemorySqlRow): UserMemoryRecord {
+  return {
+    id: row.id,
+    sourceTurnId: row.source_turn_id,
+    userId: row.user_id,
+    memoryTypes: asStringArray(parseJson(row.memory_types_json, [])) as UserMemoryType[],
+    content: row.content,
+    normalizedUserTextHash: row.normalized_user_text_hash,
+    sourceTurnRefs: asStringArray(parseJson(row.source_turn_refs_json, [])),
+    status: row.status,
+    replacesMemoryId: row.replaces_memory_id ?? undefined,
+    replacedByMemoryId: row.replaced_by_memory_id ?? undefined,
+    archivedAt: row.archived_at,
+    archiveReason: row.archive_reason ?? undefined,
+    embedding: row.embedding_json ? finiteVector(parseJson(row.embedding_json, [])) : undefined,
+    embeddingModel: row.embedding_model ?? undefined,
+    embeddingProvider: row.embedding_provider ?? undefined,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    deletedAt: row.deleted_at
+  };
+}
+
+function userMemoryPanelFilter(input: {
+  userId: string;
+  status?: UserMemoryStatus;
+  query?: string;
+}): { where: string; params: Array<string> } {
+  const clauses = ["user_id = ?"];
+  const params = [input.userId];
+  if (input.status) {
+    clauses.push("status = ?");
+    params.push(input.status);
+  } else {
+    clauses.push("deleted_at IS NULL", "status != 'deleted'");
+  }
+  const query = input.query?.trim().toLowerCase();
+  if (query) {
+    clauses.push("lower(content) LIKE ? ESCAPE '\\'");
+    params.push(`%${escapeLikePattern(query)}%`);
+  }
+  return { where: clauses.join(" AND "), params };
+}
+
+function cosineVectors(left: readonly number[], right: readonly number[]): number {
+  if (left.length === 0 || left.length !== right.length) return 0;
+  let dot = 0;
+  let leftNorm = 0;
+  let rightNorm = 0;
+  for (let index = 0; index < left.length; index += 1) {
+    const a = left[index] ?? 0;
+    const b = right[index] ?? 0;
+    dot += a * b;
+    leftNorm += a * a;
+    rightNorm += b * b;
+  }
+  return leftNorm > 0 && rightNorm > 0 ? dot / Math.sqrt(leftNorm * rightNorm) : 0;
 }
 
 export function memoryToSql(memory: MemoryRow): Record<string, SqlValue> {
@@ -4417,6 +6217,11 @@ interface SqlRecallEventRow {
   dropped_json: string;
   outcome: NonNullable<RecallEventRecord["outcome"]>;
   request_json: string;
+  query_id: string | null;
+  user_memory_candidate_ids_json: string;
+  l1_candidate_ids_json: string;
+  merged_source_turn_ids_json: string;
+  member_memory_ids_by_source_turn_id_json: string;
   created_at: string;
 }
 
@@ -4437,6 +6242,11 @@ function recallEventFromSql(row: SqlRecallEventRow): RecallEventRecord {
     dropped: parseJson(row.dropped_json, []),
     outcome: row.outcome,
     request: parseJson(row.request_json, {}),
+    queryId: row.query_id ?? undefined,
+    userMemoryCandidateIds: asStringArray(parseJson(row.user_memory_candidate_ids_json, [])),
+    l1CandidateIds: asStringArray(parseJson(row.l1_candidate_ids_json, [])),
+    mergedSourceTurnIds: asStringArray(parseJson(row.merged_source_turn_ids_json, [])),
+    memberMemoryIdsBySourceTurnId: parseJson(row.member_memory_ids_by_source_turn_id_json, {}),
     createdAt: row.created_at
   };
 }
@@ -4450,6 +6260,8 @@ interface SqlJobRow {
   session_id: string | null;
   episode_id: string | null;
   target_memory_id: string | null;
+  scope_key: string | null;
+  scope_seq: number | null;
   payload_json: string;
   attempts: number;
   max_attempts: number;
@@ -4581,6 +6393,8 @@ function jobFromSql(row: SqlJobRow): EvolutionJobRecord {
     sessionId: row.session_id ?? undefined,
     episodeId: row.episode_id ?? undefined,
     targetMemoryId: row.target_memory_id ?? undefined,
+    scopeKey: row.scope_key ?? undefined,
+    scopeSeq: row.scope_seq ?? undefined,
     payload: parseJson(row.payload_json, {}),
     attempts: row.attempts,
     maxAttempts: row.max_attempts,
@@ -4833,6 +6647,56 @@ function primaryKeyColumn(table: BundleTableName): string | undefined {
   return "id";
 }
 
+interface BundleIdentity {
+  primaryKey: string;
+  sourceId: string;
+  columns: string[];
+  values: Array<string | number>;
+}
+
+function bundleIdentity(
+  table: BundleTableName,
+  row: Record<string, unknown>
+): BundleIdentity | undefined {
+  const newTableIdentityColumns: Partial<Record<BundleTableName, string[]>> = {
+    l3_world_model_scopes: ["scope_key"],
+    l3_world_model_session_cursors: ["session_id"],
+    l3_world_model_input_traces: ["session_id", "trace_seq"],
+    l3_world_model_evidence_batches: ["id"],
+    l3_world_model_batch_targets: ["batch_id", "target_field"],
+    l3_world_model_project_environment_state: ["user_id", "project_id"]
+  };
+  const newColumns = newTableIdentityColumns[table];
+  if (newColumns) {
+    const values = newColumns.map((column) => row[column]);
+    if (values.some((value) => typeof value !== "string" && typeof value !== "number")) {
+      return undefined;
+    }
+    const identity: Record<string, string | number> = {};
+    for (const [index, column] of newColumns.entries()) {
+      identity[column] = values[index] as string | number;
+    }
+    return {
+      primaryKey: newColumns.join("+"),
+      sourceId: canonicalJson(identity),
+      columns: newColumns,
+      values: values as Array<string | number>
+    };
+  }
+
+  const primaryKey = primaryKeyColumn(table);
+  const value = primaryKey ? row[primaryKey] : undefined;
+  if (!primaryKey || (typeof value !== "string" && typeof value !== "number")) {
+    return undefined;
+  }
+  return {
+    primaryKey,
+    sourceId: String(value),
+    columns: [primaryKey],
+    values: [value]
+  };
+}
+
 function recordMigrationMap(
   migrationMap: Record<string, Record<string, string>>,
   table: string,
@@ -4874,6 +6738,55 @@ function redactBundleRow(table: BundleTableName, row: Record<string, unknown>): 
     tool_results_json: "[]",
     redacted_at: row.redacted_at ?? nowIso()
   };
+}
+
+function normalizeRedactedL3WorldModelBundle(
+  tables: Record<string, Array<Record<string, unknown>>>
+): Record<string, Array<Record<string, unknown>>> {
+  const batches = tables.l3_world_model_evidence_batches ?? [];
+  const terminalBatchIds = new Set(
+    batches
+      .filter((row) => typeof row.terminal_outcome === "string" && row.terminal_outcome)
+      .map((row) => String(row.id))
+  );
+  tables.l3_world_model_evidence_batches = batches.filter((row) => terminalBatchIds.has(String(row.id)));
+  tables.l3_world_model_batch_targets = (tables.l3_world_model_batch_targets ?? [])
+    .filter((row) => terminalBatchIds.has(String(row.batch_id)));
+  tables.evolution_jobs = (tables.evolution_jobs ?? []).filter((row) => {
+    const jobType = row.job_type;
+    if (jobType !== "l3_world_model_update" && jobType !== "project_environment_profile") return true;
+    return row.status === "succeeded" || row.status === "dead_letter";
+  });
+  tables.l3_world_model_project_environment_state = (
+    tables.l3_world_model_project_environment_state ?? []
+  ).map((row) => ({
+    ...row,
+    status: "uninitialized",
+    current_scan_id: null,
+    last_error: null
+  }));
+
+  const exportedAt = nowIso();
+  const cursors = new Map<string, Record<string, unknown>>();
+  for (const row of tables.l3_world_model_session_cursors ?? []) {
+    if (typeof row.session_id === "string") cursors.set(row.session_id, row);
+  }
+  for (const trace of tables.l3_world_model_input_traces ?? []) {
+    if (typeof trace.session_id !== "string" || typeof trace.trace_seq !== "number") continue;
+    const current = cursors.get(trace.session_id);
+    const lastScheduledSeq = typeof current?.last_scheduled_seq === "number"
+      ? current.last_scheduled_seq
+      : 0;
+    if (trace.trace_seq <= lastScheduledSeq) continue;
+    cursors.set(trace.session_id, {
+      ...(current ?? { __table: "l3_world_model_session_cursors" }),
+      session_id: trace.session_id,
+      last_scheduled_seq: trace.trace_seq,
+      updated_at: exportedAt
+    });
+  }
+  tables.l3_world_model_session_cursors = [...cursors.values()];
+  return tables;
 }
 
 function serializeBundleRow(table: BundleTableName, row: Record<string, unknown>): Record<string, unknown> {
@@ -4943,6 +6856,34 @@ function normalizeBundleSqlValue(value: unknown): SqlValue {
   return toJson(value);
 }
 
+function isL3WorldModelTargetField(value: unknown): value is L3WorldModelTargetField {
+  return value === "general_rules_and_safety_constraints" ||
+    value === "project_contract" ||
+    value === "domain_knowledge";
+}
+
+function updateL3WorldModelBatchTerminalOutcome(
+  db: Database.Database,
+  batchId: string,
+  at: string
+): void {
+  const rows = db.prepare(
+    `SELECT status FROM l3_world_model_batch_targets WHERE batch_id = ?`
+  ).all(batchId) as Array<{ status: L3WorldModelBatchTargetRecord["status"] }>;
+  if (rows.length === 0 || rows.some((row) => row.status === "queued")) return;
+  const applied = rows.filter((row) => row.status === "applied").length;
+  const terminalOutcome: NonNullable<L3WorldModelEvidenceBatchRecord["terminalOutcome"]> = applied === rows.length
+    ? "applied"
+    : applied === 0
+      ? "dead_letter"
+      : "partial_dead_letter";
+  db.prepare(
+    `UPDATE l3_world_model_evidence_batches
+     SET terminal_outcome = ?, completed_at = ?, updated_at = ?
+     WHERE id = ?`
+  ).run(terminalOutcome, at, at, batchId);
+}
+
 function isSerializedBuffer(value: unknown): value is { __memmy_type: "buffer"; base64: string } {
   return typeof value === "object" &&
     value !== null &&
@@ -4993,7 +6934,8 @@ function evolutionJobPrioritySql(): string {
              WHEN job_type = 'span_big_turn' THEN 35
              WHEN job_type = 'l2_association' THEN 40
              WHEN job_type = 'l2_induction' THEN 50
-             WHEN job_type = 'l3_abstraction' THEN 60
+             WHEN job_type = 'project_environment_profile' THEN 55
+             WHEN job_type IN ('l3_abstraction', 'l3_world_model_update') THEN 60
              WHEN job_type = 'skill_crystallization' THEN 70
              WHEN job_type = 'skill_trial_resolve' THEN 80
              ELSE 100

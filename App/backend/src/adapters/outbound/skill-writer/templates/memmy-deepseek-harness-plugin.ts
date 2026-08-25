@@ -1,14 +1,23 @@
-export const DEEPSEEK_HARNESS_PLUGIN_INDEX = String.raw`import { readFile } from "node:fs/promises";
+export const DEEPSEEK_HARNESS_PLUGIN_INDEX = String.raw`import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import { defineTool } from "@deepseek-ai/dsh-tools";
+import {
+  completeRuntimeTurn,
+  loadRuntimeL3,
+  notifyRuntimeBoundary,
+  openRuntimeSession,
+  startRuntimeTurn
+} from "./memmy-workspace-bridge.mjs";
 
 export const name = "memmy-memory";
 export const inject = ["agents", "sessions", "tools", "systemPrompt"];
 
 const SOURCE = "deepseek_harness";
 const DEFAULT_MEMMY_CONFIG_PATH = join(homedir(), ".memmy", "config.yaml");
+const CONFIG_URL = new URL("./memmy-memory-config.json", import.meta.url);
 const HTTP_TIMEOUT_MS = 45000;
 
 export function apply(ctx, config = {}) {
@@ -19,6 +28,7 @@ export function apply(ctx, config = {}) {
   const captureJobs = new Map();
   const latestQueries = new Map();
   const currentTurns = new Map();
+  const pendingL3 = new Map();
 
   ctx.systemPrompt.section({
     name: "memmy-memory",
@@ -41,16 +51,18 @@ export function apply(ctx, config = {}) {
     const agentKey = String(payload.agent.id);
     latestQueries.set(agentKey, query);
     try {
-      const client = await createClient(memmyConfigPath);
-      const sessionId = await ensureSession(client, memorySessionIds, payload.agent.session);
-      const started = await client.post("/api/v1/turns/start", {
-        sessionId,
-        query,
-        contextHints: {
-          workspacePath: payload.agent.session.header.cwd || undefined,
-          profileId: payload.agent.session.header.agentPreset || "main"
-        }
-      }, payload.signal);
+      const runtimeSession = await ensureSession(null, memorySessionIds, payload.agent.session);
+      const sessionId = runtimeSession.sessionId;
+      if (!runtimeSession.l3Initialized) {
+        const loaded = await loadRuntimeL3(runtimeSession);
+        runtimeSession.l3Initialized = true;
+        if (loaded.additionalContext) pendingL3.set(String(payload.agent.session.id), loaded.additionalContext);
+      }
+      const started = await startRuntimeTurn(
+        runtimeSession,
+        "deepseek-turn-" + hashText([sessionId, query, String(payload.turn)].join("\u0000")),
+        query
+      );
       pendingStarts.set(turnKey(payload.agent.id, payload.turn), {
         sessionId,
         turnId: cleanText(started.turnId),
@@ -59,10 +71,12 @@ export function apply(ctx, config = {}) {
         query
       });
       const markdown = injectedMarkdown(started);
-      if (!markdown) return decision;
+      const l3 = pendingL3.get(String(payload.agent.session.id)) || "";
+      pendingL3.delete(String(payload.agent.session.id));
+      if (!markdown && !l3) return decision;
       const memory = createUserMessage({
         source: { kind: "plugin", plugin: name, form: "recall" },
-        content: [{ type: "text", text: renderMemoryPacket(markdown, "turn_start", query) }]
+        content: [{ type: "text", text: [l3, markdown ? renderMemoryPacket(markdown, "turn_start", query) : ""].filter(Boolean).join("\n\n") }]
       });
       return { ...decision, messages: insertAfterUserMessage(decision.messages, memory) };
     } catch (error) {
@@ -71,8 +85,15 @@ export function apply(ctx, config = {}) {
     }
   });
 
-  ctx.on("session/event", (session, event) => {
+  ctx.on("session/event", async (session, event) => {
     const sessionKey = String(session.id);
+    if (event.type === "compaction/end" && !(event.data && event.data.error)) {
+      const runtimeSession = await ensureSession(null, memorySessionIds, session);
+      await notifyRuntimeBoundary(runtimeSession, "token_compaction");
+      const loaded = await loadRuntimeL3(runtimeSession);
+      if (loaded.additionalContext) pendingL3.set(sessionKey, loaded.additionalContext);
+      return;
+    }
     if (event.type === "turn/start") {
       currentTurns.set(sessionKey, event.data.turn);
       activeTurns.set(turnKey(session.id, event.data.turn), createTurnState(event.data.turn));
@@ -198,7 +219,7 @@ function registerTools(ctx, memmyConfigPath, memorySessionIds, latestQueries) {
     async execute(args, exec) {
       const client = await createClient(memmyConfigPath);
       const sessionId = exec.agent
-        ? await ensureSession(client, memorySessionIds, exec.agent.session)
+        ? (await ensureSession(client, memorySessionIds, exec.agent.session)).sessionId
         : undefined;
       const result = await client.post("/api/v1/memory/add", {
         content: sanitizeProtocolText(args.content),
@@ -219,6 +240,10 @@ function textOutput() {
   };
 }
 
+function hashText(value) {
+  return createHash("sha256").update(String(value)).digest("hex").slice(0, 24);
+}
+
 function createTurnState(turn) {
   return {
     turn,
@@ -234,24 +259,24 @@ function createTurnState(turn) {
 async function completeTurn(memmyConfigPath, memorySessionIds, session, state, reason, pending) {
   const query = cleanText(pending && pending.query) || state.queries.join("\n\n").trim();
   if (!query) return;
-  const client = await createClient(memmyConfigPath);
-  const sessionId = cleanText(pending && pending.sessionId) || await ensureSession(client, memorySessionIds, session);
+  const runtimeSession = await ensureSession(null, memorySessionIds, session);
+  const sessionId = cleanText(pending && pending.sessionId) || runtimeSession.sessionId;
   let started = pending;
   if (!started || !cleanText(started.turnId)) {
-    started = await client.post("/api/v1/turns/start", { sessionId, query });
+    started = await startRuntimeTurn(runtimeSession, "deepseek-fallback-" + hashText([sessionId, query].join("\u0000")), query);
   }
   const answer = state.answers.join("\n\n").trim() || failureAnswer(reason);
   if (!answer) return;
-  await client.post("/api/v1/turns/" + encodeURIComponent(started.turnId) + "/complete", {
-    sessionId,
+  await completeRuntimeTurn(runtimeSession, {
+    turnId: cleanText(started.turnId),
     episodeId: cleanText(started.episodeId) || undefined,
     query,
     answer,
-    reasoningSummary: state.reasoning.join("\n\n").trim() || undefined,
     status: reason && (reason.kind === "error" || reason.kind === "blocked") ? "failed" : "succeeded",
+    sourceMemoryIds: Array.isArray(started.sourceMemoryIds) ? started.sourceMemoryIds : undefined,
+    reasoningSummary: state.reasoning.join("\n\n").trim() || undefined,
     toolCalls: state.toolCalls.length ? state.toolCalls : undefined,
-    toolResults: state.toolResults.length ? state.toolResults : undefined,
-    sourceMemoryIds: Array.isArray(started.sourceMemoryIds) ? started.sourceMemoryIds : undefined
+    toolResults: state.toolResults.length ? state.toolResults : undefined
   });
 }
 
@@ -259,15 +284,18 @@ async function ensureSession(client, cache, session) {
   const externalId = String(session.id);
   const cached = cache.get(externalId);
   if (cached) return cached;
-  const opened = await client.post("/api/v1/sessions/open", {
-    sessionId: "deepseek-harness-" + externalId,
-    workspacePath: session.header.cwd || undefined,
-    profileId: session.header.agentPreset || "main"
+  const opened = await openRuntimeSession({
+    configUrl: CONFIG_URL,
+    source: SOURCE,
+    adapterId: "memmy-deepseek-harness-plugin",
+    profileId: session.header.agentPreset || "main",
+    sessionKey: "deepseek-harness-" + externalId,
+    workspaceRoot: session.header.cwd || null,
+    transition: "allow_legacy_rollover"
   });
-  const sessionId = cleanText(opened.sessionId);
-  if (!sessionId) throw new Error("Memmy did not return a sessionId");
-  cache.set(externalId, sessionId);
-  return sessionId;
+  if (!opened) throw new Error("Memmy did not return a sessionId");
+  cache.set(externalId, opened);
+  return opened;
 }
 
 async function createClient(configPath) {

@@ -63,6 +63,10 @@ describe("ModelPage source", () => {
     expect(pageSource).not.toContain("function simulateTest");
     expect(pageSource).not.toContain("window.setTimeout");
     expect(pageSource).toContain("modelPageSaveErrorText(error, t)");
+    expect(pageSource).toContain("const [savePending, setSavePending] = useState(false)");
+    expect(pageSource).toContain("disabled={!canContinue || savePending}");
+    expect(pageSource).toContain("const [saveFeedback, setSaveFeedback]");
+    expect(pageSource).toContain("{saveFeedback.text}");
     expect(pageSource).not.toContain('t("login.error.modePersistenceFailed")');
     expect(pageSource).not.toContain("MessageToast");
     expect(pageSource).toContain('text-red-500">{saveFeedback.text}</p>');

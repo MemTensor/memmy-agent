@@ -49,6 +49,37 @@ describe("createMemosSqliteMemoryClient", () => {
     });
   });
 
+  it("lists and deletes User Memory through the sqlite fallback", async () => {
+    const dbPath = createMemoryDatabase({
+      id: "trace_user_memory_seed",
+      sessionId: "codex-user-memory",
+      agentId: "codex",
+      tagsJson: "[]",
+      infoJson: "{}",
+      propertiesJson: JSON.stringify({ internal_info: { memory_layer: "L1" } })
+    });
+    insertUserMemory(dbPath, "user_memory_sqlite_1", "我最喜欢的水果是苹果");
+    const client = createMemosSqliteMemoryClient({
+      sources: [{ id: "memmy-memory", label: "memmy", dbPath }],
+      now: () => NOW
+    });
+
+    await expect(client.panelItems({ layer: "UserMemory", q: "苹果", page: 1 })).resolves.toMatchObject({
+      total: 1,
+      items: [{
+        id: "memmy-memory::user_memory_sqlite_1",
+        kind: "user_memory",
+        memoryLayer: "UserMemory",
+        tags: ["User Preference"]
+      }]
+    });
+    await expect(client.deleteMemory({ memoryId: "memmy-memory::user_memory_sqlite_1" })).resolves.toMatchObject({
+      kind: "user_memory",
+      status: "deleted"
+    });
+    await expect(client.panelItems({ layer: "UserMemory", page: 1 })).resolves.toMatchObject({ total: 0, items: [] });
+  });
+
   it("exposes only the span's raw-turn tool-call range in detail metadata", async () => {
     const dbPath = createMemoryDatabase({
       id: "span_sqlite_steps",
@@ -695,6 +726,43 @@ function readMemoryRowCount(dbPath: string, memoryId: string): number {
   try {
     const row = db.prepare("select count(*) as count from memories where id = ?").get(memoryId) as { count: number };
     return row.count;
+  } finally {
+    db.close();
+  }
+}
+
+function insertUserMemory(dbPath: string, id: string, content: string): void {
+  const db = new DatabaseSync(dbPath);
+  try {
+    db.exec(`
+      CREATE TABLE user_memories (
+        id TEXT PRIMARY KEY,
+        source_turn_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        memory_types_json TEXT NOT NULL,
+        content TEXT NOT NULL,
+        normalized_user_text_hash TEXT NOT NULL,
+        source_turn_refs_json TEXT NOT NULL,
+        status TEXT NOT NULL,
+        replaces_memory_id TEXT,
+        replaced_by_memory_id TEXT,
+        archived_at TEXT,
+        archive_reason TEXT,
+        embedding_json TEXT,
+        embedding_model TEXT,
+        embedding_provider TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        deleted_at TEXT
+      )
+    `);
+    db.prepare(`
+      INSERT INTO user_memories (
+        id, source_turn_id, user_id, memory_types_json, content,
+        normalized_user_text_hash, source_turn_refs_json, status,
+        created_at, updated_at
+      ) VALUES (?, 'turn-user-memory', 'local-user', '["User Preference"]', ?, 'hash', '["turn-user-memory"]', 'active', ?, ?)
+    `).run(id, content, NOW, NOW);
   } finally {
     db.close();
   }
