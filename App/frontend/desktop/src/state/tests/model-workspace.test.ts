@@ -405,6 +405,64 @@ describe("canonical model workspace adapter", () => {
     expect(saved.providers[0]!.models.map((model) => model.model)).not.toContain("embedding-delete");
   });
 
+  it("真实 Backend catalog：编辑连接删除已分配模型时清理双空间引用", async () => {
+    const file = catalogFixture();
+    const empty = await readModelConfigCatalog(file);
+    const created = await writeModelConfigCatalog(file, {
+      configRevision: empty.configRevision,
+      providers: [{
+        provider: "openai",
+        endpoints: [{
+          endpointId: "embedding",
+          apiBase: "https://api.openai.com/v1",
+          protocol: "openai-embeddings",
+          apiKey: "sk-delete-model"
+        }],
+        models: [
+          { endpointId: "embedding", model: "embedding-delete", source: "byok", capabilities: ["embedding"] },
+          { endpointId: "embedding", model: "embedding-keep", source: "byok", capabilities: ["embedding"] }
+        ]
+      }],
+      modelAssignments: structuredClone(emptyAssignments)
+    });
+    const removedPreset = created.providers[0]!.models.find((model) => model.model === "embedding-delete")!;
+    const assignedInput = modelConfigInput(createModelWorkspace(created));
+    assignedInput.modelAssignments.byok.embedding = removedPreset.presetId;
+    assignedInput.modelAssignments.account.embedding = removedPreset.presetId;
+    const base = await writeModelConfigCatalog(file, assignedInput);
+    const workspace = createModelWorkspace(base);
+    const connection = workspace.spaces.byok.connections.find((item) => item.endpointId === "embedding")!;
+    const keptPreset = connection.modelEntries.find((model) => model.model === "embedding-keep")!;
+
+    const edited = upsertModelConnection(workspace, "byok", {
+      id: connection.id,
+      provider: connection.provider,
+      endpoint: connection.endpoint,
+      protocol: connection.protocol,
+      apiKeyMasked: connection.apiKeyMasked,
+      models: [keptPreset.model],
+      modelEntries: [{
+        presetId: keptPreset.presetId,
+        model: keptPreset.model,
+        capability: keptPreset.capability
+      }]
+    });
+
+    expect(edited.error).toBeNull();
+    expect(edited.workspace.catalog.modelAssignments.byok.embedding).toBeNull();
+    expect(edited.workspace.catalog.modelAssignments.account.embedding).toBeNull();
+
+    await expect(persistModelCatalogMutation(modelConfigInput(edited.workspace), {
+      read: () => readModelConfigCatalog(file),
+      write: (input) => writeModelConfigCatalog(file, input)
+    }, base)).resolves.toMatchObject({
+      modelAssignments: {
+        byok: { embedding: null },
+        account: { embedding: null }
+      }
+    });
+  });
+
   it("真实 Backend catalog：从账号空间删除共享 DashScope 配置并清理双空间引用", async () => {
     const file = catalogFixture();
     const empty = await readModelConfigCatalog(file);

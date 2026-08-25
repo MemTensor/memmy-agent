@@ -474,12 +474,15 @@ export function upsertModelConnection(
   const previousPresetIds = existingConnection
     ? existingConnection.modelEntries.map((entry) => entry.presetId)
     : [];
+  const removedPresetIds = previousPresetIds.filter((id) => !nextPresetIds.includes(id));
   const assignment = next.modelAssignments[mode];
   assignment.agent.candidates = replaceIds(assignment.agent.candidates, previousPresetIds, nextAgentPresetIds);
   if (!assignment.agent.candidates.length) assignment.agent.candidates = [...nextAgentPresetIds];
   if (!assignment.agent.default || previousPresetIds.includes(assignment.agent.default)) {
     assignment.agent.default = nextPresetIds.find((id) => presetHasCapability(next, id, "agent")) ?? assignment.agent.default;
   }
+  clearAssignmentReferences(next.modelAssignments.byok, removedPresetIds);
+  clearAssignmentReferences(next.modelAssignments.account, removedPresetIds);
   refreshEffectiveCandidates(next);
   return { workspace: createModelWorkspace(next), error: null };
 }
