@@ -314,7 +314,7 @@ describe("AppFrame", () => {
     expect(overlayStyle).toEqual({
       right: 324,
       top: 428,
-      zIndex: 9999
+      zIndex: 10010
     });
   });
 
@@ -421,6 +421,7 @@ describe("AppFrame", () => {
     expect(shouldCreateNewAgentDraft(newAgentDraftState({ blankDraftActive: true }))).toBe(false);
     expect(shouldCreateNewAgentDraft(newAgentDraftState({ composerDraftsByScope: { "draft-3": "未发送" } }))).toBe(false);
     expect(shouldCreateNewAgentDraft(newAgentDraftState({ composerPendingAttachmentsByScope: { "draft-3": [{} as never] } }))).toBe(false);
+    expect(shouldCreateNewAgentDraft(newAgentDraftState({ composerContextReferencesByScope: { "draft-3": [{ kind: "path", id: "/docs", label: "docs/" }] } }))).toBe(false);
     expect(source).toContain("function openNewAgent(target?: WebuiSessionTarget)");
     expect(source).toContain("clearFocusedAgentTarget(");
     expect(source).toContain("if (shouldCreateNewAgentDraft(state.agent))");
@@ -603,6 +604,7 @@ describe("AppFrame", () => {
   it("keeps sidebar account settings icon pinned to the footer right edge", () => {
     const source = readFileSync(resolve(__dirname, "..", "app-frame.tsx"), "utf8");
     const styles = readFileSync(resolve(__dirname, "..", "..", "styles.css"), "utf8");
+    const tokens = readFileSync(resolve(__dirname, "..", "..", "theme", "tokens.css"), "utf8");
     const profileTextRule = styles.match(/\.app-frame-profile-text\s*\{[^}]*\}/)?.[0] ?? "";
 
     expect(source).toContain('className="flex w-full items-center gap-2 px-2 py-1.5"');
@@ -863,6 +865,25 @@ describe("AppFrame", () => {
     expect(source).toContain("menu.contains(event.target)");
     expect(source).toContain("setShowCommunity(false);");
     expect(source).toContain("isDisabled={sidebarHidden || showCommunity}");
+  });
+
+  it("turns the sidebar into a dismissible overlay on compact viewports", () => {
+    const source = readFileSync(resolve(__dirname, "..", "app-frame.tsx"), "utf8");
+    const styles = readFileSync(resolve(__dirname, "..", "..", "styles.css"), "utf8");
+    const tokens = readFileSync(resolve(__dirname, "..", "..", "theme", "tokens.css"), "utf8");
+
+    expect(source).toContain('const COMPACT_APP_FRAME_QUERY = "(max-width: 720px)";');
+    expect(source).toContain("window.matchMedia(COMPACT_APP_FRAME_QUERY).matches");
+    expect(source).toContain("if (matches) setCompactSidebarOpen(false);");
+    expect(source).toContain("const sidebarHidden = compactViewport ? !compactSidebarOpen : desktopSidebarHidden;");
+    expect(source).toContain("closeCompactSidebar();");
+    expect(source).toContain("const sidebarMenuOverlayZIndex = 10010;");
+    expect(source).toContain('className="app-frame-sidebar-backdrop"');
+    expect(styles).toContain("@media (max-width: 720px)");
+    expect(styles).toContain(".sidebar-shell .app-frame-sidebar");
+    expect(styles).toContain("width: min(280px, calc(100vw - 48px));");
+    expect(styles).toContain(".sidebar-shell > .sidebar-resize-handle");
+    expect(tokens).toContain("--z-modal: 10020;");
   });
 
   it("renders archive as an inline confirmation instead of a modal-style action", () => {
@@ -1270,6 +1291,7 @@ function newAgentDraftState(overrides: Partial<NewAgentDraftTestState> = {}): Ne
     newChatRequestId: 3,
     composerDraftsByScope: {},
     composerPendingAttachmentsByScope: {},
+    composerContextReferencesByScope: {},
     ...overrides
   };
 }

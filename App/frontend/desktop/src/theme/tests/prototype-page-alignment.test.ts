@@ -36,19 +36,21 @@ describe("prototype page structure alignment", () => {
     expect(source("pages/app-frame.tsx")).toContain("LayoutList");
     expect(source("pages/app-frame.tsx")).not.toContain('icon: "+"');
     expect(source("pages/app-frame.tsx")).not.toContain('icon: "M"');
-    expect(source("pages/home-page.tsx")).toContain("app-frame-page-content home-empty-screen flex flex-col items-center justify-center h-full");
+    expect(source("pages/home-page.tsx")).toContain('className="app-frame-page-content home-empty-screen"');
     expect(source("styles.css")).toContain(".home-empty-screen");
     expect(source("styles.css")).toContain("padding-bottom: 8%;");
     expect(source("pages/home-page.tsx")).toContain("text-center mb-8");
     expect(source("pages/home-page.tsx")).toContain("home-empty-brand-mascot flex justify-center");
     expect(source("pages/home-page.tsx")).toContain("text-2xl font-bold text-text-ink");
-    expect(source("pages/home-page.tsx")).toContain("w-full max-w-2xl");
+    expect(source("pages/home-page.tsx")).toContain('className="home-empty-composer-stack"');
     expect(source("styles.css")).toContain(".home-empty-composer");
     expect(source("styles.css")).toContain(".agent-composer-shell");
     expect(source("pages/home-page.tsx")).toContain("relative home-empty-composer agent-composer-shell rounded-card-lg");
     expect(source("pages/home-page.tsx")).toContain("w-full px-5 pt-4 pb-12 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40");
+    expect(source("pages/home-page.tsx")).toContain("composer-actions absolute bottom-3 left-4 z-50");
     expect(source("pages/home-page.tsx")).toContain("composer-actions absolute bottom-3 right-4 z-50");
-    expect(source("pages/home-page.tsx")).not.toContain("home.suggestion.");
+    expect(source("pages/home-page.tsx")).toContain('t("home.suggestion.one")');
+    expect(source("pages/home-page.tsx")).toContain("{renderComposerLeadingActions()}");
     expect(source("pages/home-page.tsx")).toContain("agent-conversation-panel flex flex-col h-full");
     expect(source("pages/home-page.tsx")).toContain("app-frame-page-content agent-conversation-scroll flex-1 overflow-y-auto");
     expect(source("pages/home-page.tsx")).toContain("max-w-3xl mx-auto space-y-3");
@@ -59,6 +61,20 @@ describe("prototype page structure alignment", () => {
     expect(source("pages/home-page.tsx")).toContain('<div className="agent-conversation-content agent-conversation-content--composer max-w-3xl mx-auto">');
     expect(source("pages/home-page.tsx")).toContain('className="relative agent-composer-shell agent-composer-shell--expanded rounded-card-lg"');
     expect(source("pages/home-page.tsx")).toContain('className="agent-composer-toolbar"');
+  });
+
+  it("keeps compact Home and literature layouts within the available viewport", () => {
+    const styles = source("styles.css");
+
+    expect(styles).toContain("@media (max-width: 720px)");
+    expect(styles).toContain(".sidebar-shell .app-frame-sidebar");
+    expect(styles).toContain(".litrev-preview-pane");
+    expect(styles).toContain("width: 100% !important;");
+    expect(styles).toContain(".litrev-split > .sidebar-resize-handle");
+    expect(styles).toContain("@media (max-width: 480px)");
+    expect(styles).toContain(".home-empty-composer .composer-quick-actions__popover--slash");
+    expect(styles).toContain(".agent-composer-shell--expanded .agent-model-selector__button");
+    expect(styles).toContain(".litrev-file-browser");
   });
 
   it("aligns utility pages with their prototype counterparts", () => {

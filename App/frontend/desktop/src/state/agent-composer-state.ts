@@ -11,6 +11,14 @@ import type { UploadedAgentMedia } from "../api/memmy-agent-client.js";
 
 export type ComposerDraftValue = string | ((currentValue: string) => string);
 
+export interface ComposerContextReference {
+  kind: "path";
+  id: string;
+  label: string;
+  fileCount?: number;
+  totalBytes?: number;
+}
+
 export interface PendingAttachmentBase {
   id: string;
   sourceKey: string;
@@ -33,6 +41,7 @@ export interface PendingImage extends PendingAttachmentBase {
 export interface PendingFileAttachment extends PendingAttachmentBase {
   kind: "file";
   status: "ready" | "error";
+  localPath?: string;
   uploadBlob?: Blob;
   uploadMime?: UploadedAgentMedia["mime"];
   uploadBytes?: number;

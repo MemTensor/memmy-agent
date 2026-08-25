@@ -8,9 +8,9 @@ const srcDir = resolve(__dirname, "..", "..");
 const allowedSourceFiles = new Set([
   "i18n/error-notice-messages.ts",
   "i18n/messages.ts",
-  "i18n/error-notice-messages.ts",
   "lib/nickname.ts",
   "pages/memory/skill-demo-data.ts",
+  "pages/literature-review-demo-data.ts",
   // Provider aliases are identifiers used for logo matching, not visible UI copy.
   "components/model-provider-logo.tsx",
   // English ui coverage tests.
@@ -26,6 +26,7 @@ describe("English UI coverage", () => {
 
     expect(failures).toEqual([]);
   });
+
 });
 
 function listSourceFiles(dir: string): string[] {

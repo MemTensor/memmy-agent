@@ -6,6 +6,7 @@ import { initGtag } from "./analytics/gtag-init.js";
 import { NicknameModal } from "./components/nickname-modal.js";
 import { I18nProvider } from "./i18n/i18n-provider.js";
 import { randomNickname } from "./lib/nickname.js";
+import { LiteratureReviewPage } from "./pages/literature-review-page.js";
 import { MemoryPage } from "./pages/memory-page.js";
 import { MemoryPluginConflictModal } from "./pages/memory-plugin-conflict-modal.js";
 import { StartupScreen } from "./pages/startup-screen.js";
@@ -73,6 +74,15 @@ function MemorySkillsPreview() {
   );
 }
 
+/** Frontend-only literature-review shell preview; backend-owned data remains empty. */
+function LiteratureReviewPreview() {
+  return (
+    <AppProviders>
+      <LiteratureReviewPage />
+    </AppProviders>
+  );
+}
+
 const root = document.getElementById("root");
 
 if (!root) {
@@ -95,6 +105,8 @@ createRoot(root).render(
       <MemoryPluginConflictModalPreview />
     ) : previewMode === "memory-skills" ? (
       <MemorySkillsPreview />
+    ) : previewMode === "literature-review" ? (
+      <LiteratureReviewPreview />
     ) : (
       <App />
     )}

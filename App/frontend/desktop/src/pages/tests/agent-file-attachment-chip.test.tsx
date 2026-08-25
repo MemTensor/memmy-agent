@@ -23,7 +23,7 @@ describe("Agent attachment cards", () => {
 
     expect(html).toContain('data-testid="agent-attachment-card-file"');
     expect(html).toContain("agent-attachment-card");
-    expect(html).toContain("agent-attachment-card__file-tile--pdf");
+    expect(html).toContain("file-type-icon--pdf");
     expect(html).toContain("agent-attachment-card__name");
     expect(html).toContain("agent-attachment-card__meta");
     expect(compactHtml).toContain(">very-long-contract-final<");
@@ -80,19 +80,28 @@ describe("Agent attachment cards", () => {
 
   it("maps file types to stable CSS modifiers instead of generated utility colors", () => {
     const cases = [
-      { name: "report.pdf", mime: "application/pdf", kind: "pdf", className: "agent-attachment-card__file-tile--pdf", label: "PDF" },
-      { name: "brief.docx", mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", kind: "docx", className: "agent-attachment-card__file-tile--docx", label: "DOC" },
-      { name: "sheet.xlsx", mime: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", kind: "xlsx", className: "agent-attachment-card__file-tile--xlsx", label: "XLS" },
-      { name: "deck.pptx", mime: "application/vnd.openxmlformats-officedocument.presentationml.presentation", kind: "pptx", className: "agent-attachment-card__file-tile--pptx", label: "PPT" },
-      { name: "notes.txt", mime: "text/plain", kind: "file", className: "agent-attachment-card__file-tile--file", label: "FILE" }
+      { name: "report.pdf", mime: "application/pdf", kind: "pdf", label: "pdf" },
+      { name: "brief.docx", mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", kind: "word", label: "doc" },
+      { name: "sheet.xlsx", mime: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", kind: "spreadsheet", label: "xls" },
+      { name: "deck.pptx", mime: "application/vnd.openxmlformats-officedocument.presentationml.presentation", kind: "presentation", label: "ppt" },
+      { name: "README.md", mime: "text/markdown", kind: "markdown", label: "md" },
+      { name: "notes.txt", mime: "text/plain", kind: "text", label: "txt" },
+      { name: "config.json", mime: "application/json", kind: "code", label: "json" },
+      { name: "photo.svg", mime: "image/svg+xml", kind: "image", label: "svg" },
+      { name: "clip.mp4", mime: "video/mp4", kind: "video", label: "mp4" },
+      { name: "voice.mp3", mime: "audio/mpeg", kind: "audio", label: "mp3" },
+      { name: "bundle.zip", mime: "application/zip", kind: "archive", label: "zip" },
+      { name: "unknown.bin", mime: "application/octet-stream", kind: "generic", label: "file" }
     ];
 
     for (const item of cases) {
       const html = renderToString(<AgentFileIconTile name={item.name} mime={item.mime} size="md" />);
 
-      expect(html).toContain(`data-testid="agent-file-icon-${item.kind}"`);
-      expect(html).toContain(item.className);
-      expect(html).toContain(`>${item.label}</span>`);
+      expect(html).toContain(`data-testid="file-type-icon-${item.kind}"`);
+      expect(html).toContain(`file-type-icon--${item.kind}`);
+      expect(html).toContain("file-type-icon__paper");
+      expect(html).toContain("file-type-icon__glyph");
+      expect(html).toContain(`>${item.label.toUpperCase()}</text>`);
       expect(html).not.toContain("rounded-[12px]");
       expect(html).not.toContain("bg-rose-50");
     }
@@ -118,13 +127,17 @@ describe("Agent attachment cards", () => {
     const styles = readFileSync(stylesUrl, "utf8");
 
     expect(styles).toContain(".composer-media-preview-strip");
+    expect(styles).toContain(".composer-context-attachments .agent-attachment-card");
+    expect(styles).toContain("width: calc((100% - 20px) / 3)");
     expect(styles).toContain(".agent-attachment-card");
     expect(styles).toContain(".agent-attachment-card__action");
-    expect(styles).toContain(".agent-attachment-card__file-tile--pdf");
-    expect(styles).toContain(".agent-attachment-card__file-tile--docx");
-    expect(styles).toContain(".agent-attachment-card__file-tile--xlsx");
-    expect(styles).toContain(".agent-attachment-card__file-tile--pptx");
-    expect(styles).toContain(".agent-attachment-card__file-tile--file");
+    expect(styles).toContain(".file-type-icon--pdf");
+    expect(styles).toContain(".file-type-icon--word");
+    expect(styles).toContain(".file-type-icon--spreadsheet");
+    expect(styles).toContain(".file-type-icon--presentation");
+    expect(styles).toContain(".file-type-icon--markdown");
+    expect(styles).toContain(".file-type-icon--code");
+    expect(styles).toContain(".file-type-icon--folder");
 
     expect(source).not.toContain("rounded-[16px]");
     expect(source).not.toContain("rounded-[12px]");

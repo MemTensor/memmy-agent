@@ -14,6 +14,7 @@ import {
   AGENT_RESTART_STATE_STORAGE_KEY,
   AGENT_MEDIA_ACCEPT,
   ComposerCommandChip,
+  addCapabilityBlockToDraft,
   ComposerMediaPreviewStrip,
   ComposerSubmitButton,
   HomePage,
@@ -27,7 +28,9 @@ import {
   clipboardImageFilesFromDataTransfer,
   dataTransferHasAttachmentFiles,
   hasActiveAgentConversation,
+  homeSuggestionDraft,
   hydrateAgentThreadInBackground,
+  insertCapabilityAtSelection,
   isAgentConversationAtBottom,
   isComposingKeyboardEvent,
   isSingleLineComposerInput,
@@ -39,6 +42,8 @@ import {
   requestAgentRestart,
   requestAgentStop,
   resolveComposerCommandDraft,
+  replaceSlashQueryAtSelection,
+  replaceTrailingSlashQuery,
   shouldAcceptAgentStatusResult,
   submitAgentComposerMessage,
   updateAgentComposerOverlayHeight,
@@ -50,6 +55,11 @@ import {
   validateAgentMediaFiles,
   type PendingFileAttachment
 } from "../home-page.js";
+import {
+  ComposerHighlightedTextarea,
+  composerHighlightSegments,
+  removeHighlightedCommandAtCaret
+} from "../home-composer-quick-actions.js";
 
 const homePageSourcePath = fileURLToPath(new URL("../home-page.tsx", import.meta.url));
 const agentRuntimeBridgeSourcePath = fileURLToPath(new URL("../../app/agent-runtime-bridge.tsx", import.meta.url));
@@ -77,6 +87,80 @@ describe("HomePage", () => {
     expect(isSteerableCurrentTurn({ kind: "im", channel: "slack" }, true)).toBe(false);
   });
 
+  it("adds a capability block without clearing the existing draft", () => {
+    expect(addCapabilityBlockToDraft("/literature-review", "比较两篇论文")).toBe(
+      "/literature-review  比较两篇论文"
+    );
+    expect(addCapabilityBlockToDraft("/literature-review", "")).toBe("/literature-review  ");
+    expect(replaceTrailingSlashQuery("比较两篇论文 /lit", "/literature-review", true)).toBe(
+      "比较两篇论文 /literature-review "
+    );
+  });
+
+  it("locks a suggested workflow into a leading capability chip", () => {
+    expect(homeSuggestionDraft("写一篇完整综述", "/literature-review")).toBe(
+      "/literature-review  写一篇完整综述"
+    );
+    expect(homeSuggestionDraft("总结本周工作")).toBe("总结本周工作");
+  });
+
+  it("inserts and replaces a capability at the active caret", () => {
+    expect(insertCapabilityAtSelection("前文后文", "/literature-review", 2)).toEqual({
+      value: "前文  /literature-review  后文",
+      caret: 24
+    });
+    expect(replaceSlashQueryAtSelection("前文 /lit 后文", "/literature-review", 7, 7, true)).toEqual({
+      value: "前文 /literature-review  后文",
+      caret: 22
+    });
+  });
+
+  it("renders a selected capability inline without replacing the textarea", () => {
+    const html = renderToString(
+      <ComposerHighlightedTextarea
+        value="/literature-review "
+        highlightedCommands={["/literature-review"]}
+        placeholder="分配一个任务或提问任何问题..."
+        onChange={() => undefined}
+      />
+    );
+
+    expect(html).toContain("composer-slash-chip");
+    expect(html).toContain(">/literature-review </textarea>");
+    expect(html).toContain("分配一个任务或提问任何问题...");
+  });
+
+  it("keeps unselected slash text editable instead of turning it into a capability chip", () => {
+    const html = renderToString(
+      <ComposerHighlightedTextarea
+        value="/AI Memory"
+        highlightedCommands={["/literature-review"]}
+        placeholder="分配一个任务或提问任何问题..."
+        onChange={() => undefined}
+      />
+    );
+
+    expect(html).not.toContain("composer-slash-chip");
+    expect(html).toContain("/AI Memory");
+  });
+
+  it("highlights and removes a selected capability at an inline caret position", () => {
+    expect(composerHighlightSegments(
+      "前文 /literature-review 后文",
+      ["/literature-review"]
+    )).toEqual([
+      { text: "前文 ", command: false },
+      { text: "/literature-review", command: true },
+      { text: " 后文", command: false }
+    ]);
+    expect(removeHighlightedCommandAtCaret(
+      "前文 /literature-review 后文",
+      ["/literature-review"],
+      21,
+      "Backspace"
+    )).toEqual({ value: "前文 后文", caret: 3 });
+  });
+
   it("renders the first-phase agent input controls", () => {
     const html = renderToString(
       <AppProviders>
@@ -87,9 +171,14 @@ describe("HomePage", () => {
     );
 
     expect(html).toContain("分配一个任务或提问任何问题...");
-    expect(html).toContain("添加图片和文件");
+    expect(html).toContain("添加资料");
+    expect(html).not.toContain('aria-label="引用"');
+    expect(html).toContain("能力");
     expect(html).toContain("语音输入");
     expect(html).toContain("发送");
+    expect(html).toContain("帮我写一篇关于 AI Memory 研究的文献综述");
+    expect(html).toContain("帮我总结一下本周的工作");
+    expect(html).toContain("梳理我最近的一个任务，并列出可行的待办");
     expect(html).toContain("Agent 正在连接");
     expect(html).not.toContain('aria-haspopup="menu"');
     expect(html).toContain('class="home-project-picker__trigger"');
@@ -97,7 +186,7 @@ describe("HomePage", () => {
     expect(html).toContain(`accept="${AGENT_MEDIA_ACCEPT}"`);
     expect(html).toContain("hidden");
     expect(html).toContain('class="hidden"');
-    expect(html).toContain('data-icon="plus"');
+    expect(html).toContain("lucide-plus");
     expect(html).toContain('data-icon="mic"');
     expect(html).toContain('data-icon="send"');
     expect(html).not.toContain("添加照片和文件");
@@ -105,7 +194,7 @@ describe("HomePage", () => {
     expect(html).not.toContain('data-icon="image-plus"');
     expect(html).not.toContain('data-icon="pause"');
     expect(html).toContain("内容由 AI 生成，请仔细甄别");
-    expect(html).toContain("text-center text-[11px] text-text-ink/40 mt-4");
+    expect(html).toContain("text-center text-[11px] text-text-ink/40 mt-3");
     expect(html).not.toContain("未选择任何文件");
   });
 
@@ -143,11 +232,16 @@ describe("HomePage", () => {
     expect(chipStyles).toContain("font-weight: 500;");
     expect(chipStyles).toMatch(/\.composer-command-chip__icon\s*{[^}]*position:\s*absolute;/s);
     expect(chipStyles).toMatch(/\.composer-command-chip__leading\s*{[^}]*display:\s*inline-flex;/s);
-    expect(source.match(/<ComposerCommandChip/g)).toHaveLength(2);
-    expect(source.match(/value=\{composerInput\}/g)).toHaveLength(2);
+    expect(source.match(/<ComposerCommandChip/g)).toHaveLength(1);
+    expect(source.match(/\{renderComposerLeadingActions\(\)\}/g)).toHaveLength(2);
+    expect(source.match(/<ComposerHighlightedTextarea/g)).toHaveLength(1);
+    expect(source.match(/<textarea\b/g)).toHaveLength(1);
     expect(source).toContain("setCurrentComposerDraft(buildComposerCommandDraft(selectedComposerCommand, value));");
     expect(source).toContain("selectedComposerCommandsByScope[chatScopeKey] ?? null");
     expect(source).toContain("setSelectedComposerCommandForScope(chatScopeKey, COMPOSER_GOAL_COMMAND);");
+    expect(source).toContain("const goalSlashCommand: SlashCommandPaletteItem");
+    expect(source).toContain("command: COMPOSER_GOAL_COMMAND");
+    expect(source).toContain('icon: "target"');
     expect(source).toContain('label={t("home.command.goalChip")}');
     expect(source).toContain('placeholder={selectedComposerCommand ? t("home.goal.input") : t("home.input")}');
     expect(styles).toContain(".agent-composer-shell--expanded textarea.agent-composer-input--conversation");
@@ -173,7 +267,8 @@ describe("HomePage", () => {
     expect(filterGoalModeSlashCommands(commands, false).map((item) => item.command)).toEqual([
       "/last-compaction"
     ]);
-    expect(source).toContain("const slashQuery = slashMenuDismissed ? null : slashQueryFromInput(composerInput);");
+    expect(source).toContain("const slashQuery = slashMenuDismissed");
+    expect(source).toContain(": slashQueryFromInput(composerInput.slice(0, Math.min(composerSelection.start, composerInput.length)));");
     expect(source).toContain("clearAuxiliarySlashQuery();");
     expect(source).toContain('setCurrentComposerDraft(buildComposerCommandDraft(selectedComposerCommand, ""));');
   });
@@ -236,7 +331,7 @@ describe("HomePage", () => {
       source.indexOf("  useEffect(() => {\n    if (!clients?.memmyAgent)")
     );
     const updateComposerInputBlock = source.slice(
-      source.indexOf("function updateComposerInput(value: string)"),
+      source.indexOf("function updateComposerInput(value: string,"),
       source.indexOf("  /**\n   * 自动收缩或展开输入框高度。")
     );
 
@@ -258,17 +353,39 @@ describe("HomePage", () => {
     expect(updateComposerInputBlock).toContain("loadSlashCommands({ resetAttempts: true });");
   });
 
-  it("keeps slash menu rendering and command panels on their existing boundaries", () => {
+  it("anchors typed slash menus at the caret and button-triggered menus at the button", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
+    const styles = readFileSync(stylesSourcePath, "utf8");
 
     expect(source).toContain("const slashMenuOpen = filteredSlashCommands.length > 0;");
-    expect(source.match(/\{slashMenuOpen && \(/g)).toHaveLength(2);
+    expect(source).toContain("function ComposerCaretMenu(props:");
+    expect(source).toContain('mirror.style.whiteSpace = "pre-wrap";');
+    expect(source).toContain("const caretTop = caretMarker.offsetTop;");
+    expect(source).not.toContain("context?.measureText(currentLine)");
+    expect(source.match(/\{slashMenuOpen && !slashPickerOpen \? \(/g)).toHaveLength(2);
+    expect(source).toContain("{slashMenuOpen && slashPickerOpen ? (");
+    expect(source).toContain('className="composer-quick-actions__anchor"');
+    expect(source).toContain('className="composer-quick-actions__popover composer-quick-actions__popover--slash"');
+    expect(source).toContain("aria-expanded={slashPickerOpen}");
+    expect(source).toContain("onClick={insertComposerSlashTrigger}");
+    expect(source).toContain('ref={composerAttachMenuRef} className="agent-composer-attach-menu"');
+    expect(source).toContain('composerAttachMenuRef.current?.removeAttribute("open");');
+    expect(styles).toContain(".agent-composer-shell--expanded .composer-quick-actions__popover--slash");
+    expect(styles).toContain("bottom: calc(100% + 8px);");
+    expect(source).toContain('<ComposerCaretMenu textareaRef={inputRef} containerRef={composerShellRef} value={composerInput} placement="above">');
+    expect(source).toContain('bottom: Math.max(8, container.clientHeight - caretTopInContainer + 4)');
+    expect(styles).toContain("top: calc(100% + 6px);");
+    expect(source).not.toContain('slashPickerOpen || /^\\s*\\//.test(input)');
+    expect(source).not.toContain("referenceMenuOpen");
+    expect(source).not.toContain("referencePickerOpen");
     expect(source).toContain("const [lastCompactionPanel, setLastCompactionPanel] = useState<StatusPanelState>({ open: false });");
     expect(source).toContain("const lastCompactionSlashCommand: SlashCommandPaletteItem = {");
     expect(source).toContain('command: "/last-compaction"');
     expect(source).toContain("const slashCommandsWithLocal = [");
+    expect(source).toContain("goalSlashCommand,");
     expect(source).toContain("lastCompactionSlashCommand,");
-    expect(source).toContain('...localizedSlashCommands.filter((command) => command.command !== "/last-compaction")');
+    expect(source).toContain("command.command !== COMPOSER_GOAL_COMMAND");
+    expect(source).toContain('command.command !== "/last-compaction"');
     expect(source).toContain("buildVisibleSlashCommands(slashCommandsWithLocal, state.agent.isSending, stopSlashCommand)");
     expect(source).toContain("{statusPanel.open && !slashMenuOpen && (");
     expect(source).toContain("{lastCompactionPanel.open && !slashMenuOpen && (");
@@ -287,15 +404,32 @@ describe("HomePage", () => {
     expect(source).toContain("const activeImTitleDisplay = imChannelTitleDisplay(activeConversationTitle);");
     expect(source).toContain("formatConversationTitleForDisplay(activeImTitleDisplay?.title ?? activeConversationTitle)");
     expect(source).toContain("topBar={hasActiveConversation || environmentScope ? (");
-    expect(source).toContain('<div className="agent-conversation-topbar">');
+    expect(source).toContain('className={`agent-conversation-topbar${previewPanelOpen ? " agent-conversation-topbar--preview-open" : ""}`}');
     expect(source).toContain('title={hasActiveConversation ? activeConversationTitle : selectedDraftProject?.name}');
     expect(source).toContain("{hasActiveConversation ? activeConversationTitleDisplay : selectedDraftProject?.name}");
     expect(source).toContain('{hasActiveConversation && activeImTitleDisplay ? <ImChannelTitleIcon slug={activeImTitleDisplay.slug} name={activeImTitleDisplay.channelName} /> : null}');
-    expect(source).toContain("topBarBorder={Boolean(hasActiveConversation || environmentScope)}");
+    expect(source).toContain("topBarBorder={Boolean(hasActiveConversation || environmentScope) && !previewPanelOpen}");
     expect(source).not.toContain("agent-conversation-titlebar");
     expect(source).toContain("app-frame-page-content agent-conversation-scroll flex-1 overflow-y-auto");
     expect(source).toContain("onScroll={handleAgentConversationScroll}");
     expect(source).toContain('className="agent-conversation-composer"');
+    expect(source).toContain("{environmentScope ? (");
+    expect(source).toContain("const previewToggle = hasActiveConversation ? (");
+    expect(source).toContain("<PanelRight size={15}");
+    expect(source).toContain("<LiteratureReviewPreviewPane");
+    expect(source).toContain("toolbarEnd={previewToggle}");
+    expect(source).toContain("{!previewPanelOpen ? previewToggle : null}");
+    expect(source).toContain("agent-environment-toggle--with-preview");
+    const environmentButton = source.slice(
+      source.indexOf("data-agent-environment-toggle"),
+      source.indexOf("</button>", source.indexOf("data-agent-environment-toggle"))
+    );
+    const previewButton = source.slice(
+      source.indexOf("agent-preview-toggle"),
+      source.indexOf("</button>", source.indexOf("agent-preview-toggle"))
+    );
+    expect(environmentButton).not.toContain("setPreviewPanelOpen(false)");
+    expect(previewButton).not.toContain("setEnvironmentPanelOpen(false)");
   });
 
   it("anchors the history DAG popover to the composer width", () => {
@@ -501,6 +635,15 @@ describe("HomePage", () => {
 
     expect(sendBlock).toContain("if (runExactLocalSlashCommand(input))");
     expect(sendBlock.indexOf("runExactLocalSlashCommand(input)")).toBeLessThan(sendBlock.indexOf("submitAgentComposerMessage({"));
+    expect(localSlashBlock).toContain("LITREV_CONTEXT_STORAGE_KEY");
+    expect(localSlashBlock).toContain("LITREV_SOURCE_INPUT_STORAGE_KEY");
+    expect(localSlashBlock).toContain("sourceInput");
+    expect(localSlashBlock).toContain('/(?:^|\\s)\\/literature-review(?=\\s|$)/i');
+    expect(localSlashBlock).toContain("JSON.stringify(contextChips)");
+    expect(localSlashBlock).toContain("composerContextReferencesUpdated(chatScopeKey, [])");
+    expect(localSlashBlock).toContain('draftTarget.kind === "project"');
+    expect(localSlashBlock).toContain("LITREV_PROJECT_CONTEXT_STORAGE_KEY");
+    expect(localSlashBlock).toContain("removeItem(LITREV_PROJECT_CONTEXT_STORAGE_KEY)");
     expect(localSlashBlock).toContain("if (pendingAttachments.length > 0) return false;");
     expect(localSlashBlock).toContain('normalized === "/last-compaction"');
     expect(localSlashBlock).toContain("requestLastCompactionPanel();");
@@ -604,7 +747,7 @@ describe("HomePage", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
     const styles = readFileSync(stylesSourcePath, "utf8");
 
-    expect(source).toContain('agent-workspace-layout${environmentPanelOpen ? " agent-workspace-layout--environment-open" : ""}');
+    expect(source).toContain('agent-workspace-layout${environmentPanelOpen ? " agent-workspace-layout--environment-open" : ""}${previewPanelOpen ? " agent-workspace-layout--preview-open" : ""}');
     expect(source).toContain('className="agent-conversation-content max-w-3xl mx-auto space-y-3"');
     expect(source).toContain('className="agent-conversation-content agent-conversation-content--composer max-w-3xl mx-auto"');
     const composerRule = styles.match(/\.agent-conversation-composer\s*\{[^}]*\}/)?.[0] ?? "";
@@ -614,6 +757,12 @@ describe("HomePage", () => {
     expect(styles).toContain(".agent-workspace-layout--environment-open .agent-conversation-content");
     expect(styles).toMatch(/--agent-conversation-shift:\s*\d+px;/);
     expect(styles).toContain("transform: translateX(calc(0px - var(--agent-conversation-shift)));");
+    expect(styles).toContain("@container agent-workspace (max-width: 960px)");
+    expect(styles).toContain(".agent-workspace-layout--preview-open > .litrev-preview-pane");
+    expect(styles).toContain("right: calc(var(--agent-preview-panel-width, 520px) + 20px);");
+    expect(styles).toContain(".agent-workspace-layout--preview-open > .agent-conversation-panel");
+    expect(styles).toContain(".app-frame-content-topbar:has(.agent-conversation-topbar--preview-open)");
+    expect(styles).toContain("right: calc(44px - var(--codex-content-padding-x));");
     expect(styles).toMatch(/\.agent-environment-panel\s*{[^}]*position:\s*absolute;/s);
   });
 
@@ -1029,14 +1178,29 @@ describe("HomePage", () => {
     expect(focusInput).toHaveBeenCalledTimes(1);
   });
 
-  it("opens the system media picker directly from the plus button without rendering a floating media menu", () => {
+  it("offers file and folder choices from the composer plus button", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
+    const styles = readFileSync(stylesSourcePath, "utf8");
+    const baseSelector = ".agent-composer-attach-menu__popover {";
+    const baseStart = styles.indexOf(baseSelector);
+    const baseBlock = styles.slice(baseStart, styles.indexOf("}", baseStart));
+    const conversationSelector = ".agent-composer-shell--expanded .agent-composer-attach-menu__popover {";
+    const conversationStart = styles.indexOf(conversationSelector);
+    const conversationBlock = styles.slice(conversationStart, styles.indexOf("}", conversationStart));
 
-    expect(source).toContain("onClick={openMediaFilePicker}");
-    expect(source).not.toContain("function ComposerMediaMenu");
-    expect(source).not.toContain("setMediaMenuOpen");
+    expect(source).toContain("openMediaFilePicker();");
+    expect(source).toContain("openFolderPicker();");
+    expect(source).toContain("agent-composer-attach-menu__popover");
+    expect(source).toContain('ref={composerCapabilityMenuRef} className="composer-quick-actions__anchor"');
+    expect(source).toContain("!composerCapabilityMenuRef.current?.contains(event.target as Node)");
     expect(source).not.toContain("aria-haspopup=\"menu\"");
-    expect(source).not.toContain("role=\"menuitem\"");
+    expect(source).toContain("role=\"menuitem\"");
+    expect(baseBlock).toContain("top: calc(100% + 8px);");
+    expect(baseBlock).toContain("right: auto;");
+    expect(baseBlock).toContain("bottom: auto;");
+    expect(baseBlock).toContain("left: 0;");
+    expect(conversationBlock).toContain("top: auto;");
+    expect(conversationBlock).toContain("bottom: calc(100% + 8px);");
   });
 
   it("renders composer media previews as compact thumbnail and file chips", () => {
@@ -1081,32 +1245,36 @@ describe("HomePage", () => {
     expect(html).toContain(">table<");
     expect(html).toContain(">data<");
     expect(html).toContain(">payload<");
-    expect(html).toContain(">PDF<");
-    expect(html).toContain(">DOC<");
-    expect(html).toContain(">XLS<");
-    expect(html).toContain(">PPT<");
-    expect(html).toContain(">FILE<");
+    expect(html).toContain("file-type-icon__paper");
+    expect(html).toContain("file-type-icon__glyph");
+    expect(html).toContain("file-type-icon__format-label");
+    expect(html).toContain(">PDF</text>");
+    expect(html).toContain(">DOC</text>");
+    expect(html).toContain(">XLS</text>");
+    expect(html).toContain(">PPT</text>");
     expect(compactHtml).toContain("XLSX · 2.0 KB");
     expect(compactHtml).toContain("PPTX · 1.5 KB");
     expect(compactHtml).toContain("TXT · 512 B");
     expect(compactHtml).toContain("CSV · 768 B");
     expect(compactHtml).toContain("JSON · 1.0 KB");
     expect(compactHtml).toContain("XML · 640 B");
-    expect(html).toContain('data-testid="agent-file-icon-pdf"');
-    expect(html).toContain('data-testid="agent-file-icon-docx"');
-    expect(html).toContain('data-testid="agent-file-icon-xlsx"');
-    expect(html).toContain('data-testid="agent-file-icon-pptx"');
-    expect(html).toContain('data-testid="agent-file-icon-file"');
-    expect(html).toContain("agent-attachment-card__file-tile--pdf");
-    expect(html).toContain("agent-attachment-card__file-tile--docx");
-    expect(html).toContain("agent-attachment-card__file-tile--xlsx");
-    expect(html).toContain("agent-attachment-card__file-tile--pptx");
-    expect(html).toContain("agent-attachment-card__file-tile--file");
-    expect(html).toContain('aria-label="PDF file"');
+    expect(html).toContain('data-testid="file-type-icon-pdf"');
+    expect(html).toContain('data-testid="file-type-icon-word"');
+    expect(html).toContain('data-testid="file-type-icon-spreadsheet"');
+    expect(html).toContain('data-testid="file-type-icon-presentation"');
+    expect(html).toContain('data-testid="file-type-icon-text"');
+    expect(html).toContain('data-testid="file-type-icon-code"');
+    expect(html).toContain("file-type-icon--pdf");
+    expect(html).toContain("file-type-icon--word");
+    expect(html).toContain("file-type-icon--spreadsheet");
+    expect(html).toContain("file-type-icon--presentation");
+    expect(html).toContain("file-type-icon--text");
+    expect(html).toContain("file-type-icon--code");
+    expect(html).toContain('aria-label="PDF document"');
     expect(html).toContain('aria-label="Word document"');
-    expect(html).toContain('aria-label="Spreadsheet file"');
-    expect(html).toContain('aria-label="Presentation file"');
-    expect(html).toContain('aria-label="File attachment"');
+    expect(html).toContain('aria-label="Spreadsheet"');
+    expect(html).toContain('aria-label="Presentation"');
+    expect(html).toContain('aria-label="Text document"');
     expect(html).not.toContain("absolute -right-1 -bottom-1");
     expect(html).not.toContain('data-testid="composer-file-kind-');
     expect(compactHtml).toContain("PNG · 2.0 KB");
@@ -1424,21 +1592,24 @@ describe("HomePage", () => {
     expect(clearComposer).toHaveBeenCalledOnce();
   });
 
-  it("anchors composer popovers above the queue and keeps Goal next to the composer", () => {
+  it("anchors the capability menu to its button while status popovers stay above the queue", () => {
     const source = readFileSync(homePageSourcePath, "utf8").replace(/\r\n/g, "\n");
     const flowStart = source.indexOf('<div className="agent-composer-flow">');
-    const slashStart = source.indexOf("{slashMenuOpen && (", flowStart);
-    const stackStart = source.indexOf('<div className="agent-composer-stack">', slashStart);
+    const stackStart = source.indexOf('<div className="agent-composer-stack">', flowStart);
     const queueStart = source.indexOf("<AgentQueuedMessageList", stackStart);
     const goalStart = source.indexOf("<AgentGoalBar", stackStart);
     const shellStart = source.indexOf('className="relative agent-composer-shell agent-composer-shell--expanded rounded-card-lg"', stackStart);
+    const leadingActionsStart = source.indexOf("function renderComposerLeadingActions");
+    const capabilityAnchorStart = source.indexOf('className="composer-quick-actions__anchor"', leadingActionsStart);
+    const capabilityMenuStart = source.indexOf('className="composer-quick-actions__popover composer-quick-actions__popover--slash"', capabilityAnchorStart);
 
     expect(flowStart).toBeGreaterThan(0);
-    expect(slashStart).toBeGreaterThan(flowStart);
-    expect(stackStart).toBeGreaterThan(slashStart);
+    expect(stackStart).toBeGreaterThan(flowStart);
     expect(queueStart).toBeGreaterThan(stackStart);
     expect(goalStart).toBeGreaterThan(queueStart);
     expect(shellStart).toBeGreaterThan(goalStart);
+    expect(capabilityAnchorStart).toBeGreaterThan(leadingActionsStart);
+    expect(capabilityMenuStart).toBeGreaterThan(capabilityAnchorStart);
     expect(source).toContain('ref={conversationPanelRef} className="agent-conversation-panel flex flex-col h-full"');
     expect(source).toContain('ref={composerOverlayRef} className="agent-conversation-composer"');
     expect(source).toContain("updateAgentComposerOverlayHeight(panel, composer, measuredHeight)");

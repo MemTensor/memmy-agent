@@ -386,6 +386,160 @@ describe("WebSocket HTTP route helpers", () => {
     });
   });
 
+  it("lists standalone task files one directory at a time", async () => {
+    const root = tmpRoot();
+    fs.mkdirSync(path.join(root, "src"));
+    fs.mkdirSync(path.join(root, "node_modules"));
+    fs.writeFileSync(path.join(root, "src", "index.ts"), "export {};\n", "utf8");
+    const manager = seedSession(tmpRoot(), "websocket:workspace-files", root);
+    const channel = makeChannel({ sessionManager: manager, workspacePath: root });
+    const headers = withApiToken(channel);
+    const encoded = encodeURIComponent("websocket:workspace-files");
+
+    const rootResponse = await channel.dispatchHttp(localConnection, {
+      path: `/api/sessions/${encoded}/workspace/files`,
+      headers,
+    });
+    expect(rootResponse?.status).toBe(200);
+    const rootListing = responseJson(rootResponse!);
+    expect(rootListing).toMatchObject({
+      root: { kind: "task", label: path.basename(root) },
+      path: "",
+      truncated: false,
+    });
+    expect(rootListing.entries).toContainEqual(expect.objectContaining({
+      name: "src",
+      path: "src",
+      kind: "directory",
+    }));
+    expect(rootListing.entries).toContainEqual(expect.objectContaining({
+      name: "node_modules",
+      path: "node_modules",
+      kind: "directory",
+    }));
+
+    const deniedResponse = await channel.dispatchHttp(localConnection, {
+      path: `/api/sessions/${encoded}/workspace/files`,
+    });
+    expect(deniedResponse?.status).toBe(401);
+    const methodResponse = await channel.dispatchHttp(localConnection, {
+      path: `/api/sessions/${encoded}/workspace/files`,
+      method: "POST",
+      headers,
+    });
+    expect(methodResponse?.status).toBe(405);
+
+    const nestedResponse = await channel.dispatchHttp(localConnection, {
+      path: `/api/sessions/${encoded}/workspace/files?path=src`,
+      headers,
+    });
+    expect(responseJson(nestedResponse!)).toMatchObject({
+      path: "src",
+      entries: [{
+        name: "index.ts",
+        path: "src/index.ts",
+        kind: "file",
+        size: 11,
+      }],
+    });
+
+    const traversalResponse = await channel.dispatchHttp(localConnection, {
+      path: `/api/sessions/${encoded}/workspace/files?path=..%2Foutside`,
+      headers,
+    });
+    expect(traversalResponse?.status).toBe(400);
+    expect(responseJson(traversalResponse!)).toMatchObject({ code: "workspace_files_path_invalid" });
+  });
+
+  it("uses the bound project's active root and label for workspace files", async () => {
+    const root = tmpRoot();
+    const workspace = path.join(root, "project-root");
+    fs.mkdirSync(workspace);
+    fs.writeFileSync(path.join(workspace, "project.md"), "project", "utf8");
+    const projectStore = new ProjectStore({ filePath: path.join(root, "projects.json") });
+    const project = projectStore.add(workspace, "existing", "Research project");
+    const manager = seedSession(path.join(root, "sessions"), "websocket:project-files", workspace);
+    const session = manager.get("websocket:project-files")!;
+    session.metadata.webuiProjectId = project.id;
+    manager.save(session);
+    const channel = makeChannel({ sessionManager: manager, projectStore, workspacePath: root });
+    const headers = withApiToken(channel);
+
+    const response = await channel.dispatchHttp(localConnection, {
+      path: `/api/sessions/${encodeURIComponent("websocket:project-files")}/workspace/files`,
+      headers,
+    });
+
+    expect(response?.status).toBe(200);
+    expect(responseJson(response!)).toMatchObject({
+      root: { kind: "project", label: "Research project" },
+      entries: [{
+        name: "project.md",
+        path: "project.md",
+        kind: "file",
+        size: 7,
+      }],
+    });
+  });
+
+  it("does not fall back to the task cwd when a bound project is missing", async () => {
+    const root = tmpRoot();
+    fs.writeFileSync(path.join(root, "task-only.txt"), "hidden", "utf8");
+    const manager = seedSession(tmpRoot(), "websocket:missing-project-files", root);
+    const session = manager.get("websocket:missing-project-files")!;
+    session.metadata.webuiProjectId = "00000000-0000-4000-8000-000000000000";
+    manager.save(session);
+    const projectStore = new ProjectStore({ filePath: path.join(tmpRoot(), "projects.json") });
+    const channel = makeChannel({ sessionManager: manager, projectStore, workspacePath: root });
+    const headers = withApiToken(channel);
+
+    const response = await channel.dispatchHttp(localConnection, {
+      path: `/api/sessions/${encodeURIComponent("websocket:missing-project-files")}/workspace/files`,
+      headers,
+    });
+
+    expect(response?.status).toBe(404);
+    expect(responseJson(response!)).toMatchObject({ code: "project_not_found" });
+  });
+
+  it("does not fall back to the task cwd when the project registry is corrupt", async () => {
+    const root = tmpRoot();
+    const manager = seedSession(tmpRoot(), "websocket:corrupt-project-files", root);
+    const session = manager.get("websocket:corrupt-project-files")!;
+    session.metadata.webuiProjectId = "00000000-0000-4000-8000-000000000000";
+    manager.save(session);
+    const projectRegistryPath = path.join(tmpRoot(), "projects.json");
+    fs.writeFileSync(projectRegistryPath, "not json", "utf8");
+    const projectStore = new ProjectStore({ filePath: projectRegistryPath });
+    const channel = makeChannel({ sessionManager: manager, projectStore, workspacePath: root });
+    const headers = withApiToken(channel);
+
+    const response = await channel.dispatchHttp(localConnection, {
+      path: `/api/sessions/${encodeURIComponent("websocket:corrupt-project-files")}/workspace/files`,
+      headers,
+    });
+
+    expect(response?.status).toBe(503);
+    expect(responseJson(response!)).toMatchObject({ code: "project_registry_corrupt" });
+  });
+
+  it("reports an unavailable workspace when the session binding is missing", async () => {
+    const manager = new SessionManager(tmpRoot());
+    const session = new Session({ key: "websocket:missing-workspace-binding" });
+    session.metadata.webui = true;
+    manager.save(session);
+    const channel = makeChannel({ sessionManager: manager });
+    const headers = withApiToken(channel);
+
+    const response = await channel.dispatchHttp(localConnection, {
+      path: `/api/sessions/${encodeURIComponent("websocket:missing-workspace-binding")}/workspace/files`,
+      headers,
+    });
+
+    expect(response?.status).toBe(422);
+    expect(responseJson(response!)).toMatchObject({ code: "workspace_missing" });
+  });
+
   it("serves the selected project environment before a Session exists", async () => {
     const root = tmpRoot();
     const workspace = path.join(root, "workspace");

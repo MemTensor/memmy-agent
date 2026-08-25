@@ -232,6 +232,7 @@ describe("desktop pet window mode", () => {
     expect(source).toContain("deliverMainWindowRouteTarget(targetMainWindow, target);");
     expect(source).toContain("targetWindow.webContents.send(MAIN_WINDOW_ROUTE_TARGET_CHANNEL, target);");
     expect(source).not.toContain('if (target) {\n    void targetMainWindow.loadURL(resolveRendererUrl("full", target));\n  }');
+    expect(source).toContain('"/memory-sources", "/literature-review", "/settings"');
   });
 
   it("leaves full-screen before hiding the main window when entering pet mode", () => {

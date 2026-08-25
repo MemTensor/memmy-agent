@@ -18,7 +18,7 @@ import type { IntegrationsClient } from "../api/integrations-client.js";
 import type { IntegrationConnection } from "../integrations/connection-state.js";
 import type { IntegrationMeta } from "../integrations/integration-meta.js";
 import type { AgentGoalControlAction, ChatModelPreset, MemmyAgentRunStatusSnapshot, MemmyAgentSessionSnapshot, MemmyAgentSessionSummary, MemmyAgentSidebarState, MemmyAgentWebuiThread, MemmyAgentWsEvent, WebuiSessionTarget } from "../api/memmy-agent-client.js";
-import type { PendingAttachment } from "./agent-composer-state.js";
+import type { ComposerContextReference, PendingAttachment } from "./agent-composer-state.js";
 import type {
   AgentAction,
   AgentChatMediaAttachment,
@@ -424,6 +424,10 @@ export const agentActions = {
 
   composerPendingAttachmentsUpdated(scopeKey: string, attachments: PendingAttachment[]): AppAction {
     return { type: "agent/composerPendingAttachmentsUpdated", scopeKey, attachments };
+  },
+
+  composerContextReferencesUpdated(scopeKey: string, references: ComposerContextReference[]): AppAction {
+    return { type: "agent/composerContextReferencesUpdated", scopeKey, references };
   },
 
   draftTargetUpdated(scopeKey: string, target: WebuiSessionTarget): AppAction {

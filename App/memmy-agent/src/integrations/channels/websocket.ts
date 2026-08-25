@@ -43,6 +43,7 @@ import { goalStateWsBlob, type GoalStatus } from "../../core/session/goal-state.
 import {
   readWebuiSessionBinding,
   Session,
+  WebuiSessionBindingError,
   WEBUI_PROJECT_ID_METADATA_KEY,
   WEBUI_WORKSPACE_CWD_METADATA_KEY,
 } from "../../core/session/manager.js";
@@ -76,6 +77,11 @@ import {
   type WebuiProject,
   type WebuiSessionTarget,
 } from "../../entrypoints/frontend-bridge/projects.js";
+import {
+  listWorkspaceFiles,
+  WorkspaceFilesError,
+  type WorkspaceFilesRootKind,
+} from "../../entrypoints/frontend-bridge/workspace-files.js";
 import {
   GuiSessionProjection,
   GuiSessionProjectionError,
@@ -1949,6 +1955,67 @@ export class WebSocketChannel extends BaseChannel {
     return this.workspaceEnvironmentResponse(request, result.context, view);
   }
 
+  handleWorkspaceFiles(request: HttpRequestLike, key: string): HttpLikeResponse {
+    if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+    if ((request.method ?? "GET").toUpperCase() !== "GET") return httpError(405, "method not allowed");
+    if (!this.sessionManager) return httpError(503, "session manager unavailable");
+
+    try {
+      const decodedKey = decodeGuiSessionApiKey(key);
+      if (decodedKey == null) return invalidGuiSessionKeyResponse(key);
+      let resolved: ResolvedGuiSession;
+      try {
+        resolved = this.resolveGuiSession(decodedKey);
+      } catch (error) {
+        if (error instanceof GuiSessionProjectionError && error.code === "session_binding_invalid") {
+          return httpJsonResponse(
+            { code: "workspace_missing", message: "workspace_missing" },
+            { status: 422 },
+          );
+        }
+        if (error instanceof GuiSessionProjectionError) return httpError(error.status, error.code);
+        return httpError(404, "session not found");
+      }
+      const session = this.sessionManager.get?.(resolved.canonicalSessionKey) as Session | null;
+      if (!session) return httpError(404, "session not found");
+      const binding = readWebuiSessionBinding(session);
+
+      let rootPath = binding.cwd;
+      let rootKind: WorkspaceFilesRootKind = "task";
+      let rootLabel = path.basename(binding.cwd) || "Task files";
+      if (binding.projectId !== null) {
+        const project = this.activeProject(binding.projectId);
+        rootPath = project.rootPath;
+        rootKind = "project";
+        rootLabel = project.name;
+      }
+      const [, query] = parseRequestPath(String(request.path ?? ""));
+      return httpJsonResponse(listWorkspaceFiles(rootPath, {
+        rootKind,
+        rootLabel,
+        relativePath: queryFirst(query, "path") ?? "",
+      }));
+    } catch (error) {
+      if (error instanceof WorkspaceFilesError) {
+        return httpJsonResponse(
+          { code: error.code, message: error.message },
+          { status: error.status },
+        );
+      }
+      if (error instanceof WebuiSessionBindingError) {
+        return httpJsonResponse(
+          { code: error.code, message: error.message },
+          { status: 422 },
+        );
+      }
+      if (error instanceof WebuiProjectError) return this.projectErrorResponse(error);
+      return httpJsonResponse(
+        { code: "workspace_files_unavailable", message: "workspace files unavailable" },
+        { status: 500 },
+      );
+    }
+  }
+
   handleWebuiThreadGet(request: any, key: string): HttpLikeResponse {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
     const [, query] = parseRequestPath(String(request?.path ?? ""));
@@ -2744,6 +2811,8 @@ export class WebSocketChannel extends BaseChannel {
     if (match) return this.handleWorkspaceEnvironment(request, match[1], "diff");
     match = got.match(/^\/api\/sessions\/([^/]+)\/environment\/branch$/);
     if (match) return this.handleWorkspaceEnvironment(request, match[1], "branch");
+    match = got.match(/^\/api\/sessions\/([^/]+)\/workspace\/files$/);
+    if (match) return this.handleWorkspaceFiles(request, match[1]);
     match = got.match(/^\/api\/sessions\/([^/]+)\/webui-thread$/);
     if (match) return this.handleWebuiThreadGet(request, match[1]);
     match = got.match(/^\/api\/sessions\/([^/]+)\/last-compaction$/);
