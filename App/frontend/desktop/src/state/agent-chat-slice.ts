@@ -30,7 +30,7 @@ import {
   parseAgentTurnSource,
   parseMemmyAgentModelSelection
 } from "../api/memmy-agent-client.js";
-import type { PendingAttachment } from "./agent-composer-state.js";
+import type { ComposerContextReference, PendingAttachment } from "./agent-composer-state.js";
 import {
   mergeFileEdits,
   mergeToolProgressEvents,
@@ -238,6 +238,7 @@ export interface AgentState {
   }>;
   composerDraftsByScope: Record<string, string>;
   composerPendingAttachmentsByScope: Record<string, PendingAttachment[]>;
+  composerContextReferencesByScope: Record<string, ComposerContextReference[]>;
   draftTargetsByScope: Record<string, WebuiSessionTarget>;
   draftTargetRevisionByScope: Record<string, number>;
   messageSendInFlightByScope: Record<string, string>;
@@ -298,6 +299,7 @@ export type AgentAction =
   | { type: "agent/queueItemSteerFailed"; chatId: string; clientRequestId: string; error: AgentOperationError }
   | { type: "agent/composerDraftUpdated"; scopeKey: string; value: string }
   | { type: "agent/composerPendingAttachmentsUpdated"; scopeKey: string; attachments: PendingAttachment[] }
+  | { type: "agent/composerContextReferencesUpdated"; scopeKey: string; references: ComposerContextReference[] }
   | { type: "agent/draftTargetUpdated"; scopeKey: string; target: WebuiSessionTarget }
   | { type: "agent/messageSendLockUpdated"; scopeKey: string; clientRequestId: string | null }
   | { type: "agent/tasksMarkedRead"; chatIds: string[] }
@@ -392,6 +394,7 @@ export const initialAgentState: AgentState = {
   goalMutationPendingByChatId: {},
   composerDraftsByScope: {},
   composerPendingAttachmentsByScope: {},
+  composerContextReferencesByScope: {},
   draftTargetsByScope: {},
   draftTargetRevisionByScope: {},
   messageSendInFlightByScope: {},
@@ -598,6 +601,8 @@ export function agentReducer(state: AgentState, action: AgentAction): AgentState
       return updateComposerDraft(state, action.scopeKey, action.value);
     case "agent/composerPendingAttachmentsUpdated":
       return updateComposerPendingAttachments(state, action.scopeKey, action.attachments);
+    case "agent/composerContextReferencesUpdated":
+      return updateComposerContextReferences(state, action.scopeKey, action.references);
     case "agent/draftTargetUpdated":
       return {
         ...state,
@@ -1314,23 +1319,51 @@ function updateComposerPendingAttachments(state: AgentState, scopeKey: string, a
   };
 }
 
+function updateComposerContextReferences(
+  state: AgentState,
+  scopeKey: string,
+  references: ComposerContextReference[]
+): AgentState {
+  if (!references.length) {
+    if (!(scopeKey in state.composerContextReferencesByScope)) {
+      return state;
+    }
+    const composerContextReferencesByScope = { ...state.composerContextReferencesByScope };
+    delete composerContextReferencesByScope[scopeKey];
+    return { ...state, composerContextReferencesByScope };
+  }
+  if (state.composerContextReferencesByScope[scopeKey] === references) {
+    return state;
+  }
+  return {
+    ...state,
+    composerContextReferencesByScope: {
+      ...state.composerContextReferencesByScope,
+      [scopeKey]: references
+    }
+  };
+}
+
 function clearComposerScope(state: AgentState, scopeKey: string): AgentState {
   const hasDraft = scopeKey in state.composerDraftsByScope;
   const hasPendingAttachments = scopeKey in state.composerPendingAttachmentsByScope;
+  const hasContextReferences = scopeKey in state.composerContextReferencesByScope;
   const hasTarget = scopeKey in state.draftTargetsByScope;
   const hasTargetRevision = scopeKey in state.draftTargetRevisionByScope;
   const hasSendLock = scopeKey in state.messageSendInFlightByScope;
-  if (!hasDraft && !hasPendingAttachments && !hasTarget && !hasTargetRevision && !hasSendLock) {
+  if (!hasDraft && !hasPendingAttachments && !hasContextReferences && !hasTarget && !hasTargetRevision && !hasSendLock) {
     return state;
   }
 
   const composerDraftsByScope = { ...state.composerDraftsByScope };
   const composerPendingAttachmentsByScope = { ...state.composerPendingAttachmentsByScope };
+  const composerContextReferencesByScope = { ...state.composerContextReferencesByScope };
   const draftTargetsByScope = { ...state.draftTargetsByScope };
   const draftTargetRevisionByScope = { ...state.draftTargetRevisionByScope };
   const messageSendInFlightByScope = { ...state.messageSendInFlightByScope };
   delete composerDraftsByScope[scopeKey];
   delete composerPendingAttachmentsByScope[scopeKey];
+  delete composerContextReferencesByScope[scopeKey];
   delete draftTargetsByScope[scopeKey];
   delete draftTargetRevisionByScope[scopeKey];
   delete messageSendInFlightByScope[scopeKey];
@@ -1338,6 +1371,7 @@ function clearComposerScope(state: AgentState, scopeKey: string): AgentState {
     ...state,
     composerDraftsByScope,
     composerPendingAttachmentsByScope,
+    composerContextReferencesByScope,
     draftTargetsByScope,
     draftTargetRevisionByScope,
     messageSendInFlightByScope

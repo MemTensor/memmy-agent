@@ -18,6 +18,7 @@ export type AppRoutePath =
   | "/tools"
   | "/memory"
   | "/memory-sources"
+  | "/literature-review"
   | "/settings";
 
 const CURRENT_ROUTE_STORAGE_KEY = "memmy.currentRoute";
@@ -54,6 +55,7 @@ export const routeTable: Record<AppRoutePath, AppRouteDefinition> = {
   "/tools": { path: "/tools", navKey: "nav.tools", requiresBootstrap: true },
   "/memory": { path: "/memory", navKey: "nav.memory", requiresBootstrap: true },
   "/memory-sources": { path: "/memory-sources", navKey: "nav.memory", requiresBootstrap: true },
+  "/literature-review": { path: "/literature-review", navKey: "nav.literatureReview", requiresBootstrap: true },
   "/settings": { path: "/settings", navKey: "nav.settings", requiresBootstrap: true }
 };
 

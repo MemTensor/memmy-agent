@@ -98,6 +98,7 @@ describe("desktop route table", () => {
       "/tools",
       "/memory",
       "/memory-sources",
+      "/literature-review",
       "/settings"
     ]);
   });

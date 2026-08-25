@@ -1990,11 +1990,11 @@ describe("AgentThreadMessages", () => {
     expect(html).toContain('data-testid="agent-attachment-card-file"');
     expect(html).toContain("agent-attachment-card");
     expect(html).toContain("agent-attachment-card__preview");
-    expect(html).toContain("agent-attachment-card__file-tile--pdf");
+    expect(html).toContain("file-type-icon--pdf");
     expect(html).toContain('style="max-width:min(100%, 32rem)"');
     expect(html).toContain('style="width:100%;max-height:26rem"');
     expect(html).toContain('data-testid="user-file-attachment"');
-    expect(html).toContain('data-testid="agent-file-icon-pdf"');
+    expect(html).toContain('data-testid="file-type-icon-pdf"');
     expect(html).toContain(">shot<");
     expect(html).toContain(">report<");
     expect(html).toContain('title="report.pdf"');
@@ -2340,10 +2340,10 @@ describe("AgentThreadMessages", () => {
     expect(html).toContain('title="/Users/yuan/deck.pptx"');
     expect(html).toContain(">deck<");
     expect(html).toContain(">PPTX<");
-    expect(html).toContain('data-testid="agent-file-icon-pptx"');
+    expect(html).toContain('data-testid="file-type-icon-presentation"');
     expect(html).toContain('data-testid="agent-attachment-card-file"');
     expect(html).toContain("agent-attachment-card");
-    expect(html).toContain("agent-attachment-card__file-tile--pptx");
+    expect(html).toContain("file-type-icon--presentation");
     expect(html).not.toContain("rounded-tag");
     expect(html).not.toContain('href="/Users/yuan/deck.pptx"');
     expect(html).not.toContain('img src="/Users/yuan/deck.pptx"');

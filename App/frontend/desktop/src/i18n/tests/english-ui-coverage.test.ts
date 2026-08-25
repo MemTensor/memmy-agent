@@ -2,13 +2,13 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, resolve, relative } from "node:path";
 import { describe, expect, it } from "vitest";
+import { enUSMessages, zhCNMessages } from "../messages.js";
 
 const srcDir = resolve(__dirname, "..", "..");
 
 const allowedSourceFiles = new Set([
   "i18n/error-notice-messages.ts",
   "i18n/messages.ts",
-  "i18n/error-notice-messages.ts",
   "lib/nickname.ts",
   "pages/memory/skill-demo-data.ts",
   // Provider aliases are identifiers used for logo matching, not visible UI copy.
@@ -25,6 +25,20 @@ describe("English UI coverage", () => {
     });
 
     expect(failures).toEqual([]);
+  });
+
+  it("文献综述页面的可见文案全部经过本地化", () => {
+    const page = stripComments(readFileSync(resolve(srcDir, "pages/literature-review-page.tsx"), "utf8"));
+    const model = stripComments(readFileSync(resolve(srcDir, "pages/literature-review-model.ts"), "utf8"));
+    const keys = Object.keys(zhCNMessages).filter((key) => key.startsWith("literatureReview."));
+
+    expect(keys.length).toBeGreaterThan(50);
+    expect(keys.every((key) => enUSMessages[key as keyof typeof enUSMessages]?.trim())).toBe(true);
+    expect(page).toContain("useTranslation");
+    expect(page).not.toMatch(/(?:aria-label|placeholder|title)="[^"]*[A-Za-z][^"]*"/);
+    expect(page.split("\n").filter((line) => />\s*[A-Za-z][^<{]*</.test(line))).toEqual([]);
+    expect(model).not.toContain("What topic or research field");
+    expect(model).not.toContain("Last 3 years");
   });
 });
 

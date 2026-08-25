@@ -4308,19 +4308,23 @@ describe("agent chat slice", () => {
     expect(state.tasks.find((task) => task.chatId === "chat-1")?.runStartedAt).toBe(1780732800);
   });
 
-  it("keeps composer drafts and pending attachments isolated by scope", () => {
+  it("keeps composer drafts, pending attachments, and context references isolated by scope", () => {
     const attachment = readyPendingFile("report.pdf");
+    const reference = { kind: "path" as const, id: "docs/report.pdf", label: "report.pdf" };
     let state = agentReducer(initialAgentState, { type: "agent/composerDraftUpdated", scopeKey: "chat-a", value: "A 草稿" });
     state = agentReducer(state, { type: "agent/composerDraftUpdated", scopeKey: "chat-b", value: "B 草稿" });
     state = agentReducer(state, { type: "agent/composerPendingAttachmentsUpdated", scopeKey: "chat-a", attachments: [attachment] });
+    state = agentReducer(state, { type: "agent/composerContextReferencesUpdated", scopeKey: "chat-a", references: [reference] });
 
     expect(state.composerDraftsByScope).toEqual({ "chat-a": "A 草稿", "chat-b": "B 草稿" });
     expect(state.composerPendingAttachmentsByScope["chat-a"]).toEqual([attachment]);
+    expect(state.composerContextReferencesByScope["chat-a"]).toEqual([reference]);
 
     state = agentReducer(state, { type: "agent/composerScopeCleared", scopeKey: "chat-a" });
 
     expect(state.composerDraftsByScope).toEqual({ "chat-b": "B 草稿" });
     expect(state.composerPendingAttachmentsByScope["chat-a"]).toBeUndefined();
+    expect(state.composerContextReferencesByScope["chat-a"]).toBeUndefined();
   });
 
   it("newChatRequested does not clear composer scopes", () => {
