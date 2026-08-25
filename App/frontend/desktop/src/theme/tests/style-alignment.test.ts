@@ -310,6 +310,18 @@ describe("prototype style alignment", () => {
     expect(globalCss).not.toContain(".memory-drawer__copy-id");
   });
 
+  it("keeps the Windows memory refresh action below the native title-bar overlay", () => {
+    const windowsMemoryHeaderRule = globalCss.match(/body\.memmy-platform-windows \.memory-panel__header\s*\{[^}]*\}/)?.[0] ?? "";
+
+    expect(windowsMemoryHeaderRule).toContain("padding-top: var(--codex-toolbar-height);");
+  });
+
+  it("keeps the Windows memory drawer close action below the native title-bar overlay", () => {
+    const windowsMemoryDrawerRule = globalCss.match(/body\.memmy-platform-windows \.memory-drawer\s*\{[^}]*\}/)?.[0] ?? "";
+
+    expect(windowsMemoryDrawerRule).toContain("padding-top: var(--codex-toolbar-height);");
+  });
+
   it("copies mascot assets into the App source tree instead of referencing the prototype folder", () => {
     const assetNames = [
       "memmy-rice.png",

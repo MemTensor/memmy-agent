@@ -3894,6 +3894,10 @@ code {
   margin-bottom: 20px;
 }
 
+body.memmy-platform-windows .memory-panel__header {
+  padding-top: var(--codex-toolbar-height);
+}
+
 .memory-panel__header--single-line {
   align-items: flex-start;
   flex-wrap: wrap;
@@ -5053,6 +5057,10 @@ code {
   animation: memory-drawer-in var(--duration-normal) ease-out;
   pointer-events: auto;
   -webkit-app-region: no-drag;
+}
+
+body.memmy-platform-windows .memory-drawer {
+  padding-top: var(--codex-toolbar-height);
 }
 
 .memory-drawer,
