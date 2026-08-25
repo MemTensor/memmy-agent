@@ -1,5 +1,5 @@
 /** Home page module. */
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type CSSProperties, type DragEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject, type SetStateAction, type UIEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type CSSProperties, type DragEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject, type SetStateAction, type UIEvent } from "react";
 import type { AgentGatewayStartupIssue } from "@memmy/local-api-contracts";
 import { hydrateAgentThreadInBackground, refreshAgentTaskList, useAgentRuntimeBridge, type AgentTaskStateCoordinator } from "../app/agent-runtime-bridge.js";
 import { useApiClients } from "../app/providers.js";
@@ -110,9 +110,13 @@ import {
   LITREV_PROMPT_STORAGE_KEY,
   LITREV_SOURCE_INPUT_STORAGE_KEY
 } from "./literature-review-model.js";
+import {
+  LiteratureReviewPreviewPane,
+  type LiteratureReviewPreviewContent
+} from "./literature-review-preview-pane.js";
 import { Mic, Pause, Plus, Send } from "./memory/memory-prototype-icons.js";
 import { resolveWorkspaceEnvironmentScope, useWorkspaceEnvironment } from "./use-workspace-environment.js";
-import { ArrowDown, BookOpenText, CalendarCheck2, Check, ChevronDown, Folder, History, Plus as LucidePlus, RotateCw, SlidersHorizontal, SquareSlash, Target, X } from "lucide-react";
+import { ArrowDown, BookOpenText, CalendarCheck2, Check, ChevronDown, Folder, History, PanelRight, Plus as LucidePlus, RotateCw, SlidersHorizontal, SquareSlash, Target, X } from "lucide-react";
 
 export { agentChatScopeKey, updateComposerDraftForScope };
 export { hydrateAgentThreadInBackground };
@@ -124,6 +128,8 @@ const NEW_TASK_MODEL_SCOPE_KEY = "draft-new-task";
 const COMPOSER_MEDIA_STRIP_STYLE = { maxHeight: "min(7.5rem, 28vh)" } satisfies CSSProperties;
 const AGENT_WS_SAFE_FRAME_BYTES = 1024 * 1024;
 const COMPOSER_HEIGHT_EPSILON = 2;
+const WORKSPACE_TEXT_PREVIEW_PATTERN = /\.(?:c|cc|cpp|css|csv|go|h|hpp|html?|ini|java|js|json|jsx|log|md|mjs|py|rb|rs|sh|sql|tex|toml|ts|tsx|txt|xml|ya?ml)$/i;
+const WORKSPACE_TEXT_PREVIEW_MAX_CHARS = 512 * 1024;
 
 export function updateAgentComposerOverlayHeight(
   panel: HTMLElement,
@@ -909,9 +915,10 @@ function ComposerCaretMenu(props: {
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   containerRef: RefObject<HTMLDivElement | null>;
   value: string;
+  placement?: "above" | "below";
   children: ReactNode;
 }) {
-  const [position, setPosition] = useState<{ left: number; top: number; width: number } | null>(null);
+  const [position, setPosition] = useState<{ left: number; top?: number; bottom?: number; width: number } | null>(null);
 
   useLayoutEffect(() => {
     const textarea = props.textareaRef.current;
@@ -961,15 +968,23 @@ function ComposerCaretMenu(props: {
     const width = Math.min(360, Math.max(180, container.clientWidth - 16));
     const desiredLeft = textareaRect.left - containerRect.left + caretLeft - textarea.scrollLeft;
     const left = Math.max(8, Math.min(desiredLeft, container.clientWidth - width - 8));
-    const top = textareaRect.top - containerRect.top + caretTop + lineHeight - textarea.scrollTop + 4;
-    setPosition({ left, top, width });
-  }, [props.containerRef, props.textareaRef, props.value]);
+    const caretTopInContainer = textareaRect.top - containerRect.top + caretTop - textarea.scrollTop;
+    if (props.placement === "above") {
+      setPosition({
+        left,
+        bottom: Math.max(8, container.clientHeight - caretTopInContainer + 4),
+        width,
+      });
+    } else {
+      setPosition({ left, top: caretTopInContainer + lineHeight + 4, width });
+    }
+  }, [props.containerRef, props.placement, props.textareaRef, props.value]);
 
   if (!position) return null;
   return (
     <div
       className="composer-caret-menu"
-      style={{ left: position.left, top: position.top, width: position.width }}
+      style={{ left: position.left, top: position.top, bottom: position.bottom, width: position.width }}
     >
       {props.children}
     </div>
@@ -1007,6 +1022,8 @@ export function HomePage() {
   const [lastCompactionPanel, setLastCompactionPanel] = useState<StatusPanelState>({ open: false });
   const [historyDagPanel, setHistoryDagPanel] = useState<HistoryDagPanelState>({ open: false });
   const [environmentPanelOpen, setEnvironmentPanelOpen] = useState(false);
+  const [previewPanelOpen, setPreviewPanelOpen] = useState(false);
+  const [previewPanelWidth, setPreviewPanelWidth] = useState(520);
   const [isCreatingChat, setIsCreatingChat] = useState(false);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
   const [projectPickerOperationId, setProjectPickerOperationId] = useState<string | null>(null);
@@ -1022,12 +1039,38 @@ export function HomePage() {
   const contextReferencesByScope = state.agent.composerContextReferencesByScope;
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const composerShellRef = useRef<HTMLDivElement | null>(null);
+  const composerAttachMenuRef = useRef<HTMLDetailsElement | null>(null);
+  const composerCapabilityMenuRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const folderInputRef = useRef<HTMLInputElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const conversationPanelRef = useRef<HTMLElement | null>(null);
   const composerOverlayRef = useRef<HTMLDivElement | null>(null);
   const pendingStatusChatRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const closeAttachMenu = (event: PointerEvent) => {
+      const menu = composerAttachMenuRef.current;
+      if (menu?.open && !menu.contains(event.target as Node)) menu.removeAttribute("open");
+      if (slashPickerOpen && !composerCapabilityMenuRef.current?.contains(event.target as Node)) {
+        setSlashPickerOpen(false);
+        setSlashMenuDismissed(true);
+      }
+    };
+    const closeAttachMenuOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        composerAttachMenuRef.current?.removeAttribute("open");
+        setSlashPickerOpen(false);
+        setSlashMenuDismissed(true);
+      }
+    };
+    document.addEventListener("pointerdown", closeAttachMenu);
+    document.addEventListener("keydown", closeAttachMenuOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeAttachMenu);
+      document.removeEventListener("keydown", closeAttachMenuOnEscape);
+    };
+  }, [slashPickerOpen]);
   const pendingLastCompactionChatRef = useRef<string | null>(null);
   const pendingHistoryDagChatRef = useRef<string | null>(null);
   const lastCompactionRequestIdRef = useRef(0);
@@ -1076,6 +1119,22 @@ export function HomePage() {
   const selectedDraftProject = draftTarget.kind === "project"
     ? state.agent.projects.find((project) => project.id === draftTarget.projectId) ?? null
     : null;
+  const activeTask = state.agent.currentSessionKey
+    ? state.agent.tasks.find((task) => task.sessionKey === state.agent.currentSessionKey) ?? null
+    : state.agent.currentChatId
+      ? state.agent.tasks.find((task) => task.chatId === state.agent.currentChatId) ?? null
+      : null;
+  const previewSessionKey = state.agent.currentSessionKey ?? activeTask?.sessionKey ?? null;
+  const activeSession = previewSessionKey
+    ? state.agent.sessions.find((session) => session.key === previewSessionKey) ?? null
+    : null;
+  const activeProjectId = activeSession?.projectId ?? activeTask?.projectId ?? null;
+  const activeProject = activeProjectId
+    ? state.agent.projects.find((project) => project.id === activeProjectId) ?? null
+    : null;
+  const previewRootLabel = activeProject?.name
+    ?? activeTask?.title
+    ?? t("litrev.preview.taskFolder");
   const environmentScope = resolveWorkspaceEnvironmentScope(
     state.agent.currentSessionKey,
     selectedDraftProject?.id ?? null,
@@ -1113,6 +1172,15 @@ export function HomePage() {
     && !currentQueuedMessages.some((item) => item.status === "steering")
   );
   const hasActiveConversation = hasActiveAgentConversation(state.agent.currentChatId, state.agent.messages.length);
+
+  useEffect(() => {
+    if (!hasActiveConversation) setPreviewPanelOpen(false);
+  }, [hasActiveConversation]);
+
+  useEffect(() => {
+    if (!environmentScope) setEnvironmentPanelOpen(false);
+  }, [environmentScope]);
+
   const activeConversationTitle = state.agent.currentSessionKey
     ? state.agent.tasks.find((task) => task.sessionKey === state.agent.currentSessionKey)?.title.trim() || t("home.title")
     : t("home.title");
@@ -1128,6 +1196,31 @@ export function HomePage() {
       openArtifact: (path: string) => client.openArtifact(path, sessionKey)
     };
   }, [clients?.memmyAgent, state.agent.currentSessionKey]);
+  const loadPreviewDirectory = useCallback((sessionKey: string, relativePath: string) => {
+    const client = clients?.memmyAgent;
+    if (!client) return Promise.reject(new Error("agent_client_unavailable"));
+    return client.listWorkspaceFiles(sessionKey, relativePath);
+  }, [clients?.memmyAgent]);
+  const loadWorkspaceFilePreview = useCallback(async (relativePath: string): Promise<LiteratureReviewPreviewContent | null> => {
+    const client = clients?.memmyAgent;
+    if (!client || !previewSessionKey) return null;
+    const artifact = await client.resolveArtifact(relativePath, previewSessionKey);
+    const extension = artifact.name.includes(".") ? artifact.name.split(".").pop()?.toUpperCase() ?? "" : "";
+    if (artifact.media_url && WORKSPACE_TEXT_PREVIEW_PATTERN.test(artifact.name)) {
+      const response = await fetch(artifact.media_url);
+      if (response.ok) {
+        const text = (await response.text()).slice(0, WORKSPACE_TEXT_PREVIEW_MAX_CHARS);
+        return {
+          title: artifact.name,
+          sections: [{ heading: extension || t("common.preview"), body: text || artifact.path }]
+        };
+      }
+    }
+    return {
+      title: artifact.name,
+      sections: [{ heading: extension || t("common.preview"), body: artifact.path }]
+    };
+  }, [clients?.memmyAgent, previewSessionKey, t]);
   const isCurrentAgentRunning = Boolean(
     state.agent.currentChatId &&
     (
@@ -2318,6 +2411,7 @@ export function HomePage() {
    * @param value The latest input box content.
    */
   function updateComposerInput(value: string, selectionStart = value.length, selectionEnd = selectionStart) {
+    composerAttachMenuRef.current?.removeAttribute("open");
     setCurrentComposerDraft(buildComposerCommandDraft(selectedComposerCommand, value));
     setComposerSelection({ start: selectionStart, end: selectionEnd });
     setSlashPickerOpen(false);
@@ -2389,6 +2483,7 @@ export function HomePage() {
   }
 
   function insertComposerSlashTrigger() {
+    composerAttachMenuRef.current?.removeAttribute("open");
     setProjectPickerOpen(false);
     setSlashMenuDismissed(false);
     setSlashPickerOpen((open) => !open);
@@ -2716,7 +2811,7 @@ export function HomePage() {
    *
    * @param event The textarea keyboard event.
    */
-  function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+  function handleComposerKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>) {
     if (isComposingKeyboardEvent(event) && (event.key === "Enter" || event.key === "Tab")) {
       return;
     }
@@ -2952,7 +3047,7 @@ export function HomePage() {
   function renderComposerLeadingActions() {
     return (
       <>
-        <details className="agent-composer-attach-menu">
+        <details ref={composerAttachMenuRef} className="agent-composer-attach-menu">
           <summary
             aria-label={t("home.quick.attach")}
             title={t("home.quick.attachHint")}
@@ -2988,7 +3083,7 @@ export function HomePage() {
             </button>
           </div>
         </details>
-        <div className="composer-quick-actions__anchor">
+        <div ref={composerCapabilityMenuRef} className="composer-quick-actions__anchor">
           <button
             type="button"
             aria-label={t("home.quick.capability")}
@@ -3035,33 +3130,73 @@ export function HomePage() {
     />
   ) : null;
 
+  const previewToggle = hasActiveConversation ? (
+    <button
+      type="button"
+      className={`agent-preview-toggle${previewPanelOpen ? " agent-preview-toggle--active" : ""}`}
+      aria-label={t("common.preview")}
+      aria-pressed={previewPanelOpen}
+      title={t("common.preview")}
+      onClick={() => setPreviewPanelOpen((open) => !open)}
+    >
+      <PanelRight size={15} aria-hidden="true" />
+    </button>
+  ) : null;
+
+  const previewPanel = previewPanelOpen && hasActiveConversation ? (
+    <LiteratureReviewPreviewPane
+      key={previewSessionKey ?? chatScopeKey}
+      sessionKey={previewSessionKey ?? ""}
+      rootLabel={previewRootLabel}
+      loadDirectory={loadPreviewDirectory}
+      loadPreview={loadWorkspaceFilePreview}
+      onAddToChat={addComposerContextChip}
+      refreshKey={`${currentHistoryVersion}:${isCurrentAgentRunning ? "running" : "idle"}`}
+      onWidthChange={setPreviewPanelWidth}
+      toolbarEnd={previewToggle}
+      emptyLabel={t("literatureReview.workspace.noFiles")}
+      emptyDetail={previewRootLabel}
+    />
+  ) : null;
+
   return (
     <AppFrame
       title={t("home.title")}
       topBar={hasActiveConversation || environmentScope ? (
-        <div className="agent-conversation-topbar">
+        <div
+          className={`agent-conversation-topbar${previewPanelOpen ? " agent-conversation-topbar--preview-open" : ""}`}
+          style={{ "--agent-preview-panel-width": `${previewPanelWidth}px` } as CSSProperties}
+        >
           <h1 className="agent-conversation-title" title={hasActiveConversation ? activeConversationTitle : selectedDraftProject?.name}>
             <span className="agent-conversation-title__text">
               {hasActiveConversation ? activeConversationTitleDisplay : selectedDraftProject?.name}
             </span>
             {hasActiveConversation && activeImTitleDisplay ? <ImChannelTitleIcon slug={activeImTitleDisplay.slug} name={activeImTitleDisplay.channelName} /> : null}
           </h1>
-          <button
-            type="button"
-            className={`agent-environment-toggle${environmentPanelOpen ? " agent-environment-toggle--active" : ""}`}
-            data-agent-environment-toggle
-            aria-label={t("home.environment.title")}
-            aria-pressed={environmentPanelOpen}
-            title={t("home.environment.title")}
-            onClick={() => setEnvironmentPanelOpen((open) => !open)}
-          >
-            <SlidersHorizontal size={16} aria-hidden="true" />
-          </button>
+          <div className="agent-conversation-topbar__actions">
+            {environmentScope ? (
+              <button
+                type="button"
+                className={`agent-environment-toggle${environmentPanelOpen ? " agent-environment-toggle--active" : ""}${previewPanelOpen ? " agent-environment-toggle--with-preview" : ""}`}
+                data-agent-environment-toggle
+                aria-label={t("home.environment.title")}
+                aria-pressed={environmentPanelOpen}
+                title={t("home.environment.title")}
+                onClick={() => setEnvironmentPanelOpen((open) => !open)}
+              >
+                <SlidersHorizontal size={15} aria-hidden="true" />
+              </button>
+            ) : null}
+            {!previewPanelOpen ? previewToggle : null}
+          </div>
         </div>
       ) : null}
-      topBarBorder={Boolean(hasActiveConversation || environmentScope)}
+      topBarBorder={Boolean(hasActiveConversation || environmentScope) && !previewPanelOpen}
     >
-      <div className={`agent-workspace-layout${environmentPanelOpen ? " agent-workspace-layout--environment-open" : ""}`}>
+      <div
+        className={`agent-workspace-layout${environmentPanelOpen ? " agent-workspace-layout--environment-open" : ""}${previewPanelOpen ? " agent-workspace-layout--preview-open" : ""}`}
+        style={{ "--agent-preview-panel-width": `${previewPanelWidth}px` } as CSSProperties}
+      >
         {!hasActiveConversation ? (
           <section className="app-frame-page-content home-empty-screen">
             {/* Mid row stays vertically centered like the original empty home. */}
@@ -3370,7 +3505,7 @@ export function HomePage() {
                       className={`${isComposerSingleLine ? "agent-composer-input--single " : ""}agent-composer-input--conversation block w-full pl-4 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40`}
                     />
                     {slashMenuOpen && !slashPickerOpen ? (
-                      <ComposerCaretMenu textareaRef={inputRef} containerRef={composerShellRef} value={composerInput}>
+                      <ComposerCaretMenu textareaRef={inputRef} containerRef={composerShellRef} value={composerInput} placement="above">
                         <AgentCommandPalette
                           commands={filteredSlashCommands}
                           heading={t("home.commandPalette.commands")}
@@ -3431,6 +3566,7 @@ export function HomePage() {
         </section>
         )}
         {environmentPanel}
+        {previewPanel}
       </div>
     </AppFrame>
   );
@@ -3709,7 +3845,7 @@ export function ProjectTargetPicker(props: {
     }
   };
 
-  const handlePickerKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+  const handlePickerKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
     if (event.key === "Enter" && isComposingKeyboardEvent(event)) return;
     if (event.key === "Tab") {
       props.onClose();

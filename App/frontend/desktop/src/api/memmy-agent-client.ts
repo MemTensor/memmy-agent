@@ -255,6 +255,24 @@ const WorkspaceEnvironmentDiffSchema = z.object({
   unavailable_reason: z.string().nullable()
 });
 
+const WorkspaceFileEntrySchema = z.object({
+  name: z.string(),
+  path: z.string(),
+  kind: z.union([z.literal("directory"), z.literal("file")]),
+  size: z.number().int().nonnegative().nullable(),
+  modifiedAt: z.string().nullable()
+});
+
+const WorkspaceFilesListingSchema = z.object({
+  root: z.object({
+    kind: z.union([z.literal("project"), z.literal("task")]),
+    label: z.string()
+  }),
+  path: z.string(),
+  entries: z.array(WorkspaceFileEntrySchema),
+  truncated: z.boolean()
+});
+
 const ProjectMutationResponseSchema = z.object({
   project: ProjectSchema,
   snapshot: SessionSnapshotSchema
@@ -432,6 +450,8 @@ export type WorkspaceEnvironmentFile = z.infer<typeof WorkspaceEnvironmentFileSc
 export type WorkspaceEnvironmentState = z.infer<typeof WorkspaceEnvironmentStateSchema>;
 export type WorkspaceEnvironmentDiff = z.infer<typeof WorkspaceEnvironmentDiffSchema>;
 export type WorkspaceEnvironmentScope = { kind: "session" | "project"; key: string };
+export type WorkspaceFileEntry = z.infer<typeof WorkspaceFileEntrySchema>;
+export type WorkspaceFilesListing = z.infer<typeof WorkspaceFilesListingSchema>;
 export type MemmyAgentProject = z.infer<typeof ProjectSchema>;
 export type MemmyAgentSessionSnapshot = z.infer<typeof SessionSnapshotSchema>;
 export type MemmyAgentSidebarState = z.infer<typeof SidebarStateSchema>;
@@ -643,6 +663,7 @@ export interface MemmyAgentClient {
   listSessions(): Promise<MemmyAgentSessionSummary[]>;
   readWorkspaceEnvironment(scope: WorkspaceEnvironmentScope): Promise<WorkspaceEnvironmentState>;
   readWorkspaceEnvironmentDiff(scope: WorkspaceEnvironmentScope, path: string): Promise<WorkspaceEnvironmentDiff>;
+  listWorkspaceFiles(sessionKey: string, path?: string): Promise<WorkspaceFilesListing>;
   switchWorkspaceEnvironmentBranch(
     scope: WorkspaceEnvironmentScope,
     branch: string,
@@ -996,6 +1017,14 @@ class HttpMemmyAgentClient implements MemmyAgentClient {
     return this.request(
       `/api/${collection}/${encodeURIComponent(scope.key)}/environment/diff?${query.toString()}`,
       WorkspaceEnvironmentDiffSchema
+    );
+  }
+
+  async listWorkspaceFiles(sessionKey: string, path = ""): Promise<WorkspaceFilesListing> {
+    const query = path ? `?${new URLSearchParams({ path }).toString()}` : "";
+    return this.request(
+      `/api/sessions/${encodeURIComponent(sessionKey)}/workspace/files${query}`,
+      WorkspaceFilesListingSchema
     );
   }
 

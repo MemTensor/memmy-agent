@@ -120,8 +120,10 @@ describe("shared file icon system", () => {
     expect(references).toContain('<FileTypeIcon name={chip.label} surface="card" />');
     expect(home).toContain("filePath={item.localPath}");
     expect(messages).toContain('surface="inline"');
-    expect(literature).toContain('<FileTypeIcon name={reference.label} filePath={reference.id} surface="card" />');
-    expect(literature).toContain('<FileTypeIcon name={item.reference.label} filePath={item.reference.id} surface="row" />');
+    expect(literature).toContain('<FileTypeIcon name={reference.id} surface="card" />');
+    expect(literature).toContain('<FileTypeIcon name={reference.label} filePath={reference.id} surface="row" />');
+    expect(literature).toContain('<FileTypeIcon name={path} surface="card" />');
+    expect(literature).toContain('<FileTypeIcon name={file.name} surface="inline" />');
     expect(attachments).toContain('surface={props.size === "md" ? "card" : "row"}');
   });
 });

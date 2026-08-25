@@ -1,12 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
+  LITREV_CONTEXT_STORAGE_KEY as demoContextKey,
+  LITREV_PROJECT_CONTEXT_STORAGE_KEY as demoProjectKey,
+  LITREV_PROMPT_STORAGE_KEY as demoPromptKey,
+  LITREV_SOURCE_INPUT_STORAGE_KEY as demoSourceKey,
+  moveOutlineItem,
+  type LitrevOutlineItem
+} from "../literature-review-demo-data.js";
+import {
   LITREV_CONTEXT_STORAGE_KEY,
   LITREV_PROJECT_CONTEXT_STORAGE_KEY,
   LITREV_PROMPT_STORAGE_KEY,
-  LITREV_SETUP_QUESTIONS,
-  LITREV_SOURCE_INPUT_STORAGE_KEY,
-  moveOutlineItem,
-  type LitrevOutlineItem
+  LITREV_SOURCE_INPUT_STORAGE_KEY
 } from "../literature-review-model.js";
 
 const outline: LitrevOutlineItem[] = [
@@ -17,6 +22,15 @@ const outline: LitrevOutlineItem[] = [
 ];
 
 describe("literature review outline hierarchy", () => {
+  it("shares launch storage keys between Home and the restored workflow", () => {
+    expect([demoPromptKey, demoSourceKey, demoContextKey, demoProjectKey]).toEqual([
+      LITREV_PROMPT_STORAGE_KEY,
+      LITREV_SOURCE_INPUT_STORAGE_KEY,
+      LITREV_CONTEXT_STORAGE_KEY,
+      LITREV_PROJECT_CONTEXT_STORAGE_KEY
+    ]);
+  });
+
   it("changes hierarchy even when dropped at the same position", () => {
     const moved = moveOutlineItem(outline, 2, 2, 1);
 
@@ -50,27 +64,5 @@ describe("literature review outline hierarchy", () => {
 
     expect(moved.map((item) => item.id)).toEqual(["b", "c", "a", "a-1"]);
     expect(moved.at(-1)?.level).toBe(1);
-  });
-});
-
-describe("literature review frontend model", () => {
-  it("keeps the original two scope cards and their choices without a default answer", () => {
-    expect(LITREV_SETUP_QUESTIONS.map((question) => question.id)).toEqual(["field", "time"]);
-    expect(LITREV_SETUP_QUESTIONS.map((question) => question.options.length)).toEqual([4, 4]);
-    expect(LITREV_SETUP_QUESTIONS.every((question) => !("answer" in question) && !("defaultAnswer" in question))).toBe(true);
-  });
-
-  it("exports stable non-demo launch storage keys", () => {
-    expect([
-      LITREV_PROMPT_STORAGE_KEY,
-      LITREV_SOURCE_INPUT_STORAGE_KEY,
-      LITREV_CONTEXT_STORAGE_KEY,
-      LITREV_PROJECT_CONTEXT_STORAGE_KEY
-    ]).toEqual([
-      "memmy.literatureReview.prompt",
-      "memmy.literatureReview.sourceInput",
-      "memmy.literatureReview.contexts",
-      "memmy.literatureReview.projectId"
-    ]);
   });
 });

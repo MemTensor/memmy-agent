@@ -355,6 +355,7 @@ describe("HomePage", () => {
 
   it("anchors typed slash menus at the caret and button-triggered menus at the button", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
+    const styles = readFileSync(stylesSourcePath, "utf8");
 
     expect(source).toContain("const slashMenuOpen = filteredSlashCommands.length > 0;");
     expect(source).toContain("function ComposerCaretMenu(props:");
@@ -367,6 +368,13 @@ describe("HomePage", () => {
     expect(source).toContain('className="composer-quick-actions__popover composer-quick-actions__popover--slash"');
     expect(source).toContain("aria-expanded={slashPickerOpen}");
     expect(source).toContain("onClick={insertComposerSlashTrigger}");
+    expect(source).toContain('ref={composerAttachMenuRef} className="agent-composer-attach-menu"');
+    expect(source).toContain('composerAttachMenuRef.current?.removeAttribute("open");');
+    expect(styles).toContain(".agent-composer-shell--expanded .composer-quick-actions__popover--slash");
+    expect(styles).toContain("bottom: calc(100% + 8px);");
+    expect(source).toContain('<ComposerCaretMenu textareaRef={inputRef} containerRef={composerShellRef} value={composerInput} placement="above">');
+    expect(source).toContain('bottom: Math.max(8, container.clientHeight - caretTopInContainer + 4)');
+    expect(styles).toContain("top: calc(100% + 6px);");
     expect(source).not.toContain('slashPickerOpen || /^\\s*\\//.test(input)');
     expect(source).not.toContain("referenceMenuOpen");
     expect(source).not.toContain("referencePickerOpen");
@@ -396,15 +404,32 @@ describe("HomePage", () => {
     expect(source).toContain("const activeImTitleDisplay = imChannelTitleDisplay(activeConversationTitle);");
     expect(source).toContain("formatConversationTitleForDisplay(activeImTitleDisplay?.title ?? activeConversationTitle)");
     expect(source).toContain("topBar={hasActiveConversation || environmentScope ? (");
-    expect(source).toContain('<div className="agent-conversation-topbar">');
+    expect(source).toContain('className={`agent-conversation-topbar${previewPanelOpen ? " agent-conversation-topbar--preview-open" : ""}`}');
     expect(source).toContain('title={hasActiveConversation ? activeConversationTitle : selectedDraftProject?.name}');
     expect(source).toContain("{hasActiveConversation ? activeConversationTitleDisplay : selectedDraftProject?.name}");
     expect(source).toContain('{hasActiveConversation && activeImTitleDisplay ? <ImChannelTitleIcon slug={activeImTitleDisplay.slug} name={activeImTitleDisplay.channelName} /> : null}');
-    expect(source).toContain("topBarBorder={Boolean(hasActiveConversation || environmentScope)}");
+    expect(source).toContain("topBarBorder={Boolean(hasActiveConversation || environmentScope) && !previewPanelOpen}");
     expect(source).not.toContain("agent-conversation-titlebar");
     expect(source).toContain("app-frame-page-content agent-conversation-scroll flex-1 overflow-y-auto");
     expect(source).toContain("onScroll={handleAgentConversationScroll}");
     expect(source).toContain('className="agent-conversation-composer"');
+    expect(source).toContain("{environmentScope ? (");
+    expect(source).toContain("const previewToggle = hasActiveConversation ? (");
+    expect(source).toContain("<PanelRight size={15}");
+    expect(source).toContain("<LiteratureReviewPreviewPane");
+    expect(source).toContain("toolbarEnd={previewToggle}");
+    expect(source).toContain("{!previewPanelOpen ? previewToggle : null}");
+    expect(source).toContain("agent-environment-toggle--with-preview");
+    const environmentButton = source.slice(
+      source.indexOf("data-agent-environment-toggle"),
+      source.indexOf("</button>", source.indexOf("data-agent-environment-toggle"))
+    );
+    const previewButton = source.slice(
+      source.indexOf("agent-preview-toggle"),
+      source.indexOf("</button>", source.indexOf("agent-preview-toggle"))
+    );
+    expect(environmentButton).not.toContain("setPreviewPanelOpen(false)");
+    expect(previewButton).not.toContain("setEnvironmentPanelOpen(false)");
   });
 
   it("anchors the history DAG popover to the composer width", () => {
@@ -722,7 +747,7 @@ describe("HomePage", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
     const styles = readFileSync(stylesSourcePath, "utf8");
 
-    expect(source).toContain('agent-workspace-layout${environmentPanelOpen ? " agent-workspace-layout--environment-open" : ""}');
+    expect(source).toContain('agent-workspace-layout${environmentPanelOpen ? " agent-workspace-layout--environment-open" : ""}${previewPanelOpen ? " agent-workspace-layout--preview-open" : ""}');
     expect(source).toContain('className="agent-conversation-content max-w-3xl mx-auto space-y-3"');
     expect(source).toContain('className="agent-conversation-content agent-conversation-content--composer max-w-3xl mx-auto"');
     const composerRule = styles.match(/\.agent-conversation-composer\s*\{[^}]*\}/)?.[0] ?? "";
@@ -732,6 +757,12 @@ describe("HomePage", () => {
     expect(styles).toContain(".agent-workspace-layout--environment-open .agent-conversation-content");
     expect(styles).toMatch(/--agent-conversation-shift:\s*\d+px;/);
     expect(styles).toContain("transform: translateX(calc(0px - var(--agent-conversation-shift)));");
+    expect(styles).toContain("@container agent-workspace (max-width: 960px)");
+    expect(styles).toContain(".agent-workspace-layout--preview-open > .litrev-preview-pane");
+    expect(styles).toContain("right: calc(var(--agent-preview-panel-width, 520px) + 20px);");
+    expect(styles).toContain(".agent-workspace-layout--preview-open > .agent-conversation-panel");
+    expect(styles).toContain(".app-frame-content-topbar:has(.agent-conversation-topbar--preview-open)");
+    expect(styles).toContain("right: calc(44px - var(--codex-content-padding-x));");
     expect(styles).toMatch(/\.agent-environment-panel\s*{[^}]*position:\s*absolute;/s);
   });
 
@@ -1149,12 +1180,27 @@ describe("HomePage", () => {
 
   it("offers file and folder choices from the composer plus button", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
+    const styles = readFileSync(stylesSourcePath, "utf8");
+    const baseSelector = ".agent-composer-attach-menu__popover {";
+    const baseStart = styles.indexOf(baseSelector);
+    const baseBlock = styles.slice(baseStart, styles.indexOf("}", baseStart));
+    const conversationSelector = ".agent-composer-shell--expanded .agent-composer-attach-menu__popover {";
+    const conversationStart = styles.indexOf(conversationSelector);
+    const conversationBlock = styles.slice(conversationStart, styles.indexOf("}", conversationStart));
 
     expect(source).toContain("openMediaFilePicker();");
     expect(source).toContain("openFolderPicker();");
     expect(source).toContain("agent-composer-attach-menu__popover");
+    expect(source).toContain('ref={composerCapabilityMenuRef} className="composer-quick-actions__anchor"');
+    expect(source).toContain("!composerCapabilityMenuRef.current?.contains(event.target as Node)");
     expect(source).not.toContain("aria-haspopup=\"menu\"");
     expect(source).toContain("role=\"menuitem\"");
+    expect(baseBlock).toContain("top: calc(100% + 8px);");
+    expect(baseBlock).toContain("right: auto;");
+    expect(baseBlock).toContain("bottom: auto;");
+    expect(baseBlock).toContain("left: 0;");
+    expect(conversationBlock).toContain("top: auto;");
+    expect(conversationBlock).toContain("bottom: calc(100% + 8px);");
   });
 
   it("renders composer media previews as compact thumbnail and file chips", () => {

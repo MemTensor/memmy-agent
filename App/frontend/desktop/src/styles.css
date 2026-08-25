@@ -375,8 +375,10 @@ body.memmy-window-fullscreen {
 
 .agent-composer-attach-menu__popover {
   position: absolute;
-  right: 0;
-  bottom: calc(100% + 8px);
+  top: calc(100% + 8px);
+  right: auto;
+  bottom: auto;
+  left: 0;
   display: grid;
   width: 132px;
   gap: 2px;
@@ -385,6 +387,11 @@ body.memmy-window-fullscreen {
   border-radius: 9px;
   background: var(--color-background-paper);
   box-shadow: var(--shadow-popover);
+}
+
+.agent-composer-shell--expanded .agent-composer-attach-menu__popover {
+  top: auto;
+  bottom: calc(100% + 8px);
 }
 
 .agent-composer-attach-menu__popover button {
@@ -406,6 +413,13 @@ body.memmy-window-fullscreen {
 .composer-caret-menu {
   position: absolute;
   z-index: 70;
+}
+
+/* The empty-home composer has room below its toolbar. The conversation
+   composer is docked to the viewport bottom, so its menus must open upward. */
+.agent-composer-shell--expanded .composer-quick-actions__popover--slash {
+  top: auto;
+  bottom: calc(100% + 8px);
 }
 
 .home-empty-composer textarea,
@@ -1940,11 +1954,33 @@ body:has(.memory-drawer) .window-drag-region {
 }
 
 .agent-conversation-topbar {
+  position: relative;
   display: flex;
   width: 100%;
   min-width: 0;
   align-items: center;
   gap: 10px;
+}
+
+.agent-conversation-topbar__actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  margin-right: calc(8px - var(--codex-content-padding-x));
+}
+
+.agent-conversation-topbar--preview-open .agent-conversation-topbar__actions {
+  position: absolute;
+  top: 50%;
+  right: calc(var(--agent-preview-panel-width, 520px) + 8px - var(--codex-content-padding-x));
+  margin: 0;
+  transform: translateY(-50%);
+}
+
+.agent-conversation-topbar--preview-open .agent-conversation-title {
+  max-width: 42%;
 }
 
 .agent-environment-toggle,
@@ -1976,6 +2012,52 @@ body:has(.memory-drawer) .window-drag-region {
   outline-offset: 2px;
 }
 
+.agent-preview-toggle {
+  display: inline-flex;
+  width: var(--codex-toolbar-button-size);
+  height: var(--codex-toolbar-button-size);
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--radius-btn);
+  background: transparent;
+  color: color-mix(in srgb, var(--color-text-ink) 50%, transparent);
+  cursor: pointer;
+}
+
+.agent-preview-toggle:hover {
+  background: color-mix(in srgb, var(--color-canvas-oat) 65%, transparent);
+  color: var(--color-text-ink);
+}
+
+.agent-preview-toggle--active {
+  background: transparent;
+  color: var(--color-action-sky-hover);
+}
+
+.agent-preview-toggle--active:hover {
+  background: color-mix(in srgb, var(--color-canvas-oat) 65%, transparent);
+}
+
+.agent-preview-toggle:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-action-sky) 48%, transparent);
+  outline-offset: 2px;
+}
+
+.agent-environment-toggle {
+  width: var(--codex-toolbar-button-size);
+  height: var(--codex-toolbar-button-size);
+  border: 0;
+  border-radius: var(--radius-btn);
+}
+
+.agent-environment-toggle:hover,
+.agent-environment-toggle--active {
+  border-color: transparent;
+  background: color-mix(in srgb, var(--color-canvas-oat) 65%, transparent);
+}
+
 .agent-workspace-layout {
   --agent-environment-panel-width: 300px;
   --agent-environment-panel-gutter: 24px;
@@ -1991,9 +2073,57 @@ body:has(.memory-drawer) .window-drag-region {
   container-type: inline-size;
 }
 
+/* In Home, the preview's native file-tab toolbar occupies the same top row as
+   the conversation title and the environment/preview actions. */
+.app-frame-content-topbar:has(.agent-preview-toggle),
+.app-frame-content-topbar:has(.agent-conversation-topbar--preview-open) {
+  z-index: 90;
+}
+
+.agent-workspace-layout--preview-open > .litrev-preview-pane {
+  z-index: 20;
+}
+
+.agent-workspace-layout--preview-open > .litrev-preview-pane .litrev-preview-toolbar {
+  padding-right: 44px;
+}
+
+@container agent-workspace (max-width: 960px) {
+  .agent-workspace-layout--preview-open > .sidebar-resize-handle {
+    display: none;
+  }
+
+  .agent-workspace-layout--preview-open > .litrev-preview-pane {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 80;
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    height: 100%;
+    flex-basis: auto !important;
+  }
+
+  .agent-conversation-topbar--preview-open .agent-conversation-title {
+    visibility: hidden;
+  }
+
+  .agent-conversation-topbar--preview-open .agent-conversation-topbar__actions {
+    right: calc(44px - var(--codex-content-padding-x));
+  }
+}
+
 .agent-workspace-layout > .agent-conversation-panel {
   min-width: 0;
   flex: 1 1 auto;
+}
+
+.agent-workspace-layout--preview-open > .agent-conversation-panel {
+  box-sizing: border-box;
+  padding-top: var(--codex-toolbar-height);
 }
 
 .agent-workspace-layout > .home-empty-screen {
@@ -2014,6 +2144,10 @@ body:has(.memory-drawer) .window-drag-region {
   .agent-workspace-layout--environment-open .agent-scroll-to-bottom-fab {
     right: calc(50% + var(--agent-conversation-shift));
   }
+
+  .agent-workspace-layout--preview-open.agent-workspace-layout--environment-open .agent-conversation-content {
+    transform: none;
+  }
 }
 
 .agent-environment-panel {
@@ -2033,6 +2167,18 @@ body:has(.memory-drawer) .window-drag-region {
   box-shadow: 0 18px 48px color-mix(in srgb, var(--color-text-ink) 16%, transparent);
   color: var(--color-text-ink);
   font-family: var(--font-sans);
+}
+
+.agent-workspace-layout--preview-open .agent-environment-panel {
+  top: calc(var(--codex-toolbar-height) + 8px);
+  right: calc(var(--agent-preview-panel-width, 520px) + 20px);
+  max-height: calc(100% - var(--codex-toolbar-height) - 20px);
+}
+
+@container agent-workspace (max-width: 960px) {
+  .agent-workspace-layout--preview-open .agent-environment-panel {
+    right: 12px;
+  }
 }
 
 .agent-environment-panel__header {
@@ -13803,6 +13949,7 @@ input[type="checkbox"].check-sky:checked::after {
 }
 
 .litrev-preview-toolbar {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 4px;
@@ -13814,6 +13961,16 @@ input[type="checkbox"].check-sky:checked::after {
   border-bottom: 1px solid color-mix(in srgb, var(--color-border-stone) 40%, transparent);
   background: var(--color-background-paper);
   -webkit-app-region: no-drag;
+}
+
+.litrev-preview-toolbar__actions {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  transform: translateY(-50%);
 }
 
 .litrev-file-tabs {
@@ -13972,8 +14129,12 @@ input[type="checkbox"].check-sky:checked::after {
 }
 
 .litrev-file-folder__toggle strong {
+  min-width: 0;
+  overflow: hidden;
   font-size: 12px;
   font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .litrev-file-folder__children {
@@ -14007,6 +14168,8 @@ input[type="checkbox"].check-sky:checked::after {
 }
 
 .litrev-file-item span {
+  min-width: 0;
+  flex: 1 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
