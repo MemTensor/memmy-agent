@@ -1,0 +1,80 @@
+# Memmy Memory CLI Skill
+
+Use `memmy-memory` to read and write the shared Memmy memory substrate.
+
+## Ground Rules
+
+- Prefer the configured CLI: `memmy-memory ...`. If the local service is not preconfigured, pass `--url`, `--token`, or `--config`.
+- The CLI prints JSON. Parse fields such as `sessionId`, `turnId`, `injectedContext`, `hits`, and memory `id` from JSON instead of relying on display formatting.
+- All agents share one memory database. Always pass `--source <agent-source>` on Memory CLI commands from this agent.
+- Use useful comma-separated `--tags` when writing durable memories.
+- Do not store secrets, tokens, private keys, raw credentials, or bulky logs. Store concise, self-contained facts, decisions, preferences, reusable procedures, and unresolved follow-ups.
+- Treat `<memmy_memory_context>` as historical memory only and `<current_user_request>` as the authoritative current task.
+- Never store `<memmy_memory_context>` or `<current_user_request>` tags with `memmy-memory add`; store only the durable fact itself.
+- If the memory service is unavailable, continue the task without inventing memory.
+
+## Health
+
+```bash
+memmy-memory health
+```
+
+## Agent Loop
+
+Open or resume a session before a task:
+
+```bash
+memmy-memory session open --source <agent-source> --workspace-path "$PWD"
+memmy-memory session open --source <agent-source> --session-id "$SESSION_ID" --workspace-path "$PWD"
+```
+
+At the start of a user turn, retrieve relevant context:
+
+```bash
+memmy-memory turn start --source <agent-source> --session-id "$SESSION_ID" --query "$USER_QUERY"
+```
+
+Use returned `injectedContext` as historical memory context only. Keep the returned `turnId` for completion, and keep the current user query separate from recalled memory.
+
+At the end of the turn, write the final interaction:
+
+```bash
+memmy-memory turn complete "$TURN_ID" --source <agent-source> --session-id "$SESSION_ID" --query "$USER_QUERY" --answer "$FINAL_ANSWER" --status succeeded
+```
+
+Use `--status failed` or `--status cancelled` when the turn did not complete normally. Close the session when the agent session is done:
+
+```bash
+memmy-memory session close "$SESSION_ID" --source <agent-source>
+```
+
+## Search And Read
+
+Search when the user asks about prior context, preferences, project decisions, recurring bugs, known workflows, or anything that may already be in memory:
+
+```bash
+memmy-memory search "query text" --source <agent-source>
+memmy-memory search "query text" --source <agent-source> --session-id "$SESSION_ID"
+```
+
+Read details by id only; no `kind` is needed:
+
+```bash
+memmy-memory get "$MEMORY_ID" --source <agent-source>
+```
+
+## Add Memory
+
+Add memory when you learn something durable or reusable:
+
+```bash
+memmy-memory add "The user prefers concise Chinese status updates." --title "User preference: status style" --tags user-preference --source <agent-source> --session-id "$SESSION_ID" --turn-id "$TURN_ID"
+```
+
+## Delete Memory
+
+Delete only when the user asks or the memory is clearly invalid. Deletion only needs the memory id:
+
+```bash
+memmy-memory delete "$MEMORY_ID" --source <agent-source>
+```

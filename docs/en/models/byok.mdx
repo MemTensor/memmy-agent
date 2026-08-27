@@ -1,0 +1,27 @@
+---
+title: API Key Mode (BYOK)
+icon: Key
+---
+
+Use your own model quota. Setup takes three steps, each with a real connection test.
+
+1. Choose a provider (OpenAI, Anthropic, Gemini, DeepSeek, Zhipu, Tongyi Qianwen, Kimi, MiniMax, Baidu Qianfan, Doubao), then fill in the model ID, endpoint, and API Key; Embedding can run in local mode or custom mode.
+
+2. The memory summary model (summarizes conversations and experience) and the skill evolution model (distills experience into skills) can both simply reuse the primary model.
+
+3. ASR (voice input, currently fixed to Qwen ASR) and the image generation model are skippable — they never block normal chat or memory features.
+
+## Provider Defaults
+
+| Provider | Default Endpoint | Default Model Placeholder |
+| --- | --- | --- |
+| OpenAI | `https://api.openai.com/v1` | `gpt-4o` |
+| Anthropic | `https://api.anthropic.com` | `claude-sonnet-4` |
+| Gemini | `https://generativelanguage.googleapis.com` | `gemini-2.5-pro` |
+| DeepSeek | `https://api.deepseek.com/v1` | `deepseek-chat` |
+| Zhipu | `https://open.bigmodel.cn/api/paas/v4` | `glm-4` |
+| Tongyi Qianwen | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-max` |
+| Kimi | `https://api.moonshot.ai/v1` | `moonshot-v1-128k` |
+| MiniMax | `https://api.minimax.chat/v1` | `MiniMax-Text-01` |
+| Baidu Qianfan | `https://qianfan.baidubce.com/v2` | `ernie-4.0-8k` |
+| Doubao | `https://ark.cn-beijing.volces.com/api/v3` | `doubao-pro-256k` |

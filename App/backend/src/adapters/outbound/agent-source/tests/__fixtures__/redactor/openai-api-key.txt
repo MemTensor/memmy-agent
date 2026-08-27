@@ -1,0 +1,9 @@
+# token=[REDACTED:openai_api_key]
+--- positive
+OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ABCD
+===
+openai: sk-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789
+--- negative
+sk-short
+===
+openai key is configured in the environment

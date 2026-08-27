@@ -1,0 +1,27 @@
+---
+title: API Key 模式（BYOK）
+icon: Key
+---
+
+使用自己的模型额度，分三步配置，每步都有真实连接测试。
+
+1. 选择 Provider（OpenAI、Anthropic、Gemini、DeepSeek、智谱、通义千问、Kimi、MiniMax、百度千帆、豆包），填模型 ID、Endpoint、API Key；Embedding 可选本地模式或自定义模式。
+
+2. 记忆摘要模型（总结对话和经验）与技能进化模型（把经验沉淀为技能），均可直接复用主模型。
+
+3. ASR（语音输入，当前固定 Qwen ASR）与图像生成模型，可跳过，不阻塞普通对话与记忆功能。
+
+## Provider 默认值
+
+| Provider | 默认 Endpoint | 默认模型占位 |
+| --- | --- | --- |
+| OpenAI | `https://api.openai.com/v1` | `gpt-4o` |
+| Anthropic | `https://api.anthropic.com` | `claude-sonnet-4` |
+| Gemini | `https://generativelanguage.googleapis.com` | `gemini-2.5-pro` |
+| DeepSeek | `https://api.deepseek.com/v1` | `deepseek-chat` |
+| 智谱 | `https://open.bigmodel.cn/api/paas/v4` | `glm-4` |
+| 通义千问 | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-max` |
+| Kimi | `https://api.moonshot.ai/v1` | `moonshot-v1-128k` |
+| MiniMax | `https://api.minimax.chat/v1` | `MiniMax-Text-01` |
+| 百度千帆 | `https://qianfan.baidubce.com/v2` | `ernie-4.0-8k` |
+| 豆包 | `https://ark.cn-beijing.volces.com/api/v3` | `doubao-pro-256k` |

@@ -1,0 +1,19 @@
+---
+title: 安全与隐私
+icon: Lock
+---
+
+Memmy 的安全边界以**本地运行**和**显式认证**为基础：
+
+- 桌面本地 API 默认只允许本机、`file://` 或受控来源访问，使用 `x-memmy-local-token` 校验。
+- SSE 因 EventSource 限制使用查询参数传递同一运行时 token。
+- Composio MCP bridge 使用独立的 `x-memmy-mcp-token`。
+- Memory HTTP 可通过 bearer token 保护（`MEMMY_MEMORY_TOKEN` / `MEMORY_SERVICE_TOKEN`）。
+- 配置支持 `${ENV_NAME}` 环境变量引用，避免把 API Key 写进配置文件。
+- Memory client 必须连接真实 Memory Layer 或发现本地 SQLite 来源，否则启动失败，不静默展示假数据。
+
+## 数据存在哪里
+
+默认全部在 `~/.memmy` 下：配置、workspace、Memory SQLite 数据库和运行时文件。桌面 app state 由本地后端维护在本机 SQLite 中。
+
+扫描和入库都在本地完成，记忆写入本地 SQLite。是否参与「记忆改进计划」由隐私设置中的开关显式控制。

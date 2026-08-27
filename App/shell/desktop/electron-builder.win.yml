@@ -1,0 +1,65 @@
+appId: cn.memtensor.memmy
+productName: Memmy
+artifactName: Memmy-${version}-${arch}.${ext}
+
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - dist/**/*
+  - package.json
+  - "!**/node_modules/*/{test,tests,__tests__,doc,docs,example,examples,coverage,.github}"
+  - "!**/node_modules/*/{test,tests,__tests__,doc,docs,example,examples,coverage,.github}/**/*"
+  - "!**/node_modules/@*/*/{test,tests,__tests__,doc,docs,example,examples,coverage,.github}"
+  - "!**/node_modules/@*/*/{test,tests,__tests__,doc,docs,example,examples,coverage,.github}/**/*"
+  - "!**/node_modules/**/*.{test,spec}.*"
+  - "!**/.env"
+  - "!**/.env.*"
+  - "!**/node_modules/**/{README,README*.md,README*.mdown,README*.markdown,README*.rst,README*.txt,CHANGELOG,CHANGELOG*.md,CHANGELOG*.mdown,CHANGELOG*.markdown,CHANGELOG*.rst,CHANGELOG*.txt,CONTRIBUTING,CONTRIBUTING*.md,CONTRIBUTING*.mdown,CONTRIBUTING*.markdown,CONTRIBUTING*.rst,CONTRIBUTING*.txt,CODE_OF_CONDUCT,CODE_OF_CONDUCT*.md,CODE_OF_CONDUCT*.mdown,CODE_OF_CONDUCT*.markdown,CODE_OF_CONDUCT*.rst,CODE_OF_CONDUCT*.txt,SECURITY,SECURITY*.md,SECURITY*.mdown,SECURITY*.markdown,SECURITY*.rst,SECURITY*.txt}"
+
+asar: true
+asarUnpack:
+  - "**/*.node"
+  - "**/onnxruntime-node/bin/napi-v3/win32/x64/**/*.dll"
+  - "**/@img/sharp-win32-x64/lib/libvips*.dll"
+  - "**/@lydell/node-pty-win32-x64/prebuilds/win32-x64/conpty/**"
+  - "**/node_modules/sqlite-vec-*/vec0.*"
+  - "dist/runtime/memmy-agent/node_modules/@memmy/migrations/**"
+  - "dist/renderer/**"
+
+extraResources:
+  - from: dist/runtime/bin
+    to: cli
+    filter:
+      - "**/*"
+  - from: dist/embedding-models
+    to: embedding-models
+    filter:
+      - "**/*"
+  - from: build/icon.ico
+    to: icon.ico
+
+win:
+  icon: build/icon.ico
+  target:
+    - target: nsis
+      arch:
+        - x64
+  requestedExecutionLevel: asInvoker
+  signAndEditExecutable: true
+  signExecutable: true
+  forceCodeSigning: true
+  signtoolOptions:
+    signingHashAlgorithms:
+      - sha256
+
+nsis:
+  include: build/installer-win-unsigned.nsh
+  oneClick: false
+  perMachine: false
+  allowElevation: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: false
+  createStartMenuShortcut: true
+  shortcutName: Memmy

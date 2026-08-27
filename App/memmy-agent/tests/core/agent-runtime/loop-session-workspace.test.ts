@@ -1,0 +1,215 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { Config } from "../../../src/config/schema.js";
+import {
+  AgentLoop,
+  SessionWorkspaceError,
+} from "../../../src/core/agent-runtime/loop.js";
+import { AgentRunResult } from "../../../src/core/agent-runtime/runner.js";
+import { InboundMessage } from "../../../src/core/runtime-messages/events.js";
+import {
+  readWebuiSessionBinding,
+  Session,
+} from "../../../src/core/session/manager.js";
+import { ProjectStore } from "../../../src/entrypoints/frontend-bridge/projects.js";
+
+const roots: string[] = [];
+
+function tempRoot(prefix: string): string {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  roots.push(root);
+  return root;
+}
+
+function makeLoop(profileWorkspace: string, projectStore: ProjectStore | null = null): AgentLoop {
+  return new AgentLoop({
+    config: new Config({ memmyMemory: { enabled: false } }),
+    workspace: profileWorkspace,
+    projectStore,
+    provider: {
+      generation: { maxTokens: 256 },
+      getDefaultModel: () => "test-model",
+    },
+  });
+}
+
+afterEach(() => {
+  for (const root of roots.splice(0)) {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+describe("AgentLoop Session workspace", () => {
+  it("keeps non-WebUI channels on the profile workspace", () => {
+    const profile = tempRoot("memmy-profile-");
+    const loop = makeLoop(profile);
+    const message = new InboundMessage({
+      channel: "cli",
+      chatId: "cli",
+      senderId: "user",
+      content: "hello",
+    });
+
+    expect(loop.resolveSessionWorkspace(message, null)).toEqual({
+      projectId: null,
+      cwd: loop.workspace,
+    });
+  });
+
+  it("requires an explicit binding reservation for a new WebUI Session", () => {
+    const profile = tempRoot("memmy-profile-");
+    const loop = makeLoop(profile);
+    const message = new InboundMessage({
+      channel: "websocket",
+      chatId: "chat",
+      senderId: "user",
+      content: "hello",
+      metadata: { webui: true },
+    });
+
+    expect(() => loop.resolveSessionWorkspace(message, null)).toThrowError(
+      expect.objectContaining({ code: "workspace_missing" }),
+    );
+
+    const binding = { projectId: null, cwd: fs.realpathSync(profile) };
+    expect(loop.resolveSessionWorkspace(message, null, binding)).toEqual(binding);
+  });
+
+  it("configures its SessionManager to recover late legacy WebUI Sessions", () => {
+    const profile = tempRoot("memmy-profile-");
+    const loop = makeLoop(profile);
+    const legacy = loop.sessions.getOrCreate("websocket:legacy");
+    legacy.metadata.webui = true;
+    loop.sessions.save(legacy);
+    loop.sessions.invalidate(legacy.key);
+
+    const reloaded = loop.sessions.get(legacy.key);
+
+    expect(readWebuiSessionBinding(reloaded)).toEqual({
+      projectId: null,
+      cwd: fs.realpathSync(profile),
+    });
+    expect(loop.sessions.listSessions()).toEqual([
+      expect.objectContaining({
+        key: legacy.key,
+        projectId: null,
+        cwd: fs.realpathSync(profile),
+      }),
+    ]);
+  });
+
+  it("uses the immutable Session binding after project rename and pin changes", () => {
+    const profile = tempRoot("memmy-profile-");
+    const projectRoot = tempRoot("memmy-project-");
+    const store = new ProjectStore({ filePath: path.join(profile, "projects.json") });
+    const project = store.add(projectRoot, "existing");
+    const loop = makeLoop(profile, store);
+    const session = new Session({
+      key: "websocket:chat",
+      metadata: {
+        webui: true,
+        webuiProjectId: project.id,
+        webuiWorkspaceCwd: fs.realpathSync(projectRoot),
+      },
+    });
+    const message = new InboundMessage({
+      channel: "websocket",
+      chatId: "chat",
+      senderId: "user",
+      content: "hello",
+      metadata: { webui: true },
+    });
+
+    store.rename(project.id, "Renamed");
+    store.setPinned(project.id, true);
+
+    expect(loop.resolveSessionWorkspace(message, session)).toEqual({
+      projectId: project.id,
+      cwd: fs.realpathSync(projectRoot),
+    });
+  });
+
+  it("fails instead of falling back when the bound directory disappears", () => {
+    const profile = tempRoot("memmy-profile-");
+    const sessionRoot = tempRoot("memmy-session-root-");
+    const loop = makeLoop(profile);
+    const session = new Session({
+      key: "websocket:chat",
+      metadata: {
+        webui: true,
+        webuiProjectId: null,
+        webuiWorkspaceCwd: fs.realpathSync(sessionRoot),
+      },
+    });
+    fs.rmdirSync(sessionRoot);
+
+    expect(() => loop.resolveSessionWorkspace(
+      new InboundMessage({
+        channel: "websocket",
+        chatId: "chat",
+        senderId: "user",
+        content: "hello",
+        metadata: { webui: true },
+      }),
+      session,
+    )).toThrowError(SessionWorkspaceError);
+  });
+
+  it("renders only the task workspace in the model identity", () => {
+    const profile = tempRoot("memmy-profile-");
+    const projectRoot = tempRoot("memmy-project-");
+    const loop = makeLoop(profile);
+    const identity = loop.context.getIdentity("websocket", fs.realpathSync(projectRoot));
+
+    expect(identity).toContain(`Your workspace is at: ${fs.realpathSync(projectRoot)}`);
+    expect(identity).not.toContain(`Your workspace is at: ${fs.realpathSync(profile)}`);
+    expect(identity).not.toContain("Memmy profile workspace:");
+  });
+
+  it("passes the immutable project binding through ordinary and system root execution paths", async () => {
+    const profile = tempRoot("memmy-profile-");
+    const projectRoot = tempRoot("memmy-project-");
+    const projectCwd = fs.realpathSync(projectRoot);
+    const store = new ProjectStore({ filePath: path.join(profile, "projects.json") });
+    const project = store.add(projectRoot, "existing");
+    const loop = makeLoop(profile, store);
+    const captured: Array<{ hostProjectId: string | null; workspace: string | null }> = [];
+    loop.runner.run = vi.fn(async (spec: any) => {
+      captured.push({
+        hostProjectId: spec.hostProjectId ?? null,
+        workspace: spec.workspace ?? null,
+      });
+      return new AgentRunResult({
+        finalContent: "done",
+        messages: [
+          ...spec.initialMessages,
+          { role: "assistant", content: "done" },
+        ],
+        stopReason: "completed",
+      });
+    });
+    const binding = { projectId: project.id, cwd: projectCwd };
+
+    await loop.processMessage(new InboundMessage({
+      channel: "websocket",
+      chatId: "ordinary-root",
+      senderId: "user",
+      content: "ordinary",
+      metadata: { webui: true },
+    }), undefined, { sessionBindingOverride: binding });
+    await loop.processSystemMessage(new InboundMessage({
+      channel: "websocket",
+      chatId: "websocket:system-root",
+      senderId: "system",
+      content: "system",
+      metadata: { webui: true },
+    }), "websocket:system-root", { sessionBindingOverride: binding });
+
+    expect(captured).toEqual([
+      { hostProjectId: project.id, workspace: projectCwd },
+      { hostProjectId: project.id, workspace: projectCwd },
+    ]);
+  });
+});

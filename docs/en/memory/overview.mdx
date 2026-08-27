@@ -1,0 +1,312 @@
+---
+title: How Memory Works
+icon: Workflow
+---
+
+Memmy memory is hosted by the local Memory service. The default endpoint is `http://127.0.0.1:18960`, and data is stored in `~/.memmy/memory-service/memory.sqlite`. Hooks, plugins, the `memmy-memory` CLI, and the desktop app all read and write this service, so different Agents share the same memory store.
+
+## The Complete Path of One Request
+
+The path has seven stages:
+
+1. Before a request reaches the Agent, a Hook or plugin opens or reuses a Memmy session and calls `turn.start`.
+2. On the first turn of a new episode, the Memory service classifies intent and decides whether to recall memory and which layers are allowed.
+3. The request is converted into a semantic query, keywords, short-pattern terms, and structural error fragments.
+4. Recall channels run in parallel, then candidates are fused using memory layer, channel rank, quality, and time decay.
+5. Candidates pass a relative threshold, deduplication, MMR diversity selection, and an optional LLM filter.
+6. Hits are rendered as historical context and injected into the Agent. The current user request always remains authoritative.
+7. At the end of the turn, `turn.complete` stores the raw turn and L1 traces. Background jobs then summarize, reflect, score, embed, and evolve higher-level memory.
+
+## Four Memory Layers
+
+| Memory layer | What it stores | How it is produced |
+| --- | --- | --- |
+| L1 Trace | User request, Agent response, tool calls, results, reflections, error signatures, and source | `turn.complete`, history scanning, or explicit `memory.add` |
+| L2 Policy | Triggers, procedures, boundaries, verification, and failure-avoidance guidance induced from similar valuable L1 traces | L2 induction after reward |
+| L3 World Model | Stable knowledge about a project, environment, and constraints rather than a procedure | Abstraction from clusters of L2 policies |
+| Skill | A callable SOP with a name, invocation guide, steps, and verification conditions | Crystallized and verified from eligible L2 Policies |
+
+## Capture, Indexing, and Evolution
+
+### Automatic turn capture
+
+`turn.complete` first stores a Raw Turn and then writes one L1 item for each captured step. By default it retains:
+
+- up to 4,000 characters of user or Agent text;
+- up to 2,000 characters from each tool output;
+- up to 8 derived tags;
+- tool name, input, result, error signatures, turn status, and source Agent;
+- a heuristic summary that can later be rewritten asynchronously by the summary model;
+- quality signals such as `value`, `alpha`, and `priority`.
+
+Reflection synthesis and embedding after capture are enabled by default. L1 uses the summary text to create `vec_summary`; L2, L3, and Skill use `vec`. An embedding failure enters a retry queue and does not block the active Agent turn.
+
+### Explicit writes and history imports
+
+`memory.add` writes L1 by default, although callers can select another layer. A normal manual write enters the text index immediately and receives an embedding asynchronously.
+
+An L1 imported by an Agent history scan enters the `summary_queued` pipeline first. It becomes recallable only after summary and vector indexing complete, preventing partially processed history from being injected.
+
+### Episodes, feedback, and higher-level memory
+
+- Consecutive follow-ups are merged into one episode by default, with a maximum gap of 2 hours.
+- When an episode closes because of a topic boundary, session close, or 2 hours of inactivity, Memmy generates and scores reflections first.
+- It waits through a default 30-second feedback window, then computes task reward and propagates it back through the episode's L1 traces.
+- Eligible L1 traces enter a candidate pool and are induced into L2. A new L2 triggers L3 abstraction and Skill crystallization.
+- Explicit user feedback, repeated tool failures, and divergent success/failure distributions can also adjust value and create failure-avoidance experience or decision repair.
+
+Key evolution defaults:
+
+| Setting | Default | Effect |
+| --- | ---: | --- |
+| `capture.synthReflection` | `true` | Synthesizes and scores reflection after an episode closes |
+| `capture.embedAfterCapture` | `true` | Creates embeddings asynchronously after capture or evolution |
+| `capture.batchThreshold` | `12` | Step threshold for batched reflection on long episodes |
+| `reward.gamma` | `0.9` | Positional discount applied to earlier steps in the trace |
+| `reward.lambda` | `0.5` | Blends uniform weighting with gamma-based positional weighting |
+| `reward.delta` | `0.1` | Extra weight for a step that recovers from an irrelevant previous step |
+| `reward.decayHalfLifeDays` | `30` | Time-decay half-life for L1 priority |
+| `reward.feedbackWindowSec` | `30` | Time to wait for explicit feedback after episode close |
+| `l2Induction.minTraceValue` | `0.005` | Minimum value for the L2 pool; the L1 trace must also have a vector |
+| `l2Induction.minEpisodesForInduction` | `1` | Distinct episodes required to induce L2 |
+| `l2Induction.minSimilarity` | `0.65` | Minimum similarity for associating L1 with an existing L2 |
+| `l2Induction.candidateTtlDays` | `30` | Retention period for L2 candidate evidence |
+| `l2Induction.minGain` | `0.02` | Minimum gain for activating an L2 Policy |
+| `l2Induction.archiveGain` | `-0.05` | Gain threshold for archiving an L2 Policy |
+| `l3Abstraction.clusterMinSimilarity` | `0.3` | Minimum similarity for clustering L2 into one world model |
+| `l3Abstraction.minConfidenceForRetrieval` | `0.2` | Minimum L3 confidence for recall |
+| `skill.minEtaForRetrieval` | `0.1` | Eta threshold used during Skill crystallization; recall also checks `retrieval.minSkillEta` |
+| `skill.minSupport` | `1` | Minimum evidence count for Skill crystallization |
+| `skill.minGain` | `0.02` | Minimum gain for Skill crystallization |
+
+## When Recall Runs
+
+Each retrieval entry point allows different layers:
+
+| Retrieval mode | Layers allowed by default | Purpose |
+| --- | --- | --- |
+| `turn_start` / `search` | Skill, L2, L1, L3 | Automatic recall before a normal request or manual search |
+| `tool_driven` / `sub_agent` | L2, L1, L3 | Tool decisions or sub-Agent missions without automatic Skill recall |
+| `skill_invoke` / `decision_repair` | Skill, L2, L1 | Invoking a target Skill or repairing a failed decision |
+| `world_model` | L3 | World-model-only lookup |
+
+The first turn of a new episode also passes an intent gate:
+
+| Intent | Layers recalled |
+| --- | --- |
+| Task or unknown | Skill, L2, L1, L3 |
+| Asking what Memmy remembers from before | Skill, L2, L1; no L3 |
+| Chitchat or a Memmy meta-command | Recall is skipped |
+
+`turn_start` excludes L1 from the current session to prevent a just-observed turn from echoing back through the long-term-memory path. L2, L3, and Skill are not excluded by this rule.
+
+`readOnlyInjectionProfile` narrows layers only when `domain: research`. It can be `experience` (L2 only), `skill`, `skill_experience`, or `all`. Outside the research domain, the effective profile is always `all`.
+
+## How the Query Is Prepared
+
+1. When an evolution model is configured, the service extracts one embedding-oriented semantic query and up to 5 keywords from the full request. If extraction fails, it falls back to the original request and rule-based keywords.
+2. Chinese phrases produce additional two-character patterns, while code, paths, and error text produce structural fragments.
+3. A query vector is created only when the database contains eligible vectors. If vectorization times out or fails, full-text, short-pattern, and structural channels continue.
+4. `enableQueryRewrite` is off by default. When enabled, the evolution model generates 3 complementary queries, each recalls independently, and a separate RRF merge combines their results.
+
+## How Many Recall Paths Are There?
+
+There are **4 retrieval families**, represented by **6 ranker channel names**:
+
+`vec`, `vec_summary`, `vec_action`, `fts`, `pattern`, and `structural`.
+
+| Family | Channel | Scope | Default pool and threshold |
+| --- | --- | --- | --- |
+| Semantic vector | L1 uses `vec_summary` / `vec_action`; other layers use `vec` | All layers | Skill 12, L1 20, L2 20, L3 8; minimum similarity is 0.25 for L1/L2/Skill and 0.15 for L3 |
+| SQLite FTS5 | `fts` | All layers | Up to 20 per layer; up to 5 full-text terms, combined in groups of three when more than two terms exist |
+| Short/CJK pattern | `pattern` | All layers | Up to 20 per layer; covers two-character CJK fragments and two-character ASCII terms using field substring matching |
+| Structural fragment | `structural` | L1 only | Up to 10; matches distinctive error signatures, paths, and error codes |
+
+Pool sizes follow these formulas:
+
+- vector pool: `tierTopK × candidatePoolFactor`;
+- the defaults are Tier 1 `3 × 4 = 12`, Tier 2 `5 × 4 = 20`, and Tier 3 `2 × 4 = 8`;
+- FTS and pattern: `max(tierTopK, keywordTopK)`, which is 20 by default;
+- after all channels are merged, each Tier is capped again at 12 / 20 / 8.
+
+For local SQLite retrieval, the service first builds a search window from the latest 2,000 vector rows matching the layer and vector field, then asks sqlite-vec for Top K. The 2,000-row window is currently a fixed constant, not a `config.yaml` option.
+
+## Candidate Filtering, Fusion, and Ranking
+
+### Before the ranker
+
+- Only `activated` and `resolving` records are read. `archived`, `deleted`, and unfinished history imports are excluded.
+- A Skill must be `active` or `candidate` and have `eta >= minSkillEta`, which defaults to 0.1.
+- L3 confidence must reach `l3Abstraction.minConfidenceForRetrieval`, which defaults to 0.2.
+- `tagFilter: auto` applies only to the L1 vector route. It first uses tags inferred from the query; if no tagged vector matches, it relaxes to an untagged summary-vector search. `on` stays strict, while `off` disables this tag gate.
+
+### Relevance fusion
+
+Each candidate starts with its best channel score, then receives a layer-quality bonus:
+
+```text
+L1 bonus    = min(weightPriority, 0.3) × max(value, 0) × time decay
+Skill bonus = skillEtaBlend × eta
+L2 bonus    = 0.2 × clamp01(gain, or feedback salience / confidence)
+RRF bonus   = 0.4 × Σ 1 / (rrfConstant + channelRank + 1)
+relevance   = max(channelScore) + layer bonus + RRF bonus
+```
+
+### Thresholds, episode rollups, and MMR
+
+1. Each Tier's pre-pool is ordered by relevance, channel count, and vector score.
+2. When at least 2 high-ranking L1 traces share an episode, the representative vector similarity reaches 0.45, and its value is not negative, Memmy creates an episode rollup containing up to 6 steps.
+3. Candidates below 20% of the highest relevance are dropped. Multi-channel bypass is on by default, so a candidate that hits at least 2 channels can survive.
+4. Queries containing long identifiers or error-code-like tokens require keyword confirmation from FTS, pattern, or structural channels for L1/L2. Skill and L3 are exempt.
+5. MMR selects using `0.7 × relevance - 0.3 × redundancy`. Smart seed requires the first candidate from a Tier to reach at least 70% of the global top relevance.
+6. The final pass deduplicates individual L1 traces against an episode rollup and suppresses duplicate L2 Policies already covered by a Skill.
+
+`tier1TopK=3`, `tier2TopK=5`, and `tier3TopK=2` size candidate pools and also produce the default global result limit of `3 + 5 + 2 = 10`. They are not hard per-Tier quotas in the final result. When a request supplies `limit`, final MMR selection uses that request value.
+
+### Final LLM filter
+
+After mechanical ranking, Memmy prefers the evolution model for relevance filtering and falls back to the summary model when evolution is not configured:
+
+| Setting | Default | Effect |
+| --- | ---: | --- |
+| `llmFilterEnabled` | `true` | Enables final semantic filtering |
+| `llmFilterMinCandidates` | `2` | Minimum mechanical candidates required before calling the LLM |
+| `llmFilterMaxKeep` | `8` | Maximum kept after a successful LLM call |
+| `llmFilterFallbackMaxKeep` | `6` | Fallback cap when no LLM is configured, the call fails, or output is malformed |
+| `llmFilterCandidateBodyChars` | `500` | Candidate body characters shown to the filter model |
+
+The LLM may intentionally drop every candidate. If its output is invalid or the call fails, the top 6 mechanically ranked candidates are retained.
+
+## How Context Is Injected
+
+Hits are rendered in this order:
+
+1. L1 traces and similar episodes;
+2. L2 Policy;
+3. L3 Environment Knowledge;
+4. Skills;
+5. decision guidance distilled from experience.
+
+A normal snippet is capped at 640 characters. Skills use `summary` mode by default, injecting the name and up to 200 characters of description. `full` mode injects the guide but still obeys the 640-character per-snippet cap. The final Markdown explicitly labels the content as historical memory that must be checked against the current request and current repository state.
+
+## Tuning config.yaml
+
+The main configuration file is `~/.memmy/config.yaml` unless `MEMMY_CONFIG` points elsewhere. The following block lists the effective core settings and their defaults. You only need to keep fields you want to override:
+
+```yaml
+memmyMemory:
+  version: 1
+  domain: ""
+  algorithm:
+    enableMemoryAdd: true
+    enableMemorySearch: true
+    enableQueryRewrite: false
+
+    capture:
+      maxTextChars: 4000
+      maxToolOutputChars: 2000
+      synthReflection: true
+      embedAfterCapture: true
+      batchThreshold: 12
+
+    reward:
+      gamma: 0.9
+      lambda: 0.5
+      delta: 0.1
+      decayHalfLifeDays: 30
+      feedbackWindowSec: 30
+
+    l2Induction:
+      minEpisodesForInduction: 1
+      minSimilarity: 0.65
+      candidateTtlDays: 30
+      minTraceValue: 0.005
+      minGain: 0.02
+      archiveGain: -0.05
+
+    l3Abstraction:
+      minPolicies: 1
+      minPolicyGain: 0.02
+      minPolicySupport: 1
+      clusterMinSimilarity: 0.3
+      minConfidenceForRetrieval: 0.2
+
+    skill:
+      minEtaForRetrieval: 0.1
+      minSupport: 1
+      minGain: 0.02
+      candidateTrials: 1
+
+    session:
+      followUpMode: merge_follow_ups
+      mergeMaxGapMs: 7200000
+
+    retrieval:
+      tier1TopK: 3
+      tier2TopK: 5
+      tier3TopK: 2
+      candidatePoolFactor: 4
+      weightPriority: 0.4
+      mmrLambda: 0.7
+      rrfConstant: 60
+      relativeThresholdFloor: 0.2
+      minSkillEta: 0.1
+      minTraceSim: 0.25
+      episodeGoalMinSim: 0.45
+      tagFilter: auto
+      keywordTopK: 20
+      skillEtaBlend: 0.15
+      smartSeed: true
+      smartSeedRatio: 0.7
+      multiChannelBypass: true
+      skillInjectionMode: summary
+      skillSummaryChars: 200
+      llmFilterEnabled: true
+      llmFilterMaxKeep: 8
+      llmFilterFallbackMaxKeep: 6
+      llmFilterMinCandidates: 2
+      llmFilterCandidateBodyChars: 500
+      readOnlyInjectionProfile: all
+```
+
+After saving the file, run:
+
+```bash
+memmy-memory reload-config
+```
+
+Retrieval, evolution, and model settings can be hot-reloaded. A `storage` change makes the reload response return `requiresRestart: true`, in which case the Memory service must be restarted. Algorithm settings are centralized in the service, so Agent Hooks and plugins usually do not need to be reinstalled.
+
+### Common tuning directions
+
+- **Increase recall:** raise `candidatePoolFactor` or `keywordTopK`, or lower `relativeThresholdFloor` or `minTraceSim`.
+- **Reduce noise:** raise `minTraceSim`, `relativeThresholdFloor`, or `minSkillEta`, or lower `llmFilterMaxKeep`.
+- **Increase diversity:** lower `mmrLambda`. Raising it favors the highest relevance more strongly.
+- **Handle multi-fact or indirect questions:** enable `enableQueryRewrite`, at the cost of extra evolution-model calls and latency.
+- **Disable memory reads or writes independently:** set `enableMemorySearch: false` or `enableMemoryAdd: false`.
+
+## Inspecting a Recall
+
+```bash
+memmy-memory search "your query" --verbose
+```
+
+For debugging, inspect:
+
+- `candidateMemoryIds`: raw candidates merged from the underlying channels;
+- `hits`: candidates after fusion, thresholding, and MMR;
+- `sourceMemoryIds`: memories actually rendered into context;
+- `status`: whether LLM filtering succeeded, was disabled, was skipped, or fell back;
+- the Memory Logs page: `memory.search` candidates, filtered results, droppedByLlm entries, and statistics.
+
+## The Memory Management Page
+
+The `/memory` sidebar is organized into three groups by purpose:
+
+| Group | Sub-pages | Description |
+| --- | --- | --- |
+| Work | Overview / Memories / Tasks / Experiences / World models / Skills | View summary statistics and memory details, organized by task, experience, world model, and skill |
+| Insights | Analytics / Logs | Review write and evolution analytics, plus Memory API search and write logs |
+| System | Cross-Agent access | Manage Agent sources, history scanning, and Hook/plugin connection status |
+
+The Logs page provides dedicated detail views for `memory.search` and `memory.add` (search candidates, written fields, result status), useful for explaining why a memory was matched or written.

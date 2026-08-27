@@ -1,0 +1,619 @@
+/** App actions module. */
+import type {
+  AgentSourceView,
+  AppBootstrapResponse,
+  AppSettingsDto,
+  OnboardingStateDto,
+  PrivacySettingsDto,
+  ScanPhase,
+  ScanPreferences,
+  TokenUsageDto
+} from "@memmy/local-api-contracts";
+import type { AppRoutePath, PreferredMode } from "../app/routes.js";
+import type { InvitationToastKind } from "../app/invitation-result.js";
+import type { ChannelsClient } from "../api/channels-client.js";
+import type { ModelProviderConfig } from "../api/config-client.js";
+import { isIntegrationSetupDiagnosticError, logHiddenIntegrationSetupDiagnosticError } from "../api/integration-errors.js";
+import type { IntegrationsClient } from "../api/integrations-client.js";
+import type { IntegrationConnection } from "../integrations/connection-state.js";
+import type { IntegrationMeta } from "../integrations/integration-meta.js";
+import type { AgentGoalControlAction, ChatModelPreset, MemmyAgentRunStatusSnapshot, MemmyAgentSessionSnapshot, MemmyAgentSessionSummary, MemmyAgentSidebarState, MemmyAgentWebuiThread, MemmyAgentWsEvent, WebuiSessionTarget } from "../api/memmy-agent-client.js";
+import type { PendingAttachment } from "./agent-composer-state.js";
+import type {
+  AgentAction,
+  AgentChatMediaAttachment,
+  AgentOperationError,
+  AgentOperationErrorSource,
+  AgentOperationSurface,
+  AgentRecoveryChatRequest,
+  AgentTaskStateRequest
+} from "./agent-chat-slice.js";
+import type { ToolsAction } from "./tools-slice.js";
+
+/** Type definition for event connection status. */
+export type EventConnectionStatus = "pending" | "connecting" | "connected" | "heartbeat" | "reconnecting";
+
+/** Contract for agent source scan progress. */
+export interface AgentSourceScanProgress {
+  jobId: string;
+  sourceId: string;
+  phase: ScanPhase;
+  current: number;
+  total: number;
+  message?: string;
+}
+
+export interface AgentSourceScanCompletion {
+  jobId: string;
+  sourceId: string;
+}
+
+export interface AgentSourceScanFinished extends AgentSourceScanCompletion {
+  succeeded: boolean;
+}
+
+export const AGENT_SOURCE_SCAN_COMPLETION_FEEDBACK_MS = 5_000;
+
+let agentOperationErrorCounter = 0;
+let invitationToastCounter = 0;
+
+export function createAgentOperationError(input: {
+  source: AgentOperationErrorSource;
+  message: string;
+  chatId?: string;
+  scopeKey?: string;
+}): AgentOperationError {
+  agentOperationErrorCounter += 1;
+  const createdAt = Date.now();
+  return {
+    id: `${input.source}-${createdAt}-${agentOperationErrorCounter}`,
+    source: input.source,
+    message: input.message,
+    ...(input.chatId ? { chatId: input.chatId } : {}),
+    ...(input.scopeKey ? { scopeKey: input.scopeKey } : {}),
+    createdAt
+  };
+}
+
+/** Type definition for app action. */
+export type AppAction =
+  | ToolsAction
+  | AgentAction
+  | { type: "startup/loading" }
+  | { type: "startup/error"; message: string }
+  | { type: "bootstrap/loaded"; bootstrap: AppBootstrapResponse; initialPath: AppRoutePath }
+  | { type: "events/statusChanged"; status: EventConnectionStatus }
+  | { type: "navigation/changed"; path: AppRoutePath }
+  | { type: "invitationToast/shown"; id: number; kind: InvitationToastKind }
+  | { type: "invitationToast/cleared"; id: number }
+  | { type: "settings/updated"; settings: Partial<AppSettingsDto> }
+  | { type: "privacy/updated"; privacy: Partial<PrivacySettingsDto> }
+  | { type: "tokenUsage/updated"; tokenUsage: TokenUsageDto }
+  | { type: "onboarding/updated"; onboarding: Partial<OnboardingStateDto> }
+  | { type: "agentSources/loading" }
+  | { type: "agentSources/loaded"; sources: AgentSourceView[] }
+  | { type: "agentSources/refreshed"; sources: AgentSourceView[] }
+  | { type: "agentSources/error"; message: string }
+  | { type: "agentSources/scanStarted"; sourceId: string }
+  | { type: "agentSources/scanProgress"; progress: AgentSourceScanProgress }
+  | { type: "agentSources/scanCompleted"; scan?: AgentSourceScanFinished }
+  | { type: "agentSources/scanCompletionExpired"; jobId: string }
+  | { type: "scanPreferences/updated"; preferences: Partial<ScanPreferences> }
+  | { type: "preferredMode/updated"; preferredMode: PreferredMode }
+  | { type: "account/updated"; userId?: string; email?: string; phoneNumber?: string | null; nickname?: string; registeredAt?: string | null }
+  | { type: "account/cleared" }
+  | { type: "modelConfig/updated"; config: Partial<ModelProviderConfig> }
+  | { type: "modal/changed"; modal: "nickname" | "scanPermission" | "improvement" | "modelConfig" | "manualSource"; open: boolean };
+
+/** Definition for app actions. */
+export const appActions = {
+  /** Starts startup loading. */
+  startupLoading(): AppAction {
+    return { type: "startup/loading" };
+  },
+
+  /** Starts startup failed. */
+  startupFailed(message: string): AppAction {
+    return { type: "startup/error", message };
+  },
+
+  /** Handles bootstrap loaded. */
+  bootstrapLoaded(bootstrap: AppBootstrapResponse, initialPath: AppRoutePath): AppAction {
+    return { type: "bootstrap/loaded", bootstrap, initialPath };
+  },
+
+  /** Handles event status changed. */
+  eventStatusChanged(status: EventConnectionStatus): AppAction {
+    return { type: "events/statusChanged", status };
+  },
+
+  /** Handles navigate. */
+  navigate(path: AppRoutePath): AppAction {
+    return { type: "navigation/changed", path };
+  },
+
+  showInvitationToast(kind: InvitationToastKind): AppAction {
+    invitationToastCounter += 1;
+    return { type: "invitationToast/shown", id: invitationToastCounter, kind };
+  },
+
+  clearInvitationToast(id: number): AppAction {
+    return { type: "invitationToast/cleared", id };
+  },
+
+  /** Writes settings updated. */
+  settingsUpdated(settings: Partial<AppSettingsDto>): AppAction {
+    return { type: "settings/updated", settings };
+  },
+
+  /** Handles privacy updated. */
+  privacyUpdated(privacy: Partial<PrivacySettingsDto>): AppAction {
+    return { type: "privacy/updated", privacy };
+  },
+
+  /** Handles token usage updated. */
+  tokenUsageUpdated(tokenUsage: TokenUsageDto): AppAction {
+    return { type: "tokenUsage/updated", tokenUsage };
+  },
+
+  /** Handles onboarding updated. */
+  onboardingUpdated(onboarding: Partial<OnboardingStateDto>): AppAction {
+    return { type: "onboarding/updated", onboarding };
+  },
+
+  /** Handles agent sources loading. */
+  agentSourcesLoading(): AppAction {
+    return { type: "agentSources/loading" };
+  },
+
+  /** Handles agent sources loaded. */
+  agentSourcesLoaded(sources: AgentSourceView[]): AppAction {
+    return { type: "agentSources/loaded", sources };
+  },
+
+  agentSourcesRefreshed(sources: AgentSourceView[]): AppAction {
+    return { type: "agentSources/refreshed", sources };
+  },
+
+  /** Handles agent sources failed. */
+  agentSourcesFailed(message: string): AppAction {
+    return { type: "agentSources/error", message };
+  },
+
+  /** Handles agent source scan started. */
+  agentSourceScanStarted(sourceId = "all"): AppAction {
+    return { type: "agentSources/scanStarted", sourceId };
+  },
+
+  /** Handles agent source scan progress received. */
+  agentSourceScanProgressReceived(progress: AgentSourceScanProgress): AppAction {
+    return { type: "agentSources/scanProgress", progress };
+  },
+
+  /** Handles agent source scan completed. */
+  agentSourceScanCompleted(scan?: AgentSourceScanFinished): AppAction {
+    return { type: "agentSources/scanCompleted", scan };
+  },
+
+  agentSourceScanCompletionExpired(jobId: string): AppAction {
+    return { type: "agentSources/scanCompletionExpired", jobId };
+  },
+
+  /** Handles scan preferences updated. */
+  scanPreferencesUpdated(preferences: Partial<ScanPreferences>): AppAction {
+    return { type: "scanPreferences/updated", preferences };
+  },
+
+  /** Handles preferred mode updated. */
+  preferredModeUpdated(preferredMode: PreferredMode): AppAction {
+    return { type: "preferredMode/updated", preferredMode };
+  },
+
+  /** Handles account updated. */
+  accountUpdated(input: { userId?: string; email?: string; phoneNumber?: string | null; nickname?: string; registeredAt?: string | null }): AppAction {
+    return { type: "account/updated", ...input };
+  },
+
+  /** Handles account cleared. */
+  accountCleared(): AppAction {
+    return { type: "account/cleared" };
+  },
+
+  /** Handles model config updated. */
+  modelConfigUpdated(config: Partial<ModelProviderConfig>): AppAction {
+    return { type: "modelConfig/updated", config };
+  },
+
+  /** Handles modal changed. */
+  modalChanged(modal: "nickname" | "scanPermission" | "improvement" | "modelConfig" | "manualSource", open: boolean): AppAction {
+    return { type: "modal/changed", modal, open };
+  },
+
+  /** Handles open tool connect modal. */
+  openToolConnectModal(integration: Pick<IntegrationMeta, "slug" | "surface">): AppAction {
+    return { type: "tools/openToolModal", surface: integration.surface, slug: integration.slug };
+  },
+
+  /** Closes close tool modal. */
+  closeToolModal(): AppAction {
+    return { type: "tools/closeModal" };
+  }
+};
+
+/** Definition for agent actions. */
+export const agentActions = {
+  bootstrapStarted(): AppAction {
+    return { type: "agent/bootstrapStarted" };
+  },
+
+  bootstrapSucceeded(modelName: string | null): AppAction {
+    return { type: "agent/bootstrapSucceeded", modelName };
+  },
+
+  modelCatalogLoaded(presets: ChatModelPreset[], defaultPreset: string | null): AppAction {
+    return { type: "agent/modelCatalogLoaded", presets, defaultPreset };
+  },
+
+  pendingModelPresetUpdated(scopeKey: string, preset: string | null): AppAction {
+    return { type: "agent/pendingModelPresetUpdated", scopeKey, preset };
+  },
+
+  pendingModelPresetCleared(scopeKey: string): AppAction {
+    return { type: "agent/pendingModelPresetCleared", scopeKey };
+  },
+
+  modelSelectionRequestStarted(
+    scopeKey: string,
+    chatId: string | null,
+    clientRequestId: string,
+    presetId: string | null
+  ): AppAction {
+    return { type: "agent/modelSelectionRequestStarted", scopeKey, chatId, clientRequestId, presetId };
+  },
+
+  modelSelectionRequestCancelled(clientRequestId: string): AppAction {
+    return { type: "agent/modelSelectionRequestCancelled", clientRequestId };
+  },
+
+  connectionConnecting(): AppAction {
+    return { type: "agent/connectionConnecting" };
+  },
+
+  connectionFailed(message: string): AppAction {
+    return { type: "agent/connectionFailed", message };
+  },
+
+  connectionDisposed(): AppAction {
+    return { type: "agent/connectionDisposed" };
+  },
+
+  operationFailed(surface: AgentOperationSurface, error: AgentOperationError): AppAction {
+    return { type: "agent/operationFailed", surface, error };
+  },
+
+  operationErrorDismissed(surface: AgentOperationSurface, id: string): AppAction {
+    return { type: "agent/operationErrorDismissed", surface, id };
+  },
+
+  sessionsLoading(requestId?: string): AppAction {
+    return { type: "agent/sessionsLoading", ...(requestId ? { requestId } : {}) };
+  },
+
+  sessionsLoaded(sessions: MemmyAgentSessionSummary[], requestId?: string): AppAction {
+    return { type: "agent/sessionsLoaded", sessions, ...(requestId ? { requestId } : {}) };
+  },
+
+  sessionSnapshotApplied(snapshot: MemmyAgentSessionSnapshot): AppAction {
+    return { type: "agent/sessionSnapshotApplied", snapshot };
+  },
+
+  sessionsLoadFailed(requestId?: string): AppAction {
+    return { type: "agent/sessionsLoadFailed", ...(requestId ? { requestId } : {}) };
+  },
+
+  sidebarStateLoaded(sidebarState: MemmyAgentSidebarState): AppAction {
+    return { type: "agent/sidebarStateLoaded", sidebarState };
+  },
+
+  sidebarStateSaved(sidebarState: MemmyAgentSidebarState): AppAction {
+    return { type: "agent/sidebarStateSaved", sidebarState };
+  },
+
+  sidebarMutationStarted(mutationId: string, sidebarState: MemmyAgentSidebarState): AppAction {
+    return { type: "agent/sidebarMutationStarted", mutationId, sidebarState };
+  },
+
+  sidebarMutationConfirmed(mutationId: string, sidebarState: MemmyAgentSidebarState): AppAction {
+    return { type: "agent/sidebarMutationConfirmed", mutationId, sidebarState };
+  },
+
+  sidebarMutationFailed(
+    mutationId: string,
+    sidebarState: MemmyAgentSidebarState,
+    error: AgentOperationError
+  ): AppAction {
+    return { type: "agent/sidebarMutationFailed", mutationId, sidebarState, error };
+  },
+
+  taskStateLoading(request: AgentTaskStateRequest): AppAction {
+    return { type: "agent/taskStateLoading", request };
+  },
+
+  taskStateSettled(input: {
+    requestId: string;
+    recoveryGeneration: number | null;
+    snapshot?: MemmyAgentSessionSnapshot;
+    sessions?: MemmyAgentSessionSummary[];
+    sidebarState?: MemmyAgentSidebarState;
+    error?: AgentOperationError;
+  }): AppAction {
+    return { type: "agent/taskStateSettled", ...input };
+  },
+
+  historyLoading(sessionKey: string, chatId: string, requestId: string): AppAction {
+    return { type: "agent/historyLoading", sessionKey, chatId, requestId };
+  },
+
+  historyLoaded(thread: MemmyAgentWebuiThread, requestId: string): AppAction {
+    return { type: "agent/historyLoaded", thread, requestId };
+  },
+
+  historyOpenMissing(sessionKey: string, chatId: string, requestId: string): AppAction {
+    return { type: "agent/historyOpenMissing", sessionKey, chatId, requestId };
+  },
+
+  historyOpenFailed(chatId: string, requestId: string, error: AgentOperationError): AppAction {
+    return { type: "agent/historyOpenFailed", chatId, requestId, error };
+  },
+
+  historyHydrateLoading(sessionKey: string, chatId: string, requestId: string): AppAction {
+    return { type: "agent/historyHydrateLoading", sessionKey, chatId, requestId };
+  },
+
+  historyHydrateLoaded(thread: MemmyAgentWebuiThread, requestId: string): AppAction {
+    return { type: "agent/historyHydrateLoaded", thread, requestId };
+  },
+
+  historyHydrateFailed(chatId: string, requestId: string, error?: AgentOperationError): AppAction {
+    return { type: "agent/historyHydrateFailed", chatId, requestId, ...(error ? { error } : {}) };
+  },
+
+  newChatRequested(): AppAction {
+    return { type: "agent/newChatRequested" };
+  },
+
+  blankDraftReopened(): AppAction {
+    return { type: "agent/blankDraftReopened" };
+  },
+
+  newChatCreated(chatId: string): AppAction {
+    return { type: "agent/newChatCreated", chatId };
+  },
+
+  transientSendFailed(chatId: string): AppAction {
+    return { type: "agent/transientSendFailed", chatId };
+  },
+
+  userMessageQueued(input: { chatId: string; content: string; media?: AgentChatMediaAttachment[]; focus?: boolean; deliveryUncertain?: boolean; target?: WebuiSessionTarget; clientRequestId?: string }): AppAction {
+    return { type: "agent/userMessageQueued", ...input };
+  },
+
+  queueItemRemoveStarted(chatId: string, clientRequestId: string): AppAction {
+    return { type: "agent/queueItemRemoveStarted", chatId, clientRequestId };
+  },
+
+  queueItemRemoveFailed(chatId: string, clientRequestId: string, error: AgentOperationError): AppAction {
+    return { type: "agent/queueItemRemoveFailed", chatId, clientRequestId, error };
+  },
+
+  queueItemSteerStarted(chatId: string, clientRequestId: string): AppAction {
+    return { type: "agent/queueItemSteerStarted", chatId, clientRequestId };
+  },
+
+  queueItemSteerReset(chatId: string, clientRequestId: string): AppAction {
+    return { type: "agent/queueItemSteerReset", chatId, clientRequestId };
+  },
+
+  queueItemSteerFailed(chatId: string, clientRequestId: string, error: AgentOperationError): AppAction {
+    return { type: "agent/queueItemSteerFailed", chatId, clientRequestId, error };
+  },
+
+  composerDraftUpdated(scopeKey: string, value: string): AppAction {
+    return { type: "agent/composerDraftUpdated", scopeKey, value };
+  },
+
+  composerPendingAttachmentsUpdated(scopeKey: string, attachments: PendingAttachment[]): AppAction {
+    return { type: "agent/composerPendingAttachmentsUpdated", scopeKey, attachments };
+  },
+
+  draftTargetUpdated(scopeKey: string, target: WebuiSessionTarget): AppAction {
+    return { type: "agent/draftTargetUpdated", scopeKey, target };
+  },
+
+  messageSendLockUpdated(scopeKey: string, clientRequestId: string | null): AppAction {
+    return { type: "agent/messageSendLockUpdated", scopeKey, clientRequestId };
+  },
+
+  tasksMarkedRead(chatIds: string[]): AppAction {
+    return { type: "agent/tasksMarkedRead", chatIds };
+  },
+
+  composerScopeCleared(scopeKey: string): AppAction {
+    return { type: "agent/composerScopeCleared", scopeKey };
+  },
+
+  stopRequested(chatId: string): AppAction {
+    return { type: "agent/stopRequested", chatId };
+  },
+
+  stopUnconfirmed(chatId: string): AppAction {
+    return { type: "agent/stopUnconfirmed", chatId };
+  },
+
+  goalMutationStarted(input: {
+    chatId: string;
+    requestId: string;
+    goalId: string;
+    action: AgentGoalControlAction;
+  }): AppAction {
+    return { type: "agent/goalMutationStarted", ...input };
+  },
+
+  goalMutationSettled(chatId: string, requestId: string): AppAction {
+    return { type: "agent/goalMutationSettled", chatId, requestId };
+  },
+
+  restartRequested(startedAt: number): AppAction {
+    return { type: "agent/restartRequested", startedAt };
+  },
+
+  restartRestored(input: { chatId: string; startedAt: number; sawDisconnect: boolean }): AppAction {
+    return { type: "agent/restartRestored", ...input };
+  },
+
+  restartFailed(message: string): AppAction {
+    return { type: "agent/restartFailed", message };
+  },
+
+  recoveryChatLoading(request: AgentRecoveryChatRequest): AppAction {
+    return { type: "agent/recoveryChatLoading", request };
+  },
+
+  recoveryChatSnapshotLoaded(input: {
+    requestId: string;
+    generation: number;
+    chatId: string;
+    chatSelectionEpoch: number;
+    thread: MemmyAgentWebuiThread | null;
+    runSnapshot: MemmyAgentRunStatusSnapshot | null;
+    noticeId: string;
+    completedAt: number;
+    failureMessage?: string;
+  }): AppAction {
+    return { type: "agent/recoveryChatSnapshotLoaded", ...input };
+  },
+
+  recoveryFinished(generation: number): AppAction {
+    return { type: "agent/recoveryFinished", generation };
+  },
+
+  chatViewVisibilityChanged(visible: boolean): AppAction {
+    return { type: "agent/chatViewVisibilityChanged", visible };
+  },
+
+  wsEventReceived(event: MemmyAgentWsEvent): AppAction {
+    return { type: "agent/wsEvent", event };
+  }
+};
+
+/** Definition for tools actions. */
+export const toolsActions = {
+  /** App actions module. */
+  async loadConnections(client: IntegrationsClient, channelsClient: ChannelsClient, dispatch: (action: ToolsAction) => void): Promise<void> {
+    dispatch({ type: "tools/loadStart" });
+
+    try {
+      const connections = await loadToolConnectionRecords(client, channelsClient);
+      dispatch({
+        type: "tools/loadSuccess",
+        connections
+      });
+    } catch (error) {
+      if (isIntegrationSetupDiagnosticError(error)) {
+        logHiddenIntegrationSetupDiagnosticError(error);
+        dispatch({ type: "tools/loadSuccess", connections: [] });
+        return;
+      }
+
+      dispatch({ type: "tools/loadFailure", message: toErrorMessage(error) });
+    }
+  },
+
+  /** App actions module. */
+  async refreshConnections(client: IntegrationsClient, channelsClient: ChannelsClient, dispatch: (action: ToolsAction) => void): Promise<void> {
+    try {
+      const connections = await loadToolConnectionRecords(client, channelsClient);
+      dispatch({ type: "tools/connectionsUpdated", connections });
+    } catch (error) {
+      if (isIntegrationSetupDiagnosticError(error)) {
+        logHiddenIntegrationSetupDiagnosticError(error);
+        return;
+      }
+
+      dispatch({ type: "tools/connectionFailure", message: toErrorMessage(error) });
+    }
+  }
+};
+
+/** Reads load tool connection records. */
+export async function loadToolConnectionRecords(client: IntegrationsClient, channelsClient: ChannelsClient): Promise<IntegrationConnection[]> {
+  const [integrationConnections, channelConnections] = await Promise.all([
+    listIntegrationConnections(client),
+    listChannelConnections(channelsClient)
+  ]);
+
+  return [...integrationConnections, ...channelConnections];
+}
+
+/** Handles list integration connections. */
+async function listIntegrationConnections(client: IntegrationsClient): Promise<IntegrationConnection[]> {
+  try {
+    const connectionsResponse = await client.listConnections();
+    return connectionsResponse.connections.map((connection) => ({ ...connection, surface: "integration" }));
+  } catch (error) {
+    if (isIntegrationSetupDiagnosticError(error)) {
+      logHiddenIntegrationSetupDiagnosticError(error);
+      return [];
+    }
+
+    throw error;
+  }
+}
+
+/** Handles list channel connections. */
+async function listChannelConnections(client: ChannelsClient): Promise<IntegrationConnection[]> {
+  try {
+    const response = await client.listConnections();
+    return response.connections.flatMap((connection) => {
+      const status = mapChannelStatus(connection.status);
+
+      return status
+        ? [
+            {
+              id: connection.id,
+              toolkit: connection.provider,
+              status,
+              surface: "channel",
+              lastError: connection.lastError ?? null
+            }
+          ]
+        : [];
+    });
+  } catch (error) {
+    console.warn("[tools] channel connection state unavailable:", error);
+    return [];
+  }
+}
+
+/** Maps map channel status. */
+function mapChannelStatus(status: string): string | null {
+  switch (status) {
+    case "connected":
+      return "connected";
+    case "pendingQr":
+    case "starting":
+    case "restarting":
+      return "pending";
+    case "expired":
+      return "expired";
+    case "error":
+      return "error";
+    default:
+      return null;
+  }
+}
+
+/** Handles to error message. */
+function toErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}

@@ -1,0 +1,9 @@
+# token=[REDACTED:authorization_bearer]
+--- positive
+Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.payload.signature
+===
+authorization: bearer abcdefghijklmnopqrstuvwxyz0123456789._-
+--- negative
+Authorization: Basic dXNlcjpwYXNz
+===
+Bearer token is missing the authorization header

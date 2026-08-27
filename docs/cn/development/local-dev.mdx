@@ -1,0 +1,56 @@
+---
+title: 本地开发与打包
+icon: Package
+---
+
+## 一键启动
+
+三步即可跑起来：
+
+```bash
+git clone https://github.com/MemTensor/memmy-agent.git && cd memmy-agent
+cp .env.example .env         # 已预填云服务地址，开箱即用
+bash scripts/dev-start.sh    # 装依赖 → 构建 → 起全套服务
+```
+
+`scripts/dev-start.sh` 一条命令完成全部：自动安装依赖、构建 Memory 与 memmy-agent、把 `memmy` / `memmy-memory` CLI 安装到 `~/.local/bin`，并同时拉起 Memory、Agent API、Gateway、前端和桌面后端。启动后在弹出的桌面应用里完成账号登录或 BYOK 配置，脚本会在模型配置写好后自动启动 agent 服务。
+
+> `.env` 中 `MEMMY_CLOUD_SERVICE` 默认指向 `https://memmy-api.memtensor.cn`，复制即连官方云服务——无需自建后端、无需自备 API Key。Windows 请在 Git Bash 中运行；脚本会把 `~/.local/bin` 加入 PATH。
+
+## 环境要求
+
+Node.js `>=22` + npm。根目录 workspace 包括 `Memory`、`App/backend/local-api-contracts`、`App/backend`、`App/frontend/*`、`App/shell/desktop/interface`、`App/shell/*`。
+
+## 常用命令
+
+```bash
+npm install            # 根目录安装依赖
+npm run dev:desktop    # 同时启动桌面前端 Vite 和 Electron 壳
+npm run build          # 构建 Memory 和所有 workspace
+npm run lint
+npm run typecheck
+npm run test
+npm run db:migrate     # 后端数据库迁移
+npm run package:mac    # 打包 macOS DMG
+npm run package:win:x64
+```
+
+## Memory 单独开发
+
+```bash
+npm run memory:serve:dev -- \
+  --host 127.0.0.1 \
+  --port 18960 \
+  --db ~/.memmy/memory-service/memory.sqlite \
+  --config ~/.memmy/config.yaml
+```
+
+## memmy-agent 源码态
+
+```bash
+cd App/memmy-agent
+npm install && npm run build
+node dist/main.js onboard
+node dist/main.js agent --message "你好，介绍一下当前工作区"
+node dist/main.js serve
+```

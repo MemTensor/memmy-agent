@@ -1,0 +1,14 @@
+---
+title: 常见问题
+icon: MessageCircleQuestionMark
+---
+
+普通聊天机器人只处理当前会话。Memmy 维护本地记忆、扫描外部 Agent 历史、安装 Agent Skill，并把桌面端、CLI、Memory 服务和工具连接放在同一个运行环境里。
+
+不一定。桌面端支持账号模式和 API Key 模式；API Key 模式使用你自己的模型额度，数据仍以本地优先方式保存。
+
+可以。它们只影响语音输入和 Agent 生图，是可选能力，不阻塞普通对话和记忆功能。
+
+先运行 Memory 服务，再安装 CLI，然后 为 Codex、Cursor、Claude Code、Opencode、OpenClaw 或 Hermes 安装对应 Skill。
+
+默认在 `~/.memmy` 下，包括配置、workspace、Memory SQLite 数据库和运行时文件。 扫描和入库都在本地完成，记忆写入本地 SQLite。是否参与「记忆改进计划」由隐私设置中的开关显式控制。

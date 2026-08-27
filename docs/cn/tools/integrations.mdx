@@ -1,0 +1,12 @@
+---
+title: 托管工具集成
+icon: Puzzle
+---
+
+工具页的普通集成来自托管目录（Composio），包括 GitHub、GitLab、Gmail、Google Calendar/Docs/Drive/Sheets/Slides、Notion、Slack、Linear、Jira、Confluence、Figma、Dropbox、Airtable、Trello、Salesforce、HubSpot、Stripe、Zoom 等。
+
+## 授权流程
+
+1. 点击工具卡片，查看权限范围后点击连接，获取授权 URL。
+2. 在外部浏览器完成 OAuth；弹窗每 4 秒轮询，最长等待 5 分钟。
+3. 连接成功后，工具通过 Composio MCP bridge 暴露给 Agent Runtime，桌面后端自动写入 `tools.mcpServers.composio`。

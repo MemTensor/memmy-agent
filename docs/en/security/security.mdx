@@ -1,0 +1,19 @@
+---
+title: Security & Privacy
+icon: Lock
+---
+
+Memmy's security boundary is built on **local execution** and **explicit authentication**:
+
+- The desktop local API only accepts requests from the local machine, `file://`, or controlled origins by default, verified with `x-memmy-local-token`.
+- Due to EventSource limitations, SSE passes the same runtime token via a query parameter.
+- The Composio MCP bridge uses a separate `x-memmy-mcp-token`.
+- Memory HTTP can be protected with a bearer token (`MEMMY_MEMORY_TOKEN` / `MEMORY_SERVICE_TOKEN`).
+- Config supports `${ENV_NAME}` environment variable references, keeping API Keys out of config files.
+- The Memory client must connect to a real Memory Layer or discover a local SQLite source — otherwise startup fails rather than silently showing fake data.
+
+## Where Your Data Lives
+
+Everything defaults to `~/.memmy`: config, workspace, the Memory SQLite database, and runtime files. Desktop app state is maintained by the local backend in a local SQLite database.
+
+Scanning and ingestion happen entirely locally, with memories written to local SQLite. Participation in the "memory improvement program" is explicitly controlled by a toggle in privacy settings.

@@ -1,0 +1,3255 @@
+/** Settings page for account, model, token usage, and desktop preferences. */
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type Dispatch, type ReactNode } from "react";
+import { Brain, Palette, Rocket, Settings2, Shield, User, Zap, ArrowRight, Bell, ExternalLink, FolderOpen, Gift, Info, KeyRound, LogOut, Wrench, Eye, EyeOff, ChevronDown, ChevronUp, Database, Loader2, CheckCircle2, XCircle, Check, AlertTriangle, Mic, Image as ImageIcon, Copy} from "lucide-react";
+import type { AccountInvitationView, AppSettingsDto, ByokTokenUsageByKind, ByokTokenUsageByModel, ByokTokenUsageCapability, ByokTokenUsageKind, ByokTokenUsageSummary, Language, ModelConfigView, PrivacySettingsDto, TokenQuotaEligibility, TokenSceneUsageDto, TokenUsageDto } from "@memmy/local-api-contracts";
+import { useApiClients } from "../app/providers.js";
+import { copyInvitationCode } from "../app/invitation-analytics.js";
+import { resolveGiftTokenUsage } from "../app/routes.js";
+import { useUpdateCoordinator, type UpdateCoordinatorValue, type UpdatePhase } from "../app/update-coordinator.js";
+import type { AnalyticsEvent } from "../analytics/analytics-events.js";
+import { useAnalytics } from "../analytics/use-analytics.js";
+import type { AccountClient } from "../api/account-client.js";
+import type { ByokTokenUsageClient } from "../api/byok-token-usage-client.js";
+import type { TokenQuotaClient } from "../api/token-quota-client.js";
+import type { ConfigClient, ModelProviderConfig } from "../api/config-client.js";
+import {
+  readCloseMainWindowAction,
+  writeCloseMainWindowAction,
+  type CloseMainWindowAction
+} from "../app/pet-guide.js";
+import { consumeTokenExhaustedApplyMoreRequest, TOKEN_EXHAUSTED_APPLY_MORE_EVENT } from "../app/token-exhausted-apply-more.js";
+import { getLegalLinkUrl } from "../legal/legal-links.js";
+import { maskAccountIdentifier } from "../utils/mask-account-identifier.js";
+import { isComposingKeyboardEvent } from "../utils/keyboard.js";
+import { openExternalUrl } from "../utils/open-url.js";
+import { useTranslation } from "../i18n/use-translation.js";
+import { appActions, type AppAction } from "../state/app-actions.js";
+import type { AppState } from "../state/app-reducer.js";
+import { useAppState } from "../state/app-state.js";
+import type { ModelWorkspaceMode } from "../state/model-workspace.js";
+import { AppFrame } from "./app-frame.js";
+import { ModelWorkspaceSection } from "./model-workspace-section.js";
+import {
+  SETTINGS_ADD_MODEL_RETURN_STORAGE_KEY,
+  readInitialSettingsTab,
+  readSettingsAddModelReturnRoute,
+  resolveSettingsTabFromHash,
+  writeSettingsTabHash,
+  type SettingsTabId
+} from "./settings-nav.js";
+import { formatTokenGiftAmount } from "./token-gift.js";
+import usageStyles from "./settings-token-usage.module.css";
+
+export { resolveSettingsTabFromHash, type SettingsTabId } from "./settings-nav.js";
+import {
+  OptionalModelMissingWarningModal,
+  resolveOptionalModelMissingWarning,
+  type OptionalModelMissingWarningKind
+} from "./optional-model-missing-warning-modal.js";
+import { ConfirmDialog } from "../components/confirm-dialog.js";
+import { Memmy } from "../components/mascot/memmy.js";
+import { ModelProviderLogo } from "../components/model-provider-logo.js";
+import { Select, type SelectOption } from "../components/Select.js";
+import { canSubmitFeedback, feedbackLength, FEEDBACK_MIN_LENGTH } from "../feedback/quota-feedback.js";
+import {
+  canSaveModelConfig,
+  createModelConfigValidationKey,
+  type ModelConfigValidationState
+} from "./model-config-validation.js";
+import {
+  DEFAULT_ENDPOINTS,
+  DEFAULT_MODEL_IDS,
+  PROTOCOL_OPTIONS,
+  ASR_DEFAULT_ENDPOINT,
+  ASR_MODEL_ID,
+  IMAGE_DEFAULT_ENDPOINTS,
+  IMAGE_DEFAULT_MODEL_IDS,
+  IMAGE_PROTOCOL_OPTIONS,
+  canSaveEmbeddingModelConfig,
+  canUseModelConfig,
+  createAsrModelFormValues,
+  createAsrProviderConfig,
+  createImageGenModelFormValues,
+  createImageGenProviderConfig,
+  createTestModelConnectionMessages,
+  createMemmyMemoryProviderConfig,
+  createModelFormValues,
+  createModelProtocolPatch,
+  hydrateModelConfigForm,
+  fromProtocol,
+  testModelConnection,
+  type ImageProtocol,
+  type PrimaryModelValues,
+  type Protocol,
+  type ModelConfig
+} from "./model-config.js";
+import { ValidationMessage } from "./api-key-form-fields.js";
+import { OverflowTooltipText } from "../components/overflow-tooltip-text.js";
+import type { MessageKey, MessageValues } from "../i18n/messages.js";
+
+type LogLevel = "error" | "warn" | "info" | "debug";
+type ModelMode = "platform" | "custom";
+type EmbeddingMode = "cloud" | "local" | "custom";
+type TestStatus = "idle" | "testing" | "success" | "error";
+type ConfirmKind = "logout" | null;
+type UsageLoadStatus = "idle" | "loading" | "ready" | "error";
+type DeveloperAction = "openLogs" | "exportDiagnostics";
+type DeveloperFeedbackTone = "success" | "error";
+type DiagnosticsReportHost = "electron" | "browser";
+
+/** Localized message descriptor for a token quota eligibility state. */
+export interface QuotaEligibilityMessage {
+  /** Message key to render. */
+  key: MessageKey;
+  /** Interpolation values such as date, rejection reason, and request limit. */
+  values?: MessageValues;
+}
+
+/** Contract for developer feedback. */
+interface DeveloperFeedback {
+  tone: DeveloperFeedbackTone;
+  message: string;
+}
+
+/** Contract for diagnostics report export success. */
+interface DiagnosticsReportExportSuccess {
+  canceled: false;
+  exportPath: string;
+  bytes: number;
+  host?: DiagnosticsReportHost;
+}
+
+/** Type definition for diagnostics report export result. */
+type DiagnosticsReportExportResult = { canceled: true } | DiagnosticsReportExportSuccess;
+
+/** Contract for renderer diagnostics report input. */
+interface RendererDiagnosticsReportInput {
+  state: AppState;
+  language: Language;
+  bridgeAvailable: boolean;
+  exportBridgeAvailable: boolean;
+}
+
+type SettingsTranslate = (key: MessageKey, values?: MessageValues) => string;
+type TrackAnalyticsEvent = (event: AnalyticsEvent) => void;
+
+/** Definition for log level storage key. */
+export const LOG_LEVEL_STORAGE_KEY = "memmy.developer.logLevel";
+
+const LOG_LEVELS: readonly LogLevel[] = ["error", "warn", "info", "debug"];
+
+/** Reads read log level. */
+export function readLogLevel(storage: Storage | undefined): LogLevel {
+  const value = storage?.getItem(LOG_LEVEL_STORAGE_KEY);
+  return LOG_LEVELS.includes(value as LogLevel) ? (value as LogLevel) : "info";
+}
+
+/** Writes write log level. */
+export function writeLogLevel(storage: Storage | undefined, level: LogLevel): void {
+  storage?.setItem(LOG_LEVEL_STORAGE_KEY, level);
+}
+
+const FALLBACK_TOKEN_USAGE: TokenUsageDto = {
+  planName: "Trial Token",
+  totalTokens: 0,
+  usedTokens: 0,
+  remainingTokens: 0,
+  expiresAt: null,
+  lastSyncedAt: null,
+  sceneUsages: []
+};
+
+const EMPTY_BYOK_TOKEN_USAGE: ByokTokenUsageSummary = {
+  inputTokens: 0,
+  outputTokens: 0,
+  totalTokens: 0,
+  cachedInputTokens: 0,
+  cacheCreationInputTokens: 0,
+  updatedAt: null,
+  byKind: [],
+  byProvider: [],
+  byModel: []
+};
+
+// Display order for both panels. Platform Cloud scenes omit embedding; BYOK
+// kinds already include it in the contract — no backend TokenUsageScene change.
+const TOKEN_USAGE_SCENES = ["agent_chat", "memory_summary", "memory_evolution", "embedding"] as const satisfies readonly ByokTokenUsageKind[];
+
+let activeInvitationRequest: {
+  client: Pick<AccountClient, "getInvitation">;
+  accountKey: string;
+  promise: Promise<AccountInvitationView>;
+} | null = null;
+
+/** Coalesces React remount/re-render requests while the idempotent PUT is in flight. */
+export function requestAccountInvitation(
+  client: Pick<AccountClient, "getInvitation">,
+  accountKey: string
+): Promise<AccountInvitationView> {
+  if (
+    activeInvitationRequest?.client === client
+    && activeInvitationRequest.accountKey === accountKey
+  ) {
+    return activeInvitationRequest.promise;
+  }
+
+  const promise = client.getInvitation();
+  activeInvitationRequest = { client, accountKey, promise };
+  const clear = () => {
+    if (activeInvitationRequest?.promise === promise) {
+      activeInvitationRequest = null;
+    }
+  };
+  void promise.then(clear, clear);
+  return promise;
+}
+
+/**
+ * The default analytics-tracking function for the pure view.
+ *
+ * @param _event The event to report; ignored in pure-render scenarios.
+ */
+function noopTrackAnalyticsEvent(_event: AnalyticsEvent): void {
+  return;
+}
+
+/**
+ * Renders the settings page.
+ *
+ * @returns The settings page node.
+ */
+export function SettingsPage() {
+  const { state, dispatch } = useAppState();
+  const { clients } = useApiClients();
+  const { track } = useAnalytics();
+  const { t } = useTranslation();
+  const update = useUpdateCoordinator();
+  const [activeTab, setActiveTab] = useState<SettingsTabId>(() => {
+    return readInitialSettingsTab(typeof window === "undefined" ? undefined : window.location.hash);
+  });
+
+  function selectSettingsTab(tab: SettingsTabId) {
+    setActiveTab(tab);
+    writeSettingsTabHash(tab);
+  }
+
+  return (
+    <AppFrame
+      title={t("settings.title")}
+      settingsNav={{
+        activeTab,
+        onSelectTab: selectSettingsTab
+      }}
+    >
+      <SettingsPageView
+        state={state}
+        dispatch={dispatch}
+        platform={typeof window === "undefined" ? undefined : window.memmy?.platform}
+        accountClient={clients?.account}
+        configClient={clients?.config}
+        byokTokenUsageClient={clients?.byokTokenUsage}
+        tokenQuotaClient={clients?.tokenQuota}
+        update={update}
+        track={track}
+        activeTab={activeTab}
+      />
+    </AppFrame>
+  );
+}
+
+/**
+ * Props for the pure settings-page view.
+ *
+ * Field meanings:
+ * - state: The current global UI state, providing bootstrap, navigation, and legacy-test-compatible data.
+ * - dispatch: The settings-change event dispatch function.
+ * - platform: The desktop runtime platform used for platform-specific window copy.
+ * - accountClient: The account session client, used for nickname updates and logout.
+ * - configClient: The live config write client; may be omitted in SSR tests.
+ * - byokTokenUsageClient: The BYOK API Key Token usage client; may be omitted in SSR tests.
+ * - update: The app-level desktop update state and primary action.
+ * - track: The analytics-tracking function; may be omitted in pure-view tests and default to a no-op.
+ */
+export interface SettingsPageViewProps {
+  state: AppState;
+  dispatch: Dispatch<AppAction>;
+  platform?: string;
+  accountClient?: AccountClient;
+  configClient?: ConfigClient;
+  byokTokenUsageClient?: ByokTokenUsageClient;
+  tokenQuotaClient?: TokenQuotaClient;
+  update: UpdateCoordinatorValue;
+  track?: TrackAnalyticsEvent;
+  activeTab?: SettingsTabId;
+  onActiveTabChange?: (tab: SettingsTabId) => void;
+}
+
+/** Returns whether a nickname input key event should save the current draft. */
+export function shouldSaveAccountNicknameOnKeyDown(event: import("react").KeyboardEvent<HTMLInputElement>): boolean {
+  return event.key === "Enter" && !isComposingKeyboardEvent(event);
+}
+
+/** Returns whether the canonical catalog still contains a configured BYOK Agent model. */
+export function hasConfiguredByokAgentModel(catalog: ModelConfigView | null | undefined): boolean {
+  return Boolean(catalog?.providers.some((provider) => provider.models.some((model) => (
+    model.source === "byok" && model.capabilities.includes("agent")
+  ))));
+}
+
+/** Reconciles local UI state after the backend account session has already been cleared. */
+export async function finalizeAccountLogout(input: {
+  modelConfig: ModelProviderConfig;
+  configClient?: Pick<ConfigClient, "getModelConfig" | "updateSettings">;
+  dispatch: Dispatch<AppAction>;
+}): Promise<"byok" | "unset"> {
+  let latestModelConfig = input.modelConfig;
+  try {
+    const refreshedModelConfig = await input.configClient?.getModelConfig();
+    if (refreshedModelConfig) {
+      latestModelConfig = refreshedModelConfig;
+      input.dispatch(appActions.modelConfigUpdated(latestModelConfig));
+    }
+  } catch (error) {
+    console.warn("refresh model config after logout failed", error);
+  }
+
+  input.dispatch(appActions.accountCleared());
+  const userMode = hasConfiguredByokAgentModel(latestModelConfig.catalog) ? "byok" : "unset";
+  input.dispatch(appActions.settingsUpdated({ userMode }));
+  try {
+    if (input.configClient) {
+      const savedSettings = await input.configClient.updateSettings({ userMode });
+      input.dispatch(appActions.settingsUpdated(savedSettings));
+    }
+  } catch (error) {
+    console.warn("persist mode after logout failed", error);
+  }
+  return userMode;
+}
+
+/**
+ * Renders the pure settings-page view.
+ *
+ * @param props The pure view props.
+ * @returns The settings page content node matching the prototype structure.
+ */
+export function SettingsPageView(props: SettingsPageViewProps) {
+  const {
+    state,
+    dispatch,
+    platform,
+    accountClient,
+    configClient,
+    byokTokenUsageClient,
+    tokenQuotaClient,
+    update,
+    track = noopTrackAnalyticsEvent,
+    activeTab: activeTabProp,
+    onActiveTabChange
+  } = props;
+  const { t, language } = useTranslation();
+  const bootstrap = state.bootstrap;
+  const [launchAtLogin, setLaunchAtLogin] = useState(false);
+  const [closeAction, setCloseAction] = useState<CloseMainWindowAction>(() => {
+    return readCloseMainWindowAction(typeof window === "undefined" ? undefined : window.localStorage);
+  });
+  const [menuBarIcon, setMenuBarIcon] = useState(true);
+  const [logLevel, setLogLevel] = useState<LogLevel>(() => {
+    return readLogLevel(typeof window === "undefined" ? undefined : window.localStorage);
+  });
+  const [developerBusy, setDeveloperBusy] = useState<DeveloperAction | null>(null);
+  const [developerFeedback, setDeveloperFeedback] = useState<DeveloperFeedback | null>(null);
+  const [confirm, setConfirm] = useState<ConfirmKind>(null);
+  const [isEditingNickname, setIsEditingNickname] = useState(false);
+  const [nicknameDraft, setNicknameDraft] = useState("");
+  const [accountBusy, setAccountBusy] = useState(false);
+  const [accountError, setAccountError] = useState<string | null>(null);
+  const [activeTabState, setActiveTabState] = useState<SettingsTabId>(() => {
+    return readInitialSettingsTab(typeof window === "undefined" ? undefined : window.location.hash);
+  });
+  const activeTab = activeTabProp ?? activeTabState;
+
+  function setActiveTab(tab: SettingsTabId) {
+    if (onActiveTabChange) {
+      onActiveTabChange(tab);
+      return;
+    }
+    setActiveTabState(tab);
+    writeSettingsTabHash(tab);
+  }
+
+  const [showApplyMore, setShowApplyMore] = useState(false);
+  const [feedbackText, setFeedbackText] = useState("");
+  const [feedbackSubmitting, setFeedbackSubmitting] = useState(false);
+  const [feedbackSubmitted, setFeedbackSubmitted] = useState(false);
+  const [feedbackError, setFeedbackError] = useState<string | null>(null);
+  const [quotaEligibility, setQuotaEligibility] = useState<TokenQuotaEligibility | null>(null);
+  const [byokUsage, setByokUsage] = useState<ByokTokenUsageSummary>(EMPTY_BYOK_TOKEN_USAGE);
+  const [byokUsageStatus, setByokUsageStatus] = useState<UsageLoadStatus>("idle");
+  const [inviteCopied, setInviteCopied] = useState(false);
+  const [invitationInfo, setInvitationInfo] = useState<AccountInvitationView | null>(null);
+  const [invitationLoadStatus, setInvitationLoadStatus] =
+    useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [invitationReloadVersion, setInvitationReloadVersion] = useState(0);
+  const preserveSuccessfulTestHydrateRef = useRef(false);
+  const appSettings = bootstrap?.app;
+  const privacySettings = bootstrap?.privacy;
+  const isByokMode = appSettings?.userMode === "byok";
+  const persistedMenuBarIconEnabled = appSettings?.menuBarIconEnabled;
+  const isAccountMode = appSettings?.userMode === "account";
+  const workspaceMode: ModelWorkspaceMode = isByokMode ? "byok" : "account";
+  const setupReturnRoute = readSettingsAddModelReturnRoute(
+    typeof window === "undefined" ? undefined : window.sessionStorage
+  );
+  const initialModelForm = hydrateModelConfigForm(state.modelConfig, isByokMode ? "local" : "cloud");
+  const [showApiConfig, setShowApiConfig] = useState(false);
+  const [protocol, setProtocol] = useState<Protocol>(initialModelForm.protocol);
+  const [modelId, setModelId] = useState(initialModelForm.modelId);
+  const [endpoint, setEndpoint] = useState(initialModelForm.endpoint);
+  const [apiKey, setApiKey] = useState(initialModelForm.apiKey);
+  const [apiKeyMasked, setApiKeyMasked] = useState(initialModelForm.apiKeyMasked);
+  const [showKey, setShowKey] = useState(false);
+  const mainModelFormValues = {
+    provider: fromProtocol(protocol),
+    endpoint,
+    model: modelId,
+    apiKey,
+    apiKeyMasked,
+    hasExistingApiKey: Boolean(apiKeyMasked)
+  };
+  const [llmValidation, setLlmValidation] = useState<ModelConfigValidationState>(initialModelForm.llmValidation);
+  const [embeddingMode, setEmbeddingMode] = useState<EmbeddingMode>(initialModelForm.embeddingMode);
+  const [embModelId, setEmbModelId] = useState(initialModelForm.embModelId);
+  const [embEndpoint, setEmbEndpoint] = useState(initialModelForm.embEndpoint);
+  const [embApiKey, setEmbApiKey] = useState(initialModelForm.embApiKey);
+  const [embApiKeyMasked, setEmbApiKeyMasked] = useState(initialModelForm.embApiKeyMasked);
+  const [showEmbKey, setShowEmbKey] = useState(false);
+  const embFormValues = {
+    provider: "openai",
+    endpoint: embEndpoint,
+    model: embModelId,
+    apiKey: embApiKey,
+    apiKeyMasked: embApiKeyMasked,
+    hasExistingApiKey: Boolean(embApiKeyMasked)
+  };
+  const [embValidation, setEmbValidation] = useState<ModelConfigValidationState>(initialModelForm.embValidation);
+  const [asrModelId, setAsrModelId] = useState(initialModelForm.asrModelId);
+  const [asrEndpoint, setAsrEndpoint] = useState(initialModelForm.asrEndpoint);
+  const [asrApiKey, setAsrApiKey] = useState(initialModelForm.asrApiKey);
+  const [asrApiKeyMasked, setAsrApiKeyMasked] = useState(initialModelForm.asrApiKeyMasked);
+  const [showAsrKey, setShowAsrKey] = useState(false);
+  const [asrValidation, setAsrValidation] = useState<ModelConfigValidationState>(initialModelForm.asrValidation);
+  const [optionalModelMissingWarning, setOptionalModelMissingWarning] = useState<OptionalModelMissingWarningKind | null>(null);
+  const [asrWarningAcknowledged, setAsrWarningAcknowledged] = useState(false);
+  const [imageGenProtocol, setImageGenProtocol] = useState<ImageProtocol>(initialModelForm.imageGenProtocol);
+  const [imageGenModel, setImageGenModel] = useState(initialModelForm.imageGenModelId);
+  const [imageGenEndpoint, setImageGenEndpoint] = useState(initialModelForm.imageGenEndpoint);
+  const [imageGenApiKey, setImageGenApiKey] = useState(initialModelForm.imageGenApiKey);
+  const [imageGenApiKeyMasked, setImageGenApiKeyMasked] = useState(initialModelForm.imageGenApiKeyMasked);
+  const [showImageGenKey, setShowImageGenKey] = useState(false);
+  const [imageGenValidation, setImageGenValidation] = useState<ModelConfigValidationState>(initialModelForm.imageGenValidation);
+  const [imageGenWarningAcknowledged, setImageGenWarningAcknowledged] = useState(false);
+  const [memoryModel, setMemoryModel] = useState<ModelConfig>(() => initialModelForm.memoryModel);
+  const [skillModel, setSkillModel] = useState<ModelConfig>(() => initialModelForm.skillModel);
+  const accountIdentifier = resolveAccountIdentifier(state);
+  const maskedAccountIdentifier = maskAccountIdentifier(accountIdentifier);
+  const accountName = isByokMode
+    ? resolveAccountFallback(t)
+    : state.account.nickname || maskedAccountIdentifier || resolveAccountFallback(t);
+  const accountMeta = isByokMode ? resolveAccountMeta(appSettings?.userMode, t) : maskedAccountIdentifier || resolveAccountMeta(appSettings?.userMode, t);
+  const accountInitial = isByokMode ? "·" : resolveAccountInitials(accountName);
+  const registeredAtText = formatRegisteredAt(state.account.registeredAt, t);
+  const defaultLaunchMode = appSettings?.defaultLaunchMode ?? state.navigation.preferredMode ?? "last";
+  const autoUpdateEnabled = appSettings?.autoUpdateEnabled ?? true;
+  const taskDoneNotificationEnabled = appSettings?.taskDoneNotificationEnabled ?? true;
+  const notificationSoundEnabled = appSettings?.notificationSoundEnabled ?? true;
+  const improvementPlan = privacySettings?.allowMemoryImprovementUpload ?? false;
+  const hasAccountSession = Boolean(state.account.email || state.account.phoneNumber || state.account.registeredAt);
+  const hasByokConfig = state.modelConfig.configured === true;
+  const modelMode = resolveInitialModelMode(appSettings?.userMode);
+  const modelModeLabel = t(modelMode === "platform" ? "settings.model.platformMode" : "settings.model.customMode");
+  const modelModeClass = modelMode === "platform" ? "bg-action-sky/10 text-action-sky" : "bg-status-success-soft text-status-success";
+  const modelDotClass = modelMode === "platform" ? "bg-action-sky" : "bg-status-success";
+  const modelHeaderSpacing = modelMode === "platform" && !showApiConfig ? "" : " mb-4";
+  const tokenUsage = bootstrap?.tokenUsage ?? FALLBACK_TOKEN_USAGE;
+  // The low-balance prompt tracks Agent 任务 (the task model), because that
+  // scene blocks the user first. It keeps the existing remaining <= 0 or
+  // usage >= 80% rule on those figures.
+  const agentQuota = tokenUsage.sceneUsages.find((scene) => scene.scene === "agent_chat");
+  const giftTotalTokens = agentQuota?.totalTokens ?? tokenUsage.totalTokens;
+  const giftRemainingTokens = agentQuota?.remainingTokens ?? tokenUsage.remainingTokens;
+  const giftBarUsedTokens = agentQuota?.usedTokens ?? tokenUsage.usedTokens;
+  const { isTokenLow } = resolveGiftTokenUsage(giftBarUsedTokens, giftTotalTokens, giftRemainingTokens);
+  const showGiftQuota = !isByokMode;
+  const invitationPromotion = bootstrap?.promotions?.invitation;
+  const invitationEnabled = invitationPromotion?.enabled === true;
+  const invitationRewardBody = invitationPromotion
+    && invitationPromotion.inviterRewardTokens > 0
+    && invitationPromotion.inviterRewardTokens === invitationPromotion.inviteeRewardTokens
+      ? t("settings.token.invite.bodyWithReward", {
+          count: formatTokenGiftAmount(invitationPromotion.inviterRewardTokens)
+        })
+      : t("settings.token.invite.body");
+  const displayInviteCode = invitationInfo?.invitationCode ?? null;
+  const inviteDailyLimitReached = invitationInfo?.dailyLimitReached ?? false;
+  const showInvitationBanner = invitationEnabled
+    && (invitationLoadStatus !== "ready" || invitationInfo?.enabled === true);
+  const canApplyMoreByPromotion = bootstrap?.promotions?.applyMore ?? true;
+  const quotaRequestPending = quotaEligibility?.state === "pending";
+  const quotaApplicationBlocked = quotaEligibility !== null && quotaEligibility.state !== "available";
+  const applyMoreButtonLabel = quotaRequestPending ? t("settings.token.applyMore.pending") : t("settings.token.applyMore");
+  const quotaEligibilityMessage = resolveQuotaEligibilityMessage(quotaEligibility, language);
+  const quotaEligibilityText = quotaEligibilityMessage
+    ? t(quotaEligibilityMessage.key, quotaEligibilityMessage.values)
+    : null;
+  const primaryModelId = state.modelConfig.configured ? modelId || state.modelConfig.model : "";
+  const mainModelTestKey = createModelConfigValidationKey(mainModelFormValues);
+  const isMainModelTestStale = Boolean(llmValidation.testedKey && llmValidation.testedKey !== mainModelTestKey);
+  const primaryModelValues: PrimaryModelValues = {
+    protocol,
+    modelId,
+    endpoint,
+    apiKey,
+    apiKeyMasked,
+    configured: Boolean(apiKey.trim() || apiKeyMasked)
+  };
+  const memoryModelFormValues = createModelFormValues(memoryModel, primaryModelValues);
+  const skillModelFormValues = createModelFormValues(skillModel, primaryModelValues);
+  const embTestKey = createModelConfigValidationKey(embFormValues);
+  const isEmbeddingTestStale = Boolean(embValidation.testedKey && embValidation.testedKey !== embTestKey);
+  const asrFormValues = createAsrModelFormValues(asrModelId, asrEndpoint, asrApiKey, asrApiKeyMasked);
+  const isAsrUsable = canSaveModelConfig(asrFormValues, asrValidation);
+  const asrTestKey = createModelConfigValidationKey(asrFormValues);
+  const isAsrTestStale = Boolean(asrValidation.testedKey && asrValidation.testedKey !== asrTestKey);
+  const imageGenFormValues = createImageGenModelFormValues(imageGenProtocol, imageGenModel, imageGenEndpoint, imageGenApiKey, imageGenApiKeyMasked);
+  const isImageGenUsable = canSaveModelConfig(imageGenFormValues, imageGenValidation);
+  const imageGenTestKey = createModelConfigValidationKey(imageGenFormValues);
+  const isImageGenTestStale = Boolean(imageGenValidation.testedKey && imageGenValidation.testedKey !== imageGenTestKey);
+  const canSaveApiConfig = canSaveModelConfig(mainModelFormValues, llmValidation)
+    && canUseModelConfig(memoryModel, memoryModelFormValues)
+    && canUseModelConfig(skillModel, skillModelFormValues)
+    && canSaveEmbeddingModelConfig(embeddingMode, embFormValues, embValidation);
+  const patchMemoryModel = (patch: Partial<ModelConfig>) => setMemoryModel((current) => ({ ...current, ...patch }));
+  const patchSkillModel = (patch: Partial<ModelConfig>) => setSkillModel((current) => ({ ...current, ...patch }));
+
+  /** Keeps the last known state on failure; submission still receives server-side validation. */
+  const refreshQuotaEligibility = useCallback(async (): Promise<TokenQuotaEligibility | null> => {
+    if (!tokenQuotaClient || !isAccountMode) {
+      setQuotaEligibility(null);
+      return null;
+    }
+
+    try {
+      const nextEligibility = await tokenQuotaClient.getEligibility();
+      setQuotaEligibility(nextEligibility);
+      return nextEligibility;
+    } catch (error) {
+      console.warn("load token quota eligibility failed", error);
+      return null;
+    }
+  }, [isAccountMode, tokenQuotaClient]);
+
+  useEffect(() => {
+    if (preserveSuccessfulTestHydrateRef.current) {
+      // The auto-save after a successful test only updates the global config; it must not clear the plaintext key currently being edited or the success state.
+      preserveSuccessfulTestHydrateRef.current = false;
+      return;
+    }
+
+    const hydrated = hydrateModelConfigForm(state.modelConfig, isByokMode ? "local" : "cloud");
+    setProtocol(hydrated.protocol);
+    setModelId(hydrated.modelId);
+    setEndpoint(hydrated.endpoint);
+    setApiKey(hydrated.apiKey);
+    setApiKeyMasked(hydrated.apiKeyMasked);
+    setLlmValidation(hydrated.llmValidation);
+    setEmbeddingMode(hydrated.embeddingMode);
+    setEmbModelId(hydrated.embModelId);
+    setEmbEndpoint(hydrated.embEndpoint);
+    setEmbApiKey(hydrated.embApiKey);
+    setEmbApiKeyMasked(hydrated.embApiKeyMasked);
+    setEmbValidation(hydrated.embValidation);
+    setAsrModelId(hydrated.asrModelId);
+    setAsrEndpoint(hydrated.asrEndpoint);
+    setAsrApiKey(hydrated.asrApiKey);
+    setAsrApiKeyMasked(hydrated.asrApiKeyMasked);
+    setAsrValidation(hydrated.asrValidation);
+    setAsrWarningAcknowledged(false);
+    setImageGenProtocol(hydrated.imageGenProtocol);
+    setImageGenModel(hydrated.imageGenModelId);
+    setImageGenEndpoint(hydrated.imageGenEndpoint);
+    setImageGenApiKey(hydrated.imageGenApiKey);
+    setImageGenApiKeyMasked(hydrated.imageGenApiKeyMasked);
+    setImageGenValidation(hydrated.imageGenValidation);
+    setImageGenWarningAcknowledged(false);
+    setMemoryModel(hydrated.memoryModel);
+    setSkillModel(hydrated.skillModel);
+  }, [isByokMode, state.modelConfig]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!configClient || !isAccountMode) {
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    void configClient.getTokenUsage().then((tokenUsage) => {
+      if (!cancelled) {
+        dispatch(appActions.tokenUsageUpdated(tokenUsage));
+      }
+    }).catch((error) => {
+      console.warn("load account token usage failed", error);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [configClient, dispatch, isAccountMode]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!accountClient || !isAccountMode || !hasAccountSession || !invitationEnabled) {
+      setInvitationInfo(null);
+      setInvitationLoadStatus("idle");
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    setInvitationLoadStatus("loading");
+    const accountKey =
+      state.account.email || state.account.phoneNumber || state.account.registeredAt || "account";
+    void requestAccountInvitation(accountClient, accountKey).then((result) => {
+      if (cancelled) {
+        return;
+      }
+      setInvitationInfo(result.enabled ? result : null);
+      setInvitationLoadStatus("ready");
+    }).catch((error) => {
+      if (cancelled) {
+        return;
+      }
+      console.warn("load account invitation failed", error);
+      setInvitationInfo(null);
+      setInvitationLoadStatus("error");
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    accountClient,
+    hasAccountSession,
+    invitationEnabled,
+    invitationReloadVersion,
+    isAccountMode
+  ]);
+
+  useEffect(() => {
+    void refreshQuotaEligibility();
+  }, [refreshQuotaEligibility]);
+
+  useEffect(() => {
+    if (quotaApplicationBlocked) {
+      setShowApplyMore(false);
+    }
+  }, [quotaApplicationBlocked]);
+
+  useEffect(() => {
+    if (!quotaRequestPending || !isAccountMode) {
+      return undefined;
+    }
+
+    /** Pending requests refresh on window focus instead of fixed-interval polling. */
+    const handleWindowFocus = () => {
+      void refreshQuotaEligibility().then(async (nextEligibility) => {
+        if (!nextEligibility || nextEligibility.state === "pending" || !configClient) {
+          return;
+        }
+
+        try {
+          const nextTokenUsage = await configClient.getTokenUsage();
+          dispatch(appActions.tokenUsageUpdated(nextTokenUsage));
+        } catch (error) {
+          console.warn("refresh reviewed token quota failed", error);
+        }
+      });
+    };
+
+    window.addEventListener("focus", handleWindowFocus);
+
+    return () => {
+      window.removeEventListener("focus", handleWindowFocus);
+    };
+  }, [configClient, dispatch, isAccountMode, quotaRequestPending, refreshQuotaEligibility]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!byokTokenUsageClient) {
+      setByokUsage(EMPTY_BYOK_TOKEN_USAGE);
+      setByokUsageStatus("idle");
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    setByokUsageStatus("loading");
+    void byokTokenUsageClient.getSummary().then((summary) => {
+      if (cancelled) {
+        return;
+      }
+      setByokUsage(summary);
+      setByokUsageStatus("ready");
+    }).catch((error) => {
+      console.warn("load byok token usage failed", error);
+      if (cancelled) {
+        return;
+      }
+      setByokUsage(EMPTY_BYOK_TOKEN_USAGE);
+      setByokUsageStatus("error");
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [byokTokenUsageClient]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    // Controlled pages already initialize activeTab from the hash in SettingsPage;
+    // only the standalone view needs to synchronize its local tab state here.
+    if (activeTabProp === undefined) {
+      const tabFromHash = resolveSettingsTabFromHash(window.location.hash);
+      if (tabFromHash) {
+        setActiveTabState(tabFromHash);
+      }
+    }
+
+    if (window.location.hash !== "#pet-avatar") {
+      return;
+    }
+
+    window.setTimeout(() => {
+      document.getElementById("pet-avatar")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 0);
+    // Mount-only deep-link sync; activeTabProp is read once for controlled vs local.
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !canApplyMoreByPromotion || quotaApplicationBlocked) {
+      return;
+    }
+
+    const openRequestedApplyMore = () => {
+      if (consumeTokenExhaustedApplyMoreRequest(window.sessionStorage)) {
+        setActiveTab("tokens");
+        openApplyMore();
+      }
+    };
+
+    openRequestedApplyMore();
+    window.addEventListener(TOKEN_EXHAUSTED_APPLY_MORE_EVENT, openRequestedApplyMore);
+
+    return () => {
+      window.removeEventListener(TOKEN_EXHAUSTED_APPLY_MORE_EVENT, openRequestedApplyMore);
+    };
+  }, [canApplyMoreByPromotion, quotaApplicationBlocked]);
+
+  useEffect(() => {
+    if (typeof persistedMenuBarIconEnabled === "boolean") {
+      setMenuBarIcon(persistedMenuBarIconEnabled);
+    }
+  }, [persistedMenuBarIconEnabled]);
+
+  // On mount, treat the log level persisted by the main process as authoritative, to avoid the local localStorage diverging from the main process.
+  useEffect(() => {
+    let cancelled = false;
+    void window.memmy?.getLogLevel().then((level) => {
+      if (!cancelled) {
+        setLogLevel(level);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  /**
+   * Saves the app settings and syncs the reducer.
+   *
+   * @param patch The app settings patch.
+   */
+  function persistSettings(patch: Partial<AppSettingsDto>) {
+    void (configClient?.updateSettings(patch) ?? Promise.resolve(patch)).then((savedSettings) => {
+      dispatch(appActions.settingsUpdated(savedSettings));
+    });
+  }
+
+  /**
+   * Saves the privacy settings and syncs the reducer.
+   *
+   * @param patch The privacy settings patch.
+   */
+  function persistPrivacy(patch: Partial<PrivacySettingsDto>) {
+    // Optimistic update: on click, immediately flip the badge/button label and keep the user's choice without waiting for the backend response.
+    dispatch(appActions.privacyUpdated(patch));
+    void (configClient?.updatePrivacy(patch) ?? Promise.resolve(patch))
+      .then((savedPrivacy) => {
+        dispatch(appActions.privacyUpdated(savedPrivacy));
+      })
+      .catch(() => {
+        // In local/logged-out state the backend does not persist privacy and throws; swallow the error and keep the optimistic result to avoid the UI bouncing back.
+      });
+  }
+
+  /**
+   * Switches the interface language.
+   *
+   * @param nextLanguage The interface language.
+   */
+  function handleLanguageChange(nextLanguage: string) {
+    persistSettings({ language: nextLanguage as Language });
+  }
+
+  /**
+   * Switches the default startup mode.
+   *
+   * @param nextMode The default startup mode.
+   */
+  function handleStartupModeChange(nextMode: string) {
+    const normalizedMode = nextMode as AppSettingsDto["defaultLaunchMode"];
+    void (configClient?.updateSettings({ defaultLaunchMode: normalizedMode }) ?? Promise.resolve({ defaultLaunchMode: normalizedMode })).then((savedSettings) => {
+      dispatch(appActions.settingsUpdated(savedSettings));
+      dispatch(appActions.preferredModeUpdated(normalizedMode));
+    });
+  }
+
+  /**
+   * Switches the default behavior when closing the main window and writes it to local storage.
+   *
+   * @param nextAction The close behavior the user selected.
+   */
+  function handleCloseActionChange(nextAction: string) {
+    const normalizedAction = nextAction as CloseMainWindowAction;
+    setCloseAction(normalizedAction);
+    writeCloseMainWindowAction(
+      typeof window === "undefined" ? undefined : window.localStorage,
+      normalizedAction
+    );
+  }
+
+  /**
+   * Toggles the macOS status bar icon.
+   *
+   * @param enabled Whether to show the status bar icon.
+   */
+  function handleMenuBarIconChange(enabled: boolean) {
+    setMenuBarIcon(enabled);
+    void (configClient?.updateSettings({ menuBarIconEnabled: enabled }) ?? Promise.resolve({ menuBarIconEnabled: enabled })).then((savedSettings) => {
+      const savedEnabled = savedSettings.menuBarIconEnabled ?? enabled;
+      dispatch(appActions.settingsUpdated(savedSettings));
+      setMenuBarIcon(savedEnabled);
+      void window.memmy?.setMenuBarIcon(savedEnabled);
+    });
+  }
+
+  /**
+   * Switches the log level and writes it to local storage, ensuring the selection is preserved across page switches.
+   *
+   * @param nextLevel The log level the user selected.
+   */
+  function handleLogLevelChange(nextLevel: string) {
+    const normalizedLevel = nextLevel as LogLevel;
+    setLogLevel(normalizedLevel);
+    writeLogLevel(typeof window === "undefined" ? undefined : window.localStorage, normalizedLevel);
+    // Sync to the main process: the GUI takes effect immediately, and the daemon reads the new level on its next restart.
+    void window.memmy?.setLogLevel(normalizedLevel);
+  }
+
+  /**
+   * Switches the primary model protocol, syncs the default API endpoint and default model ID, and clears the old protocol's API Key.
+   *
+   * @param nextProtocol The new protocol type.
+   */
+  function handleProtocolChange(nextProtocol: Protocol) {
+    setProtocol(nextProtocol);
+    setEndpoint(DEFAULT_ENDPOINTS[nextProtocol]);
+    setModelId("");
+    setApiKey("");
+    setApiKeyMasked("");
+  }
+
+  /**
+   * Expands the BYOK API Key configuration form for a registered user.
+   */
+  function handleSwitchToCustom() {
+    track({ name: "model_mode_switched", params: { page_path: "/settings", to_mode: "byok" }, consentTier: "basic" });
+    if (hasByokConfig) {
+      persistSettings({ userMode: "byok" });
+      setShowApiConfig(false);
+      return;
+    }
+
+    setShowApiConfig(true);
+  }
+
+  /**
+   * Switches back to the platform Token mode.
+   */
+  function handleSwitchToPlatform() {
+    if (!hasAccountSession) {
+      return;
+    }
+
+    track({ name: "model_mode_switched", params: { page_path: "/settings", to_mode: "platform" }, consentTier: "basic" });
+    persistSettings({ userMode: "account" });
+    setShowApiConfig(false);
+  }
+
+  /**
+   * Runs a real model connection test.
+   *
+   * @param config The current model config.
+   * @param patch The model-state patch function.
+   */
+  function testModelConfigConnection(config: ModelConfig, patch: (patch: Partial<ModelConfig>) => void, secretTarget: "memory" | "skill") {
+    const values = createModelFormValues(config, primaryModelValues);
+    testModelConnection({
+      configClient,
+      values,
+      setValidation: (validation) => patch({ validation }),
+      secretTarget,
+      messages: createTestModelConnectionMessages(t)
+    });
+  }
+
+  /**
+   * Runs a real connection test for the Embedding model.
+   */
+  function testEmbeddingConnection() {
+    testModelConnection({
+      configClient,
+      values: embFormValues,
+      setValidation: setEmbValidation,
+      capability: "embedding",
+      secretTarget: "embedding",
+      messages: createTestModelConnectionMessages(t)
+    });
+  }
+
+  /**
+   * Runs a real connection test for the ASR model.
+   */
+  function testAsrConnection() {
+    testModelConnection({
+      configClient,
+      values: asrFormValues,
+      setValidation: setAsrValidation,
+      capability: "asr",
+      secretTarget: "asr",
+      messages: createTestModelConnectionMessages(t)
+    });
+  }
+
+  /**
+   * When switching the image-generation provider, syncs the default API endpoint and default model ID, and clears the old provider's API Key.
+   *
+   * @param nextProtocol The new image-generation protocol id.
+   */
+  function changeImageGenProtocol(nextProtocol: string) {
+    const next = (IMAGE_PROTOCOL_OPTIONS.find((option) => option.value === nextProtocol)?.value ?? "openai") as ImageProtocol;
+    setImageGenProtocol(next);
+    setImageGenEndpoint(IMAGE_DEFAULT_ENDPOINTS[next]);
+    setImageGenModel("");
+    setImageGenApiKey("");
+    setImageGenWarningAcknowledged(false);
+  }
+
+  /**
+   * Runs a lightweight connection test for the image-generation model.
+   */
+  function testImageGenConnection() {
+    testModelConnection({
+      configClient,
+      values: imageGenFormValues,
+      setValidation: setImageGenValidation,
+      capability: "image",
+      secretTarget: "image",
+      messages: createTestModelConnectionMessages(t)
+    });
+  }
+
+  /**
+   * Records that the user has acknowledged the impact of leaving optional models unconfigured,
+   * The retired inline model form can no longer trigger this modal; keep the close action inert for old render snapshots.
+   */
+  function closeOptionalModelMissingWarning() {
+    if (optionalModelMissingWarning === "asr" || optionalModelMissingWarning === "both") {
+      setAsrWarningAcknowledged(true);
+    }
+
+    if (optionalModelMissingWarning === "imageGen" || optionalModelMissingWarning === "both") {
+      setImageGenWarningAcknowledged(true);
+    }
+
+    setOptionalModelMissingWarning(null);
+  }
+
+  /**
+   * Opens the "Request more quota" feedback modal, resetting the previous input and state.
+   */
+  function openApplyMore() {
+    if (quotaApplicationBlocked) {
+      return;
+    }
+    setFeedbackText("");
+    setFeedbackSubmitting(false);
+    setFeedbackSubmitted(false);
+    setFeedbackError(null);
+    setShowApplyMore(true);
+  }
+
+  /**
+   * Closes the "Request more quota" feedback modal.
+   */
+  function closeApplyMore() {
+    setShowApplyMore(false);
+  }
+
+  /**
+   * Submits the "Request more quota" feedback.
+   *
+   * Returns early when the text is too short; disables the button during submission; on success shows the success state and clears the input.
+   */
+  async function handleSubmitFeedback() {
+    if (quotaApplicationBlocked || !canSubmitFeedback(feedbackText) || feedbackSubmitting) {
+      return;
+    }
+    setFeedbackSubmitting(true);
+    setFeedbackError(null);
+    try {
+      const result = await tokenQuotaClient?.requestQuota(feedbackText);
+      if (result?.status === "pending") {
+        setQuotaEligibility((current) => ({
+          state: "pending",
+          requestCount: Math.min(5, (current?.requestCount ?? 0) + 1),
+          maxRequestCount: 5,
+          nextAllowedAtEpochMs: null,
+          latestRequestStatus: "pending",
+          latestReviewNote: null
+        }));
+      } else if (result?.status === "approved") {
+        await refreshQuotaEligibility();
+        try {
+          const nextTokenUsage = await configClient?.getTokenUsage();
+          if (nextTokenUsage) {
+            dispatch(appActions.tokenUsageUpdated(nextTokenUsage));
+          }
+        } catch (error) {
+          console.warn("refresh approved token quota failed", error);
+        }
+      }
+      setFeedbackSubmitted(true);
+      setFeedbackText("");
+    } catch (error) {
+      const nextEligibility = await refreshQuotaEligibility();
+      if (nextEligibility && nextEligibility.state !== "available") {
+        setFeedbackSubmitted(false);
+        setFeedbackText("");
+        return;
+      }
+      if (isPendingQuotaRequestError(error)) {
+        setQuotaEligibility({
+          state: "pending",
+          requestCount: 1,
+          maxRequestCount: 5,
+          nextAllowedAtEpochMs: null,
+          latestRequestStatus: "pending",
+          latestReviewNote: null
+        });
+        setFeedbackSubmitted(false);
+        setFeedbackText("");
+        return;
+      }
+      // Show an error on submission failure (e.g. an approval is already pending, creating the approval failed, or not logged in) to avoid a "nothing happens when clicked" experience.
+      setFeedbackError(error instanceof Error ? error.message : t("settings.token.applyMore.error"));
+    } finally {
+      setFeedbackSubmitting(false);
+    }
+  }
+
+  /**
+   * Opens the desktop log directory in the system file manager.
+   */
+  function openDeveloperLogs() {
+    if (developerBusy) {
+      return;
+    }
+
+    const openLogsDirectory = typeof window === "undefined" ? undefined : window.memmy?.openLogsDirectory;
+    if (typeof openLogsDirectory !== "function") {
+      setDeveloperFeedback({ tone: "error", message: t("settings.developer.openLogsUnavailable") });
+      return;
+    }
+
+    setDeveloperBusy("openLogs");
+    setDeveloperFeedback(null);
+    void openLogsDirectory()
+      .then(() => setDeveloperFeedback({ tone: "success", message: t("settings.developer.openLogsDone") }))
+      .catch((error) => setDeveloperFeedback({ tone: "error", message: error instanceof Error ? error.message : String(error) }))
+      .finally(() => setDeveloperBusy(null));
+  }
+
+  /**
+   * Exports a redacted diagnostics report through the desktop bridge.
+   */
+  function exportDiagnosticsReport() {
+    if (developerBusy) {
+      return;
+    }
+
+    const exportDiagnosticsReportBridge = typeof window === "undefined" ? undefined : window.memmy?.exportDiagnosticsReport;
+    setDeveloperBusy("exportDiagnostics");
+    setDeveloperFeedback(null);
+    const exportTask = typeof exportDiagnosticsReportBridge === "function"
+      ? exportDiagnosticsReportBridge()
+      : downloadDiagnosticsReportInBrowser(buildRendererDiagnosticsReport({
+          state,
+          language,
+          bridgeAvailable: typeof window !== "undefined" && Boolean(window.memmy),
+          exportBridgeAvailable: false
+        }));
+
+    void exportTask
+      .then((result) => {
+        const parsed = parseDiagnosticsReportExportResult(result);
+        if (parsed.canceled) {
+          return;
+        }
+        setDeveloperFeedback({
+          tone: "success",
+          message: t("settings.developer.exportDiagnosticsDone", {
+            path: formatDeveloperPath(parsed.exportPath),
+            size: formatFileSize(parsed.bytes)
+          })
+        });
+      })
+      .catch((error) => setDeveloperFeedback({ tone: "error", message: error instanceof Error ? error.message : String(error) }))
+      .finally(() => setDeveloperBusy(null));
+  }
+
+  /**
+   * Starts editing the registered account's nickname.
+   */
+  function startNicknameEdit() {
+    setNicknameDraft(state.account.nickname);
+    setAccountError(null);
+    setIsEditingNickname(true);
+  }
+
+  /**
+   * Saves the registered account's nickname, falling back to the primary identifier when left blank.
+   */
+  async function saveNickname() {
+    const nextNickname = nicknameDraft.trim() || resolveDefaultNickname(accountIdentifier) || accountName;
+    if (!nextNickname) {
+      return;
+    }
+
+    setAccountBusy(true);
+    setAccountError(null);
+    try {
+      const profile = await (accountClient?.updateProfile({ nickname: nextNickname }) ?? Promise.resolve(null));
+      dispatch(appActions.accountUpdated({
+        email: profile?.email ?? state.account.email,
+        phoneNumber: profile?.phoneNumber ?? state.account.phoneNumber,
+        nickname: profile?.nickname ?? nextNickname,
+        registeredAt: profile?.registeredAt ?? state.account.registeredAt
+      }));
+      setIsEditingNickname(false);
+    } catch (error) {
+      console.warn("update account nickname failed", error);
+      setAccountError(t("settings.account.saveNicknameFailed"));
+    } finally {
+      setAccountBusy(false);
+    }
+  }
+
+  /** Handles the registered account logout confirmation. */
+  async function handleConfirmAccountExit() {
+    if (accountBusy) return;
+    setAccountBusy(true);
+    setAccountError(null);
+    try {
+      await (accountClient?.logout() ?? Promise.resolve({ ok: true as const }));
+      track({ name: "account_logout", params: { page_path: "/settings" }, consentTier: "basic" });
+      const nextUserMode = await finalizeAccountLogout({
+        modelConfig: state.modelConfig,
+        configClient,
+        dispatch
+      });
+      if (nextUserMode === "unset") {
+        dispatch(appActions.navigate("/welcome"));
+      }
+      setConfirm(null);
+    } catch (error) {
+      console.warn("logout account failed", error);
+      setAccountError(t("settings.account.logoutFailed"));
+      setConfirm(null);
+    } finally {
+      setAccountBusy(false);
+    }
+  }
+
+  const confirmDialog = confirm ? resolveAccountConfirmDialog(t) : null;
+  return (
+    <div
+      className="settings-page h-full overflow-y-auto"
+    >
+      <div className="app-frame-page-content max-w-2xl mx-auto py-8">
+        <div
+          id="settings-panel-account"
+          role="tabpanel"
+          aria-labelledby="settings-tab-account"
+          hidden={activeTab !== "account"}
+        >
+        <Section icon={<User size={16} className="text-text-ink/60" />} title={t("settings.account")}>
+          <div className="settings-account-summary">
+            <div className="settings-account-summary__main">
+              {isAccountMode && (
+                <div className="w-12 h-12 rounded-full bg-action-sky/15 flex items-center justify-center shrink-0">
+                  <span className="text-base font-bold text-action-sky">{accountInitial}</span>
+                </div>
+              )}
+              <div className="settings-account-copy">
+                <div className="flex items-center gap-2 mb-1 min-w-0">
+                  {isEditingNickname ? (
+                    <div className="flex flex-1 min-w-0 items-center gap-2">
+                      <input
+                        type="text"
+                        aria-label={t("settings.account.nickname")}
+                        value={nicknameDraft}
+                        onChange={(event) => setNicknameDraft(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (shouldSaveAccountNicknameOnKeyDown(event)) {
+                            void saveNickname();
+                          }
+                          if (event.key === "Escape") {
+                            setIsEditingNickname(false);
+                          }
+                        }}
+                        disabled={accountBusy}
+                        maxLength={32}
+                        className="min-w-0 flex-1 px-2.5 py-1.5 border border-border-stone/50 rounded-input bg-background-paper text-sm text-text-ink focus:outline-none disabled:opacity-60"
+                      />
+                      <button type="button" onClick={() => void saveNickname()} disabled={accountBusy} className="px-2.5 py-1.5 text-xs text-white bg-action-sky rounded-btn hover:bg-action-sky-hover disabled:opacity-60 cursor-pointer disabled:cursor-not-allowed">
+                        {t("common.save")}
+                      </button>
+                      <button type="button" onClick={() => setIsEditingNickname(false)} disabled={accountBusy} className="px-2.5 py-1.5 text-xs text-text-ink/60 border border-border-stone/40 rounded-btn hover:bg-canvas-oat/60 disabled:opacity-60 cursor-pointer disabled:cursor-not-allowed">
+                        {t("common.cancel")}
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <OverflowTooltipText
+                        className="settings-account-heading-name text-sm font-semibold text-text-ink truncate"
+                        text={accountName}
+                      />
+                      {isAccountMode && (
+                        <button type="button" aria-label={t("settings.account.editNickname")} onClick={startNicknameEdit} className="shrink-0 text-xs text-action-sky hover:underline cursor-pointer">
+                          {t("settings.account.editNickname")}
+                        </button>
+                      )}
+                    </>
+                  )}
+                </div>
+                <div className="min-w-0 text-xs text-text-ink/55 leading-relaxed">
+                  {isAccountMode ? (
+                    <div className="min-w-0 space-y-0.5">
+                      <OverflowTooltipText className="settings-account-meta-line block truncate" text={accountMeta} />
+                      <div className="text-text-ink/45">{t("settings.account.registeredAt", { value: registeredAtText })}</div>
+                      {accountError && <div className="text-status-error">{accountError}</div>}
+                    </div>
+                  ) : (
+                    <OverflowTooltipText className="settings-account-meta-line block truncate" text={accountMeta} />
+                  )}
+                </div>
+              </div>
+            </div>
+            {isAccountMode && (
+              <button
+                type="button"
+                onClick={() => setConfirm("logout")}
+                disabled={accountBusy}
+                className="settings-account-action shrink-0 flex items-center gap-1.5 px-3.5 py-1.5 text-xs text-text-ink/70 border border-border-stone/40 rounded-btn hover:bg-canvas-oat/60 transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                <LogOut size={12} /> {t("settings.logout")}
+              </button>
+            )}
+            {isByokMode && (
+              <button
+                type="button"
+                onClick={() => dispatch(appActions.navigate("/welcome"))}
+                className="settings-account-action shrink-0 px-3.5 py-1.5 text-xs text-white bg-action-sky rounded-btn hover:bg-action-sky-hover transition-colors cursor-pointer"
+              >
+                {t("login.continue")}
+              </button>
+            )}
+          </div>
+        </Section>
+
+        <Section icon={<Shield size={16} className="text-text-ink/60" />} title={t("settings.privacy")}>
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex-1">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-text-ink/70">{t("settings.privacy.shareData")}</span>
+                  <span className={`px-2 py-0.5 text-[10px] font-normal rounded-tag ${improvementPlan ? "bg-action-sky/10 text-action-sky" : "bg-canvas-oat text-text-ink/55"}`}>
+                    {improvementPlan ? t("settings.privacy.active") : t("settings.privacy.off")}
+                  </span>
+                </div>
+                <p className="text-xs text-text-ink/55 mt-1 leading-relaxed">
+                  {improvementPlan
+                    ? t("settings.privacy.enabledDesc")
+                    : t("settings.privacy.disabledDesc")}
+                </p>
+              </div>
+              <div className="shrink-0 ml-4">
+                <Toggle
+                  checked={improvementPlan}
+                  onChange={(checked) => persistPrivacy({ allowMemoryImprovementUpload: checked })}
+                  ariaLabel={t("settings.privacy.shareData")}
+                />
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => void openExternalUrl(getLegalLinkUrl("data", language, bootstrap?.legal))}
+              className="inline-flex items-center gap-1 text-xs text-action-sky/70 hover:text-action-sky transition-colors cursor-pointer"
+            >
+              {t("settings.privacy.learnMore")}
+              <ExternalLink size={10} />
+            </button>
+          </div>
+        </Section>
+        </div>
+
+        <div
+          id="settings-panel-model"
+          role="tabpanel"
+          aria-labelledby="settings-tab-model"
+          hidden={activeTab !== "model"}
+        >
+        <div id="model-config">
+          <ModelWorkspaceSection
+            mode={workspaceMode}
+            seedConfig={state.modelConfig}
+            configClient={configClient}
+            onConfigSaved={(saved) => dispatch(appActions.modelConfigUpdated(saved))}
+            onFinishSetup={setupReturnRoute === "/onboarding"
+              ? () => {
+                  window.sessionStorage.removeItem(SETTINGS_ADD_MODEL_RETURN_STORAGE_KEY);
+                  const nextUrl = `${window.location.pathname}${window.location.search}`;
+                  window.history.replaceState(window.history.state, "", nextUrl);
+                  dispatch(appActions.navigate("/onboarding"));
+                }
+              : undefined}
+            onReturnToMain={() => dispatch(appActions.navigate("/main"))}
+            autoOpenAddConnection={
+              setupReturnRoute === "/main"
+            }
+          />
+        </div>
+        </div>
+
+        <div
+          id="settings-panel-tokens"
+          role="tabpanel"
+          aria-labelledby="settings-tab-tokens"
+          hidden={activeTab !== "tokens"}
+        >
+        <div id="token-usage" className="mb-6">
+          <div className="flex items-center justify-between gap-4 mb-3">
+            <div className="flex items-center gap-2">
+              <Zap size={16} className="text-text-ink/60" />
+              <h2 className="text-sm font-semibold text-text-ink">{t("settings.tokens")}</h2>
+            </div>
+            <UsageStatusLabel status={byokUsageStatus} updatedAt={byokUsage.updatedAt} />
+          </div>
+
+          {(isTokenLow || quotaEligibilityText) && showGiftQuota && (
+            <div className="mb-4 flex items-center gap-2.5 p-4 bg-status-error-soft rounded-card border border-status-error/20">
+              <Info size={14} className="text-status-error mt-0.5 shrink-0" />
+              <p className="flex-1 text-xs text-status-error/85 leading-relaxed">
+                {quotaEligibilityText ?? t("settings.token.lowHint")}
+              </p>
+              {quotaRequestPending ? (
+                <button
+                  type="button"
+                  disabled
+                  className="shrink-0 px-3 py-1.5 text-xs font-normal text-white bg-status-error rounded-btn hover:opacity-90 transition-opacity cursor-pointer disabled:opacity-55 disabled:cursor-not-allowed"
+                >
+                  {applyMoreButtonLabel}
+                </button>
+              ) : canApplyMoreByPromotion && isTokenLow && (!quotaEligibility || quotaEligibility.state === "available") ? (
+                <button
+                  type="button"
+                  onClick={openApplyMore}
+                  className="shrink-0 px-3 py-1.5 text-xs font-normal text-white bg-status-error rounded-btn hover:opacity-90 transition-opacity cursor-pointer"
+                >
+                  {applyMoreButtonLabel}
+                </button>
+              ) : null}
+            </div>
+          )}
+
+          <UsageDetails
+            showPlatform={showGiftQuota}
+            platformUsage={tokenUsage}
+            byokUsage={byokUsage}
+            byokUsageStatus={byokUsageStatus}
+          />
+        </div>
+
+        {isAccountMode && showGiftQuota && showInvitationBanner ? (
+          <div
+            className={`${usageStyles.invitationCard} border ${
+              inviteDailyLimitReached
+                ? "bg-text-ink/[0.05] border-border-stone/50"
+                : "bg-action-sky/6 border-action-sky/15"
+            }`}
+          >
+            <span
+              className={`w-8 h-8 shrink-0 rounded-full flex items-center justify-center ${
+                inviteDailyLimitReached ? "bg-text-ink/10 text-text-ink/40" : "bg-action-sky/12 text-action-sky"
+              }`}
+            >
+              <Gift size={15} strokeWidth={2.1} aria-hidden="true" />
+            </span>
+            <div className="min-w-0">
+              <p className="text-sm text-text-ink/80 leading-5">{t("settings.token.invite.title")}</p>
+              <p
+                className={`mt-0.5 text-xs leading-4 ${
+                  inviteDailyLimitReached ? "text-text-ink/50" : "text-text-ink/45"
+                }`}
+              >
+                {invitationLoadStatus === "error"
+                  ? t("settings.token.invite.loadFailed")
+                  : invitationLoadStatus === "loading" || invitationLoadStatus === "idle"
+                    ? t("settings.token.invite.loading")
+                    : inviteDailyLimitReached
+                      ? t("settings.token.invite.dailyLimit")
+                      : invitationRewardBody}
+              </p>
+            </div>
+            {displayInviteCode ? (
+              <div className={usageStyles.invitationActions}>
+                <code
+                  className={`px-2.5 py-1.5 text-xs font-semibold tracking-wide bg-background-paper rounded-input border ${
+                    inviteDailyLimitReached
+                      ? "text-text-ink/35 border-border-stone/50"
+                      : "text-text-ink border-action-sky/20"
+                  }`}
+                >
+                  {displayInviteCode}
+                </code>
+                <button
+                  type="button"
+                  className={`inline-flex items-center gap-1 px-2.5 py-1.5 text-xs rounded-btn border transition-colors cursor-pointer ${
+                    inviteDailyLimitReached
+                      ? "text-text-ink/35 border-border-stone/50 hover:bg-text-ink/[0.03]"
+                      : "text-action-sky border-action-sky/30 hover:bg-action-sky/8"
+                  }`}
+                  onClick={() => {
+                    void (async () => {
+                      try {
+                        if (typeof navigator === "undefined" || typeof navigator.clipboard?.writeText !== "function") {
+                          throw new Error("Clipboard API is unavailable");
+                        }
+                        await copyInvitationCode({
+                          invitationCode: displayInviteCode,
+                          clipboard: navigator.clipboard,
+                          track
+                        });
+                        setInviteCopied(true);
+                        window.setTimeout(() => setInviteCopied(false), 2000);
+                      } catch (error) {
+                        console.warn("copy invite code failed", error);
+                      }
+                    })();
+                  }}
+                >
+                  <Copy size={12} strokeWidth={2.2} />
+                  {inviteCopied ? t("settings.token.invite.copied") : t("settings.token.invite.copy")}
+                </button>
+              </div>
+            ) : invitationLoadStatus === "error" ? (
+              <button
+                type="button"
+                className="shrink-0 px-2.5 py-1.5 text-xs rounded-btn border text-action-sky border-action-sky/30 hover:bg-action-sky/8 cursor-pointer"
+                onClick={() => setInvitationReloadVersion((current) => current + 1)}
+              >
+                {t("settings.token.invite.retry")}
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+        </div>
+
+        <div
+          id="settings-panel-preferences"
+          role="tabpanel"
+          aria-labelledby="settings-tab-preferences"
+          hidden={activeTab !== "preferences"}
+        >
+        <Section icon={<Palette size={16} className="text-text-ink/60" />} title={t("settings.general")}>
+          <SelectRow
+            label={t("settings.language")}
+            description={t("settings.general.languageDescription")}
+            value={language}
+            onChange={handleLanguageChange}
+            options={[
+              { value: "zh-CN", label: t("settings.general.language.zh") },
+              { value: "en-US", label: "English" }
+            ]}
+          />
+        </Section>
+
+        <Section icon={<Rocket size={16} className="text-text-ink/60" />} title={t("settings.window")} sectionId="pet-avatar">
+          <div className="space-y-1">
+            <ToggleRow label={t("settings.window.launchAtLogin")} description={t("settings.window.launchAtLoginDesc")} checked={launchAtLogin} onChange={setLaunchAtLogin} />
+            <Divider />
+            <SelectRow
+              label={t("settings.preferredMode")}
+              description={t("settings.window.defaultModeDesc")}
+              value={defaultLaunchMode}
+              onChange={handleStartupModeChange}
+              options={[
+                { value: "pet", label: t("settings.window.mode.pet") },
+                { value: "full", label: t("settings.window.mode.full") },
+                { value: "last", label: t("settings.window.mode.last") }
+              ]}
+            />
+            <Divider />
+            <SelectRow
+              label={t("settings.window.closeAction")}
+              description={t("settings.window.closeActionDesc")}
+              value={closeAction}
+              onChange={handleCloseActionChange}
+              options={[
+                { value: "quit", label: t("settings.window.close.quit") },
+                { value: "tray", label: t("settings.window.close.tray") },
+                { value: "pet", label: t("settings.window.close.pet") }
+              ]}
+            />
+            <Divider />
+            <ToggleRow
+              label={t("settings.window.menuBarIcon")}
+              description={t(platform === "win32" ? "settings.window.menuBarIconDescWindows" : "settings.window.menuBarIconDesc")}
+              checked={menuBarIcon}
+              onChange={handleMenuBarIconChange}
+            />
+          </div>
+        </Section>
+
+        <Section icon={<Bell size={16} className="text-text-ink/60" />} title={t("settings.notifications")}>
+          <div className="space-y-1">
+            <ToggleRow label={t("settings.notifications.update")} description={t("settings.notifications.updateDesc")} checked={autoUpdateEnabled} onChange={(checked) => persistSettings({ autoUpdateEnabled: checked })} />
+            <Divider />
+            <ToggleRow label={t("settings.notifications.taskDone")} description={t("settings.notifications.taskDoneDesc")} checked={taskDoneNotificationEnabled} onChange={(checked) => persistSettings({ taskDoneNotificationEnabled: checked })} />
+            <Divider />
+            <ToggleRow label={t("settings.notifications.sound")} description={t("settings.notifications.soundDesc")} checked={notificationSoundEnabled} onChange={(checked) => persistSettings({ notificationSoundEnabled: checked })} />
+          </div>
+        </Section>
+        </div>
+
+        <div
+          id="settings-panel-about"
+          role="tabpanel"
+          aria-labelledby="settings-tab-about"
+          hidden={activeTab !== "about"}
+        >
+        <Section icon={<Info size={16} className="text-text-ink/60" />} title={t("settings.about")}>
+          <div className="space-y-3">
+            <div className="flex items-center flex-wrap gap-3">
+              <span className="text-text-ink/70 font-mono text-xs">Memmy v{update.appVersion}</span>
+              <button
+                type="button"
+                onClick={() => void update.requestPrimaryAction()}
+                disabled={isUpdateBusy(update.phase)}
+                className="shrink-0 flex items-center gap-1.5 px-3 py-1.5 text-xs text-action-sky border border-action-sky/30 rounded-btn hover:bg-action-sky/8 transition-colors cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                {isUpdateBusy(update.phase) && <Loader2 size={12} className="animate-spin" />}
+                {resolveUpdateButtonLabel(update.phase, t)}
+              </button>
+              <LinkButton label={t("settings.about.terms")} onClick={() => void openExternalUrl(getLegalLinkUrl("terms", language, bootstrap?.legal))} />
+            </div>
+            {update.feedback && (
+              <div className={`text-xs ${update.phase === "error" ? "text-status-error" : "text-text-ink/45"}`}>
+                {t(update.feedback.key, update.feedback.values)}
+              </div>
+            )}
+            {update.phase === "downloading" && (
+              <UpdateDownloadProgress progress={update.downloadProgress} t={t} />
+            )}
+          </div>
+        </Section>
+
+        <Section icon={<Settings2 size={16} className="text-text-ink/60" />} title={t("settings.developer")}>
+          <div className="space-y-1">
+            <SelectRow
+              label={t("settings.developer.logLevel")}
+              description={t("settings.developer.logLevelDesc")}
+              value={logLevel}
+              onChange={handleLogLevelChange}
+              options={[
+                { value: "error", label: "Error" },
+                { value: "warn", label: "Warn" },
+                { value: "info", label: t("settings.developer.logInfo") },
+                { value: "debug", label: t("settings.developer.logDebug") }
+              ]}
+            />
+            <div className="flex flex-wrap gap-2 pt-2 justify-start">
+              <button
+                type="button"
+                onClick={openDeveloperLogs}
+                disabled={developerBusy !== null}
+                className="flex items-center gap-1.5 px-4 py-2 text-xs text-text-ink/70 border border-border-stone/40 rounded-btn hover:bg-canvas-oat/60 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {developerBusy === "openLogs" ? <Loader2 size={12} className="animate-spin" /> : <FolderOpen size={12} />}
+                {t("settings.developer.openLogs")}
+              </button>
+              <button
+                type="button"
+                onClick={exportDiagnosticsReport}
+                disabled={developerBusy !== null}
+                className="flex items-center gap-1.5 px-4 py-2 text-xs text-text-ink/70 border border-border-stone/40 rounded-btn hover:bg-canvas-oat/60 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {developerBusy === "exportDiagnostics" ? <Loader2 size={12} className="animate-spin" /> : <ExternalLink size={12} />}
+                {t("settings.developer.exportDiagnostics")}
+              </button>
+            </div>
+            {developerFeedback && (
+              <div className={`flex items-center gap-2 pt-2 text-xs ${developerFeedback.tone === "success" ? "text-status-success" : "text-status-error"}`}>
+                {developerFeedback.tone === "success" ? <CheckCircle2 size={13} /> : <AlertTriangle size={13} />}
+                <span className="min-w-0 break-all">{developerFeedback.message}</span>
+              </div>
+            )}
+          </div>
+        </Section>
+        </div>
+
+        <div className="h-8" />
+      </div>
+
+      {confirm && (
+        <ConfirmDialog
+          open
+          title={confirmDialog?.title ?? ""}
+          message={confirmDialog?.desc ?? ""}
+          cancelLabel={t("dialog.cancel")}
+          closeLabel={t("common.close")}
+          confirmLabel={confirmDialog?.ok ?? t("dialog.ok")}
+          confirmDisabled={accountBusy}
+          confirmVariant="danger"
+          ariaLabel={confirmDialog?.ariaLabel}
+          width={360}
+          onCancel={() => setConfirm(null)}
+          onConfirm={handleConfirmAccountExit}
+        />
+      )}
+      {showApplyMore && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-text-ink/30 backdrop-blur-sm"
+          role="presentation"
+          onClick={(event) => event.target === event.currentTarget && closeApplyMore()}
+        >
+          <div
+            className="bg-background-paper rounded-card-lg shadow-2xl w-full max-w-md mx-4 overflow-hidden border border-border-stone/30"
+            role="dialog"
+            aria-modal="true"
+            aria-label={t("settings.token.applyMore.title")}
+          >
+            <div className="px-7 pt-7 pb-4 text-center">
+              <div className="flex justify-center mb-1">
+                <Memmy pose="hum" size={120} className="memmy-bob" />
+              </div>
+              <h2 className="text-lg font-bold text-text-ink">{t("settings.token.applyMore.title")}</h2>
+            </div>
+
+            <div className="px-7">
+              {quotaRequestPending && !feedbackSubmitted ? (
+                <p className="py-6 text-center text-sm text-status-error">
+                  {t("settings.token.applyMore.pendingDesc")}
+                </p>
+              ) : feedbackSubmitted ? (
+                <p className="py-6 text-center text-sm text-status-success">
+                  {t("settings.token.applyMore.success")}
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  <textarea
+                    value={feedbackText}
+                    onChange={(event) => {
+                      setFeedbackText(event.target.value);
+                      if (feedbackError) {
+                        setFeedbackError(null);
+                      }
+                    }}
+                    placeholder={t("settings.token.applyMore.placeholder")}
+                    rows={5}
+                    className="w-full px-3 py-2.5 text-sm text-text-ink bg-canvas-oat/40 border border-border-stone/30 rounded-card resize-none focus:outline-none"
+                  />
+                  {!canSubmitFeedback(feedbackText) && (
+                    <p className="text-xs text-text-ink/45">
+                      {t("settings.token.applyMore.minHint", { count: Math.max(0, FEEDBACK_MIN_LENGTH - feedbackLength(feedbackText)) })}
+                    </p>
+                  )}
+                  {feedbackError && (
+                    <p className="text-xs text-status-error">{feedbackError}</p>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <div className="flex gap-3 px-7 py-6 mt-1">
+              {feedbackSubmitted || quotaRequestPending ? (
+                <button
+                  type="button"
+                  onClick={closeApplyMore}
+                  className="flex-1 py-3 text-sm text-white bg-action-sky rounded-btn hover:bg-action-sky-hover transition-colors font-semibold cursor-pointer shadow-md"
+                >
+                  {t("dialog.ok")}
+                </button>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    onClick={closeApplyMore}
+                    className="flex-1 py-3 text-sm text-text-ink/65 bg-canvas-oat border border-border-stone/40 rounded-btn hover:bg-canvas-oat/80 transition-colors cursor-pointer"
+                  >
+                    {t("settings.token.applyMore.skip")}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleSubmitFeedback()}
+                    disabled={quotaApplicationBlocked || !canSubmitFeedback(feedbackText) || feedbackSubmitting}
+                    className="flex-1 py-3 text-sm text-white bg-action-sky rounded-btn hover:bg-action-sky-hover transition-colors font-semibold cursor-pointer shadow-md disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    {t("settings.token.applyMore.submit")}
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+      {optionalModelMissingWarning && <OptionalModelMissingWarningModal kind={optionalModelMissingWarning} onClose={closeOptionalModelMissingWarning} />}
+    </div>
+  );
+}
+
+/**
+ * Inline Token usage details props.
+ *
+ * Field meanings:
+ * - showPlatform: Whether to show the platform-gifted channel.
+ * - platformUsage: Platform quota aggregate and scene details.
+ * - byokUsage: The local BYOK API Key Token usage summary.
+ * - byokUsageStatus: The local usage loading status.
+ */
+export interface UsageDetailsProps {
+  showPlatform: boolean;
+  platformUsage: TokenUsageDto;
+  byokUsage: ByokTokenUsageSummary;
+  byokUsageStatus: UsageLoadStatus;
+}
+
+/**
+ * Renders the complete Token usage breakdown inline.
+ *
+ * @param props The Token usage details props.
+ * @returns Platform-gifted and BYOK API Key usage sections.
+ */
+export function UsageDetails(props: UsageDetailsProps) {
+  const { t } = useTranslation();
+  const [selectedUsageModelId, setSelectedUsageModelId] = useState("all");
+  // Neither panel invents rows. The platform grants quota per scene and does
+  // not currently budget embedding at all, while own-key spend only exists for
+  // scenes that have actually run, so both lists come straight from the
+  // backend payload; TOKEN_USAGE_SCENES only fixes the display order.
+  const platformScenes = orderByScene(props.platformUsage.sceneUsages, (usage) => usage.scene);
+  const byokUsageByKind = TOKEN_USAGE_SCENES.map((kind) => (
+    props.byokUsage.byKind.find((usage) => usage.kind === kind) ?? emptyByokUsage(kind)
+  ));
+  const selectedUsageModelKey = selectedUsageModelId === "all"
+    || props.byokUsage.byModel.some((usage) => byokUsageModelKey(usage) === selectedUsageModelId)
+    ? selectedUsageModelId
+    : "all";
+  const byokUsageModelOptions: SelectOption[] = [
+    {
+      value: "all",
+      label: t("settings.token.allModels"),
+      selectedLabel: t("settings.token.allModels")
+    },
+    ...props.byokUsage.byModel.map((usage) => ({
+      value: byokUsageModelKey(usage),
+      label: byokUsageModelLabel(usage, t),
+      selectedLabel: usage.model ?? t("settings.token.historicalUnclassified")
+    }))
+  ];
+  const displayedByokModels = selectedUsageModelKey === "all"
+    ? props.byokUsage.byModel
+    : props.byokUsage.byModel.filter((usage) => byokUsageModelKey(usage) === selectedUsageModelKey);
+  const displayedByokUsage = selectedUsageModelKey === "all"
+    ? byokUsageByKind
+    : summarizeByokModelsByKind(displayedByokModels);
+  const displayedByokSummary = selectedUsageModelKey === "all"
+    ? props.byokUsage
+    : summarizeByokModels(displayedByokModels);
+  const showPlatform = props.showPlatform && platformScenes.length > 0;
+  // Sum the Cloud/Nacos scene budgets — same additive total the exhausted modal
+  // uses — so the section heading mirrors the rows below it.
+  const platformUsedTokens = platformScenes.reduce((sum, scene) => sum + scene.usedTokens, 0);
+  const platformTotalTokens = platformScenes.reduce((sum, scene) => sum + scene.totalTokens, 0);
+  // The two panels overlap on scenes, so the descriptions are only worth
+  // spelling out once: in the platform panel, or in the own-key panel when
+  // there is no platform panel above it.
+  const describeScenesInByok = !showPlatform;
+
+  return (
+    <div className={usageStyles.detailContent}>
+        {showPlatform && (
+          <section className={usageStyles.usageSection}>
+            <UsageSectionHead
+              icon={<Gift size={16} className="text-text-ink/60" />}
+              title={t("settings.token.platformQuota")}
+              stats={[
+                {
+                  label: "",
+                  value: `${formatCompactTokenCount(platformUsedTokens)} / ${formatCompactTokenCount(platformTotalTokens)}`,
+                  unit: "Token"
+                }
+              ]}
+            />
+            <div className={usageStyles.platformQuotaList}>
+              {platformScenes.map((usage) => (
+                <PlatformQuotaRow key={usage.scene} usage={usage} showDesc />
+              ))}
+            </div>
+          </section>
+        )}
+
+        <section className={usageStyles.usageSection}>
+          <UsageSectionHead
+            icon={<KeyRound size={16} className="text-text-ink/60" />}
+            title={t("settings.token.apiKeyConsumption")}
+          />
+          {props.byokUsageStatus === "loading" ? (
+            <div className={usageStyles.usageState}>
+              <Loader2 size={16} className="animate-spin" />
+              {t("settings.token.loading")}
+            </div>
+          ) : props.byokUsageStatus === "error" ? (
+            <div className={usageStyles.usageState}>
+              <div>
+                <div className="text-sm text-status-error">{t("settings.token.loadFailedTitle")}</div>
+                <div className="text-xs text-text-ink/45 mt-1">{t("settings.token.loadFailedHint")}</div>
+              </div>
+            </div>
+          ) : props.byokUsage.totalTokens <= 0 ? (
+            <div className={usageStyles.usageState}>
+              <div>
+                <div className="text-sm text-text-ink/65">{t("settings.token.noByokUsage")}</div>
+                <div className="text-xs text-text-ink/45 mt-1">{t("settings.token.noByokUsageHint")}</div>
+              </div>
+            </div>
+          ) : (
+            <div className={usageStyles.byokUsageList}>
+              <div className={usageStyles.byokOverview}>
+                <div>
+                  <span>{t("settings.token.summaryLocalTotal")}</span>
+                  <strong>
+                    {formatTokenSummary(displayedByokSummary.totalTokens)}
+                    <em>Token</em>
+                  </strong>
+                </div>
+                <Select
+                  label={t("settings.token.filterByModel")}
+                  labelClassName="sr-only"
+                  value={selectedUsageModelKey}
+                  options={byokUsageModelOptions}
+                  onValueChange={setSelectedUsageModelId}
+                  className="select-control--compact select-control--subtle"
+                  menuClassName="model-assignment-select__menu"
+                />
+              </div>
+              <div className={usageStyles.byokSummaryMetrics}>
+                <UsageSummaryMetric
+                  label={t("settings.token.input")}
+                  value={displayedByokSummary.inputTokens}
+                />
+                <UsageSummaryMetric
+                  label={t("settings.token.output")}
+                  value={displayedByokSummary.outputTokens}
+                />
+                <UsageSummaryMetric
+                  label={t("settings.token.cacheHit")}
+                  value={displayedByokSummary.cachedInputTokens}
+                />
+              </div>
+              {props.byokUsage.byModel.length === 0 && (
+                <p className={usageStyles.modelBreakdownNotice}>
+                  {t("settings.token.modelBreakdownPending")}
+                </p>
+              )}
+              {displayedByokModels.length > 0 && (
+                <>
+                  <div className={usageStyles.byokPurposeTitle}>
+                    {t("settings.token.byModel")}
+                  </div>
+                  <div className={usageStyles.byokPurposeRows}>
+                    {displayedByokModels.map((usage) => (
+                      <ByokModelUsageRow key={byokUsageModelKey(usage)} usage={usage} />
+                    ))}
+                  </div>
+                </>
+              )}
+              <div className={usageStyles.byokPurposeTitle}>
+                {t("settings.token.byPurpose")}
+              </div>
+              <div className={usageStyles.byokPurposeRows}>
+                {displayedByokUsage.map((usage) => (
+                  <ByokUsageRow
+                    key={usage.kind}
+                    usage={usage}
+                    showDesc={describeScenesInByok}
+                    breakdownUnavailable={false}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
+        </section>
+    </div>
+  );
+}
+
+/**
+ * Renders the card header shared by the platform quota and own-key sections.
+ *
+ * The heading sits above the panel rather than inside it, matching the settings
+ * sections. Platform figures beside the title are the sum of the scene rows.
+ *
+ * @param props.icon The leading icon, which also aligns the title with the
+ * panel's inner text edge the same way the settings sections do.
+ * @param props.title The section heading.
+ * @param props.stats The optional aggregate figures shown beside the heading.
+ * @returns The section heading row, whose next sibling is the detail panel.
+ */
+function UsageSectionHead(props: { icon: ReactNode; title: string; stats?: UsageStat[] }) {
+  const stats = props.stats?.filter((stat) => stat !== null) ?? [];
+
+  return (
+    <div className={usageStyles.sectionHead}>
+      <h2>{props.icon}{props.title}</h2>
+      {stats.length > 0 && (
+        <p className={usageStyles.sectionNote}>
+          {stats.map((stat, index) => (
+            <span key={stat.label || `stat-${index}`}>
+              {stat.label}
+              <strong>{stat.value}</strong>
+              {stat.unit ? <em>{stat.unit}</em> : null}
+            </span>
+          ))}
+        </p>
+      )}
+    </div>
+  );
+}
+
+type UsageStat = { label: string; value: string; unit?: string } | null;
+
+/**
+ * Sorts backend-reported usage rows into the canonical scene order.
+ *
+ * Scenes absent from the payload stay absent: the platform budgets quota per
+ * scene and own-key totals only exist once a scene has run, so a placeholder
+ * row would be a number the backend never sent.
+ *
+ * @param items The rows the backend reported, in arbitrary order.
+ * @param sceneOf Reads the scene key off a row.
+ * @returns The same rows ordered by TOKEN_USAGE_SCENES.
+ */
+function orderByScene<T>(items: readonly T[], sceneOf: (item: T) => ByokTokenUsageKind): T[] {
+  return TOKEN_USAGE_SCENES.flatMap((scene) => items.filter((item) => sceneOf(item) === scene));
+}
+
+function emptyByokUsage(kind: ByokTokenUsageKind): ByokTokenUsageByKind {
+  return {
+    kind,
+    inputTokens: 0,
+    outputTokens: 0,
+    totalTokens: 0,
+    cachedInputTokens: 0,
+    cacheCreationInputTokens: 0,
+    eventCount: 0,
+    updatedAt: null
+  };
+}
+
+function byokUsageModelKey(usage: ByokTokenUsageByModel): string {
+  return JSON.stringify([usage.presetId, usage.provider, usage.model, usage.capability]);
+}
+
+function byokUsageModelLabel(usage: ByokTokenUsageByModel, t: SettingsTranslate): string {
+  if (!usage.provider || !usage.model || !usage.capability) {
+    return t("settings.token.historicalUnclassified");
+  }
+  return `${usage.provider} · ${usage.model} · ${usageSceneMeta(capabilityToUsageKind(usage.capability), t).label}`;
+}
+
+function capabilityToUsageKind(capability: ByokTokenUsageCapability): ByokTokenUsageKind {
+  return capability === "agent" ? "agent_chat" : capability;
+}
+
+function summarizeByokModels(models: readonly ByokTokenUsageByModel[]): ByokTokenUsageSummary {
+  return models.reduce((summary, usage) => ({
+    ...summary,
+    inputTokens: summary.inputTokens + usage.inputTokens,
+    outputTokens: summary.outputTokens + usage.outputTokens,
+    totalTokens: summary.totalTokens + usage.totalTokens,
+    cachedInputTokens: summary.cachedInputTokens + usage.cachedInputTokens,
+    cacheCreationInputTokens: summary.cacheCreationInputTokens + usage.cacheCreationInputTokens,
+    updatedAt: !summary.updatedAt || (usage.updatedAt && usage.updatedAt > summary.updatedAt)
+      ? usage.updatedAt
+      : summary.updatedAt,
+    byModel: [...summary.byModel, usage]
+  }), { ...EMPTY_BYOK_TOKEN_USAGE });
+}
+
+function summarizeByokModelsByKind(models: readonly ByokTokenUsageByModel[]): ByokTokenUsageByKind[] {
+  return TOKEN_USAGE_SCENES.map((kind) => models
+    .filter((usage) => usage.capability && capabilityToUsageKind(usage.capability) === kind)
+    .reduce((summary, usage) => ({
+      ...summary,
+      inputTokens: summary.inputTokens + usage.inputTokens,
+      outputTokens: summary.outputTokens + usage.outputTokens,
+      totalTokens: summary.totalTokens + usage.totalTokens,
+      cachedInputTokens: summary.cachedInputTokens + usage.cachedInputTokens,
+      cacheCreationInputTokens: summary.cacheCreationInputTokens + usage.cacheCreationInputTokens,
+      eventCount: summary.eventCount + usage.eventCount,
+      updatedAt: !summary.updatedAt || (usage.updatedAt && usage.updatedAt > summary.updatedAt)
+        ? usage.updatedAt
+        : summary.updatedAt
+    }), emptyByokUsage(kind)));
+}
+
+interface PlatformQuotaRowProps {
+  usage: TokenSceneUsageDto;
+  showDesc: boolean;
+}
+
+function PlatformQuotaRow(props: PlatformQuotaRowProps) {
+  const { t } = useTranslation();
+  const meta = usageSceneMeta(props.usage.scene, t);
+  const usedRatio = resolveUsedRatio(props.usage);
+  const isOverQuota = usedRatio !== null && usedRatio > 1;
+  const rowClassName = isOverQuota
+    ? `${usageStyles.platformQuotaRow} ${usageStyles.overQuota}`
+    : usageStyles.platformQuotaRow;
+
+  return (
+    <article className={rowClassName}>
+      <div className={usageStyles.compactScene}>
+        <h3>{meta.label}</h3>
+        {props.showDesc && <p>{meta.desc}</p>}
+      </div>
+      <div className={usageStyles.quotaNumbers}>
+        <strong>{formatCompactTokenCount(props.usage.usedTokens)}</strong>
+        <span>/</span>
+        <span>{formatCompactTokenCount(props.usage.totalTokens)}</span>
+        <em>Token</em>
+      </div>
+      <UsageMeter
+        percent={usedRatio === null ? 0 : Math.round(Math.min(1, usedRatio) * 100)}
+        isOverQuota={isOverQuota}
+      />
+    </article>
+  );
+}
+
+function ByokUsageRow(props: {
+  usage: ByokTokenUsageByKind;
+  showDesc: boolean;
+  breakdownUnavailable: boolean;
+}) {
+  const { t } = useTranslation();
+  const meta = usageSceneMeta(props.usage.kind, t);
+  const isActive = !props.breakdownUnavailable && props.usage.totalTokens > 0;
+  const rowClassName = isActive
+    ? usageStyles.byokUsageRow
+    : `${usageStyles.byokUsageRow} ${usageStyles.inactive}`;
+
+  return (
+    <article className={rowClassName}>
+      <div className={usageStyles.compactScene}>
+        <h3>{meta.label}</h3>
+        {props.showDesc && <p>{meta.desc}</p>}
+        {isActive && (
+          <p className={usageStyles.byokBreakdown}>
+            <span>
+              {t("settings.token.input")}
+              <strong>{formatCompactTokenCount(props.usage.inputTokens)}</strong>
+            </span>
+            <span>
+              {t("settings.token.output")}
+              <strong>{formatCompactTokenCount(props.usage.outputTokens)}</strong>
+            </span>
+            {props.usage.cachedInputTokens > 0 && (
+              <span>
+                {t("settings.token.cacheHit")}
+                <strong>{formatCompactTokenCount(props.usage.cachedInputTokens)}</strong>
+              </span>
+            )}
+          </p>
+        )}
+        {props.breakdownUnavailable && (
+          <p>{t("settings.token.modelBreakdownPending")}</p>
+        )}
+      </div>
+      <div className={usageStyles.byokUsageValue}>
+        <strong>{props.breakdownUnavailable ? "—" : formatCompactTokenCount(props.usage.totalTokens)}</strong>
+        {!props.breakdownUnavailable && <em>Token</em>}
+      </div>
+    </article>
+  );
+}
+
+function ByokModelUsageRow(props: { usage: ByokTokenUsageByModel }) {
+  const { t } = useTranslation();
+  const classified = Boolean(props.usage.provider && props.usage.model && props.usage.capability);
+  const purpose = props.usage.capability
+    ? usageSceneMeta(capabilityToUsageKind(props.usage.capability), t).label
+    : t("settings.token.historicalUnclassifiedHint");
+
+  return (
+    <article className={usageStyles.byokUsageRow} data-testid="byok-model-usage-row">
+      <div className={usageStyles.compactScene}>
+        <h3>{classified ? props.usage.model : t("settings.token.historicalUnclassified")}</h3>
+        <p>{classified ? `${props.usage.provider} · ${purpose}` : purpose}</p>
+      </div>
+      <div className={usageStyles.byokUsageValue}>
+        <strong>{formatCompactTokenCount(props.usage.totalTokens)}</strong>
+        <em>Token</em>
+      </div>
+    </article>
+  );
+}
+
+function UsageSummaryMetric(props: { label: string; value: number | null }) {
+  return (
+    <div>
+      <span>{props.label}</span>
+      <strong>{props.value === null ? "—" : formatCompactTokenCount(props.value)}</strong>
+      {props.value !== null && <em>Token</em>}
+    </div>
+  );
+}
+
+/**
+ * Renders the slim consumption meter for a platform quota row.
+ *
+ * Only quota-backed figures get a meter, since a filling bar implies a ceiling.
+ *
+ * @param props.percent The consumed ratio in percent, clamped to 0-100.
+ * @param props.isOverQuota Whether the scene has consumed more than its quota.
+ * @returns A decorative meter track; the numbers next to it carry the value.
+ */
+function UsageMeter(props: { percent: number; isOverQuota: boolean }) {
+  const percent = Math.min(100, Math.max(0, props.percent));
+  const fillClassName = props.isOverQuota
+    ? `${usageStyles.meterFill} ${usageStyles.meterFillOver}`
+    : usageStyles.meterFill;
+
+  return (
+    <div className={usageStyles.meter} aria-hidden="true">
+      <span className={fillClassName} style={{ width: `${percent}%` }} />
+    </div>
+  );
+}
+
+function resolveUsedRatio(usage: TokenSceneUsageDto): number | null {
+  if (usage.totalTokens <= 0) {
+    return null;
+  }
+  return usage.usedTokens / usage.totalTokens;
+}
+
+function usageSceneMeta(kind: ByokTokenUsageKind, t: SettingsTranslate): { label: string; desc: string } {
+  switch (kind) {
+    case "agent_chat":
+      return { label: t("settings.token.agentTask"), desc: t("settings.token.agentTaskDesc") };
+    case "memory_summary":
+      return { label: t("settings.token.memorySummary"), desc: t("settings.token.memorySummaryDesc") };
+    case "memory_evolution":
+      return { label: t("settings.token.memoryEvolution"), desc: t("settings.token.memoryEvolutionDesc") };
+    case "embedding":
+      return { label: t("settings.token.embedding"), desc: t("settings.token.embeddingDesc") };
+  }
+}
+
+/**
+ * Renders the BYOK summary loading state.
+ *
+ * @param props.status The loading status.
+ * @param props.updatedAt The latest event time.
+ * @returns The status text in the top-right corner.
+ */
+function UsageStatusLabel(props: { status: UsageLoadStatus; updatedAt: string | null }) {
+  const { t } = useTranslation();
+  if (props.status === "loading") {
+    return (
+      <span className={usageStyles.updated}>
+        <Loader2 size={12} className="animate-spin" />
+        {t("settings.token.loading")}
+      </span>
+    );
+  }
+  if (props.status === "error") {
+    return <span className={usageStyles.statusError}>{t("settings.token.loadFailed")}</span>;
+  }
+  if (props.updatedAt) {
+    return <span className={usageStyles.updated}>{t("settings.token.updatedAt", { value: formatUsageUpdatedAt(props.updatedAt) })}</span>;
+  }
+  return null;
+}
+
+interface UpdateDownloadProgressProps {
+  progress: UpdateCoordinatorValue["downloadProgress"];
+  t: SettingsTranslate;
+}
+
+function UpdateDownloadProgress(props: UpdateDownloadProgressProps) {
+  const percent = props.progress?.percent ?? null;
+  const displayPercent = percent ?? 28;
+  const progressText = resolveUpdateDownloadProgressText(props.progress, props.t);
+  const fillStyle = { width: `${displayPercent}%` } satisfies CSSProperties;
+
+  return (
+    <div className="w-full max-w-sm space-y-1.5">
+      <div
+        className="h-1.5 w-full overflow-hidden rounded-pill bg-action-sky/10"
+        role="progressbar"
+        aria-label={props.t("settings.about.downloadProgressLabel")}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={percent ?? undefined}
+        aria-valuetext={progressText}
+      >
+        <div
+          className={`h-full rounded-pill bg-action-sky transition-[width] duration-200 ease-out ${percent === null ? "animate-pulse" : ""}`}
+          style={fillStyle}
+        />
+      </div>
+      <div className="text-[11px] text-text-ink/45">{progressText}</div>
+    </div>
+  );
+}
+
+function resolveUpdateDownloadProgressText(
+  progress: UpdateCoordinatorValue["downloadProgress"],
+  t: SettingsTranslate
+): string {
+  if (!progress) {
+    return t("settings.about.downloadProgressStarting");
+  }
+  if (progress.percent !== null && progress.totalBytes !== null) {
+    return t("settings.about.downloadProgressSize", {
+      percent: progress.percent,
+      downloaded: formatUpdateDownloadBytes(progress.transferredBytes),
+      total: formatUpdateDownloadBytes(progress.totalBytes)
+    });
+  }
+  if (progress.percent !== null) {
+    return t("settings.about.downloadProgressPercent", { percent: progress.percent });
+  }
+  if (progress.transferredBytes > 0) {
+    return t("settings.about.downloadProgressBytes", { downloaded: formatUpdateDownloadBytes(progress.transferredBytes) });
+  }
+  return t("settings.about.downloadProgressStarting");
+}
+
+function formatUpdateDownloadBytes(bytes: number): string {
+  const safeBytes = Math.max(0, Math.round(bytes));
+  if (safeBytes < 1024) {
+    return `${safeBytes} B`;
+  }
+
+  const units = ["KB", "MB", "GB"] as const;
+  let value = safeBytes / 1024;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+
+  return `${value.toFixed(1)} ${units[unitIndex]}`;
+}
+
+/** Resolves the label for the app-level update state. */
+function resolveUpdateButtonLabel(phase: UpdatePhase, t: SettingsTranslate): string {
+  if (phase === "checking") {
+    return t("settings.about.checkingUpdate");
+  }
+  if (phase === "downloading") {
+    return t("settings.about.downloadingButton");
+  }
+  if (phase === "installing") {
+    return t("settings.about.installingButton");
+  }
+  if (phase === "prepared") {
+    return t("settings.about.installPreparedUpdate");
+  }
+  if (phase === "available") {
+    return t("settings.about.installUpdate");
+  }
+  return t("settings.about.checkUpdate");
+}
+
+function isUpdateBusy(phase: UpdatePhase): boolean {
+  return phase === "checking" || phase === "downloading" || phase === "installing";
+}
+
+/**
+ * Settings section props.
+ *
+ * Field meanings:
+ * - icon: The icon to the left of the prototype section title.
+ * - title: The section title.
+ * - sectionId: An optional DOM id, used by external buttons to scroll to a specific settings section.
+ * - children: The card body content.
+ */
+interface SectionProps {
+  icon: ReactNode;
+  title: string;
+  sectionId?: string;
+  children: ReactNode;
+}
+
+/**
+ * Renders a prototype settings section.
+ *
+ * @param props The section props.
+ * @returns A prototype section with the title outside and the content inside a white card.
+ */
+function Section(props: SectionProps) {
+  return (
+    <div id={props.sectionId} className="mb-6">
+      <div className="flex items-center gap-2 mb-3">
+        {props.icon}
+        <h2 className="text-sm font-semibold text-text-ink">{props.title}</h2>
+      </div>
+      <div className="bg-background-paper rounded-card-lg border-content-panel p-6">{props.children}</div>
+    </div>
+  );
+}
+
+/**
+ * Settings divider.
+ *
+ * @returns A prototype light-colored divider.
+ */
+function Divider() {
+  return <div className="h-px bg-border-stone/30" />;
+}
+
+/**
+ * Protocol dropdown props.
+ *
+ * Field meanings:
+ * - value: The current protocol type.
+ * - onChange: The protocol change callback.
+ */
+interface ProtocolSelectProps {
+  value: Protocol;
+  onChange: (value: Protocol) => void;
+}
+
+/**
+ * Renders the prototype protocol-type dropdown.
+ *
+ * @param props The protocol dropdown props.
+ * @returns The protocol selection control.
+ */
+function ProtocolSelect(props: ProtocolSelectProps) {
+  const { t } = useTranslation();
+
+  return (
+    <Select
+      label={t("apiKey.provider")}
+      value={props.value}
+      onValueChange={(value) => props.onChange(value as Protocol)}
+      className="select-control--paper"
+      options={PROTOCOL_OPTIONS.map((option) => ({
+        value: option.value,
+        label: t(option.labelKey)
+      }))}
+    />
+  );
+}
+
+/**
+ * Model purpose summary props.
+ *
+ * Field meanings:
+ * - label: The purpose name.
+ * - desc: The purpose description.
+ * - model: The current model display value.
+ */
+interface ModuleRowProps {
+  label: string;
+  desc: string;
+  model: string;
+}
+
+/**
+ * Renders a model purpose summary row in BYOK API Key mode.
+ *
+ * @param props The model purpose summary props.
+ * @returns A single purpose and its model value.
+ */
+function ModuleRow(props: ModuleRowProps) {
+  return (
+    <div className="flex items-center justify-between gap-3 px-3.5 py-2.5 bg-background-paper rounded-input border-content-panel">
+      <div className="min-w-0">
+        <div className="text-sm text-text-ink/80">{props.label}</div>
+        <div className="text-[11px] text-text-ink/45">{props.desc}</div>
+      </div>
+      <span className="text-xs text-text-ink/60 font-mono truncate max-w-[300px] shrink-0" title={props.model}>{props.model}</span>
+    </div>
+  );
+}
+
+/**
+ * Form field props.
+ *
+ * Field meanings:
+ * - label: The field name.
+ * - placeholder: The placeholder hint.
+ * - value: The current input value.
+ * - onChange: The input change callback.
+ * - suffix: The unit suffix on the right.
+ * - readOnly: Whether to display as read-only.
+ */
+interface FieldProps {
+  label: string;
+  placeholder: string;
+  value: string;
+  onChange: (value: string) => void;
+  suffix?: string;
+  readOnly?: boolean;
+}
+
+/**
+ * Renders the prototype text input field.
+ *
+ * @param props The form field props.
+ * @returns An input row with a label and an optional suffix.
+ */
+function Field(props: FieldProps) {
+  return (
+    <div>
+      <label className="block text-xs text-text-ink/65 mb-1.5 font-normal">{props.label}</label>
+      <div className="relative">
+        <input
+          type="text"
+          value={props.value}
+          readOnly={props.readOnly}
+          onChange={(event) => props.onChange(event.target.value)}
+          placeholder={props.placeholder}
+          className="w-full px-4 py-2.5 border border-border-stone rounded-input text-sm bg-background-paper focus:outline-none placeholder:text-text-ink/35 read-only:cursor-default"
+        />
+        {props.suffix && <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-text-ink/40">{props.suffix}</span>}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Password field props.
+ *
+ * Field meanings:
+ * - label: The field name.
+ * - placeholder: The placeholder hint.
+ * - maskedValue: The masked value of the saved secret, shown as the input placeholder (with priority) when no new value has been entered.
+ * - value: The current input value.
+ * - onChange: The input change callback.
+ * - show: Whether to display in plaintext.
+ * - onToggle: The callback to toggle between plaintext and masked.
+ */
+interface PasswordFieldProps {
+  label: string;
+  placeholder: string;
+  maskedValue?: string;
+  value: string;
+  onChange: (value: string) => void;
+  show: boolean;
+  onToggle: () => void;
+}
+
+/**
+ * Renders the API Key input field with a show/hide button.
+ *
+ * @param props The password field props.
+ * @returns The API Key input control.
+ */
+function PasswordField(props: PasswordFieldProps) {
+  const placeholder = !props.value.trim() && props.maskedValue ? props.maskedValue : props.placeholder;
+
+  return (
+    <div>
+      <label className="block text-xs text-text-ink/65 mb-1.5 font-normal">{props.label}</label>
+      <div className="relative">
+        <input
+          type={props.show ? "text" : "password"}
+          value={props.value}
+          onChange={(event) => props.onChange(event.target.value)}
+          placeholder={placeholder}
+          className="w-full px-4 py-2.5 pr-10 border border-border-stone rounded-input text-sm bg-background-paper focus:outline-none placeholder:text-text-ink/35"
+        />
+        <button type="button" onClick={props.onToggle} className="absolute right-3 top-1/2 -translate-y-1/2 text-text-ink/40 hover:text-text-ink/65 cursor-pointer">
+          {props.show ? <EyeOff size={15} /> : <Eye size={15} />}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Connection test button props.
+ *
+ * Field meanings:
+ * - status: The connection test status.
+ * - onClick: The click-to-test callback.
+ * - disabled: Whether it is disabled.
+ */
+interface TestButtonProps {
+  status: TestStatus;
+  onClick: () => void;
+  disabled: boolean;
+}
+
+/**
+ * Renders the prototype connection test button.
+ *
+ * @param props The connection test button props.
+ * @returns A test button that changes with status.
+ */
+function TestButton(props: TestButtonProps) {
+  const { t } = useTranslation();
+  const isTesting = props.status === "testing";
+  const isSuccess = props.status === "success";
+  const isError = props.status === "error";
+
+  return (
+    <button
+      type="button"
+      onClick={props.onClick}
+      disabled={props.disabled || isTesting}
+      className={`inline-flex w-[112px] h-10 shrink-0 items-center justify-center px-4 text-xs rounded-btn border transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-50 ${
+        isSuccess
+          ? "text-status-success border-status-success/30 bg-status-success-soft"
+          : isError
+            ? "text-status-error border-status-error/30 bg-status-error-soft"
+            : "text-text-ink/65 border-border-stone/40 bg-background-paper hover:bg-canvas-oat/50"
+      }`}
+    >
+      <span className="inline-flex items-center justify-center gap-1.5">
+        {isTesting && <Loader2 size={13} className="shrink-0 animate-spin" aria-hidden="true" />}
+        {isSuccess && <CheckCircle2 size={13} className="shrink-0" aria-hidden="true" />}
+        {isError && <XCircle size={13} className="shrink-0" aria-hidden="true" />}
+        <span className="leading-none">
+          {isTesting ? t("apiKey.testing") : isSuccess ? t("apiKey.testSuccess") : isError ? t("apiKey.testFailed") : t("apiKey.test")}
+        </span>
+      </span>
+    </button>
+  );
+}
+
+/**
+ * Renders the primary model connection test result.
+ *
+ * @param props.validation The current test status.
+ * @param props.stale Whether the current form already differs from the most recent successful test.
+ * @returns The hint text shown by success/failure.
+ */
+/**
+ * Model config card props.
+ *
+ * Field meanings:
+ * - icon: The title icon.
+ * - title: The model purpose name.
+ * - subtitle: The model purpose description.
+ * - hint: Optional hint text.
+ * - cfg: The current model config.
+ * - onPatch: The model config patch callback.
+ * - onTest: The callback that runs a real connection test.
+ * - primary: The primary LLM config, used to prefill when opting out of reuse.
+ */
+interface ModelConfigCardProps {
+  icon: ReactNode;
+  title: string;
+  subtitle: string;
+  hint?: string;
+  cfg: ModelConfig;
+  onPatch: (patch: Partial<ModelConfig>) => void;
+  onTest: () => void;
+  primary: PrimaryModelValues;
+}
+
+/**
+ * Renders the memory-summary / skill-evolution model config card.
+ *
+ * @param props The model config card props.
+ * @returns A prototype card that can reuse the primary model or be configured independently.
+ */
+function ModelConfigCard(props: ModelConfigCardProps) {
+  const { t } = useTranslation();
+
+  /**
+   * Toggles whether to reuse the primary model; when opting out, prefills the blank config with the primary model.
+   */
+  function toggleReuse() {
+    const nextReuse = !props.cfg.reuse;
+    if (!nextReuse && props.primary.modelId && !props.cfg.modelId) {
+      props.onPatch({
+        reuse: false,
+        protocol: props.primary.protocol,
+        modelId: props.primary.modelId,
+        endpoint: props.primary.endpoint,
+        apiKey: props.primary.apiKey,
+        apiKeyMasked: props.primary.apiKeyMasked ?? "",
+        configured: Boolean(props.primary.configured || props.primary.apiKeyMasked)
+      });
+      return;
+    }
+
+    props.onPatch({ reuse: nextReuse });
+  }
+  const modelFormValues = createModelFormValues(props.cfg, props.primary);
+  const isTestStale = Boolean(props.cfg.validation.testedKey && props.cfg.validation.testedKey !== createModelConfigValidationKey(modelFormValues));
+
+  return (
+    <div className="bg-canvas-oat/40 rounded-card p-5 space-y-3.5">
+      <div className="flex items-center gap-2 mb-1">
+        {props.icon}
+        <span className="text-sm font-medium text-text-ink/70">{props.title}</span>
+      </div>
+      <p className="text-xs text-text-ink/50 -mt-1">{props.subtitle}</p>
+
+      <button type="button" role="checkbox" aria-checked={props.cfg.reuse} onClick={toggleReuse} className="flex items-center gap-2.5 cursor-pointer select-none">
+        <span className={`w-4 h-4 rounded flex items-center justify-center border transition-colors ${props.cfg.reuse ? "bg-action-sky border-action-sky" : "bg-background-paper border-border-stone"}`}>
+          {props.cfg.reuse && <Check size={12} strokeWidth={3} className="text-white" />}
+        </span>
+        <span className="text-xs text-text-ink/70">{t("apiKey.modelPage.reuseAgent")}</span>
+      </button>
+
+      {props.hint && (
+        <div className="flex items-start gap-2 p-3 bg-action-sky/5 rounded-card border border-action-sky/15">
+          <Info size={13} className="text-action-sky mt-0.5 shrink-0" />
+          <p className="text-xs text-text-ink/65 leading-relaxed">{props.hint}</p>
+        </div>
+      )}
+
+      {!props.cfg.reuse && (
+        <div className="space-y-3.5 pt-1">
+          <ProtocolSelect
+            value={props.cfg.protocol}
+            onChange={(value) => props.onPatch(createModelProtocolPatch(value))}
+          />
+          <Field
+            label={t("apiKey.model")}
+            placeholder={`${t("apiKey.examplePrefix")} ${DEFAULT_MODEL_IDS[props.cfg.protocol]}`}
+            value={props.cfg.modelId}
+            onChange={(value) => props.onPatch({ modelId: value })}
+          />
+          <Field label={t("apiKey.endpoint")} placeholder={`${t("apiKey.examplePrefix")} ${DEFAULT_ENDPOINTS[props.cfg.protocol]}`} value={props.cfg.endpoint} onChange={(value) => props.onPatch({ endpoint: value })} />
+          <PasswordField label={t("apiKey.key")} placeholder="sk-..." maskedValue={props.cfg.apiKeyMasked} value={props.cfg.apiKey} onChange={(value) => props.onPatch({ apiKey: value })} show={props.cfg.showKey} onToggle={() => props.onPatch({ showKey: !props.cfg.showKey })} />
+          <div className="flex min-h-9 items-center justify-end gap-3">
+            <ValidationMessage validation={props.cfg.validation} stale={isTestStale} />
+            <TestButton status={props.cfg.validation.status} onClick={props.onTest} disabled={false} />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Toggle row props.
+ *
+ * Field meanings:
+ * - label: The setting item name.
+ * - description: The setting item description.
+ * - checked: Whether it is currently on.
+ * - onChange: The toggle change callback.
+ */
+interface ToggleRowProps {
+  label: string;
+  description: string;
+  checked: boolean;
+  onChange: (value: boolean) => void;
+}
+
+/**
+ * Renders a prototype toggle setting row.
+ *
+ * @param props The toggle row props.
+ * @returns A setting row with a description and a switch on the right.
+ */
+function ToggleRow(props: ToggleRowProps) {
+  return (
+    <div className="flex items-center justify-between py-3">
+      <div className="flex-1 pr-4">
+        <div className="text-sm text-text-ink/70">{props.label}</div>
+        <div className="text-xs text-text-ink/50 leading-relaxed">{props.description}</div>
+      </div>
+      <Toggle checked={props.checked} onChange={props.onChange} />
+    </div>
+  );
+}
+
+/**
+ * Select row props.
+ *
+ * Field meanings:
+ * - label: The setting item name.
+ * - description: The setting item description.
+ * - value: The currently selected value.
+ * - onChange: The option change callback.
+ * - options: The list of available options.
+ */
+interface SelectRowProps {
+  label: string;
+  description: string;
+  value: string;
+  onChange: (value: string) => void;
+  options: SelectOption[];
+}
+
+/**
+ * Renders a prototype select setting row.
+ *
+ * @param props The select row props.
+ * @returns A setting row with a description and a select on the right.
+ */
+function SelectRow(props: SelectRowProps) {
+  return (
+    <div className="flex items-center justify-between py-3">
+      <div className="flex-1 pr-4">
+        <div className="text-sm text-text-ink/70">{props.label}</div>
+        <div className="text-xs text-text-ink/50 leading-relaxed">{props.description}</div>
+      </div>
+      <Select
+        value={props.value}
+        onValueChange={props.onChange}
+        options={props.options}
+        className="select-control--compact select-control--subtle"
+      />
+    </div>
+  );
+}
+
+/**
+ * Switch props.
+ *
+ * Field meanings:
+ * - checked: Whether it is currently on.
+ * - onChange: The toggle callback.
+ */
+interface ToggleProps {
+  checked: boolean;
+  onChange: (value: boolean) => void;
+  ariaLabel?: string;
+}
+
+/**
+ * Renders the prototype switch control.
+ *
+ * @param props The switch props.
+ * @returns A rounded slider switch.
+ */
+function Toggle(props: ToggleProps) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={props.checked}
+      aria-label={props.ariaLabel}
+      onClick={() => props.onChange(!props.checked)}
+      className={`relative inline-flex shrink-0 h-5 w-9 items-center rounded-full border-0 p-0 cursor-pointer transition-colors ${
+        props.checked ? "bg-action-sky" : "bg-border-stone"
+      }`}
+    >
+      <span className={`inline-block h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${props.checked ? "translate-x-[18px]" : "translate-x-0.5"}`} />
+    </button>
+  );
+}
+
+/**
+ * Link button props.
+ *
+ * Field meanings:
+ * - label: The button label.
+ * - onClick: The internal navigation behavior run on click.
+ */
+interface LinkButtonProps {
+  label: string;
+  onClick: () => void;
+}
+
+/**
+ * Renders the About-section link button.
+ *
+ * @param props The link button props.
+ * @returns A prototype light-colored link button.
+ */
+function LinkButton(props: LinkButtonProps) {
+  return (
+    <button
+      type="button"
+      onClick={props.onClick}
+      className="inline-flex items-center gap-1.5 px-4 py-2 text-xs text-text-ink/70 bg-canvas-oat/40 border border-border-stone/30 rounded-btn hover:bg-canvas-oat hover:border-border-stone transition-all"
+    >
+      {props.label}
+      <ExternalLink size={11} />
+    </button>
+  );
+}
+
+/**
+ * Parses the diagnostics report export result.
+ *
+ * @param result The raw value returned by the Electron preload bridge.
+ * @returns The normalized canceled or success result.
+ */
+function parseDiagnosticsReportExportResult(result: unknown): DiagnosticsReportExportResult {
+  if (result && typeof result === "object" && (result as { canceled?: unknown }).canceled === true) {
+    return { canceled: true };
+  }
+
+  if (
+    result &&
+    typeof result === "object" &&
+    (result as { canceled?: unknown }).canceled === false &&
+    typeof (result as { exportPath?: unknown }).exportPath === "string" &&
+    typeof (result as { bytes?: unknown }).bytes === "number"
+  ) {
+    const host = (result as { host?: unknown }).host;
+    return {
+      canceled: false,
+      exportPath: (result as { exportPath: string }).exportPath,
+      bytes: (result as { bytes: number }).bytes,
+      host: host === "electron" || host === "browser" ? host : undefined
+    };
+  }
+
+  throw new Error("Invalid diagnostics report export result");
+}
+
+/**
+ * Exports the renderer-side diagnostics report using the browser download capability.
+ *
+ * @param report The redacted diagnostics report text.
+ * @returns The download result; exportPath is the file name in the browser fallback.
+ */
+async function downloadDiagnosticsReportInBrowser(report: string): Promise<DiagnosticsReportExportResult> {
+  if (typeof document === "undefined" || typeof window === "undefined" || typeof Blob === "undefined" || typeof URL === "undefined" || typeof URL.createObjectURL !== "function") {
+    throw new Error("Diagnostics report download is unavailable in this runtime");
+  }
+
+  const fileName = `memmy-renderer-diagnostics-${formatDiagnosticsTimestamp(new Date())}.txt`;
+  const blob = new Blob([report], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = fileName;
+  anchor.rel = "noreferrer";
+  anchor.style.display = "none";
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+
+  return {
+    canceled: false,
+    exportPath: fileName,
+    bytes: blob.size,
+    host: "browser"
+  };
+}
+
+/**
+ * Builds the renderer fallback diagnostics report.
+ *
+ * @param input The non-sensitive state visible to the renderer.
+ * @returns A downloadable plain-text diagnostics report.
+ */
+function buildRendererDiagnosticsReport(input: RendererDiagnosticsReportInput): string {
+  const locationText = typeof window === "undefined" ? "<server-render>" : window.location.href;
+  const userAgent = typeof navigator === "undefined" ? "<unknown>" : navigator.userAgent;
+  const hasAccountIdentifier = Boolean(input.state.account.email || input.state.account.phoneNumber);
+  const hasBootstrap = Boolean(input.state.bootstrap);
+  const hasModelConfig = Boolean(input.state.modelConfig.configured);
+
+  const lines = [
+    "Memmy Renderer Diagnostics Report",
+    "=================================",
+    "",
+    "Generated At",
+    `- ISO Time: ${new Date().toISOString()}`,
+    "",
+    "Renderer",
+    `- Location: ${locationText}`,
+    `- Language: ${input.language}`,
+    `- User Agent: ${userAgent}`,
+    "",
+    "Desktop Bridge",
+    `- window.memmy: ${input.bridgeAvailable ? "available" : "missing"}`,
+    `- exportDiagnosticsReport: ${input.exportBridgeAvailable ? "available" : "missing"}`,
+    "",
+    "Application State",
+    `- Bootstrap Loaded: ${hasBootstrap ? "yes" : "no"}`,
+    `- User Mode: ${input.state.bootstrap?.app.userMode ?? "<unknown>"}`,
+    `- Account Identifier Present: ${hasAccountIdentifier ? "yes" : "no"}`,
+    `- Model Configured: ${hasModelConfig ? "yes" : "no"}`,
+    "",
+    "Notes",
+    "- This fallback report is generated by the renderer because the Electron diagnostics bridge is unavailable.",
+    "- Secrets, tokens, account identifiers, localStorage contents, prompts, and task messages are intentionally omitted."
+  ];
+
+  return `${lines.join("\n")}\n`;
+}
+
+/**
+ * Formats the timestamp for the diagnostics report file name.
+ *
+ * @param date The current time.
+ * @returns The YYYYMMDD-HHMMSS format.
+ */
+function formatDiagnosticsTimestamp(date: Date): string {
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate()),
+    "-",
+    pad(date.getHours()),
+    pad(date.getMinutes()),
+    pad(date.getSeconds())
+  ].join("");
+}
+
+/**
+ * Formats the local path in developer feedback.
+ *
+ * @param filePath The local absolute path.
+ * @returns A readable path with the username hidden.
+ */
+function formatDeveloperPath(filePath: string): string {
+  return filePath.replace(/^\/Users\/[^/]+(?=\/|$)/, "~");
+}
+
+/**
+ * Formats a file size.
+ *
+ * @param bytes The raw byte count.
+ * @returns Short text with a unit.
+ */
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = bytes / 1024;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+
+  return `${value.toFixed(value >= 10 ? 1 : 2)} ${units[unitIndex]}`;
+}
+
+interface AccountConfirmDialogContent {
+  ariaLabel: string;
+  desc: string;
+  ok: string;
+  title: string;
+}
+
+function resolveAccountConfirmDialog(
+  t: (key: MessageKey, values?: MessageValues) => string
+): AccountConfirmDialogContent {
+  return {
+    ariaLabel: t("settings.account.logoutTitle"),
+    title: t("settings.account.logoutTitle"),
+    desc: t("settings.account.logoutDesc"),
+    ok: t("settings.account.logoutOk")
+  };
+}
+
+/**
+ * Resolves the registered account's primary identifier.
+ *
+ * @param state The current global UI state.
+ * @returns Email first, then phone number.
+ */
+function resolveAccountIdentifier(state: AppState): string {
+  return state.account.email || state.account.phoneNumber || "";
+}
+
+/**
+ * Resolves the default nickname.
+ *
+ * @param identifier The email or phone number.
+ * @returns The default nickname shown and submitted when no nickname is filled in.
+ */
+function resolveDefaultNickname(identifier: string): string {
+  return identifier.trim();
+}
+
+/**
+ * Resolves the account avatar initials.
+ *
+ * @param value The nickname, email, or phone number.
+ * @returns One to two characters of avatar initials.
+ */
+function resolveAccountInitials(value: string): string {
+  const base = value.includes("@") ? (value.split("@")[0] ?? value) : value;
+  const normalized = base.trim();
+  if (!normalized) {
+    return "·";
+  }
+
+  const parts = normalized.split(/[\s._-]+/).filter(Boolean);
+  const initials = (parts.length > 1 ? parts.slice(0, 2) : [normalized])
+    .map((part) => Array.from(part)[0] ?? "")
+    .join("");
+
+  return initials.toUpperCase() || "·";
+}
+
+/**
+ * Formats the account registration time.
+ *
+ * @param value An ISO 8601 time string.
+ * @returns A settings-page-readable registration time.
+ */
+function formatRegisteredAt(value: string | null, t: SettingsTranslate): string {
+  if (!value) {
+    return t("settings.registeredUnknown");
+  }
+
+  const [normalized] = value.trim().split(/[T\s]/);
+  if (!normalized) {
+    return t("settings.registeredUnknown");
+  }
+
+  return normalized;
+}
+
+/**
+ * Resolves the fallback text for the account name.
+ *
+ * @returns The display name for the account area.
+ */
+function resolveAccountFallback(t: SettingsTranslate): string {
+  return t("settings.account.noAccount");
+}
+
+/**
+ * Resolves the fallback text for the account description.
+ *
+ * @param userMode The current user mode.
+ * @returns The account-area description; in account mode it favors neither email nor phone number.
+ */
+function resolveAccountMeta(userMode: AppSettingsDto["userMode"] | undefined, t: SettingsTranslate): string {
+  return userMode === "byok" ? t("settings.account.customApiKeyMeta") : t("settings.account.noIdentifier");
+}
+
+/**
+ * Resolves the initial model display mode for the settings page.
+ *
+ * @param userMode The current user mode.
+ * @returns A registered account defaults to platform Token; local BYOK mode defaults to the BYOK API Key.
+ */
+function resolveInitialModelMode(userMode: AppSettingsDto["userMode"] | undefined): ModelMode {
+  return userMode === "byok" ? "custom" : "platform";
+}
+
+/**
+ * Determines whether a quota request error means an approval is already pending.
+ *
+ * @param error The original error.
+ * @returns True when the UI should switch to the "request pending" state.
+ */
+export function isPendingQuotaRequestError(error: unknown): boolean {
+  const code = typeof error === "object" && error !== null ? (error as { code?: unknown }).code : null;
+  if (code === "conflict") {
+    return true;
+  }
+
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  return /\u5f85\u5ba1\u6279|\u91cd\u590d\u63d0\u4ea4|\u5df2\u6709.*\u7533\u8bf7|pending|duplicate/i.test(error.message);
+}
+
+/**
+ * Converts cloud eligibility into a settings-page message.
+ *
+ * @param eligibility Current account eligibility; null when it has not loaded successfully.
+ * @param language UI language used to format local date and time.
+ * @returns The message descriptor, or null when the account can apply.
+ */
+export function resolveQuotaEligibilityMessage(
+  eligibility: TokenQuotaEligibility | null,
+  language: "zh-CN" | "en-US"
+): QuotaEligibilityMessage | null {
+  if (!eligibility || eligibility.state === "available") {
+    return null;
+  }
+  if (eligibility.state === "pending") {
+    return { key: "settings.token.applyMore.pendingDesc" };
+  }
+
+  const reviewNote = normalizeQuotaReviewNote(eligibility.latestReviewNote);
+  if (eligibility.state === "limit_reached") {
+    const values = { count: eligibility.maxRequestCount };
+    if (eligibility.latestRequestStatus === "approved") {
+      return { key: "settings.token.applyMore.limitApproved", values };
+    }
+    if (eligibility.latestRequestStatus === "rejected" && reviewNote) {
+      return {
+        key: "settings.token.applyMore.limitRejectedWithReason",
+        values: { ...values, reason: reviewNote }
+      };
+    }
+    if (eligibility.latestRequestStatus === "rejected") {
+      return { key: "settings.token.applyMore.limitRejected", values };
+    }
+    return { key: "settings.token.applyMore.limit", values };
+  }
+
+  if (eligibility.nextAllowedAtEpochMs === null) {
+    return { key: "settings.token.applyMore.cooldown" };
+  }
+
+  const values = {
+    nextAllowedAt: formatQuotaNextAllowedAt(eligibility.nextAllowedAtEpochMs, language)
+  };
+  if (eligibility.latestRequestStatus === "approved") {
+    return { key: "settings.token.applyMore.cooldownApproved", values };
+  }
+  if (eligibility.latestRequestStatus === "rejected" && reviewNote) {
+    return {
+      key: "settings.token.applyMore.cooldownRejectedWithReason",
+      values: { ...values, reason: reviewNote }
+    };
+  }
+  if (eligibility.latestRequestStatus === "rejected") {
+    return { key: "settings.token.applyMore.cooldownRejected", values };
+  }
+  return { key: "settings.token.applyMore.cooldownAt", values };
+}
+
+function normalizeQuotaReviewNote(value: string | null): string | null {
+  const normalized = value?.trim().replace(/[。！？.!?]+$/u, "") ?? "";
+  return normalized || null;
+}
+
+function formatQuotaNextAllowedAt(epochMs: number, language: "zh-CN" | "en-US"): string {
+  const date = new Date(epochMs);
+  if (language === "zh-CN") {
+    const pad = (value: number) => String(value).padStart(2, "0");
+    return `${date.getMonth() + 1} \u6708 ${date.getDate()} \u65e5 ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  }
+
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit"
+  }).format(date);
+}
+
+/**
+ * Formats the BYOK usage update time.
+ *
+ * @param value An ISO 8601 time string.
+ * @returns A local detail-page time trimmed to the minute.
+ */
+export function formatUsageUpdatedAt(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  const pad = (n: number) => String(n).padStart(2, "0");
+  // Display in the local time zone (the original implementation just truncated the ISO string, showing UTC directly, off by 8 hours).
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+/**
+ * Formats a Token count.
+ *
+ * @param value The raw number.
+ * @returns Displayed in M units with one decimal place; the balance is not rounded up, to avoid inflating the available quota.
+ */
+function formatNumber(value: number): string {
+  const millions = Math.floor((value / 1_000_000) * 10) / 10;
+  return `${new Intl.NumberFormat("en-US", {
+    maximumFractionDigits: 1,
+    minimumFractionDigits: 1
+  }).format(millions)}M`;
+}
+
+function formatCompactTokenCount(value: number): string {
+  if (value >= 1_000_000) {
+    const millions = Math.floor((value / 1_000_000) * 10) / 10;
+    return `${new Intl.NumberFormat("en-US", { maximumFractionDigits: 1 }).format(millions)}M`;
+  }
+  if (value >= 1_000) {
+    return `${new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(value / 1_000)}K`;
+  }
+  return formatTokens(value);
+}
+
+/**
+ * Formats a summarized Token count.
+ *
+ * @param value The raw number.
+ * @returns Uses the one-decimal M abbreviation when it can be shown, otherwise the full number with thousands separators.
+ */
+function formatTokenSummary(value: number): string {
+  const abbreviated = formatNumber(value);
+  return abbreviated === "0.0M" ? formatTokens(value) : abbreviated;
+}
+
+/**
+ * Formats a Token count for the detail page.
+ *
+ * @param value The raw number.
+ * @returns The full number with thousands separators, for easy detail verification.
+ */
+function formatTokens(value: number): string {
+  return value.toLocaleString("en-US");
+}

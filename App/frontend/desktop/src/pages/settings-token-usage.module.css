@@ -1,0 +1,527 @@
+.detailContent {
+  --usage-ink: #111d1c;
+  --usage-secondary: #3d514c;
+  --usage-muted: #7f938d;
+  --usage-track: color-mix(in srgb, var(--color-border-stone) 52%, transparent);
+  --usage-row-bg: color-mix(in srgb, var(--color-canvas-oat) 40%, transparent);
+  --usage-row-hover: color-mix(in srgb, var(--color-canvas-oat) 75%, transparent);
+  background: transparent;
+  color: var(--usage-ink);
+  font-family: var(--font-sans);
+  font-size: var(--codex-text-base);
+  line-height: var(--codex-leading-base);
+  letter-spacing: 0;
+}
+
+.invitationCard {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-radius: var(--radius-card-lg);
+}
+
+.invitationActions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.updated,
+.statusError {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  color: var(--usage-muted, #7f938d);
+  font-size: var(--codex-text-xs);
+  line-height: var(--codex-leading-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.statusError {
+  color: var(--color-status-error);
+}
+
+/* --- Sections: the heading sits outside the panel, details go inside --- */
+
+.usageSection {
+  margin-bottom: 24px;
+}
+
+.usageSection:last-child {
+  margin-bottom: 0;
+}
+
+.sectionHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px 16px;
+  margin-bottom: 12px;
+}
+
+.sectionHead h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: var(--codex-text-base);
+  line-height: var(--codex-leading-base);
+  font-weight: 600;
+  color: var(--usage-ink);
+}
+
+.sectionHead h2 svg {
+  flex: 0 0 auto;
+}
+
+.sectionNote {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+  margin: 0;
+  color: var(--usage-muted);
+  font-size: var(--codex-text-sm);
+  line-height: var(--codex-leading-sm);
+}
+
+.sectionNote > span {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.sectionNote > span + span::before {
+  content: "·";
+  margin-right: 5px;
+  color: var(--color-border-stone);
+}
+
+.sectionNote strong {
+  color: var(--usage-secondary);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.sectionNote em {
+  color: var(--usage-muted);
+  font-size: var(--codex-text-xs);
+  font-style: normal;
+  font-weight: 400;
+}
+
+/* --- Panels --- */
+
+.platformQuotaList,
+.byokUsageList,
+.usageState {
+  border: 1px solid var(--border-content-panel);
+  border-radius: var(--radius-card-lg);
+  background: var(--color-background-paper);
+}
+
+/*
+ * Mirrors the settings sections with a 24px panel inset.
+ */
+.platformQuotaList,
+.byokUsageList {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 24px;
+}
+
+.byokUsageList {
+  gap: 0;
+}
+
+.byokUsageList .byokUsageRow {
+  padding: 14px 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.byokUsageList .byokUsageRow + .byokUsageRow {
+  border-top: 1px solid color-mix(in srgb, var(--color-border-stone) 30%, transparent);
+}
+
+.byokUsageList .byokUsageRow:hover {
+  background: transparent;
+}
+
+.byokOverview {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-border-stone) 30%, transparent);
+}
+
+.byokOverview > div {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.byokOverview > div > span {
+  color: var(--usage-secondary);
+  font-size: var(--codex-text-sm);
+  line-height: var(--codex-leading-sm);
+}
+
+.byokOverview > div > strong {
+  color: var(--usage-ink);
+  font-size: 18px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.byokOverview > div > strong em {
+  margin-left: 4px;
+  color: var(--usage-muted);
+  font-size: var(--codex-text-xs);
+  font-style: normal;
+  font-weight: 400;
+}
+
+.byokSummaryMetrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  padding: 14px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-border-stone) 30%, transparent);
+}
+
+.byokSummaryMetrics > div {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: var(--radius-input);
+  background: var(--usage-row-bg);
+}
+
+.byokSummaryMetrics span {
+  margin-right: auto;
+  color: var(--usage-muted);
+  font-size: var(--codex-text-xs);
+}
+
+.byokSummaryMetrics strong {
+  color: var(--usage-secondary);
+  font-size: var(--codex-text-base);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.byokSummaryMetrics em {
+  color: var(--usage-muted);
+  font-size: 10px;
+  font-style: normal;
+}
+
+.modelBreakdownNotice {
+  margin: 12px 0 0;
+  padding: 9px 10px;
+  border-radius: var(--radius-input);
+  background: color-mix(in srgb, var(--color-action-sky) 8%, transparent);
+  color: var(--usage-muted);
+  font-size: var(--codex-text-xs);
+  line-height: var(--codex-leading-xs);
+}
+
+.byokPurposeTitle {
+  margin-top: 16px;
+  padding-bottom: 6px;
+  color: var(--usage-secondary);
+  font-size: var(--codex-text-xs);
+  font-weight: 600;
+}
+
+.byokPurposeRows {
+  display: flex;
+  flex-direction: column;
+}
+
+.usageState {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 96px;
+  padding: 24px;
+  color: var(--usage-muted);
+  font-size: var(--codex-text-sm);
+  text-align: center;
+}
+
+.byokProviderGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.byokProviderGroup + .byokProviderGroup {
+  padding-top: 12px;
+  border-top: 1px solid var(--border-content-panel);
+}
+
+.byokProviderHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.byokProviderHead h3 {
+  margin: 0;
+  color: var(--usage-ink);
+  font-size: var(--codex-text-sm);
+  font-weight: 600;
+}
+
+.byokProviderHead span {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  color: var(--usage-muted);
+  font-size: var(--codex-text-xs);
+}
+
+.byokProviderHead strong {
+  color: var(--usage-ink);
+  font-weight: 600;
+}
+
+.byokProviderHead em {
+  font-style: normal;
+}
+
+.byokProviderRows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* --- Row cards (shared between platform & byok) --- */
+
+.platformQuotaRow,
+.byokUsageRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 10px 16px;
+  padding: 14px;
+  border: 1px solid var(--border-content-panel);
+  border-radius: var(--radius-card);
+  background: var(--usage-row-bg);
+  transition: background var(--duration-fast) ease;
+}
+
+.platformQuotaRow:hover,
+.byokUsageRow:hover {
+  background: var(--usage-row-hover);
+}
+
+.compactScene {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.compactScene h3 {
+  margin: 0;
+  font-size: var(--codex-text-base);
+  line-height: var(--codex-leading-base);
+  font-weight: 500;
+  color: var(--usage-ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.compactScene p {
+  margin: 0;
+  color: var(--usage-muted);
+  font-size: var(--codex-text-xs);
+  line-height: var(--codex-leading-xs);
+}
+
+/*
+ * Echoes `.sectionNote` one level down: same label-then-figure rhythm, same
+ * middot separators, but at the row's own caption size so the breakdown reads
+ * as an annotation of the scene rather than a competing set of numbers.
+ */
+.compactScene .byokBreakdown {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 8px;
+  margin-top: 2px;
+}
+
+.byokBreakdown > span {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.byokBreakdown > span + span::before {
+  content: "·";
+  margin-right: 4px;
+  color: var(--color-border-stone);
+}
+
+.byokBreakdown strong {
+  color: var(--usage-secondary);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * The used figure carries the weight; the total and the unit stay quiet so the
+ * pair reads as one number against a reference rather than a sentence.
+ */
+.quotaNumbers,
+.byokUsageValue {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  font-size: var(--codex-text-base);
+  line-height: var(--codex-leading-base);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.quotaNumbers strong,
+.byokUsageValue strong {
+  color: var(--usage-ink);
+  font-weight: 600;
+}
+
+.quotaNumbers span {
+  color: var(--usage-muted);
+  font-weight: 400;
+}
+
+.quotaNumbers em,
+.byokUsageValue em {
+  color: var(--usage-muted);
+  font-size: var(--codex-text-xs);
+  font-style: normal;
+  font-weight: 400;
+}
+
+.byokUsageActions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.byokUsageTotal {
+  display: grid;
+  justify-items: end;
+  gap: 2px;
+}
+
+.byokUsageTotal > span {
+  color: var(--usage-muted);
+  font-size: var(--codex-text-xs);
+  line-height: var(--codex-leading-xs);
+  white-space: nowrap;
+}
+
+/* --- Meter --- */
+
+.meter {
+  grid-column: 1 / -1;
+  height: 4px;
+  overflow: hidden;
+  border-radius: var(--radius-pill);
+  background: var(--usage-track);
+}
+
+.meterFill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--color-action-sky);
+  transition: width var(--duration-normal) ease;
+}
+
+.meterFillOver {
+  background: var(--color-status-error);
+}
+
+.overQuota .quotaNumbers strong {
+  color: var(--color-status-error);
+}
+
+/* --- Idle rows --- */
+
+.inactive {
+  background: transparent;
+}
+
+.inactive .compactScene h3,
+.inactive .byokUsageValue strong {
+  color: var(--usage-muted);
+  font-weight: 400;
+}
+
+/* --- Responsive --- */
+
+@media (max-width: 640px) {
+  .invitationCard {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .invitationActions,
+  .invitationCard > button {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .invitationActions {
+    flex-wrap: wrap;
+  }
+
+  .sectionHead {
+    display: block;
+  }
+
+  .sectionNote {
+    margin-top: 4px;
+  }
+
+  .platformQuotaList,
+  .byokUsageList {
+    padding: 16px;
+  }
+
+  .byokUsageActions {
+    grid-column: 1 / -1;
+    justify-content: space-between;
+  }
+
+  .byokOverview {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .byokSummaryMetrics {
+    grid-template-columns: 1fr;
+  }
+}

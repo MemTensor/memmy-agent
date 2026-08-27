@@ -1,0 +1,3915 @@
+/** Home page module. */
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type CSSProperties, type DragEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type SetStateAction, type UIEvent } from "react";
+import type { AgentGatewayStartupIssue } from "@memmy/local-api-contracts";
+import { hydrateAgentThreadInBackground, refreshAgentTaskList, useAgentRuntimeBridge, type AgentTaskStateCoordinator } from "../app/agent-runtime-bridge.js";
+import { useApiClients } from "../app/providers.js";
+import { FOCUSED_AGENT_CHAT_STORAGE_KEY, clearFocusedAgentTarget, isAccountTokenQuotaExhausted, normalizeAgentChatId, readLaunchAgentChatId, removeLaunchAgentChatIdFromUrl } from "../app/routes.js";
+import {
+  MemmyAgentRequestError,
+  MemmyAgentGoalControlError,
+  MemmyAgentMessageRejectedError,
+  type MemmyAgentClient,
+  type MemmyAgentProject,
+  type MemmyAgentSessionSummary,
+  type MemmyAgentSlashCommand,
+  type AgentTurnSource,
+  type MemmyAgentUiLanguage,
+  type MemmyAgentWebSocketConnection,
+  type UploadAgentMediaInput,
+  type UploadedAgentMedia,
+  type WebuiSessionTarget
+} from "../api/memmy-agent-client.js";
+import type { AnalyticsEvent } from "../analytics/analytics-events.js";
+import { setAnalyticsModelSource } from "../analytics/analytics-context.js";
+import { buildOnboardingActivationEvent } from "../analytics/onboarding-analytics.js";
+import { useAnalytics } from "../analytics/use-analytics.js";
+import { AgentModelSelector } from "../components/agent-model-selector.js";
+import { Memmy } from "../components/mascot/memmy.js";
+import { Select } from "../components/Select.js";
+import { formatMessage, type MessageKey, type MessageValues, zhCNMessages } from "../i18n/messages.js";
+import { useTranslation } from "../i18n/use-translation.js";
+import {
+  AGENT_ATTACHMENT_MAX_COUNT,
+  AGENT_FILE_TARGET_MAX_BYTES,
+  agentAttachmentAccept,
+  classifyAgentAttachmentFile,
+  safeAgentAttachmentFilename,
+  type AgentAttachmentClassification,
+} from "../lib/agent-attachment.js";
+import { encodeAgentImage, type AgentImageMime } from "../lib/agent-image-encode.js";
+import { formatConversationTitleForDisplay } from "../lib/format-conversation-title.js";
+import { ImChannelTitleIcon, imChannelTitleDisplay } from "../integrations/integration-meta.js";
+import { useTaskBus, type TaskBusAgentMessage } from "../lib/task-bus.js";
+import type { AppAction } from "../state/app-actions.js";
+import { agentActions, appActions, createAgentOperationError } from "../state/app-actions.js";
+import { type AgentChatMessage, type AgentState } from "../state/agent-chat-slice.js";
+import { useAppState } from "../state/app-state.js";
+import { isComposingKeyboardEvent } from "../utils/keyboard.js";
+import {
+  agentChatScopeKey,
+  updateComposerDraftForScope,
+  type PendingAttachment,
+  type PendingAttachmentBase,
+  type PendingFileAttachment,
+  type PendingImage
+} from "../state/agent-composer-state.js";
+import { createModelWorkspace, resolveModelSelection } from "../state/model-workspace.js";
+import {
+  AgentCommandPalette,
+  buildVisibleSlashCommands,
+  filterSlashCommands,
+  localizeSlashCommands,
+  readRecentSlashCommands,
+  slashQueryFromInput,
+  updateRecentSlashCommands,
+  writeRecentSlashCommands,
+  type SlashCommandPaletteItem,
+  type SlashCommandStorageLike
+} from "./agent-command-palette.js";
+import { AgentAttachmentCard, splitAgentAttachmentName } from "./agent-file-attachment-chip.js";
+import { AgentEnvironmentPanel } from "./agent-environment-panel.js";
+import { AgentGoalBar, type AgentGoalControlRequest } from "./agent-goal-bar.js";
+import { AgentQueuedMessageList } from "./agent-queued-message-list.js";
+import { AgentThreadMessages, ChatImageLightbox } from "./agent-thread-messages.js";
+import { AgentWorkspaceContext } from "./agent-workspace-context.js";
+import { AppFrame } from "./app-frame.js";
+import {
+  MicrophonePermissionError,
+  mergeVoiceTranscript,
+  microphonePermissionDeniedMessageKey,
+  useAsrRecorder
+} from "./asr-recorder.js";
+import { FirstEncounterRelayChallenge, FirstEncounterRelayOptIn, firstEncounterFollowUpMode, hasDetectedRelayAgents, relayAgentOptions } from "./first-encounter-relay-challenge.js";
+import {
+  consumeFirstEncounterRelayArm,
+  consumePendingFirstEncounterTaskLaunch,
+  readFirstEncounterRelayChat,
+  readFirstEncounterRelayPrompt,
+  readFirstEncounterRelayReadyChat,
+  writeFirstEncounterRelayChat,
+  writeFirstEncounterRelayReadyChat,
+  writePendingFirstEncounterTaskLaunch
+} from "./first-encounter-task-launch.js";
+import { HistoryDagPanel, type HistoryDagPanelState } from "./history-dag-panel.js";
+import { LlmProviderLogo } from "./llm-provider-logo.js";
+import { Mic, Pause, Plus, Send } from "./memory/memory-prototype-icons.js";
+import { resolveWorkspaceEnvironmentScope, useWorkspaceEnvironment } from "./use-workspace-environment.js";
+import { ArrowDown, Check, ChevronDown, Folder, Plus as LucidePlus, RotateCw, SlidersHorizontal, Target, X } from "lucide-react";
+
+export { agentChatScopeKey, updateComposerDraftForScope };
+export { hydrateAgentThreadInBackground };
+export { isComposingKeyboardEvent } from "../utils/keyboard.js";
+export type { PendingAttachment, PendingAttachmentBase, PendingFileAttachment, PendingImage };
+
+const NEW_TASK_MODEL_SCOPE_KEY = "draft-new-task";
+
+const COMPOSER_MEDIA_STRIP_STYLE = { maxHeight: "min(7.5rem, 28vh)" } satisfies CSSProperties;
+const AGENT_WS_SAFE_FRAME_BYTES = 1024 * 1024;
+const COMPOSER_HEIGHT_EPSILON = 2;
+
+export function updateAgentComposerOverlayHeight(
+  panel: HTMLElement,
+  composer: HTMLElement,
+  previousHeight = -1
+): number {
+  const nextHeight = Math.ceil(composer.getBoundingClientRect().height);
+  if (Math.abs(nextHeight - previousHeight) < COMPOSER_HEIGHT_EPSILON) return previousHeight;
+  panel.style.setProperty("--agent-composer-overlay-height", `${nextHeight}px`);
+  return nextHeight;
+}
+const COMPOSER_SINGLE_LINE_HEIGHT_PX = 52;
+const COMPOSER_GOAL_COMMAND = "/goal" as const;
+const GOAL_MODE_AUXILIARY_COMMANDS = new Set(["/status", "/history-dag", "/last-compaction"]);
+const AGENT_CONVERSATION_BOTTOM_EPSILON_PX = 4;
+const SLASH_COMMAND_RETRY_DELAYS_MS = [300, 1000, 2500];
+/**
+ * How long a wheel/touch gesture counts as "the user just took over scrolling".
+ * Only scroll events inside this window are allowed to turn auto-scroll off,
+ * so a scroll event fired by our own `scrollTop` assignment (or one merely
+ * racing with fast-streaming content growth) can never be mistaken for the
+ * user grabbing the scrollbar. Reaching the bottom always re-arms auto-scroll
+ * immediately, regardless of what triggered that scroll event.
+ */
+const AGENT_CONVERSATION_USER_SCROLL_INTENT_MS = 600;
+const FIRST_ENCOUNTER_MEMORY_VERIFY_TIMEOUT_MS = 60_000;
+const FIRST_ENCOUNTER_MEMORY_VERIFY_INTERVAL_MS = 2_000;
+/** Definition for stop confirmation grace ms. */
+export const STOP_CONFIRMATION_GRACE_MS = 8000;
+
+export interface ComposerCommandDraft {
+  command: typeof COMPOSER_GOAL_COMMAND | null;
+  text: string;
+}
+
+/** Splits the visual Goal command token from the underlying composer draft. */
+export function parseComposerCommandDraft(draft: string): ComposerCommandDraft {
+  if (draft === COMPOSER_GOAL_COMMAND) {
+    return { command: COMPOSER_GOAL_COMMAND, text: "" };
+  }
+  const prefix = `${COMPOSER_GOAL_COMMAND} `;
+  if (draft.startsWith(prefix)) {
+    return { command: COMPOSER_GOAL_COMMAND, text: draft.slice(prefix.length) };
+  }
+  return { command: null, text: draft };
+}
+
+/** Rebuilds the wire-format draft while keeping the command token outside the textarea. */
+export function buildComposerCommandDraft(command: string | null, text: string): string {
+  if (!command) {
+    return text;
+  }
+  return `${command} ${text}`;
+}
+
+/** Resolves the visual command token only after an explicit palette selection. */
+export function resolveComposerCommandDraft(
+  draft: string,
+  selectedCommand: typeof COMPOSER_GOAL_COMMAND | null
+): ComposerCommandDraft {
+  const parsed = parseComposerCommandDraft(draft);
+  return selectedCommand === COMPOSER_GOAL_COMMAND && parsed.command === COMPOSER_GOAL_COMMAND
+    ? parsed
+    : { command: null, text: draft };
+}
+
+/** Keeps only non-destructive slash actions while composing a Goal objective. */
+export function filterGoalModeSlashCommands(
+  commands: SlashCommandPaletteItem[],
+  hasActiveConversation: boolean
+): SlashCommandPaletteItem[] {
+  return commands.filter((command) => (
+    GOAL_MODE_AUXILIARY_COMMANDS.has(command.command)
+    && (hasActiveConversation || command.command === "/last-compaction")
+  ));
+}
+const TRANSLATABLE_AGENT_ERROR_KEYS = new Set<MessageKey>([
+  "home.media.error.sendUnsupported",
+  "home.media.error.sendSize",
+  "home.media.error.sendFileSize",
+  "home.media.error.sendTooManyImages",
+  "home.media.error.sendTooManyAttachments",
+  "home.media.error.sendReadFailed",
+  "home.media.error.sendFailed",
+  "home.media.error.messageTooBig",
+  "home.agent.messageNotRecorded",
+  "home.agent.executionInterrupted",
+  "home.agent.recoveryTimeout",
+  "home.composer.emptyMessage",
+  "home.goal.controlUnknown",
+  "home.modelSelector.unavailable",
+  "home.project.desktopRequired",
+  "home.queue.removeFailed",
+  "home.queue.steerFailed",
+  "home.queue.steerUnavailable",
+  "asr.error.microphonePermissionDenied",
+  "asr.error.microphonePermissionDenied.mac",
+  "asr.error.microphonePermissionDenied.windows"
+]);
+export const AGENT_ATTACHMENT_ACCEPT = agentAttachmentAccept();
+export const AGENT_MEDIA_ACCEPT = AGENT_ATTACHMENT_ACCEPT;
+
+export function isSteerableCurrentTurn(source: AgentTurnSource | null, isGoalActive: boolean): boolean {
+  if (!source) return isGoalActive;
+  return source.kind === "gui" && source.channel === "websocket";
+}
+export const AGENT_RESTART_STATE_STORAGE_KEY = "memmy-agent-restart-state";
+
+export interface ComposerSubmitButtonProps {
+  /** Is sending. */
+  isSending: boolean;
+  /** Disabled. */
+  disabled: boolean;
+  /** Send label. */
+  sendLabel: string;
+  /** Stop label. */
+  stopLabel: string;
+  /** Variant. */
+  variant?: "empty" | "compact";
+  /** On click. */
+  onClick: () => void;
+}
+export type StatusPanelState =
+  | { open: false }
+  | { open: true; loading: boolean; content: string; error: string | null };
+
+export interface StoredAgentRestartState {
+  /** Chat id. */
+  chatId: string;
+  /** Started at. */
+  startedAt: number;
+  /** Saw disconnect. */
+  sawDisconnect: boolean;
+}
+
+export interface RequestAgentRestartInput {
+  /** Chat id. */
+  chatId: string | null;
+  /** Connection. */
+  connection: Pick<MemmyAgentWebSocketConnection, "restart"> | null;
+  /** Ensure chat subscription. */
+  ensureChatSubscription?: (chatId: string) => void;
+  /** Dispatch. */
+  dispatch: (action: AppAction) => void;
+  /** Track. */
+  track: (event: AnalyticsEvent) => void;
+  /** Storage. */
+  storage?: SlashCommandStorageLike | null;
+  /** Now. */
+  now?: () => number;
+}
+
+export interface RequestAgentStatusInput {
+  chatId: string | null;
+  connection: Pick<MemmyAgentWebSocketConnection, "status"> | null;
+  failedMessage: string;
+  setStatusPanel: (state: StatusPanelState) => void;
+}
+
+export interface RequestNewSessionResetInput {
+  chatId: string | null;
+  connection: {
+    getReadyGeneration(): number | null;
+    sendMessage(
+      ...args: Parameters<MemmyAgentWebSocketConnection["sendMessage"]>
+    ): ReturnType<MemmyAgentWebSocketConnection["sendMessage"]> | void;
+  } | null;
+  canSubmitOrdinaryMessage: boolean;
+  ensureChatSubscription?: (chatId: string) => void;
+  clearInput: () => void;
+  clearPendingMedia: () => void;
+  dismissSlashMenu: () => void;
+  focusInput?: () => void;
+}
+
+export interface SubmitAgentComposerMessageInput {
+  chatId: string | null;
+  target?: WebuiSessionTarget | null;
+  clientRequestId?: string;
+  connection: {
+    getReadyGeneration(): number | null;
+    newChat(
+      expectedGeneration: number,
+      timeoutMs?: number,
+      modelPreset?: string | null,
+      clientRequestId?: string
+    ): Promise<{ chatId: string; modelPreset: string }>;
+    submitMessage(
+      ...args: Parameters<MemmyAgentWebSocketConnection["submitMessage"]>
+    ): ReturnType<MemmyAgentWebSocketConnection["submitMessage"]>;
+  } | null;
+  ensureChatSubscription?: (chatId: string) => void;
+  content: string;
+  displayContent?: string;
+  language?: MemmyAgentUiLanguage;
+  pendingAttachments: PendingAttachment[];
+  uploadAgentMedia: (attachments: UploadAgentMediaInput[]) => Promise<UploadedAgentMedia[]>;
+  dispatch: (action: AppAction) => void;
+  track: (event: AnalyticsEvent) => void;
+  setCreatingChat?: (value: boolean) => void;
+  setComposerMediaError?: (message: string | null) => void;
+  clearComposer: () => void;
+  onChatResolved?: (chatId: string) => void;
+  onNewChatMessageSent?: (chatId: string) => void;
+  chatSelectionEpoch?: number;
+  getChatSelectionEpoch?: () => number;
+  scopeKey?: string;
+  modelPreset?: string | null;
+}
+
+export interface RequestAgentStopInput {
+  chatId: string | null;
+  connection: Pick<MemmyAgentWebSocketConnection, "stop"> | null;
+  stopInFlightByChatId: Record<string, boolean>;
+  stopRequestLocks: Set<string>;
+  dispatch: (action: AppAction) => void;
+  track: (event: AnalyticsEvent) => void;
+}
+
+export function requestAgentStop(input: RequestAgentStopInput): boolean {
+  const { chatId, connection } = input;
+  if (!chatId || !connection || input.stopInFlightByChatId[chatId] || input.stopRequestLocks.has(chatId)) {
+    return false;
+  }
+
+  input.stopRequestLocks.add(chatId);
+  try {
+    input.track({ name: "agent_stop_generation", params: { page_path: "/main" }, consentTier: "basic" });
+    input.dispatch(agentActions.stopRequested(chatId));
+    connection.stop(chatId);
+    return true;
+  } catch (error) {
+    input.stopRequestLocks.delete(chatId);
+    throw error;
+  }
+}
+
+export function isSingleLineComposerInput(element: HTMLTextAreaElement): boolean {
+  const style = window.getComputedStyle(element);
+  const lineHeight = Number.parseFloat(style.lineHeight);
+  const paddingTop = Number.parseFloat(style.paddingTop) || 0;
+  const paddingBottom = Number.parseFloat(style.paddingBottom) || 0;
+  const singleLineHeight = (Number.isFinite(lineHeight) ? lineHeight : element.clientHeight) + paddingTop + paddingBottom;
+  return element.scrollHeight <= singleLineHeight + COMPOSER_HEIGHT_EPSILON;
+}
+
+export function isAgentConversationAtBottom(element: Pick<HTMLElement, "scrollTop" | "scrollHeight" | "clientHeight">): boolean {
+  return element.scrollTop + element.clientHeight >= element.scrollHeight - AGENT_CONVERSATION_BOTTOM_EPSILON_PX;
+}
+
+export function hasActiveAgentConversation(currentChatId: string | null, messageCount: number): boolean {
+  return Boolean(currentChatId) && messageCount > 0;
+}
+
+export function shouldAcceptAgentStatusResult(input: {
+  pendingStatusChatId: string | null;
+  subscribedChatId: string | null;
+  resultChatId: string;
+}): boolean {
+  return input.pendingStatusChatId === input.resultChatId && input.subscribedChatId === input.resultChatId;
+}
+
+export function ComposerMediaPreviewStrip(props: {
+  items: PendingAttachment[];
+  onRemove: (id: string) => void;
+  removeLabel?: string;
+  selectedLabel?: string;
+  t?: HomeTranslate;
+}) {
+  const [previewImageId, setPreviewImageId] = useState<string | null>(null);
+  const previewImages = props.items.filter((item): item is PendingImage => item.kind === "image");
+  const previewImageIndex = previewImageId == null
+    ? -1
+    : previewImages.findIndex((item) => item.id === previewImageId);
+
+  if (!props.items.length) {
+    return null;
+  }
+  const removeLabel = props.removeLabel ?? "Remove";
+  const translate = props.t ?? defaultHomeTranslate;
+
+  return (
+    <>
+      <div className="composer-media-preview-strip" style={COMPOSER_MEDIA_STRIP_STYLE} aria-label={props.selectedLabel ?? "Selected media"}>
+        {props.items.map((item) => (
+          item.kind === "image" ? (
+            <ComposerImageAttachmentChip
+              key={item.id}
+              item={item}
+              onPreview={setPreviewImageId}
+              onRemove={props.onRemove}
+              removeLabel={removeLabel}
+              t={translate}
+            />
+          ) : (
+            <ComposerFileAttachmentChip
+              key={item.id}
+              item={item}
+              onRemove={props.onRemove}
+              removeLabel={removeLabel}
+            />
+          )
+        ))}
+      </div>
+      {previewImageIndex < 0 ? null : (
+        <ChatImageLightbox
+          images={previewImages.map((item) => ({ url: item.previewUrl, name: item.fileName }))}
+          index={previewImageIndex}
+          onIndexChange={(index) => setPreviewImageId(previewImages[index]?.id ?? null)}
+          onClose={() => setPreviewImageId(null)}
+        />
+      )}
+    </>
+  );
+}
+
+export function ComposerImageAttachmentChip(props: {
+  item: PendingImage;
+  onPreview: (id: string) => void;
+  onRemove: (id: string) => void;
+  removeLabel: string;
+  t: HomeTranslate;
+}) {
+  const { item, t } = props;
+  const extensionLabel = splitAgentAttachmentName(item.fileName, item.encodedMime ? `.${item.encodedMime.slice("image/".length)}` : undefined).extensionLabel;
+  const subline = item.status === "error"
+    ? t(item.errorKey ?? "home.media.error.sendReadFailed")
+    : `${extensionLabel} · ${formatBytes(item.originalBytes)}`;
+
+  return (
+    <AgentAttachmentCard
+      kind="image"
+      name={item.fileName}
+      previewUrl={item.previewUrl}
+      subline={subline}
+      removable
+      removeLabel={props.removeLabel}
+      title={item.fileName}
+      onClick={() => props.onPreview(item.id)}
+      onRemove={() => props.onRemove(item.id)}
+      error={item.status === "error"}
+      thumbnailOverlay={item.status === "encoding" ? <RotateCw size={13} className="animate-spin" /> : null}
+    />
+  );
+}
+
+export function ComposerFileAttachmentChip(props: {
+  item: PendingFileAttachment;
+  onRemove: (id: string) => void;
+  removeLabel: string;
+}) {
+  const { item } = props;
+  const extensionLabel = splitAgentAttachmentName(item.fileName, item.extension).extensionLabel;
+  return (
+    <AgentAttachmentCard
+      kind="file"
+      name={item.fileName}
+      mime={item.uploadMime}
+      subline={`${extensionLabel} · ${formatBytes(item.uploadBytes ?? item.originalBytes)}`}
+      removable
+      removeLabel={props.removeLabel}
+      title={item.fileName}
+      onRemove={() => props.onRemove(item.id)}
+      error={item.status === "error"}
+    />
+  );
+}
+
+/**
+ * Renders the send/stop button on the right side of the input box.
+ *
+ * @param props Button state, label, style variant, and action.
+ * @returns While sending, renders only stop; when idle, renders only send.
+ */
+export function ComposerSubmitButton(props: ComposerSubmitButtonProps) {
+  const isCompact = props.variant === "compact";
+  const squareSize = isCompact ? 10 : 11;
+  const sendIconSize = isCompact ? 13 : 14;
+  const stateClassName = props.disabled
+    ? "bg-text-ink/25 text-white cursor-not-allowed"
+    : "bg-action-sky text-white hover:bg-action-sky-hover shadow-sm cursor-pointer";
+  const className = `composer-action-submit ${stateClassName}`;
+
+  return (
+    <button
+      type="button"
+      disabled={props.disabled}
+      onClick={props.onClick}
+      aria-label={props.isSending ? props.stopLabel : props.sendLabel}
+      title={props.isSending ? props.stopLabel : props.sendLabel}
+      className={className}
+    >
+      {props.isSending ? (
+        <span className="inline-flex items-center justify-center">
+          <span
+            className="block shrink-0 bg-white"
+            style={{ width: squareSize, height: squareSize, borderRadius: 2 }}
+            aria-hidden
+          />
+          <span className="sr-only">{props.stopLabel}</span>
+        </span>
+      ) : (
+        <span className="inline-flex items-center justify-center">
+          <Send size={sendIconSize} className="translate-y-[1px]" />
+          <span className="sr-only">{props.sendLabel}</span>
+        </span>
+      )}
+    </button>
+  );
+}
+
+export function agentComposerPrimaryAction(input: {
+  isRunning: boolean;
+  isGoalActive: boolean;
+  hasIntent: boolean;
+}): "send" | "stop" {
+  return input.isRunning && !input.hasIntent ? "stop" : "send";
+}
+
+/** Displays the selected slash command as a removable composer token. */
+export function ComposerCommandChip(props: {
+  command: string;
+  label?: string;
+  removeLabel: string;
+  onRemove: () => void;
+}) {
+  const label = props.label ?? props.command.replace(/^\//, "");
+  return (
+    <div className="composer-command-chip">
+      <button
+        type="button"
+        className="composer-command-chip__leading"
+        aria-label={`${props.removeLabel} ${label}`}
+        title={`${props.removeLabel} ${label}`}
+        onClick={props.onRemove}
+      >
+        <Target size={14} strokeWidth={2} aria-hidden="true" className="composer-command-chip__icon composer-command-chip__icon--target" />
+        <X size={13} strokeWidth={2.25} aria-hidden="true" className="composer-command-chip__icon composer-command-chip__icon--remove" />
+      </button>
+      <span className="composer-command-chip__label">{label}</span>
+    </div>
+  );
+}
+
+export function AgentStatusPanel(props: { state: StatusPanelState; closeLabel: string; loadingLabel: string; onClose: () => void }) {
+  if (!props.state.open) {
+    return null;
+  }
+  const content = props.state.loading ? props.loadingLabel : props.state.error ?? props.state.content;
+  return (
+    <div role="status" className="rounded-card border border-border-stone/40 bg-background-paper shadow-xl p-3">
+      <div className="flex items-start gap-3">
+        <pre className={`min-w-0 flex-1 max-h-80 overflow-auto whitespace-pre-wrap break-words text-[11px] leading-5 font-mono ${props.state.error ? "text-status-error" : "text-text-ink/70"}`}>{content}</pre>
+        <button
+          type="button"
+          aria-label={props.closeLabel}
+          title={props.closeLabel}
+          onClick={props.onClose}
+          className="shrink-0 w-7 h-7 inline-flex items-center justify-center rounded-btn text-text-ink/45 hover:bg-canvas-oat/70 hover:text-text-ink/70 transition-all cursor-pointer"
+        >
+          <X size={14} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+export function parseStoredAgentRestartState(raw: string | null): StoredAgentRestartState | null {
+  if (!raw) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+    const record = parsed as Record<string, unknown>;
+    const chatId = typeof record.chatId === "string" ? record.chatId.trim() : "";
+    const startedAt = typeof record.startedAt === "number" ? record.startedAt : NaN;
+    const sawDisconnect = record.sawDisconnect === true;
+    return chatId && Number.isFinite(startedAt) ? { chatId, startedAt, sawDisconnect } : null;
+  } catch {
+    return null;
+  }
+}
+
+export function readStoredAgentRestartState(storage: SlashCommandStorageLike | null = browserStorage()): StoredAgentRestartState | null {
+  return storage ? parseStoredAgentRestartState(storage.getItem(AGENT_RESTART_STATE_STORAGE_KEY)) : null;
+}
+
+export function writeStoredAgentRestartState(state: StoredAgentRestartState, storage: SlashCommandStorageLike | null = browserStorage()): void {
+  storage?.setItem(AGENT_RESTART_STATE_STORAGE_KEY, JSON.stringify(state));
+}
+
+export function clearStoredAgentRestartState(storage: SlashCommandStorageLike | null = browserStorage()): void {
+  if (!storage) {
+    return;
+  }
+  if (storage.removeItem) {
+    storage.removeItem(AGENT_RESTART_STATE_STORAGE_KEY);
+    return;
+  }
+  storage.setItem(AGENT_RESTART_STATE_STORAGE_KEY, "");
+}
+
+export function requestAgentRestart(input: RequestAgentRestartInput): boolean {
+  if (!input.chatId || !input.connection) {
+    return false;
+  }
+  const startedAt = input.now?.() ?? Date.now();
+  writeStoredAgentRestartState({ chatId: input.chatId, startedAt, sawDisconnect: false }, input.storage);
+  input.track({ name: "agent_restart_requested", params: { page_path: "/main" }, consentTier: "basic" });
+  input.dispatch(agentActions.restartRequested(startedAt));
+  input.ensureChatSubscription?.(input.chatId);
+  input.connection.restart(input.chatId);
+  return true;
+}
+
+export function requestAgentStatusPanel(input: RequestAgentStatusInput): boolean {
+  if (!input.chatId || !input.connection) {
+    input.setStatusPanel({ open: true, loading: false, content: "", error: input.failedMessage });
+    return false;
+  }
+  input.setStatusPanel({ open: true, loading: true, content: "", error: null });
+  input.connection.status(input.chatId);
+  return true;
+}
+
+export function requestNewSessionReset(input: RequestNewSessionResetInput): boolean {
+  const generation = input.connection?.getReadyGeneration() ?? null;
+  if (!input.canSubmitOrdinaryMessage || !input.chatId || !input.connection || generation === null) {
+    input.focusInput?.();
+    return false;
+  }
+
+  try {
+    input.connection.sendMessage({ chatId: input.chatId, content: "/new" }, generation);
+  } catch {
+    input.focusInput?.();
+    return false;
+  }
+  input.ensureChatSubscription?.(input.chatId);
+  input.clearInput();
+  input.clearPendingMedia();
+  input.dismissSlashMenu();
+  input.focusInput?.();
+  return true;
+}
+
+export async function submitAgentComposerMessage(input: SubmitAgentComposerMessageInput): Promise<boolean> {
+  const text = input.content.trim();
+  const trimmedDisplayContent = input.displayContent?.trim();
+  const displayText = trimmedDisplayContent || text;
+  if (
+    text === COMPOSER_GOAL_COMMAND
+    && trimmedDisplayContent !== undefined
+    && !trimmedDisplayContent
+  ) {
+    input.setComposerMediaError?.("home.composer.emptyMessage");
+    return false;
+  }
+  if ((!text && !input.pendingAttachments.length) || !input.connection) {
+    return false;
+  }
+  const expectedGeneration = input.connection.getReadyGeneration();
+  if (expectedGeneration === null) {
+    return false;
+  }
+  if (input.modelPreset === null) {
+    return false;
+  }
+  if (input.pendingAttachments.some((item) => !isPendingAttachmentReadyForUpload(item))) {
+    input.setComposerMediaError?.("home.media.error.sendReadFailed");
+    return false;
+  }
+  if (input.chatId && input.target) {
+    return false;
+  }
+
+  let chatId = input.chatId;
+  let confirmedModelPreset = input.modelPreset;
+  const clientRequestId = input.clientRequestId ?? crypto.randomUUID();
+  const capturedTarget = input.chatId ? null : input.target ?? { kind: "standalone" as const };
+  const capturedChatSelectionEpoch = input.chatSelectionEpoch ?? 0;
+  const createdNewChat = !chatId;
+  if (!chatId) {
+    input.setCreatingChat?.(true);
+    try {
+      const created = await input.connection.newChat(
+        expectedGeneration,
+        5000,
+        input.modelPreset,
+        clientRequestId
+      );
+      chatId = created.chatId;
+      confirmedModelPreset = created.modelPreset;
+      input.onChatResolved?.(chatId);
+    } catch (error) {
+      input.dispatch(agentActions.operationFailed("chat", createAgentOperationError({
+        source: "new-chat",
+        message: error instanceof MemmyAgentMessageRejectedError
+          ? `${error.detail}:${error.reason}`
+          : readableError(error),
+        ...(input.scopeKey ? { scopeKey: input.scopeKey } : {})
+      })));
+      return false;
+    } finally {
+      input.setCreatingChat?.(false);
+    }
+  }
+
+  const uploadInputs = input.pendingAttachments.map((item) => ({
+    blob: uploadBlobForPendingAttachment(item),
+    name: safeAgentAttachmentFilename(item.fileName, uploadClassificationForPendingAttachment(item)),
+    kind: item.kind,
+    mime: uploadMimeForPendingAttachment(item)
+  }));
+  let uploadedAttachments: UploadedAgentMedia[];
+  try {
+    uploadedAttachments = uploadInputs.length ? await input.uploadAgentMedia(uploadInputs) : [];
+  } catch (error) {
+    if (createdNewChat && chatId) {
+      input.dispatch(agentActions.transientSendFailed(chatId));
+    }
+    const uploadErrorKey = error instanceof MemmyAgentRequestError && error.status === 413
+      ? input.pendingAttachments.some((item) => item.kind === "file")
+        ? "home.media.error.sendFileSize"
+        : "home.media.error.sendSize"
+      : "home.media.error.sendFailed";
+    input.setComposerMediaError?.(uploadErrorKey);
+    return false;
+  }
+
+  const payload = {
+    type: "message",
+    chat_id: chatId,
+    content: text,
+    webui: true,
+    queue_surface: "chat_composer",
+    client_request_id: clientRequestId,
+    ...(capturedTarget ? { target: capturedTarget } : {}),
+    ...(input.language ? { language: input.language } : {}),
+    ...(confirmedModelPreset !== undefined ? { model_preset: confirmedModelPreset } : {}),
+    ...(uploadedAttachments.length ? { media_paths: uploadedAttachments.map((item) => item.path) } : {})
+  };
+  if (encodedPayloadBytes(payload) > AGENT_WS_SAFE_FRAME_BYTES) {
+    if (createdNewChat && chatId) {
+      input.dispatch(agentActions.transientSendFailed(chatId));
+    }
+    input.setComposerMediaError?.("home.media.error.messageTooBig");
+    return false;
+  }
+
+  const focus = (input.getChatSelectionEpoch?.() ?? capturedChatSelectionEpoch) === capturedChatSelectionEpoch;
+  if (focus) {
+    input.ensureChatSubscription?.(chatId);
+  }
+  let submission: Awaited<ReturnType<MemmyAgentWebSocketConnection["submitMessage"]>>;
+  try {
+    submission = await input.connection.submitMessage({
+      chatId,
+      content: text,
+      clientRequestId,
+      ...(capturedTarget ? { target: capturedTarget } : {}),
+      ...(input.language ? { language: input.language } : {}),
+      ...(confirmedModelPreset !== undefined ? { modelPreset: confirmedModelPreset } : {}),
+      media: uploadedAttachments
+    }, expectedGeneration);
+  } catch (error) {
+    if (createdNewChat) {
+      input.dispatch(agentActions.transientSendFailed(chatId));
+    }
+    if (
+      error instanceof MemmyAgentMessageRejectedError
+      && error.reason === "project_removed"
+      && input.scopeKey
+    ) {
+      input.dispatch(agentActions.draftTargetUpdated(input.scopeKey, { kind: "standalone" }));
+    }
+    input.dispatch(agentActions.operationFailed("chat", createAgentOperationError({
+      source: "send",
+      message: error instanceof MemmyAgentMessageRejectedError
+        ? `${error.detail}:${error.reason}`
+        : readableError(error),
+      chatId,
+      ...(input.scopeKey ? { scopeKey: input.scopeKey } : {})
+    })));
+    return false;
+  }
+  input.track({ name: "agent_send_message", params: { page_path: "/main" }, consentTier: "basic" });
+  if (createdNewChat && focus) {
+    input.dispatch(agentActions.newChatCreated(chatId));
+  }
+  if (submission.status === "accepted") {
+    input.dispatch(agentActions.userMessageQueued({
+      chatId,
+      content: displayText,
+      media: uploadedAttachments.map((item) => ({ url: item.url, name: item.name, kind: item.kind, path: item.path })),
+      focus,
+      clientRequestId,
+      ...(capturedTarget ? { target: capturedTarget } : {})
+    }));
+  }
+  input.clearComposer();
+  if (input.scopeKey) {
+    input.dispatch(agentActions.pendingModelPresetCleared(input.scopeKey));
+  }
+  if (createdNewChat) {
+    input.onNewChatMessageSent?.(chatId);
+  }
+  return true;
+}
+
+/**
+ * Renders the chat home page.
+ *
+ * @returns The chat home page node.
+ */
+export function HomePage() {
+  const { clients } = useApiClients();
+  const { state, dispatch } = useAppState();
+  const modelWorkspace = createModelWorkspace(state.modelConfig);
+  const { language, t } = useTranslation();
+  const { track } = useAnalytics();
+  const { syncAgentConversation } = useTaskBus();
+  const { connection, ensureChatSubscription, taskStateCoordinator } = useAgentRuntimeBridge();
+  const chatSelectionEpochRef = useRef(state.agent.chatSelectionEpoch);
+  chatSelectionEpochRef.current = state.agent.chatSelectionEpoch;
+  const [slashCommands, setSlashCommands] = useState<MemmyAgentSlashCommand[]>([]);
+  const slashCommandsRef = useRef<MemmyAgentSlashCommand[]>([]);
+  const slashCommandsInFlightRef = useRef(false);
+  const slashCommandsRequestIdRef = useRef(0);
+  const slashCommandsRetryTimerRef = useRef<number | null>(null);
+  const slashCommandsAttemptRef = useRef(0);
+  const [slashMenuDismissed, setSlashMenuDismissed] = useState(false);
+  const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
+  const [selectedComposerCommandsByScope, setSelectedComposerCommandsByScope] = useState<Record<string, typeof COMPOSER_GOAL_COMMAND>>({});
+  const [recentSlashCommands, setRecentSlashCommands] = useState<string[]>(() => readRecentSlashCommands());
+  const [statusPanel, setStatusPanel] = useState<StatusPanelState>({ open: false });
+  const [lastCompactionPanel, setLastCompactionPanel] = useState<StatusPanelState>({ open: false });
+  const [historyDagPanel, setHistoryDagPanel] = useState<HistoryDagPanelState>({ open: false });
+  const [environmentPanelOpen, setEnvironmentPanelOpen] = useState(false);
+  const [isCreatingChat, setIsCreatingChat] = useState(false);
+  const [projectPickerOpen, setProjectPickerOpen] = useState(false);
+  const [projectPickerOperationId, setProjectPickerOperationId] = useState<string | null>(null);
+  const [firstEncounterRelayChatId, setFirstEncounterRelayChatId] = useState<string | null>(() => (
+    readFirstEncounterRelayChat(typeof window === "undefined" ? undefined : window.sessionStorage)
+  ));
+  const [firstEncounterRelayReadyChatId, setFirstEncounterRelayReadyChatId] = useState<string | null>(() => (
+    readFirstEncounterRelayReadyChat(typeof window === "undefined" ? undefined : window.sessionStorage)
+  ));
+  const [isComposerSingleLine, setIsComposerSingleLine] = useState(true);
+  const composerDrafts = state.agent.composerDraftsByScope;
+  const pendingAttachmentsByScope = state.agent.composerPendingAttachmentsByScope;
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const conversationPanelRef = useRef<HTMLElement | null>(null);
+  const composerOverlayRef = useRef<HTMLDivElement | null>(null);
+  const pendingStatusChatRef = useRef<string | null>(null);
+  const pendingLastCompactionChatRef = useRef<string | null>(null);
+  const pendingHistoryDagChatRef = useRef<string | null>(null);
+  const lastCompactionRequestIdRef = useRef(0);
+  const lastChatScopeKeyRef = useRef<string | null>(null);
+  const shouldAutoScrollAgentConversationRef = useRef(true);
+  const isProgrammaticAgentScrollRef = useRef(false);
+  const userScrollIntentUntilRef = useRef(0);
+  const [showScrollToBottomFab, setShowScrollToBottomFab] = useState(false);
+  const lastNewChatRequestRef = useRef(state.agent.newChatRequestId);
+  const initialFocusedChatLoadedRef = useRef(false);
+  const composerDraftsRef = useRef<Record<string, string>>(composerDrafts);
+  const pendingAttachmentsRef = useRef<Record<string, PendingAttachment[]>>(pendingAttachmentsByScope);
+  const stopRequestLocksRef = useRef<Set<string>>(new Set());
+  const goalMutationLocksRef = useRef<Set<string>>(new Set());
+  const messageSendLocksRef = useRef<Set<string>>(new Set());
+  const queueRemoveLocksRef = useRef<Set<string>>(new Set());
+  const queueSteerLocksRef = useRef<Set<string>>(new Set());
+  const draftTargetRevisionRef = useRef(state.agent.draftTargetRevisionByScope);
+  draftTargetRevisionRef.current = state.agent.draftTargetRevisionByScope;
+  const asrRecorder = useAsrRecorder(clients?.asr, { emptyAudioMessage: t("home.asrEmptyAudio") });
+  const chatScopeKey = agentChatScopeKey(state.agent.currentChatId, state.agent.newChatRequestId);
+  const modelSelectionScopeKey = state.agent.currentChatId ?? NEW_TASK_MODEL_SCOPE_KEY;
+  const modelWorkspaceMode = state.bootstrap?.app.userMode === "byok" ? "byok" : "account";
+  const selectedModelPreset = state.agent.pendingPresetByScope[modelSelectionScopeKey]
+    ?? state.agent.committedModelSelectionByScope[modelSelectionScopeKey]?.presetId
+    ?? null;
+  const resolvedConversationModel = resolveModelSelection(
+    modelWorkspace,
+    modelWorkspaceMode,
+    selectedModelPreset
+  );
+  useEffect(() => {
+    setAnalyticsModelSource(resolvedConversationModel.candidate?.source ?? null);
+    return () => setAnalyticsModelSource(null);
+  }, [resolvedConversationModel.candidate?.source]);
+  const input = composerDrafts[chatScopeKey] ?? "";
+  const composerCommandDraft = resolveComposerCommandDraft(
+    input,
+    selectedComposerCommandsByScope[chatScopeKey] ?? null
+  );
+  const selectedComposerCommand = composerCommandDraft.command;
+  const composerInput = composerCommandDraft.text;
+  const pendingAttachments = pendingAttachmentsByScope[chatScopeKey] ?? [];
+  const draftTarget = state.agent.draftTargetsByScope[chatScopeKey] ?? { kind: "standalone" as const };
+  const selectedDraftProject = draftTarget.kind === "project"
+    ? state.agent.projects.find((project) => project.id === draftTarget.projectId) ?? null
+    : null;
+  const environmentScope = resolveWorkspaceEnvironmentScope(
+    state.agent.currentSessionKey,
+    selectedDraftProject?.id ?? null,
+  );
+  const currentSessionProjectBlocked = state.agent.projectRegistryState === "corrupt"
+    && Boolean(
+      state.agent.currentSessionKey
+      && state.agent.sessions.find((session) => session.key === state.agent.currentSessionKey)?.projectId
+    );
+  const draftProjectBlocked = !state.agent.currentChatId
+    && state.agent.projectRegistryState === "corrupt"
+    && draftTarget.kind === "project";
+  const messageSendInFlight = Boolean(state.agent.messageSendInFlightByScope[chatScopeKey]);
+  const currentHistoryVersion = state.agent.currentChatId
+    ? state.agent.historyVersionByChatId[state.agent.currentChatId] ?? 0
+    : state.agent.newChatRequestId;
+  const currentQueuedMessages = state.agent.currentChatId
+    ? state.agent.queuedMessagesByChatId[state.agent.currentChatId] ?? []
+    : [];
+  const currentGoal = state.agent.goalState?.goal_id ? state.agent.goalState : null;
+  const isCurrentGoalActive = currentGoal?.status === "active";
+  const currentActiveTurnId = state.agent.currentChatId
+    ? state.agent.activeTurnIdByChatId[state.agent.currentChatId] ?? null
+    : null;
+  const currentActiveTurnSource = state.agent.currentChatId
+    ? state.agent.activeTurnSourceByChatId[state.agent.currentChatId] ?? null
+    : null;
+  const canSteerCurrentQueue = Boolean(
+    state.agent.currentChatId
+    && state.agent.connectionStatus === "connected"
+    && state.agent.recoveringGeneration === null
+    && state.agent.runStartedAtByChatId[state.agent.currentChatId]
+    && currentActiveTurnId
+    && isSteerableCurrentTurn(currentActiveTurnSource, Boolean(isCurrentGoalActive))
+    && !currentQueuedMessages.some((item) => item.status === "steering")
+  );
+  const hasActiveConversation = hasActiveAgentConversation(state.agent.currentChatId, state.agent.messages.length);
+  const activeConversationTitle = state.agent.currentSessionKey
+    ? state.agent.tasks.find((task) => task.sessionKey === state.agent.currentSessionKey)?.title.trim() || t("home.title")
+    : t("home.title");
+  const activeImTitleDisplay = imChannelTitleDisplay(activeConversationTitle);
+  const activeConversationTitleDisplay = formatConversationTitleForDisplay(activeImTitleDisplay?.title ?? activeConversationTitle);
+  const sessionArtifactClient = useMemo(() => {
+    const client = clients?.memmyAgent;
+    const sessionKey = state.agent.currentSessionKey;
+    if (!client || !sessionKey) return null;
+    return {
+      resolveArtifact: (path: string) => client.resolveArtifact(path, sessionKey),
+      revealArtifact: (path: string) => client.revealArtifact(path, sessionKey),
+      openArtifact: (path: string) => client.openArtifact(path, sessionKey)
+    };
+  }, [clients?.memmyAgent, state.agent.currentSessionKey]);
+  const isCurrentAgentRunning = Boolean(
+    state.agent.currentChatId &&
+    (
+      state.agent.isSending ||
+      // The run lifecycle is the source of truth for running state; the message streaming flag is only for rendering and may lag behind the completion event.
+      state.agent.runStartedAtByChatId[state.agent.currentChatId] ||
+      state.agent.optimisticSendingByChatId[state.agent.currentChatId]
+    )
+  );
+  const workspaceEnvironment = useWorkspaceEnvironment(
+    clients?.memmyAgent ?? null,
+    environmentScope,
+    environmentScope?.kind === "session" && isCurrentAgentRunning,
+  );
+  const goalMutationPending = state.agent.currentChatId
+    ? state.agent.goalMutationPendingByChatId[state.agent.currentChatId] ?? null
+    : null;
+  const firstEncounterFollowUp = firstEncounterFollowUpMode(state.bootstrap?.onboarding.scanPermission ?? "unset");
+  const isFirstEncounterFollowUpChat = Boolean(
+    firstEncounterRelayChatId
+    && state.agent.currentChatId === firstEncounterRelayChatId
+    && firstEncounterFollowUp
+  );
+  const firstEncounterRelayAnswerMessageId = isFirstEncounterFollowUpChat
+    ? firstCompletedAssistantAnswerMessageId(state.agent.messages)
+    : null;
+  const firstEncounterRelayAnchorMessageId = isFirstEncounterFollowUpChat && firstEncounterRelayReadyChatId === firstEncounterRelayChatId
+    ? firstTurnTerminalMessageId(state.agent.messages)
+    : null;
+  const agentSourceOptions = state.agentSources.items.map((source) => ({
+    sourceId: source.sourceId,
+    displayName: source.displayName,
+    available: source.available,
+    builtin: source.builtin,
+    messageCount: source.messageCount,
+    status: source.status
+  }));
+  const relayAgents = relayAgentOptions(agentSourceOptions);
+  const hasDetectedAgents = hasDetectedRelayAgents(agentSourceOptions);
+
+  const rememberFirstEncounterRelayChatIfArmed = useCallback((chatId: string) => {
+    const storage = typeof window === "undefined" ? undefined : window.sessionStorage;
+    if (!consumeFirstEncounterRelayArm(storage)) {
+      return;
+    }
+    writeFirstEncounterRelayChat(storage, chatId);
+    setFirstEncounterRelayChatId(chatId);
+  }, []);
+
+  useEffect(() => {
+    if (!isFirstEncounterFollowUpChat || !firstEncounterRelayChatId) {
+      return;
+    }
+    if (firstEncounterRelayReadyChatId === firstEncounterRelayChatId) {
+      return;
+    }
+    if (isCurrentAgentRunning || !firstEncounterRelayAnswerMessageId || !firstTurnTerminalMessageId(state.agent.messages)) {
+      return;
+    }
+
+    // Only a genuine turn_end can unlock the card. This deliberately rejects
+    // partial text, idle snapshots, and user-stopped tasks.
+    if (state.agent.lastTaskCompletion?.chatId === firstEncounterRelayChatId && !firstTurnWasStoppedByUser(state.agent.messages)) {
+      writeFirstEncounterRelayReadyChat(
+        typeof window === "undefined" ? undefined : window.sessionStorage,
+        firstEncounterRelayChatId
+      );
+      setFirstEncounterRelayReadyChatId(firstEncounterRelayChatId);
+      const completedAt = state.bootstrap?.onboarding.completedAt
+        ? Date.parse(state.bootstrap.onboarding.completedAt)
+        : Number.NaN;
+      track(buildOnboardingActivationEvent({
+        name: "onboarding_first_task_completed",
+        pagePath: "/main",
+        scanPermission: state.bootstrap?.onboarding.scanPermission,
+        ...(Number.isFinite(completedAt) ? { durationMs: Math.max(0, Date.now() - completedAt) } : {})
+      }));
+    }
+  }, [
+    firstEncounterRelayAnswerMessageId,
+    firstEncounterRelayChatId,
+    firstEncounterRelayReadyChatId,
+    isCurrentAgentRunning,
+    isFirstEncounterFollowUpChat,
+    state.agent.lastTaskCompletion?.chatId,
+    state.agent.messages,
+    state.bootstrap?.onboarding.completedAt,
+    state.bootstrap?.onboarding.scanPermission,
+    track
+  ]);
+
+  const openFirstEncounterRelayAgent = useCallback(async (sourceId: string, prompt: string): Promise<boolean> => {
+    try {
+      const result = await window.memmy?.openAgentTool?.(sourceId, prompt);
+      return result?.opened === true;
+    } catch {
+      return false;
+    }
+  }, []);
+
+  const verifyFirstEncounterRelayMemory = useCallback(async (sourceId: string, startedAt: string): Promise<boolean> => {
+    const client = clients?.memoryRuntime;
+    if (!client) {
+      return false;
+    }
+    const startedAtMs = Date.parse(startedAt);
+    const deadline = Date.now() + FIRST_ENCOUNTER_MEMORY_VERIFY_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      try {
+        const output = await client.listMemoryLogs({
+          tools: ["memory_search"],
+          sourceAgent: sourceId,
+          limit: 20,
+          offset: 0
+        });
+        if (output.logs.some((log) => log.success && Date.parse(log.calledAt) >= startedAtMs)) {
+          return true;
+        }
+      } catch {
+        // The logs route may be unavailable while the local Memory service is starting.
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, FIRST_ENCOUNTER_MEMORY_VERIFY_INTERVAL_MS));
+    }
+    return false;
+  }, [clients?.memoryRuntime]);
+
+  const trackFirstEncounterRelayLifecycle = useCallback((
+    event: "relay_clicked" | "memory_verified",
+    sourceId: string,
+    action: string
+  ) => {
+    track(buildOnboardingActivationEvent({
+      name: event === "memory_verified"
+        ? "onboarding_external_memory_verified"
+        : "onboarding_relay_clicked",
+      pagePath: "/main",
+      scanPermission: state.bootstrap?.onboarding.scanPermission,
+      action,
+      sourceId: sourceId || undefined
+    }));
+  }, [state.bootstrap?.onboarding.scanPermission, track]);
+
+  const openFirstEncounterRelayConnections = useCallback(() => {
+    dispatch(appActions.navigate("/memory-sources"));
+  }, [dispatch]);
+
+  // scan_and_write_skill → relay list; scan_only → opt-in install card.
+  const firstEncounterRelayContent = firstEncounterRelayAnchorMessageId
+    ? firstEncounterFollowUp === "relay" && hasDetectedAgents
+      ? (
+          <FirstEncounterRelayChallenge
+            agents={relayAgents}
+            prompt={readFirstEncounterRelayPrompt(typeof window === "undefined" ? undefined : window.sessionStorage) ?? t("onboarding.relay.prompt")}
+            onOpenAgent={openFirstEncounterRelayAgent}
+            onVerifyMemory={verifyFirstEncounterRelayMemory}
+            onLifecycle={trackFirstEncounterRelayLifecycle}
+          />
+        )
+      : firstEncounterFollowUp === "connect"
+        ? <FirstEncounterRelayOptIn onOpenConnections={openFirstEncounterRelayConnections} />
+        : null
+    : null;
+
+  useEffect(() => {
+    const stored = readStoredAgentRestartState();
+    if (stored) {
+      dispatch(agentActions.restartRestored(stored));
+    }
+  }, [dispatch]);
+
+  useEffect(() => {
+    if (!state.agent.currentChatId) {
+      return;
+    }
+
+    const sessionIds = [
+      state.agent.currentChatId,
+      ...(state.agent.currentSessionKey ? [state.agent.currentSessionKey] : [])
+    ];
+    const messages: TaskBusAgentMessage[] = state.agent.messages.map((message) => ({
+      role: message.role,
+      content: message.content,
+      ...(message.createdAt == null ? {} : { createdAt: message.createdAt }),
+      ...(message.isStreaming == null ? {} : { isStreaming: message.isStreaming })
+    }));
+
+    syncAgentConversation({
+      sessionIds,
+      messages,
+      isRunning: isCurrentAgentRunning || isCurrentGoalActive
+    });
+  }, [isCurrentAgentRunning, isCurrentGoalActive, state.agent.currentChatId, state.agent.currentSessionKey, state.agent.messages, syncAgentConversation]);
+
+  const setSlashCommandsSnapshot = useCallback((commands: MemmyAgentSlashCommand[]) => {
+    slashCommandsRef.current = commands;
+    setSlashCommands(commands);
+  }, []);
+
+  const clearSlashCommandsRetryTimer = useCallback(() => {
+    if (slashCommandsRetryTimerRef.current) {
+      window.clearTimeout(slashCommandsRetryTimerRef.current);
+      slashCommandsRetryTimerRef.current = null;
+    }
+  }, []);
+
+  const loadSlashCommands = useCallback((options: { resetAttempts?: boolean } = {}) => {
+    const client = clients?.memmyAgent;
+    if (!client) {
+      return;
+    }
+    if (slashCommandsInFlightRef.current) {
+      return;
+    }
+
+    clearSlashCommandsRetryTimer();
+
+    if (options.resetAttempts) {
+      slashCommandsAttemptRef.current = 0;
+    }
+
+    slashCommandsRequestIdRef.current += 1;
+    const requestId = slashCommandsRequestIdRef.current;
+    slashCommandsInFlightRef.current = true;
+
+    void client.listSlashCommands()
+      .then((commands) => {
+        if (requestId !== slashCommandsRequestIdRef.current) {
+          return;
+        }
+        slashCommandsInFlightRef.current = false;
+        slashCommandsAttemptRef.current = 0;
+        setSlashCommandsSnapshot(commands);
+      })
+      .catch(() => {
+        if (requestId !== slashCommandsRequestIdRef.current) {
+          return;
+        }
+        slashCommandsInFlightRef.current = false;
+
+        if (slashCommandsRef.current.length > 0) {
+          return;
+        }
+        const delay = SLASH_COMMAND_RETRY_DELAYS_MS[slashCommandsAttemptRef.current];
+        if (delay == null) {
+          return;
+        }
+        slashCommandsAttemptRef.current += 1;
+        slashCommandsRetryTimerRef.current = window.setTimeout(() => {
+          slashCommandsRetryTimerRef.current = null;
+          loadSlashCommands();
+        }, delay);
+      });
+  }, [clients?.memmyAgent, clearSlashCommandsRetryTimer, setSlashCommandsSnapshot]);
+
+  useEffect(() => {
+    if (!clients?.memmyAgent) {
+      clearSlashCommandsRetryTimer();
+      setSlashCommandsSnapshot([]);
+      slashCommandsInFlightRef.current = false;
+      slashCommandsAttemptRef.current = 0;
+      return undefined;
+    }
+
+    loadSlashCommands({ resetAttempts: true });
+
+    return () => {
+      clearSlashCommandsRetryTimer();
+      slashCommandsInFlightRef.current = false;
+      slashCommandsRequestIdRef.current += 1;
+    };
+  }, [clients?.memmyAgent, clearSlashCommandsRetryTimer, loadSlashCommands, setSlashCommandsSnapshot]);
+
+  useEffect(() => {
+    if (!clients?.memmyAgent || initialFocusedChatLoadedRef.current) {
+      return;
+    }
+
+    initialFocusedChatLoadedRef.current = true;
+    if (state.agent.blankDraftActive) {
+      clearFocusedAgentTarget(
+        typeof window === "undefined" ? undefined : window.sessionStorage,
+        typeof window === "undefined" ? undefined : window.location,
+        typeof window === "undefined" ? undefined : window.history
+      );
+      return;
+    }
+
+    const focusedChatId = readFocusedAgentChatId();
+    if (focusedChatId) {
+      loadAgentThread(clients.memmyAgent, dispatch, focusedChatId, undefined, {
+        taskStateCoordinator,
+        tolerateMissingThread: true,
+        taskState: state.agent
+      });
+    }
+  }, [clients, dispatch, state.agent.blankDraftActive, taskStateCoordinator]);
+
+  useEffect(() => {
+    if (!clients?.memmyAgent
+      || !connection
+      || state.agent.connectionStatus !== "connected"
+      || state.agent.recoveringGeneration !== null) {
+      return;
+    }
+
+    const memmyAgent = clients.memmyAgent;
+    const storage = typeof window === "undefined" ? undefined : window.sessionStorage;
+    const pendingLaunch = consumePendingFirstEncounterTaskLaunch(storage);
+    if (!pendingLaunch) {
+      return;
+    }
+
+    // Onboarding first report: open seeded chat history (prefer chatId written at report-done).
+    if (pendingLaunch.chatId || pendingLaunch.assistantContent) {
+      setIsCreatingChat(true);
+      void (async () => {
+        const seeded = pendingLaunch.chatId
+          ? {
+              chat_id: pendingLaunch.chatId,
+              session_key: pendingLaunch.sessionKey || memmyAgent.chatIdToSessionKey(pendingLaunch.chatId)
+            }
+          : await memmyAgent.seedWebuiChat({
+              userText: pendingLaunch.prompt,
+              assistantText: pendingLaunch.assistantContent!,
+              title: t("onboarding.report.title")
+            });
+        ensureChatSubscription(seeded.chat_id);
+        dispatch(agentActions.newChatCreated(seeded.chat_id));
+        rememberFirstEncounterRelayChatIfArmed(seeded.chat_id);
+        writeFirstEncounterRelayChat(storage, seeded.chat_id);
+        writeFirstEncounterRelayReadyChat(storage, seeded.chat_id);
+        setFirstEncounterRelayChatId(seeded.chat_id);
+        setFirstEncounterRelayReadyChatId(seeded.chat_id);
+        const requestId = nextAgentHistoryRequestId(seeded.chat_id);
+        dispatch(agentActions.historyLoading(seeded.session_key, seeded.chat_id, requestId));
+        const thread = await memmyAgent.readWebuiThread(seeded.session_key);
+        dispatch(agentActions.historyLoaded(thread, requestId));
+        taskStateCoordinator.refreshTaskState({
+          expectedChatId: seeded.chat_id,
+          reason: "new-chat",
+          state: state.agent
+        });
+        const completedAt = state.bootstrap?.onboarding.completedAt
+          ? Date.parse(state.bootstrap.onboarding.completedAt)
+          : Number.NaN;
+        track(buildOnboardingActivationEvent({
+          name: "onboarding_first_task_completed",
+          pagePath: "/main",
+          scanPermission: state.bootstrap?.onboarding.scanPermission,
+          ...(Number.isFinite(completedAt) ? { durationMs: Math.max(0, Date.now() - completedAt) } : {})
+        }));
+      })().catch((error) => {
+        console.warn("open first encounter report chat failed", error);
+        writePendingFirstEncounterTaskLaunch(storage, pendingLaunch.prompt, {
+          ...(pendingLaunch.assistantContent ? { assistantContent: pendingLaunch.assistantContent } : {}),
+          ...(pendingLaunch.chatId ? { chatId: pendingLaunch.chatId } : {}),
+          ...(pendingLaunch.sessionKey ? { sessionKey: pendingLaunch.sessionKey } : {})
+        });
+      }).finally(() => {
+        setIsCreatingChat(false);
+      });
+      return;
+    }
+
+    void submitAgentComposerMessage({
+      chatId: null,
+      target: { kind: "standalone" },
+      connection,
+      ensureChatSubscription,
+      content: pendingLaunch.prompt,
+      language,
+      pendingAttachments: [],
+      uploadAgentMedia: (attachments) => memmyAgent.uploadAgentMedia(attachments),
+      dispatch,
+      track,
+      setCreatingChat: setIsCreatingChat,
+      clearComposer: () => undefined,
+      chatSelectionEpoch: state.agent.chatSelectionEpoch,
+      getChatSelectionEpoch: () => chatSelectionEpochRef.current,
+      scopeKey: agentChatScopeKey(null, state.agent.newChatRequestId),
+      onNewChatMessageSent: (chatId) => {
+        rememberFirstEncounterRelayChatIfArmed(chatId);
+        taskStateCoordinator.refreshTaskState({
+          expectedChatId: chatId,
+          reason: "new-chat",
+          state: state.agent
+        });
+      }
+    }).then((sent) => {
+      if (!sent) {
+        writePendingFirstEncounterTaskLaunch(storage, pendingLaunch.prompt);
+      }
+    });
+  }, [
+    clients,
+    connection,
+    dispatch,
+    ensureChatSubscription,
+    language,
+    rememberFirstEncounterRelayChatIfArmed,
+    state.agent,
+    state.bootstrap?.onboarding.completedAt,
+    state.bootstrap?.onboarding.scanPermission,
+    t,
+    taskStateCoordinator,
+    track
+  ]);
+
+  useEffect(() => {
+    if (lastChatScopeKeyRef.current === null) {
+      lastChatScopeKeyRef.current = chatScopeKey;
+      return;
+    }
+    if (lastChatScopeKeyRef.current === chatScopeKey) {
+      return;
+    }
+    lastChatScopeKeyRef.current = chatScopeKey;
+    resetTransientConversationUi();
+  }, [chatScopeKey]);
+
+  useEffect(() => {
+    if (state.agent.newChatRequestId <= lastNewChatRequestRef.current) {
+      return;
+    }
+
+    lastNewChatRequestRef.current = state.agent.newChatRequestId;
+    resetNewChatLocalUi();
+  }, [state.agent.newChatRequestId]);
+
+  useEffect(() => {
+    if (!state.agent.currentChatId) {
+      pendingStatusChatRef.current = null;
+      pendingLastCompactionChatRef.current = null;
+      pendingHistoryDagChatRef.current = null;
+      lastCompactionRequestIdRef.current += 1;
+      setStatusPanel({ open: false });
+      setLastCompactionPanel({ open: false });
+      setHistoryDagPanel({ open: false });
+    }
+  }, [state.agent.currentChatId]);
+
+  useEffect(() => {
+    if (!connection) {
+      return;
+    }
+
+    return connection.onStatusResult((chatId, content) => {
+      if (!shouldAcceptAgentStatusResult({
+        pendingStatusChatId: pendingStatusChatRef.current,
+        subscribedChatId: state.agent.currentChatId,
+        resultChatId: chatId
+      })) {
+        return;
+      }
+      pendingStatusChatRef.current = null;
+      setStatusPanel({ open: true, loading: false, content, error: null });
+    });
+  }, [connection, state.agent.currentChatId]);
+
+  useEffect(() => {
+    if (!connection) {
+      return;
+    }
+
+    return connection.onHistoryDagResult((chatId, content, payload) => {
+      if (pendingHistoryDagChatRef.current && pendingHistoryDagChatRef.current !== chatId) {
+        return;
+      }
+      if (state.agent.currentChatId && state.agent.currentChatId !== chatId) {
+        return;
+      }
+      pendingHistoryDagChatRef.current = null;
+      setHistoryDagPanel({ open: true, loading: false, content, error: null, payload });
+    });
+  }, [connection, state.agent.currentChatId]);
+
+  useEffect(() => {
+    for (const chatId of Array.from(stopRequestLocksRef.current)) {
+      if (!state.agent.stopInFlightByChatId[chatId]) {
+        stopRequestLocksRef.current.delete(chatId);
+      }
+    }
+  }, [state.agent.stopInFlightByChatId]);
+
+  // Stop self-healing: if the runtime's stop confirmation (stop_result /
+  // turn_end) never arrives — socket died mid-interrupt, gateway crashed —
+  // release the in-flight lock after a grace period so the composer never
+  // stays permanently unsendable.
+  useEffect(() => {
+    const pendingChatIds = Object.keys(state.agent.stopInFlightByChatId).filter(
+      (chatId) => state.agent.stopInFlightByChatId[chatId]
+    );
+    if (!pendingChatIds.length) {
+      return;
+    }
+    const timeoutId = window.setTimeout(() => {
+      for (const chatId of pendingChatIds) {
+        dispatch(agentActions.stopUnconfirmed(chatId));
+      }
+    }, STOP_CONFIRMATION_GRACE_MS);
+    return () => window.clearTimeout(timeoutId);
+  }, [dispatch, state.agent.stopInFlightByChatId]);
+
+  // NOTE: deliberately NO auto-focus on running->idle transitions. A global
+  // state-driven focus() steals the keyboard from whatever the user is doing
+  // (any other input field, mid-IME composition) whenever the running flag
+  // flips — and stale session snapshots can flip it repeatedly. Focus must
+  // only ever move on the user's own click/keys.
+
+  useEffect(() => {
+    if (state.agent.isRestarting && state.agent.currentChatId && state.agent.restartStartedAt != null) {
+      writeStoredAgentRestartState({
+        chatId: state.agent.currentChatId,
+        startedAt: state.agent.restartStartedAt,
+        sawDisconnect: state.agent.restartSawDisconnect
+      });
+      return;
+    }
+    if (!state.agent.isRestarting && (state.agent.restartCompletedAt != null || state.agent.restartError)) {
+      clearStoredAgentRestartState();
+    }
+  }, [
+    state.agent.currentChatId,
+    state.agent.isRestarting,
+    state.agent.restartCompletedAt,
+    state.agent.restartError,
+    state.agent.restartSawDisconnect,
+    state.agent.restartStartedAt
+  ]);
+
+  const stopSlashCommand: SlashCommandPaletteItem = {
+    command: "/stop",
+    title: t("home.command.stopTitle"),
+    description: t("home.command.stopDescription"),
+    icon: "square",
+    argHint: "",
+    synthetic: true
+  };
+  const lastCompactionSlashCommand: SlashCommandPaletteItem = {
+    command: "/last-compaction",
+    title: t("home.command.lastCompactionTitle"),
+    description: t("home.command.lastCompactionDescription"),
+    icon: "book-open",
+    argHint: "",
+    synthetic: true
+  };
+  const slashQuery = slashMenuDismissed ? null : slashQueryFromInput(composerInput);
+  const localizedSlashCommands = localizeSlashCommands(slashCommands, language, t);
+  const slashCommandsWithLocal = [
+    lastCompactionSlashCommand,
+    ...localizedSlashCommands.filter((command) => command.command !== "/last-compaction")
+  ];
+  const visibleSlashCommands = buildVisibleSlashCommands(slashCommandsWithLocal, state.agent.isSending, stopSlashCommand);
+  const modeVisibleSlashCommands = selectedComposerCommand
+    ? filterGoalModeSlashCommands(visibleSlashCommands, Boolean(state.agent.currentChatId))
+    : visibleSlashCommands;
+  const filteredSlashCommands = slashQuery == null ? [] : filterSlashCommands(modeVisibleSlashCommands, slashQuery, recentSlashCommands);
+  const slashMenuOpen = filteredSlashCommands.length > 0;
+  const displayConnectionStatus = state.agent.recoveryKind === "initial"
+    ? "connecting"
+    : state.agent.recoveryKind === "reconnect"
+      ? "reconnecting"
+      : state.agent.connectionStatus;
+  const statusText = agentStatusText(displayConnectionStatus, state.agent.modelName, t, {
+    startupIssue: clients?.runtimeConfig.agentGateway?.startupIssue,
+    hasConnected: state.agent.hasConnectedSinceStartup
+  });
+  const operationErrorNotice = state.agent.operationErrorNotice;
+  const visibleOperationError = operationErrorNotice
+    && (operationErrorNotice.scopeKey
+      ? operationErrorNotice.scopeKey === chatScopeKey
+      : !operationErrorNotice.chatId || operationErrorNotice.chatId === state.agent.currentChatId)
+    ? operationErrorNotice
+    : null;
+  const agentError = agentErrorText(visibleOperationError?.message ?? null, t);
+  const isAccountMode = state.bootstrap?.app.userMode === "account";
+  const sanitizePlatformApiErrors = isAccountMode;
+  const hasBlockedPendingMedia = pendingAttachments.some((item) => item.status !== "ready");
+  const hasComposerPayload = Boolean(input.trim() || pendingAttachments.some((item) => item.status === "ready"));
+  const hasComposerIntent = Boolean(input.trim() || pendingAttachments.length > 0);
+  const stopInFlight = state.agent.currentChatId ? Boolean(state.agent.stopInFlightByChatId[state.agent.currentChatId]) : false;
+  const composerSendDisabled = stopInFlight
+    || !hasComposerPayload
+    || hasBlockedPendingMedia
+    || !connection
+    || isCreatingChat
+    || messageSendInFlight
+    || currentSessionProjectBlocked
+    || draftProjectBlocked
+    || state.agent.connectionStatus !== "connected"
+    || state.agent.recoveringGeneration !== null;
+  const composerStopDisabled = stopInFlight || Boolean(isCurrentGoalActive && goalMutationPending);
+  const composerPrimaryAction = agentComposerPrimaryAction({
+    isRunning: isCurrentAgentRunning,
+    isGoalActive: isCurrentGoalActive,
+    hasIntent: hasComposerIntent
+  });
+  const composerSubmitDisabled = composerPrimaryAction === "stop" ? composerStopDisabled : composerSendDisabled;
+
+  useEffect(() => {
+    if (selectedCommandIndex >= filteredSlashCommands.length) {
+      setSelectedCommandIndex(0);
+    }
+  }, [filteredSlashCommands.length, selectedCommandIndex]);
+
+  useEffect(() => {
+    composerDraftsRef.current = composerDrafts;
+  }, [composerDrafts]);
+
+  useEffect(() => {
+    if (
+      !state.agent.currentChatId
+      && draftTarget.kind === "project"
+      && state.agent.projectRegistryState === "ready"
+      && !selectedDraftProject
+    ) {
+      dispatch(agentActions.draftTargetUpdated(chatScopeKey, { kind: "standalone" }));
+    }
+  }, [
+    chatScopeKey,
+    dispatch,
+    draftTarget,
+    selectedDraftProject,
+    state.agent.currentChatId,
+    state.agent.projectRegistryState
+  ]);
+
+  useEffect(() => {
+    pendingAttachmentsRef.current = pendingAttachmentsByScope;
+  }, [pendingAttachmentsByScope]);
+
+  // Layout effect (not a regular effect) so the scroll adjustment commits
+  // synchronously in the same browser frame as the new message content —
+  // this closes the race where fast-streaming tokens grow scrollHeight while
+  // a deferred native "scroll" event from our own assignment is still in
+  // flight, which could otherwise be misread as the user scrolling away.
+  // Also re-pin when the first-encounter relay card mounts after turn_end:
+  // messages stop changing before `afterMessageContent` appears, so omitting
+  // that dependency leaves "Switch AI and keep going" below the fold.
+  useLayoutEffect(() => {
+    if (shouldAutoScrollAgentConversationRef.current) {
+      scrollAgentConversationToBottom();
+    }
+  }, [chatScopeKey, firstEncounterRelayAnchorMessageId, state.agent.messages]);
+
+  useLayoutEffect(() => {
+    const panel = conversationPanelRef.current;
+    const composer = composerOverlayRef.current;
+    if (!panel || !composer) return;
+    let frameId: number | null = null;
+    let measuredHeight = -1;
+    const measure = () => {
+      const nextHeight = updateAgentComposerOverlayHeight(panel, composer, measuredHeight);
+      if (nextHeight === measuredHeight) return;
+      measuredHeight = nextHeight;
+      if (!shouldAutoScrollAgentConversationRef.current) return;
+      if (frameId !== null) window.cancelAnimationFrame(frameId);
+      frameId = window.requestAnimationFrame(() => {
+        frameId = null;
+        scrollAgentConversationToBottom();
+      });
+    };
+
+    measure();
+    if (typeof ResizeObserver !== "undefined") {
+      const observer = new ResizeObserver(measure);
+      observer.observe(composer);
+      return () => {
+        observer.disconnect();
+        if (frameId !== null) window.cancelAnimationFrame(frameId);
+      };
+    }
+
+    window.addEventListener("resize", measure);
+    return () => {
+      window.removeEventListener("resize", measure);
+      if (frameId !== null) window.cancelAnimationFrame(frameId);
+    };
+  }, [chatScopeKey, hasActiveConversation]);
+
+  useLayoutEffect(() => {
+    if (typeof ResizeObserver !== "undefined") return;
+    const panel = conversationPanelRef.current;
+    const composer = composerOverlayRef.current;
+    if (!panel || !composer) return;
+    updateAgentComposerOverlayHeight(panel, composer);
+    if (!shouldAutoScrollAgentConversationRef.current) return;
+    const frameId = window.requestAnimationFrame(scrollAgentConversationToBottom);
+    return () => window.cancelAnimationFrame(frameId);
+  }, [
+    agentError,
+    chatScopeKey,
+    composerInput,
+    currentGoal,
+    currentQueuedMessages.length,
+    currentSessionProjectBlocked,
+    hasActiveConversation,
+    pendingAttachments.length
+  ]);
+
+  function scrollAgentConversationToBottom() {
+    const element = scrollRef.current;
+    if (!element) {
+      return;
+    }
+    isProgrammaticAgentScrollRef.current = true;
+    element.scrollTop = element.scrollHeight;
+    // A single requestAnimationFrame is not always enough: browsers can
+    // dispatch the "scroll" event for a programmatic scrollTop assignment on
+    // a later frame than the one that follows immediately. A short timeout
+    // gives that event room to arrive and be safely ignored below.
+    window.setTimeout(() => {
+      isProgrammaticAgentScrollRef.current = false;
+    }, 120);
+  }
+
+  /** Marks that the user just took over scrolling via wheel/touch; only scroll events within a short window may turn off auto-scroll. */
+  function markAgentConversationUserScrollIntent() {
+    userScrollIntentUntilRef.current = Date.now() + AGENT_CONVERSATION_USER_SCROLL_INTENT_MS;
+  }
+
+  function resumeAgentConversationAutoScroll() {
+    shouldAutoScrollAgentConversationRef.current = true;
+    setShowScrollToBottomFab(false);
+    scrollAgentConversationToBottom();
+  }
+
+  /**
+   * Sends one round of a live Agent conversation.
+   */
+  async function sendMessage() {
+    if (runExactLocalSlashCommand(input)) {
+      return;
+    }
+    if (resolvedConversationModel.unavailable) {
+      dispatch(agentActions.operationFailed("chat", createAgentOperationError({
+        source: "send",
+        message: "home.modelSelector.unavailable",
+        ...(state.agent.currentChatId ? { chatId: state.agent.currentChatId } : { scopeKey: chatScopeKey })
+      })));
+      return;
+    }
+    if (
+      resolvedConversationModel.candidate?.source === "platform"
+      && isAccountTokenQuotaExhausted(state.bootstrap)
+    ) {
+      dispatch(agentActions.operationFailed("chat", createAgentOperationError({
+        source: "send",
+        message: "agent.error.quotaExceeded",
+        ...(state.agent.currentChatId ? { chatId: state.agent.currentChatId } : { scopeKey: chatScopeKey })
+      })));
+      return;
+    }
+    const sendScopeKey = chatScopeKey;
+    if (messageSendLocksRef.current.has(sendScopeKey)) return;
+    const clientRequestId = crypto.randomUUID();
+    messageSendLocksRef.current.add(sendScopeKey);
+    dispatch(agentActions.messageSendLockUpdated(sendScopeKey, clientRequestId));
+    dispatch(agentActions.modelSelectionRequestStarted(
+      sendScopeKey,
+      state.agent.currentChatId,
+      clientRequestId,
+      resolvedConversationModel.candidateId
+    ));
+    const target: WebuiSessionTarget | null = state.agent.currentChatId ? null : draftTarget;
+    try {
+      const submitted = await submitAgentComposerMessage({
+        chatId: state.agent.currentChatId,
+        target,
+        clientRequestId,
+        connection,
+        ensureChatSubscription,
+        content: input,
+        displayContent: selectedComposerCommand ? composerInput : undefined,
+        language,
+        pendingAttachments,
+        uploadAgentMedia: (attachments) => clients!.memmyAgent.uploadAgentMedia(attachments),
+        dispatch,
+        track,
+        setCreatingChat: setIsCreatingChat,
+        setComposerMediaError: (message) => setComposerMediaErrorForScope(sendScopeKey, message),
+        clearComposer: () => clearComposerAfterSend(sendScopeKey),
+        chatSelectionEpoch: state.agent.chatSelectionEpoch,
+        getChatSelectionEpoch: () => chatSelectionEpochRef.current,
+        scopeKey: sendScopeKey,
+        modelPreset: resolvedConversationModel.candidateId ?? undefined,
+        onChatResolved: (chatId) => dispatch(agentActions.modelSelectionRequestStarted(
+          sendScopeKey,
+          chatId,
+          clientRequestId,
+          resolvedConversationModel.candidateId
+        )),
+        onNewChatMessageSent: clients?.memmyAgent
+          ? (chatId) => {
+            rememberFirstEncounterRelayChatIfArmed(chatId);
+            taskStateCoordinator.refreshTaskState({
+              expectedChatId: chatId,
+              reason: "new-chat",
+              state: state.agent
+            });
+          }
+          : undefined
+      });
+      if (!submitted) {
+        dispatch(agentActions.modelSelectionRequestCancelled(clientRequestId));
+      }
+    } catch (error) {
+      dispatch(agentActions.modelSelectionRequestCancelled(clientRequestId));
+      throw error;
+    } finally {
+      messageSendLocksRef.current.delete(sendScopeKey);
+      dispatch(agentActions.messageSendLockUpdated(sendScopeKey, null));
+    }
+  }
+
+  async function removeQueuedMessage(clientRequestId: string) {
+    const chatId = state.agent.currentChatId;
+    const generation = connection?.getReadyGeneration() ?? null;
+    if (!chatId || !connection || generation === null || queueRemoveLocksRef.current.has(clientRequestId)) {
+      return;
+    }
+    queueRemoveLocksRef.current.add(clientRequestId);
+    dispatch(agentActions.queueItemRemoveStarted(chatId, clientRequestId));
+    try {
+      await connection.removeQueuedMessage(chatId, clientRequestId, generation);
+    } catch {
+      dispatch(agentActions.queueItemRemoveFailed(
+        chatId,
+        clientRequestId,
+        createAgentOperationError({
+          source: "queue",
+          message: "home.queue.removeFailed",
+          chatId
+        })
+      ));
+    } finally {
+      queueRemoveLocksRef.current.delete(clientRequestId);
+    }
+  }
+
+  async function steerQueuedMessage(clientRequestId: string) {
+    const chatId = state.agent.currentChatId;
+    const generation = connection?.getReadyGeneration() ?? null;
+    const turnId = chatId ? state.agent.activeTurnIdByChatId[chatId] ?? null : null;
+    const source = chatId ? state.agent.activeTurnSourceByChatId[chatId] ?? null : null;
+    const item = chatId
+      ? state.agent.queuedMessagesByChatId[chatId]?.find(
+          (candidate) => candidate.clientRequestId === clientRequestId
+        )
+      : null;
+    if (
+      !chatId
+      || !connection
+      || generation === null
+      || !turnId
+      || !isSteerableCurrentTurn(source, Boolean(isCurrentGoalActive))
+      || item?.source.kind !== "gui"
+      || item.queueSurface !== "chat_composer"
+      || item.content.trimStart().startsWith("/")
+      || item.status !== "queued"
+      || queueSteerLocksRef.current.has(chatId)
+    ) return;
+    queueSteerLocksRef.current.add(chatId);
+    dispatch(agentActions.queueItemSteerStarted(chatId, clientRequestId));
+    try {
+      const result = await connection.steerQueuedMessage(
+        chatId,
+        clientRequestId,
+        turnId,
+        generation
+      );
+      if (result.outcome !== "steered") {
+        if (result.outcome === "already_dequeued") {
+          dispatch(agentActions.queueItemSteerReset(chatId, clientRequestId));
+        } else {
+          dispatch(agentActions.queueItemSteerFailed(
+            chatId,
+            clientRequestId,
+            createAgentOperationError({
+              source: "queue",
+              message: "home.queue.steerUnavailable",
+              chatId
+            })
+          ));
+        }
+        const readyGeneration = connection.getReadyGeneration();
+        if (readyGeneration !== null) {
+          connection.requestQueueSnapshot(chatId, readyGeneration);
+        }
+      }
+    } catch {
+      dispatch(agentActions.queueItemSteerFailed(
+        chatId,
+        clientRequestId,
+        createAgentOperationError({
+          source: "queue",
+          message: "home.queue.steerFailed",
+          chatId
+        })
+      ));
+      const readyGeneration = connection.getReadyGeneration();
+      if (readyGeneration !== null) {
+        connection.requestQueueSnapshot(chatId, readyGeneration);
+      }
+    } finally {
+      queueSteerLocksRef.current.delete(chatId);
+    }
+  }
+
+  function selectDraftTarget(target: WebuiSessionTarget) {
+    if (state.agent.currentChatId || messageSendInFlight) return;
+    dispatch(agentActions.draftTargetUpdated(chatScopeKey, target));
+    setProjectPickerOpen(false);
+  }
+
+  async function selectOtherProjectFolder() {
+    if (state.agent.currentChatId || messageSendInFlight || projectPickerOperationId || !clients?.memmyAgent) {
+      return;
+    }
+    if (!window.memmy?.selectProjectDirectory) {
+      dispatch(agentActions.operationFailed("chat", createAgentOperationError({
+        source: "new-chat",
+        message: "home.project.desktopRequired",
+        scopeKey: chatScopeKey
+      })));
+      return;
+    }
+    const operationId = `draft-project-picker-${crypto.randomUUID()}`;
+    const scopeKey = chatScopeKey;
+    const revision = state.agent.draftTargetRevisionByScope[scopeKey] ?? 0;
+    setProjectPickerOperationId(operationId);
+    try {
+      await runProjectTargetFolderSelection({
+        selectDirectory: () => window.memmy!.selectProjectDirectory(),
+        mutateProject: (operation) => taskStateCoordinator.mutateProject(operation),
+        onCommitted: (project) => {
+          const currentRevision = draftTargetRevisionRef.current[scopeKey] ?? 0;
+          if (scopeKey === chatScopeKey && currentRevision === revision) {
+            dispatch(agentActions.draftTargetUpdated(scopeKey, {
+              kind: "project",
+              projectId: project.id
+            }));
+          }
+          setProjectPickerOpen(false);
+        },
+        onError: (error) => dispatch(agentActions.operationFailed("chat", createAgentOperationError({
+          source: "new-chat",
+          message: error instanceof MemmyAgentRequestError
+            ? error.code ?? "project_operation_failed"
+            : "network_unavailable",
+          scopeKey
+        }))),
+        onRefresh: () => taskStateCoordinator.refreshTaskState({ reason: "manual", state: state.agent })
+      });
+    } finally {
+      setProjectPickerOperationId((current) => current === operationId ? null : current);
+    }
+  }
+
+  function runExactLocalSlashCommand(command: string): boolean {
+    const normalized = command.trim().toLowerCase();
+    if (pendingAttachments.length > 0) return false;
+    if (normalized === "/last-compaction") {
+      rememberSlashCommand("/last-compaction");
+      setCurrentComposerDraft("");
+      requestLastCompactionPanel();
+      inputRef.current?.focus();
+      return true;
+    }
+    if (normalized === "/history-dag") {
+      rememberSlashCommand("/history-dag");
+      setCurrentComposerDraft("");
+      requestHistoryDagPanel();
+      inputRef.current?.focus();
+      return true;
+    }
+    if (normalized === "/status") {
+      rememberSlashCommand("/status");
+      setCurrentComposerDraft("");
+      requestStatusPanel();
+      inputRef.current?.focus();
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Stops the current Agent turn.
+   */
+  function stopCurrentTurn() {
+    const goal = state.agent.goalState;
+    const chatId = state.agent.currentChatId;
+    if (chatId && goal?.goal_id && goal.status === "active") {
+      void controlGoal({ chatId, goalId: goal.goal_id, action: "pause" });
+      return;
+    }
+    requestAgentStop({
+      chatId,
+      connection,
+      stopInFlightByChatId: state.agent.stopInFlightByChatId,
+      stopRequestLocks: stopRequestLocksRef.current,
+      dispatch,
+      track
+    });
+  }
+
+  async function controlGoal(request: AgentGoalControlRequest): Promise<void> {
+    if (goalMutationLocksRef.current.has(request.chatId)) return;
+    const expectedGeneration = connection?.getReadyGeneration() ?? null;
+    if (!connection || expectedGeneration === null) {
+      dispatch(agentActions.operationFailed("chat", createAgentOperationError({
+        source: "gateway-command",
+        message: "network_unavailable",
+        chatId: request.chatId
+      })));
+      return;
+    }
+
+    const requestId = crypto.randomUUID();
+    goalMutationLocksRef.current.add(request.chatId);
+    dispatch(agentActions.goalMutationStarted({
+      chatId: request.chatId,
+      requestId,
+      goalId: request.goalId,
+      action: request.action
+    }));
+    ensureChatSubscription?.(request.chatId);
+    try {
+      await connection.controlGoal({
+        chatId: request.chatId,
+        goalId: request.goalId,
+        action: request.action,
+        requestId,
+        ...(request.objective === undefined ? {} : { objective: request.objective })
+      }, expectedGeneration);
+    } catch (error) {
+      dispatch(agentActions.operationFailed("chat", createAgentOperationError({
+        source: "gateway-command",
+        message: error instanceof MemmyAgentGoalControlError && error.unknownResult
+          ? "home.goal.controlUnknown"
+          : error instanceof MemmyAgentGoalControlError
+            ? error.code
+            : readableError(error),
+        chatId: request.chatId
+      })));
+    } finally {
+      goalMutationLocksRef.current.delete(request.chatId);
+      dispatch(agentActions.goalMutationSettled(request.chatId, requestId));
+    }
+  }
+
+  /**
+   * Updates the input draft for the given session scope.
+   *
+   * @param scopeKey The session or new-draft scope.
+   * @param value The latest input content, or an updater function based on the previous value.
+   */
+  function setComposerDraftForScope(scopeKey: string, value: SetStateAction<string>) {
+    const currentValue = composerDraftsRef.current[scopeKey] ?? "";
+    const nextValue = typeof value === "function" ? value(currentValue) : value;
+    const nextDrafts = updateComposerDraftForScope(composerDraftsRef.current, scopeKey, nextValue);
+    if (nextDrafts === composerDraftsRef.current) {
+      return;
+    }
+    composerDraftsRef.current = nextDrafts;
+    dispatch(agentActions.composerDraftUpdated(scopeKey, nextValue));
+  }
+
+  /**
+   * Updates the input draft for the current session scope.
+   *
+   * @param value The latest input content, or an updater function based on the previous value.
+   */
+  function setCurrentComposerDraft(value: SetStateAction<string>) {
+    setComposerDraftForScope(chatScopeKey, value);
+  }
+
+  function setSelectedComposerCommandForScope(scopeKey: string, command: typeof COMPOSER_GOAL_COMMAND | null) {
+    setSelectedComposerCommandsByScope((current) => {
+      if (current[scopeKey] === command) return current;
+      const next = { ...current };
+      if (command) {
+        next[scopeKey] = command;
+      } else {
+        delete next[scopeKey];
+      }
+      return next;
+    });
+  }
+
+  function setPendingAttachmentsForScope(scopeKey: string, value: SetStateAction<PendingAttachment[]>) {
+    const currentMap = pendingAttachmentsRef.current;
+    const currentValue = currentMap[scopeKey] ?? [];
+    const nextValue = typeof value === "function" ? value(currentValue) : value;
+    if (currentValue === nextValue) {
+      return;
+    }
+
+    const nextMap = { ...currentMap };
+    if (nextValue.length) {
+      nextMap[scopeKey] = nextValue;
+    } else {
+      delete nextMap[scopeKey];
+    }
+    pendingAttachmentsRef.current = nextMap;
+    dispatch(agentActions.composerPendingAttachmentsUpdated(scopeKey, nextValue));
+  }
+
+  function setCurrentPendingAttachments(value: SetStateAction<PendingAttachment[]>) {
+    setPendingAttachmentsForScope(chatScopeKey, value);
+  }
+
+  function setComposerMediaErrorForScope(scopeKey: string, message: string | null) {
+    if (!message) {
+      return;
+    }
+    dispatch(agentActions.operationFailed("chat", createAgentOperationError({
+      source: "send",
+      message,
+      scopeKey
+    })));
+  }
+
+  function setCurrentComposerMediaError(message: string | null) {
+    setComposerMediaErrorForScope(chatScopeKey, message);
+  }
+
+  /**
+   * Updates the input box content and resets the slash command selection state.
+   *
+   * @param value The latest input box content.
+   */
+  function updateComposerInput(value: string) {
+    setCurrentComposerDraft(buildComposerCommandDraft(selectedComposerCommand, value));
+    setSlashMenuDismissed(false);
+    setSelectedCommandIndex(0);
+    if (
+      slashQueryFromInput(value) != null &&
+      clients?.memmyAgent &&
+      slashCommandsRef.current.length === 0 &&
+      !slashCommandsInFlightRef.current
+    ) {
+      loadSlashCommands({ resetAttempts: true });
+    }
+  }
+
+  /** Removes the selected command token while preserving the typed message. */
+  function clearSelectedComposerCommand() {
+    setSelectedComposerCommandForScope(chatScopeKey, null);
+    setCurrentComposerDraft(composerInput);
+    setSlashMenuDismissed(true);
+    setSelectedCommandIndex(0);
+    inputRef.current?.focus();
+  }
+
+  /**
+   * Automatically shrinks or expands the input box height.
+   *
+   * @param element The textarea whose height should be adjusted.
+   */
+  function resizeComposerInput(element: HTMLTextAreaElement) {
+    element.style.height = "auto";
+    const isSingleLine = isSingleLineComposerInput(element);
+    setIsComposerSingleLine(isSingleLine);
+    element.style.height = isSingleLine
+      ? `${COMPOSER_SINGLE_LINE_HEIGHT_PX}px`
+      : `${element.scrollHeight}px`;
+    requestAnimationFrame(() => {
+      element.scrollTop = element.scrollHeight;
+    });
+  }
+
+  useLayoutEffect(() => {
+    if (!inputRef.current) {
+      return;
+    }
+    resizeComposerInput(inputRef.current);
+  }, [input, hasActiveConversation]);
+
+  /**
+   * Resets the input box height after sending, so the next empty input does not inherit the previous height.
+   */
+  function resetComposerHeight() {
+    if (inputRef.current) {
+      inputRef.current.style.height = "auto";
+    }
+    setIsComposerSingleLine(true);
+  }
+
+  function clearComposerAfterSend(scopeKey: string) {
+    resetComposerDraftUi(scopeKey);
+    resetTransientConversationUi();
+  }
+
+  function resetComposerDraftUi(scopeKey = chatScopeKey) {
+    setSelectedComposerCommandForScope(scopeKey, null);
+    for (const item of pendingAttachmentsRef.current[scopeKey] ?? []) {
+      revokePendingAttachment(item);
+    }
+    const nextDrafts = { ...composerDraftsRef.current };
+    const nextPendingAttachments = { ...pendingAttachmentsRef.current };
+    delete nextDrafts[scopeKey];
+    delete nextPendingAttachments[scopeKey];
+    composerDraftsRef.current = nextDrafts;
+    pendingAttachmentsRef.current = nextPendingAttachments;
+    dispatch(agentActions.composerScopeCleared(scopeKey));
+    resetComposerHeight();
+  }
+
+  function closeLastCompactionPanel() {
+    lastCompactionRequestIdRef.current += 1;
+    pendingLastCompactionChatRef.current = null;
+    setLastCompactionPanel({ open: false });
+  }
+
+  function resetTransientConversationUi() {
+    setSlashMenuDismissed(true);
+    setSelectedCommandIndex(0);
+    setStatusPanel({ open: false });
+    closeLastCompactionPanel();
+    setHistoryDagPanel({ open: false });
+    pendingStatusChatRef.current = null;
+    pendingHistoryDagChatRef.current = null;
+    shouldAutoScrollAgentConversationRef.current = true;
+    setShowScrollToBottomFab(false);
+  }
+
+  function resetNewChatLocalUi() {
+    resetTransientConversationUi();
+    setSlashMenuDismissed(false);
+    setIsCreatingChat(false);
+  }
+
+  /**
+   * Records the most recently used slash command.
+   *
+   * @param command The slash command text.
+   */
+  function rememberSlashCommand(command: string) {
+    const nextRecent = updateRecentSlashCommands(command, recentSlashCommands);
+    setRecentSlashCommands(nextRecent);
+    writeRecentSlashCommands(nextRecent);
+  }
+
+  /**
+   * Requests and opens the Agent status panel.
+   */
+  function requestStatusPanel() {
+    const chatId = state.agent.currentChatId;
+    setSlashMenuDismissed(true);
+    closeLastCompactionPanel();
+    setHistoryDagPanel({ open: false });
+    pendingHistoryDagChatRef.current = null;
+    pendingStatusChatRef.current = chatId;
+    const requested = requestAgentStatusPanel({
+      chatId,
+      connection,
+      failedMessage: t("home.agent.failed"),
+      setStatusPanel
+    });
+    if (!requested) {
+      pendingStatusChatRef.current = null;
+    }
+  }
+
+  /**
+   * Requests and opens the current conversation's latest compaction summary panel.
+   */
+  function requestLastCompactionPanel() {
+    const client = clients?.memmyAgent;
+    const chatId = state.agent.currentChatId;
+    setSlashMenuDismissed(true);
+    setStatusPanel({ open: false });
+    setHistoryDagPanel({ open: false });
+    pendingStatusChatRef.current = null;
+    pendingHistoryDagChatRef.current = null;
+    lastCompactionRequestIdRef.current += 1;
+    const requestId = lastCompactionRequestIdRef.current;
+    pendingLastCompactionChatRef.current = chatId;
+
+    if (!client) {
+      pendingLastCompactionChatRef.current = null;
+      setLastCompactionPanel({ open: true, loading: false, content: "", error: t("home.lastCompaction.loadFailed") });
+      return;
+    }
+    if (!chatId) {
+      pendingLastCompactionChatRef.current = null;
+      setLastCompactionPanel({ open: true, loading: false, content: t("home.lastCompaction.noSummary"), error: null });
+      return;
+    }
+
+    const sessionKey = state.agent.currentSessionKey ?? client.chatIdToSessionKey(chatId);
+    setLastCompactionPanel({ open: true, loading: true, content: "", error: null });
+    void client.readLastCompaction(sessionKey)
+      .then((payload) => {
+        if (requestId !== lastCompactionRequestIdRef.current || pendingLastCompactionChatRef.current !== chatId) {
+          return;
+        }
+        pendingLastCompactionChatRef.current = null;
+        setLastCompactionPanel({
+          open: true,
+          loading: false,
+          content: payload.available ? payload.text : t("home.lastCompaction.noSummary"),
+          error: null
+        });
+      })
+      .catch(() => {
+        if (requestId !== lastCompactionRequestIdRef.current || pendingLastCompactionChatRef.current !== chatId) {
+          return;
+        }
+        pendingLastCompactionChatRef.current = null;
+        setLastCompactionPanel({ open: true, loading: false, content: "", error: t("home.lastCompaction.loadFailed") });
+      });
+  }
+
+  /**
+   * Requests and opens the current conversation's history DAG panel.
+   */
+  function requestHistoryDagPanel() {
+    const chatId = state.agent.currentChatId;
+    setSlashMenuDismissed(true);
+    setStatusPanel({ open: false });
+    closeLastCompactionPanel();
+    pendingStatusChatRef.current = null;
+    pendingHistoryDagChatRef.current = chatId;
+    if (!chatId || !connection) {
+      pendingHistoryDagChatRef.current = null;
+      setHistoryDagPanel({ open: true, loading: false, content: "", error: t("home.agent.failed"), payload: null });
+      return;
+    }
+    setHistoryDagPanel({ open: true, loading: true, content: "", error: null, payload: null });
+    ensureChatSubscription?.(chatId);
+    connection.historyDag(chatId);
+  }
+
+  /**
+   * Applies the command selected in the slash command palette.
+   *
+   * @param command The command item the user selected.
+   */
+  function clearAuxiliarySlashQuery() {
+    setCurrentComposerDraft(buildComposerCommandDraft(selectedComposerCommand, ""));
+  }
+
+  function selectSlashCommand(command: SlashCommandPaletteItem) {
+    if (command.command === "/stop") {
+      if (state.agent.isSending) {
+        stopCurrentTurn();
+      }
+      setCurrentComposerDraft("");
+      setSlashMenuDismissed(true);
+      return;
+    }
+
+    if (command.command === "/status") {
+      rememberSlashCommand(command.command);
+      clearAuxiliarySlashQuery();
+      requestStatusPanel();
+      inputRef.current?.focus();
+      return;
+    }
+
+    if (command.command === "/last-compaction") {
+      rememberSlashCommand(command.command);
+      clearAuxiliarySlashQuery();
+      requestLastCompactionPanel();
+      inputRef.current?.focus();
+      return;
+    }
+
+    if (command.command === "/history-dag") {
+      rememberSlashCommand(command.command);
+      clearAuxiliarySlashQuery();
+      requestHistoryDagPanel();
+      inputRef.current?.focus();
+      return;
+    }
+
+    if (command.command === COMPOSER_GOAL_COMMAND) {
+      rememberSlashCommand(command.command);
+      setSelectedComposerCommandForScope(chatScopeKey, COMPOSER_GOAL_COMMAND);
+      setCurrentComposerDraft(`${COMPOSER_GOAL_COMMAND} `);
+      setSlashMenuDismissed(true);
+      inputRef.current?.focus();
+      return;
+    }
+
+    if (command.command === "/new") {
+      rememberSlashCommand(command.command);
+      requestNewSessionReset({
+        chatId: state.agent.currentChatId,
+        connection,
+        canSubmitOrdinaryMessage: state.agent.connectionStatus === "connected"
+          && state.agent.recoveringGeneration === null,
+        ensureChatSubscription,
+        clearInput: () => setCurrentComposerDraft(""),
+        clearPendingMedia: clearPendingAttachments,
+        dismissSlashMenu: () => setSlashMenuDismissed(true),
+        focusInput: () => inputRef.current?.focus()
+      });
+      return;
+    }
+
+    rememberSlashCommand(command.command);
+    setCurrentComposerDraft(command.argHint ? `${command.command} ` : command.command);
+    setSlashMenuDismissed(true);
+    inputRef.current?.focus();
+  }
+
+  /**
+   * Opens the system media file picker.
+   */
+  function openMediaFilePicker() {
+    fileInputRef.current?.click();
+  }
+
+  /**
+   * Starts voice input on the main interface.
+   */
+  function startVoiceInput() {
+    inputRef.current?.focus();
+    void asrRecorder.start().catch((error: unknown) => {
+      setCurrentComposerMediaError(toReadableAsrError(error, t));
+    });
+  }
+
+  /**
+   * Ends voice input on the main interface and merges in the transcribed text.
+   */
+  async function finishVoiceInput() {
+    try {
+      const transcript = await asrRecorder.finishAndTranscribe();
+      setCurrentComposerDraft((current) => mergeVoiceTranscript(current, transcript.text));
+      setSlashMenuDismissed(false);
+      setSelectedCommandIndex(0);
+      window.requestAnimationFrame(() => {
+        if (inputRef.current) {
+          resizeComposerInput(inputRef.current);
+          inputRef.current.focus();
+        }
+      });
+    } catch (error: unknown) {
+      setCurrentComposerMediaError(toReadableAsrError(error, t));
+    }
+  }
+
+  /**
+   * Toggles the voice input state.
+   */
+  function toggleVoiceInput() {
+    if (asrRecorder.isRecording) {
+      void finishVoiceInput();
+      return;
+    }
+    startVoiceInput();
+  }
+
+
+  /**
+   * Handles keyboard interaction in the input box, including slash command navigation and Enter to send.
+   *
+   * @param event The textarea keyboard event.
+   */
+  function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (isComposingKeyboardEvent(event) && (event.key === "Enter" || event.key === "Tab")) {
+      return;
+    }
+
+    if (slashMenuOpen) {
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        setSelectedCommandIndex((index) => (index + 1) % filteredSlashCommands.length);
+        return;
+      }
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        setSelectedCommandIndex((index) => (index - 1 + filteredSlashCommands.length) % filteredSlashCommands.length);
+        return;
+      }
+      if (event.key === "Enter" || event.key === "Tab") {
+        event.preventDefault();
+        const command = filteredSlashCommands[selectedCommandIndex] ?? filteredSlashCommands[0];
+        if (command) {
+          selectSlashCommand(command);
+        }
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setSlashMenuDismissed(true);
+        return;
+      }
+    }
+
+    if (event.key === "Escape" && historyDagPanel.open) {
+      event.preventDefault();
+      setHistoryDagPanel({ open: false });
+      return;
+    }
+
+    if (event.key === "Escape" && lastCompactionPanel.open) {
+      event.preventDefault();
+      closeLastCompactionPanel();
+      return;
+    }
+
+    if (event.key !== "Enter" || event.shiftKey) {
+      return;
+    }
+    event.preventDefault();
+    if (composerPrimaryAction === "send" && !composerSendDisabled) {
+      void sendMessage();
+    }
+  }
+
+  function handleAgentConversationScroll(event: UIEvent<HTMLDivElement>) {
+    if (isProgrammaticAgentScrollRef.current) {
+      return;
+    }
+    const atBottom = isAgentConversationAtBottom(event.currentTarget);
+    if (atBottom) {
+      // Reaching the bottom is always safe to treat as "resume auto-scroll",
+      // regardless of what caused this particular scroll event.
+      shouldAutoScrollAgentConversationRef.current = true;
+      setShowScrollToBottomFab(false);
+      return;
+    }
+    // The control reflects the actual scroll position even when the user moved
+    // with the scrollbar or keyboard. Only a scroll event that follows a real
+    // wheel/touch gesture is allowed to turn auto-scroll off, so a scroll event
+    // racing with streaming content growth cannot disable it.
+    setShowScrollToBottomFab(true);
+    if (Date.now() > userScrollIntentUntilRef.current) {
+      return;
+    }
+    shouldAutoScrollAgentConversationRef.current = false;
+  }
+
+  /**
+   * Validates and stages the images selected by the user.
+   *
+   * @param event The file input change event.
+   */
+  async function selectMedia(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files ?? []);
+    try {
+      await attachMediaFilesToScope(chatScopeKey, files);
+    } finally {
+      event.target.value = "";
+    }
+  }
+
+  function handleComposerPaste(event: ClipboardEvent<HTMLTextAreaElement>) {
+    const files = clipboardImageFilesFromDataTransfer(event.clipboardData);
+    if (!files.length) {
+      return;
+    }
+
+    event.preventDefault();
+    void attachMediaFilesToScope(chatScopeKey, files);
+  }
+
+  function handleComposerDragOver(event: DragEvent<HTMLElement>) {
+    if (!dataTransferHasAttachmentFiles(event.dataTransfer)) {
+      return;
+    }
+
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+  }
+
+  function handleComposerDrop(event: DragEvent<HTMLElement>) {
+    if (!dataTransferHasAttachmentFiles(event.dataTransfer)) {
+      return;
+    }
+
+    event.preventDefault();
+    const files = attachmentFilesFromDataTransfer(event.dataTransfer);
+    if (!files.length) {
+      return;
+    }
+
+    void attachMediaFilesToScope(chatScopeKey, files).then(() => {
+      inputRef.current?.focus();
+    });
+  }
+
+  async function attachMediaFilesToScope(scopeKey: string, files: File[]) {
+    if (!files.length) {
+      return;
+    }
+
+    try {
+      const validation = await validateAgentMediaFiles(files, t, pendingAttachmentsRef.current[scopeKey] ?? []);
+      const validFiles = validation.files;
+      if (!validFiles.length) {
+        setComposerMediaErrorForScope(scopeKey, t("home.media.error.duplicateAttachment"));
+        return;
+      }
+      const nextPending = validFiles.map((item) => fileToPendingAttachment(item.file, item.sourceKey, item.classification));
+      setPendingAttachmentsForScope(scopeKey, (current) => [...current, ...nextPending]);
+      setComposerMediaErrorForScope(scopeKey, null);
+      for (const [index, pending] of nextPending.entries()) {
+        if (pending.kind === "image") {
+          void updatePendingImageEncoding(scopeKey, pending.id, validFiles[index]!.file);
+        }
+      }
+      track({ name: "agent_media_attached", params: { page_path: "/main", media_type: mediaTypeForAnalytics(nextPending) }, consentTier: "basic" });
+    } catch (error) {
+      setComposerMediaErrorForScope(scopeKey, error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function updatePendingImageEncoding(scopeKey: string, id: string, file: File) {
+    try {
+      const encoded = await encodePendingAgentImage(file);
+      setPendingAttachmentsForScope(scopeKey, (current) => current.map((item) => item.id === id && item.kind === "image"
+        ? {
+            ...item,
+            status: "ready",
+            encodedBlob: encoded.blob,
+            encodedMime: encoded.mime,
+            encodedBytes: encoded.bytes,
+            normalized: encoded.normalized,
+            errorKey: undefined
+          }
+        : item));
+    } catch (error) {
+      setPendingAttachmentsForScope(scopeKey, (current) => {
+        const failed = current.find((item) => item.id === id);
+        if (failed) revokePendingAttachment(failed);
+        return current.filter((item) => item.id !== id);
+      });
+      setComposerMediaErrorForScope(scopeKey, "attachment_read_failed");
+    }
+  }
+
+  function removePendingMedia(id: string) {
+    setCurrentPendingAttachments((current) => {
+      const removed = current.find((item) => item.id === id);
+      if (removed) {
+        revokePendingAttachment(removed);
+      }
+      return current.filter((item) => item.id !== id);
+    });
+    setCurrentComposerMediaError(null);
+    inputRef.current?.focus();
+  }
+
+  function clearPendingAttachments() {
+    setCurrentPendingAttachments((current) => {
+      for (const item of current) {
+        revokePendingAttachment(item);
+      }
+      return [];
+    });
+  }
+
+  const environmentPanel = environmentPanelOpen && environmentScope ? (
+    <AgentEnvironmentPanel
+      client={clients?.memmyAgent ?? null}
+      scope={environmentScope.kind}
+      scopeKey={environmentScope.key}
+      environment={workspaceEnvironment.data}
+      loading={workspaceEnvironment.loading}
+      error={workspaceEnvironment.error}
+      onRefresh={workspaceEnvironment.refresh}
+      onClose={() => setEnvironmentPanelOpen(false)}
+    />
+  ) : null;
+
+  return (
+    <AppFrame
+      title={t("home.title")}
+      topBar={hasActiveConversation || environmentScope ? (
+        <div className="agent-conversation-topbar">
+          <h1 className="agent-conversation-title" title={hasActiveConversation ? activeConversationTitle : selectedDraftProject?.name}>
+            <span className="agent-conversation-title__text">
+              {hasActiveConversation ? activeConversationTitleDisplay : selectedDraftProject?.name}
+            </span>
+            {hasActiveConversation && activeImTitleDisplay ? <ImChannelTitleIcon slug={activeImTitleDisplay.slug} name={activeImTitleDisplay.channelName} /> : null}
+          </h1>
+          <button
+            type="button"
+            className={`agent-environment-toggle${environmentPanelOpen ? " agent-environment-toggle--active" : ""}`}
+            data-agent-environment-toggle
+            aria-label={t("home.environment.title")}
+            aria-pressed={environmentPanelOpen}
+            title={t("home.environment.title")}
+            onClick={() => setEnvironmentPanelOpen((open) => !open)}
+          >
+            <SlidersHorizontal size={16} aria-hidden="true" />
+          </button>
+        </div>
+      ) : null}
+      topBarBorder={Boolean(hasActiveConversation || environmentScope)}
+    >
+      <div className={`agent-workspace-layout${environmentPanelOpen ? " agent-workspace-layout--environment-open" : ""}`}>
+        {!hasActiveConversation ? (
+        <section className="app-frame-page-content home-empty-screen flex flex-col items-center justify-center h-full">
+          <div className="text-center mb-8">
+            <div className="home-empty-brand-mascot flex justify-center">
+              <Memmy pose="think" size={165} className="memmy-bob" />
+            </div>
+            <h1 className="text-2xl font-bold text-text-ink">{t("home.subtitle")}</h1>
+          </div>
+          <div className="w-full max-w-2xl">
+            <AgentOperationErrorSlot message={agentError} />
+            <div className="home-empty-composer-stack">
+              <div
+                className="relative home-empty-composer agent-composer-shell rounded-card-lg"
+                onDragOver={handleComposerDragOver}
+                onDrop={handleComposerDrop}
+              >
+                {slashMenuOpen && (
+                  <div className="absolute left-0 bottom-full mb-3 z-40" style={{ width: "min(448px, 100%)" }}>
+                    <AgentCommandPalette commands={filteredSlashCommands} heading={t("home.commandPalette.commands")} selectedIndex={selectedCommandIndex} onSelect={selectSlashCommand} />
+                  </div>
+                )}
+                {lastCompactionPanel.open && !slashMenuOpen && (
+                  <div className="absolute left-0 bottom-full mb-3 z-30 w-full" style={{ right: 0 }}>
+                    <AgentStatusPanel state={lastCompactionPanel} closeLabel={t("common.close")} loadingLabel={t("home.agent.connecting")} onClose={closeLastCompactionPanel} />
+                  </div>
+                )}
+                <ComposerMediaPreviewStrip
+                  items={pendingAttachments}
+                  onRemove={removePendingMedia}
+                  removeLabel={t("common.remove")}
+                  selectedLabel={t("home.media.addPhotoFile")}
+                  t={t}
+                />
+                {selectedComposerCommand ? (
+                  <div className="composer-command-chip-slot composer-command-chip-slot--home">
+                    <ComposerCommandChip
+                      command={selectedComposerCommand}
+                      label={t("home.command.goalChip")}
+                      removeLabel={t("common.remove")}
+                      onRemove={clearSelectedComposerCommand}
+                    />
+                  </div>
+                ) : null}
+                <textarea
+                  ref={inputRef}
+                  value={composerInput}
+                  placeholder={selectedComposerCommand ? t("home.goal.input") : t("home.input")}
+                  rows={3}
+                  onChange={(event) => {
+                    updateComposerInput(event.target.value);
+                    resizeComposerInput(event.target);
+                  }}
+                  onKeyDown={handleComposerKeyDown}
+                  onPaste={handleComposerPaste}
+                  className="w-full px-5 pt-4 pb-12 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40"
+                />
+                <div className="composer-actions absolute bottom-3 right-4 z-50">
+                  <AgentModelSelector
+                    mode={modelWorkspaceMode}
+                    scopeKey={modelSelectionScopeKey}
+                    disabled={isCurrentAgentRunning || isCreatingChat || messageSendInFlight}
+                    seedConfig={state.modelConfig}
+                  />
+                  <button
+                    type="button"
+                    aria-label={t("home.media.menu")}
+                    title={t("home.media.menu")}
+                    onClick={openMediaFilePicker}
+                    className="composer-action-btn"
+                  >
+                    <Plus size={15} strokeWidth={2} />
+                  </button>
+                  <button
+                    type="button"
+                    aria-label={t("home.voiceInput")}
+                    title={t("home.voiceInput")}
+                    disabled={asrRecorder.isTranscribing || asrRecorder.isStarting}
+                    onClick={toggleVoiceInput}
+                    className={`composer-action-btn${asrRecorder.isRecording ? " composer-action-btn--active" : ""}`}
+                  >
+                    {asrRecorder.isRecording ? <Pause size={15} strokeWidth={2} /> : <Mic size={15} strokeWidth={2} />}
+                  </button>
+                  <ComposerSubmitButton
+                    isSending={isCurrentAgentRunning}
+                    disabled={composerSubmitDisabled}
+                    sendLabel={t("home.send")}
+                    stopLabel={t("home.stop")}
+                    onClick={isCurrentAgentRunning ? stopCurrentTurn : () => void sendMessage()}
+                  />
+                </div>
+              </div>
+              <div className="home-composer-toolbar">
+                <ProjectTargetPicker
+                  open={projectPickerOpen}
+                  target={draftTarget}
+                  selectedProject={selectedDraftProject}
+                  projects={state.agent.projects}
+                  sessions={state.agent.sessions}
+                  registryState={state.agent.projectRegistryState}
+                  disabled={messageSendInFlight || projectPickerOperationId != null}
+                  onToggle={() => setProjectPickerOpen((open) => !open)}
+                  onClose={() => setProjectPickerOpen(false)}
+                  onSelect={selectDraftTarget}
+                  onChooseOther={() => void selectOtherProjectFolder()}
+                />
+                <AgentWorkspaceContext
+                  snapshot={workspaceEnvironment.data?.snapshot ?? null}
+                  branches={workspaceEnvironment.data?.branches ?? []}
+                  loading={workspaceEnvironment.loading}
+                  error={workspaceEnvironment.error}
+                  onSwitchBranch={workspaceEnvironment.switchBranch}
+                  onCreateOrCheckoutBranch={workspaceEnvironment.createOrCheckoutBranch}
+                />
+              </div>
+            </div>
+            <div className="home-empty-status-area">
+              {statusText && <p className="text-center text-xs text-text-ink/45 mt-4">{statusText}</p>}
+              <p className="text-center text-[11px] text-text-ink/40 mt-4">{t("home.notice")}</p>
+            </div>
+            <input ref={fileInputRef} type="file" accept={AGENT_MEDIA_ACCEPT} multiple hidden className="hidden" onChange={(event) => void selectMedia(event)} />
+          </div>
+        </section>
+        ) : (
+        <section ref={conversationPanelRef} className="agent-conversation-panel flex flex-col h-full">
+          <div
+            ref={scrollRef}
+            className="app-frame-page-content agent-conversation-scroll flex-1 overflow-y-auto"
+            onScroll={handleAgentConversationScroll}
+            onWheel={markAgentConversationUserScrollIntent}
+            onTouchMove={markAgentConversationUserScrollIntent}
+          >
+            <div className="agent-conversation-content max-w-3xl mx-auto space-y-3">
+              {displayConnectionStatus !== "connected" && (
+                <div className="text-center">
+                  <span className="inline-flex text-[11px] px-3 py-1 rounded-tag bg-background-paper text-text-ink/55 border border-border-stone/30">
+                    {statusText}
+                  </span>
+                </div>
+              )}
+              <AgentThreadMessages
+                key={chatScopeKey}
+                chatScopeKey={chatScopeKey}
+                historyVersion={currentHistoryVersion}
+                messages={state.agent.messages}
+                afterMessageId={firstEncounterRelayAnchorMessageId}
+                afterMessageContent={firstEncounterRelayContent}
+                forceMessageActionsForMessageId={firstEncounterRelayAnswerMessageId}
+                retryWaitStatus={state.agent.currentChatId ? state.agent.retryWaitStatusByChatId[state.agent.currentChatId] ?? null : null}
+                isSending={state.agent.isSending}
+                sanitizePlatformApiErrors={sanitizePlatformApiErrors}
+                artifactClient={sessionArtifactClient}
+                memoryRuntimeClient={clients?.memoryRuntime ?? null}
+              />
+            </div>
+          </div>
+          {showScrollToBottomFab ? (
+            <button
+              type="button"
+              className="agent-scroll-to-bottom-fab"
+              aria-label={t("home.scrollToLatest")}
+              title={t("home.scrollToLatest")}
+              onClick={resumeAgentConversationAutoScroll}
+            >
+              <ArrowDown size={16} aria-hidden="true" />
+            </button>
+          ) : null}
+          <div ref={composerOverlayRef} className="agent-conversation-composer">
+            <div className="agent-conversation-content agent-conversation-content--composer max-w-3xl mx-auto">
+              <div className="agent-composer-flow">
+                {slashMenuOpen && (
+                  <div className="agent-composer-popover absolute left-0 bottom-full mb-3 z-40" style={{ width: "min(448px, 100%)" }}>
+                    <AgentCommandPalette commands={filteredSlashCommands} heading={t("home.commandPalette.commands")} selectedIndex={selectedCommandIndex} onSelect={selectSlashCommand} />
+                  </div>
+                )}
+                {statusPanel.open && !slashMenuOpen && (
+                  <div className="agent-composer-popover absolute left-0 bottom-full mb-3 z-30 w-full" style={{ right: 0 }}>
+                    <AgentStatusPanel state={statusPanel} closeLabel={t("common.close")} loadingLabel={t("home.agent.connecting")} onClose={() => setStatusPanel({ open: false })} />
+                  </div>
+                )}
+                {lastCompactionPanel.open && !statusPanel.open && !slashMenuOpen && (
+                  <div className="agent-composer-popover absolute left-0 right-0 bottom-full mb-3 z-30 w-full">
+                    <AgentStatusPanel state={lastCompactionPanel} closeLabel={t("common.close")} loadingLabel={t("home.agent.connecting")} onClose={closeLastCompactionPanel} />
+                  </div>
+                )}
+                {historyDagPanel.open && !statusPanel.open && !lastCompactionPanel.open && !slashMenuOpen && (
+                  <div className="agent-composer-popover absolute left-0 right-0 bottom-full mb-3 z-30 w-full">
+                    <HistoryDagPanel
+                      state={historyDagPanel}
+                      closeLabel={t("common.close")}
+                      loadingLabel={t("home.agent.connecting")}
+                      labels={{
+                        currentTask: t("home.historyDag.currentTask"),
+                        nodeCount: t("home.historyDag.nodeCount"),
+                        edgeCount: t("home.historyDag.edgeCount"),
+                        activePath: t("home.historyDag.activePath"),
+                        none: t("home.historyDag.none"),
+                        noDag: t("home.historyDag.noDag"),
+                        selectNode: t("home.historyDag.selectNode"),
+                        refs: t("home.historyDag.refs"),
+                        noRefs: t("home.historyDag.noRefs"),
+                        finishTitle: t("home.historyDag.finishTitle")
+                      }}
+                      onClose={() => setHistoryDagPanel({ open: false })}
+                    />
+                  </div>
+                )}
+                {currentSessionProjectBlocked ? (
+                  <p className="mx-auto mb-2 w-fit rounded-tag border border-status-error/20 bg-status-error/5 px-3 py-1 text-xs text-status-error" role="status">
+                    {t("home.project.registryUnavailable")}
+                  </p>
+                ) : null}
+                <AgentOperationErrorSlot message={agentError} />
+                <div className="agent-composer-stack">
+                  <AgentQueuedMessageList
+                    items={currentQueuedMessages}
+                    label={t("home.queue.label")}
+                    removeLabel={t("home.queue.remove")}
+                    steerLabel={t("home.queue.steer")}
+                    canSteer={canSteerCurrentQueue}
+                    attachmentOnlyLabel={(count) => t("home.queue.attachmentOnly", { count })}
+                    sourceLabels={{
+                      gui: t("home.queue.source.gui"),
+                      tui: t("home.queue.source.tui"),
+                      im: (channelName) => t("home.queue.source.im", { channel: channelName }),
+                      unknownIm: t("home.queue.source.imUnknown")
+                    }}
+                    onRemove={(clientRequestId) => void removeQueuedMessage(clientRequestId)}
+                    onSteer={(clientRequestId) => void steerQueuedMessage(clientRequestId)}
+                  />
+                  {state.agent.currentChatId && currentGoal ? (
+                    <AgentGoalBar
+                      chatId={state.agent.currentChatId}
+                      goal={currentGoal}
+                      clock={state.agent.goalRunClockByChatId[state.agent.currentChatId] ?? null}
+                      pending={Boolean(goalMutationPending)}
+                      onControl={(request) => void controlGoal(request)}
+                    />
+                  ) : null}
+                  <div
+                    className="relative agent-composer-shell agent-composer-shell--expanded rounded-card-lg"
+                    onDragOver={handleComposerDragOver}
+                    onDrop={handleComposerDrop}
+                  >
+                    <ComposerMediaPreviewStrip
+                      items={pendingAttachments}
+                      onRemove={removePendingMedia}
+                      removeLabel={t("common.remove")}
+                      selectedLabel={t("home.media.addPhotoFile")}
+                      t={t}
+                    />
+                    <textarea
+                      ref={inputRef}
+                      value={composerInput}
+                      placeholder={selectedComposerCommand ? t("home.goal.input") : t("home.input")}
+                      rows={1}
+                      onChange={(event) => {
+                        updateComposerInput(event.target.value);
+                        resizeComposerInput(event.target);
+                      }}
+                      onKeyDown={handleComposerKeyDown}
+                      onPaste={handleComposerPaste}
+                      className={`${isComposerSingleLine ? "agent-composer-input--single " : ""}agent-composer-input--conversation block w-full pl-4 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40`}
+                    />
+                    <div className="agent-composer-toolbar">
+                      <div className="agent-composer-toolbar__leading">
+                        {selectedComposerCommand ? (
+                          <ComposerCommandChip
+                            command={selectedComposerCommand}
+                            label={t("home.command.goalChip")}
+                            removeLabel={t("common.remove")}
+                            onRemove={clearSelectedComposerCommand}
+                          />
+                        ) : null}
+                      </div>
+                      <div className="composer-actions">
+                        <AgentModelSelector
+                          mode={modelWorkspaceMode}
+                          scopeKey={modelSelectionScopeKey}
+                          disabled={isCurrentAgentRunning || isCreatingChat || messageSendInFlight}
+                          seedConfig={state.modelConfig}
+                        />
+                        <button
+                          type="button"
+                          aria-label={t("home.media.menu")}
+                          title={t("home.media.menu")}
+                          onClick={openMediaFilePicker}
+                          className="composer-action-btn"
+                        >
+                          <Plus size={15} strokeWidth={2} />
+                        </button>
+                        <button
+                          type="button"
+                          aria-label={t("home.voiceInput")}
+                          title={t("home.voiceInput")}
+                          disabled={asrRecorder.isTranscribing || asrRecorder.isStarting}
+                          onClick={toggleVoiceInput}
+                          className={`composer-action-btn${asrRecorder.isRecording ? " composer-action-btn--active" : ""}`}
+                        >
+                          {asrRecorder.isRecording ? <Pause size={15} strokeWidth={2} /> : <Mic size={15} strokeWidth={2} />}
+                        </button>
+                        <ComposerSubmitButton
+                          isSending={composerPrimaryAction === "stop"}
+                          disabled={composerSubmitDisabled}
+                          sendLabel={t("home.send")}
+                          stopLabel={t("home.stop")}
+                          variant="compact"
+                          onClick={composerPrimaryAction === "stop" ? stopCurrentTurn : () => void sendMessage()}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <p className="text-center text-[11px] text-text-ink/40 mt-2">{t("home.notice")}</p>
+              <input ref={fileInputRef} type="file" accept={AGENT_MEDIA_ACCEPT} multiple hidden className="hidden" onChange={(event) => void selectMedia(event)} />
+            </div>
+          </div>
+        </section>
+        )}
+        {environmentPanel}
+      </div>
+    </AppFrame>
+  );
+}
+
+export function ChatModelSelector(props: {
+  presets: AgentState["modelPresets"];
+  value: string | null;
+  disabled: boolean;
+  label: string;
+  onChange: (preset: string) => void;
+}) {
+  const available = props.presets.filter((preset) => preset.available);
+  return (
+    <Select
+      id="home-chat-model-selector"
+      ariaLabel={props.label}
+      value={props.value ?? ""}
+      placeholder={props.label}
+      options={available.map((preset) => ({
+        value: preset.name,
+        label: preset.model,
+        icon: <LlmProviderLogo provider={preset.provider} />
+      }))}
+      disabled={props.disabled || !available.length}
+      onValueChange={props.onChange}
+      placement="top"
+      className="chat-model-select"
+      buttonClassName="chat-model-select__button"
+      menuClassName="chat-model-select__menu"
+    />
+  );
+}
+
+export function AgentOperationErrorSlot(props: { message: string | null }) {
+  return (
+    <div className="agent-operation-error-slot" aria-live="polite" aria-atomic="true">
+      {props.message ? (
+        <p key={props.message} className="agent-operation-error-toast" role="alert">
+          {props.message}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+/** Cursor-style path label: collapse the home directory to `~` and normalize separators. */
+export function formatWorkspaceDisplayPath(rootPath: string): string {
+  const normalized = rootPath.replace(/\\/g, "/");
+  if (normalized === "~" || normalized.startsWith("~/")) return normalized;
+  const unixHome = normalized.replace(/^\/(?:Users|home)\/[^/]+(?=\/|$)/, "~");
+  if (unixHome !== normalized) return unixHome;
+  return normalized.replace(/^[A-Za-z]:\/Users\/[^/]+(?=\/|$)/i, "~");
+}
+
+/** Final folder segment — preferred label when chrome width is limited. */
+export function workspaceFolderName(rootPath: string): string {
+  const displayPath = formatWorkspaceDisplayPath(rootPath).replace(/\/+$/, "");
+  if (!displayPath || displayPath === "~") return displayPath || "~";
+  return displayPath.slice(displayPath.lastIndexOf("/") + 1) || displayPath;
+}
+
+/** Approximate UI width: CJK glyphs count double so paths collapse before the leaf is clipped. */
+function workspacePathDisplayWidth(value: string): number {
+  let width = 0;
+  for (const char of value) {
+    width += (char.codePointAt(0) ?? 0) > 0xff ? 2 : 1;
+  }
+  return width;
+}
+
+function truncateWorkspacePathToWidth(value: string, maxWidth: number): string {
+  if (workspacePathDisplayWidth(value) <= maxWidth) return value;
+  let width = 0;
+  let cut = 0;
+  for (const char of value) {
+    const next = width + ((char.codePointAt(0) ?? 0) > 0xff ? 2 : 1);
+    if (next > Math.max(1, maxWidth - 1)) break;
+    width = next;
+    cut += char.length;
+  }
+  return `${value.slice(0, Math.max(1, cut))}…`;
+}
+
+/**
+ * Single-line path label that always keeps the leaf folder name intact.
+ * Collapse the middle/prefix first (`~/…/leaf`), never CSS-truncate the leaf.
+ */
+export function formatCompactWorkspacePath(rootPath: string, maxWidth = 28): string {
+  const displayPath = formatWorkspaceDisplayPath(rootPath).replace(/\/+$/, "");
+  const folder = workspaceFolderName(rootPath);
+  if (workspacePathDisplayWidth(folder) >= maxWidth) {
+    return truncateWorkspacePathToWidth(folder, maxWidth);
+  }
+  if (workspacePathDisplayWidth(displayPath) <= maxWidth) {
+    return displayPath;
+  }
+
+  const homePrefixed = displayPath.startsWith("~/");
+  const drivePrefixed = /^[A-Za-z]:\//.test(displayPath);
+  const compact = homePrefixed
+    ? `~/…/${folder}`
+    : drivePrefixed
+      ? `${displayPath.slice(0, 2)}/…/${folder}`
+      : `…/${folder}`;
+  if (workspacePathDisplayWidth(compact) <= maxWidth) return compact;
+  return folder;
+}
+
+export const PROJECT_TARGET_PICKER_MAX_RECENT = 10;
+
+type ProjectPickerSessionActivity = Pick<MemmyAgentSessionSummary, "projectId" | "updatedAt" | "run_started_at">;
+
+function projectPickerSessionActivityMs(session: ProjectPickerSessionActivity): number {
+  if (session.updatedAt) {
+    const parsed = Date.parse(session.updatedAt);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  if (typeof session.run_started_at === "number" && Number.isFinite(session.run_started_at)) {
+    return session.run_started_at < 1e12 ? session.run_started_at * 1000 : session.run_started_at;
+  }
+  return 0;
+}
+
+/** Recent workspaces by latest related conversation, capped at 10. */
+export const filterProjectTargetPickerProjects = (
+  projects: MemmyAgentProject[],
+  query: string,
+  sessions: readonly ProjectPickerSessionActivity[] = []
+): MemmyAgentProject[] => {
+  const latestActivityByProjectId = new Map<string, number>();
+  for (const session of sessions) {
+    if (!session.projectId) continue;
+    const activity = projectPickerSessionActivityMs(session);
+    const previous = latestActivityByProjectId.get(session.projectId) ?? 0;
+    if (activity > previous) latestActivityByProjectId.set(session.projectId, activity);
+  }
+
+  const sortedProjects = [...projects].sort((left, right) => {
+    const leftActivity = latestActivityByProjectId.get(left.id) ?? 0;
+    const rightActivity = latestActivityByProjectId.get(right.id) ?? 0;
+    if (rightActivity !== leftActivity) return rightActivity - leftActivity;
+    return right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id);
+  });
+
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const matched = !normalizedQuery
+    ? sortedProjects
+    : sortedProjects.filter((project) => {
+      const displayPath = formatWorkspaceDisplayPath(project.rootPath).toLocaleLowerCase();
+      return project.name.toLocaleLowerCase().includes(normalizedQuery)
+        || project.rootPath.toLocaleLowerCase().includes(normalizedQuery)
+        || displayPath.includes(normalizedQuery);
+    });
+  return matched.slice(0, PROJECT_TARGET_PICKER_MAX_RECENT);
+};
+
+export const resolveProjectTargetPickerActiveIndex = (
+  itemKeys: string[],
+  selectedKey: string | null
+): number => Math.max(0, selectedKey ? itemKeys.indexOf(selectedKey) : 0);
+
+export interface RunProjectTargetFolderSelectionInput {
+  selectDirectory: NonNullable<Window["memmy"]>["selectProjectDirectory"];
+  mutateProject: AgentTaskStateCoordinator["mutateProject"];
+  onCommitted: (project: MemmyAgentProject) => void;
+  onError: (error: unknown) => void;
+  onRefresh: () => void;
+}
+
+export const runProjectTargetFolderSelection = async (
+  input: RunProjectTargetFolderSelectionInput
+): Promise<"canceled" | "committed" | "failed"> => {
+  try {
+    const selected = await input.selectDirectory();
+    if (selected.canceled) return "canceled";
+    const result = await input.mutateProject({
+      kind: "create",
+      input: { mode: "existing", path: selected.path }
+    });
+    if (result.status !== "committed" || !result.project) {
+      throw new MemmyAgentRequestError(
+        "project registration failed",
+        result.status === "rejected" ? 409 : 503,
+        result.status === "rejected" ? result.code : "network_unavailable"
+      );
+    }
+    input.onCommitted(result.project);
+    return "committed";
+  } catch (error) {
+    input.onError(error);
+    input.onRefresh();
+    return "failed";
+  }
+};
+
+const preserveProjectTargetPickerSearchFocus = (event: ReactPointerEvent<HTMLButtonElement>) => {
+  event.preventDefault();
+};
+
+export function ProjectTargetPicker(props: {
+  open: boolean;
+  target: WebuiSessionTarget;
+  selectedProject: MemmyAgentProject | null;
+  projects: MemmyAgentProject[];
+  sessions?: readonly ProjectPickerSessionActivity[];
+  registryState: "ready" | "corrupt";
+  disabled: boolean;
+  onToggle: () => void;
+  onClose: () => void;
+  onSelect: (target: WebuiSessionTarget) => void;
+  onChooseOther: () => void;
+}) {
+  const { t } = useTranslation();
+  const [query, setQuery] = useState("");
+  const [activeIndex, setActiveIndex] = useState(0);
+  const [hasKeyboardNavigated, setHasKeyboardNavigated] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const selectedPath = props.selectedProject
+    ? formatWorkspaceDisplayPath(props.selectedProject.rootPath)
+    : null;
+  const selectedLabel = props.registryState === "corrupt"
+    ? t("home.project.registryUnavailable")
+    : props.selectedProject
+      ? workspaceFolderName(props.selectedProject.rootPath)
+      : t("home.project.optional");
+  const visibleProjects = props.registryState === "ready"
+    ? filterProjectTargetPickerProjects(props.projects, query, props.sessions)
+    : [];
+  const itemKeys = [
+    ...visibleProjects.map((project) => `project:${project.id}`),
+    ...(props.registryState === "ready" ? ["new"] : []),
+    ...(props.target.kind === "project" ? ["standalone"] : [])
+  ];
+  const selectedKey = props.target.kind === "project" ? `project:${props.target.projectId}` : null;
+  const itemKeySignature = itemKeys.join("\u0000");
+  const activeItemId = itemKeys.length > 0 ? `home-project-picker-option-${activeIndex}` : undefined;
+
+  useEffect(() => {
+    if (!props.open) return;
+    setQuery("");
+    setActiveIndex(0);
+    setHasKeyboardNavigated(false);
+    searchInputRef.current?.focus();
+  }, [props.open]);
+
+  useEffect(() => {
+    if (!props.open) return;
+    setActiveIndex(resolveProjectTargetPickerActiveIndex(itemKeys, selectedKey));
+    setHasKeyboardNavigated(false);
+  }, [itemKeySignature, props.open, query, selectedKey]);
+
+  useEffect(() => {
+    if (!props.open || !activeItemId || !hasKeyboardNavigated) return;
+    rootRef.current?.querySelector(`#${activeItemId}`)?.scrollIntoView({ block: "nearest" });
+  }, [activeItemId, hasKeyboardNavigated, props.open]);
+
+  useEffect(() => {
+    if (!props.open) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) props.onClose();
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointer);
+    return () => document.removeEventListener("pointerdown", closeOnOutsidePointer);
+  }, [props.onClose, props.open]);
+
+  const activateItem = (key: string | undefined) => {
+    if (key?.startsWith("project:")) {
+      props.onSelect({ kind: "project", projectId: key.slice("project:".length) });
+    } else if (key === "new") {
+      props.onChooseOther();
+    } else if (key === "standalone") {
+      props.onSelect({ kind: "standalone" });
+    }
+  };
+
+  const handlePickerKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Enter" && isComposingKeyboardEvent(event)) return;
+    if (event.key === "Tab") {
+      props.onClose();
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      props.onClose();
+      triggerRef.current?.focus();
+      return;
+    }
+    if (itemKeys.length === 0) return;
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      setHasKeyboardNavigated(true);
+      const offset = event.key === "ArrowDown" ? 1 : -1;
+      setActiveIndex((current) => Math.max(0, Math.min(itemKeys.length - 1, current + offset)));
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      activateItem(itemKeys[activeIndex]);
+    }
+  };
+
+  const triggerActive = Boolean(props.selectedProject) || props.open;
+
+  return (
+    <div ref={rootRef} className="home-project-picker">
+      <div className={`home-project-picker__control${props.selectedProject ? " home-project-picker__control--selected" : ""}${props.open ? " home-project-picker__control--open" : ""}`}>
+        <button
+          ref={triggerRef}
+          type="button"
+          className={`home-project-picker__trigger${triggerActive ? " home-project-picker__trigger--selected" : ""}`}
+          disabled={props.disabled}
+          aria-expanded={props.open}
+          aria-haspopup="listbox"
+          title={selectedPath ?? undefined}
+          onClick={props.onToggle}
+        >
+          <span className="home-project-picker__leading" aria-hidden="true">
+            <Folder size={13} className="home-project-picker__folder-icon" />
+            {props.selectedProject ? <X size={13} className="home-project-picker__clear-icon" /> : null}
+          </span>
+          <span className="home-project-picker__label truncate">{selectedLabel}</span>
+          {props.selectedProject ? null : (
+            <ChevronDown
+              size={13}
+              className={`home-project-picker__chevron${props.open ? " home-project-picker__chevron--open" : ""}`}
+              aria-hidden="true"
+            />
+          )}
+        </button>
+        {props.selectedProject ? (
+          <button
+            type="button"
+            className="home-project-picker__clear"
+            disabled={props.disabled}
+            aria-label={t("home.project.clear")}
+            title={t("home.project.clear")}
+            onPointerDown={preserveProjectTargetPickerSearchFocus}
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              props.onSelect({ kind: "standalone" });
+              props.onClose();
+            }}
+          />
+        ) : null}
+      </div>
+      {props.open ? (
+        <div className="home-project-picker__menu">
+          <label className="home-project-picker__search">
+            <input
+              ref={searchInputRef}
+              value={query}
+              placeholder={t("home.project.search")}
+              aria-label={t("home.project.search")}
+              role="combobox"
+              aria-autocomplete="list"
+              aria-expanded="true"
+              aria-controls="home-project-picker-list"
+              aria-activedescendant={activeItemId}
+              onChange={(event) => {
+                setQuery(event.target.value);
+                setHasKeyboardNavigated(false);
+              }}
+              onKeyDown={handlePickerKeyDown}
+            />
+          </label>
+          <div id="home-project-picker-list" className="home-project-picker__list" role="listbox">
+            <div className="home-project-picker__projects" role="presentation">
+              {props.registryState === "corrupt" ? (
+                <p className="home-project-picker__empty">{t("home.project.registryUnavailable")}</p>
+              ) : visibleProjects.length === 0 ? (
+                <p className="home-project-picker__empty" role="status">{t("home.project.empty")}</p>
+              ) : visibleProjects.map((project, index) => {
+                const selected = props.target.kind === "project" && props.target.projectId === project.id;
+                const displayPath = formatCompactWorkspacePath(project.rootPath);
+                return (
+                  <button
+                    id={`home-project-picker-option-${index}`}
+                    key={project.id}
+                    type="button"
+                    role="option"
+                    tabIndex={-1}
+                    aria-selected={selected}
+                    data-project-id={project.id}
+                    className={`home-project-picker__option${selected ? " home-project-picker__option--selected" : ""}${hasKeyboardNavigated && activeIndex === index ? " home-project-picker__option--keyboard-active" : ""}`}
+                    title={formatWorkspaceDisplayPath(project.rootPath)}
+                    onPointerDown={preserveProjectTargetPickerSearchFocus}
+                    onClick={() => props.onSelect({ kind: "project", projectId: project.id })}
+                  >
+                    <Folder size={13} className="shrink-0" aria-hidden="true" />
+                    <span className="home-project-picker__path truncate">{displayPath}</span>
+                    {selected ? <Check size={13} className="shrink-0" aria-hidden="true" /> : null}
+                  </button>
+                );
+              })}
+            </div>
+            {itemKeys.some((key) => key === "new" || key === "standalone") ? (
+              <div className="home-project-picker__divider" role="separator" />
+            ) : null}
+            <div className="home-project-picker__actions" role="presentation">
+              {props.registryState === "ready" ? (
+                <button
+                  id={`home-project-picker-option-${visibleProjects.length}`}
+                  type="button"
+                  role="option"
+                  tabIndex={-1}
+                  aria-selected="false"
+                  className={`home-project-picker__option home-project-picker__option--action${hasKeyboardNavigated && activeIndex === visibleProjects.length ? " home-project-picker__option--keyboard-active" : ""}`}
+                  onPointerDown={preserveProjectTargetPickerSearchFocus}
+                  onClick={props.onChooseOther}
+                >
+                  <LucidePlus size={13} strokeWidth={1.75} className="shrink-0 home-project-picker__action-icon" aria-hidden="true" />
+                  <span>{t("home.project.new")}</span>
+                </button>
+              ) : null}
+              {props.target.kind === "project" ? (
+                <button
+                  id={`home-project-picker-option-${itemKeys.length - 1}`}
+                  type="button"
+                  role="option"
+                  tabIndex={-1}
+                  aria-selected="false"
+                  className={`home-project-picker__option home-project-picker__option--action${hasKeyboardNavigated && activeIndex === itemKeys.length - 1 ? " home-project-picker__option--keyboard-active" : ""}`}
+                  onPointerDown={preserveProjectTargetPickerSearchFocus}
+                  onClick={() => props.onSelect({ kind: "standalone" })}
+                >
+                  <X size={13} className="shrink-0" aria-hidden="true" />
+                  <span>{t("home.project.standalone")}</span>
+                </button>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+type HomeTranslate = (key: MessageKey, values?: MessageValues) => string;
+
+const defaultHomeTranslate: HomeTranslate = (key, values) => formatMessage(zhCNMessages[key], values);
+
+export function agentErrorText(error: string | null, t: HomeTranslate = defaultHomeTranslate): string | null {
+  if (!error) {
+    return null;
+  }
+  if (TRANSLATABLE_AGENT_ERROR_KEYS.has(error as MessageKey)) {
+    return t(error as MessageKey);
+  }
+  const stableCode = error.includes(":") ? error.slice(error.lastIndexOf(":") + 1) : error;
+  const mapped = AGENT_OPERATION_ERROR_MESSAGE_KEYS[stableCode];
+  if (mapped) return t(mapped);
+  if (
+    /failed to fetch|network|connection refused|gateway connection|websocket|econnrefused/i.test(error)
+  ) {
+    return t("home.error.network");
+  }
+  return t("home.error.generic");
+}
+
+const AGENT_OPERATION_ERROR_MESSAGE_KEYS: Record<string, MessageKey> = {
+  network_unavailable: "home.error.network",
+  request_timeout: "home.error.timeout",
+  project_directory_unavailable: "home.error.projectUnavailable",
+  project_unavailable: "home.error.projectUnavailable",
+  workspace_unavailable: "home.error.projectUnavailable",
+  project_removed: "home.error.projectUnavailable",
+  project_deleting: "home.error.projectDeleting",
+  project_directory_not_empty: "home.error.projectNotEmpty",
+  project_limit_reached: "home.error.projectLimit",
+  project_registry_corrupt: "home.error.projectRegistry",
+  message_request_conflict: "home.error.messageConflict",
+  model_selection_unavailable: "home.modelSelector.unavailable",
+  result_unknown: "home.error.resultUnknown",
+  attachment_read_failed: "home.media.error.sendReadFailed"
+};
+
+export function agentStatusText(
+  status: string,
+  modelName: string | null,
+  t: HomeTranslate,
+  context: { startupIssue?: AgentGatewayStartupIssue; hasConnected?: boolean } = {}
+): string | null {
+  if (status === "connected") {
+    return null;
+  }
+  if (status === "error") {
+    return t(context.startupIssue === "model_config_invalid" && !context.hasConnected
+      ? "home.modelSelector.unavailable"
+      : "home.agent.failed");
+  }
+  if (status === "reconnecting") {
+    return t("home.agent.reconnecting");
+  }
+  return t("home.agent.connecting");
+}
+
+function loadAgentThread(
+  client: MemmyAgentClient,
+  dispatch: (action: AppAction) => void,
+  chatId: string,
+  sessionKey = client.chatIdToSessionKey(chatId),
+  options: {
+    tolerateMissingThread?: boolean;
+    taskState?: Pick<AgentState, "sidebarStateVersion" | "runStatusVersionByChatId">;
+    taskStateCoordinator?: ReturnType<typeof useAgentRuntimeBridge>["taskStateCoordinator"];
+  } = {}
+): void {
+  const requestId = nextAgentHistoryRequestId(chatId);
+  dispatch(agentActions.historyLoading(sessionKey, chatId, requestId));
+  void client.readWebuiThread(sessionKey)
+    .catch((error: unknown) => {
+      if (options.tolerateMissingThread && error instanceof MemmyAgentRequestError && error.status === 404) {
+        return { schemaVersion: 1, sessionKey, messages: [] };
+      }
+      throw error;
+    })
+    .then((thread) => dispatch(agentActions.historyLoaded(thread, requestId)))
+    .catch((error) => dispatch(agentActions.historyOpenFailed(chatId, requestId, createAgentOperationError({
+      source: "history",
+      message: error instanceof Error ? error.message : String(error),
+      chatId
+    }))));
+  if (options.taskStateCoordinator) {
+    options.taskStateCoordinator.refreshTaskState({ reason: "thread", state: options.taskState });
+  } else {
+    refreshAgentTaskList(client, dispatch, { reason: "thread", state: options.taskState });
+  }
+}
+
+let agentHistoryRequestCounter = 0;
+
+function nextAgentHistoryRequestId(chatId: string): string {
+  agentHistoryRequestCounter += 1;
+  return `${chatId}-${agentHistoryRequestCounter}`;
+}
+
+export function readFocusedAgentChatId(
+  search: string | undefined = typeof window === "undefined" ? undefined : window.location.search,
+  storage: SlashCommandStorageLike | null = typeof window === "undefined" ? null : window.sessionStorage,
+  locationLike: Pick<Location, "href"> | null = typeof window === "undefined" ? null : window.location,
+  historyLike: Pick<History, "replaceState" | "state"> | null = typeof window === "undefined" ? null : window.history
+): string | null {
+  const launchChatId = readLaunchAgentChatId(search);
+  if (launchChatId) {
+    clearFocusedAgentChatStorage(storage);
+    if (locationLike && historyLike) {
+      try {
+        removeLaunchAgentChatIdFromUrl(locationLike, historyLike);
+      } catch {
+        // URL cleanup is best-effort; the focused chat id was already read.
+      }
+    }
+    return launchChatId;
+  }
+
+  const storedChatId = normalizeAgentChatId(storage?.getItem(FOCUSED_AGENT_CHAT_STORAGE_KEY));
+  clearFocusedAgentChatStorage(storage);
+  return storedChatId;
+}
+
+function clearFocusedAgentChatStorage(storage: SlashCommandStorageLike | null): void {
+  if (!storage) {
+    return;
+  }
+  if (storage.removeItem) {
+    storage.removeItem(FOCUSED_AGENT_CHAT_STORAGE_KEY);
+    return;
+  }
+  storage.setItem(FOCUSED_AGENT_CHAT_STORAGE_KEY, "");
+}
+
+function browserStorage(): SlashCommandStorageLike | null {
+  return typeof window === "undefined" ? null : window.localStorage;
+}
+
+/**
+ * Produces an ASR error message for the main interface.
+ *
+ * Microphone denials use a stable message key so the toast shows OS-specific
+ * settings guidance instead of the generic "operation failed" fallback.
+ *
+ * @param error An unknown exception.
+ * @returns Error text or a MessageKey that can be shown to the user.
+ */
+function toReadableAsrError(error: unknown, t: HomeTranslate = defaultHomeTranslate): string {
+  if (error instanceof MicrophonePermissionError) {
+    return microphonePermissionDeniedMessageKey();
+  }
+  return error instanceof Error && error.message
+    ? t("home.asrFailedWithMessage", { message: error.message })
+    : t("home.asrFailed");
+}
+
+function readableError(error: unknown): string {
+  return error instanceof Error && error.message ? error.message : String(error);
+}
+
+function isPendingAttachmentReadyForUpload(item: PendingAttachment): boolean {
+  if (item.status !== "ready") {
+    return false;
+  }
+  return item.kind === "image"
+    ? Boolean(item.encodedBlob && item.encodedMime)
+    : Boolean(item.uploadBlob && item.uploadMime);
+}
+
+function uploadBlobForPendingAttachment(item: PendingAttachment): Blob {
+  return item.kind === "image" ? item.encodedBlob! : item.uploadBlob!;
+}
+
+function uploadMimeForPendingAttachment(item: PendingAttachment): UploadedAgentMedia["mime"] {
+  return item.kind === "image" ? item.encodedMime! : item.uploadMime!;
+}
+
+function uploadClassificationForPendingAttachment(item: PendingAttachment): AgentAttachmentClassification {
+  if (item.kind === "image") {
+    return {
+      kind: "image",
+      mime: item.encodedMime!,
+      extension: item.encodedMime === "image/jpeg" ? ".jpg" : `.${item.encodedMime!.slice("image/".length)}`,
+    };
+  }
+  return {
+    kind: "file",
+    mime: item.uploadMime!,
+    extension: item.extension,
+  };
+}
+
+function mediaTypeForAnalytics(items: PendingAttachment[]): "image" | "file" | "mixed" {
+  const kinds = new Set(items.map((item) => item.kind));
+  if (kinds.size > 1) {
+    return "mixed";
+  }
+  return kinds.has("file") ? "file" : "image";
+}
+
+export interface ValidatedAgentMediaFile {
+  file: File;
+  classification: AgentAttachmentClassification;
+  sourceKey: string;
+}
+
+export interface AgentMediaValidationResult {
+  files: ValidatedAgentMediaFile[];
+  duplicateCount: number;
+}
+
+type ClipboardFileItem = Pick<DataTransferItem, "kind" | "type" | "getAsFile">;
+type DragFileItem = Pick<DataTransferItem, "kind" | "getAsFile">;
+
+export interface ClipboardImageSource {
+  items?: ArrayLike<ClipboardFileItem> | Iterable<ClipboardFileItem>;
+  files?: ArrayLike<File> | Iterable<File>;
+}
+
+export interface AttachmentDropSource {
+  items?: ArrayLike<DragFileItem> | Iterable<DragFileItem>;
+  files?: ArrayLike<File> | Iterable<File>;
+  types?: ArrayLike<string> | Iterable<string>;
+}
+
+export function clipboardImageFilesFromDataTransfer(source: ClipboardImageSource | null | undefined): File[] {
+  const files: File[] = [];
+  const seen = new Set<File>();
+  const addImageFile = (file: File | null | undefined) => {
+    if (!file || !String(file.type ?? "").toLowerCase().startsWith("image/") || seen.has(file)) {
+      return;
+    }
+    seen.add(file);
+    files.push(file);
+  };
+
+  for (const item of arrayLikeToArray<ClipboardFileItem>(source?.items)) {
+    if (item.kind === "file" && String(item.type ?? "").toLowerCase().startsWith("image/")) {
+      addImageFile(item.getAsFile());
+    }
+  }
+  if (files.length > 0) {
+    return files;
+  }
+  for (const file of arrayLikeToArray<File>(source?.files)) {
+    addImageFile(file);
+  }
+
+  return files;
+}
+
+export function attachmentFilesFromDataTransfer(source: AttachmentDropSource | null | undefined): File[] {
+  const files: File[] = [];
+  const seen = new Set<File>();
+  const addFile = (file: File | null | undefined) => {
+    if (!file || seen.has(file)) {
+      return;
+    }
+    seen.add(file);
+    files.push(file);
+  };
+
+  for (const item of arrayLikeToArray<DragFileItem>(source?.items)) {
+    if (item.kind === "file") {
+      addFile(item.getAsFile());
+    }
+  }
+  for (const file of arrayLikeToArray<File>(source?.files)) {
+    addFile(file);
+  }
+
+  return files;
+}
+
+export function dataTransferHasAttachmentFiles(source: AttachmentDropSource | null | undefined): boolean {
+  if (arrayLikeToArray<DragFileItem>(source?.items).some((item) => item.kind === "file")) {
+    return true;
+  }
+  if (arrayLikeToArray<File>(source?.files).length > 0) {
+    return true;
+  }
+  return arrayLikeToArray<string>(source?.types).some((type) => type.toLowerCase() === "files");
+}
+
+export async function hashAgentAttachmentFile(file: File): Promise<string> {
+  if (!globalThis.crypto?.subtle) {
+    throw new Error("home.media.error.sendReadFailed");
+  }
+  try {
+    const buffer = await file.arrayBuffer();
+    const digest = await globalThis.crypto.subtle.digest("SHA-256", buffer);
+    return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+  } catch {
+    throw new Error("home.media.error.sendReadFailed");
+  }
+}
+
+export function agentAttachmentSourceKey(file: Pick<File, "name" | "size" | "lastModified">, classification: AgentAttachmentClassification, sha256: string): string {
+  return JSON.stringify([
+    "content-metadata-v1",
+    classification.kind,
+    classification.mime,
+    file.name || "",
+    file.size,
+    Number.isFinite(file.lastModified) ? file.lastModified : 0,
+    sha256
+  ]);
+}
+
+export async function validateAgentMediaFiles(files: File[], t?: HomeTranslate, existingAttachments: readonly PendingAttachment[] = []): Promise<AgentMediaValidationResult> {
+  const translate = t ?? defaultHomeTranslate;
+  const classifications = files.map((file) => classifyAgentAttachmentFile(file));
+
+  if (classifications.some((item) => !item)) {
+    throw new Error(translate("home.media.error.unsupported"));
+  }
+  for (const [index] of classifications.entries()) {
+    if (files[index]!.size > AGENT_FILE_TARGET_MAX_BYTES) {
+      throw new Error(translate("home.media.error.fileTooLarge"));
+    }
+  }
+
+  const seenSourceKeys = new Set(existingAttachments.map((item) => item.sourceKey));
+  const resultFiles: ValidatedAgentMediaFile[] = [];
+  let duplicateCount = 0;
+
+  for (const [index, file] of files.entries()) {
+    const classification = classifications[index]!;
+    const sha256 = await hashAgentAttachmentFile(file);
+    const sourceKey = agentAttachmentSourceKey(file, classification, sha256);
+    if (seenSourceKeys.has(sourceKey)) {
+      duplicateCount += 1;
+      continue;
+    }
+    seenSourceKeys.add(sourceKey);
+    resultFiles.push({ file, classification, sourceKey });
+    if (existingAttachments.length + resultFiles.length > AGENT_ATTACHMENT_MAX_COUNT) {
+      throw new Error(translate("home.media.error.tooManyAttachments"));
+    }
+  }
+
+  return { files: resultFiles, duplicateCount };
+}
+
+export function fileToPendingAttachment(file: File, sourceKey: string, classificationInput?: AgentAttachmentClassification): PendingAttachment {
+  const classification = classificationInput ?? classifyAgentAttachmentFile(file);
+  if (!classification) {
+    throw new Error("home.media.error.sendUnsupported");
+  }
+  if (classification.kind === "file") {
+    return {
+      id: randomPendingAttachmentId("file"),
+      sourceKey,
+      fileName: file.name || `attachment${classification.extension}`,
+      kind: "file",
+      status: "ready",
+      originalBytes: file.size,
+      uploadBlob: file,
+      uploadMime: classification.mime as UploadedAgentMedia["mime"],
+      uploadBytes: file.size,
+      extension: classification.extension,
+    };
+  }
+  return {
+    id: randomPendingAttachmentId("image"),
+    sourceKey,
+    fileName: file.name || "image",
+    kind: "image",
+    previewUrl: createPreviewUrl(file),
+    status: "encoding",
+    originalBytes: file.size
+  };
+}
+
+async function encodePendingAgentImage(file: File): Promise<{ blob: Blob; mime: AgentImageMime; bytes: number; normalized: boolean }> {
+  if (typeof Worker === "undefined") {
+    return encodeAgentImage(file);
+  }
+
+  return new Promise((resolve, reject) => {
+    const id = randomPendingImageId();
+    const worker = new Worker(new URL("../workers/agent-image-encode.worker.ts", import.meta.url), { type: "module" });
+    const cleanup = () => worker.terminate();
+    worker.onmessage = (event: MessageEvent<Record<string, unknown>>) => {
+      if (event.data.id !== id) {
+        return;
+      }
+      cleanup();
+      if (event.data.ok === true) {
+        resolve({
+          blob: event.data.blob as Blob,
+          mime: event.data.mime as AgentImageMime,
+          bytes: Number(event.data.bytes),
+          normalized: event.data.normalized === true
+        });
+        return;
+      }
+      reject(new Error(typeof event.data.error === "string" ? event.data.error : "home.media.error.sendReadFailed"));
+    };
+    worker.onerror = () => {
+      cleanup();
+      reject(new Error("home.media.error.sendReadFailed"));
+    };
+    worker.postMessage({ id, file });
+  });
+}
+
+function createPreviewUrl(file: File): string {
+  if (typeof URL !== "undefined" && typeof URL.createObjectURL === "function") {
+    return URL.createObjectURL(file);
+  }
+  return "";
+}
+
+function revokePendingAttachment(item: PendingAttachment): void {
+  if (item.kind === "image" && item.previewUrl && typeof URL !== "undefined" && typeof URL.revokeObjectURL === "function") {
+    URL.revokeObjectURL(item.previewUrl);
+  }
+}
+
+function randomPendingAttachmentId(kind: "image" | "file"): string {
+  return typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `${kind}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function randomPendingImageId(): string {
+  return typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `image-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function arrayLikeToArray<T>(value: ArrayLike<T> | Iterable<T> | null | undefined): T[] {
+  return value ? Array.from(value) : [];
+}
+
+function encodedPayloadBytes(payload: Record<string, unknown>): number {
+  return new TextEncoder().encode(JSON.stringify(payload)).length;
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return "0 B";
+  }
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function isMessageKey(value: string): value is MessageKey {
+  return Object.prototype.hasOwnProperty.call(zhCNMessages, value);
+}
+
+export function hasCompletedAssistantAnswer(messages: AgentChatMessage[]): boolean {
+  return firstCompletedAssistantAnswerMessageId(messages) !== null;
+}
+
+export function firstCompletedAssistantAnswerMessageId(messages: AgentChatMessage[]): string | null {
+  const message = firstTurnMessages(messages).find((candidate) => (
+    candidate.role === "assistant"
+    && !candidate.isStreaming
+    && candidate.kind !== "trace"
+    && candidate.kind !== "narration"
+    && candidate.kind !== "context_compaction"
+    && candidate.content.trim().length > 0
+  ));
+  return message?.id || null;
+}
+
+/** Last event of the first task, so supplemental UI follows all of its activity. */
+export function firstTurnTerminalMessageId(messages: AgentChatMessage[]): string | null {
+  const firstTurn = firstTurnMessages(messages);
+  return firstCompletedAssistantAnswerMessageId(messages) ? firstTurn.at(-1)?.id ?? null : null;
+}
+
+function firstTurnWasStoppedByUser(messages: AgentChatMessage[]): boolean {
+  return firstTurnMessages(messages).some((message) => message.stoppedByUser === true);
+}
+
+function firstTurnMessages(messages: AgentChatMessage[]): AgentChatMessage[] {
+  const firstUserIndex = messages.findIndex((message) => message.role === "user");
+  if (firstUserIndex < 0) {
+    return [];
+  }
+  const nextUserIndex = messages.findIndex((message, index) => index > firstUserIndex && message.role === "user");
+  return messages.slice(firstUserIndex, nextUserIndex < 0 ? undefined : nextUserIndex);
+}

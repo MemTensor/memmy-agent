@@ -1,0 +1,5 @@
+{
+  "title": "工具",
+  "icon": "Wrench",
+  "pages": ["integrations", "mcp"]
+}

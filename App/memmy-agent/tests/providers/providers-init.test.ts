@@ -1,0 +1,95 @@
+import { describe, expect, it } from "vitest";
+import { Config, ValueError } from "../../src/config/schema.js";
+import { AnthropicProvider } from "../../src/providers/anthropic-provider.js";
+import { AzureOpenAIProvider } from "../../src/providers/azure-openai-provider.js";
+import { GitHubCopilotProvider } from "../../src/providers/github-copilot-provider.js";
+import { buildProviderSnapshot, makeProvider } from "../../src/providers/factory.js";
+import { OpenAICompatProvider } from "../../src/providers/openai-compat-provider.js";
+import { findByName } from "../../src/providers/registry.js";
+import { DEFAULT_MAX_TOKENS } from "../../src/token-budget.js";
+
+describe("provider initialization", () => {
+  it("normalizes hyphen and camel-case provider names", () => {
+    expect(findByName("github-copilot")?.name).toBe("github_copilot");
+    expect(findByName("volcengineCodingPlan")?.name).toBe("volcengine_coding_plan");
+    expect(findByName("atomic-chat")?.name).toBe("atomic_chat");
+    expect(findByName("antLing")?.defaultApiBase).toBe("https://api.ant-ling.com/v1");
+    expect(findByName("memmy-account")?.name).toBe("memmy_account");
+  });
+
+  it("creates backend-specific provider classes", () => {
+    expect(makeProvider("github-copilot", "github-copilot/gpt-4.1")).toBeInstanceOf(GitHubCopilotProvider);
+    expect(makeProvider("anthropic", "anthropic/claude-opus-4-5")).toBeInstanceOf(AnthropicProvider);
+    expect(
+      makeProvider(
+        new Config({
+          agents: { defaults: { provider: "azure", model: "deployment" } },
+          providers: { azure_openai: {
+            apiKey: "key",
+            endpoints: { chat: {
+              apiBase: "https://res.openai.azure.com",
+              protocol: "openai-chat-completions",
+            } },
+          } },
+        }),
+      ),
+    ).toBeInstanceOf(AzureOpenAIProvider);
+    expect(makeProvider("openai", "openai/gpt-4o-mini")).toBeInstanceOf(OpenAICompatProvider);
+  });
+
+  it("validates required provider credentials", () => {
+    expect(() => makeProvider(new Config({ agents: { defaults: { provider: "openai", model: "gpt-4.1" } } }))).toThrow(
+      ValueError,
+    );
+    expect(() =>
+      makeProvider(new Config({ agents: { defaults: { provider: "azure", model: "deployment" } } })),
+    ).toThrow("Azure OpenAI requires apiKey and apiBase");
+  });
+
+  it("uses the configured preset maxTokens for provider generation", () => {
+    const defaultProvider = makeProvider(new Config({
+      agents: { defaults: { provider: "openai", model: "openai/gpt-4.1" } },
+      providers: { openai: { apiKey: "sk-test" } },
+    }));
+    const explicitProvider = makeProvider(new Config({
+      agents: { defaults: { provider: "openai", model: "openai/gpt-4.1", maxTokens: 1234 } },
+      providers: { openai: { apiKey: "sk-test" } },
+    }));
+
+    expect(defaultProvider.generation.maxTokens).toBe(DEFAULT_MAX_TOKENS);
+    expect(explicitProvider.generation.maxTokens).toBe(1234);
+  });
+
+  it("propagates mapped BYOK token defaults into provider snapshots and signatures", () => {
+    const config = new Config({
+      agents: { defaults: { modelPreset: "known" } },
+      providers: {
+        openai: {
+          apiKey: "sk-test",
+          endpoints: {
+            chat: {
+              apiBase: "https://api.openai.com/v1",
+              protocol: "openai-responses",
+            },
+          },
+        },
+      },
+      modelPresets: {
+        known: {
+          endpoint: "chat",
+          model: "gpt-5.6",
+          provider: "openai",
+          source: "byok",
+          capabilities: ["agent"],
+        },
+      },
+    });
+
+    const snapshot = buildProviderSnapshot(config, { presetName: "known" });
+
+    expect(snapshot.provider.generation.maxTokens).toBe(128_000);
+    expect(snapshot.contextWindowTokens).toBe(1_050_000);
+    expect(snapshot.signature[10]).toBe(128_000);
+    expect(snapshot.signature[13]).toBe(1_050_000);
+  });
+});

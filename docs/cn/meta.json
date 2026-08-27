@@ -1,0 +1,28 @@
+{
+  "root": true,
+  "pages": [
+    "index",
+    "---[Play]开始使用---",
+    "...start",
+    "---[Monitor]桌面端---",
+    "...desktop",
+    "---[Brain]记忆---",
+    "...memory",
+    "---[MessageSquare]渠道---",
+    "...channels",
+    "---[Wrench]工具---",
+    "...tools",
+    "---[Cpu]模型---",
+    "...models",
+    "---[Boxes]概念---",
+    "...concepts",
+    "---[Library]参考---",
+    "...reference",
+    "---[Code]开发---",
+    "...development",
+    "---[Shield]安全---",
+    "...security",
+    "---[CircleQuestionMark]帮助---",
+    "...help"
+  ]
+}

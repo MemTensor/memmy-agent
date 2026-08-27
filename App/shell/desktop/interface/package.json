@@ -1,0 +1,21 @@
+{
+  "name": "@memmy/desktop-interface",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "npm run build -w @memmy/local-api-contracts && node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json",
+    "typecheck": "npm run build -w @memmy/local-api-contracts && tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@memmy/local-api-contracts": "0.0.0"
+  }
+}

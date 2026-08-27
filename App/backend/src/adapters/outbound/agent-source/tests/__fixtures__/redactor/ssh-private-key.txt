@@ -1,0 +1,17 @@
+# token=[REDACTED:ssh_private_key]
+--- positive
+-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQ==
+-----END OPENSSH PRIVATE KEY-----
+===
+-----BEGIN RSA PRIVATE KEY-----
+MIIEpAIBAAKCAQEA1234567890abcdefghijklmnopqrstuvwxyz
+-----END RSA PRIVATE KEY-----
+--- negative
+-----BEGIN PUBLIC KEY-----
+public-key-placeholder
+-----END PUBLIC KEY-----
+===
+-----BEGIN COMMENT-----
+not a key
+-----END COMMENT-----

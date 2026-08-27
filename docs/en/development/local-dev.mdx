@@ -1,0 +1,56 @@
+---
+title: Local Development & Packaging
+icon: Package
+---
+
+## One-Command Start
+
+Get running in three steps:
+
+```bash
+git clone https://github.com/MemTensor/memmy-agent.git && cd memmy-agent
+cp .env.example .env         # Cloud address is pre-filled — works out of the box
+bash scripts/dev-start.sh    # Install deps → build → start the full stack
+```
+
+`scripts/dev-start.sh` does everything in one command: it installs dependencies, builds Memory and memmy-agent, installs the `memmy` / `memmy-memory` CLIs into `~/.local/bin`, and starts the full stack (Memory, Agent API, Gateway, frontend, and desktop backend). Once the desktop app opens, finish account sign-in or BYOK setup — the script waits for the model config and then starts the agent services automatically.
+
+> `MEMMY_CLOUD_SERVICE` in `.env` defaults to `https://memmy-api.memtensor.cn`, so copying it connects you to the official cloud — no self-hosted backend or API key required. On Windows, run it in Git Bash; the script adds `~/.local/bin` to your PATH.
+
+## Requirements
+
+Node.js `>=22` + npm. Root workspaces include `Memory`, `App/backend/local-api-contracts`, `App/backend`, `App/frontend/*`, `App/shell/desktop/interface`, and `App/shell/*`.
+
+## Common Commands
+
+```bash
+npm install            # Install dependencies at the repo root
+npm run dev:desktop    # Start the desktop frontend Vite server and Electron shell together
+npm run build          # Build Memory and all workspaces
+npm run lint
+npm run typecheck
+npm run test
+npm run db:migrate     # Run backend database migrations
+npm run package:mac    # Package the macOS DMG
+npm run package:win:x64
+```
+
+## Developing Memory Standalone
+
+```bash
+npm run memory:serve:dev -- \
+  --host 127.0.0.1 \
+  --port 18960 \
+  --db ~/.memmy/memory-service/memory.sqlite \
+  --config ~/.memmy/config.yaml
+```
+
+## memmy-agent from Source
+
+```bash
+cd App/memmy-agent
+npm install && npm run build
+node dist/main.js onboard
+node dist/main.js agent --message "Hi, introduce the current workspace"
+node dist/main.js serve
+```

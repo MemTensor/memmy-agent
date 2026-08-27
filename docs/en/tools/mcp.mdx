@@ -1,0 +1,41 @@
+---
+title: Custom MCP Servers
+icon: Server
+---
+
+Memmy supports three kinds of MCP servers: `stdio`, `sse`, and `streamableHttp`:
+
+```yaml
+tools:
+  mcpServers:
+    example:
+      type: stdio
+      command: npx
+      args:
+        - "-y"
+        - "your-mcp-server"
+      toolTimeout: 30
+      enabledTools:
+        - "*"
+```
+
+## Built-in Tool Toggles
+
+```yaml
+tools:
+  web:
+    enabled: true
+    search:
+      provider: duckduckgo
+      maxResults: 5
+    fetch:
+      timeoutS: 30
+      maxChars: 60000
+  exec:
+    enabled: true
+    timeout: 60
+  imageGeneration:
+    enabled: false
+```
+
+Built-in tools cover the filesystem, shell, web search and fetching, MCP, scheduled tasks, message sending, image generation, long-running tasks, introspection, runtime status, and context management.

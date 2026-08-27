@@ -1,0 +1,566 @@
+import { describe, expect, it, vi } from "vitest";
+import { DEFAULT_MEMOS_MEMORY_TIMEOUT_MS, MemmyMemoryClient, MemmyMemoryHttpError } from "../../src/memmy-memory/client.js";
+import { MEMOS_MEMORY_TOOL_SPECS, registerMemmyMemoryTools } from "../../src/memmy-memory/tools.js";
+import type { MemmyMemoryToolRuntime } from "../../src/memmy-memory/types.js";
+import { RequestContext } from "../../src/core/agent-runtime/tools/context.js";
+import { ToolRegistry } from "../../src/core/agent-runtime/tools/registry.js";
+
+function response(body: any, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+function deferred(): [Promise<void>, () => void] {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return [promise, resolve];
+}
+
+function setRegistryContext(registry: ToolRegistry, ctx: RequestContext): void {
+  for (const name of registry.toolNames) {
+    const tool: any = registry.get(name);
+    if (typeof tool?.setContext === "function") tool.setContext(ctx);
+  }
+}
+
+function validHealth(
+  features?: Record<string, unknown>,
+  schemaVersion = "v6",
+): Record<string, unknown> {
+  return {
+    ok: true,
+    version: "1.0.9",
+    uptimeMs: 10,
+    mode: "local",
+    storage: { backend: "sqlite", schemaVersion, ready: true },
+    capabilities: { routes: [], tools: [], memoryLayers: ["L1", "L2", "L3", "Skill"], supportsCli: true },
+    ...(features === undefined ? {} : { features }),
+    models: {
+      summary: { configured: true, provider: "host", model: "test", remote: false, routing: "fixed" },
+      evolution: { configured: true, provider: "host", model: "test", remote: false, routing: "fixed" },
+      embedding: { configured: true, provider: "local", model: "test", remote: false, mode: "local" },
+    },
+    serverTime: "2026-08-19T00:00:00.000Z",
+  };
+}
+
+describe("MemmyMemoryClient", () => {
+  it("uses a 20s default request timeout", () => {
+    const client = new MemmyMemoryClient({ baseUrl: "http://memory.test" });
+
+    expect(client.timeoutMs).toBe(DEFAULT_MEMOS_MEMORY_TIMEOUT_MS);
+  });
+
+  it("sends bearer token and JSON request bodies", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const client = new MemmyMemoryClient(
+      { baseUrl: "http://memory.test/", token: "secret", timeoutMs: 1000, timeZone: "Asia/Shanghai" },
+      vi.fn(async (url, init) => {
+        calls.push({ url: String(url), init: init ?? {} });
+        return response({ ok: true, sessionId: "s1" });
+      }) as any,
+    );
+
+    await client.openSession({ requestId: "req-1", sessionId: "s1" });
+
+    expect(calls[0].url).toBe("http://memory.test/api/v1/sessions/open");
+    expect((calls[0].init.headers as any).authorization).toBe("Bearer secret");
+    expect((calls[0].init.headers as any)["x-request-id"]).toBe("req-1");
+    expect((calls[0].init.headers as any)["x-memmy-time-zone"]).toBe("+08:00");
+    expect(JSON.parse(String(calls[0].init.body))).toEqual({ requestId: "req-1", sessionId: "s1" });
+  });
+
+  it("throws structured HTTP errors", async () => {
+    const client = new MemmyMemoryClient({ baseUrl: "http://memory.test", timeoutMs: 1000 }, vi.fn(async () => response({ error: { message: "bad token" } }, 401)) as any);
+
+    await expect(client.health()).rejects.toMatchObject({
+      name: "MemmyMemoryHttpError",
+      status: 401,
+      message: "bad token",
+    } satisfies Partial<MemmyMemoryHttpError>);
+  });
+
+  it("strictly reads L3 capability versions without inferring them from storage", async () => {
+    const values = [
+      validHealth({ l3WorldModelProtocolVersions: [2] }),
+      validHealth(undefined, "v999"),
+      validHealth({ l3WorldModelProtocolVersions: ["2"] }),
+    ];
+    const client = new MemmyMemoryClient(
+      { baseUrl: "http://memory.test", timeoutMs: 1000 },
+      vi.fn(async () => response(values.shift())) as any,
+    );
+
+    await expect(client.health()).resolves.toMatchObject({
+      features: {
+        l3WorldModelProtocolVersions: [2],
+      },
+    });
+    await expect(client.health()).resolves.toMatchObject({
+      storage: { schemaVersion: "v999" },
+    });
+    await expect(client.health()).rejects.toThrow();
+  });
+
+  it("uses the shared v2 transport for context, Trace Head, and boundary", async () => {
+    const calls: Array<{ method: string; url: URL; headers: Record<string, string>; body: unknown }> = [];
+    const client = new MemmyMemoryClient(
+      { baseUrl: "http://memory.test", timeoutMs: 1000 },
+      vi.fn(async (url, init) => {
+        const target = new URL(String(url));
+        const headers = init?.headers as Record<string, string>;
+        calls.push({
+          method: String(init?.method),
+          url: target,
+          headers,
+          body: init?.body === undefined ? undefined : JSON.parse(String(init.body)),
+        });
+        if (target.pathname.endsWith("l3-world-model-trace-head")) {
+          return response({ throughL1MemoryId: "l1-1", traceSeq: 7 });
+        }
+        if (target.pathname.endsWith("/context")) {
+          return response({
+            schemaVersion: 2,
+            projectId: "project-1",
+            memoryId: "memory-1",
+            memoryVersion: 3,
+            renderedContext: "项目契约：保持边界。",
+            sourceMemoryIds: ["l1-1"],
+            generalRulesAndSafetyConstraints: null,
+            projectEnvironmentProfile: "语言：TypeScript",
+            projectContract: "保持边界。",
+            domainKnowledge: null,
+            serverTime: "2026-08-19T00:00:00.000Z",
+          });
+        }
+        if (target.pathname.endsWith("l3-world-model-boundary")) {
+          return response({
+            scheduled: true,
+            throughL1MemoryId: "l1-1",
+            throughTraceSeq: 7,
+            batchIds: ["batch-1"],
+            targetCount: 2,
+            serverTime: "2026-08-19T00:00:00.000Z",
+          });
+        }
+        return response({}, 404);
+      }) as any,
+    );
+    const envelope = {
+      requestId: "5f9bd35e-6b75-42ab-9e25-9a9ce4dc4980",
+      adapterId: "memmy-agent",
+      source: "memmy-agent",
+      namespace: {
+        source: "memmy-agent",
+        profileId: "default",
+        userId: "user-1",
+        projectId: "project-1",
+        sessionKey: "websocket:one",
+      },
+    } as const;
+
+    await client.l3WorldModelTraceHead("session-1", envelope);
+    await client.l3WorldModelContext("session-1", envelope);
+    await client.l3WorldModelBoundary("session-1", {
+      ...envelope,
+      trigger: "token_compaction",
+      throughL1MemoryId: "l1-1",
+    });
+    for (const call of [calls[0]!, calls[1]!]) {
+      expect(call.method).toBe("GET");
+      expect(call.body).toBeUndefined();
+      expect(Object.fromEntries(call.url.searchParams)).toEqual(expect.objectContaining({
+        adapterId: "memmy-agent",
+        source: "memmy-agent",
+      }));
+      expect(call.headers).toMatchObject({
+        "x-request-id": envelope.requestId,
+        "x-memmy-user-id": "user-1",
+        "x-memmy-project-id": "project-1",
+        "x-memmy-profile-id": "default",
+        "x-memmy-session-key": "websocket:one",
+      });
+    }
+    expect(calls[2]).toMatchObject({
+      method: "POST",
+      body: { trigger: "token_compaction", throughL1MemoryId: "l1-1" },
+    });
+  });
+});
+
+describe("memmy memory tools", () => {
+  it("declares explicit array item types for Moonshot-compatible tool schemas", () => {
+    const search = MEMOS_MEMORY_TOOL_SPECS.find((spec) => spec.name === "memmy_memory_search");
+    const parameters = search?.parameters as any;
+
+    expect(parameters?.properties?.layers).toEqual({
+      type: "array",
+      items: { type: "string", enum: ["L1", "L2", "L3", "Skill"] },
+    });
+  });
+
+  it("registers only search/get tools and sends runtime defaults", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const client = new MemmyMemoryClient(
+      { baseUrl: "http://memory.test", timeoutMs: 1000 },
+      vi.fn(async (url, init) => {
+        calls.push({ url: String(url), init: init ?? {} });
+        return response({ ok: true, path: new URL(String(url)).pathname });
+      }) as any,
+    );
+    const runtime: MemmyMemoryToolRuntime = {
+      requestEnvelope: (sessionKey) => ({
+        requestId: "tool-req",
+        adapterId: "memmy-agent",
+        source: "memmy-agent",
+        namespace: {
+          source: "memmy-agent",
+          profileId: "default",
+          sessionKey: sessionKey ?? undefined,
+        },
+      }),
+      currentSessionId: () => "memmy-agent::cli:direct",
+      currentEpisodeId: () => "ep-1",
+      currentTurnId: () => "turn-1",
+      currentUserText: () => "Summarize the current README",
+    };
+    const registry = new ToolRegistry();
+    registerMemmyMemoryTools(registry, client, runtime);
+    setRegistryContext(registry, new RequestContext({ sessionKey: "cli:direct" }));
+
+    const searchResult = await registry.get("memmy_memory_search")!.execute({
+      query: "previous task",
+      layers: ["L1"]
+    });
+    const getResult = await registry.get("memmy_memory_get")!.execute({ id: "trace_123" });
+
+    expect(registry.has("memmy_memory_search")).toBe(true);
+    expect(registry.has("memmy_memory_get")).toBe(true);
+    expect(searchResult).toContain('<memmy_memory_context source="tool_search">');
+    expect(searchResult).toContain("No relevant Memmy memories found.");
+    expect(searchResult).toContain("<current_user_request>\nSummarize the current README\n</current_user_request>");
+    expect(getResult).toContain('<memmy_memory_context source="tool_get">');
+    expect(getResult).toContain("/api/v1/memory/trace_123");
+    expect(getResult).toContain("<current_user_request>\nSummarize the current README\n</current_user_request>");
+    const body = JSON.parse(String(calls[0].init.body));
+    expect(body).toMatchObject({
+      query: "previous task",
+      source: "memmy-agent",
+      sessionId: "memmy-agent::cli:direct",
+      episodeId: "ep-1",
+      turnId: "turn-1",
+      layers: ["L1"]
+    });
+    expect(body).not.toHaveProperty("requestId");
+    expect(body).not.toHaveProperty("adapterId");
+    expect(calls[1].url).toBe("http://memory.test/api/v1/memory/trace_123");
+  });
+
+  it("formats memory get tool output as compact agent context", async () => {
+    const client = new MemmyMemoryClient(
+      { baseUrl: "http://memory.test", timeoutMs: 1000 },
+      vi.fn(async () => response({
+        id: "trace_123",
+        kind: "trace",
+        memoryLayer: "L1",
+        title: "Checked memory",
+        body: [
+          "Summary: Checked memory",
+          "RawTurn: raw_1",
+          "TraceStep: 0",
+          "User:",
+          "check memory",
+          "Tool calls:",
+          "- exec",
+          "Agent:",
+          "16 GB",
+          "Alpha: 0",
+          "Value: 0",
+          "Priority: 0.5"
+        ].join("\n"),
+        refs: {
+          rawTurn: {
+            userText: "check memory",
+            assistantText: "16 GB",
+            toolCalls: [
+              {
+                id: "call_exec",
+                name: "exec",
+                input: { command: "sysctl hw.memsize" },
+              }
+            ],
+            toolResults: [
+              {
+                toolCallId: "call_exec",
+                name: "exec",
+                output: "hw.memsize: 17179869184\n\nExit code: 0",
+              }
+            ],
+          },
+        },
+        metadata: {
+          properties: {
+            embedding: [1, 0, 0],
+          },
+        },
+      })) as any,
+    );
+    const runtime: MemmyMemoryToolRuntime = {
+      requestEnvelope: () => ({}),
+      currentSessionId: () => "session-1",
+      currentEpisodeId: () => "episode-1",
+      currentTurnId: () => "turn-1",
+      currentUserText: () => "current task",
+    };
+    const registry = new ToolRegistry();
+    registerMemmyMemoryTools(registry, client, runtime);
+
+    const getResult = await registry.get("memmy_memory_get")!.execute({ id: "trace_123" });
+
+    expect(getResult).toContain('<memmy_memory_context source="tool_get">');
+    expect(getResult).toContain("User:\ncheck memory");
+    expect(getResult).toContain("Assistant:\n16 GB");
+    expect(getResult).not.toContain("Summary:");
+    expect(getResult).not.toContain("title: Checked memory");
+    expect(getResult).not.toContain("Tool calls:");
+    expect(getResult).not.toContain('input: {"command":"sysctl hw.memsize"}');
+    expect(getResult).not.toContain("hw.memsize: 17179869184");
+    expect(getResult).not.toContain("RawTurn:");
+    expect(getResult).not.toContain("TraceStep:");
+    expect(getResult).not.toContain("Alpha:");
+    expect(getResult).not.toContain("Value:");
+    expect(getResult).not.toContain("Priority:");
+    expect(getResult).not.toContain("embedding");
+  });
+
+  it("maps empty search runtime session id to the active memory runtime session", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const client = new MemmyMemoryClient(
+      { baseUrl: "http://memory.test", timeoutMs: 1000 },
+      vi.fn(async (url, init) => {
+        calls.push({ url: String(url), init: init ?? {} });
+        return response({ ok: true });
+      }) as any,
+    );
+    const runtime: MemmyMemoryToolRuntime = {
+      requestEnvelope: () => ({}),
+      currentSessionId: () => "memmy-agent::cli:direct",
+      currentEpisodeId: () => "ep-1",
+      currentTurnId: () => "turn-1",
+      currentUserText: () => "current task",
+    };
+    const registry = new ToolRegistry();
+    registerMemmyMemoryTools(registry, client, runtime);
+    setRegistryContext(registry, new RequestContext({ sessionKey: "cli:direct" }));
+
+    await registry.get("memmy_memory_search")!.execute({
+      query: "current task",
+      sessionId: ""
+    });
+
+    const searchBody = JSON.parse(String(calls[0].init.body));
+    expect(searchBody).toMatchObject({
+      sessionId: "memmy-agent::cli:direct"
+    });
+  });
+
+  it("keeps memory search session key local to each async task", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const client = new MemmyMemoryClient(
+      { baseUrl: "http://memory.test", timeoutMs: 1000 },
+      vi.fn(async (url, init) => {
+        calls.push({ url: String(url), init: init ?? {} });
+        return response({ ok: true });
+      }) as any,
+    );
+    const runtime: MemmyMemoryToolRuntime = {
+      requestEnvelope: (sessionKey) => ({
+        namespace: {
+          source: "memmy-agent",
+          profileId: "default",
+          sessionKey: sessionKey ?? undefined,
+        },
+      }),
+      currentSessionId: (sessionKey) => sessionKey ? `memmy-agent::${sessionKey}` : null,
+      currentEpisodeId: () => null,
+      currentTurnId: () => null,
+      currentUserText: () => "current task",
+    };
+    const registry = new ToolRegistry();
+    registerMemmyMemoryTools(registry, client, runtime);
+    const search = registry.get("memmy_memory_search")!;
+    const [entered, markEntered] = deferred();
+    const [release, markRelease] = deferred();
+
+    async function taskOne(): Promise<void> {
+      (search as any).setContext(new RequestContext({ sessionKey: "cli:a" }));
+      markEntered();
+      await release;
+      await search.execute({ query: "one", sessionId: "" });
+    }
+
+    async function taskTwo(): Promise<void> {
+      await entered;
+      (search as any).setContext(new RequestContext({ sessionKey: "cli:b" }));
+      markRelease();
+      await search.execute({ query: "two", sessionId: "" });
+    }
+
+    await Promise.all([taskOne(), taskTwo()]);
+
+    const sessionIds = calls.map((call) => JSON.parse(String(call.init.body)).sessionId);
+    expect(new Set(sessionIds)).toEqual(new Set(["memmy-agent::cli:a", "memmy-agent::cli:b"]));
+  });
+
+  it("returns an error string when search throws", async () => {
+    const client = new MemmyMemoryClient(
+      { baseUrl: "http://memory.test", timeoutMs: 1000 },
+      vi.fn(async () => response({ error: { message: "search failed" } }, 500)) as any,
+    );
+    const runtime: MemmyMemoryToolRuntime = {
+      requestEnvelope: () => ({}),
+      currentSessionId: () => "session-1",
+      currentEpisodeId: () => null,
+      currentTurnId: () => "turn-1",
+      currentUserText: () => "current task",
+    };
+    const registry = new ToolRegistry();
+    registerMemmyMemoryTools(registry, client, runtime);
+    setRegistryContext(registry, new RequestContext({ sessionKey: "cli:direct" }));
+
+    const result = await registry.get("memmy_memory_search")!.execute({ query: "q" });
+    expect(result).toContain("Error:");
+  });
+
+  it("reports memory_search and memory_get analytics with mode=tool", async () => {
+    const trackMemoryAnalytics = vi.fn();
+    const client = new MemmyMemoryClient(
+      { baseUrl: "http://memory.test", timeoutMs: 1000 },
+      vi.fn(async (url) => {
+        const path = new URL(String(url)).pathname;
+        if (path.endsWith("/search")) {
+          return response({ sourceMemoryIds: ["m1", "m2"], hits: [{ id: "m1" }, { id: "m2" }] });
+        }
+        if (path.includes("/memory/")) {
+          return response({ id: "trace_123", memoryLayer: "L2", title: "t" });
+        }
+        return response({ ok: true });
+      }) as any,
+    );
+    const runtime: MemmyMemoryToolRuntime = {
+      requestEnvelope: () => ({ adapterId: "memmy-agent", source: "memmy-agent" }),
+      currentSessionId: () => "session-1",
+      currentEpisodeId: () => "ep-1",
+      currentTurnId: () => "turn-1",
+      currentUserText: () => "current task",
+      trackMemoryAnalytics,
+      memoryAnalyticsContext: () => ({
+        entrypoint: "memmy-cli",
+        adapter_id: "memmy-agent",
+        session_id_hash: "sidhash",
+        turn_id_hash: "turnhash",
+        episode_id_hash: "ephash",
+      }),
+    };
+    const registry = new ToolRegistry();
+    registerMemmyMemoryTools(registry, client, runtime);
+    setRegistryContext(registry, new RequestContext({ sessionKey: "cli:direct" }));
+
+    await registry.get("memmy_memory_search")!.execute({ query: "q", layers: ["L1", "L2"] });
+    await registry.get("memmy_memory_get")!.execute({ id: "trace_123" });
+
+    const names = trackMemoryAnalytics.mock.calls.map((call) => call[0]);
+    expect(names).toEqual([
+      "memory_search_started",
+      "memory_search_succeeded",
+      "memory_get_started",
+      "memory_get_succeeded",
+    ]);
+    expect(trackMemoryAnalytics.mock.calls[0]![1]).toMatchObject({
+      entrypoint: "memmy-cli",
+      adapter_id: "memmy-agent",
+      storage_backend: "memmy-memory",
+      mode: "tool",
+      layer: "L1,L2",
+      session_id_hash: "sidhash",
+    });
+    expect(trackMemoryAnalytics.mock.calls[1]![1]).toMatchObject({
+      success: true,
+      hit_count: 2,
+    });
+    expect(trackMemoryAnalytics.mock.calls[3]![1]).toMatchObject({
+      mode: "tool",
+      success: true,
+      hit_count: 1,
+    });
+  });
+
+  it("reports memory_desktop_* tool analytics for webui entrypoint", async () => {
+    const trackMemoryAnalytics = vi.fn();
+    const client = new MemmyMemoryClient(
+      { baseUrl: "http://memory.test", timeoutMs: 1000 },
+      vi.fn(async () => response({ sourceMemoryIds: ["m1"], hits: [{ id: "m1" }] })) as any,
+    );
+    const runtime: MemmyMemoryToolRuntime = {
+      requestEnvelope: () => ({}),
+      currentSessionId: () => "session-1",
+      currentEpisodeId: () => null,
+      currentTurnId: () => "turn-1",
+      currentUserText: () => "current task",
+      trackMemoryAnalytics,
+      memoryAnalyticsContext: () => ({
+        entrypoint: "memmy-desktop",
+        adapter_id: "memmy-agent",
+      }),
+    };
+    const registry = new ToolRegistry();
+    registerMemmyMemoryTools(registry, client, runtime);
+    setRegistryContext(registry, new RequestContext({ sessionKey: "websocket:chat-1" }));
+
+    await registry.get("memmy_memory_search")!.execute({ query: "q" });
+    expect(trackMemoryAnalytics.mock.calls.map((call) => call[0])).toEqual([
+      "memory_desktop_search_started",
+      "memory_desktop_search_succeeded",
+    ]);
+    expect(trackMemoryAnalytics.mock.calls[0]![1]).toMatchObject({
+      entrypoint: "memmy-desktop",
+      mode: "tool",
+    });
+  });
+
+  it("reports memory_search_failed when search throws", async () => {
+    const trackMemoryAnalytics = vi.fn();
+    const client = new MemmyMemoryClient(
+      { baseUrl: "http://memory.test", timeoutMs: 1000 },
+      vi.fn(async () => response({ error: { message: "search failed" } }, 500)) as any,
+    );
+    const runtime: MemmyMemoryToolRuntime = {
+      requestEnvelope: () => ({}),
+      currentSessionId: () => "session-1",
+      currentEpisodeId: () => null,
+      currentTurnId: () => "turn-1",
+      currentUserText: () => "current task",
+      trackMemoryAnalytics,
+      memoryAnalyticsContext: () => ({ adapter_id: "memmy-agent", turn_id_hash: "turnhash" }),
+    };
+    const registry = new ToolRegistry();
+    registerMemmyMemoryTools(registry, client, runtime);
+    setRegistryContext(registry, new RequestContext({ sessionKey: "cli:direct" }));
+
+    const result = await registry.get("memmy_memory_search")!.execute({ query: "q" });
+    expect(result).toContain("Error:");
+    expect(trackMemoryAnalytics.mock.calls.map((call) => call[0])).toEqual([
+      "memory_search_started",
+      "memory_search_failed",
+    ]);
+    expect(trackMemoryAnalytics.mock.calls[1]![1]).toMatchObject({
+      mode: "tool",
+      success: false,
+      error_code: "http_500",
+    });
+  });
+});

@@ -1,0 +1,2 @@
+export const DEFAULT_MAX_TOKENS = 65_536;
+export const CONTEXT_SAFETY_BUFFER_TOKENS = 4_096;

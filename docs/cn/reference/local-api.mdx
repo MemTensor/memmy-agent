@@ -1,0 +1,22 @@
+---
+title: 桌面本地 API
+icon: Server
+---
+
+桌面本地 API 基于 Fastify，绑定 `127.0.0.1` 随机端口，除 `/api/health` 外通过 `x-memmy-local-token` 认证；SSE 因 EventSource 限制用 `?token=` 传递同一 token。
+
+## 主要接口分组
+
+| 分组 | 代表接口 |
+| --- | --- |
+| 应用配置 | `PATCH /api/app/settings`、`GET/PUT /api/app/model-config`、`POST /api/app/model-config/test` |
+| 账号 | `POST /api/account/send-code`、`POST /api/account/verify-code`、`POST /api/account/logout` |
+| 集成与渠道 | `GET /api/v1/integrations/capabilities`、`POST /api/v1/channels/:provider/connect` |
+| Agent Source | `GET /api/agent-sources`、`POST /api/agent-sources/scan`、`POST /api/agent-sources/:sourceId/skill` |
+| 本地数据 | `POST /api/local-data/reveal`、`POST /api/local-data/export`、`DELETE /api/local-data` |
+| Memory 代理 | `/api/v1/memory/*`、`/api/v1/panel/*`（代理到 Memory Runtime） |
+| MCP bridge | `GET/POST/DELETE /mcp/composio`（独立 `x-memmy-mcp-token`） |
+
+## SSE 事件
+
+`/api/events` 推送：`app.connected`、`app.heartbeat`、`agent_source.scan_progress`、`agent_source.scan_completed`。

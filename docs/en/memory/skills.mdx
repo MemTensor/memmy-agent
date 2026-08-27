@@ -1,0 +1,8 @@
+---
+title: Install Memory Skills for External Agents
+icon: Plug
+---
+
+Beyond passively scanning history, Memmy lets external Agents <b>actively</b> read and write memory.
+
+The desktop app starts it automatically; or launch from source with `npm run memory:serve:dev`. The desktop "Memory Sources" page offers one-click installation to `~/.local/bin`. ```bash memmy-memory init --agent ``` Memmy writes the memory instruction file into the target Agent's rules directory, after which that Agent will actively call `memmy-memory` to retrieve and write memories.

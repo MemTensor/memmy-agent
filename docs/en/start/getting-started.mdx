@@ -1,0 +1,99 @@
+---
+title: Getting Started
+description: This page walks you through installing Memmy, completing first-run setup, and having your first conversation — from zero.
+icon: Rocket
+---
+
+## What You Need
+
+- A macOS or Windows desktop environment (desktop path).
+- Or Node.js `>=22` + npm (CLI / source path).
+- API Key mode requires at least one model provider's API Key.
+
+<Callout type="idea">
+  Not sure which mode to pick? Account mode works out of the box and comes with platform trial tokens; in API Key mode your data and quota stay fully under your control. Both modes store data local-first.
+</Callout>
+
+## Quick Setup
+
+For a terminal-only installation on Linux x64 or arm64, install Node.js 22 or newer and make sure a systemd user session is available, then run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MemTensor/memmy-agent/main/scripts/install.sh | bash
+memmy
+```
+
+The installer starts the local Memory Service as `memmy-memory.service`. If no usable model is configured, the first bare `memmy` command opens the existing wizard. After saving, it enables `memmy-gateway.service`, waits for readiness, and continues into the TUI. Both `systemd --user` services stay running when the TUI or terminal exits and start again on later logins; linger is not enabled. The installer launcher also refreshes a private `~/.memmy/systemd/gateway.env` file (mode `0600`) so configuration-referenced credentials and the terminal `PATH` remain available to the persistent Gateway.
+
+Use `systemctl --user status memmy-memory.service` and `systemctl --user status memmy-gateway.service` to inspect them. The installer does not modify external agents. Run `memmy-memory init` or `memmy-memory init --agent <agent>` explicitly to install Memory integration for an agent.
+
+Download and install the Memmy desktop app. On first launch it automatically:
+
+1. Sets `MEMMY_HOME` and `MEMMY_CONFIG`.
+2. Installs the bundled CLI and prepares Hooks, plugins, and companion Skills for authorized Agents.
+3. Prepares `~/.memmy/config.yaml`, the workspace, and the Memory SQLite database.
+4. Starts the Memory service and the Agent gateway.
+
+```bash
+cd App/memmy-agent
+npm install
+npm run build
+node dist/main.js --help
+```
+
+On the welcome page, choose:
+
+- **Account mode**: sign in with a phone number or email verification code, using platform trial tokens.
+- **API Key mode**: a three-step setup — primary model + Embedding, memory-related models, and optional ASR and image generation models — each step with a real connection test.
+
+```bash
+memmy onboard          # Initialize config and workspace
+memmy onboard --wizard # Terminal menu for configuring models, providers, and tools
+memmy status           # Check configuration and runtime status
+```
+
+Enter the main workbench and send your first message from the input box. `Enter` to send, `Shift + Enter` for a new line, and type `/` to open the slash command panel.
+
+```bash
+memmy agent --message "Hi, introduce the current workspace"
+# Or start an interactive chat directly
+memmy
+```
+
+Open "Memory → Cross-Agent access" and scan conversation history from Cursor, Claude Code, Codex, OpenCode, OpenClaw, Hermes, WorkBuddy, Pi, and qwenwork into the memory store. First-run onboarding lets you scan only or also install the matching Hook, plugin, or Skill for detected Agents.
+
+After connection, Hooks and plugins capture completed turns and inject relevant memory automatically; WorkBuddy, Pi, and qwenwork use the Skill for on-demand memory access. See [Agent Sources & Scanning](/docs/memory/sources) for details.
+
+To connect an Agent outside the built-in list, open **Advanced actions → Add another Agent**. Select `kimi code`, `zcode`, `minimax code`, or `coder`, or enter another name; Memmy discovers its history location and format, installs the Skill, and completes the first import.
+Open the "Tools" page:
+
+- Messaging channels: Telegram, Discord, iMessage, WeChat, Feishu, DingTalk.
+- Managed integrations: GitHub, Gmail, Notion, Slack, Linear, Jira, and more, via OAuth.
+
+## Advanced: Use Memmy as a Local API
+
+```bash
+memmy serve
+```
+
+Listens on `http://127.0.0.1:18990` by default, exposing `GET /health`, `GET /v1/models`, and `POST /v1/chat/completions` — reusable by any tool that speaks the OpenAI Chat Completions protocol.
+
+## Advanced: Environment Variables
+
+| Variable | Purpose |
+| --- | --- |
+| `MEMMY_HOME` | Memmy data home directory (default `~/.memmy`) |
+| `MEMMY_CONFIG` | Main config file path (default `~/.memmy/config.yaml`) |
+| `MEMMY_MEMORY_TOKEN` / `MEMORY_SERVICE_TOKEN` | Bearer token for the Memory HTTP service |
+
+`${ENV_NAME}` references in the config file are resolved automatically, so you never hard-code API Keys in config.
+
+## What's Next
+
+Sessions, attachments, voice, and slash commands · Agent scanning and Hook/plugin integrations · The three-step setup in detail · The lightweight always-on-desktop entry point
+
+## Related
+
+- [Default Ports](/docs/reference/ports)
+- [Security & Privacy](/docs/security/security)
+- [FAQ](/docs/help/faq)

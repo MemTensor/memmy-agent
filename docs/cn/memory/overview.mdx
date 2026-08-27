@@ -1,0 +1,312 @@
+---
+title: 记忆是如何工作的
+icon: Workflow
+---
+
+Memmy 的记忆由本地 Memory 服务承载。默认服务地址是 `http://127.0.0.1:18960`，数据保存在 `~/.memmy/memory-service/memory.sqlite`。Hook、插件、`memmy-memory` CLI 和桌面端最终都读写这一个服务，因此不同 Agent 可以共享同一套记忆。
+
+## 一次请求的完整链路
+
+链路可以拆成七步：
+
+1. Hook 或插件在请求进入 Agent 前打开或复用 Memmy 会话，并调用 `turn.start`。
+2. Memory 服务在新 episode 的第一轮判断请求意图，决定是否召回以及允许召回哪些层。
+3. 查询被整理为语义查询、关键词、短词模式和结构化错误片段。
+4. 各召回通道并行返回候选，再按记忆层、通道排名、质量和时间衰减融合。
+5. 候选经过相对阈值、去重、MMR 多样性选择和可选的 LLM 过滤。
+6. 命中项被渲染为“历史上下文”注入 Agent；当前用户请求始终优先。
+7. 回合结束后，`turn.complete` 写入原始回合和 L1 轨迹，后台任务再继续摘要、反思、评分、向量化和高层记忆演化。
+
+## 四个记忆层
+
+| 记忆层 | 保存什么 | 如何产生 |
+| --- | --- | --- |
+| L1 Trace | 用户请求、Agent 回复、工具调用、结果、反思、错误签名与来源 | `turn.complete`、历史扫描或显式 `memory.add` |
+| L2 Policy | 从相似且有价值的 L1 中归纳出的触发条件、步骤、边界、验证方式和避坑经验 | reward 后的 L2 induction |
+| L3 World Model | 关于项目、环境和约束的稳定场域认知，不是操作步骤 | 从 L2 policy 集群抽象 |
+| Skill | 可调用的 SOP，包括名称、触发说明、执行步骤和验证条件 | 从满足条件的 L2 Policy 结晶并验证 |
+
+## 写入、索引与演化
+
+### 自动回合采集
+
+`turn.complete` 会先保存 Raw Turn，然后按捕获到的步骤写入 L1。默认会保留：
+
+- 最多 4,000 字符的用户或 Agent 文本；
+- 每个工具输出最多 2,000 字符；
+- 最多 8 个派生标签；
+- 工具名、输入、结果、错误签名、回合状态和来源 Agent；
+- 启发式摘要，随后可由摘要模型异步改写；
+- `value`、`alpha` 和 `priority` 等质量信号。
+
+当前默认开启反思合成和写入后向量化。L1 使用摘要文本生成 `vec_summary`；L2、L3 和 Skill 使用统一的 `vec`。索引失败会进入重试队列，不会阻塞当前 Agent 回合。
+
+### 显式写入和历史导入
+
+`memory.add` 默认写入 L1，也可以显式指定其他层。普通手动写入会立即进入文本索引并异步生成向量。
+
+从 Agent 历史扫描导入的 L1 会先进入 `summary_queued` 流程，完成摘要和向量索引后才参与召回，避免半成品记忆被提前注入。
+
+### Episode、反馈与高层记忆
+
+- 连续 follow-up 默认合并到同一 episode，最大间隔为 2 小时。
+- episode 因主题切换、会话关闭或空闲 2 小时而关闭后，会先生成/评分反思。
+- 默认等待 30 秒反馈窗口，再计算任务奖励并向 episode 内的 L1 反向传播。
+- 达到条件的 L1 进入候选池并归纳为 L2；新 L2 会继续触发 L3 抽象和 Skill 结晶。
+- 用户明确反馈、工具连续失败和成功/失败分布还会修正价值、生成避坑经验或 decision repair。
+
+关键演化默认值：
+
+| 配置 | 默认值 | 作用 |
+| --- | ---: | --- |
+| `capture.synthReflection` | `true` | episode 关闭后合成和评分反思 |
+| `capture.embedAfterCapture` | `true` | 写入或演化后异步生成向量 |
+| `capture.batchThreshold` | `12` | 长 episode 进入批量反思的步数阈值 |
+| `reward.gamma` | `0.9` | 按轨迹位置衰减较早步骤的奖励权重 |
+| `reward.lambda` | `0.5` | 在均匀权重与 gamma 位置衰减权重之间进行混合 |
+| `reward.delta` | `0.1` | 从无关步骤恢复到相关步骤时的额外权重系数 |
+| `reward.decayHalfLifeDays` | `30` | L1 priority 的时间衰减半衰期 |
+| `reward.feedbackWindowSec` | `30` | episode 关闭后等待显式反馈的时间 |
+| `l2Induction.minTraceValue` | `0.005` | L1 进入 L2 候选池的最低价值；同时必须已有向量 |
+| `l2Induction.minEpisodesForInduction` | `1` | 归纳 L2 所需的不同 episode 数 |
+| `l2Induction.minSimilarity` | `0.65` | L1 与已有 L2 的最低关联相似度 |
+| `l2Induction.candidateTtlDays` | `30` | L2 候选证据保留时间 |
+| `l2Induction.minGain` | `0.02` | 激活 L2 Policy 的最低收益 |
+| `l2Induction.archiveGain` | `-0.05` | 归档 L2 Policy 的收益阈值 |
+| `l3Abstraction.clusterMinSimilarity` | `0.3` | L2 聚成同一场域认知的最低相似度 |
+| `l3Abstraction.minConfidenceForRetrieval` | `0.2` | L3 可以参与召回的最低置信度 |
+| `skill.minEtaForRetrieval` | `0.1` | Skill 结晶时使用的 eta 阈值；实际召回还受 `retrieval.minSkillEta` 约束 |
+| `skill.minSupport` | `1` | Skill 结晶所需的最低证据数 |
+| `skill.minGain` | `0.02` | Skill 结晶所需的最低收益 |
+
+## 召回在什么时候发生
+
+不同入口使用不同记忆层：
+
+| 检索模式 | 默认允许的层 | 用途 |
+| --- | --- | --- |
+| `turn_start` / `search` | Skill、L2、L1、L3 | 普通请求前自动召回或手动搜索 |
+| `tool_driven` / `sub_agent` | L2、L1、L3 | 工具决策或子 Agent 任务，不自动带入 Skill |
+| `skill_invoke` / `decision_repair` | Skill、L2、L1 | 调用指定 Skill 或失败后的决策修复 |
+| `world_model` | L3 | 只查询场域认知 |
+
+新 episode 的第一轮还会做意图门控：
+
+| 意图 | 召回层 |
+| --- | --- |
+| 任务或无法确定 | Skill、L2、L1、L3 |
+| 询问“以前是否记得” | Skill、L2、L1，不召回 L3 |
+| 闲聊或 Memmy 元命令 | 跳过召回 |
+
+`turn_start` 会排除当前 session 自己的 L1，防止刚发生的内容通过长期记忆路径回声式重复；L2、L3 和 Skill 不受这个排除规则影响。
+
+`readOnlyInjectionProfile` 只在 `domain: research` 时缩小召回层：可选 `experience`（仅 L2）、`skill`、`skill_experience` 或 `all`。非 research 域始终按 `all` 处理。
+
+## 查询如何被准备
+
+1. 如果配置了 evolution 模型，服务先从完整请求中提取一个更适合向量化的语义查询和最多 5 个关键词。提取失败时使用原始请求和规则关键词，不会中断搜索。
+2. 中文短语会补充二字模式；代码、路径和错误文本会提取结构化片段。
+3. 只有数据库中存在可用向量时才生成查询向量；查询向量超时或失败时，全文、短词和结构通道仍可继续。
+4. `enableQueryRewrite` 默认关闭。开启后，evolution 模型会生成 3 个互补查询，每个查询独立召回，再用独立的 RRF 合并结果。
+
+## 到底有几路召回
+
+从“检索方法”看有 **4 类**；从 ranker 的 channel 名称看有 **6 个**：
+
+`vec`、`vec_summary`、`vec_action`、`fts`、`pattern`、`structural`。
+
+| 方法 | Channel | 使用范围 | 默认候选量与门槛 |
+| --- | --- | --- | --- |
+| 语义向量 | L1 使用 `vec_summary` / `vec_action`；其他层使用 `vec` | 所有层 | Skill 12、L1 20、L2 20、L3 8；L1/L2/Skill 相似度至少 0.25，L3 至少 0.15 |
+| SQLite FTS5 全文 | `fts` | 所有层 | 每层最多 20；最多取 5 个全文词，词多于 2 个时按三词组合匹配 |
+| 短词/中文模式 | `pattern` | 所有层 | 每层最多 20；覆盖二字中文片段和两字符 ASCII 短词，使用字段包含匹配 |
+| 结构化片段 | `structural` | 仅 L1 | 最多 10；匹配错误签名、路径、错误码等高辨识度片段 |
+
+候选量来自以下公式：
+
+- 向量池：`对应 tierTopK × candidatePoolFactor`；
+- 默认分别是 Tier 1：`3 × 4 = 12`，Tier 2：`5 × 4 = 20`，Tier 3：`2 × 4 = 8`；
+- FTS 和 pattern：`max(对应 tierTopK, keywordTopK)`，默认都是 20；
+- 所有通道合并后，再按 Tier 截断为 12 / 20 / 8。
+
+本地 SQLite 向量检索会先从相应层和字段的最近 2,000 条向量记录中建立本次搜索窗口，再交给 sqlite-vec 取 Top K；这个 2,000 是当前固定常量，不在 `config.yaml` 中。
+
+## 候选如何过滤、融合与排序
+
+### 进入 ranker 前
+
+- 只读取 `activated` 和 `resolving` 状态；`archived`、`deleted` 和未完成导入索引的记录不会进入召回。
+- Skill 必须是 `active` 或 `candidate`，且 `eta >= minSkillEta`，默认 0.1。
+- L3 的置信度必须达到 `l3Abstraction.minConfidenceForRetrieval`，默认 0.2。
+- `tagFilter: auto` 只约束 L1 向量通道：先按查询推导出的标签检索；如果没有标签命中，会放宽为无标签的摘要向量检索。`on` 始终严格，`off` 不使用这个标签门控。
+
+### 相关度融合
+
+每个候选先取所有命中通道中的最高分，再叠加层级质量：
+
+```text
+L1 bonus    = min(weightPriority, 0.3) × max(value, 0) × 时间衰减
+Skill bonus = skillEtaBlend × eta
+L2 bonus    = 0.2 × clamp01(gain，或反馈经验的 salience / confidence)
+RRF bonus   = 0.4 × Σ 1 / (rrfConstant + channelRank + 1)
+relevance   = max(channelScore) + 层级 bonus + RRF bonus
+```
+
+### 阈值、episode 聚合与 MMR
+
+1. 每个 Tier 的预排序候选池先按相关度、命中通道数和向量分排序。
+2. 同一 episode 如果至少有 2 条高位 L1，且代表轨迹的向量相似度达到 0.45、value 不为负，会生成最多包含 6 步的 episode rollup。
+3. 低于最高相关度 20% 的候选被丢弃；默认开启多通道豁免，命中至少 2 个通道的候选可以保留。
+4. 对长标识符、错误码等高熵查询，L1/L2 还必须有 FTS、pattern 或 structural 的关键词确认；Skill 和 L3 例外。
+5. MMR 以 `0.7 × relevance - 0.3 × redundancy` 选择结果。默认 smart seed 要求每个 Tier 的首个候选至少达到全局最高相关度的 70%。
+6. 最后去重同一 episode 的单条 L1 与 rollup，并在 Skill 已覆盖同一 Policy 时抑制重复 L2。
+
+`tier1TopK=3`、`tier2TopK=5`、`tier3TopK=2` 同时决定候选池大小和默认全局返回上限 `3 + 5 + 2 = 10`，但它们不是最终结果中每个 Tier 的硬配额。请求显式传入 `limit` 时，最终 MMR 使用请求值。
+
+### LLM 最终过滤
+
+默认在机械排序后优先使用 evolution 模型做相关性过滤；未配置 evolution 模型时会尝试 summary 模型：
+
+| 配置 | 默认值 | 作用 |
+| --- | ---: | --- |
+| `llmFilterEnabled` | `true` | 是否启用最终语义过滤 |
+| `llmFilterMinCandidates` | `2` | 至少有多少条机械候选才调用 LLM |
+| `llmFilterMaxKeep` | `8` | LLM 成功时最多保留数量 |
+| `llmFilterFallbackMaxKeep` | `6` | 未配置 LLM、超时或返回异常时的保底上限 |
+| `llmFilterCandidateBodyChars` | `500` | 每条候选提供给过滤模型的正文字符数 |
+
+LLM 可以明确丢弃全部候选；如果输出格式无效或调用失败，则保留机械排序的前 6 条。
+
+## 如何注入 Agent 上下文
+
+命中项会按以下顺序渲染：
+
+1. L1 Trace 和相似 episode；
+2. L2 Policy；
+3. L3 Environment Knowledge；
+4. Skill；
+5. 从经验中提炼出的 decision guidance。
+
+普通片段最多 640 字符。Skill 默认使用 `summary` 模式，只注入名称和最多 200 字符的描述；可改为 `full`，但仍受单片段 640 字符上限约束。最终 Markdown 会明确说明这些内容只是历史记忆，需要与当前请求和当前仓库状态核对。
+
+## 在 config.yaml 中调整
+
+主配置默认是 `~/.memmy/config.yaml`；设置 `MEMMY_CONFIG` 时使用该路径。下面是当前有效的核心参数及默认值，可以只保留你要覆盖的字段：
+
+```yaml
+memmyMemory:
+  version: 1
+  domain: ""
+  algorithm:
+    enableMemoryAdd: true
+    enableMemorySearch: true
+    enableQueryRewrite: false
+
+    capture:
+      maxTextChars: 4000
+      maxToolOutputChars: 2000
+      synthReflection: true
+      embedAfterCapture: true
+      batchThreshold: 12
+
+    reward:
+      gamma: 0.9
+      lambda: 0.5
+      delta: 0.1
+      decayHalfLifeDays: 30
+      feedbackWindowSec: 30
+
+    l2Induction:
+      minEpisodesForInduction: 1
+      minSimilarity: 0.65
+      candidateTtlDays: 30
+      minTraceValue: 0.005
+      minGain: 0.02
+      archiveGain: -0.05
+
+    l3Abstraction:
+      minPolicies: 1
+      minPolicyGain: 0.02
+      minPolicySupport: 1
+      clusterMinSimilarity: 0.3
+      minConfidenceForRetrieval: 0.2
+
+    skill:
+      minEtaForRetrieval: 0.1
+      minSupport: 1
+      minGain: 0.02
+      candidateTrials: 1
+
+    session:
+      followUpMode: merge_follow_ups
+      mergeMaxGapMs: 7200000
+
+    retrieval:
+      tier1TopK: 3
+      tier2TopK: 5
+      tier3TopK: 2
+      candidatePoolFactor: 4
+      weightPriority: 0.4
+      mmrLambda: 0.7
+      rrfConstant: 60
+      relativeThresholdFloor: 0.2
+      minSkillEta: 0.1
+      minTraceSim: 0.25
+      episodeGoalMinSim: 0.45
+      tagFilter: auto
+      keywordTopK: 20
+      skillEtaBlend: 0.15
+      smartSeed: true
+      smartSeedRatio: 0.7
+      multiChannelBypass: true
+      skillInjectionMode: summary
+      skillSummaryChars: 200
+      llmFilterEnabled: true
+      llmFilterMaxKeep: 8
+      llmFilterFallbackMaxKeep: 6
+      llmFilterMinCandidates: 2
+      llmFilterCandidateBodyChars: 500
+      readOnlyInjectionProfile: all
+```
+
+保存后执行：
+
+```bash
+memmy-memory reload-config
+```
+
+召回、演化和模型配置可以热加载。修改 `storage` 后，reload 响应会返回 `requiresRestart: true`，此时需要重启 Memory 服务。算法参数集中在服务端，通常不需要重新安装 Agent Hook 或插件。
+
+### 常见调优方向
+
+- **提高召回率**：增大 `candidatePoolFactor` 或 `keywordTopK`，降低 `relativeThresholdFloor` 或 `minTraceSim`。
+- **减少噪声**：提高 `minTraceSim`、`relativeThresholdFloor`、`minSkillEta`，或减小 `llmFilterMaxKeep`。
+- **增加结果多样性**：降低 `mmrLambda`；提高它会更偏向最高相关度。
+- **处理多事实或间接问题**：开启 `enableQueryRewrite`，代价是额外的 evolution 模型调用和延迟。
+- **完全关闭记忆读或写**：分别设置 `enableMemorySearch: false` 或 `enableMemoryAdd: false`；二者互不强制绑定。
+
+## 如何检查某次召回
+
+```bash
+memmy-memory search "你的查询" --verbose
+```
+
+调试时重点看：
+
+- `candidateMemoryIds`：各底层通道汇总出的原始候选；
+- `hits`：融合、阈值和 MMR 后的候选；
+- `sourceMemoryIds`：实际渲染进上下文的记忆；
+- `status`：LLM 过滤是成功、关闭、跳过还是回退；
+- 记忆管理的日志页：查看 `memory.search` 的 candidates、filtered、droppedByLlm 和统计信息。
+
+## 记忆管理页
+
+`/memory` 的侧栏按用途分为三组：
+
+| 分组 | 子页 | 说明 |
+| --- | --- | --- |
+| 工作 | 概览 / 记忆 / 任务 / 经验 / 场域认知 / 技能 | 查看总体统计和记忆详情，按任务、经验、场域认知与技能组织沉淀结果 |
+| 洞察 | 分析 / 日志 | 查看写入与演化分析图表，以及 Memory API 的搜索和写入日志 |
+| 系统 | 跨Agent接入 | 管理 Agent 来源、历史扫描以及 Hook/插件接入状态 |
+
+日志页对 `memory.search` 和 `memory.add` 提供专门详情（搜索候选、写入字段、结果状态），可用来解释某条记忆为何被命中或写入。

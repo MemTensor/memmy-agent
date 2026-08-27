@@ -1,0 +1,54 @@
+{
+  "name": "@memmy/memory",
+  "version": "1.1.1",
+  "private": true,
+  "type": "module",
+  "main": "./dist/src/index.js",
+  "bin": {
+    "memmy-memory": "./dist/src/cli/index.js"
+  },
+  "scripts": {
+    "version:sync": "npm --prefix .. run version:sync",
+    "prebuild": "npm run version:sync",
+    "pretypecheck": "npm run version:sync",
+    "pretest": "npm run version:sync",
+    "prepackage:npm": "npm run version:sync",
+    "prebinary": "npm run version:sync",
+    "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json && npm run copy-cli-assets",
+    "postbuild": "node src/cli/scripts/set-executable.mjs dist/src/cli/index.js",
+    "copy-cli-assets": "node src/cli/scripts/copy-assets.mjs",
+    "dev": "tsx src/server/index.ts",
+    "serve": "node dist/src/server/index.js",
+    "serve:local": "node dist/src/server/index.js",
+    "serve:dev": "tsx src/server/index.ts",
+    "worker:run": "node dist/src/cli/index.js raw POST /worker/run",
+    "test": "vitest run --dir tests",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "package:npm": "node src/cli/npm/build-package.mjs",
+    "pack:npm": "npm run package:npm && npm pack ../dist/memmy-memory-npm",
+    "binary": "bash src/cli/scripts/build-binary.sh"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@memmy/local-api-contracts": "0.0.0",
+    "@memmy/migrations": "0.0.0",
+    "@huggingface/transformers": "^3.8.0",
+    "better-sqlite3": "^12.6.3",
+    "dotenv": "^16.6.1",
+    "fast-xml-parser": "^5.8.0",
+    "ignore": "^7.0.5",
+    "jsonc-parser": "^3.3.1",
+    "sqlite-vec": "0.1.9",
+    "smol-toml": "1.7.0",
+    "typescript": "^6.0.3",
+    "yaml": "^2.9.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^25.9.1",
+    "tsx": "^4.22.3",
+    "vitest": "^4.1.7"
+  }
+}

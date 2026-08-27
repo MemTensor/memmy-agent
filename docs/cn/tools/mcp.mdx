@@ -1,0 +1,41 @@
+---
+title: 自定义 MCP Server
+icon: Server
+---
+
+Memmy 支持 `stdio`、`sse`、`streamableHttp` 三种 MCP server：
+
+```yaml
+tools:
+  mcpServers:
+    example:
+      type: stdio
+      command: npx
+      args:
+        - "-y"
+        - "your-mcp-server"
+      toolTimeout: 30
+      enabledTools:
+        - "*"
+```
+
+## 内置工具开关
+
+```yaml
+tools:
+  web:
+    enabled: true
+    search:
+      provider: duckduckgo
+      maxResults: 5
+    fetch:
+      timeoutS: 30
+      maxChars: 60000
+  exec:
+    enabled: true
+    timeout: 60
+  imageGeneration:
+    enabled: false
+```
+
+内置工具覆盖文件系统、shell、Web 搜索与抓取、MCP、定时任务、消息发送、图像生成、长任务、自省、运行时状态和上下文管理。

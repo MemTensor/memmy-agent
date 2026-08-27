@@ -1,0 +1,9 @@
+# token=[REDACTED:google_api_key]
+--- positive
+GOOGLE_API_KEY=AIzaSyA1234567890abcdefghijklmnopqrstuv
+===
+gemini: AIzaSyB1234567890abcdefghijklmnopqrstuv
+--- negative
+AIza-short
+===
+AIzaSyA1234567890abcdefghijk
