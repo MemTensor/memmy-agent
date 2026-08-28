@@ -7,7 +7,8 @@ import {
   type UpdatePluginConfigInput
 } from "@memmy/local-api-contracts";
 import { Ajv } from "ajv";
-import type { PluginRegistry, PluginRelease } from "../adapters/outbound/plugin-registry/index.js";
+import type { PluginRegistry } from "../adapters/outbound/plugin-registry/index.js";
+import type { PluginArtifactManager } from "../adapters/outbound/plugin-artifact/index.js";
 import type { PluginRecord, PluginRepository } from "../infrastructure/app-state-store/repositories/plugin-repo.js";
 import type { SecretStore } from "../infrastructure/app-state-store/index.js";
 
@@ -17,10 +18,7 @@ export interface PluginRuntimeHost {
   deactivate(pluginId: string): Promise<void>;
 }
 
-export interface PluginArtifactManager {
-  install(release: PluginRelease): Promise<{ artifactHash: string | null; rootPath: string | null }>;
-  remove(plugin: Pick<PluginRecord, "artifactHash" | "rootPath">): Promise<void>;
-}
+export type { PluginArtifactManager } from "../adapters/outbound/plugin-artifact/index.js";
 
 export interface PluginService {
   list(): InstalledPlugin[];
