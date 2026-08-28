@@ -22,7 +22,16 @@ export const API_ERROR_CODES = [
   "toolkit_unsupported",
   "model_config_changed",
   "config_write_busy",
-  "account_model_preset_conflict"
+  "account_model_preset_conflict",
+  "plugin_invalid",
+  "plugin_incompatible",
+  "plugin_adapter_unsupported",
+  "plugin_permission_denied",
+  "plugin_activation_failed",
+  "plugin_runtime_error",
+  "plugin_timeout",
+  "plugin_unavailable",
+  "plugin_interaction_invalid"
 ] as const;
 
 export type ApiErrorCode = (typeof API_ERROR_CODES)[number];
@@ -46,7 +55,16 @@ export const HTTP_STATUS_BY_CODE: Readonly<Record<ApiErrorCode, number>> = Objec
   toolkit_unsupported: 400,
   model_config_changed: 409,
   config_write_busy: 409,
-  account_model_preset_conflict: 409
+  account_model_preset_conflict: 409,
+  plugin_invalid: 400,
+  plugin_incompatible: 400,
+  plugin_adapter_unsupported: 400,
+  plugin_permission_denied: 403,
+  plugin_activation_failed: 409,
+  plugin_runtime_error: 502,
+  plugin_timeout: 504,
+  plugin_unavailable: 409,
+  plugin_interaction_invalid: 409
 });
 
 export interface ApiError extends Error {
