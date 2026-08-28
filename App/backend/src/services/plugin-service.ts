@@ -162,6 +162,9 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
 
     configure(id, input) {
       const plugin = required(id);
+      if (plugin.state === "active" || plugin.state === "enabling" || plugin.state === "disabling") {
+        throw pluginError("conflict", "Disable plugin before changing its configuration");
+      }
       validateConfig(plugin, input.config);
       const allowedSecrets = declaredSecretKeys(plugin.manifest.permissions);
       for (const [key, secret] of Object.entries(input.secrets ?? {})) {

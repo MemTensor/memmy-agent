@@ -143,6 +143,9 @@ describe("PluginService", () => {
     })) events.push(event);
     expect(events).toEqual([{ type: "result", output: { ok: true } }]);
     expect(runtimeHost.invoke).toBeDefined();
+    expect(() => service.configure(release.manifest.id, {
+      config: { database: "pubmed" }
+    })).toThrow(/Disable plugin/);
   });
 
   it("updates an active plugin and reactivates it atomically", async () => {
