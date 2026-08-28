@@ -142,6 +142,25 @@ describe("PluginService", () => {
     expect(service.get(release.manifest.id)).toMatchObject({ state: "failed", lastError: "offline" });
   });
 
+  it("marks an active plugin failed when a permission change cannot stop its runtime", async () => {
+    const { service, runtimeHost } = createContext();
+    await service.install(release.manifest.id);
+    service.configure(release.manifest.id, {
+      config: { database: "crossref" },
+      secrets: { "api-key": "secret" }
+    });
+    await service.approvePermissions(release.manifest.id, release.manifest.permissions);
+    await service.enable(release.manifest.id);
+    vi.mocked(runtimeHost.deactivate).mockRejectedValueOnce(new Error("busy"));
+
+    await expect(service.approvePermissions(release.manifest.id, [])).rejects.toThrow(/busy/);
+    expect(service.get(release.manifest.id)).toMatchObject({
+      state: "failed",
+      approvedPermissions: release.manifest.permissions,
+      lastError: "busy"
+    });
+  });
+
   it("invokes only active declared capabilities", async () => {
     const { service, runtimeHost } = createContext();
     await service.install(release.manifest.id);
@@ -187,6 +206,30 @@ describe("PluginService", () => {
     });
     expect(runtimeHost.deactivate).toHaveBeenCalledWith(release.manifest.id);
     expect(runtimeHost.activate).toHaveBeenCalledTimes(2);
+  });
+
+  it("restores the previous active version when an update cannot activate", async () => {
+    const nextRelease: PluginRelease = { manifest: { ...release.manifest, version: "2.0.0" } };
+    const { service, runtimeHost, artifactManager } = createContext([release, nextRelease]);
+    vi.mocked(artifactManager.install).mockImplementation(async (pluginRelease) => ({
+      artifactHash: pluginRelease.manifest.version,
+      rootPath: `/plugins/${pluginRelease.manifest.version}`
+    }));
+    await service.install(release.manifest.id, "1.0.0");
+    service.configure(release.manifest.id, {
+      config: { database: "crossref" },
+      secrets: { "api-key": "secret" }
+    });
+    await service.approvePermissions(release.manifest.id, release.manifest.permissions);
+    await service.enable(release.manifest.id);
+    vi.mocked(runtimeHost.activate).mockRejectedValueOnce(new Error("new version failed"));
+
+    await expect(service.update(release.manifest.id, "2.0.0")).rejects.toThrow(/new version failed/);
+    expect(service.get(release.manifest.id)).toMatchObject({ version: "1.0.0", state: "active" });
+    expect(runtimeHost.activate).toHaveBeenCalledTimes(3);
+    expect(artifactManager.remove).toHaveBeenCalledWith(expect.objectContaining({
+      rootPath: "/plugins/2.0.0"
+    }));
   });
 
   it("restores and closes persisted active runtimes without changing their state", async () => {

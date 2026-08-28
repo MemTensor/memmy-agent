@@ -155,11 +155,23 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
         });
         restored = options.repository.setApprovedPermissions(id, previous.approvedPermissions);
         restored = options.repository.setConfig(id, previous.config);
+        let rollbackError: unknown;
         if (previous.state === "active") {
-          await options.runtimeHost.activate(restored, readSecrets(restored, options.secretStore));
-          options.repository.setState(id, "active");
+          try {
+            await options.runtimeHost.activate(restored, readSecrets(restored, options.secretStore));
+            options.repository.setState(id, "active");
+          } catch (restoreError) {
+            rollbackError = restoreError;
+            options.repository.setState(id, "failed", `Update rollback failed: ${errorMessage(restoreError)}`);
+          }
         }
         if (artifact.rootPath !== previous.rootPath) await options.artifactManager.remove(artifact);
+        if (rollbackError) {
+          throw pluginError(
+            "plugin_activation_failed",
+            `Plugin update failed (${errorMessage(error)}) and rollback failed (${errorMessage(rollbackError)})`
+          );
+        }
         throw error;
       }
     },
@@ -186,8 +198,14 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
       const approved = permissions.map((permission) => PluginPermissionSchema.parse(permission));
       assertPermissionSubset(approved, plugin.manifest.permissions);
       if (plugin.state === "active" && !samePermissions(approved, plugin.approvedPermissions)) {
-        await options.runtimeHost.deactivate(id);
-        options.repository.setState(id, "disabled");
+        options.repository.setState(id, "disabling");
+        try {
+          await options.runtimeHost.deactivate(id);
+          options.repository.setState(id, "disabled");
+        } catch (error) {
+          options.repository.setState(id, "failed", errorMessage(error));
+          throw pluginError("plugin_runtime_error", errorMessage(error));
+        }
       }
       const updated = options.repository.setApprovedPermissions(id, approved);
       const next = updated.state === "pending_approval" && hasAllPermissions(updated)
