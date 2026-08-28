@@ -167,9 +167,27 @@ export const UpdatePluginPermissionsInputSchema = z.object({
 });
 export type UpdatePluginPermissionsInput = z.infer<typeof UpdatePluginPermissionsInputSchema>;
 
+export const UpdatePluginInputSchema = z.object({
+  version: z.string().trim().min(1).max(64).optional()
+});
+export type UpdatePluginInput = z.infer<typeof UpdatePluginInputSchema>;
+
 export const InvokePluginCapabilityInputSchema = z.object({
   conversationId: z.string().trim().min(1),
   input: z.unknown()
 });
 export type InvokePluginCapabilityInput = z.infer<typeof InvokePluginCapabilityInputSchema>;
 
+export const PluginInteractionResponseInputSchema = z.object({
+  response: z.unknown()
+});
+export type PluginInteractionResponseInput = z.infer<typeof PluginInteractionResponseInputSchema>;
+
+export const PluginCapabilityEventPayloadSchema = z.object({
+  pluginId: PluginIdentifierSchema,
+  capabilityId: PluginIdentifierSchema,
+  callId: z.string().min(1),
+  conversationId: z.string().min(1),
+  event: CapabilityEventSchema
+});
+export type PluginCapabilityEventPayload = z.infer<typeof PluginCapabilityEventPayloadSchema>;

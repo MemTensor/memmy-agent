@@ -1,5 +1,6 @@
 /** Memmy local API contract. */
 import { z } from "zod";
+import { PluginCapabilityEventPayloadSchema } from "./plugin.js";
 
 export * from "./model-catalog-resolver.js";
 
@@ -1472,11 +1473,19 @@ export const ScanCompletedSseEventSchema = z.object({
     })
 });
 
+export const PluginCapabilitySseEventSchema = z.object({
+    id: z.string(),
+    type: z.literal("plugin.capability_event"),
+    timestamp: z.string().datetime(),
+    payload: PluginCapabilityEventPayloadSchema
+});
+
 export const SseEventSchema = z.discriminatedUnion("type", [
     ConnectedSseEventSchema,
     HeartbeatSseEventSchema,
     ScanProgressSseEventSchema,
-    ScanCompletedSseEventSchema
+    ScanCompletedSseEventSchema,
+    PluginCapabilitySseEventSchema
 ]);
 export type SseEvent = z.infer<typeof SseEventSchema>;
 

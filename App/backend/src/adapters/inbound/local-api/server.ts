@@ -278,12 +278,21 @@ function startSse(
       payload: event
     });
   });
+  const unsubscribePluginCapability = progressBus.on("plugin.capability_event", (event) => {
+    send({
+      id: randomUUID(),
+      type: "plugin.capability_event",
+      timestamp: new Date().toISOString(),
+      payload: event
+    });
+  });
 
   const cleanup = () => {
     // Clean up the heartbeat timer promptly after the client disconnects, avoiding orphaned tasks lingering in the background.
     clearInterval(interval);
     unsubscribeScanProgress();
     unsubscribeScanCompleted();
+    unsubscribePluginCapability();
   };
 
   reply.raw.once("close", cleanup);

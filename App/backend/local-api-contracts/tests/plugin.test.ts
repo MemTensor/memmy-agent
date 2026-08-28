@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   CapabilityEventSchema,
+  PluginCapabilityEventPayloadSchema,
   PluginManifestSchema,
   type PluginManifest
 } from "../src/plugin.js";
@@ -53,5 +54,15 @@ describe("CapabilityEventSchema", () => {
       type: "interaction",
       request: { interactionId: "question-1", type: "question", payload: { title: "Scope" } }
     }).type).toBe("interaction");
+  });
+
+  it("wraps generic plugin events with call routing context", () => {
+    expect(PluginCapabilityEventPayloadSchema.parse({
+      pluginId: manifest.id,
+      capabilityId: "review",
+      callId: "call-1",
+      conversationId: "conversation-1",
+      event: { type: "artifact", artifact: { id: "report", name: "report.md", mediaType: "text/markdown", uri: "file:///report.md" } }
+    }).event.type).toBe("artifact");
   });
 });
