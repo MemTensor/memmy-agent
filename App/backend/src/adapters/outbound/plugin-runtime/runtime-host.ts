@@ -6,23 +6,17 @@ import {
   type CapabilityEvent
 } from "@memmy/local-api-contracts";
 import { Ajv } from "ajv";
-import type { PluginRecord } from "../../../infrastructure/app-state-store/repositories/plugin-repo.js";
-import type { PluginRuntimeHost } from "../../../services/plugin-service.js";
 import { PluginAdapterRegistry } from "./registry.js";
-import type { PluginAdapter, PluginSession } from "./types.js";
+import type { PluginAdapter, PluginRuntimeHost, PluginRuntimeRecord, PluginSession } from "./types.js";
 
 interface ActivePlugin {
-  plugin: PluginRecord;
+  plugin: PluginRuntimeRecord;
   adapter: PluginAdapter;
   session: PluginSession;
   calls: Map<string, Map<string, Record<string, unknown> | undefined>>;
 }
 
-export interface CapabilityRuntimeHost extends PluginRuntimeHost {
-  invoke(call: CapabilityCall): AsyncIterable<CapabilityEvent>;
-  cancel(pluginId: string, callId: string): Promise<void>;
-  respond(pluginId: string, callId: string, interactionId: string, response: unknown): Promise<void>;
-}
+export type CapabilityRuntimeHost = PluginRuntimeHost;
 
 export function createPluginRuntimeHost(registry: PluginAdapterRegistry): CapabilityRuntimeHost {
   const active = new Map<string, ActivePlugin>();

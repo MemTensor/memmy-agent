@@ -12,19 +12,12 @@ import {
 import { Ajv } from "ajv";
 import type { PluginRegistry } from "../adapters/outbound/plugin-registry/index.js";
 import type { PluginArtifactManager } from "../adapters/outbound/plugin-artifact/index.js";
+import type { PluginRuntimeHost } from "../adapters/outbound/plugin-runtime/index.js";
 import type { PluginRecord, PluginRepository } from "../infrastructure/app-state-store/repositories/plugin-repo.js";
 import type { SecretStore } from "../infrastructure/app-state-store/index.js";
 
-export interface PluginRuntimeHost {
-  supports(adapterId: string): boolean;
-  activate(plugin: PluginRecord, secrets: Readonly<Record<string, string>>): Promise<void>;
-  deactivate(pluginId: string): Promise<void>;
-  invoke(call: CapabilityCall): AsyncIterable<CapabilityEvent>;
-  cancel(pluginId: string, callId: string): Promise<void>;
-  respond(pluginId: string, callId: string, interactionId: string, response: unknown): Promise<void>;
-}
-
 export type { PluginArtifactManager } from "../adapters/outbound/plugin-artifact/index.js";
+export type { PluginRuntimeHost } from "../adapters/outbound/plugin-runtime/index.js";
 
 export interface PluginService {
   list(): InstalledPlugin[];
