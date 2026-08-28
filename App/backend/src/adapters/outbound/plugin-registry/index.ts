@@ -15,6 +15,8 @@ export interface PluginRegistry {
   resolve(pluginId: string, version?: string): Promise<PluginRelease>;
 }
 
+export { createHttpPluginRegistry, type CreateHttpPluginRegistryOptions } from "./http-plugin-registry.js";
+
 export function createInMemoryPluginRegistry(releases: PluginRelease[]): PluginRegistry {
   return {
     async resolve(pluginId, version) {
