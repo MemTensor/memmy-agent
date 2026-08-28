@@ -12,6 +12,7 @@ import { createBootstrapRepository, type BootstrapRepository } from "./repositor
 import { createByokTokenUsageRepository, type ByokTokenUsageRepository } from "./repositories/byok-token-usage-repo.js";
 import { createComposioMachineTokenRepository, type ComposioMachineTokenRepository } from "./repositories/composio-machine-token-repo.js";
 import { createDeviceIdentityRepository, type DeviceIdentityRepository } from "./repositories/device-identity-repo.js";
+import { createPluginRepository, type PluginRepository } from "./repositories/plugin-repo.js";
 import { finalizeDatabaseDesign } from "./schema-finalizer.js";
 import { createSqliteSecretStore, type SecretStore } from "./secret-store.js";
 
@@ -47,6 +48,8 @@ export interface AppStateStore {
     byokTokenUsage: ByokTokenUsageRepository;
     /** Installation-scoped device identity. */
     deviceIdentity: DeviceIdentityRepository;
+    /** Installed plugins. */
+    plugins: PluginRepository;
   };
   /** Secret store. */
   secretStore: SecretStore;
@@ -81,7 +84,8 @@ export function createAppStateStore(options: CreateAppStateStoreOptions = {}): A
       idempotency: createIdempotencyStore(db, { getActiveUuid }),
       composioMachineToken: createComposioMachineTokenRepository(secretStore),
       byokTokenUsage: createByokTokenUsageRepository(db),
-      deviceIdentity: createDeviceIdentityRepository(db)
+      deviceIdentity: createDeviceIdentityRepository(db),
+      plugins: createPluginRepository(db)
     },
     secretStore,
     localDataStore,
