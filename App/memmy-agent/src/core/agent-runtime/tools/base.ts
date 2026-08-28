@@ -9,6 +9,7 @@ export type ToolExecutionContext = {
   abortSignal?: AbortSignal | null;
   toolName?: string;
   callId?: string | null;
+  sessionKey?: string | null;
   reportFileMutation?: (outcome: FileMutationOutcome) => void;
 };
 

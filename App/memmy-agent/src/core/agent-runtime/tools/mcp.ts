@@ -14,7 +14,7 @@ import {
 } from "../../runtime-messages/events.js";
 import { loadConfig, resolveConfigEnvVars } from "../../../config/loader.js";
 import { VERSION } from "../../../version.js";
-import { Tool } from "./base.js";
+import { Tool, type ToolExecutionContext } from "./base.js";
 import { ToolRegistry } from "./registry.js";
 import { storeToolImageArtifact } from "../../../utils/artifacts.js";
 
@@ -78,11 +78,17 @@ class SdkClientSession {
     return this.client.listTools();
   }
 
-  async callTool(name: string, args: Record<string, any>, timeout: number): Promise<any> {
+  async callTool(
+    name: string,
+    args: Record<string, any>,
+    timeout: number,
+    meta?: Record<string, string>,
+    signal?: AbortSignal | null,
+  ): Promise<any> {
     return this.client.callTool(
-      { name, arguments: args },
+      { name, arguments: args, ...(meta ? { _meta: meta } : {}) },
       undefined,
-      { timeout: timeout * 1000 },
+      { timeout: timeout * 1000, ...(signal ? { signal } : {}) },
     );
   }
 
@@ -364,6 +370,7 @@ export class MCPToolWrapper extends Tool {
   private toolDescription: string;
   private toolParameters: Record<string, any>;
   private toolTimeout: number;
+  private sendMemmyContext: boolean;
 
   constructor(session: any, serverName: string, toolDef: any, toolTimeout = 30) {
     super();
@@ -373,6 +380,7 @@ export class MCPToolWrapper extends Tool {
     this.toolDescription = toolDef.description || toolDef.name;
     this.toolParameters = normalizeSchemaForOpenAI(toolDef.inputSchema ?? { type: "object", properties: {} });
     this.toolTimeout = toolTimeout;
+    this.sendMemmyContext = serverName === "plugins";
   }
 
   get name(): string {
@@ -387,11 +395,12 @@ export class MCPToolWrapper extends Tool {
     return this.toolParameters;
   }
 
-  async execute(params: Record<string, any> = {}): Promise<string> {
+  async execute(params: Record<string, any> = {}, context?: ToolExecutionContext): Promise<string> {
+    const meta = this.sendMemmyContext ? pluginCallMeta(context) : undefined;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
         const result: any = await timeoutPromise(
-          this.session.callTool(this.originalName, params, this.toolTimeout),
+          this.session.callTool(this.originalName, params, this.toolTimeout, meta, context?.abortSignal),
           this.toolTimeout,
           "timeout",
         );
@@ -406,6 +415,14 @@ export class MCPToolWrapper extends Tool {
     }
     return "(MCP tool call failed)";
   }
+}
+
+function pluginCallMeta(context?: ToolExecutionContext): Record<string, string> | undefined {
+  const entries = [
+    ["memmy.dev/session-key", context?.sessionKey],
+    ["memmy.dev/tool-call-id", context?.callId],
+  ].filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].length > 0);
+  return entries.length ? Object.fromEntries(entries) : undefined;
 }
 
 export class MCPResourceWrapper extends Tool {

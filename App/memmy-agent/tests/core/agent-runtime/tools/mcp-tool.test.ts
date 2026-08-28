@@ -191,6 +191,21 @@ describe("MCPToolWrapper execution", () => {
     await expect(new MCPToolWrapper(session, "test", toolDef("demo"), 0.1).execute({ value: 1 })).resolves.toBe("hello\n42");
   });
 
+  it("passes session metadata only to the local plugin bridge", async () => {
+    const callTool = vi.fn(async () => ({ content: [new FakeTextContent("ok")] }));
+    const context = { sessionKey: "desktop:conversation-1", callId: "tool-call-1" };
+
+    await new MCPToolWrapper({ callTool }, "plugins", toolDef("demo"), 0.1).execute({}, context);
+    expect(callTool).toHaveBeenCalledWith("demo", {}, 0.1, {
+      "memmy.dev/session-key": "desktop:conversation-1",
+      "memmy.dev/tool-call-id": "tool-call-1"
+    }, undefined);
+
+    callTool.mockClear();
+    await new MCPToolWrapper({ callTool }, "external", toolDef("demo"), 0.1).execute({}, context);
+    expect(callTool).toHaveBeenCalledWith("demo", {}, 0.1, undefined, undefined);
+  });
+
   it("returns a timeout message", async () => {
     const session = { callTool: () => new Promise(() => undefined) };
 
