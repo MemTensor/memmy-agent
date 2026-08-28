@@ -15,12 +15,13 @@ interface ActivePlugin {
   plugin: PluginRecord;
   adapter: PluginAdapter;
   session: PluginSession;
-  calls: Set<string>;
+  calls: Map<string, Map<string, Record<string, unknown> | undefined>>;
 }
 
 export interface CapabilityRuntimeHost extends PluginRuntimeHost {
   invoke(call: CapabilityCall): AsyncIterable<CapabilityEvent>;
   cancel(pluginId: string, callId: string): Promise<void>;
+  respond(pluginId: string, callId: string, interactionId: string, response: unknown): Promise<void>;
 }
 
 export function createPluginRuntimeHost(registry: PluginAdapterRegistry): CapabilityRuntimeHost {
@@ -45,7 +46,7 @@ export function createPluginRuntimeHost(registry: PluginAdapterRegistry): Capabi
         await adapter.deactivate(session).catch(() => undefined);
         throw new Error(`Plugin adapter activated a session for ${session.pluginId}`);
       }
-      active.set(plugin.id, { plugin, adapter, session, calls: new Set() });
+      active.set(plugin.id, { plugin, adapter, session, calls: new Map() });
     },
 
     async *invoke(rawCall) {
@@ -67,7 +68,7 @@ export function createPluginRuntimeHost(registry: PluginAdapterRegistry): Capabi
         return;
       }
 
-      current.calls.add(call.callId);
+      current.calls.set(call.callId, new Map());
       let terminal = false;
       try {
         const iterator = current.adapter.invoke(current.session, call)[Symbol.asyncIterator]();
@@ -77,6 +78,16 @@ export function createPluginRuntimeHost(registry: PluginAdapterRegistry): Capabi
           );
           if (item.done) break;
           const event = CapabilityEventSchema.parse(item.value);
+          if (Buffer.byteLength(JSON.stringify(event)) > 10 * 1024 * 1024) {
+            throw new Error("Plugin event exceeded size limit");
+          }
+          if (event.type === "interaction") {
+            const pending = current.calls.get(call.callId)!;
+            if (pending.has(event.request.interactionId)) {
+              throw new Error(`Duplicate plugin interaction: ${event.request.interactionId}`);
+            }
+            pending.set(event.request.interactionId, event.request.responseSchema);
+          }
           if (event.type === "result") {
             const outputError = validateValue(capability.outputSchema, event.output);
             if (outputError) {
@@ -108,11 +119,31 @@ export function createPluginRuntimeHost(registry: PluginAdapterRegistry): Capabi
       await current.adapter.cancel?.(current.session, callId);
     },
 
+    async respond(pluginId, callId, interactionId, response) {
+      const current = active.get(pluginId);
+      const pending = current?.calls.get(callId);
+      if (!current || !pending?.has(interactionId)) {
+        throw Object.assign(new Error("Plugin interaction is not pending"), { code: "plugin_interaction_invalid" });
+      }
+      if (!current.adapter.respond) {
+        throw Object.assign(new Error("Plugin adapter does not support interactions"), { code: "plugin_interaction_invalid" });
+      }
+      const schema = pending.get(interactionId);
+      if (schema) {
+        const error = validateValue(schema, response);
+        if (error) throw Object.assign(new Error(`Invalid plugin interaction response: ${error}`), {
+          code: "plugin_interaction_invalid"
+        });
+      }
+      await current.adapter.respond(current.session, callId, interactionId, response);
+      pending.delete(interactionId);
+    },
+
     async deactivate(pluginId) {
       const current = active.get(pluginId);
       if (!current) return;
       active.delete(pluginId);
-      await Promise.all([...current.calls].map((callId) =>
+      await Promise.all([...current.calls.keys()].map((callId) =>
         current.adapter.cancel?.(current.session, callId) ?? Promise.resolve()
       ));
       await current.adapter.deactivate(current.session);

@@ -22,6 +22,7 @@ const CommandRuntimeConfigSchema = z.object({
   cwd: z.string().default("."),
   inputMode: z.enum(["stdin-json", "argument-json"]).default("stdin-json"),
   outputMode: z.enum(["json", "ndjson"]).default("json"),
+  interactive: z.boolean().default(false),
   env: z.record(z.string(), z.string()).default({}),
   secretEnv: z.record(z.string(), z.string().min(1)).default({}),
   timeoutMs: z.number().int().positive().max(3_600_000).default(300_000),
@@ -98,8 +99,8 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
         stdio: ["pipe", "pipe", "pipe"]
       });
       session.children.set(call.callId, child);
-      if (session.config.inputMode === "stdin-json") child.stdin.end(`${request}\n`);
-      else child.stdin.end();
+      if (session.config.inputMode === "stdin-json") child.stdin.write(`${request}\n`);
+      if (!session.config.interactive) child.stdin.end();
 
       let stderr = "";
       child.stderr.on("data", (chunk: Buffer) => {
@@ -168,8 +169,23 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
         if (terminal) yield terminal;
       } finally {
         clearTimeout(timer);
+        if (!child.stdin.destroyed && !child.stdin.writableEnded) child.stdin.end();
         session.children.delete(call.callId);
       }
+    },
+
+    async respond(rawSession, callId, interactionId, response) {
+      const session = asCommandSession(rawSession);
+      const child = session.children.get(callId);
+      if (!session.config.interactive || !child || child.stdin.destroyed) {
+        throw new Error("Plugin command interaction is not available");
+      }
+      await new Promise<void>((resolve, reject) => {
+        child.stdin.write(`${JSON.stringify({ type: "interaction-response", callId, interactionId, response })}\n`, (error) => {
+          if (error) reject(error);
+          else resolve();
+        });
+      });
     },
 
     async cancel(rawSession, callId) {

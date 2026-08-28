@@ -17,6 +17,7 @@ const HttpRuntimeConfigSchema = z.object({
   baseUrl: z.string().url(),
   invokePath: z.string().min(1).default("/capabilities/{capabilityId}/invoke"),
   cancelPath: z.string().min(1).optional(),
+  interactionPath: z.string().min(1).default("/calls/{callId}/interactions/{interactionId}"),
   headers: z.record(z.string(), z.string()).default({}),
   secretHeaders: z.record(z.string(), z.string().min(1)).default({}),
   timeoutMs: z.number().int().positive().max(3_600_000).default(DEFAULT_TIMEOUT_MS),
@@ -106,6 +107,21 @@ export function createHttpPluginAdapter(options: CreateHttpPluginAdapterOptions 
         signal: AbortSignal.timeout(Math.min(session.config.timeoutMs, 30_000))
       });
       if (!response.ok) throw new Error(`Plugin HTTP cancellation failed with ${response.status}`);
+    },
+
+    async respond(rawSession, callId, interactionId, responseBody) {
+      const session = asHttpSession(rawSession);
+      const response = await fetchFn(resolveEndpoint(session.config, session.config.interactionPath, {
+        callId,
+        interactionId
+      }), {
+        method: "POST",
+        redirect: "error",
+        headers: { "content-type": "application/json", ...session.headers },
+        body: JSON.stringify({ callId, interactionId, response: responseBody }),
+        signal: AbortSignal.timeout(Math.min(session.config.timeoutMs, 30_000))
+      });
+      if (!response.ok) throw new Error(`Plugin HTTP interaction response failed with ${response.status}`);
     },
 
     async deactivate(rawSession) {

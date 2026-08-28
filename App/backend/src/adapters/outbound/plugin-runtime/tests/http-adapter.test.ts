@@ -103,4 +103,17 @@ describe("HttpPluginAdapter", () => {
     denied.plugin.manifest.permissions = [{ type: "network", hosts: ["other.example"] }];
     await expect(createHttpPluginAdapter().activate(denied)).rejects.toThrow(/does not allow/);
   });
+
+  it("posts interaction responses to the plugin", async () => {
+    const fetchFn = vi.fn(async () => new Response(null, { status: 204 }));
+    const adapter = createHttpPluginAdapter({ fetchFn: fetchFn as typeof fetch });
+    const session = await adapter.activate(context());
+    await adapter.respond?.(session, "call-1", "question-1", { selected: ["memory"] });
+    expect(String(fetchFn.mock.calls[0]?.[0])).toBe("https://plugin.example/calls/call-1/interactions/question-1");
+    expect(JSON.parse(String(fetchFn.mock.calls[0]?.[1]?.body))).toMatchObject({
+      callId: "call-1",
+      interactionId: "question-1",
+      response: { selected: ["memory"] }
+    });
+  });
 });

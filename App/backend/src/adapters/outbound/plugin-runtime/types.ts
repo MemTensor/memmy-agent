@@ -22,6 +22,7 @@ export interface PluginAdapter {
   validate(runtime: PluginRuntime, rootPath: string | null): void;
   activate(context: PluginRuntimeContext): Promise<PluginSession>;
   invoke(session: PluginSession, call: CapabilityCall): AsyncIterable<CapabilityEvent>;
+  respond?(session: PluginSession, callId: string, interactionId: string, response: unknown): Promise<void>;
   cancel?(session: PluginSession, callId: string): Promise<void>;
   deactivate(session: PluginSession): Promise<void>;
 }

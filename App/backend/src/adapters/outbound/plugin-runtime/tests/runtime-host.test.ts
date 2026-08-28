@@ -54,6 +54,7 @@ function adapter(events: CapabilityEvent[]): PluginAdapter {
     async *invoke() {
       for (const event of events) yield event;
     },
+    respond: vi.fn(async () => undefined),
     cancel: vi.fn(async () => undefined),
     deactivate: vi.fn(async () => undefined)
   };
@@ -121,5 +122,41 @@ describe("PluginRuntimeHost", () => {
       conversationId: "conversation-1",
       input: { text: "hello" }
     }))).toEqual([expect.objectContaining({ type: "error", code: "plugin_unavailable" })]);
+  });
+
+  it("validates and forwards a pending interaction response", async () => {
+    let releaseResult: (() => void) | undefined;
+    const runtimeAdapter = adapter([]);
+    runtimeAdapter.invoke = async function* () {
+      const gate = new Promise<void>((resolve) => {
+        releaseResult = resolve;
+      });
+      yield {
+        type: "interaction",
+        request: {
+          interactionId: "question-1",
+          type: "question",
+          payload: { title: "Scope" },
+          responseSchema: { type: "string", minLength: 1 }
+        }
+      };
+      await gate;
+      yield { type: "result", output: { text: "done" } };
+    };
+    const host = createPluginRuntimeHost(new PluginAdapterRegistry([runtimeAdapter]));
+    await host.activate(plugin(), {});
+    const iterator = host.invoke({
+      callId: "call-1",
+      pluginId: "com.example.echo",
+      capabilityId: "echo",
+      conversationId: "conversation-1",
+      input: { text: "hello" }
+    })[Symbol.asyncIterator]();
+    expect((await iterator.next()).value).toMatchObject({ type: "interaction" });
+    await expect(host.respond("com.example.echo", "call-1", "question-1", "")).rejects.toThrow(/Invalid/);
+    await host.respond("com.example.echo", "call-1", "question-1", "focused");
+    expect(runtimeAdapter.respond).toHaveBeenCalledWith(expect.any(Object), "call-1", "question-1", "focused");
+    releaseResult?.();
+    expect((await iterator.next()).value).toMatchObject({ type: "result" });
   });
 });
