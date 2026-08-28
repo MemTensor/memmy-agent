@@ -10,6 +10,7 @@ export * from "./memory-l3-world-model.js";
 export * from "./endpoints.js";
 export * from "./cloud-service.js";
 export * from "./desktop-runtime-manifest.js";
+export * from "./plugin.js";
 
 export const MANAGED_AGENT_DISCOVERY_PENDING_DATA_PATH = "memmy-agent://history-discovery-pending";
 
