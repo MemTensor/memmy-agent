@@ -80,6 +80,10 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
       const existing = options.repository.get(pluginId);
       if (existing) {
         if (existing.version === manifest.version && manifestsEqual(existing.manifest, manifest)) {
+          const releaseHash = release.artifact?.sha256.toLowerCase() ?? null;
+          if (existing.artifactHash !== releaseHash) {
+            throw pluginError("conflict", `Plugin release digest changed: ${pluginId}@${manifest.version}`);
+          }
           return publicPlugin(existing);
         }
         throw pluginError("conflict", `Plugin is already installed: ${pluginId}@${existing.version}`);

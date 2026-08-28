@@ -62,7 +62,10 @@ function createContext(releases: PluginRelease[] = [release]) {
     respond: vi.fn(async () => undefined)
   };
   const artifactManager: PluginArtifactManager = {
-    install: vi.fn(async () => ({ artifactHash: null, rootPath: null })),
+    install: vi.fn(async (pluginRelease) => ({
+      artifactHash: pluginRelease.artifact?.sha256.toLowerCase() ?? null,
+      rootPath: null
+    })),
     remove: vi.fn(async () => undefined)
   };
   return {
@@ -109,6 +112,21 @@ describe("PluginService", () => {
       type: "network",
       hosts: ["evil.example"]
     }])).rejects.toThrow(/did not declare/);
+  });
+
+  it("rejects a changed artifact digest for an installed version", async () => {
+    const releases: PluginRelease[] = [{
+      ...release,
+      artifact: { url: "https://plugins.example/review.zip", sha256: "a".repeat(64) }
+    }];
+    const { service } = createContext(releases);
+    await service.install(release.manifest.id);
+    releases.push({
+      ...release,
+      artifact: { url: "https://plugins.example/review.zip", sha256: "b".repeat(64) }
+    });
+
+    await expect(service.install(release.manifest.id)).rejects.toThrow(/digest changed/);
   });
 
   it("marks activation failures without publishing the plugin as active", async () => {
