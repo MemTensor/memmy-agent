@@ -40,6 +40,7 @@ export interface PluginService {
   cancel(id: string, callId: string): Promise<void>;
   respond(id: string, callId: string, interactionId: string, response: unknown): Promise<void>;
   restoreActive(): Promise<void>;
+  shutdown(): Promise<void>;
 }
 
 export interface CreatePluginServiceOptions {
@@ -265,6 +266,12 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
           options.repository.setState(plugin.id, "failed", errorMessage(error));
         }
       }
+    },
+
+    async shutdown() {
+      await Promise.allSettled(options.repository.list()
+        .filter((plugin) => plugin.state === "active" || plugin.state === "enabling")
+        .map((plugin) => options.runtimeHost.deactivate(plugin.id)));
     }
   };
 }

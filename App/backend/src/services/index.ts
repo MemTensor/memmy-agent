@@ -1,4 +1,5 @@
 import type { AccountChannel } from "@memmy/local-api-contracts";
+import { dirname, join } from "node:path";
 import type { AppStateStore } from "../infrastructure/app-state-store/index.js";
 import { type MemmyConfigWriter } from "../infrastructure/memmy-config/index.js";
 import type { AgentAdapterRegistry } from "../adapters/outbound/agent-adapter/index.js";
@@ -12,6 +13,15 @@ import type { MemmyAgentAdminClient } from "../adapters/outbound/memmy-agent-adm
 import type { SkillTargetRegistry } from "../adapters/outbound/skill-writer/target-registry.js";
 import type { CloudClient } from "../adapters/outbound/cloud-client/index.js";
 import type { MemoryClient } from "../adapters/outbound/memory-client/index.js";
+import {
+  createCommandPluginAdapter,
+  createHttpPluginAdapter,
+  createMcpPluginAdapter,
+  createPluginRuntimeHost,
+  PluginAdapterRegistry
+} from "../adapters/outbound/plugin-runtime/index.js";
+import { createPluginArtifactManager, type PluginArtifactManager } from "../adapters/outbound/plugin-artifact/index.js";
+import type { PluginRegistry } from "../adapters/outbound/plugin-registry/index.js";
 import type { PermissionManager } from "../permission/index.js";
 import {
   createAgentSourceLifecycleAnalytics,
@@ -56,6 +66,7 @@ import {
   type SkillDistributionService
 } from "./skill-distribution-service.js";
 import { createTurnService, type TurnService } from "./turn-service.js";
+import { createPluginService, type PluginRuntimeHost, type PluginService } from "./plugin-service.js";
 
 export interface BackendServices {
   memoryClient: MemoryClient;
@@ -82,6 +93,8 @@ export interface BackendServices {
   asr: AsrService;
   /** Token quota. */
   tokenQuota: TokenQuotaService;
+  /** Third-party plugins. */
+  plugins: PluginService;
 }
 
 export interface CreateBackendServicesOptions {
@@ -96,6 +109,9 @@ export interface CreateBackendServicesOptions {
   skillDistributionService?: SkillDistributionService;
   skillTargetRegistry?: SkillTargetRegistry;
   progressBus?: ProgressBus;
+  pluginRegistry?: PluginRegistry;
+  pluginArtifactManager?: PluginArtifactManager;
+  pluginRuntimeHost?: PluginRuntimeHost;
   /** Memmy config writer. */
   memmyConfigWriter?: MemmyConfigWriter;
   /** Memmy config path. */
@@ -110,6 +126,20 @@ export interface CreateBackendServicesOptions {
 
 export function createBackendServices(options: CreateBackendServicesOptions): BackendServices {
   const progressBus = options.progressBus ?? createProgressBus();
+  const pluginRuntimeHost = options.pluginRuntimeHost ?? createPluginRuntimeHost(new PluginAdapterRegistry([
+    createMcpPluginAdapter(),
+    createHttpPluginAdapter(),
+    createCommandPluginAdapter()
+  ]));
+  const plugins = createPluginService({
+    repository: options.appStateStore.repositories.plugins,
+    secretStore: options.appStateStore.secretStore,
+    registry: options.pluginRegistry ?? unavailablePluginRegistry,
+    runtimeHost: pluginRuntimeHost,
+    artifactManager: options.pluginArtifactManager ?? createPluginArtifactManager({
+      installRoot: join(dirname(options.appStateStore.databasePath), "plugins")
+    })
+  });
   const sourceRegistry =
     options.sourceRegistry ??
     createBuiltinAgentSourceRegistry();
@@ -243,7 +273,8 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
     tokenQuota: createTokenQuotaService({
       cloudClient: options.cloudClient,
       accountSessionRepository: options.appStateStore.repositories.accountSession
-    })
+    }),
+    plugins
   };
 }
 
@@ -298,3 +329,9 @@ function createUnavailableMemmyConfigWriter(): MemmyConfigWriter {
     patchMcpServerConfig: async () => unavailable()
   };
 }
+
+const unavailablePluginRegistry: PluginRegistry = {
+  async resolve() {
+    throw Object.assign(new Error("Plugin registry is not configured"), { code: "plugin_unavailable" });
+  }
+};

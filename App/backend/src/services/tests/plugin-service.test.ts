@@ -165,4 +165,23 @@ describe("PluginService", () => {
     expect(runtimeHost.deactivate).toHaveBeenCalledWith(release.manifest.id);
     expect(runtimeHost.activate).toHaveBeenCalledTimes(2);
   });
+
+  it("restores and closes persisted active runtimes without changing their state", async () => {
+    const { service, runtimeHost } = createContext();
+    await service.install(release.manifest.id);
+    service.configure(release.manifest.id, {
+      config: { database: "crossref" },
+      secrets: { "api-key": "secret" }
+    });
+    await service.approvePermissions(release.manifest.id, release.manifest.permissions);
+    await service.enable(release.manifest.id);
+    vi.mocked(runtimeHost.activate).mockClear();
+
+    await service.restoreActive();
+    await service.shutdown();
+
+    expect(runtimeHost.activate).toHaveBeenCalledOnce();
+    expect(runtimeHost.deactivate).toHaveBeenCalledWith(release.manifest.id);
+    expect(service.get(release.manifest.id).state).toBe("active");
+  });
 });
