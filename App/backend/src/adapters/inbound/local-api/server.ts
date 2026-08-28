@@ -16,6 +16,7 @@ import { registerComposioMcpRoutes } from "./routes/composio-mcp.js";
 import { registerIntegrationRoutes } from "./routes/integrations.js";
 import { registerLocalDataRoutes } from "./routes/local-data.js";
 import { registerOnboardingInsightRoutes } from "./routes/onboarding-insight.js";
+import { registerPluginRoutes } from "./routes/plugins.js";
 
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 15_000;
 const LOCAL_API_SERVICE_NAME = "memmy-local-api";
@@ -131,6 +132,11 @@ export function createLocalApiServer(options: CreateLocalApiServerOptions): Fast
   registerOnboardingInsightRoutes(app, {
     onboardingInsight: options.services.onboardingInsight,
     permissionManager: options.permissionManager,
+    authenticateRuntimeToken
+  });
+  registerPluginRoutes(app, {
+    plugins: options.services.plugins,
+    progressBus: options.services.progressBus,
     authenticateRuntimeToken
   });
   registerAgentRuntimeRoutes(app, {

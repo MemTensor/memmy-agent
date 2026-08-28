@@ -174,7 +174,8 @@ export type UpdatePluginInput = z.infer<typeof UpdatePluginInputSchema>;
 
 export const InvokePluginCapabilityInputSchema = z.object({
   conversationId: z.string().trim().min(1),
-  input: z.unknown()
+  input: z.unknown(),
+  deadline: z.string().datetime().optional()
 });
 export type InvokePluginCapabilityInput = z.infer<typeof InvokePluginCapabilityInputSchema>;
 
