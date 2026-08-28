@@ -1,5 +1,6 @@
 /** Memmy local API contract. */
 import { z } from "zod";
+import { PluginCapabilityEventPayloadSchema } from "./plugin.js";
 
 export * from "./model-catalog-resolver.js";
 
@@ -10,6 +11,7 @@ export * from "./memory-l3-world-model.js";
 export * from "./endpoints.js";
 export * from "./cloud-service.js";
 export * from "./desktop-runtime-manifest.js";
+export * from "./plugin.js";
 
 export const MANAGED_AGENT_DISCOVERY_PENDING_DATA_PATH = "memmy-agent://history-discovery-pending";
 
@@ -1471,11 +1473,19 @@ export const ScanCompletedSseEventSchema = z.object({
     })
 });
 
+export const PluginCapabilitySseEventSchema = z.object({
+    id: z.string(),
+    type: z.literal("plugin.capability_event"),
+    timestamp: z.string().datetime(),
+    payload: PluginCapabilityEventPayloadSchema
+});
+
 export const SseEventSchema = z.discriminatedUnion("type", [
     ConnectedSseEventSchema,
     HeartbeatSseEventSchema,
     ScanProgressSseEventSchema,
-    ScanCompletedSseEventSchema
+    ScanCompletedSseEventSchema,
+    PluginCapabilitySseEventSchema
 ]);
 export type SseEvent = z.infer<typeof SseEventSchema>;
 

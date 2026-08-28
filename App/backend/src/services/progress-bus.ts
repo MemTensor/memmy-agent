@@ -1,6 +1,6 @@
 /** Progress bus module. */
 import { EventEmitter } from "node:events";
-import type { ScanPhase, ScanResult } from "@memmy/local-api-contracts";
+import type { PluginCapabilityEventPayload, ScanPhase, ScanResult } from "@memmy/local-api-contracts";
 
 /** Contract for agent source scan progress event. */
 export interface AgentSourceScanProgressEvent {
@@ -23,6 +23,7 @@ export interface AgentSourceScanCompletedEvent {
 export interface ProgressBusEventMap {
   "agent_source.scan_progress": AgentSourceScanProgressEvent;
   "agent_source.scan_completed": AgentSourceScanCompletedEvent;
+  "plugin.capability_event": PluginCapabilityEventPayload;
 }
 
 /** Contract for progress bus. */

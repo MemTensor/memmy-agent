@@ -21,6 +21,7 @@ import {
 import { createPermissionManager } from "./permission/index.js";
 import { createLocalApiServer } from "./adapters/inbound/local-api/server.js";
 import { createBackendServices, type BootstrapScenario } from "./services/index.js";
+import type { PluginService } from "./services/plugin-service.js";
 import {
   createAgentSourceAutoScanService,
   DEFAULT_AGENT_SOURCE_AUTO_SCAN_INTERVAL_MS,
@@ -34,6 +35,7 @@ import {
 } from "./services/runtime-config-sync-service.js";
 import { loadCloudServiceEnv } from "./load-env.js";
 import type { MemmyAgentAdminClient } from "./adapters/outbound/memmy-agent-admin-client/index.js";
+import { createHttpPluginRegistry } from "./adapters/outbound/plugin-registry/index.js";
 
 export type { BootstrapScenario };
 export { loadCloudServiceEnv };
@@ -89,6 +91,7 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
   const appStateStore = createAppStateStore({ databasePath: options.databasePath });
   let server: Awaited<ReturnType<typeof createLocalApiServer>> | null = null;
   let autoScan: AgentSourceAutoScanService | null = null;
+  let pluginService: PluginService | null = null;
 
   try {
     if (options.desktopInstallFingerprint) {
@@ -142,8 +145,11 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       memmyConfigPath,
       accountChannel: options.accountChannel,
       memmyAgentAdminClient: options.memmyAgentAdminClient,
-      memmyAgentAdminBootstrapSecret: await readAgentGatewayBootstrapSecret(memmyConfigPath)
+      memmyAgentAdminBootstrapSecret: await readAgentGatewayBootstrapSecret(memmyConfigPath),
+      pluginRegistry: configuredPluginRegistry(process.env)
     });
+    pluginService = services.plugins;
+    await services.plugins.restoreActive();
     const localToken = await permissionManager.getRuntimeToken();
     const composioMcpToken = `mmt_${randomBytes(32).toString("base64url")}`;
     server = createLocalApiServer({
@@ -152,7 +158,8 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       composioMcpToken,
       timeZone: configuredTimeZone,
       heartbeatIntervalMs: options.heartbeatIntervalMs,
-      scanProcess
+      scanProcess,
+      pluginCapabilitiesChanged: () => reloadAgentMcp(options.memmyAgentAdminClient)
     });
     await server.listen({ host: "127.0.0.1", port: 0 });
 
@@ -168,14 +175,13 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       headers: { "x-memmy-mcp-token": composioMcpToken },
       toolTimeout: 60
     });
-    if (options.memmyAgentAdminClient) {
-      try {
-        const result = await options.memmyAgentAdminClient.reloadMcpConfig();
-        if (!result.ok) console.warn(`Agent MCP reload did not complete: ${result.message}`);
-      } catch (error) {
-        console.warn(`Agent MCP reload unavailable during backend startup: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    }
+    await memmyConfigWriter.patchMcpServerConfig("plugins", {
+      type: "streamableHttp",
+      url: `http://127.0.0.1:${(address as AddressInfo).port}/mcp/plugins`,
+      headers: { "x-memmy-mcp-token": composioMcpToken },
+      toolTimeout: 3600
+    });
+    await reloadAgentMcp(options.memmyAgentAdminClient);
 
     const runtimeConfig = RuntimeConfigSchema.parse({
       baseUrl: `http://127.0.0.1:${(address as AddressInfo).port}`,
@@ -195,6 +201,7 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
 
     const boundServer = server;
     const boundAutoScan = autoScan;
+    const boundPluginService = services.plugins;
     return {
       runtimeConfig,
       getAppSettings() {
@@ -205,15 +212,35 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       },
       async close() {
         boundAutoScan.close();
-        await boundServer.close();
-        appStateStore.close();
+        try {
+          await boundServer.close();
+        } finally {
+          await boundPluginService.shutdown();
+          appStateStore.close();
+        }
       }
     };
   } catch (error) {
     autoScan?.close();
     await server?.close().catch(() => undefined);
+    await pluginService?.shutdown();
     appStateStore.close();
     throw error;
+  }
+}
+
+function configuredPluginRegistry(env: NodeJS.ProcessEnv) {
+  const baseUrl = env.MEMMY_PLUGIN_REGISTRY_URL?.trim();
+  return baseUrl ? createHttpPluginRegistry({ baseUrl }) : undefined;
+}
+
+async function reloadAgentMcp(client: MemmyAgentAdminClient | undefined): Promise<void> {
+  if (!client) return;
+  try {
+    const result = await client.reloadMcpConfig();
+    if (!result.ok) console.warn(`Agent MCP reload did not complete: ${result.message}`);
+  } catch (error) {
+    console.warn(`Agent MCP reload unavailable: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
