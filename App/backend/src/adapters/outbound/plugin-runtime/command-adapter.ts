@@ -28,9 +28,9 @@ const CommandRuntimeConfigSchema = z.object({
   timeoutMs: z.number().int().positive().max(3_600_000).default(300_000),
   maxOutputBytes: z.number().int().positive().max(MAX_OUTPUT_BYTES).default(10 * 1024 * 1024)
 });
-type CommandRuntimeConfig = z.infer<typeof CommandRuntimeConfigSchema>;
+export type CommandRuntimeConfig = z.infer<typeof CommandRuntimeConfigSchema>;
 
-interface SandboxLaunch {
+export interface SandboxLaunch {
   command: string;
   args: string[];
   cwd: string;
@@ -53,7 +53,7 @@ export interface CreateCommandPluginAdapterOptions {
 export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOptions = {}): PluginAdapter {
   const platform = options.platform ?? process.platform;
   const spawnFn = options.spawnFn ?? spawn;
-  const buildLaunch = options.buildLaunch ?? ((context, config) => buildSandboxLaunch(context, config, platform));
+  const buildLaunch = options.buildLaunch ?? ((context, config) => buildPluginSandboxLaunch(context, config, platform));
 
   return {
     id: "command",
@@ -69,7 +69,7 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
           code: "plugin_permission_denied"
         });
       }
-      const env = resolveEnvironment(config, context.secrets);
+      const env = resolvePluginEnvironment(config.env, config.secretEnv, context.secrets);
       return {
         pluginId: context.plugin.id,
         launch: await buildLaunch(context, config),
@@ -217,10 +217,10 @@ function validateCommandConfig(runtime: PluginRuntime, rootPath: string | null, 
   return config;
 }
 
-async function buildSandboxLaunch(
+export async function buildPluginSandboxLaunch(
   context: PluginRuntimeContext,
-  config: CommandRuntimeConfig,
-  platform: NodeJS.Platform
+  config: Pick<CommandRuntimeConfig, "command" | "args" | "cwd">,
+  platform: NodeJS.Platform = process.platform
 ): Promise<SandboxLaunch> {
   const root = await realpath(context.rootPath!);
   const command = await canonicalDescendant(root, resolve(root, config.command));
@@ -347,9 +347,13 @@ async function firstExecutable(paths: string[]): Promise<string | null> {
   return null;
 }
 
-function resolveEnvironment(config: CommandRuntimeConfig, secrets: Readonly<Record<string, string>>): Record<string, string> {
-  const env: Record<string, string> = { PATH: "/usr/bin:/bin", LANG: "C.UTF-8", ...config.env };
-  for (const [name, key] of Object.entries(config.secretEnv)) {
+export function resolvePluginEnvironment(
+  configured: Readonly<Record<string, string>>,
+  secretEnv: Readonly<Record<string, string>>,
+  secrets: Readonly<Record<string, string>>
+): Record<string, string> {
+  const env: Record<string, string> = { PATH: "/usr/bin:/bin", LANG: "C.UTF-8", ...configured };
+  for (const [name, key] of Object.entries(secretEnv)) {
     const value = secrets[key];
     if (!value) throw new Error(`Missing plugin secret for environment variable ${name}`);
     env[name] = value;

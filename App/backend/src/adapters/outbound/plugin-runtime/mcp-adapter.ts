@@ -7,20 +7,33 @@ import {
 } from "@memmy/local-api-contracts";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { z } from "zod";
 import type { PluginAdapter, PluginRuntimeContext, PluginSession } from "./types.js";
+import { buildPluginSandboxLaunch, resolvePluginEnvironment } from "./command-adapter.js";
 
 const BLOCKED_STATIC_HEADERS = new Set(["authorization", "cookie", "host", "proxy-authorization"]);
 
-const McpRuntimeConfigSchema = z.object({
-  transport: z.enum(["sse", "streamableHttp"]),
-  url: z.string().url(),
-  headers: z.record(z.string(), z.string()).default({}),
-  secretHeaders: z.record(z.string(), z.string().min(1)).default({}),
+const McpSharedConfigSchema = z.object({
   capabilityTools: z.record(z.string(), z.string().min(1)).default({}),
   timeoutMs: z.number().int().positive().max(3_600_000).default(300_000)
 });
+const McpRemoteConfigSchema = McpSharedConfigSchema.extend({
+  transport: z.enum(["sse", "streamableHttp"]),
+  url: z.string().url(),
+  headers: z.record(z.string(), z.string()).default({}),
+  secretHeaders: z.record(z.string(), z.string().min(1)).default({})
+});
+const McpStdioConfigSchema = McpSharedConfigSchema.extend({
+  transport: z.literal("stdio"),
+  command: z.string().trim().min(1),
+  args: z.array(z.string()).default([]),
+  cwd: z.string().default("."),
+  env: z.record(z.string(), z.string()).default({}),
+  secretEnv: z.record(z.string(), z.string().min(1)).default({})
+});
+const McpRuntimeConfigSchema = z.discriminatedUnion("transport", [McpRemoteConfigSchema, McpStdioConfigSchema]);
 type McpRuntimeConfig = z.infer<typeof McpRuntimeConfigSchema>;
 
 interface McpClientLike {
@@ -49,29 +62,43 @@ interface McpPluginSession extends PluginSession {
 
 export interface CreateMcpPluginAdapterOptions {
   createClient?: () => McpClientLike;
-  createTransport?: (config: McpRuntimeConfig, headers: Record<string, string>) => unknown;
+  createTransport?: (
+    config: McpRuntimeConfig,
+    headers: Record<string, string>,
+    context: PluginRuntimeContext
+  ) => unknown | Promise<unknown>;
+  platform?: NodeJS.Platform;
 }
 
 export function createMcpPluginAdapter(options: CreateMcpPluginAdapterOptions = {}): PluginAdapter {
   const createClient = options.createClient ?? (() => new Client({ name: "memmy-plugin-host", version: "1.0.0" }) as McpClientLike);
   const createTransport = options.createTransport ?? defaultTransport;
+  const platform = options.platform ?? process.platform;
 
   return {
     id: "mcp",
 
-    validate(runtime) {
-      validateMcpConfig(runtime);
+    validate(runtime, rootPath) {
+      validateMcpConfig(runtime, rootPath, platform);
     },
 
     async activate(context) {
-      const config = validateMcpConfig(context.plugin.manifest.runtime);
-      const url = new URL(config.url);
-      assertAllowedProtocol(url);
-      assertNetworkPermission(context, url.hostname);
-      const headers = resolveHeaders(config, context.secrets);
+      const config = validateMcpConfig(context.plugin.manifest.runtime, context.rootPath, platform);
+      const headers = config.transport === "stdio" ? {} : resolveHeaders(config, context.secrets);
+      if (config.transport === "stdio") {
+        if (context.plugin.manifest.permissions.some((permission) => permission.type === "network")) {
+          throw Object.assign(new Error("Local MCP plugins cannot request network access; use remote MCP"), {
+            code: "plugin_permission_denied"
+          });
+        }
+      } else {
+        const url = new URL(config.url);
+        assertAllowedProtocol(url);
+        assertNetworkPermission(context, url.hostname);
+      }
       const client = createClient();
       try {
-        await client.connect(createTransport(config, headers));
+        await client.connect(await createTransport(config, headers, context));
         const available = new Set((await client.listTools()).tools.map((tool) => tool.name));
         const capabilityTools = Object.fromEntries(context.plugin.manifest.capabilities.map((capability) => [
           capability.id,
@@ -162,18 +189,39 @@ export function createMcpPluginAdapter(options: CreateMcpPluginAdapterOptions = 
   };
 }
 
-function validateMcpConfig(runtime: PluginRuntime): McpRuntimeConfig {
+function validateMcpConfig(
+  runtime: PluginRuntime,
+  rootPath: string | null,
+  platform: NodeJS.Platform
+): McpRuntimeConfig {
   if (runtime.adapter !== "mcp") throw new Error(`Expected mcp runtime, got ${runtime.adapter}`);
   const config = McpRuntimeConfigSchema.parse(runtime.config ?? {});
-  for (const name of Object.keys(config.headers)) {
-    if (BLOCKED_STATIC_HEADERS.has(name.toLowerCase())) {
-      throw new Error(`Sensitive MCP header must use secretHeaders: ${name}`);
+  if (config.transport === "stdio") {
+    if (!rootPath) throw new Error("Local MCP plugin requires an installed artifact");
+    if (platform !== "darwin" && platform !== "linux") throw new Error(`Local MCP plugins are unsupported on ${platform}`);
+  } else {
+    for (const name of Object.keys(config.headers)) {
+      if (BLOCKED_STATIC_HEADERS.has(name.toLowerCase())) {
+        throw new Error(`Sensitive MCP header must use secretHeaders: ${name}`);
+      }
     }
   }
   return config;
 }
 
-function defaultTransport(config: McpRuntimeConfig, headers: Record<string, string>): unknown {
+async function defaultTransport(
+  config: McpRuntimeConfig,
+  headers: Record<string, string>,
+  context: PluginRuntimeContext
+): Promise<unknown> {
+  if (config.transport === "stdio") {
+    const launch = await buildPluginSandboxLaunch(context, config);
+    return new StdioClientTransport({
+      ...launch,
+      env: resolvePluginEnvironment(config.env, config.secretEnv, context.secrets),
+      stderr: "ignore"
+    });
+  }
   const url = new URL(config.url);
   const rejectRedirects = (input: string | URL | Request, init?: RequestInit) =>
     fetch(input, { ...init, redirect: "error" });
@@ -223,7 +271,10 @@ function asArguments(input: unknown): Record<string, unknown> {
   return input as Record<string, unknown>;
 }
 
-function resolveHeaders(config: McpRuntimeConfig, secrets: Readonly<Record<string, string>>): Record<string, string> {
+function resolveHeaders(
+  config: z.infer<typeof McpRemoteConfigSchema>,
+  secrets: Readonly<Record<string, string>>
+): Record<string, string> {
   const headers = { ...config.headers };
   for (const [header, key] of Object.entries(config.secretHeaders)) {
     const value = secrets[key];

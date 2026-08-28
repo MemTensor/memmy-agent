@@ -86,7 +86,7 @@ describe("McpPluginAdapter", () => {
       undefined,
       expect.any(Object)
     );
-    expect(createTransport).toHaveBeenCalledWith(expect.any(Object), { authorization: "Bearer secret" });
+    expect(createTransport).toHaveBeenCalledWith(expect.any(Object), { authorization: "Bearer secret" }, expect.any(Object));
   });
 
   it("fails activation when a mapped MCP tool is missing", async () => {
@@ -99,5 +99,47 @@ describe("McpPluginAdapter", () => {
     const adapter = createMcpPluginAdapter({ createClient: () => client, createTransport: () => ({}) });
     await expect(adapter.activate(context())).rejects.toThrow(/MCP tools not found/);
     expect(client.close).toHaveBeenCalledOnce();
+  });
+
+  it("starts local stdio MCP through the shared sandbox transport boundary", async () => {
+    const pluginContext = context();
+    pluginContext.rootPath = "/plugin";
+    pluginContext.plugin.rootPath = "/plugin";
+    pluginContext.plugin.manifest.runtime.config = {
+      transport: "stdio",
+      command: "runtime/server",
+      secretEnv: { REVIEW_API_KEY: "api-key" }
+    };
+    pluginContext.plugin.manifest.permissions = [{ type: "secret", keys: ["api-key"] }];
+    const client = {
+      connect: vi.fn(async () => undefined),
+      close: vi.fn(async () => undefined),
+      listTools: vi.fn(async () => ({ tools: [{ name: "search" }] })),
+      callTool: vi.fn()
+    };
+    const createTransport = vi.fn(() => ({ transport: "stdio-test" }));
+    const adapter = createMcpPluginAdapter({
+      createClient: () => client,
+      createTransport,
+      platform: "darwin"
+    });
+
+    await adapter.activate(pluginContext);
+
+    expect(createTransport).toHaveBeenCalledWith(
+      expect.objectContaining({ transport: "stdio", command: "runtime/server" }),
+      {},
+      pluginContext
+    );
+  });
+
+  it("rejects network permission for local stdio MCP", async () => {
+    const pluginContext = context();
+    pluginContext.rootPath = "/plugin";
+    pluginContext.plugin.rootPath = "/plugin";
+    pluginContext.plugin.manifest.runtime.config = { transport: "stdio", command: "runtime/server" };
+    const adapter = createMcpPluginAdapter({ platform: "darwin" });
+
+    await expect(adapter.activate(pluginContext)).rejects.toThrow(/cannot request network/);
   });
 });
