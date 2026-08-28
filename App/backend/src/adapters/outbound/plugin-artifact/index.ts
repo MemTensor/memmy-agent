@@ -22,7 +22,7 @@ const MAX_ARCHIVE_BYTES = 50 * 1024 * 1024;
 const MAX_EXTRACTED_BYTES = 250 * 1024 * 1024;
 const MAX_FILES = 2_000;
 
-export type { PluginArtifactManager } from "./types.js";
+export type { PluginArtifactLocation, PluginArtifactManager } from "./types.js";
 
 export interface CreatePluginArtifactManagerOptions {
   installRoot: string;

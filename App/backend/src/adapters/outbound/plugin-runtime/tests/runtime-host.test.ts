@@ -1,11 +1,10 @@
 import type { CapabilityEvent } from "@memmy/local-api-contracts";
 import { describe, expect, it, vi } from "vitest";
-import type { PluginRecord } from "../../../../infrastructure/app-state-store/repositories/plugin-repo.js";
 import { PluginAdapterRegistry } from "../registry.js";
 import { createPluginRuntimeHost } from "../runtime-host.js";
-import type { PluginAdapter } from "../types.js";
+import type { PluginAdapter, PluginRuntimeRecord } from "../types.js";
 
-function plugin(): PluginRecord {
+function plugin(): PluginRuntimeRecord {
   const now = new Date().toISOString();
   return {
     id: "com.example.echo",
