@@ -17,6 +17,7 @@ import { registerIntegrationRoutes } from "./routes/integrations.js";
 import { registerLocalDataRoutes } from "./routes/local-data.js";
 import { registerOnboardingInsightRoutes } from "./routes/onboarding-insight.js";
 import { registerPluginRoutes } from "./routes/plugins.js";
+import { registerPluginMcpRoutes } from "./routes/plugin-mcp.js";
 
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 15_000;
 const LOCAL_API_SERVICE_NAME = "memmy-local-api";
@@ -33,7 +34,7 @@ export interface CreateLocalApiServerOptions {
   /** Configured agent timezone. Renderer headers are used only when absent. */
   timeZone?: string;
   /**
-   * Local validation token for the Composio MCP bridge; the agent carries it in mcpServers.composio.headers to access /mcp/composio.
+   * Local validation token shared by Memmy's loopback MCP bridges.
    */
   composioMcpToken: string;
   heartbeatIntervalMs?: number;
@@ -41,6 +42,7 @@ export interface CreateLocalApiServerOptions {
   scanProcess?: {
     databasePath: string;
   };
+  pluginCapabilitiesChanged?: () => Promise<void>;
 }
 
 interface EventsQuerystring {
@@ -113,6 +115,11 @@ export function createLocalApiServer(options: CreateLocalApiServerOptions): Fast
     integrations: options.services.integrations,
     mcpToken: options.composioMcpToken
   });
+  registerPluginMcpRoutes(app, {
+    plugins: options.services.plugins,
+    progressBus: options.services.progressBus,
+    mcpToken: options.composioMcpToken
+  });
   registerChannelRoutes(app, {
     channels: options.services.channels,
     authenticateRuntimeToken
@@ -137,7 +144,8 @@ export function createLocalApiServer(options: CreateLocalApiServerOptions): Fast
   registerPluginRoutes(app, {
     plugins: options.services.plugins,
     progressBus: options.services.progressBus,
-    authenticateRuntimeToken
+    authenticateRuntimeToken,
+    refreshAgentTools: options.pluginCapabilitiesChanged
   });
   registerAgentRuntimeRoutes(app, {
     services: options.services,

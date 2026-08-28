@@ -158,7 +158,8 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       composioMcpToken,
       timeZone: configuredTimeZone,
       heartbeatIntervalMs: options.heartbeatIntervalMs,
-      scanProcess
+      scanProcess,
+      pluginCapabilitiesChanged: () => reloadAgentMcp(options.memmyAgentAdminClient)
     });
     await server.listen({ host: "127.0.0.1", port: 0 });
 
@@ -174,14 +175,13 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       headers: { "x-memmy-mcp-token": composioMcpToken },
       toolTimeout: 60
     });
-    if (options.memmyAgentAdminClient) {
-      try {
-        const result = await options.memmyAgentAdminClient.reloadMcpConfig();
-        if (!result.ok) console.warn(`Agent MCP reload did not complete: ${result.message}`);
-      } catch (error) {
-        console.warn(`Agent MCP reload unavailable during backend startup: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    }
+    await memmyConfigWriter.patchMcpServerConfig("plugins", {
+      type: "streamableHttp",
+      url: `http://127.0.0.1:${(address as AddressInfo).port}/mcp/plugins`,
+      headers: { "x-memmy-mcp-token": composioMcpToken },
+      toolTimeout: 3600
+    });
+    await reloadAgentMcp(options.memmyAgentAdminClient);
 
     const runtimeConfig = RuntimeConfigSchema.parse({
       baseUrl: `http://127.0.0.1:${(address as AddressInfo).port}`,
@@ -232,6 +232,16 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
 function configuredPluginRegistry(env: NodeJS.ProcessEnv) {
   const baseUrl = env.MEMMY_PLUGIN_REGISTRY_URL?.trim();
   return baseUrl ? createHttpPluginRegistry({ baseUrl }) : undefined;
+}
+
+async function reloadAgentMcp(client: MemmyAgentAdminClient | undefined): Promise<void> {
+  if (!client) return;
+  try {
+    const result = await client.reloadMcpConfig();
+    if (!result.ok) console.warn(`Agent MCP reload did not complete: ${result.message}`);
+  } catch (error) {
+    console.warn(`Agent MCP reload unavailable: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 /**

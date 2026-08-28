@@ -87,7 +87,7 @@ describe("local api", () => {
     expect(backend.runtimeConfig.memory).toEqual({ baseUrl: "http://127.0.0.1:18960" });
   });
 
-  it("reloads Agent MCP only after writing the current Composio bridge config", async () => {
+  it("reloads Agent MCP only after writing the current local bridge configs", async () => {
     tempDir = mkdtempSync(join(tmpdir(), "memmy-backend-mcp-startup-reload-"));
     const memmyConfigPath = join(tempDir, "config.yaml");
     const snapshots: unknown[] = [];
@@ -122,6 +122,11 @@ describe("local api", () => {
           composio: {
             type: "streamableHttp",
             url: `${backend.runtimeConfig.baseUrl}/mcp/composio`,
+            headers: { "x-memmy-mcp-token": expect.stringMatching(/^mmt_/) }
+          },
+          plugins: {
+            type: "streamableHttp",
+            url: `${backend.runtimeConfig.baseUrl}/mcp/plugins`,
             headers: { "x-memmy-mcp-token": expect.stringMatching(/^mmt_/) }
           }
         }

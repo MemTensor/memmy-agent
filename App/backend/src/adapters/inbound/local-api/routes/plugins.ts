@@ -20,6 +20,7 @@ export interface RegisterPluginRoutesOptions {
   plugins: PluginService;
   progressBus: ProgressBus;
   authenticateRuntimeToken: (request: FastifyRequest, reply: FastifyReply) => Promise<unknown>;
+  refreshAgentTools?: () => Promise<void>;
 }
 
 const PluginParamsSchema = z.object({ id: z.string().trim().min(1).max(128) });
@@ -52,28 +53,37 @@ export function registerPluginRoutes(app: FastifyInstance, options: RegisterPlug
   app.put("/api/v1/plugins/:id/permissions", protectedRoute, withErrorEnvelope(async (request, reply) => {
     const { id } = PluginParamsSchema.parse(request.params);
     const input = UpdatePluginPermissionsInputSchema.parse(request.body);
-    return reply.send(InstalledPluginSchema.parse(await options.plugins.approvePermissions(id, input.permissions)));
+    const plugin = InstalledPluginSchema.parse(await options.plugins.approvePermissions(id, input.permissions));
+    await refreshAgentTools(options);
+    return reply.send(plugin);
   }));
 
   app.post("/api/v1/plugins/:id/enable", protectedRoute, withErrorEnvelope(async (request, reply) => {
     const { id } = PluginParamsSchema.parse(request.params);
-    return reply.send(InstalledPluginSchema.parse(await options.plugins.enable(id)));
+    const plugin = InstalledPluginSchema.parse(await options.plugins.enable(id));
+    await refreshAgentTools(options);
+    return reply.send(plugin);
   }));
 
   app.post("/api/v1/plugins/:id/disable", protectedRoute, withErrorEnvelope(async (request, reply) => {
     const { id } = PluginParamsSchema.parse(request.params);
-    return reply.send(InstalledPluginSchema.parse(await options.plugins.disable(id)));
+    const plugin = InstalledPluginSchema.parse(await options.plugins.disable(id));
+    await refreshAgentTools(options);
+    return reply.send(plugin);
   }));
 
   app.post("/api/v1/plugins/:id/update", protectedRoute, withErrorEnvelope(async (request, reply) => {
     const { id } = PluginParamsSchema.parse(request.params);
     const input = UpdatePluginInputSchema.parse(request.body ?? {});
-    return reply.send(InstalledPluginSchema.parse(await options.plugins.update(id, input.version)));
+    const plugin = InstalledPluginSchema.parse(await options.plugins.update(id, input.version));
+    await refreshAgentTools(options);
+    return reply.send(plugin);
   }));
 
   app.delete("/api/v1/plugins/:id", protectedRoute, withErrorEnvelope(async (request, reply) => {
     const { id } = PluginParamsSchema.parse(request.params);
     await options.plugins.uninstall(id);
+    await refreshAgentTools(options);
     return reply.send({ ok: true });
   }));
 
@@ -127,4 +137,12 @@ export function registerPluginRoutes(app: FastifyInstance, options: RegisterPlug
       return reply.send({ ok: true });
     })
   );
+}
+
+async function refreshAgentTools(options: RegisterPluginRoutesOptions): Promise<void> {
+  try {
+    await options.refreshAgentTools?.();
+  } catch (error) {
+    console.warn(`Agent plugin tool reload unavailable: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }

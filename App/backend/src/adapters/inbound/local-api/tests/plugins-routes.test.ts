@@ -61,14 +61,19 @@ function createService(): PluginService {
   };
 }
 
-function createApp(plugins: PluginService, onEvent?: (event: unknown) => void): FastifyInstance {
+function createApp(
+  plugins: PluginService,
+  onEvent?: (event: unknown) => void,
+  refreshAgentTools?: () => Promise<void>
+): FastifyInstance {
   const progressBus = createProgressBus();
   if (onEvent) progressBus.on("plugin.capability_event", onEvent);
   const server = Fastify({ logger: false });
   registerPluginRoutes(server, {
     plugins,
     progressBus,
-    authenticateRuntimeToken: async () => undefined
+    authenticateRuntimeToken: async () => undefined,
+    refreshAgentTools
   });
   return server;
 }
@@ -76,7 +81,8 @@ function createApp(plugins: PluginService, onEvent?: (event: unknown) => void): 
 describe("plugin routes", () => {
   it("installs and manages plugins by id", async () => {
     const plugins = createService();
-    app = createApp(plugins);
+    const refreshAgentTools = vi.fn(async () => undefined);
+    app = createApp(plugins, undefined, refreshAgentTools);
 
     expect((await app.inject({ method: "POST", url: "/api/v1/plugins/install", payload: {
       pluginId: plugin.id,
@@ -87,6 +93,7 @@ describe("plugin routes", () => {
     expect((await app.inject({ method: "DELETE", url: `/api/v1/plugins/${plugin.id}` })).json()).toEqual({ ok: true });
     expect(plugins.install).toHaveBeenCalledWith(plugin.id, plugin.version);
     expect(plugins.uninstall).toHaveBeenCalledWith(plugin.id);
+    expect(refreshAgentTools).toHaveBeenCalledTimes(2);
   });
 
   it("streams capability events and returns only the terminal event", async () => {
