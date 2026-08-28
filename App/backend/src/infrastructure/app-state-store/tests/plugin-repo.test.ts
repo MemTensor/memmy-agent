@@ -50,6 +50,19 @@ describe("PluginRepository", () => {
       config: { database: "crossref" },
       approvedPermissions: manifest.permissions
     });
+
+    store.repositories.plugins.recordCall({
+      callId: "call-1",
+      pluginId: manifest.id,
+      pluginVersion: manifest.version,
+      capabilityId: "run",
+      adapterId: "http",
+      durationMs: 12.8,
+      outcome: "error",
+      errorCode: "plugin_timeout"
+    });
+    expect(store.db.prepare("SELECT duration_ms, outcome, error_code FROM plugin_call_logs WHERE call_id = ?")
+      .get("call-1")).toEqual({ duration_ms: 12, outcome: "error", error_code: "plugin_timeout" });
   });
 
   it("fails closed when a plugin does not exist", () => {

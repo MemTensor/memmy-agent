@@ -34,7 +34,19 @@ export interface PluginRepository {
   setState(id: string, state: PluginState, lastError?: string | null): PluginRecord;
   setConfig(id: string, config: Record<string, unknown>): PluginRecord;
   setApprovedPermissions(id: string, permissions: PluginPermission[]): PluginRecord;
+  recordCall(input: PluginCallLogInput): void;
   delete(id: string): boolean;
+}
+
+export interface PluginCallLogInput {
+  callId: string;
+  pluginId: string;
+  pluginVersion: string;
+  capabilityId: string;
+  adapterId: string;
+  durationMs: number;
+  outcome: "success" | "error" | "interrupted";
+  errorCode?: string | null;
 }
 
 interface PluginRow {
@@ -119,6 +131,24 @@ export function createPluginRepository(db: DatabaseSync): PluginRepository {
       ).run(JSON.stringify(PermissionsSchema.parse(permissions)), new Date().toISOString(), id);
       if (result.changes === 0) getRequired(id);
       return getRequired(id);
+    },
+
+    recordCall(input) {
+      db.prepare(`INSERT INTO plugin_call_logs (
+        call_id, plugin_id, plugin_version, capability_id, adapter_id,
+        duration_ms, outcome, error_code, called_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        input.callId,
+        input.pluginId,
+        input.pluginVersion,
+        input.capabilityId,
+        input.adapterId,
+        Math.max(0, Math.trunc(input.durationMs)),
+        input.outcome,
+        input.errorCode ?? null,
+        new Date().toISOString()
+      );
     },
 
     delete(id) {

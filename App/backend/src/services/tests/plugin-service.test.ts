@@ -161,6 +161,8 @@ describe("PluginService", () => {
     })) events.push(event);
     expect(events).toEqual([{ type: "result", output: { ok: true } }]);
     expect(runtimeHost.invoke).toBeDefined();
+    expect(store!.db.prepare("SELECT outcome, error_code FROM plugin_call_logs WHERE call_id = ?")
+      .get("call-1")).toEqual({ outcome: "success", error_code: null });
     expect(() => service.configure(release.manifest.id, {
       config: { database: "pubmed" }
     })).toThrow(/Disable plugin/);

@@ -242,7 +242,7 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
       options.repository.delete(id);
     },
 
-    invoke(rawCall) {
+    async *invoke(rawCall) {
       const call = CapabilityCallSchema.parse(rawCall);
       const plugin = required(call.pluginId);
       if (plugin.state !== "active") throw pluginError("plugin_unavailable", `Plugin is not active: ${plugin.id}`);
@@ -250,7 +250,40 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
       if (!plugin.manifest.capabilities.some((capability) => capability.id === call.capabilityId)) {
         throw pluginError("plugin_unavailable", `Capability not found: ${call.capabilityId}`);
       }
-      return options.runtimeHost.invoke(call);
+      const startedAt = Date.now();
+      let outcome: "success" | "error" | "interrupted" = "interrupted";
+      let errorCode: string | null = null;
+      try {
+        for await (const event of options.runtimeHost.invoke(call)) {
+          if (event.type === "result") outcome = "success";
+          if (event.type === "error") {
+            outcome = "error";
+            errorCode = event.code;
+          }
+          yield event;
+        }
+      } catch (error) {
+        outcome = "error";
+        errorCode = typeof (error as { code?: unknown })?.code === "string"
+          ? (error as { code: string }).code
+          : "plugin_runtime_error";
+        throw error;
+      } finally {
+        try {
+          options.repository.recordCall({
+            callId: call.callId,
+            pluginId: plugin.id,
+            pluginVersion: plugin.version,
+            capabilityId: call.capabilityId,
+            adapterId: plugin.manifest.runtime.adapter,
+            durationMs: Date.now() - startedAt,
+            outcome,
+            errorCode
+          });
+        } catch (error) {
+          console.warn(`Plugin call audit write failed: ${errorMessage(error)}`);
+        }
+      }
     },
 
     async cancel(id, callId) {
