@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createInMemoryPluginRegistry } from "../../adapters/outbound/plugin-registry/index.js";
+import { createInMemoryPluginRegistry, type PluginRelease } from "../../adapters/outbound/plugin-registry/index.js";
 import { createAppStateStore, type AppStateStore } from "../../infrastructure/app-state-store/index.js";
 import {
   createPluginService,
@@ -48,13 +48,18 @@ const release = {
   }
 };
 
-function createContext() {
+function createContext(releases: PluginRelease[] = [release]) {
   root = mkdtempSync(join(tmpdir(), "memmy-plugin-service-"));
   store = createAppStateStore({ databasePath: join(root, "app.sqlite") });
   const runtimeHost: PluginRuntimeHost = {
     supports: vi.fn(() => true),
     activate: vi.fn(async () => undefined),
-    deactivate: vi.fn(async () => undefined)
+    deactivate: vi.fn(async () => undefined),
+    async *invoke() {
+      yield { type: "result" as const, output: { ok: true } };
+    },
+    cancel: vi.fn(async () => undefined),
+    respond: vi.fn(async () => undefined)
   };
   const artifactManager: PluginArtifactManager = {
     install: vi.fn(async () => ({ artifactHash: null, rootPath: null })),
@@ -66,7 +71,7 @@ function createContext() {
     service: createPluginService({
       repository: store.repositories.plugins,
       secretStore: store.secretStore,
-      registry: createInMemoryPluginRegistry([release]),
+      registry: createInMemoryPluginRegistry(releases),
       runtimeHost,
       artifactManager
     })
@@ -117,5 +122,47 @@ describe("PluginService", () => {
     vi.mocked(runtimeHost.activate).mockRejectedValueOnce(new Error("offline"));
     await expect(service.enable(release.manifest.id)).rejects.toThrow(/offline/);
     expect(service.get(release.manifest.id)).toMatchObject({ state: "failed", lastError: "offline" });
+  });
+
+  it("invokes only active declared capabilities", async () => {
+    const { service, runtimeHost } = createContext();
+    await service.install(release.manifest.id);
+    service.configure(release.manifest.id, {
+      config: { database: "crossref" },
+      secrets: { "api-key": "secret" }
+    });
+    await service.approvePermissions(release.manifest.id, release.manifest.permissions);
+    await service.enable(release.manifest.id);
+    const events = [];
+    for await (const event of service.invoke({
+      callId: "call-1",
+      pluginId: release.manifest.id,
+      capabilityId: "run",
+      conversationId: "conversation-1",
+      input: {}
+    })) events.push(event);
+    expect(events).toEqual([{ type: "result", output: { ok: true } }]);
+    expect(runtimeHost.invoke).toBeDefined();
+  });
+
+  it("updates an active plugin and reactivates it atomically", async () => {
+    const nextRelease: PluginRelease = {
+      manifest: { ...release.manifest, version: "2.0.0" }
+    };
+    const { service, runtimeHost } = createContext([release, nextRelease]);
+    await service.install(release.manifest.id, "1.0.0");
+    service.configure(release.manifest.id, {
+      config: { database: "crossref" },
+      secrets: { "api-key": "secret" }
+    });
+    await service.approvePermissions(release.manifest.id, release.manifest.permissions);
+    await service.enable(release.manifest.id);
+    expect(await service.update(release.manifest.id, "2.0.0")).toMatchObject({
+      version: "2.0.0",
+      state: "active",
+      config: { database: "crossref" }
+    });
+    expect(runtimeHost.deactivate).toHaveBeenCalledWith(release.manifest.id);
+    expect(runtimeHost.activate).toHaveBeenCalledTimes(2);
   });
 });

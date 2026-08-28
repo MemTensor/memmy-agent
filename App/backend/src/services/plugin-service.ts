@@ -1,8 +1,11 @@
 /** Plugin installation and lifecycle service. */
 import {
+  CapabilityCallSchema,
   PluginManifestSchema,
   PluginPermissionSchema,
   type InstalledPlugin,
+  type CapabilityCall,
+  type CapabilityEvent,
   type PluginPermission,
   type UpdatePluginConfigInput
 } from "@memmy/local-api-contracts";
@@ -16,6 +19,9 @@ export interface PluginRuntimeHost {
   supports(adapterId: string): boolean;
   activate(plugin: PluginRecord, secrets: Readonly<Record<string, string>>): Promise<void>;
   deactivate(pluginId: string): Promise<void>;
+  invoke(call: CapabilityCall): AsyncIterable<CapabilityEvent>;
+  cancel(pluginId: string, callId: string): Promise<void>;
+  respond(pluginId: string, callId: string, interactionId: string, response: unknown): Promise<void>;
 }
 
 export type { PluginArtifactManager } from "../adapters/outbound/plugin-artifact/index.js";
@@ -24,11 +30,16 @@ export interface PluginService {
   list(): InstalledPlugin[];
   get(id: string): InstalledPlugin;
   install(pluginId: string, version?: string): Promise<InstalledPlugin>;
+  update(id: string, version?: string): Promise<InstalledPlugin>;
   configure(id: string, input: UpdatePluginConfigInput): InstalledPlugin;
   approvePermissions(id: string, permissions: PluginPermission[]): Promise<InstalledPlugin>;
   enable(id: string): Promise<InstalledPlugin>;
   disable(id: string): Promise<InstalledPlugin>;
   uninstall(id: string): Promise<void>;
+  invoke(call: CapabilityCall): AsyncIterable<CapabilityEvent>;
+  cancel(id: string, callId: string): Promise<void>;
+  respond(id: string, callId: string, interactionId: string, response: unknown): Promise<void>;
+  restoreActive(): Promise<void>;
 }
 
 export interface CreatePluginServiceOptions {
@@ -82,6 +93,68 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
         }));
       } catch (error) {
         await options.artifactManager.remove(artifact);
+        throw error;
+      }
+    },
+
+    async update(id, version) {
+      const previous = required(id);
+      const release = await options.registry.resolve(id, version);
+      const manifest = PluginManifestSchema.parse(release.manifest);
+      if (manifest.id !== id || (version && manifest.version !== version)) {
+        throw pluginError("plugin_invalid", "Registry returned a different plugin release");
+      }
+      if (!options.runtimeHost.supports(manifest.runtime.adapter)) {
+        throw pluginError("plugin_adapter_unsupported", `Unsupported plugin adapter: ${manifest.runtime.adapter}`);
+      }
+      if (previous.version === manifest.version && manifestsEqual(previous.manifest, manifest)) {
+        return publicPlugin(previous);
+      }
+
+      const artifact = await options.artifactManager.install({ ...release, manifest });
+      const approvedPermissions = previous.approvedPermissions.filter((approved) =>
+        manifest.permissions.some((declared) => permissionKey(approved) === permissionKey(declared))
+      );
+      const pendingApproval = !samePermissions(approvedPermissions, manifest.permissions);
+      const draft: PluginRecord = {
+        ...previous,
+        version: manifest.version,
+        manifest,
+        approvedPermissions,
+        state: pendingApproval ? "pending_approval" : "disabled",
+        ...artifact
+      };
+      try {
+        validateConfig(draft, draft.config);
+        const secrets = pendingApproval ? {} : readSecrets(draft, options.secretStore);
+        if (previous.state === "active") await options.runtimeHost.deactivate(id);
+        let updated = options.repository.save({
+          manifest,
+          state: draft.state,
+          ...artifact
+        });
+        updated = options.repository.setApprovedPermissions(id, approvedPermissions);
+        if (previous.state === "active" && !pendingApproval) {
+          await options.runtimeHost.activate(updated, secrets);
+          updated = options.repository.setState(id, "active");
+        }
+        if (artifact.rootPath !== previous.rootPath) await options.artifactManager.remove(previous);
+        return publicPlugin(updated);
+      } catch (error) {
+        await options.runtimeHost.deactivate(id).catch(() => undefined);
+        let restored = options.repository.save({
+          manifest: previous.manifest,
+          state: previous.state === "active" ? "disabled" : previous.state,
+          artifactHash: previous.artifactHash,
+          rootPath: previous.rootPath
+        });
+        restored = options.repository.setApprovedPermissions(id, previous.approvedPermissions);
+        restored = options.repository.setConfig(id, previous.config);
+        if (previous.state === "active") {
+          await options.runtimeHost.activate(restored, readSecrets(restored, options.secretStore));
+          options.repository.setState(id, "active");
+        }
+        if (artifact.rootPath !== previous.rootPath) await options.artifactManager.remove(artifact);
         throw error;
       }
     },
@@ -159,6 +232,39 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
         options.secretStore.delete(secretRef(id, key));
       }
       options.repository.delete(id);
+    },
+
+    invoke(rawCall) {
+      const call = CapabilityCallSchema.parse(rawCall);
+      const plugin = required(call.pluginId);
+      if (plugin.state !== "active") throw pluginError("plugin_unavailable", `Plugin is not active: ${plugin.id}`);
+      if (!hasAllPermissions(plugin)) throw pluginError("plugin_permission_denied", "Plugin permissions have changed");
+      if (!plugin.manifest.capabilities.some((capability) => capability.id === call.capabilityId)) {
+        throw pluginError("plugin_unavailable", `Capability not found: ${call.capabilityId}`);
+      }
+      return options.runtimeHost.invoke(call);
+    },
+
+    async cancel(id, callId) {
+      required(id);
+      await options.runtimeHost.cancel(id, callId);
+    },
+
+    async respond(id, callId, interactionId, response) {
+      required(id);
+      await options.runtimeHost.respond(id, callId, interactionId, response);
+    },
+
+    async restoreActive() {
+      for (const plugin of options.repository.list().filter((candidate) => candidate.state === "active")) {
+        try {
+          if (!hasAllPermissions(plugin)) throw new Error("Plugin permissions have changed");
+          validateConfig(plugin, plugin.config);
+          await options.runtimeHost.activate(plugin, readSecrets(plugin, options.secretStore));
+        } catch (error) {
+          options.repository.setState(plugin.id, "failed", errorMessage(error));
+        }
+      }
     }
   };
 }
