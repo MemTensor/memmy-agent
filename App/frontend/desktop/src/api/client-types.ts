@@ -16,6 +16,7 @@ import {
 import { createHttpLocalDataClient, type LocalDataClient } from "./local-data-client.js";
 import { createHttpMemoryRuntimeClient, type MemoryRuntimeClient } from "./memory-runtime-client.js";
 import { createMemmyAgentClient, type MemmyAgentClient } from "./memmy-agent-client.js";
+import { createHttpPluginsClient, type PluginsClient } from "./plugins-client.js";
 import { createHttpTokenQuotaClient, type TokenQuotaClient } from "./token-quota-client.js";
 import { configureUserTimeZone } from "../lib/user-time-zone.js";
 
@@ -32,6 +33,7 @@ export interface AppClients {
   byokTokenUsage: ByokTokenUsageClient;
   asr: AsrClient;
   memmyAgent: MemmyAgentClient;
+  plugins: PluginsClient;
   tokenQuota: TokenQuotaClient;
 }
 
@@ -58,6 +60,7 @@ export function createAppClients(input: CreateAppClientsInput): AppClients {
     byokTokenUsage: createHttpByokTokenUsageClient(input.runtimeConfig),
     asr: createHttpAsrClient(input.runtimeConfig),
     memmyAgent: createMemmyAgentClient(input.runtimeConfig.agentGateway),
+    plugins: createHttpPluginsClient(input.runtimeConfig),
     tokenQuota: createHttpTokenQuotaClient(input.runtimeConfig)
   };
 }

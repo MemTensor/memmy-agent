@@ -4,6 +4,7 @@ import {
   InstalledPluginSchema,
   InvokePluginCapabilityInputSchema,
   PluginInteractionResponseInputSchema,
+  PluginUiRendererResponseSchema,
   UpdatePluginConfigInputSchema,
   UpdatePluginInputSchema,
   UpdatePluginPermissionsInputSchema,
@@ -43,6 +44,11 @@ export function registerPluginRoutes(app: FastifyInstance, options: RegisterPlug
   app.get("/api/v1/plugins/:id", protectedRoute, withErrorEnvelope(async (request, reply) => {
     const { id } = PluginParamsSchema.parse(request.params);
     return reply.send(InstalledPluginSchema.parse(options.plugins.get(id)));
+  }));
+
+  app.get("/api/v1/plugins/:id/ui/renderer", protectedRoute, withErrorEnvelope(async (request, reply) => {
+    const { id } = PluginParamsSchema.parse(request.params);
+    return reply.send(PluginUiRendererResponseSchema.parse({ html: await options.plugins.readUiRenderer(id) }));
   }));
 
   app.put("/api/v1/plugins/:id/config", protectedRoute, withErrorEnvelope(async (request, reply) => {

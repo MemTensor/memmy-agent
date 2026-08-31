@@ -22,6 +22,7 @@ export type { PluginRuntimeHost } from "../adapters/outbound/plugin-runtime/inde
 export interface PluginService {
   list(): InstalledPlugin[];
   get(id: string): InstalledPlugin;
+  readUiRenderer(id: string): Promise<string>;
   install(pluginId: string, version?: string): Promise<InstalledPlugin>;
   update(id: string, version?: string): Promise<InstalledPlugin>;
   configure(id: string, input: UpdatePluginConfigInput): InstalledPlugin;
@@ -58,6 +59,13 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
 
     get(id) {
       return publicPlugin(required(id));
+    },
+
+    async readUiRenderer(id) {
+      const plugin = required(id);
+      const entry = plugin.manifest.ui?.renderer?.entry;
+      if (!entry) throw pluginError("plugin_unavailable", `Plugin has no UI renderer: ${id}`);
+      return options.artifactManager.readTextFile(plugin, entry, 512 * 1024);
     },
 
     async install(pluginId, version) {

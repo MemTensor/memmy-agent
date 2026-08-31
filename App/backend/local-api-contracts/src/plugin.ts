@@ -5,6 +5,13 @@ export const JsonSchemaSchema = z.record(z.string(), z.unknown());
 export type JsonSchema = z.infer<typeof JsonSchemaSchema>;
 
 const PluginIdentifierSchema = z.string().trim().min(1).max(128).regex(/^[a-z0-9][a-z0-9._-]*$/);
+const PluginPackagePathSchema = z.string().trim().min(1).max(512).refine((value) => (
+  !value.startsWith("/")
+  && !value.includes("\\")
+  && !value.includes("\0")
+  && !/^[A-Za-z]:/.test(value)
+  && value.split("/").every((segment) => segment.length > 0 && segment !== "." && segment !== "..")
+), "Plugin package path must be a safe relative path");
 
 export const PluginRuntimeSchema = z.object({
   adapter: z.enum(["mcp", "http", "command"]),
@@ -48,6 +55,18 @@ export const PluginPermissionSchema = z.discriminatedUnion("type", [
 ]);
 export type PluginPermission = z.infer<typeof PluginPermissionSchema>;
 
+export const PluginUiRendererSchema = z.object({
+  entry: PluginPackagePathSchema,
+  capabilities: z.array(PluginIdentifierSchema).min(1).max(100).optional(),
+  height: z.number().int().min(120).max(1_200).optional()
+});
+export type PluginUiRenderer = z.infer<typeof PluginUiRendererSchema>;
+
+export const PluginUiSchema = z.object({
+  renderer: PluginUiRendererSchema.optional()
+}).passthrough();
+export type PluginUi = z.infer<typeof PluginUiSchema>;
+
 export const PluginManifestSchema = z.object({
   apiVersion: z.literal("memmy/v1"),
   id: PluginIdentifierSchema,
@@ -57,7 +76,7 @@ export const PluginManifestSchema = z.object({
   capabilities: z.array(PluginCapabilitySchema).min(1),
   permissions: z.array(PluginPermissionSchema),
   configSchema: JsonSchemaSchema.optional(),
-  ui: z.record(z.string(), z.unknown()).optional()
+  ui: PluginUiSchema.optional()
 }).superRefine((manifest, context) => {
   const ids = new Set<string>();
   for (const [index, capability] of manifest.capabilities.entries()) {
@@ -69,6 +88,15 @@ export const PluginManifestSchema = z.object({
       });
     }
     ids.add(capability.id);
+  }
+  for (const [index, capabilityId] of (manifest.ui?.renderer?.capabilities ?? []).entries()) {
+    if (!ids.has(capabilityId)) {
+      context.addIssue({
+        code: "custom",
+        path: ["ui", "renderer", "capabilities", index],
+        message: `Unknown renderer capability id: ${capabilityId}`
+      });
+    }
   }
 });
 export type PluginManifest = z.infer<typeof PluginManifestSchema>;
@@ -149,6 +177,7 @@ export const InstalledPluginSchema = z.object({
   updatedAt: z.string().datetime()
 });
 export type InstalledPlugin = z.infer<typeof InstalledPluginSchema>;
+export const InstalledPluginsSchema = z.array(InstalledPluginSchema);
 
 export const InstallPluginInputSchema = z.object({
   pluginId: PluginIdentifierSchema,
@@ -183,6 +212,9 @@ export const PluginInteractionResponseInputSchema = z.object({
   response: z.unknown()
 });
 export type PluginInteractionResponseInput = z.infer<typeof PluginInteractionResponseInputSchema>;
+
+export const PluginUiRendererResponseSchema = z.object({ html: z.string() });
+export type PluginUiRendererResponse = z.infer<typeof PluginUiRendererResponseSchema>;
 
 export const PluginCapabilityEventPayloadSchema = z.object({
   pluginId: PluginIdentifierSchema,

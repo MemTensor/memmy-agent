@@ -1,8 +1,9 @@
 /** Home page module. */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type CSSProperties, type DragEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject, type SetStateAction, type UIEvent } from "react";
-import type { AgentGatewayStartupIssue } from "@memmy/local-api-contracts";
+import type { AgentGatewayStartupIssue, InstalledPlugin } from "@memmy/local-api-contracts";
 import { hydrateAgentThreadInBackground, refreshAgentTaskList, useAgentRuntimeBridge, type AgentTaskStateCoordinator } from "../app/agent-runtime-bridge.js";
 import { useApiClients } from "../app/providers.js";
+import { usePluginUi } from "../app/plugin-ui-context.js";
 import { FOCUSED_AGENT_CHAT_STORAGE_KEY, clearFocusedAgentTarget, isAccountTokenQuotaExhausted, normalizeAgentChatId, readLaunchAgentChatId, removeLaunchAgentChatIdFromUrl } from "../app/routes.js";
 import {
   MemmyAgentRequestError,
@@ -78,6 +79,7 @@ import { AgentEnvironmentPanel } from "./agent-environment-panel.js";
 import { AgentGoalBar, type AgentGoalControlRequest } from "./agent-goal-bar.js";
 import { AgentQueuedMessageList } from "./agent-queued-message-list.js";
 import { AgentThreadMessages, ChatImageLightbox } from "./agent-thread-messages.js";
+import { PluginCapabilityHost } from "./plugin-capability-host.js";
 import { AgentWorkspaceContext } from "./agent-workspace-context.js";
 import { AppFrame } from "./app-frame.js";
 import {
@@ -998,6 +1000,7 @@ function ComposerCaretMenu(props: {
  */
 export function HomePage() {
   const { clients } = useApiClients();
+  const { calls: pluginUiCalls } = usePluginUi();
   const { state, dispatch } = useAppState();
   const modelWorkspace = createModelWorkspace(state.modelConfig);
   const { language, t } = useTranslation();
@@ -1023,6 +1026,7 @@ export function HomePage() {
   const [historyDagPanel, setHistoryDagPanel] = useState<HistoryDagPanelState>({ open: false });
   const [environmentPanelOpen, setEnvironmentPanelOpen] = useState(false);
   const [previewPanelOpen, setPreviewPanelOpen] = useState(false);
+  const [installedPlugins, setInstalledPlugins] = useState<InstalledPlugin[]>([]);
   const [previewPanelWidth, setPreviewPanelWidth] = useState(520);
   const [isCreatingChat, setIsCreatingChat] = useState(false);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
@@ -1092,6 +1096,11 @@ export function HomePage() {
   draftTargetRevisionRef.current = state.agent.draftTargetRevisionByScope;
   const asrRecorder = useAsrRecorder(clients?.asr, { emptyAudioMessage: t("home.asrEmptyAudio") });
   const chatScopeKey = agentChatScopeKey(state.agent.currentChatId, state.agent.newChatRequestId);
+  const pluginUiPluginKey = useMemo(() => [...new Set(pluginUiCalls.map((call) => call.pluginId))].sort().join("\n"), [pluginUiCalls]);
+  const visiblePluginCalls = useMemo(() => pluginUiCalls.filter((call) => (
+    call.conversationId === state.agent.currentChatId
+    || call.conversationId === state.agent.currentSessionKey
+  )), [pluginUiCalls, state.agent.currentChatId, state.agent.currentSessionKey]);
   const modelSelectionScopeKey = state.agent.currentChatId ?? NEW_TASK_MODEL_SCOPE_KEY;
   const modelWorkspaceMode = state.bootstrap?.app.userMode === "byok" ? "byok" : "account";
   const selectedModelPreset = state.agent.pendingPresetByScope[modelSelectionScopeKey]
@@ -1106,6 +1115,17 @@ export function HomePage() {
     setAnalyticsModelSource(resolvedConversationModel.candidate?.source ?? null);
     return () => setAnalyticsModelSource(null);
   }, [resolvedConversationModel.candidate?.source]);
+  useEffect(() => {
+    let active = true;
+    if (!clients) {
+      setInstalledPlugins([]);
+      return () => { active = false; };
+    }
+    void clients.plugins.list()
+      .then((plugins) => { if (active) setInstalledPlugins(plugins); })
+      .catch(() => { if (active) setInstalledPlugins([]); });
+    return () => { active = false; };
+  }, [clients, pluginUiPluginKey]);
   const input = composerDrafts[chatScopeKey] ?? "";
   const composerCommandDraft = resolveComposerCommandDraft(
     input,
@@ -3388,6 +3408,11 @@ export function HomePage() {
                 sanitizePlatformApiErrors={sanitizePlatformApiErrors}
                 artifactClient={sessionArtifactClient}
                 memoryRuntimeClient={clients?.memoryRuntime ?? null}
+              />
+              <PluginCapabilityHost
+                calls={visiblePluginCalls}
+                plugins={installedPlugins}
+                client={clients?.plugins ?? null}
               />
             </div>
           </div>

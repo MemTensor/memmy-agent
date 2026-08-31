@@ -41,6 +41,22 @@ describe("PluginManifestSchema", () => {
     const { permissions: _permissions, ...withoutPermissions } = manifest;
     expect(() => PluginManifestSchema.parse(withoutPermissions)).toThrow();
   });
+
+  it("accepts a scoped renderer and rejects unsafe or unknown entries", () => {
+    expect(PluginManifestSchema.parse({
+      ...manifest,
+      ui: { renderer: { entry: "ui/index.html", capabilities: ["review"], height: 320 } }
+    }).ui?.renderer).toEqual({ entry: "ui/index.html", capabilities: ["review"], height: 320 });
+
+    expect(() => PluginManifestSchema.parse({
+      ...manifest,
+      ui: { renderer: { entry: "../outside.html" } }
+    })).toThrow(/safe relative path/);
+    expect(() => PluginManifestSchema.parse({
+      ...manifest,
+      ui: { renderer: { entry: "ui/index.html", capabilities: ["missing"] } }
+    })).toThrow(/Unknown renderer capability/);
+  });
 });
 
 describe("CapabilityEventSchema", () => {

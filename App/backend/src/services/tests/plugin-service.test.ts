@@ -66,6 +66,7 @@ function createContext(releases: PluginRelease[] = [release]) {
       artifactHash: pluginRelease.artifact?.sha256.toLowerCase() ?? null,
       rootPath: null
     })),
+    readTextFile: vi.fn(async () => "<main>renderer</main>"),
     remove: vi.fn(async () => undefined)
   };
   return {
@@ -82,6 +83,21 @@ function createContext(releases: PluginRelease[] = [release]) {
 }
 
 describe("PluginService", () => {
+  it("loads a declared renderer from the installed plugin artifact", async () => {
+    const rendererRelease: PluginRelease = {
+      manifest: { ...release.manifest, ui: { renderer: { entry: "ui/index.html", capabilities: ["run"] } } }
+    };
+    const { service, artifactManager } = createContext([rendererRelease]);
+    await service.install(rendererRelease.manifest.id);
+
+    await expect(service.readUiRenderer(rendererRelease.manifest.id)).resolves.toBe("<main>renderer</main>");
+    expect(artifactManager.readTextFile).toHaveBeenCalledWith(
+      expect.objectContaining({ id: rendererRelease.manifest.id }),
+      "ui/index.html",
+      512 * 1024
+    );
+  });
+
   it("installs, configures, approves, enables, disables, and uninstalls", async () => {
     const { service, runtimeHost, artifactManager } = createContext();
     expect((await service.install(release.manifest.id)).state).toBe("pending_approval");
