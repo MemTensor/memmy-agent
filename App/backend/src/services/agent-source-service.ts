@@ -557,6 +557,7 @@ async function collectSourceMessages(
     messages: [],
     errors: []
   };
+  const conversationIds = new Set<string>();
 
   emitProgress(scanOptions, {
     sourceId,
@@ -585,7 +586,8 @@ async function collectSourceMessages(
     })) {
       scanOptions.signal?.throwIfAborted();
       collected.messages.push(message);
-      if (!collected.conversationIds.includes(message.conversationId)) {
+      if (!conversationIds.has(message.conversationId)) {
+        conversationIds.add(message.conversationId);
         collected.conversationIds.push(message.conversationId);
       }
       if (collected.messages.length % SCAN_MESSAGE_YIELD_INTERVAL === 0) {
