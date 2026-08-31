@@ -7,6 +7,7 @@ import {
   type CapabilityCall,
   type CapabilityEvent,
   type PluginPermission,
+  type PluginUiSlot,
   type UpdatePluginConfigInput
 } from "@memmy/local-api-contracts";
 import { Ajv } from "ajv";
@@ -22,6 +23,7 @@ export type { PluginRuntimeHost } from "../adapters/outbound/plugin-runtime/inde
 export interface PluginService {
   list(): InstalledPlugin[];
   get(id: string): InstalledPlugin;
+  readUi(id: string, slot: PluginUiSlot): Promise<string>;
   install(pluginId: string, version?: string): Promise<InstalledPlugin>;
   update(id: string, version?: string): Promise<InstalledPlugin>;
   configure(id: string, input: UpdatePluginConfigInput): InstalledPlugin;
@@ -60,6 +62,13 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
       return publicPlugin(required(id));
     },
 
+    async readUi(id, slot) {
+      const plugin = required(id);
+      const entry = plugin.manifest.ui?.[slot]?.entry;
+      if (!entry) throw pluginError("plugin_unavailable", `Plugin has no UI ${slot}: ${id}`);
+      return options.artifactManager.readTextFile(plugin, entry, 512 * 1024);
+    },
+
     async install(pluginId, version) {
       const release = await options.registry.resolve(pluginId, version);
       const manifest = PluginManifestSchema.parse(release.manifest);
@@ -73,10 +82,7 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
       const existing = options.repository.get(pluginId);
       if (existing) {
         if (existing.version === manifest.version && manifestsEqual(existing.manifest, manifest)) {
-          const releaseHash = release.artifact?.sha256.toLowerCase() ?? null;
-          if (existing.artifactHash !== releaseHash) {
-            throw pluginError("conflict", `Plugin release digest changed: ${pluginId}@${manifest.version}`);
-          }
+          assertReleaseDigest(existing, release.artifact?.sha256);
           return publicPlugin(existing);
         }
         throw pluginError("conflict", `Plugin is already installed: ${pluginId}@${existing.version}`);
@@ -105,7 +111,11 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
       if (!options.runtimeHost.supports(manifest.runtime.adapter)) {
         throw pluginError("plugin_adapter_unsupported", `Unsupported plugin adapter: ${manifest.runtime.adapter}`);
       }
-      if (previous.version === manifest.version && manifestsEqual(previous.manifest, manifest)) {
+      if (previous.version === manifest.version) {
+        if (!manifestsEqual(previous.manifest, manifest)) {
+          throw pluginError("conflict", `Plugin release manifest changed: ${id}@${manifest.version}`);
+        }
+        assertReleaseDigest(previous, release.artifact?.sha256);
         return publicPlugin(previous);
       }
 
@@ -373,11 +383,22 @@ function samePermissions(left: PluginPermission[], right: PluginPermission[]): b
 }
 
 function permissionKey(permission: PluginPermission): string {
-  return JSON.stringify(permission);
+  switch (permission.type) {
+    case "network": return JSON.stringify([permission.type, [...permission.hosts].sort()]);
+    case "filesystem": return JSON.stringify([permission.type, permission.access, [...permission.paths].sort()]);
+    case "secret": return JSON.stringify([permission.type, [...permission.keys].sort()]);
+    case "host-service": return JSON.stringify([permission.type, [...permission.services].sort()]);
+  }
 }
 
 function manifestsEqual(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function assertReleaseDigest(plugin: Pick<PluginRecord, "id" | "version" | "artifactHash">, sha256?: string): void {
+  if (plugin.artifactHash !== (sha256?.toLowerCase() ?? null)) {
+    throw pluginError("conflict", `Plugin release digest changed: ${plugin.id}@${plugin.version}`);
+  }
 }
 
 function pluginError(code: string, message: string): Error {

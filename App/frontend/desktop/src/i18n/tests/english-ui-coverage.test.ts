@@ -10,7 +10,6 @@ const allowedSourceFiles = new Set([
   "i18n/messages.ts",
   "lib/nickname.ts",
   "pages/memory/skill-demo-data.ts",
-  "pages/literature-review-demo-data.ts",
   // Provider aliases are identifiers used for logo matching, not visible UI copy.
   "components/model-provider-logo.tsx",
   // English ui coverage tests.

@@ -88,6 +88,7 @@ describe("plugin host end to end", () => {
       runtimeHost,
       artifactManager: {
         install: async () => ({ artifactHash: null, rootPath: null }),
+        readTextFile: async () => "",
         remove: async () => undefined
       }
     });

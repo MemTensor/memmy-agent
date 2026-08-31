@@ -8,14 +8,14 @@ import type { WorkspaceFilesListing } from "../../api/memmy-agent-client.js";
 import { readComposerReferenceDrag } from "../../lib/composer-file-reference.js";
 import type { ComposerContextReference } from "../../state/agent-composer-state.js";
 import {
-  LiteratureReviewPreviewPane,
-  type LiteratureReviewPreviewEntry
-} from "../literature-review-preview-pane.js";
+  WorkspaceArtifactPanel,
+  type WorkspaceArtifactEntry
+} from "../workspace-artifact-panel.js";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const SESSION_KEY = "websocket:chat-real";
-const ROOT_ENTRIES: LiteratureReviewPreviewEntry[] = [
+const ROOT_ENTRIES: WorkspaceArtifactEntry[] = [
   {
     path: "downloads",
     name: "downloads",
@@ -39,7 +39,7 @@ const ROOT_ENTRIES: LiteratureReviewPreviewEntry[] = [
   }
 ];
 
-const ENTRIES_BY_DIRECTORY: Record<string, LiteratureReviewPreviewEntry[]> = {
+const ENTRIES_BY_DIRECTORY: Record<string, WorkspaceArtifactEntry[]> = {
   "": ROOT_ENTRIES,
   downloads: [
     {
@@ -82,7 +82,7 @@ function listing(path: string, entries = ENTRIES_BY_DIRECTORY[path] ?? [], trunc
   };
 }
 
-describe("LiteratureReviewPreviewPane", () => {
+describe("WorkspaceArtifactPanel", () => {
   let container: HTMLDivElement;
   let root: Root;
   let onAddToChat: ReturnType<typeof vi.fn<(reference: ComposerContextReference) => void>>;
@@ -126,8 +126,8 @@ describe("LiteratureReviewPreviewPane", () => {
       "综述.tex"
     ]);
     expect(activeTab()?.textContent).toContain("研究资料.pdf");
-    expect(container.querySelector(".litrev-preview-document")?.textContent).toContain("真实文件预览");
-    expect(container.querySelector(".litrev-preview-crumb")?.textContent).toContain("memmy-agent");
+    expect(container.querySelector(".workspace-artifact-preview-document")?.textContent).toContain("真实文件预览");
+    expect(container.querySelector(".workspace-artifact-preview-crumb")?.textContent).toContain("memmy-agent");
     expect(container.querySelectorAll('[role="separator"]')).toHaveLength(2);
   });
 
@@ -135,10 +135,10 @@ describe("LiteratureReviewPreviewPane", () => {
     act(() => folderButtons()[0]!.click());
     expect(fileButtonLabels()).not.toContain("研究资料.pdf");
 
-    const toggle = container.querySelector<HTMLButtonElement>(".litrev-file-browser__toggle")!;
+    const toggle = container.querySelector<HTMLButtonElement>(".workspace-artifact-file-browser__toggle")!;
     act(() => toggle.click());
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
-    expect(container.querySelector(".litrev-file-list")).toBeNull();
+    expect(container.querySelector(".workspace-artifact-file-list")).toBeNull();
     expect(activeTab()?.textContent).toContain("研究资料.pdf");
 
     act(() => toggle.click());
@@ -172,7 +172,7 @@ describe("LiteratureReviewPreviewPane", () => {
     expect(loadPreview).toHaveBeenLastCalledWith("downloads/证据.pdf");
 
     await act(async () => {
-      activeTab()!.querySelector<HTMLButtonElement>(".litrev-file-tab__close")!.click();
+      activeTab()!.querySelector<HTMLButtonElement>(".workspace-artifact-file-tab__close")!.click();
       await Promise.resolve();
     });
     expect(container.querySelectorAll('[role="tab"]')).toHaveLength(1);
@@ -258,7 +258,7 @@ describe("LiteratureReviewPreviewPane", () => {
     await act(async () => {
       root.render(
         <I18nProvider language="zh-CN">
-          <LiteratureReviewPreviewPane
+          <WorkspaceArtifactPanel
             sessionKey={SESSION_KEY}
             rootLabel="memmy-agent"
             loadDirectory={loadDirectory}
@@ -274,11 +274,11 @@ describe("LiteratureReviewPreviewPane", () => {
   }
 
   function folderButtons(): HTMLButtonElement[] {
-    return [...container.querySelectorAll<HTMLButtonElement>(".litrev-file-folder__toggle")];
+    return [...container.querySelectorAll<HTMLButtonElement>(".workspace-artifact-file-folder__toggle")];
   }
 
   function fileButtons(): HTMLButtonElement[] {
-    return [...container.querySelectorAll<HTMLButtonElement>("button.litrev-file-item")];
+    return [...container.querySelectorAll<HTMLButtonElement>("button.workspace-artifact-file-item")];
   }
 
   function fileButtonLabels(): string[] {
@@ -286,7 +286,7 @@ describe("LiteratureReviewPreviewPane", () => {
   }
 
   function activeTab(): HTMLDivElement | null {
-    return container.querySelector<HTMLDivElement>(".litrev-file-tab--active");
+    return container.querySelector<HTMLDivElement>(".workspace-artifact-file-tab--active");
   }
 });
 

@@ -5,6 +5,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  readFile,
   realpath,
   rename,
   rm,
@@ -67,6 +68,21 @@ export function createPluginArtifactManager(options: CreatePluginArtifactManager
       } finally {
         await rm(temp, { recursive: true, force: true });
       }
+    },
+
+    async readTextFile(plugin, relativePath, maxBytes) {
+      if (!plugin.rootPath) throw new Error("Plugin has no installed artifact");
+      const installRoot = await realpath(configuredInstallRoot);
+      const root = await realpath(plugin.rootPath);
+      assertDescendant(installRoot, root);
+      const target = resolve(root, relativePath);
+      assertDescendant(root, target);
+      const info = await lstat(target);
+      if (!info.isFile() || info.isSymbolicLink()) throw new Error("Plugin UI entry must be a regular file");
+      if (await realpath(target) !== target) throw new Error("Plugin UI entry must not be a symbolic link");
+      const content = await readFile(target);
+      if (info.size > maxBytes || content.byteLength > maxBytes) throw new Error("Plugin UI entry exceeded size limit");
+      return content.toString("utf8");
     },
 
     async remove(plugin) {

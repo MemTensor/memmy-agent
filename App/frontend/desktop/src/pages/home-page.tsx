@@ -1,8 +1,9 @@
 /** Home page module. */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type CSSProperties, type DragEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject, type SetStateAction, type UIEvent } from "react";
-import type { AgentGatewayStartupIssue } from "@memmy/local-api-contracts";
+import type { AgentGatewayStartupIssue, InstalledPlugin, PluginArtifactRef, PluginCommandContribution } from "@memmy/local-api-contracts";
 import { hydrateAgentThreadInBackground, refreshAgentTaskList, useAgentRuntimeBridge, type AgentTaskStateCoordinator } from "../app/agent-runtime-bridge.js";
 import { useApiClients } from "../app/providers.js";
+import { usePluginUi } from "../app/plugin-ui-context.js";
 import { FOCUSED_AGENT_CHAT_STORAGE_KEY, clearFocusedAgentTarget, isAccountTokenQuotaExhausted, normalizeAgentChatId, readLaunchAgentChatId, removeLaunchAgentChatIdFromUrl } from "../app/routes.js";
 import {
   MemmyAgentRequestError,
@@ -45,7 +46,6 @@ import {
   mergeComposerContextReferences,
   readComposerReferenceDrag
 } from "../lib/composer-file-reference.js";
-import { assessLiteratureSourceBatch } from "../lib/literature-source-files.js";
 import { useTaskBus, type TaskBusAgentMessage } from "../lib/task-bus.js";
 import type { AppAction } from "../state/app-actions.js";
 import { agentActions, appActions, createAgentOperationError } from "../state/app-actions.js";
@@ -78,6 +78,7 @@ import { AgentEnvironmentPanel } from "./agent-environment-panel.js";
 import { AgentGoalBar, type AgentGoalControlRequest } from "./agent-goal-bar.js";
 import { AgentQueuedMessageList } from "./agent-queued-message-list.js";
 import { AgentThreadMessages, ChatImageLightbox } from "./agent-thread-messages.js";
+import { PluginCapabilityHost } from "./plugin-capability-host.js";
 import { AgentWorkspaceContext } from "./agent-workspace-context.js";
 import { AppFrame } from "./app-frame.js";
 import {
@@ -105,15 +106,9 @@ import {
   type ComposerContextChip
 } from "./home-composer-quick-actions.js";
 import {
-  LITREV_CONTEXT_STORAGE_KEY,
-  LITREV_PROJECT_CONTEXT_STORAGE_KEY,
-  LITREV_PROMPT_STORAGE_KEY,
-  LITREV_SOURCE_INPUT_STORAGE_KEY
-} from "./literature-review-model.js";
-import {
-  LiteratureReviewPreviewPane,
-  type LiteratureReviewPreviewContent
-} from "./literature-review-preview-pane.js";
+  WorkspaceArtifactPanel,
+  type WorkspaceArtifactContent
+} from "./workspace-artifact-panel.js";
 import { Mic, Pause, Plus, Send } from "./memory/memory-prototype-icons.js";
 import { resolveWorkspaceEnvironmentScope, useWorkspaceEnvironment } from "./use-workspace-environment.js";
 import { ArrowDown, BookOpenText, CalendarCheck2, Check, ChevronDown, Folder, History, PanelRight, Plus as LucidePlus, RotateCw, SlidersHorizontal, SquareSlash, Target, X } from "lucide-react";
@@ -382,9 +377,9 @@ export function addCapabilityBlockToDraft(command: string, draft: string): strin
   return existingDraft ? `${command}  ${existingDraft}` : `${command}  `;
 }
 
-/** Builds a suggestion draft with its capability locked in as a visible prefix chip. */
-export function homeSuggestionDraft(text: string, capability?: "/literature-review"): string {
-  return capability ? `${capability}  ${text}` : text;
+/** Builds a plain suggestion draft; plugin commands are registered dynamically. */
+export function homeSuggestionDraft(text: string): string {
+  return text;
 }
 
 /** Replaces only the trailing slash query, preserving text before it. */
@@ -445,6 +440,38 @@ export function replaceSlashQueryAtSelection(
 
 export function isAgentConversationAtBottom(element: Pick<HTMLElement, "scrollTop" | "scrollHeight" | "clientHeight">): boolean {
   return element.scrollTop + element.clientHeight >= element.scrollHeight - AGENT_CONVERSATION_BOTTOM_EPSILON_PX;
+}
+
+export function appendPluginArtifact(draft: string, artifact: PluginArtifactRef): string {
+  const separator = draft && !draft.endsWith("\n") ? "\n" : "";
+  return `${draft}${separator}${artifact.name.replace(/[\r\n]/g, " ")}: ${artifact.uri.replace(/[\r\n]/g, "")}`;
+}
+
+export interface PluginCommandTarget {
+  plugin: InstalledPlugin;
+  command: PluginCommandContribution;
+}
+
+export function collectPluginCommandTargets(plugins: InstalledPlugin[], reserved: Iterable<string> = []): PluginCommandTarget[] {
+  const seen = new Set([...reserved].map((command) => command.toLowerCase()));
+  return plugins.filter((plugin) => plugin.state === "active").flatMap((plugin) => (
+    (plugin.manifest.commands ?? []).flatMap((command) => {
+      if (seen.has(command.command)) return [];
+      seen.add(command.command);
+      return [{ plugin, command }];
+    })
+  ));
+}
+
+export function parsePluginCommandInvocation(input: string, targets: PluginCommandTarget[]): {
+  plugin: InstalledPlugin;
+  contribution: PluginCommandContribution;
+  arguments: string;
+} | null {
+  const trimmed = input.trim();
+  const token = trimmed.split(/\s/, 1)[0]?.toLowerCase();
+  const target = targets.find((item) => item.command.command === token);
+  return target ? { plugin: target.plugin, contribution: target.command, arguments: trimmed.slice(target.command.command.length).trim() } : null;
 }
 
 export function hasActiveAgentConversation(currentChatId: string | null, messageCount: number): boolean {
@@ -998,6 +1025,7 @@ function ComposerCaretMenu(props: {
  */
 export function HomePage() {
   const { clients } = useApiClients();
+  const { calls: pluginUiCalls, openSurface } = usePluginUi();
   const { state, dispatch } = useAppState();
   const modelWorkspace = createModelWorkspace(state.modelConfig);
   const { language, t } = useTranslation();
@@ -1023,6 +1051,7 @@ export function HomePage() {
   const [historyDagPanel, setHistoryDagPanel] = useState<HistoryDagPanelState>({ open: false });
   const [environmentPanelOpen, setEnvironmentPanelOpen] = useState(false);
   const [previewPanelOpen, setPreviewPanelOpen] = useState(false);
+  const [installedPlugins, setInstalledPlugins] = useState<InstalledPlugin[]>([]);
   const [previewPanelWidth, setPreviewPanelWidth] = useState(520);
   const [isCreatingChat, setIsCreatingChat] = useState(false);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
@@ -1092,6 +1121,12 @@ export function HomePage() {
   draftTargetRevisionRef.current = state.agent.draftTargetRevisionByScope;
   const asrRecorder = useAsrRecorder(clients?.asr, { emptyAudioMessage: t("home.asrEmptyAudio") });
   const chatScopeKey = agentChatScopeKey(state.agent.currentChatId, state.agent.newChatRequestId);
+  const pluginUiPluginKey = useMemo(() => [...new Set(pluginUiCalls.map((call) => call.pluginId))].sort().join("\n"), [pluginUiCalls]);
+  const visiblePluginCalls = useMemo(() => pluginUiCalls.filter((call) => (
+    call.conversationId === state.agent.currentChatId
+    || call.conversationId === state.agent.currentSessionKey
+    || call.conversationId === chatScopeKey
+  )), [chatScopeKey, pluginUiCalls, state.agent.currentChatId, state.agent.currentSessionKey]);
   const modelSelectionScopeKey = state.agent.currentChatId ?? NEW_TASK_MODEL_SCOPE_KEY;
   const modelWorkspaceMode = state.bootstrap?.app.userMode === "byok" ? "byok" : "account";
   const selectedModelPreset = state.agent.pendingPresetByScope[modelSelectionScopeKey]
@@ -1106,6 +1141,17 @@ export function HomePage() {
     setAnalyticsModelSource(resolvedConversationModel.candidate?.source ?? null);
     return () => setAnalyticsModelSource(null);
   }, [resolvedConversationModel.candidate?.source]);
+  useEffect(() => {
+    let active = true;
+    if (!clients) {
+      setInstalledPlugins([]);
+      return () => { active = false; };
+    }
+    void clients.plugins.list()
+      .then((plugins) => { if (active) setInstalledPlugins(plugins); })
+      .catch(() => { if (active) setInstalledPlugins([]); });
+    return () => { active = false; };
+  }, [clients, pluginUiPluginKey]);
   const input = composerDrafts[chatScopeKey] ?? "";
   const composerCommandDraft = resolveComposerCommandDraft(
     input,
@@ -1134,7 +1180,7 @@ export function HomePage() {
     : null;
   const previewRootLabel = activeProject?.name
     ?? activeTask?.title
-    ?? t("litrev.preview.taskFolder");
+    ?? t("workspaceArtifact.taskFolder");
   const environmentScope = resolveWorkspaceEnvironmentScope(
     state.agent.currentSessionKey,
     selectedDraftProject?.id ?? null,
@@ -1201,7 +1247,7 @@ export function HomePage() {
     if (!client) return Promise.reject(new Error("agent_client_unavailable"));
     return client.listWorkspaceFiles(sessionKey, relativePath);
   }, [clients?.memmyAgent]);
-  const loadWorkspaceFilePreview = useCallback(async (relativePath: string): Promise<LiteratureReviewPreviewContent | null> => {
+  const loadWorkspaceFilePreview = useCallback(async (relativePath: string): Promise<WorkspaceArtifactContent | null> => {
     const client = clients?.memmyAgent;
     if (!client || !previewSessionKey) return null;
     const artifact = await client.resolveArtifact(relativePath, previewSessionKey);
@@ -1775,14 +1821,20 @@ export function HomePage() {
     argHint: "",
     synthetic: true
   };
-  const literatureReviewSlashCommand: SlashCommandPaletteItem = {
-    command: "/literature-review",
-    title: t("home.capability.literatureReview"),
-    description: t("home.capability.literatureReviewHint"),
-    icon: "book-open",
-    argHint: t("home.capability.literatureReviewArgHint"),
+  const pluginCommandTargets = collectPluginCommandTargets(installedPlugins, [
+    "/stop",
+    "/last-compaction",
+    COMPOSER_GOAL_COMMAND,
+    ...slashCommands.map((command) => command.command)
+  ]);
+  const pluginSlashCommands: SlashCommandPaletteItem[] = pluginCommandTargets.map(({ command }) => ({
+    command: command.command,
+    title: command.name,
+    description: command.description,
+    icon: command.icon ?? "sparkles",
+    argHint: command.argHint ?? "",
     synthetic: true
-  };
+  }));
   const slashQuery = slashMenuDismissed
     ? null
     : slashPickerOpen
@@ -1790,7 +1842,7 @@ export function HomePage() {
       : slashQueryFromInput(composerInput.slice(0, Math.min(composerSelection.start, composerInput.length)));
   const localizedSlashCommands = localizeSlashCommands(slashCommands, language, t);
   const slashCommandsWithLocal = [
-    literatureReviewSlashCommand,
+    ...pluginSlashCommands,
     goalSlashCommand,
     lastCompactionSlashCommand,
     ...localizedSlashCommands.filter((command) => (
@@ -1827,11 +1879,9 @@ export function HomePage() {
   const hasComposerPayload = Boolean(input.trim() || pendingAttachments.some((item) => item.status === "ready"));
   const hasComposerIntent = Boolean(input.trim() || pendingAttachments.length > 0);
   const stopInFlight = state.agent.currentChatId ? Boolean(state.agent.stopInFlightByChatId[state.agent.currentChatId]) : false;
-  // Literature review launches entirely in the renderer; ordinary messages still
-  // use the latest survey queue, connection, project and model guards.
-  const isLocalWorkflowCommand = /(?:^|\s)\/literature-review(?=\s|$)/i.test(input);
-  const composerSendDisabled = isLocalWorkflowCommand
-    ? false
+  const isPluginCommand = Boolean(parsePluginCommandInvocation(input, pluginCommandTargets));
+  const composerSendDisabled = isPluginCommand
+    ? pendingAttachments.length > 0 || !clients
     : stopInFlight
       || !hasComposerPayload
       || hasBlockedPendingMedia
@@ -2212,31 +2262,36 @@ export function HomePage() {
 
   function runExactLocalSlashCommand(command: string): boolean {
     const normalized = command.trim().toLowerCase();
-    if (/(?:^|\s)\/literature-review(?=\s|$)/i.test(command)) {
-      const sourceInput = command.trim();
-      const request = sourceInput
-        .replace(/(?:^|\s)\/literature-review(?=\s|$)/i, " ")
-        .replace(/(?:^|\s)@\S+/g, " ")
-        .replace(/\s+/g, " ")
-        .trim();
-      try {
-        window.sessionStorage.setItem(LITREV_PROMPT_STORAGE_KEY, request);
-        window.sessionStorage.setItem(LITREV_SOURCE_INPUT_STORAGE_KEY, sourceInput);
-        window.sessionStorage.setItem(LITREV_CONTEXT_STORAGE_KEY, JSON.stringify(contextChips));
-        if (draftTarget.kind === "project") {
-          window.sessionStorage.setItem(LITREV_PROJECT_CONTEXT_STORAGE_KEY, draftTarget.projectId);
-        } else {
-          window.sessionStorage.removeItem(LITREV_PROJECT_CONTEXT_STORAGE_KEY);
+    const pluginInvocation = parsePluginCommandInvocation(command, pluginCommandTargets);
+    if (pluginInvocation && pendingAttachments.length > 0) return false;
+    if (pluginInvocation && clients) {
+      const { plugin, contribution, arguments: commandArguments } = pluginInvocation;
+      const conversationId = state.agent.currentChatId ?? state.agent.currentSessionKey ?? chatScopeKey;
+      const invocationInput = {
+        command: contribution.command,
+        arguments: commandArguments,
+        context: {
+          ...(draftTarget.kind === "project" ? { projectId: draftTarget.projectId } : {}),
+          references: contextChips
         }
-      } catch {
-        // Losing launch context leaves the literature page with an empty launch request.
+      };
+      const surface = plugin.manifest.ui?.surface;
+      if (contribution.surface && surface && (!surface.capabilities || surface.capabilities.includes(contribution.capabilityId))) {
+        openSurface({ pluginId: plugin.id, capabilityId: contribution.capabilityId, conversationId, input: invocationInput });
+        dispatch(appActions.navigate("/plugin"));
       }
-      rememberSlashCommand("/literature-review");
+      void clients.plugins.invoke(plugin.id, contribution.capabilityId, { conversationId, input: invocationInput }).catch((error) => {
+        dispatch(agentActions.operationFailed("chat", createAgentOperationError({
+          source: "send",
+          message: error instanceof Error ? error.message : "network_unavailable",
+          scopeKey: chatScopeKey
+        })));
+      });
+      rememberSlashCommand(contribution.command);
       setSelectedComposerCommandForScope(chatScopeKey, null);
       setCurrentComposerDraft("");
       setSlashPickerOpen(false);
       dispatch(agentActions.composerContextReferencesUpdated(chatScopeKey, []));
-      dispatch(appActions.navigate("/literature-review"));
       return true;
     }
     if (pendingAttachments.length > 0) return false;
@@ -2467,8 +2522,8 @@ export function HomePage() {
     ));
   }
 
-  function selectHomeSuggestion(text: string, capability?: "/literature-review") {
-    const nextDraft = homeSuggestionDraft(text, capability);
+  function selectHomeSuggestion(text: string) {
+    const nextDraft = homeSuggestionDraft(text);
     setSelectedComposerCommandForScope(chatScopeKey, null);
     setCurrentComposerDraft(nextDraft);
     setComposerSelection({ start: nextDraft.length, end: nextDraft.length });
@@ -2914,11 +2969,10 @@ export function HomePage() {
       }
     );
     if (reference) {
-      const literatureSources = assessLiteratureSourceBatch(files).accepted;
       addComposerContextChip({
         ...reference,
-        fileCount: literatureSources.length,
-        totalBytes: literatureSources.reduce((total, file) => total + file.size, 0)
+        fileCount: files.length,
+        totalBytes: files.reduce((total, file) => total + file.size, 0)
       });
     }
     event.target.value = "";
@@ -3144,7 +3198,7 @@ export function HomePage() {
   ) : null;
 
   const previewPanel = previewPanelOpen && hasActiveConversation ? (
-    <LiteratureReviewPreviewPane
+    <WorkspaceArtifactPanel
       key={previewSessionKey ?? chatScopeKey}
       sessionKey={previewSessionKey ?? ""}
       rootLabel={previewRootLabel}
@@ -3154,7 +3208,7 @@ export function HomePage() {
       refreshKey={`${currentHistoryVersion}:${isCurrentAgentRunning ? "running" : "idle"}`}
       onWidthChange={setPreviewPanelWidth}
       toolbarEnd={previewToggle}
-      emptyLabel={t("literatureReview.workspace.noFiles")}
+      emptyLabel={t("workspaceArtifact.noFiles")}
       emptyDetail={previewRootLabel}
     />
   ) : null;
@@ -3317,7 +3371,7 @@ export function HomePage() {
               <div className="home-prompt-suggestions" aria-label={t("home.empty")}>
                 <button
                   type="button"
-                  onClick={() => selectHomeSuggestion(t("home.suggestionPrompt.one"), "/literature-review")}
+                  onClick={() => selectHomeSuggestion(t("home.suggestionPrompt.one"))}
                 >
                   <span className="home-prompt-suggestions__icon" aria-hidden="true"><BookOpenText size={15} /></span>
                   <span>{t("home.suggestion.one")}</span>
@@ -3388,6 +3442,13 @@ export function HomePage() {
                 sanitizePlatformApiErrors={sanitizePlatformApiErrors}
                 artifactClient={sessionArtifactClient}
                 memoryRuntimeClient={clients?.memoryRuntime ?? null}
+              />
+              <PluginCapabilityHost
+                calls={visiblePluginCalls}
+                plugins={installedPlugins}
+                client={clients?.plugins ?? null}
+                uploadFiles={clients ? (files) => clients.memmyAgent.uploadAgentMedia(files) : undefined}
+                onAddArtifact={(artifact) => setCurrentComposerDraft((current) => appendPluginArtifact(current, artifact))}
               />
             </div>
           </div>

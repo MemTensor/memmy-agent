@@ -55,6 +55,8 @@ describe("PluginArtifactManager", () => {
     const installed = await manager.install(input.release);
     expect(installed.artifactHash).toBe(input.release.artifact.sha256);
     expect(readFileSync(join(installed.rootPath!, "runtime/plugin.sh"), "utf8")).toContain("#!/bin/sh");
+    await expect(manager.readTextFile(installed, "runtime/plugin.sh", 1_024)).resolves.toContain("#!/bin/sh");
+    await expect(manager.readTextFile(installed, "../outside.html", 1_024)).rejects.toThrow(/escapes/);
     await manager.remove(installed);
     expect(() => readFileSync(join(installed.rootPath!, "runtime/plugin.sh"))).toThrow();
   });

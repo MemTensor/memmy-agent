@@ -43,6 +43,14 @@ describe("RuntimeApp bootstrap loading", () => {
     expect(source).toContain("formatAgentSourceScanRequestError(error, undefined, translationRef.current)");
   });
 
+  it("routes validated plugin capability events into the plugin UI host", () => {
+    const source = readFileSync(resolve(__dirname, "../..", "app.tsx"), "utf8");
+
+    expect(source).toContain('events.addEventListener("plugin.capability_event"');
+    expect(source).toContain('parsed?.type === "plugin.capability_event"');
+    expect(source).toContain("receivePluginEvent(parsed.payload)");
+  });
+
   it("keeps desktop update coordination above route-scoped content", () => {
     const appSource = readFileSync(resolve(__dirname, "../..", "app.tsx"), "utf8");
     const routerSource = readFileSync(resolve(__dirname, "..", "router.tsx"), "utf8");

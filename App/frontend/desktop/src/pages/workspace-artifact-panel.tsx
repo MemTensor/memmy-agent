@@ -1,4 +1,4 @@
-/** Shared literature-review artifact preview for ordinary and workflow chats. */
+/** Shared workspace artifact browser and preview. */
 import {
   useCallback,
   useEffect,
@@ -23,24 +23,24 @@ import { writeComposerReferenceDrag } from "../lib/composer-file-reference.js";
 import type { ComposerContextReference } from "../state/agent-composer-state.js";
 import { SidebarResizeHandle, useResizableSidebar } from "./sidebar-resize.js";
 
-const LITREV_PREVIEW_WIDTH_STORAGE_KEY = "memmy.literatureReview.previewWidth";
-const LITREV_FILE_BROWSER_WIDTH_STORAGE_KEY = "memmy.literatureReview.fileBrowserWidth";
+const WORKSPACE_ARTIFACT_WIDTH_STORAGE_KEY = "memmy.workspaceArtifact.previewWidth";
+const WORKSPACE_ARTIFACT_BROWSER_WIDTH_STORAGE_KEY = "memmy.workspaceArtifact.fileBrowserWidth";
 const ROOT_DIRECTORY_KEY = "";
 
-export type LiteratureReviewPreviewEntry = WorkspaceFileEntry;
+export type WorkspaceArtifactEntry = WorkspaceFileEntry;
 
-export interface LiteratureReviewPreviewSection {
+export interface WorkspaceArtifactSection {
   heading: string;
   body: string;
 }
 
 /** Renderer-safe preview produced from a session-scoped artifact. */
-export interface LiteratureReviewPreviewContent {
+export interface WorkspaceArtifactContent {
   title: string;
-  sections: LiteratureReviewPreviewSection[];
+  sections: WorkspaceArtifactSection[];
 }
 
-export interface LiteratureReviewPreviewPaneProps {
+export interface WorkspaceArtifactPanelProps {
   /** Identifies the active session; the gateway resolves its project root/cwd. */
   sessionKey: string;
   /** Fallback label until the gateway returns its authoritative root label. */
@@ -48,7 +48,7 @@ export interface LiteratureReviewPreviewPaneProps {
   /** Loads one real directory level. An empty relative path means the root. */
   loadDirectory: (sessionKey: string, relativePath: string) => Promise<WorkspaceFilesListing>;
   /** Loads renderer-safe content for a selected session-relative file path. */
-  loadPreview: (relativePath: string) => Promise<LiteratureReviewPreviewContent | null>;
+  loadPreview: (relativePath: string) => Promise<WorkspaceArtifactContent | null>;
   /** Receives the same session-relative path reference produced by dragging. */
   onAddToChat: (reference: ComposerContextReference) => void;
   /** Bump when a completed turn may have generated new workspace files. */
@@ -80,14 +80,10 @@ function shouldOpenByDefault(entry: WorkspaceFileEntry): boolean {
 }
 
 /**
- * Literature-review artifact browser shared by every chat.
- *
- * The shell mirrors the committed literature workflow (tabs, folder/file-tree
- * toggles, both resize handles, drag, and context-menu add to chat). Directory
- * data is loaded lazily from the active session; this module never creates mock
- * files or receives a renderer-controlled workspace root.
+ * Directory data is loaded lazily from the active session. The component never
+ * creates mock files or accepts a renderer-controlled workspace root.
  */
-export function LiteratureReviewPreviewPane(props: LiteratureReviewPreviewPaneProps): ReactNode {
+export function WorkspaceArtifactPanel(props: WorkspaceArtifactPanelProps): ReactNode {
   const { t } = useTranslation();
   const loadDirectoryRef = useRef(props.loadDirectory);
   const loadPreviewRef = useRef(props.loadPreview);
@@ -104,7 +100,7 @@ export function LiteratureReviewPreviewPane(props: LiteratureReviewPreviewPanePr
   const [treeLoadFailed, setTreeLoadFailed] = useState(false);
   const [previewPath, setPreviewPath] = useState<string | null>(null);
   const [openPreviewTabs, setOpenPreviewTabs] = useState<string[]>([]);
-  const [previewContent, setPreviewContent] = useState<LiteratureReviewPreviewContent | null>(null);
+  const [previewContent, setPreviewContent] = useState<WorkspaceArtifactContent | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [fileTreeOpen, setFileTreeOpen] = useState(true);
   const [collapsedPreviewFolders, setCollapsedPreviewFolders] = useState<Record<string, boolean>>({});
@@ -114,14 +110,14 @@ export function LiteratureReviewPreviewPane(props: LiteratureReviewPreviewPanePr
     y: number;
   } | null>(null);
   const previewResize = useResizableSidebar({
-    storageKey: LITREV_PREVIEW_WIDTH_STORAGE_KEY,
+    storageKey: WORKSPACE_ARTIFACT_WIDTH_STORAGE_KEY,
     defaultWidth: 520,
     minWidth: 360,
     maxWidth: 760,
     resizeDirection: -1
   });
   const fileBrowserResize = useResizableSidebar({
-    storageKey: LITREV_FILE_BROWSER_WIDTH_STORAGE_KEY,
+    storageKey: WORKSPACE_ARTIFACT_BROWSER_WIDTH_STORAGE_KEY,
     defaultWidth: 200,
     minWidth: 160,
     maxWidth: 360
@@ -295,7 +291,7 @@ export function LiteratureReviewPreviewPane(props: LiteratureReviewPreviewPanePr
         <button
           type="button"
           key={entry.path}
-          className={`litrev-file-item${previewPath === entry.path ? " litrev-file-item--active" : ""}`}
+          className={`workspace-artifact-file-item${previewPath === entry.path ? " workspace-artifact-file-item--active" : ""}`}
           draggable
           onDragStart={(event) => beginFileDrag(event, entry.path, entry.name)}
           onContextMenu={(event) => openFileContextMenu(event, entry.path, entry.name)}
@@ -309,10 +305,10 @@ export function LiteratureReviewPreviewPane(props: LiteratureReviewPreviewPanePr
     const collapsed = collapsedPreviewFolders[entry.path] !== false;
     const childListing = listingsByDirectory[entry.path];
     return (
-      <div key={entry.path} className="litrev-file-folder">
+      <div key={entry.path} className="workspace-artifact-file-folder">
         <button
           type="button"
-          className="litrev-file-folder__toggle"
+          className="workspace-artifact-file-folder__toggle"
           aria-expanded={!collapsed}
           onClick={() => toggleDirectory(entry)}
         >
@@ -320,14 +316,14 @@ export function LiteratureReviewPreviewPane(props: LiteratureReviewPreviewPanePr
           <strong>{entry.name}</strong>
         </button>
         {!collapsed ? (
-          <div className="litrev-file-folder__children">
+          <div className="workspace-artifact-file-folder__children">
             {loadingDirectories[entry.path] && childListing === undefined ? (
-              <span className="litrev-file-item">{t("common.loading")}</span>
+              <span className="workspace-artifact-file-item">{t("common.loading")}</span>
             ) : (
               <>
                 {(childListing?.entries ?? []).map(renderEntry)}
                 {childListing?.truncated ? (
-                  <span className="litrev-file-item" title={props.truncatedLabel}>{props.truncatedLabel ?? "…"}</span>
+                  <span className="workspace-artifact-file-item" title={props.truncatedLabel}>{props.truncatedLabel ?? "…"}</span>
                 ) : null}
               </>
             )}
@@ -341,14 +337,14 @@ export function LiteratureReviewPreviewPane(props: LiteratureReviewPreviewPanePr
   const hasEntries = Boolean(rootListing?.entries.length);
   const rootLoading = rootListing === undefined;
   const resolvedRootLabel = rootListing?.root.label || props.rootLabel;
-  const emptyLabel = props.emptyLabel ?? t("literatureReview.workspace.noFiles");
+  const emptyLabel = props.emptyLabel ?? t("workspaceArtifact.noFiles");
   const emptyDetail = props.emptyDetail ?? resolvedRootLabel;
   const previewUnavailableLabel = props.previewUnavailableLabel ?? t("common.preview");
 
   return (
     <>
       <SidebarResizeHandle
-        label={t("litrev.workspace.resize")}
+        label={t("workspaceArtifact.resize")}
         width={previewResize.width}
         minWidth={previewResize.minWidth}
         maxWidth={previewResize.maxWidth}
@@ -356,24 +352,24 @@ export function LiteratureReviewPreviewPane(props: LiteratureReviewPreviewPanePr
         onResizeStart={previewResize.beginResize}
         onResizeBy={previewResize.resizeBy}
       />
-      <aside className="litrev-preview-pane litrev-preview-pane--lifted" style={previewResize.sidebarStyle}>
-        <header className="litrev-preview-toolbar">
+      <aside className="workspace-artifact-preview-pane workspace-artifact-preview-pane--lifted" style={previewResize.sidebarStyle}>
+        <header className="workspace-artifact-preview-toolbar">
           {hasEntries ? (
             <button
               type="button"
-              className="litrev-file-browser__toggle"
-              aria-label={t("litrev.preview.toggleFiles")}
+              className="workspace-artifact-file-browser__toggle"
+              aria-label={t("workspaceArtifact.toggleFiles")}
               aria-expanded={fileTreeOpen}
               onClick={() => setFileTreeOpen((open) => !open)}
             >
               {fileTreeOpen ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}
             </button>
           ) : null}
-          <div className="litrev-file-tabs" role="tablist" aria-label={t("litrev.preview.openFiles")}>
+          <div className="workspace-artifact-file-tabs" role="tablist" aria-label={t("workspaceArtifact.openFiles")}>
             {openPreviewTabs.map((path) => {
               const active = previewPath === path;
               return (
-                <div key={path} className={`litrev-file-tab${active ? " litrev-file-tab--active" : ""}`} role="presentation">
+                <div key={path} className={`workspace-artifact-file-tab${active ? " workspace-artifact-file-tab--active" : ""}`} role="presentation">
                   <button
                     type="button"
                     role="tab"
@@ -385,7 +381,7 @@ export function LiteratureReviewPreviewPane(props: LiteratureReviewPreviewPanePr
                   </button>
                   <button
                     type="button"
-                    className="litrev-file-tab__close"
+                    className="workspace-artifact-file-tab__close"
                     aria-label={t("common.close")}
                     onClick={(event) => {
                       event.stopPropagation();
@@ -399,26 +395,26 @@ export function LiteratureReviewPreviewPane(props: LiteratureReviewPreviewPanePr
             })}
           </div>
           {props.toolbarEnd ? (
-            <div className="litrev-preview-toolbar__actions">{props.toolbarEnd}</div>
+            <div className="workspace-artifact-preview-toolbar__actions">{props.toolbarEnd}</div>
           ) : null}
         </header>
-        <div className="litrev-preview-body">
+        <div className="workspace-artifact-preview-body">
           <aside
-            className={`litrev-file-browser${fileTreeOpen && hasEntries ? "" : " litrev-file-browser--collapsed"}`}
+            className={`workspace-artifact-file-browser${fileTreeOpen && hasEntries ? "" : " workspace-artifact-file-browser--collapsed"}`}
             style={fileBrowserResize.sidebarStyle}
           >
             {fileTreeOpen && hasEntries ? (
-              <nav className="litrev-file-list">
+              <nav className="workspace-artifact-file-list">
                 {(rootListing?.entries ?? []).map(renderEntry)}
                 {rootListing?.truncated ? (
-                  <span className="litrev-file-item" title={props.truncatedLabel}>{props.truncatedLabel ?? "…"}</span>
+                  <span className="workspace-artifact-file-item" title={props.truncatedLabel}>{props.truncatedLabel ?? "…"}</span>
                 ) : null}
               </nav>
             ) : null}
           </aside>
           {fileTreeOpen && hasEntries ? (
             <SidebarResizeHandle
-              label={t("litrev.preview.resizeFiles")}
+              label={t("workspaceArtifact.resizeFiles")}
               width={fileBrowserResize.width}
               minWidth={fileBrowserResize.minWidth}
               maxWidth={fileBrowserResize.maxWidth}
@@ -427,10 +423,10 @@ export function LiteratureReviewPreviewPane(props: LiteratureReviewPreviewPanePr
               onResizeBy={fileBrowserResize.resizeBy}
             />
           ) : null}
-          <section className="litrev-preview-main">
+          <section className="workspace-artifact-preview-main">
             {previewPath && previewContent ? (
-              <article className="litrev-preview-document">
-                <div className="litrev-preview-crumb">{resolvedRootLabel} › {fileNameFromPath(previewPath)}</div>
+              <article className="workspace-artifact-preview-document">
+                <div className="workspace-artifact-preview-crumb">{resolvedRootLabel} › {fileNameFromPath(previewPath)}</div>
                 <h2>{previewContent.title}</h2>
                 {previewContent.sections.map((section) => (
                   <section key={section.heading}>
@@ -440,7 +436,7 @@ export function LiteratureReviewPreviewPane(props: LiteratureReviewPreviewPanePr
                 ))}
               </article>
             ) : (
-              <div className="litrev-preview-empty">
+              <div className="workspace-artifact-preview-empty">
                 <Folder size={28} aria-hidden="true" />
                 <strong>
                   {rootLoading || previewLoading

@@ -12,6 +12,7 @@ import {
   type AgentTaskStateCoordinator
 } from "./app/agent-runtime-bridge.js";
 import { AppProviders, useApiClients } from "./app/providers.js";
+import { usePluginUi } from "./app/plugin-ui-context.js";
 import { AppRouter } from "./app/router.js";
 import { UpdateCoordinatorProvider } from "./app/update-coordinator.js";
 import { GithubStarPromptHost } from "./components/github-star-prompt-host.js";
@@ -65,6 +66,7 @@ export function App() {
 function RuntimeApp() {
   const { state, dispatch } = useAppState();
   const { clients, setClients } = useApiClients();
+  const { receive: receivePluginEvent } = usePluginUi();
   const { track } = useAnalytics();
   const { t } = useTranslation();
   const translationRef = useRef(t);
@@ -286,6 +288,10 @@ function RuntimeApp() {
               ))
             );
         });
+        events.addEventListener("plugin.capability_event", (event) => {
+          const parsed = parseSseEvent(event);
+          if (parsed?.type === "plugin.capability_event") receivePluginEvent(parsed.payload);
+        });
         events.onerror = () => dispatch(appActions.eventStatusChanged("reconnecting"));
       } catch (error) {
         if (!isActive) {
@@ -305,7 +311,7 @@ function RuntimeApp() {
         clearTimeout(timeout);
       }
     };
-  }, [bootKey, dispatch, setClients]);
+  }, [bootKey, dispatch, receivePluginEvent, setClients]);
 
   return (
     <UpdateCoordinatorProvider>

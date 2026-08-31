@@ -41,6 +41,36 @@ describe("PluginManifestSchema", () => {
     const { permissions: _permissions, ...withoutPermissions } = manifest;
     expect(() => PluginManifestSchema.parse(withoutPermissions)).toThrow();
   });
+
+  it("accepts a scoped renderer and rejects unsafe or unknown entries", () => {
+    expect(PluginManifestSchema.parse({
+      ...manifest,
+      ui: { renderer: { entry: "ui/index.html", capabilities: ["review"], height: 320 } }
+    }).ui?.renderer).toEqual({ entry: "ui/index.html", capabilities: ["review"], height: 320 });
+
+    expect(() => PluginManifestSchema.parse({
+      ...manifest,
+      ui: { renderer: { entry: "../outside.html" } }
+    })).toThrow(/safe relative path/);
+    expect(() => PluginManifestSchema.parse({
+      ...manifest,
+      ui: { renderer: { entry: "ui/index.html", capabilities: ["missing"] } }
+    })).toThrow(/Unknown renderer capability/);
+  });
+
+  it("registers commands and a full plugin surface against declared capabilities", () => {
+    const parsed = PluginManifestSchema.parse({
+      ...manifest,
+      commands: [{ command: "/review", name: "Review", description: "Create a review", capabilityId: "review", surface: true }],
+      ui: { surface: { entry: "ui/surface.html", capabilities: ["review"] } }
+    });
+    expect(parsed.commands?.[0]?.command).toBe("/review");
+    expect(parsed.ui?.surface?.entry).toBe("ui/surface.html");
+    expect(() => PluginManifestSchema.parse({
+      ...manifest,
+      commands: [{ command: "/review", name: "Review", description: "Create a review", capabilityId: "missing" }]
+    })).toThrow(/Unknown command capability/);
+  });
 });
 
 describe("CapabilityEventSchema", () => {

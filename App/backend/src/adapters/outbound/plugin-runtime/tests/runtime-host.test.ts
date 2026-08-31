@@ -66,13 +66,16 @@ async function collect(iterable: AsyncIterable<CapabilityEvent>): Promise<Capabi
 }
 
 describe("PluginRuntimeHost", () => {
-  it("validates input and output around adapter execution", async () => {
+  it("validates input and output without sharing plugin schema ids", async () => {
     const runtimeAdapter = adapter([
       { type: "progress", current: 1, total: 1 },
       { type: "result", output: { text: "done" } }
     ]);
+    const installed = plugin();
+    installed.manifest.capabilities[0]!.inputSchema.$id = "shared";
+    installed.manifest.capabilities[0]!.outputSchema.$id = "shared";
     const host = createPluginRuntimeHost(new PluginAdapterRegistry([runtimeAdapter]));
-    await host.activate(plugin(), {});
+    await host.activate(installed, {});
 
     expect(await collect(host.invoke({
       callId: "call-1",

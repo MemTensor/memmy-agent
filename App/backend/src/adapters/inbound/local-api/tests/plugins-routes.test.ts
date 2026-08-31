@@ -43,6 +43,7 @@ function createService(): PluginService {
   return {
     list: vi.fn(() => [plugin]),
     get: vi.fn(() => plugin),
+    readUi: vi.fn(async (_id, slot) => `<main>${slot}</main>`),
     install: vi.fn(async () => plugin),
     update: vi.fn(async () => plugin),
     configure: vi.fn(() => plugin),
@@ -94,6 +95,17 @@ describe("plugin routes", () => {
     expect(plugins.install).toHaveBeenCalledWith(plugin.id, plugin.version);
     expect(plugins.uninstall).toHaveBeenCalledWith(plugin.id);
     expect(refreshAgentTools).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns the installed plugin renderer", async () => {
+    const plugins = createService();
+    app = createApp(plugins);
+
+    const response = await app.inject({ method: "GET", url: `/api/v1/plugins/${plugin.id}/ui/renderer` });
+
+    expect(response.json()).toEqual({ html: "<main>renderer</main>" });
+    expect(plugins.readUi).toHaveBeenCalledWith(plugin.id, "renderer");
+    expect((await app.inject({ method: "GET", url: `/api/v1/plugins/${plugin.id}/ui/surface` })).json()).toEqual({ html: "<main>surface</main>" });
   });
 
   it("streams capability events and returns only the terminal event", async () => {
