@@ -70,7 +70,7 @@ describe("PluginCapabilityHost", () => {
 
     await act(async () => root.render(
       <I18nProvider language="en-US">
-        <PluginCapabilityHost calls={[call]} plugins={[plugin]} client={{ getRenderer: vi.fn(), cancel, respond }} />
+        <PluginCapabilityHost calls={[call]} plugins={[plugin]} client={{ getUi: vi.fn(), cancel, respond }} />
       </I18nProvider>
     ));
 
@@ -83,7 +83,7 @@ describe("PluginCapabilityHost", () => {
   });
 
   it("loads a declared renderer into a script-only sandbox", async () => {
-    const getRenderer = vi.fn(async () => "<main>Custom renderer</main>");
+    const getUi = vi.fn(async () => "<main>Custom renderer</main>");
     const cancel = vi.fn(async () => undefined);
     const respond = vi.fn(async () => undefined);
     const customPlugin = InstalledPluginSchema.parse({
@@ -100,13 +100,13 @@ describe("PluginCapabilityHost", () => {
 
     await act(async () => root.render(
       <I18nProvider language="en-US">
-        <PluginCapabilityHost calls={[call]} plugins={[customPlugin]} client={{ getRenderer, cancel, respond }} />
+        <PluginCapabilityHost calls={[call]} plugins={[customPlugin]} client={{ getUi, cancel, respond }} />
       </I18nProvider>
     ));
     await act(async () => Promise.resolve());
 
     const iframe = container.querySelector("iframe")!;
-    expect(getRenderer).toHaveBeenCalledWith(plugin.id);
+    expect(getUi).toHaveBeenCalledWith(plugin.id, "renderer");
     expect(iframe.getAttribute("sandbox")).toBe("allow-scripts");
     expect(iframe.getAttribute("srcdoc")).toContain("Content-Security-Policy");
     expect(iframe.style.height).toBe("240px");
@@ -147,7 +147,7 @@ describe("PluginCapabilityHost", () => {
         <PluginCapabilityHost
           calls={[call]}
           plugins={[plugin]}
-          client={{ getRenderer: vi.fn(), cancel, respond }}
+          client={{ getUi: vi.fn(), cancel, respond }}
           uploadFiles={uploadFiles}
           onAddArtifact={onAddArtifact}
         />

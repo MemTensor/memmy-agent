@@ -90,7 +90,7 @@ describe("PluginService", () => {
     const { service, artifactManager } = createContext([rendererRelease]);
     await service.install(rendererRelease.manifest.id);
 
-    await expect(service.readUiRenderer(rendererRelease.manifest.id)).resolves.toBe("<main>renderer</main>");
+    await expect(service.readUi(rendererRelease.manifest.id, "renderer")).resolves.toBe("<main>renderer</main>");
     expect(artifactManager.readTextFile).toHaveBeenCalledWith(
       expect.objectContaining({ id: rendererRelease.manifest.id }),
       "ui/index.html",

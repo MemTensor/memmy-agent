@@ -16,8 +16,18 @@ export interface PluginUiCall {
   events: CapabilityEvent[];
 }
 
+export interface PluginInvocationContext {
+  pluginId: string;
+  capabilityId: string;
+  conversationId: string;
+  input: unknown;
+}
+
 interface PluginUiContextValue {
   calls: PluginUiCall[];
+  activeSurface: PluginInvocationContext | null;
+  openSurface(context: PluginInvocationContext): void;
+  closeSurface(): void;
   receive(payload: PluginCapabilityEventPayload): void;
 }
 
@@ -26,10 +36,13 @@ const PluginUiContext = createContext<PluginUiContextValue | null>(null);
 
 export function PluginUiProvider(props: { children: ReactNode }) {
   const [calls, setCalls] = useState<PluginUiCall[]>([]);
+  const [activeSurface, setActiveSurface] = useState<PluginInvocationContext | null>(null);
   const receive = useCallback((payload: PluginCapabilityEventPayload) => {
     setCalls((current) => reducePluginUiCalls(current, payload));
   }, []);
-  const value = useMemo(() => ({ calls, receive }), [calls, receive]);
+  const openSurface = useCallback((context: PluginInvocationContext) => setActiveSurface(context), []);
+  const closeSurface = useCallback(() => setActiveSurface(null), []);
+  const value = useMemo(() => ({ calls, activeSurface, openSurface, closeSurface, receive }), [activeSurface, calls, closeSurface, openSurface, receive]);
   return <PluginUiContext.Provider value={value}>{props.children}</PluginUiContext.Provider>;
 }
 

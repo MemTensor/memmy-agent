@@ -46,7 +46,7 @@ const TASK_STATUS_KEYS = {
 interface PluginCapabilityHostProps {
   calls: PluginUiCall[];
   plugins: InstalledPlugin[];
-  client: Pick<PluginsClient, "getRenderer" | "cancel" | "respond"> | null;
+  client: Pick<PluginsClient, "getUi" | "cancel" | "respond"> | null;
   uploadFiles?: (files: UploadAgentMediaInput[]) => Promise<UploadedAgentMedia[]>;
   onAddArtifact?: (artifact: PluginArtifactRef) => void;
 }
@@ -404,7 +404,7 @@ function ErrorCard(props: { event: Extract<CapabilityEvent, { type: "error" }> }
 function SandboxedPluginRenderer(props: {
   call: PluginUiCall;
   height: number;
-  client: Pick<PluginsClient, "getRenderer">;
+  client: Pick<PluginsClient, "getUi">;
   onRespond(interactionId: string, response: unknown): Promise<void>;
   fallback: ReactNode;
 }) {
@@ -425,7 +425,7 @@ function SandboxedPluginRenderer(props: {
 
   useEffect(() => {
     let active = true;
-    void props.client.getRenderer(props.call.pluginId).then((content) => {
+    void props.client.getUi(props.call.pluginId, "renderer").then((content) => {
       if (active) setHtml(content);
     }).catch(() => {
       if (active) setFailed(true);

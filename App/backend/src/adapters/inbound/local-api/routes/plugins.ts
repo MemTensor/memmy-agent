@@ -5,6 +5,7 @@ import {
   InvokePluginCapabilityInputSchema,
   PluginInteractionResponseInputSchema,
   PluginUiRendererResponseSchema,
+  PluginUiSlotSchema,
   UpdatePluginConfigInputSchema,
   UpdatePluginInputSchema,
   UpdatePluginPermissionsInputSchema,
@@ -28,6 +29,7 @@ const PluginParamsSchema = z.object({ id: z.string().trim().min(1).max(128) });
 const CapabilityParamsSchema = PluginParamsSchema.extend({ capabilityId: z.string().trim().min(1).max(128) });
 const CallParamsSchema = PluginParamsSchema.extend({ callId: z.string().trim().min(1) });
 const InteractionParamsSchema = CallParamsSchema.extend({ interactionId: z.string().trim().min(1) });
+const UiParamsSchema = PluginParamsSchema.extend({ slot: PluginUiSlotSchema });
 
 export function registerPluginRoutes(app: FastifyInstance, options: RegisterPluginRoutesOptions): void {
   const protectedRoute = { preHandler: options.authenticateRuntimeToken };
@@ -46,9 +48,9 @@ export function registerPluginRoutes(app: FastifyInstance, options: RegisterPlug
     return reply.send(InstalledPluginSchema.parse(options.plugins.get(id)));
   }));
 
-  app.get("/api/v1/plugins/:id/ui/renderer", protectedRoute, withErrorEnvelope(async (request, reply) => {
-    const { id } = PluginParamsSchema.parse(request.params);
-    return reply.send(PluginUiRendererResponseSchema.parse({ html: await options.plugins.readUiRenderer(id) }));
+  app.get("/api/v1/plugins/:id/ui/:slot", protectedRoute, withErrorEnvelope(async (request, reply) => {
+    const { id, slot } = UiParamsSchema.parse(request.params);
+    return reply.send(PluginUiRendererResponseSchema.parse({ html: await options.plugins.readUi(id, slot) }));
   }));
 
   app.put("/api/v1/plugins/:id/config", protectedRoute, withErrorEnvelope(async (request, reply) => {

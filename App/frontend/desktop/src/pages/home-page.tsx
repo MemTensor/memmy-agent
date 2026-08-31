@@ -1,6 +1,6 @@
 /** Home page module. */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type CSSProperties, type DragEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject, type SetStateAction, type UIEvent } from "react";
-import type { AgentGatewayStartupIssue, InstalledPlugin, PluginArtifactRef } from "@memmy/local-api-contracts";
+import type { AgentGatewayStartupIssue, InstalledPlugin, PluginArtifactRef, PluginCommandContribution } from "@memmy/local-api-contracts";
 import { hydrateAgentThreadInBackground, refreshAgentTaskList, useAgentRuntimeBridge, type AgentTaskStateCoordinator } from "../app/agent-runtime-bridge.js";
 import { useApiClients } from "../app/providers.js";
 import { usePluginUi } from "../app/plugin-ui-context.js";
@@ -106,12 +106,6 @@ import {
   HomeContextChips,
   type ComposerContextChip
 } from "./home-composer-quick-actions.js";
-import {
-  LITREV_CONTEXT_STORAGE_KEY,
-  LITREV_PROJECT_CONTEXT_STORAGE_KEY,
-  LITREV_PROMPT_STORAGE_KEY,
-  LITREV_SOURCE_INPUT_STORAGE_KEY
-} from "./literature-review-model.js";
 import {
   LiteratureReviewPreviewPane,
   type LiteratureReviewPreviewContent
@@ -452,6 +446,33 @@ export function isAgentConversationAtBottom(element: Pick<HTMLElement, "scrollTo
 export function appendPluginArtifact(draft: string, artifact: PluginArtifactRef): string {
   const separator = draft && !draft.endsWith("\n") ? "\n" : "";
   return `${draft}${separator}${artifact.name.replace(/[\r\n]/g, " ")}: ${artifact.uri.replace(/[\r\n]/g, "")}`;
+}
+
+export interface PluginCommandTarget {
+  plugin: InstalledPlugin;
+  command: PluginCommandContribution;
+}
+
+export function collectPluginCommandTargets(plugins: InstalledPlugin[], reserved: Iterable<string> = []): PluginCommandTarget[] {
+  const seen = new Set([...reserved].map((command) => command.toLowerCase()));
+  return plugins.filter((plugin) => plugin.state === "active").flatMap((plugin) => (
+    (plugin.manifest.commands ?? []).flatMap((command) => {
+      if (seen.has(command.command)) return [];
+      seen.add(command.command);
+      return [{ plugin, command }];
+    })
+  ));
+}
+
+export function parsePluginCommandInvocation(input: string, targets: PluginCommandTarget[]): {
+  plugin: InstalledPlugin;
+  contribution: PluginCommandContribution;
+  arguments: string;
+} | null {
+  const trimmed = input.trim();
+  const token = trimmed.split(/\s/, 1)[0]?.toLowerCase();
+  const target = targets.find((item) => item.command.command === token);
+  return target ? { plugin: target.plugin, contribution: target.command, arguments: trimmed.slice(target.command.command.length).trim() } : null;
 }
 
 export function hasActiveAgentConversation(currentChatId: string | null, messageCount: number): boolean {
@@ -1005,7 +1026,7 @@ function ComposerCaretMenu(props: {
  */
 export function HomePage() {
   const { clients } = useApiClients();
-  const { calls: pluginUiCalls } = usePluginUi();
+  const { calls: pluginUiCalls, openSurface } = usePluginUi();
   const { state, dispatch } = useAppState();
   const modelWorkspace = createModelWorkspace(state.modelConfig);
   const { language, t } = useTranslation();
@@ -1801,14 +1822,20 @@ export function HomePage() {
     argHint: "",
     synthetic: true
   };
-  const literatureReviewSlashCommand: SlashCommandPaletteItem = {
-    command: "/literature-review",
-    title: t("home.capability.literatureReview"),
-    description: t("home.capability.literatureReviewHint"),
-    icon: "book-open",
-    argHint: t("home.capability.literatureReviewArgHint"),
+  const pluginCommandTargets = collectPluginCommandTargets(installedPlugins, [
+    "/stop",
+    "/last-compaction",
+    COMPOSER_GOAL_COMMAND,
+    ...slashCommands.map((command) => command.command)
+  ]);
+  const pluginSlashCommands: SlashCommandPaletteItem[] = pluginCommandTargets.map(({ command }) => ({
+    command: command.command,
+    title: command.name,
+    description: command.description,
+    icon: command.icon ?? "sparkles",
+    argHint: command.argHint ?? "",
     synthetic: true
-  };
+  }));
   const slashQuery = slashMenuDismissed
     ? null
     : slashPickerOpen
@@ -1816,7 +1843,7 @@ export function HomePage() {
       : slashQueryFromInput(composerInput.slice(0, Math.min(composerSelection.start, composerInput.length)));
   const localizedSlashCommands = localizeSlashCommands(slashCommands, language, t);
   const slashCommandsWithLocal = [
-    literatureReviewSlashCommand,
+    ...pluginSlashCommands,
     goalSlashCommand,
     lastCompactionSlashCommand,
     ...localizedSlashCommands.filter((command) => (
@@ -1853,11 +1880,9 @@ export function HomePage() {
   const hasComposerPayload = Boolean(input.trim() || pendingAttachments.some((item) => item.status === "ready"));
   const hasComposerIntent = Boolean(input.trim() || pendingAttachments.length > 0);
   const stopInFlight = state.agent.currentChatId ? Boolean(state.agent.stopInFlightByChatId[state.agent.currentChatId]) : false;
-  // Literature review launches entirely in the renderer; ordinary messages still
-  // use the latest survey queue, connection, project and model guards.
-  const isLocalWorkflowCommand = /(?:^|\s)\/literature-review(?=\s|$)/i.test(input);
-  const composerSendDisabled = isLocalWorkflowCommand
-    ? false
+  const isPluginCommand = Boolean(parsePluginCommandInvocation(input, pluginCommandTargets));
+  const composerSendDisabled = isPluginCommand
+    ? pendingAttachments.length > 0 || !clients
     : stopInFlight
       || !hasComposerPayload
       || hasBlockedPendingMedia
@@ -2238,31 +2263,36 @@ export function HomePage() {
 
   function runExactLocalSlashCommand(command: string): boolean {
     const normalized = command.trim().toLowerCase();
-    if (/(?:^|\s)\/literature-review(?=\s|$)/i.test(command)) {
-      const sourceInput = command.trim();
-      const request = sourceInput
-        .replace(/(?:^|\s)\/literature-review(?=\s|$)/i, " ")
-        .replace(/(?:^|\s)@\S+/g, " ")
-        .replace(/\s+/g, " ")
-        .trim();
-      try {
-        window.sessionStorage.setItem(LITREV_PROMPT_STORAGE_KEY, request);
-        window.sessionStorage.setItem(LITREV_SOURCE_INPUT_STORAGE_KEY, sourceInput);
-        window.sessionStorage.setItem(LITREV_CONTEXT_STORAGE_KEY, JSON.stringify(contextChips));
-        if (draftTarget.kind === "project") {
-          window.sessionStorage.setItem(LITREV_PROJECT_CONTEXT_STORAGE_KEY, draftTarget.projectId);
-        } else {
-          window.sessionStorage.removeItem(LITREV_PROJECT_CONTEXT_STORAGE_KEY);
+    const pluginInvocation = parsePluginCommandInvocation(command, pluginCommandTargets);
+    if (pluginInvocation && pendingAttachments.length > 0) return false;
+    if (pluginInvocation && clients) {
+      const { plugin, contribution, arguments: commandArguments } = pluginInvocation;
+      const conversationId = state.agent.currentChatId ?? state.agent.currentSessionKey ?? chatScopeKey;
+      const invocationInput = {
+        command: contribution.command,
+        arguments: commandArguments,
+        context: {
+          ...(draftTarget.kind === "project" ? { projectId: draftTarget.projectId } : {}),
+          references: contextChips
         }
-      } catch {
-        // Losing launch context leaves the literature page with an empty launch request.
+      };
+      const surface = plugin.manifest.ui?.surface;
+      if (contribution.surface && surface && (!surface.capabilities || surface.capabilities.includes(contribution.capabilityId))) {
+        openSurface({ pluginId: plugin.id, capabilityId: contribution.capabilityId, conversationId, input: invocationInput });
+        dispatch(appActions.navigate("/plugin"));
       }
-      rememberSlashCommand("/literature-review");
+      void clients.plugins.invoke(plugin.id, contribution.capabilityId, { conversationId, input: invocationInput }).catch((error) => {
+        dispatch(agentActions.operationFailed("chat", createAgentOperationError({
+          source: "send",
+          message: error instanceof Error ? error.message : "network_unavailable",
+          scopeKey: chatScopeKey
+        })));
+      });
+      rememberSlashCommand(contribution.command);
       setSelectedComposerCommandForScope(chatScopeKey, null);
       setCurrentComposerDraft("");
       setSlashPickerOpen(false);
       dispatch(agentActions.composerContextReferencesUpdated(chatScopeKey, []));
-      dispatch(appActions.navigate("/literature-review"));
       return true;
     }
     if (pendingAttachments.length > 0) return false;

@@ -57,6 +57,20 @@ describe("PluginManifestSchema", () => {
       ui: { renderer: { entry: "ui/index.html", capabilities: ["missing"] } }
     })).toThrow(/Unknown renderer capability/);
   });
+
+  it("registers commands and a full plugin surface against declared capabilities", () => {
+    const parsed = PluginManifestSchema.parse({
+      ...manifest,
+      commands: [{ command: "/review", name: "Review", description: "Create a review", capabilityId: "review", surface: true }],
+      ui: { surface: { entry: "ui/surface.html", capabilities: ["review"] } }
+    });
+    expect(parsed.commands?.[0]?.command).toBe("/review");
+    expect(parsed.ui?.surface?.entry).toBe("ui/surface.html");
+    expect(() => PluginManifestSchema.parse({
+      ...manifest,
+      commands: [{ command: "/review", name: "Review", description: "Create a review", capabilityId: "missing" }]
+    })).toThrow(/Unknown command capability/);
+  });
 });
 
 describe("CapabilityEventSchema", () => {

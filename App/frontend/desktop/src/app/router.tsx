@@ -57,6 +57,7 @@ import { LoginPage } from "../pages/login-page.js";
 import { MemoryPage, writeMemorySubPage } from "../pages/memory-page.js";
 import { OnboardingPage } from "../pages/onboarding-page.js";
 import { PetPage } from "../pages/pet-page.js";
+import { PluginSurfacePage } from "../pages/plugin-surface-page.js";
 import { SettingsPage } from "../pages/settings-page.js";
 import { StartupScreen } from "../pages/startup-screen.js";
 import { TokenDetailPage } from "../pages/token-detail-page.js";
@@ -335,6 +336,8 @@ function renderRoute(path: AppRoutePath) {
       return <MemoryPage />;
     case "/memory-sources":
       return <MemoryPage initialSubPage="sources" />;
+    case "/plugin":
+      return <PluginSurfacePage />;
     case "/literature-review":
       return <LiteratureReviewPage />;
     case "/settings":

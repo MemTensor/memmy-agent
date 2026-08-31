@@ -63,9 +63,21 @@ export const PluginUiRendererSchema = z.object({
 export type PluginUiRenderer = z.infer<typeof PluginUiRendererSchema>;
 
 export const PluginUiSchema = z.object({
-  renderer: PluginUiRendererSchema.optional()
+  renderer: PluginUiRendererSchema.optional(),
+  surface: PluginUiRendererSchema.optional()
 }).passthrough();
 export type PluginUi = z.infer<typeof PluginUiSchema>;
+
+export const PluginCommandContributionSchema = z.object({
+  command: z.string().trim().regex(/^\/[a-z0-9][a-z0-9-]{0,63}$/),
+  name: z.string().trim().min(1).max(128),
+  description: z.string().trim().min(1).max(500),
+  capabilityId: PluginIdentifierSchema,
+  argHint: z.string().trim().max(128).optional(),
+  icon: z.string().trim().min(1).max(64).optional(),
+  surface: z.boolean().optional()
+});
+export type PluginCommandContribution = z.infer<typeof PluginCommandContributionSchema>;
 
 export const PluginManifestSchema = z.object({
   apiVersion: z.literal("memmy/v1"),
@@ -76,6 +88,7 @@ export const PluginManifestSchema = z.object({
   capabilities: z.array(PluginCapabilitySchema).min(1),
   permissions: z.array(PluginPermissionSchema),
   configSchema: JsonSchemaSchema.optional(),
+  commands: z.array(PluginCommandContributionSchema).max(100).optional(),
   ui: PluginUiSchema.optional()
 }).superRefine((manifest, context) => {
   const ids = new Set<string>();
@@ -89,14 +102,26 @@ export const PluginManifestSchema = z.object({
     }
     ids.add(capability.id);
   }
-  for (const [index, capabilityId] of (manifest.ui?.renderer?.capabilities ?? []).entries()) {
-    if (!ids.has(capabilityId)) {
-      context.addIssue({
-        code: "custom",
-        path: ["ui", "renderer", "capabilities", index],
-        message: `Unknown renderer capability id: ${capabilityId}`
-      });
+  for (const slot of ["renderer", "surface"] as const) {
+    for (const [index, capabilityId] of (manifest.ui?.[slot]?.capabilities ?? []).entries()) {
+      if (!ids.has(capabilityId)) {
+        context.addIssue({
+          code: "custom",
+          path: ["ui", slot, "capabilities", index],
+          message: `Unknown ${slot} capability id: ${capabilityId}`
+        });
+      }
     }
+  }
+  const commands = new Set<string>();
+  for (const [index, command] of (manifest.commands ?? []).entries()) {
+    if (!ids.has(command.capabilityId)) {
+      context.addIssue({ code: "custom", path: ["commands", index, "capabilityId"], message: `Unknown command capability id: ${command.capabilityId}` });
+    }
+    if (commands.has(command.command)) {
+      context.addIssue({ code: "custom", path: ["commands", index, "command"], message: `Duplicate plugin command: ${command.command}` });
+    }
+    commands.add(command.command);
   }
 });
 export type PluginManifest = z.infer<typeof PluginManifestSchema>;
@@ -210,6 +235,12 @@ export const InvokePluginCapabilityInputSchema = z.object({
 });
 export type InvokePluginCapabilityInput = z.infer<typeof InvokePluginCapabilityInputSchema>;
 
+export const InvokePluginCapabilityResponseSchema = z.object({
+  callId: z.string().trim().min(1),
+  event: CapabilityEventSchema
+});
+export type InvokePluginCapabilityResponse = z.infer<typeof InvokePluginCapabilityResponseSchema>;
+
 export const PluginInteractionResponseInputSchema = z.object({
   response: z.unknown()
 });
@@ -217,6 +248,8 @@ export type PluginInteractionResponseInput = z.infer<typeof PluginInteractionRes
 
 export const PluginUiRendererResponseSchema = z.object({ html: z.string() });
 export type PluginUiRendererResponse = z.infer<typeof PluginUiRendererResponseSchema>;
+export const PluginUiSlotSchema = z.enum(["renderer", "surface"]);
+export type PluginUiSlot = z.infer<typeof PluginUiSlotSchema>;
 
 export const PluginCapabilityEventPayloadSchema = z.object({
   pluginId: PluginIdentifierSchema,

@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { Window } from "happy-dom";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
+import { InstalledPluginSchema } from "@memmy/local-api-contracts";
 import { MemmyAgentMessageRejectedError, MemmyAgentRequestError } from "../../api/memmy-agent-client.js";
 import { AgentRuntimeBridge } from "../../app/agent-runtime-bridge.js";
 import { AppProviders } from "../../app/providers.js";
@@ -26,6 +27,7 @@ import {
   attachmentFilesFromDataTransfer,
   buildComposerCommandDraft,
   clipboardImageFilesFromDataTransfer,
+  collectPluginCommandTargets,
   dataTransferHasAttachmentFiles,
   hasActiveAgentConversation,
   homeSuggestionDraft,
@@ -36,6 +38,7 @@ import {
   isSingleLineComposerInput,
   isSteerableCurrentTurn,
   parseStoredAgentRestartState,
+  parsePluginCommandInvocation,
   parseComposerCommandDraft,
   readFocusedAgentChatId,
   requestNewSessionReset,
@@ -79,6 +82,35 @@ function mockCallOrder(fn: { mock: { invocationCallOrder: readonly number[] } },
 }
 
 describe("HomePage", () => {
+  it("registers only active non-reserved plugin commands and parses their arguments", () => {
+    const plugin = InstalledPluginSchema.parse({
+      id: "com.example.review",
+      version: "1.0.0",
+      manifest: {
+        apiVersion: "memmy/v1",
+        id: "com.example.review",
+        name: "Review",
+        version: "1.0.0",
+        runtime: { adapter: "http" },
+        capabilities: [{ id: "run", name: "Run", description: "Run", inputSchema: {}, outputSchema: {}, execution: "job" }],
+        commands: [
+          { command: "/review", name: "Review", description: "Create a review", capabilityId: "run" },
+          { command: "/status", name: "Bad collision", description: "Reserved", capabilityId: "run" }
+        ],
+        permissions: []
+      },
+      state: "active",
+      approvedPermissions: [],
+      config: {},
+      lastError: null,
+      createdAt: "2026-08-31T00:00:00.000Z",
+      updatedAt: "2026-08-31T00:00:00.000Z"
+    });
+    const targets = collectPluginCommandTargets([plugin], ["/status"]);
+    expect(targets.map((item) => item.command.command)).toEqual(["/review"]);
+    expect(parsePluginCommandInvocation("/review agent memory", targets)).toMatchObject({ arguments: "agent memory", plugin });
+  });
+
   it("allows Goal steering when source metadata is missing without opening TUI or IM turns", () => {
     expect(isSteerableCurrentTurn(null, true)).toBe(true);
     expect(isSteerableCurrentTurn(null, false)).toBe(false);
@@ -622,7 +654,7 @@ describe("HomePage", () => {
 
   it("passes the current UI language into agent websocket messages", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
-    const sendBlock = source.slice(source.indexOf("async function sendMessage()"), source.indexOf("  /**\n   * 停止当前 Agent 回合"));
+    const sendBlock = source.slice(source.indexOf("async function sendMessage()"), source.indexOf("function stopCurrentTurn"));
 
     expect(source).toContain("const { language, t } = useTranslation();");
     expect(sendBlock).toContain("language,");
@@ -630,21 +662,19 @@ describe("HomePage", () => {
 
   it("intercepts exact local slash commands before normal message submission", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
-    const sendBlock = source.slice(source.indexOf("async function sendMessage()"), source.indexOf("  /**\n   * 停止当前 Agent 回合"));
-    const localSlashBlock = source.slice(source.indexOf("function runExactLocalSlashCommand"), source.indexOf("  /**\n   * 停止当前 Agent 回合"));
+    const sendBlock = source.slice(source.indexOf("async function sendMessage()"), source.indexOf("function stopCurrentTurn"));
+    const localSlashBlock = source.slice(source.indexOf("function runExactLocalSlashCommand"), source.indexOf("function stopCurrentTurn"));
 
     expect(sendBlock).toContain("if (runExactLocalSlashCommand(input))");
     expect(sendBlock.indexOf("runExactLocalSlashCommand(input)")).toBeLessThan(sendBlock.indexOf("submitAgentComposerMessage({"));
-    expect(localSlashBlock).toContain("LITREV_CONTEXT_STORAGE_KEY");
-    expect(localSlashBlock).toContain("LITREV_SOURCE_INPUT_STORAGE_KEY");
-    expect(localSlashBlock).toContain("sourceInput");
-    expect(localSlashBlock).toContain('/(?:^|\\s)\\/literature-review(?=\\s|$)/i');
-    expect(localSlashBlock).toContain("JSON.stringify(contextChips)");
+    expect(localSlashBlock).toContain("parsePluginCommandInvocation(command, pluginCommandTargets)");
+    expect(localSlashBlock).toContain("clients.plugins.invoke(plugin.id, contribution.capabilityId");
+    expect(localSlashBlock).toContain("openSurface({ pluginId: plugin.id");
+    expect(localSlashBlock).toContain('appActions.navigate("/plugin")');
+    expect(localSlashBlock).toContain("references: contextChips");
     expect(localSlashBlock).toContain("composerContextReferencesUpdated(chatScopeKey, [])");
     expect(localSlashBlock).toContain('draftTarget.kind === "project"');
-    expect(localSlashBlock).toContain("LITREV_PROJECT_CONTEXT_STORAGE_KEY");
-    expect(localSlashBlock).toContain("removeItem(LITREV_PROJECT_CONTEXT_STORAGE_KEY)");
-    expect(localSlashBlock).toContain("if (pendingAttachments.length > 0) return false;");
+    expect(localSlashBlock).not.toContain("sessionStorage");
     expect(localSlashBlock).toContain('normalized === "/last-compaction"');
     expect(localSlashBlock).toContain("requestLastCompactionPanel();");
     expect(localSlashBlock).toContain('normalized === "/history-dag"');
