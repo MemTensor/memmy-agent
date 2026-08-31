@@ -19,7 +19,6 @@ export type AppRoutePath =
   | "/memory"
   | "/memory-sources"
   | "/plugin"
-  | "/literature-review"
   | "/settings";
 
 const CURRENT_ROUTE_STORAGE_KEY = "memmy.currentRoute";
@@ -57,7 +56,6 @@ export const routeTable: Record<AppRoutePath, AppRouteDefinition> = {
   "/memory": { path: "/memory", navKey: "nav.memory", requiresBootstrap: true },
   "/memory-sources": { path: "/memory-sources", navKey: "nav.memory", requiresBootstrap: true },
   "/plugin": { path: "/plugin", navKey: "plugin.surface.title", requiresBootstrap: true },
-  "/literature-review": { path: "/literature-review", navKey: "nav.literatureReview", requiresBootstrap: true },
   "/settings": { path: "/settings", navKey: "nav.settings", requiresBootstrap: true }
 };
 
@@ -646,7 +644,7 @@ function isAppRoutePath(value: string | null): value is AppRoutePath {
 }
 
 function isRestorableRoute(path: AppRoutePath): boolean {
-  return path === "/main" || path === "/pet" || path === "/tools" || path === "/memory" || path === "/memory-sources" || path === "/literature-review" || path === "/settings";
+  return path === "/main" || path === "/pet" || path === "/tools" || path === "/memory" || path === "/memory-sources" || path === "/settings";
 }
 
 function isPostOnboardingRoute(path: AppRoutePath): boolean {

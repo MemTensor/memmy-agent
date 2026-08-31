@@ -63,18 +63,18 @@ describe("prototype page structure alignment", () => {
     expect(source("pages/home-page.tsx")).toContain('className="agent-composer-toolbar"');
   });
 
-  it("keeps compact Home and literature layouts within the available viewport", () => {
+  it("keeps compact Home and workspace artifact layouts within the available viewport", () => {
     const styles = source("styles.css");
 
     expect(styles).toContain("@media (max-width: 720px)");
     expect(styles).toContain(".sidebar-shell .app-frame-sidebar");
-    expect(styles).toContain(".litrev-preview-pane");
+    expect(styles).toContain(".workspace-artifact-preview-pane");
     expect(styles).toContain("width: 100% !important;");
-    expect(styles).toContain(".litrev-split > .sidebar-resize-handle");
+    expect(styles).toContain(".workspace-artifact-preview-pane");
     expect(styles).toContain("@media (max-width: 480px)");
     expect(styles).toContain(".home-empty-composer .composer-quick-actions__popover--slash");
     expect(styles).toContain(".agent-composer-shell--expanded .agent-model-selector__button");
-    expect(styles).toContain(".litrev-file-browser");
+    expect(styles).toContain(".workspace-artifact-file-browser");
   });
 
   it("aligns utility pages with their prototype counterparts", () => {

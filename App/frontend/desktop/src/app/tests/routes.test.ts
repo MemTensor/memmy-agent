@@ -99,7 +99,6 @@ describe("desktop route table", () => {
       "/memory",
       "/memory-sources",
       "/plugin",
-      "/literature-review",
       "/settings"
     ]);
   });
@@ -551,7 +550,7 @@ describe("desktop route table", () => {
 
   it("restores the current window route across renderer reloads after onboarding", () => {
     expect(resolveReloadedInitialView("/main", "/memory-sources")).toBe("/memory-sources");
-    expect(resolveReloadedInitialView("/main", "/literature-review")).toBe("/literature-review");
+    expect(resolveReloadedInitialView("/main", "/plugin")).toBe("/main");
     expect(resolveReloadedInitialView("/pet", "/settings")).toBe("/settings");
     expect(resolveReloadedInitialView("/main", "/pet")).toBe("/main");
     expect(resolveReloadedInitialView("/pet", "/pet")).toBe("/pet");

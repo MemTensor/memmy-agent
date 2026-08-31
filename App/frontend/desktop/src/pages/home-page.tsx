@@ -46,7 +46,6 @@ import {
   mergeComposerContextReferences,
   readComposerReferenceDrag
 } from "../lib/composer-file-reference.js";
-import { assessLiteratureSourceBatch } from "../lib/literature-source-files.js";
 import { useTaskBus, type TaskBusAgentMessage } from "../lib/task-bus.js";
 import type { AppAction } from "../state/app-actions.js";
 import { agentActions, appActions, createAgentOperationError } from "../state/app-actions.js";
@@ -107,9 +106,9 @@ import {
   type ComposerContextChip
 } from "./home-composer-quick-actions.js";
 import {
-  LiteratureReviewPreviewPane,
-  type LiteratureReviewPreviewContent
-} from "./literature-review-preview-pane.js";
+  WorkspaceArtifactPanel,
+  type WorkspaceArtifactContent
+} from "./workspace-artifact-panel.js";
 import { Mic, Pause, Plus, Send } from "./memory/memory-prototype-icons.js";
 import { resolveWorkspaceEnvironmentScope, useWorkspaceEnvironment } from "./use-workspace-environment.js";
 import { ArrowDown, BookOpenText, CalendarCheck2, Check, ChevronDown, Folder, History, PanelRight, Plus as LucidePlus, RotateCw, SlidersHorizontal, SquareSlash, Target, X } from "lucide-react";
@@ -378,9 +377,9 @@ export function addCapabilityBlockToDraft(command: string, draft: string): strin
   return existingDraft ? `${command}  ${existingDraft}` : `${command}  `;
 }
 
-/** Builds a suggestion draft with its capability locked in as a visible prefix chip. */
-export function homeSuggestionDraft(text: string, capability?: "/literature-review"): string {
-  return capability ? `${capability}  ${text}` : text;
+/** Builds a plain suggestion draft; plugin commands are registered dynamically. */
+export function homeSuggestionDraft(text: string): string {
+  return text;
 }
 
 /** Replaces only the trailing slash query, preserving text before it. */
@@ -1181,7 +1180,7 @@ export function HomePage() {
     : null;
   const previewRootLabel = activeProject?.name
     ?? activeTask?.title
-    ?? t("litrev.preview.taskFolder");
+    ?? t("workspaceArtifact.taskFolder");
   const environmentScope = resolveWorkspaceEnvironmentScope(
     state.agent.currentSessionKey,
     selectedDraftProject?.id ?? null,
@@ -1248,7 +1247,7 @@ export function HomePage() {
     if (!client) return Promise.reject(new Error("agent_client_unavailable"));
     return client.listWorkspaceFiles(sessionKey, relativePath);
   }, [clients?.memmyAgent]);
-  const loadWorkspaceFilePreview = useCallback(async (relativePath: string): Promise<LiteratureReviewPreviewContent | null> => {
+  const loadWorkspaceFilePreview = useCallback(async (relativePath: string): Promise<WorkspaceArtifactContent | null> => {
     const client = clients?.memmyAgent;
     if (!client || !previewSessionKey) return null;
     const artifact = await client.resolveArtifact(relativePath, previewSessionKey);
@@ -2523,8 +2522,8 @@ export function HomePage() {
     ));
   }
 
-  function selectHomeSuggestion(text: string, capability?: "/literature-review") {
-    const nextDraft = homeSuggestionDraft(text, capability);
+  function selectHomeSuggestion(text: string) {
+    const nextDraft = homeSuggestionDraft(text);
     setSelectedComposerCommandForScope(chatScopeKey, null);
     setCurrentComposerDraft(nextDraft);
     setComposerSelection({ start: nextDraft.length, end: nextDraft.length });
@@ -2970,11 +2969,10 @@ export function HomePage() {
       }
     );
     if (reference) {
-      const literatureSources = assessLiteratureSourceBatch(files).accepted;
       addComposerContextChip({
         ...reference,
-        fileCount: literatureSources.length,
-        totalBytes: literatureSources.reduce((total, file) => total + file.size, 0)
+        fileCount: files.length,
+        totalBytes: files.reduce((total, file) => total + file.size, 0)
       });
     }
     event.target.value = "";
@@ -3200,7 +3198,7 @@ export function HomePage() {
   ) : null;
 
   const previewPanel = previewPanelOpen && hasActiveConversation ? (
-    <LiteratureReviewPreviewPane
+    <WorkspaceArtifactPanel
       key={previewSessionKey ?? chatScopeKey}
       sessionKey={previewSessionKey ?? ""}
       rootLabel={previewRootLabel}
@@ -3210,7 +3208,7 @@ export function HomePage() {
       refreshKey={`${currentHistoryVersion}:${isCurrentAgentRunning ? "running" : "idle"}`}
       onWidthChange={setPreviewPanelWidth}
       toolbarEnd={previewToggle}
-      emptyLabel={t("literatureReview.workspace.noFiles")}
+      emptyLabel={t("workspaceArtifact.noFiles")}
       emptyDetail={previewRootLabel}
     />
   ) : null;
@@ -3373,7 +3371,7 @@ export function HomePage() {
               <div className="home-prompt-suggestions" aria-label={t("home.empty")}>
                 <button
                   type="button"
-                  onClick={() => selectHomeSuggestion(t("home.suggestionPrompt.one"), "/literature-review")}
+                  onClick={() => selectHomeSuggestion(t("home.suggestionPrompt.one"))}
                 >
                   <span className="home-prompt-suggestions__icon" aria-hidden="true"><BookOpenText size={15} /></span>
                   <span>{t("home.suggestion.one")}</span>

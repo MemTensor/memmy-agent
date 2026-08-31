@@ -120,45 +120,43 @@ describe("HomePage", () => {
   });
 
   it("adds a capability block without clearing the existing draft", () => {
-    expect(addCapabilityBlockToDraft("/literature-review", "比较两篇论文")).toBe(
-      "/literature-review  比较两篇论文"
+    expect(addCapabilityBlockToDraft("/review", "比较两篇论文")).toBe(
+      "/review  比较两篇论文"
     );
-    expect(addCapabilityBlockToDraft("/literature-review", "")).toBe("/literature-review  ");
-    expect(replaceTrailingSlashQuery("比较两篇论文 /lit", "/literature-review", true)).toBe(
-      "比较两篇论文 /literature-review "
+    expect(addCapabilityBlockToDraft("/review", "")).toBe("/review  ");
+    expect(replaceTrailingSlashQuery("比较两篇论文 /lit", "/review", true)).toBe(
+      "比较两篇论文 /review "
     );
   });
 
-  it("locks a suggested workflow into a leading capability chip", () => {
-    expect(homeSuggestionDraft("写一篇完整综述", "/literature-review")).toBe(
-      "/literature-review  写一篇完整综述"
-    );
+  it("keeps suggestions as plain drafts until a plugin command is selected", () => {
+    expect(homeSuggestionDraft("写一篇完整综述")).toBe("写一篇完整综述");
     expect(homeSuggestionDraft("总结本周工作")).toBe("总结本周工作");
   });
 
   it("inserts and replaces a capability at the active caret", () => {
-    expect(insertCapabilityAtSelection("前文后文", "/literature-review", 2)).toEqual({
-      value: "前文  /literature-review  后文",
-      caret: 24
+    expect(insertCapabilityAtSelection("前文后文", "/review", 2)).toEqual({
+      value: "前文  /review  后文",
+      caret: 13
     });
-    expect(replaceSlashQueryAtSelection("前文 /lit 后文", "/literature-review", 7, 7, true)).toEqual({
-      value: "前文 /literature-review  后文",
-      caret: 22
+    expect(replaceSlashQueryAtSelection("前文 /lit 后文", "/review", 7, 7, true)).toEqual({
+      value: "前文 /review  后文",
+      caret: 11
     });
   });
 
   it("renders a selected capability inline without replacing the textarea", () => {
     const html = renderToString(
       <ComposerHighlightedTextarea
-        value="/literature-review "
-        highlightedCommands={["/literature-review"]}
+        value="/review "
+        highlightedCommands={["/review"]}
         placeholder="分配一个任务或提问任何问题..."
         onChange={() => undefined}
       />
     );
 
     expect(html).toContain("composer-slash-chip");
-    expect(html).toContain(">/literature-review </textarea>");
+    expect(html).toContain(">/review </textarea>");
     expect(html).toContain("分配一个任务或提问任何问题...");
   });
 
@@ -166,7 +164,7 @@ describe("HomePage", () => {
     const html = renderToString(
       <ComposerHighlightedTextarea
         value="/AI Memory"
-        highlightedCommands={["/literature-review"]}
+        highlightedCommands={["/review"]}
         placeholder="分配一个任务或提问任何问题..."
         onChange={() => undefined}
       />
@@ -178,17 +176,17 @@ describe("HomePage", () => {
 
   it("highlights and removes a selected capability at an inline caret position", () => {
     expect(composerHighlightSegments(
-      "前文 /literature-review 后文",
-      ["/literature-review"]
+      "前文 /review 后文",
+      ["/review"]
     )).toEqual([
       { text: "前文 ", command: false },
-      { text: "/literature-review", command: true },
+      { text: "/review", command: true },
       { text: " 后文", command: false }
     ]);
     expect(removeHighlightedCommandAtCaret(
-      "前文 /literature-review 后文",
-      ["/literature-review"],
-      21,
+      "前文 /review 后文",
+      ["/review"],
+      10,
       "Backspace"
     )).toEqual({ value: "前文 后文", caret: 3 });
   });
@@ -448,7 +446,7 @@ describe("HomePage", () => {
     expect(source).toContain("{environmentScope ? (");
     expect(source).toContain("const previewToggle = hasActiveConversation ? (");
     expect(source).toContain("<PanelRight size={15}");
-    expect(source).toContain("<LiteratureReviewPreviewPane");
+    expect(source).toContain("<WorkspaceArtifactPanel");
     expect(source).toContain("toolbarEnd={previewToggle}");
     expect(source).toContain("{!previewPanelOpen ? previewToggle : null}");
     expect(source).toContain("agent-environment-toggle--with-preview");
@@ -788,7 +786,7 @@ describe("HomePage", () => {
     expect(styles).toMatch(/--agent-conversation-shift:\s*\d+px;/);
     expect(styles).toContain("transform: translateX(calc(0px - var(--agent-conversation-shift)));");
     expect(styles).toContain("@container agent-workspace (max-width: 960px)");
-    expect(styles).toContain(".agent-workspace-layout--preview-open > .litrev-preview-pane");
+    expect(styles).toContain(".agent-workspace-layout--preview-open > .workspace-artifact-preview-pane");
     expect(styles).toContain("right: calc(var(--agent-preview-panel-width, 520px) + 20px);");
     expect(styles).toContain(".agent-workspace-layout--preview-open > .agent-conversation-panel");
     expect(styles).toContain(".app-frame-content-topbar:has(.agent-conversation-topbar--preview-open)");
