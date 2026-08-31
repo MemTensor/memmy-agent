@@ -1,6 +1,6 @@
 /** Home page module. */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type CSSProperties, type DragEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject, type SetStateAction, type UIEvent } from "react";
-import type { AgentGatewayStartupIssue, InstalledPlugin } from "@memmy/local-api-contracts";
+import type { AgentGatewayStartupIssue, InstalledPlugin, PluginArtifactRef } from "@memmy/local-api-contracts";
 import { hydrateAgentThreadInBackground, refreshAgentTaskList, useAgentRuntimeBridge, type AgentTaskStateCoordinator } from "../app/agent-runtime-bridge.js";
 import { useApiClients } from "../app/providers.js";
 import { usePluginUi } from "../app/plugin-ui-context.js";
@@ -447,6 +447,11 @@ export function replaceSlashQueryAtSelection(
 
 export function isAgentConversationAtBottom(element: Pick<HTMLElement, "scrollTop" | "scrollHeight" | "clientHeight">): boolean {
   return element.scrollTop + element.clientHeight >= element.scrollHeight - AGENT_CONVERSATION_BOTTOM_EPSILON_PX;
+}
+
+export function appendPluginArtifact(draft: string, artifact: PluginArtifactRef): string {
+  const separator = draft && !draft.endsWith("\n") ? "\n" : "";
+  return `${draft}${separator}${artifact.name.replace(/[\r\n]/g, " ")}: ${artifact.uri.replace(/[\r\n]/g, "")}`;
 }
 
 export function hasActiveAgentConversation(currentChatId: string | null, messageCount: number): boolean {
@@ -1100,7 +1105,8 @@ export function HomePage() {
   const visiblePluginCalls = useMemo(() => pluginUiCalls.filter((call) => (
     call.conversationId === state.agent.currentChatId
     || call.conversationId === state.agent.currentSessionKey
-  )), [pluginUiCalls, state.agent.currentChatId, state.agent.currentSessionKey]);
+    || call.conversationId === chatScopeKey
+  )), [chatScopeKey, pluginUiCalls, state.agent.currentChatId, state.agent.currentSessionKey]);
   const modelSelectionScopeKey = state.agent.currentChatId ?? NEW_TASK_MODEL_SCOPE_KEY;
   const modelWorkspaceMode = state.bootstrap?.app.userMode === "byok" ? "byok" : "account";
   const selectedModelPreset = state.agent.pendingPresetByScope[modelSelectionScopeKey]
@@ -3413,6 +3419,8 @@ export function HomePage() {
                 calls={visiblePluginCalls}
                 plugins={installedPlugins}
                 client={clients?.plugins ?? null}
+                uploadFiles={clients ? (files) => clients.memmyAgent.uploadAgentMedia(files) : undefined}
+                onAddArtifact={(artifact) => setCurrentComposerDraft((current) => appendPluginArtifact(current, artifact))}
               />
             </div>
           </div>

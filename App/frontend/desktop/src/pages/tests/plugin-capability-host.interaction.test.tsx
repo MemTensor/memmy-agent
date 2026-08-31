@@ -55,6 +55,7 @@ describe("PluginCapabilityHost", () => {
 
   it("renders generic task, question, and artifact cards and submits a choice", async () => {
     const respond = vi.fn(async () => undefined);
+    const cancel = vi.fn(async () => undefined);
     const call: PluginUiCall = {
       pluginId: plugin.id,
       capabilityId: "run",
@@ -69,7 +70,7 @@ describe("PluginCapabilityHost", () => {
 
     await act(async () => root.render(
       <I18nProvider language="en-US">
-        <PluginCapabilityHost calls={[call]} plugins={[plugin]} client={{ getRenderer: vi.fn(), respond }} />
+        <PluginCapabilityHost calls={[call]} plugins={[plugin]} client={{ getRenderer: vi.fn(), cancel, respond }} />
       </I18nProvider>
     ));
 
@@ -83,6 +84,7 @@ describe("PluginCapabilityHost", () => {
 
   it("loads a declared renderer into a script-only sandbox", async () => {
     const getRenderer = vi.fn(async () => "<main>Custom renderer</main>");
+    const cancel = vi.fn(async () => undefined);
     const respond = vi.fn(async () => undefined);
     const customPlugin = InstalledPluginSchema.parse({
       ...plugin,
@@ -98,7 +100,7 @@ describe("PluginCapabilityHost", () => {
 
     await act(async () => root.render(
       <I18nProvider language="en-US">
-        <PluginCapabilityHost calls={[call]} plugins={[customPlugin]} client={{ getRenderer, respond }} />
+        <PluginCapabilityHost calls={[call]} plugins={[customPlugin]} client={{ getRenderer, cancel, respond }} />
       </I18nProvider>
     ));
     await act(async () => Promise.resolve());
@@ -113,6 +115,63 @@ describe("PluginCapabilityHost", () => {
       data: { type: "memmy.plugin.interaction-response", version: 1, interactionId: "custom-1", response: { choice: "yes" } }
     })));
     expect(respond).toHaveBeenCalledWith(plugin.id, "call-2", "custom-1", { choice: "yes" });
+  });
+
+  it("supports cancellation, multiple choice, file upload, and artifact reuse", async () => {
+    const cancel = vi.fn(async () => undefined);
+    const respond = vi.fn(async () => undefined);
+    const uploadFiles = vi.fn(async () => [{
+      path: "/media/source.pdf",
+      url: "http://agent.test/source.pdf",
+      name: "source.pdf",
+      kind: "file" as const,
+      mime: "application/pdf" as const,
+      bytes: 3
+    }]);
+    const onAddArtifact = vi.fn();
+    const call: PluginUiCall = {
+      pluginId: plugin.id,
+      capabilityId: "run",
+      callId: "call-3",
+      conversationId: "chat-1",
+      events: [
+        { type: "progress", current: 1, total: 2, cancellable: true },
+        { type: "interaction", request: { interactionId: "q-2", type: "question", payload: { title: "Sources", multiple: true, options: ["PubMed", "Crossref"] } } },
+        { type: "interaction", request: { interactionId: "files-1", type: "file-input", payload: { title: "Sources", accept: [".pdf"], maxFiles: 2 } } },
+        { type: "artifact", artifact: { id: "report", name: "report.md", mediaType: "text/markdown", uri: "https://example.test/report.md" } }
+      ]
+    };
+
+    await act(async () => root.render(
+      <I18nProvider language="en-US">
+        <PluginCapabilityHost
+          calls={[call]}
+          plugins={[plugin]}
+          client={{ getRenderer: vi.fn(), cancel, respond }}
+          uploadFiles={uploadFiles}
+          onAddArtifact={onAddArtifact}
+        />
+      </I18nProvider>
+    ));
+
+    const buttons = () => Array.from(container.querySelectorAll("button"));
+    await act(async () => buttons().find((button) => button.textContent === "Cancel")?.click());
+    expect(cancel).toHaveBeenCalledWith(plugin.id, "call-3");
+
+    const choices = container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]');
+    await act(async () => choices[0]?.click());
+    await act(async () => buttons().find((button) => button.textContent === "Submit")?.click());
+    expect(respond).toHaveBeenCalledWith(plugin.id, "call-3", "q-2", ["PubMed"]);
+
+    const fileInput = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    Object.defineProperty(fileInput, "files", { value: [new File(["pdf"], "source.pdf", { type: "application/pdf" })] });
+    await act(async () => fileInput.dispatchEvent(new Event("change", { bubbles: true })));
+    await act(async () => buttons().find((button) => button.textContent === "Upload")?.click());
+    expect(uploadFiles).toHaveBeenCalledTimes(1);
+    expect(respond).toHaveBeenCalledWith(plugin.id, "call-3", "files-1", { files: expect.any(Array) });
+
+    await act(async () => buttons().find((button) => button.textContent === "Add to chat")?.click());
+    expect(onAddArtifact).toHaveBeenCalledWith(call.events[3]!.type === "artifact" ? call.events[3]!.artifact : null);
   });
 });
 

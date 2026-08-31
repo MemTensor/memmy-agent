@@ -130,7 +130,8 @@ export const PluginArtifactRefSchema = z.object({
   id: z.string().trim().min(1),
   name: z.string().trim().min(1),
   mediaType: z.string().trim().min(1),
-  uri: z.string().trim().min(1)
+  uri: z.string().trim().min(1),
+  downloadUri: z.string().trim().min(1).optional()
 });
 export type PluginArtifactRef = z.infer<typeof PluginArtifactRefSchema>;
 
@@ -139,7 +140,8 @@ export const CapabilityEventSchema = z.discriminatedUnion("type", [
     type: z.literal("progress"),
     current: z.number().nonnegative(),
     total: z.number().positive().optional(),
-    message: z.string().optional()
+    message: z.string().optional(),
+    cancellable: z.boolean().optional()
   }),
   z.object({ type: z.literal("task-list"), tasks: z.array(PluginTaskSchema) }),
   z.object({ type: z.literal("interaction"), request: PluginInteractionRequestSchema }),
