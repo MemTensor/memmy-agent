@@ -6,13 +6,18 @@ import {
   type PluginRuntime
 } from "@memmy/local-api-contracts";
 import { z } from "zod";
+import {
+  assertNetworkPermission,
+  assertSafeStaticHeaders,
+  callTimeoutMs,
+  isCapabilityEvent,
+  resolveSecretHeaders
+} from "./shared.js";
 import type { PluginAdapter, PluginRuntimeContext, PluginSession } from "./types.js";
 
 const DEFAULT_TIMEOUT_MS = 300_000;
 const DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
 const ABSOLUTE_MAX_RESPONSE_BYTES = 50 * 1024 * 1024;
-const BLOCKED_STATIC_HEADERS = new Set(["authorization", "cookie", "host", "proxy-authorization"]);
-
 const HttpRuntimeConfigSchema = z.object({
   baseUrl: z.string().url(),
   invokePath: z.string().min(1).default("/capabilities/{capabilityId}/invoke"),
@@ -51,7 +56,7 @@ export function createHttpPluginAdapter(options: CreateHttpPluginAdapterOptions 
       const baseUrl = new URL(config.baseUrl);
       assertAllowedProtocol(baseUrl);
       assertNetworkPermission(context, baseUrl.hostname);
-      const headers = resolveHeaders(config, context.secrets);
+      const headers = resolveSecretHeaders(config.headers, config.secretHeaders, context.secrets, "HTTP");
       return {
         pluginId: context.plugin.id,
         config,
@@ -135,11 +140,7 @@ export function createHttpPluginAdapter(options: CreateHttpPluginAdapterOptions 
 function validateHttpConfig(runtime: PluginRuntime): HttpRuntimeConfig {
   if (runtime.adapter !== "http") throw new Error(`Expected http runtime, got ${runtime.adapter}`);
   const config = HttpRuntimeConfigSchema.parse(runtime.config ?? {});
-  for (const name of Object.keys(config.headers)) {
-    if (BLOCKED_STATIC_HEADERS.has(name.toLowerCase())) {
-      throw new Error(`Sensitive HTTP header must use secretHeaders: ${name}`);
-    }
-  }
+  assertSafeStaticHeaders(config.headers, "HTTP");
   return config;
 }
 
@@ -148,25 +149,6 @@ function assertAllowedProtocol(url: URL): void {
   if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) {
     throw new Error("Plugin HTTP baseUrl must use HTTPS or loopback HTTP");
   }
-}
-
-function assertNetworkPermission(context: PluginRuntimeContext, hostname: string): void {
-  const allowed = context.plugin.manifest.permissions.some((permission) =>
-    permission.type === "network" && permission.hosts.includes(hostname)
-  );
-  if (!allowed) throw Object.assign(new Error(`Plugin network permission does not allow ${hostname}`), {
-    code: "plugin_permission_denied"
-  });
-}
-
-function resolveHeaders(config: HttpRuntimeConfig, secrets: Readonly<Record<string, string>>): Record<string, string> {
-  const headers = { ...config.headers };
-  for (const [header, key] of Object.entries(config.secretHeaders)) {
-    const value = secrets[key];
-    if (!value) throw new Error(`Missing plugin secret for HTTP header ${header}`);
-    headers[header] = value;
-  }
-  return headers;
 }
 
 function resolveEndpoint(config: HttpRuntimeConfig, template: string, values: Record<string, string>): URL {
@@ -242,15 +224,6 @@ function eventData(line: string, contentType: string | undefined): string | null
   if (!trimmed || trimmed.startsWith(":")) return null;
   if (contentType === "text/event-stream") return trimmed.startsWith("data:") ? trimmed.slice(5).trim() : null;
   return trimmed;
-}
-
-function isCapabilityEvent(value: unknown): value is CapabilityEvent {
-  return Boolean(value && typeof value === "object" && "type" in value);
-}
-
-function callTimeoutMs(configured: number, deadline: string | undefined): number {
-  if (!deadline) return configured;
-  return Math.max(1, Math.min(configured, Date.parse(deadline) - Date.now()));
 }
 
 function timeoutError(): Error {

@@ -9,6 +9,8 @@ import { Ajv } from "ajv";
 import { PluginAdapterRegistry } from "./registry.js";
 import type { PluginAdapter, PluginRuntimeHost, PluginRuntimeRecord, PluginSession } from "./types.js";
 
+const ajv = new Ajv({ allErrors: true, strict: false, addUsedSchema: false });
+
 interface ActivePlugin {
   plugin: PluginRuntimeRecord;
   adapter: PluginAdapter;
@@ -16,9 +18,7 @@ interface ActivePlugin {
   calls: Map<string, Map<string, Record<string, unknown> | undefined>>;
 }
 
-export type CapabilityRuntimeHost = PluginRuntimeHost;
-
-export function createPluginRuntimeHost(registry: PluginAdapterRegistry): CapabilityRuntimeHost {
+export function createPluginRuntimeHost(registry: PluginAdapterRegistry): PluginRuntimeHost {
   const active = new Map<string, ActivePlugin>();
 
   return {
@@ -146,7 +146,7 @@ export function createPluginRuntimeHost(registry: PluginAdapterRegistry): Capabi
 }
 
 function validateValue(schema: Record<string, unknown>, value: unknown): string | null {
-  const validate = new Ajv({ allErrors: true, strict: false }).compile(schema);
+  const validate = ajv.compile(schema);
   return validate(value) ? null : (validate.errors?.[0]?.message ?? "schema validation failed");
 }
 

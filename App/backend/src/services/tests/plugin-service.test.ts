@@ -114,7 +114,7 @@ describe("PluginService", () => {
     }])).rejects.toThrow(/did not declare/);
   });
 
-  it("rejects a changed artifact digest for an installed version", async () => {
+  it.each(["install", "update"] as const)("rejects a changed artifact digest through %s", async (operation) => {
     const releases: PluginRelease[] = [{
       ...release,
       artifact: { url: "https://plugins.example/review.zip", sha256: "a".repeat(64) }
@@ -126,7 +126,34 @@ describe("PluginService", () => {
       artifact: { url: "https://plugins.example/review.zip", sha256: "b".repeat(64) }
     });
 
-    await expect(service.install(release.manifest.id)).rejects.toThrow(/digest changed/);
+    await expect(service[operation](release.manifest.id)).rejects.toThrow(/digest changed/);
+  });
+
+  it("rejects a changed manifest for an installed version", async () => {
+    const changed: PluginRelease = { manifest: { ...release.manifest, name: "Changed" } };
+    const releases: PluginRelease[] = [release];
+    const { service } = createContext(releases);
+    await service.install(release.manifest.id);
+    releases.push(changed);
+
+    await expect(service.update(release.manifest.id)).rejects.toThrow(/manifest changed/);
+  });
+
+  it("compares permission scope independently of descriptions and list order", async () => {
+    const declared = [
+      { type: "network" as const, hosts: ["api.example", "cdn.example"], description: "Paper APIs" },
+      { type: "secret" as const, keys: ["api-key", "client-id"], description: "Credentials" }
+    ];
+    const pluginRelease: PluginRelease = {
+      manifest: { ...release.manifest, permissions: declared }
+    };
+    const { service } = createContext([pluginRelease]);
+    await service.install(release.manifest.id);
+
+    expect(await service.approvePermissions(release.manifest.id, [
+      { type: "network", hosts: ["cdn.example", "api.example"] },
+      { type: "secret", keys: ["client-id", "api-key"] }
+    ])).toMatchObject({ state: "installed" });
   });
 
   it("marks activation failures without publishing the plugin as active", async () => {

@@ -11,6 +11,7 @@ import {
   type PluginRuntime
 } from "@memmy/local-api-contracts";
 import { z } from "zod";
+import { callTimeoutMs, isCapabilityEvent } from "./shared.js";
 import type { PluginAdapter, PluginRuntimeContext, PluginSession } from "./types.js";
 
 const MAX_OUTPUT_BYTES = 50 * 1024 * 1024;
@@ -394,15 +395,6 @@ function waitForTermination(child: ChildProcessWithoutNullStreams): Promise<void
       resolve();
     });
   });
-}
-
-function callTimeoutMs(configured: number, deadline: string | undefined): number {
-  if (!deadline) return configured;
-  return Math.max(1, Math.min(configured, Date.parse(deadline) - Date.now()));
-}
-
-function isCapabilityEvent(value: unknown): value is CapabilityEvent {
-  return Boolean(value && typeof value === "object" && "type" in value);
 }
 
 function asCommandSession(session: PluginSession): CommandPluginSession {

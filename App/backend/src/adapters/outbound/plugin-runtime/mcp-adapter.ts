@@ -10,10 +10,14 @@ import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { z } from "zod";
+import {
+  assertNetworkPermission,
+  assertSafeStaticHeaders,
+  callTimeoutMs,
+  resolveSecretHeaders
+} from "./shared.js";
 import type { PluginAdapter, PluginRuntimeContext, PluginSession } from "./types.js";
 import { buildPluginSandboxLaunch, resolvePluginEnvironment } from "./command-adapter.js";
-
-const BLOCKED_STATIC_HEADERS = new Set(["authorization", "cookie", "host", "proxy-authorization"]);
 
 const McpSharedConfigSchema = z.object({
   capabilityTools: z.record(z.string(), z.string().min(1)).default({}),
@@ -84,7 +88,9 @@ export function createMcpPluginAdapter(options: CreateMcpPluginAdapterOptions = 
 
     async activate(context) {
       const config = validateMcpConfig(context.plugin.manifest.runtime, context.rootPath, platform);
-      const headers = config.transport === "stdio" ? {} : resolveHeaders(config, context.secrets);
+      const headers = config.transport === "stdio"
+        ? {}
+        : resolveSecretHeaders(config.headers, config.secretHeaders, context.secrets, "MCP");
       if (config.transport === "stdio") {
         if (context.plugin.manifest.permissions.some((permission) => permission.type === "network")) {
           throw Object.assign(new Error("Local MCP plugins cannot request network access; use remote MCP"), {
@@ -200,11 +206,7 @@ function validateMcpConfig(
     if (!rootPath) throw new Error("Local MCP plugin requires an installed artifact");
     if (platform !== "darwin" && platform !== "linux") throw new Error(`Local MCP plugins are unsupported on ${platform}`);
   } else {
-    for (const name of Object.keys(config.headers)) {
-      if (BLOCKED_STATIC_HEADERS.has(name.toLowerCase())) {
-        throw new Error(`Sensitive MCP header must use secretHeaders: ${name}`);
-      }
-    }
+    assertSafeStaticHeaders(config.headers, "MCP");
   }
   return config;
 }
@@ -271,38 +273,11 @@ function asArguments(input: unknown): Record<string, unknown> {
   return input as Record<string, unknown>;
 }
 
-function resolveHeaders(
-  config: z.infer<typeof McpRemoteConfigSchema>,
-  secrets: Readonly<Record<string, string>>
-): Record<string, string> {
-  const headers = { ...config.headers };
-  for (const [header, key] of Object.entries(config.secretHeaders)) {
-    const value = secrets[key];
-    if (!value) throw new Error(`Missing plugin secret for MCP header ${header}`);
-    headers[header] = value;
-  }
-  return headers;
-}
-
 function assertAllowedProtocol(url: URL): void {
   const loopback = url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]";
   if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) {
     throw new Error("Plugin MCP URL must use HTTPS or loopback HTTP");
   }
-}
-
-function assertNetworkPermission(context: PluginRuntimeContext, hostname: string): void {
-  const allowed = context.plugin.manifest.permissions.some((permission) =>
-    permission.type === "network" && permission.hosts.includes(hostname)
-  );
-  if (!allowed) throw Object.assign(new Error(`Plugin network permission does not allow ${hostname}`), {
-    code: "plugin_permission_denied"
-  });
-}
-
-function callTimeoutMs(configured: number, deadline: string | undefined): number {
-  if (!deadline) return configured;
-  return Math.max(1, Math.min(configured, Date.parse(deadline) - Date.now()));
 }
 
 function asMcpSession(session: PluginSession): McpPluginSession {
