@@ -1,9 +1,9 @@
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CapabilityEvent } from "@memmy/local-api-contracts";
 import { afterEach, describe, expect, it } from "vitest";
-import { createCommandPluginAdapter } from "../command-adapter.js";
+import { buildPluginSandboxLaunch, createCommandPluginAdapter } from "../command-adapter.js";
 import type { PluginRuntimeContext } from "../types.js";
 
 let root: string | undefined;
@@ -120,12 +120,40 @@ describe("CommandPluginAdapter", () => {
     ]);
   });
 
-  it("rejects network access and commands outside the artifact", async () => {
+  it("allows only command-plugin network hosts approved by the host policy", async () => {
     const pluginContext = context();
     pluginContext.plugin.manifest.permissions = [{ type: "network", hosts: ["example.com"] }];
-    await expect(createCommandPluginAdapter().activate(pluginContext)).rejects.toThrow(/cannot request network/);
+    await expect(createCommandPluginAdapter().activate(pluginContext)).rejects.toThrow(/not in the host allowlist/);
+    let networkEnabled = false;
+    const adapter = createCommandPluginAdapter({
+      allowedNetworkHosts: ["example.com"],
+      buildLaunch: async (_context, _config, enabled) => {
+        networkEnabled = enabled;
+        return { command: process.execPath, args: [], cwd: root! };
+      }
+    });
+    await expect(adapter.activate(pluginContext)).resolves.toBeDefined();
+    expect(networkEnabled).toBe(true);
+  });
+
+  it("rejects commands outside the artifact", async () => {
+    const pluginContext = context();
     pluginContext.plugin.manifest.permissions = [];
     pluginContext.plugin.manifest.runtime.config = { command: "../outside" };
     await expect(createCommandPluginAdapter().activate(pluginContext)).rejects.toThrow(/relative/);
+  });
+
+  it("runs non-executable JavaScript artifacts with the host Node interpreter", async () => {
+    const pluginContext = context();
+    chmodSync(join(root!, "runtime/plugin"), 0o644);
+    const launch = await buildPluginSandboxLaunch(pluginContext, {
+      command: "runtime/plugin",
+      interpreter: "node",
+      args: ["--flag"],
+      cwd: "."
+    }, "darwin");
+    const separator = launch.args.indexOf("--");
+    expect(launch.args[separator + 1]).toBe(realpathSync(process.execPath));
+    expect(launch.args.slice(separator + 2)).toEqual([realpathSync(join(root!, "runtime/plugin")), "--flag"]);
   });
 });

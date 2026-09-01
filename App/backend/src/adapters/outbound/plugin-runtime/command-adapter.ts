@@ -1,8 +1,8 @@
 /** Sandboxed local command plugin runtime adapter. */
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
-import { access, lstat, realpath } from "node:fs/promises";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { access, lstat, mkdir, realpath } from "node:fs/promises";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
 import {
   CapabilityEventSchema,
@@ -19,6 +19,7 @@ const MAX_STDERR_BYTES = 64 * 1024;
 
 const CommandRuntimeConfigSchema = z.object({
   command: z.string().trim().min(1),
+  interpreter: z.enum(["direct", "node"]).default("direct"),
   args: z.array(z.string()).default([]),
   cwd: z.string().default("."),
   inputMode: z.enum(["stdin-json", "argument-json"]).default("stdin-json"),
@@ -48,13 +49,24 @@ interface CommandPluginSession extends PluginSession {
 export interface CreateCommandPluginAdapterOptions {
   platform?: NodeJS.Platform;
   spawnFn?: typeof spawn;
-  buildLaunch?: (context: PluginRuntimeContext, config: CommandRuntimeConfig) => Promise<SandboxLaunch>;
+  buildLaunch?: (context: PluginRuntimeContext, config: CommandRuntimeConfig, networkEnabled: boolean) => Promise<SandboxLaunch>;
+  /** Exact DNS hosts local command plugins may request in their manifest. */
+  allowedNetworkHosts?: readonly string[];
+  /** Host-owned upload roots made readable only to plugins approved for the file-input host service. */
+  fileInputRoots?: readonly string[];
 }
 
 export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOptions = {}): PluginAdapter {
   const platform = options.platform ?? process.platform;
   const spawnFn = options.spawnFn ?? spawn;
-  const buildLaunch = options.buildLaunch ?? ((context, config) => buildPluginSandboxLaunch(context, config, platform));
+  const buildLaunch = options.buildLaunch ?? ((context, config, networkEnabled) => buildPluginSandboxLaunch(
+    context,
+    config,
+    platform,
+    networkEnabled,
+    options.fileInputRoots ?? []
+  ));
+  const allowedNetworkHosts = new Set((options.allowedNetworkHosts ?? []).map((host) => host.trim().toLowerCase()).filter(Boolean));
 
   return {
     id: "command",
@@ -65,15 +77,19 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
 
     async activate(context) {
       const config = validateCommandConfig(context.plugin.manifest.runtime, context.rootPath, platform);
-      if (context.plugin.manifest.permissions.some((permission) => permission.type === "network")) {
-        throw Object.assign(new Error("Command plugins cannot request network access; use HTTP or MCP"), {
-          code: "plugin_permission_denied"
-        });
-      }
+      const requestedNetworkHosts = context.plugin.manifest.permissions
+        .filter((permission) => permission.type === "network")
+        .flatMap((permission) => permission.hosts);
+      const deniedHost = requestedNetworkHosts.find((host) => !allowedNetworkHosts.has(host));
+      if (deniedHost) throw Object.assign(new Error(`Command plugin network host is not in the host allowlist: ${deniedHost}`), {
+        code: "plugin_permission_denied"
+      });
       const env = resolvePluginEnvironment(config.env, config.secretEnv, context.secrets);
+      const pluginDataPath = configuredPluginDataPath(context);
+      if (pluginDataPath) env.MEMMY_PLUGIN_DATA_DIR = pluginDataPath;
       return {
         pluginId: context.plugin.id,
-        launch: await buildLaunch(context, config),
+        launch: await buildLaunch(context, config, requestedNetworkHosts.length > 0),
         config,
         pluginConfig: context.config,
         env,
@@ -220,29 +236,35 @@ function validateCommandConfig(runtime: PluginRuntime, rootPath: string | null, 
 
 export async function buildPluginSandboxLaunch(
   context: PluginRuntimeContext,
-  config: Pick<CommandRuntimeConfig, "command" | "args" | "cwd">,
-  platform: NodeJS.Platform = process.platform
+  config: Pick<CommandRuntimeConfig, "command" | "args" | "cwd"> & Partial<Pick<CommandRuntimeConfig, "interpreter">>,
+  platform: NodeJS.Platform = process.platform,
+  networkEnabled = false,
+  fileInputRoots: readonly string[] = []
 ): Promise<SandboxLaunch> {
   const root = await realpath(context.rootPath!);
   const command = await canonicalDescendant(root, resolve(root, config.command));
   const info = await lstat(command);
   if (!info.isFile() || info.isSymbolicLink()) throw new Error("Plugin command must be a regular file");
-  await access(command, fsConstants.X_OK);
+  const interpreter = config.interpreter ?? "direct";
+  if (interpreter === "direct") await access(command, fsConstants.X_OK);
+  const runtimeCommand = interpreter === "node" ? await realpath(process.execPath) : command;
+  const runtimeRoot = interpreter === "node" ? resolve(dirname(runtimeCommand), "..") : null;
+  const runtimeArgs = interpreter === "node" ? [command, ...config.args] : config.args;
   const cwd = await canonicalDescendant(root, resolve(root, config.cwd), true);
   if (!(await lstat(cwd)).isDirectory()) throw new Error("Plugin command cwd must be a directory");
-  const filesystem = await filesystemRules(context);
+  const filesystem = await filesystemRules(context, fileInputRoots);
 
   if (platform === "darwin") {
     return {
       command: "/usr/bin/sandbox-exec",
-      args: ["-p", seatbeltProfile(root, filesystem), "--", command, ...config.args],
+      args: ["-p", seatbeltProfile(root, filesystem, networkEnabled, runtimeRoot), "--", runtimeCommand, ...runtimeArgs],
       cwd
     };
   }
 
   const bwrap = await firstExecutable(["/usr/bin/bwrap", "/bin/bwrap"]);
   if (!bwrap) throw new Error("Command plugins require bubblewrap on Linux");
-  return { command: bwrap, args: bwrapArgs(root, cwd, command, config.args, filesystem), cwd };
+  return { command: bwrap, args: bwrapArgs(root, cwd, runtimeCommand, runtimeArgs, filesystem, networkEnabled, runtimeRoot), cwd };
 }
 
 interface FilesystemRule {
@@ -250,7 +272,7 @@ interface FilesystemRule {
   writable: boolean;
 }
 
-async function filesystemRules(context: PluginRuntimeContext): Promise<FilesystemRule[]> {
+async function filesystemRules(context: PluginRuntimeContext, fileInputRoots: readonly string[]): Promise<FilesystemRule[]> {
   const rules: FilesystemRule[] = [];
   for (const permission of context.plugin.approvedPermissions) {
     if (permission.type !== "filesystem") continue;
@@ -260,10 +282,36 @@ async function filesystemRules(context: PluginRuntimeContext): Promise<Filesyste
       rules.push({ path, writable: permission.access !== "read" });
     }
   }
+  if (approvedHostService(context, "file-input")) {
+    for (const configured of fileInputRoots) {
+      if (!isAbsolute(configured)) throw new Error(`File-input root must be absolute: ${configured}`);
+      const path = await realpath(configured).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return null;
+        throw error;
+      });
+      if (path) rules.push({ path, writable: false });
+    }
+  }
+  const pluginDataPath = configuredPluginDataPath(context);
+  if (pluginDataPath) {
+    await mkdir(pluginDataPath, { recursive: true });
+    rules.push({ path: await realpath(pluginDataPath), writable: true });
+  }
   return rules;
 }
 
-function seatbeltProfile(root: string, filesystem: FilesystemRule[]): string {
+function approvedHostService(context: PluginRuntimeContext, service: string): boolean {
+  return context.plugin.approvedPermissions.some((permission) => permission.type === "host-service" && permission.services.includes(service));
+}
+
+function configuredPluginDataPath(context: PluginRuntimeContext): string | null {
+  if (!approvedHostService(context, "plugin-data")) return null;
+  const value = context.config.taskRoot;
+  if (typeof value !== "string" || !isAbsolute(value)) throw new Error("plugin-data host service requires an absolute taskRoot config path");
+  return value;
+}
+
+function seatbeltProfile(root: string, filesystem: FilesystemRule[], networkEnabled: boolean, runtimeRoot: string | null): string {
   const readPaths = [
     root,
     "/System",
@@ -274,7 +322,8 @@ function seatbeltProfile(root: string, filesystem: FilesystemRule[]): string {
     "/usr/share",
     "/bin",
     "/usr/bin",
-    ...filesystem.map((rule) => rule.path)
+    ...filesystem.map((rule) => rule.path),
+    ...(runtimeRoot ? [runtimeRoot] : [])
   ];
   const writePaths = filesystem.filter((rule) => rule.writable).map((rule) => rule.path);
   const clauses = [
@@ -284,10 +333,11 @@ function seatbeltProfile(root: string, filesystem: FilesystemRule[]): string {
     "(allow process-exec process-fork)",
     "(allow signal process-info* (target same-sandbox))",
     `(allow file-read-metadata file-test-existence ${readPaths.map(seatbeltAncestors).join(" ")})`,
-    `(allow file-map-executable (subpath "/System") (subpath "/System/Volumes/Preboot/Cryptexes/OS") (subpath "/usr/lib") (subpath "/Library/Apple") ${seatbeltSubpath(root)})`,
+    `(allow file-map-executable (subpath "/System") (subpath "/System/Volumes/Preboot/Cryptexes/OS") (subpath "/usr/lib") (subpath "/Library/Apple") ${seatbeltSubpath(root)}${runtimeRoot ? ` ${seatbeltSubpath(runtimeRoot)}` : ""})`,
     `(allow file-read* ${readPaths.map(seatbeltSubpath).join(" ")})`
   ];
   if (writePaths.length) clauses.push(`(allow file-write* ${writePaths.map(seatbeltSubpath).join(" ")})`);
+  if (networkEnabled) clauses.push("(allow network-outbound)");
   return clauses.join("\n");
 }
 
@@ -304,13 +354,17 @@ function bwrapArgs(
   cwd: string,
   command: string,
   commandArgs: string[],
-  filesystem: FilesystemRule[]
+  filesystem: FilesystemRule[],
+  networkEnabled: boolean,
+  runtimeRoot: string | null
 ): string[] {
   const args = ["--die-with-parent", "--new-session", "--unshare-all", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"];
-  const bindTargets = [root, ...filesystem.map((rule) => rule.path)];
+  if (networkEnabled) args.push("--share-net");
+  const bindTargets = [root, ...filesystem.map((rule) => rule.path), ...(runtimeRoot ? [runtimeRoot] : [])];
   for (const directory of new Set(bindTargets.flatMap(parentDirectories))) args.push("--dir", directory);
   for (const path of ["/usr", "/bin", "/lib", "/lib64"]) args.push("--ro-bind-try", path, path);
   args.push("--ro-bind", root, root);
+  if (runtimeRoot && !["/usr", "/bin", "/lib", "/lib64"].includes(runtimeRoot)) args.push("--ro-bind", runtimeRoot, runtimeRoot);
   for (const rule of filesystem) args.push(rule.writable ? "--bind" : "--ro-bind", rule.path, rule.path);
   args.push("--chdir", cwd, "--", command, ...commandArgs);
   return args;

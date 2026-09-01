@@ -363,9 +363,8 @@ function ResponseButton(props: { children: string; disabled: boolean; onClick?: 
 
 function ArtifactCard(props: { event: Extract<CapabilityEvent, { type: "artifact" }>; onAddToChat?: (artifact: PluginArtifactRef) => void }) {
   const { t } = useTranslation();
-  const canOpen = isSafeExternalUri(props.event.artifact.uri);
-  const downloadUri = props.event.artifact.downloadUri ?? props.event.artifact.uri;
-  const canDownload = isSafeExternalUri(downloadUri);
+  const openUri = resolveSafeArtifactUri(props.event.artifact.uri);
+  const downloadUri = resolveSafeArtifactUri(props.event.artifact.downloadUri ?? props.event.artifact.uri);
   return (
     <div className="flex items-center gap-3 rounded-card border border-border-stone/30 px-3 py-2.5">
       <FileOutput size={18} className="shrink-0 text-action-sky" aria-hidden="true" />
@@ -373,12 +372,12 @@ function ArtifactCard(props: { event: Extract<CapabilityEvent, { type: "artifact
         <p className="truncate text-sm text-text-ink/75">{props.event.artifact.name}</p>
         <p className="truncate text-[11px] text-text-ink/40">{props.event.artifact.mediaType}</p>
       </div>
-      {canOpen ? (
-        <button type="button" className="inline-flex items-center gap-1 text-xs text-action-sky hover:underline" onClick={() => void openExternalUrl(props.event.artifact.uri)}>
+      {openUri ? (
+        <button type="button" className="inline-flex items-center gap-1 text-xs text-action-sky hover:underline" onClick={() => void openExternalUrl(openUri)}>
           {t("plugin.ui.open")}<ExternalLink size={12} aria-hidden="true" />
         </button>
       ) : null}
-      {canDownload ? (
+      {downloadUri ? (
         <button type="button" className="inline-flex items-center gap-1 text-xs text-action-sky hover:underline" onClick={() => startBrowserDownload(downloadUri, props.event.artifact.name)}>
           {t("plugin.ui.download")}<Download size={12} aria-hidden="true" />
         </button>
@@ -533,11 +532,11 @@ function matchesAccept(file: File, accept: string): boolean {
   });
 }
 
-function isSafeExternalUri(raw: string): boolean {
+export function resolveSafeArtifactUri(raw: string): string | null {
   try {
-    const protocol = new URL(raw).protocol;
-    return protocol === "https:" || protocol === "http:";
+    const url = new URL(raw, typeof window === "undefined" ? "http://localhost" : window.location.origin);
+    return url.protocol === "https:" || url.protocol === "http:" ? url.href : null;
   } catch {
-    return false;
+    return null;
   }
 }

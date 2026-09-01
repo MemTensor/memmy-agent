@@ -13,6 +13,12 @@ const PluginPackagePathSchema = z.string().trim().min(1).max(512).refine((value)
   && value.split("/").every((segment) => segment.length > 0 && segment !== "." && segment !== "..")
 ), "Plugin package path must be a safe relative path");
 
+const PluginNetworkHostSchema = z.string().trim().min(1).max(253).transform((value) => value.toLowerCase()).refine((value) => {
+  if (value === "localhost") return true;
+  if (value.includes(":") || value.includes("/") || value.includes("*") || value.startsWith(".")) return false;
+  return value.split(".").every((label) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label));
+}, "Network host must be an exact DNS hostname without a scheme, port, path, or wildcard");
+
 export const PluginRuntimeSchema = z.object({
   adapter: z.enum(["mcp", "http", "command"]),
   config: z.record(z.string(), z.unknown()).optional()
@@ -33,7 +39,7 @@ export type PluginCapability = z.infer<typeof PluginCapabilitySchema>;
 export const PluginPermissionSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("network"),
-    hosts: z.array(z.string().trim().min(1)).min(1),
+    hosts: z.array(PluginNetworkHostSchema).min(1),
     description: z.string().trim().min(1).optional()
   }),
   z.object({
@@ -68,6 +74,18 @@ export const PluginUiSchema = z.object({
 }).passthrough();
 export type PluginUi = z.infer<typeof PluginUiSchema>;
 
+export const PluginSkillContributionSchema = z.object({
+  id: PluginIdentifierSchema,
+  name: z.string().trim().min(1).max(128),
+  description: z.string().trim().min(1).max(500),
+  entry: PluginPackagePathSchema
+}).superRefine((skill, context) => {
+  if (!skill.entry.endsWith("/SKILL.md") && skill.entry !== "SKILL.md") {
+    context.addIssue({ code: "custom", path: ["entry"], message: "Plugin skill entry must point to SKILL.md" });
+  }
+});
+export type PluginSkillContribution = z.infer<typeof PluginSkillContributionSchema>;
+
 export const PluginCommandContributionSchema = z.object({
   command: z.string().trim().regex(/^\/[a-z0-9][a-z0-9-]{0,63}$/),
   name: z.string().trim().min(1).max(128),
@@ -88,6 +106,7 @@ export const PluginManifestSchema = z.object({
   capabilities: z.array(PluginCapabilitySchema).min(1),
   permissions: z.array(PluginPermissionSchema),
   configSchema: JsonSchemaSchema.optional(),
+  skills: z.array(PluginSkillContributionSchema).max(20).optional(),
   commands: z.array(PluginCommandContributionSchema).max(100).optional(),
   ui: PluginUiSchema.optional()
 }).superRefine((manifest, context) => {
@@ -122,6 +141,13 @@ export const PluginManifestSchema = z.object({
       context.addIssue({ code: "custom", path: ["commands", index, "command"], message: `Duplicate plugin command: ${command.command}` });
     }
     commands.add(command.command);
+  }
+  const skills = new Set<string>();
+  for (const [index, skill] of (manifest.skills ?? []).entries()) {
+    if (skills.has(skill.id)) {
+      context.addIssue({ code: "custom", path: ["skills", index, "id"], message: `Duplicate plugin skill id: ${skill.id}` });
+    }
+    skills.add(skill.id);
   }
 });
 export type PluginManifest = z.infer<typeof PluginManifestSchema>;

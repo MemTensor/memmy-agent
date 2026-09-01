@@ -1,5 +1,6 @@
 import type { AccountChannel } from "@memmy/local-api-contracts";
-import { dirname, join } from "node:path";
+import { homedir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import type { AppStateStore } from "../infrastructure/app-state-store/index.js";
 import { type MemmyConfigWriter } from "../infrastructure/memmy-config/index.js";
 import type { AgentAdapterRegistry } from "../adapters/outbound/agent-adapter/index.js";
@@ -21,6 +22,7 @@ import {
   PluginAdapterRegistry
 } from "../adapters/outbound/plugin-runtime/index.js";
 import { createPluginArtifactManager, type PluginArtifactManager } from "../adapters/outbound/plugin-artifact/index.js";
+import { createPluginSkillManager } from "../adapters/outbound/plugin-skill/index.js";
 import type { PluginRegistry } from "../adapters/outbound/plugin-registry/index.js";
 import type { PermissionManager } from "../permission/index.js";
 import {
@@ -112,6 +114,8 @@ export interface CreateBackendServicesOptions {
   pluginRegistry?: PluginRegistry;
   pluginArtifactManager?: PluginArtifactManager;
   pluginRuntimeHost?: PluginRuntimeHost;
+  /** Exact hosts local command plugins may request. Defaults to MEMMY_COMMAND_PLUGIN_NETWORK_ALLOWLIST. */
+  commandPluginNetworkAllowlist?: readonly string[];
   /** Memmy config writer. */
   memmyConfigWriter?: MemmyConfigWriter;
   /** Memmy config path. */
@@ -129,7 +133,10 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
   const pluginRuntimeHost = options.pluginRuntimeHost ?? createPluginRuntimeHost(new PluginAdapterRegistry([
     createMcpPluginAdapter(),
     createHttpPluginAdapter(),
-    createCommandPluginAdapter()
+    createCommandPluginAdapter({
+      allowedNetworkHosts: options.commandPluginNetworkAllowlist ?? commandPluginNetworkAllowlist(process.env),
+      fileInputRoots: [join(resolveAgentDataRoot(process.env), "media")]
+    })
   ]));
   const plugins = createPluginService({
     repository: options.appStateStore.repositories.plugins,
@@ -138,7 +145,8 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
     runtimeHost: pluginRuntimeHost,
     artifactManager: options.pluginArtifactManager ?? createPluginArtifactManager({
       installRoot: join(dirname(options.appStateStore.databasePath), "plugins")
-    })
+    }),
+    skillManager: createPluginSkillManager({ skillsRoot: join(resolveAgentWorkspace(process.env), "skills") })
   });
   const sourceRegistry =
     options.sourceRegistry ??
@@ -276,6 +284,27 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
     }),
     plugins
   };
+}
+
+function commandPluginNetworkAllowlist(env: NodeJS.ProcessEnv): string[] {
+  return (env.MEMMY_COMMAND_PLUGIN_NETWORK_ALLOWLIST ?? "")
+    .split(",")
+    .map((host) => host.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function resolveAgentWorkspace(env: NodeJS.ProcessEnv): string {
+  const configured = env.MEMMY_AGENT_WORKSPACE?.trim() || "~/.memmy/workspace";
+  if (configured === "~") return homedir();
+  if (configured.startsWith("~/")) return resolve(homedir(), configured.slice(2));
+  return resolve(configured);
+}
+
+function resolveAgentDataRoot(env: NodeJS.ProcessEnv): string {
+  const configured = env.MEMMY_AGENT_DATA_DIR?.trim() || "~/.memmy";
+  if (configured === "~") return homedir();
+  if (configured.startsWith("~/")) return resolve(homedir(), configured.slice(2));
+  return resolve(configured);
 }
 
 export { createBootstrapService };

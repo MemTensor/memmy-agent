@@ -69,15 +69,21 @@ function createContext(releases: PluginRelease[] = [release]) {
     readTextFile: vi.fn(async () => "<main>renderer</main>"),
     remove: vi.fn(async () => undefined)
   };
+  const skillManager = {
+    activate: vi.fn(async () => undefined),
+    deactivate: vi.fn(async () => undefined)
+  };
   return {
     runtimeHost,
     artifactManager,
+    skillManager,
     service: createPluginService({
       repository: store.repositories.plugins,
       secretStore: store.secretStore,
       registry: createInMemoryPluginRegistry(releases),
       runtimeHost,
-      artifactManager
+      artifactManager,
+      skillManager
     })
   };
 }
@@ -99,7 +105,7 @@ describe("PluginService", () => {
   });
 
   it("installs, configures, approves, enables, disables, and uninstalls", async () => {
-    const { service, runtimeHost, artifactManager } = createContext();
+    const { service, runtimeHost, artifactManager, skillManager } = createContext();
     expect((await service.install(release.manifest.id)).state).toBe("pending_approval");
     expect(() => service.configure(release.manifest.id, { config: {} })).toThrow(/Invalid plugin config/);
     service.configure(release.manifest.id, {
@@ -111,7 +117,9 @@ describe("PluginService", () => {
     expect(runtimeHost.activate).toHaveBeenCalledWith(expect.objectContaining({ id: release.manifest.id }), {
       "api-key": "secret"
     });
+    expect(skillManager.activate).toHaveBeenCalledWith(expect.objectContaining({ id: release.manifest.id }));
     expect((await service.disable(release.manifest.id)).state).toBe("disabled");
+    expect(skillManager.deactivate).toHaveBeenCalledWith(release.manifest.id);
     await service.uninstall(release.manifest.id);
     expect(service.list()).toEqual([]);
     expect(artifactManager.remove).toHaveBeenCalled();

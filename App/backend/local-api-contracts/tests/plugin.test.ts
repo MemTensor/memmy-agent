@@ -71,6 +71,23 @@ describe("PluginManifestSchema", () => {
       commands: [{ command: "/review", name: "Review", description: "Create a review", capabilityId: "missing" }]
     })).toThrow(/Unknown command capability/);
   });
+
+  it("registers packaged skills and accepts only exact network hostnames", () => {
+    const parsed = PluginManifestSchema.parse({
+      ...manifest,
+      permissions: [{ type: "network", hosts: ["API.CROSSREF.ORG"] }],
+      skills: [{ id: "literature-review", name: "Literature Review", description: "Coordinate review tools", entry: "skills/literature-review/SKILL.md" }]
+    });
+    expect(parsed.permissions).toEqual([{ type: "network", hosts: ["api.crossref.org"] }]);
+    expect(parsed.skills?.[0]?.entry).toBe("skills/literature-review/SKILL.md");
+    for (const host of ["https://api.crossref.org", "*.crossref.org", "api.crossref.org:443"]) {
+      expect(() => PluginManifestSchema.parse({ ...manifest, permissions: [{ type: "network", hosts: [host] }] })).toThrow(/exact DNS hostname/);
+    }
+    expect(() => PluginManifestSchema.parse({
+      ...manifest,
+      skills: [{ id: "review", name: "Review", description: "Review", entry: "skills/review.md" }]
+    })).toThrow(/SKILL.md/);
+  });
 });
 
 describe("CapabilityEventSchema", () => {

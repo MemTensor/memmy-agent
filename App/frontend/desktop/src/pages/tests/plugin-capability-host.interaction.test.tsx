@@ -6,7 +6,7 @@ import { InstalledPluginSchema, type PluginCapabilityEventPayload } from "@memmy
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
 import { reducePluginUiCalls, type PluginUiCall } from "../../app/plugin-ui-context.js";
-import { buildRendererDocument, PluginCapabilityHost } from "../plugin-capability-host.js";
+import { buildRendererDocument, PluginCapabilityHost, resolveSafeArtifactUri } from "../plugin-capability-host.js";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -176,6 +176,13 @@ describe("PluginCapabilityHost", () => {
 });
 
 describe("plugin UI event reduction", () => {
+  it("resolves Host-managed relative artifact URIs and rejects local file URIs", () => {
+    expect(resolveSafeArtifactUri("/api/v1/plugins/review/artifacts/token/preview")).toBe(
+      `${window.location.origin}/api/v1/plugins/review/artifacts/token/preview`
+    );
+    expect(resolveSafeArtifactUri("file:///tmp/review.pdf")).toBeNull();
+  });
+
   it("replaces transient events and keeps distinct cards", () => {
     const base = {
       pluginId: plugin.id,
