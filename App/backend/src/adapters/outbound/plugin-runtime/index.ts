@@ -8,5 +8,7 @@ export type {
   PluginRuntimeContext,
   PluginRuntimeHost,
   PluginRuntimeRecord,
-  PluginSession
+  PluginSession,
+  PluginHostServiceCall,
+  PluginHostServiceInvoker
 } from "./types.js";

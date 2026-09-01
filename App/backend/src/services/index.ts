@@ -19,7 +19,8 @@ import {
   createHttpPluginAdapter,
   createMcpPluginAdapter,
   createPluginRuntimeHost,
-  PluginAdapterRegistry
+  PluginAdapterRegistry,
+  type PluginHostServiceInvoker
 } from "../adapters/outbound/plugin-runtime/index.js";
 import { createPluginArtifactManager, type PluginArtifactManager } from "../adapters/outbound/plugin-artifact/index.js";
 import { createPluginSkillManager } from "../adapters/outbound/plugin-skill/index.js";
@@ -70,6 +71,7 @@ import {
 import { createTurnService, type TurnService } from "./turn-service.js";
 import { createPluginService, type PluginRuntimeHost, type PluginService } from "./plugin-service.js";
 import { createPluginLocalArtifactService } from "./plugin-local-artifact-service.js";
+import { createPluginModelInferenceService } from "./plugin-model-inference-service.js";
 
 export interface BackendServices {
   memoryClient: MemoryClient;
@@ -115,6 +117,8 @@ export interface CreateBackendServicesOptions {
   pluginRegistry?: PluginRegistry;
   pluginArtifactManager?: PluginArtifactManager;
   pluginRuntimeHost?: PluginRuntimeHost;
+  /** Optional Host-service dispatcher, primarily for embedding and tests. */
+  pluginHostServices?: PluginHostServiceInvoker;
   /** Exact hosts local command plugins may request. Defaults to MEMMY_COMMAND_PLUGIN_NETWORK_ALLOWLIST. */
   commandPluginNetworkAllowlist?: readonly string[];
   /** Memmy config writer. */
@@ -134,13 +138,28 @@ export const DEFAULT_COMMAND_PLUGIN_NETWORK_ALLOWLIST = ["export.arxiv.org", "ar
 
 export function createBackendServices(options: CreateBackendServicesOptions): BackendServices {
   const progressBus = options.progressBus ?? createProgressBus();
+  const memmyConfigWriter = options.memmyConfigWriter ?? createUnavailableMemmyConfigWriter();
+  const accountSessionRepository = options.appStateStore.repositories.accountSession;
+  const pluginHostServices = options.pluginHostServices ?? createPluginModelInferenceService({
+    resolveModel: async () => {
+      const userMode = options.appStateStore.repositories.bootstrap.getAppSettings().userMode;
+      if (userMode !== "account" && userMode !== "byok") return null;
+      const account = accountSessionRepository.get();
+      return await memmyConfigWriter.resolveAssignedModel?.({
+        mode: userMode,
+        activeAccountId: account.authenticated ? account.profile.userId : null,
+        capability: "agent"
+      }) ?? null;
+    }
+  });
   const pluginRuntimeHost = options.pluginRuntimeHost ?? createPluginRuntimeHost(new PluginAdapterRegistry([
     createMcpPluginAdapter(),
     createHttpPluginAdapter(),
     createCommandPluginAdapter({
       allowedNetworkHosts: options.commandPluginNetworkAllowlist ?? resolveCommandPluginNetworkAllowlist(process.env),
       fileInputRoots: [join(resolveAgentDataRoot(process.env), "media")],
-      pluginDataRoot: join(dirname(options.appStateStore.databasePath), "plugin-data")
+      pluginDataRoot: join(dirname(options.appStateStore.databasePath), "plugin-data"),
+      hostServices: pluginHostServices
     })
   ]));
   const plugins = createPluginService({
@@ -170,8 +189,6 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
   const memmyAgentAdminClient =
     options.memmyAgentAdminClient ??
     createHttpMemmyAgentAdminClient({ bootstrapSecret: options.memmyAgentAdminBootstrapSecret });
-  const memmyConfigWriter = options.memmyConfigWriter ?? createUnavailableMemmyConfigWriter();
-  const accountSessionRepository = options.appStateStore.repositories.accountSession;
   const resolveAnalyticsUserId = () => {
     const session = accountSessionRepository.get();
     if (!session.authenticated) return null;

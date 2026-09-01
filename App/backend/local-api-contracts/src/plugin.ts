@@ -186,6 +186,30 @@ export const PluginArtifactRefSchema = z.object({
 });
 export type PluginArtifactRef = z.infer<typeof PluginArtifactRefSchema>;
 
+/** Private command-adapter message requesting a Host-owned service. Never forwarded to plugin API consumers. */
+export const PluginHostServiceRequestSchema = z.object({
+  type: z.literal("host-service-request"),
+  requestId: z.string().trim().min(1),
+  service: PluginIdentifierSchema,
+  input: z.unknown()
+});
+export type PluginHostServiceRequest = z.infer<typeof PluginHostServiceRequestSchema>;
+
+export const PluginHostServiceResponseSchema = z.object({
+  type: z.literal("host-service-response"),
+  callId: z.string().trim().min(1),
+  requestId: z.string().trim().min(1),
+  response: z.unknown().optional(),
+  error: z.object({
+    code: z.string().trim().min(1),
+    message: z.string().trim().min(1),
+    retryable: z.boolean()
+  }).optional()
+}).refine((value) => value.response !== undefined || value.error !== undefined, {
+  message: "Host service response requires response or error"
+});
+export type PluginHostServiceResponse = z.infer<typeof PluginHostServiceResponseSchema>;
+
 export const CapabilityEventSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("progress"),

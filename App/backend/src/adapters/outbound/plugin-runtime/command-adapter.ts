@@ -6,16 +6,20 @@ import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
 import {
   CapabilityEventSchema,
+  PluginHostServiceRequestSchema,
   type CapabilityCall,
   type CapabilityEvent,
+  type PluginHostServiceRequest,
+  type PluginHostServiceResponse,
   type PluginRuntime
 } from "@memmy/local-api-contracts";
 import { z } from "zod";
 import { callTimeoutMs, isCapabilityEvent } from "./shared.js";
-import type { PluginAdapter, PluginRuntimeContext, PluginSession } from "./types.js";
+import type { PluginAdapter, PluginHostServiceInvoker, PluginRuntimeContext, PluginSession } from "./types.js";
 
 const MAX_OUTPUT_BYTES = 50 * 1024 * 1024;
 const MAX_STDERR_BYTES = 64 * 1024;
+const MAX_HOST_SERVICE_REQUESTS_PER_CALL = 16;
 
 const CommandRuntimeConfigSchema = z.object({
   command: z.string().trim().min(1),
@@ -44,6 +48,7 @@ interface CommandPluginSession extends PluginSession {
   pluginConfig: Readonly<Record<string, unknown>>;
   env: Record<string, string>;
   children: Map<string, ChildProcessWithoutNullStreams>;
+  approvedHostServices: Set<string>;
 }
 
 export interface CreateCommandPluginAdapterOptions {
@@ -56,6 +61,8 @@ export interface CreateCommandPluginAdapterOptions {
   fileInputRoots?: readonly string[];
   /** Host-owned parent directory containing one writable data directory per plugin. */
   pluginDataRoot?: string;
+  /** Host-owned services callable over the private command runtime protocol. */
+  hostServices?: PluginHostServiceInvoker;
 }
 
 export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOptions = {}): PluginAdapter {
@@ -96,7 +103,10 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
         config,
         pluginConfig: context.config,
         env,
-        children: new Map()
+        children: new Map(),
+        approvedHostServices: new Set(context.plugin.approvedPermissions
+          .filter((permission) => permission.type === "host-service")
+          .flatMap((permission) => permission.services))
       } satisfies CommandPluginSession;
     },
 
@@ -137,6 +147,7 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
         let jsonOutput: Buffer | null = null;
         if (session.config.outputMode === "ndjson") {
           let bytes = 0;
+          let hostServiceRequests = 0;
           const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
           for await (const line of lines) {
             bytes += Buffer.byteLength(line) + 1;
@@ -145,7 +156,14 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
               throw new Error("Plugin command output exceeded size limit");
             }
             if (line.trim()) {
-              const event = CapabilityEventSchema.parse(JSON.parse(line));
+              const raw = JSON.parse(line);
+              const hostRequest = PluginHostServiceRequestSchema.safeParse(raw);
+              if (hostRequest.success) {
+                hostServiceRequests += 1;
+                await respondToHostServiceRequest(child, session, call, hostRequest.data, options.hostServices, hostServiceRequests);
+                continue;
+              }
+              const event = CapabilityEventSchema.parse(raw);
               if (event.type === "result" || event.type === "error") {
                 if (terminal) throw new Error("Plugin command emitted multiple terminal events");
                 terminal = event;
@@ -224,6 +242,58 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
       session.children.clear();
     }
   };
+}
+
+async function respondToHostServiceRequest(
+  child: ChildProcessWithoutNullStreams,
+  session: CommandPluginSession,
+  call: CapabilityCall,
+  request: PluginHostServiceRequest,
+  invoker: PluginHostServiceInvoker | undefined,
+  requestNumber: number
+): Promise<void> {
+  let message: PluginHostServiceResponse;
+  if (requestNumber > MAX_HOST_SERVICE_REQUESTS_PER_CALL) {
+    message = hostServiceError(call.callId, request.requestId, "host_service_limit_exceeded", `A plugin call may make at most ${MAX_HOST_SERVICE_REQUESTS_PER_CALL} Host-service requests`, false);
+  } else if (!session.config.interactive) {
+    message = hostServiceError(call.callId, request.requestId, "plugin_runtime_error", "Host services require an interactive command runtime", false);
+  } else if (!session.approvedHostServices.has(request.service)) {
+    message = hostServiceError(call.callId, request.requestId, "plugin_permission_denied", `Host service permission was not approved: ${request.service}`, false);
+  } else if (!invoker) {
+    message = hostServiceError(call.callId, request.requestId, "host_service_unavailable", `Host service is unavailable: ${request.service}`, true);
+  } else {
+    try {
+      const response = await invoker.invoke({
+        pluginId: session.pluginId,
+        callId: call.callId,
+        conversationId: call.conversationId,
+        service: request.service,
+        input: request.input,
+        deadline: call.deadline
+      });
+      message = { type: "host-service-response", callId: call.callId, requestId: request.requestId, response };
+    } catch (error) {
+      const details = error as { code?: unknown; retryable?: unknown; message?: unknown };
+      message = hostServiceError(
+        call.callId,
+        request.requestId,
+        typeof details.code === "string" ? details.code : "host_service_error",
+        typeof details.message === "string" ? details.message : "Host service request failed",
+        details.retryable === true
+      );
+    }
+  }
+  await writeChildMessage(child, message);
+}
+
+function hostServiceError(callId: string, requestId: string, code: string, message: string, retryable: boolean): PluginHostServiceResponse {
+  return { type: "host-service-response", callId, requestId, error: { code, message, retryable } };
+}
+
+async function writeChildMessage(child: ChildProcessWithoutNullStreams, message: PluginHostServiceResponse): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    child.stdin.write(`${JSON.stringify(message)}\n`, (error) => error ? reject(error) : resolve());
+  });
 }
 
 function validateCommandConfig(runtime: PluginRuntime, rootPath: string | null, platform: NodeJS.Platform): CommandRuntimeConfig {

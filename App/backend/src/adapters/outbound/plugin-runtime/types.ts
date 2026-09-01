@@ -6,6 +6,19 @@ import type {
   PluginRuntime
 } from "@memmy/local-api-contracts";
 
+export interface PluginHostServiceCall {
+  pluginId: string;
+  callId: string;
+  conversationId: string;
+  service: string;
+  input: unknown;
+  deadline?: string;
+}
+
+export interface PluginHostServiceInvoker {
+  invoke(call: PluginHostServiceCall): Promise<unknown>;
+}
+
 export interface PluginRuntimeRecord extends InstalledPlugin {
   artifactHash: string | null;
   rootPath: string | null;

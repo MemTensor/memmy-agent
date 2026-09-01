@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CapabilityEvent } from "@memmy/local-api-contracts";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildPluginSandboxLaunch, createCommandPluginAdapter } from "../command-adapter.js";
 import type { PluginRuntimeContext } from "../types.js";
 
@@ -118,6 +118,55 @@ describe("CommandPluginAdapter", () => {
       { type: "progress", current: 1, total: 1 },
       { type: "result", output: { ok: true } }
     ]);
+  });
+
+  it("brokers approved Host-service requests over the private NDJSON channel", async () => {
+    const adapter = createCommandPluginAdapter({
+      hostServices: { invoke: async (call) => ({ content: `model:${call.conversationId}` }) },
+      buildLaunch: async (_context, config) => ({
+        command: process.execPath,
+        args: ["-e", `
+          const rl=require('node:readline').createInterface({input:process.stdin});
+          let first=true;
+          rl.on('line', line => {
+            const value=JSON.parse(line);
+            if(first){ first=false; console.log(JSON.stringify({type:'host-service-request',requestId:'model-1',service:'model-inference',input:{messages:[{role:'user',content:'hello'}]}})); }
+            else { console.log(JSON.stringify({type:'result',output:{host:value.response}})); process.exit(0); }
+          });
+        `, ...config.args],
+        cwd: root!
+      })
+    });
+    const pluginContext = context("ndjson");
+    pluginContext.plugin.manifest.runtime.config = { ...pluginContext.plugin.manifest.runtime.config, interactive: true };
+    const permission = { type: "host-service" as const, services: ["model-inference"] };
+    pluginContext.plugin.manifest.permissions = [permission];
+    pluginContext.plugin.approvedPermissions = [permission];
+    const session = await adapter.activate(pluginContext);
+    expect(await collect(adapter.invoke(session, {
+      callId: "call-1", pluginId: pluginContext.plugin.id, capabilityId: "run", conversationId: "conversation-1", input: {}
+    }))).toEqual([{ type: "result", output: { host: { content: "model:conversation-1" } } }]);
+  });
+
+  it("denies unapproved Host-service requests without invoking the service", async () => {
+    const invoke = vi.fn();
+    const adapter = createCommandPluginAdapter({
+      hostServices: { invoke },
+      buildLaunch: async () => ({
+        command: process.execPath,
+        args: ["-e", `
+          const rl=require('node:readline').createInterface({input:process.stdin}); let first=true;
+          rl.on('line', line => { const value=JSON.parse(line); if(first){ first=false; console.log(JSON.stringify({type:'host-service-request',requestId:'model-1',service:'model-inference',input:{}})); } else { console.log(JSON.stringify({type:'result',output:value.error})); process.exit(0); } });
+        `], cwd: root!
+      })
+    });
+    const pluginContext = context("ndjson");
+    pluginContext.plugin.manifest.runtime.config = { ...pluginContext.plugin.manifest.runtime.config, interactive: true };
+    const session = await adapter.activate(pluginContext);
+    expect(await collect(adapter.invoke(session, { callId: "call-1", pluginId: pluginContext.plugin.id, capabilityId: "run", conversationId: "conversation-1", input: {} }))).toEqual([
+      { type: "result", output: { code: "plugin_permission_denied", message: "Host service permission was not approved: model-inference", retryable: false } }
+    ]);
+    expect(invoke).not.toHaveBeenCalled();
   });
 
   it("allows only command-plugin network hosts approved by the host policy", async () => {
