@@ -17,7 +17,12 @@ export interface PluginLocalArtifactService {
   revokePlugin(pluginId: string): void;
 }
 
-export function createPluginLocalArtifactService(): PluginLocalArtifactService {
+export interface CreatePluginLocalArtifactServiceOptions {
+  /** Host-owned parent directory containing one writable data directory per plugin. */
+  pluginDataRoot?: string;
+}
+
+export function createPluginLocalArtifactService(options: CreatePluginLocalArtifactServiceOptions = {}): PluginLocalArtifactService {
   const artifacts = new Map<string, HostedPluginArtifact & { pluginId: string }>();
   return {
     async host(plugin, artifact) {
@@ -41,7 +46,7 @@ export function createPluginLocalArtifactService(): PluginLocalArtifactService {
       const path = await realpath(requestedPath);
       const info = await lstat(path);
       if (!info.isFile() || info.isSymbolicLink()) throw pluginArtifactError("Plugin local artifact must be a regular file");
-      const allowed = await approvedFilesystemRoots(plugin);
+      const allowed = await approvedFilesystemRoots(plugin, options.pluginDataRoot);
       if (!allowed.some((root) => isWithin(root, path))) {
         throw Object.assign(new Error("Plugin local artifact is outside its approved filesystem paths"), {
           code: "plugin_permission_denied"
@@ -69,10 +74,13 @@ export function createPluginLocalArtifactService(): PluginLocalArtifactService {
   };
 }
 
-async function approvedFilesystemRoots(plugin: { approvedPermissions: PluginPermission[]; config: Record<string, unknown> }): Promise<string[]> {
+async function approvedFilesystemRoots(
+  plugin: { id: string; approvedPermissions: PluginPermission[] },
+  pluginDataRoot?: string
+): Promise<string[]> {
   const paths = plugin.approvedPermissions.flatMap((permission) => permission.type === "filesystem" ? permission.paths : []);
   const hasPluginData = plugin.approvedPermissions.some((permission) => permission.type === "host-service" && permission.services.includes("plugin-data"));
-  if (hasPluginData && typeof plugin.config.taskRoot === "string" && isAbsolute(plugin.config.taskRoot)) paths.push(plugin.config.taskRoot);
+  if (hasPluginData && pluginDataRoot) paths.push(resolve(pluginDataRoot, plugin.id));
   return Promise.all(paths.map((path) => realpath(path)));
 }
 

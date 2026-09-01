@@ -47,15 +47,30 @@ describe("PluginLocalArtifactService", () => {
 
   it("accepts artifacts under the Host-approved plugin-data task root", async () => {
     root = mkdtempSync(join(tmpdir(), "memmy-plugin-output-"));
+    const pluginDataRoot = join(root, "plugin-data");
+    const output = join(pluginDataRoot, "literature-review", "review.md");
+    mkdirSync(join(pluginDataRoot, "literature-review"), { recursive: true });
+    writeFileSync(output, "# Review");
+    await expect(createPluginLocalArtifactService({ pluginDataRoot }).host({
+      id: "literature-review",
+      approvedPermissions: [{ type: "host-service", services: ["plugin-data", "artifact-host"] }],
+      config: {}
+    }, { id: "review", name: "review.md", mediaType: "text/markdown", uri: pathToFileURL(output).href })).resolves.toMatchObject({
+      uri: expect.stringContaining("/preview"),
+      downloadUri: expect.stringContaining("/download")
+    });
+  });
+
+  it("does not treat a plugin-configured taskRoot as a Host-approved path", async () => {
+    root = mkdtempSync(join(tmpdir(), "memmy-plugin-output-"));
     const output = join(root, "review.md");
     writeFileSync(output, "# Review");
     await expect(createPluginLocalArtifactService().host({
       id: "literature-review",
       approvedPermissions: [{ type: "host-service", services: ["plugin-data", "artifact-host"] }],
       config: { taskRoot: root }
-    }, { id: "review", name: "review.md", mediaType: "text/markdown", uri: pathToFileURL(output).href })).resolves.toMatchObject({
-      uri: expect.stringContaining("/preview"),
-      downloadUri: expect.stringContaining("/download")
+    }, { id: "review", name: "review.md", mediaType: "text/markdown", uri: pathToFileURL(output).href })).rejects.toMatchObject({
+      code: "plugin_permission_denied"
     });
   });
 });

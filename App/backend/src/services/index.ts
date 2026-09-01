@@ -69,6 +69,7 @@ import {
 } from "./skill-distribution-service.js";
 import { createTurnService, type TurnService } from "./turn-service.js";
 import { createPluginService, type PluginRuntimeHost, type PluginService } from "./plugin-service.js";
+import { createPluginLocalArtifactService } from "./plugin-local-artifact-service.js";
 
 export interface BackendServices {
   memoryClient: MemoryClient;
@@ -128,14 +129,18 @@ export interface CreateBackendServicesOptions {
   accountChannel?: AccountChannel;
 }
 
+/** Minimum network surface for the first-party arXiv literature-review provider. */
+export const DEFAULT_COMMAND_PLUGIN_NETWORK_ALLOWLIST = ["export.arxiv.org", "arxiv.org"] as const;
+
 export function createBackendServices(options: CreateBackendServicesOptions): BackendServices {
   const progressBus = options.progressBus ?? createProgressBus();
   const pluginRuntimeHost = options.pluginRuntimeHost ?? createPluginRuntimeHost(new PluginAdapterRegistry([
     createMcpPluginAdapter(),
     createHttpPluginAdapter(),
     createCommandPluginAdapter({
-      allowedNetworkHosts: options.commandPluginNetworkAllowlist ?? commandPluginNetworkAllowlist(process.env),
-      fileInputRoots: [join(resolveAgentDataRoot(process.env), "media")]
+      allowedNetworkHosts: options.commandPluginNetworkAllowlist ?? resolveCommandPluginNetworkAllowlist(process.env),
+      fileInputRoots: [join(resolveAgentDataRoot(process.env), "media")],
+      pluginDataRoot: join(dirname(options.appStateStore.databasePath), "plugin-data")
     })
   ]));
   const plugins = createPluginService({
@@ -146,7 +151,10 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
     artifactManager: options.pluginArtifactManager ?? createPluginArtifactManager({
       installRoot: join(dirname(options.appStateStore.databasePath), "plugins")
     }),
-    skillManager: createPluginSkillManager({ skillsRoot: join(resolveAgentWorkspace(process.env), "skills") })
+    skillManager: createPluginSkillManager({ skillsRoot: join(resolveAgentWorkspace(process.env), "skills") }),
+    localArtifactService: createPluginLocalArtifactService({
+      pluginDataRoot: join(dirname(options.appStateStore.databasePath), "plugin-data")
+    })
   });
   const sourceRegistry =
     options.sourceRegistry ??
@@ -286,8 +294,10 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
   };
 }
 
-function commandPluginNetworkAllowlist(env: NodeJS.ProcessEnv): string[] {
-  return (env.MEMMY_COMMAND_PLUGIN_NETWORK_ALLOWLIST ?? "")
+export function resolveCommandPluginNetworkAllowlist(env: NodeJS.ProcessEnv): string[] {
+  const configured = env.MEMMY_COMMAND_PLUGIN_NETWORK_ALLOWLIST?.trim();
+  if (!configured) return [...DEFAULT_COMMAND_PLUGIN_NETWORK_ALLOWLIST];
+  return configured
     .split(",")
     .map((host) => host.trim().toLowerCase())
     .filter(Boolean);

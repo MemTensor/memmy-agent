@@ -54,6 +54,8 @@ export interface CreateCommandPluginAdapterOptions {
   allowedNetworkHosts?: readonly string[];
   /** Host-owned upload roots made readable only to plugins approved for the file-input host service. */
   fileInputRoots?: readonly string[];
+  /** Host-owned parent directory containing one writable data directory per plugin. */
+  pluginDataRoot?: string;
 }
 
 export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOptions = {}): PluginAdapter {
@@ -64,7 +66,8 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
     config,
     platform,
     networkEnabled,
-    options.fileInputRoots ?? []
+    options.fileInputRoots ?? [],
+    options.pluginDataRoot
   ));
   const allowedNetworkHosts = new Set((options.allowedNetworkHosts ?? []).map((host) => host.trim().toLowerCase()).filter(Boolean));
 
@@ -85,7 +88,7 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
         code: "plugin_permission_denied"
       });
       const env = resolvePluginEnvironment(config.env, config.secretEnv, context.secrets);
-      const pluginDataPath = configuredPluginDataPath(context);
+      const pluginDataPath = await resolvePluginDataPath(context, options.pluginDataRoot);
       if (pluginDataPath) env.MEMMY_PLUGIN_DATA_DIR = pluginDataPath;
       return {
         pluginId: context.plugin.id,
@@ -239,7 +242,8 @@ export async function buildPluginSandboxLaunch(
   config: Pick<CommandRuntimeConfig, "command" | "args" | "cwd"> & Partial<Pick<CommandRuntimeConfig, "interpreter">>,
   platform: NodeJS.Platform = process.platform,
   networkEnabled = false,
-  fileInputRoots: readonly string[] = []
+  fileInputRoots: readonly string[] = [],
+  pluginDataRoot?: string
 ): Promise<SandboxLaunch> {
   const root = await realpath(context.rootPath!);
   const command = await canonicalDescendant(root, resolve(root, config.command));
@@ -252,7 +256,7 @@ export async function buildPluginSandboxLaunch(
   const runtimeArgs = interpreter === "node" ? [command, ...config.args] : config.args;
   const cwd = await canonicalDescendant(root, resolve(root, config.cwd), true);
   if (!(await lstat(cwd)).isDirectory()) throw new Error("Plugin command cwd must be a directory");
-  const filesystem = await filesystemRules(context, fileInputRoots);
+  const filesystem = await filesystemRules(context, fileInputRoots, pluginDataRoot);
 
   if (platform === "darwin") {
     return {
@@ -272,7 +276,11 @@ interface FilesystemRule {
   writable: boolean;
 }
 
-async function filesystemRules(context: PluginRuntimeContext, fileInputRoots: readonly string[]): Promise<FilesystemRule[]> {
+async function filesystemRules(
+  context: PluginRuntimeContext,
+  fileInputRoots: readonly string[],
+  pluginDataRoot?: string
+): Promise<FilesystemRule[]> {
   const rules: FilesystemRule[] = [];
   for (const permission of context.plugin.approvedPermissions) {
     if (permission.type !== "filesystem") continue;
@@ -292,10 +300,9 @@ async function filesystemRules(context: PluginRuntimeContext, fileInputRoots: re
       if (path) rules.push({ path, writable: false });
     }
   }
-  const pluginDataPath = configuredPluginDataPath(context);
+  const pluginDataPath = await resolvePluginDataPath(context, pluginDataRoot);
   if (pluginDataPath) {
-    await mkdir(pluginDataPath, { recursive: true });
-    rules.push({ path: await realpath(pluginDataPath), writable: true });
+    rules.push({ path: pluginDataPath, writable: true });
   }
   return rules;
 }
@@ -304,11 +311,20 @@ function approvedHostService(context: PluginRuntimeContext, service: string): bo
   return context.plugin.approvedPermissions.some((permission) => permission.type === "host-service" && permission.services.includes(service));
 }
 
-function configuredPluginDataPath(context: PluginRuntimeContext): string | null {
+async function resolvePluginDataPath(context: PluginRuntimeContext, configuredRoot: string | undefined): Promise<string | null> {
   if (!approvedHostService(context, "plugin-data")) return null;
-  const value = context.config.taskRoot;
-  if (typeof value !== "string" || !isAbsolute(value)) throw new Error("plugin-data host service requires an absolute taskRoot config path");
-  return value;
+  if (!configuredRoot || !isAbsolute(configuredRoot)) {
+    throw new Error("plugin-data host service requires a Host-owned absolute data root");
+  }
+  await mkdir(configuredRoot, { recursive: true });
+  const root = await realpath(configuredRoot);
+  const target = resolve(root, context.plugin.id);
+  const child = relative(root, target);
+  if (!child || child === ".." || child.startsWith(`..${sep}`) || isAbsolute(child)) {
+    throw new Error("Plugin data path escapes the Host-owned data root");
+  }
+  await mkdir(target, { recursive: true });
+  return realpath(target);
 }
 
 function seatbeltProfile(root: string, filesystem: FilesystemRule[], networkEnabled: boolean, runtimeRoot: string | null): string {

@@ -1,7 +1,7 @@
 /** Shared settings sidebar navigation for Desktop AppFrame + Settings page. */
 import type { MessageKey } from "../i18n/messages.js";
 
-export type SettingsTabId = "account" | "model" | "tokens" | "preferences" | "about";
+export type SettingsTabId = "account" | "model" | "tokens" | "preferences" | "plugins" | "about";
 
 export interface SettingsNavItem {
   id: SettingsTabId;
@@ -29,6 +29,7 @@ export const SETTINGS_NAV_SECTIONS: ReadonlyArray<SettingsNavSection> = [
     titleKey: "settings.nav.app",
     items: [
       { id: "preferences", labelKey: "settings.preferences" },
+      { id: "plugins", labelKey: "settings.plugins" },
       { id: "about", labelKey: "settings.about" }
     ]
   }
@@ -71,6 +72,8 @@ export function resolveSettingsTabFromHash(hash: string): SettingsTabId | null {
       return "tokens";
     case "#about":
       return "about";
+    case "#plugins":
+      return "plugins";
     default:
       return null;
   }
@@ -92,6 +95,8 @@ export function settingsTabHash(tab: SettingsTabId): string {
       return "#token-usage";
     case "preferences":
       return "#preferences";
+    case "plugins":
+      return "#plugins";
     case "about":
       return "#about";
   }
