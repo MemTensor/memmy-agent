@@ -51,9 +51,20 @@ interface PluginCapabilityHostProps {
   onAddArtifact?: (artifact: PluginArtifactRef) => void;
 }
 
+export interface PluginRendererInteractionState {
+  interactionId: string;
+  status: "stale";
+  error: {
+    code: "stale_card";
+    message: string;
+    latestContentHash: string;
+  };
+}
+
 export function PluginCapabilityHost(props: PluginCapabilityHostProps) {
   const { t } = useTranslation();
   const plugins = useMemo(() => new Map(props.plugins.map((plugin) => [plugin.id, plugin])), [props.plugins]);
+  const interactionStates = useMemo(() => resolveRendererInteractionStates(props.calls), [props.calls]);
   if (props.calls.length === 0) return null;
 
   return (
@@ -91,6 +102,7 @@ export function PluginCapabilityHost(props: PluginCapabilityHostProps) {
             {usesRenderer && renderer ? (
               <SandboxedPluginRenderer
                 call={call}
+                interactionStates={interactionStates.get(call.pluginId + ":" + call.callId) ?? []}
                 height={renderer.height ?? 320}
                 client={props.client!}
                 onRespond={respond}
@@ -402,6 +414,7 @@ function ErrorCard(props: { event: Extract<CapabilityEvent, { type: "error" }> }
 
 function SandboxedPluginRenderer(props: {
   call: PluginUiCall;
+  interactionStates: PluginRendererInteractionState[];
   height: number;
   client: Pick<PluginsClient, "getUi">;
   onRespond(interactionId: string, response: unknown): Promise<void>;
@@ -419,8 +432,9 @@ function SandboxedPluginRenderer(props: {
     pluginId: props.call.pluginId,
     capabilityId: props.call.capabilityId,
     callId: props.call.callId,
-    events: props.call.events
-  }), [props.call]);
+    events: props.call.events,
+    interactionStates: props.interactionStates
+  }), [props.call, props.interactionStates]);
 
   useEffect(() => {
     let active = true;
@@ -444,6 +458,18 @@ function SandboxedPluginRenderer(props: {
       const interactionId = message.interactionId;
       const declared = props.call.events.some((item) => item.type === "interaction" && item.request.interactionId === interactionId);
       if (!declared || answered.current.has(interactionId)) return;
+      const response = asRecord(message.response);
+      const stale = props.interactionStates.find((item) => item.interactionId === interactionId);
+      if (stale && response.action === "submit") {
+        iframeRef.current?.contentWindow?.postMessage({
+          type: "memmy.plugin.response-result",
+          version: 1,
+          interactionId,
+          ok: false,
+          error: stale.error
+        }, "*");
+        return;
+      }
       answered.current.add(interactionId);
       void props.onRespond(interactionId, message.response).then(
         () => iframeRef.current?.contentWindow?.postMessage({ type: "memmy.plugin.response-result", version: 1, interactionId, ok: true }, "*"),
@@ -455,7 +481,7 @@ function SandboxedPluginRenderer(props: {
     };
     window.addEventListener("message", receive);
     return () => window.removeEventListener("message", receive);
-  }, [props.call.events, props.onRespond]);
+  }, [props.call.events, props.interactionStates, props.onRespond]);
 
   if (failed) return props.fallback;
   if (html === null) return <p className="py-3 text-center text-xs text-text-ink/40" role="status">{t("plugin.ui.rendererLoading")}</p>;
@@ -479,6 +505,66 @@ export function buildRendererDocument(html: string): string {
   if (/<head(?:\s[^>]*)?>/i.test(html)) return html.replace(/<head(\s[^>]*)?>/i, (head) => `${head}${meta}`);
   if (/<html(?:\s[^>]*)?>/i.test(html)) return html.replace(/<html(\s[^>]*)?>/i, (root) => `${root}<head>${meta}</head>`);
   return `<!doctype html><html><head>${meta}</head><body>${html}</body></html>`;
+}
+
+export function resolveRendererInteractionStates(
+  calls: PluginUiCall[]
+): Map<string, PluginRendererInteractionState[]> {
+  const latest = new Map<string, { contentHash: string }>();
+  for (const call of calls) {
+    for (const event of call.events) {
+      if (event.type !== "result") continue;
+      const output = asRecord(event.output);
+      const taskId = typeof output.taskId === "string" ? output.taskId : null;
+      if (!taskId || !Array.isArray(output.artifacts)) continue;
+      for (const value of output.artifacts) {
+        const artifact = asRecord(value);
+        if (typeof artifact.kind !== "string" || typeof artifact.contentHash !== "string" || artifact.stale === true) continue;
+        latest.set(call.pluginId + ":" + taskId + ":" + artifact.kind, {
+          contentHash: artifact.contentHash
+        });
+      }
+    }
+  }
+
+  const states = new Map<string, PluginRendererInteractionState[]>();
+  for (const call of calls) {
+    const callStates: PluginRendererInteractionState[] = [];
+    for (const event of call.events) {
+      if (event.type !== "interaction") continue;
+      const payload = asRecord(event.request.payload);
+      const taskId = typeof payload.taskId === "string" ? payload.taskId : null;
+      const baseArtifact = asRecord(payload.baseArtifact);
+      if (!taskId || typeof baseArtifact.kind !== "string" || typeof baseArtifact.contentHash !== "string") continue;
+      const current = latest.get(call.pluginId + ":" + taskId + ":" + baseArtifact.kind);
+      let latestContentHash = current?.contentHash;
+      let stale = Boolean(current && current.contentHash !== baseArtifact.contentHash);
+      if (Array.isArray(payload.artifactSnapshot)) {
+        for (const value of payload.artifactSnapshot) {
+          const dependency = asRecord(value);
+          if (typeof dependency.kind !== "string" || typeof dependency.contentHash !== "string") continue;
+          const latestDependency = latest.get(call.pluginId + ":" + taskId + ":" + dependency.kind);
+          if (latestDependency && latestDependency.contentHash !== dependency.contentHash) {
+            stale = true;
+            latestContentHash = latestDependency.contentHash;
+            break;
+          }
+        }
+      }
+      if (!stale || !latestContentHash) continue;
+      callStates.push({
+        interactionId: event.request.interactionId,
+        status: "stale",
+        error: {
+          code: "stale_card",
+          message: "This card targets an older artifact version. Load the latest version before submitting.",
+          latestContentHash
+        }
+      });
+    }
+    if (callStates.length) states.set(call.pluginId + ":" + call.callId, callStates);
+  }
+  return states;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

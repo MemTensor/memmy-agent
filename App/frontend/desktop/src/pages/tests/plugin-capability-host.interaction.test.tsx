@@ -6,7 +6,7 @@ import { InstalledPluginSchema, type PluginCapabilityEventPayload } from "@memmy
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
 import { reducePluginUiCalls, type PluginUiCall } from "../../app/plugin-ui-context.js";
-import { buildRendererDocument, PluginCapabilityHost, resolveSafeArtifactUri } from "../plugin-capability-host.js";
+import { buildRendererDocument, PluginCapabilityHost, resolveRendererInteractionStates, resolveSafeArtifactUri } from "../plugin-capability-host.js";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -117,6 +117,85 @@ describe("PluginCapabilityHost", () => {
     expect(respond).toHaveBeenCalledWith(plugin.id, "call-2", "custom-1", { choice: "yes" });
   });
 
+  it("blocks stale submissions and allows the renderer to request a refresh", async () => {
+    const getUi = vi.fn(async () => "<main>Custom renderer</main>");
+    const cancel = vi.fn(async () => undefined);
+    const respond = vi.fn(async () => undefined);
+    const customPlugin = InstalledPluginSchema.parse({
+      ...plugin,
+      manifest: { ...plugin.manifest, ui: { renderer: { entry: "ui/index.html", height: 240 } } }
+    });
+    const calls: PluginUiCall[] = [
+      {
+        pluginId: plugin.id,
+        capabilityId: "run",
+        callId: "stale-call",
+        conversationId: "chat-1",
+        events: [{
+          type: "interaction",
+          request: {
+            interactionId: "stale-1",
+            type: "custom",
+            payload: {
+              taskId: "review-1",
+              baseArtifact: { id: "outline-old", kind: "outline", contentHash: "sha256:outline" },
+              artifactSnapshot: [{ kind: "review-spec", contentHash: "sha256:old" }]
+            }
+          }
+        }]
+      },
+      {
+        pluginId: plugin.id,
+        capabilityId: "run",
+        callId: "update-call",
+        conversationId: "chat-1",
+        events: [{
+          type: "result",
+          output: {
+            taskId: "review-1",
+            artifacts: [{ id: "spec-new", kind: "review-spec", contentHash: "sha256:new", stale: false }]
+          }
+        }]
+      }
+    ];
+
+    await act(async () => root.render(
+      <I18nProvider language="en-US">
+        <PluginCapabilityHost calls={calls} plugins={[customPlugin]} client={{ getUi, cancel, respond }} />
+      </I18nProvider>
+    ));
+    await act(async () => Promise.resolve());
+
+    const iframe = container.querySelectorAll("iframe")[0]!;
+    const postMessage = vi.spyOn(iframe.contentWindow!, "postMessage");
+    await act(async () => window.dispatchEvent(new MessageEvent("message", {
+      source: iframe.contentWindow,
+      data: {
+        type: "memmy.plugin.interaction-response",
+        version: 1,
+        interactionId: "stale-1",
+        response: { action: "submit", baseArtifactHash: "sha256:old", values: {} }
+      }
+    })));
+    expect(respond).not.toHaveBeenCalled();
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: "memmy.plugin.response-result",
+      ok: false,
+      error: expect.objectContaining({ code: "stale_card", latestContentHash: "sha256:new" })
+    }), "*");
+
+    await act(async () => window.dispatchEvent(new MessageEvent("message", {
+      source: iframe.contentWindow,
+      data: {
+        type: "memmy.plugin.interaction-response",
+        version: 1,
+        interactionId: "stale-1",
+        response: { action: "refresh", baseArtifactHash: "sha256:old", values: { outline: [] } }
+      }
+    })));
+    expect(respond).toHaveBeenCalledWith(plugin.id, "stale-call", "stale-1", expect.objectContaining({ action: "refresh" }));
+  });
+
   it("supports cancellation, multiple choice, file upload, and artifact reuse", async () => {
     const cancel = vi.fn(async () => undefined);
     const respond = vi.fn(async () => undefined);
@@ -176,6 +255,51 @@ describe("PluginCapabilityHost", () => {
 });
 
 describe("plugin UI event reduction", () => {
+  it("marks an interaction stale when a newer task artifact is observed", () => {
+    const calls: PluginUiCall[] = [
+      {
+        pluginId: plugin.id,
+        capabilityId: "review_request_interaction",
+        callId: "card-call",
+        conversationId: "chat-1",
+        events: [{
+          type: "interaction",
+          request: {
+            interactionId: "outline-card",
+            type: "custom",
+            payload: {
+              taskId: "review-1",
+              baseArtifact: { id: "outline-old", kind: "outline", contentHash: "sha256:old" }
+            }
+          }
+        }]
+      },
+      {
+        pluginId: plugin.id,
+        capabilityId: "review_update_outline",
+        callId: "update-call",
+        conversationId: "chat-1",
+        events: [{
+          type: "result",
+          output: {
+            taskId: "review-1",
+            artifacts: [{ id: "outline-new", kind: "outline", contentHash: "sha256:new", stale: false }]
+          }
+        }]
+      }
+    ];
+
+    expect(resolveRendererInteractionStates(calls).get(plugin.id + ":card-call")).toEqual([{
+      interactionId: "outline-card",
+      status: "stale",
+      error: {
+        code: "stale_card",
+        message: expect.any(String),
+        latestContentHash: "sha256:new"
+      }
+    }]);
+  });
+
   it("resolves Host-managed relative artifact URIs and rejects local file URIs", () => {
     expect(resolveSafeArtifactUri("/api/v1/plugins/review/artifacts/token/preview")).toBe(
       `${window.location.origin}/api/v1/plugins/review/artifacts/token/preview`
