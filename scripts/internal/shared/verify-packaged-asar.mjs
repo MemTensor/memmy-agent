@@ -2,10 +2,22 @@
 
 import { extractFile, listPackage } from "@electron/asar";
 
-const { asarPath, expected, platform, arch } = parseArgs(process.argv.slice(2));
-if (!/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(expected)) {
-  throw new Error("Expected packaged version must use semantic version syntax");
-}
+const semanticVersionPattern = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
+const assertSemanticVersion = (version, label) => {
+  if (!semanticVersionPattern.test(version ?? "")) {
+    throw new Error(`${label} must use semantic version syntax`);
+  }
+};
+
+const {
+  asarPath,
+  expected: expectedDesktop,
+  expectedMemory,
+  platform,
+  arch,
+} = parseArgs(process.argv.slice(2));
+assertSemanticVersion(expectedDesktop, "Expected packaged version");
+if (platform === "win32") assertSemanticVersion(expectedMemory, "Expected packaged Memory version");
 
 const entries = listPackage(asarPath).map((entry) => entry.replaceAll("\\", "/").replace(/^\/+/, ""));
 if (entries.some((entry) => /(^|\/)\.env(?:$|\.)/u.test(entry))) {
@@ -22,6 +34,8 @@ const requiredFiles = [
 if (platform === "win32") {
   requiredFiles.push(
     "dist/runtime/memory/package.json",
+    "dist/runtime/memory/node_modules/@memmy/agent-source-core/package.json",
+    "dist/runtime/memory/node_modules/@memmy/agent-source-core/dist/src/index.js",
     `dist/runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/${platform}/${arch}/onnxruntime_binding.node`,
     `dist/runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/${platform}/${arch}/onnxruntime.dll`,
     "dist/runtime/memmy-agent/dist/main.js.map",
@@ -56,30 +70,31 @@ if (platform === "win32") {
 }
 
 const versionedFiles = [
-  ["package.json", false],
-  ["dist/runtime/memmy-agent/package.json", false],
-  ["dist/runtime/memmy-agent/package-lock.json", true],
+  ["package.json", false, expectedDesktop],
+  ["dist/runtime/memmy-agent/package.json", false, expectedDesktop],
+  ["dist/runtime/memmy-agent/package-lock.json", true, expectedDesktop],
 ];
 if (platform === "win32") {
   versionedFiles.splice(1, 0,
-    ["dist/runtime/memory/package.json", false],
-    ["dist/runtime/memory/package-lock.json", true],
+    ["dist/runtime/memory/package.json", false, expectedMemory],
+    ["dist/runtime/memory/package-lock.json", true, expectedMemory],
   );
 }
-for (const [file, lock] of versionedFiles) {
+for (const [file, lock, expectedVersion] of versionedFiles) {
   // electron-builder excludes npm lockfiles by default. The staged-runtime
   // version guard validates them before packaging; re-check any that are kept.
   if (lock && !entrySet.has(file)) continue;
   const json = readAsarJson(asarPath, file);
-  if (json.version !== expected) {
+  if (json.version !== expectedVersion) {
     throw new Error(`Packaged version does not match the requested version: ${file}`);
   }
-  if (lock && json.packages?.[""]?.version !== expected) {
+  if (lock && json.packages?.[""]?.version !== expectedVersion) {
     throw new Error(`Packaged lock root does not match the requested version: ${file}`);
   }
 }
 
-console.log(`Verified packaged ASAR boundary and version ${expected}`);
+const memoryVersionSummary = expectedMemory ? ` and Memory version ${expectedMemory}` : "";
+console.log(`Verified packaged ASAR boundary and version ${expectedDesktop}${memoryVersionSummary}`);
 
 function readAsarJson(path, file) {
   try {
@@ -102,10 +117,11 @@ function parseArgs(args) {
     const flag = args[index];
     const value = args[index + 1];
     if (!flag?.startsWith("--") || value === undefined) {
-      throw new Error("Usage: verify-packaged-asar.mjs --asar <path> --expected <version> --platform <platform> --arch <arch>");
+      throw new Error("Usage: verify-packaged-asar.mjs --asar <path> --expected <version> [--expected-memory <version>] --platform <platform> --arch <arch>");
     }
     const key = flag.slice(2);
-    if (!new Set(["asar", "expected", "platform", "arch"]).has(key) || parsed[key]) {
+    if (!new Set(["asar", "expected", "expected-memory", "platform", "arch"]).has(key)
+      || Object.hasOwn(parsed, key)) {
       throw new Error(`Unknown or duplicate option: ${flag}`);
     }
     parsed[key] = value;
@@ -119,5 +135,18 @@ function parseArgs(args) {
   if (!new Set(["arm64", "x64"]).has(parsed.arch)) {
     throw new Error(`Unsupported packaged architecture: ${parsed.arch}`);
   }
-  return { asarPath: parsed.asar, expected: parsed.expected, platform: parsed.platform, arch: parsed.arch };
+  const hasExpectedMemory = Object.hasOwn(parsed, "expected-memory");
+  if (parsed.platform === "win32" && !hasExpectedMemory) {
+    throw new Error("--expected-memory is required for win32 packages");
+  }
+  if (parsed.platform !== "win32" && hasExpectedMemory) {
+    throw new Error("--expected-memory is only supported for win32 packages");
+  }
+  return {
+    asarPath: parsed.asar,
+    expected: parsed.expected,
+    expectedMemory: parsed["expected-memory"],
+    platform: parsed.platform,
+    arch: parsed.arch,
+  };
 }

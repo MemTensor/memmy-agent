@@ -6,6 +6,7 @@ source "$ROOT_DIR/scripts/internal/shared/package-logging.sh"
 DESKTOP_DIR="$ROOT_DIR/App/shell/desktop"
 AGENT_DIR="$ROOT_DIR/App/memmy-agent"
 MEMORY_DIR="$ROOT_DIR/Memory"
+AGENT_SOURCE_CORE_DIR="$ROOT_DIR/AgentSourceCore"
 MIGRATIONS_DIR="$ROOT_DIR/Migrations"
 LOCAL_API_CONTRACTS_DIR="$ROOT_DIR/App/backend/local-api-contracts"
 RUNTIME_DIR="$DESKTOP_DIR/dist/runtime"
@@ -82,6 +83,7 @@ if [ -n "${MEMMY_DESKTOP_VERSION:-}" ]; then
 else
   DESKTOP_VERSION="$(read_package_version "$DESKTOP_DIR/package.json")"
 fi
+MEMORY_VERSION="$(read_package_version "$MEMORY_DIR/package.json")"
 node "$ROOT_DIR/scripts/internal/shared/verify-package-version.mjs" --expected "$DESKTOP_VERSION"
 export MEMMY_VERSION_SYNC_CHECK_ONLY=1
 for builder_arg in "$@"; do
@@ -301,29 +303,10 @@ install_better_sqlite3_prebuild_with_download_fallback() {
 }
 
 create_memory_runtime_manifest() {
-  node - "$MEMORY_DIR/package.json" "$RUNTIME_DIR/memory/package.json" "$RUNTIME_DIR/memory/memory-runtime.json" <<'NODE'
-const { readFileSync, writeFileSync } = require("node:fs");
-
-const [sourcePackagePath, runtimePackagePath, runtimeMetadataPath] = process.argv.slice(2);
-const sourcePackage = JSON.parse(readFileSync(sourcePackagePath, "utf8"));
-const dependencies = { ...(sourcePackage.dependencies ?? {}) };
-const runtimePackage = {
-  name: "@memmy/packaged-memory-runtime",
-  version: sourcePackage.version,
-  private: true,
-  type: "module",
-  dependencies
-};
-
-writeFileSync(runtimePackagePath, `${JSON.stringify(runtimePackage, null, 2)}\n`);
-writeFileSync(runtimeMetadataPath, `${JSON.stringify({
-  version: sourcePackage.version,
-  protocolVersion: 1,
-  target: "windows-x64",
-  entrypoint: "dist/src/server/index.js",
-  viewer: "dist/viewer/index.html"
-}, null, 2)}\n`);
-NODE
+  node "$ROOT_DIR/scripts/internal/win/create-memory-runtime-manifest.mjs" \
+    "$MEMORY_DIR/package.json" \
+    "$RUNTIME_DIR/memory/package.json" \
+    "$RUNTIME_DIR/memory/memory-runtime.json"
 
   create_memory_runtime_lock
 }
@@ -504,6 +487,15 @@ verify_windows_native_module() {
     "Memory better-sqlite3"
 }
 
+verify_windows_memory_workspace_artifacts() {
+  require_packaged_runtime_file "$RUNTIME_AGENT_SOURCE_CORE_DIR/package.json"
+  require_packaged_runtime_file "$RUNTIME_AGENT_SOURCE_CORE_DIR/dist/src/index.js"
+  if [ -L "$RUNTIME_AGENT_SOURCE_CORE_DIR" ]; then
+    echo "Packaged agent source core must not be a symbolic link." >&2
+    exit 1
+  fi
+}
+
 verify_windows_onnxruntime_module() {
   local onnxruntime_node="$RUNTIME_DIR/memory/node_modules/onnxruntime-node/bin/napi-v3/win32/x64/onnxruntime_binding.node"
   local onnxruntime_dir
@@ -597,12 +589,20 @@ verify_pruned_windows_runtime() {
 
 verify_packaged_windows_unpacked_artifacts() {
   local unpacked_runtime="$DESKTOP_DIR/release/win-unpacked/resources/app.asar.unpacked/dist/runtime"
+  local packaged_memory_runtime="$DESKTOP_DIR/release/win-unpacked/resources/memory-runtime"
+  local packaged_agent_source_core="$packaged_memory_runtime/node_modules/@memmy/agent-source-core"
   local packaged_embedding_model="$DESKTOP_DIR/release/win-unpacked/resources/embedding-models/$EMBEDDING_MODEL_ID"
 
   require_packaged_runtime_file "$DESKTOP_DIR/release/win-unpacked/resources/app.asar"
   require_packaged_runtime_file "$DESKTOP_DIR/release/win-unpacked/resources/cli/memmy-memory.cmd"
   require_packaged_runtime_file "$DESKTOP_DIR/release/win-unpacked/resources/cli/memmy.cmd"
   verify_packaged_runtime_config_boundary "$DESKTOP_DIR/release/win-unpacked/resources"
+  require_packaged_runtime_file "$packaged_agent_source_core/package.json"
+  require_packaged_runtime_file "$packaged_agent_source_core/dist/src/index.js"
+  if [ -L "$packaged_agent_source_core" ]; then
+    echo "Packaged offline Memory agent source core must not be a symbolic link." >&2
+    exit 1
+  fi
   verify_windows_x64_native_module \
     "$unpacked_runtime/memory/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
     "packaged Memory better-sqlite3"
@@ -648,6 +648,7 @@ verify_packaged_runtime_config_boundary() {
   node "$ROOT_DIR/scripts/internal/shared/verify-packaged-asar.mjs" \
     --asar "$(to_node_readable_path "$asar_file")" \
     --expected "$DESKTOP_VERSION" \
+    --expected-memory "$MEMORY_VERSION" \
     --platform win32 \
     --arch "$PACKAGE_ARCH"
 }
@@ -726,7 +727,14 @@ create_memory_runtime_manifest
 package_step_start "Install Windows x64 Memory runtime dependencies"
 npm_ci_win_x64 "$RUNTIME_DIR/memory"
 install_better_sqlite3_win_x64 "$RUNTIME_DIR/memory"
+package_step_start "Stage Windows Memory workspace runtime packages"
+RUNTIME_AGENT_SOURCE_CORE_DIR="$RUNTIME_DIR/memory/node_modules/@memmy/agent-source-core"
+rm -rf "$RUNTIME_AGENT_SOURCE_CORE_DIR"
+mkdir -p "$RUNTIME_AGENT_SOURCE_CORE_DIR"
+cp "$AGENT_SOURCE_CORE_DIR/package.json" "$RUNTIME_AGENT_SOURCE_CORE_DIR/package.json"
+cp -R "$AGENT_SOURCE_CORE_DIR/dist" "$RUNTIME_AGENT_SOURCE_CORE_DIR/dist"
 package_step_start "Verify Windows x64 Memory runtime artifacts"
+verify_windows_memory_workspace_artifacts
 verify_windows_native_module
 verify_windows_better_sqlite3_runtime "$RUNTIME_DIR/memory"
 verify_windows_onnxruntime_module

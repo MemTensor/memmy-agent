@@ -33,6 +33,12 @@ extraResources:
     to: memory-runtime
     filter:
       - "**/*"
+  # electron-builder excludes a matcher-root node_modules directory. Copy it
+  # through its own matcher so the standalone Memory runtime stays complete.
+  - from: dist/runtime/memory/node_modules
+    to: memory-runtime/node_modules
+    filter:
+      - "**/*"
   - from: dist/runtime/bin
     to: cli
     filter:
