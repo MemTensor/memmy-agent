@@ -517,6 +517,7 @@ function setupOptions(parsed: ParsedArgs): MemoryCliSetupOptions {
     preferInstalledCompatible: optionBoolean(parsed.options, "use-compatible-installed"),
     skipServiceRegistration: optionBoolean(parsed.options, "skip-service-registration"),
     skipHealthCheck: optionBoolean(parsed.options, "skip-health-check"),
+    healthCheckTimeoutMs: positiveIntegerOption(parsed, "health-check-timeout-ms"),
     configSource: legacyConfigSource(optionString(parsed.options, "config-source")),
     legacyRoot: optionString(parsed.options, "legacy-root"),
     nonInteractive: optionBoolean(parsed.options, "non-interactive"),
@@ -535,6 +536,19 @@ function legacyConfigSource(value: string | undefined): "openclaw" | "hermes" | 
   if (value === undefined) return undefined;
   if (value === "openclaw" || value === "hermes") return value;
   throw new Error("--config-source must be openclaw or hermes");
+}
+
+function positiveIntegerOption(parsed: ParsedArgs, name: string): number | undefined {
+  if (!hasOption(parsed.options, name)) return undefined;
+  const value = optionString(parsed.options, name);
+  if (value === undefined || !/^\d+$/.test(value)) {
+    throw new Error(`--${name} must be a positive integer`);
+  }
+  const parsedValue = Number(value);
+  if (!Number.isSafeInteger(parsedValue) || parsedValue <= 0) {
+    throw new Error(`--${name} must be a positive integer`);
+  }
+  return parsedValue;
 }
 
 function stringArrayOption(parsed: ParsedArgs, name: string): string[] | undefined {
@@ -623,6 +637,7 @@ function helpText(): string {
     "  --user-id <id>               Memory namespace user id",
     "  --source <agent>             Calling agent/source id",
     "  --config <path>              Memmy config path",
+    "  --health-check-timeout-ms <ms> Activation health timeout for Memory install",
     "  --skip-agent-skills          Initialize config without installing agent skills",
     "  --config-source <agent>      Select openclaw or hermes legacy config",
     "  --help, -h                   Show this help",

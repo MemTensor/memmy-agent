@@ -30,6 +30,7 @@ describe("memmy CLI command map", () => {
     expect(help).toContain("init --agent codex");
     expect(help).toContain("init --skip-agent-skills");
     expect(help).toContain("--skip-agent-skills");
+    expect(help).toContain("--health-check-timeout-ms");
     expect(help).toContain("Supported agents:");
     expect(help).toContain("Default URL:");
   });
@@ -37,6 +38,34 @@ describe("memmy CLI command map", () => {
   it("prints the CLI version", async () => {
     await expect(runCommand({ argv: ["--version"] })).resolves.toBe(PROJECT_VERSION);
     await expect(runCommand({ argv: ["-v"] })).resolves.toBe(PROJECT_VERSION);
+  });
+
+  it("passes a valid installer health timeout and rejects malformed values", async () => {
+    const root = mkdtempSync(join(tmpdir(), "memmy-cli-timeout-"));
+    roots.push(root);
+    await expect(runCommand({
+      argv: [
+        "install",
+        "--dry-run",
+        "--service-only",
+        "--home", root,
+        "--health-check-timeout-ms", "1234"
+      ]
+    })).resolves.toMatchObject({
+      ok: true,
+      command: "install",
+      runtime: { ok: true, dryRun: true }
+    });
+
+    await expect(runCommand({
+      argv: [
+        "install",
+        "--dry-run",
+        "--service-only",
+        "--home", root,
+        "--health-check-timeout-ms", "0"
+      ]
+    })).rejects.toThrow("--health-check-timeout-ms must be a positive integer");
   });
 
   it("supports memmy-memory stop as an alias for service stop", async () => {

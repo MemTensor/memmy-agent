@@ -1,13 +1,14 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createServer } from "node:http";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   compareVersions,
   currentInstalledRuntime,
+  DEFAULT_HEALTH_CHECK_TIMEOUT_MS,
   installMemoryRuntime,
   runtimeTarget,
   stopInstalledMemoryService,
@@ -140,6 +141,153 @@ describe("standalone Memory runtime installer", () => {
     })).rejects.toThrow("checksum mismatch");
     expect(await currentInstalledRuntime(home)).toBeUndefined();
   });
+
+  it("waits for a migration-delayed health response instead of failing at 15 seconds", async () => {
+    expect(DEFAULT_HEALTH_CHECK_TIMEOUT_MS).toBe(120_000);
+    const root = tempRoot();
+    const home = join(root, "home");
+    const runtimeDirectory = createRuntimeDirectory(root, "2.1.0");
+    vi.useFakeTimers();
+    let resolveStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      resolveStarted = resolve;
+    });
+    const startedAt = Date.now();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      resolveStarted();
+      const ready = Date.now() - startedAt >= 16_000;
+      return {
+        ok: true,
+        json: async () => ready
+          ? { ok: true, protocolVersion: 1, serviceVersion: "2.1.0" }
+          : { ok: true, protocolVersion: 1, serviceVersion: "old" },
+      } as Response;
+    });
+
+    try {
+      const install = installMemoryRuntime({
+        home,
+        runtimeDirectory,
+        endpoint: "http://127.0.0.1:18960",
+        skipServiceRegistration: true,
+      });
+      await started;
+      await vi.advanceTimersByTimeAsync(16_000);
+      await expect(install).resolves.toMatchObject({ ok: true, version: "2.1.0" });
+    } finally {
+      vi.restoreAllMocks();
+      vi.useRealTimers();
+    }
+  });
+
+  it("restores the previous runtime when the bounded activation health timeout expires", async () => {
+    const root = tempRoot();
+    const home = join(root, "home");
+    const previousDirectory = createRuntimeDirectory(root, "2.0.0");
+    await installMemoryRuntime({
+      home,
+      runtimeDirectory: previousDirectory,
+      skipServiceRegistration: true,
+      skipHealthCheck: true
+    });
+    const nextDirectory = createRuntimeDirectory(root, "2.1.0");
+    vi.useFakeTimers();
+    let resolveStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      resolveStarted = resolve;
+    });
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      resolveStarted();
+      return {
+        ok: true,
+        json: async () => ({ ok: true, protocolVersion: 1, serviceVersion: "old" })
+      } as Response;
+    });
+
+    try {
+      const install = installMemoryRuntime({
+        home,
+        runtimeDirectory: nextDirectory,
+        endpoint: "http://127.0.0.1:18960",
+        skipServiceRegistration: true,
+        healthCheckTimeoutMs: 1_000
+      });
+      await started;
+      await vi.advanceTimersByTimeAsync(2_000);
+      await expect(install).rejects.toThrow("activation health check");
+      expect((await currentInstalledRuntime(home))?.version).toBe("2.0.0");
+      expect(JSON.parse(readFileSync(join(home, "memory-service", "installation.json"), "utf8"))).toMatchObject({
+        serviceVersion: "2.0.0"
+      });
+    } finally {
+      vi.restoreAllMocks();
+      vi.useRealTimers();
+    }
+  });
+
+  it("cleans first-install launchers and metadata when activation health times out", async () => {
+    const root = tempRoot();
+    const home = join(root, "home");
+    const runtimeDirectory = createRuntimeDirectory(root, "2.1.0");
+    const launcherName = process.platform === "win32"
+      ? "memmy-memory-service.cmd"
+      : "memmy-memory-service";
+    mkdirSync(join(home, "bin"), { recursive: true });
+    writeFileSync(join(home, "bin", launcherName), "stale launcher");
+    writeFileSync(join(home, "bin", "memmy-memory-service.cjs"), "stale script");
+    mkdirSync(join(home, "memory-service"), { recursive: true });
+    writeFileSync(join(home, "memory-service", "installation.json"), JSON.stringify({
+      serviceVersion: "stale"
+    }));
+    writeFileSync(join(home, "memory-service", "runtime.json"), JSON.stringify({
+      endpoint: "http://127.0.0.1:18960"
+    }));
+    vi.useFakeTimers();
+    let resolveStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      resolveStarted = resolve;
+    });
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      resolveStarted();
+      return {
+        ok: true,
+        json: async () => ({ ok: true, protocolVersion: 1, serviceVersion: "old" })
+      } as Response;
+    });
+
+    try {
+      const install = installMemoryRuntime({
+        home,
+        runtimeDirectory,
+        endpoint: "http://127.0.0.1:18960",
+        skipServiceRegistration: true,
+        healthCheckTimeoutMs: 1_000
+      });
+      await started;
+      await vi.advanceTimersByTimeAsync(2_000);
+      await expect(install).rejects.toThrow("activation health check");
+      expect(await currentInstalledRuntime(home)).toBeUndefined();
+      expect(existsSync(join(home, "bin", launcherName))).toBe(false);
+      expect(existsSync(join(home, "bin", "memmy-memory-service.cjs"))).toBe(false);
+      expect(existsSync(join(home, "memory-service", "installation.json"))).toBe(false);
+      expect(existsSync(join(home, "memory-service", "runtime.json"))).toBe(false);
+      expect(existsSync(join(home, "memory-service", "runtime", "2.1.0", runtimeTarget(process.platform, process.arch)))).toBe(false);
+    } finally {
+      vi.restoreAllMocks();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
+    "rejects an invalid activation health timeout (%s)",
+    async (healthCheckTimeoutMs) => {
+      await expect(installMemoryRuntime({
+        home: tempRoot(),
+        dryRun: true,
+        healthCheckTimeoutMs
+      })).rejects.toThrow("healthCheckTimeoutMs must be a positive integer");
+    }
+  );
 
   it("never replaces a newer installed version with an older one", async () => {
     const root = tempRoot();
