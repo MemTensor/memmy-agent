@@ -31,6 +31,9 @@ const signedMacArm64PackagePath = fileURLToPath(
 );
 const packageWinPath = fileURLToPath(new URL("../../../../scripts/package-win.sh", import.meta.url));
 const packageWinX64Path = fileURLToPath(new URL("../../../../scripts/internal/win/build-nsis.sh", import.meta.url));
+const createMemoryRuntimeManifestPath = fileURLToPath(
+  new URL("../../../../scripts/internal/win/create-memory-runtime-manifest.mjs", import.meta.url),
+);
 const winUnsignedBuilderPath = fileURLToPath(new URL("../electron-builder.win.unsigned.yml", import.meta.url));
 const winUnsignedInstallerIncludePath = fileURLToPath(new URL("../build/installer-win-unsigned.nsh", import.meta.url));
 const winUpgradeRelayScriptPath = fileURLToPath(new URL("../build/MemmyWindowsUpgradeRelay.ps1", import.meta.url));
@@ -289,13 +292,15 @@ describe("desktop packaged runtime boundaries", () => {
 
   it("keeps the Windows Memory runtime independent from private workspaces", () => {
     const source = readFileSync(packageWinX64Path, "utf8");
+    const manifestSource = readFileSync(createMemoryRuntimeManifestPath, "utf8");
 
     expect(source).toContain("run build -w @memmy/local-api-contracts");
     expect(source).not.toContain('memory/node_modules/@memmy/local-api-contracts');
     expect(source).not.toContain('memory/node_modules/@memmy/migrations');
     expect(source).toContain('cp -R "$MEMORY_DIR/dist/viewer" "$RUNTIME_DIR/memory/dist/viewer"');
     expect(source).toContain('cp -R "$MEMORY_DIR/adapters" "$RUNTIME_DIR/memory/adapters"');
-    expect(source).toContain('protocolVersion: 1');
+    expect(source).toContain('node "$ROOT_DIR/scripts/internal/win/create-memory-runtime-manifest.mjs" \\');
+    expect(manifestSource).toContain("protocolVersion: 1");
     expect(source.indexOf("run build -w @memmy/local-api-contracts")).toBeLessThan(
       source.indexOf("run build -w @memmy/memory"),
     );
