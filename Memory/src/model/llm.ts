@@ -270,6 +270,8 @@ class HttpLlmClient implements LlmClient {
   private completeOnce(messages: LlmMessage[], options: Required<Pick<LlmCompletionOptions, "operation">> & LlmCompletionOptions): Promise<LlmCallResult> {
     switch (this.config.provider) {
       case "openai_compatible":
+      case "sglang":
+      case "vllm":
         return this.completeOpenAiCompatible(messages, options);
       case "gemini":
         return this.completeGemini(messages, options);
@@ -303,6 +305,11 @@ class HttpLlmClient implements LlmClient {
     const thinkingBudget = thinking.enabled && thinkingUsesEnableThinking(this.config.vendor ?? "", base, model)
       ? this.config.thinkingBudget
       : undefined;
+    const thinkingPayload = openAiCompatibleThinkingPayload(
+      this.config.provider,
+      thinking,
+      this.config.extraBody
+    );
     const agentRegion = resolveMemoryAgentRegion(this.config.sourceProvider);
     const response = await postJsonWithRetry<OpenAiChatResponse>({
       actualModelContext: this.config.actualModelContext,
@@ -323,10 +330,10 @@ class HttpLlmClient implements LlmClient {
         ...(!omitTemperature ? { temperature: options.temperature ?? this.config.temperature } : {}),
         max_tokens: options.maxTokens ?? this.config.maxTokens,
         stream: false,
-        ...thinking.fields,
+        ...thinkingPayload.fields,
         ...(thinkingBudget !== undefined ? { thinking_budget: thinkingBudget } : {}),
         ...(options.jsonMode && !omitJsonMode ? { response_format: { type: "json_object" } } : {}),
-        ...(this.config.extraBody ?? {})
+        ...thinkingPayload.extraBody
       }
     });
     const choice = response.choices?.[0];
@@ -559,6 +566,43 @@ class HttpLlmClient implements LlmClient {
       usage: extractModelTokenUsage(response)
     });
   }
+}
+
+function openAiCompatibleThinkingPayload(
+  provider: LlmConfig["provider"],
+  thinking: ThinkingControl,
+  configuredExtraBody: Record<string, unknown> | undefined
+): { fields: Record<string, unknown>; extraBody: Record<string, unknown> } {
+  const extraBody = configuredExtraBody ?? {};
+  const configuredChatTemplateKwargs = extraBody.chat_template_kwargs;
+  if (
+    (provider !== "sglang" && provider !== "vllm") ||
+    !("enable_thinking" in thinking.fields) ||
+    (configuredChatTemplateKwargs !== undefined &&
+      !isUnknownRecord(configuredChatTemplateKwargs))
+  ) {
+    return { fields: thinking.fields, extraBody };
+  }
+  const chatTemplateKwargs = configuredChatTemplateKwargs ?? {};
+
+  const fields = { ...thinking.fields };
+  delete fields.enable_thinking;
+  return {
+    fields,
+    extraBody: {
+      ...extraBody,
+      chat_template_kwargs: {
+        ...chatTemplateKwargs,
+        ...(!Object.hasOwn(chatTemplateKwargs, "enable_thinking")
+          ? { enable_thinking: thinking.enabled }
+          : {})
+      }
+    }
+  };
+}
+
+function isUnknownRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function openAiCompatibleThinkingControl(input: {
