@@ -33,6 +33,43 @@ describe("plugin model inference Host service", () => {
     await expect(available.invoke({ pluginId: "p", callId: "c", conversationId: "v", service: "model-inference", input: { messages: [{ role: "user", content: "x".repeat(200_001) }] } })).rejects.toBeDefined();
     expect(fetch).not.toHaveBeenCalled();
   });
+
+  it("delegates embedding inference to the Memory-owned current model without exposing configuration", async () => {
+    const embeddingInference = vi.fn(async () => ({
+      embeddings: [[1, 0], [0, 1]],
+      model: { provider: "local", model: "Xenova/all-MiniLM-L6-v2", mode: "local" as const, dimension: 2 }
+    }));
+    const service = createPluginModelInferenceService({
+      resolveModel: async () => null,
+      embeddingInference
+    });
+    const result = await service.invoke({
+      pluginId: "literature-review",
+      callId: "call-embedding",
+      conversationId: "conversation-1",
+      service: "embedding-inference",
+      input: { texts: ["section query", "evidence document"], role: "document" }
+    });
+    expect(result).toEqual({
+      embeddings: [[1, 0], [0, 1]],
+      model: { provider: "local", model: "Xenova/all-MiniLM-L6-v2", mode: "local", dimension: 2 }
+    });
+    expect(embeddingInference).toHaveBeenCalledWith({ texts: ["section query", "evidence document"], role: "document" });
+  });
+
+  it("rejects invalid or unavailable embedding requests", async () => {
+    const unavailable = createPluginModelInferenceService({ resolveModel: async () => null });
+    await expect(unavailable.invoke({
+      pluginId: "p", callId: "c", conversationId: "v", service: "embedding-inference", input: { texts: ["query"] }
+    })).rejects.toMatchObject({ code: "embedding_unavailable", retryable: false });
+
+    const embeddingInference = vi.fn();
+    const available = createPluginModelInferenceService({ resolveModel: async () => null, embeddingInference });
+    await expect(available.invoke({
+      pluginId: "p", callId: "c", conversationId: "v", service: "embedding-inference", input: { texts: [] }
+    })).rejects.toBeDefined();
+    expect(embeddingInference).not.toHaveBeenCalled();
+  });
 });
 
 function resolved(): ModelSelectionResolution {

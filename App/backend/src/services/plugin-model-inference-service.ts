@@ -1,5 +1,10 @@
 import { z } from "zod";
-import type { ModelSelectionResolution } from "@memmy/local-api-contracts";
+import {
+  EmbeddingInferenceInputSchema,
+  type EmbeddingInferenceInput,
+  type EmbeddingInferenceOutput,
+  type ModelSelectionResolution
+} from "@memmy/local-api-contracts";
 import type { PluginHostServiceCall, PluginHostServiceInvoker } from "../adapters/outbound/plugin-runtime/index.js";
 
 const MAX_INPUT_CHARACTERS = 200_000;
@@ -30,6 +35,7 @@ export interface PluginModelInferenceResult {
 
 export interface CreatePluginModelInferenceServiceOptions {
   resolveModel: () => Promise<ModelSelectionResolution | null>;
+  embeddingInference?: (input: EmbeddingInferenceInput) => Promise<EmbeddingInferenceOutput>;
   fetch?: typeof fetch;
   timeoutMs?: number;
 }
@@ -38,6 +44,22 @@ export function createPluginModelInferenceService(options: CreatePluginModelInfe
   const fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
   return {
     async invoke(call) {
+      if (call.service === "embedding-inference") {
+        if (!options.embeddingInference) {
+          throw serviceError("embedding_unavailable", "The current embedding model is not available to plugins", false);
+        }
+        const input = EmbeddingInferenceInputSchema.parse(call.input);
+        try {
+          return await options.embeddingInference(input);
+        } catch (error) {
+          if (hasServiceErrorCode(error)) throw error;
+          throw serviceError(
+            "embedding_inference_failed",
+            error instanceof Error ? error.message : "Embedding inference failed",
+            true
+          );
+        }
+      }
       if (call.service !== "model-inference") throw serviceError("host_service_unavailable", `Unknown Host service: ${call.service}`, false);
       const input = ModelInferenceInputSchema.parse(call.input);
       const resolved = await options.resolveModel();
@@ -166,6 +188,9 @@ function deadlineTimeout(call: PluginHostServiceCall, fallback: number): number 
   return Math.max(1, Math.min(fallback, Date.parse(call.deadline) - Date.now()));
 }
 function serviceError(code: string, message: string, retryable: boolean): Error { return Object.assign(new Error(message), { code, retryable }); }
+function hasServiceErrorCode(error: unknown): error is Error & { code: string; retryable?: boolean } {
+  return error instanceof Error && typeof (error as Error & { code?: unknown }).code === "string";
+}
 function record(value: unknown): Record<string, unknown> { return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
 function string(value: unknown): string { return typeof value === "string" ? value : ""; }
 function numeric(value: unknown): number | undefined { return typeof value === "number" && Number.isFinite(value) ? value : undefined; }

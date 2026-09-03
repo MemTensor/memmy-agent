@@ -157,7 +157,10 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
         activeAccountId: account.authenticated ? account.profile.userId : null,
         capability: "agent"
       }) ?? null;
-    }
+    },
+    embeddingInference: options.memoryClient.embeddingInference
+      ? (input) => options.memoryClient.embeddingInference!(input)
+      : undefined
   });
   const pluginRuntimeHost = options.pluginRuntimeHost ?? createPluginRuntimeHost(new PluginAdapterRegistry([
     createMcpPluginAdapter(),
