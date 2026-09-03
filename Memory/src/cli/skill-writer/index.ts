@@ -1,7 +1,7 @@
 import { cp, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const SUPPORTED_MEMMY_AGENT_IDS = ["codex", "cursor", "claude", "opencode", "openclaw", "hermes"] as const;
 export type MemmyAgentId = typeof SUPPORTED_MEMMY_AGENT_IDS[number];
@@ -14,6 +14,7 @@ export interface AgentSkillInstallOptions {
 
 export interface AgentSkillBatchInstallOptions extends AgentSkillInstallOptions {
   skipUnavailable?: boolean;
+  memmyConfigPath?: string;
 }
 
 export interface AgentSkillInstallResult {
@@ -66,6 +67,11 @@ export async function installMemmyMemorySkillForAgents(
   agents: string[],
   options: AgentSkillBatchInstallOptions = {}
 ): Promise<AgentSkillInstallResult[]> {
+  if (process.env.MEMMY_AGENT_INTEGRATION_ROOT?.trim() && options.agentRoot && !options.dryRun) {
+    throw new Error(
+      "--agent-root cannot be combined with packaged Hook/plugin integration; use the agent's configured home",
+    );
+  }
   const results = await Promise.all(
     normalizeAgentIds(agents).map(async (agent) => {
       if (options.skipUnavailable && !(await isExistingDirectory(targetForAgent(agent, options.agentRoot).root))) {
@@ -74,7 +80,52 @@ export async function installMemmyMemorySkillForAgents(
       return installMemmyMemorySkillForAgent(agent, options);
     })
   );
-  return results.filter((result): result is AgentSkillInstallResult => result !== null);
+  const installed = results.filter((result): result is AgentSkillInstallResult => result !== null);
+  await installPackagedAgentIntegrations(installed, options);
+  return installed;
+}
+
+type PackagedIntegrationTarget = {
+  installPlugin?: (targetId: string) => Promise<void>;
+};
+
+type PackagedIntegrationRegistry = {
+  get: (targetId: string) => PackagedIntegrationTarget | undefined;
+};
+
+type PackagedIntegrationModule = {
+  createBuiltinSkillTargetRegistry: (memmyConfigPath?: string) => PackagedIntegrationRegistry;
+};
+
+async function installPackagedAgentIntegrations(
+  installed: AgentSkillInstallResult[],
+  options: AgentSkillBatchInstallOptions,
+): Promise<void> {
+  const integrationRoot = process.env.MEMMY_AGENT_INTEGRATION_ROOT?.trim();
+  if (!integrationRoot || options.dryRun || installed.length === 0) return;
+
+  const modulePath = join(
+    resolve(expandHome(integrationRoot)),
+    "services",
+    "builtin-skill-target-registry.js",
+  );
+  if (!(await pathExists(modulePath))) {
+    throw new Error(`packaged agent integration registry not found: ${modulePath}`);
+  }
+
+  const integrationModule = await import(pathToFileURL(modulePath).href) as PackagedIntegrationModule;
+  if (typeof integrationModule.createBuiltinSkillTargetRegistry !== "function") {
+    throw new Error(`invalid packaged agent integration registry: ${modulePath}`);
+  }
+  const registry = integrationModule.createBuiltinSkillTargetRegistry(options.memmyConfigPath);
+  for (const result of installed) {
+    const targetId = result.agent === "claude" ? "claude_code" : result.agent;
+    const target = registry.get(targetId);
+    if (!target?.installPlugin) {
+      throw new Error(`packaged Hook/plugin integration is unavailable for ${result.agent}`);
+    }
+    await target.installPlugin(targetId);
+  }
 }
 
 export async function installMemmyMemorySkillForAgent(

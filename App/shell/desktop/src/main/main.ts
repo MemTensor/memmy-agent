@@ -109,6 +109,7 @@ import {
   type WindowsDataMigrationConsistency,
   type WindowsDataLayout
 } from "./windows-data-layout.js";
+import { createWindowsUpdateLauncherFile } from "./windows-update-launcher.js";
 
 let mainWindow: BrowserWindow | null = null;
 let petWindow: BrowserWindow | null = null;
@@ -2732,7 +2733,7 @@ async function installWindowsUpdateInBackground(
     await clearWindowsUpdatePromptMarker().catch(() => undefined);
   }
   await writeFile(helperPath, createWindowsUpdateInstallScript(), { mode: 0o700 });
-  await writeFile(launcherPath, createWindowsUpdateLauncherScript([
+  await writeFile(launcherPath, createWindowsUpdateLauncherFile([
     "powershell.exe",
     "-NoProfile",
     "-ExecutionPolicy",
@@ -2748,7 +2749,7 @@ async function installWindowsUpdateInBackground(
     options.openAfterInstall ? "1" : "0",
     resolvePreparedRequiredUpdatePath(),
     options.expectedVersion ?? ""
-  ]), "utf8");
+  ]));
   await appendFile(logPath, `[${new Date().toISOString()}] queued Memmy Windows update helper "${helperPath}"\n`).catch(() => undefined);
 
   const helper = spawn("wscript.exe", [launcherPath], {
@@ -2765,36 +2766,6 @@ async function installWindowsUpdateInBackground(
     scheduleQuitForManualUpdateInstall();
   }
   return { filePath, opened: false, willQuit: options.quitCurrentApp, background: true };
-}
-
-/**
- * Creates the VBS script that launches the Windows update helper hidden.
- *
- * @param command The PowerShell helper launch command and arguments.
- * @returns The VBS script content.
- */
-function createWindowsUpdateLauncherScript(command: string[]): string {
-  const shellCommand = command.map(quoteWindowsShellArgument).join(" ");
-  return `Set shell = CreateObject("WScript.Shell")
-shell.Run "${escapeVbsString(shellCommand)}", 0, False
-Set fso = CreateObject("Scripting.FileSystemObject")
-On Error Resume Next
-fso.DeleteFile WScript.ScriptFullName, True
-`;
-}
-
-/**
- * Quotes a Windows shell command argument.
- *
- * @param value The argument value.
- * @returns The argument ready to be spliced into the command line.
- */
-function quoteWindowsShellArgument(value: string): string {
-  return `"${value.replace(/"/g, "\\\"")}"`;
-}
-
-function escapeVbsString(value: string): string {
-  return value.replace(/"/g, "\"\"");
 }
 
 function createWindowsUpdateInstallScript(): string {

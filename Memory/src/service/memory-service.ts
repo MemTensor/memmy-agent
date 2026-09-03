@@ -2208,6 +2208,10 @@ export class MemoryService {
   ): ReturnType<MemoryService["startTurn"]> {
     const turnId = request.turnId ?? newId("turn");
     const contextHints = turnStartContextHints(request);
+    const defaultLayers: MemoryLayer[] = ["Skill", "L2", "L1", "L3"];
+    const requestedLayers = request.layers === undefined
+      ? defaultLayers
+      : defaultLayers.filter((layer) => request.layers?.includes(layer));
     const search = await this.search({
       requestId: request.requestId,
       adapterId: request.adapterId,
@@ -2215,7 +2219,7 @@ export class MemoryService {
       sessionId: request.sessionId,
       turnId,
       query: buildSearchQuery({ ...request, contextHints }, this.config.domain),
-      layers: ["Skill", "L2", "L1", "L3"],
+      layers: requestedLayers,
       limit: this.turnStartRetrievalLimit(),
       contextBudget: typeof request.contextBudget === "number" ? request.contextBudget : undefined,
       includeInjectedContext: true,

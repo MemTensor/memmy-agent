@@ -53,6 +53,7 @@ export type ModelKind = "text" | "embedding" | "asr" | "image";
 
 const DEFAULT_TEXT_CAPABILITIES: ModelCapability[] = ["chat", "memorySummary", "memoryEvolution"];
 const MODEL_KIND_OPTIONS = ["text", "embedding", "asr", "image"] as const;
+const LOCAL_EMBEDDING_OPTION_VALUE = "builtin:local-embedding";
 
 export function modelCapabilitiesForKind(kind: ModelKind): ModelCapability[] {
   if (kind === "text") return [...DEFAULT_TEXT_CAPABILITIES];
@@ -585,7 +586,12 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
   }
 
   function updateAssignment(kind: ModelAssignmentKind, candidateId: string) {
-    commitWorkspace(setModelAssignment(workspace, props.mode, kind, candidateId));
+    const assignment = kind === "embedding"
+      && props.mode === "byok"
+      && candidateId === LOCAL_EMBEDDING_OPTION_VALUE
+      ? null
+      : candidateId;
+    commitWorkspace(setModelAssignment(workspace, props.mode, kind, assignment));
   }
 
   function toggleTaskCandidate(candidateId: string) {
@@ -654,7 +660,19 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
     candidate.source,
     candidate.provider
   ));
-  const embeddingOptions: SelectOption[] = embeddingModelOptions;
+  const embeddingOptions: SelectOption[] = props.mode === "byok"
+    ? [
+        {
+          value: LOCAL_EMBEDDING_OPTION_VALUE,
+          label: t("settings.modelWorkspace.localEmbedding"),
+          selectedLabel: t("settings.modelWorkspace.localEmbeddingShort"),
+          groupLabel: t("settings.modelWorkspace.specialBuiltins")
+        },
+        ...embeddingModelOptions
+      ]
+    : embeddingModelOptions;
+  const embeddingAssignment = space.assignments.embedding
+    ?? (props.mode === "byok" ? LOCAL_EMBEDDING_OPTION_VALUE : undefined);
   const editorExistingConnection = editor?.connectionId
     ? space.connections.find((connection) => connection.id === editor.connectionId)
     : undefined;
@@ -973,7 +991,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
             kind="embedding"
             label={t("settings.model.embeddingSearch")}
             description={t("settings.model.embeddingDesc")}
-            value={space.assignments.embedding}
+            value={embeddingAssignment}
             options={embeddingOptions}
             onChange={updateAssignment}
           />

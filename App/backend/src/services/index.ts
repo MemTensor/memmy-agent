@@ -256,6 +256,7 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
     account: createAccountService({
       cloudClient: options.cloudClient,
       accountSessionRepository: options.appStateStore.repositories.accountSession,
+      bootstrapRepository: options.appStateStore.repositories.bootstrap,
       memmyConfigWriter: options.memmyConfigWriter,
       memoryClient: options.memoryClient,
       accountChannel: options.accountChannel

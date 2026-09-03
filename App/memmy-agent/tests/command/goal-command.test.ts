@@ -89,6 +89,15 @@ describe("/goal command", () => {
     expect(loop.goalRuntime.get("cli:direct")?.objective).toBe("pause migration");
   });
 
+  it("preserves multiline formatting in an explicitly created objective", async () => {
+    const loop = makeLoop();
+    await cmdGoal(context(loop, "/goal create first line\n\n- keep this item", "turn-create"));
+
+    expect(loop.goalRuntime.get("cli:direct")?.objective).toBe(
+      "first line\n\n- keep this item",
+    );
+  });
+
   it("marks only successful WebUI Goal creation acknowledgements as hidden", async () => {
     const webuiLoop = makeLoop();
     const created = await cmdGoal(context(

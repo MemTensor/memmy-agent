@@ -102,6 +102,15 @@ describe("terminal target resolution", () => {
     })).toThrow("mutually exclusive");
   });
 
+  it("directs an unconfigured terminal session to the interactive wizard", () => {
+    const { dependencies } = makeLoop();
+    dependencies.hasUsableDefaultModel = () => false;
+
+    expect(() => resolveTerminalTarget(dependencies, { standalone: true })).toThrow(
+      "No usable default model is configured. Run `memmy onboard --wizard` first.",
+    );
+  });
+
   it("accepts project paths, reuses the registered canonical root, and fixes each binding", () => {
     const { root, dependencies } = makeLoop();
     const projectPath = path.join(root, "code", "memmy");

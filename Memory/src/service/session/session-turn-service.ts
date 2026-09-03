@@ -1150,6 +1150,10 @@ export class SessionTurnService {
       endTopicDecision
     );
     const contextHints = turnStartContextHints(request);
+    const intentLayers = this.deps.memoryLayersForIntent(intentDecision.kind);
+    const requestedLayers = request.layers === undefined
+      ? intentLayers
+      : intentLayers.filter((layer: MemoryLayer) => request.layers?.includes(layer));
     const searchPromise = this.deps.search({
       requestId: request.requestId,
       adapterId: request.adapterId,
@@ -1160,7 +1164,7 @@ export class SessionTurnService {
       query: buildSearchQuery({ ...request, contextHints }, this.deps.config.domain),
       layers: endTopicDecision
         ? []
-        : this.deps.memoryLayersForIntent(intentDecision.kind),
+        : requestedLayers,
       limit: this.deps.turnStartRetrievalLimit(),
       contextBudget: typeof request.contextBudget === "number" ? request.contextBudget : undefined,
       includeInjectedContext: true,

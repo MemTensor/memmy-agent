@@ -84,6 +84,8 @@ export interface BootstrapRepository {
   setAvatarSkin(patch: AvatarSkinPatch): AppSettingsDto;
   getOnboardingState(): OnboardingStateDto;
   updateOnboarding(patch: PatchOnboardingInput): OnboardingStateDto;
+  /** Copies only the completed-guide invariants from the active account into the local BYOK scope. */
+  preserveCompletedOnboardingForLocalByok(): boolean;
   getPrivacySettings(): PrivacySettingsDto;
   updatePrivacy(patch: PatchPrivacyInput): PrivacySettingsDto;
   getScanPreferences(): ScanPreferences;
@@ -241,6 +243,65 @@ export function createBootstrapRepository(db: DatabaseSync): BootstrapRepository
         );
       }
       return this.getOnboardingState();
+    },
+
+    preserveCompletedOnboardingForLocalByok() {
+      const sourceUuid = getActiveUuidWithDefaults(db);
+      if (!sourceUuid || sourceUuid === LOCAL_BYOK_ACCOUNT_UUID) {
+        return false;
+      }
+
+      const source = getRequiredRow<Pick<
+        OnboardingStateRow,
+        "has_finished_guide" | "has_accepted_terms" | "accepted_terms_version" | "completed_at"
+      >>(
+        db,
+        `SELECT
+          has_finished_guide,
+          has_accepted_terms,
+          accepted_terms_version,
+          completed_at
+        FROM account_onboarding_state
+        WHERE uuid = ?`,
+        [sourceUuid]
+      );
+      if (!toBoolean(source.has_finished_guide)) {
+        return false;
+      }
+
+      ensureLocalOnboardingDefaults(db);
+      const now = new Date().toISOString();
+      // Scan permission belongs to the installation scope, while the account's
+      // improvement-program choice must never become BYOK consent.
+      const result = db.prepare(
+        `UPDATE account_onboarding_state
+        SET has_finished_guide = 1,
+            current_step = 'completed',
+            has_accepted_terms = CASE WHEN has_accepted_terms = 1 THEN 1 ELSE ? END,
+            accepted_terms_version = CASE
+              WHEN has_accepted_terms = 1 THEN COALESCE(accepted_terms_version, ?)
+              WHEN ? = 1 THEN ?
+              ELSE accepted_terms_version
+            END,
+            improvement_program = CASE
+              WHEN improvement_program = 'unset' THEN 'not_applicable'
+              ELSE improvement_program
+            END,
+            completed_at = COALESCE(completed_at, ?, ?),
+            updated_at = ?
+        WHERE uuid = ?
+          AND has_finished_guide = 0`
+      ).run(
+        source.has_accepted_terms,
+        source.accepted_terms_version,
+        source.has_accepted_terms,
+        source.accepted_terms_version,
+        source.completed_at,
+        now,
+        now,
+        LOCAL_BYOK_ACCOUNT_UUID
+      );
+      return result.changes > 0;
     },
 
     getPrivacySettings() {

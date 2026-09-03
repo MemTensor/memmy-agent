@@ -1,6 +1,6 @@
 {
   "name": "memmy-agent",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "private": true,
   "type": "module",
   "description": "Local-first agent memory substrate with desktop and CLI surfaces.",
@@ -27,6 +27,7 @@
     "test": "npm run test:release-workflow && npm run test:packaging-guards && npm run memory:test && npm run workspace:test && npm run agent:test:tui-cursor",
     "test:release-workflow": "vitest run tests/release-workflow.test.ts tests/oss-crc64.test.mjs",
     "test:packaging-guards": "vitest run tests/package-version-guard.test.mjs tests/packaged-runtime-config.test.mjs tests/package-logging.test.mjs",
+    "test:linux-cli": "vitest run tests/linux-cli-packaging.test.mjs && npm --prefix App/memmy-agent exec vitest run tests/entrypoints/cli/linux-systemd-gateway.test.ts tests/entrypoints/cli/gateway-lifecycle.test.ts tests/entrypoints/cli/root-terminal-options.test.ts tests/entrypoints/cli/terminal-target.test.ts && npm --prefix Memory test -- tests/cli-setup.test.ts",
     "serve": "npm run memory:serve",
     "serve:local": "npm run memory:serve:local",
     "serve:dev": "npm run memory:serve:dev",

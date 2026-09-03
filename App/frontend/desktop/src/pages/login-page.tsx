@@ -31,6 +31,7 @@ export function LoginPage() {
   const [inviteCode, setInviteCode] = useState("");
   const [modePersistencePending, setModePersistencePending] = useState(false);
   const [modePersistenceFeedback, setModePersistenceFeedback] = useState<{ text: string; tone: "error" | "success" } | null>(null);
+  const [pendingAccountOnboarding, setPendingAccountOnboarding] = useState<Partial<OnboardingStateDto> | null>(null);
   const channel = resolveDesktopAccountChannel();
   const invitationEnabled = state.bootstrap?.promotions?.invitation?.enabled === true;
   const canContinue = Boolean(identifier.trim() && code.trim());
@@ -40,6 +41,7 @@ export function LoginPage() {
     setCode("");
     setInviteCode("");
     setModePersistenceFeedback(null);
+    setPendingAccountOnboarding(null);
     verificationCodeAuth.resetInteractionState();
   }, [channel, verificationCodeAuth.resetInteractionState]);
 
@@ -52,10 +54,15 @@ export function LoginPage() {
   }
 
   async function submitLogin() {
-    if (!canContinue || verificationCodeAuth.loginPending || modePersistencePending) {
+    if (verificationCodeAuth.loginPending || modePersistencePending) {
       return;
     }
     setModePersistenceFeedback(null);
+    if (pendingAccountOnboarding) {
+      await continueAfterRegistration(pendingAccountOnboarding);
+      return;
+    }
+    if (!canContinue) return;
 
     const loginResult = await verificationCodeAuth.login(
       channel,
@@ -88,17 +95,16 @@ export function LoginPage() {
       registeredAt: session.profile.registeredAt
     }));
 
-    if (session.profile.hasFinishedGuide) {
-      await continueAfterRegistration({
+    const onboardingPatch: Partial<OnboardingStateDto> = session.profile.hasFinishedGuide
+      ? {
         completed: true,
         currentStep: "completed",
         completedAt: new Date().toISOString(),
         hasAcceptedTerms: true
-      });
-      return;
-    }
-
-    await continueAfterRegistration();
+      }
+      : buildAccountOnboardingStartPatch();
+    setPendingAccountOnboarding(onboardingPatch);
+    await continueAfterRegistration(onboardingPatch);
   }
 
   async function continueAfterRegistration(forcedOnboarding?: Partial<OnboardingStateDto>) {
@@ -119,6 +125,7 @@ export function LoginPage() {
         userMode: "account",
         onboarding: onboardingPatch
       });
+      setPendingAccountOnboarding(null);
       dispatch(appActions.navigate(nextRoute));
     } catch (error) {
       console.error("persist account mode failed", error);
@@ -149,7 +156,7 @@ export function LoginPage() {
             identifierType={channel}
             code={code}
             inviteCode={inviteCode}
-            disabled={!canContinue || verificationCodeAuth.loginPending || modePersistencePending}
+            disabled={(!canContinue && !pendingAccountOnboarding) || verificationCodeAuth.loginPending || modePersistencePending}
             sendCodeDisabled={verificationCodeAuth.sendCodeDisabled}
             sendCodeLabel={verificationCodeAuth.sendCodeLabel}
             feedback={modePersistenceFeedback ?? verificationCodeAuth.feedback}

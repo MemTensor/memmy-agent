@@ -36,6 +36,7 @@ import { normalizeTimeZoneOffset } from "../../utils/time-zone.js";
 const MEMMY_ACCOUNT_PROVIDER = "memmy_account";
 const MEMMY_ACCOUNT_MODEL = "agent_chat";
 const MEMMY_ACCOUNT_IMAGE_MODEL = "image_gen";
+const LEGACY_ACCOUNT_BYOK_LOCAL_SELECTION_BASELINE = "accountByokLocalSelectionBaseline";
 const ACCOUNT_MODELS = {
   agent: MEMMY_ACCOUNT_MODEL,
   memory_summary: "memory_summary",
@@ -130,7 +131,12 @@ export interface MemmyConfigWriter {
   /**
    * Clear the account-mode runtime login projection.
    */
-  clearAccountModelProjection?(input?: { ownerAccountId?: string; force?: boolean }): Promise<RuntimeProjectionResult>;
+  clearAccountModelProjection?(input?: {
+    ownerAccountId?: string;
+    force?: boolean;
+    syncSelectedByokToLocal?: boolean;
+    expectedCloudUuid?: string;
+  }): Promise<RuntimeProjectionResult>;
 
   /**
    * Patch a single memmy-agent channel config.
@@ -519,6 +525,7 @@ export async function writeAccountModelProjectionToMemmyConfig(
     const appConfig = isRecord(config.app) ? { ...config.app } : {};
     if (normalizedCloudUuid) appConfig.cloudUuid = normalizedCloudUuid;
     if (normalizedUserId) appConfig.userId = normalizedUserId;
+    delete appConfig[LEGACY_ACCOUNT_BYOK_LOCAL_SELECTION_BASELINE];
     setAppConfig(config, appConfig);
     delete config.uuid;
     delete config.identity;
@@ -594,9 +601,15 @@ export async function writeAccountModelProjectionToMemmyConfig(
  */
 export async function clearAccountModelProjectionFromMemmyConfig(
   configPath = resolveDefaultMemmyConfigPath(),
-  input: { ownerAccountId?: string; force?: boolean } = {}
+  input: {
+    ownerAccountId?: string;
+    force?: boolean;
+    syncSelectedByokToLocal?: boolean;
+    expectedCloudUuid?: string;
+  } = {}
 ): Promise<RuntimeProjectionResult> {
   const requestedOwnerAccountId = input.ownerAccountId?.trim();
+  const expectedCloudUuid = input.expectedCloudUuid?.trim();
   const result = await mutateRuntimeConfig(configPath, (config) => {
     const appConfig = isRecord(config.app) ? { ...config.app } : {};
     const providers = isRecord(config.providers) ? { ...config.providers } : {};
@@ -604,6 +617,7 @@ export async function clearAccountModelProjectionFromMemmyConfig(
     if (input.force) {
       delete appConfig.cloudUuid;
       delete appConfig.userId;
+      delete appConfig[LEGACY_ACCOUNT_BYOK_LOCAL_SELECTION_BASELINE];
       setAppConfig(config, appConfig);
       delete config.uuid;
       delete config.identity;
@@ -620,10 +634,19 @@ export async function clearAccountModelProjectionFromMemmyConfig(
       config.modelAssignments = assignments;
       return { memoryConfigAffected: false };
     }
+    const currentCloudUuid = existingString(appConfig.cloudUuid) ?? existingString(accountProvider?.apiKey);
+    if (expectedCloudUuid && currentCloudUuid !== expectedCloudUuid) {
+      return { memoryConfigAffected: false };
+    }
     const ownerAccountId = requestedOwnerAccountId
       ?? existingString(appConfig.userId)
       ?? existingString(accountProvider?.ownerAccountId);
     if (!ownerAccountId) return { memoryConfigAffected: false };
+    delete appConfig[LEGACY_ACCOUNT_BYOK_LOCAL_SELECTION_BASELINE];
+
+    if (input.syncSelectedByokToLocal) {
+      syncSelectedAccountByokCandidatesToLocal(config, ownerAccountId);
+    }
 
     if (!existingString(appConfig.userId) || appConfig.userId === ownerAccountId) {
       delete appConfig.cloudUuid;
@@ -732,10 +755,17 @@ function updateAccountAssignment(
   const currentCandidates = Array.isArray(agent.candidates)
     ? agent.candidates.filter((value): value is string => typeof value === "string")
     : [];
-  const candidates = currentCandidates.filter((presetId) => assignmentPresetIsUsable(
-    presets, presetId, "agent", ownerAccountId
-  ));
-  if (!candidates.includes(presetIds.agent)) candidates.push(presetIds.agent);
+  const platformCandidates = [...new Set(currentCandidates.filter((presetId) => {
+    const preset = asRecord(presets[presetId]);
+    return preset?.source === "account"
+      && assignmentPresetIsUsable(presets, presetId, "agent", ownerAccountId);
+  }))];
+  if (!platformCandidates.includes(presetIds.agent)) platformCandidates.push(presetIds.agent);
+
+  const byok = isRecord(assignments.byok) ? assignments.byok : {};
+  const byokAgent = isRecord(byok.agent) ? byok.agent : {};
+  const localCandidates = selectedUsableByokAgentCandidates(byokAgent, presets, ownerAccountId);
+  const candidates = [...platformCandidates, ...localCandidates];
   const currentDefault = existingString(agent.default);
   agent.candidates = candidates;
   agent.default = currentDefault && candidates.includes(currentDefault) ? currentDefault : presetIds.agent;
@@ -756,6 +786,43 @@ function updateAccountAssignment(
   }
   assignments.account = next;
   config.modelAssignments = assignments;
+}
+
+function syncSelectedAccountByokCandidatesToLocal(
+  config: Record<string, unknown>,
+  ownerAccountId: string
+): void {
+  const assignments = isRecord(config.modelAssignments) ? { ...config.modelAssignments } : {};
+  const account = isRecord(assignments.account) ? assignments.account : {};
+  if (existingString(account.ownerAccountId) !== ownerAccountId) return;
+
+  const presets = isRecord(config.modelPresets) ? config.modelPresets : {};
+  const accountAgent = isRecord(account.agent) ? account.agent : {};
+  const selectedByokCandidates = selectedUsableByokAgentCandidates(accountAgent, presets, ownerAccountId);
+
+  const byok = isRecord(assignments.byok) ? { ...assignments.byok } : {};
+  const byokAgent = isRecord(byok.agent) ? { ...byok.agent } : {};
+  if (selectedByokCandidates.length === 0) return;
+
+  const localDefault = existingString(byokAgent.default);
+  byokAgent.candidates = selectedByokCandidates;
+  byokAgent.default = localDefault && selectedByokCandidates.includes(localDefault)
+    ? localDefault
+    : selectedByokCandidates[0];
+  byok.agent = byokAgent;
+  assignments.byok = byok;
+  config.modelAssignments = assignments;
+}
+
+function selectedUsableByokAgentCandidates(
+  agent: Record<string, unknown>,
+  presets: Record<string, unknown>,
+  ownerAccountId: string
+): string[] {
+  return [...new Set((Array.isArray(agent.candidates) ? agent.candidates : [])
+    .filter((value): value is string => typeof value === "string")
+    .filter((presetId) => asRecord(presets[presetId])?.source === "byok"
+      && assignmentPresetIsUsable(presets, presetId, "agent", ownerAccountId)))];
 }
 
 function assignmentPresetIsUsable(

@@ -328,6 +328,7 @@ export interface TurnStartRequest extends RequestEnvelope {
   sessionId: string;
   query: string;
   turnId?: string;
+  layers?: MemoryLayer[];
   contextHints?: Record<string, unknown>;
   contextBudget?: number;
 }

@@ -1170,7 +1170,8 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain("launch-win-update-${Date.now()}.vbs");
     expect(mainSource).toContain("install-win-update-${Date.now()}.ps1");
     expect(mainSource).toContain('const helper = spawn("wscript.exe"');
-    expect(mainSource).toContain("function createWindowsUpdateLauncherScript");
+    expect(mainSource).toContain('import { createWindowsUpdateLauncherFile } from "./windows-update-launcher.js"');
+    expect(mainSource).toContain("await writeFile(launcherPath, createWindowsUpdateLauncherFile([");
     expect(mainSource).toContain("$arguments = @('/S', '--updated', '/currentuser', ('/D=' + $appDir))");
     expect(mainSource).toContain("CURRENT_APP_PID");
     expect(mainSource).toContain("OPEN_AFTER_INSTALL");

@@ -196,6 +196,40 @@ describe("PetPage helpers", () => {
     })).toBe("/main");
   });
 
+  it("BYOK 尚无 Agent 模型时桌宠展开回到 API Key 配置", () => {
+    const bootstrap = {
+      ...mockBootstrap,
+      app: { ...mockBootstrap.app, userMode: "byok" as const },
+      onboarding: {
+        ...mockBootstrap.onboarding,
+        completed: true,
+        currentStep: "completed" as const,
+        completedAt: "2026-06-01T00:00:00.000Z"
+      }
+    };
+    const account = {
+      email: "",
+      phoneNumber: null,
+      nickname: "",
+      registeredAt: null
+    };
+
+    expect(resolvePetFullRoute({
+      bootstrap,
+      account,
+      modelConfig: {
+        catalog: { modelAssignments: { byok: { agent: { candidates: [] } } } }
+      }
+    })).toBe("/api-key");
+    expect(resolvePetFullRoute({
+      bootstrap,
+      account,
+      modelConfig: {
+        catalog: { modelAssignments: { byok: { agent: { candidates: ["local-agent"] } } } }
+      }
+    })).toBe("/main");
+  });
+
   it("录音计时格式化为 m:ss", () => {
     expect(formatRecordSeconds(0)).toBe("0:00");
     expect(formatRecordSeconds(65)).toBe("1:05");

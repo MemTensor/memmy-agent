@@ -806,9 +806,13 @@ function resolveAssignedEmbedding(
     embedding.mode,
     DEFAULT_MEMMY_CONFIG.embedding.mode
   );
+  const rawAssignedPreset = mode
+    ? asRecord(asRecord(rootConfig.modelAssignments)[mode]).embedding
+    : undefined;
+  const hasExplicitAssignment = rawAssignedPreset !== undefined && rawAssignedPreset !== null;
   const resolved = resolveMemoryAssignment(rootConfig, mode, "embedding");
   if (!resolved.ok) {
-    if (embeddingMode !== "local") {
+    if (hasExplicitAssignment || (mode !== "byok" && embeddingMode !== "local")) {
       return {
         ...embedding,
         provider: "openai_compatible",
@@ -818,9 +822,16 @@ function resolveAssignedEmbedding(
     }
     return {
       ...embedding,
-      mode: embeddingMode,
+      mode: "local",
       provider: "local",
-      sourceProvider: "local"
+      sourceProvider: "local",
+      endpoint: undefined,
+      model: DEFAULT_MEMMY_CONFIG.embedding.model,
+      apiKey: undefined,
+      extraHeaders: undefined,
+      extraBody: undefined,
+      actualModelContext: undefined,
+      selectionError: undefined
     };
   }
   if (!embeddingProtocolSupported(resolved.context.protocol)) {

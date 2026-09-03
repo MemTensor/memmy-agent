@@ -17,6 +17,30 @@ const {
 afterEach(cleanup);
 
 describe("MemoryService / session / turn capture", () => {
+  it("preserves an explicit empty turn-start layer selection for evaluation ablations", async () => {
+    const { db, service } = createTestService();
+    const session = service.openSession({
+      namespace: {
+        source: "memmy-agent",
+        profileId: "layer-ablation",
+        userId: "layer-ablation-user"
+      }
+    });
+
+    const started = await service.startTurn({
+      sessionId: session.sessionId,
+      turnId: "turn-layer-ablation-none",
+      query: "Fix the failing SWE test without retrieved memory.",
+      layers: []
+    });
+
+    expect(started.sourceMemoryIds).toEqual([]);
+    expect(db.db.prepare(
+      "SELECT layers_json FROM recall_events WHERE id = ?"
+    ).get(started.searchEventId)).toEqual({ layers_json: "[]" });
+    db.close();
+  });
+
   it("records only recall audit at turn.start and commits episode, RawTurn, and L1 at turn.complete", async () => {
     const { db, service } = createTestService();
     const session = service.openSession({

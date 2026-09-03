@@ -22,6 +22,10 @@ import {
   SessionManager,
   type WebuiSessionBinding,
 } from "../../core/session/manager.js";
+import {
+  publicGoalState,
+  type AgentGoalState,
+} from "../../core/session/goal-state.js";
 import { WEBUI_LANGUAGE_METADATA_KEY } from "../../core/session/webui-turns.js";
 import {
   API_MAX_BODY_BYTES,
@@ -74,6 +78,8 @@ import {
 } from "./onboard.js";
 import { StreamRenderer, ThinkingSpinner } from "./stream.js";
 import { prepareStartupMigrations } from "./startup-migrations.js";
+import { parseRootTerminalOptions } from "./root-terminal-options.js";
+import { runLinuxRootTerminal } from "./linux-systemd-gateway.js";
 
 const CLI_TEMPLATES_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../templates");
 
@@ -81,6 +87,13 @@ export const app = new Command("memmy")
   .option("-s, --session <sessionId>", "Resume an existing cli:* terminal session")
   .option("--standalone", "Create a new standalone terminal session")
   .option("--project <path>", "Create a terminal session bound to a project path");
+
+export function resolveCliActionOptions<T extends Record<string, any>>(
+  localOptions: T,
+  command: Pick<Command, "optsWithGlobals">,
+): T {
+  return { ...localOptions, ...command.optsWithGlobals() };
+}
 
 export type GatewayRuntime = {
   bus: MessageBus;
@@ -91,6 +104,37 @@ export type GatewayRuntime = {
   healthServer: http.Server;
   stop: () => Promise<void>;
 };
+
+type GatewayLifecycleProcess = Pick<NodeJS.Process, "on" | "off" | "exit">;
+
+export function installGatewaySignalLifecycle(
+  runtime: GatewayRuntime,
+  lifecycle: GatewayLifecycleProcess = process,
+): void {
+  let stopping = false;
+  const signals: NodeJS.Signals[] = ["SIGHUP", "SIGINT", "SIGTERM"];
+  const remove = () => {
+    for (const signal of signals) lifecycle.off(signal, shutdown);
+  };
+  const shutdown = () => {
+    if (stopping) return;
+    stopping = true;
+    remove();
+    const forceExit = setTimeout(() => lifecycle.exit(1), 10_000);
+    forceExit.unref?.();
+    void runtime.stop().then(
+      () => {
+        clearTimeout(forceExit);
+        lifecycle.exit(0);
+      },
+      () => {
+        clearTimeout(forceExit);
+        lifecycle.exit(1);
+      },
+    );
+  };
+  for (const signal of signals) lifecycle.on(signal, shutdown);
+}
 
 let cliRuntimeLogs = false;
 
@@ -340,7 +384,7 @@ export function resolveTerminalTarget(
     key = standalone || project ? `cli:${crypto.randomUUID()}` : "cli:direct";
     const existing = reload(key);
     if (!existing && !dependencies.hasUsableDefaultModel()) {
-      throw new Error("No usable default model is configured. Run `memmy onboard` first.");
+      throw new Error("No usable default model is configured. Run `memmy onboard --wizard` first.");
     }
     if (existing) {
       binding = readWebuiSessionBinding(existing);
@@ -446,9 +490,9 @@ export async function runRootInteractiveAgent({
   sessionId?: string | null;
   standalone?: boolean;
   project?: string | null;
-} = {}): Promise<unknown> {
+} = {}, runtimeConfig?: Config): Promise<unknown> {
   if (rootInteractiveRunnerForTest) return rootInteractiveRunnerForTest();
-  const loaded = loadRuntimeConfig(null, null);
+  const loaded = runtimeConfig ?? loadRuntimeConfig(null, null);
   const workspace = syncRuntimeWorkspaceTemplates(loaded);
   const target = resolveTerminalTarget({
     sessions: new SessionManager(path.join(workspace, "sessions"), {
@@ -468,31 +512,6 @@ export async function runRootInteractiveAgent({
   printCliRestartNoticeIfNeeded(target.sessionId, true);
   const { runInkInteractiveAgent } = await import("./tui.js");
   return runInkInteractiveAgent(loaded, target.sessionId, target);
-}
-
-function rootTerminalOptions(argv: string[]): {
-  sessionId?: string;
-  standalone?: boolean;
-  project?: string;
-} | null {
-  if (argv.length <= 2) return {};
-  const args = argv.slice(2);
-  const options: { sessionId?: string; standalone?: boolean; project?: string } = {};
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index];
-    if (arg === "--standalone") options.standalone = true;
-    else if (arg === "--session" || arg === "-s") {
-      const value = args[++index];
-      if (!value || value.startsWith("-")) throw new Error("--session requires a sessionId");
-      options.sessionId = value;
-    } else if (arg === "--project") {
-      const value = args[++index];
-      if (!value || value.startsWith("-")) throw new Error("--project requires a path");
-      options.project = value;
-    }
-    else return null;
-  }
-  return options;
 }
 
 export async function runInternalCommand(argv: string[]): Promise<boolean> {
@@ -524,10 +543,18 @@ export async function main(argv: string[] = process.argv): Promise<void> {
     versionCallback(true);
     return;
   }
-  const rootTarget = rootTerminalOptions(argv);
+  const rootTarget = parseRootTerminalOptions(argv);
   if (rootTarget) {
     await prepareStartupMigrations();
-    await runRootInteractiveAgent(rootTarget);
+    if (rootInteractiveRunnerForTest) {
+      await runRootInteractiveAgent(rootTarget);
+      return;
+    }
+    await runLinuxRootTerminal({
+      loadConfig: () => loadRuntimeConfig(null, null),
+      onboardWizard: () => onboard({ wizard: true }),
+      runInteractive: (config) => runRootInteractiveAgent(rootTarget, config),
+    });
     return;
   }
 
@@ -585,7 +612,8 @@ export async function main(argv: string[] = process.argv): Promise<void> {
     .option("-c, --config <path>", "Path to config file")
     .option("-v, --verbose", "Enable verbose runtime logs", false)
     .action(async (opts) => {
-      await gateway(opts);
+      const runtime = await gateway(opts);
+      installGatewaySignalLifecycle(runtime);
     });
 
   app
@@ -601,8 +629,32 @@ export async function main(argv: string[] = process.argv): Promise<void> {
     .option("--no-markdown", "Render final responses as plain text")
     .option("--logs", "Enable runtime logs", false)
     .option("--no-logs", "Disable runtime logs")
-    .action(async (opts) => {
+    .action(async (localOpts, actionCommand) => {
+      const opts = resolveCliActionOptions(localOpts, actionCommand);
       await agent({ ...opts, sessionId: opts.session });
+    });
+
+  app
+    .command("goal")
+    .description("Run a persistent Goal to a terminal state.")
+    .option("-m, --message <message>", "Goal objective")
+    .option("--message-file <path>", "Read the Goal objective from a UTF-8 file")
+    .option("-s, --session <sessionId>", "Existing cli:* session ID")
+    .option("--standalone", "Create a new standalone terminal session")
+    .option("--project <path>", "Create a terminal session bound to a project path")
+    .option("--token-budget <tokens>", "Cumulative Goal token budget")
+    .option("-t, --timeout <seconds>", "Maximum wall-clock runtime", "14400")
+    .option("-o, --output <path>", "Write the structured result as JSON")
+    .option("-w, --workspace <dir>", "Workspace directory")
+    .option("-c, --config <path>", "Path to config file")
+    .option("--logs", "Enable runtime logs", false)
+    .option("--no-logs", "Disable runtime logs")
+    .action(async (localOpts, actionCommand) => {
+      const opts = resolveCliActionOptions(localOpts, actionCommand);
+      const result = await goal({ ...opts, sessionId: opts.session });
+      if (result.status !== "success") {
+        throw new Error(`Goal stopped with ${result.goal.status}: ${result.summary}`);
+      }
     });
 
   const sessionsCommand = app.command("sessions").description("Manage terminal sessions.");
@@ -1493,6 +1545,258 @@ export async function gateway({
       ]);
     },
   };
+}
+
+export type HeadlessGoalResult = {
+  status: "success" | "warning" | "error";
+  summary: string;
+  next_actions: string[];
+  artifacts: {
+    workspace: string;
+    project: string | null;
+    session_file: string | null;
+    result_file: string | null;
+  };
+  goal: AgentGoalState;
+  session_id: string | null;
+  timed_out: boolean;
+  last_message: string | null;
+  metrics: {
+    tokens_used: number;
+    time_used_seconds: number;
+  };
+};
+
+function positiveIntegerOption(value: string | number | null | undefined, name: string): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return parsed;
+}
+
+function headlessGoalObjective(
+  message: string | null | undefined,
+  messageFile: string | null | undefined,
+): string {
+  if (message && messageFile) throw new Error("--message and --message-file are mutually exclusive");
+  const value = messageFile
+    ? fs.readFileSync(path.resolve(messageFile), "utf8")
+    : message ?? (process.stdin.isTTY ? "" : fs.readFileSync(0, "utf8"));
+  const objective = value.trim();
+  if (!objective) throw new Error("A non-empty Goal objective is required");
+  return objective;
+}
+
+function writeHeadlessGoalResult(result: HeadlessGoalResult, output: string | null | undefined): void {
+  const rendered = `${JSON.stringify(result, null, 2)}\n`;
+  if (!output) {
+    process.stdout.write(rendered);
+    return;
+  }
+  const outputPath = path.resolve(output);
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+  fs.writeFileSync(outputPath, rendered, "utf8");
+  console.log(`Goal result: ${outputPath}`);
+}
+
+function drainGoalOutput(bus: MessageBus, messages: string[]): void {
+  while (true) {
+    const outbound = bus.outbound.getNowait();
+    if (!outbound) return;
+    const content = String(outbound.content ?? "").trim();
+    if (content) messages.push(content);
+  }
+}
+
+function headlessGoalOutcome(
+  goalState: AgentGoalState,
+  timedOut: boolean,
+  lastMessage: string | null,
+): Pick<HeadlessGoalResult, "status" | "summary" | "next_actions"> {
+  if (timedOut) {
+    return {
+      status: "warning",
+      summary: `Goal paused after reaching the headless timeout (${goalState.status ?? "unknown"}).`,
+      next_actions: ["Inspect the session artifact and increase --timeout before retrying."],
+    };
+  }
+  if (goalState.status === "completed") {
+    return {
+      status: "success",
+      summary: lastMessage ?? "Goal completed.",
+      next_actions: [],
+    };
+  }
+  const status = goalState.status ?? "unknown";
+  return {
+    status: "warning",
+    summary: lastMessage ?? `Goal stopped with status ${status}.`,
+    next_actions: [`Inspect the session artifact before resuming the ${status} Goal.`],
+  };
+}
+
+export async function goal({
+  message = null,
+  messageFile = null,
+  sessionId = null,
+  standalone = false,
+  project = null,
+  tokenBudget = null,
+  timeout = 14_400,
+  output = null,
+  workspace = null,
+  config = null,
+  logs = false,
+}: {
+  message?: string | null;
+  messageFile?: string | null;
+  sessionId?: string | null;
+  standalone?: boolean;
+  project?: string | null;
+  tokenBudget?: string | number | null;
+  timeout?: string | number | null;
+  output?: string | null;
+  workspace?: string | null;
+  config?: string | null;
+  logs?: boolean;
+} = {}): Promise<HeadlessGoalResult> {
+  const objective = headlessGoalObjective(message, messageFile);
+  const budget = positiveIntegerOption(tokenBudget, "--token-budget");
+  const timeoutSeconds = positiveIntegerOption(timeout, "--timeout") ?? 14_400;
+  const invocationCwd = process.cwd();
+  const loaded = loadRuntimeConfig(config, workspace);
+  const workspacePath = syncRuntimeWorkspaceTemplates(loaded);
+  setCliRuntimeLogs(Boolean(logs));
+  const bus = new MessageBus();
+  const loop = AgentLoop.fromConfig(loaded, bus);
+  let target: TerminalTarget | null = null;
+  let runTask: Promise<void> | null = null;
+  let runError: unknown = null;
+  let runFinished = false;
+  let timedOut = false;
+  const messages: string[] = [];
+
+  try {
+    target = resolveTerminalTarget(terminalTargetDependenciesForLoop(loop), {
+      sessionId,
+      standalone,
+      project,
+      invocationCwd,
+    });
+    if (project) {
+      const requestedProject = fs.realpathSync(path.resolve(invocationCwd, expandHomePath(project)));
+      const actualProject = fs.realpathSync(target.cwd);
+      if (target.target !== "project" || actualProject !== requestedProject) {
+        throw new Error(
+          `Goal project binding mismatch: requested ${requestedProject}, resolved ${actualProject}`,
+        );
+      }
+    }
+    if (loop.sessions instanceof SessionManager) {
+      loop.guiTranscriptMirror = new GuiTranscriptMirror(loop.sessions, target.cwd);
+      loop.guiTranscriptMirror.sessionUpdated(target.sessionId);
+    }
+
+    const createResponse = await loop.processDirect(`/goal create ${objective}`, {
+      sessionKey: target.sessionId,
+      channel: "cli",
+      chatId: target.sessionId.slice("cli:".length) || "goal",
+    });
+    const created = loop.goalRuntime.get(target.sessionId);
+    if (!created) {
+      throw new Error(createResponse?.content?.trim() || "Goal creation failed");
+    }
+    if (budget !== null) {
+      await loop.goalRuntime.setBudget(target.sessionId, created.goalId, budget);
+      await loop.goalRuntime.flushEffects(target.sessionId);
+    }
+
+    runTask = loop.run()
+      .then(() => {
+        runFinished = true;
+      })
+      .catch((error) => {
+        runError = error;
+      });
+    const deadline = Date.now() + timeoutSeconds * 1_000;
+    while (true) {
+      drainGoalOutput(bus, messages);
+      if (runError) throw runError;
+      const current = loop.goalRuntime.get(target.sessionId);
+      const activeTurns = loop.activeTasks.get(target.sessionId)?.length ?? 0;
+      if (current && current.status !== "active" && activeTurns === 0) break;
+      if (runFinished) throw new Error("Goal runtime stopped before reaching a terminal state");
+      if (Date.now() >= deadline) {
+        timedOut = true;
+        if (current?.status === "active") {
+          await loop.goalRuntime.pauseAndCancel(target.sessionId, current.goalId);
+          await loop.goalRuntime.flushEffects(target.sessionId);
+        }
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  } catch (error) {
+    const current = target ? publicGoalState(loop.goalRuntime.get(target.sessionId)) : publicGoalState(null);
+    const result: HeadlessGoalResult = {
+      status: "error",
+      summary: error instanceof Error ? error.message : String(error),
+      next_actions: ["Inspect the runtime log and configuration before retrying."],
+      artifacts: {
+        workspace: workspacePath,
+        project: target?.cwd ?? (project ? path.resolve(invocationCwd, project) : null),
+        session_file: target && typeof loop.sessions.pathFor === "function"
+          ? loop.sessions.pathFor(target.sessionId)
+          : null,
+        result_file: output ? path.resolve(output) : null,
+      },
+      goal: current,
+      session_id: target?.sessionId ?? null,
+      timed_out: timedOut,
+      last_message: messages.at(-1)?.slice(-8_000) ?? null,
+      metrics: {
+        tokens_used: current.tokens_used,
+        time_used_seconds: current.time_used_seconds,
+      },
+    };
+    writeHeadlessGoalResult(result, output);
+    return result;
+  } finally {
+    loop.stop();
+    await Promise.allSettled([
+      runTask ?? Promise.resolve(),
+      closeLoopRuntimeTools(loop),
+      Promise.resolve(loop.sessions.flushAll()),
+    ]);
+    drainGoalOutput(bus, messages);
+  }
+
+  const current = publicGoalState(target ? loop.goalRuntime.get(target.sessionId) : null);
+  const lastMessage = messages.at(-1)?.slice(-8_000) ?? null;
+  const outcome = headlessGoalOutcome(current, timedOut, lastMessage);
+  const result: HeadlessGoalResult = {
+    ...outcome,
+    artifacts: {
+      workspace: workspacePath,
+      project: target?.cwd ?? null,
+      session_file: target && typeof loop.sessions.pathFor === "function"
+        ? loop.sessions.pathFor(target.sessionId)
+        : null,
+      result_file: output ? path.resolve(output) : null,
+    },
+    goal: current,
+    session_id: target?.sessionId ?? null,
+    timed_out: timedOut,
+    last_message: lastMessage,
+    metrics: {
+      tokens_used: current.tokens_used,
+      time_used_seconds: current.time_used_seconds,
+    },
+  };
+  writeHeadlessGoalResult(result, output);
+  return result;
 }
 
 export async function agent({

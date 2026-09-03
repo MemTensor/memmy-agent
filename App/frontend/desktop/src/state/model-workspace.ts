@@ -494,14 +494,14 @@ export function deleteModelConnection(
   const next = cloneCatalog(workspace.catalog);
   const provider = next.providers.find((item) => item.provider === connection.provider && !item.accountManaged);
   if (!provider) return { workspace, error: "connection_not_found" };
-  const removedIds = provider.models.filter((item) => item.endpointId === connection.endpointId).map((item) => item.presetId);
   provider.endpoints = provider.endpoints.filter((item) => item.endpointId !== connection.endpointId);
   provider.models = provider.models.filter((item) => item.endpointId !== connection.endpointId);
   if (!provider.endpoints.length || !provider.models.length) {
     next.providers = next.providers.filter((item) => item !== provider);
   }
-  clearAssignmentReferences(next.modelAssignments.byok, removedIds);
-  clearAssignmentReferences(next.modelAssignments.account, removedIds);
+  const remainingIds = new Set(next.providers.flatMap((item) => item.models.map((model) => model.presetId)));
+  pruneInvalidAssignmentReferences(next.modelAssignments.byok, remainingIds);
+  pruneInvalidAssignmentReferences(next.modelAssignments.account, remainingIds);
   refreshEffectiveCandidates(next);
   return { workspace: createModelWorkspace(next), error: null };
 }
@@ -553,13 +553,18 @@ export function setModelAssignment(
   workspace: ModelWorkspace,
   mode: ModelWorkspaceMode,
   kind: ModelAssignmentKind,
-  candidateId: string
+  candidateId: string | null
 ): ModelWorkspace {
+  const key = kind === "image" ? "imageGeneration" : kind;
+  if (candidateId === null) {
+    const next = cloneCatalog(workspace.catalog);
+    next.modelAssignments[mode][key] = null;
+    return createModelWorkspace(next);
+  }
   const capability = assignmentCapability(kind);
   const allowed = new Set(getModelCandidates(workspace, mode, capability).map((candidate) => candidate.id));
   if (!allowed.has(candidateId)) return workspace;
   const next = cloneCatalog(workspace.catalog);
-  const key = kind === "image" ? "imageGeneration" : kind;
   next.modelAssignments[mode][key] = candidateId;
   return createModelWorkspace(next);
 }
@@ -783,12 +788,13 @@ function replaceIds(current: string[], oldIds: string[], nextIds: string[]): str
   return unique([...kept, ...nextIds]);
 }
 
-function clearAssignmentReferences(assignment: ModelAssignment, removedIds: string[]): void {
-  const removed = new Set(removedIds);
-  assignment.agent.candidates = assignment.agent.candidates.filter((id) => !removed.has(id));
-  if (assignment.agent.default && removed.has(assignment.agent.default)) assignment.agent.default = assignment.agent.candidates[0] ?? null;
+function pruneInvalidAssignmentReferences(assignment: ModelAssignment, validIds: ReadonlySet<string>): void {
+  assignment.agent.candidates = assignment.agent.candidates.filter((id) => validIds.has(id));
+  if (!assignment.agent.default || !assignment.agent.candidates.includes(assignment.agent.default)) {
+    assignment.agent.default = assignment.agent.candidates[0] ?? null;
+  }
   for (const key of ["memorySummary", "memoryEvolution", "embedding", "asr", "imageGeneration"] as const) {
-    if (assignment[key] && removed.has(assignment[key]!)) assignment[key] = null;
+    if (assignment[key] && !validIds.has(assignment[key]!)) assignment[key] = null;
   }
 }
 

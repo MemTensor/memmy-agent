@@ -341,6 +341,7 @@ describe("MemoryService / REST contract", () => {
       sessionId: opened.sessionId,
       turnId: "cursor-http-turn",
       query: "Continue the hook lifecycle repair",
+      layers: ["L2"],
       contextHints: {
         agentIdentity: "cursor-agent",
         hostProvider: "cursor"
@@ -386,6 +387,9 @@ describe("MemoryService / REST contract", () => {
       tool_name: "memory_search",
       retrieval_mode: "turn_start"
     });
+    expect(db.db.prepare(
+      "SELECT layers_json FROM recall_events WHERE id = ?"
+    ).get(started.searchEventId)).toEqual({ layers_json: '["L2"]' });
     const duplicateStartResponse = await fetch(baseUrl + "/turns/start", {
       method: "POST",
       headers: { "content-type": "application/json" },

@@ -1,0 +1,209 @@
+name: Linux CLI installer
+
+on:
+  release:
+    types: [published]
+  pull_request:
+    paths:
+      - ".github/workflows/linux-cli-installer.yml"
+      - "scripts/install.sh"
+      - "scripts/internal/linux/**"
+      - "App/memmy-agent/**"
+      - "Memory/**"
+      - "Migrations/**"
+      - "App/backend/**"
+      - "tests/linux-cli-packaging.test.mjs"
+      - "package.json"
+      - "package-lock.json"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/linux-cli-installer.yml"
+      - "scripts/install.sh"
+      - "scripts/internal/linux/**"
+      - "App/memmy-agent/**"
+      - "Memory/**"
+      - "Migrations/**"
+      - "App/backend/**"
+      - "tests/linux-cli-packaging.test.mjs"
+      - "package.json"
+      - "package-lock.json"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version matching package.json (without the v prefix)
+        required: false
+        type: string
+      upload_to_release:
+        description: Upload the verified Linux assets to an existing GitHub Release
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm ci --prefix App/memmy-agent
+      - name: Resolve and verify version
+        id: version
+        env:
+          REQUESTED_VERSION: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.version }}
+        run: |
+          set -euo pipefail
+          repository_version="$(node -p "require('./package.json').version")"
+          version="${REQUESTED_VERSION:-$repository_version}"
+          version="${version#v}"
+          if [[ "$version" != "$repository_version" ]]; then
+            echo "Requested version $version does not match package.json version $repository_version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Test Linux launcher and installer contracts
+        run: npm run test:linux-cli
+      - name: Build Linux CLI release assets
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: bash scripts/internal/linux/build-cli-archive.sh --version "$VERSION" --output release-assets
+      - uses: actions/upload-artifact@v4
+        with:
+          name: memmy-linux-cli-assets
+          path: |
+            release-assets/memmy-agent-linux-cli.tar.gz
+            release-assets/memmy-agent-linux-cli.tar.gz.sha256
+            release-assets/install.sh
+          if-no-files-found: error
+
+  install-smoke:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            architecture: x64
+          - runner: ubuntu-24.04-arm
+            architecture: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: memmy-linux-cli-assets
+          path: release-assets
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install twice and exercise the CLI
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          EXPECTED_ARCH: ${{ matrix.architecture }}
+          MEMMY_INSTALL_ROOT: ${{ runner.temp }}/memmy-agent
+          MEMMY_BIN_DIR: ${{ runner.temp }}/bin
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            x86_64|amd64) actual_arch="x64" ;;
+            aarch64|arm64) actual_arch="arm64" ;;
+            *) echo "Unsupported runner architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+          [[ "$actual_arch" == "$EXPECTED_ARCH" ]]
+          export MEMMY_VERSION="$VERSION"
+          export MEMMY_RELEASE_BASE_URL="file://$PWD/release-assets"
+          bash release-assets/install.sh
+          bash release-assets/install.sh
+          "$MEMMY_BIN_DIR/memmy" --version
+          "$MEMMY_BIN_DIR/memmy" --help >/dev/null
+          "$MEMMY_BIN_DIR/memmy-memory" health >/dev/null
+          systemctl --user is-enabled --quiet memmy-memory.service
+          if systemctl --user is-enabled --quiet memmy-gateway.service; then
+            echo "Gateway must remain disabled until the first bare memmy onboarding" >&2
+            exit 1
+          fi
+          systemd_verify_output="$(systemd-analyze --user verify \
+            "$HOME/.config/systemd/user/memmy-memory.service" \
+            "$HOME/.config/systemd/user/memmy-gateway.service" 2>&1)" || {
+              printf '%s\n' "$systemd_verify_output" >&2
+              exit 1
+            }
+          if [[ -n "$systemd_verify_output" ]]; then
+            printf '%s\n' "$systemd_verify_output" >&2
+            exit 1
+          fi
+          export MEMMY_SMOKE_SECRET="linux-smoke-${EXPECTED_ARCH}"
+          (
+            cd "$MEMMY_INSTALL_ROOT/current/App/memmy-agent"
+            CONFIG_PATH="$HOME/.memmy/config.yaml" node --input-type=module <<'NODE'
+          import { readFileSync, writeFileSync } from "node:fs";
+          import YAML from "yaml";
+
+          const configPath = process.env.CONFIG_PATH;
+          const config = YAML.parse(readFileSync(configPath, "utf8")) ?? {};
+          config.agents ??= {};
+          config.agents.defaults ??= {};
+          config.agents.defaults.model = "ollama/llama3.2";
+          config.tools ??= {};
+          config.tools.web ??= {};
+          config.tools.web.search ??= {};
+          config.tools.web.search.apiKey = "${MEMMY_SMOKE_SECRET}";
+          config.tools.browser = { enabled: false };
+          writeFileSync(configPath, YAML.stringify(config), "utf8");
+          NODE
+          )
+          set +e
+          timeout --signal=TERM --kill-after=5s 45s \
+            script -qefc "$MEMMY_BIN_DIR/memmy" "$RUNNER_TEMP/memmy-tui.log" </dev/null
+          tui_status=$?
+          set -e
+          if [[ "$tui_status" -ne 0 && "$tui_status" -ne 124 && "$tui_status" -ne 137 ]]; then
+            cat "$RUNNER_TEMP/memmy-tui.log" >&2
+            exit "$tui_status"
+          fi
+          systemctl --user is-enabled --quiet memmy-gateway.service
+          systemctl --user is-active --quiet memmy-gateway.service
+          grep -Fq 'MEMMY_SMOKE_SECRET="linux-smoke-' "$HOME/.memmy/systemd/gateway.env"
+          gateway_pid_before_update="$(systemctl --user show memmy-gateway.service --property=MainPID --value)"
+          bash release-assets/install.sh
+          gateway_pid_after_update="$(systemctl --user show memmy-gateway.service --property=MainPID --value)"
+          [[ "$gateway_pid_after_update" != "$gateway_pid_before_update" ]]
+          systemctl --user is-active --quiet memmy-gateway.service
+          curl --fail --silent --show-error http://127.0.0.1:18970/health >/dev/null
+          "$MEMMY_BIN_DIR/memmy-memory" health >/dev/null
+          systemctl --user stop memmy-gateway.service
+
+  upload:
+    if: ${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.upload_to_release == true) }}
+    needs: [build, install-smoke]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: memmy-linux-cli-assets
+          path: release-assets
+      - name: Upload only Linux CLI assets to the existing Release
+        run: |
+          set -euo pipefail
+          gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null
+          gh release upload "v$VERSION" \
+            release-assets/memmy-agent-linux-cli.tar.gz \
+            release-assets/memmy-agent-linux-cli.tar.gz.sha256 \
+            release-assets/install.sh \
+            --clobber \
+            --repo "$GITHUB_REPOSITORY"

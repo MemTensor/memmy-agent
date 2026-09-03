@@ -76,6 +76,118 @@ describe("memmy-memory CLI setup commands", () => {
     expect(existsSync(dbPath)).toBe(false);
   });
 
+  it("generates an authentication token only when explicitly requested", async () => {
+    const root = tempRoot();
+    const configPath = join(root, "config.yaml");
+    createAllAgentRoots(root);
+    setEnv("HOME", root);
+
+    await runCommand({
+      argv: [
+        "init",
+        "--home", root,
+        "--config", configPath,
+        "--db", join(root, "memory.sqlite"),
+        "--skip-agent-skills",
+        "--generate-token-if-missing"
+      ]
+    });
+
+    const saved = YAML.parse(readFileSync(configPath, "utf8"));
+    expect(saved.memmyMemory.storage.token).toMatch(/^[a-f0-9]{64}$/);
+    expect(existsSync(join(root, ".codex", "skills", "memmy-memory"))).toBe(false);
+  });
+
+  it("preserves an existing authentication token when initialization is repeated", async () => {
+    const root = tempRoot();
+    const configPath = join(root, "config.yaml");
+    writeFileSync(configPath, [
+      "memmyMemory:",
+      "  storage:",
+      "    token: keep-this-token",
+      ""
+    ].join("\n"));
+    createAllAgentRoots(root);
+    setEnv("HOME", root);
+
+    await runCommand({
+      argv: [
+        "init",
+        "--home", root,
+        "--config", configPath,
+        "--db", join(root, "memory.sqlite"),
+        "--skip-agent-skills",
+        "--generate-token-if-missing"
+      ]
+    });
+
+    const saved = YAML.parse(readFileSync(configPath, "utf8"));
+    expect(saved.memmyMemory.storage.token).toBe("keep-this-token");
+  });
+
+  it("uses packaged Hook/plugin integration only after an explicit agent init", async () => {
+    const root = tempRoot();
+    const integrationRoot = join(root, "integration-runtime");
+    const markerPath = join(root, "plugin-installed.json");
+    mkdirSync(join(integrationRoot, "services"), { recursive: true });
+    writeFileSync(join(integrationRoot, "package.json"), JSON.stringify({ type: "module" }));
+    writeFileSync(
+      join(integrationRoot, "services", "builtin-skill-target-registry.js"),
+      [
+        "import { writeFile } from 'node:fs/promises';",
+        "export function createBuiltinSkillTargetRegistry(configPath) {",
+        "  return {",
+        "    get(targetId) {",
+        "      return {",
+        "        async installPlugin(installedTargetId) {",
+        "          await writeFile(process.env.MEMMY_TEST_PLUGIN_MARKER, JSON.stringify({ configPath, targetId, installedTargetId }));",
+        "        }",
+        "      };",
+        "    },",
+        "  };",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    createAllAgentRoots(root);
+    setEnv("HOME", root);
+    setEnv("MEMMY_AGENT_INTEGRATION_ROOT", integrationRoot);
+    setEnv("MEMMY_TEST_PLUGIN_MARKER", markerPath);
+    const configPath = join(root, "config.yaml");
+
+    await runCommand({
+      argv: [
+        "init",
+        "--home", root,
+        "--config", configPath,
+        "--db", join(root, "memory.sqlite"),
+        "--agent", "codex",
+      ],
+    });
+
+    expect(JSON.parse(readFileSync(markerPath, "utf8"))).toEqual({
+      configPath,
+      targetId: "codex",
+      installedTargetId: "codex",
+    });
+  });
+
+  it("does not load packaged agent integrations during installer-style initialization", async () => {
+    const root = tempRoot();
+    setEnv("HOME", root);
+    setEnv("MEMMY_AGENT_INTEGRATION_ROOT", join(root, "missing-integration-runtime"));
+
+    await expect(runCommand({
+      argv: [
+        "init",
+        "--home", root,
+        "--config", join(root, "config.yaml"),
+        "--db", join(root, "memory.sqlite"),
+        "--skip-agent-skills",
+      ],
+    })).resolves.toMatchObject({ ok: true });
+  });
+
   it("renders init results as a human-friendly success message", async () => {
     const root = tempRoot();
     createAllAgentRoots(root);
@@ -599,6 +711,8 @@ function createCliAssets(assetRoot: string): void {
 }
 
 function createAllAgentRoots(root: string): void {
+  setEnv("OPENCODE_CONFIG_DIR", "");
+  setEnv("XDG_CONFIG_HOME", join(root, ".config"));
   mkdirSync(join(root, ".codex"), { recursive: true });
   mkdirSync(join(root, ".cursor"), { recursive: true });
   mkdirSync(join(root, ".claude"), { recursive: true });

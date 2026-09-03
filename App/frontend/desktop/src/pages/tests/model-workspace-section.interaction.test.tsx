@@ -127,14 +127,84 @@ describe("ModelWorkspaceSection BYOK connection deletion", () => {
     expect(bgeModel?.capabilities).toEqual(["embedding"]);
   });
 
-  function renderWorkspace(seedConfig: ModelProviderConfig) {
+  it("shows the built-in embedding option for BYOK without changing labels", () => {
+    renderWorkspace(createSeedConfig(1));
+
+    const embeddingSelect = getAssignmentCombobox("Embedding 检索");
+    expect(embeddingSelect.disabled).toBe(false);
+    expect(embeddingSelect.textContent).toContain("本地 Embedding");
+
+    act(() => embeddingSelect.click());
+    expect(getOption("本地 · Xenova/all-MiniLM-L6-v2")).not.toBeNull();
+  });
+
+  it("does not offer the built-in embedding option in account mode", () => {
+    const seedConfig = createEmbeddingSeedConfig();
+    const presetId = seedConfig.catalog.modelAssignments.byok.embedding!;
+    seedConfig.catalog.modelAssignments.account.embedding = presetId;
+
+    renderWorkspace(seedConfig, "account");
+
+    const embeddingSelect = getAssignmentCombobox("Embedding 检索");
+    expect(embeddingSelect.textContent).toContain("text-embedding-3-small");
+    act(() => embeddingSelect.click());
+    expect(getOption("本地 · Xenova/all-MiniLM-L6-v2")).toBeNull();
+  });
+
+  it("persists the built-in BYOK embedding as a null assignment", async () => {
+    const seedConfig = createEmbeddingSeedConfig();
+    const presetId = seedConfig.catalog.modelAssignments.byok.embedding!;
+    seedConfig.catalog.modelAssignments.account.embedding = presetId;
+    const configClient = {
+      getModelConfig: vi.fn(async () => seedConfig),
+      saveModelCatalog: vi.fn(async () => seedConfig),
+      testModelConfig: vi.fn(async () => ({
+        ok: true,
+        message: "ok",
+        checkedAt: "2026-08-13T00:00:00.000Z"
+      }))
+    };
+
+    await act(async () => {
+      root.render(
+        <I18nProvider language="zh-CN">
+          <ModelWorkspaceSection mode="byok" seedConfig={seedConfig} configClient={configClient} />
+        </I18nProvider>
+      );
+      await Promise.resolve();
+    });
+
+    act(() => getAssignmentCombobox("Embedding 检索").click());
+    const localOption = getOption("本地 · Xenova/all-MiniLM-L6-v2");
+    expect(localOption).not.toBeNull();
+    act(() => localOption!.click());
+
+    await vi.waitFor(() => expect(configClient.saveModelCatalog).toHaveBeenCalledTimes(1));
+    const input = configClient.saveModelCatalog.mock.calls[0]![0];
+    expect(input.modelAssignments.byok.embedding).toBeNull();
+    expect(input.modelAssignments.account.embedding).toBe(presetId);
+  });
+
+  function renderWorkspace(seedConfig: ModelProviderConfig, mode: "byok" | "account" = "byok") {
     act(() => {
       root.render(
         <I18nProvider language="zh-CN">
-          <ModelWorkspaceSection mode="byok" seedConfig={seedConfig} />
+          <ModelWorkspaceSection mode={mode} seedConfig={seedConfig} />
         </I18nProvider>
       );
     });
+  }
+
+  function getAssignmentCombobox(label: string): HTMLButtonElement {
+    const labelNode = [...container.querySelectorAll<HTMLElement>(".model-assignment-label")]
+      .find((node) => node.textContent === label)!;
+    return labelNode.closest("div.flex.items-center.justify-between")!
+      .querySelector<HTMLButtonElement>('[role="combobox"]')!;
+  }
+
+  function getOption(label: string): HTMLButtonElement | null {
+    return [...container.querySelectorAll<HTMLButtonElement>('[role="option"]')]
+      .find((option) => option.textContent?.includes(label)) ?? null;
   }
 
   function getDeleteButtons(): HTMLButtonElement[] {

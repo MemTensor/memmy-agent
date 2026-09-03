@@ -341,6 +341,88 @@ describe("memmy memory config", () => {
     expect(config.evolution.thinkingBudget).toBeUndefined();
   });
 
+  it("uses local embedding for an absent BYOK assignment despite stale custom mode", () => {
+    const root = tempRoot();
+    const configPath = join(root, "config.yaml");
+    writeFileSync(configPath, YAML.stringify({
+      providers: {},
+      modelPresets: {},
+      modelAssignments: {
+        byok: { embedding: null },
+        account: {}
+      },
+      app: { userMode: "byok" },
+      memmyMemory: {
+        embedding: {
+          mode: "custom",
+          endpoint: "https://embedding.example.com/v1",
+          model: "text-embedding-3-small",
+          apiKey: "sk-stale",
+          extraHeaders: { "X-Stale": "true" },
+          extraBody: { dimensions: 1024 }
+        }
+      }
+    }));
+
+    const { config } = loadMemmyConfig(configPath);
+
+    expect(config.embedding).toMatchObject({
+      mode: "local",
+      provider: "local",
+      sourceProvider: "local",
+      model: "Xenova/all-MiniLM-L6-v2"
+    });
+    expect(config.embedding.endpoint).toBeUndefined();
+    expect(config.embedding.apiKey).toBeUndefined();
+    expect(config.embedding.extraHeaders).toBeUndefined();
+    expect(config.embedding.extraBody).toBeUndefined();
+    expect(config.embedding.selectionError).toBeUndefined();
+  });
+
+  it("does not fall back locally for an explicit invalid BYOK embedding assignment", () => {
+    const root = tempRoot();
+    const configPath = join(root, "config.yaml");
+    writeFileSync(configPath, YAML.stringify({
+      providers: {},
+      modelPresets: {},
+      modelAssignments: {
+        byok: { embedding: "missing-embedding-preset" },
+        account: {}
+      },
+      app: { userMode: "byok" },
+      memmyMemory: { embedding: { mode: "local" } }
+    }));
+
+    const { config } = loadMemmyConfig(configPath);
+
+    expect(config.embedding.provider).not.toBe("local");
+    expect(config.embedding.selectionError).toBe("model_selection_unavailable");
+  });
+
+  it.each([
+    ["blank string", "   "],
+    ["number", 42],
+    ["object", { presetId: "missing" }]
+  ])("does not treat an explicit invalid %s assignment as absent", (_label, embeddingAssignment) => {
+    const root = tempRoot();
+    const configPath = join(root, "config.yaml");
+    writeFileSync(configPath, YAML.stringify({
+      providers: {},
+      modelPresets: {},
+      modelAssignments: {
+        byok: { embedding: embeddingAssignment },
+        account: {}
+      },
+      app: { userMode: "byok" },
+      memmyMemory: { embedding: { mode: "local" } }
+    }));
+
+    const { config } = loadMemmyConfig(configPath);
+
+    expect(config.embedding.provider).not.toBe("local");
+    expect(config.embedding.selectionError).toBe("model_selection_unavailable");
+  });
+
   it("rejects a legacy fixed BYOK evolution connection before runtime use", () => {
     const root = tempRoot();
     const configPath = join(root, "config.yaml");

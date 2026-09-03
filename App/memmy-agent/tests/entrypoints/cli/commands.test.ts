@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { Command } from "commander";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import YAML from "yaml";
 import { buildHelpText, builtinCommandPalette } from "../../../src/command/builtin.js";
@@ -32,6 +33,7 @@ import {
   cliRuntimeLogsEnabled,
   deleteOauthFiles,
   gateway,
+  goal,
   isRootInteractiveRequest,
   isRootVersionRequest,
   loadRuntimeConfig,
@@ -42,6 +44,7 @@ import {
   pluginsListRows,
   providerLogin,
   providerLogout,
+  resolveCliActionOptions,
   resolveOauthProvider,
   runInternalCommand,
   serve,
@@ -240,6 +243,34 @@ describe("CLI command helpers", () => {
     expect(help).toContain("-s, --session <sessionId>");
     expect(help).toContain("--standalone");
     expect(help).toContain("--project <path>");
+  });
+
+  it("merges terminal target options parsed by the root command into subcommand options", async () => {
+    const program = new Command("memmy")
+      .option("--project <path>");
+    let resolved: Record<string, any> | null = null;
+    program
+      .command("goal")
+      .option("--message-file <path>")
+      .option("--project <path>")
+      .action((localOpts, actionCommand) => {
+        resolved = resolveCliActionOptions(localOpts, actionCommand);
+      });
+
+    await program.parseAsync([
+      "node",
+      "memmy",
+      "goal",
+      "--message-file",
+      "/tmp/objective.txt",
+      "--project",
+      "/app",
+    ]);
+
+    expect(resolved).toEqual(expect.objectContaining({
+      messageFile: "/tmp/objective.txt",
+      project: "/app",
+    }));
   });
 
   it("stops before the root TUI when startup migrations fail", async () => {
@@ -1256,6 +1287,99 @@ describe("CLI command helpers", () => {
     expect(loop.stop).toHaveBeenCalledTimes(1);
     expect(loop.closeMcp).toHaveBeenCalledTimes(1);
     expect(loop.sessions.flushAll).toHaveBeenCalledTimes(1);
+  });
+
+  it("runs a headless Goal until completion and writes a structured result", async () => {
+    const root = tempRoot();
+    const workspace = path.join(root, "workspace");
+    const output = path.join(root, "result", "goal.json");
+    const configPath = writeConfig(root, {
+      agents: { defaults: { workspace, model: "test-model" } },
+    });
+    const order: string[] = [];
+    let state: any = null;
+    const busMessages: OutboundMessage[] = [];
+    const fakeLoop = {
+      workspace,
+      projectStore: {} as any,
+      guiTranscriptMirror: null,
+      activeTasks: new Map(),
+      sessions: {
+        flushAll: vi.fn(() => 0),
+        pathFor: vi.fn((key: string) => path.join(workspace, "sessions", `${key}.jsonl`)),
+      },
+      resolveTurnModelSelection: vi.fn(() => ({ model: "test-model" })),
+      processDirect: vi.fn(async (content: string) => {
+        order.push("create");
+        state = {
+          goalId: "goal-1",
+          objective: content.slice("/goal create ".length),
+          status: "active",
+          tokenBudget: null,
+          tokensUsed: 0,
+          timeUsedSeconds: 0,
+          createdAt: "2026-08-18T00:00:00.000Z",
+          updatedAt: "2026-08-18T00:00:00.000Z",
+        };
+        return { content: "Goal created." };
+      }),
+      goalRuntime: {
+        get: vi.fn(() => state),
+        setBudget: vi.fn(async (_session: string, _goal: string, budget: number) => {
+          order.push("budget");
+          state = { ...state, tokenBudget: budget };
+          return state;
+        }),
+        flushEffects: vi.fn(async () => undefined),
+        pauseAndCancel: vi.fn(async () => undefined),
+      },
+      run: vi.fn(async () => {
+        order.push("run");
+        state = {
+          ...state,
+          status: "completed",
+          tokensUsed: 321,
+          timeUsedSeconds: 12,
+          updatedAt: "2026-08-18T00:00:12.000Z",
+        };
+        for (const message of busMessages) await (fakeLoop as any).bus.publishOutbound(message);
+      }),
+      stop: vi.fn(),
+      closeMcp: vi.fn(async () => undefined),
+    };
+    vi.spyOn(AgentLoop, "fromConfig").mockImplementation((_config, bus) => {
+      (fakeLoop as any).bus = bus;
+      busMessages.push(new OutboundMessage({
+        channel: "cli",
+        chatId: "direct",
+        content: "Implemented and verified.",
+      }));
+      return fakeLoop as any;
+    });
+
+    const result = await goal({
+      message: "Fix the repository task",
+      tokenBudget: 500,
+      timeout: 5,
+      output,
+      config: configPath,
+    });
+
+    expect(order).toEqual(["create", "budget", "run"]);
+    expect(result).toMatchObject({
+      status: "success",
+      summary: "Implemented and verified.",
+      session_id: "cli:direct",
+      timed_out: false,
+      metrics: { tokens_used: 321, time_used_seconds: 12 },
+    });
+    expect(JSON.parse(fs.readFileSync(output, "utf8"))).toMatchObject({
+      status: "success",
+      goal: { status: "completed", token_budget: 500 },
+    });
+    expect(fakeLoop.stop).toHaveBeenCalledTimes(1);
+    expect(fakeLoop.closeMcp).toHaveBeenCalledTimes(1);
+    expect(fakeLoop.sessions.flushAll).toHaveBeenCalledTimes(1);
   });
 
   it("agent prints a matching CLI restart notice before a direct turn", async () => {

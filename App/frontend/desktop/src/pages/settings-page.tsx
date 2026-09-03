@@ -1,7 +1,7 @@
 /** Settings page for account, model, token usage, and desktop preferences. */
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type Dispatch, type ReactNode } from "react";
 import { Brain, Palette, Rocket, Settings2, Shield, User, Zap, ArrowRight, Bell, ExternalLink, FolderOpen, Gift, Info, KeyRound, LogOut, Wrench, Eye, EyeOff, ChevronDown, ChevronUp, Database, Loader2, CheckCircle2, XCircle, Check, AlertTriangle, Mic, Image as ImageIcon, Copy} from "lucide-react";
-import type { AccountInvitationView, AppSettingsDto, ByokTokenUsageByKind, ByokTokenUsageByModel, ByokTokenUsageCapability, ByokTokenUsageKind, ByokTokenUsageSummary, Language, PrivacySettingsDto, TokenQuotaEligibility, TokenSceneUsageDto, TokenUsageDto } from "@memmy/local-api-contracts";
+import type { AccountInvitationView, AppSettingsDto, ByokTokenUsageByKind, ByokTokenUsageByModel, ByokTokenUsageCapability, ByokTokenUsageKind, ByokTokenUsageSummary, Language, ModelConfigView, PrivacySettingsDto, TokenQuotaEligibility, TokenSceneUsageDto, TokenUsageDto } from "@memmy/local-api-contracts";
 import { useApiClients } from "../app/providers.js";
 import { copyInvitationCode } from "../app/invitation-analytics.js";
 import { resolveGiftTokenUsage } from "../app/routes.js";
@@ -12,7 +12,7 @@ import type { AccountClient } from "../api/account-client.js";
 import type { PluginsClient } from "../api/plugins-client.js";
 import type { ByokTokenUsageClient } from "../api/byok-token-usage-client.js";
 import type { TokenQuotaClient } from "../api/token-quota-client.js";
-import type { ConfigClient } from "../api/config-client.js";
+import type { ConfigClient, ModelProviderConfig } from "../api/config-client.js";
 import {
   readCloseMainWindowAction,
   writeCloseMainWindowAction,
@@ -291,6 +291,44 @@ export interface SettingsPageViewProps {
 /** Returns whether a nickname input key event should save the current draft. */
 export function shouldSaveAccountNicknameOnKeyDown(event: import("react").KeyboardEvent<HTMLInputElement>): boolean {
   return event.key === "Enter" && !isComposingKeyboardEvent(event);
+}
+
+/** Returns whether the canonical catalog still contains a configured BYOK Agent model. */
+export function hasConfiguredByokAgentModel(catalog: ModelConfigView | null | undefined): boolean {
+  return Boolean(catalog?.providers.some((provider) => provider.models.some((model) => (
+    model.source === "byok" && model.capabilities.includes("agent")
+  ))));
+}
+
+/** Reconciles local UI state after the backend account session has already been cleared. */
+export async function finalizeAccountLogout(input: {
+  modelConfig: ModelProviderConfig;
+  configClient?: Pick<ConfigClient, "getModelConfig" | "updateSettings">;
+  dispatch: Dispatch<AppAction>;
+}): Promise<"byok" | "unset"> {
+  let latestModelConfig = input.modelConfig;
+  try {
+    const refreshedModelConfig = await input.configClient?.getModelConfig();
+    if (refreshedModelConfig) {
+      latestModelConfig = refreshedModelConfig;
+      input.dispatch(appActions.modelConfigUpdated(latestModelConfig));
+    }
+  } catch (error) {
+    console.warn("refresh model config after logout failed", error);
+  }
+
+  input.dispatch(appActions.accountCleared());
+  const userMode = hasConfiguredByokAgentModel(latestModelConfig.catalog) ? "byok" : "unset";
+  input.dispatch(appActions.settingsUpdated({ userMode }));
+  try {
+    if (input.configClient) {
+      const savedSettings = await input.configClient.updateSettings({ userMode });
+      input.dispatch(appActions.settingsUpdated(savedSettings));
+    }
+  } catch (error) {
+    console.warn("persist mode after logout failed", error);
+  }
+  return userMode;
 }
 
 /**
@@ -1154,13 +1192,12 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     try {
       await (accountClient?.logout() ?? Promise.resolve({ ok: true as const }));
       track({ name: "account_logout", params: { page_path: "/settings" }, consentTier: "basic" });
-      dispatch(appActions.accountCleared());
-      const canEnterByok = Boolean(state.modelConfig.catalog?.modelAssignments.byok.agent.candidates.length);
-      if (canEnterByok) {
-        dispatch(appActions.settingsUpdated({ userMode: "byok" }));
-        persistSettings({ userMode: "byok" });
-      } else {
-        persistSettings({ userMode: "unset" });
+      const nextUserMode = await finalizeAccountLogout({
+        modelConfig: state.modelConfig,
+        configClient,
+        dispatch
+      });
+      if (nextUserMode === "unset") {
         dispatch(appActions.navigate("/welcome"));
       }
       setConfirm(null);

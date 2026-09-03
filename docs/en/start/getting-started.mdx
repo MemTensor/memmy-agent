@@ -16,6 +16,17 @@ icon: Rocket
 
 ## Quick Setup
 
+For a terminal-only installation on Linux x64 or arm64, install Node.js 22 or newer and make sure a systemd user session is available, then run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MemTensor/memmy-agent/main/scripts/install.sh | bash
+memmy
+```
+
+The installer starts the local Memory Service as `memmy-memory.service`. If no usable model is configured, the first bare `memmy` command opens the existing wizard. After saving, it enables `memmy-gateway.service`, waits for readiness, and continues into the TUI. Both `systemd --user` services stay running when the TUI or terminal exits and start again on later logins; linger is not enabled. The installer launcher also refreshes a private `~/.memmy/systemd/gateway.env` file (mode `0600`) so configuration-referenced credentials and the terminal `PATH` remain available to the persistent Gateway.
+
+Use `systemctl --user status memmy-memory.service` and `systemctl --user status memmy-gateway.service` to inspect them. The installer does not modify external agents. Run `memmy-memory init` or `memmy-memory init --agent <agent>` explicitly to install Memory integration for an agent.
+
 Download and install the Memmy desktop app. On first launch it automatically:
 
 1. Sets `MEMMY_HOME` and `MEMMY_CONFIG`.

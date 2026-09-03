@@ -1,6 +1,30 @@
 /** Account service tests. */
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { createAccountService } from "../account-service.js";
+import { LOCAL_BYOK_ACCOUNT_UUID } from "../../infrastructure/app-state-store/account-context.js";
+import { createAppStateStore } from "../../infrastructure/app-state-store/index.js";
+import {
+  createAccountService as createAccountServiceImplementation,
+  type CreateAccountServiceOptions
+} from "../account-service.js";
+
+type TestAccountServiceOptions = Omit<CreateAccountServiceOptions, "bootstrapRepository"> & {
+  bootstrapRepository?: CreateAccountServiceOptions["bootstrapRepository"];
+};
+
+function createAccountService(options: TestAccountServiceOptions) {
+  const { bootstrapRepository, ...rest } = options;
+  return createAccountServiceImplementation({
+    ...rest,
+    bootstrapRepository: bootstrapRepository ?? {
+      preserveCompletedOnboardingForLocalByok() {
+        return false;
+      }
+    }
+  });
+}
 
 describe("AccountService", () => {
   it("rejects verification channels that are not supported by the desktop package", async () => {
@@ -573,6 +597,16 @@ describe("AccountService", () => {
         },
         clear() {
           calls.push("clear");
+        },
+        clearIfCloudUuid(cloudUuid) {
+          calls.push(`clear-if:${cloudUuid}`);
+          return true;
+        }
+      },
+      bootstrapRepository: {
+        preserveCompletedOnboardingForLocalByok() {
+          calls.push("preserve-onboarding");
+          return true;
         }
       },
       memmyConfigWriter: {
@@ -580,8 +614,10 @@ describe("AccountService", () => {
           calls.push("write-account");
           return projectionResult();
         },
-        async clearAccountModelProjection() {
-          calls.push("clear-account-config");
+        async clearAccountModelProjection(input) {
+          calls.push(
+            `clear-account-config:${input.syncSelectedByokToLocal ?? false}:${input.expectedCloudUuid ?? "none"}`
+          );
           return projectionResult();
         },
         async writeByokModelProjection() {
@@ -599,7 +635,227 @@ describe("AccountService", () => {
     });
 
     await expect(service.logout()).resolves.toEqual({ ok: true });
-    expect(calls).toEqual(["cloud-logout:cloud.login.uuid", "clear-account-config", "clear"]);
+    expect(calls).toEqual([
+      "preserve-onboarding",
+      "cloud-logout:cloud.login.uuid",
+      "clear-account-config:true:cloud.login.uuid",
+      "clear-if:cloud.login.uuid"
+    ]);
+  });
+
+  it("preserves local onboarding before a failed cloud logout and still clears the local session", async () => {
+    const calls: string[] = [];
+    const service = createAccountService({
+      cloudClient: {
+        ...createCloudClientStub(),
+        async logout() {
+          calls.push("cloud-logout");
+          throw new Error("cloud unavailable");
+        }
+      },
+      accountSessionRepository: {
+        ...createAccountSessionRepositoryStub(),
+        getCloudUuid() {
+          return "cloud.login.uuid";
+        },
+        clearIfCloudUuid(cloudUuid) {
+          calls.push(`clear-if:${cloudUuid}`);
+          return true;
+        }
+      },
+      bootstrapRepository: {
+        preserveCompletedOnboardingForLocalByok() {
+          calls.push("preserve-onboarding");
+          return true;
+        }
+      }
+    });
+
+    await expect(service.logout()).resolves.toEqual({ ok: true });
+    expect(calls).toEqual([
+      "preserve-onboarding",
+      "cloud-logout",
+      "clear-if:cloud.login.uuid"
+    ]);
+  });
+
+  it("preserves completed onboarding in the local BYOK scope when logout clears the active account", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "memmy-account-logout-onboarding-"));
+    const databasePath = join(tempDir, "app.sqlite");
+    let store: ReturnType<typeof createAppStateStore> | null = createAppStateStore({ databasePath });
+
+    try {
+      store.repositories.accountSession.upsert({
+        profile: cloudProfile(),
+        uuid: "cloud-account-user-1",
+        cloudUuid: "cloud.login.uuid",
+        isNewUser: false,
+        authChannel: "email"
+      });
+      store.repositories.bootstrap.updateOnboarding({
+        completed: true,
+        currentStep: "completed",
+        hasAcceptedTerms: true,
+        acceptedTermsVersion: "2026-06-01",
+        scanPermission: "scan_only",
+        improvementProgram: "accepted",
+        completedAt: "2026-06-20T12:00:00.000Z"
+      });
+
+      const service = createAccountService({
+        cloudClient: createCloudClientStub(),
+        accountSessionRepository: store.repositories.accountSession,
+        bootstrapRepository: store.repositories.bootstrap
+      });
+
+      await expect(service.logout()).resolves.toEqual({ ok: true });
+      expect(store.repositories.accountSession.get()).toEqual({ authenticated: false });
+      expect(store.repositories.bootstrap.getOnboardingState()).toMatchObject({
+        completed: true,
+        currentStep: "completed",
+        hasAcceptedTerms: true,
+        acceptedTermsVersion: "2026-06-01",
+        scanPermission: "scan_only",
+        improvementProgram: "not_applicable",
+        completedAt: "2026-06-20T12:00:00.000Z"
+      });
+
+      expect(store.repositories.accountSession.activateByCloudUuid("cloud.login.uuid", "email")).toBe(true);
+      expect(store.repositories.bootstrap.getOnboardingState()).toMatchObject({
+        completed: true,
+        currentStep: "completed",
+        improvementProgram: "accepted",
+        completedAt: "2026-06-20T12:00:00.000Z"
+      });
+      expect(store.repositories.bootstrap.preserveCompletedOnboardingForLocalByok()).toBe(false);
+      store.repositories.accountSession.clear();
+
+      store.repositories.bootstrap.updateAppSettings({ userMode: "byok" });
+      store.close();
+      store = null;
+      store = createAppStateStore({ databasePath });
+
+      expect(store.repositories.bootstrap.getAppSettings().userMode).toBe("byok");
+      expect(store.repositories.bootstrap.getOnboardingState()).toMatchObject({
+        completed: true,
+        currentStep: "completed",
+        hasAcceptedTerms: true,
+        acceptedTermsVersion: "2026-06-01",
+        scanPermission: "scan_only",
+        improvementProgram: "not_applicable",
+        completedAt: "2026-06-20T12:00:00.000Z"
+      });
+    } finally {
+      store?.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not promote incomplete account onboarding into the local BYOK scope", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "memmy-account-logout-onboarding-"));
+    const databasePath = join(tempDir, "app.sqlite");
+    const store = createAppStateStore({ databasePath });
+
+    try {
+      store.repositories.accountSession.upsert({
+        profile: cloudProfile(),
+        uuid: "cloud-account-user-1",
+        cloudUuid: "cloud.login.uuid",
+        isNewUser: false,
+        authChannel: "email"
+      });
+      store.repositories.bootstrap.updateOnboarding({
+        completed: false,
+        currentStep: "product_tour_required",
+        improvementProgram: "accepted"
+      });
+      const readLocalByok = () => store.db.prepare(
+        `SELECT has_finished_guide, current_step, has_accepted_terms,
+          accepted_terms_version, improvement_program, completed_at, updated_at
+        FROM account_onboarding_state
+        WHERE uuid = ?`
+      ).get(LOCAL_BYOK_ACCOUNT_UUID);
+      const before = readLocalByok();
+      const service = createAccountService({
+        cloudClient: createCloudClientStub(),
+        accountSessionRepository: store.repositories.accountSession,
+        bootstrapRepository: store.repositories.bootstrap
+      });
+
+      await expect(service.logout()).resolves.toEqual({ ok: true });
+      expect(readLocalByok()).toEqual(before);
+    } finally {
+      store.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not clear a newer account session when an older manual logout finishes late", async () => {
+    const calls: string[] = [];
+    let activeCloudUuid: string | null = "cloud.login.uuid";
+    let releaseLogout: () => void = () => undefined;
+    const logoutGate = new Promise<void>((resolve) => {
+      releaseLogout = resolve;
+    });
+    const service = createAccountService({
+      cloudClient: {
+        ...createCloudClientStub(),
+        async logout() {
+          calls.push("cloud-logout");
+          await logoutGate;
+        }
+      },
+      accountSessionRepository: {
+        ...createAccountSessionRepositoryStub(),
+        getCloudUuid() {
+          return activeCloudUuid;
+        },
+        clearIfCloudUuid(cloudUuid) {
+          calls.push(`clear-if:${cloudUuid}`);
+          if (activeCloudUuid !== cloudUuid) return false;
+          activeCloudUuid = null;
+          return true;
+        }
+      },
+      bootstrapRepository: {
+        preserveCompletedOnboardingForLocalByok() {
+          calls.push("preserve-onboarding");
+          return true;
+        }
+      },
+      memmyConfigWriter: {
+        async writeAccountModelProjection() {
+          return projectionResult();
+        },
+        async clearAccountModelProjection(input) {
+          calls.push(`clear-account-config:${input.expectedCloudUuid ?? "none"}`);
+          return projectionResult();
+        },
+        async writeByokModelProjection() {
+          return projectionResult();
+        },
+        async writeActiveMemoryProfile() {
+          return projectionResult();
+        },
+        async patchChannelConfig() {
+          return undefined;
+        }
+      }
+    });
+
+    const logout = service.logout();
+    await new Promise((resolve) => setImmediate(resolve));
+    activeCloudUuid = "cloud.new.uuid";
+    releaseLogout();
+    await expect(logout).resolves.toEqual({ ok: true });
+
+    expect(activeCloudUuid).toBe("cloud.new.uuid");
+    expect(calls).toEqual([
+      "preserve-onboarding",
+      "cloud-logout",
+      "clear-account-config:cloud.login.uuid",
+      "clear-if:cloud.login.uuid"
+    ]);
   });
 
   it("clears the owner-scoped account projection when cloud authentication expires", async () => {
@@ -635,6 +891,10 @@ describe("AccountService", () => {
         },
         clear() {
           calls.push("clear-session");
+        },
+        clearIfCloudUuid(cloudUuid) {
+          calls.push(`clear-session-if:${cloudUuid}`);
+          return true;
         }
       },
       memmyConfigWriter: {
@@ -642,7 +902,10 @@ describe("AccountService", () => {
           return projectionResult();
         },
         async clearAccountModelProjection(input) {
-          calls.push(`clear-account-config:${input.ownerAccountId ?? "none"}`);
+          calls.push(
+            `clear-account-config:${input.ownerAccountId ?? "none"}:${input.syncSelectedByokToLocal ?? false}`
+            + `:${input.expectedCloudUuid ?? "none"}`
+          );
           return projectionResult();
         },
         async writeByokModelProjection() {
@@ -661,7 +924,10 @@ describe("AccountService", () => {
       message: "session expired",
       code: "unauthorized"
     });
-    expect(calls).toEqual(["clear-account-config:user-1", "clear-session"]);
+    expect(calls).toEqual([
+      "clear-account-config:user-1:false:cloud.login.uuid",
+      "clear-session-if:cloud.login.uuid"
+    ]);
   });
 });
 
@@ -726,6 +992,9 @@ function createAccountSessionRepositoryStub() {
     },
     clear() {
       return undefined;
+    },
+    clearIfCloudUuid() {
+      return true;
     },
     getLastCodeSentAt() {
       return null;

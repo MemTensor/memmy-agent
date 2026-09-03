@@ -1075,6 +1075,7 @@ export class MemmyMemoryConfig extends Base {
   userId = "local-user";
   version?: number;
   storage?: Dict;
+  retrievalLayers?: Array<"L1" | "L2" | "L3" | "Skill">;
   summary?: Dict;
   evolution?: Dict;
   embedding?: Dict;
@@ -1091,6 +1092,12 @@ export class MemmyMemoryConfig extends Base {
     this.userId = options.userId ?? pick(init, ["userId"], this.userId);
     this.version = pick<number | undefined>(init, ["version"], undefined);
     this.storage = pick<Dict | undefined>(init, ["storage"], undefined);
+    const retrievalLayers = pick<unknown>(init, ["retrievalLayers"], undefined);
+    this.retrievalLayers = retrievalLayers === undefined
+      ? undefined
+      : [...new Set(assertStringArray("memmyMemory.retrievalLayers", retrievalLayers).map((layer, index) =>
+          assertOneOf(`memmyMemory.retrievalLayers[${index}]`, layer, ["L1", "L2", "L3", "Skill"] as const)
+        ))];
     this.summary = undefined;
     this.evolution = undefined;
     this.embedding = undefined;
@@ -1103,6 +1110,7 @@ export class MemmyMemoryConfig extends Base {
       userId: this.userId,
       version: this.version,
       storage: this.storage,
+      retrievalLayers: this.retrievalLayers,
       algorithm: this.algorithm,
     });
   }

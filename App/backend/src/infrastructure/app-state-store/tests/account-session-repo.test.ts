@@ -269,6 +269,33 @@ describe("account session repository", () => {
     expect(fabricatedAccount).toBeUndefined();
   });
 
+  it("clears only the session whose cloud uuid is still active", () => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-account-session-"));
+    const store = createAppStateStore({ databasePath: join(tempDir, "app.sqlite") });
+    store.repositories.accountSession.upsert({
+      profile: {
+        userId: "user-1",
+        email: "hello@example.com",
+        phoneNumber: null,
+        nickname: "hello",
+        avatarUrl: null,
+        planType: "free",
+        hasFinishedGuide: false,
+        region: null,
+        registeredAt: null,
+        rawProfile: { id: "user-1" }
+      },
+      uuid: "cloud-account-a",
+      cloudUuid: "cloud.login.uuid.a"
+    });
+
+    expect(store.repositories.accountSession.clearIfCloudUuid("cloud.login.uuid.b")).toBe(false);
+    expect(store.repositories.accountSession.get()).toMatchObject({ authenticated: true });
+    expect(store.repositories.accountSession.clearIfCloudUuid("cloud.login.uuid.a")).toBe(true);
+    expect(store.repositories.accountSession.get()).toEqual({ authenticated: false });
+    store.close();
+  });
+
   it("infers a legacy login channel only from one unambiguous bound contact", () => {
     tempDir = mkdtempSync(join(tmpdir(), "memmy-account-session-"));
     const store = createAppStateStore({ databasePath: join(tempDir, "app.sqlite") });

@@ -156,6 +156,42 @@ describe("desktop route table", () => {
     ).toBe("/api-key");
   });
 
+  it("keeps completed BYOK onboarding on API key setup until an Agent model is configured", () => {
+    const completedByokBootstrap = {
+      ...baseBootstrap,
+      app: { ...baseBootstrap.app, userMode: "byok" as const },
+      onboarding: {
+        ...baseBootstrap.onboarding,
+        completed: true,
+        currentStep: "completed" as const,
+        completedAt: "2026-06-04T00:00:00.000Z"
+      }
+    };
+
+    expect(resolveInitialView({
+      bootstrap: completedByokBootstrap,
+      preferredMode: "full",
+      modelConfig: {
+        catalog: {
+          modelAssignments: {
+            byok: { agent: { candidates: [] } }
+          }
+        }
+      }
+    })).toBe("/api-key");
+    expect(resolveInitialView({
+      bootstrap: completedByokBootstrap,
+      preferredMode: "full",
+      modelConfig: {
+        catalog: {
+          modelAssignments: {
+            byok: { agent: { candidates: ["local-agent"] } }
+          }
+        }
+      }
+    })).toBe("/main");
+  });
+
   it("respects the preferred full or pet mode after onboarding is complete", () => {
     const completedBootstrap = {
       ...baseBootstrap,

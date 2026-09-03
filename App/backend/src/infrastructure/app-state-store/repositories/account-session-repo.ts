@@ -25,6 +25,8 @@ export interface AccountSessionRepository {
   activateByCloudUuid(cloudUuid: string, accountChannel?: AccountChannel): boolean;
   upsert(input: UpsertAccountSessionInput): AccountSessionView;
   clear(): void;
+  /** Clears only when the expected cloud credential still belongs to the active session. */
+  clearIfCloudUuid(cloudUuid: string): boolean;
   getLastCodeSentAt(key: string): string | null;
   markCodeSent(key: string, at: string): void;
 }
@@ -214,6 +216,12 @@ export function createAccountSessionRepository(db: DatabaseSync, secretStore: Se
 
     clear() {
       setActiveAccountUuid(db, null);
+    },
+
+    clearIfCloudUuid(cloudUuid) {
+      if (getCloudUuidFromRow(secretStore, getActiveAccountRow(db)) !== cloudUuid) return false;
+      setActiveAccountUuid(db, null);
+      return true;
     },
 
     getLastCodeSentAt(key) {

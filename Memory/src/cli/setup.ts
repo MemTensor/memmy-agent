@@ -7,6 +7,7 @@ import {
   symlinkSync,
   unlinkSync
 } from "node:fs";
+import crypto from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { asRecord, expandHome, optionalString } from "./config.js";
 import {
@@ -29,6 +30,7 @@ export interface MemoryCliSetupOptions {
   agentRoot?: string;
   assetRoot?: string;
   skipAgentSkills?: boolean;
+  generateTokenIfMissing?: boolean;
 }
 
 export async function initMemoryCli(options: MemoryCliSetupOptions = {}): Promise<Record<string, unknown>> {
@@ -41,7 +43,12 @@ export async function initMemoryCli(options: MemoryCliSetupOptions = {}): Promis
     mkdirSync(home, { recursive: true });
     mkdirSync(dirname(configPath), { recursive: true });
     await mutateRuntimeConfig(configPath, (config) => {
-      setupMemoryConfig(config, { dbPath, endpoint, token: options.token });
+      setupMemoryConfig(config, {
+        dbPath,
+        endpoint,
+        token: options.token,
+        generateTokenIfMissing: options.generateTokenIfMissing,
+      });
     });
   }
 
@@ -57,6 +64,7 @@ export async function initMemoryCli(options: MemoryCliSetupOptions = {}): Promis
     agentInstallations = await installMemmyMemorySkillForAgents(requestedAgents, {
       agentRoot: options.agents?.length ? options.agentRoot : undefined,
       assetRoot: options.assetRoot,
+      memmyConfigPath: configPath,
       dryRun: options.dryRun,
       skipUnavailable: !options.agents?.length
     });
@@ -122,6 +130,7 @@ function setupMemoryConfig(
     dbPath: string;
     endpoint: string;
     token?: string;
+    generateTokenIfMissing?: boolean;
   }
 ): void {
   const app = asRecord(config.app);
@@ -131,7 +140,8 @@ function setupMemoryConfig(
     appUserId,
     dbPath: options.dbPath,
     endpoint: options.endpoint,
-    token: options.token
+    token: options.token,
+    generateTokenIfMissing: options.generateTokenIfMissing,
   });
 }
 
@@ -142,12 +152,17 @@ function setupMemmyMemoryConfig(
     dbPath: string;
     endpoint: string;
     token?: string;
+    generateTokenIfMissing?: boolean;
   }
 ): Record<string, unknown> {
   const roleRouting = asRecord(existing.roleRouting);
   const embedding = asRecord(existing.embedding);
   const storage = asRecord(existing.storage);
   const algorithm = asRecord(existing.algorithm);
+  const existingToken = optionalString(storage.token);
+  const token = options.token
+    ?? existingToken
+    ?? (options.generateTokenIfMissing ? crypto.randomBytes(32).toString("hex") : undefined);
   validateEmbeddingForSetup(embedding);
   const memmyMemory: Record<string, unknown> = {
     ...existing,
@@ -164,7 +179,7 @@ function setupMemmyMemoryConfig(
       backend: "sqlite",
       sqlitePath: options.dbPath,
       endpoint: options.endpoint,
-      ...(options.token !== undefined ? { token: options.token } : {})
+      ...(token !== undefined ? { token } : {})
     },
     algorithm: {
       ...algorithm,

@@ -358,6 +358,29 @@ describe("MemmyMemoryHook", () => {
     expect(hook.currentTurnId("cli:direct")).toBeNull();
   });
 
+  it("forwards an explicit empty retrieval layer selection", async () => {
+    const client = fakeClient();
+    const hook = new MemmyMemoryHook(client as any, {
+      workspace: "/tmp/workspace",
+      retrievalLayers: [],
+    });
+    const spec = {
+      sessionKey: "cli:layer-ablation",
+      turnId: "agent-turn-layer-ablation",
+      workspace: "/tmp/workspace",
+    };
+
+    await hook.beforeRun(new AgentHookContext({
+      spec,
+      messages: [{ role: "user", content: "Run without retrieved memory." }],
+    }));
+
+    expect((client.startTurn as any).mock.calls[0][1]).toMatchObject({
+      layers: [],
+    });
+    expect(hook.lastError).toBeNull();
+  });
+
   it("drops a user-cancelled turn even when partial assistant text exists", async () => {
     const client = fakeClient();
     const hook = new MemmyMemoryHook(client as any, { workspace: "/tmp/workspace" });

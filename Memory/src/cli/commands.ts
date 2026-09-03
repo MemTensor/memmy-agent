@@ -471,6 +471,7 @@ function setupOptions(parsed: ParsedArgs): {
   agentRoot?: string;
   assetRoot?: string;
   skipAgentSkills?: boolean;
+  generateTokenIfMissing?: boolean;
 } {
   return {
     home: optionString(parsed.options, "home"),
@@ -485,7 +486,8 @@ function setupOptions(parsed: ParsedArgs): {
     agents: optionValues(parsed.options, "agent"),
     agentRoot: optionString(parsed.options, "agent-root"),
     assetRoot: optionString(parsed.options, "asset-root"),
-    skipAgentSkills: optionBoolean(parsed.options, "skip-agent-skills")
+    skipAgentSkills: optionBoolean(parsed.options, "skip-agent-skills"),
+    generateTokenIfMissing: optionBoolean(parsed.options, "generate-token-if-missing")
   };
 }
 

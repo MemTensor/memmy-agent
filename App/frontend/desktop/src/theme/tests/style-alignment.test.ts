@@ -276,6 +276,22 @@ describe("prototype style alignment", () => {
     expect(memorySummaryRule).toContain("-webkit-line-clamp: 2;");
   });
 
+  it("keeps the Windows memory refresh action below the native title-bar overlay", () => {
+    const windowsMemoryHeaderRule = globalCss.match(
+      /body\.memmy-platform-windows \.memory-panel__header\s*\{[^}]*\}/
+    )?.[0] ?? "";
+
+    expect(windowsMemoryHeaderRule).toContain("padding-top: var(--codex-toolbar-height);");
+  });
+
+  it("keeps the Windows memory drawer close action below the native title-bar overlay", () => {
+    const windowsMemoryDrawerRule = globalCss.match(
+      /body\.memmy-platform-windows \.memory-drawer\s*\{[^}]*\}/
+    )?.[0] ?? "";
+
+    expect(windowsMemoryDrawerRule).toContain("padding-top: var(--codex-toolbar-height);");
+  });
+
   it("keeps memory drawer IDs selectable inside the window drag area", () => {
     const memoryDrawerBackdropRule = globalCss.match(/\.memory-drawer-backdrop\s*\{[^}]*\}/)?.[0] ?? "";
     const memoryDrawerBackdropCloseRule = globalCss.match(/\.memory-drawer-backdrop__close\s*\{[^}]*\}/)?.[0] ?? "";
