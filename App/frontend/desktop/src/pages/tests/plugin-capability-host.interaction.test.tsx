@@ -216,7 +216,25 @@ describe("PluginCapabilityHost", () => {
       events: [
         { type: "progress", current: 1, total: 2, cancellable: true },
         { type: "interaction", request: { interactionId: "q-2", type: "question", payload: { title: "Sources", multiple: true, options: ["PubMed", "Crossref"] } } },
-        { type: "interaction", request: { interactionId: "files-1", type: "file-input", payload: { title: "Sources", accept: [".pdf"], maxFiles: 2 } } },
+        {
+          type: "interaction",
+          request: {
+            interactionId: "files-1",
+            type: "file-input",
+            payload: {
+              title: "Sources",
+              accept: [".pdf", ".doc"],
+              maxFiles: 2,
+              multiple: true,
+              fileRules: [{
+                extensions: [".doc"],
+                disposition: "blocked",
+                code: "legacy_doc_requires_conversion",
+                message: "Save this legacy .doc file as .docx before importing."
+              }]
+            }
+          }
+        },
         { type: "artifact", artifact: { id: "report", name: "report.md", mediaType: "text/markdown", uri: "https://example.test/report.md" } }
       ]
     };
@@ -243,10 +261,19 @@ describe("PluginCapabilityHost", () => {
     expect(respond).toHaveBeenCalledWith(plugin.id, "call-3", "q-2", ["PubMed"]);
 
     const fileInput = container.querySelector<HTMLInputElement>('input[type="file"]')!;
-    Object.defineProperty(fileInput, "files", { value: [new File(["pdf"], "source.pdf", { type: "application/pdf" })] });
+    Object.defineProperty(fileInput, "files", { value: [
+      new File(["pdf"], "source.pdf", { type: "application/pdf" }),
+      new File(["doc"], "legacy.doc", { type: "application/msword" })
+    ] });
     await act(async () => fileInput.dispatchEvent(new Event("change", { bubbles: true })));
+    expect(container.textContent).toContain("source.pdf");
+    expect(container.textContent).toContain("legacy.doc");
+    expect(container.textContent).toContain("1 ready to import, 1 need attention");
+    expect(container.textContent).toContain("Save this legacy .doc file as .docx before importing.");
     await act(async () => buttons().find((button) => button.textContent === "Upload")?.click());
     expect(uploadFiles).toHaveBeenCalledTimes(1);
+    expect(uploadFiles.mock.calls[0]?.[0]).toHaveLength(1);
+    expect(uploadFiles.mock.calls[0]?.[0]?.[0]?.name).toBe("source.pdf");
     expect(respond).toHaveBeenCalledWith(plugin.id, "call-3", "files-1", { files: expect.any(Array) });
 
     await act(async () => buttons().find((button) => button.textContent === "Add to chat")?.click());

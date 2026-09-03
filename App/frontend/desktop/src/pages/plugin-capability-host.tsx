@@ -311,22 +311,26 @@ function FileInputCard(props: {
   const [files, setFiles] = useState<File[]>([]);
   const [validationError, setValidationError] = useState<string | null>(null);
   const accept = readStrings(payload.accept).join(",");
+  const fileRules = readFileRules(payload.fileRules);
   const maxFiles = positiveInteger(payload.maxFiles) ?? (payload.multiple === true ? null : 1);
   const maxBytes = positiveInteger(payload.maxBytes);
+  const fileStates = files.map((file) => classifyPluginInputFile(file, accept, maxBytes, fileRules, t));
+  const readyFiles = fileStates.filter((item) => item.status === "ready").map((item) => item.file);
   const choose = (event: ChangeEvent<HTMLInputElement>) => {
     const next = Array.from(event.target.files ?? []);
     setFiles(next);
-    setValidationError(validateFiles(next, maxFiles, maxBytes, accept, t));
+    const nextReady = next.filter((file) => classifyPluginInputFile(file, accept, maxBytes, fileRules, t).status === "ready");
+    setValidationError(validateReadyFileCount(nextReady, maxFiles, t));
   };
   const upload = async () => {
-    const error = validateFiles(files, maxFiles, maxBytes, accept, t);
+    const error = validateReadyFileCount(readyFiles, maxFiles, t);
     if (error || !props.onUploadFiles) {
       setValidationError(error ?? t("plugin.ui.responseFailed"));
       return;
     }
     props.onStatus("submitting");
     try {
-      const uploaded = await props.onUploadFiles(files.map((file) => {
+      const uploaded = await props.onUploadFiles(readyFiles.map((file) => {
         const classification = classifyAgentAttachmentFile(file)!;
         return { blob: file, name: file.name, kind: classification.kind, mime: classification.mime };
       }));
@@ -348,9 +352,26 @@ function FileInputCard(props: {
               {t("plugin.ui.chooseFiles")}
               <input className="sr-only" type="file" accept={accept || undefined} multiple={payload.multiple === true} disabled={props.disabled} onChange={choose} />
             </label>
-            <span className="min-w-0 flex-1 truncate text-xs text-text-ink/45">{files.length ? files.map((file) => file.name).join(", ") : t("plugin.ui.noFiles")}</span>
-            <ResponseButton disabled={props.disabled || files.length === 0 || Boolean(validationError) || !props.onUploadFiles} onClick={() => void upload()}>{t("plugin.ui.upload")}</ResponseButton>
+            <span className="min-w-0 flex-1 truncate text-xs text-text-ink/45">
+              {files.length ? t("plugin.ui.filesReadySummary", { ready: readyFiles.length, blocked: files.length - readyFiles.length }) : t("plugin.ui.noFiles")}
+            </span>
+            <ResponseButton disabled={props.disabled || readyFiles.length === 0 || Boolean(validationError) || !props.onUploadFiles} onClick={() => void upload()}>{t("plugin.ui.upload")}</ResponseButton>
           </div>
+          {fileStates.length ? (
+            <ul className="mt-2 space-y-1.5" aria-label={t("plugin.ui.selectedFiles")}>
+              {fileStates.map((item, index) => (
+                <li key={`${item.file.name}:${item.file.size}:${index}`} className={`flex items-start gap-2 rounded-btn border px-2.5 py-2 text-xs ${item.status === "blocked" ? "border-status-error/20 bg-status-error-soft/35 text-text-ink/55" : "border-border-stone/30 bg-background-paper text-text-ink/65"}`}>
+                  {item.status === "blocked" ? <AlertCircle size={14} className="mt-0.5 shrink-0 text-status-error" aria-hidden="true" /> : <Check size={14} className="mt-0.5 shrink-0 text-status-success" aria-hidden="true" />}
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate font-medium">{item.file.name}</span>
+                    <span className={item.status === "blocked" ? "text-status-error" : "text-text-ink/40"} role={item.status === "blocked" ? "alert" : undefined}>
+                      {item.message ?? t("plugin.ui.fileReady")}
+                    </span>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
           {validationError ? <p className="mt-2 text-xs text-status-error" role="alert">{validationError}</p> : null}
           {props.status === "answered" ? <p className="mt-2 text-xs text-status-success" role="status">{t("plugin.ui.answered")}</p> : null}
           {props.status === "error" ? <p className="mt-2 text-xs text-status-error" role="alert">{t("plugin.ui.responseFailed")}</p> : null}
@@ -598,10 +619,45 @@ function positiveInteger(value: unknown): number | null {
   return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null;
 }
 
-function validateFiles(files: File[], maxFiles: number | null, maxBytes: number | null, accept: string, t: ReturnType<typeof useTranslation>["t"]): string | null {
+interface PluginFileRule {
+  extensions: string[];
+  disposition: "blocked";
+  code: string | null;
+  message: string;
+}
+
+function readFileRules(value: unknown): PluginFileRule[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((raw) => {
+    const rule = asRecord(raw);
+    const extensions = readStrings(rule.extensions).map((item) => item.toLowerCase());
+    const message = firstString(rule, ["message"]);
+    if (rule.disposition !== "blocked" || !extensions.length || !message) return [];
+    return [{ extensions, disposition: "blocked" as const, code: firstString(rule, ["code"]), message }];
+  });
+}
+
+function classifyPluginInputFile(
+  file: File,
+  accept: string,
+  maxBytes: number | null,
+  rules: PluginFileRule[],
+  t: ReturnType<typeof useTranslation>["t"]
+): { file: File; status: "ready" | "blocked"; code: string | null; message: string | null } {
+  const name = file.name.toLowerCase();
+  const rule = rules.find((item) => item.extensions.some((extension) => name.endsWith(extension)));
+  if (rule) return { file, status: "blocked", code: rule.code, message: rule.message };
+  if (!matchesAccept(file, accept) || !classifyAgentAttachmentFile(file)) {
+    return { file, status: "blocked", code: "file_unsupported", message: t("plugin.ui.fileUnsupported") };
+  }
+  if (maxBytes && file.size > maxBytes) {
+    return { file, status: "blocked", code: "file_too_large", message: t("plugin.ui.fileTooLarge") };
+  }
+  return { file, status: "ready", code: null, message: null };
+}
+
+function validateReadyFileCount(files: File[], maxFiles: number | null, t: ReturnType<typeof useTranslation>["t"]): string | null {
   if (maxFiles && files.length > maxFiles) return t("plugin.ui.fileCountExceeded");
-  if (maxBytes && files.some((file) => file.size > maxBytes)) return t("plugin.ui.fileTooLarge");
-  if (files.some((file) => !classifyAgentAttachmentFile(file) || !matchesAccept(file, accept))) return t("plugin.ui.fileUnsupported");
   return null;
 }
 
