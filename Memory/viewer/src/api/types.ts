@@ -21,14 +21,14 @@ export type {
   ToolOutcomeDTO,
   TurnInputDTO,
   TurnResultDTO,
-} from "../../../agent-contract/dto";
+} from "../../../agent-contract/dto.js";
 
 export type {
   CoreEvent,
   CoreEventType,
-} from "../../../agent-contract/events";
+} from "../../../agent-contract/events.js";
 
 export type {
   LogRecord,
   LogLevel,
-} from "../../../agent-contract/log-record";
+} from "../../../agent-contract/log-record.js";
