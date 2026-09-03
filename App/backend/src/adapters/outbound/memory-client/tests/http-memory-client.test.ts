@@ -21,6 +21,7 @@ describe("HttpMemoryClient", () => {
       "/api/v1/turns/start",
       "/api/v1/turns/:turnId/complete",
       "/api/v1/memory/search",
+      "/api/v1/models/embedding/infer",
       "/api/v1/memory/add",
       "/api/v1/memory/:id",
       "/api/v1/memory/:id",
@@ -85,6 +86,10 @@ describe("HttpMemoryClient", () => {
     await expect(client.completeTurn(completeTurnInput())).resolves.toMatchObject({ scheduledEvolution: false });
     await expect(client.search(searchInput())).resolves.toEqual({ injectedContext: "" });
     await expect(client.search({ ...searchInput(), verbose: true })).resolves.toMatchObject({ debug: { hits: [] } });
+    await expect(client.embeddingInference?.({ texts: ["query", "document"], role: "document" })).resolves.toEqual({
+      embeddings: [[1, 0], [0, 1]],
+      model: { provider: "local", model: "test-embedding", mode: "local", dimension: 2 }
+    });
     await expect(client.addMemory(addMemoryInput())).resolves.toMatchObject({ id: "memory-1" });
     await expect(client.getMemory({ memoryId: "memory-1" })).resolves.toMatchObject({ item: { id: "memory-1" } });
     await expect(client.deleteMemory({ memoryId: "memory-1", source: "codex" })).resolves.toMatchObject({ status: "deleted" });
@@ -115,6 +120,7 @@ describe("HttpMemoryClient", () => {
       "POST /api/v1/turns/turn-1/complete",
       "POST /api/v1/memory/search",
       "POST /api/v1/memory/search",
+      "POST /api/v1/models/embedding/infer",
       "POST /api/v1/memory/add",
       "GET /api/v1/memory/memory-1",
       "DELETE /api/v1/memory/memory-1",
@@ -414,6 +420,12 @@ function fixtureFor(method: string, path: string, body: unknown): unknown {
   if (method === "POST" && path === "/api/v1/turns/start") return startTurnOutput(body);
   if (method === "POST" && path === "/api/v1/turns/turn-1/complete") return completeTurnOutput();
   if (method === "POST" && path === "/api/v1/memory/search") return searchOutput(body);
+  if (method === "POST" && path === "/api/v1/models/embedding/infer") {
+    return {
+      embeddings: [[1, 0], [0, 1]],
+      model: { provider: "local", model: "test-embedding", mode: "local", dimension: 2 }
+    };
+  }
   if (method === "POST" && path === "/api/v1/memory/add") return addMemoryOutput(body);
   if (method === "GET" && path === "/api/v1/memory/memory-1") return getMemoryOutput();
   if (method === "DELETE" && path === "/api/v1/memory/memory-1") return deleteMemoryOutput();

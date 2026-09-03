@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { randomUUID } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import {
+  EmbeddingInferenceInputSchema,
   L3WorldModelBoundaryRequestSchema,
   L3WorldModelRequestEnvelopeSchema,
   OpenSessionInputSchema
@@ -50,6 +51,7 @@ export const API_ROUTES = [
   "POST /api/v1/turns/start",
   "POST /api/v1/turns/:turnId/complete",
   "POST /api/v1/memory/search",
+  "POST /api/v1/models/embedding/infer",
   "GET /api/v1/memory/recalls/:queryId",
   "POST /api/v1/memory/add",
   "POST /api/v1/memory/processing/status",
@@ -595,6 +597,12 @@ async function routeRequest(
         ),
       (result) => ({ hit_count: hitCountFromSearchResponse(result) }),
     ));
+  }
+
+  if (method === "POST" && path === "/api/v1/models/embedding/infer") {
+    requireMemoryRead(principal);
+    const request = EmbeddingInferenceInputSchema.parse(body);
+    return service.embedTexts(request.texts, request.role);
   }
 
   const recallEvidence = match(path, /^\/api\/v1\/memory\/recalls\/([^/]+)$/);

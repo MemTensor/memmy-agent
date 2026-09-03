@@ -702,6 +702,29 @@ export class MemoryService {
     };
   }
 
+  async embedTexts(
+    texts: string[],
+    role: "query" | "document" = "document"
+  ): Promise<{
+    embeddings: number[][];
+    model: { provider: string; model: string; mode: "cloud" | "local" | "custom"; dimension: number };
+  }> {
+    const embeddings = await this.embedder.embed(texts, role);
+    const dimension = embeddings[0]?.length ?? 0;
+    if (dimension < 1 || embeddings.some((embedding) => embedding.length !== dimension)) {
+      throw new MemoryServiceError("internal", "embedding provider returned inconsistent vector dimensions");
+    }
+    return {
+      embeddings,
+      model: {
+        provider: this.embedder.config.provider,
+        model: this.embedder.config.model || this.embedder.config.provider,
+        mode: this.config.embedding.mode,
+        dimension
+      }
+    };
+  }
+
   reloadConfig(request: MemoryReloadConfigRequest = {}): MemoryReloadConfigResponse {
     const previousConfig = this.config;
     const loader = this.options.configLoader ?? loadMemmyConfig;

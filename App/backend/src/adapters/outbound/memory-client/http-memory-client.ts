@@ -5,6 +5,7 @@ import {
   CloseSessionOutputSchema,
   CompleteTurnOutputSchema,
   DeleteMemoryOutputSchema,
+  EmbeddingInferenceOutputSchema,
   DeletePanelTaskOutputSchema,
   EnqueueImportSummariesOutputSchema,
   GetMemoryOutputSchema,
@@ -156,6 +157,13 @@ export function createHttpMemoryClient(
 
     async search(input, context) {
       return request("POST", "search", SearchOutputSchema, { body: input, context });
+    },
+
+    async embeddingInference(input) {
+      return request("POST", "embeddingInference", EmbeddingInferenceOutputSchema, {
+        body: input,
+        maxRetries: 0
+      });
     },
 
     async addMemory(input, context) {
