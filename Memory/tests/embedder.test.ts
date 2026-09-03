@@ -1,6 +1,7 @@
 import { mkdir, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { get_encoding } from "tiktoken";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_MEMMY_CONFIG } from "../src/config/index.js";
 import { createEmbedder } from "../src/model/embedder.js";
@@ -136,6 +137,56 @@ describe("embedder", () => {
 
     expect(sentInputs.length).toBeGreaterThan(1);
     expect(sentInputs.every((input) => input.length <= 512)).toBe(true);
+  });
+
+  it("uses the conservative token budget for an opaque deployment alias by default", async () => {
+    const sentInputs: string[] = [];
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (_url, init) => {
+      const body = JSON.parse(String(init?.body)) as { input: string[] };
+      sentInputs.push(...body.input);
+      return new Response(JSON.stringify({
+        data: body.input.map(() => ({ embedding: [1, 0] }))
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }));
+    const embedder = createEmbedder({
+      ...DEFAULT_MEMMY_CONFIG.embedding,
+      provider: "openai_compatible",
+      endpoint: "https://api.example.test/v1",
+      model: "production-embedding-deployment",
+      apiKey: "sk-test",
+      cache: false,
+      maxRetries: 0
+    });
+
+    await expect(embedder.embedOne(" memory".repeat(8_001))).resolves.toEqual([1, 0]);
+
+    expect(sentInputs.length).toBeGreaterThan(1);
+    const encoder = get_encoding("cl100k_base");
+    expect(sentInputs.every((input) => encoder.encode(input).length <= 7_500)).toBe(true);
+    expect(sentInputs.join("")).toBe(" memory".repeat(8_001));
+  });
+
+  it("keeps short opaque deployment inputs as text", async () => {
+    let requestInput: unknown;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (_url, init) => {
+      requestInput = (JSON.parse(String(init?.body)) as { input: unknown }).input;
+      return new Response(JSON.stringify({ data: [{ embedding: [1, 0] }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      });
+    }));
+    const embedder = createEmbedder({
+      ...DEFAULT_MEMMY_CONFIG.embedding,
+      provider: "openai_compatible",
+      endpoint: "https://api.example.test/v1",
+      model: "production-embedding-deployment",
+      apiKey: "sk-test",
+      cache: false,
+      maxRetries: 0
+    });
+
+    await expect(embedder.embedOne("short memory")).resolves.toEqual([1, 0]);
+    expect(requestInput).toEqual(["short memory"]);
   });
 
   it("keeps chunked OpenAI embedding request batches below the aggregate token budget", async () => {

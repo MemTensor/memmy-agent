@@ -67,6 +67,7 @@ import { TEAM_SHARING_UI_ENABLED } from "../features";
 import type { TraceDTO } from "../api/types";
 import { displayMemoryId } from "../utils/memory-id";
 import { areAllIdsSelected, toggleIdsInSelection } from "../utils/selection";
+import { pickSummary, usableSummary } from "./memory-summary";
 import {
   loadHubSharingEnabled,
   normalizeShareScope,
@@ -644,16 +645,6 @@ function TraceMemoriesView() {
 
 // ─── helpers ─────────────────────────────────────────────────────────────
 
-function pickSummary(trace: TraceDTO): string {
-  const s = usableSummary(trace.summary);
-  if (s) return s;
-  const u = (trace.userText ?? "").replace(/\s+/g, " ").trim();
-  if (u) return u.length > 180 ? u.slice(0, 177) + "…" : u;
-  const a = (trace.agentText ?? "").replace(/\s+/g, " ").trim();
-  if (a) return a.length > 180 ? a.slice(0, 177) + "…" : a;
-  return "(empty trace)";
-}
-
 function pickGroupSummary(group: MemoryGroup): string {
   const headSummary = usableSummary(group.head.summary);
   if (headSummary) return headSummary;
@@ -665,17 +656,6 @@ function pickGroupSummary(group: MemoryGroup): string {
   }
 
   return pickSummary(group.head);
-}
-
-function usableSummary(summary: string | null | undefined): string {
-  const s = (summary ?? "").trim();
-  if (!s || isPlaceholderSummary(s)) return "";
-  return s;
-}
-
-function isPlaceholderSummary(summary: string): boolean {
-  const s = summary.trim().toLowerCase();
-  return s === "(empty turn)" || s === "(empty trace)" || s === "(empty)";
 }
 
 function detectRole(trace: TraceDTO): "user" | "assistant" | "tool" | "" {

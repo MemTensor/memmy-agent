@@ -228,7 +228,7 @@ class HttpEmbedder implements Embedder {
     const chunkVectors: number[][] = [];
     for (const batch of plan.batches) {
       chunkVectors.push(...await this.requestOpenAiShape(
-        batch.map((chunk) => chunk.tokens),
+        batch.map((chunk) => chunk.input),
         provider,
         url,
         role
