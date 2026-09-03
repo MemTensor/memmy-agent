@@ -133,8 +133,15 @@ export interface CreateBackendServicesOptions {
   accountChannel?: AccountChannel;
 }
 
-/** Minimum network surface for the first-party arXiv literature-review provider. */
-export const DEFAULT_COMMAND_PLUGIN_NETWORK_ALLOWLIST = ["export.arxiv.org", "arxiv.org"] as const;
+/** Exact network surface required by the first-party literature-review Providers. */
+export const DEFAULT_COMMAND_PLUGIN_NETWORK_ALLOWLIST = [
+  "export.arxiv.org",
+  "arxiv.org",
+  "eutils.ncbi.nlm.nih.gov",
+  "pmc.ncbi.nlm.nih.gov",
+  "api.openalex.org",
+  "api.crossref.org"
+] as const;
 
 export function createBackendServices(options: CreateBackendServicesOptions): BackendServices {
   const progressBus = options.progressBus ?? createProgressBus();
