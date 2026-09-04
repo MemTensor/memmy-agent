@@ -69,10 +69,13 @@ describe("memmy-memory CLI setup commands", () => {
           enableMemoryAdd: true,
           enableMemorySearch: true,
           enableQueryRewrite: false
+        },
+        embedding: {
+          mode: "local",
+          provider: "local"
         }
       }
     });
-    expect(saved.memmyMemory).not.toHaveProperty("embedding");
     expect(existsSync(dbPath)).toBe(false);
   });
 
@@ -425,13 +428,52 @@ describe("memmy-memory CLI setup commands", () => {
         enableMemoryAdd: true,
         enableMemorySearch: true,
         enableQueryRewrite: false
+      },
+      embedding: {
+        mode: "local",
+        provider: "local"
       }
     });
-    expect(saved.memmyMemory).not.toHaveProperty("embedding");
     expect(existsSync(dbPath)).toBe(false);
   });
 
-  it("removes obsolete embedding mode markers during setup", async () => {
+  it("preserves the Memmy-configured database and endpoint when no CLI override is given", async () => {
+    const root = tempRoot();
+    const configPath = join(root, "config.yaml");
+    const configuredDbPath = join(root, "existing", "memmy.sqlite");
+    writeFileSync(configPath, YAML.stringify({
+      memmyMemory: {
+        roleRouting: { summary: "fixed", evolution: "fixed" },
+        summary: { provider: "openai_compatible", model: "memmy-model" },
+        storage: {
+          sqlitePath: configuredDbPath,
+          endpoint: "http://127.0.0.1:19999"
+        }
+      }
+    }));
+
+    const result = await runCommand({
+      argv: [
+        "init",
+        "--home", root,
+        "--config", configPath,
+        "--skip-agent-skills"
+      ]
+    }) as Record<string, unknown>;
+
+    expect(result).toMatchObject({
+      dbPath: configuredDbPath,
+      endpoint: "http://127.0.0.1:19999"
+    });
+    const saved = YAML.parse(readFileSync(configPath, "utf8"));
+    expect(saved.memmyMemory.storage).toMatchObject({
+      sqlitePath: configuredDbPath,
+      endpoint: "http://127.0.0.1:19999"
+    });
+    expect(saved.memmyMemory.summary.model).toBe("memmy-model");
+  });
+
+  it("preserves embedding modes during setup", async () => {
     for (const mode of ["cloud", "local", "custom"]) {
       const root = tempRoot();
       const configPath = join(root, "config.yaml");
@@ -453,11 +495,11 @@ describe("memmy-memory CLI setup commands", () => {
       });
 
       const saved = YAML.parse(readFileSync(configPath, "utf8"));
-      expect(saved.memmyMemory).not.toHaveProperty("embedding");
+      expect(saved.memmyMemory.embedding).toEqual({ mode });
     }
   });
 
-  it("rejects legacy embedding connections instead of discarding them during setup", async () => {
+  it("preserves embedding connections during setup", async () => {
     for (const embedding of [
       {
         provider: "openai_compatible",
@@ -476,7 +518,7 @@ describe("memmy-memory CLI setup commands", () => {
       setEnv("HOME", root);
       writeFileSync(configPath, YAML.stringify({ memmyMemory: { embedding } }));
 
-      await expect(runCommand({
+      await runCommand({
         argv: [
           "init",
           "--home", root,
@@ -484,7 +526,9 @@ describe("memmy-memory CLI setup commands", () => {
           "--db", join(root, "memory.sqlite"),
           "--skip-agent-skills"
         ]
-      })).rejects.toThrow("memmyMemory.embedding requires the registered runtime config migration");
+      });
+      const saved = YAML.parse(readFileSync(configPath, "utf8"));
+      expect(saved.memmyMemory.embedding).toEqual(embedding);
     }
   });
 
@@ -666,6 +710,50 @@ describe("memmy-memory CLI setup commands", () => {
     });
     expect(lstatSync(binPath).isSymbolicLink()).toBe(true);
     expect(readlinkSync(binPath)).toBe(source);
+  });
+
+  it("keeps the pre-startup config state when Desktop created defaults before installation", async () => {
+    const root = tempRoot();
+    const configPath = join(root, ".memmy", "config.yaml");
+    const pluginRoot = join(root, ".openclaw", "memos-plugin");
+    const source = join(root, "dist", "src", "cli", "index.js");
+    const binPath = join(root, "bin", "memmy-memory");
+    mkdirSync(dirname(configPath), { recursive: true });
+    mkdirSync(pluginRoot, { recursive: true });
+    mkdirSync(dirname(source), { recursive: true });
+    writeFileSync(configPath, YAML.stringify({ memmyMemory: { storage: {} } }));
+    writeFileSync(join(pluginRoot, "config.yaml"), YAML.stringify({
+      llm: {
+        provider: "openai_compatible",
+        endpoint: "https://plugin.example/v1",
+        model: "plugin-model",
+        apiKey: "plugin-secret"
+      },
+      embedding: { provider: "local" }
+    }));
+    writeFileSync(source, "#!/usr/bin/env node\n", { mode: 0o755 });
+
+    await runCommand({
+      argv: [
+        "install",
+        "--home", join(root, ".memmy"),
+        "--config", configPath,
+        "--source-path", source,
+        "--bin", binPath,
+        "--legacy-root", root,
+        "--config-source", "openclaw",
+        "--memmy-config-preexisting", "false",
+        "--skip-agent-skills"
+      ]
+    });
+
+    const saved = YAML.parse(readFileSync(configPath, "utf8"));
+    expect(saved.memmyMemory).toMatchObject({
+      roleRouting: { summary: "fixed", evolution: "fixed" },
+      summary: { model: "plugin-model", apiKey: "plugin-secret" },
+      evolution: { model: "plugin-model", apiKey: "plugin-secret" },
+      migratedFrom: "openclaw"
+    });
   });
 
   it("does not replace an existing non-memmy-memory binary without force", async () => {

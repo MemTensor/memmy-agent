@@ -13,9 +13,19 @@ import {
 } from "./args.js";
 import { sendRequest, type CliRequest, type CliRequestOptions } from "./http.js";
 import { renderCliOutput } from "./render/index.js";
-import { initMemoryCli, installMemoryCli } from "./setup.js";
+import {
+  initMemoryCli,
+  installMemoryCli,
+  upgradeMemoryCli,
+  type MemoryCliSetupOptions
+} from "./setup.js";
 import { DEFAULT_MEMORY_URL, loadCliMemoryConfig } from "./config.js";
 import { PROJECT_VERSION } from "./project-version.js";
+import {
+  currentInstalledRuntime,
+  startInstalledMemoryService,
+  stopInstalledMemoryService
+} from "./runtime-installer.js";
 
 type Method = "GET" | "POST" | "DELETE";
 const CLI_NAME = "memmy-memory";
@@ -24,6 +34,7 @@ const COMPACT_GET_TOOL_FIELD_CHARS = 1200;
 export interface CommandContext {
   argv: string[];
   fetch?: typeof fetch;
+  stopInstalledService?: (home: string) => Promise<Record<string, unknown>>;
 }
 
 export async function runCommand(context: CommandContext): Promise<unknown> {
@@ -34,7 +45,7 @@ export async function runCommand(context: CommandContext): Promise<unknown> {
   if (hasOption(options, "help") || hasOption(options, "h")) {
     return helpText();
   }
-  if (hasOption(options, "version") || hasOption(options, "v")) {
+  if (words.length === 0 && (hasOption(options, "version") || hasOption(options, "v"))) {
     return PROJECT_VERSION;
   }
   if (words.length === 0 || words[0] === "help") {
@@ -47,6 +58,23 @@ export async function runCommand(context: CommandContext): Promise<unknown> {
 
   if (words[0] === "install") {
     return installMemoryCli(setupOptions(parsed));
+  }
+
+  if (words[0] === "upgrade") {
+    return upgradeMemoryCli(setupOptions(parsed));
+  }
+
+  if (words[0] === "stop") {
+    const home = optionString(options, "home") ?? "~/.memmy";
+    return (context.stopInstalledService ?? stopInstalledMemoryService)(home);
+  }
+
+  if (words[0] === "service") {
+    const home = optionString(options, "home") ?? "~/.memmy";
+    if (words[1] === "start") return startInstalledMemoryService(home);
+    if (words[1] === "stop") return (context.stopInstalledService ?? stopInstalledMemoryService)(home);
+    if (words[1] === "status") return { ok: true, runtime: await currentInstalledRuntime(home) ?? null };
+    throw new Error("service requires start, stop, or status");
   }
 
   if (words[0] === "raw") {
@@ -457,22 +485,11 @@ function withSource(request: CliRequest, parsed: ParsedArgs): CliRequest {
   return { ...request, body };
 }
 
-function setupOptions(parsed: ParsedArgs): {
-  home?: string;
-  configPath?: string;
-  dbPath?: string;
-  endpoint?: string;
-  token?: string;
-  force?: boolean;
-  dryRun?: boolean;
-  binPath?: string;
-  sourcePath?: string;
-  agents?: string[];
-  agentRoot?: string;
-  assetRoot?: string;
-  skipAgentSkills?: boolean;
-  generateTokenIfMissing?: boolean;
-} {
+function setupOptions(parsed: ParsedArgs): MemoryCliSetupOptions {
+  const agents = [
+    ...optionValues(parsed.options, "agent"),
+    ...optionValues(parsed.options, "agents")
+  ];
   return {
     home: optionString(parsed.options, "home"),
     configPath: optionString(parsed.options, "config"),
@@ -483,16 +500,55 @@ function setupOptions(parsed: ParsedArgs): {
     dryRun: optionBoolean(parsed.options, "dry-run"),
     binPath: optionString(parsed.options, "bin") ?? optionString(parsed.options, "bin-path"),
     sourcePath: optionString(parsed.options, "source-path"),
-    agents: optionValues(parsed.options, "agent"),
+    agents,
     agentRoot: optionString(parsed.options, "agent-root"),
     assetRoot: optionString(parsed.options, "asset-root"),
     skipAgentSkills: optionBoolean(parsed.options, "skip-agent-skills"),
-    generateTokenIfMissing: optionBoolean(parsed.options, "generate-token-if-missing")
+    generateTokenIfMissing: optionBoolean(parsed.options, "generate-token-if-missing"),
+    serviceOnly: optionBoolean(parsed.options, "service-only"),
+    version: optionString(parsed.options, "version"),
+    latest: optionBoolean(parsed.options, "latest"),
+    runtimeAsset: optionString(parsed.options, "runtime-asset"),
+    runtimeDirectory: optionString(parsed.options, "runtime-directory"),
+    runtimeSha256: optionString(parsed.options, "runtime-sha256"),
+    releaseManifest: optionString(parsed.options, "release-manifest"),
+    releaseBaseUrl: optionString(parsed.options, "release-base-url"),
+    nodeExecutable: optionString(parsed.options, "node-executable"),
+    preferInstalledCompatible: optionBoolean(parsed.options, "use-compatible-installed"),
+    skipServiceRegistration: optionBoolean(parsed.options, "skip-service-registration"),
+    skipHealthCheck: optionBoolean(parsed.options, "skip-health-check"),
+    healthCheckTimeoutMs: positiveIntegerOption(parsed, "health-check-timeout-ms"),
+    configSource: legacyConfigSource(optionString(parsed.options, "config-source")),
+    legacyRoot: optionString(parsed.options, "legacy-root"),
+    nonInteractive: optionBoolean(parsed.options, "non-interactive"),
+    skipLegacyMigration: optionBoolean(parsed.options, "skip-legacy-migration"),
+    memmyConfigPreexisting: optionBoolean(parsed.options, "memmy-config-preexisting"),
+    userHome: optionString(parsed.options, "user-home"),
+    dshProfile: optionString(parsed.options, "dsh-profile")
   };
 }
 
 function userIdOption(parsed: ParsedArgs): string | undefined {
   return optionString(parsed.options, "user-id") ?? optionString(parsed.options, "user_id");
+}
+
+function legacyConfigSource(value: string | undefined): "openclaw" | "hermes" | undefined {
+  if (value === undefined) return undefined;
+  if (value === "openclaw" || value === "hermes") return value;
+  throw new Error("--config-source must be openclaw or hermes");
+}
+
+function positiveIntegerOption(parsed: ParsedArgs, name: string): number | undefined {
+  if (!hasOption(parsed.options, name)) return undefined;
+  const value = optionString(parsed.options, name);
+  if (value === undefined || !/^\d+$/.test(value)) {
+    throw new Error(`--${name} must be a positive integer`);
+  }
+  const parsedValue = Number(value);
+  if (!Number.isSafeInteger(parsedValue) || parsedValue <= 0) {
+    throw new Error(`--${name} must be a positive integer`);
+  }
+  return parsedValue;
 }
 
 function stringArrayOption(parsed: ParsedArgs, name: string): string[] | undefined {
@@ -540,7 +596,10 @@ function helpText(): string {
     "",
     "Commands:",
     "  init [--agent <agent>]       Initialize CLI config and install agent skills",
-    "  install                      Initialize and create a local memmy-memory symlink",
+    "  install [--service-only]     Install and start the standalone Memory service",
+    "  upgrade [--version <ver>]    Upgrade Memory and installed agent adapters",
+    "  stop                         Stop the background Memory service",
+    "  service start|stop|status    Control the installed user service",
     "  serve                        Explain how to connect to an external Memory service",
     "  health                       Check Memory service health",
     "  reload-config                Reload runtime model config from config.yaml",
@@ -559,6 +618,9 @@ function helpText(): string {
     `  ${CLI_NAME} init --skip-agent-skills`,
     `  ${CLI_NAME} init --agent codex`,
     `  ${CLI_NAME} init --agent codex,cursor,claude`,
+    `  ${CLI_NAME} install --service-only`,
+    `  ${CLI_NAME} install --agents openclaw,hermes`,
+    `  ${CLI_NAME} upgrade`,
     "",
     "Memory examples:",
     `  ${CLI_NAME} health`,
@@ -575,12 +637,14 @@ function helpText(): string {
     "  --user-id <id>               Memory namespace user id",
     "  --source <agent>             Calling agent/source id",
     "  --config <path>              Memmy config path",
+    "  --health-check-timeout-ms <ms> Activation health timeout for Memory install",
     "  --skip-agent-skills          Initialize config without installing agent skills",
+    "  --config-source <agent>      Select openclaw or hermes legacy config",
     "  --help, -h                   Show this help",
     "  --version, -v                Show CLI version",
     "",
     "Supported agents:",
-    "  codex, cursor, claude, opencode, openclaw, hermes",
+    "  codex, cursor, claude, opencode, openclaw, hermes, dsh, workbuddy, pi, qwenwork",
     "",
     `Default URL: ${DEFAULT_MEMORY_URL}`
   ].join("\n");

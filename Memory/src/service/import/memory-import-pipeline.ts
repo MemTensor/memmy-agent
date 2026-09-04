@@ -105,6 +105,13 @@ export function memoryAddImportTrace(request: MemoryAddRequest, at: string): Rec
   };
 }
 
+export function memoryAddQaPair(request: MemoryAddRequest): { query: string; answer: string } | null {
+  const sections = parseMemoryAddSections(request.content);
+  const query = [...sections].reverse().find((section) => section.role === "user")?.text;
+  const answer = [...sections].reverse().find((section) => section.role === "assistant")?.text;
+  return query && answer ? { query, answer } : null;
+}
+
 export function titleFromImportTrace(trace: Record<string, unknown>): string | undefined {
   const userText = stringFromRecord(trace, "user_text");
   const title = userText ? firstLine(userText) : "";

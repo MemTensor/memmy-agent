@@ -8,7 +8,6 @@ import {
   readFileSync,
   readlinkSync,
   rmSync,
-  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -232,6 +231,7 @@ describe("Linux CLI package boundary", () => {
     const installer = readFileSync(installerPath, "utf8");
 
     expect(builder).toContain("App/memmy-agent/dist/main.js");
+    expect(builder).toContain("AgentSourceCore/dist/src/index.js");
     expect(builder).toContain("Memory/dist/src/server/index.js");
     expect(builder).toContain("Memory/dist/src/cli/index.js");
     expect(builder).toContain("builtin-skill-target-registry.js");
@@ -244,7 +244,7 @@ describe("Linux CLI package boundary", () => {
     expect(builder).not.toContain("App/shell/desktop");
     expect(builder).not.toContain("App/frontend/desktop");
     expect(installer).toContain('(cd "$AGENT_DIR" && npm ci --omit=dev');
-    expect(installer).toContain("npm ci --omit=dev --workspace @memmy/memory");
+    expect(installer).toContain("npm ci --omit=dev --workspaces");
     expect(installer).toContain('--home "$MEMMY_HOME_DIR"');
     expect(installer).toContain("--generate-token-if-missing");
     expect(installer).toContain("systemctl --user enable --now memmy-memory.service");
@@ -291,6 +291,7 @@ describe("Linux CLI package boundary", () => {
     const listing = spawnSync("tar", ["-tzf", archive], { encoding: "utf8" });
     expect(listing.status, listing.stderr).toBe(0);
     expect(listing.stdout).toContain("App/memmy-agent/dist/main.js");
+    expect(listing.stdout).toContain("AgentSourceCore/dist/src/index.js");
     expect(listing.stdout).toContain("Memory/dist/src/server/index.js");
     expect(listing.stdout).toContain("Memory/dist/src/cli/index.js");
     expect(listing.stdout).toContain("App/backend/dist/src/services/builtin-skill-target-registry.js");
@@ -322,13 +323,11 @@ describe("Linux CLI package boundary", () => {
       env: cleanNpmLifecycleEnv(),
     });
     expect(installDryRun.status, installDryRun.stderr).toBe(0);
-    const memoryInstallDryRun = spawnSync("npm", [
+    const runtimeInstall = spawnSync("npm", [
       "ci",
       "--omit=dev",
-      "--workspace",
-      "@memmy/memory",
+      "--workspaces",
       "--include-workspace-root=false",
-      "--dry-run",
       "--ignore-scripts",
       "--no-audit",
       "--no-fund",
@@ -337,10 +336,23 @@ describe("Linux CLI package boundary", () => {
       encoding: "utf8",
       env: cleanNpmLifecycleEnv(),
     });
-    expect(memoryInstallDryRun.status, memoryInstallDryRun.stderr).toBe(0);
+    expect(runtimeInstall.status, runtimeInstall.stderr).toBe(0);
+    expect(existsSync(path.join(extracted, "AgentSourceCore", "dist", "src", "index.js"))).toBe(true);
+    expect(existsSync(path.join(extracted, "node_modules", "@memmy", "agent-source-core"))).toBe(true);
 
-    rmSync(path.join(extracted, "node_modules"), { recursive: true, force: true });
-    symlinkSync(path.join(repoRoot, "node_modules"), path.join(extracted, "node_modules"));
+    const migrationModuleUrl = pathToFileURL(path.join(
+      extracted,
+      "Migrations",
+      "dist",
+      "runner.js",
+    )).href;
+    const migrationImport = spawnSync("node", [
+      "--input-type=module",
+      "--eval",
+      `await import(${JSON.stringify(migrationModuleUrl)});`,
+    ], { cwd: extracted, encoding: "utf8" });
+    expect(migrationImport.status, migrationImport.stderr).toBe(0);
+
     const integrationModuleUrl = pathToFileURL(path.join(
       extracted,
       "App",
@@ -439,7 +451,7 @@ describe("Linux one-line installer transaction", () => {
     const beforeFailure = readlinkSync(current);
     const npmFailed = runInstaller(home, release, tools, { MEMMY_FIXTURE_NPM_FAIL: "1" });
     expect(npmFailed.status).not.toBe(0);
-    expect(npmFailed.stderr).toContain("Memory dependency installation failed");
+    expect(npmFailed.stderr).toContain("Memory runtime dependency installation failed");
     expect(readlinkSync(current)).toBe(beforeFailure);
 
     const configPath = path.join(home, ".memmy", "config.yaml");

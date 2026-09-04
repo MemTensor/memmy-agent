@@ -410,7 +410,11 @@ function migrateConfig(config: JsonObject): { changed: boolean; config: JsonObje
 
   const summary = fixedRoleConfig(migratedView, "summary");
   const evolution = fixedRoleConfig(migratedView, "evolution");
-  if (summary) memmyMemory.summary = structuredClone(summary);
+  if (summary) {
+    const migratedSummary = structuredClone(summary);
+    if (migratedSummary.timeoutMs === 45_000) migratedSummary.timeoutMs = 180_000;
+    memmyMemory.summary = migratedSummary;
+  }
   if (evolution) memmyMemory.evolution = structuredClone(evolution);
   memmyMemory.embedding = mergeEmbedding(migratedView);
   migrateUserIds(migrated, memmyMemory, migratedView);

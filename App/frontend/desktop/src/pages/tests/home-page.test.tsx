@@ -24,7 +24,7 @@ import {
   agentChatScopeKey,
   attachmentFilesFromDataTransfer,
   buildComposerCommandDraft,
-  clipboardImageFilesFromDataTransfer,
+  clipboardAttachmentFilesFromDataTransfer,
   dataTransferHasAttachmentFiles,
   hasActiveAgentConversation,
   hydrateAgentThreadInBackground,
@@ -1743,27 +1743,28 @@ describe("HomePage", () => {
     await expect(validateAgentMediaFiles([file("unknown.bin", "", 1024)])).rejects.toThrow("仅支持 PNG、JPG/JPEG、WebP、GIF 图片，以及 PDF、DOCX、XLSX、PPTX 或文本文件");
   });
 
-  it("extracts only image files from pasted clipboard data", () => {
+  it("extracts image and file attachments from pasted clipboard data", () => {
     const pastedImage = file("clipboard.png", "image/png", 1024);
+    const pastedText = file("notes.txt", "text/plain", 1024);
     const fallbackImage = file("fallback.jpg", "image/jpeg", 1024);
-    const textFile = file("notes.txt", "text/plain", 1024);
+    const fallbackPdf = file("fallback.pdf", "application/pdf", 1024);
     const textItem = { kind: "string", type: "text/plain", getAsFile: () => null };
     const imageItem = { kind: "file", type: "image/png", getAsFile: () => pastedImage };
-    const ignoredFileItem = { kind: "file", type: "text/plain", getAsFile: () => textFile };
+    const fileItem = { kind: "file", type: "text/plain", getAsFile: () => pastedText };
 
-    expect(clipboardImageFilesFromDataTransfer({
-      items: [textItem, imageItem, ignoredFileItem],
-      files: [pastedImage, fallbackImage, textFile]
-    })).toEqual([pastedImage]);
-    expect(clipboardImageFilesFromDataTransfer({
-      items: [textItem, ignoredFileItem],
-      files: [fallbackImage, textFile]
-    })).toEqual([fallbackImage]);
-    expect(clipboardImageFilesFromDataTransfer({
-      items: [textItem, ignoredFileItem],
-      files: [textFile]
+    expect(clipboardAttachmentFilesFromDataTransfer({
+      items: [textItem, imageItem, fileItem],
+      files: [fallbackImage, fallbackPdf]
+    })).toEqual([pastedImage, pastedText]);
+    expect(clipboardAttachmentFilesFromDataTransfer({
+      items: [textItem],
+      files: [fallbackImage, fallbackPdf]
+    })).toEqual([fallbackImage, fallbackPdf]);
+    expect(clipboardAttachmentFilesFromDataTransfer({
+      items: [textItem],
+      files: []
     })).toEqual([]);
-    expect(clipboardImageFilesFromDataTransfer(null)).toEqual([]);
+    expect(clipboardAttachmentFilesFromDataTransfer(null)).toEqual([]);
   });
 
   it("does not duplicate copied images exposed through clipboard items and files", () => {
@@ -1771,7 +1772,7 @@ describe("HomePage", () => {
     const fileImage = file("image.png", "image/png", "same-png", 2);
     const imageItem = { kind: "file", type: "image/png", getAsFile: () => itemImage };
 
-    expect(clipboardImageFilesFromDataTransfer({
+    expect(clipboardAttachmentFilesFromDataTransfer({
       items: [imageItem],
       files: [fileImage]
     })).toEqual([itemImage]);
@@ -1797,11 +1798,11 @@ describe("HomePage", () => {
     expect(dataTransferHasAttachmentFiles(null)).toBe(false);
   });
 
-  it("wires pasted images into both composer textareas", () => {
+  it("wires pasted attachments into both composer textareas", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
 
     expect(source).toContain("function handleComposerPaste(event: ClipboardEvent<HTMLTextAreaElement>)");
-    expect(source).toContain("clipboardImageFilesFromDataTransfer(event.clipboardData)");
+    expect(source).toContain("clipboardAttachmentFilesFromDataTransfer(event.clipboardData)");
     expect(source).toContain("event.preventDefault();");
     expect(source).toContain("void attachMediaFilesToScope(chatScopeKey, files);");
     expect(source.match(/onPaste=\{handleComposerPaste\}/g)).toHaveLength(2);

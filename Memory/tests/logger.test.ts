@@ -26,7 +26,7 @@ describe("Memory structured logger", () => {
     expect(record).toEqual({
       timestamp: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
       level: "info",
-      message: expect.stringContaining("[skill.crystallize] 任务成功，jobId=job-1")
+      message: expect.stringContaining("[skill.crystallize] Job succeeded, jobId=job-1")
     });
     expect(Object.keys(record)).toEqual(["timestamp", "level", "message"]);
   });
@@ -75,5 +75,66 @@ describe("Memory structured logger", () => {
     expect(line).toContain("primaryModel=memory_summary");
     expect(line).toContain("fallbackModel=memory_evolution");
     expect(line).toContain("HTTP 405");
+  });
+
+  it("uses English for built-in log messages", () => {
+    process.env.MEMMY_LOG_LEVEL = "debug";
+    const stdoutWrite = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const events: Array<[string, string]> = [
+      ["embedding", "request.started"],
+      ["llm", "request.started"],
+      ["http", "request.succeeded"],
+      ["embedding", "request.succeeded"],
+      ["llm", "request.succeeded"],
+      ["model-http", "request.retry_scheduled"],
+      ["http", "request.rejected"],
+      ["llm", "request.rejected"],
+      ["http", "request.failed"],
+      ["embedding", "request.failed"],
+      ["model-http", "request.failed"],
+      ["llm", "request.failed"],
+      ["llm", "json.truncated_retry"],
+      ["llm", "json.malformed_retry"],
+      ["llm", "json.recovered"],
+      ["llm", "json.failed"],
+      ["worker", "job.started"],
+      ["worker", "job.succeeded"],
+      ["worker", "job.failed"],
+      ["worker", "embedding_retry.succeeded"],
+      ["worker", "embedding_retry.retry_scheduled"],
+      ["worker", "embedding_retry.failed"],
+      ["worker", "drain.completed"],
+      ["worker", "drain.failed"],
+      ["worker", "startup.reconciliation_failed"],
+      ["pipeline", "generation.skipped"],
+      ["pipeline", "gate.skipped"],
+      ["pipeline", "fallback.used"],
+      ["pipeline", "summary.fallback_started"],
+      ["pipeline", "summary.fallback_succeeded"],
+      ["pipeline", "summary.fallback_failed"],
+      ["pipeline", "batch_window.failed"],
+      ["memory-service", "initialized"],
+      ["memory-service", "config.reloaded"],
+      ["memory-service", "service.starting"],
+      ["memory-service", "service.listening"],
+      ["memory-service", "service.fatal"],
+      ["memory-service", "config.endpoint_write_failed"]
+    ];
+
+    for (const [component, event] of events) {
+      createMemoryLogger(component).info(event, {
+        attempt: 1,
+        delayMs: 100,
+        errorMessage: "test error",
+        path: "/health",
+        status: 200
+      });
+    }
+
+    const output = stdoutWrite.mock.calls.map(([line]) => String(line)).join("");
+    expect(output).toContain("HTTP request succeeded");
+    expect(output).toContain("HTTP request rejected");
+    expect(output).toContain("HTTP request failed");
+    expect(output).not.toMatch(/[\u3400-\u9fff]/u);
   });
 });

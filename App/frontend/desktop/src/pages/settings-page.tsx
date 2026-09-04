@@ -74,6 +74,7 @@ import {
   createTestModelConnectionMessages,
   createMemmyMemoryProviderConfig,
   createModelFormValues,
+  modelFormValuesAsPrimary,
   createModelProtocolPatch,
   hydrateModelConfigForm,
   fromProtocol,
@@ -350,6 +351,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const { t, language } = useTranslation();
   const bootstrap = state.bootstrap;
   const [launchAtLogin, setLaunchAtLogin] = useState(false);
+  const launchAtLoginRequestVersion = useRef(0);
   const [closeAction, setCloseAction] = useState<CloseMainWindowAction>(() => {
     return readCloseMainWindowAction(typeof window === "undefined" ? undefined : window.localStorage);
   });
@@ -461,6 +463,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const registeredAtText = formatRegisteredAt(state.account.registeredAt, t);
   const defaultLaunchMode = appSettings?.defaultLaunchMode ?? state.navigation.preferredMode ?? "last";
   const autoUpdateEnabled = appSettings?.autoUpdateEnabled ?? true;
+  const stopMemoryServiceOnExit = appSettings?.stopMemoryServiceOnExit ?? false;
   const taskDoneNotificationEnabled = appSettings?.taskDoneNotificationEnabled ?? true;
   const notificationSoundEnabled = appSettings?.notificationSoundEnabled ?? true;
   const improvementPlan = privacySettings?.allowMemoryImprovementUpload ?? false;
@@ -513,8 +516,11 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     apiKeyMasked,
     configured: Boolean(apiKey.trim() || apiKeyMasked)
   };
-  const memoryModelFormValues = createModelFormValues(memoryModel, primaryModelValues);
   const skillModelFormValues = createModelFormValues(skillModel, primaryModelValues);
+  const memoryModelFormValues = createModelFormValues(
+    memoryModel,
+    modelFormValuesAsPrimary(skillModelFormValues)
+  );
   const embTestKey = createModelConfigValidationKey(embFormValues);
   const isEmbeddingTestStale = Boolean(embValidation.testedKey && embValidation.testedKey !== embTestKey);
   const asrFormValues = createAsrModelFormValues(asrModelId, asrEndpoint, asrApiKey, asrApiKeyMasked);
@@ -694,26 +700,40 @@ export function SettingsPageView(props: SettingsPageViewProps) {
       };
     }
 
-    setByokUsageStatus("loading");
-    void byokTokenUsageClient.getSummary().then((summary) => {
-      if (cancelled) {
-        return;
-      }
-      setByokUsage(summary);
-      setByokUsageStatus("ready");
-    }).catch((error) => {
-      console.warn("load byok token usage failed", error);
-      if (cancelled) {
-        return;
-      }
-      setByokUsage(EMPTY_BYOK_TOKEN_USAGE);
-      setByokUsageStatus("error");
-    });
+    if (activeTab !== "tokens") {
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    let requestVersion = 0;
+    const refreshByokUsage = () => {
+      const currentRequestVersion = ++requestVersion;
+      setByokUsageStatus("loading");
+      void byokTokenUsageClient.getSummary().then((summary) => {
+        if (cancelled || currentRequestVersion !== requestVersion) {
+          return;
+        }
+        setByokUsage(summary);
+        setByokUsageStatus("ready");
+      }).catch((error) => {
+        console.warn("load byok token usage failed", error);
+        if (cancelled || currentRequestVersion !== requestVersion) {
+          return;
+        }
+        setByokUsage(EMPTY_BYOK_TOKEN_USAGE);
+        setByokUsageStatus("error");
+      });
+    };
+
+    refreshByokUsage();
+    window.addEventListener("focus", refreshByokUsage);
 
     return () => {
       cancelled = true;
+      window.removeEventListener("focus", refreshByokUsage);
     };
-  }, [byokTokenUsageClient]);
+  }, [activeTab, byokTokenUsageClient]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -764,6 +784,30 @@ export function SettingsPageView(props: SettingsPageViewProps) {
       setMenuBarIcon(persistedMenuBarIconEnabled);
     }
   }, [persistedMenuBarIconEnabled]);
+
+  useEffect(() => {
+    if (platform !== "win32" || typeof window === "undefined") {
+      return;
+    }
+
+    const getLaunchAtLogin = window.memmy?.getLaunchAtLogin;
+    if (!getLaunchAtLogin) {
+      return;
+    }
+
+    let cancelled = false;
+    const requestVersion = ++launchAtLoginRequestVersion.current;
+    void getLaunchAtLogin().then((enabled) => {
+      if (!cancelled && launchAtLoginRequestVersion.current === requestVersion) {
+        setLaunchAtLogin(enabled);
+      }
+    }).catch((error) => {
+      console.warn("read Windows launch-at-login state failed", error);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [platform]);
 
   // On mount, treat the log level persisted by the main process as authoritative, to avoid the local localStorage diverging from the main process.
   useEffect(() => {
@@ -843,6 +887,30 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   }
 
   /**
+   * Updates the Windows login item while preserving the existing local interaction on other platforms.
+   */
+  function handleLaunchAtLoginChange(enabled: boolean) {
+    if (platform !== "win32" || typeof window === "undefined" || !window.memmy?.setLaunchAtLogin) {
+      setLaunchAtLogin(enabled);
+      return;
+    }
+
+    const previous = launchAtLogin;
+    const requestVersion = ++launchAtLoginRequestVersion.current;
+    setLaunchAtLogin(enabled);
+    void window.memmy.setLaunchAtLogin(enabled).then((effectiveEnabled) => {
+      if (launchAtLoginRequestVersion.current === requestVersion) {
+        setLaunchAtLogin(effectiveEnabled);
+      }
+    }).catch((error) => {
+      console.warn("update Windows launch-at-login state failed", error);
+      if (launchAtLoginRequestVersion.current === requestVersion) {
+        setLaunchAtLogin(previous);
+      }
+    });
+  }
+
+  /**
    * Toggles the macOS status bar icon.
    *
    * @param enabled Whether to show the status bar icon.
@@ -917,7 +985,10 @@ export function SettingsPageView(props: SettingsPageViewProps) {
    * @param patch The model-state patch function.
    */
   function testModelConfigConnection(config: ModelConfig, patch: (patch: Partial<ModelConfig>) => void, secretTarget: "memory" | "skill") {
-    const values = createModelFormValues(config, primaryModelValues);
+    const inheritedModel = secretTarget === "memory"
+      ? modelFormValuesAsPrimary(skillModelFormValues)
+      : primaryModelValues;
+    const values = createModelFormValues(config, inheritedModel);
     testModelConnection({
       configClient,
       values,
@@ -1412,6 +1483,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
             platformUsage={tokenUsage}
             byokUsage={byokUsage}
             byokUsageStatus={byokUsageStatus}
+            modelCatalog={state.modelConfig.catalog}
           />
         </div>
 
@@ -1521,7 +1593,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
 
         <Section icon={<Rocket size={16} className="text-text-ink/60" />} title={t("settings.window")} sectionId="pet-avatar">
           <div className="space-y-1">
-            <ToggleRow label={t("settings.window.launchAtLogin")} description={t("settings.window.launchAtLoginDesc")} checked={launchAtLogin} onChange={setLaunchAtLogin} />
+            <ToggleRow label={t("settings.window.launchAtLogin")} description={t("settings.window.launchAtLoginDesc")} checked={launchAtLogin} onChange={handleLaunchAtLoginChange} />
             <Divider />
             <SelectRow
               label={t("settings.preferredMode")}
@@ -1552,6 +1624,13 @@ export function SettingsPageView(props: SettingsPageViewProps) {
               description={t(platform === "win32" ? "settings.window.menuBarIconDescWindows" : "settings.window.menuBarIconDesc")}
               checked={menuBarIcon}
               onChange={handleMenuBarIconChange}
+            />
+            <Divider />
+            <ToggleRow
+              label={t("settings.window.stopMemoryOnExit")}
+              description={t("settings.window.stopMemoryOnExitDesc")}
+              checked={stopMemoryServiceOnExit}
+              onChange={(checked) => persistSettings({ stopMemoryServiceOnExit: checked })}
             />
           </div>
         </Section>
@@ -1767,6 +1846,7 @@ export interface UsageDetailsProps {
   platformUsage: TokenUsageDto;
   byokUsage: ByokTokenUsageSummary;
   byokUsageStatus: UsageLoadStatus;
+  modelCatalog?: ModelConfigView;
 }
 
 /**
@@ -1786,31 +1866,61 @@ export function UsageDetails(props: UsageDetailsProps) {
   const byokUsageByKind = TOKEN_USAGE_SCENES.map((kind) => (
     props.byokUsage.byKind.find((usage) => usage.kind === kind) ?? emptyByokUsage(kind)
   ));
+  const classifiedByokModels = props.byokUsage.byModel.filter(isClassifiedByokUsageModel);
   const selectedUsageModelKey = selectedUsageModelId === "all"
-    || props.byokUsage.byModel.some((usage) => byokUsageModelKey(usage) === selectedUsageModelId)
+    || classifiedByokModels.some((usage) => byokUsageModelKey(usage) === selectedUsageModelId)
     ? selectedUsageModelId
     : "all";
+  const uniqueByokModels = new Map<string, ByokTokenUsageByModel>();
+  for (const usage of classifiedByokModels) {
+    const value = byokUsageModelKey(usage);
+    if (!uniqueByokModels.has(value)) {
+      uniqueByokModels.set(value, usage);
+    }
+  }
+  const modelLabelCounts = new Map<string, number>();
+  for (const usage of uniqueByokModels.values()) {
+    const label = byokUsageModelLabel(usage);
+    modelLabelCounts.set(label, (modelLabelCounts.get(label) ?? 0) + 1);
+  }
+  const discriminatorCounts = new Map<string, number>();
+  for (const usage of uniqueByokModels.values()) {
+    const label = byokUsageModelLabel(usage);
+    if (modelLabelCounts.get(label) === 1) continue;
+    const discriminator = byokUsageModelDiscriminator(usage, props.modelCatalog);
+    const collisionKey = JSON.stringify([label, discriminator]);
+    discriminatorCounts.set(collisionKey, (discriminatorCounts.get(collisionKey) ?? 0) + 1);
+  }
   const byokUsageModelOptions: SelectOption[] = [
     {
       value: "all",
       label: t("settings.token.allModels"),
       selectedLabel: t("settings.token.allModels")
     },
-    ...props.byokUsage.byModel.map((usage) => ({
-      value: byokUsageModelKey(usage),
-      label: byokUsageModelLabel(usage, t),
-      selectedLabel: usage.model ?? t("settings.token.historicalUnclassified")
-    }))
+    ...[...uniqueByokModels.entries()].map(([value, usage]) => {
+      const label = byokUsageModelLabel(usage);
+      const baseDiscriminator = modelLabelCounts.get(label) === 1
+        ? null
+        : byokUsageModelDiscriminator(usage, props.modelCatalog);
+      const discriminator = baseDiscriminator
+        && discriminatorCounts.get(JSON.stringify([label, baseDiscriminator])) !== 1
+        ? `${baseDiscriminator} · ${usage.presetId}`
+        : baseDiscriminator;
+      return {
+        value,
+        label: discriminator ? `${label} · ${discriminator}` : label,
+        selectedLabel: discriminator ? `${usage.model} · ${discriminator}` : usage.model ?? ""
+      };
+    })
   ];
-  const displayedByokModels = selectedUsageModelKey === "all"
-    ? props.byokUsage.byModel
-    : props.byokUsage.byModel.filter((usage) => byokUsageModelKey(usage) === selectedUsageModelKey);
+  const selectedByokModels = classifiedByokModels
+    .filter((usage) => byokUsageModelKey(usage) === selectedUsageModelKey);
   const displayedByokUsage = selectedUsageModelKey === "all"
     ? byokUsageByKind
-    : summarizeByokModelsByKind(displayedByokModels);
+    : summarizeByokModelsByKind(selectedByokModels);
   const displayedByokSummary = selectedUsageModelKey === "all"
     ? props.byokUsage
-    : summarizeByokModels(displayedByokModels);
+    : summarizeByokModels(selectedByokModels);
   const showPlatform = props.showPlatform && platformScenes.length > 0;
   // Sum the Cloud/Nacos scene budgets — same additive total the exhausted modal
   // uses — so the section heading mirrors the rows below it.
@@ -1907,21 +2017,6 @@ export function UsageDetails(props: UsageDetailsProps) {
                   {t("settings.token.modelBreakdownPending")}
                 </p>
               )}
-              {displayedByokModels.length > 0 && (
-                <>
-                  <div className={usageStyles.byokPurposeTitle}>
-                    {t("settings.token.byModel")}
-                  </div>
-                  <div className={usageStyles.byokPurposeRows}>
-                    {displayedByokModels.map((usage) => (
-                      <ByokModelUsageRow key={byokUsageModelKey(usage)} usage={usage} />
-                    ))}
-                  </div>
-                </>
-              )}
-              <div className={usageStyles.byokPurposeTitle}>
-                {t("settings.token.byPurpose")}
-              </div>
               <div className={usageStyles.byokPurposeRows}>
                 {displayedByokUsage.map((usage) => (
                   <ByokUsageRow
@@ -2003,14 +2098,22 @@ function emptyByokUsage(kind: ByokTokenUsageKind): ByokTokenUsageByKind {
 }
 
 function byokUsageModelKey(usage: ByokTokenUsageByModel): string {
-  return JSON.stringify([usage.presetId, usage.provider, usage.model, usage.capability]);
+  return JSON.stringify([usage.presetId, usage.provider, usage.model]);
 }
 
-function byokUsageModelLabel(usage: ByokTokenUsageByModel, t: SettingsTranslate): string {
-  if (!usage.provider || !usage.model || !usage.capability) {
-    return t("settings.token.historicalUnclassified");
-  }
-  return `${usage.provider} · ${usage.model} · ${usageSceneMeta(capabilityToUsageKind(usage.capability), t).label}`;
+function isClassifiedByokUsageModel(usage: ByokTokenUsageByModel): boolean {
+  return Boolean(usage.presetId && usage.provider && usage.model && usage.capability);
+}
+
+function byokUsageModelLabel(usage: ByokTokenUsageByModel): string {
+  return `${usage.provider} · ${usage.model}`;
+}
+
+function byokUsageModelDiscriminator(usage: ByokTokenUsageByModel, catalog?: ModelConfigView): string {
+  const provider = catalog?.providers.find((item) => item.provider === usage.provider);
+  const preset = provider?.models.find((item) => item.presetId === usage.presetId);
+  const endpoint = provider?.endpoints.find((item) => item.endpointId === preset?.endpointId);
+  return endpoint?.apiBase ?? usage.presetId ?? "";
 }
 
 function capabilityToUsageKind(capability: ByokTokenUsageCapability): ByokTokenUsageKind {
@@ -2125,27 +2228,6 @@ function ByokUsageRow(props: {
       <div className={usageStyles.byokUsageValue}>
         <strong>{props.breakdownUnavailable ? "—" : formatCompactTokenCount(props.usage.totalTokens)}</strong>
         {!props.breakdownUnavailable && <em>Token</em>}
-      </div>
-    </article>
-  );
-}
-
-function ByokModelUsageRow(props: { usage: ByokTokenUsageByModel }) {
-  const { t } = useTranslation();
-  const classified = Boolean(props.usage.provider && props.usage.model && props.usage.capability);
-  const purpose = props.usage.capability
-    ? usageSceneMeta(capabilityToUsageKind(props.usage.capability), t).label
-    : t("settings.token.historicalUnclassifiedHint");
-
-  return (
-    <article className={usageStyles.byokUsageRow} data-testid="byok-model-usage-row">
-      <div className={usageStyles.compactScene}>
-        <h3>{classified ? props.usage.model : t("settings.token.historicalUnclassified")}</h3>
-        <p>{classified ? `${props.usage.provider} · ${purpose}` : purpose}</p>
-      </div>
-      <div className={usageStyles.byokUsageValue}>
-        <strong>{formatCompactTokenCount(props.usage.totalTokens)}</strong>
-        <em>Token</em>
       </div>
     </article>
   );

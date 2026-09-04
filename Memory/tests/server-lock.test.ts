@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { acquireSqliteServerLock } from "../src/server/index.js";
+import { acquireSqliteServerLock, assertLoopbackBindHost } from "../src/server/index.js";
 
 const roots: string[] = [];
 
@@ -13,6 +13,13 @@ afterEach(() => {
 });
 
 describe("Memory server sqlite lock", () => {
+  it("allows only loopback bind hosts", () => {
+    expect(() => assertLoopbackBindHost("127.0.0.1")).not.toThrow();
+    expect(() => assertLoopbackBindHost("::1")).not.toThrow();
+    expect(() => assertLoopbackBindHost("localhost")).not.toThrow();
+    expect(() => assertLoopbackBindHost("0.0.0.0")).toThrow("loopback address");
+  });
+
   it("rejects a second live server for the same sqlite path", () => {
     const root = mkdtempSync(join(tmpdir(), "mindock-memory-server-lock-"));
     roots.push(root);

@@ -2,7 +2,7 @@ import { mutateRuntimeConfig } from "@memmy/migrations";
 import type { AgentGatewayStartupIssue } from "@memmy/local-api-contracts";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { mkdir, readdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -12,6 +12,7 @@ import type { LogLevel } from "./log-level.js";
 
 const LOCAL_HOST = "127.0.0.1";
 const DEFAULT_MEMORY_URL = "http://127.0.0.1:18960";
+const SUPPORTED_MEMORY_PROTOCOL_VERSION = 1;
 const DEFAULT_AGENT_GATEWAY_HEALTH_PORT = 18970;
 const DEFAULT_AGENT_WEBSOCKET_PORT = 18980;
 const STARTUP_TIMEOUT_MS = 30_000;
@@ -39,8 +40,8 @@ export interface ManagedRuntimeServices {
     startupIssue?: AgentGatewayStartupIssue;
   };
   restartMemory(): Promise<void>;
-  close(): Promise<void>;
-  terminateSync(): void;
+  close(options?: { stopMemory?: boolean }): Promise<void>;
+  terminateSync(options?: { stopMemory?: boolean }): void;
 }
 
 export interface StartPackagedRuntimeServicesOptions {
@@ -56,6 +57,8 @@ export interface StartManagedRuntimeServicesOptions extends StartPackagedRuntime
   runtimeExecutable?: string;
   /** Runs after migrations/config preparation and before any managed child starts. */
   beforeStartServices?: (input: { databasePath: string; configPath: string }) => Promise<void>;
+  /** Unpacked Memory runtime shipped as an offline Desktop resource. */
+  offlineMemoryRuntimeDirectory?: string;
 }
 
 export type PackagedRuntimeServices = ManagedRuntimeServices;
@@ -95,6 +98,7 @@ export interface ManagedChild {
   stderrTail: string[];
   exitDescription: string | null;
   logWriter: RotatingWriter | null;
+  persistOnDesktopExit?: boolean;
 }
 
 export interface PackagedBrowserPreparation {
@@ -107,6 +111,7 @@ interface ServiceLogOptions {
   logLevel: LogLevel;
   ipc?: boolean;
   executablePath?: string;
+  persistOnDesktopExit?: boolean;
 }
 
 const DAEMON_LOG_MAX_SIZE = 5 * 1024 * 1024;
@@ -114,6 +119,8 @@ const DAEMON_LOG_MAX_SIZE = 5 * 1024 * 1024;
 const DAEMON_LOG_MAX_FILES = 5;
 const AGENT_GATEWAY_RESTART_DELAYS_MS = [250, 1_000, 2_000, 5_000, 10_000] as const;
 const AGENT_GATEWAY_STABLE_MS = 30_000;
+const DESKTOP_MANAGED_MEMORY_ENV = "MEMMY_DESKTOP_MANAGED_MEMORY";
+const MEMORY_RESTART_IPC_TYPE = "memmy-memory:restart";
 const DESKTOP_MANAGED_GATEWAY_ENV = "MEMMY_DESKTOP_MANAGED_GATEWAY";
 const BROWSER_PREPARATION_ATTEMPT_ID_ENV = "MEMMY_BROWSER_PREPARATION_ATTEMPT_ID";
 const MANAGED_RESTART_IPC_TYPE = "memmy-agent:restart";
@@ -157,6 +164,7 @@ export async function startManagedRuntimeServices(
 ): Promise<ManagedRuntimeServices> {
   const entries = resolveRuntimeEntryPaths(options);
   const migrationTargets = await resolvePackagedRuntimeMigrationTargets();
+  const memmyConfigPreexisting = existsSync(migrationTargets.configPath);
   await runPackagedMigrationCommand({
     agentEntry: entries.agentEntry,
     configPath: migrationTargets.configPath,
@@ -187,6 +195,29 @@ export async function startManagedRuntimeServices(
   let browserPreparation: PackagedBrowserPreparation | null = null;
   let closing = false;
 
+  async function restartMemoryRuntime(): Promise<void> {
+    if (closing) throw new Error("Memmy is shutting down");
+    await memoryStartup;
+    if (closing) throw new Error("Memmy is shutting down");
+    if (!memoryRestart) {
+      memoryRestart = restartManagedMemoryService(
+        entries,
+        runtimeConfig,
+        children,
+        options,
+        requestMemoryRestart
+      ).finally(() => {
+        memoryRestart = null;
+      });
+    }
+    await memoryRestart;
+  }
+  function requestMemoryRestart(): void {
+    void restartMemoryRuntime().catch((error) => {
+      console.warn(`Memory service restart request failed: ${errorMessage(error)}`);
+    });
+  }
+
   try {
     await syncBundledAgentSkills({
       agentEntry: entries.agentEntry,
@@ -199,7 +230,14 @@ export async function startManagedRuntimeServices(
       spawn,
       browserPreparationAttemptId
     );
-    const memoryReady = ensureMemoryService(entries, runtimeConfig, children, options);
+    const memoryReady = ensureMemoryService(
+      entries,
+      runtimeConfig,
+      children,
+      options,
+      memmyConfigPreexisting,
+      requestMemoryRestart
+    );
     memoryStartup = memoryReady.catch((error) => {
       console.warn(`Memory service unavailable during desktop startup: ${errorMessage(error)}`);
     });
@@ -221,32 +259,35 @@ export async function startManagedRuntimeServices(
         ...(agentGatewayStartupIssue ? { startupIssue: agentGatewayStartupIssue } : {})
       },
       async restartMemory() {
-        if (closing) {
-          throw new Error("Memmy is shutting down");
-        }
-        await memoryStartup;
-        if (closing) {
-          throw new Error("Memmy is shutting down");
-        }
-        if (!memoryRestart) {
-          memoryRestart = restartManagedMemoryService(entries, runtimeConfig, children, options)
-            .finally(() => {
-              memoryRestart = null;
-            });
-        }
-        await memoryRestart;
+        await restartMemoryRuntime();
       },
-      async close() {
+      async close(closeOptions = {}) {
         closing = true;
         browserPreparation?.stop();
         await memoryRestart?.catch(() => undefined);
         await gatewaySupervisor.close();
-        await stopManagedChildren(children);
+        if (closeOptions.stopMemory && options.offlineMemoryRuntimeDirectory) {
+          await runBundledMemoryCli(
+            options.offlineMemoryRuntimeDirectory,
+            runtimeConfig,
+            options,
+            ["stop", "--home", dirname(runtimeConfig.configPath)]
+          );
+        }
+        await stopManagedChildrenForDesktopExit(children, closeOptions.stopMemory === true);
       },
-      terminateSync() {
+      terminateSync(terminateOptions = {}) {
         browserPreparation?.stop();
+        if (terminateOptions.stopMemory && options.offlineMemoryRuntimeDirectory) {
+          runBundledMemoryCliSync(
+            options.offlineMemoryRuntimeDirectory,
+            runtimeConfig,
+            options,
+            ["stop", "--home", dirname(runtimeConfig.configPath)]
+          );
+        }
         gatewaySupervisor.terminateSync();
-        terminateManagedChildrenSync(children);
+        terminateManagedChildrenForDesktopExit(children, terminateOptions.stopMemory === true);
       }
     };
   } catch (error) {
@@ -702,16 +743,32 @@ export async function ensureMemoryService(
   entries: RuntimeEntryPaths,
   runtimeConfig: PackagedRuntimeConfig,
   children: ManagedChild[],
-  options: StartManagedRuntimeServicesOptions
+  options: StartManagedRuntimeServicesOptions,
+  memmyConfigPreexisting = true,
+  onRestartRequested?: () => void
 ): Promise<void> {
   const healthUrl = `${runtimeConfig.memoryBaseUrl}/api/v1/health`;
   const healthHeaders = memoryAuthHeaders(runtimeConfig.memoryToken);
-  const probe = await probeHttpService(healthUrl, healthHeaders);
+  const probe = await probeMemoryService(healthUrl, healthHeaders);
   if (probe === "ready") {
     return;
   }
+  if (probe === "incompatible") {
+    throw new Error(`Memory protocol at ${healthUrl} is incompatible with Desktop protocol ${SUPPORTED_MEMORY_PROTOCOL_VERSION}; upgrade Desktop or Memory`);
+  }
   if (probe === "unexpected") {
     throw new Error(`Memory endpoint is occupied by an unexpected service: ${healthUrl}`);
+  }
+
+  if (options.offlineMemoryRuntimeDirectory) {
+    await installBundledMemoryRuntime(
+      options.offlineMemoryRuntimeDirectory,
+      runtimeConfig,
+      options,
+      memmyConfigPreexisting
+    );
+    await waitForCompatibleMemoryService(healthUrl, healthHeaders, MEMORY_STARTUP_TIMEOUT_MS);
+    return;
   }
 
   const existingLock = readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath);
@@ -737,12 +794,22 @@ export async function ensureMemoryService(
     MEMMY_EMBEDDING_MODEL_ROOT: join(options.resourcesPath, "embedding-models"),
     MEMORY_SERVICE_URL: runtimeConfig.memoryBaseUrl,
     MEMORY_SERVICE_TOKEN: runtimeConfig.memoryToken,
-    MEMORY_SERVICE_DB: runtimeConfig.memoryDatabasePath
+    MEMORY_SERVICE_DB: runtimeConfig.memoryDatabasePath,
+    ...(onRestartRequested ? { [DESKTOP_MANAGED_MEMORY_ENV]: "1" } : {})
   }, {
     logFilePath: join(options.logDirectory, "memory.log"),
     logLevel: options.logLevel,
-    executablePath: options.runtimeExecutable
+    ipc: Boolean(onRestartRequested),
+    executablePath: options.runtimeExecutable,
+    persistOnDesktopExit: true
   });
+  if (onRestartRequested) {
+    memoryChild.process.on("message", (message) => {
+      if (isRecord(message) && message.type === MEMORY_RESTART_IPC_TYPE) {
+        onRestartRequested();
+      }
+    });
+  }
   children.push(memoryChild);
   try {
     await waitForHttpService(
@@ -761,11 +828,113 @@ export async function ensureMemoryService(
   }
 }
 
+async function installBundledMemoryRuntime(
+  runtimeDirectory: string,
+  runtimeConfig: PackagedRuntimeConfig,
+  options: StartManagedRuntimeServicesOptions,
+  memmyConfigPreexisting: boolean
+): Promise<void> {
+  const cliEntry = join(runtimeDirectory, "dist", "src", "cli", "index.js");
+  if (!existsSync(cliEntry)) {
+    throw new Error(`Bundled Memory installer is missing: ${cliEntry}`);
+  }
+  const executable = options.runtimeExecutable ?? process.execPath;
+  await runBundledMemoryCli(
+    runtimeDirectory,
+    runtimeConfig,
+    options,
+    bundledMemoryInstallArguments(runtimeDirectory, runtimeConfig, memmyConfigPreexisting, executable)
+  );
+}
+
+export function bundledMemoryInstallArguments(
+  runtimeDirectory: string,
+  runtimeConfig: PackagedRuntimeConfig,
+  memmyConfigPreexisting: boolean,
+  executable: string
+): string[] {
+  return [
+    "install",
+    "--service-only",
+    "--runtime-directory", runtimeDirectory,
+    "--home", dirname(runtimeConfig.configPath),
+    "--config", runtimeConfig.configPath,
+    "--db", runtimeConfig.memoryDatabasePath,
+    "--endpoint", runtimeConfig.memoryBaseUrl,
+    "--memmy-config-preexisting", String(memmyConfigPreexisting),
+    "--node-executable", executable,
+    "--non-interactive",
+    "--use-compatible-installed",
+    "--health-check-timeout-ms", String(MEMORY_STARTUP_TIMEOUT_MS)
+  ];
+}
+
+async function runBundledMemoryCli(
+  runtimeDirectory: string,
+  runtimeConfig: PackagedRuntimeConfig,
+  options: StartManagedRuntimeServicesOptions,
+  commandArgs: string[]
+): Promise<void> {
+  const cliEntry = join(runtimeDirectory, "dist", "src", "cli", "index.js");
+  if (!existsSync(cliEntry)) throw new Error(`Bundled Memory CLI is missing: ${cliEntry}`);
+  const executable = options.runtimeExecutable ?? process.execPath;
+  const args = [cliEntry, ...commandArgs];
+  await new Promise<void>((resolveInstall, rejectInstall) => {
+    const child = spawn(executable, args, {
+      env: {
+        ...process.env,
+        ELECTRON_RUN_AS_NODE: "1",
+        NODE_ENV: process.env.NODE_ENV ?? "production",
+        MEMMY_CLI_ANALYTICS_SKIP: "1",
+        MEMMY_CONFIG: runtimeConfig.configPath
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true
+    });
+    let output = "";
+    const append = (chunk: unknown) => { output = `${output}${String(chunk)}`.slice(-4_000); };
+    child.stdout?.on("data", append);
+    child.stderr?.on("data", append);
+    child.once("error", rejectInstall);
+    child.once("exit", (code, signal) => {
+      if (code === 0) resolveInstall();
+      else rejectInstall(new Error(`Bundled Memory command failed (${signal ? `signal ${signal}` : `code ${String(code)}`}): ${output.trim()}`));
+    });
+  });
+}
+
+function runBundledMemoryCliSync(
+  runtimeDirectory: string,
+  runtimeConfig: PackagedRuntimeConfig,
+  options: StartManagedRuntimeServicesOptions,
+  commandArgs: string[]
+): void {
+  const cliEntry = join(runtimeDirectory, "dist", "src", "cli", "index.js");
+  if (!existsSync(cliEntry)) return;
+  try {
+    execFileSync(options.runtimeExecutable ?? process.execPath, [cliEntry, ...commandArgs], {
+      env: {
+        ...process.env,
+        ELECTRON_RUN_AS_NODE: "1",
+        NODE_ENV: process.env.NODE_ENV ?? "production",
+        MEMMY_CLI_ANALYTICS_SKIP: "1",
+        MEMMY_CONFIG: runtimeConfig.configPath
+      },
+      stdio: "ignore",
+      timeout: 6_000,
+      windowsHide: true
+    });
+  } catch (error) {
+    console.warn(`Failed to stop the Memory service during forced Desktop shutdown: ${errorMessage(error)}`);
+  }
+}
+
 async function restartManagedMemoryService(
   entries: RuntimeEntryPaths,
   runtimeConfig: PackagedRuntimeConfig,
   children: ManagedChild[],
-  options: StartManagedRuntimeServicesOptions
+  options: StartManagedRuntimeServicesOptions,
+  onRestartRequested?: () => void
 ): Promise<void> {
   const healthUrl = `${runtimeConfig.memoryBaseUrl}/api/v1/health`;
   const healthHeaders = memoryAuthHeaders(runtimeConfig.memoryToken);
@@ -789,7 +958,7 @@ async function restartManagedMemoryService(
 
   removeManagedChildrenByName(children, "memory");
   await waitForHttpServiceStop(healthUrl, healthHeaders);
-  await ensureMemoryService(entries, runtimeConfig, children, options);
+  await ensureMemoryService(entries, runtimeConfig, children, options, true, onRestartRequested);
 }
 
 export async function restartExternalMemoryService(input: {
@@ -1162,7 +1331,9 @@ export function resolveRuntimeEntryPaths(options: StartManagedRuntimeServicesOpt
     return { ...options.runtimeEntries };
   }
   return {
-    memoryEntry: join(options.appPath, "dist/runtime/memory/src/server/index.js"),
+    memoryEntry: options.offlineMemoryRuntimeDirectory
+      ? join(options.offlineMemoryRuntimeDirectory, "dist/src/server/index.js")
+      : join(options.appPath, "dist/runtime/memory/dist/src/server/index.js"),
     agentEntry: join(options.appPath, "dist/runtime/memmy-agent/dist/main.js")
   };
 }
@@ -1185,23 +1356,44 @@ export function spawnNodeService(
     ELECTRON_RUN_AS_NODE: "1",
     NODE_ENV: process.env.NODE_ENV ?? "production"
   };
-  const child = spawn(logOptions.executablePath ?? process.execPath, [entry, ...args], {
-    env: childEnv,
-    stdio: logOptions.ipc ? ["ignore", "pipe", "pipe", "ipc"] : ["ignore", "pipe", "pipe"],
-    windowsHide: true
-  });
-  const logWriter = createRotatingWriter({
-    filePath: logOptions.logFilePath,
-    maxSize: DAEMON_LOG_MAX_SIZE,
-    maxFiles: DAEMON_LOG_MAX_FILES
-  });
+  const persistOnDesktopExit = logOptions.persistOnDesktopExit === true;
+  let logFileDescriptor: number | undefined;
+  if (persistOnDesktopExit) {
+    mkdirSync(dirname(logOptions.logFilePath), { recursive: true });
+    logFileDescriptor = openSync(logOptions.logFilePath, "a", 0o600);
+  }
+  let child: ChildProcess;
+  try {
+    child = spawn(logOptions.executablePath ?? process.execPath, [entry, ...args], {
+      env: childEnv,
+      stdio: persistOnDesktopExit
+        ? logOptions.ipc
+          ? ["ignore", logFileDescriptor!, logFileDescriptor!, "ipc"]
+          : ["ignore", logFileDescriptor!, logFileDescriptor!]
+        : logOptions.ipc
+          ? ["ignore", "pipe", "pipe", "ipc"]
+          : ["ignore", "pipe", "pipe"],
+      detached: persistOnDesktopExit,
+      windowsHide: true
+    });
+  } finally {
+    if (logFileDescriptor !== undefined) closeSync(logFileDescriptor);
+  }
+  const logWriter = persistOnDesktopExit
+    ? null
+    : createRotatingWriter({
+      filePath: logOptions.logFilePath,
+      maxSize: DAEMON_LOG_MAX_SIZE,
+      maxFiles: DAEMON_LOG_MAX_FILES
+    });
   const managed: ManagedChild = {
     name,
     process: child,
     stdoutTail: [],
     stderrTail: [],
     exitDescription: null,
-    logWriter
+    logWriter,
+    persistOnDesktopExit
   };
 
   child.stdout?.setEncoding("utf8");
@@ -1209,17 +1401,21 @@ export function spawnNodeService(
   child.stdout?.on("data", (chunk) => {
     const text = String(chunk);
     appendTail(managed.stdoutTail, text);
-    logWriter.write(text);
+    logWriter?.write(text);
   });
   child.stderr?.on("data", (chunk) => {
     const text = String(chunk);
     appendTail(managed.stderrTail, text);
-    logWriter.write(text);
+    logWriter?.write(text);
   });
   child.once("exit", (code, signal) => {
     managed.exitDescription = signal ? `signal ${signal}` : `code ${code ?? "unknown"}`;
     managed.logWriter?.close();
   });
+  if (persistOnDesktopExit) {
+    child.unref();
+    child.channel?.unref();
+  }
 
   return managed;
 }
@@ -1235,6 +1431,40 @@ async function probeHttpService(url: string, headers: Record<string, string> = {
   } catch {
     return "unreachable";
   }
+}
+
+async function probeMemoryService(url: string, headers: Record<string, string> = {}): Promise<HttpProbeResult | "incompatible"> {
+  try {
+    const response = await fetch(url, {
+      cache: "no-store",
+      headers,
+      signal: AbortSignal.timeout(HTTP_TIMEOUT_MS)
+    });
+    if (!response.ok) return "unexpected";
+    const body = await response.json() as { ok?: unknown; protocolVersion?: unknown };
+    if (body.ok !== true) return "unexpected";
+    return body.protocolVersion === SUPPORTED_MEMORY_PROTOCOL_VERSION ? "ready" : "incompatible";
+  } catch {
+    return "unreachable";
+  }
+}
+
+async function waitForCompatibleMemoryService(
+  url: string,
+  headers: Record<string, string>,
+  timeoutMs: number
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastProbe: HttpProbeResult | "incompatible" = "unreachable";
+  while (Date.now() < deadline) {
+    lastProbe = await probeMemoryService(url, headers);
+    if (lastProbe === "ready") return;
+    if (lastProbe === "incompatible") {
+      throw new Error(`Memory protocol at ${url} is incompatible with Desktop protocol ${SUPPORTED_MEMORY_PROTOCOL_VERSION}`);
+    }
+    await sleep(POLL_INTERVAL_MS);
+  }
+  throw new Error(`Memory did not become compatible at ${url} (${lastProbe})`);
 }
 
 async function waitForHttpServiceStop(url: string, headers: Record<string, string> = {}): Promise<void> {
@@ -1296,12 +1526,7 @@ async function waitForExistingMemoryService(
   lock: MemoryServerLock
 ): Promise<void> {
   try {
-    await waitForHttpServiceReady(
-      "existing memory",
-      healthUrl,
-      healthHeaders,
-      MEMORY_STARTUP_TIMEOUT_MS
-    );
+    await waitForCompatibleMemoryService(healthUrl, healthHeaders, MEMORY_STARTUP_TIMEOUT_MS);
   } catch (error) {
     throw new Error(
       `Existing Memory service pid ${lock.pid} did not become ready at ${healthUrl}: ${errorMessage(error)}`
@@ -1339,6 +1564,7 @@ function isPackagedMemoryServiceProcess(pid: number, memoryEntry: string): boole
     const normalizedCommand = command.replaceAll("\\", "/");
     const normalizedEntry = resolve(memoryEntry).replaceAll("\\", "/");
     return normalizedCommand.includes(normalizedEntry)
+      || normalizedCommand.includes("/memory-runtime/dist/src/server/index.js")
       || normalizedCommand.includes("/dist/runtime/memory/src/server/index.js");
   } catch {
     return false;
@@ -1418,6 +1644,13 @@ async function stopManagedChildren(children: ManagedChild[]): Promise<void> {
   await Promise.allSettled([...children].reverse().map((child) => stopManagedChild(child)));
 }
 
+export async function stopManagedChildrenForDesktopExit(
+  children: ManagedChild[],
+  stopMemory: boolean
+): Promise<void> {
+  await stopManagedChildren(children.filter((child) => stopMemory || !child.persistOnDesktopExit));
+}
+
 function isManagedChildRunning(child: ManagedChild): boolean {
   return !child.exitDescription && child.process.exitCode === null && child.process.signalCode === null;
 }
@@ -1447,6 +1680,13 @@ function terminateManagedChildrenSync(children: ManagedChild[]): void {
   for (const child of children) {
     terminateProcessTreeSync(child.process);
   }
+}
+
+export function terminateManagedChildrenForDesktopExit(
+  children: ManagedChild[],
+  stopMemory: boolean
+): void {
+  terminateManagedChildrenSync(children.filter((child) => stopMemory || !child.persistOnDesktopExit));
 }
 
 function terminateProcessTreeSync(child: ChildProcess): void {

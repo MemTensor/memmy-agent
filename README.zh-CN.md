@@ -28,7 +28,7 @@
 </div>
 
 <div align="center">
-  
+
 [English](README.md) • **简体中文**
 
 </div>
@@ -105,7 +105,8 @@ systemctl --user status memmy-gateway.service
 安装阶段只初始化 Memory 基础配置，不会修改 Codex、Claude Code、Cursor 等外部 Agent。需要接入时，由用户明确执行 `memmy-memory init`（接入检测到的 Agent）或 `memmy-memory init --agent <agent>` 安装对应的 Memory Skill 及受支持的 Hook/插件。
 
 ```bash
-memmy onboard                              # 初始化配置和 workspace
+memmy onboard                              # 交互式配置模型、Provider、Gateway、Memory 和工具
+memmy onboard --defaults                   # 使用默认值初始化 ~/.memmy/config.yaml 和 workspace
 memmy status                               # 检查配置、模型和 Provider
 memmy agent --message "介绍一下当前工作区"  # 单轮任务
 memmy                                      # 进入交互式 TUI

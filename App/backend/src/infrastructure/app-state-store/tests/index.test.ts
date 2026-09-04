@@ -124,13 +124,15 @@ describe("app state store migrations", () => {
     expect(onboarding).toMatchObject({
       completed: false,
       currentStep: "scan_permission_required",
-      scanPermission: "unset"
+      scanPermission: "unset",
+      firstEncounterReportStatus: "pending"
     });
     expect(settings.userMode).toBe("unset");
     expect(settings.menuBarIconEnabled).toBe(true);
+    expect(settings.stopMemoryServiceOnExit).toBe(false);
     expect(agentSources).toEqual([]);
-    expect(firstMigrationCount).toBe(30);
-    expect(secondMigrationCount).toBe(30);
+    expect(firstMigrationCount).toBe(32);
+    expect(secondMigrationCount).toBe(32);
   });
 
   it("preserves the authenticated account when upgrading the legacy 0007 database", () => {
@@ -1809,7 +1811,8 @@ describe("app state store migrations", () => {
       "auto_scan_known_agents",
       "watch_file_changes",
       "auto_inject_skill",
-      "installation_id"
+      "installation_id",
+      "stop_memory_service_on_exit"
     ]);
     expect(settings).toMatchObject({
       defaultLaunchMode: "last",
@@ -1818,7 +1821,8 @@ describe("app state store migrations", () => {
       skinId: "default",
       taskDoneNotificationEnabled: true,
       notificationSoundEnabled: true,
-      menuBarIconEnabled: true
+      menuBarIconEnabled: true,
+      stopMemoryServiceOnExit: false
     });
     expect(cloudAccountColumns).toEqual([
       "uuid",
@@ -2215,6 +2219,49 @@ describe("bootstrap repository writes", () => {
     });
     expect(accountAPrivacy).toMatchObject({ localOnlyMode: true, allowMemoryImprovementUpload: false });
     expect(accountATokenUsage).toMatchObject({ planName: "Account A Plan", remainingTokens: 60 });
+  });
+
+  it("shares the first encounter report state across accounts, BYOK, and database reopen", () => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-app-state-"));
+    const databasePath = join(tempDir, "app.sqlite");
+    const first = createAppStateStore({ databasePath });
+
+    first.repositories.accountSession.upsert({
+      profile: accountProfile("user-a", "a@example.com", "Account A"),
+      uuid: "cloud-account-a"
+    });
+    first.repositories.bootstrap.updateOnboarding({ firstEncounterReportStatus: "shown" });
+
+    first.repositories.accountSession.upsert({
+      profile: accountProfile("user-b", "b@example.com", "Account B"),
+      uuid: "cloud-account-b"
+    });
+    expect(first.repositories.bootstrap.getOnboardingState().firstEncounterReportStatus).toBe("shown");
+
+    first.repositories.bootstrap.updateAppSettings({ userMode: "byok" });
+    expect(first.repositories.bootstrap.getOnboardingState().firstEncounterReportStatus).toBe("shown");
+    first.close();
+
+    const reopened = createAppStateStore({ databasePath });
+    expect(reopened.repositories.bootstrap.getOnboardingState().firstEncounterReportStatus).toBe("shown");
+    reopened.close();
+  });
+
+  it("keeps a denied first encounter report skipped after scan permission changes", () => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-app-state-"));
+    const store = createAppStateStore({ databasePath: join(tempDir, "app.sqlite") });
+
+    store.repositories.bootstrap.updateOnboarding({
+      scanPermission: "none",
+      firstEncounterReportStatus: "skipped"
+    });
+    store.repositories.bootstrap.updateOnboarding({ scanPermission: "scan_only" });
+
+    expect(store.repositories.bootstrap.getOnboardingState()).toMatchObject({
+      scanPermission: "scan_only",
+      firstEncounterReportStatus: "skipped"
+    });
+    store.close();
   });
 });
 

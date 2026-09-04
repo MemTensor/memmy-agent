@@ -20,7 +20,6 @@ import { constants as fsConstants, existsSync, readFileSync } from "node:fs";
 import { access, appendFile, chmod, copyFile, lstat, mkdir, open, readFile, readdir, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
-import YAML from "yaml";
 import {
   fullWindowOptions,
   parsePetWindowLayout,
@@ -91,7 +90,6 @@ import {
 } from "./logger.js";
 import { persistSharedAnalyticsClientId } from "./analytics-client-id-store.js";
 import { getOrCreateInstallationId } from "./installation-id-store.js";
-import { backupSqliteDatabase } from "./sqlite-backup.js";
 import {
   resolveStartupSplashHtml,
   resolveStartupSplashLanguage,
@@ -108,6 +106,16 @@ import {
   type WindowsDataLayout
 } from "./windows-data-layout.js";
 import { createWindowsUpdateLauncherFile } from "./windows-update-launcher.js";
+import {
+  installPackagedWindowsCliTools,
+  resolveCliInstallStrategy,
+  type CliInstallResult
+} from "./windows-cli-path.js";
+import {
+  getWindowsLaunchAtLogin,
+  setWindowsLaunchAtLogin,
+  type WindowsLaunchAtLoginEnvironment
+} from "./windows-launch-at-login.js";
 
 let mainWindow: BrowserWindow | null = null;
 let petWindow: BrowserWindow | null = null;
@@ -137,6 +145,7 @@ let isReplayingMainWindowAction = false;
 let isQuitting = false;
 let isQuitCleanupInProgress = false;
 let isQuitCleanupComplete = false;
+let stopMemoryServiceForCurrentQuit = false;
 let quitCleanupForceExitTimer: ReturnType<typeof setTimeout> | null = null;
 let areIpcHandlersRegistered = false;
 let isBootReady = false;
@@ -243,18 +252,6 @@ interface MemoryDatabaseExportResult {
   canceled: boolean;
   exportPath?: string;
   bytes?: number;
-}
-
-interface CliInstallResult {
-  ok: true;
-  binDirectory: string;
-  installed: Array<{
-    name: string;
-    source: string;
-    target: string;
-  }>;
-  pathUpdated: boolean;
-  profilePaths: string[];
 }
 
 /**
@@ -371,7 +368,10 @@ async function boot(): Promise<void> {
         : resolveDevelopmentRuntimeEntryPaths(import.meta.dirname),
       runtimeExecutable: app.isPackaged
         ? undefined
-        : resolveDevelopmentRuntimeExecutable()
+        : resolveDevelopmentRuntimeExecutable(),
+      offlineMemoryRuntimeDirectory: app.isPackaged
+        ? join(process.resourcesPath, "memory-runtime")
+        : undefined
     });
     runtimeConfig = await startLocalApi(runtimeServices);
     isBootReady = true;
@@ -517,6 +517,14 @@ async function installBundledCliIfNeeded(): Promise<void> {
 }
 
 async function installCliTools(): Promise<CliInstallResult> {
+  if (resolveCliInstallStrategy(
+    process.platform,
+    app.isPackaged,
+    Boolean((process as NodeJS.Process & { windowsStore?: boolean }).windowsStore)
+  ) === "packaged-windows") {
+    return installPackagedWindowsCliTools(process.resourcesPath);
+  }
+
   const binDirectory = join(homedir(), ".local", "bin");
   const entries = resolveCliToolEntries();
   await mkdir(binDirectory, { recursive: true });
@@ -927,6 +935,14 @@ function registerIpcHandlers(): void {
     applyAndPersistLogLevel(level);
   });
 
+  ipcMain.handle("memmy:get-launch-at-login", () => (
+    getWindowsLaunchAtLogin(app, currentWindowsLaunchAtLoginEnvironment())
+  ));
+
+  ipcMain.handle("memmy:set-launch-at-login", (_event, enabled: boolean) => (
+    setWindowsLaunchAtLogin(app, currentWindowsLaunchAtLoginEnvironment(), Boolean(enabled))
+  ));
+
   ipcMain.handle("memmy:get-microphone-access-status", () => getMicrophoneAccessStatus());
 
   ipcMain.handle("memmy:request-microphone-access", async () => requestMicrophoneAccess());
@@ -1000,6 +1016,8 @@ function getDesktopAppInfo(): DesktopAppInfo {
     version: resolveDesktopAppVersion(),
     platform: process.platform,
     arch: process.arch,
+    isPackaged: app.isPackaged,
+    isWindowsStore: Boolean((process as NodeJS.Process & { windowsStore?: boolean }).windowsStore),
     ...(updateManifestUrl ? { updateManifestUrl } : {})
   };
 }
@@ -2906,19 +2924,19 @@ function shouldQuitForManualUpdateInstall(filePath: string): boolean {
 function scheduleQuitForManualUpdateInstall(): void {
   setTimeout(() => {
     isQuitting = true;
+    stopMemoryServiceForCurrentQuit = readStopMemoryServiceOnExitSetting();
     const forceExitDelayMs = process.platform === "win32" ? WINDOWS_UPDATE_INSTALL_FORCE_EXIT_DELAY_MS : UPDATE_INSTALL_FORCE_EXIT_DELAY_MS;
     if (process.platform === "win32") {
       hideAppShellForQuit();
-      runtimeServices?.terminateSync();
+      runtimeServices?.terminateSync({ stopMemory: stopMemoryServiceForCurrentQuit });
       app.exit(0);
       return;
     }
     app.quit();
     if (!updateInstallForceExitTimer) {
       updateInstallForceExitTimer = setTimeout(() => {
-        // Synchronously kill the child services before force-exiting, so memory / agent-gateway do
-        // not become orphans holding ports and drag down the new instance reopened after the update.
-        runtimeServices?.terminateSync();
+        // Apply the same service-lifecycle choice even if update shutdown needs a forced exit.
+        runtimeServices?.terminateSync({ stopMemory: stopMemoryServiceForCurrentQuit });
         app.exit(0);
       }, forceExitDelayMs);
       updateInstallForceExitTimer.unref?.();
@@ -3747,10 +3765,23 @@ function applyMainWindowActionResolution(
   }
 
   if (resolution === "hide") {
-    if (process.platform === "win32") {
-      syncMenuBarTray(true);
+    const hideWindow = () => {
+      if (targetWindow.isDestroyed()) {
+        return;
+      }
+      if (process.platform === "win32") {
+        syncMenuBarTray(true);
+      }
+      targetWindow.hide();
+    };
+
+    if (isWindowFullScreenLike(targetWindow)) {
+      waitForWindowToLeaveFullScreen(targetWindow, hideWindow);
+      leaveWindowFullScreen(targetWindow);
+      return;
     }
-    targetWindow.hide();
+
+    hideWindow();
     return;
   }
 
@@ -4881,6 +4912,7 @@ app.on("before-quit", (event) => {
   }
 
   isQuitCleanupInProgress = true;
+  stopMemoryServiceForCurrentQuit = readStopMemoryServiceOnExitSetting();
   void writePackagedStartupLog("quit:cleanup-start");
   armQuitCleanupForceExitTimer();
   void cleanupBeforeQuit()
@@ -4916,9 +4948,8 @@ function armQuitCleanupForceExitTimer(): void {
   clearQuitCleanupForceExitTimer();
   quitCleanupForceExitTimer = setTimeout(() => {
     console.warn("quit cleanup timed out; forcing app exit");
-    // Before force-exiting on a cleanup timeout, synchronously kill the child services, so leftover
-    // orphan processes do not keep holding the fixed ports.
-    runtimeServices?.terminateSync();
+    // Apply the same service-lifecycle choice when graceful cleanup times out.
+    runtimeServices?.terminateSync({ stopMemory: stopMemoryServiceForCurrentQuit });
     relaunchAfterQuitCleanupIfRequested();
     app.exit(0);
   }, APP_QUIT_CLEANUP_FORCE_EXIT_DELAY_MS);
@@ -4977,6 +5008,8 @@ async function cleanupBeforeQuit(): Promise<void> {
   ipcMain.removeHandler("memmy:restart-memory-service");
   ipcMain.removeHandler("memmy:open-logs-directory");
   ipcMain.removeHandler("memmy:export-diagnostics-report");
+  ipcMain.removeHandler("memmy:get-launch-at-login");
+  ipcMain.removeHandler("memmy:set-launch-at-login");
   ipcMain.removeHandler("memmy:get-microphone-access-status");
   ipcMain.removeHandler("memmy:request-microphone-access");
   ipcMain.removeHandler("memmy:select-project-directory");
@@ -4999,10 +5032,29 @@ async function cleanupBeforeQuit(): Promise<void> {
   memoryServiceControl = null;
   const backend = localBackend;
   localBackend = null;
-  await services?.close();
+  await services?.close({ stopMemory: stopMemoryServiceForCurrentQuit });
   await backend?.close();
   await stopPackagedRendererServer();
   await sendAppExitEventBeforeQuit();
+}
+
+function readStopMemoryServiceOnExitSetting(): boolean {
+  try {
+    return localBackend?.getAppSettings().stopMemoryServiceOnExit ?? false;
+  } catch {
+    return false;
+  }
+}
+
+/** Resolves the runtime paths used by the Windows login item adapter. */
+function currentWindowsLaunchAtLoginEnvironment(): WindowsLaunchAtLoginEnvironment {
+  return {
+    platform: process.platform,
+    isPackaged: app.isPackaged,
+    executablePath: process.execPath,
+    localAppDataPath: process.env.LOCALAPPDATA,
+    systemRootPath: process.env.SystemRoot ?? process.env.WINDIR
+  };
 }
 
 async function copyDesktopImageToClipboard(request: DesktopImageActionRequest, senderUrl: string): Promise<void> {
@@ -5332,19 +5384,25 @@ function desktopImageSaveFilters(name: string, mime: string | null): FileFilter[
 }
 
 /**
- * Prompts for a save path and creates a consistent Memory SQLite snapshot.
+ * Prompts for a save path and exports Memory through the standalone HTTP service.
  *
  * @param owner The window that triggered the export.
  * @returns The user cancellation or the export result.
  */
 async function exportMemoryDatabase(owner: BrowserWindow | null): Promise<MemoryDatabaseExportResult> {
-  const sourcePath = await resolveMemoryDatabasePathForExport();
-  await access(sourcePath, fsConstants.R_OK);
+  const service = memoryServiceControl;
+  if (!service) {
+    throw new Error("Memory service is unavailable");
+  }
 
   const options = {
-    title: "Export memory.sqlite",
+    title: "Export Memmy Memory",
     buttonLabel: "Export",
-    defaultPath: join(app.getPath("documents"), `memory-${formatExportTimestamp(new Date())}.sqlite`)
+    defaultPath: join(app.getPath("documents"), `memmy-memory-${formatExportTimestamp(new Date())}.json`),
+    filters: [
+      { name: "Memmy Memory Export", extensions: ["json"] },
+      { name: "All Files", extensions: ["*"] }
+    ]
   };
   const selected = owner && !owner.isDestroyed()
     ? await dialog.showSaveDialog(owner, options)
@@ -5353,11 +5411,22 @@ async function exportMemoryDatabase(owner: BrowserWindow | null): Promise<Memory
     return { canceled: true };
   }
 
-  const bytes = await backupSqliteDatabase(sourcePath, selected.filePath);
+  const response = await fetch(`${service.baseUrl.replace(/\/$/u, "")}/api/v1/admin/export`, {
+    cache: "no-store",
+    headers: {
+      "x-memmy-time-zone": Intl.DateTimeFormat().resolvedOptions().timeZone,
+      ...(service.token ? { authorization: `Bearer ${service.token}` } : {})
+    }
+  });
+  if (!response.ok) {
+    throw new Error(`Memory export failed: HTTP ${response.status}`);
+  }
+  const payload = new Uint8Array(await response.arrayBuffer());
+  await writeFile(selected.filePath, payload);
   return {
     canceled: false,
     exportPath: selected.filePath,
-    bytes
+    bytes: payload.byteLength
   };
 }
 
@@ -5465,42 +5534,6 @@ function buildDiagnosticsReport(): string {
  */
 function resolveLogsDirectory(): string {
   return app.getPath("logs");
-}
-
-async function resolveMemoryDatabasePathForExport(): Promise<string> {
-  if (runtimeServices?.memory.databasePath) {
-    return runtimeServices.memory.databasePath;
-  }
-
-  const explicitPath = [
-    process.env.MEMMY_MEMORY_DB_PATH,
-    process.env.MEMMY_MEMOS_DB_PATH,
-    process.env.MEMORY_SERVICE_DB,
-    process.env.MEMMY_MEMORY_DB
-  ].find((value) => typeof value === "string" && value.trim().length > 0);
-  if (explicitPath) {
-    return resolvePathValue(explicitPath);
-  }
-
-  const configPath = resolvePathValue(process.env.MEMMY_CONFIG ?? "~/.memmy/config.yaml");
-  const configuredPath = await readMemoryDatabasePathFromConfig(configPath);
-  return configuredPath ? resolvePathValue(configuredPath) : join(homedir(), ".memmy", "memory-service", "memory.sqlite");
-}
-
-async function readMemoryDatabasePathFromConfig(configPath: string): Promise<string | null> {
-  try {
-    const parsed = YAML.parse(await readFile(configPath, "utf8"));
-    const memmyMemory = recordValue(parsed)?.memmyMemory;
-    const storage = recordValue(memmyMemory)?.storage;
-    const sqlitePath = recordValue(storage)?.sqlitePath;
-    return typeof sqlitePath === "string" && sqlitePath.trim().length > 0 ? sqlitePath.trim() : null;
-  } catch {
-    return null;
-  }
-}
-
-function recordValue(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
 function resolvePathValue(path: string): string {

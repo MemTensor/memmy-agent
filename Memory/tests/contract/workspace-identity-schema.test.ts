@@ -6,7 +6,7 @@ import {
   deriveWorkspaceHostId,
   isLocalWorkspaceUri,
   normalizeWorkspaceUri
-} from "@memmy/local-api-contracts";
+} from "../../src/contracts/index.js";
 
 describe("workspace identity contract", () => {
   it("normalizes local and remote absolute URIs deterministically", () => {

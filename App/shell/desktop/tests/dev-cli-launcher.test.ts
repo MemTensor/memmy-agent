@@ -151,7 +151,7 @@ fi`;
       );
       expect(init.status, init.stderr || init.stdout).toBe(0);
       const config = YAML.parse(readFileSync(configPath, "utf8"));
-      expect(config.memmyMemory).not.toHaveProperty("embedding");
+      expect(config.memmyMemory.embedding).toEqual({ mode: "local", provider: "local" });
 
       const validate = spawnSync(
         "node",
@@ -263,5 +263,34 @@ test ! -e "$cmd_path"`;
 
     expect(source).toContain("MINGW*|MSYS*|CYGWIN*");
     expect(source).toContain('ln -s "$source" "$target"');
+  });
+
+  it("replaces the legacy Memory viewer CLI launcher with a development symlink", () => {
+    const script = String.raw`set -euo pipefail
+test_home="$(mktemp -d)"
+trap 'rm -rf "$test_home"' EXIT
+export HOME="$test_home"
+source scripts/dev-start.sh
+
+source_path="$test_home/current/Memory/dist/src/cli/index.js"
+target="$HOME/.local/bin/memmy-memory"
+mkdir -p "$(dirname "$source_path")" "$(dirname "$target")"
+printf '#!/usr/bin/env node\n' > "$source_path"
+printf '#!/bin/sh\nexec env ELECTRON_RUN_AS_NODE=1 %q %q "$@"\n' \
+  "$test_home/runtime/node" "/old/Memory/dist/src/cli/index.js" > "$target"
+
+install_user_cli_link memmy-memory "$source_path"
+test -L "$target"
+test "$(readlink "$target")" = "$source_path"
+
+unlink "$target"
+printf '#!/bin/sh\necho unrelated\n' > "$target"
+if (install_user_cli_link memmy-memory "$source_path"); then
+  exit 1
+fi
+grep -Fx 'echo unrelated' "$target"`;
+    const result = spawnSync("bash", ["-s"], { cwd: repoRoot, encoding: "utf8", input: script });
+
+    expect(result.status, result.stderr || result.stdout).toBe(0);
   });
 });

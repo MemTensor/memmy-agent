@@ -1,0 +1,10 @@
+- insert:
+    - id: memmy-memory
+      name: '@memtensor/memmy-memory-dsh'
+      config:
+        enabled: true
+        profileId: default
+        recallEnabled: true
+        captureEnabled: true
+        toolsEnabled: true
+        recallTimeoutMs: 3000

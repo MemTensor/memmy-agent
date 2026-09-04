@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
+  BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID,
   resolveAssignedModel as resolveCatalogAssignment,
   resolveCloudServiceBaseUrl,
   type ActualModelContext,
@@ -750,6 +751,7 @@ function updateAccountAssignment(
 ): void {
   const assignments = isRecord(config.modelAssignments) ? { ...config.modelAssignments } : {};
   const existing = isRecord(assignments.account) ? { ...assignments.account } : {};
+  const sameOwner = existingString(existing.ownerAccountId) === ownerAccountId;
   const presets = isRecord(config.modelPresets) ? config.modelPresets : {};
   const agent = isRecord(existing.agent) ? { ...existing.agent } : {};
   const currentCandidates = Array.isArray(agent.candidates)
@@ -780,9 +782,14 @@ function updateAccountAssignment(
   const next: Record<string, unknown> = { ...existing, ownerAccountId, agent };
   for (const [field, capability] of Object.entries(singles) as Array<[keyof typeof singles, AccountCapability]>) {
     const current = existingString(existing[field]);
-    next[field] = current && assignmentPresetIsUsable(presets, current, capability, ownerAccountId)
+    const keepBuiltInLocalEmbedding = field === "embedding"
+      && sameOwner
+      && current === BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID;
+    next[field] = keepBuiltInLocalEmbedding
       ? current
-      : presetIds[capability];
+      : current && assignmentPresetIsUsable(presets, current, capability, ownerAccountId)
+        ? current
+        : presetIds[capability];
   }
   assignments.account = next;
   config.modelAssignments = assignments;

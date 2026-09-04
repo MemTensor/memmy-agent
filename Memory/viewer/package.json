@@ -1,0 +1,6 @@
+{
+  "name": "@memmy/memory-viewer",
+  "version": "2.1.0",
+  "private": true,
+  "type": "module"
+}

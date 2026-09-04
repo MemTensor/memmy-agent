@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { LOCAL_BYOK_ACCOUNT_UUID } from "../../infrastructure/app-state-store/account-context.js";
 import { createAppStateStore } from "../../infrastructure/app-state-store/index.js";
+import { INSTALLATION_SCAN_SCOPE_UUID } from "../../infrastructure/installation-scan-scope.js";
 import {
   createAccountService as createAccountServiceImplementation,
   type CreateAccountServiceOptions
@@ -698,9 +699,16 @@ describe("AccountService", () => {
         hasAcceptedTerms: true,
         acceptedTermsVersion: "2026-06-01",
         scanPermission: "scan_only",
+        firstEncounterReportStatus: "shown",
         improvementProgram: "accepted",
         completedAt: "2026-06-20T12:00:00.000Z"
       });
+      const readInstallationOnboarding = () => store!.db.prepare(
+        `SELECT scan_permission, first_encounter_report_status, updated_at
+        FROM account_onboarding_state
+        WHERE uuid = ?`
+      ).get(INSTALLATION_SCAN_SCOPE_UUID);
+      const installationBeforeLogout = readInstallationOnboarding();
 
       const service = createAccountService({
         cloudClient: createCloudClientStub(),
@@ -709,6 +717,7 @@ describe("AccountService", () => {
       });
 
       await expect(service.logout()).resolves.toEqual({ ok: true });
+      expect(readInstallationOnboarding()).toEqual(installationBeforeLogout);
       expect(store.repositories.accountSession.get()).toEqual({ authenticated: false });
       expect(store.repositories.bootstrap.getOnboardingState()).toMatchObject({
         completed: true,
@@ -716,6 +725,7 @@ describe("AccountService", () => {
         hasAcceptedTerms: true,
         acceptedTermsVersion: "2026-06-01",
         scanPermission: "scan_only",
+        firstEncounterReportStatus: "shown",
         improvementProgram: "not_applicable",
         completedAt: "2026-06-20T12:00:00.000Z"
       });
@@ -742,6 +752,7 @@ describe("AccountService", () => {
         hasAcceptedTerms: true,
         acceptedTermsVersion: "2026-06-01",
         scanPermission: "scan_only",
+        firstEncounterReportStatus: "shown",
         improvementProgram: "not_applicable",
         completedAt: "2026-06-20T12:00:00.000Z"
       });

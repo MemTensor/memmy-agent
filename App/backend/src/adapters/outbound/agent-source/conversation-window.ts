@@ -45,6 +45,29 @@ export async function collectConversationWindow<T extends ConversationWindowMess
   return messages.filter((message) => included.has(message.conversationId));
 }
 
+/** Streams a source target without materializing its complete history. */
+export async function* streamConversationWindow<T extends ConversationWindowMessage>(
+  input: AsyncIterable<T>,
+  since?: string,
+  signal?: AbortSignal,
+  maxMessages?: number,
+  fullHistory = false
+): AsyncIterable<T> {
+  if (maxMessages !== undefined && maxMessages <= 0) return;
+  if (fullHistory) {
+    let emitted = 0;
+    for await (const message of input) {
+      signal?.throwIfAborted();
+      if (maxMessages !== undefined && emitted >= maxMessages) break;
+      emitted += 1;
+      yield message;
+    }
+    return;
+  }
+  // Keep the legacy complete-conversation semantics for non-production callers.
+  for (const message of await collectConversationWindow(input, since, signal, maxMessages)) yield message;
+}
+
 export function remainingMessageCapacity(limit: number | undefined, emitted: number): number | undefined {
   return limit === undefined ? undefined : Math.max(0, limit - emitted);
 }

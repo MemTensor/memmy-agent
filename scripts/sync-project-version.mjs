@@ -13,8 +13,6 @@ if (typeof version !== "string" || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.tes
 }
 
 const derivedManifests = [
-  "Memory/package.json",
-  "Memory/src/cli/npm/package.json",
   "App/memmy-agent/package.json",
   "App/shell/desktop/package.json",
 ];
@@ -34,7 +32,6 @@ await updateText(
 await updateJson("package-lock.json", (json) => {
   json.version = version;
   json.packages[""].version = version;
-  json.packages.Memory.version = version;
   json.packages["App/shell/desktop"].version = version;
 });
 

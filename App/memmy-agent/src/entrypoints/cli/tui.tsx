@@ -16,6 +16,17 @@ import {
   type TuiModelSelection,
 } from "./tui-gateway-client.js";
 import { resolveComposerCursorPosition, type ComposerLayout } from "./tui-cursor.js";
+import {
+  buildTuiSlashCommands,
+  classifyTuiInput,
+  completeTuiSlashCommand,
+  isTuiSlashMenuOpen,
+  queryTuiSlashCommands,
+  SlashMenu,
+  slashMenuStatusText,
+  tuiSlashMenuRowCount,
+  tuiVisibleMessageCount,
+} from "./tui-slash-menu.js";
 
 type TuiMessageRole = "assistant" | "progress" | "system" | "user";
 
@@ -60,6 +71,7 @@ type YogaLayoutNode = {
 const PROMPT = "❯";
 const MAX_MESSAGES = 24;
 const MAX_TOOLSET_ROWS = 5;
+const CLEAR_TERMINAL_SEQUENCE = "\x1b[2J\x1b[H\x1b[3J";
 const THINK_FRAMES = ["planning", "working", "calling tools", "reading", "writing"];
 const PALETTE = {
   accent: "#F59E6B",
@@ -74,6 +86,10 @@ const PALETTE = {
   primaryStrong: "#3AA893",
   success: "#2DC999",
 };
+
+export function clearTerminalScreen(write: (data: string) => unknown = (data) => process.stdout.write(data)): void {
+  write(CLEAR_TERMINAL_SEQUENCE);
+}
 
 const WORDMARK_ROWS = [
   "███╗   ███╗ ███████╗ ███╗   ███╗ ███╗   ███╗ ██╗   ██╗",
@@ -152,7 +168,7 @@ function modelSelectionLabel(selection: TuiModelSelection): string {
   return `${selection.provider} / ${model}`;
 }
 
-function modelLabel(_config: Config): string {
+function modelLabel(): string {
   const resolved = resolveModelSelection({});
   return resolved ? modelSelectionLabel(resolved) : "(none configured)";
 }
@@ -951,6 +967,7 @@ function QueuePanel({
 
 function MemmyTui({ config, gateway, registerCleanup, target, toolsets, version }: TuiProps) {
   const { exit } = useApp();
+  const { write } = useStdout();
   const { columns, rows } = useTerminalSize();
   const idRef = useRef(1);
   const [input, setInput] = useState("");
@@ -962,10 +979,18 @@ function MemmyTui({ config, gateway, registerCleanup, target, toolsets, version 
     clientRequestId: string;
     text: string;
   } | null>(null);
+  const lastCompactionPendingRef = useRef<
+    ReturnType<TuiGatewayClient["readLastCompaction"]> | null
+  >(null);
   const [localMessages, setLocalMessages] = useState<TuiMessage[]>(() => []);
   const [gatewayState, setGatewayState] = useState<TuiGatewayState>(() => gateway.snapshot());
+  const handledSessionResetVersionRef = useRef(gatewayState.sessionResetVersion);
+  const gatewayStateRef = useRef(gatewayState);
   const [notice, setNotice] = useState("");
   const [now, setNow] = useState(() => Date.now());
+  const [slashSelectedIndex, setSlashSelectedIndex] = useState(0);
+  const [dismissedSlashDraft, setDismissedSlashDraft] = useState<string | null>(null);
+  gatewayStateRef.current = gatewayState;
 
   const appendMessage = useCallback((role: TuiMessageRole, text: string) => {
     setLocalMessages((prev) => [...prev, { id: idRef.current++, role, text }].slice(-MAX_MESSAGES));
@@ -980,6 +1005,21 @@ function MemmyTui({ config, gateway, registerCleanup, target, toolsets, version 
     setInputCursor(safeCursor);
   }, []);
 
+  const slashCommands = useMemo(
+    () => buildTuiSlashCommands(gatewayState.slashCommands, gatewayState),
+    [gatewayState],
+  );
+  const slashMenuOpen = isTuiSlashMenuOpen(input, dismissedSlashDraft);
+  const slashCandidates = useMemo(
+    () => slashMenuOpen ? queryTuiSlashCommands(slashCommands, input) : [],
+    [input, slashCommands, slashMenuOpen],
+  );
+  const slashCandidateKey = slashCandidates.map((command) => command.command).join("\n");
+
+  useEffect(() => {
+    setSlashSelectedIndex(0);
+  }, [slashCandidateKey]);
+
   useEffect(() => {
     const unsubscribe = gateway.subscribe(setGatewayState);
     const cleanup = onceCleanup(async () => {
@@ -993,6 +1033,13 @@ function MemmyTui({ config, gateway, registerCleanup, target, toolsets, version 
   }, [gateway, registerCleanup]);
 
   useEffect(() => {
+    if (handledSessionResetVersionRef.current === gatewayState.sessionResetVersion) return;
+    handledSessionResetVersionRef.current = gatewayState.sessionResetVersion;
+    setLocalMessages([]);
+    clearTerminalScreen(write);
+  }, [gatewayState.sessionResetVersion, write]);
+
+  useEffect(() => {
     if (!gatewayState.busy) return;
     setNow(Date.now());
     const id = setInterval(() => setNow(Date.now()), 250);
@@ -1003,11 +1050,6 @@ function MemmyTui({ config, gateway, registerCleanup, target, toolsets, version 
     (value: string, turnAdmission: "queue" | "steer") => {
       const text = value.trim();
       if (!text) return;
-      if (["exit", "quit", "/exit", "/quit", ":q"].includes(text.toLowerCase())) {
-        appendMessage("system", "Goodbye.");
-        exit();
-        return;
-      }
       if (turnAdmission === "steer" && !gatewayState.ownedByTui) {
         setNotice("The current Turn belongs to another channel; use Enter to queue.");
         return;
@@ -1035,8 +1077,82 @@ function MemmyTui({ config, gateway, registerCleanup, target, toolsets, version 
           setNotice(`Error: ${error instanceof Error ? error.message : String(error)}`);
         });
     },
-    [appendMessage, exit, gateway, gatewayState.ownedByTui, setDraft],
+    [gateway, gatewayState.ownedByTui, setDraft],
   );
+
+  const dispatchTuiInput = useCallback((value: string) => {
+    const action = classifyTuiInput(value);
+    if (action === "local-quit") {
+      appendMessage("system", "Goodbye.");
+      exit();
+      return;
+    }
+    if (action === "local-stop") {
+      const latest = gatewayStateRef.current;
+      if (
+        latest.connection !== "connected"
+        || !latest.attached
+        || !latest.busy
+        || !latest.ownedByTui
+        || !latest.activeTurnId
+      ) {
+        setNotice("No TUI-owned Turn is running.");
+        return;
+      }
+      setNotice("stopping current TUI Turn");
+      void gateway.stopOwnedTurn()
+        .then((outcome) => {
+          if (outcome === "not_owned") {
+            setNotice("Could not stop the current TUI Turn.");
+            return;
+          }
+          if (classifyTuiInput(inputRef.current) === "local-stop") setDraft("", 0);
+          appendMessage(
+            "system",
+            outcome === "stopped"
+              ? "Stopped the current TUI Turn."
+              : "The current TUI Turn already finished.",
+          );
+          setNotice("ready");
+        })
+        .catch(() => setNotice("Could not stop the current TUI Turn."));
+      return;
+    }
+    if (action === "local-last-compaction") {
+      if (lastCompactionPendingRef.current) {
+        setNotice("Reading the last compaction summary...");
+        return;
+      }
+      setNotice("Reading the last compaction summary...");
+      const requestDraft = inputRef.current;
+      const pending = gateway.readLastCompaction();
+      lastCompactionPendingRef.current = pending;
+      void pending
+        .then((result) => {
+          appendMessage(
+            "system",
+            result.available
+              ? result.text
+              : "No compaction summary is available for this Session.",
+          );
+          if (
+            inputRef.current === requestDraft
+            && classifyTuiInput(inputRef.current) === "local-last-compaction"
+          ) {
+            setDraft("", 0);
+          }
+          setNotice("ready");
+        })
+        .catch(() => setNotice("Could not read the last compaction summary."))
+        .finally(() => {
+          if (lastCompactionPendingRef.current === pending) {
+            lastCompactionPendingRef.current = null;
+          }
+        });
+      return;
+    }
+    submit(value, "queue");
+  }, [appendMessage, exit, gateway, setDraft, submit]);
 
   useInput((value, key) => {
     if (key.ctrl && value === "c") {
@@ -1053,8 +1169,44 @@ function MemmyTui({ config, gateway, registerCleanup, target, toolsets, version 
       return;
     }
 
+    if (slashMenuOpen && key.escape) {
+      setDismissedSlashDraft(inputRef.current);
+      return;
+    }
+
+    if (slashMenuOpen && (key.upArrow || key.downArrow)) {
+      if (slashCandidates.length > 0) {
+        setSlashSelectedIndex((current) => {
+          const direction = key.upArrow ? -1 : 1;
+          return (current + direction + slashCandidates.length) % slashCandidates.length;
+        });
+      }
+      return;
+    }
+
+    const slashInput = inputRef.current.trimStart().startsWith("/");
+    const selectedSlashCommand = slashCandidates[slashSelectedIndex] ?? slashCandidates[0];
+    if (key.tab && slashInput) {
+      if (slashMenuOpen && selectedSlashCommand) {
+        const completed = completeTuiSlashCommand(selectedSlashCommand);
+        setDraft(completed, completed.length);
+      } else {
+        setNotice(slashMenuStatusText(gatewayState.slashCommandsStatus));
+      }
+      return;
+    }
+
     if (key.return) {
-      submit(inputRef.current, "queue");
+      if (
+        slashMenuOpen
+        && selectedSlashCommand
+        && inputRef.current.toLowerCase() !== selectedSlashCommand.command.toLowerCase()
+      ) {
+        const completed = completeTuiSlashCommand(selectedSlashCommand);
+        setDraft(completed, completed.length);
+        return;
+      }
+      dispatchTuiInput(inputRef.current);
       return;
     }
 
@@ -1140,7 +1292,7 @@ function MemmyTui({ config, gateway, registerCleanup, target, toolsets, version 
     const text = value.replace(/\r/g, "");
     if (!text) return;
     if (text.includes("\n")) {
-      submit(currentInput.slice(0, currentCursor) + text.replace(/\n.*$/s, ""), "queue");
+      dispatchTuiInput(currentInput.slice(0, currentCursor) + text.replace(/\n.*$/s, ""));
       return;
     }
 
@@ -1156,7 +1308,11 @@ function MemmyTui({ config, gateway, registerCleanup, target, toolsets, version 
     })),
     ...localMessages,
   ].slice(-MAX_MESSAGES);
-  const visibleMessages = messages.slice(-8);
+  const slashMenuRows = tuiSlashMenuRowCount(slashMenuOpen, slashCandidates.length);
+  const visibleMessageCount = tuiVisibleMessageCount(slashMenuRows);
+  const visibleMessages = visibleMessageCount === 0
+    ? []
+    : messages.slice(-visibleMessageCount);
   const elapsedMs = gatewayState.startedAt ? now - gatewayState.startedAt : 0;
   const ruleWidth = Math.max(0, columns - 2);
   const inputPlaceholder = gatewayState.busy
@@ -1168,13 +1324,13 @@ function MemmyTui({ config, gateway, registerCleanup, target, toolsets, version 
     ? modelSelectionLabel(gatewayState.modelSelection)
     : gatewayState.modelName
       ? displayModelName(gatewayState.modelName)
-    : modelLabel(config);
+    : modelLabel();
 
   return (
     <Box flexDirection="column" paddingX={1}>
       <Banner columns={columns} config={config} model={currentModelLabel} target={target} toolsets={toolsets} version={version} />
 
-      {messages.length ? (
+      {visibleMessages.length ? (
         <Box flexDirection="column">
           {visibleMessages.map((message) => (
             <MessageBlock key={message.id} columns={columns} message={message} />
@@ -1197,6 +1353,15 @@ function MemmyTui({ config, gateway, registerCleanup, target, toolsets, version 
         inputLength={input.length}
         notice={notice || gatewayState.notice}
       />
+
+      {slashMenuOpen ? (
+        <SlashMenu
+          columns={columns}
+          commands={slashCandidates}
+          selectedIndex={slashSelectedIndex}
+          status={gatewayState.slashCommandsStatus}
+        />
+      ) : null}
 
       <Box flexDirection="column">
         <ComposerInput
@@ -1227,7 +1392,7 @@ export async function runInkInteractiveAgent(
     cleanup = next;
   };
 
-  process.stdout.write("\x1b[2J\x1b[H\x1b[3J");
+  clearTerminalScreen();
   const instance = render(
     <MemmyTui
       config={config}

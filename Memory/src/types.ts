@@ -4,7 +4,7 @@ import type {
   L3WorldModelTransition,
   WorkspaceHostId,
   WorkspaceUri
-} from "@memmy/local-api-contracts";
+} from "./contracts/index.js";
 
 export type {
   L3WorldModelBoundaryRequest,
@@ -22,7 +22,7 @@ export type {
   WorkspaceHostId,
   WorkspaceIdentityFields,
   WorkspaceUri
-} from "@memmy/local-api-contracts";
+} from "./contracts/index.js";
 
 export type IsoTime = string;
 export const DEFAULT_NAMESPACE_SOURCE = "unknown";
@@ -501,6 +501,10 @@ export interface RawTurnRedactRequest extends RequestEnvelope {
 
 export interface HealthResponse {
   ok: boolean;
+  serviceVersion: string;
+  protocolVersion: number;
+  viewerVersion: string;
+  viewerUrl: string;
   version: string;
   uptimeMs: number;
   mode: "local" | "cloud" | "dev";
@@ -551,6 +555,7 @@ export interface HealthResponse {
     tools: string[];
     memoryLayers: MemoryLayer[];
     supportsCli: boolean;
+    service: string[];
   };
   features?: L3WorldModelFeatures;
   serverTime: IsoTime;

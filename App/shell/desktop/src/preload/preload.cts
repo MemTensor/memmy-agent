@@ -43,6 +43,8 @@ interface MemmyPreloadApi {
   exportDiagnosticsReport(): Promise<DiagnosticsReportExportResult>;
   getLogLevel(): Promise<"error" | "warn" | "info" | "debug">;
   setLogLevel(level: "error" | "warn" | "info" | "debug"): Promise<void>;
+  getLaunchAtLogin(): Promise<boolean>;
+  setLaunchAtLogin(enabled: boolean): Promise<boolean>;
   getMicrophoneAccessStatus(): Promise<MicrophoneAccessStatus>;
   requestMicrophoneAccess(): Promise<MicrophoneAccessStatus>;
   selectProjectDirectory(): Promise<DesktopProjectDirectorySelection>;
@@ -202,6 +204,14 @@ const memmyPreloadApi: MemmyPreloadApi = {
 
   async setLogLevel(level: "error" | "warn" | "info" | "debug"): Promise<void> {
     return ipcRenderer.invoke("memmy:set-log-level", level);
+  },
+
+  async getLaunchAtLogin(): Promise<boolean> {
+    return ipcRenderer.invoke("memmy:get-launch-at-login");
+  },
+
+  async setLaunchAtLogin(enabled: boolean): Promise<boolean> {
+    return ipcRenderer.invoke("memmy:set-launch-at-login", enabled);
   },
 
   async getMicrophoneAccessStatus(): Promise<MicrophoneAccessStatus> {

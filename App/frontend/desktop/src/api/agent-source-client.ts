@@ -4,6 +4,7 @@ import {
   AgentSourceScanJobResponseSchema,
   AgentSourceScanInputSchema,
   AgentSourceScanStatusResponseSchema,
+  ScanResultPageSchema,
   AgentSourceViewSchema,
   ManagedAgentSourceImportResultSchema,
   OkResponseSchema,
@@ -15,6 +16,7 @@ import {
   type AgentSourceScanInput,
   type AgentSourceScanStatusResponse,
   type AgentSourceView,
+  type ScanResultPage,
   type ManagedAgentSourceImportResult,
   type RuntimeConfig
 } from "@memmy/local-api-contracts";
@@ -24,6 +26,7 @@ export interface AgentSourceClient {
   listSources(): Promise<AgentSourceView[]>;
   startScan(input?: AgentSourceScanInput): Promise<AgentSourceScanJobResponse>;
   getScanStatus(): Promise<AgentSourceScanStatusResponse>;
+  getScanResults(jobId: string, cursor?: string, limit?: number): Promise<ScanResultPage>;
   stopScan(): Promise<void>;
   cancelScan(): Promise<void>;
   addManualSource(input: AddManualInput): Promise<AgentSourceView>;
@@ -60,6 +63,14 @@ export function createHttpAgentSourceClient(config: RuntimeConfig): AgentSourceC
         config,
         path: "/api/agent-sources/scan/status",
         schema: AgentSourceScanStatusResponseSchema
+      });
+    },
+
+    async getScanResults(jobId, cursor = "0", limit = 100) {
+      return requestJson({
+        config,
+        path: `/api/agent-sources/scan/jobs/${encodeURIComponent(jobId)}/results?cursor=${encodeURIComponent(cursor)}&limit=${encodeURIComponent(String(limit))}`,
+        schema: ScanResultPageSchema
       });
     },
 

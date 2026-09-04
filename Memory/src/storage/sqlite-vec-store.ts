@@ -34,6 +34,11 @@ export interface SerializedMemoryVector {
   updated_at: string;
 }
 
+export interface EmbeddingDimensionCounts {
+  totalSlots: number;
+  dimensions: Array<{ dimension: number; count: number }>;
+}
+
 /** Keeps sqlite-vec details out of the repository and retrieval layers. */
 export class SqliteVecStore {
   constructor(private readonly db: Database.Database) {}
@@ -207,6 +212,23 @@ export class SqliteVecStore {
           }]
         : [];
     });
+  }
+
+  maintenanceDimensionCounts(): EmbeddingDimensionCounts {
+    const totalSlots = Number(this.db.prepare(
+      `SELECT COUNT(*)
+       FROM memories
+       WHERE deleted_at IS NULL AND status != 'deleted'`
+    ).pluck().get() ?? 0);
+    const dimensions = this.db.prepare(
+      `SELECT entries.embedding_dim AS dimension, COUNT(DISTINCT entries.memory_id) AS count
+       FROM memory_vector_entries AS entries
+       INNER JOIN memories ON memories.id = entries.memory_id
+       WHERE memories.deleted_at IS NULL AND memories.status != 'deleted'
+       GROUP BY entries.embedding_dim
+       ORDER BY count DESC, dimension DESC`
+    ).all() as Array<{ dimension: number; count: number }>;
+    return { totalSlots, dimensions };
   }
 
   importRows(rows: SerializedMemoryVector[]): void {

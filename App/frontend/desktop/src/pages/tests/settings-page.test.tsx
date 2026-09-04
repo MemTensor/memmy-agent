@@ -667,9 +667,14 @@ describe("SettingsPageView", () => {
     expect(styles).toContain(".byokUsageList");
     expect(styles).not.toContain(".backButton");
     expect(source).toContain("const byokUsageByKind = TOKEN_USAGE_SCENES.map");
-    expect(source).toContain("props.byokUsage.byModel.map");
-    expect(source).toContain("function ByokModelUsageRow");
-    expect(source).toContain('t("settings.token.historicalUnclassified")');
+    expect(source).toContain("const classifiedByokModels = props.byokUsage.byModel.filter");
+    expect(source).toContain("const uniqueByokModels = new Map<string, ByokTokenUsageByModel>();");
+    expect(source).not.toContain("function ByokModelUsageRow");
+    expect(source).not.toContain("usageStyles.byokPurposeTitle");
+    expect(styles).not.toContain(".byokPurposeTitle");
+    expect(source).not.toContain('t("settings.token.byModel")');
+    expect(source).not.toContain('t("settings.token.byPurpose")');
+    expect(source).not.toContain('t("settings.token.historicalUnclassified")');
     expect(source).not.toContain("getTaskModelCandidates(workspace, workspaceMode)");
     expect(source).toContain('"settings.token.modelBreakdownPending"');
     expect(source).toContain("usageSceneMeta(props.usage.scene, t)");
@@ -754,7 +759,7 @@ describe("SettingsPageView", () => {
     expect(html).toContain("打磨 Agent 技能与偏好");
     expect(html).toContain("Embedding 检索");
     expect(html).toContain("记忆向量化检索");
-    expect(html).toContain("Xenova/all-MiniLM-L6-v2");
+    expect(html).toContain("Memmy Platform 本地 Embedding");
     expect(html).toContain("语音识别 ASR");
     expect(html).toContain("生图模型");
     expect(html).toContain("未配置");

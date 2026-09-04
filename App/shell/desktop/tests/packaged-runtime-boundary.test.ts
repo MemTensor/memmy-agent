@@ -31,11 +31,17 @@ const signedMacArm64PackagePath = fileURLToPath(
 );
 const packageWinPath = fileURLToPath(new URL("../../../../scripts/package-win.sh", import.meta.url));
 const packageWinX64Path = fileURLToPath(new URL("../../../../scripts/internal/win/build-nsis.sh", import.meta.url));
+const createMemoryRuntimeManifestPath = fileURLToPath(
+  new URL("../../../../scripts/internal/win/create-memory-runtime-manifest.mjs", import.meta.url),
+);
 const winUnsignedBuilderPath = fileURLToPath(new URL("../electron-builder.win.unsigned.yml", import.meta.url));
 const winUnsignedInstallerIncludePath = fileURLToPath(new URL("../build/installer-win-unsigned.nsh", import.meta.url));
 const winUpgradeRelayScriptPath = fileURLToPath(new URL("../build/MemmyWindowsUpgradeRelay.ps1", import.meta.url));
 const winUpgradeRecoveryScriptPath = fileURLToPath(new URL("../build/MemmyWindowsUpgradeRecovery.ps1", import.meta.url));
 const winDataMigrationScriptPath = fileURLToPath(new URL("../build/MemmyWindowsDataMigration.ps1", import.meta.url));
+const electronBuilderInstallSectionPath = fileURLToPath(
+  new URL("../../../../node_modules/app-builder-lib/templates/nsis/installSection.nsh", import.meta.url)
+);
 const desktopInterfacePath = fileURLToPath(new URL("../interface/src/index.ts", import.meta.url));
 const localApiContractsPath = fileURLToPath(new URL("../../../../App/backend/local-api-contracts/src/index.ts", import.meta.url));
 const rootPackagePath = fileURLToPath(new URL("../../../../package.json", import.meta.url));
@@ -112,17 +118,16 @@ describe("desktop packaged runtime boundaries", () => {
       bin: { "memmy-memory": "./dist/src/cli/index.js" }
     });
     expect(memoryPackage.dependencies).toMatchObject({
-      "@memmy/local-api-contracts": "0.0.0",
-      "@memmy/migrations": "0.0.0",
       "@huggingface/transformers": expect.any(String),
       "better-sqlite3": expect.any(String),
       "sqlite-vec": "0.1.9",
-      yaml: expect.any(String)
+      yaml: expect.any(String),
+      zod: expect.any(String)
     });
-    expect(memoryPackage.dependencies ?? {}).not.toHaveProperty("zod");
-    expect(memoryPackage.scripts?.prebuild).toBe("npm run version:sync");
-    expect(memoryPackage.scripts?.pretypecheck).toBe("npm run version:sync");
-    expect(memoryPackage.scripts?.pretest).toBe("npm run version:sync");
+    expect(memoryPackage.version).toBe("2.1.0");
+    expect(memoryPackage.dependencies ?? {}).not.toHaveProperty("@memmy/local-api-contracts");
+    expect(memoryPackage.dependencies ?? {}).not.toHaveProperty("@memmy/migrations");
+    expect(memoryPackage.scripts?.prebuild).toBeUndefined();
     expect(backendPackage.dependencies).toHaveProperty("zod");
     expect(backendPackage.dependencies).toHaveProperty("sqlite-vec", "0.1.9");
     expect(frontendPackage.dependencies).toHaveProperty("zod");
@@ -285,20 +290,17 @@ describe("desktop packaged runtime boundaries", () => {
     );
   });
 
-  it("materializes private Memory workspace packages in the Windows runtime", () => {
+  it("keeps the Windows Memory runtime independent from private workspaces", () => {
     const source = readFileSync(packageWinX64Path, "utf8");
+    const manifestSource = readFileSync(createMemoryRuntimeManifestPath, "utf8");
 
     expect(source).toContain("run build -w @memmy/local-api-contracts");
-    expect(source).toContain('delete dependencies["@memmy/local-api-contracts"]');
-    expect(source).toContain('delete dependencies["@memmy/migrations"]');
-    expect(source).toContain("Object.assign(dependencies, contractsPackage.dependencies, migrationsPackage.dependencies)");
-    expect(source).toContain('cp -R "$ROOT_DIR/App/backend/local-api-contracts/dist" "$RUNTIME_DIR/memory/node_modules/@memmy/local-api-contracts/dist"');
-    expect(source).toContain('cp -R "$MIGRATIONS_STAGING_DIR/dist" "$RUNTIME_DIR/memory/node_modules/@memmy/migrations/dist"');
-    expect(source).toContain('require_packaged_runtime_file "$RUNTIME_DIR/memory/node_modules/@memmy/local-api-contracts/dist/index.js"');
-    expect(source).toContain('require_packaged_runtime_file "$RUNTIME_DIR/memory/node_modules/@memmy/migrations/dist/index.js"');
-    expect(source.indexOf('cp -R "$ROOT_DIR/App/backend/local-api-contracts/dist"')).toBeGreaterThan(
-      source.indexOf('npm_ci_win_x64 "$RUNTIME_DIR/memory"'),
-    );
+    expect(source).not.toContain('memory/node_modules/@memmy/local-api-contracts');
+    expect(source).not.toContain('memory/node_modules/@memmy/migrations');
+    expect(source).toContain('cp -R "$MEMORY_DIR/dist/viewer" "$RUNTIME_DIR/memory/dist/viewer"');
+    expect(source).toContain('cp -R "$MEMORY_DIR/adapters" "$RUNTIME_DIR/memory/adapters"');
+    expect(source).toContain('node "$ROOT_DIR/scripts/internal/win/create-memory-runtime-manifest.mjs" \\');
+    expect(manifestSource).toContain("protocolVersion: 1");
     expect(source.indexOf("run build -w @memmy/local-api-contracts")).toBeLessThan(
       source.indexOf("run build -w @memmy/memory"),
     );
@@ -369,6 +371,39 @@ describe("desktop packaged runtime boundaries", () => {
         filter: ["**/*"]
       });
     }
+  });
+
+  it("ships the standalone Memory runtime with production dependencies on macOS", () => {
+    for (const configPath of [electronBuilderPath, unsignedElectronBuilderPath]) {
+      const config = parseYaml(readFileSync(configPath, "utf8")) as {
+        extraResources?: Array<{ from?: string; to?: string; filter?: string[] }>;
+      };
+      expect(config.extraResources).toContainEqual({
+        from: "dist/runtime/memory",
+        to: "memory-runtime",
+        filter: ["**/*"]
+      });
+      expect(config.extraResources).toContainEqual({
+        from: "dist/runtime/memory/node_modules",
+        to: "memory-runtime/node_modules",
+        filter: ["**/*"]
+      });
+    }
+
+    const macSource = readFileSync(packageMacDmgPath, "utf8");
+    expect(macSource).toContain(
+      'packaged_memory_runtime="$app_path/Contents/Resources/memory-runtime"'
+    );
+    expect(macSource).toContain(
+      '$packaged_memory_runtime/node_modules/onnxruntime-node/bin/napi-v3/darwin/$target_cpu/libonnxruntime*.dylib'
+    );
+    expect(macSource).not.toContain(
+      '$unpacked_runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/darwin/$target_cpu/libonnxruntime*.dylib'
+    );
+    const asarGuardSource = readFileSync(verifyPackagedAsarPath, "utf8");
+    expect(asarGuardSource).toContain(
+      'if (platform === "win32") {\n  requiredFiles.push(\n    "dist/runtime/memory/package.json"'
+    );
   });
 
   it("excludes dependency root tests and docs from every desktop app archive", () => {
@@ -651,8 +686,22 @@ describe("desktop packaged runtime boundaries", () => {
     expect(includeSource).toContain('GetFullPathName $4 "$MemmyUpgradeWorkDir"');
     expect(includeSource).not.toContain('GetFullPathName $5 "$MemmyUpgradeBackupRoot"');
     expect(includeSource).toContain('${GetFileName} "$MemmyUpgradeWorkDir" $5');
-    expect(includeSource).toContain('StrCpy $0 "$INSTDIR.memmy-upgrade-backup\\$4"');
+    expect(includeSource).toContain('StrCpy $0 "$MemmyUpgradeSourceInstallDir.memmy-upgrade-backup\\$4"');
     expect(includeSource).toContain('StrCmp $MemmyUpgradeBackupRoot $0 0 memmy_relay_context_failed');
+    expect(includeSource).toContain("MEMMY_UPGRADE_SOURCE_INSTALL_DIR");
+    expect(includeSource).toContain("MEMMY_UPGRADE_TARGET_INSTALL_DIR");
+    const finishPageMacroStart = includeSource.indexOf("!macro customFinishPage");
+    const finishPageMacroEnd = includeSource.indexOf("!macroend", finishPageMacroStart);
+    const finishPageMacroSource = includeSource.slice(finishPageMacroStart, finishPageMacroEnd);
+    expect(finishPageMacroStart).toBeGreaterThan(-1);
+    expect(finishPageMacroSource).toContain("Function MemmySkipRelayedFinishPage");
+    expect(finishPageMacroSource).toContain('StrCmp $MemmyIsRelayedUpgrade "1"');
+    expect(finishPageMacroSource).toContain("Abort");
+    expect(finishPageMacroSource).toContain("Function MemmyStartAppAfterInstall");
+    expect(finishPageMacroSource).toContain('${StdUtils.ExecShellAsUser} $0 "$launchLink" "open" "$1"');
+    expect(finishPageMacroSource).toContain("!define MUI_PAGE_CUSTOMFUNCTION_PRE MemmySkipRelayedFinishPage");
+    expect(finishPageMacroSource).toContain("!define MUI_FINISHPAGE_RUN_FUNCTION MemmyStartAppAfterInstall");
+    expect(finishPageMacroSource).toContain("!insertmacro MUI_PAGE_FINISH");
     const relayInitIndex = includeSource.indexOf("Function MemmyRelayLegacyUpgrade");
     const earlyLaunchProxyIndex = includeSource.indexOf("Call MemmyInstallLaunchProxy", relayInitIndex);
     const relayStartIndex = includeSource.indexOf('ExecShell "open" "$R5"', relayInitIndex);
@@ -691,6 +740,52 @@ describe("desktop packaged runtime boundaries", () => {
     expect(recoverySource).toContain("completed migration lock cleared without restoring install-local data");
     expect(recoverySource).toContain("Remove-Item -LiteralPath $LockPath");
     expect(mainSource).toContain('spawn("/bin/zsh", [helperPath, filePath, destinationAppPath, logPath, String(process.pid), options.openAfterInstall ? "1" : "0"');
+  });
+
+  it("bridges electron-builder shortcut retention across relayed install-directory changes", () => {
+    const includeSource = readFileSync(winUnsignedInstallerIncludePath, "utf8");
+    const installSectionSource = readFileSync(electronBuilderInstallSectionPath, "utf8");
+    const customCheckStart = includeSource.indexOf("!macro customCheckAppRunning");
+    const customCheckEnd = includeSource.indexOf("!macroend", customCheckStart);
+    const customCheckSource = includeSource.slice(customCheckStart, customCheckEnd);
+    const uninstallCheckStart = includeSource.indexOf("!macro customUnInstallCheck");
+    const uninstallCheckEnd = includeSource.indexOf("!macroend", uninstallCheckStart);
+    const uninstallCheckSource = includeSource.slice(uninstallCheckStart, uninstallCheckEnd);
+
+    const targetAssignment = installSectionSource.indexOf('StrCpy $appExe "$INSTDIR\\${APP_EXECUTABLE_FILENAME}"');
+    const runningCheck = installSectionSource.indexOf("!insertmacro CHECK_APP_RUNNING");
+    const shortcutProbe = installSectionSource.indexOf('${FileExists} "$appExe"');
+    const oldUninstall = installSectionSource.indexOf("!insertmacro uninstallOldVersion SHELL_CONTEXT");
+    const newFiles = installSectionSource.indexOf("!insertmacro installApplicationFiles");
+    expect(targetAssignment).toBeGreaterThan(-1);
+    expect(targetAssignment).toBeLessThan(runningCheck);
+    expect(runningCheck).toBeLessThan(shortcutProbe);
+    expect(shortcutProbe).toBeLessThan(oldUninstall);
+    expect(oldUninstall).toBeLessThan(newFiles);
+
+    const sourceBridge = 'StrCpy $appExe "$MemmyUpgradeSourceInstallDir\\${PRODUCT_FILENAME}.exe"';
+    const targetRestore = 'StrCpy $appExe "$MemmyUpgradeTargetInstallDir\\${PRODUCT_FILENAME}.exe"';
+    expect(customCheckSource).toContain(sourceBridge);
+    expect(customCheckSource.indexOf("!insertmacro _CHECK_APP_RUNNING")).toBeLessThan(
+      customCheckSource.indexOf(sourceBridge)
+    );
+    expect(uninstallCheckSource.match(new RegExp(targetRestore.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"))).toHaveLength(2);
+    expect(uninstallCheckSource.indexOf(targetRestore)).toBeLessThan(
+      uninstallCheckSource.indexOf("${If} $R0 != 0")
+    );
+  });
+
+  it("records the final Windows install directory in uninstall metadata", () => {
+    const includeSource = readFileSync(winUnsignedInstallerIncludePath, "utf8");
+    const installSectionSource = readFileSync(electronBuilderInstallSectionPath, "utf8");
+    const registryInfo = installSectionSource.indexOf("!insertmacro registryAddInstallInfo");
+    const customInstall = installSectionSource.indexOf("!insertmacro customInstall");
+
+    expect(registryInfo).toBeGreaterThan(-1);
+    expect(customInstall).toBeGreaterThan(registryInfo);
+    expect(includeSource).toContain(
+      'WriteRegStr SHELL_CONTEXT "${UNINSTALL_REGISTRY_KEY}" "InstallLocation" "$INSTDIR"'
+    );
   });
 
   it("validates Windows install and external data permissions before uninstalling the old version", () => {
@@ -880,19 +975,33 @@ describe("desktop packaged runtime boundaries", () => {
     expect(updatePromptSource).not.toContain("CornerRadius");
   });
 
-  it("exports a consistent memory.sqlite snapshot through the desktop save dialog", () => {
+  it("removes the Windows login item only during a full uninstall", () => {
+    const includeSource = readFileSync(winUnsignedInstallerIncludePath, "utf8");
+    const keepLaunchProxyIndex = includeSource.indexOf("un_memmy_keep_launch_proxy:");
+    const removeLaunchProxyIndex = includeSource.indexOf("un_memmy_remove_launch_proxy:");
+    const removeLoginItemIndex = includeSource.indexOf(
+      'DeleteRegValue HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Run" "${APP_ID}"'
+    );
+
+    expect(keepLaunchProxyIndex).toBeGreaterThan(-1);
+    expect(removeLaunchProxyIndex).toBeGreaterThan(keepLaunchProxyIndex);
+    expect(includeSource.slice(keepLaunchProxyIndex, removeLaunchProxyIndex)).toContain("Return");
+    expect(removeLoginItemIndex).toBeGreaterThan(removeLaunchProxyIndex);
+  });
+
+  it("exports Memory through the standalone HTTP service and desktop save dialog", () => {
     const source = readFileSync(mainSourcePath, "utf8");
     const exportSource = extractFunctionSource(source, "async function exportMemoryDatabase");
 
     expect(source).toContain('ipcMain.handle("memmy:export-memory-database"');
     expect(exportSource).toContain("dialog.showSaveDialog");
-    expect(exportSource).toContain("await backupSqliteDatabase(sourcePath, selected.filePath)");
-    expect(exportSource).not.toContain("await copyFile(sourcePath, selected.filePath)");
-    expect(exportSource).toContain("memory-${formatExportTimestamp(new Date())}.sqlite");
-    expect(exportSource).not.toContain("filters:");
-    expect(exportSource).not.toContain("All Files");
-    expect(source).toContain('import { backupSqliteDatabase } from "./sqlite-backup.js"');
-    expect(source).toContain('join(homedir(), ".memmy", "memory-service", "memory.sqlite")');
+    expect(exportSource).toContain("/api/v1/admin/export");
+    expect(exportSource).toContain("authorization: `Bearer ${service.token}`");
+    expect(exportSource).toContain("await response.arrayBuffer()");
+    expect(exportSource).toContain("await writeFile(selected.filePath, payload)");
+    expect(exportSource).toContain("memmy-memory-${formatExportTimestamp(new Date())}.json");
+    expect(exportSource).toContain("filters:");
+    expect(exportSource).not.toContain("backupSqliteDatabase");
   });
 
   it("saves and copies generated images through native desktop APIs", () => {
@@ -931,7 +1040,7 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain("if (response.status === 401)");
   });
 
-  it("installs memmy-memory into ~/.local/bin through the desktop bridge", () => {
+  it("uses packaged .cmd launchers on Windows and keeps the macOS profile flow", () => {
     const mainSource = readFileSync(mainSourcePath, "utf8");
     const preloadSource = readFileSync(preloadSourcePath, "utf8");
     const packageSource = normalizeLineEndings(readFileSync(packageMacDmgPath, "utf8"));
@@ -941,6 +1050,10 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain('ipcMain.handle("memmy:install-cli-tools"');
     expect(mainSource).toContain('ipcMain.removeHandler("memmy:install-cli-tools")');
     expect(mainSource).toContain("async function installCliTools");
+    expect(mainSource).toContain("installPackagedWindowsCliTools");
+    expect(mainSource).toContain("resolveCliInstallStrategy(");
+    expect(mainSource).toContain('Boolean((process as NodeJS.Process & { windowsStore?: boolean }).windowsStore)');
+    expect(mainSource).toContain(') === "packaged-windows"');
     expect(mainSource).toContain('join(homedir(), ".local", "bin")');
     expect(mainSource).toContain('{ name: "memmy-memory", source: join(cliDirectory, "memmy-memory") }');
     expect(mainSource).toContain('export PATH="$HOME/.local/bin:$PATH"');
@@ -981,6 +1094,8 @@ describe("desktop packaged runtime boundaries", () => {
     expect(packageSource).not.toContain(['create_cli_launcher "$CLI_BIN_DIR/', 'memmy-agent', '"'].join(""));
     expect(packageSource).not.toContain(['ln -sf "$SCRIPT_DIR/', 'memmy-agent', '"'].join(""));
     expect(windowsPackageSource).toContain('create_windows_cli_launcher "$CLI_BIN_DIR/memmy.cmd"');
+    expect(windowsPackageSource).toContain('require_packaged_runtime_file "$DESKTOP_DIR/release/win-unpacked/resources/cli/memmy-memory.cmd"');
+    expect(windowsPackageSource).toContain('require_packaged_runtime_file "$DESKTOP_DIR/release/win-unpacked/resources/cli/memmy.cmd"');
     expect(windowsPackageSource).toContain('for %%I in ("%RESOURCES_DIR%\\..") do set "APP_DIR=%%~fI"');
     expect(windowsPackageSource).toContain('set "APP_EXEC=%APP_DIR%\\Memmy.exe"');
     expect(windowsPackageSource).not.toContain('set "APP_EXEC=%RESOURCES_DIR%\\Memmy.exe"');
@@ -1014,6 +1129,8 @@ describe("desktop packaged runtime boundaries", () => {
     const windowsPreparedUpdateSource = extractFunctionSource(mainSource, "async function waitForWindowsPreparedRequiredUpdateBeforeBoot");
 
     expect(interfaceSource).toContain("export interface DesktopAppInfo");
+    expect(interfaceSource).toContain("isPackaged: boolean;");
+    expect(interfaceSource).toContain("isWindowsStore: boolean;");
     expect(interfaceSource).toContain("export interface DesktopUpdateCheckResult");
     expect(interfaceSource).toContain("export interface DesktopUpdateInstallResult");
     expect(mainSource).toContain("resolveCloudServiceBaseUrl(process.env.MEMMY_CLOUD_SERVICE)");
@@ -1026,6 +1143,8 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain("async function installPreparedRequiredUpdateBeforeBoot()");
     expect(mainSource).toContain("async function prepareRequiredUpdateAfterBoot()");
     expect(mainSource).toContain('url.searchParams.set("platformType", resolveCurrentDesktopPlatformType())');
+    expect(mainSource).toContain("isPackaged: app.isPackaged");
+    expect(mainSource).toContain('isWindowsStore: Boolean((process as NodeJS.Process & { windowsStore?: boolean }).windowsStore)');
     expect(mainSource).toContain("REQUIRED_UPDATE_BACKGROUND_FIRST_CHECK_DELAY_MS");
     expect(mainSource).toContain("REQUIRED_UPDATE_BACKGROUND_CHECK_INTERVAL_MS");
     expect(mainSource).toContain("requiredUpdateBackgroundFirstCheckTimer");
@@ -1191,7 +1310,8 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain("app.exit(0)");
     expect(mainSource).toContain("async function cleanupBeforeQuit()");
     expect(mainSource).toContain("event.preventDefault()");
-    expect(mainSource).toContain("await services?.close()");
+    expect(mainSource).toContain("readStopMemoryServiceOnExitSetting()");
+    expect(mainSource).toContain("await services?.close({ stopMemory: stopMemoryServiceForCurrentQuit })");
     expect(mainSource).toContain("app.quit()");
     expect(runtimeServicesSource).toContain("STOP_MANAGED_CHILD_GRACE_MS");
     expect(runtimeServicesSource).toContain("waitForManagedChildExit(child, STOP_MANAGED_CHILD_GRACE_MS)");
@@ -1438,30 +1558,15 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).not.toContain('fs.readFileSync("./dist/main.js", "utf8").includes("browser-prepare")');
     expect(source).not.toContain('npm install --prefix "$AGENT_DIR"');
     expect(source).not.toContain('if [ ! -x "$AGENT_DIR/node_modules/.bin/tsc" ]');
-    expect(source).toContain('cp -R "$MEMORY_DIR/dist/src" "$RUNTIME_DIR/memory/src"');
+    expect(source).toContain('cp -R "$MEMORY_DIR/dist/src" "$RUNTIME_DIR/memory/dist/src"');
+    expect(source).toContain('cp -R "$MEMORY_DIR/dist/viewer" "$RUNTIME_DIR/memory/dist/viewer"');
+    expect(source).toContain('cp -R "$MEMORY_DIR/adapters" "$RUNTIME_DIR/memory/adapters"');
     expect(source).toContain(
       'npm install --prefix "$RUNTIME_DIR/memory" --package-lock-only --ignore-scripts --os=darwin --cpu="$TARGET_CPU"'
     );
     expect(source).toContain('npm ci --prefix "$RUNTIME_DIR/memory" --omit=dev --os=darwin --cpu="$TARGET_CPU"');
-    expect(source).toContain('delete dependencies["@memmy/local-api-contracts"]');
-    expect(source).toContain('delete dependencies["@memmy/migrations"]');
-    expect(source).toContain('cp "$LOCAL_API_CONTRACTS_DIR/package.json"');
-    expect(source).toContain('cp -R "$LOCAL_API_CONTRACTS_DIR/dist"');
-    expect(source).toContain(
-      'MEMORY_RUNTIME_CONTRACTS_DIR="$RUNTIME_DIR/memory/node_modules/@memmy/local-api-contracts"',
-    );
-    expect(source).toContain(
-      'MEMORY_RUNTIME_MIGRATIONS_DIR="$RUNTIME_DIR/memory/node_modules/@memmy/migrations"',
-    );
-    expect(source).toContain(
-      'cp "$MIGRATIONS_STAGING_DIR/package.json" "$MEMORY_RUNTIME_MIGRATIONS_DIR/package.json"',
-    );
-    expect(source).toContain(
-      'require_packaged_runtime_file "$MEMORY_RUNTIME_CONTRACTS_DIR/dist/index.js"',
-    );
-    expect(source).toContain(
-      'require_packaged_runtime_file "$MEMORY_RUNTIME_MIGRATIONS_DIR/dist/index.js"',
-    );
+    expect(source).not.toContain('MEMORY_RUNTIME_CONTRACTS_DIR');
+    expect(source).not.toContain('MEMORY_RUNTIME_MIGRATIONS_DIR');
     expect(source).toContain("node_modules/.bin/electron-rebuild");
     expect(source).toContain('-m "$RUNTIME_DIR/memory"');
     expect(source).not.toContain('cp -R "$ROOT_DIR/dist/src" "$RUNTIME_DIR/memory/src"');
@@ -1783,7 +1888,7 @@ describe("desktop packaged runtime boundaries", () => {
     expect(writerSource).toContain("cloudService");
     expect(writerSource).not.toContain("JSON.stringify(process.env");
     expect(prunerSource).toContain('name === ".env" || name.startsWith(".env.")');
-    expect(versionGuardSource).toContain('["memory", "memmy-agent"]');
+    expect(versionGuardSource).toContain('[["memory", memoryVersion], ["memmy-agent", expected]]');
     expect(versionGuardSource).toContain("`staged ${component}`");
     expect(asarGuardSource).toContain("Packaged ASAR contains a forbidden environment file");
     expect(asarGuardSource).toContain("dist/main/desktop-edition.json");
@@ -1798,6 +1903,35 @@ describe("desktop packaged runtime boundaries", () => {
     const source = readFileSync(runtimeServicesPath, "utf8");
 
     expect(source).toContain('MEMMY_EMBEDDING_MODEL_ROOT: join(options.resourcesPath, "embedding-models")');
+  });
+
+  it("prunes and verifies only proven Windows x64 packaged runtime waste", () => {
+    const source = readFileSync(packageWinX64Path, "utf8");
+
+    expect(source).toContain("verify_windows_agent_html_lint_runtime");
+    expect(source).toContain([
+      'prune-packaged-runtime.mjs" \\',
+      "  --platform win32 \\",
+      '  --arch "$PACKAGE_ARCH" \\',
+      '  --runtime-root "$RUNTIME_DIR"',
+    ].join("\n"));
+    expect(source).toContain("verify_pruned_windows_runtime");
+    expect(source).toContain('require_packaged_runtime_absent "$RUNTIME_DIR/memory/node_modules/onnxruntime-node/bin/napi-v3/darwin"');
+    expect(source).toContain('require_packaged_runtime_absent "$RUNTIME_DIR/memory/node_modules/onnxruntime-node/bin/napi-v3/linux"');
+    expect(source).toContain('require_packaged_runtime_absent "$RUNTIME_DIR/memory/node_modules/onnxruntime-node/bin/napi-v3/win32/arm64"');
+    expect(source).toContain('require_packaged_runtime_absent "$RUNTIME_DIR/memmy-agent/node_modules/vitest"');
+    expect(source).toContain('require_packaged_runtime_absent "$RUNTIME_DIR/memmy-agent/node_modules/@vitest"');
+    expect(source).toContain('require_no_packaged_runtime_glob "$RUNTIME_DIR/memmy-agent/node_modules/@rolldown/binding-*"');
+    expect(source).toContain("Packaged runtime contains a third-party production source map");
+    expect(source.indexOf("verify_windows_agent_html_lint_runtime")).toBeLessThan(
+      source.indexOf("prune-packaged-runtime.mjs"),
+    );
+    expect(source.indexOf("prune-packaged-runtime.mjs")).toBeLessThan(
+      source.lastIndexOf("verify_windows_agent_html_lint_runtime"),
+    );
+    expect(source.lastIndexOf("verify_pruned_windows_runtime")).toBeLessThan(
+      source.indexOf("npx electron-builder"),
+    );
   });
 });
 

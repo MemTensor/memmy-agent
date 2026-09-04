@@ -4,7 +4,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
-import type { ByokTokenUsageSummary, TokenUsageDto } from "@memmy/local-api-contracts";
+import type { ByokTokenUsageSummary, ModelConfigView, TokenUsageDto } from "@memmy/local-api-contracts";
 import { appActions } from "../../state/app-actions.js";
 import { appReducer, createInitialAppState } from "../../state/app-reducer.js";
 import { SettingsPageView, UsageDetails } from "../settings-page.js";
@@ -118,53 +118,27 @@ describe("SettingsPage platform scene quota details", () => {
     expect(sceneGrid?.className).toContain("platformQuotaList");
   });
 
-  it("shows BYOK usage by stable provider and model dimensions, including historical rows", () => {
+  it("filters BYOK totals and purpose rows by model while keeping historical usage in all models", () => {
     const byokUsage: ByokTokenUsageSummary = {
-      inputTokens: 24,
-      outputTokens: 21,
-      totalTokens: 45,
-      cachedInputTokens: 3,
+      inputTokens: 38,
+      outputTokens: 16,
+      totalTokens: 54,
+      cachedInputTokens: 8,
       cacheCreationInputTokens: 0,
       updatedAt: "2026-08-11T12:00:00.000Z",
-      byKind: [{
-        kind: "agent_chat",
-        inputTokens: 24,
-        outputTokens: 21,
-        totalTokens: 45,
-        cachedInputTokens: 3,
-        cacheCreationInputTokens: 0,
-        eventCount: 3,
-        updatedAt: "2026-08-11T12:00:00.000Z"
-      }],
+      byKind: [
+        byKind("agent_chat", 25, 10, 35, 5),
+        byKind("memory_summary", 9, 3, 12, 2),
+        byKind("memory_evolution", 4, 3, 7, 1)
+      ],
       byProvider: [],
       byModel: [
-        byModel("preset-openai", "openai", "shared-model", "agent", 30),
-        byModel("preset-anthropic", "anthropic", "shared-model", "agent", 10),
-        byModel(null, null, null, null, 5)
+        byModel("preset-openai", "openai", "shared-model", "agent", 20, 10, 30, 5),
+        byModel("preset-openai", "openai", "shared-model", "memory_summary", 9, 3, 12, 2),
+        byModel("preset-anthropic", "anthropic", "shared-model", "memory_evolution", 4, 3, 7, 1),
+        byModel(null, null, null, null, 5, 0, 5, 0)
       ]
     };
-
-    act(() => {
-      root.render(
-        <I18nProvider language="zh-CN">
-          <UsageDetails
-            showPlatform
-            platformUsage={emptyPlatformUsage()}
-            byokUsage={byokUsage}
-            byokUsageStatus="ready"
-          />
-        </I18nProvider>
-      );
-    });
-
-    expect(container.textContent).toContain("平台赠送额度");
-    expect(container.textContent).toContain("按模型");
-    const modelRows = [...container.querySelectorAll('[data-testid="byok-model-usage-row"]')];
-    expect(modelRows.map((row) => row.textContent)).toEqual([
-      expect.stringContaining("shared-modelopenai · Agent 任务30Token"),
-      expect.stringContaining("shared-modelanthropic · Agent 任务10Token"),
-      expect.stringContaining("历史未分类升级前记录，无法可靠归属到具体模型5Token")
-    ]);
 
     act(() => {
       root.render(
@@ -179,8 +153,83 @@ describe("SettingsPage platform scene quota details", () => {
       );
     });
 
-    expect(container.textContent).not.toContain("平台赠送额度");
-    expect(container.textContent).toContain("自定义 API Key 消耗");
+    expect(container.textContent).toContain("本机累计54Token");
+    expect(container.textContent).toContain("输入38Token输出16Token缓存命中8Token");
+    expect([...container.querySelectorAll("div")].some((element) => element.textContent === "按模型")).toBe(false);
+    expect(container.textContent).not.toContain("按用途");
+    expect(container.querySelector('[data-testid="byok-model-usage-row"]')).toBeNull();
+
+    act(() => {
+      container.querySelector<HTMLButtonElement>('[role="combobox"]')?.click();
+    });
+
+    const options = [...container.querySelectorAll<HTMLButtonElement>('[role="option"]')];
+    expect(options.map((option) => option.textContent)).toEqual([
+      "全部模型",
+      "openai · shared-model",
+      "anthropic · shared-model"
+    ]);
+
+    act(() => {
+      options[1]?.click();
+    });
+
+    expect(container.textContent).toContain("本机累计42Token");
+    expect(container.textContent).toContain("输入29Token输出13Token缓存命中7Token");
+    expect(findUsageRow(container, "Agent 任务").textContent).toContain("30Token");
+    expect(findUsageRow(container, "记忆摘要").textContent).toContain("12Token");
+    expect(findUsageRow(container, "记忆进化").textContent).toContain("0Token");
+    expect(findUsageRow(container, "Embedding").textContent).toContain("0Token");
+  });
+
+  it("disambiguates identical provider, model, and API base by preset", () => {
+    const byokUsage: ByokTokenUsageSummary = {
+      inputTokens: 30,
+      outputTokens: 0,
+      totalTokens: 30,
+      cachedInputTokens: 0,
+      cacheCreationInputTokens: 0,
+      updatedAt: "2026-08-11T12:00:00.000Z",
+      byKind: [byKind("agent_chat", 30, 0, 30, 0)],
+      byProvider: [],
+      byModel: [
+        byModel("preset-primary", "openai", "shared-model", "agent", 10, 0, 10, 0),
+        byModel("preset-relay", "openai", "shared-model", "agent", 20, 0, 20, 0)
+      ]
+    };
+
+    act(() => {
+      root.render(
+        <I18nProvider language="zh-CN">
+          <UsageDetails
+            showPlatform={false}
+            platformUsage={emptyPlatformUsage()}
+            byokUsage={byokUsage}
+            byokUsageStatus="ready"
+            modelCatalog={duplicateModelCatalog()}
+          />
+        </I18nProvider>
+      );
+    });
+
+    act(() => {
+      container.querySelector<HTMLButtonElement>('[role="combobox"]')?.click();
+    });
+
+    const options = [...container.querySelectorAll<HTMLButtonElement>('[role="option"]')];
+    expect(options.map((option) => option.textContent)).toEqual([
+      "全部模型",
+      "openai · shared-model · https://api.openai.com/v1 · preset-primary",
+      "openai · shared-model · https://api.openai.com/v1 · preset-relay"
+    ]);
+
+    act(() => {
+      options[2]?.click();
+    });
+
+    expect(container.querySelector('[role="combobox"]')?.textContent)
+      .toContain("shared-model · https://api.openai.com/v1 · preset-relay");
+    expect(container.textContent).toContain("本机累计20Token");
   });
 
   it("places the BYOK updated time beside the outer Token usage heading", async () => {
@@ -202,6 +251,7 @@ describe("SettingsPage platform scene quota details", () => {
           <SettingsPageView
             state={createInitialAppState()}
             dispatch={vi.fn()}
+            activeTab="tokens"
             byokTokenUsageClient={{ getSummary: vi.fn(async () => byokUsage) }}
             update={{
               appVersion: "1.0.4",
@@ -224,28 +274,129 @@ describe("SettingsPage platform scene quota details", () => {
     expect(tokenUsageHeader?.textContent).toContain("更新于");
     expect(tokenUsageHeader?.className).toContain("justify-between");
   });
+
+  it("refreshes BYOK usage when entering the Token tab and when the focused Token tab regains focus", async () => {
+    const getSummary = vi.fn(async () => ({
+      inputTokens: 1,
+      outputTokens: 1,
+      totalTokens: 2,
+      cachedInputTokens: 0,
+      cacheCreationInputTokens: 0,
+      updatedAt: "2026-08-31T02:00:00.000Z",
+      byKind: [],
+      byProvider: [],
+      byModel: []
+    } satisfies ByokTokenUsageSummary));
+    const byokTokenUsageClient = { getSummary };
+    const update = {
+      appVersion: "1.0.4",
+      phase: "idle" as const,
+      preparedUpdatePath: null,
+      downloadProgress: null,
+      feedback: null,
+      requestInlineAction: vi.fn(async () => undefined),
+      requestPrimaryAction: vi.fn(async () => undefined)
+    };
+    const renderTab = async (activeTab: "account" | "tokens") => {
+      await act(async () => {
+        root.render(
+          <I18nProvider language="zh-CN">
+            <SettingsPageView
+              state={createInitialAppState()}
+              dispatch={vi.fn()}
+              activeTab={activeTab}
+              byokTokenUsageClient={byokTokenUsageClient}
+              update={update}
+            />
+          </I18nProvider>
+        );
+        await Promise.resolve();
+      });
+    };
+
+    await renderTab("account");
+    expect(getSummary).not.toHaveBeenCalled();
+
+    await renderTab("tokens");
+    expect(getSummary).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+      await Promise.resolve();
+    });
+    expect(getSummary).toHaveBeenCalledTimes(2);
+
+    await renderTab("account");
+    window.dispatchEvent(new Event("focus"));
+    expect(getSummary).toHaveBeenCalledTimes(2);
+  });
 });
 
 function byModel(
   presetId: string | null,
   provider: string | null,
   model: string | null,
-  capability: "agent" | null,
-  totalTokens: number
+  capability: ByokTokenUsageSummary["byModel"][number]["capability"],
+  inputTokens: number,
+  outputTokens: number,
+  totalTokens: number,
+  cachedInputTokens: number
 ): ByokTokenUsageSummary["byModel"][number] {
   return {
     presetId,
     provider,
     model,
     capability,
-    inputTokens: totalTokens,
-    outputTokens: 0,
+    inputTokens,
+    outputTokens,
     totalTokens,
-    cachedInputTokens: 0,
+    cachedInputTokens,
     cacheCreationInputTokens: 0,
     eventCount: 1,
     updatedAt: "2026-08-11T12:00:00.000Z"
   };
+}
+
+function byKind(
+  kind: ByokTokenUsageSummary["byKind"][number]["kind"],
+  inputTokens: number,
+  outputTokens: number,
+  totalTokens: number,
+  cachedInputTokens: number
+): ByokTokenUsageSummary["byKind"][number] {
+  return {
+    kind,
+    inputTokens,
+    outputTokens,
+    totalTokens,
+    cachedInputTokens,
+    cacheCreationInputTokens: 0,
+    eventCount: 1,
+    updatedAt: "2026-08-11T12:00:00.000Z"
+  };
+}
+
+function findUsageRow(container: HTMLElement, label: string): HTMLElement {
+  const row = [...container.querySelectorAll<HTMLElement>("article")]
+    .find((candidate) => candidate.querySelector("h3")?.textContent === label);
+  expect(row).not.toBeUndefined();
+  return row!;
+}
+
+function duplicateModelCatalog(): ModelConfigView {
+  return {
+    providers: [{
+      provider: "openai",
+      endpoints: [
+        { endpointId: "endpoint-primary", apiBase: "https://api.openai.com/v1" },
+        { endpointId: "endpoint-relay", apiBase: "https://api.openai.com/v1" }
+      ],
+      models: [
+        { presetId: "preset-primary", endpointId: "endpoint-primary" },
+        { presetId: "preset-relay", endpointId: "endpoint-relay" }
+      ]
+    }]
+  } as ModelConfigView;
 }
 
 function emptyPlatformUsage(): TokenUsageDto {

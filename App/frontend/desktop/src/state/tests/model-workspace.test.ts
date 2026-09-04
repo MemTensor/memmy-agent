@@ -1,7 +1,11 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ModelConfigInput, ModelConfigView } from "@memmy/local-api-contracts";
+import {
+  BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID,
+  type ModelConfigInput,
+  type ModelConfigView
+} from "@memmy/local-api-contracts";
 import YAML from "yaml";
 import { afterEach, describe, expect, it } from "vitest";
 import { CLIENT_PRESET_ID_PREFIX, persistModelCatalogMutation } from "../../api/config-client.js";
@@ -808,6 +812,19 @@ describe("canonical model workspace adapter", () => {
     expect(result.workspace.catalog.effectiveCandidates.byok).toEqual([]);
     expect(result.workspace.catalog.effectiveCandidates.account.map((candidate) => candidate.presetId))
       .toEqual(["account-agent"]);
+  });
+
+  it("删除无关连接时保留两个空间的内置本地 Embedding Assignment", () => {
+    const workspace = createModelWorkspace(catalog());
+    workspace.catalog.modelAssignments.byok.embedding = BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID;
+    workspace.catalog.modelAssignments.account.embedding = BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID;
+
+    const result = deleteModelConnection(workspace, "account", "openai:chat");
+
+    expect(result.workspace.catalog.modelAssignments.byok.embedding)
+      .toBe(BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID);
+    expect(result.workspace.catalog.modelAssignments.account.embedding)
+      .toBe(BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID);
   });
 
   it("Agent 多选/default 与其他任务单选引用 preset ID", () => {

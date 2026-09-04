@@ -135,6 +135,10 @@ export class AnthropicProvider extends LLMProvider {
     return model.startsWith("anthropic/") ? model.slice("anthropic/".length) : model;
   }
 
+  static omitsTemperature(model: string): boolean {
+    return /(?:^|[./])claude-(?:sonnet-5|opus-(?:4-7|5))(?:[-.:@]|$)/i.test(model);
+  }
+
   static toolResultBlock(msg: Record<string, any>): Record<string, any> {
     const content = msg.content;
     const block: Record<string, any> = {
@@ -364,7 +368,7 @@ export class AnthropicProvider extends LLMProvider {
     }
 
     const thinkingEnabled = Boolean(reasoningEffort) && String(reasoningEffort).toLowerCase() !== "none";
-    const omitTemperature = modelName.includes("opus-4-7");
+    const omitTemperature = AnthropicProvider.omitsTemperature(modelName);
     const kwargs: Record<string, any> = {
       model: modelName,
       messages,
@@ -393,6 +397,7 @@ export class AnthropicProvider extends LLMProvider {
 
     if (this.extraHeaders) kwargs.extra_headers = this.extraHeaders;
     if (this.extraBody) Object.assign(kwargs, this.extraBody);
+    if (omitTemperature) delete kwargs.temperature;
     return kwargs;
   }
 

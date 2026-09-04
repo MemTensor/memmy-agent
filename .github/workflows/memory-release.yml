@@ -1,0 +1,102 @@
+name: Memory 2.1 Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Memory version (X.Y.Z)
+        required: true
+        default: 2.1.0
+  push:
+    tags:
+      - "memory-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck -w @memmy/memory
+      - run: npm test -w @memmy/memory
+      - run: npx vitest run App/shell/desktop/tests/packaged-runtime-boundary.test.ts App/shell/desktop/tests/runtime-services.test.ts
+
+  runtime:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: darwin-arm64
+            os: macos-14
+          - target: darwin-x64
+            os: macos-15-intel
+          - target: linux-arm64
+            os: ubuntu-24.04-arm
+          - target: linux-x64
+            os: ubuntu-24.04
+          - target: windows-arm64
+            os: windows-11-arm
+          - target: windows-x64
+            os: windows-2025
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          version="${{ inputs.version }}"
+          if [[ -z "$version" ]]; then version="${GITHUB_REF_NAME#memory-v}"; fi
+          node -e 'if (!/^\d+\.\d+\.\d+$/.test(process.argv[1])) process.exit(1)' "$version"
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+      - name: Build self-contained runtime
+        shell: bash
+        run: node Memory/src/cli/scripts/build-runtime.mjs --target "${{ matrix.target }}" --version "${{ steps.version.outputs.value }}" --output Memory/dist/release-part
+      - name: Build CLI launcher
+        shell: bash
+        env:
+          MEMMY_MEMORY_TARGET: ${{ matrix.target }}
+          MEMMY_MEMORY_VERSION: ${{ steps.version.outputs.value }}
+        run: bash Memory/src/cli/scripts/build-binary.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: memory-${{ matrix.target }}
+          path: |
+            Memory/dist/release-part/*.tar.gz
+            Memory/src/cli/dist/binaries/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    needs: runtime
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: Memory/dist/release-input
+      - name: Resolve version
+        id: version
+        run: |
+          version="${{ inputs.version }}"
+          if [[ -z "$version" ]]; then version="${GITHUB_REF_NAME#memory-v}"; fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+      - run: node Memory/src/cli/scripts/assemble-release.mjs Memory/dist/release-input Memory/dist/release "${{ steps.version.outputs.value }}"
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: memory-v${{ steps.version.outputs.value }}
+          name: Memmy Memory ${{ steps.version.outputs.value }}
+          generate_release_notes: true
+          files: Memory/dist/release/*

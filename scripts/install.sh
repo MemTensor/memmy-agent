@@ -152,10 +152,10 @@ AGENT_DIR="$PAYLOAD_DIR/App/memmy-agent"
 [ -f "$PAYLOAD_DIR/resources/embedding-models/Xenova/all-MiniLM-L6-v2/onnx/model_quantized.onnx" ] \
   || fail "archive is missing the bundled embedding model"
 
-printf 'Installing Memory production dependencies for this Linux machine...\n'
-(cd "$PAYLOAD_DIR" && npm ci --omit=dev --workspace @memmy/memory \
+printf 'Installing Memory runtime production dependencies for this Linux machine...\n'
+(cd "$PAYLOAD_DIR" && npm ci --omit=dev --workspaces \
   --include-workspace-root=false --no-audit --no-fund) \
-  || fail "Memory dependency installation failed; the previous Memmy installation is unchanged"
+  || fail "Memory runtime dependency installation failed; the previous Memmy installation is unchanged"
 printf 'Installing Agent production dependencies for this Linux machine...\n'
 (cd "$AGENT_DIR" && npm ci --omit=dev --no-audit --no-fund) \
   || fail "Agent dependency installation failed; the previous Memmy installation is unchanged"

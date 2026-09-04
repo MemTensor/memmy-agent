@@ -4,7 +4,7 @@ import { MANAGED_AGENT_DISCOVERY_PENDING_DATA_PATH } from "@memmy/local-api-cont
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createSourceRegistry } from "../../adapters/outbound/agent-source/source-registry.js";
 import type {
   ConversationMessage,
@@ -610,9 +610,10 @@ describe("agent source service", () => {
     expect(enqueueCalls).toEqual([["memory-cursor", "memory-custom"]]);
     expect(workerCalls).toEqual([
       expect.objectContaining({
-        limit: 20,
+        limit: 1,
         targetMemoryIds: ["memory-cursor", "memory-custom"],
-        priorityCohortOnly: true
+        priorityCohortOnly: true,
+        timeoutMs: 2_400_000
       })
     ]);
   });
@@ -671,12 +672,66 @@ describe("agent source service", () => {
     })).resolves.toEqual([]);
 
     expect(workerTargets).toEqual([["memory-a", "memory-b"]]);
-    expect(workerLimits).toEqual([20]);
+    expect(workerLimits).toEqual([1]);
     expect(workerPriorityCohorts).toEqual([true]);
     expect(progress).toEqual([
       { current: 0, total: 2 },
       { current: 2, total: 2 }
     ]);
+  });
+
+  it("emits persisted summary progress while the worker call remains pending", async () => {
+    const baseMemoryClient = createMockMemoryClient();
+    let releaseWorker = () => undefined;
+    let workerSettled = false;
+    const workerGate = new Promise<void>((resolve) => {
+      releaseWorker = resolve;
+    });
+    const service = createService({
+      memoryClient: {
+        ...baseMemoryClient,
+        async enqueueImportSummaries(memoryIds) {
+          return { enqueued: memoryIds?.length ?? 0, memoryIds: memoryIds ?? [], serverTime: "2026-05-28T10:00:00.000Z" };
+        },
+        async runWorker(input) {
+          await workerGate;
+          workerSettled = true;
+          return baseMemoryClient.runWorker(input);
+        },
+        async getMemoryProcessingStatus(memoryIds) {
+          return {
+            items: memoryIds.map((memoryId) => ({
+              memoryId,
+              state: "ready" as const,
+              stage: null,
+              activeJobId: null,
+              attemptCount: 1,
+              manualRetryCount: 0,
+              retryAction: "retry" as const,
+              errorCode: null,
+              errorMessage: null,
+              failedAt: null,
+              updatedAt: "2026-05-28T10:00:00.000Z"
+            })),
+            serverTime: "2026-05-28T10:00:00.000Z"
+          };
+        }
+      }
+    });
+    const progress: number[] = [];
+    const processing = service.processImportSummaries(["memory-a"], {
+      onProgress(event) {
+        if (event.phase === "summarize") progress.push(event.current);
+      }
+    });
+
+    try {
+      await vi.waitFor(() => expect(progress).toContain(1), { timeout: 1_000, interval: 25 });
+      expect(workerSettled).toBe(false);
+    } finally {
+      releaseWorker();
+      await processing;
+    }
   });
 
   it("finishes an empty owned-memory batch without starting the worker", async () => {

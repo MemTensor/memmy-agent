@@ -73,16 +73,17 @@ afterEach(() => {
 });
 
 describe("terminal target resolution", () => {
-  it("creates cli:direct as a fixed standalone session by default", () => {
+  it("creates a fresh standalone session when requested by the root TUI", () => {
     const { dependencies, loop, workspace } = makeLoop();
-    const target = resolveTerminalTarget(dependencies);
+    const target = resolveTerminalTarget(dependencies, { fresh: true });
     expect(target).toMatchObject({
-      sessionId: "cli:direct",
       target: "standalone",
       projectId: null,
       cwd: workspace,
     });
-    expect(loop.sessions.loadSession("cli:direct")?.metadata).toMatchObject({
+    expect(target.sessionId).toMatch(/^cli:[0-9a-f-]{36}$/);
+    expect(resolveTerminalTarget(dependencies, { fresh: true }).sessionId).not.toBe(target.sessionId);
+    expect(loop.sessions.loadSession(target.sessionId)?.metadata).toMatchObject({
       webui: true,
       webuiProjectId: null,
       webuiWorkspaceCwd: workspace,
@@ -94,6 +95,7 @@ describe("terminal target resolution", () => {
     const created = resolveTerminalTarget(dependencies, { standalone: true });
     expect(created.sessionId).toMatch(/^cli:[0-9a-f-]{36}$/);
     expect(resolveTerminalTarget(dependencies, { sessionId: created.sessionId })).toEqual(created);
+    expect(resolveTerminalTarget(dependencies, { sessionId: created.sessionId, fresh: true })).toEqual(created);
     expect(() => resolveTerminalTarget(dependencies, { sessionId: "telegram:123" }))
       .toThrow("--session only accepts");
     expect(() => resolveTerminalTarget(dependencies, {
@@ -107,7 +109,7 @@ describe("terminal target resolution", () => {
     dependencies.hasUsableDefaultModel = () => false;
 
     expect(() => resolveTerminalTarget(dependencies, { standalone: true })).toThrow(
-      "No usable default model is configured. Run `memmy onboard --wizard` first.",
+      "No usable default model is configured. Run `memmy onboard` first.",
     );
   });
 

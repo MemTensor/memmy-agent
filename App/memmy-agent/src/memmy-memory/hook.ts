@@ -148,11 +148,13 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
     const sessionKey = this.sessionKeyFromContext(ctx);
     if (!sessionKey) return;
     try {
-      await this.prepareL3Session(ctx, sessionKey, false);
+      await this.ensureSession(ctx, sessionKey);
+      const state = this.sessionStateBySessionKey.get(sessionKey);
+      if (state?.protocol === "v2") await this.loadL3Context(sessionKey, state);
       this.clearMemoryUnavailable(sessionKey);
     } catch (error) {
       this.rememberUnavailableL3(sessionKey);
-      this.warnMemoryUnavailable(sessionKey, "session-start", error);
+      this.warnMemoryUnavailable(sessionKey, "recall", error);
     }
   }
 
@@ -160,7 +162,7 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
     const sessionKey = this.sessionKeyFromContext(ctx);
     if (!sessionKey) return;
     try {
-      await this.prepareL3Session(ctx, sessionKey, false);
+      await this.ensureSession(ctx, sessionKey);
       this.clearMemoryUnavailable(sessionKey);
     } catch (error) {
       this.warnMemoryUnavailable(sessionKey, "session-start", error);
@@ -351,7 +353,6 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
           throughL1MemoryId: head.throughL1MemoryId,
         });
       }
-      await this.loadL3Context(sessionKey, state);
       this.clearMemoryUnavailable(sessionKey);
     } catch (error) {
       this.warnMemoryUnavailable(sessionKey, "recall", error);
@@ -573,19 +574,22 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
     return resolved;
   }
 
-  private async prepareL3Session(ctx: AgentHookContext, sessionKey: string, force: boolean): Promise<void> {
-    await this.ensureSession(ctx, sessionKey);
-    const state = this.sessionStateBySessionKey.get(sessionKey);
-    if (!state || state.protocol !== "v2") return;
-    if (!force && state.l3Cache.loadedAt) return;
-    await this.loadL3Context(sessionKey, state);
-  }
-
   private async loadL3Context(sessionKey: string, state: MemmyMemorySessionState): Promise<void> {
     const response = await this.client.l3WorldModelContext(
       state.memorySessionId,
       this.l3Envelope(sessionKey, state),
     );
+    const loadedAt = new Date().toISOString();
+    const current = state.l3Cache;
+    if (
+      response.memoryId !== null
+      && current.status === "loaded"
+      && current.memoryId === response.memoryId
+      && current.memoryVersion === response.memoryVersion
+    ) {
+      state.l3Cache = { ...current, loadedAt };
+      return;
+    }
     state.l3Cache = {
       sessionId: state.memorySessionId,
       projectId: response.projectId,
@@ -594,7 +598,7 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
       memoryVersion: response.memoryVersion,
       renderedContext: response.renderedContext,
       sourceMemoryIds: [...response.sourceMemoryIds],
-      loadedAt: new Date().toISOString(),
+      loadedAt,
     };
   }
 

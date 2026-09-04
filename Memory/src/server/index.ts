@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-import { mutateRuntimeConfig } from "@memmy/migrations";
-import { closeSync, mkdirSync, openSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { mutateMemoryConfig } from "../config/writer.js";
+import { closeSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Server } from "node:http";
 import { createStorageBackend, type StorageBackend } from "../storage/backend.js";
@@ -10,6 +10,8 @@ import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
 import { MemoryService } from "../service/memory-service.js";
 import { listenMemoryHttpServer } from "./http.js";
 import { loadCloudServiceEnv } from "../cli/load-env.js";
+import { requestMemoryServiceRestart } from "./service-restart.js";
+import { MEMORY_PROTOCOL_VERSION, MEMORY_SERVICE_VERSION } from "../version.js";
 
 const logger = createMemoryLogger("server");
 
@@ -18,11 +20,13 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     const options = parseServeArgs(argv);
     const { config, path: configPath } = loadMemmyConfig(options.configPath);
     const host = options.host ?? process.env.MEMMY_MEMORY_HOST ?? process.env.MEMORY_SERVICE_HOST ?? "127.0.0.1";
+    assertLoopbackBindHost(host);
     const port = options.port ??
         numberEnv("MEMMY_MEMORY_PORT") ??
         numberEnv("MEMORY_SERVICE_PORT") ??
         18960;
     const sqlitePath = options.dbPath ?? config.storage.sqlitePath;
+    const serviceHome = resolve(dirname(configPath), "memory-service");
     logger.info("service.starting", {
         host,
         port,
@@ -31,9 +35,8 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
         sqlitePath,
         configPath
     });
-    const serverLock = config.storage.backend === "openmem-cloud-rest"
-        ? undefined
-        : acquireSqliteServerLock({ sqlitePath, host, port });
+    const serviceLock = acquireUserServiceLock({ serviceHome, host, port });
+    let sqliteLock: SqliteServerLock | undefined;
     let backend: StorageBackend | undefined;
     let server: Server | undefined;
     let requestShutdown: (() => void) | undefined;
@@ -43,6 +46,9 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     const handleShutdownSignal = () => requestShutdown?.();
 
     try {
+        sqliteLock = config.storage.backend === "openmem-cloud-rest"
+            ? undefined
+            : acquireSqliteServerLock({ sqlitePath, host, port });
         backend = createStorageBackend({
             mode: config.storage.mode,
             backend: config.storage.backend,
@@ -53,7 +59,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
         const service = new MemoryService({
             backend,
             mode: config.storage.mode,
-            configPath: options.configPath,
+            configPath,
             config
         });
         const listening = await listenMemoryHttpServer({
@@ -62,15 +68,27 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
             port,
             timeZone: config.timeZone,
             onShutdownRequested: () => requestShutdown?.(),
+            onRestartRequested: requestMemoryServiceRestart,
             auth: config.storage.token
                 ? { localServiceToken: config.storage.token }
-                : { allowAnonymous: true }
+                : { allowAnonymous: true },
+            configPath,
+            startAgentSourceAutomation: true
         });
         server = listening.server;
         const { url } = listening;
         if (configPath) {
             await writeCurrentEndpoint(configPath, url);
         }
+        writeRuntimeState(serviceHome, {
+            pid: process.pid,
+            endpoint: url,
+            serviceVersion: MEMORY_SERVICE_VERSION,
+            protocolVersion: MEMORY_PROTOCOL_VERSION,
+            configPath,
+            sqlitePath,
+            startedAt: new Date().toISOString()
+        });
 
         logger.info("service.listening", {
             url,
@@ -87,7 +105,9 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
             await closeHttpServer(server);
         }
         backend?.close();
-        serverLock?.release();
+        removeRuntimeState(serviceHome);
+        sqliteLock?.release();
+        serviceLock.release();
     }
 }
 
@@ -102,6 +122,24 @@ async function closeHttpServer(server: Server): Promise<void> {
 export interface SqliteServerLock {
     path: string;
     release(): void;
+}
+
+export function acquireUserServiceLock(input: {
+    serviceHome: string;
+    host: string;
+    port: number;
+}): SqliteServerLock {
+    const serviceHome = resolve(input.serviceHome);
+    mkdirSync(serviceHome, { recursive: true });
+    return acquireLockFile(join(serviceHome, "service.lock"), {
+        pid: process.pid,
+        host: input.host,
+        port: input.port,
+        serviceHome,
+        serviceVersion: MEMORY_SERVICE_VERSION,
+        protocolVersion: MEMORY_PROTOCOL_VERSION,
+        startedAt: new Date().toISOString()
+    });
 }
 
 export function acquireSqliteServerLock(input: {
@@ -159,13 +197,33 @@ function acquireLockFile(lockPath: string, payload: Record<string, unknown>): Sq
                 continue;
             }
             throw new Error(
-                `Memory sqlite database is already served by pid ${existing.pid}` +
+                `Memory service is already served by pid ${existing.pid}` +
                 `${existing.host && existing.port ? ` at ${existing.host}:${existing.port}` : ""}. ` +
                 `Stop that process before starting another Memory server. Lock: ${lockPath}`
             );
         }
     }
     throw new Error(`failed to acquire Memory sqlite server lock: ${lockPath}`);
+}
+
+function writeRuntimeState(serviceHome: string, state: Record<string, unknown>): void {
+    mkdirSync(serviceHome, { recursive: true });
+    const path = join(serviceHome, "runtime.json");
+    const temporaryPath = `${path}.${process.pid}.tmp`;
+    writeFileSync(temporaryPath, `${JSON.stringify(state, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+    renameSync(temporaryPath, path);
+}
+
+function removeRuntimeState(serviceHome: string): void {
+    const path = join(serviceHome, "runtime.json");
+    try {
+        const state = JSON.parse(readFileSync(path, "utf8")) as { pid?: unknown };
+        if (state.pid === process.pid) unlinkSync(path);
+    } catch (error) {
+        if (!isNodeError(error) || error.code !== "ENOENT") {
+            logger.warn("runtime_state.remove_failed", { path, ...memoryErrorFields(error) });
+        }
+    }
 }
 
 function readServerLock(lockPath: string): { pid?: unknown; host?: unknown; port?: unknown } | undefined {
@@ -255,9 +313,15 @@ function numberEnv(name: string): number | undefined {
     return parsePort(value);
 }
 
+export function assertLoopbackBindHost(host: string): void {
+    if (host !== "127.0.0.1" && host !== "::1" && host !== "localhost") {
+        throw new Error(`Memory service must listen on a loopback address, received: ${host}`);
+    }
+}
+
 export async function writeCurrentEndpoint(configPath: string, endpoint: string): Promise<void> {
     try {
-        await mutateRuntimeConfig(configPath, (root) => {
+        await mutateMemoryConfig(configPath, (root) => {
             const memmyMemory = mutableRecord(root.memmyMemory);
             const storage = mutableRecord(memmyMemory.storage);
             storage.endpoint = endpoint;

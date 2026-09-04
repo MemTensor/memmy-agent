@@ -1,6 +1,6 @@
 {
   "name": "@memmy/memory",
-  "version": "1.1.1",
+  "version": "2.1.0",
   "private": true,
   "type": "module",
   "main": "./dist/src/index.js",
@@ -8,47 +8,57 @@
     "memmy-memory": "./dist/src/cli/index.js"
   },
   "scripts": {
-    "version:sync": "npm --prefix .. run version:sync",
-    "prebuild": "npm run version:sync",
-    "pretypecheck": "npm run version:sync",
-    "pretest": "npm run version:sync",
-    "prepackage:npm": "npm run version:sync",
-    "prebinary": "npm run version:sync",
-    "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json && npm run copy-cli-assets",
+    "build": "npm run build -w @memmy/agent-source-core && node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && npm run viewer:build && tsc -p tsconfig.json && npm run integration:build:dist && npm run copy-cli-assets",
     "postbuild": "node src/cli/scripts/set-executable.mjs dist/src/cli/index.js",
     "copy-cli-assets": "node src/cli/scripts/copy-assets.mjs",
     "dev": "tsx src/server/index.ts",
+    "predev": "npm run integration:build",
     "serve": "node dist/src/server/index.js",
     "serve:local": "node dist/src/server/index.js",
     "serve:dev": "tsx src/server/index.ts",
+    "preserve:dev": "npm run integration:build",
     "worker:run": "node dist/src/cli/index.js raw POST /worker/run",
     "test": "vitest run --dir tests",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "npm run build -w @memmy/agent-source-core && tsc -p tsconfig.json --noEmit && tsc -p viewer/tsconfig.json --noEmit",
+    "viewer:build": "vite build --config viewer/vite.config.ts",
+    "viewer:dev": "vite --config viewer/vite.config.ts --host 127.0.0.1",
+    "pretest": "npm run build -w @memmy/agent-source-core && npm run viewer:build && npm run integration:build",
+    "integration:build": "node src/agent-source/integration/workspace-bridge/build-runtime.mjs",
+    "integration:build:dist": "node src/agent-source/integration/workspace-bridge/build-runtime.mjs --dist",
     "package:npm": "node src/cli/npm/build-package.mjs",
-    "pack:npm": "npm run package:npm && npm pack ../dist/memmy-memory-npm",
-    "binary": "bash src/cli/scripts/build-binary.sh"
+    "pack:npm": "npm run package:npm && npm pack ./dist/memmy-memory-npm",
+    "binary": "bash src/cli/scripts/build-binary.sh",
+    "runtime:package": "node src/cli/scripts/build-runtime.mjs",
+    "release:assemble": "node src/cli/scripts/assemble-release.mjs"
   },
   "engines": {
     "node": ">=20"
   },
   "dependencies": {
-    "@memmy/local-api-contracts": "0.0.0",
-    "@memmy/migrations": "0.0.0",
+    "@memmy/agent-source-core": "0.0.0",
     "@huggingface/transformers": "^3.8.0",
     "better-sqlite3": "^12.6.3",
     "dotenv": "^16.6.1",
     "fast-xml-parser": "^5.8.0",
+    "fzstd": "^0.1.1",
     "ignore": "^7.0.5",
     "jsonc-parser": "^3.3.1",
     "sqlite-vec": "0.1.9",
     "smol-toml": "1.7.0",
+    "tiktoken": "^1.0.22",
     "typescript": "^6.0.3",
-    "yaml": "^2.9.0"
+    "yaml": "^2.9.0",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@preact/preset-vite": "^2.10.2",
+    "@preact/signals": "^2.8.1",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^25.9.1",
+    "esbuild": "^0.27.4",
+    "preact": "^10.27.2",
     "tsx": "^4.22.3",
+    "vite": "^8.0.0",
     "vitest": "^4.1.7"
   }
 }

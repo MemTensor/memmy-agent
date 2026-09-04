@@ -1,5 +1,9 @@
 import { AlertTriangle, Check, CheckCircle2, ChevronDown, ChevronUp, Database, Info, KeyRound, Loader2, Pencil, Plus, Trash2, Wrench, X, XCircle } from "lucide-react";
-import { MODEL_NAME_MAX_LENGTH, type ModelEndpointProtocol } from "@memmy/local-api-contracts";
+import {
+  BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID,
+  MODEL_NAME_MAX_LENGTH,
+  type ModelEndpointProtocol
+} from "@memmy/local-api-contracts";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ConfigClient, ModelProviderConfig } from "../api/config-client.js";
 import { Button } from "../components/button.js";
@@ -53,7 +57,6 @@ export type ModelKind = "text" | "embedding" | "asr" | "image";
 
 const DEFAULT_TEXT_CAPABILITIES: ModelCapability[] = ["chat", "memorySummary", "memoryEvolution"];
 const MODEL_KIND_OPTIONS = ["text", "embedding", "asr", "image"] as const;
-const LOCAL_EMBEDDING_OPTION_VALUE = "builtin:local-embedding";
 
 export function modelCapabilitiesForKind(kind: ModelKind): ModelCapability[] {
   if (kind === "text") return [...DEFAULT_TEXT_CAPABILITIES];
@@ -586,12 +589,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
   }
 
   function updateAssignment(kind: ModelAssignmentKind, candidateId: string) {
-    const assignment = kind === "embedding"
-      && props.mode === "byok"
-      && candidateId === LOCAL_EMBEDDING_OPTION_VALUE
-      ? null
-      : candidateId;
-    commitWorkspace(setModelAssignment(workspace, props.mode, kind, assignment));
+    commitWorkspace(setModelAssignment(workspace, props.mode, kind, candidateId));
   }
 
   function toggleTaskCandidate(candidateId: string) {
@@ -624,18 +622,27 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
     candidate.source,
     candidate.provider
   ));
-  const embeddingModelOptions = embeddingCandidates.map((candidate) => candidateOption(
-    candidate.id,
-    candidate.source === "platform"
-      ? t("settings.modelWorkspace.platformName")
-      : connectionProtocolLabel(candidate.provider, t),
-    candidate.source === "platform" ? platformModelName(candidate.capability, t) : candidate.model,
-    candidate.source === "platform"
-      ? t("settings.modelWorkspace.platformModels")
-      : t("settings.modelWorkspace.byokConnections"),
-    candidate.source,
-    candidate.provider
-  ));
+  const customEmbeddingOptions = embeddingCandidates
+    .filter((candidate) => candidate.source === "byok")
+    .map((candidate) => candidateOption(
+      candidate.id,
+      connectionProtocolLabel(candidate.provider, t),
+      candidate.model,
+      t("settings.modelWorkspace.byokConnections"),
+      candidate.source,
+      candidate.provider
+    ));
+  const cloudEmbeddingOptions = props.mode === "account"
+    ? embeddingCandidates
+        .filter((candidate) => candidate.source === "platform")
+        .map((candidate): SelectOption => ({
+          value: candidate.id,
+          label: t("settings.modelWorkspace.platformEmbedding"),
+          selectedLabel: t("settings.modelWorkspace.platformEmbedding"),
+          groupLabel: t("settings.modelWorkspace.platformModels"),
+          icon: <ModelProviderLogo provider="memmy" size={16} />
+        }))
+    : [];
   const asrOptions = asrCandidates.map((candidate) => candidateOption(
     candidate.id,
     candidate.source === "platform"
@@ -660,19 +667,19 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
     candidate.source,
     candidate.provider
   ));
-  const embeddingOptions: SelectOption[] = props.mode === "byok"
-    ? [
-        {
-          value: LOCAL_EMBEDDING_OPTION_VALUE,
-          label: t("settings.modelWorkspace.localEmbedding"),
-          selectedLabel: t("settings.modelWorkspace.localEmbeddingShort"),
-          groupLabel: t("settings.modelWorkspace.specialBuiltins")
-        },
-        ...embeddingModelOptions
-      ]
-    : embeddingModelOptions;
+  const embeddingOptions: SelectOption[] = [
+    {
+      value: BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID,
+      label: t("settings.modelWorkspace.localEmbedding"),
+      selectedLabel: t("settings.modelWorkspace.localEmbeddingShort"),
+      groupLabel: t("settings.modelWorkspace.platformModels"),
+      icon: <ModelProviderLogo provider="memmy" size={16} />
+    },
+    ...cloudEmbeddingOptions,
+    ...customEmbeddingOptions
+  ];
   const embeddingAssignment = space.assignments.embedding
-    ?? (props.mode === "byok" ? LOCAL_EMBEDDING_OPTION_VALUE : undefined);
+    ?? (props.mode === "byok" ? BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID : undefined);
   const editorExistingConnection = editor?.connectionId
     ? space.connections.find((connection) => connection.id === editor.connectionId)
     : undefined;
@@ -693,9 +700,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
     && (editor.models.length > 0 || (editor.addingModel && editor.modelDraft.trim()))
   );
   const selectedTaskModelsText = taskCandidates.length > 0
-    ? taskCandidates.map((candidate) => candidate.source === "platform"
-        ? platformModelName(candidate.capability, t)
-        : candidate.model).join("、")
+    ? taskCandidates.map((candidate) => candidate.model).join("、")
     : t("settings.modelWorkspace.notConfigured");
 
   return (
@@ -775,21 +780,6 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
                   {t("settings.modelWorkspace.platformProvided")}
                 </span>
               </div>
-              {modelsExpanded ? (
-                <ProviderModelList
-                  items={platformCandidates.map((model) => ({
-                    id: model.id,
-                    model: platformModelName(model.capability, t),
-                    capabilities: [model.capability]
-                  }))}
-                />
-              ) : (
-                <p className="mt-2 text-xs text-text-ink/45">
-                  {t("settings.modelWorkspace.platformManaged")} · {t("settings.modelWorkspace.modelCount", {
-                    count: platformCandidates.length
-                  })}
-                </p>
-              )}
             </article>
           )}
 
@@ -939,11 +929,11 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
                             {selected && <Check size={11} strokeWidth={3} aria-hidden="true" />}
                           </span>
                           <span className="min-w-0 flex-1 truncate text-left">
-                            {candidate.source === "platform" ? platformModelName(candidate.capability, t) : candidate.model}
+                            {candidate.model}
                           </span>
                           <span className="shrink-0 text-[10px] text-text-ink/40">
                             {candidate.source === "platform"
-                              ? candidate.displayName
+                              ? t("settings.modelWorkspace.platformName")
                               : connectionProtocolLabel(candidate.provider, t)}
                           </span>
                           </button>
@@ -994,6 +984,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
             value={embeddingAssignment}
             options={embeddingOptions}
             onChange={updateAssignment}
+            preserveUnassigned={props.mode === "account"}
           />
           <div className="h-px bg-border-stone/30" />
           <AssignmentRow
@@ -1328,10 +1319,15 @@ function AssignmentRow(props: {
   value: string | undefined;
   options: SelectOption[];
   onChange: (kind: ModelAssignmentKind, value: string) => void;
+  preserveUnassigned?: boolean;
 }) {
   const { t } = useTranslation();
   const optionExists = props.options.some((option) => option.value === props.value);
-  const value = optionExists ? props.value! : props.options[0]?.value ?? "";
+  const value = optionExists
+    ? props.value!
+    : props.preserveUnassigned
+      ? ""
+      : props.options[0]?.value ?? "";
   return (
     <div className="flex items-center justify-between gap-4 px-3.5 py-2.5">
       <div className="min-w-0">

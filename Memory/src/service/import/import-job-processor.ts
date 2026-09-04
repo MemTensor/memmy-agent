@@ -65,6 +65,9 @@ export interface ImportJobProcessorDeps {
   assertSessionInScope(session: ReturnType<ImportJobProcessorDeps["requireSession"]>, namespace: unknown): void;
   normalizeMemoryAddCreatedAt(value: string | undefined, timeZone?: string): string | undefined;
   memoryAddImportTrace(request: MemoryAddRequest, at: string): Record<string, unknown> | null;
+  memoryAddQaPair(request: MemoryAddRequest): { query: string; answer: string } | null;
+  memoryCaptureQaHash(query: string, answer: string): string;
+  normalizeMemoryCaptureSource(source: string): string;
   isAgentSourceImportMemoryAdd(request: MemoryAddRequest): boolean;
   titleFromImportTrace(trace: Record<string, unknown>): string | undefined;
   memoryAddTags(request: MemoryAddRequest, isImport: boolean, traceTags: string[]): string[];
@@ -90,6 +93,7 @@ export interface ImportJobProcessorDeps {
   ): void;
   memories: {
     get(id: string): MemoryRow | undefined;
+    getIncludingDeleted(id: string): MemoryRow | undefined;
     getByKeyIncludingDeleted(layer: MemoryLayer, key: string): MemoryRow | undefined;
     upsertByKey(memory: MemoryRow): { memory: MemoryRow; created: boolean; previous?: MemoryRow };
     archivePriorReadOnlySkillVersions(input: {
@@ -104,6 +108,19 @@ export interface ImportJobProcessorDeps {
     listUnprocessedAgentSourceImports(limit: number): MemoryRow[];
     toListItem(memory: MemoryRow): { id: string; kind: MemoryKind; memoryLayer: MemoryLayer; status: MemoryStatus; title: string; summary: string; tags: string[] };
     update(memory: MemoryRow): MemoryRow;
+  };
+  captureClaims: {
+    claim(input: {
+      userId: string;
+      source: string;
+      qaHash: string;
+      primaryMemoryId: string;
+      capturedBy: "agent_source_scan";
+      createdAt: string;
+    }): {
+      claimed: boolean;
+      claim: { primaryMemoryId: string; capturedBy: "turn_complete" | "agent_source_scan" };
+    };
   };
   processing: {
     get(memoryId: string): MemoryProcessingRecord | undefined;
@@ -122,7 +139,7 @@ export class ImportJobProcessor {
 
   addMemory(request: MemoryAddRequest): {
     id: string; kind: MemoryKind; memoryLayer: MemoryLayer; status: MemoryStatus;
-    title: string; summary: string; tags: string[]; createdAt: string; serverTime: string;
+    title: string; summary: string; tags: string[]; createdAt: string; serverTime: string; duplicate?: boolean;
   } {
     const d = this.deps;
     d.assertMemoryAddEnabled();
@@ -241,7 +258,37 @@ export class ImportJobProcessor {
       createdAt: at
     });
 
+    const qaPair = layer === "L1" && d.isAgentSourceImportMemoryAdd(request)
+      ? d.memoryAddQaPair(request)
+      : null;
+    const captureSource = qaPair
+      ? d.normalizeMemoryCaptureSource(memory.agentId ?? request.source ?? context.namespace.source ?? "")
+      : "";
     const persisted = d.transaction(() => {
+      if (qaPair && captureSource) {
+        const priorCaptureMemory = d.memories.getByKeyIncludingDeleted(layer, memoryKey);
+        const capturePrimaryMemoryId = priorCaptureMemory &&
+          priorCaptureMemory.status !== "deleted" &&
+          !priorCaptureMemory.deletedAt
+          ? priorCaptureMemory.id
+          : memory.id;
+        const capture = d.captureClaims.claim({
+          userId: memory.userId,
+          source: captureSource,
+          qaHash: d.memoryCaptureQaHash(qaPair.query, qaPair.answer),
+          primaryMemoryId: capturePrimaryMemoryId,
+          capturedBy: "agent_source_scan",
+          createdAt: at
+        });
+        if (!capture.claimed && capture.claim.capturedBy !== "agent_source_scan") {
+          const existing = d.memories.getIncludingDeleted(capture.claim.primaryMemoryId);
+          if (!existing) {
+            throw d.createError("conflict", "memory capture claim points to a missing memory");
+          }
+          d.assertMemoryInScope(existing, request.namespace);
+          return { duplicateMemory: existing } as const;
+        }
+      }
       const upsert = d.memories.upsertByKey(memory);
       const inserted = upsert.memory;
       const changeSeq = d.runtime.appendChange({
@@ -287,8 +334,23 @@ export class ImportJobProcessor {
           d.processing.update(inserted.id, { activeJobId: job.id, updatedAt: at }, ["summary_pending"]);
         }
       }
-      return { upsert, changeSeq };
+      return { upsert, changeSeq, duplicateMemory: undefined };
     });
+    if (persisted.duplicateMemory) {
+      const item = d.memories.toListItem(persisted.duplicateMemory);
+      return {
+        id: item.id,
+        kind: item.kind,
+        memoryLayer: item.memoryLayer,
+        status: item.status,
+        title: item.title,
+        summary: item.summary,
+        tags: item.tags,
+        createdAt: persisted.duplicateMemory.createdAt,
+        serverTime: d.nowIso(),
+        duplicate: true
+      };
+    }
     const inserted = persisted.upsert.memory;
     if (persisted.upsert.created && !d.isAgentSourceImportMemoryAdd(request)) {
       d.enqueueJob({ jobType: "episode_idle_close", userId: inserted.userId, sessionId: inserted.sessionId,

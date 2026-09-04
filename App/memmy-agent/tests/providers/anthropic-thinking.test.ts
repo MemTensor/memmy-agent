@@ -8,7 +8,11 @@ afterEach(() => {
 
 describe("Anthropic thinking", () => {
   function build(reasoningEffort: string | null, overrides: Record<string, any> = {}): Record<string, any> {
-    const provider = new AnthropicProvider({ apiKey: "key", defaultModel: overrides.defaultModel ?? "claude-sonnet-4-6" });
+    const provider = new AnthropicProvider({
+      apiKey: "key",
+      defaultModel: overrides.defaultModel ?? "claude-sonnet-4-6",
+      extraBody: overrides.extraBody ?? null,
+    });
     return provider.buildKwargs({
       messages: [{ role: "user", content: "hello" }],
       tools: null,
@@ -20,6 +24,16 @@ describe("Anthropic thinking", () => {
       supportsCaching: false,
     });
   }
+
+  it("does not allow extra body options to reintroduce temperature for fixed-temperature models", () => {
+    const kwargs = build(null, {
+      defaultModel: "publishers/anthropic/models/claude-sonnet-5@20260801",
+      extraBody: { temperature: 0.2, metadata: { user_id: "u1" } },
+    });
+
+    expect(kwargs).not.toHaveProperty("temperature");
+    expect(kwargs.metadata).toEqual({ user_id: "u1" });
+  });
 
   it("keeps dedicated thinking blocks separate from visible content", () => {
     expect(extractReasoning(null, [{ type: "thinking", thinking: "step 1" }], "hello")).toEqual(["step 1", "hello"]);
@@ -194,5 +208,19 @@ describe("Anthropic thinking", () => {
     const none = build(null, { defaultModel: "claude-opus-4-7" });
     expect(none).not.toHaveProperty("temperature");
     expect(none).not.toHaveProperty("thinking");
+  });
+
+  it.each([
+    "claude-sonnet-5",
+    "anthropic/claude-sonnet-5-20260801",
+    "claude-opus-5",
+    "us.anthropic.claude-opus-5-20260801-v1:0"
+  ])("omits temperature for fixed-temperature Claude model %s", (model) => {
+    expect(build(null, { defaultModel: model })).not.toHaveProperty("temperature");
+    expect(build("adaptive", { defaultModel: model })).not.toHaveProperty("temperature");
+  });
+
+  it("keeps temperature for Claude models that accept it", () => {
+    expect(build(null, { defaultModel: "claude-sonnet-4-6" }).temperature).toBe(0.7);
   });
 });

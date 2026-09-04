@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -18,6 +18,41 @@ describe("package version guard", () => {
     const runtimeRoot = fixtureRuntime(root, "1.0.8");
     expect(verifyPackageVersion({ repoRoot: root, expected: "1.0.8", runtimeRoot }))
       .toBe("1.0.8");
+  });
+
+  it("accepts independent Memmy and Memory release versions", () => {
+    const root = fixtureRepo("1.1.2", "2.1.0");
+    const runtimeRoot = fixtureRuntime(root, "1.1.2", "2.1.0");
+    expect(verifyPackageVersion({ repoRoot: root, expected: "1.1.2", runtimeRoot }))
+      .toBe("1.1.2");
+  });
+
+  it("synchronizes Memmy metadata without overwriting the Memory release", () => {
+    const root = fixtureRepo("1.1.1", "2.1.0");
+    writeJson(join(root, "package.json"), { version: "1.1.2" });
+    const script = join(root, "scripts", "sync-project-version.mjs");
+    mkdirSync(dirname(script), { recursive: true });
+    copyFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "sync-project-version.mjs"),
+      script,
+    );
+
+    const result = spawnSync(process.execPath, [script], { cwd: root, encoding: "utf8" });
+    expect(result.status, result.stderr).toBe(0);
+    expect(readJson(join(root, "App/memmy-agent/package.json")).version).toBe("1.1.2");
+    expect(readJson(join(root, "App/shell/desktop/package.json")).version).toBe("1.1.2");
+    expect(readFileSync(join(root, "App/backend/src/project-version.ts"), "utf8"))
+      .toContain('MEMMY_VERSION = "1.1.2"');
+    expect(readJson(join(root, "Memory/package.json")).version).toBe("2.1.0");
+    expect(readJson(join(root, "Memory/src/cli/npm/package.json")).version).toBe("2.1.0");
+    const rootLock = readJson(join(root, "package-lock.json"));
+    expect(rootLock.version).toBe("1.1.2");
+    expect(rootLock.packages[""].version).toBe("1.1.2");
+    expect(rootLock.packages["App/shell/desktop"].version).toBe("1.1.2");
+    expect(rootLock.packages.Memory.version).toBe("2.1.0");
+    const agentLock = readJson(join(root, "App/memmy-agent/package-lock.json"));
+    expect(agentLock.version).toBe("1.1.2");
+    expect(agentLock.packages[""].version).toBe("1.1.2");
   });
 
   it("rejects a requested version that differs from source metadata", () => {
@@ -87,23 +122,27 @@ describe("package version guard", () => {
   });
 });
 
-function fixtureRepo(version) {
+function fixtureRepo(version, memoryVersion = version) {
   const root = mkdtempSync(join(tmpdir(), "memmy-version-guard-"));
   roots.push(root);
   for (const relativePath of [
     "package.json",
-    "Memory/package.json",
-    "Memory/src/cli/npm/package.json",
     "App/memmy-agent/package.json",
     "App/shell/desktop/package.json",
   ]) {
     writeJson(join(root, relativePath), { version });
   }
+  for (const relativePath of [
+    "Memory/package.json",
+    "Memory/src/cli/npm/package.json",
+  ]) {
+    writeJson(join(root, relativePath), { version: memoryVersion });
+  }
   writeJson(join(root, "package-lock.json"), {
     version,
     packages: {
       "": { version },
-      Memory: { version },
+      Memory: { version: memoryVersion },
       "App/shell/desktop": { version },
     },
   });
@@ -118,16 +157,23 @@ function fixtureRepo(version) {
   return root;
 }
 
-function fixtureRuntime(root, version) {
+function fixtureRuntime(root, version, memoryVersion = version) {
   const runtimeRoot = join(root, "App/shell/desktop/dist/runtime");
-  for (const component of ["memory", "memmy-agent"]) {
-    writeJson(join(runtimeRoot, component, "package.json"), { version });
+  for (const [component, componentVersion] of [
+    ["memory", memoryVersion],
+    ["memmy-agent", version],
+  ]) {
+    writeJson(join(runtimeRoot, component, "package.json"), { version: componentVersion });
     writeJson(join(runtimeRoot, component, "package-lock.json"), {
-      version,
-      packages: { "": { version } },
+      version: componentVersion,
+      packages: { "": { version: componentVersion } },
     });
   }
   return runtimeRoot;
+}
+
+function readJson(path) {
+  return JSON.parse(readFileSync(path, "utf8"));
 }
 
 function writeJson(path, value) {

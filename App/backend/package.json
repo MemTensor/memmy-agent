@@ -14,14 +14,15 @@
   "scripts": {
     "workspace-bridge:build": "node src/adapters/outbound/skill-writer/workspace-bridge/build-runtime.mjs",
     "workspace-bridge:build:dist": "node src/adapters/outbound/skill-writer/workspace-bridge/build-runtime.mjs --dist",
-    "build": "npm run build -w @memmy/migrations && npm run build -w @memmy/local-api-contracts && node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json && node -e \"const fs=require('node:fs'); fs.cpSync('src/infrastructure/app-state-store/migrations', 'dist/src/infrastructure/app-state-store/migrations', { recursive: true }); fs.cpSync('src/infrastructure/agent-source-store/migrations', 'dist/src/infrastructure/agent-source-store/migrations', { recursive: true }); fs.cpSync('src/infrastructure/idempotency-store/migrations', 'dist/src/infrastructure/idempotency-store/migrations', { recursive: true }); if (fs.existsSync('src/adapters/outbound/agent-adapter/plugins')) fs.cpSync('src/adapters/outbound/agent-adapter/plugins', 'dist/src/adapters/outbound/agent-adapter/plugins', { recursive: true });\" && npm run workspace-bridge:build:dist",
+    "build": "npm run build -w @memmy/agent-source-core && npm run build -w @memmy/migrations && npm run build -w @memmy/local-api-contracts && node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json && node -e \"const fs=require('node:fs'); fs.cpSync('src/infrastructure/app-state-store/migrations', 'dist/src/infrastructure/app-state-store/migrations', { recursive: true }); fs.cpSync('src/infrastructure/agent-source-store/migrations', 'dist/src/infrastructure/agent-source-store/migrations', { recursive: true }); fs.cpSync('src/infrastructure/idempotency-store/migrations', 'dist/src/infrastructure/idempotency-store/migrations', { recursive: true }); if (fs.existsSync('src/adapters/outbound/agent-adapter/plugins')) fs.cpSync('src/adapters/outbound/agent-adapter/plugins', 'dist/src/adapters/outbound/agent-adapter/plugins', { recursive: true });\" && npm run workspace-bridge:build:dist",
     "lint": "eslint \"src/**/*.ts\" \"vitest.config.ts\"",
-    "typecheck": "npm run build -w @memmy/migrations && npm run build -w @memmy/local-api-contracts && tsc -p tsconfig.json --noEmit",
-    "test": "npm run build -w @memmy/migrations && npm run build -w @memmy/local-api-contracts && npm run workspace-bridge:build && vitest run",
+    "typecheck": "npm run build -w @memmy/agent-source-core && npm run build -w @memmy/migrations && npm run build -w @memmy/local-api-contracts && tsc -p tsconfig.json --noEmit",
+    "test": "npm run build -w @memmy/agent-source-core && npm run build -w @memmy/migrations && npm run build -w @memmy/local-api-contracts && npm run workspace-bridge:build && vitest run",
     "test:agent-adapter:coverage": "npm run build -w @memmy/local-api-contracts && vitest run src/adapters/outbound/agent-adapter/tests --coverage",
     "db:migrate": "tsx src/infrastructure/app-state-store/cli/migrate.ts"
   },
   "dependencies": {
+    "@memmy/agent-source-core": "0.0.0",
     "@memmy/local-api-contracts": "0.0.0",
     "@memmy/migrations": "0.0.0",
     "@modelcontextprotocol/sdk": "^1.29.0",

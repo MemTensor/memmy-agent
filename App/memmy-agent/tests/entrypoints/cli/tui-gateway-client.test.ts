@@ -69,6 +69,42 @@ const sessionSelection = {
   model: "gpt-fast",
 };
 
+const gatewayCommands = [{
+  command: "/model",
+  title: "Switch model preset",
+  description: "Show, list, or switch the active model preset.",
+  icon: "brain",
+  arg_hint: "[list|preset]",
+}, {
+  command: "/history",
+  title: "Show conversation history",
+  description: "Print the last N persisted conversation messages.",
+  icon: "history",
+  arg_hint: "[n]",
+}, {
+  command: "/MODEL",
+  title: "Duplicate model",
+  description: "This duplicate must be ignored.",
+  icon: "duplicate",
+  arg_hint: "",
+}, {
+  command: "not-a-slash-command",
+  title: "Invalid",
+  description: "This invalid entry must be ignored.",
+  icon: "invalid",
+  arg_hint: "",
+}];
+
+function commandWire(command: string): Record<string, string> {
+  return {
+    command,
+    title: `${command} title`,
+    description: `${command} description`,
+    icon: "test",
+    arg_hint: "",
+  };
+}
+
 async function waitUntil(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!predicate() && Date.now() < deadline) {
@@ -84,7 +120,8 @@ async function connectClient({
 } = {}) {
   const sockets: FakeSocket[] = [];
   let bootstrapCount = 0;
-  const fetchImpl = vi.fn(async (input: string | URL) => {
+  const fetchImpl = vi.fn(async (input: string | URL, init?: RequestInit) => {
+    void init;
     const url = String(input);
     if (url.endsWith("/webui/bootstrap")) {
       bootstrapCount += 1;
@@ -98,8 +135,13 @@ async function connectClient({
       });
     }
     if (url.includes("/webui-thread?surface=tui")) {
-      return response({ schemaVersion: 3, sessionKey: "websocket:ext_Y2xpOnRlc3Q", messages: historyMessages });
+      return response({
+        schemaVersion: 3,
+        sessionKey: "websocket:ext_Y2xpOnRlc3Q",
+        messages: historyMessages,
+      });
     }
+    if (url.endsWith("/api/commands")) return response({ commands: gatewayCommands });
     throw new Error(`unexpected URL: ${url}`);
   });
   const client = new TuiGatewayClient({
@@ -134,6 +176,7 @@ async function connectClient({
     started_items: [],
   });
   await starting;
+  await waitUntil(() => client.snapshot().slashCommandsStatus === "ready");
   return { client, fetchImpl, sockets };
 }
 
@@ -146,10 +189,11 @@ describe("TuiGatewayClient", () => {
       ],
     });
 
-    expect(fetchImpl.mock.calls.map(([url]) => String(url))).toEqual([
+    expect(fetchImpl.mock.calls.map(([url]) => String(url))).toEqual(expect.arrayContaining([
       "http://127.0.0.1:18980/webui/bootstrap",
       expect.stringContaining("/webui-thread?surface=tui"),
-    ]);
+      "http://127.0.0.1:18980/api/commands",
+    ]));
     expect(client.snapshot()).toMatchObject({
       connection: "connected",
       attached: true,
@@ -162,9 +206,73 @@ describe("TuiGatewayClient", () => {
         model: "gpt-fast",
       },
       toolNames: ["exec", "read_file"],
+      slashCommandsStatus: "ready",
+      slashCommands: [
+        expect.objectContaining({ command: "/model", argHint: "[list|preset]", source: "gateway" }),
+        expect.objectContaining({ command: "/history", argHint: "[n]", source: "gateway" }),
+      ],
+    });
+    const commandCall = fetchImpl.mock.calls.find(([url]) => String(url).endsWith("/api/commands"));
+    expect(commandCall?.[1]).toMatchObject({
+      headers: { authorization: "Bearer token-1" },
+      signal: expect.any(AbortSignal),
     });
     expect(client.snapshot().messages.map((message) => message.text)).toEqual(["from TUI", "answer"]);
     expect(sockets).toHaveLength(1);
+    client.close();
+  });
+
+  it("clears hydrated transcript when an accepted TUI /new resets the Session", async () => {
+    const { client, sockets } = await connectClient({
+      historyMessages: [
+        { id: "user-old", role: "user", content: "old question" },
+        { id: "assistant-old", role: "assistant", content: "old answer" },
+      ],
+    });
+    const socket = sockets[0]!;
+    const requestId = "11111111-1111-4111-8111-111111111111";
+    const submission = client.submit("/new", "queue", requestId);
+    const queuedItem = {
+      client_request_id: requestId,
+      text: "/new",
+      queued_at: "2026-08-09T12:00:00.000Z",
+      source: { kind: "tui", channel: "websocket" },
+    };
+
+    socket.message({
+      event: "message_queued",
+      chat_id: client.chatId,
+      client_request_id: requestId,
+      revision: 1,
+      item: queuedItem,
+    });
+    await expect(submission).resolves.toMatchObject({ status: "queued" });
+    expect(client.snapshot().messages.map((message) => message.text)).toEqual(["old question", "old answer"]);
+
+    socket.message({
+      event: "message_dequeued",
+      chat_id: client.chatId,
+      client_request_id: requestId,
+      revision: 2,
+      item: queuedItem,
+    });
+    socket.message({
+      event: "message_accepted",
+      chat_id: client.chatId,
+      client_request_id: requestId,
+      turn_id: "turn-new",
+    });
+
+    expect(client.snapshot()).toMatchObject({ messages: [], sessionResetVersion: 1 });
+
+    socket.message({
+      event: "message",
+      chat_id: client.chatId,
+      text: "New session started.",
+      turn_id: "turn-new",
+      source: { kind: "tui", channel: "websocket" },
+    });
+    expect(client.snapshot().messages.map((message) => message.text)).toEqual(["New session started."]);
     client.close();
   });
 
@@ -177,6 +285,9 @@ describe("TuiGatewayClient", () => {
     const fetchImpl = vi.fn(async (input: string | URL) => {
       if (String(input).endsWith("/webui/bootstrap")) {
         return response({ token: "token", ws_path: "/", expires_in: 300, model_name: null });
+      }
+      if (String(input).endsWith("/api/commands")) {
+        return response({ commands: gatewayCommands });
       }
       return history;
     });
@@ -591,6 +702,217 @@ describe("TuiGatewayClient", () => {
       source: "byok",
       ownerAccountId: null,
     });
+    client.close();
+  });
+
+  it("keeps chat attached when the command catalog exhausts its retries", async () => {
+    const sockets: FakeSocket[] = [];
+    let catalogAttempt = 0;
+    const fetchImpl = vi.fn(async (input: string | URL) => {
+      const url = String(input);
+      if (url.endsWith("/webui/bootstrap")) {
+        return response({
+          token: "catalog-token",
+          ws_path: "/gateway",
+          expires_in: 300,
+          model_name: null,
+        });
+      }
+      if (url.includes("/webui-thread?surface=tui")) {
+        return response({
+          schemaVersion: 3,
+          sessionKey: "websocket:ext_Y2xpOnRlc3Q",
+          messages: [],
+        });
+      }
+      if (url.endsWith("/api/commands")) {
+        catalogAttempt += 1;
+        if (catalogAttempt === 1) return response({ error: "private 401 body" }, 401);
+        if (catalogAttempt === 2) return response({ error: "private 500 body" }, 500);
+        if (catalogAttempt === 3) return new Response("{", { status: 200 });
+        return response({ commands: [] });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const client = new TuiGatewayClient({
+      baseUrl: "http://127.0.0.1:18980",
+      sessionKey: "cli:test",
+      fetchImpl,
+      webSocketFactory: () => {
+        const socket = new FakeSocket();
+        sockets.push(socket);
+        return socket as unknown as TuiWebSocket;
+      },
+      requestTimeoutMs: 500,
+    });
+    const starting = client.start();
+    await waitUntil(() => sockets.length === 1);
+    sockets[0]!.open();
+    sockets[0]!.message({ event: "ready" });
+    sockets[0]!.message({ event: "attached", chat_id: client.chatId });
+    sockets[0]!.message({
+      event: "message_queue_snapshot",
+      chat_id: client.chatId,
+      revision: 0,
+      items: [],
+      started_items: [],
+    });
+    await starting;
+    await waitUntil(() => client.snapshot().slashCommandsStatus === "error", 5_000);
+    expect(client.snapshot()).toMatchObject({
+      connection: "connected",
+      attached: true,
+      slashCommands: [],
+      slashCommandsStatus: "error",
+      slashCommandsError: "Command catalog unavailable.",
+    });
+    expect(fetchImpl.mock.calls.filter(([url]) => String(url).endsWith("/api/commands")))
+      .toHaveLength(4);
+    client.close();
+  }, 7_000);
+
+  it("keeps last-good commands and ignores a superseded generation response", async () => {
+    const { client, fetchImpl, sockets } = await connectClient();
+    const originalFetch = fetchImpl.getMockImplementation();
+    if (!originalFetch) throw new Error("fetch mock is missing its implementation");
+    let resolveOldCatalog!: (value: Response) => void;
+    const oldCatalogCapture: { signal?: AbortSignal } = {};
+    const oldCatalog = new Promise<Response>((resolve) => {
+      resolveOldCatalog = resolve;
+    });
+    let catalogGeneration: "old" | "new" = "old";
+    fetchImpl.mockImplementation((input: string | URL, init?: RequestInit) => {
+      if (String(input).endsWith("/api/commands")) {
+        if (catalogGeneration === "old" && init?.signal) {
+          oldCatalogCapture.signal = init.signal;
+        }
+        return catalogGeneration === "old"
+          ? oldCatalog
+          : Promise.resolve(response({ commands: [commandWire("/fresh")] }));
+      }
+      return originalFetch(input, init);
+    });
+
+    sockets[0]!.disconnect();
+    await waitUntil(() => sockets.length === 2);
+    const second = sockets[1]!;
+    second.open();
+    second.message({ event: "ready" });
+    second.message({ event: "attached", chat_id: client.chatId });
+    second.message({
+      event: "message_queue_snapshot",
+      chat_id: client.chatId,
+      revision: 0,
+      items: [],
+      started_items: [],
+    });
+    await waitUntil(() => client.snapshot().connection === "connected");
+    expect(client.snapshot()).toMatchObject({ slashCommandsStatus: "stale" });
+    expect(client.snapshot().slashCommands.map((item) => item.command)).toEqual([
+      "/model",
+      "/history",
+    ]);
+    expect(oldCatalogCapture.signal?.aborted).toBe(false);
+
+    catalogGeneration = "new";
+    second.disconnect();
+    expect(oldCatalogCapture.signal?.aborted).toBe(true);
+    await waitUntil(() => sockets.length === 3);
+    const third = sockets[2]!;
+    third.open();
+    third.message({ event: "ready" });
+    third.message({ event: "attached", chat_id: client.chatId });
+    third.message({
+      event: "message_queue_snapshot",
+      chat_id: client.chatId,
+      revision: 0,
+      items: [],
+      started_items: [],
+    });
+    await waitUntil(() => client.snapshot().slashCommandsStatus === "ready");
+    expect(client.snapshot().slashCommands.map((item) => item.command)).toEqual(["/fresh"]);
+
+    resolveOldCatalog(response({ commands: [commandWire("/obsolete")] }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(client.snapshot().slashCommands.map((item) => item.command)).toEqual(["/fresh"]);
+    client.close();
+  });
+
+  it("reads last compaction once with the current token and aborts it on disconnect", async () => {
+    const { client, fetchImpl, sockets } = await connectClient();
+    const originalFetch = fetchImpl.getMockImplementation();
+    if (!originalFetch) throw new Error("fetch mock is missing its implementation");
+    let resolveCompaction!: (value: Response) => void;
+    const compaction = new Promise<Response>((resolve) => {
+      resolveCompaction = resolve;
+    });
+    let phase: "available" | "empty" | "invalid" | "pending" = "available";
+    fetchImpl.mockImplementation((input: string | URL, init?: RequestInit) => {
+      if (!String(input).endsWith("/last-compaction")) return originalFetch(input, init);
+      if (phase === "available") return compaction;
+      if (phase === "empty") {
+        return Promise.resolve(response({
+          available: false,
+          sessionKey: `websocket:${client.chatId}`,
+          mode: null,
+          text: "",
+          lastActive: null,
+        }));
+      }
+      if (phase === "invalid") {
+        return Promise.resolve(response({
+          available: true,
+          sessionKey: "websocket:another-session",
+          mode: null,
+          text: "",
+          lastActive: null,
+        }));
+      }
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      });
+    });
+
+    const first = client.readLastCompaction();
+    const duplicate = client.readLastCompaction();
+    expect(duplicate).toBe(first);
+    const calls = fetchImpl.mock.calls.filter(([url]) => String(url).endsWith("/last-compaction"));
+    expect(calls).toHaveLength(1);
+    const sessionKey = `websocket:${client.chatId}`;
+    expect(String(calls[0]![0])).toBe(
+      `http://127.0.0.1:18980/api/sessions/${encodeURIComponent(sessionKey)}/last-compaction`,
+    );
+    expect(calls[0]![1]).toMatchObject({
+      headers: { authorization: "Bearer token-1" },
+      signal: expect.any(AbortSignal),
+    });
+    resolveCompaction(response({
+      available: true,
+      sessionKey: `websocket:${client.chatId}`,
+      mode: "dag",
+      text: "summary line one\nsummary line two",
+      lastActive: "2026-08-28T01:02:03.000Z",
+      dagSnapshotId: "snapshot-1",
+    }));
+    await expect(first).resolves.toMatchObject({
+      available: true,
+      mode: "dag",
+      text: "summary line one\nsummary line two",
+    });
+
+    phase = "empty";
+    await expect(client.readLastCompaction()).resolves.toMatchObject({
+      available: false,
+      mode: null,
+    });
+
+    phase = "invalid";
+    await expect(client.readLastCompaction()).rejects.toThrow("invalid");
+
+    phase = "pending";
+    const pending = client.readLastCompaction();
+    sockets[0]!.disconnect();
+    await expect(pending).rejects.toThrow("aborted");
     client.close();
   });
 });

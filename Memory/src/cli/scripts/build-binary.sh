@@ -4,10 +4,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLI_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 MEMORY_ROOT="$(cd "$CLI_DIR/../.." && pwd)"
-PROJECT_ROOT="$(cd "$CLI_DIR/../../.." && pwd)"
-cd "$PROJECT_ROOT"
+cd "$MEMORY_ROOT"
 
-VERSION_PACKAGE_JSON="$PROJECT_ROOT/package.json"
+VERSION_PACKAGE_JSON="$MEMORY_ROOT/package.json"
 export VERSION_PACKAGE_JSON
 VERSION="${MEMMY_MEMORY_VERSION:-$(node -p "require(process.env.VERSION_PACKAGE_JSON).version")}"
 TARGET="${MEMMY_MEMORY_TARGET:-}"
@@ -55,7 +54,7 @@ rm -rf "$CLI_DIR/dist/build"
 npx tsc -p "$CLI_DIR/tsconfig.json"
 
 mkdir -p "$STAGE_DIR/dist/cli"
-cp -R "$CLI_DIR/dist/build/." "$STAGE_DIR/dist/cli/"
+cp -R "$CLI_DIR/dist/build/." "$STAGE_DIR/dist/"
 cp -R "$CLI_DIR/agent_inject.md" "$STAGE_DIR/dist/cli/agent_inject.md"
 cp -R "$CLI_DIR/skills" "$STAGE_DIR/dist/cli/skills"
 
@@ -63,7 +62,7 @@ MEMMY_MEMORY_VERSION="$VERSION" MEMORY_PACKAGE_JSON="$MEMORY_ROOT/package.json" 
 import { readFileSync, writeFileSync } from "node:fs";
 const root = JSON.parse(readFileSync(process.env.MEMORY_PACKAGE_JSON, "utf8"));
 const dependencies = {};
-for (const name of ["yaml"]) {
+for (const name of ["yaml", "jsonc-parser", "better-sqlite3"]) {
   if (root.dependencies?.[name]) {
     dependencies[name] = root.dependencies[name];
   }

@@ -49,9 +49,10 @@ function validHealth(
 }
 
 describe("MemmyMemoryClient", () => {
-  it("uses a 20s default request timeout", () => {
+  it("uses a 60s default request timeout", () => {
     const client = new MemmyMemoryClient({ baseUrl: "http://memory.test" });
 
+    expect(DEFAULT_MEMOS_MEMORY_TIMEOUT_MS).toBe(60_000);
     expect(client.timeoutMs).toBe(DEFAULT_MEMOS_MEMORY_TIMEOUT_MS);
   });
 

@@ -23,6 +23,7 @@ import {
   PROTOCOL_OPTIONS,
   canUseModelConfig,
   createModelFormValues,
+  modelFormValuesAsPrimary,
   createModelProtocolPatch,
   createTestModelConnectionMessages,
   hydrateModelConfigForm,
@@ -43,6 +44,7 @@ interface ModelCardProps {
   hint?: string;
   cfg: ModelConfig;
   primary: PrimaryModelValues;
+  reuseLabel: string;
   onPatch: (patch: Partial<ModelConfig>) => void;
   onTest: () => void;
 }
@@ -94,8 +96,9 @@ export function ModelPage() {
   const [skill, setSkill] = useState<ModelConfig>(() => initialModelForm.skillModel);
   const [savePending, setSavePending] = useState(false);
   const [saveFeedback, setSaveFeedback] = useState<{ text: string; tone: "error" | "success" } | null>(null);
-  const memoryValues = createModelFormValues(mem, primaryModel);
   const skillValues = createModelFormValues(skill, primaryModel);
+  const evolutionModel = modelFormValuesAsPrimary(skillValues);
+  const memoryValues = createModelFormValues(mem, evolutionModel);
   const canContinue = canUseModelConfig(mem, memoryValues) && canUseModelConfig(skill, skillValues);
 
   /** Handles patch mem. */
@@ -109,8 +112,13 @@ export function ModelPage() {
   }
 
   /** Handles test model config connection. */
-  function testModelConfigConnection(config: ModelConfig, patch: (patch: Partial<ModelConfig>) => void, secretTarget: "memory" | "skill") {
-    const values = createModelFormValues(config, primaryModel);
+  function testModelConfigConnection(
+    config: ModelConfig,
+    inheritedModel: PrimaryModelValues,
+    patch: (patch: Partial<ModelConfig>) => void,
+    secretTarget: "memory" | "skill"
+  ) {
+    const values = createModelFormValues(config, inheritedModel);
     testModelConnection({
       configClient: clients?.config,
       values,
@@ -132,25 +140,8 @@ export function ModelPage() {
       setSavePending(true);
       const latest = await clients.config.getModelConfig();
       let workspace = createModelWorkspace(latest);
-      const memoryValues = createModelFormValues(mem, primaryModel);
-      const assignedMemoryEndpointId = mem.reuse
-        ? assignedCatalogEndpointId(workspace, "byok", "agent")
-        : assignedCatalogEndpointId(workspace, "byok", "memory_summary")
-          ?? (!memoryValues.apiKey.trim() && memoryValues.apiKeyMasked
-            ? assignedCatalogEndpointId(workspace, "byok", "agent")
-            : undefined);
-      const memory = upsertByokPreset(workspace, {
-        provider: memoryValues.provider,
-        ...(memoryValues.apiKeyMasked && assignedMemoryEndpointId ? { endpointId: assignedMemoryEndpointId } : {}),
-        endpoint: memoryValues.endpoint,
-        protocol: chatProtocol(memoryValues.provider),
-        ...(memoryValues.apiKey.trim() ? { apiKey: memoryValues.apiKey.trim() } : {}),
-        ...(memoryValues.apiKeyMasked ? { apiKeyMasked: memoryValues.apiKeyMasked } : {}),
-        model: memoryValues.model,
-        capabilities: ["memory_summary"]
-      });
-      workspace = assignCatalogPreset(memory.workspace, "byok", "memory_summary", memory.presetId);
       const evolutionValues = createModelFormValues(skill, primaryModel);
+      const memoryValues = createModelFormValues(mem, modelFormValuesAsPrimary(evolutionValues));
       const assignedEvolutionEndpointId = skill.reuse
         ? assignedCatalogEndpointId(workspace, "byok", "agent")
         : assignedCatalogEndpointId(workspace, "byok", "memory_evolution")
@@ -168,6 +159,23 @@ export function ModelPage() {
         capabilities: ["memory_evolution"]
       });
       workspace = assignCatalogPreset(evolution.workspace, "byok", "memory_evolution", evolution.presetId);
+      const assignedMemoryEndpointId = mem.reuse
+        ? evolution.endpointId
+        : assignedCatalogEndpointId(workspace, "byok", "memory_summary")
+          ?? (!memoryValues.apiKey.trim() && memoryValues.apiKeyMasked
+            ? evolution.endpointId
+            : undefined);
+      const memory = upsertByokPreset(workspace, {
+        provider: memoryValues.provider,
+        ...(memoryValues.apiKeyMasked && assignedMemoryEndpointId ? { endpointId: assignedMemoryEndpointId } : {}),
+        endpoint: memoryValues.endpoint,
+        protocol: chatProtocol(memoryValues.provider),
+        ...(memoryValues.apiKey.trim() ? { apiKey: memoryValues.apiKey.trim() } : {}),
+        ...(memoryValues.apiKeyMasked ? { apiKeyMasked: memoryValues.apiKeyMasked } : {}),
+        model: memoryValues.model,
+        capabilities: ["memory_summary"]
+      });
+      workspace = assignCatalogPreset(memory.workspace, "byok", "memory_summary", memory.presetId);
       const savedConfig = await clients.config.saveModelCatalog(modelConfigInput(workspace));
       dispatch(appActions.modelConfigUpdated(savedConfig));
       dispatch(appActions.navigate("/api-key-optional"));
@@ -208,9 +216,10 @@ export function ModelPage() {
           subtitle={t("apiKey.modelPage.memorySubtitle")}
           hint={t("apiKey.modelPage.memoryHint")}
           cfg={mem}
-          primary={primaryModel}
+          primary={evolutionModel}
+          reuseLabel={t("apiKey.modelPage.reuseEvolution")}
           onPatch={patchMem}
-          onTest={() => testModelConfigConnection(mem, patchMem, "memory")}
+          onTest={() => testModelConfigConnection(mem, evolutionModel, patchMem, "memory")}
         />
 
         <ModelCard
@@ -219,8 +228,9 @@ export function ModelPage() {
           subtitle={t("apiKey.modelPage.skillSubtitle")}
           cfg={skill}
           primary={primaryModel}
+          reuseLabel={t("apiKey.modelPage.reuseAgentChat")}
           onPatch={patchSkill}
-          onTest={() => testModelConfigConnection(skill, patchSkill, "skill")}
+          onTest={() => testModelConfigConnection(skill, primaryModel, patchSkill, "skill")}
         />
 
         <button
@@ -315,7 +325,7 @@ function ModelCard(props: ModelCardProps) {
         >
           {props.cfg.reuse && <Check size={12} strokeWidth={3} className="text-white" />}
         </span>
-        <span className="text-sm text-text-ink/75">{t("apiKey.modelPage.reusePrevious")}</span>
+        <span className="text-sm text-text-ink/75">{props.reuseLabel}</span>
       </button>
 
       {props.hint && (

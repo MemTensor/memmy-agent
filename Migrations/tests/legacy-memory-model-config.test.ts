@@ -230,7 +230,7 @@ describe("legacy Memory model config normalization", () => {
     });
     expect(config.memmyMemory.summary).toMatchObject({
       model: "gpt-main",
-      timeoutMs: 45_000,
+      timeoutMs: 180_000,
     });
     expect(config.memmyMemory.evolution).toMatchObject({
       model: "claude-fixed",

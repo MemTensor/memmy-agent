@@ -124,8 +124,14 @@ describe("DeepSeek Harness skill target", () => {
     expect(handoff?.id).toBe("@memmy/memmy-memory");
 
     let definition: Record<string, any> | undefined;
-    handoff?.factory().apply({
-      conversationEvents: { register: (value: Record<string, any>) => { definition = value; } }
+    const client = handoff?.factory();
+    expect(client?.inject).toEqual([]);
+    client?.apply({
+      get(name: string) {
+        return name === "conversationEvents"
+          ? { register: (value: Record<string, any>) => { definition = value; } }
+          : undefined;
+      }
     });
     const message = {
       id: "user-1",
@@ -162,6 +168,51 @@ describe("DeepSeek Harness skill target", () => {
       key: "optimistic:user-1",
       visibility: "hidden"
     });
+  });
+
+  it("prefers the uiConversation event registry when both APIs are available", async () => {
+    const rootDirectory = createRoot();
+    const target = createDeepseekHarnessSkillTarget({ rootDirectory });
+    await target.installPlugin?.("deepseek_harness");
+    const clientPath = join(installedPluginDirectory(rootDirectory), "client.js");
+    let handoff: { id: string; factory(): Record<string, any> } | undefined;
+    runInNewContext(readFileSync(clientPath, "utf8"), {
+      window: { __ModuleLoader__: { load: (value: typeof handoff) => { handoff = value; } } }
+    });
+
+    let modernRegistrations = 0;
+    let legacyRegistrations = 0;
+    const client = handoff?.factory();
+    client?.apply({
+      get(name: string) {
+        if (name === "uiConversation") {
+          return { events: { register: () => { modernRegistrations += 1; } } };
+        }
+        if (name === "conversationEvents") {
+          return { register: () => { legacyRegistrations += 1; } };
+        }
+        return undefined;
+      }
+    });
+
+    expect(modernRegistrations).toBe(1);
+    expect(legacyRegistrations).toBe(0);
+  });
+
+  it("fails clearly when neither conversation event API is available", async () => {
+    const rootDirectory = createRoot();
+    const target = createDeepseekHarnessSkillTarget({ rootDirectory });
+    await target.installPlugin?.("deepseek_harness");
+    const clientPath = join(installedPluginDirectory(rootDirectory), "client.js");
+    let handoff: { id: string; factory(): Record<string, any> } | undefined;
+    runInNewContext(readFileSync(clientPath, "utf8"), {
+      window: { __ModuleLoader__: { load: (value: typeof handoff) => { handoff = value; } } }
+    });
+
+    const client = handoff?.factory();
+    expect(() => client?.apply({ get: () => undefined })).toThrow(
+      "memmy-memory requires uiConversation.events or conversationEvents"
+    );
   });
 
   it("replaces legacy versioned patch markers", async () => {

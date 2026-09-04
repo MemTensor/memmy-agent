@@ -327,11 +327,13 @@ export function resolveTerminalTarget(
     sessionId = null,
     standalone = false,
     project = null,
+    fresh = false,
     invocationCwd = process.cwd(),
   }: {
     sessionId?: string | null;
     standalone?: boolean;
     project?: string | null;
+    fresh?: boolean;
     invocationCwd?: string;
   } = {},
 ): TerminalTarget {
@@ -343,7 +345,7 @@ export function resolveTerminalTarget(
     || typeof sessions?.save !== "function"
   ) {
     const fallbackId = sessionId
-      ?? (standalone || project ? `cli:${crypto.randomUUID()}` : "cli:direct");
+      ?? (standalone || project || fresh ? `cli:${crypto.randomUUID()}` : "cli:direct");
     return {
       sessionId: fallbackId,
       target: project ? "project" : "standalone",
@@ -381,10 +383,10 @@ export function resolveTerminalTarget(
       projectName = registered.name;
     }
   } else {
-    key = standalone || project ? `cli:${crypto.randomUUID()}` : "cli:direct";
+    key = standalone || project || fresh ? `cli:${crypto.randomUUID()}` : "cli:direct";
     const existing = reload(key);
     if (!existing && !dependencies.hasUsableDefaultModel()) {
-      throw new Error("No usable default model is configured. Run `memmy onboard --wizard` first.");
+      throw new Error("No usable default model is configured. Run `memmy onboard` first.");
     }
     if (existing) {
       binding = readWebuiSessionBinding(existing);
@@ -508,7 +510,7 @@ export async function runRootInteractiveAgent({
         return false;
       }
     },
-  }, { sessionId, standalone, project });
+  }, { sessionId, standalone, project, fresh: true });
   printCliRestartNoticeIfNeeded(target.sessionId, true);
   const { runInkInteractiveAgent } = await import("./tui.js");
   return runInkInteractiveAgent(loaded, target.sessionId, target);
@@ -552,7 +554,7 @@ export async function main(argv: string[] = process.argv): Promise<void> {
     }
     await runLinuxRootTerminal({
       loadConfig: () => loadRuntimeConfig(null, null),
-      onboardWizard: () => onboard({ wizard: true }),
+      onboardWizard: () => onboard(),
       runInteractive: (config) => runRootInteractiveAgent(rootTarget, config),
     });
     return;
@@ -585,7 +587,7 @@ export async function main(argv: string[] = process.argv): Promise<void> {
     .description("Initialize memmy configuration and workspace.")
     .option("-w, --workspace <dir>", "Workspace directory")
     .option("-c, --config <path>", "Path to config file")
-    .option("--wizard", "Use interactive wizard", false)
+    .option("--defaults", "Use default configuration", false)
     .action(async (opts) => {
       await onboard(opts);
     });
@@ -748,15 +750,15 @@ export async function main(argv: string[] = process.argv): Promise<void> {
 export async function onboard({
   workspace = null,
   config = null,
-  wizard = false,
-}: { workspace?: string | null; config?: string | null; wizard?: boolean } = {}): Promise<Config> {
+  defaults = false,
+}: { workspace?: string | null; config?: string | null; defaults?: boolean } = {}): Promise<Config> {
   const configPath = config
     ? path.resolve(config.replace(/^~(?=$|\/)/, process.env.HOME ?? "~"))
     : getConfigPath();
   if (config) setConfigPath(configPath);
   let loaded: Config;
   if (fs.existsSync(configPath)) {
-    if (wizard) {
+    if (!defaults) {
       loaded = loadConfig(configPath);
     } else if (
       process.stdin.isTTY &&
@@ -779,13 +781,13 @@ export async function onboard({
   } else {
     loaded = new Config();
     if (workspace) loaded.agents.defaults.workspace = workspace;
-    if (!wizard) {
+    if (defaults) {
       saveConfig(loaded, configPath);
       console.log(`Created config at ${configPath}`);
     }
   }
   if (workspace) loaded.agents.defaults.workspace = workspace;
-  if (wizard) {
+  if (!defaults) {
     const result = await runOnboard(loaded);
     loaded = result.config;
     if (!result.shouldSave) {

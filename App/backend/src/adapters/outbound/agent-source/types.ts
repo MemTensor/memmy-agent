@@ -1,34 +1,20 @@
-/** Types module. */
+/** Types module. Shared with the standalone runtime. */
+import type {
+  ConversationMessage as CoreConversationMessage,
+  SourceDescriptor as CoreSourceDescriptor,
+  ScanOptions as CoreScanOptions,
+  ScanProgress as CoreScanProgress,
+  SourceAdapter as CoreSourceAdapter
+} from "@memmy/agent-source-core";
 
 /** Contract for source descriptor. */
-export interface SourceDescriptor {
-  sourceId: string;
-  displayName: string;
-  builtin: boolean;
-  dataPath: string;
-}
+export type SourceDescriptor = CoreSourceDescriptor;
 
 /** Contract for conversation message. */
-export interface ConversationMessage {
-  messageId: string;
-  sourceId: string;
-  conversationId: string;
-  role: "user" | "assistant" | "tool" | "system";
-  content: string;
-  createdAt: string;
-  workspacePath: string | null;
-  gitRoot: string | null;
-  rawMeta: Readonly<Record<string, unknown>>;
-}
+export type ConversationMessage = CoreConversationMessage;
 
 /** Contract for scan progress. */
-export interface ScanProgress {
-  sourceId: string;
-  phase: "discover" | "read" | "redact" | "emit" | "scan" | "add" | "summarize" | "done" | "stopped";
-  current: number;
-  total: number;
-  message?: string;
-}
+export type ScanProgress = CoreScanProgress;
 
 /** Contract for scan result. */
 export interface ScanResult {
@@ -40,18 +26,7 @@ export interface ScanResult {
 }
 
 /** Contract for source adapter. */
-export interface SourceAdapter {
-  readonly descriptor: SourceDescriptor;
-  detect(): Promise<boolean>;
-  scan(options: ScanOptions): AsyncIterable<ConversationMessage>;
-}
+export type SourceAdapter = CoreSourceAdapter;
 
 /** Contract for scan options. */
-export interface ScanOptions {
-  since?: string;
-  maxMessages?: number;
-  maxScanTargets?: number;
-  order?: "source_default" | "recent_first";
-  signal?: AbortSignal;
-  onProgress?: (progress: ScanProgress) => void;
-}
+export type ScanOptions = CoreScanOptions;

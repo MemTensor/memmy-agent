@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { deriveWorkspaceHostId } from "@memmy/local-api-contracts";
+import { deriveWorkspaceHostId } from "../../../src/contracts/index.js";
 import { createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
 
 const {

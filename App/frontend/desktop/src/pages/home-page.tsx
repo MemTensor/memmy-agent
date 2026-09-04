@@ -2518,7 +2518,7 @@ export function HomePage() {
   }
 
   function handleComposerPaste(event: ClipboardEvent<HTMLTextAreaElement>) {
-    const files = clipboardImageFilesFromDataTransfer(event.clipboardData);
+    const files = clipboardAttachmentFilesFromDataTransfer(event.clipboardData);
     if (!files.length) {
       return;
     }
@@ -3633,10 +3633,10 @@ export interface AgentMediaValidationResult {
   duplicateCount: number;
 }
 
-type ClipboardFileItem = Pick<DataTransferItem, "kind" | "type" | "getAsFile">;
+type ClipboardFileItem = Pick<DataTransferItem, "kind" | "getAsFile">;
 type DragFileItem = Pick<DataTransferItem, "kind" | "getAsFile">;
 
-export interface ClipboardImageSource {
+export interface ClipboardAttachmentSource {
   items?: ArrayLike<ClipboardFileItem> | Iterable<ClipboardFileItem>;
   files?: ArrayLike<File> | Iterable<File>;
 }
@@ -3647,11 +3647,11 @@ export interface AttachmentDropSource {
   types?: ArrayLike<string> | Iterable<string>;
 }
 
-export function clipboardImageFilesFromDataTransfer(source: ClipboardImageSource | null | undefined): File[] {
+export function clipboardAttachmentFilesFromDataTransfer(source: ClipboardAttachmentSource | null | undefined): File[] {
   const files: File[] = [];
   const seen = new Set<File>();
-  const addImageFile = (file: File | null | undefined) => {
-    if (!file || !String(file.type ?? "").toLowerCase().startsWith("image/") || seen.has(file)) {
+  const addFile = (file: File | null | undefined) => {
+    if (!file || seen.has(file)) {
       return;
     }
     seen.add(file);
@@ -3659,15 +3659,15 @@ export function clipboardImageFilesFromDataTransfer(source: ClipboardImageSource
   };
 
   for (const item of arrayLikeToArray<ClipboardFileItem>(source?.items)) {
-    if (item.kind === "file" && String(item.type ?? "").toLowerCase().startsWith("image/")) {
-      addImageFile(item.getAsFile());
+    if (item.kind === "file") {
+      addFile(item.getAsFile());
     }
   }
   if (files.length > 0) {
     return files;
   }
   for (const file of arrayLikeToArray<File>(source?.files)) {
-    addImageFile(file);
+    addFile(file);
   }
 
   return files;

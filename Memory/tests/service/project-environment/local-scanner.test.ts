@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
-import type { WorkspaceUri } from "@memmy/local-api-contracts";
+import type { WorkspaceUri } from "../../../src/contracts/index.js";
 import {
   resolveLocalWorkspaceRoot,
   scanLocalProject

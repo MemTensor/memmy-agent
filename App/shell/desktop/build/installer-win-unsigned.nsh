@@ -45,6 +45,7 @@ Var pid
   ; close-and-verify flow above and must never prepare or mutate migration state.
   !ifndef BUILD_UNINSTALLER
     StrCmp $MemmyIsRelayedUpgrade "1" memmy_check_app_running_done
+    StrCmp $MemmyStandardUpgradeSafe "1" memmy_check_app_running_done
     Call MemmyPrepareDirectDataMigration
     Pop $0
     StrCmp $0 "1" memmy_check_app_running_done
@@ -55,12 +56,30 @@ Var pid
     Quit
 
     memmy_check_app_running_done:
+      ; electron-builder checks $appExe before deciding whether the old uninstaller may keep
+      ; shortcuts. A relayed directory move has no executable in the new target yet, so bridge
+      ; only that probe to the verified source installation. customUnInstallCheck restores the
+      ; packaged target before any new files or registry entries are written.
+      StrCmp $MemmyIsRelayedUpgrade "1" 0 memmy_check_app_running_complete
+      StrCpy $appExe "$MemmyUpgradeSourceInstallDir\${PRODUCT_FILENAME}.exe"
+
+    memmy_check_app_running_complete:
   !endif
 !macroend
 
 !ifndef BUILD_UNINSTALLER
   !define MUI_CUSTOMFUNCTION_ABORT MemmyOnUserAbort
   Var MemmyIsRelayedUpgrade
+  Var MemmyStandardUpgradeSafe
+  Var MemmyInstalledExePath
+  Var MemmyInstalledInstallDir
+  Var MemmySelectedInstallDir
+  Var MemmyUpgradeRoute
+  Var MemmyFinalDirectoryReady
+  Var MemmyRelayInstallerMode
+  Var MemmyUpgradeSourceInstallDir
+  Var MemmyUpgradeTargetInstallDir
+  Var MemmyStandardUpgradeCheckScriptPath
   Var MemmyUpgradeWorkDir
   Var MemmyUpgradeBackupRoot
   Var MemmyUpgradeReopenAfterInstall
@@ -81,14 +100,15 @@ Var pid
   Var MemmyMigrationLogPath
   Var MemmyInstallerPid
 
-  ; The 1.0.8 updater starts the downloaded installer from $INSTDIR\data. electron-builder's
-  ; normal upgrade path asks the old uninstaller to move all of $INSTDIR, so that running
-  ; installer keeps the directory busy and the old uninstaller exits with code 2. Relay only
-  ; this legacy --updated invocation through a copy outside $INSTDIR. The relayed child carries
-  ; an explicit marker so normal installs and future upgrades continue through electron-builder.
+  ; Completed external-v1 installations can use electron-builder's standard NSIS upgrade.
+  ; Legacy or uncertain layouts still relay through a copy outside $INSTDIR so old install-local
+  ; data survives the uninstall. The relayed child carries an explicit marker to prevent recursion.
   !macro customInit
     StrCpy $MemmyDirectMigrationPrepared "0"
+    StrCpy $MemmyStandardUpgradeSafe "0"
     StrCpy $MemmyPreparedInstallDir ""
+    StrCpy $MemmyUpgradeRoute "relay"
+    StrCpy $MemmyFinalDirectoryReady "0"
     System::Call 'kernel32::GetCurrentProcessId() i.r0'
     StrCpy $MemmyInstallerPid $0
     ReadRegStr $MemmyPreviousInstallDir HKCU "${INSTALL_REGISTRY_KEY}" "InstallLocation"
@@ -100,7 +120,12 @@ Var pid
     ${If} ${Silent}
       Call MemmyValidateSelectedDirectories
       Pop $0
-      StrCmp $0 "1" memmy_custom_init_done memmy_custom_init_failed
+      StrCmp $0 "1" memmy_custom_init_route memmy_custom_init_failed
+
+      memmy_custom_init_route:
+        StrCpy $MemmyFinalDirectoryReady "1"
+        Call MemmyRelayLegacyUpgrade
+        StrCmp $MemmyUpgradeRoute "blocked" memmy_custom_init_failed memmy_custom_init_done
 
       memmy_custom_init_failed:
         SetErrorLevel 5
@@ -114,14 +139,50 @@ Var pid
     Page custom MemmyValidateInstallPage
   !macroend
 
+  ; A relay child is still visible for manual upgrades, but the relay owns the final reopen after
+  ; migration completion and version verification. Skipping the child's finish page avoids a
+  ; second launch through a shortcut while its proxy is being preserved or refreshed.
+  !macro customFinishPage
+    Function MemmySkipRelayedFinishPage
+      StrCmp $MemmyIsRelayedUpgrade "1" memmy_skip_relayed_finish_page memmy_show_finish_page
+
+      memmy_skip_relayed_finish_page:
+        Abort
+
+      memmy_show_finish_page:
+    FunctionEnd
+
+    Function MemmyStartAppAfterInstall
+      ${if} ${isUpdated}
+        StrCpy $1 "--updated"
+      ${else}
+        StrCpy $1 ""
+      ${endif}
+      ${StdUtils.ExecShellAsUser} $0 "$launchLink" "open" "$1"
+    FunctionEnd
+
+    !define MUI_PAGE_CUSTOMFUNCTION_PRE MemmySkipRelayedFinishPage
+    !define MUI_FINISHPAGE_RUN
+    !define MUI_FINISHPAGE_RUN_FUNCTION MemmyStartAppAfterInstall
+    !insertmacro MUI_PAGE_FINISH
+  !macroend
+
   ; electron-builder quits directly when the old uninstaller returns a failure code,
   ; so recover the prepared migration before preserving its existing error behavior.
   !macro customUnInstallCheck
-    IfErrors memmy_uninstall_check_exec_failed memmy_uninstall_check_result
+    IfErrors memmy_uninstall_check_exec_failed memmy_uninstall_check_restore_target_app_exe
 
     memmy_uninstall_check_exec_failed:
+      StrCmp $MemmyIsRelayedUpgrade "1" 0 memmy_uninstall_check_exec_failed_report
+      StrCpy $appExe "$MemmyUpgradeTargetInstallDir\${PRODUCT_FILENAME}.exe"
+
+    memmy_uninstall_check_exec_failed_report:
       DetailPrint `Uninstall was not successful. Not able to launch uninstaller!`
       Return
+
+    memmy_uninstall_check_restore_target_app_exe:
+      StrCmp $MemmyIsRelayedUpgrade "1" 0 memmy_uninstall_check_result
+      StrCpy $appExe "$MemmyUpgradeTargetInstallDir\${PRODUCT_FILENAME}.exe"
 
     memmy_uninstall_check_result:
       ${If} $R0 != 0
@@ -134,6 +195,7 @@ Var pid
   !macroend
 
   !macro customInstall
+    WriteRegStr SHELL_CONTEXT "${UNINSTALL_REGISTRY_KEY}" "InstallLocation" "$INSTDIR"
     Call MemmyAddCliToUserPath
     Call MemmyInstallLaunchProxy
     !insertmacro MemmyPointShortcutsToLaunchProxy
@@ -181,11 +243,10 @@ Function MemmyResolveMigrationPaths
     StrCmp $MemmyPreviousInstallDir "" 0 memmy_resolve_previous_source
     StrCpy $MemmyDirectSourceDataPath "$INSTDIR\data"
     StrCpy $MemmyDirectSourceInstallDir "$INSTDIR"
-    ; The exact directory explicitly selected by the user is the only discoverable old
-    ; install after a legacy uninstaller removed its registry entry. The migration helper
-    ; still requires complete category anchors and blocks it when an external-v1 record
-    ; proves the directory belongs to the new layout.
-    StrCpy $MemmyDirectSourceAuthority "selected-install-authority"
+    ; A user-selected directory is only a candidate. Without registry evidence, the
+    ; migration helper may elevate only an exact persisted install-local record; an
+    ; arbitrary residual must never replace already verified external data.
+    StrCpy $MemmyDirectSourceAuthority "untrusted-residual"
     Return
 
   memmy_resolve_previous_source:
@@ -314,6 +375,66 @@ Function MemmyExtractDataMigrationScript
   StrCpy $MemmyMigrationScriptPath "$PLUGINSDIR\MemmyDataMigration\MemmyWindowsDataMigration.ps1"
 FunctionEnd
 
+Function MemmyExtractStandardUpgradeCheckScript
+  InitPluginsDir
+  CreateDirectory "$PLUGINSDIR\MemmyStandardUpgradeCheck"
+  SetOutPath "$PLUGINSDIR\MemmyStandardUpgradeCheck"
+  File /oname=MemmyWindowsStandardUpgradeCheck.ps1 "${BUILD_RESOURCES_DIR}\MemmyWindowsStandardUpgradeCheck.ps1"
+  StrCpy $MemmyStandardUpgradeCheckScriptPath "$PLUGINSDIR\MemmyStandardUpgradeCheck\MemmyWindowsStandardUpgradeCheck.ps1"
+FunctionEnd
+
+; An installed application may bypass relay only when its completed external-v1 record, executable
+; version, external data paths, migration state, legacy data directory, and installer location all
+; pass the fail-closed PowerShell check. A missing installed executable is a normal fresh install.
+Function MemmyEvaluateStandardUpgradeSafety
+  StrCpy $MemmyStandardUpgradeSafe "0"
+  StrCpy $MemmyUpgradeRoute "relay"
+  StrCpy $MemmySelectedInstallDir "$INSTDIR"
+  StrCpy $MemmyInstalledInstallDir "$INSTDIR"
+  StrCpy $MemmyInstalledExePath "$INSTDIR\${PRODUCT_FILENAME}.exe"
+  StrCmp $MemmyPreviousInstallDir "" memmy_standard_check_installed_exe
+  StrCpy $MemmyInstalledInstallDir "$MemmyPreviousInstallDir"
+  StrCpy $MemmyInstalledExePath "$MemmyPreviousInstallDir\${PRODUCT_FILENAME}.exe"
+
+  memmy_standard_check_installed_exe:
+    Call MemmyResolveMigrationPaths
+    Call MemmyExtractStandardUpgradeCheckScript
+    IfFileExists "$MemmyStandardUpgradeCheckScriptPath" 0 memmy_standard_check_failed
+    StrCpy $R5 "$SYSDIR\WindowsPowerShell\v1.0\powershell.exe"
+    IfFileExists "$R5" 0 memmy_standard_check_failed
+    StrCpy $R4 ""
+    IfFileExists "$MemmyInstalledExePath" memmy_standard_check_run
+    StrCpy $R4 "-AllowMissingExecutable"
+
+  memmy_standard_check_run:
+    nsExec::ExecToStack '$\"$R5$\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $\"$MemmyStandardUpgradeCheckScriptPath$\" -InstallDir $\"$MemmyInstalledInstallDir$\" -TargetInstallDir $\"$MemmySelectedInstallDir$\" -TargetUserDataPath $\"$MemmyTargetUserDataPath$\" -TargetRuntimeHomePath $\"$MemmyTargetRuntimeHomePath$\" -InstalledExePath $\"$MemmyInstalledExePath$\" -InstallerPath $\"$EXEPATH$\" -InstallationRecordPath $\"$MemmyInstallationRecordPath$\" -MigrationStatePath $\"$MemmyMigrationStatePath$\" $R4'
+    Pop $0
+    Pop $1
+    DetailPrint "$1"
+    StrCmp $0 "0" memmy_standard_check_safe
+    StrCmp $0 "2" memmy_standard_check_blocked
+
+  memmy_standard_check_failed:
+    DetailPrint "Installed data layout requires the compatibility upgrade relay."
+    Return
+
+  memmy_standard_check_safe:
+    StrCpy $MemmyStandardUpgradeSafe "1"
+    StrCpy $MemmyUpgradeRoute "standard"
+    StrCmp $R4 "-AllowMissingExecutable" memmy_standard_check_fresh
+    DetailPrint "Completed external-v1 data layout verified; using the standard NSIS upgrade."
+    Return
+
+  memmy_standard_check_fresh:
+    DetailPrint "No installed Memmy.exe or trusted install-local source was found; using the standard NSIS install path."
+    Return
+
+  memmy_standard_check_blocked:
+    StrCpy $MemmyUpgradeRoute "blocked"
+    StrCpy $R8 "$1"
+    DetailPrint "Installation target validation blocked the upgrade."
+FunctionEnd
+
 ; Performs the migration while the old installation and its registered location still exist.
 ; Output: pushes "1" on success, else "0" and leaves a user-facing message in $R8.
 Function MemmyPrepareDirectDataMigration
@@ -333,7 +454,7 @@ Function MemmyPrepareDirectDataMigration
 
   memmy_direct_prepare_run:
     StrCpy $R5 "$SYSDIR\WindowsPowerShell\v1.0\powershell.exe"
-    nsExec::ExecToStack '$\"$R5$\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $\"$MemmyMigrationScriptPath$\" -Mode Prepare -SourceDataPath $\"$MemmyDirectSourceDataPath$\" -SourceAuthority $MemmyDirectSourceAuthority -SourceInstallDir $\"$MemmyDirectSourceInstallDir$\" -SourceInstalledVersion $\"$MemmyPreviousInstalledVersion$\" -InstallationRecordPath $\"$MemmyInstallationRecordPath$\" -LegacyRuntimeHomePath $\"$PROFILE\.memmy$\" -TargetUserDataPath $\"$MemmyTargetUserDataPath$\" -TargetRuntimeHomePath $\"$MemmyTargetRuntimeHomePath$\" -PointerPath $\"$MemmyDataPointerPath$\" -StatePath $\"$MemmyMigrationStatePath$\" -LockPath $\"$MemmyMigrationLockPath$\" -LogPath $\"$MemmyMigrationLogPath$\" -Owner installer -InstallerPid $MemmyInstallerPid -InstallerPath $\"$EXEPATH$\" -InstallerInstallDir $\"$INSTDIR$\" -AcquireLock'
+    nsExec::ExecToStack '$\"$R5$\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $\"$MemmyMigrationScriptPath$\" -Mode Prepare -SourceDataPath $\"$MemmyDirectSourceDataPath$\" -SourceAuthority $MemmyDirectSourceAuthority -SourceInstallDir $\"$MemmyDirectSourceInstallDir$\" -TargetInstallDir $\"$INSTDIR$\" -SourceInstalledVersion $\"$MemmyPreviousInstalledVersion$\" -InstallationRecordPath $\"$MemmyInstallationRecordPath$\" -LegacyRuntimeHomePath $\"$PROFILE\.memmy$\" -TargetUserDataPath $\"$MemmyTargetUserDataPath$\" -TargetRuntimeHomePath $\"$MemmyTargetRuntimeHomePath$\" -PointerPath $\"$MemmyDataPointerPath$\" -StatePath $\"$MemmyMigrationStatePath$\" -LockPath $\"$MemmyMigrationLockPath$\" -LogPath $\"$MemmyMigrationLogPath$\" -Owner installer -InstallerPid $MemmyInstallerPid -InstallerPath $\"$EXEPATH$\" -InstallerInstallDir $\"$INSTDIR$\" -AcquireLock'
     Pop $0
     Pop $1
     StrCmp $0 "0" memmy_direct_prepare_succeeded
@@ -428,12 +549,29 @@ Function MemmyValidateInstallPage
     Abort
   ${EndIf}
   StrCmp $MemmyIsRelayedUpgrade "1" 0 memmy_validate_page_direct
-  Abort
+  Call MemmyValidateSelectedDirectories
+  Pop $0
+  StrCmp $0 "1" memmy_validate_page_relayed_target memmy_validate_page_show_error
+
+  memmy_validate_page_relayed_target:
+    GetFullPathName $1 "$INSTDIR"
+    GetFullPathName $2 "$MemmyUpgradeTargetInstallDir"
+    StrCmp $1 $2 0 memmy_validate_page_relayed_target_failed
+    Abort
+
+  memmy_validate_page_relayed_target_failed:
+    StrCpy $R8 "The relayed upgrade target changed after compatibility migration started. Go back and select $\"$MemmyUpgradeTargetInstallDir$\"."
+    StrCmp $LANGUAGE ${MEMMY_LANG_SIMPCHINESE} 0 memmy_validate_page_show_error
+    StrCpy $R8 "兼容迁移开始后安装目录发生了变化。请返回并选择“$MemmyUpgradeTargetInstallDir”。"
+    Goto memmy_validate_page_show_error
 
   memmy_validate_page_direct:
     Call MemmyValidateSelectedDirectories
     Pop $0
     StrCmp $0 "1" 0 memmy_validate_page_show_error
+    StrCpy $MemmyFinalDirectoryReady "1"
+    Call MemmyRelayLegacyUpgrade
+    StrCmp $MemmyUpgradeRoute "blocked" memmy_validate_page_show_error
     Abort
 
   memmy_validate_page_show_error:
@@ -460,9 +598,19 @@ Function MemmyRelayLegacyUpgrade
   Return
 
   memmy_relay_check_legacy:
-    ClearErrors
-    ${GetOptions} $R0 "--updated" $R1
-    IfErrors memmy_relay_done
+    StrCmp $MemmyFinalDirectoryReady "1" memmy_relay_evaluate
+    Return
+
+  memmy_relay_evaluate:
+    Call MemmyEvaluateStandardUpgradeSafety
+    StrCmp $MemmyStandardUpgradeSafe "1" memmy_relay_done
+    StrCmp $MemmyUpgradeRoute "blocked" memmy_relay_blocked
+    StrCpy $MemmyUpgradeSourceInstallDir "$MemmyInstalledInstallDir"
+    StrCpy $MemmyUpgradeTargetInstallDir "$MemmySelectedInstallDir"
+    StrCpy $MemmyRelayInstallerMode "Interactive"
+    ${If} ${Silent}
+      StrCpy $MemmyRelayInstallerMode "Silent"
+    ${EndIf}
 
     System::Call 'kernel32::GetCurrentProcessId() i .r2'
     StrCmp $2 "" memmy_relay_failed
@@ -488,15 +636,18 @@ Function MemmyRelayLegacyUpgrade
     Goto memmy_relay_stage
 
   memmy_relay_check_legacy_reopen:
-    IfFileExists "$INSTDIR\data\Memmy\prepared-required-update.json" 0 memmy_relay_stage
-    IfFileExists "$INSTDIR\data\Memmy\prepared-required-update.json.attempt" memmy_relay_stage
+    IfFileExists "$MemmyUpgradeSourceInstallDir\data\Memmy\prepared-required-update.json" 0 memmy_relay_stage
+    IfFileExists "$MemmyUpgradeSourceInstallDir\data\Memmy\prepared-required-update.json.attempt" memmy_relay_stage
     StrCpy $R6 "0"
 
   memmy_relay_stage:
     ; Refresh the launch proxy before the relay moves $INSTDIR\data. The 1.0.8 proxy only knows
     ; the install-local marker lock, which disappears with that move; the refreshed proxy also
     ; recognizes the relay lock outside $INSTDIR and keeps desktop launches blocked throughout.
+    StrCpy $R2 "$INSTDIR"
+    StrCpy $INSTDIR "$MemmyUpgradeSourceInstallDir"
     Call MemmyInstallLaunchProxy
+    StrCpy $INSTDIR "$R2"
     ClearErrors
     CreateDirectory "$R1"
     SetOutPath "$R1"
@@ -521,7 +672,7 @@ Function MemmyRelayLegacyUpgrade
     Delete "$R8"
 
     ClearErrors
-    ExecShell "open" "$R5" '-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File $\"$R3$\" -InstallerPath $\"$R4$\" -InstallDir $\"$INSTDIR$\" -OriginalInstallerPid $2 -LegacyHelperPid $3 -ExpectedVersion $\"${VERSION}$\" -InstalledVersion $\"$MemmyPreviousInstalledVersion$\" -ReopenAfterInstall $R6 -ReadyPath $\"$R8$\" -WorkDir $\"$R1$\" -LogPath $\"$R7$\"' SW_HIDE
+    ExecShell "open" "$R5" '-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File $\"$R3$\" -InstallerPath $\"$R4$\" -SourceInstallDir $\"$MemmyUpgradeSourceInstallDir$\" -TargetInstallDir $\"$MemmyUpgradeTargetInstallDir$\" -OriginalInstallerPid $2 -LegacyHelperPid $3 -ExpectedVersion $\"${VERSION}$\" -InstalledVersion $\"$MemmyPreviousInstalledVersion$\" -InstallerMode $MemmyRelayInstallerMode -ReopenAfterInstall $R6 -ReadyPath $\"$R8$\" -WorkDir $\"$R1$\" -LogPath $\"$R7$\"' SW_HIDE
     IfErrors memmy_relay_failed
     StrCpy $R9 "0"
 
@@ -534,8 +685,20 @@ Function MemmyRelayLegacyUpgrade
   memmy_relay_ready:
 
     ; The old 1.0.8 helper must not reopen the old executable while the relay owns the upgrade.
+    StrCmp $MemmyRelayInstallerMode "Interactive" memmy_relay_interactive_parent_done
     SetErrorLevel 1602
     Quit
+
+  memmy_relay_interactive_parent_done:
+    SetErrorLevel 0
+    Quit
+
+  memmy_relay_blocked:
+    ${If} ${Silent}
+      SetErrorLevel 5
+      Quit
+    ${EndIf}
+    Return
 
   memmy_relay_failed:
     SetOutPath "$INSTDIR"
@@ -550,12 +713,22 @@ Function MemmyReadRelayedUpgradeContext
   ReadEnvStr $MemmyUpgradeWorkDir "MEMMY_UPGRADE_WORK_DIR"
   ReadEnvStr $MemmyUpgradeBackupRoot "MEMMY_UPGRADE_BACKUP_ROOT"
   ReadEnvStr $MemmyUpgradeReopenAfterInstall "MEMMY_UPGRADE_REOPEN_AFTER_INSTALL"
+  ReadEnvStr $MemmyUpgradeSourceInstallDir "MEMMY_UPGRADE_SOURCE_INSTALL_DIR"
+  ReadEnvStr $MemmyUpgradeTargetInstallDir "MEMMY_UPGRADE_TARGET_INSTALL_DIR"
   StrCmp $MemmyUpgradeWorkDir "" memmy_relay_context_failed
   StrCmp $MemmyUpgradeBackupRoot "" memmy_relay_context_failed
+  StrCmp $MemmyUpgradeSourceInstallDir "" memmy_relay_context_failed
+  StrCmp $MemmyUpgradeTargetInstallDir "" memmy_relay_context_failed
   StrCmp $MemmyUpgradeReopenAfterInstall "0" memmy_relay_context_validate_path
   StrCmp $MemmyUpgradeReopenAfterInstall "1" memmy_relay_context_validate_path memmy_relay_context_failed
 
   memmy_relay_context_validate_path:
+    GetFullPathName $6 "$MemmyUpgradeSourceInstallDir"
+    StrCmp $6 $MemmyUpgradeSourceInstallDir 0 memmy_relay_context_failed
+    GetFullPathName $7 "$MemmyUpgradeTargetInstallDir"
+    StrCmp $7 $MemmyUpgradeTargetInstallDir 0 memmy_relay_context_failed
+    GetFullPathName $8 "$INSTDIR"
+    StrCmp $8 $MemmyUpgradeTargetInstallDir 0 memmy_relay_context_failed
     GetFullPathName $4 "$MemmyUpgradeWorkDir"
     StrCmp $4 $MemmyUpgradeWorkDir 0 memmy_relay_context_failed
     ; The backup root is optional when the previous installation has no data directory.
@@ -572,7 +745,7 @@ Function MemmyReadRelayedUpgradeContext
     StrCmp $4 "" memmy_relay_context_failed
     ${GetFileName} "$MemmyUpgradeWorkDir" $5
     StrCmp $4 $5 0 memmy_relay_context_failed
-    StrCpy $0 "$INSTDIR.memmy-upgrade-backup\$4"
+    StrCpy $0 "$MemmyUpgradeSourceInstallDir.memmy-upgrade-backup\$4"
     StrCmp $MemmyUpgradeBackupRoot $0 0 memmy_relay_context_failed
     StrCpy $MemmyIsRelayedUpgrade "1"
     Return
@@ -848,6 +1021,10 @@ Function un.MemmyRemoveLaunchProxy
     Pop $R2
     Pop $R1
     Pop $R0
+    ; Electron registers app.setLoginItemSettings under this per-user Run value.
+    ; The keep-shortcuts upgrade branch returns above so the user's preference survives updates.
+    DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${APP_ID}"
+    ClearErrors
     ReadRegStr $0 SHELL_CONTEXT "Software\${APP_GUID}" "ShortcutName"
     StrCmp $0 "" 0 un_memmy_delete_old_desktop_shortcut
     StrCpy $0 "${PRODUCT_FILENAME}"

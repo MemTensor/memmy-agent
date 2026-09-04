@@ -47,6 +47,8 @@ declare global {
       exportDiagnosticsReport(): Promise<MemmyDiagnosticsReportExportResult>;
       getLogLevel(): Promise<"error" | "warn" | "info" | "debug">;
       setLogLevel(level: "error" | "warn" | "info" | "debug"): Promise<void>;
+      getLaunchAtLogin(): Promise<boolean>;
+      setLaunchAtLogin(enabled: boolean): Promise<boolean>;
       getMicrophoneAccessStatus(): Promise<MemmyMicrophoneAccessStatus>;
       requestMicrophoneAccess(): Promise<MemmyMicrophoneAccessStatus>;
       selectProjectDirectory(): Promise<DesktopProjectDirectorySelection>;

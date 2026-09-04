@@ -37,6 +37,7 @@ interface AppSettingsRow {
   task_done_notification_enabled: number;
   notification_sound_enabled: number;
   menu_bar_icon_enabled: number;
+  stop_memory_service_on_exit: number;
   auto_scan_known_agents: number;
   watch_file_changes: number;
   auto_inject_skill: number;
@@ -48,6 +49,7 @@ interface OnboardingStateRow {
   has_accepted_terms: number;
   accepted_terms_version: string | null;
   scan_permission: string;
+  first_encounter_report_status: string;
   improvement_program: string;
   completed_at: string | null;
 }
@@ -117,6 +119,7 @@ export function createBootstrapRepository(db: DatabaseSync): BootstrapRepository
           task_done_notification_enabled,
           notification_sound_enabled,
           menu_bar_icon_enabled,
+          stop_memory_service_on_exit,
           auto_scan_known_agents,
           watch_file_changes,
           auto_inject_skill
@@ -135,7 +138,8 @@ export function createBootstrapRepository(db: DatabaseSync): BootstrapRepository
         skinId: row.skin,
         taskDoneNotificationEnabled: toBoolean(row.task_done_notification_enabled),
         notificationSoundEnabled: toBoolean(row.notification_sound_enabled),
-        menuBarIconEnabled: toBoolean(row.menu_bar_icon_enabled)
+        menuBarIconEnabled: toBoolean(row.menu_bar_icon_enabled),
+        stopMemoryServiceOnExit: toBoolean(row.stop_memory_service_on_exit)
       });
     },
 
@@ -163,7 +167,8 @@ export function createBootstrapRepository(db: DatabaseSync): BootstrapRepository
           defaultLaunchMode: { column: "default_launch_mode" },
           taskDoneNotificationEnabled: { column: "task_done_notification_enabled", serialize: toInteger },
           notificationSoundEnabled: { column: "notification_sound_enabled", serialize: toInteger },
-          menuBarIconEnabled: { column: "menu_bar_icon_enabled", serialize: toInteger }
+          menuBarIconEnabled: { column: "menu_bar_icon_enabled", serialize: toInteger },
+          stopMemoryServiceOnExit: { column: "stop_memory_service_on_exit", serialize: toInteger }
         },
         patch
       );
@@ -185,9 +190,9 @@ export function createBootstrapRepository(db: DatabaseSync): BootstrapRepository
 
     getOnboardingState() {
       const uuid = resolveOnboardingUuidWithDefaults(db);
-      const installationScanPermission = getRequiredRow<Pick<OnboardingStateRow, "scan_permission">>(
+      const installationState = getRequiredRow<Pick<OnboardingStateRow, "scan_permission" | "first_encounter_report_status">>(
         db,
-        "SELECT scan_permission FROM account_onboarding_state WHERE uuid = ?",
+        "SELECT scan_permission, first_encounter_report_status FROM account_onboarding_state WHERE uuid = ?",
         [INSTALLATION_SCAN_SCOPE_UUID]
       );
       const row = getRequiredRow<OnboardingStateRow>(
@@ -210,7 +215,8 @@ export function createBootstrapRepository(db: DatabaseSync): BootstrapRepository
         currentStep: row.current_step,
         hasAcceptedTerms: toBoolean(row.has_accepted_terms),
         acceptedTermsVersion: row.accepted_terms_version,
-        scanPermission: installationScanPermission.scan_permission,
+        scanPermission: installationState.scan_permission,
+        firstEncounterReportStatus: installationState.first_encounter_report_status,
         improvementProgram: row.improvement_program,
         completedAt: row.completed_at
       });
@@ -218,7 +224,7 @@ export function createBootstrapRepository(db: DatabaseSync): BootstrapRepository
 
     updateOnboarding(patch) {
       const uuid = resolveOnboardingUuidWithDefaults(db);
-      const { scanPermission, ...accountPatch } = patch;
+      const { scanPermission, firstEncounterReportStatus, ...accountPatch } = patch;
       applyPatch(
         db,
         "account_onboarding_state",
@@ -233,12 +239,15 @@ export function createBootstrapRepository(db: DatabaseSync): BootstrapRepository
         accountPatch,
         { column: "uuid", value: uuid }
       );
-      if (scanPermission !== undefined) {
+      if (scanPermission !== undefined || firstEncounterReportStatus !== undefined) {
         applyPatch(
           db,
           "account_onboarding_state",
-          { scanPermission: { column: "scan_permission" } },
-          { scanPermission },
+          {
+            scanPermission: { column: "scan_permission" },
+            firstEncounterReportStatus: { column: "first_encounter_report_status" }
+          },
+          { scanPermission, firstEncounterReportStatus },
           { column: "uuid", value: INSTALLATION_SCAN_SCOPE_UUID }
         );
       }

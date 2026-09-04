@@ -205,7 +205,7 @@ TUI 支持 Slash 命令候选菜单。在输入区输入 `/` 即可打开菜单�
 
 - `exit`、`quit`、`/exit`、`/quit`、`:q` 可以退出，但只有 `/quit` 出现在菜单中。
 
-- `/history-dag` 和 `/dream*` 是否出现取决于对应功能是否启用。
+- `/history-dag` 是否出现取决于对应功能是否启用。
 
 - 初始最多显示 8 个候选项，可继续输入命令前缀筛选其他命令。
 
@@ -234,18 +234,13 @@ TUI 支持 Slash 命令候选菜单。在输入区输入 `/` 即可打开菜单�
 | `/goal edit <objective>` | 新目标内容 | 修改目标 |
 | `/goal budget <n\|none>` | 数字或 `none` | 设置或清除目标预算 |
 | `/goal clear` | 无 | 清除目标 |
-| `/dream` | 无 | 执行记忆整理 |
-| `/dream-log` | 无 | 查看记忆整理记录 |
-| `/dream-log <sha>` | Dream 版本 SHA | 查看指定记忆整理版本的变更 |
-| `/dream-restore` | 无 | 列出可恢复的记忆整理版本 |
-| `/dream-restore <sha>` | Dream 版本 SHA | 恢复到指定记忆整理版本 |
 | `/pairing` | 无 | 查看或管理渠道配对 |
 | `/pairing list` | 无 | 查看渠道配对请求 |
 | `/pairing approve <code>` | 配对码 | 批准配对请求 |
 | `/pairing deny <code>` | 配对码 | 拒绝配对请求 |
 | `/pairing revoke <user_id>` | 用户 ID | 撤销用户配对 |
 
-`/history-dag`、`/dream*` 等命令是否可用，取决于对应功能是否在配置中启用。
+`/history-dag` 是否可用，取决于对应功能是否在配置中启用。
 
 ## 七、常见问题
 

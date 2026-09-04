@@ -6,6 +6,7 @@ source "$ROOT_DIR/scripts/internal/shared/package-logging.sh"
 DESKTOP_DIR="$ROOT_DIR/App/shell/desktop"
 AGENT_DIR="$ROOT_DIR/App/memmy-agent"
 MEMORY_DIR="$ROOT_DIR/Memory"
+AGENT_SOURCE_CORE_DIR="$ROOT_DIR/AgentSourceCore"
 MIGRATIONS_DIR="$ROOT_DIR/Migrations"
 LOCAL_API_CONTRACTS_DIR="$ROOT_DIR/App/backend/local-api-contracts"
 RUNTIME_DIR="$DESKTOP_DIR/dist/runtime"
@@ -82,6 +83,7 @@ if [ -n "${MEMMY_DESKTOP_VERSION:-}" ]; then
 else
   DESKTOP_VERSION="$(read_package_version "$DESKTOP_DIR/package.json")"
 fi
+MEMORY_VERSION="$(read_package_version "$MEMORY_DIR/package.json")"
 node "$ROOT_DIR/scripts/internal/shared/verify-package-version.mjs" --expected "$DESKTOP_VERSION"
 export MEMMY_VERSION_SYNC_CHECK_ONLY=1
 for builder_arg in "$@"; do
@@ -165,6 +167,24 @@ require_packaged_runtime_glob() {
 
   if ! compgen -G "$required_pattern" >/dev/null; then
     echo "Missing required packaged runtime file matching: $required_pattern" >&2
+    exit 1
+  fi
+}
+
+require_packaged_runtime_absent() {
+  local forbidden_path="$1"
+
+  if [ -e "$forbidden_path" ] || [ -L "$forbidden_path" ]; then
+    echo "Packaged runtime contains a forbidden path: $forbidden_path" >&2
+    exit 1
+  fi
+}
+
+require_no_packaged_runtime_glob() {
+  local forbidden_pattern="$1"
+
+  if compgen -G "$forbidden_pattern" >/dev/null; then
+    echo "Packaged runtime contains a forbidden path matching: $forbidden_pattern" >&2
     exit 1
   fi
 }
@@ -283,28 +303,10 @@ install_better_sqlite3_prebuild_with_download_fallback() {
 }
 
 create_memory_runtime_manifest() {
-  node - "$ROOT_DIR/package.json" "$MEMORY_DIR/package.json" "$ROOT_DIR/App/backend/local-api-contracts/package.json" "$MIGRATIONS_DIR/package.json" "$RUNTIME_DIR/memory/package.json" <<'NODE'
-const { readFileSync, writeFileSync } = require("node:fs");
-
-const [projectPackagePath, sourcePackagePath, contractsPackagePath, migrationsPackagePath, runtimePackagePath] = process.argv.slice(2);
-const projectPackage = JSON.parse(readFileSync(projectPackagePath, "utf8"));
-const sourcePackage = JSON.parse(readFileSync(sourcePackagePath, "utf8"));
-const contractsPackage = JSON.parse(readFileSync(contractsPackagePath, "utf8"));
-const migrationsPackage = JSON.parse(readFileSync(migrationsPackagePath, "utf8"));
-const dependencies = { ...(sourcePackage.dependencies ?? {}) };
-delete dependencies["@memmy/local-api-contracts"];
-delete dependencies["@memmy/migrations"];
-Object.assign(dependencies, contractsPackage.dependencies, migrationsPackage.dependencies);
-const runtimePackage = {
-  name: "@memmy/packaged-memory-runtime",
-  version: projectPackage.version,
-  private: true,
-  type: "module",
-  dependencies
-};
-
-writeFileSync(runtimePackagePath, `${JSON.stringify(runtimePackage, null, 2)}\n`);
-NODE
+  node "$ROOT_DIR/scripts/internal/win/create-memory-runtime-manifest.mjs" \
+    "$MEMORY_DIR/package.json" \
+    "$RUNTIME_DIR/memory/package.json" \
+    "$RUNTIME_DIR/memory/memory-runtime.json"
 
   create_memory_runtime_lock
 }
@@ -480,11 +482,18 @@ verify_packaged_file_matches_runtime() {
 }
 
 verify_windows_native_module() {
-  require_packaged_runtime_file "$RUNTIME_DIR/memory/node_modules/@memmy/local-api-contracts/dist/index.js"
-  require_packaged_runtime_file "$RUNTIME_DIR/memory/node_modules/@memmy/migrations/dist/index.js"
   verify_windows_x64_native_module \
     "$RUNTIME_DIR/memory/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
     "Memory better-sqlite3"
+}
+
+verify_windows_memory_workspace_artifacts() {
+  require_packaged_runtime_file "$RUNTIME_AGENT_SOURCE_CORE_DIR/package.json"
+  require_packaged_runtime_file "$RUNTIME_AGENT_SOURCE_CORE_DIR/dist/src/index.js"
+  if [ -L "$RUNTIME_AGENT_SOURCE_CORE_DIR" ]; then
+    echo "Packaged agent source core must not be a symbolic link." >&2
+    exit 1
+  fi
 }
 
 verify_windows_onnxruntime_module() {
@@ -538,12 +547,62 @@ verify_windows_agent_native_artifacts() {
   require_packaged_runtime_glob "$RUNTIME_DIR/memmy-agent/node_modules/openclaw/node_modules/sqlite-vec-windows-x64/vec0.*"
 }
 
+verify_windows_agent_html_lint_runtime() {
+  (
+    cd "$RUNTIME_DIR/memmy-agent"
+    node --input-type=module --eval '
+      import { HtmlValidate } from "html-validate";
+      const validator = new HtmlValidate({ extends: ["html-validate:recommended"] });
+      const valid = await validator.validateString("<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Memmy</title></head><body><main>ready</main></body></html>");
+      const invalid = await validator.validateString("<main><span></main>");
+      if (!valid.valid || invalid.valid) throw new Error("html-validate packaged runtime smoke failed");
+    '
+  )
+}
+
+verify_pruned_windows_runtime() {
+  local forbidden_source_map
+
+  verify_windows_onnxruntime_module
+  require_packaged_runtime_file "$RUNTIME_DIR/memmy-agent/dist/main.js.map"
+  require_packaged_runtime_absent "$RUNTIME_DIR/memory/node_modules/onnxruntime-node/bin/napi-v3/darwin"
+  require_packaged_runtime_absent "$RUNTIME_DIR/memory/node_modules/onnxruntime-node/bin/napi-v3/linux"
+  require_packaged_runtime_absent "$RUNTIME_DIR/memory/node_modules/onnxruntime-node/bin/napi-v3/win32/arm64"
+  require_packaged_runtime_absent "$RUNTIME_DIR/memmy-agent/node_modules/vitest"
+  require_packaged_runtime_absent "$RUNTIME_DIR/memmy-agent/node_modules/vite"
+  require_packaged_runtime_absent "$RUNTIME_DIR/memmy-agent/node_modules/rolldown"
+  require_packaged_runtime_absent "$RUNTIME_DIR/memmy-agent/node_modules/@vitest"
+  require_no_packaged_runtime_glob "$RUNTIME_DIR/memmy-agent/node_modules/@rolldown/binding-*"
+
+  forbidden_source_map="$(find \
+    "$RUNTIME_DIR/memory/node_modules" \
+    "$RUNTIME_DIR/memmy-agent/node_modules" \
+    -type f -name '*.map' \
+    ! -path "$RUNTIME_DIR/memory/node_modules/@memmy/*" \
+    ! -path "$RUNTIME_DIR/memmy-agent/node_modules/@memmy/*" \
+    -print -quit)"
+  if [ -n "$forbidden_source_map" ]; then
+    echo "Packaged runtime contains a third-party production source map: $forbidden_source_map" >&2
+    exit 1
+  fi
+}
+
 verify_packaged_windows_unpacked_artifacts() {
   local unpacked_runtime="$DESKTOP_DIR/release/win-unpacked/resources/app.asar.unpacked/dist/runtime"
+  local packaged_memory_runtime="$DESKTOP_DIR/release/win-unpacked/resources/memory-runtime"
+  local packaged_agent_source_core="$packaged_memory_runtime/node_modules/@memmy/agent-source-core"
   local packaged_embedding_model="$DESKTOP_DIR/release/win-unpacked/resources/embedding-models/$EMBEDDING_MODEL_ID"
 
   require_packaged_runtime_file "$DESKTOP_DIR/release/win-unpacked/resources/app.asar"
+  require_packaged_runtime_file "$DESKTOP_DIR/release/win-unpacked/resources/cli/memmy-memory.cmd"
+  require_packaged_runtime_file "$DESKTOP_DIR/release/win-unpacked/resources/cli/memmy.cmd"
   verify_packaged_runtime_config_boundary "$DESKTOP_DIR/release/win-unpacked/resources"
+  require_packaged_runtime_file "$packaged_agent_source_core/package.json"
+  require_packaged_runtime_file "$packaged_agent_source_core/dist/src/index.js"
+  if [ -L "$packaged_agent_source_core" ]; then
+    echo "Packaged offline Memory agent source core must not be a symbolic link." >&2
+    exit 1
+  fi
   verify_windows_x64_native_module \
     "$unpacked_runtime/memory/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
     "packaged Memory better-sqlite3"
@@ -588,7 +647,10 @@ verify_packaged_runtime_config_boundary() {
   fi
   node "$ROOT_DIR/scripts/internal/shared/verify-packaged-asar.mjs" \
     --asar "$(to_node_readable_path "$asar_file")" \
-    --expected "$DESKTOP_VERSION"
+    --expected "$DESKTOP_VERSION" \
+    --expected-memory "$MEMORY_VERSION" \
+    --platform win32 \
+    --arch "$PACKAGE_ARCH"
 }
 
 npm_ci_win_x64() {
@@ -655,19 +717,24 @@ mkdir -p "$MIGRATIONS_STAGING_DIR"
 cp "$MIGRATIONS_DIR/package.json" "$MIGRATIONS_STAGING_DIR/package.json"
 cp -R "$MIGRATIONS_DIR/dist" "$MIGRATIONS_STAGING_DIR/dist"
 
-cp -R "$MEMORY_DIR/dist/src" "$RUNTIME_DIR/memory/src"
+mkdir -p "$RUNTIME_DIR/memory/dist"
+cp -R "$MEMORY_DIR/dist/src" "$RUNTIME_DIR/memory/dist/src"
+cp -R "$MEMORY_DIR/dist/viewer" "$RUNTIME_DIR/memory/dist/viewer"
+cp -R "$MEMORY_DIR/adapters" "$RUNTIME_DIR/memory/adapters"
 package_step_start "Create Windows Memory runtime manifest"
 create_memory_runtime_manifest
 
 package_step_start "Install Windows x64 Memory runtime dependencies"
 npm_ci_win_x64 "$RUNTIME_DIR/memory"
-mkdir -p "$RUNTIME_DIR/memory/node_modules/@memmy/local-api-contracts" "$RUNTIME_DIR/memory/node_modules/@memmy/migrations"
-cp "$ROOT_DIR/App/backend/local-api-contracts/package.json" "$RUNTIME_DIR/memory/node_modules/@memmy/local-api-contracts/package.json"
-cp -R "$ROOT_DIR/App/backend/local-api-contracts/dist" "$RUNTIME_DIR/memory/node_modules/@memmy/local-api-contracts/dist"
-cp "$MIGRATIONS_STAGING_DIR/package.json" "$RUNTIME_DIR/memory/node_modules/@memmy/migrations/package.json"
-cp -R "$MIGRATIONS_STAGING_DIR/dist" "$RUNTIME_DIR/memory/node_modules/@memmy/migrations/dist"
 install_better_sqlite3_win_x64 "$RUNTIME_DIR/memory"
+package_step_start "Stage Windows Memory workspace runtime packages"
+RUNTIME_AGENT_SOURCE_CORE_DIR="$RUNTIME_DIR/memory/node_modules/@memmy/agent-source-core"
+rm -rf "$RUNTIME_AGENT_SOURCE_CORE_DIR"
+mkdir -p "$RUNTIME_AGENT_SOURCE_CORE_DIR"
+cp "$AGENT_SOURCE_CORE_DIR/package.json" "$RUNTIME_AGENT_SOURCE_CORE_DIR/package.json"
+cp -R "$AGENT_SOURCE_CORE_DIR/dist" "$RUNTIME_AGENT_SOURCE_CORE_DIR/dist"
 package_step_start "Verify Windows x64 Memory runtime artifacts"
+verify_windows_memory_workspace_artifacts
 verify_windows_native_module
 verify_windows_better_sqlite3_runtime "$RUNTIME_DIR/memory"
 verify_windows_onnxruntime_module
@@ -751,6 +818,19 @@ package_step_start "Verify Windows memmy-agent runtime exports"
 	  '
 )
 
+package_step_start "Smoke test packaged HTML lint before optional-peer pruning"
+verify_windows_agent_html_lint_runtime
+
+package_step_start "Prune platform-incompatible and packaging-only Windows runtime files"
+node "$ROOT_DIR/scripts/internal/shared/prune-packaged-runtime.mjs" \
+  --platform win32 \
+  --arch "$PACKAGE_ARCH" \
+  --runtime-root "$RUNTIME_DIR"
+
+package_step_start "Verify pruned Windows runtime boundaries"
+verify_windows_agent_html_lint_runtime
+verify_pruned_windows_runtime
+
 package_step_start "Prune and verify Windows runtime versions"
 node "$ROOT_DIR/scripts/internal/shared/prune-runtime-env-files.mjs" "$RUNTIME_DIR"
 RUNTIME_NODE_DIR="$(to_node_readable_path "$RUNTIME_DIR")"
@@ -759,9 +839,10 @@ node "$ROOT_DIR/scripts/internal/shared/verify-package-version.mjs" \
   --runtime-root "$RUNTIME_NODE_DIR"
 
 package_step_start "Create Windows CLI launchers and embedding model"
-create_windows_cli_launcher "$CLI_BIN_DIR/memmy-memory.cmd" "dist\\runtime\\memory\\src\\cli\\index.js"
+create_windows_cli_launcher "$CLI_BIN_DIR/memmy-memory.cmd" "dist\\runtime\\memory\\dist\\src\\cli\\index.js"
 create_windows_cli_launcher "$CLI_BIN_DIR/memmy.cmd" "dist\\runtime\\memmy-agent\\dist\\main.js"
 node "$ROOT_DIR/scripts/internal/shared/prepare-embedding-model.mjs" "$EMBEDDING_MODELS_DIR"
+cp -R "$EMBEDDING_MODELS_DIR" "$RUNTIME_DIR/memory/embedding-models"
 
 package_step_start "Patch electron-builder NSIS template"
 patch_electron_builder_nsis_refresh

@@ -48,6 +48,7 @@ import type {
 import { MemoryServiceError } from "../../utils/error.js";
 import { newId,stableHash,stableStringify } from "../../utils/id.js";
 import { isRecord } from "../../utils/json.js";
+import { memoryCaptureQaHash, normalizeMemoryCaptureSource } from "../../utils/memory-capture-claim.js";
 import { isMemmyRecallToolName } from "../../utils/memmy-context-tags.js";
 import { clip } from "../../utils/text.js";
 import { nowIso } from "../../utils/time.js";
@@ -1241,6 +1242,7 @@ export class SessionTurnService {
       }
     }
 
+    const newlyStoredL1MemoryIds: string[] = [];
     const response = this.deps.repos.transaction(() => {
       const session = this.deps.requireOpenSession(request.sessionId);
       this.deps.assertSessionInScope(session, request.namespace);
@@ -1251,9 +1253,19 @@ export class SessionTurnService {
       if (existingRawTurn && isRecord(existingRawTurn.messagePayload?.turn_complete)) {
         const at = nowIso();
         const episode = this.deps.requireEpisode(existingRawTurn.episodeId);
+        const existingCaptureClaim = existingRawTurn.userText && existingRawTurn.assistantText
+          ? this.deps.repos.captureClaims.get(
+              session.userId,
+              normalizeMemoryCaptureSource(session.source),
+              memoryCaptureQaHash(existingRawTurn.userText, existingRawTurn.assistantText)
+            )
+          : undefined;
         const l1MemoryIds = episode.l1MemoryIds.filter((memoryId: string) => {
           const memory = this.deps.repos.memories.get(memoryId);
-          return memory && this.deps.rawTurnIdFromMemory(memory) === existingRawTurn.id;
+          return memory && (
+            this.deps.rawTurnIdFromMemory(memory) === existingRawTurn.id ||
+            memory.id === existingCaptureClaim?.primaryMemoryId
+          );
         });
         const userMemoryIds = this.deps.repos.userMemories
           .listActive(session.userId)
@@ -1515,6 +1527,7 @@ export class SessionTurnService {
         });
 
       const l1MemoryIds: string[] = [];
+      const captureClaimByRawTurnId = new Map<string, boolean>();
       let changeSeq = 0;
       const jobs: EvolutionJobRecord[] = [...route.jobs, ...userMemoryCapture.jobs];
 
@@ -1611,8 +1624,50 @@ export class SessionTurnService {
           createdAt: at
         });
 
+        let captureClaimed = captureClaimByRawTurnId.get(stepRawTurnId);
+        if (captureClaimed === undefined) {
+          const qaQuery = sourceRawTurn.userText ?? "";
+          const qaAnswer = sourceRawTurn.assistantText ?? "";
+          if (qaQuery.trim() && qaAnswer.trim()) {
+            const capture = this.deps.repos.captureClaims.claim({
+              userId: session.userId,
+              source: normalizeMemoryCaptureSource(session.source),
+              qaHash: memoryCaptureQaHash(qaQuery, qaAnswer),
+              primaryMemoryId: l1Memory.id,
+              capturedBy: "turn_complete",
+              createdAt: at
+            });
+            captureClaimed = capture.claimed || capture.claim.capturedBy === "turn_complete";
+            captureClaimByRawTurnId.set(stepRawTurnId, captureClaimed);
+            if (!captureClaimed) {
+              const existing = this.deps.repos.memories.getIncludingDeleted(capture.claim.primaryMemoryId);
+              if (!existing) {
+                throw new MemoryServiceError("conflict", "memory capture claim points to a missing memory");
+              }
+              if (existing.status !== "deleted" && !existing.deletedAt) {
+                l1MemoryIds.push(existing.id);
+                if (session.meta.l3_world_model_protocol_version === 2) {
+                  this.deps.repos.l3WorldModels.registerInputTrace({
+                    sessionId: session.id,
+                    l1MemoryId: existing.id,
+                    rawTurnId: stepRawTurnId,
+                    episodeId: episode.id,
+                    createdAt: at
+                  });
+                }
+                this.deps.repos.runtime.appendEpisodeTurn(episode.id, stepRawTurnId, existing.id, at);
+              }
+            }
+          } else {
+            captureClaimed = true;
+            captureClaimByRawTurnId.set(stepRawTurnId, true);
+          }
+        }
+        if (!captureClaimed) continue;
+
         const upsert = this.deps.repos.memories.upsertByKey(l1Memory);
         l1MemoryIds.push(upsert.memory.id);
+        newlyStoredL1MemoryIds.push(upsert.memory.id);
         if (session.meta.l3_world_model_protocol_version === 2) {
           this.deps.repos.l3WorldModels.registerInputTrace({
             sessionId: session.id,
@@ -1790,7 +1845,7 @@ export class SessionTurnService {
       return body;
     });
 
-    for (const memoryId of response.duplicate ? [] : response.l1MemoryIds) {
+    for (const memoryId of response.duplicate ? [] : newlyStoredL1MemoryIds) {
       const memory = this.deps.repos.memories.get(memoryId);
       recordApiLog(this.deps.repos.runtime, "memory_add", {
         sessionId: response.sessionId,

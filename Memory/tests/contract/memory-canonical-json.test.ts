@@ -4,7 +4,7 @@ import {
   canonicalJson,
   compareUnicodeCodePoints,
   sha256Hex
-} from "@memmy/local-api-contracts";
+} from "../../src/contracts/index.js";
 
 describe("canonical Memory JSON", () => {
   it("sorts object keys by code point while preserving array order", () => {

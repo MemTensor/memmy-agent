@@ -63,7 +63,7 @@ import {
   Wand2
 } from "./memory/memory-prototype-icons.js";
 import { SETTINGS_NAV_ITEMS, type SettingsTabId } from "./settings-nav.js";
-import { Check, CheckCheck, ChevronDown, ChevronRight, ChevronsDownUp, ChevronsUpDown, Download, Folder, FolderOpen, FolderPlus, ListFilter, MoreHorizontal, Plus, RotateCcw } from "lucide-react";
+import { ArrowDown, Check, CheckCheck, ChevronDown, ChevronRight, ChevronsDownUp, ChevronsUpDown, Folder, FolderOpen, FolderPlus, ListFilter, MoreHorizontal, Plus, RotateCcw } from "lucide-react";
 
 export interface SettingsSidebarNav {
   activeTab: SettingsTabId;
@@ -188,6 +188,7 @@ interface SidebarUpdateActionView {
   ariaLabel: string;
   title: string;
   disabled: boolean;
+  progress: number | null;
 }
 
 const navItems: NavItem[] = [
@@ -1489,7 +1490,7 @@ export function AppFrame(props: AppFrameProps) {
                 void update?.requestInlineAction();
               }}
             >
-              {renderSidebarUpdateActionIcon(sidebarUpdateAction.kind)}
+              {renderSidebarUpdateActionIcon(sidebarUpdateAction)}
               <span className="app-frame-sidebar-update-button__label">{sidebarUpdateAction.label}</span>
             </button>
             <button
@@ -2973,7 +2974,8 @@ export function resolveSidebarUpdateAction(
       label: t("appFrame.update.available"),
       ariaLabel: t("appFrame.update.availableAria"),
       title: t("appFrame.update.availableAria"),
-      disabled: false
+      disabled: false,
+      progress: null
     };
   }
 
@@ -2984,7 +2986,8 @@ export function resolveSidebarUpdateAction(
       label: percent === null ? t("appFrame.update.downloading") : t("appFrame.update.progress", { percent }),
       ariaLabel: percent === null ? t("appFrame.update.downloadingAria") : t("appFrame.update.progressAria", { percent }),
       title: percent === null ? t("appFrame.update.downloadingAria") : t("appFrame.update.progressAria", { percent }),
-      disabled: true
+      disabled: true,
+      progress: percent
     };
   }
 
@@ -2994,7 +2997,8 @@ export function resolveSidebarUpdateAction(
       label: t("appFrame.update.installing"),
       ariaLabel: t("appFrame.update.installingAria"),
       title: t("appFrame.update.installingAria"),
-      disabled: true
+      disabled: true,
+      progress: null
     };
   }
 
@@ -3004,7 +3008,8 @@ export function resolveSidebarUpdateAction(
       label: t("appFrame.update.restart"),
       ariaLabel: t("appFrame.update.restartAria"),
       title: t("appFrame.update.restartAria"),
-      disabled: false
+      disabled: false,
+      progress: null
     };
   }
 
@@ -3018,12 +3023,29 @@ function normalizeUpdateDownloadPercent(percent: number | null | undefined): num
   return Math.min(100, Math.max(0, Math.round(percent)));
 }
 
-function renderSidebarUpdateActionIcon(kind: SidebarUpdateActionView["kind"]): ReactNode {
-  if (kind === "available") {
-    return <Download size={14} strokeWidth={2.2} aria-hidden="true" />;
+function renderSidebarUpdateActionIcon(action: SidebarUpdateActionView): ReactNode {
+  if (action.kind === "available") {
+    return <ArrowDown size={12} strokeWidth={2.2} aria-hidden="true" />;
   }
-  if (kind === "prepared") {
-    return <RefreshCw size={13} strokeWidth={2.1} aria-hidden="true" />;
+  if (action.kind === "downloading") {
+    if (action.progress === null) {
+      return <Loader2 size={14} strokeWidth={2.2} className="animate-spin" aria-hidden="true" />;
+    }
+    return (
+      <span
+        className="app-frame-sidebar-update-progress"
+        style={{ "--app-frame-sidebar-update-progress": `${action.progress}%` } as CSSProperties}
+        aria-hidden="true"
+      >
+        <span>{action.progress}</span>
+      </span>
+    );
+  }
+  if (action.kind === "installing") {
+    return <Loader2 size={14} strokeWidth={2.2} className="animate-spin" aria-hidden="true" />;
+  }
+  if (action.kind === "prepared") {
+    return <RefreshCw size={12} strokeWidth={2.1} aria-hidden="true" />;
   }
   return null;
 }

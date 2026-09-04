@@ -3972,6 +3972,25 @@ body.memmy-platform-windows .memory-panel__header {
   transform: translateY(-1px);
 }
 
+.memory-refresh-button--pending .memory-refresh-button__icon {
+  animation: memory-refresh-spin 800ms linear infinite;
+}
+
+.memory-refresh-button--success {
+  border-color: color-mix(in srgb, var(--color-status-success) 38%, var(--border-content-panel));
+  color: var(--color-status-success);
+}
+
+.memory-refresh-button:disabled {
+  cursor: wait;
+}
+
+@keyframes memory-refresh-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .memory-refresh-button:focus-visible {
   outline: none;
 }
@@ -10308,31 +10327,31 @@ input[type="checkbox"].check-sky:checked::after {
   flex: 0 0 auto;
   align-items: center;
   justify-content: center;
-  gap: 4px;
-  height: 32px;
-  min-width: 32px;
-  max-width: 86px;
-  padding: 0 10px;
+  gap: 3px;
+  height: 24px;
+  min-width: 24px;
+  max-width: 78px;
+  padding: 0 7px;
   border: 0;
   border-radius: 999px;
   appearance: none;
-  background: #2f8fff;
+  background: var(--color-action-sky);
   color: #fff;
   cursor: pointer;
   font-family: inherit;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 700;
   line-height: 1;
   letter-spacing: 0;
   white-space: nowrap;
-  box-shadow: 0 4px 10px rgba(47, 143, 255, 0.22);
-  transition: background-color 120ms ease, box-shadow 120ms ease, min-width 120ms ease, padding 120ms ease;
+  box-shadow: 0 2px 6px color-mix(in srgb, var(--color-action-sky) 22%, transparent);
+  transition: background-color 120ms ease, box-shadow 120ms ease, gap 120ms ease, min-width 120ms ease, padding 120ms ease;
 }
 
 .app-frame-sidebar-update-button:hover,
 .app-frame-sidebar-update-button:focus-visible {
-  background: #1d7df2;
-  box-shadow: 0 6px 14px rgba(47, 143, 255, 0.28);
+  background: var(--color-action-sky-hover);
+  box-shadow: 0 3px 8px color-mix(in srgb, var(--color-action-sky-hover) 26%, transparent);
 }
 
 .app-frame-sidebar-update-button:focus-visible {
@@ -10346,8 +10365,9 @@ input[type="checkbox"].check-sky:checked::after {
 }
 
 .app-frame-sidebar-update-button svg {
-  width: 14px;
-  height: 14px;
+  display: block;
+  width: 12px;
+  height: 12px;
   flex-shrink: 0;
 }
 
@@ -10359,8 +10379,10 @@ input[type="checkbox"].check-sky:checked::after {
 }
 
 .app-frame-sidebar-update-button--available {
-  width: 32px;
+  width: 24px;
+  min-width: 24px;
   padding: 0;
+  gap: 0;
 }
 
 .app-frame-sidebar-update-button--available .app-frame-sidebar-update-button__label {
@@ -10372,8 +10394,9 @@ input[type="checkbox"].check-sky:checked::after {
 .app-frame-sidebar-update-button--available:hover,
 .app-frame-sidebar-update-button--available:focus-visible {
   width: auto;
-  min-width: 54px;
-  padding: 0 10px;
+  min-width: 46px;
+  padding: 0 7px;
+  gap: 3px;
 }
 
 .app-frame-sidebar-update-button--available:hover .app-frame-sidebar-update-button__label,
@@ -10382,24 +10405,75 @@ input[type="checkbox"].check-sky:checked::after {
   opacity: 1;
 }
 
+.app-frame-sidebar-update-button--available:hover,
+.app-frame-sidebar-update-button--available:focus-visible {
+  min-width: 38px;
+  gap: 0;
+}
+
+.app-frame-sidebar-update-button--available:hover svg,
+.app-frame-sidebar-update-button--available:focus-visible svg {
+  display: none;
+}
+
+.app-frame-sidebar-update-button--available:not(:hover):not(:focus-visible) svg {
+  transform: translateY(-0.5px);
+}
+
 .app-frame-sidebar-update-button--downloading {
+  width: 24px;
+  min-width: 24px;
+  padding: 0;
+  gap: 0;
+  cursor: default;
+}
+
+.app-frame-sidebar-update-button--downloading .app-frame-sidebar-update-button__label {
+  display: none;
+}
+
+.app-frame-sidebar-update-progress {
+  --app-frame-sidebar-update-progress: 0%;
+  position: relative;
+  display: inline-grid;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  place-items: center;
+  border-radius: 50%;
+  background: conic-gradient(
+    #fff var(--app-frame-sidebar-update-progress),
+    rgb(255 255 255 / 28%) 0
+  );
+  color: #fff;
+  font-size: 6px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.app-frame-sidebar-update-progress::before {
+  position: absolute;
+  inset: 1.5px;
+  border-radius: inherit;
+  background: var(--color-action-sky);
+  content: "";
+}
+
+.app-frame-sidebar-update-progress > span {
+  position: relative;
+  z-index: 1;
+}
+
+.app-frame-sidebar-update-button--prepared {
+  width: auto;
   min-width: 50px;
+  padding: 0 7px;
+  gap: 3px;
 }
 
 .app-frame-sidebar-update-button--installing {
   min-width: 72px;
-}
-
-.app-frame-sidebar-update-button--prepared {
-  min-width: 58px;
-  background: #159a84;
-  box-shadow: 0 4px 10px rgba(21, 154, 132, 0.2);
-}
-
-.app-frame-sidebar-update-button--prepared:hover,
-.app-frame-sidebar-update-button--prepared:focus-visible {
-  background: #118572;
-  box-shadow: 0 6px 14px rgba(21, 154, 132, 0.24);
 }
 
 .rounded-menu {

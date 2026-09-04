@@ -827,7 +827,7 @@ export function isValidImageGenerationMaxImagesPerTurn(value: unknown): value is
 }
 
 export class ImageGenerationToolConfig extends Base {
-  enabled = false;
+  enabled = true;
   provider = "openai";
   model = "gpt-image-2";
   apiKey = "";
@@ -851,7 +851,7 @@ export class ImageGenerationToolConfig extends Base {
         throw new ValueError(`tools.imageGeneration current contract does not accept legacy model field '${legacy}'`);
       }
     }
-    this.enabled = pick(init, ["enabled"], false);
+    this.enabled = pick(init, ["enabled"], true);
     this.profileMode = false;
     this.defaultAspectRatio = pick(
       init,
@@ -1075,19 +1075,29 @@ export class MemmyMemoryConfig extends Base {
   userId = "local-user";
   version?: number;
   storage?: Dict;
+  roleRouting?: Dict;
   retrievalLayers?: Array<"L1" | "L2" | "L3" | "Skill">;
   summary?: Dict;
   evolution?: Dict;
   embedding?: Dict;
   algorithm?: Dict;
+  telemetry?: Dict;
+  hub?: Dict;
+  agentAccess?: Dict;
+  private readonly additional: Dict;
 
   constructor(init: Dict = {}, options: { userId?: string } = {}) {
     super();
-    for (const legacy of ["enable", "activeProfile", "profiles", "summary", "evolution", "embedding"]) {
+    for (const legacy of ["enable", "activeProfile", "profiles"]) {
       if (Object.prototype.hasOwnProperty.call(init, legacy)) {
         throw new ValueError(`memmyMemory current contract does not accept legacy field '${legacy}'`);
       }
     }
+    this.additional = { ...init };
+    for (const key of [
+      "enabled", "userId", "version", "storage", "roleRouting", "retrievalLayers", "summary", "evolution",
+      "embedding", "algorithm", "logging", "telemetry", "hub", "agentAccess"
+    ]) delete this.additional[key];
     this.enabled = pick(init, ["enabled"], true);
     this.userId = options.userId ?? pick(init, ["userId"], this.userId);
     this.version = pick<number | undefined>(init, ["version"], undefined);
@@ -1098,20 +1108,37 @@ export class MemmyMemoryConfig extends Base {
       : [...new Set(assertStringArray("memmyMemory.retrievalLayers", retrievalLayers).map((layer, index) =>
           assertOneOf(`memmyMemory.retrievalLayers[${index}]`, layer, ["L1", "L2", "L3", "Skill"] as const)
         ))];
-    this.summary = undefined;
-    this.evolution = undefined;
-    this.embedding = undefined;
-    this.algorithm = pick<Dict | undefined>(init, ["algorithm"], undefined);
+    this.roleRouting = pick<Dict | undefined>(init, ["roleRouting"], undefined);
+    this.summary = pick<Dict | undefined>(init, ["summary"], undefined);
+    this.evolution = pick<Dict | undefined>(init, ["evolution"], undefined);
+    this.embedding = pick<Dict | undefined>(init, ["embedding"], undefined);
+    const algorithm = pick<Dict | undefined>(init, ["algorithm"], undefined);
+    if (algorithm) {
+      const supportedAlgorithm = { ...algorithm };
+      delete supportedAlgorithm.lightweightMemory;
+      this.algorithm = supportedAlgorithm;
+    }
+    this.telemetry = pick<Dict | undefined>(init, ["telemetry"], undefined);
+    this.hub = pick<Dict | undefined>(init, ["hub"], undefined);
+    this.agentAccess = pick<Dict | undefined>(init, ["agentAccess"], undefined);
   }
 
   override toObject(): Dict {
     return omitUndefined({
+      ...this.additional,
       enabled: this.enabled,
       userId: this.userId,
       version: this.version,
       storage: this.storage,
+      roleRouting: this.roleRouting,
       retrievalLayers: this.retrievalLayers,
+      summary: this.summary,
+      evolution: this.evolution,
+      embedding: this.embedding,
       algorithm: this.algorithm,
+      telemetry: this.telemetry,
+      hub: this.hub,
+      agentAccess: this.agentAccess,
     });
   }
 }

@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import type { ActualModelContext } from "@memmy/local-api-contracts";
+import type { ActualModelContext } from "../contracts/index.js";
 
 export type MemoryLlmModelRole = "memory_summary" | "memory_evolution";
 export type MemoryTokenUsageKind = MemoryLlmModelRole | "embedding";

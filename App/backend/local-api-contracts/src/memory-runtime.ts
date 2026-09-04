@@ -301,6 +301,10 @@ export type MemoryModelsStatus = z.infer<typeof MemoryModelsStatusSchema>;
 /** Schema for memory health snapshot. */
 export const MemoryHealthSnapshotSchema = z.object({
   ok: z.boolean(),
+  serviceVersion: NonEmptyStringSchema.optional(),
+  protocolVersion: z.number().int().positive().optional(),
+  viewerVersion: NonEmptyStringSchema.optional(),
+  viewerUrl: z.url().optional(),
   version: NonEmptyStringSchema,
   uptimeMs: z.number().nonnegative(),
   mode: z.enum(["local", "cloud", "dev"]),
@@ -314,7 +318,8 @@ export const MemoryHealthSnapshotSchema = z.object({
     routes: z.array(z.string()),
     tools: z.array(z.string()),
     memoryLayers: z.array(MemoryLayerSchema),
-    supportsCli: z.boolean()
+    supportsCli: z.boolean(),
+    service: z.array(z.string()).optional()
   }),
   features: L3WorldModelFeaturesSchema.optional(),
   models: MemoryModelsStatusSchema,
@@ -524,7 +529,8 @@ export const AddMemoryOutputSchema = z.object({
   summary: z.string(),
   tags: z.array(z.string()),
   createdAt: IsoTimeSchema,
-  serverTime: IsoTimeSchema
+  serverTime: IsoTimeSchema,
+  duplicate: z.boolean().optional()
 });
 export type AddMemoryOutput = z.infer<typeof AddMemoryOutputSchema>;
 

@@ -367,7 +367,7 @@ describe("desktop pet window mode", () => {
     expect(source).toContain("setPetWindowMode(true);");
     expect(source).toContain('resolution === "quit"');
     expect(source).toContain("app.quit();");
-    expect(source).toContain('if (process.platform === "win32") {\n      syncMenuBarTray(true);\n    }\n    targetWindow.hide();');
+    expect(source).toContain('if (process.platform === "win32") {\n        syncMenuBarTray(true);\n      }');
     expect(source).toContain("targetWindow.hide();");
     expect(source).toContain("targetWindow.minimize();");
     expect(source).toContain("targetWindow.close();");
@@ -375,5 +375,17 @@ describe("desktop pet window mode", () => {
     expect(source).toContain("mainWindow.show();");
     expect(source).toContain("mainWindow.focus();");
     expect(source).toContain("activateMainWindow();");
+  });
+
+  it("exits macOS fullscreen before hiding the main window for the tray close action", () => {
+    const source = readFileSync(mainSourcePath, "utf8");
+    const hideBranchStart = source.indexOf('if (resolution === "hide")');
+    const hideBranchEnd = source.indexOf("\n  replayMainWindowAction", hideBranchStart);
+    const hideBranch = source.slice(hideBranchStart, hideBranchEnd);
+
+    expect(hideBranch).toContain("if (isWindowFullScreenLike(targetWindow))");
+    expect(hideBranch).toContain("waitForWindowToLeaveFullScreen(targetWindow");
+    expect(hideBranch).toContain("leaveWindowFullScreen(targetWindow);");
+    expect(hideBranch).toContain("targetWindow.hide();");
   });
 });

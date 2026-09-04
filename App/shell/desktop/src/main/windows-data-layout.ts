@@ -67,6 +67,7 @@ interface WindowsDataMigrationState {
   sourceDataPath?: unknown;
   sourceAuthority?: unknown;
   sourceInstallDir?: unknown;
+  targetInstallDir?: unknown;
   targetUserDataPath?: unknown;
   targetRuntimeHomePath?: unknown;
   backupPaths?: unknown;
@@ -83,7 +84,6 @@ interface WindowsDataMigrationState {
 
 const trustedInstallAuthorities = new Set([
   "current-install-authority",
-  "selected-install-authority",
   "relay-backup-authority",
   "persisted-install-authority"
 ]);
@@ -236,8 +236,13 @@ export const advanceWindowsDataMigrationAfterBoot = async (
       : []),
     state
   ];
+  const cleanupLayouts = resolveValidatedCleanupLayouts(
+    cleanupStates,
+    layout,
+    trustedLegacyRuntimeHomePaths
+  );
   for (const cleanupState of cleanupStates) {
-    const cleanupLayout = resolveValidatedCleanupLayout(cleanupState, layout, trustedLegacyRuntimeHomePaths);
+    const cleanupLayout = cleanupLayouts.get(cleanupState);
     if (!cleanupLayout) continue;
     const backupPaths = Array.isArray(cleanupState.backupPaths)
       ? cleanupState.backupPaths.filter((value): value is string => typeof value === "string")
@@ -350,7 +355,7 @@ const resolveValidatedRelayBackupRoot = (
     || typeof state.sourceDataPath !== "string"
     || typeof state.sourceInstallDir !== "string"
     || !win32.isAbsolute(state.sourceInstallDir)
-    || !sameWindowsPath(state.sourceInstallDir, win32.dirname(layout.legacyInstallDataPath))
+    || !hasValidatedInstallRelocationContext(state, layout)
     || !Array.isArray(state.preparedCopies)
   ) return null;
   const normalizedSourcePath = win32.normalize(state.sourceDataPath);
@@ -396,6 +401,43 @@ const resolveValidatedCleanupLayout = (
   return runtimeIsTrusted ? { ...layout, runtimeHomePath: runtimePath } : null;
 };
 
+const resolveValidatedCleanupLayouts = (
+  states: WindowsDataMigrationState[],
+  layout: WindowsDataLayout,
+  trustedLegacyRuntimeHomePaths: string[]
+): Map<WindowsDataMigrationState, WindowsDataLayout> => {
+  const validated = new Map<WindowsDataMigrationState, WindowsDataLayout>();
+  let expectedTargetInstallDir = win32.dirname(layout.legacyInstallDataPath);
+  for (let index = states.length - 1; index >= 0; index -= 1) {
+    const state = states[index];
+    if (!state) continue;
+    const hasInstallContext = typeof state.targetInstallDir === "string"
+      || typeof state.sourceInstallDir === "string";
+    if (!hasInstallContext) {
+      const stateLayout = resolveValidatedCleanupLayout(state, layout, trustedLegacyRuntimeHomePaths);
+      if (stateLayout) validated.set(state, stateLayout);
+      continue;
+    }
+    const targetInstallDir = typeof state.targetInstallDir === "string" && win32.isAbsolute(state.targetInstallDir)
+      ? win32.normalize(state.targetInstallDir)
+      : typeof state.sourceInstallDir === "string" && win32.isAbsolute(state.sourceInstallDir)
+        ? win32.normalize(state.sourceInstallDir)
+        : null;
+    if (!targetInstallDir || !sameWindowsPath(targetInstallDir, expectedTargetInstallDir)) break;
+    const stateLayout = resolveValidatedCleanupLayout(
+      state,
+      { ...layout, legacyInstallDataPath: win32.join(targetInstallDir, "data") },
+      trustedLegacyRuntimeHomePaths
+    );
+    if (!stateLayout) break;
+    validated.set(state, stateLayout);
+    if (typeof state.sourceInstallDir === "string" && win32.isAbsolute(state.sourceInstallDir)) {
+      expectedTargetInstallDir = win32.normalize(state.sourceInstallDir);
+    }
+  }
+  return validated;
+};
+
 const cleanupValidatedInstallSources = async (
   state: WindowsDataMigrationState,
   layout: WindowsDataLayout
@@ -412,7 +454,7 @@ const cleanupValidatedInstallSources = async (
 
   const sourceDataPath = win32.normalize(state.sourceDataPath);
   const sourceInstallDir = win32.normalize(state.sourceInstallDir);
-  if (!sameWindowsPath(sourceInstallDir, win32.dirname(layout.legacyInstallDataPath))) return;
+  if (!hasValidatedInstallRelocationContext(state, layout)) return;
   const directDataPath = win32.join(sourceInstallDir, "data");
   const failedBackupRoot = win32.dirname(sourceDataPath);
   const failedBackupParent = win32.dirname(failedBackupRoot);
@@ -444,6 +486,19 @@ const cleanupValidatedInstallSources = async (
       if (!isMissingFileError(error) && !isDirectoryNotEmptyError(error)) throw error;
     });
   }
+};
+
+const hasValidatedInstallRelocationContext = (
+  state: WindowsDataMigrationState,
+  layout: WindowsDataLayout
+): boolean => {
+  const activeInstallDir = win32.dirname(layout.legacyInstallDataPath);
+  if (typeof state.targetInstallDir === "string") {
+    return win32.isAbsolute(state.targetInstallDir)
+      && sameWindowsPath(state.targetInstallDir, activeInstallDir);
+  }
+  return typeof state.sourceInstallDir === "string"
+    && sameWindowsPath(state.sourceInstallDir, activeInstallDir);
 };
 
 const writeJsonAtomically = async (statePath: string, state: object): Promise<void> => {
