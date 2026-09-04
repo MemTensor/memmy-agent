@@ -9,6 +9,7 @@ import YAML from "yaml";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AgentGatewaySupervisor,
+  bundledMemoryInstallArguments,
   ensureMemoryService,
   preparePackagedBrowser,
   preparePackagedRuntimeConfig,
@@ -154,6 +155,30 @@ describe("packaged desktop runtime config", () => {
       "--app-database",
       join(root, "app.sqlite")
     ]);
+  });
+
+  it("passes the finite Desktop startup budget to the bundled Memory installer", () => {
+    const args = bundledMemoryInstallArguments(
+      "/resources/memory",
+      {
+        configPath: "/memmy/config.yaml",
+        agentWorkspace: "/memmy/workspace",
+        memoryDatabasePath: "/memmy/memory.sqlite",
+        memoryBaseUrl: "http://127.0.0.1:18960",
+        memoryToken: "memory-token",
+        memoryListenHost: "127.0.0.1",
+        memoryListenPort: 18960,
+        agentGatewayBaseUrl: "http://127.0.0.1:18980",
+        agentGatewayHealthHost: "127.0.0.1",
+        agentGatewayHealthPort: 18970,
+        agentGatewayBootstrapSecret: "gateway-secret"
+      },
+      true,
+      "/runtime/node"
+    );
+
+    expect(args.slice(-2)).toEqual(["--health-check-timeout-ms", "120000"]);
+    expect(args).not.toContain("--skip-health-check");
   });
 
   it("rejects when the packaged migration command exits unsuccessfully", async () => {

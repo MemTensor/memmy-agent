@@ -839,7 +839,21 @@ async function installBundledMemoryRuntime(
     throw new Error(`Bundled Memory installer is missing: ${cliEntry}`);
   }
   const executable = options.runtimeExecutable ?? process.execPath;
-  await runBundledMemoryCli(runtimeDirectory, runtimeConfig, options, [
+  await runBundledMemoryCli(
+    runtimeDirectory,
+    runtimeConfig,
+    options,
+    bundledMemoryInstallArguments(runtimeDirectory, runtimeConfig, memmyConfigPreexisting, executable)
+  );
+}
+
+export function bundledMemoryInstallArguments(
+  runtimeDirectory: string,
+  runtimeConfig: PackagedRuntimeConfig,
+  memmyConfigPreexisting: boolean,
+  executable: string
+): string[] {
+  return [
     "install",
     "--service-only",
     "--runtime-directory", runtimeDirectory,
@@ -850,8 +864,9 @@ async function installBundledMemoryRuntime(
     "--memmy-config-preexisting", String(memmyConfigPreexisting),
     "--node-executable", executable,
     "--non-interactive",
-    "--use-compatible-installed"
-  ]);
+    "--use-compatible-installed",
+    "--health-check-timeout-ms", String(MEMORY_STARTUP_TIMEOUT_MS)
+  ];
 }
 
 async function runBundledMemoryCli(

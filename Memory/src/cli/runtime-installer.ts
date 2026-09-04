@@ -11,6 +11,7 @@ import { MEMORY_PROTOCOL_VERSION, MEMORY_SERVICE_VERSION } from "../version.js";
 const DEFAULT_RELEASES_URL = "https://github.com/MemTensor/memmy-agent/releases";
 const INSTALL_LOCK_TIMEOUT_MS = 15_000;
 const SERVICE_STOP_TIMEOUT_MS = 5_000;
+export const DEFAULT_HEALTH_CHECK_TIMEOUT_MS = 120_000;
 
 export interface RuntimeAssetDescriptor { name: string; sha256: string; size?: number; url?: string; }
 export interface MemoryReleaseManifest {
@@ -33,6 +34,8 @@ export interface MemoryRuntimeInstallOptions {
   nodeExecutable?: string;
   skipServiceRegistration?: boolean;
   skipHealthCheck?: boolean;
+  /** Maximum time to wait for the newly activated service to report its version. */
+  healthCheckTimeoutMs?: number;
   endpoint?: string;
   agents?: string[];
   /** Desktop uses a newer compatible installation instead of replacing it with its bundled copy. */
@@ -50,6 +53,7 @@ export interface InstalledRuntimePointer {
 }
 
 export async function installMemoryRuntime(options: MemoryRuntimeInstallOptions = {}): Promise<Record<string, unknown>> {
+  const healthCheckTimeoutMs = resolveHealthCheckTimeoutMs(options.healthCheckTimeoutMs);
   const home = resolveHome(options.home ?? "~/.memmy");
   const serviceHome = join(home, "memory-service");
   const runtimeRoot = join(serviceHome, "runtime");
@@ -61,10 +65,11 @@ export async function installMemoryRuntime(options: MemoryRuntimeInstallOptions 
     throw new Error(`Memory protocol ${manifest.protocolVersion} is incompatible with installer protocol ${MEMORY_PROTOCOL_VERSION}`);
   }
   const currentPath = join(serviceHome, "current.json");
+  const installationPath = join(serviceHome, "installation.json");
   const previous = await readJsonFile<InstalledRuntimePointer>(currentPath);
   const versionComparison = previous ? compareVersions(manifest.version, previous.version) : 1;
   if (previous && options.preferInstalledCompatible && previous.protocolVersion === MEMORY_PROTOCOL_VERSION && versionComparison <= 0) {
-    return reuseInstalledRuntime(previous, home, serviceHome, options);
+    return reuseInstalledRuntime(previous, home, serviceHome, options, healthCheckTimeoutMs);
   }
   if (previous && versionComparison < 0) {
     throw new Error(`refusing to downgrade Memory from ${previous.version} to ${manifest.version}`);
@@ -87,6 +92,7 @@ export async function installMemoryRuntime(options: MemoryRuntimeInstallOptions 
   await mkdir(runtimeRoot, { recursive: true });
   const installLock = await acquireInstallLock(join(serviceHome, "install.lock"));
   let stagedPath: string | undefined;
+  let installedRuntimeCreated = false;
   try {
     if (!existsSync(pointer.entrypoint)) {
       stagedPath = join(runtimeRoot, `.staging-${process.pid}-${Date.now()}`);
@@ -108,6 +114,7 @@ export async function installMemoryRuntime(options: MemoryRuntimeInstallOptions 
       await mkdir(dirname(runtimeDir), { recursive: true });
       await rm(runtimeDir, { recursive: true, force: true });
       await rename(unpacked, runtimeDir);
+      installedRuntimeCreated = true;
     } else {
       await validateRuntime(runtimeDir, manifest.version, target, manifest.protocolVersion);
     }
@@ -120,21 +127,33 @@ export async function installMemoryRuntime(options: MemoryRuntimeInstallOptions 
 
     if (!options.skipHealthCheck) {
       try {
-        await waitForRuntimeHealth(options.endpoint ?? "http://127.0.0.1:18960", manifest.version);
+        await waitForRuntimeHealth(
+          options.endpoint ?? "http://127.0.0.1:18960",
+          manifest.version,
+          healthCheckTimeoutMs
+        );
       } catch (error) {
-        if (!options.skipServiceRegistration) stopUserService();
+        if (!options.skipServiceRegistration && previous) stopUserService();
         if (previous) {
           await writeJsonAtomic(currentPath, previous);
           await writeStableLauncher(home, serviceHome, previous.runtimeExecutable ?? process.execPath);
           if (!options.skipServiceRegistration) registerAndStartUserService(home, serviceHome);
         } else {
-          await unlink(currentPath).catch(() => undefined);
+          await cleanupFailedFirstInstall({
+            currentPath,
+            installationPath,
+            launcher,
+            runtimeDir,
+            runtimeCreated: installedRuntimeCreated,
+            serviceHome,
+            unregisterService: !options.skipServiceRegistration
+          });
         }
         throw error;
       }
     }
 
-    await writeJsonAtomic(join(serviceHome, "installation.json"), {
+    await writeJsonAtomic(installationPath, {
       serviceVersion: manifest.version,
       protocolVersion: manifest.protocolVersion,
       target,
@@ -334,7 +353,8 @@ async function reuseInstalledRuntime(
   pointer: InstalledRuntimePointer,
   home: string,
   serviceHome: string,
-  options: MemoryRuntimeInstallOptions
+  options: MemoryRuntimeInstallOptions,
+  healthCheckTimeoutMs: number
 ): Promise<Record<string, unknown>> {
   if (options.dryRun) return { ok: true, reused: true, dryRun: true, ...pointer };
   await validateRuntime(pointer.runtimeDir, pointer.version, pointer.target, pointer.protocolVersion);
@@ -344,7 +364,11 @@ async function reuseInstalledRuntime(
   }
   if (!options.skipServiceRegistration) registerAndStartUserService(home, serviceHome);
   if (!options.skipHealthCheck) {
-    await waitForRuntimeHealth(options.endpoint ?? "http://127.0.0.1:18960", pointer.version);
+    await waitForRuntimeHealth(
+      options.endpoint ?? "http://127.0.0.1:18960",
+      pointer.version,
+      healthCheckTimeoutMs
+    );
   }
   return { ok: true, reused: true, ...pointer };
 }
@@ -588,12 +612,19 @@ function runLifecycle(command: string, args: string[], allowFailure = false): vo
   }
 }
 
-async function waitForRuntimeHealth(endpoint: string, expectedVersion: string): Promise<void> {
-  const deadline = Date.now() + 15_000;
+async function waitForRuntimeHealth(
+  endpoint: string,
+  expectedVersion: string,
+  timeoutMs: number
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
   let lastError = "service did not respond";
   while (Date.now() < deadline) {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) break;
+    const requestTimeoutMs = Math.max(1, Math.min(1_000, remainingMs));
     try {
-      const response = await fetch(`${endpoint.replace(/\/$/, "")}/api/v1/health`, { signal: AbortSignal.timeout(1_000) });
+      const response = await fetch(`${endpoint.replace(/\/$/, "")}/api/v1/health`, { signal: AbortSignal.timeout(requestTimeoutMs) });
       if (response.ok) {
         const health = await response.json() as Record<string, unknown>;
         if (
@@ -612,9 +643,61 @@ async function waitForRuntimeHealth(endpoint: string, expectedVersion: string): 
     } catch (error) {
       lastError = error instanceof Error ? error.message : String(error);
     }
-    await new Promise((resolveDelay) => setTimeout(resolveDelay, 250));
+    const delayMs = Math.min(250, Math.max(0, deadline - Date.now()));
+    if (delayMs <= 0) break;
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, delayMs));
   }
   throw new Error(`Memory ${expectedVersion} failed its activation health check: ${lastError}`);
+}
+
+async function cleanupFailedFirstInstall(input: {
+  currentPath: string;
+  installationPath: string;
+  launcher: { command: string; script: string };
+  runtimeDir: string;
+  runtimeCreated: boolean;
+  serviceHome: string;
+  unregisterService: boolean;
+}): Promise<void> {
+  if (input.unregisterService) {
+    await removeUserServiceRegistration();
+  }
+  await Promise.all([
+    rm(input.currentPath, { force: true }).catch(() => undefined),
+    rm(input.launcher.command, { force: true }).catch(() => undefined),
+    rm(input.launcher.script, { force: true }).catch(() => undefined),
+    rm(input.installationPath, { force: true }).catch(() => undefined),
+    rm(join(input.serviceHome, "runtime.json"), { force: true }).catch(() => undefined),
+    ...(input.runtimeCreated
+      ? [rm(input.runtimeDir, { recursive: true, force: true }).catch(() => undefined)]
+      : [])
+  ]);
+}
+
+async function removeUserServiceRegistration(): Promise<void> {
+  if (process.platform === "darwin") {
+    runLifecycle("launchctl", ["bootout", `gui/${process.getuid?.() ?? 0}/com.memtensor.memmy-memory`], true);
+    await rm(join(homedir(), "Library", "LaunchAgents", "com.memtensor.memmy-memory.plist"), { force: true }).catch(() => undefined);
+    return;
+  }
+  if (process.platform === "linux") {
+    runLifecycle("systemctl", ["--user", "disable", "--now", "memmy-memory.service"], true);
+    await rm(join(homedir(), ".config", "systemd", "user", "memmy-memory.service"), { force: true }).catch(() => undefined);
+    runLifecycle("systemctl", ["--user", "daemon-reload"], true);
+    return;
+  }
+  if (process.platform === "win32") {
+    runLifecycle("schtasks", ["/End", "/TN", "Memmy Memory Service"], true);
+    runLifecycle("schtasks", ["/Delete", "/TN", "Memmy Memory Service", "/F"], true);
+  }
+}
+
+function resolveHealthCheckTimeoutMs(value: number | undefined): number {
+  if (value === undefined) return DEFAULT_HEALTH_CHECK_TIMEOUT_MS;
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error("healthCheckTimeoutMs must be a positive integer");
+  }
+  return value;
 }
 async function acquireInstallLock(path: string): Promise<{ release(): Promise<void> }> {
   await mkdir(dirname(path), { recursive: true });
