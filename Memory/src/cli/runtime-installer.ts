@@ -643,7 +643,9 @@ async function waitForRuntimeHealth(
     } catch (error) {
       lastError = error instanceof Error ? error.message : String(error);
     }
-    await new Promise((resolveDelay) => setTimeout(resolveDelay, 250));
+    const delayMs = Math.min(250, Math.max(0, deadline - Date.now()));
+    if (delayMs <= 0) break;
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, delayMs));
   }
   throw new Error(`Memory ${expectedVersion} failed its activation health check: ${lastError}`);
 }

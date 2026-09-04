@@ -180,6 +180,41 @@ describe("standalone Memory runtime installer", () => {
     }
   });
 
+  it("caps retry backoff at the activation health deadline", async () => {
+    const root = tempRoot();
+    const home = join(root, "home");
+    const runtimeDirectory = createRuntimeDirectory(root, "2.1.0");
+    vi.useFakeTimers();
+    let resolveStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      resolveStarted = resolve;
+    });
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      resolveStarted();
+      return {
+        ok: true,
+        json: async () => ({ ok: true, protocolVersion: 1, serviceVersion: "old" })
+      } as Response;
+    });
+
+    try {
+      const install = installMemoryRuntime({
+        home,
+        runtimeDirectory,
+        endpoint: "http://127.0.0.1:18960",
+        skipServiceRegistration: true,
+        healthCheckTimeoutMs: 1
+      });
+      await started;
+      await vi.advanceTimersByTimeAsync(1);
+      expect(vi.getTimerCount()).toBe(0);
+      await expect(install).rejects.toThrow("activation health check");
+    } finally {
+      vi.restoreAllMocks();
+      vi.useRealTimers();
+    }
+  });
+
   it("restores the previous runtime when the bounded activation health timeout expires", async () => {
     const root = tempRoot();
     const home = join(root, "home");
