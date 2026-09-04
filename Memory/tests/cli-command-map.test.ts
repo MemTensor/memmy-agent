@@ -49,6 +49,7 @@ describe("memmy CLI command map", () => {
         "--dry-run",
         "--service-only",
         "--home", root,
+        "--legacy-root", root,
         "--health-check-timeout-ms", "1234"
       ]
     })).resolves.toMatchObject({
@@ -63,6 +64,7 @@ describe("memmy CLI command map", () => {
         "--dry-run",
         "--service-only",
         "--home", root,
+        "--legacy-root", root,
         "--health-check-timeout-ms", "0"
       ]
     })).rejects.toThrow("--health-check-timeout-ms must be a positive integer");
