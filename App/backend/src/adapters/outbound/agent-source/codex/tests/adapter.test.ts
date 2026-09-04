@@ -69,6 +69,24 @@ describe("codex source adapter", () => {
     ]);
   });
 
+  it("ignores backup copies of rollout files", async () => {
+    const fixture = createFixture();
+    const backupPath = `${fixture.rolloutPath}.bak-strip-input-image.jsonl`;
+    writeFileSync(
+      backupPath,
+      JSON.stringify({
+        timestamp: "2026-05-29T11:00:00.000Z",
+        type: "session_meta",
+        payload: { cwd: join(fixture.workspacePath, "backup-copy") }
+      }),
+      "utf8"
+    );
+
+    await expect(discoverCodexSessions({ root: fixture.sessionsRoot })).resolves.toEqual([
+      expect.objectContaining({ sessionFilePath: fixture.rolloutPath })
+    ]);
+  });
+
   it("redacts large image tool outputs without failing the scan", async () => {
     const fixture = createLargeImageFixture();
     const adapter = createCodexSourceAdapter({ sessionsRoot: fixture.sessionsRoot });
