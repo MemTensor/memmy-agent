@@ -1512,6 +1512,12 @@ export async function gateway({
   });
 
   await cron.start();
+  // Fire-and-forget: several channel adapters (Telegram/Discord/Slack) return a promise
+  // from start() that only settles when the channel shuts down (grammy polling loop,
+  // Discord gateway lifetime, Slack Socket Mode connection). Awaiting startAll() here
+  // would deadlock gateway startup. Readiness therefore reflects "channel init dispatched",
+  // not "every channel has fully connected"; per-channel connection health is surfaced
+  // separately by the manager.
   void manager.startAll();
   transcriptMonitor?.start();
   await heartbeat.start();
