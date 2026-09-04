@@ -860,6 +860,44 @@ describe("CLI command helpers", () => {
     }
   });
 
+  it("gateway health helper reports 503 until readiness is signaled", async () => {
+    let ready = false;
+    const server = await startGatewayHealthServer("127.0.0.1", 0, () => ready);
+    try {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+
+      const notReady = await fetch(`http://127.0.0.1:${port}/health`);
+      expect(notReady.status).toBe(503);
+      expect(await notReady.json()).toEqual({ status: "starting" });
+
+      ready = true;
+      const nowReady = await fetch(`http://127.0.0.1:${port}/health`);
+      expect(nowReady.status).toBe(200);
+      expect(await nowReady.json()).toEqual({ status: "ok" });
+
+      ready = false;
+      const shuttingDown = await fetch(`http://127.0.0.1:${port}/health`);
+      expect(shuttingDown.status).toBe(503);
+      expect(await shuttingDown.json()).toEqual({ status: "starting" });
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+    }
+  });
+
+  it("gateway health helper rejects when the port is already bound", async () => {
+    const first = await startGatewayHealthServer("127.0.0.1", 0);
+    try {
+      const address = first.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      await expect(startGatewayHealthServer("127.0.0.1", port)).rejects.toMatchObject({
+        code: "EADDRINUSE",
+      });
+    } finally {
+      await new Promise<void>((resolve, reject) => first.close((error) => (error ? reject(error) : resolve())));
+    }
+  });
+
   async function startCronGatewayWithFakeLoop({
     processDirect,
     isSessionBusy = vi.fn(() => false),

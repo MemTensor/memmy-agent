@@ -969,11 +969,16 @@ export async function serve({
   return server;
 }
 
-export async function startGatewayHealthServer(host: string, port: number): Promise<http.Server> {
+export async function startGatewayHealthServer(
+  host: string,
+  port: number,
+  isReady: () => boolean = () => true,
+): Promise<http.Server> {
   const server = http.createServer((req, res) => {
     if (req.method === "GET" && req.url?.split("?", 1)[0] === "/health") {
-      const body = JSON.stringify({ status: "ok" });
-      res.writeHead(200, {
+      const ready = Boolean(isReady());
+      const body = JSON.stringify(ready ? { status: "ok" } : { status: "starting" });
+      res.writeHead(ready ? 200 : 503, {
         "content-type": "application/json",
         "content-length": Buffer.byteLength(body),
       });
@@ -984,7 +989,18 @@ export async function startGatewayHealthServer(host: string, port: number): Prom
     res.writeHead(404, { "content-type": "text/plain", "content-length": Buffer.byteLength(body) });
     res.end(body);
   });
-  await new Promise<void>((resolve) => server.listen(port, host, resolve));
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: Error): void => {
+      server.off("listening", onListening);
+      reject(error);
+    };
+    const onListening = (): void => {
+      server.off("error", onError);
+      resolve();
+    };
+    server.once("error", onError);
+    server.listen(port, host, onListening);
+  });
   return server;
 }
 
@@ -1236,7 +1252,10 @@ export async function gateway({
   }
   const bindHost = host ?? loaded.gateway.host;
   const bindPort = port == null ? loaded.gateway.port : Number(port);
-  const healthServer = await startGatewayHealthServer(bindHost, bindPort);
+  // Track gateway readiness so the /health endpoint can accurately signal 503 during startup
+  // (or if startup stalls) and 200 only after every dependent service has started.
+  let gatewayReady = false;
+  const healthServer = await startGatewayHealthServer(bindHost, bindPort, () => gatewayReady);
 
   const deliverToChannelNow = async (
     msg: OutboundMessage,
@@ -1497,6 +1516,9 @@ export async function gateway({
   transcriptMonitor?.start();
   await heartbeat.start();
   const inboundTask = loop.run();
+  // All dependent services have completed startup; flip readiness so the /health endpoint
+  // reports 200. Until this point the endpoint responds with 503 to reflect actual state.
+  gatewayReady = true;
   console.log(
     `memmy gateway started (${manager.enabledChannels.join(", ") || "no channels enabled"})`,
   );
@@ -1522,6 +1544,8 @@ export async function gateway({
     cron,
     healthServer,
     stop: async () => {
+      // Shutdown began; /health should immediately stop advertising readiness.
+      gatewayReady = false;
       modelCatalogWatcher.close();
       heartbeat.stop();
       cron.stop();
