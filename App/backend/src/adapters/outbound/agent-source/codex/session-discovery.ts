@@ -5,6 +5,8 @@ import { dirname, join } from "node:path";
 import { readJsonlObjects } from "../jsonl-lines.js";
 import { readDirectoryIfExists } from "../read-directory.js";
 
+const ROLLOUT_FILE_SUFFIX = ".jsonl";
+
 export interface CodexSessionFile {
   /** Session file path. */
   sessionFilePath: string;
@@ -56,7 +58,7 @@ async function listRolloutFiles(
         continue;
       }
 
-      if (entry.isFile() && entry.name.startsWith("rollout-") && entry.name.endsWith(".jsonl") && !/\.jsonl\.bak-/u.test(entry.name)) {
+      if (entry.isFile() && isPrimaryRolloutFile(entry.name)) {
         const fileStat = await stat(path);
         files.push({ path, mtimeMs: fileStat.mtimeMs });
       }
@@ -69,6 +71,12 @@ async function listRolloutFiles(
       : left.path.localeCompare(right.path))
     .slice(0, maxSessions ?? files.length)
     .map((file) => file.path);
+}
+
+function isPrimaryRolloutFile(name: string): boolean {
+  return name.startsWith("rollout-") &&
+    name.endsWith(ROLLOUT_FILE_SUFFIX) &&
+    name.indexOf(ROLLOUT_FILE_SUFFIX) === name.length - ROLLOUT_FILE_SUFFIX.length;
 }
 
 async function readFirstCwd(filePath: string): Promise<string | null> {
