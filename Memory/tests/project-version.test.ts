@@ -10,9 +10,13 @@ describe("Memory service version", () => {
     const cliManifest = JSON.parse(
       readFileSync(resolve(fileURLToPath(import.meta.url), "../../src/cli/npm/package.json"), "utf8")
     );
+    const viewerManifest = JSON.parse(
+      readFileSync(resolve(fileURLToPath(import.meta.url), "../../viewer/package.json"), "utf8")
+    );
 
-    expect(PROJECT_VERSION).toBe("2.1.0");
+    expect(PROJECT_VERSION).toBe("2.1.1");
     expect(PROJECT_VERSION).toBe(manifest.version);
     expect(cliManifest.version).toBe(manifest.version);
+    expect(viewerManifest.version).toBe(manifest.version);
   });
 });

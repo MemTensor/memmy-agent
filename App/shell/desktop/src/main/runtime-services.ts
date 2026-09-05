@@ -5,7 +5,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { mkdir, readdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import YAML from "yaml";
 import { createRotatingWriter, type RotatingWriter } from "./rotating-log-file.js";
 import type { LogLevel } from "./log-level.js";
@@ -781,7 +781,7 @@ export async function ensureMemoryService(
   const healthHeaders = memoryAuthHeaders(runtimeConfig.memoryToken);
   const probe = await probeMemoryService(healthUrl, healthHeaders);
   if (probe === "ready") {
-    return;
+    if (!(await stopOlderBundledMemoryRuntime(runtimeConfig, options, shouldStop))) return;
   }
   if (probe === "incompatible") {
     throw new Error(`Memory protocol at ${healthUrl} is incompatible with Desktop protocol ${SUPPORTED_MEMORY_PROTOCOL_VERSION}; upgrade Desktop or Memory`);
@@ -796,12 +796,14 @@ export async function ensureMemoryService(
       // Never switch the stable pointer while an older service still owns
       // the database. It may be in migrations before its HTTP endpoint is
       // available; let that owner finish before activating a new runtime.
+      let existingReady = false;
       try {
         await waitForExistingMemoryService(healthUrl, healthHeaders, existingLock);
-        return;
+        existingReady = true;
       } catch (error) {
         if (readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath)) throw error;
       }
+      if (existingReady && !(await stopOlderBundledMemoryRuntime(runtimeConfig, options, shouldStop))) return;
     }
     if (shouldStop?.()) return;
     await installBundledMemoryRuntime(
@@ -837,6 +839,90 @@ export async function ensureMemoryService(
     false,
     shouldStop
   );
+}
+
+/** Only replace a runtime installed by this Desktop, after its migrations finish. */
+async function stopOlderBundledMemoryRuntime(
+  runtimeConfig: PackagedRuntimeConfig,
+  options: StartManagedRuntimeServicesOptions,
+  shouldStop?: () => boolean
+): Promise<boolean> {
+  if (!options.offlineMemoryRuntimeDirectory || shouldStop?.()) return false;
+  const serviceHome = join(dirname(runtimeConfig.configPath), "memory-service");
+  let bundled: Record<string, unknown>;
+  let installed: Record<string, unknown>;
+  let running: Record<string, unknown>;
+  try {
+    [bundled, installed, running] = await Promise.all([
+      readFile(join(options.offlineMemoryRuntimeDirectory, "memory-runtime.json"), "utf8"),
+      readFile(join(serviceHome, "current.json"), "utf8"),
+      readFile(join(serviceHome, "runtime.json"), "utf8")
+    ]).then((values) => values.map((value) => JSON.parse(value) as Record<string, unknown>) as [Record<string, unknown>, Record<string, unknown>, Record<string, unknown>]);
+  } catch {
+    return false;
+  }
+  if (!isRecord(bundled) || !isRecord(installed) || !isRecord(running)) return false;
+  const bundledVersion = parseStableMemoryVersion(bundled.version);
+  const installedVersion = parseStableMemoryVersion(installed.version);
+  if (!bundledVersion || !installedVersion) return false;
+  const difference = bundledVersion.map((part, index) => part - installedVersion[index]!).find((delta) => delta !== 0) ?? 0;
+  if (difference <= 0 || bundled.protocolVersion !== SUPPORTED_MEMORY_PROTOCOL_VERSION
+    || installed.protocolVersion !== SUPPORTED_MEMORY_PROTOCOL_VERSION) return false;
+
+  // The standalone CLI records its own Node executable. Sharing a home or a
+  // compatible HTTP endpoint alone does not give Desktop ownership of it.
+  if (typeof installed.runtimeExecutable !== "string"
+    || resolve(installed.runtimeExecutable) !== resolve(options.runtimeExecutable ?? process.execPath)
+    || typeof installed.runtimeDir !== "string" || typeof installed.entrypoint !== "string") return false;
+  const runtimeRelative = relative(join(serviceHome, "runtime"), installed.runtimeDir);
+  if (!runtimeRelative || runtimeRelative.startsWith("..") || isAbsolute(runtimeRelative)
+    || resolve(installed.entrypoint) !== resolve(installed.runtimeDir, "dist/src/server/index.js")) return false;
+  const lock = readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath);
+  if (!lock || lock.pid === process.pid || running.pid !== lock.pid
+    || typeof running.configPath !== "string" || resolve(running.configPath) !== resolve(runtimeConfig.configPath)
+    || typeof running.sqlitePath !== "string" || resolve(running.sqlitePath) !== resolve(runtimeConfig.memoryDatabasePath)
+    || running.endpoint !== runtimeConfig.memoryBaseUrl
+    || running.serviceVersion !== installed.version
+    || running.protocolVersion !== SUPPORTED_MEMORY_PROTOCOL_VERSION
+    || !isPackagedMemoryServiceProcess(lock.pid, installed.entrypoint, true)) return false;
+
+  const healthUrl = `${runtimeConfig.memoryBaseUrl}/api/v1/health`;
+  const healthHeaders = memoryAuthHeaders(runtimeConfig.memoryToken);
+  try {
+    const response = await fetch(healthUrl, { headers: healthHeaders, cache: "no-store", signal: AbortSignal.timeout(HTTP_TIMEOUT_MS) });
+    const health: unknown = await response.json();
+    if (!response.ok || !isRecord(health) || health.ok !== true
+      || health.protocolVersion !== SUPPORTED_MEMORY_PROTOCOL_VERSION
+      || health.serviceVersion !== installed.version) return false;
+  } catch {
+    return false;
+  }
+  if (shouldStop?.()) return false;
+  await stopPreviouslyRegisteredMemoryService(options.offlineMemoryRuntimeDirectory, runtimeConfig, options);
+  const remainingLock = readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath);
+  if (remainingLock && remainingLock.pid !== lock.pid) {
+    throw new Error("Memory database ownership changed during bundled runtime upgrade");
+  }
+  const probe = await probeMemoryService(healthUrl, healthHeaders);
+  if (probe === "ready" && remainingLock?.pid === lock.pid) {
+    await requestMemoryServiceShutdown({ baseUrl: runtimeConfig.memoryBaseUrl, token: runtimeConfig.memoryToken });
+  } else if (probe !== "unreachable") {
+    throw new Error("Memory endpoint ownership changed during bundled runtime upgrade");
+  }
+  await waitForHttpServiceStop(healthUrl, healthHeaders, MEMORY_RESTART_STOP_TIMEOUT_MS);
+  // HTTP can stop accepting connections before storage and workers have
+  // closed. Never switch current.json or kill an owner still releasing data.
+  if (!(await waitForProcessExit(lock.pid, MEMORY_RESTART_STOP_TIMEOUT_MS))
+    || readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath)) {
+    throw new Error("Memory database owner did not exit before bundled runtime upgrade");
+  }
+  return true;
+}
+
+function parseStableMemoryVersion(value: unknown): number[] | undefined {
+  if (typeof value !== "string" || !/^\d+\.\d+\.\d+$/.test(value)) return undefined;
+  const parts = value.split(".").map(Number);
+  return parts.every(Number.isSafeInteger) ? parts : undefined;
 }
 
 function hasPreviousMemoryRuntimeMarker(configPath: string): boolean {
@@ -1868,7 +1954,7 @@ async function stopLockedMemoryService(databasePath: string, memoryEntry: string
   }
 }
 
-function isPackagedMemoryServiceProcess(pid: number, memoryEntry: string): boolean {
+function isPackagedMemoryServiceProcess(pid: number, memoryEntry: string, exactEntryOnly = false): boolean {
   try {
     const command = process.platform === "win32"
       ? execFileSync("powershell.exe", [
@@ -1880,8 +1966,8 @@ function isPackagedMemoryServiceProcess(pid: number, memoryEntry: string): boole
     const normalizedCommand = command.replaceAll("\\", "/");
     const normalizedEntry = resolve(memoryEntry).replaceAll("\\", "/");
     return normalizedCommand.includes(normalizedEntry)
-      || normalizedCommand.includes("/memory-runtime/dist/src/server/index.js")
-      || normalizedCommand.includes("/dist/runtime/memory/src/server/index.js");
+      || (!exactEntryOnly && (normalizedCommand.includes("/memory-runtime/dist/src/server/index.js")
+        || normalizedCommand.includes("/dist/runtime/memory/src/server/index.js")));
   } catch {
     return false;
   }

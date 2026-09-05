@@ -122,11 +122,12 @@ interface AutoWorkerDrain {
   start(): void;
   afterHealthCheck(): void;
   schedule(): void;
-  dispose(): void;
+  dispose(): Promise<void>;
 }
 
 const DEFAULT_WORKER_STARTUP_FALLBACK_MS = 5_000;
 const DEFAULT_WORKER_POST_HEALTH_DELAY_MS = 250;
+const serverCleanup = new WeakMap<Server, () => Promise<void>>();
 
 export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server {
   const autoWorker = createAutoWorkerDrain(options.service, {
@@ -139,7 +140,13 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
     configPath: options.configPath,
     scheduleWorker: autoWorker.schedule
   });
-  const server = createServer(async (request, response) => {
+  const activeRequests = new Set<Promise<void>>();
+  const server = createServer((request, response) => {
+    const handling = handleRequest(request, response);
+    activeRequests.add(handling);
+    void handling.finally(() => activeRequests.delete(handling));
+  });
+  async function handleRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const startedAt = Date.now();
     const requestId = requestIdFromHeaders(request) ?? randomUUID();
     const requestPath = request.url?.split("?", 1)[0] ?? "<missing>";
@@ -244,16 +251,35 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
       }
       writeError(response, error, requestId);
     }
-  });
+  }
   server.once("listening", () => {
     autoWorker.start();
     if (options.startAgentSourceAutomation) agentSources.startAutomation();
   });
+  let cleanup: Promise<void> | undefined;
+  const dispose = () => cleanup ??= Promise.all([
+    autoWorker.dispose(),
+    agentSources.dispose(),
+    ...activeRequests,
+  ]).then(() => undefined);
+  serverCleanup.set(server, dispose);
   server.on("close", () => {
-    autoWorker.dispose();
-    agentSources.dispose();
+    void dispose().catch((error) => logger.error("service.cleanup.failed", memoryErrorFields(error)));
   });
   return server;
+}
+
+export async function closeMemoryHttpServer(server: Server): Promise<void> {
+  // Closing sockets alone does not settle workers, scans or async request handlers.
+  const cleanup = serverCleanup.get(server)?.();
+  await Promise.all([
+    cleanup,
+    new Promise<void>((resolveClose, rejectClose) => {
+      if (!server.listening) { resolveClose(); return; }
+      server.close((error) => error ? rejectClose(error) : resolveClose());
+      server.closeAllConnections();
+    }),
+  ]);
 }
 
 export async function listenMemoryHttpServer(options: MemoryHttpServerOptions & {
@@ -295,6 +321,9 @@ function createAutoWorkerDrain(
   let startupReconciled = false;
   let startupTimer: ReturnType<typeof setTimeout> | undefined;
   let delayedTimer: ReturnType<typeof setTimeout> | undefined;
+  let scheduledTimer: ReturnType<typeof setTimeout> | undefined;
+  let drainStopped: (() => void) | undefined;
+  let activeDrain: Promise<void> | undefined;
   const maxCycles = 40;
   const workerBatchSize = 4;
 
@@ -307,6 +336,7 @@ function createAutoWorkerDrain(
       return;
     }
     running = true;
+    activeDrain = new Promise<void>((done) => { drainStopped = done; });
     let continueSoon = false;
     try {
       if (!startupReconciled) {
@@ -319,7 +349,7 @@ function createAutoWorkerDrain(
       }
       do {
         requested = false;
-        for (let cycle = 0; cycle < maxCycles; cycle += 1) {
+        for (let cycle = 0; cycle < maxCycles && !disposed; cycle += 1) {
           const result = await service.runWorkerOnce(workerBatchSize, {
             priorityCohortOnly: true
           });
@@ -331,16 +361,18 @@ function createAutoWorkerDrain(
           }
           await yieldToEventLoop();
         }
-      } while (requested && !continueSoon);
+      } while (requested && !continueSoon && !disposed);
     } catch (error) {
       workerLogger.error("drain.failed", memoryErrorFields(error));
     } finally {
       running = false;
+      drainStopped?.();
       if (disposed) {
         return;
       }
       if (requested || continueSoon) {
-        setTimeout(() => {
+        scheduledTimer = setTimeout(() => {
+          scheduledTimer = undefined;
           requested = true;
           void drain();
         }, 0);
@@ -386,7 +418,8 @@ function createAutoWorkerDrain(
       return;
     }
     scheduled = true;
-    setTimeout(() => {
+    scheduledTimer = setTimeout(() => {
+      scheduledTimer = undefined;
       scheduled = false;
       void drain();
     }, 0);
@@ -416,7 +449,7 @@ function createAutoWorkerDrain(
       }, Math.max(0, options.postHealthDelayMs));
     },
     schedule,
-    dispose(): void {
+    async dispose(): Promise<void> {
       disposed = true;
       requested = false;
       if (startupTimer) {
@@ -427,6 +460,11 @@ function createAutoWorkerDrain(
         clearTimeout(delayedTimer);
         delayedTimer = undefined;
       }
+      if (scheduledTimer) {
+        clearTimeout(scheduledTimer);
+        scheduledTimer = undefined;
+      }
+      await activeDrain;
     }
   };
 }

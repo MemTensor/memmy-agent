@@ -13,6 +13,17 @@ afterEach(() => {
 });
 
 describe("Memory server sqlite lock", () => {
+  it("removes exit handlers when locks are released across repeated restarts", () => {
+    const root = mkdtempSync(join(tmpdir(), "memmy-memory-server-restart-lock-"));
+    roots.push(root);
+    const listeners = process.listenerCount("exit");
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      const lock = acquireSqliteServerLock({ sqlitePath: join(root, "memory.sqlite"), host: "127.0.0.1", port: 18960 });
+      lock?.release();
+    }
+    expect(process.listenerCount("exit")).toBe(listeners);
+  });
+
   it("allows only loopback bind hosts", () => {
     expect(() => assertLoopbackBindHost("127.0.0.1")).not.toThrow();
     expect(() => assertLoopbackBindHost("::1")).not.toThrow();
