@@ -40,7 +40,8 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       (github.event.pull_request.merged == true &&
        github.event.pull_request.head.repo.full_name == github.repository &&
-       startsWith(github.event.pull_request.head.ref, 'release/v'))
+       (startsWith(github.event.pull_request.head.ref, 'v') ||
+        startsWith(github.event.pull_request.head.ref, 'release/v')))
     concurrency:
       # Tag and Draft Release mutations are repository-global. Queue automatic
       # and manual recovery runs so they cannot mutate assets concurrently.
@@ -69,11 +70,11 @@ jobs:
           create_draft="false"
           manual_target_sha_supplied="false"
           if [[ "$EVENT_NAME" == "pull_request_target" ]]; then
-            if [[ ! "$PR_HEAD_REF" =~ ^release/v((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))$ ]]; then
-              echo "Release branch must match release/vX.Y.Z" >&2
+            if [[ ! "$PR_HEAD_REF" =~ ^(release/)?v((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))$ ]]; then
+              echo "Release branch must match vX.Y.Z or release/vX.Y.Z" >&2
               exit 1
             fi
-            version="${BASH_REMATCH[1]}"
+            version="${BASH_REMATCH[2]}"
             target_sha="$PR_MERGE_SHA"
             preflight_level="full"
             create_draft="true"
