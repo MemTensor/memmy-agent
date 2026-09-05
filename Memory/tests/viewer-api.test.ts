@@ -14,6 +14,7 @@ import {
 } from "../src/index.js";
 import type { AgentSourceExecutor } from "../src/agent-source/runtime.js";
 import type { ViewerCliOptions } from "../src/server/viewer-cli.js";
+import { MEMORY_SERVICE_VERSION } from "../src/version.js";
 
 const cleanup: Array<() => Promise<void> | void> = [];
 
@@ -27,7 +28,7 @@ describe("local Viewer API", () => {
     const health = await fetch(`${fixture.baseUrl}/health`);
     expect(await health.json()).toMatchObject({
       ok: true,
-      serviceVersion: "2.1.0",
+      serviceVersion: MEMORY_SERVICE_VERSION,
       protocolVersion: 1,
       viewerUrl: expect.stringContaining("/viewer")
     });
