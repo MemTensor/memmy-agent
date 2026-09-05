@@ -1902,7 +1902,7 @@ describe("desktop packaged runtime boundaries", () => {
   it("points packaged Memory at the bundled local embedding model resources", () => {
     const source = readFileSync(runtimeServicesPath, "utf8");
 
-    expect(source).toContain('MEMMY_EMBEDDING_MODEL_ROOT: join(options.resourcesPath, "embedding-models")');
+    expect(source).toContain('MEMMY_EMBEDDING_MODEL_ROOT: join(runtimeDir ?? options.resourcesPath, "embedding-models")');
   });
 
   it("prunes and verifies only proven Windows x64 packaged runtime waste", () => {
