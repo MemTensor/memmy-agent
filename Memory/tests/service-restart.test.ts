@@ -33,10 +33,36 @@ describe("Memory service restart dispatch", () => {
     expect(restartInstalled).toHaveBeenCalledOnce();
   });
 
-  it("rejects a Desktop-managed restart without an IPC channel", async () => {
-    expect(() => requestMemoryServiceRestart({
+  it("rebuilds a persistent service after its Desktop IPC channel closes", async () => {
+    const restartLocal = vi.fn();
+    const restartInstalled = vi.fn();
+    await requestMemoryServiceRestart({
       env: { [DESKTOP_MANAGED_MEMORY_ENV]: "1" },
       send: null,
-    })).toThrow("requires an IPC channel");
+      restartLocal,
+      restartInstalled,
+    });
+    expect(restartLocal).toHaveBeenCalledOnce();
+    expect(restartInstalled).not.toHaveBeenCalled();
+  });
+
+  it("rebuilds locally if Desktop exits while a restart message is sent", async () => {
+    const restartLocal = vi.fn();
+    await requestMemoryServiceRestart({
+      env: { [DESKTOP_MANAGED_MEMORY_ENV]: "1" },
+      send: (_message, callback) => callback(Object.assign(new Error("closed"), { code: "ERR_IPC_CHANNEL_CLOSED" })),
+      restartLocal,
+    });
+    expect(restartLocal).toHaveBeenCalledOnce();
+  });
+
+  it("preserves unexpected IPC errors", async () => {
+    const restartLocal = vi.fn();
+    await expect(requestMemoryServiceRestart({
+      env: { [DESKTOP_MANAGED_MEMORY_ENV]: "1" },
+      send: (_message, callback) => callback(new Error("invalid message")),
+      restartLocal,
+    })).rejects.toThrow("invalid message");
+    expect(restartLocal).not.toHaveBeenCalled();
   });
 });

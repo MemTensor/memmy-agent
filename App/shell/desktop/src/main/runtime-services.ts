@@ -5,7 +5,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { mkdir, readdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import YAML from "yaml";
 import { createRotatingWriter, type RotatingWriter } from "./rotating-log-file.js";
 import type { LogLevel } from "./log-level.js";
@@ -20,6 +20,8 @@ const MEMORY_STARTUP_TIMEOUT_MS = 120_000;
 const POLL_INTERVAL_MS = 250;
 const HTTP_TIMEOUT_MS = 1_000;
 const STOP_MANAGED_CHILD_GRACE_MS = 1_000;
+const MEMORY_STOP_COMMAND_TIMEOUT_MS = 10_000;
+const MEMORY_RESTART_STOP_TIMEOUT_MS = 10_000;
 
 type RuntimeEnv = Record<string, string | undefined>;
 type ConfigRecord = Record<string, unknown>;
@@ -194,6 +196,7 @@ export async function startManagedRuntimeServices(
   let memoryStartup: Promise<void> | null = null;
   let browserPreparation: PackagedBrowserPreparation | null = null;
   let closing = false;
+  let stopMemoryOnClose = false;
 
   async function restartMemoryRuntime(): Promise<void> {
     if (closing) throw new Error("Memmy is shutting down");
@@ -236,11 +239,23 @@ export async function startManagedRuntimeServices(
       children,
       options,
       memmyConfigPreexisting,
-      requestMemoryRestart
+      requestMemoryRestart,
+      () => closing && stopMemoryOnClose
     );
-    memoryStartup = memoryReady.catch((error) => {
-      console.warn(`Memory service unavailable during desktop startup: ${errorMessage(error)}`);
-    });
+    memoryStartup = memoryReady
+      .catch((error) => {
+        console.warn(`Memory service unavailable during desktop startup: ${errorMessage(error)}`);
+      })
+      .finally(() => {
+        // Closing can race the asynchronous installer/health wait. If a
+        // detached child is materialized after the first cleanup pass, run
+        // the same policy once more when startup settles.
+        if (closing) {
+          void stopManagedChildrenForDesktopExit(children, stopMemoryOnClose).catch((error) => {
+            console.warn(`Memory child cleanup after startup close failed: ${errorMessage(error)}`);
+          });
+        }
+      });
     const agentGatewayStartupIssue = await startAgentGatewayWithRecovery(gatewaySupervisor);
 
     return {
@@ -263,20 +278,31 @@ export async function startManagedRuntimeServices(
       },
       async close(closeOptions = {}) {
         closing = true;
+        stopMemoryOnClose = closeOptions.stopMemory === true;
         browserPreparation?.stop();
         await memoryRestart?.catch(() => undefined);
         await gatewaySupervisor.close();
         if (closeOptions.stopMemory && options.offlineMemoryRuntimeDirectory) {
-          await runBundledMemoryCli(
-            options.offlineMemoryRuntimeDirectory,
-            runtimeConfig,
-            options,
-            ["stop", "--home", dirname(runtimeConfig.configPath)]
-          );
+          try {
+            await runBundledMemoryCli(
+              options.offlineMemoryRuntimeDirectory,
+              runtimeConfig,
+              options,
+              ["stop", "--home", dirname(runtimeConfig.configPath)],
+              MEMORY_STOP_COMMAND_TIMEOUT_MS
+            );
+          } catch (error) {
+            // A failed service-manager command must not prevent cleanup of a
+            // Desktop-owned child or turn an intentional quit into a
+            // rejected close promise.
+            console.warn(`Failed to stop bundled Memory during Desktop close: ${errorMessage(error)}`);
+          }
         }
         await stopManagedChildrenForDesktopExit(children, closeOptions.stopMemory === true);
       },
       terminateSync(terminateOptions = {}) {
+        closing = true;
+        stopMemoryOnClose = terminateOptions.stopMemory === true;
         browserPreparation?.stop();
         if (terminateOptions.stopMemory && options.offlineMemoryRuntimeDirectory) {
           runBundledMemoryCliSync(
@@ -291,6 +317,8 @@ export async function startManagedRuntimeServices(
       }
     };
   } catch (error) {
+    closing = true;
+    stopMemoryOnClose = true;
     browserPreparation?.stop();
     await gatewaySupervisor.close();
     await stopManagedChildren(children);
@@ -745,13 +773,15 @@ export async function ensureMemoryService(
   children: ManagedChild[],
   options: StartManagedRuntimeServicesOptions,
   memmyConfigPreexisting = true,
-  onRestartRequested?: () => void
+  onRestartRequested?: () => void,
+  shouldStop?: () => boolean
 ): Promise<void> {
+  if (shouldStop?.()) return;
   const healthUrl = `${runtimeConfig.memoryBaseUrl}/api/v1/health`;
   const healthHeaders = memoryAuthHeaders(runtimeConfig.memoryToken);
   const probe = await probeMemoryService(healthUrl, healthHeaders);
   if (probe === "ready") {
-    return;
+    if (!(await stopOlderBundledMemoryRuntime(runtimeConfig, options, shouldStop))) return;
   }
   if (probe === "incompatible") {
     throw new Error(`Memory protocol at ${healthUrl} is incompatible with Desktop protocol ${SUPPORTED_MEMORY_PROTOCOL_VERSION}; upgrade Desktop or Memory`);
@@ -761,70 +791,170 @@ export async function ensureMemoryService(
   }
 
   if (options.offlineMemoryRuntimeDirectory) {
+    const existingLock = readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath);
+    if (existingLock) {
+      // Never switch the stable pointer while an older service still owns
+      // the database. It may be in migrations before its HTTP endpoint is
+      // available; let that owner finish before activating a new runtime.
+      let existingReady = false;
+      try {
+        await waitForExistingMemoryService(healthUrl, healthHeaders, existingLock);
+        existingReady = true;
+      } catch (error) {
+        if (readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath)) throw error;
+      }
+      if (existingReady && !(await stopOlderBundledMemoryRuntime(runtimeConfig, options, shouldStop))) return;
+    }
+    if (shouldStop?.()) return;
     await installBundledMemoryRuntime(
       options.offlineMemoryRuntimeDirectory,
       runtimeConfig,
       options,
       memmyConfigPreexisting
     );
-    await waitForCompatibleMemoryService(healthUrl, healthHeaders, MEMORY_STARTUP_TIMEOUT_MS);
-    return;
-  }
-
-  const existingLock = readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath);
-  if (existingLock) {
-    await waitForExistingMemoryService(healthUrl, healthHeaders, existingLock);
-    return;
-  }
-
-  const memoryChild = spawnNodeService("memory", entries.memoryEntry, [
-    "--config",
-    runtimeConfig.configPath,
-    "--host",
-    runtimeConfig.memoryListenHost,
-    "--port",
-    String(runtimeConfig.memoryListenPort),
-    "--db",
-    runtimeConfig.memoryDatabasePath
-  ], {
-    MEMMY_CONFIG: runtimeConfig.configPath,
-    MEMMY_MEMORY_URL: runtimeConfig.memoryBaseUrl,
-    MEMMY_MEMORY_TOKEN: runtimeConfig.memoryToken,
-    MEMMY_MEMORY_DB: runtimeConfig.memoryDatabasePath,
-    MEMMY_EMBEDDING_MODEL_ROOT: join(options.resourcesPath, "embedding-models"),
-    MEMORY_SERVICE_URL: runtimeConfig.memoryBaseUrl,
-    MEMORY_SERVICE_TOKEN: runtimeConfig.memoryToken,
-    MEMORY_SERVICE_DB: runtimeConfig.memoryDatabasePath,
-    ...(onRestartRequested ? { [DESKTOP_MANAGED_MEMORY_ENV]: "1" } : {})
-  }, {
-    logFilePath: join(options.logDirectory, "memory.log"),
-    logLevel: options.logLevel,
-    ipc: Boolean(onRestartRequested),
-    executablePath: options.runtimeExecutable,
-    persistOnDesktopExit: true
-  });
-  if (onRestartRequested) {
-    memoryChild.process.on("message", (message) => {
-      if (isRecord(message) && message.type === MEMORY_RESTART_IPC_TYPE) {
-        onRestartRequested();
-      }
-    });
-  }
-  children.push(memoryChild);
-  try {
-    await waitForHttpService(
-      "memory",
-      healthUrl,
-      memoryChild,
-      healthHeaders,
-      MEMORY_STARTUP_TIMEOUT_MS
+    if (shouldStop?.()) return;
+    const installed = await readInstalledMemoryRuntime(runtimeConfig.configPath);
+    await startManagedMemoryService(
+      installed?.entrypoint ?? entries.memoryEntry,
+      installed?.runtimeDir ?? options.offlineMemoryRuntimeDirectory,
+      installed?.runtimeExecutable,
+      runtimeConfig,
+      children,
+      options,
+      onRestartRequested,
+      true,
+      shouldStop
     );
+    return;
+  }
+
+  await startManagedMemoryService(
+    entries.memoryEntry,
+    undefined,
+    undefined,
+    runtimeConfig,
+    children,
+    options,
+    onRestartRequested,
+    false,
+    shouldStop
+  );
+}
+
+/** Only replace a runtime installed by this Desktop, after its migrations finish. */
+async function stopOlderBundledMemoryRuntime(
+  runtimeConfig: PackagedRuntimeConfig,
+  options: StartManagedRuntimeServicesOptions,
+  shouldStop?: () => boolean
+): Promise<boolean> {
+  if (!options.offlineMemoryRuntimeDirectory || shouldStop?.()) return false;
+  const serviceHome = join(dirname(runtimeConfig.configPath), "memory-service");
+  let bundled: Record<string, unknown>;
+  let installed: Record<string, unknown>;
+  let running: Record<string, unknown>;
+  try {
+    [bundled, installed, running] = await Promise.all([
+      readFile(join(options.offlineMemoryRuntimeDirectory, "memory-runtime.json"), "utf8"),
+      readFile(join(serviceHome, "current.json"), "utf8"),
+      readFile(join(serviceHome, "runtime.json"), "utf8")
+    ]).then((values) => values.map((value) => JSON.parse(value) as Record<string, unknown>) as [Record<string, unknown>, Record<string, unknown>, Record<string, unknown>]);
+  } catch {
+    return false;
+  }
+  if (!isRecord(bundled) || !isRecord(installed) || !isRecord(running)) return false;
+  const bundledVersion = parseStableMemoryVersion(bundled.version);
+  const installedVersion = parseStableMemoryVersion(installed.version);
+  if (!bundledVersion || !installedVersion) return false;
+  const difference = bundledVersion.map((part, index) => part - installedVersion[index]!).find((delta) => delta !== 0) ?? 0;
+  if (difference <= 0 || bundled.protocolVersion !== SUPPORTED_MEMORY_PROTOCOL_VERSION
+    || installed.protocolVersion !== SUPPORTED_MEMORY_PROTOCOL_VERSION) return false;
+
+  // The standalone CLI records its own Node executable. Sharing a home or a
+  // compatible HTTP endpoint alone does not give Desktop ownership of it.
+  if (typeof installed.runtimeExecutable !== "string"
+    || resolve(installed.runtimeExecutable) !== resolve(options.runtimeExecutable ?? process.execPath)
+    || typeof installed.runtimeDir !== "string" || typeof installed.entrypoint !== "string") return false;
+  const runtimeRelative = relative(join(serviceHome, "runtime"), installed.runtimeDir);
+  if (!runtimeRelative || runtimeRelative.startsWith("..") || isAbsolute(runtimeRelative)
+    || resolve(installed.entrypoint) !== resolve(installed.runtimeDir, "dist/src/server/index.js")) return false;
+  const lock = readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath);
+  if (!lock || lock.pid === process.pid || running.pid !== lock.pid
+    || typeof running.configPath !== "string" || resolve(running.configPath) !== resolve(runtimeConfig.configPath)
+    || typeof running.sqlitePath !== "string" || resolve(running.sqlitePath) !== resolve(runtimeConfig.memoryDatabasePath)
+    || running.endpoint !== runtimeConfig.memoryBaseUrl
+    || running.serviceVersion !== installed.version
+    || running.protocolVersion !== SUPPORTED_MEMORY_PROTOCOL_VERSION
+    || !isPackagedMemoryServiceProcess(lock.pid, installed.entrypoint, true)) return false;
+
+  const healthUrl = `${runtimeConfig.memoryBaseUrl}/api/v1/health`;
+  const healthHeaders = memoryAuthHeaders(runtimeConfig.memoryToken);
+  try {
+    const response = await fetch(healthUrl, { headers: healthHeaders, cache: "no-store", signal: AbortSignal.timeout(HTTP_TIMEOUT_MS) });
+    const health: unknown = await response.json();
+    if (!response.ok || !isRecord(health) || health.ok !== true
+      || health.protocolVersion !== SUPPORTED_MEMORY_PROTOCOL_VERSION
+      || health.serviceVersion !== installed.version) return false;
+  } catch {
+    return false;
+  }
+  if (shouldStop?.()) return false;
+  await stopPreviouslyRegisteredMemoryService(options.offlineMemoryRuntimeDirectory, runtimeConfig, options);
+  const remainingLock = readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath);
+  if (remainingLock && remainingLock.pid !== lock.pid) {
+    throw new Error("Memory database ownership changed during bundled runtime upgrade");
+  }
+  const probe = await probeMemoryService(healthUrl, healthHeaders);
+  if (probe === "ready" && remainingLock?.pid === lock.pid) {
+    await requestMemoryServiceShutdown({ baseUrl: runtimeConfig.memoryBaseUrl, token: runtimeConfig.memoryToken });
+  } else if (probe !== "unreachable") {
+    throw new Error("Memory endpoint ownership changed during bundled runtime upgrade");
+  }
+  await waitForHttpServiceStop(healthUrl, healthHeaders, MEMORY_RESTART_STOP_TIMEOUT_MS);
+  // HTTP can stop accepting connections before storage and workers have
+  // closed. Never switch current.json or kill an owner still releasing data.
+  if (!(await waitForProcessExit(lock.pid, MEMORY_RESTART_STOP_TIMEOUT_MS))
+    || readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath)) {
+    throw new Error("Memory database owner did not exit before bundled runtime upgrade");
+  }
+  return true;
+}
+
+function parseStableMemoryVersion(value: unknown): number[] | undefined {
+  if (typeof value !== "string" || !/^\d+\.\d+\.\d+$/.test(value)) return undefined;
+  const parts = value.split(".").map(Number);
+  return parts.every(Number.isSafeInteger) ? parts : undefined;
+}
+
+function hasPreviousMemoryRuntimeMarker(configPath: string): boolean {
+  const serviceHome = join(dirname(configPath), "memory-service");
+  return existsSync(join(serviceHome, "current.json"))
+    || existsSync(join(serviceHome, "runtime.json"));
+}
+
+/**
+ * Stop the service-manager instance left by an older packaged Desktop before
+ * taking ownership of the bundled runtime in this process. The registration
+ * itself is retained for the next login, preserving standalone persistence;
+ * the installer command is deliberately best effort so a stale registration
+ * can never make Desktop startup fail.
+ */
+async function stopPreviouslyRegisteredMemoryService(
+  runtimeDirectory: string,
+  runtimeConfig: PackagedRuntimeConfig,
+  options: StartManagedRuntimeServicesOptions
+): Promise<boolean> {
+  try {
+    await runBundledMemoryCli(
+      runtimeDirectory,
+      runtimeConfig,
+      options,
+      ["stop", "--home", dirname(runtimeConfig.configPath)],
+      MEMORY_STOP_COMMAND_TIMEOUT_MS
+    );
+    return true;
   } catch (error) {
-    const lockOwner = readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath);
-    if (!lockOwner || lockOwner.pid === memoryChild.process.pid) {
-      throw error;
-    }
-    await waitForExistingMemoryService(healthUrl, healthHeaders, lockOwner);
+    console.warn("Failed to stop a previously registered Memory service: " + errorMessage(error));
+    return false;
   }
 }
 
@@ -851,8 +981,11 @@ export function bundledMemoryInstallArguments(
   runtimeDirectory: string,
   runtimeConfig: PackagedRuntimeConfig,
   memmyConfigPreexisting: boolean,
-  executable: string
+  nodeExecutable: string
 ): string[] {
+  // Packaged Desktop owns this child process. Registering a per-user OS
+  // service here makes signed, non-elevated installs fail on Windows
+  // (schtasks) and races the direct process on macOS (launchd KeepAlive).
   return [
     "install",
     "--service-only",
@@ -862,18 +995,135 @@ export function bundledMemoryInstallArguments(
     "--db", runtimeConfig.memoryDatabasePath,
     "--endpoint", runtimeConfig.memoryBaseUrl,
     "--memmy-config-preexisting", String(memmyConfigPreexisting),
-    "--node-executable", executable,
+    "--node-executable", nodeExecutable,
     "--non-interactive",
     "--use-compatible-installed",
+    "--skip-service-registration",
+    "--skip-health-check",
     "--health-check-timeout-ms", String(MEMORY_STARTUP_TIMEOUT_MS)
   ];
 }
 
+interface InstalledMemoryRuntime {
+  entrypoint: string;
+  runtimeDir?: string;
+  runtimeExecutable?: string;
+}
+
+async function readInstalledMemoryRuntime(configPath: string): Promise<InstalledMemoryRuntime | undefined> {
+  try {
+    const serviceHome = join(dirname(configPath), "memory-service");
+    const value = JSON.parse(
+      await readFile(join(serviceHome, "current.json"), "utf8")
+    ) as Record<string, unknown>;
+    if (typeof value.entrypoint !== "string" || !existsSync(value.entrypoint)) return undefined;
+    const runtimeDir = typeof value.runtimeDir === "string" && value.runtimeDir.trim().length > 0
+      ? value.runtimeDir
+      : undefined;
+    const runtimeExecutable = typeof value.runtimeExecutable === "string"
+      && value.runtimeExecutable.trim().length > 0
+      && existsSync(value.runtimeExecutable)
+      ? resolve(value.runtimeExecutable)
+      : undefined;
+    return {
+      entrypoint: value.entrypoint,
+      runtimeDir,
+      ...(runtimeExecutable ? { runtimeExecutable } : {})
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+async function startManagedMemoryService(
+  entry: string,
+  runtimeDir: string | undefined,
+  runtimeExecutable: string | undefined,
+  runtimeConfig: PackagedRuntimeConfig,
+  children: ManagedChild[],
+  options: StartManagedRuntimeServicesOptions,
+  onRestartRequested?: () => void,
+  requireCompatible = false,
+  shouldStop?: () => boolean
+): Promise<void> {
+  if (shouldStop?.()) return;
+  const healthUrl = runtimeConfig.memoryBaseUrl + "/api/v1/health";
+  const healthHeaders = memoryAuthHeaders(runtimeConfig.memoryToken);
+  const existingLock = readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath);
+  if (existingLock) {
+    try {
+      await waitForExistingMemoryService(healthUrl, healthHeaders, existingLock);
+      return;
+    } catch (error) {
+      // A service can release its lock while the health waiter is still
+      // running. In that case this Desktop instance may safely take over;
+      // preserve the original error while the lock owner is still alive.
+      if (readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath)) throw error;
+    }
+  }
+  if (shouldStop?.()) return;
+
+  const memoryChild = spawnNodeService("memory", entry, [
+    "--config",
+    runtimeConfig.configPath,
+    "--host",
+    runtimeConfig.memoryListenHost,
+    "--port",
+    String(runtimeConfig.memoryListenPort),
+    "--db",
+    runtimeConfig.memoryDatabasePath
+  ], {
+    MEMMY_CONFIG: runtimeConfig.configPath,
+    MEMMY_MEMORY_URL: runtimeConfig.memoryBaseUrl,
+    MEMMY_MEMORY_TOKEN: runtimeConfig.memoryToken,
+    MEMMY_MEMORY_DB: runtimeConfig.memoryDatabasePath,
+    MEMMY_EMBEDDING_MODEL_ROOT: join(runtimeDir ?? options.resourcesPath, "embedding-models"),
+    MEMORY_SERVICE_URL: runtimeConfig.memoryBaseUrl,
+    MEMORY_SERVICE_TOKEN: runtimeConfig.memoryToken,
+    MEMORY_SERVICE_DB: runtimeConfig.memoryDatabasePath,
+    ...(onRestartRequested ? { [DESKTOP_MANAGED_MEMORY_ENV]: "1" } : {})
+  }, {
+    logFilePath: join(options.logDirectory, "memory.log"),
+    logLevel: options.logLevel,
+    ipc: Boolean(onRestartRequested),
+    executablePath: runtimeExecutable ?? options.runtimeExecutable,
+    persistOnDesktopExit: true
+  });
+  if (onRestartRequested) {
+    memoryChild.process.on("message", (message) => {
+      if (isRecord(message) && message.type === MEMORY_RESTART_IPC_TYPE) onRestartRequested();
+    });
+  }
+  children.push(memoryChild);
+  try {
+    if (requireCompatible) {
+      await waitForCompatibleMemoryService(
+        healthUrl,
+        healthHeaders,
+        MEMORY_STARTUP_TIMEOUT_MS,
+        memoryChild
+      );
+    } else {
+      await waitForHttpService("memory", healthUrl, memoryChild, healthHeaders, MEMORY_STARTUP_TIMEOUT_MS);
+    }
+  } catch (error) {
+    const lockOwner = readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath);
+    if (!lockOwner || lockOwner.pid === memoryChild.process.pid) {
+      await stopManagedChild(memoryChild).catch(() => undefined);
+      removeManagedChild(children, memoryChild);
+      throw error;
+    }
+    await stopManagedChild(memoryChild).catch(() => undefined);
+    removeManagedChild(children, memoryChild);
+    await waitForExistingMemoryService(healthUrl, healthHeaders, lockOwner);
+  }
+}
 async function runBundledMemoryCli(
   runtimeDirectory: string,
   runtimeConfig: PackagedRuntimeConfig,
   options: StartManagedRuntimeServicesOptions,
-  commandArgs: string[]
+  commandArgs: string[],
+  timeoutMs?: number
 ): Promise<void> {
   const cliEntry = join(runtimeDirectory, "dist", "src", "cli", "index.js");
   if (!existsSync(cliEntry)) throw new Error(`Bundled Memory CLI is missing: ${cliEntry}`);
@@ -895,11 +1145,28 @@ async function runBundledMemoryCli(
     const append = (chunk: unknown) => { output = `${output}${String(chunk)}`.slice(-4_000); };
     child.stdout?.on("data", append);
     child.stderr?.on("data", append);
-    child.once("error", rejectInstall);
+    let settled = false;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      if (timeout) clearTimeout(timeout);
+      if (error) rejectInstall(error);
+      else resolveInstall();
+    };
+    child.once("error", (error) => finish(error instanceof Error ? error : new Error(String(error))));
     child.once("exit", (code, signal) => {
-      if (code === 0) resolveInstall();
-      else rejectInstall(new Error(`Bundled Memory command failed (${signal ? `signal ${signal}` : `code ${String(code)}`}): ${output.trim()}`));
+      if (code === 0) finish();
+      else finish(new Error(`Bundled Memory command failed (${signal ? `signal ${signal}` : `code ${String(code)}`}): ${output.trim()}`));
     });
+    if (timeoutMs !== undefined) {
+      const timer = setTimeout(() => {
+        finish(new Error("Bundled Memory command timed out after " + timeoutMs + "ms"));
+        try { child.kill(); } catch { /* the process may already have exited */ }
+      }, timeoutMs);
+      timeout = timer;
+      if (settled) clearTimeout(timer);
+    }
   });
 }
 
@@ -929,6 +1196,30 @@ function runBundledMemoryCliSync(
   }
 }
 
+async function stopManagedMemoryChild(
+  child: ManagedChild,
+  healthUrl: string,
+  healthHeaders: Record<string, string>,
+  runtimeConfig: PackagedRuntimeConfig
+): Promise<void> {
+  try {
+    if (await probeMemoryService(healthUrl, healthHeaders) === "ready") {
+      await requestMemoryServiceShutdown({
+        baseUrl: runtimeConfig.memoryBaseUrl,
+        token: runtimeConfig.memoryToken
+      });
+      await waitForHttpServiceStop(healthUrl, healthHeaders, MEMORY_RESTART_STOP_TIMEOUT_MS);
+      if (isManagedChildRunning(child)) {
+        await stopManagedChild(child);
+      }
+      return;
+    }
+  } catch (error) {
+    console.warn("Graceful Memory shutdown failed; falling back to process stop: " + errorMessage(error));
+  }
+  await stopManagedChild(child);
+}
+
 async function restartManagedMemoryService(
   entries: RuntimeEntryPaths,
   runtimeConfig: PackagedRuntimeConfig,
@@ -939,25 +1230,111 @@ async function restartManagedMemoryService(
   const healthUrl = `${runtimeConfig.memoryBaseUrl}/api/v1/health`;
   const healthHeaders = memoryAuthHeaders(runtimeConfig.memoryToken);
   const managedMemory = children.filter((child) => child.name === "memory" && isManagedChildRunning(child));
+  const installed = options.offlineMemoryRuntimeDirectory
+    ? await readInstalledMemoryRuntime(runtimeConfig.configPath)
+    : undefined;
+  let managerStopAttempted = false;
 
   if (managedMemory.length > 0) {
-    await Promise.all(managedMemory.map((child) => stopManagedChild(child)));
+    await Promise.all(managedMemory.map((child) => stopManagedMemoryChild(
+      child,
+      healthUrl,
+      healthHeaders,
+      runtimeConfig
+    )));
   } else {
-    const probe = await probeHttpService(healthUrl, healthHeaders);
-    if (probe === "ready") {
-      await requestMemoryServiceShutdown({
-        baseUrl: runtimeConfig.memoryBaseUrl,
-        token: runtimeConfig.memoryToken
-      });
-    } else if (probe === "unexpected") {
+    // Inspect the endpoint and sqlite lock before touching launchd/schtasks.
+    // A live lock can represent a legitimate migration that has not exposed
+    // HTTP yet; stopping it first would make the next process race the same DB.
+    let probe = await probeHttpService(healthUrl, healthHeaders);
+    if (probe === "unexpected") {
       throw new Error(`Memory endpoint is occupied by an unexpected service: ${healthUrl}`);
-    } else {
-      await stopLockedMemoryService(runtimeConfig.memoryDatabasePath, entries.memoryEntry);
+    }
+    const lock = probe === "unreachable"
+      ? readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath)
+      : null;
+    if (lock) {
+      try {
+        await waitForExistingMemoryService(healthUrl, healthHeaders, lock);
+        probe = "ready";
+      } catch {
+        // If the owner is still alive, stop only after it has failed its
+        // bounded compatibility wait. If it exited, continue with install.
+        if (readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath)) {
+          await stopLockedMemoryService(
+            runtimeConfig.memoryDatabasePath,
+            installed?.entrypoint ?? entries.memoryEntry
+          );
+        }
+        probe = await probeHttpService(healthUrl, healthHeaders);
+        if (probe === "unexpected") {
+          throw new Error(`Memory endpoint is occupied by an unexpected service: ${healthUrl}`);
+        }
+      }
+    }
+    if (options.offlineMemoryRuntimeDirectory && hasPreviousMemoryRuntimeMarker(runtimeConfig.configPath)) {
+      managerStopAttempted = await stopPreviouslyRegisteredMemoryService(
+        options.offlineMemoryRuntimeDirectory,
+        runtimeConfig,
+        options
+      );
+      // The CLI stop command normally shuts the endpoint down itself. Reprobe
+      // because an already-running KeepAlive manager may have restarted it.
+      probe = await probeHttpService(healthUrl, healthHeaders);
+      if (probe === "unexpected") {
+        throw new Error(`Memory endpoint is occupied by an unexpected service: ${healthUrl}`);
+      }
+    }
+    if (probe === "ready") {
+      try {
+        await requestMemoryServiceShutdown({
+          baseUrl: runtimeConfig.memoryBaseUrl,
+          token: runtimeConfig.memoryToken
+        });
+      } catch (error) {
+        console.warn("Memory service shutdown request failed during restart: " + errorMessage(error));
+        const lockAfterFailure = readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath);
+        if (lockAfterFailure) {
+          await stopLockedMemoryService(
+            runtimeConfig.memoryDatabasePath,
+            installed?.entrypoint ?? entries.memoryEntry
+          );
+        }
+      }
+    } else if (probe === "unreachable") {
+      const lockAfterProbe = readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath);
+      if (lockAfterProbe) {
+        try {
+          await waitForExistingMemoryService(healthUrl, healthHeaders, lockAfterProbe);
+          await requestMemoryServiceShutdown({
+            baseUrl: runtimeConfig.memoryBaseUrl,
+            token: runtimeConfig.memoryToken
+          });
+        } catch {
+          await stopLockedMemoryService(
+            runtimeConfig.memoryDatabasePath,
+            installed?.entrypoint ?? entries.memoryEntry
+          );
+        }
+      }
     }
   }
 
   removeManagedChildrenByName(children, "memory");
-  await waitForHttpServiceStop(healthUrl, healthHeaders);
+  try {
+    await waitForHttpServiceStop(
+      healthUrl,
+      healthHeaders,
+      options.offlineMemoryRuntimeDirectory ? MEMORY_RESTART_STOP_TIMEOUT_MS : undefined
+    );
+  } catch (error) {
+    // launchd KeepAlive can legitimately bring the standalone service back
+    // before the stop poll observes a gap. A compatible endpoint is already
+    // a valid restart result; ensureMemoryService will reuse it.
+    if (!options.offlineMemoryRuntimeDirectory || !managerStopAttempted || (await probeMemoryService(healthUrl, healthHeaders)) !== "ready") {
+      throw error;
+    }
+  }
   await ensureMemoryService(entries, runtimeConfig, children, options, true, onRestartRequested);
 }
 
@@ -1408,8 +1785,13 @@ export function spawnNodeService(
     appendTail(managed.stderrTail, text);
     logWriter?.write(text);
   });
+  child.once("error", (error) => {
+    managed.exitDescription ??= "error " + errorMessage(error);
+    logWriter?.write(managed.exitDescription + "\n");
+    managed.logWriter?.close();
+  });
   child.once("exit", (code, signal) => {
-    managed.exitDescription = signal ? `signal ${signal}` : `code ${code ?? "unknown"}`;
+    managed.exitDescription ??= signal ? `signal ${signal}` : `code ${code ?? "unknown"}`;
     managed.logWriter?.close();
   });
   if (persistOnDesktopExit) {
@@ -1452,11 +1834,21 @@ async function probeMemoryService(url: string, headers: Record<string, string> =
 async function waitForCompatibleMemoryService(
   url: string,
   headers: Record<string, string>,
-  timeoutMs: number
+  timeoutMs: number,
+  child?: ManagedChild,
+  lock?: MemoryServerLock
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let lastProbe: HttpProbeResult | "incompatible" = "unreachable";
   while (Date.now() < deadline) {
+    if (child?.exitDescription) {
+      throw new Error(
+        "memory exited before it became compatible (" + child.exitDescription + "). " + formatChildTail(child)
+      );
+    }
+    if (lock && !isProcessAlive(lock.pid)) {
+      throw new Error("memory lock owner pid " + lock.pid + " exited before it became compatible");
+    }
     lastProbe = await probeMemoryService(url, headers);
     if (lastProbe === "ready") return;
     if (lastProbe === "incompatible") {
@@ -1464,11 +1856,15 @@ async function waitForCompatibleMemoryService(
     }
     await sleep(POLL_INTERVAL_MS);
   }
-  throw new Error(`Memory did not become compatible at ${url} (${lastProbe})`);
+  throw new Error("Memory did not become compatible at " + url + " (" + lastProbe + ")" + (child ? ". " + formatChildTail(child) : ""));
 }
 
-async function waitForHttpServiceStop(url: string, headers: Record<string, string> = {}): Promise<void> {
-  const deadline = Date.now() + STARTUP_TIMEOUT_MS;
+async function waitForHttpServiceStop(
+  url: string,
+  headers: Record<string, string> = {},
+  timeoutMs = STARTUP_TIMEOUT_MS
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (await probeHttpService(url, headers) === "unreachable") {
       return;
@@ -1526,7 +1922,13 @@ async function waitForExistingMemoryService(
   lock: MemoryServerLock
 ): Promise<void> {
   try {
-    await waitForCompatibleMemoryService(healthUrl, healthHeaders, MEMORY_STARTUP_TIMEOUT_MS);
+    await waitForCompatibleMemoryService(
+      healthUrl,
+      healthHeaders,
+      MEMORY_STARTUP_TIMEOUT_MS,
+      undefined,
+      lock
+    );
   } catch (error) {
     throw new Error(
       `Existing Memory service pid ${lock.pid} did not become ready at ${healthUrl}: ${errorMessage(error)}`
@@ -1552,7 +1954,7 @@ async function stopLockedMemoryService(databasePath: string, memoryEntry: string
   }
 }
 
-function isPackagedMemoryServiceProcess(pid: number, memoryEntry: string): boolean {
+function isPackagedMemoryServiceProcess(pid: number, memoryEntry: string, exactEntryOnly = false): boolean {
   try {
     const command = process.platform === "win32"
       ? execFileSync("powershell.exe", [
@@ -1564,8 +1966,8 @@ function isPackagedMemoryServiceProcess(pid: number, memoryEntry: string): boole
     const normalizedCommand = command.replaceAll("\\", "/");
     const normalizedEntry = resolve(memoryEntry).replaceAll("\\", "/");
     return normalizedCommand.includes(normalizedEntry)
-      || normalizedCommand.includes("/memory-runtime/dist/src/server/index.js")
-      || normalizedCommand.includes("/dist/runtime/memory/src/server/index.js");
+      || (!exactEntryOnly && (normalizedCommand.includes("/memory-runtime/dist/src/server/index.js")
+        || normalizedCommand.includes("/dist/runtime/memory/src/server/index.js")));
   } catch {
     return false;
   }
@@ -1661,6 +2063,11 @@ function removeManagedChildrenByName(children: ManagedChild[], name: string): vo
       children.splice(index, 1);
     }
   }
+}
+
+function removeManagedChild(children: ManagedChild[], child: ManagedChild): void {
+  const index = children.indexOf(child);
+  if (index >= 0) children.splice(index, 1);
 }
 
 function memoryAuthHeaders(token: string): Record<string, string> {

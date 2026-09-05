@@ -97,7 +97,7 @@ export interface AgentSourceExecutor {
   scanResults?(jobId: string, cursor?: string, limit?: number): Promise<{ items: Array<{ sourceId: string; conversationId: string; memoryId?: string; error?: string }>; nextCursor: string | null }>;
   mutateConnection(sourceId: string, kind: "plugin" | "skill", method: "POST" | "DELETE"): Promise<unknown>;
   startAutomation(): void;
-  dispose(): void;
+  dispose(): void | Promise<void>;
 }
 
 interface PersistedSourceState {
@@ -145,6 +145,8 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
   let progressBeforePause: ScanProgress | null = null;
   let resumePausedScan: (() => void) | undefined;
   let disposed = false;
+  const activeScans = new Set<Promise<void>>();
+  let activeAutomation: Promise<void> | undefined;
 
   const readState = () => statePromise ??= loadState(statePath);
   const persist = async (state: PersistedState) => writeState(statePath, state);
@@ -176,6 +178,7 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
   }
 
   async function startScan(input: unknown): Promise<{ accepted: true; jobId: string }> {
+    if (disposed) throw new MemoryServiceError("conflict", "Agent source executor is shutting down");
     const request = normalizeScanInput(input);
     if (scan.running) throw new MemoryServiceError("conflict", "An Agent source scan is already running");
     if (scanPaused && scanAbortController && activeScanRequest && scan.jobId) {
@@ -220,7 +223,7 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
     progressBeforePause = null;
     const controller = new AbortController();
     scanAbortController = controller;
-    void runScan(request, controller.signal, jobId).then(() => {
+    const activeScan = runScan(request, controller.signal, jobId).then(() => {
       if (scan.jobId !== jobId) return;
       scan = { ...scan, running: false, completedAt: new Date().toISOString() };
       logger.info("scan.completed", { jobId, sourceId: request.sourceId });
@@ -234,6 +237,7 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
       };
       logger.error("scan.failed", { jobId, sourceId: request.sourceId, ...memoryErrorFields(error) });
     }).finally(() => {
+      activeScans.delete(activeScan);
       if (scanAbortController === controller) {
         scanAbortController = undefined;
         activeScanRequest = undefined;
@@ -242,6 +246,7 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
         resumePausedScan = undefined;
       }
     });
+    activeScans.add(activeScan);
     logger.info("scan.started", { jobId, sourceId: request.sourceId, mode: request.mode });
     return { accepted: true, jobId };
   }
@@ -493,7 +498,7 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
     if (disposed) return;
     scanTimer = setTimeout(() => {
       scanTimer = undefined;
-      void runAutomation(startup)
+      activeAutomation = runAutomation(startup)
         .catch((error) => logger.warn("automation.failed", memoryErrorFields(error)))
         .finally(() => scheduleAutomation(
           options.scheduledScanIntervalMs ?? SCHEDULED_SCAN_INTERVAL_MS,
@@ -509,6 +514,7 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
     if (config.autoInjectSkill) {
       const discovered = await list();
       for (const source of discovered.sources) {
+        if (disposed) return;
         if (!source.available || source.status !== "not_connected") continue;
         try {
           await mutateConnection(source.sourceId, agentConnectionKind(source.sourceId), "POST");
@@ -518,7 +524,7 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
       }
     }
     const enabled = startup ? config.autoScanKnownAgents : config.watchFileChanges;
-    if (enabled) await startScan({ sourceId: "all" });
+    if (enabled && !disposed) await startScan({ sourceId: "all" });
   }
 
   return {
@@ -539,7 +545,7 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
         config.autoScanKnownAgents
       );
     },
-    dispose() {
+    async dispose() {
       disposed = true;
       if (scanTimer) clearTimeout(scanTimer);
       scanTimer = undefined;
@@ -547,7 +553,8 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
       scanAbortController?.abort();
       resumePausedScan?.();
       resumePausedScan = undefined;
-      scanAbortController = undefined;
+      await activeAutomation;
+      await Promise.all(activeScans);
     }
   };
 }
