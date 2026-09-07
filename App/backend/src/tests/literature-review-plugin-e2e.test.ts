@@ -316,7 +316,7 @@ describe.skipIf(!integrationAvailable)("installed Literature Review Plugin", () 
     const bibliography = await call("review_build_bibliography", { taskId: createOutput.taskId });
     expect((bibliography.data as { records: unknown[] }).records).toHaveLength(1);
     const audit = await call("review_audit", { taskId: createOutput.taskId });
-    expect(audit.data).toMatchObject({ audit: { passed: true } });
+    expect(audit.data, JSON.stringify(audit.data, null, 2)).toMatchObject({ audit: { passed: true } });
     const abstractSuggestion = (audit.suggestedNextTools as Array<{ toolName: string; args?: Record<string, unknown> }>).find((item) => item.toolName === "review_generate_abstract");
     expect(abstractSuggestion?.args?.expectedArtifactHash).toMatch(/^sha256:/);
     const generatedAbstract = await call("review_generate_abstract", {
@@ -608,12 +608,24 @@ function modelFixtureResponse(system: string, request: Record<string, unknown>):
     return { sections: sections.map((section) => {
       const evidenceIds = section.evidence?.map((item) => item.evidenceId) ?? section.evidenceIds ?? [];
       const citeKeys = section.evidence?.map((item) => item.citeKey) ?? section.citeKeys ?? [];
+      const focus = section.outlineNodeId.includes("2-1")
+        ? "Across the reviewed evaluations, higher retrieval relevance is associated with fewer unsupported answers and clearer evidence provenance"
+        : "The review scope connects retrieval quality, persistent memory, and grounded behavior under a shared evidence-tracing framework";
       return {
         outlineNodeId: section.outlineNodeId,
-        markdown: `The reviewed evidence links retrieval quality with more grounded long-term agent behavior ${citeKeys.map((key) => `[${key}]`).join(" ")}.`,
+        markdown: `${focus} ${citeKeys.map((key) => `[${key}]`).join(" ")}.`,
         evidenceIds
       };
     }) };
+  }
+  if (system.includes("create compact evidence tables")) {
+    const rows = (request.rows ?? []) as Array<{ paperId: string; evidence?: Array<{ evidenceId: string }> }>;
+    return { rows: rows.map((row) => ({
+      paperId: row.paperId,
+      method: { text: "Controlled evaluation", evidenceIds: row.evidence?.slice(0, 1).map((item) => item.evidenceId) ?? [] },
+      finding: { text: "Reliable retrieval improves grounding", evidenceIds: row.evidence?.slice(0, 1).map((item) => item.evidenceId) ?? [] },
+      limitation: { text: "Limited benchmark scope", evidenceIds: row.evidence?.slice(0, 1).map((item) => item.evidenceId) ?? [] }
+    })) };
   }
   if (system.includes("write a journal-style abstract")) {
     const sections = (request.sections ?? []) as Array<{ sectionId: string; evidenceIds?: string[] }>;

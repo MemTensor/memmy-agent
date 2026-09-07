@@ -15,7 +15,10 @@ const reportPath = resolve(
     ?? join(pluginRoot, "evals", "reports", "host-integration-latest.json")
 );
 await mkdir(dirname(reportPath), { recursive: true });
-await run("npm", ["exec", "vitest", "run", "App/backend/src/tests/literature-review-plugin-e2e.test.ts"], memmyRoot, {
+await run("npm", ["exec", "vitest", "run",
+  "App/backend/src/tests/literature-review-plugin-e2e.test.ts",
+  "App/frontend/desktop/src/pages/tests/plugin-capability-host.interaction.test.tsx"
+], memmyRoot, {
   LITERATURE_REVIEW_PLUGIN_ROOT: pluginRoot,
   LITERATURE_REVIEW_E2E_REPORT: reportPath
 });
