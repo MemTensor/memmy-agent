@@ -75,6 +75,7 @@ export function PluginCapabilityHost(props: PluginCapabilityHostProps) {
         const usesRenderer = Boolean(
           renderer
           && (!renderer.capabilities || renderer.capabilities.includes(call.capabilityId))
+          && call.events.some((event) => event.type === "interaction" && event.request.type === "custom")
           && props.client
         );
         const respond = (interactionId: string, response: unknown) => {

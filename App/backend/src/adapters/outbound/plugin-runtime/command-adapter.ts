@@ -114,6 +114,7 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
       const session = asCommandSession(rawSession);
       const request = JSON.stringify({
         callId: call.callId,
+        pluginId: call.pluginId,
         capabilityId: call.capabilityId,
         conversationId: call.conversationId,
         input: call.input,

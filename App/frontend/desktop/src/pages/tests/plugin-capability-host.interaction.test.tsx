@@ -2,6 +2,8 @@
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { InstalledPluginSchema, type PluginCapabilityEventPayload } from "@memmy/local-api-contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
@@ -278,6 +280,116 @@ describe("PluginCapabilityHost", () => {
 
     await act(async () => buttons().find((button) => button.textContent === "Add to chat")?.click());
     expect(onAddArtifact).toHaveBeenCalledWith(call.events[3]!.type === "artifact" ? call.events[3]!.artifact : null);
+  });
+
+  it.skipIf(!process.env.LITERATURE_REVIEW_PLUGIN_ROOT)("mounts every literature-review card through the real plugin UI bundle", async () => {
+    const pluginRoot = process.env.LITERATURE_REVIEW_PLUGIN_ROOT!;
+    const rendererHtml = readFileSync(path.join(pluginRoot, "ui/bundles/review-cards/index.html"), "utf8");
+    const getUi = vi.fn(async () => rendererHtml);
+    const cancel = vi.fn(async () => undefined);
+    const respond = vi.fn(async () => undefined);
+    const uploadFiles = vi.fn(async () => [{
+      path: "/media/local-source.pdf",
+      url: "http://agent.test/local-source.pdf",
+      name: "local-source.pdf",
+      kind: "file" as const,
+      mime: "application/pdf" as const,
+      bytes: 3
+    }]);
+    const literatureReviewPlugin = InstalledPluginSchema.parse({
+      ...plugin,
+      id: "literature-review",
+      manifest: {
+        ...plugin.manifest,
+        id: "literature-review",
+        ui: { renderer: { entry: "ui/bundles/review-cards/index.html", height: 680 } }
+      }
+    });
+    const customCardTypes = ["review-spec", "keywords", "outline", "paper-selection", "fulltext-recovery"];
+    const calls: PluginUiCall[] = customCardTypes.map((cardType, index) => ({
+      pluginId: literatureReviewPlugin.id,
+      capabilityId: "review_request_interaction",
+      callId: `custom-${index}`,
+      conversationId: "chat-card-flow",
+      events: [{
+        type: "interaction",
+        request: {
+          interactionId: `interaction-${index}`,
+          type: "custom",
+          payload: { cardType, taskId: "review-card-flow", title: cardType, data: {} }
+        }
+      }]
+    }));
+    calls.push({
+      pluginId: literatureReviewPlugin.id,
+      capabilityId: "review_request_interaction",
+      callId: "source-import",
+      conversationId: "chat-card-flow",
+      events: [{
+        type: "interaction",
+        request: {
+          interactionId: "source-import-interaction",
+          type: "file-input",
+          payload: {
+            title: "添加本地参考文献",
+            accept: [".pdf", ".docx", ".txt", ".md", ".doc"],
+            multiple: true,
+            fileRules: [{
+              extensions: [".doc"],
+              disposition: "blocked",
+              code: "legacy_doc_requires_conversion",
+              message: "暂不支持旧版 .doc，请另存为 .docx 后重新选择。"
+            }]
+          }
+        }
+      }]
+    });
+
+    await act(async () => root.render(
+      <I18nProvider language="zh-CN">
+        <PluginCapabilityHost
+          calls={calls}
+          plugins={[literatureReviewPlugin]}
+          client={{ getUi, cancel, respond }}
+          uploadFiles={uploadFiles}
+        />
+      </I18nProvider>
+    ));
+    await act(async () => Promise.resolve());
+
+    const iframes = Array.from(container.querySelectorAll("iframe"));
+    expect(iframes).toHaveLength(customCardTypes.length);
+    expect(getUi).toHaveBeenCalledTimes(customCardTypes.length);
+    for (const iframe of iframes) {
+      expect(iframe.getAttribute("sandbox")).toBe("allow-scripts");
+      expect(iframe.getAttribute("srcdoc")).toContain("CARD_NAMES");
+      expect(iframe.getAttribute("srcdoc")).toContain("Content-Security-Policy");
+    }
+
+    for (const [index, iframe] of iframes.entries()) {
+      await act(async () => window.dispatchEvent(new MessageEvent("message", {
+        source: iframe.contentWindow,
+        data: {
+          type: "memmy.plugin.interaction-response",
+          version: 1,
+          interactionId: `interaction-${index}`,
+          response: { action: "submit", values: { cardType: customCardTypes[index] } }
+        }
+      })));
+    }
+    expect(respond).toHaveBeenCalledTimes(customCardTypes.length);
+
+    const fileInput = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    Object.defineProperty(fileInput, "files", { value: [new File(["pdf"], "local-source.pdf", { type: "application/pdf" })] });
+    await act(async () => fileInput.dispatchEvent(new Event("change", { bubbles: true })));
+    await act(async () => Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "上传")?.click());
+    expect(uploadFiles).toHaveBeenCalledTimes(1);
+    expect(respond).toHaveBeenCalledWith(
+      literatureReviewPlugin.id,
+      "source-import",
+      "source-import-interaction",
+      { files: expect.any(Array) }
+    );
   });
 });
 

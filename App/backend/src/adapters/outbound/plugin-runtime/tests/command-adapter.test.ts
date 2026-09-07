@@ -83,7 +83,7 @@ describe("CommandPluginAdapter", () => {
     const adapter = createCommandPluginAdapter({
       buildLaunch: async (_context, config) => ({
         command: process.execPath,
-        args: ["-e", "process.stdin.resume(); process.stdin.on('end', () => console.log(JSON.stringify({ok:true})))", ...config.args],
+        args: ["-e", "let body=''; process.stdin.on('data', chunk => body += chunk); process.stdin.on('end', () => { const call=JSON.parse(body); console.log(JSON.stringify({pluginId:call.pluginId,input:call.input})); })", ...config.args],
         cwd: root!
       })
     });
@@ -95,7 +95,7 @@ describe("CommandPluginAdapter", () => {
       capabilityId: "run",
       conversationId: "conversation-1",
       input: { topic: "memory" }
-    }))).toEqual([{ type: "result", output: { ok: true } }]);
+    }))).toEqual([{ type: "result", output: { pluginId: "com.example.command", input: { topic: "memory" } } }]);
   });
 
   it("streams NDJSON events", async () => {
