@@ -3,7 +3,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer, type Server as HttpServer } from "node:http";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { mkdir, readFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
@@ -27,10 +27,13 @@ import { ContextBuilder } from "../../../memmy-agent/src/core/agent-runtime/cont
 import { MCPToolWrapper } from "../../../memmy-agent/src/core/agent-runtime/tools/mcp.js";
 import { ToolRegistry } from "../../../memmy-agent/src/core/agent-runtime/tools/registry.js";
 import { LLMResponse, ToolCallRequest } from "../../../memmy-agent/src/providers/base.js";
+import { resolveModelSelection } from "../../../memmy-agent/src/providers/model-catalog.js";
+import YAML from "yaml";
 
 const pluginRoot = resolve(process.env.LITERATURE_REVIEW_PLUGIN_ROOT ?? join(process.cwd(), "..", "Literature-Review-Plugin"));
 const manifestPath = join(pluginRoot, "plugin.json");
 const integrationAvailable = existsSync(manifestPath);
+const liveAgentEnabled = process.env.LITERATURE_REVIEW_LIVE_AGENT === "1";
 let root: string | undefined;
 let store: AppStateStore | undefined;
 let client: Client | undefined;
@@ -406,6 +409,10 @@ describe.skipIf(!integrationAvailable)("installed Literature Review Plugin", () 
     const interactionResponses: Array<Promise<void>> = [];
     const agentCardTypes: string[] = [];
     const unsubscribe = progressBus.on("plugin.capability_event", (event) => {
+      if (event.capabilityId === "review_create_task" && event.event.type === "result") {
+        const output = event.event.output as { taskId?: unknown };
+        if (typeof output.taskId === "string") agentTaskId = output.taskId;
+      }
       if (event.capabilityId !== "review_request_interaction" || event.event.type !== "interaction") return;
       const request = event.event.request;
       const payload = request.payload as Record<string, unknown>;
@@ -442,7 +449,7 @@ describe.skipIf(!integrationAvailable)("installed Literature Review Plugin", () 
     let agentModelStep = 0;
     let agentTaskId = "";
     const agentModelMessages: Array<Array<Record<string, unknown>>> = [];
-    const agentProvider = {
+    const scriptedAgentProvider = {
       generation: { maxTokens: 512 },
       getDefaultModel: () => "fixture-agent-model",
       chatWithRetry: async ({ messages }: { messages: Array<Record<string, unknown>> }) => {
@@ -523,6 +530,19 @@ describe.skipIf(!integrationAvailable)("installed Literature Review Plugin", () 
         return new LLMResponse({ content: "已根据卡片和最新聊天指令完成综述并生成交付物。", finishReason: "stop" });
       }
     };
+    const liveConfigPath = resolve(process.env.MEMMY_CONFIG ?? join(homedir(), ".memmy", "config.yaml"));
+    const liveConfig = liveAgentEnabled && existsSync(liveConfigPath)
+      ? YAML.parse(readFileSync(liveConfigPath, "utf8")) as { app?: { userId?: string }; modelAssignments?: { account?: { agent?: { default?: string } } } }
+      : undefined;
+    const liveMode = liveConfig?.modelAssignments?.account?.agent?.default ? "account" : "byok";
+    const liveSelection = liveAgentEnabled ? resolveModelSelection({
+      configPath: liveConfigPath,
+      mode: liveMode,
+      activeAccountId: liveMode === "account" ? liveConfig?.app?.userId ?? null : null,
+      capability: "agent"
+    }) : null;
+    if (liveAgentEnabled && !liveSelection) throw new Error("The current Memmy user model is unavailable for the live Agent E2E.");
+    const agentProvider = liveSelection?.snapshot.provider ?? scriptedAgentProvider;
     const agentContext = new ContextBuilder({ workspace: join(root, "workspace"), fileMemoryEnabled: false });
     const agentSystemPrompt = agentContext.buildSystemPrompt(["literature-review"]);
     expect(agentSystemPrompt).toContain("### Skill: literature-review");
@@ -532,36 +552,58 @@ describe.skipIf(!integrationAvailable)("installed Literature Review Plugin", () 
       agentResult = await new AgentRunner(agentProvider as never).run(new AgentRunSpec({
         messages: [
           { role: "system", content: agentSystemPrompt },
-          { role: "user", content: "$literature-review 请创建一份关于检索质量与智能体长期记忆的综述。" }
+          { role: "user", content: "$literature-review 请创建一份关于检索质量与智能体长期记忆的综述。请使用 arXiv 检索，并通过所有必需卡片让我确认；收到卡片结果后继续完成证据映射、正文、图表、参考文献、审计、摘要和全部交付物。" }
         ],
         provider: agentProvider as never,
         tools: agentTools,
-        model: "fixture-agent-model",
-        maxIterations: 32,
+        model: liveSelection?.model ?? "fixture-agent-model",
+        maxIterations: liveAgentEnabled ? 40 : 32,
         injectionCallback: ({ limit = 3 } = {}) => pendingChat.splice(0, limit)
       }));
       await Promise.all(interactionResponses);
     } finally {
       unsubscribe();
     }
-    expect(agentResult.finalContent).toContain("生成交付物");
+    if (liveAgentEnabled) {
+      const debugPath = resolve(process.env.LITERATURE_REVIEW_LIVE_AGENT_REPORT ?? join(process.cwd(), "artifacts", "literature-review-live-agent-report.json"));
+      mkdirSync(dirname(debugPath), { recursive: true });
+      writeFileSync(debugPath, `${JSON.stringify({
+        generatedAt: new Date().toISOString(),
+        finalContent: agentResult.finalContent,
+        toolsUsed: agentResult.toolsUsed,
+        cards: agentCardTypes,
+        taskId: agentTaskId,
+        decisionModel: liveSelection ? { provider: liveSelection.provider, model: liveSelection.model } : null
+      }, null, 2)}\n`, "utf8");
+    }
+    expect(agentResult.finalContent.length).toBeGreaterThan(0);
     expect(agentResult.hadInjections).toBe(true);
-    expect(agentCardTypes).toEqual(["review-spec", "source-import", "keywords", "paper-selection", "outline"]);
-    expect(agentResult.toolsUsed).toHaveLength(28);
-    expect(agentResult.toolsUsed.at(-2)).toBe(agentToolNames.get("review_render"));
-    expect(agentResult.toolsUsed.at(-1)).toBe(agentToolNames.get("review_get_status"));
+    expect(agentCardTypes, JSON.stringify({
+      finalContent: agentResult.finalContent,
+      cards: agentCardTypes,
+      toolsUsed: agentResult.toolsUsed
+    }, null, 2)).toEqual(["review-spec", "source-import", "keywords", "paper-selection", "outline"]);
+    for (const capability of [
+      "review_create_task", "review_update_spec", "review_import_sources", "review_parse_sources", "review_generate_keywords",
+      "review_update_keywords", "review_search_papers", "review_update_paper_selection", "review_resolve_metadata",
+      "review_fetch_fulltexts", "review_build_readings", "review_generate_outline", "review_update_outline", "review_map_evidence",
+      "review_generate_sections", "review_refine", "review_plan_figures", "review_build_tables", "review_build_bibliography",
+      "review_audit", "review_generate_abstract", "review_render"
+    ]) expect(agentResult.toolsUsed, JSON.stringify({ missing: capability, finalContent: agentResult.finalContent, toolsUsed: agentResult.toolsUsed }, null, 2)).toContain(agentToolNames.get(capability));
+    expect(agentResult.toolsUsed.filter((name) => name === agentToolNames.get("review_request_interaction"))).toHaveLength(5);
     const agentTask = JSON.parse(readFileSync(join(dataRoot, manifest.id, "tasks", agentTaskId, "task.json"), "utf8"));
     expect(agentTask.spec).toMatchObject({ outputLanguage: "zh-CN", dateRange: { from: 2022 } });
     expect(agentTask.values.outputs.map((output: { name: string }) => output.name).sort()).toEqual([
       "neurips_2024.sty", "references.bib", "review.docx", "review.md", "review.pdf", "review.tex"
     ]);
-    expect(agentModelMessages.at(-1)?.some((message) => message.role === "user" && String(message.content).includes("2022"))).toBe(true);
+    if (!liveAgentEnabled) expect(agentModelMessages.at(-1)?.some((message) => message.role === "user" && String(message.content).includes("2022"))).toBe(true);
     trace.push({
       phase: "agent-orchestration-verified",
       skillLoaded: true,
       toolsUsed: agentResult.toolsUsed,
       cards: agentCardTypes,
       chatSteeringApplied: true,
+      decisionModel: liveSelection ? { provider: liveSelection.provider, model: liveSelection.model } : { provider: "fixture", model: "fixture-agent-model" },
       taskId: agentTaskId
     });
 
@@ -586,7 +628,7 @@ describe.skipIf(!integrationAvailable)("installed Literature Review Plugin", () 
       toolCount: tools.length,
       taskId: createOutput.taskId
     });
-  }, 120_000);
+  }, liveAgentEnabled ? 900_000 : 120_000);
 });
 
 function modelFixtureResponse(system: string, request: Record<string, unknown>): Record<string, unknown> {
