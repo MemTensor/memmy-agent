@@ -34,6 +34,30 @@ describe("plugin model inference Host service", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
+  it("retries one transient empty model response before returning success", async () => {
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        choices: [{ message: { content: "" }, finish_reason: "stop" }]
+      }), { status: 200, headers: { "content-type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        choices: [{ message: { content: "recovered" }, finish_reason: "stop" }]
+      }), { status: 200, headers: { "content-type": "application/json" } }));
+    const service = createPluginModelInferenceService({
+      resolveModel: async () => resolved(),
+      fetch: fetch as typeof globalThis.fetch
+    });
+
+    await expect(service.invoke({
+      pluginId: "literature-review", callId: "retry-empty", conversationId: "conversation-1", service: "model-inference",
+      input: { messages: [{ role: "user", content: "Check continuity" }], responseFormat: "json" }
+    })).resolves.toMatchObject({ content: "recovered" });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    const firstBody = JSON.parse(String(fetch.mock.calls[0]?.[1]?.body));
+    const secondBody = JSON.parse(String(fetch.mock.calls[1]?.[1]?.body));
+    expect(firstBody.response_format).toEqual({ type: "json_object" });
+    expect(secondBody.response_format).toBeUndefined();
+  });
+
   it("delegates embedding inference to the Memory-owned current model without exposing configuration", async () => {
     const embeddingInference = vi.fn(async () => ({
       embeddings: [[1, 0], [0, 1]],

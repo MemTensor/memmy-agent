@@ -343,13 +343,13 @@ function protocolSupportsCapability(
 }
 
 function validStringRecord(value: unknown): boolean {
-    return value === undefined || (
+    return value === undefined || value === null || (
         isRecord(value) && Object.values(value).every((entry) => typeof entry === "string")
     );
 }
 
 function validUnknownRecord(value: unknown): boolean {
-    return value === undefined || isRecord(value);
+    return value === undefined || value === null || isRecord(value);
 }
 
 function isHttpUrl(value: unknown): value is string {

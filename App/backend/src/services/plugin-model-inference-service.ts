@@ -11,6 +11,7 @@ const MAX_INPUT_CHARACTERS = 200_000;
 const MAX_OUTPUT_TOKENS = 8_192;
 const DEFAULT_OUTPUT_TOKENS = 2_048;
 const DEFAULT_TIMEOUT_MS = 120_000;
+const DEFAULT_MAX_ATTEMPTS = 2;
 
 const ModelInferenceInputSchema = z.object({
   messages: z.array(z.object({
@@ -38,6 +39,7 @@ export interface CreatePluginModelInferenceServiceOptions {
   embeddingInference?: (input: EmbeddingInferenceInput) => Promise<EmbeddingInferenceOutput>;
   fetch?: typeof fetch;
   timeoutMs?: number;
+  maxAttempts?: number;
 }
 
 export function createPluginModelInferenceService(options: CreatePluginModelInferenceServiceOptions): PluginHostServiceInvoker {
@@ -64,8 +66,27 @@ export function createPluginModelInferenceService(options: CreatePluginModelInfe
       const input = ModelInferenceInputSchema.parse(call.input);
       const resolved = await options.resolveModel();
       if (!resolved?.ok) throw serviceError("model_unavailable", "The current user model is not configured or available", false);
-      const timeoutMs = deadlineTimeout(call, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-      return infer(resolved, input, fetchImpl, timeoutMs);
+      const maxAttempts = Math.max(1, options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS);
+      let lastError: unknown;
+      let attemptInput = input;
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        try {
+          const timeoutMs = deadlineTimeout(call, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+          return await infer(resolved, attemptInput, fetchImpl, timeoutMs);
+        } catch (error) {
+          lastError = error;
+          if (attempt >= maxAttempts || !isRetryableServiceError(error)) throw error;
+          // Some OpenAI-compatible gateways occasionally return an empty choice
+          // when response_format=json_object is requested. The prompt still asks
+          // for JSON, so retrying without the transport-level JSON constraint is
+          // a safe compatibility fallback and keeps credentials inside the Host.
+          if (serviceErrorCode(error) === "model_empty_response" && attemptInput.responseFormat === "json") {
+            attemptInput = { ...attemptInput, responseFormat: "text" };
+          }
+          await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+        }
+      }
+      throw lastError;
     }
   };
 }
@@ -190,6 +211,12 @@ function deadlineTimeout(call: PluginHostServiceCall, fallback: number): number 
 function serviceError(code: string, message: string, retryable: boolean): Error { return Object.assign(new Error(message), { code, retryable }); }
 function hasServiceErrorCode(error: unknown): error is Error & { code: string; retryable?: boolean } {
   return error instanceof Error && typeof (error as Error & { code?: unknown }).code === "string";
+}
+function isRetryableServiceError(error: unknown): error is Error & { retryable: true } {
+  return error instanceof Error && (error as Error & { retryable?: unknown }).retryable === true;
+}
+function serviceErrorCode(error: unknown): string | undefined {
+  return error instanceof Error ? (error as Error & { code?: string }).code : undefined;
 }
 function record(value: unknown): Record<string, unknown> { return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
 function string(value: unknown): string { return typeof value === "string" ? value : ""; }
