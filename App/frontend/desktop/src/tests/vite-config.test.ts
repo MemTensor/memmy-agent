@@ -53,6 +53,30 @@ describe("vite workspace resolution", () => {
     expect(JSON.stringify(config.define)).not.toContain("MEMMY_PRIVATE_TOKEN");
     expect(JSON.stringify(config.define)).not.toContain("must-not-be-rendered");
   });
+
+  it("ignores source watcher events during stable Electron demo runs", () => {
+    vi.stubEnv("MEMMY_STABLE_ELECTRON_DEMO", "1");
+
+    const config = resolveConfig("test");
+
+    expect(config.server?.watch).toEqual({ ignored: ["**/*"] });
+    expect(config.server?.hmr).toEqual({
+      host: "127.0.0.1",
+      port: 19001
+    });
+  });
+
+  it("keeps source watching enabled for normal frontend development", () => {
+    vi.stubEnv("MEMMY_STABLE_ELECTRON_DEMO", "0");
+
+    const config = resolveConfig("test");
+
+    expect(config.server?.watch).toBeUndefined();
+    expect(config.server?.hmr).toEqual({
+      host: "127.0.0.1",
+      port: 19001
+    });
+  });
 });
 
 /** Handles resolve config. */

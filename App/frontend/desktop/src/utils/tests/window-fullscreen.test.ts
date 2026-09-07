@@ -42,7 +42,7 @@ describe("window-fullscreen", () => {
     const mainSource = readFileSync(mainSourcePath, "utf8");
     expect(mainSource).toContain("applyWindowPlatformClass(window.memmy?.platform);");
     expect(mainSource.indexOf("applyWindowPlatformClass(window.memmy?.platform);")).toBeLessThan(
-      mainSource.indexOf("createRoot(root).render(")
+      mainSource.indexOf("createRoot(root)")
     );
   });
 

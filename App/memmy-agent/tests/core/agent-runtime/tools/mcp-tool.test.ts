@@ -191,6 +191,39 @@ describe("MCPToolWrapper execution", () => {
     await expect(new MCPToolWrapper(session, "test", toolDef("demo"), 0.1).execute({ value: 1 })).resolves.toBe("hello\n42");
   });
 
+  it("preserves images and structured content returned by MCP tools", async () => {
+    const root = useConfig(new Config());
+    process.env.MEMMY_AGENT_DATA_DIR = root;
+    const session = {
+      async callTool() {
+        return {
+          content: [
+            { type: "text", text: "captured" },
+            {
+              type: "image",
+              mimeType: "image/png",
+              data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
+            },
+          ],
+          structuredContent: { snapshot_id: "snapshot-1", elements: [{ element_token: "token-1" }] },
+        };
+      },
+    };
+
+    const result = await new MCPToolWrapper(session, "cua", toolDef("get_window_state"), 0.1).execute();
+    expect(result).toEqual([
+      { type: "text", text: "captured" },
+      expect.objectContaining({
+        type: "image_url",
+        image_url: expect.objectContaining({ url: expect.stringMatching(/^data:image\/png;base64,/) }),
+      }),
+      {
+        type: "text",
+        text: '[structuredContent]\n{"snapshot_id":"snapshot-1","elements":[{"element_token":"token-1"}]}',
+      },
+    ]);
+  });
+
   it("returns a timeout message", async () => {
     const session = { callTool: () => new Promise(() => undefined) };
 
@@ -241,6 +274,10 @@ describe("MCP structured content conversion", () => {
             data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
           },
         ],
+        structuredContent: {
+          snapshot_id: "snapshot-1",
+          elements: [{ element_token: "token-1" }],
+        },
       },
       "structured",
     ) as Array<Record<string, any>>;
@@ -255,6 +292,10 @@ describe("MCP structured content conversion", () => {
       meta: { path: expect.any(String) },
     });
     expect(fs.existsSync(result[1].meta.path)).toBe(true);
+    expect(result[2]).toEqual({
+      type: "text",
+      text: '[structuredContent]\n{"snapshot_id":"snapshot-1","elements":[{"element_token":"token-1"}]}',
+    });
   });
 
   it("keeps ordinary MCP wrappers on their existing text-only behavior", () => {

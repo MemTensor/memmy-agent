@@ -104,6 +104,11 @@ import {
 } from "../../entrypoints/frontend-bridge/transcript.js";
 import type { ChannelAdminApi } from "../../entrypoints/frontend-bridge/channels-api.js";
 import {
+  ComputerHistoryApiError,
+  getComputerHistoryDemoService,
+} from "../../entrypoints/frontend-bridge/computer-history-api.js";
+import type { ComputerHistoryDemoService } from "../../entrypoints/frontend-bridge/computer-history-api.js";
+import {
   removeSessionDagFiles,
   type SessionDagQueueManager,
 } from "../../session-dag/index.js";
@@ -705,6 +710,7 @@ export class WebSocketChannel extends BaseChannel {
   stopExpectedTurn: WebSocketChannelOptions["stopExpectedTurn"] = undefined;
   goalControlConnections = new Map<string, Set<any>>();
   dispatchingGoalControls = new Map<string, string>();
+  readonly computerHistory: ComputerHistoryDemoService;
 
   constructor(config: any = {}, bus?: any, options: WebSocketChannelOptions = {}) {
     const normalized = config instanceof WebSocketConfig ? config : new WebSocketConfig(config);
@@ -736,6 +742,7 @@ export class WebSocketChannel extends BaseChannel {
     this.stopExpectedTurn = options.stopExpectedTurn ?? config?.stopExpectedTurn;
     const workspacePath = options.workspacePath ?? config?.workspacePath ?? getWorkspacePath();
     this.workspacePath = path.resolve(String(workspacePath));
+    this.computerHistory = getComputerHistoryDemoService();
   }
 
   setChannelAdmin(admin: ChannelAdminApi | null): void {
@@ -2722,6 +2729,15 @@ export class WebSocketChannel extends BaseChannel {
     if (got === "/api/projects") return this.handleProjectCreate(request);
     if (got === "/api/settings") return this.handleSettings(request);
     if (got === "/api/commands") return this.handleCommands(request);
+    if (got === "/api/computer-history") return this.handleComputerHistory(request, "snapshot");
+    if (got === "/api/computer-history/delete") return this.handleComputerHistory(request, "history-delete");
+    if (got === "/api/computer-history/demo-fixture") return this.handleComputerHistory(request, "demo-fixture");
+    if (got === "/api/computer-history/import") return this.handleComputerHistory(request, "import");
+    if (got === "/api/computer-history/capture/start") return this.handleComputerHistory(request, "capture-start");
+    if (got === "/api/computer-history/capture/stop") return this.handleComputerHistory(request, "capture-stop");
+    if (got === "/api/computer-history/workflows/create") return this.handleComputerHistory(request, "workflow-create");
+    if (got === "/api/computer-history/cua/start") return this.handleComputerHistory(request, "cua-start");
+    if (got === "/api/computer-history/cua/smoke") return this.handleComputerHistory(request, "cua-smoke");
     if (got === "/api/webui/sidebar-state") return this.handleWebuiSidebarState(request);
     if (got === "/api/webui/sidebar-state/update") return this.handleWebuiSidebarStateUpdate(request);
     if (got === "/api/webui/seed-chat") return this.handleWebuiSeedChat(request);
@@ -2854,6 +2870,79 @@ export class WebSocketChannel extends BaseChannel {
     for (const timer of this.sessionUpdateTimers.values()) clearTimeout(timer);
     this.sessionUpdateTimers.clear();
     this.sessionUpdateScopes.clear();
+  }
+
+  async handleComputerHistory(
+    request: any,
+    action: "snapshot" | "history-delete" | "demo-fixture" | "import" | "capture-start" | "capture-stop" | "workflow-create" | "cua-start" | "cua-smoke",
+  ): Promise<HttpLikeResponse> {
+    if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+    const method = (request.method ?? "GET").toUpperCase();
+    if (action === "snapshot") {
+      return method === "GET"
+        ? httpJsonResponse(this.computerHistory.snapshot() as unknown as Record<string, any>)
+        : httpError(405, "method not allowed");
+    }
+    if (method !== "POST") return httpError(405, "method not allowed");
+
+    let body: Record<string, any> = {};
+    if (requestBodyText(request).trim()) {
+      try {
+        const parsed = JSON.parse(requestBodyText(request));
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          return httpError(400, "body must be an object");
+        }
+        body = parsed;
+      } catch {
+        return httpError(400, "body must be JSON");
+      }
+    }
+
+    try {
+      let snapshot;
+      switch (action) {
+        case "history-delete":
+          snapshot = this.computerHistory.deleteHistory(String(body.history_id ?? ""));
+          break;
+        case "demo-fixture":
+          snapshot = this.computerHistory.installDemoFixture();
+          break;
+        case "import":
+          snapshot = this.computerHistory.importMarkdown({
+            title: typeof body.title === "string" ? body.title : undefined,
+            markdown: typeof body.markdown === "string" ? body.markdown : "",
+          });
+          break;
+        case "capture-start":
+          snapshot = this.computerHistory.startCapture(
+            typeof body.title === "string" ? body.title : "",
+            typeof body.start_url === "string" ? body.start_url : "",
+          );
+          break;
+        case "capture-stop":
+          snapshot = await this.computerHistory.stopCapture();
+          break;
+        case "workflow-create":
+          snapshot = this.computerHistory.createWorkflow(
+            String(body.history_id ?? ""),
+            typeof body.user_request === "string" ? body.user_request : "",
+          );
+          break;
+        case "cua-start":
+          snapshot = this.computerHistory.startCuaRun(
+            String(body.workflow_id ?? ""),
+            Array.isArray(body.variables) ? body.variables.filter((value: unknown) => typeof value === "string") : [],
+          );
+          break;
+        case "cua-smoke":
+          snapshot = this.computerHistory.startCuaSmokeTest();
+          break;
+      }
+      return httpJsonResponse(snapshot as unknown as Record<string, any>);
+    } catch (error) {
+      if (error instanceof ComputerHistoryApiError) return httpError(error.status, error.message);
+      return httpError(500, error instanceof Error ? error.message : String(error));
+    }
   }
 
   async connectionLoop(connection: any): Promise<void> {

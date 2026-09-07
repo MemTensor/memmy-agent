@@ -7,6 +7,8 @@ import { ToolRegistry } from "./registry.js";
 import { ApplyPatchTool } from "./apply-patch.js";
 import { AgentSourceTool } from "./agent-source.js";
 import { CronTool } from "./cron.js";
+import { COMPUTER_TOOL_CLASSES } from "./computer.js";
+import { ComputerHistoryTool } from "./computer-history.js";
 import { ListExecSessionsTool, WriteStdinTool } from "./exec-session.js";
 import { ReadFileTool, WriteFileTool, EditFileTool, ListDirTool } from "./filesystem.js";
 import { ImageGenerationTool } from "./image-generation.js";
@@ -41,6 +43,7 @@ type ToolClass = (new (...args: any[]) => Tool) & {
 const BUILTIN_TOOL_CLASSES: ToolClass[] = [
   AgentSourceTool,
   ApplyPatchTool,
+  ComputerHistoryTool,
   CreateGoalTool,
   CronTool,
   EditFileTool,
@@ -60,6 +63,7 @@ const BUILTIN_TOOL_CLASSES: ToolClass[] = [
   WriteFileTool,
   WriteStdinTool,
   ...BROWSER_TOOL_CLASSES,
+  ...COMPUTER_TOOL_CLASSES,
 ];
 
 function scopesFor(cls: ToolClass): Set<string> {
