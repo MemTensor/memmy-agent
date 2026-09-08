@@ -12,21 +12,10 @@ import { ObservationSettingsStore } from "../../../src/core/agent-runtime/comput
 const roots: string[] = [];
 const settingsFiles: string[] = [];
 
-function allowNotes(settingsFile: string): void {
-  new ObservationSettingsStore(settingsFile).write({
-    observation: {
-      defaultApplicationBehavior: "do_not_observe",
-      defaultURLBehavior: "observe",
-      rules: [{ scope: "app", bundleID: "com.apple.Notes", behavior: "observe" }],
-    },
-  });
-}
-
 function service(): ComputerHistoryDemoService {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-observation-"));
   roots.push(root);
   const settingsFile = path.join(root, "observation-settings.json");
-  allowNotes(settingsFile);
   settingsFiles.push(settingsFile);
   return new ComputerHistoryDemoService({
     observationSettingsFile: settingsFile,
@@ -96,6 +85,26 @@ describe("Computer History observation lifecycle", () => {
     const stopped = await instance.stopObservation();
 
     expect(stopped.observation).toMatchObject({ state: "stopped", segmentId: null, startedAt: null });
+  });
+
+  it("writes the policy out on first start so it is explicit and editable", () => {
+    const instance = service();
+    const file = settingsFiles.at(-1)!;
+    expect(fs.existsSync(file)).toBe(false);
+
+    instance.startObservation();
+
+    const written = JSON.parse(fs.readFileSync(file, "utf8"));
+    expect(written.observation.defaultApplicationBehavior).toBe("observe");
+    expect(written.observation.rules).toEqual([]);
+  });
+
+  it("refuses to start on a settings file that does not parse", () => {
+    const instance = service();
+    fs.writeFileSync(settingsFiles.at(-1)!, "{ not json", "utf8");
+
+    // An unreadable file is an error state, not a policy to fall back from.
+    expect(() => instance.startObservation()).toThrow(/are not valid/);
   });
 
   it("refuses to start when the policy would record nothing", () => {

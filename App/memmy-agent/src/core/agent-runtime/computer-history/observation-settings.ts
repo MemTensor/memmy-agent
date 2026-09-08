@@ -51,11 +51,17 @@ export interface ObservationDecision {
     | "url_not_allowed";
 }
 
-// Recording nothing is the safe default: a fresh install observes only what the
-// user has explicitly allowed.
+// Observe by default and use the blocklist for exceptions.
+//
+// An allowlist default fails silently in the worst possible way: the UI says
+// it is recording while nothing is written, and the gap is only discovered
+// days later when the history is asked for and turns out to be empty. What
+// protects the user here is the blocklist, pause, the unconditional private
+// browsing exclusion, secure-input suppression, local-only storage and the
+// retention window — none of which depend on which way this default points.
 export const DEFAULT_OBSERVATION_SETTINGS: ObservationSettings = {
   observation: {
-    defaultApplicationBehavior: "do_not_observe",
+    defaultApplicationBehavior: "observe",
     defaultURLBehavior: "observe",
     rules: [],
   },

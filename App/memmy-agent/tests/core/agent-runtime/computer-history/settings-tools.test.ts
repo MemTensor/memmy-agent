@@ -79,10 +79,10 @@ describe("Computer History settings tools", () => {
     expect(result.privacy).toMatchObject({ screenshots: false, audio: false });
   });
 
-  it("returns the safe default before the user has configured anything", async () => {
+  it("returns the observe-by-default policy before anything is configured", async () => {
     const result = JSON.parse(await new ComputerHistoryGetSettingsTool(temporaryStore()).execute());
 
-    expect(result.settings.observation.defaultApplicationBehavior).toBe("do_not_observe");
+    expect(result.settings.observation.defaultApplicationBehavior).toBe("observe");
     expect(result.settings.observation.rules).toEqual([]);
   });
 

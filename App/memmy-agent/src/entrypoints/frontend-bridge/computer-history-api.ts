@@ -2,6 +2,10 @@ import {
   ObservationSettingsStore,
 } from "../../core/agent-runtime/computer-history/settings-store.js";
 import {
+  DEFAULT_OBSERVATION_SETTINGS,
+  parseObservationSettings,
+} from "../../core/agent-runtime/computer-history/observation-settings.js";
+import {
   applicationsFromMarkdown,
   applyNarrative,
   writeSegmentNarrative,
@@ -475,6 +479,7 @@ export class ComputerHistoryDemoService {
     if (this.observationState === "running") {
       throw new ComputerHistoryApiError(409, "Computer History is already running");
     }
+    this.ensureObservationSettings();
     this.assertObservesSomething();
     this.cleanupExpiredRecordings();
     const segment = this.segment ?? this.openSegment();
@@ -494,11 +499,38 @@ export class ComputerHistoryDemoService {
   }
 
   /**
+   * Makes the policy an explicit document before the recorder reads it.
+   *
+   * Writing the defaults out on first start means the recorder parses one
+   * unambiguous file instead of inferring a policy from a missing one, and it
+   * gives the user something to edit. A file that exists but does not parse is
+   * an error state rather than a policy, so it stops the start instead of
+   * falling back to something they did not choose.
+   */
+  private ensureObservationSettings(): void {
+    const file = this.observationSettings.filePath;
+    if (!fs.existsSync(file)) {
+      this.observationSettings.write(DEFAULT_OBSERVATION_SETTINGS);
+      return;
+    }
+    try {
+      parseObservationSettings(JSON.parse(fs.readFileSync(file, "utf8")));
+    } catch (error) {
+      throw new ComputerHistoryApiError(
+        400,
+        `Computer History settings at ${file} are not valid: `
+          + `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  /**
    * Refuses to start when the policy would record nothing.
    *
-   * The default is do-not-observe, so a fresh install has no allowed apps yet.
-   * Starting anyway would look like it was recording while producing empty
-   * segments, so say what is missing instead.
+   * The default observes everything, so this only fires for someone who
+   * deliberately switched to an allowlist and then left it empty. Starting
+   * anyway would look like it was recording while producing empty segments,
+   * so say what is missing instead.
    */
   private assertObservesSomething(): void {
     const { observation } = this.observationSettings.read();

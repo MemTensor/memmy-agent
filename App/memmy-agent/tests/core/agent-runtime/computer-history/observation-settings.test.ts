@@ -18,12 +18,23 @@ function settings(
 }
 
 describe("observation settings", () => {
-  it("records nothing until the user allows something", () => {
-    expect(DEFAULT_OBSERVATION_SETTINGS.observation.defaultApplicationBehavior).toBe("do_not_observe");
-    expect(evaluateObservation(DEFAULT_OBSERVATION_SETTINGS, { bundleId: "com.apple.Notes" })).toEqual({
-      observe: false,
-      reason: "application_not_allowed",
-    });
+  it("observes by default so the history is never silently empty", () => {
+    expect(DEFAULT_OBSERVATION_SETTINGS.observation.defaultApplicationBehavior).toBe("observe");
+    expect(DEFAULT_OBSERVATION_SETTINGS.observation.rules).toEqual([]);
+    expect(evaluateObservation(DEFAULT_OBSERVATION_SETTINGS, { bundleId: "com.apple.Notes" }))
+      .toEqual({ observe: true, reason: "observed" });
+    expect(evaluateObservation(DEFAULT_OBSERVATION_SETTINGS, {
+      bundleId: "com.google.Chrome",
+      url: "https://example.com/a",
+    })).toEqual({ observe: true, reason: "observed" });
+  });
+
+  it("still excludes private browsing under the permissive default", () => {
+    expect(evaluateObservation(DEFAULT_OBSERVATION_SETTINGS, {
+      bundleId: "com.google.Chrome",
+      url: "https://example.com/a",
+      privateBrowsing: true,
+    })).toEqual({ observe: false, reason: "private_browsing" });
   });
 
   it("excludes private browsing whatever the rules say", () => {

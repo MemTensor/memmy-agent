@@ -174,8 +174,11 @@ function loadObservationSettings(file) {
       rules: Array.isArray(observation.rules) ? observation.rules : [],
     };
   } catch {
-    // An unreadable policy must not silently widen what is recorded.
-    return { defaultApplicationBehavior: "do_not_observe", defaultURLBehavior: "observe", rules: [] };
+    // The service writes and validates this file before spawning the recorder,
+    // so reaching here means it went missing mid-run. Fall back to the same
+    // defaults the service would have written rather than silently recording
+    // nothing, which looks identical to a broken recorder.
+    return { defaultApplicationBehavior: "observe", defaultURLBehavior: "observe", rules: [] };
   }
 }
 
