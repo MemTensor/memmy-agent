@@ -100,6 +100,7 @@ export type ComputerHistorySnapshot = {
     audio: false;
     rawRetentionHours: number;
     markdownDirectory: string;
+    eventStreamDirectory: string;
   };
 };
 
@@ -156,6 +157,7 @@ const ComputerHistorySnapshotSchema = z.object({
     audio: z.literal(false),
     rawRetentionHours: z.number(),
     markdownDirectory: z.string(),
+    eventStreamDirectory: z.string(),
 
   }).strict()
 }).strict();

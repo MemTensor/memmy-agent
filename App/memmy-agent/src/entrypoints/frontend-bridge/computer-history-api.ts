@@ -46,6 +46,8 @@ export interface ComputerHistoryEntry {
   summaryWindow: "10min" | "6h" | null;
   /** Whether this entry's raw events are exempt from the retention window. */
   pinned: boolean;
+  /** The raw event stream this summary was written from, while it still exists. */
+  eventStreamPath: string | null;
   sourceType: ComputerHistorySourceType;
   createdAt: string;
   markdown: string;
@@ -86,7 +88,10 @@ export interface ComputerHistorySnapshot {
     screenshots: false;
     audio: false;
     rawRetentionHours: 48;
+    /** Where the readable summaries live. */
     markdownDirectory: string;
+    /** Where the raw per-segment event streams live, for direct inspection. */
+    eventStreamDirectory: string;
   };
 }
 
@@ -285,7 +290,11 @@ export class ComputerHistoryDemoService {
         }),
       ]
         .filter((entry) => !isCodexSkysightCopy(entry.id))
-        .map((entry) => ({ ...entry, pinned: this.isPinned(entry.id) })),
+        .map((entry) => ({
+          ...entry,
+          pinned: this.isPinned(entry.id),
+          eventStreamPath: this.eventStreamPathFor(entry.id),
+        })),
       // Pick the fields explicitly rather than spreading the directory entry: a
       // workflow is not a summary, and spreading leaked summary-only fields
       // into it the moment the reader grew new ones.
@@ -302,6 +311,7 @@ export class ComputerHistoryDemoService {
         audio: false,
         rawRetentionHours: 48,
         markdownDirectory: this.historyDirectory,
+        eventStreamDirectory: this.segmentsDirectory,
       },
     };
   }
@@ -715,6 +725,14 @@ export class ComputerHistoryDemoService {
     const segmentId = historyId.replace(/-(?:10min|6h)-summary$/u, "");
     const directory = path.join(this.segmentsDirectory, segmentId);
     return fs.existsSync(directory) ? directory : null;
+  }
+
+  /** The segment's event stream, or null once it has passed retention. */
+  private eventStreamPathFor(historyId: string): string | null {
+    const directory = this.segmentDirectoryFor(historyId);
+    if (!directory) return null;
+    const file = path.join(directory, "events.jsonl");
+    return fs.existsSync(file) ? file : null;
   }
 
   private isPinned(historyId: string): boolean {

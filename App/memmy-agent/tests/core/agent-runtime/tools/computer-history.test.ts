@@ -3,6 +3,7 @@ import { ComputerHistoryTool } from "../../../../src/core/agent-runtime/tools/co
 import { ToolLoader } from "../../../../src/core/agent-runtime/tools/loader.js";
 
 const history = {
+  eventStreamPath: "/tmp/segments/2026-09-08T08-20-00Z/events.jsonl",
   id: "history-iphone",
   title: "配置 iPhone",
   sourceType: "captured" as const,
@@ -67,5 +68,33 @@ describe("ComputerHistoryTool", () => {
     await new ComputerHistoryTool({ searchHistories } as any).execute({ query: "x", limit: 12 });
 
     expect(searchHistories).toHaveBeenCalledWith("x", 12);
+  });
+
+  it("points at the raw event stream, because the summary lacks the specifics", async () => {
+    const searchHistories = vi.fn(() => [{ history, score: 5, matchedTerms: ["iphone"] }]);
+    const result = JSON.parse(await new ComputerHistoryTool({ searchHistories } as any).execute({
+      query: "今天谁联系了我",
+    }));
+
+    expect(result.matches[0].event_stream_path).toBe(history.eventStreamPath);
+    expect(result.matches[0].raw_events_available).toBe(true);
+    expect(result.next_step).toContain("grep the event_stream_path");
+  });
+
+  it("says the raw events are gone rather than implying the summary is all there was", async () => {
+    const expired = { ...history, eventStreamPath: null };
+    const searchHistories = vi.fn(() => [{ history: expired, score: 5, matchedTerms: [] }]);
+    const result = JSON.parse(await new ComputerHistoryTool({ searchHistories } as any).execute({
+      query: "上个月谁联系了我",
+    }));
+
+    expect(result.matches[0].raw_events_available).toBe(false);
+    expect(result.next_step).toContain("passed the retention window");
+  });
+
+  it("tells the caller the summary is not where the detail lives", () => {
+    const tool = new ComputerHistoryTool({ searchHistories: vi.fn() } as any);
+    expect(tool.description).toContain("summaries only");
+    expect(tool.description).toContain("event_stream_path");
   });
 });

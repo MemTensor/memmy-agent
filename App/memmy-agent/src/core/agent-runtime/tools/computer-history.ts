@@ -34,10 +34,11 @@ const PARAMETERS = {
 // job, and keeping the two apart stops a retrieval result from turning into
 // desktop control on its own.
 const DESCRIPTION = [
-  "Search the local Computer History record of the user's recent desktop activity.",
-  "Use it to answer what the user was doing, what they were working on, or where they left off.",
+  "Locate windows in the local Computer History by relevance to a question.",
+  "This searches the readable summaries only, which say what the user was doing but not the specifics.",
+  "For who contacted them, what a message said, or which page they were on, read event_stream_path",
+  "from the results with your own file tools — that is where the detail is.",
   "Returns observed evidence only; it never operates the desktop.",
-  "To actually reproduce a behavior, read the evidence first and then drive the Open Computer Use MCP tools yourself.",
 ].join(" ");
 
 export class ComputerHistoryTool extends Tool {
@@ -86,7 +87,14 @@ export class ComputerHistoryTool extends Tool {
           score,
           matched_terms: matchedTerms,
           summary: history.markdown.slice(0, 1_200),
+          // The summary says what the window was about; this is where what
+          // actually happened in it can still be read, while it lasts.
+          event_stream_path: history.eventStreamPath,
+          raw_events_available: history.eventStreamPath !== null,
         })),
+        next_step: matches.some((match) => match.history.eventStreamPath)
+          ? "For anything specific — who, which message, which page — grep the event_stream_path of the relevant match rather than relying on the summary."
+          : "The raw events for these windows have passed the retention window; only the summaries remain.",
       });
     } catch (error) {
       if (error instanceof ComputerHistoryApiError) {

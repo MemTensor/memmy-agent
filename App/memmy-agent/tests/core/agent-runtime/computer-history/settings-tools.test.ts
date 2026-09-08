@@ -33,6 +33,7 @@ const snapshot = (state: string) => ({
     audio: false,
     rawRetentionHours: 48,
     markdownDirectory: "/tmp/histories",
+    eventStreamDirectory: "/tmp/recordings/segments",
   },
 });
 
@@ -67,7 +68,7 @@ describe("Computer History settings tools", () => {
     expect(runStateFrom("nonsense")).toBe("stopped");
   });
 
-  it("reports where the event stream lives so the agent can search it", async () => {
+  it("reports both layers so the agent can pick the right one", async () => {
     const tool = new ComputerHistoryStatusTool(
       { snapshot: () => snapshot("running") } as any,
       temporaryStore(),
@@ -75,7 +76,11 @@ describe("Computer History settings tools", () => {
     const result = JSON.parse(await tool.execute());
 
     expect(result.state).toBe("running");
-    expect(result.event_stream_root_path).toBe("/tmp/histories");
+    // The summaries say what a window was about; the raw streams say what
+    // specifically happened in it. Reporting only one leaves half the record
+    // unreachable.
+    expect(result.summary_directory).toBe("/tmp/histories");
+    expect(result.event_stream_root_path).toBe("/tmp/recordings/segments");
     expect(result.segment_id).toBe("2026-09-08T00-00-00Z");
     expect(result.privacy).toMatchObject({ screenshots: false, audio: false });
   });
