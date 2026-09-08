@@ -1,34 +1,58 @@
 /**
- * Creates the VBS script that launches the Windows update helper hidden.
+ * Creates the CMD script that launches the Windows update helper hidden.
+ *
+ * A CMD launcher replaces the historical .vbs launcher so systems with
+ * VBScript / Windows Script Host disabled (e.g. Windows Feature removal or GPO)
+ * no longer surface the "There is no script engine for file extension '.vbs'"
+ * dialog after an update.
+ *
+ * The generated batch delegates to PowerShell via -EncodedCommand so localized
+ * paths and arguments round-trip through UTF-16 without depending on the host
+ * console code page.
  *
  * @param command The PowerShell helper launch command and arguments.
- * @returns The VBS script content.
+ * @returns The CMD script content.
  */
 const createWindowsUpdateLauncherScript = (command: string[]): string => {
-  const shellCommand = command.map(quoteWindowsShellArgument).join(" ");
-  return `Set shell = CreateObject("WScript.Shell")
-shell.Run "${escapeVbsString(shellCommand)}", 0, False
-Set fso = CreateObject("Scripting.FileSystemObject")
-On Error Resume Next
-fso.DeleteFile WScript.ScriptFullName, True
-`;
+  const [powershellPath, ...rest] = command;
+  const targetPath = powershellPath ?? "powershell.exe";
+  const startProcess = [
+    "Start-Process",
+    "-FilePath",
+    quotePowerShellSingleQuoted(targetPath),
+    "-ArgumentList",
+    quotePowerShellArgumentList(rest),
+    "-WindowStyle",
+    "Hidden"
+  ].join(" ");
+  const encodedCommand = Buffer.from(startProcess, "utf16le").toString("base64");
+  return [
+    "@echo off",
+    `start "" /B "%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand ${encodedCommand}`,
+    '(goto) 2>nul & del "%~f0"',
+    ""
+  ].join("\r\n");
 };
 
 /**
- * Creates a Windows Script Host compatible launcher file.
+ * Creates a Windows launcher file that does not depend on Windows Script Host.
  *
- * Windows Script Host may decode a BOM-less UTF-8 VBS file with the active
- * system code page, corrupting non-ASCII update paths before PowerShell starts.
+ * The launcher is a CMD batch that hands off to PowerShell via -EncodedCommand
+ * so non-ASCII install paths survive the OEM console code page. The batch
+ * deletes itself once dispatched.
  */
 export const createWindowsUpdateLauncherFile = (command: string[]): Buffer => {
   const script = createWindowsUpdateLauncherScript(command);
-  return Buffer.from(`\uFEFF${script}`, "utf16le");
+  return Buffer.from(script, "utf8");
 };
 
-const quoteWindowsShellArgument = (value: string): string => {
-  return `"${value.replace(/"/g, "\\\"")}"`;
+const quotePowerShellArgumentList = (values: string[]): string => {
+  if (values.length === 0) {
+    return "@()";
+  }
+  return values.map(quotePowerShellSingleQuoted).join(",");
 };
 
-const escapeVbsString = (value: string): string => {
-  return value.replace(/"/g, "\"\"");
+const quotePowerShellSingleQuoted = (value: string): string => {
+  return `'${value.replace(/'/g, "''")}'`;
 };

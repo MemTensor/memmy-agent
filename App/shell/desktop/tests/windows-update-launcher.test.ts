@@ -6,8 +6,16 @@ import { setTimeout as delay } from "node:timers/promises";
 import { describe, expect, it } from "vitest";
 import { createWindowsUpdateLauncherFile } from "../src/main/windows-update-launcher.js";
 
+const decodePowerShellEncodedCommand = (script: string): string => {
+  const match = script.match(/-EncodedCommand\s+([A-Za-z0-9+/=]+)/u);
+  if (!match) {
+    throw new Error("EncodedCommand payload not found in launcher script");
+  }
+  return Buffer.from(match[1], "base64").toString("utf16le");
+};
+
 describe("Windows update launcher", () => {
-  it("encodes the VBS launcher as UTF-16LE with BOM without losing Chinese paths or arguments", () => {
+  it("emits a CMD launcher that hands off to PowerShell without Windows Script Host", () => {
     const helperPath = "D:\\测试路径\\Memmy\\data\\Memmy\\updates\\install-win-update.ps1";
     const installerPath = "D:\\测试路径\\Memmy\\data\\Memmy\\updates\\Memmy-1.1.0.exe";
     const appPath = "D:\\测试路径\\Memmy\\Memmy.exe";
@@ -32,28 +40,36 @@ describe("Windows update launcher", () => {
     ];
 
     const launcherFile = createWindowsUpdateLauncherFile(command);
+    const script = launcherFile.toString("utf8");
 
-    expect([...launcherFile.subarray(0, 2)]).toEqual([0xff, 0xfe]);
-    const decoded = launcherFile.toString("utf16le");
-    expect(decoded.startsWith("\uFEFF")).toBe(true);
-    expect(decoded).toContain('Set shell = CreateObject("WScript.Shell")');
-    expect(decoded).toContain('shell.Run """powershell.exe""');
-    expect(decoded).toContain(', 0, False');
-    expect(decoded).toContain('Set fso = CreateObject("Scripting.FileSystemObject")');
-    expect(decoded).toContain("fso.DeleteFile WScript.ScriptFullName, True");
-    for (const argument of command) {
+    expect(script).not.toMatch(/\.vbs\b/u);
+    expect(script).not.toContain("WScript");
+    expect(script).not.toContain("wscript.exe");
+    expect(script.startsWith("@echo off")).toBe(true);
+    expect(script).toContain('WindowsPowerShell\\v1.0\\powershell.exe');
+    expect(script).toContain("-NoProfile");
+    expect(script).toContain("-ExecutionPolicy Bypass");
+    expect(script).toContain("-WindowStyle Hidden");
+    expect(script).toContain("-EncodedCommand");
+    expect(script).toContain('(goto) 2>nul & del "%~f0"');
+
+    const decoded = decodePowerShellEncodedCommand(script);
+    expect(decoded).toContain("Start-Process");
+    expect(decoded).toContain("-FilePath 'powershell.exe'");
+    expect(decoded).toContain("-WindowStyle Hidden");
+    for (const argument of command.slice(1)) {
       expect(decoded).toContain(argument);
     }
   });
 
   it.runIf(process.platform === "win32")(
-    "launches a PowerShell helper from a Chinese path through cscript",
+    "launches a PowerShell helper from a Chinese path without depending on VBScript",
     async () => {
-      const root = await mkdtemp(join(tmpdir(), "memmy-vbs-launcher-"));
+      const root = await mkdtemp(join(tmpdir(), "memmy-cmd-launcher-"));
       const chineseRoot = join(root, "中文路径");
       const helperPath = join(chineseRoot, "probe.ps1");
       const markerPath = join(chineseRoot, "marker.txt");
-      const launcherPath = join(root, "launcher.vbs");
+      const launcherPath = join(root, "launcher.cmd");
       try {
         await mkdir(chineseRoot, { recursive: true });
         await writeFile(
@@ -73,8 +89,8 @@ describe("Windows update launcher", () => {
           markerPath
         ]));
 
-        const cscriptPath = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "cscript.exe");
-        const result = spawnSync(cscriptPath, ["//B", "//Nologo", launcherPath], { encoding: "utf8" });
+        const cmdPath = process.env.ComSpec ?? join(process.env.SystemRoot ?? "C:\\Windows", "System32", "cmd.exe");
+        const result = spawnSync(cmdPath, ["/D", "/C", launcherPath], { encoding: "utf8" });
         expect(result.error).toBeUndefined();
         expect(result.status).toBe(0);
 

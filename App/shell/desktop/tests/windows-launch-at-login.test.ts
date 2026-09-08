@@ -22,18 +22,38 @@ const packagedWindowsEnvironment = {
   systemRootPath: "C:\\Windows"
 } as const;
 
+const vbscriptAvailable = () => true;
+const vbscriptUnavailable = () => false;
+
 describe("Windows launch at login", () => {
-  it("uses the installed launch proxy so login startup follows the normal Windows launch chain", () => {
+  it("uses the installed launch proxy when Windows Script Host is available", () => {
     const launcherPath = "C:\\Users\\Lee User\\AppData\\Local\\Memmy\\launcher\\MemmyLauncher.vbs";
 
-    expect(resolveWindowsLoginItemCommand(packagedWindowsEnvironment, (path) => path === launcherPath)).toEqual({
+    expect(resolveWindowsLoginItemCommand(
+      packagedWindowsEnvironment,
+      (path) => path === launcherPath,
+      vbscriptAvailable
+    )).toEqual({
       path: "C:\\Windows\\System32\\wscript.exe",
       args: [`"${launcherPath}"`]
     });
   });
 
   it("falls back to the packaged executable when the launch proxy is unavailable", () => {
-    expect(resolveWindowsLoginItemCommand(packagedWindowsEnvironment, () => false)).toEqual({
+    expect(resolveWindowsLoginItemCommand(packagedWindowsEnvironment, () => false, vbscriptAvailable)).toEqual({
+      path: packagedWindowsEnvironment.executablePath,
+      args: []
+    });
+  });
+
+  it("falls back to the packaged executable when Windows Script Host is disabled", () => {
+    const launcherPath = "C:\\Users\\Lee User\\AppData\\Local\\Memmy\\launcher\\MemmyLauncher.vbs";
+
+    expect(resolveWindowsLoginItemCommand(
+      packagedWindowsEnvironment,
+      (path) => path === launcherPath,
+      vbscriptUnavailable
+    )).toEqual({
       path: packagedWindowsEnvironment.executablePath,
       args: []
     });
@@ -54,7 +74,7 @@ describe("Windows launch at login", () => {
       setLoginItemSettings: vi.fn()
     };
 
-    expect(getWindowsLaunchAtLogin(application, packagedWindowsEnvironment, () => false)).toBe(true);
+    expect(getWindowsLaunchAtLogin(application, packagedWindowsEnvironment, () => false, vbscriptAvailable)).toBe(true);
     expect(getLoginItemSettings).toHaveBeenCalledWith({
       path: packagedWindowsEnvironment.executablePath,
       args: []
@@ -81,7 +101,12 @@ describe("Windows launch at login", () => {
       setLoginItemSettings: vi.fn()
     };
 
-    expect(getWindowsLaunchAtLogin(application, packagedWindowsEnvironment, (path) => path === launcherPath)).toBe(false);
+    expect(getWindowsLaunchAtLogin(
+      application,
+      packagedWindowsEnvironment,
+      (path) => path === launcherPath,
+      vbscriptAvailable
+    )).toBe(false);
   });
 
   it.each([true, false])("writes and re-reads the effective Windows startup state: %s", (enabled) => {
@@ -100,7 +125,7 @@ describe("Windows launch at login", () => {
       setLoginItemSettings
     };
 
-    expect(setWindowsLaunchAtLogin(application, packagedWindowsEnvironment, enabled, () => false)).toBe(enabled);
+    expect(setWindowsLaunchAtLogin(application, packagedWindowsEnvironment, enabled, () => false, vbscriptAvailable)).toBe(enabled);
     expect(setLoginItemSettings).toHaveBeenCalledWith({
       openAtLogin: enabled,
       enabled,
