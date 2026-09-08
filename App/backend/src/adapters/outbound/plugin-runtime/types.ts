@@ -13,6 +13,8 @@ export interface PluginHostServiceCall {
   service: string;
   input: unknown;
   deadline?: string;
+  /** Aborted when the owning plugin capability call is cancelled or terminated. */
+  signal?: AbortSignal;
 }
 
 export interface PluginHostServiceInvoker {

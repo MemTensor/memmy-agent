@@ -78,6 +78,32 @@ describe("plugin model inference Host service", () => {
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
+  it("aborts an in-flight model request when the owning plugin run is cancelled", async () => {
+    const requestStarted = Promise.withResolvers<void>();
+    let receivedSignal: AbortSignal | undefined;
+    const fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      receivedSignal = init?.signal ?? undefined;
+      requestStarted.resolve();
+      return await new Promise<Response>((_resolve, reject) => {
+        receivedSignal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+      });
+    });
+    const controller = new AbortController();
+    const service = createPluginModelInferenceService({
+      resolveModel: async () => resolved(),
+      fetch: fetch as typeof globalThis.fetch,
+      maxAttempts: 1
+    });
+    const pending = service.invoke({
+      pluginId: "literature-review", callId: "cancel-model", conversationId: "conversation-1", service: "model-inference",
+      input: { messages: [{ role: "user", content: "Write" }] }, signal: controller.signal
+    });
+    await requestStarted.promise;
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ code: "plugin_call_cancelled", retryable: false });
+    expect(receivedSignal?.aborted).toBe(true);
+  });
+
   it("delegates embedding inference to the Memory-owned current model without exposing configuration", async () => {
     const embeddingInference = vi.fn(async () => ({
       embeddings: [[1, 0], [0, 1]],
@@ -98,7 +124,10 @@ describe("plugin model inference Host service", () => {
       embeddings: [[1, 0], [0, 1]],
       model: { provider: "local", model: "Xenova/all-MiniLM-L6-v2", mode: "local", dimension: 2 }
     });
-    expect(embeddingInference).toHaveBeenCalledWith({ texts: ["section query", "evidence document"], role: "document" });
+    expect(embeddingInference).toHaveBeenCalledWith(
+      { texts: ["section query", "evidence document"], role: "document" },
+      { signal: undefined }
+    );
   });
 
   it("rejects invalid or unavailable embedding requests", async () => {

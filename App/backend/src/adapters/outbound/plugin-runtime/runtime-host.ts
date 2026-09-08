@@ -15,7 +15,13 @@ interface ActivePlugin {
   plugin: PluginRuntimeRecord;
   adapter: PluginAdapter;
   session: PluginSession;
-  calls: Map<string, Map<string, Record<string, unknown> | undefined>>;
+  calls: Map<string, ActiveCall>;
+}
+
+interface ActiveCall {
+  call: CapabilityCall;
+  interactions: Map<string, Record<string, unknown> | undefined>;
+  cancelRequested: boolean;
 }
 
 export function createPluginRuntimeHost(registry: PluginAdapterRegistry): PluginRuntimeHost {
@@ -62,9 +68,11 @@ export function createPluginRuntimeHost(registry: PluginAdapterRegistry): Plugin
         return;
       }
 
-      current.calls.set(call.callId, new Map());
+      const activeCall: ActiveCall = { call, interactions: new Map(), cancelRequested: false };
+      current.calls.set(call.callId, activeCall);
       let terminal = false;
       try {
+        await applyCapabilityControl(current, capability.control, call);
         const iterator = current.adapter.invoke(current.session, call)[Symbol.asyncIterator]();
         for (;;) {
           const item = await nextBeforeDeadline(iterator, call.deadline, () =>
@@ -76,7 +84,7 @@ export function createPluginRuntimeHost(registry: PluginAdapterRegistry): Plugin
             throw new Error("Plugin event exceeded size limit");
           }
           if (event.type === "interaction") {
-            const pending = current.calls.get(call.callId)!;
+            const pending = current.calls.get(call.callId)!.interactions;
             if (pending.has(event.request.interactionId)) {
               throw new Error(`Duplicate plugin interaction: ${event.request.interactionId}`);
             }
@@ -96,12 +104,16 @@ export function createPluginRuntimeHost(registry: PluginAdapterRegistry): Plugin
           yield event;
           if (terminal) break;
         }
-        if (!terminal) yield runtimeError("plugin_runtime_error", "Plugin ended without a result or error");
+        if (!terminal) yield activeCall.cancelRequested
+          ? runtimeError("plugin_cancelled", "Plugin call was cancelled")
+          : runtimeError("plugin_runtime_error", "Plugin ended without a result or error");
       } catch (error) {
-        yield runtimeError(
-          isTimeout(error) ? "plugin_timeout" : "plugin_runtime_error",
-          error instanceof Error ? error.message : String(error)
-        );
+        yield activeCall.cancelRequested
+          ? runtimeError("plugin_cancelled", "Plugin call was cancelled")
+          : runtimeError(
+              isTimeout(error) ? "plugin_timeout" : "plugin_runtime_error",
+              error instanceof Error ? error.message : String(error)
+            );
       } finally {
         current.calls.delete(call.callId);
       }
@@ -109,13 +121,13 @@ export function createPluginRuntimeHost(registry: PluginAdapterRegistry): Plugin
 
     async cancel(pluginId, callId) {
       const current = active.get(pluginId);
-      if (!current?.calls.has(callId)) return;
-      await current.adapter.cancel?.(current.session, callId);
+      if (!current) return;
+      await cancelActiveCall(current, callId);
     },
 
     async respond(pluginId, callId, interactionId, response) {
       const current = active.get(pluginId);
-      const pending = current?.calls.get(callId);
+      const pending = current?.calls.get(callId)?.interactions;
       if (!current || !pending?.has(interactionId)) {
         throw Object.assign(new Error("Plugin interaction is not pending"), { code: "plugin_interaction_invalid" });
       }
@@ -137,12 +149,47 @@ export function createPluginRuntimeHost(registry: PluginAdapterRegistry): Plugin
       const current = active.get(pluginId);
       if (!current) return;
       active.delete(pluginId);
-      await Promise.all([...current.calls.keys()].map((callId) =>
-        current.adapter.cancel?.(current.session, callId) ?? Promise.resolve()
-      ));
+      await Promise.all([...current.calls.keys()].map((callId) => cancelActiveCall(current, callId)));
       await current.adapter.deactivate(current.session);
     }
   };
+}
+
+async function applyCapabilityControl(
+  current: ActivePlugin,
+  control: PluginRuntimeRecord["manifest"]["capabilities"][number]["control"],
+  call: CapabilityCall
+): Promise<void> {
+  if (control?.action !== "cancel") return;
+  const input = asRecord(call.input);
+  const scope = input[control.scopeInput];
+  if (scope === "task") {
+    const taskId = input[control.taskIdInput];
+    if (typeof taskId !== "string" || !taskId) return;
+    const targets = [...current.calls.values()]
+      .filter((candidate) => candidate.call.callId !== call.callId)
+      .filter((candidate) => asRecord(candidate.call.input)[control.taskIdInput] === taskId)
+      .map((candidate) => candidate.call.callId);
+    await Promise.all(targets.map((target) => cancelActiveCall(current, target)));
+    return;
+  }
+  const target = input[control.runIdInput];
+  if (typeof target === "string" && target && target !== call.callId) {
+    const requestedTaskId = input[control.taskIdInput];
+    const targetCall = current.calls.get(target)?.call;
+    const targetTaskId = targetCall ? asRecord(targetCall.input)[control.taskIdInput] : undefined;
+    if (typeof requestedTaskId === "string" && requestedTaskId && targetTaskId === requestedTaskId) {
+      await cancelActiveCall(current, target);
+    }
+  }
+}
+
+async function cancelActiveCall(current: ActivePlugin, callId: string): Promise<boolean> {
+  const target = current.calls.get(callId);
+  if (!target) return false;
+  target.cancelRequested = true;
+  await current.adapter.cancel?.(current.session, callId);
+  return true;
 }
 
 function validateValue(schema: Record<string, unknown>, value: unknown): string | null {
@@ -186,4 +233,8 @@ function isTimeout(error: unknown): boolean {
 
 function runtimeError(code: string, message: string): CapabilityEvent {
   return { type: "error", code, message, retryable: code === "plugin_timeout" || code === "plugin_runtime_error" };
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }

@@ -153,6 +153,41 @@ describe("CommandPluginAdapter", () => {
     }))).toEqual([{ type: "result", output: { host: { content: "model:conversation-1" } } }]);
   });
 
+  it("aborts in-flight Host services when a command-plugin run is cancelled", async () => {
+    const started = Promise.withResolvers<void>();
+    let hostSignal: AbortSignal | undefined;
+    const adapter = createCommandPluginAdapter({
+      hostServices: {
+        invoke: async (call) => {
+          hostSignal = call.signal;
+          started.resolve();
+          return await new Promise((_resolve, reject) => call.signal?.addEventListener("abort", () => reject(new Error("cancelled")), { once: true }));
+        }
+      },
+      buildLaunch: async (_context, config) => ({
+        command: process.execPath,
+        args: ["-e", `
+          const rl=require('node:readline').createInterface({input:process.stdin}); let first=true;
+          rl.on('line', () => { if(first){ first=false; console.log(JSON.stringify({type:'host-service-request',requestId:'model-1',service:'model-inference',input:{}})); } });
+        `, ...config.args],
+        cwd: root!
+      })
+    });
+    const pluginContext = context("ndjson");
+    pluginContext.plugin.manifest.runtime.config = { ...pluginContext.plugin.manifest.runtime.config, interactive: true };
+    const permission = { type: "host-service" as const, services: ["model-inference"] };
+    pluginContext.plugin.manifest.permissions = [permission];
+    pluginContext.plugin.approvedPermissions = [permission];
+    const session = await adapter.activate(pluginContext);
+    const pending = collect(adapter.invoke(session, {
+      callId: "call-cancel", pluginId: pluginContext.plugin.id, capabilityId: "run", conversationId: "conversation-1", input: {}
+    }));
+    await started.promise;
+    await adapter.cancel?.(session, "call-cancel");
+    expect(hostSignal?.aborted).toBe(true);
+    await expect(pending).rejects.toBeDefined();
+  });
+
   it("denies unapproved Host-service requests without invoking the service", async () => {
     const invoke = vi.fn();
     const adapter = createCommandPluginAdapter({

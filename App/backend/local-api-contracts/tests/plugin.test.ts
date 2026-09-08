@@ -30,6 +30,27 @@ describe("PluginManifestSchema", () => {
     expect(PluginManifestSchema.parse(manifest)).toEqual(manifest);
   });
 
+  it("accepts a Host-owned cancellation control declaration", () => {
+    const parsed = PluginManifestSchema.parse({
+      ...manifest,
+      capabilities: [{
+        ...manifest.capabilities[0],
+        id: "cancel",
+        inputSchema: {
+          type: "object",
+          properties: { runId: { type: "string" }, scope: { type: "string" }, taskId: { type: "string" } }
+        },
+        control: { action: "cancel", runIdInput: "runId", scopeInput: "scope", taskIdInput: "taskId" }
+      }]
+    });
+    expect(parsed.capabilities[0]?.control).toEqual({
+      action: "cancel",
+      runIdInput: "runId",
+      scopeInput: "scope",
+      taskIdInput: "taskId"
+    });
+  });
+
   it("rejects duplicate capability ids", () => {
     expect(() => PluginManifestSchema.parse({
       ...manifest,

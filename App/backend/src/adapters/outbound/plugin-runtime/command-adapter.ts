@@ -51,6 +51,7 @@ interface CommandPluginSession extends PluginSession {
   pluginConfig: Readonly<Record<string, unknown>>;
   env: Record<string, string>;
   children: Map<string, ChildProcessWithoutNullStreams>;
+  hostServiceControllers: Map<string, Set<AbortController>>;
   approvedHostServices: Set<string>;
 }
 
@@ -121,6 +122,7 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
         pluginConfig: context.config,
         env,
         children: new Map(),
+        hostServiceControllers: new Map(),
         approvedHostServices: new Set(context.plugin.approvedPermissions
           .filter((permission) => permission.type === "host-service")
           .flatMap((permission) => permission.services))
@@ -147,6 +149,7 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
         stdio: ["pipe", "pipe", "pipe"]
       });
       session.children.set(call.callId, child);
+      child.once("close", () => abortHostServices(session, call.callId));
       if (session.config.inputMode === "stdin-json") child.stdin.write(`${request}\n`);
       if (!session.config.interactive) child.stdin.end();
 
@@ -245,7 +248,9 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
     },
 
     async cancel(rawSession, callId) {
-      const child = asCommandSession(rawSession).children.get(callId);
+      const session = asCommandSession(rawSession);
+      abortHostServices(session, callId);
+      const child = session.children.get(callId);
       if (child) {
         terminate(child);
         await waitForTermination(child);
@@ -255,6 +260,7 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
     async deactivate(rawSession) {
       const session = asCommandSession(rawSession);
       const children = [...session.children.values()];
+      for (const callId of session.children.keys()) abortHostServices(session, callId);
       for (const child of children) terminate(child);
       await Promise.all(children.map(waitForTermination));
       session.children.clear();
@@ -280,6 +286,10 @@ async function respondToHostServiceRequest(
   } else if (!invoker) {
     message = hostServiceError(call.callId, request.requestId, "host_service_unavailable", `Host service is unavailable: ${request.service}`, true);
   } else {
+    const controller = new AbortController();
+    const controllers = session.hostServiceControllers.get(call.callId) ?? new Set<AbortController>();
+    controllers.add(controller);
+    session.hostServiceControllers.set(call.callId, controllers);
     try {
       const response = await invoker.invoke({
         pluginId: session.pluginId,
@@ -287,7 +297,8 @@ async function respondToHostServiceRequest(
         conversationId: call.conversationId,
         service: request.service,
         input: request.input,
-        deadline: call.deadline
+        deadline: call.deadline,
+        signal: controller.signal
       });
       message = { type: "host-service-response", callId: call.callId, requestId: request.requestId, response };
     } catch (error) {
@@ -299,9 +310,19 @@ async function respondToHostServiceRequest(
         typeof details.message === "string" ? details.message : "Host service request failed",
         details.retryable === true
       );
+    } finally {
+      controllers.delete(controller);
+      if (controllers.size === 0) session.hostServiceControllers.delete(call.callId);
     }
   }
   await writeChildMessage(child, message);
+}
+
+function abortHostServices(session: CommandPluginSession, callId: string): void {
+  const controllers = session.hostServiceControllers.get(callId);
+  if (!controllers) return;
+  session.hostServiceControllers.delete(callId);
+  for (const controller of controllers) controller.abort(new Error("plugin_call_cancelled"));
 }
 
 function hostServiceError(callId: string, requestId: string, code: string, message: string, retryable: boolean): PluginHostServiceResponse {

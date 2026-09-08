@@ -25,6 +25,14 @@ export const PluginRuntimeSchema = z.object({
 });
 export type PluginRuntime = z.infer<typeof PluginRuntimeSchema>;
 
+export const PluginCapabilityControlSchema = z.object({
+  action: z.literal("cancel"),
+  runIdInput: z.string().trim().min(1).max(128).regex(/^[A-Za-z_][A-Za-z0-9_.-]*$/).default("runId"),
+  scopeInput: z.string().trim().min(1).max(128).regex(/^[A-Za-z_][A-Za-z0-9_.-]*$/).default("scope"),
+  taskIdInput: z.string().trim().min(1).max(128).regex(/^[A-Za-z_][A-Za-z0-9_.-]*$/).default("taskId")
+});
+export type PluginCapabilityControl = z.infer<typeof PluginCapabilityControlSchema>;
+
 export const PluginCapabilitySchema = z.object({
   id: PluginIdentifierSchema,
   name: z.string().trim().min(1).max(128),
@@ -32,6 +40,8 @@ export const PluginCapabilitySchema = z.object({
   inputSchema: JsonSchemaSchema,
   outputSchema: JsonSchemaSchema,
   execution: z.enum(["request", "job"]),
+  /** Optional Host-owned execution control performed before invoking this capability. */
+  control: PluginCapabilityControlSchema.optional(),
   examples: z.array(z.string().trim().min(1).max(500)).max(20).optional()
 });
 export type PluginCapability = z.infer<typeof PluginCapabilitySchema>;
@@ -120,6 +130,21 @@ export const PluginManifestSchema = z.object({
       });
     }
     ids.add(capability.id);
+    if (capability.control) {
+      const properties = capability.inputSchema.properties;
+      const declared = properties && typeof properties === "object" && !Array.isArray(properties)
+        ? properties as Record<string, unknown>
+        : {};
+      for (const field of [capability.control.runIdInput, capability.control.scopeInput, capability.control.taskIdInput]) {
+        if (!Object.hasOwn(declared, field)) {
+          context.addIssue({
+            code: "custom",
+            path: ["capabilities", index, "control"],
+            message: `Cancellation control input field is not declared by the capability schema: ${field}`
+          });
+        }
+      }
+    }
   }
   for (const slot of ["renderer", "surface"] as const) {
     for (const [index, capabilityId] of (manifest.ui?.[slot]?.capabilities ?? []).entries()) {

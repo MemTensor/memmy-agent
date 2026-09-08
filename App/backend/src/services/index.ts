@@ -159,7 +159,7 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       }) ?? null;
     },
     embeddingInference: options.memoryClient.embeddingInference
-      ? (input) => options.memoryClient.embeddingInference!(input)
+      ? (input, inferenceOptions) => options.memoryClient.embeddingInference!(input, inferenceOptions)
       : undefined
   });
   const pluginRuntimeHost = options.pluginRuntimeHost ?? createPluginRuntimeHost(new PluginAdapterRegistry([

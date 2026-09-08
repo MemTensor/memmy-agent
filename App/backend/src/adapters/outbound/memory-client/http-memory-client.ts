@@ -159,9 +159,10 @@ export function createHttpMemoryClient(
       return request("POST", "search", SearchOutputSchema, { body: input, context });
     },
 
-    async embeddingInference(input) {
+    async embeddingInference(input, options) {
       return request("POST", "embeddingInference", EmbeddingInferenceOutputSchema, {
         body: input,
+        signal: options?.signal,
         maxRetries: 0
       });
     },

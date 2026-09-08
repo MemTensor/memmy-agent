@@ -36,7 +36,7 @@ export interface PluginModelInferenceResult {
 
 export interface CreatePluginModelInferenceServiceOptions {
   resolveModel: () => Promise<ModelSelectionResolution | null>;
-  embeddingInference?: (input: EmbeddingInferenceInput) => Promise<EmbeddingInferenceOutput>;
+  embeddingInference?: (input: EmbeddingInferenceInput, options?: { signal?: AbortSignal }) => Promise<EmbeddingInferenceOutput>;
   fetch?: typeof fetch;
   timeoutMs?: number;
   maxAttempts?: number;
@@ -47,13 +47,14 @@ export function createPluginModelInferenceService(options: CreatePluginModelInfe
   const fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
   return {
     async invoke(call) {
+      throwIfCallerAborted(call.signal);
       if (call.service === "embedding-inference") {
         if (!options.embeddingInference) {
           throw serviceError("embedding_unavailable", "The current embedding model is not available to plugins", false);
         }
         const input = EmbeddingInferenceInputSchema.parse(call.input);
         try {
-          return await options.embeddingInference(input);
+          return await raceWithAbort(options.embeddingInference(input, { signal: call.signal }), call.signal);
         } catch (error) {
           if (hasServiceErrorCode(error)) throw error;
           throw serviceError(
@@ -72,8 +73,9 @@ export function createPluginModelInferenceService(options: CreatePluginModelInfe
       let attemptInput = input;
       for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
         try {
+          throwIfCallerAborted(call.signal);
           const timeoutMs = deadlineTimeout(call, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-          return await infer(resolved, attemptInput, fetchImpl, timeoutMs);
+          return await infer(resolved, attemptInput, fetchImpl, timeoutMs, call.signal);
         } catch (error) {
           lastError = error;
           if (attempt >= maxAttempts || !isRetryableServiceError(error)) throw error;
@@ -87,7 +89,7 @@ export function createPluginModelInferenceService(options: CreatePluginModelInfe
           const baseDelayMs = Math.max(0, Math.min(30_000, options.retryBaseDelayMs ?? 250));
           const exponentialDelayMs = baseDelayMs * (2 ** (attempt - 1));
           const jitterMs = baseDelayMs > 0 ? Math.floor(Math.random() * Math.max(1, baseDelayMs * 0.2)) : 0;
-          await new Promise((resolve) => setTimeout(resolve, exponentialDelayMs + jitterMs));
+          await abortableDelay(exponentialDelayMs + jitterMs, call.signal);
         }
       }
       throw lastError;
@@ -99,13 +101,17 @@ async function infer(
   resolved: Extract<ModelSelectionResolution, { ok: true }>,
   input: z.output<typeof ModelInferenceInputSchema>,
   fetchImpl: typeof fetch,
-  timeoutMs: number
+  timeoutMs: number,
+  callerSignal?: AbortSignal
 ): Promise<PluginModelInferenceResult> {
   const protocol = resolved.context.protocol;
   const maxTokens = input.maxOutputTokens ?? DEFAULT_OUTPUT_TOKENS;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const abortFromCaller = () => controller.abort(callerSignal?.reason);
+  callerSignal?.addEventListener("abort", abortFromCaller, { once: true });
   try {
+    throwIfCallerAborted(callerSignal);
     const request = requestForProtocol(resolved, input, maxTokens, controller.signal);
     const response = await fetchImpl(request.url, request.init);
     if (!response.ok) {
@@ -117,11 +123,47 @@ async function infer(
     if (!parsed.content.trim()) throw serviceError("model_empty_response", "Current user model returned no content", true);
     return { ...parsed, model: { provider: resolved.context.provider, model: resolved.context.model } };
   } catch (error) {
+    if (callerSignal?.aborted) throw cancelledError();
     if (controller.signal.aborted) throw serviceError("model_inference_timeout", "Current user model request timed out", true);
     throw error;
   } finally {
     clearTimeout(timer);
+    callerSignal?.removeEventListener("abort", abortFromCaller);
   }
+}
+
+function abortableDelay(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  if (milliseconds <= 0) return Promise.resolve();
+  throwIfCallerAborted(signal);
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, milliseconds);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(cancelledError());
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function raceWithAbort<T>(operation: Promise<T>, signal?: AbortSignal): Promise<T> {
+  throwIfCallerAborted(signal);
+  if (!signal) return operation;
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(cancelledError());
+    signal.addEventListener("abort", onAbort, { once: true });
+    operation.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
+}
+
+function throwIfCallerAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw cancelledError();
+}
+
+function cancelledError(): Error {
+  return serviceError("plugin_call_cancelled", "The owning plugin call was cancelled", false);
 }
 
 function requestForProtocol(

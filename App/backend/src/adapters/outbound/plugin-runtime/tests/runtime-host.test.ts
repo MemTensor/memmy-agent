@@ -161,4 +161,55 @@ describe("PluginRuntimeHost", () => {
     releaseResult?.();
     expect((await iterator.next()).value).toMatchObject({ type: "result" });
   });
+
+  it("routes a declared cancellation capability to one active run", async () => {
+    const targetGate = Promise.withResolvers<void>();
+    const runtimeAdapter = adapter([]);
+    runtimeAdapter.invoke = async function* (_session, call) {
+      if (call.capabilityId === "echo") {
+        yield { type: "progress", current: 0, total: 1, cancellable: true };
+        await targetGate.promise;
+        return;
+      }
+      yield { type: "result", output: { text: "cancel recorded" } };
+    };
+    runtimeAdapter.cancel = vi.fn(async (_session, callId) => {
+      if (callId === "run-target") targetGate.resolve();
+    });
+    const installed = plugin();
+    installed.manifest.capabilities.push({
+      id: "cancel",
+      name: "Cancel",
+      description: "Cancel one run",
+      inputSchema: { type: "object" },
+      outputSchema: { type: "object" },
+      execution: "request",
+      control: { action: "cancel", runIdInput: "runId", scopeInput: "scope", taskIdInput: "taskId" }
+    });
+    installed.manifest.capabilities[0]!.inputSchema = {
+      type: "object",
+      required: ["text", "taskId"],
+      properties: { text: { type: "string" }, taskId: { type: "string" } },
+      additionalProperties: false
+    };
+    const host = createPluginRuntimeHost(new PluginAdapterRegistry([runtimeAdapter]));
+    await host.activate(installed, {});
+    const target = host.invoke({
+      callId: "run-target", pluginId: installed.id, capabilityId: "echo", conversationId: "conversation-1", input: { taskId: "task-1", text: "slow" }
+    })[Symbol.asyncIterator]();
+    expect((await target.next()).value).toMatchObject({ type: "progress", cancellable: true });
+
+    expect(await collect(host.invoke({
+      callId: "run-cancel-wrong-task", pluginId: installed.id, capabilityId: "cancel", conversationId: "conversation-1",
+      input: { taskId: "task-2", scope: "run", runId: "run-target" }
+    }))).toEqual([{ type: "result", output: { text: "cancel recorded" } }]);
+    expect(runtimeAdapter.cancel).not.toHaveBeenCalled();
+
+    expect(await collect(host.invoke({
+      callId: "run-cancel", pluginId: installed.id, capabilityId: "cancel", conversationId: "conversation-1",
+      input: { taskId: "task-1", scope: "run", runId: "run-target" }
+    }))).toEqual([{ type: "result", output: { text: "cancel recorded" } }]);
+    expect(runtimeAdapter.cancel).toHaveBeenCalledWith(expect.any(Object), "run-target");
+    expect((await target.next()).value).toMatchObject({ type: "error", code: "plugin_cancelled", retryable: false });
+  });
 });
