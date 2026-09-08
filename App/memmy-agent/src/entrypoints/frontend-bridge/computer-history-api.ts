@@ -14,7 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-export type ComputerHistorySourceType = "captured" | "imported" | "demo_fixture" | "codex_synced";
+export type ComputerHistorySourceType = "captured" | "imported" | "demo_fixture";
 
 export interface ComputerHistoryReplayPlan {
   sourcePath: string;
@@ -66,7 +66,6 @@ export interface ComputerHistorySnapshot {
     audio: false;
     rawRetentionHours: 48;
     markdownDirectory: string;
-    codexSyncDirectory: string | null;
   };
 }
 
@@ -155,11 +154,8 @@ function boundedInterval(value: string | undefined, fallback: number, minimum: n
 export class ComputerHistoryDemoService {
   private readonly repositoryRoot: string;
   private readonly historyDirectory: string;
-  private readonly codexHistoryDirectory: string;
-  private readonly codexSyncEnabled: boolean;
   private readonly recordingDirectory: string;
   private readonly workflowDirectory: string;
-  private readonly syncStateFile: string;
   private readonly liveSummaryIntervalMs: number;
   private segment: SegmentState | null = null;
   private observationState: ObservationState = "stopped";
@@ -182,29 +178,18 @@ export class ComputerHistoryDemoService {
   constructor(input: {
     repositoryRoot?: string;
     historyDirectory?: string;
-    codexHistoryDirectory?: string;
     recordingDirectory?: string;
     workflowDirectory?: string;
     observationSettingsFile?: string;
-    codexSyncEnabled?: boolean;
   } = {}) {
     this.repositoryRoot = path.resolve(input.repositoryRoot ?? defaultRepositoryRoot());
     this.historyDirectory = path.resolve(input.historyDirectory
       ?? path.join(os.homedir(), ".memmy", "computer-history", "histories"));
-    this.codexHistoryDirectory = path.resolve(input.codexHistoryDirectory
-      ?? (input.historyDirectory
-        ? path.join(this.historyDirectory, ".codex-sync")
-        : path.join(os.homedir(), ".codex", "memories", "extensions", "skysight")));
-    // Codex's own Skysight history is another product's record, so Memmy no
-    // longer folds it into the timeline unless it is asked to.
-    this.codexSyncEnabled = input.codexSyncEnabled
-      ?? process.env.MEMMY_COMPUTER_HISTORY_CODEX_SYNC === "1";
     this.recordingDirectory = path.resolve(input.recordingDirectory
       ?? path.join(os.homedir(), ".memmy", "computer-history", "recordings"));
     this.workflowDirectory = path.resolve(input.workflowDirectory
       ?? path.join(os.homedir(), ".memmy", "computer-history", "workflows"));
     this.observationSettings = new ObservationSettingsStore(input.observationSettingsFile);
-    this.syncStateFile = path.join(path.dirname(this.historyDirectory), "sync-state.json");
     this.liveSummaryIntervalMs = boundedInterval(
       process.env.MEMMY_COMPUTER_HISTORY_LIVE_SUMMARY_INTERVAL_MS,
       60_000,
@@ -236,10 +221,7 @@ export class ComputerHistoryDemoService {
           const sourceType = readSourceType(entry.markdown);
           return { ...entry, sourceType, replayPlan: replayPlanFor(entry, sourceType) };
         }),
-        ...(this.codexSyncEnabled ? this.readCodexHistories() : []),
-      ]
-        .filter((entry) => !isCodexSkysightCopy(entry.id))
-        .filter((entry) => !this.readHiddenSyncedIds().has(entry.id)),
+      ].filter((entry) => !isCodexSkysightCopy(entry.id)),
       workflows: this.readMarkdownDirectory(this.workflowDirectory).map((entry) => ({
         ...entry,
         sourceHistoryId: nullableFrontmatterValue(entry.markdown, "source_history_id"),
@@ -249,7 +231,6 @@ export class ComputerHistoryDemoService {
         audio: false,
         rawRetentionHours: 48,
         markdownDirectory: this.historyDirectory,
-        codexSyncDirectory: this.codexSyncEnabled ? this.codexHistoryDirectory : null,
       },
     };
   }
@@ -586,12 +567,6 @@ export class ComputerHistoryDemoService {
 
   deleteHistory(historyId: string): ComputerHistorySnapshot {
     const history = this.findHistory(historyId.trim());
-    if (history.sourceType === "codex_synced") {
-      const hidden = this.readHiddenSyncedIds();
-      hidden.add(history.id);
-      this.writeHiddenSyncedIds(hidden);
-      return this.snapshot();
-    }
     const derivedWorkflows = this.snapshot().workflows.filter((workflow) => workflow.sourceHistoryId === history.id);
     fs.rmSync(history.filePath, { force: true });
     for (const workflow of derivedWorkflows) fs.rmSync(workflow.filePath, { force: true });
@@ -602,7 +577,7 @@ export class ComputerHistoryDemoService {
   createWorkflow(historyId: string, userRequest = ""): ComputerHistorySnapshot {
     const history = this.findHistory(historyId);
     const request = cleanUserRequest(userRequest || "帮我把妈妈之前说的那台 iPhone 配好，加入购物袋就停，不要结账或支付。");
-    if (history.sourceType === "captured" || history.sourceType === "codex_synced") {
+    if (history.sourceType === "captured") {
       if (history.sourceType === "captured" && readFrontmatterValue(history.markdown, "status") !== "completed") {
         throw new ComputerHistoryApiError(422, "the selected operation-experience recording is incomplete");
       }
@@ -685,7 +660,7 @@ export class ComputerHistoryDemoService {
       candidate.sourceHistoryId === history.id && !existingWorkflowIds.has(candidate.id)
     ));
     if (!workflow) throw new ComputerHistoryApiError(500, "workflow generation did not produce an artifact");
-    const steps = history.sourceType === "captured" || history.sourceType === "codex_synced"
+    const steps = history.sourceType === "captured"
       ? normalizeRecordedExperienceSteps(extractReusableExperienceSteps(history.markdown))
       : extractWorkflowRecordedActions(workflow.markdown);
     return { history, workflow, snapshot: afterWorkflow, steps };
@@ -786,38 +761,6 @@ export class ComputerHistoryDemoService {
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
   }
 
-  private readCodexHistories(): ComputerHistoryEntry[] {
-    const resourcesDirectory = path.join(this.codexHistoryDirectory, "resources");
-    return [
-      ...this.readMarkdownDirectory(this.codexHistoryDirectory),
-      ...this.readMarkdownDirectory(resourcesDirectory),
-    ]
-      .filter((entry) => isCodexComputerHistoryMarkdown(entry.markdown))
-      .map((entry) => ({
-        ...entry,
-        id: `codex-${hashText(entry.filePath).slice(0, 16)}`,
-        sourceType: "codex_synced" as const,
-        replayPlan: replayPlanFor(entry, "codex_synced"),
-      }));
-  }
-
-  private readHiddenSyncedIds(): Set<string> {
-    if (!fs.existsSync(this.syncStateFile)) return new Set();
-    try {
-      const parsed = JSON.parse(fs.readFileSync(this.syncStateFile, "utf8"));
-      return new Set(Array.isArray(parsed?.hiddenSyncedIds)
-        ? parsed.hiddenSyncedIds.filter((value: unknown): value is string => typeof value === "string")
-        : []);
-    } catch {
-      return new Set();
-    }
-  }
-
-  private writeHiddenSyncedIds(ids: Set<string>): void {
-    fs.mkdirSync(path.dirname(this.syncStateFile), { recursive: true });
-    fs.writeFileSync(this.syncStateFile, `${JSON.stringify({ hiddenSyncedIds: [...ids].sort() }, null, 2)}\n`, "utf8");
-  }
-
   private cleanupExpiredRecordings(): void {
     if (!fs.existsSync(this.recordingDirectory)) return;
     const cutoff = Date.now() - RAW_RETENTION_MS;
@@ -846,20 +789,9 @@ function hashText(value: string): string {
   return crypto.createHash("sha256").update(value).digest("hex");
 }
 
-function isCodexComputerHistoryMarkdown(markdown: string): boolean {
-  const sourceType = readFrontmatterValue(markdown, "source_type");
-  // Do not re-import legacy Memmy captures that were copied into the Codex
-  // directory. Native Codex summaries have no source_type and start with a
-  // Memory summary section; explicitly marked human histories remain valid.
-  if (sourceType && sourceType !== "human_computer_history") return false;
-  return sourceType === "human_computer_history"
-    || /^## Memory summary\s*$/mu.test(markdown)
-    || /^## Reusable operation experience\s*$/mu.test(markdown)
-    || /^capture_policy:\s*accessibility_events_and_page_urls/imu.test(markdown);
-}
 
 function replayPlanFor(entry: MarkdownEntry, sourceType: ComputerHistorySourceType): ComputerHistoryReplayPlan | null {
-  if (sourceType !== "captured" && sourceType !== "codex_synced") return null;
+  if (sourceType !== "captured") return null;
   const steps = normalizeRecordedExperienceSteps(extractReusableExperienceSteps(entry.markdown));
   return {
     sourcePath: entry.filePath,
@@ -919,9 +851,6 @@ function extractCandidateSteps(markdown: string): string[] {
 function historySupportsReplay(history: ComputerHistoryEntry): boolean {
   if (history.sourceType === "demo_fixture") {
     return readFrontmatterValue(history.markdown, "demo_id") === "wechat_mom_iphone";
-  }
-  if (history.sourceType === "codex_synced") {
-    return extractReusableExperienceSteps(history.markdown).length > 0;
   }
   return history.sourceType === "captured"
     && readFrontmatterValue(history.markdown, "status") === "completed"

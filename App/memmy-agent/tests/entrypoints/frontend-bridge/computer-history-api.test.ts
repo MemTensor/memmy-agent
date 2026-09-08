@@ -27,103 +27,6 @@ describe("ComputerHistoryDemoService", () => {
     expect(snapshot.privacy.rawRetentionHours).toBe(48);
   });
 
-  it("syncs Codex Computer History as a read-only replayable source", () => {
-    const { service, root } = createService();
-    const codexDirectory = path.join(root, "codex");
-    fs.mkdirSync(codexDirectory, { recursive: true });
-    const sourcePath = path.join(codexDirectory, "daily-work.md");
-    fs.writeFileSync(sourcePath, [
-      "---",
-      'title: "Notion Daily Work template"',
-      "source_type: human_computer_history",
-      "status: completed",
-      "experience_version: 1",
-      "---",
-      "",
-      "## Reusable operation experience",
-      "",
-      "1. Activate Google Chrome (`com.google.Chrome`) and verify its main content window is visible.",
-      "2. In Google Chrome (`com.google.Chrome`), locate AXButton \"New page\" from the current Accessibility state, activate it once, then verify the resulting UI state before continuing.",
-      "3. Set the page title to `Daily Work - {{today}}`, then verify the visible title.",
-      "",
-    ].join("\n"), "utf8");
-    const serviceWithCodex = new ComputerHistoryDemoService({
-      repositoryRoot: path.resolve(import.meta.dirname, "../../../../.."),
-      historyDirectory: path.join(root, "histories"),
-      codexHistoryDirectory: codexDirectory,
-      codexSyncEnabled: true,
-      recordingDirectory: path.join(root, "recordings"),
-      workflowDirectory: path.join(root, "workflows"),
-    });
-
-    const synced = serviceWithCodex.snapshot().histories.find((item) => item.sourceType === "codex_synced");
-    expect(synced).toBeDefined();
-    expect(synced?.filePath).toBe(sourcePath);
-    expect(synced?.replayPlan).toMatchObject({
-      status: "ready",
-      sourcePath,
-      variables: ["today"],
-    });
-    expect(synced?.replayPlan?.steps).toHaveLength(3);
-
-    const prepared = serviceWithCodex.prepareReplayUserRequest({
-      userRequest: "参照 Computer History，在 Notion 创建今天的 Daily Work 模板",
-      historyId: synced?.id,
-    });
-    expect(prepared.history.sourceType).toBe("codex_synced");
-    expect(prepared.workflow.sourceHistoryId).toBe(synced?.id);
-    expect(prepared.workflow.markdown).toContain("source_history_path:");
-    expect(fs.readFileSync(sourcePath, "utf8")).toContain("Notion Daily Work template");
-
-    const afterHide = serviceWithCodex.deleteHistory(synced!.id);
-    expect(afterHide.histories.some((item) => item.id === synced!.id)).toBe(false);
-    expect(fs.existsSync(sourcePath)).toBe(true);
-  });
-
-  it("syncs native Codex resource summaries but ignores legacy copied captures", () => {
-    const { root } = createService();
-    const codexDirectory = path.join(root, "codex");
-    const resourcesDirectory = path.join(codexDirectory, "resources");
-    fs.mkdirSync(resourcesDirectory, { recursive: true });
-    fs.writeFileSync(path.join(codexDirectory, "legacy.md"), [
-      "---",
-      'title: \"Legacy Memmy capture\"',
-      "source_type: captured",
-      "status: completed",
-      "---",
-      "",
-      "## Reusable operation experience",
-      "",
-      "1. This must not be imported from the Codex source.",
-      "",
-    ].join("\n"), "utf8");
-    const resourcePath = path.join(resourcesDirectory, "2026-09-02T02-30-00-demo-10min-memory-summary.md");
-    fs.writeFileSync(resourcePath, [
-      "---",
-      'title: \"Native Codex activity summary\"',
-      'applications: [com.google.Chrome]',
-      "---",
-      "",
-      "## Memory summary",
-      "",
-      "The user opened a browser and reviewed a project page.",
-      "",
-    ].join("\n"), "utf8");
-
-    const service = new ComputerHistoryDemoService({
-      repositoryRoot: path.resolve(import.meta.dirname, "../../../../.."),
-      historyDirectory: path.join(root, "histories"),
-      codexHistoryDirectory: codexDirectory,
-      codexSyncEnabled: true,
-      recordingDirectory: path.join(root, "recordings"),
-      workflowDirectory: path.join(root, "workflows"),
-    });
-    const synced = service.snapshot().histories.filter((item) => item.sourceType === "codex_synced");
-    expect(synced).toHaveLength(1);
-    expect(synced[0].filePath).toBe(resourcePath);
-    expect(synced[0].replayPlan?.status).toBe("not_replayable");
-  });
-
   it("deletes a History together with its derived workflows and raw recording", () => {
     const { service, root } = createService();
     const created = service.importMarkdown({
@@ -255,7 +158,6 @@ function createService(): { service: ComputerHistoryDemoService; root: string } 
     service: new ComputerHistoryDemoService({
       repositoryRoot: path.resolve(import.meta.dirname, "../../../../.."),
       historyDirectory: path.join(root, "histories"),
-      codexHistoryDirectory: path.join(root, "codex"),
       recordingDirectory: path.join(root, "recordings"),
       workflowDirectory: path.join(root, "workflows"),
     }),

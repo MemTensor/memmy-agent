@@ -158,8 +158,4 @@ describe("Codex-derived history", () => {
     // Hidden, not deleted.
     expect(fs.existsSync(codexCopy)).toBe(true);
   });
-
-  it("leaves Codex's live Skysight directory out unless explicitly enabled", () => {
-    expect(service().snapshot().privacy.codexSyncDirectory).toBeNull();
-  });
 });

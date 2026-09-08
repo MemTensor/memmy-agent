@@ -43,7 +43,7 @@ export type AgentGoalControlResult = {
   warning?: "turn_cancel_failed";
 };
 
-export type ComputerHistorySourceType = "captured" | "imported" | "demo_fixture" | "codex_synced";
+export type ComputerHistorySourceType = "captured" | "imported" | "demo_fixture";
 
 export type ComputerHistoryReplayPlan = {
   sourcePath: string;
@@ -95,14 +95,13 @@ export type ComputerHistorySnapshot = {
     audio: false;
     rawRetentionHours: number;
     markdownDirectory: string;
-    codexSyncDirectory: string | null;
   };
 };
 
 const ComputerHistoryEntrySchema = z.object({
   id: z.string(),
   title: z.string(),
-  sourceType: z.enum(["captured", "imported", "demo_fixture", "codex_synced"]),
+  sourceType: z.enum(["captured", "imported", "demo_fixture"]),
   createdAt: z.string(),
   markdown: z.string(),
   filePath: z.string(),
@@ -147,7 +146,7 @@ const ComputerHistorySnapshotSchema = z.object({
     audio: z.literal(false),
     rawRetentionHours: z.number(),
     markdownDirectory: z.string(),
-    codexSyncDirectory: z.string().nullable()
+
   }).strict()
 }).strict();
 

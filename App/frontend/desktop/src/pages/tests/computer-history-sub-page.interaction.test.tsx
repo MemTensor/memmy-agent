@@ -94,7 +94,6 @@ function snapshot(overrides: Partial<ComputerHistorySnapshot> = {}): ComputerHis
       audio: false,
       rawRetentionHours: 48,
       markdownDirectory: "/tmp/histories",
-      codexSyncDirectory: "/tmp/codex-sync",
     },
     ...overrides,
   };
