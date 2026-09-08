@@ -159,3 +159,47 @@ describe("Codex-derived history", () => {
     expect(fs.existsSync(codexCopy)).toBe(true);
   });
 });
+
+describe("snapshot shape", () => {
+  // The desktop client parses this snapshot with a strict schema, so an extra
+  // key is not a harmless addition — it fails the whole page.
+  it("gives workflows exactly the fields a workflow has", () => {
+    const instance = service();
+    const directory = instance.snapshot().privacy.markdownDirectory.replace(/histories$/, "workflows");
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(
+      path.join(directory, "workflow-1.md"),
+      '---\ntitle: "A workflow"\nsource_history_id: "history-1"\n---\n\nbody\n',
+      "utf8",
+    );
+
+    const [workflow] = instance.snapshot().workflows;
+    expect(Object.keys(workflow).sort()).toEqual([
+      "createdAt",
+      "filePath",
+      "id",
+      "markdown",
+      "sourceHistoryId",
+      "title",
+    ]);
+  });
+
+  it("gives histories the fields the timeline renders from", () => {
+    const instance = service();
+    const directory = instance.snapshot().privacy.markdownDirectory;
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(
+      path.join(directory, "2026-09-08T03-30-00Z-10min-summary.md"),
+      '---\ntitle: "A window"\ndescription: "You did a thing."\napplications: ["com.apple.Notes"]\n---\n\nbody\n',
+      "utf8",
+    );
+
+    const [history] = instance.snapshot().histories;
+    expect(history).toMatchObject({
+      title: "A window",
+      description: "You did a thing.",
+      applications: ["com.apple.Notes"],
+      summaryWindow: "10min",
+    });
+  });
+});

@@ -243,8 +243,15 @@ export class ComputerHistoryDemoService {
           return { ...entry, sourceType, replayPlan: replayPlanFor(entry, sourceType) };
         }),
       ].filter((entry) => !isCodexSkysightCopy(entry.id)),
+      // Pick the fields explicitly rather than spreading the directory entry: a
+      // workflow is not a summary, and spreading leaked summary-only fields
+      // into it the moment the reader grew new ones.
       workflows: this.readMarkdownDirectory(this.workflowDirectory).map((entry) => ({
-        ...entry,
+        id: entry.id,
+        title: entry.title,
+        createdAt: entry.createdAt,
+        markdown: entry.markdown,
+        filePath: entry.filePath,
         sourceHistoryId: nullableFrontmatterValue(entry.markdown, "source_history_id"),
       })),
       privacy: {
