@@ -557,43 +557,6 @@ function derivedHumanTitle(events, fallback) {
   return fallback || `${app} 操作记录`;
 }
 
-function humanEventLine(record) {
-  const application = record.application?.name ?? record.application?.bundleId ?? "unknown application";
-  const prefix = record.timestamp ? `- ${record.timestamp} — ` : "- ";
-  const details = record.details ?? {};
-  let action;
-  if (record.eventType === "recording_started") {
-    action = `Recording started in ${application}; goal: ${cleanInline(details.goal, 240)}`;
-  } else if (record.eventType === "application_changed") {
-    action = `Foreground application changed to ${application} (${record.application?.bundleId ?? "unknown"})`;
-  } else if (record.eventType === "mouse_click") {
-    const target = semanticAccessibilityTarget(details);
-    action = target
-      ? `${details.button ?? "left"} mouse click on ${target} in ${application}`
-      : `${details.button ?? "left"} mouse click in ${application}; semantic target unavailable (coordinates retained only in the raw recording)`;
-  } else if (record.eventType === "text_input") {
-    action = details.redacted
-      ? `Typed ${details.characterCount ?? "unknown"} character(s) in ${application}; text redacted`
-      : `Text input in ${application}: ${cleanInline(JSON.stringify(details.text ?? ""), 240)}`;
-  } else if (record.eventType === "key_press") {
-    action = `Key press in ${application}: ${(details.keys ?? []).map((key) => `\`${cleanInline(key, 80)}\``).join(", ") || "unknown"}`;
-  } else if (record.eventType === "scroll") {
-    const gesture = details.direction && details.direction !== "none"
-      ? ` ${details.direction}`
-      : "";
-    const samples = details.sampleCount ? `, ${details.sampleCount} raw sample(s)` : "";
-    action = `Scroll${gesture} in ${application}${samples}`;
-  } else if (record.eventType === "page_context") {
-    const title = cleanInline(details.title, 160);
-    action = `Browser page in ${application}: ${cleanInline(details.url, 500)}${title ? ` — “${title}”` : ""}`;
-  } else if (record.eventType === "recording_stopped") {
-    action = `Recording stopped (${cleanInline(details.reason ?? "unknown")})`;
-  } else {
-    action = `${record.eventType ?? "unknown event"}: ${cleanInline(JSON.stringify(details), 260)}`;
-  }
-  const screenshot = record.screenshot ? ` — screenshot: \`${record.screenshot}\`` : "";
-  return `${prefix}${action}${screenshot}`;
-}
 
 export function renderHumanSummary({
   file,
@@ -665,28 +628,25 @@ export function renderHumanSummary({
   ];
   if (malformedLines.length) output.push(`- Skipped malformed JSONL lines: ${malformedLines.join(", ")}`);
 
-  output.push("", "## Activity timeline", "");
+  // The per-event ledger used to live here. It was the event stream reformatted,
+  // not a summary — hundreds of lines, most of them a single keystroke. The
+  // readable account is written over this section by the model; what stays here
+  // is a compact fallback for when the model is unavailable.
+  const appRuns = [];
   for (const event of events) {
-    if (event.eventType === "recording_started" || event.eventType === "recording_stopped") continue;
-    output.push(humanEventLine(event));
+    const name = event.application?.name ?? event.application?.bundleId;
+    if (!name) continue;
+    if (appRuns.at(-1) !== name) appRuns.push(name);
   }
-
   output.push(
     "",
-    "## Reusable operation experience",
+    "## Recording summary",
     "",
-    "The following sequence is distilled from the human demonstration. It intentionally omits recorded coordinates and exact scroll distances.",
+    `本窗口共 ${events.length} 条事件，涉及 ${applications.length} 个应用。`,
+    appRuns.length ? `应用切换顺序：${appRuns.slice(0, 20).join(" → ")}` : "未从录制证据中确定应用。",
     "",
+    "详细事件证据保留在原始事件流中，未在此展开。",
   );
-  const reusableActions = reusableHumanActions(events);
-  if (metadata.contextUrl) {
-    reusableActions.unshift(`Open ${cleanInline(metadata.contextUrl, 2048)} in the existing browser application, then verify the origin, page title, and main content before continuing.`);
-  }
-  if (reusableActions.length) {
-    reusableActions.forEach((action, index) => output.push(`${index + 1}. ${action}`));
-  } else {
-    output.push("No reusable semantic action was established from this recording.");
-  }
 
   const finalApplication = [...events].reverse().find((event) => event.application?.bundleId)?.application;
   output.push(

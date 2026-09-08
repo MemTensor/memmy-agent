@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   applicationsFromMarkdown,
   applyNarrative,
+  compactEventEvidence,
   writeSegmentNarrative,
 } from "../../../../src/core/agent-runtime/computer-history/summary-writer.js";
 
@@ -18,6 +19,14 @@ const summary = [
   "",
   "用户打开 Notes 并记录了一段内容。",
   "",
+  "## Recording summary",
+  "",
+  "本窗口共 12 条事件，涉及 2 个应用。",
+  "",
+  "## Citations",
+  "",
+  "- segments/2026-09-08T03-30-00Z",
+  "",
 ].join("\n");
 
 function runtime(content: string) {
@@ -31,7 +40,7 @@ function runtime(content: string) {
 describe("segment narrative", () => {
   it("asks the model for a title and a second-person description", async () => {
     const { resolver, chatWithRetry } = runtime(
-      '{"title": "Notes drafting", "description": "You opened Notes and drafted a short entry."}',
+      '{"title": "Notes drafting", "description": "You opened Notes and drafted a short entry.", "body": "You spent the window in Notes."}',
     );
 
     const narrative = await writeSegmentNarrative(resolver, {
@@ -43,6 +52,7 @@ describe("segment narrative", () => {
     expect(narrative).toEqual({
       title: "Notes drafting",
       description: "You opened Notes and drafted a short entry.",
+      body: "You spent the window in Notes.",
     });
     const call = chatWithRetry.mock.calls[0]![0] as any;
     // The recorded screen content is evidence, never instructions.
@@ -52,14 +62,14 @@ describe("segment narrative", () => {
 
   it("accepts JSON the model wrapped in prose or a fence", async () => {
     const { resolver } = runtime(
-      'Sure!\n```json\n{"title": "Notes drafting", "description": "You drafted a note."}\n```',
+      'Sure!\n```json\n{"title": "Notes drafting", "description": "You drafted a note.", "body": "You drafted."}\n```',
     );
 
     expect(await writeSegmentNarrative(resolver, {
       applications: [],
       evidence: "evidence",
       window: "10min",
-    })).toEqual({ title: "Notes drafting", description: "You drafted a note." });
+    })).toEqual({ title: "Notes drafting", description: "You drafted a note.", body: "You drafted." });
   });
 
   it("returns nothing rather than throwing when the model is unavailable", async () => {
@@ -101,6 +111,7 @@ describe("segment narrative", () => {
     const updated = applyNarrative(summary, {
       title: "Notes drafting",
       description: "You opened Notes and drafted a short entry.",
+      body: "",
     });
 
     expect(updated).toContain('title: "Notes drafting"');
@@ -116,5 +127,71 @@ describe("segment narrative", () => {
   it("reads the applications a summary recorded", () => {
     expect(applicationsFromMarkdown(summary)).toEqual(["com.apple.Notes", "com.google.Chrome"]);
     expect(applicationsFromMarkdown("no frontmatter")).toEqual([]);
+  });
+
+  it("replaces the recording summary prose while keeping later sections", () => {
+    const updated = applyNarrative(summary, {
+      title: "Notes drafting",
+      description: "d",
+      body: "You opened Notes and drafted an entry, then switched to the browser.",
+    });
+
+    expect(updated).toContain("You opened Notes and drafted an entry");
+    expect(updated).not.toContain("本窗口共 12 条事件");
+    // Sections after the recording summary must survive the rewrite.
+    expect(updated).toContain("## Citations");
+    expect(updated).toContain("- segments/2026-09-08T03-30-00Z");
+    // And sections before it, too.
+    expect(updated).toContain("## Memory summary");
+  });
+
+  it("folds the event stream into activity arcs instead of a transcript", () => {
+    const lines = [
+      JSON.stringify({ timestamp: "2026-09-08T08:28:18Z", eventType: "mouse_click", application: { name: "钉钉" }, details: { accessibility: { title: "任欣悦: 消息内容" } } }),
+      ...Array.from({ length: 40 }, () => JSON.stringify({
+        timestamp: "2026-09-08T08:28:31Z", eventType: "text_input",
+        application: { name: "Claude" }, details: { characterCount: 1, redacted: true },
+      })),
+      JSON.stringify({ timestamp: "2026-09-08T08:29:10Z", eventType: "key_press", application: { name: "Claude" }, details: { keys: ["return"] } }),
+    ];
+
+    const evidence = compactEventEvidence(lines);
+
+    // Forty keystrokes become one line, not forty.
+    expect(evidence.split("\n").filter((l) => l.includes("Claude"))).toHaveLength(1);
+    expect(evidence).toContain("typed 40 character(s)");
+    expect(evidence).toContain("keys: return");
+    // The semantic label is what lets the summary say what happened.
+    expect(evidence).toContain("任欣悦: 消息内容");
+  });
+
+  it("returns nothing for an empty or unparseable stream", () => {
+    expect(compactEventEvidence([])).toBe("");
+    expect(compactEventEvidence(["", "not json"])).toBe("");
+  });
+
+  it("recovers a label from the enrichment when the click landed on a container", () => {
+    const evidence = compactEventEvidence([
+      JSON.stringify({
+        timestamp: "2026-09-01T01:00:02Z", eventType: "mouse_click",
+        application: { name: "Google Chrome" },
+        // An anonymous container: the label lives in the enrichment.
+        details: { accessibility: { role: "AXGroup", descendants: [{ role: "AXRadioButton", title: "512GB" }] } },
+      }),
+      JSON.stringify({
+        timestamp: "2026-09-01T01:00:03Z", eventType: "mouse_click",
+        application: { name: "Google Chrome" },
+        details: { accessibility: { role: "AXGroup", focused: { role: "AXRadioButton", title: "Silver" } } },
+      }),
+      JSON.stringify({
+        timestamp: "2026-09-01T01:00:04Z", eventType: "page_context",
+        application: { name: "Google Chrome" },
+        details: { url: "https://www.apple.com/shop/buy-iphone" },
+      }),
+    ]);
+
+    expect(evidence).toContain("512GB");
+    expect(evidence).toContain("Silver");
+    expect(evidence).toContain("page: https://www.apple.com/shop/buy-iphone");
   });
 });

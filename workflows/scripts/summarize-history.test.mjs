@@ -199,15 +199,23 @@ test("summarizes an explicit human-operation recording", () => {
   assert.match(markdown, /用户在「用 Spotlight 打开 Notes 并新建备忘录」中完成了一组电脑操作/);
   assert.doesNotMatch(markdown, /本次录制包含 \d+ 个操作事件/);
   assert.doesNotMatch(markdown, /用户主动开始和停止的单次 Demo 录制/);
-  assert.match(markdown, /AXButton "新建备忘录"/);
+  // The per-event ledger is gone: this is a summary, not a reformatted stream.
+  assert.doesNotMatch(markdown, /## Activity timeline/);
+  assert.match(markdown, /## Recording summary/);
+  assert.match(markdown, /本窗口共 \d+ 条事件/);
   assert.match(markdown, /Semantic click target coverage: 1\/1/);
-  assert.match(markdown, /## Reusable operation experience/);
-  assert.match(markdown, /Open https:\/\/www\.apple\.com\.cn\/shop\/buy-iphone\/iphone-17-pro/);
-  assert.match(markdown, /locate AXButton "新建备忘录"/);
-  assert.match(markdown, /## Activity timeline/);
+  assert.doesNotMatch(markdown, /## Reusable operation experience/);
+  // The starting URL survives as a durable fact rather than as a replay step.
+  assert.match(markdown, /- Approved starting URL: https:\/\/www\.apple\.com\.cn\/shop\/buy-iphone\/iphone-17-pro/);
+  // Durable facts stay: they are what survives once raw events are cleaned.
+  assert.match(markdown, /- Applications: /);
+  assert.match(markdown, /- Time range: /);
+  assert.match(markdown, /## Citations/);
   assert.doesNotMatch(markdown, /Recording started|Recording stopped|Recording status|Captured key screenshots/);
   assert.doesNotMatch(markdown, /\(812, 406\)/);
-  assert.match(markdown, /Text input in Notes: "第一次人工录制"/);
+  // Typed text is evidence and stays in the event stream; the summary does not
+  // reproduce it verbatim.
+  assert.doesNotMatch(markdown, /第一次人工录制/);
   assert.match(markdown, new RegExp(screenshot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 });
 
@@ -295,87 +303,19 @@ test("enriches unlabeled clicks via descendants and records browser page context
 
   assert.equal(result.status, 0, result.stderr);
   const markdown = fs.readFileSync(out, "utf8");
-  assert.match(markdown, /AXRadioButton "512GB" inside AXFieldset "Storage\. How much space do you need\?"/);
-  assert.match(markdown, /locate AXRadioButton "Silver"/);
-  assert.doesNotMatch(markdown, /stale hit-test text/);
+  // Click enrichment stays in the event stream, where the narrator reads it
+  // (see summary-writer's compaction tests). The summary reports coverage
+  // rather than replaying each click.
+  assert.doesNotMatch(markdown, /## Activity timeline/);
   assert.match(markdown, /Semantic click target coverage: 2\/3/);
-  assert.match(markdown, /Browser page in Google Chrome: .*6\.3-inch-display-512gb-silver-unlocked/);
-  assert.match(markdown, /Confirm the front browser page in Google Chrome/);
+  assert.match(markdown, /- Applications: com\.google\.Chrome/);
+  assert.match(markdown, /## Recording summary/);
+  // Page context now reaches the narrator through the event stream rather than
+  // appearing as a replay instruction in the summary.
+  assert.doesNotMatch(markdown, /Confirm the front browser page/);
   assert.match(markdown, /Final browser page: .*512gb-silver-unlocked/);
-  assert.match(markdown, /rely on the surrounding page context/);
-});
-
-test("compresses consecutive scrolls into the next semantic target", () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-human-history-scroll-test-"));
-  const recording = writeFixture(dir, "events.jsonl", [
-    {
-      recordType: "human_history_metadata",
-      schemaVersion: 1,
-      recordingId: "human:scroll-demo",
-      title: "选择 AppleCare 选项",
-      createdAt: "2026-09-01T01:00:00.000Z",
-      platform: "macOS",
-      captureText: false,
-    },
-    {
-      recordType: "human_event",
-      sequence: 1,
-      timestamp: "2026-09-01T01:00:01.000Z",
-      eventType: "scroll",
-      application: { name: "Google Chrome", bundleId: "com.google.Chrome", pid: 7 },
-      details: { direction: "down", sampleCount: 118 },
-    },
-    {
-      recordType: "human_event",
-      sequence: 2,
-      timestamp: "2026-09-01T01:00:02.000Z",
-      eventType: "scroll",
-      application: { name: "Google Chrome", bundleId: "com.google.Chrome", pid: 7 },
-      details: { direction: "down", sampleCount: 57 },
-    },
-    {
-      recordType: "human_event",
-      sequence: 3,
-      timestamp: "2026-09-01T01:00:03.000Z",
-      eventType: "mouse_click",
-      application: { name: "Google Chrome", bundleId: "com.google.Chrome", pid: 7 },
-      details: {
-        button: "left",
-        accessibility: {
-          role: "AXStaticText",
-          value: "No AppleCare coverage",
-          focused: { role: "AXRadioButton", title: "No AppleCare coverage" },
-          ancestors: [{
-            role: "AXGroup",
-            subrole: "AXFieldset",
-            description: "AppleCare+ coverage",
-          }],
-        },
-      },
-    },
-    {
-      recordType: "human_event",
-      sequence: 4,
-      timestamp: "2026-09-01T01:00:04.000Z",
-      eventType: "recording_stopped",
-      application: { name: "Google Chrome", bundleId: "com.google.Chrome", pid: 7 },
-      details: { reason: "user_interrupt" },
-    },
-  ]);
-  const out = path.join(dir, "summary.md");
-  const result = spawnSync(process.execPath, [script, "--file", recording, "--out", out], {
-    encoding: "utf8",
-  });
-
-  assert.equal(result.status, 0, result.stderr);
-  const markdown = fs.readFileSync(out, "utf8");
-  const reusable = markdown
-    .split("## Reusable operation experience\n", 2)[1]
-    .split("## End State\n", 1)[0];
-  assert.equal(reusable.match(/^\d+\. /gmu)?.length, 1);
-  assert.match(reusable, /after moving down only as needed to reveal the next semantic target/);
-  assert.match(reusable, /AXRadioButton "No AppleCare coverage" inside AXFieldset "AppleCare\+ coverage"/);
-  assert.doesNotMatch(reusable, /118|57|at most one viewport/);
+  // Replay guidance belongs to the workflow candidate, not to the summary.
+  assert.doesNotMatch(markdown, /rely on the surrounding page context/);
 });
 
 test("finds the latest nested human recording", () => {

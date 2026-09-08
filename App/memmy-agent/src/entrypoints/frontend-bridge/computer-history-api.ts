@@ -8,6 +8,7 @@ import {
 import {
   applicationsFromMarkdown,
   applyNarrative,
+  compactEventEvidence,
   writeSegmentNarrative,
 } from "../../core/agent-runtime/computer-history/summary-writer.js";
 import type { LLMRuntimeResolver } from "../../utils/llm-runtime.js";
@@ -404,7 +405,7 @@ export class ComputerHistoryDemoService {
       this.observationError = error;
       return;
     }
-    this.narrateSummary(segment.historyFile, "10min");
+    this.narrateSummary(segment.historyFile, "10min", segment.eventsFile);
     this.writeSixHourRollup(segment.id);
   }
 
@@ -415,7 +416,7 @@ export class ComputerHistoryDemoService {
    * Deliberately fire-and-forget: the mechanical summary is already on disk, so
    * a slow or unreachable model delays the better wording, never the recording.
    */
-  private narrateSummary(file: string, window: "10min" | "6h"): void {
+  private narrateSummary(file: string, window: "10min" | "6h", eventsFile: string | null): void {
     const llmRuntime = this.llmRuntime;
     if (!llmRuntime) return;
     void (async () => {
@@ -425,9 +426,21 @@ export class ComputerHistoryDemoService {
       } catch {
         return;
       }
+      // A segment is narrated from its own event stream, compacted into
+      // activity arcs. A rollup has no stream of its own and is narrated from
+      // the ten-minute summaries it already gathered.
+      let evidence = markdown.replace(/^---\n[\s\S]*?\n---\n/u, "");
+      if (eventsFile) {
+        try {
+          const compacted = compactEventEvidence(fs.readFileSync(eventsFile, "utf8").split("\n"));
+          if (compacted) evidence = compacted;
+        } catch {
+          // Fall back to the mechanical summary body.
+        }
+      }
       const narrative = await writeSegmentNarrative(llmRuntime, {
         applications: applicationsFromMarkdown(markdown),
-        evidence: markdown.replace(/^---\n[\s\S]*?\n---\n/u, ""),
+        evidence,
         window,
       });
       if (!narrative) return;
@@ -461,7 +474,7 @@ export class ComputerHistoryDemoService {
     if (!rollup) return;
     const rollupFile = path.join(this.historyDirectory, rollup.fileName);
     fs.writeFileSync(rollupFile, rollup.markdown, "utf8");
-    this.narrateSummary(rollupFile, "6h");
+    this.narrateSummary(rollupFile, "6h", null);
   }
 
   private rotateSegment(): void {
