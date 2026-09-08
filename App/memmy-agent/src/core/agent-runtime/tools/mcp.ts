@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -31,6 +32,8 @@ const TRANSIENT_EXC_NAMES = new Set([
 
 const WINDOWS_SHELL_LAUNCHERS = new Set(["npx", "npm", "pnpm", "yarn", "bunx"]);
 const SANITIZE_RE = /_+/g;
+const MAX_TOOL_NAME_LENGTH = 64;
+const TOOL_NAME_HASH_LENGTH = 12;
 const RELOAD_LOCKS = new WeakMap<object, Promise<void>>();
 
 type Runtime = {
@@ -136,7 +139,14 @@ async function loadRuntime(): Promise<Runtime> {
 }
 
 export function sanitizeName(name: string): string {
-  return name.replace(/[^a-zA-Z0-9_-]/g, "_").replace(SANITIZE_RE, "_");
+  const sanitized = name.replace(/[^a-zA-Z0-9_-]/g, "_").replace(SANITIZE_RE, "_");
+  if (sanitized.length <= MAX_TOOL_NAME_LENGTH) return sanitized;
+
+  // OpenAI-compatible APIs cap function names at 64 characters. Keep a readable
+  // prefix and a deterministic digest so similarly prefixed MCP tools stay unique.
+  const digest = createHash("sha256").update(sanitized).digest("hex").slice(0, TOOL_NAME_HASH_LENGTH);
+  const prefixLength = MAX_TOOL_NAME_LENGTH - TOOL_NAME_HASH_LENGTH - 1;
+  return `${sanitized.slice(0, prefixLength)}_${digest}`;
 }
 
 export function isTransient(error: unknown): boolean {
