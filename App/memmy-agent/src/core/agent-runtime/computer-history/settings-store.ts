@@ -22,8 +22,8 @@ export function defaultSettingsFile(): string {
 export class ObservationSettingsStore {
   private readonly file: string;
 
-  constructor(file = defaultSettingsFile()) {
-    this.file = file;
+  constructor(file?: string) {
+    this.file = file ?? defaultSettingsFile();
   }
 
   get filePath(): string {

@@ -1,4 +1,7 @@
 import {
+  ObservationSettingsStore,
+} from "../../core/agent-runtime/computer-history/settings-store.js";
+import {
   SIX_HOUR_MS,
   alignedId,
   buildSixHourSummary,
@@ -152,6 +155,7 @@ export class ComputerHistoryDemoService {
   private observationStartedAt: string | null = null;
   private observationError: string | null = null;
   private rotationTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly observationSettings: ObservationSettingsStore;
   private liveSummaryTimer: ReturnType<typeof setInterval> | null = null;
   private liveSummarySignature: string | null = null;
   private run: RunState = {
@@ -170,6 +174,7 @@ export class ComputerHistoryDemoService {
     codexHistoryDirectory?: string;
     recordingDirectory?: string;
     workflowDirectory?: string;
+    observationSettingsFile?: string;
   } = {}) {
     this.repositoryRoot = path.resolve(input.repositoryRoot ?? defaultRepositoryRoot());
     this.historyDirectory = path.resolve(input.historyDirectory
@@ -183,6 +188,7 @@ export class ComputerHistoryDemoService {
       ?? path.join(os.homedir(), ".memmy", "computer-history", "recordings"));
     this.workflowDirectory = path.resolve(input.workflowDirectory
       ?? path.join(os.homedir(), ".memmy", "computer-history", "workflows"));
+    this.observationSettings = new ObservationSettingsStore(input.observationSettingsFile);
     this.syncStateFile = path.join(path.dirname(this.historyDirectory), "sync-state.json");
     this.liveSummaryIntervalMs = boundedInterval(
       process.env.MEMMY_COMPUTER_HISTORY_LIVE_SUMMARY_INTERVAL_MS,
@@ -297,6 +303,9 @@ export class ComputerHistoryDemoService {
       "--out", segment.eventsFile,
       "--no-screenshots",
       "--capture-search-text",
+      // The recorder evaluates the policy per event, because the website axis
+      // depends on the URL each event carries.
+      "--observation-settings", this.observationSettings.filePath,
     ], {
       cwd: this.repositoryRoot,
       env: process.env,
@@ -405,6 +414,7 @@ export class ComputerHistoryDemoService {
     if (this.observationState === "running") {
       throw new ComputerHistoryApiError(409, "Computer History is already running");
     }
+    this.assertObservesSomething();
     this.cleanupExpiredRecordings();
     const segment = this.segment ?? this.openSegment();
     this.segment = segment;
@@ -420,6 +430,27 @@ export class ComputerHistoryDemoService {
     this.startLiveSummaryTimer();
     this.startRotationTimer();
     return this.snapshot();
+  }
+
+  /**
+   * Refuses to start when the policy would record nothing.
+   *
+   * The default is do-not-observe, so a fresh install has no allowed apps yet.
+   * Starting anyway would look like it was recording while producing empty
+   * segments, so say what is missing instead.
+   */
+  private assertObservesSomething(): void {
+    const { observation } = this.observationSettings.read();
+    if (observation.defaultApplicationBehavior === "observe") return;
+    const allowsAnyApp = observation.rules.some(
+      (rule) => rule.scope === "app" && rule.behavior === "observe",
+    );
+    if (allowsAnyApp) return;
+    throw new ComputerHistoryApiError(
+      400,
+      "Computer History observes nothing yet: allow at least one application, "
+        + `or set defaultApplicationBehavior to "observe", in ${this.observationSettings.filePath}`,
+    );
   }
 
   /** Keeps the current segment but stops writing to it. */

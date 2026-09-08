@@ -7,6 +7,7 @@ import {
   searchInputContextFromAccessibility,
   appFrom,
   isSecureInput,
+  shouldObserve,
 } from "./record-human-history.mjs";
 
 const notes = { name: "Notes", bundleId: "com.apple.Notes", pid: 42 };
@@ -166,4 +167,50 @@ test("maps the recorder envelope onto the history application shape", () => {
 test("reports secure input so keystroke text can be suppressed", () => {
   assert.equal(isSecureInput(textInput("a")), false);
   assert.equal(isSecureInput({ app: { secureInput: true } }), true);
+});
+
+// This table mirrors observation-settings.test.ts: the capture path and the
+// agent tools must agree on what the policy means.
+const policy = (defaultApp, defaultUrl, rules = []) => ({
+  defaultApplicationBehavior: defaultApp,
+  defaultURLBehavior: defaultUrl,
+  rules,
+});
+
+test("records nothing until an application is allowed", () => {
+  assert.equal(shouldObserve(policy("do_not_observe", "observe"), { bundleId: "com.apple.Notes" }), false);
+  assert.equal(shouldObserve(
+    policy("do_not_observe", "observe", [{ scope: "app", bundleID: "com.apple.Notes", behavior: "observe" }]),
+    { bundleId: "com.apple.Notes" },
+  ), true);
+});
+
+test("judges a record without a usable URL by its application alone", () => {
+  const settings = policy("observe", "do_not_observe");
+  assert.equal(shouldObserve(settings, { bundleId: "com.apple.Notes" }), true);
+  assert.equal(shouldObserve(settings, { bundleId: "com.google.Chrome", url: "https://example.com/a" }), false);
+});
+
+test("lets a block rule win over an allow rule inside the same axis", () => {
+  const settings = policy("observe", "observe", [
+    { scope: "url", urlDomain: "example.com", behavior: "observe" },
+    { scope: "url", urlDomain: "example.com", behavior: "do_not_observe" },
+  ]);
+  assert.equal(shouldObserve(settings, { bundleId: "c", url: "https://example.com/a" }), false);
+});
+
+test("matches subdomains but not lookalike domains", () => {
+  const settings = policy("observe", "observe", [
+    { scope: "url", urlDomain: "bank.com", behavior: "do_not_observe" },
+  ]);
+  assert.equal(shouldObserve(settings, { bundleId: "c", url: "https://secure.bank.com/x" }), false);
+  assert.equal(shouldObserve(settings, { bundleId: "c", url: "https://notbank.com/x" }), true);
+});
+
+test("keeps the two axes independent", () => {
+  const settings = policy("do_not_observe", "observe", [
+    { scope: "url", urlDomain: "example.com", behavior: "observe" },
+  ]);
+  // Allowing the site cannot rescue a disallowed application.
+  assert.equal(shouldObserve(settings, { bundleId: "com.google.Chrome", url: "https://example.com/a" }), false);
 });

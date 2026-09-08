@@ -62,6 +62,7 @@ export function parseArgs(argv) {
     else if (key === "--capture-text") args.captureText = true;
     else if (key === "--allow-app") args.allowApps.push(value());
     else if (key === "--only-app") args.onlyApps.push(value());
+    else if (key === "--observation-settings") args.observationSettings = value();
     else if (key === "--no-screenshots") args.screenshots = false;
     else if (key === "--help" || key === "-h") args.help = true;
     else throw new Error(`unknown argument: ${key}`);
@@ -158,6 +159,64 @@ export function searchInputContextFromAccessibility(accessibility) {
 // The recorder now classifies keystrokes itself, so the consumer no longer has
 // to infer printability from modifiers: a keyboard.text_input event is text by
 // construction, and secure-input windows never produce one.
+// Mirrors src/core/agent-runtime/computer-history/observation-settings.ts.
+// The capture path has to evaluate the policy per event, so the rules live on
+// both sides; the tables in their two test files are kept identical.
+function loadObservationSettings(file) {
+  if (!file) return null;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+    const observation = parsed?.observation;
+    if (!observation) return null;
+    return {
+      defaultApplicationBehavior: observation.defaultApplicationBehavior ?? "do_not_observe",
+      defaultURLBehavior: observation.defaultURLBehavior ?? "observe",
+      rules: Array.isArray(observation.rules) ? observation.rules : [],
+    };
+  } catch {
+    // An unreadable policy must not silently widen what is recorded.
+    return { defaultApplicationBehavior: "do_not_observe", defaultURLBehavior: "observe", rules: [] };
+  }
+}
+
+function hostFromUrl(url) {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+    return parsed.hostname.trim().toLowerCase().replace(/^\.+|\.+$/g, "") || null;
+  } catch {
+    return null;
+  }
+}
+
+function domainMatches(host, domain) {
+  const normalized = String(domain ?? "").trim().toLowerCase().replace(/^\.+|\.+$/g, "");
+  if (!normalized) return false;
+  return host === normalized || host.endsWith(`.${normalized}`);
+}
+
+// A block rule always wins inside its own axis.
+function resolveAxis(matching, fallback) {
+  if (matching.some((rule) => rule.behavior === "do_not_observe")) return "do_not_observe";
+  if (matching.some((rule) => rule.behavior === "observe")) return "observe";
+  return fallback;
+}
+
+export function shouldObserve(settings, subject) {
+  if (!settings) return true;
+  const appRules = settings.rules.filter(
+    (rule) => rule.scope === "app" && subject.bundleId && rule.bundleID === subject.bundleId,
+  );
+  if (resolveAxis(appRules, settings.defaultApplicationBehavior) === "do_not_observe") return false;
+
+  const host = subject.url ? hostFromUrl(subject.url) : null;
+  if (!host) return true;
+  const urlRules = settings.rules.filter(
+    (rule) => rule.scope === "url" && domainMatches(host, rule.urlDomain),
+  );
+  return resolveAxis(urlRules, settings.defaultURLBehavior) !== "do_not_observe";
+}
+
 function printableKey(event) {
   return event?.kind === "keyboard.text_input"
     && typeof event.keyboard?.text === "string"
@@ -300,6 +359,7 @@ export async function run(argv = process.argv) {
   let sequence = 0;
   let lastPageContextUrl = null;
   const searchInputContextByApp = new Map();
+  const observationSettings = loadObservationSettings(args.observationSettings);
   let pendingKeys = [];
   let pendingKeyTimer = null;
   let processing = Promise.resolve();
@@ -376,6 +436,10 @@ export async function run(argv = process.argv) {
     }
     if (event.kind === "session.ended") return;
     if (args.onlyApps.length && !appAllowed(application, args.onlyApps)) return;
+    if (!shouldObserve(observationSettings, {
+      bundleId: application.bundleId,
+      url: typeof event.window?.url === "string" ? event.window.url : null,
+    })) return;
 
     // The URL now rides on every event's window envelope instead of arriving as
     // its own recorder event, so page context is derived from a change in it.

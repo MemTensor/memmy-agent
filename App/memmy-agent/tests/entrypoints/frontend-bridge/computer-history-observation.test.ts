@@ -6,13 +6,29 @@ import {
   ComputerHistoryApiError,
   ComputerHistoryDemoService,
 } from "../../../src/entrypoints/frontend-bridge/computer-history-api.js";
+import { ObservationSettingsStore } from "../../../src/core/agent-runtime/computer-history/settings-store.js";
 
 const roots: string[] = [];
+const settingsFiles: string[] = [];
+
+function allowNotes(settingsFile: string): void {
+  new ObservationSettingsStore(settingsFile).write({
+    observation: {
+      defaultApplicationBehavior: "do_not_observe",
+      defaultURLBehavior: "observe",
+      rules: [{ scope: "app", bundleID: "com.apple.Notes", behavior: "observe" }],
+    },
+  });
+}
 
 function service(): ComputerHistoryDemoService {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-observation-"));
   roots.push(root);
+  const settingsFile = path.join(root, "observation-settings.json");
+  allowNotes(settingsFile);
+  settingsFiles.push(settingsFile);
   return new ComputerHistoryDemoService({
+    observationSettingsFile: settingsFile,
     historyDirectory: path.join(root, "histories"),
     recordingDirectory: path.join(root, "recordings"),
     workflowDirectory: path.join(root, "workflows"),
@@ -79,6 +95,15 @@ describe("Computer History observation lifecycle", () => {
     const stopped = await instance.stopObservation();
 
     expect(stopped.observation).toMatchObject({ state: "stopped", segmentId: null, startedAt: null });
+  });
+
+  it("refuses to start when the policy would record nothing", () => {
+    const instance = service();
+    new ObservationSettingsStore(settingsFiles.at(-1)!).write({
+      observation: { defaultApplicationBehavior: "do_not_observe", defaultURLBehavior: "observe", rules: [] },
+    });
+
+    expect(() => instance.startObservation()).toThrow(/observes nothing yet/);
   });
 
   it("rejects transitions that do not apply to the current state", async () => {
