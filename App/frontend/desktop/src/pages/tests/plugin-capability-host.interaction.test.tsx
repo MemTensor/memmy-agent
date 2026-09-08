@@ -282,6 +282,40 @@ describe("PluginCapabilityHost", () => {
     expect(onAddArtifact).toHaveBeenCalledWith(call.events[3]!.type === "artifact" ? call.events[3]!.artifact : null);
   });
 
+  it("allows an optional file-input interaction to be skipped without uploading", async () => {
+    const respond = vi.fn(async () => undefined);
+    const uploadFiles = vi.fn(async () => []);
+    const call: PluginUiCall = {
+      pluginId: plugin.id,
+      capabilityId: "run",
+      callId: "optional-files",
+      conversationId: "chat-optional-files",
+      events: [{
+        type: "interaction",
+        request: {
+          interactionId: "optional-files-interaction",
+          type: "file-input",
+          payload: { title: "Optional sources", multiple: true }
+        }
+      }]
+    };
+
+    await act(async () => root.render(
+      <I18nProvider language="en-US">
+        <PluginCapabilityHost
+          calls={[call]}
+          plugins={[plugin]}
+          client={{ getUi: vi.fn(), cancel: vi.fn(), respond }}
+          uploadFiles={uploadFiles}
+        />
+      </I18nProvider>
+    ));
+
+    await act(async () => Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "Skip")?.click());
+    expect(uploadFiles).not.toHaveBeenCalled();
+    expect(respond).toHaveBeenCalledWith(plugin.id, "optional-files", "optional-files-interaction", { files: [] });
+  });
+
   it.skipIf(!process.env.LITERATURE_REVIEW_PLUGIN_ROOT)("mounts every literature-review card through the real plugin UI bundle", async () => {
     const pluginRoot = process.env.LITERATURE_REVIEW_PLUGIN_ROOT!;
     const rendererHtml = readFileSync(path.join(pluginRoot, "ui/bundles/review-cards/index.html"), "utf8");

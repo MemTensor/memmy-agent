@@ -314,6 +314,7 @@ function FileInputCard(props: {
   const accept = readStrings(payload.accept).join(",");
   const fileRules = readFileRules(payload.fileRules);
   const maxFiles = positiveInteger(payload.maxFiles) ?? (payload.multiple === true ? null : 1);
+  const minFiles = positiveInteger(payload.minFiles) ?? 0;
   const maxBytes = positiveInteger(payload.maxBytes);
   const fileStates = files.map((file) => classifyPluginInputFile(file, accept, maxBytes, fileRules, t));
   const readyFiles = fileStates.filter((item) => item.status === "ready").map((item) => item.file);
@@ -341,6 +342,15 @@ function FileInputCard(props: {
       props.onStatus("error");
     }
   };
+  const skip = async () => {
+    props.onStatus("submitting");
+    try {
+      await props.onRespond(props.request.interactionId, { files: [] });
+      props.onStatus("answered");
+    } catch {
+      props.onStatus("error");
+    }
+  };
   return (
     <div className="rounded-card border border-action-sky/25 bg-action-sky/[0.04] px-3 py-3">
       <div className="flex items-start gap-2">
@@ -356,6 +366,7 @@ function FileInputCard(props: {
             <span className="min-w-0 flex-1 truncate text-xs text-text-ink/45">
               {files.length ? t("plugin.ui.filesReadySummary", { ready: readyFiles.length, blocked: files.length - readyFiles.length }) : t("plugin.ui.noFiles")}
             </span>
+            {minFiles === 0 && files.length === 0 ? <ResponseButton disabled={props.disabled} secondary onClick={() => void skip()}>{t("plugin.ui.skip")}</ResponseButton> : null}
             <ResponseButton disabled={props.disabled || readyFiles.length === 0 || Boolean(validationError) || !props.onUploadFiles} onClick={() => void upload()}>{t("plugin.ui.upload")}</ResponseButton>
           </div>
           {fileStates.length ? (
