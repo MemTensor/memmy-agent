@@ -360,6 +360,9 @@ export async function run(argv = process.argv) {
 
   const ingest = async (event) => {
     const application = appFrom(event);
+    // Window state travels with the action it belongs to so the summarizer can
+    // read what was on screen without re-deriving it from neighbouring events.
+    const axState = event.ax ? { ax: event.ax } : {};
     if (event.kind === "session.started") {
       await appendEvent({
         eventType: "recording_started",
@@ -421,6 +424,7 @@ export async function run(argv = process.argv) {
         eventType: "application_changed",
         timestamp: event.timestamp,
         application,
+        ...axState,
       }, true);
       return;
     }
@@ -442,6 +446,7 @@ export async function run(argv = process.argv) {
           ...(event.kind === "mouse.context_menu" ? { contextMenu: true } : {}),
           ...(target ? { accessibility: target } : {}),
         },
+        ...axState,
       }, true);
       return;
     }
@@ -455,6 +460,7 @@ export async function run(argv = process.argv) {
           origin: event.mouse?.origin?.element ?? null,
           destination: event.mouse?.destination?.element ?? null,
         },
+        ...axState,
       }, true);
       return;
     }
@@ -476,6 +482,7 @@ export async function run(argv = process.argv) {
             : { text: "[REDACTED]", redacted: true }),
           ...(event.selection?.target ? { accessibility: event.selection.target } : {}),
         },
+        ...axState,
       });
     }
   };

@@ -333,6 +333,13 @@ func emitEvent(kind: String, application: [String: Any]? = nil, extra: [String: 
   ]
   let window = cachedWindow()
   if !window.isEmpty { payload["window"] = window }
+  axStateLock.lock()
+  let pid = observedPid
+  axStateLock.unlock()
+  if let pid {
+    let windowKey = "\(pid):\(window["title"] as? String ?? "")"
+    if let ax = axSnapshot(pid: pid, windowKey: windowKey) { payload["ax"] = ax }
+  }
   for (key, value) in extra { payload[key] = value }
   emit(payload)
 }
@@ -388,6 +395,87 @@ func emitSelectionChanged(_ element: AXUIElement) {
   if target.isEmpty { target = ["role": "AXUnknown"] }
   selection["target"] = target
   emitEvent(kind: "selection.changed", extra: ["selection": selection])
+}
+
+// MARK: - Accessibility tree snapshots
+//
+// Every event carries the state of the focused window, but sending the whole
+// tree each time is wasteful: consecutive events usually differ by a handful of
+// nodes. Keep the previous snapshot per window and emit only what changed,
+// falling back to the full tree when there is nothing to diff against or the
+// change is large enough that a diff would not be smaller.
+
+let AX_TREE_MAX_NODES = 400
+let AX_TREE_MIN_INTERVAL: TimeInterval = 0.4
+let AX_DIFF_FULL_TREE_RATIO = 0.6
+
+var lastTreeKey: String?
+var lastTreeLines: [String]?
+var lastTreeAt: Date?
+
+func treeLine(_ payload: [String: Any]) -> String? {
+  let role = payload["role"] as? String ?? ""
+  let fields = ["subrole", "title", "description", "identifier", "value"]
+    .map { payload[$0] as? String ?? "" }
+  guard !role.isEmpty, fields.contains(where: { !$0.isEmpty }) else { return nil }
+  return ([role] + fields).joined(separator: "|")
+}
+
+func axTreeLines(pid: pid_t) -> [String] {
+  let app = AXUIElementCreateApplication(pid)
+  AXUIElementSetMessagingTimeout(app, 0.3)
+  var windowRef: CFTypeRef?
+  if AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &windowRef) != .success {
+    _ = AXUIElementCopyAttributeValue(app, kAXMainWindowAttribute as CFString, &windowRef)
+  }
+  guard let window = axElement(windowRef) else { return [] }
+
+  var lines: [String] = []
+  var queue: [AXUIElement] = [window]
+  var visited = 0
+  while !queue.isEmpty && visited < AX_TREE_MAX_NODES {
+    let current = queue.removeFirst()
+    visited += 1
+    if let line = treeLine(nodePayload(current)) { lines.append(line) }
+    var childrenRef: CFTypeRef?
+    if AXUIElementCopyAttributeValue(current, kAXChildrenAttribute as CFString, &childrenRef) == .success,
+       let children = childrenRef as? [AXUIElement] {
+      queue.append(contentsOf: children.prefix(24))
+    }
+  }
+  return lines
+}
+
+// Returns nil when the snapshot was taken recently enough that recomputing it
+// would cost more than the freshness is worth.
+func axSnapshot(pid: pid_t, windowKey: String) -> [String: Any]? {
+  let now = Date()
+  if let lastTreeAt, now.timeIntervalSince(lastTreeAt) < AX_TREE_MIN_INTERVAL { return nil }
+
+  let lines = axTreeLines(pid: pid)
+  guard !lines.isEmpty else { return nil }
+  defer {
+    lastTreeKey = windowKey
+    lastTreeLines = lines
+    lastTreeAt = now
+  }
+
+  guard windowKey == lastTreeKey, let previous = lastTreeLines else {
+    return ["mode": "fullTree", "text": lines.joined(separator: "\n")]
+  }
+
+  let previousSet = Set(previous)
+  let currentSet = Set(lines)
+  let added = lines.filter { !previousSet.contains($0) }
+  let removed = previous.filter { !currentSet.contains($0) }
+  if added.isEmpty && removed.isEmpty { return nil }
+
+  let changed = added.count + removed.count
+  if Double(changed) > Double(max(lines.count, 1)) * AX_DIFF_FULL_TREE_RATIO {
+    return ["mode": "fullTree", "text": lines.joined(separator: "\n")]
+  }
+  let diff = removed.map { "- \($0)" } + added.map { "+ \($0)" }
+  return ["mode": "diffFromPrevious", "text": diff.joined(separator: "\n")]
 }
 
 let axObserverCallback: AXObserverCallback = { _, element, notification, _ in
