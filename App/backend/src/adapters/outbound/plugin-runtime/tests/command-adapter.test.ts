@@ -3,7 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CapabilityEvent } from "@memmy/local-api-contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { buildPluginSandboxLaunch, createCommandPluginAdapter } from "../command-adapter.js";
+import {
+  buildPluginSandboxLaunch,
+  createCommandPluginAdapter,
+  resolveCommandRuntimeDependencies,
+  resolvePluginEnvironment
+} from "../command-adapter.js";
 import type { PluginRuntimeContext } from "../types.js";
 
 let root: string | undefined;
@@ -204,5 +209,35 @@ describe("CommandPluginAdapter", () => {
     const separator = launch.args.indexOf("--");
     expect(launch.args[separator + 1]).toBe(realpathSync(process.execPath));
     expect(launch.args.slice(separator + 2)).toEqual([realpathSync(join(root!, "runtime/plugin")), "--flag"]);
+  });
+
+  it("prepends only Host-resolved runtime paths to the plugin environment", () => {
+    expect(resolvePluginEnvironment({ TEXMFHOME: "/plugin/path" }, {}, {}, ["/trusted/tex/bin"], { TEXMFHOME: "/trusted/texmf" })).toMatchObject({
+      PATH: "/trusted/tex/bin:/usr/bin:/bin",
+      LANG: "C.UTF-8",
+      TEXMFHOME: "/trusted/texmf"
+    });
+  });
+
+  it("grants declared TeX Live dependencies read and executable sandbox access on macOS", async () => {
+    const dependency = await resolveCommandRuntimeDependencies(["texlive"], "darwin");
+    if (dependency.pathEntries.length === 0) return;
+    const pluginContext = context();
+    const launch = await buildPluginSandboxLaunch(
+      pluginContext,
+      { command: "runtime/plugin", interpreter: "node", args: [], cwd: "." },
+      "darwin",
+      false,
+      [],
+      undefined,
+      dependency.readRoots,
+      dependency.executableRoots
+    );
+    const profile = launch.args[1] ?? "";
+    expect(dependency.pathEntries[0]).toMatch(/texlive/u);
+    expect(dependency.environment.TEXMFHOME).toMatch(/texmf/u);
+    expect(profile).toContain(`(allow file-read*`);
+    expect(profile).toContain(`(subpath ${JSON.stringify(dependency.readRoots[0])})`);
+    expect(profile).toContain(`(subpath ${JSON.stringify(dependency.executableRoots[0])})`);
   });
 });

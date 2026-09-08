@@ -2,6 +2,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
 import { access, lstat, mkdir, realpath } from "node:fs/promises";
+import { homedir } from "node:os";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
 import {
@@ -20,6 +21,7 @@ import type { PluginAdapter, PluginHostServiceInvoker, PluginRuntimeContext, Plu
 const MAX_OUTPUT_BYTES = 50 * 1024 * 1024;
 const MAX_STDERR_BYTES = 64 * 1024;
 const MAX_HOST_SERVICE_REQUESTS_PER_CALL = 16;
+const CommandRuntimeDependencySchema = z.enum(["texlive"]);
 
 const CommandRuntimeConfigSchema = z.object({
   command: z.string().trim().min(1),
@@ -29,6 +31,7 @@ const CommandRuntimeConfigSchema = z.object({
   inputMode: z.enum(["stdin-json", "argument-json"]).default("stdin-json"),
   outputMode: z.enum(["json", "ndjson"]).default("json"),
   interactive: z.boolean().default(false),
+  runtimeDependencies: z.array(CommandRuntimeDependencySchema).max(8).default([]),
   env: z.record(z.string(), z.string()).default({}),
   secretEnv: z.record(z.string(), z.string().min(1)).default({}),
   timeoutMs: z.number().int().positive().max(3_600_000).default(300_000),
@@ -54,7 +57,12 @@ interface CommandPluginSession extends PluginSession {
 export interface CreateCommandPluginAdapterOptions {
   platform?: NodeJS.Platform;
   spawnFn?: typeof spawn;
-  buildLaunch?: (context: PluginRuntimeContext, config: CommandRuntimeConfig, networkEnabled: boolean) => Promise<SandboxLaunch>;
+  buildLaunch?: (
+    context: PluginRuntimeContext,
+    config: CommandRuntimeConfig,
+    networkEnabled: boolean,
+    runtimeDependencies: ResolvedCommandRuntimeDependencies
+  ) => Promise<SandboxLaunch>;
   /** Exact DNS hosts local command plugins may request in their manifest. */
   allowedNetworkHosts?: readonly string[];
   /** Host-owned upload roots made readable only to plugins approved for the file-input host service. */
@@ -68,13 +76,15 @@ export interface CreateCommandPluginAdapterOptions {
 export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOptions = {}): PluginAdapter {
   const platform = options.platform ?? process.platform;
   const spawnFn = options.spawnFn ?? spawn;
-  const buildLaunch = options.buildLaunch ?? ((context, config, networkEnabled) => buildPluginSandboxLaunch(
+  const buildLaunch = options.buildLaunch ?? ((context, config, networkEnabled, runtimeDependencies) => buildPluginSandboxLaunch(
     context,
     config,
     platform,
     networkEnabled,
     options.fileInputRoots ?? [],
-    options.pluginDataRoot
+    options.pluginDataRoot,
+    runtimeDependencies.readRoots,
+    runtimeDependencies.executableRoots
   ));
   const allowedNetworkHosts = new Set((options.allowedNetworkHosts ?? []).map((host) => host.trim().toLowerCase()).filter(Boolean));
 
@@ -94,12 +104,19 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
       if (deniedHost) throw Object.assign(new Error(`Command plugin network host is not in the host allowlist: ${deniedHost}`), {
         code: "plugin_permission_denied"
       });
-      const env = resolvePluginEnvironment(config.env, config.secretEnv, context.secrets);
+      const runtimeDependencies = await resolveCommandRuntimeDependencies(config.runtimeDependencies, platform);
+      const env = resolvePluginEnvironment(
+        config.env,
+        config.secretEnv,
+        context.secrets,
+        runtimeDependencies.pathEntries,
+        runtimeDependencies.environment
+      );
       const pluginDataPath = await resolvePluginDataPath(context, options.pluginDataRoot);
       if (pluginDataPath) env.MEMMY_PLUGIN_DATA_DIR = pluginDataPath;
       return {
         pluginId: context.plugin.id,
-        launch: await buildLaunch(context, config, requestedNetworkHosts.length > 0),
+        launch: await buildLaunch(context, config, requestedNetworkHosts.length > 0, runtimeDependencies),
         config,
         pluginConfig: context.config,
         env,
@@ -314,7 +331,9 @@ export async function buildPluginSandboxLaunch(
   platform: NodeJS.Platform = process.platform,
   networkEnabled = false,
   fileInputRoots: readonly string[] = [],
-  pluginDataRoot?: string
+  pluginDataRoot?: string,
+  runtimeReadRoots: readonly string[] = [],
+  runtimeExecutableRoots: readonly string[] = []
 ): Promise<SandboxLaunch> {
   const root = await realpath(context.rootPath!);
   const command = await canonicalDescendant(root, resolve(root, config.command));
@@ -332,14 +351,46 @@ export async function buildPluginSandboxLaunch(
   if (platform === "darwin") {
     return {
       command: "/usr/bin/sandbox-exec",
-      args: ["-p", seatbeltProfile(root, filesystem, networkEnabled, runtimeRoot), "--", runtimeCommand, ...runtimeArgs],
+      args: ["-p", seatbeltProfile(root, filesystem, networkEnabled, runtimeRoot, runtimeReadRoots, runtimeExecutableRoots), "--", runtimeCommand, ...runtimeArgs],
       cwd
     };
   }
 
   const bwrap = await firstExecutable(["/usr/bin/bwrap", "/bin/bwrap"]);
   if (!bwrap) throw new Error("Command plugins require bubblewrap on Linux");
-  return { command: bwrap, args: bwrapArgs(root, cwd, runtimeCommand, runtimeArgs, filesystem, networkEnabled, runtimeRoot), cwd };
+  return { command: bwrap, args: bwrapArgs(root, cwd, runtimeCommand, runtimeArgs, filesystem, networkEnabled, runtimeRoot, runtimeReadRoots), cwd };
+}
+
+export interface ResolvedCommandRuntimeDependencies {
+  pathEntries: string[];
+  readRoots: string[];
+  executableRoots: string[];
+  environment: Record<string, string>;
+}
+
+/** Resolve only Host-approved runtimes; plugin manifests cannot inject arbitrary executable roots. */
+export async function resolveCommandRuntimeDependencies(
+  dependencies: readonly z.infer<typeof CommandRuntimeDependencySchema>[],
+  platform: NodeJS.Platform = process.platform
+): Promise<ResolvedCommandRuntimeDependencies> {
+  const resolved: ResolvedCommandRuntimeDependencies = { pathEntries: [], readRoots: [], executableRoots: [], environment: {} };
+  if (!dependencies.includes("texlive")) return resolved;
+
+  if (platform === "darwin") {
+    const binaryRoot = await realpath("/Library/TeX/texbin").catch(() => null);
+    const distributionRoot = await realpath("/usr/local/texlive").catch(() => null);
+    const userTexmfRoot = await realpath(resolve(homedir(), "Library", "texmf")).catch(() => null);
+    if (binaryRoot) resolved.pathEntries.push(binaryRoot);
+    if (distributionRoot) {
+      resolved.readRoots.push(distributionRoot);
+      resolved.executableRoots.push(distributionRoot);
+    }
+    if (userTexmfRoot) {
+      resolved.readRoots.push(userTexmfRoot);
+      resolved.environment.TEXMFHOME = userTexmfRoot;
+    }
+  }
+  return resolved;
 }
 
 interface FilesystemRule {
@@ -398,7 +449,14 @@ async function resolvePluginDataPath(context: PluginRuntimeContext, configuredRo
   return realpath(target);
 }
 
-function seatbeltProfile(root: string, filesystem: FilesystemRule[], networkEnabled: boolean, runtimeRoot: string | null): string {
+function seatbeltProfile(
+  root: string,
+  filesystem: FilesystemRule[],
+  networkEnabled: boolean,
+  runtimeRoot: string | null,
+  runtimeReadRoots: readonly string[],
+  runtimeExecutableRoots: readonly string[]
+): string {
   const readPaths = [
     root,
     "/System",
@@ -410,7 +468,8 @@ function seatbeltProfile(root: string, filesystem: FilesystemRule[], networkEnab
     "/bin",
     "/usr/bin",
     ...filesystem.map((rule) => rule.path),
-    ...(runtimeRoot ? [runtimeRoot] : [])
+    ...(runtimeRoot ? [runtimeRoot] : []),
+    ...runtimeReadRoots
   ];
   const writePaths = filesystem.filter((rule) => rule.writable).map((rule) => rule.path);
   const clauses = [
@@ -420,7 +479,7 @@ function seatbeltProfile(root: string, filesystem: FilesystemRule[], networkEnab
     "(allow process-exec process-fork)",
     "(allow signal process-info* (target same-sandbox))",
     `(allow file-read-metadata file-test-existence ${readPaths.map(seatbeltAncestors).join(" ")})`,
-    `(allow file-map-executable (subpath "/System") (subpath "/System/Volumes/Preboot/Cryptexes/OS") (subpath "/usr/lib") (subpath "/Library/Apple") ${seatbeltSubpath(root)}${runtimeRoot ? ` ${seatbeltSubpath(runtimeRoot)}` : ""})`,
+    `(allow file-map-executable (subpath "/System") (subpath "/System/Volumes/Preboot/Cryptexes/OS") (subpath "/usr/lib") (subpath "/Library/Apple") ${seatbeltSubpath(root)}${runtimeRoot ? ` ${seatbeltSubpath(runtimeRoot)}` : ""}${runtimeExecutableRoots.map((path) => ` ${seatbeltSubpath(path)}`).join("")})`,
     `(allow file-read* ${readPaths.map(seatbeltSubpath).join(" ")})`
   ];
   if (writePaths.length) clauses.push(`(allow file-write* ${writePaths.map(seatbeltSubpath).join(" ")})`);
@@ -443,15 +502,17 @@ function bwrapArgs(
   commandArgs: string[],
   filesystem: FilesystemRule[],
   networkEnabled: boolean,
-  runtimeRoot: string | null
+  runtimeRoot: string | null,
+  runtimeReadRoots: readonly string[]
 ): string[] {
   const args = ["--die-with-parent", "--new-session", "--unshare-all", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"];
   if (networkEnabled) args.push("--share-net");
-  const bindTargets = [root, ...filesystem.map((rule) => rule.path), ...(runtimeRoot ? [runtimeRoot] : [])];
+  const bindTargets = [root, ...filesystem.map((rule) => rule.path), ...(runtimeRoot ? [runtimeRoot] : []), ...runtimeReadRoots];
   for (const directory of new Set(bindTargets.flatMap(parentDirectories))) args.push("--dir", directory);
   for (const path of ["/usr", "/bin", "/lib", "/lib64"]) args.push("--ro-bind-try", path, path);
   args.push("--ro-bind", root, root);
   if (runtimeRoot && !["/usr", "/bin", "/lib", "/lib64"].includes(runtimeRoot)) args.push("--ro-bind", runtimeRoot, runtimeRoot);
+  for (const path of runtimeReadRoots) args.push("--ro-bind", path, path);
   for (const rule of filesystem) args.push(rule.writable ? "--bind" : "--ro-bind", rule.path, rule.path);
   args.push("--chdir", cwd, "--", command, ...commandArgs);
   return args;
@@ -492,9 +553,12 @@ async function firstExecutable(paths: string[]): Promise<string | null> {
 export function resolvePluginEnvironment(
   configured: Readonly<Record<string, string>>,
   secretEnv: Readonly<Record<string, string>>,
-  secrets: Readonly<Record<string, string>>
+  secrets: Readonly<Record<string, string>>,
+  runtimePathEntries: readonly string[] = [],
+  runtimeEnvironment: Readonly<Record<string, string>> = {}
 ): Record<string, string> {
-  const env: Record<string, string> = { PATH: "/usr/bin:/bin", LANG: "C.UTF-8", ...configured };
+  const hostPath = [...new Set([...runtimePathEntries, "/usr/bin", "/bin"])].join(":");
+  const env: Record<string, string> = { PATH: hostPath, LANG: "C.UTF-8", ...configured, ...runtimeEnvironment };
   for (const [name, key] of Object.entries(secretEnv)) {
     const value = secrets[key];
     if (!value) throw new Error(`Missing plugin secret for environment variable ${name}`);
