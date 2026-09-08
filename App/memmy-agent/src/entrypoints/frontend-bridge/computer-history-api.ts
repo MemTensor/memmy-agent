@@ -1,3 +1,9 @@
+import {
+  SIX_HOUR_MS,
+  alignedId,
+  buildSixHourSummary,
+  instantFromId,
+} from "../../core/agent-runtime/computer-history/rollup.js";
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -100,6 +106,9 @@ interface SegmentState {
 export type ObservationState = "running" | "paused" | "stopped" | "stopping" | "failed";
 
 const SEGMENT_DURATION_MS = 10 * 60 * 1000;
+
+// A six-hour rollup is cheap because it reuses ten-minute summaries, so it can
+// run every time a segment is finalized rather than on its own schedule.
 
 interface RunState {
   child: ChildProcessWithoutNullStreams | null;
@@ -248,9 +257,8 @@ export class ComputerHistoryDemoService {
 
   private segmentId(at: Date): string {
     // Align segment ids to the ten-minute grid so their names sort and group
-    // the same way Codex's do.
-    const aligned = new Date(Math.floor(at.getTime() / SEGMENT_DURATION_MS) * SEGMENT_DURATION_MS);
-    return `${aligned.toISOString().slice(0, 19).replace(/[:]/g, "-")}Z`;
+    // the same way Codex's do, and so the rollup can parse them back.
+    return alignedId(at, SEGMENT_DURATION_MS);
   }
 
   private openSegment(): SegmentState {
@@ -274,7 +282,7 @@ export class ComputerHistoryDemoService {
       startedAt: startedAt.toISOString(),
       eventsFile,
       metadataFile,
-      historyFile: path.join(this.historyDirectory, `${id}.md`),
+      historyFile: path.join(this.historyDirectory, `${id}-10min-summary.md`),
       workflowCandidateFile: path.join(this.workflowDirectory, `${id}-candidate.md`),
       output: "",
     };
@@ -348,7 +356,33 @@ export class ComputerHistoryDemoService {
   private finalizeSegment(segment: SegmentState): void {
     if (!fs.existsSync(segment.eventsFile) || !fs.statSync(segment.eventsFile).size) return;
     const error = this.writeSegmentSummary(segment);
-    if (error) this.observationError = error;
+    if (error) {
+      this.observationError = error;
+      return;
+    }
+    this.writeSixHourRollup(segment.id);
+  }
+
+  /** Rebuilds the six-hour summary covering the segment that just closed. */
+  private writeSixHourRollup(segmentId: string): void {
+    const at = instantFromId(segmentId);
+    if (!at) return;
+    const windowStart = new Date(Math.floor(at.getTime() / SIX_HOUR_MS) * SIX_HOUR_MS);
+    let names: string[];
+    try {
+      names = fs.readdirSync(this.historyDirectory);
+    } catch {
+      return;
+    }
+    const summaries = names
+      .filter((name) => name.endsWith(".md") && name.includes("-10min-"))
+      .map((name) => ({
+        name,
+        markdown: fs.readFileSync(path.join(this.historyDirectory, name), "utf8"),
+      }));
+    const rollup = buildSixHourSummary(summaries, windowStart);
+    if (!rollup) return;
+    fs.writeFileSync(path.join(this.historyDirectory, rollup.fileName), rollup.markdown, "utf8");
   }
 
   private rotateSegment(): void {
