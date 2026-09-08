@@ -8,13 +8,14 @@ import {
   readFileSync,
   readlinkSync,
   rmSync,
-  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { runInNewContext } from "node:vm";
 import { afterEach, describe, expect, it } from "vitest";
+import YAML from "yaml";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const installerPath = path.join(repoRoot, "scripts", "install.sh");
@@ -232,6 +233,7 @@ describe("Linux CLI package boundary", () => {
     const installer = readFileSync(installerPath, "utf8");
 
     expect(builder).toContain("App/memmy-agent/dist/main.js");
+    expect(builder).toContain("AgentSourceCore/dist/src/index.js");
     expect(builder).toContain("Memory/dist/src/server/index.js");
     expect(builder).toContain("Memory/dist/src/cli/index.js");
     expect(builder).toContain("builtin-skill-target-registry.js");
@@ -244,7 +246,7 @@ describe("Linux CLI package boundary", () => {
     expect(builder).not.toContain("App/shell/desktop");
     expect(builder).not.toContain("App/frontend/desktop");
     expect(installer).toContain('(cd "$AGENT_DIR" && npm ci --omit=dev');
-    expect(installer).toContain("npm ci --omit=dev --workspace @memmy/memory");
+    expect(installer).toContain("npm ci --omit=dev --workspaces");
     expect(installer).toContain('--home "$MEMMY_HOME_DIR"');
     expect(installer).toContain("--generate-token-if-missing");
     expect(installer).toContain("systemctl --user enable --now memmy-memory.service");
@@ -291,6 +293,7 @@ describe("Linux CLI package boundary", () => {
     const listing = spawnSync("tar", ["-tzf", archive], { encoding: "utf8" });
     expect(listing.status, listing.stderr).toBe(0);
     expect(listing.stdout).toContain("App/memmy-agent/dist/main.js");
+    expect(listing.stdout).toContain("AgentSourceCore/dist/src/index.js");
     expect(listing.stdout).toContain("Memory/dist/src/server/index.js");
     expect(listing.stdout).toContain("Memory/dist/src/cli/index.js");
     expect(listing.stdout).toContain("App/backend/dist/src/services/builtin-skill-target-registry.js");
@@ -322,13 +325,11 @@ describe("Linux CLI package boundary", () => {
       env: cleanNpmLifecycleEnv(),
     });
     expect(installDryRun.status, installDryRun.stderr).toBe(0);
-    const memoryInstallDryRun = spawnSync("npm", [
+    const runtimeInstall = spawnSync("npm", [
       "ci",
       "--omit=dev",
-      "--workspace",
-      "@memmy/memory",
+      "--workspaces",
       "--include-workspace-root=false",
-      "--dry-run",
       "--ignore-scripts",
       "--no-audit",
       "--no-fund",
@@ -337,10 +338,23 @@ describe("Linux CLI package boundary", () => {
       encoding: "utf8",
       env: cleanNpmLifecycleEnv(),
     });
-    expect(memoryInstallDryRun.status, memoryInstallDryRun.stderr).toBe(0);
+    expect(runtimeInstall.status, runtimeInstall.stderr).toBe(0);
+    expect(existsSync(path.join(extracted, "AgentSourceCore", "dist", "src", "index.js"))).toBe(true);
+    expect(existsSync(path.join(extracted, "node_modules", "@memmy", "agent-source-core"))).toBe(true);
 
-    rmSync(path.join(extracted, "node_modules"), { recursive: true, force: true });
-    symlinkSync(path.join(repoRoot, "node_modules"), path.join(extracted, "node_modules"));
+    const migrationModuleUrl = pathToFileURL(path.join(
+      extracted,
+      "Migrations",
+      "dist",
+      "runner.js",
+    )).href;
+    const migrationImport = spawnSync("node", [
+      "--input-type=module",
+      "--eval",
+      `await import(${JSON.stringify(migrationModuleUrl)});`,
+    ], { cwd: extracted, encoding: "utf8" });
+    expect(migrationImport.status, migrationImport.stderr).toBe(0);
+
     const integrationModuleUrl = pathToFileURL(path.join(
       extracted,
       "App",
@@ -362,6 +376,35 @@ describe("Linux CLI package boundary", () => {
     ], { cwd: extracted, encoding: "utf8" });
     expect(integrationImport.status, integrationImport.stderr).toBe(0);
   }, 120_000);
+
+  it.each([
+    { event: "release", expectedRef: "refs/tags/v1.1.3" },
+    { event: "pull_request", expectedRef: "a".repeat(40) },
+    { event: "workflow_dispatch", expectedRef: "a".repeat(40) },
+  ])("selects an unambiguous checkout ref for $event", ({ event, expectedRef }) => {
+    const workflow = YAML.parse(readFileSync(linuxWorkflowPath, "utf8"));
+    const checkout = workflow.jobs.build.steps.find((step) =>
+      step.uses?.startsWith("actions/checkout@"));
+    const ref = checkout.with.ref;
+    expect(ref.startsWith("${{")).toBe(true);
+    expect(ref.endsWith("}}")).toBe(true);
+
+    // This expression uses the shared JavaScript/Actions comparison and boolean
+    // subset. Evaluate the workflow itself, including Actions' format function.
+    const resolvedRef = runInNewContext(ref.slice(3, -2), {
+      github: {
+        event_name: event,
+        sha: "a".repeat(40),
+        event: { release: { tag_name: "v1.1.3" } },
+      },
+      format: (template, ...values) => template.replace(/\{(\d+)\}/g,
+        (_, index) => String(values[Number(index)])),
+    });
+
+    // actions/checkout prefers a branch for bare vX.Y.Z when both refs exist.
+    // A release must explicitly select the tag; other runs keep their event SHA.
+    expect(resolvedRef).toBe(expectedRef);
+  });
 
   it("keeps Linux publication isolated from the desktop Draft Release", () => {
     const linuxWorkflow = readFileSync(linuxWorkflowPath, "utf8");
@@ -439,7 +482,7 @@ describe("Linux one-line installer transaction", () => {
     const beforeFailure = readlinkSync(current);
     const npmFailed = runInstaller(home, release, tools, { MEMMY_FIXTURE_NPM_FAIL: "1" });
     expect(npmFailed.status).not.toBe(0);
-    expect(npmFailed.stderr).toContain("Memory dependency installation failed");
+    expect(npmFailed.stderr).toContain("Memory runtime dependency installation failed");
     expect(readlinkSync(current)).toBe(beforeFailure);
 
     const configPath = path.join(home, ".memmy", "config.yaml");

@@ -208,7 +208,7 @@ If `Enter` only completed the command, press `Enter` again to run it.
 
 - `exit`, `quit`, `/exit`, `/quit`, and `:q` all exit, but only `/quit` appears in the menu.
 
-- Whether `/history-dag` and `/dream*` appear depends on whether the corresponding features are enabled.
+- Whether `/history-dag` appears depends on whether the corresponding feature is enabled.
 
 - Up to 8 suggestions are shown initially; keep typing a command prefix to filter down to others.
 
@@ -237,18 +237,13 @@ If `Enter` only completed the command, press `Enter` again to run it.
 | `/goal edit <objective>` | new goal text | Edit the goal |
 | `/goal budget <n\|none>` | a number or `none` | Set or clear the goal budget |
 | `/goal clear` | none | Clear the goal |
-| `/dream` | none | Run memory consolidation |
-| `/dream-log` | none | Show the memory-consolidation log |
-| `/dream-log <sha>` | Dream version SHA | Show the changes in a specific memory consolidation version |
-| `/dream-restore` | none | List restorable memory consolidation versions |
-| `/dream-restore <sha>` | Dream version SHA | Restore a specific memory consolidation version |
 | `/pairing` | none | View or manage channel pairings |
 | `/pairing list` | none | List channel pairing requests |
 | `/pairing approve <code>` | pairing code | Approve a pairing request |
 | `/pairing deny <code>` | pairing code | Deny a pairing request |
 | `/pairing revoke <user_id>` | user ID | Revoke a user's pairing |
 
-Whether commands such as `/history-dag` and `/dream*` are available depends on whether the corresponding features are enabled in your configuration.
+Whether `/history-dag` is available depends on whether the corresponding feature is enabled in your configuration.
 
 ## FAQ
 

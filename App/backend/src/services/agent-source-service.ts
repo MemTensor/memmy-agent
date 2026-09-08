@@ -21,7 +21,8 @@ import type {
 import type {
   ConversationMessage,
   ScanOptions,
-  ScanProgress
+  ScanProgress,
+  SourceAdapter
 } from "../adapters/outbound/agent-source/types.js";
 import type { MemoryClient } from "../adapters/outbound/memory-client/index.js";
 import type { SourceRegistry } from "../adapters/outbound/agent-source/source-registry.js";
@@ -43,13 +44,25 @@ import {
   extractManagedAgentHistory,
   selectIncrementalManagedMessages
 } from "./managed-agent-history.js";
+import {
+  orderedTurns,
+  splitTurn,
+  stableTurnIdentity,
+  isCompleteTurn,
+  legacyTurnId,
+  legacyTurnRequestId
+} from "@memmy/agent-source-core";
+import { openAppAgentSourceScanStore, type AppAgentSourceScanStore } from "../infrastructure/agent-source-scan-store/index.js";
 
 export type { ScanProgress } from "../adapters/outbound/agent-source/types.js";
 
 const SCAN_MESSAGE_YIELD_INTERVAL = 100;
-const IMPORT_WORKER_BATCH_SIZE = 20;
+const IMPORT_WORKER_BATCH_SIZE = 1;
 const IMPORT_PROCESSING_COHORT_SIZE = 100;
-const IMPORT_WORKER_TIMEOUT_MS = 600_000;
+// A targeted run leases one job so the timeout never depends on queue ordering.
+// One summary can make three content attempts, each with four 180s HTTP attempts
+// and backoff; keep a safety margin without replaying the worker request.
+const IMPORT_WORKER_TIMEOUT_MS = 2_400_000;
 const IMPORT_PROGRESS_POLL_INTERVAL_MS = 250;
 const INITIAL_GLOBAL_MEMORY_LIMIT = 1_000;
 const INITIAL_ABSENT_SOURCE_MEMORY_LIMIT = 200;
@@ -57,6 +70,7 @@ const INITIAL_SOURCE_MEMORY_LIMIT = 1_000;
 
 /** Contract for agent source service. */
 export interface AgentSourceService {
+  readonly supportsPersistentScan?: true;
   list(): Promise<AgentSourceView[]>;
   scanAll(options?: AgentSourceScanOptions): Promise<ScanResult[]>;
   scanOne(sourceId: string, options?: AgentSourceScanOptions): Promise<ScanResult>;
@@ -92,6 +106,7 @@ export interface AgentSourceScanOptions {
   signal?: AbortSignal;
   onProgress?: (progress: ScanProgress) => void;
   progressSourceId?: string;
+  scanJobId?: string;
 }
 
 /** Contract for create agent source service options. */
@@ -105,6 +120,7 @@ export interface CreateAgentSourceServiceOptions {
   getScanPermission?: () => Promise<ScanPermission>;
   now?: () => string;
   createId?: () => string;
+  scanStoreDirectory?: string;
 }
 
 /** Creates create agent source service. */
@@ -114,19 +130,20 @@ export function createAgentSourceService(options: CreateAgentSourceServiceOption
   const agentSourceAnalytics = options.agentSourceAnalytics ?? createAgentSourceLifecycleAnalytics();
 
   return {
+    supportsPersistentScan: true,
     async list() {
       return await listSources(options);
     },
 
     async scanAll(scanOptions = {}) {
-      const collected = await this.collectAll(scanOptions);
-      const results = await this.ingestCollected(collected, scanOptions);
-      const failures = await this.processImportSummaries(
-        results.flatMap((result) => result.memoryIds ?? []),
-        { ...scanOptions, progressSourceId: "all" }
-      );
-      appendProcessingFailuresToResults(results, failures);
-      return results;
+      if (!scanOptions.scanJobId && !options.scanStoreDirectory) {
+        const collected = await this.collectAll(scanOptions);
+        const results = await this.ingestCollected(collected, scanOptions);
+        const failures = await this.processImportSummaries(results.flatMap((result) => result.memoryIds ?? []), { ...scanOptions, progressSourceId: "all" });
+        appendProcessingFailuresToResults(results, failures);
+        return results;
+      }
+      return scanPersistent(options, "all", scanOptions, now);
     },
 
     async collectAll(scanOptions = {}) {
@@ -157,15 +174,21 @@ export function createAgentSourceService(options: CreateAgentSourceServiceOption
     },
 
     async scanOne(sourceId, scanOptions = {}) {
-      const collected = await this.collectOne(sourceId, scanOptions);
-      const result = await ingestCollectedSource(options, collected, scanOptions, now);
-      const failures = await processPendingImportSummaries(
-        options,
-        result.memoryIds ?? [],
-        { ...scanOptions, progressSourceId: sourceId }
-      );
-      appendProcessingFailures(result, failures);
-      return result;
+      if (!scanOptions.scanJobId && !options.scanStoreDirectory) {
+        const collected = await this.collectOne(sourceId, scanOptions);
+        const result = await ingestCollectedSource(options, collected, scanOptions, now);
+        const failures = await processPendingImportSummaries(options, result.memoryIds ?? [], { ...scanOptions, progressSourceId: sourceId });
+        appendProcessingFailures(result, failures);
+        return result;
+      }
+      const results = await scanPersistent(options, sourceId, scanOptions, now);
+      return results[0] ?? {
+        sourceId,
+        discoveredConversations: 0,
+        emittedMessages: 0,
+        skipped: 0,
+        errors: [{ conversationId: "scan", reason: "No result" }]
+      };
     },
 
     async addManual(input) {
@@ -510,6 +533,406 @@ async function detectAvailableSourceAdapters(options: CreateAgentSourceServiceOp
   return detected.filter((entry) => entry.available).map((entry) => entry.adapter);
 }
 
+interface PersistentSourceStage {
+  adapter: SourceAdapter;
+  sourceId: string;
+  mode: AgentSourceScanMode;
+  since?: string;
+  errors: Array<{ conversationId: string; reason: string }>;
+  scanErrorCount: number;
+}
+
+/** Runs the production scan through a durable, bounded staging store. */
+async function scanPersistent(
+  options: CreateAgentSourceServiceOptions,
+  requestedSourceId: string,
+  scanOptions: AgentSourceScanOptions,
+  now: () => string
+): Promise<ScanResult[]> {
+  const adapters = requestedSourceId === "all"
+    ? options.sourceRegistry.list()
+    : [options.sourceRegistry.require(requestedSourceId)];
+  const jobId = scanOptions.scanJobId ?? randomUUID();
+  const directory = options.scanStoreDirectory ?? `${process.cwd()}/agent-source-scans`;
+  const store = openAppAgentSourceScanStore(`${directory}/${jobId}.sqlite`, {
+    jobId, sourceId: requestedSourceId, mode: scanOptions.mode ?? "incremental", phase: "stage", createdAt: now(), updatedAt: now()
+  });
+  const results: ScanResult[] = [];
+  let completed = false;
+  try {
+    const available: SourceAdapter[] = [];
+    for (const adapter of adapters) {
+      scanOptions.signal?.throwIfAborted();
+      if (await adapter.detect()) available.push(adapter);
+      else if (requestedSourceId !== "all") throw new AgentSourceUnavailableError(adapter.descriptor.displayName);
+    }
+    const globalInitial = requestedSourceId === "all" && available.length > 0 &&
+      (scanOptions.mode === "initial_subset" || (scanOptions.mode === undefined && available.every((adapter) => !options.agentSourceRepository.getScanWatermark(adapter.descriptor.sourceId))));
+    const stages: PersistentSourceStage[] = [];
+    for (const adapter of available) {
+      scanOptions.signal?.throwIfAborted();
+      const sourceId = adapter.descriptor.sourceId;
+      const watermark = options.agentSourceRepository.getScanWatermark(sourceId);
+      const mode = scanOptions.mode ?? (watermark ? "incremental" : "initial_subset");
+      const since = scanOptions.since ?? (mode === "incremental" ? watermarkCursor(watermark) : undefined);
+      stages.push(await stagePersistentSource(options, store, adapter, mode, since, scanOptions, now));
+    }
+    if (globalInitial) {
+      for (const stage of stages) {
+        scanOptions.signal?.throwIfAborted();
+        store.saveMeta({ jobId: store.getMeta()?.jobId ?? jobId, sourceId: store.getMeta()?.sourceId ?? requestedSourceId, mode: stage.mode, phase: "prepare", createdAt: store.getMeta()?.createdAt ?? now(), updatedAt: now() });
+        const sourceState = store.getSourceState(stage.sourceId);
+        store.saveSourceState({ ...(sourceState ?? { sourceId: stage.sourceId, mode: stage.mode, messageCount: store.count(stage.sourceId), resultCount: store.resultCount(stage.sourceId), errorCount: stage.scanErrorCount, updatedAt: now() }), phase: "prepare", updatedAt: now() });
+        await preparePersistentSource(options, store, stage.sourceId, stage.mode);
+      }
+      store.selectInitialTurns(stages.map((stage) => stage.sourceId), INITIAL_GLOBAL_MEMORY_LIMIT, INITIAL_ABSENT_SOURCE_MEMORY_LIMIT);
+    }
+    for (const stage of stages) {
+      const result = await ingestPersistentStagedSource(options, store, stage, scanOptions, now, globalInitial);
+      results.push(result);
+      store.saveSourceState({
+        sourceId: stage.sourceId,
+        mode: stage.mode,
+        phase: result.errorCount && result.errorCount > 0 ? "failed" : "done",
+        messageCount: result.emittedMessages,
+        resultCount: store.resultCount(stage.sourceId),
+        errorCount: result.errorCount ?? result.errors.length,
+        updatedAt: now(),
+        ...(stage.since ? { watermarkedSince: stage.since } : {})
+      });
+    }
+    const hasErrors = results.some((result) => (result.errorCount ?? result.errors.length) > 0);
+    store.saveMeta({ jobId, sourceId: requestedSourceId, mode: scanOptions.mode ?? "incremental", phase: hasErrors ? "failed" : "done", createdAt: store.getMeta()?.createdAt ?? now(), updatedAt: now(), ...(hasErrors ? { error: "Agent source scan completed with errors" } : {}) });
+    // Keep large result details available for the paged results endpoint until
+    // the client consumes the final page. Small jobs can release their store
+    // immediately as before.
+    completed = !hasErrors && !results.some((result) => result.detailsTruncated);
+    return results;
+  } catch (error) {
+    store.saveMeta({ ...(store.getMeta() ?? { jobId, sourceId: requestedSourceId, mode: scanOptions.mode ?? "incremental", phase: "stage", createdAt: now(), updatedAt: now() }), phase: "failed", updatedAt: now(), error: error instanceof Error ? error.message : "Agent source scan failed" });
+    throw error;
+  } finally {
+    if (completed) store.remove();
+    else store.close();
+  }
+}
+
+async function stagePersistentSource(
+  options: CreateAgentSourceServiceOptions,
+  store: AppAgentSourceScanStore,
+  adapter: SourceAdapter,
+  mode: AgentSourceScanMode,
+  since: string | undefined,
+  scanOptions: AgentSourceScanOptions,
+  now: () => string
+): Promise<PersistentSourceStage> {
+  const sourceId = adapter.descriptor.sourceId;
+  options.agentSourceRepository.upsertSource({ sourceId, displayName: adapter.descriptor.displayName, dataPath: adapter.descriptor.dataPath, builtin: adapter.descriptor.builtin });
+  store.saveMeta({ jobId: store.getMeta()?.jobId ?? scanOptions.scanJobId ?? "", sourceId: store.getMeta()?.sourceId ?? sourceId, mode, phase: "stage", createdAt: store.getMeta()?.createdAt ?? now(), updatedAt: now() });
+  store.saveSourceState({ sourceId, mode, phase: "stage", messageCount: store.count(sourceId), resultCount: store.resultCount(sourceId), errorCount: 0, updatedAt: now(), ...(since ? { watermarkedSince: since } : {}) });
+  const errors: Array<{ conversationId: string; reason: string }> = [];
+  let scanErrorCount = 0;
+  let batch: ConversationMessage[] = [];
+  let bytes = 0;
+  let emittedOrdinal = 0;
+  try {
+    for await (const message of adapter.scan({
+      since,
+      order: scanOptions.order ?? (mode === "initial_subset" ? "recent_first" : "source_default"),
+      fullHistory: true,
+      signal: scanOptions.signal,
+      onProgress: (progress) => emitProgress(scanOptions, { ...progress, phase: "scan" })
+    })) {
+      scanOptions.signal?.throwIfAborted();
+      const messageBytes = Buffer.byteLength(JSON.stringify(message));
+      if (messageBytes > 64 * 1024 * 1024) {
+        scanErrorCount += 1;
+        if (errors.length < 1000) errors.push({ conversationId: message.conversationId, reason: "scan record exceeds 64 MiB limit" });
+        store.saveResult({ sourceId, conversationId: message.conversationId, error: "scan record exceeds 64 MiB limit" });
+        continue;
+      }
+      if (batch.length > 0 && (batch.length >= 500 || bytes + messageBytes > 8 * 1024 * 1024)) {
+        store.stageBatch(batch);
+        const last = batch[batch.length - 1]!;
+        store.saveScanCursor(sourceId, { conversationId: last.conversationId, createdAt: last.createdAt, messageId: last.messageId, ordinal: last.ordinal ?? 0 });
+        batch = [];
+        bytes = 0;
+      }
+      batch.push({ ...message, ordinal: emittedOrdinal++ });
+      bytes += messageBytes;
+      if (batch.length >= 500 || bytes >= 8 * 1024 * 1024) {
+        store.stageBatch(batch);
+        const last = batch[batch.length - 1]!;
+        store.saveScanCursor(sourceId, { conversationId: last.conversationId, createdAt: last.createdAt, messageId: last.messageId, ordinal: last.ordinal ?? 0 });
+        batch = [];
+        bytes = 0;
+      }
+    }
+    if (batch.length > 0) {
+      store.stageBatch(batch);
+      const last = batch[batch.length - 1]!;
+      store.saveScanCursor(sourceId, { conversationId: last.conversationId, createdAt: last.createdAt, messageId: last.messageId, ordinal: last.ordinal ?? 0 });
+    }
+  } catch (error) {
+    if (scanOptions.signal?.aborted) throw error;
+    scanErrorCount += 1;
+    const reason = error instanceof Error ? error.message : "Agent source scan failed";
+    if (errors.length < 1000) errors.push({ conversationId: "scan", reason });
+    store.saveResult({ sourceId, conversationId: "scan", error: reason });
+  }
+  store.saveSourceState({ sourceId, mode, phase: scanErrorCount > 0 ? "failed" : "stage", messageCount: store.count(sourceId), resultCount: store.resultCount(sourceId), errorCount: scanErrorCount, updatedAt: now(), ...(since ? { watermarkedSince: since } : {}) });
+  return { adapter, sourceId, mode, since, errors, scanErrorCount };
+}
+
+async function ingestPersistentStagedSource(
+  options: CreateAgentSourceServiceOptions,
+  store: AppAgentSourceScanStore,
+  stage: PersistentSourceStage,
+  scanOptions: AgentSourceScanOptions,
+  now: () => string,
+  globalInitial: boolean
+): Promise<ScanResult> {
+  const { sourceId, mode, since } = stage;
+  if (!globalInitial) {
+    store.saveMeta({ jobId: store.getMeta()?.jobId ?? scanOptions.scanJobId ?? "", sourceId: store.getMeta()?.sourceId ?? sourceId, mode, phase: "prepare", createdAt: store.getMeta()?.createdAt ?? now(), updatedAt: now() });
+    const sourceState = store.getSourceState(sourceId);
+    store.saveSourceState({ ...(sourceState ?? { sourceId, mode, messageCount: store.count(sourceId), resultCount: store.resultCount(sourceId), errorCount: stage.scanErrorCount, updatedAt: now() }), phase: "prepare", updatedAt: now() });
+    await preparePersistentSource(options, store, sourceId, mode);
+    if (mode === "initial_subset") store.selectInitialTurns([sourceId], INITIAL_SOURCE_MEMORY_LIMIT, 0);
+  }
+  store.saveMeta({ jobId: store.getMeta()?.jobId ?? scanOptions.scanJobId ?? "", sourceId: store.getMeta()?.sourceId ?? sourceId, mode, phase: "ingest", createdAt: store.getMeta()?.createdAt ?? now(), updatedAt: now() });
+  const preparedState = store.getSourceState(sourceId);
+  store.saveSourceState({ ...(preparedState ?? { sourceId, mode, messageCount: store.count(sourceId), resultCount: store.resultCount(sourceId), errorCount: stage.scanErrorCount, updatedAt: now() }), phase: "ingest", updatedAt: now() });
+  const ingestion = await ingestPersistentSource(options, store, sourceId, scanOptions, []);
+  const scannedAt = now();
+  options.agentSourceRepository.setLastScannedAt(sourceId, scannedAt);
+  const skillResult = await ingestSourceSkills(options, sourceId, scanOptions, store);
+  if (stage.errors.length === 0 && ingestion.errors.length === 0 && skillResult.errorCount === 0) updatePersistentWatermark(options, sourceId, mode, ingestion.latestSeenAt, scannedAt, since);
+  const allErrors = [...stage.errors, ...ingestion.errors, ...skillResult.errors];
+  const errorCount = stage.scanErrorCount + ingestion.errorCount + skillResult.errorCount;
+  const memoryIdCount = ingestion.memoryIdCount + skillResult.memoryIdCount;
+  store.saveMeta({ jobId: store.getMeta()?.jobId ?? scanOptions.scanJobId ?? "", sourceId: store.getMeta()?.sourceId ?? sourceId, mode, phase: "summarize", createdAt: store.getMeta()?.createdAt ?? scannedAt, updatedAt: scannedAt });
+  store.saveSourceState({ sourceId, mode, phase: "summarize", messageCount: store.count(sourceId), resultCount: store.resultCount(sourceId), errorCount, updatedAt: scannedAt, ...(since ? { watermarkedSince: since } : {}) });
+  return {
+    sourceId,
+    discoveredConversations: store.conversationCount(sourceId),
+    emittedMessages: store.count(sourceId),
+    skipped: ingestion.deduped,
+    memoryIds: ingestion.memoryIds,
+    memoryIdCount,
+    errorCount,
+    detailsTruncated: errorCount > 1000 || memoryIdCount > 1000,
+    errors: allErrors.slice(0, 1000)
+  };
+}
+
+async function preparePersistentSource(options: CreateAgentSourceServiceOptions, store: AppAgentSourceScanStore, sourceId: string, mode: AgentSourceScanMode): Promise<void> {
+  let cursor: { conversationId: string; createdAt: string; messageId: string; ordinal: number } | undefined;
+  let currentId: string | null = null;
+  let currentTurn: ConversationMessage[] = [];
+  let turnIndex = 0;
+  let hash = createHash("sha256");
+  let first = true;
+  let latest: ConversationMessage | null = null;
+  const flushTurn = () => {
+    if (!currentTurn.length || !isCompleteTurn(currentTurn)) return;
+    const firstMessage = currentTurn[0]!;
+    const lastMessage = currentTurn[currentTurn.length - 1]!;
+    const turn = { sourceId, conversationId: firstMessage.conversationId, turnIndex, messages: currentTurn };
+    store.saveTurnMeta({
+      sourceId,
+      conversationId: firstMessage.conversationId,
+      turnId: stableTurnIdentity(turn),
+      firstMessageId: firstMessage.messageId,
+      firstCreatedAt: firstMessage.createdAt,
+      lastMessageId: lastMessage.messageId,
+      lastCreatedAt: lastMessage.createdAt,
+      selected: true
+    });
+    turnIndex += 1;
+  };
+  const flush = () => {
+    if (!currentId || !latest) return;
+    hash.update("]");
+    const contentHash = hash.digest("hex");
+    const checkpoint = options.agentSourceRepository.getConversationCheckpoint(sourceId, currentId);
+    const selected = mode === "full" || mode === "initial_subset" || !checkpoint
+      || Date.parse(latest.createdAt) > Date.parse(checkpoint.lastCreatedAt)
+      || (Date.parse(latest.createdAt) === Date.parse(checkpoint.lastCreatedAt) && latest.messageId.localeCompare(checkpoint.lastMessageId) > 0)
+      || checkpoint.contentHash !== contentHash;
+    store.saveConversationMeta({ sourceId, conversationId: currentId, lastMessageId: latest.messageId, lastCreatedAt: latest.createdAt, contentHash, selected });
+  };
+  while (true) {
+    const page = readScanPage(store, sourceId, cursor);
+    if (page.length === 0) break;
+    for (const message of page) {
+      if (message.conversationId !== currentId) {
+        flushTurn();
+        flush();
+        currentId = message.conversationId;
+        currentTurn = [];
+        turnIndex = 0;
+        hash = createHash("sha256");
+        hash.update("[");
+        first = true;
+      }
+      if (message.role === "user" && currentTurn.length > 0) {
+        flushTurn();
+        currentTurn = [];
+      }
+      currentTurn.push(message);
+      if (!first) hash.update(",");
+      first = false;
+      hash.update(JSON.stringify({ messageId: message.messageId, role: message.role, content: message.content, createdAt: message.createdAt, toolName: hashMetaString(message, "toolName") ?? hashMetaString(message, "hermesToolName"), toolCallId: hashMetaString(message, "toolCallId") ?? hashMetaString(message, "hermesToolCallId") }));
+      latest = message;
+    }
+    const last = page[page.length - 1]!;
+    cursor = { conversationId: last.conversationId, createdAt: last.createdAt, messageId: last.messageId, ordinal: last.ordinal ?? 0 };
+  }
+  flushTurn();
+  if (currentId && latest) flush();
+}
+
+function hashMetaString(message: ConversationMessage, key: string): string | undefined {
+  const value = message.rawMeta[key];
+  return typeof value === "string" ? value : undefined;
+}
+
+async function ingestPersistentSource(
+  options: CreateAgentSourceServiceOptions,
+  store: AppAgentSourceScanStore,
+  sourceId: string,
+  scanOptions: AgentSourceScanOptions,
+  initialErrors: readonly { conversationId: string; reason: string }[]
+): Promise<{ memoryIds: string[]; memoryIdCount: number; deduped: number; errorCount: number; errors: Array<{ conversationId: string; reason: string }>; latestSeenAt: string | null }> {
+  const memoryIds: string[] = [];
+  let memoryIdCount = 0;
+  const pendingIds: string[] = [];
+  const errors = initialErrors.slice(0, 1000);
+  let errorCount = initialErrors.length;
+  let deduped = 0;
+  let latestSeenAt: string | null = null;
+  let activeConversationId: string | null = null;
+  let activeConversationFailed = false;
+  const commitConversation = () => {
+    if (!activeConversationId || activeConversationFailed) return;
+    const meta = store.getConversationMeta(sourceId, activeConversationId);
+    if (!meta) return;
+    const updatedAt = new Date().toISOString();
+    const checkpoint = { sourceId, conversationId: activeConversationId, lastMessageId: meta.lastMessageId, lastCreatedAt: meta.lastCreatedAt, contentHash: meta.contentHash, updatedAt };
+    store.saveCheckpoint(checkpoint);
+    options.agentSourceRepository.upsertConversationCheckpoint(checkpoint);
+  };
+  const pages = (async function*() {
+    let cursor: { conversationId: string; createdAt: string; messageId: string; ordinal: number } | undefined;
+    while (true) {
+      const page = readScanPage(store, sourceId, cursor);
+      if (page.length === 0) break;
+      for (const message of page) {
+        yield message;
+      }
+      const last = page[page.length - 1]!;
+      cursor = { conversationId: last.conversationId, createdAt: last.createdAt, messageId: last.messageId, ordinal: last.ordinal ?? 0 };
+    }
+  })();
+  for await (const turn of orderedTurns(pages)) {
+    scanOptions.signal?.throwIfAborted();
+    const turnLatest = turn.messages[turn.messages.length - 1]?.createdAt ?? null;
+    if (turnLatest && (!latestSeenAt || Date.parse(turnLatest) > Date.parse(latestSeenAt))) latestSeenAt = turnLatest;
+    if (turn.conversationId !== activeConversationId) {
+      commitConversation();
+      activeConversationId = turn.conversationId;
+      activeConversationFailed = false;
+    }
+    const conversationMeta = store.getConversationMeta(sourceId, turn.conversationId);
+    if (conversationMeta?.selected === false) continue;
+    const selectedTurn = store.getTurnMeta(sourceId, turn.conversationId, stableTurnIdentity(turn));
+    if (selectedTurn && !selectedTurn.selected) continue;
+    let turnSucceeded = true;
+    // Leave ample room for JSON escaping and the add-memory envelope while
+    // keeping every request below the 1 MiB wire limit.
+    const parts = splitTurn(turn, 4000, 512 * 1024);
+    for (const part of parts) {
+      const contentHash = createHash("sha256").update(part.content).digest("hex");
+      const requestId = parts.length === 1
+        ? legacyTurnRequestId(turn)
+        : createHash("sha256").update([stableTurnIdentity(turn), String(part.partIndex), contentHash].join("\u0000")).digest("hex");
+      const turnId = parts.length === 1 ? legacyTurnId(turn) : `${sourceId}:${part.parentTurnId}:${part.partIndex}`;
+      try {
+        const added = await options.memoryClient.addMemory({
+          requestId,
+          adapterId: `agent-source:${sourceId}`,
+          content: part.content,
+          layer: "L1",
+          title: firstTurnLine(part.messages) ?? `${sourceId} conversation`,
+          tags: ["agent-source", sourceId],
+          source: sourceId,
+          turnId,
+          createdAt: part.messages[0]!.createdAt,
+          deferProcessing: true
+        });
+        if (added.duplicate) deduped += part.messages.length;
+        else {
+          memoryIdCount += 1;
+          if (memoryIds.length < 1000) memoryIds.push(added.id);
+          pendingIds.push(added.id);
+          if (pendingIds.length >= IMPORT_PROCESSING_COHORT_SIZE) {
+            const cohort = pendingIds.splice(0, pendingIds.length);
+            const failures = await processPendingImportSummaries(options, cohort, { ...scanOptions, progressSourceId: sourceId });
+            if (failures.length > 0) activeConversationFailed = true;
+            const mapped = failures.map((failure) => ({ conversationId: failure.memoryId, reason: failure.reason }));
+            errorCount += mapped.length;
+            errors.push(...mapped.slice(0, Math.max(0, 1000 - errors.length)));
+            for (const failure of failures) store.saveResult({ sourceId, conversationId: failure.memoryId, error: failure.reason });
+          }
+        }
+        store.saveResult({ sourceId, conversationId: turn.conversationId, memoryId: added.id });
+      } catch (error) {
+        turnSucceeded = false;
+        activeConversationFailed = true;
+        const reason = error instanceof Error ? error.message : "Agent source ingestion failed";
+        errorCount += 1;
+        if (errors.length < 1000) errors.push({ conversationId: turn.conversationId, reason });
+        store.saveResult({ sourceId, conversationId: turn.conversationId, error: reason });
+      }
+    }
+    if (!turnSucceeded) activeConversationFailed = true;
+    emitProgress(scanOptions, { sourceId, phase: "add", current: memoryIds.length + deduped, total: store.count(sourceId), message: "Adding raw memories" });
+  }
+  if (pendingIds.length > 0) {
+    const failures = await processPendingImportSummaries(options, pendingIds, { ...scanOptions, progressSourceId: sourceId });
+    if (failures.length > 0) activeConversationFailed = true;
+    const mapped = failures.map((failure) => ({ conversationId: failure.memoryId, reason: failure.reason }));
+    errorCount += mapped.length;
+    errors.push(...mapped.slice(0, Math.max(0, 1000 - errors.length)));
+    for (const failure of failures) store.saveResult({ sourceId, conversationId: failure.memoryId, error: failure.reason });
+  }
+  commitConversation();
+  return { memoryIds, memoryIdCount, deduped, errorCount, errors, latestSeenAt };
+}
+
+function readScanPage(store: AppAgentSourceScanStore, sourceId: string, cursor?: { conversationId: string; createdAt: string; messageId: string; ordinal: number }): ConversationMessage[] {
+  const page: ConversationMessage[] = [];
+  let bytes = 0;
+  for (const message of store.messages(sourceId, cursor, 500)) {
+    page.push(message);
+    bytes += Buffer.byteLength(JSON.stringify(message));
+    if (page.length >= 500 || bytes >= 8 * 1024 * 1024) break;
+  }
+  return page;
+}
+
+function firstTurnLine(messages: readonly ConversationMessage[]): string | undefined {
+  const value = messages.find((message) => message.role === "user")?.content;
+  const line = value?.split(/\r?\n/).map((part) => part.trim()).find(Boolean);
+  return line ? (line.length <= 120 ? line : `${line.slice(0, 117)}...`) : undefined;
+}
+
+function updatePersistentWatermark(options: CreateAgentSourceServiceOptions, sourceId: string, mode: AgentSourceScanMode, latestSeenAt: string | null, scannedAt: string, since?: string): void {
+  const existing = options.agentSourceRepository.getScanWatermark(sourceId);
+  options.agentSourceRepository.upsertScanWatermark({ sourceId, mode, baselineAt: existing?.baselineAt ?? since ?? scannedAt, latestSeenCreatedAt: maxIso(existing?.latestSeenCreatedAt ?? null, latestSeenAt), updatedAt: scannedAt });
+}
+
 export interface CollectedSourceScan {
   sourceId: string;
   scanMode?: AgentSourceScanMode;
@@ -557,6 +980,7 @@ async function collectSourceMessages(
     messages: [],
     errors: []
   };
+  const conversationIds = new Set<string>();
 
   emitProgress(scanOptions, {
     sourceId,
@@ -585,7 +1009,8 @@ async function collectSourceMessages(
     })) {
       scanOptions.signal?.throwIfAborted();
       collected.messages.push(message);
-      if (!collected.conversationIds.includes(message.conversationId)) {
+      if (!conversationIds.has(message.conversationId)) {
+        conversationIds.add(message.conversationId);
         collected.conversationIds.push(message.conversationId);
       }
       if (collected.messages.length % SCAN_MESSAGE_YIELD_INTERVAL === 0) {
@@ -689,7 +1114,7 @@ async function ingestCollectedSource(
   ) {
     updateScanWatermark(options, collected, scanOptions, scannedAt);
   }
-  errors.push(...await ingestSourceSkills(options, collected.sourceId, scanOptions));
+  errors.push(...(await ingestSourceSkills(options, collected.sourceId, scanOptions)).errors);
   return {
     sourceId: collected.sourceId,
     discoveredConversations: collected.conversationIds.length,
@@ -700,28 +1125,39 @@ async function ingestCollectedSource(
   };
 }
 
+interface SkillScanOutcome {
+  errors: Array<{ conversationId: string; reason: string }>;
+  errorCount: number;
+  memoryIdCount: number;
+}
+
 async function ingestSourceSkills(
   options: CreateAgentSourceServiceOptions,
   sourceId: string,
-  scanOptions: AgentSourceScanOptions
-): Promise<Array<{ conversationId: string; reason: string }>> {
-  if (!options.skillDistributionService.listSkills) return [];
+  scanOptions: AgentSourceScanOptions,
+  store?: AppAgentSourceScanStore
+): Promise<SkillScanOutcome> {
+  if (!options.skillDistributionService.listSkills) return { errors: [], errorCount: 0, memoryIdCount: 0 };
 
   const errors: Array<{ conversationId: string; reason: string }> = [];
+  let errorCount = 0;
+  let memoryIdCount = 0;
   let skills;
   try {
     skills = await options.skillDistributionService.listSkills(sourceId);
   } catch (error) {
-    return [{
+    const detail = {
       conversationId: "skills",
       reason: error instanceof Error ? error.message : "Agent Skill scan failed"
-    }];
+    };
+    store?.saveResult({ sourceId, conversationId: detail.conversationId, error: detail.reason });
+    return { errors: [detail], errorCount: 1, memoryIdCount: 0 };
   }
 
   for (const skill of skills) {
     scanOptions.signal?.throwIfAborted();
     try {
-      await options.memoryClient.addMemory({
+      const added = await options.memoryClient.addMemory({
         requestId: `agent-source-skill:${sourceId}:${skill.sourceSkillId}:${skill.sourceContentHash}`,
         adapterId: `agent-source:${sourceId}`,
         content: skill.content,
@@ -737,14 +1173,19 @@ async function ingestSourceSkills(
         sourceSkillVersion: skill.sourceSkillVersion,
         sourceContentHash: skill.sourceContentHash
       });
+      memoryIdCount += 1;
+      store?.saveResult({ sourceId, conversationId: `skill:${skill.sourceSkillId}`, memoryId: added.id });
     } catch (error) {
-      errors.push({
+      errorCount += 1;
+      const detail = {
         conversationId: `skill:${skill.sourceSkillId}`,
         reason: error instanceof Error ? error.message : "Agent Skill import failed"
-      });
+      };
+      store?.saveResult({ sourceId, conversationId: detail.conversationId, error: detail.reason });
+      if (errors.length < 1000) errors.push(detail);
     }
   }
-  return errors;
+  return { errors, errorCount, memoryIdCount };
 }
 
 function filterCheckpointedConversations(
@@ -1077,44 +1518,36 @@ async function processPendingImportSummaries(
     while (pendingMemoryIds.size > 0) {
       scanOptions.signal?.throwIfAborted();
       const targets = [...pendingMemoryIds];
-      const result = await options.memoryClient.runWorker({
+      const workerOutcome = options.memoryClient.runWorker({
         limit: IMPORT_WORKER_BATCH_SIZE,
         targetMemoryIds: targets,
         priorityCohortOnly: true,
         signal: scanOptions.signal,
         timeoutMs: IMPORT_WORKER_TIMEOUT_MS
-      });
+      }).then((result) => ({ kind: "worker" as const, result }));
+      let result: Awaited<ReturnType<MemoryClient["runWorker"]>> | undefined;
 
-      const refreshed = await options.memoryClient.getMemoryProcessingStatus(targets);
-      const processingByMemoryId = new Map(refreshed.items.map((item) => [item.memoryId, item]));
-      const activeMemoryIds = new Set(refreshed.items
-        .filter((item) => item.state === "summary_pending" || item.state === "summarizing" ||
-          item.state === "embedding_pending" || item.state === "embedding")
-        .map((item) => item.memoryId));
-      const previousPending = pendingMemoryIds.size;
-      for (const memoryId of pendingMemoryIds) {
-        if (activeMemoryIds.has(memoryId)) continue;
-        const processing = processingByMemoryId.get(memoryId);
-        if (!processing) {
-          failures.push({ memoryId, reason: "Memory processing state is missing" });
-        } else if (processing.state === "failed") {
-          failures.push({
-            memoryId,
-            reason: processing.errorMessage || "Memory processing failed"
-          });
+      while (!result) {
+        const outcome = await Promise.race([
+          workerOutcome,
+          waitForWorkerProgress(IMPORT_PROGRESS_POLL_INTERVAL_MS, undefined, { signal: scanOptions.signal })
+            .then(() => ({ kind: "poll" as const }))
+        ]);
+        if (outcome.kind === "worker") result = outcome.result;
+        const previousPending = pendingMemoryIds.size;
+        await reconcileImportProcessing(options.memoryClient, pendingMemoryIds, failures);
+        if (pendingMemoryIds.size < previousPending) lastProgressAt = Date.now();
+        emitProgress(scanOptions, {
+          sourceId: progressSourceId,
+          phase: "summarize",
+          current: completedMemoryCount + cohort.length - pendingMemoryIds.size,
+          total: ownedMemoryIds.length,
+          message: "Summarizing and indexing latest memories"
+        });
+        if (pendingMemoryIds.size === 0 && !result) {
+          result = (await workerOutcome).result;
         }
-        pendingMemoryIds.delete(memoryId);
       }
-      if (pendingMemoryIds.size < previousPending) {
-        lastProgressAt = Date.now();
-      }
-      emitProgress(scanOptions, {
-        sourceId: progressSourceId,
-        phase: "summarize",
-        current: completedMemoryCount + cohort.length - pendingMemoryIds.size,
-        total: ownedMemoryIds.length,
-        message: "Summarizing and indexing latest memories"
-      });
 
       if (pendingMemoryIds.size === 0) break;
       if (Date.now() - lastProgressAt >= IMPORT_WORKER_TIMEOUT_MS) {
@@ -1128,6 +1561,29 @@ async function processPendingImportSummaries(
     completedMemoryCount += cohort.length;
   }
   return failures;
+}
+
+async function reconcileImportProcessing(
+  memoryClient: Pick<MemoryClient, "getMemoryProcessingStatus">,
+  pendingMemoryIds: Set<string>,
+  failures: ProcessingFailure[]
+): Promise<void> {
+  const refreshed = await memoryClient.getMemoryProcessingStatus([...pendingMemoryIds]);
+  const processingByMemoryId = new Map(refreshed.items.map((item) => [item.memoryId, item]));
+  const activeMemoryIds = new Set(refreshed.items
+    .filter((item) => item.state === "summary_pending" || item.state === "summarizing" ||
+      item.state === "embedding_pending" || item.state === "embedding")
+    .map((item) => item.memoryId));
+  for (const memoryId of pendingMemoryIds) {
+    if (activeMemoryIds.has(memoryId)) continue;
+    const processing = processingByMemoryId.get(memoryId);
+    if (!processing) {
+      failures.push({ memoryId, reason: "Memory processing state is missing" });
+    } else if (processing.state === "failed") {
+      failures.push({ memoryId, reason: processing.errorMessage || "Memory processing failed" });
+    }
+    pendingMemoryIds.delete(memoryId);
+  }
 }
 
 function appendProcessingFailures(result: ScanResult, failures: readonly ProcessingFailure[]): void {

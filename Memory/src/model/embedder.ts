@@ -5,6 +5,10 @@ import type { EmbeddingConfig } from "../config/index.js";
 import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
 import { stableHash } from "../utils/id.js";
 import { bearer, postJsonWithRetry, trimTrailingSlash } from "./http.js";
+import {
+  aggregateOpenAiEmbeddingVectors,
+  planOpenAiEmbeddingInputs
+} from "./openai-embedding-inputs.js";
 import { HttpByokTokenUsageRecorder, extractModelTokenUsage } from "./token-usage.js";
 import type { Embedder, ModelStatus } from "./types.js";
 
@@ -216,6 +220,29 @@ class HttpEmbedder implements Embedder {
     if (!this.config.apiKey && !this.config.endpoint) {
       throw new Error(`${provider} embedding provider requires apiKey or endpoint`);
     }
+    const plan = provider === "openai_compatible"
+      ? planOpenAiEmbeddingInputs(texts, this.config.model, this.config.maxInputTokens)
+      : null;
+    if (!plan) return this.requestOpenAiShape(texts, provider, url, role);
+
+    const chunkVectors: number[][] = [];
+    for (const batch of plan.batches) {
+      chunkVectors.push(...await this.requestOpenAiShape(
+        batch.map((chunk) => chunk.input),
+        provider,
+        url,
+        role
+      ));
+    }
+    return aggregateOpenAiEmbeddingVectors(plan, chunkVectors);
+  }
+
+  private async requestOpenAiShape(
+    inputs: Array<string | number[]>,
+    provider: string,
+    url: string,
+    role: "query" | "document"
+  ): Promise<number[][]> {
     const response = await postJsonWithRetry<OpenAiEmbeddingResponse>({
       actualModelContext: this.config.actualModelContext,
       provider: this.config.sourceProvider ?? provider,
@@ -230,11 +257,11 @@ class HttpEmbedder implements Embedder {
       maxRetries: this.config.maxRetries,
       body: {
         model: this.config.model,
-        input: texts,
+        input: inputs,
         ...(this.config.extraBody ?? {})
       }
     });
-    const vectors = validateVectors(provider, response.data?.map((row) => row.embedding), texts.length);
+    const vectors = validateVectors(provider, response.data?.map((row) => row.embedding), inputs.length);
     this.recordEmbeddingUsage(response, provider, role);
     return vectors;
   }

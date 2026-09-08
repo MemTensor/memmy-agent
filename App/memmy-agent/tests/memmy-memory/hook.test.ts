@@ -66,7 +66,7 @@ function fakeV2Client() {
 }
 
 describe("MemmyMemoryHook", () => {
-  it("loads one v2 Session snapshot before prompt construction and reuses it on ordinary turns", async () => {
+  it("opens a v2 Session at sessionStart and reads L3 once before every prompt build", async () => {
     const client = fakeV2Client();
     const workspace = mkdtempSync(join(tmpdir(), "memmy-v2-hook-"));
     const memmyHome = mkdtempSync(join(tmpdir(), "memmy-v2-home-"));
@@ -85,12 +85,15 @@ describe("MemmyMemoryHook", () => {
       };
       const lifecycle = new AgentHookContext({ sessionKey: spec.sessionKey, spec });
 
+      await hook.sessionStart(lifecycle);
+      expect(client.l3WorldModelContext).not.toHaveBeenCalled();
+
       await hook.beforeBuildSystemPrompt(lifecycle);
       await hook.beforeBuildSystemPrompt(lifecycle);
 
       expect(client.health).toHaveBeenCalledTimes(1);
       expect(client.openSession).toHaveBeenCalledTimes(1);
-      expect(client.l3WorldModelContext).toHaveBeenCalledTimes(1);
+      expect(client.l3WorldModelContext).toHaveBeenCalledTimes(2);
       expect(client.openSession.mock.calls[0]![0]).toMatchObject({
         l3WorldModelProtocolVersion: 2,
         l3WorldModelTransition: "allow_legacy_rollover",
@@ -117,7 +120,7 @@ describe("MemmyMemoryHook", () => {
         finalContent: "完成",
         stopReason: "completed",
       });
-      expect(client.l3WorldModelContext).toHaveBeenCalledTimes(1);
+      expect(client.l3WorldModelContext).toHaveBeenCalledTimes(2);
       expect(client.startTurn.mock.calls[0]![1].namespace.projectId).toBe(`ws_${"a".repeat(64)}`);
       expect(client.startTurn.mock.calls[0]![1].namespace).not.toHaveProperty("workspacePath");
     } finally {
@@ -128,7 +131,128 @@ describe("MemmyMemoryHook", () => {
     }
   });
 
-  it("refreshes L3 only after successful token compaction", async () => {
+  it("preserves an identical L3 snapshot, replaces a changed snapshot, and removes an empty snapshot", async () => {
+    const client = fakeV2Client();
+    const workspace = mkdtempSync(join(tmpdir(), "memmy-v2-snapshot-"));
+    try {
+      const hook = new MemmyMemoryHook(client as any, { workspace, userId: "v2-user" });
+      const spec = {
+        sessionKey: "websocket:v2-snapshot",
+        hostProjectId: "local-project-id",
+        workspace,
+      };
+      const lifecycle = new AgentHookContext({ sessionKey: spec.sessionKey, spec });
+
+      client.l3WorldModelContext
+        .mockResolvedValueOnce({
+          sessionId: "memory-v2-session",
+          projectId: `ws_${"a".repeat(64)}`,
+          memoryId: "l3-memory-1",
+          memoryVersion: 1,
+          renderedContext: "L3_V1",
+          sourceMemoryIds: ["l1-1"],
+        })
+        .mockResolvedValueOnce({
+          sessionId: "memory-v2-session",
+          projectId: `ws_${"a".repeat(64)}`,
+          memoryId: "l3-memory-1",
+          memoryVersion: 1,
+          renderedContext: "SHOULD_NOT_REPLACE_IDENTICAL_SNAPSHOT",
+          sourceMemoryIds: ["l1-2"],
+        })
+        .mockResolvedValueOnce({
+          sessionId: "memory-v2-session",
+          projectId: `ws_${"a".repeat(64)}`,
+          memoryId: "l3-memory-1",
+          memoryVersion: 2,
+          renderedContext: "L3_V2",
+          sourceMemoryIds: ["l1-1", "l1-2"],
+        })
+        .mockResolvedValueOnce({
+          sessionId: "memory-v2-session",
+          projectId: `ws_${"a".repeat(64)}`,
+          memoryId: null,
+          memoryVersion: null,
+          renderedContext: "",
+          sourceMemoryIds: [],
+        } as any);
+
+      await hook.beforeBuildSystemPrompt(lifecycle);
+      const firstPrompt = new SystemPromptBuildContext({ sessionKey: spec.sessionKey });
+      hook.onBuildSystemPrompt(firstPrompt);
+      expect(firstPrompt.getSection("memmy-l3-world-model")?.content).toContain("L3_V1");
+
+      await hook.beforeBuildSystemPrompt(lifecycle);
+      const identicalPrompt = new SystemPromptBuildContext({ sessionKey: spec.sessionKey });
+      hook.onBuildSystemPrompt(identicalPrompt);
+      expect(identicalPrompt.getSection("memmy-l3-world-model")?.content).toContain("L3_V1");
+      expect(identicalPrompt.getSection("memmy-l3-world-model")?.content).not.toContain("SHOULD_NOT_REPLACE");
+
+      await hook.beforeBuildSystemPrompt(lifecycle);
+      const updatedPrompt = new SystemPromptBuildContext({ sessionKey: spec.sessionKey });
+      hook.onBuildSystemPrompt(updatedPrompt);
+      expect(updatedPrompt.getSection("memmy-l3-world-model")?.content).toContain("L3_V2");
+      expect(updatedPrompt.sections.filter((section) => section.id === "memmy-l3-world-model")).toHaveLength(1);
+
+      await hook.beforeBuildSystemPrompt(lifecycle);
+      hook.onBuildSystemPrompt(updatedPrompt);
+      expect(updatedPrompt.getSection("memmy-l3-world-model")).toBeNull();
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it("retries an unavailable L3 read and preserves the last successful snapshot", async () => {
+    const client = fakeV2Client();
+    const workspace = mkdtempSync(join(tmpdir(), "memmy-v2-recovery-"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const hook = new MemmyMemoryHook(client as any, { workspace, userId: "v2-user" });
+      const spec = {
+        sessionKey: "websocket:v2-recovery",
+        hostProjectId: "local-project-id",
+        workspace,
+      };
+      const lifecycle = new AgentHookContext({ sessionKey: spec.sessionKey, spec });
+      const response = (memoryVersion: number, renderedContext: string) => ({
+        sessionId: "memory-v2-session",
+        projectId: `ws_${"a".repeat(64)}`,
+        memoryId: "l3-memory-1",
+        memoryVersion,
+        renderedContext,
+        sourceMemoryIds: ["l1-1"],
+      });
+
+      client.l3WorldModelContext
+        .mockRejectedValueOnce(new Error("context unavailable"))
+        .mockResolvedValueOnce(response(1, "L3_V1"))
+        .mockRejectedValueOnce(new Error("context unavailable again"))
+        .mockResolvedValueOnce(response(2, "L3_V2"));
+
+      await hook.beforeBuildSystemPrompt(lifecycle);
+      const prompt = new SystemPromptBuildContext({ sessionKey: spec.sessionKey });
+      hook.onBuildSystemPrompt(prompt);
+      expect(prompt.getSection("memmy-l3-world-model")).toBeNull();
+
+      await hook.beforeBuildSystemPrompt(lifecycle);
+      hook.onBuildSystemPrompt(prompt);
+      expect(prompt.getSection("memmy-l3-world-model")?.content).toContain("L3_V1");
+
+      await hook.beforeBuildSystemPrompt(lifecycle);
+      hook.onBuildSystemPrompt(prompt);
+      expect(prompt.getSection("memmy-l3-world-model")?.content).toContain("L3_V1");
+
+      await hook.beforeBuildSystemPrompt(lifecycle);
+      hook.onBuildSystemPrompt(prompt);
+      expect(prompt.getSection("memmy-l3-world-model")?.content).toContain("L3_V2");
+      expect(client.l3WorldModelContext).toHaveBeenCalledTimes(4);
+    } finally {
+      warn.mockRestore();
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it("freezes a successful token compaction without reloading L3", async () => {
     const client = fakeV2Client();
     const workspace = mkdtempSync(join(tmpdir(), "memmy-v2-bridge-"));
     const memmyHome = mkdtempSync(join(tmpdir(), "memmy-v2-bridge-home-"));
@@ -162,6 +286,14 @@ describe("MemmyMemoryHook", () => {
       }));
       expect(client.l3WorldModelTraceHead).toHaveBeenCalledTimes(1);
       expect(client.l3WorldModelBoundary).toHaveBeenCalledTimes(1);
+      expect(client.l3WorldModelContext).toHaveBeenCalledTimes(1);
+
+      const prompt = new SystemPromptBuildContext({ sessionKey: spec.sessionKey });
+      hook.onBuildSystemPrompt(prompt);
+      hook.onBuildSystemPrompt(prompt);
+      expect(prompt.sections.filter((section) => section.id === "memmy-l3-world-model")).toHaveLength(1);
+
+      await hook.beforeBuildSystemPrompt(lifecycle);
       expect(client.l3WorldModelContext).toHaveBeenCalledTimes(2);
     } finally {
       if (previousMemmyHome === undefined) delete process.env.MEMMY_HOME;

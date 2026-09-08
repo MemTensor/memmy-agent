@@ -129,7 +129,8 @@ describe("auth flow pages", () => {
     const source = readSource(fileName);
 
     expect(source).toContain("buildAccountOnboardingStartPatch");
-    expect(source).toContain("const onboardingPatch = forcedOnboarding ?? buildAccountOnboardingStartPatch();");
+    expect(source).toContain("const onboardingPatch = forcedOnboarding ?? buildAccountOnboardingStartPatch(onboarding);");
+    expect(source).toContain("!shouldShowFirstEncounterReport(state.bootstrap.onboarding)");
     expect(source).not.toContain("const shouldContinueOnboarding = !onboarding?.completed;");
   });
 

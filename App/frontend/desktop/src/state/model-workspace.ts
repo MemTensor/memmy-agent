@@ -1,13 +1,14 @@
 /** Pure view-model helpers for the canonical model catalog returned by the local API. */
-import type {
-  CatalogEndpointInput,
-  CatalogProviderId,
-  ModelAssignment,
-  ModelCapability as CatalogCapability,
-  ModelConfigInput,
-  ModelConfigView,
-  ModelEndpointProtocol,
-  TextModelItemView
+import {
+  BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID,
+  type CatalogEndpointInput,
+  type CatalogProviderId,
+  type ModelAssignment,
+  type ModelCapability as CatalogCapability,
+  type ModelConfigInput,
+  type ModelConfigView,
+  type ModelEndpointProtocol,
+  type TextModelItemView
 } from "@memmy/local-api-contracts";
 import { CLIENT_PRESET_ID_PREFIX, type ModelProviderConfig } from "../api/config-client.js";
 
@@ -561,6 +562,11 @@ export function setModelAssignment(
     next.modelAssignments[mode][key] = null;
     return createModelWorkspace(next);
   }
+  if (kind === "embedding" && candidateId === BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID) {
+    const next = cloneCatalog(workspace.catalog);
+    next.modelAssignments[mode].embedding = candidateId;
+    return createModelWorkspace(next);
+  }
   const capability = assignmentCapability(kind);
   const allowed = new Set(getModelCandidates(workspace, mode, capability).map((candidate) => candidate.id));
   if (!allowed.has(candidateId)) return workspace;
@@ -794,7 +800,9 @@ function pruneInvalidAssignmentReferences(assignment: ModelAssignment, validIds:
     assignment.agent.default = assignment.agent.candidates[0] ?? null;
   }
   for (const key of ["memorySummary", "memoryEvolution", "embedding", "asr", "imageGeneration"] as const) {
-    if (assignment[key] && !validIds.has(assignment[key]!)) assignment[key] = null;
+    const candidateId = assignment[key];
+    if (!candidateId || (key === "embedding" && candidateId === BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID)) continue;
+    if (!validIds.has(candidateId)) assignment[key] = null;
   }
 }
 

@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 
 const SQLITE_ROW_YIELD_INTERVAL = 100;
+const MAX_RECORD_BYTES = 64 * 1024 * 1024;
 
 /** Contract for raw opencode database message. */
 export interface RawOpencodeDatabaseMessage {
@@ -58,6 +59,39 @@ export async function* readOpencodeDatabase(path: string): AsyncIterable<RawOpen
   }
 }
 
+/** Streams OpenCode messages while retaining only the current message's parts. */
+export async function* streamOpencodeDatabase(path: string): AsyncIterable<RawOpencodeDatabaseMessage> {
+  const db = new DatabaseSync(path, { readOnly: true });
+  try {
+    if (!hasTable(db, "message") || !hasTable(db, "part") || !hasTable(db, "session")) return;
+    const statement = db.prepare(`
+      SELECT m.id AS message_id, m.session_id AS session_id, m.time_created AS message_time_created,
+        m.data AS message_data, s.directory AS session_directory, p.id AS part_id,
+        p.time_created AS part_time_created, p.data AS part_data
+      FROM message m LEFT JOIN session s ON s.id = m.session_id LEFT JOIN part p ON p.message_id = m.id
+      ORDER BY m.session_id ASC, m.time_created ASC, m.id ASC, p.time_created ASC, p.id ASC
+    `);
+    let current: MessageAccumulator | null = null;
+    let rows = 0;
+    for (const row of statement.iterate() as Iterable<OpencodePartRow>) {
+      rows += 1;
+      if (rows % SQLITE_ROW_YIELD_INTERVAL === 0) await yieldToEventLoop();
+      if (!current || current.messageId !== row.message_id) {
+        if (current?.contentParts.length) yield toDatabaseMessage(current);
+        current = Buffer.byteLength(row.message_data) <= MAX_RECORD_BYTES ? createAccumulator(row) : null;
+      }
+      if (!current || !row.part_data || !row.part_id || Buffer.byteLength(row.part_data) > MAX_RECORD_BYTES) continue;
+      const text = getPartText(parseJson(row.part_data));
+      if (!text) continue;
+      current.partIds.push(row.part_id);
+      current.contentParts.push(text);
+    }
+    if (current?.contentParts.length) yield toDatabaseMessage(current);
+  } finally {
+    db.close();
+  }
+}
+
 async function readMessages(db: DatabaseSync): Promise<RawOpencodeDatabaseMessage[]> {
   const statement = db.prepare(`
     SELECT
@@ -84,7 +118,7 @@ async function readMessages(db: DatabaseSync): Promise<RawOpencodeDatabaseMessag
     }
 
     const accumulator = getOrCreateAccumulator(accumulators, row);
-    if (!accumulator || !row.part_data || !row.part_id) {
+    if (!accumulator || !row.part_data || !row.part_id || Buffer.byteLength(row.part_data) > MAX_RECORD_BYTES) {
       continue;
     }
 
@@ -117,6 +151,7 @@ function getOrCreateAccumulator(
   accumulators: Map<string, MessageAccumulator>,
   row: OpencodePartRow
 ): MessageAccumulator | null {
+  if (Buffer.byteLength(row.message_data) > MAX_RECORD_BYTES) return null;
   const existing = accumulators.get(row.message_id);
   if (existing) {
     return existing;
@@ -135,7 +170,21 @@ function getOrCreateAccumulator(
   const workspacePath = getNestedString(messageData, "path", "cwd") ?? row.session_directory;
   const explicitRoot = getNestedString(messageData, "path", "root");
   const gitRoot = explicitRoot && explicitRoot !== "/" ? explicitRoot : workspacePath ? findGitRoot(workspacePath) : null;
-  const accumulator: MessageAccumulator = {
+  const accumulator = createAccumulator(row);
+  if (!accumulator) return null;
+  accumulators.set(row.message_id, accumulator);
+  return accumulator;
+}
+
+function createAccumulator(row: OpencodePartRow): MessageAccumulator | null {
+  const messageData = parseJson(row.message_data);
+  if (!isRecord(messageData)) return null;
+  const role = normalizeRole(messageData.role);
+  if (!role) return null;
+  const workspacePath = getNestedString(messageData, "path", "cwd") ?? row.session_directory;
+  const explicitRoot = getNestedString(messageData, "path", "root");
+  const gitRoot = explicitRoot && explicitRoot !== "/" ? explicitRoot : workspacePath ? findGitRoot(workspacePath) : null;
+  return {
     messageId: row.message_id,
     conversationId: row.session_id,
     role,
@@ -145,8 +194,19 @@ function getOrCreateAccumulator(
     partIds: [],
     contentParts: []
   };
-  accumulators.set(row.message_id, accumulator);
-  return accumulator;
+}
+
+function toDatabaseMessage(message: MessageAccumulator): RawOpencodeDatabaseMessage {
+  return {
+    messageId: message.messageId,
+    conversationId: message.conversationId,
+    role: message.role,
+    content: message.contentParts.join("\n"),
+    createdAt: message.createdAt,
+    workspacePath: message.workspacePath,
+    gitRoot: message.gitRoot,
+    rawMeta: Object.freeze({ opencodePartIds: message.partIds })
+  };
 }
 
 function getPartText(partData: unknown): string | null {

@@ -34,6 +34,26 @@ export type TuiGatewayMessage = {
   turnId: string | null;
 };
 
+export type TuiSlashCommand = {
+  command: string;
+  title: string;
+  description: string;
+  icon: string;
+  argHint: string;
+  source: "gateway" | "local";
+};
+
+export type TuiSlashCommandsStatus = "loading" | "ready" | "stale" | "error";
+
+export type TuiLastCompaction = {
+  available: boolean;
+  sessionKey: string;
+  mode: "text" | "dag" | null;
+  text: string;
+  lastActive: string | null;
+  dagSnapshotId?: string;
+};
+
 export type TuiModelSelection = Readonly<{
   presetId: string;
   provider: string;
@@ -56,12 +76,20 @@ export type TuiGatewayState = {
   activeTurnId: string | null;
   startedAt: number | null;
   messages: TuiGatewayMessage[];
+  sessionResetVersion: number;
   goalState: Record<string, unknown> | null;
   modelName: string | null;
   modelSelection: TuiModelSelection | null;
   toolNames: string[];
+  slashCommands: TuiSlashCommand[];
+  slashCommandsStatus: TuiSlashCommandsStatus;
+  slashCommandsError: string | null;
   notice: string;
 };
+
+function isNewSessionCommand(content: string): boolean {
+  return content.trim().toLowerCase() === "/new";
+}
 
 export type TuiGatewaySubmissionResult = {
   clientRequestId: string;
@@ -104,6 +132,22 @@ type PendingSubmission = {
   waiters: Set<SubmissionWaiter>;
 };
 
+type SlashCatalogRequest = {
+  generation: number;
+  apiToken: string;
+  attempt: number;
+  controller: AbortController | null;
+  retryTimer: NodeJS.Timeout | null;
+  cancelled: boolean;
+};
+
+type LastCompactionRequest = {
+  id: symbol;
+  generation: number;
+  controller: AbortController;
+  promise: Promise<TuiLastCompaction>;
+};
+
 type BootstrapResponse = {
   token: string;
   ws_path: string;
@@ -111,13 +155,6 @@ type BootstrapResponse = {
   model_name: string | null;
   model_selection: TuiModelSelection | null;
   tool_names: string[];
-};
-
-type QueueWireItem = {
-  client_request_id: string;
-  text: string;
-  queued_at: string;
-  source: TurnSource;
 };
 
 type GatewayEvent = Record<string, unknown> & {
@@ -151,6 +188,9 @@ const WS_OPEN = 1;
 const DEFAULT_RECONNECT_DELAY_MS = 500;
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
 const MAX_TUI_MESSAGES = 24;
+const SLASH_CATALOG_RETRY_DELAYS_MS = [300, 1_000, 2_500] as const;
+const SLASH_COMMAND_PATTERN = /^\/[a-z0-9-]+$/;
+const SLASH_COMMANDS_ERROR = "Command catalog unavailable.";
 
 function deferred<T>(): Deferred<T> {
   let resolve!: (value: T) => void;
@@ -261,6 +301,55 @@ function parseQueueItem(value: unknown): TuiGatewayQueueItem | null {
   return { clientRequestId, text: value.text, queuedAt, source };
 }
 
+function parseSlashCommands(value: unknown): TuiSlashCommand[] | null {
+  if (!isRecord(value) || !Array.isArray(value.commands)) return null;
+  const seen = new Set<string>();
+  const commands: TuiSlashCommand[] = [];
+  for (const item of value.commands) {
+    if (!isRecord(item)) continue;
+    const command = stringValue(item.command)?.toLowerCase() ?? null;
+    const title = stringValue(item.title);
+    const description = stringValue(item.description);
+    if (!command || !title || !description || !SLASH_COMMAND_PATTERN.test(command)) continue;
+    if (seen.has(command)) continue;
+    seen.add(command);
+    commands.push({
+      command,
+      title,
+      description,
+      icon: typeof item.icon === "string" ? item.icon : "",
+      argHint: typeof item.arg_hint === "string" ? item.arg_hint : "",
+      source: "gateway",
+    });
+  }
+  return commands.length > 0 ? commands : null;
+}
+
+function parseLastCompaction(value: unknown, sessionKey: string): TuiLastCompaction | null {
+  if (
+    !isRecord(value)
+    || typeof value.available !== "boolean"
+    || value.sessionKey !== sessionKey
+    || (value.mode !== "text" && value.mode !== "dag" && value.mode !== null)
+    || typeof value.text !== "string"
+    || (value.lastActive !== null && typeof value.lastActive !== "string")
+    || (value.dagSnapshotId !== undefined && typeof value.dagSnapshotId !== "string")
+  ) return null;
+  if (value.available) {
+    if (value.mode === null || !value.text.trim()) return null;
+  } else if (value.mode !== null) {
+    return null;
+  }
+  return {
+    available: value.available,
+    sessionKey,
+    mode: value.mode,
+    text: value.text,
+    lastActive: value.lastActive,
+    ...(value.dagSnapshotId === undefined ? {} : { dagSnapshotId: value.dagSnapshotId }),
+  };
+}
+
 function normalizeHistoryMessage(value: unknown, index: number): TuiGatewayMessage | null {
   if (!isRecord(value)) return null;
   const rawRole = stringValue(value.role);
@@ -338,6 +427,7 @@ export class TuiGatewayClient {
   private readonly listeners = new Set<(state: TuiGatewayState) => void>();
   private readonly pendingSubmissions = new Map<string, PendingSubmission>();
   private readonly acceptedModelUpdateRequests = new Set<string>();
+  private readonly sessionResetRequestIds = new Set<string>();
   private readonly queuedContents = new Map<string, string>();
   private readonly historyBuffers = new Map<number, GatewayEvent[]>();
   private socket: TuiWebSocket | null = null;
@@ -348,6 +438,9 @@ export class TuiGatewayClient {
   private desyncedQueueRevision: number | null = null;
   private initialStart: Deferred<void> | null = null;
   private stopRequest: Deferred<TuiGatewayStopResult> | null = null;
+  private currentApiToken: string | null = null;
+  private slashCatalogRequest: SlashCatalogRequest | null = null;
+  private lastCompactionRequest: LastCompactionRequest | null = null;
   private state: TuiGatewayState = {
     connection: "closed",
     attached: false,
@@ -359,10 +452,14 @@ export class TuiGatewayClient {
     activeTurnId: null,
     startedAt: null,
     messages: [],
+    sessionResetVersion: 0,
     goalState: null,
     modelName: null,
     modelSelection: null,
     toolNames: [],
+    slashCommands: [],
+    slashCommandsStatus: "loading",
+    slashCommandsError: null,
     notice: "connecting",
   };
 
@@ -400,6 +497,7 @@ export class TuiGatewayClient {
     if (this.closed) return;
     this.closed = true;
     this.generation += 1;
+    this.clearAuthorizedRequests();
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
     const socket = this.socket;
@@ -415,6 +513,7 @@ export class TuiGatewayClient {
     }
     this.pendingSubmissions.clear();
     this.acceptedModelUpdateRequests.clear();
+    this.sessionResetRequestIds.clear();
     this.patch({
       connection: "closed",
       attached: false,
@@ -422,6 +521,7 @@ export class TuiGatewayClient {
       ownedByTui: false,
       activeTurnId: null,
       startedAt: null,
+      slashCommandsStatus: this.state.slashCommands.length > 0 ? "stale" : "loading",
       notice: "closed",
     });
   }
@@ -462,6 +562,7 @@ export class TuiGatewayClient {
       sentGeneration: null,
       waiters: new Set<SubmissionWaiter>(),
     };
+    if (isNewSessionCommand(text)) this.sessionResetRequestIds.add(clientRequestId);
     this.pendingSubmissions.set(clientRequestId, attempt);
     const result = this.waitForSubmission(attempt);
     this.sendSubmission(attempt);
@@ -491,6 +592,30 @@ export class TuiGatewayClient {
     return pending.promise;
   }
 
+  readLastCompaction(): Promise<TuiLastCompaction> {
+    const generation = this.generation;
+    const apiToken = this.currentApiToken;
+    if (
+      !apiToken
+      || !this.state.attached
+      || this.state.connection !== "connected"
+    ) {
+      return Promise.reject(new Error("Gateway is not attached to this Session"));
+    }
+    const current = this.lastCompactionRequest;
+    if (current && current.generation === generation) return current.promise;
+
+    const controller = new AbortController();
+    const id = Symbol("last-compaction-request");
+    const promise = this.fetchLastCompaction(generation, apiToken, controller)
+      .finally(() => {
+        if (this.lastCompactionRequest?.id === id) this.lastCompactionRequest = null;
+      });
+    const request: LastCompactionRequest = { id, generation, controller, promise };
+    this.lastCompactionRequest = request;
+    return promise;
+  }
+
   private patch(patch: Partial<TuiGatewayState>): void {
     this.state = { ...this.state, ...patch };
     for (const listener of this.listeners) listener(this.state);
@@ -498,9 +623,15 @@ export class TuiGatewayClient {
 
   private async connect(initial: boolean): Promise<void> {
     const generation = ++this.generation;
+    this.clearAuthorizedRequests();
+    this.patch({
+      slashCommandsStatus: this.state.slashCommands.length > 0 ? "stale" : "loading",
+      slashCommandsError: null,
+    });
     try {
       const bootstrap = await this.bootstrap();
       if (this.closed || generation !== this.generation) return;
+      this.currentApiToken = bootstrap.token;
       this.patch({
         modelName: bootstrap.model_name,
         modelSelection: bootstrap.model_selection,
@@ -525,6 +656,7 @@ export class TuiGatewayClient {
         this.initialStart.reject(unavailable);
         this.initialStart = null;
         this.closed = true;
+        this.clearAuthorizedRequests();
         this.patch({ connection: "closed", notice: unavailable.message });
         return;
       }
@@ -592,6 +724,7 @@ export class TuiGatewayClient {
       });
       this.historyBuffers.set(generation, []);
       void this.hydrateHistory(generation, apiToken);
+      this.hydrateSlashCommands(generation, apiToken);
       return;
     }
     if (!this.state.attached) return;
@@ -648,12 +781,16 @@ export class TuiGatewayClient {
     if (event.event === "message_queue_removed") {
       const id = stringValue(event.client_request_id);
       this.applyQueueIncrement(event, (items) => items.filter((candidate) => candidate.clientRequestId !== id));
-      if (id) this.queuedContents.delete(id);
+      if (id) {
+        this.queuedContents.delete(id);
+        this.sessionResetRequestIds.delete(id);
+      }
       return;
     }
     if (event.event === "message_steered") {
       const id = stringValue(event.client_request_id);
       if (id) this.promoteSubmission(id, stringValue(event.turn_id));
+      if (id) this.sessionResetRequestIds.delete(id);
       this.resolveSubmission(id, "steered");
       return;
     }
@@ -665,7 +802,13 @@ export class TuiGatewayClient {
       if (id && attempt?.content.trim().match(/^\/model\s+\S+$/i)) {
         this.acceptedModelUpdateRequests.add(id);
       }
-      if (id && !this.state.queueItems.some((item) => item.clientRequestId === id)) {
+      const resetSession = id ? this.sessionResetRequestIds.delete(id) : false;
+      if (resetSession) {
+        this.patch({
+          messages: [],
+          sessionResetVersion: this.state.sessionResetVersion + 1,
+        });
+      } else if (id && !this.state.queueItems.some((item) => item.clientRequestId === id)) {
         this.promoteSubmission(id, stringValue(event.turn_id));
       }
       this.resolveSubmission(id, "accepted");
@@ -712,7 +855,10 @@ export class TuiGatewayClient {
     }
     if (event.event === "error") {
       const id = stringValue(event.client_request_id);
-      if (id) this.rejectSubmission(id, new Error(stringValue(event.reason) ?? stringValue(event.detail) ?? "Gateway rejected message"));
+      if (id) {
+        this.sessionResetRequestIds.delete(id);
+        this.rejectSubmission(id, new Error(stringValue(event.reason) ?? stringValue(event.detail) ?? "Gateway rejected message"));
+      }
       if (this.stopRequest && event.detail === "stop_failed") {
         const pending = this.stopRequest;
         this.stopRequest = null;
@@ -754,6 +900,127 @@ export class TuiGatewayClient {
     }
   }
 
+  private hydrateSlashCommands(generation: number, apiToken: string): void {
+    this.cancelSlashCatalogRequest();
+    const request: SlashCatalogRequest = {
+      generation,
+      apiToken,
+      attempt: 0,
+      controller: null,
+      retryTimer: null,
+      cancelled: false,
+    };
+    this.slashCatalogRequest = request;
+    void this.fetchSlashCommands(request);
+  }
+
+  private async fetchSlashCommands(request: SlashCatalogRequest): Promise<void> {
+    if (!this.isSlashCatalogRequestCurrent(request)) return;
+    const controller = new AbortController();
+    request.controller = controller;
+    const timeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);
+    let commands: TuiSlashCommand[] | null = null;
+    try {
+      const response = await this.fetchImpl(`${this.baseUrl}/api/commands`, {
+        headers: { authorization: `Bearer ${request.apiToken}` },
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error("command catalog request failed");
+      commands = parseSlashCommands(await response.json());
+      if (!commands) throw new Error("command catalog response is invalid");
+    } catch {
+      commands = null;
+    } finally {
+      clearTimeout(timeout);
+      if (request.controller === controller) request.controller = null;
+    }
+    if (!this.isSlashCatalogRequestCurrent(request)) return;
+    if (commands) {
+      this.slashCatalogRequest = null;
+      this.patch({
+        slashCommands: commands,
+        slashCommandsStatus: "ready",
+        slashCommandsError: null,
+      });
+      return;
+    }
+    if (request.attempt < SLASH_CATALOG_RETRY_DELAYS_MS.length) {
+      const delay = SLASH_CATALOG_RETRY_DELAYS_MS[request.attempt]!;
+      request.attempt += 1;
+      request.retryTimer = setTimeout(() => {
+        request.retryTimer = null;
+        void this.fetchSlashCommands(request);
+      }, delay);
+      return;
+    }
+    this.slashCatalogRequest = null;
+    this.patch({
+      slashCommandsStatus: this.state.slashCommands.length > 0 ? "stale" : "error",
+      slashCommandsError: SLASH_COMMANDS_ERROR,
+    });
+  }
+
+  private async fetchLastCompaction(
+    generation: number,
+    apiToken: string,
+    controller: AbortController,
+  ): Promise<TuiLastCompaction> {
+    const timer = setTimeout(() => controller.abort(), this.requestTimeoutMs);
+    const sessionKey = `websocket:${this.chatId}`;
+    const key = encodeURIComponent(sessionKey);
+    try {
+      const response = await this.fetchImpl(
+        `${this.baseUrl}/api/sessions/${key}/last-compaction`,
+        {
+          headers: { authorization: `Bearer ${apiToken}` },
+          signal: controller.signal,
+        },
+      );
+      if (!this.isAuthorizedGenerationCurrent(generation, apiToken)) {
+        throw new Error("Gateway connection changed");
+      }
+      if (!response.ok) throw new Error("Last compaction request failed");
+      const parsed = parseLastCompaction(await response.json(), sessionKey);
+      if (!parsed) throw new Error("Last compaction response is invalid");
+      if (!this.isAuthorizedGenerationCurrent(generation, apiToken)) {
+        throw new Error("Gateway connection changed");
+      }
+      return parsed;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private isSlashCatalogRequestCurrent(request: SlashCatalogRequest): boolean {
+    return !request.cancelled
+      && this.slashCatalogRequest === request
+      && this.isGenerationCurrent(request.generation)
+      && this.currentApiToken === request.apiToken;
+  }
+
+  private isAuthorizedGenerationCurrent(generation: number, apiToken: string): boolean {
+    return this.isGenerationCurrent(generation)
+      && this.currentApiToken === apiToken
+      && this.state.attached
+      && this.state.connection === "connected";
+  }
+
+  private cancelSlashCatalogRequest(): void {
+    const request = this.slashCatalogRequest;
+    if (!request) return;
+    request.cancelled = true;
+    request.controller?.abort();
+    if (request.retryTimer) clearTimeout(request.retryTimer);
+    this.slashCatalogRequest = null;
+  }
+
+  private clearAuthorizedRequests(): void {
+    this.currentApiToken = null;
+    this.cancelSlashCatalogRequest();
+    this.lastCompactionRequest?.controller.abort();
+    this.lastCompactionRequest = null;
+  }
+
   private async hydrateHistory(generation: number, apiToken: string): Promise<void> {
     try {
       const key = encodeURIComponent(`websocket:${this.chatId}`);
@@ -790,10 +1057,12 @@ export class TuiGatewayClient {
         startup.reject(unavailable);
         this.initialStart = null;
         this.closed = true;
+        this.clearAuthorizedRequests();
         this.socket?.close(1011, "history unavailable");
         this.patch({ connection: "closed", attached: false, notice: unavailable.message });
         return;
       }
+      this.clearAuthorizedRequests();
       this.socket?.close(1011, "history unavailable");
     }
   }
@@ -1028,6 +1297,7 @@ export class TuiGatewayClient {
     if (!this.isCurrent(socket, generation)) return;
     this.socket = null;
     this.historyBuffers.delete(generation);
+    this.clearAuthorizedRequests();
     if (this.closed) return;
     for (const attempt of this.pendingSubmissions.values()) attempt.sentGeneration = null;
     this.acceptedModelUpdateRequests.clear();
@@ -1042,6 +1312,8 @@ export class TuiGatewayClient {
       activeTurnId: null,
       startedAt: null,
       goalState: null,
+      slashCommandsStatus: this.state.slashCommands.length > 0 ? "stale" : "loading",
+      slashCommandsError: null,
       notice: "Gateway disconnected; reconnecting",
     });
     this.desyncedQueueRevision = null;

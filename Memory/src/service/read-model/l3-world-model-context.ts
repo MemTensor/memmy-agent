@@ -1,7 +1,7 @@
 import {
   renderL3WorldModelFields,
   type SessionL3WorldModelContextResponse
-} from "@memmy/local-api-contracts";
+} from "../../contracts/index.js";
 import type { Repositories, SessionRecord } from "../../storage/repositories.js";
 import { nowIso } from "../../utils/time.js";
 

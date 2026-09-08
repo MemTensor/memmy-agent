@@ -260,10 +260,10 @@ describe("model config helpers", () => {
     expect(createMemmyMemoryProviderConfig(memory, skill, primary)).toEqual({
       summary: {
         mode: "follow",
-        provider: "openai",
-        endpoint: "https://api.openai.com/v1",
-        model: "gpt-4o",
-        apiKey: "sk-primary",
+        provider: "kimi",
+        endpoint: DEFAULT_ENDPOINTS.moonshot,
+        model: "moonshot-v1-128k",
+        apiKey: "sk-skill",
         apiKeyMasked: "",
         configured: true
       },

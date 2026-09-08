@@ -28,6 +28,7 @@ import {
   resolvePreferredLaunchMode,
   resolveReloadedInitialView,
   shouldExitPetLaunchForRoute,
+  shouldShowFirstEncounterReport,
   shouldShowTokenExhaustedModal,
   routeTable,
   writeCurrentRoute,
@@ -164,6 +165,7 @@ describe("desktop route table", () => {
         ...baseBootstrap.onboarding,
         completed: true,
         currentStep: "completed" as const,
+        firstEncounterReportStatus: "shown" as const,
         completedAt: "2026-06-04T00:00:00.000Z"
       }
     };
@@ -192,6 +194,41 @@ describe("desktop route table", () => {
     })).toBe("/main");
   });
 
+  it("keeps a pending BYOK first report after completion carryover once a model is configured", () => {
+    const carriedBootstrap = {
+      ...baseBootstrap,
+      app: { ...baseBootstrap.app, userMode: "byok" as const },
+      onboarding: {
+        ...baseBootstrap.onboarding,
+        completed: true,
+        currentStep: "completed" as const,
+        firstEncounterReportStatus: "pending" as const,
+        completedAt: "2026-06-04T00:00:00.000Z"
+      }
+    };
+    const reconciled = reconcileInitialOnboarding({ bootstrap: carriedBootstrap });
+
+    expect(reconciled.onboarding).toMatchObject({
+      completed: false,
+      currentStep: "scan_permission_required",
+      firstEncounterReportStatus: "pending"
+    });
+    expect(resolveInitialView({
+      bootstrap: reconciled,
+      preferredMode: "full",
+      modelConfig: {
+        catalog: { modelAssignments: { byok: { agent: { candidates: [] } } } }
+      }
+    })).toBe("/api-key");
+    expect(resolveInitialView({
+      bootstrap: reconciled,
+      preferredMode: "full",
+      modelConfig: {
+        catalog: { modelAssignments: { byok: { agent: { candidates: ["local-agent"] } } } }
+      }
+    })).toBe("/onboarding");
+  });
+
   it("respects the preferred full or pet mode after onboarding is complete", () => {
     const completedBootstrap = {
       ...baseBootstrap,
@@ -200,6 +237,7 @@ describe("desktop route table", () => {
         ...baseBootstrap.onboarding,
         completed: true,
         currentStep: "completed" as const,
+        firstEncounterReportStatus: "shown" as const,
         completedAt: "2026-06-01T00:00:00.000Z"
       }
     };
@@ -232,6 +270,7 @@ describe("desktop route table", () => {
         ...baseBootstrap.onboarding,
         completed: false,
         currentStep: "scan_permission_required" as const,
+        firstEncounterReportStatus: "shown" as const,
         completedAt: null
       }
     };
@@ -359,7 +398,8 @@ describe("desktop route table", () => {
       resolveInitialView({
         bootstrap: {
           ...baseBootstrap,
-          app: { ...baseBootstrap.app, userMode: "account" }
+          app: { ...baseBootstrap.app, userMode: "account" },
+          onboarding: { ...baseBootstrap.onboarding, firstEncounterReportStatus: "shown" }
         },
         preferredMode: "full",
         accountSession: {
@@ -379,6 +419,35 @@ describe("desktop route table", () => {
         }
       })
     ).toBe("/main");
+  });
+
+  it("shows the local first encounter flow for an old cloud account on a new installation", () => {
+    expect(
+      resolveInitialView({
+        bootstrap: {
+          ...baseBootstrap,
+          app: { ...baseBootstrap.app, userMode: "account" },
+          onboarding: { ...baseBootstrap.onboarding, firstEncounterReportStatus: "pending" }
+        },
+        preferredMode: "full",
+        guidanceCompleted: true,
+        accountSession: {
+          authenticated: true,
+          isNewUser: false,
+          profile: {
+            userId: "old-user",
+            email: "old@example.com",
+            phoneNumber: null,
+            nickname: "Old User",
+            avatarUrl: null,
+            planType: null,
+            hasFinishedGuide: true,
+            region: null,
+            registeredAt: "2025-01-01T00:00:00.000Z"
+          }
+        }
+      })
+    ).toBe("/onboarding");
   });
 
   it("continues onboarding for authenticated account users whose guide is unfinished", () => {
@@ -417,6 +486,7 @@ describe("desktop route table", () => {
         completed: true,
         currentStep: "completed" as const,
         scanPermission: "scan_only" as const,
+        firstEncounterReportStatus: "shown" as const,
         improvementProgram: "accepted" as const,
         completedAt: "2026-06-04T00:00:00.000Z"
       }
@@ -441,7 +511,7 @@ describe("desktop route table", () => {
       accountSession: unfinishedAccountSession
     });
 
-    expect(reconciled.onboarding).toMatchObject(buildAccountOnboardingStartPatch());
+    expect(reconciled.onboarding).toMatchObject(buildAccountOnboardingStartPatch(staleCompletedBootstrap.onboarding));
     expect(resolveInitialView({ bootstrap: reconciled, preferredMode: "full", accountSession: unfinishedAccountSession })).toBe("/onboarding");
   });
 
@@ -576,6 +646,18 @@ describe("desktop route table", () => {
       improvementProgram: "not_applicable",
       completedAt: null
     });
+    expect(buildAccountOnboardingStartPatch({
+      scanPermission: "scan_only",
+      firstEncounterReportStatus: "shown"
+    })).toMatchObject({
+      scanPermission: "scan_only",
+      firstEncounterReportStatus: "shown"
+    });
+    expect(shouldShowFirstEncounterReport(buildAccountOnboardingStartPatch())).toBe(true);
+    expect(shouldShowFirstEncounterReport(buildAccountOnboardingStartPatch({
+      scanPermission: "none",
+      firstEncounterReportStatus: "skipped"
+    }))).toBe(false);
   });
 
   it("resolves the first route from the saved launch mode preference", () => {

@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import type { AppStateStore } from "../infrastructure/app-state-store/index.js";
 import { type MemmyConfigWriter } from "../infrastructure/memmy-config/index.js";
+import type { ScanPreferencesStore } from "../infrastructure/memmy-config/agent-access.js";
 import type { AgentAdapterRegistry } from "../adapters/outbound/agent-adapter/index.js";
 import {
   createBuiltinOnboardingInsightSamplers,
@@ -131,6 +132,7 @@ export interface CreateBackendServicesOptions {
   memmyAgentAdminBootstrapSecret?: string | null;
   /** Verification channel supported by the current desktop package. */
   accountChannel?: AccountChannel;
+  scanPreferencesStore?: ScanPreferencesStore;
 }
 
 /** Exact network surface required by the first-party literature-review Providers. */
@@ -236,6 +238,7 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       getUserId: resolveAnalyticsUserId,
       getUserMode: resolveAnalyticsUserMode,
     }),
+    scanStoreDirectory: join(dirname(options.appStateStore.databasePath), "agent-source-scans"),
   });
   const toolConnectionAnalytics = createToolConnectionAnalytics({
     getUserId: resolveAnalyticsUserId,
@@ -245,13 +248,17 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
   return {
     memoryClient: options.memoryClient,
     agentAdapterRegistry: options.agentAdapterRegistry,
-    bootstrap: createBootstrapService(options),
+    bootstrap: createBootstrapService({
+      ...options,
+      scanPreferencesStore: options.scanPreferencesStore
+    }),
     appConfig: createAppConfigService({
       bootstrapRepository: options.appStateStore.repositories.bootstrap,
       cloudClient: options.cloudClient,
       accountSessionRepository: options.appStateStore.repositories.accountSession,
       memmyConfigWriter: options.memmyConfigWriter,
-      memoryClient: options.memoryClient
+      memoryClient: options.memoryClient,
+      scanPreferencesStore: options.scanPreferencesStore
     }),
     account: createAccountService({
       cloudClient: options.cloudClient,
@@ -272,14 +279,18 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       toolConnectionAnalytics,
     }),
     localData: createLocalDataService({
-      localDataStore: options.appStateStore.localDataStore
+      localDataStore: options.appStateStore.localDataStore,
+      memoryClient: options.memoryClient
     }),
     agentSources,
     agentSourceAutoInject: createAgentSourceAutoInjectService({
       agentSources,
       permissionManager: options.permissionManager,
-      getScanPreferences: () => options.appStateStore.repositories.bootstrap.getScanPreferences()
+      getScanPreferences: () => options.scanPreferencesStore?.getScanPreferences()
+        ?? options.appStateStore.repositories.bootstrap.getScanPreferences()
     }),
+    // First-report sampling stays inside Desktop: it reads a small recent-history
+    // window for onboarding and is separate from Memory's persistent Agent scan.
     onboardingInsight: createOnboardingInsightService({
       samplers: createBuiltinOnboardingInsightSamplers(),
       conversationWindowReader: createSourceRegistryOnboardingConversationWindowReader(sourceRegistry),

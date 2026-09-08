@@ -1,7 +1,7 @@
 /** Onboarding page module. */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { PenLine, Search, type LucideIcon } from "lucide-react";
-import type { AgentSourceMemoryPluginConflict, ScanPermission } from "@memmy/local-api-contracts";
+import type { AgentSourceMemoryPluginConflict, AgentSourceView, ScanPermission } from "@memmy/local-api-contracts";
 import { useApiClients } from "../app/providers.js";
 import {
   productTourIncludesLogs,
@@ -89,8 +89,11 @@ export function OnboardingPage() {
   const onboarding = state.bootstrap?.onboarding;
   const isAccountMode = state.bootstrap?.app.userMode === "account";
   const guidanceCompleted = readGuidanceCompleted(typeof window === "undefined" ? undefined : window.localStorage);
+  const firstEncounterReportPending = (onboarding?.firstEncounterReportStatus ?? "pending") === "pending";
+  const effectiveGuidanceCompleted = guidanceCompleted && !firstEncounterReportPending;
   const shouldResumeFirstScan = Boolean(
     onboarding &&
+    firstEncounterReportPending &&
     !onboarding.completed &&
     onboarding.currentStep === "scan_permission_required" &&
     (onboarding.scanPermission === "scan_only" || onboarding.scanPermission === "scan_and_write_skill")
@@ -100,36 +103,53 @@ export function OnboardingPage() {
       ? "checking_plugins"
       : "scanning"
     : null;
-  const activeFirstScanStep = guidanceCompleted ? null : (firstScanStep ?? resumedFirstScanStep);
+  const shouldAdvancePastFirstReport = Boolean(
+    onboarding &&
+    !onboarding.completed &&
+    onboarding.currentStep === "scan_permission_required" &&
+    !firstEncounterReportPending &&
+    !firstScanStep
+  );
+  const activeFirstScanStep = effectiveGuidanceCompleted ? null : (firstScanStep ?? resumedFirstScanStep);
   const scanOpen =
-    !guidanceCompleted &&
+    !effectiveGuidanceCompleted &&
+    firstEncounterReportPending &&
     !activeFirstScanStep &&
     (!onboarding || (!onboarding.completed && onboarding.currentStep === "scan_permission_required"));
   const productTourOpen = Boolean(
-    !guidanceCompleted &&
+    !effectiveGuidanceCompleted &&
     !activeFirstScanStep &&
     onboarding &&
     !onboarding.completed &&
     (onboarding.currentStep === "product_tour_required" || onboarding.currentStep === "improvement_program_required")
   );
-  const hasRenderableOnboardingStep = Boolean(activeFirstScanStep || scanOpen || productTourOpen);
+  const hasRenderableOnboardingStep = Boolean(
+    activeFirstScanStep || scanOpen || productTourOpen || shouldAdvancePastFirstReport
+  );
 
   useEffect(() => {
     firstScanStepRef.current = firstScanStep;
   }, [firstScanStep]);
 
   useEffect(() => {
-    if (activeFirstScanStep !== "report" || !firstReportPayload || hasTrackedFirstReportView.current) {
+    if (activeFirstScanStep !== "report" || !firstReportPayload || !clients || hasTrackedFirstReportView.current) {
       return;
     }
     hasTrackedFirstReportView.current = true;
+    const reportPatch = { firstEncounterReportStatus: "shown" as const };
+    dispatch(appActions.onboardingUpdated(reportPatch));
+    void clients.config
+      .updateOnboarding(reportPatch)
+      .catch((error) => {
+        console.warn("persist first encounter report state failed", error);
+      });
     track(buildOnboardingStepCompletedEvent({
       step: "first_report",
       choice: "viewed",
       scanPermission: onboarding?.scanPermission,
       emptyHistory: firstReportPayload.emptyHistory
     }));
-  }, [activeFirstScanStep, firstReportPayload, onboarding?.scanPermission, track]);
+  }, [activeFirstScanStep, clients, dispatch, firstReportPayload, onboarding?.scanPermission, track]);
 
   useEffect(() => {
     if (!shouldResumeFirstScan || firstScanStep || !clients || hasResumedFirstScan.current) {
@@ -141,6 +161,19 @@ export function OnboardingPage() {
       console.warn("resume first agent source scan failed", error);
     });
   }, [clients, firstScanStep, shouldResumeFirstScan]);
+
+  useEffect(() => {
+    if (!shouldAdvancePastFirstReport || !clients) {
+      return;
+    }
+    const patch = { currentStep: "product_tour_required" as const };
+    dispatch(appActions.onboardingUpdated(patch));
+    void clients.config
+      .updateOnboarding(patch)
+      .catch((error) => {
+        console.warn("advance past first encounter report failed", error);
+      });
+  }, [clients, dispatch, shouldAdvancePastFirstReport]);
 
   useEffect(() => {
     if (state.startup.status === "ready" && !hasRenderableOnboardingStep) {
@@ -197,7 +230,11 @@ export function OnboardingPage() {
           ? { autoScanKnownAgents: true, watchFileChanges: true, autoInjectSkill: false }
           : { autoScanKnownAgents: false, watchFileChanges: false, autoInjectSkill: false };
     const patch = permission === "none"
-      ? { scanPermission: permission, currentStep: "product_tour_required" } as const
+      ? {
+          scanPermission: permission,
+          firstEncounterReportStatus: "skipped",
+          currentStep: "product_tour_required"
+        } as const
       : { completed: false, currentStep: "scan_permission_required", scanPermission: permission } as const;
 
     dispatch(appActions.onboardingUpdated(patch));
@@ -384,7 +421,7 @@ export function OnboardingPage() {
       return;
     }
 
-    startFirstReport([]);
+    startFirstReport(detectedFirstEncounterAgents(state.agentSources.items));
     if (hasStartedAgentSourceScan.current) {
       return;
     }
@@ -827,6 +864,16 @@ export function OnboardingPage() {
 
     </main>
   );
+}
+
+function detectedFirstEncounterAgents(sources: readonly AgentSourceView[]): DiscoveredAgent[] {
+  return sources
+    .filter((source) => source.available && (source.builtin || source.messageCount > 0 || source.syncReady))
+    .map((source) => ({
+      sourceId: source.sourceId,
+      name: source.displayName,
+      conversations: source.messageCount
+    }));
 }
 
 /** Prefer live scan sources; fall back to report agents so the relay card still renders in mock. */

@@ -1,0 +1,7 @@
+{
+  "name": "@memtensor/memmy-memory-openclaw",
+  "version": "2.1.0",
+  "type": "module",
+  "main": "index.js",
+  "private": true
+}

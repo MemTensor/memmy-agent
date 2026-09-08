@@ -447,6 +447,55 @@ describe("ingestion service", () => {
     });
   });
 
+  it("counts a QA duplicate returned by memory.add as deduped and marks its source messages seen", async () => {
+    const markSeen = vi.fn(() => true);
+    const succeeded: Array<Record<string, unknown>> = [];
+    const service = createService(
+      {
+        async addMemory(input) {
+          return {
+            id: "hook-memory",
+            kind: "trace",
+            memoryLayer: input.layer ?? "L1",
+            status: "activated",
+            title: input.title ?? "Hook memory",
+            summary: input.content,
+            tags: input.tags ?? [],
+            createdAt: now(),
+            serverTime: now(),
+            duplicate: true
+          };
+        }
+      },
+      { hasSeen: () => false, markSeen },
+      undefined,
+      {
+        trackAddStarted() {},
+        trackAddSucceeded(input) {
+          succeeded.push({ ...input });
+        },
+        trackAddFailed() {}
+      }
+    );
+
+    const stats = await service.ingest(
+      toAsyncIterable([createMessage("conv-a", 1), createMessage("conv-a", 2)]),
+      { sourceId: "codex" }
+    );
+
+    expect(markSeen).toHaveBeenCalledTimes(2);
+    expect(stats).toMatchObject({
+      written: 0,
+      deduped: 2,
+      writtenMemories: 0,
+      dedupedMemories: 1,
+      memoryIds: []
+    });
+    expect(succeeded).toEqual([
+      expect.objectContaining({ storedCount: 0 })
+    ]);
+  });
+
   it("does not import user-only or assistant-only turns as memories", async () => {
     const calls: string[] = [];
     const service = createService({

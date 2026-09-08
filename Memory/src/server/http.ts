@@ -1,14 +1,18 @@
+import { EmbeddingInferenceInputSchema } from "@memmy/local-api-contracts";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import {
-  EmbeddingInferenceInputSchema,
+  createAgentSourceExecutor,
+  type AgentSourceExecutor
+} from "../agent-source/runtime.js";
+import {
   L3WorldModelBoundaryRequestSchema,
   L3WorldModelRequestEnvelopeSchema,
   OpenSessionInputSchema
-} from "@memmy/local-api-contracts";
+} from "../contracts/index.js";
 import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
-import { memoryPanelHtml } from "../viewer/static.js";
+import { isMemoryViewerPath, memoryViewerAsset } from "../viewer/static.js";
 import type {
   MemoryAddRequest,
   MemoryGovernanceRequest,
@@ -35,14 +39,25 @@ import {
   trackExternalToolCall,
   type PluginRuntimeAnalytics,
 } from "./plugin-runtime-analytics.js";
+import type { ViewerCliOptions } from "./viewer-cli.js";
+import {
+  VIEWER_API_ROUTES,
+  assertLocalViewerRequest,
+  isViewerApiRequest,
+  routeViewerRequest,
+  streamViewerEvents
+} from "./viewer-api.js";
 
 const logger = createMemoryLogger("http");
 const workerLogger = createMemoryLogger("worker");
 
 export const API_ROUTES = [
+  "GET /health",
   "GET /api/v1/health",
   "POST /api/v1/admin/reload-config",
   "POST /api/v1/admin/shutdown",
+  "GET /api/v1/admin/export",
+  "DELETE /api/v1/admin/data",
   "POST /api/v1/sessions/open",
   "POST /api/v1/sessions/:sessionId/close",
   "GET /api/v1/sessions/:sessionId/l3-world-model-trace-head",
@@ -65,7 +80,8 @@ export const API_ROUTES = [
   "GET /api/v1/panel/analysis",
   "GET /api/v1/panel/items",
   "GET /api/v1/panel/tasks",
-  "DELETE /api/v1/panel/tasks/:id"
+  "DELETE /api/v1/panel/tasks/:id",
+  ...VIEWER_API_ROUTES
 ] as const;
 
 export interface MemoryHttpServerOptions {
@@ -78,6 +94,11 @@ export interface MemoryHttpServerOptions {
   workerPostHealthDelayMs?: number;
   onShutdownRequested?: () => void;
   pluginRuntimeAnalytics?: PluginRuntimeAnalytics;
+  configPath?: string;
+  viewerCli?: ViewerCliOptions;
+  onRestartRequested?: () => void | Promise<void>;
+  agentSourceExecutor?: AgentSourceExecutor;
+  startAgentSourceAutomation?: boolean;
 }
 
 export interface MemoryHttpAuthOptions {
@@ -92,7 +113,7 @@ export interface MemoryHttpAuthOptions {
 }
 
 interface AuthPrincipal {
-  kind: "anonymous" | "local" | "cloud" | "scoped";
+  kind: "anonymous" | "local" | "cloud" | "scoped" | "viewer";
   tokenId?: string;
   namespace?: RuntimeNamespace;
   scopes: string[];
@@ -103,11 +124,12 @@ interface AutoWorkerDrain {
   start(): void;
   afterHealthCheck(): void;
   schedule(): void;
-  dispose(): void;
+  dispose(): Promise<void>;
 }
 
 const DEFAULT_WORKER_STARTUP_FALLBACK_MS = 5_000;
 const DEFAULT_WORKER_POST_HEALTH_DELAY_MS = 250;
+const serverCleanup = new WeakMap<Server, () => Promise<void>>();
 
 export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server {
   const autoWorker = createAutoWorkerDrain(options.service, {
@@ -115,34 +137,82 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
     postHealthDelayMs: options.workerPostHealthDelayMs ?? DEFAULT_WORKER_POST_HEALTH_DELAY_MS
   });
   const pluginRuntimeAnalytics = options.pluginRuntimeAnalytics ?? createPluginRuntimeAnalytics();
-  const server = createServer(async (request, response) => {
+  const agentSources = options.agentSourceExecutor ?? createAgentSourceExecutor({
+    service: options.service,
+    configPath: options.configPath,
+    scheduleWorker: autoWorker.schedule
+  });
+  const activeRequests = new Set<Promise<void>>();
+  const server = createServer((request, response) => {
+    const handling = handleRequest(request, response);
+    activeRequests.add(handling);
+    void handling.finally(() => activeRequests.delete(handling));
+  });
+  async function handleRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const startedAt = Date.now();
     const requestId = requestIdFromHeaders(request) ?? randomUUID();
     const requestPath = request.url?.split("?", 1)[0] ?? "<missing>";
-    setCors(response);
-    if (request.method === "OPTIONS") {
-      response.writeHead(204);
-      response.end();
-      return;
-    }
+    setSecurityHeaders(response);
 
     try {
       if (!request.url || !request.method) {
         throw new MemoryServiceError("invalid_argument", "missing request url or method");
       }
       const url = new URL(request.url, "http://127.0.0.1");
-      if (request.method === "GET" && url.pathname === "/api/v1/health") {
+      if (request.method === "GET" && (url.pathname === "/health" || url.pathname === "/api/v1/health")) {
         response.once("finish", () => autoWorker.afterHealthCheck());
       }
-      if (request.method === "GET" && isViewerPath(url.pathname)) {
-        writeHtml(response, memoryPanelHtml(options.timeZone));
+      if (request.method === "GET" && isMemoryViewerPath(url.pathname)) {
+        assertLocalViewerRequest(request, url);
+        const asset = memoryViewerAsset(url.pathname);
+        if (!asset) throw new MemoryServiceError("not_found", `Viewer asset not found: ${url.pathname}`);
+        writeViewerAsset(response, asset);
+        return;
+      }
+      const viewerRequest = isViewerApiRequest(request, url);
+      if (viewerRequest) assertLocalViewerRequest(request, url);
+      if (viewerRequest && request.method === "GET" && url.pathname === "/api/v1/events") {
+        streamViewerEvents({
+          service: options.service,
+          configPath: options.configPath,
+          routes: API_ROUTES,
+          scheduleWorker: autoWorker.schedule,
+          timeZone: requestTimeZone(request, options.timeZone),
+          agentSources
+        }, request, response, url);
         return;
       }
       const principal = {
-        ...authenticate(request, url, options),
+        ...(viewerRequest ? viewerPrincipal() : authenticate(request, url, options)),
         timeZone: requestTimeZone(request, options.timeZone)
       };
       const body = await readJson(request);
+      if (viewerRequest) {
+        const viewerResult = await routeViewerRequest({
+          service: options.service,
+          configPath: options.configPath,
+          routes: API_ROUTES,
+          scheduleWorker: autoWorker.schedule,
+          timeZone: principal.timeZone,
+          viewerCli: options.viewerCli,
+          restartService: options.onRestartRequested,
+          agentSources
+        }, request.method, url, body);
+        if (viewerResult) {
+          if (viewerResult.afterResponse) {
+            response.once("finish", () => {
+              void Promise.resolve()
+                .then(() => viewerResult.afterResponse?.())
+                .catch((error) => logger.error("service.restart.failed", {
+                  requestId,
+                  ...memoryErrorFields(error)
+                }));
+            });
+          }
+          writeJson(response, viewerResult.status ?? 200, viewerResult.body, viewerResult.headers);
+          return;
+        }
+      }
       const result = await routeRequest(
         options.service,
         autoWorker,
@@ -183,10 +253,35 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
       }
       writeError(response, error, requestId);
     }
+  }
+  server.once("listening", () => {
+    autoWorker.start();
+    if (options.startAgentSourceAutomation) agentSources.startAutomation();
   });
-  server.once("listening", () => autoWorker.start());
-  server.on("close", () => autoWorker.dispose());
+  let cleanup: Promise<void> | undefined;
+  const dispose = () => cleanup ??= Promise.all([
+    autoWorker.dispose(),
+    agentSources.dispose(),
+    ...activeRequests,
+  ]).then(() => undefined);
+  serverCleanup.set(server, dispose);
+  server.on("close", () => {
+    void dispose().catch((error) => logger.error("service.cleanup.failed", memoryErrorFields(error)));
+  });
   return server;
+}
+
+export async function closeMemoryHttpServer(server: Server): Promise<void> {
+  // Closing sockets alone does not settle workers, scans or async request handlers.
+  const cleanup = serverCleanup.get(server)?.();
+  await Promise.all([
+    cleanup,
+    new Promise<void>((resolveClose, rejectClose) => {
+      if (!server.listening) { resolveClose(); return; }
+      server.close((error) => error ? rejectClose(error) : resolveClose());
+      server.closeAllConnections();
+    }),
+  ]);
 }
 
 export async function listenMemoryHttpServer(options: MemoryHttpServerOptions & {
@@ -228,6 +323,9 @@ function createAutoWorkerDrain(
   let startupReconciled = false;
   let startupTimer: ReturnType<typeof setTimeout> | undefined;
   let delayedTimer: ReturnType<typeof setTimeout> | undefined;
+  let scheduledTimer: ReturnType<typeof setTimeout> | undefined;
+  let drainStopped: (() => void) | undefined;
+  let activeDrain: Promise<void> | undefined;
   const maxCycles = 40;
   const workerBatchSize = 4;
 
@@ -240,6 +338,7 @@ function createAutoWorkerDrain(
       return;
     }
     running = true;
+    activeDrain = new Promise<void>((done) => { drainStopped = done; });
     let continueSoon = false;
     try {
       if (!startupReconciled) {
@@ -252,7 +351,7 @@ function createAutoWorkerDrain(
       }
       do {
         requested = false;
-        for (let cycle = 0; cycle < maxCycles; cycle += 1) {
+        for (let cycle = 0; cycle < maxCycles && !disposed; cycle += 1) {
           const result = await service.runWorkerOnce(workerBatchSize, {
             priorityCohortOnly: true
           });
@@ -264,16 +363,18 @@ function createAutoWorkerDrain(
           }
           await yieldToEventLoop();
         }
-      } while (requested && !continueSoon);
+      } while (requested && !continueSoon && !disposed);
     } catch (error) {
       workerLogger.error("drain.failed", memoryErrorFields(error));
     } finally {
       running = false;
+      drainStopped?.();
       if (disposed) {
         return;
       }
       if (requested || continueSoon) {
-        setTimeout(() => {
+        scheduledTimer = setTimeout(() => {
+          scheduledTimer = undefined;
           requested = true;
           void drain();
         }, 0);
@@ -319,7 +420,8 @@ function createAutoWorkerDrain(
       return;
     }
     scheduled = true;
-    setTimeout(() => {
+    scheduledTimer = setTimeout(() => {
+      scheduledTimer = undefined;
       scheduled = false;
       void drain();
     }, 0);
@@ -349,7 +451,7 @@ function createAutoWorkerDrain(
       }, Math.max(0, options.postHealthDelayMs));
     },
     schedule,
-    dispose(): void {
+    async dispose(): Promise<void> {
       disposed = true;
       requested = false;
       if (startupTimer) {
@@ -360,6 +462,11 @@ function createAutoWorkerDrain(
         clearTimeout(delayedTimer);
         delayedTimer = undefined;
       }
+      if (scheduledTimer) {
+        clearTimeout(scheduledTimer);
+        scheduledTimer = undefined;
+      }
+      await activeDrain;
     }
   };
 }
@@ -387,7 +494,7 @@ async function routeRequest(
 ): Promise<unknown> {
   const path = url.pathname;
 
-  if (method === "GET" && path === "/api/v1/health") {
+  if (method === "GET" && (path === "/health" || path === "/api/v1/health")) {
     return service.health([...API_ROUTES]);
   }
   if (method === "POST" && path === "/api/v1/admin/reload-config") {
@@ -695,6 +802,21 @@ async function routeRequest(
     });
   }
 
+  if (method === "GET" && path === "/api/v1/admin/export") {
+    requirePanelRead(principal);
+    return service.exportBundle({
+      namespace: principal.namespace,
+      timeZone: principal.timeZone,
+      includeRawText: url.searchParams.get("includeRawText") === "true",
+      includeAudit: url.searchParams.get("includeAudit") === "true"
+    });
+  }
+
+  if (method === "DELETE" && path === "/api/v1/admin/data") {
+    requireMemoryWrite(principal);
+    return service.clearAllData();
+  }
+
   if (method === "GET" && path === "/api/v1/panel/analysis") {
     requirePanelRead(principal);
     return service.panelAnalysis({
@@ -836,6 +958,9 @@ function publicCloseSessionResponse(result: unknown): Record<string, unknown> {
     ok: record.ok,
     sessionId: record.sessionId,
     status: record.status,
+    closedEpisodeIds: record.closedEpisodeIds,
+    changeSeq: record.changeSeq,
+    syncCursor: record.syncCursor,
     serverTime: record.serverTime
   };
 }
@@ -992,21 +1117,31 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
   }
 }
 
-function writeJson(response: ServerResponse, status: number, body: unknown): void {
+function writeJson(
+  response: ServerResponse,
+  status: number,
+  body: unknown,
+  headers: Record<string, string> = {}
+): void {
   const payload = JSON.stringify(body, null, 2);
   response.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
-    "content-length": Buffer.byteLength(payload)
+    "content-length": Buffer.byteLength(payload),
+    ...headers
   });
   response.end(payload);
 }
 
-function writeHtml(response: ServerResponse, html: string): void {
+function writeViewerAsset(
+  response: ServerResponse,
+  asset: NonNullable<ReturnType<typeof memoryViewerAsset>>
+): void {
   response.writeHead(200, {
-    "content-type": "text/html; charset=utf-8",
-    "content-length": Buffer.byteLength(html)
+    "content-type": asset.contentType,
+    "content-length": asset.body.byteLength,
+    "cache-control": asset.cacheControl
   });
-  response.end(html);
+  response.end(asset.body);
 }
 
 function writeError(response: ServerResponse, error: unknown, requestId?: string): void {
@@ -1038,7 +1173,7 @@ function authenticate(
   url: URL,
   options: MemoryHttpServerOptions
 ): AuthPrincipal {
-  if (url.pathname === "/api/v1/health") {
+  if (url.pathname === "/health" || url.pathname === "/api/v1/health") {
     return { kind: "anonymous", scopes: ["health:read"] };
   }
   const auth = options.auth;
@@ -1080,6 +1215,10 @@ function authenticate(
   throw new MemoryServiceError("unauthorized", "invalid memory service token", 401, requestIdFromHeaders(request));
 }
 
+function viewerPrincipal(): AuthPrincipal {
+  return { kind: "viewer", scopes: ["*"] };
+}
+
 function tokenFromRequest(request: IncomingMessage, url: URL): string | undefined {
   const authorization = request.headers.authorization;
   const bearer = authorization?.startsWith("Bearer ")
@@ -1088,10 +1227,6 @@ function tokenFromRequest(request: IncomingMessage, url: URL): string | undefine
   const headerKey = request.headers["x-api-key"];
   const apiKey = Array.isArray(headerKey) ? headerKey[0] : headerKey;
   return bearer ?? apiKey ?? url.searchParams.get("token") ?? url.searchParams.get("access_token") ?? undefined;
-}
-
-function isViewerPath(path: string): boolean {
-  return path === "/" || path === "/viewer" || path === "/viewer/";
 }
 
 function namespaceFromRequest(request: IncomingMessage, url: URL): RuntimeNamespace | undefined {
@@ -1192,7 +1327,7 @@ function envelopeWithPrincipal<T extends Record<string, unknown>>(
   principal: AuthPrincipal
 ): T & RequestEnvelope {
   const existing = isRecord(body.namespace) ? body.namespace as unknown as RuntimeNamespace : undefined;
-  const namespace = mergeNamespaces(mergeNamespaces(existing, namespaceFromSource(body.source)), principal.namespace);
+  const namespace = mergeNamespaces(mergeNamespaces(namespaceFromSource(body.source), existing), principal.namespace);
   assertNamespaceScope(existing, principal.namespace);
   return {
     ...body,
@@ -1226,7 +1361,7 @@ function strictEnvelopeWithPrincipal(
     }
   }
   const namespace = mergeNamespaces(
-    mergeNamespaces(requestNamespace, namespaceFromSource(body.source)),
+    mergeNamespaces(namespaceFromSource(body.source), requestNamespace),
     principalNamespace
   );
   if (!namespace) {
@@ -1308,27 +1443,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
-function setCors(response: ServerResponse): void {
-  response.setHeader("access-control-allow-origin", "*");
-  response.setHeader("access-control-allow-methods", "GET,POST,DELETE,OPTIONS");
+function setSecurityHeaders(response: ServerResponse): void {
+  response.setHeader("x-content-type-options", "nosniff");
+  response.setHeader("x-frame-options", "DENY");
+  response.setHeader("referrer-policy", "no-referrer");
   response.setHeader(
-    "access-control-allow-headers",
-    [
-      "content-type",
-      "authorization",
-      "x-api-key",
-      "x-request-id",
-      "x-correlation-id",
-      "x-memmy-user-id",
-      "x-memmy-tenant-id",
-      "x-memmy-project-id",
-      "x-memmy-workspace-id",
-      "x-memmy-workspace-path",
-      "x-memmy-profile-id",
-      "x-memmy-profile-label",
-      "x-memmy-session-key",
-      "x-memmy-time-zone"
-    ].join(",")
+    "content-security-policy",
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'"
   );
 }
 

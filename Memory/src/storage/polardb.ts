@@ -1,5 +1,5 @@
-export const POLARDB_SCHEMA_VERSION = "runtime-v2";
-export const POLARDB_MIGRATION_ID = "002_memmy_l3_world_model_runtime_schema";
+export const POLARDB_SCHEMA_VERSION = "runtime-v3";
+export const POLARDB_MIGRATION_ID = "003_memory_capture_claims";
 
 export function polardbMigrationSql(): string[] {
   return [
@@ -286,6 +286,17 @@ export function polardbMigrationSql(): string[] {
       created_at TIMESTAMPTZ NOT NULL,
       expires_at TIMESTAMPTZ
     )`,
+    `CREATE TABLE IF NOT EXISTS memory_capture_claims (
+      user_id TEXT NOT NULL,
+      source TEXT NOT NULL,
+      qa_hash TEXT NOT NULL,
+      primary_memory_id TEXT NOT NULL,
+      captured_by TEXT NOT NULL CHECK (captured_by IN ('turn_complete', 'agent_source_scan')),
+      created_at TIMESTAMPTZ NOT NULL,
+      PRIMARY KEY (user_id, source, qa_hash)
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_memory_capture_claims_primary_memory
+      ON memory_capture_claims (primary_memory_id)`,
     `CREATE TABLE IF NOT EXISTS l3_world_model_scopes (
       scope_key TEXT PRIMARY KEY,
       user_id TEXT NOT NULL,

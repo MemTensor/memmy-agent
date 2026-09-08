@@ -32,7 +32,7 @@ Environment variables:
 Default binary URL:
 
 ```text
-https://memos-test.oss-cn-shanghai.aliyuncs.com/memmy-memory-{version}-{target}.tar.gz
+https://github.com/MemTensor/memmy-agent/releases/download/memory-v{version}/memmy-memory-{version}-{target}.tar.gz
 ```
 
 For example, a macOS arm64 archive name is:
@@ -53,9 +53,21 @@ memmy-memory init
 ```
 
 `init` writes the Memory endpoint and optional local SQLite path to the Memmy
-config file. The npm package does not bundle the Memory HTTP service; run the
-local service separately during development, or point the CLI at a cloud Memory
-endpoint with `--url`.
+config file. Install the standalone service without changing an Agent with:
+
+```bash
+memmy-memory install --service-only
+```
+
+Install the service and adapters for detected Agents, or upgrade the active
+runtime and its installed adapters, with:
+
+```bash
+memmy-memory install
+memmy-memory install --agents openclaw,hermes
+memmy-memory upgrade
+memmy-memory upgrade --version 2.1.0
+```
 
 By default, `init` installs agent-side files for each supported agent root it
 finds and skips agents that are not installed. Use `--agent` to require and
@@ -76,6 +88,10 @@ Supported agents:
 - `opencode`
 - `openclaw`
 - `hermes`
+- `dsh`
+- `workbuddy`
+- `pi`
+- `qwenwork`
 
 ## Commands
 
@@ -98,9 +114,9 @@ memmy-memory delete <id>
 memmy-memory raw GET /panel/overview
 ```
 
-`memmy-memory install` is a source-tree helper. It runs initialization and
-creates `~/.memmy/bin/memmy-memory` as a symlink to a built CLI entry point;
-global npm installations normally do not need it.
+`memmy-memory install` downloads a verified, versioned Memory runtime, registers
+the user-level background service, starts it, and verifies `/api/v1/health`.
+The development-only `--source-path` option retains the source-tree symlink flow.
 
 `memmy-memory get <id>` prints compact agent-readable memory content by default.
 Use `--verbose` when debugging the full JSON detail payload.

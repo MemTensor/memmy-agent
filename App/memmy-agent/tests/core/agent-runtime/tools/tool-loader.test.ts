@@ -375,7 +375,7 @@ describe("Config round-trip", () => {
     expect(config.tools.exec.timeout).toBe(60);
     expect(config.tools.web.enable).toBe(true);
     expect(config.tools.web.search.provider).toBe("duckduckgo");
-    expect(config.tools.imageGeneration.enabled).toBe(false);
+    expect(config.tools.imageGeneration.enabled).toBe(true);
     expect(config.tools.restrictToWorkspace).toBe(false);
     expect(["cli", "Apps"].join("") in config.tools).toBe(false);
   });

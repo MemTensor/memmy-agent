@@ -51,7 +51,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.sha }}
+          # A branch may share the release tag's name; select the tag explicitly.
+          ref: ${{ github.event_name == 'release' && format('refs/tags/{0}', github.event.release.tag_name) || github.sha }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22

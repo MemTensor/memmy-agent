@@ -183,6 +183,7 @@ describe("PetPage helpers", () => {
           ...mockBootstrap.onboarding,
           completed: false,
           currentStep: "scan_permission_required" as const,
+          firstEncounterReportStatus: "shown" as const,
           completedAt: null
         }
       },
@@ -204,6 +205,7 @@ describe("PetPage helpers", () => {
         ...mockBootstrap.onboarding,
         completed: true,
         currentStep: "completed" as const,
+        firstEncounterReportStatus: "shown" as const,
         completedAt: "2026-06-01T00:00:00.000Z"
       }
     };

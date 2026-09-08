@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
+  BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID,
   resolveAssignedModel as resolveCatalogAssignment,
   resolveCloudServiceBaseUrl,
   type ActualModelContext,
@@ -544,6 +545,12 @@ export async function writeAccountModelProjectionToMemmyConfig(
       ? { ...existingAccountProvider.endpoints }
       : {};
     const existingPlatform = isRecord(existingEndpoints.platform) ? existingEndpoints.platform : {};
+    const existingMemory = isRecord(config.memmyMemory) ? config.memmyMemory : {};
+    const existingRoleRouting = isRecord(existingMemory.roleRouting) ? existingMemory.roleRouting : {};
+    const memoryConfigAffected = existingRoleRouting.summary !== "fixed"
+      || existingRoleRouting.evolution !== "fixed"
+      || existingString(existingAccountProvider.apiKey) !== effectiveCloudUuid
+      || existingString(existingAccountProvider.ownerAccountId) !== ownerAccountId;
     providers[MEMMY_ACCOUNT_PROVIDER] = {
       ...existingAccountProvider,
       ownerAccountId,
@@ -583,13 +590,22 @@ export async function writeAccountModelProjectionToMemmyConfig(
     config.modelPresets = presets;
     updateAccountAssignment(config, ownerAccountId, presetIds);
 
+    const memory = { ...existingMemory };
+    const roleRouting = { ...existingRoleRouting };
+    // Account mode owns dedicated models for both memory roles. Persist the
+    // route so a freshly installed config cannot inherit agent_chat.
+    roleRouting.summary = "fixed";
+    roleRouting.evolution = "fixed";
+    memory.roleRouting = roleRouting;
+    config.memmyMemory = memory;
+
     const agents = isRecord(config.agents) ? { ...config.agents } : {};
     const defaults = isRecord(agents.defaults) ? { ...agents.defaults } : {};
     const currentDefault = existingString(defaults.modelPreset);
     if (!currentDefault || !isRecord(presets[currentDefault])) defaults.modelPreset = presetIds.agent;
     agents.defaults = defaults;
     config.agents = agents;
-    return { memoryConfigAffected: false };
+    return { memoryConfigAffected };
   });
   return { changed: result.changed, memoryConfigAffected: result.value.memoryConfigAffected };
 }
@@ -750,6 +766,7 @@ function updateAccountAssignment(
 ): void {
   const assignments = isRecord(config.modelAssignments) ? { ...config.modelAssignments } : {};
   const existing = isRecord(assignments.account) ? { ...assignments.account } : {};
+  const sameOwner = existingString(existing.ownerAccountId) === ownerAccountId;
   const presets = isRecord(config.modelPresets) ? config.modelPresets : {};
   const agent = isRecord(existing.agent) ? { ...existing.agent } : {};
   const currentCandidates = Array.isArray(agent.candidates)
@@ -780,9 +797,14 @@ function updateAccountAssignment(
   const next: Record<string, unknown> = { ...existing, ownerAccountId, agent };
   for (const [field, capability] of Object.entries(singles) as Array<[keyof typeof singles, AccountCapability]>) {
     const current = existingString(existing[field]);
-    next[field] = current && assignmentPresetIsUsable(presets, current, capability, ownerAccountId)
+    const keepBuiltInLocalEmbedding = field === "embedding"
+      && sameOwner
+      && current === BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID;
+    next[field] = keepBuiltInLocalEmbedding
       ? current
-      : presetIds[capability];
+      : current && assignmentPresetIsUsable(presets, current, capability, ownerAccountId)
+        ? current
+        : presetIds[capability];
   }
   assignments.account = next;
   config.modelAssignments = assignments;

@@ -47,9 +47,9 @@ node dist/main.js --help
 - **API Key 模式**：分三步配置主模型 + Embedding、记忆相关模型、可选的 ASR 与图像生成模型，每一步都提供真实连接测试。
 
 ```bash
-memmy onboard          # 初始化配置和 workspace
-memmy onboard --wizard # 终端菜单式配置模型、Provider、工具
-memmy status           # 检查配置与运行状态
+memmy onboard            # 终端菜单式配置模型、Provider、工具
+memmy onboard --defaults # 非交互式初始化配置和 workspace
+memmy status             # 检查配置与运行状态
 ```
 
 进入主工作台，在输入框发送第一条消息。`Enter` 发送，`Shift + Enter` 换行，输入 `/` 可打开 Slash command 面板。

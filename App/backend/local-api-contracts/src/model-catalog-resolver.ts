@@ -13,6 +13,8 @@ export interface RuntimeCatalogEndpoint {
     extraBody?: Record<string, unknown>;
 }
 
+export const BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID = "memmy-builtin-local-embedding";
+
 export interface RuntimeCatalogProvider {
     apiKey?: string;
     extraHeaders?: Record<string, string>;

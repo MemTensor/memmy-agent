@@ -3,6 +3,7 @@ import { DatabaseSync } from "node:sqlite";
 import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 
 const SQLITE_ROW_YIELD_INTERVAL = 100;
+const MAX_RECORD_BYTES = 64 * 1024 * 1024;
 
 /** Contract for raw cursor message. */
 export interface RawCursorMessage {
@@ -61,6 +62,36 @@ export async function* readCursorVscdb(path: string): AsyncIterable<RawCursorMes
   }
 }
 
+/** Streams Cursor rows without building a database-wide message array. */
+export async function* streamCursorVscdb(path: string): AsyncIterable<RawCursorMessage> {
+  const db = new DatabaseSync(path, { readOnly: true });
+  try {
+    if (hasTable(db, "ItemTable")) {
+      const statement = db.prepare("SELECT key, value FROM ItemTable WHERE value IS NOT NULL ORDER BY key ASC");
+      let rows = 0;
+      for (const row of statement.iterate() as Iterable<ItemTableRow>) {
+        rows += 1;
+        if (rows % SQLITE_ROW_YIELD_INTERVAL === 0) await yieldToEventLoop();
+        if (Buffer.byteLength(row.value) > MAX_RECORD_BYTES) continue;
+        for (const message of extractMessagesFromItemRow(row)) yield message;
+      }
+    }
+    if (hasTable(db, "cursorDiskKV")) {
+      const statement = db.prepare("SELECT key, value FROM cursorDiskKV WHERE key LIKE 'bubbleId:%' AND value IS NOT NULL ORDER BY key ASC");
+      let rows = 0;
+      for (const row of statement.iterate() as Iterable<CursorDiskKvRow>) {
+        rows += 1;
+        if (rows % SQLITE_ROW_YIELD_INTERVAL === 0) await yieldToEventLoop();
+        if (Buffer.byteLength(row.value) > MAX_RECORD_BYTES) continue;
+        const message = extractMessageFromBubbleRow(row);
+        if (message) yield message;
+      }
+    }
+  } finally {
+    db.close();
+  }
+}
+
 /** Reads read item table messages. */
 async function readItemTableMessages(db: DatabaseSync): Promise<RawCursorMessage[]> {
   if (!hasTable(db, "ItemTable")) {
@@ -76,7 +107,7 @@ async function readItemTableMessages(db: DatabaseSync): Promise<RawCursorMessage
       await yieldToEventLoop();
     }
 
-    messages.push(...extractMessagesFromItemRow(row));
+    if (Buffer.byteLength(row.value) <= MAX_RECORD_BYTES) messages.push(...extractMessagesFromItemRow(row));
   }
 
   return messages;
@@ -99,6 +130,7 @@ async function readCursorDiskKvMessages(db: DatabaseSync): Promise<RawCursorMess
       await yieldToEventLoop();
     }
 
+    if (Buffer.byteLength(row.value) > MAX_RECORD_BYTES) continue;
     const message = extractMessageFromBubbleRow(row);
     if (message) {
       messages.push(message);

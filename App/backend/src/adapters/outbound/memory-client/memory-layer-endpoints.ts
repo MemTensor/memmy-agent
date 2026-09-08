@@ -3,6 +3,8 @@
 export const MEMORY_LAYER_PATHS = Object.freeze({
   health: "/api/v1/health",
   reloadConfig: "/api/v1/admin/reload-config",
+  exportBundle: "/api/v1/admin/export",
+  clearAllData: "/api/v1/admin/data",
   openSession: "/api/v1/sessions/open",
   closeSession: "/api/v1/sessions/:sessionId/close",
   startTurn: "/api/v1/turns/start",

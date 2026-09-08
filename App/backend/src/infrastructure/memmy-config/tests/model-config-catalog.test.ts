@@ -3,7 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import YAML from "yaml";
 import { afterEach, describe, expect, it } from "vitest";
-import type { ModelAssignments, ModelConfigInput } from "@memmy/local-api-contracts";
+import {
+  BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID,
+  type ModelAssignments,
+  type ModelConfigInput
+} from "@memmy/local-api-contracts";
 import {
   InvalidModelConfigError,
   ModelConfigChangedError,
@@ -65,6 +69,76 @@ function openAiInput(revision: string, presetId?: string): ModelConfigInput {
 }
 
 describe("model config catalog", () => {
+  it("persists the reserved built-in local Embedding assignment without a preset", async () => {
+    const file = fixture({ modelAssignments: emptyAssignments() });
+    const current = await readModelConfigCatalog(file);
+    const assignments = emptyAssignments();
+    assignments.byok.embedding = BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID;
+
+    const saved = await writeModelConfigCatalog(file, {
+      configRevision: current.configRevision,
+      providers: [],
+      modelAssignments: assignments
+    });
+
+    expect(saved.modelAssignments.byok.embedding).toBe(BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID);
+  });
+
+  it("rejects an ownerless account built-in local Embedding assignment", async () => {
+    const file = fixture({ modelAssignments: emptyAssignments() });
+    const current = await readModelConfigCatalog(file);
+    const assignments = emptyAssignments();
+    assignments.account.embedding = BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID;
+
+    await expect(writeModelConfigCatalog(file, {
+      configRevision: current.configRevision,
+      providers: [],
+      modelAssignments: assignments
+    })).rejects.toThrow(/requires an account owner/);
+  });
+
+  it("rejects the built-in local Embedding identifier outside the Embedding assignment", async () => {
+    const file = fixture({ modelAssignments: emptyAssignments() });
+    const current = await readModelConfigCatalog(file);
+    const assignments = emptyAssignments();
+    assignments.byok.memorySummary = BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID;
+
+    await expect(writeModelConfigCatalog(file, {
+      configRevision: current.configRevision,
+      providers: [],
+      modelAssignments: assignments
+    })).rejects.toThrow(/only valid for embedding/);
+  });
+
+  it("reserves the built-in local Embedding identifier against preset collisions", async () => {
+    const file = fixture({
+      providers: {
+        openai: {
+          apiKey: "sk-existing",
+          endpoints: {
+            chat: { apiBase: "https://api.example.test/v1", protocol: "openai-chat-completions" }
+          }
+        }
+      },
+      modelPresets: {
+        [BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID]: {
+          provider: "openai",
+          endpoint: "chat",
+          model: "gpt-5",
+          source: "byok",
+          capabilities: ["agent"]
+        }
+      },
+      modelAssignments: emptyAssignments()
+    });
+    const current = await readModelConfigCatalog(file);
+
+    await expect(writeModelConfigCatalog(
+      file,
+      openAiInput(current.configRevision, BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID)
+    )).rejects.toThrow(/Preset ID is reserved/);
+  });
+
   it("creates unique server preset IDs, masks all credentials, and never persists labels", async () => {
     const file = fixture({ futureSection: { keepMe: true } });
     const current = await readModelConfigCatalog(file);
@@ -262,6 +336,112 @@ describe("model config catalog", () => {
     const accountSaved = await writeModelConfigCatalog(file, accountInput);
     expect(accountSaved.modelAssignments.byok).toEqual(byokSaved.modelAssignments.byok);
     expect(accountSaved.modelAssignments.account).not.toEqual(accountBefore);
+  });
+
+  it("projects Desktop memory selections into the authoritative memmyMemory section", async () => {
+    const file = fixture({ app: { userMode: "byok" } });
+    const revision = (await readModelConfigCatalog(file)).configRevision;
+    const definitions: ModelConfigInput = {
+      configRevision: revision,
+      providers: [{
+        provider: "openai",
+        apiKey: "sk-memory",
+        endpoints: [
+          {
+            endpointId: "chat",
+            apiBase: "https://models.example/v1",
+            protocol: "openai-chat-completions"
+          },
+          {
+            endpointId: "embedding",
+            apiBase: "https://models.example/v1",
+            protocol: "openai-embeddings"
+          }
+        ],
+        models: [
+          {
+            endpointId: "chat",
+            model: "agent-model",
+            source: "byok",
+            capabilities: ["agent", "memory_summary", "memory_evolution"]
+          },
+          {
+            endpointId: "chat",
+            model: "memory-model",
+            source: "byok",
+            capabilities: ["memory_summary", "memory_evolution"]
+          },
+          {
+            endpointId: "embedding",
+            model: "embedding-model",
+            source: "byok",
+            capabilities: ["embedding"]
+          }
+        ]
+      }],
+      modelAssignments: emptyAssignments()
+    };
+    const created = await writeModelConfigCatalog(file, definitions);
+    const models = created.providers[0]!.models;
+    const agentId = models.find((model) => model.model === "agent-model")!.presetId;
+    const memoryId = models.find((model) => model.model === "memory-model")!.presetId;
+    const embeddingId = models.find((model) => model.model === "embedding-model")!.presetId;
+    const assigned: ModelConfigInput = {
+      ...definitions,
+      configRevision: created.configRevision,
+      providers: [{
+        ...definitions.providers[0]!,
+        models: definitions.providers[0]!.models.map((model) => ({
+          ...model,
+          presetId: model.model === "agent-model"
+            ? agentId
+            : model.model === "memory-model"
+              ? memoryId
+              : embeddingId
+        }))
+      }],
+      modelAssignments: {
+        ...emptyAssignments(),
+        byok: {
+          ...emptyAssignment(),
+          agent: { candidates: [agentId], default: agentId },
+          memorySummary: memoryId,
+          memoryEvolution: memoryId,
+          embedding: embeddingId
+        }
+      }
+    };
+    const saved = await writeModelConfigCatalog(file, assigned);
+    const raw = YAML.parse(readFileSync(file, "utf8")) as any;
+    expect(raw.memmyMemory).toMatchObject({
+      roleRouting: { summary: "follow", evolution: "fixed" },
+      evolution: {
+        provider: "openai_compatible",
+        endpoint: "https://models.example/v1",
+        model: "memory-model",
+        apiKey: "sk-memory"
+      },
+      embedding: {
+        mode: "custom",
+        provider: "openai_compatible",
+        endpoint: "https://models.example/v1",
+        model: "embedding-model",
+        apiKey: "sk-memory"
+      }
+    });
+    expect(saved.memorySettings).toEqual({
+      roleRouting: { summary: "follow", evolution: "fixed" },
+      embeddingMode: "custom"
+    });
+
+    const followInput = structuredClone(assigned);
+    followInput.configRevision = saved.configRevision;
+    followInput.modelAssignments.byok.memorySummary = agentId;
+    followInput.modelAssignments.byok.memoryEvolution = agentId;
+    const followed = await writeModelConfigCatalog(file, followInput);
+    expect(followed.memorySettings?.roleRouting.summary).toBe("follow");
+    expect(followed.memorySettings?.roleRouting.evolution).toBe("follow");
+    expect((YAML.parse(readFileSync(file, "utf8")) as any).memmyMemory.roleRouting.summary).toBe("follow");
   });
 
   it("rejects duplicate endpoint definitions, invalid protocol capabilities, and duplicate models", async () => {

@@ -143,6 +143,146 @@ describe("packaged desktop runtime configuration", () => {
     expect(existsSync(join(runtime, ".env"))).toBe(false);
   });
 
+  it("creates a standalone Windows Memory manifest without private workspace dependencies", () => {
+    const root = fixtureRoot();
+    const sourcePackage = join(root, "Memory", "package.json");
+    const runtimePackage = join(root, "runtime", "package.json");
+    const runtimeMetadata = join(root, "runtime", "memory-runtime.json");
+    writeFixtureJson(sourcePackage, {
+      name: "@memmy/memory",
+      version: "2.1.0",
+      dependencies: {
+        "@memmy/agent-source-core": "0.0.0",
+        zod: "^4.4.3",
+      },
+    });
+    const generator = join(
+      dirname(fileURLToPath(import.meta.url)),
+      "..", "scripts", "internal", "win", "create-memory-runtime-manifest.mjs",
+    );
+
+    const result = spawnSync(process.execPath, [
+      generator,
+      sourcePackage,
+      runtimePackage,
+      runtimeMetadata,
+    ], { encoding: "utf8" });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(readFileSync(runtimePackage, "utf8"))).toEqual({
+      name: "@memmy/packaged-memory-runtime",
+      version: "2.1.0",
+      private: true,
+      type: "module",
+      dependencies: { zod: "^4.4.3" },
+    });
+    expect(JSON.parse(readFileSync(runtimeMetadata, "utf8"))).toEqual({
+      version: "2.1.0",
+      protocolVersion: 1,
+      target: "windows-x64",
+      entrypoint: "dist/src/server/index.js",
+      viewer: "dist/viewer/index.html",
+    });
+  });
+
+  it("validates desktop and Memory ASAR versions against independent authorities", async () => {
+    const root = fixtureRoot();
+    const verifier = join(
+      dirname(fileURLToPath(import.meta.url)),
+      "..",
+      "scripts",
+      "internal",
+      "shared",
+      "verify-packaged-asar.mjs",
+    );
+    const asar = await createAsarFixture(
+      root,
+      "independent-component-versions",
+      "1.1.2",
+      false,
+      true,
+      [],
+      "win32",
+      "complete",
+      "2.1.0",
+    );
+
+    const verified = spawnSync(
+      process.execPath,
+      [verifier, ...verifierArgs(asar, "1.1.2", "win32", "x64", "2.1.0")],
+      { encoding: "utf8" },
+    );
+    expect(verified.status, verified.stderr).toBe(0);
+
+    const staleMemory = spawnSync(
+      process.execPath,
+      [verifier, ...verifierArgs(asar, "1.1.2", "win32", "x64", "2.0.9")],
+      { encoding: "utf8" },
+    );
+    expect(staleMemory.status).not.toBe(0);
+    expect(staleMemory.stderr).toContain("dist/runtime/memory/package.json");
+
+    const missingMemoryAuthority = spawnSync(process.execPath, [
+      verifier,
+      "--asar", asar,
+      "--expected", "1.1.2",
+      "--platform", "win32",
+      "--arch", "x64",
+    ], { encoding: "utf8" });
+    expect(missingMemoryAuthority.status).not.toBe(0);
+    expect(missingMemoryAuthority.stderr).toContain("--expected-memory is required");
+
+    const invalidMemoryAuthority = spawnSync(
+      process.execPath,
+      [verifier, ...verifierArgs(asar, "1.1.2", "win32", "x64", "invalid")],
+      { encoding: "utf8" },
+    );
+    expect(invalidMemoryAuthority.status).not.toBe(0);
+    expect(invalidMemoryAuthority.stderr).toContain(
+      "Expected packaged Memory version must use semantic version syntax",
+    );
+
+    const unexpectedDarwinMemoryAuthority = spawnSync(
+      process.execPath,
+      [verifier, ...verifierArgs(asar, "1.1.2", "darwin", "arm64"), "--expected-memory", "2.1.0"],
+      { encoding: "utf8" },
+    );
+    expect(unexpectedDarwinMemoryAuthority.status).not.toBe(0);
+    expect(unexpectedDarwinMemoryAuthority.stderr).toContain(
+      "--expected-memory is only supported for win32 packages",
+    );
+
+    const emptyDarwinMemoryAuthority = spawnSync(process.execPath, [
+      verifier,
+      ...verifierArgs(asar, "1.1.2", "darwin", "arm64"),
+      "--expected-memory", "",
+    ], { encoding: "utf8" });
+    expect(emptyDarwinMemoryAuthority.status).not.toBe(0);
+    expect(emptyDarwinMemoryAuthority.stderr).toContain(
+      "--expected-memory is only supported for win32 packages",
+    );
+
+    const staleAgentAsar = await createAsarFixture(
+      root,
+      "stale-agent-version",
+      "1.1.2",
+      false,
+      true,
+      [],
+      "win32",
+      "complete",
+      "2.1.0",
+      "1.1.1",
+    );
+    const staleAgent = spawnSync(
+      process.execPath,
+      [verifier, ...verifierArgs(staleAgentAsar, "1.1.2", "win32", "x64", "2.1.0")],
+      { encoding: "utf8" },
+    );
+    expect(staleAgent.status).not.toBe(0);
+    expect(staleAgent.stderr).toContain("dist/runtime/memmy-agent/package.json");
+  });
+
   it("fails closed on ASAR env files and stale embedded versions", async () => {
     const root = fixtureRoot();
     const verifier = join(
@@ -154,47 +294,179 @@ describe("packaged desktop runtime configuration", () => {
       "verify-packaged-asar.mjs",
     );
     const goodAsar = await createAsarFixture(root, "good", "1.0.8");
-    const good = spawnSync(process.execPath, [verifier, "--asar", goodAsar, "--expected", "1.0.8"], {
+    const good = spawnSync(process.execPath, [verifier, ...verifierArgs(goodAsar, "1.0.8")], {
       encoding: "utf8",
     });
     expect(good.status, good.stderr).toBe(0);
 
+    const missingAgentSourceCoreAsar = await createAsarFixture(
+      root,
+      "without-agent-source-core",
+      "1.0.8",
+      false,
+      true,
+      [],
+      "win32",
+      "manifest-only",
+    );
+    const missingAgentSourceCore = spawnSync(
+      process.execPath,
+      [verifier, ...verifierArgs(missingAgentSourceCoreAsar, "1.0.8")],
+      { encoding: "utf8" },
+    );
+    expect(missingAgentSourceCore.status).not.toBe(0);
+    expect(missingAgentSourceCore.stderr).toContain(
+      "dist/runtime/memory/node_modules/@memmy/agent-source-core/dist/src/index.js",
+    );
+
+    const darwinAsar = await createAsarFixture(root, "darwin", "1.0.8", false, true, [], "darwin");
+    const darwin = spawnSync(process.execPath, [verifier, ...verifierArgs(darwinAsar, "1.0.8", "darwin", "arm64")], {
+      encoding: "utf8",
+    });
+    expect(darwin.status, darwin.stderr).toBe(0);
+
     const noLocksAsar = await createAsarFixture(root, "without-locks", "1.0.8", false, false);
     const withoutLocks = spawnSync(
       process.execPath,
-      [verifier, "--asar", noLocksAsar, "--expected", "1.0.8"],
+      [verifier, ...verifierArgs(noLocksAsar, "1.0.8")],
       { encoding: "utf8" },
     );
     expect(withoutLocks.status, withoutLocks.stderr).toBe(0);
 
     const staleAsar = await createAsarFixture(root, "stale", "1.0.7");
-    const stale = spawnSync(process.execPath, [verifier, "--asar", staleAsar, "--expected", "1.0.8"], {
+    const stale = spawnSync(process.execPath, [verifier, ...verifierArgs(staleAsar, "1.0.8")], {
       encoding: "utf8",
     });
     expect(stale.status).not.toBe(0);
     expect(stale.stderr).toContain("does not match the requested version");
 
     const envAsar = await createAsarFixture(root, "with-env", "1.0.8", true);
-    const withEnv = spawnSync(process.execPath, [verifier, "--asar", envAsar, "--expected", "1.0.8"], {
+    const withEnv = spawnSync(process.execPath, [verifier, ...verifierArgs(envAsar, "1.0.8")], {
       encoding: "utf8",
     });
     expect(withEnv.status).not.toBe(0);
     expect(withEnv.stderr).toContain("forbidden environment file");
+
+    const foreignNativeAsar = await createAsarFixture(root, "foreign-native", "1.0.8", false, true, [
+      ["dist/runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/linux/x64/libonnxruntime.so", "foreign"],
+    ]);
+    const foreignNative = spawnSync(process.execPath, [verifier, ...verifierArgs(foreignNativeAsar, "1.0.8")], {
+      encoding: "utf8",
+    });
+    expect(foreignNative.status).not.toBe(0);
+    expect(foreignNative.stderr).toContain("incompatible onnxruntime-node platform");
+
+    const toolchainAsar = await createAsarFixture(root, "toolchain", "1.0.8", false, true, [
+      ["dist/runtime/memmy-agent/node_modules/vitest/index.js", "test-only"],
+    ]);
+    const toolchain = spawnSync(process.execPath, [verifier, ...verifierArgs(toolchainAsar, "1.0.8")], {
+      encoding: "utf8",
+    });
+    expect(toolchain.status).not.toBe(0);
+    expect(toolchain.stderr).toContain("optional-peer test toolchain");
+
+    const thirdPartyMapAsar = await createAsarFixture(root, "third-party-map", "1.0.8", false, true, [
+      ["dist/runtime/memory/node_modules/dependency/dist/index.js.map", "third-party-map"],
+    ]);
+    const thirdPartyMap = spawnSync(process.execPath, [verifier, ...verifierArgs(thirdPartyMapAsar, "1.0.8")], {
+      encoding: "utf8",
+    });
+    expect(thirdPartyMap.status).not.toBe(0);
+    expect(thirdPartyMap.stderr).toContain("third-party production source map");
+  });
+
+  it("passes the defined Windows package architecture to the shared ASAR verifier", () => {
+    const buildScript = readFileSync(join(
+      dirname(fileURLToPath(import.meta.url)),
+      "..", "scripts", "internal", "win", "build-nsis.sh",
+    ), "utf8");
+    const verifierCall = buildScript.slice(
+      buildScript.indexOf('node "$ROOT_DIR/scripts/internal/shared/verify-packaged-asar.mjs"'),
+      buildScript.indexOf("\n}", buildScript.indexOf('node "$ROOT_DIR/scripts/internal/shared/verify-packaged-asar.mjs"')),
+    );
+
+    expect(verifierCall).toContain('--arch "$PACKAGE_ARCH"');
+    expect(verifierCall).toContain('--expected-memory "$MEMORY_VERSION"');
+    expect(verifierCall).not.toContain("TARGET_ARCH");
+  });
+
+  it("stages the private agent source workspace package without resolving it from npm", () => {
+    const buildScript = readFileSync(join(
+      dirname(fileURLToPath(import.meta.url)),
+      "..", "scripts", "internal", "win", "build-nsis.sh",
+    ), "utf8");
+
+    expect(buildScript).toContain('AGENT_SOURCE_CORE_DIR="$ROOT_DIR/AgentSourceCore"');
+    expect(buildScript).toContain(
+      'node "$ROOT_DIR/scripts/internal/win/create-memory-runtime-manifest.mjs"',
+    );
+    expect(buildScript).toContain(
+      'RUNTIME_AGENT_SOURCE_CORE_DIR="$RUNTIME_DIR/memory/node_modules/@memmy/agent-source-core"',
+    );
+    expect(buildScript).toContain(
+      'cp -R "$AGENT_SOURCE_CORE_DIR/dist" "$RUNTIME_AGENT_SOURCE_CORE_DIR/dist"',
+    );
+    expect(buildScript).toContain(
+      'require_packaged_runtime_file "$RUNTIME_AGENT_SOURCE_CORE_DIR/dist/src/index.js"',
+    );
+    expect(buildScript.indexOf('npm_ci_win_x64 "$RUNTIME_DIR/memory"')).toBeLessThan(
+      buildScript.indexOf('RUNTIME_AGENT_SOURCE_CORE_DIR="$RUNTIME_DIR/memory/node_modules/@memmy/agent-source-core"'),
+    );
+    expect(buildScript).toContain(
+      'local packaged_memory_runtime="$DESKTOP_DIR/release/win-unpacked/resources/memory-runtime"',
+    );
+    expect(buildScript).toContain(
+      'require_packaged_runtime_file "$packaged_agent_source_core/package.json"',
+    );
+    expect(buildScript).toContain(
+      'require_packaged_runtime_file "$packaged_agent_source_core/dist/src/index.js"',
+    );
+  });
+
+  it("copies Memory node_modules into both Windows offline runtime variants", () => {
+    for (const configName of [
+      "electron-builder.win.yml",
+      "electron-builder.win.unsigned.yml",
+    ]) {
+      const config = readFileSync(join(
+        dirname(fileURLToPath(import.meta.url)),
+        "..", "App", "shell", "desktop", configName,
+      ), "utf8");
+      expect(config).toContain([
+        "  - from: dist/runtime/memory/node_modules",
+        "    to: memory-runtime/node_modules",
+        "    filter:",
+        '      - "**/*"',
+      ].join("\n"));
+    }
   });
 });
 
-async function createAsarFixture(root, name, version, includeEnv = false, includeLocks = true) {
+async function createAsarFixture(
+  root,
+  name,
+  version,
+  includeEnv = false,
+  includeLocks = true,
+  extraFiles = [],
+  platform = "win32",
+  agentSourceCoreFixture = "complete",
+  memoryVersion = version,
+  agentVersion = version,
+) {
   const source = join(root, `${name}-source`);
   const asar = join(root, `${name}.asar`);
   const manifest = { version };
-  const lock = { version, packages: { "": { version } } };
   writeFixtureJson(join(source, "package.json"), manifest);
   writeFixtureJson(join(source, "dist/main/desktop-edition.json"), {
     cloudService: "https://manifest.example.test",
   });
   for (const component of ["memory", "memmy-agent"]) {
-    writeFixtureJson(join(source, `dist/runtime/${component}/package.json`), manifest);
-    if (includeLocks) writeFixtureJson(join(source, `dist/runtime/${component}/package-lock.json`), lock);
+    const componentVersion = component === "memory" ? memoryVersion : agentVersion;
+    const componentManifest = { version: componentVersion };
+    const componentLock = { version: componentVersion, packages: { "": { version: componentVersion } } };
+    writeFixtureJson(join(source, `dist/runtime/${component}/package.json`), componentManifest);
+    if (includeLocks) writeFixtureJson(join(source, `dist/runtime/${component}/package-lock.json`), componentLock);
   }
   const contracts = join(
     source,
@@ -202,15 +474,55 @@ async function createAsarFixture(root, name, version, includeEnv = false, includ
   );
   mkdirSync(dirname(contracts), { recursive: true });
   writeFileSync(contracts, "export {};\n");
+  if (platform === "win32") {
+    const ownSourceMap = join(source, "dist/runtime/memmy-agent/dist/main.js.map");
+    mkdirSync(dirname(ownSourceMap), { recursive: true });
+    writeFileSync(ownSourceMap, "own-production-map\n");
+    if (agentSourceCoreFixture === "complete") {
+      const agentSourceCore = join(
+        source,
+        "dist/runtime/memory/node_modules/@memmy/agent-source-core/dist/src/index.js",
+      );
+      mkdirSync(dirname(agentSourceCore), { recursive: true });
+      writeFileSync(agentSourceCore, "export {};\n");
+    }
+    if (agentSourceCoreFixture !== "missing") {
+      writeFixtureJson(
+        join(source, "dist/runtime/memory/node_modules/@memmy/agent-source-core/package.json"),
+        {
+          name: "@memmy/agent-source-core",
+          version: "0.0.0",
+          type: "module",
+          main: "./dist/src/index.js",
+        },
+      );
+    }
+  }
+  const targetArch = platform === "darwin" ? "arm64" : "x64";
+  const onnxRuntimeRoot = join(source, `dist/runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/${platform}/${targetArch}`);
+  mkdirSync(onnxRuntimeRoot, { recursive: true });
+  writeFileSync(join(onnxRuntimeRoot, "onnxruntime_binding.node"), `${platform}-${targetArch}-node`);
+  if (platform === "win32") writeFileSync(join(onnxRuntimeRoot, "onnxruntime.dll"), "win-x64-dll");
   const lifecycleSidecar = join(
     source,
     "node_modules/@memmy/backend/dist/src/adapters/outbound/skill-writer/workspace-bridge/memmy-workspace-bridge.mjs",
   );
   mkdirSync(dirname(lifecycleSidecar), { recursive: true });
   writeFileSync(lifecycleSidecar, "export {};\n");
+  for (const [relativePath, contents] of extraFiles) {
+    const targetPath = join(source, relativePath);
+    mkdirSync(dirname(targetPath), { recursive: true });
+    writeFileSync(targetPath, contents);
+  }
   if (includeEnv) writeFileSync(join(source, ".env.production"), "TOKEN=decoy\n");
   await createPackage(source, asar);
   return asar;
+}
+
+function verifierArgs(asar, expected, platform = "win32", arch = "x64", expectedMemory = expected) {
+  const args = ["--asar", asar, "--expected", expected, "--platform", platform, "--arch", arch];
+  if (platform === "win32") args.push("--expected-memory", expectedMemory);
+  return args;
 }
 
 function writeFixtureJson(path, value) {
