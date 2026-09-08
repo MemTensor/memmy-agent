@@ -54,6 +54,9 @@ export type ComputerHistoryReplayPlan = {
 };
 
 export type ComputerHistoryEntry = {
+  description: string | null;
+  applications: string[];
+  summaryWindow: "10min" | "6h" | null;
   id: string;
   title: string;
   sourceType: ComputerHistorySourceType;
@@ -101,6 +104,9 @@ export type ComputerHistorySnapshot = {
 const ComputerHistoryEntrySchema = z.object({
   id: z.string(),
   title: z.string(),
+  description: z.string().nullable(),
+  applications: z.array(z.string()),
+  summaryWindow: z.enum(["10min", "6h"]).nullable(),
   sourceType: z.enum(["captured", "imported", "demo_fixture"]),
   createdAt: z.string(),
   markdown: z.string(),

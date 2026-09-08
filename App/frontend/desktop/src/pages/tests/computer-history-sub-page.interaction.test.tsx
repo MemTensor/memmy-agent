@@ -26,6 +26,20 @@ describe("ComputerHistorySubPage", () => {
     document.body.replaceChildren();
   });
 
+  const renderWith = async (initial: ComputerHistorySnapshot) => {
+    const client = {
+      getComputerHistory: vi.fn().mockResolvedValue(initial),
+      deleteComputerHistory: vi.fn().mockResolvedValue(initial),
+      startComputerHistoryObservation: vi.fn().mockResolvedValue(initial),
+      pauseComputerHistoryObservation: vi.fn().mockResolvedValue(initial),
+      resumeComputerHistoryObservation: vi.fn().mockResolvedValue(initial),
+      stopComputerHistoryObservation: vi.fn().mockResolvedValue(initial),
+    } as unknown as MemmyAgentClient;
+    await act(async () => {
+      root.render(<ComputerHistorySubPage client={client} />);
+    });
+  };
+
   it("keeps recording and read-only artifacts on the page, and requires two clicks to delete", async () => {
     const initial = snapshot();
     const afterDelete = snapshot({ histories: [], workflows: [] });
@@ -44,7 +58,8 @@ describe("ComputerHistorySubPage", () => {
     });
 
     expect(container.textContent).toContain("Computer History：已停止");
-    expect(container.textContent).toContain("History Markdown");
+    // The timeline reads as a summary: each entry carries its own account.
+    expect(container.textContent).toContain("You opened Notes and drafted a short entry.");
     expect(container.textContent).toContain("Workflow");
     expect(container.textContent).toContain("具体执行统一在聊天框中触发");
     expect(container.textContent).not.toContain("本次示范目标");
@@ -67,6 +82,35 @@ describe("ComputerHistorySubPage", () => {
     expect(deleteComputerHistory).toHaveBeenCalledWith("history-1");
     expect(container.textContent).toContain("还没有 History");
   });
+
+  it("renders a history as a summary instead of raw markdown", async () => {
+    await renderWith(snapshot());
+
+    expect(container.textContent).toContain("My recording");
+    expect(container.textContent).toContain("com.apple.Notes");
+    expect(container.textContent).toContain("Recorded steps.");
+    // Frontmatter is presentation metadata, not something to show the reader.
+    expect(container.textContent).not.toContain("capture_policy");
+  });
+
+  it("groups entries by day and heads a day with its six-hour overview", async () => {
+    const base = {
+      applications: [] as string[],
+      sourceType: "captured" as const,
+      markdown: "## Memory summary\n\nbody",
+      filePath: "/tmp/x.md",
+    };
+    await renderWith(snapshot({
+      histories: [
+        { ...base, id: "day-overview", title: "A whole day", description: "Overview.", summaryWindow: "6h" as const, createdAt: "2026-09-01T00:00:00.000Z" },
+        { ...base, id: "moment", title: "One moment", description: "Detail.", summaryWindow: "10min" as const, createdAt: "2026-09-01T05:00:00.000Z" },
+      ],
+    }));
+
+    expect(container.textContent).toContain("这一天");
+    expect(container.textContent).toContain("A whole day");
+    expect(container.textContent).toContain("One moment");
+  });
 });
 
 function snapshot(overrides: Partial<ComputerHistorySnapshot> = {}): ComputerHistorySnapshot {
@@ -76,9 +120,12 @@ function snapshot(overrides: Partial<ComputerHistorySnapshot> = {}): ComputerHis
     histories: [{
       id: "history-1",
       title: "My recording",
+      description: "You opened Notes and drafted a short entry.",
+      applications: ["com.apple.Notes"],
+      summaryWindow: "10min",
       sourceType: "captured",
       createdAt: "2026-09-01T05:00:00.000Z",
-      markdown: "# Computer History\n\nRecorded steps.",
+      markdown: '---\ncapture_policy: accessibility_events\ntitle: "My recording"\n---\n\n## Memory summary\n\nRecorded steps.',
       filePath: "/tmp/history-1.md",
     }],
     workflows: [{

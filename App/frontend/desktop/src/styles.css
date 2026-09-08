@@ -11078,6 +11078,94 @@ input[type="checkbox"].check-sky:checked::after {
   color: white;
 }
 
+.computer-history-day {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 18px;
+}
+
+.computer-history-day__label {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  opacity: 0.6;
+}
+
+.computer-history-overview {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: flex-start;
+  text-align: left;
+  padding: 10px 12px;
+  border: 1px dashed rgba(120, 130, 140, 0.4);
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.computer-history-overview--active {
+  border-style: solid;
+  border-color: rgba(90, 150, 160, 0.8);
+}
+
+.computer-history-overview__badge {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  opacity: 0.55;
+}
+
+.computer-history-overview p,
+.computer-history-card__summary {
+  margin: 2px 0 0;
+  font-size: 13px;
+  line-height: 1.6;
+  opacity: 0.75;
+}
+
+.computer-history-card__time {
+  font-size: 12px;
+  opacity: 0.55;
+  font-variant-numeric: tabular-nums;
+}
+
+.computer-history-detail__head {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-bottom: 14px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid rgba(120, 130, 140, 0.2);
+}
+
+.computer-history-detail__head h2 {
+  margin: 0;
+}
+
+.computer-history-detail__time {
+  font-size: 12px;
+  opacity: 0.55;
+  font-variant-numeric: tabular-nums;
+}
+
+.computer-history-detail__apps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+}
+
+.computer-history-detail__apps li {
+  font-size: 11.5px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: rgba(120, 130, 140, 0.14);
+}
+
 .computer-history-page__switches {
   display: flex;
   gap: 8px;

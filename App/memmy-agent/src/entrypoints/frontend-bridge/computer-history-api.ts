@@ -2,6 +2,12 @@ import {
   ObservationSettingsStore,
 } from "../../core/agent-runtime/computer-history/settings-store.js";
 import {
+  applicationsFromMarkdown,
+  applyNarrative,
+  writeSegmentNarrative,
+} from "../../core/agent-runtime/computer-history/summary-writer.js";
+import type { LLMRuntimeResolver } from "../../utils/llm-runtime.js";
+import {
   SIX_HOUR_MS,
   alignedId,
   buildSixHourSummary,
@@ -27,6 +33,12 @@ export interface ComputerHistoryReplayPlan {
 export interface ComputerHistoryEntry {
   id: string;
   title: string;
+  /** One-paragraph account of the window, shown in the timeline. */
+  description: string | null;
+  /** Bundle identifiers seen during the window. */
+  applications: string[];
+  /** Which summary layer this entry belongs to, when it is one. */
+  summaryWindow: "10min" | "6h" | null;
   sourceType: ComputerHistorySourceType;
   createdAt: string;
   markdown: string;
@@ -125,6 +137,9 @@ interface RunState {
 interface MarkdownEntry {
   id: string;
   title: string;
+  description: string | null;
+  applications: string[];
+  summaryWindow: "10min" | "6h" | null;
   createdAt: string;
   markdown: string;
   filePath: string;
@@ -163,6 +178,7 @@ export class ComputerHistoryDemoService {
   private observationError: string | null = null;
   private rotationTimer: ReturnType<typeof setInterval> | null = null;
   private readonly observationSettings: ObservationSettingsStore;
+  private llmRuntime: LLMRuntimeResolver | null = null;
   private liveSummaryTimer: ReturnType<typeof setInterval> | null = null;
   private liveSummarySignature: string | null = null;
   private run: RunState = {
@@ -196,6 +212,11 @@ export class ComputerHistoryDemoService {
       15_000,
       10 * 60_000,
     );
+  }
+
+  /** Supplies the model used to narrate finalized segments. */
+  setLlmRuntime(llmRuntime: LLMRuntimeResolver | null): void {
+    this.llmRuntime = llmRuntime;
   }
 
   snapshot(): ComputerHistorySnapshot {
@@ -367,7 +388,40 @@ export class ComputerHistoryDemoService {
       this.observationError = error;
       return;
     }
+    this.narrateSummary(segment.historyFile, "10min");
     this.writeSixHourRollup(segment.id);
+  }
+
+  /**
+   * Rewrites a finished summary's title and description with a model-written
+   * account of the window.
+   *
+   * Deliberately fire-and-forget: the mechanical summary is already on disk, so
+   * a slow or unreachable model delays the better wording, never the recording.
+   */
+  private narrateSummary(file: string, window: "10min" | "6h"): void {
+    const llmRuntime = this.llmRuntime;
+    if (!llmRuntime) return;
+    void (async () => {
+      let markdown: string;
+      try {
+        markdown = fs.readFileSync(file, "utf8");
+      } catch {
+        return;
+      }
+      const narrative = await writeSegmentNarrative(llmRuntime, {
+        applications: applicationsFromMarkdown(markdown),
+        evidence: markdown.replace(/^---\n[\s\S]*?\n---\n/u, ""),
+        window,
+      });
+      if (!narrative) return;
+      try {
+        // Re-read: a rollup may have rewritten the file while the model ran.
+        fs.writeFileSync(file, applyNarrative(fs.readFileSync(file, "utf8"), narrative), "utf8");
+      } catch {
+        // Losing the better wording is acceptable; the summary itself stands.
+      }
+    })();
   }
 
   /** Rebuilds the six-hour summary covering the segment that just closed. */
@@ -389,7 +443,9 @@ export class ComputerHistoryDemoService {
       }));
     const rollup = buildSixHourSummary(summaries, windowStart);
     if (!rollup) return;
-    fs.writeFileSync(path.join(this.historyDirectory, rollup.fileName), rollup.markdown, "utf8");
+    const rollupFile = path.join(this.historyDirectory, rollup.fileName);
+    fs.writeFileSync(rollupFile, rollup.markdown, "utf8");
+    this.narrateSummary(rollupFile, "6h");
   }
 
   private rotateSegment(): void {
@@ -750,9 +806,17 @@ export class ComputerHistoryDemoService {
         const filePath = path.join(directory, entry.name);
         const markdown = fs.readFileSync(filePath, "utf8");
         const stat = fs.statSync(filePath);
+        const id = entry.name.slice(0, -3);
         return {
-          id: entry.name.slice(0, -3),
-          title: readFrontmatterValue(markdown, "title") || entry.name.slice(0, -3),
+          id,
+          title: readFrontmatterValue(markdown, "title") || id,
+          description: nullableFrontmatterValue(markdown, "description"),
+          applications: applicationsFromMarkdown(markdown),
+          summaryWindow: id.endsWith("-10min-summary")
+            ? ("10min" as const)
+            : id.endsWith("-6h-summary")
+              ? ("6h" as const)
+              : null,
           createdAt: readFrontmatterValue(markdown, "captured_at") || stat.mtime.toISOString(),
           markdown,
           filePath,
