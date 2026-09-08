@@ -50,7 +50,9 @@ const quotePowerShellArgumentList = (values: string[]): string => {
   if (values.length === 0) {
     return "@()";
   }
-  return values.map(quotePowerShellSingleQuoted).join(",");
+  // Wrap in @(...) so Start-Process reliably receives an array literal and
+  // unpacks each element as a separate argument to the spawned process.
+  return `@(${values.map(quotePowerShellSingleQuoted).join(",")})`;
 };
 
 const quotePowerShellSingleQuoted = (value: string): string => {

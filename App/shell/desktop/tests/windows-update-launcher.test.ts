@@ -57,6 +57,9 @@ describe("Windows update launcher", () => {
     expect(decoded).toContain("Start-Process");
     expect(decoded).toContain("-FilePath 'powershell.exe'");
     expect(decoded).toContain("-WindowStyle Hidden");
+    // -ArgumentList must be an explicit PowerShell array literal so Start-Process
+    // unpacks each element as a separate argument, not one concatenated string.
+    expect(decoded).toMatch(/-ArgumentList @\('/u);
     for (const argument of command.slice(1)) {
       expect(decoded).toContain(argument);
     }

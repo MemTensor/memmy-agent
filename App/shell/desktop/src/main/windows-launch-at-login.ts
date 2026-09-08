@@ -140,21 +140,37 @@ const defaultWindowsScriptHostProbe: WindowsScriptHostProbe = (systemRootPath) =
 };
 
 const probeWindowsScriptHostOnce = (systemRootPath: string): boolean => {
-  const cscriptPath = windowsPath.join(systemRootPath, "System32", "cscript.exe");
-  if (!existsSync(cscriptPath)) {
+  // Mirror the production launch path (line 72) so the probe fails whenever
+  // the user-facing login item would fail. wscript.exe resolves .vbs through
+  // the shell file-association that surfaces the "no script engine" dialog;
+  // cscript's // switches bypass that association and could pass on systems
+  // where wscript still errors.
+  const wscriptPath = windowsPath.join(systemRootPath, "System32", "wscript.exe");
+  if (!existsSync(wscriptPath)) {
     return false;
   }
 
   let workingDirectory: string | undefined;
   try {
     workingDirectory = mkdtempSync(joinPath(tmpdir(), "memmy-wsh-probe-"));
-    const probeScript = joinPath(workingDirectory, "probe.vbs");
+    const probeScript = windowsPath.join(workingDirectory, "probe.vbs");
     writeFileSync(probeScript, "WScript.Quit 0\r\n", { encoding: "ascii" });
-    const result = spawnSync(cscriptPath, ["//B", "//Nologo", "//T:5", probeScript], {
-      stdio: "ignore",
-      windowsHide: true
-    });
-    return result.status === 0;
+    // Generous timeout to avoid false negatives on heavily loaded machines;
+    // the trivial WScript.Quit script completes in milliseconds under normal
+    // conditions.
+    const CSCRIPT_PROBE_TIMEOUT_SECONDS = 5;
+    const result = spawnSync(
+      wscriptPath,
+      ["//B", "//Nologo", `//T:${CSCRIPT_PROBE_TIMEOUT_SECONDS}`, probeScript],
+      {
+        stdio: "ignore",
+        windowsHide: true
+      }
+    );
+    // result.status is null when the process is killed by a signal (e.g. the
+    // //T:5 timeout); the explicit error guard also covers spawn-time failures
+    // where the engine is present but the launch itself was rejected.
+    return result.status === 0 && result.error == null;
   } catch {
     return false;
   } finally {
