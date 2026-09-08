@@ -99,7 +99,10 @@ export async function writeSegmentNarrative(
   ].filter(Boolean).join("\n");
 
   try {
-    const runtime = llmRuntime(request.modelPreset ?? null);
+    // Pass nothing when no preset was asked for. Coercing that to null reads as
+    // "resolve the preset named null", which the gateway's resolver cannot do —
+    // it answered model_selection_unavailable and narration silently gave up.
+    const runtime = request.modelPreset ? llmRuntime(request.modelPreset) : llmRuntime();
     const response = await runtime.provider.chatWithRetry({
       messages: [
         { role: "system", content: SYSTEM_PROMPT },

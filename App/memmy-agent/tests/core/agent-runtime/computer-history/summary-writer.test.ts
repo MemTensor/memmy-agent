@@ -239,4 +239,35 @@ describe("segment narrative", () => {
       "no evidence to summarize",
     ]);
   });
+
+  it("asks for no preset rather than the preset named null", async () => {
+    const seen: unknown[] = [];
+    const resolver = ((preset?: string | null) => {
+      seen.push(preset);
+      // The gateway resolver rejects an explicit null the same way.
+      if (preset === null) throw new Error("model_selection_unavailable");
+      return { provider: { chatWithRetry: async () => ({ content: '{"title":"t","description":"d","body":"b"}' }) } as any, model: "m" };
+    }) as any;
+
+    const narrative = await writeSegmentNarrative(resolver, {
+      applications: [], evidence: "e", window: "10min",
+    });
+
+    expect(seen).toEqual([undefined]);
+    expect(narrative?.title).toBe("t");
+  });
+
+  it("uses a preset when one is actually given", async () => {
+    const seen: unknown[] = [];
+    const resolver = ((preset?: string | null) => {
+      seen.push(preset);
+      return { provider: { chatWithRetry: async () => ({ content: '{"title":"t","description":"d","body":"b"}' }) } as any, model: "m" };
+    }) as any;
+
+    await writeSegmentNarrative(resolver, {
+      applications: [], evidence: "e", window: "10min", modelPreset: "computer-use-fast",
+    });
+
+    expect(seen).toEqual(["computer-use-fast"]);
+  });
 });
