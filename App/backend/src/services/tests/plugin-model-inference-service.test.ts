@@ -44,7 +44,8 @@ describe("plugin model inference Host service", () => {
       }), { status: 200, headers: { "content-type": "application/json" } }));
     const service = createPluginModelInferenceService({
       resolveModel: async () => resolved(),
-      fetch: fetch as typeof globalThis.fetch
+      fetch: fetch as typeof globalThis.fetch,
+      retryBaseDelayMs: 0
     });
 
     await expect(service.invoke({
@@ -56,6 +57,25 @@ describe("plugin model inference Host service", () => {
     const secondBody = JSON.parse(String(fetch.mock.calls[1]?.[1]?.body));
     expect(firstBody.response_format).toEqual({ type: "json_object" });
     expect(secondBody.response_format).toBeUndefined();
+  });
+
+  it("retries transient gateway failures with the configured retry policy", async () => {
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response("bad gateway", { status: 502 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        choices: [{ message: { content: "recovered after 502" }, finish_reason: "stop" }]
+      }), { status: 200, headers: { "content-type": "application/json" } }));
+    const service = createPluginModelInferenceService({
+      resolveModel: async () => resolved(),
+      fetch: fetch as typeof globalThis.fetch,
+      maxAttempts: 2,
+      retryBaseDelayMs: 0
+    });
+    await expect(service.invoke({
+      pluginId: "literature-review", callId: "retry-502", conversationId: "conversation-1", service: "model-inference",
+      input: { messages: [{ role: "user", content: "Continue" }] }
+    })).resolves.toMatchObject({ content: "recovered after 502" });
+    expect(fetch).toHaveBeenCalledTimes(2);
   });
 
   it("delegates embedding inference to the Memory-owned current model without exposing configuration", async () => {

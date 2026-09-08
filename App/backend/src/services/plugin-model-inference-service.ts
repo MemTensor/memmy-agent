@@ -40,6 +40,7 @@ export interface CreatePluginModelInferenceServiceOptions {
   fetch?: typeof fetch;
   timeoutMs?: number;
   maxAttempts?: number;
+  retryBaseDelayMs?: number;
 }
 
 export function createPluginModelInferenceService(options: CreatePluginModelInferenceServiceOptions): PluginHostServiceInvoker {
@@ -83,7 +84,10 @@ export function createPluginModelInferenceService(options: CreatePluginModelInfe
           if (serviceErrorCode(error) === "model_empty_response" && attemptInput.responseFormat === "json") {
             attemptInput = { ...attemptInput, responseFormat: "text" };
           }
-          await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+          const baseDelayMs = Math.max(0, Math.min(30_000, options.retryBaseDelayMs ?? 250));
+          const exponentialDelayMs = baseDelayMs * (2 ** (attempt - 1));
+          const jitterMs = baseDelayMs > 0 ? Math.floor(Math.random() * Math.max(1, baseDelayMs * 0.2)) : 0;
+          await new Promise((resolve) => setTimeout(resolve, exponentialDelayMs + jitterMs));
         }
       }
       throw lastError;
