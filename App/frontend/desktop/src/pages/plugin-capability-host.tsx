@@ -13,7 +13,6 @@ import {
   Circle,
   CircleDot,
   Download,
-  ExternalLink,
   FileOutput,
   HelpCircle,
   ListChecks,
@@ -34,7 +33,6 @@ import type { PluginUiCall } from "../app/plugin-ui-context.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { classifyAgentAttachmentFile } from "../lib/agent-attachment.js";
 import { startBrowserDownload } from "./agent-message-content.js";
-import { openExternalUrl } from "../utils/open-url.js";
 
 const TASK_STATUS_KEYS = {
   pending: "plugin.ui.task.pending",
@@ -46,9 +44,10 @@ const TASK_STATUS_KEYS = {
 interface PluginCapabilityHostProps {
   calls: PluginUiCall[];
   plugins: InstalledPlugin[];
-  client: Pick<PluginsClient, "getUi" | "cancel" | "respond"> | null;
+  client: (Pick<PluginsClient, "getUi" | "cancel" | "respond"> & Partial<Pick<PluginsClient, "readArtifact">>) | null;
   uploadFiles?: (files: UploadAgentMediaInput[]) => Promise<UploadedAgentMedia[]>;
   onAddArtifact?: (artifact: PluginArtifactRef) => void;
+  onOpenArtifact?: (artifact: PluginArtifactRef) => void;
 }
 
 export interface PluginRendererInteractionState {
@@ -104,6 +103,8 @@ export function PluginCapabilityHost(props: PluginCapabilityHostProps) {
             onCancel={cancel}
             onUploadFiles={props.uploadFiles}
             onAddArtifact={props.onAddArtifact}
+            onOpenArtifact={props.onOpenArtifact}
+            onReadArtifact={props.client?.readArtifact}
           />
         );
         return (
@@ -136,6 +137,8 @@ function GenericPluginCards(props: {
   onCancel(): Promise<void>;
   onUploadFiles?: (files: UploadAgentMediaInput[]) => Promise<UploadedAgentMedia[]>;
   onAddArtifact?: (artifact: PluginArtifactRef) => void;
+  onOpenArtifact?: (artifact: PluginArtifactRef) => void;
+  onReadArtifact?: PluginsClient["readArtifact"];
 }) {
   const terminal = props.events.some((event) => event.type === "result" || event.type === "error");
   return (
@@ -146,7 +149,7 @@ function GenericPluginCards(props: {
         if (event.type === "interaction") {
           return terminal ? null : <InteractionCard key={`interaction:${event.request.interactionId}`} request={event.request} onRespond={props.onRespond} onUploadFiles={props.onUploadFiles} />;
         }
-        if (event.type === "artifact") return <ArtifactCard key={`artifact:${event.artifact.id}`} event={event} onAddToChat={props.onAddArtifact} />;
+        if (event.type === "artifact") return <ArtifactCard key={`artifact:${event.artifact.id}`} event={event} onAddToChat={props.onAddArtifact} onOpen={props.onOpenArtifact} onRead={props.onReadArtifact} />;
         if (event.type === "error") return <ErrorCard key="error" event={event} />;
         return null;
       })}
@@ -420,10 +423,33 @@ function ResponseButton(props: { children: string; disabled: boolean; onClick?: 
   );
 }
 
-function ArtifactCard(props: { event: Extract<CapabilityEvent, { type: "artifact" }>; onAddToChat?: (artifact: PluginArtifactRef) => void }) {
+function ArtifactCard(props: {
+  event: Extract<CapabilityEvent, { type: "artifact" }>;
+  onAddToChat?: (artifact: PluginArtifactRef) => void;
+  onOpen?: (artifact: PluginArtifactRef) => void;
+  onRead?: PluginsClient["readArtifact"];
+}) {
   const { t } = useTranslation();
-  const openUri = resolveSafeArtifactUri(props.event.artifact.uri);
-  const downloadUri = resolveSafeArtifactUri(props.event.artifact.downloadUri ?? props.event.artifact.uri);
+  const artifact = props.event.artifact;
+  const downloadUri = artifact.downloadUri ?? artifact.uri;
+  const [downloadState, setDownloadState] = useState<"idle" | "pending" | "error">("idle");
+  const download = async () => {
+    if (!props.onRead) {
+      const safeUri = resolveSafeArtifactUri(downloadUri);
+      if (safeUri) startBrowserDownload(safeUri, artifact.name);
+      return;
+    }
+    setDownloadState("pending");
+    try {
+      const blob = await props.onRead(downloadUri);
+      const objectUrl = URL.createObjectURL(blob);
+      startBrowserDownload(objectUrl, artifact.name);
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+      setDownloadState("idle");
+    } catch {
+      setDownloadState("error");
+    }
+  };
   return (
     <div className="flex items-center gap-3 rounded-card border border-border-stone/30 px-3 py-2.5">
       <FileOutput size={18} className="shrink-0 text-action-sky" aria-hidden="true" />
@@ -431,16 +457,14 @@ function ArtifactCard(props: { event: Extract<CapabilityEvent, { type: "artifact
         <p className="truncate text-sm text-text-ink/75">{props.event.artifact.name}</p>
         <p className="truncate text-[11px] text-text-ink/40">{props.event.artifact.mediaType}</p>
       </div>
-      {openUri ? (
-        <button type="button" className="inline-flex items-center gap-1 text-xs text-action-sky hover:underline" onClick={() => void openExternalUrl(openUri)}>
-          {t("plugin.ui.open")}<ExternalLink size={12} aria-hidden="true" />
+      {props.onOpen ? (
+        <button type="button" className="inline-flex items-center gap-1 text-xs text-action-sky hover:underline" onClick={() => props.onOpen?.(artifact)}>
+          {t("plugin.ui.open")}<FileOutput size={12} aria-hidden="true" />
         </button>
       ) : null}
-      {downloadUri ? (
-        <button type="button" className="inline-flex items-center gap-1 text-xs text-action-sky hover:underline" onClick={() => startBrowserDownload(downloadUri, props.event.artifact.name)}>
+      <button type="button" disabled={downloadState === "pending"} className="inline-flex items-center gap-1 text-xs text-action-sky hover:underline disabled:opacity-50" onClick={() => void download()}>
           {t("plugin.ui.download")}<Download size={12} aria-hidden="true" />
-        </button>
-      ) : null}
+      </button>
       {props.onAddToChat ? (
         <button type="button" className="inline-flex items-center gap-1 text-xs text-action-sky hover:underline" onClick={() => props.onAddToChat?.(props.event.artifact)}>
           {t("plugin.ui.addToChat")}<MessageSquarePlus size={12} aria-hidden="true" />

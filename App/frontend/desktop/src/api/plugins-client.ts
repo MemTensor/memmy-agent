@@ -14,6 +14,7 @@ import {
   type RuntimeConfig
 } from "@memmy/local-api-contracts";
 import { requestJson } from "./http.js";
+import { userTimeZone } from "../lib/user-time-zone.js";
 
 export interface PluginsClient {
   list(): Promise<InstalledPlugin[]>;
@@ -23,6 +24,8 @@ export interface PluginsClient {
   disable(pluginId: string): Promise<InstalledPlugin>;
   uninstall(pluginId: string): Promise<void>;
   getUi(pluginId: string, slot: PluginUiSlot): Promise<string>;
+  /** Reads a Host-validated plugin artifact with the local runtime credential. */
+  readArtifact(uri: string): Promise<Blob>;
   invoke(pluginId: string, capabilityId: string, input: InvokePluginCapabilityInput): Promise<InvokePluginCapabilityResponse>;
   cancel(pluginId: string, callId: string): Promise<void>;
   respond(pluginId: string, callId: string, interactionId: string, response: unknown): Promise<void>;
@@ -93,6 +96,21 @@ export function createHttpPluginsClient(config: RuntimeConfig): PluginsClient {
       });
       uiCache.set(cacheKey, request);
       return request;
+    },
+    async readArtifact(uri) {
+      const base = new URL(config.baseUrl);
+      const target = new URL(uri, base);
+      if (target.origin !== base.origin || !/^\/api\/v1\/plugins\/[^/]+\/artifacts\/[^/]+\/(?:preview|download)$/u.test(target.pathname)) {
+        throw new Error("Refusing to read an untrusted plugin artifact URI");
+      }
+      const response = await fetch(target, {
+        headers: {
+          "x-memmy-local-token": config.localToken,
+          "x-memmy-time-zone": userTimeZone(config.timeZone)
+        }
+      });
+      if (!response.ok) throw new Error(`Plugin artifact request failed with status ${response.status}`);
+      return response.blob();
     },
     invoke(pluginId, capabilityId, input) {
       return requestJson({

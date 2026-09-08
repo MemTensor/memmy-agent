@@ -79,6 +79,7 @@ import { AgentGoalBar, type AgentGoalControlRequest } from "./agent-goal-bar.js"
 import { AgentQueuedMessageList } from "./agent-queued-message-list.js";
 import { AgentThreadMessages, ChatImageLightbox } from "./agent-thread-messages.js";
 import { PluginCapabilityHost } from "./plugin-capability-host.js";
+import { PluginArtifactPreviewPanel } from "./plugin-artifact-preview-panel.js";
 import { AgentWorkspaceContext } from "./agent-workspace-context.js";
 import { AppFrame } from "./app-frame.js";
 import {
@@ -1051,6 +1052,7 @@ export function HomePage() {
   const [historyDagPanel, setHistoryDagPanel] = useState<HistoryDagPanelState>({ open: false });
   const [environmentPanelOpen, setEnvironmentPanelOpen] = useState(false);
   const [previewPanelOpen, setPreviewPanelOpen] = useState(false);
+  const [pluginArtifactPreview, setPluginArtifactPreview] = useState<PluginArtifactRef | null>(null);
   const [installedPlugins, setInstalledPlugins] = useState<InstalledPlugin[]>([]);
   const [previewPanelWidth, setPreviewPanelWidth] = useState(520);
   const [isCreatingChat, setIsCreatingChat] = useState(false);
@@ -1220,7 +1222,10 @@ export function HomePage() {
   const hasActiveConversation = hasActiveAgentConversation(state.agent.currentChatId, state.agent.messages.length);
 
   useEffect(() => {
-    if (!hasActiveConversation) setPreviewPanelOpen(false);
+    if (!hasActiveConversation) {
+      setPreviewPanelOpen(false);
+      setPluginArtifactPreview(null);
+    }
   }, [hasActiveConversation]);
 
   useEffect(() => {
@@ -3184,6 +3189,7 @@ export function HomePage() {
     />
   ) : null;
 
+  const sidePreviewOpen = previewPanelOpen || pluginArtifactPreview !== null;
   const previewToggle = hasActiveConversation ? (
     <button
       type="button"
@@ -3191,13 +3197,24 @@ export function HomePage() {
       aria-label={t("common.preview")}
       aria-pressed={previewPanelOpen}
       title={t("common.preview")}
-      onClick={() => setPreviewPanelOpen((open) => !open)}
+      onClick={() => {
+        setPluginArtifactPreview(null);
+        setPreviewPanelOpen((open) => !open);
+      }}
     >
       <PanelRight size={15} aria-hidden="true" />
     </button>
   ) : null;
 
-  const previewPanel = previewPanelOpen && hasActiveConversation ? (
+  const previewPanel = pluginArtifactPreview && clients ? (
+    <PluginArtifactPreviewPanel
+      key={pluginArtifactPreview.id}
+      artifact={pluginArtifactPreview}
+      readArtifact={clients.plugins.readArtifact}
+      onClose={() => setPluginArtifactPreview(null)}
+      onWidthChange={setPreviewPanelWidth}
+    />
+  ) : previewPanelOpen && hasActiveConversation ? (
     <WorkspaceArtifactPanel
       key={previewSessionKey ?? chatScopeKey}
       sessionKey={previewSessionKey ?? ""}
@@ -3218,7 +3235,7 @@ export function HomePage() {
       title={t("home.title")}
       topBar={hasActiveConversation || environmentScope ? (
         <div
-          className={`agent-conversation-topbar${previewPanelOpen ? " agent-conversation-topbar--preview-open" : ""}`}
+          className={`agent-conversation-topbar${sidePreviewOpen ? " agent-conversation-topbar--preview-open" : ""}`}
           style={{ "--agent-preview-panel-width": `${previewPanelWidth}px` } as CSSProperties}
         >
           <h1 className="agent-conversation-title" title={hasActiveConversation ? activeConversationTitle : selectedDraftProject?.name}>
@@ -3231,7 +3248,7 @@ export function HomePage() {
             {environmentScope ? (
               <button
                 type="button"
-                className={`agent-environment-toggle${environmentPanelOpen ? " agent-environment-toggle--active" : ""}${previewPanelOpen ? " agent-environment-toggle--with-preview" : ""}`}
+                className={`agent-environment-toggle${environmentPanelOpen ? " agent-environment-toggle--active" : ""}${sidePreviewOpen ? " agent-environment-toggle--with-preview" : ""}`}
                 data-agent-environment-toggle
                 aria-label={t("home.environment.title")}
                 aria-pressed={environmentPanelOpen}
@@ -3241,14 +3258,14 @@ export function HomePage() {
                 <SlidersHorizontal size={15} aria-hidden="true" />
               </button>
             ) : null}
-            {!previewPanelOpen ? previewToggle : null}
+            {!sidePreviewOpen ? previewToggle : null}
           </div>
         </div>
       ) : null}
-      topBarBorder={Boolean(hasActiveConversation || environmentScope) && !previewPanelOpen}
+      topBarBorder={Boolean(hasActiveConversation || environmentScope) && !sidePreviewOpen}
     >
       <div
-        className={`agent-workspace-layout${environmentPanelOpen ? " agent-workspace-layout--environment-open" : ""}${previewPanelOpen ? " agent-workspace-layout--preview-open" : ""}`}
+        className={`agent-workspace-layout${environmentPanelOpen ? " agent-workspace-layout--environment-open" : ""}${sidePreviewOpen ? " agent-workspace-layout--preview-open" : ""}`}
         style={{ "--agent-preview-panel-width": `${previewPanelWidth}px` } as CSSProperties}
       >
         {!hasActiveConversation ? (
@@ -3449,6 +3466,10 @@ export function HomePage() {
                 client={clients?.plugins ?? null}
                 uploadFiles={clients ? (files) => clients.memmyAgent.uploadAgentMedia(files) : undefined}
                 onAddArtifact={(artifact) => setCurrentComposerDraft((current) => appendPluginArtifact(current, artifact))}
+                onOpenArtifact={(artifact) => {
+                  setPreviewPanelOpen(false);
+                  setPluginArtifactPreview(artifact);
+                }}
               />
             </div>
           </div>

@@ -52,6 +52,20 @@ describe("plugins client", () => {
       { path: `/api/v1/plugins/${plugin.id}`, method: "DELETE", body: undefined }
     ]);
   });
+
+  it("reads Host-managed artifacts with local authentication and rejects foreign URLs", async () => {
+    const fetchMock = vi.fn(async (_request: URL, init?: RequestInit) => {
+      expect(init?.headers).toMatchObject({ "x-memmy-local-token": "token" });
+      return new Response("%PDF", { headers: { "content-type": "application/pdf" } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createHttpPluginsClient(config);
+
+    const blob = await client.readArtifact("/api/v1/plugins/literature-review/artifacts/token/preview");
+    expect(await blob.text()).toBe("%PDF");
+    await expect(client.readArtifact("https://example.test/review.pdf")).rejects.toThrow("untrusted");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
 });
 
 function installedPlugin() {

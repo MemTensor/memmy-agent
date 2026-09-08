@@ -434,11 +434,11 @@ describe("HomePage", () => {
     expect(source).toContain("const activeImTitleDisplay = imChannelTitleDisplay(activeConversationTitle);");
     expect(source).toContain("formatConversationTitleForDisplay(activeImTitleDisplay?.title ?? activeConversationTitle)");
     expect(source).toContain("topBar={hasActiveConversation || environmentScope ? (");
-    expect(source).toContain('className={`agent-conversation-topbar${previewPanelOpen ? " agent-conversation-topbar--preview-open" : ""}`}');
+    expect(source).toContain('className={`agent-conversation-topbar${sidePreviewOpen ? " agent-conversation-topbar--preview-open" : ""}`}');
     expect(source).toContain('title={hasActiveConversation ? activeConversationTitle : selectedDraftProject?.name}');
     expect(source).toContain("{hasActiveConversation ? activeConversationTitleDisplay : selectedDraftProject?.name}");
     expect(source).toContain('{hasActiveConversation && activeImTitleDisplay ? <ImChannelTitleIcon slug={activeImTitleDisplay.slug} name={activeImTitleDisplay.channelName} /> : null}');
-    expect(source).toContain("topBarBorder={Boolean(hasActiveConversation || environmentScope) && !previewPanelOpen}");
+    expect(source).toContain("topBarBorder={Boolean(hasActiveConversation || environmentScope) && !sidePreviewOpen}");
     expect(source).not.toContain("agent-conversation-titlebar");
     expect(source).toContain("app-frame-page-content agent-conversation-scroll flex-1 overflow-y-auto");
     expect(source).toContain("onScroll={handleAgentConversationScroll}");
@@ -448,7 +448,7 @@ describe("HomePage", () => {
     expect(source).toContain("<PanelRight size={15}");
     expect(source).toContain("<WorkspaceArtifactPanel");
     expect(source).toContain("toolbarEnd={previewToggle}");
-    expect(source).toContain("{!previewPanelOpen ? previewToggle : null}");
+    expect(source).toContain("{!sidePreviewOpen ? previewToggle : null}");
     expect(source).toContain("agent-environment-toggle--with-preview");
     const environmentButton = source.slice(
       source.indexOf("data-agent-environment-toggle"),
@@ -775,7 +775,7 @@ describe("HomePage", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
     const styles = readFileSync(stylesSourcePath, "utf8");
 
-    expect(source).toContain('agent-workspace-layout${environmentPanelOpen ? " agent-workspace-layout--environment-open" : ""}${previewPanelOpen ? " agent-workspace-layout--preview-open" : ""}');
+    expect(source).toContain('agent-workspace-layout${environmentPanelOpen ? " agent-workspace-layout--environment-open" : ""}${sidePreviewOpen ? " agent-workspace-layout--preview-open" : ""}');
     expect(source).toContain('className="agent-conversation-content max-w-3xl mx-auto space-y-3"');
     expect(source).toContain('className="agent-conversation-content agent-conversation-content--composer max-w-3xl mx-auto"');
     const composerRule = styles.match(/\.agent-conversation-composer\s*\{[^}]*\}/)?.[0] ?? "";
