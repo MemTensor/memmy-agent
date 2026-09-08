@@ -534,7 +534,9 @@ try {
 }
 
 const defaults = config.agents?.defaults ?? {};
-const presetName = defaults.modelPreset;
+const presetName = defaults.modelPreset
+  ?? config.modelAssignments?.account?.agent?.default
+  ?? config.modelAssignments?.byok?.agent?.default;
 const preset = presetName ? config.modelPresets?.[presetName] : null;
 const providerName = preset?.provider;
 const endpointName = preset?.endpoint;
@@ -679,8 +681,12 @@ NODE
   "$(user_cli_path "memmy")" --version >/dev/null
   log "memmy command is ready in $MEMMY_BIN_DIR"
 
-  log "refreshing non-interactive memmy-agent onboard state"
-  node dist/main.js onboard --defaults </dev/null
+  if config_has_agent_model; then
+    log "preserving existing model catalog; non-interactive onboard refresh is not required"
+  else
+    log "refreshing non-interactive memmy-agent onboard state"
+    node dist/main.js onboard --defaults </dev/null
+  fi
 
   log "starting agent API, frontend, and desktop backend; Electron manages Memory and supervises gateway"
   cd "$ROOT_DIR"
