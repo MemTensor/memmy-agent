@@ -51,6 +51,7 @@ describe("ComputerHistoryDemoService", () => {
       repositoryRoot: path.resolve(import.meta.dirname, "../../../../.."),
       historyDirectory: path.join(root, "histories"),
       codexHistoryDirectory: codexDirectory,
+      codexSyncEnabled: true,
       recordingDirectory: path.join(root, "recordings"),
       workflowDirectory: path.join(root, "workflows"),
     });
@@ -113,6 +114,7 @@ describe("ComputerHistoryDemoService", () => {
       repositoryRoot: path.resolve(import.meta.dirname, "../../../../.."),
       historyDirectory: path.join(root, "histories"),
       codexHistoryDirectory: codexDirectory,
+      codexSyncEnabled: true,
       recordingDirectory: path.join(root, "recordings"),
       workflowDirectory: path.join(root, "workflows"),
     });

@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   ComputerHistoryApiError,
   ComputerHistoryDemoService,
+  isCodexSkysightCopy,
 } from "../../../src/entrypoints/frontend-bridge/computer-history-api.js";
 import { ObservationSettingsStore } from "../../../src/core/agent-runtime/computer-history/settings-store.js";
 
@@ -124,5 +125,41 @@ describe("Computer History observation lifecycle", () => {
     expect(instance.snapshot().observation.state).toBe("stopped");
     // Shutting down twice must stay quiet rather than throwing on app exit.
     await expect(instance.shutdown()).resolves.toBeUndefined();
+  });
+});
+
+describe("Codex-derived history", () => {
+  it("recognizes copies of Codex Skysight summaries by their file name", () => {
+    // Codex: <utc>-<4 random chars>-<window>-memory-summary
+    expect(isCodexSkysightCopy("2026-08-26T15-00-00-jsSd-10min-memory-summary")).toBe(true);
+    expect(isCodexSkysightCopy("2026-08-26T12-00-00-gnKw-6h-memory-summary")).toBe(true);
+  });
+
+  it("never mistakes Memmy's own summaries for Codex copies", () => {
+    // Memmy: <segment id>-<window>-summary, no random component, no "memory-".
+    expect(isCodexSkysightCopy("2026-09-08T03-30-00Z-10min-summary")).toBe(false);
+    expect(isCodexSkysightCopy("2026-09-08T00-00-00Z-6h-summary")).toBe(false);
+    expect(isCodexSkysightCopy("2026-09-08T02-52-00Z-computer-history-demonstration")).toBe(false);
+    expect(isCodexSkysightCopy("my-imported-note")).toBe(false);
+  });
+
+  it("keeps Codex copies out of the timeline while leaving them on disk", () => {
+    const instance = service();
+    const directory = instance.snapshot().privacy.markdownDirectory;
+    fs.mkdirSync(directory, { recursive: true });
+    const codexCopy = path.join(directory, "2026-08-26T15-00-00-jsSd-10min-memory-summary.md");
+    const own = path.join(directory, "2026-09-08T03-30-00Z-10min-summary.md");
+    fs.writeFileSync(codexCopy, '---\ntitle: "codex"\nsource_type: imported\n---\n', "utf8");
+    fs.writeFileSync(own, '---\ntitle: "memmy"\n---\n', "utf8");
+
+    const ids = instance.snapshot().histories.map((entry) => entry.id);
+    expect(ids).toContain("2026-09-08T03-30-00Z-10min-summary");
+    expect(ids).not.toContain("2026-08-26T15-00-00-jsSd-10min-memory-summary");
+    // Hidden, not deleted.
+    expect(fs.existsSync(codexCopy)).toBe(true);
+  });
+
+  it("leaves Codex's live Skysight directory out unless explicitly enabled", () => {
+    expect(service().snapshot().privacy.codexSyncDirectory).toBeNull();
   });
 });

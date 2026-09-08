@@ -135,6 +135,17 @@ const MAX_MARKDOWN_BYTES = 512 * 1024;
 const MAX_LOG_CHARS = 24_000;
 const RAW_RETENTION_MS = 48 * 60 * 60 * 1000;
 
+// Codex writes its Skysight summaries as `<utc>-<4 random chars>-10min-memory-summary.md`
+// (or `-6h-`). Copies of those were dropped into the history directory during
+// earlier experiments, where they are indistinguishable from Memmy's own
+// captures. Memmy names its own segments `<segment id>-10min-summary.md`, with
+// no random component and no "memory-", so the two cannot collide.
+const CODEX_SKYSIGHT_FILE = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-[A-Za-z]{4}-(?:10min|6h)-memory-summary$/;
+
+export function isCodexSkysightCopy(historyId: string): boolean {
+  return CODEX_SKYSIGHT_FILE.test(historyId);
+}
+
 function boundedInterval(value: string | undefined, fallback: number, minimum: number, maximum: number): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
@@ -175,6 +186,7 @@ export class ComputerHistoryDemoService {
     recordingDirectory?: string;
     workflowDirectory?: string;
     observationSettingsFile?: string;
+    codexSyncEnabled?: boolean;
   } = {}) {
     this.repositoryRoot = path.resolve(input.repositoryRoot ?? defaultRepositoryRoot());
     this.historyDirectory = path.resolve(input.historyDirectory
@@ -183,7 +195,10 @@ export class ComputerHistoryDemoService {
       ?? (input.historyDirectory
         ? path.join(this.historyDirectory, ".codex-sync")
         : path.join(os.homedir(), ".codex", "memories", "extensions", "skysight")));
-    this.codexSyncEnabled = process.env.MEMMY_COMPUTER_HISTORY_CODEX_SYNC !== "0";
+    // Codex's own Skysight history is another product's record, so Memmy no
+    // longer folds it into the timeline unless it is asked to.
+    this.codexSyncEnabled = input.codexSyncEnabled
+      ?? process.env.MEMMY_COMPUTER_HISTORY_CODEX_SYNC === "1";
     this.recordingDirectory = path.resolve(input.recordingDirectory
       ?? path.join(os.homedir(), ".memmy", "computer-history", "recordings"));
     this.workflowDirectory = path.resolve(input.workflowDirectory
@@ -222,7 +237,9 @@ export class ComputerHistoryDemoService {
           return { ...entry, sourceType, replayPlan: replayPlanFor(entry, sourceType) };
         }),
         ...(this.codexSyncEnabled ? this.readCodexHistories() : []),
-      ].filter((entry) => !this.readHiddenSyncedIds().has(entry.id)),
+      ]
+        .filter((entry) => !isCodexSkysightCopy(entry.id))
+        .filter((entry) => !this.readHiddenSyncedIds().has(entry.id)),
       workflows: this.readMarkdownDirectory(this.workflowDirectory).map((entry) => ({
         ...entry,
         sourceHistoryId: nullableFrontmatterValue(entry.markdown, "source_history_id"),
