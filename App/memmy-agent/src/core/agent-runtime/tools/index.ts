@@ -20,6 +20,7 @@ export * from "./browser.js";
 export * from "./browser-setup.js";
 export * from "./computer.js";
 export * from "./computer-history.js";
+export * from "./computer-history-settings.js";
 export * from "./file-state.js";
 export * from "./path-utils.js";
 export * from "./sandbox.js";
