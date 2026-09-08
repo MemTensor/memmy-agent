@@ -6,6 +6,13 @@
  * bearer tokens and a WebSocket protocol owned by memmy-agent.
  */
 import { z } from "zod";
+import {
+  ComputerHistoryEntrySchema,
+  ComputerHistorySnapshotSchema,
+  ComputerHistoryWorkflowSchema,
+} from "./computer-history-contract.js";
+
+export { ComputerHistorySnapshotSchema };
 
 export type AgentGoalStatus =
   | "active"
@@ -58,6 +65,7 @@ export type ComputerHistoryEntry = {
   applications: string[];
   summaryWindow: "10min" | "6h" | null;
   pinned: boolean;
+  eventStreamPath: string | null;
   id: string;
   title: string;
   sourceType: ComputerHistorySourceType;
@@ -103,64 +111,6 @@ export type ComputerHistorySnapshot = {
     eventStreamDirectory: string;
   };
 };
-
-const ComputerHistoryEntrySchema = z.object({
-  id: z.string(),
-  title: z.string(),
-  description: z.string().nullable(),
-  applications: z.array(z.string()),
-  summaryWindow: z.enum(["10min", "6h"]).nullable(),
-  pinned: z.boolean(),
-  sourceType: z.enum(["captured", "imported", "demo_fixture"]),
-  createdAt: z.string(),
-  markdown: z.string(),
-  filePath: z.string(),
-  replayPlan: z.object({
-    sourcePath: z.string(),
-    sourceHash: z.string(),
-    status: z.enum(["ready", "not_replayable"]),
-    steps: z.array(z.string()),
-    variables: z.array(z.string())
-  }).nullable().optional()
-}).strict();
-
-const ComputerHistoryWorkflowSchema = z.object({
-  id: z.string(),
-  title: z.string(),
-  createdAt: z.string(),
-  markdown: z.string(),
-  filePath: z.string(),
-  sourceHistoryId: z.string().nullable()
-}).strict();
-
-const ComputerHistorySnapshotSchema = z.object({
-  observation: z.object({
-    state: z.enum(["running", "paused", "stopped", "stopping", "failed"]),
-    startedAt: z.string().nullable(),
-    segmentId: z.string().nullable(),
-    segmentStartedAt: z.string().nullable(),
-    error: z.string().nullable(),
-    narrationError: z.string().nullable()
-  }).strict(),
-  cuaRun: z.object({
-    kind: z.enum(["smoke", "workflow"]).nullable(),
-    status: z.enum(["idle", "running", "completed", "failed"]),
-    startedAt: z.string().nullable(),
-    finishedAt: z.string().nullable(),
-    output: z.string(),
-    error: z.string().nullable()
-  }).strict(),
-  histories: z.array(ComputerHistoryEntrySchema),
-  workflows: z.array(ComputerHistoryWorkflowSchema),
-  privacy: z.object({
-    screenshots: z.literal(false),
-    audio: z.literal(false),
-    rawRetentionHours: z.number(),
-    markdownDirectory: z.string(),
-    eventStreamDirectory: z.string(),
-
-  }).strict()
-}).strict();
 
 const AgentGoalStateSchema = z.object({
   goal_id: z.string().nullable(),
