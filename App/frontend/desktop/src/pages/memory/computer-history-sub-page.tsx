@@ -40,12 +40,11 @@ export function ComputerHistorySubPage(props: ComputerHistorySubPageProps) {
   }, [refresh]);
 
   useEffect(() => {
-    const intervalMs = snapshot?.capture.status === "recording" || snapshot?.capture.status === "stopping"
-      ? 1500
-      : 5000;
+    const state = snapshot?.observation.state;
+    const intervalMs = state === "running" || state === "stopping" ? 1500 : 5000;
     const timer = window.setInterval(() => void refresh(), intervalMs);
     return () => window.clearInterval(timer);
-  }, [refresh, snapshot?.capture.status]);
+  }, [refresh, snapshot?.observation.state]);
 
   const selectedHistory = useMemo(
     () => snapshot?.histories.find((item) => item.id === selectedHistoryId) ?? null,
@@ -59,7 +58,13 @@ export function ComputerHistorySubPage(props: ComputerHistorySubPageProps) {
     () => selectedHistoryWorkflows.find((item) => item.id === selectedWorkflowId) ?? null,
     [selectedHistoryWorkflows, selectedWorkflowId]
   );
-  const recording = snapshot?.capture.status === "recording" || snapshot?.capture.status === "stopping";
+  const observationState = snapshot?.observation.state ?? "stopped";
+  const recording = observationState === "running" || observationState === "stopping";
+  const paused = observationState === "paused";
+  // Paused keeps the current segment, so it reads as a third state rather than
+  // a variant of off.
+  const stateLabel = recording ? "记录中" : paused ? "已暂停" : "已停止";
+  const stateModifier = recording ? "active" : paused ? "paused" : "idle";
 
   useEffect(() => {
     setSelectedWorkflowId((current) => current && selectedHistoryWorkflows.some((item) => item.id === current)
@@ -90,7 +95,7 @@ export function ComputerHistorySubPage(props: ComputerHistorySubPageProps) {
     setError(null);
     try {
       const before = new Set(snapshot?.histories.map((item) => item.id) ?? []);
-      const next = await props.client.stopComputerHistoryCapture();
+      const next = await props.client.stopComputerHistoryObservation();
       acceptSnapshot(next);
       const captured = next.histories.find((item) => !before.has(item.id) && item.sourceType === "captured")
         ?? next.histories.find((item) => item.sourceType === "captured");
@@ -127,8 +132,8 @@ export function ComputerHistorySubPage(props: ComputerHistorySubPageProps) {
           <p className="computer-history-page__eyebrow">PERSONAL CONTEXT LAYER</p>
           <h1>Computer History</h1>
         </div>
-        <div className={`computer-history-status computer-history-status--${recording ? "active" : "idle"}`}>
-          <span />Computer History：{recording ? "记录中" : "已暂停"}
+        <div className={`computer-history-status computer-history-status--${stateModifier}`}>
+          <span />Computer History：{stateLabel}
         </div>
       </header>
 
@@ -136,21 +141,46 @@ export function ComputerHistorySubPage(props: ComputerHistorySubPageProps) {
 
       <div className="computer-history-page__actions computer-history-page__actions--recording">
         <div>
-          <strong>Computer History：{recording ? "开启" : "关闭"}</strong>
+          <strong>Computer History：{stateLabel}</strong>
+          {paused ? <span className="computer-history-page__hint">当前片段已保留，恢复后继续写入。</span> : null}
         </div>
-        <button
-          type="button"
-          role="switch"
-          aria-checked={recording}
-          aria-label={`Computer History：${recording ? "关闭" : "开启"}`}
-          className={recording ? "computer-history-toggle computer-history-toggle--on" : "computer-history-toggle"}
-          disabled={busy || !props.client}
-          onClick={() => recording
-            ? void stopRecording()
-            : void runAction((client) => client.startComputerHistoryCapture())}
-        >
-          {recording ? "关闭" : "开启"}
-        </button>
+        <div className="computer-history-page__switches">
+          {recording ? (
+            <button
+              type="button"
+              className="computer-history-toggle"
+              disabled={busy || !props.client}
+              onClick={() => void runAction((client) => client.pauseComputerHistoryObservation())}
+            >
+              暂停
+            </button>
+          ) : null}
+          {paused ? (
+            <button
+              type="button"
+              className="computer-history-toggle"
+              disabled={busy || !props.client}
+              onClick={() => void runAction((client) => client.resumeComputerHistoryObservation())}
+            >
+              恢复
+            </button>
+          ) : null}
+          <button
+            type="button"
+            role="switch"
+            aria-checked={recording || paused}
+            aria-label={`Computer History：${recording || paused ? "停止" : "开启"}`}
+            className={recording || paused
+              ? "computer-history-toggle computer-history-toggle--on"
+              : "computer-history-toggle"}
+            disabled={busy || !props.client}
+            onClick={() => recording || paused
+              ? void stopRecording()
+              : void runAction((client) => client.startComputerHistoryObservation())}
+          >
+            {recording || paused ? "停止" : "开启"}
+          </button>
+        </div>
       </div>
 
       <div className="computer-history-page__workspace">

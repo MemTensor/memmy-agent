@@ -11,9 +11,10 @@ import {
 // segments stay searchable.
 export type ComputerHistoryRunState = "running" | "paused" | "stopped" | "stopping" | "failed";
 
-export function runStateFrom(captureStatus: string): ComputerHistoryRunState {
-  switch (captureStatus) {
-    case "recording": return "running";
+export function runStateFrom(state: string): ComputerHistoryRunState {
+  switch (state) {
+    case "running": return "running";
+    case "paused": return "paused";
     case "stopping": return "stopping";
     case "failed": return "failed";
     default: return "stopped";
@@ -53,9 +54,10 @@ export class ComputerHistoryStatusTool extends Tool {
     const snapshot = this.service.snapshot();
     return JSON.stringify({
       status: "ok",
-      state: runStateFrom(snapshot.capture.status),
-      started_at: snapshot.capture.startedAt,
-      error: snapshot.capture.error,
+      state: runStateFrom(snapshot.observation.state),
+      started_at: snapshot.observation.startedAt,
+      segment_id: snapshot.observation.segmentId,
+      error: snapshot.observation.error,
       event_stream_root_path: snapshot.privacy.markdownDirectory,
       settings_path: this.store.filePath,
       privacy: {

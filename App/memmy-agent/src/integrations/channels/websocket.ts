@@ -2733,8 +2733,10 @@ export class WebSocketChannel extends BaseChannel {
     if (got === "/api/computer-history/delete") return this.handleComputerHistory(request, "history-delete");
     if (got === "/api/computer-history/demo-fixture") return this.handleComputerHistory(request, "demo-fixture");
     if (got === "/api/computer-history/import") return this.handleComputerHistory(request, "import");
-    if (got === "/api/computer-history/capture/start") return this.handleComputerHistory(request, "capture-start");
-    if (got === "/api/computer-history/capture/stop") return this.handleComputerHistory(request, "capture-stop");
+    if (got === "/api/computer-history/observation/start") return this.handleComputerHistory(request, "observation-start");
+    if (got === "/api/computer-history/observation/pause") return this.handleComputerHistory(request, "observation-pause");
+    if (got === "/api/computer-history/observation/resume") return this.handleComputerHistory(request, "observation-resume");
+    if (got === "/api/computer-history/observation/stop") return this.handleComputerHistory(request, "observation-stop");
     if (got === "/api/computer-history/workflows/create") return this.handleComputerHistory(request, "workflow-create");
     if (got === "/api/computer-history/cua/start") return this.handleComputerHistory(request, "cua-start");
     if (got === "/api/computer-history/cua/smoke") return this.handleComputerHistory(request, "cua-smoke");
@@ -2849,6 +2851,9 @@ export class WebSocketChannel extends BaseChannel {
   override async stop(): Promise<void> {
     if (!this.running && !this.server) return;
     this.running = false;
+    // Recording is scoped to the app: closing it finalizes the open segment
+    // rather than leaving a recorder running behind the user's back.
+    await this.computerHistory.shutdown();
     if (typeof this.server?.close === "function") {
       await new Promise<void>((resolve) => this.server.close(() => resolve()));
     }
@@ -2874,7 +2879,7 @@ export class WebSocketChannel extends BaseChannel {
 
   async handleComputerHistory(
     request: any,
-    action: "snapshot" | "history-delete" | "demo-fixture" | "import" | "capture-start" | "capture-stop" | "workflow-create" | "cua-start" | "cua-smoke",
+    action: "snapshot" | "history-delete" | "demo-fixture" | "import" | "observation-start" | "observation-pause" | "observation-resume" | "observation-stop" | "workflow-create" | "cua-start" | "cua-smoke",
   ): Promise<HttpLikeResponse> {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
     const method = (request.method ?? "GET").toUpperCase();
@@ -2913,14 +2918,17 @@ export class WebSocketChannel extends BaseChannel {
             markdown: typeof body.markdown === "string" ? body.markdown : "",
           });
           break;
-        case "capture-start":
-          snapshot = this.computerHistory.startCapture(
-            typeof body.title === "string" ? body.title : "",
-            typeof body.start_url === "string" ? body.start_url : "",
-          );
+        case "observation-start":
+          snapshot = this.computerHistory.startObservation();
           break;
-        case "capture-stop":
-          snapshot = await this.computerHistory.stopCapture();
+        case "observation-pause":
+          snapshot = await this.computerHistory.pauseObservation();
+          break;
+        case "observation-resume":
+          snapshot = this.computerHistory.resumeObservation();
+          break;
+        case "observation-stop":
+          snapshot = await this.computerHistory.stopObservation();
           break;
         case "workflow-create":
           snapshot = this.computerHistory.createWorkflow(

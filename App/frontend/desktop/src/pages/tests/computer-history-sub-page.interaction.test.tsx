@@ -33,15 +33,17 @@ describe("ComputerHistorySubPage", () => {
     const client = {
       getComputerHistory: vi.fn().mockResolvedValue(initial),
       deleteComputerHistory,
-      startComputerHistoryCapture: vi.fn().mockResolvedValue(initial),
-      stopComputerHistoryCapture: vi.fn().mockResolvedValue(initial),
+      startComputerHistoryObservation: vi.fn().mockResolvedValue(initial),
+      pauseComputerHistoryObservation: vi.fn().mockResolvedValue(initial),
+      resumeComputerHistoryObservation: vi.fn().mockResolvedValue(initial),
+      stopComputerHistoryObservation: vi.fn().mockResolvedValue(initial),
     } as unknown as MemmyAgentClient;
 
     await act(async () => {
       root.render(<ComputerHistorySubPage client={client} />);
     });
 
-    expect(container.textContent).toContain("Computer History：关闭");
+    expect(container.textContent).toContain("Computer History：已停止");
     expect(container.textContent).toContain("History Markdown");
     expect(container.textContent).toContain("Workflow");
     expect(container.textContent).toContain("具体执行统一在聊天框中触发");
@@ -69,7 +71,7 @@ describe("ComputerHistorySubPage", () => {
 
 function snapshot(overrides: Partial<ComputerHistorySnapshot> = {}): ComputerHistorySnapshot {
   return {
-    capture: { status: "idle", title: null, startUrl: null, startedAt: null, error: null },
+    observation: { state: "stopped", startedAt: null, segmentId: null, segmentStartedAt: null, error: null },
     cuaRun: { kind: null, status: "idle", startedAt: null, finishedAt: null, output: "", error: null },
     histories: [{
       id: "history-1",

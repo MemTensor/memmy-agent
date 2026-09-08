@@ -313,7 +313,7 @@ export async function run(argv = process.argv) {
     childClosedResolve = resolve;
   });
 
-  const appendEvent = async ({ eventType, timestamp, application = {}, details = {} }, screenshot = false) => {
+  const appendEvent = async ({ eventType, timestamp, application = {}, details = {}, ax = null }, screenshot = false) => {
     sequence += 1;
     let screenshotPath = null;
     if (args.screenshots && screenshot) {
@@ -332,6 +332,7 @@ export async function run(argv = process.argv) {
       eventType,
       application,
       details,
+      ...(ax ? { ax } : {}),
       ...(screenshotPath ? { screenshot: screenshotPath } : {}),
     });
   };
@@ -342,13 +343,14 @@ export async function run(argv = process.argv) {
     if (!pendingKeys.length) return;
     const events = pendingKeys;
     pendingKeys = [];
-    const bundleId = events.at(-1)?.application?.bundleId;
+    const bundleId = appFrom(events.at(-1)).bundleId;
     const inputContext = bundleId ? searchInputContextByApp.get(bundleId) : null;
     const normalized = normalizeKeyBurst(
       inputContext ? events.map((event) => ({ ...event, inputContext: event.inputContext ?? inputContext })) : events,
       args,
     );
-    await appendEvent({ ...normalized, timestamp: events[0].timestamp });
+    const ax = events.at(-1)?.ax ?? null;
+    await appendEvent({ ...normalized, timestamp: events[0].timestamp, ax });
   };
 
   const scheduleKeyFlush = () => {

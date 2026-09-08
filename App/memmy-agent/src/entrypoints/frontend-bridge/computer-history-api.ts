@@ -35,11 +35,11 @@ export interface ComputerHistoryWorkflow {
 }
 
 export interface ComputerHistorySnapshot {
-  capture: {
-    status: "idle" | "recording" | "stopping" | "failed";
-    title: string | null;
-    startUrl: string | null;
+  observation: {
+    state: ObservationState;
     startedAt: string | null;
+    segmentId: string | null;
+    segmentStartedAt: string | null;
     error: string | null;
   };
   cuaRun: {
@@ -77,16 +77,29 @@ export interface ComputerHistoryPreparationResult extends ComputerHistoryReplayR
   steps: string[];
 }
 
-interface CaptureState {
-  child: ChildProcessWithoutNullStreams;
-  title: string;
-  startUrl: string | null;
+// Observation is a continuous stream sliced into segments, not a set of named
+// recordings, so a segment carries no title or starting URL: it is simply the
+// window of time it covers.
+interface SegmentState {
+  child: ChildProcessWithoutNullStreams | null;
+  id: string;
+  directory: string;
   startedAt: string;
   eventsFile: string;
+  metadataFile: string;
   historyFile: string;
   workflowCandidateFile: string;
   output: string;
 }
+
+/**
+ * `paused` keeps the current segment open but stops writing to it, so the user
+ * can step away from recording without losing the arc they were in the middle
+ * of. `stopped` records nothing while every completed segment stays searchable.
+ */
+export type ObservationState = "running" | "paused" | "stopped" | "stopping" | "failed";
+
+const SEGMENT_DURATION_MS = 10 * 60 * 1000;
 
 interface RunState {
   child: ChildProcessWithoutNullStreams | null;
@@ -125,11 +138,13 @@ export class ComputerHistoryDemoService {
   private readonly workflowDirectory: string;
   private readonly syncStateFile: string;
   private readonly liveSummaryIntervalMs: number;
-  private capture: CaptureState | null = null;
+  private segment: SegmentState | null = null;
+  private observationState: ObservationState = "stopped";
+  private observationStartedAt: string | null = null;
+  private observationError: string | null = null;
+  private rotationTimer: ReturnType<typeof setInterval> | null = null;
   private liveSummaryTimer: ReturnType<typeof setInterval> | null = null;
   private liveSummarySignature: string | null = null;
-  private captureStatus: "idle" | "recording" | "stopping" | "failed" = "idle";
-  private captureError: string | null = null;
   private run: RunState = {
     child: null,
     kind: null,
@@ -171,12 +186,12 @@ export class ComputerHistoryDemoService {
   snapshot(): ComputerHistorySnapshot {
     this.cleanupExpiredRecordings();
     return {
-      capture: {
-        status: this.captureStatus,
-        title: this.capture?.title ?? null,
-        startUrl: this.capture?.startUrl ?? null,
-        startedAt: this.capture?.startedAt ?? null,
-        error: this.captureError,
+      observation: {
+        state: this.observationState,
+        startedAt: this.observationStartedAt,
+        segmentId: this.segment?.id ?? null,
+        segmentStartedAt: this.segment?.startedAt ?? null,
+        error: this.observationError,
       },
       cuaRun: {
         kind: this.run.kind,
@@ -231,85 +246,202 @@ export class ComputerHistoryDemoService {
     });
   }
 
-  startCapture(title: string, startUrl = ""): ComputerHistorySnapshot {
-    if (this.capture) throw new ComputerHistoryApiError(409, "a capture is already running");
-    const recorder = path.join(this.repositoryRoot, "workflows", "scripts", "record-human-history.mjs");
-    if (!fs.existsSync(recorder)) throw new ComputerHistoryApiError(503, "recorder script is unavailable");
-    this.cleanupExpiredRecordings();
-    const startedAt = new Date().toISOString();
-    const safeTitle = cleanTitle(title || "Computer History demonstration");
-    const safeStartUrl = cleanCaptureUrl(startUrl);
-    const captureId = `${timestampForPath()}-${slug(safeTitle)}`;
-    const captureDirectory = path.join(this.recordingDirectory, captureId);
-    const eventsFile = path.join(captureDirectory, "events.jsonl");
-    const historyFile = path.join(this.historyDirectory, `${captureId}.md`);
-    const workflowCandidateFile = path.join(this.workflowDirectory, `${captureId}-candidate.md`);
-    fs.mkdirSync(captureDirectory, { recursive: true });
+  private segmentId(at: Date): string {
+    // Align segment ids to the ten-minute grid so their names sort and group
+    // the same way Codex's do.
+    const aligned = new Date(Math.floor(at.getTime() / SEGMENT_DURATION_MS) * SEGMENT_DURATION_MS);
+    return `${aligned.toISOString().slice(0, 19).replace(/[:]/g, "-")}Z`;
+  }
+
+  private openSegment(): SegmentState {
+    const startedAt = new Date();
+    const id = this.segmentId(startedAt);
+    const directory = path.join(this.recordingDirectory, "segments", id);
+    fs.mkdirSync(directory, { recursive: true });
     fs.mkdirSync(this.historyDirectory, { recursive: true });
     fs.mkdirSync(this.workflowDirectory, { recursive: true });
-    const recorderArguments = [
+    const eventsFile = path.join(directory, "events.jsonl");
+    const metadataFile = path.join(directory, "metadata.json");
+    fs.writeFileSync(
+      metadataFile,
+      `${JSON.stringify({ id, startedAt: startedAt.toISOString(), eventsPath: eventsFile }, null, 2)}\n`,
+      "utf8",
+    );
+    return {
+      child: null,
+      id,
+      directory,
+      startedAt: startedAt.toISOString(),
+      eventsFile,
+      metadataFile,
+      historyFile: path.join(this.historyDirectory, `${id}.md`),
+      workflowCandidateFile: path.join(this.workflowDirectory, `${id}-candidate.md`),
+      output: "",
+    };
+  }
+
+  private spawnRecorder(segment: SegmentState): void {
+    const recorder = path.join(this.repositoryRoot, "workflows", "scripts", "record-human-history.mjs");
+    if (!fs.existsSync(recorder)) throw new ComputerHistoryApiError(503, "recorder script is unavailable");
+    const child = spawn(process.execPath, [
       recorder,
-      "--title", safeTitle,
-      "--out", eventsFile,
+      "--title", `Computer History ${segment.id}`,
+      "--out", segment.eventsFile,
       "--no-screenshots",
       "--capture-search-text",
-      "--only-app", "com.google.Chrome",
-      "--only-app", "com.apple.Safari",
-      "--only-app", "com.apple.Notes",
-      "--only-app", "com.tencent.xinWeChat",
-      "--only-app", "notion.id",
-      "--only-app", "com.notion.id",
-    ];
-    if (safeStartUrl) recorderArguments.push("--context-url", safeStartUrl);
-    const child = spawn(process.execPath, recorderArguments, {
+    ], {
       cwd: this.repositoryRoot,
       env: process.env,
       stdio: ["pipe", "pipe", "pipe"],
     });
-    this.capture = {
-      child,
-      title: safeTitle,
-      startUrl: safeStartUrl,
-      startedAt,
-      eventsFile,
-      historyFile,
-      workflowCandidateFile,
-      output: "",
-    };
-    this.captureStatus = "recording";
-    this.captureError = null;
-    this.startLiveSummaryTimer();
+    segment.child = child;
+
     const append = (chunk: Buffer) => {
-      if (this.capture?.child !== child) return;
-      this.capture.output = appendLog(this.capture.output, chunk.toString("utf8"));
+      if (this.segment?.child !== child) return;
+      this.segment.output = appendLog(this.segment.output, chunk.toString("utf8"));
     };
     child.stdout.on("data", append);
     child.stderr.on("data", append);
     child.once("error", (error) => {
-      if (this.capture?.child !== child) return;
-      this.clearLiveSummaryTimer();
-      this.captureError = error.message;
-      this.captureStatus = "failed";
-      this.capture = null;
+      if (this.segment?.child !== child) return;
+      this.failObservation(error.message);
     });
     child.once("exit", (code) => {
-      if (this.capture?.child !== child || this.captureStatus === "stopping") return;
-      this.clearLiveSummaryTimer();
-      this.writeLiveSummary(this.capture);
-      this.captureError = code === 0 ? null : this.capture.output.trim() || `recorder exited with code ${code}`;
-      this.captureStatus = code === 0 ? "idle" : "failed";
-      this.capture = null;
+      if (this.segment?.child !== child) return;
+      // Pausing, rotating and stopping all detach the child first, so reaching
+      // here means the recorder died on its own.
+      if (this.observationState !== "running") return;
+      this.failObservation(this.segment.output.trim() || `recorder exited with code ${code}`);
     });
+  }
+
+  private failObservation(message: string): void {
+    this.clearLiveSummaryTimer();
+    this.clearRotationTimer();
+    if (this.segment) this.segment.child = null;
+    this.observationError = message;
+    this.observationState = "failed";
+  }
+
+  private clearRotationTimer(): void {
+    if (this.rotationTimer) clearInterval(this.rotationTimer);
+    this.rotationTimer = null;
+  }
+
+  private startRotationTimer(): void {
+    this.clearRotationTimer();
+    this.rotationTimer = setInterval(() => {
+      if (this.observationState !== "running") return;
+      this.rotateSegment();
+    }, SEGMENT_DURATION_MS);
+  }
+
+  private async detachRecorder(segment: SegmentState): Promise<void> {
+    const child = segment.child;
+    if (!child) return;
+    segment.child = null;
+    child.kill("SIGTERM");
+    await waitForExit(child, 8_000);
+  }
+
+  /** Summarizes a segment and leaves it behind as searchable history. */
+  private finalizeSegment(segment: SegmentState): void {
+    if (!fs.existsSync(segment.eventsFile) || !fs.statSync(segment.eventsFile).size) return;
+    const error = this.writeSegmentSummary(segment);
+    if (error) this.observationError = error;
+  }
+
+  private rotateSegment(): void {
+    const previous = this.segment;
+    if (!previous) return;
+    void this.detachRecorder(previous).then(() => {
+      this.finalizeSegment(previous);
+      if (this.observationState !== "running") return;
+      const next = this.openSegment();
+      this.segment = next;
+      try {
+        this.spawnRecorder(next);
+      } catch (error) {
+        this.failObservation(error instanceof Error ? error.message : String(error));
+      }
+    });
+  }
+
+  startObservation(): ComputerHistorySnapshot {
+    if (this.observationState === "running") {
+      throw new ComputerHistoryApiError(409, "Computer History is already running");
+    }
+    this.cleanupExpiredRecordings();
+    const segment = this.segment ?? this.openSegment();
+    this.segment = segment;
+    this.observationStartedAt ??= new Date().toISOString();
+    this.observationError = null;
+    this.observationState = "running";
+    try {
+      this.spawnRecorder(segment);
+    } catch (error) {
+      this.failObservation(error instanceof Error ? error.message : String(error));
+      throw error;
+    }
+    this.startLiveSummaryTimer();
+    this.startRotationTimer();
     return this.snapshot();
+  }
+
+  /** Keeps the current segment but stops writing to it. */
+  async pauseObservation(): Promise<ComputerHistorySnapshot> {
+    if (this.observationState !== "running") {
+      throw new ComputerHistoryApiError(409, "Computer History is not running");
+    }
+    this.clearLiveSummaryTimer();
+    this.clearRotationTimer();
+    if (this.segment) await this.detachRecorder(this.segment);
+    this.observationState = "paused";
+    return this.snapshot();
+  }
+
+  resumeObservation(): ComputerHistorySnapshot {
+    if (this.observationState !== "paused") {
+      throw new ComputerHistoryApiError(409, "Computer History is not paused");
+    }
+    return this.startObservation();
+  }
+
+  async stopObservation(): Promise<ComputerHistorySnapshot> {
+    if (this.observationState === "stopped") {
+      throw new ComputerHistoryApiError(409, "Computer History is not running");
+    }
+    const segment = this.segment;
+    this.observationState = "stopping";
+    this.clearLiveSummaryTimer();
+    this.clearRotationTimer();
+    if (segment) {
+      await this.detachRecorder(segment);
+      this.finalizeSegment(segment);
+    }
+    this.segment = null;
+    this.observationStartedAt = null;
+    this.observationState = "stopped";
+    return this.snapshot();
+  }
+
+  /** Called when the desktop app exits: recording does not outlive the app. */
+  async shutdown(): Promise<void> {
+    if (this.observationState === "stopped") return;
+    try {
+      await this.stopObservation();
+    } catch {
+      // Shutdown is best effort; a failed segment must not block app exit.
+    }
   }
 
   private startLiveSummaryTimer(): void {
     this.clearLiveSummaryTimer();
     this.liveSummarySignature = null;
     this.liveSummaryTimer = setInterval(() => {
-      const capture = this.capture;
-      if (!capture || this.captureStatus !== "recording") return;
-      this.writeLiveSummary(capture);
+      const segment = this.segment;
+      if (!segment || this.observationState !== "running") return;
+      this.writeLiveSummary(segment);
     }, this.liveSummaryIntervalMs);
   }
 
@@ -319,81 +451,55 @@ export class ComputerHistoryDemoService {
     this.liveSummarySignature = null;
   }
 
-  private writeLiveSummary(capture: CaptureState): void {
-    if (!fs.existsSync(capture.eventsFile)) return;
+  private writeLiveSummary(segment: SegmentState): void {
+    if (!fs.existsSync(segment.eventsFile)) return;
     let stat: fs.Stats;
     try {
-      stat = fs.statSync(capture.eventsFile);
+      stat = fs.statSync(segment.eventsFile);
     } catch {
       return;
     }
     const signature = `${stat.size}:${stat.mtimeMs}`;
     if (!stat.size || signature === this.liveSummarySignature) return;
-    const error = this.writeCaptureSummary(capture);
+    const error = this.writeSegmentSummary(segment);
     if (!error) this.liveSummarySignature = signature;
   }
 
-  private writeCaptureSummary(capture: CaptureState): string | null {
+  private writeSegmentSummary(segment: SegmentState): string | null {
     const summarizer = path.join(this.repositoryRoot, "workflows", "scripts", "summarize-history.mjs");
     const result = spawnSync(process.execPath, [
       summarizer,
-      "--file", capture.eventsFile,
-      "--out", capture.historyFile,
-      "--title", capture.title,
+      "--file", segment.eventsFile,
+      "--out", segment.historyFile,
+      "--title", `Computer History ${segment.id}`,
     ], { cwd: this.repositoryRoot, encoding: "utf8", timeout: 30_000 });
-    if (result.status !== 0 || !fs.existsSync(capture.historyFile)) {
+    if (result.status !== 0 || !fs.existsSync(segment.historyFile)) {
       return String(result.stderr || result.stdout || "failed to distill captured events").trim();
     }
-    const markdown = fs.readFileSync(capture.historyFile, "utf8")
+    const markdown = fs.readFileSync(segment.historyFile, "utf8")
       .replace(/^source_type:\s*human_computer_history\s*$/m, "source_type: captured")
       .replace(/^---\n/, "---\ncapture_policy: accessibility_events_and_page_urls_no_screenshots\n");
-    fs.writeFileSync(capture.historyFile, markdown, "utf8");
-    this.writeWorkflowCandidate(capture);
+    fs.writeFileSync(segment.historyFile, markdown, "utf8");
+    this.writeWorkflowCandidate(segment);
     return null;
   }
 
-  private writeWorkflowCandidate(capture: CaptureState): void {
+  private writeWorkflowCandidate(segment: SegmentState): void {
     const extractor = path.join(this.repositoryRoot, "workflows", "scripts", "extract-workflow-candidate.mjs");
     if (!fs.existsSync(extractor)) return;
-    const historyTitle = fs.existsSync(capture.historyFile)
-      ? readFrontmatterValue(fs.readFileSync(capture.historyFile, "utf8"), "title") ?? capture.title
-      : capture.title;
+    const historyTitle = fs.existsSync(segment.historyFile)
+      ? readFrontmatterValue(fs.readFileSync(segment.historyFile, "utf8"), "title") ?? `Computer History ${segment.id}`
+      : `Computer History ${segment.id}`;
     const result = spawnSync(process.execPath, [
       extractor,
-      "--file", capture.eventsFile,
-      "--out", capture.workflowCandidateFile,
+      "--file", segment.eventsFile,
+      "--out", segment.workflowCandidateFile,
       "--title", historyTitle,
-      "--source-history-id", path.basename(capture.historyFile, ".md"),
+      "--source-history-id", path.basename(segment.historyFile, ".md"),
     ], { cwd: this.repositoryRoot, encoding: "utf8", timeout: 30_000 });
     if (result.status !== 0 && result.status !== 2) {
-      this.captureError = String(result.stderr || result.stdout || "failed to derive workflow candidate").trim();
+      this.observationError = String(result.stderr || result.stdout || "failed to derive workflow candidate").trim();
     }
-  }
-
-  async stopCapture(): Promise<ComputerHistorySnapshot> {
-    const capture = this.capture;
-    if (!capture) throw new ComputerHistoryApiError(409, "no capture is running");
-    this.captureStatus = "stopping";
-    this.clearLiveSummaryTimer();
-    capture.child.kill("SIGTERM");
-    const exitCode = await waitForExit(capture.child, 8_000);
-    if (exitCode !== 0 || !fs.existsSync(capture.eventsFile)) {
-      this.captureError = capture.output.trim() || `recorder exited with code ${exitCode}`;
-      this.captureStatus = "failed";
-      this.capture = null;
-      throw new ComputerHistoryApiError(500, this.captureError);
-    }
-    const summaryError = this.writeCaptureSummary(capture);
-    if (summaryError) {
-      this.captureError = summaryError;
-      this.captureStatus = "failed";
-      this.capture = null;
-      throw new ComputerHistoryApiError(500, this.captureError);
-    }
-    this.capture = null;
-    this.captureStatus = "idle";
-    this.captureError = null;
-    return this.snapshot();
   }
 
   deleteHistory(historyId: string): ComputerHistorySnapshot {

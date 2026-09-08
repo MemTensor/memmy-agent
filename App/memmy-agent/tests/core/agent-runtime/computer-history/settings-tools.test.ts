@@ -19,8 +19,14 @@ function temporaryStore(): ObservationSettingsStore {
   return new ObservationSettingsStore(path.join(directory, "observation-settings.json"));
 }
 
-const snapshot = (status: string) => ({
-  capture: { status, startedAt: "2026-09-08T00:00:00.000Z", error: null },
+const snapshot = (state: string) => ({
+  observation: {
+    state,
+    startedAt: "2026-09-08T00:00:00.000Z",
+    segmentId: "2026-09-08T00-00-00Z",
+    segmentStartedAt: "2026-09-08T00:00:00.000Z",
+    error: null,
+  },
   privacy: {
     screenshots: false,
     audio: false,
@@ -50,22 +56,26 @@ describe("Computer History settings tools", () => {
     expect(registry.get("computer_history_update_settings")).toBeDefined();
   });
 
-  it("maps capture status onto the recorder lifecycle vocabulary", () => {
-    expect(runStateFrom("recording")).toBe("running");
-    expect(runStateFrom("idle")).toBe("stopped");
+  it("carries the recorder lifecycle vocabulary through unchanged", () => {
+    expect(runStateFrom("running")).toBe("running");
+    expect(runStateFrom("paused")).toBe("paused");
     expect(runStateFrom("stopping")).toBe("stopping");
     expect(runStateFrom("failed")).toBe("failed");
+    expect(runStateFrom("stopped")).toBe("stopped");
+    // Anything unrecognized must read as "not recording", never as running.
+    expect(runStateFrom("nonsense")).toBe("stopped");
   });
 
   it("reports where the event stream lives so the agent can search it", async () => {
     const tool = new ComputerHistoryStatusTool(
-      { snapshot: () => snapshot("recording") } as any,
+      { snapshot: () => snapshot("running") } as any,
       temporaryStore(),
     );
     const result = JSON.parse(await tool.execute());
 
     expect(result.state).toBe("running");
     expect(result.event_stream_root_path).toBe("/tmp/histories");
+    expect(result.segment_id).toBe("2026-09-08T00-00-00Z");
     expect(result.privacy).toMatchObject({ screenshots: false, audio: false });
   });
 
