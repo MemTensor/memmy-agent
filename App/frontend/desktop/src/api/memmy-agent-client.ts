@@ -57,6 +57,7 @@ export type ComputerHistoryEntry = {
   description: string | null;
   applications: string[];
   summaryWindow: "10min" | "6h" | null;
+  pinned: boolean;
   id: string;
   title: string;
   sourceType: ComputerHistorySourceType;
@@ -107,6 +108,7 @@ const ComputerHistoryEntrySchema = z.object({
   description: z.string().nullable(),
   applications: z.array(z.string()),
   summaryWindow: z.enum(["10min", "6h"]).nullable(),
+  pinned: z.boolean(),
   sourceType: z.enum(["captured", "imported", "demo_fixture"]),
   createdAt: z.string(),
   markdown: z.string(),
@@ -754,6 +756,7 @@ export interface MemmyAgentClient {
   getSettings(): Promise<MemmyAgentSettings>;
   getComputerHistory(): Promise<ComputerHistorySnapshot>;
   deleteComputerHistory(historyId: string): Promise<ComputerHistorySnapshot>;
+  pinComputerHistory(historyId: string, pinned: boolean): Promise<ComputerHistorySnapshot>;
   installComputerHistoryDemo(): Promise<ComputerHistorySnapshot>;
   importComputerHistory(input: { title?: string; markdown: string }): Promise<ComputerHistorySnapshot>;
   startComputerHistoryObservation(): Promise<ComputerHistorySnapshot>;
@@ -1112,6 +1115,13 @@ class HttpMemmyAgentClient implements MemmyAgentClient {
       body: { history_id: historyId }
     });
   }
+  async pinComputerHistory(historyId: string, pinned: boolean): Promise<ComputerHistorySnapshot> {
+    return this.request("/api/computer-history/pin", ComputerHistorySnapshotSchema, {
+      method: "POST",
+      body: { history_id: historyId, pinned }
+    });
+  }
+
 
   async installComputerHistoryDemo(): Promise<ComputerHistorySnapshot> {
     return this.request("/api/computer-history/demo-fixture", ComputerHistorySnapshotSchema, { method: "POST", body: {} });

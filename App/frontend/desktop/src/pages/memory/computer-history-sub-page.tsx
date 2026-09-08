@@ -267,6 +267,16 @@ export function ComputerHistorySubPage(props: ComputerHistorySubPageProps) {
                   </button>
                   <button
                     type="button"
+                    className={item.pinned ? "computer-history-card__pin computer-history-card__pin--on" : "computer-history-card__pin"}
+                    disabled={busy || !props.client}
+                    title={item.pinned ? "取消保留原始事件" : "保留原始事件，不随 48 小时清理"}
+                    aria-pressed={item.pinned}
+                    onClick={() => void runAction((client) => client.pinComputerHistory(item.id, !item.pinned))}
+                  >
+                    {item.pinned ? "已保留" : "保留"}
+                  </button>
+                  <button
+                    type="button"
                     className={pendingDeleteId === item.id ? "computer-history-card__delete computer-history-card__delete--confirm" : "computer-history-card__delete"}
                     disabled={busy || recording}
                     onClick={() => void deleteHistory(item.id)}

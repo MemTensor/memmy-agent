@@ -96,6 +96,7 @@ describe("ComputerHistorySubPage", () => {
   it("groups entries by day and heads a day with its six-hour overview", async () => {
     const base = {
       applications: [] as string[],
+      pinned: false,
       sourceType: "captured" as const,
       markdown: "## Memory summary\n\nbody",
       filePath: "/tmp/x.md",
@@ -123,6 +124,7 @@ function snapshot(overrides: Partial<ComputerHistorySnapshot> = {}): ComputerHis
       description: "You opened Notes and drafted a short entry.",
       applications: ["com.apple.Notes"],
       summaryWindow: "10min",
+      pinned: false,
       sourceType: "captured",
       createdAt: "2026-09-01T05:00:00.000Z",
       markdown: '---\ncapture_policy: accessibility_events\ntitle: "My recording"\n---\n\n## Memory summary\n\nRecorded steps.',

@@ -44,6 +44,8 @@ export interface ComputerHistoryEntry {
   applications: string[];
   /** Which summary layer this entry belongs to, when it is one. */
   summaryWindow: "10min" | "6h" | null;
+  /** Whether this entry's raw events are exempt from the retention window. */
+  pinned: boolean;
   sourceType: ComputerHistorySourceType;
   createdAt: string;
   markdown: string;
@@ -113,7 +115,6 @@ interface SegmentState {
   eventsFile: string;
   metadataFile: string;
   historyFile: string;
-  workflowCandidateFile: string;
   output: string;
 }
 
@@ -126,6 +127,8 @@ export type ObservationState = "running" | "paused" | "stopped" | "stopping" | "
 
 const SEGMENT_DURATION_MS = 10 * 60 * 1000;
 const SEGMENTS_DIRECTORY_NAME = "segments";
+// A pinned segment keeps its raw events past the retention window.
+const PIN_MARKER = ".pinned";
 
 // A six-hour rollup is cheap because it reuses ten-minute summaries, so it can
 // run every time a segment is finalized rather than on its own schedule.
@@ -146,6 +149,7 @@ interface MarkdownEntry {
   description: string | null;
   applications: string[];
   summaryWindow: "10min" | "6h" | null;
+  pinned: boolean;
   createdAt: string;
   markdown: string;
   filePath: string;
@@ -161,6 +165,24 @@ const RAW_RETENTION_MS = 48 * 60 * 60 * 1000;
 // captures. Memmy names its own segments `<segment id>-10min-summary.md`, with
 // no random component and no "memory-", so the two cannot collide.
 const CODEX_SKYSIGHT_FILE = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-[A-Za-z]{4}-(?:10min|6h)-memory-summary$/;
+
+/**
+ * When a segment's window started.
+ *
+ * Reads the recorded start time rather than trusting the directory's mtime:
+ * writing a pin marker, or any other touch, would otherwise reset the clock and
+ * silently grant the segment another full retention window.
+ */
+function segmentAgeMs(directory: string): number {
+  try {
+    const metadata = JSON.parse(fs.readFileSync(path.join(directory, "metadata.json"), "utf8"));
+    const startedAt = Date.parse(metadata?.startedAt ?? "");
+    if (!Number.isNaN(startedAt)) return startedAt;
+  } catch {
+    // Recordings from before segments carried metadata fall back to mtime.
+  }
+  return fs.statSync(directory).mtimeMs;
+}
 
 export function isCodexSkysightCopy(historyId: string): boolean {
   return CODEX_SKYSIGHT_FILE.test(historyId);
@@ -250,9 +272,12 @@ export class ComputerHistoryDemoService {
       histories: [
         ...this.readMarkdownDirectory(this.historyDirectory).map((entry) => {
           const sourceType = readSourceType(entry.markdown);
-          return { ...entry, sourceType, replayPlan: replayPlanFor(entry, sourceType) };
+          const hasRawEvents = this.segmentDirectoryFor(entry.id) !== null;
+          return { ...entry, sourceType, replayPlan: replayPlanFor(entry, sourceType, hasRawEvents) };
         }),
-      ].filter((entry) => !isCodexSkysightCopy(entry.id)),
+      ]
+        .filter((entry) => !isCodexSkysightCopy(entry.id))
+        .map((entry) => ({ ...entry, pinned: this.isPinned(entry.id) })),
       // Pick the fields explicitly rather than spreading the directory entry: a
       // workflow is not a summary, and spreading leaked summary-only fields
       // into it the moment the reader grew new ones.
@@ -325,7 +350,6 @@ export class ComputerHistoryDemoService {
       eventsFile,
       metadataFile,
       historyFile: path.join(this.historyDirectory, `${id}-10min-summary.md`),
-      workflowCandidateFile: path.join(this.workflowDirectory, `${id}-candidate.md`),
       output: "",
     };
   }
@@ -656,26 +680,70 @@ export class ComputerHistoryDemoService {
       .replace(/^source_type:\s*human_computer_history\s*$/m, "source_type: captured")
       .replace(/^---\n/, "---\ncapture_policy: accessibility_events_and_page_urls_no_screenshots\n");
     fs.writeFileSync(segment.historyFile, markdown, "utf8");
-    this.writeWorkflowCandidate(segment);
     return null;
   }
 
-  private writeWorkflowCandidate(segment: SegmentState): void {
+
+
+  /** Resolves the segment directory a summary came from, if it still exists. */
+  private segmentDirectoryFor(historyId: string): string | null {
+    const segmentId = historyId.replace(/-(?:10min|6h)-summary$/u, "");
+    const directory = path.join(this.segmentsDirectory, segmentId);
+    return fs.existsSync(directory) ? directory : null;
+  }
+
+  private isPinned(historyId: string): boolean {
+    const directory = this.segmentDirectoryFor(historyId);
+    return directory !== null && fs.existsSync(path.join(directory, PIN_MARKER));
+  }
+
+  /**
+   * Keeps a segment's raw events past the retention window.
+   *
+   * Retention exists so a recording of an ordinary afternoon does not live
+   * forever, but occasionally a window is worth keeping as the source for a
+   * workflow. Pinning is that exception, and it is deliberately explicit.
+   */
+  pinSegment(historyId: string, pinned: boolean): ComputerHistorySnapshot {
+    const directory = this.segmentDirectoryFor(historyId.trim());
+    if (!directory) {
+      throw new ComputerHistoryApiError(
+        404,
+        "the raw events for this entry are no longer on disk, so there is nothing to pin",
+      );
+    }
+    const marker = path.join(directory, PIN_MARKER);
+    if (pinned) fs.writeFileSync(marker, "", "utf8");
+    else fs.rmSync(marker, { force: true });
+    return this.snapshot();
+  }
+
+  /**
+   * Derives replayable steps from a segment's own event stream, on demand.
+   *
+   * This used to run for every segment at capture time, which produced a
+   * candidate for every ten-minute slice of the day. A window boundary has
+   * nothing to do with a task boundary, so almost all of them were noise.
+   * Deriving on request means it happens when someone actually wants to repeat
+   * something.
+   */
+  private deriveSteps(historyId: string): string[] {
+    const directory = this.segmentDirectoryFor(historyId);
+    if (!directory) return [];
+    const eventsFile = path.join(directory, "events.jsonl");
+    if (!fs.existsSync(eventsFile)) return [];
     const extractor = path.join(this.repositoryRoot, "workflows", "scripts", "extract-workflow-candidate.mjs");
-    if (!fs.existsSync(extractor)) return;
-    const historyTitle = fs.existsSync(segment.historyFile)
-      ? readFrontmatterValue(fs.readFileSync(segment.historyFile, "utf8"), "title") ?? `Computer History ${segment.id}`
-      : `Computer History ${segment.id}`;
+    if (!fs.existsSync(extractor)) return [];
+    const target = path.join(directory, "candidate.md");
     const result = spawnSync(process.execPath, [
       extractor,
-      "--file", segment.eventsFile,
-      "--out", segment.workflowCandidateFile,
-      "--title", historyTitle,
-      "--source-history-id", path.basename(segment.historyFile, ".md"),
+      "--file", eventsFile,
+      "--out", target,
+      "--title", historyId,
+      "--source-history-id", historyId,
     ], { cwd: this.repositoryRoot, encoding: "utf8", timeout: 30_000 });
-    if (result.status !== 0 && result.status !== 2) {
-      this.observationError = String(result.stderr || result.stdout || "failed to derive workflow candidate").trim();
-    }
+    if (result.status !== 0 || !fs.existsSync(target)) return [];
+    return extractCandidateSteps(fs.readFileSync(target, "utf8"));
   }
 
   deleteHistory(historyId: string): ComputerHistorySnapshot {
@@ -683,7 +751,11 @@ export class ComputerHistoryDemoService {
     const derivedWorkflows = this.snapshot().workflows.filter((workflow) => workflow.sourceHistoryId === history.id);
     fs.rmSync(history.filePath, { force: true });
     for (const workflow of derivedWorkflows) fs.rmSync(workflow.filePath, { force: true });
-    fs.rmSync(path.join(this.recordingDirectory, history.id), { recursive: true, force: true });
+    // Segments moved under `segments/`; the id also carries the summary suffix.
+    fs.rmSync(this.segmentDirectoryFor(history.id) ?? path.join(this.recordingDirectory, history.id), {
+      recursive: true,
+      force: true,
+    });
     return this.snapshot();
   }
 
@@ -697,16 +769,16 @@ export class ComputerHistoryDemoService {
       if (history.sourceType === "captured" && readFrontmatterValue(history.markdown, "experience_version") !== "1") {
         throw new ComputerHistoryApiError(422, "the selected recording does not contain reusable semantic operation experience");
       }
-      const candidate = this.snapshot().workflows.find((workflow) => (
-        workflow.sourceHistoryId === history.id
-        && readFrontmatterValue(workflow.markdown, "kind") === "computer_use_workflow_candidate"
-      ));
-      const steps = normalizeRecordedExperienceSteps(
-        extractCandidateSteps(candidate?.markdown ?? "")
-          .concat(candidate ? [] : extractReusableExperienceSteps(history.markdown)),
-      );
+      const steps = normalizeRecordedExperienceSteps(this.deriveSteps(history.id));
       if (!steps.length) {
-        throw new ComputerHistoryApiError(422, "the selected recording contains no reusable semantic action");
+        // Distinguish "nothing repeatable happened" from "the evidence is gone",
+        // because only the second one is the user's to prevent next time.
+        throw new ComputerHistoryApiError(
+          422,
+          this.segmentDirectoryFor(history.id)
+            ? "the selected recording contains no reusable semantic action"
+            : "the raw events for this entry passed the retention window; pin a segment to keep its events for later",
+        );
       }
       const id = `${timestampForPath()}-recorded-operation-experience-computer-use`;
       const markdown = buildRecordedExperienceWorkflow({ history, request, steps });
@@ -735,8 +807,11 @@ export class ComputerHistoryDemoService {
 
   searchHistories(query: string, limit = 5): ComputerHistoryMatch[] {
     const terms = queryTerms(query);
+    // Searching is evidence retrieval, not replay selection. Filtering by
+    // replayability meant an entry vanished from search the moment its raw
+    // events expired — exactly when the written summary is all that is left and
+    // the only thing that can still answer "what was I doing".
     return this.snapshot().histories
-      .filter(historySupportsReplay)
       .map((history) => {
         const title = searchableText(history.title);
         const markdown = searchableText(history.markdown);
@@ -773,9 +848,7 @@ export class ComputerHistoryDemoService {
       candidate.sourceHistoryId === history.id && !existingWorkflowIds.has(candidate.id)
     ));
     if (!workflow) throw new ComputerHistoryApiError(500, "workflow generation did not produce an artifact");
-    const steps = history.sourceType === "captured"
-      ? normalizeRecordedExperienceSteps(extractReusableExperienceSteps(history.markdown))
-      : extractWorkflowRecordedActions(workflow.markdown);
+    const steps = extractWorkflowRecordedActions(workflow.markdown);
     return { history, workflow, snapshot: afterWorkflow, steps };
   }
 
@@ -869,6 +942,7 @@ export class ComputerHistoryDemoService {
           title: readFrontmatterValue(markdown, "title") || id,
           description: nullableFrontmatterValue(markdown, "description"),
           applications: applicationsFromMarkdown(markdown),
+          pinned: false,
           summaryWindow: id.endsWith("-10min-summary")
             ? ("10min" as const)
             : id.endsWith("-6h-summary")
@@ -902,8 +976,9 @@ export class ComputerHistoryDemoService {
       for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
         if (!entry.isDirectory() || isOpen(entry.name)) continue;
         const target = path.join(directory, entry.name);
+        if (fs.existsSync(path.join(target, PIN_MARKER))) continue;
         try {
-          if (fs.statSync(target).mtimeMs < cutoff) fs.rmSync(target, { recursive: true, force: true });
+          if (segmentAgeMs(target) < cutoff) fs.rmSync(target, { recursive: true, force: true });
         } catch {
           // A segment removed by another pass is already in the desired state.
         }
@@ -916,31 +991,30 @@ export class ComputerHistoryDemoService {
   }
 }
 
-function extractReusableExperienceSteps(markdown: string): string[] {
-  const heading = markdown.match(/^## Reusable operation experience\s*$/mu);
-  if (!heading || heading.index === undefined) return [];
-  const remainder = markdown.slice(heading.index + heading[0].length);
-  const nextHeading = remainder.search(/^##\s/mu);
-  const section = nextHeading >= 0 ? remainder.slice(0, nextHeading) : remainder;
-  return section
-    .split("\n")
-    .map((line) => line.match(/^\s*\d+\.\s+(.+?)\s*$/u)?.[1] ?? "")
-    .filter(Boolean)
-    .slice(0, 80);
-}
 
 function hashText(value: string): string {
   return crypto.createHash("sha256").update(value).digest("hex");
 }
 
 
-function replayPlanFor(entry: MarkdownEntry, sourceType: ComputerHistorySourceType): ComputerHistoryReplayPlan | null {
+/**
+ * Reports whether an entry can still be turned into a workflow.
+ *
+ * Steps are derived from the raw event stream on demand, so what decides this
+ * is whether that stream is still on disk, not whether the summary happens to
+ * contain a section listing actions.
+ */
+function replayPlanFor(
+  entry: MarkdownEntry,
+  sourceType: ComputerHistorySourceType,
+  hasRawEvents: boolean,
+): ComputerHistoryReplayPlan | null {
   if (sourceType !== "captured") return null;
-  const steps = normalizeRecordedExperienceSteps(extractReusableExperienceSteps(entry.markdown));
+  const steps: string[] = [];
   return {
     sourcePath: entry.filePath,
     sourceHash: hashText(entry.markdown),
-    status: steps.length ? "ready" : "not_replayable",
+    status: hasRawEvents ? "ready" : "not_replayable",
     steps,
     variables: [...entry.markdown.matchAll(/\{\{\s*([^}]+?)\s*\}\}/gu)].map((match) => match[1].trim()),
   };
@@ -999,7 +1073,7 @@ function historySupportsReplay(history: ComputerHistoryEntry): boolean {
   return history.sourceType === "captured"
     && readFrontmatterValue(history.markdown, "status") === "completed"
     && readFrontmatterValue(history.markdown, "experience_version") === "1"
-    && extractReusableExperienceSteps(history.markdown).length > 0;
+    && history.replayPlan?.status === "ready";
 }
 
 const QUERY_STOP_TERMS = new Set([

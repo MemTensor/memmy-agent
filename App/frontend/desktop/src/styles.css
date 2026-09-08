@@ -11078,6 +11078,20 @@ input[type="checkbox"].check-sky:checked::after {
   color: white;
 }
 
+.computer-history-card__pin {
+  border: 1px solid rgba(120, 130, 140, 0.35);
+  background: transparent;
+  border-radius: 6px;
+  font-size: 12px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+.computer-history-card__pin--on {
+  border-color: rgba(90, 150, 160, 0.85);
+  color: #2f7f8c;
+}
+
 .computer-history-day {
   display: flex;
   flex-direction: column;

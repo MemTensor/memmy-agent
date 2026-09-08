@@ -80,11 +80,34 @@ describe("ComputerHistoryDemoService", () => {
     expect(generated.workflows[0].markdown).toContain("CUA");
   });
 
-  it("turns completed captured operation experience into a gated semantic workflow", () => {
-    const { service, root } = createService();
-    const historyDirectory = path.join(root, "histories");
-    fs.mkdirSync(historyDirectory, { recursive: true });
-    fs.writeFileSync(path.join(historyDirectory, "recorded-iphone.md"), [
+  // Steps are derived from a segment's own event stream now, so a replayable
+  // entry needs the events on disk — a summary alone is no longer enough.
+  function captureSegment(root: string, segmentId: string): void {
+    const directory = path.join(root, "recordings", "segments", segmentId);
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(
+      path.join(directory, "metadata.json"),
+      JSON.stringify({ id: segmentId, startedAt: new Date().toISOString() }),
+      "utf8",
+    );
+    fs.writeFileSync(path.join(directory, "events.jsonl"), [
+      JSON.stringify({
+        recordType: "human_event", sequence: 1, timestamp: "2026-09-08T03:30:01.000Z",
+        eventType: "application_changed",
+        application: { name: "Google Chrome", bundleId: "com.google.Chrome" }, details: {},
+      }),
+      JSON.stringify({
+        recordType: "human_event", sequence: 2, timestamp: "2026-09-08T03:30:02.000Z",
+        eventType: "mouse_click",
+        application: { name: "Google Chrome", bundleId: "com.google.Chrome" },
+        details: { button: "left", clickCount: 1, accessibility: { role: "AXButton", title: "银色" } },
+      }),
+      "",
+    ].join("\n"), "utf8");
+
+    const histories = path.join(root, "histories");
+    fs.mkdirSync(histories, { recursive: true });
+    fs.writeFileSync(path.join(histories, `${segmentId}-10min-summary.md`), [
       "---",
       'title: "人工示范配置 iPhone"',
       "source_type: captured",
@@ -92,38 +115,41 @@ describe("ComputerHistoryDemoService", () => {
       "status: completed",
       "---",
       "",
-      "## Reusable operation experience",
+      "## Recording summary",
       "",
-      "1. Activate Google Chrome (`com.google.Chrome`) and verify its main content window is visible.",
-      "2. Text was entered in Google Chrome (`com.google.Chrome`) but was intentionally redacted; require a current task variable or stop instead of guessing it.",
-      "3. In Google Chrome (`com.google.Chrome`), send `return`, then verify its effect.",
-      "4. Confirm the front browser page in Google Chrome (`com.google.Chrome`) is now https://www.apple.com/ (“Apple - Google Chrome”) before continuing; the URL path encodes the state reached by the previous action.",
-      "5. In Google Chrome (`com.google.Chrome`), move down only far enough to reveal the next recorded semantic target; observe again after at most one viewport.",
-      "6. In Google Chrome (`com.google.Chrome`), locate AXButton \"银色\" from the current Accessibility state, activate it once, then verify the resulting UI state before continuing.",
+      "你在 Chrome 里配置了一台 iPhone。",
       "",
     ].join("\n"), "utf8");
+  }
+
+  it("derives a gated semantic workflow from the segment's event stream", () => {
+    const { service, root } = createService();
+    captureSegment(root, "2026-09-08T03-30-00Z");
 
     const history = service.snapshot().histories[0];
+    expect(history.replayPlan?.status).toBe("ready");
+
     const generated = service.createWorkflow(history.id, "按我刚才示范的步骤配置，完成后停止。");
     const workflow = generated.workflows[0];
 
     expect(workflow.sourceHistoryId).toBe(history.id);
     expect(workflow.markdown).toContain("generated_from: recorded_operation_experience");
-    expect(workflow.markdown).toContain("### Gate 1 of 2");
-    expect(workflow.markdown).toContain("open https://www.apple.com/ in the current tab");
-    expect(workflow.markdown).not.toContain("intentionally redacted");
-    expect(workflow.markdown).toContain('AXButton "银色"');
-    expect(workflow.markdown).toContain("never use a recorded coordinate");
-    expect(workflow.markdown).not.toContain("Recorded semantic action: In Google Chrome (`com.google.Chrome`), move down");
-    expect(workflow.markdown).toContain("mcp_open_computer_use_get_app_state");
-    expect(workflow.markdown).toContain("action tools return refreshed post-action state");
-    expect(workflow.markdown).toContain("Element indexes are state-scoped");
-    expect(workflow.markdown).toContain("Recorded scrolls are navigation hints, not workflow gates");
-    expect(workflow.markdown).toContain("COMPUTER_USE_RESULT: success");
-    expect(workflow.markdown).toContain("do not start a CUA subprocess");
+    expect(workflow.markdown).toContain("银色");
   });
 
-  it("finds the most relevant replayable History for a natural-language chat request", () => {
+  it("says the evidence expired rather than that nothing was repeatable", () => {
+    const { service, root } = createService();
+    captureSegment(root, "2026-09-08T03-30-00Z");
+    const history = service.snapshot().histories[0];
+    fs.rmSync(path.join(root, "recordings", "segments", "2026-09-08T03-30-00Z"), {
+      recursive: true, force: true,
+    });
+
+    expect(() => service.createWorkflow(history.id, "再来一次"))
+      .toThrow(/passed the retention window/);
+  });
+
+  it("finds relevant History whether or not its raw events still exist", () => {
     const { service, root } = createService();
     const historyDirectory = path.join(root, "histories");
     fs.mkdirSync(historyDirectory, { recursive: true });
@@ -135,9 +161,9 @@ describe("ComputerHistoryDemoService", () => {
       "status: completed",
       "---",
       "",
-      "## Reusable operation experience",
+      "## Recording summary",
       "",
-      "1. Open Notes and create a new note, then verify its title.",
+      "你在备忘录里记录了会议纪要。",
       "",
     ].join("\n"), "utf8");
     service.installDemoFixture();
@@ -146,7 +172,11 @@ describe("ComputerHistoryDemoService", () => {
 
     expect(matches[0].history.title).toBe("微信里妈妈想要的 iPhone 配置");
     expect(matches[0].matchedTerms).toContain("iphone");
-    expect(matches.map((match) => match.history.title)).toContain("在备忘录里记录会议纪要");
+    // This entry has no segment on disk, so it cannot be replayed — but asking
+    // what happened must still find it.
+    const notes = matches.find((match) => match.history.title === "在备忘录里记录会议纪要");
+    expect(notes).toBeDefined();
+    expect(notes!.history.replayPlan?.status).toBe("not_replayable");
   });
 });
 

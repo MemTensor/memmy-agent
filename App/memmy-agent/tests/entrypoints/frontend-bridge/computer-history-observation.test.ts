@@ -278,3 +278,86 @@ describe("raw event retention", () => {
     expect(fs.existsSync(legacy)).toBe(false);
   });
 });
+
+describe("pinning raw events", () => {
+  const RETENTION_MS = 48 * 60 * 60 * 1000;
+
+  function pinService(root: string): ComputerHistoryDemoService {
+    return new ComputerHistoryDemoService({
+      historyDirectory: path.join(root, "histories"),
+      recordingDirectory: path.join(root, "recordings"),
+      workflowDirectory: path.join(root, "workflows"),
+      observationSettingsFile: path.join(root, "observation-settings.json"),
+    });
+  }
+
+  // Builds an already-expired segment plus its summary. Paths are derived
+  // without calling snapshot(), because snapshot() runs the cleanup and would
+  // remove the segment before the test could pin it.
+  function staleSegment(root: string, id: string): string {
+    const directory = path.join(root, "recordings", "segments", id);
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, "events.jsonl"), "{}\n", "utf8");
+    fs.writeFileSync(
+      path.join(directory, "metadata.json"),
+      JSON.stringify({ id, startedAt: new Date(Date.now() - RETENTION_MS - 60_000).toISOString() }),
+      "utf8",
+    );
+    const histories = path.join(root, "histories");
+    fs.mkdirSync(histories, { recursive: true });
+    fs.writeFileSync(
+      path.join(histories, `${id}-10min-summary.md`),
+      '---\ntitle: "A window"\nsource_type: captured\n---\n\nbody\n',
+      "utf8",
+    );
+    return directory;
+  }
+
+  it("keeps a pinned segment past the retention window", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-pin-"));
+    roots.push(root);
+    const directory = staleSegment(root, "2026-09-01T00-00-00Z");
+    const instance = pinService(root);
+
+    instance.pinSegment("2026-09-01T00-00-00Z-10min-summary", true);
+    instance.snapshot();
+
+    expect(fs.existsSync(directory)).toBe(true);
+    expect(instance.snapshot().histories[0]).toMatchObject({ pinned: true });
+  });
+
+  it("expires it again once unpinned", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-pin-"));
+    roots.push(root);
+    const directory = staleSegment(root, "2026-09-01T00-00-00Z");
+    const instance = pinService(root);
+    instance.pinSegment("2026-09-01T00-00-00Z-10min-summary", true);
+    instance.snapshot();
+
+    instance.pinSegment("2026-09-01T00-00-00Z-10min-summary", false);
+    instance.snapshot();
+
+    expect(fs.existsSync(directory)).toBe(false);
+  });
+
+  it("refuses to pin an entry whose events are already gone", () => {
+    const instance = service();
+    expect(() => instance.pinSegment("2026-09-01T00-00-00Z-10min-summary", true))
+      .toThrow(/no longer on disk/);
+  });
+
+  it("reports replay as unavailable once the raw events expire", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-pin-"));
+    roots.push(root);
+    const directory = staleSegment(root, "2026-09-01T00-00-00Z");
+    const instance = pinService(root);
+    instance.pinSegment("2026-09-01T00-00-00Z-10min-summary", true);
+    // Steps are derived from the event stream on demand, so its absence is
+    // what makes an entry unreplayable — not anything in the summary text.
+    expect(instance.snapshot().histories[0].replayPlan?.status).toBe("ready");
+
+    fs.rmSync(directory, { recursive: true, force: true });
+
+    expect(instance.snapshot().histories[0].replayPlan?.status).toBe("not_replayable");
+  });
+});
