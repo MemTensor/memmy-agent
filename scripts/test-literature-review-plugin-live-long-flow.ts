@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import YAML from "yaml";
@@ -20,12 +20,18 @@ const mode = safeConfig.modelAssignments?.account?.agent?.default ? "account" : 
 const resolution = await writer.resolveAssignedModel?.({ mode, activeAccountId: mode === "account" ? safeConfig.app?.userId ?? null : null, capability: "agent" });
 if (!resolution?.ok) throw new Error(`Current Memmy model unavailable: ${resolution?.reason ?? "unknown"}`);
 const inferenceTimeoutMs = Number(process.env.LITERATURE_REVIEW_LIVE_LONG_MODEL_TIMEOUT_MS ?? 300_000);
-const inference = createPluginModelInferenceService({ resolveModel: async () => resolution, timeoutMs: inferenceTimeoutMs, maxAttempts: 2 });
+const inference = createPluginModelInferenceService({
+  resolveModel: async () => resolution,
+  timeoutMs: inferenceTimeoutMs,
+  maxAttempts: 4,
+  retryBaseDelayMs: Number(process.env.LITERATURE_REVIEW_LIVE_LONG_RETRY_DELAY_MS ?? 5_000)
+});
 const modelCalls: Array<Record<string, unknown>> = [];
 const modelInference = async (input: Record<string, unknown>) => {
   const started = Date.now();
   try {
     const result = await inference.invoke({ pluginId: "literature-review", callId: `long-model-${modelCalls.length + 1}`, conversationId: "live-long-flow", service: "model-inference", input, deadline: new Date(Date.now() + inferenceTimeoutMs).toISOString() }) as Record<string, unknown>;
+    await writeFile(join(runRoot, `model-call-${modelCalls.length + 1}.txt`), String(result.content ?? ""), "utf8");
     modelCalls.push({ ok: true, durationMs: Date.now() - started, usage: result.usage, model: result.model });
     return result as never;
   } catch (error) {
@@ -133,7 +139,37 @@ try {
   failure = error;
 }
 const task = taskId ? await repository.load(taskId) : null;
-const report = { generatedAt: new Date().toISOString(), result: failure ? "failed" : "passed", failure: failure instanceof Error ? failure.message : failure, model: { provider: resolution.context.provider, model: resolution.context.model }, taskId, searchCandidates: (task?.values.searchResults as unknown[] | undefined)?.length ?? 0, searchDiagnostics: task?.values.searchDiagnostics ?? [], selectedPapers: (task?.values.selectedPaperIds as unknown[] | undefined)?.length ?? 0, parsedDocuments: (task?.values.parsedDocuments as unknown[] | undefined)?.length ?? 0, evidenceUnits: (task?.values.evidenceUnits as unknown[] | undefined)?.length ?? 0, outputs: task?.values.outputs ?? [], trace, modelCalls, totalModelTokens: modelCalls.reduce((sum, call) => sum + Number((call.usage as { totalTokens?: number } | undefined)?.totalTokens ?? 0), 0) };
+const outputs = (task?.values.outputs as Array<{ format: string; path: string; name: string; generation?: { renderer?: string; fallback?: boolean } }> | undefined) ?? [];
+const qualityChecks = {
+  xelatex: outputs.some((output) => output.format === "pdf" && output.generation?.renderer === "xelatex" && output.generation.fallback === false),
+  neuripsTemplate: false,
+  citationCommands: false,
+  bibliographyEntries: ((task?.values.bibliography as unknown[] | undefined) ?? []).length,
+  figures: ((task?.values.figureBlocks as unknown[] | undefined) ?? []).length,
+  tables: ((task?.values.tableBlocks as unknown[] | undefined) ?? []).length,
+  sections: ((task?.values.sections as unknown[] | undefined) ?? []).length
+};
+if (!failure) {
+  const tex = outputs.find((output) => output.name === "review.tex");
+  if (!tex) failure = new Error("Quality delivery did not produce review.tex");
+  else {
+    const source = await readFile(tex.path, "utf8");
+    qualityChecks.neuripsTemplate = source.includes("\\usepackage[preprint]{neurips_2024}");
+    qualityChecks.citationCommands = source.includes("\\cite{") && source.includes("\\begin{thebibliography}{99}");
+  }
+  if (!qualityChecks.xelatex) failure = new Error("Quality delivery used PDFKit fallback instead of XeLaTeX");
+  else if (!qualityChecks.neuripsTemplate) failure = new Error("Quality delivery did not load the NeurIPS 2024 template");
+  else if (!qualityChecks.citationCommands) failure = new Error("Quality delivery did not render LaTeX citations and bibliography");
+}
+const deliveryRoot = join(runRoot, "delivery");
+if (!failure) {
+  for (const output of outputs) {
+    const destination = join(deliveryRoot, output.name);
+    await mkdir(resolve(destination, ".."), { recursive: true });
+    await copyFile(output.path, destination);
+  }
+}
+const report = { generatedAt: new Date().toISOString(), result: failure ? "failed" : "passed", failure: failure instanceof Error ? failure.message : failure, model: { provider: resolution.context.provider, model: resolution.context.model }, taskId, searchCandidates: (task?.values.searchResults as unknown[] | undefined)?.length ?? 0, searchDiagnostics: task?.values.searchDiagnostics ?? [], selectedPapers: (task?.values.selectedPaperIds as unknown[] | undefined)?.length ?? 0, parsedDocuments: (task?.values.parsedDocuments as unknown[] | undefined)?.length ?? 0, evidenceUnits: (task?.values.evidenceUnits as unknown[] | undefined)?.length ?? 0, outputs, deliveryRoot, qualityChecks, trace, modelCalls, totalModelTokens: modelCalls.reduce((sum, call) => sum + Number((call.usage as { totalTokens?: number } | undefined)?.totalTokens ?? 0), 0) };
 await writeFile(join(runRoot, "report.json"), `${JSON.stringify(report, null, 2)}\n`, "utf8");
 console.log(`Live long-flow report: ${join(runRoot, "report.json")}`);
 if (failure) throw failure;
