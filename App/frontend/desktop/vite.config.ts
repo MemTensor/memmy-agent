@@ -39,6 +39,7 @@ export const validateLegalEnv = (env: Record<string, string | undefined>): void 
 /** Vite configuration. */
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, REPO_ROOT_DIR, "");
+  const stableElectronDemo = process.env.MEMMY_STABLE_ELECTRON_DEMO?.trim() === "1";
   const validationEnv = mode === "test"
     ? {
         ...env,
@@ -78,6 +79,7 @@ export default defineConfig(({ mode }) => {
       host: "127.0.0.1",
       port: 19000,
       strictPort: true,
+      watch: stableElectronDemo ? { ignored: ["**/*"] } : undefined,
       hmr: {
         host: "127.0.0.1",
         port: 19001

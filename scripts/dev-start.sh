@@ -685,6 +685,10 @@ NODE
   log "starting agent API, frontend, and desktop backend; Electron manages Memory and supervises gateway"
   cd "$ROOT_DIR"
   mkdir -p "$LOG_DIR"
+  export MEMMY_STABLE_ELECTRON_DEMO="${MEMMY_STABLE_ELECTRON_DEMO:-1}"
+  if [[ "$MEMMY_STABLE_ELECTRON_DEMO" == "1" ]]; then
+    log "frontend source watching disabled for a stable Electron demo; set MEMMY_STABLE_ELECTRON_DEMO=0 to enable it"
+  fi
   exec "$CONCURRENTLY_BIN" -k -n agent-api,frontend,backend -c cyan,magenta,yellow \
     "bash -c 'set -o pipefail; bash scripts/dev-start.sh --agent-api 2>&1 | tee .tmp/dev-stack/agent-api.log'" \
     "bash -c 'set -o pipefail; npm run dev -w @memmy/frontend-desktop -- --host 127.0.0.1 2>&1 | tee .tmp/dev-stack/frontend.log'" \

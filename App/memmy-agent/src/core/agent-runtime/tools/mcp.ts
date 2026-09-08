@@ -270,14 +270,49 @@ function textFromContentBlock(block: any): string {
   return String(block);
 }
 
-export type McpContentMode = "text" | "structured";
+export type McpContentMode = "text" | "structured" | "auto";
+
+function hasImageContent(content: any[]): boolean {
+  return content.some((block) => block?.type === "image");
+}
+
+function sanitizeStructuredContent(value: any, textContent: string, key = ""): any {
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeStructuredContent(item, textContent));
+  }
+  if (!value || typeof value !== "object") {
+    if (
+      typeof value === "string" &&
+      value.length > 1024 &&
+      /(base64|blob|image_data|screenshot_data)/i.test(key)
+    ) {
+      return `[omitted ${value.length} character binary payload]`;
+    }
+    return value;
+  }
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([childKey, childValue]) => {
+        return !(
+          childKey === "tree_markdown" &&
+          typeof childValue === "string" &&
+          textContent.includes(childValue)
+        );
+      })
+      .map(([childKey, childValue]) => [
+        childKey,
+        sanitizeStructuredContent(childValue, textContent, childKey),
+      ]),
+  );
+}
 
 export function convertMcpToolContent(
   result: any,
   mode: McpContentMode = "text",
 ): string | Array<Record<string, any>> {
   const content = Array.isArray(result?.content) ? result.content : [];
-  if (mode === "text") {
+  const effectiveMode = mode === "auto" ? (hasImageContent(content) ? "structured" : "text") : mode;
+  if (effectiveMode === "text") {
     return content.map(textFromContentBlock).join("\n") || "(no output)";
   }
   const converted: Array<Record<string, any>> = [];
@@ -310,6 +345,24 @@ export function convertMcpToolContent(
       type: "text",
       text: `[unsupported MCP content: ${String(block?.type ?? typeof block)}]`,
     });
+  }
+  if (result?.structuredContent != null) {
+    try {
+      const textContent = content
+        .filter((block: any) => block?.type === "text" && typeof block.text === "string")
+        .map((block: any) => block.text)
+        .join("\n");
+      const structured = sanitizeStructuredContent(result.structuredContent, textContent);
+      converted.push({
+        type: "text",
+        text: `[structuredContent]\n${JSON.stringify(structured)}`,
+      });
+    } catch (error) {
+      converted.push({
+        type: "text",
+        text: `[structured MCP content unavailable: ${error instanceof Error ? error.message : "invalid content"}]`,
+      });
+    }
   }
   return converted.length ? converted : [{ type: "text", text: "(no output)" }];
 }
@@ -387,7 +440,7 @@ export class MCPToolWrapper extends Tool {
     return this.toolParameters;
   }
 
-  async execute(params: Record<string, any> = {}): Promise<string> {
+  async execute(params: Record<string, any> = {}): Promise<string | Array<Record<string, any>>> {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
         const result: any = await timeoutPromise(
@@ -395,7 +448,7 @@ export class MCPToolWrapper extends Tool {
           this.toolTimeout,
           "timeout",
         );
-        return convertMcpToolContent(result, "text") as string;
+        return convertMcpToolContent(result, "auto");
       } catch (error) {
         if ((error as Error).message === "timeout") return `(MCP tool call timed out after ${this.toolTimeout}s)`;
         if ((error as Error).name === "CancelledError") return "(MCP tool call was cancelled)";

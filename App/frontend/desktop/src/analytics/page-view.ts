@@ -21,6 +21,7 @@ const ROUTE_PAGE_TITLES: Record<AppRoutePath, string> = {
 
 const MEMORY_SUB_PAGE_TITLES: Record<MemorySubPageId, string> = {
   overview: "Overview",
+  "computer-history": "Computer History",
   memories: "Memories",
   "user-memories": "User Memories",
   tasks: "Tasks",

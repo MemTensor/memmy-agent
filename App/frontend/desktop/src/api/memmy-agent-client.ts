@@ -43,6 +43,114 @@ export type AgentGoalControlResult = {
   warning?: "turn_cancel_failed";
 };
 
+export type ComputerHistorySourceType = "captured" | "imported" | "demo_fixture" | "codex_synced";
+
+export type ComputerHistoryReplayPlan = {
+  sourcePath: string;
+  sourceHash: string;
+  status: "ready" | "not_replayable";
+  steps: string[];
+  variables: string[];
+};
+
+export type ComputerHistoryEntry = {
+  id: string;
+  title: string;
+  sourceType: ComputerHistorySourceType;
+  createdAt: string;
+  markdown: string;
+  filePath: string;
+  replayPlan?: ComputerHistoryReplayPlan | null;
+};
+
+export type ComputerHistoryWorkflow = {
+  id: string;
+  title: string;
+  createdAt: string;
+  markdown: string;
+  filePath: string;
+  sourceHistoryId: string | null;
+};
+
+export type ComputerHistorySnapshot = {
+  capture: {
+    status: "idle" | "recording" | "stopping" | "failed";
+    title: string | null;
+    startUrl: string | null;
+    startedAt: string | null;
+    error: string | null;
+  };
+  cuaRun: {
+    kind: "smoke" | "workflow" | null;
+    status: "idle" | "running" | "completed" | "failed";
+    startedAt: string | null;
+    finishedAt: string | null;
+    output: string;
+    error: string | null;
+  };
+  histories: ComputerHistoryEntry[];
+  workflows: ComputerHistoryWorkflow[];
+  privacy: {
+    screenshots: false;
+    audio: false;
+    rawRetentionHours: number;
+    markdownDirectory: string;
+    codexSyncDirectory: string | null;
+  };
+};
+
+const ComputerHistoryEntrySchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  sourceType: z.enum(["captured", "imported", "demo_fixture", "codex_synced"]),
+  createdAt: z.string(),
+  markdown: z.string(),
+  filePath: z.string(),
+  replayPlan: z.object({
+    sourcePath: z.string(),
+    sourceHash: z.string(),
+    status: z.enum(["ready", "not_replayable"]),
+    steps: z.array(z.string()),
+    variables: z.array(z.string())
+  }).nullable().optional()
+}).strict();
+
+const ComputerHistoryWorkflowSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  createdAt: z.string(),
+  markdown: z.string(),
+  filePath: z.string(),
+  sourceHistoryId: z.string().nullable()
+}).strict();
+
+const ComputerHistorySnapshotSchema = z.object({
+  capture: z.object({
+    status: z.enum(["idle", "recording", "stopping", "failed"]),
+    title: z.string().nullable(),
+    startUrl: z.string().nullable(),
+    startedAt: z.string().nullable(),
+    error: z.string().nullable()
+  }).strict(),
+  cuaRun: z.object({
+    kind: z.enum(["smoke", "workflow"]).nullable(),
+    status: z.enum(["idle", "running", "completed", "failed"]),
+    startedAt: z.string().nullable(),
+    finishedAt: z.string().nullable(),
+    output: z.string(),
+    error: z.string().nullable()
+  }).strict(),
+  histories: z.array(ComputerHistoryEntrySchema),
+  workflows: z.array(ComputerHistoryWorkflowSchema),
+  privacy: z.object({
+    screenshots: z.literal(false),
+    audio: z.literal(false),
+    rawRetentionHours: z.number(),
+    markdownDirectory: z.string(),
+    codexSyncDirectory: z.string().nullable()
+  }).strict()
+}).strict();
+
 const AgentGoalStateSchema = z.object({
   goal_id: z.string().nullable(),
   status: z.union([
@@ -639,6 +747,15 @@ export type MemmyAgentRunLifecycleEvent = MemmyAgentWsEvent & {
 export interface MemmyAgentClient {
   bootstrap(options?: { force?: boolean }): Promise<MemmyAgentBootstrap>;
   getSettings(): Promise<MemmyAgentSettings>;
+  getComputerHistory(): Promise<ComputerHistorySnapshot>;
+  deleteComputerHistory(historyId: string): Promise<ComputerHistorySnapshot>;
+  installComputerHistoryDemo(): Promise<ComputerHistorySnapshot>;
+  importComputerHistory(input: { title?: string; markdown: string }): Promise<ComputerHistorySnapshot>;
+  startComputerHistoryCapture(title?: string, startUrl?: string): Promise<ComputerHistorySnapshot>;
+  stopComputerHistoryCapture(): Promise<ComputerHistorySnapshot>;
+  createComputerHistoryWorkflow(historyId: string, userRequest: string): Promise<ComputerHistorySnapshot>;
+  startComputerHistoryCua(workflowId: string, variables: string[]): Promise<ComputerHistorySnapshot>;
+  startComputerHistoryCuaSmoke(): Promise<ComputerHistorySnapshot>;
   getSessionSnapshot(options?: MemmyAgentRequestOptions): Promise<MemmyAgentSessionSnapshot>;
   listSessions(): Promise<MemmyAgentSessionSummary[]>;
   readWorkspaceEnvironment(scope: WorkspaceEnvironmentScope): Promise<WorkspaceEnvironmentState>;
@@ -976,6 +1093,57 @@ class HttpMemmyAgentClient implements MemmyAgentClient {
 
   async getSettings(): Promise<MemmyAgentSettings> {
     return this.request("/api/settings", AgentSettingsSchema);
+  }
+
+  async getComputerHistory(): Promise<ComputerHistorySnapshot> {
+    return this.request("/api/computer-history", ComputerHistorySnapshotSchema);
+  }
+
+  async deleteComputerHistory(historyId: string): Promise<ComputerHistorySnapshot> {
+    return this.request("/api/computer-history/delete", ComputerHistorySnapshotSchema, {
+      method: "POST",
+      body: { history_id: historyId }
+    });
+  }
+
+  async installComputerHistoryDemo(): Promise<ComputerHistorySnapshot> {
+    return this.request("/api/computer-history/demo-fixture", ComputerHistorySnapshotSchema, { method: "POST", body: {} });
+  }
+
+  async importComputerHistory(input: { title?: string; markdown: string }): Promise<ComputerHistorySnapshot> {
+    return this.request("/api/computer-history/import", ComputerHistorySnapshotSchema, { method: "POST", body: input });
+  }
+
+  async startComputerHistoryCapture(title = "", startUrl = ""): Promise<ComputerHistorySnapshot> {
+    return this.request("/api/computer-history/capture/start", ComputerHistorySnapshotSchema, {
+      method: "POST",
+      body: { title, start_url: startUrl }
+    });
+  }
+
+  async stopComputerHistoryCapture(): Promise<ComputerHistorySnapshot> {
+    return this.request("/api/computer-history/capture/stop", ComputerHistorySnapshotSchema, { method: "POST", body: {} });
+  }
+
+  async createComputerHistoryWorkflow(historyId: string, userRequest: string): Promise<ComputerHistorySnapshot> {
+    return this.request("/api/computer-history/workflows/create", ComputerHistorySnapshotSchema, {
+      method: "POST",
+      body: { history_id: historyId, user_request: userRequest }
+    });
+  }
+
+  async startComputerHistoryCua(workflowId: string, variables: string[]): Promise<ComputerHistorySnapshot> {
+    return this.request("/api/computer-history/cua/start", ComputerHistorySnapshotSchema, {
+      method: "POST",
+      body: { workflow_id: workflowId, variables }
+    });
+  }
+
+  async startComputerHistoryCuaSmoke(): Promise<ComputerHistorySnapshot> {
+    return this.request("/api/computer-history/cua/smoke", ComputerHistorySnapshotSchema, {
+      method: "POST",
+      body: {}
+    });
   }
 
   async listSessions(): Promise<MemmyAgentSessionSummary[]> {
