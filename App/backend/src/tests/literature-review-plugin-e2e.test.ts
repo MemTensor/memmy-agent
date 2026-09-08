@@ -176,6 +176,41 @@ describe.skipIf(!integrationAvailable)("installed Literature Review Plugin", () 
     expect(status.structuredContent).toMatchObject({ taskId: createOutput.taskId, ok: true });
     trace.push({ phase: "persisted", capabilityId: "review_get_status", taskId: createOutput.taskId });
 
+    const cancellableRunId = "interaction-cancel-target";
+    const cancellable = service.invoke({
+      callId: cancellableRunId,
+      pluginId: manifest.id,
+      capabilityId: "review_request_interaction",
+      conversationId: "desktop:literature-review-e2e",
+      input: { taskId: createOutput.taskId, type: "review-spec" }
+    })[Symbol.asyncIterator]();
+    expect((await cancellable.next()).value).toMatchObject({ type: "interaction" });
+    let cancelOutput: Record<string, unknown> | undefined;
+    for await (const event of service.invoke({
+      callId: "cancel-control-call",
+      pluginId: manifest.id,
+      capabilityId: "review_cancel",
+      conversationId: "desktop:literature-review-e2e",
+      input: { taskId: createOutput.taskId, scope: "run", runId: cancellableRunId, reason: "E2E cancellation check" }
+    })) {
+      if (event.type === "result") cancelOutput = event.output as Record<string, unknown>;
+    }
+    expect(cancelOutput).toMatchObject({ ok: true, data: { scope: "run", taskCancelled: false, cancelledRun: { runId: cancellableRunId, status: "cancelled" } } });
+    expect((await cancellable.next()).value).toMatchObject({ type: "error", code: "plugin_cancelled", retryable: false });
+    let cancellationStatus: Record<string, unknown> | undefined;
+    for await (const event of service.invoke({
+      callId: "status-after-cancel-result",
+      pluginId: manifest.id,
+      capabilityId: "review_get_status",
+      conversationId: "desktop:literature-review-e2e",
+      input: { taskId: createOutput.taskId }
+    })) {
+      if (event.type === "result") cancellationStatus = event.output as Record<string, unknown>;
+    }
+    expect(cancellationStatus).toMatchObject({ ok: true, data: { cancelled: false } });
+    expect(((cancellationStatus?.data as { runs?: Array<{ runId: string; status: string }> } | undefined)?.runs ?? [])).toContainEqual(expect.objectContaining({ runId: cancellableRunId, status: "cancelled" }));
+    trace.push({ phase: "run-cancellation-verified", runId: cancellableRunId, taskCancelled: false });
+
     const call = async (capabilityId: string, args: Record<string, unknown>) => {
       const tool = tools.find((candidate) => candidate.name.includes(capabilityId));
       if (!tool) throw new Error(`Agent tool was not registered: ${capabilityId}`);
@@ -254,6 +289,26 @@ describe.skipIf(!integrationAvailable)("installed Literature Review Plugin", () 
     expect(importSuggestion).toMatchObject({ toolName: "review_import_sources" });
     await call("review_import_sources", importSuggestion.args);
     await call("review_parse_sources", { taskId: createOutput.taskId });
+    const interruptedRunId = "restart-interrupted-keywords";
+    const interruptedAt = new Date(Date.now() - 60_000).toISOString();
+    writeFileSync(join(dataRoot, manifest.id, "tasks", createOutput.taskId!, "runs", `${interruptedRunId}.json`), `${JSON.stringify({
+      runId: interruptedRunId,
+      taskId: createOutput.taskId,
+      toolName: "review_generate_keywords",
+      status: "running",
+      startedAt: interruptedAt,
+      updatedAt: interruptedAt,
+      heartbeatAt: interruptedAt,
+      ownerPid: 987654321,
+      input: { taskId: createOutput.taskId },
+      inputHash: "sha256:e2e-fixture"
+    }, null, 2)}\n`, "utf8");
+    const restartStatus = await call("review_get_status", { taskId: createOutput.taskId });
+    expect(restartStatus, JSON.stringify(restartStatus, null, 2)).toMatchObject({ ok: true });
+    expect(((restartStatus.data as { recoverableRuns?: Array<{ runId: string; status: string }> } | undefined)?.recoverableRuns ?? []), JSON.stringify(restartStatus, null, 2)).toContainEqual(expect.objectContaining({ runId: interruptedRunId, status: "interrupted" }));
+    const resumedKeywords = await call("review_resume", { taskId: createOutput.taskId, runId: interruptedRunId });
+    expect(resumedKeywords).toMatchObject({ ok: true, data: { resumedFromRunId: interruptedRunId, resumedToolName: "review_generate_keywords" } });
+    trace.push({ phase: "job-recovery-verified", interruptedRunId, resumed: true });
     const generatedKeywords = await call("review_generate_keywords", { taskId: createOutput.taskId });
     const keywordInteraction = await interact("keywords", (request) => customResponse(request, {
       keywords: (generatedKeywords.data as { keywords: unknown[] }).keywords
@@ -327,6 +382,10 @@ describe.skipIf(!integrationAvailable)("installed Literature Review Plugin", () 
       expectedArtifactHash: abstractSuggestion!.args!.expectedArtifactHash
     });
     expect(generatedAbstract.data).toMatchObject({ abstract: { language: "en" } });
+    const renderPreflight = await call("review_check_render_environment", { taskId: createOutput.taskId });
+    expect(renderPreflight.data).toMatchObject({
+      environment: process.env.LITERATURE_REVIEW_REQUIRE_XELATEX === "1" ? { available: true, runtimeDependency: "texlive" } : { runtimeDependency: "texlive" }
+    });
 
     const renderEvents = [];
     for await (const event of service.invoke({
