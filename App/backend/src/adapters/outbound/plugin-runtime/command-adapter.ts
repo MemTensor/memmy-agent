@@ -113,6 +113,12 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
         runtimeDependencies.pathEntries,
         runtimeDependencies.environment
       );
+      // In packaged and Electron-hosted development builds, process.execPath is
+      // the Electron executable.  `interpreter: "node"` intentionally reuses
+      // that trusted Host runtime, so the child must opt into Electron's Node
+      // compatibility mode.  The variable is harmless when process.execPath is
+      // already a standalone Node binary.
+      if (config.interpreter === "node") env.ELECTRON_RUN_AS_NODE = "1";
       const pluginDataPath = await resolvePluginDataPath(context, options.pluginDataRoot);
       if (pluginDataPath) env.MEMMY_PLUGIN_DATA_DIR = pluginDataPath;
       return {

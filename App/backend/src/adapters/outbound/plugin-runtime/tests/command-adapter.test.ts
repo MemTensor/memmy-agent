@@ -1,4 +1,5 @@
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CapabilityEvent } from "@memmy/local-api-contracts";
@@ -85,7 +86,12 @@ describe("CommandPluginAdapter", () => {
   );
 
   it("maps a sandboxed command JSON response", async () => {
+    let childEnvironment: Record<string, string> | undefined;
     const adapter = createCommandPluginAdapter({
+      spawnFn: ((command, args, options) => {
+        childEnvironment = options?.env as Record<string, string>;
+        return spawn(command, args, options as Parameters<typeof spawn>[2]) as ReturnType<typeof spawn>;
+      }) as typeof spawn,
       buildLaunch: async (_context, config) => ({
         command: process.execPath,
         args: ["-e", "let body=''; process.stdin.on('data', chunk => body += chunk); process.stdin.on('end', () => { const call=JSON.parse(body); console.log(JSON.stringify({pluginId:call.pluginId,input:call.input})); })", ...config.args],
@@ -93,6 +99,10 @@ describe("CommandPluginAdapter", () => {
       })
     });
     const pluginContext = context();
+    pluginContext.plugin.manifest.runtime.config = {
+      ...pluginContext.plugin.manifest.runtime.config,
+      interpreter: "node"
+    };
     const session = await adapter.activate(pluginContext);
     expect(await collect(adapter.invoke(session, {
       callId: "call-1",
@@ -101,6 +111,7 @@ describe("CommandPluginAdapter", () => {
       conversationId: "conversation-1",
       input: { topic: "memory" }
     }))).toEqual([{ type: "result", output: { pluginId: "com.example.command", input: { topic: "memory" } } }]);
+    expect(childEnvironment?.ELECTRON_RUN_AS_NODE).toBe("1");
   });
 
   it("streams NDJSON events", async () => {
