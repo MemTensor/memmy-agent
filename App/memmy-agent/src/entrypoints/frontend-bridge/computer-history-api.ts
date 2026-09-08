@@ -124,6 +124,7 @@ interface SegmentState {
 export type ObservationState = "running" | "paused" | "stopped" | "stopping" | "failed";
 
 const SEGMENT_DURATION_MS = 10 * 60 * 1000;
+const SEGMENTS_DIRECTORY_NAME = "segments";
 
 // A six-hour rollup is cheap because it reuses ten-minute summaries, so it can
 // run every time a segment is finalized rather than on its own schedule.
@@ -183,6 +184,10 @@ export class ComputerHistoryDemoService {
   private rotationTimer: ReturnType<typeof setInterval> | null = null;
   private readonly observationSettings: ObservationSettingsStore;
   private llmRuntime: LLMRuntimeResolver | null = null;
+
+  private get segmentsDirectory(): string {
+    return path.join(this.recordingDirectory, SEGMENTS_DIRECTORY_NAME);
+  }
   private liveSummaryTimer: ReturnType<typeof setInterval> | null = null;
   private liveSummarySignature: string | null = null;
   private run: RunState = {
@@ -300,7 +305,7 @@ export class ComputerHistoryDemoService {
   private openSegment(): SegmentState {
     const startedAt = new Date();
     const id = this.segmentId(startedAt);
-    const directory = path.join(this.recordingDirectory, "segments", id);
+    const directory = path.join(this.segmentsDirectory, id);
     fs.mkdirSync(directory, { recursive: true });
     fs.mkdirSync(this.historyDirectory, { recursive: true });
     fs.mkdirSync(this.workflowDirectory, { recursive: true });
@@ -864,14 +869,37 @@ export class ComputerHistoryDemoService {
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
   }
 
+  /**
+   * Drops raw event streams past the retention window.
+   *
+   * Segments live one level down, under `segments/`, so the container itself is
+   * never a candidate: judging it by its own mtime meant it stayed fresh as
+   * long as recording continued and nothing inside was ever cleaned, then
+   * expired as a whole once recording stopped for long enough. Each segment is
+   * judged on its own age instead, and the open one is left alone because it is
+   * still being written to.
+   */
   private cleanupExpiredRecordings(): void {
     if (!fs.existsSync(this.recordingDirectory)) return;
     const cutoff = Date.now() - RAW_RETENTION_MS;
-    for (const entry of fs.readdirSync(this.recordingDirectory, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue;
-      const candidate = path.join(this.recordingDirectory, entry.name);
-      if (fs.statSync(candidate).mtimeMs < cutoff) fs.rmSync(candidate, { recursive: true, force: true });
-    }
+    const openSegmentId = this.segment?.id ?? null;
+
+    const expire = (directory: string, isOpen: (name: string) => boolean): void => {
+      if (!fs.existsSync(directory)) return;
+      for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+        if (!entry.isDirectory() || isOpen(entry.name)) continue;
+        const target = path.join(directory, entry.name);
+        try {
+          if (fs.statSync(target).mtimeMs < cutoff) fs.rmSync(target, { recursive: true, force: true });
+        } catch {
+          // A segment removed by another pass is already in the desired state.
+        }
+      }
+    };
+
+    expire(this.segmentsDirectory, (name) => name === openSegmentId);
+    // Recordings captured before segments existed still sit at the top level.
+    expire(this.recordingDirectory, (name) => name === SEGMENTS_DIRECTORY_NAME);
   }
 }
 

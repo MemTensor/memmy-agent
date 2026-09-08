@@ -212,3 +212,69 @@ describe("snapshot shape", () => {
     });
   });
 });
+
+describe("raw event retention", () => {
+  const RETENTION_MS = 48 * 60 * 60 * 1000;
+
+  function segmentDir(instance: ComputerHistoryDemoService, id: string, ageMs: number): string {
+    const root = instance.snapshot().privacy.markdownDirectory.replace(/histories$/, "recordings");
+    const directory = path.join(root, "segments", id);
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, "events.jsonl"), "{}\n", "utf8");
+    const at = new Date(Date.now() - ageMs);
+    fs.utimesSync(directory, at, at);
+    return directory;
+  }
+
+  it("expires each segment on its own age, not the container's", () => {
+    const instance = service();
+    const stale = segmentDir(instance, "2026-09-01T00-00-00Z", RETENTION_MS + 60_000);
+    const fresh = segmentDir(instance, "2026-09-08T00-00-00Z", 60_000);
+
+    instance.snapshot();
+
+    expect(fs.existsSync(stale)).toBe(false);
+    expect(fs.existsSync(fresh)).toBe(true);
+  });
+
+  it("never expires the segments container itself", () => {
+    const instance = service();
+    const fresh = segmentDir(instance, "2026-09-08T00-00-00Z", 60_000);
+    const container = path.dirname(fresh);
+    const at = new Date(Date.now() - RETENTION_MS - 60_000);
+    // A container older than the window used to take every segment with it.
+    fs.utimesSync(container, at, at);
+
+    instance.snapshot();
+
+    expect(fs.existsSync(container)).toBe(true);
+    expect(fs.existsSync(fresh)).toBe(true);
+  });
+
+  it("leaves the open segment alone while it is still being written", () => {
+    const instance = service();
+    const snapshot = instance.startObservation();
+    const id = snapshot.observation.segmentId!;
+    const root = instance.snapshot().privacy.markdownDirectory.replace(/histories$/, "recordings");
+    const open = path.join(root, "segments", id);
+    const at = new Date(Date.now() - RETENTION_MS - 60_000);
+    fs.utimesSync(open, at, at);
+
+    instance.snapshot();
+
+    expect(fs.existsSync(open)).toBe(true);
+  });
+
+  it("still expires recordings captured before segments existed", () => {
+    const instance = service();
+    const root = instance.snapshot().privacy.markdownDirectory.replace(/histories$/, "recordings");
+    const legacy = path.join(root, "2026-09-01T00-00-00Z-computer-history-demonstration");
+    fs.mkdirSync(legacy, { recursive: true });
+    const at = new Date(Date.now() - RETENTION_MS - 60_000);
+    fs.utimesSync(legacy, at, at);
+
+    instance.snapshot();
+
+    expect(fs.existsSync(legacy)).toBe(false);
+  });
+});
