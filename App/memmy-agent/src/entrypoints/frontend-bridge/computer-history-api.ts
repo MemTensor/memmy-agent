@@ -69,6 +69,8 @@ export interface ComputerHistorySnapshot {
     segmentId: string | null;
     segmentStartedAt: string | null;
     error: string | null;
+    /** Why the last summary kept its mechanical wording, if it did. */
+    narrationError: string | null;
   };
   cuaRun: {
     kind: "smoke" | "workflow" | null;
@@ -127,6 +129,8 @@ export type ObservationState = "running" | "paused" | "stopped" | "stopping" | "
 
 const SEGMENT_DURATION_MS = 10 * 60 * 1000;
 const SEGMENTS_DIRECTORY_NAME = "segments";
+// Enough of a stream that a summary of it says something.
+const LIVE_NARRATION_MIN_BYTES = 4_000;
 // A pinned segment keeps its raw events past the retention window.
 const PIN_MARKER = ".pinned";
 
@@ -207,6 +211,9 @@ export class ComputerHistoryDemoService {
   private rotationTimer: ReturnType<typeof setInterval> | null = null;
   private readonly observationSettings: ObservationSettingsStore;
   private llmRuntime: LLMRuntimeResolver | null = null;
+  private narrationError: string | null = null;
+  /** Segments already narrated while still open, so it happens once, not per tick. */
+  private readonly narratedOpenSegments = new Set<string>();
 
   private get segmentsDirectory(): string {
     return path.join(this.recordingDirectory, SEGMENTS_DIRECTORY_NAME);
@@ -260,6 +267,7 @@ export class ComputerHistoryDemoService {
         segmentId: this.segment?.id ?? null,
         segmentStartedAt: this.segment?.startedAt ?? null,
         error: this.observationError,
+        narrationError: this.narrationError,
       },
       cuaRun: {
         kind: this.run.kind,
@@ -429,6 +437,7 @@ export class ComputerHistoryDemoService {
       this.observationError = error;
       return;
     }
+    this.narratedOpenSegments.delete(segment.id);
     this.narrateSummary(segment.historyFile, "10min", segment.eventsFile);
     this.writeSixHourRollup(segment.id);
   }
@@ -466,8 +475,15 @@ export class ComputerHistoryDemoService {
         applications: applicationsFromMarkdown(markdown),
         evidence,
         window,
+        onError: (reason) => {
+          // Narration is best effort, but a silent no-op is indistinguishable
+          // from a feature that was never wired, so say why it produced nothing.
+          this.narrationError = reason;
+          console.warn(`[computer-history] summary narration skipped: ${reason}`);
+        },
       });
       if (!narrative) return;
+      this.narrationError = null;
       try {
         // Re-read: a rollup may have rewritten the file while the model ran.
         fs.writeFileSync(file, applyNarrative(fs.readFileSync(file, "utf8"), narrative), "utf8");
@@ -662,7 +678,16 @@ export class ComputerHistoryDemoService {
     const signature = `${stat.size}:${stat.mtimeMs}`;
     if (!stat.size || signature === this.liveSummarySignature) return;
     const error = this.writeSegmentSummary(segment);
-    if (!error) this.liveSummarySignature = signature;
+    if (error) return;
+    this.liveSummarySignature = signature;
+
+    // Narrate an open segment once it has enough to say. Waiting for the
+    // segment to close left the entry reading mechanically for the whole ten
+    // minutes someone is most likely to look at it.
+    if (stat.size >= LIVE_NARRATION_MIN_BYTES && !this.narratedOpenSegments.has(segment.id)) {
+      this.narratedOpenSegments.add(segment.id);
+      this.narrateSummary(segment.historyFile, "10min", segment.eventsFile);
+    }
   }
 
   private writeSegmentSummary(segment: SegmentState): string | null {

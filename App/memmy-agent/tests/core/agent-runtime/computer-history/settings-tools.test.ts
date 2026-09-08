@@ -26,6 +26,7 @@ const snapshot = (state: string) => ({
     segmentId: "2026-09-08T00-00-00Z",
     segmentStartedAt: "2026-09-08T00:00:00.000Z",
     error: null,
+    narrationError: null,
   },
   privacy: {
     screenshots: false,

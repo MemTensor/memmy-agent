@@ -194,4 +194,49 @@ describe("segment narrative", () => {
     expect(evidence).toContain("Silver");
     expect(evidence).toContain("page: https://www.apple.com/shop/buy-iphone");
   });
+
+  it("asks for no reasoning, matching the call that is known to work here", async () => {
+    const { resolver, chatWithRetry } = runtime('{"title": "t", "description": "d", "body": "b"}');
+    await writeSegmentNarrative(resolver, { applications: [], evidence: "e", window: "10min" });
+
+    const call = chatWithRetry.mock.calls[0]![0] as any;
+    // A reasoning model otherwise spends the budget thinking and returns
+    // empty content, which is indistinguishable from narration being off.
+    expect(call.reasoningEffort).toBe("none");
+    expect(call.retryMode).toBe("standard");
+  });
+
+  it("reports why it produced nothing instead of failing invisibly", async () => {
+    const reasons: string[] = [];
+    const record = (reason: string) => reasons.push(reason);
+
+    const empty = runtime("");
+    await writeSegmentNarrative(empty.resolver, {
+      applications: [], evidence: "e", window: "10min", onError: record,
+    });
+
+    const unusable = runtime("not json at all");
+    await writeSegmentNarrative(unusable.resolver, {
+      applications: [], evidence: "e", window: "10min", onError: record,
+    });
+
+    const failing = () => ({
+      provider: { chatWithRetry: async () => { throw new Error("offline"); } } as any,
+      model: "m",
+    });
+    await writeSegmentNarrative(failing, {
+      applications: [], evidence: "e", window: "10min", onError: record,
+    });
+
+    await writeSegmentNarrative(empty.resolver, {
+      applications: [], evidence: "   ", window: "10min", onError: record,
+    });
+
+    expect(reasons).toEqual([
+      "the model returned no content",
+      expect.stringContaining("not usable"),
+      "offline",
+      "no evidence to summarize",
+    ]);
+  });
 });

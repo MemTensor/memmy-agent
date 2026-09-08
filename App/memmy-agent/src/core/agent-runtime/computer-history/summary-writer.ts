@@ -14,6 +14,7 @@ export interface SegmentNarrative {
 
 const MAX_TOKENS = 1_200;
 const TEMPERATURE = 0.3;
+const NARRATION_REASONING_EFFORT = "none";
 const MAX_EVIDENCE_CHARS = 6_000;
 
 const SYSTEM_PROMPT = [
@@ -65,6 +66,8 @@ export interface NarrativeRequest {
   evidence: string;
   window: "10min" | "6h";
   modelPreset?: string | null;
+  /** Reports why narration produced nothing, so it cannot fail invisibly. */
+  onError?: (reason: string) => void;
 }
 
 /**
@@ -79,7 +82,10 @@ export async function writeSegmentNarrative(
   request: NarrativeRequest,
 ): Promise<SegmentNarrative | null> {
   const evidence = request.evidence.slice(0, MAX_EVIDENCE_CHARS).trim();
-  if (!evidence) return null;
+  if (!evidence) {
+    request.onError?.("no evidence to summarize");
+    return null;
+  }
 
   const span = request.window === "6h" ? "a six-hour stretch" : "a ten-minute window";
   const prompt = [
@@ -103,10 +109,22 @@ export async function writeSegmentNarrative(
       model: runtime.model,
       maxTokens: MAX_TOKENS,
       temperature: TEMPERATURE,
+      // Match the chat-title generator, which is the call known to work here.
+      // Without this a reasoning model spends the budget thinking and returns
+      // empty content, which used to look identical to "no narration wanted".
+      reasoningEffort: NARRATION_REASONING_EFFORT,
+      retryMode: "standard",
     });
     const text = typeof response?.content === "string" ? response.content : "";
-    return parseNarrative(text);
-  } catch {
+    if (!text.trim()) {
+      request.onError?.("the model returned no content");
+      return null;
+    }
+    const narrative = parseNarrative(text);
+    if (!narrative) request.onError?.(`the model response was not usable: ${text.slice(0, 200)}`);
+    return narrative;
+  } catch (error) {
+    request.onError?.(error instanceof Error ? error.message : String(error));
     return null;
   }
 }

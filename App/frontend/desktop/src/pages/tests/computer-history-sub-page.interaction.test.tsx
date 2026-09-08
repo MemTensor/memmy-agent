@@ -116,7 +116,7 @@ describe("ComputerHistorySubPage", () => {
 
 function snapshot(overrides: Partial<ComputerHistorySnapshot> = {}): ComputerHistorySnapshot {
   return {
-    observation: { state: "stopped", startedAt: null, segmentId: null, segmentStartedAt: null, error: null },
+    observation: { state: "stopped", startedAt: null, segmentId: null, segmentStartedAt: null, error: null, narrationError: null },
     cuaRun: { kind: null, status: "idle", startedAt: null, finishedAt: null, output: "", error: null },
     histories: [{
       id: "history-1",

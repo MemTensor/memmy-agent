@@ -83,6 +83,7 @@ export type ComputerHistorySnapshot = {
     segmentId: string | null;
     segmentStartedAt: string | null;
     error: string | null;
+    narrationError: string | null;
   };
   cuaRun: {
     kind: "smoke" | "workflow" | null;
@@ -137,7 +138,8 @@ const ComputerHistorySnapshotSchema = z.object({
     startedAt: z.string().nullable(),
     segmentId: z.string().nullable(),
     segmentStartedAt: z.string().nullable(),
-    error: z.string().nullable()
+    error: z.string().nullable(),
+    narrationError: z.string().nullable()
   }).strict(),
   cuaRun: z.object({
     kind: z.enum(["smoke", "workflow"]).nullable(),
