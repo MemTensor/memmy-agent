@@ -63,24 +63,35 @@ export interface PluginRendererInteractionState {
 
 export function PluginCapabilityHost(props: PluginCapabilityHostProps) {
   const { t } = useTranslation();
+  const [answeredInteractions, setAnsweredInteractions] = useState<Set<string>>(() => new Set());
   const plugins = useMemo(() => new Map(props.plugins.map((plugin) => [plugin.id, plugin])), [props.plugins]);
   const interactionStates = useMemo(() => resolveRendererInteractionStates(props.calls), [props.calls]);
-  if (props.calls.length === 0) return null;
+  const calls = useMemo(
+    () => selectVisiblePluginCalls(props.calls, answeredInteractions),
+    [answeredInteractions, props.calls]
+  );
+  if (calls.length === 0) return null;
 
   return (
     <section className="space-y-3" aria-label={t("plugin.ui.regionLabel")}>
-      {props.calls.map((call) => {
+      {calls.map((call) => {
         const plugin = plugins.get(call.pluginId);
         const renderer = plugin?.manifest.ui?.renderer;
         const usesRenderer = Boolean(
           renderer
           && (!renderer.capabilities || renderer.capabilities.includes(call.capabilityId))
           && call.events.some((event) => event.type === "interaction" && event.request.type === "custom")
+          && !call.events.some((event) => event.type === "result" || event.type === "error")
           && props.client
         );
-        const respond = (interactionId: string, response: unknown) => {
+        const respond = async (interactionId: string, response: unknown) => {
           if (!props.client) return Promise.reject(new Error("Plugin client unavailable"));
-          return props.client.respond(call.pluginId, call.callId, interactionId, response);
+          await props.client.respond(call.pluginId, call.callId, interactionId, response);
+          setAnsweredInteractions((current) => {
+            const next = new Set(current);
+            next.add(interactionKey(call, interactionId));
+            return next;
+          });
         };
         const cancel = () => {
           if (!props.client) return Promise.reject(new Error("Plugin client unavailable"));
@@ -130,10 +141,10 @@ function GenericPluginCards(props: {
   return (
     <div className="space-y-2">
       {props.events.map((event) => {
-        if (event.type === "progress") return <ProgressCard key="progress" event={event} canCancel={Boolean(event.cancellable) && !terminal} onCancel={props.onCancel} />;
-        if (event.type === "task-list") return <TaskCard key="tasks" event={event} />;
+        if (event.type === "progress") return terminal ? null : <ProgressCard key="progress" event={event} canCancel={Boolean(event.cancellable)} onCancel={props.onCancel} />;
+        if (event.type === "task-list") return terminal ? null : <TaskCard key="tasks" event={event} />;
         if (event.type === "interaction") {
-          return <InteractionCard key={`interaction:${event.request.interactionId}`} request={event.request} onRespond={props.onRespond} onUploadFiles={props.onUploadFiles} />;
+          return terminal ? null : <InteractionCard key={`interaction:${event.request.interactionId}`} request={event.request} onRespond={props.onRespond} onUploadFiles={props.onUploadFiles} />;
         }
         if (event.type === "artifact") return <ArtifactCard key={`artifact:${event.artifact.id}`} event={event} onAddToChat={props.onAddArtifact} />;
         if (event.type === "error") return <ErrorCard key="error" event={event} />;
@@ -151,6 +162,7 @@ function ProgressCard(props: {
   const { t } = useTranslation();
   const [cancelState, setCancelState] = useState<"idle" | "pending" | "done" | "error">("idle");
   const value = props.event.total ? Math.min(100, Math.round((props.event.current / props.event.total) * 100)) : undefined;
+  const completed = value === 100;
   const cancel = async () => {
     setCancelState("pending");
     try {
@@ -163,7 +175,9 @@ function ProgressCard(props: {
   return (
     <div className="rounded-card bg-canvas-oat/55 px-3 py-2.5" role="status" aria-live="polite">
       <div className="flex items-center gap-2 text-sm text-text-ink/75">
-        <LoaderCircle size={15} className="animate-spin text-action-sky" aria-hidden="true" />
+        {completed
+          ? <Check size={15} className="text-status-success" aria-hidden="true" />
+          : <LoaderCircle size={15} className="animate-spin text-action-sky" aria-hidden="true" />}
         <span>{props.event.message || t("plugin.ui.progress")}</span>
         {value !== undefined ? <span className="ml-auto text-xs text-text-ink/45">{value}%</span> : null}
         {props.canCancel && cancelState !== "done" ? (
@@ -432,8 +446,33 @@ function ArtifactCard(props: { event: Extract<CapabilityEvent, { type: "artifact
           {t("plugin.ui.addToChat")}<MessageSquarePlus size={12} aria-hidden="true" />
         </button>
       ) : null}
+      {downloadState === "error" ? <span className="text-xs text-status-error" role="alert">{t("plugin.ui.downloadFailed")}</span> : null}
     </div>
   );
+}
+
+function interactionKey(call: Pick<PluginUiCall, "pluginId" | "callId">, interactionId: string): string {
+  return `${call.pluginId}:${call.callId}:${interactionId}`;
+}
+
+/** Keeps history in the event store while limiting the conversation to actionable UI. */
+export function selectVisiblePluginCalls(calls: PluginUiCall[], answered: ReadonlySet<string> = new Set()): PluginUiCall[] {
+  const prepared = calls.map((call) => ({
+    ...call,
+    events: call.events.filter((event) => (
+      event.type !== "interaction" || !answered.has(interactionKey(call, event.request.interactionId))
+    ))
+  }));
+  const latest = prepared[prepared.length - 1];
+  const latestActive = latest && !latest.events.some((event) => event.type === "result" || event.type === "error")
+    ? latest.callId
+    : undefined;
+  return prepared.filter((call) => {
+    if (call.events.some((event) => event.type === "artifact" || event.type === "error")) return true;
+    if (!call.events.some((event) => event.type === "result" || event.type === "error")
+      && call.events.some((event) => event.type === "interaction")) return true;
+    return call.callId === latestActive && call.events.some((event) => event.type !== "result");
+  });
 }
 
 function ErrorCard(props: { event: Extract<CapabilityEvent, { type: "error" }> }) {

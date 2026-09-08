@@ -8,7 +8,7 @@ import { InstalledPluginSchema, type PluginCapabilityEventPayload } from "@memmy
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
 import { reducePluginUiCalls, type PluginUiCall } from "../../app/plugin-ui-context.js";
-import { buildRendererDocument, PluginCapabilityHost, resolveRendererInteractionStates, resolveSafeArtifactUri } from "../plugin-capability-host.js";
+import { buildRendererDocument, PluginCapabilityHost, resolveRendererInteractionStates, resolveSafeArtifactUri, selectVisiblePluginCalls } from "../plugin-capability-host.js";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -81,7 +81,8 @@ describe("PluginCapabilityHost", () => {
     expect(container.textContent).toContain("report.md");
     await act(async () => container.querySelectorAll("button")[0]?.click());
     expect(respond).toHaveBeenCalledWith(plugin.id, "call-1", "q-1", "Broad");
-    expect(container.textContent).toContain("Submitted");
+    expect(container.textContent).not.toContain("Scope");
+    expect(container.textContent).toContain("report.md");
   });
 
   it("loads a declared renderer into a script-only sandbox", async () => {
@@ -498,6 +499,44 @@ describe("plugin UI event reduction", () => {
       { type: "progress", current: 2, total: 2 },
       { type: "artifact", artifact: { id: "report", name: "report.md", mediaType: "text/markdown", uri: "file:///report.md" } }
     ]);
+  });
+
+  it("keeps only the latest active call while retaining errors and delivery artifacts", () => {
+    const base = { pluginId: plugin.id, capabilityId: "run", conversationId: "chat-1" };
+    const calls: PluginUiCall[] = [
+      { ...base, callId: "done", events: [{ type: "progress", current: 1, total: 1 }, { type: "result", output: {} }] },
+      { ...base, callId: "old-active", events: [{ type: "progress", current: 1, total: 2 }] },
+      { ...base, callId: "artifact", events: [{ type: "artifact", artifact: { id: "pdf", name: "review.pdf", mediaType: "application/pdf", uri: "/api/v1/plugins/review/artifacts/token/preview" } }, { type: "result", output: {} }] },
+      { ...base, callId: "latest-active", events: [{ type: "interaction", request: { interactionId: "outline", type: "custom", payload: {} } }] },
+      { ...base, callId: "failed", events: [{ type: "error", code: "failed", message: "failed", retryable: true }] }
+    ];
+
+    expect(selectVisiblePluginCalls(calls).map((call) => call.callId)).toEqual(["artifact", "latest-active", "failed"]);
+    expect(selectVisiblePluginCalls(calls.slice(0, -1)).map((call) => call.callId)).toEqual(["artifact", "latest-active"]);
+    expect(selectVisiblePluginCalls(calls.slice(0, -1), new Set([`${plugin.id}:latest-active:outline`])).map((call) => call.callId)).toEqual(["artifact"]);
+  });
+
+  it("does not spin a progress indicator that has reached 100 percent", async () => {
+    const progressContainer = document.createElement("div");
+    document.body.append(progressContainer);
+    const progressRoot = createRoot(progressContainer);
+    const call: PluginUiCall = {
+      pluginId: plugin.id,
+      capabilityId: "run",
+      callId: "progress-complete",
+      conversationId: "chat-1",
+      events: [{ type: "progress", current: 1, total: 1, message: "Complete" }]
+    };
+    await act(async () => progressRoot.render(
+      <I18nProvider language="en-US">
+        <PluginCapabilityHost calls={[call]} plugins={[plugin]} client={{ getUi: vi.fn(), cancel: vi.fn(), respond: vi.fn() }} />
+      </I18nProvider>
+    ));
+
+    expect(progressContainer.textContent).toContain("100%");
+    expect(progressContainer.querySelector(".animate-spin")).toBeNull();
+    await act(async () => progressRoot.unmount());
+    progressContainer.remove();
   });
 
   it("injects a restrictive CSP into renderer HTML", () => {
