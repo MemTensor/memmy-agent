@@ -177,7 +177,10 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       type: "streamableHttp",
       url: `http://127.0.0.1:${(address as AddressInfo).port}/mcp/plugins`,
       headers: { "x-memmy-mcp-token": composioMcpToken },
-      toolTimeout: 3600
+      // Interaction capabilities can legitimately wait while the user reads a
+      // long card or leaves the app in the background. Non-interactive command
+      // work remains bounded by the plugin runtime's own timeout.
+      toolTimeout: 7 * 24 * 60 * 60
     });
     await reloadAgentMcp(options.memmyAgentAdminClient);
 

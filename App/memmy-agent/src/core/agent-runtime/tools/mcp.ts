@@ -91,7 +91,16 @@ class SdkClientSession {
     return this.client.callTool(
       { name, arguments: args, ...(meta ? { _meta: meta } : {}) },
       undefined,
-      { timeout: timeout * 1000, ...(signal ? { signal } : {}) },
+      {
+        timeout: timeout * 1000,
+        maxTotalTimeout: timeout * 1000,
+        resetTimeoutOnProgress: true,
+        // Request a progress token even when callers do not surface progress.
+        // Local interactive plugin calls use it for transport keepalives while
+        // they are legitimately waiting for user input.
+        onprogress: () => undefined,
+        ...(signal ? { signal } : {})
+      },
     );
   }
 

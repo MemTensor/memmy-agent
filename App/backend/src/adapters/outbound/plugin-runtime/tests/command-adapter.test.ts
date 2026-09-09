@@ -136,6 +136,52 @@ describe("CommandPluginAdapter", () => {
     ]);
   });
 
+  it("does not consume the command timeout while an interaction waits for the user", async () => {
+    const adapter = createCommandPluginAdapter({
+      buildLaunch: async (_context, config) => ({
+        command: process.execPath,
+        args: ["-e", `
+          const rl=require('node:readline').createInterface({input:process.stdin});
+          let first=true;
+          rl.on('line', line => {
+            const value=JSON.parse(line);
+            if(first){
+              first=false;
+              console.log(JSON.stringify({type:'interaction',request:{interactionId:'review-card',type:'custom',payload:{}}}));
+            } else {
+              console.log(JSON.stringify({type:'result',output:{response:value.response}}));
+              process.exit(0);
+            }
+          });
+        `, ...config.args],
+        cwd: root!
+      })
+    });
+    const pluginContext = context("ndjson");
+    pluginContext.plugin.manifest.runtime.config = {
+      ...pluginContext.plugin.manifest.runtime.config,
+      interactive: true,
+      timeoutMs: 2000
+    };
+    const session = await adapter.activate(pluginContext);
+    const iterator = adapter.invoke(session, {
+      callId: "call-interaction",
+      pluginId: pluginContext.plugin.id,
+      capabilityId: "run",
+      conversationId: "conversation-1",
+      input: {}
+    })[Symbol.asyncIterator]();
+
+    expect((await iterator.next()).value).toMatchObject({
+      type: "interaction",
+      request: { interactionId: "review-card" }
+    });
+    await new Promise((resolve) => setTimeout(resolve, 2100));
+    await adapter.respond?.(session, "call-interaction", "review-card", { confirmed: true });
+    expect((await iterator.next()).value).toEqual({ type: "result", output: { response: { confirmed: true } } });
+    expect((await iterator.next()).done).toBe(true);
+  });
+
   it("brokers approved Host-service requests over the private NDJSON channel", async () => {
     const adapter = createCommandPluginAdapter({
       hostServices: { invoke: async (call) => ({ content: `model:${call.conversationId}` }) },

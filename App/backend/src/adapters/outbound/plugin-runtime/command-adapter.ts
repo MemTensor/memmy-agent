@@ -165,7 +165,7 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
       });
       const exit = processExit(child);
       let timedOut = false;
-      const timer = setTimeout(() => {
+      let timer: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
         timedOut = true;
         terminate(child);
       }, callTimeoutMs(session.config.timeoutMs, call.deadline));
@@ -195,6 +195,13 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
                 if (terminal) throw new Error("Plugin command emitted multiple terminal events");
                 terminal = event;
               } else {
+                // Once an interactive card is visible, user think time must not
+                // consume the command execution budget. Explicit cancellation,
+                // app shutdown, and the outer Agent request still stop the run.
+                if (event.type === "interaction" && timer) {
+                  clearTimeout(timer);
+                  timer = undefined;
+                }
                 yield event;
               }
             }
@@ -233,7 +240,7 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
         }
         if (terminal) yield terminal;
       } finally {
-        clearTimeout(timer);
+        if (timer) clearTimeout(timer);
         if (!child.stdin.destroyed && !child.stdin.writableEnded) child.stdin.end();
         session.children.delete(call.callId);
       }
