@@ -101,6 +101,7 @@ export const PluginCommandContributionSchema = z.object({
   name: z.string().trim().min(1).max(128),
   description: z.string().trim().min(1).max(500),
   capabilityId: PluginIdentifierSchema,
+  agentSkillId: PluginIdentifierSchema.optional(),
   argHint: z.string().trim().max(128).optional(),
   icon: z.string().trim().min(1).max(64).optional(),
   surface: z.boolean().optional()
@@ -157,6 +158,13 @@ export const PluginManifestSchema = z.object({
       }
     }
   }
+  const skills = new Set<string>();
+  for (const [index, skill] of (manifest.skills ?? []).entries()) {
+    if (skills.has(skill.id)) {
+      context.addIssue({ code: "custom", path: ["skills", index, "id"], message: `Duplicate plugin skill id: ${skill.id}` });
+    }
+    skills.add(skill.id);
+  }
   const commands = new Set<string>();
   for (const [index, command] of (manifest.commands ?? []).entries()) {
     if (!ids.has(command.capabilityId)) {
@@ -165,14 +173,13 @@ export const PluginManifestSchema = z.object({
     if (commands.has(command.command)) {
       context.addIssue({ code: "custom", path: ["commands", index, "command"], message: `Duplicate plugin command: ${command.command}` });
     }
-    commands.add(command.command);
-  }
-  const skills = new Set<string>();
-  for (const [index, skill] of (manifest.skills ?? []).entries()) {
-    if (skills.has(skill.id)) {
-      context.addIssue({ code: "custom", path: ["skills", index, "id"], message: `Duplicate plugin skill id: ${skill.id}` });
+    if (command.agentSkillId && !skills.has(command.agentSkillId)) {
+      context.addIssue({ code: "custom", path: ["commands", index, "agentSkillId"], message: `Unknown command Agent skill id: ${command.agentSkillId}` });
     }
-    skills.add(skill.id);
+    if (command.agentSkillId && command.surface) {
+      context.addIssue({ code: "custom", path: ["commands", index, "surface"], message: "Agent-routed plugin commands cannot open a direct plugin surface" });
+    }
+    commands.add(command.command);
   }
 });
 export type PluginManifest = z.infer<typeof PluginManifestSchema>;

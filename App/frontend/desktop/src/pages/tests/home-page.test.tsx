@@ -26,6 +26,7 @@ import {
   agentChatScopeKey,
   attachmentFilesFromDataTransfer,
   buildComposerCommandDraft,
+  buildAgentRoutedPluginPrompt,
   collectPluginCommandTargets,
   clipboardAttachmentFilesFromDataTransfer,
   dataTransferHasAttachmentFiles,
@@ -109,6 +110,36 @@ describe("HomePage", () => {
     const targets = collectPluginCommandTargets([plugin], ["/status"]);
     expect(targets.map((item) => item.command.command)).toEqual(["/review"]);
     expect(parsePluginCommandInvocation("/review agent memory", targets)).toMatchObject({ arguments: "agent memory", plugin });
+  });
+
+  it("converts Agent-routed plugin commands into explicit Skill prompts", () => {
+    const plugin = InstalledPluginSchema.parse({
+      id: "com.example.review",
+      version: "1.0.0",
+      manifest: {
+        apiVersion: "memmy/v1",
+        id: "com.example.review",
+        name: "Review",
+        version: "1.0.0",
+        runtime: { adapter: "http" },
+        capabilities: [{ id: "run", name: "Run", description: "Run", inputSchema: {}, outputSchema: {}, execution: "job" }],
+        skills: [{ id: "literature-review", name: "Literature Review", description: "Coordinate review tools", entry: "skills/literature-review/SKILL.md" }],
+        commands: [{ command: "/literature-review", name: "Literature Review", description: "Create a review", capabilityId: "run", agentSkillId: "literature-review" }],
+        permissions: []
+      },
+      state: "active",
+      approvedPermissions: [],
+      config: {},
+      lastError: null,
+      createdAt: "2026-08-31T00:00:00.000Z",
+      updatedAt: "2026-08-31T00:00:00.000Z"
+    });
+    const targets = collectPluginCommandTargets([plugin]);
+    expect(buildAgentRoutedPluginPrompt("/literature-review compare memory agents", targets)).toBe(
+      "$literature-review compare memory agents"
+    );
+    expect(buildAgentRoutedPluginPrompt("/literature-review", targets)).toBe("$literature-review");
+    expect(buildAgentRoutedPluginPrompt("ordinary chat", targets)).toBeNull();
   });
 
   it("allows Goal steering when source metadata is missing without opening TUI or IM turns", () => {
@@ -666,6 +697,7 @@ describe("HomePage", () => {
     expect(sendBlock).toContain("if (runExactLocalSlashCommand(input))");
     expect(sendBlock.indexOf("runExactLocalSlashCommand(input)")).toBeLessThan(sendBlock.indexOf("submitAgentComposerMessage({"));
     expect(localSlashBlock).toContain("parsePluginCommandInvocation(command, pluginCommandTargets)");
+    expect(localSlashBlock).toContain("pluginInvocation?.contribution.agentSkillId");
     expect(localSlashBlock).toContain("clients.plugins.invoke(plugin.id, contribution.capabilityId");
     expect(localSlashBlock).toContain("openSurface({ pluginId: plugin.id");
     expect(localSlashBlock).toContain('appActions.navigate("/plugin")');

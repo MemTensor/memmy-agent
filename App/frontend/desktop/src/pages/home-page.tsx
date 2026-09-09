@@ -475,6 +475,14 @@ export function parsePluginCommandInvocation(input: string, targets: PluginComma
   return target ? { plugin: target.plugin, contribution: target.command, arguments: trimmed.slice(target.command.command.length).trim() } : null;
 }
 
+/** Converts an Agent-routed plugin command into an explicit Skill invocation. */
+export function buildAgentRoutedPluginPrompt(input: string, targets: PluginCommandTarget[]): string | null {
+  const invocation = parsePluginCommandInvocation(input, targets);
+  const skillId = invocation?.contribution.agentSkillId;
+  if (!invocation || !skillId) return null;
+  return `$${skillId}${invocation.arguments ? ` ${invocation.arguments}` : ""}`;
+}
+
 export function hasActiveAgentConversation(currentChatId: string | null, messageCount: number): boolean {
   return Boolean(currentChatId) && messageCount > 0;
 }
@@ -1884,8 +1892,10 @@ export function HomePage() {
   const hasComposerPayload = Boolean(input.trim() || pendingAttachments.some((item) => item.status === "ready"));
   const hasComposerIntent = Boolean(input.trim() || pendingAttachments.length > 0);
   const stopInFlight = state.agent.currentChatId ? Boolean(state.agent.stopInFlightByChatId[state.agent.currentChatId]) : false;
-  const isPluginCommand = Boolean(parsePluginCommandInvocation(input, pluginCommandTargets));
-  const composerSendDisabled = isPluginCommand
+  const pluginCommandInvocation = parsePluginCommandInvocation(input, pluginCommandTargets);
+  const agentRoutedPluginPrompt = buildAgentRoutedPluginPrompt(input, pluginCommandTargets);
+  const isDirectPluginCommand = Boolean(pluginCommandInvocation && !agentRoutedPluginPrompt);
+  const composerSendDisabled = isDirectPluginCommand
     ? pendingAttachments.length > 0 || !clients
     : stopInFlight
       || !hasComposerPayload
@@ -2078,8 +2088,8 @@ export function HomePage() {
         clientRequestId,
         connection,
         ensureChatSubscription,
-        content: input,
-        displayContent: selectedComposerCommand ? composerInput : undefined,
+        content: agentRoutedPluginPrompt ?? input,
+        displayContent: agentRoutedPluginPrompt ? input : selectedComposerCommand ? composerInput : undefined,
         language,
         pendingAttachments,
         uploadAgentMedia: (attachments) => clients!.memmyAgent.uploadAgentMedia(attachments),
@@ -2268,6 +2278,7 @@ export function HomePage() {
   function runExactLocalSlashCommand(command: string): boolean {
     const normalized = command.trim().toLowerCase();
     const pluginInvocation = parsePluginCommandInvocation(command, pluginCommandTargets);
+    if (pluginInvocation?.contribution.agentSkillId) return false;
     if (pluginInvocation && pendingAttachments.length > 0) return false;
     if (pluginInvocation && clients) {
       const { plugin, contribution, arguments: commandArguments } = pluginInvocation;

@@ -93,6 +93,30 @@ describe("PluginManifestSchema", () => {
     })).toThrow(/Unknown command capability/);
   });
 
+  it("registers Agent-routed commands only against packaged skills", () => {
+    const parsed = PluginManifestSchema.parse({
+      ...manifest,
+      skills: [{ id: "literature-review", name: "Literature Review", description: "Coordinate review tools", entry: "skills/literature-review/SKILL.md" }],
+      commands: [{
+        command: "/literature-review",
+        name: "Literature Review",
+        description: "Create a review",
+        capabilityId: "review",
+        agentSkillId: "literature-review"
+      }]
+    });
+    expect(parsed.commands?.[0]?.agentSkillId).toBe("literature-review");
+    expect(() => PluginManifestSchema.parse({
+      ...manifest,
+      commands: [{ command: "/review", name: "Review", description: "Create a review", capabilityId: "review", agentSkillId: "missing" }]
+    })).toThrow(/Unknown command Agent skill id/);
+    expect(() => PluginManifestSchema.parse({
+      ...manifest,
+      skills: [{ id: "review", name: "Review", description: "Coordinate review tools", entry: "skills/review/SKILL.md" }],
+      commands: [{ command: "/review", name: "Review", description: "Create a review", capabilityId: "review", agentSkillId: "review", surface: true }]
+    })).toThrow(/cannot open a direct plugin surface/);
+  });
+
   it("registers packaged skills and accepts only exact network hostnames", () => {
     const parsed = PluginManifestSchema.parse({
       ...manifest,
