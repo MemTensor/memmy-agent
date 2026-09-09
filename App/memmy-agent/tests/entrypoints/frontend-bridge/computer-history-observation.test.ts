@@ -307,7 +307,7 @@ describe("pinning raw events", () => {
     fs.mkdirSync(histories, { recursive: true });
     fs.writeFileSync(
       path.join(histories, `${id}-10min-summary.md`),
-      '---\ntitle: "A window"\nsource_type: captured\n---\n\nbody\n',
+      '---\ntitle: "A window"\nsource_type: captured\nsummary_state: ready\n---\n\nbody\n',
       "utf8",
     );
     return directory;
@@ -359,5 +359,42 @@ describe("pinning raw events", () => {
     fs.rmSync(directory, { recursive: true, force: true });
 
     expect(instance.snapshot().histories[0].replayPlan?.status).toBe("not_replayable");
+  });
+});
+
+describe("showing a window only once it is written", () => {
+  it("keeps a segment out of the timeline until the model has summarized it", () => {
+    const instance = service();
+    const directory = instance.snapshot().privacy.markdownDirectory;
+    fs.mkdirSync(directory, { recursive: true });
+    const file = path.join(directory, "2026-09-08T03-30-00Z-10min-summary.md");
+
+    // What the mechanical pass leaves behind: a placeholder nobody should read.
+    fs.writeFileSync(
+      file,
+      '---\ntitle: "Computer History 2026-09-08T03-30-00Z"\nsource_type: captured\nsummary_state: pending\n---\n\n## Memory summary\n\n（尚未生成）\n',
+      "utf8",
+    );
+    expect(instance.snapshot().histories).toHaveLength(0);
+
+    fs.writeFileSync(
+      file,
+      '---\ntitle: "A real title"\nsource_type: captured\nsummary_state: ready\n---\n\n## Memory summary\n\nYou did a thing.\n',
+      "utf8",
+    );
+    expect(instance.snapshot().histories.map((entry) => entry.title)).toEqual(["A real title"]);
+  });
+
+  it("still shows imported and demo entries, which no model writes", () => {
+    const instance = service();
+    const directory = instance.snapshot().privacy.markdownDirectory;
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(
+      path.join(directory, "an-import.md"),
+      '---\ntitle: "Imported"\nsource_type: imported\n---\n\nbody\n',
+      "utf8",
+    );
+
+    expect(instance.snapshot().histories.map((entry) => entry.title)).toEqual(["Imported"]);
   });
 });

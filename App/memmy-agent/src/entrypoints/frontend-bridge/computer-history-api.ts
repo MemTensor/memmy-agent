@@ -9,6 +9,7 @@ import {
   applicationsFromMarkdown,
   applyNarrative,
   compactEventEvidence,
+  isNarrated,
   writeSegmentNarrative,
 } from "../../core/agent-runtime/computer-history/summary-writer.js";
 import type { LLMRuntimeResolver } from "../../utils/llm-runtime.js";
@@ -136,6 +137,8 @@ const SEGMENT_DURATION_MS = 10 * 60 * 1000;
 const SEGMENTS_DIRECTORY_NAME = "segments";
 // Enough of a stream that a summary of it says something.
 const LIVE_NARRATION_MIN_BYTES = 4_000;
+// How many preceding windows the model is shown, so it can relate this one to them.
+const PRIOR_SUMMARY_COUNT = 2;
 // A pinned segment keeps its raw events past the retention window.
 const PIN_MARKER = ".pinned";
 
@@ -258,6 +261,33 @@ export class ComputerHistoryDemoService {
     );
   }
 
+  /**
+   * The summaries immediately before this one, oldest first.
+   *
+   * Without them the model has nothing to relate a window to, and any account
+   * of what preceded it would be invention.
+   */
+  private priorSummaries(historyId: string): string[] {
+    let names: string[];
+    try {
+      names = fs.readdirSync(this.historyDirectory);
+    } catch {
+      return [];
+    }
+    return names
+      .filter((name) => name.endsWith("-10min-summary.md") && name < `${historyId}.md`)
+      .sort()
+      .slice(-PRIOR_SUMMARY_COUNT)
+      .map((name) => {
+        try {
+          return fs.readFileSync(path.join(this.historyDirectory, name), "utf8");
+        } catch {
+          return "";
+        }
+      })
+      .filter((markdown) => markdown && isNarrated(markdown));
+  }
+
   /** Supplies the model used to narrate finalized segments. */
   setLlmRuntime(llmRuntime: LLMRuntimeResolver | null): void {
     this.llmRuntime = llmRuntime;
@@ -289,6 +319,10 @@ export class ComputerHistoryDemoService {
           return { ...entry, sourceType, replayPlan: replayPlanFor(entry, sourceType, hasRawEvents) };
         }),
       ]
+        // An entry appears once it has been written. Showing the placeholder
+        // would put the mechanical wording in front of the reader, which is the
+        // thing the written summary exists to avoid.
+        .filter((entry) => entry.sourceType !== "captured" || isNarrated(entry.markdown))
         .filter((entry) => !isCodexSkysightCopy(entry.id))
         .map((entry) => ({
           ...entry,
@@ -485,6 +519,7 @@ export class ComputerHistoryDemoService {
         applications: applicationsFromMarkdown(markdown),
         evidence,
         window,
+        priorSummaries: this.priorSummaries(path.basename(file, ".md")),
         onError: (reason) => {
           // Narration is best effort, but a silent no-op is indistinguishable
           // from a feature that was never wired, so say why it produced nothing.

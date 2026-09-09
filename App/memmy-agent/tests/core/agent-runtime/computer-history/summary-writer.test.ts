@@ -3,6 +3,7 @@ import {
   applicationsFromMarkdown,
   applyNarrative,
   compactEventEvidence,
+  isNarrated,
   writeSegmentNarrative,
 } from "../../../../src/core/agent-runtime/computer-history/summary-writer.js";
 
@@ -11,6 +12,7 @@ const summary = [
   'capture_policy: accessibility_events_and_page_urls_no_screenshots',
   'title: "Computer History 2026-09-08T03-30-00Z"',
   'description: "用户在「Computer History」中完成了一组电脑操作。"',
+  "summary_state: pending",
   'applications: ["com.apple.Notes", "com.google.Chrome"]',
   "status: completed",
   "---",
@@ -19,9 +21,9 @@ const summary = [
   "",
   "用户打开 Notes 并记录了一段内容。",
   "",
-  "## Recording summary",
+  "## Memory summary",
   "",
-  "本窗口共 12 条事件，涉及 2 个应用。",
+  "（尚未生成）",
   "",
   "## Citations",
   "",
@@ -107,7 +109,7 @@ describe("segment narrative", () => {
     expect(chatWithRetry).not.toHaveBeenCalled();
   });
 
-  it("replaces only the title and description in the frontmatter", () => {
+  it("replaces the title and description and marks the summary written", () => {
     const updated = applyNarrative(summary, {
       title: "Notes drafting",
       description: "You opened Notes and drafted a short entry.",
@@ -120,8 +122,8 @@ describe("segment narrative", () => {
     // Everything else in the document survives untouched.
     expect(updated).toContain("capture_policy: accessibility_events_and_page_urls_no_screenshots");
     expect(updated).toContain('applications: ["com.apple.Notes", "com.google.Chrome"]');
-    expect(updated).toContain("## Memory summary");
-    expect(updated).toContain("用户打开 Notes 并记录了一段内容。");
+    expect(isNarrated(updated)).toBe(true);
+    expect(updated).not.toContain("summary_state: pending");
   });
 
   it("reads the applications a summary recorded", () => {
@@ -129,20 +131,57 @@ describe("segment narrative", () => {
     expect(applicationsFromMarkdown("no frontmatter")).toEqual([]);
   });
 
-  it("replaces the recording summary prose while keeping later sections", () => {
+  it("replaces the whole body but never the citations", () => {
     const updated = applyNarrative(summary, {
       title: "Notes drafting",
       description: "d",
-      body: "You opened Notes and drafted an entry, then switched to the browser.",
+      body: "## Memory summary\n\nYou drafted an entry.\n\n## Recording summary\n\nThen you left.",
     });
 
-    expect(updated).toContain("You opened Notes and drafted an entry");
-    expect(updated).not.toContain("本窗口共 12 条事件");
-    // Sections after the recording summary must survive the rewrite.
+    expect(updated).toContain("You drafted an entry.");
+    // The placeholder body is gone, not appended to.
+    expect(updated).not.toContain("（尚未生成）");
+    // Citations name the evidence and are not the model's to write.
     expect(updated).toContain("## Citations");
     expect(updated).toContain("- segments/2026-09-08T03-30-00Z");
-    // And sections before it, too.
-    expect(updated).toContain("## Memory summary");
+    // Frontmatter the model does not own survives.
+    expect(updated).toContain('applications: ["com.apple.Notes", "com.google.Chrome"]');
+  });
+
+  it("reports a summary as unwritten until the model has replaced the body", () => {
+    expect(isNarrated(summary)).toBe(false);
+    expect(isNarrated(applyNarrative(summary, { title: "t", description: "d", body: "## Memory summary\n\nx" })))
+      .toBe(true);
+  });
+
+  it("shows the model the preceding windows so it can relate this one to them", async () => {
+    const { resolver, chatWithRetry } = runtime('{"title":"t","description":"d","body":"b"}');
+    await writeSegmentNarrative(resolver, {
+      applications: [], evidence: "e", window: "10min",
+      priorSummaries: ["earlier window one", "earlier window two"],
+    });
+
+    const prompt = (chatWithRetry.mock.calls[0]![0] as any).messages[1].content;
+    expect(prompt).toContain("earlier window one");
+    expect(prompt).toContain("earlier window two");
+    expect(prompt).toContain("oldest first");
+  });
+
+  it("asks for the four sections, and for the machine bookkeeping to stay out", async () => {
+    const { resolver, chatWithRetry } = runtime('{"title":"t","description":"d","body":"b"}');
+    await writeSegmentNarrative(resolver, { applications: [], evidence: "e", window: "10min" });
+
+    const system = (chatWithRetry.mock.calls[0]![0] as any).messages[0].content;
+    for (const heading of [
+      "## Memory summary",
+      "### Relevant prior context",
+      "### Important non-obvious context about the user",
+      "## Recording summary",
+    ]) {
+      expect(system).toContain(heading);
+    }
+    // Event counts and screen size were what the section used to hold.
+    expect(system).toContain("event counts, screen size and file paths belong nowhere");
   });
 
   it("folds the event stream into activity arcs instead of a transcript", () => {

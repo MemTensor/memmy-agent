@@ -201,15 +201,17 @@ test("summarizes an explicit human-operation recording", () => {
   assert.doesNotMatch(markdown, /用户主动开始和停止的单次 Demo 录制/);
   // The per-event ledger is gone: this is a summary, not a reformatted stream.
   assert.doesNotMatch(markdown, /## Activity timeline/);
-  assert.match(markdown, /## Recording summary/);
-  assert.match(markdown, /本窗口共 \d+ 条事件/);
-  assert.match(markdown, /Semantic click target coverage: 1\/1/);
+  // The mechanical pass now writes a placeholder; the model writes the body.
+  assert.match(markdown, /summary_state: pending/);
+  assert.match(markdown, /（尚未生成）/);
+  assert.doesNotMatch(markdown, /Semantic click target coverage/);
+  assert.doesNotMatch(markdown, /Display: \d+x\d+/);
+  assert.doesNotMatch(markdown, /Event counts/);
   assert.doesNotMatch(markdown, /## Reusable operation experience/);
-  // The starting URL survives as a durable fact rather than as a replay step.
-  assert.match(markdown, /- Approved starting URL: https:\/\/www\.apple\.com\.cn\/shop\/buy-iphone\/iphone-17-pro/);
-  // Durable facts stay: they are what survives once raw events are cleaned.
-  assert.match(markdown, /- Applications: /);
-  assert.match(markdown, /- Time range: /);
+  // The starting URL survives in the frontmatter, which the model does not own.
+  assert.match(markdown, /start_url: "https:\/\/www\.apple\.com\.cn\/shop\/buy-iphone\/iphone-17-pro"/);
+  // Applications stay in the frontmatter for the timeline to render.
+  assert.match(markdown, /applications: \["com\.apple\.Notes"\]/);
   assert.match(markdown, /## Citations/);
   assert.doesNotMatch(markdown, /Recording started|Recording stopped|Recording status|Captured key screenshots/);
   assert.doesNotMatch(markdown, /\(812, 406\)/);
@@ -307,13 +309,14 @@ test("enriches unlabeled clicks via descendants and records browser page context
   // (see summary-writer's compaction tests). The summary reports coverage
   // rather than replaying each click.
   assert.doesNotMatch(markdown, /## Activity timeline/);
-  assert.match(markdown, /Semantic click target coverage: 2\/3/);
-  assert.match(markdown, /- Applications: com\.google\.Chrome/);
-  assert.match(markdown, /## Recording summary/);
+  assert.match(markdown, /summary_state: pending/);
+  assert.match(markdown, /applications: \["com\.google\.Chrome"\]/);
   // Page context now reaches the narrator through the event stream rather than
   // appearing as a replay instruction in the summary.
   assert.doesNotMatch(markdown, /Confirm the front browser page/);
-  assert.match(markdown, /Final browser page: .*512gb-silver-unlocked/);
+  // End State was machine bookkeeping; the model states where the window ended
+  // in prose instead.
+  assert.doesNotMatch(markdown, /## End State/);
   // Replay guidance belongs to the workflow candidate, not to the summary.
   assert.doesNotMatch(markdown, /rely on the surrounding page context/);
 });

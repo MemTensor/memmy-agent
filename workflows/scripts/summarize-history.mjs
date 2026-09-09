@@ -603,60 +603,18 @@ export function renderHumanSummary({
     "experience_version: 1",
     ...(metadata.contextUrl ? [`start_url: ${yamlString(cleanInline(metadata.contextUrl, 2048))}`] : []),
     `status: ${status}`,
+    // Marks the summary as not yet written. The body below is a placeholder;
+    // the model replaces it, and only then does the entry become presentable.
+    "summary_state: pending",
     "---",
     "",
     "## Memory summary",
     "",
-    `用户在「${cleanInline(resolvedTitle, SUMMARY_TEXT_LIMIT)}」中完成了一组电脑操作，已整理为可读的行为记忆。`,
-    "",
-    "### Relevant prior context",
-    "",
-    `- 文本记录模式：${metadata.captureText ? "仅显式允许的应用保留文本" : "文本内容不保留"}。`,
-    "- 浏览器页面地址仅保留协议、域名和路径；查询参数和片段在采集时即被移除。",
-    "",
-    "### Important non-obvious context",
-    "",
-    `- Source recording: \`${recordingId}\``,
-    `- Source file: \`${file}\``,
-    `- Time range: ${timestamps[0] ?? metadata.createdAt ?? "unknown"} → ${timestamps.at(-1) ?? "unknown"}`,
-    `- Platform: ${metadata.platform ?? "macOS"}`,
-    `- Display: ${metadata.display?.width ?? "?"}x${metadata.display?.height ?? "?"} points`,
-    `- Event counts: ${[...eventCounts].map(([name, count]) => `${name} × ${count}`).join(", ")}`,
-    `- Applications: ${applications.length ? applications.join(", ") : "not established from recording evidence"}`,
-    `- Semantic click target coverage: ${semanticClickCount}/${clickEvents.length}`,
-    ...(metadata.contextUrl ? [`- Approved starting URL: ${cleanInline(metadata.contextUrl, 2048)}`] : []),
+    "（尚未生成）",
   ];
-  if (malformedLines.length) output.push(`- Skipped malformed JSONL lines: ${malformedLines.join(", ")}`);
-
-  // The per-event ledger used to live here. It was the event stream reformatted,
-  // not a summary — hundreds of lines, most of them a single keystroke. The
-  // readable account is written over this section by the model; what stays here
-  // is a compact fallback for when the model is unavailable.
-  const appRuns = [];
-  for (const event of events) {
-    const name = event.application?.name ?? event.application?.bundleId;
-    if (!name) continue;
-    if (appRuns.at(-1) !== name) appRuns.push(name);
+  if (malformedLines.length) {
+    output.push("", `<!-- skipped malformed JSONL lines: ${malformedLines.join(", ")} -->`);
   }
-  output.push(
-    "",
-    "## Recording summary",
-    "",
-    `本窗口共 ${events.length} 条事件，涉及 ${applications.length} 个应用。`,
-    appRuns.length ? `应用切换顺序：${appRuns.slice(0, 20).join(" → ")}` : "未从录制证据中确定应用。",
-    "",
-    "详细事件证据保留在原始事件流中，未在此展开。",
-  );
-
-  const finalApplication = [...events].reverse().find((event) => event.application?.bundleId)?.application;
-  output.push(
-    "",
-    "## End State",
-    "",
-    `- Final foreground application: ${finalApplication?.name ?? "unknown"} (${finalApplication?.bundleId ?? "unknown"})`,
-    ...(finalPageContext ? [`- Final browser page: ${cleanInline(finalPageContext.details.url, 500)}`] : []),
-  );
-  for (const artifact of artifacts) output.push(`  - \`${artifact}\``);
 
   output.push("", "## Citations", "", `- ${file}`);
   for (const artifact of artifacts) output.push(`- ${artifact}`);

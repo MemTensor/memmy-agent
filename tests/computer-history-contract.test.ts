@@ -41,7 +41,7 @@ describe("snapshot contract with the desktop client", () => {
     fs.mkdirSync(markdownDirectory, { recursive: true });
     fs.writeFileSync(
       path.join(markdownDirectory, "2026-09-08T08-20-00Z-10min-summary.md"),
-      '---\ntitle: "A window"\ndescription: "You did a thing."\napplications: ["com.apple.Notes"]\nsource_type: captured\n---\n\nbody\n',
+      '---\ntitle: "A window"\ndescription: "You did a thing."\napplications: ["com.apple.Notes"]\nsource_type: captured\nsummary_state: ready\n---\n\nbody\n',
       "utf8",
     );
 
