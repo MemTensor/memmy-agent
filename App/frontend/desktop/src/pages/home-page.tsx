@@ -330,6 +330,7 @@ export interface SubmitAgentComposerMessageInput {
   clearComposer: () => void;
   onChatResolved?: (chatId: string) => void;
   onNewChatMessageSent?: (chatId: string) => void;
+  onMessageAccepted?: (chatId: string, feedback: { message: string; clientRequestId: string }) => void;
   chatSelectionEpoch?: number;
   getChatSelectionEpoch?: () => number;
   scopeKey?: string;
@@ -938,6 +939,7 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
     }));
   }
   input.clearComposer();
+  input.onMessageAccepted?.(chatId, { message: text, clientRequestId });
   if (input.scopeKey) {
     input.dispatch(agentActions.pendingModelPresetCleared(input.scopeKey));
   }
@@ -1034,7 +1036,7 @@ function ComposerCaretMenu(props: {
  */
 export function HomePage() {
   const { clients } = useApiClients();
-  const { calls: pluginUiCalls, openSurface } = usePluginUi();
+  const { calls: pluginUiCalls, openSurface, notifyChatMessage } = usePluginUi();
   const { state, dispatch } = useAppState();
   const modelWorkspace = createModelWorkspace(state.modelConfig);
   const { language, t } = useTranslation();
@@ -2086,6 +2088,7 @@ export function HomePage() {
         chatId: state.agent.currentChatId,
         target,
         clientRequestId,
+        onMessageAccepted: notifyChatMessage,
         connection,
         ensureChatSubscription,
         content: agentRoutedPluginPrompt ?? input,
@@ -3467,6 +3470,7 @@ export function HomePage() {
                 forceMessageActionsForMessageId={firstEncounterRelayAnswerMessageId}
                 retryWaitStatus={state.agent.currentChatId ? state.agent.retryWaitStatusByChatId[state.agent.currentChatId] ?? null : null}
                 isSending={state.agent.isSending}
+                waitingForPluginInteraction={visiblePluginCalls.some((call) => call.events.some((event) => event.type === "interaction") && !call.events.some((event) => event.type === "result" || event.type === "error"))}
                 sanitizePlatformApiErrors={sanitizePlatformApiErrors}
                 artifactClient={sessionArtifactClient}
                 memoryRuntimeClient={clients?.memoryRuntime ?? null}

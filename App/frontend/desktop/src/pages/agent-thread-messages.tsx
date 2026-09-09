@@ -75,6 +75,7 @@ interface AgentThreadMessagesProps {
   chatScopeKey: string;
   historyVersion?: number;
   isSending?: boolean;
+  waitingForPluginInteraction?: boolean;
   sanitizePlatformApiErrors?: boolean;
   memoryRuntimeClient?: Pick<MemoryRuntimeClient, "recallEvidence" | "deleteMemory"> | null;
 }
@@ -230,7 +231,7 @@ export const AgentThreadMessages = memo(function AgentThreadMessages(props: Agen
         );
       })}
       {shouldShowThinkingPlaceholder(props.messages, props.isSending) && (
-        <ThinkingPlaceholder />
+        props.waitingForPluginInteraction ? <PluginInteractionWaitingPlaceholder /> : <ThinkingPlaceholder />
       )}
     </>
   );
@@ -244,6 +245,7 @@ function areAgentThreadMessagesPropsEqual(previous: AgentThreadMessagesProps, ne
     && previous.artifactClient === next.artifactClient
     && previous.chatScopeKey === next.chatScopeKey
     && previous.historyVersion === next.historyVersion
+    && previous.waitingForPluginInteraction === next.waitingForPluginInteraction
     && previous.isSending === next.isSending
     && previous.retryWaitStatus === next.retryWaitStatus
     && previous.sanitizePlatformApiErrors === next.sanitizePlatformApiErrors
@@ -1254,6 +1256,11 @@ function CodexCheckIcon(props: SVGProps<SVGSVGElement>) {
       />
     </svg>
   );
+}
+
+function PluginInteractionWaitingPlaceholder() {
+  const { t } = useTranslation();
+  return <p role="status" className="text-sm text-text-ink/55">{t("plugin.ui.waitingForResponse")}</p>;
 }
 
 function ThinkingPlaceholder() {

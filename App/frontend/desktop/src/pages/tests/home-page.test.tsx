@@ -1392,6 +1392,17 @@ describe("HomePage", () => {
     expect(agentErrorText(null)).toBeNull();
   });
 
+  it("does not release a waiting card when the chat send is rejected", async () => {
+    const onMessageAccepted = vi.fn();
+    const cleared = vi.fn();
+    await expect(submitAgentComposerMessage({ chatId: "chat-1", content: "Revise this card", pendingAttachments: [],
+      connection: { getReadyGeneration: () => 1, newChat: vi.fn(), submitMessage: vi.fn(async () => { throw new Error("Disconnected"); }) },
+      uploadAgentMedia: vi.fn(), dispatch: vi.fn(), track: vi.fn(), clearComposer: cleared, onMessageAccepted
+    })).resolves.toBe(false);
+    expect(onMessageAccepted).not.toHaveBeenCalled();
+    expect(cleared).not.toHaveBeenCalled();
+  });
+
   it("keeps the model unavailable reason when a tombstone blocks new-chat creation", async () => {
     const dispatch = vi.fn();
 
@@ -1444,6 +1455,7 @@ describe("HomePage", () => {
     const clearComposer = vi.fn();
     const setCreatingChat = vi.fn();
     const onNewChatMessageSent = vi.fn();
+    const onMessageAccepted = vi.fn();
     const encodedBlob = new Blob(["png"], { type: "image/png" });
     const uploadAgentMedia = vi.fn(async () => [
       { path: "/media/websocket/webui/shot.png", url: "http://agent.local/api/media/sig/shot", name: "shot.png", kind: "image" as const, mime: "image/png" as const, bytes: 3 },
@@ -1465,7 +1477,8 @@ describe("HomePage", () => {
       track,
       setCreatingChat,
       clearComposer,
-      onNewChatMessageSent
+      onNewChatMessageSent,
+      onMessageAccepted
     })).resolves.toBe(true);
 
     expect(newChat).toHaveBeenCalledWith(1, 5000, undefined, expect.any(String));
@@ -1506,6 +1519,7 @@ describe("HomePage", () => {
     expect(setCreatingChat).toHaveBeenLastCalledWith(false);
     expect(clearComposer).toHaveBeenCalledTimes(1);
     expect(onNewChatMessageSent).toHaveBeenCalledWith("chat-new");
+    expect(onMessageAccepted).toHaveBeenCalledWith("chat-new", { message: "帮我整理计划", clientRequestId: expect.any(String) });
     expect(track).toHaveBeenCalledWith({ name: "agent_send_message", params: { page_path: "/main" }, consentTier: "basic" });
   });
 
@@ -1552,6 +1566,7 @@ describe("HomePage", () => {
     const ensureChatSubscription = vi.fn();
     const dispatch = vi.fn();
     const onNewChatMessageSent = vi.fn();
+    const onMessageAccepted = vi.fn();
 
     await expect(submitAgentComposerMessage({
       chatId: "chat-1",
@@ -1563,7 +1578,8 @@ describe("HomePage", () => {
       dispatch,
       track: vi.fn(),
       clearComposer: vi.fn(),
-      onNewChatMessageSent
+      onNewChatMessageSent,
+      onMessageAccepted
     })).resolves.toBe(true);
 
     expect(newChat).not.toHaveBeenCalled();
@@ -1585,6 +1601,7 @@ describe("HomePage", () => {
     expect(mockCallOrder(ensureChatSubscription)).toBeLessThan(mockCallOrder(sendMessage));
     expect(mockCallOrder(sendMessage)).toBeLessThan(mockCallOrder(dispatch));
     expect(onNewChatMessageSent).not.toHaveBeenCalled();
+    expect(onMessageAccepted).toHaveBeenCalledWith("chat-1", { message: "继续", clientRequestId: expect.any(String) });
   });
 
   it("does not clear the composer or add an optimistic user before send confirmation", async () => {

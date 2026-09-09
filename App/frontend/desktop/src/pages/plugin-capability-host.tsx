@@ -29,7 +29,7 @@ import type {
 } from "@memmy/local-api-contracts";
 import type { UploadAgentMediaInput, UploadedAgentMedia } from "../api/memmy-agent-client.js";
 import type { PluginsClient } from "../api/plugins-client.js";
-import type { PluginUiCall } from "../app/plugin-ui-context.js";
+import { usePluginChatFeedback, type PluginChatFeedback, type PluginUiCall } from "../app/plugin-ui-context.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { classifyAgentAttachmentFile } from "../lib/agent-attachment.js";
 import { startBrowserDownload } from "./agent-message-content.js";
@@ -86,6 +86,9 @@ export function PluginCapabilityHost(props: PluginCapabilityHostProps) {
         const respond = async (interactionId: string, response: unknown) => {
           if (!props.client) return Promise.reject(new Error("Plugin client unavailable"));
           await props.client.respond(call.pluginId, call.callId, interactionId, response);
+          // A refresh is an intermediate action in a multi-step card. Keep the
+          // renderer mounted until its next authoritative interaction arrives.
+          if (asRecord(response).action === "refresh") return;
           setAnsweredInteractions((current) => {
             const next = new Set(current);
             next.add(interactionKey(call, interactionId));
@@ -99,6 +102,8 @@ export function PluginCapabilityHost(props: PluginCapabilityHostProps) {
         const cards = (
           <GenericPluginCards
             events={call.events}
+            conversationId={call.conversationId}
+            pluginId={call.pluginId}
             onRespond={respond}
             onCancel={cancel}
             onUploadFiles={props.uploadFiles}
@@ -119,6 +124,7 @@ export function PluginCapabilityHost(props: PluginCapabilityHostProps) {
                 height={renderer.height ?? 320}
                 client={props.client!}
                 onRespond={respond}
+                onUploadFiles={plugin?.approvedPermissions.some((permission) => permission.type === "host-service" && permission.services.includes("file-input")) ? props.uploadFiles : undefined}
                 fallback={cards}
               />
             ) : (
@@ -132,6 +138,8 @@ export function PluginCapabilityHost(props: PluginCapabilityHostProps) {
 }
 
 function GenericPluginCards(props: {
+  conversationId?: string;
+  pluginId?: string;
   events: CapabilityEvent[];
   onRespond(interactionId: string, response: unknown): Promise<void>;
   onCancel(): Promise<void>;
@@ -147,7 +155,7 @@ function GenericPluginCards(props: {
         if (event.type === "progress") return terminal ? null : <ProgressCard key="progress" event={event} canCancel={Boolean(event.cancellable)} onCancel={props.onCancel} />;
         if (event.type === "task-list") return terminal ? null : <TaskCard key="tasks" event={event} />;
         if (event.type === "interaction") {
-          return terminal ? null : <InteractionCard key={`interaction:${event.request.interactionId}`} request={event.request} onRespond={props.onRespond} onUploadFiles={props.onUploadFiles} />;
+          return terminal ? null : <InteractionCard key={`interaction:${event.request.interactionId}`} request={event.request} conversationId={props.conversationId} pluginId={props.pluginId} onRespond={props.onRespond} onUploadFiles={props.onUploadFiles} />;
         }
         if (event.type === "artifact") return <ArtifactCard key={`artifact:${event.artifact.id}`} event={event} onAddToChat={props.onAddArtifact} onOpen={props.onOpenArtifact} onRead={props.onReadArtifact} />;
         if (event.type === "error") return <ErrorCard key="error" event={event} />;
@@ -225,6 +233,8 @@ function TaskCard(props: { event: Extract<CapabilityEvent, { type: "task-list" }
 }
 
 function InteractionCard(props: {
+  conversationId?: string;
+  pluginId?: string;
   request: PluginInteractionRequest;
   onRespond(interactionId: string, response: unknown): Promise<void>;
   onUploadFiles?: (files: UploadAgentMediaInput[]) => Promise<UploadedAgentMedia[]>;
@@ -257,7 +267,7 @@ function InteractionCard(props: {
   };
 
   if (props.request.type === "file-input") {
-    return <FileInputCard request={props.request} title={title} description={description} disabled={disabled} status={status} onStatus={setStatus} onRespond={props.onRespond} onUploadFiles={props.onUploadFiles} />;
+    return <FileInputCard conversationId={props.conversationId} pluginId={props.pluginId} request={props.request} title={title} description={description} disabled={disabled} status={status} onStatus={setStatus} onRespond={props.onRespond} onUploadFiles={props.onUploadFiles} />;
   }
 
   return (
@@ -315,6 +325,8 @@ function InteractionCard(props: {
 }
 
 function FileInputCard(props: {
+  conversationId?: string;
+  pluginId?: string;
   request: PluginInteractionRequest;
   title: string;
   description: string | null;
@@ -327,6 +339,27 @@ function FileInputCard(props: {
   const { t } = useTranslation();
   const payload = asRecord(props.request.payload);
   const [files, setFiles] = useState<File[]>([]);
+  const pendingFeedback = useRef<PluginChatFeedback | null>(null);
+  const fileDraftKey = JSON.stringify([props.pluginId, props.conversationId, payload.taskId, payload.cardType, payload.targetPaperId]);
+  const fileDrafts = usePluginChatFeedback(payload.chatFeedback === true ? props.conversationId : undefined, (feedback) => {
+    if (props.status === "answered") return;
+    pendingFeedback.current = feedback;
+    if (!props.disabled) void releaseForChat();
+  });
+  useEffect(() => { const draft = fileDrafts?.get(fileDraftKey); if (draft) setFiles(draft); }, [fileDraftKey, fileDrafts]);
+  useEffect(() => { if (!props.disabled && pendingFeedback.current) void releaseForChat(); }, [props.disabled]);
+  async function releaseForChat() {
+    const feedback = pendingFeedback.current;
+    if (!feedback || props.disabled) return;
+    pendingFeedback.current = null;
+    fileDrafts?.set(fileDraftKey, files);
+    props.onStatus("submitting");
+    try {
+      await props.onRespond(props.request.interactionId, { action: "chat-feedback", ...feedback, files: [], values: { selectedFileNames: files.map((file) => file.name) } });
+      props.onStatus("answered");
+    } catch { props.onStatus("error"); }
+  }
+
   const [validationError, setValidationError] = useState<string | null>(null);
   const accept = readStrings(payload.accept).join(",");
   const fileRules = readFileRules(payload.fileRules);
@@ -353,7 +386,16 @@ function FileInputCard(props: {
         const classification = classifyAgentAttachmentFile(file)!;
         return { blob: file, name: file.name, kind: classification.kind, mime: classification.mime };
       }));
-      await props.onRespond(props.request.interactionId, { files: uploaded });
+      const feedback = pendingFeedback.current;
+      if (feedback) {
+        pendingFeedback.current = null;
+        fileDrafts?.set(fileDraftKey, files);
+        await props.onRespond(props.request.interactionId, { action: "chat-feedback", ...feedback, files: [],
+          values: { selectedFileNames: files.map((file) => file.name), stagedFiles: uploaded } });
+      } else {
+        await props.onRespond(props.request.interactionId, { files: uploaded });
+        fileDrafts?.delete(fileDraftKey);
+      }
       props.onStatus("answered");
     } catch {
       props.onStatus("error");
@@ -491,8 +533,17 @@ export function selectVisiblePluginCalls(calls: PluginUiCall[], answered: Readon
   const latestActive = latest && !latest.events.some((event) => event.type === "result" || event.type === "error")
     ? latest.callId
     : undefined;
-  return prepared.filter((call) => {
-    if (call.events.some((event) => event.type === "artifact" || event.type === "error")) return true;
+  return prepared.filter((call, index) => {
+    const hasArtifact = call.events.some((event) => event.type === "artifact");
+    const hasError = call.events.some((event) => event.type === "error");
+    const recoveredByLaterRetry = hasError && prepared.slice(index + 1).some((candidate) => (
+      candidate.pluginId === call.pluginId
+      && candidate.capabilityId === call.capabilityId
+      && candidate.conversationId === call.conversationId
+      && candidate.events.some((event) => event.type === "result")
+    ));
+    if (hasArtifact) return true;
+    if (hasError) return !recoveredByLaterRetry;
     if (!call.events.some((event) => event.type === "result" || event.type === "error")
       && call.events.some((event) => event.type === "interaction")) return true;
     return call.callId === latestActive && call.events.some((event) => event.type !== "result");
@@ -515,13 +566,27 @@ function SandboxedPluginRenderer(props: {
   client: Pick<PluginsClient, "getUi">;
   onRespond(interactionId: string, response: unknown): Promise<void>;
   fallback: ReactNode;
+  onUploadFiles?: (files: UploadAgentMediaInput[]) => Promise<UploadedAgentMedia[]>;
 }) {
   const { t } = useTranslation();
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const answered = useRef(new Set<string>());
+  const uploading = useRef(new Set<string>());
   const [html, setHtml] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
+  const [rendererHeight, setRendererHeight] = useState(() => Math.min(props.height, 320));
   const document = useMemo(() => html === null ? "" : buildRendererDocument(html), [html]);
+  const queuedChat = useRef<PluginChatFeedback | null>(null);
+  const latestInteraction = [...props.call.events].reverse().find((event) => event.type === "interaction");
+  const feedbackEnabled = latestInteraction?.type === "interaction" && asRecord(latestInteraction.request.payload).chatFeedback === true
+    && !props.call.events.some((event) => event.type === "result" || event.type === "error");
+  usePluginChatFeedback(feedbackEnabled ? props.call.conversationId : undefined, (feedback) => {
+    if (latestInteraction?.type !== "interaction" || answered.current.has(latestInteraction.request.interactionId)) return;
+    queuedChat.current = feedback;
+    iframeRef.current?.contentWindow?.postMessage({ type: "memmy.plugin.chat-feedback", version: 1,
+      interactionId: latestInteraction.request.interactionId, ...feedback }, "*");
+  });
+
   const rendererMessage = useMemo(() => ({
     type: "memmy.plugin.render",
     version: 1,
@@ -544,12 +609,58 @@ function SandboxedPluginRenderer(props: {
 
   useEffect(() => {
     iframeRef.current?.contentWindow?.postMessage(rendererMessage, "*");
+    if (queuedChat.current && latestInteraction?.type === "interaction") iframeRef.current?.contentWindow?.postMessage({
+      type: "memmy.plugin.chat-feedback", version: 1, interactionId: latestInteraction.request.interactionId, ...queuedChat.current
+    }, "*");
   }, [rendererMessage]);
+
+  useEffect(() => {
+    setRendererHeight(Math.min(props.height, 320));
+  }, [props.call.callId, props.height]);
 
   useEffect(() => {
     const receive = (event: MessageEvent) => {
       if (event.source !== iframeRef.current?.contentWindow) return;
       const message = asRecord(event.data);
+      if (message.type === "memmy.plugin.resize" && message.version === 1) {
+        const requestedHeight = typeof message.height === "number" ? message.height : Number.NaN;
+        if (Number.isFinite(requestedHeight)) {
+          setRendererHeight(Math.min(props.height, Math.max(180, Math.ceil(requestedHeight))));
+        }
+        return;
+      }
+      if (message.type === "memmy.plugin.upload-files" && message.version === 1) {
+        const interactionId = message.interactionId;
+        const requestId = message.requestId;
+        const latest = [...props.call.events].reverse().find((item) => item.type === "interaction");
+        if (typeof interactionId !== "string" || typeof requestId !== "string" || requestId.length > 128
+          || latest?.type !== "interaction" || latest.request.interactionId !== interactionId
+          || latest.request.type !== "custom" || answered.current.has(interactionId) || uploading.current.has(interactionId)
+          || props.call.events.some((item) => item.type === "result" || item.type === "error")) return;
+        const reply = (result: Record<string, unknown>) => iframeRef.current?.contentWindow?.postMessage({
+          type: "memmy.plugin.upload-result", version: 1, interactionId, requestId, ...result
+        }, "*");
+        const rules = asRecord(asRecord(latest.request.payload).fileUpload);
+        const files = Array.isArray(message.files) ? message.files : [];
+        const maxFiles = Math.min(10, positiveInteger(rules.maxFiles) ?? 1);
+        const maxBytes = Math.min(50 * 1024 * 1024, positiveInteger(rules.maxBytes) ?? 50 * 1024 * 1024);
+        const accept = readStrings(rules.accept).join(",");
+        if (!props.onUploadFiles || !accept || files.length === 0 || files.length > maxFiles
+          || files.some((file) => !(file instanceof File) || classifyPluginInputFile(file, accept, maxBytes, [], t).status !== "ready")
+          || props.interactionStates.some((state) => state.interactionId === interactionId)) {
+          reply({ ok: false, error: { message: "文件不符合要求或卡片已过期，请刷新后重新选择。" } });
+          return;
+        }
+        uploading.current.add(interactionId);
+        void props.onUploadFiles(files.map((file: File) => {
+          const classification = classifyAgentAttachmentFile(file)!;
+          return { blob: file, name: file.name, kind: classification.kind, mime: classification.mime };
+        })).then(
+          (uploaded) => reply({ ok: true, files: uploaded }),
+          () => reply({ ok: false, error: { message: "上传失败，请重新选择文件重试。" } })
+        ).finally(() => uploading.current.delete(interactionId));
+        return;
+      }
       if (message.type !== "memmy.plugin.interaction-response" || message.version !== 1 || typeof message.interactionId !== "string") return;
       const interactionId = message.interactionId;
       const declared = props.call.events.some((item) => item.type === "interaction" && item.request.interactionId === interactionId);
@@ -567,6 +678,7 @@ function SandboxedPluginRenderer(props: {
         return;
       }
       answered.current.add(interactionId);
+      if (response.action === "chat-feedback") queuedChat.current = null;
       void props.onRespond(interactionId, message.response).then(
         () => iframeRef.current?.contentWindow?.postMessage({ type: "memmy.plugin.response-result", version: 1, interactionId, ok: true }, "*"),
         () => {
@@ -577,7 +689,7 @@ function SandboxedPluginRenderer(props: {
     };
     window.addEventListener("message", receive);
     return () => window.removeEventListener("message", receive);
-  }, [props.call.events, props.interactionStates, props.onRespond]);
+  }, [props.call.events, props.height, props.interactionStates, props.onRespond, props.onUploadFiles, t]);
 
   if (failed) return props.fallback;
   if (html === null) return <p className="py-3 text-center text-xs text-text-ink/40" role="status">{t("plugin.ui.rendererLoading")}</p>;
@@ -589,8 +701,13 @@ function SandboxedPluginRenderer(props: {
       referrerPolicy="no-referrer"
       srcDoc={document}
       className="w-full rounded-card border-0 bg-transparent"
-      style={{ height: props.height }}
-      onLoad={() => iframeRef.current?.contentWindow?.postMessage(rendererMessage, "*")}
+      style={{ height: rendererHeight }}
+      onLoad={() => {
+        iframeRef.current?.contentWindow?.postMessage(rendererMessage, "*");
+        if (queuedChat.current && latestInteraction?.type === "interaction") iframeRef.current?.contentWindow?.postMessage({
+          type: "memmy.plugin.chat-feedback", version: 1, interactionId: latestInteraction.request.interactionId, ...queuedChat.current
+        }, "*");
+      }}
     />
   );
 }
@@ -639,6 +756,10 @@ export function resolveRendererInteractionStates(
         for (const value of payload.artifactSnapshot) {
           const dependency = asRecord(value);
           if (typeof dependency.kind !== "string" || typeof dependency.contentHash !== "string") continue;
+          // Older plugin builds used a sentinel for absent optional inputs.
+          // It is not an artifact version and must not be compared with a
+          // historical artifact observed earlier in the conversation.
+          if (dependency.contentHash === "__missing__") continue;
           const latestDependency = latest.get(call.pluginId + ":" + taskId + ":" + dependency.kind);
           if (latestDependency && latestDependency.contentHash !== dependency.contentHash) {
             stale = true;
