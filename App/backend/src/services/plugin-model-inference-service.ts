@@ -11,6 +11,7 @@ const MAX_INPUT_CHARACTERS = 200_000;
 const MAX_OUTPUT_TOKENS = 8_192;
 const DEFAULT_OUTPUT_TOKENS = 2_048;
 const DEFAULT_TIMEOUT_MS = 120_000;
+const MAX_TIMEOUT_MS = 300_000;
 const DEFAULT_MAX_ATTEMPTS = 2;
 
 const ModelInferenceInputSchema = z.object({
@@ -20,7 +21,10 @@ const ModelInferenceInputSchema = z.object({
   })).min(1).max(100),
   temperature: z.number().min(0).max(2).optional(),
   maxOutputTokens: z.number().int().positive().max(MAX_OUTPUT_TOKENS).optional(),
-  responseFormat: z.enum(["text", "json"]).default("text")
+  responseFormat: z.enum(["text", "json"]).default("text"),
+  timeoutMs: z.number().int().min(1_000).max(MAX_TIMEOUT_MS).optional(),
+  thinkingBudgetTokens: z.number().int().min(1).max(8_192).optional(),
+  maxAttempts: z.number().int().min(1).max(DEFAULT_MAX_ATTEMPTS).optional()
 }).superRefine((input, context) => {
   const total = input.messages.reduce((sum, message) => sum + message.content.length, 0);
   if (total > MAX_INPUT_CHARACTERS) context.addIssue({ code: "custom", path: ["messages"], message: `Total message content exceeds ${MAX_INPUT_CHARACTERS} characters` });
@@ -30,7 +34,7 @@ export type PluginModelInferenceInput = z.input<typeof ModelInferenceInputSchema
 export interface PluginModelInferenceResult {
   content: string;
   finishReason: string;
-  usage: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
+  usage: { inputTokens?: number; outputTokens?: number; totalTokens?: number; reasoningTokens?: number };
   model: { provider: string; model: string };
 }
 
@@ -68,13 +72,17 @@ export function createPluginModelInferenceService(options: CreatePluginModelInfe
       const input = ModelInferenceInputSchema.parse(call.input);
       const resolved = await options.resolveModel();
       if (!resolved?.ok) throw serviceError("model_unavailable", "The current user model is not configured or available", false);
-      const maxAttempts = Math.max(1, options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS);
+      const configuredAttempts = Math.max(1, options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS);
+      const maxAttempts = input.maxAttempts === undefined ? configuredAttempts : Math.min(configuredAttempts, input.maxAttempts);
       let lastError: unknown;
       let attemptInput = input;
       for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
         try {
           throwIfCallerAborted(call.signal);
-          const timeoutMs = deadlineTimeout(call, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+          const timeoutMs = Math.min(
+            deadlineTimeout(call, options.timeoutMs ?? attemptInput.timeoutMs ?? DEFAULT_TIMEOUT_MS),
+            attemptInput.timeoutMs ?? DEFAULT_TIMEOUT_MS
+          );
           return await infer(resolved, attemptInput, fetchImpl, timeoutMs, call.signal);
         } catch (error) {
           lastError = error;
@@ -208,11 +216,28 @@ function requestForProtocol(
       }) }
     };
   }
+  // Opt-in only. Do not send vendor-specific parameters to unrelated models,
+  // or mutate provider defaults shared with the main Agent and other plugins.
+  const extraBody = { ...(provider.extraBody ?? {}) };
+  const boundedQwen = input.thinkingBudgetTokens !== undefined
+    && /^qwen3\.(?:[5-9]|[1-9]\d+)-(?:flash|plus|max)(?:$|-)/iu.test(context.model)
+    && !/^qwen3\.[56]-max(?:$|-)/iu.test(context.model);
+  let tokenLimits: Record<string, unknown> = { max_tokens: maxTokens };
+  if (boundedQwen) {
+    delete extraBody.reasoning_effort;
+    delete extraBody.thinking_budget;
+    delete extraBody.max_tokens;
+    delete extraBody.max_completion_tokens;
+    tokenLimits = {
+      thinking_budget: input.thinkingBudgetTokens,
+      max_completion_tokens: maxTokens + input.thinkingBudgetTokens!
+    };
+  }
   return {
     url: endpoint(provider.apiBase, "/v1/chat/completions"),
     init: { ...common, headers: { ...headers, authorization: `Bearer ${provider.apiKey ?? ""}` }, body: JSON.stringify({
-      model: context.model, messages: input.messages, max_tokens: maxTokens, temperature: input.temperature ?? 0.2,
-      ...(input.responseFormat === "json" ? { response_format: { type: "json_object" } } : {}), ...(provider.extraBody ?? {})
+      model: context.model, messages: input.messages, ...tokenLimits, temperature: input.temperature ?? 0.2,
+      ...(input.responseFormat === "json" ? { response_format: { type: "json_object" } } : {}), ...extraBody
     }) }
   };
 }
@@ -234,7 +259,11 @@ function extractResponse(protocol: string, value: unknown): Omit<PluginModelInfe
     return { content: string(body.output_text) || content, finishReason: string(body.status) || "completed", usage: usage(body.usage, "input_tokens", "output_tokens", "total_tokens") };
   }
   const choice = Array.isArray(body.choices) ? record(body.choices[0]) : {};
-  return { content: string(record(choice.message).content), finishReason: string(choice.finish_reason) || "stop", usage: usage(body.usage, "prompt_tokens", "completion_tokens", "total_tokens") };
+  const reasoningTokens = numeric(record(record(body.usage).completion_tokens_details).reasoning_tokens);
+  return { content: string(record(choice.message).content), finishReason: string(choice.finish_reason) || "stop", usage: {
+    ...usage(body.usage, "prompt_tokens", "completion_tokens", "total_tokens"),
+    ...(reasoningTokens !== undefined ? { reasoningTokens } : {})
+  } };
 }
 
 function endpoint(base: string, suffix: string): string {
