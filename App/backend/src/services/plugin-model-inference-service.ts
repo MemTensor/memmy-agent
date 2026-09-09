@@ -23,6 +23,7 @@ const ModelInferenceInputSchema = z.object({
   maxOutputTokens: z.number().int().positive().max(MAX_OUTPUT_TOKENS).optional(),
   responseFormat: z.enum(["text", "json"]).default("text"),
   timeoutMs: z.number().int().min(1_000).max(MAX_TIMEOUT_MS).optional(),
+  thinkingMode: z.literal("disabled").optional(),
   thinkingBudgetTokens: z.number().int().min(1).max(8_192).optional(),
   maxAttempts: z.number().int().min(1).max(DEFAULT_MAX_ATTEMPTS).optional()
 }).superRefine((input, context) => {
@@ -219,11 +220,19 @@ function requestForProtocol(
   // Opt-in only. Do not send vendor-specific parameters to unrelated models,
   // or mutate provider defaults shared with the main Agent and other plugins.
   const extraBody = { ...(provider.extraBody ?? {}) };
-  const boundedQwen = input.thinkingBudgetTokens !== undefined
-    && /^qwen3\.(?:[5-9]|[1-9]\d+)-(?:flash|plus|max)(?:$|-)/iu.test(context.model)
+  const supportsQwenThinkingControl = /^qwen3\.(?:[5-9]|[1-9]\d+)-(?:flash|plus|max)(?:$|-)/iu.test(context.model)
     && !/^qwen3\.[56]-max(?:$|-)/iu.test(context.model);
+  const disableThinking = input.thinkingMode === "disabled" && supportsQwenThinkingControl;
+  const boundedQwen = input.thinkingBudgetTokens !== undefined && supportsQwenThinkingControl;
   let tokenLimits: Record<string, unknown> = { max_tokens: maxTokens };
-  if (boundedQwen) {
+  if (disableThinking) {
+    // Copy and override only this request; never modify the user's shared model settings.
+    for (const key of ["reasoning_effort", "thinking_budget", "thinking", "enable_thinking", "max_tokens", "max_completion_tokens"]) delete extraBody[key];
+    if (extraBody.chat_template_kwargs && typeof extraBody.chat_template_kwargs === "object") {
+      extraBody.chat_template_kwargs = { ...record(extraBody.chat_template_kwargs), enable_thinking: false };
+    }
+    tokenLimits = { enable_thinking: false, max_completion_tokens: maxTokens };
+  } else if (boundedQwen) {
     delete extraBody.reasoning_effort;
     delete extraBody.thinking_budget;
     delete extraBody.max_tokens;

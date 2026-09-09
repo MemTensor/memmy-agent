@@ -54,6 +54,40 @@ describe("plugin model inference Host service", () => {
     expect(bodies[2]).toEqual({ ...bodies[1], model: "unrelated-chat-model" });
   });
 
+  it("disables Qwen thinking only for opted-in requests and cannot be overridden by shared defaults", async () => {
+    const model = resolved();
+    if (!model.ok) throw new Error("fixture");
+    model.context.model = "qwen3.8-flash";
+    const defaults = { enable_thinking: true, thinking_budget: 32000, reasoning_effort: "xhigh", thinking: { type: "enabled" },
+      max_tokens: 32768, max_completion_tokens: 65536, chat_template_kwargs: { enable_thinking: true, keep: "value" } };
+    model.provider.extraBody = structuredClone(defaults);
+    const bodies: Record<string, unknown>[] = [];
+    const fetch = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ choices: [{ message: { content: "{\"paragraph\":\"Synthetic prose\"}" }, finish_reason: "stop" }],
+        usage: { completion_tokens: 20, completion_tokens_details: { reasoning_tokens: 0 } } }));
+    });
+    const service = createPluginModelInferenceService({ resolveModel: async () => model, fetch: fetch as typeof globalThis.fetch });
+    const call = { pluginId: "literature-review", callId: "writing", conversationId: "v", service: "model-inference" };
+    const input = { messages: [{ role: "user", content: "Write a paragraph" }], maxOutputTokens: 1100 };
+    const result = await service.invoke({ ...call, input: { ...input, thinkingMode: "disabled", thinkingBudgetTokens: 2048 } });
+    expect(bodies[0]).toMatchObject({ enable_thinking: false, max_completion_tokens: 1100, chat_template_kwargs: { enable_thinking: false, keep: "value" } });
+    for (const key of ["thinking_budget", "reasoning_effort", "thinking", "max_tokens"]) expect(bodies[0]).not.toHaveProperty(key);
+    expect(result).toMatchObject({ usage: { reasoningTokens: 0 } });
+    // Both unrelated work inside the review plugin and other plugins retain their settings.
+    await service.invoke({ ...call, input });
+    await service.invoke({ ...call, pluginId: "other-plugin", input });
+    expect(bodies[1]).toMatchObject(defaults);
+    expect(bodies[2]).toEqual(bodies[1]);
+    expect(model.provider.extraBody).toEqual(defaults);
+    model.context.model = "unrelated-chat-model";
+    await service.invoke({ ...call, input: { ...input, thinkingMode: "disabled" } });
+    expect(bodies[3]).toMatchObject(defaults);
+    model.context.model = "qwen3.6-max";
+    await service.invoke({ ...call, input: { ...input, thinkingMode: "disabled" } });
+    expect(bodies[4]).toMatchObject(defaults);
+  });
+
   it("does not duplicate a timed out paragraph request, and honors the caller deadline", async () => {
     vi.useFakeTimers();
     try {
