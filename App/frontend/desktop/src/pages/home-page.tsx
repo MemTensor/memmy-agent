@@ -2561,7 +2561,6 @@ export function HomePage() {
       const validation = await validateAgentMediaFiles(files, t, pendingAttachmentsRef.current[scopeKey] ?? []);
       const validFiles = validation.files;
       if (!validFiles.length) {
-        setComposerMediaErrorForScope(scopeKey, t("home.media.error.duplicateAttachment"));
         return;
       }
       const nextPending = validFiles.map((item) => fileToPendingAttachment(item.file, item.sourceKey, item.classification));
