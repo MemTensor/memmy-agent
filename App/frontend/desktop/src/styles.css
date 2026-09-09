@@ -10087,6 +10087,7 @@ input[type="checkbox"].check-sky:checked::after {
 
 .app-frame-task-section-header__toggle-icon.is-collapsed {
   transform: rotate(-90deg);
+  opacity: 0.55;
 }
 
 .app-frame-task-section-header:hover .app-frame-task-section-header__toggle-icon,

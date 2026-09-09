@@ -312,6 +312,7 @@ export function AppFrame(props: AppFrameProps) {
   const hasRequestedAgentData = useRef(false);
   const lastNotifiedCompletionAt = useRef<number | null>(null);
   const previousCanonicalSessionKeysRef = useRef<Set<string> | null>(null);
+  const lastAutoExpandedSessionKeyRef = useRef<string | null>(null);
   const accountSummary = resolveSidebarAccountSummary(state, {
     brandName: t("brand.name"),
     byokLabel: t("welcome.byok.title"),
@@ -769,6 +770,14 @@ export function AppFrame(props: AppFrameProps) {
       });
     }
   }
+
+  useEffect(() => {
+    if (!highlightedSessionKey || lastAutoExpandedSessionKeyRef.current === highlightedSessionKey) return;
+    const task = state.agent.tasks.find((candidate) => candidate.sessionKey === highlightedSessionKey);
+    if (!task) return;
+    lastAutoExpandedSessionKeyRef.current = highlightedSessionKey;
+    expandTaskAncestors(task);
+  }, [highlightedSessionKey, showingArchived, state.agent.projects, state.agent.sidebarState.collapsed_groups, state.agent.tasks]);
 
   function selectSidebarWorkspace(projectId: string) {
     setProjectCreateMenuAnchor(null);
