@@ -864,7 +864,7 @@ async function ingestPersistentSource(
     // out into hundreds of near-empty tool-call fragments, so an oversized turn
     // is clipped to the wire budget instead of being fanned out.
     try {
-      const added = await options.memoryClient.addMemory({
+      const added = await addMemoryWithIdempotencyMigration(options.memoryClient, {
         requestId: legacyTurnRequestId(turn),
         adapterId: `agent-source:${sourceId}`,
         content: renderTurnClipped(turn.messages),
@@ -1161,7 +1161,7 @@ async function ingestSourceSkills(
   for (const skill of skills) {
     scanOptions.signal?.throwIfAborted();
     try {
-      const added = await options.memoryClient.addMemory({
+      const added = await addMemoryWithIdempotencyMigration(options.memoryClient, {
         requestId: `agent-source-skill:${sourceId}:${skill.sourceSkillId}:${skill.sourceContentHash}`,
         adapterId: `agent-source:${sourceId}`,
         content: skill.content,
@@ -1190,6 +1190,28 @@ async function ingestSourceSkills(
     }
   }
   return { errors, errorCount, memoryIdCount };
+}
+
+async function addMemoryWithIdempotencyMigration(
+  memoryClient: Pick<MemoryClient, "addMemory">,
+  input: Parameters<MemoryClient["addMemory"]>[0]
+): ReturnType<MemoryClient["addMemory"]> {
+  try {
+    return await memoryClient.addMemory(input);
+  } catch (error) {
+    if (!isIdempotencyBodyMismatch(error)) throw error;
+    const requestId = createHash("sha256")
+      .update(`agent-source-request-v2\u0000${JSON.stringify({ ...input, requestId: undefined })}`)
+      .digest("hex");
+    return await memoryClient.addMemory({ ...input, requestId });
+  }
+}
+
+function isIdempotencyBodyMismatch(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const code = "code" in error && typeof error.code === "string" ? error.code : "";
+  return code === "idempotency_body_mismatch"
+    || error.message.includes("idempotency key reused with different request body");
 }
 
 function filterCheckpointedConversations(

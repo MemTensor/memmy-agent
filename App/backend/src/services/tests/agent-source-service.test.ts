@@ -77,6 +77,49 @@ describe("agent source service", () => {
       expect(replay.memoryIdCount).toBe(0);
     });
 
+    it("migrates stale conversation and skill idempotency keys without failing the scan", async () => {
+      tempDir = mkdtempSync(join(tmpdir(), "memmy-idempotency-migration-"));
+      const messages = createCompleteMemoryMessages("codex", 1, "2026-05-28T10:00:00.000Z");
+      const memoryClient = createMockMemoryClient();
+      const added: Parameters<MemoryClient["addMemory"]>[0][] = [];
+      const service = createService({
+        scanStoreDirectory: tempDir,
+        adapters: [createFakeAdapter("codex", messages)],
+        memoryClient: {
+          ...memoryClient,
+          async addMemory(input) {
+            added.push(input);
+            if (added.length === 1 || added.length === 3) {
+              throw Object.assign(new Error("idempotency key reused with different request body"), {
+                code: "idempotency_body_mismatch"
+              });
+            }
+            return { ...await memoryClient.addMemory(input), id: `memory-${added.length}` };
+          },
+          async getMemoryProcessingStatus(ids) {
+            return { items: ids.map((memoryId) => ({ memoryId, state: "ready" as const, attemptCount: 0, manualRetryCount: 0, retryAction: "retry" as const, updatedAt: "2026-05-28T10:00:00.000Z" })), serverTime: "2026-05-28T10:00:00.000Z" };
+          }
+        },
+        skillDistributionService: {
+          async listSkills() {
+            return [{
+              sourceAgentId: "codex", sourceSkillId: "review-code", sourceSkillPath: "/tmp/codex/skills/review-code/SKILL.md",
+              sourceSkillVersion: "v1", sourceContentHash: "same-content", title: "review-code",
+              content: "Review changed code.", updatedAt: "2026-05-28T09:00:00.000Z"
+            }];
+          },
+          async install() {}, async uninstall() {}, async installPlugin() {}, async uninstallPlugin() {}
+        }
+      });
+
+      const result = await service.scanOne("codex", { mode: "full" });
+
+      expect(result.errors).toEqual([]);
+      expect(added).toHaveLength(4);
+      expect(added[1]?.requestId).not.toBe(added[0]?.requestId);
+      expect(added[3]?.requestId).not.toBe(added[2]?.requestId);
+    });
+
     it.each([
       ["after the watermark", "2026-05-28T10:01:53.000Z", ["query 1"]],
       ["ending exactly at the watermark", "2026-05-28T10:01:52.000Z", ["query 2", "query 1"]],

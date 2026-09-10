@@ -789,7 +789,7 @@ async function ingestStagedMessages(
     // out into hundreds of near-empty tool-call fragments, so an oversized turn
     // is clipped to the wire budget instead of being fanned out.
     try {
-      const added = service.addMemory({
+      const added = addMemoryWithIdempotencyMigration(service, {
         requestId: legacyTurnRequestId(turn), adapterId: `agent-source:${sourceId}`,
         content: renderTurnClipped(turn.messages), layer: "L1",
         title: titleForTurn(sourceId, turn.messages), tags: ["agent-source", sourceId], source: sourceId,
@@ -960,7 +960,7 @@ async function ingestAgentSkills(
     const requestId = `agent-source-skill:${sourceId}:${sourceSkillId}:${contentHash}`;
     const fileStat = await stat(filePath);
     try {
-      const added = service.addMemory({
+      const added = addMemoryWithIdempotencyMigration(service, {
         requestId,
         adapterId: `agent-source:${sourceId}`,
         content,
@@ -993,6 +993,25 @@ async function ingestAgentSkills(
   }
   flush(true);
   return { written, memoryIdCount, errorCount, errors };
+}
+
+function addMemoryWithIdempotencyMigration(
+  service: Pick<MemoryService, "addMemory">,
+  input: Parameters<MemoryService["addMemory"]>[0]
+): ReturnType<MemoryService["addMemory"]> {
+  try {
+    return service.addMemory(input);
+  } catch (error) {
+    if (!(error instanceof MemoryServiceError)
+      || error.code !== "conflict"
+      || !error.message.includes("idempotency key reused with different request body")) {
+      throw error;
+    }
+    const requestId = createHash("sha256")
+      .update(`agent-source-request-v2\u0000${JSON.stringify({ ...input, requestId: undefined })}`)
+      .digest("hex");
+    return service.addMemory({ ...input, requestId });
+  }
 }
 
 async function* findSkillFiles(root: string): AsyncGenerator<string> {
