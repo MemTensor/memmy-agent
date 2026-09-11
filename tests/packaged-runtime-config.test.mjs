@@ -1,14 +1,17 @@
 import {
   existsSync,
+  lstatSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createPackage } from "@electron/asar";
@@ -20,12 +23,86 @@ import {
 import { pruneRuntimeEnvFiles } from "../scripts/internal/shared/prune-runtime-env-files-lib.mjs";
 
 const roots = [];
+const macBuildScriptSource = readFileSync(new URL("../scripts/internal/mac/build-dmg.sh", import.meta.url), "utf8");
 
 afterEach(() => {
   while (roots.length) rmSync(roots.pop(), { recursive: true, force: true });
 });
 
 describe("packaged desktop runtime configuration", () => {
+  it("generates a macOS Memory manifest with local workspace dependencies and retained external locks", () => {
+    const fixture = macMemoryManifestFixture({ externalDependency: true });
+    const result = generateMacMemoryManifest(fixture);
+    expect(result.status, result.stderr).toBe(0);
+    const manifest = JSON.parse(readFileSync(join(fixture.runtime, "package.json"), "utf8"));
+    const lock = JSON.parse(readFileSync(join(fixture.runtime, "package-lock.json"), "utf8"));
+    expect(manifest.dependencies).toEqual({
+      "@memmy/agent-source-core": "file:../../../../../../AgentSourceCore",
+      "fixture-public": "1.0.0",
+    });
+    expect(resolve(fixture.runtime, manifest.dependencies["@memmy/agent-source-core"].slice(5))).toBe(fixture.core);
+    expect(lock.packages[""].dependencies).toEqual(manifest.dependencies);
+    expect(lock.packages["node_modules/@memmy/agent-source-core"]).toBeUndefined();
+    expect(lock.packages["node_modules/fixture-public"]).toEqual({
+      version: "1.0.0", dependencies: { "fixture-transitive": "1.0.0" },
+    });
+    expect(lock.packages["node_modules/fixture-transitive"]).toEqual({ version: "1.0.0" });
+    expect(JSON.parse(readFileSync(join(fixture.runtime, "memory-runtime.json"), "utf8"))).toMatchObject({
+      version: "2.1.2", target: "darwin-arm64", entrypoint: "dist/src/server/index.js",
+    });
+  });
+
+  it("keeps macOS Memory workspace imports working after staging is moved away from the repository", () => {
+    const fixture = macMemoryManifestFixture();
+    const generated = generateMacMemoryManifest(fixture);
+    expect(generated.status, generated.stderr).toBe(0);
+    const commands = macBuildScriptSource.split(/\r?\n/).filter((line) =>
+      /^npm (install|ci) --prefix "\$RUNTIME_DIR\/memory"/.test(line));
+    expect(commands).toHaveLength(2);
+    const npmConfig = join(fixture.root, "empty.npmrc");
+    const npmGlobalConfig = join(fixture.root, "empty-global.npmrc");
+    writeFileSync(npmConfig, "");
+    writeFileSync(npmGlobalConfig, "");
+    const installed = spawnSync("bash", ["-c", [
+      "set -euo pipefail",
+      'RUNTIME_DIR="$1"',
+      'fixture_node="$2"',
+      'fixture_npm_cli="$3"',
+      'TARGET_CPU="arm64"',
+      'npm() { "$fixture_node" "$fixture_npm_cli" "$@"; }',
+      ...commands,
+    ].join("\n"), "mac-memory-fixture", dirname(fixture.runtime), process.execPath, findNpmCli()], {
+      cwd: fixture.root,
+      encoding: "utf8",
+      timeout: 30_000,
+      env: {
+        PATH: process.env.PATH,
+        ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
+        npm_config_userconfig: npmConfig,
+        npm_config_globalconfig: npmGlobalConfig,
+        npm_config_cache: join(fixture.root, "npm-cache"),
+        npm_config_offline: "true",
+        npm_config_ignore_scripts: "true",
+        npm_config_audit: "false",
+        npm_config_fund: "false",
+      },
+    });
+    expect(installed.status, [
+      installed.stderr || installed.error?.message,
+      readFileSync(join(fixture.runtime, "package-lock.json"), "utf8"),
+    ].join("\n")).toBe(0);
+    const installedCore = join(fixture.runtime, "node_modules", "@memmy", "agent-source-core");
+    expect(lstatSync(installedCore).isSymbolicLink()).toBe(false);
+    const relocated = join(fixture.root, "relocated-memory");
+    renameSync(fixture.runtime, relocated);
+    rmSync(fixture.core, { recursive: true, force: true });
+    const imported = spawnSync(process.execPath, ["--input-type=module", "-e",
+      'import { fixtureValue } from "@memmy/agent-source-core"; console.log(fixtureValue);',
+    ], { cwd: relocated, encoding: "utf8" });
+    expect(imported.status, imported.stderr).toBe(0);
+    expect(imported.stdout.trim()).toBe("local-core-ready");
+  });
+
   it("writes exactly the public allowlist and never serializes env decoys", async () => {
     const root = fixtureRoot();
     const envFile = join(root, ".env");
@@ -534,4 +611,62 @@ function fixtureRoot() {
   const root = mkdtempSync(join(tmpdir(), "memmy-packaged-runtime-"));
   roots.push(root);
   return root;
+}
+
+function macMemoryManifestFixture({ externalDependency = false } = {}) {
+  // npm compares real package paths; macOS /var is an alias for /private/var.
+  const root = realpathSync(fixtureRoot());
+  const repository = join(root, "repository with spaces");
+  const core = join(repository, "AgentSourceCore");
+  const memory = join(repository, "Memory");
+  const runtime = join(repository, "App", "shell", "desktop", "dist", "runtime", "memory");
+  writeFixtureJson(join(core, "package.json"), {
+    name: "@memmy/agent-source-core", version: "0.0.0", private: true, type: "module", main: "dist/src/index.js",
+  });
+  mkdirSync(join(core, "dist", "src"), { recursive: true });
+  writeFileSync(join(core, "dist", "src", "index.js"), 'export const fixtureValue = "local-core-ready";\n');
+  writeFixtureJson(join(memory, "package.json"), {
+    name: "@memmy/memory", version: "2.1.2",
+    dependencies: { "@memmy/agent-source-core": "0.0.0", ...(externalDependency ? { "fixture-public": "1.0.0" } : {}) },
+  });
+  writeFixtureJson(join(repository, "package-lock.json"), {
+    lockfileVersion: 3,
+    requires: true,
+    packages: {
+      "": { name: "fixture-repository", version: "1.1.4" },
+      AgentSourceCore: { name: "@memmy/agent-source-core", version: "0.0.0" },
+      "node_modules/@memmy/agent-source-core": { resolved: "AgentSourceCore", link: true },
+      ...(externalDependency ? {
+        "node_modules/fixture-public": { version: "1.0.0", dependencies: { "fixture-transitive": "1.0.0" } },
+        "node_modules/fixture-transitive": { version: "1.0.0" },
+      } : {}),
+    },
+  });
+  return { root, repository, core, memory, runtime };
+}
+
+function generateMacMemoryManifest(fixture) {
+  // Execute only the manifest generator, never the build script or its credential setup.
+  const generator = /create_memory_runtime_manifest\(\) \{[\s\S]*?node --input-type=module <<'NODE'\r?\n([\s\S]*?)\r?\nNODE\r?\n\}/.exec(macBuildScriptSource)?.[1];
+  expect(generator).toBeTypeOf("string");
+  return spawnSync(process.execPath, ["--input-type=module"], {
+    input: generator,
+    cwd: fixture.root,
+    encoding: "utf8",
+    env: { ROOT_DIR: fixture.repository, MEMORY_DIR: fixture.memory, MEMORY_RUNTIME_DIR: fixture.runtime, TARGET_CPU: "arm64" },
+  });
+}
+
+function findNpmCli() {
+  if (process.env.npm_execpath?.endsWith("npm-cli.js")) return process.env.npm_execpath;
+  for (const directory of (process.env.PATH ?? "").split(delimiter)) {
+    const windowsCli = join(directory, "node_modules", "npm", "bin", "npm-cli.js");
+    if (existsSync(windowsCli)) return windowsCli;
+    const executable = join(directory, "npm");
+    if (existsSync(executable)) {
+      const resolved = realpathSync(executable);
+      if (resolved.endsWith("npm-cli.js")) return resolved;
+    }
+  }
+  throw new Error("An installed npm CLI is required for the offline package fixture");
 }

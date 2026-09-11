@@ -347,6 +347,18 @@ const memoryPackage = JSON.parse(await readFile(join(memoryDir, "package.json"),
 const runtimeVersion = memoryPackage.version;
 const rootLock = JSON.parse(await readFile(join(rootDir, "package-lock.json"), "utf8"));
 const dependencies = { ...(memoryPackage.dependencies ?? {}) };
+const workspacePackageDirs = new Map();
+for (const [packageKey, packageInfo] of Object.entries(rootLock.packages ?? {})) {
+  if (packageKey && !packageKey.startsWith("node_modules/") && packageInfo.name) {
+    workspacePackageDirs.set(packageInfo.name, packageKey);
+  }
+}
+for (const dependencyName of Object.keys(dependencies)) {
+  const workspaceDir = workspacePackageDirs.get(dependencyName);
+  if (workspaceDir) {
+    dependencies[dependencyName] = `file:../../../../../../${workspaceDir}`;
+  }
+}
 const runtimePackage = {
   name: runtimeName,
   version: runtimeVersion,
@@ -410,6 +422,9 @@ function addPackage(packageKey) {
   const packageInfo = sourcePackages[packageKey];
   if (!packageInfo) {
     throw new Error(`Missing package-lock entry for ${packageKey}`);
+  }
+  if (packageInfo.link) {
+    return;
   }
 
   selectedPackageKeys.add(packageKey);
@@ -804,6 +819,11 @@ mkdir -p "$MIGRATIONS_STAGING_DIR"
 cp "$MIGRATIONS_DIR/package.json" "$MIGRATIONS_STAGING_DIR/package.json"
 cp -R "$MIGRATIONS_DIR/dist" "$MIGRATIONS_STAGING_DIR/dist"
 mkdir -p "$RUNTIME_DIR/memory/dist"
+if [ -d "$ROOT_DIR/AgentSourceCore/dist/src" ]; then
+  mkdir -p "$RUNTIME_DIR/memory/AgentSourceCore/dist/src"
+  cp -R "$ROOT_DIR/AgentSourceCore/dist/src/." "$RUNTIME_DIR/memory/AgentSourceCore/dist/src/"
+  cp "$ROOT_DIR/AgentSourceCore/package.json" "$RUNTIME_DIR/memory/AgentSourceCore/package.json"
+fi
 cp -R "$MEMORY_DIR/dist/src" "$RUNTIME_DIR/memory/dist/src"
 cp -R "$MEMORY_DIR/dist/viewer" "$RUNTIME_DIR/memory/dist/viewer"
 cp -R "$MEMORY_DIR/adapters" "$RUNTIME_DIR/memory/adapters"
@@ -811,9 +831,9 @@ cp -R "$AGENT_DIR/dist" "$RUNTIME_DIR/memmy-agent/dist"
 package_step_start "Create Memory runtime manifest"
 create_memory_runtime_manifest "$RUNTIME_DIR/memory"
 package_step_start "Resolve Memory runtime lockfile"
-npm install --prefix "$RUNTIME_DIR/memory" --package-lock-only --ignore-scripts --os=darwin --cpu="$TARGET_CPU"
+npm install --prefix "$RUNTIME_DIR/memory" --package-lock-only --ignore-scripts --install-links --os=darwin --cpu="$TARGET_CPU"
 package_step_start "Install Memory runtime production dependencies"
-npm ci --prefix "$RUNTIME_DIR/memory" --omit=dev --os=darwin --cpu="$TARGET_CPU"
+npm ci --prefix "$RUNTIME_DIR/memory" --omit=dev --install-links --os=darwin --cpu="$TARGET_CPU"
 package_step_start "Rebuild Memory native modules for Electron"
 ELECTRON_VERSION="$(node -p "require('./App/shell/desktop/node_modules/electron/package.json').version")"
 node_modules/.bin/electron-rebuild \

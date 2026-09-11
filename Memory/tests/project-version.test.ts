@@ -14,7 +14,7 @@ describe("Memory service version", () => {
       readFileSync(resolve(fileURLToPath(import.meta.url), "../../viewer/package.json"), "utf8")
     );
 
-    expect(PROJECT_VERSION).toBe("2.1.1");
+    expect(PROJECT_VERSION).toBe("2.1.2");
     expect(PROJECT_VERSION).toBe(manifest.version);
     expect(cliManifest.version).toBe(manifest.version);
     expect(viewerManifest.version).toBe(manifest.version);

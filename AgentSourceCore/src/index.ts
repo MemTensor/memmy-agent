@@ -137,14 +137,6 @@ export interface ImportedTurn {
   messages: ConversationMessage[];
 }
 
-export interface TurnPart extends ImportedTurn {
-  parentTurnId: string;
-  partIndex: number;
-  partCount: number;
-  content: string;
-  contentHash: string;
-}
-
 export function compareMessageOrder(left: ConversationMessage, right: ConversationMessage): number {
   return left.conversationId.localeCompare(right.conversationId)
     || Date.parse(left.createdAt) - Date.parse(right.createdAt)
@@ -237,154 +229,48 @@ export function legacyTurnId(turn: ImportedTurn): string {
   return `${turn.sourceId}:${createHash("sha256").update(stableTurnIdentity(turn)).digest("hex").slice(0, 24)}`;
 }
 
-export function splitTurn(turn: ImportedTurn, maxTokens = 4000, maxBytes = 1024 * 1024): TurnPart[] {
-  const chunks: ConversationMessage[][] = [];
-  let current: ConversationMessage[] = [];
-  const fits = (candidate: readonly ConversationMessage[]) => {
-    const content = renderTurn(candidate);
-    return estimateTokens(content) <= maxTokens && Buffer.byteLength(content) <= maxBytes;
-  };
-  for (const message of turn.messages) {
-    if (fits([...current, message])) {
-      current.push(message);
-      continue;
-    }
-    if (current.length > 0) { chunks.push(current); current = []; }
-    const pieces = splitMessage(message, maxTokens, maxBytes);
-    if (current.length === 0 && chunks.length > 0) {
-      // A user prefix followed by an oversized assistant/tool message should
-      // remain one logical part whenever the prefix can share any content.
-      const previous = chunks[chunks.length - 1];
-      if (previous && !isCompleteTurn(previous)) {
-        const combined = combinePrefix(previous, pieces[0]!, maxTokens, maxBytes);
-        if (combined) {
-          chunks[chunks.length - 1] = combined.messages;
-          if (combined.remainder) chunks.push(...splitMessage(combined.remainder, maxTokens, maxBytes).map((piece) => [piece]));
-          for (const piece of pieces.slice(1)) chunks.push([piece]);
-          continue;
-        }
-      }
-    }
-    for (const piece of pieces) chunks.push([piece]);
-  }
-  if (current.length > 0) chunks.push(current);
-  if (chunks.length === 0) chunks.push([...turn.messages]);
-  const parentTurnId = createHash("sha256").update(stableTurnIdentity(turn)).digest("hex").slice(0, 24);
-  return chunks.map((messages, partIndex) => {
-    const content = renderTurn(messages);
-    return {
-      ...turn,
-      messages,
-      parentTurnId,
-      partIndex,
-      partCount: chunks.length,
-      content,
-      contentHash: createHash("sha256").update(content).digest("hex")
-    };
-  });
+/** Raw UTF-8 content limit; JSON escaping has a separate transport budget. */
+export const TURN_CONTENT_MAX_BYTES = 512 * 1024;
+const TURN_CONTENT_MAX_JSON_BYTES = 1024 * 1024;
+
+/**
+ * Renders a whole turn as one memory body. Agent-source scans deliberately keep
+ * one turn == one memory: splitting an agentic turn fans a single exchange out
+ * into hundreds of near-empty tool-call fragments. Oversized turns are clipped
+ * on a UTF-8 boundary instead so the add-memory request stays under the wire
+ * limit without inventing extra memories.
+ */
+export function renderTurnClipped(messages: readonly ConversationMessage[], maxBytes = TURN_CONTENT_MAX_BYTES): string {
+  const content = renderTurn(messages);
+  const bytes = Buffer.byteLength(content);
+  if (bytes <= maxBytes && jsonContentBytes(content) + 2 <= TURN_CONTENT_MAX_JSON_BYTES) return content;
+  const marker = (omitted: number) => `\n\n[... truncated ${omitted} bytes of tool output ...]`;
+  // Reserving the largest possible omission count also bounds the final marker.
+  const reservedMarker = marker(bytes);
+  const markerBytes = Buffer.byteLength(reservedMarker);
+  const rawBudget = Math.max(0, maxBytes);
+  if (rawBudget <= markerBytes) return clipUtf8(reservedMarker, rawBudget, TURN_CONTENT_MAX_JSON_BYTES - 2);
+  const prefix = clipUtf8(content, rawBudget - markerBytes, TURN_CONTENT_MAX_JSON_BYTES - 2 - jsonContentBytes(reservedMarker));
+  return `${prefix}${marker(bytes - Buffer.byteLength(prefix))}`;
 }
 
-function combinePrefix(
-  prefix: readonly ConversationMessage[],
-  piece: ConversationMessage,
-  maxTokens: number,
-  maxBytes: number
-): { messages: ConversationMessage[]; remainder?: ConversationMessage } | null {
-  const fits = (content: string) => {
-    const candidate = [...prefix, { ...piece, content }];
-    const rendered = renderTurn(candidate);
-    return estimateTokens(rendered) <= maxTokens && Buffer.byteLength(rendered) <= maxBytes;
-  };
-  if (fits(piece.content)) return { messages: [...prefix, piece] };
-  const characters = Array.from(piece.content);
-  let low = 0;
-  let high = characters.length;
-  let best = 0;
-  while (low <= high) {
-    const middle = Math.floor((low + high) / 2);
-    if (fits(characters.slice(0, middle).join(""))) {
-      best = middle;
-      low = middle + 1;
-    } else {
-      high = middle - 1;
-    }
-  }
-  if (best === 0) return null;
-  const content = characters.slice(0, best).join("");
-  const remainder = characters.slice(best).join("");
-  return {
-    messages: [...prefix, { ...piece, content }],
-    ...(remainder ? { remainder: { ...piece, content: remainder } } : {})
-  };
+function jsonContentBytes(value: string): number {
+  return Buffer.byteLength(JSON.stringify(value)) - 2;
 }
 
-function splitMessage(message: ConversationMessage, maxTokens: number, maxBytes: number): ConversationMessage[] {
-  const emptyRendered = renderTurn([{ ...message, content: "" }]);
-  const bodyTokenLimit = Math.max(1, maxTokens - estimateTokens(emptyRendered));
-  const bodyByteLimit = Math.max(1, maxBytes - Buffer.byteLength(emptyRendered));
-  const fitsContent = (content: string) => {
-    const rendered = renderTurn([{ ...message, content }]);
-    return estimateTokens(rendered) <= maxTokens && Buffer.byteLength(rendered) <= maxBytes;
-  };
-  if (fitsContent(message.content)) return [message];
-  const pieces: string[] = [];
-  for (const paragraph of message.content.split(/\n\s*\n/)) {
-    if (!paragraph) continue;
-    if (paragraph && estimateTokens(paragraph) <= bodyTokenLimit && Buffer.byteLength(paragraph) <= bodyByteLimit && fitsContent(paragraph)) {
-      pieces.push(paragraph);
-    } else {
-      pieces.push(...splitText(paragraph, bodyTokenLimit, bodyByteLimit));
-    }
-  }
-  return (pieces.length > 0 ? pieces : [""]).map((content) => ({ ...message, content }));
-}
-
-function splitText(value: string, maxTokens: number, maxBytes: number): string[] {
-  const maxChars = Math.max(1, maxTokens * 4);
-  const chunks: string[] = [];
-  let current = "";
-  for (const line of value.split(/\r?\n/u)) {
-    const candidate = current ? `${current}\n${line}` : line;
-    if (current && (estimateTokens(candidate) > maxTokens || Buffer.byteLength(candidate) > maxBytes)) {
-      chunks.push(...splitUtf8(current, maxBytes));
-      current = "";
-    }
-    if (line.length > maxChars || Buffer.byteLength(line) > maxBytes) {
-      if (current) { chunks.push(...splitUtf8(current, maxBytes)); current = ""; }
-      let part = "";
-      for (const character of line) {
-        if (part && (part.length >= maxChars || Buffer.byteLength(part + character) > maxBytes)) {
-          chunks.push(part);
-          part = "";
-        }
-        part += character;
-      }
-      if (part) chunks.push(part);
-    } else {
-      current = current ? candidate : line;
-    }
-  }
-  if (current) chunks.push(...splitUtf8(current, maxBytes));
-  return chunks.length > 0 ? chunks : [""];
-}
-
-function splitUtf8(value: string, maxBytes: number): string[] {
-  const parts: string[] = [];
-  let current = "";
-  let currentBytes = 0;
+function clipUtf8(value: string, maxBytes: number, maxJsonBytes: number): string {
+  let bytes = 0;
+  let jsonBytes = 0;
+  let end = 0;
   for (const character of value) {
     const characterBytes = Buffer.byteLength(character);
-    if (current && currentBytes + characterBytes > maxBytes) {
-      parts.push(current);
-      current = character;
-      currentBytes = characterBytes;
-    } else {
-      current += character;
-      currentBytes += characterBytes;
-    }
+    const characterJsonBytes = jsonContentBytes(character);
+    if (bytes + characterBytes > maxBytes || jsonBytes + characterJsonBytes > maxJsonBytes) break;
+    bytes += characterBytes;
+    jsonBytes += characterJsonBytes;
+    end += character.length;
   }
-  if (current) parts.push(current);
-  return parts.length > 0 ? parts : [""];
+  return value.slice(0, end);
 }
 
 export function estimateTokens(value: string): number { return Math.ceil(value.length / 4); }

@@ -34,7 +34,7 @@ import type { ConversationMessage, ScanProgress, SourceAdapter } from "./adapter
 import {
   isCompleteTurn,
   orderedTurns,
-  splitTurn,
+  renderTurnClipped,
   stableTurnIdentity,
   legacyTurnId,
   legacyTurnRequestId,
@@ -663,7 +663,10 @@ async function stageStandaloneSource(
     for await (const message of adapter.scan({
       ...(mode === "incremental" && stored.latestSeenAt ? { since: stored.latestSeenAt } : {}),
       order: mode === "initial_subset" ? "recent_first" : "source_default",
-      fullHistory: true,
+      // Incremental scans must honor the persisted boundary. Full-history
+      // streaming is only safe for an explicit full scan; otherwise the
+      // adapter would stage every historical message in an active session.
+      fullHistory: mode === "full",
       signal,
       onProgress
     })) {
@@ -782,30 +785,25 @@ async function ingestStagedMessages(
     const selectedTurn = store.getTurnMeta(sourceId, turn.conversationId, stableTurnIdentity(turn));
     if (selectedTurn && !selectedTurn.selected) continue;
     let succeeded = true;
-    // Leave ample room for JSON escaping and the add-memory envelope while
-    // keeping every request below the 1 MiB wire limit.
-    const parts = splitTurn(turn, 4000, 512 * 1024);
-    for (const part of parts) {
-      const requestId = parts.length === 1
-        ? legacyTurnRequestId(turn)
-        : createHash("sha256").update([stableTurnIdentity(turn), String(part.partIndex), part.contentHash].join("\u0000")).digest("hex");
-      const turnId = parts.length === 1 ? legacyTurnId(turn) : `${sourceId}:${part.parentTurnId}:${part.partIndex}`;
-      try {
-        const added = service.addMemory({
-          requestId, adapterId: `agent-source:${sourceId}`, content: part.content, layer: "L1",
-          title: titleForTurn(sourceId, part.messages), tags: ["agent-source", sourceId], source: sourceId,
-          turnId, createdAt: part.messages[0]!.createdAt, deferProcessing: true
-        });
-        if (added.duplicate) store.saveResult({ sourceId, conversationId: turn.conversationId, memoryId: added.id });
-        else { store.saveResult({ sourceId, conversationId: turn.conversationId, memoryId: added.id }); memoryIds.push(added.id); written += 1; }
-      } catch (error) {
-        succeeded = false;
-        activeConversationFailed = true;
-        const reason = error instanceof Error ? error.message : String(error);
-        errorCount += 1;
-        if (errors.length < 1000) errors.push(`${turn.conversationId}: ${reason}`);
-        store.saveResult({ sourceId, conversationId: turn.conversationId, error: reason });
-      }
+    // One turn is one memory. Splitting an agentic turn fans a single exchange
+    // out into hundreds of near-empty tool-call fragments, so an oversized turn
+    // is clipped to the wire budget instead of being fanned out.
+    try {
+      const added = service.addMemory({
+        requestId: legacyTurnRequestId(turn), adapterId: `agent-source:${sourceId}`,
+        content: renderTurnClipped(turn.messages), layer: "L1",
+        title: titleForTurn(sourceId, turn.messages), tags: ["agent-source", sourceId], source: sourceId,
+        turnId: legacyTurnId(turn), createdAt: turn.messages[0]!.createdAt, deferProcessing: true
+      });
+      store.saveResult({ sourceId, conversationId: turn.conversationId, memoryId: added.id });
+      if (!added.duplicate) { memoryIds.push(added.id); written += 1; }
+    } catch (error) {
+      succeeded = false;
+      activeConversationFailed = true;
+      const reason = error instanceof Error ? error.message : String(error);
+      errorCount += 1;
+      if (errors.length < 1000) errors.push(`${turn.conversationId}: ${reason}`);
+      store.saveResult({ sourceId, conversationId: turn.conversationId, error: reason });
     }
     if (succeeded) {
       messageCount += turn.messages.length;
@@ -848,13 +846,16 @@ async function prepareStandaloneSource(
       firstCreatedAt: firstMessage.createdAt,
       lastMessageId: lastMessage.messageId,
       lastCreatedAt: lastMessage.createdAt,
-      selected: true
+      // A conversation may contain years of history but only one new turn.
+      // Select turns at the watermark, not every turn in that conversation.
+      selected: mode !== "incremental" || !latestSeenAt ||
+        isAtOrAfter(lastMessage.createdAt, latestSeenAt)
     });
   };
   const flushConversation = () => {
     if (!currentConversation || !latest) return;
     hash.update("]");
-    const selected = mode !== "incremental" || !latestSeenAt || Date.parse(latest.createdAt) > Date.parse(latestSeenAt);
+    const selected = mode !== "incremental" || !latestSeenAt || isAtOrAfter(latest.createdAt, latestSeenAt);
     store.saveConversationMeta({
       sourceId,
       conversationId: currentConversation,
@@ -908,6 +909,12 @@ async function prepareStandaloneSource(
   const contentHash = sourceHash.digest("hex");
   if (mode === "incremental" && previousContentHash !== contentHash) store.selectAllConversations(sourceId);
   return contentHash;
+}
+
+function isAtOrAfter(value: string, boundary: string): boolean {
+  const valueAt = Date.parse(value);
+  const boundaryAt = Date.parse(boundary);
+  return !Number.isFinite(valueAt) || !Number.isFinite(boundaryAt) || valueAt >= boundaryAt;
 }
 
 function hashMeta(message: ConversationMessage, key: string): string | undefined {
