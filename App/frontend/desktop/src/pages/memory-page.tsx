@@ -76,7 +76,6 @@ const memoryNavSections: MemoryNavSection[] = [
     titleKey: "memory.nav.work",
     items: [
       { id: "overview", labelKey: "memory.nav.overview", icon: <Layers size={16} /> },
-      { id: "computer-history", labelKey: "memory.nav.computerHistory", icon: <ScrollText size={16} /> },
       { id: "memories", labelKey: "memory.nav.memory", icon: <BrainCircuit size={16} /> },
       { id: "tasks", labelKey: "memory.nav.tasks", icon: <ListChecks size={16} /> },
       { id: "policies", labelKey: "memory.nav.policies", icon: <Sparkles size={16} /> },
@@ -95,7 +94,8 @@ const memoryNavSections: MemoryNavSection[] = [
   {
     titleKey: "memory.nav.system",
     items: [
-      { id: "sources", labelKey: "memory.sourcesNav", icon: <Link2 size={16} /> }
+      { id: "sources", labelKey: "memory.sourcesNav", icon: <Link2 size={16} /> },
+      { id: "computer-history", labelKey: "memory.nav.computerHistory", icon: <ScrollText size={16} /> }
     ]
   }
 ];
