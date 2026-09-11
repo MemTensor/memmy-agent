@@ -16,7 +16,7 @@ export const ComputerHistoryEntrySchema = z.object({
   summaryWindow: z.enum(["10min", "6h"]).nullable(),
   pinned: z.boolean(),
   eventStreamPath: z.string().nullable(),
-  sourceType: z.enum(["captured", "imported", "demo_fixture"]),
+  sourceType: z.enum(["captured", "rollup", "imported", "demo_fixture"]),
   createdAt: z.string(),
   markdown: z.string(),
   filePath: z.string(),
@@ -68,4 +68,10 @@ export const ComputerHistorySnapshotSchema = z.object({
     eventStreamDirectory: z.string(),
 
   }).strict()
+}).strict();
+
+// The app-icon route answers with one image rather than a snapshot, so it
+// carries its own tiny schema next to the one it sits beside.
+export const ApplicationIconSchema = z.object({
+  icon: z.string().nullable()
 }).strict();

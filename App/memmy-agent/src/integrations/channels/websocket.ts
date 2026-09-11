@@ -2741,6 +2741,7 @@ export class WebSocketChannel extends BaseChannel {
     if (got === "/api/computer-history/workflows/create") return this.handleComputerHistory(request, "workflow-create");
     if (got === "/api/computer-history/cua/start") return this.handleComputerHistory(request, "cua-start");
     if (got === "/api/computer-history/cua/smoke") return this.handleComputerHistory(request, "cua-smoke");
+    if (got === "/api/computer-history/app-icon") return this.handleComputerHistoryAppIcon(request);
     if (got === "/api/webui/sidebar-state") return this.handleWebuiSidebarState(request);
     if (got === "/api/webui/sidebar-state/update") return this.handleWebuiSidebarStateUpdate(request);
     if (got === "/api/webui/seed-chat") return this.handleWebuiSeedChat(request);
@@ -2876,6 +2877,26 @@ export class WebSocketChannel extends BaseChannel {
     for (const timer of this.sessionUpdateTimers.values()) clearTimeout(timer);
     this.sessionUpdateTimers.clear();
     this.sessionUpdateScopes.clear();
+  }
+
+  /**
+   * An application icon, apart from the snapshot routes: it answers with one
+   * image rather than the whole timeline, and the timeline asks for a dozen of
+   * them at once.
+   */
+  async handleComputerHistoryAppIcon(request: any): Promise<HttpLikeResponse> {
+    if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+    if ((request.method ?? "GET").toUpperCase() !== "GET") return httpError(405, "method not allowed");
+    // The router carries the path, query and all, on `request.path`; there is
+    // no `request.url` here, and reading one silently loses every parameter.
+    const bundleId = queryFirst(parseQuery(String(request?.path ?? "/")), "bundle_id");
+    if (!bundleId) return httpError(400, "bundle_id is required");
+    try {
+      return httpJsonResponse({ icon: await this.computerHistory.applicationIcon(bundleId) });
+    } catch (error) {
+      if (error instanceof ComputerHistoryApiError) return httpError(error.status, error.message);
+      return httpError(500, error instanceof Error ? error.message : String(error));
+    }
   }
 
   async handleComputerHistory(

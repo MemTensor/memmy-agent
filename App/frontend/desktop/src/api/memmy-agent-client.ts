@@ -8,6 +8,7 @@
 import { z } from "zod";
 import {
   ComputerHistoryEntrySchema,
+  ApplicationIconSchema,
   ComputerHistorySnapshotSchema,
   ComputerHistoryWorkflowSchema,
 } from "./computer-history-contract.js";
@@ -50,7 +51,7 @@ export type AgentGoalControlResult = {
   warning?: "turn_cancel_failed";
 };
 
-export type ComputerHistorySourceType = "captured" | "imported" | "demo_fixture";
+export type ComputerHistorySourceType = "captured" | "rollup" | "imported" | "demo_fixture";
 
 export type ComputerHistoryReplayPlan = {
   sourcePath: string;
@@ -720,6 +721,7 @@ export interface MemmyAgentClient {
   createComputerHistoryWorkflow(historyId: string, userRequest: string): Promise<ComputerHistorySnapshot>;
   startComputerHistoryCua(workflowId: string, variables: string[]): Promise<ComputerHistorySnapshot>;
   startComputerHistoryCuaSmoke(): Promise<ComputerHistorySnapshot>;
+  getApplicationIcon(bundleId: string): Promise<string | null>;
   getSessionSnapshot(options?: MemmyAgentRequestOptions): Promise<MemmyAgentSessionSnapshot>;
   listSessions(): Promise<MemmyAgentSessionSummary[]>;
   readWorkspaceEnvironment(scope: WorkspaceEnvironmentScope): Promise<WorkspaceEnvironmentState>;
@@ -1120,6 +1122,14 @@ class HttpMemmyAgentClient implements MemmyAgentClient {
       method: "POST",
       body: {}
     });
+  }
+
+  async getApplicationIcon(bundleId: string): Promise<string | null> {
+    const { icon } = await this.request(
+      `/api/computer-history/app-icon?bundle_id=${encodeURIComponent(bundleId)}`,
+      ApplicationIconSchema
+    );
+    return icon;
   }
 
   async listSessions(): Promise<MemmyAgentSessionSummary[]> {

@@ -25,8 +25,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { ApplicationIconReader } from "../../core/agent-runtime/computer-history/application-icon.js";
 
-export type ComputerHistorySourceType = "captured" | "imported" | "demo_fixture";
+export type ComputerHistorySourceType = "captured" | "rollup" | "imported" | "demo_fixture";
 
 export interface ComputerHistoryReplayPlan {
   sourcePath: string;
@@ -200,6 +201,38 @@ export function isCodexSkysightCopy(historyId: string): boolean {
   return CODEX_SKYSIGHT_FILE.test(historyId);
 }
 
+/**
+ * The moment a summary is about, in order of how well each source knows it.
+ *
+ * The id carries the start of the window it covers and never changes; imported
+ * context carries `captured_at`; only a summary with neither is dated by its
+ * file, which is a guess and the reason this exists.
+ */
+function entryInstant(id: string, markdown: string, modifiedAt: Date): string {
+  const fromId = instantFromId(id);
+  if (fromId) return fromId.toISOString();
+  const captured = readFrontmatterValue(markdown, "captured_at");
+  if (captured) {
+    const parsed = new Date(captured);
+    if (!Number.isNaN(parsed.getTime())) return parsed.toISOString();
+  }
+  return modifiedAt.toISOString();
+}
+
+/** Whether this summary is one the machine produced and the model must write. */
+function isMachineSummary(sourceType: ComputerHistorySourceType): boolean {
+  return sourceType === "captured" || sourceType === "rollup";
+}
+
+/** Whether the summary on disk has already been written by the model. */
+function isSummaryWritten(file: string): boolean {
+  try {
+    return isNarrated(fs.readFileSync(file, "utf8"));
+  } catch {
+    return false;
+  }
+}
+
 function boundedInterval(value: string | undefined, fallback: number, minimum: number, maximum: number): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
@@ -218,7 +251,14 @@ export class ComputerHistoryDemoService {
   private observationError: string | null = null;
   private rotationTimer: ReturnType<typeof setInterval> | null = null;
   private readonly observationSettings: ObservationSettingsStore;
+  private readonly applicationIcons: ApplicationIconReader;
   private llmRuntime: LLMRuntimeResolver | null = null;
+  /**
+   * The one backfill this process runs. Held rather than flagged so that
+   * starting it and waiting for it are the same call: what succeeds is written
+   * for good, so a second pass would have nothing to do.
+   */
+  private backfill: Promise<number> | null = null;
   private narrationError: string | null = null;
   /** Segments already narrated while still open, so it happens once, not per tick. */
   private readonly narratedOpenSegments = new Set<string>();
@@ -253,6 +293,7 @@ export class ComputerHistoryDemoService {
     this.workflowDirectory = path.resolve(input.workflowDirectory
       ?? path.join(os.homedir(), ".memmy", "computer-history", "workflows"));
     this.observationSettings = new ObservationSettingsStore(input.observationSettingsFile);
+    this.applicationIcons = new ApplicationIconReader({ repositoryRoot: this.repositoryRoot });
     this.liveSummaryIntervalMs = boundedInterval(
       process.env.MEMMY_COMPUTER_HISTORY_LIVE_SUMMARY_INTERVAL_MS,
       60_000,
@@ -288,9 +329,46 @@ export class ComputerHistoryDemoService {
       .filter((markdown) => markdown && isNarrated(markdown));
   }
 
+  /** An application's icon for the timeline, as a data URL. */
+  applicationIcon(bundleId: string): Promise<string | null> {
+    return this.applicationIcons.iconFor(bundleId);
+  }
+
   /** Supplies the model used to narrate finalized segments. */
   setLlmRuntime(llmRuntime: LLMRuntimeResolver | null): void {
     this.llmRuntime = llmRuntime;
+    if (llmRuntime) void this.backfillUnwrittenSummaries();
+  }
+
+  /**
+   * Writes every machine summary the model never got to.
+   *
+   * A summary is only shown once written, so one the model never reached is not
+   * merely plainer — it is absent from the timeline. That covers summaries from
+   * before narration wrote the whole body, and any left behind by a model that
+   * was unreachable at the time. Runs when the runtime arrives, one at a time,
+   * so a backlog does not go out as a burst of concurrent requests.
+   */
+  async backfillUnwrittenSummaries(): Promise<number> {
+    if (!this.llmRuntime) return 0;
+    this.backfill ??= this.writeUnwrittenSummaries();
+    return this.backfill;
+  }
+
+  private async writeUnwrittenSummaries(): Promise<number> {
+    let written = 0;
+    for (const entry of this.readMarkdownDirectory(this.historyDirectory)) {
+      if (isCodexSkysightCopy(entry.id)) continue;
+      if (!isMachineSummary(readSourceType(entry.markdown))) continue;
+      if (isNarrated(entry.markdown)) continue;
+      // The open segment is still being written to; it is narrated in place.
+      if (entry.filePath === this.segment?.historyFile) continue;
+      const window = entry.id.endsWith("-6h-summary") ? "6h" : "10min";
+      if (await this.writeSummaryWith(entry.filePath, window, this.eventStreamPathFor(entry.id))) {
+        written += 1;
+      }
+    }
+    return written;
   }
 
   snapshot(): ComputerHistorySnapshot {
@@ -321,8 +399,10 @@ export class ComputerHistoryDemoService {
       ]
         // An entry appears once it has been written. Showing the placeholder
         // would put the mechanical wording in front of the reader, which is the
-        // thing the written summary exists to avoid.
-        .filter((entry) => entry.sourceType !== "captured" || isNarrated(entry.markdown))
+        // thing the written summary exists to avoid. Rollups are machine
+        // generated too: read as "imported", they slipped past this gate and
+        // put a templated body on the timeline.
+        .filter((entry) => !isMachineSummary(entry.sourceType) || isNarrated(entry.markdown))
         .filter((entry) => !isCodexSkysightCopy(entry.id))
         .map((entry) => ({
           ...entry,
@@ -473,16 +553,38 @@ export class ComputerHistoryDemoService {
     await waitForExit(child, 8_000);
   }
 
-  /** Summarizes a segment and leaves it behind as searchable history. */
-  private finalizeSegment(segment: SegmentState): void {
+  /**
+   * Summarizes a closed segment and leaves it behind as searchable history.
+   *
+   * A segment narrated while it was open already stands on the timeline, and
+   * regenerating it in place would put the placeholder back over that account
+   * until the model caught up — an entry that blinks out and returns, or, if
+   * the model is unreachable, never returns at all. So the fuller summary is
+   * built beside the standing one and swapped in only once it is written.
+   * Nothing on disk ever says less than it did a moment ago.
+   */
+  private async finalizeSegment(segment: SegmentState): Promise<void> {
     if (!fs.existsSync(segment.eventsFile) || !fs.statSync(segment.eventsFile).size) return;
-    const error = this.writeSegmentSummary(segment);
+    const standing = isSummaryWritten(segment.historyFile);
+    const staging = `${segment.historyFile}.staging`;
+    // A previous run may have been killed between writing and swapping.
+    fs.rmSync(staging, { force: true });
+    const destination = standing ? staging : segment.historyFile;
+    const error = this.writeSegmentSummary(segment, destination);
     if (error) {
       this.observationError = error;
+      fs.rmSync(staging, { force: true });
       return;
     }
     this.narratedOpenSegments.delete(segment.id);
-    this.narrateSummary(segment.historyFile, "10min", segment.eventsFile);
+    // Narrating a staged copy must still be narrating *this* summary: prior
+    // context is selected by name, and the segment id sorts differently.
+    const summaryId = path.basename(segment.historyFile, ".md");
+    const written = await this.writeSummaryWith(destination, "10min", segment.eventsFile, summaryId);
+    if (standing) {
+      if (written) fs.renameSync(staging, segment.historyFile);
+      else fs.rmSync(staging, { force: true });
+    }
     this.writeSixHourRollup(segment.id);
   }
 
@@ -494,48 +596,58 @@ export class ComputerHistoryDemoService {
    * a slow or unreachable model delays the better wording, never the recording.
    */
   private narrateSummary(file: string, window: "10min" | "6h", eventsFile: string | null): void {
+    void this.writeSummaryWith(file, window, eventsFile);
+  }
+
+  /** The narration itself, awaitable so a backfill can pace itself. */
+  private async writeSummaryWith(
+    file: string,
+    window: "10min" | "6h",
+    eventsFile: string | null,
+    summaryId?: string,
+  ): Promise<boolean> {
     const llmRuntime = this.llmRuntime;
-    if (!llmRuntime) return;
-    void (async () => {
-      let markdown: string;
+    if (!llmRuntime) return false;
+    let markdown: string;
+    try {
+      markdown = fs.readFileSync(file, "utf8");
+    } catch {
+      return false;
+    }
+    // A segment is narrated from its own event stream, compacted into activity
+    // arcs. A rollup has no stream of its own and is narrated from the
+    // ten-minute summaries it already gathered.
+    let evidence = markdown.replace(/^---\n[\s\S]*?\n---\n/u, "");
+    if (eventsFile) {
       try {
-        markdown = fs.readFileSync(file, "utf8");
+        const compacted = compactEventEvidence(fs.readFileSync(eventsFile, "utf8").split("\n"));
+        if (compacted) evidence = compacted;
       } catch {
-        return;
+        // Fall back to the mechanical summary body.
       }
-      // A segment is narrated from its own event stream, compacted into
-      // activity arcs. A rollup has no stream of its own and is narrated from
-      // the ten-minute summaries it already gathered.
-      let evidence = markdown.replace(/^---\n[\s\S]*?\n---\n/u, "");
-      if (eventsFile) {
-        try {
-          const compacted = compactEventEvidence(fs.readFileSync(eventsFile, "utf8").split("\n"));
-          if (compacted) evidence = compacted;
-        } catch {
-          // Fall back to the mechanical summary body.
-        }
-      }
-      const narrative = await writeSegmentNarrative(llmRuntime, {
-        applications: applicationsFromMarkdown(markdown),
-        evidence,
-        window,
-        priorSummaries: this.priorSummaries(path.basename(file, ".md")),
-        onError: (reason) => {
-          // Narration is best effort, but a silent no-op is indistinguishable
-          // from a feature that was never wired, so say why it produced nothing.
-          this.narrationError = reason;
-          console.warn(`[computer-history] summary narration skipped: ${reason}`);
-        },
-      });
-      if (!narrative) return;
-      this.narrationError = null;
-      try {
-        // Re-read: a rollup may have rewritten the file while the model ran.
-        fs.writeFileSync(file, applyNarrative(fs.readFileSync(file, "utf8"), narrative), "utf8");
-      } catch {
-        // Losing the better wording is acceptable; the summary itself stands.
-      }
-    })();
+    }
+    const narrative = await writeSegmentNarrative(llmRuntime, {
+      applications: applicationsFromMarkdown(markdown),
+      evidence,
+      window,
+      priorSummaries: this.priorSummaries(summaryId ?? path.basename(file, ".md")),
+      onError: (reason) => {
+        // Narration is best effort, but a silent no-op is indistinguishable
+        // from a feature that was never wired, so say why it produced nothing.
+        this.narrationError = reason;
+        console.warn(`[computer-history] summary narration skipped: ${reason}`);
+      },
+    });
+    if (!narrative) return false;
+    this.narrationError = null;
+    try {
+      // Re-read: a rollup may have rewritten the file while the model ran.
+      fs.writeFileSync(file, applyNarrative(fs.readFileSync(file, "utf8"), narrative), "utf8");
+      return true;
+    } catch {
+      // Losing the better wording is acceptable; the summary itself stands.
+      return false;
+    }
   }
 
   /** Rebuilds the six-hour summary covering the segment that just closed. */
@@ -566,7 +678,9 @@ export class ComputerHistoryDemoService {
     const previous = this.segment;
     if (!previous) return;
     void this.detachRecorder(previous).then(() => {
-      this.finalizeSegment(previous);
+      // Not awaited: the entry already on the timeline stays right while the
+      // model writes the fuller one, so nothing is held up waiting for it.
+      void this.finalizeSegment(previous);
       if (this.observationState !== "running") return;
       const next = this.openSegment();
       this.segment = next;
@@ -678,7 +792,8 @@ export class ComputerHistoryDemoService {
     this.clearRotationTimer();
     if (segment) {
       await this.detachRecorder(segment);
-      this.finalizeSegment(segment);
+      // Stopping should not wait on the model; the swap happens when it lands.
+      void this.finalizeSegment(segment);
     }
     this.segment = null;
     this.observationStartedAt = null;
@@ -714,6 +829,13 @@ export class ComputerHistoryDemoService {
 
   private writeLiveSummary(segment: SegmentState): void {
     if (!fs.existsSync(segment.eventsFile)) return;
+    // Leave a written summary alone for the rest of the segment. The mechanical
+    // pass rewrites the whole file, so running it again would put the
+    // placeholder back over the account; and because narration runs once per
+    // open segment, nothing would rewrite it until the segment closed. The
+    // entry would appear, then vanish from the timeline on the next tick.
+    // Closing the segment regenerates and narrates it with the full window.
+    if (isSummaryWritten(segment.historyFile)) return;
     let stat: fs.Stats;
     try {
       stat = fs.statSync(segment.eventsFile);
@@ -735,21 +857,21 @@ export class ComputerHistoryDemoService {
     }
   }
 
-  private writeSegmentSummary(segment: SegmentState): string | null {
+  private writeSegmentSummary(segment: SegmentState, destination = segment.historyFile): string | null {
     const summarizer = path.join(this.repositoryRoot, "workflows", "scripts", "summarize-history.mjs");
     const result = spawnSync(process.execPath, [
       summarizer,
       "--file", segment.eventsFile,
-      "--out", segment.historyFile,
+      "--out", destination,
       "--title", `Computer History ${segment.id}`,
     ], { cwd: this.repositoryRoot, encoding: "utf8", timeout: 30_000 });
-    if (result.status !== 0 || !fs.existsSync(segment.historyFile)) {
+    if (result.status !== 0 || !fs.existsSync(destination)) {
       return String(result.stderr || result.stdout || "failed to distill captured events").trim();
     }
-    const markdown = fs.readFileSync(segment.historyFile, "utf8")
+    const markdown = fs.readFileSync(destination, "utf8")
       .replace(/^source_type:\s*human_computer_history\s*$/m, "source_type: captured")
       .replace(/^---\n/, "---\ncapture_policy: accessibility_events_and_page_urls_no_screenshots\n");
-    fs.writeFileSync(segment.historyFile, markdown, "utf8");
+    fs.writeFileSync(destination, markdown, "utf8");
     return null;
   }
 
@@ -1026,7 +1148,12 @@ export class ComputerHistoryDemoService {
             : id.endsWith("-6h-summary")
               ? ("6h" as const)
               : null,
-          createdAt: readFrontmatterValue(markdown, "captured_at") || stat.mtime.toISOString(),
+          // When the window happened, not when its file was last touched.
+          // A summary is rewritten every time it is regenerated and narrated,
+          // so mtime walks forward as the model catches up — which made an
+          // entry appear to vanish and a new one take its place, and sorted
+          // rollups into the middle of the segments they cover.
+          createdAt: entryInstant(id, markdown, stat.mtime),
           markdown,
           filePath,
         };
@@ -1288,7 +1415,7 @@ function ensureHistoryFrontmatter(markdown: string, input: { title: string; sour
 
 function readSourceType(markdown: string): ComputerHistorySourceType {
   const value = readFrontmatterValue(markdown, "source_type");
-  if (value === "captured" || value === "demo_fixture") return value;
+  if (value === "captured" || value === "rollup" || value === "demo_fixture") return value;
   return "imported";
 }
 
