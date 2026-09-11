@@ -553,7 +553,7 @@ describe("MatrixChannel memmy parity cases", () => {
     const client = new FakeMatrixClient();
     client.roomSendResponse = new RoomSendResponse({ eventId: "$stream", roomId: "!room:matrix.org" });
     const channel = makeChannel({}, client);
-    let now = 100;
+    const now = 100;
     channel.monotonicTime = () => now;
 
     await channel.sendDelta("!room:matrix.org", "Hello");

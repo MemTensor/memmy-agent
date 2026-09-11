@@ -53,4 +53,12 @@ export default tseslint.config(
       "prefer-const": "off",
     },
   },
+  {
+    files: ["scripts/**/*.mjs"],
+    languageOptions: {
+      globals: {
+        process: "readonly",
+      },
+    },
+  },
 );

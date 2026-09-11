@@ -5,7 +5,6 @@ import mammoth from "mammoth";
 import ExcelJS from "exceljs";
 import JSZip from "jszip";
 import { XMLParser } from "fast-xml-parser";
-import { detectImageMime } from "./helpers.js";
 
 export const SUPPORTED_EXTENSIONS = new Set([
   ".pdf",

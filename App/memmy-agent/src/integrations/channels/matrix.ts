@@ -7,7 +7,7 @@ import { getDataDir, getMediaDir } from "../../config/paths.js";
 import { BaseChannel } from "./base.js";
 
 export const TYPING_NOTICE_TIMEOUT_MS = 30_000;
-export let TYPING_KEEPALIVE_INTERVAL_MS = 20_000;
+export const TYPING_KEEPALIVE_INTERVAL_MS = 20_000;
 export const MATRIX_HTML_FORMAT = "org.matrix.custom.html";
 export const _ATTACH_TOO_LARGE = "[attachment: {} - too large]";
 export const _ATTACH_FAILED = "[attachment: {} - download failed]";
@@ -164,7 +164,7 @@ function renderInlineMarkdown(text: string): string {
 
 export function renderMarkdownHtml(text: string): string | null {
   try {
-    if (!/[#*`~^|!\[\]()>-]|https?:\/\//.test(text)) return null;
+    if (!new RegExp("[#*`~^|!\\[\\]()>-]|https?://").test(text)) return null;
     const lines = text.split(/\r?\n/);
     const blocks: string[] = [];
     let index = 0;
@@ -278,7 +278,7 @@ export class MatrixConfig {
   }
 }
 
-export let decryptAttachment = (ciphertext: Buffer, key: string, sha256: string, iv: string): Buffer => {
+export let decryptAttachment: (ciphertext: Buffer, key: string, sha256: string, iv: string) => Buffer = () => {
   throw new EncryptionError("Matrix encrypted attachment decryptor is not configured");
 };
 
@@ -401,8 +401,8 @@ export class MatrixChannel extends BaseChannel {
     }
   }
 
-  async onJoinError(response: any): Promise<void> {}
-  async onSendError(response: any): Promise<void> {}
+  async onJoinError(): Promise<void> {}
+  async onSendError(): Promise<void> {}
 
   async syncLoop(): Promise<void> {
     let backoff = 2;
