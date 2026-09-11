@@ -10,6 +10,7 @@ import {
 import {
   AlertCircle,
   Check,
+  ChevronRight,
   Circle,
   CircleDot,
   Download,
@@ -32,6 +33,7 @@ import type { PluginsClient } from "../api/plugins-client.js";
 import { usePluginChatFeedback, type PluginChatFeedback, type PluginUiCall } from "../app/plugin-ui-context.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { classifyAgentAttachmentFile } from "../lib/agent-attachment.js";
+import { materializePluginUploadFile } from "../lib/plugin-upload-file.js";
 import { startBrowserDownload } from "./agent-message-content.js";
 
 const TASK_STATUS_KEYS = {
@@ -69,11 +71,12 @@ export function PluginCapabilityHost(props: PluginCapabilityHostProps) {
     () => selectVisiblePluginCalls(props.calls, answeredInteractions),
     [answeredInteractions, props.calls]
   );
+  const orderedCalls = useMemo(() => orderPluginCallsForDisplay(calls), [calls]);
   if (calls.length === 0) return null;
 
   return (
     <section className="space-y-3" aria-label={t("plugin.ui.regionLabel")}>
-      {calls.map((call) => {
+      {orderedCalls.map((call) => {
         const plugin = plugins.get(call.pluginId);
         const renderer = plugin?.manifest.ui?.renderer;
         const usesRenderer = Boolean(
@@ -149,18 +152,28 @@ function GenericPluginCards(props: {
   onReadArtifact?: PluginsClient["readArtifact"];
 }) {
   const terminal = props.events.some((event) => event.type === "result" || event.type === "error");
+  const artifactEvents = props.events.filter((event): event is Extract<CapabilityEvent, { type: "artifact" }> => event.type === "artifact");
   return (
     <div className="space-y-2">
-      {props.events.map((event) => {
+      {props.events.filter((event) => event.type !== "artifact").map((event) => {
         if (event.type === "progress") return terminal ? null : <ProgressCard key="progress" event={event} canCancel={Boolean(event.cancellable)} onCancel={props.onCancel} />;
         if (event.type === "task-list") return terminal ? null : <TaskCard key="tasks" event={event} />;
         if (event.type === "interaction") {
           return terminal ? null : <InteractionCard key={`interaction:${event.request.interactionId}`} request={event.request} conversationId={props.conversationId} pluginId={props.pluginId} onRespond={props.onRespond} onUploadFiles={props.onUploadFiles} />;
         }
-        if (event.type === "artifact") return <ArtifactCard key={`artifact:${event.artifact.id}`} event={event} onAddToChat={props.onAddArtifact} onOpen={props.onOpenArtifact} onRead={props.onReadArtifact} />;
         if (event.type === "error") return <ErrorCard key="error" event={event} />;
         return null;
       })}
+      {artifactEvents.length > 1 ? (
+        <ArtifactCollection
+          events={artifactEvents}
+          onAddToChat={props.onAddArtifact}
+          onOpen={props.onOpenArtifact}
+          onRead={props.onReadArtifact}
+        />
+      ) : artifactEvents[0] ? (
+        <ArtifactCard event={artifactEvents[0]} onAddToChat={props.onAddArtifact} onOpen={props.onOpenArtifact} onRead={props.onReadArtifact} />
+      ) : null}
     </div>
   );
 }
@@ -517,6 +530,44 @@ function ArtifactCard(props: {
   );
 }
 
+function ArtifactCollection(props: {
+  events: Array<Extract<CapabilityEvent, { type: "artifact" }>>;
+  onAddToChat?: (artifact: PluginArtifactRef) => void;
+  onOpen?: (artifact: PluginArtifactRef) => void;
+  onRead?: PluginsClient["readArtifact"];
+}) {
+  const { t } = useTranslation();
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div className="overflow-hidden rounded-card border border-border-stone/30">
+      <button
+        type="button"
+        className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm text-text-ink/70 transition-colors hover:bg-canvas-oat/45"
+        aria-expanded={expanded}
+        onClick={() => setExpanded((current) => !current)}
+      >
+        <FileOutput size={17} className="shrink-0 text-action-sky" aria-hidden="true" />
+        <span className="font-medium">{t("plugin.ui.artifactCollection", { count: props.events.length })}</span>
+        <span className="ml-auto text-xs text-text-ink/40">{expanded ? t("plugin.ui.collapse") : t("plugin.ui.expand")}</span>
+        <ChevronRight size={15} className={`text-text-ink/40 transition-transform ${expanded ? "rotate-90" : ""}`} aria-hidden="true" />
+      </button>
+      {expanded ? (
+        <div className="max-h-72 space-y-1.5 overflow-y-auto border-t border-border-stone/25 p-2">
+          {props.events.map((event) => (
+            <ArtifactCard
+              key={`artifact:${event.artifact.id}`}
+              event={event}
+              onAddToChat={props.onAddToChat}
+              onOpen={props.onOpen}
+              onRead={props.onRead}
+            />
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function interactionKey(call: Pick<PluginUiCall, "pluginId" | "callId">, interactionId: string): string {
   return `${call.pluginId}:${call.callId}:${interactionId}`;
 }
@@ -548,6 +599,18 @@ export function selectVisiblePluginCalls(calls: PluginUiCall[], answered: Readon
       && call.events.some((event) => event.type === "interaction")) return true;
     return call.callId === latestActive && call.events.some((event) => event.type !== "result");
   });
+}
+
+/** Keep active work closest to the current Agent turn and completed deliveries at the bottom. */
+export function orderPluginCallsForDisplay(calls: PluginUiCall[]): PluginUiCall[] {
+  const isCompletedDelivery = (call: PluginUiCall) => (
+    call.events.some((event) => event.type === "artifact")
+    && call.events.some((event) => event.type === "result" || event.type === "error")
+  );
+  return [
+    ...calls.filter((call) => !isCompletedDelivery(call)),
+    ...calls.filter(isCompletedDelivery)
+  ];
 }
 
 function ErrorCard(props: { event: Extract<CapabilityEvent, { type: "error" }> }) {
@@ -652,10 +715,11 @@ function SandboxedPluginRenderer(props: {
           return;
         }
         uploading.current.add(interactionId);
-        void props.onUploadFiles(files.map((file: File) => {
+        const uploadFiles = props.onUploadFiles;
+        void Promise.all(files.map(async (file: File) => {
           const classification = classifyAgentAttachmentFile(file)!;
-          return { blob: file, name: file.name, kind: classification.kind, mime: classification.mime };
-        })).then(
+          return { blob: await materializePluginUploadFile(file), name: file.name, kind: classification.kind, mime: classification.mime };
+        })).then(uploadFiles).then(
           (uploaded) => reply({ ok: true, files: uploaded }),
           () => reply({ ok: false, error: { message: "上传失败，请重新选择文件重试。" } })
         ).finally(() => uploading.current.delete(interactionId));

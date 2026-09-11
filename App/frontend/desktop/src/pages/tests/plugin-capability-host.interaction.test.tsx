@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { InstalledPluginSchema, type PluginCapabilityEventPayload } from "@memmy/local-api-contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { UploadedAgentMedia } from "../../api/memmy-agent-client.js";
+import type { UploadedAgentMedia, UploadAgentMediaInput } from "../../api/memmy-agent-client.js";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
 import { PluginUiProvider, usePluginUi, reducePluginUiCalls, type PluginUiCall } from "../../app/plugin-ui-context.js";
 import { buildRendererDocument, PluginCapabilityHost, resolveRendererInteractionStates, resolveSafeArtifactUri, selectVisiblePluginCalls } from "../plugin-capability-host.js";
@@ -170,6 +170,44 @@ describe("PluginCapabilityHost", () => {
     expect(container.textContent).toContain("report.md");
   });
 
+  it("keeps active progress above a collapsed multi-file delivery", async () => {
+    const delivery: PluginUiCall = {
+      pluginId: plugin.id,
+      capabilityId: "render",
+      callId: "delivery",
+      conversationId: "chat-1",
+      events: [
+        ...["review.md", "references.bib", "review.pdf", "review.docx"].map((name, index) => ({
+          type: "artifact" as const,
+          artifact: { id: `artifact-${index}`, name, mediaType: "application/octet-stream", uri: `https://example.test/${name}` }
+        })),
+        { type: "result" as const, output: {} }
+      ]
+    };
+    const active: PluginUiCall = {
+      pluginId: plugin.id,
+      capabilityId: "build-tables",
+      callId: "active",
+      conversationId: "chat-1",
+      events: [{ type: "progress", current: 0, total: 1, message: "Building tables" }]
+    };
+
+    await act(async () => root.render(
+      <I18nProvider language="en-US">
+        <PluginCapabilityHost calls={[delivery, active]} plugins={[plugin]} client={{ getUi: vi.fn(), cancel: vi.fn(), respond: vi.fn() }} />
+      </I18nProvider>
+    ));
+
+    expect(container.textContent!.indexOf("Building tables")).toBeLessThan(container.textContent!.indexOf("4 delivery files"));
+    expect(container.textContent).not.toContain("review.md");
+    const toggle = [...container.querySelectorAll("button")].find((button) => button.textContent?.includes("4 delivery files"))!;
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    await act(async () => toggle.click());
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(container.textContent).toContain("review.md");
+    expect(container.textContent).toContain("review.docx");
+  });
+
   it("loads a declared renderer into a script-only sandbox", async () => {
     const getUi = vi.fn(async () => "<main>Custom renderer</main>");
     const cancel = vi.fn(async () => undefined);
@@ -211,7 +249,7 @@ describe("PluginCapabilityHost", () => {
       approvedPermissions: [permission], manifest: { ...plugin.manifest, permissions: [permission], ui: { renderer: { entry: "ui/index.html", height: 680 } } }
     });
     const respond = vi.fn(async () => undefined);
-    const uploadFiles = vi.fn(async () => [{ path: "/staged/paper.pdf", name: "paper.pdf", kind: "file", mime: "application/pdf" }] as UploadedAgentMedia[]);
+    const uploadFiles = vi.fn(async (_files: UploadAgentMediaInput[]) => [{ path: "/staged/paper.pdf", name: "paper.pdf", kind: "file", mime: "application/pdf" }] as UploadedAgentMedia[]);
     const client = { getUi: vi.fn(async () => "<main>Recovery</main>"), cancel: vi.fn(), respond };
     const call: PluginUiCall = { pluginId: plugin.id, capabilityId: "run", callId: "recovery", conversationId: "chat-1",
       events: [{ type: "interaction", request: { interactionId: "row-1", type: "custom", payload: {
@@ -226,6 +264,12 @@ describe("PluginCapabilityHost", () => {
     expect(uploadFiles).not.toHaveBeenCalled();
     await act(async () => window.dispatchEvent(new MessageEvent("message", { source: iframe.contentWindow, data: upload })));
     expect(uploadFiles).toHaveBeenCalledTimes(1);
+    const staged = uploadFiles.mock.calls[0]![0][0]!;
+    expect(staged.blob).not.toBe(file);
+    expect(staged.blob).not.toBeInstanceOf(File);
+    expect(staged.name).toBe("paper.pdf");
+    expect(staged.mime).toBe("application/pdf");
+    expect(await staged.blob.text()).toBe("synthetic pdf");
     expect(respond).not.toHaveBeenCalled();
     expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "memmy.plugin.upload-result", ok: true, requestId: "file-1" }), "*");
     await act(async () => window.dispatchEvent(new MessageEvent("message", { source: iframe.contentWindow, data: {
@@ -233,6 +277,18 @@ describe("PluginCapabilityHost", () => {
     } })));
     expect(uploadFiles).toHaveBeenCalledTimes(1);
     expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "memmy.plugin.upload-result", ok: false, requestId: "bad-file" }), "*");
+    const unreadable = new File(["gone"], "missing.pdf", { type: "application/pdf" });
+    vi.spyOn(unreadable, "arrayBuffer").mockRejectedValue(new DOMException("File disappeared", "NotReadableError"));
+    await act(async () => window.dispatchEvent(new MessageEvent("message", { source: iframe.contentWindow, data: {
+      ...upload, requestId: "unreadable", files: [unreadable]
+    } })));
+    expect(uploadFiles).toHaveBeenCalledTimes(1);
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "memmy.plugin.upload-result", ok: false, requestId: "unreadable" }), "*");
+    expect(respond).not.toHaveBeenCalled();
+    await act(async () => window.dispatchEvent(new MessageEvent("message", { source: iframe.contentWindow, data: { ...upload, requestId: "retry-readable" } })));
+    expect(uploadFiles).toHaveBeenCalledTimes(2);
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "memmy.plugin.upload-result", ok: true, requestId: "retry-readable" }), "*");
+    uploadFiles.mockClear();
     await act(async () => window.dispatchEvent(new MessageEvent("message", { source: iframe.contentWindow, data: {
       type: "memmy.plugin.interaction-response", version: 1, interactionId: "row-1",
       response: { action: "refresh", values: { intent: "import-fulltext", paperId: "p1", files: [{ path: "/staged/paper.pdf" }] } }
@@ -240,18 +296,18 @@ describe("PluginCapabilityHost", () => {
     expect(respond).toHaveBeenCalledTimes(1);
     expect(container.querySelector("iframe")).toBe(iframe);
     await act(async () => window.dispatchEvent(new MessageEvent("message", { source: iframe.contentWindow, data: upload })));
-    expect(uploadFiles).toHaveBeenCalledTimes(1); // Old interaction cannot upload again.
+    expect(uploadFiles).not.toHaveBeenCalled(); // Old interaction cannot upload again.
     const nextCall: PluginUiCall = { ...call, events: [...call.events, { type: "interaction", request: {
       interactionId: "row-2", type: "custom", payload: { fileUpload: { accept: [".pdf"], maxFiles: 1, maxBytes: 1024 } }
     } }] };
     await act(async () => root.render(<I18nProvider language="en-US"><PluginCapabilityHost calls={[nextCall]} plugins={[customPlugin]} client={client} uploadFiles={uploadFiles} /></I18nProvider>));
     expect(container.querySelector("iframe")).toBe(iframe);
     await act(async () => window.dispatchEvent(new MessageEvent("message", { source: iframe.contentWindow, data: { ...upload, interactionId: "row-2", requestId: "file-2" } })));
-    expect(uploadFiles).toHaveBeenCalledTimes(2);
+    expect(uploadFiles).toHaveBeenCalledTimes(1);
     const unpermitted = InstalledPluginSchema.parse({ ...customPlugin, approvedPermissions: [] });
     await act(async () => root.render(<I18nProvider language="en-US"><PluginCapabilityHost calls={[nextCall]} plugins={[unpermitted]} client={client} uploadFiles={uploadFiles} /></I18nProvider>));
     await act(async () => window.dispatchEvent(new MessageEvent("message", { source: iframe.contentWindow, data: { ...upload, interactionId: "row-2", requestId: "file-3" } })));
-    expect(uploadFiles).toHaveBeenCalledTimes(2);
+    expect(uploadFiles).toHaveBeenCalledTimes(1);
     expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "memmy.plugin.upload-result", ok: false, requestId: "file-3" }), "*");
   });
 
