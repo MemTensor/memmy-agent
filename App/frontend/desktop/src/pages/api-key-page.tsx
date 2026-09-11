@@ -70,7 +70,9 @@ const providerOptions: ProviderOption[] = [
   { value: "kimi", labelKey: "apiKey.provider.kimi", endpoint: "https://api.moonshot.ai/v1", defaultModelId: "moonshot-v1-128k" },
   { value: "minimax", labelKey: "apiKey.provider.minimax", endpoint: "https://api.minimax.chat/v1", defaultModelId: "MiniMax-Text-01" },
   { value: "baidu", labelKey: "apiKey.provider.baidu", endpoint: "https://qianfan.baidubce.com/v2", defaultModelId: "ernie-x1.1" },
-  { value: "doubao", labelKey: "apiKey.provider.doubao", endpoint: "https://ark.cn-beijing.volces.com/api/v3", defaultModelId: "doubao-pro-256k" }
+  { value: "doubao", labelKey: "apiKey.provider.doubao", endpoint: "https://ark.cn-beijing.volces.com/api/v3", defaultModelId: "doubao-pro-256k" },
+  { value: "stepfun", labelKey: "apiKey.provider.stepfun", endpoint: "https://api.stepfun.com/v1", defaultModelId: "step-3.5-flash" },
+  { value: "xiaomi", labelKey: "apiKey.provider.xiaomi", endpoint: "https://api.xiaomimimo.com/v1", defaultModelId: "mimo-v2.5-pro" }
 ];
 
 const defaultProvider = providerOptions[0]!;

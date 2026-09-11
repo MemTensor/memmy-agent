@@ -8,6 +8,8 @@ import minimaxLogoUrl from "../assets/llm-provider-logo/minimax.svg";
 import moonshotLogoUrl from "../assets/llm-provider-logo/moonshot.svg";
 import openaiLogoUrl from "../assets/llm-provider-logo/openai.svg";
 import qwenLogoUrl from "../assets/llm-provider-logo/qwen.svg";
+import stepfunLogoUrl from "../assets/llm-provider-logo/stepfun.svg";
+import xiaomiLogoUrl from "../assets/llm-provider-logo/xiaomi.svg";
 import zhipuLogoUrl from "../assets/llm-provider-logo/zhipu.svg";
 
 const LLM_PROVIDER_LOGOS: Readonly<Record<string, string>> = {
@@ -23,6 +25,9 @@ const LLM_PROVIDER_LOGOS: Readonly<Record<string, string>> = {
   moonshot: moonshotLogoUrl,
   openai: openaiLogoUrl,
   qwen: qwenLogoUrl,
+  stepfun: stepfunLogoUrl,
+  xiaomi: xiaomiLogoUrl,
+  xiaomi_mimo: xiaomiLogoUrl,
   zhipu: zhipuLogoUrl
 };
 

@@ -302,6 +302,9 @@ export class EpisodeReadModel {
 
   refsForMemory(memory: MemoryRow): Record<string, unknown> {
     if (memory.memoryLayer === "L1") {
+      if (memory.properties.internal_info.memory_kind === "work_memory") {
+        return {};
+      }
       const rawTurnId = this.deps.rawTurnIdFromMemory(memory);
       const rawTurn = rawTurnId ? this.deps.repos.runtime.getRawTurn(rawTurnId) : undefined;
       const episodeId = rawTurn?.episodeId ?? this.deps.episodeIdFromMemory(memory);

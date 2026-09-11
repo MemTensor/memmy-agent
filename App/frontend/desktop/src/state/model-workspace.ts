@@ -698,9 +698,9 @@ function cloneAssignment<T extends Omit<ModelAssignment, "ownerAccountId"> | Mod
 
 function normalizeProvider(provider: string): CatalogProviderId | null {
   const normalized = provider.trim().toLowerCase();
-  const aliases: Record<string, CatalogProviderId> = { qwen: "dashscope", kimi: "moonshot", baidu: "qianfan", doubao: "volcengine" };
+  const aliases: Record<string, CatalogProviderId> = { qwen: "dashscope", kimi: "moonshot", baidu: "qianfan", doubao: "volcengine", xiaomi: "xiaomi_mimo" };
   const candidate = aliases[normalized] ?? normalized;
-  return ["openai", "anthropic", "gemini", "deepseek", "zhipu", "dashscope", "moonshot", "minimax", "qianfan", "volcengine", "memmy_account"].includes(candidate)
+  return ["openai", "anthropic", "gemini", "deepseek", "zhipu", "dashscope", "moonshot", "minimax", "qianfan", "volcengine", "stepfun", "xiaomi_mimo", "memmy_account"].includes(candidate)
     ? candidate as CatalogProviderId
     : null;
 }

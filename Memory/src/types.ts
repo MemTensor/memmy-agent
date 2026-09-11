@@ -29,7 +29,7 @@ export const DEFAULT_NAMESPACE_SOURCE = "unknown";
 export type Cursor = string;
 export type MemoryLayer = "L1" | "L2" | "L3" | "Skill";
 export type RecallMemoryLayer = MemoryLayer | "UserMemory";
-export type MemoryKind = "user_memory" | "trace" | "span" | "policy" | "world_model" | "skill";
+export type MemoryKind = "user_memory" | "trace" | "span" | "policy" | "world_model" | "skill" | "work_memory";
 export type MemoryStatus = "activated" | "resolving" | "archived" | "deleted";
 export type RetrievalMode =
   | "search"
@@ -81,7 +81,8 @@ export type JobType =
   | "l3_world_model_update"
   | "project_environment_profile"
   | "skill_crystallization"
-  | "skill_trial_resolve";
+  | "skill_trial_resolve"
+  | "work_memory_extract";
 
 export interface RuntimeNamespace {
   source: string;
@@ -188,6 +189,9 @@ export interface MemoryFilter {
   status?: MemoryStatus | MemoryStatus[];
   tags?: string[];
   ids?: string[];
+  memoryKind?: MemoryKind | MemoryKind[];
+  workMemoryUserId?: string;
+  workMemoryProjectId?: string | null;
 }
 
 export interface RecallHit {
@@ -273,6 +277,12 @@ export interface MemoryDetailItem extends MemoryListItem {
   createdAt: IsoTime;
   sourceMemoryIds: string[];
   metadata: Record<string, unknown>;
+  workMemory?: {
+    workTopic?: string;
+    requirement?: string;
+    reason?: string;
+    projectId?: string | null;
+  };
 }
 
 export interface RawTurnSummary {
@@ -292,6 +302,7 @@ export interface ToolCallPayload {
   name: string;
   input?: unknown;
   output?: unknown;
+  status?: string;
   error?: string;
   errorCode?: string;
   success?: boolean;
@@ -350,6 +361,50 @@ export interface TurnCompleteRequest extends RequestEnvelope {
     targetMemoryId: string;
     revisedContent: string;
   };
+}
+
+/** A completed native source turn; channel is deliberately excluded from its identity. */
+export interface SourceTurnIdentity {
+  source: string;
+  profileId: string;
+  conversationId: string;
+  turnId: string;
+  startedAt: IsoTime;
+  completedAt: IsoTime;
+  sequence?: number;
+  completionEvidence: string;
+}
+
+export interface SourceTurnCompleteRequest extends Omit<TurnCompleteRequest, "sessionId"> {
+  sessionId?: string;
+  sourceTurn: SourceTurnIdentity;
+  channel: "hook" | "agent_source_scan";
+  workspacePath?: string;
+}
+
+export interface TurnCompletionResult {
+  turnId: string;
+  sessionId: string;
+  episodeId: string;
+  rawTurnId: string;
+  userMemoryId: string;
+  userMemoryIds: string[];
+  l1MemoryId: string;
+  l1MemoryIds: string[];
+  closedEpisodeIds: string[];
+  scheduledEvolution: boolean;
+  jobs: JobRef[];
+  changeSeq: number;
+  syncCursor: string;
+  etag: string;
+  serverTime: string;
+  duplicate?: boolean;
+}
+
+export interface SourceTurnCompleteResponse {
+  status: "stored" | "existing" | "rejected" | "pending" | "conflict";
+  reason?: string;
+  result?: TurnCompletionResult;
 }
 
 export type UserMemoryType = "User Fact" | "User Preference" | "User Directive";

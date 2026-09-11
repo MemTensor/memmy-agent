@@ -76,6 +76,7 @@ describe("createMockMemoryClient", () => {
       "addMemory",
       "closeSession",
       "completeTurn",
+      "completeSourceTurn",
       "deleteMemory",
       "enqueueImportSummaries",
       "getMemory",

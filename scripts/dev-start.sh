@@ -228,6 +228,8 @@ ensure_memmy_agent_dependencies() {
   local -a missing_packages=()
   local -a required_packages=(
     "html-validate"
+    "@xmldom/xmldom"
+    "pngjs"
     "ink"
     "parse5"
     "postcss"

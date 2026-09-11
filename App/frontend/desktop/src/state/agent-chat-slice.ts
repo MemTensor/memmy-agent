@@ -2916,11 +2916,6 @@ function mediaRejectedMessageKey(reason: string | undefined): string {
     case "mime":
     case "deprecated_payload":
       return "home.media.error.sendUnsupported";
-    case "size":
-      return "home.media.error.sendFileSize";
-    case "too_many_images":
-    case "too_many_attachments":
-      return "home.media.error.sendTooManyAttachments";
     case "decode":
     case "malformed":
       return "home.media.error.sendReadFailed";

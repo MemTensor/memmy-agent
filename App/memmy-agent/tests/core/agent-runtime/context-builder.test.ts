@@ -230,11 +230,15 @@ describe("Build User Content", () => {
     expect(builder().buildUserContent("hello", ["/nonexistent/image.png"])).toBe("hello");
   });
 
-  it("non image file returns string", () => {
+  it("non image file returns attachment manifest array", () => {
     const root = tempRoot();
     const txt = path.join(root, "doc.txt");
     fs.writeFileSync(txt, "not an image", "utf8");
-    expect(builder(root).buildUserContent("hello", [txt])).toBe("hello");
+    const result = builder(root).buildUserContent("hello", [txt]);
+    expect(Array.isArray(result)).toBe(true);
+    const textBlock = (result as any[]).find((b) => b.type === "text");
+    expect(textBlock?.text).toContain("doc.txt");
+    expect(textBlock?.text).toContain("<attachments>");
   });
 
   it("valid image returns list", () => {

@@ -1,0 +1,9 @@
+{
+  "root": "presentationml.xsd",
+  "files": ["presentationml.xsd"],
+  "source": "Public OOXML PresentationML structural subset maintained for Memmy",
+  "license": "Memmy project license; public format terminology only",
+  "sha256": {
+    "presentationml.xsd": "5320980e2e32bb3a5b09322783688ea523d66ab7b3ec33d435f65d9a6ec8852d"
+  }
+}

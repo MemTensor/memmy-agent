@@ -75,6 +75,7 @@ export interface AppFrameProps {
   reserveTopBar?: boolean;
   topBar?: ReactNode;
   topBarBorder?: boolean;
+  windowsTitlebarSafe?: boolean;
   /** When set, replaces the main app sidebar with settings section navigation. */
   settingsNav?: SettingsSidebarNav;
   children: ReactNode;
@@ -1569,7 +1570,7 @@ export function AppFrame(props: AppFrameProps) {
         onResizeBy={sidebarResize.resizeBy}
       />
 
-      <main className={`relative min-w-0 flex-1 overflow-hidden flex flex-col bg-content-bg${sidebarHidden ? " app-frame-main--sidebar-hidden" : ""}`} aria-label={props.title}>
+      <main className={`app-frame-main relative min-w-0 flex-1 overflow-hidden flex flex-col bg-content-bg${sidebarHidden ? " app-frame-main--sidebar-hidden" : ""}${props.windowsTitlebarSafe ? " app-frame-main--windows-titlebar-safe" : ""}`} aria-label={props.title}>
         {props.reserveTopBar !== false && (
           <header className={`app-frame-content-topbar${props.topBarBorder ? " app-frame-content-topbar--bordered" : ""}`}>
             {props.topBar}
@@ -1580,7 +1581,7 @@ export function AppFrame(props: AppFrameProps) {
           className={`min-h-0 h-full flex-1 overflow-hidden${
             sidebarHidden && !props.topBarBorder ? " app-frame-content-body--sidebar-hidden" : ""
           }`}
-          style={props.topBarBorder ? { paddingTop: "var(--codex-toolbar-height)" } : undefined}
+          style={props.topBarBorder ? { paddingTop: "calc(var(--codex-toolbar-height) + var(--app-frame-topbar-offset, 0px))" } : undefined}
         >
           {props.children}
         </div>

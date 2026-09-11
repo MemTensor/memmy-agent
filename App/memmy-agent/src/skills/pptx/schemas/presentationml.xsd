@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+  targetNamespace="http://schemas.openxmlformats.org/presentationml/2006/main"
+  xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+  elementFormDefault="qualified">
+  <xs:element name="presentation">
+    <xs:complexType>
+      <xs:sequence minOccurs="0" maxOccurs="unbounded">
+        <xs:any processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+      </xs:sequence>
+      <xs:anyAttribute processContents="lax"/>
+    </xs:complexType>
+  </xs:element>
+</xs:schema>

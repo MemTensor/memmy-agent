@@ -607,7 +607,7 @@ describe("CLI command helpers", () => {
       const body = await response.json() as any;
 
       expect(response.status).toBe(413);
-      expect(body.error.message).toContain("20MB");
+      expect(body.error.message).toContain("256MB");
       expect(loop.processDirect).not.toHaveBeenCalled();
     } finally {
       await closeServer(server);

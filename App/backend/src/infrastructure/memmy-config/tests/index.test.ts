@@ -179,7 +179,8 @@ describe("memmy runtime config current contract", () => {
     await writeAppCloudUuidToMemmyConfig("cloud-token", target);
     await expect(readRuntimeMemmyConfigState(target)).resolves.toMatchObject({ status: "valid_account", cloudUuid: "cloud-token" });
     expect(Object.fromEntries([
-      "openai_compatible", "anthropic", "google", "deepseek", "zhipu", "qwen", "kimi", "minimax", "baidu", "doubao"
+      "openai_compatible", "anthropic", "google", "deepseek", "zhipu", "qwen", "kimi", "minimax", "baidu", "doubao",
+      "stepfun", "xiaomi"
     ].map((provider) => [provider, mapModelProtocol(provider as any).agentProvider]))).toEqual({
       openai_compatible: "openai",
       anthropic: "anthropic",
@@ -190,7 +191,19 @@ describe("memmy runtime config current contract", () => {
       kimi: "moonshot",
       minimax: "minimax",
       baidu: "qianfan",
-      doubao: "volcengine"
+      doubao: "volcengine",
+      stepfun: "stepfun",
+      xiaomi: "xiaomi_mimo"
+    });
+    expect(mapModelProtocol("stepfun")).toEqual({
+      agentProvider: "stepfun",
+      agentApiType: "auto",
+      memoryProvider: "openai_compatible"
+    });
+    expect(mapModelProtocol("xiaomi")).toEqual({
+      agentProvider: "xiaomi_mimo",
+      agentApiType: "auto",
+      memoryProvider: "openai_compatible"
     });
   });
 });

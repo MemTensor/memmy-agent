@@ -2,6 +2,8 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_ENDPOINTS,
+  DEFAULT_MODEL_IDS,
+  PROTOCOL_OPTIONS,
   IMAGE_DEFAULT_ENDPOINTS,
   IMAGE_DEFAULT_MODEL_IDS,
   IMAGE_PROTOCOL_OPTIONS,
@@ -26,6 +28,7 @@ import {
   toProtocol
 } from "../model-config.js";
 import type { TextModelProviderConfig } from "../../api/config-client.js";
+import { modelProviderLogoUrl } from "../../components/model-provider-logo.js";
 import { canSaveModelConfig, createModelConfigValidationKey, type ModelConfigValidationState } from "../model-config-validation.js";
 import { zhCNMessages } from "../../i18n/messages.js";
 
@@ -505,5 +508,37 @@ describe("model config helpers", () => {
     expect(toProtocol("kimi")).toBe("moonshot");
     expect(toProtocol("google")).toBe("gemini");
     expect(fromProtocol("moonshot")).toBe("kimi");
+  });
+
+  it("阶跃星辰和小米 MiMo 作为文本 Provider 可选且默认值完整", () => {
+    const options = PROTOCOL_OPTIONS.map((option) => option.value);
+    expect(options).toContain("stepfun");
+    expect(options).toContain("xiaomi");
+
+    expect(DEFAULT_ENDPOINTS.stepfun).toBe("https://api.stepfun.com/v1");
+    expect(DEFAULT_ENDPOINTS.xiaomi).toBe("https://api.xiaomimimo.com/v1");
+    expect(DEFAULT_MODEL_IDS.stepfun).toBe("step-3.5-flash");
+    expect(DEFAULT_MODEL_IDS.xiaomi).toBe("mimo-v2.5-pro");
+
+    // 两家在前后端同名，protocol 与 provider id 必须原样往返。
+    for (const protocol of ["stepfun", "xiaomi"] as const) {
+      expect(fromProtocol(protocol)).toBe(protocol);
+      expect(toProtocol(protocol)).toBe(protocol);
+    }
+
+    expect(zhCNMessages["apiKey.provider.stepfun"]).toBe("阶跃星辰");
+    expect(zhCNMessages["apiKey.provider.xiaomi"]).toBe("小米 MiMo");
+  });
+
+  it("为阶跃星辰和小米 MiMo 解析出品牌 logo", () => {
+    expect(modelProviderLogoUrl("stepfun")).toMatch(/^data:image\/svg\+xml/);
+    expect(modelProviderLogoUrl("xiaomi")).toMatch(/^data:image\/svg\+xml/);
+    expect(modelProviderLogoUrl("xiaomi_mimo")).toBe(modelProviderLogoUrl("xiaomi"));
+    expect(modelProviderLogoUrl("mimo-v2.5-pro")).toBe(modelProviderLogoUrl("xiaomi"));
+    expect(modelProviderLogoUrl("step-3.5-flash")).toBe(modelProviderLogoUrl("stepfun"));
+    expect(modelProviderLogoUrl("阶跃星辰")).toBe(modelProviderLogoUrl("stepfun"));
+    expect(modelProviderLogoUrl("小米 MiMo")).toBe(modelProviderLogoUrl("xiaomi"));
+    // minimax 不能被 mimo 规则误伤。
+    expect(modelProviderLogoUrl("minimax")).not.toBe(modelProviderLogoUrl("xiaomi"));
   });
 });

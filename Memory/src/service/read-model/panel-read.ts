@@ -782,7 +782,7 @@ function normalizeChangeOp(value: string | undefined): PanelChange["op"] | undef
 }
 
 function normalizeChangeKind(value: string | undefined): PanelChange["kind"] | undefined {
-  return value === "trace" || value === "span" || value === "policy" || value === "world_model" || value === "skill" ||
+  return value === "trace" || value === "span" || value === "policy" || value === "world_model" || value === "skill" || value === "work_memory" ||
     value === "session" || value === "episode" || value === "job" || value === "feedback" ||
     value === "raw_turn" || value === "repair" || value === "skill_trial" || value === "recall" ||
     value === "artifact"

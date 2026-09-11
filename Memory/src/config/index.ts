@@ -32,7 +32,9 @@ export type LlmVendorName =
   | "kimi"
   | "minimax"
   | "baidu"
-  | "doubao";
+  | "doubao"
+  | "stepfun"
+  | "xiaomi";
 
 export type EmbeddingProviderName =
   | "local"
@@ -280,6 +282,14 @@ const ACCOUNT_EVOLUTION_THINKING_BUDGET = 1_000;
 const ASYNC_EVOLUTION_TIMEOUT_MS = 3 * 60_000;
 export const MEMORY_SUMMARY_MAX_TOKENS = 512;
 
+export function defaultMemoryDatabasePath(): string {
+  const baseDir =
+    process.env.MEMMY_MEMORY_HOME ??
+    process.env.MEMORY_SERVICE_HOME ??
+    join(homedir(), ".memmy", "memory-service");
+  return join(baseDir, "memory.sqlite");
+}
+
 export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
   version: 1,
   domain: "",
@@ -290,7 +300,7 @@ export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
   storage: {
     mode: "local",
     backend: "sqlite",
-    sqlitePath: join(homedir(), ".memmy", "memory-service", "memory.sqlite"),
+    sqlitePath: defaultMemoryDatabasePath(),
     endpoint: "http://127.0.0.1:18960",
     token: undefined
   },
@@ -509,8 +519,15 @@ export function loadMemmyConfig(configPath?: string): {
   const memmyMemoryConfig = asRecord(rootConfig.memmyMemory);
   const fileConfig = resolveRuntimeMemmyMemoryConfig(memmyMemoryConfig, rootConfig);
   const envConfig = configFromEnv();
+  const defaults = {
+    ...DEFAULT_MEMMY_CONFIG,
+    storage: {
+      ...DEFAULT_MEMMY_CONFIG.storage,
+      sqlitePath: defaultMemoryDatabasePath()
+    }
+  };
   const merged = normalizeConfig(deepMerge(
-    DEFAULT_MEMMY_CONFIG as unknown as Record<string, unknown>,
+    defaults as unknown as Record<string, unknown>,
     fileConfig,
     envConfig
   ));
@@ -845,12 +862,16 @@ function memoryLlmVendor(
     case "qianfan":
     case "doubao":
     case "volcengine":
+    case "stepfun":
+    case "xiaomi":
+    case "xiaomi_mimo":
       return ({
         dashscope: "qwen",
         moonshot: "kimi",
         qianfan: "baidu",
-        volcengine: "doubao"
-      } as const)[provider as "dashscope" | "moonshot" | "qianfan" | "volcengine"]
+        volcengine: "doubao",
+        xiaomi_mimo: "xiaomi"
+      } as const)[provider as "dashscope" | "moonshot" | "qianfan" | "volcengine" | "xiaomi_mimo"]
         ?? provider as LlmVendorName;
     default:
       return runtimeProvider === "openai_compatible" ? "openai_compatible" : "";
@@ -1280,7 +1301,9 @@ function llmVendor(value: unknown, fallback: LlmVendorName): LlmVendorName {
     vendor === "kimi" ||
     vendor === "minimax" ||
     vendor === "baidu" ||
-    vendor === "doubao"
+    vendor === "doubao" ||
+    vendor === "stepfun" ||
+    vendor === "xiaomi"
   ) {
     return vendor;
   }

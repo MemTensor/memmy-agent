@@ -124,7 +124,7 @@ describe("desktop packaged runtime boundaries", () => {
       yaml: expect.any(String),
       zod: expect.any(String)
     });
-    expect(memoryPackage.version).toBe("2.1.2");
+    expect(memoryPackage.version).toBe("2.1.3");
     expect(memoryPackage.dependencies ?? {}).not.toHaveProperty("@memmy/local-api-contracts");
     expect(memoryPackage.dependencies ?? {}).not.toHaveProperty("@memmy/migrations");
     expect(memoryPackage.scripts?.prebuild).toBeUndefined();
@@ -351,6 +351,9 @@ describe("desktop packaged runtime boundaries", () => {
       };
       expect(config.asarUnpack).toContain(
         "dist/runtime/memmy-agent/node_modules/@memmy/migrations/**"
+      );
+      expect(config.asarUnpack).toContain(
+        "dist/runtime/memmy-agent/dist/extra-dependencies/office-rendering/**"
       );
     }
   });
@@ -1526,7 +1529,8 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).toContain("InstallLocation is shared-looking or contains a protected path");
     expect(source).toContain("-IncludeMachineScope requires an already elevated PowerShell session");
     expect(source).toContain("This script can only run on Windows.");
-    expect(source).toContain("Type CLEAR MEMMY to continue");
+    expect(source).toContain("This permanently deletes Memmy application state and local data.");
+    expect(source).not.toContain("Read-Host");
   });
 
   it("keeps packaged CLI launchers on Memmy.app and ~/.memmy/config.yaml", () => {

@@ -1,9 +1,9 @@
 import { agentImageAccept, agentImageExtensionForMime, isAgentImageMime, type AgentImageMime } from "./agent-image-encode.js";
 
-export const AGENT_ATTACHMENT_MAX_COUNT = 4;
-export const AGENT_FILE_TARGET_MAX_BYTES = 10 * 1024 * 1024;
-
-const AGENT_ATTACHMENT_UNSAFE_FILENAME_CHARS = /[<>:"\/\\|?*\x00-\x1F]/g;
+const AGENT_ATTACHMENT_UNSAFE_FILENAME_CHARS = new RegExp(
+  `[<>:"/\\\\|?*${String.fromCharCode(0)}-${String.fromCharCode(31)}]`,
+  "g",
+);
 
 export const AGENT_DOCUMENT_MIME_BY_EXTENSION = {
   ".pdf": "application/pdf",

@@ -14,12 +14,19 @@ export function detailFromMemory(memory: MemoryRow, processing?: MemoryProcessin
 }
 
 export function detailTitleForMemory(memory: MemoryRow): string {
+  if (memory.properties.internal_info.memory_kind === "work_memory") {
+    const topic = stringFromMaybeRecord(memory.properties.internal_info, "work_topic");
+    if (topic) return truncateDetailTitle(topic);
+  }
   const trace = traceMetaFromMemory(memory); const policy = policyMetaFromMemory(memory); const worldModel = worldModelMetaFromMemory(memory); const skill = skillMetaFromMemory(memory);
   const title = firstDetailDisplayString(stringFromMaybeRecord(memory.info, "title"), stringFromMaybeRecord(memory.properties.internal_info, "title"), trace?.summary, policy?.title, worldModel?.title, skill?.name, firstReadableDetailMemoryLine(memory.memoryValue), isInternalMemoryKeyForDisplay(memory.memoryKey) ? undefined : memory.memoryKey);
   return truncateDetailTitle(title ?? memory.id);
 }
 
 export function detailSummaryForMemory(memory: MemoryRow): string {
+  if (memory.properties.internal_info.memory_kind === "work_memory") {
+    return stringFromMaybeRecord(memory.properties.internal_info, "requirement") ?? "";
+  }
   const trace = traceMetaFromMemory(memory); const policy = policyMetaFromMemory(memory); const worldModel = worldModelMetaFromMemory(memory); const skill = skillMetaFromMemory(memory);
   return firstDetailDisplayString(stringFromMaybeRecord(memory.info, "summary"), stringFromMaybeRecord(memory.properties.internal_info, "summary"), trace?.summary, policy?.trigger, policy?.procedure, worldModel?.body, worldModel?.title, skill?.invocationGuide, firstReadableDetailMemoryLine(memory.memoryValue), firstLine(memory.memoryValue)) ?? "";
 }
@@ -31,6 +38,15 @@ export function firstDetailDisplayString(...values: Array<string | undefined | n
 export function memoryDetailWithLayerPayload(detail: MemoryDetailItem, memory: MemoryRow): MemoryDetailItem & Record<string, unknown> {
   const item: MemoryDetailItem & Record<string, unknown> = { ...detail };
   if (memory.memoryLayer === "L1") {
+    if (memory.properties.internal_info.memory_kind === "work_memory") {
+      item.workMemory = {
+        workTopic: stringFromMaybeRecord(memory.properties.internal_info, "work_topic"),
+        requirement: stringFromMaybeRecord(memory.properties.internal_info, "requirement"),
+        reason: stringFromMaybeRecord(memory.properties.internal_info, "reason"),
+        projectId: typeof memory.info.project_id === "string" ? memory.info.project_id : null
+      };
+      return item;
+    }
     const trace = traceMetaFromMemory(memory);
     const tracePayload = { episodeId: trace?.episodeId ?? stringFromMaybeRecord(memory.info, "episode_id") ?? "", rawTurnId: rawTurnIdFromMemory(memory) ?? "", turnId: trace?.turnId ?? stringFromMaybeRecord(memory.info, "turn_id") ?? "" };
     if (tracePayload.episodeId && tracePayload.rawTurnId && tracePayload.turnId) item.trace = tracePayload;

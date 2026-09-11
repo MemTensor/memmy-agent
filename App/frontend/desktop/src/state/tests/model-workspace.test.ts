@@ -160,6 +160,30 @@ function catalog(): ModelConfigView {
 }
 
 describe("canonical model workspace adapter", () => {
+  it("把小米的 UI provider id 归一成 catalog id，阶跃保持同名", async () => {
+    const base = createModelWorkspace(await readModelConfigCatalog(catalogFixture()));
+
+    const xiaomi = upsertByokPreset(base, {
+      provider: "xiaomi",
+      endpoint: "https://api.xiaomimimo.com/v1",
+      protocol: "openai-chat-completions",
+      apiKey: "sk-mimo",
+      model: "mimo-v2.5-pro",
+      capabilities: ["agent"]
+    });
+    expect(xiaomi.workspace.catalog.providers.map((provider) => provider.provider)).toContain("xiaomi_mimo");
+
+    const stepfun = upsertByokPreset(base, {
+      provider: "stepfun",
+      endpoint: "https://api.stepfun.com/v1",
+      protocol: "openai-chat-completions",
+      apiKey: "sk-stepfun",
+      model: "step-3.5-flash",
+      capabilities: ["agent"]
+    });
+    expect(stepfun.workspace.catalog.providers.map((provider) => provider.provider)).toContain("stepfun");
+  });
+
   it("真实 Backend catalog：空目录经 onboarding 两阶段创建 server UUID 并让一 preset 承载三种 chat capability", async () => {
     const file = catalogFixture();
     let workspace = createModelWorkspace(await readModelConfigCatalog(file));

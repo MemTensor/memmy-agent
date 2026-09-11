@@ -22,7 +22,7 @@ export const CursorSchema = z.string();
 export type Cursor = z.infer<typeof CursorSchema>;
 
 /** Schema for memory kind. */
-export const MemoryKindSchema = z.enum(["user_memory", "trace", "span", "policy", "world_model", "skill"]);
+export const MemoryKindSchema = z.enum(["user_memory", "trace", "span", "policy", "world_model", "skill", "work_memory"]);
 export type MemoryKind = z.infer<typeof MemoryKindSchema>;
 
 /** Schema for memory layer. */
@@ -55,7 +55,8 @@ export const JobTypeSchema = z.enum([
   "l3_world_model_update",
   "project_environment_profile",
   "skill_crystallization",
-  "skill_trial_resolve"
+  "skill_trial_resolve",
+  "work_memory_extract"
 ]);
 export type JobType = z.infer<typeof JobTypeSchema>;
 
@@ -216,7 +217,13 @@ export const MemoryDetailItemSchema = MemoryListItemSchema.extend({
   body: z.string(),
   createdAt: IsoTimeSchema,
   sourceMemoryIds: z.array(NonEmptyStringSchema),
-  metadata: UnknownRecordSchema
+  metadata: UnknownRecordSchema,
+  workMemory: z.object({
+    workTopic: z.string().optional(),
+    requirement: z.string().optional(),
+    reason: z.string().optional(),
+    projectId: z.string().nullable().optional()
+  }).optional()
 });
 export type MemoryDetailItem = z.infer<typeof MemoryDetailItemSchema>;
 
@@ -466,6 +473,31 @@ export const CompleteTurnOutputSchema = z.object({
   duplicate: z.boolean().optional()
 });
 export type CompleteTurnOutput = z.infer<typeof CompleteTurnOutputSchema>;
+
+/** Completed native Agent turn shared by Hook and automatic scanning. */
+export const SourceTurnCompleteInputSchema = CompleteTurnInputSchema.omit({ sessionId: true }).extend({
+  sessionId: NonEmptyStringSchema.optional(),
+  sourceTurn: z.object({
+    source: NonEmptyStringSchema,
+    profileId: NonEmptyStringSchema,
+    conversationId: NonEmptyStringSchema,
+    turnId: NonEmptyStringSchema,
+    startedAt: IsoTimeSchema,
+    completedAt: IsoTimeSchema,
+    sequence: z.number().int().nonnegative().optional(),
+    completionEvidence: NonEmptyStringSchema
+  }),
+  channel: z.enum(["hook", "agent_source_scan"]),
+  workspacePath: z.string().optional()
+});
+export type SourceTurnCompleteInput = z.infer<typeof SourceTurnCompleteInputSchema>;
+
+export const SourceTurnCompleteOutputSchema = z.object({
+  status: z.enum(["stored", "existing", "rejected", "pending", "conflict"]),
+  reason: z.string().optional(),
+  result: CompleteTurnOutputSchema.partial({ changeSeq: true }).optional()
+});
+export type SourceTurnCompleteOutput = z.infer<typeof SourceTurnCompleteOutputSchema>;
 
 /** Definition for search input. */
 export const SearchInputSchema = RuntimeRequestFieldsSchema.extend({

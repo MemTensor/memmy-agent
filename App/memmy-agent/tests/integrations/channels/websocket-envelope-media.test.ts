@@ -56,7 +56,7 @@ function makeWebuiChannel(): WebSocketChannel {
 }
 
 function makeConnection() {
-  return { send: vi.fn(async (raw: string) => undefined), remoteAddress: ["127.0.0.1"] };
+  return { send: vi.fn(async (raw: string) => { void raw; }), remoteAddress: ["127.0.0.1"] };
 }
 
 function sentError(connection: ReturnType<typeof makeConnection>): any {
@@ -250,7 +250,7 @@ describe("WebSocket message envelopes with media paths", () => {
     expect(sentError(connection)).toMatchObject({ chat_id: "abc123", detail: "attachment_rejected", reason: "mime" });
   });
 
-  it("rejects too many media_paths", async () => {
+  it("accepts any number of media_paths without a count limit", async () => {
     tmpRoot();
     const channel = makeChannel();
     const connection = makeConnection();
@@ -262,8 +262,10 @@ describe("WebSocket message envelopes with media paths", () => {
       media_paths: Array.from({ length: 5 }, (_, index) => writeWebuiImage(`shot-${index}.png`)),
     });
 
-    expect(channel.handleMessage).not.toHaveBeenCalled();
-    expect(sentError(connection)).toMatchObject({ chat_id: "abc123", detail: "attachment_rejected", reason: "too_many_attachments" });
+    // With no count limit, all 5 paths are accepted and handleMessage is called
+    expect(channel.handleMessage).toHaveBeenCalledTimes(1);
+    const opts = (channel.handleMessage as any).mock.calls[0][0];
+    expect(opts.media).toHaveLength(5);
   });
 
   it("rejects deprecated WebUI image and video data URL media payloads", async () => {

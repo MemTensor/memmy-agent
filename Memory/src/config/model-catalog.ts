@@ -144,12 +144,13 @@ function catalogProviderId(connection: Record<string, unknown>): string {
     qwen: "dashscope",
     kimi: "moonshot",
     baidu: "qianfan",
-    doubao: "volcengine"
+    doubao: "volcengine",
+    xiaomi: "xiaomi_mimo"
   };
   const provider = aliases[source] ?? source;
   return [
     "openai", "anthropic", "gemini", "deepseek", "zhipu", "dashscope",
-    "moonshot", "minimax", "qianfan", "volcengine"
+    "moonshot", "minimax", "qianfan", "volcengine", "stepfun", "xiaomi_mimo"
   ].includes(provider) ? provider : "openai";
 }
 

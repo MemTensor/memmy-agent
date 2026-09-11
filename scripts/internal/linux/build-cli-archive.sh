@@ -5,6 +5,10 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 VERSION="$(node -p "require('$REPO_ROOT/package.json').version")"
 OUTPUT_DIR="$REPO_ROOT/release-assets"
 ARCHIVE_NAME="memmy-agent-linux-cli.tar.gz"
+# The Office rendering executables are provisioned by release packaging and are
+# not tracked here, so contract runs opt out of the presence check. Hashes named
+# by a manifest still describe a real payload and are always verified below.
+ALLOW_MISSING_OFFICE_PAYLOAD="${MEMMY_LINUX_CLI_ALLOW_MISSING_OFFICE_PAYLOAD:-0}"
 
 usage() {
   printf '%s\n' \
@@ -97,6 +101,70 @@ cp "$REPO_ROOT/package-lock.json" "$PAYLOAD_DIR/package-lock.json"
 cp "$REPO_ROOT/App/memmy-agent/package.json" "$PAYLOAD_DIR/App/memmy-agent/package.json"
 cp "$REPO_ROOT/App/memmy-agent/package-lock.json" "$PAYLOAD_DIR/App/memmy-agent/package-lock.json"
 cp -R "$REPO_ROOT/App/memmy-agent/dist" "$PAYLOAD_DIR/App/memmy-agent/dist"
+
+verify_office_rendering_bundle() {
+  local target_key="$1"
+  local bundle_dir="$PAYLOAD_DIR/App/memmy-agent/dist/extra-dependencies/office-rendering/$target_key"
+  local manifest="$bundle_dir/OFFICE-RENDERING-MANIFEST.json"
+  [ -f "$manifest" ] || { echo "Missing Office rendering manifest: $manifest" >&2; exit 1; }
+  if [ "$ALLOW_MISSING_OFFICE_PAYLOAD" = "1" ] && [ ! -e "$bundle_dir/bin/soffice" ]; then
+    echo "Office rendering payload absent for $target_key; skipping executable checks" >&2
+  else
+    for binary in soffice pdfinfo pdftoppm; do
+      [ -f "$bundle_dir/bin/$binary" ] || { echo "Missing Office rendering binary: $bundle_dir/bin/$binary" >&2; exit 1; }
+      [ -x "$bundle_dir/bin/$binary" ] || { echo "Office rendering binary is not executable: $bundle_dir/bin/$binary" >&2; exit 1; }
+    done
+  fi
+node - "$manifest" "$target_key" <<'NODE'
+const { createHash } = require("node:crypto");
+const { readFileSync } = require("node:fs");
+const path = require("node:path");
+const [manifestPath, expectedKey] = process.argv.slice(2);
+const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+if (`${manifest.platform}-${manifest.arch}` !== expectedKey) throw new Error(`Office rendering manifest target mismatch: ${manifestPath}`);
+if (JSON.stringify(manifest.binaries) !== JSON.stringify(["bin/soffice", "bin/pdfinfo", "bin/pdftoppm"])) throw new Error(`Office rendering manifest binary list mismatch: ${manifestPath}`);
+if (Object.hasOwn(manifest, "schemaVersion")) throw new Error(`Office rendering manifest must not contain schemaVersion: ${manifestPath}`);
+if (!manifest.toolVersions || typeof manifest.toolVersions !== "object" || Array.isArray(manifest.toolVersions)) throw new Error(`Office rendering toolVersions must be an object: ${manifestPath}`);
+if (!manifest.sha256 || typeof manifest.sha256 !== "object" || Array.isArray(manifest.sha256)) throw new Error(`Office rendering sha256 must be an object: ${manifestPath}`);
+for (const [relative, expected] of Object.entries(manifest.sha256)) {
+  if (!/^[^/].*$/.test(relative) || relative.includes("..") || !/^[0-9a-f]{64}$/i.test(expected)) throw new Error(`Invalid Office rendering hash entry: ${relative}`);
+  const actual = createHash("sha256").update(readFileSync(path.join(path.dirname(manifestPath), relative))).digest("hex");
+  if (actual !== expected.toLowerCase()) throw new Error(`Office rendering hash mismatch: ${relative}`);
+}
+NODE
+}
+
+for office_target in linux-x64 linux-arm64; do
+  verify_office_rendering_bundle "$office_target"
+done
+
+verify_office_skill_payload() {
+  local skill_root="$PAYLOAD_DIR/App/memmy-agent/dist/skills"
+  for skill in pptx xlsx; do
+    [ -f "$skill_root/$skill/SKILL.md" ] || { echo "Missing packaged $skill skill" >&2; exit 1; }
+    [ -d "$skill_root/$skill/scripts" ] || { echo "Missing packaged $skill scripts" >&2; exit 1; }
+  done
+  local schema_root="$skill_root/pptx/schemas"
+  local schema_manifest="$schema_root/SCHEMA-MANIFEST.json"
+  [ -f "$schema_manifest" ] || { echo "Missing packaged PPTX schema manifest" >&2; exit 1; }
+  node - "$schema_manifest" "$schema_root" <<'NODE'
+const { createHash } = require("node:crypto");
+const { readFileSync } = require("node:fs");
+const path = require("node:path");
+const [manifestPath, schemaRoot] = process.argv.slice(2);
+const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+if (!manifest.root || !Array.isArray(manifest.files) || !manifest.files.includes(manifest.root)) throw new Error(`Invalid PPTX schema manifest: ${manifestPath}`);
+for (const relative of manifest.files) {
+  if (!relative || path.posix.normalize(relative) !== relative || relative.startsWith("../") || path.isAbsolute(relative)) throw new Error(`Unsafe PPTX schema path: ${relative}`);
+  const bytes = readFileSync(path.join(schemaRoot, relative));
+  const expected = manifest.sha256?.[relative];
+  if (!/^[0-9a-f]{64}$/i.test(expected ?? "")) throw new Error(`Missing PPTX schema hash: ${relative}`);
+  const actual = createHash("sha256").update(bytes).digest("hex");
+  if (actual !== expected.toLowerCase()) throw new Error(`PPTX schema hash mismatch: ${relative}`);
+}
+NODE
+}
+verify_office_skill_payload
 cp "$REPO_ROOT/AgentSourceCore/package.json" "$PAYLOAD_DIR/AgentSourceCore/package.json"
 cp -R "$REPO_ROOT/AgentSourceCore/dist" "$PAYLOAD_DIR/AgentSourceCore/dist"
 cp "$REPO_ROOT/App/backend/package.json" "$PAYLOAD_DIR/App/backend/package.json"

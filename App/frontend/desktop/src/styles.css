@@ -1609,6 +1609,15 @@ body:has(.memory-drawer) .window-drag-region {
   padding-right: var(--codex-content-padding-x);
 }
 
+/* Keep the home toolbar below Windows native controls; fullscreen has no overlay. */
+body.memmy-platform-windows:not(.memmy-window-fullscreen) .app-frame-main--windows-titlebar-safe {
+  --app-frame-topbar-offset: var(--codex-toolbar-height);
+}
+
+.app-frame-main--windows-titlebar-safe .app-frame-content-topbar {
+  top: var(--app-frame-topbar-offset, 0px);
+}
+
 .app-frame-content-topbar {
   position: absolute;
   top: 0;

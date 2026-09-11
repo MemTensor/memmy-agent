@@ -1,5 +1,6 @@
 /** Ingestion service module. */
 import { createHash } from "node:crypto";
+import { orderedTurns, sourceTurnFromMessages, sourceTurnFailureReason, buildSourceTurnRequest } from "@memmy/agent-source-core";
 import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import type { ConversationMessage } from "../adapters/outbound/agent-source/types.js";
 import type { MemoryClient } from "../adapters/outbound/memory-client/index.js";
@@ -64,7 +65,7 @@ export interface IngestionStats {
 
 /** Contract for create ingestion service options. */
 export interface CreateIngestionServiceOptions {
-  memoryClient: Pick<MemoryClient, "addMemory">;
+  memoryClient: Pick<MemoryClient, "addMemory" | "completeSourceTurn">;
   agentSourceRepository: Pick<AgentSourceRepository, "hasSeen" | "markSeen">;
   memoryAddAnalytics?: Pick<
     MemoryDesktopAddAnalytics,
@@ -163,6 +164,10 @@ async function processConversation(
   ctx: IngestionContext,
   stats: IngestionStats
 ): Promise<void> {
+  if (ctx.sourceId === "codex") {
+    await processNativeConversation(options, messages, ctx, stats);
+    return;
+  }
   let processedTurns = 0;
   let incomplete = false;
   let failed = false;
@@ -272,6 +277,52 @@ async function processConversation(
   if (failed) stats.failedConversationIds.push(conversationId);
   else if (incomplete) stats.incompleteConversationIds.push(conversationId);
   else stats.completedConversationIds.push(conversationId);
+}
+
+async function processNativeConversation(
+  options: CreateIngestionServiceOptions,
+  messages: readonly ConversationMessage[],
+  ctx: IngestionContext,
+  stats: IngestionStats
+): Promise<void> {
+  let failed = false;
+  const values = (async function* () { yield* messages; })();
+  for await (const turn of orderedTurns(values)) {
+    ctx.signal?.throwIfAborted();
+    try {
+      const sourceTurn = sourceTurnFromMessages(turn.messages);
+      if (!sourceTurn) {
+        throw new Error(sourceTurnFailureReason(turn.messages));
+      }
+      const result = await options.memoryClient.completeSourceTurn(buildSourceTurnRequest(sourceTurn, "agent_source_scan"));
+      if (result.status === "pending" || result.status === "conflict") {
+        throw new Error(result.reason ?? result.status);
+      }
+      if (result.status === "stored") {
+        const ids = result.result?.l1MemoryIds ?? [];
+        stats.written += turn.messages.length;
+        stats.writtenMemories += ids.length;
+        stats.memoryIds.push(...ids);
+      } else {
+        stats.deduped += turn.messages.length;
+        if (result.status === "existing") stats.dedupedMemories += 1;
+      }
+      for (const message of turn.messages) {
+        options.agentSourceRepository.markSeen(createDedupKey(ctx.sourceId, message.messageId), ctx.sourceId);
+      }
+    } catch (error) {
+      failed = true;
+      stats.failed += turn.messages.length;
+      stats.failedMemories += 1;
+      stats.errors.push({ conversationId: turn.conversationId, reason: error instanceof Error ? error.message : "native turn ingestion failed" });
+    }
+    emitIngestionProgress(ctx, stats);
+  }
+  const conversationId = messages[0]?.conversationId;
+  if (conversationId) {
+    if (failed) stats.failedConversationIds.push(conversationId);
+    else stats.completedConversationIds.push(conversationId);
+  }
 }
 
 function emitIngestionProgress(ctx: IngestionContext, stats: IngestionStats): void {

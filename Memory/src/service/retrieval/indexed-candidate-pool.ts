@@ -38,25 +38,33 @@ export class IndexedCandidatePool {
     userId: string;
     layers: MemoryLayer[];
     tags?: string[];
+    projectId?: string | null;
   }): number {
     const baseFilter: MemoryFilter = {
       memoryLayer: input.layers,
       status: ["activated", "resolving"]
     };
-    return this.deps.repos.memories.count(input.tags?.length ? { ...baseFilter, tags: input.tags } : baseFilter);
+    const scopedFilter = input.layers.includes("L1") && input.projectId !== undefined
+      ? { ...baseFilter, workMemoryUserId: input.userId, workMemoryProjectId: input.projectId }
+      : baseFilter;
+    return this.deps.repos.memories.count(input.tags?.length ? { ...scopedFilter, tags: input.tags } : scopedFilter);
   }
 
   hasRetrievalVectorCandidates(input: {
     userId: string;
     layers: MemoryLayer[];
     tags?: string[];
+    projectId?: string | null;
   }): boolean {
     if (input.layers.length === 0) return false;
     const baseFilter: MemoryFilter = {
       memoryLayer: input.layers,
       status: ["activated", "resolving"]
     };
-    return this.deps.repos.memories.hasVectorRows(input.tags?.length ? { ...baseFilter, tags: input.tags } : baseFilter);
+    const scopedFilter = input.layers.includes("L1") && input.projectId !== undefined
+      ? { ...baseFilter, workMemoryUserId: input.userId, workMemoryProjectId: input.projectId }
+      : baseFilter;
+    return this.deps.repos.memories.hasVectorRows(input.tags?.length ? { ...scopedFilter, tags: input.tags } : scopedFilter);
   }
 
   async indexedRetrievalCandidatePool(input: {
@@ -65,6 +73,7 @@ export class IndexedCandidatePool {
     queryVector?: number[];
     layers: MemoryLayer[];
     tags?: string[];
+    projectId?: string | null;
     targetSkillId?: string;
     currentAgentId?: string;
     config: {
@@ -90,6 +99,9 @@ export class IndexedCandidatePool {
       const filter: MemoryFilter = {
         memoryLayer: layer,
         status: ["activated", "resolving"],
+        ...(layer === "L1" && input.projectId !== undefined
+          ? { workMemoryUserId: input.userId, workMemoryProjectId: input.projectId }
+          : {}),
         ...(input.tags?.length ? { tags: input.tags } : {})
       };
       const vectorPool = this.retrievalVectorPoolSize(layer, input.config);

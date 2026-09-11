@@ -10,6 +10,7 @@ import type { LlmClient } from "../model/types.js";
 import { MEMORY_SUMMARY_MAX_TOKENS } from "../config/index.js";
 import { memoryVector } from "../storage/memory-vector-state.js";
 import { stableHash } from "../utils/id.js";
+import { matchToolResultIndices } from "../utils/tool-call-pairing.js";
 import { formatZonedTime } from "../utils/time.js";
 import {
   renderL3WorldModelFields,
@@ -4468,14 +4469,37 @@ export function tracePolicySimilarity(
 }
 
 function normalizeToolCalls(toolCalls: ToolCallPayload[], toolResults: unknown[]): ToolCallPayload[] {
+  const resultIndices = matchToolResultIndices(toolCalls, toolResults);
   return toolCalls.map((call, index) => {
-    const result = toolResults[index];
-    const output = call.output ?? result;
+    const resultIndex = resultIndices[index];
+    const pairedResult = resultIndex === undefined ? undefined : toolResults[resultIndex];
+    const result = pairedResult && typeof pairedResult === "object" && !Array.isArray(pairedResult)
+      ? pairedResult as Record<string, unknown>
+      : {};
+    const output = call.output ?? result.output ?? result.result ?? result.content ?? pairedResult;
+    const resultError = typeof result.error === "string" ? result.error : errorMessageFromUnknown(result.error);
+    const error = call.error ?? resultError ??
+      (result.success === false ? errorMessageFromUnknown(result) : undefined);
+    let success: boolean | undefined;
+    if (typeof call.success === "boolean") {
+      success = call.success;
+    } else if (typeof result.success === "boolean") {
+      success = result.success;
+    } else if (error) {
+      success = false;
+    } else if (output !== undefined) {
+      success = true;
+    } else {
+      success = undefined;
+    }
+    const resultErrorCode = result.errorCode ?? result.error_code;
     return {
       ...call,
       output,
-      error: call.error,
-      success: call.success ?? !call.error
+      status: call.status ?? (typeof result.status === "string" ? result.status : undefined),
+      error,
+      errorCode: call.errorCode ?? (typeof resultErrorCode === "string" ? resultErrorCode : undefined),
+      success
     };
   });
 }
@@ -5143,11 +5167,12 @@ function candidateFromMemory(
     return null;
   }
   const kind = memory.properties.internal_info.memory_kind ?? kindFromLayer(memory.memoryLayer);
+  const traceLike = kind === "trace" || kind === "span";
   const tier = memory.memoryLayer === "Skill" ? "tier1" : memory.memoryLayer === "L3" ? "tier3" : "tier2";
   const text = memoryTextForRetrieval(memory);
   const vectorChannels = vectorChannelsForMemory(memory, queryVec, options.config, {
     suppressTraceVector:
-      memory.memoryLayer === "L1" &&
+      traceLike &&
       options.traceVectorTagsRequired &&
       !memoryHasAnyTag(memory, options.traceVectorTags),
     seededChannelScores: options.seededChannelScores,

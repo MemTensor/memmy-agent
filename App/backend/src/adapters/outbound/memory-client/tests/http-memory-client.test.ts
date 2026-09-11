@@ -12,6 +12,24 @@ afterEach(async () => {
 });
 
 describe("HttpMemoryClient", () => {
+  it("posts a native turn without a Runtime Session and preserves pending reasons", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const client = createHttpMemoryClient({ baseUrl: "http://memory.test", token: "fixture-token", timeoutMs: 500, maxRetries: 0 }, {
+      fetchImpl: (async (url, init) => {
+        calls.push({ url: String(url), init });
+        return new Response(JSON.stringify({ status: "pending", reason: "source_episode_closed" }), { status: 200, headers: { "content-type": "application/json" } });
+      }) as typeof fetch
+    });
+    const input = {
+      sourceTurn: { source: "codex", profileId: "default", conversationId: "native-session", turnId: "native-turn", startedAt: "2099-01-01T00:00:00.000Z", completedAt: "2099-01-01T00:01:00.000Z", completionEvidence: "final_answer:native-turn" },
+      channel: "agent_source_scan" as const, query: "Run tests", answer: "Tests passed", toolCalls: [{ id: "call-a", name: "test", input: "npm test", output: "passed" }]
+    };
+    expect(await client.completeSourceTurn(input, { userId: "fixture-user" })).toEqual({ status: "pending", reason: "source_episode_closed" });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe("http://memory.test/api/v1/source-turns/complete");
+    expect(JSON.parse(String(calls[0]?.init?.body))).toEqual(input);
+    expect(new Headers(calls[0]?.init?.headers).get("x-memmy-user-id")).toBe("fixture-user");
+  });
   it("only defines path templates for the final memory HTTP APIs", () => {
     expect(Object.values(MEMORY_LAYER_PATHS)).toEqual([
       "/api/v1/health",
@@ -22,6 +40,7 @@ describe("HttpMemoryClient", () => {
       "/api/v1/sessions/:sessionId/close",
       "/api/v1/turns/start",
       "/api/v1/turns/:turnId/complete",
+      "/api/v1/source-turns/complete",
       "/api/v1/memory/search",
       "/api/v1/memory/add",
       "/api/v1/memory/:id",

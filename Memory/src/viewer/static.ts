@@ -38,7 +38,15 @@ export function isMemoryViewerPath(pathname: string): boolean {
 
 function builtViewerRoot(): string | undefined {
   const moduleDir = dirname(fileURLToPath(import.meta.url));
-  const candidates = [resolve(moduleDir, "../../dist/viewer"), resolve(moduleDir, "../../viewer")];
+  // `pkg` exposes bundled files below /snapshot. In the normal compiled
+  // layout this resolves to the runtime root as well, so the same lookup
+  // works for the standalone executable and the unpacked runtime package.
+  // esbuild's CommonJS bundle is located at the packaged runtime root.
+  const candidates = [
+    join(moduleDir, "viewer"),
+    resolve(moduleDir, "../../dist/viewer"),
+    resolve(moduleDir, "../../viewer")
+  ];
   return candidates.find((candidate) => existsSync(join(candidate, "index.html")) && existsSync(join(candidate, "assets")));
 }
 

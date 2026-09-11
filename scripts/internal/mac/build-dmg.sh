@@ -8,6 +8,7 @@ MEMORY_DIR="$ROOT_DIR/Memory"
 MIGRATIONS_DIR="$ROOT_DIR/Migrations"
 LOCAL_API_CONTRACTS_DIR="$ROOT_DIR/App/backend/local-api-contracts"
 RUNTIME_DIR="$DESKTOP_DIR/dist/runtime"
+OFFICE_RENDERING_RUNTIME_DIR="$RUNTIME_DIR/memmy-agent/dist/extra-dependencies/office-rendering"
 MIGRATIONS_STAGING_DIR="$DESKTOP_DIR/dist/Migrations"
 CLI_BIN_DIR="$RUNTIME_DIR/bin"
 DMG_HELPER_DIR="$DESKTOP_DIR/dist/dmg"
@@ -610,6 +611,43 @@ require_packaged_runtime_glob() {
   fi
 }
 
+verify_office_rendering_bundle() {
+  local target_cpu="$1"
+  for candidate in "$OFFICE_RENDERING_RUNTIME_DIR"/*; do
+    [ -e "$candidate" ] || continue
+    if [ "$(basename "$candidate")" != "darwin-$target_cpu" ]; then rm -rf "$candidate"; fi
+  done
+  local bundle_dir="$OFFICE_RENDERING_RUNTIME_DIR/darwin-$target_cpu"
+  local manifest="$bundle_dir/OFFICE-RENDERING-MANIFEST.json"
+
+  require_packaged_runtime_file "$manifest"
+  for binary in soffice pdfinfo pdftoppm; do
+    require_packaged_runtime_file "$bundle_dir/bin/$binary"
+    if [ ! -x "$bundle_dir/bin/$binary" ]; then
+      echo "Office rendering binary is not executable: $bundle_dir/bin/$binary" >&2
+      exit 1
+    fi
+  done
+
+  node - "$manifest" "darwin-$target_cpu" <<'NODE'
+const { createHash } = require("node:crypto");
+const { readFileSync } = require("node:fs");
+const path = require("node:path");
+const [manifestPath, expectedKey] = process.argv.slice(2);
+const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+if (`${manifest.platform}-${manifest.arch}` !== expectedKey) throw new Error(`Office rendering manifest target mismatch: ${manifestPath}`);
+if (JSON.stringify(manifest.binaries) !== JSON.stringify(["bin/soffice", "bin/pdfinfo", "bin/pdftoppm"])) throw new Error(`Office rendering manifest binary list mismatch: ${manifestPath}`);
+if (Object.hasOwn(manifest, "schemaVersion")) throw new Error(`Office rendering manifest must not contain schemaVersion: ${manifestPath}`);
+if (!manifest.toolVersions || typeof manifest.toolVersions !== "object" || Array.isArray(manifest.toolVersions)) throw new Error(`Office rendering toolVersions must be an object: ${manifestPath}`);
+if (!manifest.sha256 || typeof manifest.sha256 !== "object" || Array.isArray(manifest.sha256)) throw new Error(`Office rendering sha256 must be an object: ${manifestPath}`);
+for (const [relative, expected] of Object.entries(manifest.sha256)) {
+  if (!/^[^/].*$/.test(relative) || relative.includes("..") || !/^[0-9a-f]{64}$/i.test(expected)) throw new Error(`Invalid Office rendering hash entry: ${relative}`);
+  const actual = createHash("sha256").update(readFileSync(path.join(path.dirname(manifestPath), relative))).digest("hex");
+  if (actual !== expected.toLowerCase()) throw new Error(`Office rendering hash mismatch: ${relative}`);
+}
+NODE
+}
+
 verify_mac_memory_native_artifacts() {
   local target_cpu="$1"
 
@@ -652,6 +690,7 @@ verify_packaged_mac_unpacked_artifacts() {
   app_path="$(resolve_packaged_mac_app_path "$target_cpu")"
   local unpacked_runtime="$app_path/Contents/Resources/app.asar.unpacked/dist/runtime"
   local packaged_memory_runtime="$app_path/Contents/Resources/memory-runtime"
+  local packaged_agent_source_core="$packaged_memory_runtime/node_modules/@memmy/agent-source-core"
   local packaged_embedding_model="$app_path/Contents/Resources/embedding-models/$EMBEDDING_MODEL_ID"
 
   require_packaged_runtime_file "$app_path/Contents/Resources/app.asar"
@@ -661,6 +700,14 @@ verify_packaged_mac_unpacked_artifacts() {
   require_packaged_runtime_file "$packaged_memory_runtime/memory-runtime.json"
   require_packaged_runtime_file "$packaged_memory_runtime/dist/src/server/index.js"
   require_packaged_runtime_file "$packaged_memory_runtime/dist/src/cli/index.js"
+  require_packaged_runtime_file "$packaged_memory_runtime/dist/src/agent-source/integration/workspace-bridge/memmy-workspace-bridge.mjs"
+  require_packaged_runtime_file "$packaged_agent_source_core/package.json"
+  require_packaged_runtime_file "$packaged_agent_source_core/dist/src/index.js"
+  require_packaged_runtime_file "$packaged_agent_source_core/dist/src/codex-source-turn.js"
+  if [ -L "$packaged_agent_source_core" ]; then
+    echo "Packaged offline Memory agent source core must not be a symbolic link." >&2
+    exit 1
+  fi
   require_packaged_runtime_file "$packaged_memory_runtime/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
   require_packaged_runtime_glob "$packaged_memory_runtime/node_modules/sqlite-vec-darwin-$target_cpu/vec0.*"
   require_packaged_runtime_file "$packaged_memory_runtime/node_modules/onnxruntime-node/bin/napi-v3/darwin/$target_cpu/onnxruntime_binding.node"
@@ -828,6 +875,35 @@ cp -R "$MEMORY_DIR/dist/src" "$RUNTIME_DIR/memory/dist/src"
 cp -R "$MEMORY_DIR/dist/viewer" "$RUNTIME_DIR/memory/dist/viewer"
 cp -R "$MEMORY_DIR/adapters" "$RUNTIME_DIR/memory/adapters"
 cp -R "$AGENT_DIR/dist" "$RUNTIME_DIR/memmy-agent/dist"
+verify_office_rendering_bundle "$TARGET_CPU"
+
+verify_office_skill_payload() {
+  local skill_root="$RUNTIME_DIR/memmy-agent/dist/skills"
+  for skill in pptx xlsx; do
+    require_packaged_runtime_file "$skill_root/$skill/SKILL.md"
+    require_packaged_runtime_glob "$skill_root/$skill/scripts/*.mjs"
+  done
+  local schema_root="$skill_root/pptx/schemas"
+  local schema_manifest="$schema_root/SCHEMA-MANIFEST.json"
+  require_packaged_runtime_file "$schema_manifest"
+  node - "$schema_manifest" "$schema_root" <<'NODE'
+const { createHash } = require("node:crypto");
+const { readFileSync } = require("node:fs");
+const path = require("node:path");
+const [manifestPath, schemaRoot] = process.argv.slice(2);
+const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+if (!manifest.root || !Array.isArray(manifest.files) || !manifest.files.includes(manifest.root)) throw new Error(`Invalid PPTX schema manifest: ${manifestPath}`);
+for (const relative of manifest.files) {
+  if (!relative || path.posix.normalize(relative) !== relative || relative.startsWith("../") || path.isAbsolute(relative)) throw new Error(`Unsafe PPTX schema path: ${relative}`);
+  const bytes = readFileSync(path.join(schemaRoot, relative));
+  const expected = manifest.sha256?.[relative];
+  if (!/^[0-9a-f]{64}$/i.test(expected ?? "")) throw new Error(`Missing PPTX schema hash: ${relative}`);
+  const actual = createHash("sha256").update(bytes).digest("hex");
+  if (actual !== expected.toLowerCase()) throw new Error(`PPTX schema hash mismatch: ${relative}`);
+}
+NODE
+}
+verify_office_skill_payload
 package_step_start "Create Memory runtime manifest"
 create_memory_runtime_manifest "$RUNTIME_DIR/memory"
 package_step_start "Resolve Memory runtime lockfile"

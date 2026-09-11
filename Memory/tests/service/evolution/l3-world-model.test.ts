@@ -50,7 +50,7 @@ describe("L3 World Model trace field pipeline", () => {
         thinkingBefore: "PRIVATE_REASONING_TOOL",
         assistantTextBefore: "VISIBLE_ASSISTANT_PROGRESS"
       }],
-      toolResults: [{ name: "exec", output: "dynamic linker error", exitCode: 1 }]
+      toolResults: [{ id: "call-1", name: "exec", output: "dynamic linker error", exitCode: 1 }]
     });
     service.closeSession(opened.sessionId);
 

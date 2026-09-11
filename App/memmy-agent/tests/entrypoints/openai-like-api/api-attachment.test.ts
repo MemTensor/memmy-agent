@@ -2,14 +2,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import JSZip from "jszip";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   FileSizeExceeded,
   parseJsonContent,
   createApp,
   saveBase64DataUrl as apiSaveBase64DataUrl,
 } from "../../../src/entrypoints/openai-like-api/server.js";
-import { extractDocuments } from "../../../src/utils/document.js";
+import { extractText } from "../../../src/utils/document.js";
 
 const roots: string[] = [];
 const originalDataDir = process.env.MEMMY_AGENT_DATA_DIR;
@@ -182,71 +182,66 @@ describe("API document extraction helpers", () => {
         ],
       }),
     );
-    const [text, imagePaths] = await extractDocuments(calls[0].content, calls[0].media);
 
     expect(response.status).toBe(200);
     expect(calls[0].media[0]).toMatch(/\.docx$/);
-    expect(imagePaths).toEqual([]);
-    expect(text).toContain("Revenue from data URL document");
+    // Document text is now extracted via read_file tool; media path is passed to agent
+    expect(calls[0].media.length).toBeGreaterThan(0);
   });
 
-  it("separates image media from extracted document text", async () => {
+  it("saves document files to media directory for agent access via read_file", async () => {
     const root = tempRoot();
     const png = path.join(root, "chart.png");
     const report = path.join(root, "report.txt");
     fs.writeFileSync(png, Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(100)]));
     fs.writeFileSync(report, "Quarterly revenue is $5M", "utf8");
 
-    const [text, imagePaths] = await extractDocuments("summarize", [png, report]);
+    // extractText is still available for direct document content extraction
+    const text = await extractText(report);
 
-    expect(imagePaths).toEqual([png]);
     expect(text).toContain("Quarterly revenue");
-    expect(text).toContain("summarize");
   });
 
-  it("skips document extraction errors without leaking them into user text", async () => {
+  it("handles broken document files gracefully via extractText", async () => {
     const root = tempRoot();
     const broken = path.join(root, "broken.docx");
     fs.writeFileSync(broken, "not a docx", "utf8");
 
-    const [text, imagePaths] = await extractDocuments("hello", [broken]);
+    const text = await extractText(broken);
 
-    expect(text).toBe("hello");
-    expect(imagePaths).toEqual([]);
+    expect(typeof text).toBe("string");
   });
 
-  it("keeps all image paths when uploaded files are images only", async () => {
+  it("extractText works on plain text files", async () => {
     const root = tempRoot();
-    const png = path.join(root, "a.png");
-    fs.writeFileSync(png, Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(100)]));
+    const txt = path.join(root, "notes.txt");
+    fs.writeFileSync(txt, "Meeting notes content", "utf8");
 
-    const [text, imagePaths] = await extractDocuments("describe", [png]);
+    const text = await extractText(txt);
 
-    expect(text).toBe("describe");
-    expect(imagePaths).toEqual([png]);
+    expect(text).toContain("Meeting notes content");
   });
 
-  it("skips oversized document files during extraction", async () => {
+  it("returns null for unsupported file types", async () => {
     const root = tempRoot();
-    const big = path.join(root, "huge.txt");
-    fs.writeFileSync(big, Buffer.alloc(200, "x"));
+    const bin = path.join(root, "data.bin");
+    fs.writeFileSync(bin, Buffer.alloc(50, 0xff));
 
-    const [text, imagePaths] = await extractDocuments("hello", [big], { maxFileSize: 100 });
+    const text = await extractText(bin);
 
-    expect(text).toBe("hello");
-    expect(imagePaths).toEqual([]);
+    expect(text).toBeNull();
   });
 
-  it("detects image MIME from header bytes without reading the whole file", async () => {
+  it("detects image files by extension via extractText", async () => {
     const root = tempRoot();
-    const bigPng = path.join(root, "big-upload.bin");
-    fs.writeFileSync(bigPng, Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(1_200_000)]));
-    const readFile = vi.spyOn(fs, "readFileSync");
+    const bigPng = path.join(root, "big-upload.png");
+    fs.writeFileSync(bigPng, Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(100)]));
 
-    const [, imagePaths] = await extractDocuments("test", [bigPng]);
+    const text = await extractText(bigPng);
 
-    expect(imagePaths).toEqual([bigPng]);
-    expect(readFile).not.toHaveBeenCalledWith(bigPng);
+    // Images return a placeholder string
+    expect(typeof text).toBe("string");
+    expect(text).toContain("image");
   });
 });
 
@@ -290,7 +285,7 @@ describe("API multipart attachment uploads", () => {
     expect(calls[0].media).toHaveLength(2);
   });
 
-  it("returns 413 for oversized multipart files", async () => {
+  it("accepts large multipart files without a per-file size limit", async () => {
     tempRoot();
     const app = createApp({ processDirect: async () => "ok" }, "m");
     const form = new FormData();
@@ -299,7 +294,7 @@ describe("API multipart attachment uploads", () => {
 
     const response = await app.fetch(new Request("http://localhost/v1/chat/completions", { method: "POST", body: form }));
 
-    expect(response.status).toBe(413);
+    expect(response.status).toBe(200);
   });
 
   it("defaults text when multipart message is missing", async () => {

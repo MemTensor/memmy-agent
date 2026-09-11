@@ -22,7 +22,7 @@ export const CursorSchema = z.string();
 export type Cursor = z.infer<typeof CursorSchema>;
 
 /** Schema for memory kind. */
-export const MemoryKindSchema = z.enum(["user_memory", "trace", "span", "policy", "world_model", "skill"]);
+export const MemoryKindSchema = z.enum(["user_memory", "trace", "span", "policy", "world_model", "skill", "work_memory"]);
 export type MemoryKind = z.infer<typeof MemoryKindSchema>;
 
 /** Schema for memory layer. */
@@ -55,7 +55,8 @@ export const JobTypeSchema = z.enum([
   "l3_world_model_update",
   "project_environment_profile",
   "skill_crystallization",
-  "skill_trial_resolve"
+  "skill_trial_resolve",
+  "work_memory_extract"
 ]);
 export type JobType = z.infer<typeof JobTypeSchema>;
 
@@ -216,7 +217,13 @@ export const MemoryDetailItemSchema = MemoryListItemSchema.extend({
   body: z.string(),
   createdAt: IsoTimeSchema,
   sourceMemoryIds: z.array(NonEmptyStringSchema),
-  metadata: UnknownRecordSchema
+  metadata: UnknownRecordSchema,
+  workMemory: z.object({
+    workTopic: z.string().optional(),
+    requirement: z.string().optional(),
+    reason: z.string().optional(),
+    projectId: z.string().nullable().optional()
+  }).optional()
 });
 export type MemoryDetailItem = z.infer<typeof MemoryDetailItemSchema>;
 

@@ -9,6 +9,7 @@ export const MEMORY_LAYER_PATHS = Object.freeze({
   closeSession: "/api/v1/sessions/:sessionId/close",
   startTurn: "/api/v1/turns/start",
   completeTurn: "/api/v1/turns/:turnId/complete",
+  completeSourceTurn: "/api/v1/source-turns/complete",
   search: "/api/v1/memory/search",
   addMemory: "/api/v1/memory/add",
   getMemory: "/api/v1/memory/:id",

@@ -1029,11 +1029,12 @@ export class FeishuChannel extends BaseChannel {
         contentParts.push(contentText);
       }
     } else if (["image", "audio", "file", "media"].includes(msgType)) {
-      let [filePath, contentText] = await this.downloadAndSaveMedia(
+      const [filePath, initialContentText] = await this.downloadAndSaveMedia(
         msgType,
         contentJson,
         messageId,
       );
+      let contentText = initialContentText;
       if (filePath) mediaPaths.push(filePath);
       if (msgType === "audio" && filePath) {
         const transcription = await this.transcribeAudio(filePath);
@@ -1052,7 +1053,7 @@ export class FeishuChannel extends BaseChannel {
     ) {
       contentParts.push(extractShareCardContent(contentJson, msgType));
     } else {
-      contentParts.push(MSG_TYPE_MAP[msgType] ?? `[${msgType}]`);
+      if (!mediaPaths.length) contentParts.push(MSG_TYPE_MAP[msgType] ?? `[${msgType}]`);
     }
     const parentId = message.parent_id ?? message.parentId ?? null;
     const rootId = message.root_id ?? message.rootId ?? null;
@@ -1115,10 +1116,10 @@ export class FeishuChannel extends BaseChannel {
   onMessageSync(data: any): void {
     void this.safeOnMessage(data);
   }
-  onReactionCreated(data: any): void {}
-  onReactionDeleted(data: any): void {}
-  onMessageRead(data: any): void {}
-  onBotP2pChatEntered(data: any): void {}
+  onReactionCreated(): void {}
+  onReactionDeleted(): void {}
+  onMessageRead(): void {}
+  onBotP2pChatEntered(): void {}
   static formatToolHintLines(toolHint: string): string {
     const parts: string[] = [];
     let buf = "";
