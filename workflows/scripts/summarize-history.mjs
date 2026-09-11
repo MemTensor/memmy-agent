@@ -557,43 +557,6 @@ function derivedHumanTitle(events, fallback) {
   return fallback || `${app} 操作记录`;
 }
 
-function humanEventLine(record) {
-  const application = record.application?.name ?? record.application?.bundleId ?? "unknown application";
-  const prefix = record.timestamp ? `- ${record.timestamp} — ` : "- ";
-  const details = record.details ?? {};
-  let action;
-  if (record.eventType === "recording_started") {
-    action = `Recording started in ${application}; goal: ${cleanInline(details.goal, 240)}`;
-  } else if (record.eventType === "application_changed") {
-    action = `Foreground application changed to ${application} (${record.application?.bundleId ?? "unknown"})`;
-  } else if (record.eventType === "mouse_click") {
-    const target = semanticAccessibilityTarget(details);
-    action = target
-      ? `${details.button ?? "left"} mouse click on ${target} in ${application}`
-      : `${details.button ?? "left"} mouse click in ${application}; semantic target unavailable (coordinates retained only in the raw recording)`;
-  } else if (record.eventType === "text_input") {
-    action = details.redacted
-      ? `Typed ${details.characterCount ?? "unknown"} character(s) in ${application}; text redacted`
-      : `Text input in ${application}: ${cleanInline(JSON.stringify(details.text ?? ""), 240)}`;
-  } else if (record.eventType === "key_press") {
-    action = `Key press in ${application}: ${(details.keys ?? []).map((key) => `\`${cleanInline(key, 80)}\``).join(", ") || "unknown"}`;
-  } else if (record.eventType === "scroll") {
-    const gesture = details.direction && details.direction !== "none"
-      ? ` ${details.direction}`
-      : "";
-    const samples = details.sampleCount ? `, ${details.sampleCount} raw sample(s)` : "";
-    action = `Scroll${gesture} in ${application}${samples}`;
-  } else if (record.eventType === "page_context") {
-    const title = cleanInline(details.title, 160);
-    action = `Browser page in ${application}: ${cleanInline(details.url, 500)}${title ? ` — “${title}”` : ""}`;
-  } else if (record.eventType === "recording_stopped") {
-    action = `Recording stopped (${cleanInline(details.reason ?? "unknown")})`;
-  } else {
-    action = `${record.eventType ?? "unknown event"}: ${cleanInline(JSON.stringify(details), 260)}`;
-  }
-  const screenshot = record.screenshot ? ` — screenshot: \`${record.screenshot}\`` : "";
-  return `${prefix}${action}${screenshot}`;
-}
 
 export function renderHumanSummary({
   file,
@@ -640,63 +603,18 @@ export function renderHumanSummary({
     "experience_version: 1",
     ...(metadata.contextUrl ? [`start_url: ${yamlString(cleanInline(metadata.contextUrl, 2048))}`] : []),
     `status: ${status}`,
+    // Marks the summary as not yet written. The body below is a placeholder;
+    // the model replaces it, and only then does the entry become presentable.
+    "summary_state: pending",
     "---",
     "",
     "## Memory summary",
     "",
-    `用户在「${cleanInline(resolvedTitle, SUMMARY_TEXT_LIMIT)}」中完成了一组电脑操作，已整理为可读的行为记忆。`,
-    "",
-    "### Relevant prior context",
-    "",
-    `- 文本记录模式：${metadata.captureText ? "仅显式允许的应用保留文本" : "文本内容不保留"}。`,
-    "- 浏览器页面地址仅保留协议、域名和路径；查询参数和片段在采集时即被移除。",
-    "",
-    "### Important non-obvious context",
-    "",
-    `- Source recording: \`${recordingId}\``,
-    `- Source file: \`${file}\``,
-    `- Time range: ${timestamps[0] ?? metadata.createdAt ?? "unknown"} → ${timestamps.at(-1) ?? "unknown"}`,
-    `- Platform: ${metadata.platform ?? "macOS"}`,
-    `- Display: ${metadata.display?.width ?? "?"}x${metadata.display?.height ?? "?"} points`,
-    `- Event counts: ${[...eventCounts].map(([name, count]) => `${name} × ${count}`).join(", ")}`,
-    `- Applications: ${applications.length ? applications.join(", ") : "not established from recording evidence"}`,
-    `- Semantic click target coverage: ${semanticClickCount}/${clickEvents.length}`,
-    ...(metadata.contextUrl ? [`- Approved starting URL: ${cleanInline(metadata.contextUrl, 2048)}`] : []),
+    "（尚未生成）",
   ];
-  if (malformedLines.length) output.push(`- Skipped malformed JSONL lines: ${malformedLines.join(", ")}`);
-
-  output.push("", "## Activity timeline", "");
-  for (const event of events) {
-    if (event.eventType === "recording_started" || event.eventType === "recording_stopped") continue;
-    output.push(humanEventLine(event));
+  if (malformedLines.length) {
+    output.push("", `<!-- skipped malformed JSONL lines: ${malformedLines.join(", ")} -->`);
   }
-
-  output.push(
-    "",
-    "## Reusable operation experience",
-    "",
-    "The following sequence is distilled from the human demonstration. It intentionally omits recorded coordinates and exact scroll distances.",
-    "",
-  );
-  const reusableActions = reusableHumanActions(events);
-  if (metadata.contextUrl) {
-    reusableActions.unshift(`Open ${cleanInline(metadata.contextUrl, 2048)} in the existing browser application, then verify the origin, page title, and main content before continuing.`);
-  }
-  if (reusableActions.length) {
-    reusableActions.forEach((action, index) => output.push(`${index + 1}. ${action}`));
-  } else {
-    output.push("No reusable semantic action was established from this recording.");
-  }
-
-  const finalApplication = [...events].reverse().find((event) => event.application?.bundleId)?.application;
-  output.push(
-    "",
-    "## End State",
-    "",
-    `- Final foreground application: ${finalApplication?.name ?? "unknown"} (${finalApplication?.bundleId ?? "unknown"})`,
-    ...(finalPageContext ? [`- Final browser page: ${cleanInline(finalPageContext.details.url, 500)}`] : []),
-  );
-  for (const artifact of artifacts) output.push(`  - \`${artifact}\``);
 
   output.push("", "## Citations", "", `- ${file}`);
   for (const artifact of artifacts) output.push(`- ${artifact}`);

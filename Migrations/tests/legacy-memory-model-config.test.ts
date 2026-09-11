@@ -87,7 +87,7 @@ afterEach(async () => {
 });
 
 describe("legacy Memory model config normalization", () => {
-  it("migrates an account profile to follow/cloud without treating platform roles as fixed", async () => {
+  it("migrates an account profile with a fixed summary route", async () => {
     const { configPath, context } = await fixture({
       app: { cloudUuid: "cloud-uuid" },
       providers: {
@@ -154,7 +154,7 @@ describe("legacy Memory model config normalization", () => {
     expect(config.memmyMemory).toMatchObject({
       userId: "local-user-7",
       roleRouting: {
-        summary: "follow",
+        summary: "fixed",
         evolution: "follow",
       },
       summary: {

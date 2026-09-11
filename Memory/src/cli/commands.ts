@@ -23,6 +23,7 @@ import { DEFAULT_MEMORY_URL, loadCliMemoryConfig } from "./config.js";
 import { PROJECT_VERSION } from "./project-version.js";
 import {
   currentInstalledRuntime,
+  repairInstalledWindowsMemoryService,
   startInstalledMemoryService,
   stopInstalledMemoryService
 } from "./runtime-installer.js";
@@ -35,6 +36,7 @@ export interface CommandContext {
   argv: string[];
   fetch?: typeof fetch;
   stopInstalledService?: (home: string) => Promise<Record<string, unknown>>;
+  repairInstalledService?: (home: string) => Promise<Record<string, unknown>>;
 }
 
 export async function runCommand(context: CommandContext): Promise<unknown> {
@@ -73,8 +75,9 @@ export async function runCommand(context: CommandContext): Promise<unknown> {
     const home = optionString(options, "home") ?? "~/.memmy";
     if (words[1] === "start") return startInstalledMemoryService(home);
     if (words[1] === "stop") return (context.stopInstalledService ?? stopInstalledMemoryService)(home);
+    if (words[1] === "repair-launcher") return (context.repairInstalledService ?? repairInstalledWindowsMemoryService)(home);
     if (words[1] === "status") return { ok: true, runtime: await currentInstalledRuntime(home) ?? null };
-    throw new Error("service requires start, stop, or status");
+    throw new Error("service requires start, stop, status, or repair-launcher");
   }
 
   if (words[0] === "raw") {
@@ -600,6 +603,7 @@ function helpText(): string {
     "  upgrade [--version <ver>]    Upgrade Memory and installed agent adapters",
     "  stop                         Stop the background Memory service",
     "  service start|stop|status    Control the installed user service",
+    "  service repair-launcher     Repair a legacy Windows task without starting it",
     "  serve                        Explain how to connect to an external Memory service",
     "  health                       Check Memory service health",
     "  reload-config                Reload runtime model config from config.yaml",

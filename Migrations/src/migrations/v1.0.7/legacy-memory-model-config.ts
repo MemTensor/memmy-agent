@@ -249,6 +249,7 @@ function resolvedRoleRouting(
   role: MemoryRole,
   agentConnection: AgentModelConnection | null,
 ): MemoryRoleRouting {
+  if (view.activeProfile === "account" && role === "summary") return "fixed";
   const explicit = roleRoutingValue(view.roleRouting, role);
   if (explicit) return explicit;
   if (view.activeProfile === "account") return "follow";

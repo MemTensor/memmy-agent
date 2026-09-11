@@ -1212,6 +1212,7 @@ export async function gateway({
       sessionDagQueue: loop.sessionDagQueue,
     });
     webuiChannel.setChannelAdmin(createChannelAdmin(manager));
+    webuiChannel.computerHistory.setLlmRuntime((preset) => loop.llmRuntime(preset));
     webuiChannel.setWebuiTitleService(
       new WebuiTitleService({
         bus,

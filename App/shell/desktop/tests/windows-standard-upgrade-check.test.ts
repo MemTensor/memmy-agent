@@ -9,6 +9,7 @@ const describeOnWindows = process.platform === "win32" ? describe : describe.ski
 const scriptPath = fileURLToPath(new URL("../build/MemmyWindowsStandardUpgradeCheck.ps1", import.meta.url));
 const installerIncludePath = fileURLToPath(new URL("../build/installer-win-unsigned.nsh", import.meta.url));
 const fixtureRoots: string[] = [];
+const powershellTimeoutMs = 30_000;
 
 afterEach(() => {
   for (const root of fixtureRoots.splice(0)) {
@@ -16,7 +17,9 @@ afterEach(() => {
   }
 });
 
-describeOnWindows("Windows standard upgrade safety check", () => {
+// Each integration case starts two Windows PowerShell processes. The first
+// invocation on a fresh runner can exceed Vitest's default five-second budget.
+describeOnWindows("Windows standard upgrade safety check", { timeout: 60_000 }, () => {
   it("allows a completed external-v1 installation", () => {
     const fixture = createFixture();
 
@@ -271,7 +274,9 @@ function runCheck(fixture: Fixture, allowMissingExecutable = false) {
     "-MigrationStatePath", fixture.migrationStatePath,
   ];
   if (allowMissingExecutable) args.push("-AllowMissingExecutable");
-  return spawnSync("powershell.exe", args, { encoding: "utf8" });
+  const result = spawnSync("powershell.exe", args, { encoding: "utf8", timeout: powershellTimeoutMs });
+  if (result.error) throw result.error;
+  return result;
 }
 
 function readProductVersion(executablePath: string): string {
@@ -281,7 +286,8 @@ function readProductVersion(executablePath: string): string {
     "-NonInteractive",
     "-Command",
     `[System.Diagnostics.FileVersionInfo]::GetVersionInfo('${escapedPath}').ProductVersion`,
-  ], { encoding: "utf8" });
+  ], { encoding: "utf8", timeout: powershellTimeoutMs });
+  if (result.error) throw result.error;
   if (result.status !== 0 || !result.stdout.trim()) {
     throw new Error(result.stderr || "Cannot read fixture product version");
   }

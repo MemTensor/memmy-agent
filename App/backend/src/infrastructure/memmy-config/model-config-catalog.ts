@@ -224,6 +224,13 @@ function projectMemoryConfig(
     previousPresetId: string | null,
     previousRoute: unknown
   ): void {
+    if (mode === "account") {
+      // Account mode has dedicated platform models for both memory roles.
+      roleRouting[role] = "fixed";
+      const connection = memoryConnection(root, presetId!);
+      if (connection) target[role] = mergeMemoryConnection(record(target[role]), connection);
+      return;
+    }
     const preservesFixedRoute = previousRoute === "fixed" && presetId === previousPresetId;
     const followsInheritedModel = !preservesFixedRoute && (!presetId || presetId === inheritedPresetId);
     roleRouting[role] = followsInheritedModel ? "follow" : "fixed";
@@ -754,8 +761,8 @@ function memorySettings(config: ConfigRecord): {
   const appMode = record(config.app).userMode === "account" ? "account" : "byok";
   return {
     roleRouting: {
-      summary: routing.summary === "fixed" ? "fixed" : "follow",
-      evolution: routing.evolution === "fixed" ? "fixed" : "follow"
+      summary: appMode === "account" ? "fixed" : routing.summary === "fixed" ? "fixed" : "follow",
+      evolution: appMode === "account" ? "fixed" : routing.evolution === "fixed" ? "fixed" : "follow"
     },
     embeddingMode: embedding.mode === "cloud" || embedding.mode === "custom" || embedding.mode === "local"
       ? embedding.mode

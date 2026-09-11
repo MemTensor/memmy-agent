@@ -27,101 +27,6 @@ describe("ComputerHistoryDemoService", () => {
     expect(snapshot.privacy.rawRetentionHours).toBe(48);
   });
 
-  it("syncs Codex Computer History as a read-only replayable source", () => {
-    const { service, root } = createService();
-    const codexDirectory = path.join(root, "codex");
-    fs.mkdirSync(codexDirectory, { recursive: true });
-    const sourcePath = path.join(codexDirectory, "daily-work.md");
-    fs.writeFileSync(sourcePath, [
-      "---",
-      'title: "Notion Daily Work template"',
-      "source_type: human_computer_history",
-      "status: completed",
-      "experience_version: 1",
-      "---",
-      "",
-      "## Reusable operation experience",
-      "",
-      "1. Activate Google Chrome (`com.google.Chrome`) and verify its main content window is visible.",
-      "2. In Google Chrome (`com.google.Chrome`), locate AXButton \"New page\" from the current Accessibility state, activate it once, then verify the resulting UI state before continuing.",
-      "3. Set the page title to `Daily Work - {{today}}`, then verify the visible title.",
-      "",
-    ].join("\n"), "utf8");
-    const serviceWithCodex = new ComputerHistoryDemoService({
-      repositoryRoot: path.resolve(import.meta.dirname, "../../../../.."),
-      historyDirectory: path.join(root, "histories"),
-      codexHistoryDirectory: codexDirectory,
-      recordingDirectory: path.join(root, "recordings"),
-      workflowDirectory: path.join(root, "workflows"),
-    });
-
-    const synced = serviceWithCodex.snapshot().histories.find((item) => item.sourceType === "codex_synced");
-    expect(synced).toBeDefined();
-    expect(synced?.filePath).toBe(sourcePath);
-    expect(synced?.replayPlan).toMatchObject({
-      status: "ready",
-      sourcePath,
-      variables: ["today"],
-    });
-    expect(synced?.replayPlan?.steps).toHaveLength(3);
-
-    const prepared = serviceWithCodex.prepareReplayUserRequest({
-      userRequest: "参照 Computer History，在 Notion 创建今天的 Daily Work 模板",
-      historyId: synced?.id,
-    });
-    expect(prepared.history.sourceType).toBe("codex_synced");
-    expect(prepared.workflow.sourceHistoryId).toBe(synced?.id);
-    expect(prepared.workflow.markdown).toContain("source_history_path:");
-    expect(fs.readFileSync(sourcePath, "utf8")).toContain("Notion Daily Work template");
-
-    const afterHide = serviceWithCodex.deleteHistory(synced!.id);
-    expect(afterHide.histories.some((item) => item.id === synced!.id)).toBe(false);
-    expect(fs.existsSync(sourcePath)).toBe(true);
-  });
-
-  it("syncs native Codex resource summaries but ignores legacy copied captures", () => {
-    const { root } = createService();
-    const codexDirectory = path.join(root, "codex");
-    const resourcesDirectory = path.join(codexDirectory, "resources");
-    fs.mkdirSync(resourcesDirectory, { recursive: true });
-    fs.writeFileSync(path.join(codexDirectory, "legacy.md"), [
-      "---",
-      'title: \"Legacy Memmy capture\"',
-      "source_type: captured",
-      "status: completed",
-      "---",
-      "",
-      "## Reusable operation experience",
-      "",
-      "1. This must not be imported from the Codex source.",
-      "",
-    ].join("\n"), "utf8");
-    const resourcePath = path.join(resourcesDirectory, "2026-09-02T02-30-00-demo-10min-memory-summary.md");
-    fs.writeFileSync(resourcePath, [
-      "---",
-      'title: \"Native Codex activity summary\"',
-      'applications: [com.google.Chrome]',
-      "---",
-      "",
-      "## Memory summary",
-      "",
-      "The user opened a browser and reviewed a project page.",
-      "",
-    ].join("\n"), "utf8");
-
-    const service = new ComputerHistoryDemoService({
-      repositoryRoot: path.resolve(import.meta.dirname, "../../../../.."),
-      historyDirectory: path.join(root, "histories"),
-      codexHistoryDirectory: codexDirectory,
-      recordingDirectory: path.join(root, "recordings"),
-      workflowDirectory: path.join(root, "workflows"),
-    });
-    const synced = service.snapshot().histories.filter((item) => item.sourceType === "codex_synced");
-    expect(synced).toHaveLength(1);
-    expect(synced[0].filePath).toBe(resourcePath);
-    expect(synced[0].replayPlan?.status).toBe("not_replayable");
-  });
-
   it("deletes a History together with its derived workflows and raw recording", () => {
     const { service, root } = createService();
     const created = service.importMarkdown({
@@ -175,50 +80,276 @@ describe("ComputerHistoryDemoService", () => {
     expect(generated.workflows[0].markdown).toContain("CUA");
   });
 
-  it("turns completed captured operation experience into a gated semantic workflow", () => {
-    const { service, root } = createService();
-    const historyDirectory = path.join(root, "histories");
-    fs.mkdirSync(historyDirectory, { recursive: true });
-    fs.writeFileSync(path.join(historyDirectory, "recorded-iphone.md"), [
+  // Steps are derived from a segment's own event stream now, so a replayable
+  // entry needs the events on disk — a summary alone is no longer enough.
+  function captureSegment(root: string, segmentId: string): void {
+    const directory = path.join(root, "recordings", "segments", segmentId);
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(
+      path.join(directory, "metadata.json"),
+      JSON.stringify({ id: segmentId, startedAt: new Date().toISOString() }),
+      "utf8",
+    );
+    fs.writeFileSync(path.join(directory, "events.jsonl"), [
+      JSON.stringify({
+        recordType: "human_event", sequence: 1, timestamp: "2026-09-08T03:30:01.000Z",
+        eventType: "application_changed",
+        application: { name: "Google Chrome", bundleId: "com.google.Chrome" }, details: {},
+      }),
+      JSON.stringify({
+        recordType: "human_event", sequence: 2, timestamp: "2026-09-08T03:30:02.000Z",
+        eventType: "mouse_click",
+        application: { name: "Google Chrome", bundleId: "com.google.Chrome" },
+        details: { button: "left", clickCount: 1, accessibility: { role: "AXButton", title: "银色" } },
+      }),
+      "",
+    ].join("\n"), "utf8");
+
+    const histories = path.join(root, "histories");
+    fs.mkdirSync(histories, { recursive: true });
+    fs.writeFileSync(path.join(histories, `${segmentId}-10min-summary.md`), [
       "---",
       'title: "人工示范配置 iPhone"',
       "source_type: captured",
+      "summary_state: ready",
       "experience_version: 1",
       "status: completed",
       "---",
       "",
-      "## Reusable operation experience",
+      "## Recording summary",
       "",
-      "1. Activate Google Chrome (`com.google.Chrome`) and verify its main content window is visible.",
-      "2. Text was entered in Google Chrome (`com.google.Chrome`) but was intentionally redacted; require a current task variable or stop instead of guessing it.",
-      "3. In Google Chrome (`com.google.Chrome`), send `return`, then verify its effect.",
-      "4. Confirm the front browser page in Google Chrome (`com.google.Chrome`) is now https://www.apple.com/ (“Apple - Google Chrome”) before continuing; the URL path encodes the state reached by the previous action.",
-      "5. In Google Chrome (`com.google.Chrome`), move down only far enough to reveal the next recorded semantic target; observe again after at most one viewport.",
-      "6. In Google Chrome (`com.google.Chrome`), locate AXButton \"银色\" from the current Accessibility state, activate it once, then verify the resulting UI state before continuing.",
+      "你在 Chrome 里配置了一台 iPhone。",
       "",
     ].join("\n"), "utf8");
+  }
+
+  it("derives a gated semantic workflow from the segment's event stream", () => {
+    const { service, root } = createService();
+    captureSegment(root, "2026-09-08T03-30-00Z");
 
     const history = service.snapshot().histories[0];
+    expect(history.replayPlan?.status).toBe("ready");
+
     const generated = service.createWorkflow(history.id, "按我刚才示范的步骤配置，完成后停止。");
     const workflow = generated.workflows[0];
 
     expect(workflow.sourceHistoryId).toBe(history.id);
     expect(workflow.markdown).toContain("generated_from: recorded_operation_experience");
-    expect(workflow.markdown).toContain("### Gate 1 of 2");
-    expect(workflow.markdown).toContain("open https://www.apple.com/ in the current tab");
-    expect(workflow.markdown).not.toContain("intentionally redacted");
-    expect(workflow.markdown).toContain('AXButton "银色"');
-    expect(workflow.markdown).toContain("never use a recorded coordinate");
-    expect(workflow.markdown).not.toContain("Recorded semantic action: In Google Chrome (`com.google.Chrome`), move down");
-    expect(workflow.markdown).toContain("mcp_open_computer_use_get_app_state");
-    expect(workflow.markdown).toContain("action tools return refreshed post-action state");
-    expect(workflow.markdown).toContain("Element indexes are state-scoped");
-    expect(workflow.markdown).toContain("Recorded scrolls are navigation hints, not workflow gates");
-    expect(workflow.markdown).toContain("COMPUTER_USE_RESULT: success");
-    expect(workflow.markdown).toContain("do not start a CUA subprocess");
+    expect(workflow.markdown).toContain("银色");
   });
 
-  it("finds the most relevant replayable History for a natural-language chat request", () => {
+  it("says the evidence expired rather than that nothing was repeatable", () => {
+    const { service, root } = createService();
+    captureSegment(root, "2026-09-08T03-30-00Z");
+    const history = service.snapshot().histories[0];
+    fs.rmSync(path.join(root, "recordings", "segments", "2026-09-08T03-30-00Z"), {
+      recursive: true, force: true,
+    });
+
+    expect(() => service.createWorkflow(history.id, "再来一次"))
+      .toThrow(/passed the retention window/);
+  });
+
+  it("keeps a written summary through the live pass instead of overwriting it", () => {
+    const { service, root } = createService();
+    const segmentId = "2026-09-09T06-10-00Z";
+    const directory = path.join(root, "recordings", "segments", segmentId);
+    const historyDirectory = path.join(root, "histories");
+    fs.mkdirSync(directory, { recursive: true });
+    fs.mkdirSync(historyDirectory, { recursive: true });
+    const eventsFile = path.join(directory, "events.jsonl");
+    const historyFile = path.join(historyDirectory, `${segmentId}-10min-summary.md`);
+    fs.writeFileSync(eventsFile, [
+      JSON.stringify({
+        recordType: "human_history_metadata", schemaVersion: 1, recordingId: segmentId,
+        title: "配置 iPhone", createdAt: "2026-09-09T06:10:00.000Z", platform: "macOS",
+        display: { width: 1920, height: 1080 },
+        captureText: false, captureSearchText: true,
+        allowedApplications: [], captureScopeApplications: [],
+      }),
+      JSON.stringify({
+        recordType: "human_event", sequence: 1, timestamp: "2026-09-09T06:10:01.000Z",
+        eventType: "application_changed",
+        application: { name: "Google Chrome", bundleId: "com.google.Chrome" }, details: {},
+      }),
+      "",
+    ].join("\n"), "utf8");
+    const written = [
+      "---",
+      'title: "配置 iPhone"',
+      "source_type: captured",
+      "summary_state: ready",
+      "experience_version: 1",
+      "status: completed",
+      "---",
+      "",
+      "## Memory summary",
+      "",
+      "你在 Chrome 里配置了一台 iPhone。",
+      "",
+    ].join("\n");
+    fs.writeFileSync(historyFile, written, "utf8");
+
+    // The segment is still open and its events keep growing, which is exactly
+    // when the live pass used to rewrite the account back into a placeholder.
+    fs.appendFileSync(eventsFile, `${JSON.stringify({
+      recordType: "human_event", sequence: 2, timestamp: "2026-09-09T06:10:02.000Z",
+      eventType: "mouse_click",
+      application: { name: "Google Chrome", bundleId: "com.google.Chrome" },
+      details: { button: "left", clickCount: 1 },
+    })}\n`, "utf8");
+    liveSummaryPass(service, {
+      id: segmentId,
+      directory,
+      eventsFile,
+      historyFile,
+      metadataFile: path.join(directory, "metadata.json"),
+      startedAt: "2026-09-09T06:10:00.000Z",
+      child: null,
+      output: "",
+    });
+
+    expect(fs.readFileSync(historyFile, "utf8")).toBe(written);
+    expect(service.snapshot().histories.map((entry) => entry.id)).toContain(`${segmentId}-10min-summary`);
+  });
+
+  it("keeps a mechanical rollup off the timeline until it is written", () => {
+    const { service, root } = createService();
+    const historyDirectory = path.join(root, "histories");
+    fs.mkdirSync(historyDirectory, { recursive: true });
+    // A rollup reads as "imported" unless source_type knows the word, and an
+    // imported entry is exempt from the written gate — which is how a templated
+    // body reached the timeline.
+    fs.writeFileSync(path.join(historyDirectory, "2026-09-08T06-00-00Z-6h-summary.md"), [
+      "---",
+      'title: "ClawForce Architecture and Requirements Review"',
+      "source_type: rollup",
+      "summary_window: 6h",
+      "---",
+      "",
+      "## Memory summary",
+      "",
+      "本窗口由 9 份 10 分钟摘要汇总而来，覆盖 5 个应用。",
+      "",
+    ].join("\n"), "utf8");
+
+    expect(service.snapshot().histories).toHaveLength(0);
+  });
+
+  it("writes the summaries the model never reached, so their history returns", async () => {
+    const { service, root } = createService();
+    const historyDirectory = path.join(root, "histories");
+    fs.mkdirSync(historyDirectory, { recursive: true });
+    fs.writeFileSync(path.join(historyDirectory, "2026-09-08T11-30-00Z-10min-summary.md"), [
+      "---",
+      'title: "Computer History Review"',
+      "source_type: captured",
+      "---",
+      "",
+      "## Memory summary",
+      "",
+      "用户完成了一组电脑操作。",
+      "",
+    ].join("\n"), "utf8");
+    expect(service.snapshot().histories).toHaveLength(0);
+
+    service.setLlmRuntime(narratingRuntime());
+    const written = await service.backfillUnwrittenSummaries();
+
+    expect(written).toBe(1);
+    const histories = service.snapshot().histories;
+    expect(histories).toHaveLength(1);
+    expect(histories[0].markdown).toContain("summary_state: ready");
+    expect(histories[0].markdown).not.toContain("用户完成了一组电脑操作。");
+  });
+
+  it("never replaces a written summary with a placeholder while finalizing", async () => {
+    const { service, root } = createService();
+    const segmentId = "2026-09-10T02-10-00Z";
+    const directory = path.join(root, "recordings", "segments", segmentId);
+    const historyDirectory = path.join(root, "histories");
+    fs.mkdirSync(directory, { recursive: true });
+    fs.mkdirSync(historyDirectory, { recursive: true });
+    const eventsFile = path.join(directory, "events.jsonl");
+    const historyFile = path.join(historyDirectory, `${segmentId}-10min-summary.md`);
+    fs.writeFileSync(eventsFile, [
+      JSON.stringify({
+        recordType: "human_history_metadata", schemaVersion: 1, recordingId: segmentId,
+        title: "A window", createdAt: "2026-09-10T02:10:00.000Z", platform: "macOS",
+        display: { width: 1920, height: 1080 },
+        captureText: false, captureSearchText: true,
+        allowedApplications: [], captureScopeApplications: [],
+      }),
+      JSON.stringify({
+        recordType: "human_event", sequence: 1, timestamp: "2026-09-10T02:10:01.000Z",
+        eventType: "application_changed",
+        application: { name: "Google Chrome", bundleId: "com.google.Chrome" }, details: {},
+      }),
+      "",
+    ].join("\n"), "utf8");
+    const standing = [
+      "---",
+      'title: "What the model wrote"',
+      "source_type: captured",
+      "summary_state: ready",
+      "---",
+      "",
+      "你在 Chrome 里做了一件事。",
+      "",
+    ].join("\n");
+    fs.writeFileSync(historyFile, standing, "utf8");
+
+    // The model is unreachable, which is the case that used to lose the entry
+    // for good rather than for a few seconds.
+    await finalize(service, {
+      id: segmentId,
+      directory,
+      eventsFile,
+      historyFile,
+      metadataFile: path.join(directory, "metadata.json"),
+      startedAt: "2026-09-10T02:10:00.000Z",
+      child: null,
+      output: "",
+    });
+
+    expect(fs.readFileSync(historyFile, "utf8")).toBe(standing);
+    expect(service.snapshot().histories.map((entry) => entry.title)).toContain("What the model wrote");
+    // The staged rewrite is cleaned up rather than left beside the summary.
+    expect(fs.existsSync(`${historyFile}.staging`)).toBe(false);
+  });
+
+  it("dates a summary by the window it covers, not by when it was last written", () => {
+    const { service, root } = createService();
+    const historyDirectory = path.join(root, "histories");
+    fs.mkdirSync(historyDirectory, { recursive: true });
+    const write = (name: string, title: string) => {
+      fs.writeFileSync(path.join(historyDirectory, name), [
+        "---",
+        `title: ${JSON.stringify(title)}`,
+        "source_type: captured",
+        "summary_state: ready",
+        "---",
+        "",
+        "body",
+        "",
+      ].join("\n"), "utf8");
+    };
+    // Written newest-first on disk, so mtime order is the reverse of the truth.
+    write("2026-09-10T02-20-00Z-10min-summary.md", "The later window");
+    write("2026-09-10T02-10-00Z-10min-summary.md", "The earlier window");
+
+    const histories = service.snapshot().histories;
+
+    // A summary is rewritten every time the model catches up with it, so its
+    // file says when that happened, never when the activity did.
+    expect(histories.map((entry) => entry.createdAt)).toEqual([
+      "2026-09-10T02:20:00.000Z",
+      "2026-09-10T02:10:00.000Z",
+    ]);
+    expect(histories.map((entry) => entry.title)).toEqual(["The later window", "The earlier window"]);
+  });
+
+  it("finds relevant History whether or not its raw events still exist", () => {
     const { service, root } = createService();
     const historyDirectory = path.join(root, "histories");
     fs.mkdirSync(historyDirectory, { recursive: true });
@@ -226,13 +357,14 @@ describe("ComputerHistoryDemoService", () => {
       "---",
       'title: "在备忘录里记录会议纪要"',
       "source_type: captured",
+      "summary_state: ready",
       "experience_version: 1",
       "status: completed",
       "---",
       "",
-      "## Reusable operation experience",
+      "## Recording summary",
       "",
-      "1. Open Notes and create a new note, then verify its title.",
+      "你在备忘录里记录了会议纪要。",
       "",
     ].join("\n"), "utf8");
     service.installDemoFixture();
@@ -241,9 +373,43 @@ describe("ComputerHistoryDemoService", () => {
 
     expect(matches[0].history.title).toBe("微信里妈妈想要的 iPhone 配置");
     expect(matches[0].matchedTerms).toContain("iphone");
-    expect(matches.map((match) => match.history.title)).toContain("在备忘录里记录会议纪要");
+    // This entry has no segment on disk, so it cannot be replayed — but asking
+    // what happened must still find it.
+    const notes = matches.find((match) => match.history.title === "在备忘录里记录会议纪要");
+    expect(notes).toBeDefined();
+    expect(notes!.history.replayPlan?.status).toBe("not_replayable");
   });
 });
+
+/** A model that always writes, so the backfill can be checked without one. */
+function narratingRuntime() {
+  return (() => ({
+    model: "test-model",
+    provider: {
+      chatWithRetry: async () => ({
+        content: JSON.stringify({
+          title: "Computer History review",
+          description: "You looked over earlier Computer History entries.",
+          body: "## Memory summary\n\nYou looked over earlier Computer History entries.",
+        }),
+      }),
+    },
+  })) as unknown as Parameters<ComputerHistoryDemoService["setLlmRuntime"]>[0];
+}
+
+/** Closes a segment the way rotation and stopping both do. */
+function finalize(service: ComputerHistoryDemoService, segment: unknown): Promise<void> {
+  return (service as unknown as { finalizeSegment(state: unknown): Promise<void> }).finalizeSegment(segment);
+}
+
+/**
+ * Runs one tick of the live summary pass. It is private because nothing outside
+ * the timer drives it, but the invariant it now upholds — that a written
+ * summary survives the tick — is worth holding onto.
+ */
+function liveSummaryPass(service: ComputerHistoryDemoService, segment: unknown): void {
+  (service as unknown as { writeLiveSummary(state: unknown): void }).writeLiveSummary(segment);
+}
 
 function createService(): { service: ComputerHistoryDemoService; root: string } {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-computer-history-test-"));
@@ -253,7 +419,6 @@ function createService(): { service: ComputerHistoryDemoService; root: string } 
     service: new ComputerHistoryDemoService({
       repositoryRoot: path.resolve(import.meta.dirname, "../../../../.."),
       historyDirectory: path.join(root, "histories"),
-      codexHistoryDirectory: path.join(root, "codex"),
       recordingDirectory: path.join(root, "recordings"),
       workflowDirectory: path.join(root, "workflows"),
     }),

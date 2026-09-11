@@ -124,7 +124,7 @@ describe("desktop packaged runtime boundaries", () => {
       yaml: expect.any(String),
       zod: expect.any(String)
     });
-    expect(memoryPackage.version).toBe("2.1.0");
+    expect(memoryPackage.version).toBe("2.1.2");
     expect(memoryPackage.dependencies ?? {}).not.toHaveProperty("@memmy/local-api-contracts");
     expect(memoryPackage.dependencies ?? {}).not.toHaveProperty("@memmy/migrations");
     expect(memoryPackage.scripts?.prebuild).toBeUndefined();
@@ -1562,9 +1562,9 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).toContain('cp -R "$MEMORY_DIR/dist/viewer" "$RUNTIME_DIR/memory/dist/viewer"');
     expect(source).toContain('cp -R "$MEMORY_DIR/adapters" "$RUNTIME_DIR/memory/adapters"');
     expect(source).toContain(
-      'npm install --prefix "$RUNTIME_DIR/memory" --package-lock-only --ignore-scripts --os=darwin --cpu="$TARGET_CPU"'
+      'npm install --prefix "$RUNTIME_DIR/memory" --package-lock-only --ignore-scripts --install-links --os=darwin --cpu="$TARGET_CPU"'
     );
-    expect(source).toContain('npm ci --prefix "$RUNTIME_DIR/memory" --omit=dev --os=darwin --cpu="$TARGET_CPU"');
+    expect(source).toContain('npm ci --prefix "$RUNTIME_DIR/memory" --omit=dev --install-links --os=darwin --cpu="$TARGET_CPU"');
     expect(source).not.toContain('MEMORY_RUNTIME_CONTRACTS_DIR');
     expect(source).not.toContain('MEMORY_RUNTIME_MIGRATIONS_DIR');
     expect(source).toContain("node_modules/.bin/electron-rebuild");
@@ -1902,7 +1902,7 @@ describe("desktop packaged runtime boundaries", () => {
   it("points packaged Memory at the bundled local embedding model resources", () => {
     const source = readFileSync(runtimeServicesPath, "utf8");
 
-    expect(source).toContain('MEMMY_EMBEDDING_MODEL_ROOT: join(options.resourcesPath, "embedding-models")');
+    expect(source).toContain('MEMMY_EMBEDDING_MODEL_ROOT: join(runtimeDir ?? options.resourcesPath, "embedding-models")');
   });
 
   it("prunes and verifies only proven Windows x64 packaged runtime waste", () => {

@@ -1,7 +1,9 @@
 import Database from "better-sqlite3";
-import { existsSync, mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { homedir } from "node:os";
+import { createHash, randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { getLoadablePath as getSqliteVecLoadablePath } from "sqlite-vec";
 import { getSchemaVersion, migrate, SCHEMA_VERSION } from "./schema.js";
 import { SQLITE_VEC_VERSION } from "./sqlite-vec-store.js";
@@ -18,10 +20,12 @@ export class MemoryDb {
   constructor(options: MemoryDbOptions = {}) {
     this.path = options.path ?? defaultDatabasePath();
     mkdirSync(dirname(this.path), { recursive: true });
+    const nativeBinding = packagedNativeBindingPath();
     this.db = new Database(this.path, {
-      readonly: options.readonly ?? false
+      readonly: options.readonly ?? false,
+      ...(nativeBinding ? { nativeBinding } : {})
     });
-    const extensionPath = getSqliteVecLoadablePath();
+    const extensionPath = packagedNativeAssetPath(getSqliteVecLoadablePath());
     const unpackedPath = extensionPath.replace(/app\.asar([\\/])/, "app.asar.unpacked$1");
     this.db.loadExtension(existsSync(unpackedPath) ? unpackedPath : extensionPath);
     const loadedVersion = (this.db.prepare(`SELECT vec_version() AS version`).get() as { version: string }).version;
@@ -73,6 +77,40 @@ export class MemoryDb {
     this.db.pragma("wal_checkpoint(FULL)");
     this.db.prepare("VACUUM INTO ?").run(backupPath);
   }
+}
+
+function packagedNativeBindingPath(): string | undefined {
+  if (!(process as NodeJS.Process & { pkg?: unknown }).pkg) return undefined;
+  const source = resolve(
+    dirname(fileURLToPath(import.meta.url)),
+    "../../../../node_modules/better-sqlite3/build/Release/better_sqlite3.node"
+  );
+  if (!existsSync(source)) return undefined;
+  return packagedNativeAssetPath(source);
+}
+
+function packagedNativeAssetPath(source: string): string {
+  if (!(process as NodeJS.Process & { pkg?: unknown }).pkg) return source;
+  if (!existsSync(source)) return source;
+  const contents = readFileSync(source);
+  const digest = createHash("sha256").update(contents).digest("hex");
+  // Keep upgrades separate from native libraries already loaded by older processes.
+  const targetDirectory = join(tmpdir(), "memmy-memory-native", digest);
+  const target = join(targetDirectory, basename(source));
+  const isComplete = () => existsSync(target) && readFileSync(target).equals(contents);
+  if (isComplete()) return target;
+  mkdirSync(targetDirectory, { recursive: true, mode: 0o700 });
+  const temporaryPath = `${target}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temporaryPath, contents, { flag: "wx", mode: 0o600 });
+    renameSync(temporaryPath, target);
+  } catch (error) {
+    // Another extractor may publish and load the same asset before our rename.
+    if (!isComplete()) throw error;
+  } finally {
+    rmSync(temporaryPath, { force: true });
+  }
+  return target;
 }
 
 export function defaultDatabasePath(): string {

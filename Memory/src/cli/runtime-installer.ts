@@ -32,6 +32,7 @@ export interface MemoryRuntimeInstallOptions {
   releaseManifest?: string;
   releaseBaseUrl?: string;
   nodeExecutable?: string;
+  /** Do not create/start an OS service; an existing legacy Windows task is repaired in place. */
   skipServiceRegistration?: boolean;
   skipHealthCheck?: boolean;
   /** Maximum time to wait for the newly activated service to report its version. */
@@ -120,10 +121,16 @@ export async function installMemoryRuntime(options: MemoryRuntimeInstallOptions 
     }
 
     const switching = !previous || previous.runtimeDir !== runtimeDir;
-    if (switching && previous && !options.skipServiceRegistration) stopUserService();
+    const repairLegacyTask = Boolean(options.skipServiceRegistration && previous && isLegacyWindowsTask(home));
+    if (!options.skipServiceRegistration || repairLegacyTask) {
+      // End an already running .cmd task as well as any surviving legacy service.
+      if (process.platform === "win32") await stopInstalledMemoryService(home);
+      else if (switching && previous) stopUserService();
+    }
     await writeJsonAtomic(currentPath, pointer);
     await writeStableLauncher(home, serviceHome, pointer.runtimeExecutable!);
     if (!options.skipServiceRegistration) registerAndStartUserService(home, serviceHome);
+    else if (repairLegacyTask) tryRepairLegacyWindowsTaskRegistration(home, serviceHome);
 
     if (!options.skipHealthCheck) {
       try {
@@ -133,7 +140,10 @@ export async function installMemoryRuntime(options: MemoryRuntimeInstallOptions 
           healthCheckTimeoutMs
         );
       } catch (error) {
-        if (!options.skipServiceRegistration && previous) stopUserService();
+        if (!options.skipServiceRegistration && previous) {
+          if (process.platform === "win32") await stopInstalledMemoryService(home);
+          else stopUserService();
+        }
         if (previous) {
           await writeJsonAtomic(currentPath, previous);
           await writeStableLauncher(home, serviceHome, previous.runtimeExecutable ?? process.execPath);
@@ -184,15 +194,40 @@ export async function installedAgents(home = "~/.memmy"): Promise<string[]> {
 export async function startInstalledMemoryService(home = "~/.memmy"): Promise<Record<string, unknown>> {
   const resolvedHome = resolveHome(home);
   const serviceHome = join(resolvedHome, "memory-service");
-  const pointer = await currentInstalledRuntime(resolvedHome);
-  if (!pointer) throw new Error("Memory is not installed");
-  await validateRuntime(pointer.runtimeDir, pointer.version, pointer.target, pointer.protocolVersion);
-  const launcher = launcherPaths(resolvedHome);
-  if (!existsSync(launcher.command) || !existsSync(launcher.script)) {
+  const installLock = await acquireInstallLock(join(serviceHome, "install.lock"));
+  try {
+    const pointer = await currentInstalledRuntime(resolvedHome);
+    if (!pointer) throw new Error("Memory is not installed");
+    await validateRuntime(pointer.runtimeDir, pointer.version, pointer.target, pointer.protocolVersion);
+    if (process.platform === "win32") await stopInstalledMemoryService(resolvedHome);
     await writeStableLauncher(resolvedHome, serviceHome, pointer.runtimeExecutable ?? process.execPath);
+    registerAndStartUserService(resolvedHome, serviceHome);
+    return { ok: true, action: "start", ...pointer };
+  } finally {
+    await installLock.release();
   }
-  registerAndStartUserService(resolvedHome, serviceHome);
-  return { ok: true, action: "start", ...pointer };
+}
+
+/** Repair only this installation's legacy login task, leaving startup to Desktop. */
+export async function repairInstalledWindowsMemoryService(home = "~/.memmy"): Promise<Record<string, unknown>> {
+  const resolvedHome = resolveHome(home);
+  if (process.platform !== "win32" || !(await currentInstalledRuntime(resolvedHome))) {
+    return { ok: true, repaired: false };
+  }
+  const serviceHome = join(resolvedHome, "memory-service");
+  const installLock = await acquireInstallLock(join(serviceHome, "install.lock"));
+  try {
+    if (!isLegacyWindowsTask(resolvedHome)) return { ok: true, repaired: false };
+    const pointer = await currentInstalledRuntime(resolvedHome);
+    if (!pointer) throw new Error("Memory is not installed");
+    await validateRuntime(pointer.runtimeDir, pointer.version, pointer.target, pointer.protocolVersion);
+    await stopInstalledMemoryService(resolvedHome);
+    await writeStableLauncher(resolvedHome, serviceHome, pointer.runtimeExecutable ?? process.execPath);
+    registerAndStartUserService(resolvedHome, serviceHome, false);
+    return { ok: true, repaired: true };
+  } finally {
+    await installLock.release();
+  }
 }
 
 export interface UserServiceRestartCommand {
@@ -357,20 +392,27 @@ async function reuseInstalledRuntime(
   healthCheckTimeoutMs: number
 ): Promise<Record<string, unknown>> {
   if (options.dryRun) return { ok: true, reused: true, dryRun: true, ...pointer };
-  await validateRuntime(pointer.runtimeDir, pointer.version, pointer.target, pointer.protocolVersion);
-  const launcher = launcherPaths(home);
-  if (!existsSync(launcher.command) || !existsSync(launcher.script)) {
+  const installLock = await acquireInstallLock(join(serviceHome, "install.lock"));
+  try {
+    // Another installer may have activated a newer runtime while we waited.
+    pointer = await currentInstalledRuntime(home) ?? pointer;
+    await validateRuntime(pointer.runtimeDir, pointer.version, pointer.target, pointer.protocolVersion);
+    const repairLegacyTask = Boolean(options.skipServiceRegistration && isLegacyWindowsTask(home));
+    if (process.platform === "win32" && (!options.skipServiceRegistration || repairLegacyTask)) await stopInstalledMemoryService(home);
     await writeStableLauncher(home, serviceHome, pointer.runtimeExecutable ?? options.nodeExecutable ?? process.execPath);
+    if (!options.skipServiceRegistration) registerAndStartUserService(home, serviceHome);
+    else if (repairLegacyTask) tryRepairLegacyWindowsTaskRegistration(home, serviceHome);
+    if (!options.skipHealthCheck) {
+      await waitForRuntimeHealth(
+        options.endpoint ?? "http://127.0.0.1:18960",
+        pointer.version,
+        healthCheckTimeoutMs
+      );
+    }
+    return { ok: true, reused: true, ...pointer };
+  } finally {
+    await installLock.release();
   }
-  if (!options.skipServiceRegistration) registerAndStartUserService(home, serviceHome);
-  if (!options.skipHealthCheck) {
-    await waitForRuntimeHealth(
-      options.endpoint ?? "http://127.0.0.1:18960",
-      pointer.version,
-      healthCheckTimeoutMs
-    );
-  }
-  return { ok: true, reused: true, ...pointer };
 }
 
 async function resolveReleaseManifest(
@@ -525,10 +567,10 @@ async function sha256File(path: string): Promise<string> {
   });
   return hash.digest("hex");
 }
-function launcherPaths(home: string): { command: string; script: string } {
+function launcherPaths(home: string): { command: string; script: string; hidden?: string } {
   const bin = join(home, "bin");
   return process.platform === "win32"
-    ? { command: join(bin, "memmy-memory-service.cmd"), script: join(bin, "memmy-memory-service.cjs") }
+    ? { command: join(bin, "memmy-memory-service.cmd"), script: join(bin, "memmy-memory-service.cjs"), hidden: join(bin, "memmy-memory-service.js") }
     : { command: join(bin, "memmy-memory-service"), script: join(bin, "memmy-memory-service.cjs") };
 }
 
@@ -537,26 +579,115 @@ async function writeStableLauncher(home: string, serviceHome: string, nodeExecut
   await mkdir(dirname(paths.script), { recursive: true });
   const script = [
     "\"use strict\";",
-    "const { readFileSync } = require(\"node:fs\");",
+    "const { readFileSync, mkdirSync, openSync, closeSync, appendFileSync } = require(\"node:fs\");",
     "const { spawn } = require(\"node:child_process\");",
-    `const pointer = JSON.parse(readFileSync(${JSON.stringify(join(serviceHome, "current.json"))}, "utf8"));`,
     "const path = require(\"node:path\");",
+    "const windows = process.platform === \"win32\";",
+    "const hostPid = process.ppid;",
+    "let hostWatch = null; let stopTimer = null; let finished = false; let hostEnded = false; let stoppingChild = false;",
+    `const logs = ${JSON.stringify(join(serviceHome, "logs"))};`,
+    "function clearSupervision() {",
+    "  finished = true;",
+    "  if (hostWatch) { clearInterval(hostWatch); hostWatch = null; }",
+    "  if (stopTimer) { clearTimeout(stopTimer); stopTimer = null; }",
+    "}",
+    "function fail(error) {",
+    "  clearSupervision();",
+    "  if (windows) appendFileSync(path.join(logs, \"service-error.log\"), String(error.stack || error.message || error) + \"\\n\");",
+    "  else console.error(error);",
+    "  process.exit(1);",
+    "}",
+    "try {",
+    "if (windows) mkdirSync(logs, { recursive: true });",
+    `const pointer = JSON.parse(readFileSync(${JSON.stringify(join(serviceHome, "current.json"))}, "utf8"));`,
     `const env = { ...process.env, MEMMY_HOME: ${JSON.stringify(home)}, MEMMY_CONFIG: ${JSON.stringify(join(home, "config.yaml"))}, MEMMY_EMBEDDING_MODEL_ROOT: path.join(pointer.runtimeDir, "embedding-models") };`,
-    "const child = spawn(process.execPath, [pointer.entrypoint, ...process.argv.slice(2)], { stdio: \"inherit\", windowsHide: false, env });",
-    "child.once(\"error\", (error) => { console.error(error.message); process.exit(1); });",
-    "child.once(\"exit\", (code, signal) => { if (signal) process.kill(process.pid, signal); else process.exit(code ?? 0); });",
+    "const handles = [];",
+    "let child;",
+    "try {",
+    "  if (windows) for (const file of [\"service.log\", \"service-error.log\"]) handles.push(openSync(path.join(logs, file), \"a\"));",
+    "  child = spawn(process.execPath, [pointer.entrypoint, ...process.argv.slice(2)], { stdio: windows ? [\"ignore\", ...handles] : \"inherit\", windowsHide: true, env });",
+    "} finally { for (const handle of handles) closeSync(handle); }",
+    "child.once(\"error\", fail);",
+    "child.once(\"exit\", (code, signal) => { clearSupervision(); if (signal) process.kill(process.pid, signal); else process.exit(code ?? 0); });",
+    // Task Scheduler can end WScript without terminating Node descendants.
+    // Allow CLI stop's subsequent HTTP shutdown to drain storage before stopping
+    // this launcher's own child; never search for or kill a process by name/PID.
+    "if (windows) {",
+    "  hostWatch = setInterval(() => {",
+    "    if (finished || hostEnded) return;",
+    "    try { process.kill(hostPid, 0); } catch (error) {",
+    "      if (error.code !== \"ESRCH\") return;",
+    "      hostEnded = true; clearInterval(hostWatch); hostWatch = null;",
+    "      stopTimer = setTimeout(() => {",
+    "        stopTimer = null;",
+    "        if (finished || stoppingChild) return;",
+    "        stoppingChild = true;",
+    "        try { child.kill(); } catch (error) { fail(error); }",
+    `      }, ${SERVICE_STOP_TIMEOUT_MS});`,
+    "      stopTimer.unref();",
+    "    }",
+    "  }, 500);",
+    "  hostWatch.unref();",
+    "}",
+    "} catch (error) { fail(error); }",
     ""
   ].join("\n");
   await writeFile(paths.script, script, { encoding: "utf8", mode: 0o700 });
   if (process.platform === "win32") {
     await writeFile(paths.command, `@echo off\r\nset ELECTRON_RUN_AS_NODE=1\r\n"${nodeExecutable}" "${paths.script}" %*\r\n`, "utf8");
+    // WScript is a GUI-subsystem host. Wait for Node so the scheduled task owns
+    // the entire service lifetime, rather than leaving an untracked child behind.
+    const hiddenScript = [
+      'var shell = new ActiveXObject("WScript.Shell");',
+      'var environment = shell.Environment("Process");',
+      'environment.Item("ELECTRON_RUN_AS_NODE") = "1";',
+      `WScript.Quit(shell.Run(${JSON.stringify(`"${nodeExecutable}" "${paths.script}"`)}, 0, true));`,
+      ""
+    ].join("\r\n").replace(/[^\x00-\x7f]/g, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`);
+    await writeFile(paths.hidden!, hiddenScript, "utf8");
   } else {
     await writeFile(paths.command, `#!/bin/sh\nexec env ELECTRON_RUN_AS_NODE=1 ${shellQuote(nodeExecutable)} ${shellQuote(paths.script)} "$@"\n`, { encoding: "utf8", mode: 0o700 });
     await chmod(paths.command, 0o700);
   }
 }
 
-function registerAndStartUserService(home: string, serviceHome: string): void {
+function isLegacyWindowsTask(home: string): boolean {
+  if (process.platform !== "win32") return false;
+  // COM returns Unicode paths. Encode stdout as ASCII rather than depending on
+  // schtasks' console code page when a Windows home contains non-ASCII names.
+  const query = [
+    "$ErrorActionPreference = 'Stop'",
+    "$scheduler = New-Object -ComObject Schedule.Service",
+    "$scheduler.Connect()",
+    "$actions = $scheduler.GetFolder('\\').GetTask('Memmy Memory Service').Definition.Actions",
+    "if ($actions.Count -ne 1) { exit 2 }",
+    "$action = $actions.Item(1)",
+    "if ($action.Type -ne 0) { exit 2 }",
+    "[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$action.Path))"
+  ].join("; ");
+  const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", query], {
+    encoding: "utf8", windowsHide: true, timeout: 10_000
+  });
+  if (result.status !== 0) return false;
+  const encoded = result.stdout.trim();
+  if (!encoded || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) return false;
+  const command = Buffer.from(encoded, "base64").toString("utf8");
+  // Do not rewrite a task belonging to another home or an already hidden host.
+  const normalize = (value: string) => value.replace(/^"|"$/g, "").replace(/\//g, "\\").toLowerCase();
+  return normalize(command) === normalize(launcherPaths(home).command);
+}
+
+function tryRepairLegacyWindowsTaskRegistration(home: string, serviceHome: string): void {
+  try {
+    registerAndStartUserService(home, serviceHome, false);
+  } catch (error) {
+    // Desktop explicitly owns startup when registration was skipped. A task
+    // ACL must not invalidate its installed runtime or prevent child startup.
+    console.warn("Optional Windows Memory task update failed: " + (error instanceof Error ? error.message : String(error)));
+  }
+}
+
+function registerAndStartUserService(home: string, serviceHome: string, start = true): void {
   const launcher = launcherPaths(home).command;
   const logs = join(serviceHome, "logs");
   mkdirSyncForLifecycle(logs);
@@ -588,8 +719,20 @@ function registerAndStartUserService(home: string, serviceHome: string): void {
     return;
   }
   if (process.platform === "win32") {
-    runLifecycle("schtasks", ["/Create", "/TN", "Memmy Memory Service", "/TR", `\"${launcher}\"`, "/SC", "ONLOGON", "/F"]);
-    runLifecycle("schtasks", ["/Run", "/TN", "Memmy Memory Service"]);
+    const taskPath = join(serviceHome, "service-task.xml");
+    const host = join(process.env.SystemRoot || "C:\\Windows", "System32", "wscript.exe");
+    const args = `/B /Nologo /E:JScript "${launcherPaths(home).hidden!}"`;
+    // schtasks imports XML as Unicode; its declaration must match the UTF-16
+    // bytes, including a BOM so non-ASCII installation paths stay intact.
+    writeFileSyncForLifecycle(taskPath, `\uFEFF<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+<Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers>
+<Principals><Principal id="User"><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
+<Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><ExecutionTimeLimit>PT0S</ExecutionTimeLimit></Settings>
+<Actions Context="User"><Exec><Command>${xmlEscape(host)}</Command><Arguments>${xmlEscape(args)}</Arguments></Exec></Actions>
+</Task>\n`, "utf16le");
+    runLifecycle("schtasks", ["/Create", "/TN", "Memmy Memory Service", "/XML", taskPath, "/F"]);
+    if (start) runLifecycle("schtasks", ["/Run", "/TN", "Memmy Memory Service"]);
     return;
   }
   throw new Error(`unsupported platform: ${process.platform}`);
@@ -653,7 +796,7 @@ async function waitForRuntimeHealth(
 async function cleanupFailedFirstInstall(input: {
   currentPath: string;
   installationPath: string;
-  launcher: { command: string; script: string };
+  launcher: { command: string; script: string; hidden?: string };
   runtimeDir: string;
   runtimeCreated: boolean;
   serviceHome: string;
@@ -666,6 +809,8 @@ async function cleanupFailedFirstInstall(input: {
     rm(input.currentPath, { force: true }).catch(() => undefined),
     rm(input.launcher.command, { force: true }).catch(() => undefined),
     rm(input.launcher.script, { force: true }).catch(() => undefined),
+    ...(input.launcher.hidden ? [rm(input.launcher.hidden, { force: true }).catch(() => undefined)] : []),
+    rm(join(input.serviceHome, "service-task.xml"), { force: true }).catch(() => undefined),
     rm(input.installationPath, { force: true }).catch(() => undefined),
     rm(join(input.serviceHome, "runtime.json"), { force: true }).catch(() => undefined),
     ...(input.runtimeCreated
@@ -756,4 +901,4 @@ function shellQuote(value: string): string { return "'" + value.replace(/'/g, "'
 function systemdEscape(value: string): string { return value.replace(/([\\"\s])/g, "\\$1"); }
 function xmlEscape(value: string): string { return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
 function mkdirSyncForLifecycle(path: string): void { mkdirSync(path, { recursive: true }); }
-function writeFileSyncForLifecycle(path: string, value: string): void { writeFileSync(path, value, { encoding: "utf8", mode: 0o600 }); }
+function writeFileSyncForLifecycle(path: string, value: string, encoding: "utf8" | "utf16le" = "utf8"): void { writeFileSync(path, value, { encoding, mode: 0o600 }); }

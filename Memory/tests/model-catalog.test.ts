@@ -2,6 +2,28 @@ import { describe, expect, it } from "vitest";
 import { syncMemoryModelCatalog } from "../src/config/model-catalog.js";
 
 describe("Memory model catalog inheritance", () => {
+  it("forces account summaries to use a fixed route", () => {
+    const root: Record<string, unknown> = {
+      app: { userMode: "account" },
+      modelAssignments: {
+        account: {
+          agent: { candidates: ["account-agent"], default: "account-agent" },
+          memorySummary: "account-summary",
+          memoryEvolution: "account-evolution"
+        }
+      }
+    };
+    const memory = {
+      roleRouting: { summary: "follow", evolution: "follow" }
+    };
+
+    syncMemoryModelCatalog(root, memory, { roleRouting: memory.roleRouting });
+
+    expect(memory.roleRouting).toEqual({ summary: "fixed", evolution: "fixed" });
+    expect((root.modelAssignments as any).account.memorySummary).toBe("account-summary");
+    expect((root.modelAssignments as any).account.memoryEvolution).toBe("account-evolution");
+  });
+
   it("syncs follow routing as summary -> evolution -> Agent Chat", () => {
     const root: Record<string, unknown> = {
       app: { userMode: "byok" },

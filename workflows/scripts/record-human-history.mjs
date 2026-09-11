@@ -17,7 +17,6 @@ const ROOT_DIR = path.resolve(SCRIPT_DIR, "..", "..");
 const HELPER_SOURCE = path.join(SCRIPT_DIR, "human-recorder.swift");
 const DEFAULT_RECORDINGS_DIR = path.join(ROOT_DIR, "workflows", "recordings");
 const TEXT_IDLE_MS = 700;
-const SCROLL_IDLE_MS = 550;
 const NAVIGATION_SETTLE_MS = 900;
 
 function usage() {
@@ -63,6 +62,7 @@ export function parseArgs(argv) {
     else if (key === "--capture-text") args.captureText = true;
     else if (key === "--allow-app") args.allowApps.push(value());
     else if (key === "--only-app") args.onlyApps.push(value());
+    else if (key === "--observation-settings") args.observationSettings = value();
     else if (key === "--no-screenshots") args.screenshots = false;
     else if (key === "--help" || key === "-h") args.help = true;
     else throw new Error(`unknown argument: ${key}`);
@@ -106,6 +106,21 @@ function appAllowed(application, allowedApps) {
   return Boolean(application?.bundleId && allowedApps.includes(application.bundleId));
 }
 
+// The recorder emits Codex-shaped envelopes (app.bundleIdentifier / app.name).
+// The history JSONL keeps its own {name, bundleId} shape so summarize-history
+// and its fixtures stay valid.
+export function appFrom(event) {
+  const app = event?.app ?? {};
+  const application = {};
+  if (typeof app.name === "string") application.name = app.name;
+  if (typeof app.bundleIdentifier === "string") application.bundleId = app.bundleIdentifier;
+  return application;
+}
+
+export function isSecureInput(event) {
+  return event?.app?.secureInput === true;
+}
+
 const SEARCH_INPUT_ROLES = new Set(["AXSearchField"]);
 const SEARCHABLE_TEXT_INPUT_ROLES = new Set(["AXTextField", "AXComboBox"]);
 const SEARCH_INPUT_HINT = /(?:\bsearch\b|\bquery\b|\bfind\b|address and search|搜索|检索|查找)/iu;
@@ -141,17 +156,79 @@ export function searchInputContextFromAccessibility(accessibility) {
   return null;
 }
 
+// The recorder now classifies keystrokes itself, so the consumer no longer has
+// to infer printability from modifiers: a keyboard.text_input event is text by
+// construction, and secure-input windows never produce one.
+// Mirrors src/core/agent-runtime/computer-history/observation-settings.ts.
+// The capture path has to evaluate the policy per event, so the rules live on
+// both sides; the tables in their two test files are kept identical.
+function loadObservationSettings(file) {
+  if (!file) return null;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+    const observation = parsed?.observation;
+    if (!observation) return null;
+    return {
+      defaultApplicationBehavior: observation.defaultApplicationBehavior ?? "do_not_observe",
+      defaultURLBehavior: observation.defaultURLBehavior ?? "observe",
+      rules: Array.isArray(observation.rules) ? observation.rules : [],
+    };
+  } catch {
+    // The service writes and validates this file before spawning the recorder,
+    // so reaching here means it went missing mid-run. Fall back to the same
+    // defaults the service would have written rather than silently recording
+    // nothing, which looks identical to a broken recorder.
+    return { defaultApplicationBehavior: "observe", defaultURLBehavior: "observe", rules: [] };
+  }
+}
+
+function hostFromUrl(url) {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+    return parsed.hostname.trim().toLowerCase().replace(/^\.+|\.+$/g, "") || null;
+  } catch {
+    return null;
+  }
+}
+
+function domainMatches(host, domain) {
+  const normalized = String(domain ?? "").trim().toLowerCase().replace(/^\.+|\.+$/g, "");
+  if (!normalized) return false;
+  return host === normalized || host.endsWith(`.${normalized}`);
+}
+
+// A block rule always wins inside its own axis.
+function resolveAxis(matching, fallback) {
+  if (matching.some((rule) => rule.behavior === "do_not_observe")) return "do_not_observe";
+  if (matching.some((rule) => rule.behavior === "observe")) return "observe";
+  return fallback;
+}
+
+export function shouldObserve(settings, subject) {
+  if (!settings) return true;
+  const appRules = settings.rules.filter(
+    (rule) => rule.scope === "app" && subject.bundleId && rule.bundleID === subject.bundleId,
+  );
+  if (resolveAxis(appRules, settings.defaultApplicationBehavior) === "do_not_observe") return false;
+
+  const host = subject.url ? hostFromUrl(subject.url) : null;
+  if (!host) return true;
+  const urlRules = settings.rules.filter(
+    (rule) => rule.scope === "url" && domainMatches(host, rule.urlDomain),
+  );
+  return resolveAxis(urlRules, settings.defaultURLBehavior) !== "do_not_observe";
+}
+
 function printableKey(event) {
-  const modifiers = new Set(event.modifiers ?? []);
-  if (modifiers.has("cmd") || modifiers.has("control") || modifiers.has("option")) return false;
-  return typeof event.characters === "string"
-    && event.characters.length > 0
-    && !/[\u0000-\u001f\u007f]/u.test(event.characters);
+  return event?.kind === "keyboard.text_input"
+    && typeof event.keyboard?.text === "string"
+    && event.keyboard.text.length > 0;
 }
 
 export function normalizeKeyBurst(events, options) {
-  const application = events.at(-1)?.application ?? {};
-  const rawText = events.filter(printableKey).map((event) => event.characters).join("");
+  const application = appFrom(events.at(-1));
+  const rawText = events.filter(printableKey).map((event) => event.keyboard.text).join("");
   const searchInput = events.at(-1)?.inputContext?.purpose === "search_query"
     ? events.at(-1).inputContext
     : null;
@@ -172,39 +249,18 @@ export function normalizeKeyBurst(events, options) {
     };
   }
   const keys = events.map((event) => {
-    const modifiers = event.modifiers ?? [];
-    return [...modifiers, event.key].filter(Boolean).join("+");
+    const keyboard = event.keyboard ?? {};
+    const modifiers = keyboard.modifiers ?? [];
+    const key = event.kind === "keyboard.submit" ? "return" : keyboard.keyEquivalent;
+    return [...modifiers, key].filter(Boolean).join("+");
   });
   return { eventType: "key_press", application, details: { keys } };
 }
 
-export function normalizeScrollBurst(events) {
-  const application = events.at(-1)?.application ?? {};
-  const deltaX = events.reduce((sum, event) => sum + Number(event.deltaX || 0), 0);
-  const deltaY = events.reduce((sum, event) => sum + Number(event.deltaY || 0), 0);
-  const dominantDelta = Math.abs(deltaY) >= Math.abs(deltaX) ? deltaY : deltaX;
-  const axis = Math.abs(deltaY) >= Math.abs(deltaX) ? "vertical" : "horizontal";
-  let direction = "none";
-  if (dominantDelta !== 0) {
-    if (axis === "vertical") direction = dominantDelta < 0 ? "down" : "up";
-    else direction = dominantDelta < 0 ? "right" : "left";
-  }
-  return {
-    eventType: "scroll",
-    application,
-    details: {
-      deltaX: Math.round(deltaX),
-      deltaY: Math.round(deltaY),
-      direction,
-      sampleCount: events.length,
-    },
-  };
-}
-
 export function isStopHotkey(event) {
-  const modifiers = new Set(event?.modifiers ?? []);
-  return event?.type === "key_down"
-    && event.keyCode === 15
+  const modifiers = new Set(event?.keyboard?.modifiers ?? []);
+  return event?.kind === "keyboard.shortcut"
+    && event.keyboard?.keyCode === 15
     && modifiers.has("cmd")
     && modifiers.has("control")
     && modifiers.has("option");
@@ -306,10 +362,9 @@ export async function run(argv = process.argv) {
   let sequence = 0;
   let lastPageContextUrl = null;
   const searchInputContextByApp = new Map();
+  const observationSettings = loadObservationSettings(args.observationSettings);
   let pendingKeys = [];
   let pendingKeyTimer = null;
-  let pendingScrolls = [];
-  let pendingScrollTimer = null;
   let processing = Promise.resolve();
   let stopping = false;
   let finishPromise = null;
@@ -321,7 +376,7 @@ export async function run(argv = process.argv) {
     childClosedResolve = resolve;
   });
 
-  const appendEvent = async ({ eventType, timestamp, application = {}, details = {} }, screenshot = false) => {
+  const appendEvent = async ({ eventType, timestamp, application = {}, details = {}, ax = null }, screenshot = false) => {
     sequence += 1;
     let screenshotPath = null;
     if (args.screenshots && screenshot) {
@@ -340,6 +395,7 @@ export async function run(argv = process.argv) {
       eventType,
       application,
       details,
+      ...(ax ? { ax } : {}),
       ...(screenshotPath ? { screenshot: screenshotPath } : {}),
     });
   };
@@ -350,13 +406,14 @@ export async function run(argv = process.argv) {
     if (!pendingKeys.length) return;
     const events = pendingKeys;
     pendingKeys = [];
-    const bundleId = events.at(-1)?.application?.bundleId;
+    const bundleId = appFrom(events.at(-1)).bundleId;
     const inputContext = bundleId ? searchInputContextByApp.get(bundleId) : null;
     const normalized = normalizeKeyBurst(
       inputContext ? events.map((event) => ({ ...event, inputContext: event.inputContext ?? inputContext })) : events,
       args,
     );
-    await appendEvent({ ...normalized, timestamp: events[0].timestamp });
+    const ax = events.at(-1)?.ax ?? null;
+    await appendEvent({ ...normalized, timestamp: events[0].timestamp, ax });
   };
 
   const scheduleKeyFlush = () => {
@@ -366,102 +423,136 @@ export async function run(argv = process.argv) {
     }, TEXT_IDLE_MS);
   };
 
-  const flushScrolls = async () => {
-    if (pendingScrollTimer) clearTimeout(pendingScrollTimer);
-    pendingScrollTimer = null;
-    if (!pendingScrolls.length) return;
-    const events = pendingScrolls;
-    pendingScrolls = [];
-    const normalized = normalizeScrollBurst(events);
-    await appendEvent({ ...normalized, timestamp: events[0].timestamp }, true);
-  };
-
-  const scheduleScrollFlush = () => {
-    if (pendingScrollTimer) clearTimeout(pendingScrollTimer);
-    pendingScrollTimer = setTimeout(() => {
-      processing = processing.then(flushScrolls);
-    }, SCROLL_IDLE_MS);
-  };
-
   const ingest = async (event) => {
-    if (event.type === "helper_ready") {
+    const application = appFrom(event);
+    // Window state travels with the action it belongs to so the summarizer can
+    // read what was on screen without re-deriving it from neighbouring events.
+    const axState = event.ax ? { ax: event.ax } : {};
+    if (event.kind === "session.started") {
       await appendEvent({
         eventType: "recording_started",
         timestamp: event.timestamp,
-        application: event.application,
+        application,
         details: { goal: args.title ?? "Human-operated macOS workflow" },
       }, true);
       return;
     }
-    if (args.onlyApps.length && !appAllowed(event.application, args.onlyApps)) return;
-    if (event.type === "page_context") {
-      if (typeof event.url !== "string" || !event.url) return;
-      if (event.url === lastPageContextUrl) return;
-      lastPageContextUrl = event.url;
+    if (event.kind === "session.ended") return;
+    if (args.onlyApps.length && !appAllowed(application, args.onlyApps)) return;
+    if (!shouldObserve(observationSettings, {
+      bundleId: application.bundleId,
+      url: typeof event.window?.url === "string" ? event.window.url : null,
+    })) return;
+
+    // The URL now rides on every event's window envelope instead of arriving as
+    // its own recorder event, so page context is derived from a change in it.
+    const windowUrl = typeof event.window?.url === "string" ? event.window.url : null;
+    if (windowUrl && windowUrl !== lastPageContextUrl) {
+      lastPageContextUrl = windowUrl;
       await flushKeys();
-      await flushScrolls();
       await appendEvent({
         eventType: "page_context",
         timestamp: event.timestamp,
-        application: event.application,
+        application,
         details: {
-          url: event.url,
-          ...(typeof event.title === "string" ? { title: redactSensitive(event.title) } : {}),
+          url: windowUrl,
+          ...(typeof event.window?.title === "string"
+            ? { title: redactSensitive(event.window.title) }
+            : {}),
         },
       });
+    }
+
+    if (event.kind === "keyboard.text_input") {
+      const inputContext = searchInputContextByApp.get(application.bundleId);
+      if (inputContext) event = { ...event, inputContext };
+      const previousApp = pendingKeys.at(-1) ? appFrom(pendingKeys.at(-1)).bundleId : undefined;
+      if (pendingKeys.length && previousApp !== application.bundleId) await flushKeys();
+      pendingKeys.push(event);
+      scheduleKeyFlush();
       return;
     }
-    if (event.type === "key_down") {
-      await flushScrolls();
-      if (!printableKey(event)) {
-        await flushKeys();
-        const captureAfterNavigation = event.key === "return"
-          && ["com.google.Chrome", "com.apple.Safari"].includes(event.application?.bundleId);
-        if (captureAfterNavigation) {
-          await new Promise((resolve) => setTimeout(resolve, NAVIGATION_SETTLE_MS));
-        }
-        await appendEvent(normalizeKeyBurst([event], args), captureAfterNavigation);
-      } else {
-        const inputContext = searchInputContextByApp.get(event.application?.bundleId);
-        if (inputContext) event = { ...event, inputContext };
-        const previousApp = pendingKeys.at(-1)?.application?.bundleId;
-        if (pendingKeys.length && previousApp !== event.application?.bundleId) await flushKeys();
-        pendingKeys.push(event);
-        scheduleKeyFlush();
+
+    if (event.kind === "keyboard.shortcut" || event.kind === "keyboard.submit") {
+      await flushKeys();
+      // Submitting in a browser starts a navigation; give it a moment so the
+      // next captured state is the destination rather than the old page.
+      const captureAfterNavigation = event.kind === "keyboard.submit"
+        && ["com.google.Chrome", "com.apple.Safari"].includes(application.bundleId);
+      if (captureAfterNavigation) {
+        await new Promise((resolve) => setTimeout(resolve, NAVIGATION_SETTLE_MS));
       }
+      await appendEvent(normalizeKeyBurst([event], args), captureAfterNavigation);
       return;
     }
 
     await flushKeys();
-    if (event.type !== "scroll") await flushScrolls();
-    if (event.type === "application_changed") {
+
+    if (event.kind === "window.changed") {
       await appendEvent({
         eventType: "application_changed",
         timestamp: event.timestamp,
-        application: event.application,
+        application,
+        ...axState,
       }, true);
-    } else if (event.type === "mouse_click") {
-      const bundleId = event.application?.bundleId;
-      if (bundleId) {
-        const searchInput = searchInputContextFromAccessibility(event.accessibility);
-        if (searchInput) searchInputContextByApp.set(bundleId, searchInput);
-        else searchInputContextByApp.delete(bundleId);
+      return;
+    }
+
+    if (event.kind === "mouse.click" || event.kind === "mouse.context_menu") {
+      const target = event.mouse?.target ?? null;
+      if (application.bundleId) {
+        const searchInput = searchInputContextFromAccessibility(target);
+        if (searchInput) searchInputContextByApp.set(application.bundleId, searchInput);
+        else searchInputContextByApp.delete(application.bundleId);
       }
       await appendEvent({
         eventType: "mouse_click",
         timestamp: event.timestamp,
-        application: event.application,
+        application,
         details: {
-          x: Math.round(event.x), y: Math.round(event.y),
-          button: event.button, clickCount: event.clickCount,
-          ...(event.accessibility ? { accessibility: event.accessibility } : {}),
+          button: event.mouse?.button ?? "left",
+          clickCount: event.mouse?.clickCount ?? 1,
+          ...(event.kind === "mouse.context_menu" ? { contextMenu: true } : {}),
+          ...(target ? { accessibility: target } : {}),
         },
+        ...axState,
       }, true);
-    } else if (event.type === "scroll") {
-      const previousApp = pendingScrolls.at(-1)?.application?.bundleId;
-      if (pendingScrolls.length && previousApp !== event.application?.bundleId) await flushScrolls();
-      pendingScrolls.push(event);
-      scheduleScrollFlush();
+      return;
+    }
+
+    if (event.kind === "mouse.drag") {
+      await appendEvent({
+        eventType: "mouse_drag",
+        timestamp: event.timestamp,
+        application,
+        details: {
+          origin: event.mouse?.origin?.element ?? null,
+          destination: event.mouse?.destination?.element ?? null,
+        },
+        ...axState,
+      }, true);
+      return;
+    }
+
+    // Selected text is evidence about what the user is reading, so it obeys the
+    // same retention rule as typed text rather than being kept unconditionally.
+    if (event.kind === "selection.changed") {
+      const selectedText = event.selection?.selectedText;
+      if (typeof selectedText !== "string" || !selectedText) return;
+      const retain = args.captureText && appAllowed(application, args.allowApps);
+      await appendEvent({
+        eventType: "selection_changed",
+        timestamp: event.timestamp,
+        application,
+        details: {
+          characterCount: [...selectedText].length,
+          ...(retain
+            ? { text: redactSensitive(selectedText), redacted: false }
+            : { text: "[REDACTED]", redacted: true }),
+          ...(event.selection?.target ? { accessibility: event.selection.target } : {}),
+        },
+        ...axState,
+      });
     }
   };
 
@@ -471,7 +562,6 @@ export async function run(argv = process.argv) {
       stopping = true;
       terminalLines?.close();
       if (pendingKeyTimer) clearTimeout(pendingKeyTimer);
-      if (pendingScrollTimer) clearTimeout(pendingScrollTimer);
       if (child && !child.killed) child.kill("SIGTERM");
       await Promise.race([
         childClosed,
@@ -479,7 +569,6 @@ export async function run(argv = process.argv) {
       ]);
       await processing;
       await flushKeys();
-      await flushScrolls();
       await appendEvent({
         eventType: "recording_stopped",
         details: { reason },

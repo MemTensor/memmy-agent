@@ -174,22 +174,24 @@ jobs:
           test "$(git rev-parse HEAD)" = "$TARGET_SHA"
 
       - name: Preflight Doc Agent draft endpoint
+        id: doc_agent
         env:
           DOC_AGENT_RELEASE_NOTES_DRAFT_URL: ${{ vars.DOC_AGENT_RELEASE_NOTES_DRAFT_URL || secrets.DOC_AGENT_RELEASE_NOTES_DRAFT_URL }}
           DOC_AGENT_RELEASE_NOTES_DRAFT_TOKEN: ${{ secrets.DOC_AGENT_RELEASE_NOTES_DRAFT_TOKEN }}
         run: |
           set -euo pipefail
+          echo "available=false" >> "$GITHUB_OUTPUT"
           if [[ -z "$DOC_AGENT_RELEASE_NOTES_DRAFT_URL" ]]; then
-            echo "::error title=Doc Agent draft URL is missing::Configure DOC_AGENT_RELEASE_NOTES_DRAFT_URL before merging release branches. Manual recovery: add the Actions variable pointing to the 106 /internal/memmy-release-notes/draft endpoint, then re-run smoke." >&2
-            exit 1
+            echo "::warning title=Doc Agent draft URL is missing::The full release run will create a safe needs-review Draft instead of stopping. Configure DOC_AGENT_RELEASE_NOTES_DRAFT_URL to restore generated copy." >&2
+            exit 0
           fi
           if [[ -z "$DOC_AGENT_RELEASE_NOTES_DRAFT_TOKEN" ]]; then
-            echo "::error title=Doc Agent draft token is missing::Configure DOC_AGENT_RELEASE_NOTES_DRAFT_TOKEN before merging release branches. Manual recovery: add the Actions secret matching the 106 RELEASE_NOTES_DRAFT_TOKEN, then re-run smoke." >&2
-            exit 1
+            echo "::warning title=Doc Agent draft token is missing::The full release run will create a safe needs-review Draft instead of stopping. Configure DOC_AGENT_RELEASE_NOTES_DRAFT_TOKEN to restore generated copy." >&2
+            exit 0
           fi
           if [[ ! "$DOC_AGENT_RELEASE_NOTES_DRAFT_URL" =~ ^https?://[^[:space:]]+/internal/(memmy-)?release-notes/draft$ ]]; then
-            echo "::error title=Doc Agent draft URL is invalid::DOC_AGENT_RELEASE_NOTES_DRAFT_URL must point to /internal/memmy-release-notes/draft or /internal/release-notes/draft. Manual recovery: fix the Actions variable, then re-run smoke." >&2
-            exit 1
+            echo "::warning title=Doc Agent draft URL is invalid::The full release run will create a safe needs-review Draft. The URL must point to /internal/memmy-release-notes/draft or /internal/release-notes/draft." >&2
+            exit 0
           fi
 
           mkdir -p release-assets
@@ -206,31 +208,33 @@ jobs:
           case "$http_status" in
             400|422) ;;
             200)
-              echo "::error title=Doc Agent smoke contract mismatch::The 106 draft endpoint accepted an intentionally invalid smoke payload. Manual recovery: verify the endpoint still rejects non-object evidence packets before release." >&2
-              exit 1
+              echo "::warning title=Doc Agent smoke contract mismatch::The 106 endpoint accepted an invalid smoke payload; the full run will use a safe needs-review Draft until the endpoint contract is corrected." >&2
+              exit 0
               ;;
             401|403)
-              echo "::error title=Doc Agent draft token rejected::The 106 draft endpoint rejected DOC_AGENT_RELEASE_NOTES_DRAFT_TOKEN with HTTP $http_status. Manual recovery: make the GitHub secret match the 106 RELEASE_NOTES_DRAFT_TOKEN, then re-run smoke." >&2
-              exit 1
+              echo "::warning title=Doc Agent draft token rejected::The 106 endpoint rejected the token with HTTP $http_status; the full run will use a safe needs-review Draft." >&2
+              exit 0
               ;;
             404)
-              echo "::error title=Doc Agent draft endpoint disabled or wrong path::The 106 draft endpoint returned HTTP 404. Manual recovery: enable RELEASE_NOTES_DRAFT_ENABLED=true on 106 and verify the URL path, then re-run smoke." >&2
-              exit 1
+              echo "::warning title=Doc Agent draft endpoint disabled or wrong path::The 106 endpoint returned HTTP 404; the full run will use a safe needs-review Draft." >&2
+              exit 0
               ;;
             000|5*)
-              echo "::error title=Doc Agent draft endpoint unavailable::The 106 draft endpoint was unreachable or returned HTTP $http_status. Manual recovery: verify doc-agent.service health and network access, then re-run smoke." >&2
-              exit 1
+              echo "::warning title=Doc Agent draft endpoint unavailable::The 106 endpoint was unreachable or returned HTTP $http_status; the full run will use a safe needs-review Draft." >&2
+              exit 0
               ;;
             *)
-              echo "::error title=Unexpected Doc Agent draft endpoint status::The 106 draft endpoint returned HTTP $http_status. Manual recovery: inspect the 106 logs and endpoint configuration, then re-run smoke." >&2
-              exit 1
+              echo "::warning title=Unexpected Doc Agent draft endpoint status::The 106 endpoint returned HTTP $http_status; the full run will use a safe needs-review Draft." >&2
+              exit 0
               ;;
           esac
 
           if ! jq -e 'type == "object" and (has("detail") or has("error") or has("message") or has("warnings"))' "$response_file" >/dev/null; then
-            echo "::error title=Doc Agent smoke response contract mismatch::Validation failures must return a JSON object with detail/error/message/warnings so release failures are actionable." >&2
-            exit 1
+            echo "::warning title=Doc Agent smoke response contract mismatch::The full run will use a safe needs-review Draft because validation failures are not returning an actionable JSON object." >&2
+            exit 0
           fi
+
+          echo "available=true" >> "$GITHUB_OUTPUT"
 
           {
             echo "## Doc Agent draft endpoint preflight"
@@ -437,33 +441,93 @@ jobs:
           PREVIOUS_TAG: ${{ steps.previous.outputs.previous_tag }}
           DOC_AGENT_RELEASE_NOTES_DRAFT_URL: ${{ vars.DOC_AGENT_RELEASE_NOTES_DRAFT_URL || secrets.DOC_AGENT_RELEASE_NOTES_DRAFT_URL }}
           DOC_AGENT_RELEASE_NOTES_DRAFT_TOKEN: ${{ secrets.DOC_AGENT_RELEASE_NOTES_DRAFT_TOKEN }}
+          DOC_AGENT_PREFLIGHT_AVAILABLE: ${{ steps.doc_agent.outputs.available }}
         run: |
           set -euo pipefail
           notes="release-assets/RELEASE_NOTES.md"
           manual_notes=".github/release-notes/$TAG.md"
           manual_object="${TARGET_SHA}:${manual_notes}"
+          reviewed_notes="release-assets/REVIEWED_RELEASE_NOTES.md"
+          manual_present="false"
           notes_source="unknown"
           needs_review="false"
           : > "$notes"
+          : > "$reviewed_notes"
           jq -n '{source: "unknown", needs_review: true, warnings: ["release notes source has not been selected yet"]}' > release-assets/RELEASE_NOTES_SOURCE.json
           jq -n '{ok: false, needs_review: true, warnings: ["release notes quality report has not been generated yet"]}' > release-assets/QUALITY_REPORT.json
 
+          write_safe_fallback_body() {
+            local reason="$1"
+            local allow_manual="${2:-true}"
+            needs_review="true"
+            if [[ "$manual_present" == "true" && "$allow_manual" == "true" ]]; then
+              cp "$reviewed_notes" "$notes"
+              notes_source="manual-needs-review-fallback"
+            else
+              notes_source="safe-needs-review-fallback"
+              cat > "$notes" <<EOF
+          # Memmy $TAG
+
+          > **Needs review:** Doc Agent could not produce validated public wording. Review the release evidence and replace this placeholder before publishing.
+
+          ## Release review
+
+          - The release target and installer assets passed the workflow's deterministic checks.
+          - Public release wording still requires human review.
+          EOF
+            fi
+            jq -n \
+              --arg source "$notes_source" \
+              --arg reason "$reason" \
+              --arg file "$manual_notes" \
+              --argjson manualPresent "$manual_present" \
+              '{
+                source: $source,
+                needs_review: true,
+                fallback_reason: $reason,
+                manual_file: (if $manualPresent then $file else null end),
+                warnings: [$reason]
+              }' > release-assets/RELEASE_NOTES_SOURCE.json
+            jq -n \
+              --arg source "$notes_source" \
+              --arg reason "$reason" \
+              '{
+                ok: false,
+                needs_review: true,
+                source: $source,
+                fallback_reason: $reason,
+                warnings: [$reason],
+                recovery: "safe_needs_review_draft"
+              }' > release-assets/QUALITY_REPORT.json
+          }
+
+          append_release_assets() {
+            cat >> "$notes" <<EOF
+
+          ## Downloads
+
+          - Windows x64 (China): [Memmy-$VERSION-win32-x64-cn-signed.exe](https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/Memmy-$VERSION-win32-x64-cn-signed.exe)
+          - Windows x64 (International): [Memmy-$VERSION-win32-x64-intl-signed.exe](https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/Memmy-$VERSION-win32-x64-intl-signed.exe)
+          - macOS Apple Silicon (China): [Memmy-$VERSION-darwin-arm64-cn-signed.dmg](https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/Memmy-$VERSION-darwin-arm64-cn-signed.dmg)
+          - macOS Apple Silicon (International): [Memmy-$VERSION-darwin-arm64-intl-signed.dmg](https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/Memmy-$VERSION-darwin-arm64-intl-signed.dmg)
+
+          ## Installation
+
+          On Windows, download the appropriate signed exe and run the installer. On Apple Silicon Macs, download the appropriate signed dmg, open it, and drag Memmy to Applications.
+
+          ## Checksums
+
+          Verify downloads with MD5SUMS.txt or SHA256SUMS.txt attached to this release. Before creating the Draft, the workflow verifies Normal OSS objects with Content-MD5 and Multipart objects with OSS CRC-64/XZ.
+          EOF
+          }
+
           if git cat-file -e "$manual_object" 2>/dev/null; then
-            git show "$manual_object" > "$notes"
-            notes_source="manual"
-            jq -n \
-              --arg source "$notes_source" \
-              --arg file "$manual_notes" \
-              '{source: $source, manual_file: $file, needs_review: false, warnings: []}' \
-              > release-assets/RELEASE_NOTES_SOURCE.json
-            jq -n \
-              --arg source "$notes_source" \
-              --arg file "$manual_notes" \
-              '{ok: true, needs_review: false, source: $source, manual_file: $file, warnings: []}' \
-              > release-assets/QUALITY_REPORT.json
-          else
-            cp release-assets/COMPARE.json release-assets/DRAFT_COMPARE.json
-            cp release-assets/PULL_REQUESTS.json release-assets/DRAFT_PULL_REQUESTS.json
+            git show "$manual_object" > "$reviewed_notes"
+            manual_present="true"
+          fi
+
+          cp release-assets/COMPARE.json release-assets/DRAFT_COMPARE.json
+          cp release-assets/PULL_REQUESTS.json release-assets/DRAFT_PULL_REQUESTS.json
             total_commits="$(jq -r '.total_commits' release-assets/DRAFT_COMPARE.json)"
             received_commits="$(jq -r '.commits | length' release-assets/DRAFT_COMPARE.json)"
             compare_head="$(jq -r '.head_commit.sha // empty' release-assets/DRAFT_COMPARE.json)"
@@ -558,11 +622,14 @@ jobs:
               --arg memoryCliVersion "$memory_cli_version" \
               --arg agentVersion "$agent_version" \
               --arg desktopVersion "$desktop_version" \
+              --arg manualPath "$manual_notes" \
+              --argjson manualPresent "$manual_present" \
+              --rawfile reviewedMarkdown "$reviewed_notes" \
               --slurpfile compare release-assets/DRAFT_COMPARE.json \
               --slurpfile pullRequests release-assets/DRAFT_PULL_REQUESTS.json \
               --slurpfile artifacts release-assets/ARTIFACTS.json \
               --slurpfile styleExamples release-assets/MEMMY_RELEASE_STYLE_EXAMPLES.json \
-              '{
+              '({
                 source_id: $sourceId,
                 sourceId: $sourceId,
                 repository: $repository,
@@ -607,6 +674,7 @@ jobs:
                   candidate_count: 3,
                   require_source_refs: true,
                   require_bilingual_output: true,
+                  public_release_language: "en",
                   require_surfaces: true,
                   max_items: 10,
                   max_added_items: 5,
@@ -618,16 +686,23 @@ jobs:
                 release_context: {
                   release_kind: "memmy_official_desktop_agent_memory_cli",
                   public_release_body: "github_draft_release_notes",
+                  public_release_language: "en",
                   docs_product_extraction: "release_published_revalidated_by_106",
                   manual_release_notes_file: ".github/release-notes/vX.Y.Z.md is optional"
                 }
-              }' > release-assets/DOC_AGENT_RELEASE_NOTES_REQUEST.json
+              } + if $manualPresent then {
+                reviewed_release_notes: {
+                  path: $manualPath,
+                  public_language: "en",
+                  markdown: $reviewedMarkdown
+                }
+              } else {} end)' > release-assets/DOC_AGENT_RELEASE_NOTES_REQUEST.json
 
-            if [[ -z "$DOC_AGENT_RELEASE_NOTES_DRAFT_URL" || -z "$DOC_AGENT_RELEASE_NOTES_DRAFT_TOKEN" ]]; then
-              echo "::error title=Doc Agent draft configuration missing::Full preflight requires DOC_AGENT_RELEASE_NOTES_DRAFT_URL and DOC_AGENT_RELEASE_NOTES_DRAFT_TOKEN. Manual recovery: configure them and run smoke before full preflight." >&2
-              exit 1
-            fi
-
+          response_usable="false"
+          fallback_reason=""
+          if [[ "$DOC_AGENT_PREFLIGHT_AVAILABLE" != "true" ]]; then
+            fallback_reason="Doc Agent preflight was unavailable; public wording requires review"
+          else
             response_status="$(curl --silent --show-error --location --retry 3 --retry-all-errors \
               --connect-timeout 10 --max-time 180 \
               --header "Content-Type: application/json" \
@@ -636,32 +711,40 @@ jobs:
               --output release-assets/DOC_AGENT_RELEASE_NOTES_RESPONSE.json \
               --write-out '%{http_code}' \
               "$DOC_AGENT_RELEASE_NOTES_DRAFT_URL" || true)"
-            if [[ "$response_status" != "200" ]]; then
-              echo "::error title=Doc Agent draft generation failed::The 106 draft endpoint returned HTTP $response_status. Manual recovery: inspect release-assets/DOC_AGENT_RELEASE_NOTES_REQUEST.json, 106 logs, token/URL config, and LLM settings; do not fall back silently for a real Memmy release." >&2
-              exit 1
-            fi
-            if ! jq -e 'type == "object" and ((.release_notes_md // .release_notes_markdown // "") | length) > 0' \
-              release-assets/DOC_AGENT_RELEASE_NOTES_RESPONSE.json >/dev/null; then
-              echo "::error title=Doc Agent returned invalid release notes::The response must include release_notes_md or release_notes_markdown. Manual recovery: fix the 106 draft endpoint contract before retrying." >&2
-              exit 1
-            fi
-            if ! jq -e '(.source // "doc-agent") == "doc-agent" and (.quality_report | type == "object")' \
-              release-assets/DOC_AGENT_RELEASE_NOTES_RESPONSE.json >/dev/null; then
-              echo "::error title=Doc Agent quality report missing::The response must include source=doc-agent and a quality_report object. Manual recovery: deploy the corrected 106 code before retrying." >&2
-              exit 1
-            fi
-            if ! jq -e '(.quality_report.candidate_selection.requested_candidate_count // .candidate_selection.requested_candidate_count // 0) >= 3' \
-              release-assets/DOC_AGENT_RELEASE_NOTES_RESPONSE.json >/dev/null; then
-              echo "::error title=Doc Agent candidate selection missing::The 106 response must prove three-candidate generation/scoring for Memmy. Manual recovery: verify the 106 Memmy draft endpoint is running the v2 renderer." >&2
-              exit 1
-            fi
-            if jq -e '(.needs_review // .quality_report.needs_review // false) == true or (.quality_report.ok // .ok // false) != true' \
-              release-assets/DOC_AGENT_RELEASE_NOTES_RESPONSE.json >/dev/null; then
-              echo "::error title=Doc Agent release notes need review::The generated release notes did not pass quality gates. Manual recovery: inspect QUALITY_REPORT.json, fix evidence/style/LLM output, or add .github/release-notes/$TAG.md as a reviewed manual override." >&2
-              jq '.quality_report // .' release-assets/DOC_AGENT_RELEASE_NOTES_RESPONSE.json > release-assets/QUALITY_REPORT.json || true
-              exit 1
-            fi
 
+            if [[ "$response_status" != "200" ]]; then
+              fallback_reason="Doc Agent generation returned HTTP $response_status"
+            elif ! jq -e 'type == "object" and ((.release_notes_md // .release_notes_markdown // "") | length) > 0 and (.quality_report | type == "object")' \
+              release-assets/DOC_AGENT_RELEASE_NOTES_RESPONSE.json >/dev/null; then
+              fallback_reason="Doc Agent returned an invalid response contract"
+            elif ! jq -e '
+              (.source // "") as $source
+              | ($source == "doc-agent"
+                or $source == "doc-agent-manual-regeneration"
+                or $source == "manual-reviewed-by-doc-agent"
+                or $source == "manual-repaired-by-doc-agent")
+            ' release-assets/DOC_AGENT_RELEASE_NOTES_RESPONSE.json >/dev/null; then
+              fallback_reason="Doc Agent returned an unsupported release-notes source"
+            elif ! jq -e --argjson manualPresent "$manual_present" '
+              (.source // "") as $source
+              | (.quality_report.candidate_selection.requested_candidate_count // .candidate_selection.requested_candidate_count // 0) as $requested
+              | if ($source == "manual-reviewed-by-doc-agent" or $source == "manual-repaired-by-doc-agent")
+                then ($manualPresent and $requested == 0 and (.manual_repair.llm_regenerated // true) == false)
+                elif $source == "doc-agent-manual-regeneration"
+                then ($manualPresent and $requested >= 3 and (.manual_repair.llm_regenerated // false) == true)
+                else ($source == "doc-agent" and $requested >= 3)
+                end
+            ' release-assets/DOC_AGENT_RELEASE_NOTES_RESPONSE.json >/dev/null; then
+              fallback_reason="Doc Agent response did not prove the required validation or candidate repair path"
+            elif jq -e '(.needs_review // .quality_report.needs_review // false) == true or (.quality_report.ok // .ok // false) != true' \
+              release-assets/DOC_AGENT_RELEASE_NOTES_RESPONSE.json >/dev/null; then
+              fallback_reason="Doc Agent exhausted automatic wording repair without a publishable result"
+            else
+              response_usable="true"
+            fi
+          fi
+
+          if [[ "$response_usable" == "true" ]]; then
             jq -r '.release_notes_md // .release_notes_markdown' \
               release-assets/DOC_AGENT_RELEASE_NOTES_RESPONSE.json > "$notes"
             jq '{
@@ -670,6 +753,7 @@ jobs:
               needs_review: (.needs_review // .quality_report.needs_review // false),
               confidence: (.confidence // .quality_report.confidence // "medium"),
               candidate_selection: (.quality_report.candidate_selection // .candidate_selection // {}),
+              manual_repair: (.manual_repair // .quality_report.manual_repair // null),
               warnings: (.quality_report.warnings // .warnings // [])
             }' release-assets/DOC_AGENT_RELEASE_NOTES_RESPONSE.json \
               > release-assets/RELEASE_NOTES_SOURCE.json
@@ -680,46 +764,51 @@ jobs:
               warnings: (.warnings // []),
               coverage: (.coverage // {}),
               candidate_selection: (.candidate_selection // {}),
-              attempts: (.attempts // [])
+              attempts: (.attempts // []),
+              manual_repair: (.manual_repair // null)
             }' release-assets/DOC_AGENT_RELEASE_NOTES_RESPONSE.json \
               > release-assets/QUALITY_REPORT.json
-            notes_source="doc-agent"
-            needs_review="$(jq -r '.needs_review // .quality_report.needs_review // false' release-assets/DOC_AGENT_RELEASE_NOTES_RESPONSE.json)"
+            notes_source="$(jq -r '.source' release-assets/DOC_AGENT_RELEASE_NOTES_RESPONSE.json)"
+            needs_review="false"
+          else
+            echo "::warning title=Release notes require review::$fallback_reason. The workflow will continue with a safe Draft and will not publish it automatically." >&2
+            write_safe_fallback_body "$fallback_reason"
+          fi
 
-            if [[ ! -s "$notes" ]]; then
-              echo "::error title=Release notes generation produced an empty body::No release notes were produced. Manual recovery: inspect the Doc Agent response or add .github/release-notes/$TAG.md as a reviewed manual override." >&2
+          if [[ ! -s "$notes" ]]; then
+            echo "::warning title=Release notes body was empty::The workflow replaced the empty body with a safe needs-review Draft." >&2
+            write_safe_fallback_body "Doc Agent produced an empty public body" "false"
+          fi
+
+          append_release_assets
+
+          sanitized_notes="${notes}.sanitized"
+          if ! node scripts/sanitize-release-notes.mjs "$notes" "$sanitized_notes" --language en; then
+            echo "::warning title=Release notes sanitization repaired with safe fallback::The final body still contained unsafe mixed-language or malformed metadata after upstream repair. It was replaced with an English needs-review Draft instead of stopping the release workflow." >&2
+            write_safe_fallback_body "Final public-language validation rejected the repaired wording" "false"
+            append_release_assets
+            if ! node scripts/sanitize-release-notes.mjs "$notes" "$sanitized_notes" --language en; then
+              echo "::error title=Safe release-notes fallback failed::The fixed English fallback itself failed deterministic validation. This indicates a workflow implementation error, so Draft creation was stopped." >&2
               exit 1
             fi
           fi
+          mv "$sanitized_notes" "$notes"
 
-          cat >> "$notes" <<EOF
+          source_report="release-assets/RELEASE_NOTES_SOURCE.json"
+          source_report_tmp="${source_report}.tmp"
+          jq '. + {
+            public_release_language: "en",
+            language_validation: {ok: true, visible_body: "english_only"}
+          }' "$source_report" > "$source_report_tmp"
+          mv "$source_report_tmp" "$source_report"
 
-          ## Downloads
-
-          - Windows x64 (China): [Memmy-$VERSION-win32-x64-cn-signed.exe](https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/Memmy-$VERSION-win32-x64-cn-signed.exe)
-          - Windows x64 (International): [Memmy-$VERSION-win32-x64-intl-signed.exe](https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/Memmy-$VERSION-win32-x64-intl-signed.exe)
-          - macOS Apple Silicon (China): [Memmy-$VERSION-darwin-arm64-cn-signed.dmg](https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/Memmy-$VERSION-darwin-arm64-cn-signed.dmg)
-          - macOS Apple Silicon (International): [Memmy-$VERSION-darwin-arm64-intl-signed.dmg](https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/Memmy-$VERSION-darwin-arm64-intl-signed.dmg)
-
-          ## Installation
-
-          On Windows, download the appropriate signed exe and run the installer. On Apple Silicon Macs, download the appropriate signed dmg, open it, and drag Memmy to Applications.
-
-          ## Checksums
-
-          Verify downloads with MD5SUMS.txt or SHA256SUMS.txt attached to this release. Before creating the Draft, the workflow verifies Normal OSS objects with Content-MD5 and Multipart objects with OSS CRC-64/XZ.
-
-          <!-- doc-agent: source-id=memmy-official-changelog-v2 -->
-          <!-- memmy-release-evidence
-          schema_version: 2
-          source_id: $GITHUB_REPOSITORY@$TAG
-          previous_tag: $PREVIOUS_TAG
-          target_sha: $TARGET_SHA
-          release_notes_source: $notes_source
-          release_notes_needs_review: $needs_review
-          artifact_manifest: SHA256SUMS.txt
-          -->
-          EOF
+          quality_report="release-assets/QUALITY_REPORT.json"
+          quality_report_tmp="${quality_report}.tmp"
+          jq '. + {
+            public_release_language: "en",
+            language_validation: {ok: true, visible_body: "english_only"}
+          }' "$quality_report" > "$quality_report_tmp"
+          mv "$quality_report_tmp" "$quality_report"
 
       - name: Build auditable release evidence
         if: ${{ steps.release.outputs.preflight_level == 'full' }}

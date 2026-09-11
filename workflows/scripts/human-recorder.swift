@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import Carbon.HIToolbox
 import CoreGraphics
 import Foundation
 
@@ -265,126 +266,407 @@ func browserPage(pid: pid_t) -> (url: String?, title: String?) {
   return (nil, title)
 }
 
-let enrichmentQueue = DispatchQueue(label: "human-recorder.enrichment")
-var pageContextGeneration = 0
+// MARK: - Secure input
 
-// Must be called on enrichmentQueue. Waits for the page to settle, then emits
-// the front browser page (query and fragment stripped) as its own event.
-func schedulePageContext(for application: [String: Any]) {
-  guard let bundleId = application["bundleId"] as? String,
-        browserBundleIds.contains(bundleId),
-        let pid = application["pid"] as? pid_t
+// macOS raises secure input mode while a password field owns focus. Recording
+// keystroke text in that window is exactly what we must never do, so every
+// event carries the flag and text capture is suppressed while it is set.
+func secureInputActive() -> Bool {
+  IsSecureEventInputEnabled()
+}
+
+// MARK: - Event identity
+
+let eventCounter = NSLock()
+var eventSequence = 0
+
+func nextEventId() -> String {
+  eventCounter.lock()
+  eventSequence += 1
+  let value = eventSequence
+  eventCounter.unlock()
+  return "evt-\(value)"
+}
+
+// MARK: - Live accessibility state
+//
+// The previous recorder resolved a click by hit-testing the cursor position and
+// then sleeping 300ms hoping the application had rebuilt its tree. That races
+// the renderer. Instead we keep the focused element continuously up to date from
+// AXObserver notifications, so a click can be attributed immediately and the
+// positional hit test is only a fallback for controls that never take focus.
+
+let axStateLock = NSLock()
+var observedPid: pid_t?
+var observedObserver: AXObserver?
+var focusedElementCache: AXUIElement?
+var focusedWindowTitle: String?
+var focusedWindowUrl: String?
+
+func cachedFocusedElement() -> AXUIElement? {
+  axStateLock.lock(); defer { axStateLock.unlock() }
+  return focusedElementCache
+}
+
+func cachedWindow() -> [String: Any] {
+  axStateLock.lock(); defer { axStateLock.unlock() }
+  var payload: [String: Any] = [:]
+  if let focusedWindowTitle { payload["title"] = focusedWindowTitle }
+  if let focusedWindowUrl { payload["url"] = focusedWindowUrl }
+  return payload
+}
+
+func applicationEnvelope(_ application: [String: Any]? = nil) -> [String: Any] {
+  let source = application ?? applicationPayload()
+  var payload: [String: Any] = ["secureInput": secureInputActive()]
+  if let name = source["name"] { payload["name"] = name }
+  if let bundleId = source["bundleId"] { payload["bundleIdentifier"] = bundleId }
+  return payload
+}
+
+func emitEvent(kind: String, application: [String: Any]? = nil, extra: [String: Any]) {
+  var payload: [String: Any] = [
+    "kind": kind,
+    "id": nextEventId(),
+    "timestamp": timestamp(),
+    "app": applicationEnvelope(application),
+  ]
+  let window = cachedWindow()
+  if !window.isEmpty { payload["window"] = window }
+  axStateLock.lock()
+  let pid = observedPid
+  axStateLock.unlock()
+  if let pid {
+    let windowKey = "\(pid):\(window["title"] as? String ?? "")"
+    if let ax = axSnapshot(pid: pid, windowKey: windowKey) { payload["ax"] = ax }
+  }
+  for (key, value) in extra { payload[key] = value }
+  emit(payload)
+}
+
+func refreshFocusedWindow(pid: pid_t) {
+  let app = AXUIElementCreateApplication(pid)
+  AXUIElementSetMessagingTimeout(app, 0.2)
+  var windowRef: CFTypeRef?
+  if AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &windowRef) != .success {
+    _ = AXUIElementCopyAttributeValue(app, kAXMainWindowAttribute as CFString, &windowRef)
+  }
+  let title = axElement(windowRef).flatMap { accessibilityString($0, kAXTitleAttribute as CFString) }
+  var url: String?
+  if let bundleId = applicationPayload()["bundleId"] as? String, browserBundleIds.contains(bundleId) {
+    url = browserPage(pid: pid).url
+  }
+  axStateLock.lock()
+  focusedWindowTitle = title
+  focusedWindowUrl = url
+  axStateLock.unlock()
+}
+
+func refreshFocusedElement(pid: pid_t) {
+  let app = AXUIElementCreateApplication(pid)
+  AXUIElementSetMessagingTimeout(app, 0.2)
+  var ref: CFTypeRef?
+  guard AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &ref) == .success,
+        let element = axElement(ref)
   else { return }
-  pageContextGeneration += 1
-  let generation = pageContextGeneration
-  enrichmentQueue.asyncAfter(deadline: .now() + 0.9) {
-    guard generation == pageContextGeneration else { return }
-    let page = browserPage(pid: pid)
-    guard let url = page.url else { return }
-    var payload: [String: Any] = [
-      "type": "page_context",
-      "timestamp": timestamp(),
-      "application": application,
-      "url": url,
-    ]
-    if let title = page.title { payload["title"] = title }
-    emit(payload)
+  axStateLock.lock()
+  focusedElementCache = element
+  axStateLock.unlock()
+}
+
+// Selected text is the single highest-volume semantic signal: it reports what
+// the user is actually reading or editing without any coordinate involved.
+func emitSelectionChanged(_ element: AXUIElement) {
+  guard !secureInputActive() else { return }
+  var target = nodePayload(element)
+  var selection: [String: Any] = [:]
+  if let text = accessibilityString(element, kAXSelectedTextAttribute as CFString) {
+    selection["selectedText"] = text
+  }
+  var rangeRef: CFTypeRef?
+  if AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success,
+     let value = rangeRef, CFGetTypeID(value) == AXValueGetTypeID() {
+    var range = CFRange(location: 0, length: 0)
+    if AXValueGetValue(value as! AXValue, .cfRange, &range) {
+      selection["selectedRange"] = ["location": range.location, "length": range.length]
+    }
+  }
+  guard !selection.isEmpty else { return }
+  if target.isEmpty { target = ["role": "AXUnknown"] }
+  selection["target"] = target
+  emitEvent(kind: "selection.changed", extra: ["selection": selection])
+}
+
+// MARK: - Accessibility tree snapshots
+//
+// Every event carries the state of the focused window, but sending the whole
+// tree each time is wasteful: consecutive events usually differ by a handful of
+// nodes. Keep the previous snapshot per window and emit only what changed,
+// falling back to the full tree when there is nothing to diff against or the
+// change is large enough that a diff would not be smaller.
+
+let AX_TREE_MAX_NODES = 400
+let AX_TREE_MIN_INTERVAL: TimeInterval = 0.4
+let AX_DIFF_FULL_TREE_RATIO = 0.6
+
+var lastTreeKey: String?
+var lastTreeLines: [String]?
+var lastTreeAt: Date?
+
+func treeLine(_ payload: [String: Any]) -> String? {
+  let role = payload["role"] as? String ?? ""
+  let fields = ["subrole", "title", "description", "identifier", "value"]
+    .map { payload[$0] as? String ?? "" }
+  guard !role.isEmpty, fields.contains(where: { !$0.isEmpty }) else { return nil }
+  return ([role] + fields).joined(separator: "|")
+}
+
+func axTreeLines(pid: pid_t) -> [String] {
+  let app = AXUIElementCreateApplication(pid)
+  AXUIElementSetMessagingTimeout(app, 0.3)
+  var windowRef: CFTypeRef?
+  if AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &windowRef) != .success {
+    _ = AXUIElementCopyAttributeValue(app, kAXMainWindowAttribute as CFString, &windowRef)
+  }
+  guard let window = axElement(windowRef) else { return [] }
+
+  var lines: [String] = []
+  var queue: [AXUIElement] = [window]
+  var visited = 0
+  while !queue.isEmpty && visited < AX_TREE_MAX_NODES {
+    let current = queue.removeFirst()
+    visited += 1
+    if let line = treeLine(nodePayload(current)) { lines.append(line) }
+    var childrenRef: CFTypeRef?
+    if AXUIElementCopyAttributeValue(current, kAXChildrenAttribute as CFString, &childrenRef) == .success,
+       let children = childrenRef as? [AXUIElement] {
+      queue.append(contentsOf: children.prefix(24))
+    }
+  }
+  return lines
+}
+
+// Returns nil when the snapshot was taken recently enough that recomputing it
+// would cost more than the freshness is worth.
+func axSnapshot(pid: pid_t, windowKey: String) -> [String: Any]? {
+  let now = Date()
+  if let lastTreeAt, now.timeIntervalSince(lastTreeAt) < AX_TREE_MIN_INTERVAL { return nil }
+
+  let lines = axTreeLines(pid: pid)
+  guard !lines.isEmpty else { return nil }
+  defer {
+    lastTreeKey = windowKey
+    lastTreeLines = lines
+    lastTreeAt = now
+  }
+
+  guard windowKey == lastTreeKey, let previous = lastTreeLines else {
+    return ["mode": "fullTree", "text": lines.joined(separator: "\n")]
+  }
+
+  let previousSet = Set(previous)
+  let currentSet = Set(lines)
+  let added = lines.filter { !previousSet.contains($0) }
+  let removed = previous.filter { !currentSet.contains($0) }
+  if added.isEmpty && removed.isEmpty { return nil }
+
+  let changed = added.count + removed.count
+  if Double(changed) > Double(max(lines.count, 1)) * AX_DIFF_FULL_TREE_RATIO {
+    return ["mode": "fullTree", "text": lines.joined(separator: "\n")]
+  }
+  let diff = removed.map { "- \($0)" } + added.map { "+ \($0)" }
+  return ["mode": "diffFromPrevious", "text": diff.joined(separator: "\n")]
+}
+
+let axObserverCallback: AXObserverCallback = { _, element, notification, _ in
+  let name = notification as String
+  switch name {
+  case kAXFocusedUIElementChangedNotification:
+    axStateLock.lock()
+    focusedElementCache = element
+    axStateLock.unlock()
+  case kAXSelectedTextChangedNotification:
+    emitSelectionChanged(element)
+  case kAXValueChangedNotification:
+    axStateLock.lock()
+    let isFocused = focusedElementCache == nil
+    axStateLock.unlock()
+    if isFocused {
+      axStateLock.lock()
+      focusedElementCache = element
+      axStateLock.unlock()
+    }
+  case kAXFocusedWindowChangedNotification, kAXWindowMovedNotification:
+    var pid: pid_t = 0
+    if AXUIElementGetPid(element, &pid) == .success {
+      refreshFocusedWindow(pid: pid)
+      emitEvent(kind: "window.changed", extra: [:])
+    }
+  default:
+    break
   }
 }
 
-let arguments = Set(CommandLine.arguments.dropFirst())
-if arguments.contains("--permissions") || arguments.contains("--request-permissions") {
-  emit(permissionsPayload(request: arguments.contains("--request-permissions")))
-  exit(0)
+func observeApplication(pid: pid_t) {
+  axStateLock.lock()
+  let alreadyObserved = observedPid == pid
+  axStateLock.unlock()
+  guard !alreadyObserved else { return }
+
+  if let previous = observedObserver {
+    CFRunLoopRemoveSource(
+      CFRunLoopGetMain(),
+      AXObserverGetRunLoopSource(previous),
+      .defaultMode
+    )
+  }
+
+  var observer: AXObserver?
+  guard AXObserverCreate(pid, axObserverCallback, &observer) == .success,
+        let observer
+  else { return }
+  let app = AXUIElementCreateApplication(pid)
+  for notification in [
+    kAXFocusedUIElementChangedNotification,
+    kAXSelectedTextChangedNotification,
+    kAXValueChangedNotification,
+    kAXFocusedWindowChangedNotification,
+    kAXWindowMovedNotification,
+  ] {
+    AXObserverAddNotification(observer, app, notification as CFString, nil)
+  }
+  CFRunLoopAddSource(
+    CFRunLoopGetMain(),
+    AXObserverGetRunLoopSource(observer),
+    .defaultMode
+  )
+
+  axStateLock.lock()
+  observedPid = pid
+  observedObserver = observer
+  focusedElementCache = nil
+  axStateLock.unlock()
+
+  refreshFocusedElement(pid: pid)
+  refreshFocusedWindow(pid: pid)
 }
 
+// MARK: - Event tap
+//
+// The tap still tells us *that* an interaction happened; it no longer decides
+// *what* was interacted with. Coordinates are used only to fall back to a hit
+// test and are never emitted.
+
+let enrichmentQueue = DispatchQueue(label: "human-recorder.enrichment")
+
 let eventMask = (1 << CGEventType.leftMouseDown.rawValue)
+  | (1 << CGEventType.leftMouseUp.rawValue)
   | (1 << CGEventType.rightMouseDown.rawValue)
   | (1 << CGEventType.keyDown.rawValue)
-  | (1 << CGEventType.scrollWheel.rawValue)
 
 var eventTap: CFMachPort?
+var dragOrigin: (point: CGPoint, target: [String: Any])?
+
+// Resolve what was acted on. The AXObserver-maintained focused element is
+// authoritative and always current; the positional hit test only covers
+// controls that never take focus (static links, custom canvas widgets).
+func resolveTarget(at point: CGPoint) -> [String: Any] {
+  if let focused = cachedFocusedElement() {
+    let payload = nodePayload(focused)
+    if hasSemanticLabel(payload) { return payload }
+  }
+  if let hit = accessibilityHit(at: point), hitHasSemantics(hit.payload) {
+    return hit.payload
+  }
+  return [:]
+}
+
+func modifierList(_ event: CGEvent) -> [String] {
+  modifierNames(event.flags)
+}
 
 let callback: CGEventTapCallBack = { _, type, event, _ in
   switch type {
   case .leftMouseDown, .rightMouseDown:
-    // The AX walk can take tens of milliseconds; run it off the tap thread so
-    // a slow application cannot make the OS disable the listen-only tap.
     let point = event.location
-    let button = type == .rightMouseDown ? "right" : "left"
     let clickCount = event.getIntegerValueField(.mouseEventClickState)
-    let eventTimestamp = timestamp()
-    let frontmost = applicationPayload()
+    let button = type == .rightMouseDown ? "right" : "left"
+    let modifiers = modifierList(event)
+    let application = applicationPayload()
     enrichmentQueue.async {
-      var payload: [String: Any] = [
-        "type": "mouse_click",
-        "timestamp": eventTimestamp,
-        "x": point.x,
-        "y": point.y,
-        "button": button,
-        "clickCount": clickCount,
-      ]
-      var application = frontmost
-      var hit = accessibilityHit(at: point)
-      // Let the click settle, then re-probe: Chrome builds its AX tree lazily
-      // and reports stale geometry right after scrolls, so an empty first hit
-      // often resolves on the second attempt.
-      usleep(300_000)
-      if hit == nil || !hitHasSemantics(hit!.payload) {
-        if let retried = accessibilityHit(at: point), hitHasSemantics(retried.payload) {
-          hit = retried
-        }
-      }
-      if let hit {
-        var accessibility = hit.payload
-        // Attribute the click to the process owning the clicked element, not
-        // the frontmost application: the first click on a background window
-        // arrives before macOS finishes activating it.
-        if let pid = hit.pid {
-          if let owner = NSRunningApplication(processIdentifier: pid) {
-            application = applicationPayload(owner)
-          }
-          if let focused = focusedInteractiveNode(pid: pid) {
-            accessibility["focused"] = focused
-          }
-        }
-        if !accessibility.isEmpty { payload["accessibility"] = accessibility }
-      }
-      payload["application"] = application
-      emit(payload)
-      schedulePageContext(for: application)
+      var target = resolveTarget(at: point)
+      if target.isEmpty { target = ["role": "AXUnknown"] }
+      if type == .leftMouseDown { dragOrigin = (point, target) }
+      var mouse: [String: Any] = ["button": button, "clickCount": clickCount, "target": target]
+      if !modifiers.isEmpty { mouse["modifiers"] = modifiers }
+      emitEvent(
+        kind: type == .rightMouseDown ? "mouse.context_menu" : "mouse.click",
+        application: application,
+        extra: ["mouse": mouse]
+      )
+    }
+  case .leftMouseUp:
+    let point = event.location
+    let application = applicationPayload()
+    guard let origin = dragOrigin else { break }
+    dragOrigin = nil
+    let dx = point.x - origin.point.x
+    let dy = point.y - origin.point.y
+    // Anything under a few points is a click that wobbled, not a drag.
+    guard (dx * dx + dy * dy) > 25 else { break }
+    enrichmentQueue.async {
+      var destination = resolveTarget(at: point)
+      if destination.isEmpty { destination = ["role": "AXUnknown"] }
+      emitEvent(
+        kind: "mouse.drag",
+        application: application,
+        extra: ["mouse": ["origin": ["element": origin.target], "destination": ["element": destination]]]
+      )
     }
   case .keyDown:
     let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
     let text = characters(from: event)
+    let modifiers = modifierList(event)
     let application = applicationPayload()
-    emit([
-      "type": "key_down",
-      "timestamp": timestamp(),
-      "application": application,
-      "keyCode": keyCode,
-      "key": keyNames[keyCode] ?? (text.isEmpty ? "keycode-\(keyCode)" : text),
-      "characters": text,
-      "modifiers": modifierNames(event.flags),
-      "repeat": event.getIntegerValueField(.keyboardEventAutorepeat) == 1,
-    ])
-    if keyCode == 36 {
-      enrichmentQueue.async { schedulePageContext(for: application) }
+    let secure = secureInputActive()
+    enrichmentQueue.async {
+      var target = cachedFocusedElement().map { nodePayload($0) } ?? [:]
+      if target.isEmpty { target = ["role": "AXUnknown"] }
+      var keyboard: [String: Any] = ["target": target]
+      if !modifiers.isEmpty { keyboard["modifiers"] = modifiers }
+
+      // Return without modifiers ends an input; it is the cheapest reliable
+      // marker of a task boundary, so it gets its own kind.
+      if keyCode == 36 && modifiers.isEmpty {
+        emitEvent(kind: "keyboard.submit", application: application, extra: ["keyboard": keyboard])
+        return
+      }
+      let named = keyNames[keyCode]
+      if !modifiers.isEmpty || named != nil {
+        keyboard["keyEquivalent"] = named ?? (text.isEmpty ? "keycode-\(keyCode)" : text)
+        keyboard["keyCode"] = Int(keyCode)
+        emitEvent(kind: "keyboard.shortcut", application: application, extra: ["keyboard": keyboard])
+        return
+      }
+      // Never carry keystroke text out of a secure input window.
+      guard !secure, !text.isEmpty else { return }
+      keyboard["text"] = text
+      emitEvent(kind: "keyboard.text_input", application: application, extra: ["keyboard": keyboard])
     }
-  case .scrollWheel:
-    emit([
-      "type": "scroll",
-      "timestamp": timestamp(),
-      "application": applicationPayload(),
-      "deltaX": event.getDoubleValueField(.scrollWheelEventPointDeltaAxis2),
-      "deltaY": event.getDoubleValueField(.scrollWheelEventPointDeltaAxis1),
-    ])
   case .tapDisabledByTimeout, .tapDisabledByUserInput:
     if let eventTap { CGEvent.tapEnable(tap: eventTap, enable: true) }
   default:
     break
   }
   return Unmanaged.passUnretained(event)
+}
+
+// MARK: - Entry point
+
+let arguments = Set(CommandLine.arguments.dropFirst())
+if arguments.contains("--permissions") || arguments.contains("--request-permissions") {
+  emit(permissionsPayload(request: arguments.contains("--request-permissions")))
+  exit(0)
 }
 
 guard let tap = CGEvent.tapCreate(
@@ -403,26 +685,32 @@ guard let tap = CGEvent.tapCreate(
 }
 eventTap = tap
 
-let observer = NSWorkspace.shared.notificationCenter.addObserver(
+let workspaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
   forName: NSWorkspace.didActivateApplicationNotification,
   object: nil,
   queue: .main
 ) { notification in
   let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
-  emit([
-    "type": "application_changed",
-    "timestamp": timestamp(),
-    "application": applicationPayload(application),
-  ])
+  let payload = applicationPayload(application)
+  if let pid = payload["pid"] as? pid_t { observeApplication(pid: pid) }
+  emitEvent(kind: "window.changed", application: payload, extra: [:])
 }
 
 let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
 CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
 CGEvent.tapEnable(tap: tap, enable: true)
-emit([
-  "type": "helper_ready",
-  "timestamp": timestamp(),
-  "application": applicationPayload(),
-])
+
+if let pid = applicationPayload()["pid"] as? pid_t { observeApplication(pid: pid) }
+emitEvent(kind: "session.started", extra: [:])
+
+signal(SIGTERM) { _ in
+  emitEvent(kind: "session.ended", extra: [:])
+  exit(0)
+}
+signal(SIGINT) { _ in
+  emitEvent(kind: "session.ended", extra: [:])
+  exit(0)
+}
+
 CFRunLoopRun()
-NSWorkspace.shared.notificationCenter.removeObserver(observer)
+NSWorkspace.shared.notificationCenter.removeObserver(workspaceObserver)

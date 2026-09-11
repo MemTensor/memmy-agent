@@ -1,11 +1,33 @@
+import {
+  ObservationSettingsStore,
+} from "../../core/agent-runtime/computer-history/settings-store.js";
+import {
+  DEFAULT_OBSERVATION_SETTINGS,
+  parseObservationSettings,
+} from "../../core/agent-runtime/computer-history/observation-settings.js";
+import {
+  applicationsFromMarkdown,
+  applyNarrative,
+  compactEventEvidence,
+  isNarrated,
+  writeSegmentNarrative,
+} from "../../core/agent-runtime/computer-history/summary-writer.js";
+import type { LLMRuntimeResolver } from "../../utils/llm-runtime.js";
+import {
+  SIX_HOUR_MS,
+  alignedId,
+  buildSixHourSummary,
+  instantFromId,
+} from "../../core/agent-runtime/computer-history/rollup.js";
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { ApplicationIconReader } from "../../core/agent-runtime/computer-history/application-icon.js";
 
-export type ComputerHistorySourceType = "captured" | "imported" | "demo_fixture" | "codex_synced";
+export type ComputerHistorySourceType = "captured" | "rollup" | "imported" | "demo_fixture";
 
 export interface ComputerHistoryReplayPlan {
   sourcePath: string;
@@ -18,6 +40,16 @@ export interface ComputerHistoryReplayPlan {
 export interface ComputerHistoryEntry {
   id: string;
   title: string;
+  /** One-paragraph account of the window, shown in the timeline. */
+  description: string | null;
+  /** Bundle identifiers seen during the window. */
+  applications: string[];
+  /** Which summary layer this entry belongs to, when it is one. */
+  summaryWindow: "10min" | "6h" | null;
+  /** Whether this entry's raw events are exempt from the retention window. */
+  pinned: boolean;
+  /** The raw event stream this summary was written from, while it still exists. */
+  eventStreamPath: string | null;
   sourceType: ComputerHistorySourceType;
   createdAt: string;
   markdown: string;
@@ -35,12 +67,14 @@ export interface ComputerHistoryWorkflow {
 }
 
 export interface ComputerHistorySnapshot {
-  capture: {
-    status: "idle" | "recording" | "stopping" | "failed";
-    title: string | null;
-    startUrl: string | null;
+  observation: {
+    state: ObservationState;
     startedAt: string | null;
+    segmentId: string | null;
+    segmentStartedAt: string | null;
     error: string | null;
+    /** Why the last summary kept its mechanical wording, if it did. */
+    narrationError: string | null;
   };
   cuaRun: {
     kind: "smoke" | "workflow" | null;
@@ -56,8 +90,10 @@ export interface ComputerHistorySnapshot {
     screenshots: false;
     audio: false;
     rawRetentionHours: 48;
+    /** Where the readable summaries live. */
     markdownDirectory: string;
-    codexSyncDirectory: string | null;
+    /** Where the raw per-segment event streams live, for direct inspection. */
+    eventStreamDirectory: string;
   };
 }
 
@@ -77,16 +113,38 @@ export interface ComputerHistoryPreparationResult extends ComputerHistoryReplayR
   steps: string[];
 }
 
-interface CaptureState {
-  child: ChildProcessWithoutNullStreams;
-  title: string;
-  startUrl: string | null;
+// Observation is a continuous stream sliced into segments, not a set of named
+// recordings, so a segment carries no title or starting URL: it is simply the
+// window of time it covers.
+interface SegmentState {
+  child: ChildProcessWithoutNullStreams | null;
+  id: string;
+  directory: string;
   startedAt: string;
   eventsFile: string;
+  metadataFile: string;
   historyFile: string;
-  workflowCandidateFile: string;
   output: string;
 }
+
+/**
+ * `paused` keeps the current segment open but stops writing to it, so the user
+ * can step away from recording without losing the arc they were in the middle
+ * of. `stopped` records nothing while every completed segment stays searchable.
+ */
+export type ObservationState = "running" | "paused" | "stopped" | "stopping" | "failed";
+
+const SEGMENT_DURATION_MS = 10 * 60 * 1000;
+const SEGMENTS_DIRECTORY_NAME = "segments";
+// Enough of a stream that a summary of it says something.
+const LIVE_NARRATION_MIN_BYTES = 4_000;
+// How many preceding windows the model is shown, so it can relate this one to them.
+const PRIOR_SUMMARY_COUNT = 2;
+// A pinned segment keeps its raw events past the retention window.
+const PIN_MARKER = ".pinned";
+
+// A six-hour rollup is cheap because it reuses ten-minute summaries, so it can
+// run every time a segment is finalized rather than on its own schedule.
 
 interface RunState {
   child: ChildProcessWithoutNullStreams | null;
@@ -101,6 +159,10 @@ interface RunState {
 interface MarkdownEntry {
   id: string;
   title: string;
+  description: string | null;
+  applications: string[];
+  summaryWindow: "10min" | "6h" | null;
+  pinned: boolean;
   createdAt: string;
   markdown: string;
   filePath: string;
@@ -109,6 +171,67 @@ interface MarkdownEntry {
 const MAX_MARKDOWN_BYTES = 512 * 1024;
 const MAX_LOG_CHARS = 24_000;
 const RAW_RETENTION_MS = 48 * 60 * 60 * 1000;
+
+// Codex writes its Skysight summaries as `<utc>-<4 random chars>-10min-memory-summary.md`
+// (or `-6h-`). Copies of those were dropped into the history directory during
+// earlier experiments, where they are indistinguishable from Memmy's own
+// captures. Memmy names its own segments `<segment id>-10min-summary.md`, with
+// no random component and no "memory-", so the two cannot collide.
+const CODEX_SKYSIGHT_FILE = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-[A-Za-z]{4}-(?:10min|6h)-memory-summary$/;
+
+/**
+ * When a segment's window started.
+ *
+ * Reads the recorded start time rather than trusting the directory's mtime:
+ * writing a pin marker, or any other touch, would otherwise reset the clock and
+ * silently grant the segment another full retention window.
+ */
+function segmentAgeMs(directory: string): number {
+  try {
+    const metadata = JSON.parse(fs.readFileSync(path.join(directory, "metadata.json"), "utf8"));
+    const startedAt = Date.parse(metadata?.startedAt ?? "");
+    if (!Number.isNaN(startedAt)) return startedAt;
+  } catch {
+    // Recordings from before segments carried metadata fall back to mtime.
+  }
+  return fs.statSync(directory).mtimeMs;
+}
+
+export function isCodexSkysightCopy(historyId: string): boolean {
+  return CODEX_SKYSIGHT_FILE.test(historyId);
+}
+
+/**
+ * The moment a summary is about, in order of how well each source knows it.
+ *
+ * The id carries the start of the window it covers and never changes; imported
+ * context carries `captured_at`; only a summary with neither is dated by its
+ * file, which is a guess and the reason this exists.
+ */
+function entryInstant(id: string, markdown: string, modifiedAt: Date): string {
+  const fromId = instantFromId(id);
+  if (fromId) return fromId.toISOString();
+  const captured = readFrontmatterValue(markdown, "captured_at");
+  if (captured) {
+    const parsed = new Date(captured);
+    if (!Number.isNaN(parsed.getTime())) return parsed.toISOString();
+  }
+  return modifiedAt.toISOString();
+}
+
+/** Whether this summary is one the machine produced and the model must write. */
+function isMachineSummary(sourceType: ComputerHistorySourceType): boolean {
+  return sourceType === "captured" || sourceType === "rollup";
+}
+
+/** Whether the summary on disk has already been written by the model. */
+function isSummaryWritten(file: string): boolean {
+  try {
+    return isNarrated(fs.readFileSync(file, "utf8"));
+  } catch {
+    return false;
+  }
+}
 
 function boundedInterval(value: string | undefined, fallback: number, minimum: number, maximum: number): number {
   const parsed = Number(value);
@@ -119,17 +242,32 @@ function boundedInterval(value: string | undefined, fallback: number, minimum: n
 export class ComputerHistoryDemoService {
   private readonly repositoryRoot: string;
   private readonly historyDirectory: string;
-  private readonly codexHistoryDirectory: string;
-  private readonly codexSyncEnabled: boolean;
   private readonly recordingDirectory: string;
   private readonly workflowDirectory: string;
-  private readonly syncStateFile: string;
   private readonly liveSummaryIntervalMs: number;
-  private capture: CaptureState | null = null;
+  private segment: SegmentState | null = null;
+  private observationState: ObservationState = "stopped";
+  private observationStartedAt: string | null = null;
+  private observationError: string | null = null;
+  private rotationTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly observationSettings: ObservationSettingsStore;
+  private readonly applicationIcons: ApplicationIconReader;
+  private llmRuntime: LLMRuntimeResolver | null = null;
+  /**
+   * The one backfill this process runs. Held rather than flagged so that
+   * starting it and waiting for it are the same call: what succeeds is written
+   * for good, so a second pass would have nothing to do.
+   */
+  private backfill: Promise<number> | null = null;
+  private narrationError: string | null = null;
+  /** Segments already narrated while still open, so it happens once, not per tick. */
+  private readonly narratedOpenSegments = new Set<string>();
+
+  private get segmentsDirectory(): string {
+    return path.join(this.recordingDirectory, SEGMENTS_DIRECTORY_NAME);
+  }
   private liveSummaryTimer: ReturnType<typeof setInterval> | null = null;
   private liveSummarySignature: string | null = null;
-  private captureStatus: "idle" | "recording" | "stopping" | "failed" = "idle";
-  private captureError: string | null = null;
   private run: RunState = {
     child: null,
     kind: null,
@@ -143,23 +281,19 @@ export class ComputerHistoryDemoService {
   constructor(input: {
     repositoryRoot?: string;
     historyDirectory?: string;
-    codexHistoryDirectory?: string;
     recordingDirectory?: string;
     workflowDirectory?: string;
+    observationSettingsFile?: string;
   } = {}) {
     this.repositoryRoot = path.resolve(input.repositoryRoot ?? defaultRepositoryRoot());
     this.historyDirectory = path.resolve(input.historyDirectory
       ?? path.join(os.homedir(), ".memmy", "computer-history", "histories"));
-    this.codexHistoryDirectory = path.resolve(input.codexHistoryDirectory
-      ?? (input.historyDirectory
-        ? path.join(this.historyDirectory, ".codex-sync")
-        : path.join(os.homedir(), ".codex", "memories", "extensions", "skysight")));
-    this.codexSyncEnabled = process.env.MEMMY_COMPUTER_HISTORY_CODEX_SYNC !== "0";
     this.recordingDirectory = path.resolve(input.recordingDirectory
       ?? path.join(os.homedir(), ".memmy", "computer-history", "recordings"));
     this.workflowDirectory = path.resolve(input.workflowDirectory
       ?? path.join(os.homedir(), ".memmy", "computer-history", "workflows"));
-    this.syncStateFile = path.join(path.dirname(this.historyDirectory), "sync-state.json");
+    this.observationSettings = new ObservationSettingsStore(input.observationSettingsFile);
+    this.applicationIcons = new ApplicationIconReader({ repositoryRoot: this.repositoryRoot });
     this.liveSummaryIntervalMs = boundedInterval(
       process.env.MEMMY_COMPUTER_HISTORY_LIVE_SUMMARY_INTERVAL_MS,
       60_000,
@@ -168,15 +302,85 @@ export class ComputerHistoryDemoService {
     );
   }
 
+  /**
+   * The summaries immediately before this one, oldest first.
+   *
+   * Without them the model has nothing to relate a window to, and any account
+   * of what preceded it would be invention.
+   */
+  private priorSummaries(historyId: string): string[] {
+    let names: string[];
+    try {
+      names = fs.readdirSync(this.historyDirectory);
+    } catch {
+      return [];
+    }
+    return names
+      .filter((name) => name.endsWith("-10min-summary.md") && name < `${historyId}.md`)
+      .sort()
+      .slice(-PRIOR_SUMMARY_COUNT)
+      .map((name) => {
+        try {
+          return fs.readFileSync(path.join(this.historyDirectory, name), "utf8");
+        } catch {
+          return "";
+        }
+      })
+      .filter((markdown) => markdown && isNarrated(markdown));
+  }
+
+  /** An application's icon for the timeline, as a data URL. */
+  applicationIcon(bundleId: string): Promise<string | null> {
+    return this.applicationIcons.iconFor(bundleId);
+  }
+
+  /** Supplies the model used to narrate finalized segments. */
+  setLlmRuntime(llmRuntime: LLMRuntimeResolver | null): void {
+    this.llmRuntime = llmRuntime;
+    if (llmRuntime) void this.backfillUnwrittenSummaries();
+  }
+
+  /**
+   * Writes every machine summary the model never got to.
+   *
+   * A summary is only shown once written, so one the model never reached is not
+   * merely plainer — it is absent from the timeline. That covers summaries from
+   * before narration wrote the whole body, and any left behind by a model that
+   * was unreachable at the time. Runs when the runtime arrives, one at a time,
+   * so a backlog does not go out as a burst of concurrent requests.
+   */
+  async backfillUnwrittenSummaries(): Promise<number> {
+    if (!this.llmRuntime) return 0;
+    this.backfill ??= this.writeUnwrittenSummaries();
+    return this.backfill;
+  }
+
+  private async writeUnwrittenSummaries(): Promise<number> {
+    let written = 0;
+    for (const entry of this.readMarkdownDirectory(this.historyDirectory)) {
+      if (isCodexSkysightCopy(entry.id)) continue;
+      if (!isMachineSummary(readSourceType(entry.markdown))) continue;
+      if (isNarrated(entry.markdown)) continue;
+      // The open segment is still being written to; it is narrated in place.
+      if (entry.filePath === this.segment?.historyFile) continue;
+      const window = entry.id.endsWith("-6h-summary") ? "6h" : "10min";
+      if (await this.writeSummaryWith(entry.filePath, window, this.eventStreamPathFor(entry.id))) {
+        written += 1;
+      }
+    }
+    return written;
+  }
+
   snapshot(): ComputerHistorySnapshot {
     this.cleanupExpiredRecordings();
     return {
-      capture: {
-        status: this.captureStatus,
-        title: this.capture?.title ?? null,
-        startUrl: this.capture?.startUrl ?? null,
-        startedAt: this.capture?.startedAt ?? null,
-        error: this.captureError,
+      observation: {
+        state: this.observationState,
+        startedAt: this.observationStartedAt,
+        segmentId: this.segment?.id ?? null,
+        segmentStartedAt: this.segment?.startedAt ?? null,
+        error: this.observationError,
+        narrationError: this.narrationError,
       },
       cuaRun: {
         kind: this.run.kind,
@@ -189,12 +393,31 @@ export class ComputerHistoryDemoService {
       histories: [
         ...this.readMarkdownDirectory(this.historyDirectory).map((entry) => {
           const sourceType = readSourceType(entry.markdown);
-          return { ...entry, sourceType, replayPlan: replayPlanFor(entry, sourceType) };
+          const hasRawEvents = this.segmentDirectoryFor(entry.id) !== null;
+          return { ...entry, sourceType, replayPlan: replayPlanFor(entry, sourceType, hasRawEvents) };
         }),
-        ...(this.codexSyncEnabled ? this.readCodexHistories() : []),
-      ].filter((entry) => !this.readHiddenSyncedIds().has(entry.id)),
+      ]
+        // An entry appears once it has been written. Showing the placeholder
+        // would put the mechanical wording in front of the reader, which is the
+        // thing the written summary exists to avoid. Rollups are machine
+        // generated too: read as "imported", they slipped past this gate and
+        // put a templated body on the timeline.
+        .filter((entry) => !isMachineSummary(entry.sourceType) || isNarrated(entry.markdown))
+        .filter((entry) => !isCodexSkysightCopy(entry.id))
+        .map((entry) => ({
+          ...entry,
+          pinned: this.isPinned(entry.id),
+          eventStreamPath: this.eventStreamPathFor(entry.id),
+        })),
+      // Pick the fields explicitly rather than spreading the directory entry: a
+      // workflow is not a summary, and spreading leaked summary-only fields
+      // into it the moment the reader grew new ones.
       workflows: this.readMarkdownDirectory(this.workflowDirectory).map((entry) => ({
-        ...entry,
+        id: entry.id,
+        title: entry.title,
+        createdAt: entry.createdAt,
+        markdown: entry.markdown,
+        filePath: entry.filePath,
         sourceHistoryId: nullableFrontmatterValue(entry.markdown, "source_history_id"),
       })),
       privacy: {
@@ -202,7 +425,7 @@ export class ComputerHistoryDemoService {
         audio: false,
         rawRetentionHours: 48,
         markdownDirectory: this.historyDirectory,
-        codexSyncDirectory: this.codexSyncEnabled ? this.codexHistoryDirectory : null,
+        eventStreamDirectory: this.segmentsDirectory,
       },
     };
   }
@@ -231,85 +454,370 @@ export class ComputerHistoryDemoService {
     });
   }
 
-  startCapture(title: string, startUrl = ""): ComputerHistorySnapshot {
-    if (this.capture) throw new ComputerHistoryApiError(409, "a capture is already running");
-    const recorder = path.join(this.repositoryRoot, "workflows", "scripts", "record-human-history.mjs");
-    if (!fs.existsSync(recorder)) throw new ComputerHistoryApiError(503, "recorder script is unavailable");
-    this.cleanupExpiredRecordings();
-    const startedAt = new Date().toISOString();
-    const safeTitle = cleanTitle(title || "Computer History demonstration");
-    const safeStartUrl = cleanCaptureUrl(startUrl);
-    const captureId = `${timestampForPath()}-${slug(safeTitle)}`;
-    const captureDirectory = path.join(this.recordingDirectory, captureId);
-    const eventsFile = path.join(captureDirectory, "events.jsonl");
-    const historyFile = path.join(this.historyDirectory, `${captureId}.md`);
-    const workflowCandidateFile = path.join(this.workflowDirectory, `${captureId}-candidate.md`);
-    fs.mkdirSync(captureDirectory, { recursive: true });
+  private segmentId(at: Date): string {
+    // Align segment ids to the ten-minute grid so their names sort and group
+    // the same way Codex's do, and so the rollup can parse them back.
+    return alignedId(at, SEGMENT_DURATION_MS);
+  }
+
+  private openSegment(): SegmentState {
+    const startedAt = new Date();
+    const id = this.segmentId(startedAt);
+    const directory = path.join(this.segmentsDirectory, id);
+    fs.mkdirSync(directory, { recursive: true });
     fs.mkdirSync(this.historyDirectory, { recursive: true });
     fs.mkdirSync(this.workflowDirectory, { recursive: true });
-    const recorderArguments = [
+    const eventsFile = path.join(directory, "events.jsonl");
+    const metadataFile = path.join(directory, "metadata.json");
+    fs.writeFileSync(
+      metadataFile,
+      `${JSON.stringify({ id, startedAt: startedAt.toISOString(), eventsPath: eventsFile }, null, 2)}\n`,
+      "utf8",
+    );
+    return {
+      child: null,
+      id,
+      directory,
+      startedAt: startedAt.toISOString(),
+      eventsFile,
+      metadataFile,
+      historyFile: path.join(this.historyDirectory, `${id}-10min-summary.md`),
+      output: "",
+    };
+  }
+
+  private spawnRecorder(segment: SegmentState): void {
+    const recorder = path.join(this.repositoryRoot, "workflows", "scripts", "record-human-history.mjs");
+    if (!fs.existsSync(recorder)) throw new ComputerHistoryApiError(503, "recorder script is unavailable");
+    const child = spawn(process.execPath, [
       recorder,
-      "--title", safeTitle,
-      "--out", eventsFile,
+      "--title", `Computer History ${segment.id}`,
+      "--out", segment.eventsFile,
       "--no-screenshots",
       "--capture-search-text",
-      "--only-app", "com.google.Chrome",
-      "--only-app", "com.apple.Safari",
-      "--only-app", "com.apple.Notes",
-      "--only-app", "com.tencent.xinWeChat",
-      "--only-app", "notion.id",
-      "--only-app", "com.notion.id",
-    ];
-    if (safeStartUrl) recorderArguments.push("--context-url", safeStartUrl);
-    const child = spawn(process.execPath, recorderArguments, {
+      // The recorder evaluates the policy per event, because the website axis
+      // depends on the URL each event carries.
+      "--observation-settings", this.observationSettings.filePath,
+    ], {
       cwd: this.repositoryRoot,
       env: process.env,
       stdio: ["pipe", "pipe", "pipe"],
     });
-    this.capture = {
-      child,
-      title: safeTitle,
-      startUrl: safeStartUrl,
-      startedAt,
-      eventsFile,
-      historyFile,
-      workflowCandidateFile,
-      output: "",
-    };
-    this.captureStatus = "recording";
-    this.captureError = null;
-    this.startLiveSummaryTimer();
+    segment.child = child;
+
     const append = (chunk: Buffer) => {
-      if (this.capture?.child !== child) return;
-      this.capture.output = appendLog(this.capture.output, chunk.toString("utf8"));
+      if (this.segment?.child !== child) return;
+      this.segment.output = appendLog(this.segment.output, chunk.toString("utf8"));
     };
     child.stdout.on("data", append);
     child.stderr.on("data", append);
     child.once("error", (error) => {
-      if (this.capture?.child !== child) return;
-      this.clearLiveSummaryTimer();
-      this.captureError = error.message;
-      this.captureStatus = "failed";
-      this.capture = null;
+      if (this.segment?.child !== child) return;
+      this.failObservation(error.message);
     });
     child.once("exit", (code) => {
-      if (this.capture?.child !== child || this.captureStatus === "stopping") return;
-      this.clearLiveSummaryTimer();
-      this.writeLiveSummary(this.capture);
-      this.captureError = code === 0 ? null : this.capture.output.trim() || `recorder exited with code ${code}`;
-      this.captureStatus = code === 0 ? "idle" : "failed";
-      this.capture = null;
+      if (this.segment?.child !== child) return;
+      // Pausing, rotating and stopping all detach the child first, so reaching
+      // here means the recorder died on its own.
+      if (this.observationState !== "running") return;
+      this.failObservation(this.segment.output.trim() || `recorder exited with code ${code}`);
     });
+  }
+
+  private failObservation(message: string): void {
+    this.clearLiveSummaryTimer();
+    this.clearRotationTimer();
+    if (this.segment) this.segment.child = null;
+    this.observationError = message;
+    this.observationState = "failed";
+  }
+
+  private clearRotationTimer(): void {
+    if (this.rotationTimer) clearInterval(this.rotationTimer);
+    this.rotationTimer = null;
+  }
+
+  private startRotationTimer(): void {
+    this.clearRotationTimer();
+    this.rotationTimer = setInterval(() => {
+      if (this.observationState !== "running") return;
+      this.rotateSegment();
+    }, SEGMENT_DURATION_MS);
+  }
+
+  private async detachRecorder(segment: SegmentState): Promise<void> {
+    const child = segment.child;
+    if (!child) return;
+    segment.child = null;
+    child.kill("SIGTERM");
+    await waitForExit(child, 8_000);
+  }
+
+  /**
+   * Summarizes a closed segment and leaves it behind as searchable history.
+   *
+   * A segment narrated while it was open already stands on the timeline, and
+   * regenerating it in place would put the placeholder back over that account
+   * until the model caught up — an entry that blinks out and returns, or, if
+   * the model is unreachable, never returns at all. So the fuller summary is
+   * built beside the standing one and swapped in only once it is written.
+   * Nothing on disk ever says less than it did a moment ago.
+   */
+  private async finalizeSegment(segment: SegmentState): Promise<void> {
+    if (!fs.existsSync(segment.eventsFile) || !fs.statSync(segment.eventsFile).size) return;
+    const standing = isSummaryWritten(segment.historyFile);
+    const staging = `${segment.historyFile}.staging`;
+    // A previous run may have been killed between writing and swapping.
+    fs.rmSync(staging, { force: true });
+    const destination = standing ? staging : segment.historyFile;
+    const error = this.writeSegmentSummary(segment, destination);
+    if (error) {
+      this.observationError = error;
+      fs.rmSync(staging, { force: true });
+      return;
+    }
+    this.narratedOpenSegments.delete(segment.id);
+    // Narrating a staged copy must still be narrating *this* summary: prior
+    // context is selected by name, and the segment id sorts differently.
+    const summaryId = path.basename(segment.historyFile, ".md");
+    const written = await this.writeSummaryWith(destination, "10min", segment.eventsFile, summaryId);
+    if (standing) {
+      if (written) fs.renameSync(staging, segment.historyFile);
+      else fs.rmSync(staging, { force: true });
+    }
+    this.writeSixHourRollup(segment.id);
+  }
+
+  /**
+   * Rewrites a finished summary's title and description with a model-written
+   * account of the window.
+   *
+   * Deliberately fire-and-forget: the mechanical summary is already on disk, so
+   * a slow or unreachable model delays the better wording, never the recording.
+   */
+  private narrateSummary(file: string, window: "10min" | "6h", eventsFile: string | null): void {
+    void this.writeSummaryWith(file, window, eventsFile);
+  }
+
+  /** The narration itself, awaitable so a backfill can pace itself. */
+  private async writeSummaryWith(
+    file: string,
+    window: "10min" | "6h",
+    eventsFile: string | null,
+    summaryId?: string,
+  ): Promise<boolean> {
+    const llmRuntime = this.llmRuntime;
+    if (!llmRuntime) return false;
+    let markdown: string;
+    try {
+      markdown = fs.readFileSync(file, "utf8");
+    } catch {
+      return false;
+    }
+    // A segment is narrated from its own event stream, compacted into activity
+    // arcs. A rollup has no stream of its own and is narrated from the
+    // ten-minute summaries it already gathered.
+    let evidence = markdown.replace(/^---\n[\s\S]*?\n---\n/u, "");
+    if (eventsFile) {
+      try {
+        const compacted = compactEventEvidence(fs.readFileSync(eventsFile, "utf8").split("\n"));
+        if (compacted) evidence = compacted;
+      } catch {
+        // Fall back to the mechanical summary body.
+      }
+    }
+    const narrative = await writeSegmentNarrative(llmRuntime, {
+      applications: applicationsFromMarkdown(markdown),
+      evidence,
+      window,
+      priorSummaries: this.priorSummaries(summaryId ?? path.basename(file, ".md")),
+      onError: (reason) => {
+        // Narration is best effort, but a silent no-op is indistinguishable
+        // from a feature that was never wired, so say why it produced nothing.
+        this.narrationError = reason;
+        console.warn(`[computer-history] summary narration skipped: ${reason}`);
+      },
+    });
+    if (!narrative) return false;
+    this.narrationError = null;
+    try {
+      // Re-read: a rollup may have rewritten the file while the model ran.
+      fs.writeFileSync(file, applyNarrative(fs.readFileSync(file, "utf8"), narrative), "utf8");
+      return true;
+    } catch {
+      // Losing the better wording is acceptable; the summary itself stands.
+      return false;
+    }
+  }
+
+  /** Rebuilds the six-hour summary covering the segment that just closed. */
+  private writeSixHourRollup(segmentId: string): void {
+    const at = instantFromId(segmentId);
+    if (!at) return;
+    const windowStart = new Date(Math.floor(at.getTime() / SIX_HOUR_MS) * SIX_HOUR_MS);
+    let names: string[];
+    try {
+      names = fs.readdirSync(this.historyDirectory);
+    } catch {
+      return;
+    }
+    const summaries = names
+      .filter((name) => name.endsWith(".md") && name.includes("-10min-"))
+      .map((name) => ({
+        name,
+        markdown: fs.readFileSync(path.join(this.historyDirectory, name), "utf8"),
+      }));
+    const rollup = buildSixHourSummary(summaries, windowStart);
+    if (!rollup) return;
+    const rollupFile = path.join(this.historyDirectory, rollup.fileName);
+    fs.writeFileSync(rollupFile, rollup.markdown, "utf8");
+    this.narrateSummary(rollupFile, "6h", null);
+  }
+
+  private rotateSegment(): void {
+    const previous = this.segment;
+    if (!previous) return;
+    void this.detachRecorder(previous).then(() => {
+      // Not awaited: the entry already on the timeline stays right while the
+      // model writes the fuller one, so nothing is held up waiting for it.
+      void this.finalizeSegment(previous);
+      if (this.observationState !== "running") return;
+      const next = this.openSegment();
+      this.segment = next;
+      try {
+        this.spawnRecorder(next);
+      } catch (error) {
+        this.failObservation(error instanceof Error ? error.message : String(error));
+      }
+    });
+  }
+
+  startObservation(): ComputerHistorySnapshot {
+    if (this.observationState === "running") {
+      throw new ComputerHistoryApiError(409, "Computer History is already running");
+    }
+    this.ensureObservationSettings();
+    this.assertObservesSomething();
+    this.cleanupExpiredRecordings();
+    const segment = this.segment ?? this.openSegment();
+    this.segment = segment;
+    this.observationStartedAt ??= new Date().toISOString();
+    this.observationError = null;
+    this.observationState = "running";
+    try {
+      this.spawnRecorder(segment);
+    } catch (error) {
+      this.failObservation(error instanceof Error ? error.message : String(error));
+      throw error;
+    }
+    this.startLiveSummaryTimer();
+    this.startRotationTimer();
     return this.snapshot();
+  }
+
+  /**
+   * Makes the policy an explicit document before the recorder reads it.
+   *
+   * Writing the defaults out on first start means the recorder parses one
+   * unambiguous file instead of inferring a policy from a missing one, and it
+   * gives the user something to edit. A file that exists but does not parse is
+   * an error state rather than a policy, so it stops the start instead of
+   * falling back to something they did not choose.
+   */
+  private ensureObservationSettings(): void {
+    const file = this.observationSettings.filePath;
+    if (!fs.existsSync(file)) {
+      this.observationSettings.write(DEFAULT_OBSERVATION_SETTINGS);
+      return;
+    }
+    try {
+      parseObservationSettings(JSON.parse(fs.readFileSync(file, "utf8")));
+    } catch (error) {
+      throw new ComputerHistoryApiError(
+        400,
+        `Computer History settings at ${file} are not valid: `
+          + `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  /**
+   * Refuses to start when the policy would record nothing.
+   *
+   * The default observes everything, so this only fires for someone who
+   * deliberately switched to an allowlist and then left it empty. Starting
+   * anyway would look like it was recording while producing empty segments,
+   * so say what is missing instead.
+   */
+  private assertObservesSomething(): void {
+    const { observation } = this.observationSettings.read();
+    if (observation.defaultApplicationBehavior === "observe") return;
+    const allowsAnyApp = observation.rules.some(
+      (rule) => rule.scope === "app" && rule.behavior === "observe",
+    );
+    if (allowsAnyApp) return;
+    throw new ComputerHistoryApiError(
+      400,
+      "Computer History observes nothing yet: allow at least one application, "
+        + `or set defaultApplicationBehavior to "observe", in ${this.observationSettings.filePath}`,
+    );
+  }
+
+  /** Keeps the current segment but stops writing to it. */
+  async pauseObservation(): Promise<ComputerHistorySnapshot> {
+    if (this.observationState !== "running") {
+      throw new ComputerHistoryApiError(409, "Computer History is not running");
+    }
+    this.clearLiveSummaryTimer();
+    this.clearRotationTimer();
+    if (this.segment) await this.detachRecorder(this.segment);
+    this.observationState = "paused";
+    return this.snapshot();
+  }
+
+  resumeObservation(): ComputerHistorySnapshot {
+    if (this.observationState !== "paused") {
+      throw new ComputerHistoryApiError(409, "Computer History is not paused");
+    }
+    return this.startObservation();
+  }
+
+  async stopObservation(): Promise<ComputerHistorySnapshot> {
+    if (this.observationState === "stopped") {
+      throw new ComputerHistoryApiError(409, "Computer History is not running");
+    }
+    const segment = this.segment;
+    this.observationState = "stopping";
+    this.clearLiveSummaryTimer();
+    this.clearRotationTimer();
+    if (segment) {
+      await this.detachRecorder(segment);
+      // Stopping should not wait on the model; the swap happens when it lands.
+      void this.finalizeSegment(segment);
+    }
+    this.segment = null;
+    this.observationStartedAt = null;
+    this.observationState = "stopped";
+    return this.snapshot();
+  }
+
+  /** Called when the desktop app exits: recording does not outlive the app. */
+  async shutdown(): Promise<void> {
+    if (this.observationState === "stopped") return;
+    try {
+      await this.stopObservation();
+    } catch {
+      // Shutdown is best effort; a failed segment must not block app exit.
+    }
   }
 
   private startLiveSummaryTimer(): void {
     this.clearLiveSummaryTimer();
     this.liveSummarySignature = null;
     this.liveSummaryTimer = setInterval(() => {
-      const capture = this.capture;
-      if (!capture || this.captureStatus !== "recording") return;
-      this.writeLiveSummary(capture);
+      const segment = this.segment;
+      if (!segment || this.observationState !== "running") return;
+      this.writeLiveSummary(segment);
     }, this.liveSummaryIntervalMs);
   }
 
@@ -319,118 +827,158 @@ export class ComputerHistoryDemoService {
     this.liveSummarySignature = null;
   }
 
-  private writeLiveSummary(capture: CaptureState): void {
-    if (!fs.existsSync(capture.eventsFile)) return;
+  private writeLiveSummary(segment: SegmentState): void {
+    if (!fs.existsSync(segment.eventsFile)) return;
+    // Leave a written summary alone for the rest of the segment. The mechanical
+    // pass rewrites the whole file, so running it again would put the
+    // placeholder back over the account; and because narration runs once per
+    // open segment, nothing would rewrite it until the segment closed. The
+    // entry would appear, then vanish from the timeline on the next tick.
+    // Closing the segment regenerates and narrates it with the full window.
+    if (isSummaryWritten(segment.historyFile)) return;
     let stat: fs.Stats;
     try {
-      stat = fs.statSync(capture.eventsFile);
+      stat = fs.statSync(segment.eventsFile);
     } catch {
       return;
     }
     const signature = `${stat.size}:${stat.mtimeMs}`;
     if (!stat.size || signature === this.liveSummarySignature) return;
-    const error = this.writeCaptureSummary(capture);
-    if (!error) this.liveSummarySignature = signature;
+    const error = this.writeSegmentSummary(segment);
+    if (error) return;
+    this.liveSummarySignature = signature;
+
+    // Narrate an open segment once it has enough to say. Waiting for the
+    // segment to close left the entry reading mechanically for the whole ten
+    // minutes someone is most likely to look at it.
+    if (stat.size >= LIVE_NARRATION_MIN_BYTES && !this.narratedOpenSegments.has(segment.id)) {
+      this.narratedOpenSegments.add(segment.id);
+      this.narrateSummary(segment.historyFile, "10min", segment.eventsFile);
+    }
   }
 
-  private writeCaptureSummary(capture: CaptureState): string | null {
+  private writeSegmentSummary(segment: SegmentState, destination = segment.historyFile): string | null {
     const summarizer = path.join(this.repositoryRoot, "workflows", "scripts", "summarize-history.mjs");
     const result = spawnSync(process.execPath, [
       summarizer,
-      "--file", capture.eventsFile,
-      "--out", capture.historyFile,
-      "--title", capture.title,
+      "--file", segment.eventsFile,
+      "--out", destination,
+      "--title", `Computer History ${segment.id}`,
     ], { cwd: this.repositoryRoot, encoding: "utf8", timeout: 30_000 });
-    if (result.status !== 0 || !fs.existsSync(capture.historyFile)) {
+    if (result.status !== 0 || !fs.existsSync(destination)) {
       return String(result.stderr || result.stdout || "failed to distill captured events").trim();
     }
-    const markdown = fs.readFileSync(capture.historyFile, "utf8")
+    const markdown = fs.readFileSync(destination, "utf8")
       .replace(/^source_type:\s*human_computer_history\s*$/m, "source_type: captured")
       .replace(/^---\n/, "---\ncapture_policy: accessibility_events_and_page_urls_no_screenshots\n");
-    fs.writeFileSync(capture.historyFile, markdown, "utf8");
-    this.writeWorkflowCandidate(capture);
+    fs.writeFileSync(destination, markdown, "utf8");
     return null;
   }
 
-  private writeWorkflowCandidate(capture: CaptureState): void {
-    const extractor = path.join(this.repositoryRoot, "workflows", "scripts", "extract-workflow-candidate.mjs");
-    if (!fs.existsSync(extractor)) return;
-    const historyTitle = fs.existsSync(capture.historyFile)
-      ? readFrontmatterValue(fs.readFileSync(capture.historyFile, "utf8"), "title") ?? capture.title
-      : capture.title;
-    const result = spawnSync(process.execPath, [
-      extractor,
-      "--file", capture.eventsFile,
-      "--out", capture.workflowCandidateFile,
-      "--title", historyTitle,
-      "--source-history-id", path.basename(capture.historyFile, ".md"),
-    ], { cwd: this.repositoryRoot, encoding: "utf8", timeout: 30_000 });
-    if (result.status !== 0 && result.status !== 2) {
-      this.captureError = String(result.stderr || result.stdout || "failed to derive workflow candidate").trim();
-    }
+
+
+  /** Resolves the segment directory a summary came from, if it still exists. */
+  private segmentDirectoryFor(historyId: string): string | null {
+    const segmentId = historyId.replace(/-(?:10min|6h)-summary$/u, "");
+    const directory = path.join(this.segmentsDirectory, segmentId);
+    return fs.existsSync(directory) ? directory : null;
   }
 
-  async stopCapture(): Promise<ComputerHistorySnapshot> {
-    const capture = this.capture;
-    if (!capture) throw new ComputerHistoryApiError(409, "no capture is running");
-    this.captureStatus = "stopping";
-    this.clearLiveSummaryTimer();
-    capture.child.kill("SIGTERM");
-    const exitCode = await waitForExit(capture.child, 8_000);
-    if (exitCode !== 0 || !fs.existsSync(capture.eventsFile)) {
-      this.captureError = capture.output.trim() || `recorder exited with code ${exitCode}`;
-      this.captureStatus = "failed";
-      this.capture = null;
-      throw new ComputerHistoryApiError(500, this.captureError);
+  /** The segment's event stream, or null once it has passed retention. */
+  private eventStreamPathFor(historyId: string): string | null {
+    const directory = this.segmentDirectoryFor(historyId);
+    if (!directory) return null;
+    const file = path.join(directory, "events.jsonl");
+    return fs.existsSync(file) ? file : null;
+  }
+
+  private isPinned(historyId: string): boolean {
+    const directory = this.segmentDirectoryFor(historyId);
+    return directory !== null && fs.existsSync(path.join(directory, PIN_MARKER));
+  }
+
+  /**
+   * Keeps a segment's raw events past the retention window.
+   *
+   * Retention exists so a recording of an ordinary afternoon does not live
+   * forever, but occasionally a window is worth keeping as the source for a
+   * workflow. Pinning is that exception, and it is deliberately explicit.
+   */
+  pinSegment(historyId: string, pinned: boolean): ComputerHistorySnapshot {
+    const directory = this.segmentDirectoryFor(historyId.trim());
+    if (!directory) {
+      throw new ComputerHistoryApiError(
+        404,
+        "the raw events for this entry are no longer on disk, so there is nothing to pin",
+      );
     }
-    const summaryError = this.writeCaptureSummary(capture);
-    if (summaryError) {
-      this.captureError = summaryError;
-      this.captureStatus = "failed";
-      this.capture = null;
-      throw new ComputerHistoryApiError(500, this.captureError);
-    }
-    this.capture = null;
-    this.captureStatus = "idle";
-    this.captureError = null;
+    const marker = path.join(directory, PIN_MARKER);
+    if (pinned) fs.writeFileSync(marker, "", "utf8");
+    else fs.rmSync(marker, { force: true });
     return this.snapshot();
+  }
+
+  /**
+   * Derives replayable steps from a segment's own event stream, on demand.
+   *
+   * This used to run for every segment at capture time, which produced a
+   * candidate for every ten-minute slice of the day. A window boundary has
+   * nothing to do with a task boundary, so almost all of them were noise.
+   * Deriving on request means it happens when someone actually wants to repeat
+   * something.
+   */
+  private deriveSteps(historyId: string): string[] {
+    const directory = this.segmentDirectoryFor(historyId);
+    if (!directory) return [];
+    const eventsFile = path.join(directory, "events.jsonl");
+    if (!fs.existsSync(eventsFile)) return [];
+    const extractor = path.join(this.repositoryRoot, "workflows", "scripts", "extract-workflow-candidate.mjs");
+    if (!fs.existsSync(extractor)) return [];
+    const target = path.join(directory, "candidate.md");
+    const result = spawnSync(process.execPath, [
+      extractor,
+      "--file", eventsFile,
+      "--out", target,
+      "--title", historyId,
+      "--source-history-id", historyId,
+    ], { cwd: this.repositoryRoot, encoding: "utf8", timeout: 30_000 });
+    if (result.status !== 0 || !fs.existsSync(target)) return [];
+    return extractCandidateSteps(fs.readFileSync(target, "utf8"));
   }
 
   deleteHistory(historyId: string): ComputerHistorySnapshot {
     const history = this.findHistory(historyId.trim());
-    if (history.sourceType === "codex_synced") {
-      const hidden = this.readHiddenSyncedIds();
-      hidden.add(history.id);
-      this.writeHiddenSyncedIds(hidden);
-      return this.snapshot();
-    }
     const derivedWorkflows = this.snapshot().workflows.filter((workflow) => workflow.sourceHistoryId === history.id);
     fs.rmSync(history.filePath, { force: true });
     for (const workflow of derivedWorkflows) fs.rmSync(workflow.filePath, { force: true });
-    fs.rmSync(path.join(this.recordingDirectory, history.id), { recursive: true, force: true });
+    // Segments moved under `segments/`; the id also carries the summary suffix.
+    fs.rmSync(this.segmentDirectoryFor(history.id) ?? path.join(this.recordingDirectory, history.id), {
+      recursive: true,
+      force: true,
+    });
     return this.snapshot();
   }
 
   createWorkflow(historyId: string, userRequest = ""): ComputerHistorySnapshot {
     const history = this.findHistory(historyId);
     const request = cleanUserRequest(userRequest || "帮我把妈妈之前说的那台 iPhone 配好，加入购物袋就停，不要结账或支付。");
-    if (history.sourceType === "captured" || history.sourceType === "codex_synced") {
+    if (history.sourceType === "captured") {
       if (history.sourceType === "captured" && readFrontmatterValue(history.markdown, "status") !== "completed") {
         throw new ComputerHistoryApiError(422, "the selected operation-experience recording is incomplete");
       }
       if (history.sourceType === "captured" && readFrontmatterValue(history.markdown, "experience_version") !== "1") {
         throw new ComputerHistoryApiError(422, "the selected recording does not contain reusable semantic operation experience");
       }
-      const candidate = this.snapshot().workflows.find((workflow) => (
-        workflow.sourceHistoryId === history.id
-        && readFrontmatterValue(workflow.markdown, "kind") === "computer_use_workflow_candidate"
-      ));
-      const steps = normalizeRecordedExperienceSteps(
-        extractCandidateSteps(candidate?.markdown ?? "")
-          .concat(candidate ? [] : extractReusableExperienceSteps(history.markdown)),
-      );
+      const steps = normalizeRecordedExperienceSteps(this.deriveSteps(history.id));
       if (!steps.length) {
-        throw new ComputerHistoryApiError(422, "the selected recording contains no reusable semantic action");
+        // Distinguish "nothing repeatable happened" from "the evidence is gone",
+        // because only the second one is the user's to prevent next time.
+        throw new ComputerHistoryApiError(
+          422,
+          this.segmentDirectoryFor(history.id)
+            ? "the selected recording contains no reusable semantic action"
+            : "the raw events for this entry passed the retention window; pin a segment to keep its events for later",
+        );
       }
       const id = `${timestampForPath()}-recorded-operation-experience-computer-use`;
       const markdown = buildRecordedExperienceWorkflow({ history, request, steps });
@@ -459,8 +1007,11 @@ export class ComputerHistoryDemoService {
 
   searchHistories(query: string, limit = 5): ComputerHistoryMatch[] {
     const terms = queryTerms(query);
+    // Searching is evidence retrieval, not replay selection. Filtering by
+    // replayability meant an entry vanished from search the moment its raw
+    // events expired — exactly when the written summary is all that is left and
+    // the only thing that can still answer "what was I doing".
     return this.snapshot().histories
-      .filter(historySupportsReplay)
       .map((history) => {
         const title = searchableText(history.title);
         const markdown = searchableText(history.markdown);
@@ -497,9 +1048,7 @@ export class ComputerHistoryDemoService {
       candidate.sourceHistoryId === history.id && !existingWorkflowIds.has(candidate.id)
     ));
     if (!workflow) throw new ComputerHistoryApiError(500, "workflow generation did not produce an artifact");
-    const steps = history.sourceType === "captured" || history.sourceType === "codex_synced"
-      ? normalizeRecordedExperienceSteps(extractReusableExperienceSteps(history.markdown))
-      : extractWorkflowRecordedActions(workflow.markdown);
+    const steps = extractWorkflowRecordedActions(workflow.markdown);
     return { history, workflow, snapshot: afterWorkflow, steps };
   }
 
@@ -587,10 +1136,24 @@ export class ComputerHistoryDemoService {
         const filePath = path.join(directory, entry.name);
         const markdown = fs.readFileSync(filePath, "utf8");
         const stat = fs.statSync(filePath);
+        const id = entry.name.slice(0, -3);
         return {
-          id: entry.name.slice(0, -3),
-          title: readFrontmatterValue(markdown, "title") || entry.name.slice(0, -3),
-          createdAt: readFrontmatterValue(markdown, "captured_at") || stat.mtime.toISOString(),
+          id,
+          title: readFrontmatterValue(markdown, "title") || id,
+          description: nullableFrontmatterValue(markdown, "description"),
+          applications: applicationsFromMarkdown(markdown),
+          pinned: false,
+          summaryWindow: id.endsWith("-10min-summary")
+            ? ("10min" as const)
+            : id.endsWith("-6h-summary")
+              ? ("6h" as const)
+              : null,
+          // When the window happened, not when its file was last touched.
+          // A summary is rewritten every time it is regenerated and narrated,
+          // so mtime walks forward as the model catches up — which made an
+          // entry appear to vanish and a new one take its place, and sorted
+          // rollups into the middle of the segments they cover.
+          createdAt: entryInstant(id, markdown, stat.mtime),
           markdown,
           filePath,
         };
@@ -598,85 +1161,65 @@ export class ComputerHistoryDemoService {
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
   }
 
-  private readCodexHistories(): ComputerHistoryEntry[] {
-    const resourcesDirectory = path.join(this.codexHistoryDirectory, "resources");
-    return [
-      ...this.readMarkdownDirectory(this.codexHistoryDirectory),
-      ...this.readMarkdownDirectory(resourcesDirectory),
-    ]
-      .filter((entry) => isCodexComputerHistoryMarkdown(entry.markdown))
-      .map((entry) => ({
-        ...entry,
-        id: `codex-${hashText(entry.filePath).slice(0, 16)}`,
-        sourceType: "codex_synced" as const,
-        replayPlan: replayPlanFor(entry, "codex_synced"),
-      }));
-  }
-
-  private readHiddenSyncedIds(): Set<string> {
-    if (!fs.existsSync(this.syncStateFile)) return new Set();
-    try {
-      const parsed = JSON.parse(fs.readFileSync(this.syncStateFile, "utf8"));
-      return new Set(Array.isArray(parsed?.hiddenSyncedIds)
-        ? parsed.hiddenSyncedIds.filter((value: unknown): value is string => typeof value === "string")
-        : []);
-    } catch {
-      return new Set();
-    }
-  }
-
-  private writeHiddenSyncedIds(ids: Set<string>): void {
-    fs.mkdirSync(path.dirname(this.syncStateFile), { recursive: true });
-    fs.writeFileSync(this.syncStateFile, `${JSON.stringify({ hiddenSyncedIds: [...ids].sort() }, null, 2)}\n`, "utf8");
-  }
-
+  /**
+   * Drops raw event streams past the retention window.
+   *
+   * Segments live one level down, under `segments/`, so the container itself is
+   * never a candidate: judging it by its own mtime meant it stayed fresh as
+   * long as recording continued and nothing inside was ever cleaned, then
+   * expired as a whole once recording stopped for long enough. Each segment is
+   * judged on its own age instead, and the open one is left alone because it is
+   * still being written to.
+   */
   private cleanupExpiredRecordings(): void {
     if (!fs.existsSync(this.recordingDirectory)) return;
     const cutoff = Date.now() - RAW_RETENTION_MS;
-    for (const entry of fs.readdirSync(this.recordingDirectory, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue;
-      const candidate = path.join(this.recordingDirectory, entry.name);
-      if (fs.statSync(candidate).mtimeMs < cutoff) fs.rmSync(candidate, { recursive: true, force: true });
-    }
+    const openSegmentId = this.segment?.id ?? null;
+
+    const expire = (directory: string, isOpen: (name: string) => boolean): void => {
+      if (!fs.existsSync(directory)) return;
+      for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+        if (!entry.isDirectory() || isOpen(entry.name)) continue;
+        const target = path.join(directory, entry.name);
+        if (fs.existsSync(path.join(target, PIN_MARKER))) continue;
+        try {
+          if (segmentAgeMs(target) < cutoff) fs.rmSync(target, { recursive: true, force: true });
+        } catch {
+          // A segment removed by another pass is already in the desired state.
+        }
+      }
+    };
+
+    expire(this.segmentsDirectory, (name) => name === openSegmentId);
+    // Recordings captured before segments existed still sit at the top level.
+    expire(this.recordingDirectory, (name) => name === SEGMENTS_DIRECTORY_NAME);
   }
 }
 
-function extractReusableExperienceSteps(markdown: string): string[] {
-  const heading = markdown.match(/^## Reusable operation experience\s*$/mu);
-  if (!heading || heading.index === undefined) return [];
-  const remainder = markdown.slice(heading.index + heading[0].length);
-  const nextHeading = remainder.search(/^##\s/mu);
-  const section = nextHeading >= 0 ? remainder.slice(0, nextHeading) : remainder;
-  return section
-    .split("\n")
-    .map((line) => line.match(/^\s*\d+\.\s+(.+?)\s*$/u)?.[1] ?? "")
-    .filter(Boolean)
-    .slice(0, 80);
-}
 
 function hashText(value: string): string {
   return crypto.createHash("sha256").update(value).digest("hex");
 }
 
-function isCodexComputerHistoryMarkdown(markdown: string): boolean {
-  const sourceType = readFrontmatterValue(markdown, "source_type");
-  // Do not re-import legacy Memmy captures that were copied into the Codex
-  // directory. Native Codex summaries have no source_type and start with a
-  // Memory summary section; explicitly marked human histories remain valid.
-  if (sourceType && sourceType !== "human_computer_history") return false;
-  return sourceType === "human_computer_history"
-    || /^## Memory summary\s*$/mu.test(markdown)
-    || /^## Reusable operation experience\s*$/mu.test(markdown)
-    || /^capture_policy:\s*accessibility_events_and_page_urls/imu.test(markdown);
-}
 
-function replayPlanFor(entry: MarkdownEntry, sourceType: ComputerHistorySourceType): ComputerHistoryReplayPlan | null {
-  if (sourceType !== "captured" && sourceType !== "codex_synced") return null;
-  const steps = normalizeRecordedExperienceSteps(extractReusableExperienceSteps(entry.markdown));
+/**
+ * Reports whether an entry can still be turned into a workflow.
+ *
+ * Steps are derived from the raw event stream on demand, so what decides this
+ * is whether that stream is still on disk, not whether the summary happens to
+ * contain a section listing actions.
+ */
+function replayPlanFor(
+  entry: MarkdownEntry,
+  sourceType: ComputerHistorySourceType,
+  hasRawEvents: boolean,
+): ComputerHistoryReplayPlan | null {
+  if (sourceType !== "captured") return null;
+  const steps: string[] = [];
   return {
     sourcePath: entry.filePath,
     sourceHash: hashText(entry.markdown),
-    status: steps.length ? "ready" : "not_replayable",
+    status: hasRawEvents ? "ready" : "not_replayable",
     steps,
     variables: [...entry.markdown.matchAll(/\{\{\s*([^}]+?)\s*\}\}/gu)].map((match) => match[1].trim()),
   };
@@ -732,13 +1275,10 @@ function historySupportsReplay(history: ComputerHistoryEntry): boolean {
   if (history.sourceType === "demo_fixture") {
     return readFrontmatterValue(history.markdown, "demo_id") === "wechat_mom_iphone";
   }
-  if (history.sourceType === "codex_synced") {
-    return extractReusableExperienceSteps(history.markdown).length > 0;
-  }
   return history.sourceType === "captured"
     && readFrontmatterValue(history.markdown, "status") === "completed"
     && readFrontmatterValue(history.markdown, "experience_version") === "1"
-    && extractReusableExperienceSteps(history.markdown).length > 0;
+    && history.replayPlan?.status === "ready";
 }
 
 const QUERY_STOP_TERMS = new Set([
@@ -875,7 +1415,7 @@ function ensureHistoryFrontmatter(markdown: string, input: { title: string; sour
 
 function readSourceType(markdown: string): ComputerHistorySourceType {
   const value = readFrontmatterValue(markdown, "source_type");
-  if (value === "captured" || value === "demo_fixture") return value;
+  if (value === "captured" || value === "rollup" || value === "demo_fixture") return value;
   return "imported";
 }
 
