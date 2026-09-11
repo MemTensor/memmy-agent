@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { renderWorkflowCandidate } from "./extract-workflow-candidate.mjs";
+import { test } from "vitest";
+import { renderWorkflowCandidate } from "../../../src/tools/computer-use/extract-workflow-candidate.js";
 
 test("renders a separate semantic Workflow Candidate from human events", async () => {
   const markdown = renderWorkflowCandidate({
@@ -13,6 +13,7 @@ test("renders a separate semantic Workflow Candidate from human events", async (
     ],
   });
 
+  assert.ok(markdown, "a recording with a labelled click yields a candidate");
   assert.match(markdown, /kind: computer_use_workflow_candidate/);
   assert.match(markdown, /source_history_id: "history-1"/);
   assert.match(markdown, /## Semantic steps/);

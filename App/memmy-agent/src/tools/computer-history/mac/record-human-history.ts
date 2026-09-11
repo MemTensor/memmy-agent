@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 // Explicitly record one human-operated macOS workflow as a small, local JSONL
 // event stream. This is a demo recorder, not a background activity monitor.
 
@@ -11,17 +10,76 @@ import readline from "node:readline";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
+/** A line from the Swift helper. Its fields depend on `kind`. */
+type HelperEvent = Record<string, any>;
+
+interface Application {
+  name?: string;
+  bundleId?: string;
+}
+
+export interface RecorderArgs {
+  allowApps: string[];
+  onlyApps: string[];
+  captureText: boolean;
+  captureSearchText: boolean;
+  screenshots: boolean;
+  title?: string;
+  out?: string;
+  recordingsDir?: string;
+  contextUrl?: string;
+  observationSettings?: string;
+  help?: boolean;
+}
+
+interface SearchInputContext {
+  purpose: "search_query";
+  role: string;
+  label: string;
+}
+
+interface ObservationRule {
+  scope?: string;
+  behavior?: string;
+  bundleID?: string;
+  urlDomain?: string;
+}
+
+interface RecorderObservationSettings {
+  defaultApplicationBehavior: string;
+  defaultURLBehavior: string;
+  rules: ObservationRule[];
+}
+
+interface NormalizedEvent {
+  eventType: string;
+  application: Application;
+  details: Record<string, unknown>;
+}
+
+interface RecorderPermissions {
+  inputMonitoring: boolean;
+  screenRecording: boolean;
+  accessibility: boolean;
+  mainDisplayWidth: number;
+  mainDisplayHeight: number;
+}
+
 const execFileAsync = promisify(execFile);
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
-const ROOT_DIR = path.resolve(SCRIPT_DIR, "..", "..");
+// The build copies the Swift source beside the compiled module, so the helper
+// is found the same way from `src/` under test and from `dist/` when shipped.
 const HELPER_SOURCE = path.join(SCRIPT_DIR, "human-recorder.swift");
-const DEFAULT_RECORDINGS_DIR = path.join(ROOT_DIR, "workflows", "recordings");
+// Where the service keeps recordings. This was once resolved against the
+// repository root, which a packaged app does not have.
+const DEFAULT_RECORDINGS_DIR = path.join(os.homedir(), ".memmy", "computer-history", "recordings");
+const BROWSER_BUNDLE_IDS = new Set(["com.google.Chrome", "com.apple.Safari"]);
 const TEXT_IDLE_MS = 700;
 const NAVIGATION_SETTLE_MS = 900;
 
-function usage() {
+function usage(): void {
   console.log(`Usage:
-  node workflows/scripts/record-human-history.mjs [options]
+  node dist/tools/computer-history/mac/record-human-history.js [options]
 
 Options:
   --title <text>          recording goal shown in the History Markdown
@@ -39,14 +97,20 @@ Press control+option+cmd+r while the result remains visible to stop and capture 
 Returning to this terminal and pressing Enter (or Ctrl+C) is also supported.`);
 }
 
-function expandHome(value) {
+function expandHome(value: string): string {
   if (value === "~") return os.homedir();
   if (value.startsWith("~/")) return path.join(os.homedir(), value.slice(2));
   return value;
 }
 
-export function parseArgs(argv) {
-  const args = { allowApps: [], onlyApps: [], captureText: false, captureSearchText: false, screenshots: true };
+export function parseArgs(argv: string[]): RecorderArgs {
+  const args: RecorderArgs = {
+    allowApps: [],
+    onlyApps: [],
+    captureText: false,
+    captureSearchText: false,
+    screenshots: true,
+  };
   for (let index = 2; index < argv.length; index += 1) {
     const key = argv[index];
     const value = () => {
@@ -73,16 +137,16 @@ export function parseArgs(argv) {
   return args;
 }
 
-function timestampForPath(date = new Date()) {
+function timestampForPath(date = new Date()): string {
   return date.toISOString().replace(/\.\d{3}Z$/, "Z").replaceAll(":", "-");
 }
 
-function defaultOutput(args, recordingId) {
+function defaultOutput(args: RecorderArgs, recordingId: string): string {
   const recordingsDir = path.resolve(expandHome(args.recordingsDir ?? DEFAULT_RECORDINGS_DIR));
   return path.join(recordingsDir, `${timestampForPath()}-${recordingId.slice(0, 8)}`, "events.jsonl");
 }
 
-function normalizedContextUrl(value) {
+function normalizedContextUrl(value: string | undefined): string | null {
   if (!value) return null;
   const url = new URL(value);
   if (!["http:", "https:"].includes(url.protocol)) throw new Error("--context-url must use http or https");
@@ -92,7 +156,7 @@ function normalizedContextUrl(value) {
   return url.toString();
 }
 
-function redactSensitive(value) {
+function redactSensitive(value: unknown): string {
   return String(value ?? "")
     .replace(/\bBearer\s+[a-z0-9._~+/-]{12,}/gi, "Bearer [REDACTED]")
     .replace(/\bsk-[a-z0-9_-]{12,}\b/gi, "[REDACTED]")
@@ -102,22 +166,22 @@ function redactSensitive(value) {
     );
 }
 
-function appAllowed(application, allowedApps) {
+function appAllowed(application: Application | undefined, allowedApps: string[]): boolean {
   return Boolean(application?.bundleId && allowedApps.includes(application.bundleId));
 }
 
 // The recorder emits Codex-shaped envelopes (app.bundleIdentifier / app.name).
 // The history JSONL keeps its own {name, bundleId} shape so summarize-history
 // and its fixtures stay valid.
-export function appFrom(event) {
+export function appFrom(event: HelperEvent | undefined): Application {
   const app = event?.app ?? {};
-  const application = {};
+  const application: Application = {};
   if (typeof app.name === "string") application.name = app.name;
   if (typeof app.bundleIdentifier === "string") application.bundleId = app.bundleIdentifier;
   return application;
 }
 
-export function isSecureInput(event) {
+export function isSecureInput(event: HelperEvent | undefined): boolean {
   return event?.app?.secureInput === true;
 }
 
@@ -125,10 +189,10 @@ const SEARCH_INPUT_ROLES = new Set(["AXSearchField"]);
 const SEARCHABLE_TEXT_INPUT_ROLES = new Set(["AXTextField", "AXComboBox"]);
 const SEARCH_INPUT_HINT = /(?:\bsearch\b|\bquery\b|\bfind\b|address and search|搜索|检索|查找)/iu;
 
-export function searchInputContextFromAccessibility(accessibility) {
+export function searchInputContextFromAccessibility(accessibility: any): SearchInputContext | null {
   if (!accessibility || typeof accessibility !== "object") return null;
-  const queue = [accessibility.focused, accessibility].filter(Boolean);
-  const seen = new Set();
+  const queue: any[] = [accessibility.focused, accessibility].filter(Boolean);
+  const seen = new Set<object>();
   let visited = 0;
   while (queue.length && visited < 64) {
     const node = queue.shift();
@@ -159,10 +223,11 @@ export function searchInputContextFromAccessibility(accessibility) {
 // The recorder now classifies keystrokes itself, so the consumer no longer has
 // to infer printability from modifiers: a keyboard.text_input event is text by
 // construction, and secure-input windows never produce one.
-// Mirrors src/core/agent-runtime/computer-history/observation-settings.ts.
-// The capture path has to evaluate the policy per event, so the rules live on
-// both sides; the tables in their two test files are kept identical.
-function loadObservationSettings(file) {
+// Mirrors ./observation-settings.ts. The recorder was a standalone script
+// outside the TypeScript build, so it could not import the policy and carried
+// its own copy; the tables in the two test files are kept identical. Now that
+// both compile together, the copy can be replaced with an import.
+function loadObservationSettings(file: string | undefined): RecorderObservationSettings | null {
   if (!file) return null;
   try {
     const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
@@ -182,7 +247,7 @@ function loadObservationSettings(file) {
   }
 }
 
-function hostFromUrl(url) {
+function hostFromUrl(url: string): string | null {
   try {
     const parsed = new URL(url);
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
@@ -192,45 +257,52 @@ function hostFromUrl(url) {
   }
 }
 
-function domainMatches(host, domain) {
+function domainMatches(host: string, domain: unknown): boolean {
   const normalized = String(domain ?? "").trim().toLowerCase().replace(/^\.+|\.+$/g, "");
   if (!normalized) return false;
   return host === normalized || host.endsWith(`.${normalized}`);
 }
 
 // A block rule always wins inside its own axis.
-function resolveAxis(matching, fallback) {
+function resolveAxis(matching: ObservationRule[], fallback: string): string {
   if (matching.some((rule) => rule.behavior === "do_not_observe")) return "do_not_observe";
   if (matching.some((rule) => rule.behavior === "observe")) return "observe";
   return fallback;
 }
 
-export function shouldObserve(settings, subject) {
+export function shouldObserve(
+  settings: RecorderObservationSettings | null,
+  subject: { bundleId?: string; url?: string | null },
+): boolean {
   if (!settings) return true;
   const appRules = settings.rules.filter(
-    (rule) => rule.scope === "app" && subject.bundleId && rule.bundleID === subject.bundleId,
+    (rule: ObservationRule) => rule.scope === "app" && subject.bundleId && rule.bundleID === subject.bundleId,
   );
   if (resolveAxis(appRules, settings.defaultApplicationBehavior) === "do_not_observe") return false;
 
   const host = subject.url ? hostFromUrl(subject.url) : null;
   if (!host) return true;
   const urlRules = settings.rules.filter(
-    (rule) => rule.scope === "url" && domainMatches(host, rule.urlDomain),
+    (rule: ObservationRule) => rule.scope === "url" && domainMatches(host, rule.urlDomain),
   );
   return resolveAxis(urlRules, settings.defaultURLBehavior) !== "do_not_observe";
 }
 
-function printableKey(event) {
+function printableKey(event: HelperEvent): boolean {
   return event?.kind === "keyboard.text_input"
     && typeof event.keyboard?.text === "string"
     && event.keyboard.text.length > 0;
 }
 
-export function normalizeKeyBurst(events, options) {
+export function normalizeKeyBurst(
+  events: HelperEvent[],
+  // Search-field retention is opt-in, and absent means off.
+  options: Pick<RecorderArgs, "captureText" | "allowApps"> & { captureSearchText?: boolean },
+): NormalizedEvent {
   const application = appFrom(events.at(-1));
   const rawText = events.filter(printableKey).map((event) => event.keyboard.text).join("");
-  const searchInput = events.at(-1)?.inputContext?.purpose === "search_query"
-    ? events.at(-1).inputContext
+  const searchInput: SearchInputContext | null = events.at(-1)?.inputContext?.purpose === "search_query"
+    ? events.at(-1)!.inputContext
     : null;
   const retainText = (options.captureText && appAllowed(application, options.allowApps))
     || (options.captureSearchText && searchInput);
@@ -257,7 +329,7 @@ export function normalizeKeyBurst(events, options) {
   return { eventType: "key_press", application, details: { keys } };
 }
 
-export function isStopHotkey(event) {
+export function isStopHotkey(event: HelperEvent | undefined): boolean {
   const modifiers = new Set(event?.keyboard?.modifiers ?? []);
   return event?.kind === "keyboard.shortcut"
     && event.keyboard?.keyCode === 15
@@ -266,7 +338,7 @@ export function isStopHotkey(event) {
     && modifiers.has("option");
 }
 
-async function ensureHelper() {
+async function ensureHelper(): Promise<string> {
   const source = fs.readFileSync(HELPER_SOURCE, "utf8");
   const hash = crypto.createHash("sha256").update(source).digest("hex").slice(0, 12);
   const helperDir = path.join(os.homedir(), ".memmy", "tools", "human-history-recorder");
@@ -277,18 +349,21 @@ async function ensureHelper() {
     await execFileAsync("swiftc", ["-O", "-o", binary, HELPER_SOURCE], { timeout: 120_000 });
   } catch (error) {
     throw new Error(
-      `failed to compile the macOS recorder helper (Xcode Command Line Tools required): ${error.message}`,
+      `failed to compile the macOS recorder helper (Xcode Command Line Tools required): ${(error as Error).message}`,
     );
   }
   return binary;
 }
 
-async function helperJson(binary, mode) {
+async function helperJson(binary: string, mode: string): Promise<RecorderPermissions> {
   const { stdout } = await execFileAsync(binary, [mode], { timeout: 60_000 });
   return JSON.parse(stdout.trim());
 }
 
-async function checkPermissions(binary, { screenshots = true, accessibility = true } = {}) {
+async function checkPermissions(
+  binary: string,
+  { screenshots = true, accessibility = true }: { screenshots?: boolean; accessibility?: boolean } = {},
+): Promise<RecorderPermissions> {
   let permissions = await helperJson(binary, "--permissions");
   const missingRequiredPermission = () => (
     !permissions.inputMonitoring
@@ -299,7 +374,7 @@ async function checkPermissions(binary, { screenshots = true, accessibility = tr
     permissions = await helperJson(binary, "--request-permissions");
   }
   if (missingRequiredPermission()) {
-    const missing = [];
+    const missing: string[] = [];
     if (!permissions.inputMonitoring) missing.push("Input Monitoring");
     if (screenshots && !permissions.screenRecording) missing.push("Screen Recording");
     if (accessibility && !permissions.accessibility) missing.push("Accessibility");
@@ -310,7 +385,7 @@ async function checkPermissions(binary, { screenshots = true, accessibility = tr
   return permissions;
 }
 
-async function captureScreenshot(file, width) {
+async function captureScreenshot(file: string, width: number): Promise<string> {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   await execFileAsync("screencapture", ["-x", "-C", "-D", "1", "-t", "jpg", file], {
     timeout: 30_000,
@@ -321,11 +396,13 @@ async function captureScreenshot(file, width) {
   return file;
 }
 
-function appendJsonLine(file, payload) {
+function appendJsonLine(file: string, payload: unknown): void {
   fs.appendFileSync(file, `${JSON.stringify(payload)}\n`, "utf8");
 }
 
-export async function run(argv = process.argv) {
+export async function run(
+  argv: string[] = process.argv,
+): Promise<{ output: string; recordingId: string; events: number } | null> {
   const args = parseArgs(argv);
   if (args.help) {
     usage();
@@ -360,23 +437,37 @@ export async function run(argv = process.argv) {
   });
 
   let sequence = 0;
-  let lastPageContextUrl = null;
-  const searchInputContextByApp = new Map();
+  let lastPageContextUrl: string | null = null;
+  const searchInputContextByApp = new Map<string, SearchInputContext>();
   const observationSettings = loadObservationSettings(args.observationSettings);
-  let pendingKeys = [];
-  let pendingKeyTimer = null;
-  let processing = Promise.resolve();
+  let pendingKeys: HelperEvent[] = [];
+  let pendingKeyTimer: ReturnType<typeof setTimeout> | null = null;
+  let processing: Promise<void> = Promise.resolve();
   let stopping = false;
-  let finishPromise = null;
-  let child;
-  let terminalLines = null;
-  let stopFromHotkey = null;
-  let childClosedResolve;
-  const childClosed = new Promise((resolve) => {
+  let finishPromise: Promise<void> | null = null;
+  let terminalLines: readline.Interface | null = null;
+  let stopFromHotkey: (() => void) | null = null;
+  let childClosedResolve!: () => void;
+  const childClosed = new Promise<void>((resolve) => {
     childClosedResolve = resolve;
   });
 
-  const appendEvent = async ({ eventType, timestamp, application = {}, details = {}, ax = null }, screenshot = false) => {
+  const appendEvent = async (
+    {
+      eventType,
+      timestamp,
+      application = {},
+      details = {},
+      ax = null,
+    }: {
+      eventType: string;
+      timestamp?: string;
+      application?: Application;
+      details?: Record<string, unknown>;
+      ax?: unknown;
+    },
+    screenshot = false,
+  ) => {
     sequence += 1;
     let screenshotPath = null;
     if (args.screenshots && screenshot) {
@@ -385,7 +476,7 @@ export async function run(argv = process.argv) {
         await captureScreenshot(screenshotPath, permissions.mainDisplayWidth);
       } catch (error) {
         screenshotPath = null;
-        details = { ...details, screenshotError: error.message };
+        details = { ...details, screenshotError: (error as Error).message };
       }
     }
     appendJsonLine(output, {
@@ -423,7 +514,7 @@ export async function run(argv = process.argv) {
     }, TEXT_IDLE_MS);
   };
 
-  const ingest = async (event) => {
+  const ingest = async (event: HelperEvent) => {
     const application = appFrom(event);
     // Window state travels with the action it belongs to so the summarizer can
     // read what was on screen without re-deriving it from neighbouring events.
@@ -464,7 +555,7 @@ export async function run(argv = process.argv) {
     }
 
     if (event.kind === "keyboard.text_input") {
-      const inputContext = searchInputContextByApp.get(application.bundleId);
+      const inputContext = application.bundleId ? searchInputContextByApp.get(application.bundleId) : undefined;
       if (inputContext) event = { ...event, inputContext };
       const previousApp = pendingKeys.at(-1) ? appFrom(pendingKeys.at(-1)).bundleId : undefined;
       if (pendingKeys.length && previousApp !== application.bundleId) await flushKeys();
@@ -478,9 +569,9 @@ export async function run(argv = process.argv) {
       // Submitting in a browser starts a navigation; give it a moment so the
       // next captured state is the destination rather than the old page.
       const captureAfterNavigation = event.kind === "keyboard.submit"
-        && ["com.google.Chrome", "com.apple.Safari"].includes(application.bundleId);
+        && BROWSER_BUNDLE_IDS.has(application.bundleId ?? "");
       if (captureAfterNavigation) {
-        await new Promise((resolve) => setTimeout(resolve, NAVIGATION_SETTLE_MS));
+        await new Promise<void>((resolve) => setTimeout(resolve, NAVIGATION_SETTLE_MS));
       }
       await appendEvent(normalizeKeyBurst([event], args), captureAfterNavigation);
       return;
@@ -556,16 +647,17 @@ export async function run(argv = process.argv) {
     }
   };
 
-  const finish = (reason) => {
+  const finish = (reason: string): Promise<void> => {
     if (finishPromise) return finishPromise;
     finishPromise = (async () => {
       stopping = true;
       terminalLines?.close();
       if (pendingKeyTimer) clearTimeout(pendingKeyTimer);
-      if (child && !child.killed) child.kill("SIGTERM");
+      // Only ever called from handlers registered after the helper starts.
+      if (!helper.killed) helper.kill("SIGTERM");
       await Promise.race([
         childClosed,
-        new Promise((resolve) => setTimeout(resolve, 500)),
+        new Promise<void>((resolve) => setTimeout(resolve, 500)),
       ]);
       await processing;
       await flushKeys();
@@ -579,10 +671,10 @@ export async function run(argv = process.argv) {
     return finishPromise;
   };
 
-  child = spawn(binary, [], { stdio: ["ignore", "pipe", "pipe"] });
-  child.once("close", childClosedResolve);
-  const lines = readline.createInterface({ input: child.stdout });
-  lines.on("line", (line) => {
+  const helper = spawn(binary, [], { stdio: ["ignore", "pipe", "pipe"] });
+  helper.once("close", childClosedResolve);
+  const lines = readline.createInterface({ input: helper.stdout });
+  lines.on("line", (line: string) => {
     try {
       const event = JSON.parse(line);
       if (isStopHotkey(event)) {
@@ -591,17 +683,17 @@ export async function run(argv = process.argv) {
       }
       processing = processing.then(() => ingest(event));
     } catch (error) {
-      console.error(`[recorder] ignored malformed helper event: ${error.message}`);
+      console.error(`[recorder] ignored malformed helper event: ${(error as Error).message}`);
     }
   });
-  child.stderr.on("data", (chunk) => process.stderr.write(chunk));
+  helper.stderr.on("data", (chunk: Buffer) => process.stderr.write(chunk));
 
   console.log(`[recorder] goal: ${args.title ?? "Human-operated macOS workflow"}`);
   console.log(`[recorder] output: ${output}`);
   console.log("[recorder] recording now; keep the final result visible and press control+option+cmd+r to stop.");
   console.log("[recorder] fallback: return here and press Enter or Ctrl+C.");
 
-  await new Promise((resolve, reject) => {
+  await new Promise<void>((resolve, reject) => {
     const onSignal = () => finish("user_interrupt").then(resolve, reject);
     process.once("SIGINT", onSignal);
     process.once("SIGTERM", onSignal);
@@ -610,8 +702,8 @@ export async function run(argv = process.argv) {
       terminalLines = readline.createInterface({ input: process.stdin, output: process.stdout });
       terminalLines.once("line", () => finish("user_stop").then(resolve, reject));
     }
-    child.once("error", reject);
-    child.once("exit", (code, signal) => {
+    helper.once("error", reject);
+    helper.once("exit", (code, signal) => {
       if (stopping) return;
       finish(`helper_exit:${code ?? signal ?? "unknown"}`).then(resolve, reject);
     });

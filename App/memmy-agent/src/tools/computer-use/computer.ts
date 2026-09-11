@@ -4,8 +4,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { Tool, type ToolExecutionContext } from "./base.js";
-import { storeToolImageArtifact } from "../../../utils/artifacts.js";
+import { Tool, type ToolExecutionContext } from "../../core/agent-runtime/tools/base.js";
+import { storeToolImageArtifact } from "../../utils/artifacts.js";
 
 const execFileAsync = promisify(execFile);
 

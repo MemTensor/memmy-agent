@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { ComputerHistoryTool } from "../../../../src/core/agent-runtime/tools/computer-history.js";
+import { ComputerHistoryTool } from "../../../../src/tools/computer-history/mac/computer-history.js";
 import { ToolLoader } from "../../../../src/core/agent-runtime/tools/loader.js";
 
 const history = {

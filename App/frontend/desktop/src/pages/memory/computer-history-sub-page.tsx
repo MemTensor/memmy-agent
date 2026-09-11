@@ -42,7 +42,8 @@ function dayLabel(at: Date, t: Translate): string {
  * A ten-minute segment is a moment, so it keeps the clock. A six-hour rollup
  * covers a stretch no clock time honestly describes, so it reads as the part of
  * the day it spans — which is also what makes older history legible: by then
- * the rollups are all that is shown.
+ * the rollups are all that is shown. Rollup windows start at 00, 06, 12 and 18
+ * on the local clock, so each part of the day names exactly one of them.
  */
 function whenLabel(entry: ComputerHistoryEntry, t: Translate): string {
   const at = new Date(entry.createdAt);
@@ -51,6 +52,7 @@ function whenLabel(entry: ComputerHistoryEntry, t: Translate): string {
     return at.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
   }
   const hour = at.getHours();
+  if (hour < 6) return t("computerHistory.night");
   if (hour < 12) return t("computerHistory.morning");
   return hour < 18 ? t("computerHistory.afternoon") : t("computerHistory.evening");
 }

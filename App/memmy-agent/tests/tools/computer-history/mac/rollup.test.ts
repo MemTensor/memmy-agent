@@ -4,8 +4,10 @@ import {
   alignedId,
   buildSixHourSummary,
   instantFromId,
+  isLocalSixHourWindow,
+  sixHourWindowStart,
   summariesInWindow,
-} from "../../../../src/core/agent-runtime/computer-history/rollup.js";
+} from "../../../../src/tools/computer-history/mac/rollup.js";
 
 function tenMinute(id: string, options: {
   title?: string;
@@ -51,6 +53,26 @@ describe("layered summaries", () => {
     const at = new Date("2026-09-08T03:37:41.000Z");
     expect(alignedId(at, 10 * 60 * 1000)).toBe("2026-09-08T03-30-00Z");
     expect(alignedId(at, SIX_HOUR_MS)).toBe("2026-09-08T00-00-00Z");
+  });
+
+  it("cuts six-hour windows on the local clock, one per part of the day", () => {
+    // Written against local getters so it holds in any time zone. Epoch
+    // alignment put the boundaries at 02/08/14/20 in UTC+8, which gave a day
+    // two windows that began before noon.
+    const day = new Date(2026, 8, 11);
+    const starts = new Set<number>();
+    for (let hour = 0; hour < 24; hour += 1) {
+      const at = new Date(day.getFullYear(), day.getMonth(), day.getDate(), hour, 37);
+      const start = sixHourWindowStart(at);
+      expect(start.getHours() % 6).toBe(0);
+      expect(start.getMinutes()).toBe(0);
+      expect(start.getDate()).toBe(at.getDate());
+      expect(at.getTime() - start.getTime()).toBeLessThan(SIX_HOUR_MS);
+      expect(isLocalSixHourWindow(start)).toBe(true);
+      starts.add(start.getTime());
+    }
+    expect([...starts].map((time) => new Date(time).getHours())).toEqual([0, 6, 12, 18]);
+    expect(isLocalSixHourWindow(new Date(day.getFullYear(), day.getMonth(), day.getDate(), 2))).toBe(false);
   });
 
   it("selects only the ten-minute summaries inside the window", () => {

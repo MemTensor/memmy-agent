@@ -1,10 +1,10 @@
-import { Tool } from "./base.js";
-import { getComputerHistoryDemoService } from "../../../entrypoints/frontend-bridge/computer-history-api.js";
-import type { ComputerHistoryDemoService } from "../../../entrypoints/frontend-bridge/computer-history-api.js";
+import { Tool } from "../../../core/agent-runtime/tools/base.js";
+import { getComputerHistoryDemoService } from "./computer-history-api.js";
+import type { ComputerHistoryDemoService } from "./computer-history-api.js";
 import {
   ObservationSettingsError,
   ObservationSettingsStore,
-} from "../computer-history/settings-store.js";
+} from "./settings-store.js";
 
 // The recorder's own lifecycle vocabulary. `paused` keeps the current segment
 // but stops writing to it; `stopped` records nothing while previously completed

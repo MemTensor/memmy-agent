@@ -5,7 +5,7 @@ import {
   compactEventEvidence,
   isNarrated,
   writeSegmentNarrative,
-} from "../../../../src/core/agent-runtime/computer-history/summary-writer.js";
+} from "../../../../src/tools/computer-history/mac/summary-writer.js";
 
 const summary = [
   "---",

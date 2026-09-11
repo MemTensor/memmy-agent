@@ -4,8 +4,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
-MEMMY_JS="$ROOT_DIR/App/memmy-agent/dist/main.js"
+# The service passes both. The fallbacks cover running this copy by hand from
+# the compiled tree, where it sits at dist/tools/computer-use/.
+MEMMY_JS="${MEMMY_JS:-$(cd "$SCRIPT_DIR/../.." && pwd)/main.js}"
+WORKSPACE="${MEMMY_REPLAY_WORKSPACE:-$HOME/.memmy/workspace}"
 
 WORKFLOW_FILE="${1:?usage: replay-cua.sh <workflow-file> [var=value ...]}"
 shift || true
@@ -68,7 +70,7 @@ RUN_LOG="$(mktemp -t memmy-cua-run.XXXXXX)"
 trap 'rm -f "$RUN_LOG"' EXIT
 
 set +e
-MEMMY_COMPUTER_USE=0 MEMMY_COMPUTER_HISTORY=0 node "$MEMMY_JS" agent --standalone -w "$ROOT_DIR" --no-markdown -m "$PROMPT" | tee "$RUN_LOG"
+MEMMY_COMPUTER_USE=0 MEMMY_COMPUTER_HISTORY=0 node "$MEMMY_JS" agent --standalone -w "$WORKSPACE" --no-markdown -m "$PROMPT" | tee "$RUN_LOG"
 AGENT_STATUS=${PIPESTATUS[0]}
 set -e
 

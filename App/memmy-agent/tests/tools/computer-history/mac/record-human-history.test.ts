@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import { test } from "vitest";
 import {
   isStopHotkey,
   normalizeKeyBurst,
@@ -8,12 +8,12 @@ import {
   appFrom,
   isSecureInput,
   shouldObserve,
-} from "./record-human-history.mjs";
+} from "../../../../src/tools/computer-history/mac/record-human-history.js";
 
 const notes = { name: "Notes", bundleId: "com.apple.Notes", pid: 42 };
 
 // Recorder-shaped envelope: app identity lives on `app`, keystrokes on `keyboard`.
-function textInput(text, application = notes, extra = {}) {
+function textInput(text: string, application = notes, extra: Record<string, unknown> = {}) {
   return {
     kind: "keyboard.text_input",
     app: { name: application.name, bundleIdentifier: application.bundleId, secureInput: false },
@@ -22,7 +22,7 @@ function textInput(text, application = notes, extra = {}) {
   };
 }
 
-function shortcut(keyEquivalent, modifiers, application = notes, keyCode) {
+function shortcut(keyEquivalent: string, modifiers: string[], application = notes, keyCode?: number) {
   return {
     kind: "keyboard.shortcut",
     app: { name: application.name, bundleIdentifier: application.bundleId, secureInput: false },
@@ -171,7 +171,7 @@ test("reports secure input so keystroke text can be suppressed", () => {
 
 // This table mirrors observation-settings.test.ts: the capture path and the
 // agent tools must agree on what the policy means.
-const policy = (defaultApp, defaultUrl, rules = []) => ({
+const policy = (defaultApp: string, defaultUrl: string, rules: Array<Record<string, string>> = []) => ({
   defaultApplicationBehavior: defaultApp,
   defaultURLBehavior: defaultUrl,
   rules,

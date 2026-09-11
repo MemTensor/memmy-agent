@@ -712,7 +712,6 @@ export interface MemmyAgentClient {
   getComputerHistory(): Promise<ComputerHistorySnapshot>;
   deleteComputerHistory(historyId: string): Promise<ComputerHistorySnapshot>;
   pinComputerHistory(historyId: string, pinned: boolean): Promise<ComputerHistorySnapshot>;
-  installComputerHistoryDemo(): Promise<ComputerHistorySnapshot>;
   importComputerHistory(input: { title?: string; markdown: string }): Promise<ComputerHistorySnapshot>;
   startComputerHistoryObservation(): Promise<ComputerHistorySnapshot>;
   pauseComputerHistoryObservation(): Promise<ComputerHistorySnapshot>;
@@ -720,7 +719,6 @@ export interface MemmyAgentClient {
   stopComputerHistoryObservation(): Promise<ComputerHistorySnapshot>;
   createComputerHistoryWorkflow(historyId: string, userRequest: string): Promise<ComputerHistorySnapshot>;
   startComputerHistoryCua(workflowId: string, variables: string[]): Promise<ComputerHistorySnapshot>;
-  startComputerHistoryCuaSmoke(): Promise<ComputerHistorySnapshot>;
   getApplicationIcon(bundleId: string): Promise<string | null>;
   getSessionSnapshot(options?: MemmyAgentRequestOptions): Promise<MemmyAgentSessionSnapshot>;
   listSessions(): Promise<MemmyAgentSessionSummary[]>;
@@ -1079,10 +1077,6 @@ class HttpMemmyAgentClient implements MemmyAgentClient {
   }
 
 
-  async installComputerHistoryDemo(): Promise<ComputerHistorySnapshot> {
-    return this.request("/api/computer-history/demo-fixture", ComputerHistorySnapshotSchema, { method: "POST", body: {} });
-  }
-
   async importComputerHistory(input: { title?: string; markdown: string }): Promise<ComputerHistorySnapshot> {
     return this.request("/api/computer-history/import", ComputerHistorySnapshotSchema, { method: "POST", body: input });
   }
@@ -1114,13 +1108,6 @@ class HttpMemmyAgentClient implements MemmyAgentClient {
     return this.request("/api/computer-history/cua/start", ComputerHistorySnapshotSchema, {
       method: "POST",
       body: { workflow_id: workflowId, variables }
-    });
-  }
-
-  async startComputerHistoryCuaSmoke(): Promise<ComputerHistorySnapshot> {
-    return this.request("/api/computer-history/cua/smoke", ComputerHistorySnapshotSchema, {
-      method: "POST",
-      body: {}
     });
   }
 
