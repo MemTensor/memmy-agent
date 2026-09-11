@@ -170,11 +170,11 @@ describe("prototype style alignment", () => {
     expect(memorySidebarRule).toContain("padding-top: 0;");
     expect(memoryToolbarRule).toContain("flex: 0 0 var(--codex-toolbar-height);");
     expect(memoryToolbarRule).toContain("min-height: var(--codex-toolbar-height);");
-    expect(memoryReturnRowRule).toContain("padding: 6px 14px 12px 30px;");
+    expect(memoryReturnRowRule).toContain("padding: 6px 14px 12px 20px;");
     expect(memoryBackButtonRule).toContain("height: 32px;");
     expect(memoryBackButtonRule).toContain("gap: 10px;");
     expect(memoryBackButtonRule).toContain("font-size: var(--codex-text-base);");
-    expect(memorySectionHeaderRule).toContain("padding: 0 14px 0 30px;");
+    expect(memorySectionHeaderRule).toContain("padding: 0 14px 0 20px;");
     expect(dragRegionRule).toContain("position: fixed;");
     expect(dragRegionRule).toContain("right: 0;");
     expect(dragRegionRule).toContain("left: 0;");

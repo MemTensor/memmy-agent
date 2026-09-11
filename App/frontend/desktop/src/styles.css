@@ -10611,7 +10611,7 @@ input[type="checkbox"].check-sky:checked::after {
   display: flex;
   min-height: 44px;
   align-items: center;
-  padding: 6px 14px 12px 30px;
+  padding: 6px 14px 12px 20px;
 }
 
 .memory-page-back-button {
@@ -10640,7 +10640,7 @@ input[type="checkbox"].check-sky:checked::after {
 }
 
 .memory-page-section-header {
-  padding: 0 14px 0 30px;
+  padding: 0 14px 0 20px;
   margin-bottom: 6px;
 }
 

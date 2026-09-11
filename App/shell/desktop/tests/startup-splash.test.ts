@@ -50,6 +50,12 @@ describe("startup splash localization", () => {
     expect(chineseHtml).not.toContain("Starting…");
   });
 
+  it("renders a localized waiting message for slow startup", () => {
+    expect(resolveStartupSplashHtml("zh-CN", true)).toContain("启动时间较长，请稍候…");
+    expect(resolveStartupSplashHtml("en-US", true)).toContain("Taking longer than usual. Please wait…");
+    expect(resolveStartupSplashHtml("en-US", true)).not.toContain("启动时间较长");
+  });
+
   it("renders the update splash without exposing unescaped version text", () => {
     const englishHtml = resolveUpdateSplashHtml("en-US", "1.0.8<script>");
     const chineseHtml = resolveUpdateSplashHtml("zh-CN", "1.0.8");

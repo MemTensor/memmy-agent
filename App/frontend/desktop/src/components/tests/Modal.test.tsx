@@ -1,7 +1,13 @@
+// @vitest-environment happy-dom
+
 /** Modal tests. */
+import { act } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToString } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Modal, shouldCloseModalByBackdrop, shouldCloseModalByKey, shouldInitializeModalFocus } from "../modal.js";
+
+(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 describe("Modal", () => {
   it("renders a centered dialog without right-side drawer classes", () => {
@@ -81,5 +87,47 @@ describe("Modal", () => {
 
     expect(shouldCloseModalByBackdrop({ target: backdrop, currentTarget: backdrop } as never)).toBe(true);
     expect(shouldCloseModalByBackdrop({ target: {}, currentTarget: backdrop } as never)).toBe(false);
+  });
+
+  it("does not close when a text-selection drag starts inside the modal and ends on the backdrop", () => {
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    const onClose = vi.fn();
+    document.body.append(container);
+
+    try {
+      act(() => root.render(
+        <Modal open title="Model configuration" onClose={onClose}>
+          <span>gpt-5.4</span>
+        </Modal>
+      ));
+
+      const backdrop = container.querySelector<HTMLElement>(".modal-backdrop")!;
+      const modelId = container.querySelector<HTMLElement>(".modal-body span")!;
+
+      act(() => {
+        modelId.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+        backdrop.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+        backdrop.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      expect(onClose).not.toHaveBeenCalled();
+
+      act(() => {
+        backdrop.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+        modelId.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+        backdrop.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      expect(onClose).not.toHaveBeenCalled();
+
+      act(() => {
+        backdrop.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+        backdrop.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+        backdrop.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      expect(onClose).toHaveBeenCalledOnce();
+    } finally {
+      act(() => root.unmount());
+      container.remove();
+    }
   });
 });
