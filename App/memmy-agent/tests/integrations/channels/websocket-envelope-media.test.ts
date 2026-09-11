@@ -56,7 +56,7 @@ function makeWebuiChannel(): WebSocketChannel {
 }
 
 function makeConnection() {
-  return { send: vi.fn(async () => undefined), remoteAddress: ["127.0.0.1"] };
+  return { send: vi.fn(async (raw: string) => { void raw; }), remoteAddress: ["127.0.0.1"] };
 }
 
 function sentError(connection: ReturnType<typeof makeConnection>): any {

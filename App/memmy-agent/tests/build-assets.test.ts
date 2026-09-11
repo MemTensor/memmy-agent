@@ -4,6 +4,12 @@ import { execFileSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
 const npmBin = process.platform === "win32" ? "npm.cmd" : "npm";
+const root = path.resolve(import.meta.dirname, "..");
+const buildEnv = {
+  ...process.env,
+  MEMMY_LEGAL_CN_BASE_URL: "https://memmy.cn",
+  MEMMY_LEGAL_INTL_BASE_URL: "https://memmy.bot",
+};
 
 describe("build runtime assets", () => {
   it("copies templates and builtin skill resources into dist", () => {
@@ -18,7 +24,7 @@ describe("build runtime assets", () => {
       "dist/core/agent-runtime/tools/runtime-state.d.ts",
     ];
     for (const relativePath of staleFiles) {
-      const staleFile = path.join(process.cwd(), relativePath);
+      const staleFile = path.join(root, relativePath);
       fs.mkdirSync(path.dirname(staleFile), { recursive: true });
       fs.writeFileSync(staleFile, "stale build output", "utf8");
     }
@@ -28,40 +34,40 @@ describe("build runtime assets", () => {
       process.platform === "win32"
         ? ["/d", "/s", "/c", "npm.cmd run --ignore-scripts build"]
         : ["run", "--ignore-scripts", "build"],
-      { cwd: process.cwd(), stdio: "pipe" },
+      { cwd: root, env: buildEnv, stdio: "pipe" },
     );
 
     expect(
-      fs.existsSync(path.join(process.cwd(), "dist/templates/agent/file-memory.md")),
+      fs.existsSync(path.join(root, "dist/templates/agent/file-memory.md")),
     ).toBe(true);
-    expect(fs.existsSync(path.join(process.cwd(), "dist/skills/memory"))).toBe(
+    expect(fs.existsSync(path.join(root, "dist/skills/memory"))).toBe(
       false,
     );
-    expect(fs.existsSync(path.join(process.cwd(), "dist/skills/my"))).toBe(false);
+    expect(fs.existsSync(path.join(root, "dist/skills/my"))).toBe(false);
     for (const relativePath of staleFiles.slice(2)) {
-      expect(fs.existsSync(path.join(process.cwd(), relativePath))).toBe(false);
+      expect(fs.existsSync(path.join(root, relativePath))).toBe(false);
     }
-    expect(fs.existsSync(path.join(process.cwd(), "dist/templates/agent/subagent-announce.md"))).toBe(true);
-    expect(fs.existsSync(path.join(process.cwd(), "dist/templates/agent/verification-contract.md"))).toBe(true);
-    expect(fs.existsSync(path.join(process.cwd(), "dist/templates/memory/MEMORY.md"))).toBe(true);
-    expect(fs.existsSync(path.join(process.cwd(), "dist/skills/goal/SKILL.md"))).toBe(false);
-    expect(fs.existsSync(path.join(process.cwd(), "dist/skills/skill-creator/SKILL.md"))).toBe(true);
-    expect(fs.existsSync(path.join(process.cwd(), "dist/skills/skill-creator/scripts/quick-validate.py"))).toBe(true);
-    expect(fs.existsSync(path.join(process.cwd(), "dist/skills/ui-craft/SKILL.md"))).toBe(true);
-    expect(fs.existsSync(path.join(process.cwd(), "dist/skills/ui-craft/references"))).toBe(false);
+    expect(fs.existsSync(path.join(root, "dist/templates/agent/subagent-announce.md"))).toBe(true);
+    expect(fs.existsSync(path.join(root, "dist/templates/agent/verification-contract.md"))).toBe(true);
+    expect(fs.existsSync(path.join(root, "dist/templates/memory/MEMORY.md"))).toBe(true);
+    expect(fs.existsSync(path.join(root, "dist/skills/goal/SKILL.md"))).toBe(false);
+    expect(fs.existsSync(path.join(root, "dist/skills/skill-creator/SKILL.md"))).toBe(true);
+    expect(fs.existsSync(path.join(root, "dist/skills/skill-creator/scripts/quick-validate.py"))).toBe(true);
+    expect(fs.existsSync(path.join(root, "dist/skills/ui-craft/SKILL.md"))).toBe(true);
+    expect(fs.existsSync(path.join(root, "dist/skills/ui-craft/references"))).toBe(false);
 
-    const renderingRoot = path.join(process.cwd(), "dist/extra-dependencies/office-rendering");
+    const renderingRoot = path.join(root, "dist/extra-dependencies/office-rendering");
     for (const platform of ["darwin-arm64", "darwin-x64", "win32-x64", "linux-x64", "linux-arm64"]) {
       expect(fs.existsSync(path.join(renderingRoot, platform, "OFFICE-RENDERING-MANIFEST.json"))).toBe(true);
     }
     expect(fs.existsSync(path.join(renderingRoot, "THIRD-PARTY-NOTICES.md"))).toBe(true);
-    expect(fs.existsSync(path.join(process.cwd(), "dist/extra-dependencies/docx-rendering"))).toBe(false);
-    expect(fs.existsSync(path.join(process.cwd(), "dist/skills/pptx/SKILL.md"))).toBe(true);
-    expect(fs.existsSync(path.join(process.cwd(), "dist/skills/xlsx/SKILL.md"))).toBe(true);
-    const docxScripts = path.join(process.cwd(), "dist/skills/docx/scripts");
+    expect(fs.existsSync(path.join(root, "dist/extra-dependencies/docx-rendering"))).toBe(false);
+    expect(fs.existsSync(path.join(root, "dist/skills/pptx/SKILL.md"))).toBe(true);
+    expect(fs.existsSync(path.join(root, "dist/skills/xlsx/SKILL.md"))).toBe(true);
+    const docxScripts = path.join(root, "dist/skills/docx/scripts");
     expect(fs.readdirSync(docxScripts).filter((entry) => entry.endsWith(".py"))).toEqual([]);
 
-    const tmuxScript = path.join(process.cwd(), "dist/skills/tmux/scripts/find-sessions.sh");
+    const tmuxScript = path.join(root, "dist/skills/tmux/scripts/find-sessions.sh");
     expect(fs.existsSync(tmuxScript)).toBe(true);
     if (process.platform !== "win32") expect(fs.statSync(tmuxScript).mode & 0o111).not.toBe(0);
   }, 60_000);

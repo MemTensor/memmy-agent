@@ -1029,11 +1029,12 @@ export class FeishuChannel extends BaseChannel {
         contentParts.push(contentText);
       }
     } else if (["image", "audio", "file", "media"].includes(msgType)) {
-      const [filePath, contentText] = await this.downloadAndSaveMedia(
+      const [filePath, initialContentText] = await this.downloadAndSaveMedia(
         msgType,
         contentJson,
         messageId,
       );
+      let contentText = initialContentText;
       if (filePath) mediaPaths.push(filePath);
       if (msgType === "audio" && filePath) {
         const transcription = await this.transcribeAudio(filePath);

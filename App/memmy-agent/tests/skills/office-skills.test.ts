@@ -4,7 +4,12 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 
-const root = process.cwd();
+const root = path.resolve(import.meta.dirname, "../..");
+const buildEnv = {
+  ...process.env,
+  MEMMY_LEGAL_CN_BASE_URL: "https://memmy.cn",
+  MEMMY_LEGAL_INTL_BASE_URL: "https://memmy.bot",
+};
 const pptxScripts = path.join(root, "src/skills/pptx/scripts");
 const xlsxScripts = path.join(root, "src/skills/xlsx/scripts");
 
@@ -36,7 +41,7 @@ describe("document skill CLIs", () => {
   });
 
   it("builds the new skills into dist with their static resources", () => {
-    execFileSync(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "--ignore-scripts", "build"], { cwd: root, stdio: "pipe" });
+    execFileSync(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "--ignore-scripts", "build"], { cwd: root, env: buildEnv, stdio: "pipe" });
     expect(fs.existsSync(path.join(root, "dist/skills/pptx/schemas/SCHEMA-MANIFEST.json"))).toBe(true);
     expect(fs.existsSync(path.join(root, "dist/skills/xlsx/SKILL.md"))).toBe(true);
   }, 60_000);
