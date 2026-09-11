@@ -353,6 +353,14 @@ export function getModelInputModalities(
   return MODEL_INPUT_CAPABILITIES[model] ?? TEXT;
 }
 
+// The catalog only covers model IDs we have reviewed against a vendor's docs, so a miss
+// means "unknown", not "text-only". Callers that can afford to let the provider answer
+// should branch on this instead of on the TEXT fallback above.
+export function hasDeclaredInputModalities(model: string | null | undefined): boolean {
+  return typeof model === "string"
+    && Object.prototype.hasOwnProperty.call(MODEL_INPUT_CAPABILITIES, model);
+}
+
 export function requiredInputModalities(
   messages: readonly Record<string, any>[],
 ): readonly ModelInputModality[] {

@@ -12,6 +12,11 @@ export function syncMemoryModelCatalog(
   const assignments = { ...record(root.modelAssignments) };
   const assignment = { ...record(assignments[mode]) };
   const routing = record(memory.roleRouting);
+  if (mode === "account") {
+    // Platform accounts expose dedicated summary and evolution models.
+    routing.summary = "fixed";
+    routing.evolution = "fixed";
+  }
   const touchedRouting = Object.prototype.hasOwnProperty.call(patch, "roleRouting");
 
   if (touchedRouting || Object.prototype.hasOwnProperty.call(patch, "evolution")) {
@@ -38,6 +43,7 @@ export function syncMemoryModelCatalog(
     assignmentKey: "memorySummary" | "memoryEvolution",
     capability: "memory_summary" | "memory_evolution"
   ): void {
+    if (mode === "account" && role === "summary") return;
     if (routing[role] !== "fixed") {
       const agent = record(assignment.agent);
       assignment[assignmentKey] = role === "evolution"

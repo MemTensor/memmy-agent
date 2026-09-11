@@ -8,7 +8,7 @@ import { createStorageBackend, type StorageBackend } from "../storage/backend.js
 import { loadMemmyConfig } from "../config/index.js";
 import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
 import { MemoryService } from "../service/memory-service.js";
-import { listenMemoryHttpServer } from "./http.js";
+import { closeMemoryHttpServer, listenMemoryHttpServer } from "./http.js";
 import { loadCloudServiceEnv } from "../cli/load-env.js";
 import { requestMemoryServiceRestart } from "./service-restart.js";
 import { MEMORY_PROTOCOL_VERSION, MEMORY_SERVICE_VERSION } from "../version.js";
@@ -17,6 +17,35 @@ const logger = createMemoryLogger("server");
 
 export async function main(argv = process.argv.slice(2)): Promise<void> {
     loadCloudServiceEnv();
+    let shuttingDown = false;
+    let stopService: (() => void) | undefined;
+    const shutdown = () => {
+        shuttingDown = true;
+        stopService?.();
+    };
+    process.on("SIGINT", shutdown);
+    process.on("SIGTERM", shutdown);
+    try {
+        while (!shuttingDown) {
+            const restart = await runMemoryService(argv, {
+                shutdown,
+                setStopService(stop) {
+                    stopService = stop;
+                    if (shuttingDown) stop();
+                }
+            });
+            if (!restart) break;
+        }
+    } finally {
+        process.off("SIGINT", shutdown);
+        process.off("SIGTERM", shutdown);
+    }
+}
+
+async function runMemoryService(argv: string[], lifecycle: {
+    shutdown(): void;
+    setStopService(stop: () => void): void;
+}): Promise<boolean> {
     const options = parseServeArgs(argv);
     const { config, path: configPath } = loadMemmyConfig(options.configPath);
     const host = options.host ?? process.env.MEMMY_MEMORY_HOST ?? process.env.MEMORY_SERVICE_HOST ?? "127.0.0.1";
@@ -39,11 +68,12 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     let sqliteLock: SqliteServerLock | undefined;
     let backend: StorageBackend | undefined;
     let server: Server | undefined;
-    let requestShutdown: (() => void) | undefined;
+    let requestShutdown!: () => void;
+    let restartRequested = false;
     const shutdownRequested = new Promise<void>((resolveShutdown) => {
         requestShutdown = resolveShutdown;
     });
-    const handleShutdownSignal = () => requestShutdown?.();
+    lifecycle.setStopService(requestShutdown);
 
     try {
         sqliteLock = config.storage.backend === "openmem-cloud-rest"
@@ -67,8 +97,13 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
             host,
             port,
             timeZone: config.timeZone,
-            onShutdownRequested: () => requestShutdown?.(),
-            onRestartRequested: requestMemoryServiceRestart,
+            onShutdownRequested: lifecycle.shutdown,
+            onRestartRequested: () => requestMemoryServiceRestart({
+                restartLocal: () => {
+                    restartRequested = true;
+                    requestShutdown();
+                }
+            }),
             auth: config.storage.token
                 ? { localServiceToken: config.storage.token }
                 : { allowAnonymous: true },
@@ -95,28 +130,17 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
             mode: config.storage.mode,
             storageBackend: config.storage.backend
         });
-        process.once("SIGINT", handleShutdownSignal);
-        process.once("SIGTERM", handleShutdownSignal);
         await shutdownRequested;
     } finally {
-        process.off("SIGINT", handleShutdownSignal);
-        process.off("SIGTERM", handleShutdownSignal);
         if (server) {
-            await closeHttpServer(server);
+            await closeMemoryHttpServer(server);
         }
         backend?.close();
         removeRuntimeState(serviceHome);
         sqliteLock?.release();
         serviceLock.release();
     }
-}
-
-async function closeHttpServer(server: Server): Promise<void> {
-    if (!server.listening) return;
-    await new Promise<void>((resolveClose, rejectClose) => {
-        server.close((error) => error ? rejectClose(error) : resolveClose());
-        server.closeAllConnections();
-    });
+    return restartRequested;
 }
 
 export interface SqliteServerLock {
@@ -173,6 +197,7 @@ function acquireLockFile(lockPath: string, payload: Record<string, unknown>): Sq
             const release = () => {
                 if (released) return;
                 released = true;
+                process.off("exit", release);
                 try {
                     unlinkSync(lockPath);
                 } catch {

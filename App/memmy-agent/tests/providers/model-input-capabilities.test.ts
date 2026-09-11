@@ -3,6 +3,7 @@ import {
   coversInputModalities,
   defineModelInputCapabilities,
   getModelInputModalities,
+  hasDeclaredInputModalities,
   MODEL_INPUT_CAPABILITIES,
   MODEL_INPUT_CAPABILITIES_REVIEWED_AT,
   requiredInputModalities,
@@ -43,6 +44,17 @@ describe("model input capabilities", () => {
     expect(getModelInputModalities(" gpt-5.6 ")).toEqual(["text"]);
     expect(getModelInputModalities("gpt-5.6-unknown-snapshot")).toEqual(["text"]);
     expect(getModelInputModalities(null)).toEqual(["text"]);
+  });
+
+  it("separates an unknown model from one the catalog declares text-only", () => {
+    expect(hasDeclaredInputModalities("deepseek-v4-pro")).toBe(true);
+    expect(hasDeclaredInputModalities("gpt-5.6")).toBe(true);
+    expect(hasDeclaredInputModalities("Qwen3-27B")).toBe(false);
+    expect(hasDeclaredInputModalities("Gpt-5.6")).toBe(false);
+    expect(hasDeclaredInputModalities("gpt-5.6-unknown-snapshot")).toBe(false);
+    expect(hasDeclaredInputModalities("toString")).toBe(false);
+    expect(hasDeclaredInputModalities(null)).toBe(false);
+    expect(hasDeclaredInputModalities(undefined)).toBe(false);
   });
 
   it("rejects duplicate model keys instead of overwriting them", () => {

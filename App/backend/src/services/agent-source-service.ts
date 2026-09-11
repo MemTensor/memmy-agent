@@ -46,7 +46,7 @@ import {
 } from "./managed-agent-history.js";
 import {
   orderedTurns,
-  splitTurn,
+  renderTurnClipped,
   stableTurnIdentity,
   isCompleteTurn,
   legacyTurnId,
@@ -583,7 +583,7 @@ async function scanPersistent(
         store.saveMeta({ jobId: store.getMeta()?.jobId ?? jobId, sourceId: store.getMeta()?.sourceId ?? requestedSourceId, mode: stage.mode, phase: "prepare", createdAt: store.getMeta()?.createdAt ?? now(), updatedAt: now() });
         const sourceState = store.getSourceState(stage.sourceId);
         store.saveSourceState({ ...(sourceState ?? { sourceId: stage.sourceId, mode: stage.mode, messageCount: store.count(stage.sourceId), resultCount: store.resultCount(stage.sourceId), errorCount: stage.scanErrorCount, updatedAt: now() }), phase: "prepare", updatedAt: now() });
-        await preparePersistentSource(options, store, stage.sourceId, stage.mode);
+        await preparePersistentSource(options, store, stage.sourceId, stage.mode, stage.since);
       }
       store.selectInitialTurns(stages.map((stage) => stage.sourceId), INITIAL_GLOBAL_MEMORY_LIMIT, INITIAL_ABSENT_SOURCE_MEMORY_LIMIT);
     }
@@ -639,7 +639,10 @@ async function stagePersistentSource(
     for await (const message of adapter.scan({
       since,
       order: scanOptions.order ?? (mode === "initial_subset" ? "recent_first" : "source_default"),
-      fullHistory: true,
+      // Only explicit full scans may bypass the incremental boundary. If an
+      // incremental scan streams every historical message, an active long
+      // conversation can make the scanner re-import its entire history.
+      fullHistory: mode === "full",
       signal: scanOptions.signal,
       onProgress: (progress) => emitProgress(scanOptions, { ...progress, phase: "scan" })
     })) {
@@ -697,7 +700,7 @@ async function ingestPersistentStagedSource(
     store.saveMeta({ jobId: store.getMeta()?.jobId ?? scanOptions.scanJobId ?? "", sourceId: store.getMeta()?.sourceId ?? sourceId, mode, phase: "prepare", createdAt: store.getMeta()?.createdAt ?? now(), updatedAt: now() });
     const sourceState = store.getSourceState(sourceId);
     store.saveSourceState({ ...(sourceState ?? { sourceId, mode, messageCount: store.count(sourceId), resultCount: store.resultCount(sourceId), errorCount: stage.scanErrorCount, updatedAt: now() }), phase: "prepare", updatedAt: now() });
-    await preparePersistentSource(options, store, sourceId, mode);
+    await preparePersistentSource(options, store, sourceId, mode, since);
     if (mode === "initial_subset") store.selectInitialTurns([sourceId], INITIAL_SOURCE_MEMORY_LIMIT, 0);
   }
   store.saveMeta({ jobId: store.getMeta()?.jobId ?? scanOptions.scanJobId ?? "", sourceId: store.getMeta()?.sourceId ?? sourceId, mode, phase: "ingest", createdAt: store.getMeta()?.createdAt ?? now(), updatedAt: now() });
@@ -726,7 +729,7 @@ async function ingestPersistentStagedSource(
   };
 }
 
-async function preparePersistentSource(options: CreateAgentSourceServiceOptions, store: AppAgentSourceScanStore, sourceId: string, mode: AgentSourceScanMode): Promise<void> {
+async function preparePersistentSource(options: CreateAgentSourceServiceOptions, store: AppAgentSourceScanStore, sourceId: string, mode: AgentSourceScanMode, since?: string): Promise<void> {
   let cursor: { conversationId: string; createdAt: string; messageId: string; ordinal: number } | undefined;
   let currentId: string | null = null;
   let currentTurn: ConversationMessage[] = [];
@@ -747,7 +750,9 @@ async function preparePersistentSource(options: CreateAgentSourceServiceOptions,
       firstCreatedAt: firstMessage.createdAt,
       lastMessageId: lastMessage.messageId,
       lastCreatedAt: lastMessage.createdAt,
-      selected: true
+      // A changed conversation must not cause all of its historical turns to
+      // be imported again. Select only turns at or after the scan boundary.
+      selected: mode !== "incremental" || !since || isAtOrAfter(lastMessage.createdAt, since)
     });
     turnIndex += 1;
   };
@@ -791,6 +796,12 @@ async function preparePersistentSource(options: CreateAgentSourceServiceOptions,
   }
   flushTurn();
   if (currentId && latest) flush();
+}
+
+function isAtOrAfter(value: string, boundary: string): boolean {
+  const valueAt = Date.parse(value);
+  const boundaryAt = Date.parse(boundary);
+  return !Number.isFinite(valueAt) || !Number.isFinite(boundaryAt) || valueAt >= boundaryAt;
 }
 
 function hashMetaString(message: ConversationMessage, key: string): string | undefined {
@@ -849,52 +860,45 @@ async function ingestPersistentSource(
     const selectedTurn = store.getTurnMeta(sourceId, turn.conversationId, stableTurnIdentity(turn));
     if (selectedTurn && !selectedTurn.selected) continue;
     let turnSucceeded = true;
-    // Leave ample room for JSON escaping and the add-memory envelope while
-    // keeping every request below the 1 MiB wire limit.
-    const parts = splitTurn(turn, 4000, 512 * 1024);
-    for (const part of parts) {
-      const contentHash = createHash("sha256").update(part.content).digest("hex");
-      const requestId = parts.length === 1
-        ? legacyTurnRequestId(turn)
-        : createHash("sha256").update([stableTurnIdentity(turn), String(part.partIndex), contentHash].join("\u0000")).digest("hex");
-      const turnId = parts.length === 1 ? legacyTurnId(turn) : `${sourceId}:${part.parentTurnId}:${part.partIndex}`;
-      try {
-        const added = await options.memoryClient.addMemory({
-          requestId,
-          adapterId: `agent-source:${sourceId}`,
-          content: part.content,
-          layer: "L1",
-          title: firstTurnLine(part.messages) ?? `${sourceId} conversation`,
-          tags: ["agent-source", sourceId],
-          source: sourceId,
-          turnId,
-          createdAt: part.messages[0]!.createdAt,
-          deferProcessing: true
-        });
-        if (added.duplicate) deduped += part.messages.length;
-        else {
-          memoryIdCount += 1;
-          if (memoryIds.length < 1000) memoryIds.push(added.id);
-          pendingIds.push(added.id);
-          if (pendingIds.length >= IMPORT_PROCESSING_COHORT_SIZE) {
-            const cohort = pendingIds.splice(0, pendingIds.length);
-            const failures = await processPendingImportSummaries(options, cohort, { ...scanOptions, progressSourceId: sourceId });
-            if (failures.length > 0) activeConversationFailed = true;
-            const mapped = failures.map((failure) => ({ conversationId: failure.memoryId, reason: failure.reason }));
-            errorCount += mapped.length;
-            errors.push(...mapped.slice(0, Math.max(0, 1000 - errors.length)));
-            for (const failure of failures) store.saveResult({ sourceId, conversationId: failure.memoryId, error: failure.reason });
-          }
+    // One turn is one memory. Splitting an agentic turn fans a single exchange
+    // out into hundreds of near-empty tool-call fragments, so an oversized turn
+    // is clipped to the wire budget instead of being fanned out.
+    try {
+      const added = await options.memoryClient.addMemory({
+        requestId: legacyTurnRequestId(turn),
+        adapterId: `agent-source:${sourceId}`,
+        content: renderTurnClipped(turn.messages),
+        layer: "L1",
+        title: firstTurnLine(turn.messages) ?? `${sourceId} conversation`,
+        tags: ["agent-source", sourceId],
+        source: sourceId,
+        turnId: legacyTurnId(turn),
+        createdAt: turn.messages[0]!.createdAt,
+        deferProcessing: true
+      });
+      if (added.duplicate) deduped += turn.messages.length;
+      else {
+        memoryIdCount += 1;
+        if (memoryIds.length < 1000) memoryIds.push(added.id);
+        pendingIds.push(added.id);
+        if (pendingIds.length >= IMPORT_PROCESSING_COHORT_SIZE) {
+          const cohort = pendingIds.splice(0, pendingIds.length);
+          const failures = await processPendingImportSummaries(options, cohort, { ...scanOptions, progressSourceId: sourceId });
+          if (failures.length > 0) activeConversationFailed = true;
+          const mapped = failures.map((failure) => ({ conversationId: failure.memoryId, reason: failure.reason }));
+          errorCount += mapped.length;
+          errors.push(...mapped.slice(0, Math.max(0, 1000 - errors.length)));
+          for (const failure of failures) store.saveResult({ sourceId, conversationId: failure.memoryId, error: failure.reason });
         }
-        store.saveResult({ sourceId, conversationId: turn.conversationId, memoryId: added.id });
-      } catch (error) {
-        turnSucceeded = false;
-        activeConversationFailed = true;
-        const reason = error instanceof Error ? error.message : "Agent source ingestion failed";
-        errorCount += 1;
-        if (errors.length < 1000) errors.push({ conversationId: turn.conversationId, reason });
-        store.saveResult({ sourceId, conversationId: turn.conversationId, error: reason });
       }
+      store.saveResult({ sourceId, conversationId: turn.conversationId, memoryId: added.id });
+    } catch (error) {
+      turnSucceeded = false;
+      activeConversationFailed = true;
+      const reason = error instanceof Error ? error.message : "Agent source ingestion failed";
+      errorCount += 1;
+      if (errors.length < 1000) errors.push({ conversationId: turn.conversationId, reason });
+      store.saveResult({ sourceId, conversationId: turn.conversationId, error: reason });
     }
     if (!turnSucceeded) activeConversationFailed = true;
     emitProgress(scanOptions, { sourceId, phase: "add", current: memoryIds.length + deduped, total: store.count(sourceId), message: "Adding raw memories" });

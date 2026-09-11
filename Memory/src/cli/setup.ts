@@ -330,8 +330,10 @@ function setupMemmyMemoryConfig(
     userId: optionalString(existing.userId) ?? options.appUserId ?? "local-user",
     roleRouting: {
       ...roleRouting,
-      summary: memoryRoleRouting(roleRouting.summary),
-      evolution: memoryRoleRouting(roleRouting.evolution)
+      // Account mode has platform-owned models for both memory roles. Never
+      // let either role silently inherit the agent chat model.
+      summary: options.accountMode ? "fixed" : memoryRoleRouting(roleRouting.summary),
+      evolution: options.accountMode ? "fixed" : memoryRoleRouting(roleRouting.evolution)
     },
     storage: {
       ...storage,

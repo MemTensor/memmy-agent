@@ -545,6 +545,12 @@ export async function writeAccountModelProjectionToMemmyConfig(
       ? { ...existingAccountProvider.endpoints }
       : {};
     const existingPlatform = isRecord(existingEndpoints.platform) ? existingEndpoints.platform : {};
+    const existingMemory = isRecord(config.memmyMemory) ? config.memmyMemory : {};
+    const existingRoleRouting = isRecord(existingMemory.roleRouting) ? existingMemory.roleRouting : {};
+    let memoryConfigAffected = existingRoleRouting.summary !== "fixed"
+      || existingRoleRouting.evolution !== "fixed"
+      || existingString(existingAccountProvider.apiKey) !== effectiveCloudUuid
+      || existingString(existingAccountProvider.ownerAccountId) !== ownerAccountId;
     providers[MEMMY_ACCOUNT_PROVIDER] = {
       ...existingAccountProvider,
       ownerAccountId,
@@ -584,13 +590,81 @@ export async function writeAccountModelProjectionToMemmyConfig(
     config.modelPresets = presets;
     updateAccountAssignment(config, ownerAccountId, presetIds);
 
+    const memory = { ...existingMemory };
+    const roleRouting = { ...existingRoleRouting };
+    const projectedAccountProvider = asRecord(providers[MEMMY_ACCOUNT_PROVIDER])!;
+    const projectedPlatformEndpoint = asRecord(asRecord(projectedAccountProvider.endpoints)?.platform)!;
+    const accountApiBase = existingString(projectedPlatformEndpoint.apiBase)!;
+    const accountApiKey = existingString(projectedPlatformEndpoint.apiKey)
+      ?? existingString(projectedAccountProvider.apiKey)!;
+    const accountConnection = {
+      provider: "openai_compatible",
+      sourceProvider: MEMMY_ACCOUNT_PROVIDER,
+      endpoint: accountApiBase,
+      apiKey: accountApiKey
+    };
+    const accountEmbeddingIsLocal = existingString(
+      asRecord(asRecord(config.modelAssignments)?.account)?.embedding
+    ) === BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID;
+    const previousEmbedding = isRecord(existingMemory.embedding) ? existingMemory.embedding : {};
+
+    // Account mode owns dedicated models for both memory roles. Persist the
+    // route and the resolved connections so a freshly installed config cannot
+    // inherit agent_chat or retain a stale BYOK memory endpoint.
+    roleRouting.summary = "fixed";
+    roleRouting.evolution = "fixed";
+    memory.userId = ownerAccountId;
+    memory.roleRouting = roleRouting;
+    memory.summary = {
+      ...withoutMemoryConnection(previousMemoryRecord(existingMemory.summary)),
+      ...accountConnection,
+      model: ACCOUNT_MODELS.memory_summary
+    };
+    memory.evolution = {
+      ...withoutMemoryConnection(previousMemoryRecord(existingMemory.evolution)),
+      ...accountConnection,
+      model: ACCOUNT_MODELS.memory_evolution
+    };
+    memory.embedding = accountEmbeddingIsLocal
+      ? { ...withoutMemoryConnection(previousEmbedding), mode: "local", provider: "local" }
+      : {
+          ...withoutMemoryConnection(previousEmbedding),
+          ...accountConnection,
+          model: ACCOUNT_MODELS.embedding,
+          mode: "cloud"
+        };
+    memoryConfigAffected = memoryConfigAffected
+      || existingString(existingMemory.userId) !== ownerAccountId
+      || !accountMemoryConnectionMatches(
+        existingMemory.summary,
+        ACCOUNT_MODELS.memory_summary,
+        accountApiBase,
+        accountApiKey
+      )
+      || !accountMemoryConnectionMatches(
+        existingMemory.evolution,
+        ACCOUNT_MODELS.memory_evolution,
+        accountApiBase,
+        accountApiKey
+      )
+      || (accountEmbeddingIsLocal
+        ? previousEmbedding.mode !== "local" || previousEmbedding.provider !== "local"
+        : previousEmbedding.mode !== "cloud"
+          || !accountMemoryConnectionMatches(
+            previousEmbedding,
+            ACCOUNT_MODELS.embedding,
+            accountApiBase,
+            accountApiKey
+          ));
+    config.memmyMemory = memory;
+
     const agents = isRecord(config.agents) ? { ...config.agents } : {};
     const defaults = isRecord(agents.defaults) ? { ...agents.defaults } : {};
     const currentDefault = existingString(defaults.modelPreset);
     if (!currentDefault || !isRecord(presets[currentDefault])) defaults.modelPreset = presetIds.agent;
     agents.defaults = defaults;
     config.agents = agents;
-    return { memoryConfigAffected: false };
+    return { memoryConfigAffected };
   });
   return { changed: result.changed, memoryConfigAffected: result.value.memoryConfigAffected };
 }
@@ -924,6 +998,36 @@ function normalizeChannelNameForConfig(value: string): string {
 
 function existingString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+const MEMORY_CONNECTION_FIELDS = [
+  "provider", "sourceProvider", "vendor", "endpoint", "apiBase", "baseUrl",
+  "model", "modelId", "apiKey", "extraHeaders", "extraBody", "custom",
+  "actualModelContext", "selectionError"
+] as const;
+
+function previousMemoryRecord(value: unknown): Record<string, unknown> {
+  return isRecord(value) ? value : {};
+}
+
+function withoutMemoryConnection(value: Record<string, unknown>): Record<string, unknown> {
+  const next = { ...value };
+  for (const key of MEMORY_CONNECTION_FIELDS) delete next[key];
+  return next;
+}
+
+function accountMemoryConnectionMatches(
+  value: unknown,
+  model: string,
+  endpoint: string,
+  apiKey: string
+): boolean {
+  const memory = previousMemoryRecord(value);
+  return memory.provider === "openai_compatible"
+    && memory.sourceProvider === MEMMY_ACCOUNT_PROVIDER
+    && memory.endpoint === endpoint
+    && memory.model === model
+    && memory.apiKey === apiKey;
 }
 
 /**

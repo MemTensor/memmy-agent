@@ -95,7 +95,7 @@ describe("account model projection current catalog", () => {
       userId: "owner-a"
     }, file);
 
-    expect(result).toEqual({ changed: true, memoryConfigAffected: false });
+    expect(result).toEqual({ changed: true, memoryConfigAffected: true });
     const saved = await readConfig(file);
     expect(saved.providers.memmy_account).toMatchObject({
       ownerAccountId: "owner-a",
@@ -118,6 +118,31 @@ describe("account model projection current catalog", () => {
       });
     }
     expect(saved.modelAssignments.byok).toEqual(beforeByok);
+    expect(saved.memmyMemory).toMatchObject({
+      userId: "owner-a",
+      roleRouting: { summary: "fixed", evolution: "fixed" },
+      summary: {
+        provider: "openai_compatible",
+        sourceProvider: "memmy_account",
+        endpoint: expect.stringContaining("/api/agentExternal/v1"),
+        model: "memory_summary",
+        apiKey: "cloud-token"
+      },
+      evolution: {
+        provider: "openai_compatible",
+        sourceProvider: "memmy_account",
+        endpoint: expect.stringContaining("/api/agentExternal/v1"),
+        model: "memory_evolution",
+        apiKey: "cloud-token"
+      },
+      embedding: {
+        mode: "cloud",
+        provider: "openai_compatible",
+        sourceProvider: "memmy_account",
+        model: "embedding",
+        apiKey: "cloud-token"
+      }
+    });
     expect(saved.modelAssignments.account).toMatchObject({
       ownerAccountId: "owner-a",
       agent: {
