@@ -71,8 +71,8 @@ For complete installation and configuration instructions, see the [Getting Start
 #### 1. Desktop App (Recommended)
 
 <p align="center">
-  <img src="docs/assets/first-scan-en.png" width="58%" alt="First scan">
-  <img src="docs/assets/first-report-en.png" width="38%" alt="First Meeting Report">
+  <img src="docs/assets/first-scan-en.png" width="59%" align="top" style="vertical-align: top;" alt="First scan">
+  <img src="docs/assets/first-report-en.png" width="36%" align="top" style="vertical-align: top;" alt="First Meeting Report">
 </p>
 
 Download Memmy from the [official website](https://memmy.bot/) or [GitHub Releases](https://github.com/MemTensor/memmy-agent/releases).
