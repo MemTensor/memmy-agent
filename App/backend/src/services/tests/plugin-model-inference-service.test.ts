@@ -88,6 +88,133 @@ describe("plugin model inference Host service", () => {
     expect(bodies[4]).toMatchObject(defaults);
   });
 
+  it.each([
+    {
+      name: "DeepSeek V4",
+      provider: "deepseek",
+      endpoint: "https://api.deepseek.example/v1",
+      model: "deepseek-v4-flash",
+      expected: { thinking: { type: "disabled" }, max_tokens: 1100 },
+      absent: ["enable_thinking", "reasoning_effort", "max_completion_tokens"]
+    },
+    {
+      name: "GLM",
+      provider: "zhipu",
+      endpoint: "https://open.bigmodel.cn/api/paas/v4",
+      model: "glm-5-flash",
+      expected: { thinking: { type: "disabled" }, max_tokens: 1100 },
+      absent: ["enable_thinking", "reasoning_effort", "max_completion_tokens"]
+    },
+    {
+      name: "GPT with disable support",
+      provider: "openai",
+      endpoint: "https://api.openai.com/v1",
+      model: "gpt-5.1",
+      expected: { reasoning_effort: "none", max_completion_tokens: 1100 },
+      absent: ["enable_thinking", "thinking", "max_tokens", "temperature"]
+    },
+    {
+      name: "OpenRouter",
+      provider: "openai",
+      endpoint: "https://openrouter.ai/api/v1",
+      model: "anthropic/claude-sonnet-4",
+      expected: { reasoning: { effort: "none" }, max_tokens: 1100 },
+      absent: ["enable_thinking", "thinking", "reasoning_effort", "max_completion_tokens"]
+    }
+  ])("translates disabled thinking for $name without leaking shared reasoning defaults", async ({ provider, endpoint, model, expected, absent }) => {
+    const selection = resolved();
+    if (!selection.ok) throw new Error("fixture");
+    selection.context.provider = provider;
+    selection.context.model = model;
+    selection.provider.provider = provider;
+    selection.provider.apiBase = endpoint;
+    selection.provider.extraBody = {
+      reasoning_effort: "high",
+      reasoning: { effort: "high" },
+      thinking: { type: "enabled" },
+      enable_thinking: true,
+      max_tokens: 32_768,
+      max_completion_tokens: 65_536
+    };
+    let body: Record<string, unknown> = {};
+    const fetch = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: "{\"paragraph\":\"Synthetic prose\"}" }, finish_reason: "stop" }]
+      }));
+    });
+    const service = createPluginModelInferenceService({ resolveModel: async () => selection, fetch: fetch as typeof globalThis.fetch });
+    await service.invoke({
+      pluginId: "literature-review", callId: "disable-thinking", conversationId: "v", service: "model-inference",
+      input: { messages: [{ role: "user", content: "Write" }], thinkingMode: "disabled", maxOutputTokens: 1100 }
+    });
+    expect(body).toMatchObject(expected);
+    for (const key of absent) expect(body).not.toHaveProperty(key);
+  });
+
+  it("uses protocol-native disabled thinking controls for Claude, Gemini, and OpenAI Responses", async () => {
+    const call = { pluginId: "literature-review", callId: "native-thinking", conversationId: "v", service: "model-inference" };
+    const input = { messages: [{ role: "user" as const, content: "Write" }], thinkingMode: "disabled" as const, maxOutputTokens: 900 };
+
+    const anthropic = resolved();
+    if (!anthropic.ok) throw new Error("fixture");
+    anthropic.context.protocol = "anthropic-messages";
+    anthropic.context.model = "claude-sonnet-4";
+    anthropic.provider.protocol = "anthropic-messages";
+    anthropic.provider.extraBody = { thinking: { type: "enabled", budget_tokens: 4000 }, max_tokens: 8000 };
+    let anthropicBody: Record<string, unknown> = {};
+    const anthropicFetch = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      anthropicBody = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ content: [{ type: "text", text: "done" }], stop_reason: "end_turn" }));
+    });
+    await createPluginModelInferenceService({
+      resolveModel: async () => anthropic,
+      fetch: anthropicFetch as typeof globalThis.fetch
+    }).invoke({ ...call, input });
+    expect(anthropicBody).toMatchObject({ max_tokens: 900, thinking: { type: "disabled" } });
+
+    const gemini = resolved();
+    if (!gemini.ok) throw new Error("fixture");
+    gemini.context.protocol = "gemini-generate-content";
+    gemini.context.model = "gemini-2.5-flash";
+    gemini.provider.protocol = "gemini-generate-content";
+    gemini.provider.extraBody = { generationConfig: { topP: 0.8, thinkingConfig: { thinkingBudget: 4000 } } };
+    let geminiBody: Record<string, unknown> = {};
+    const geminiFetch = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      geminiBody = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({
+        candidates: [{ content: { parts: [{ text: "done" }] }, finishReason: "STOP" }]
+      }));
+    });
+    await createPluginModelInferenceService({
+      resolveModel: async () => gemini,
+      fetch: geminiFetch as typeof globalThis.fetch
+    }).invoke({ ...call, input });
+    expect(geminiBody).toMatchObject({
+      generationConfig: { topP: 0.8, maxOutputTokens: 900, thinkingConfig: { thinkingBudget: 0 } }
+    });
+
+    const responses = resolved();
+    if (!responses.ok) throw new Error("fixture");
+    responses.context.protocol = "openai-responses";
+    responses.context.model = "gpt-5.1";
+    responses.provider.protocol = "openai-responses";
+    responses.provider.extraBody = { reasoning: { effort: "high" } };
+    let responsesBody: Record<string, unknown> = {};
+    const responsesFetch = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      responsesBody = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ output_text: "done", status: "completed" }));
+    });
+    await createPluginModelInferenceService({
+      resolveModel: async () => responses,
+      fetch: responsesFetch as typeof globalThis.fetch
+    }).invoke({ ...call, input });
+    expect(responsesBody).toMatchObject({
+      max_output_tokens: 900,
+      reasoning: { effort: "none" }
+    });
+  });
+
   it("does not duplicate a timed out paragraph request, and honors the caller deadline", async () => {
     vi.useFakeTimers();
     try {
@@ -122,7 +249,7 @@ describe("plugin model inference Host service", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it("retries one transient empty model response before returning success", async () => {
+  it("uses one JSON compatibility fallback even when the plugin disables ordinary retries", async () => {
     const fetch = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({
         choices: [{ message: { content: "" }, finish_reason: "stop" }]
@@ -138,7 +265,7 @@ describe("plugin model inference Host service", () => {
 
     await expect(service.invoke({
       pluginId: "literature-review", callId: "retry-empty", conversationId: "conversation-1", service: "model-inference",
-      input: { messages: [{ role: "user", content: "Check continuity" }], responseFormat: "json" }
+      input: { messages: [{ role: "user", content: "Check continuity" }], responseFormat: "json", maxAttempts: 1 }
     })).resolves.toMatchObject({ content: "recovered" });
     expect(fetch).toHaveBeenCalledTimes(2);
     const firstBody = JSON.parse(String(fetch.mock.calls[0]?.[1]?.body));

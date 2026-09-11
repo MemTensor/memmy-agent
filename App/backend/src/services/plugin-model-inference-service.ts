@@ -77,7 +77,10 @@ export function createPluginModelInferenceService(options: CreatePluginModelInfe
       const maxAttempts = input.maxAttempts === undefined ? configuredAttempts : Math.min(configuredAttempts, input.maxAttempts);
       let lastError: unknown;
       let attemptInput = input;
-      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      let remainingAttempts = maxAttempts;
+      let usedJsonCompatibilityFallback = false;
+      while (remainingAttempts > 0) {
+        remainingAttempts -= 1;
         try {
           throwIfCallerAborted(call.signal);
           const timeoutMs = Math.min(
@@ -87,16 +90,24 @@ export function createPluginModelInferenceService(options: CreatePluginModelInfe
           return await infer(resolved, attemptInput, fetchImpl, timeoutMs, call.signal);
         } catch (error) {
           lastError = error;
-          if (attempt >= maxAttempts || !isRetryableServiceError(error)) throw error;
           // Some OpenAI-compatible gateways occasionally return an empty choice
           // when response_format=json_object is requested. The prompt still asks
           // for JSON, so retrying without the transport-level JSON constraint is
-          // a safe compatibility fallback and keeps credentials inside the Host.
-          if (serviceErrorCode(error) === "model_empty_response" && attemptInput.responseFormat === "json") {
+          // a safe, single compatibility fallback. It is transport negotiation,
+          // so it remains available even when the plugin disables ordinary retries.
+          const canUseJsonFallback = !usedJsonCompatibilityFallback
+            && serviceErrorCode(error) === "model_empty_response"
+            && attemptInput.responseFormat === "json";
+          if (canUseJsonFallback) {
+            usedJsonCompatibilityFallback = true;
             attemptInput = { ...attemptInput, responseFormat: "text" };
+            remainingAttempts += 1;
+          } else if (remainingAttempts <= 0 || !isRetryableServiceError(error)) {
+            throw error;
           }
           const baseDelayMs = Math.max(0, Math.min(30_000, options.retryBaseDelayMs ?? 250));
-          const exponentialDelayMs = baseDelayMs * (2 ** (attempt - 1));
+          const attemptsUsed = maxAttempts - remainingAttempts;
+          const exponentialDelayMs = baseDelayMs * (2 ** Math.max(0, attemptsUsed - 1));
           const jitterMs = baseDelayMs > 0 ? Math.floor(Math.random() * Math.max(1, baseDelayMs * 0.2)) : 0;
           await abortableDelay(exponentialDelayMs + jitterMs, call.signal);
         }
@@ -184,13 +195,19 @@ function requestForProtocol(
   const { context, provider } = resolved;
   const headers = { "content-type": "application/json", ...(provider.extraHeaders ?? {}) };
   const common = { method: "POST", signal };
+  const disableThinking = input.thinkingMode === "disabled";
+  const thinkingStrategy = disableThinking ? thinkingStrategyFor(resolved) : "inherit";
   if (context.protocol === "anthropic-messages") {
     const system = input.messages.filter((message) => message.role === "system").map((message) => message.content).join("\n\n");
+    const extraBody = thinkingStrategy === "anthropic-disabled"
+      ? withoutThinkingDefaults(provider.extraBody)
+      : { ...(provider.extraBody ?? {}) };
     return {
       url: endpoint(provider.apiBase, "/v1/messages"),
       init: { ...common, headers: { ...headers, "x-api-key": provider.apiKey ?? "", "anthropic-version": "2023-06-01" }, body: JSON.stringify({
         model: context.model, ...(system ? { system } : {}), messages: input.messages.filter((message) => message.role !== "system"),
-        max_tokens: maxTokens, temperature: input.temperature ?? 0.2, ...(provider.extraBody ?? {})
+        max_tokens: maxTokens, temperature: input.temperature ?? 0.2, ...extraBody,
+        ...(thinkingStrategy === "anthropic-disabled" ? { thinking: { type: "disabled" } } : {})
       }) }
     };
   }
@@ -198,40 +215,61 @@ function requestForProtocol(
     const url = new URL(endpoint(provider.apiBase, `/v1beta/models/${encodeURIComponent(context.model)}:generateContent`));
     if (provider.apiKey) url.searchParams.set("key", provider.apiKey);
     const system = input.messages.filter((message) => message.role === "system").map((message) => message.content).join("\n\n");
+    const extraBody = { ...(provider.extraBody ?? {}) };
+    const configuredGeneration = thinkingStrategy === "gemini-budget-zero" ? { ...record(extraBody.generationConfig) } : {};
+    if (thinkingStrategy === "gemini-budget-zero") {
+      delete configuredGeneration.thinkingConfig;
+      delete extraBody.generationConfig;
+    }
     return {
       url: url.href,
       init: { ...common, headers, body: JSON.stringify({
         ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
         contents: input.messages.filter((message) => message.role !== "system").map((message) => ({ role: message.role === "assistant" ? "model" : "user", parts: [{ text: message.content }] })),
-        generationConfig: { maxOutputTokens: maxTokens, temperature: input.temperature ?? 0.2, ...(input.responseFormat === "json" ? { responseMimeType: "application/json" } : {}) },
-        ...(provider.extraBody ?? {})
+        generationConfig: {
+          ...configuredGeneration,
+          maxOutputTokens: maxTokens,
+          temperature: input.temperature ?? 0.2,
+          ...(input.responseFormat === "json" ? { responseMimeType: "application/json" } : {}),
+          ...(thinkingStrategy === "gemini-budget-zero" ? { thinkingConfig: { thinkingBudget: 0 } } : {})
+        },
+        ...extraBody
       }) }
     };
   }
   if (context.protocol === "openai-responses") {
+    const extraBody = thinkingStrategy === "reasoning-none"
+      ? withoutThinkingDefaults(provider.extraBody)
+      : { ...(provider.extraBody ?? {}) };
     return {
       url: endpoint(provider.apiBase, "/v1/responses"),
       init: { ...common, headers: { ...headers, authorization: `Bearer ${provider.apiKey ?? ""}` }, body: JSON.stringify({
         model: context.model, input: input.messages, max_output_tokens: maxTokens,
-        ...(input.temperature !== undefined ? { temperature: input.temperature } : {}), ...(provider.extraBody ?? {})
+        ...(input.temperature !== undefined && !isOpenAiReasoningModel(modelSlug(context.model)) ? { temperature: input.temperature } : {}),
+        ...extraBody,
+        ...(thinkingStrategy === "reasoning-none" ? { reasoning: { effort: "none" } } : {})
       }) }
     };
   }
-  // Opt-in only. Do not send vendor-specific parameters to unrelated models,
-  // or mutate provider defaults shared with the main Agent and other plugins.
-  const extraBody = { ...(provider.extraBody ?? {}) };
-  const supportsQwenThinkingControl = /^qwen3\.(?:[5-9]|[1-9]\d+)-(?:flash|plus|max)(?:$|-)/iu.test(context.model)
+  // Translate the plugin-level intent into the selected endpoint's wire format.
+  // Unknown and always-on models receive no vendor-specific field.
+  const extraBody = disableThinking && thinkingStrategy !== "omit"
+    ? withoutThinkingDefaults(provider.extraBody)
+    : { ...(provider.extraBody ?? {}) };
+  const supportsQwenBudget = /^qwen3\.(?:[5-9]|[1-9]\d+)-(?:flash|plus|max)(?:$|-)/iu.test(context.model)
     && !/^qwen3\.[56]-max(?:$|-)/iu.test(context.model);
-  const disableThinking = input.thinkingMode === "disabled" && supportsQwenThinkingControl;
-  const boundedQwen = input.thinkingBudgetTokens !== undefined && supportsQwenThinkingControl;
+  const boundedQwen = !disableThinking && input.thinkingBudgetTokens !== undefined && supportsQwenBudget;
   let tokenLimits: Record<string, unknown> = { max_tokens: maxTokens };
   if (disableThinking) {
-    // Copy and override only this request; never modify the user's shared model settings.
-    for (const key of ["reasoning_effort", "thinking_budget", "thinking", "enable_thinking", "max_tokens", "max_completion_tokens"]) delete extraBody[key];
-    if (extraBody.chat_template_kwargs && typeof extraBody.chat_template_kwargs === "object") {
+    if (thinkingStrategy === "enable-thinking-false" && extraBody.chat_template_kwargs && typeof extraBody.chat_template_kwargs === "object") {
       extraBody.chat_template_kwargs = { ...record(extraBody.chat_template_kwargs), enable_thinking: false };
     }
-    tokenLimits = { enable_thinking: false, max_completion_tokens: maxTokens };
+    tokenLimits = {
+      ...thinkingFields(thinkingStrategy),
+      ...(usesMaxCompletionTokens(thinkingStrategy, context.model)
+        ? { max_completion_tokens: maxTokens }
+        : { max_tokens: maxTokens })
+    };
   } else if (boundedQwen) {
     delete extraBody.reasoning_effort;
     delete extraBody.thinking_budget;
@@ -245,10 +283,170 @@ function requestForProtocol(
   return {
     url: endpoint(provider.apiBase, "/v1/chat/completions"),
     init: { ...common, headers: { ...headers, authorization: `Bearer ${provider.apiKey ?? ""}` }, body: JSON.stringify({
-      model: context.model, messages: input.messages, ...tokenLimits, temperature: input.temperature ?? 0.2,
+      model: context.model, messages: input.messages, ...tokenLimits,
+      ...(!isOpenAiReasoningModel(modelSlug(context.model)) ? { temperature: input.temperature ?? 0.2 } : {}),
       ...(input.responseFormat === "json" ? { response_format: { type: "json_object" } } : {}), ...extraBody
     }) }
   };
+}
+
+type ThinkingStrategy =
+  | "inherit"
+  | "omit"
+  | "anthropic-disabled"
+  | "gemini-budget-zero"
+  | "reasoning-effort-none"
+  | "reasoning-none"
+  | "thinking-type-disabled"
+  | "thinking-adaptive-disabled"
+  | "enable-thinking-false";
+
+function thinkingStrategyFor(
+  resolved: Extract<ModelSelectionResolution, { ok: true }>
+): ThinkingStrategy {
+  const { context, provider } = resolved;
+  const slug = modelSlug(context.model);
+  if (context.protocol === "anthropic-messages") {
+    return isAnthropicThinkingCapableModel(slug) && !isAlwaysOnThinkingModel(slug)
+      ? "anthropic-disabled"
+      : "omit";
+  }
+  if (context.protocol === "gemini-generate-content") {
+    return /^gemini-2\.5(?!-pro)(?:[.-]|$)/u.test(slug) ? "gemini-budget-zero" : "omit";
+  }
+  if (context.protocol === "openai-responses") {
+    return isOpenAiReasoningModel(slug) && supportsOpenAiReasoningNone(slug)
+      ? "reasoning-none"
+      : "omit";
+  }
+  if (context.protocol !== "openai-chat-completions" && context.protocol !== "memmy-account") return "omit";
+  return openAiChatThinkingStrategy(context.provider, provider.apiBase, slug);
+}
+
+function openAiChatThinkingStrategy(vendorValue: string, endpointValue: string, slug: string): ThinkingStrategy {
+  if (isAlwaysOnThinkingModel(slug)) return "omit";
+  const vendor = vendorValue.trim().toLowerCase();
+  const endpoint = endpointValue.trim().toLowerCase();
+  const haystack = `${vendor} ${endpoint} ${slug}`;
+  if (haystack.includes("openrouter")) return "reasoning-none";
+  if (isAlibabaCompatibleEndpoint(endpoint)) {
+    return vendor === "minimax" || slug.includes("minimax")
+      ? "thinking-adaptive-disabled"
+      : "enable-thinking-false";
+  }
+  if (vendor === "qwen" || vendor === "dashscope") return "enable-thinking-false";
+  if (vendor === "minimax") {
+    return /^minimax-m3(?:[.-]|$)/u.test(slug) ? "thinking-adaptive-disabled" : "omit";
+  }
+  if ((vendor === "baidu" || vendor === "qianfan") && (slug.includes("ernie") || slug.includes("qwen"))) {
+    return "enable-thinking-false";
+  }
+  if (["deepseek", "zhipu", "kimi", "moonshot", "baidu", "qianfan", "doubao", "volcengine"].includes(vendor)) {
+    return "thinking-type-disabled";
+  }
+  if (
+    haystack.includes("dashscope") ||
+    haystack.includes("qwen")
+  ) {
+    return "enable-thinking-false";
+  }
+  if (haystack.includes("minimax")) return /^minimax-m3(?:[.-]|$)/u.test(slug) ? "thinking-adaptive-disabled" : "omit";
+  if (
+    haystack.includes("volces") ||
+    haystack.includes("volcengine") ||
+    haystack.includes("byteplus") ||
+    haystack.includes("deepseek") ||
+    haystack.includes("bigmodel") ||
+    haystack.includes("zhipu") ||
+    haystack.includes("moonshot") ||
+    haystack.includes("qianfan") ||
+    haystack.includes("xiaomimimo") ||
+    slug.includes("glm-") ||
+    slug.includes("kimi-k2.5") ||
+    slug.includes("kimi-k2.6") ||
+    slug.includes("kimi-k2.7") ||
+    slug.includes("k2.6-code-preview") ||
+    slug.includes("mimo-v2")
+  ) {
+    return "thinking-type-disabled";
+  }
+  if (isOpenAiReasoningModel(slug) && supportsOpenAiReasoningNone(slug)) return "reasoning-effort-none";
+  return "omit";
+}
+
+function thinkingFields(strategy: ThinkingStrategy): Record<string, unknown> {
+  switch (strategy) {
+    case "reasoning-effort-none": return { reasoning_effort: "none" };
+    case "reasoning-none": return { reasoning: { effort: "none" } };
+    case "thinking-type-disabled": return { thinking: { type: "disabled" } };
+    case "thinking-adaptive-disabled": return { thinking: { type: "disabled" } };
+    case "enable-thinking-false": return { enable_thinking: false };
+    default: return {};
+  }
+}
+
+function withoutThinkingDefaults(value: Readonly<Record<string, unknown>> | undefined): Record<string, unknown> {
+  const result = { ...(value ?? {}) };
+  for (const key of [
+    "reasoning_effort", "reasoning", "thinking_budget", "thinking",
+    "enable_thinking", "reasoning_split", "output_config",
+    "max_tokens", "max_completion_tokens", "max_output_tokens"
+  ]) delete result[key];
+  if (result.chat_template_kwargs && typeof result.chat_template_kwargs === "object") {
+    const template = { ...record(result.chat_template_kwargs) };
+    delete template.enable_thinking;
+    result.chat_template_kwargs = template;
+  }
+  return result;
+}
+
+function usesMaxCompletionTokens(strategy: ThinkingStrategy, model: string): boolean {
+  return strategy === "reasoning-effort-none"
+    || (strategy === "enable-thinking-false"
+      && /^qwen3\.(?:[5-9]|[1-9]\d+)-(?:flash|plus|max)(?:$|-)/iu.test(model)
+      && !/^qwen3\.[56]-max(?:$|-)/iu.test(model));
+}
+
+function isAlibabaCompatibleEndpoint(endpoint: string): boolean {
+  return endpoint.includes("dashscope") || endpoint.includes("aliyuncs.com") || endpoint.includes("alibabacloud.com");
+}
+
+function isOpenAiReasoningModel(slug: string): boolean {
+  return /^(o[134]\b|o[134][.-]|gpt-[5-9]\b|gpt-[5-9][.-])/u.test(slug);
+}
+
+function supportsOpenAiReasoningNone(slug: string): boolean {
+  const version = slug.match(/^gpt-(\d+)(?:\.(\d+))?/u);
+  if (!version) return false;
+  const major = Number(version[1]);
+  const minor = Number(version[2] ?? 0);
+  return major > 5 || (major === 5 && minor >= 1);
+}
+
+function isAnthropicThinkingCapableModel(slug: string): boolean {
+  return slug.includes("claude-3-7")
+    || /claude-(?:opus|sonnet|haiku)?-?4(?:[.-]|$)/u.test(slug)
+    || /claude-(?:opus|sonnet|haiku)?-?5(?:[.-]|$)/u.test(slug)
+    || slug.includes("fable")
+    || slug.includes("mythos");
+}
+
+function isAlwaysOnThinkingModel(slug: string): boolean {
+  return slug.includes("deepseek-r1")
+    || slug.includes("deepseek-reasoner")
+    || slug.startsWith("kimi-k2.7-code")
+    || slug.startsWith("qwq")
+    || (slug.includes("-thinking") && !slug.startsWith("ernie-"))
+    || /^qwen3\.[56]-max(?:$|-)/u.test(slug)
+    || slug === "qwen3.7-max-preview"
+    || slug.includes("qwen3.7-max-2026-05-17")
+    || /^minimax-m2(?:[.-]|$)/u.test(slug)
+    || slug.includes("fable")
+    || slug.includes("mythos");
+}
+
+function modelSlug(model: string): string {
+  return model.trim().toLowerCase().split("/").at(-1) ?? model.trim().toLowerCase();
 }
 
 function extractResponse(protocol: string, value: unknown): Omit<PluginModelInferenceResult, "model"> {
