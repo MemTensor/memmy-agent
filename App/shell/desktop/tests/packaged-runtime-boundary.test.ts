@@ -1262,9 +1262,13 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain("STAGED_APP_PATH");
     expect(mainSource).toContain("function shouldInstallWindowsUpdateInBackground");
     expect(mainSource).toContain("async function installWindowsUpdateInBackground");
-    expect(mainSource).toContain("launch-win-update-${Date.now()}.vbs");
+    expect(mainSource).toContain("launch-win-update-${Date.now()}.cmd");
     expect(mainSource).toContain("install-win-update-${Date.now()}.ps1");
-    expect(mainSource).toContain('const helper = spawn("wscript.exe"');
+    expect(mainSource).toContain("const comSpec = process.env.SystemRoot");
+    expect(mainSource).toContain('join(process.env.SystemRoot, "System32", "cmd.exe")');
+    expect(mainSource).toContain('const helper = spawn(comSpec, ["/D", "/C", launcherPath]');
+    expect(mainSource).not.toContain('spawn(process.env.ComSpec ?? "cmd.exe"');
+    expect(mainSource).not.toContain('spawn("wscript.exe"');
     expect(mainSource).toContain('import { createWindowsUpdateLauncherFile } from "./windows-update-launcher.js"');
     expect(mainSource).toContain("await writeFile(launcherPath, createWindowsUpdateLauncherFile([");
     expect(mainSource).toContain("$arguments = @('/S', '--updated', '/currentuser', ('/D=' + $appDir))");
@@ -1278,7 +1282,6 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain("-WindowStyle Hidden");
     expect(mainSource).not.toContain("powershell.exe -NoProfile -ExecutionPolicy Bypass -Command");
     expect(mainSource).not.toContain("install-win-update-${Date.now()}.cmd");
-    expect(mainSource).not.toContain('spawn(process.env.ComSpec ?? "cmd.exe"');
     expect(mainSource).not.toContain("findstr /R");
     expect(mainSource).not.toContain("for _ in {1..120}");
     expect(mainSource).not.toContain("for /L %%i in (1,1,120)");

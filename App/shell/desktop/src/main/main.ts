@@ -2676,7 +2676,7 @@ async function installWindowsUpdateInBackground(
   const updatesDirectory = resolveUpdatesDirectory();
   await mkdir(updatesDirectory, { recursive: true });
   const helperPath = join(updatesDirectory, `install-win-update-${Date.now()}.ps1`);
-  const launcherPath = join(updatesDirectory, `launch-win-update-${Date.now()}.vbs`);
+  const launcherPath = join(updatesDirectory, `launch-win-update-${Date.now()}.cmd`);
   const logPath = join(updatesDirectory, "win-update-install.log");
   if (options.showUpdatePrompt) {
     await writeWindowsUpdatePromptLanguage(resolveWindowsUpdatePromptLanguageFromAppSettings());
@@ -2704,7 +2704,14 @@ async function installWindowsUpdateInBackground(
   ]));
   await appendFile(logPath, `[${new Date().toISOString()}] queued Memmy Windows update helper "${helperPath}"\n`).catch(() => undefined);
 
-  const helper = spawn("wscript.exe", [launcherPath], {
+  // Resolve cmd.exe through SystemRoot (a kernel-set variable) rather than
+  // ComSpec, which any process can override before Memmy starts. Consistent
+  // with the generated CMD batch, which already hard-codes powershell.exe under
+  // %SystemRoot%\System32 rather than trusting PATH.
+  const comSpec = process.env.SystemRoot
+    ? join(process.env.SystemRoot, "System32", "cmd.exe")
+    : "cmd.exe";
+  const helper = spawn(comSpec, ["/D", "/C", launcherPath], {
     detached: true,
     stdio: "ignore",
     windowsHide: true
