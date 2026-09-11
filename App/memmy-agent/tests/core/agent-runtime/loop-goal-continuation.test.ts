@@ -160,6 +160,53 @@ describe("Goal continuation scheduling", () => {
     expect(scheduleGoalWork).not.toHaveBeenCalled();
   });
 
+  it("keeps an active Goal active when its exact Turn is cancelled", async () => {
+    const loop = makeLoop();
+    const goal = await createGoal(loop);
+    loop.goalRuntime.releaseTurn(SESSION_KEY, "turn-create");
+    const scheduleGoalWork = vi.spyOn(loop, "scheduleGoalWork");
+    const pauseAndCancel = vi.spyOn(loop.goalRuntime, "pauseAndCancel");
+    const controller = new AbortController();
+    let notifyRunnerStarted!: () => void;
+    const runnerStarted = new Promise<void>((resolve) => {
+      notifyRunnerStarted = resolve;
+    });
+    loop.runner.run = vi.fn(async (spec: AgentRunSpec) => {
+      notifyRunnerStarted();
+      await new Promise<void>((resolve) => {
+        spec.abortSignal?.addEventListener("abort", () => resolve(), { once: true });
+      });
+      return new AgentRunResult({
+        finalContent: "cancelled",
+        messages: spec.messages,
+        stopReason: "cancelled",
+        usage: { total_tokens: 7 },
+      });
+    });
+
+    const processing = loop.processMessage(new InboundMessage({
+      channel: "websocket",
+      chatId: "goal-chat",
+      senderId: "user",
+      content: "continue the active Goal",
+      metadata: { webui: true },
+    }), SESSION_KEY, {
+      abortSignal: controller.signal,
+      turnId: "turn-targeted-cancel",
+    });
+    await runnerStarted;
+    controller.abort();
+
+    await expect(processing).rejects.toMatchObject({ name: "TaskCancelledError" });
+    expect(loop.goalRuntime.get(SESSION_KEY)).toMatchObject({
+      goalId: goal.goalId,
+      status: "active",
+      tokensUsed: 7,
+    });
+    expect(pauseAndCancel).not.toHaveBeenCalled();
+    expect(scheduleGoalWork).not.toHaveBeenCalled();
+  });
+
   it("runs maxIterations continuations as distinct top-level Turns and stops on completed", async () => {
     const loop = makeLoop();
     const goal = await createGoal(loop);

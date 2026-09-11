@@ -1,7 +1,5 @@
 import {
   createHttpMemoryClient,
-  createMemosSqliteMemoryClient,
-  discoverMemosSqliteSources,
   type MemoryClient,
   type MemoryLayerConfig
 } from "../adapters/outbound/memory-client/index.js";
@@ -11,21 +9,14 @@ import {
 } from "../analytics/agent-source-analytics.js";
 import { createMemoryDesktopAddAnalytics } from "../analytics/memory-add-analytics.js";
 import { createAppStateStore, type AppStateStore } from "../infrastructure/app-state-store/index.js";
-import { createAgentSourceScanJournal, type AgentSourceScanJournal } from "../infrastructure/agent-source-scan-journal/index.js";
 import { createAgentSourceService } from "./agent-source-service.js";
 import { createBuiltinAgentSourceRegistry } from "./builtin-agent-source-registry.js";
 import { createBuiltinSkillTargetRegistry } from "./builtin-skill-target-registry.js";
 import { createIngestionService } from "./ingestion-service.js";
 import { createSkillDistributionService } from "./skill-distribution-service.js";
-import {
-  type AgentSourceScanProcessCommand,
-  type AgentSourceScanProcessData,
-  type AgentSourceScanProcessMessage,
-  isScanResumeStateReference,
-  type ScanResumeState,
-  type ScanResumeStateReference,
-  runAgentSourceScanJob
-} from "./agent-source-scan-runner.js";
+import { isScanResumeStateReference, type AgentSourceScanProcessCommand, type AgentSourceScanProcessData, type AgentSourceScanProcessMessage, runAgentSourceScanJob } from "./agent-source-scan-runner.js";
+import { dirname, join } from "node:path";
+import { migrateLegacyScanJournal } from "./agent-source-scan-migration.js";
 
 const DEFAULT_MEMORY_LAYER_TIMEOUT_MS = 20_000;
 
@@ -64,13 +55,21 @@ async function runProcess(data: AgentSourceScanProcessData): Promise<void> {
   let appStateStore: AppStateStore | null = null;
   try {
     appStateStore = createAppStateStore({ databasePath: data.databasePath });
-    const scanJournal = createAgentSourceScanJournal(appStateStore.db);
+    const legacyMigrationSucceeded = migrateLegacyScanJournal(
+      data.databasePath,
+      join(dirname(data.databasePath), "agent-source-scans", `${data.job.jobId}.sqlite`),
+      data.job.jobId
+    );
+    const preservedResume = data.job.resume && isScanResumeStateReference(data.job.resume) ? data.job.resume : null;
+    const preserveLegacyResume = Boolean(preservedResume && !legacyMigrationSucceeded);
     const memoryClient = createDefaultMemoryClient(process.env);
     const agentSources = createAgentSources(appStateStore, memoryClient);
     await runAgentSourceScanJob(
       {
         ...data.job,
-        resume: readResumeState(scanJournal, data.job.resume),
+        // The durable per-job store is the source of truth. Do not hydrate the
+        // legacy journal arrays into JavaScript while resuming an old job.
+        resume: null,
         controller
       },
       agentSources,
@@ -79,7 +78,7 @@ async function runProcess(data: AgentSourceScanProcessData): Promise<void> {
           postProcessMessage({ type: "progress", progress });
         },
         onResumeChanged(resume) {
-          postProcessMessage({ type: "resume", resume: resume ? writeResumeState(scanJournal, data, resume) : null });
+          postProcessMessage({ type: "resume", resume: preserveLegacyResume ? preservedResume : null });
         },
         onCompleted(results) {
           postProcessMessage({ type: "completed", results });
@@ -123,11 +122,16 @@ function createAgentSources(appStateStore: AppStateStore, memoryClient: MemoryCl
     skillDistributionService: createSkillDistributionService({
       targetRegistry: createBuiltinSkillTargetRegistry()
     }),
+    scanStoreDirectory: `${dataDirectoryForScanStore(appStateStore)}`,
     agentSourceAnalytics: createAgentSourceLifecycleAnalytics({
       getUserId: resolveAnalyticsUserId,
       getUserMode: resolveAnalyticsUserMode,
     }),
   });
+}
+
+function dataDirectoryForScanStore(appStateStore: AppStateStore): string {
+  return join(dirname(appStateStore.databasePath), "agent-source-scans");
 }
 
 function createDefaultMemoryClient(env: NodeJS.ProcessEnv): MemoryClient {
@@ -136,14 +140,7 @@ function createDefaultMemoryClient(env: NodeJS.ProcessEnv): MemoryClient {
     return createHttpMemoryClient(memoryLayerConfig);
   }
 
-  if (env.MEMMY_DISABLE_MEMOS_SQLITE !== "1") {
-    const sources = discoverMemosSqliteSources(env);
-    if (sources.length > 0) {
-      return createMemosSqliteMemoryClient({ sources });
-    }
-  }
-
-  throw new Error("MEMMY_MEMORY_LAYER_URL or a local Memmy memory SQLite source is required");
+  throw new Error("MEMMY_MEMORY_LAYER_URL is required");
 }
 
 function readMemoryLayerConfig(env: NodeJS.ProcessEnv): MemoryLayerConfig | null {
@@ -157,50 +154,6 @@ function readMemoryLayerConfig(env: NodeJS.ProcessEnv): MemoryLayerConfig | null
     token: env.MEMMY_MEMORY_LAYER_TOKEN ?? env.MEMMY_MEMORY_TOKEN ?? env.MEMORY_SERVICE_TOKEN ?? "",
     timeoutMs: Number.parseInt(env.MEMMY_MEMORY_LAYER_TIMEOUT_MS ?? String(DEFAULT_MEMORY_LAYER_TIMEOUT_MS), 10),
     maxRetries: Number.parseInt(env.MEMMY_MEMORY_LAYER_MAX_RETRIES ?? "3", 10)
-  };
-}
-
-function readResumeState(scanJournal: AgentSourceScanJournal, resume: AgentSourceScanProcessData["job"]["resume"]): ScanResumeState | null {
-  if (!resume) {
-    return null;
-  }
-
-  if (!isScanResumeStateReference(resume)) {
-    return resume;
-  }
-
-  return scanJournal.readResume(resume.jobId);
-}
-
-function writeResumeState(
-  scanJournal: AgentSourceScanJournal,
-  data: AgentSourceScanProcessData,
-  resume: ScanResumeState
-): ScanResumeStateReference {
-  scanJournal.writeResume({
-    jobId: data.job.jobId,
-    sourceId: data.job.sourceId,
-    mode: data.job.mode,
-    resume
-  });
-
-  if (resume.phase === "add") {
-    return {
-      storage: "sqlite",
-      phase: "add",
-      jobId: data.job.jobId,
-      sourceId: resume.collected[0]?.sourceId ?? data.job.sourceId,
-      messageCount: resume.collected.reduce((sum, source) => sum + source.messages.length, 0),
-      sourceCount: resume.collected.length
-    };
-  }
-
-  return {
-    storage: "sqlite",
-    phase: "summarize",
-    jobId: data.job.jobId,
-    sourceId: data.job.sourceId,
-    resultCount: resume.results.length
   };
 }
 

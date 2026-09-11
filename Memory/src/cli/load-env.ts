@@ -4,7 +4,7 @@
  */
 import {
   cloudServiceFromDesktopRuntimeManifest,
-} from "@memmy/local-api-contracts";
+} from "../contracts/desktop-runtime-manifest.js";
 import { config as loadDotenv } from "dotenv";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -55,7 +55,7 @@ export function loadCloudServiceEnv(options: {
   const moduleDir = options.moduleDir ?? dirname(fileURLToPath(import.meta.url));
   const packagedRuntime = isPackagedRuntimeModule(moduleDir);
   if (options.manifestPath !== undefined || packagedRuntime) {
-    const manifestPath = options.manifestPath ?? resolve(moduleDir, "../../../../main/desktop-edition.json");
+    const manifestPath = options.manifestPath ?? packagedManifestPath(moduleDir);
     if (!existsSync(manifestPath)) {
       throw new Error("Packaged desktop runtime manifest is missing");
     }
@@ -77,7 +77,17 @@ export function loadCloudServiceEnv(options: {
 }
 
 function isPackagedRuntimeModule(moduleDir: string): boolean {
-  return resolve(moduleDir).replace(/\\/g, "/").endsWith("/dist/runtime/memory/src/cli");
+  const normalized = resolve(moduleDir).replace(/\\/g, "/");
+  return normalized.endsWith("/dist/runtime/memory/src/cli")
+    || normalized.endsWith("/memory-runtime/dist/src/cli");
+}
+
+function packagedManifestPath(moduleDir: string): string {
+  const normalized = resolve(moduleDir).replace(/\\/g, "/");
+  if (normalized.endsWith("/memory-runtime/dist/src/cli")) {
+    return resolve(moduleDir, "../../../../app.asar/dist/main/desktop-edition.json");
+  }
+  return resolve(moduleDir, "../../../../main/desktop-edition.json");
 }
 
 loadCloudServiceEnv();

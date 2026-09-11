@@ -183,6 +183,7 @@ describe("PetPage helpers", () => {
           ...mockBootstrap.onboarding,
           completed: false,
           currentStep: "scan_permission_required" as const,
+          firstEncounterReportStatus: "shown" as const,
           completedAt: null
         }
       },
@@ -193,6 +194,41 @@ describe("PetPage helpers", () => {
         registeredAt: "2026-06-01T00:00:00.000Z"
       },
       guidanceCompleted: true
+    })).toBe("/main");
+  });
+
+  it("BYOK 尚无 Agent 模型时桌宠展开回到 API Key 配置", () => {
+    const bootstrap = {
+      ...mockBootstrap,
+      app: { ...mockBootstrap.app, userMode: "byok" as const },
+      onboarding: {
+        ...mockBootstrap.onboarding,
+        completed: true,
+        currentStep: "completed" as const,
+        firstEncounterReportStatus: "shown" as const,
+        completedAt: "2026-06-01T00:00:00.000Z"
+      }
+    };
+    const account = {
+      email: "",
+      phoneNumber: null,
+      nickname: "",
+      registeredAt: null
+    };
+
+    expect(resolvePetFullRoute({
+      bootstrap,
+      account,
+      modelConfig: {
+        catalog: { modelAssignments: { byok: { agent: { candidates: [] } } } }
+      }
+    })).toBe("/api-key");
+    expect(resolvePetFullRoute({
+      bootstrap,
+      account,
+      modelConfig: {
+        catalog: { modelAssignments: { byok: { agent: { candidates: ["local-agent"] } } } }
+      }
     })).toBe("/main");
   });
 

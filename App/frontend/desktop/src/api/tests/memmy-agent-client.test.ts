@@ -1974,6 +1974,49 @@ describe("memmy-agent client", () => {
     await expect(removal).resolves.toEqual({ outcome: "already_dequeued", revision: 8 });
   });
 
+  it("sends question answers directly and resolves their acknowledgement", async () => {
+    const sockets: FakeSocket[] = [];
+    const client = createMemmyAgentClient({
+      baseUrl: "https://agent.local:18980",
+      clientId: "frontend-test",
+      fetchFn: vi.fn(async () => json(bootstrap)) as typeof fetch,
+      webSocketFactory: (url) => {
+        const socket = new FakeSocket(url);
+        sockets.push(socket);
+        return socket;
+      }
+    });
+    const connection = await connectReady(client, sockets);
+    const requestId = "66666666-6666-4666-8666-666666666666";
+    const response = connection.respondToQuestion("chat-question", {
+      requestId,
+      answers: [{
+        questionId: "choice",
+        selectedOptionIds: ["yes"],
+        otherText: "details"
+      }]
+    }, 1);
+    const frame = JSON.parse(sockets[0]!.sent.at(-1)!);
+    expect(frame).toEqual({
+      type: "agent_question_response",
+      chat_id: "chat-question",
+      request_id: requestId,
+      answers: [{
+        question_id: "choice",
+        selected_option_ids: ["yes"],
+        other_text: "details"
+      }]
+    });
+
+    sockets[0]!.emit({
+      event: "agent_question_response_result",
+      chat_id: "chat-question",
+      request_id: requestId,
+      ok: true
+    });
+    await expect(response).resolves.toBeUndefined();
+  });
+
   it("sends one queue-steer control and terminates the original queued attempt", async () => {
     const sockets: FakeSocket[] = [];
     const client = createMemmyAgentClient({

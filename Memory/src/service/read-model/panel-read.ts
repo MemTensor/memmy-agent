@@ -454,7 +454,8 @@ export class PanelReadModel {
       const total = this.deps.repos.userMemories.countForPanel({
         userId,
         status,
-        query: input.q
+        query: input.q,
+        sourceAgent: input.sourceAgent
       });
       const totalPages = Math.max(1, Math.ceil(total / pageSize));
       const page = Math.min(requestedPage, totalPages);
@@ -463,6 +464,7 @@ export class PanelReadModel {
         userId,
         status,
         query: input.q,
+        sourceAgent: input.sourceAgent,
         limit: pageSize,
         offset
       });
@@ -533,7 +535,7 @@ export class PanelReadModel {
     };
   }
 
-  panelTasks(input: RequestEnvelope & { q?: string; page?: number }): {
+  panelTasks(input: RequestEnvelope & { q?: string; sourceAgent?: string; page?: number }): {
     tasks: Array<{
       id: string;
       episode: Record<string, unknown>;
@@ -552,10 +554,16 @@ export class PanelReadModel {
     const pageSize = 20 as const;
     const query = input.q?.trim() || undefined;
     const userId = input.namespace?.userId;
-    const total = this.deps.repos.runtime.countEpisodes(userId, query);
+    const total = this.deps.repos.runtime.countEpisodes(userId, query, input.sourceAgent);
     const totalPages = Math.max(1, Math.ceil(total / pageSize));
     const page = Math.min(normalizePageNumber(input.page), totalPages);
-    const episodes = this.deps.repos.runtime.listEpisodes(userId, pageSize, (page - 1) * pageSize, query);
+    const episodes = this.deps.repos.runtime.listEpisodes(
+      userId,
+      pageSize,
+      (page - 1) * pageSize,
+      query,
+      input.sourceAgent,
+    );
     return {
       tasks: episodes.map((episode) => ({
         id: episode.id,

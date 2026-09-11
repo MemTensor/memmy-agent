@@ -6,6 +6,8 @@ import type {
   CloseSessionOutput,
   DeleteMemoryInput,
   DeleteMemoryOutput,
+  EmbeddingInferenceInput,
+  EmbeddingInferenceOutput,
   DeletePanelTaskOutput,
   CompleteTurnInput,
   CompleteTurnOutput,
@@ -43,6 +45,8 @@ export interface MemoryRequestContext {
 export interface MemoryClient {
   health(): Promise<MemoryHealthSnapshot>;
   reloadConfig(input?: MemoryReloadConfigInput): Promise<MemoryReloadConfigOutput>;
+  exportBundle?(): Promise<Record<string, unknown>>;
+  clearAllData?(): Promise<{ ok: true; clearedAt: string; cleared: Record<string, number> }>;
 
   openSession(input: OpenSessionInput, context?: MemoryRequestContext): Promise<OpenSessionOutput>;
   closeSession(input: CloseSessionInput & { sessionId: string }, context?: MemoryRequestContext): Promise<CloseSessionOutput>;
@@ -51,6 +55,7 @@ export interface MemoryClient {
   completeTurn(input: CompleteTurnInput & { turnId: string }, context?: MemoryRequestContext): Promise<CompleteTurnOutput>;
 
   search(input: SearchInput, context?: MemoryRequestContext): Promise<SearchOutput>;
+  embeddingInference?(input: EmbeddingInferenceInput, options?: { signal?: AbortSignal }): Promise<EmbeddingInferenceOutput>;
   addMemory(input: AddMemoryInput, context?: MemoryRequestContext): Promise<AddMemoryOutput>;
   getMemory(input: { memoryId: string }, context?: MemoryRequestContext): Promise<GetMemoryOutput>;
   deleteMemory(input: DeleteMemoryInput & { memoryId: string }, context?: MemoryRequestContext): Promise<DeleteMemoryOutput>;

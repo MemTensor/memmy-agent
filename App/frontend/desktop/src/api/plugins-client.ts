@@ -1,4 +1,5 @@
 import {
+  InstalledPluginSchema,
   InstalledPluginsSchema,
   InvokePluginCapabilityInputSchema,
   InvokePluginCapabilityResponseSchema,
@@ -6,16 +7,25 @@ import {
   PluginInteractionResponseInputSchema,
   PluginUiRendererResponseSchema,
   type InstalledPlugin,
+  type PluginPermission,
   type InvokePluginCapabilityInput,
   type InvokePluginCapabilityResponse,
   type PluginUiSlot,
   type RuntimeConfig
 } from "@memmy/local-api-contracts";
 import { requestJson } from "./http.js";
+import { userTimeZone } from "../lib/user-time-zone.js";
 
 export interface PluginsClient {
   list(): Promise<InstalledPlugin[]>;
+  install(pluginId: string, version?: string): Promise<InstalledPlugin>;
+  approvePermissions(pluginId: string, permissions: PluginPermission[]): Promise<InstalledPlugin>;
+  enable(pluginId: string): Promise<InstalledPlugin>;
+  disable(pluginId: string): Promise<InstalledPlugin>;
+  uninstall(pluginId: string): Promise<void>;
   getUi(pluginId: string, slot: PluginUiSlot): Promise<string>;
+  /** Reads a Host-validated plugin artifact with the local runtime credential. */
+  readArtifact(uri: string): Promise<Blob>;
   invoke(pluginId: string, capabilityId: string, input: InvokePluginCapabilityInput): Promise<InvokePluginCapabilityResponse>;
   cancel(pluginId: string, callId: string): Promise<void>;
   respond(pluginId: string, callId: string, interactionId: string, response: unknown): Promise<void>;
@@ -23,6 +33,11 @@ export interface PluginsClient {
 
 export const pluginEndpointPaths = {
   list: "/api/v1/plugins",
+  install: "/api/v1/plugins/install",
+  permissions: (pluginId: string) => `/api/v1/plugins/${encodeURIComponent(pluginId)}/permissions`,
+  enable: (pluginId: string) => `/api/v1/plugins/${encodeURIComponent(pluginId)}/enable`,
+  disable: (pluginId: string) => `/api/v1/plugins/${encodeURIComponent(pluginId)}/disable`,
+  plugin: (pluginId: string) => `/api/v1/plugins/${encodeURIComponent(pluginId)}`,
   ui: (pluginId: string, slot: PluginUiSlot) => `/api/v1/plugins/${encodeURIComponent(pluginId)}/ui/${slot}`,
   invoke: (pluginId: string, capabilityId: string) => (
     `/api/v1/plugins/${encodeURIComponent(pluginId)}/capabilities/${encodeURIComponent(capabilityId)}/invoke`
@@ -41,6 +56,32 @@ export function createHttpPluginsClient(config: RuntimeConfig): PluginsClient {
     list() {
       return requestJson({ config, path: pluginEndpointPaths.list, schema: InstalledPluginsSchema });
     },
+    install(pluginId, version) {
+      return requestJson({
+        config,
+        path: pluginEndpointPaths.install,
+        schema: InstalledPluginSchema,
+        body: { pluginId, ...(version ? { version } : {}) }
+      });
+    },
+    approvePermissions(pluginId, permissions) {
+      return requestJson({
+        config,
+        path: pluginEndpointPaths.permissions(pluginId),
+        init: { method: "PUT" },
+        schema: InstalledPluginSchema,
+        body: { permissions }
+      });
+    },
+    enable(pluginId) {
+      return requestJson({ config, path: pluginEndpointPaths.enable(pluginId), schema: InstalledPluginSchema, body: {} });
+    },
+    disable(pluginId) {
+      return requestJson({ config, path: pluginEndpointPaths.disable(pluginId), schema: InstalledPluginSchema, body: {} });
+    },
+    async uninstall(pluginId) {
+      await requestJson({ config, path: pluginEndpointPaths.plugin(pluginId), init: { method: "DELETE" }, schema: OkResponseSchema });
+    },
     getUi(pluginId, slot) {
       const cacheKey = `${pluginId}:${slot}`;
       const cached = uiCache.get(cacheKey);
@@ -55,6 +96,21 @@ export function createHttpPluginsClient(config: RuntimeConfig): PluginsClient {
       });
       uiCache.set(cacheKey, request);
       return request;
+    },
+    async readArtifact(uri) {
+      const base = new URL(config.baseUrl);
+      const target = new URL(uri, base);
+      if (target.origin !== base.origin || !/^\/api\/v1\/plugins\/[^/]+\/artifacts\/[^/]+\/(?:preview|download)$/u.test(target.pathname)) {
+        throw new Error("Refusing to read an untrusted plugin artifact URI");
+      }
+      const response = await fetch(target, {
+        headers: {
+          "x-memmy-local-token": config.localToken,
+          "x-memmy-time-zone": userTimeZone(config.timeZone)
+        }
+      });
+      if (!response.ok) throw new Error(`Plugin artifact request failed with status ${response.status}`);
+      return response.blob();
     },
     invoke(pluginId, capabilityId, input) {
       return requestJson({

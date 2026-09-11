@@ -8,7 +8,6 @@ param(
 
   [ValidateSet(
     "current-install-authority",
-    "selected-install-authority",
     "relay-backup-authority",
     "persisted-install-authority",
     "untrusted-residual"
@@ -55,6 +54,8 @@ param(
 
   [string]$InstallerInstallDir = "",
 
+  [string]$TargetInstallDir = "",
+
   [switch]$AcquireLock
 )
 
@@ -66,6 +67,16 @@ $effectiveSourceAuthority = $SourceAuthority
 $effectiveSourceInstallDir = $SourceInstallDir
 $effectiveSourceGeneration = $SourceGeneration
 $effectiveSourceInstalledVersion = $SourceInstalledVersion
+$effectiveTargetInstallDir = if ($TargetInstallDir) {
+  $TargetInstallDir
+} elseif ($InstallerInstallDir) {
+  $InstallerInstallDir
+} elseif ($SourceInstallDir) {
+  $SourceInstallDir
+} else {
+  Split-Path -Parent $SourceDataPath
+}
+$verifiedExternalRuntimeHomePath = ""
 
 function Ensure-ParentDirectory {
   param([Parameter(Mandatory = $true)][string]$Path)
@@ -106,6 +117,71 @@ function Test-SamePath {
   )
 }
 
+function Test-SameOrDescendantPath {
+  param(
+    [Parameter(Mandatory = $true)][string]$Candidate,
+    [Parameter(Mandatory = $true)][string]$Parent
+  )
+
+  $normalizedCandidate = Get-NormalizedPath -Path $Candidate
+  $normalizedParent = Get-NormalizedPath -Path $Parent
+  if (Test-SamePath -Left $normalizedCandidate -Right $normalizedParent) { return $true }
+  return $normalizedCandidate.StartsWith(
+    "$($normalizedParent.TrimEnd('\'))\",
+    [System.StringComparison]::OrdinalIgnoreCase
+  )
+}
+
+function Get-CanonicalExternalRuntimeHomePath {
+  param([Parameter(Mandatory = $true)][string]$InstallDir)
+
+  $installRoot = [System.IO.Path]::GetPathRoot((Get-NormalizedPath -Path $InstallDir))
+  if (-not $installRoot) {
+    throw "The source installation has no canonical runtime drive."
+  }
+  if (Test-SamePath -Left $installRoot -Right 'C:\') {
+    $legacyHome = if ($LegacyRuntimeHomePath) {
+      $LegacyRuntimeHomePath
+    } else {
+      Join-Path $env:USERPROFILE '.memmy'
+    }
+    return Get-NormalizedPath -Path $legacyHome
+  }
+  return Get-NormalizedPath -Path (Join-Path $installRoot 'MemmyData\.memmy')
+}
+
+function Assert-NoReparsePath {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [Parameter(Mandatory = $true)][string]$Description
+  )
+
+  $currentPath = Get-NormalizedPath -Path $Path
+  while (-not (Test-Path -LiteralPath $currentPath)) {
+    $parentPath = [System.IO.Path]::GetDirectoryName($currentPath)
+    if (-not $parentPath -or (Test-SamePath -Left $parentPath -Right $currentPath)) {
+      throw "$Description has no existing trusted ancestor"
+    }
+    $currentPath = $parentPath
+  }
+
+  while ($currentPath) {
+    $item = Get-Item -LiteralPath $currentPath -Force -ErrorAction Stop
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+      throw "$Description crosses a reparse point: $($item.FullName)"
+    }
+    if ($item -is [System.IO.FileInfo]) {
+      $currentPath = $item.DirectoryName
+    }
+    elseif ($item.Parent) {
+      $currentPath = $item.Parent.FullName
+    }
+    else {
+      $currentPath = $null
+    }
+  }
+}
+
 function Read-DataRootPointer {
   param([Parameter(Mandatory = $true)][string]$Path)
 
@@ -134,7 +210,9 @@ function Read-DataRootPointer {
           (Test-SamePath -Left $normalizedValue -Right $TargetRuntimeHomePath) -or
           ($canonicalDriveRuntimeHome -and (Test-SamePath -Left $normalizedValue -Right $canonicalDriveRuntimeHome)) -or
           ($AllowedRememberedRuntimeHomePath -and
-            (Test-SamePath -Left $normalizedValue -Right $AllowedRememberedRuntimeHomePath))) {
+            (Test-SamePath -Left $normalizedValue -Right $AllowedRememberedRuntimeHomePath)) -or
+          ($verifiedExternalRuntimeHomePath -and
+            (Test-SamePath -Left $normalizedValue -Right $verifiedExternalRuntimeHomePath))) {
         return $normalizedValue
       }
       Write-MigrationLog -Message "Ignoring data-root pointer outside a supported Memmy runtime root: $normalizedValue"
@@ -157,10 +235,7 @@ function Resolve-TrustedInstallDataPath {
 
   $normalizedSourceDataPath = Get-NormalizedPath -Path $effectiveSourceDataPath
   $normalizedSourceInstallDir = Get-NormalizedPath -Path $effectiveSourceInstallDir
-  if (@("current-install-authority", "selected-install-authority") -contains $effectiveSourceAuthority) {
-    if ($effectiveSourceAuthority -eq "selected-install-authority" -and $Owner -ne "installer") {
-      throw "Selected-install authority requires direct installer ownership."
-    }
+  if ($effectiveSourceAuthority -eq "current-install-authority") {
     $expectedSourceDataPath = Get-NormalizedPath -Path (Join-Path $normalizedSourceInstallDir "data")
     if (-not (Test-SamePath -Left $normalizedSourceDataPath -Right $expectedSourceDataPath)) {
       throw "Install source data is outside the exact installation directory."
@@ -223,13 +298,79 @@ function Resolve-SourceGeneration {
 function Test-CompleteInstallUserData {
   param([Parameter(Mandatory = $true)][string]$Path)
 
-  return Test-Path -LiteralPath (Join-Path $Path "app.sqlite") -PathType Leaf
+  $databasePath = Join-Path $Path "app.sqlite"
+  if (-not (Test-Path -LiteralPath $databasePath -PathType Leaf)) {
+    return $false
+  }
+  try {
+    $file = Get-Item -LiteralPath $databasePath -ErrorAction Stop
+    if ($file.Length -lt 512) {
+      Write-MigrationLog -Message "Ignoring incomplete install account database: $databasePath"
+      return $false
+    }
+    $stream = [System.IO.File]::Open(
+      $databasePath,
+      [System.IO.FileMode]::Open,
+      [System.IO.FileAccess]::Read,
+      [System.IO.FileShare]::ReadWrite
+    )
+    try {
+      $header = New-Object byte[] 100
+      if ($stream.Read($header, 0, $header.Length) -ne $header.Length) {
+        return $false
+      }
+      $expectedHeader = [System.Text.Encoding]::ASCII.GetBytes("SQLite format 3`0")
+      for ($index = 0; $index -lt $expectedHeader.Length; $index++) {
+        if ($header[$index] -ne $expectedHeader[$index]) {
+          Write-MigrationLog -Message "Ignoring install account database with an invalid SQLite header: $databasePath"
+          return $false
+        }
+      }
+      $pageSize = ([int]$header[16] -shl 8) -bor [int]$header[17]
+      if ($pageSize -eq 1) { $pageSize = 65536 }
+      if ($pageSize -lt 512 -or $pageSize -gt 65536 -or
+          (($pageSize -band ($pageSize - 1)) -ne 0) -or
+          (($file.Length % $pageSize) -ne 0)) {
+        Write-MigrationLog -Message "Ignoring install account database with an invalid SQLite page layout: $databasePath"
+        return $false
+      }
+      return $true
+    }
+    finally {
+      $stream.Dispose()
+    }
+  }
+  catch {
+    Write-MigrationLog -Message "Ignoring unreadable install account database '$databasePath': $($_.Exception.Message)"
+    return $false
+  }
 }
 
 function Test-CompleteInstallRuntimeData {
   param([Parameter(Mandatory = $true)][string]$Path)
 
-  return Test-Path -LiteralPath (Join-Path $Path "config.yaml") -PathType Leaf
+  $configPath = Join-Path $Path "config.yaml"
+  if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
+    return $false
+  }
+  try {
+    $bytes = [System.IO.File]::ReadAllBytes($configPath)
+    if ($bytes.Length -eq 0) {
+      Write-MigrationLog -Message "Ignoring empty install runtime config: $configPath"
+      return $false
+    }
+    $strictUtf8 = New-Object System.Text.UTF8Encoding($false, $true)
+    $contents = $strictUtf8.GetString($bytes).Trim([char]0xfeff).Trim()
+    if (-not $contents -or $contents.IndexOf([char]0) -ge 0) {
+      Write-MigrationLog -Message "Ignoring incomplete install runtime config: $configPath"
+      return $false
+    }
+    return $true
+  }
+  catch {
+    Write-MigrationLog -Message "Ignoring unreadable install runtime config '$configPath': $($_.Exception.Message)"
+    return $false
+  }
 }
 
 function Read-InstallationRecord {
@@ -267,6 +408,24 @@ function Test-IsKnownInstallLocalVersion {
   return $parsed -ge [Version]'1.0.6' -and $parsed -lt [Version]'1.1.0'
 }
 
+function Test-CompatibleRecordedVersion {
+  param(
+    [Parameter(Mandatory = $true)][string]$RecordedVersion,
+    [Parameter(Mandatory = $true)][string]$InstalledVersion
+  )
+
+  $recordedMatch = [Regex]::Match($RecordedVersion.Trim(), '^(?<version>[0-9]+\.[0-9]+\.[0-9]+(?:\.[0-9]+)?)$')
+  $installedMatch = [Regex]::Match($InstalledVersion.Trim(), '^(?<version>[0-9]+\.[0-9]+\.[0-9]+(?:\.[0-9]+)?)(?:\s.*)?$')
+  if (-not $recordedMatch.Success -or -not $installedMatch.Success) { return $false }
+  try {
+    return ([Version]$recordedMatch.Groups['version'].Value) -eq
+      ([Version]$installedMatch.Groups['version'].Value)
+  }
+  catch {
+    return $false
+  }
+}
+
 function Resolve-EffectiveInstallSource {
   $record = Read-InstallationRecord
   if ($effectiveSourceAuthority -eq "untrusted-residual" -and
@@ -291,7 +450,7 @@ function Resolve-EffectiveInstallSource {
     }
     Write-MigrationLog -Message "Using the persisted trusted install-local source: $effectiveSourceDataPath"
   }
-  elseif (@("current-install-authority", "selected-install-authority", "relay-backup-authority") -contains $effectiveSourceAuthority -and
+  elseif (@("current-install-authority", "relay-backup-authority") -contains $effectiveSourceAuthority -and
       $null -ne $record -and
       [string]$record.dataLayoutGeneration -eq "external-v1" -and
       (Test-SamePath -Left ([string]$record.installDir) -Right $effectiveSourceInstallDir)) {
@@ -300,6 +459,35 @@ function Resolve-EffectiveInstallSource {
       Write-MigrationLog -Message "Installed version $effectiveSourceInstalledVersion uses the install-local layout; it remains authoritative despite an earlier external marker."
     }
     else {
+      try {
+        if (-not $record.userDataPath -or -not $record.runtimeHomePath -or -not $record.appVersion -or
+            -not [System.IO.Path]::IsPathRooted([string]$record.userDataPath) -or
+            -not [System.IO.Path]::IsPathRooted([string]$record.runtimeHomePath)) {
+          throw "The external-v1 record is missing absolute data paths."
+        }
+        if (-not $effectiveSourceInstalledVersion -or
+            -not (Test-CompatibleRecordedVersion `
+              -RecordedVersion ([string]$record.appVersion) `
+              -InstalledVersion $effectiveSourceInstalledVersion)) {
+          throw "The external-v1 record does not match the installed application version."
+        }
+        $recordedExternalUserDataPath = Get-NormalizedPath -Path ([string]$record.userDataPath)
+        $recordedExternalRuntimeHomePath = Get-NormalizedPath -Path ([string]$record.runtimeHomePath)
+        $expectedExternalRuntimeHomePath = Get-CanonicalExternalRuntimeHomePath -InstallDir $effectiveSourceInstallDir
+        if (-not (Test-SamePath -Left $recordedExternalUserDataPath -Right $TargetUserDataPath) -or
+            -not (Test-SamePath -Left $recordedExternalRuntimeHomePath -Right $expectedExternalRuntimeHomePath) -or
+            (Test-SameOrDescendantPath -Candidate $recordedExternalRuntimeHomePath -Parent $effectiveSourceInstallDir) -or
+            -not (Test-Path -LiteralPath $recordedExternalRuntimeHomePath -PathType Container)) {
+          throw "The external-v1 record does not identify the trusted current data layout."
+        }
+        Assert-NoReparsePath -Path $recordedExternalRuntimeHomePath -Description 'recorded external runtimeHomePath'
+        $script:verifiedExternalRuntimeHomePath = $recordedExternalRuntimeHomePath
+        Write-MigrationLog -Message "Using the verified external-v1 runtime source for relocation: $verifiedExternalRuntimeHomePath"
+      }
+      catch {
+        Write-MigrationLog -Message "Ignoring an invalid external-v1 runtime source: $($_.Exception.Message)"
+        $script:verifiedExternalRuntimeHomePath = ""
+      }
       Write-MigrationLog -Message "Install is already verified on the external layout; install-local residual data cannot replace targets."
       $script:effectiveSourceAuthority = "untrusted-residual"
       $script:effectiveSourceGeneration = ""
@@ -310,7 +498,7 @@ function Resolve-EffectiveInstallSource {
 function Record-TrustedInstallLocalGeneration {
   if ($Owner -ne "installer" -or
       -not $InstallationRecordPath -or
-      @("current-install-authority", "selected-install-authority", "persisted-install-authority") -notcontains $effectiveSourceAuthority) {
+      @("current-install-authority", "persisted-install-authority") -notcontains $effectiveSourceAuthority) {
     return
   }
   $userDataPath = Join-Path $effectiveSourceDataPath "Memmy"
@@ -334,7 +522,7 @@ function Preserve-FailedDirectMigrationSource {
   if ($Mode -ne "Prepare" -or
       $Owner -ne "installer" -or
       -not $InstallationRecordPath -or
-      @("current-install-authority", "selected-install-authority", "persisted-install-authority") -notcontains $effectiveSourceAuthority -or
+      @("current-install-authority", "persisted-install-authority") -notcontains $effectiveSourceAuthority -or
       -not (Test-Path -LiteralPath $effectiveSourceDataPath -PathType Container)) {
     return
   }
@@ -663,11 +851,13 @@ function Invoke-TransactionalDirectoryCopy {
     return $null
   }
 
+  Assert-NoReparsePath -Path $Destination -Description 'migration destination'
   $criticalFileStreams = @(Open-CriticalFilesForMigration -RootPath $Source)
   $destinationParent = Split-Path -Parent $Destination
   if (-not (Test-Path -LiteralPath $destinationParent -PathType Container)) {
     New-Item -ItemType Directory -Path $destinationParent -Force | Out-Null
   }
+  Assert-NoReparsePath -Path $Destination -Description 'migration destination'
 
   $token = [Guid]::NewGuid().ToString("N")
   $stagingPath = "$Destination.migrating-$token"
@@ -675,6 +865,8 @@ function Invoke-TransactionalDirectoryCopy {
   $journalUpdated = $false
   try {
     Copy-DirectoryContents -Source $Source -Destination $stagingPath -ExcludeTopLevelNames $ExcludeTopLevelNames
+    Assert-NoReparsePath -Path $Destination -Description 'migration destination'
+    Assert-NoReparsePath -Path $stagingPath -Description 'migration staging path'
     $sourceFingerprint = Get-DirectoryFingerprint -Path $Source -ExcludeTopLevelNames $ExcludeTopLevelNames
     $stagingFingerprint = Get-DirectoryFingerprint -Path $stagingPath
     if ($sourceFingerprint.FileCount -ne $stagingFingerprint.FileCount -or
@@ -705,6 +897,8 @@ function Invoke-TransactionalDirectoryCopy {
       -DeferredCleanupStates $DeferredCleanupStates
     $journalUpdated = $true
 
+    Assert-NoReparsePath -Path $Destination -Description 'migration destination'
+    Assert-NoReparsePath -Path $stagingPath -Description 'migration staging path'
     if ($destinationExisted) {
       Move-Item -LiteralPath $Destination -Destination $backupPath -Force -ErrorAction Stop
     }
@@ -815,6 +1009,7 @@ function Write-PreparedRollbackJournal {
     sourceDataPath = (Get-NormalizedPath -Path $effectiveSourceDataPath)
     targetUserDataPath = (Get-NormalizedPath -Path $TargetUserDataPath)
     targetRuntimeHomePath = (Get-NormalizedPath -Path $TargetRuntimeHomePath)
+    targetInstallDir = (Get-NormalizedPath -Path $effectiveTargetInstallDir)
     pointerPath = (Get-NormalizedPath -Path $PointerPath)
     backupPaths = @($backupPaths)
     preparedCopies = @($Copies)
@@ -1002,11 +1197,11 @@ function Resume-PreservedMigrationForRetry {
   $stateAccountAuthority = if ($state.PSObject.Properties.Name -contains "accountSourceAuthority") { [string]$state.accountSourceAuthority } else { "target-existing" }
   $stateRuntimeAuthority = if ($state.PSObject.Properties.Name -contains "runtimeSourceAuthority") { [string]$state.runtimeSourceAuthority } else { "target-existing" }
   if ($stateAccountAuthority -and
-      @("target-existing", "current-install-authority", "selected-install-authority", "relay-backup-authority", "persisted-install-authority") -notcontains $stateAccountAuthority) {
+      @("target-existing", "current-install-authority", "relay-backup-authority", "persisted-install-authority") -notcontains $stateAccountAuthority) {
     throw "Preserved migration account authority is invalid."
   }
   if ($stateRuntimeAuthority -and
-      @("target-existing", "legacy-home-fallback", "current-install-authority", "selected-install-authority", "relay-backup-authority", "persisted-install-authority") -notcontains $stateRuntimeAuthority) {
+      @("target-existing", "legacy-home-fallback", "current-install-authority", "relay-backup-authority", "persisted-install-authority", "persisted-external-authority") -notcontains $stateRuntimeAuthority) {
     throw "Preserved migration runtime authority is invalid."
   }
   if ($stateAccountAuthority -ne "target-existing" -and
@@ -1140,6 +1335,12 @@ try {
   }
 
   if ($Mode -eq "Prepare") {
+    if (-not $effectiveTargetInstallDir -or -not [System.IO.Path]::IsPathRooted($effectiveTargetInstallDir)) {
+      throw "A target installation directory is required for migration."
+    }
+    Assert-NoReparsePath -Path $effectiveTargetInstallDir -Description 'target installDir'
+    Assert-NoReparsePath -Path $TargetUserDataPath -Description 'target userDataPath'
+    Assert-NoReparsePath -Path $TargetRuntimeHomePath -Description 'target runtimeHomePath'
     Resolve-EffectiveInstallSource
     if (Resume-PreservedMigrationForRetry) {
       Write-MigrationLog -Message "Migration preparation resumed."
@@ -1215,6 +1416,7 @@ try {
           Write-MigrationLog -Message "No higher-authority account source exists; target user data retained."
         }
         elseif (-not (Test-Path -LiteralPath $TargetUserDataPath -PathType Container)) {
+          Assert-NoReparsePath -Path $TargetUserDataPath -Description 'target userDataPath'
           New-Item -ItemType Directory -Path $TargetUserDataPath -Force | Out-Null
         }
 
@@ -1229,12 +1431,17 @@ try {
         }
         $runtimeSourceAuthority = if ($runtimeSourcePath) { $effectiveSourceAuthority } else { "target-existing" }
         if (-not $runtimeSourcePath -and -not $targetRuntimeHadData) {
-          foreach ($candidate in @($rememberedRuntimeHomePath, $LegacyRuntimeHomePath)) {
+          foreach ($candidate in @($verifiedExternalRuntimeHomePath, $rememberedRuntimeHomePath, $LegacyRuntimeHomePath)) {
             if ($candidate -and
                 -not (Test-SamePath -Left $candidate -Right $TargetRuntimeHomePath) -and
                 (Test-DirectoryContainsData -Path $candidate -ExcludeTopLevelNames @("updates"))) {
               $runtimeSourcePath = Get-NormalizedPath -Path $candidate
-              $runtimeSourceAuthority = "legacy-home-fallback"
+              $runtimeSourceAuthority = if ($verifiedExternalRuntimeHomePath -and
+                (Test-SamePath -Left $candidate -Right $verifiedExternalRuntimeHomePath)) {
+                "persisted-external-authority"
+              } else {
+                "legacy-home-fallback"
+              }
               break
             }
           }
@@ -1271,6 +1478,7 @@ try {
           Write-MigrationLog -Message "No higher-authority runtime source exists; target runtime data retained: $TargetRuntimeHomePath"
         }
         elseif (-not (Test-Path -LiteralPath $TargetRuntimeHomePath -PathType Container)) {
+          Assert-NoReparsePath -Path $TargetRuntimeHomePath -Description 'target runtimeHomePath'
           New-Item -ItemType Directory -Path $TargetRuntimeHomePath -Force | Out-Null
         }
 
@@ -1297,6 +1505,7 @@ try {
           targetRuntimeHadData = $targetRuntimeHadData
           targetUserDataPath = (Get-NormalizedPath -Path $TargetUserDataPath)
           targetRuntimeHomePath = (Get-NormalizedPath -Path $TargetRuntimeHomePath)
+          targetInstallDir = (Get-NormalizedPath -Path $effectiveTargetInstallDir)
           pointerPath = (Get-NormalizedPath -Path $PointerPath)
           backupPaths = @($backupPaths)
           preparedCopies = @($preparedCopies)
@@ -1305,8 +1514,10 @@ try {
           deferredCleanupStates = $deferredCleanupStates
           createdAt = [DateTime]::UtcNow.ToString("o")
         }
+        Assert-NoReparsePath -Path $StatePath -Description 'migration state path'
         Write-JsonFileAtomically -Path $StatePath -Value $state
         $preparedStateWritten = $true
+        Assert-NoReparsePath -Path $PointerPath -Description 'runtime pointer path'
         Write-UnicodeFileAtomically -Path $PointerPath -Value "$TargetRuntimeHomePath`r`n"
         Write-MigrationLog -Message "Migration preparation completed."
       }

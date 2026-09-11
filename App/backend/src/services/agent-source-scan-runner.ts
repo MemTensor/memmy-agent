@@ -120,39 +120,26 @@ export async function runAgentSourceScanJob(
     };
 
     let results: ScanResult[];
-    if (job.resume?.phase === "summarize") {
-      results = job.resume.results;
+    let legacyPipeline = false;
+    if (agentSources.supportsPersistentScan) {
+      results = job.sourceId === "all"
+        ? await agentSources.scanAll({ ...scanOptions, scanJobId: job.jobId })
+        : [await agentSources.scanOne(job.sourceId, { ...scanOptions, scanJobId: job.jobId })];
+      callbacks.onResumeChanged(null);
     } else {
+      legacyPipeline = true;
       const collected = job.resume?.phase === "add"
         ? job.resume.collected
-        : job.sourceId === "all"
-          ? await agentSources.collectAll(scanOptions)
-          : [await agentSources.collectOne(job.sourceId, scanOptions)];
-      if (job.controller.signal.aborted) {
-        return;
-      }
+        : job.sourceId === "all" ? await agentSources.collectAll(scanOptions) : [await agentSources.collectOne(job.sourceId, scanOptions)];
       callbacks.onResumeChanged({ phase: "add", collected });
       results = await agentSources.ingestCollected(collected, scanOptions);
-      if (job.controller.signal.aborted) {
-        return;
-      }
     }
-
-    callbacks.onResumeChanged({ phase: "summarize", results });
-    const failures = await agentSources.processImportSummaries(
-      results.flatMap((result) => result.memoryIds ?? []),
-      { ...scanOptions, progressSourceId: job.sourceId }
-    );
-    const resultByMemoryId = new Map<string, ScanResult>();
-    for (const result of results) {
-      for (const memoryId of result.memoryIds ?? []) resultByMemoryId.set(memoryId, result);
-    }
-    for (const failure of failures) {
-      const result = resultByMemoryId.get(failure.memoryId);
-      result?.errors.push({
-        conversationId: failure.memoryId,
-        reason: failure.reason
-      });
+    if (legacyPipeline) {
+      callbacks.onResumeChanged({ phase: "summarize", results });
+      const failures = await agentSources.processImportSummaries(results.flatMap((result) => result.memoryIds ?? []), { ...scanOptions, progressSourceId: job.sourceId });
+      const resultByMemoryId = new Map<string, ScanResult>();
+      for (const result of results) for (const memoryId of result.memoryIds ?? []) resultByMemoryId.set(memoryId, result);
+      for (const failure of failures) resultByMemoryId.get(failure.memoryId)?.errors.push({ conversationId: failure.memoryId, reason: failure.reason });
     }
     if (job.controller.signal.aborted) {
       return;

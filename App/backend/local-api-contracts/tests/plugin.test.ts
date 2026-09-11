@@ -30,6 +30,27 @@ describe("PluginManifestSchema", () => {
     expect(PluginManifestSchema.parse(manifest)).toEqual(manifest);
   });
 
+  it("accepts a Host-owned cancellation control declaration", () => {
+    const parsed = PluginManifestSchema.parse({
+      ...manifest,
+      capabilities: [{
+        ...manifest.capabilities[0],
+        id: "cancel",
+        inputSchema: {
+          type: "object",
+          properties: { runId: { type: "string" }, scope: { type: "string" }, taskId: { type: "string" } }
+        },
+        control: { action: "cancel", runIdInput: "runId", scopeInput: "scope", taskIdInput: "taskId" }
+      }]
+    });
+    expect(parsed.capabilities[0]?.control).toEqual({
+      action: "cancel",
+      runIdInput: "runId",
+      scopeInput: "scope",
+      taskIdInput: "taskId"
+    });
+  });
+
   it("rejects duplicate capability ids", () => {
     expect(() => PluginManifestSchema.parse({
       ...manifest,
@@ -70,6 +91,47 @@ describe("PluginManifestSchema", () => {
       ...manifest,
       commands: [{ command: "/review", name: "Review", description: "Create a review", capabilityId: "missing" }]
     })).toThrow(/Unknown command capability/);
+  });
+
+  it("registers Agent-routed commands only against packaged skills", () => {
+    const parsed = PluginManifestSchema.parse({
+      ...manifest,
+      skills: [{ id: "literature-review", name: "Literature Review", description: "Coordinate review tools", entry: "skills/literature-review/SKILL.md" }],
+      commands: [{
+        command: "/literature-review",
+        name: "Literature Review",
+        description: "Create a review",
+        capabilityId: "review",
+        agentSkillId: "literature-review"
+      }]
+    });
+    expect(parsed.commands?.[0]?.agentSkillId).toBe("literature-review");
+    expect(() => PluginManifestSchema.parse({
+      ...manifest,
+      commands: [{ command: "/review", name: "Review", description: "Create a review", capabilityId: "review", agentSkillId: "missing" }]
+    })).toThrow(/Unknown command Agent skill id/);
+    expect(() => PluginManifestSchema.parse({
+      ...manifest,
+      skills: [{ id: "review", name: "Review", description: "Coordinate review tools", entry: "skills/review/SKILL.md" }],
+      commands: [{ command: "/review", name: "Review", description: "Create a review", capabilityId: "review", agentSkillId: "review", surface: true }]
+    })).toThrow(/cannot open a direct plugin surface/);
+  });
+
+  it("registers packaged skills and accepts only exact network hostnames", () => {
+    const parsed = PluginManifestSchema.parse({
+      ...manifest,
+      permissions: [{ type: "network", hosts: ["API.CROSSREF.ORG"] }],
+      skills: [{ id: "literature-review", name: "Literature Review", description: "Coordinate review tools", entry: "skills/literature-review/SKILL.md" }]
+    });
+    expect(parsed.permissions).toEqual([{ type: "network", hosts: ["api.crossref.org"] }]);
+    expect(parsed.skills?.[0]?.entry).toBe("skills/literature-review/SKILL.md");
+    for (const host of ["https://api.crossref.org", "*.crossref.org", "api.crossref.org:443"]) {
+      expect(() => PluginManifestSchema.parse({ ...manifest, permissions: [{ type: "network", hosts: [host] }] })).toThrow(/exact DNS hostname/);
+    }
+    expect(() => PluginManifestSchema.parse({
+      ...manifest,
+      skills: [{ id: "review", name: "Review", description: "Review", entry: "skills/review.md" }]
+    })).toThrow(/SKILL.md/);
   });
 });
 

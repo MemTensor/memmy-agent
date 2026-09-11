@@ -439,17 +439,38 @@ export class WorkerRunner {
           }
         }
       } catch (error) {
+        const classification = classifyProcessingError(error);
+        if (classification.code === "model_input_too_long" && batch.length > 1) {
+          for (const item of batch) results.push(await this.runLeasedEmbeddingItem(item));
+          continue;
+        }
         for (const item of batch) {
-          if (!this.deps.embeddingJobs.enqueueEmbeddingRetryAfterFailure(item, error)) {
-            results.push(this.failLeasedWorkerJob(item.job, error));
-          } else {
-            results.push(this.completeLeasedWorkerJob(item.job));
-          }
+          results.push(this.finishFailedEmbeddingItem(item, error));
         }
       }
     }
 
     return results;
+  }
+
+  async runLeasedEmbeddingItem(item: PreparedEmbeddingJob): Promise<WorkerJobRunResult> {
+    try {
+      const vector = await this.deps.embedder.embedOne(item.text || "(empty)", item.role);
+      this.deps.embeddingJobs.applyEmbeddingVector(item, vector);
+      return this.completeLeasedWorkerJob(item.job);
+    } catch (error) {
+      return this.finishFailedEmbeddingItem(item, error);
+    }
+  }
+
+  finishFailedEmbeddingItem(item: PreparedEmbeddingJob, error: unknown): WorkerJobRunResult {
+    if (classifyProcessingError(error).retryAction !== "retry") {
+      return this.failLeasedWorkerJob(item.job, error);
+    }
+    if (!this.deps.embeddingJobs.enqueueEmbeddingRetryAfterFailure(item, error)) {
+      return this.failLeasedWorkerJob(item.job, error);
+    }
+    return this.completeLeasedWorkerJob(item.job);
   }
 
   completeLeasedWorkerJob(job: EvolutionJobRecord): WorkerJobRunResult {
@@ -472,7 +493,14 @@ export class WorkerRunner {
     const errorMessage = processingStageForJob(job.jobType)
       ? sanitizeProcessingError(error)
       : error instanceof Error ? error.message : String(error);
-    const failedJob = this.deps.repos.runtime.failJob(job.id, errorMessage) ?? {
+    const stage = processingStageForJob(job.jobType);
+    const forceDeadLetter = Boolean(stage && classifyProcessingError(error).retryAction !== "retry");
+    const failedJob = this.deps.repos.runtime.failJob(
+      job.id,
+      errorMessage,
+      this.deps.nowIso(),
+      forceDeadLetter
+    ) ?? {
       ...job,
       status: "failed" as const,
       leasedUntil: null,
@@ -524,6 +552,20 @@ export class WorkerRunner {
     const message = sanitizeProcessingError(error);
     const terminal = job.status === "dead_letter";
     const classification = classifyProcessingError(error);
+    if (terminal && stage === "embedding" && classification.code === "model_input_too_long") {
+      this.deps.repos.processing.update(job.targetMemoryId, {
+        state: "ready_text_only",
+        stage: null,
+        activeJobId: null,
+        attemptCount: job.attempts,
+        retryAction: "none",
+        errorCode: classification.code,
+        errorMessage: message,
+        failedAt: this.deps.nowIso(),
+        updatedAt: this.deps.nowIso()
+      }, ["embedding_pending", "embedding", "failed"]);
+      return;
+    }
     this.deps.repos.processing.update(job.targetMemoryId, {
       state: terminal ? "failed" : stage === "summary" ? "summary_pending" : "embedding_pending",
       stage,
@@ -583,6 +625,13 @@ export class WorkerRunner {
           }
         }
       } catch (error) {
+        const classification = classifyProcessingError(error);
+        if (classification.code === "model_input_too_long" && batch.length > 1) {
+          for (const item of batch) {
+            results.push(await this.runClaimedEmbeddingRetryItem(item.retry, item.claim, item.attemptNo));
+          }
+          continue;
+        }
         for (const item of batch) {
           results.push(this.failClaimedEmbeddingRetry(item.retry, item.claim, item.attemptNo, error));
         }
@@ -595,6 +644,19 @@ export class WorkerRunner {
       failed: results.reduce((sum, result) => sum + result.failed, 0),
       items: results.map((result) => result.item).filter((item): item is EmbeddingRetryRunSummary["items"][number] => Boolean(item))
     };
+  }
+
+  async runClaimedEmbeddingRetryItem(
+    retry: EmbeddingRetryRecord,
+    claim: EmbeddingRetryClaim,
+    attemptNo: number
+  ): Promise<EmbeddingRetryResult> {
+    try {
+      const vector = await this.deps.embedder.embedOne(retry.sourceText || "(empty)", retry.embedRole);
+      return this.applyEmbeddingRetryVector(retry, claim, vector);
+    } catch (error) {
+      return this.failClaimedEmbeddingRetry(retry, claim, attemptNo, error);
+    }
   }
 
   applyEmbeddingRetryVector(
@@ -653,8 +715,8 @@ export class WorkerRunner {
     attemptNo: number,
     error: unknown
   ): EmbeddingRetryResult {
-    const message = error instanceof Error ? error.message : String(error);
-    const terminal = attemptNo >= retry.maxAttempts;
+    const message = sanitizeProcessingError(error);
+    const terminal = classifyProcessingError(error).retryAction !== "retry" || attemptNo >= retry.maxAttempts;
     const updated = terminal
       ? this.deps.repos.runtime.markEmbeddingRetryFailedClaimed(retry.id, {
         ...claim,

@@ -3,12 +3,13 @@ import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { PassThrough } from "node:stream";
 import YAML from "yaml";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AgentGatewaySupervisor,
+  bundledMemoryInstallArguments,
   ensureMemoryService,
   preparePackagedBrowser,
   preparePackagedRuntimeConfig,
@@ -23,6 +24,7 @@ import {
   startAgentGatewayWithRecovery,
   startPackagedBrowserPreparation,
   stopManagedChild,
+  stopManagedChildrenForDesktopExit,
   syncBundledAgentSkills,
   type ManagedChild,
   type PackagedRuntimeConfig,
@@ -122,6 +124,129 @@ describe("packaged desktop runtime config", () => {
     expect(spawnedEnv).not.toHaveProperty("MEMMY_MIGRATIONS_READY_APP_DATABASE");
   });
 
+  it("materializes bundled Memory without asking the OS to register a service", () => {
+    const args = bundledMemoryInstallArguments(
+      "/runtime/memory",
+      {
+        configPath: "/memmy/config.yaml",
+        agentWorkspace: "/memmy/workspace",
+        memoryDatabasePath: "/memmy/memory.sqlite",
+        memoryBaseUrl: "http://127.0.0.1:18960",
+        memoryToken: "",
+        memoryListenHost: "127.0.0.1",
+        memoryListenPort: 18960,
+        agentGatewayBaseUrl: "http://127.0.0.1:18980",
+        agentGatewayHealthHost: "127.0.0.1",
+        agentGatewayHealthPort: 18970,
+        agentGatewayBootstrapSecret: "secret"
+      },
+      true,
+      process.execPath
+    );
+
+    expect(args).toContain("--skip-service-registration");
+    expect(args).toContain("--skip-health-check");
+  });
+
+  it("starts the materialized bundled Memory runtime as a Desktop child", async () => {
+    const root = await makeTempRoot();
+    const home = join(root, "home");
+    const bundled = join(root, "bundled-memory");
+    const cliEntry = join(bundled, "dist", "src", "cli", "index.js");
+    const runtimeDir = join(home, "memory-service", "runtime", "fixture");
+    const bundledServerEntry = join(bundled, "dist", "src", "server", "index.js");
+    const installedServerEntry = join(runtimeDir, "dist", "src", "server", "index.js");
+    await mkdir(dirname(cliEntry), { recursive: true });
+    await mkdir(dirname(bundledServerEntry), { recursive: true });
+    await writeFile(bundledServerEntry, [
+      "const http = require('node:http');",
+      "const args = process.argv.slice(2);",
+      "const port = Number(args[args.indexOf('--port') + 1]);",
+      "const server = http.createServer((request, response) => {",
+      "  if (request.url === '/api/v1/health') {",
+      "    response.writeHead(200, { 'content-type': 'application/json' });",
+      "    response.end(JSON.stringify({ ok: true, protocolVersion: 1 }));",
+      "    return;",
+      "  }",
+      "  response.writeHead(404);",
+      "  response.end();",
+      "});",
+      "server.listen(port, '127.0.0.1');",
+      "const shutdown = () => server.close(() => process.exit(0));",
+      "process.once('SIGTERM', shutdown);",
+      "process.once('SIGINT', shutdown);"
+    ].join("\n"), "utf8");
+    await writeFile(cliEntry, [
+      "const fs = require('node:fs');",
+      "const path = require('node:path');",
+      "const args = process.argv.slice(2);",
+      "if (args[0] !== 'install' || !args.includes('--skip-service-registration') || !args.includes('--skip-health-check')) {",
+      "  console.error('Desktop must not register a bundled Memory service');",
+      "  process.exit(17);",
+      "}",
+      "const homeArg = args.indexOf('--home');",
+      "const home = args[homeArg + 1];",
+      "const bundledArg = args.indexOf('--runtime-directory');",
+      "const bundled = args[bundledArg + 1];",
+      "const installedRuntimeDir = path.join(home, 'memory-service', 'runtime', 'fixture');",
+      "const entrypoint = path.join(installedRuntimeDir, 'dist', 'src', 'server', 'index.js');",
+      "fs.mkdirSync(path.dirname(entrypoint), { recursive: true });",
+      "fs.copyFileSync(path.join(bundled, 'dist', 'src', 'server', 'index.js'), entrypoint);",
+      "fs.writeFileSync(path.join(home, 'memory-service', 'current.json'), JSON.stringify({ runtimeDir: installedRuntimeDir, entrypoint, runtimeExecutable: process.execPath }));",
+      "process.exit(0);"
+    ].join("\n"), "utf8");
+
+    const reservation = createServer();
+    await new Promise<void>((resolveListen, rejectListen) => {
+      reservation.once("error", rejectListen);
+      reservation.listen(0, "127.0.0.1", resolveListen);
+    });
+    const address = reservation.address();
+    if (!address || typeof address === "string") throw new Error("expected TCP address");
+    const port = address.port;
+    await new Promise<void>((resolveClose) => reservation.close(() => resolveClose()));
+
+    const runtimeConfig: PackagedRuntimeConfig = {
+      configPath: join(home, "config.yaml"),
+      agentWorkspace: join(home, "workspace"),
+      memoryDatabasePath: join(home, "memory.sqlite"),
+      memoryBaseUrl: "http://127.0.0.1:" + port,
+      memoryToken: "",
+      memoryListenHost: "127.0.0.1",
+      memoryListenPort: port,
+      agentGatewayBaseUrl: "http://127.0.0.1:18980",
+      agentGatewayHealthHost: "127.0.0.1",
+      agentGatewayHealthPort: 18970,
+      agentGatewayBootstrapSecret: "secret"
+    };
+    const children: ManagedChild[] = [];
+    try {
+      await ensureMemoryService(
+        { memoryEntry: join(root, "missing-memory.js"), agentEntry: join(root, "missing-agent.js") },
+        runtimeConfig,
+        children,
+        {
+          appPath: root,
+          appDatabaseFile: join(home, "app.sqlite"),
+          resourcesPath: root,
+          logDirectory: root,
+          logLevel: "info",
+          runtimeExecutable: process.execPath,
+          offlineMemoryRuntimeDirectory: bundled
+        },
+        true,
+        vi.fn()
+      );
+
+      expect(children).toHaveLength(1);
+      expect(children[0]?.name).toBe("memory");
+      expect(children[0]?.persistOnDesktopExit).toBe(true);
+      expect(children[0]?.process.pid).toBeTypeOf("number");
+    } finally {
+      await stopManagedChildrenForDesktopExit(children, true);
+    }
+  });
+
   it("omits an implicit workspace override while still passing the Desktop database target", async () => {
     const root = await makeTempRoot();
     const child = Object.assign(new EventEmitter(), {
@@ -153,6 +278,31 @@ describe("packaged desktop runtime config", () => {
       "--app-database",
       join(root, "app.sqlite")
     ]);
+  });
+
+  it("passes the finite Desktop startup budget to the bundled Memory installer", () => {
+    const args = bundledMemoryInstallArguments(
+      "/resources/memory",
+      {
+        configPath: "/memmy/config.yaml",
+        agentWorkspace: "/memmy/workspace",
+        memoryDatabasePath: "/memmy/memory.sqlite",
+        memoryBaseUrl: "http://127.0.0.1:18960",
+        memoryToken: "memory-token",
+        memoryListenHost: "127.0.0.1",
+        memoryListenPort: 18960,
+        agentGatewayBaseUrl: "http://127.0.0.1:18980",
+        agentGatewayHealthHost: "127.0.0.1",
+        agentGatewayHealthPort: 18970,
+        agentGatewayBootstrapSecret: "gateway-secret"
+      },
+      true,
+      "/runtime/node"
+    );
+
+    expect(args.slice(-2)).toEqual(["--health-check-timeout-ms", "120000"]);
+    expect(args).toContain("--skip-service-registration");
+    expect(args).toContain("--skip-health-check");
   });
 
   it("rejects when the packaged migration command exits unsuccessfully", async () => {
@@ -358,7 +508,7 @@ describe("packaged desktop runtime config", () => {
 
     const server = createServer((_request, response) => {
       response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify({ ok: true }));
+      response.end(JSON.stringify({ ok: true, protocolVersion: 1 }));
     });
     testServers.push(server);
     setTimeout(() => server.listen(port, "127.0.0.1"), 100);
@@ -1129,6 +1279,62 @@ describe("AgentGatewaySupervisor", () => {
 });
 
 describe("spawnNodeService 落盘与 env 注入", () => {
+  it("keeps persistent Memory alive on Desktop exit unless the setting requests a stop", async () => {
+    const root = await makeTempRoot();
+    const entry = join(root, "persistent-service.js");
+    await writeFile(entry, "setInterval(() => {}, 1000);\n");
+    const memory = spawnNodeService("memory", entry, [], {}, {
+      logFilePath: join(root, "memory.log"),
+      logLevel: "info",
+      persistOnDesktopExit: true
+    });
+    const gateway = spawnNodeService("agent-gateway", entry, [], {}, {
+      logFilePath: join(root, "agent-gateway.log"),
+      logLevel: "info"
+    });
+
+    try {
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+      await stopManagedChildrenForDesktopExit([memory, gateway], false);
+
+      expect(gateway.process.exitCode !== null || gateway.process.signalCode !== null).toBe(true);
+      expect(memory.process.exitCode).toBeNull();
+      expect(memory.process.signalCode).toBeNull();
+
+      await stopManagedChildrenForDesktopExit([memory], true);
+      expect(memory.process.exitCode !== null || memory.process.signalCode !== null).toBe(true);
+    } finally {
+      await stopManagedChild(memory);
+      await stopManagedChild(gateway);
+    }
+  });
+
+  it("keeps the restart IPC channel available for persistent Memory", async () => {
+    const root = await makeTempRoot();
+    const entry = join(root, "persistent-memory-ipc.js");
+    await writeFile(entry, [
+      "process.send?.({ type: 'memmy-memory:restart' });",
+      "setInterval(() => {}, 1000);",
+    ].join("\n"));
+    const memory = spawnNodeService("memory", entry, [], {
+      MEMMY_DESKTOP_MANAGED_MEMORY: "1",
+    }, {
+      logFilePath: join(root, "memory-ipc.log"),
+      logLevel: "info",
+      ipc: true,
+      persistOnDesktopExit: true,
+    });
+
+    try {
+      await expect(new Promise((resolveMessage) => {
+        memory.process.once("message", resolveMessage);
+      })).resolves.toEqual({ type: "memmy-memory:restart" });
+      expect(memory.process.connected).toBe(true);
+    } finally {
+      await stopManagedChild(memory);
+    }
+  });
+
   it("把子进程 stdout 落盘到指定日志文件", async () => {
     const root = await makeTempRoot();
     const entry = join(root, "entry.js");

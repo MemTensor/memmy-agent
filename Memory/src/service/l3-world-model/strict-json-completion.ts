@@ -1,7 +1,7 @@
 import {
   canonicalJson,
   type JsonValue
-} from "@memmy/local-api-contracts";
+} from "../../contracts/index.js";
 import type { LlmClient, LlmMessage } from "../../model/types.js";
 
 export const L3_WORLD_MODEL_MAX_OUTPUT_TOKENS = 65_536;

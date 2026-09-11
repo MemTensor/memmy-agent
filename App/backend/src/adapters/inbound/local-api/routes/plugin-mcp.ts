@@ -10,6 +10,7 @@ import type { ProgressBus } from "../../../../services/progress-bus.js";
 
 const MCP_TOKEN_HEADER = "x-memmy-mcp-token";
 const MCP_ROUTE_PATH = "/mcp/plugins";
+const PLUGIN_MCP_KEEPALIVE_MS = 30_000;
 
 export type PluginMcpService = Pick<PluginService, "list" | "invoke" | "cancel">;
 
@@ -26,7 +27,11 @@ interface CapabilityTool {
   wrapsInput: boolean;
 }
 
-export function buildPluginMcpServer(plugins: PluginMcpService, progressBus: ProgressBus): Server {
+export function buildPluginMcpServer(
+  plugins: PluginMcpService,
+  progressBus: ProgressBus,
+  keepaliveIntervalMs = PLUGIN_MCP_KEEPALIVE_MS
+): Server {
   const server = new Server({ name: "memmy-plugins", version: "1.0.0" }, { capabilities: { tools: {} } });
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -53,6 +58,25 @@ export function buildPluginMcpServer(plugins: PluginMcpService, progressBus: Pro
       input
     };
     const cancel = () => void plugins.cancel(tool.plugin.id, callId).catch(() => undefined);
+    const progressToken = extra._meta?.progressToken;
+    let progressSequence = 0;
+    const sendTransportProgress = (message: string, current?: number, total?: number) => {
+      if (progressToken === undefined) return Promise.resolve();
+      progressSequence += 1;
+      return extra.sendNotification({
+        method: "notifications/progress",
+        params: {
+          progressToken,
+          progress: current ?? progressSequence,
+          ...(total === undefined ? {} : { total }),
+          message
+        }
+      }).catch(() => undefined);
+    };
+    const keepalive = setInterval(() => {
+      void sendTransportProgress("Waiting for plugin interaction");
+    }, keepaliveIntervalMs);
+    keepalive.unref?.();
     extra.signal.addEventListener("abort", cancel, { once: true });
     try {
       for await (const event of plugins.invoke(call)) {
@@ -63,6 +87,11 @@ export function buildPluginMcpServer(plugins: PluginMcpService, progressBus: Pro
           conversationId,
           event
         });
+        await sendTransportProgress(
+          event.type === "progress" ? event.message ?? "Plugin progress" : `Plugin ${event.type}`,
+          event.type === "progress" ? event.current : undefined,
+          event.type === "progress" ? event.total : undefined
+        );
         if (event.type === "result") return toolResult(event.output);
         if (event.type === "error") return toolError(`${event.code}: ${event.message}`);
       }
@@ -70,6 +99,7 @@ export function buildPluginMcpServer(plugins: PluginMcpService, progressBus: Pro
     } catch (error) {
       return toolError(error instanceof Error ? error.message : String(error));
     } finally {
+      clearInterval(keepalive);
       extra.signal.removeEventListener("abort", cancel);
     }
   });
@@ -111,10 +141,14 @@ function capabilityTools(plugins: PluginMcpService): CapabilityTool[] {
     })));
 }
 
-function capabilityToolName(pluginId: string, capabilityId: string): string {
-  const readable = `${pluginId}_${capabilityId}`.replace(/[^a-zA-Z0-9_-]/g, "_").replace(/_+/g, "_").slice(0, 72);
-  const digest = createHash("sha256").update(`${pluginId}\0${capabilityId}`).digest("hex").slice(0, 12);
-  return `plugin_${readable}_${digest}`;
+export function capabilityToolName(pluginId: string, capabilityId: string): string {
+  // The Agent prefixes MCP names with `mcp_plugins_` and caps them at 64
+  // characters. Keep this raw name within 52 characters so the capability ID
+  // remains readable instead of collapsing several tools to `review_update__*`.
+  const digest = createHash("sha256").update(`${pluginId}\0${capabilityId}`).digest("hex").slice(0, 8);
+  const readable = capabilityId.replace(/[^a-zA-Z0-9_-]/g, "_").replace(/_+/g, "_");
+  const maxReadableLength = 52 - "plugin__".length - digest.length;
+  return `plugin_${readable.slice(0, maxReadableLength)}_${digest}`;
 }
 
 function mcpInputSchema(schema: JsonSchema, wrapsInput: boolean): Record<string, unknown> {

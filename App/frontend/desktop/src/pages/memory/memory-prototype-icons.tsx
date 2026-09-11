@@ -441,6 +441,14 @@ export function CheckCircle2(props: MemoryIconProps) {
   );
 }
 
+export function Check(props: MemoryIconProps) {
+  return (
+    <IconShell {...props} name="check">
+      <path d="m20 6-11 11-5-5" />
+    </IconShell>
+  );
+}
+
 export function AlertCircle(props: MemoryIconProps) {
   return (
     <IconShell {...props} name="alert-circle">

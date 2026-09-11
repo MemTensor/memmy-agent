@@ -1,8 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { get_encoding } from "tiktoken";
 import type { LlmConfig } from "../src/config/index.js";
 import { createLlmClient } from "../src/model/llm.js";
+import type { LlmMessage } from "../src/model/types.js";
 
 const originalLogLevel = process.env.MEMMY_LOG_LEVEL;
+const encoding = get_encoding("cl100k_base");
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -12,6 +15,175 @@ afterEach(() => {
   } else {
     process.env.MEMMY_LOG_LEVEL = originalLogLevel;
   }
+});
+
+describe("memory summary input budget", () => {
+  it.each([
+    ["capture.summarize", 512],
+    ["capture.reflection.synth", 500],
+    ["capture.alpha.reflection_score.v1", 700],
+    ["span.big_turn.v1", 4096],
+    ["reward.r_human.v1", 700],
+    ["retrieval.query_extract.v1", 320],
+    ["retrieval.filter.v1", 512],
+    ["relation.classify.v1", 512],
+    ["relation.arbitration.v1", 512]
+  ])("budgets the summary role for %s", async (operation, maxTokens) => {
+    const fetchMock = sequenceFetch([openAiResponse("ok")]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const messages: LlmMessage[] = [
+      { role: "system", content: "Keep the system instructions." },
+      { role: "user", content: "BEGIN " + "tool output ".repeat(6_000) + "END" }
+    ];
+    const original = structuredClone(messages);
+    const client = createLlmClient(llmConfig(), { modelRole: "memory_summary" });
+    await client.complete(messages, { operation, maxTokens });
+
+    const body = requestBodies(fetchMock)[0]!;
+    const sent = body.messages as LlmMessage[];
+    expect(body.max_tokens).toBe(maxTokens);
+    expect(sent[0]).toEqual(messages[0]);
+    expect(sent[1]?.content).toMatch(/^BEGIN /);
+    expect(sent[1]?.content).toContain("[... input truncated ...]");
+    expect(sent[1]?.content).toMatch(/END$/);
+    expect(inputTokenCount(body)).toBeLessThanOrEqual(Math.min(7_000, 8_192 - maxTokens - 512));
+    expect(messages).toEqual(original);
+  });
+
+  it("keeps short input unchanged and sends the default output reservation", async () => {
+    const fetchMock = sequenceFetch([openAiResponse("ok")]);
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createLlmClient(llmConfig({ maxTokens: undefined }), { modelRole: "memory_summary" });
+    const messages: LlmMessage[] = [{ role: "user", content: "Summarize this." }];
+
+    await client.complete(messages, { operation: "capture.summarize" });
+
+    expect(requestBodies(fetchMock)[0]).toMatchObject({ messages, max_tokens: 512 });
+  });
+
+  it("preserves system messages after long evidence and shares space among other messages", async () => {
+    const fetchMock = sequenceFetch([openAiResponse("ok")]);
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createLlmClient(llmConfig(), { modelRole: "memory_summary" });
+    const messages: LlmMessage[] = [
+      { role: "user", content: "user evidence ".repeat(6_000) },
+      { role: "system", content: "Do not drop these instructions." },
+      { role: "assistant", content: "assistant evidence ".repeat(6_000) },
+      { role: "user", content: "Keep this short request." }
+    ];
+
+    await client.complete(messages, { operation: "capture.summarize" });
+
+    const body = requestBodies(fetchMock)[0]!;
+    const sent = body.messages as LlmMessage[];
+    expect(sent.map((message) => message.role)).toEqual(messages.map((message) => message.role));
+    expect(sent[1]).toEqual(messages[1]);
+    expect(sent[3]).toEqual(messages[3]);
+    expect(sent[0]?.content).toContain("[... input truncated ...]");
+    expect(sent[2]?.content).toContain("[... input truncated ...]");
+    expect(inputTokenCount(body) + Number(body.max_tokens) + 512).toBeLessThanOrEqual(8_192);
+  });
+
+  it("cuts Chinese and emoji only at valid Unicode boundaries", async () => {
+    const fetchMock = sequenceFetch([openAiResponse("ok")]);
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createLlmClient(llmConfig(), { modelRole: "memory_summary" });
+    const source = "开头" + "中文🧠检索𠮷野家🧪".repeat(2_000) + "结尾";
+
+    await client.complete([{ role: "user", content: source }], { operation: "span.big_turn.v1" });
+
+    const body = requestBodies(fetchMock)[0]!;
+    const content = (body.messages as LlmMessage[])[0]!.content;
+    const [head, tail] = content.split("\n[... input truncated ...]\n");
+    expect(content).not.toContain("\ufffd");
+    expect(head?.startsWith("开头")).toBe(true);
+    expect(tail?.endsWith("结尾")).toBe(true);
+    expect(source.startsWith(head!)).toBe(true);
+    expect(source.endsWith(tail!)).toBe(true);
+    expect(inputTokenCount(body)).toBeLessThanOrEqual(3_584);
+  });
+
+  it("rejects oversized system instructions without dropping them or making a request", async () => {
+    const fetchMock = sequenceFetch([]);
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createLlmClient(llmConfig(), { modelRole: "memory_summary" });
+
+    await expect(client.complete([
+      { role: "system", content: "system instruction ".repeat(6_000) },
+      { role: "user", content: "evidence" }
+    ], { operation: "capture.summarize" })).rejects.toThrow("Summary system instructions exceed");
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(client.status().lastError).toContain("Summary system instructions exceed");
+  });
+
+  it("caps an oversized summary output reservation", async () => {
+    const fetchMock = sequenceFetch([openAiResponse("ok")]);
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createLlmClient(llmConfig({ maxTokens: 8_192 }), { modelRole: "memory_summary" });
+
+    await client.complete([{ role: "user", content: "evidence ".repeat(10_000) }], {
+      operation: "span.big_turn.v1"
+    });
+
+    const body = requestBodies(fetchMock)[0]!;
+    expect(body.max_tokens).toBe(4_096);
+    expect(inputTokenCount(body) + Number(body.max_tokens) + 512).toBeLessThanOrEqual(8_192);
+  });
+
+  it("recomputes the input budget including JSON hints when output doubles", async () => {
+    const fetchMock = sequenceFetch([
+      openAiResponse('{"ok":', "length"),
+      openAiResponse('{"ok":true}', "stop")
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createLlmClient(llmConfig({ maxTokens: 512 }), { modelRole: "memory_summary" });
+
+    await expect(client.completeJson([
+      { role: "system", content: "Keep the system instructions." },
+      { role: "user", content: "evidence ".repeat(10_000) }
+    ], { operation: "retrieval.filter.v1" })).resolves.toEqual({ ok: true });
+
+    const bodies = requestBodies(fetchMock);
+    expect(bodies.map((body) => body.max_tokens)).toEqual([512, 1_024]);
+    for (const body of bodies) {
+      const messages = body.messages as LlmMessage[];
+      expect(messages[0]?.content).toContain("Return exactly one valid JSON object.");
+      expect(messages[0]?.content).toContain("Keep the system instructions.");
+      expect(inputTokenCount(body) + Number(body.max_tokens) + 512).toBeLessThanOrEqual(8_192);
+    }
+    expect((bodies[1]!.messages as LlmMessage[])[0]?.content).toContain("previous output was truncated");
+  });
+
+  it("does not expand a summary JSON retry to an impossible 8192-token output", async () => {
+    const fetchMock = sequenceFetch([openAiResponse('{"spans":[', "length")]);
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createLlmClient(llmConfig(), { modelRole: "memory_summary" });
+
+    await expect(client.completeJson([{ role: "user", content: "segment this turn" }], {
+      operation: "span.big_turn.v1"
+    })).rejects.toThrow();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(requestBodies(fetchMock)[0]?.max_tokens).toBe(4_096);
+  });
+
+  it("does not constrain evolution requests even when they handle a summary fallback", async () => {
+    const fetchMock = sequenceFetch([
+      openAiResponse('{"ok":', "length"),
+      openAiResponse('{"ok":true}', "stop")
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createLlmClient(llmConfig(), { modelRole: "memory_evolution" });
+    const content = "evidence ".repeat(10_000);
+
+    await client.completeJson([{ role: "user", content }], { operation: "capture.summarize" });
+
+    const bodies = requestBodies(fetchMock);
+    expect(bodies.map((body) => body.max_tokens)).toEqual([4_096, 8_192]);
+    expect(bodies.every((body) => (body.messages as LlmMessage[])[1]?.content === content)).toBe(true);
+  });
 });
 
 describe("memory LLM JSON length retry", () => {
@@ -157,11 +329,11 @@ describe("memory LLM JSON length retry", () => {
       .map((value) => JSON.parse(value) as Record<string, unknown>);
     expect(records).toContainEqual(expect.objectContaining({
       level: "warn",
-      message: "[l3.abstraction.v2] 模型输出被截断，将 maxTokens 从 4096 提升到 8192 后重试"
+      message: "[l3.abstraction.v2] Model output was truncated; retrying with maxTokens increased from 4096 to 8192"
     }));
     expect(records).toContainEqual(expect.objectContaining({
       level: "info",
-      message: "[l3.abstraction.v2] 模型 JSON 在第 2 次尝试后解析成功，maxTokens=8192"
+      message: "[l3.abstraction.v2] Model JSON parsing recovered on attempt 2, maxTokens=8192"
     }));
     expect(records.every((record) => /^\d{4}-\d{2}-\d{2}T/.test(String(record.timestamp)))).toBe(true);
     expect(records.every((record) => Object.keys(record).join(",") === "timestamp,level,message")).toBe(true);
@@ -188,7 +360,7 @@ describe("memory LLM JSON length retry", () => {
       .map((value) => JSON.parse(value) as Record<string, unknown>);
     expect(records).toContainEqual(expect.objectContaining({
       level: "error",
-      message: expect.stringContaining("[capture.summarize] 模型 JSON 解析失败")
+      message: expect.stringContaining("[capture.summarize] Model JSON parsing failed")
     }));
     expect(client.status().lastError).toBeTruthy();
   });
@@ -241,4 +413,9 @@ function sequenceFetch(responses: Response[]): ReturnType<typeof vi.fn<typeof fe
 
 function requestBodies(fetchMock: ReturnType<typeof vi.fn<typeof fetch>>): Array<Record<string, unknown>> {
   return fetchMock.mock.calls.map(([, init]) => JSON.parse(String(init?.body)) as Record<string, unknown>);
+}
+
+function inputTokenCount(body: Record<string, unknown>): number {
+  return (body.messages as LlmMessage[])
+    .reduce((total, message) => total + encoding.encode(message.content, [], []).length, 0);
 }

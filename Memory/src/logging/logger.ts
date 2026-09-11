@@ -163,86 +163,86 @@ function messageForEvent(component: string, event: string, fields: MemoryLogFiel
   switch (event) {
     case "request.started":
       return component === "embedding"
-        ? `开始生成向量${details(fields, ["provider", "model", "role", "batchSize"])}`
-        : `开始调用模型${details(fields, ["provider", "model", "maxTokens", "timeoutMs"])}`;
+        ? `Embedding request started${details(fields, ["provider", "model", "role", "batchSize"])}`
+        : `Model request started${details(fields, ["provider", "model", "maxTokens", "timeoutMs"])}`;
     case "request.succeeded":
       if (component === "http") {
-        return `HTTP 请求成功${details(fields, ["method", "path", "status", "durationMs", "requestId"])}`;
+        return `HTTP request succeeded${details(fields, ["method", "path", "status", "durationMs", "requestId"])}`;
       }
       if (component === "embedding") {
-        return `向量生成成功${details(fields, ["provider", "model", "role", "batchSize", "durationMs"])}`;
+        return `Embedding request succeeded${details(fields, ["provider", "model", "role", "batchSize", "durationMs"])}`;
       }
-      return `模型调用成功${details(fields, ["provider", "model", "maxTokens", "finishReason", "outputChars", "durationMs"])}`;
+      return `Model request succeeded${details(fields, ["provider", "model", "maxTokens", "finishReason", "outputChars", "durationMs"])}`;
     case "request.retry_scheduled":
-      return `模型 HTTP 请求失败，将在 ${valueOr(fields.delayMs, "?")}ms 后重试${details(fields, ["provider", "model", "attempt", "maxAttempts", "errorMessage"])}`;
+      return `Model HTTP request failed; retrying in ${valueOr(fields.delayMs, "?")}ms${details(fields, ["provider", "model", "attempt", "maxAttempts", "errorMessage"])}`;
     case "request.rejected":
       if (component === "http") {
-        return `HTTP 请求被拒绝${details(fields, ["method", "path", "status", "errorCode", "errorMessage", "requestId"])}`;
+        return `HTTP request rejected${details(fields, ["method", "path", "status", "errorCode", "errorMessage", "requestId"])}`;
       }
-      return `模型调用被拒绝${details(fields, ["provider", "model", "errorMessage"])}`;
+      return `Model request rejected${details(fields, ["provider", "model", "errorMessage"])}`;
     case "request.failed":
       if (component === "http") {
-        return `HTTP 请求失败${details(fields, ["method", "path", "status", "durationMs", "errorMessage", "requestId"])}`;
+        return `HTTP request failed${details(fields, ["method", "path", "status", "durationMs", "errorMessage", "requestId"])}`;
       }
       if (component === "embedding") {
-        return `向量生成失败${details(fields, ["provider", "model", "role", "batchSize", "durationMs", "errorMessage"])}`;
+        return `Embedding request failed${details(fields, ["provider", "model", "role", "batchSize", "durationMs", "errorMessage"])}`;
       }
       if (component === "model-http") {
-        return `模型 HTTP 请求最终失败${details(fields, ["provider", "model", "attempt", "maxAttempts", "errorMessage"])}`;
+        return `Model HTTP request failed after the final attempt${details(fields, ["provider", "model", "attempt", "maxAttempts", "errorMessage"])}`;
       }
-      return `模型调用失败${details(fields, ["provider", "model", "maxTokens", "durationMs", "errorMessage"])}`;
+      return `Model request failed${details(fields, ["provider", "model", "maxTokens", "durationMs", "errorMessage"])}`;
     case "json.truncated_retry":
-      return `模型输出被截断，将 maxTokens 从 ${valueOr(fields.previousMaxTokens, "?")} 提升到 ${valueOr(fields.nextMaxTokens, "?")} 后重试`;
+      return `Model output was truncated; retrying with maxTokens increased from ${valueOr(fields.previousMaxTokens, "?")} to ${valueOr(fields.nextMaxTokens, "?")}`;
     case "json.malformed_retry":
-      return `模型输出不是有效 JSON，将使用 maxTokens=${valueOr(fields.maxTokens, "?")} 重试${details(fields, ["attempt", "retriesRemaining", "errorMessage"])}`;
+      return `Model output was not valid JSON; retrying with maxTokens=${valueOr(fields.maxTokens, "?")}${details(fields, ["attempt", "retriesRemaining", "errorMessage"])}`;
     case "json.recovered":
-      return `模型 JSON 在第 ${valueOr(fields.attempt, "?")} 次尝试后解析成功，maxTokens=${valueOr(fields.maxTokens, "?")}`;
+      return `Model JSON parsing recovered on attempt ${valueOr(fields.attempt, "?")}, maxTokens=${valueOr(fields.maxTokens, "?")}`;
     case "json.failed":
-      return `模型 JSON 解析失败${details(fields, ["attempt", "maxTokens", "finishReason", "errorMessage"])}`;
+      return `Model JSON parsing failed${details(fields, ["attempt", "maxTokens", "finishReason", "errorMessage"])}`;
     case "job.started":
-      return `任务开始${details(fields, ["jobId", "attempt", "maxAttempts", "sessionId", "episodeId", "targetMemoryId"])}`;
+      return `Job started${details(fields, ["jobId", "attempt", "maxAttempts", "sessionId", "episodeId", "targetMemoryId"])}`;
     case "job.succeeded":
-      return `任务成功${details(fields, ["jobId", "attempt", "maxAttempts", "targetMemoryId"])}`;
+      return `Job succeeded${details(fields, ["jobId", "attempt", "maxAttempts", "targetMemoryId"])}`;
     case "job.failed":
-      return `任务失败${details(fields, ["jobId", "attempt", "maxAttempts", "terminal", "targetMemoryId", "errorMessage"])}`;
+      return `Job failed${details(fields, ["jobId", "attempt", "maxAttempts", "terminal", "targetMemoryId", "errorMessage"])}`;
     case "embedding_retry.succeeded":
-      return `向量重试成功${details(fields, ["retryId", "targetMemoryId", "vectorField", "attempt", "maxAttempts"])}`;
+      return `Embedding retry succeeded${details(fields, ["retryId", "targetMemoryId", "vectorField", "attempt", "maxAttempts"])}`;
     case "embedding_retry.retry_scheduled":
-      return `向量生成失败，已安排重试${details(fields, ["retryId", "targetMemoryId", "vectorField", "attempt", "maxAttempts", "nextAttemptAt", "errorMessage"])}`;
+      return `Embedding generation failed; retry scheduled${details(fields, ["retryId", "targetMemoryId", "vectorField", "attempt", "maxAttempts", "nextAttemptAt", "errorMessage"])}`;
     case "embedding_retry.failed":
-      return `向量重试最终失败${details(fields, ["retryId", "targetMemoryId", "vectorField", "attempt", "maxAttempts", "errorMessage"])}`;
+      return `Embedding retry failed after the final attempt${details(fields, ["retryId", "targetMemoryId", "vectorField", "attempt", "maxAttempts", "errorMessage"])}`;
     case "drain.completed":
-      return `Worker 本轮执行完成${details(fields, ["leased", "succeeded", "failed", "embeddingRetriesLeased", "embeddingRetriesSucceeded", "embeddingRetriesFailed"])}`;
+      return `Worker drain completed${details(fields, ["leased", "succeeded", "failed", "embeddingRetriesLeased", "embeddingRetriesSucceeded", "embeddingRetriesFailed"])}`;
     case "drain.failed":
-      return `Worker 执行失败${details(fields, ["errorMessage"])}`;
+      return `Worker drain failed${details(fields, ["errorMessage"])}`;
     case "startup.reconciliation_failed":
-      return `Worker 启动恢复失败${details(fields, ["errorMessage"])}`;
+      return `Worker startup reconciliation failed${details(fields, ["errorMessage"])}`;
     case "generation.skipped":
-      return `生成被跳过${details(fields, ["reason", "jobId", "policyId", "sourceMemoryId", "evidenceCount", "counterExampleCount", "policyCount", "verdict"])}`;
+      return `Generation skipped${details(fields, ["reason", "jobId", "policyId", "sourceMemoryId", "evidenceCount", "counterExampleCount", "policyCount", "verdict"])}`;
     case "gate.skipped":
-      return `门控未通过${details(fields, ["reason", "jobId", "policyId", "sourceMemoryId", "evidenceCount", "distinctEpisodeCount", "requiredEpisodes", "policyCount", "filteredPolicyCount", "minPolicies", "minPolicyGain", "minPolicySupport", "clusterMinSimilarity"])}`;
+      return `Evolution gate not satisfied${details(fields, ["reason", "jobId", "policyId", "sourceMemoryId", "evidenceCount", "distinctEpisodeCount", "requiredEpisodes", "policyCount", "filteredPolicyCount", "minPolicies", "minPolicyGain", "minPolicySupport", "clusterMinSimilarity"])}`;
     case "fallback.used":
-      return `已使用降级策略${details(fields, ["fallback", "pipeline", "reason", "candidateCount", "selectedCount", "feedbackId", "sourceMemoryId", "errorMessage"])}`;
+      return `Fallback used${details(fields, ["fallback", "pipeline", "reason", "candidateCount", "selectedCount", "feedbackId", "sourceMemoryId", "errorMessage"])}`;
     case "summary.fallback_started":
-      return `总结模型失败，切换到进化模型${details(fields, ["sourceMemoryId", "episodeId", "primaryModel", "fallbackModel", "errorMessage"])}`;
+      return `Summary model failed; switching to the evolution model${details(fields, ["sourceMemoryId", "episodeId", "primaryModel", "fallbackModel", "errorMessage"])}`;
     case "summary.fallback_succeeded":
-      return `进化模型已完成总结降级${details(fields, ["sourceMemoryId", "episodeId", "primaryModel", "fallbackModel"])}`;
+      return `Evolution model completed the summary fallback${details(fields, ["sourceMemoryId", "episodeId", "primaryModel", "fallbackModel"])}`;
     case "summary.fallback_failed":
-      return `总结模型与进化模型均失败${details(fields, ["sourceMemoryId", "episodeId", "primaryModel", "fallbackModel", "primaryErrorMessage", "fallbackErrorMessage"])}`;
+      return `Both summary and evolution models failed${details(fields, ["sourceMemoryId", "episodeId", "primaryModel", "fallbackModel", "primaryErrorMessage", "fallbackErrorMessage"])}`;
     case "batch_window.failed":
-      return `批量反思窗口处理失败${details(fields, ["episodeId", "windowStart", "windowEnd", "attempt", "maxAttempts", "errorMessage"])}`;
+      return `Reflection batch window failed${details(fields, ["episodeId", "windowStart", "windowEnd", "attempt", "maxAttempts", "errorMessage"])}`;
     case "initialized":
-      return `记忆服务初始化完成${configDetails(fields)}`;
+      return `Memory service initialized${configDetails(fields)}`;
     case "config.reloaded":
-      return `配置已重新加载${details(fields, ["changed", "requiresRestart", "restartFailedProcessing"])}${configDetails(fields)}`;
+      return `Configuration reloaded${details(fields, ["changed", "requiresRestart", "restartFailedProcessing"])}${configDetails(fields)}`;
     case "service.starting":
-      return `记忆服务正在启动${details(fields, ["host", "port", "mode", "storageBackend", "sqlitePath", "configPath"])}`;
+      return `Memory service starting${details(fields, ["host", "port", "mode", "storageBackend", "sqlitePath", "configPath"])}`;
     case "service.listening":
-      return `记忆服务已启动${details(fields, ["url", "mode", "storageBackend"])}`;
+      return `Memory service listening${details(fields, ["url", "mode", "storageBackend"])}`;
     case "service.fatal":
-      return `记忆服务发生致命错误${details(fields, ["errorMessage"])}`;
+      return `Memory service encountered a fatal error${details(fields, ["errorMessage"])}`;
     case "config.endpoint_write_failed":
-      return `写入当前服务地址失败${details(fields, ["configPath", "endpoint", "errorMessage"])}`;
+      return `Failed to write the current service endpoint${details(fields, ["configPath", "endpoint", "errorMessage"])}`;
     default:
       return `${event}${details(fields, Object.keys(fields).filter((key) => key !== "operation" && key !== "stage" && key !== "jobType"))}`;
   }
@@ -260,14 +260,14 @@ function configDetails(fields: MemoryLogFields): string {
     compactObject("embeddingModel", fields.embeddingModel),
     compactObject("evolutionGates", fields.evolutionGates)
   ].filter((value): value is string => Boolean(value));
-  return parts.length > 0 ? `，${parts.join("，")}` : "";
+  return parts.length > 0 ? `, ${parts.join(", ")}` : "";
 }
 
 function details(fields: MemoryLogFields, keys: string[]): string {
   const parts = keys
     .map((key) => pair(key, fields[key]))
     .filter((value): value is string => Boolean(value));
-  return parts.length > 0 ? `，${parts.join("，")}` : "";
+  return parts.length > 0 ? `, ${parts.join(", ")}` : "";
 }
 
 function pair(key: string, value: unknown): string | undefined {

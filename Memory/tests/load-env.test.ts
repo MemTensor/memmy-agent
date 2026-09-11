@@ -58,6 +58,19 @@ describe("packaged memmy-memory cloud-service loading", () => {
     expect(env.MEMMY_CLOUD_SERVICE).toBe("https://dev.example.test");
   });
 
+  it("loads the desktop manifest from the app ASAR for the standalone runtime", () => {
+    const root = fixtureRoot();
+    const moduleDir = join(root, "Resources", "memory-runtime", "dist", "src", "cli");
+    const manifestPath = join(root, "Resources", "app.asar", "dist", "main", "desktop-edition.json");
+    mkdirSync(moduleDir, { recursive: true });
+    mkdirSync(join(root, "Resources", "app.asar", "dist", "main"), { recursive: true });
+    writeFileSync(manifestPath, JSON.stringify({ cloudService: "https://standalone.example.test" }));
+
+    const env: NodeJS.ProcessEnv = {};
+    expect(loadCloudServiceEnv({ cwd: root, moduleDir, env })).toBe(manifestPath);
+    expect(env.MEMMY_CLOUD_SERVICE).toBe("https://standalone.example.test");
+  });
+
   it("fails closed for an invalid packaged manifest", () => {
     const root = fixtureRoot();
     const manifestPath = join(root, "desktop-edition.json");

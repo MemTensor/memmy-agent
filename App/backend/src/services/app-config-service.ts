@@ -28,12 +28,14 @@ import type { CloudClient } from "../adapters/outbound/cloud-client/index.js";
 import type { AccountSessionRepository } from "../infrastructure/app-state-store/repositories/account-session-repo.js";
 import type { BootstrapRepository } from "../infrastructure/app-state-store/repositories/bootstrap-repo.js";
 import type { MemmyConfigWriter } from "../infrastructure/memmy-config/index.js";
+import type { ScanPreferencesStore } from "../infrastructure/memmy-config/agent-access.js";
 import type { MemoryClient } from "../adapters/outbound/memory-client/index.js";
 import { createHttpModelConfigTester, type ModelConfigTester } from "./model-config-tester.js";
 
 export interface AppConfigService {
   updateSettings(input: PatchAppSettingsInput): Promise<AppSettingsDto>;
   updatePrivacy(input: PatchPrivacyInput): Promise<PrivacySettingsDto>;
+  getScanPreferences(): Promise<ScanPreferences>;
   updateScanPreferences(input: PatchScanPreferencesInput): Promise<ScanPreferences>;
   updateOnboarding(input: PatchOnboardingInput): Promise<OnboardingStateDto>;
   setImprovementProgram(input: SetImprovementProgramInput): Promise<SetImprovementProgramResponse>;
@@ -52,6 +54,7 @@ export interface CreateAppConfigServiceOptions {
     | "updateAppSettings"
     | "getAppSettings"
     | "getOnboardingState"
+    | "getScanPreferences"
     | "updatePrivacy"
     | "updateScanPreferences"
     | "updateOnboarding"
@@ -63,6 +66,7 @@ export interface CreateAppConfigServiceOptions {
   accountSessionRepository?: Pick<AccountSessionRepository, "get" | "getCloudUuid">;
   memmyConfigWriter?: MemmyConfigWriter;
   memoryClient?: Pick<MemoryClient, "reloadConfig">;
+  scanPreferencesStore?: ScanPreferencesStore;
 }
 
 const BUILT_IN_AVATARS = AvatarOptionSchema.array().parse([
@@ -108,8 +112,15 @@ export function createAppConfigService(options: CreateAppConfigServiceOptions): 
       return options.bootstrapRepository.updatePrivacy(input);
     },
 
+    async getScanPreferences() {
+      return options.scanPreferencesStore?.getScanPreferences()
+        ?? options.bootstrapRepository.getScanPreferences();
+    },
+
     async updateScanPreferences(input) {
-      return options.bootstrapRepository.updateScanPreferences(input);
+      return options.scanPreferencesStore
+        ? options.scanPreferencesStore.updateScanPreferences(input)
+        : options.bootstrapRepository.updateScanPreferences(input);
     },
 
     async updateOnboarding(input) {

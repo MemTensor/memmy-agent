@@ -124,13 +124,15 @@ describe("app state store migrations", () => {
     expect(onboarding).toMatchObject({
       completed: false,
       currentStep: "scan_permission_required",
-      scanPermission: "unset"
+      scanPermission: "unset",
+      firstEncounterReportStatus: "pending"
     });
     expect(settings.userMode).toBe("unset");
     expect(settings.menuBarIconEnabled).toBe(true);
+    expect(settings.stopMemoryServiceOnExit).toBe(false);
     expect(agentSources).toEqual([]);
-    expect(firstMigrationCount).toBe(32);
-    expect(secondMigrationCount).toBe(32);
+    expect(firstMigrationCount).toBe(33);
+    expect(secondMigrationCount).toBe(33);
   });
 
   it("preserves the authenticated account when upgrading the legacy 0007 database", () => {
@@ -1573,6 +1575,86 @@ describe("app state store migrations", () => {
     expect(accountRow.scan_permission).toBe("unset");
   });
 
+  it("moves account-scoped agent scan state into the installation scope", () => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-app-state-"));
+    const databasePath = join(tempDir, "app.sqlite");
+    const initialStore = createAppStateStore({ databasePath });
+
+    initialStore.repositories.accountSession.upsert({
+      profile: accountProfile("user-a", "a@example.com", "Account A"),
+      uuid: "cloud-account-a"
+    });
+    initialStore.db.prepare(`
+      INSERT INTO account_agent_sources (
+        uuid, source_id, display_name, data_path, builtin, status,
+        last_scanned_at, sync_recipe_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      "cloud-account-a",
+      "codex",
+      "Codex",
+      "/Users/test/.codex/sessions",
+      1,
+      "skill_installed",
+      "2026-08-01T10:00:00.000Z",
+      null,
+      "2026-07-01T10:00:00.000Z",
+      "2026-08-01T10:00:00.000Z"
+    );
+    initialStore.db.prepare(`
+      INSERT INTO account_ingestion_seen (uuid, dedup_key, source_id, created_at)
+      VALUES (?, ?, ?, ?)
+    `).run("cloud-account-a", "codex-message-1", "codex", "2026-08-01T10:01:00.000Z");
+    initialStore.db.prepare(`
+      INSERT INTO account_agent_source_watermarks (
+        uuid, source_id, mode, baseline_at, latest_seen_created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      "cloud-account-a",
+      "codex",
+      "incremental",
+      "2026-07-01T10:00:00.000Z",
+      "2026-08-01T10:00:00.000Z",
+      "2026-08-01T10:00:00.000Z"
+    );
+    initialStore.db.prepare(`
+      INSERT INTO account_agent_source_conversation_checkpoints (
+        uuid, source_id, conversation_id, last_message_id, last_created_at, content_hash, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      "cloud-account-a",
+      "codex",
+      "conversation-1",
+      "message-1",
+      "2026-08-01T10:00:00.000Z",
+      "hash-1",
+      "2026-08-01T10:00:00.000Z"
+    );
+    initialStore.db.prepare("DELETE FROM _migrations WHERE name = ?").run("0028-installation-agent-source-state.sql");
+    initialStore.close();
+
+    const migratedStore = createAppStateStore({ databasePath });
+    expect(migratedStore.db.prepare(
+      "SELECT display_name, last_scanned_at FROM account_agent_sources WHERE uuid = ? AND source_id = ?"
+    ).get(INSTALLATION_SCAN_SCOPE_UUID, "codex")).toEqual({
+      display_name: "Codex",
+      last_scanned_at: "2026-08-01T10:00:00.000Z"
+    });
+    expect(migratedStore.db.prepare(
+      "SELECT dedup_key FROM account_ingestion_seen WHERE uuid = ? AND source_id = ?"
+    ).get(INSTALLATION_SCAN_SCOPE_UUID, "codex")).toEqual({ dedup_key: "codex-message-1" });
+    expect(migratedStore.db.prepare(
+      "SELECT latest_seen_created_at FROM account_agent_source_watermarks WHERE uuid = ? AND source_id = ?"
+    ).get(INSTALLATION_SCAN_SCOPE_UUID, "codex")).toEqual({ latest_seen_created_at: "2026-08-01T10:00:00.000Z" });
+    expect(migratedStore.db.prepare(
+      "SELECT content_hash FROM account_agent_source_conversation_checkpoints WHERE uuid = ? AND source_id = ? AND conversation_id = ?"
+    ).get(INSTALLATION_SCAN_SCOPE_UUID, "codex", "conversation-1")).toEqual({ content_hash: "hash-1" });
+    expect(migratedStore.db.prepare(
+      "SELECT COUNT(*) AS count FROM account_agent_sources WHERE uuid = ?"
+    ).get("cloud-account-a")).toEqual({ count: 0 });
+    migratedStore.close();
+  });
+
   it("prefers the BYOK permission over a stale active account during migration", () => {
     tempDir = mkdtempSync(join(tmpdir(), "memmy-app-state-"));
     const databasePath = join(tempDir, "app.sqlite");
@@ -1809,7 +1891,8 @@ describe("app state store migrations", () => {
       "auto_scan_known_agents",
       "watch_file_changes",
       "auto_inject_skill",
-      "installation_id"
+      "installation_id",
+      "stop_memory_service_on_exit"
     ]);
     expect(settings).toMatchObject({
       defaultLaunchMode: "last",
@@ -1818,7 +1901,8 @@ describe("app state store migrations", () => {
       skinId: "default",
       taskDoneNotificationEnabled: true,
       notificationSoundEnabled: true,
-      menuBarIconEnabled: true
+      menuBarIconEnabled: true,
+      stopMemoryServiceOnExit: false
     });
     expect(cloudAccountColumns).toEqual([
       "uuid",
@@ -2215,6 +2299,49 @@ describe("bootstrap repository writes", () => {
     });
     expect(accountAPrivacy).toMatchObject({ localOnlyMode: true, allowMemoryImprovementUpload: false });
     expect(accountATokenUsage).toMatchObject({ planName: "Account A Plan", remainingTokens: 60 });
+  });
+
+  it("shares the first encounter report state across accounts, BYOK, and database reopen", () => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-app-state-"));
+    const databasePath = join(tempDir, "app.sqlite");
+    const first = createAppStateStore({ databasePath });
+
+    first.repositories.accountSession.upsert({
+      profile: accountProfile("user-a", "a@example.com", "Account A"),
+      uuid: "cloud-account-a"
+    });
+    first.repositories.bootstrap.updateOnboarding({ firstEncounterReportStatus: "shown" });
+
+    first.repositories.accountSession.upsert({
+      profile: accountProfile("user-b", "b@example.com", "Account B"),
+      uuid: "cloud-account-b"
+    });
+    expect(first.repositories.bootstrap.getOnboardingState().firstEncounterReportStatus).toBe("shown");
+
+    first.repositories.bootstrap.updateAppSettings({ userMode: "byok" });
+    expect(first.repositories.bootstrap.getOnboardingState().firstEncounterReportStatus).toBe("shown");
+    first.close();
+
+    const reopened = createAppStateStore({ databasePath });
+    expect(reopened.repositories.bootstrap.getOnboardingState().firstEncounterReportStatus).toBe("shown");
+    reopened.close();
+  });
+
+  it("keeps a denied first encounter report skipped after scan permission changes", () => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-app-state-"));
+    const store = createAppStateStore({ databasePath: join(tempDir, "app.sqlite") });
+
+    store.repositories.bootstrap.updateOnboarding({
+      scanPermission: "none",
+      firstEncounterReportStatus: "skipped"
+    });
+    store.repositories.bootstrap.updateOnboarding({ scanPermission: "scan_only" });
+
+    expect(store.repositories.bootstrap.getOnboardingState()).toMatchObject({
+      scanPermission: "scan_only",
+      firstEncounterReportStatus: "skipped"
+    });
+    store.close();
   });
 });
 

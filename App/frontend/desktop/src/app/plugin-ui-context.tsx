@@ -3,6 +3,8 @@ import {
   useCallback,
   useContext,
   useMemo,
+  useEffect,
+  useRef,
   useState,
   type ReactNode
 } from "react";
@@ -23,7 +25,15 @@ export interface PluginInvocationContext {
   input: unknown;
 }
 
+export interface PluginChatFeedback {
+  message: string;
+  clientRequestId: string;
+}
+
 interface PluginUiContextValue {
+  registerChatFeedback(conversationId: string, handler: (feedback: PluginChatFeedback) => void): () => void;
+  notifyChatMessage(chatId: string, feedback: PluginChatFeedback): void;
+  fileDrafts: Map<string, File[]>;
   calls: PluginUiCall[];
   activeSurface: PluginInvocationContext | null;
   openSurface(context: PluginInvocationContext): void;
@@ -35,6 +45,19 @@ const MAX_PLUGIN_CALLS = 50;
 const PluginUiContext = createContext<PluginUiContextValue | null>(null);
 
 export function PluginUiProvider(props: { children: ReactNode }) {
+  const feedbackHandlers = useRef(new Map<symbol, { conversationId: string; handler: (feedback: PluginChatFeedback) => void }>());
+  const fileDrafts = useRef(new Map<string, File[]>()).current;
+  const registerChatFeedback = useCallback((conversationId: string, handler: (feedback: PluginChatFeedback) => void) => {
+    const id = Symbol();
+    feedbackHandlers.current.set(id, { conversationId, handler });
+    return () => { feedbackHandlers.current.delete(id); };
+  }, []);
+  const notifyChatMessage = useCallback((chatId: string, feedback: PluginChatFeedback) => {
+    const sessionKey = chatId.startsWith("websocket:") ? chatId : `websocket:${chatId}`;
+    for (const entry of [...feedbackHandlers.current.values()]) {
+      if (entry.conversationId === chatId || entry.conversationId === sessionKey) entry.handler(feedback);
+    }
+  }, []);
   const [calls, setCalls] = useState<PluginUiCall[]>([]);
   const [activeSurface, setActiveSurface] = useState<PluginInvocationContext | null>(null);
   const receive = useCallback((payload: PluginCapabilityEventPayload) => {
@@ -42,7 +65,7 @@ export function PluginUiProvider(props: { children: ReactNode }) {
   }, []);
   const openSurface = useCallback((context: PluginInvocationContext) => setActiveSurface(context), []);
   const closeSurface = useCallback(() => setActiveSurface(null), []);
-  const value = useMemo(() => ({ calls, activeSurface, openSurface, closeSurface, receive }), [activeSurface, calls, closeSurface, openSurface, receive]);
+  const value = useMemo(() => ({ calls, activeSurface, openSurface, closeSurface, receive, registerChatFeedback, notifyChatMessage, fileDrafts }), [activeSurface, calls, closeSurface, openSurface, receive, registerChatFeedback, notifyChatMessage, fileDrafts]);
   return <PluginUiContext.Provider value={value}>{props.children}</PluginUiContext.Provider>;
 }
 
@@ -86,4 +109,16 @@ function mergeCapabilityEvent(events: CapabilityEvent[], event: CapabilityEvent)
   const next = [...events];
   next[index] = event;
   return next;
+}
+
+/** Optional for standalone renderer previews; routes only messages from the same conversation. */
+export function usePluginChatFeedback(conversationId: string | undefined, handler: (feedback: PluginChatFeedback) => void) {
+  const context = useContext(PluginUiContext);
+  const latest = useRef(handler);
+  latest.current = handler;
+  const register = context?.registerChatFeedback;
+  useEffect(() => {
+    if (register && conversationId) return register(conversationId, (feedback) => latest.current(feedback));
+  }, [register, conversationId]);
+  return context?.fileDrafts;
 }

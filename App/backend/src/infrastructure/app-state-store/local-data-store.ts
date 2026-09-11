@@ -1,20 +1,18 @@
 /** Local data store module. */
 import { spawn } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
-import { DatabaseSync as SqliteDatabaseSync } from "node:sqlite";
 import type { ExportLocalDataInput, LocalDataExportResponse } from "@memmy/local-api-contracts";
-import { getLoadablePath as getSqliteVecLoadablePath } from "sqlite-vec";
 import YAML from "yaml";
 import type { SecretStore } from "./secret-store.js";
 
 export interface LocalDataStore {
   getDataPath(): string;
   revealDataPath(dataPath: string): void;
-  exportData(input: ExportLocalDataInput): LocalDataExportResponse;
-  clearMemoryDatabase(clearedAt: string): void;
+  exportData(input: ExportLocalDataInput, bundle: Record<string, unknown>): LocalDataExportResponse;
+  clearImportState(): void;
 }
 
 export interface CreateFilesystemLocalDataStoreOptions {
@@ -28,31 +26,6 @@ export interface CreateFilesystemLocalDataStoreOptions {
 }
 
 const DEFAULT_MEMORY_HOME = join(homedir(), ".memmy");
-const MEMORY_DATA_TABLES = [
-  "memories_fts",
-  "user_memories_fts",
-  "memory_vector_entries",
-  "memory_processing_state",
-  "trace_policy_links",
-  "skill_trials",
-  "feedback",
-  "decision_repairs",
-  "raw_turns",
-  "episodes",
-  "sessions",
-  "recall_events",
-  "l2_candidate_pool",
-  "evolution_jobs",
-  "embedding_retry_queue",
-  "artifacts",
-  "audit_logs",
-  "api_logs",
-  "memory_change_log",
-  "idempotency_keys",
-  "user_memories",
-  "memories"
-] as const;
-
 /** Creates create filesystem local data store. */
 export function createFilesystemLocalDataStore(options: CreateFilesystemLocalDataStoreOptions): LocalDataStore {
   const memoryDatabasePath = resolveMemoryDatabasePath(options);
@@ -67,14 +40,11 @@ export function createFilesystemLocalDataStore(options: CreateFilesystemLocalDat
       (options.revealPath ?? revealPathInFileManager)(dataPath);
     },
 
-    exportData(input) {
+    exportData(input, bundle) {
       const exportRoot = resolveExportRoot(input.targetPath, memoryDataPath);
       const exportPath = join(exportRoot, `memmy-export-${toExportTimestamp(new Date())}`);
       mkdirSync(exportPath, { recursive: true });
-
-      copyIfExists(memoryDatabasePath, join(exportPath, "memory.sqlite"));
-      copyIfExists(`${memoryDatabasePath}-wal`, join(exportPath, "memory.sqlite-wal"));
-      copyIfExists(`${memoryDatabasePath}-shm`, join(exportPath, "memory.sqlite-shm"));
+      writeFileSync(join(exportPath, "memory.json"), `${JSON.stringify(bundle, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
 
       return {
         exportPath,
@@ -82,8 +52,7 @@ export function createFilesystemLocalDataStore(options: CreateFilesystemLocalDat
       };
     },
 
-    clearMemoryDatabase(_clearedAt) {
-      clearSqliteMemoryTables(memoryDatabasePath);
+    clearImportState() {
       options.db.exec(`
         DELETE FROM account_ingestion_seen;
         DELETE FROM account_agent_source_watermarks;
@@ -91,72 +60,6 @@ export function createFilesystemLocalDataStore(options: CreateFilesystemLocalDat
       `);
     }
   };
-}
-
-function clearSqliteMemoryTables(databasePath: string): void {
-  if (!existsSync(databasePath)) {
-    return;
-  }
-
-  const db = new SqliteDatabaseSync(databasePath, { allowExtension: true });
-  try {
-    const extensionPath = getSqliteVecLoadablePath();
-    const unpackedPath = extensionPath.replace(/app\.asar([\\/])/, "app.asar.unpacked$1");
-    db.loadExtension(existsSync(unpackedPath) ? unpackedPath : extensionPath);
-    db.exec("PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = OFF");
-    db.exec("BEGIN IMMEDIATE");
-    try {
-      for (const table of sqliteVectorTables(db)) {
-        deleteTableRowsIfExists(db, table);
-      }
-      for (const table of MEMORY_DATA_TABLES) {
-        deleteTableRowsIfExists(db, table);
-      }
-      deleteSqliteSequenceRows(db);
-      db.exec("COMMIT");
-    } catch (error) {
-      db.exec("ROLLBACK");
-      throw error;
-    }
-    try {
-      db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
-    } catch {
-      // The cleanup data has already been committed; a WAL truncation failure should not make the user think the cleanup failed.
-    }
-  } finally {
-    db.close();
-  }
-}
-
-function sqliteVectorTables(db: DatabaseSync): string[] {
-  const rows = db
-    .prepare(
-      `SELECT name
-       FROM sqlite_master
-       WHERE type = 'table'
-         AND name GLOB 'memory_vec_[0-9]*'
-         AND sql LIKE 'CREATE VIRTUAL TABLE%USING vec0%'`
-    )
-    .all() as Array<{ name: string }>;
-  return rows.map((row) => row.name).filter((name) => /^memory_vec_\d+$/.test(name));
-}
-
-function deleteTableRowsIfExists(db: DatabaseSync, table: string): void {
-  if (tableExists(db, table)) {
-    db.prepare(`DELETE FROM ${table}`).run();
-  }
-}
-
-function deleteSqliteSequenceRows(db: DatabaseSync): void {
-  if (!tableExists(db, "sqlite_sequence")) {
-    return;
-  }
-  db.prepare("DELETE FROM sqlite_sequence WHERE name IN (?, ?)").run("api_logs", "memory_change_log");
-}
-
-function tableExists(db: DatabaseSync, table: string): boolean {
-  const row = db.prepare("SELECT name FROM sqlite_master WHERE type IN ('table', 'view') AND name = ?").get(table);
-  return Boolean(row);
 }
 
 function resolveMemoryDatabasePath(options: CreateFilesystemLocalDataStoreOptions): string {
@@ -249,18 +152,6 @@ function resolveExportRoot(targetPath: string | undefined, dataPath: string): st
  */
 function hasParentTraversal(targetPath: string): boolean {
   return targetPath.split(/[\\/]+/).includes("..");
-}
-
-/**
- * Copies the file if it exists.
- *
- * @param source the source path.
- * @param target the target path.
- */
-function copyIfExists(source: string, target: string): void {
-  if (existsSync(source)) {
-    copyFileSync(source, target);
-  }
 }
 
 /**

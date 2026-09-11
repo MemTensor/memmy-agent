@@ -13,11 +13,25 @@ const PluginPackagePathSchema = z.string().trim().min(1).max(512).refine((value)
   && value.split("/").every((segment) => segment.length > 0 && segment !== "." && segment !== "..")
 ), "Plugin package path must be a safe relative path");
 
+const PluginNetworkHostSchema = z.string().trim().min(1).max(253).transform((value) => value.toLowerCase()).refine((value) => {
+  if (value === "localhost") return true;
+  if (value.includes(":") || value.includes("/") || value.includes("*") || value.startsWith(".")) return false;
+  return value.split(".").every((label) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label));
+}, "Network host must be an exact DNS hostname without a scheme, port, path, or wildcard");
+
 export const PluginRuntimeSchema = z.object({
   adapter: z.enum(["mcp", "http", "command"]),
   config: z.record(z.string(), z.unknown()).optional()
 });
 export type PluginRuntime = z.infer<typeof PluginRuntimeSchema>;
+
+export const PluginCapabilityControlSchema = z.object({
+  action: z.literal("cancel"),
+  runIdInput: z.string().trim().min(1).max(128).regex(/^[A-Za-z_][A-Za-z0-9_.-]*$/).default("runId"),
+  scopeInput: z.string().trim().min(1).max(128).regex(/^[A-Za-z_][A-Za-z0-9_.-]*$/).default("scope"),
+  taskIdInput: z.string().trim().min(1).max(128).regex(/^[A-Za-z_][A-Za-z0-9_.-]*$/).default("taskId")
+});
+export type PluginCapabilityControl = z.infer<typeof PluginCapabilityControlSchema>;
 
 export const PluginCapabilitySchema = z.object({
   id: PluginIdentifierSchema,
@@ -26,6 +40,8 @@ export const PluginCapabilitySchema = z.object({
   inputSchema: JsonSchemaSchema,
   outputSchema: JsonSchemaSchema,
   execution: z.enum(["request", "job"]),
+  /** Optional Host-owned execution control performed before invoking this capability. */
+  control: PluginCapabilityControlSchema.optional(),
   examples: z.array(z.string().trim().min(1).max(500)).max(20).optional()
 });
 export type PluginCapability = z.infer<typeof PluginCapabilitySchema>;
@@ -33,7 +49,7 @@ export type PluginCapability = z.infer<typeof PluginCapabilitySchema>;
 export const PluginPermissionSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("network"),
-    hosts: z.array(z.string().trim().min(1)).min(1),
+    hosts: z.array(PluginNetworkHostSchema).min(1),
     description: z.string().trim().min(1).optional()
   }),
   z.object({
@@ -68,11 +84,24 @@ export const PluginUiSchema = z.object({
 }).passthrough();
 export type PluginUi = z.infer<typeof PluginUiSchema>;
 
+export const PluginSkillContributionSchema = z.object({
+  id: PluginIdentifierSchema,
+  name: z.string().trim().min(1).max(128),
+  description: z.string().trim().min(1).max(500),
+  entry: PluginPackagePathSchema
+}).superRefine((skill, context) => {
+  if (!skill.entry.endsWith("/SKILL.md") && skill.entry !== "SKILL.md") {
+    context.addIssue({ code: "custom", path: ["entry"], message: "Plugin skill entry must point to SKILL.md" });
+  }
+});
+export type PluginSkillContribution = z.infer<typeof PluginSkillContributionSchema>;
+
 export const PluginCommandContributionSchema = z.object({
   command: z.string().trim().regex(/^\/[a-z0-9][a-z0-9-]{0,63}$/),
   name: z.string().trim().min(1).max(128),
   description: z.string().trim().min(1).max(500),
   capabilityId: PluginIdentifierSchema,
+  agentSkillId: PluginIdentifierSchema.optional(),
   argHint: z.string().trim().max(128).optional(),
   icon: z.string().trim().min(1).max(64).optional(),
   surface: z.boolean().optional()
@@ -88,6 +117,7 @@ export const PluginManifestSchema = z.object({
   capabilities: z.array(PluginCapabilitySchema).min(1),
   permissions: z.array(PluginPermissionSchema),
   configSchema: JsonSchemaSchema.optional(),
+  skills: z.array(PluginSkillContributionSchema).max(20).optional(),
   commands: z.array(PluginCommandContributionSchema).max(100).optional(),
   ui: PluginUiSchema.optional()
 }).superRefine((manifest, context) => {
@@ -101,6 +131,21 @@ export const PluginManifestSchema = z.object({
       });
     }
     ids.add(capability.id);
+    if (capability.control) {
+      const properties = capability.inputSchema.properties;
+      const declared = properties && typeof properties === "object" && !Array.isArray(properties)
+        ? properties as Record<string, unknown>
+        : {};
+      for (const field of [capability.control.runIdInput, capability.control.scopeInput, capability.control.taskIdInput]) {
+        if (!Object.hasOwn(declared, field)) {
+          context.addIssue({
+            code: "custom",
+            path: ["capabilities", index, "control"],
+            message: `Cancellation control input field is not declared by the capability schema: ${field}`
+          });
+        }
+      }
+    }
   }
   for (const slot of ["renderer", "surface"] as const) {
     for (const [index, capabilityId] of (manifest.ui?.[slot]?.capabilities ?? []).entries()) {
@@ -113,6 +158,13 @@ export const PluginManifestSchema = z.object({
       }
     }
   }
+  const skills = new Set<string>();
+  for (const [index, skill] of (manifest.skills ?? []).entries()) {
+    if (skills.has(skill.id)) {
+      context.addIssue({ code: "custom", path: ["skills", index, "id"], message: `Duplicate plugin skill id: ${skill.id}` });
+    }
+    skills.add(skill.id);
+  }
   const commands = new Set<string>();
   for (const [index, command] of (manifest.commands ?? []).entries()) {
     if (!ids.has(command.capabilityId)) {
@@ -120,6 +172,12 @@ export const PluginManifestSchema = z.object({
     }
     if (commands.has(command.command)) {
       context.addIssue({ code: "custom", path: ["commands", index, "command"], message: `Duplicate plugin command: ${command.command}` });
+    }
+    if (command.agentSkillId && !skills.has(command.agentSkillId)) {
+      context.addIssue({ code: "custom", path: ["commands", index, "agentSkillId"], message: `Unknown command Agent skill id: ${command.agentSkillId}` });
+    }
+    if (command.agentSkillId && command.surface) {
+      context.addIssue({ code: "custom", path: ["commands", index, "surface"], message: "Agent-routed plugin commands cannot open a direct plugin surface" });
     }
     commands.add(command.command);
   }
@@ -159,6 +217,30 @@ export const PluginArtifactRefSchema = z.object({
   downloadUri: z.string().trim().min(1).optional()
 });
 export type PluginArtifactRef = z.infer<typeof PluginArtifactRefSchema>;
+
+/** Private command-adapter message requesting a Host-owned service. Never forwarded to plugin API consumers. */
+export const PluginHostServiceRequestSchema = z.object({
+  type: z.literal("host-service-request"),
+  requestId: z.string().trim().min(1),
+  service: PluginIdentifierSchema,
+  input: z.unknown()
+});
+export type PluginHostServiceRequest = z.infer<typeof PluginHostServiceRequestSchema>;
+
+export const PluginHostServiceResponseSchema = z.object({
+  type: z.literal("host-service-response"),
+  callId: z.string().trim().min(1),
+  requestId: z.string().trim().min(1),
+  response: z.unknown().optional(),
+  error: z.object({
+    code: z.string().trim().min(1),
+    message: z.string().trim().min(1),
+    retryable: z.boolean()
+  }).optional()
+}).refine((value) => value.response !== undefined || value.error !== undefined, {
+  message: "Host service response requires response or error"
+});
+export type PluginHostServiceResponse = z.infer<typeof PluginHostServiceResponseSchema>;
 
 export const CapabilityEventSchema = z.discriminatedUnion("type", [
   z.object({

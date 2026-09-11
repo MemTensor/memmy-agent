@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import JSZip from "jszip";
@@ -14,28 +14,30 @@ afterEach(() => {
 });
 
 async function release(fileName = "runtime/plugin.sh") {
+  const manifest = {
+    apiVersion: "memmy/v1" as const,
+    id: "com.example.command",
+    name: "Command plugin",
+    version: "1.0.0",
+    runtime: { adapter: "command" as const, config: { command: "runtime/plugin.sh" } },
+    capabilities: [{
+      id: "run",
+      name: "Run",
+      description: "Run command",
+      inputSchema: { type: "object" },
+      outputSchema: { type: "object" },
+      execution: "request" as const
+    }],
+    permissions: []
+  };
   const zip = new JSZip();
   zip.file(fileName, "#!/bin/sh\nprintf '{\"ok\":true}'\n", { unixPermissions: 0o100755 });
+  zip.file("plugin.json", JSON.stringify(manifest));
   const bytes = await zip.generateAsync({ type: "nodebuffer", platform: "UNIX" });
   return {
     bytes,
     release: {
-      manifest: {
-        apiVersion: "memmy/v1" as const,
-        id: "com.example.command",
-        name: "Command plugin",
-        version: "1.0.0",
-        runtime: { adapter: "command" as const, config: { command: "runtime/plugin.sh" } },
-        capabilities: [{
-          id: "run",
-          name: "Run",
-          description: "Run command",
-          inputSchema: { type: "object" },
-          outputSchema: { type: "object" },
-          execution: "request" as const
-        }],
-        permissions: []
-      },
+      manifest,
       artifact: {
         url: "https://registry.example/plugin.zip",
         sha256: createHash("sha256").update(bytes).digest("hex")
@@ -80,5 +82,39 @@ describe("PluginArtifactManager", () => {
       fetchFn: vi.fn(async () => new Response(input.bytes)) as typeof fetch
     });
     await expect(manager.install(input.release)).rejects.toThrow(/unsafe path/);
+  });
+
+  it("installs only regular local archives inside a trusted bundled root", async () => {
+    root = mkdtempSync(join(tmpdir(), "memmy-plugin-artifact-"));
+    const bundleRoot = join(root, "bundled");
+    const installRoot = join(root, "installed");
+    mkdirSync(bundleRoot);
+    const input = await release();
+    const archivePath = join(bundleRoot, "plugin.mpp.zip");
+    writeFileSync(archivePath, input.bytes);
+    const manager = createPluginArtifactManager({
+      installRoot,
+      trustedLocalRoots: [bundleRoot]
+    });
+
+    const installed = await manager.install({
+      ...input.release,
+      artifact: { localPath: archivePath, sha256: input.release.artifact.sha256 }
+    });
+    expect(readFileSync(join(installed.rootPath!, "plugin.json"), "utf8")).toContain("com.example.command");
+
+    const outsidePath = join(root, "outside.mpp.zip");
+    writeFileSync(outsidePath, input.bytes);
+    await expect(manager.install({
+      ...input.release,
+      artifact: { localPath: outsidePath, sha256: input.release.artifact.sha256 }
+    })).rejects.toThrow(/outside the trusted/);
+
+    const symlinkPath = join(bundleRoot, "linked.mpp.zip");
+    symlinkSync(outsidePath, symlinkPath);
+    await expect(manager.install({
+      ...input.release,
+      artifact: { localPath: symlinkPath, sha256: input.release.artifact.sha256 }
+    })).rejects.toThrow(/regular file/);
   });
 });

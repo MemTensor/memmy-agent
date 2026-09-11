@@ -16,11 +16,14 @@ describe("HttpMemoryClient", () => {
     expect(Object.values(MEMORY_LAYER_PATHS)).toEqual([
       "/api/v1/health",
       "/api/v1/admin/reload-config",
+      "/api/v1/admin/export",
+      "/api/v1/admin/data",
       "/api/v1/sessions/open",
       "/api/v1/sessions/:sessionId/close",
       "/api/v1/turns/start",
       "/api/v1/turns/:turnId/complete",
       "/api/v1/memory/search",
+      "/api/v1/models/embedding/infer",
       "/api/v1/memory/add",
       "/api/v1/memory/:id",
       "/api/v1/memory/:id",
@@ -79,12 +82,18 @@ describe("HttpMemoryClient", () => {
         summary: { routing: "fixed" }
       }
     });
+    await expect(client.exportBundle!()).resolves.toMatchObject({ manifest: { service: "memmy-memory-service" } });
+    await expect(client.clearAllData!()).resolves.toMatchObject({ ok: true, cleared: {} });
     await expect(client.openSession(openSessionInput())).resolves.toMatchObject({ status: "open" });
     await expect(client.closeSession(closeSessionInput())).resolves.toMatchObject({ status: "closed" });
     await expect(client.startTurn(startTurnInput())).resolves.toMatchObject({ status: [] });
     await expect(client.completeTurn(completeTurnInput())).resolves.toMatchObject({ scheduledEvolution: false });
     await expect(client.search(searchInput())).resolves.toEqual({ injectedContext: "" });
     await expect(client.search({ ...searchInput(), verbose: true })).resolves.toMatchObject({ debug: { hits: [] } });
+    await expect(client.embeddingInference?.({ texts: ["query", "document"], role: "document" })).resolves.toEqual({
+      embeddings: [[1, 0], [0, 1]],
+      model: { provider: "local", model: "test-embedding", mode: "local", dimension: 2 }
+    });
     await expect(client.addMemory(addMemoryInput())).resolves.toMatchObject({ id: "memory-1" });
     await expect(client.getMemory({ memoryId: "memory-1" })).resolves.toMatchObject({ item: { id: "memory-1" } });
     await expect(client.deleteMemory({ memoryId: "memory-1", source: "codex" })).resolves.toMatchObject({ status: "deleted" });
@@ -109,12 +118,15 @@ describe("HttpMemoryClient", () => {
     expect(requests.map((request) => `${request.method} ${request.path}`)).toEqual([
       "GET /api/v1/health",
       "POST /api/v1/admin/reload-config",
+      "GET /api/v1/admin/export",
+      "DELETE /api/v1/admin/data",
       "POST /api/v1/sessions/open",
       "POST /api/v1/sessions/session-1/close",
       "POST /api/v1/turns/start",
       "POST /api/v1/turns/turn-1/complete",
       "POST /api/v1/memory/search",
       "POST /api/v1/memory/search",
+      "POST /api/v1/models/embedding/infer",
       "POST /api/v1/memory/add",
       "GET /api/v1/memory/memory-1",
       "DELETE /api/v1/memory/memory-1",
@@ -220,6 +232,19 @@ describe("HttpMemoryClient", () => {
       limit: 20,
       targetMemoryIds: ["memory-a", "memory-b"]
     });
+  });
+
+  it("does not replay a worker request after a server failure", async () => {
+    let calls = 0;
+    const baseUrl = await startServer(async (_request, response) => {
+      calls += 1;
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end("{}");
+    });
+    const client = createHttpMemoryClient({ baseUrl, token: "", timeoutMs: 500, maxRetries: 3 });
+
+    await expect(client.runWorker({ limit: 20 })).rejects.toThrow("memory layer 5xx");
+    expect(calls).toBe(1);
   });
 
   it("retries 5xx responses and succeeds before max retries is exhausted", async () => {
@@ -409,11 +434,23 @@ function requestBodySource(body: unknown): string | undefined {
 function fixtureFor(method: string, path: string, body: unknown): unknown {
   if (method === "GET" && path === "/api/v1/health") return healthOutput();
   if (method === "POST" && path === "/api/v1/admin/reload-config") return reloadConfigOutput();
+  if (method === "GET" && path === "/api/v1/admin/export") {
+    return { manifest: { service: "memmy-memory-service" }, tables: {} };
+  }
+  if (method === "DELETE" && path === "/api/v1/admin/data") {
+    return { ok: true, cleared: {}, clearedAt: now(), serverTime: now() };
+  }
   if (method === "POST" && path === "/api/v1/sessions/open") return openSessionOutput();
   if (method === "POST" && path === "/api/v1/sessions/session-1/close") return closeSessionOutput();
   if (method === "POST" && path === "/api/v1/turns/start") return startTurnOutput(body);
   if (method === "POST" && path === "/api/v1/turns/turn-1/complete") return completeTurnOutput();
   if (method === "POST" && path === "/api/v1/memory/search") return searchOutput(body);
+  if (method === "POST" && path === "/api/v1/models/embedding/infer") {
+    return {
+      embeddings: [[1, 0], [0, 1]],
+      model: { provider: "local", model: "test-embedding", mode: "local", dimension: 2 }
+    };
+  }
   if (method === "POST" && path === "/api/v1/memory/add") return addMemoryOutput(body);
   if (method === "GET" && path === "/api/v1/memory/memory-1") return getMemoryOutput();
   if (method === "DELETE" && path === "/api/v1/memory/memory-1") return deleteMemoryOutput();

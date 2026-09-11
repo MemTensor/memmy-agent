@@ -26,8 +26,9 @@ import {
   agentChatScopeKey,
   attachmentFilesFromDataTransfer,
   buildComposerCommandDraft,
-  clipboardImageFilesFromDataTransfer,
+  buildAgentRoutedPluginPrompt,
   collectPluginCommandTargets,
+  clipboardAttachmentFilesFromDataTransfer,
   dataTransferHasAttachmentFiles,
   hasActiveAgentConversation,
   homeSuggestionDraft,
@@ -109,6 +110,36 @@ describe("HomePage", () => {
     const targets = collectPluginCommandTargets([plugin], ["/status"]);
     expect(targets.map((item) => item.command.command)).toEqual(["/review"]);
     expect(parsePluginCommandInvocation("/review agent memory", targets)).toMatchObject({ arguments: "agent memory", plugin });
+  });
+
+  it("converts Agent-routed plugin commands into explicit Skill prompts", () => {
+    const plugin = InstalledPluginSchema.parse({
+      id: "com.example.review",
+      version: "1.0.0",
+      manifest: {
+        apiVersion: "memmy/v1",
+        id: "com.example.review",
+        name: "Review",
+        version: "1.0.0",
+        runtime: { adapter: "http" },
+        capabilities: [{ id: "run", name: "Run", description: "Run", inputSchema: {}, outputSchema: {}, execution: "job" }],
+        skills: [{ id: "literature-review", name: "Literature Review", description: "Coordinate review tools", entry: "skills/literature-review/SKILL.md" }],
+        commands: [{ command: "/literature-review", name: "Literature Review", description: "Create a review", capabilityId: "run", agentSkillId: "literature-review" }],
+        permissions: []
+      },
+      state: "active",
+      approvedPermissions: [],
+      config: {},
+      lastError: null,
+      createdAt: "2026-08-31T00:00:00.000Z",
+      updatedAt: "2026-08-31T00:00:00.000Z"
+    });
+    const targets = collectPluginCommandTargets([plugin]);
+    expect(buildAgentRoutedPluginPrompt("/literature-review compare memory agents", targets)).toBe(
+      "$literature-review compare memory agents"
+    );
+    expect(buildAgentRoutedPluginPrompt("/literature-review", targets)).toBe("$literature-review");
+    expect(buildAgentRoutedPluginPrompt("ordinary chat", targets)).toBeNull();
   });
 
   it("allows Goal steering when source metadata is missing without opening TUI or IM turns", () => {
@@ -434,11 +465,11 @@ describe("HomePage", () => {
     expect(source).toContain("const activeImTitleDisplay = imChannelTitleDisplay(activeConversationTitle);");
     expect(source).toContain("formatConversationTitleForDisplay(activeImTitleDisplay?.title ?? activeConversationTitle)");
     expect(source).toContain("topBar={hasActiveConversation || environmentScope ? (");
-    expect(source).toContain('className={`agent-conversation-topbar${previewPanelOpen ? " agent-conversation-topbar--preview-open" : ""}`}');
+    expect(source).toContain('className={`agent-conversation-topbar${sidePreviewOpen ? " agent-conversation-topbar--preview-open" : ""}`}');
     expect(source).toContain('title={hasActiveConversation ? activeConversationTitle : selectedDraftProject?.name}');
     expect(source).toContain("{hasActiveConversation ? activeConversationTitleDisplay : selectedDraftProject?.name}");
     expect(source).toContain('{hasActiveConversation && activeImTitleDisplay ? <ImChannelTitleIcon slug={activeImTitleDisplay.slug} name={activeImTitleDisplay.channelName} /> : null}');
-    expect(source).toContain("topBarBorder={Boolean(hasActiveConversation || environmentScope) && !previewPanelOpen}");
+    expect(source).toContain("topBarBorder={Boolean(hasActiveConversation || environmentScope) && !sidePreviewOpen}");
     expect(source).not.toContain("agent-conversation-titlebar");
     expect(source).toContain("app-frame-page-content agent-conversation-scroll flex-1 overflow-y-auto");
     expect(source).toContain("onScroll={handleAgentConversationScroll}");
@@ -448,7 +479,7 @@ describe("HomePage", () => {
     expect(source).toContain("<PanelRight size={15}");
     expect(source).toContain("<WorkspaceArtifactPanel");
     expect(source).toContain("toolbarEnd={previewToggle}");
-    expect(source).toContain("{!previewPanelOpen ? previewToggle : null}");
+    expect(source).toContain("{!sidePreviewOpen ? previewToggle : null}");
     expect(source).toContain("agent-environment-toggle--with-preview");
     const environmentButton = source.slice(
       source.indexOf("data-agent-environment-toggle"),
@@ -666,6 +697,7 @@ describe("HomePage", () => {
     expect(sendBlock).toContain("if (runExactLocalSlashCommand(input))");
     expect(sendBlock.indexOf("runExactLocalSlashCommand(input)")).toBeLessThan(sendBlock.indexOf("submitAgentComposerMessage({"));
     expect(localSlashBlock).toContain("parsePluginCommandInvocation(command, pluginCommandTargets)");
+    expect(localSlashBlock).toContain("pluginInvocation?.contribution.agentSkillId");
     expect(localSlashBlock).toContain("clients.plugins.invoke(plugin.id, contribution.capabilityId");
     expect(localSlashBlock).toContain("openSurface({ pluginId: plugin.id");
     expect(localSlashBlock).toContain('appActions.navigate("/plugin")');
@@ -775,7 +807,7 @@ describe("HomePage", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
     const styles = readFileSync(stylesSourcePath, "utf8");
 
-    expect(source).toContain('agent-workspace-layout${environmentPanelOpen ? " agent-workspace-layout--environment-open" : ""}${previewPanelOpen ? " agent-workspace-layout--preview-open" : ""}');
+    expect(source).toContain('agent-workspace-layout${environmentPanelOpen ? " agent-workspace-layout--environment-open" : ""}${sidePreviewOpen ? " agent-workspace-layout--preview-open" : ""}');
     expect(source).toContain('className="agent-conversation-content max-w-3xl mx-auto space-y-3"');
     expect(source).toContain('className="agent-conversation-content agent-conversation-content--composer max-w-3xl mx-auto"');
     const composerRule = styles.match(/\.agent-conversation-composer\s*\{[^}]*\}/)?.[0] ?? "";
@@ -1360,6 +1392,17 @@ describe("HomePage", () => {
     expect(agentErrorText(null)).toBeNull();
   });
 
+  it("does not release a waiting card when the chat send is rejected", async () => {
+    const onMessageAccepted = vi.fn();
+    const cleared = vi.fn();
+    await expect(submitAgentComposerMessage({ chatId: "chat-1", content: "Revise this card", pendingAttachments: [],
+      connection: { getReadyGeneration: () => 1, newChat: vi.fn(), submitMessage: vi.fn(async () => { throw new Error("Disconnected"); }) },
+      uploadAgentMedia: vi.fn(), dispatch: vi.fn(), track: vi.fn(), clearComposer: cleared, onMessageAccepted
+    })).resolves.toBe(false);
+    expect(onMessageAccepted).not.toHaveBeenCalled();
+    expect(cleared).not.toHaveBeenCalled();
+  });
+
   it("keeps the model unavailable reason when a tombstone blocks new-chat creation", async () => {
     const dispatch = vi.fn();
 
@@ -1412,6 +1455,7 @@ describe("HomePage", () => {
     const clearComposer = vi.fn();
     const setCreatingChat = vi.fn();
     const onNewChatMessageSent = vi.fn();
+    const onMessageAccepted = vi.fn();
     const encodedBlob = new Blob(["png"], { type: "image/png" });
     const uploadAgentMedia = vi.fn(async () => [
       { path: "/media/websocket/webui/shot.png", url: "http://agent.local/api/media/sig/shot", name: "shot.png", kind: "image" as const, mime: "image/png" as const, bytes: 3 },
@@ -1433,7 +1477,8 @@ describe("HomePage", () => {
       track,
       setCreatingChat,
       clearComposer,
-      onNewChatMessageSent
+      onNewChatMessageSent,
+      onMessageAccepted
     })).resolves.toBe(true);
 
     expect(newChat).toHaveBeenCalledWith(1, 5000, undefined, expect.any(String));
@@ -1474,6 +1519,7 @@ describe("HomePage", () => {
     expect(setCreatingChat).toHaveBeenLastCalledWith(false);
     expect(clearComposer).toHaveBeenCalledTimes(1);
     expect(onNewChatMessageSent).toHaveBeenCalledWith("chat-new");
+    expect(onMessageAccepted).toHaveBeenCalledWith("chat-new", { message: "帮我整理计划", clientRequestId: expect.any(String) });
     expect(track).toHaveBeenCalledWith({ name: "agent_send_message", params: { page_path: "/main" }, consentTier: "basic" });
   });
 
@@ -1520,6 +1566,7 @@ describe("HomePage", () => {
     const ensureChatSubscription = vi.fn();
     const dispatch = vi.fn();
     const onNewChatMessageSent = vi.fn();
+    const onMessageAccepted = vi.fn();
 
     await expect(submitAgentComposerMessage({
       chatId: "chat-1",
@@ -1531,7 +1578,8 @@ describe("HomePage", () => {
       dispatch,
       track: vi.fn(),
       clearComposer: vi.fn(),
-      onNewChatMessageSent
+      onNewChatMessageSent,
+      onMessageAccepted
     })).resolves.toBe(true);
 
     expect(newChat).not.toHaveBeenCalled();
@@ -1553,6 +1601,7 @@ describe("HomePage", () => {
     expect(mockCallOrder(ensureChatSubscription)).toBeLessThan(mockCallOrder(sendMessage));
     expect(mockCallOrder(sendMessage)).toBeLessThan(mockCallOrder(dispatch));
     expect(onNewChatMessageSent).not.toHaveBeenCalled();
+    expect(onMessageAccepted).toHaveBeenCalledWith("chat-1", { message: "继续", clientRequestId: expect.any(String) });
   });
 
   it("does not clear the composer or add an optimistic user before send confirmation", async () => {
@@ -1942,27 +1991,28 @@ describe("HomePage", () => {
     await expect(validateAgentMediaFiles([file("unknown.bin", "", 1024)])).rejects.toThrow("仅支持 PNG、JPG/JPEG、WebP、GIF 图片，以及 PDF、DOCX、XLSX、PPTX 或文本文件");
   });
 
-  it("extracts only image files from pasted clipboard data", () => {
+  it("extracts image and file attachments from pasted clipboard data", () => {
     const pastedImage = file("clipboard.png", "image/png", 1024);
+    const pastedText = file("notes.txt", "text/plain", 1024);
     const fallbackImage = file("fallback.jpg", "image/jpeg", 1024);
-    const textFile = file("notes.txt", "text/plain", 1024);
+    const fallbackPdf = file("fallback.pdf", "application/pdf", 1024);
     const textItem = { kind: "string", type: "text/plain", getAsFile: () => null };
     const imageItem = { kind: "file", type: "image/png", getAsFile: () => pastedImage };
-    const ignoredFileItem = { kind: "file", type: "text/plain", getAsFile: () => textFile };
+    const fileItem = { kind: "file", type: "text/plain", getAsFile: () => pastedText };
 
-    expect(clipboardImageFilesFromDataTransfer({
-      items: [textItem, imageItem, ignoredFileItem],
-      files: [pastedImage, fallbackImage, textFile]
-    })).toEqual([pastedImage]);
-    expect(clipboardImageFilesFromDataTransfer({
-      items: [textItem, ignoredFileItem],
-      files: [fallbackImage, textFile]
-    })).toEqual([fallbackImage]);
-    expect(clipboardImageFilesFromDataTransfer({
-      items: [textItem, ignoredFileItem],
-      files: [textFile]
+    expect(clipboardAttachmentFilesFromDataTransfer({
+      items: [textItem, imageItem, fileItem],
+      files: [fallbackImage, fallbackPdf]
+    })).toEqual([pastedImage, pastedText]);
+    expect(clipboardAttachmentFilesFromDataTransfer({
+      items: [textItem],
+      files: [fallbackImage, fallbackPdf]
+    })).toEqual([fallbackImage, fallbackPdf]);
+    expect(clipboardAttachmentFilesFromDataTransfer({
+      items: [textItem],
+      files: []
     })).toEqual([]);
-    expect(clipboardImageFilesFromDataTransfer(null)).toEqual([]);
+    expect(clipboardAttachmentFilesFromDataTransfer(null)).toEqual([]);
   });
 
   it("does not duplicate copied images exposed through clipboard items and files", () => {
@@ -1970,7 +2020,7 @@ describe("HomePage", () => {
     const fileImage = file("image.png", "image/png", "same-png", 2);
     const imageItem = { kind: "file", type: "image/png", getAsFile: () => itemImage };
 
-    expect(clipboardImageFilesFromDataTransfer({
+    expect(clipboardAttachmentFilesFromDataTransfer({
       items: [imageItem],
       files: [fileImage]
     })).toEqual([itemImage]);
@@ -1996,11 +2046,11 @@ describe("HomePage", () => {
     expect(dataTransferHasAttachmentFiles(null)).toBe(false);
   });
 
-  it("wires pasted images into both composer textareas", () => {
+  it("wires pasted attachments into both composer textareas", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
 
     expect(source).toContain("function handleComposerPaste(event: ClipboardEvent<HTMLTextAreaElement>)");
-    expect(source).toContain("clipboardImageFilesFromDataTransfer(event.clipboardData)");
+    expect(source).toContain("clipboardAttachmentFilesFromDataTransfer(event.clipboardData)");
     expect(source).toContain("event.preventDefault();");
     expect(source).toContain("void attachMediaFilesToScope(chatScopeKey, files);");
     expect(source.match(/onPaste=\{handleComposerPaste\}/g)).toHaveLength(2);

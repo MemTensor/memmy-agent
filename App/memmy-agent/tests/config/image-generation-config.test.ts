@@ -25,12 +25,19 @@ describe("ImageGenerationToolConfig", () => {
     const config = new ImageGenerationToolConfig();
 
     expect(config.toObject()).toEqual({
-      enabled: false,
+      enabled: true,
       defaultAspectRatio: "1:1",
       defaultImageSize: "1K",
       maxImagesPerTurn: null,
       saveDir: "generated",
     });
+  });
+
+  it("honors an explicit disable", () => {
+    const config = new ImageGenerationToolConfig({ enabled: false });
+
+    expect(config.enabled).toBe(false);
+    expect(config.toObject().enabled).toBe(false);
   });
 
   it("accepts null and positive safe integer turn limits", () => {

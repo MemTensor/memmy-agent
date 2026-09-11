@@ -10,10 +10,10 @@ import {
 import {
   AlertCircle,
   Check,
+  ChevronRight,
   Circle,
   CircleDot,
   Download,
-  ExternalLink,
   FileOutput,
   HelpCircle,
   ListChecks,
@@ -30,11 +30,11 @@ import type {
 } from "@memmy/local-api-contracts";
 import type { UploadAgentMediaInput, UploadedAgentMedia } from "../api/memmy-agent-client.js";
 import type { PluginsClient } from "../api/plugins-client.js";
-import type { PluginUiCall } from "../app/plugin-ui-context.js";
+import { usePluginChatFeedback, type PluginChatFeedback, type PluginUiCall } from "../app/plugin-ui-context.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { classifyAgentAttachmentFile } from "../lib/agent-attachment.js";
+import { materializePluginUploadFile } from "../lib/plugin-upload-file.js";
 import { startBrowserDownload } from "./agent-message-content.js";
-import { openExternalUrl } from "../utils/open-url.js";
 
 const TASK_STATUS_KEYS = {
   pending: "plugin.ui.task.pending",
@@ -46,29 +46,57 @@ const TASK_STATUS_KEYS = {
 interface PluginCapabilityHostProps {
   calls: PluginUiCall[];
   plugins: InstalledPlugin[];
-  client: Pick<PluginsClient, "getUi" | "cancel" | "respond"> | null;
+  client: (Pick<PluginsClient, "getUi" | "cancel" | "respond"> & Partial<Pick<PluginsClient, "readArtifact">>) | null;
   uploadFiles?: (files: UploadAgentMediaInput[]) => Promise<UploadedAgentMedia[]>;
   onAddArtifact?: (artifact: PluginArtifactRef) => void;
+  onOpenArtifact?: (artifact: PluginArtifactRef) => void;
+}
+
+export interface PluginRendererInteractionState {
+  interactionId: string;
+  status: "stale";
+  error: {
+    code: "stale_card";
+    message: string;
+    latestContentHash: string;
+  };
 }
 
 export function PluginCapabilityHost(props: PluginCapabilityHostProps) {
   const { t } = useTranslation();
+  const [answeredInteractions, setAnsweredInteractions] = useState<Set<string>>(() => new Set());
   const plugins = useMemo(() => new Map(props.plugins.map((plugin) => [plugin.id, plugin])), [props.plugins]);
-  if (props.calls.length === 0) return null;
+  const interactionStates = useMemo(() => resolveRendererInteractionStates(props.calls), [props.calls]);
+  const calls = useMemo(
+    () => selectVisiblePluginCalls(props.calls, answeredInteractions),
+    [answeredInteractions, props.calls]
+  );
+  const orderedCalls = useMemo(() => orderPluginCallsForDisplay(calls), [calls]);
+  if (calls.length === 0) return null;
 
   return (
     <section className="space-y-3" aria-label={t("plugin.ui.regionLabel")}>
-      {props.calls.map((call) => {
+      {orderedCalls.map((call) => {
         const plugin = plugins.get(call.pluginId);
         const renderer = plugin?.manifest.ui?.renderer;
         const usesRenderer = Boolean(
           renderer
           && (!renderer.capabilities || renderer.capabilities.includes(call.capabilityId))
+          && call.events.some((event) => event.type === "interaction" && event.request.type === "custom")
+          && !call.events.some((event) => event.type === "result" || event.type === "error")
           && props.client
         );
-        const respond = (interactionId: string, response: unknown) => {
+        const respond = async (interactionId: string, response: unknown) => {
           if (!props.client) return Promise.reject(new Error("Plugin client unavailable"));
-          return props.client.respond(call.pluginId, call.callId, interactionId, response);
+          await props.client.respond(call.pluginId, call.callId, interactionId, response);
+          // A refresh is an intermediate action in a multi-step card. Keep the
+          // renderer mounted until its next authoritative interaction arrives.
+          if (asRecord(response).action === "refresh") return;
+          setAnsweredInteractions((current) => {
+            const next = new Set(current);
+            next.add(interactionKey(call, interactionId));
+            return next;
+          });
         };
         const cancel = () => {
           if (!props.client) return Promise.reject(new Error("Plugin client unavailable"));
@@ -77,10 +105,14 @@ export function PluginCapabilityHost(props: PluginCapabilityHostProps) {
         const cards = (
           <GenericPluginCards
             events={call.events}
+            conversationId={call.conversationId}
+            pluginId={call.pluginId}
             onRespond={respond}
             onCancel={cancel}
             onUploadFiles={props.uploadFiles}
             onAddArtifact={props.onAddArtifact}
+            onOpenArtifact={props.onOpenArtifact}
+            onReadArtifact={props.client?.readArtifact}
           />
         );
         return (
@@ -91,9 +123,11 @@ export function PluginCapabilityHost(props: PluginCapabilityHostProps) {
             {usesRenderer && renderer ? (
               <SandboxedPluginRenderer
                 call={call}
+                interactionStates={interactionStates.get(call.pluginId + ":" + call.callId) ?? []}
                 height={renderer.height ?? 320}
                 client={props.client!}
                 onRespond={respond}
+                onUploadFiles={plugin?.approvedPermissions.some((permission) => permission.type === "host-service" && permission.services.includes("file-input")) ? props.uploadFiles : undefined}
                 fallback={cards}
               />
             ) : (
@@ -107,25 +141,39 @@ export function PluginCapabilityHost(props: PluginCapabilityHostProps) {
 }
 
 function GenericPluginCards(props: {
+  conversationId?: string;
+  pluginId?: string;
   events: CapabilityEvent[];
   onRespond(interactionId: string, response: unknown): Promise<void>;
   onCancel(): Promise<void>;
   onUploadFiles?: (files: UploadAgentMediaInput[]) => Promise<UploadedAgentMedia[]>;
   onAddArtifact?: (artifact: PluginArtifactRef) => void;
+  onOpenArtifact?: (artifact: PluginArtifactRef) => void;
+  onReadArtifact?: PluginsClient["readArtifact"];
 }) {
   const terminal = props.events.some((event) => event.type === "result" || event.type === "error");
+  const artifactEvents = props.events.filter((event): event is Extract<CapabilityEvent, { type: "artifact" }> => event.type === "artifact");
   return (
     <div className="space-y-2">
-      {props.events.map((event) => {
-        if (event.type === "progress") return <ProgressCard key="progress" event={event} canCancel={Boolean(event.cancellable) && !terminal} onCancel={props.onCancel} />;
-        if (event.type === "task-list") return <TaskCard key="tasks" event={event} />;
+      {props.events.filter((event) => event.type !== "artifact").map((event) => {
+        if (event.type === "progress") return terminal ? null : <ProgressCard key="progress" event={event} canCancel={Boolean(event.cancellable)} onCancel={props.onCancel} />;
+        if (event.type === "task-list") return terminal ? null : <TaskCard key="tasks" event={event} />;
         if (event.type === "interaction") {
-          return <InteractionCard key={`interaction:${event.request.interactionId}`} request={event.request} onRespond={props.onRespond} onUploadFiles={props.onUploadFiles} />;
+          return terminal ? null : <InteractionCard key={`interaction:${event.request.interactionId}`} request={event.request} conversationId={props.conversationId} pluginId={props.pluginId} onRespond={props.onRespond} onUploadFiles={props.onUploadFiles} />;
         }
-        if (event.type === "artifact") return <ArtifactCard key={`artifact:${event.artifact.id}`} event={event} onAddToChat={props.onAddArtifact} />;
         if (event.type === "error") return <ErrorCard key="error" event={event} />;
         return null;
       })}
+      {artifactEvents.length > 1 ? (
+        <ArtifactCollection
+          events={artifactEvents}
+          onAddToChat={props.onAddArtifact}
+          onOpen={props.onOpenArtifact}
+          onRead={props.onReadArtifact}
+        />
+      ) : artifactEvents[0] ? (
+        <ArtifactCard event={artifactEvents[0]} onAddToChat={props.onAddArtifact} onOpen={props.onOpenArtifact} onRead={props.onReadArtifact} />
+      ) : null}
     </div>
   );
 }
@@ -138,6 +186,7 @@ function ProgressCard(props: {
   const { t } = useTranslation();
   const [cancelState, setCancelState] = useState<"idle" | "pending" | "done" | "error">("idle");
   const value = props.event.total ? Math.min(100, Math.round((props.event.current / props.event.total) * 100)) : undefined;
+  const completed = value === 100;
   const cancel = async () => {
     setCancelState("pending");
     try {
@@ -150,7 +199,9 @@ function ProgressCard(props: {
   return (
     <div className="rounded-card bg-canvas-oat/55 px-3 py-2.5" role="status" aria-live="polite">
       <div className="flex items-center gap-2 text-sm text-text-ink/75">
-        <LoaderCircle size={15} className="animate-spin text-action-sky" aria-hidden="true" />
+        {completed
+          ? <Check size={15} className="text-status-success" aria-hidden="true" />
+          : <LoaderCircle size={15} className="animate-spin text-action-sky" aria-hidden="true" />}
         <span>{props.event.message || t("plugin.ui.progress")}</span>
         {value !== undefined ? <span className="ml-auto text-xs text-text-ink/45">{value}%</span> : null}
         {props.canCancel && cancelState !== "done" ? (
@@ -195,6 +246,8 @@ function TaskCard(props: { event: Extract<CapabilityEvent, { type: "task-list" }
 }
 
 function InteractionCard(props: {
+  conversationId?: string;
+  pluginId?: string;
   request: PluginInteractionRequest;
   onRespond(interactionId: string, response: unknown): Promise<void>;
   onUploadFiles?: (files: UploadAgentMediaInput[]) => Promise<UploadedAgentMedia[]>;
@@ -227,7 +280,7 @@ function InteractionCard(props: {
   };
 
   if (props.request.type === "file-input") {
-    return <FileInputCard request={props.request} title={title} description={description} disabled={disabled} status={status} onStatus={setStatus} onRespond={props.onRespond} onUploadFiles={props.onUploadFiles} />;
+    return <FileInputCard conversationId={props.conversationId} pluginId={props.pluginId} request={props.request} title={title} description={description} disabled={disabled} status={status} onStatus={setStatus} onRespond={props.onRespond} onUploadFiles={props.onUploadFiles} />;
   }
 
   return (
@@ -285,6 +338,8 @@ function InteractionCard(props: {
 }
 
 function FileInputCard(props: {
+  conversationId?: string;
+  pluginId?: string;
   request: PluginInteractionRequest;
   title: string;
   description: string | null;
@@ -297,28 +352,84 @@ function FileInputCard(props: {
   const { t } = useTranslation();
   const payload = asRecord(props.request.payload);
   const [files, setFiles] = useState<File[]>([]);
+  const pendingFeedback = useRef<PluginChatFeedback | null>(null);
+  const fileDraftKey = JSON.stringify([props.pluginId, props.conversationId, payload.taskId, payload.cardType, payload.targetPaperId]);
+  const fileDrafts = usePluginChatFeedback(payload.chatFeedback === true ? props.conversationId : undefined, (feedback) => {
+    if (props.status === "answered") return;
+    pendingFeedback.current = feedback;
+    if (!props.disabled) void releaseForChat();
+  });
+  useEffect(() => { const draft = fileDrafts?.get(fileDraftKey); if (draft) setFiles(draft); }, [fileDraftKey, fileDrafts]);
+  useEffect(() => { if (!props.disabled && pendingFeedback.current) void releaseForChat(); }, [props.disabled]);
+  async function releaseForChat() {
+    const feedback = pendingFeedback.current;
+    if (!feedback || props.disabled) return;
+    pendingFeedback.current = null;
+    fileDrafts?.set(fileDraftKey, files);
+    props.onStatus("submitting");
+    try {
+      await props.onRespond(props.request.interactionId, { action: "chat-feedback", ...feedback, files: [], values: { selectedFileNames: files.map((file) => file.name) } });
+      props.onStatus("answered");
+    } catch { props.onStatus("error"); }
+  }
+
   const [validationError, setValidationError] = useState<string | null>(null);
   const accept = readStrings(payload.accept).join(",");
+  const fileRules = readFileRules(payload.fileRules);
   const maxFiles = positiveInteger(payload.maxFiles) ?? (payload.multiple === true ? null : 1);
+  const minFiles = positiveInteger(payload.minFiles) ?? 0;
   const maxBytes = positiveInteger(payload.maxBytes);
+  const fileStates = files.map((file) => classifyPluginInputFile(file, accept, maxBytes, fileRules, t));
+  const readyFiles = fileStates.filter((item) => item.status === "ready").map((item) => item.file);
   const choose = (event: ChangeEvent<HTMLInputElement>) => {
     const next = Array.from(event.target.files ?? []);
+    event.target.value = "";
     setFiles(next);
-    setValidationError(validateFiles(next, maxFiles, maxBytes, accept, t));
+    if (fileDrafts?.has(fileDraftKey)) fileDrafts.set(fileDraftKey, next);
+    const nextReady = next.filter((file) => classifyPluginInputFile(file, accept, maxBytes, fileRules, t).status === "ready");
+    setValidationError(validateReadyFileCount(nextReady, maxFiles, t));
+  };
+  const remove = (index: number) => {
+    const next = files.filter((_file, candidateIndex) => candidateIndex !== index);
+    setFiles(next);
+    if (fileDrafts?.has(fileDraftKey)) {
+      if (next.length) fileDrafts.set(fileDraftKey, next);
+      else fileDrafts.delete(fileDraftKey);
+    }
+    const nextReady = next.filter((file) => classifyPluginInputFile(file, accept, maxBytes, fileRules, t).status === "ready");
+    setValidationError(validateReadyFileCount(nextReady, maxFiles, t));
   };
   const upload = async () => {
-    const error = validateFiles(files, maxFiles, maxBytes, accept, t);
+    const error = validateReadyFileCount(readyFiles, maxFiles, t);
     if (error || !props.onUploadFiles) {
       setValidationError(error ?? t("plugin.ui.responseFailed"));
       return;
     }
     props.onStatus("submitting");
     try {
-      const uploaded = await props.onUploadFiles(files.map((file) => {
+      const uploaded = await props.onUploadFiles(readyFiles.map((file) => {
         const classification = classifyAgentAttachmentFile(file)!;
         return { blob: file, name: file.name, kind: classification.kind, mime: classification.mime };
       }));
-      await props.onRespond(props.request.interactionId, { files: uploaded });
+      const feedback = pendingFeedback.current;
+      if (feedback) {
+        pendingFeedback.current = null;
+        fileDrafts?.set(fileDraftKey, files);
+        await props.onRespond(props.request.interactionId, { action: "chat-feedback", ...feedback, files: [],
+          values: { selectedFileNames: files.map((file) => file.name), stagedFiles: uploaded } });
+      } else {
+        await props.onRespond(props.request.interactionId, { files: uploaded });
+        fileDrafts?.delete(fileDraftKey);
+      }
+      props.onStatus("answered");
+    } catch {
+      props.onStatus("error");
+    }
+  };
+  const skip = async () => {
+    props.onStatus("submitting");
+    try {
+      await props.onRespond(props.request.interactionId, { files: [] });
       props.onStatus("answered");
     } catch {
       props.onStatus("error");
@@ -336,9 +447,36 @@ function FileInputCard(props: {
               {t("plugin.ui.chooseFiles")}
               <input className="sr-only" type="file" accept={accept || undefined} multiple={payload.multiple === true} disabled={props.disabled} onChange={choose} />
             </label>
-            <span className="min-w-0 flex-1 truncate text-xs text-text-ink/45">{files.length ? files.map((file) => file.name).join(", ") : t("plugin.ui.noFiles")}</span>
-            <ResponseButton disabled={props.disabled || files.length === 0 || Boolean(validationError) || !props.onUploadFiles} onClick={() => void upload()}>{t("plugin.ui.upload")}</ResponseButton>
+            <span className="min-w-0 flex-1 truncate text-xs text-text-ink/45">
+              {files.length ? t("plugin.ui.filesReadySummary", { ready: readyFiles.length, blocked: files.length - readyFiles.length }) : t("plugin.ui.noFiles")}
+            </span>
+            {minFiles === 0 && files.length === 0 ? <ResponseButton disabled={props.disabled} secondary onClick={() => void skip()}>{t("plugin.ui.skip")}</ResponseButton> : null}
+            <ResponseButton disabled={props.disabled || readyFiles.length === 0 || Boolean(validationError) || !props.onUploadFiles} onClick={() => void upload()}>{t("plugin.ui.upload")}</ResponseButton>
           </div>
+          {fileStates.length ? (
+            <ul className="mt-2 space-y-1.5" aria-label={t("plugin.ui.selectedFiles")}>
+              {fileStates.map((item, index) => (
+                <li key={`${item.file.name}:${item.file.size}:${index}`} className={`flex items-start gap-2 rounded-btn border px-2.5 py-2 text-xs ${item.status === "blocked" ? "border-status-error/20 bg-status-error-soft/35 text-text-ink/55" : "border-border-stone/30 bg-background-paper text-text-ink/65"}`}>
+                  {item.status === "blocked" ? <AlertCircle size={14} className="mt-0.5 shrink-0 text-status-error" aria-hidden="true" /> : <Check size={14} className="mt-0.5 shrink-0 text-status-success" aria-hidden="true" />}
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate font-medium">{item.file.name}</span>
+                    <span className={item.status === "blocked" ? "text-status-error" : "text-text-ink/40"} role={item.status === "blocked" ? "alert" : undefined}>
+                      {item.message ?? t("plugin.ui.fileReady")}
+                    </span>
+                  </span>
+                  <button
+                    type="button"
+                    disabled={props.disabled}
+                    aria-label={t("plugin.ui.removeFile", { name: item.file.name })}
+                    className="rounded-btn p-1 text-text-ink/35 transition-colors hover:bg-canvas-oat hover:text-text-ink/65 disabled:cursor-not-allowed disabled:opacity-50"
+                    onClick={() => remove(index)}
+                  >
+                    <X size={14} aria-hidden="true" />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : null}
           {validationError ? <p className="mt-2 text-xs text-status-error" role="alert">{validationError}</p> : null}
           {props.status === "answered" ? <p className="mt-2 text-xs text-status-success" role="status">{t("plugin.ui.answered")}</p> : null}
           {props.status === "error" ? <p className="mt-2 text-xs text-status-error" role="alert">{t("plugin.ui.responseFailed")}</p> : null}
@@ -361,11 +499,33 @@ function ResponseButton(props: { children: string; disabled: boolean; onClick?: 
   );
 }
 
-function ArtifactCard(props: { event: Extract<CapabilityEvent, { type: "artifact" }>; onAddToChat?: (artifact: PluginArtifactRef) => void }) {
+function ArtifactCard(props: {
+  event: Extract<CapabilityEvent, { type: "artifact" }>;
+  onAddToChat?: (artifact: PluginArtifactRef) => void;
+  onOpen?: (artifact: PluginArtifactRef) => void;
+  onRead?: PluginsClient["readArtifact"];
+}) {
   const { t } = useTranslation();
-  const canOpen = isSafeExternalUri(props.event.artifact.uri);
-  const downloadUri = props.event.artifact.downloadUri ?? props.event.artifact.uri;
-  const canDownload = isSafeExternalUri(downloadUri);
+  const artifact = props.event.artifact;
+  const downloadUri = artifact.downloadUri ?? artifact.uri;
+  const [downloadState, setDownloadState] = useState<"idle" | "pending" | "error">("idle");
+  const download = async () => {
+    if (!props.onRead) {
+      const safeUri = resolveSafeArtifactUri(downloadUri);
+      if (safeUri) startBrowserDownload(safeUri, artifact.name);
+      return;
+    }
+    setDownloadState("pending");
+    try {
+      const blob = await props.onRead(downloadUri);
+      const objectUrl = URL.createObjectURL(blob);
+      startBrowserDownload(objectUrl, artifact.name);
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+      setDownloadState("idle");
+    } catch {
+      setDownloadState("error");
+    }
+  };
   return (
     <div className="flex items-center gap-3 rounded-card border border-border-stone/30 px-3 py-2.5">
       <FileOutput size={18} className="shrink-0 text-action-sky" aria-hidden="true" />
@@ -373,23 +533,105 @@ function ArtifactCard(props: { event: Extract<CapabilityEvent, { type: "artifact
         <p className="truncate text-sm text-text-ink/75">{props.event.artifact.name}</p>
         <p className="truncate text-[11px] text-text-ink/40">{props.event.artifact.mediaType}</p>
       </div>
-      {canOpen ? (
-        <button type="button" className="inline-flex items-center gap-1 text-xs text-action-sky hover:underline" onClick={() => void openExternalUrl(props.event.artifact.uri)}>
-          {t("plugin.ui.open")}<ExternalLink size={12} aria-hidden="true" />
+      {props.onOpen ? (
+        <button type="button" className="inline-flex items-center gap-1 text-xs text-action-sky hover:underline" onClick={() => props.onOpen?.(artifact)}>
+          {t("plugin.ui.open")}<FileOutput size={12} aria-hidden="true" />
         </button>
       ) : null}
-      {canDownload ? (
-        <button type="button" className="inline-flex items-center gap-1 text-xs text-action-sky hover:underline" onClick={() => startBrowserDownload(downloadUri, props.event.artifact.name)}>
+      <button type="button" disabled={downloadState === "pending"} className="inline-flex items-center gap-1 text-xs text-action-sky hover:underline disabled:opacity-50" onClick={() => void download()}>
           {t("plugin.ui.download")}<Download size={12} aria-hidden="true" />
-        </button>
-      ) : null}
+      </button>
       {props.onAddToChat ? (
         <button type="button" className="inline-flex items-center gap-1 text-xs text-action-sky hover:underline" onClick={() => props.onAddToChat?.(props.event.artifact)}>
           {t("plugin.ui.addToChat")}<MessageSquarePlus size={12} aria-hidden="true" />
         </button>
       ) : null}
+      {downloadState === "error" ? <span className="text-xs text-status-error" role="alert">{t("plugin.ui.downloadFailed")}</span> : null}
     </div>
   );
+}
+
+function ArtifactCollection(props: {
+  events: Array<Extract<CapabilityEvent, { type: "artifact" }>>;
+  onAddToChat?: (artifact: PluginArtifactRef) => void;
+  onOpen?: (artifact: PluginArtifactRef) => void;
+  onRead?: PluginsClient["readArtifact"];
+}) {
+  const { t } = useTranslation();
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div className="overflow-hidden rounded-card border border-border-stone/30">
+      <button
+        type="button"
+        className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm text-text-ink/70 transition-colors hover:bg-canvas-oat/45"
+        aria-expanded={expanded}
+        onClick={() => setExpanded((current) => !current)}
+      >
+        <FileOutput size={17} className="shrink-0 text-action-sky" aria-hidden="true" />
+        <span className="font-medium">{t("plugin.ui.artifactCollection", { count: props.events.length })}</span>
+        <span className="ml-auto text-xs text-text-ink/40">{expanded ? t("plugin.ui.collapse") : t("plugin.ui.expand")}</span>
+        <ChevronRight size={15} className={`text-text-ink/40 transition-transform ${expanded ? "rotate-90" : ""}`} aria-hidden="true" />
+      </button>
+      {expanded ? (
+        <div className="max-h-72 space-y-1.5 overflow-y-auto border-t border-border-stone/25 p-2">
+          {props.events.map((event) => (
+            <ArtifactCard
+              key={`artifact:${event.artifact.id}`}
+              event={event}
+              onAddToChat={props.onAddToChat}
+              onOpen={props.onOpen}
+              onRead={props.onRead}
+            />
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function interactionKey(call: Pick<PluginUiCall, "pluginId" | "callId">, interactionId: string): string {
+  return `${call.pluginId}:${call.callId}:${interactionId}`;
+}
+
+/** Keeps history in the event store while limiting the conversation to actionable UI. */
+export function selectVisiblePluginCalls(calls: PluginUiCall[], answered: ReadonlySet<string> = new Set()): PluginUiCall[] {
+  const prepared = calls.map((call) => ({
+    ...call,
+    events: call.events.filter((event) => (
+      event.type !== "interaction" || !answered.has(interactionKey(call, event.request.interactionId))
+    ))
+  }));
+  const latest = prepared[prepared.length - 1];
+  const latestActive = latest && !latest.events.some((event) => event.type === "result" || event.type === "error")
+    ? latest.callId
+    : undefined;
+  return prepared.filter((call, index) => {
+    const hasArtifact = call.events.some((event) => event.type === "artifact");
+    const hasError = call.events.some((event) => event.type === "error");
+    const recoveredByLaterRetry = hasError && prepared.slice(index + 1).some((candidate) => (
+      candidate.pluginId === call.pluginId
+      && candidate.capabilityId === call.capabilityId
+      && candidate.conversationId === call.conversationId
+      && candidate.events.some((event) => event.type === "result")
+    ));
+    if (hasArtifact) return true;
+    if (hasError) return !recoveredByLaterRetry;
+    if (!call.events.some((event) => event.type === "result" || event.type === "error")
+      && call.events.some((event) => event.type === "interaction")) return true;
+    return call.callId === latestActive && call.events.some((event) => event.type !== "result");
+  });
+}
+
+/** Keep active work closest to the current Agent turn and completed deliveries at the bottom. */
+export function orderPluginCallsForDisplay(calls: PluginUiCall[]): PluginUiCall[] {
+  const isCompletedDelivery = (call: PluginUiCall) => (
+    call.events.some((event) => event.type === "artifact")
+    && call.events.some((event) => event.type === "result" || event.type === "error")
+  );
+  return [
+    ...calls.filter((call) => !isCompletedDelivery(call)),
+    ...calls.filter(isCompletedDelivery)
+  ];
 }
 
 function ErrorCard(props: { event: Extract<CapabilityEvent, { type: "error" }> }) {
@@ -403,25 +645,41 @@ function ErrorCard(props: { event: Extract<CapabilityEvent, { type: "error" }> }
 
 function SandboxedPluginRenderer(props: {
   call: PluginUiCall;
+  interactionStates: PluginRendererInteractionState[];
   height: number;
   client: Pick<PluginsClient, "getUi">;
   onRespond(interactionId: string, response: unknown): Promise<void>;
   fallback: ReactNode;
+  onUploadFiles?: (files: UploadAgentMediaInput[]) => Promise<UploadedAgentMedia[]>;
 }) {
   const { t } = useTranslation();
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const answered = useRef(new Set<string>());
+  const uploading = useRef(new Set<string>());
   const [html, setHtml] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
+  const [rendererHeight, setRendererHeight] = useState(() => Math.min(props.height, 320));
   const document = useMemo(() => html === null ? "" : buildRendererDocument(html), [html]);
+  const queuedChat = useRef<PluginChatFeedback | null>(null);
+  const latestInteraction = [...props.call.events].reverse().find((event) => event.type === "interaction");
+  const feedbackEnabled = latestInteraction?.type === "interaction" && asRecord(latestInteraction.request.payload).chatFeedback === true
+    && !props.call.events.some((event) => event.type === "result" || event.type === "error");
+  usePluginChatFeedback(feedbackEnabled ? props.call.conversationId : undefined, (feedback) => {
+    if (latestInteraction?.type !== "interaction" || answered.current.has(latestInteraction.request.interactionId)) return;
+    queuedChat.current = feedback;
+    iframeRef.current?.contentWindow?.postMessage({ type: "memmy.plugin.chat-feedback", version: 1,
+      interactionId: latestInteraction.request.interactionId, ...feedback }, "*");
+  });
+
   const rendererMessage = useMemo(() => ({
     type: "memmy.plugin.render",
     version: 1,
     pluginId: props.call.pluginId,
     capabilityId: props.call.capabilityId,
     callId: props.call.callId,
-    events: props.call.events
-  }), [props.call]);
+    events: props.call.events,
+    interactionStates: props.interactionStates
+  }), [props.call, props.interactionStates]);
 
   useEffect(() => {
     let active = true;
@@ -435,17 +693,77 @@ function SandboxedPluginRenderer(props: {
 
   useEffect(() => {
     iframeRef.current?.contentWindow?.postMessage(rendererMessage, "*");
+    if (queuedChat.current && latestInteraction?.type === "interaction") iframeRef.current?.contentWindow?.postMessage({
+      type: "memmy.plugin.chat-feedback", version: 1, interactionId: latestInteraction.request.interactionId, ...queuedChat.current
+    }, "*");
   }, [rendererMessage]);
+
+  useEffect(() => {
+    setRendererHeight(Math.min(props.height, 320));
+  }, [props.call.callId, props.height]);
 
   useEffect(() => {
     const receive = (event: MessageEvent) => {
       if (event.source !== iframeRef.current?.contentWindow) return;
       const message = asRecord(event.data);
+      if (message.type === "memmy.plugin.resize" && message.version === 1) {
+        const requestedHeight = typeof message.height === "number" ? message.height : Number.NaN;
+        if (Number.isFinite(requestedHeight)) {
+          setRendererHeight(Math.min(props.height, Math.max(180, Math.ceil(requestedHeight))));
+        }
+        return;
+      }
+      if (message.type === "memmy.plugin.upload-files" && message.version === 1) {
+        const interactionId = message.interactionId;
+        const requestId = message.requestId;
+        const latest = [...props.call.events].reverse().find((item) => item.type === "interaction");
+        if (typeof interactionId !== "string" || typeof requestId !== "string" || requestId.length > 128
+          || latest?.type !== "interaction" || latest.request.interactionId !== interactionId
+          || latest.request.type !== "custom" || answered.current.has(interactionId) || uploading.current.has(interactionId)
+          || props.call.events.some((item) => item.type === "result" || item.type === "error")) return;
+        const reply = (result: Record<string, unknown>) => iframeRef.current?.contentWindow?.postMessage({
+          type: "memmy.plugin.upload-result", version: 1, interactionId, requestId, ...result
+        }, "*");
+        const rules = asRecord(asRecord(latest.request.payload).fileUpload);
+        const files = Array.isArray(message.files) ? message.files : [];
+        const maxFiles = Math.min(10, positiveInteger(rules.maxFiles) ?? 1);
+        const maxBytes = Math.min(50 * 1024 * 1024, positiveInteger(rules.maxBytes) ?? 50 * 1024 * 1024);
+        const accept = readStrings(rules.accept).join(",");
+        if (!props.onUploadFiles || !accept || files.length === 0 || files.length > maxFiles
+          || files.some((file) => !(file instanceof File) || classifyPluginInputFile(file, accept, maxBytes, [], t).status !== "ready")
+          || props.interactionStates.some((state) => state.interactionId === interactionId)) {
+          reply({ ok: false, error: { message: t("plugin.ui.uploadInvalid") } });
+          return;
+        }
+        uploading.current.add(interactionId);
+        const uploadFiles = props.onUploadFiles;
+        void Promise.all(files.map(async (file: File) => {
+          const classification = classifyAgentAttachmentFile(file)!;
+          return { blob: await materializePluginUploadFile(file), name: file.name, kind: classification.kind, mime: classification.mime };
+        })).then(uploadFiles).then(
+          (uploaded) => reply({ ok: true, files: uploaded }),
+          () => reply({ ok: false, error: { message: t("plugin.ui.uploadFailed") } })
+        ).finally(() => uploading.current.delete(interactionId));
+        return;
+      }
       if (message.type !== "memmy.plugin.interaction-response" || message.version !== 1 || typeof message.interactionId !== "string") return;
       const interactionId = message.interactionId;
       const declared = props.call.events.some((item) => item.type === "interaction" && item.request.interactionId === interactionId);
       if (!declared || answered.current.has(interactionId)) return;
+      const response = asRecord(message.response);
+      const stale = props.interactionStates.find((item) => item.interactionId === interactionId);
+      if (stale && response.action === "submit") {
+        iframeRef.current?.contentWindow?.postMessage({
+          type: "memmy.plugin.response-result",
+          version: 1,
+          interactionId,
+          ok: false,
+          error: stale.error
+        }, "*");
+        return;
+      }
       answered.current.add(interactionId);
+      if (response.action === "chat-feedback") queuedChat.current = null;
       void props.onRespond(interactionId, message.response).then(
         () => iframeRef.current?.contentWindow?.postMessage({ type: "memmy.plugin.response-result", version: 1, interactionId, ok: true }, "*"),
         () => {
@@ -456,7 +774,7 @@ function SandboxedPluginRenderer(props: {
     };
     window.addEventListener("message", receive);
     return () => window.removeEventListener("message", receive);
-  }, [props.call.events, props.onRespond]);
+  }, [props.call.events, props.height, props.interactionStates, props.onRespond, props.onUploadFiles, t]);
 
   if (failed) return props.fallback;
   if (html === null) return <p className="py-3 text-center text-xs text-text-ink/40" role="status">{t("plugin.ui.rendererLoading")}</p>;
@@ -468,8 +786,13 @@ function SandboxedPluginRenderer(props: {
       referrerPolicy="no-referrer"
       srcDoc={document}
       className="w-full rounded-card border-0 bg-transparent"
-      style={{ height: props.height }}
-      onLoad={() => iframeRef.current?.contentWindow?.postMessage(rendererMessage, "*")}
+      style={{ height: rendererHeight }}
+      onLoad={() => {
+        iframeRef.current?.contentWindow?.postMessage(rendererMessage, "*");
+        if (queuedChat.current && latestInteraction?.type === "interaction") iframeRef.current?.contentWindow?.postMessage({
+          type: "memmy.plugin.chat-feedback", version: 1, interactionId: latestInteraction.request.interactionId, ...queuedChat.current
+        }, "*");
+      }}
     />
   );
 }
@@ -480,6 +803,70 @@ export function buildRendererDocument(html: string): string {
   if (/<head(?:\s[^>]*)?>/i.test(html)) return html.replace(/<head(\s[^>]*)?>/i, (head) => `${head}${meta}`);
   if (/<html(?:\s[^>]*)?>/i.test(html)) return html.replace(/<html(\s[^>]*)?>/i, (root) => `${root}<head>${meta}</head>`);
   return `<!doctype html><html><head>${meta}</head><body>${html}</body></html>`;
+}
+
+export function resolveRendererInteractionStates(
+  calls: PluginUiCall[]
+): Map<string, PluginRendererInteractionState[]> {
+  const latest = new Map<string, { contentHash: string }>();
+  for (const call of calls) {
+    for (const event of call.events) {
+      if (event.type !== "result") continue;
+      const output = asRecord(event.output);
+      const taskId = typeof output.taskId === "string" ? output.taskId : null;
+      if (!taskId || !Array.isArray(output.artifacts)) continue;
+      for (const value of output.artifacts) {
+        const artifact = asRecord(value);
+        if (typeof artifact.kind !== "string" || typeof artifact.contentHash !== "string" || artifact.stale === true) continue;
+        latest.set(call.pluginId + ":" + taskId + ":" + artifact.kind, {
+          contentHash: artifact.contentHash
+        });
+      }
+    }
+  }
+
+  const states = new Map<string, PluginRendererInteractionState[]>();
+  for (const call of calls) {
+    const callStates: PluginRendererInteractionState[] = [];
+    for (const event of call.events) {
+      if (event.type !== "interaction") continue;
+      const payload = asRecord(event.request.payload);
+      const taskId = typeof payload.taskId === "string" ? payload.taskId : null;
+      const baseArtifact = asRecord(payload.baseArtifact);
+      if (!taskId || typeof baseArtifact.kind !== "string" || typeof baseArtifact.contentHash !== "string") continue;
+      const current = latest.get(call.pluginId + ":" + taskId + ":" + baseArtifact.kind);
+      let latestContentHash = current?.contentHash;
+      let stale = Boolean(current && current.contentHash !== baseArtifact.contentHash);
+      if (Array.isArray(payload.artifactSnapshot)) {
+        for (const value of payload.artifactSnapshot) {
+          const dependency = asRecord(value);
+          if (typeof dependency.kind !== "string" || typeof dependency.contentHash !== "string") continue;
+          // Older plugin builds used a sentinel for absent optional inputs.
+          // It is not an artifact version and must not be compared with a
+          // historical artifact observed earlier in the conversation.
+          if (dependency.contentHash === "__missing__") continue;
+          const latestDependency = latest.get(call.pluginId + ":" + taskId + ":" + dependency.kind);
+          if (latestDependency && latestDependency.contentHash !== dependency.contentHash) {
+            stale = true;
+            latestContentHash = latestDependency.contentHash;
+            break;
+          }
+        }
+      }
+      if (!stale || !latestContentHash) continue;
+      callStates.push({
+        interactionId: event.request.interactionId,
+        status: "stale",
+        error: {
+          code: "stale_card",
+          message: "This card targets an older artifact version. Load the latest version before submitting.",
+          latestContentHash
+        }
+      });
+    }
+    if (callStates.length) states.set(call.pluginId + ":" + call.callId, callStates);
+  }
+  return states;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -513,10 +900,45 @@ function positiveInteger(value: unknown): number | null {
   return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null;
 }
 
-function validateFiles(files: File[], maxFiles: number | null, maxBytes: number | null, accept: string, t: ReturnType<typeof useTranslation>["t"]): string | null {
+interface PluginFileRule {
+  extensions: string[];
+  disposition: "blocked";
+  code: string | null;
+  message: string;
+}
+
+function readFileRules(value: unknown): PluginFileRule[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((raw) => {
+    const rule = asRecord(raw);
+    const extensions = readStrings(rule.extensions).map((item) => item.toLowerCase());
+    const message = firstString(rule, ["message"]);
+    if (rule.disposition !== "blocked" || !extensions.length || !message) return [];
+    return [{ extensions, disposition: "blocked" as const, code: firstString(rule, ["code"]), message }];
+  });
+}
+
+function classifyPluginInputFile(
+  file: File,
+  accept: string,
+  maxBytes: number | null,
+  rules: PluginFileRule[],
+  t: ReturnType<typeof useTranslation>["t"]
+): { file: File; status: "ready" | "blocked"; code: string | null; message: string | null } {
+  const name = file.name.toLowerCase();
+  const rule = rules.find((item) => item.extensions.some((extension) => name.endsWith(extension)));
+  if (rule) return { file, status: "blocked", code: rule.code, message: rule.message };
+  if (!matchesAccept(file, accept) || !classifyAgentAttachmentFile(file)) {
+    return { file, status: "blocked", code: "file_unsupported", message: t("plugin.ui.fileUnsupported") };
+  }
+  if (maxBytes && file.size > maxBytes) {
+    return { file, status: "blocked", code: "file_too_large", message: t("plugin.ui.fileTooLarge") };
+  }
+  return { file, status: "ready", code: null, message: null };
+}
+
+function validateReadyFileCount(files: File[], maxFiles: number | null, t: ReturnType<typeof useTranslation>["t"]): string | null {
   if (maxFiles && files.length > maxFiles) return t("plugin.ui.fileCountExceeded");
-  if (maxBytes && files.some((file) => file.size > maxBytes)) return t("plugin.ui.fileTooLarge");
-  if (files.some((file) => !classifyAgentAttachmentFile(file) || !matchesAccept(file, accept))) return t("plugin.ui.fileUnsupported");
   return null;
 }
 
@@ -533,11 +955,11 @@ function matchesAccept(file: File, accept: string): boolean {
   });
 }
 
-function isSafeExternalUri(raw: string): boolean {
+export function resolveSafeArtifactUri(raw: string): string | null {
   try {
-    const protocol = new URL(raw).protocol;
-    return protocol === "https:" || protocol === "http:";
+    const url = new URL(raw, typeof window === "undefined" ? "http://localhost" : window.location.origin);
+    return url.protocol === "https:" || url.protocol === "http:" ? url.href : null;
   } catch {
-    return false;
+    return null;
   }
 }

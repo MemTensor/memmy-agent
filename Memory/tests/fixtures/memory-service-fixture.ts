@@ -41,6 +41,7 @@ export function createMemoryServiceFixture(): {
   ): MemoryService {
     return new MemoryService({
       ...options,
+      skillLlm: options.skillLlm ?? options.llm,
       embedder: options.embedder ?? createCapturingEmbedder([])
     });
   }

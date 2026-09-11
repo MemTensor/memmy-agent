@@ -72,6 +72,18 @@ The `MEMMY_MEMORY_HOST`, `MEMMY_MEMORY_PORT`, and `MEMMY_MEMORY_DB`
 environment variables override the corresponding server settings. The
 `MEMORY_SERVICE_*` aliases are also accepted.
 
+OpenAI-compatible embedding inputs are tokenized and split automatically with
+a conservative 7,500-token per-input budget. Set
+`memmyMemory.embedding.maxInputTokens` or
+`MEMMY_EMBEDDING_MAX_INPUT_TOKENS` to use a smaller budget for a provider with
+a shorter context window.
+
+All remote summary-model calls (capture, reflection, long-turn splitting,
+reward scoring, retrieval filtering, and turn routing) are clipped before
+requesting when their estimated input would exceed an 8,192-token context;
+the requested output budget and a 512-token provider overhead margin are
+reserved first.
+
 When `storage.token`, `MEMMY_MEMORY_TOKEN`, or `MEMORY_SERVICE_TOKEN` is set,
 all HTTP routes except `GET /api/v1/health` require that token as a bearer token
 or `x-api-key`.

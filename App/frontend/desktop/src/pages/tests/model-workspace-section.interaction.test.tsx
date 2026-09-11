@@ -1,6 +1,9 @@
 // @vitest-environment happy-dom
 
-import type { ModelConfigView } from "@memmy/local-api-contracts";
+import {
+  BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID,
+  type ModelConfigView
+} from "@memmy/local-api-contracts";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -127,14 +130,120 @@ describe("ModelWorkspaceSection BYOK connection deletion", () => {
     expect(bgeModel?.capabilities).toEqual(["embedding"]);
   });
 
-  function renderWorkspace(seedConfig: ModelProviderConfig) {
+  it("shows the platform local Embedding option for BYOK", () => {
+    renderWorkspace(createSeedConfig(1));
+
+    const embeddingSelect = getAssignmentCombobox("Embedding 检索");
+    expect(embeddingSelect.disabled).toBe(false);
+    expect(embeddingSelect.textContent).toContain("Memmy Platform 本地 Embedding");
+
+    act(() => embeddingSelect.click());
+    expect(getOption("Memmy Platform 本地 Embedding")).not.toBeNull();
+    expect(getOption("Memmy Platform 云端 Embedding")).toBeNull();
+    expect([...container.querySelectorAll(".select-control__group-label")].map((node) => node.textContent))
+      .toEqual(["平台模型"]);
+  });
+
+  it("orders account Embedding options by platform and configured custom groups", () => {
+    renderWorkspace(createAccountSeedConfig(), "account");
+
+    const embeddingSelect = getAssignmentCombobox("Embedding 检索");
+    expect(embeddingSelect.textContent).toContain("Memmy Platform 云端 Embedding");
+    act(() => embeddingSelect.click());
+
+    expect([...container.querySelectorAll(".select-control__group-label")].map((node) => node.textContent))
+      .toEqual(["平台模型", "自定义模型"]);
+    expect([...container.querySelectorAll('[role="option"]')].map((node) => node.textContent?.trim()))
+      .toEqual([
+        "Memmy Platform 本地 Embedding",
+        "Memmy Platform 云端 Embedding",
+        "OpenAI 兼容 · text-embedding-3-small"
+      ]);
+  });
+
+  it("shows an unconfigured account Embedding assignment without treating it as local", () => {
+    const seedConfig = createAccountSeedConfig();
+    seedConfig.catalog.modelAssignments.account.embedding = null;
+
+    renderWorkspace(seedConfig, "account");
+
+    expect(getAssignmentCombobox("Embedding 检索").textContent).toContain("未配置");
+    expect(getAssignmentCombobox("Embedding 检索").textContent).not.toContain("本地 Embedding");
+  });
+
+  it("persists the built-in local Embedding as a distinct account assignment", async () => {
+    const seedConfig = createAccountSeedConfig();
+    const byokPresetId = seedConfig.catalog.modelAssignments.byok.embedding!;
+    const configClient = {
+      getModelConfig: vi.fn(async () => seedConfig),
+      saveModelCatalog: vi.fn(async () => seedConfig),
+      testModelConfig: vi.fn(async () => ({
+        ok: true,
+        message: "ok",
+        checkedAt: "2026-08-13T00:00:00.000Z"
+      }))
+    };
+
+    await act(async () => {
+      root.render(
+        <I18nProvider language="zh-CN">
+          <ModelWorkspaceSection mode="account" seedConfig={seedConfig} configClient={configClient} />
+        </I18nProvider>
+      );
+      await Promise.resolve();
+    });
+
+    act(() => getAssignmentCombobox("Embedding 检索").click());
+    const localOption = getOption("Memmy Platform 本地 Embedding");
+    expect(localOption).not.toBeNull();
+    act(() => localOption!.click());
+
+    await vi.waitFor(() => expect(configClient.saveModelCatalog).toHaveBeenCalledTimes(1));
+    const input = configClient.saveModelCatalog.mock.calls[0]![0];
+    expect(input.modelAssignments.account.embedding).toBe(BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID);
+    expect(input.modelAssignments.byok.embedding).toBe(byokPresetId);
+  });
+
+  it("keeps only the platform card shell and uses the platform Agent identity", () => {
+    renderWorkspace(createAccountSeedConfig(), "account");
+
+    const platformCard = [...container.querySelectorAll("article")]
+      .find((article) => article.querySelector("h4")?.textContent?.includes("Memmy Platform"))!;
+    expect(platformCard).not.toBeNull();
+    expect(platformCard.querySelector(".provider-model-list")).toBeNull();
+    expect(container.querySelectorAll(".provider-model-list")).toHaveLength(1);
+    expect(container.querySelector(".task-model-selection-summary")?.textContent).toContain("agent_chat");
+
+    act(() => [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.includes("2 个已选"))!.click());
+
+    const platformChoice = [...container.querySelectorAll<HTMLElement>(".task-model-picker__choice")]
+      .find((choice) => choice.textContent?.includes("agent_chat"))!;
+    expect(platformChoice.textContent).toContain("agent_chat");
+    expect(platformChoice.textContent).toContain("Memmy Platform");
+    expect(platformChoice.textContent).not.toContain("通用文本");
+  });
+
+  function renderWorkspace(seedConfig: ModelProviderConfig, mode: "byok" | "account" = "byok") {
     act(() => {
       root.render(
         <I18nProvider language="zh-CN">
-          <ModelWorkspaceSection mode="byok" seedConfig={seedConfig} />
+          <ModelWorkspaceSection mode={mode} seedConfig={seedConfig} />
         </I18nProvider>
       );
     });
+  }
+
+  function getAssignmentCombobox(label: string): HTMLButtonElement {
+    const labelNode = [...container.querySelectorAll<HTMLElement>(".model-assignment-label")]
+      .find((node) => node.textContent === label)!;
+    return labelNode.closest("div.flex.items-center.justify-between")!
+      .querySelector<HTMLButtonElement>('[role="combobox"]')!;
+  }
+
+  function getOption(label: string): HTMLButtonElement | null {
+    return [...container.querySelectorAll<HTMLButtonElement>('[role="option"]')]
+      .find((option) => option.textContent?.includes(label)) ?? null;
   }
 
   function getDeleteButtons(): HTMLButtonElement[] {
@@ -155,6 +264,70 @@ function createEmbeddingSeedConfig(): ModelProviderConfig {
   seed.catalog.modelAssignments.byok.embedding = model.presetId;
   seed.catalog.effectiveCandidates.byok = [model];
   seed.model = model.model;
+  return seed;
+}
+
+function createAccountSeedConfig(): ModelProviderConfig {
+  const seed = createEmbeddingSeedConfig();
+  const customProvider = seed.catalog.providers[0]!;
+  const customAgent = {
+    presetId: "custom-agent",
+    provider: "openai" as const,
+    endpointId: customProvider.endpoints[0]!.endpointId,
+    protocol: "openai-chat-completions" as const,
+    model: "gpt-4o",
+    source: "byok" as const,
+    capabilities: ["agent" as const],
+    available: true
+  };
+  customProvider.models.push(customAgent);
+
+  const platformAgent = {
+    presetId: "platform-agent",
+    provider: "memmy_account" as const,
+    endpointId: "platform",
+    protocol: "memmy-account" as const,
+    model: "agent_chat",
+    source: "account" as const,
+    ownerAccountId: "owner-a",
+    capabilities: ["agent" as const],
+    available: true
+  };
+  const platformEmbedding = {
+    ...platformAgent,
+    presetId: "platform-embedding",
+    model: "embedding",
+    capabilities: ["embedding" as const]
+  };
+  seed.catalog.providers.push({
+    provider: "memmy_account",
+    configured: true,
+    hasApiKey: true,
+    apiKeyMasked: "••••cloud",
+    apiKey: "",
+    ownerAccountId: "owner-a",
+    endpoints: [{
+      endpointId: "platform",
+      apiBase: "https://platform.example.com/v1",
+      protocol: "memmy-account",
+      hasApiKey: false,
+      apiKeyMasked: "",
+      apiKey: ""
+    }],
+    accountManaged: true,
+    editable: false,
+    models: [platformAgent, platformEmbedding]
+  });
+  seed.catalog.modelAssignments.account = {
+    ownerAccountId: "owner-a",
+    agent: { candidates: [platformAgent.presetId, customAgent.presetId], default: platformAgent.presetId },
+    memorySummary: null,
+    memoryEvolution: null,
+    embedding: platformEmbedding.presetId,
+    asr: null,
+    imageGeneration: null
+  };
+  seed.catalog.effectiveCandidates.account = [platformAgent, customAgent];
   return seed;
 }
 

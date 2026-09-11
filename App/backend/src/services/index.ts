@@ -1,7 +1,9 @@
 import type { AccountChannel } from "@memmy/local-api-contracts";
-import { dirname, join } from "node:path";
+import { homedir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import type { AppStateStore } from "../infrastructure/app-state-store/index.js";
 import { type MemmyConfigWriter } from "../infrastructure/memmy-config/index.js";
+import type { ScanPreferencesStore } from "../infrastructure/memmy-config/agent-access.js";
 import type { AgentAdapterRegistry } from "../adapters/outbound/agent-adapter/index.js";
 import {
   createBuiltinOnboardingInsightSamplers,
@@ -18,9 +20,11 @@ import {
   createHttpPluginAdapter,
   createMcpPluginAdapter,
   createPluginRuntimeHost,
-  PluginAdapterRegistry
+  PluginAdapterRegistry,
+  type PluginHostServiceInvoker
 } from "../adapters/outbound/plugin-runtime/index.js";
 import { createPluginArtifactManager, type PluginArtifactManager } from "../adapters/outbound/plugin-artifact/index.js";
+import { createPluginSkillManager } from "../adapters/outbound/plugin-skill/index.js";
 import type { PluginRegistry } from "../adapters/outbound/plugin-registry/index.js";
 import type { PermissionManager } from "../permission/index.js";
 import {
@@ -67,6 +71,8 @@ import {
 } from "./skill-distribution-service.js";
 import { createTurnService, type TurnService } from "./turn-service.js";
 import { createPluginService, type PluginRuntimeHost, type PluginService } from "./plugin-service.js";
+import { createPluginLocalArtifactService } from "./plugin-local-artifact-service.js";
+import { createPluginModelInferenceService } from "./plugin-model-inference-service.js";
 
 export interface BackendServices {
   memoryClient: MemoryClient;
@@ -111,7 +117,13 @@ export interface CreateBackendServicesOptions {
   progressBus?: ProgressBus;
   pluginRegistry?: PluginRegistry;
   pluginArtifactManager?: PluginArtifactManager;
+  /** Canonical resource roots trusted to provide immutable bundled plugin archives. */
+  trustedBundledPluginRoots?: readonly string[];
   pluginRuntimeHost?: PluginRuntimeHost;
+  /** Optional Host-service dispatcher, primarily for embedding and tests. */
+  pluginHostServices?: PluginHostServiceInvoker;
+  /** Exact hosts local command plugins may request. Defaults to MEMMY_COMMAND_PLUGIN_NETWORK_ALLOWLIST. */
+  commandPluginNetworkAllowlist?: readonly string[];
   /** Memmy config writer. */
   memmyConfigWriter?: MemmyConfigWriter;
   /** Memmy config path. */
@@ -122,14 +134,47 @@ export interface CreateBackendServicesOptions {
   memmyAgentAdminBootstrapSecret?: string | null;
   /** Verification channel supported by the current desktop package. */
   accountChannel?: AccountChannel;
+  scanPreferencesStore?: ScanPreferencesStore;
 }
+
+/** Exact network surface required by the first-party literature-review Providers. */
+export const DEFAULT_COMMAND_PLUGIN_NETWORK_ALLOWLIST = [
+  "export.arxiv.org",
+  "arxiv.org",
+  "eutils.ncbi.nlm.nih.gov",
+  "pmc.ncbi.nlm.nih.gov",
+  "api.openalex.org",
+  "api.crossref.org"
+] as const;
 
 export function createBackendServices(options: CreateBackendServicesOptions): BackendServices {
   const progressBus = options.progressBus ?? createProgressBus();
+  const memmyConfigWriter = options.memmyConfigWriter ?? createUnavailableMemmyConfigWriter();
+  const accountSessionRepository = options.appStateStore.repositories.accountSession;
+  const pluginHostServices = options.pluginHostServices ?? createPluginModelInferenceService({
+    resolveModel: async () => {
+      const userMode = options.appStateStore.repositories.bootstrap.getAppSettings().userMode;
+      if (userMode !== "account" && userMode !== "byok") return null;
+      const account = accountSessionRepository.get();
+      return await memmyConfigWriter.resolveAssignedModel?.({
+        mode: userMode,
+        activeAccountId: account.authenticated ? account.profile.userId : null,
+        capability: "agent"
+      }) ?? null;
+    },
+    embeddingInference: options.memoryClient.embeddingInference
+      ? (input, inferenceOptions) => options.memoryClient.embeddingInference!(input, inferenceOptions)
+      : undefined
+  });
   const pluginRuntimeHost = options.pluginRuntimeHost ?? createPluginRuntimeHost(new PluginAdapterRegistry([
     createMcpPluginAdapter(),
     createHttpPluginAdapter(),
-    createCommandPluginAdapter()
+    createCommandPluginAdapter({
+      allowedNetworkHosts: options.commandPluginNetworkAllowlist ?? resolveCommandPluginNetworkAllowlist(process.env),
+      fileInputRoots: [join(resolveAgentDataRoot(process.env), "media")],
+      pluginDataRoot: join(dirname(options.appStateStore.databasePath), "plugin-data"),
+      hostServices: pluginHostServices
+    })
   ]));
   const plugins = createPluginService({
     repository: options.appStateStore.repositories.plugins,
@@ -137,7 +182,12 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
     registry: options.pluginRegistry ?? unavailablePluginRegistry,
     runtimeHost: pluginRuntimeHost,
     artifactManager: options.pluginArtifactManager ?? createPluginArtifactManager({
-      installRoot: join(dirname(options.appStateStore.databasePath), "plugins")
+      installRoot: join(dirname(options.appStateStore.databasePath), "plugins"),
+      trustedLocalRoots: options.trustedBundledPluginRoots
+    }),
+    skillManager: createPluginSkillManager({ skillsRoot: join(resolveAgentWorkspace(process.env), "skills") }),
+    localArtifactService: createPluginLocalArtifactService({
+      pluginDataRoot: join(dirname(options.appStateStore.databasePath), "plugin-data")
     })
   });
   const sourceRegistry =
@@ -154,8 +204,6 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
   const memmyAgentAdminClient =
     options.memmyAgentAdminClient ??
     createHttpMemmyAgentAdminClient({ bootstrapSecret: options.memmyAgentAdminBootstrapSecret });
-  const memmyConfigWriter = options.memmyConfigWriter ?? createUnavailableMemmyConfigWriter();
-  const accountSessionRepository = options.appStateStore.repositories.accountSession;
   const resolveAnalyticsUserId = () => {
     const session = accountSessionRepository.get();
     if (!session.authenticated) return null;
@@ -193,6 +241,7 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       getUserId: resolveAnalyticsUserId,
       getUserMode: resolveAnalyticsUserMode,
     }),
+    scanStoreDirectory: join(dirname(options.appStateStore.databasePath), "agent-source-scans"),
   });
   const toolConnectionAnalytics = createToolConnectionAnalytics({
     getUserId: resolveAnalyticsUserId,
@@ -202,17 +251,22 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
   return {
     memoryClient: options.memoryClient,
     agentAdapterRegistry: options.agentAdapterRegistry,
-    bootstrap: createBootstrapService(options),
+    bootstrap: createBootstrapService({
+      ...options,
+      scanPreferencesStore: options.scanPreferencesStore
+    }),
     appConfig: createAppConfigService({
       bootstrapRepository: options.appStateStore.repositories.bootstrap,
       cloudClient: options.cloudClient,
       accountSessionRepository: options.appStateStore.repositories.accountSession,
       memmyConfigWriter: options.memmyConfigWriter,
-      memoryClient: options.memoryClient
+      memoryClient: options.memoryClient,
+      scanPreferencesStore: options.scanPreferencesStore
     }),
     account: createAccountService({
       cloudClient: options.cloudClient,
       accountSessionRepository: options.appStateStore.repositories.accountSession,
+      bootstrapRepository: options.appStateStore.repositories.bootstrap,
       memmyConfigWriter: options.memmyConfigWriter,
       memoryClient: options.memoryClient,
       accountChannel: options.accountChannel
@@ -228,14 +282,18 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       toolConnectionAnalytics,
     }),
     localData: createLocalDataService({
-      localDataStore: options.appStateStore.localDataStore
+      localDataStore: options.appStateStore.localDataStore,
+      memoryClient: options.memoryClient
     }),
     agentSources,
     agentSourceAutoInject: createAgentSourceAutoInjectService({
       agentSources,
       permissionManager: options.permissionManager,
-      getScanPreferences: () => options.appStateStore.repositories.bootstrap.getScanPreferences()
+      getScanPreferences: () => options.scanPreferencesStore?.getScanPreferences()
+        ?? options.appStateStore.repositories.bootstrap.getScanPreferences()
     }),
+    // First-report sampling stays inside Desktop: it reads a small recent-history
+    // window for onboarding and is separate from Memory's persistent Agent scan.
     onboardingInsight: createOnboardingInsightService({
       samplers: createBuiltinOnboardingInsightSamplers(),
       conversationWindowReader: createSourceRegistryOnboardingConversationWindowReader(sourceRegistry),
@@ -276,6 +334,29 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
     }),
     plugins
   };
+}
+
+export function resolveCommandPluginNetworkAllowlist(env: NodeJS.ProcessEnv): string[] {
+  const configured = env.MEMMY_COMMAND_PLUGIN_NETWORK_ALLOWLIST?.trim();
+  if (!configured) return [...DEFAULT_COMMAND_PLUGIN_NETWORK_ALLOWLIST];
+  return configured
+    .split(",")
+    .map((host) => host.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function resolveAgentWorkspace(env: NodeJS.ProcessEnv): string {
+  const configured = env.MEMMY_AGENT_WORKSPACE?.trim() || "~/.memmy/workspace";
+  if (configured === "~") return homedir();
+  if (configured.startsWith("~/")) return resolve(homedir(), configured.slice(2));
+  return resolve(configured);
+}
+
+function resolveAgentDataRoot(env: NodeJS.ProcessEnv): string {
+  const configured = env.MEMMY_AGENT_DATA_DIR?.trim() || "~/.memmy";
+  if (configured === "~") return homedir();
+  if (configured.startsWith("~/")) return resolve(homedir(), configured.slice(2));
+  return resolve(configured);
 }
 
 export { createBootstrapService };

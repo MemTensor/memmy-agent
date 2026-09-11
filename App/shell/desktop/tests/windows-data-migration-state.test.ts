@@ -260,6 +260,112 @@ describe.runIf(process.platform === "win32")("Windows data migration boot verifi
     expect(existsSync(layout.migrationStatePath)).toBe(false);
   });
 
+  it("cleans a validated relocation relay backup and old drive runtime only after boot verification", async () => {
+    const root = await mkdtemp(join(tmpdir(), "memmy-migration-state-"));
+    temporaryDirectories.push(root);
+    const layout = createLayout(root);
+    const sourceInstallDir = join(root, "old-install");
+    const targetInstallDir = dirname(layout.legacyInstallDataPath);
+    const relayBackupRoot = join(`${sourceInstallDir}.memmy-upgrade-backup`, "1234");
+    const sourceDataPath = join(relayBackupRoot, "data-backup");
+    const accountSourcePath = join(sourceDataPath, "Memmy");
+    const oldRuntimeHomePath = join(root, "old-drive", "MemmyData", ".memmy");
+    await Promise.all([
+      mkdir(accountSourcePath, { recursive: true }),
+      mkdir(oldRuntimeHomePath, { recursive: true }),
+      mkdir(layout.runtimeHomePath, { recursive: true }),
+      mkdir(dirname(layout.migrationStatePath), { recursive: true })
+    ]);
+    await Promise.all([
+      writeFile(join(accountSourcePath, "app.sqlite"), "legacy-account", "utf8"),
+      writeFile(join(oldRuntimeHomePath, "config.yaml"), "old-runtime", "utf8"),
+      writeFile(join(layout.runtimeHomePath, "config.yaml"), "new-runtime", "utf8"),
+      writeFile(layout.migrationStatePath, JSON.stringify({
+        owner: "relay",
+        phase: "awaiting-app-verification",
+        sourceAuthority: "relay-backup-authority",
+        sourceInstallDir,
+        targetInstallDir,
+        sourceDataPath,
+        targetUserDataPath: layout.userDataPath,
+        targetRuntimeHomePath: layout.runtimeHomePath,
+        runtimeSourcePath: oldRuntimeHomePath,
+        runtimeSourcePaths: [oldRuntimeHomePath],
+        preparedCopies: [
+          { SourcePath: accountSourcePath, DestinationPath: layout.userDataPath, BackupPath: null },
+          { SourcePath: oldRuntimeHomePath, DestinationPath: layout.runtimeHomePath, BackupPath: null }
+        ],
+        backupPaths: []
+      }), "utf8")
+    ]);
+
+    await expect(advanceWindowsDataMigrationAfterBoot(layout, [oldRuntimeHomePath])).resolves.toBe("verified");
+    expect(existsSync(relayBackupRoot)).toBe(true);
+    expect(existsSync(oldRuntimeHomePath)).toBe(true);
+
+    await expect(advanceWindowsDataMigrationAfterBoot(layout, [oldRuntimeHomePath])).resolves.toBe("cleaned");
+    expect(existsSync(relayBackupRoot)).toBe(false);
+    expect(existsSync(oldRuntimeHomePath)).toBe(false);
+    expect(existsSync(layout.migrationStatePath)).toBe(false);
+  });
+
+  it("cleans carry-forward relay backups across consecutive installation relocations", async () => {
+    const root = await mkdtemp(join(tmpdir(), "memmy-migration-state-"));
+    temporaryDirectories.push(root);
+    const layout = createLayout(root);
+    const firstSourceInstallDir = join(root, "install-a");
+    const intermediateInstallDir = join(root, "install-b");
+    const activeInstallDir = dirname(layout.legacyInstallDataPath);
+    const firstRelayBackupRoot = join(`${firstSourceInstallDir}.memmy-upgrade-backup`, "1111");
+    const secondRelayBackupRoot = join(`${intermediateInstallDir}.memmy-upgrade-backup`, "2222");
+    const firstSourceDataPath = join(firstRelayBackupRoot, "data-backup");
+    const secondSourceDataPath = join(secondRelayBackupRoot, "data-backup");
+    const createRelayState = (
+      sourceInstallDir: string,
+      targetInstallDir: string,
+      sourceDataPath: string
+    ) => ({
+      owner: "relay",
+      phase: "app-verified",
+      sourceAuthority: "relay-backup-authority",
+      sourceInstallDir,
+      targetInstallDir,
+      sourceDataPath,
+      targetUserDataPath: layout.userDataPath,
+      targetRuntimeHomePath: layout.runtimeHomePath,
+      runtimeSourcePaths: [],
+      preparedCopies: [
+        {
+          SourcePath: join(sourceDataPath, "Memmy"),
+          DestinationPath: layout.userDataPath,
+          BackupPath: null
+        }
+      ],
+      backupPaths: []
+    });
+    const firstState = createRelayState(firstSourceInstallDir, intermediateInstallDir, firstSourceDataPath);
+    const secondState = {
+      ...createRelayState(intermediateInstallDir, activeInstallDir, secondSourceDataPath),
+      deferredCleanupStates: [firstState]
+    };
+    await Promise.all([
+      mkdir(join(firstSourceDataPath, "Memmy"), { recursive: true }),
+      mkdir(join(secondSourceDataPath, "Memmy"), { recursive: true }),
+      mkdir(layout.runtimeHomePath, { recursive: true }),
+      mkdir(dirname(layout.migrationStatePath), { recursive: true })
+    ]);
+    await Promise.all([
+      writeFile(join(firstSourceDataPath, "Memmy", "app.sqlite"), "first", "utf8"),
+      writeFile(join(secondSourceDataPath, "Memmy", "app.sqlite"), "second", "utf8"),
+      writeFile(layout.migrationStatePath, JSON.stringify(secondState), "utf8")
+    ]);
+
+    await expect(advanceWindowsDataMigrationAfterBoot(layout)).resolves.toBe("cleaned");
+    expect(existsSync(firstRelayBackupRoot)).toBe(false);
+    expect(existsSync(secondRelayBackupRoot)).toBe(false);
+    expect(existsSync(layout.migrationStatePath)).toBe(false);
+  });
+
   it("does not delete a relay-shaped backup outside the active installation sibling", async () => {
     const root = await mkdtemp(join(tmpdir(), "memmy-migration-state-"));
     temporaryDirectories.push(root);

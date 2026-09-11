@@ -79,7 +79,9 @@ export function UserMemoriesSubPage(props: UserMemoriesSubPageProps) {
           </h3>
           <p className="memory-panel__subtitle">{t("memory.userMemories.description")}</p>
         </div>
-        <MemoryRefreshButton onClick={() => void refresh()} />
+        <MemoryRefreshButton onClick={async () => {
+          await refresh();
+        }} />
       </div>
 
       <div className="memory-toolbar">

@@ -301,6 +301,10 @@ export type MemoryModelsStatus = z.infer<typeof MemoryModelsStatusSchema>;
 /** Schema for memory health snapshot. */
 export const MemoryHealthSnapshotSchema = z.object({
   ok: z.boolean(),
+  serviceVersion: NonEmptyStringSchema.optional(),
+  protocolVersion: z.number().int().positive().optional(),
+  viewerVersion: NonEmptyStringSchema.optional(),
+  viewerUrl: z.url().optional(),
   version: NonEmptyStringSchema,
   uptimeMs: z.number().nonnegative(),
   mode: z.enum(["local", "cloud", "dev"]),
@@ -314,7 +318,8 @@ export const MemoryHealthSnapshotSchema = z.object({
     routes: z.array(z.string()),
     tools: z.array(z.string()),
     memoryLayers: z.array(MemoryLayerSchema),
-    supportsCli: z.boolean()
+    supportsCli: z.boolean(),
+    service: z.array(z.string()).optional()
   }),
   features: L3WorldModelFeaturesSchema.optional(),
   models: MemoryModelsStatusSchema,
@@ -473,6 +478,33 @@ export const SearchInputSchema = RuntimeRequestFieldsSchema.extend({
 });
 export type SearchInput = z.infer<typeof SearchInputSchema>;
 
+/** Generate vectors with the embedding model currently owned by the Memory runtime. */
+export const EmbeddingInferenceInputSchema = z.object({
+  texts: z.array(z.string().min(1).max(16_000)).min(1).max(256),
+  role: z.enum(["query", "document"]).default("document")
+}).superRefine((input, context) => {
+  const totalCharacters = input.texts.reduce((sum, text) => sum + text.length, 0);
+  if (totalCharacters > 200_000) {
+    context.addIssue({
+      code: "custom",
+      path: ["texts"],
+      message: "Total embedding input exceeds 200000 characters"
+    });
+  }
+});
+export type EmbeddingInferenceInput = z.input<typeof EmbeddingInferenceInputSchema>;
+
+export const EmbeddingInferenceOutputSchema = z.object({
+  embeddings: z.array(z.array(z.number())),
+  model: z.object({
+    provider: z.string().min(1),
+    model: z.string().min(1),
+    mode: z.enum(["cloud", "local", "custom"]),
+    dimension: z.number().int().positive()
+  })
+});
+export type EmbeddingInferenceOutput = z.infer<typeof EmbeddingInferenceOutputSchema>;
+
 /** Schema for default search output. */
 export const DefaultSearchOutputSchema = z.object({
   injectedContext: z.string()
@@ -524,7 +556,8 @@ export const AddMemoryOutputSchema = z.object({
   summary: z.string(),
   tags: z.array(z.string()),
   createdAt: IsoTimeSchema,
-  serverTime: IsoTimeSchema
+  serverTime: IsoTimeSchema,
+  duplicate: z.boolean().optional()
 });
 export type AddMemoryOutput = z.infer<typeof AddMemoryOutputSchema>;
 

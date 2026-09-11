@@ -4,8 +4,8 @@ import { fileURLToPath } from "node:url";
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const cliRoot = join(scriptDirectory, "..");
-const projectRoot = join(cliRoot, "..", "..", "..");
-const packageOutput = join(projectRoot, "dist", "memmy-memory-npm");
+const memoryRoot = join(cliRoot, "..", "..");
+const packageOutput = join(memoryRoot, "dist", "memmy-memory-npm");
 const templateManifestPath = join(scriptDirectory, "package.json");
 const templateReadmePath = join(scriptDirectory, "README.md");
 const templateBinPath = join(scriptDirectory, "bin");
@@ -15,8 +15,8 @@ await rm(packageOutput, { recursive: true, force: true });
 await mkdir(packageOutput, { recursive: true });
 
 const packageManifest = JSON.parse(await readFile(templateManifestPath, "utf8"));
-const projectManifest = JSON.parse(await readFile(join(projectRoot, "package.json"), "utf8"));
-packageManifest.version = projectManifest.version;
+const memoryManifest = JSON.parse(await readFile(join(memoryRoot, "package.json"), "utf8"));
+packageManifest.version = memoryManifest.version;
 
 await writeFile(join(packageOutput, "package.json"), `${JSON.stringify(packageManifest, null, 2)}\n`, "utf8");
 await cp(templateReadmePath, join(packageOutput, "README.md"));
@@ -28,7 +28,7 @@ await chmod(join(packageOutput, "scripts", "postinstall.js"), 0o755);
 await chmod(join(packageOutput, "scripts", "prepublish-check.js"), 0o755);
 
 console.log(`Prepared npm package at ${packageOutput}`);
-console.log("Run: npm pack ./dist/memmy-memory-npm");
+console.log("Run from Memory/: npm pack ./dist/memmy-memory-npm");
 
 async function removeJunkFiles(root) {
   const entries = await import("node:fs/promises").then((fs) => fs.readdir(root, { withFileTypes: true }));

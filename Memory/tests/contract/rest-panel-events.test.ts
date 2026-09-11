@@ -39,10 +39,13 @@ describe("REST panel contract", () => {
       const viewerHtml = await viewerResponse.text();
       expect(viewerResponse.status).toBe(200);
       expect(viewerResponse.headers.get("content-type")).toContain("text/html");
-      expect(viewerHtml).toContain("Memmy Memory Panel");
-      expect(viewerHtml).toContain("/api/v1/panel/items");
-      expect(viewerHtml).toContain("/api/v1/memory/");
-      expect(viewerHtml).not.toContain("EventSource");
+      expect(viewerHtml).toContain("<title>Memmy Memory — Memory Viewer</title>");
+      expect(viewerHtml).toContain("/viewer/assets/");
+      const viewerScript = viewerHtml.match(/src="([^"]+\.js)"/)?.[1];
+      expect(viewerScript).toBeTruthy();
+      const viewerBundle = await (await fetch(`${endpoint}${viewerScript}`)).text();
+      expect(viewerBundle).toContain("/api/v1/traces");
+      expect(viewerBundle).toContain("/api/v1/events");
 
       const session = await client.openSession({
         adapterId: "contract",

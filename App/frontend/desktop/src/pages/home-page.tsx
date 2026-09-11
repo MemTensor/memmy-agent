@@ -78,7 +78,12 @@ import { AgentEnvironmentPanel } from "./agent-environment-panel.js";
 import { AgentGoalBar, type AgentGoalControlRequest } from "./agent-goal-bar.js";
 import { AgentQueuedMessageList } from "./agent-queued-message-list.js";
 import { AgentThreadMessages, ChatImageLightbox } from "./agent-thread-messages.js";
+import {
+  type AgentQuestionCardPayload,
+  type AgentQuestionResponse,
+} from "./agent-question-card.js";
 import { PluginCapabilityHost } from "./plugin-capability-host.js";
+import { PluginArtifactPreviewPanel } from "./plugin-artifact-preview-panel.js";
 import { AgentWorkspaceContext } from "./agent-workspace-context.js";
 import { AppFrame } from "./app-frame.js";
 import {
@@ -329,6 +334,7 @@ export interface SubmitAgentComposerMessageInput {
   clearComposer: () => void;
   onChatResolved?: (chatId: string) => void;
   onNewChatMessageSent?: (chatId: string) => void;
+  onMessageAccepted?: (chatId: string, feedback: { message: string; clientRequestId: string }) => void;
   chatSelectionEpoch?: number;
   getChatSelectionEpoch?: () => number;
   scopeKey?: string;
@@ -472,6 +478,14 @@ export function parsePluginCommandInvocation(input: string, targets: PluginComma
   const token = trimmed.split(/\s/, 1)[0]?.toLowerCase();
   const target = targets.find((item) => item.command.command === token);
   return target ? { plugin: target.plugin, contribution: target.command, arguments: trimmed.slice(target.command.command.length).trim() } : null;
+}
+
+/** Converts an Agent-routed plugin command into an explicit Skill invocation. */
+export function buildAgentRoutedPluginPrompt(input: string, targets: PluginCommandTarget[]): string | null {
+  const invocation = parsePluginCommandInvocation(input, targets);
+  const skillId = invocation?.contribution.agentSkillId;
+  if (!invocation || !skillId) return null;
+  return `$${skillId}${invocation.arguments ? ` ${invocation.arguments}` : ""}`;
 }
 
 export function hasActiveAgentConversation(currentChatId: string | null, messageCount: number): boolean {
@@ -929,6 +943,7 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
     }));
   }
   input.clearComposer();
+  input.onMessageAccepted?.(chatId, { message: text, clientRequestId });
   if (input.scopeKey) {
     input.dispatch(agentActions.pendingModelPresetCleared(input.scopeKey));
   }
@@ -1025,7 +1040,7 @@ function ComposerCaretMenu(props: {
  */
 export function HomePage() {
   const { clients } = useApiClients();
-  const { calls: pluginUiCalls, openSurface } = usePluginUi();
+  const { calls: pluginUiCalls, openSurface, notifyChatMessage } = usePluginUi();
   const { state, dispatch } = useAppState();
   const modelWorkspace = createModelWorkspace(state.modelConfig);
   const { language, t } = useTranslation();
@@ -1051,6 +1066,7 @@ export function HomePage() {
   const [historyDagPanel, setHistoryDagPanel] = useState<HistoryDagPanelState>({ open: false });
   const [environmentPanelOpen, setEnvironmentPanelOpen] = useState(false);
   const [previewPanelOpen, setPreviewPanelOpen] = useState(false);
+  const [pluginArtifactPreview, setPluginArtifactPreview] = useState<PluginArtifactRef | null>(null);
   const [installedPlugins, setInstalledPlugins] = useState<InstalledPlugin[]>([]);
   const [previewPanelWidth, setPreviewPanelWidth] = useState(520);
   const [isCreatingChat, setIsCreatingChat] = useState(false);
@@ -1220,7 +1236,10 @@ export function HomePage() {
   const hasActiveConversation = hasActiveAgentConversation(state.agent.currentChatId, state.agent.messages.length);
 
   useEffect(() => {
-    if (!hasActiveConversation) setPreviewPanelOpen(false);
+    if (!hasActiveConversation) {
+      setPreviewPanelOpen(false);
+      setPluginArtifactPreview(null);
+    }
   }, [hasActiveConversation]);
 
   useEffect(() => {
@@ -1879,8 +1898,10 @@ export function HomePage() {
   const hasComposerPayload = Boolean(input.trim() || pendingAttachments.some((item) => item.status === "ready"));
   const hasComposerIntent = Boolean(input.trim() || pendingAttachments.length > 0);
   const stopInFlight = state.agent.currentChatId ? Boolean(state.agent.stopInFlightByChatId[state.agent.currentChatId]) : false;
-  const isPluginCommand = Boolean(parsePluginCommandInvocation(input, pluginCommandTargets));
-  const composerSendDisabled = isPluginCommand
+  const pluginCommandInvocation = parsePluginCommandInvocation(input, pluginCommandTargets);
+  const agentRoutedPluginPrompt = buildAgentRoutedPluginPrompt(input, pluginCommandTargets);
+  const isDirectPluginCommand = Boolean(pluginCommandInvocation && !agentRoutedPluginPrompt);
+  const composerSendDisabled = isDirectPluginCommand
     ? pendingAttachments.length > 0 || !clients
     : stopInFlight
       || !hasComposerPayload
@@ -2071,10 +2092,11 @@ export function HomePage() {
         chatId: state.agent.currentChatId,
         target,
         clientRequestId,
+        onMessageAccepted: notifyChatMessage,
         connection,
         ensureChatSubscription,
-        content: input,
-        displayContent: selectedComposerCommand ? composerInput : undefined,
+        content: agentRoutedPluginPrompt ?? input,
+        displayContent: agentRoutedPluginPrompt ? input : selectedComposerCommand ? composerInput : undefined,
         language,
         pendingAttachments,
         uploadAgentMedia: (attachments) => clients!.memmyAgent.uploadAgentMedia(attachments),
@@ -2115,6 +2137,30 @@ export function HomePage() {
       dispatch(agentActions.messageSendLockUpdated(sendScopeKey, null));
     }
   }
+
+  async function submitAgentQuestionResponse(
+    _card: AgentQuestionCardPayload,
+    response: AgentQuestionResponse,
+  ): Promise<boolean> {
+    const chatId = state.agent.currentChatId;
+    const generation = connection?.getReadyGeneration() ?? null;
+    if (!chatId || !connection || generation === null) return false;
+    try {
+      await connection.respondToQuestion(chatId, response, generation);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  const answerAgentQuestionRef = useRef(
+    (_card: AgentQuestionCardPayload, _response: AgentQuestionResponse): Promise<boolean> => Promise.resolve(false)
+  );
+  answerAgentQuestionRef.current = submitAgentQuestionResponse;
+  const answerAgentQuestion = useCallback(
+    (card: AgentQuestionCardPayload, response: AgentQuestionResponse) => answerAgentQuestionRef.current(card, response),
+    []
+  );
 
   async function removeQueuedMessage(clientRequestId: string) {
     const chatId = state.agent.currentChatId;
@@ -2263,6 +2309,7 @@ export function HomePage() {
   function runExactLocalSlashCommand(command: string): boolean {
     const normalized = command.trim().toLowerCase();
     const pluginInvocation = parsePluginCommandInvocation(command, pluginCommandTargets);
+    if (pluginInvocation?.contribution.agentSkillId) return false;
     if (pluginInvocation && pendingAttachments.length > 0) return false;
     if (pluginInvocation && clients) {
       const { plugin, contribution, arguments: commandArguments } = pluginInvocation;
@@ -2980,7 +3027,7 @@ export function HomePage() {
   }
 
   function handleComposerPaste(event: ClipboardEvent<HTMLTextAreaElement>) {
-    const files = clipboardImageFilesFromDataTransfer(event.clipboardData);
+    const files = clipboardAttachmentFilesFromDataTransfer(event.clipboardData);
     if (!files.length) {
       return;
     }
@@ -3184,6 +3231,7 @@ export function HomePage() {
     />
   ) : null;
 
+  const sidePreviewOpen = previewPanelOpen || pluginArtifactPreview !== null;
   const previewToggle = hasActiveConversation ? (
     <button
       type="button"
@@ -3191,13 +3239,24 @@ export function HomePage() {
       aria-label={t("common.preview")}
       aria-pressed={previewPanelOpen}
       title={t("common.preview")}
-      onClick={() => setPreviewPanelOpen((open) => !open)}
+      onClick={() => {
+        setPluginArtifactPreview(null);
+        setPreviewPanelOpen((open) => !open);
+      }}
     >
       <PanelRight size={15} aria-hidden="true" />
     </button>
   ) : null;
 
-  const previewPanel = previewPanelOpen && hasActiveConversation ? (
+  const previewPanel = pluginArtifactPreview && clients ? (
+    <PluginArtifactPreviewPanel
+      key={pluginArtifactPreview.id}
+      artifact={pluginArtifactPreview}
+      readArtifact={clients.plugins.readArtifact}
+      onClose={() => setPluginArtifactPreview(null)}
+      onWidthChange={setPreviewPanelWidth}
+    />
+  ) : previewPanelOpen && hasActiveConversation ? (
     <WorkspaceArtifactPanel
       key={previewSessionKey ?? chatScopeKey}
       sessionKey={previewSessionKey ?? ""}
@@ -3218,7 +3277,7 @@ export function HomePage() {
       title={t("home.title")}
       topBar={hasActiveConversation || environmentScope ? (
         <div
-          className={`agent-conversation-topbar${previewPanelOpen ? " agent-conversation-topbar--preview-open" : ""}`}
+          className={`agent-conversation-topbar${sidePreviewOpen ? " agent-conversation-topbar--preview-open" : ""}`}
           style={{ "--agent-preview-panel-width": `${previewPanelWidth}px` } as CSSProperties}
         >
           <h1 className="agent-conversation-title" title={hasActiveConversation ? activeConversationTitle : selectedDraftProject?.name}>
@@ -3231,7 +3290,7 @@ export function HomePage() {
             {environmentScope ? (
               <button
                 type="button"
-                className={`agent-environment-toggle${environmentPanelOpen ? " agent-environment-toggle--active" : ""}${previewPanelOpen ? " agent-environment-toggle--with-preview" : ""}`}
+                className={`agent-environment-toggle${environmentPanelOpen ? " agent-environment-toggle--active" : ""}${sidePreviewOpen ? " agent-environment-toggle--with-preview" : ""}`}
                 data-agent-environment-toggle
                 aria-label={t("home.environment.title")}
                 aria-pressed={environmentPanelOpen}
@@ -3241,14 +3300,14 @@ export function HomePage() {
                 <SlidersHorizontal size={15} aria-hidden="true" />
               </button>
             ) : null}
-            {!previewPanelOpen ? previewToggle : null}
+            {!sidePreviewOpen ? previewToggle : null}
           </div>
         </div>
       ) : null}
-      topBarBorder={Boolean(hasActiveConversation || environmentScope) && !previewPanelOpen}
+      topBarBorder={Boolean(hasActiveConversation || environmentScope) && !sidePreviewOpen}
     >
       <div
-        className={`agent-workspace-layout${environmentPanelOpen ? " agent-workspace-layout--environment-open" : ""}${previewPanelOpen ? " agent-workspace-layout--preview-open" : ""}`}
+        className={`agent-workspace-layout${environmentPanelOpen ? " agent-workspace-layout--environment-open" : ""}${sidePreviewOpen ? " agent-workspace-layout--preview-open" : ""}`}
         style={{ "--agent-preview-panel-width": `${previewPanelWidth}px` } as CSSProperties}
       >
         {!hasActiveConversation ? (
@@ -3439,9 +3498,11 @@ export function HomePage() {
                 forceMessageActionsForMessageId={firstEncounterRelayAnswerMessageId}
                 retryWaitStatus={state.agent.currentChatId ? state.agent.retryWaitStatusByChatId[state.agent.currentChatId] ?? null : null}
                 isSending={state.agent.isSending}
+                waitingForPluginInteraction={visiblePluginCalls.some((call) => call.events.some((event) => event.type === "interaction") && !call.events.some((event) => event.type === "result" || event.type === "error"))}
                 sanitizePlatformApiErrors={sanitizePlatformApiErrors}
                 artifactClient={sessionArtifactClient}
                 memoryRuntimeClient={clients?.memoryRuntime ?? null}
+                onAnswerQuestion={answerAgentQuestion}
               />
               <PluginCapabilityHost
                 calls={visiblePluginCalls}
@@ -3449,6 +3510,10 @@ export function HomePage() {
                 client={clients?.plugins ?? null}
                 uploadFiles={clients ? (files) => clients.memmyAgent.uploadAgentMedia(files) : undefined}
                 onAddArtifact={(artifact) => setCurrentComposerDraft((current) => appendPluginArtifact(current, artifact))}
+                onOpenArtifact={(artifact) => {
+                  setPreviewPanelOpen(false);
+                  setPluginArtifactPreview(artifact);
+                }}
               />
             </div>
           </div>
@@ -4278,10 +4343,10 @@ export interface AgentMediaValidationResult {
   duplicateCount: number;
 }
 
-type ClipboardFileItem = Pick<DataTransferItem, "kind" | "type" | "getAsFile">;
+type ClipboardFileItem = Pick<DataTransferItem, "kind" | "getAsFile">;
 type DragFileItem = Pick<DataTransferItem, "kind" | "getAsFile">;
 
-export interface ClipboardImageSource {
+export interface ClipboardAttachmentSource {
   items?: ArrayLike<ClipboardFileItem> | Iterable<ClipboardFileItem>;
   files?: ArrayLike<File> | Iterable<File>;
 }
@@ -4292,11 +4357,11 @@ export interface AttachmentDropSource {
   types?: ArrayLike<string> | Iterable<string>;
 }
 
-export function clipboardImageFilesFromDataTransfer(source: ClipboardImageSource | null | undefined): File[] {
+export function clipboardAttachmentFilesFromDataTransfer(source: ClipboardAttachmentSource | null | undefined): File[] {
   const files: File[] = [];
   const seen = new Set<File>();
-  const addImageFile = (file: File | null | undefined) => {
-    if (!file || !String(file.type ?? "").toLowerCase().startsWith("image/") || seen.has(file)) {
+  const addFile = (file: File | null | undefined) => {
+    if (!file || seen.has(file)) {
       return;
     }
     seen.add(file);
@@ -4304,15 +4369,15 @@ export function clipboardImageFilesFromDataTransfer(source: ClipboardImageSource
   };
 
   for (const item of arrayLikeToArray<ClipboardFileItem>(source?.items)) {
-    if (item.kind === "file" && String(item.type ?? "").toLowerCase().startsWith("image/")) {
-      addImageFile(item.getAsFile());
+    if (item.kind === "file") {
+      addFile(item.getAsFile());
     }
   }
   if (files.length > 0) {
     return files;
   }
   for (const file of arrayLikeToArray<File>(source?.files)) {
-    addImageFile(file);
+    addFile(file);
   }
 
   return files;

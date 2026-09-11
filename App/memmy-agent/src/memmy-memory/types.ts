@@ -20,6 +20,8 @@ export type {
   WorkspaceUri
 };
 
+export type MemmyMemoryLayer = "L1" | "L2" | "L3" | "Skill";
+
 export type MemmyMemoryRuntimeNamespace = {
   source: string;
   profileId: string;
@@ -50,6 +52,7 @@ export type MemmyMemoryConnection = {
 export type MemmyMemoryResolvedConfig = {
   enabled: boolean;
   userId?: string;
+  retrievalLayers?: MemmyMemoryLayer[];
 };
 
 export type MemmyMemoryInstallOptions = {
@@ -88,6 +91,8 @@ export type MemmyMemoryHookOptions = {
   profileId?: string;
   profileLabel?: string;
   userId?: string;
+  /** Optional per-run upper bound on layers eligible for automatic turn-start retrieval. */
+  retrievalLayers?: MemmyMemoryLayer[];
   /** Optional override for GA4 client_id; defaults to reading desktop-written ~/.memmy/analytics-client-id. */
   getAnalyticsClientId?: () => string | null | undefined;
   /** Optional logged-in account id for GA4 user_id; omitted when anonymous. */

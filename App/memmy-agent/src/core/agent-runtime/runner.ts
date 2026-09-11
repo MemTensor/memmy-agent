@@ -4,6 +4,7 @@ import { LLMProvider, LLMResponse, ToolCallRequest } from "../../providers/base.
 import {
   coversInputModalities,
   getModelInputModalities,
+  hasDeclaredInputModalities,
   requiredInputModalities,
 } from "../../providers/model-input-capabilities.js";
 import type { ActualModelContext } from "@memmy/local-api-contracts";
@@ -675,9 +676,14 @@ export class AgentRunner {
     const canUseAccountFallback = missing.length === 1
       && missing[0] === "image"
       && this.canRunAccountImageTextFallback(spec, null);
+    // A BYOK model ID we have never reviewed may well be multimodal, and BYOK has no
+    // image2text fallback to fall back on, so let the user's own endpoint answer rather
+    // than refusing the request here.
+    const deferToProvider = spec.actualModelContext?.source === "byok"
+      && !hasDeclaredInputModalities(model);
 
     let initialResponse: LLMResponse | null = null;
-    if (coversInputModalities(supported, required)) {
+    if (deferToProvider || coversInputModalities(supported, required)) {
       initialResponse = await this.requestModel(spec, messagesForModel, hook, context, options);
       const canRecoverExplicitRejection = initialResponse.errorCategory === "image_input_unsupported"
         && !context.streamedContent

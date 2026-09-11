@@ -25,11 +25,20 @@ asarUnpack:
   - "**/@img/sharp-libvips-darwin-*/lib/libvips*.dylib"
   - "**/@lydell/node-pty-darwin-*/prebuilds/darwin-*/spawn-helper"
   - "**/node_modules/sqlite-vec-*/vec0.*"
-  - "dist/runtime/memory/node_modules/@memmy/**"
   - "dist/runtime/memmy-agent/node_modules/@memmy/migrations/**"
   - "dist/renderer/**"
 
 extraResources:
+  - from: dist/runtime/memory
+    to: memory-runtime
+    filter:
+      - "**/*"
+  # electron-builder excludes a matcher-root node_modules directory. Copy it
+  # through its own matcher so the standalone Memory runtime stays complete.
+  - from: dist/runtime/memory/node_modules
+    to: memory-runtime/node_modules
+    filter:
+      - "**/*"
   - from: dist/runtime/bin
     to: cli
     filter:
@@ -40,6 +49,10 @@ extraResources:
     to: MenuBarIconTemplate@2x.png
   - from: dist/embedding-models
     to: embedding-models
+    filter:
+      - "**/*"
+  - from: dist/bundled-plugins
+    to: bundled-plugins
     filter:
       - "**/*"
 mac:

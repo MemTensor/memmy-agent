@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { Command } from "commander";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import YAML from "yaml";
 import { buildHelpText, builtinCommandPalette } from "../../../src/command/builtin.js";
@@ -32,6 +33,7 @@ import {
   cliRuntimeLogsEnabled,
   deleteOauthFiles,
   gateway,
+  goal,
   isRootInteractiveRequest,
   isRootVersionRequest,
   loadRuntimeConfig,
@@ -42,6 +44,7 @@ import {
   pluginsListRows,
   providerLogin,
   providerLogout,
+  resolveCliActionOptions,
   resolveOauthProvider,
   runInternalCommand,
   serve,
@@ -242,6 +245,34 @@ describe("CLI command helpers", () => {
     expect(help).toContain("--project <path>");
   });
 
+  it("merges terminal target options parsed by the root command into subcommand options", async () => {
+    const program = new Command("memmy")
+      .option("--project <path>");
+    let resolved: Record<string, any> | null = null;
+    program
+      .command("goal")
+      .option("--message-file <path>")
+      .option("--project <path>")
+      .action((localOpts, actionCommand) => {
+        resolved = resolveCliActionOptions(localOpts, actionCommand);
+      });
+
+    await program.parseAsync([
+      "node",
+      "memmy",
+      "goal",
+      "--message-file",
+      "/tmp/objective.txt",
+      "--project",
+      "/app",
+    ]);
+
+    expect(resolved).toEqual(expect.objectContaining({
+      messageFile: "/tmp/objective.txt",
+      project: "/app",
+    }));
+  });
+
   it("stops before the root TUI when startup migrations fail", async () => {
     const root = tempRoot("memmy-root-migration-failure-");
     const workspace = path.join(root, "workspace");
@@ -301,7 +332,7 @@ describe("CLI command helpers", () => {
     expect(config.agents.defaults.workspace).toBe(path.join(root, "workspace"));
   });
 
-  it("onboard creates config, channel defaults, workspace templates, and leaves legacy cron store untouched", async () => {
+  it("onboard defaults creates config, channel defaults, workspace templates, and leaves legacy cron store untouched", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-onboard-"));
     const configPath = path.join(root, "config.yaml");
     const workspace = path.join(root, "workspace");
@@ -310,7 +341,7 @@ describe("CLI command helpers", () => {
     fs.writeFileSync(path.join(legacyDir, "jobs.json"), "[]", "utf8");
     process.env.MEMMY_AGENT_DATA_DIR = root;
 
-    const config = await onboard({ config: configPath, workspace });
+    const config = await onboard({ config: configPath, workspace, defaults: true });
     delete process.env.MEMMY_AGENT_DATA_DIR;
 
     expect(config.agents.defaults.workspace).toBe(workspace);
@@ -337,21 +368,21 @@ describe("CLI command helpers", () => {
     expect(fs.existsSync(path.join(workspace, "cron", "jobs.json"))).toBe(false);
   });
 
-  it("onboard wizard does not write missing config when the user exits without saving", async () => {
+  it("onboard does not write missing config when the user exits without saving", async () => {
     const root = tempRoot("memmy-onboard-wizard-");
     const configPath = path.join(root, "config.yaml");
     const workspace = path.join(root, "workspace");
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     usePrompt(["[X] Exit Without Saving"]);
 
-    const config = await onboard({ config: configPath, workspace, wizard: true });
+    const config = await onboard({ config: configPath, workspace });
 
     expect(config.agents.defaults.workspace).toBe(workspace);
     expect(fs.existsSync(configPath)).toBe(false);
     expect(fs.existsSync(workspace)).toBe(false);
   });
 
-  it("onboard asks before resetting an existing config in an interactive terminal", async () => {
+  it("onboard defaults asks before resetting an existing config in an interactive terminal", async () => {
     const root = tempRoot("memmy-onboard-existing-");
     const configPath = writeConfig(root, {
       agents: { defaults: { model: "openai/custom-model", workspace: path.join(root, "old-workspace") } },
@@ -362,7 +393,7 @@ describe("CLI command helpers", () => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     usePrompt([true]);
 
-    const config = await onboard({ config: configPath, workspace });
+    const config = await onboard({ config: configPath, workspace, defaults: true });
 
     expect(config.agents.defaults.model).toBe(new Config().agents.defaults.model);
     expect(config.agents.defaults.workspace).toBe(workspace);
@@ -479,6 +510,14 @@ describe("CLI command helpers", () => {
     expect(raw.app.userId).toBe("user_cli_123");
     expect(raw.memmyMemory.userId).toBe("user_cli_123");
     expect(log.mock.calls.flat().join("\n")).toContain("app.userId: user_cli_123");
+  });
+
+  it("exposes defaults on onboard and removes the wizard option", () => {
+    const onboardCommand = app.commands.find((command) => command.name() === "onboard");
+    const flags = onboardCommand?.options.map((option) => option.long);
+
+    expect(flags).toContain("--defaults");
+    expect(flags).not.toContain("--wizard");
   });
 
   it("rejects unsupported config set keys", () => {
@@ -1258,6 +1297,99 @@ describe("CLI command helpers", () => {
     expect(loop.sessions.flushAll).toHaveBeenCalledTimes(1);
   });
 
+  it("runs a headless Goal until completion and writes a structured result", async () => {
+    const root = tempRoot();
+    const workspace = path.join(root, "workspace");
+    const output = path.join(root, "result", "goal.json");
+    const configPath = writeConfig(root, {
+      agents: { defaults: { workspace, model: "test-model" } },
+    });
+    const order: string[] = [];
+    let state: any = null;
+    const busMessages: OutboundMessage[] = [];
+    const fakeLoop = {
+      workspace,
+      projectStore: {} as any,
+      guiTranscriptMirror: null,
+      activeTasks: new Map(),
+      sessions: {
+        flushAll: vi.fn(() => 0),
+        pathFor: vi.fn((key: string) => path.join(workspace, "sessions", `${key}.jsonl`)),
+      },
+      resolveTurnModelSelection: vi.fn(() => ({ model: "test-model" })),
+      processDirect: vi.fn(async (content: string) => {
+        order.push("create");
+        state = {
+          goalId: "goal-1",
+          objective: content.slice("/goal create ".length),
+          status: "active",
+          tokenBudget: null,
+          tokensUsed: 0,
+          timeUsedSeconds: 0,
+          createdAt: "2026-08-18T00:00:00.000Z",
+          updatedAt: "2026-08-18T00:00:00.000Z",
+        };
+        return { content: "Goal created." };
+      }),
+      goalRuntime: {
+        get: vi.fn(() => state),
+        setBudget: vi.fn(async (_session: string, _goal: string, budget: number) => {
+          order.push("budget");
+          state = { ...state, tokenBudget: budget };
+          return state;
+        }),
+        flushEffects: vi.fn(async () => undefined),
+        pauseAndCancel: vi.fn(async () => undefined),
+      },
+      run: vi.fn(async () => {
+        order.push("run");
+        state = {
+          ...state,
+          status: "completed",
+          tokensUsed: 321,
+          timeUsedSeconds: 12,
+          updatedAt: "2026-08-18T00:00:12.000Z",
+        };
+        for (const message of busMessages) await (fakeLoop as any).bus.publishOutbound(message);
+      }),
+      stop: vi.fn(),
+      closeMcp: vi.fn(async () => undefined),
+    };
+    vi.spyOn(AgentLoop, "fromConfig").mockImplementation((_config, bus) => {
+      (fakeLoop as any).bus = bus;
+      busMessages.push(new OutboundMessage({
+        channel: "cli",
+        chatId: "direct",
+        content: "Implemented and verified.",
+      }));
+      return fakeLoop as any;
+    });
+
+    const result = await goal({
+      message: "Fix the repository task",
+      tokenBudget: 500,
+      timeout: 5,
+      output,
+      config: configPath,
+    });
+
+    expect(order).toEqual(["create", "budget", "run"]);
+    expect(result).toMatchObject({
+      status: "success",
+      summary: "Implemented and verified.",
+      session_id: "cli:direct",
+      timed_out: false,
+      metrics: { tokens_used: 321, time_used_seconds: 12 },
+    });
+    expect(JSON.parse(fs.readFileSync(output, "utf8"))).toMatchObject({
+      status: "success",
+      goal: { status: "completed", token_budget: 500 },
+    });
+    expect(fakeLoop.stop).toHaveBeenCalledTimes(1);
+    expect(fakeLoop.closeMcp).toHaveBeenCalledTimes(1);
+    expect(fakeLoop.sessions.flushAll).toHaveBeenCalledTimes(1);
+  });
+
   it("agent prints a matching CLI restart notice before a direct turn", async () => {
     const root = tempRoot();
     const configPath = writeConfig(root, { agents: { defaults: { workspace: path.join(root, "workspace"), model: "test-model" } } });
@@ -1282,7 +1414,7 @@ describe("CLI command helpers", () => {
     const configPath = path.join(root, "config.yaml");
     const workspace = path.join(root, "workspace");
 
-    await onboard({ config: configPath, workspace });
+    await onboard({ config: configPath, workspace, defaults: true });
     const output = status({ config: configPath });
 
     expect(output).toContain("memmy Status");
@@ -1601,7 +1733,7 @@ describe("CLI command parity with memmy test_commands", () => {
     const workspace = path.join(root, "workspace");
     const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
 
-    const config = await onboard({ config: configPath, workspace });
+    const config = await onboard({ config: configPath, workspace, defaults: true });
 
     expect(config.agents.defaults.workspace).toBe(workspace);
     expect(fs.existsSync(configPath)).toBe(true);
@@ -1619,7 +1751,7 @@ describe("CLI command parity with memmy test_commands", () => {
     const workspace = path.join(root, "workspace");
     vi.spyOn(console, "log").mockImplementation(() => undefined);
 
-    const config = await onboard({ config: configPath, workspace });
+    const config = await onboard({ config: configPath, workspace, defaults: true });
     const raw = YAML.parse(fs.readFileSync(configPath, "utf8"));
 
     expect(config.fileMemory.enabled).toBe(true);
@@ -1641,7 +1773,7 @@ describe("CLI command parity with memmy test_commands", () => {
     const workspace = path.join(root, "workspace");
     vi.spyOn(console, "log").mockImplementation(() => undefined);
 
-    const config = await onboard({ config: configPath, workspace });
+    const config = await onboard({ config: configPath, workspace, defaults: true });
     const raw = YAML.parse(fs.readFileSync(configPath, "utf8"));
 
     expect(config.agents.defaults.model).toBe("openai/test-model");
@@ -1659,7 +1791,7 @@ describe("CLI command parity with memmy test_commands", () => {
     fs.writeFileSync(path.join(workspace, "keep.txt"), "keep", "utf8");
     vi.spyOn(console, "log").mockImplementation(() => undefined);
 
-    await onboard({ config: configPath, workspace });
+    await onboard({ config: configPath, workspace, defaults: true });
 
     expect(fs.existsSync(path.join(workspace, "keep.txt"))).toBe(true);
     expect(fs.existsSync(path.join(workspace, "AGENTS.md"))).toBe(true);
@@ -1671,7 +1803,7 @@ describe("CLI command parity with memmy test_commands", () => {
     const workspace = path.join(root, "workspace");
     const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
 
-    const config = await onboard({ config: configPath, workspace });
+    const config = await onboard({ config: configPath, workspace, defaults: true });
 
     expect(config.agents.defaults.workspace).toBe(workspace);
     expect(fs.existsSync(configPath)).toBe(true);

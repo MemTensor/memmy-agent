@@ -13,6 +13,8 @@ export interface RuntimeCatalogEndpoint {
     extraBody?: Record<string, unknown>;
 }
 
+export const BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID = "memmy-builtin-local-embedding";
+
 export interface RuntimeCatalogProvider {
     apiKey?: string;
     extraHeaders?: Record<string, string>;
@@ -343,13 +345,13 @@ function protocolSupportsCapability(
 }
 
 function validStringRecord(value: unknown): boolean {
-    return value === undefined || (
+    return value === undefined || value === null || (
         isRecord(value) && Object.values(value).every((entry) => typeof entry === "string")
     );
 }
 
 function validUnknownRecord(value: unknown): boolean {
-    return value === undefined || isRecord(value);
+    return value === undefined || value === null || isRecord(value);
 }
 
 function isHttpUrl(value: unknown): value is string {
