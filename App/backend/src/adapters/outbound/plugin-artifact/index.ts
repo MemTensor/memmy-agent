@@ -15,6 +15,8 @@ import { createWriteStream } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { Transform } from "node:stream";
+import { isDeepStrictEqual } from "node:util";
+import { PluginManifestSchema, type PluginManifest } from "@memmy/local-api-contracts";
 import JSZip, { type JSZipObject } from "jszip";
 import type { PluginRelease } from "../plugin-registry/index.js";
 import type { PluginArtifactManager } from "./types.js";
@@ -28,18 +30,21 @@ export type { PluginArtifactLocation, PluginArtifactManager } from "./types.js";
 export interface CreatePluginArtifactManagerOptions {
   installRoot: string;
   fetchFn?: typeof fetch;
+  /** Canonical desktop resource roots allowed to provide immutable local plugin packages. */
+  trustedLocalRoots?: readonly string[];
 }
 
 export function createPluginArtifactManager(options: CreatePluginArtifactManagerOptions): PluginArtifactManager {
   const configuredInstallRoot = resolve(options.installRoot);
+  const trustedLocalRoots = (options.trustedLocalRoots ?? []).map((root) => resolve(root));
   const fetchFn = options.fetchFn ?? fetch.bind(globalThis);
 
   return {
     async install(release) {
       if (!release.artifact) return { artifactHash: null, rootPath: null };
-      const url = new URL(release.artifact.url);
-      assertAllowedArtifactUrl(url);
-      const bytes = await downloadArtifact(url, fetchFn);
+      const bytes = "localPath" in release.artifact && release.artifact.localPath
+        ? await readTrustedLocalArtifact(release.artifact.localPath, trustedLocalRoots)
+        : await downloadArtifact(assertArtifactUrl(release.artifact.url), fetchFn);
       const digest = createHash("sha256").update(bytes).digest("hex");
       if (digest !== release.artifact.sha256.toLowerCase()) {
         throw Object.assign(new Error("Plugin artifact SHA-256 mismatch"), { code: "plugin_invalid" });
@@ -56,6 +61,7 @@ export function createPluginArtifactManager(options: CreatePluginArtifactManager
       try {
         await mkdir(content);
         await extractZip(bytes, content);
+        await assertPackagedManifest(content, release.manifest);
         const pluginRoot = dirname(target);
         await mkdir(pluginRoot, { recursive: true });
         await assertCanonicalDirectory(pluginRoot);
@@ -98,6 +104,27 @@ export function createPluginArtifactManager(options: CreatePluginArtifactManager
   };
 }
 
+async function readTrustedLocalArtifact(path: string, trustedRoots: readonly string[]): Promise<Buffer> {
+  const requestedPath = resolve(path);
+  const info = await lstat(requestedPath);
+  if (!info.isFile() || info.isSymbolicLink()) {
+    throw new Error("Bundled plugin artifact must be a regular file");
+  }
+  const canonicalPath = await realpath(requestedPath);
+  const allowed = await Promise.all(trustedRoots.map(async (root) => {
+    const rootInfo = await lstat(root);
+    const canonicalRoot = await realpath(root);
+    return rootInfo.isDirectory()
+      && !rootInfo.isSymbolicLink()
+      && isDescendant(canonicalRoot, canonicalPath);
+  }));
+  if (!allowed.some(Boolean)) throw new Error("Bundled plugin artifact is outside the trusted resource root");
+  if (info.size > MAX_ARCHIVE_BYTES) throw new Error("Plugin artifact exceeded size limit");
+  const bytes = await readFile(canonicalPath);
+  if (bytes.byteLength > MAX_ARCHIVE_BYTES) throw new Error("Plugin artifact exceeded size limit");
+  return bytes;
+}
+
 async function downloadArtifact(url: URL, fetchFn: typeof fetch): Promise<Buffer> {
   const response = await fetchFn(url, {
     headers: { accept: "application/zip, application/octet-stream" },
@@ -116,6 +143,20 @@ async function downloadArtifact(url: URL, fetchFn: typeof fetch): Promise<Buffer
     chunks.push(chunk);
   }
   return Buffer.concat(chunks, total);
+}
+
+async function assertPackagedManifest(root: string, expected: PluginManifest): Promise<void> {
+  const manifestPath = resolve(root, "plugin.json");
+  assertDescendant(root, manifestPath);
+  const info = await lstat(manifestPath).catch(() => null);
+  if (!info?.isFile() || info.isSymbolicLink() || await realpath(manifestPath) !== manifestPath) {
+    throw new Error("Plugin artifact must contain a regular plugin.json");
+  }
+  if (info.size > 512 * 1024) throw new Error("Plugin artifact manifest exceeded size limit");
+  const packaged = PluginManifestSchema.parse(JSON.parse(await readFile(manifestPath, "utf8")) as unknown);
+  if (!isDeepStrictEqual(packaged, expected)) {
+    throw new Error("Plugin artifact manifest does not match the release descriptor");
+  }
 }
 
 async function extractZip(bytes: Buffer, destination: string): Promise<void> {
@@ -171,18 +212,25 @@ function numericMode(value: number | string | null): number {
   return 0;
 }
 
-function assertAllowedArtifactUrl(url: URL): void {
+function assertArtifactUrl(value: string | undefined): URL {
+  if (!value) throw new Error("Plugin artifact URL is missing");
+  const url = new URL(value);
   const loopback = url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]";
   if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) {
     throw new Error("Plugin artifact URL must use HTTPS or loopback HTTP");
   }
+  return url;
 }
 
 function assertDescendant(parent: string, child: string): void {
-  const path = relative(resolve(parent), resolve(child));
-  if (!path || path === ".." || path.startsWith(`..${sep}`) || isAbsolute(path)) {
+  if (!isDescendant(parent, child)) {
     throw new Error("Plugin artifact path escapes the install root");
   }
+}
+
+function isDescendant(parent: string, child: string): boolean {
+  const path = relative(resolve(parent), resolve(child));
+  return Boolean(path) && path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path);
 }
 
 async function isDirectory(path: string): Promise<boolean> {

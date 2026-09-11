@@ -355,7 +355,7 @@ describe("desktop packaged runtime boundaries", () => {
     }
   });
 
-  it("bundles the local embedding model in every desktop package variant", () => {
+  it("bundles local models and first-party plugins in every desktop package variant", () => {
     for (const configPath of [
       electronBuilderPath,
       unsignedElectronBuilderPath,
@@ -368,6 +368,11 @@ describe("desktop packaged runtime boundaries", () => {
       expect(config.extraResources).toContainEqual({
         from: "dist/embedding-models",
         to: "embedding-models",
+        filter: ["**/*"]
+      });
+      expect(config.extraResources).toContainEqual({
+        from: "dist/bundled-plugins",
+        to: "bundled-plugins",
         filter: ["**/*"]
       });
     }

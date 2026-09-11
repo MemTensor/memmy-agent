@@ -249,6 +249,7 @@ describe("resolveSettingsTabFromHash", () => {
     expect(resolveSettingsTabFromHash("#model-config-add")).toBe("model");
     expect(resolveSettingsTabFromHash("#token-usage")).toBe("tokens");
     expect(resolveSettingsTabFromHash("#about")).toBe("about");
+    expect(resolveSettingsTabFromHash("#plugins")).toBeNull();
     expect(resolveSettingsTabFromHash("#unknown")).toBeNull();
   });
 });

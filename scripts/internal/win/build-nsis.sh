@@ -838,6 +838,10 @@ node "$ROOT_DIR/scripts/internal/shared/verify-package-version.mjs" \
   --expected "$DESKTOP_VERSION" \
   --runtime-root "$RUNTIME_NODE_DIR"
 
+package_step_start "Prepare bundled first-party plugins"
+node "$ROOT_DIR/scripts/internal/shared/prepare-bundled-plugins.mjs" \
+  "$DESKTOP_DIR/dist/bundled-plugins"
+
 package_step_start "Create Windows CLI launchers and embedding model"
 create_windows_cli_launcher "$CLI_BIN_DIR/memmy-memory.cmd" "dist\\runtime\\memory\\dist\\src\\cli\\index.js"
 create_windows_cli_launcher "$CLI_BIN_DIR/memmy.cmd" "dist\\runtime\\memmy-agent\\dist\\main.js"

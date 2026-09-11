@@ -117,6 +117,8 @@ export interface CreateBackendServicesOptions {
   progressBus?: ProgressBus;
   pluginRegistry?: PluginRegistry;
   pluginArtifactManager?: PluginArtifactManager;
+  /** Canonical resource roots trusted to provide immutable bundled plugin archives. */
+  trustedBundledPluginRoots?: readonly string[];
   pluginRuntimeHost?: PluginRuntimeHost;
   /** Optional Host-service dispatcher, primarily for embedding and tests. */
   pluginHostServices?: PluginHostServiceInvoker;
@@ -180,7 +182,8 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
     registry: options.pluginRegistry ?? unavailablePluginRegistry,
     runtimeHost: pluginRuntimeHost,
     artifactManager: options.pluginArtifactManager ?? createPluginArtifactManager({
-      installRoot: join(dirname(options.appStateStore.databasePath), "plugins")
+      installRoot: join(dirname(options.appStateStore.databasePath), "plugins"),
+      trustedLocalRoots: options.trustedBundledPluginRoots
     }),
     skillManager: createPluginSkillManager({ skillsRoot: join(resolveAgentWorkspace(process.env), "skills") }),
     localArtifactService: createPluginLocalArtifactService({

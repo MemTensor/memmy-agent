@@ -9,7 +9,6 @@ import { useUpdateCoordinator, type UpdateCoordinatorValue, type UpdatePhase } f
 import type { AnalyticsEvent } from "../analytics/analytics-events.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
 import type { AccountClient } from "../api/account-client.js";
-import type { PluginsClient } from "../api/plugins-client.js";
 import type { ByokTokenUsageClient } from "../api/byok-token-usage-client.js";
 import type { TokenQuotaClient } from "../api/token-quota-client.js";
 import type { ConfigClient, ModelProviderConfig } from "../api/config-client.js";
@@ -30,7 +29,6 @@ import { useAppState } from "../state/app-state.js";
 import type { ModelWorkspaceMode } from "../state/model-workspace.js";
 import { AppFrame } from "./app-frame.js";
 import { ModelWorkspaceSection } from "./model-workspace-section.js";
-import { PluginSettingsSection } from "./plugin-settings-section.js";
 import {
   SETTINGS_ADD_MODEL_RETURN_STORAGE_KEY,
   readInitialSettingsTab,
@@ -252,7 +250,6 @@ export function SettingsPage() {
         configClient={clients?.config}
         byokTokenUsageClient={clients?.byokTokenUsage}
         tokenQuotaClient={clients?.tokenQuota}
-        pluginsClient={clients?.plugins}
         update={update}
         track={track}
         activeTab={activeTab}
@@ -282,7 +279,6 @@ export interface SettingsPageViewProps {
   configClient?: ConfigClient;
   byokTokenUsageClient?: ByokTokenUsageClient;
   tokenQuotaClient?: TokenQuotaClient;
-  pluginsClient?: PluginsClient;
   update: UpdateCoordinatorValue;
   track?: TrackAnalyticsEvent;
   activeTab?: SettingsTabId;
@@ -347,7 +343,6 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     configClient,
     byokTokenUsageClient,
     tokenQuotaClient,
-    pluginsClient,
     update,
     track = noopTrackAnalyticsEvent,
     activeTab: activeTabProp,
@@ -1649,15 +1644,6 @@ export function SettingsPageView(props: SettingsPageViewProps) {
             <ToggleRow label={t("settings.notifications.sound")} description={t("settings.notifications.soundDesc")} checked={notificationSoundEnabled} onChange={(checked) => persistSettings({ notificationSoundEnabled: checked })} />
           </div>
         </Section>
-        </div>
-
-        <div
-          id="settings-panel-plugins"
-          role="tabpanel"
-          aria-labelledby="settings-tab-plugins"
-          hidden={activeTab !== "plugins"}
-        >
-          <PluginSettingsSection client={pluginsClient} />
         </div>
 
         <div

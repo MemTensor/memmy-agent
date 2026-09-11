@@ -47,6 +47,10 @@ extraResources:
     to: embedding-models
     filter:
       - "**/*"
+  - from: dist/bundled-plugins
+    to: bundled-plugins
+    filter:
+      - "**/*"
   - from: build/icon.ico
     to: icon.ico
 

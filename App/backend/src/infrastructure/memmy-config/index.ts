@@ -49,6 +49,43 @@ const ACCOUNT_MODELS = {
 type AccountCapability = keyof typeof ACCOUNT_MODELS;
 type AccountPresetIds = Record<AccountCapability, string>;
 
+export type BundledPluginPreferences = Record<string, { enabled: boolean }>;
+
+/**
+ * Reads explicit enablement for first-party bundled plugins.
+ *
+ * Missing entries deliberately default to enabled in the bootstrap service.
+ * A malformed file returns null so startup preserves the previous plugin state.
+ */
+export async function readBundledPluginPreferences(
+  configPath: string,
+  pluginIds: readonly string[]
+): Promise<BundledPluginPreferences | null> {
+  let root: unknown;
+  try {
+    root = YAML.parse(await readFile(configPath, "utf8")) ?? {};
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return {};
+    console.warn(`Bundled plugin preferences could not be read: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  }
+  if (!root || typeof root !== "object" || Array.isArray(root)) return null;
+  const plugins = (root as Record<string, unknown>).plugins;
+  if (plugins === undefined) return {};
+  if (!plugins || typeof plugins !== "object" || Array.isArray(plugins)) return null;
+
+  const preferences: BundledPluginPreferences = {};
+  for (const pluginId of pluginIds) {
+    const entry = (plugins as Record<string, unknown>)[pluginId];
+    if (entry === undefined) continue;
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
+    const enabled = (entry as Record<string, unknown>).enabled;
+    if (typeof enabled !== "boolean") return null;
+    preferences[pluginId] = { enabled };
+  }
+  return preferences;
+}
+
 /** Handles resolve memmy account api base. */
 export function resolveMemmyAccountApiBase(): string {
   return `${resolveCloudServiceBaseUrl(process.env.MEMMY_CLOUD_SERVICE)}/api/agentExternal/v1`;

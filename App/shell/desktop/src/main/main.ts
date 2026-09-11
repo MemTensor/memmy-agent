@@ -805,6 +805,8 @@ async function startLocalApi(services: ManagedRuntimeServices | null): Promise<D
         })
       : undefined,
     memmyConfigPath: process.env.MEMMY_CONFIG,
+    bundledPluginDirectory: process.env.MEMMY_BUNDLED_PLUGINS_DIR
+      ?? (app.isPackaged ? join(process.resourcesPath, "bundled-plugins") : undefined),
     memoryBaseUrl: memoryControl.baseUrl,
     memoryReady: services?.memory.ready,
     runtimeConfigPath: process.env.MEMMY_HOME ? join(process.env.MEMMY_HOME, "runtime.json") : undefined
