@@ -133,6 +133,32 @@ describe("ComputerHistorySubPage", () => {
     expect(container.textContent).not.toContain("A whole window");
   });
 
+  it("names each part of the day once", async () => {
+    const base = {
+      applications: [] as string[],
+      pinned: false,
+      sourceType: "captured" as const,
+      markdown: "## Memory summary\n\nbody",
+      filePath: "/tmp/x.md",
+      summaryWindow: "6h" as const,
+    };
+    const day = new Date(Date.now() - 2 * 86_400_000);
+    const at = (hour: number) => new Date(day.getFullYear(), day.getMonth(), day.getDate(), hour).toISOString();
+    await renderWith(snapshot({
+      histories: [
+        { ...base, id: "evening", title: "Evening window", description: "d", createdAt: at(18) },
+        { ...base, id: "afternoon", title: "Afternoon window", description: "d", createdAt: at(12) },
+        { ...base, id: "morning", title: "Morning window", description: "d", createdAt: at(6) },
+        { ...base, id: "night", title: "Night window", description: "d", createdAt: at(0) },
+      ],
+    }));
+
+    // The window before six used to read as morning too, which is how a day
+    // came to show two of them.
+    const labels = [...container.querySelectorAll(".ch-entry__when")].map((node) => node.textContent);
+    expect(labels).toEqual(["晚上", "下午", "上午", "凌晨"]);
+  });
+
   it("lets a closed rollup stand in for the segments it covers", async () => {
     const base = {
       applications: [] as string[],

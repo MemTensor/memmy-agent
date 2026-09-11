@@ -35,8 +35,30 @@ export function instantFromId(id: string): Date | null {
 }
 
 export function alignedId(at: Date, windowMs: number): string {
-  const aligned = new Date(Math.floor(at.getTime() / windowMs) * windowMs);
-  return `${aligned.toISOString().slice(0, 19).replace(/:/g, "-")}Z`;
+  return instantId(new Date(Math.floor(at.getTime() / windowMs) * windowMs));
+}
+
+/** The id for an instant that is already the start of its window. */
+export function instantId(at: Date): string {
+  return `${at.toISOString().slice(0, 19).replace(/:/g, "-")}Z`;
+}
+
+/**
+ * The start of the six-hour window containing `at`, on the local clock.
+ *
+ * A six-hour summary is read as a part of the day, so its window has to be one:
+ * aligned to local midnight, the four windows are night, morning, afternoon and
+ * evening. Aligned to the epoch instead, their boundaries fell at 02/08/14/20 in
+ * UTC+8 — two windows began before noon and both read as "morning", and one
+ * straddled midnight and belonged to two days.
+ */
+export function sixHourWindowStart(at: Date): Date {
+  return new Date(at.getFullYear(), at.getMonth(), at.getDate(), Math.floor(at.getHours() / 6) * 6);
+}
+
+/** Whether a six-hour summary's window starts where the local clock says it should. */
+export function isLocalSixHourWindow(start: Date): boolean {
+  return sixHourWindowStart(start).getTime() === start.getTime();
 }
 
 function frontmatterValue(markdown: string, key: string): string | null {
@@ -85,7 +107,9 @@ export function buildSixHourSummary(
   const covered = summariesInWindow(summaries, windowStart);
   if (!covered.length) return null;
 
-  const id = alignedId(windowStart, SIX_HOUR_MS);
+  // The window is chosen by the caller on the local clock; re-aligning it to
+  // the epoch here would undo that.
+  const id = instantId(windowStart);
   const applications = uniqueLines(
     covered.flatMap((summary) => {
       const raw = frontmatterValue(summary.markdown, "applications") ?? "";

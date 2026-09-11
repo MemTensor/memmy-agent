@@ -14,8 +14,9 @@ import {
 } from "./summary-writer.js";
 import type { LLMRuntimeResolver } from "../../../utils/llm-runtime.js";
 import {
-  SIX_HOUR_MS,
   alignedId,
+  isLocalSixHourWindow,
+  sixHourWindowStart,
   buildSixHourSummary,
   instantFromId,
 } from "./rollup.js";
@@ -344,7 +345,10 @@ export class ComputerHistoryDemoService {
   /** Supplies the model used to narrate finalized segments. */
   setLlmRuntime(llmRuntime: LLMRuntimeResolver | null): void {
     this.llmRuntime = llmRuntime;
-    if (llmRuntime) void this.backfillUnwrittenSummaries();
+    if (!llmRuntime) return;
+    // Realign first so the rebuilt rollups are among what the backfill writes.
+    this.realignRollups();
+    void this.backfillUnwrittenSummaries();
   }
 
   /**
@@ -651,12 +655,17 @@ export class ComputerHistoryDemoService {
   private writeSixHourRollup(segmentId: string): void {
     const at = instantFromId(segmentId);
     if (!at) return;
-    const windowStart = new Date(Math.floor(at.getTime() / SIX_HOUR_MS) * SIX_HOUR_MS);
+    const rollupFile = this.writeRollupFor(sixHourWindowStart(at));
+    if (rollupFile) this.narrateSummary(rollupFile, "6h", null);
+  }
+
+  /** Writes the mechanical six-hour summary for one window; the model writes it later. */
+  private writeRollupFor(windowStart: Date): string | null {
     let names: string[];
     try {
       names = fs.readdirSync(this.historyDirectory);
     } catch {
-      return;
+      return null;
     }
     const summaries = names
       .filter((name) => name.endsWith(".md") && name.includes("-10min-"))
@@ -665,10 +674,43 @@ export class ComputerHistoryDemoService {
         markdown: fs.readFileSync(path.join(this.historyDirectory, name), "utf8"),
       }));
     const rollup = buildSixHourSummary(summaries, windowStart);
-    if (!rollup) return;
+    if (!rollup) return null;
     const rollupFile = path.join(this.historyDirectory, rollup.fileName);
     fs.writeFileSync(rollupFile, rollup.markdown, "utf8");
-    this.narrateSummary(rollupFile, "6h", null);
+    return rollupFile;
+  }
+
+  /**
+   * Replaces six-hour summaries cut on the old epoch-aligned windows.
+   *
+   * Those windows do not line up with the parts of a local day, so a day could
+   * show two mornings. Each is removed, and every local window its ten-minute
+   * summaries fall in is rebuilt; the backfill that follows writes them.
+   */
+  realignRollups(): number {
+    let names: string[];
+    try {
+      names = fs.readdirSync(this.historyDirectory);
+    } catch {
+      return 0;
+    }
+    const misaligned = names.filter((name) => {
+      if (!name.endsWith("-6h-summary.md")) return false;
+      const start = instantFromId(name);
+      return start !== null && !isLocalSixHourWindow(start);
+    });
+    if (!misaligned.length) return 0;
+    for (const name of misaligned) fs.rmSync(path.join(this.historyDirectory, name), { force: true });
+    const windows = new Map<number, Date>();
+    for (const name of names) {
+      if (!name.endsWith("-10min-summary.md")) continue;
+      const at = instantFromId(name);
+      if (!at) continue;
+      const start = sixHourWindowStart(at);
+      windows.set(start.getTime(), start);
+    }
+    for (const start of windows.values()) this.writeRollupFor(start);
+    return misaligned.length;
   }
 
   private rotateSegment(): void {

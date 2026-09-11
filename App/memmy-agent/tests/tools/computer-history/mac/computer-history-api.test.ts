@@ -326,6 +326,44 @@ describe("ComputerHistoryDemoService", () => {
     expect(histories.map((entry) => entry.title)).toEqual(["The later window", "The earlier window"]);
   });
 
+  it("rebuilds six-hour summaries cut on the old epoch-aligned windows", () => {
+    const { service, root } = createService();
+    const historyDirectory = path.join(root, "histories");
+    fs.mkdirSync(historyDirectory, { recursive: true });
+    const idOf = (at: Date) => `${at.toISOString().slice(0, 19).replace(/:/g, "-")}Z`;
+    // A morning segment, and a rollup starting two hours off the local grid —
+    // the shape the epoch-aligned windows had in UTC+8.
+    const segment = new Date(2026, 8, 11, 9, 10);
+    const misaligned = new Date(2026, 8, 11, 2);
+    fs.writeFileSync(path.join(historyDirectory, `${idOf(segment)}-10min-summary.md`), [
+      "---",
+      'title: "A morning window"',
+      "source_type: captured",
+      "summary_state: ready",
+      "---",
+      "",
+      "body",
+      "",
+    ].join("\n"), "utf8");
+    fs.writeFileSync(path.join(historyDirectory, `${idOf(misaligned)}-6h-summary.md`), [
+      "---",
+      'title: "Two mornings"',
+      "source_type: rollup",
+      "summary_state: ready",
+      "---",
+      "",
+      "body",
+      "",
+    ].join("\n"), "utf8");
+
+    expect(service.realignRollups()).toBe(1);
+
+    const rollups = fs.readdirSync(historyDirectory).filter((name) => name.endsWith("-6h-summary.md"));
+    expect(rollups).toEqual([`${idOf(new Date(2026, 8, 11, 6))}-6h-summary.md`]);
+    // Nothing is left to realign, so starting again does not churn.
+    expect(service.realignRollups()).toBe(0);
+  });
+
   it("finds relevant History whether or not its raw events still exist", () => {
     const { service, root } = createService();
     const historyDirectory = path.join(root, "histories");
