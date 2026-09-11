@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   ComputerTypeTool,
   physicalKeyComboForCharacter,
-} from "../../../../src/core/agent-runtime/tools/computer.js";
+} from "../../../src/tools/computer-use/computer.js";
 
 describe("computer input helper", () => {
   it("steers callers to establish and verify focus", () => {

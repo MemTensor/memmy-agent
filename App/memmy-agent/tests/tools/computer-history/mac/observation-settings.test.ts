@@ -7,7 +7,7 @@ import {
   parseObservationSettings,
   type ObservationRule,
   type ObservationSettings,
-} from "../../../../src/core/agent-runtime/computer-history/observation-settings.js";
+} from "../../../../src/tools/computer-history/mac/observation-settings.js";
 
 function settings(
   defaultApplicationBehavior: "observe" | "do_not_observe",

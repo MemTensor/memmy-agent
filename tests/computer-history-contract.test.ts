@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 // it here checks the real contract rather than a hand-maintained list of field
 // names, which drifted twice before anything caught it.
 import { ComputerHistorySnapshotSchema } from "../App/frontend/desktop/src/api/computer-history-contract.js";
-import { ComputerHistoryDemoService } from "../App/memmy-agent/src/entrypoints/frontend-bridge/computer-history-api.js";
+import { ComputerHistoryDemoService } from "../App/memmy-agent/src/tools/computer-history/mac/computer-history-api.js";
 
 const roots: string[] = [];
 

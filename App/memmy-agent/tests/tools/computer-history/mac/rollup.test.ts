@@ -5,7 +5,7 @@ import {
   buildSixHourSummary,
   instantFromId,
   summariesInWindow,
-} from "../../../../src/core/agent-runtime/computer-history/rollup.js";
+} from "../../../../src/tools/computer-history/mac/rollup.js";
 
 function tenMinute(id: string, options: {
   title?: string;

@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -32,8 +33,9 @@ export class ApplicationIconReader {
   private helper: Promise<string> | null = null;
   private readonly pending = new Map<string, Promise<string | null>>();
 
-  constructor(input: { repositoryRoot: string; cacheDirectory?: string }) {
-    this.helperSource = path.join(input.repositoryRoot, "workflows", "scripts", "app-icon.swift");
+  constructor(input: { cacheDirectory?: string } = {}) {
+    // Copied beside the compiled module by the build, as the recorder's is.
+    this.helperSource = fileURLToPath(new URL("./app-icon.swift", import.meta.url));
     this.cacheDirectory = input.cacheDirectory
       ?? path.join(os.homedir(), ".memmy", "computer-history", "app-icons");
   }

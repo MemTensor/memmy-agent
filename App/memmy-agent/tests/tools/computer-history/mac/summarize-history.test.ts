@@ -1,14 +1,29 @@
 import assert from "node:assert/strict";
+import { test, vi } from "vitest";
+import { run } from "../../../../src/tools/computer-history/mac/summarize-history.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
-import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
 
-const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "summarize-history.mjs");
+/**
+ * Runs the summarizer as its command line would, without spawning a process.
+ *
+ * It used to be spawned as a standalone file; it is a compiled module now, and
+ * a test running from source has no compiled file to spawn.
+ */
+function summarize(args: string[]): { status: number; stderr: string } {
+  const log = vi.spyOn(console, "log").mockImplementation(() => {});
+  try {
+    run([process.execPath, "summarize-history", ...args]);
+    return { status: 0, stderr: "" };
+  } catch (error) {
+    return { status: 1, stderr: error instanceof Error ? error.message : String(error) };
+  } finally {
+    log.mockRestore();
+  }
+}
 
-function writeFixture(dir, name, records) {
+function writeFixture(dir: string, name: string, records: Array<Record<string, unknown>>): string {
   const file = path.join(dir, name);
   fs.writeFileSync(file, `${records.map((record) => JSON.stringify(record)).join("\n")}\n`, "utf8");
   return file;
@@ -60,9 +75,7 @@ test("writes a Computer History-style summary from a computer-use session", () =
     },
   ]);
   const out = path.join(dir, "summary.md");
-  const result = spawnSync(process.execPath, [script, "--file", session, "--out", out], {
-    encoding: "utf8",
-  });
+  const result = summarize(["--file", session, "--out", out]);
 
   assert.equal(result.status, 0, result.stderr);
   const markdown = fs.readFileSync(out, "utf8");
@@ -84,12 +97,10 @@ test("supports --last and reports omitted turns", () => {
     { role: "assistant", content: "second answer", timestamp: "2026-08-28T01:01:01.000Z" },
   ]);
   const out = path.join(dir, "summary.md");
-  const result = spawnSync(process.execPath, [
-    script,
-    "--file", session,
+  const result = summarize(["--file", session,
     "--out", out,
     "--last", "1",
-  ], { encoding: "utf8" });
+  ]);
 
   assert.equal(result.status, 0, result.stderr);
   const markdown = fs.readFileSync(out, "utf8");
@@ -114,9 +125,7 @@ test("redacts common secrets and embedded image data", () => {
     },
   ]);
   const out = path.join(dir, "summary.md");
-  const result = spawnSync(process.execPath, [script, "--file", session, "--out", out], {
-    encoding: "utf8",
-  });
+  const result = summarize(["--file", session, "--out", out]);
 
   assert.equal(result.status, 0, result.stderr);
   const markdown = fs.readFileSync(out, "utf8");
@@ -185,9 +194,7 @@ test("summarizes an explicit human-operation recording", () => {
     },
   ]);
   const out = path.join(dir, "summary.md");
-  const result = spawnSync(process.execPath, [script, "--file", recording, "--out", out], {
-    encoding: "utf8",
-  });
+  const result = summarize(["--file", recording, "--out", out]);
 
   assert.equal(result.status, 0, result.stderr);
   const markdown = fs.readFileSync(out, "utf8");
@@ -299,9 +306,7 @@ test("enriches unlabeled clicks via descendants and records browser page context
     },
   ]);
   const out = path.join(dir, "summary.md");
-  const result = spawnSync(process.execPath, [script, "--file", recording, "--out", out], {
-    encoding: "utf8",
-  });
+  const result = summarize(["--file", recording, "--out", out]);
 
   assert.equal(result.status, 0, result.stderr);
   const markdown = fs.readFileSync(out, "utf8");
@@ -342,12 +347,10 @@ test("finds the latest nested human recording", () => {
     },
   ]);
   const out = path.join(dir, "summary.md");
-  const result = spawnSync(process.execPath, [
-    script,
-    "--latest-recording",
+  const result = summarize(["--latest-recording",
     "--recordings-dir", dir,
     "--out", out,
-  ], { encoding: "utf8" });
+  ]);
 
   assert.equal(result.status, 0, result.stderr);
   assert.match(fs.readFileSync(out, "utf8"), /source_session: "human:latest-demo"/);

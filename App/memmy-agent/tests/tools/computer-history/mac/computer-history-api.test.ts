@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { ComputerHistoryDemoService } from "../../../src/entrypoints/frontend-bridge/computer-history-api.js";
+import { ComputerHistoryDemoService } from "../../../../src/tools/computer-history/mac/computer-history-api.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -55,29 +55,6 @@ describe("ComputerHistoryDemoService", () => {
     expect(afterDelete.workflows).toHaveLength(0);
     expect(fs.existsSync(history.filePath)).toBe(false);
     expect(fs.existsSync(recordingDirectory)).toBe(false);
-  });
-
-  it("installs the transparent demo fixture and derives a separate CUA workflow", () => {
-    const { service } = createService();
-    const installed = service.installDemoFixture();
-    const history = installed.histories[0];
-
-    expect(history.sourceType).toBe("demo_fixture");
-    expect(history.markdown).toContain("不是可直接逐击回放的宏");
-    expect(history.markdown).toContain("iPhone 17 Pro / 银色 / 512GB");
-
-    const generated = service.createWorkflow(
-      history.id,
-      "帮我把妈妈之前说的那台 iPhone 配好，加入购物袋就停，不要结账或支付。",
-    );
-    expect(generated.workflows).toHaveLength(1);
-    expect(generated.workflows[0].sourceHistoryId).toBe(history.id);
-    expect(generated.workflows[0].markdown).toContain("妈妈之前说的那台 iPhone");
-    expect(generated.workflows[0].markdown).toContain("点击一次“添加到购物袋”");
-    expect(generated.workflows[0].markdown).toContain("不得点击“结账”");
-    expect(generated.workflows[0].markdown).toContain("creates_new_application_instance=false");
-    expect(generated.workflows[0].markdown).toContain("desktop-scope foreground");
-    expect(generated.workflows[0].markdown).toContain("CUA");
   });
 
   // Steps are derived from a segment's own event stream now, so a replayable
@@ -367,11 +344,14 @@ describe("ComputerHistoryDemoService", () => {
       "你在备忘录里记录了会议纪要。",
       "",
     ].join("\n"), "utf8");
-    service.installDemoFixture();
+    service.importMarkdown({
+      title: "配置一台 iPhone",
+      markdown: "# Timeline\n\n在 Apple 官网选好了 iPhone 的颜色和容量。",
+    });
 
     const matches = service.searchHistories("接着帮我把那台 iPhone 配好", 2);
 
-    expect(matches[0].history.title).toBe("微信里妈妈想要的 iPhone 配置");
+    expect(matches[0].history.title).toBe("配置一台 iPhone");
     expect(matches[0].matchedTerms).toContain("iphone");
     // This entry has no segment on disk, so it cannot be replayed — but asking
     // what happened must still find it.
@@ -417,7 +397,6 @@ function createService(): { service: ComputerHistoryDemoService; root: string } 
   return {
     root,
     service: new ComputerHistoryDemoService({
-      repositoryRoot: path.resolve(import.meta.dirname, "../../../../.."),
       historyDirectory: path.join(root, "histories"),
       recordingDirectory: path.join(root, "recordings"),
       workflowDirectory: path.join(root, "workflows"),

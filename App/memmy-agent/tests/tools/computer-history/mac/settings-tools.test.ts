@@ -2,13 +2,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { ObservationSettingsStore } from "../../../../src/core/agent-runtime/computer-history/settings-store.js";
+import { ObservationSettingsStore } from "../../../../src/tools/computer-history/mac/settings-store.js";
 import {
   ComputerHistoryGetSettingsTool,
   ComputerHistoryStatusTool,
   ComputerHistoryUpdateSettingsTool,
   runStateFrom,
-} from "../../../../src/core/agent-runtime/tools/computer-history-settings.js";
+} from "../../../../src/tools/computer-history/mac/computer-history-settings.js";
 import { ToolLoader } from "../../../../src/core/agent-runtime/tools/loader.js";
 
 const temporaryDirectories: string[] = [];

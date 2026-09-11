@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 // Convert one Memmy terminal session JSONL into a factual, Codex Computer
 // History-style Markdown summary.
 //
@@ -10,17 +9,56 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+/** A parsed JSONL line. Its shape is only known through the checks made on it. */
+export type JsonRecord = Record<string, any>;
+
+export interface SummarizeArgs {
+  applications: string[];
+  latest: boolean;
+  latestRecording?: boolean;
+  session?: string;
+  file?: string;
+  sessionsDir?: string;
+  recordingsDir?: string;
+  out?: string;
+  last: number;
+  title?: string;
+  description?: string;
+  help?: boolean;
+}
+
+export interface LoadedRecords {
+  records: JsonRecord[];
+  malformedLines: number[];
+}
+
+export interface RenderOptions {
+  file: string;
+  records: JsonRecord[];
+  malformedLines?: number[];
+  last?: number;
+  title?: string;
+  description?: string;
+  explicitApplications?: string[];
+}
+
+interface Turn {
+  user: JsonRecord;
+  events: JsonRecord[];
+}
+
+interface AccessibilityNode {
+  role: string;
+  subrole: string;
+  label: string | undefined;
+  text: string;
+}
+
 const DEFAULT_SESSIONS_DIR = path.join(os.homedir(), ".memmy", "workspace", "sessions");
-const DEFAULT_RECORDINGS_DIR = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "..",
-  "recordings",
-);
-const DEFAULT_HISTORY_DIR = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "..",
-  "history",
-);
+// Where the service keeps recordings and summaries. These were once relative
+// to the script, which put them inside the repository beside the source.
+const DEFAULT_RECORDINGS_DIR = path.join(os.homedir(), ".memmy", "computer-history", "recordings");
+const DEFAULT_HISTORY_DIR = path.join(os.homedir(), ".memmy", "computer-history", "histories");
 const SUMMARY_TEXT_LIMIT = 800;
 const EVENT_TEXT_LIMIT = 360;
 
@@ -37,17 +75,17 @@ const APPLICATION_PATTERNS = [
   { id: "com.mitchellh.ghostty", pattern: /\bGhostty\b/i },
 ];
 
-function usage() {
+function usage(): void {
   console.log(`Usage:
-  node workflows/scripts/summarize-history.mjs --latest
-  node workflows/scripts/summarize-history.mjs --latest-recording
-  node workflows/scripts/summarize-history.mjs --session <session-key>
-  node workflows/scripts/summarize-history.mjs --file <session.jsonl>
+  node dist/tools/computer-history/mac/summarize-history.js --latest
+  node dist/tools/computer-history/mac/summarize-history.js --latest-recording
+  node dist/tools/computer-history/mac/summarize-history.js --session <session-key>
+  node dist/tools/computer-history/mac/summarize-history.js --file <session.jsonl>
 
 Options:
   --sessions-dir <dir>       session directory (default: ~/.memmy/workspace/sessions)
-  --recordings-dir <dir>     human recording directory (default: workflows/recordings)
-  --out <path>               output Markdown path (default: workflows/history/...)
+  --recordings-dir <dir>     human recording directory (default: ~/.memmy/computer-history/recordings)
+  --out <path>               output Markdown path (default: ~/.memmy/computer-history/histories/...)
   --last <n>                 include only the last n user turns
   --title <text>             override generated title
   --description <text>       override generated description
@@ -57,14 +95,14 @@ Options:
 With no selector, --latest is used.`);
 }
 
-function expandHome(value) {
+function expandHome(value: string): string {
   if (value === "~") return os.homedir();
   if (value.startsWith("~/")) return path.join(os.homedir(), value.slice(2));
   return value;
 }
 
-export function parseArgs(argv) {
-  const args = { applications: [], latest: false, last: 0 };
+export function parseArgs(argv: string[]): SummarizeArgs {
+  const args: SummarizeArgs = { applications: [], latest: false, last: 0 };
   for (let index = 2; index < argv.length; index += 1) {
     const key = argv[index];
     const value = () => {
@@ -96,12 +134,12 @@ export function parseArgs(argv) {
   return args;
 }
 
-function sessionFilename(sessionKey) {
+function sessionFilename(sessionKey: string): string {
   const normalized = sessionKey.replace(/^cli:/, "cli_").replaceAll(":", "_");
   return normalized.endsWith(".jsonl") ? normalized : `${normalized}.jsonl`;
 }
 
-function latestSessionFile(sessionsDir) {
+function latestSessionFile(sessionsDir: string): string {
   if (!fs.existsSync(sessionsDir)) throw new Error(`sessions directory not found: ${sessionsDir}`);
   const candidates = fs.readdirSync(sessionsDir)
     .filter((name) => name.endsWith(".jsonl") && name !== "history.jsonl")
@@ -114,12 +152,12 @@ function latestSessionFile(sessionsDir) {
   return candidates[0].file;
 }
 
-function latestHumanRecordingFile(recordingsDir) {
+function latestHumanRecordingFile(recordingsDir: string): string {
   if (!fs.existsSync(recordingsDir)) throw new Error(`recordings directory not found: ${recordingsDir}`);
   const pending = [recordingsDir];
-  const candidates = [];
+  const candidates: Array<{ file: string; mtimeMs: number }> = [];
   while (pending.length) {
-    const current = pending.pop();
+    const current = pending.pop()!;
     for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
       const file = path.join(current, entry.name);
       if (entry.isDirectory()) pending.push(file);
@@ -133,7 +171,7 @@ function latestHumanRecordingFile(recordingsDir) {
   return candidates[0].file;
 }
 
-export function resolveSessionFile(args) {
+export function resolveSessionFile(args: SummarizeArgs): string {
   const sessionsDir = path.resolve(expandHome(args.sessionsDir ?? DEFAULT_SESSIONS_DIR));
   if (args.file) return path.resolve(expandHome(args.file));
   if (args.session) return path.join(sessionsDir, sessionFilename(args.session));
@@ -144,10 +182,10 @@ export function resolveSessionFile(args) {
   return latestSessionFile(sessionsDir);
 }
 
-export function loadRecords(file) {
+export function loadRecords(file: string): LoadedRecords {
   if (!fs.existsSync(file)) throw new Error(`session file not found: ${file}`);
-  const records = [];
-  const malformedLines = [];
+  const records: JsonRecord[] = [];
+  const malformedLines: number[] = [];
   fs.readFileSync(file, "utf8").split("\n").forEach((line, index) => {
     if (!line.trim()) return;
     try {
@@ -160,14 +198,14 @@ export function loadRecords(file) {
   return { records, malformedLines };
 }
 
-function imagePathFromBlock(block) {
+function imagePathFromBlock(block: any): string | null {
   if (!block || typeof block !== "object") return null;
   if (typeof block.meta?.path === "string") return block.meta.path;
   if (typeof block.path === "string") return block.path;
   return null;
 }
 
-export function contentToText(content) {
+export function contentToText(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   return content.map((block) => {
@@ -180,13 +218,13 @@ export function contentToText(content) {
   }).filter(Boolean).join("\n");
 }
 
-function cleanInline(value, max = EVENT_TEXT_LIMIT) {
+function cleanInline(value: unknown, max = EVENT_TEXT_LIMIT): string {
   const clean = redactSensitive(String(value ?? "")).replace(/\s+/g, " ").trim();
   if (clean.length <= max) return clean;
   return `${clean.slice(0, max - 1)}…`;
 }
 
-export function redactSensitive(value) {
+export function redactSensitive(value: unknown): string {
   return String(value ?? "")
     .replace(/data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=]+/gi, "[image base64 omitted]")
     .replace(/\bBearer\s+[a-z0-9._~+/-]{12,}/gi, "Bearer [REDACTED]")
@@ -197,11 +235,11 @@ export function redactSensitive(value) {
     );
 }
 
-function yamlString(value) {
+function yamlString(value: unknown): string {
   return JSON.stringify(redactSensitive(String(value ?? "")));
 }
 
-function formatArguments(value) {
+function formatArguments(value: unknown): string {
   if (typeof value !== "string") return cleanInline(JSON.stringify(value ?? {}), 260);
   try {
     return cleanInline(JSON.stringify(JSON.parse(value)), 260);
@@ -210,13 +248,13 @@ function formatArguments(value) {
   }
 }
 
-function recordTimestamp(record) {
+function recordTimestamp(record: JsonRecord | undefined): string | null {
   return typeof record?.timestamp === "string" ? record.timestamp : null;
 }
 
-export function groupTurns(records) {
-  const turns = [];
-  let current = null;
+export function groupTurns(records: JsonRecord[]): Turn[] {
+  const turns: Turn[] = [];
+  let current: Turn | null = null;
   for (const record of records) {
     if (!record?.role) continue;
     if (record.role === "user") {
@@ -229,10 +267,10 @@ export function groupTurns(records) {
   return turns;
 }
 
-function collectArtifacts(records) {
-  const artifacts = [];
-  const seen = new Set();
-  const add = (candidate) => {
+function collectArtifacts(records: JsonRecord[]): string[] {
+  const artifacts: string[] = [];
+  const seen = new Set<string>();
+  const add = (candidate: string | null | undefined) => {
     if (!candidate || seen.has(candidate)) return;
     seen.add(candidate);
     artifacts.push(candidate);
@@ -248,8 +286,8 @@ function collectArtifacts(records) {
   return artifacts;
 }
 
-function collectToolCounts(records) {
-  const counts = new Map();
+function collectToolCounts(records: JsonRecord[]): Map<string, number> {
+  const counts = new Map<string, number>();
   for (const record of records) {
     if (record.role !== "assistant" || !Array.isArray(record.tool_calls)) continue;
     for (const call of record.tool_calls) {
@@ -260,11 +298,11 @@ function collectToolCounts(records) {
   return counts;
 }
 
-function collectApplications(records, explicitApplications) {
+function collectApplications(records: JsonRecord[], explicitApplications: string[]): string[] {
   const corpus = records.map((record) => contentToText(record.content)).join("\n");
-  const applications = [];
-  const seen = new Set();
-  const add = (id) => {
+  const applications: string[] = [];
+  const seen = new Set<string>();
+  const add = (id: string) => {
     if (!id || seen.has(id)) return;
     seen.add(id);
     applications.push(id);
@@ -276,7 +314,7 @@ function collectApplications(records, explicitApplications) {
   return applications;
 }
 
-function finalAssistantText(records) {
+function finalAssistantText(records: JsonRecord[]): string {
   for (let index = records.length - 1; index >= 0; index -= 1) {
     const record = records[index];
     if (record.role !== "assistant") continue;
@@ -286,30 +324,31 @@ function finalAssistantText(records) {
   return "";
 }
 
-function sessionStatus(records, finalText) {
+function sessionStatus(records: JsonRecord[], finalText: string): string {
   const corpus = records.map((record) => contentToText(record.content)).join("\n");
   if (/task cancelled|cancell?ed|已取消|用户中断/i.test(corpus)) return "cancelled";
   if (records.some((record) => record.finish_reason === "error" || record.error)) return "error";
   return finalText ? "completed" : "incomplete";
 }
 
-function metadataFromRecords(records) {
+function metadataFromRecords(records: JsonRecord[]): JsonRecord | null {
   return records.find((record) => record.recordType === "metadata") ?? null;
 }
 
-function timeRange(records, metadata) {
-  const timestamps = records.map(recordTimestamp).filter(Boolean).sort();
+function timeRange(records: JsonRecord[], metadata: JsonRecord | null): { start: string | null; end: string | null } {
+  const timestamps = records.map((record) => recordTimestamp(record))
+    .filter((value): value is string => Boolean(value)).sort();
   return {
     start: timestamps[0] ?? metadata?.createdAt ?? null,
     end: timestamps.at(-1) ?? metadata?.updatedAt ?? null,
   };
 }
 
-function sessionId(metadata, file) {
+function sessionId(metadata: JsonRecord | null, file: string): string {
   return metadata?.key ?? path.basename(file, ".jsonl");
 }
 
-function modelDetails(metadata, records) {
+function modelDetails(metadata: JsonRecord | null, records: JsonRecord[]) {
   const userWithModel = records.find((record) => record.role === "user" && record.model);
   return {
     preset: metadata?.metadata?.modelPreset ?? userWithModel?.model_preset ?? null,
@@ -318,15 +357,15 @@ function modelDetails(metadata, records) {
   };
 }
 
-function defaultTitle(turns, file) {
+function defaultTitle(turns: Turn[], file: string): string {
   const instruction = contentToText(turns[0]?.user?.content);
   return cleanInline(instruction || path.basename(file, ".jsonl"), 80);
 }
 
-function renderEvent(record) {
+function renderEvent(record: JsonRecord): string[] {
   const prefix = recordTimestamp(record) ? `- ${record.timestamp} — ` : "- ";
   if (record.role === "assistant" && Array.isArray(record.tool_calls) && record.tool_calls.length) {
-    return record.tool_calls.map((call) => {
+    return record.tool_calls.map((call: any) => {
       const name = call?.function?.name ?? "unknown_tool";
       const args = formatArguments(call?.function?.arguments ?? {});
       return `${prefix}Tool call \`${name}\` with \`${args}\``;
@@ -344,14 +383,14 @@ function renderEvent(record) {
   return [];
 }
 
-function isHumanHistory(records) {
+function isHumanHistory(records: JsonRecord[]): boolean {
   return records.some((record) => record.recordType === "human_history_metadata");
 }
 
-function humanApplications(records, explicitApplications) {
-  const applications = [];
-  const seen = new Set();
-  const add = (id) => {
+function humanApplications(records: JsonRecord[], explicitApplications: string[]): string[] {
+  const applications: string[] = [];
+  const seen = new Set<string>();
+  const add = (id: string | undefined) => {
     if (!id || id === "unknown" || seen.has(id)) return;
     seen.add(id);
     applications.push(id);
@@ -361,11 +400,11 @@ function humanApplications(records, explicitApplications) {
   return applications;
 }
 
-function humanArtifacts(records) {
-  return records.map((record) => record.screenshot).filter((value) => typeof value === "string");
+function humanArtifacts(records: JsonRecord[]): string[] {
+  return records.map((record) => record.screenshot).filter((value): value is string => typeof value === "string");
 }
 
-function accessibilityNode(raw) {
+function accessibilityNode(raw: any): AccessibilityNode | null {
   if (!raw || typeof raw !== "object") return null;
   const role = cleanInline(raw.role, 80);
   const subrole = cleanInline(raw.subrole, 80);
@@ -387,46 +426,46 @@ const INTERACTIVE_ACCESSIBILITY_ROLES = new Set([
   "AXIncrementor", "AXSearchField",
 ]);
 
-function isInteractiveAccessibilityNode(node) {
+function isInteractiveAccessibilityNode(node: AccessibilityNode | null | undefined): boolean {
   return Boolean(node && INTERACTIVE_ACCESSIBILITY_ROLES.has(node.role || node.subrole));
 }
 
-function semanticSectionAnchor(nodes, target) {
+function semanticSectionAnchor(nodes: AccessibilityNode[], target: AccessibilityNode): AccessibilityNode | null {
   const candidates = nodes.filter((node) => node?.label && node.text !== target?.text);
   return candidates.find((node) => node.subrole === "AXFieldset")
     ?? candidates.find((node) => ["AXGroup", "AXToolbar", "AXDialog"].includes(node.role))
     ?? null;
 }
 
-function semanticAccessibilityTarget(details) {
+function semanticAccessibilityTarget(details: any): string | null {
   const accessibility = details?.accessibility;
   if (!accessibility || typeof accessibility !== "object") return null;
   const self = accessibilityNode(accessibility);
   const focused = accessibilityNode(accessibility.focused);
   const descendants = (Array.isArray(accessibility.descendants) ? accessibility.descendants : [])
-    .map(accessibilityNode)
-    .filter(Boolean);
+    .map((node: unknown) => accessibilityNode(node))
+    .filter((node: AccessibilityNode | null): node is AccessibilityNode => node !== null);
   const ancestors = (Array.isArray(accessibility.ancestors) ? accessibility.ancestors : [])
-    .map(accessibilityNode)
-    .filter(Boolean);
+    .map((node: unknown) => accessibilityNode(node))
+    .filter((node: AccessibilityNode | null): node is AccessibilityNode => node !== null);
   // The post-click focused control is the most reliable identity of what the
   // click actually activated; interactive descendants are more useful than
   // anonymous web containers or short leaf text such as "GB".
   const target = [
     focused && isInteractiveAccessibilityNode(focused) && focused.label ? focused : null,
-    descendants.find((node) => isInteractiveAccessibilityNode(node) && node.label),
+    descendants.find((node: AccessibilityNode) => isInteractiveAccessibilityNode(node) && node.label),
     self && isInteractiveAccessibilityNode(self) && self.label ? self : null,
     focused?.label ? focused : null,
     self?.label ? self : null,
-    descendants.find((node) => node.label),
+    descendants.find((node: AccessibilityNode) => node.label),
     self,
-  ].find(Boolean);
+  ].find((node): node is AccessibilityNode => Boolean(node));
   if (!target) return null;
   const section = semanticSectionAnchor(ancestors, target);
   return section ? `${target.text} inside ${section.text}` : target.text;
 }
 
-function clickHasSemanticLabel(details) {
+function clickHasSemanticLabel(details: any): boolean {
   const accessibility = details?.accessibility;
   if (!accessibility || typeof accessibility !== "object") return false;
   const nodes = [
@@ -438,7 +477,7 @@ function clickHasSemanticLabel(details) {
   return nodes.some((node) => accessibilityNode(node)?.label);
 }
 
-function reusableHumanAction(record, { navigationHint = "" } = {}) {
+function reusableHumanAction(record: JsonRecord, { navigationHint = "" }: { navigationHint?: string } = {}): string | null {
   const application = record.application?.name ?? record.application?.bundleId ?? "unknown application";
   const bundleId = record.application?.bundleId ?? "unknown";
   const details = record.details ?? {};
@@ -468,13 +507,13 @@ function reusableHumanAction(record, { navigationHint = "" } = {}) {
       : `Enter ${cleanInline(JSON.stringify(details.text ?? ""), 240)} in the matching semantic field in ${application} (\`${bundleId}\`), then verify the visible value.`;
   }
   if (record.eventType === "key_press") {
-    const keys = (details.keys ?? []).map((key) => `\`${cleanInline(key, 80)}\``).join(", ");
+    const keys = (details.keys ?? []).map((key: unknown) => `\`${cleanInline(key, 80)}\``).join(", ");
     return `In ${application} (\`${bundleId}\`), send ${keys || "the recorded semantic key action"}, then verify its effect.`;
   }
   return null;
 }
 
-function compressedScrollHint(scrolls) {
+function compressedScrollHint(scrolls: JsonRecord[]): string {
   const directions = [...new Set(scrolls
     .map((record) => record.details?.direction)
     .filter((direction) => direction && direction !== "none"))];
@@ -482,12 +521,12 @@ function compressedScrollHint(scrolls) {
   return `after moving ${direction} only as needed to reveal the next semantic target`;
 }
 
-export function reusableHumanActions(events) {
-  const actions = [];
-  let pendingScrolls = [];
+export function reusableHumanActions(events: JsonRecord[]): string[] {
+  const actions: string[] = [];
+  let pendingScrolls: JsonRecord[] = [];
   const flushPendingScrolls = () => {
     if (!pendingScrolls.length) return;
-    const action = reusableHumanAction(pendingScrolls.at(-1));
+    const action = reusableHumanAction(pendingScrolls.at(-1)!);
     if (action) actions.push(action);
     pendingScrolls = [];
   };
@@ -516,12 +555,12 @@ export function reusableHumanActions(events) {
   return actions;
 }
 
-function isGenericHumanTitle(value) {
+function isGenericHumanTitle(value: unknown): boolean {
   return !value
     || /^(?:Computer History demonstration|Human-operated macOS workflow)$/iu.test(String(value).trim());
 }
 
-function derivedHumanTitle(events, fallback) {
+function derivedHumanTitle(events: JsonRecord[], fallback: string): string {
   const applications = events
     .map((event) => event.application?.name ?? event.application?.bundleId ?? "")
     .filter(Boolean);
@@ -565,24 +604,14 @@ export function renderHumanSummary({
   title,
   description,
   explicitApplications = [],
-}) {
-  const metadata = records.find((record) => record.recordType === "human_history_metadata") ?? {};
+}: Omit<RenderOptions, "last">): string {
+  const metadata: JsonRecord = records.find((record) => record.recordType === "human_history_metadata") ?? {};
   const events = records.filter((record) => record.recordType === "human_event");
   if (!events.length) throw new Error("no human operation events found in the selected recording");
   const stopped = events.some((record) => record.eventType === "recording_stopped");
   const status = stopped ? "completed" : "incomplete";
   const applications = humanApplications(events, explicitApplications);
   const artifacts = humanArtifacts(events);
-  const clickEvents = events.filter((record) => record.eventType === "mouse_click");
-  const semanticClickCount = clickEvents.filter((record) => clickHasSemanticLabel(record.details)).length;
-  const finalPageContext = [...events].reverse().find((record) => (
-    record.eventType === "page_context" && record.details?.url
-  ));
-  const eventCounts = new Map();
-  for (const event of events) {
-    eventCounts.set(event.eventType, (eventCounts.get(event.eventType) ?? 0) + 1);
-  }
-  const timestamps = events.map(recordTimestamp).filter(Boolean).sort();
   const initialTitle = title || metadata.title || "Human-operated macOS workflow";
   const resolvedTitle = isGenericHumanTitle(initialTitle)
     ? derivedHumanTitle(events, initialTitle)
@@ -630,7 +659,7 @@ export function renderSummary({
   title,
   description,
   explicitApplications = [],
-}) {
+}: RenderOptions): string {
   if (isHumanHistory(records)) {
     return renderHumanSummary({
       file,
@@ -733,14 +762,27 @@ export function renderSummary({
   return output.join("\n");
 }
 
-function defaultOutputPath(file, records) {
+function defaultOutputPath(file: string, records: JsonRecord[]): string {
   const metadata = metadataFromRecords(records);
   const key = sessionId(metadata, file).replace(/[^a-zA-Z0-9_-]+/g, "_");
   const stamp = new Date().toISOString().replace(/\.\d{3}Z$/, "Z").replaceAll(":", "-");
   return path.join(DEFAULT_HISTORY_DIR, `${stamp}-${key}-memory-summary.md`);
 }
 
-export function run(argv = process.argv) {
+/**
+ * Writes the summary of one recording to `out`.
+ *
+ * For callers that are not a terminal: the service summarizes a segment every
+ * minute while recording, and a line of console output each time is noise.
+ */
+export function summarizeToFile(input: { file: string; out: string; title?: string }): void {
+  const { records, malformedLines } = loadRecords(input.file);
+  const markdown = renderSummary({ file: input.file, records, malformedLines, title: input.title });
+  fs.mkdirSync(path.dirname(input.out), { recursive: true });
+  fs.writeFileSync(input.out, markdown, "utf8");
+}
+
+export function run(argv: string[] = process.argv): { outPath: string; file: string } | null {
   const args = parseArgs(argv);
   if (args.help) {
     usage();

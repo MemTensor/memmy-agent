@@ -1,31 +1,33 @@
 import {
   ObservationSettingsStore,
-} from "../../core/agent-runtime/computer-history/settings-store.js";
+} from "./settings-store.js";
 import {
   DEFAULT_OBSERVATION_SETTINGS,
   parseObservationSettings,
-} from "../../core/agent-runtime/computer-history/observation-settings.js";
+} from "./observation-settings.js";
 import {
   applicationsFromMarkdown,
   applyNarrative,
   compactEventEvidence,
   isNarrated,
   writeSegmentNarrative,
-} from "../../core/agent-runtime/computer-history/summary-writer.js";
-import type { LLMRuntimeResolver } from "../../utils/llm-runtime.js";
+} from "./summary-writer.js";
+import type { LLMRuntimeResolver } from "../../../utils/llm-runtime.js";
 import {
   SIX_HOUR_MS,
   alignedId,
   buildSixHourSummary,
   instantFromId,
-} from "../../core/agent-runtime/computer-history/rollup.js";
-import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
+} from "./rollup.js";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { ApplicationIconReader } from "../../core/agent-runtime/computer-history/application-icon.js";
+import { ApplicationIconReader } from "./application-icon.js";
+import { summarizeToFile } from "./summarize-history.js";
+import { writeWorkflowCandidate } from "../../computer-use/extract-workflow-candidate.js";
 
 export type ComputerHistorySourceType = "captured" | "rollup" | "imported" | "demo_fixture";
 
@@ -240,7 +242,7 @@ function boundedInterval(value: string | undefined, fallback: number, minimum: n
 }
 
 export class ComputerHistoryDemoService {
-  private readonly repositoryRoot: string;
+  private readonly recorderScript: string;
   private readonly historyDirectory: string;
   private readonly recordingDirectory: string;
   private readonly workflowDirectory: string;
@@ -279,13 +281,18 @@ export class ComputerHistoryDemoService {
   };
 
   constructor(input: {
-    repositoryRoot?: string;
+    /**
+     * The recorder entry point. Tests pass a stand-in: the real one listens to
+     * the keyboard and mouse, and a test that forgets to stop it leaves it
+     * running long after the suite has finished.
+     */
+    recorderScript?: string;
     historyDirectory?: string;
     recordingDirectory?: string;
     workflowDirectory?: string;
     observationSettingsFile?: string;
   } = {}) {
-    this.repositoryRoot = path.resolve(input.repositoryRoot ?? defaultRepositoryRoot());
+    this.recorderScript = input.recorderScript ?? moduleFile("record-human-history.js");
     this.historyDirectory = path.resolve(input.historyDirectory
       ?? path.join(os.homedir(), ".memmy", "computer-history", "histories"));
     this.recordingDirectory = path.resolve(input.recordingDirectory
@@ -293,7 +300,7 @@ export class ComputerHistoryDemoService {
     this.workflowDirectory = path.resolve(input.workflowDirectory
       ?? path.join(os.homedir(), ".memmy", "computer-history", "workflows"));
     this.observationSettings = new ObservationSettingsStore(input.observationSettingsFile);
-    this.applicationIcons = new ApplicationIconReader({ repositoryRoot: this.repositoryRoot });
+    this.applicationIcons = new ApplicationIconReader();
     this.liveSummaryIntervalMs = boundedInterval(
       process.env.MEMMY_COMPUTER_HISTORY_LIVE_SUMMARY_INTERVAL_MS,
       60_000,
@@ -445,15 +452,6 @@ export class ComputerHistoryDemoService {
     return this.snapshot();
   }
 
-  installDemoFixture(): ComputerHistorySnapshot {
-    const fixture = path.join(this.repositoryRoot, "workflows", "demo-fixtures", "wechat-mom-iphone-history.md");
-    if (!fs.existsSync(fixture)) throw new ComputerHistoryApiError(503, "demo fixture is unavailable");
-    return this.importMarkdown({
-      markdown: fs.readFileSync(fixture, "utf8"),
-      sourceType: "demo_fixture",
-    });
-  }
-
   private segmentId(at: Date): string {
     // Align segment ids to the ten-minute grid so their names sort and group
     // the same way Codex's do, and so the rollup can parse them back.
@@ -487,7 +485,7 @@ export class ComputerHistoryDemoService {
   }
 
   private spawnRecorder(segment: SegmentState): void {
-    const recorder = path.join(this.repositoryRoot, "workflows", "scripts", "record-human-history.mjs");
+    const recorder = this.recorderScript;
     if (!fs.existsSync(recorder)) throw new ComputerHistoryApiError(503, "recorder script is unavailable");
     const child = spawn(process.execPath, [
       recorder,
@@ -499,7 +497,6 @@ export class ComputerHistoryDemoService {
       // depends on the URL each event carries.
       "--observation-settings", this.observationSettings.filePath,
     ], {
-      cwd: this.repositoryRoot,
       env: process.env,
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -858,16 +855,12 @@ export class ComputerHistoryDemoService {
   }
 
   private writeSegmentSummary(segment: SegmentState, destination = segment.historyFile): string | null {
-    const summarizer = path.join(this.repositoryRoot, "workflows", "scripts", "summarize-history.mjs");
-    const result = spawnSync(process.execPath, [
-      summarizer,
-      "--file", segment.eventsFile,
-      "--out", destination,
-      "--title", `Computer History ${segment.id}`,
-    ], { cwd: this.repositoryRoot, encoding: "utf8", timeout: 30_000 });
-    if (result.status !== 0 || !fs.existsSync(destination)) {
-      return String(result.stderr || result.stdout || "failed to distill captured events").trim();
+    try {
+      summarizeToFile({ file: segment.eventsFile, out: destination, title: `Computer History ${segment.id}` });
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
     }
+    if (!fs.existsSync(destination)) return "failed to distill captured events";
     const markdown = fs.readFileSync(destination, "utf8")
       .replace(/^source_type:\s*human_computer_history\s*$/m, "source_type: captured")
       .replace(/^---\n/, "---\ncapture_policy: accessibility_events_and_page_urls_no_screenshots\n");
@@ -932,17 +925,18 @@ export class ComputerHistoryDemoService {
     if (!directory) return [];
     const eventsFile = path.join(directory, "events.jsonl");
     if (!fs.existsSync(eventsFile)) return [];
-    const extractor = path.join(this.repositoryRoot, "workflows", "scripts", "extract-workflow-candidate.mjs");
-    if (!fs.existsSync(extractor)) return [];
     const target = path.join(directory, "candidate.md");
-    const result = spawnSync(process.execPath, [
-      extractor,
-      "--file", eventsFile,
-      "--out", target,
-      "--title", historyId,
-      "--source-history-id", historyId,
-    ], { cwd: this.repositoryRoot, encoding: "utf8", timeout: 30_000 });
-    if (result.status !== 0 || !fs.existsSync(target)) return [];
+    try {
+      const written = writeWorkflowCandidate({
+        file: eventsFile,
+        out: target,
+        title: historyId,
+        sourceHistoryId: historyId,
+      });
+      if (!written) return [];
+    } catch {
+      return [];
+    }
     return extractCandidateSteps(fs.readFileSync(target, "utf8"));
   }
 
@@ -961,7 +955,7 @@ export class ComputerHistoryDemoService {
 
   createWorkflow(historyId: string, userRequest = ""): ComputerHistorySnapshot {
     const history = this.findHistory(historyId);
-    const request = cleanUserRequest(userRequest || "帮我把妈妈之前说的那台 iPhone 配好，加入购物袋就停，不要结账或支付。");
+    const request = cleanUserRequest(userRequest || "按记录中的步骤复现这段操作，完成后停止。");
     if (history.sourceType === "captured") {
       if (history.sourceType === "captured" && readFrontmatterValue(history.markdown, "status") !== "completed") {
         throw new ComputerHistoryApiError(422, "the selected operation-experience recording is incomplete");
@@ -986,23 +980,7 @@ export class ComputerHistoryDemoService {
       fs.writeFileSync(path.join(this.workflowDirectory, `${id}.md`), markdown, { encoding: "utf8", flag: "wx" });
       return this.snapshot();
     }
-    if (history.sourceType !== "demo_fixture") {
-      throw new ComputerHistoryApiError(422, "select a completed operation-experience recording or the WeChat mom iPhone demo History");
-    }
-    if (readFrontmatterValue(history.markdown, "demo_id") !== "wechat_mom_iphone") {
-      throw new ComputerHistoryApiError(422, "select the WeChat mom iPhone demo History before generating this Workflow");
-    }
-    const fixture = path.join(this.repositoryRoot, "workflows", "demo-fixtures", "wechat-mom-iphone-workflow.md");
-    if (!fs.existsSync(fixture)) throw new ComputerHistoryApiError(503, "workflow fixture is unavailable");
-    const id = `${timestampForPath()}-wechat-mom-iphone-cua`;
-    const markdown = fs.readFileSync(fixture, "utf8")
-      .replace("source_history_id: DEMO_HISTORY_ID", `source_history_id: ${history.id}`)
-      .replace("source_history_path: DEMO_HISTORY_PATH", `source_history_path: ${history.filePath}`)
-      .replace("user_request: DEMO_USER_REQUEST", `user_request: ${JSON.stringify(request)}`)
-      .replace("DEMO_USER_REQUEST_TEXT", request);
-    fs.mkdirSync(this.workflowDirectory, { recursive: true });
-    fs.writeFileSync(path.join(this.workflowDirectory, `${id}.md`), markdown, { encoding: "utf8", flag: "wx" });
-    return this.snapshot();
+    throw new ComputerHistoryApiError(422, "select a completed operation-experience recording");
   }
 
   searchHistories(query: string, limit = 5): ComputerHistoryMatch[] {
@@ -1059,13 +1037,16 @@ export class ComputerHistoryDemoService {
   ): ComputerHistorySnapshot {
     if (this.run.status === "running") throw new ComputerHistoryApiError(409, "a CUA run is already active");
     const workflow = this.findWorkflow(workflowId);
-    const replay = path.join(this.repositoryRoot, "workflows", "scripts", "replay-cua.sh");
+    const replay = moduleFile("../../computer-use/replay-cua.sh");
     if (!fs.existsSync(replay)) throw new ComputerHistoryApiError(503, "CUA replay script is unavailable");
     const child = spawn("bash", [replay, workflow.filePath, ...variables.slice(0, 20)], {
-      cwd: this.repositoryRoot,
       env: {
         ...process.env,
         PATH: `${path.join(os.homedir(), ".local", "bin")}:${process.env.PATH ?? ""}`,
+        // The script used to find the agent by walking up to the repository,
+        // which a packaged app does not have. The service knows where it is.
+        MEMMY_JS: moduleFile("../../../main.js"),
+        MEMMY_REPLAY_WORKSPACE: path.join(os.homedir(), ".memmy", "workspace"),
       },
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -1101,19 +1082,6 @@ export class ComputerHistoryDemoService {
       this.run.child = null;
     });
     return this.snapshot();
-  }
-
-  startCuaSmokeTest(): ComputerHistorySnapshot {
-    if (this.run.status === "running") throw new ComputerHistoryApiError(409, "a CUA run is already active");
-    const fixture = path.join(this.repositoryRoot, "workflows", "demo-fixtures", "cua-browser-smoke-workflow.md");
-    if (!fs.existsSync(fixture)) throw new ComputerHistoryApiError(503, "CUA smoke-test fixture is unavailable");
-    const id = `${timestampForPath()}-cua-browser-smoke`;
-    fs.mkdirSync(this.workflowDirectory, { recursive: true });
-    fs.writeFileSync(path.join(this.workflowDirectory, `${id}.md`), fs.readFileSync(fixture, "utf8"), {
-      encoding: "utf8",
-      flag: "wx",
-    });
-    return this.startCuaRun(id, [], "smoke");
   }
 
   private findHistory(id: string): ComputerHistoryEntry {
@@ -1479,20 +1447,16 @@ function lastMeaningfulLogLine(value: string): string | null {
   return lines.at(-1) ?? null;
 }
 
-function defaultRepositoryRoot(): string {
-  let candidate = path.dirname(fileURLToPath(import.meta.url));
-  while (true) {
-    if (
-      fs.existsSync(path.join(candidate, "App", "memmy-agent", "package.json"))
-      && fs.existsSync(path.join(candidate, "workflows"))
-    ) {
-      return candidate;
-    }
-    const parent = path.dirname(candidate);
-    if (parent === candidate) break;
-    candidate = parent;
-  }
-  return path.resolve(process.cwd());
+/**
+ * A file shipped beside this module.
+ *
+ * Everything Computer History runs — the recorder, its Swift helper, the replay
+ * script — is compiled or copied into the same tree as this file, so it is
+ * found relative to the module rather than by searching upward for a
+ * repository checkout that a packaged app does not have.
+ */
+function moduleFile(relative: string): string {
+  return fileURLToPath(new URL(relative, import.meta.url));
 }
 
 let defaultComputerHistoryDemoService: ComputerHistoryDemoService | null = null;

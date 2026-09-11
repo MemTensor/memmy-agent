@@ -106,8 +106,8 @@ import type { ChannelAdminApi } from "../../entrypoints/frontend-bridge/channels
 import {
   ComputerHistoryApiError,
   getComputerHistoryDemoService,
-} from "../../entrypoints/frontend-bridge/computer-history-api.js";
-import type { ComputerHistoryDemoService } from "../../entrypoints/frontend-bridge/computer-history-api.js";
+} from "../../tools/computer-history/mac/computer-history-api.js";
+import type { ComputerHistoryDemoService } from "../../tools/computer-history/mac/computer-history-api.js";
 import {
   removeSessionDagFiles,
   type SessionDagQueueManager,
@@ -2732,7 +2732,6 @@ export class WebSocketChannel extends BaseChannel {
     if (got === "/api/computer-history") return this.handleComputerHistory(request, "snapshot");
     if (got === "/api/computer-history/delete") return this.handleComputerHistory(request, "history-delete");
     if (got === "/api/computer-history/pin") return this.handleComputerHistory(request, "history-pin");
-    if (got === "/api/computer-history/demo-fixture") return this.handleComputerHistory(request, "demo-fixture");
     if (got === "/api/computer-history/import") return this.handleComputerHistory(request, "import");
     if (got === "/api/computer-history/observation/start") return this.handleComputerHistory(request, "observation-start");
     if (got === "/api/computer-history/observation/pause") return this.handleComputerHistory(request, "observation-pause");
@@ -2740,7 +2739,6 @@ export class WebSocketChannel extends BaseChannel {
     if (got === "/api/computer-history/observation/stop") return this.handleComputerHistory(request, "observation-stop");
     if (got === "/api/computer-history/workflows/create") return this.handleComputerHistory(request, "workflow-create");
     if (got === "/api/computer-history/cua/start") return this.handleComputerHistory(request, "cua-start");
-    if (got === "/api/computer-history/cua/smoke") return this.handleComputerHistory(request, "cua-smoke");
     if (got === "/api/computer-history/app-icon") return this.handleComputerHistoryAppIcon(request);
     if (got === "/api/webui/sidebar-state") return this.handleWebuiSidebarState(request);
     if (got === "/api/webui/sidebar-state/update") return this.handleWebuiSidebarStateUpdate(request);
@@ -2901,7 +2899,7 @@ export class WebSocketChannel extends BaseChannel {
 
   async handleComputerHistory(
     request: any,
-    action: "snapshot" | "history-delete" | "history-pin" | "demo-fixture" | "import" | "observation-start" | "observation-pause" | "observation-resume" | "observation-stop" | "workflow-create" | "cua-start" | "cua-smoke",
+    action: "snapshot" | "history-delete" | "history-pin" | "import" | "observation-start" | "observation-pause" | "observation-resume" | "observation-stop" | "workflow-create" | "cua-start",
   ): Promise<HttpLikeResponse> {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
     const method = (request.method ?? "GET").toUpperCase();
@@ -2937,9 +2935,6 @@ export class WebSocketChannel extends BaseChannel {
             body.pinned !== false,
           );
           break;
-        case "demo-fixture":
-          snapshot = this.computerHistory.installDemoFixture();
-          break;
         case "import":
           snapshot = this.computerHistory.importMarkdown({
             title: typeof body.title === "string" ? body.title : undefined,
@@ -2969,9 +2964,6 @@ export class WebSocketChannel extends BaseChannel {
             String(body.workflow_id ?? ""),
             Array.isArray(body.variables) ? body.variables.filter((value: unknown) => typeof value === "string") : [],
           );
-          break;
-        case "cua-smoke":
-          snapshot = this.computerHistory.startCuaSmokeTest();
           break;
       }
       return httpJsonResponse(snapshot as unknown as Record<string, any>);

@@ -6,26 +6,44 @@ import {
   ComputerHistoryApiError,
   ComputerHistoryDemoService,
   isCodexSkysightCopy,
-} from "../../../src/entrypoints/frontend-bridge/computer-history-api.js";
-import { ObservationSettingsStore } from "../../../src/core/agent-runtime/computer-history/settings-store.js";
+} from "../../../../src/tools/computer-history/mac/computer-history-api.js";
+import { ObservationSettingsStore } from "../../../../src/tools/computer-history/mac/settings-store.js";
 
 const roots: string[] = [];
 const settingsFiles: string[] = [];
+const instances: ComputerHistoryDemoService[] = [];
+
+// Stands in for the recorder. The real one taps the keyboard and mouse, and
+// these tests start observation without always stopping it: each run left a
+// recorder listening to the machine long after the suite had finished.
+const stubRecorder = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "memmy-stub-recorder-")), "recorder.mjs");
+fs.writeFileSync(stubRecorder, [
+  "const stop = () => process.exit(0);",
+  'process.on("SIGTERM", stop);',
+  'process.on("SIGINT", stop);',
+  "setInterval(() => {}, 1 << 30);",
+  "",
+].join("\n"), "utf8");
 
 function service(): ComputerHistoryDemoService {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-observation-"));
   roots.push(root);
   const settingsFile = path.join(root, "observation-settings.json");
   settingsFiles.push(settingsFile);
-  return new ComputerHistoryDemoService({
+  const instance = new ComputerHistoryDemoService({
     observationSettingsFile: settingsFile,
     historyDirectory: path.join(root, "histories"),
     recordingDirectory: path.join(root, "recordings"),
     workflowDirectory: path.join(root, "workflows"),
+    recorderScript: stubRecorder,
   });
+  instances.push(instance);
+  return instance;
 }
 
-afterEach(() => {
+afterEach(async () => {
+  // Stop before deleting: a running segment still holds its directory.
+  await Promise.all(instances.splice(0).map((instance) => instance.shutdown()));
   while (roots.length) fs.rmSync(roots.pop()!, { recursive: true, force: true });
 });
 
@@ -283,12 +301,15 @@ describe("pinning raw events", () => {
   const RETENTION_MS = 48 * 60 * 60 * 1000;
 
   function pinService(root: string): ComputerHistoryDemoService {
-    return new ComputerHistoryDemoService({
+    const instance = new ComputerHistoryDemoService({
       historyDirectory: path.join(root, "histories"),
       recordingDirectory: path.join(root, "recordings"),
       workflowDirectory: path.join(root, "workflows"),
       observationSettingsFile: path.join(root, "observation-settings.json"),
+      recorderScript: stubRecorder,
     });
+    instances.push(instance);
+    return instance;
   }
 
   // Builds an already-expired segment plus its summary. Paths are derived

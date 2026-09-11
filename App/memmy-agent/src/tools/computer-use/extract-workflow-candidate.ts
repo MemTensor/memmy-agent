@@ -1,5 +1,3 @@
-#!/usr/bin/env node
-
 // Derive a machine-facing Workflow Candidate from a human Computer History
 // JSONL recording. The user-facing History Markdown remains a separate
 // presentation artifact.
@@ -7,11 +5,23 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadRecords, reusableHumanActions } from "./summarize-history.mjs";
+import {
+  loadRecords,
+  reusableHumanActions,
+  type JsonRecord,
+} from "../computer-history/mac/summarize-history.js";
 
-function usage() {
+interface CandidateArgs {
+  file?: string;
+  out?: string;
+  title?: string;
+  sourceHistoryId?: string;
+  help?: boolean;
+}
+
+function usage(): void {
   console.log(`Usage:
-  node workflows/scripts/extract-workflow-candidate.mjs --file <events.jsonl> --out <candidate.md>
+  node dist/tools/computer-use/extract-workflow-candidate.js --file <events.jsonl> --out <candidate.md>
 
 Options:
   --file <path>               human recording JSONL
@@ -20,8 +30,8 @@ Options:
   --source-history-id <id>    History id used for linking`);
 }
 
-function parseArgs(argv) {
-  const args = {};
+function parseArgs(argv: string[]): CandidateArgs {
+  const args: CandidateArgs = {};
   for (let index = 2; index < argv.length; index += 1) {
     const key = argv[index];
     const value = () => {
@@ -41,11 +51,16 @@ function parseArgs(argv) {
   return args;
 }
 
-function yamlString(value) {
+function yamlString(value: unknown): string {
   return JSON.stringify(String(value ?? ""));
 }
 
-export function renderWorkflowCandidate({ file, records, title, sourceHistoryId }) {
+export function renderWorkflowCandidate({ file, records, title, sourceHistoryId }: {
+  file: string;
+  records: JsonRecord[];
+  title?: string;
+  sourceHistoryId?: string;
+}): string | null {
   const events = records.filter((record) => record?.recordType === "human_event");
   const steps = reusableHumanActions(events);
   if (!steps.length) return null;
@@ -81,15 +96,37 @@ export function renderWorkflowCandidate({ file, records, title, sourceHistoryId 
   return output.join("\n");
 }
 
-export function run(argv = process.argv) {
+/**
+ * Writes a Workflow Candidate for one recording, or reports that there is none.
+ *
+ * For callers that are not a terminal, and so need the answer rather than a
+ * line on stderr: `false` means the recording held no reusable step.
+ */
+export function writeWorkflowCandidate(input: {
+  file: string;
+  out: string;
+  title?: string;
+  sourceHistoryId?: string;
+}): boolean {
+  const { records } = loadRecords(input.file);
+  const markdown = renderWorkflowCandidate({ ...input, records });
+  if (!markdown) return false;
+  fs.mkdirSync(path.dirname(input.out), { recursive: true });
+  fs.writeFileSync(input.out, markdown, "utf8");
+  return true;
+}
+
+export function run(argv: string[] = process.argv): { out: string; markdown: string } | null {
   const args = parseArgs(argv);
   if (args.help) {
     usage();
     return null;
   }
-  const { records } = loadRecords(path.resolve(args.file));
+  // parseArgs has already required both, so these are present past help.
+  const file = path.resolve(args.file!);
+  const { records } = loadRecords(file);
   const markdown = renderWorkflowCandidate({
-    file: path.resolve(args.file),
+    file,
     records,
     title: args.title,
     sourceHistoryId: args.sourceHistoryId,
@@ -98,7 +135,7 @@ export function run(argv = process.argv) {
     console.error("workflow candidate not ready: no reusable semantic steps found");
     return null;
   }
-  const out = path.resolve(args.out);
+  const out = path.resolve(args.out!);
   fs.mkdirSync(path.dirname(out), { recursive: true });
   fs.writeFileSync(out, markdown, "utf8");
   console.log(`workflow candidate written: ${out}`);

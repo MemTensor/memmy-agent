@@ -1,9 +1,9 @@
-import { Tool } from "./base.js";
+import { Tool } from "../../../core/agent-runtime/tools/base.js";
 import {
   ComputerHistoryApiError,
   getComputerHistoryDemoService,
-} from "../../../entrypoints/frontend-bridge/computer-history-api.js";
-import type { ComputerHistoryDemoService } from "../../../entrypoints/frontend-bridge/computer-history-api.js";
+} from "./computer-history-api.js";
+import type { ComputerHistoryDemoService } from "./computer-history-api.js";
 
 const PARAMETERS = {
   type: "object",
