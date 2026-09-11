@@ -71,8 +71,8 @@
 #### 1. 桌面端（推荐）
 
 <p align="center">
-  <img src="docs/assets/first-scan-cn.png" width="58%" alt="首次扫描">
-  <img src="docs/assets/first-report-cn.png" width="38%" alt="初见报告">
+  <img src="docs/assets/first-scan-cn.png" width="58%" align="top" style="vertical-align: top;" alt="首次扫描">
+  <img src="docs/assets/first-report-cn.png" width="38%" align="top" style="vertical-align: top;" alt="初见报告">
 </p>
 
 点击[官网](https://memmy.cn/)或者 [GitHub Release](https://github.com/MemTensor/memmy-agent/releases) 下载。
