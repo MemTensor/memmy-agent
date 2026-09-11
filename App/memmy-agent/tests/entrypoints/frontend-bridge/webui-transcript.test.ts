@@ -58,6 +58,42 @@ describe("webui transcript replay", () => {
     ]);
   });
 
+  it("replays question cards and their direct responses", () => {
+    const requestId = "11111111-1111-4111-8111-111111111111";
+    const messages = replayTranscriptToUiMessages([
+      {
+        event: "message",
+        text: "请选择",
+        agent_ui: {
+          questionCard: {
+            requestId,
+            questions: [{
+              id: "choice",
+              prompt: "继续吗？",
+              options: [{ id: "yes", label: "继续" }, { id: "no", label: "停止" }],
+            }],
+          },
+        },
+      },
+      {
+        event: "agent_question_response",
+        request_id: requestId,
+        answers: [{ questionId: "choice", selectedOptionIds: ["yes"] }],
+      },
+    ]);
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      role: "assistant",
+      content: "请选择",
+      agent_ui: { questionCard: { requestId } },
+      questionResponse: {
+        requestId,
+        answers: [{ questionId: "choice", selectedOptionIds: ["yes"] }],
+      },
+    });
+  });
+
   it("preserves streaming state only for an identified turn without turn_end", () => {
     const openMessages = replayTranscriptToUiMessages([
       { event: "reasoning_delta", turn_id: "turn-open", text: "分析中" },

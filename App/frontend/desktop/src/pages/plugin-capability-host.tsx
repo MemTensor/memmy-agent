@@ -383,7 +383,19 @@ function FileInputCard(props: {
   const readyFiles = fileStates.filter((item) => item.status === "ready").map((item) => item.file);
   const choose = (event: ChangeEvent<HTMLInputElement>) => {
     const next = Array.from(event.target.files ?? []);
+    event.target.value = "";
     setFiles(next);
+    if (fileDrafts?.has(fileDraftKey)) fileDrafts.set(fileDraftKey, next);
+    const nextReady = next.filter((file) => classifyPluginInputFile(file, accept, maxBytes, fileRules, t).status === "ready");
+    setValidationError(validateReadyFileCount(nextReady, maxFiles, t));
+  };
+  const remove = (index: number) => {
+    const next = files.filter((_file, candidateIndex) => candidateIndex !== index);
+    setFiles(next);
+    if (fileDrafts?.has(fileDraftKey)) {
+      if (next.length) fileDrafts.set(fileDraftKey, next);
+      else fileDrafts.delete(fileDraftKey);
+    }
     const nextReady = next.filter((file) => classifyPluginInputFile(file, accept, maxBytes, fileRules, t).status === "ready");
     setValidationError(validateReadyFileCount(nextReady, maxFiles, t));
   };
@@ -452,6 +464,15 @@ function FileInputCard(props: {
                       {item.message ?? t("plugin.ui.fileReady")}
                     </span>
                   </span>
+                  <button
+                    type="button"
+                    disabled={props.disabled}
+                    aria-label={t("plugin.ui.removeFile", { name: item.file.name })}
+                    className="rounded-btn p-1 text-text-ink/35 transition-colors hover:bg-canvas-oat hover:text-text-ink/65 disabled:cursor-not-allowed disabled:opacity-50"
+                    onClick={() => remove(index)}
+                  >
+                    <X size={14} aria-hidden="true" />
+                  </button>
                 </li>
               ))}
             </ul>
@@ -711,7 +732,7 @@ function SandboxedPluginRenderer(props: {
         if (!props.onUploadFiles || !accept || files.length === 0 || files.length > maxFiles
           || files.some((file) => !(file instanceof File) || classifyPluginInputFile(file, accept, maxBytes, [], t).status !== "ready")
           || props.interactionStates.some((state) => state.interactionId === interactionId)) {
-          reply({ ok: false, error: { message: "文件不符合要求或卡片已过期，请刷新后重新选择。" } });
+          reply({ ok: false, error: { message: t("plugin.ui.uploadInvalid") } });
           return;
         }
         uploading.current.add(interactionId);
@@ -721,7 +742,7 @@ function SandboxedPluginRenderer(props: {
           return { blob: await materializePluginUploadFile(file), name: file.name, kind: classification.kind, mime: classification.mime };
         })).then(uploadFiles).then(
           (uploaded) => reply({ ok: true, files: uploaded }),
-          () => reply({ ok: false, error: { message: "上传失败，请重新选择文件重试。" } })
+          () => reply({ ok: false, error: { message: t("plugin.ui.uploadFailed") } })
         ).finally(() => uploading.current.delete(interactionId));
         return;
       }

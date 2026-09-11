@@ -111,6 +111,54 @@ describe("PluginCapabilityHost", () => {
     expect(container.textContent).toContain("selected.pdf");
   });
 
+  it("allows selected source files to be removed before upload", async () => {
+    const respond = vi.fn(async () => undefined);
+    const uploadFiles = vi.fn();
+    const client = { getUi: vi.fn(), cancel: vi.fn(), respond };
+    const call: PluginUiCall = {
+      pluginId: plugin.id,
+      capabilityId: "run",
+      callId: "removable-files",
+      conversationId: "websocket:chat-1",
+      events: [{
+        type: "interaction",
+        request: {
+          interactionId: "removable-files",
+          type: "file-input",
+          payload: { cardType: "source-import", accept: [".pdf"], multiple: true }
+        }
+      }]
+    };
+    await act(async () => root.render(
+      <I18nProvider language="en-US">
+        <PluginCapabilityHost calls={[call]} plugins={[plugin]} client={client} uploadFiles={uploadFiles} />
+      </I18nProvider>
+    ));
+    const picker = container.querySelector('input[type="file"]')!;
+    Object.defineProperty(picker, "files", {
+      value: [
+        new File(["first"], "first.pdf", { type: "application/pdf" }),
+        new File(["second"], "second.pdf", { type: "application/pdf" })
+      ]
+    });
+    await act(async () => picker.dispatchEvent(new Event("change", { bubbles: true })));
+
+    await act(async () => (
+      container.querySelector('button[aria-label="Remove file first.pdf"]') as HTMLButtonElement
+    ).click());
+    expect(container.textContent).not.toContain("first.pdf");
+    expect(container.textContent).toContain("second.pdf");
+
+    await act(async () => (
+      container.querySelector('button[aria-label="Remove file second.pdf"]') as HTMLButtonElement
+    ).click());
+    expect(container.textContent).toContain("No files selected");
+    expect(Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "Upload"))
+      .toHaveProperty("disabled", true);
+    expect(uploadFiles).not.toHaveBeenCalled();
+    expect(respond).not.toHaveBeenCalled();
+  });
+
   it.skipIf(!process.env.LITERATURE_REVIEW_PLUGIN_ROOT)("renders the exact 7/20 proposal and returns in-card edits with chat feedback", async () => {
     const window = new TestWindow({ settings: { enableJavaScriptEvaluation: true } });
     try {

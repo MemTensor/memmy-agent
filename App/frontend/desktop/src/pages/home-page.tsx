@@ -78,6 +78,10 @@ import { AgentEnvironmentPanel } from "./agent-environment-panel.js";
 import { AgentGoalBar, type AgentGoalControlRequest } from "./agent-goal-bar.js";
 import { AgentQueuedMessageList } from "./agent-queued-message-list.js";
 import { AgentThreadMessages, ChatImageLightbox } from "./agent-thread-messages.js";
+import {
+  type AgentQuestionCardPayload,
+  type AgentQuestionResponse,
+} from "./agent-question-card.js";
 import { PluginCapabilityHost } from "./plugin-capability-host.js";
 import { PluginArtifactPreviewPanel } from "./plugin-artifact-preview-panel.js";
 import { AgentWorkspaceContext } from "./agent-workspace-context.js";
@@ -2134,6 +2138,30 @@ export function HomePage() {
     }
   }
 
+  async function submitAgentQuestionResponse(
+    _card: AgentQuestionCardPayload,
+    response: AgentQuestionResponse,
+  ): Promise<boolean> {
+    const chatId = state.agent.currentChatId;
+    const generation = connection?.getReadyGeneration() ?? null;
+    if (!chatId || !connection || generation === null) return false;
+    try {
+      await connection.respondToQuestion(chatId, response, generation);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  const answerAgentQuestionRef = useRef(
+    (_card: AgentQuestionCardPayload, _response: AgentQuestionResponse): Promise<boolean> => Promise.resolve(false)
+  );
+  answerAgentQuestionRef.current = submitAgentQuestionResponse;
+  const answerAgentQuestion = useCallback(
+    (card: AgentQuestionCardPayload, response: AgentQuestionResponse) => answerAgentQuestionRef.current(card, response),
+    []
+  );
+
   async function removeQueuedMessage(clientRequestId: string) {
     const chatId = state.agent.currentChatId;
     const generation = connection?.getReadyGeneration() ?? null;
@@ -3474,6 +3502,7 @@ export function HomePage() {
                 sanitizePlatformApiErrors={sanitizePlatformApiErrors}
                 artifactClient={sessionArtifactClient}
                 memoryRuntimeClient={clients?.memoryRuntime ?? null}
+                onAnswerQuestion={answerAgentQuestion}
               />
               <PluginCapabilityHost
                 calls={visiblePluginCalls}

@@ -671,6 +671,22 @@ NODE
   export MEMMY_MIGRATIONS_READY_SESSION_DAG="${MEMMY_AGENT_SESSION_DAG_DIR:-$(dirname "$MEMMY_WORKSPACE_DIR")/session-dag}"
   export MEMMY_APP_DATABASE="$MEMMY_APP_DATABASE_FILE"
   export MEMMY_MIGRATIONS_READY_APP_DATABASE="$MEMMY_APP_DATABASE_FILE"
+  if [[ -z "${VITE_MEMMY_AGENT_WEBUI_URL:-}" ]]; then
+    VITE_MEMMY_AGENT_WEBUI_URL="$("$MEMMY_RUNTIME_NODE_PATH" - "$MEMMY_CONFIG_PATH" <<'NODE'
+const fs = require("node:fs");
+const YAML = require("yaml");
+const config = YAML.parse(fs.readFileSync(process.argv[2], "utf8")) || {};
+const websocket = config?.channels?.websocket || {};
+const configuredHost = typeof websocket.host === "string" && websocket.host.trim()
+  ? websocket.host.trim()
+  : "127.0.0.1";
+const host = configuredHost === "0.0.0.0" || configuredHost === "::" ? "127.0.0.1" : configuredHost;
+const port = Number.isInteger(websocket.port) && websocket.port > 0 ? websocket.port : 18980;
+process.stdout.write(`http://${host}:${port}`);
+NODE
+)"
+    export VITE_MEMMY_AGENT_WEBUI_URL
+  fi
 
   build_and_install_memory_cli
 

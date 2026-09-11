@@ -5,6 +5,7 @@ import { I18nProvider } from "../../i18n/i18n-provider.js";
 import { WINDOW_CONTROLS_OVERLAY_SAFE_TOP_STYLE } from "../../theme/window-controls-overlay.js";
 import { AttachmentActionError, emailAddressFromMailtoHref, estimateDeferredMarkdownHeight, isLikelyExpensiveAgentMarkdown, isMailtoHref, localArtifactPathFromHref, runAttachmentAction } from "../agent-message-content.js";
 import { AgentThreadMessages, buildAgentDisplayUnits, CHAT_IMAGE_LIGHTBOX_CLOSE_BUTTON_CLASS, CHAT_IMAGE_LIGHTBOX_NAV_BUTTON_CLASS, copyImageToClipboard, resolveAgentMessageDisplayContent, saveImageToFile } from "../agent-thread-messages.js";
+import { type AgentQuestionCardPayload } from "../agent-question-card.js";
 
 const agentThreadMessagesSourceUrl = new URL("../agent-thread-messages.tsx", import.meta.url);
 const agentMessageContentSourceUrl = new URL("../agent-message-content.tsx", import.meta.url);
@@ -12,6 +13,48 @@ const stylesSourceUrl = new URL("../../styles.css", import.meta.url);
 const WINDOWS_COMMAND_ERROR = "'node' 不是内部或外部命令，也不是可运行的程序\r\n或批处理文件。";
 
 describe("AgentThreadMessages", () => {
+  it("updates a question card in place without rendering its response as a user bubble", () => {
+    const card: AgentQuestionCardPayload = {
+      version: 1,
+      requestId: "question-1",
+      questions: [{
+        id: "uploads",
+        prompt: "还有其他文件需要上传吗？",
+        options: [
+          { id: "more", label: "继续上传" },
+          { id: "done", label: "已全部上传" }
+        ],
+        allowMultiple: false,
+        allowOther: true
+      }]
+    };
+    const html = renderToString(
+      <I18nProvider language="zh-CN">
+        <AgentThreadMessages
+          chatScopeKey="chat-question"
+          messages={[
+            {
+              id: "question",
+              role: "assistant",
+              content: "请选择",
+              agentUi: { questionCard: card },
+              questionResponse: {
+                requestId: card.requestId,
+                answers: [{ questionId: "uploads", selectedOptionIds: ["done"] }]
+              }
+            }
+          ]}
+        />
+      </I18nProvider>
+    );
+
+    expect(html).toContain("还有其他文件需要上传吗？");
+    expect(html).toContain("已全部上传");
+    expect(html).toContain("已回答");
+    expect(html).not.toContain("agent-chat-bubble--user");
+    expect(html).not.toContain("memmy-question-response");
+  });
+
   it("shows a per-answer control for inspecting injected memories", () => {
     const html = renderToString(
       <I18nProvider language="zh-CN">
