@@ -7,6 +7,7 @@ import { runInNewContext } from "node:vm";
 import YAML from "yaml";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createDeepseekHarnessSkillTarget } from "../index.js";
+import { MEMMY_VERSION } from "../../../../../project-version.js";
 
 let tempDir: string | undefined;
 
@@ -43,6 +44,7 @@ describe("DeepSeek Harness skill target", () => {
     const packageManifest = JSON.parse(readFileSync(packagePath, "utf8")) as Record<string, unknown>;
     expect(packageManifest).toMatchObject({
       name: "@memmy/memmy-memory",
+      version: MEMMY_VERSION,
       type: "module",
       exports: {
         ".": "./index.mjs",
@@ -50,7 +52,6 @@ describe("DeepSeek Harness skill target", () => {
       },
       dsh: { client: { platform: "web" } }
     });
-    expect(packageManifest).not.toHaveProperty("version");
     expect(readFileSync(skillPath, "utf8")).toContain('memmy-memory search "query text" --source deepseek_harness');
     expect(patch).toContain("id: user-plugin");
     expect(patch).toContain("# memmy-memory plugin:start");
