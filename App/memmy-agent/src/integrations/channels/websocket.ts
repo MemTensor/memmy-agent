@@ -45,6 +45,7 @@ import type {
 import { getMediaDir, getWorkspacePath } from "../../config/paths.js";
 import type { CronService } from "../../cron/service.js";
 import { goalStateWsBlob, type GoalStatus } from "../../core/session/goal-state.js";
+import { taskPlanStateWsBlob } from "../../core/session/task-plan-state.js";
 import {
   readWebuiSessionBinding,
   Session,
@@ -1208,6 +1209,17 @@ export class WebSocketChannel extends BaseChannel {
     await this.sendGoalState(chatId, blob);
   }
 
+  async maybePushTaskPlanState(chatId: string): Promise<void> {
+    if (!this.sessionManager) return;
+    const sessionKey = this.canonicalSessionKeyForChatId(chatId);
+    if (!sessionKey) return;
+    const row = this.readSessionFile(sessionKey);
+    const metadata = row && typeof row.metadata === "object" ? row.metadata : {};
+    const blob = taskPlanStateWsBlob(metadata);
+    if (!blob.plan_id) return;
+    await this.sendTaskPlanState(chatId, blob);
+  }
+
   async maybePushTurnRunWallClock(chatId: string): Promise<void> {
     const terminalRun = this.terminalRunStateForChatId(chatId);
     const startedAt = websocketTurnWallStartedAt(chatId)
@@ -1277,6 +1289,7 @@ export class WebSocketChannel extends BaseChannel {
 
   async hydrateAfterSubscribe(chatId: string): Promise<void> {
     await this.maybePushActiveGoalState(chatId);
+    await this.maybePushTaskPlanState(chatId);
     await this.maybePushTurnRunWallClock(chatId);
   }
 
@@ -3877,6 +3890,7 @@ export class WebSocketChannel extends BaseChannel {
       await this.sendRunStatusSnapshot(connection, chatId);
       await this.sendWebuiQueueSnapshot(connection, chatId);
       await this.maybePushActiveGoalState(chatId);
+      await this.maybePushTaskPlanState(chatId);
       return;
     }
     if (type === "status") {
@@ -4388,6 +4402,15 @@ export class WebSocketChannel extends BaseChannel {
       );
       return;
     }
+    if (message.metadata?.taskPlanStateSync) {
+      await this.sendTaskPlanState(
+        message.chatId,
+        typeof message.metadata.taskPlanState === "object"
+          ? message.metadata.taskPlanState
+          : taskPlanStateWsBlob(),
+      );
+      return;
+    }
     if (message.metadata?.runStatusEvent) {
       await this.sendRunStatus(message.chatId, String(message.metadata.runStatus), {
         startedAt: numberOrNull(message.metadata.startedAt),
@@ -4612,6 +4635,14 @@ export class WebSocketChannel extends BaseChannel {
 
   async sendGoalState(chatId: string, blob: Record<string, any>): Promise<void> {
     await this.broadcast(chatId, { event: "goal_state", chat_id: chatId, goal_state: blob });
+  }
+
+  async sendTaskPlanState(chatId: string, blob: Record<string, any>): Promise<void> {
+    await this.broadcast(chatId, {
+      event: "task_plan_state",
+      chat_id: chatId,
+      task_plan_state: blob,
+    });
   }
 
   async sendRunStatus(chatId: string, status: string, {

@@ -398,6 +398,10 @@ export const agentActions = {
     return { type: "agent/userMessageQueued", ...input };
   },
 
+  pluginFeedbackRecorded(chatId: string, content: string, clientRequestId: string): AppAction {
+    return { type: "agent/pluginFeedbackRecorded", chatId, content, clientRequestId };
+  },
+
   queueItemRemoveStarted(chatId: string, clientRequestId: string): AppAction {
     return { type: "agent/queueItemRemoveStarted", chatId, clientRequestId };
   },

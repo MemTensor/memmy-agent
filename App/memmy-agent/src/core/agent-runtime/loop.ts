@@ -100,6 +100,7 @@ import {
   type GoalTurnInboxEntry,
   type WebuiQueueSteerTransferRecord,
 } from "./goal-runtime.js";
+import { TaskPlanRuntime } from "./task-plan-runtime.js";
 import { resolveToolResultMaxChars, SESSION_TOOL_RESULT_MAX_CHARS_BY_NAME } from "./tool-result-budget.js";
 import { AgentProgressHook } from "./progress-hook.js";
 import { createTurnCancellationBoundary, type TurnCancellationBoundary } from "./turn-cancellation-boundary.js";
@@ -736,6 +737,7 @@ export class AgentLoop {
   startTime: number;
   lastUsageBySession: Map<string, Record<string, number>>;
   goalRuntime: GoalRuntime;
+  taskPlanRuntime: TaskPlanRuntime;
   scheduledGoalSessions: Map<string, { goalId: string; updatedAt: string }>;
   activeTasks: Map<string, any[]>;
   pendingQueues: Map<string, AsyncQueue<InboundMessage>>;
@@ -842,6 +844,10 @@ export class AgentLoop {
       cancelActiveTasks: (sessionKey) => this.cancelActiveTasks(sessionKey),
       scheduleGoalWork: (sessionKey, goal) => this.scheduleGoalWork(sessionKey, goal),
       invalidateGoalWork: (sessionKey) => this.scheduledGoalSessions.delete(sessionKey),
+    });
+    this.taskPlanRuntime = new TaskPlanRuntime({
+      sessions: this.sessions,
+      bus: this.bus,
     });
     this.projectStore = init.projectStore ?? null;
     this.guiTranscriptMirror = init.guiTranscriptMirror ?? null;
@@ -1010,6 +1016,7 @@ export class AgentLoop {
       fileStateStore: this.fileStateStore,
       browserSessionManager: this.browserSessionManager,
       goalRuntime: this.goalRuntime,
+      taskPlanRuntime: this.taskPlanRuntime,
       readonlySkillRoots,
       timezone: this.context.timezone || this.config.agents.defaults.timezone || "UTC",
       runtimeState: this,

@@ -77,6 +77,7 @@ import { AgentAttachmentCard, splitAgentAttachmentName } from "./agent-file-atta
 import { AgentEnvironmentPanel } from "./agent-environment-panel.js";
 import { AgentGoalBar, type AgentGoalControlRequest } from "./agent-goal-bar.js";
 import { AgentQueuedMessageList } from "./agent-queued-message-list.js";
+import { AgentTaskPlanBar } from "./agent-task-plan-bar.js";
 import { AgentThreadMessages, ChatImageLightbox } from "./agent-thread-messages.js";
 import {
   type AgentQuestionCardPayload,
@@ -334,7 +335,6 @@ export interface SubmitAgentComposerMessageInput {
   clearComposer: () => void;
   onChatResolved?: (chatId: string) => void;
   onNewChatMessageSent?: (chatId: string) => void;
-  onMessageAccepted?: (chatId: string, feedback: { message: string; clientRequestId: string }) => void;
   chatSelectionEpoch?: number;
   getChatSelectionEpoch?: () => number;
   scopeKey?: string;
@@ -943,7 +943,6 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
     }));
   }
   input.clearComposer();
-  input.onMessageAccepted?.(chatId, { message: text, clientRequestId });
   if (input.scopeKey) {
     input.dispatch(agentActions.pendingModelPresetCleared(input.scopeKey));
   }
@@ -1040,7 +1039,7 @@ function ComposerCaretMenu(props: {
  */
 export function HomePage() {
   const { clients } = useApiClients();
-  const { calls: pluginUiCalls, openSurface, notifyChatMessage } = usePluginUi();
+  const { calls: pluginUiCalls, openSurface, routeChatFeedback } = usePluginUi();
   const { state, dispatch } = useAppState();
   const modelWorkspace = createModelWorkspace(state.modelConfig);
   const { language, t } = useTranslation();
@@ -1217,6 +1216,9 @@ export function HomePage() {
     ? state.agent.queuedMessagesByChatId[state.agent.currentChatId] ?? []
     : [];
   const currentGoal = state.agent.goalState?.goal_id ? state.agent.goalState : null;
+  const currentTaskPlan = state.agent.taskPlanState?.plan_id
+    ? state.agent.taskPlanState
+    : null;
   const isCurrentGoalActive = currentGoal?.status === "active";
   const currentActiveTurnId = state.agent.currentChatId
     ? state.agent.activeTurnIdByChatId[state.agent.currentChatId] ?? null
@@ -2056,6 +2058,20 @@ export function HomePage() {
     if (runExactLocalSlashCommand(input)) {
       return;
     }
+    const clientRequestId = crypto.randomUUID();
+    const currentChatId = state.agent.currentChatId;
+    if (
+      currentChatId
+      && Boolean(input.trim())
+      && pendingAttachments.length === 0
+      && !input.trimStart().startsWith("/")
+      && routeChatFeedback(currentChatId, { message: input, clientRequestId })
+    ) {
+      dispatch(agentActions.pluginFeedbackRecorded(currentChatId, input, clientRequestId));
+      clearComposerAfterSend(chatScopeKey);
+      track({ name: "agent_send_message", params: { page_path: "/main" }, consentTier: "basic" });
+      return;
+    }
     if (resolvedConversationModel.unavailable) {
       dispatch(agentActions.operationFailed("chat", createAgentOperationError({
         source: "send",
@@ -2077,7 +2093,6 @@ export function HomePage() {
     }
     const sendScopeKey = chatScopeKey;
     if (messageSendLocksRef.current.has(sendScopeKey)) return;
-    const clientRequestId = crypto.randomUUID();
     messageSendLocksRef.current.add(sendScopeKey);
     dispatch(agentActions.messageSendLockUpdated(sendScopeKey, clientRequestId));
     dispatch(agentActions.modelSelectionRequestStarted(
@@ -2092,7 +2107,6 @@ export function HomePage() {
         chatId: state.agent.currentChatId,
         target,
         clientRequestId,
-        onMessageAccepted: notifyChatMessage,
         connection,
         ensureChatSubscription,
         content: agentRoutedPluginPrompt ?? input,
@@ -3586,6 +3600,9 @@ export function HomePage() {
                     onRemove={(clientRequestId) => void removeQueuedMessage(clientRequestId)}
                     onSteer={(clientRequestId) => void steerQueuedMessage(clientRequestId)}
                   />
+                  {currentTaskPlan ? (
+                    <AgentTaskPlanBar plan={currentTaskPlan} />
+                  ) : null}
                   {state.agent.currentChatId && currentGoal ? (
                     <AgentGoalBar
                       chatId={state.agent.currentChatId}
