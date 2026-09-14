@@ -3509,6 +3509,7 @@ export function HomePage() {
                 plugins={installedPlugins}
                 client={clients?.plugins ?? null}
                 uploadFiles={clients ? (files) => clients.memmyAgent.uploadAgentMedia(files) : undefined}
+                asrClient={clients?.asr}
                 onAddArtifact={(artifact) => setCurrentComposerDraft((current) => appendPluginArtifact(current, artifact))}
                 onOpenArtifact={(artifact) => {
                   setPreviewPanelOpen(false);

@@ -41,6 +41,7 @@ import {
   type PluginRegistry
 } from "./adapters/outbound/plugin-registry/index.js";
 import { reconcileBundledPlugins } from "./services/bundled-plugin-bootstrap-service.js";
+import { reconcileEntitledPlugins } from "./services/plugin-entitlement-reconcile-service.js";
 
 export type { BootstrapScenario };
 export { loadCloudServiceEnv };
@@ -175,7 +176,10 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       accountChannel: options.accountChannel,
       memmyAgentAdminClient: options.memmyAgentAdminClient,
       memmyAgentAdminBootstrapSecret: await readAgentGatewayBootstrapSecret(memmyConfigPath),
-      pluginRegistry: configuredPluginRegistry(process.env, bundledCatalog?.registry),
+      pluginRegistry: configuredPluginRegistry(process.env, bundledCatalog?.registry, (): Record<string, string> => {
+        const cloudUuid = appStateStore.repositories.accountSession.getCloudUuid();
+        return cloudUuid ? { authorization: `Bearer ${cloudUuid}` } : {};
+      }),
       trustedBundledPluginRoots: bundledCatalog ? [bundledCatalog.trustedArtifactRoot] : undefined
     });
     pluginService = services.plugins;
@@ -195,6 +199,17 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
         console.warn(`Bundled plugin bootstrap failed for ${failure.pluginId}: ${failure.message}`);
       }
     }
+    // Runs on every launch so an entitled plugin missing after an upgrade is reinstalled.
+    const reconcileEntitlements = async () => {
+      const failures = await reconcileEntitledPlugins({
+        plugins: services.plugins,
+        entitlements: appStateStore.repositories.accountSession.getEntitlements()
+      });
+      for (const failure of failures) {
+        console.warn(`Entitled plugin reconciliation failed for ${failure.pluginId}: ${failure.message}`);
+      }
+    };
+    await reconcileEntitlements();
     const localToken = await permissionManager.getRuntimeToken();
     const composioMcpToken = `mmt_${randomBytes(32).toString("base64url")}`;
     server = createLocalApiServer({
@@ -267,10 +282,11 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
 
 function configuredPluginRegistry(
   env: NodeJS.ProcessEnv,
-  bundledRegistry?: PluginRegistry
+  bundledRegistry?: PluginRegistry,
+  authHeaders?: () => Record<string, string>
 ): PluginRegistry | undefined {
   const baseUrl = env.MEMMY_PLUGIN_REGISTRY_URL?.trim();
-  const remoteRegistry = baseUrl ? createHttpPluginRegistry({ baseUrl }) : undefined;
+  const remoteRegistry = baseUrl ? createHttpPluginRegistry({ baseUrl, authHeaders }) : undefined;
   return bundledRegistry
     ? createCompositePluginRegistry(bundledRegistry, remoteRegistry)
     : remoteRegistry;

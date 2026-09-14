@@ -32,6 +32,8 @@ export interface CreatePluginArtifactManagerOptions {
   fetchFn?: typeof fetch;
   /** Canonical desktop resource roots allowed to provide immutable local plugin packages. */
   trustedLocalRoots?: readonly string[];
+  /** Supplies account credentials so a registry can gate entitlement-restricted downloads. */
+  authHeaders?: () => Record<string, string>;
 }
 
 export function createPluginArtifactManager(options: CreatePluginArtifactManagerOptions): PluginArtifactManager {
@@ -44,7 +46,7 @@ export function createPluginArtifactManager(options: CreatePluginArtifactManager
       if (!release.artifact) return { artifactHash: null, rootPath: null };
       const bytes = "localPath" in release.artifact && release.artifact.localPath
         ? await readTrustedLocalArtifact(release.artifact.localPath, trustedLocalRoots)
-        : await downloadArtifact(assertArtifactUrl(release.artifact.url), fetchFn);
+        : await downloadArtifact(assertArtifactUrl(release.artifact.url), fetchFn, options.authHeaders?.());
       const digest = createHash("sha256").update(bytes).digest("hex");
       if (digest !== release.artifact.sha256.toLowerCase()) {
         throw Object.assign(new Error("Plugin artifact SHA-256 mismatch"), { code: "plugin_invalid" });
@@ -125,12 +127,17 @@ async function readTrustedLocalArtifact(path: string, trustedRoots: readonly str
   return bytes;
 }
 
-async function downloadArtifact(url: URL, fetchFn: typeof fetch): Promise<Buffer> {
+async function downloadArtifact(url: URL, fetchFn: typeof fetch, authHeaders?: Record<string, string>): Promise<Buffer> {
   const response = await fetchFn(url, {
-    headers: { accept: "application/zip, application/octet-stream" },
+    headers: { accept: "application/zip, application/octet-stream", ...authHeaders },
     redirect: "error",
     signal: AbortSignal.timeout(60_000)
   });
+  if (response.status === 401 || response.status === 403) {
+    throw Object.assign(new Error("Plugin artifact is not available for this account"), {
+      code: "plugin_entitlement_required" as const
+    });
+  }
   if (!response.ok) throw new Error(`Plugin artifact download failed with ${response.status}`);
   const declared = Number(response.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > MAX_ARCHIVE_BYTES) throw new Error("Plugin artifact exceeded size limit");

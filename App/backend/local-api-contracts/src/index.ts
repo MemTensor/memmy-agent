@@ -1078,9 +1078,27 @@ export type ModelConfigView = z.infer<typeof ModelConfigViewSchema>;
 export const AsrTranscriptionInputSchema = z.object({
     audioBase64: z.string().min(1),
     mimeType: z.string().min(1),
-    durationMs: z.number().int().nonnegative().optional()
+    durationMs: z.number().int().nonnegative().optional(),
+    /** Requests speaker separation. Honoured only by upstream models that support it. */
+    diarization: z.boolean().optional(),
+    /** Domain terms biasing recognition, e.g. jargon the base model mistranscribes. */
+    hotwords: z.array(z.string().trim().min(1).max(64)).max(200).optional()
 });
 export type AsrTranscriptionInput = z.infer<typeof AsrTranscriptionInputSchema>;
+
+/**
+ * One diarized utterance.
+ *
+ * `speakerId` is scoped to a single transcription: the same index in two
+ * transcriptions does not denote the same person.
+ */
+export const AsrTranscriptSegmentSchema = z.object({
+    text: z.string(),
+    speakerId: z.number().int().nonnegative().optional(),
+    startMs: z.number().int().nonnegative().optional(),
+    endMs: z.number().int().nonnegative().optional()
+});
+export type AsrTranscriptSegment = z.infer<typeof AsrTranscriptSegmentSchema>;
 
 /** Schema for asr transcription response. */
 export const AsrTranscriptionResponseSchema = z.object({
@@ -1088,7 +1106,9 @@ export const AsrTranscriptionResponseSchema = z.object({
     modelId: z.string().trim().min(1),
     provider: CatalogProviderIdSchema,
     source: z.enum(["account", "byok"]),
-    transcribedAt: z.string().datetime()
+    transcribedAt: z.string().datetime(),
+    /** Present only when diarization was requested and the upstream model returned it. */
+    segments: z.array(AsrTranscriptSegmentSchema).optional()
 });
 export type AsrTranscriptionResponse = z.infer<typeof AsrTranscriptionResponseSchema>;
 

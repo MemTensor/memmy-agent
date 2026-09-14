@@ -13,6 +13,8 @@ import type { SecretStore } from "../secret-store.js";
 
 export interface AccountSessionRepository {
   get(): AccountSessionView;
+  /** Reads the cloud-issued grants held by the active account, e.g. `plugin:<pluginId>`. */
+  getEntitlements(): string[];
   /** Reads the explicit channel used to create the active login session. */
   getAuthChannel(): AccountChannel | null;
   /** Reads the channel bound to a persisted cloud credential without activating it. */
@@ -82,6 +84,12 @@ export function createAccountSessionRepository(db: DatabaseSync, secretStore: Se
         isNewUser: false,
         profile: toProfileView(row)
       });
+    },
+
+    getEntitlements() {
+      const row = getActiveAccountRow(db);
+      if (!row?.user_id || !row.raw_profile_json) return [];
+      return readEntitlements(parseRawProfile(row.raw_profile_json)?.entitlements);
     },
 
     getAuthChannel() {
@@ -407,6 +415,23 @@ function resolveLegacyAccountAuthChannel(row: AccountSessionRow | null): Account
   );
   if (hasEmail === hasPhone) return null;
   return hasEmail ? "email" : "phone";
+}
+
+/**
+ * Reads account entitlements out of the persisted raw profile.
+ *
+ * Entitlements ride along in raw_profile_json rather than a dedicated column so the cloud can add
+ * grants without a client migration, matching how every other unrecognised profile field is kept.
+ *
+ * @param value the raw entitlements field.
+ * @returns the deduplicated non-empty grants; returns an empty array when absent or malformed.
+ */
+function readEntitlements(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const entries = value
+    .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+    .filter((entry) => entry.length > 0);
+  return [...new Set(entries)];
 }
 
 /**

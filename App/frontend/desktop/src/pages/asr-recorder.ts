@@ -9,6 +9,13 @@ const MICROPHONE_PERMISSION_ERROR_MESSAGE = formatMessage(zhCNMessages["asr.erro
 export type AsrRecorderStatus = "idle" | "checkingPermission" | "requestingPermission" | "starting" | "recording" | "paused" | "transcribing" | "error";
 export type MicrophoneAccessStatus = "not-determined" | "granted" | "denied" | "restricted" | "unsupported";
 
+export interface AsrTranscribeOptions {
+  /** Requests speaker separation. Honoured only by upstream models that support it. */
+  diarization?: boolean;
+  /** Domain terms biasing recognition. */
+  hotwords?: readonly string[];
+}
+
 export interface AsrRecorder {
   status: AsrRecorderStatus;
   error: Error | null;
@@ -19,7 +26,7 @@ export interface AsrRecorder {
   pause(): void;
   resume(): void;
   cancel(): void;
-  finishAndTranscribe(): Promise<AsrTranscriptionResponse>;
+  finishAndTranscribe(options?: AsrTranscribeOptions): Promise<AsrTranscriptionResponse>;
 }
 
 export interface EncodedAudio {
@@ -153,7 +160,7 @@ export function useAsrRecorder(asrClient?: AsrClient, options: AsrRecorderOption
     setStatus("recording");
   }, []);
 
-  const finishAndTranscribe = useCallback(async () => {
+  const finishAndTranscribe = useCallback(async (transcribeOptions: AsrTranscribeOptions = {}) => {
     if (!asrClient) {
       throw new Error("ASR client is not configured");
     }
@@ -175,7 +182,9 @@ export function useAsrRecorder(asrClient?: AsrClient, options: AsrRecorderOption
       const result = await asrClient.transcribe({
         audioBase64: encoded.audioBase64,
         mimeType: encoded.mimeType,
-        durationMs
+        durationMs,
+        ...(transcribeOptions.diarization ? { diarization: true } : {}),
+        ...(transcribeOptions.hotwords?.length ? { hotwords: [...transcribeOptions.hotwords] } : {})
       });
       chunksRef.current = [];
       setStatus("idle");

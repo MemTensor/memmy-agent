@@ -19,6 +19,7 @@ import {
   ListChecks,
   LoaderCircle,
   MessageSquarePlus,
+  Mic,
   Paperclip,
   X
 } from "lucide-react";
@@ -28,8 +29,10 @@ import type {
   PluginArtifactRef,
   PluginInteractionRequest
 } from "@memmy/local-api-contracts";
+import type { AsrClient } from "../api/asr-client.js";
 import type { UploadAgentMediaInput, UploadedAgentMedia } from "../api/memmy-agent-client.js";
 import type { PluginsClient } from "../api/plugins-client.js";
+import { useAsrRecorder } from "./asr-recorder.js";
 import { usePluginChatFeedback, type PluginChatFeedback, type PluginUiCall } from "../app/plugin-ui-context.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { classifyAgentAttachmentFile } from "../lib/agent-attachment.js";
@@ -48,6 +51,8 @@ interface PluginCapabilityHostProps {
   plugins: InstalledPlugin[];
   client: (Pick<PluginsClient, "getUi" | "cancel" | "respond"> & Partial<Pick<PluginsClient, "readArtifact">>) | null;
   uploadFiles?: (files: UploadAgentMediaInput[]) => Promise<UploadedAgentMedia[]>;
+  /** Backs `audio-record` interactions; the Host transcribes so plugins never receive raw audio. */
+  asrClient?: AsrClient;
   onAddArtifact?: (artifact: PluginArtifactRef) => void;
   onOpenArtifact?: (artifact: PluginArtifactRef) => void;
 }
@@ -110,6 +115,7 @@ export function PluginCapabilityHost(props: PluginCapabilityHostProps) {
             onRespond={respond}
             onCancel={cancel}
             onUploadFiles={props.uploadFiles}
+            asrClient={props.asrClient}
             onAddArtifact={props.onAddArtifact}
             onOpenArtifact={props.onOpenArtifact}
             onReadArtifact={props.client?.readArtifact}
@@ -147,6 +153,7 @@ function GenericPluginCards(props: {
   onRespond(interactionId: string, response: unknown): Promise<void>;
   onCancel(): Promise<void>;
   onUploadFiles?: (files: UploadAgentMediaInput[]) => Promise<UploadedAgentMedia[]>;
+  asrClient?: AsrClient;
   onAddArtifact?: (artifact: PluginArtifactRef) => void;
   onOpenArtifact?: (artifact: PluginArtifactRef) => void;
   onReadArtifact?: PluginsClient["readArtifact"];
@@ -159,7 +166,7 @@ function GenericPluginCards(props: {
         if (event.type === "progress") return terminal ? null : <ProgressCard key="progress" event={event} canCancel={Boolean(event.cancellable)} onCancel={props.onCancel} />;
         if (event.type === "task-list") return terminal ? null : <TaskCard key="tasks" event={event} />;
         if (event.type === "interaction") {
-          return terminal ? null : <InteractionCard key={`interaction:${event.request.interactionId}`} request={event.request} conversationId={props.conversationId} pluginId={props.pluginId} onRespond={props.onRespond} onUploadFiles={props.onUploadFiles} />;
+          return terminal ? null : <InteractionCard key={`interaction:${event.request.interactionId}`} request={event.request} conversationId={props.conversationId} pluginId={props.pluginId} onRespond={props.onRespond} onUploadFiles={props.onUploadFiles} asrClient={props.asrClient} />;
         }
         if (event.type === "error") return <ErrorCard key="error" event={event} />;
         return null;
@@ -251,6 +258,7 @@ function InteractionCard(props: {
   request: PluginInteractionRequest;
   onRespond(interactionId: string, response: unknown): Promise<void>;
   onUploadFiles?: (files: UploadAgentMediaInput[]) => Promise<UploadedAgentMedia[]>;
+  asrClient?: AsrClient;
 }) {
   const { t } = useTranslation();
   const [value, setValue] = useState("");
@@ -281,6 +289,10 @@ function InteractionCard(props: {
 
   if (props.request.type === "file-input") {
     return <FileInputCard conversationId={props.conversationId} pluginId={props.pluginId} request={props.request} title={title} description={description} disabled={disabled} status={status} onStatus={setStatus} onRespond={props.onRespond} onUploadFiles={props.onUploadFiles} />;
+  }
+
+  if (props.request.type === "audio-record") {
+    return <AudioRecordCard request={props.request} title={title} description={description} status={status} onStatus={setStatus} onRespond={props.onRespond} asrClient={props.asrClient} />;
   }
 
   return (
@@ -335,6 +347,117 @@ function InteractionCard(props: {
       </div>
     </div>
   );
+}
+
+/**
+ * Records microphone audio and hands the plugin the transcript.
+ *
+ * The audio never reaches the plugin: the Host transcribes it and responds with
+ * text only, so a plugin needs no microphone or raw-audio access. Speaker
+ * separation is requested through the payload and applied upstream, which is why
+ * the card exposes no speaker controls.
+ */
+function AudioRecordCard(props: {
+  request: PluginInteractionRequest;
+  title: string;
+  description: string | null;
+  status: "idle" | "submitting" | "answered" | "error";
+  onStatus(value: "idle" | "submitting" | "answered" | "error"): void;
+  onRespond(interactionId: string, response: unknown): Promise<void>;
+  asrClient?: AsrClient;
+}) {
+  const { t } = useTranslation();
+  const payload = asRecord(props.request.payload);
+  const diarization = payload.diarization === true;
+  const hotwords = readStrings(payload.hotwords);
+  const allowSkip = payload.allowSkip === true;
+  const recorder = useAsrRecorder(props.asrClient);
+  const [elapsedMs, setElapsedMs] = useState(0);
+  const answered = props.status === "answered";
+  const busy = props.status === "submitting" || recorder.isTranscribing;
+
+  useEffect(() => {
+    if (recorder.status !== "recording") return;
+    const timer = window.setInterval(() => setElapsedMs((current) => current + 1_000), 1_000);
+    return () => window.clearInterval(timer);
+  }, [recorder.status]);
+
+  const finish = async () => {
+    props.onStatus("submitting");
+    try {
+      const result = await recorder.finishAndTranscribe({ diarization, hotwords });
+      await props.onRespond(props.request.interactionId, {
+        text: result.text,
+        segments: result.segments ?? [],
+        durationMs: elapsedMs,
+        transcribedAt: result.transcribedAt
+      });
+      props.onStatus("answered");
+    } catch {
+      props.onStatus("error");
+    }
+  };
+  const skip = async () => {
+    recorder.cancel();
+    props.onStatus("submitting");
+    try {
+      await props.onRespond(props.request.interactionId, { text: "", segments: [], durationMs: 0 });
+      props.onStatus("answered");
+    } catch {
+      props.onStatus("error");
+    }
+  };
+
+  return (
+    <div className="rounded-card border border-action-sky/25 bg-action-sky/[0.04] px-3 py-3">
+      <div className="flex items-start gap-2">
+        <Mic size={16} className="mt-0.5 shrink-0 text-action-sky" aria-hidden="true" />
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium text-text-ink/80">{props.title}</p>
+          {props.description ? <p className="mt-1 text-xs leading-relaxed text-text-ink/50">{props.description}</p> : null}
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            {recorder.isRecording ? (
+              <>
+                {recorder.status === "paused" ? (
+                  <ResponseButton disabled={busy || answered} onClick={() => recorder.resume()}>{t("plugin.ui.audio.resume")}</ResponseButton>
+                ) : (
+                  <ResponseButton disabled={busy || answered} secondary onClick={() => recorder.pause()}>{t("plugin.ui.audio.pause")}</ResponseButton>
+                )}
+                <ResponseButton disabled={busy || answered} onClick={() => void finish()}>{t("plugin.ui.audio.stop")}</ResponseButton>
+                <ResponseButton disabled={busy || answered} secondary onClick={() => { recorder.cancel(); setElapsedMs(0); }}>{t("plugin.ui.audio.discard")}</ResponseButton>
+              </>
+            ) : (
+              <ResponseButton
+                disabled={busy || answered || recorder.isStarting || !props.asrClient}
+                onClick={() => { setElapsedMs(0); void recorder.start().catch(() => undefined); }}
+              >
+                {t("plugin.ui.audio.start")}
+              </ResponseButton>
+            )}
+            {allowSkip && !recorder.isRecording && !answered ? (
+              <ResponseButton disabled={busy} secondary onClick={() => void skip()}>{t("plugin.ui.skip")}</ResponseButton>
+            ) : null}
+            <span className="text-xs tabular-nums text-text-ink/45" role="timer" aria-label={t("plugin.ui.audio.elapsed")}>
+              {formatElapsed(elapsedMs)}
+            </span>
+          </div>
+          {recorder.isTranscribing ? <p className="mt-2 text-xs text-text-ink/50" role="status">{t("plugin.ui.audio.transcribing")}</p> : null}
+          {!props.asrClient ? <p className="mt-2 text-xs text-status-error" role="alert">{t("plugin.ui.audio.unavailable")}</p> : null}
+          {recorder.error && props.status !== "answered" ? <p className="mt-2 text-xs text-status-error" role="alert">{recorder.error.message}</p> : null}
+          {answered ? <p className="mt-2 text-xs text-status-success" role="status">{t("plugin.ui.answered")}</p> : null}
+          {props.status === "error" ? <p className="mt-2 text-xs text-status-error" role="alert">{t("plugin.ui.responseFailed")}</p> : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Formats a recording duration as mm:ss. */
+function formatElapsed(elapsedMs: number): string {
+  const totalSeconds = Math.floor(elapsedMs / 1_000);
+  const minutes = String(Math.floor(totalSeconds / 60)).padStart(2, "0");
+  const seconds = String(totalSeconds % 60).padStart(2, "0");
+  return `${minutes}:${seconds}`;
 }
 
 function FileInputCard(props: {

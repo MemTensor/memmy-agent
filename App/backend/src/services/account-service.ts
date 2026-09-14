@@ -52,6 +52,8 @@ export interface CreateAccountServiceOptions {
   now?: () => Date;
   /** Verification channel supported by the current desktop package. */
   accountChannel?: AccountChannel;
+  /** Invoked after the cloud profile is refreshed so entitlement-gated features can be reconciled. */
+  onAccountGrantsRefreshed?: () => Promise<void>;
 }
 
 /** Creates create account service. */
@@ -117,7 +119,8 @@ export function createAccountService(options: CreateAccountServiceOptions): Acco
         cloudClient: options.cloudClient,
         accountSessionRepository: options.accountSessionRepository,
         session,
-        cloudUuid: loginResult.uuid
+        cloudUuid: loginResult.uuid,
+        onGrantsRefreshed: options.onAccountGrantsRefreshed
       });
       return AccountLoginResultViewSchema.parse({
         session: refreshedSession,
@@ -204,6 +207,7 @@ export function createAccountService(options: CreateAccountServiceOptions): Acco
         accountSessionRepository: options.accountSessionRepository,
         session,
         cloudUuid: cloudUuid ?? undefined,
+        onGrantsRefreshed: options.onAccountGrantsRefreshed,
         onAuthenticationInvalid: () => clearLocalAccountState(
           options,
           session.authenticated ? session.profile.userId : undefined,
@@ -265,6 +269,7 @@ async function refreshCloudGuideState(input: {
   accountSessionRepository: AccountSessionRepository;
   session: AccountSessionView;
   cloudUuid?: string;
+  onGrantsRefreshed?: () => Promise<void>;
   onAuthenticationInvalid?: () => Promise<void>;
 }): Promise<AccountSessionView> {
   if (!input.session.authenticated) {
@@ -285,12 +290,17 @@ async function refreshCloudGuideState(input: {
     }
     throw error;
   }
-  return AccountSessionViewSchema.parse(
+  const refreshed = AccountSessionViewSchema.parse(
     input.accountSessionRepository.upsert({
       profile: toSessionProfileInput(cloudProfile),
       isNewUser: input.session.isNewUser
     })
   );
+  // Entitlement-gated features reconcile in the background; a failure here must not fail the login.
+  await input.onGrantsRefreshed?.().catch((error: unknown) => {
+    console.warn(`Account grant reconciliation failed: ${error instanceof Error ? error.message : String(error)}`);
+  });
+  return refreshed;
 }
 
 function isUnauthorized(error: unknown): boolean {

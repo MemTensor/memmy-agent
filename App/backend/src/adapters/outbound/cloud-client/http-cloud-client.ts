@@ -14,6 +14,7 @@ import {
   QWEN_ASR_MODEL_ID,
   TokenQuotaEligibilitySchema,
   TokenUsageDtoSchema,
+  type AsrTranscriptSegment,
   type AuthorizeIntegrationResponse,
   type AccountInvitationView,
   type IntegrationCapabilitiesResponse,
@@ -347,7 +348,9 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
         body: {
           audioBase64: input.audioBase64,
           mimeType: input.mimeType,
-          ...(input.durationMs === undefined ? {} : { durationMs: input.durationMs })
+          ...(input.durationMs === undefined ? {} : { durationMs: input.durationMs }),
+          ...(input.diarization ? { diarization: true } : {}),
+          ...(input.hotwords?.length ? { hotwords: [...input.hotwords] } : {})
         },
         lang: "zh",
         bearerCredential: input.uuid
@@ -523,6 +526,7 @@ function toCloudAccountProfile(data: Record<string, unknown>): CloudAccountProfi
     planType: readString(data.planType),
     hasFinishedGuide: readNullableBoolean(data.hasFinishedGuide),
     improvementProgramGranted: readNullableBoolean(data.improvementProgramGranted ?? data.improvement_program_granted),
+    entitlements: readStringArray(data.entitlements ?? data.entitlementList ?? data.entitlement_list),
     region: readString(data.region),
     registeredAt: readIsoTime(data.registeredAt, data.registerTime, data.createdAt, data.created_at, data.createTime, data.create_time),
     rawProfile
@@ -740,11 +744,38 @@ function toOkResponse(value: unknown): OkResponse {
  */
 function toCloudAsrTranscriptionResult(value: unknown): CloudAsrTranscriptionResult {
   const record = asRecord(value);
+  const segments = readAsrSegments(record.segments);
   return {
     text: readString(record.text) ?? "",
     modelId: QWEN_ASR_MODEL_ID,
-    provider: ASR_PROVIDER
+    provider: ASR_PROVIDER,
+    ...(segments ? { segments } : {})
   };
+}
+
+/**
+ * Maps the Cloud diarization segments into local transcript segments.
+ *
+ * @param value the raw segments field.
+ * @returns the segments carrying text; returns null when diarization was not returned.
+ */
+function readAsrSegments(value: unknown): AsrTranscriptSegment[] | null {
+  if (!Array.isArray(value)) return null;
+  const segments = value.flatMap((entry) => {
+    const record = asRecord(entry);
+    const text = readString(record.text);
+    if (!text) return [];
+    const speakerId = readOptionalNonNegativeInteger(record.speakerId ?? record.speaker_id);
+    const startMs = readOptionalNonNegativeInteger(record.startMs ?? record.start_ms ?? record.beginTime);
+    const endMs = readOptionalNonNegativeInteger(record.endMs ?? record.end_ms ?? record.endTime);
+    return [{
+      text,
+      ...(speakerId === null ? {} : { speakerId }),
+      ...(startMs === null ? {} : { startMs }),
+      ...(endMs === null ? {} : { endMs })
+    }];
+  });
+  return segments.length ? segments : null;
 }
 
 /**
@@ -1035,6 +1066,22 @@ function readTimestampNumber(value: unknown): number | null {
 }
 
 /**
+ * Reads an optional non-negative integer such as a speaker index or a millisecond offset.
+ *
+ * Distinct from `readNonNegativeInteger`, which defaults to 0: for a speaker index and a
+ * segment start offset 0 is a real value, so absence must stay distinguishable from zero.
+ *
+ * @param value an unknown cloud field.
+ * @returns the integer; returns null when absent or not a non-negative integer.
+ */
+function readOptionalNonNegativeInteger(value: unknown): number | null {
+  const numericValue = typeof value === "number"
+    ? value
+    : typeof value === "string" && /^\d+$/.test(value.trim()) ? Number(value.trim()) : Number.NaN;
+  return Number.isInteger(numericValue) && numericValue >= 0 ? numericValue : null;
+}
+
+/**
  * Reads a string from an unknown value.
  *
  * @param value an unknown cloud field.
@@ -1050,6 +1097,26 @@ function readString(value: unknown): string | null {
   }
 
   return null;
+}
+
+/**
+ * Parses a cloud string-array field such as account entitlements.
+ *
+ * Some cloud deployments send a comma-separated string instead of an array, so both shapes are accepted.
+ *
+ * @param value the raw cloud field value.
+ * @returns the deduplicated non-empty entries; returns null when the field is absent or unusable.
+ */
+function readStringArray(value: unknown): string[] | null {
+  const raw = typeof value === "string" ? value.split(",") : Array.isArray(value) ? value : null;
+  if (!raw) {
+    return null;
+  }
+
+  const entries = raw
+    .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+    .filter((entry) => entry.length > 0);
+  return [...new Set(entries)];
 }
 
 /**
