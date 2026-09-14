@@ -2236,6 +2236,33 @@ export class RuntimeRepository {
     };
   }
 
+  updateEpisodeTitle(
+    episodeId: string,
+    input: { title: string; summary: string; meta?: Record<string, unknown> },
+    at = nowIso()
+  ): EpisodeRecord | undefined {
+    const episode = this.getEpisode(episodeId);
+    if (!episode) return undefined;
+    const meta = input.meta ? { ...episode.meta, ...input.meta } : episode.meta;
+    this.db
+      .prepare(
+        `UPDATE episodes
+         SET title = ?,
+             summary = ?,
+             meta_json = ?,
+             updated_at = ?
+         WHERE id = ?`
+      )
+      .run(input.title, input.summary, toJson(meta), at, episodeId);
+    return {
+      ...episode,
+      title: input.title,
+      summary: input.summary,
+      meta,
+      updatedAt: at
+    };
+  }
+
   latestEpisodeForSession(sessionId: string): EpisodeRecord | undefined {
     const row = this.db
       .prepare(
@@ -2519,7 +2546,32 @@ export class RuntimeRepository {
         `SELECT *
          FROM raw_turns
          WHERE episode_id = ?
-         ORDER BY created_at ASC
+         ORDER BY created_at ASC, id ASC
+         LIMIT ?`
+      )
+      .all(episodeId, limit) as SqlRawTurnRow[];
+    return rows.map(rawTurnFromSql);
+  }
+
+  countRawTurnsByEpisode(episodeId: string): number {
+    const row = this.db
+      .prepare(`SELECT COUNT(*) AS count FROM raw_turns WHERE episode_id = ?`)
+      .get(episodeId) as { count: number } | undefined;
+    return Number(row?.count ?? 0);
+  }
+
+  /**
+   * Newest-first turns, so callers can read an episode's tail without paging the
+   * head.  The ordering mirrors listRawTurnsByEpisode exactly, which keeps a
+   * head window and a tail window from overlapping or skipping a turn.
+   */
+  listLatestRawTurnsByEpisode(episodeId: string, limit = 100): RawTurnRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT *
+         FROM raw_turns
+         WHERE episode_id = ?
+         ORDER BY created_at DESC, id DESC
          LIMIT ?`
       )
       .all(episodeId, limit) as SqlRawTurnRow[];
@@ -7344,6 +7396,7 @@ function evolutionJobPrioritySql(): string {
                OR (job_type = 'embedding' AND ${importedTarget}) THEN 2
              WHEN job_type = 'embedding' THEN 3
              WHEN job_type = 'episode_idle_close' THEN 10
+             WHEN job_type = 'episode_title' THEN 15
              WHEN job_type = 'reflection' THEN 20
              WHEN job_type = 'reward' THEN 30
              WHEN job_type = 'span_big_turn' THEN 35

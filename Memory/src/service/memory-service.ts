@@ -122,6 +122,7 @@ import {
   titleFromImportTrace,
   toolCallsFromUnknown
 } from "./import/memory-import-pipeline.js";
+import { EpisodeTitleService } from "./episode-title/episode-title-service.js";
 import { recordApiLog } from "./model-audit/model-call-audit.js";
 import { ProjectEnvironmentService } from "./project-environment/project-environment-service.js";
 import {
@@ -242,6 +243,7 @@ export class MemoryService {
   private readonly feedbackExperience: FeedbackExperienceService;
   private readonly skillTrials: SkillTrialResolver;
   private readonly episodeReadModel: EpisodeReadModel;
+  private readonly episodeTitle: EpisodeTitleService;
   private readonly importJobs: ImportJobProcessor;
   private readonly l3WorldModelContextReadModel: L3WorldModelContextReadModel;
   private readonly projectEnvironment: ProjectEnvironmentService;
@@ -286,6 +288,13 @@ export class MemoryService {
       repos: this.repos,
       get llm() { return projectEnvironmentOwner.skillLlm; }
     });
+    const episodeTitleOwner = this;
+    this.episodeTitle = new EpisodeTitleService({
+      repos: this.repos,
+      get llm() { return episodeTitleOwner.llm; },
+      nowIso,
+      namespaceIdFromSession
+    });
     const workerHandlerOwner = this;
     this.workerHandlers = createWorkerJobHandlers({
       repos: this.repos,
@@ -322,6 +331,9 @@ export class MemoryService {
         },
         workMemory: {
           extract: (job) => this.workMemory.extract(job)
+        },
+        episodeTitle: {
+          generate: (job) => this.episodeTitle.generate(job)
         }
       }
     });

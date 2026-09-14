@@ -145,8 +145,11 @@ function createRejectingCaptureLlm(calls: string[]): LlmClient {
     isConfigured() {
       return true;
     },
-    async complete() {
-      return "{}";
+    async complete(_messages, options) {
+      // Titling runs for every episode, including one whose only candidate L1 is rejected.
+      return options.operation.startsWith("episode_title")
+        ? JSON.stringify({ title: "被拒绝捕获的对话", summary: "该轮没有产生可留存的任务结果。" })
+        : "{}";
     },
     async completeJson<T extends Record<string, unknown>>(
       _messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
@@ -242,7 +245,7 @@ describe("MemoryService / evolution / reward", () => {
       query: "finish the migration scaffold with durable sqlite state and a worker queue",
       answer: "implemented the service scaffold, sqlite schema, raw turn capture, and asynchronous worker queue"
     });
-    expect(complete.jobs.map((job) => job.jobType)).toEqual(["trace_summary", "episode_idle_close"]);
+    expect(complete.jobs.map((job) => job.jobType)).toEqual(["trace_summary", "episode_idle_close", "episode_title"]);
 
     const rewardBeforeClose = db.db.prepare(
       `SELECT COUNT(*) AS count
@@ -291,7 +294,8 @@ describe("MemoryService / evolution / reward", () => {
       userId: "user-implicit-reward",
       status: "queued"
     }).items.map((job) => job.jobType);
-    expect(queuedOrder.slice(0, 2)).toEqual(["trace_summary", "episode_idle_close"]);
+    expect(queuedOrder[0]).toBe("trace_summary");
+    expect(queuedOrder.indexOf("episode_title")).toBeLessThan(queuedOrder.indexOf("episode_idle_close"));
 
     const run = await service.runWorkerOnce(20);
     expect(run.changeSeq).toBeGreaterThan(0);
