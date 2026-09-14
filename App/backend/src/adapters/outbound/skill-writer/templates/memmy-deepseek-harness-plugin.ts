@@ -1,3 +1,5 @@
+import { MEMMY_VERSION } from "../../../../project-version.js";
+
 export const DEEPSEEK_HARNESS_PLUGIN_INDEX = String.raw`import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -608,6 +610,7 @@ export const DEEPSEEK_HARNESS_PLUGIN_CLIENT = String.raw`window.__ModuleLoader__
 export function createDeepseekHarnessPluginPackageManifest(): Record<string, unknown> {
   return {
     name: "@memmy/memmy-memory",
+    version: MEMMY_VERSION,
     private: true,
     type: "module",
     exports: {
