@@ -478,9 +478,10 @@ function FileInputCard(props: {
   const pendingFeedback = useRef<PluginChatFeedback | null>(null);
   const fileDraftKey = JSON.stringify([props.pluginId, props.conversationId, payload.taskId, payload.cardType, payload.targetPaperId]);
   const fileDrafts = usePluginChatFeedback(payload.chatFeedback === true ? props.conversationId : undefined, (feedback) => {
-    if (props.status === "answered") return;
+    if (props.status === "answered") return false;
     pendingFeedback.current = feedback;
     if (!props.disabled) void releaseForChat();
+    return true;
   });
   useEffect(() => { const draft = fileDrafts?.get(fileDraftKey); if (draft) setFiles(draft); }, [fileDraftKey, fileDrafts]);
   useEffect(() => { if (!props.disabled && pendingFeedback.current) void releaseForChat(); }, [props.disabled]);
@@ -788,10 +789,11 @@ function SandboxedPluginRenderer(props: {
   const feedbackEnabled = latestInteraction?.type === "interaction" && asRecord(latestInteraction.request.payload).chatFeedback === true
     && !props.call.events.some((event) => event.type === "result" || event.type === "error");
   usePluginChatFeedback(feedbackEnabled ? props.call.conversationId : undefined, (feedback) => {
-    if (latestInteraction?.type !== "interaction" || answered.current.has(latestInteraction.request.interactionId)) return;
+    if (latestInteraction?.type !== "interaction" || answered.current.has(latestInteraction.request.interactionId)) return false;
     queuedChat.current = feedback;
     iframeRef.current?.contentWindow?.postMessage({ type: "memmy.plugin.chat-feedback", version: 1,
       interactionId: latestInteraction.request.interactionId, ...feedback }, "*");
+    return true;
   });
 
   const rendererMessage = useMemo(() => ({

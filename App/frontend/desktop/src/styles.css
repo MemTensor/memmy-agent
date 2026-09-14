@@ -12038,6 +12038,180 @@ input[type="checkbox"].check-sky:checked::after {
     font-size: 28px;
   }
 }
+.agent-task-plan-bar {
+  overflow: hidden;
+  margin-bottom: 0.5rem;
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 35%, transparent);
+  border-radius: 0.75rem;
+  background: color-mix(in srgb, var(--color-background-paper) 96%, transparent);
+}
+
+.agent-task-plan-bar--blocked {
+  border-color: color-mix(in srgb, var(--color-status-error) 25%, transparent);
+}
+
+.agent-task-plan-bar__header {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  border: 0;
+  background: transparent;
+  padding: 0.55rem 0.625rem;
+  color: var(--color-text-ink);
+  text-align: left;
+  cursor: pointer;
+}
+
+.agent-task-plan-bar__header:hover {
+  background: color-mix(in srgb, var(--color-canvas-oat) 48%, transparent);
+}
+
+.agent-task-plan-bar__header:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-action-sky) 36%, transparent);
+  outline-offset: -2px;
+}
+
+.agent-task-plan-bar__heading,
+.agent-task-plan-bar__summary {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+}
+
+.agent-task-plan-bar__heading {
+  flex: 1 1 auto;
+  gap: 0.5rem;
+}
+
+.agent-task-plan-bar__heading > svg {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  color: var(--color-action-sky);
+}
+
+.agent-task-plan-bar__title {
+  overflow: hidden;
+  font-size: 0.8rem;
+  font-weight: 600;
+  line-height: 1.25rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-task-plan-bar__summary {
+  flex: 0 0 auto;
+  gap: 0.45rem;
+}
+
+.agent-task-plan-bar__status {
+  border-radius: 9999px;
+  background: color-mix(in srgb, var(--color-canvas-oat) 80%, transparent);
+  padding: 0.16rem 0.48rem;
+  font-size: 0.68rem;
+  font-weight: 600;
+  line-height: 1rem;
+  white-space: nowrap;
+}
+
+.agent-task-plan-bar__status--active,
+.agent-task-plan-bar__status--completed {
+  color: var(--color-action-sky);
+}
+
+.agent-task-plan-bar__status--blocked {
+  color: var(--color-status-error);
+}
+
+.agent-task-plan-bar__progress {
+  color: color-mix(in srgb, var(--color-text-ink) 55%, transparent);
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+
+.agent-task-plan-bar__chevron {
+  width: 15px;
+  height: 15px;
+  color: color-mix(in srgb, var(--color-text-ink) 52%, transparent);
+  transition: transform var(--duration-fast) ease;
+}
+
+.agent-task-plan-bar__header[aria-expanded="false"] .agent-task-plan-bar__chevron {
+  transform: rotate(-90deg);
+}
+
+.agent-task-plan-bar__items {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0;
+  border-top: 1px solid color-mix(in srgb, var(--color-border-stone) 25%, transparent);
+  padding: 0.55rem 0.75rem 0.65rem;
+  list-style: none;
+}
+
+.agent-task-plan-bar__item {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 0.5rem;
+  color: color-mix(in srgb, var(--color-text-ink) 72%, transparent);
+  font-size: 0.76rem;
+  line-height: 1.2rem;
+}
+
+.agent-task-plan-bar__item > svg {
+  width: 15px;
+  height: 15px;
+  margin-top: 0.15rem;
+  flex: 0 0 auto;
+}
+
+.agent-task-plan-bar__item--pending > svg {
+  color: color-mix(in srgb, var(--color-text-ink) 30%, transparent);
+}
+
+.agent-task-plan-bar__item--in_progress {
+  color: var(--color-text-ink);
+  font-weight: 500;
+}
+
+.agent-task-plan-bar__item--in_progress > svg {
+  color: var(--color-action-sky);
+  animation: agent-task-plan-spin 1.2s linear infinite;
+}
+
+.agent-task-plan-bar__item--completed {
+  color: color-mix(in srgb, var(--color-text-ink) 44%, transparent);
+}
+
+.agent-task-plan-bar__item--completed > svg {
+  color: var(--color-action-sky);
+}
+
+.agent-task-plan-bar__item--blocked,
+.agent-task-plan-bar__item--blocked > svg {
+  color: var(--color-status-error);
+}
+
+@keyframes agent-task-plan-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-task-plan-bar__item--in_progress > svg {
+    animation: none;
+  }
+
+  .agent-task-plan-bar__chevron {
+    transition: none;
+  }
+}
+
 .agent-goal-bar {
   position: relative;
   container-type: inline-size;

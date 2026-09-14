@@ -51,6 +51,7 @@ export class ToolContext extends RequestContext {
   execSessionManager?: any;
   browserSessionManager?: any;
   goalRuntime?: any;
+  taskPlanRuntime?: any;
   readonlySkillRoots?: readonly string[];
   timezone: string;
 
@@ -65,6 +66,7 @@ export class ToolContext extends RequestContext {
     this.execSessionManager = init.execSessionManager;
     this.browserSessionManager = init.browserSessionManager;
     this.goalRuntime = init.goalRuntime;
+    this.taskPlanRuntime = init.taskPlanRuntime;
     this.readonlySkillRoots = init.readonlySkillRoots;
     this.timezone = init.timezone ?? "UTC";
   }

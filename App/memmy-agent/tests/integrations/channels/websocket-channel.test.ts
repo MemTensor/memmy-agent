@@ -2436,6 +2436,29 @@ describe("WebSocket channel", () => {
     expect(sent(ws)).toMatchObject({ event: "goal_state", goal_state: { active: true, objective: "ship" } });
   });
 
+  it("emits persisted task plan state per chat", async () => {
+    const channel = new WebSocketChannel({}, new MessageBus());
+    const ws = connection();
+    channel.attachConnection(ws, "chat-1");
+
+    await channel.sendTaskPlanState("chat-1", {
+      plan_id: "32f2868d-ae25-4f47-b33b-17f474eecc3a",
+      title: "Ship task plan",
+      status: "active",
+      items: [{ id: "implement", content: "Implement", status: "in_progress" }],
+      created_at: "2026-09-14T06:00:00.000Z",
+      updated_at: "2026-09-14T06:01:00.000Z",
+    });
+
+    expect(sent(ws)).toMatchObject({
+      event: "task_plan_state",
+      task_plan_state: {
+        title: "Ship task plan",
+        items: [{ id: "implement", status: "in_progress" }],
+      },
+    });
+  });
+
   it("publishes committed Goal state before the matching control result", async () => {
     const root = tempDataDir();
     const bus = new MessageBus();
