@@ -7,6 +7,7 @@ export type WindowsStoreUpdateCommand =
   | "check"
   | "download-silent"
   | "download-user"
+  | "stage-store-update-finalizer"
   | "startup-status"
   | "startup-enable"
   | "startup-disable";
@@ -72,17 +73,38 @@ export interface WindowsStoreStartupTaskResult {
   state: WindowsStoreStartupTaskState;
 }
 
+export interface WindowsStoreFinalizerStagedResult {
+  type: "finalizer-staged";
+  attemptId: string;
+  path: string;
+  externalReadyPath: string;
+  installerReadyPath: string;
+  resultPath: string;
+  logPath: string;
+  size: number;
+  sha256: string;
+}
+
 export type WindowsStoreUpdateResult =
   | WindowsStorePackageIdentityResult
   | WindowsStoreUpdateCheckResult
   | WindowsStoreUpdateActionResult
-  | WindowsStoreStartupTaskResult;
+  | WindowsStoreStartupTaskResult
+  | WindowsStoreFinalizerStagedResult;
 
 export interface RunWindowsStoreUpdateOptions {
   resourcesPath: string;
   command: WindowsStoreUpdateCommand;
   ownerWindowHandle?: string;
+  packageFamilyName?: string;
+  attemptId?: string;
   onProgress?: (progress: WindowsStoreUpdateProgress) => void;
+}
+
+export interface StageWindowsStoreUpdateFinalizerOptions {
+  resourcesPath: string;
+  packageFamilyName: string;
+  attemptId: string;
 }
 
 export type WindowsStoreHelperMessage =
@@ -97,6 +119,15 @@ export async function runWindowsStoreUpdate(
   const args: string[] = [options.command];
   if (options.ownerWindowHandle) {
     args.push("--hwnd", options.ownerWindowHandle);
+  }
+  if (options.command === "stage-store-update-finalizer") {
+    if (!options.packageFamilyName || !options.attemptId) {
+      throw new Error("Microsoft Store finalizer staging requires package identity and an attempt ID");
+    }
+    args.push(
+      "--package-family-name", options.packageFamilyName,
+      "--attempt-id", options.attemptId
+    );
   }
 
   return new Promise((resolve, reject) => {
@@ -171,6 +202,19 @@ export async function runWindowsStoreUpdate(
   });
 }
 
+export async function stageWindowsStoreUpdateFinalizer(
+  options: StageWindowsStoreUpdateFinalizerOptions
+): Promise<WindowsStoreFinalizerStagedResult> {
+  const result = await runWindowsStoreUpdate({
+    ...options,
+    command: "stage-store-update-finalizer"
+  });
+  if (result.type !== "finalizer-staged") {
+    throw new Error(`Microsoft Store update helper returned ${result.type} for finalizer staging`);
+  }
+  return result;
+}
+
 export function nativeWindowHandleToDecimal(handle: Buffer): string {
   if (handle.length >= 8) {
     return handle.readBigUInt64LE(0).toString(10);
@@ -225,6 +269,29 @@ export function parseWindowsStoreHelperMessage(line: string): WindowsStoreHelper
       type: "startup-task",
       taskId: value.taskId,
       state: value.state
+    };
+  }
+  if (value.type === "finalizer-staged") {
+    if (typeof value.attemptId !== "string" || value.attemptId.length === 0 ||
+        typeof value.path !== "string" || value.path.length === 0 ||
+        typeof value.externalReadyPath !== "string" || value.externalReadyPath.length === 0 ||
+        typeof value.installerReadyPath !== "string" || value.installerReadyPath.length === 0 ||
+        typeof value.resultPath !== "string" || value.resultPath.length === 0 ||
+        typeof value.logPath !== "string" || value.logPath.length === 0 ||
+        typeof value.size !== "number" || !Number.isSafeInteger(value.size) || value.size <= 0 ||
+        typeof value.sha256 !== "string" || !/^[0-9a-f]{64}$/iu.test(value.sha256)) {
+      throw new Error("Microsoft Store update helper returned an invalid finalizer staging result");
+    }
+    return {
+      type: "finalizer-staged",
+      attemptId: value.attemptId,
+      path: value.path,
+      externalReadyPath: value.externalReadyPath,
+      installerReadyPath: value.installerReadyPath,
+      resultPath: value.resultPath,
+      logPath: value.logPath,
+      size: value.size,
+      sha256: value.sha256.toLowerCase()
     };
   }
   if (value.type === "progress") {

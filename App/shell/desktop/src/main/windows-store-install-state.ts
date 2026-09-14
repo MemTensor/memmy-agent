@@ -10,6 +10,7 @@ export type WindowsStoreInstallStatus = "installing" | "completed" | "failed";
 
 export interface WindowsStoreInstallState {
   schemaVersion: 2;
+  attemptId?: string;
   mode: WindowsStoreInstallMode;
   status: WindowsStoreInstallStatus;
   baselinePackageVersion: string;
@@ -27,6 +28,7 @@ export interface WindowsStoreInstallState {
 }
 
 interface CreateWindowsStoreInstallStateOptions {
+  attemptId: string;
   mode: WindowsStoreInstallMode;
   baselinePackageVersion: string;
   baselinePackageFullName: string;
@@ -55,6 +57,7 @@ export const createWindowsStoreInstallState = (
   const timestamp = (options.now ?? new Date()).toISOString();
   return {
     schemaVersion: 2,
+    attemptId: normalizeAttemptId(options.attemptId),
     mode: options.mode,
     status: "installing",
     baselinePackageVersion: normalizeVersion(options.baselinePackageVersion),
@@ -175,6 +178,19 @@ export const clearWindowsStoreInstallState = async (statePath: string): Promise<
   await rm(statePath, { force: true });
 };
 
+export const clearWindowsStoreInstallStateForAttempt = async (
+  statePath: string,
+  attemptId: string
+): Promise<boolean> => {
+  const normalizedAttemptId = normalizeAttemptId(attemptId);
+  const current = await readWindowsStoreInstallState(statePath);
+  if (!current || current.attemptId !== normalizedAttemptId) {
+    return false;
+  }
+  await rm(statePath, { force: true });
+  return true;
+};
+
 const markExpiredState = (
   state: WindowsStoreInstallState,
   now: Date
@@ -192,6 +208,7 @@ const parseWindowsStoreInstallState = (contents: string): WindowsStoreInstallSta
   const value = JSON.parse(contents) as unknown;
   if (!isRecord(value) ||
       value.schemaVersion !== 2 ||
+      (value.attemptId !== undefined && typeof value.attemptId !== "string") ||
       (value.mode !== "manual" && value.mode !== "silent") ||
       (value.status !== "installing" && value.status !== "completed" && value.status !== "failed") ||
       typeof value.baselinePackageVersion !== "string" ||
@@ -210,6 +227,9 @@ const parseWindowsStoreInstallState = (contents: string): WindowsStoreInstallSta
   }
   return {
     schemaVersion: 2,
+    ...(typeof value.attemptId === "string"
+      ? { attemptId: normalizeAttemptId(value.attemptId) }
+      : {}),
     mode: value.mode,
     status: value.status,
     baselinePackageVersion: normalizeVersion(value.baselinePackageVersion),
@@ -240,6 +260,14 @@ const normalizeVersion = (value: string): string => {
   const normalized = value.trim();
   if (!/^\d+(?:\.\d+){0,3}$/u.test(normalized)) {
     throw new Error(`Invalid Windows package version: ${value}`);
+  }
+  return normalized;
+};
+
+const normalizeAttemptId = (value: string): string => {
+  const normalized = value.trim().toLowerCase();
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(normalized)) {
+    throw new Error("Microsoft Store update attempt ID is invalid");
   }
   return normalized;
 };

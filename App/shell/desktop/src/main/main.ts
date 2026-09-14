@@ -48,6 +48,7 @@ import {
   resolveDevelopmentRuntimeEntryPaths,
   resolveDevelopmentRuntimeExecutable,
   startManagedRuntimeServices,
+  stopBundledMemoryForStoreUpdate,
   type ManagedRuntimeServices
 } from "./runtime-services.js";
 import { resolveRendererContextMenuCommands, resolveRendererContextMenuMaxLabelWidth, type RendererContextMenuCommand } from "./renderer-context-menu.js";
@@ -138,11 +139,13 @@ import {
   type WindowsStoreUpdateProgress
 } from "./windows-store-update.js";
 import {
+  createWindowsStoreInstallSingleFlight,
   prepareWindowsStoreInstallHandoff,
   startWindowsStoreInstallHandoff
 } from "./windows-store-install-handoff.js";
 import {
   clearWindowsStoreInstallState,
+  clearWindowsStoreInstallStateForAttempt,
   readWindowsStoreInstallState,
   resolveWindowsStoreInstallStatePath,
   resolveWindowsStoreStartupDecision,
@@ -232,6 +235,14 @@ let isRequiredUpdateBackgroundCheckRunning = false;
 let preparedManagedBackgroundUpdateVersion: string | null = null;
 let updateInstallForceExitTimer: ReturnType<typeof setTimeout> | null = null;
 let isManagedUpdateInstallerRunning = false;
+const windowsStoreInstallSingleFlight = createWindowsStoreInstallSingleFlight<DesktopUpdateInstallResult>({
+  onStart: () => {
+    isManagedUpdateInstallerRunning = true;
+  },
+  onFailure: () => {
+    isManagedUpdateInstallerRunning = false;
+  }
+});
 let shouldSuppressActivateAfterPetWindowClose = false;
 const programmaticPetWindowCloses = new WeakSet<BrowserWindow>();
 
@@ -255,6 +266,8 @@ const WINDOWS_UPDATE_INSTALL_FORCE_EXIT_DELAY_MS = 4000;
 const WINDOWS_UPDATE_INSTALL_PROCESS_POLL_MS = 250;
 const WINDOWS_PREPARED_UPDATE_RELAUNCH_DELAY_MS = 500;
 const APP_QUIT_CLEANUP_FORCE_EXIT_DELAY_MS = 5000;
+// Identity (15s) + staging (30s) + installer readiness (15s), with 10s for state/log cleanup.
+const WINDOWS_STORE_QUIT_PREFLIGHT_FORCE_EXIT_DELAY_MS = 70_000;
 const APP_QUIT_ANALYTICS_GRACE_MS = 150;
 const SINGLE_INSTANCE_LOCK_RETRY_INTERVAL_MS = 500;
 const SINGLE_INSTANCE_LOCK_WAIT_DEADLINE_MS = 10000;
@@ -1715,13 +1728,35 @@ async function waitForWindowsPreparedRequiredUpdateBeforeBoot(): Promise<boolean
       await writePackagedStartupLog(
         `boot:prepared-required-update microsoft-store ${preparedUpdate.baselinePackageFullName}`
       );
-      await installWindowsStorePreparedUpdate(
-        createMicrosoftStoreUpdateHandle(
-          preparedUpdate.baselinePackageVersion,
-          preparedUpdate.baselinePackageFullName
-        ),
-        "silent",
-        false
+      try {
+        // No native handoff exists yet, so a bounded stop failure can safely fall back to normal
+        // boot. Runtime startup below will restore Memory if the later staging preflight fails.
+        await stopBundledMemoryForStoreUpdate({
+          runtimeDirectory: join(process.resourcesPath, "memory-runtime"),
+          runtimeExecutable: process.execPath
+        });
+        await writePackagedStartupLog(
+          "boot:prepared-required-update microsoft-store bundled-memory-stopped"
+        );
+      } catch (memoryStopError) {
+        console.warn(
+          "Bundled Memory stop before Microsoft Store replacement failed:",
+          memoryStopError
+        );
+        await writePackagedStartupLog(
+          `boot:prepared-required-update microsoft-store bundled-memory-stop-failed\n${formatStartupError(memoryStopError)}`
+        );
+        throw memoryStopError;
+      }
+      await runWindowsStoreInstallPreflightForQuit(
+        () => installWindowsStorePreparedUpdate(
+          createMicrosoftStoreUpdateHandle(
+            preparedUpdate.baselinePackageVersion,
+            preparedUpdate.baselinePackageFullName
+          ),
+          "silent",
+          false
+        )
       );
       app.quit();
       return true;
@@ -2040,11 +2075,22 @@ async function installPreparedRequiredUpdateOnQuit(): Promise<void> {
   // was blocked by the single-instance lock (and never started) mistakenly triggering an install,
   // and avoids a repeat install by an instance that exited early during boot (e.g. one that already
   // handed off the install in the boot phase).
-  if (!isBootReady || !shouldManageRequiredUpdates() || isManagedUpdateInstallerRunning) {
+  if (!isBootReady || !shouldManageRequiredUpdates()) {
     return;
   }
 
   try {
+    // A manual/repeated IPC request may already be staging this exact Store handoff. Join it before
+    // consulting the generic installer guard so quit cannot start a second, silent handoff.
+    const activeWindowsStoreInstall = windowsStoreInstallSingleFlight.current();
+    if (activeWindowsStoreInstall) {
+      await runWindowsStoreInstallPreflightForQuit(() => activeWindowsStoreInstall.promise);
+      return;
+    }
+    if (isManagedUpdateInstallerRunning) {
+      return;
+    }
+
     const preparedUpdate = await readPreparedRequiredUpdate();
     if (!preparedUpdate) {
       return;
@@ -2054,15 +2100,16 @@ async function installPreparedRequiredUpdateOnQuit(): Promise<void> {
       await writePackagedStartupLog(
         `quit:prepared-required-update microsoft-store ${preparedUpdate.baselinePackageFullName}`
       );
-      await installWindowsStorePreparedUpdate(
-        createMicrosoftStoreUpdateHandle(
-          preparedUpdate.baselinePackageVersion,
-          preparedUpdate.baselinePackageFullName
-        ),
-        "silent",
-        false
+      await runWindowsStoreInstallPreflightForQuit(
+        () => installWindowsStorePreparedUpdate(
+          createMicrosoftStoreUpdateHandle(
+            preparedUpdate.baselinePackageVersion,
+            preparedUpdate.baselinePackageFullName
+          ),
+          "silent",
+          false
+        )
       );
-      stopMemoryServiceForCurrentQuit = true;
       return;
     }
 
@@ -2090,6 +2137,28 @@ async function installPreparedRequiredUpdateOnQuit(): Promise<void> {
       await clearPreparedRequiredUpdate().catch(() => undefined);
     }
     await writePackagedStartupLog(`quit:prepared-required-update skipped\n${formatStartupError(error)}`);
+  }
+}
+
+async function runWindowsStoreInstallPreflightForQuit(
+  startOrJoinInstall: () => Promise<DesktopUpdateInstallResult>
+): Promise<void> {
+  // The ordinary five-second quit watchdog is too short for the helper's three bounded preflight
+  // phases. Keep an overall finite budget, then restore the normal cleanup watchdog afterward.
+  armQuitCleanupForceExitTimer(WINDOWS_STORE_QUIT_PREFLIGHT_FORCE_EXIT_DELAY_MS);
+  try {
+    await startOrJoinInstall();
+    // Readiness is now acknowledged by both helpers. Only at this point may quit stop Memory and
+    // release the packaged executable for replacement.
+    stopMemoryServiceForCurrentQuit = true;
+  } finally {
+    if (isQuitCleanupInProgress) {
+      armQuitCleanupForceExitTimer();
+    } else {
+      // The boot fallback uses this preflight before before-quit starts. Do not leave its watchdog
+      // armed if staging fails and startup continues normally.
+      clearQuitCleanupForceExitTimer();
+    }
   }
 }
 
@@ -3193,7 +3262,23 @@ async function requireCurrentWindowsStoreLegacyCleanupBroker() {
   });
 }
 
-async function installWindowsStorePreparedUpdate(
+function installWindowsStorePreparedUpdate(
+  preparedUpdate: Extract<DesktopPreparedUpdateHandle, { kind: "microsoft-store" }>,
+  mode: WindowsStoreInstallMode,
+  scheduleQuit: boolean
+): Promise<DesktopUpdateInstallResult> {
+  return windowsStoreInstallSingleFlight.run(
+    preparedUpdate.baselinePackageFullName,
+    mode,
+    (originalMode) => performWindowsStorePreparedUpdateInstall(
+      preparedUpdate,
+      originalMode,
+      scheduleQuit
+    )
+  );
+}
+
+async function performWindowsStorePreparedUpdateInstall(
   preparedUpdate: Extract<DesktopPreparedUpdateHandle, { kind: "microsoft-store" }>,
   mode: WindowsStoreInstallMode,
   scheduleQuit: boolean
@@ -3206,14 +3291,9 @@ async function installWindowsStorePreparedUpdate(
       || packageIdentity.currentPackageFullName !== preparedUpdate.baselinePackageFullName) {
     throw new Error("Microsoft Store prepared update baseline no longer matches the running package");
   }
-  const localAppDataPath = process.env.LOCALAPPDATA?.trim();
-  if (!localAppDataPath) {
-    throw new Error("LOCALAPPDATA is unavailable for Microsoft Store update handoff");
-  }
   const handoff = await prepareWindowsStoreInstallHandoff({
     resourcesPath: resolveCurrentWindowsStorePackagedResourcesPath(),
     userDataPath: app.getPath("userData"),
-    localAppDataPath,
     mode,
     baselinePackageVersion: packageIdentity.currentPackageVersion,
     baselinePackageFullName: packageIdentity.currentPackageFullName,
@@ -3222,19 +3302,18 @@ async function installWindowsStorePreparedUpdate(
     packageFamilyName: packageIdentity.packageFamilyName
   });
   try {
-    startWindowsStoreInstallHandoff(handoff, {
+    await startWindowsStoreInstallHandoff(handoff, {
       reportChildError: (error) => {
         console.warn("Microsoft Store update handoff child process failed:", error);
-        void clearWindowsStoreInstallState(handoff.statePath).catch((clearError: unknown) => {
-          console.warn("Microsoft Store update handoff state cleanup failed:", clearError);
-        });
       }
     });
   } catch (error) {
-    await clearWindowsStoreInstallState(handoff.statePath).catch(() => undefined);
+    await clearWindowsStoreInstallStateForAttempt(
+      handoff.statePath,
+      handoff.attemptId
+    ).catch(() => false);
     throw error;
   }
-  isManagedUpdateInstallerRunning = true;
   await clearPreparedRequiredUpdate().catch(() => undefined);
   await clearPreparedRequiredUpdateAttempt().catch(() => undefined);
   if (scheduleQuit) {
@@ -6348,7 +6427,9 @@ function relaunchAfterQuitCleanupIfRequested(): void {
   app.relaunch();
 }
 
-function armQuitCleanupForceExitTimer(): void {
+function armQuitCleanupForceExitTimer(
+  delayMs: number = APP_QUIT_CLEANUP_FORCE_EXIT_DELAY_MS
+): void {
   clearQuitCleanupForceExitTimer();
   quitCleanupForceExitTimer = setTimeout(() => {
     console.warn("quit cleanup timed out; forcing app exit");
@@ -6356,7 +6437,7 @@ function armQuitCleanupForceExitTimer(): void {
     runtimeServices?.terminateSync({ stopMemory: stopMemoryServiceForCurrentQuit });
     relaunchAfterQuitCleanupIfRequested();
     app.exit(0);
-  }, APP_QUIT_CLEANUP_FORCE_EXIT_DELAY_MS);
+  }, delayMs);
   quitCleanupForceExitTimer.unref?.();
 }
 

@@ -444,6 +444,39 @@ export async function preparePackagedRuntimeConfig(
   };
 }
 
+/**
+ * Stops the bundled Memory instance before a prepared Store package replaces the app.
+ *
+ * This path is used before runtime services have started, so it resolves the same configured
+ * Memory home without creating or mutating config and invokes the same bounded CLI stop command
+ * used by normal Desktop shutdown.
+ */
+export async function stopBundledMemoryForStoreUpdate(options: {
+  runtimeDirectory: string;
+  runtimeExecutable?: string;
+  env?: Record<string, string | undefined>;
+  timeoutMs?: number;
+  spawnProcess?: typeof spawn;
+}): Promise<void> {
+  const runtimeConfig = await preparePackagedRuntimeConfig({
+    ...(options.env ? { env: options.env } : {}),
+    ensureDirectories: false,
+    fillMissingAgentSecret: false,
+    writeConfig: false
+  });
+  const runtimeOptions = options.runtimeExecutable
+    ? { runtimeExecutable: options.runtimeExecutable }
+    : {};
+  await runBundledMemoryCli(
+    options.runtimeDirectory,
+    runtimeConfig,
+    runtimeOptions,
+    ["stop", "--home", dirname(runtimeConfig.configPath)],
+    options.timeoutMs ?? MEMORY_STOP_COMMAND_TIMEOUT_MS,
+    options.spawnProcess ?? spawn
+  );
+}
+
 export async function resolvePackagedRuntimeMigrationTargets(
   env: RuntimeEnv = process.env,
   isWindowsStore = false
@@ -1213,16 +1246,17 @@ async function startManagedMemoryService(
 async function runBundledMemoryCli(
   runtimeDirectory: string,
   runtimeConfig: PackagedRuntimeConfig,
-  options: StartManagedRuntimeServicesOptions,
+  options: { runtimeExecutable?: string },
   commandArgs: string[],
-  timeoutMs?: number
+  timeoutMs?: number,
+  spawnProcess: typeof spawn = spawn
 ): Promise<void> {
   const cliEntry = join(runtimeDirectory, "dist", "src", "cli", "index.js");
   if (!existsSync(cliEntry)) throw new Error(`Bundled Memory CLI is missing: ${cliEntry}`);
   const executable = options.runtimeExecutable ?? process.execPath;
   const args = [cliEntry, ...commandArgs];
   await new Promise<void>((resolveInstall, rejectInstall) => {
-    const child = spawn(executable, args, {
+    const child = spawnProcess(executable, args, {
       env: {
         ...process.env,
         ELECTRON_RUN_AS_NODE: "1",
@@ -1253,8 +1287,8 @@ async function runBundledMemoryCli(
     });
     if (timeoutMs !== undefined) {
       const timer = setTimeout(() => {
+        terminateProcessTreeSync(child, STOP_MANAGED_CHILD_GRACE_MS);
         finish(new Error("Bundled Memory command timed out after " + timeoutMs + "ms"));
-        try { child.kill(); } catch { /* the process may already have exited */ }
       }, timeoutMs);
       timeout = timer;
       if (settled) clearTimeout(timer);
@@ -2188,12 +2222,15 @@ export function terminateManagedChildrenForDesktopExit(
   terminateManagedChildrenSync(children.filter((child) => stopMemory || !child.persistOnDesktopExit));
 }
 
-function terminateProcessTreeSync(child: ChildProcess): void {
+function terminateProcessTreeSync(child: ChildProcess, timeoutMs?: number): void {
   if (child.exitCode != null || child.signalCode != null) return;
   const pid = child.pid;
   if (process.platform === "win32" && pid !== undefined) {
     try {
-      execFileSync("taskkill", ["/F", "/T", "/PID", String(pid)], { stdio: "ignore" });
+      execFileSync("taskkill", ["/F", "/T", "/PID", String(pid)], {
+        stdio: "ignore",
+        ...(timeoutMs === undefined ? {} : { timeout: timeoutMs })
+      });
       return;
     } catch {
       // Fall through to the direct-child fallback if taskkill cannot inspect the process tree.

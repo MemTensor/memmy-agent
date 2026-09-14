@@ -1424,6 +1424,26 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).not.toContain("WINDOWS_UPDATE_IN_PROGRESS_PROMPTS");
     expect(mainSource).not.toContain("Memmy 正在更新");
     expect(mainSource).toContain("boot:prepared-required-update win32");
+    const storeFallbackPreflightIndex = windowsPreparedUpdateSource.indexOf(
+      "await runWindowsStoreInstallPreflightForQuit("
+    );
+    const storeFallbackInstallerReadyIndex = windowsPreparedUpdateSource.indexOf(
+      "() => installWindowsStorePreparedUpdate("
+    );
+    const storeFallbackMemoryStopIndex = windowsPreparedUpdateSource.indexOf(
+      "await stopBundledMemoryForStoreUpdate("
+    );
+    const storeFallbackMemoryStopFailureIndex = windowsPreparedUpdateSource.indexOf(
+      "bundled-memory-stop-failed"
+    );
+    const storeFallbackQuitIndex = windowsPreparedUpdateSource.indexOf("app.quit()");
+    expect(storeFallbackMemoryStopIndex).toBeGreaterThanOrEqual(0);
+    expect(storeFallbackMemoryStopFailureIndex).toBeGreaterThan(storeFallbackMemoryStopIndex);
+    expect(windowsPreparedUpdateSource).toContain("throw memoryStopError");
+    expect(mainSource.match(/stopBundledMemoryForStoreUpdate\(/gu)).toHaveLength(1);
+    expect(storeFallbackPreflightIndex).toBeGreaterThan(storeFallbackMemoryStopFailureIndex);
+    expect(storeFallbackInstallerReadyIndex).toBeGreaterThan(storeFallbackPreflightIndex);
+    expect(storeFallbackQuitIndex).toBeGreaterThan(storeFallbackInstallerReadyIndex);
     expect(mainSource).toContain("async function waitForPreparedRequiredUpdateLockStart");
     expect(mainSource).toContain("quit:prepared-required-update lock-start-timeout");
     expect(windowsPreparedUpdateSource).toContain("openBackgroundUpdateInstaller(safeFilePath");
@@ -1532,16 +1552,83 @@ describe("desktop packaged runtime boundaries", () => {
       mainSource,
       "async function installPreparedRequiredUpdateOnQuit"
     );
-    const storeInstallHandoffIndex = installPreparedOnQuitSource.indexOf("await installWindowsStorePreparedUpdate(");
-    const stopMemoryAfterHandoffIndex = installPreparedOnQuitSource.indexOf("stopMemoryServiceForCurrentQuit = true;");
-    expect(storeInstallHandoffIndex).toBeGreaterThanOrEqual(0);
-    expect(stopMemoryAfterHandoffIndex).toBeGreaterThan(storeInstallHandoffIndex);
+    const activeFlightIndex = installPreparedOnQuitSource.indexOf(
+      "windowsStoreInstallSingleFlight.current()"
+    );
+    const managedInstallerGuardIndex = installPreparedOnQuitSource.indexOf(
+      "if (isManagedUpdateInstallerRunning)"
+    );
+    const storeInstallHandoffIndex = installPreparedOnQuitSource.indexOf(
+      "() => installWindowsStorePreparedUpdate("
+    );
+    expect(activeFlightIndex).toBeGreaterThanOrEqual(0);
+    expect(managedInstallerGuardIndex).toBeGreaterThan(activeFlightIndex);
+    expect(storeInstallHandoffIndex).toBeGreaterThan(managedInstallerGuardIndex);
+    expect(installPreparedOnQuitSource).toContain(
+      "() => activeWindowsStoreInstall.promise"
+    );
+    const storeInstallSource = extractFunctionSource(
+      mainSource,
+      "function installWindowsStorePreparedUpdate"
+    );
+    const registerSingleFlightIndex = storeInstallSource.indexOf(
+      "windowsStoreInstallSingleFlight.run("
+    );
+    const performInstallIndex = storeInstallSource.indexOf(
+      "performWindowsStorePreparedUpdateInstall("
+    );
+    const finalizerReadyIndex = storeInstallSource.indexOf(
+      "await startWindowsStoreInstallHandoff(handoff"
+    );
+    const clearPreparedIndex = storeInstallSource.indexOf(
+      "await clearPreparedRequiredUpdate()"
+    );
+    const scheduleManualQuitIndex = storeInstallSource.indexOf(
+      "scheduleQuitForManualUpdateInstall()"
+    );
+    expect(registerSingleFlightIndex).toBeGreaterThanOrEqual(0);
+    expect(performInstallIndex).toBeGreaterThan(registerSingleFlightIndex);
+    expect(finalizerReadyIndex).toBeGreaterThan(performInstallIndex);
+    expect(clearPreparedIndex).toBeGreaterThan(finalizerReadyIndex);
+    expect(scheduleManualQuitIndex).toBeGreaterThan(clearPreparedIndex);
+    expect(mainSource).toContain(
+      "const windowsStoreInstallSingleFlight = createWindowsStoreInstallSingleFlight<DesktopUpdateInstallResult>"
+    );
+    expect(mainSource).toContain("onStart: () => {\n    isManagedUpdateInstallerRunning = true;");
+    expect(mainSource).toContain("onFailure: () => {\n    isManagedUpdateInstallerRunning = false;");
+    expect(storeInstallSource).toContain("clearWindowsStoreInstallStateForAttempt(");
+    const storeQuitPreflightSource = extractFunctionSource(
+      mainSource,
+      "async function runWindowsStoreInstallPreflightForQuit"
+    );
+    const extendedBudgetIndex = storeQuitPreflightSource.indexOf(
+      "armQuitCleanupForceExitTimer(WINDOWS_STORE_QUIT_PREFLIGHT_FORCE_EXIT_DELAY_MS)"
+    );
+    const awaitReadyIndex = storeQuitPreflightSource.indexOf("await startOrJoinInstall()");
+    const stopMemoryAfterReadyIndex = storeQuitPreflightSource.indexOf(
+      "stopMemoryServiceForCurrentQuit = true"
+    );
+    const ordinaryBudgetIndex = storeQuitPreflightSource.lastIndexOf(
+      "armQuitCleanupForceExitTimer()"
+    );
+    expect(mainSource).toContain(
+      "const WINDOWS_STORE_QUIT_PREFLIGHT_FORCE_EXIT_DELAY_MS = 70_000;"
+    );
+    expect(extendedBudgetIndex).toBeGreaterThanOrEqual(0);
+    expect(awaitReadyIndex).toBeGreaterThan(extendedBudgetIndex);
+    expect(stopMemoryAfterReadyIndex).toBeGreaterThan(awaitReadyIndex);
+    expect(ordinaryBudgetIndex).toBeGreaterThan(stopMemoryAfterReadyIndex);
+    expect(storeQuitPreflightSource).toContain("if (isQuitCleanupInProgress)");
+    expect(storeQuitPreflightSource).toContain("clearQuitCleanupForceExitTimer()");
     expect(mainSource).toContain(
       "stopMemoryServiceForCurrentQuit ||= readStopMemoryServiceOnExitSetting();"
     );
     expect(mainSource).toContain("await services?.close({ stopMemory: stopMemoryServiceForCurrentQuit })");
     expect(mainSource).toContain("app.quit()");
     expect(runtimeServicesSource).toContain("STOP_MANAGED_CHILD_GRACE_MS");
+    expect(runtimeServicesSource).toContain(
+      "terminateProcessTreeSync(child, STOP_MANAGED_CHILD_GRACE_MS);"
+    );
     expect(runtimeServicesSource).toContain('process.platform === "win32" ? ["--replace-same-version-on-executable-change"] : []');
     expect(runtimeServicesSource).toContain("waitForManagedChildExit(child, STOP_MANAGED_CHILD_GRACE_MS)");
     expect(interfaceSource).toContain("export type DesktopUpdateMode");

@@ -23,6 +23,7 @@ import {
   spawnNodeService,
   startAgentGatewayWithRecovery,
   startPackagedBrowserPreparation,
+  stopBundledMemoryForStoreUpdate,
   stopManagedChild,
   stopManagedChildrenForDesktopExit,
   syncBundledAgentSkills,
@@ -146,6 +147,76 @@ describe("packaged desktop runtime config", () => {
 
     expect(args).toContain("--skip-service-registration");
     expect(args).toContain("--skip-health-check");
+  });
+
+  it("stops bundled Memory for Store replacement with the configured runtime home", async () => {
+    const root = await makeTempRoot();
+    const runtimeDirectory = join(root, "memory-runtime");
+    const cliEntry = join(runtimeDirectory, "dist", "src", "cli", "index.js");
+    const configPath = join(root, "configured-home", "config.yaml");
+    const runtimeExecutable = join(root, "node.exe");
+    await mkdir(dirname(cliEntry), { recursive: true });
+    await writeFile(cliEntry, "// spawn is injected by the test\n", "utf8");
+    const child = Object.assign(new EventEmitter(), {
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      exitCode: null,
+      signalCode: null,
+      kill: vi.fn()
+    }) as unknown as ChildProcess;
+    const spawnProcess = vi.fn(() => {
+      queueMicrotask(() => child.emit("exit", 0, null));
+      return child;
+    });
+
+    await stopBundledMemoryForStoreUpdate({
+      runtimeDirectory,
+      runtimeExecutable,
+      env: {
+        MEMMY_HOME: join(root, "ignored-default-home"),
+        MEMMY_CONFIG: configPath
+      },
+      spawnProcess: spawnProcess as typeof import("node:child_process").spawn
+    });
+
+    expect(spawnProcess).toHaveBeenCalledWith(
+      runtimeExecutable,
+      [cliEntry, "stop", "--home", dirname(configPath)],
+      expect.objectContaining({
+        env: expect.objectContaining({
+          ELECTRON_RUN_AS_NODE: "1",
+          MEMMY_CLI_ANALYTICS_SKIP: "1",
+          MEMMY_CONFIG: configPath
+        }),
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true
+      })
+    );
+    await expect(stat(dirname(configPath))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("bounds the Store replacement bundled Memory stop command", async () => {
+    const root = await makeTempRoot();
+    const runtimeDirectory = join(root, "memory-runtime");
+    const cliEntry = join(runtimeDirectory, "dist", "src", "cli", "index.js");
+    await mkdir(dirname(cliEntry), { recursive: true });
+    await writeFile(cliEntry, "// spawn is injected by the test\n", "utf8");
+    const child = Object.assign(new EventEmitter(), {
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      exitCode: null,
+      signalCode: null,
+      kill: vi.fn()
+    }) as unknown as ChildProcess;
+
+    await expect(stopBundledMemoryForStoreUpdate({
+      runtimeDirectory,
+      env: { MEMMY_HOME: join(root, "home") },
+      timeoutMs: 1,
+      spawnProcess: (() => child) as typeof import("node:child_process").spawn
+    })).rejects.toThrow("Bundled Memory command timed out after 1ms");
+    expect(child.kill).toHaveBeenCalledOnce();
+    expect(child.kill).toHaveBeenCalledWith("SIGKILL");
   });
 
   it("starts the materialized bundled Memory runtime as a Desktop child", async () => {

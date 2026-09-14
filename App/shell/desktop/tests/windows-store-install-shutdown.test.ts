@@ -47,11 +47,11 @@ if ($LASTEXITCODE -ne 0) { throw 'native failure fixture compilation failed' }
   }, 50_000);
   afterAll(async () => { if (root) await rm(root, { recursive: true, force: true }); });
 
-  it.each(["manual", "silent"])("waits for the old process before publishing %s watchdog failure", async (mode) => {
+  it.each(["manual", "silent"])("publishes %s watchdog failure without closing the old process before readiness", async (mode) => {
     const directory = await mkdtemp(join(root, "failure-"));
     const result = await execFile(failureFixture, [mode, directory], { windowsHide: true, timeout: 5_000 });
-    expect(result.stdout).toContain(`recovery-after-old-exit mode=${mode}`);
-    expect(Number(/elapsed=(\d+)/u.exec(result.stdout)?.[1])).toBeGreaterThanOrEqual(500);
+    expect(result.stdout).toContain(`failure-published-with-old-running mode=${mode}`);
+    expect(Number(/reportElapsed=(\d+)/u.exec(result.stdout)?.[1])).toBeLessThan(1500);
   });
 
   it.each(["query-only", "cancelled-shutdown", "before-deployment", "operation-finished", "all-notifications-lost-operation-finished"])(
@@ -106,7 +106,8 @@ it("limits the release watchdog to handoff-install and retains independent final
   expect(guardedEntry).toContain("wait_for_old_application_exit(options)");
   expect(guardedEntry).toMatch(/report_store_install_shutdown_unavailable\(options, error.what\(\)\);\s*return 2;[\s\S]*?execute_store_install_handoff/u);
   const finalizer = source.slice(source.indexOf("int finalize_store_update("), source.indexOf("IVector<StorePackageUpdate> copy_updates("));
-  expect(finalizer.match(/if \(options.mode == L"manual"\)/gu)).toHaveLength(2);
+  expect(finalizer.match(/if \(options.mode == L"manual"\)/gu)).toHaveLength(1);
+  expect(finalizer).toContain('if (failure_state_written && options.mode == L"manual")');
   expect(source).toContain("installed_package_replaced_baseline(options)");
   expect(source).toContain("activate_store_application_with_retry(options, \"completed\")");
   expect(source).toContain("std::chrono::minutes(15)");

@@ -34,6 +34,7 @@
 #include <vector>
 
 #include <winrt/Windows.ApplicationModel.h>
+#include <winrt/Windows.Data.Json.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Services.Store.h>
@@ -43,6 +44,7 @@
 
 using namespace winrt;
 using namespace Windows::ApplicationModel;
+using namespace Windows::Data::Json;
 using namespace Windows::Foundation;
 using namespace Windows::Foundation::Collections;
 using namespace Windows::Services::Store;
@@ -56,6 +58,7 @@ namespace
         Check,
         DownloadSilent,
         DownloadUser,
+        StageStoreUpdateFinalizer,
         HandoffInstall,
         LaunchStoreUpdateFinalizer,
         FinalizeStoreUpdate,
@@ -92,9 +95,28 @@ namespace
     constexpr wchar_t allowed_memmy_agent_package_family[] =
         L"Memtensor.MemmyAgent_eyack96k521x2";
 
+    struct StoreFinalizerStageOptions
+    {
+        std::wstring package_family_name;
+        std::wstring attempt_id;
+    };
+
+    struct StoreFinalizerStageResult
+    {
+        std::filesystem::path staged_path;
+        std::filesystem::path external_ready_path;
+        std::filesystem::path installer_ready_path;
+        std::filesystem::path result_path;
+        std::filesystem::path log_path;
+        uint64_t size = 0;
+        std::string sha256;
+    };
+
     struct StoreInstallHandoffOptions
     {
         std::filesystem::path external_helper_path;
+        std::filesystem::path external_ready_path;
+        std::filesystem::path ready_path;
         std::filesystem::path state_path;
         std::filesystem::path result_path;
         std::filesystem::path log_path;
@@ -105,11 +127,14 @@ namespace
         std::wstring aumid;
         std::wstring package_family_name;
         std::wstring mode;
+        std::wstring attempt_id;
+        std::string external_helper_sha256;
     };
 
     struct StoreInstallResultFile
     {
         bool available = false;
+        std::string attempt_id;
         std::string state;
         std::string hresult;
         std::string reason;
@@ -2463,18 +2488,138 @@ namespace
         }
     }
 
-    void write_store_install_result(
+    std::string read_small_text_file_handle(
+        HANDLE file,
+        const wchar_t* failure_context)
+    {
+        LARGE_INTEGER size{};
+        if (!GetFileSizeEx(file, &size))
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(GetLastError()),
+                failure_context);
+        }
+        constexpr LONGLONG maximum_control_file_size = 1024 * 1024;
+        if (size.QuadPart < 0 || size.QuadPart > maximum_control_file_size)
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(ERROR_FILE_TOO_LARGE),
+                failure_context);
+        }
+        LARGE_INTEGER beginning{};
+        if (!SetFilePointerEx(file, beginning, nullptr, FILE_BEGIN))
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(GetLastError()),
+                failure_context);
+        }
+        std::string contents(static_cast<size_t>(size.QuadPart), '\0');
+        size_t offset = 0;
+        while (offset < contents.size())
+        {
+            const DWORD requested = static_cast<DWORD>((std::min)(
+                contents.size() - offset,
+                static_cast<size_t>((std::numeric_limits<DWORD>::max)())));
+            DWORD read = 0;
+            if (!ReadFile(file, contents.data() + offset, requested, &read, nullptr))
+            {
+                throw hresult_error(
+                    HRESULT_FROM_WIN32(GetLastError()),
+                    failure_context);
+            }
+            if (read == 0)
+            {
+                throw hresult_error(
+                    HRESULT_FROM_WIN32(ERROR_HANDLE_EOF),
+                    failure_context);
+            }
+            offset += read;
+        }
+        return contents;
+    }
+
+    bool json_has_matching_attempt_id(
+        const std::string& contents,
+        const std::wstring& expected_attempt_id) noexcept
+    {
+        try
+        {
+            const JsonObject object = JsonObject::Parse(to_hstring(contents));
+            return object.GetNamedString(L"attemptId") == expected_attempt_id;
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
+    scoped_handle open_matching_store_install_state(
+        const StoreInstallHandoffOptions& options,
+        DWORD desired_access,
+        DWORD share_mode)
+    {
+        scoped_handle state_file(CreateFileW(
+            options.state_path.c_str(),
+            desired_access,
+            share_mode,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr));
+        if (!state_file)
+        {
+            const DWORD error = GetLastError();
+            if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)
+            {
+                return {};
+            }
+            throw hresult_error(
+                HRESULT_FROM_WIN32(error),
+                L"Unable to open the Store update install state");
+        }
+        const std::string contents = read_small_text_file_handle(
+            state_file.get(),
+            L"Unable to read the Store update install state");
+        if (!json_has_matching_attempt_id(contents, options.attempt_id))
+        {
+            return {};
+        }
+        return state_file;
+    }
+
+    bool current_store_install_state_matches_attempt(
+        const StoreInstallHandoffOptions& options)
+    {
+        return static_cast<bool>(open_matching_store_install_state(
+            options,
+            GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE));
+    }
+
+    bool write_store_install_result(
         const StoreInstallHandoffOptions& options,
         const std::string& state,
         const std::string& hresult,
         const std::string& reason)
     {
+        if (!current_store_install_state_matches_attempt(options))
+        {
+            append_handoff_log(
+                options.log_path,
+                "installer-result-skipped-stale-attempt",
+                state,
+                hresult,
+                reason);
+            return false;
+        }
         write_text_file_atomic(
             options.result_path,
-            single_line(state) + "\n" +
+            single_line(utf8(options.attempt_id)) + "\n" +
+                single_line(state) + "\n" +
                 single_line(hresult) + "\n" +
                 single_line(reason) + "\n");
         append_handoff_log(options.log_path, "installer-result", state, hresult, reason);
+        return true;
     }
 
     void append_store_package_log(
@@ -2506,18 +2651,25 @@ namespace
     }
 
     StoreInstallResultFile read_store_install_result(
-        const std::filesystem::path& result_path)
+        const StoreInstallHandoffOptions& options)
     {
         StoreInstallResultFile result;
-        std::ifstream input(result_path, std::ios::binary);
+        std::ifstream input(options.result_path, std::ios::binary);
         if (!input)
         {
             return result;
         }
-        result.available = true;
+        std::getline(input, result.attempt_id);
         std::getline(input, result.state);
         std::getline(input, result.hresult);
         std::getline(input, result.reason);
+        std::string extra;
+        if (!input || result.attempt_id != utf8(options.attempt_id) ||
+            result.state.empty() || std::getline(input, extra))
+        {
+            return {};
+        }
+        result.available = true;
         return result;
     }
 
@@ -2946,6 +3098,653 @@ namespace
         return static_cast<DWORD>(parsed);
     }
 
+    bool is_sha256_hex(const std::string& value)
+    {
+        return value.size() == 64 &&
+            std::all_of(value.begin(), value.end(), [](char character)
+            {
+                return (character >= '0' && character <= '9') ||
+                    (character >= 'a' && character <= 'f') ||
+                    (character >= 'A' && character <= 'F');
+            });
+    }
+
+    void require_current_store_package_identity(
+        const std::wstring& package_family_name)
+    {
+        if ((package_family_name != allowed_memmy_package_family &&
+             package_family_name != allowed_memmy_agent_package_family) ||
+            !current_process_has_package_identity())
+        {
+            throw hresult_error(
+                E_ACCESSDENIED,
+                L"Store update helper requires an allowed Memmy package identity");
+        }
+        UINT32 length = PACKAGE_FAMILY_NAME_MAX_LENGTH;
+        std::array<wchar_t, PACKAGE_FAMILY_NAME_MAX_LENGTH> current_family{};
+        const LONG result = GetCurrentPackageFamilyName(
+            &length,
+            current_family.data());
+        if (result != ERROR_SUCCESS || package_family_name != current_family.data())
+        {
+            throw hresult_error(
+                result == ERROR_SUCCESS ? E_ACCESSDENIED : HRESULT_FROM_WIN32(result),
+                L"Store update helper package identity does not match its request");
+        }
+    }
+
+    bool has_plain_store_finalizer_directory_attributes(DWORD attributes)
+    {
+        return attributes != INVALID_FILE_ATTRIBUTES &&
+            (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+            (attributes &
+                (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_ENCRYPTED)) == 0;
+    }
+
+    void ensure_plain_store_finalizer_directory(
+        const std::filesystem::path& directory,
+        bool create,
+        bool require_new = false)
+    {
+        if (create && !CreateDirectoryW(directory.c_str(), nullptr))
+        {
+            const DWORD create_error = GetLastError();
+            if (require_new || create_error != ERROR_ALREADY_EXISTS)
+            {
+                throw hresult_error(
+                    HRESULT_FROM_WIN32(create_error),
+                    L"Unable to create the Store finalizer staging directory");
+            }
+        }
+        const DWORD attributes = GetFileAttributesW(directory.c_str());
+        if (!has_plain_store_finalizer_directory_attributes(attributes))
+        {
+            throw hresult_error(
+                E_ACCESSDENIED,
+                L"Store finalizer staging directory is missing, encrypted, or a reparse point");
+        }
+    }
+
+    std::filesystem::path store_finalizer_attempt_directory(
+        const std::filesystem::path& profile_root,
+        const std::wstring& package_family_name,
+        const std::wstring& attempt_id)
+    {
+        return profile_root /
+            L".memmy" /
+            L"store-update" /
+            package_family_name /
+            attempt_id;
+    }
+
+    std::filesystem::path final_path_from_handle(
+        HANDLE handle,
+        const wchar_t* failure_context)
+    {
+        std::vector<wchar_t> value(32768);
+        DWORD length = GetFinalPathNameByHandleW(
+            handle,
+            value.data(),
+            static_cast<DWORD>(value.size()),
+            FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+        if (length >= value.size())
+        {
+            value.resize(static_cast<size_t>(length) + 1);
+            length = GetFinalPathNameByHandleW(
+                handle,
+                value.data(),
+                static_cast<DWORD>(value.size()),
+                FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+        }
+        if (length == 0 || length >= value.size())
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(GetLastError()),
+                failure_context);
+        }
+        std::wstring resolved(value.data(), length);
+        if (resolved.rfind(L"\\\\?\\UNC\\", 0) == 0)
+        {
+            resolved = L"\\\\" + resolved.substr(8);
+        }
+        else if (resolved.rfind(L"\\\\?\\", 0) == 0)
+        {
+            resolved.erase(0, 4);
+        }
+        return std::filesystem::path(std::move(resolved));
+    }
+
+    std::filesystem::path final_path_for_existing_file(
+        const std::filesystem::path& path,
+        const wchar_t* failure_context)
+    {
+        scoped_handle file(CreateFileW(
+            path.c_str(),
+            GENERIC_READ | FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_DELETE,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+            nullptr));
+        if (!file)
+        {
+            throw hresult_error(HRESULT_FROM_WIN32(GetLastError()), failure_context);
+        }
+        BY_HANDLE_FILE_INFORMATION information{};
+        if (!GetFileInformationByHandle(file.get(), &information) ||
+            (information.dwFileAttributes &
+                (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0)
+        {
+            throw hresult_error(
+                E_ACCESSDENIED,
+                L"Store finalizer file path is not a regular non-reparse file");
+        }
+        return final_path_from_handle(file.get(), failure_context);
+    }
+
+    std::filesystem::path final_path_for_existing_directory(
+        const std::filesystem::path& path,
+        const wchar_t* failure_context,
+        bool require_plain = false)
+    {
+        scoped_handle directory(CreateFileW(
+            path.c_str(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            nullptr));
+        if (!directory)
+        {
+            throw hresult_error(HRESULT_FROM_WIN32(GetLastError()), failure_context);
+        }
+        BY_HANDLE_FILE_INFORMATION information{};
+        const DWORD forbidden_attributes = FILE_ATTRIBUTE_REPARSE_POINT |
+            (require_plain ? FILE_ATTRIBUTE_ENCRYPTED : 0);
+        if (!GetFileInformationByHandle(directory.get(), &information) ||
+            (information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
+            (information.dwFileAttributes & forbidden_attributes) != 0)
+        {
+            throw hresult_error(
+                E_ACCESSDENIED,
+                L"Store finalizer directory path is encrypted, not a directory, or a reparse point");
+        }
+        return final_path_from_handle(directory.get(), failure_context);
+    }
+
+    std::filesystem::path resolve_store_finalizer_profile_authority_root(
+        const std::filesystem::path& profile_root)
+    {
+        const DWORD attributes = GetFileAttributesW(profile_root.c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES ||
+            (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
+        {
+            throw hresult_error(
+                E_ACCESSDENIED,
+                L"Current user profile is missing or is not a directory");
+        }
+
+        // FOLDERID_Profile is the OS authority for this root. Windows may expose the profile
+        // itself as a mount-point junction, so follow this one authority-selected path and
+        // immediately continue from its handle-resolved target. Every .memmy descendant remains
+        // subject to the stricter non-reparse and non-encrypted checks below.
+        scoped_handle directory(CreateFileW(
+            profile_root.c_str(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            nullptr));
+        if (!directory)
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(GetLastError()),
+                L"Unable to open the current user profile authority root");
+        }
+        const std::filesystem::path followed_root = final_path_from_handle(
+            directory.get(),
+            L"Unable to resolve the current user profile authority root");
+        const std::filesystem::path resolved_root = final_path_for_existing_directory(
+            followed_root,
+            L"Unable to verify the resolved current user profile authority root");
+        if (!resolved_root.is_absolute() ||
+            normalize_absolute_path(resolved_root) ==
+                normalize_absolute_path(resolved_root.root_path()) ||
+            is_windows_apps_path(resolved_root))
+        {
+            throw hresult_error(
+                E_ACCESSDENIED,
+                L"Resolved current user profile authority root is unsafe");
+        }
+        return resolved_root;
+    }
+
+    std::filesystem::path resolve_store_finalizer_profile_root()
+    {
+        const std::filesystem::path profile_root = resolve_known_folder_path(
+            FOLDERID_Profile,
+            L"Current user profile is unavailable for Store finalizer staging");
+        if (profile_root.empty() || !profile_root.is_absolute())
+        {
+            throw hresult_error(
+                E_UNEXPECTED,
+                L"Current user profile is unavailable for Store finalizer staging");
+        }
+        return resolve_store_finalizer_profile_authority_root(profile_root);
+    }
+
+    std::filesystem::path resolve_plain_store_finalizer_child_directory(
+        const std::filesystem::path& resolved_parent,
+        const std::wstring& child_name,
+        bool create,
+        bool require_new = false)
+    {
+        const std::filesystem::path child = resolved_parent / child_name;
+        ensure_plain_store_finalizer_directory(child, create, require_new);
+        const std::filesystem::path resolved_child = final_path_for_existing_directory(
+            child,
+            L"Unable to resolve a Store finalizer staging directory",
+            true);
+        if (normalize_absolute_path(resolved_child) != normalize_absolute_path(child) ||
+            normalize_absolute_path(resolved_child.parent_path()) !=
+                normalize_absolute_path(resolved_parent) ||
+            resolved_child.filename() != child_name)
+        {
+            throw hresult_error(
+                E_ACCESSDENIED,
+                L"Store finalizer staging directory resolved outside its verified parent");
+        }
+        return resolved_child;
+    }
+
+    std::filesystem::path resolve_store_finalizer_attempt_directory(
+        const std::filesystem::path& resolved_profile_root,
+        const std::wstring& package_family_name,
+        const std::wstring& attempt_id,
+        bool create,
+        bool require_new_attempt = false)
+    {
+        const std::filesystem::path memmy_directory =
+            resolve_plain_store_finalizer_child_directory(
+                resolved_profile_root,
+                L".memmy",
+                create);
+        const std::filesystem::path update_directory =
+            resolve_plain_store_finalizer_child_directory(
+                memmy_directory,
+                L"store-update",
+                create);
+        const std::filesystem::path family_directory =
+            resolve_plain_store_finalizer_child_directory(
+                update_directory,
+                package_family_name,
+                create);
+        return resolve_plain_store_finalizer_child_directory(
+            family_directory,
+            attempt_id,
+            create,
+            require_new_attempt);
+    }
+
+    std::string sha256_file_hex(
+        const std::filesystem::path& path,
+        uint64_t* size_out = nullptr,
+        bool require_plain = true)
+    {
+        scoped_handle file(CreateFileW(
+            path.c_str(),
+            GENERIC_READ | FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_DELETE,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+            nullptr));
+        if (!file)
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(GetLastError()),
+                L"Unable to open a Store finalizer file for SHA-256 verification");
+        }
+        BY_HANDLE_FILE_INFORMATION information{};
+        if (!GetFileInformationByHandle(file.get(), &information))
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(GetLastError()),
+                L"Unable to inspect a Store finalizer file");
+        }
+        const DWORD forbidden_attributes =
+            FILE_ATTRIBUTE_DIRECTORY |
+            FILE_ATTRIBUTE_REPARSE_POINT |
+            (require_plain ? FILE_ATTRIBUTE_ENCRYPTED : 0);
+        if ((information.dwFileAttributes & forbidden_attributes) != 0)
+        {
+            throw hresult_error(
+                E_ACCESSDENIED,
+                L"Store finalizer file is encrypted, not regular, or a reparse point");
+        }
+        const uint64_t file_size =
+            (static_cast<uint64_t>(information.nFileSizeHigh) << 32) |
+            information.nFileSizeLow;
+        if (file_size == 0)
+        {
+            throw hresult_error(E_UNEXPECTED, L"Store finalizer file is empty");
+        }
+
+        HCRYPTPROV provider = 0;
+        HCRYPTHASH hash = 0;
+        if (!CryptAcquireContextW(
+                &provider,
+                nullptr,
+                MS_ENH_RSA_AES_PROV_W,
+                PROV_RSA_AES,
+                CRYPT_VERIFYCONTEXT))
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(GetLastError()),
+                L"Unable to initialize Store finalizer hashing");
+        }
+        if (!CryptCreateHash(provider, CALG_SHA_256, 0, 0, &hash))
+        {
+            const DWORD error = GetLastError();
+            CryptReleaseContext(provider, 0);
+            throw hresult_error(
+                HRESULT_FROM_WIN32(error),
+                L"Unable to create a Store finalizer SHA-256 hash");
+        }
+        try
+        {
+            std::array<unsigned char, 65536> buffer{};
+            while (true)
+            {
+                DWORD read = 0;
+                if (!ReadFile(
+                        file.get(),
+                        buffer.data(),
+                        static_cast<DWORD>(buffer.size()),
+                        &read,
+                        nullptr))
+                {
+                    throw hresult_error(
+                        HRESULT_FROM_WIN32(GetLastError()),
+                        L"Unable to read a Store finalizer file for SHA-256 verification");
+                }
+                if (read == 0)
+                {
+                    break;
+                }
+                if (!CryptHashData(hash, buffer.data(), read, 0))
+                {
+                    throw hresult_error(
+                        HRESULT_FROM_WIN32(GetLastError()),
+                        L"Unable to hash a Store finalizer file");
+                }
+            }
+            std::array<unsigned char, 32> digest{};
+            DWORD digest_size = static_cast<DWORD>(digest.size());
+            if (!CryptGetHashParam(hash, HP_HASHVAL, digest.data(), &digest_size, 0) ||
+                digest_size != digest.size())
+            {
+                throw hresult_error(
+                    HRESULT_FROM_WIN32(GetLastError()),
+                    L"Unable to finish a Store finalizer SHA-256 hash");
+            }
+            std::ostringstream output;
+            output << std::hex << std::setfill('0');
+            for (const unsigned char byte : digest)
+            {
+                output << std::setw(2) << static_cast<unsigned int>(byte);
+            }
+            CryptDestroyHash(hash);
+            CryptReleaseContext(provider, 0);
+            if (size_out != nullptr)
+            {
+                *size_out = file_size;
+            }
+            return output.str();
+        }
+        catch (...)
+        {
+            CryptDestroyHash(hash);
+            CryptReleaseContext(provider, 0);
+            throw;
+        }
+    }
+
+    void stream_store_finalizer_to_new_file(
+        const std::filesystem::path& source_path,
+        const std::filesystem::path& destination_path,
+        bool& destination_created)
+    {
+        scoped_handle source(CreateFileW(
+            source_path.c_str(),
+            GENERIC_READ | FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_DELETE,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr));
+        if (!source)
+        {
+            const DWORD error = GetLastError();
+            throw hresult_error(
+                HRESULT_FROM_WIN32(error),
+                L"Unable to open the packaged Store finalizer for streaming (Win32 error " +
+                    std::to_wstring(error) + L")");
+        }
+        BY_HANDLE_FILE_INFORMATION source_information{};
+        if (!GetFileInformationByHandle(source.get(), &source_information))
+        {
+            const DWORD error = GetLastError();
+            throw hresult_error(
+                HRESULT_FROM_WIN32(error),
+                L"Unable to inspect the packaged Store finalizer (Win32 error " +
+                    std::to_wstring(error) + L")");
+        }
+        if ((source_information.dwFileAttributes &
+                (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0)
+        {
+            throw hresult_error(
+                E_ACCESSDENIED,
+                L"Packaged Store finalizer source is not a regular file");
+        }
+
+        scoped_handle destination(CreateFileW(
+            destination_path.c_str(),
+            GENERIC_WRITE | FILE_READ_ATTRIBUTES,
+            0,
+            nullptr,
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr));
+        if (!destination)
+        {
+            const DWORD error = GetLastError();
+            throw hresult_error(
+                HRESULT_FROM_WIN32(error),
+                L"Unable to create the unique Store finalizer destination (Win32 error " +
+                    std::to_wstring(error) + L")");
+        }
+        destination_created = true;
+
+        std::array<unsigned char, 65536> buffer{};
+        while (true)
+        {
+            DWORD read = 0;
+            if (!ReadFile(
+                    source.get(),
+                    buffer.data(),
+                    static_cast<DWORD>(buffer.size()),
+                    &read,
+                    nullptr))
+            {
+                const DWORD error = GetLastError();
+                throw hresult_error(
+                    HRESULT_FROM_WIN32(error),
+                    L"Unable to read the packaged Store finalizer (Win32 error " +
+                        std::to_wstring(error) + L")");
+            }
+            if (read == 0)
+            {
+                break;
+            }
+            DWORD offset = 0;
+            while (offset < read)
+            {
+                DWORD written = 0;
+                const BOOL write_succeeded = WriteFile(
+                        destination.get(),
+                        buffer.data() + offset,
+                        read - offset,
+                        &written,
+                        nullptr);
+                if (!write_succeeded || written == 0)
+                {
+                    const DWORD error = write_succeeded
+                        ? ERROR_WRITE_FAULT
+                        : GetLastError();
+                    throw hresult_error(
+                        HRESULT_FROM_WIN32(error),
+                        L"Unable to write the staged Store finalizer (Win32 error " +
+                            std::to_wstring(error) + L")");
+                }
+                offset += written;
+            }
+        }
+        if (!FlushFileBuffers(destination.get()))
+        {
+            const DWORD error = GetLastError();
+            throw hresult_error(
+                HRESULT_FROM_WIN32(error),
+                L"Unable to flush the staged Store finalizer (Win32 error " +
+                    std::to_wstring(error) + L")");
+        }
+    }
+
+    StoreFinalizerStageResult stage_store_update_finalizer(
+        const StoreFinalizerStageOptions& options)
+    {
+        if (!is_valid_package_family_name(options.package_family_name) ||
+            !is_canonical_uuid(options.attempt_id))
+        {
+            throw hresult_invalid_argument(
+                L"Store finalizer staging requires a package family and canonical attempt ID");
+        }
+        require_current_store_package_identity(options.package_family_name);
+
+        const std::filesystem::path resolved_profile_root =
+            resolve_store_finalizer_profile_root();
+        std::filesystem::path attempt_directory = store_finalizer_attempt_directory(
+            resolved_profile_root,
+            options.package_family_name,
+            options.attempt_id);
+
+        const std::filesystem::path source_path = current_executable_path();
+        std::filesystem::path resolved_attempt_directory;
+        std::filesystem::path destination_path;
+        bool destination_created = false;
+        try
+        {
+            resolved_attempt_directory = resolve_store_finalizer_attempt_directory(
+                resolved_profile_root,
+                options.package_family_name,
+                options.attempt_id,
+                true,
+                true);
+            attempt_directory = resolved_attempt_directory;
+            if (!is_path_within_directory(
+                    resolved_attempt_directory,
+                    resolved_profile_root) ||
+                is_windows_apps_path(resolved_attempt_directory))
+            {
+                throw hresult_error(
+                    E_ACCESSDENIED,
+                    L"Store finalizer attempt directory resolved outside the current user profile before writing");
+            }
+            destination_path = resolved_attempt_directory / L"MemmyStoreUpdate.exe";
+            stream_store_finalizer_to_new_file(
+                source_path,
+                destination_path,
+                destination_created);
+        }
+        catch (...)
+        {
+            if (destination_created)
+            {
+                SetFileAttributesW(destination_path.c_str(), FILE_ATTRIBUTE_NORMAL);
+                DeleteFileW(destination_path.c_str());
+            }
+            RemoveDirectoryW(attempt_directory.c_str());
+            throw;
+        }
+
+        try
+        {
+            const std::filesystem::path verified_profile_root =
+                resolve_store_finalizer_profile_root();
+            const std::filesystem::path verified_attempt_directory =
+                resolve_store_finalizer_attempt_directory(
+                    verified_profile_root,
+                    options.package_family_name,
+                    options.attempt_id,
+                    false);
+            const std::filesystem::path resolved_destination =
+                final_path_for_existing_file(
+                    destination_path,
+                    L"Unable to resolve the staged Store finalizer path");
+            if (!is_path_within_directory(
+                    resolved_destination,
+                    verified_attempt_directory) ||
+                normalize_absolute_path(resolved_destination.parent_path()) !=
+                    normalize_absolute_path(verified_attempt_directory) ||
+                normalize_absolute_path(verified_attempt_directory) !=
+                    normalize_absolute_path(resolved_attempt_directory) ||
+                resolved_destination.filename() != L"MemmyStoreUpdate.exe" ||
+                is_windows_apps_path(resolved_destination))
+            {
+                throw hresult_error(
+                    E_ACCESSDENIED,
+                    L"Staged Store finalizer resolved outside its unique attempt directory");
+            }
+
+            uint64_t source_size = 0;
+            uint64_t destination_size = 0;
+            const std::string source_sha256 =
+                sha256_file_hex(source_path, &source_size, false);
+            const std::string destination_sha256 =
+                sha256_file_hex(resolved_destination, &destination_size);
+            if (source_size != destination_size ||
+                source_sha256 != destination_sha256)
+            {
+                throw hresult_error(
+                    HRESULT_FROM_WIN32(ERROR_CRC),
+                    L"Staged Store finalizer failed size or SHA-256 verification");
+            }
+            return {
+                resolved_destination,
+                verified_attempt_directory / L"external-ready-v1.json",
+                verified_attempt_directory / L"installer-ready-v1.json",
+                verified_attempt_directory / L"store-update-result-v1.txt",
+                verified_attempt_directory / L"store-update-handoff.jsonl",
+                destination_size,
+                destination_sha256
+            };
+        }
+        catch (...)
+        {
+            SetFileAttributesW(destination_path.c_str(), FILE_ATTRIBUTE_NORMAL);
+            DeleteFileW(destination_path.c_str());
+            RemoveDirectoryW(attempt_directory.c_str());
+            throw;
+        }
+    }
+
+    void initialize_store_update_stage_apartment()
+    {
+        init_apartment(apartment_type::single_threaded);
+    }
+
     void validate_store_install_handoff_options(
         const StoreInstallHandoffOptions& options,
         bool require_external_helper_path)
@@ -2955,17 +3754,24 @@ namespace
             !is_valid_package_full_name(options.baseline_package_full_name) ||
             !is_valid_aumid(options.aumid) ||
             !is_valid_package_family_name(options.package_family_name) ||
+            options.aumid != options.package_family_name + L"!Memmy" ||
             (options.mode != L"manual" && options.mode != L"silent") ||
-            options.old_process_id == 0)
+            options.old_process_id == 0 ||
+            !is_canonical_uuid(options.attempt_id) ||
+            !is_sha256_hex(options.external_helper_sha256))
         {
             throw hresult_invalid_argument(L"Invalid Store update handoff metadata");
         }
         if (!options.state_path.is_absolute() ||
             !options.result_path.is_absolute() ||
             !options.log_path.is_absolute() ||
+            !options.external_ready_path.is_absolute() ||
+            !options.ready_path.is_absolute() ||
             options.state_path.filename() != L"store-update-install-state-v2.json" ||
             options.result_path.filename() != L"store-update-result-v1.txt" ||
-            options.log_path.filename() != L"store-update-handoff.jsonl")
+            options.log_path.filename() != L"store-update-handoff.jsonl" ||
+            options.external_ready_path.filename() != L"external-ready-v1.json" ||
+            options.ready_path.filename() != L"installer-ready-v1.json")
         {
             throw hresult_invalid_argument(L"Invalid Store update handoff paths");
         }
@@ -2975,32 +3781,79 @@ namespace
         {
             throw hresult_invalid_argument(L"Store update state is outside its package family namespace");
         }
-        const std::filesystem::path expected_handoff_directory =
-            namespace_directory / L"handoff";
-        if (normalize_absolute_path(options.result_path.parent_path()) !=
-                normalize_absolute_path(expected_handoff_directory) ||
-            normalize_absolute_path(options.log_path.parent_path()) !=
-                normalize_absolute_path(expected_handoff_directory))
-        {
-            throw hresult_invalid_argument(L"Store update handoff paths do not share the expected directory");
-        }
         if (require_external_helper_path)
         {
-            const std::filesystem::path expected_external_helper =
-                resolve_environment_path(
-                    L"LOCALAPPDATA",
-                    L"LOCALAPPDATA is unavailable for Store update finalization") /
-                L"Memmy" /
-                L"store-update" /
-                options.package_family_name /
-                L"MemmyStoreUpdate.exe";
+            const std::filesystem::path expected_attempt_directory =
+                options.external_helper_path.parent_path();
+            if (expected_attempt_directory.filename() != options.attempt_id ||
+                expected_attempt_directory.parent_path().filename() !=
+                    options.package_family_name ||
+                expected_attempt_directory.parent_path().parent_path().filename() !=
+                    L"store-update" ||
+                expected_attempt_directory.parent_path().parent_path().parent_path().filename() !=
+                    L".memmy")
+            {
+                throw hresult_invalid_argument(
+                    L"External Store update helper does not use the expected user-profile namespace");
+            }
+            const std::filesystem::path resolved_profile_root =
+                resolve_store_finalizer_profile_root();
+            const std::filesystem::path resolved_attempt_directory =
+                resolve_store_finalizer_attempt_directory(
+                    resolved_profile_root,
+                    options.package_family_name,
+                    options.attempt_id,
+                    false);
+            if (normalize_absolute_path(expected_attempt_directory) !=
+                    normalize_absolute_path(resolved_attempt_directory))
+            {
+                throw hresult_error(
+                    E_ACCESSDENIED,
+                    L"External Store update helper is outside the current user profile authority root");
+            }
+            const std::filesystem::path resolved_external_helper =
+                final_path_for_existing_file(
+                    options.external_helper_path,
+                    L"Unable to resolve the external Store finalizer");
+            const std::filesystem::path expected_external_ready_path =
+                resolved_attempt_directory / L"external-ready-v1.json";
+            const std::filesystem::path expected_installer_ready_path =
+                resolved_attempt_directory / L"installer-ready-v1.json";
+            const std::filesystem::path expected_result_path =
+                resolved_attempt_directory / L"store-update-result-v1.txt";
+            const std::filesystem::path expected_log_path =
+                resolved_attempt_directory / L"store-update-handoff.jsonl";
             if (!options.external_helper_path.is_absolute() ||
-                normalize_absolute_path(options.external_helper_path) !=
-                    normalize_absolute_path(expected_external_helper) ||
-                is_windows_apps_path(options.external_helper_path) ||
-                !std::filesystem::is_regular_file(options.external_helper_path))
+                resolved_external_helper.filename() != L"MemmyStoreUpdate.exe" ||
+                is_windows_apps_path(resolved_external_helper))
             {
                 throw hresult_invalid_argument(L"Invalid external Store update helper path");
+            }
+            if (normalize_absolute_path(resolved_external_helper.parent_path()) !=
+                normalize_absolute_path(resolved_attempt_directory))
+            {
+                throw hresult_invalid_argument(
+                    L"External Store update helper is outside its attempt directory");
+            }
+            if (normalize_absolute_path(options.external_ready_path) !=
+                    normalize_absolute_path(expected_external_ready_path) ||
+                normalize_absolute_path(options.ready_path) !=
+                    normalize_absolute_path(expected_installer_ready_path) ||
+                normalize_absolute_path(options.result_path) !=
+                    normalize_absolute_path(expected_result_path) ||
+                normalize_absolute_path(options.log_path) !=
+                    normalize_absolute_path(expected_log_path))
+            {
+                throw hresult_invalid_argument(
+                    L"Store update receipts, result, or log are outside the unique attempt directory");
+            }
+            if (_stricmp(
+                    sha256_file_hex(resolved_external_helper).c_str(),
+                    options.external_helper_sha256.c_str()) != 0)
+            {
+                throw hresult_error(
+                    HRESULT_FROM_WIN32(ERROR_CRC),
+                    L"External Store update helper SHA-256 does not match staging");
             }
         }
     }
@@ -3209,12 +4062,26 @@ namespace
              installed->full_name != options.baseline_package_full_name);
     }
 
-    void write_failed_store_install_state(
+    bool write_failed_store_install_state(
         const StoreInstallHandoffOptions& options,
         const std::string& native_state,
         const std::string& hresult,
         const std::string& reason)
     {
+        scoped_handle state_file = open_matching_store_install_state(
+            options,
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ);
+        if (!state_file)
+        {
+            append_handoff_log(
+                options.log_path,
+                "failure-state-skipped-stale-attempt",
+                native_state,
+                hresult,
+                reason);
+            return false;
+        }
         const std::string created_at = escape_json(utf8(options.created_at));
         const std::string timestamp = utc_timestamp();
         const bool manual = options.mode == L"manual";
@@ -3233,13 +4100,81 @@ namespace
                << "  \"autoActivateOnSuccess\": " << (manual ? "true" : "false") << ",\n"
                << "  \"aumid\": \"" << escape_json(utf8(options.aumid)) << "\",\n"
                << "  \"packageFamilyName\": \"" << escape_json(utf8(options.package_family_name)) << "\",\n"
+               << "  \"attemptId\": \"" << escape_json(utf8(options.attempt_id)) << "\",\n"
                << "  \"nativeState\": \"" << escape_json(native_state) << "\",\n"
                << "  \"hresult\": "
                << (hresult.empty() ? "null" : "\"" + escape_json(hresult) + "\"") << ",\n"
                << "  \"failureReason\": \"" << escape_json(single_line(reason)) << "\",\n"
                << "  \"failurePending\": true\n"
                << "}\n";
-        write_text_file_atomic(options.state_path, output.str());
+        const std::string contents = output.str();
+        LARGE_INTEGER beginning{};
+        if (!SetFilePointerEx(state_file.get(), beginning, nullptr, FILE_BEGIN))
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(GetLastError()),
+                L"Unable to seek the matching Store update install state");
+        }
+        size_t offset = 0;
+        while (offset < contents.size())
+        {
+            const DWORD requested = static_cast<DWORD>((std::min)(
+                contents.size() - offset,
+                static_cast<size_t>((std::numeric_limits<DWORD>::max)())));
+            DWORD written = 0;
+            const BOOL write_succeeded = WriteFile(
+                    state_file.get(),
+                    contents.data() + offset,
+                    requested,
+                    &written,
+                    nullptr);
+            if (!write_succeeded || written == 0)
+            {
+                const DWORD error = write_succeeded
+                    ? ERROR_WRITE_FAULT
+                    : GetLastError();
+                throw hresult_error(
+                    HRESULT_FROM_WIN32(error),
+                    L"Unable to rewrite the matching Store update install state");
+            }
+            offset += written;
+        }
+        if (!SetEndOfFile(state_file.get()) || !FlushFileBuffers(state_file.get()))
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(GetLastError()),
+                L"Unable to commit the matching Store update install state");
+        }
+        return true;
+    }
+
+    bool delete_matching_store_install_state(
+        const StoreInstallHandoffOptions& options)
+    {
+        scoped_handle state_file = open_matching_store_install_state(
+            options,
+            GENERIC_READ | DELETE,
+            FILE_SHARE_READ);
+        if (!state_file)
+        {
+            append_handoff_log(
+                options.log_path,
+                "success-state-delete-skipped-stale-attempt");
+            return false;
+        }
+        FILE_DISPOSITION_INFO disposition{};
+        disposition.DeleteFile = TRUE;
+        if (!SetFileInformationByHandle(
+                state_file.get(),
+                FileDispositionInfo,
+                &disposition,
+                sizeof(disposition)))
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(GetLastError()),
+                L"Unable to delete the matching Store update install state");
+        }
+        return true;
     }
 
     void activate_store_application(const std::wstring& aumid)
@@ -3302,12 +4237,19 @@ namespace
             L"--state-path", options.state_path.wstring(),
             L"--result-path", options.result_path.wstring(),
             L"--log-path", options.log_path.wstring(),
+            L"--external-ready-path", options.external_ready_path.wstring(),
+            L"--ready-path", options.ready_path.wstring(),
             L"--old-pid", std::to_wstring(options.old_process_id),
             L"--baseline-package-version", options.baseline_package_version,
             L"--baseline-package-full-name", options.baseline_package_full_name,
             L"--created-at", options.created_at,
             L"--aumid", options.aumid,
             L"--package-family-name", options.package_family_name,
+            L"--attempt-id", options.attempt_id,
+            L"--external-helper-sha256",
+                std::wstring(
+                    options.external_helper_sha256.begin(),
+                    options.external_helper_sha256.end()),
             L"--mode", options.mode
         };
         if (include_external_helper_path)
@@ -7803,6 +8745,287 @@ namespace
         complete_legacy_cleanup_operation("brokerAcknowledged=true");
     }
 
+    void publish_store_update_external_ready(
+        const StoreInstallHandoffOptions& options)
+    {
+        UINT32 package_name_length = 0;
+        const LONG package_identity_result =
+            GetCurrentPackageFullName(&package_name_length, nullptr);
+        if (package_identity_result != APPMODEL_ERROR_NO_PACKAGE)
+        {
+            throw hresult_error(
+                E_ACCESSDENIED,
+                L"Store update finalizer readiness requires an unpackaged process");
+        }
+        const std::filesystem::path resolved_current_executable =
+            final_path_for_existing_file(
+                current_executable_path(),
+                L"Unable to resolve the running Store update finalizer");
+        const std::filesystem::path resolved_expected_executable =
+            final_path_for_existing_file(
+                options.external_helper_path,
+                L"Unable to resolve the expected Store update finalizer");
+        if (normalize_absolute_path(resolved_current_executable) !=
+                normalize_absolute_path(resolved_expected_executable) ||
+            _stricmp(
+                sha256_file_hex(resolved_current_executable).c_str(),
+                options.external_helper_sha256.c_str()) != 0)
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(ERROR_CRC),
+                L"Running Store update finalizer does not match the staged helper");
+        }
+        if (!current_store_install_state_matches_attempt(options))
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(ERROR_REVISION_MISMATCH),
+                L"Store update finalizer readiness does not match the current install attempt");
+        }
+
+        const std::string receipt =
+            "{\"type\":\"external-ready\""
+            ",\"attemptId\":\"" + escape_json(utf8(options.attempt_id)) + "\"" +
+            ",\"pid\":" + std::to_string(GetCurrentProcessId()) +
+            ",\"path\":\"" + escape_json(utf8(options.external_helper_path.wstring())) + "\"" +
+            ",\"sha256\":\"" + escape_json(options.external_helper_sha256) + "\"}\n";
+        scoped_handle ready_file(CreateFileW(
+            options.external_ready_path.c_str(),
+            GENERIC_WRITE,
+            FILE_SHARE_READ,
+            nullptr,
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr));
+        if (!ready_file)
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(GetLastError()),
+                L"Unable to create the external Store finalizer readiness receipt");
+        }
+        DWORD written = 0;
+        DWORD write_error = ERROR_SUCCESS;
+        bool write_succeeded = receipt.size() <= (std::numeric_limits<DWORD>::max)();
+        if (!write_succeeded)
+        {
+            write_error = ERROR_FILE_TOO_LARGE;
+        }
+        else if (!WriteFile(
+                ready_file.get(),
+                receipt.data(),
+                static_cast<DWORD>(receipt.size()),
+                &written,
+                nullptr))
+        {
+            write_succeeded = false;
+            write_error = GetLastError();
+        }
+        else if (written != receipt.size())
+        {
+            write_succeeded = false;
+            write_error = ERROR_WRITE_FAULT;
+        }
+        else if (!FlushFileBuffers(ready_file.get()))
+        {
+            write_succeeded = false;
+            write_error = GetLastError();
+        }
+        ready_file.reset();
+        if (!write_succeeded)
+        {
+            DeleteFileW(options.external_ready_path.c_str());
+            throw hresult_error(
+                HRESULT_FROM_WIN32(write_error),
+                L"Unable to commit the external Store finalizer readiness receipt");
+        }
+    }
+
+    std::optional<DWORD> store_update_external_ready_pid(
+        const StoreInstallHandoffOptions& options)
+    {
+        scoped_handle ready_file(CreateFileW(
+            options.external_ready_path.c_str(),
+            GENERIC_READ | FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_DELETE,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr));
+        if (!ready_file)
+        {
+            const DWORD error = GetLastError();
+            if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)
+            {
+                return std::nullopt;
+            }
+            throw hresult_error(
+                HRESULT_FROM_WIN32(error),
+                L"Unable to open the external Store finalizer readiness receipt");
+        }
+        BY_HANDLE_FILE_INFORMATION information{};
+        if (!GetFileInformationByHandle(ready_file.get(), &information) ||
+            (information.dwFileAttributes &
+                (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0)
+        {
+            return std::nullopt;
+        }
+        try
+        {
+            const JsonObject receipt = JsonObject::Parse(to_hstring(
+                read_small_text_file_handle(
+                    ready_file.get(),
+                    L"Unable to read the external Store finalizer readiness receipt")));
+            if (receipt.GetNamedString(L"type") != L"external-ready" ||
+                receipt.GetNamedString(L"attemptId") != options.attempt_id ||
+                receipt.GetNamedString(L"path") != options.external_helper_path.wstring() ||
+                _stricmp(
+                    to_string(receipt.GetNamedString(L"sha256")).c_str(),
+                    options.external_helper_sha256.c_str()) != 0)
+            {
+                return std::nullopt;
+            }
+            const double pid_number = receipt.GetNamedNumber(L"pid");
+            if (pid_number < 1 ||
+                pid_number > static_cast<double>((std::numeric_limits<DWORD>::max)()))
+            {
+                return std::nullopt;
+            }
+            const DWORD finalizer_pid = static_cast<DWORD>(pid_number);
+            if (static_cast<double>(finalizer_pid) != pid_number)
+            {
+                return std::nullopt;
+            }
+            scoped_handle finalizer_process(OpenProcess(
+                SYNCHRONIZE,
+                FALSE,
+                finalizer_pid));
+            if (!finalizer_process ||
+                WaitForSingleObject(finalizer_process.get(), 0) != WAIT_TIMEOUT)
+            {
+                return std::nullopt;
+            }
+            return finalizer_pid;
+        }
+        catch (...)
+        {
+            return std::nullopt;
+        }
+    }
+
+    DWORD wait_for_store_update_external_ready(
+        const StoreInstallHandoffOptions& options,
+        DWORD timeout_milliseconds = 10000)
+    {
+        const ULONGLONG deadline = GetTickCount64() + timeout_milliseconds;
+        do
+        {
+            const auto finalizer_pid = store_update_external_ready_pid(options);
+            if (finalizer_pid)
+            {
+                append_handoff_log(options.log_path, "external-finalizer-ready");
+                return *finalizer_pid;
+            }
+            Sleep(50);
+        }
+        while (GetTickCount64() < deadline);
+        throw hresult_error(
+            HRESULT_FROM_WIN32(ERROR_TIMEOUT),
+            L"External Store update finalizer did not become ready before timeout");
+    }
+
+    void publish_store_update_installer_ready(
+        const StoreInstallHandoffOptions& options,
+        DWORD finalizer_pid)
+    {
+        scoped_handle finalizer_process(OpenProcess(
+            SYNCHRONIZE,
+            FALSE,
+            finalizer_pid));
+        if (!finalizer_process ||
+            WaitForSingleObject(finalizer_process.get(), 0) != WAIT_TIMEOUT)
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(ERROR_BROKEN_PIPE),
+                L"External Store update finalizer exited before installer readiness");
+        }
+        if (!current_store_install_state_matches_attempt(options))
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(ERROR_REVISION_MISMATCH),
+                L"Store update installer readiness does not match the current install attempt");
+        }
+        const std::string receipt =
+            "{\"type\":\"installer-ready\""
+            ",\"attemptId\":\"" + escape_json(utf8(options.attempt_id)) + "\"" +
+            ",\"pid\":" + std::to_string(GetCurrentProcessId()) +
+            ",\"finalizerPid\":" + std::to_string(finalizer_pid) +
+            ",\"path\":\"" + escape_json(utf8(options.external_helper_path.wstring())) + "\"" +
+            ",\"sha256\":\"" + escape_json(options.external_helper_sha256) + "\"}\n";
+        const std::filesystem::path temporary_path =
+            options.ready_path.wstring() +
+            L"." + std::to_wstring(GetCurrentProcessId()) + L".tmp";
+        scoped_handle ready_file(CreateFileW(
+            temporary_path.c_str(),
+            GENERIC_WRITE,
+            0,
+            nullptr,
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr));
+        if (!ready_file)
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(GetLastError()),
+                L"Unable to create the Store installer readiness receipt");
+        }
+        DWORD written = 0;
+        DWORD write_error = ERROR_SUCCESS;
+        bool write_succeeded = receipt.size() <= (std::numeric_limits<DWORD>::max)();
+        if (!write_succeeded)
+        {
+            write_error = ERROR_FILE_TOO_LARGE;
+        }
+        else if (!WriteFile(
+                ready_file.get(),
+                receipt.data(),
+                static_cast<DWORD>(receipt.size()),
+                &written,
+                nullptr))
+        {
+            write_succeeded = false;
+            write_error = GetLastError();
+        }
+        else if (written != receipt.size())
+        {
+            write_succeeded = false;
+            write_error = ERROR_WRITE_FAULT;
+        }
+        else if (!FlushFileBuffers(ready_file.get()))
+        {
+            write_succeeded = false;
+            write_error = GetLastError();
+        }
+        ready_file.reset();
+        if (!write_succeeded)
+        {
+            DeleteFileW(temporary_path.c_str());
+            throw hresult_error(
+                HRESULT_FROM_WIN32(write_error),
+                L"Unable to write the Store installer readiness receipt");
+        }
+        if (!MoveFileExW(
+                temporary_path.c_str(),
+                options.ready_path.c_str(),
+                MOVEFILE_WRITE_THROUGH))
+        {
+            const DWORD move_error = GetLastError();
+            DeleteFileW(temporary_path.c_str());
+            throw hresult_error(
+                HRESULT_FROM_WIN32(move_error),
+                L"Unable to atomically publish the Store installer readiness receipt");
+        }
+        append_handoff_log(options.log_path, "installer-ready");
+    }
+
     void launch_store_update_finalizer_breakaway(
         const StoreInstallHandoffOptions& options)
     {
@@ -7827,7 +9050,7 @@ namespace
                 options.external_helper_path,
                 L"finalize-store-update",
                 options,
-                false),
+                true),
             false);
         append_handoff_log(options.log_path, "external-finalizer-started");
     }
@@ -7868,12 +9091,15 @@ namespace
         const StoreInstallHandoffOptions& options,
         const std::string& reason)
     {
-        // Publishing the failure lets the external finalizer activate the app.
-        // First wait for the quitting instance, otherwise activation can be
-        // delivered to that instance just before it exits. If this bounded wait
-        // fails, leave recovery to the finalizer's existing overall timeout.
-        wait_for_old_application_exit(options);
+        // Installer readiness has not been published, so the original app is
+        // intentionally still running. Record only this matching attempt and
+        // never wait for or reactivate the old process from this failure path.
         write_store_install_result(options, "installer-shutdown-unavailable", "", reason);
+        write_failed_store_install_state(
+            options,
+            "installer-shutdown-unavailable",
+            "",
+            reason);
     }
 
     int finalize_store_update(const StoreInstallHandoffOptions& options)
@@ -7884,6 +9110,8 @@ namespace
                 E_ACCESSDENIED,
                 L"Store update finalizer must run outside the application package");
         }
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes(15);
+        publish_store_update_external_ready(options);
         append_handoff_log(
             options.log_path,
             "finalizer-monitoring",
@@ -7892,7 +9120,6 @@ namespace
             "baselinePackageVersion=" + utf8(options.baseline_package_version) +
                 "; baselinePackageFullName=" + utf8(options.baseline_package_full_name) +
                 "; oldPid=" + std::to_string(options.old_process_id));
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes(15);
         std::string failure_state;
         std::string failure_hresult;
         std::string failure_reason;
@@ -7902,7 +9129,14 @@ namespace
             {
                 if (installed_package_replaced_baseline(options))
                 {
-                    DeleteFileW(options.state_path.c_str());
+                    if (!delete_matching_store_install_state(options))
+                    {
+                        append_handoff_log(
+                            options.log_path,
+                            "replacement-package-ready-stale-attempt",
+                            "completed");
+                        return 4;
+                    }
                     DeleteFileW(options.result_path.c_str());
                     append_handoff_log(options.log_path, "replacement-package-ready", "completed");
                     if (options.mode == L"manual")
@@ -7922,7 +9156,7 @@ namespace
                     to_string(error.message()));
             }
 
-            const StoreInstallResultFile result = read_store_install_result(options.result_path);
+            const StoreInstallResultFile result = read_store_install_result(options);
             if (result.available && result.state != "completed")
             {
                 failure_state = result.state.empty() ? "installer-error" : result.state;
@@ -7939,7 +9173,7 @@ namespace
             failure_state = "timeout";
             failure_reason = "The Microsoft Store update did not replace the baseline package before timeout";
         }
-        write_failed_store_install_state(
+        const bool failure_state_written = write_failed_store_install_state(
             options,
             failure_state,
             failure_hresult,
@@ -7950,11 +9184,11 @@ namespace
             failure_state,
             failure_hresult,
             failure_reason);
-        if (options.mode == L"manual")
+        if (failure_state_written && options.mode == L"manual")
         {
             activate_store_application_with_retry(options, "failed");
         }
-        return 2;
+        return failure_state_written ? 2 : 4;
     }
 
     IVector<StorePackageUpdate> copy_updates(const IVectorView<StorePackageUpdate>& updates)
@@ -8262,6 +9496,10 @@ namespace
         {
             return Command::DownloadUser;
         }
+        if (value == L"stage-store-update-finalizer")
+        {
+            return Command::StageStoreUpdateFinalizer;
+        }
         if (value == L"handoff-install")
         {
             return Command::HandoffInstall;
@@ -8359,6 +9597,8 @@ namespace
     bool has_handoff_options(const StoreInstallHandoffOptions& options)
     {
         return !options.external_helper_path.empty() ||
+            !options.external_ready_path.empty() ||
+            !options.ready_path.empty() ||
             !options.state_path.empty() ||
             !options.result_path.empty() ||
             !options.log_path.empty() ||
@@ -8368,7 +9608,9 @@ namespace
             !options.created_at.empty() ||
             !options.aumid.empty() ||
             !options.package_family_name.empty() ||
-            !options.mode.empty();
+            !options.mode.empty() ||
+            !options.attempt_id.empty() ||
+            !options.external_helper_sha256.empty();
     }
 
     int run_message_loop()
@@ -8390,7 +9632,7 @@ int wmain(int argc, wchar_t* argv[])
     {
         if (argc < 2)
         {
-            std::cerr << "usage: MemmyStoreUpdate.exe <identity|package-family-registration|check|download-silent|download-user|handoff-install|launch-store-update-finalizer|finalize-store-update|startup-status|startup-enable|startup-disable|prepare-legacy-takeover|recover-legacy-cleanup-journal|ensure-legacy-cleanup-broker|legacy-cleanup-broker|stop-legacy-cleanup-broker|authorize-nsis-mutation|finalize-legacy-cleanup|ack-legacy-cleanup> [options]\n";
+            std::cerr << "usage: MemmyStoreUpdate.exe <identity|package-family-registration|check|download-silent|download-user|stage-store-update-finalizer|handoff-install|launch-store-update-finalizer|finalize-store-update|startup-status|startup-enable|startup-disable|prepare-legacy-takeover|recover-legacy-cleanup-journal|ensure-legacy-cleanup-broker|legacy-cleanup-broker|stop-legacy-cleanup-broker|authorize-nsis-mutation|finalize-legacy-cleanup|ack-legacy-cleanup> [options]\n";
             return 64;
         }
 
@@ -8398,6 +9640,7 @@ int wmain(int argc, wchar_t* argv[])
         active_command = command;
         HWND owner = nullptr;
         StoreInstallHandoffOptions options;
+        StoreFinalizerStageOptions stage_options;
         LegacyTransitionOptions legacy_options;
         std::wstring registration_package_family_name;
         bool store_only_option_was_provided = false;
@@ -8412,6 +9655,24 @@ int wmain(int argc, wchar_t* argv[])
                 }
                 return argv[++index];
             };
+
+            if (command == Command::StageStoreUpdateFinalizer)
+            {
+                if (argument == L"--package-family-name" &&
+                    stage_options.package_family_name.empty())
+                {
+                    stage_options.package_family_name = require_value();
+                    continue;
+                }
+                if (argument == L"--attempt-id" &&
+                    stage_options.attempt_id.empty())
+                {
+                    stage_options.attempt_id = require_value();
+                    continue;
+                }
+                throw hresult_invalid_argument(
+                    L"Store finalizer staging accepts only one package family and attempt ID");
+            }
 
             if (command == Command::PackageFamilyRegistration)
             {
@@ -8491,6 +9752,18 @@ int wmain(int argc, wchar_t* argv[])
                 options.log_path = require_value();
                 continue;
             }
+            if (argument == L"--ready-path")
+            {
+                store_only_option_was_provided = true;
+                options.ready_path = require_value();
+                continue;
+            }
+            if (argument == L"--external-ready-path")
+            {
+                store_only_option_was_provided = true;
+                options.external_ready_path = require_value();
+                continue;
+            }
             if (argument == L"--old-pid")
             {
                 store_only_option_was_provided = true;
@@ -8551,18 +9824,27 @@ int wmain(int argc, wchar_t* argv[])
             }
             if (argument == L"--attempt-id")
             {
-                if (!is_legacy_transition_command(command))
+                if (is_legacy_transition_command(command))
                 {
-                    throw hresult_invalid_argument(
-                        L"--attempt-id is only valid for legacy cleanup");
+                    legacy_options.attempt_id = require_value();
                 }
-                legacy_options.attempt_id = require_value();
+                else
+                {
+                    store_only_option_was_provided = true;
+                    options.attempt_id = require_value();
+                }
                 continue;
             }
             if (argument == L"--mode")
             {
                 store_only_option_was_provided = true;
                 options.mode = require_value();
+                continue;
+            }
+            if (argument == L"--external-helper-sha256")
+            {
+                store_only_option_was_provided = true;
+                options.external_helper_sha256 = utf8(require_value());
                 continue;
             }
             throw hresult_invalid_argument(L"Unknown argument");
@@ -8576,6 +9858,35 @@ int wmain(int argc, wchar_t* argv[])
                     L"package-family-registration requires a valid --package-family-name");
             }
             emit_package_family_registration(registration_package_family_name);
+            return 0;
+        }
+        if (command == Command::StageStoreUpdateFinalizer)
+        {
+            if (argc != 6)
+            {
+                throw hresult_invalid_argument(
+                    L"Store finalizer staging requires exactly one package family and attempt ID");
+            }
+            initialize_store_update_stage_apartment();
+            const StoreFinalizerStageResult result =
+                stage_store_update_finalizer(stage_options);
+            std::ostringstream output;
+            output << "{\"type\":\"finalizer-staged\""
+                   << ",\"attemptId\":\""
+                   << escape_json(utf8(stage_options.attempt_id)) << "\""
+                   << ",\"path\":\""
+                   << escape_json(utf8(result.staged_path.wstring())) << "\""
+                   << ",\"externalReadyPath\":\""
+                   << escape_json(utf8(result.external_ready_path.wstring())) << "\""
+                   << ",\"installerReadyPath\":\""
+                   << escape_json(utf8(result.installer_ready_path.wstring())) << "\""
+                   << ",\"resultPath\":\""
+                   << escape_json(utf8(result.result_path.wstring())) << "\""
+                   << ",\"logPath\":\""
+                   << escape_json(utf8(result.log_path.wstring())) << "\""
+                   << ",\"size\":" << result.size
+                   << ",\"sha256\":\"" << result.sha256 << "\"}";
+            write_json_line(output.str());
             return 0;
         }
         if (is_legacy_transition_command(command) &&
@@ -8791,39 +10102,29 @@ int wmain(int argc, wchar_t* argv[])
                 throw hresult_invalid_argument(L"--hwnd is invalid for Store install handoff");
             }
             validate_store_install_handoff_options(options, true);
-            if (!current_process_has_package_identity())
-            {
-                throw hresult_error(
-                    E_ACCESSDENIED,
-                    L"Store update installer must retain application package identity");
-            }
+            require_current_store_package_identity(options.package_family_name);
+            DWORD finalizer_pid = 0;
             try
             {
+                if (!current_store_install_state_matches_attempt(options))
+                {
+                    throw hresult_error(
+                        HRESULT_FROM_WIN32(ERROR_REVISION_MISMATCH),
+                        L"Store install handoff does not match the current install attempt");
+                }
                 launch_store_update_finalizer_breakaway(options);
+                finalizer_pid = wait_for_store_update_external_ready(options);
             }
             catch (const hresult_error& error)
             {
                 const std::string code = hresult_text(error.code());
                 const std::string reason = single_line(to_string(error.message()));
-                write_store_install_result(options, "finalizer-start-failed", code, reason);
+                write_store_install_result(options, "finalizer-ready-failed", code, reason);
                 write_failed_store_install_state(
                     options,
-                    "finalizer-start-failed",
+                    "finalizer-ready-failed",
                     code,
                     reason);
-                try
-                {
-                    wait_for_old_application_exit(options);
-                    if (options.mode == L"manual")
-                    {
-                        activate_store_application_with_retry(
-                            options,
-                            "finalizer-start-failed");
-                    }
-                }
-                catch (...)
-                {
-                }
                 return 2;
             }
             std::shared_ptr<memmy::StoreInstallShutdown> shutdown;
@@ -8836,12 +10137,13 @@ int wmain(int argc, wchar_t* argv[])
                     options.log_path, "installer-shutdown-ready", utf8(options.mode),
                     shutdown->window_error() ? hresult_text(HRESULT_FROM_WIN32(shutdown->window_error())) : "",
                     shutdown->window() ? "window-and-bounded-timeouts" : "bounded-timeouts-only");
+                publish_store_update_installer_ready(options, finalizer_pid);
             }
             catch (const std::exception& error)
             {
-                // Do not start an unbounded Store operation without the timer.
-                // The external finalizer restores the retryable state and, for
-                // a manual update, reopens the currently installed application.
+                // Do not publish installer readiness or start a Store operation
+                // without the shutdown controller and its bounded timers. The
+                // original app remains running because Node is still gated.
                 report_store_install_shutdown_unavailable(options, error.what());
                 return 2;
             }
@@ -8888,7 +10190,7 @@ int wmain(int argc, wchar_t* argv[])
             {
                 throw hresult_invalid_argument(L"--hwnd is invalid for Store update finalization");
             }
-            validate_store_install_handoff_options(options, false);
+            validate_store_install_handoff_options(options, true);
             return finalize_store_update(options);
         }
 

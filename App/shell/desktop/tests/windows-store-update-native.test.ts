@@ -2,15 +2,17 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
-const helperSourcePath = fileURLToPath(new URL(
-  "../native/windows-store-update/MemmyStoreUpdate.cpp",
-  import.meta.url
-));
+const helperSourcePath = fileURLToPath(
+  new URL(
+    "../native/windows-store-update/MemmyStoreUpdate.cpp",
+    import.meta.url,
+  ),
+);
 
 const sourceBetween = (
   source: string,
   startMarker: string,
-  endMarker: string
+  endMarker: string,
 ): string => {
   const start = source.indexOf(startMarker);
   if (start < 0) {
@@ -26,7 +28,7 @@ const sourceBetween = (
 const expectSourceOrder = (
   source: string,
   earlierMarker: string,
-  laterMarker: string
+  laterMarker: string,
 ): void => {
   const earlier = source.indexOf(earlierMarker);
   const later = source.indexOf(laterMarker);
@@ -37,7 +39,11 @@ const expectSourceOrder = (
 describe("Windows Store native update helper boundary", () => {
   it("publishes one owned Store shortcut with a stable icon and preserves other applications", async () => {
     const source = await readFile(helperSourcePath, "utf8");
-    const shortcuts = sourceBetween(source, "std::filesystem::path store_shortcut_local_app_data()", "LegacySourceExecutableIdentity capture_source_executable_identity(");
+    const shortcuts = sourceBetween(
+      source,
+      "std::filesystem::path store_shortcut_local_app_data()",
+      "LegacySourceExecutableIdentity capture_source_executable_identity(",
+    );
     expect(shortcuts).toContain("GetCurrentPackageFamilyName");
     expect(shortcuts).toContain("GetCurrentPackagePath");
     expect(shortcuts).toContain('L"LocalState" / L"Memmy" / L"shell"');
@@ -45,30 +51,47 @@ describe("Windows Store native update helper boundary", () => {
     expect(shortcuts).toContain("SetIDList(item.value)");
     expect(shortcuts).toContain('index == 0 ? L"Memmy.lnk"');
     expect(shortcuts).not.toContain('L"Memmy (Microsoft Store).lnk"');
-    expect(shortcuts).toContain("std::filesystem::exists(target) && !owned(existing)");
+    expect(shortcuts).toContain(
+      "std::filesystem::exists(target) && !owned(existing)",
+    );
     expect(shortcuts).toContain("PackageFamilyNameFromFullName");
-    expect(shortcuts).toContain("if (owned(existing)) delete_pinned_store_shortcut(existing)");
+    expect(shortcuts).toContain(
+      "if (owned(existing)) delete_pinned_store_shortcut(existing)",
+    );
     expect(shortcuts).toContain("SHCNE_UPDATEITEM");
   });
 
   it("rechecks process-exit races without widening the legacy process ownership boundary", async () => {
     const source = await readFile(helperSourcePath, "utf8");
-    const discovery = sourceBetween(source, "std::vector<ProcessSnapshotEntry> discover_legacy_import_targets(", "bool stop_legacy_for_data_import()");
+    const discovery = sourceBetween(
+      source,
+      "std::vector<ProcessSnapshotEntry> discover_legacy_import_targets(",
+      "bool stop_legacy_for_data_import()",
+    );
     expect(discovery).toContain("is_windows_apps_path(entry.image_path)");
     expect(discovery).toContain("process_user_sid(process.get()) != user_sid");
     expect(discovery).toContain("process_package_family(process.get())");
-    expect(discovery).toContain("WaitForSingleObject(process.get(), 0) == WAIT_OBJECT_0");
-    const shutdown = sourceBetween(source, "bool stop_legacy_for_data_import()", "void create_store_shortcut(");
+    expect(discovery).toContain(
+      "WaitForSingleObject(process.get(), 0) == WAIT_OBJECT_0",
+    );
+    const shutdown = sourceBetween(
+      source,
+      "bool stop_legacy_for_data_import()",
+      "void create_store_shortcut(",
+    );
     expect(shutdown).toContain("memmy::stop_legacy_until_clear(");
-    expect(shutdown).toContain("terminate_legacy_process_tree(targets, deadline)");
+    expect(shutdown).toContain(
+      "terminate_legacy_process_tree(targets, deadline)",
+    );
     expect(shutdown).toContain("25'000");
     expect(shutdown).toContain("legacy-stop result=");
   });
 
   it("exposes StoreContext commands plus authority-bound legacy takeover and cleanup", async () => {
     const source = await readFile(helperSourcePath, "utf8");
-    const commands = [...source.matchAll(/value == L"([a-z-]+)"/gu)]
-      .map((match) => match[1]);
+    const commands = [...source.matchAll(/value == L"([a-z-]+)"/gu)].map(
+      (match) => match[1],
+    );
 
     expect(commands).toEqual([
       "identity",
@@ -76,6 +99,7 @@ describe("Windows Store native update helper boundary", () => {
       "check",
       "download-silent",
       "download-user",
+      "stage-store-update-finalizer",
       "handoff-install",
       "launch-store-update-finalizer",
       "finalize-store-update",
@@ -96,13 +120,17 @@ describe("Windows Store native update helper boundary", () => {
       "finalize-legacy-cleanup",
       "ack-legacy-cleanup",
       "finalize-legacy-cleanup-breakaway-launcher",
-      "finalize-legacy-cleanup-unpackaged"
+      "finalize-legacy-cleanup-unpackaged",
     ]);
     expect(source).toContain("StoreContext::GetDefault()");
     expect(source).toContain("TrySilentDownloadStorePackageUpdatesAsync");
     expect(source).toContain("RequestDownloadStorePackageUpdatesAsync");
-    expect(source).toContain("TrySilentDownloadAndInstallStorePackageUpdatesAsync");
-    expect(source).toContain("namespace_directory.filename() != options.package_family_name");
+    expect(source).toContain(
+      "TrySilentDownloadAndInstallStorePackageUpdatesAsync",
+    );
+    expect(source).toContain(
+      "namespace_directory.filename() != options.package_family_name",
+    );
     expect(source).toContain("options.package_family_name /");
     expect(source).toContain('store_startup_task_id[] = L"MemmyStartupTask"');
     expect(source).toContain("StartupTask::GetAsync(store_startup_task_id)");
@@ -114,8 +142,12 @@ describe("Windows Store native update helper boundary", () => {
     expect(source).toContain("QueryFullProcessImageNameW");
     expect(source).toContain("WM_CLOSE");
     expect(source).toContain("TerminateProcess");
-    expect(source).toContain("stop_legacy_processes(options.legacy_install_directory)");
-    expect(source).toContain("Files may already be partially removed, including Memmy.exe");
+    expect(source).toContain(
+      "stop_legacy_processes(options.legacy_install_directory)",
+    );
+    expect(source).toContain(
+      "Files may already be partially removed, including Memmy.exe",
+    );
     expect(source).toContain("--legacy-install-directory");
     expect(source).toContain("--legacy-executable-path");
     expect(source).toContain("--transition-id");
@@ -129,18 +161,26 @@ describe("Windows Store native update helper boundary", () => {
     expect(source).toContain("write_legacy_cleanup_error_to_stderr");
     expect(source).toContain('<< ",\\\"transitionId\\\":\\\""');
     expect(source).toContain('<< ",\\\"attemptId\\\":\\\""');
-    expect(source).not.toContain("Unable to append the fixed legacy cleanup diagnostic log");
-    expect(source).toContain("Refusing to mutate the real legacy installation from a packaged process");
-    expect(source).toContain("Software\\\\886615f7-a04c-57ec-a2dd-9161dbe1a7c4");
+    expect(source).not.toContain(
+      "Unable to append the fixed legacy cleanup diagnostic log",
+    );
+    expect(source).toContain(
+      "Refusing to mutate the real legacy installation from a packaged process",
+    );
+    expect(source).toContain(
+      "Software\\\\886615f7-a04c-57ec-a2dd-9161dbe1a7c4",
+    );
     expect(source).toContain("ProcessIdToSessionId");
     expect(source).toContain("GetCurrentPackageFullName");
     expect(source).toContain("struct DeleteTreeResult");
     expect(source).toContain("failed_path");
     expect(source).toContain("KEY_WOW64_32KEY");
     expect(source).toContain("KEY_WOW64_64KEY");
-    expect(source).toContain('legacy_app_user_model_id[] = L"cn.memtensor.memmy"');
     expect(source).toContain(
-      "delete_registry_value_if_present(run_key, legacy_app_user_model_id);"
+      'legacy_app_user_model_id[] = L"cn.memtensor.memmy"',
+    );
+    expect(source).toContain(
+      "delete_registry_value_if_present(run_key, legacy_app_user_model_id);",
     );
     for (const diagnosticEvent of [
       "process-context",
@@ -154,7 +194,7 @@ describe("Windows Store native update helper boundary", () => {
       "user-path-update",
       "start-menu-shortcut-delete",
       "launcher-directory-delete",
-      "apps-folder-shortcut-create"
+      "apps-folder-shortcut-create",
     ]) {
       expect(source).toContain(diagnosticEvent);
     }
@@ -169,9 +209,263 @@ describe("Windows Store native update helper boundary", () => {
     expect(source).toContain("memmy-store-transition-cleanup-broker-v1-");
     expect(source).toContain("MemmyStoreTransitionNsisMutation");
     expect(source).toContain("GetFileInformationByHandle");
-    expect(source).toContain("Legacy executable generation changed after broker authority capture");
+    expect(source).toContain(
+      "Legacy executable generation changed after broker authority capture",
+    );
     expect(source).not.toContain('L"Programs" / L"Memmy"');
-    expect(source).not.toMatch(/WindowsApps[\\/][^"\r\n]*_\d+\.\d+\.\d+\.\d+/iu);
+    expect(source).not.toMatch(
+      /WindowsApps[\\/][^"\r\n]*_\d+\.\d+\.\d+\.\d+/iu,
+    );
+  });
+
+  it("streams the Store finalizer directly to a unique plain final executable", async () => {
+    const source = await readFile(helperSourcePath, "utf8");
+    const stagingSupport = sourceBetween(
+      source,
+      "void ensure_plain_store_finalizer_directory(",
+      "StoreFinalizerStageResult stage_store_update_finalizer(",
+    );
+    const staging = sourceBetween(
+      source,
+      "StoreFinalizerStageResult stage_store_update_finalizer(",
+      "void validate_store_install_handoff_options(",
+    );
+    const profileRootResolver = sourceBetween(
+      source,
+      "std::filesystem::path resolve_store_finalizer_profile_authority_root(",
+      "std::string sha256_file_hex(",
+    );
+
+    expect(profileRootResolver).toContain("FOLDERID_Profile");
+    expect(profileRootResolver).toContain("FILE_FLAG_BACKUP_SEMANTICS");
+    expect(profileRootResolver).not.toContain("FILE_FLAG_OPEN_REPARSE_POINT");
+    expect(profileRootResolver).toContain("final_path_for_existing_directory(");
+    expect(stagingSupport).toContain('L".memmy"');
+    expect(stagingSupport).toContain('L"store-update"');
+    expect(stagingSupport).toContain(
+      "resolve_plain_store_finalizer_child_directory(",
+    );
+    expect(stagingSupport).toContain(
+      "ensure_plain_store_finalizer_directory(child, create, require_new)",
+    );
+    expect(source).toContain(
+      "FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_ENCRYPTED",
+    );
+    expect(staging).toContain("resolve_store_finalizer_profile_root()");
+    expect(staging).toContain("resolve_store_finalizer_attempt_directory(");
+    expect(staging).not.toContain(
+      "ApplicationData::Current().LocalFolder().Path()",
+    );
+    expect(staging).not.toContain("Current package LocalState");
+    expect(staging).toContain("is_path_within_directory(");
+    expect(staging).toContain(
+      "resolved_attempt_directory,\n                    resolved_profile_root",
+    );
+    expect(staging).toContain(
+      'destination_path = resolved_attempt_directory / L"MemmyStoreUpdate.exe"',
+    );
+    expectSourceOrder(
+      staging,
+      "resolved_attempt_directory = resolve_store_finalizer_attempt_directory(",
+      "is_path_within_directory(",
+    );
+    expectSourceOrder(
+      staging,
+      "is_path_within_directory(",
+      "stream_store_finalizer_to_new_file(",
+    );
+    expect(stagingSupport).toContain("stream_store_finalizer_to_new_file(");
+    expect(stagingSupport).toContain("CREATE_NEW");
+    expect(stagingSupport).toContain("ReadFile(");
+    expect(stagingSupport).toContain("WriteFile(");
+    expect(stagingSupport).toContain("FlushFileBuffers(");
+    expect(stagingSupport).not.toContain("DecryptFileW(");
+    expect(stagingSupport).not.toContain("ensure_decrypted_store_finalizer");
+    expect(staging).toContain("bool destination_created = false");
+    expect(staging).toContain("if (destination_created)");
+    expect(stagingSupport).not.toContain("CopyFileExW(");
+    expect(staging).not.toContain("CopyFileExW(");
+    expect(stagingSupport).toContain("GetFinalPathNameByHandleW");
+    expect(stagingSupport).toContain("FILE_FLAG_OPEN_REPARSE_POINT");
+    expect(staging).toContain("sha256_file_hex(");
+    expectSourceOrder(
+      staging,
+      "normalize_absolute_path(verified_attempt_directory) !=",
+      "sha256_file_hex(source_path",
+    );
+    expect(stagingSupport).toContain("FILE_ATTRIBUTE_ENCRYPTED");
+    expect(stagingSupport).toContain("FILE_ATTRIBUTE_REPARSE_POINT");
+    expect(staging).toContain('L"external-ready-v1.json"');
+    expect(staging).toContain('L"installer-ready-v1.json"');
+    expect(staging).toContain('L"store-update-result-v1.txt"');
+    expect(staging).toContain('L"store-update-handoff.jsonl"');
+    expect(stagingSupport).not.toContain("MoveFileExW(");
+    expect(staging).not.toContain("MoveFileExW(");
+    expect(staging).not.toContain("MoveFileW(");
+
+    expect(source).toMatch(
+      /void initialize_store_update_stage_apartment\(\)\s*\{\s*init_apartment\(apartment_type::single_threaded\);\s*\}/u,
+    );
+    const stageCommandOffset = source.lastIndexOf(
+      "if (command == Command::StageStoreUpdateFinalizer)",
+    );
+    const stageCommandEntry = source.slice(
+      stageCommandOffset,
+      source.indexOf(
+        "if (is_legacy_transition_command(command)",
+        stageCommandOffset,
+      ),
+    );
+    expectSourceOrder(
+      stageCommandEntry,
+      "initialize_store_update_stage_apartment();",
+      "stage_store_update_finalizer(stage_options)",
+    );
+    for (const field of [
+      "externalReadyPath",
+      "installerReadyPath",
+      "resultPath",
+      "logPath",
+    ]) {
+      expect(stageCommandEntry).toContain(field);
+    }
+  });
+
+  it("publishes external and installer readiness in order before the old app exits", async () => {
+    const source = await readFile(helperSourcePath, "utf8");
+    const externalReadyPublication = sourceBetween(
+      source,
+      "void publish_store_update_external_ready(",
+      "std::optional<DWORD> store_update_external_ready_pid(",
+    );
+    const externalReadyValidation = sourceBetween(
+      source,
+      "std::optional<DWORD> store_update_external_ready_pid(",
+      "DWORD wait_for_store_update_external_ready(",
+    );
+    const installerReadyPublication = sourceBetween(
+      source,
+      "void publish_store_update_installer_ready(",
+      "void launch_store_update_finalizer_breakaway(",
+    );
+    const finalizer = sourceBetween(
+      source,
+      "int finalize_store_update(",
+      "IVector<StorePackageUpdate> copy_updates(",
+    );
+    const handoffEntry = sourceBetween(
+      source,
+      "if (command == Command::HandoffInstall)",
+      "if (command == Command::LaunchStoreUpdateFinalizer)",
+    );
+
+    expect(externalReadyPublication).toContain("APPMODEL_ERROR_NO_PACKAGE");
+    expect(externalReadyPublication).toContain("current_executable_path()");
+    expect(externalReadyPublication).toContain("sha256_file_hex(");
+    expect(externalReadyPublication).toContain('\\"external-ready\\"');
+    expect(externalReadyPublication).toContain("CREATE_NEW");
+    expect(externalReadyPublication).toContain("FlushFileBuffers");
+    expect(externalReadyPublication).toContain(
+      "current_store_install_state_matches_attempt(options)",
+    );
+    expect(externalReadyValidation).toContain("JsonObject::Parse");
+    expect(externalReadyValidation).toContain('GetNamedString(L"attemptId")');
+    expect(externalReadyValidation).toContain("OpenProcess(");
+    expect(externalReadyValidation).toContain("WAIT_TIMEOUT");
+
+    expect(installerReadyPublication).toContain('\\"installer-ready\\"');
+    expect(installerReadyPublication).toContain('\\"finalizerPid\\"');
+    expect(installerReadyPublication).toContain("GetCurrentProcessId()");
+    expect(installerReadyPublication).toContain("FlushFileBuffers");
+    expect(installerReadyPublication).toContain("MoveFileExW(");
+    expect(installerReadyPublication).toContain("MOVEFILE_WRITE_THROUGH");
+    expect(installerReadyPublication).not.toContain(
+      "MOVEFILE_REPLACE_EXISTING",
+    );
+    expect(installerReadyPublication).toContain(
+      "current_store_install_state_matches_attempt(options)",
+    );
+
+    expectSourceOrder(
+      finalizer,
+      "publish_store_update_external_ready(options)",
+      '"finalizer-monitoring"',
+    );
+    expectSourceOrder(
+      handoffEntry,
+      "launch_store_update_finalizer_breakaway(options)",
+      "wait_for_store_update_external_ready(options",
+    );
+    expectSourceOrder(
+      handoffEntry,
+      "wait_for_store_update_external_ready(options",
+      "StoreInstallShutdown",
+    );
+    expectSourceOrder(
+      handoffEntry,
+      "StoreInstallShutdown",
+      "publish_store_update_installer_ready(options, finalizer_pid)",
+    );
+    expectSourceOrder(
+      handoffEntry,
+      "publish_store_update_installer_ready(options, finalizer_pid)",
+      "wait_for_old_application_exit(options)",
+    );
+    expect(handoffEntry).toContain("finalizer-ready-failed");
+  });
+
+  it("isolates result and state mutations by the exact Store update attempt", async () => {
+    const source = await readFile(helperSourcePath, "utf8");
+    const resultWriter = sourceBetween(
+      source,
+      "bool write_store_install_result(",
+      "void append_store_package_log(",
+    );
+    const resultReader = sourceBetween(
+      source,
+      "StoreInstallResultFile read_store_install_result(",
+      "std::array<uint16_t, 4> parse_package_version(",
+    );
+    const failureWriter = sourceBetween(
+      source,
+      "bool write_failed_store_install_state(",
+      "bool delete_matching_store_install_state(",
+    );
+    const successDelete = sourceBetween(
+      source,
+      "bool delete_matching_store_install_state(",
+      "void activate_store_application(",
+    );
+    const finalizer = sourceBetween(
+      source,
+      "int finalize_store_update(",
+      "IVector<StorePackageUpdate> copy_updates(",
+    );
+
+    expect(source).toContain("JsonObject::Parse(to_hstring(contents))");
+    expect(source).toContain(
+      'object.GetNamedString(L"attemptId") == expected_attempt_id',
+    );
+    expect(resultWriter).toContain(
+      "current_store_install_state_matches_attempt(options)",
+    );
+    expect(resultWriter).toContain("single_line(utf8(options.attempt_id))");
+    expect(resultReader).toContain(
+      "result.attempt_id != utf8(options.attempt_id)",
+    );
+    expect(failureWriter).toContain("open_matching_store_install_state(");
+    expect(failureWriter).toContain('\\"attemptId\\"');
+    expect(failureWriter).toContain("FlushFileBuffers(state_file.get())");
+    expect(successDelete).toContain("open_matching_store_install_state(");
+    expect(successDelete).toContain("SetFileInformationByHandle(");
+    expectSourceOrder(
+      finalizer,
+      "delete_matching_store_install_state(options)",
+      'activate_store_application_with_retry(options, "completed")',
+    );
+    expect(finalizer).toContain(
+      'failure_state_written && options.mode == L"manual"',
+    );
   });
 
   it("queries current-user package registration from the package-family API result", async () => {
@@ -179,49 +473,49 @@ describe("Windows Store native update helper boundary", () => {
     const registrationQuery = sourceBetween(
       source,
       "std::vector<std::wstring> registered_package_full_names(",
-      "void emit_package_family_registration("
+      "void emit_package_family_registration(",
     );
     const registrationOutput = sourceBetween(
       source,
       "void emit_package_family_registration(",
-      "struct InstalledPackageIdentity"
+      "struct InstalledPackageIdentity",
     );
     const argumentParsing = sourceBetween(
       source,
       "for (int index = 2; index < argc; ++index)",
-      "init_apartment(apartment_type::single_threaded);"
+      "init_apartment(apartment_type::single_threaded);",
     );
     const commandEntry = sourceBetween(
       source,
       "if (command == Command::PackageFamilyRegistration)",
-      "init_apartment(apartment_type::single_threaded);"
+      "init_apartment(apartment_type::single_threaded);",
     );
 
-    expect(registrationQuery.match(/GetPackagesByPackageFamily\(/gu)).toHaveLength(2);
+    expect(
+      registrationQuery.match(/GetPackagesByPackageFamily\(/gu),
+    ).toHaveLength(2);
     expect(registrationQuery).toContain("package_full_names.data()");
     expect(registrationQuery).toContain("package_full_name_buffer.data()");
     expect(registrationQuery).toContain("read_count");
     expect(registrationQuery).not.toContain("PackageIdFromFullName");
     expect(registrationQuery).toContain("HRESULT_FROM_WIN32(result)");
     expect(registrationOutput).toContain(
-      '\\"type\\":\\"package-family-registration\\"'
+      '\\"type\\":\\"package-family-registration\\"',
     );
     expect(registrationOutput).toContain('\\"packageFamilyName\\":\\"');
     expect(registrationOutput).toContain('\\"registered\\":');
     expect(registrationOutput).toContain('\\"packageFullNames\\":[');
     expect(registrationOutput.match(/write_json_line\(/gu)).toHaveLength(1);
     expect(argumentParsing).toContain(
-      "if (command == Command::PackageFamilyRegistration)"
+      "if (command == Command::PackageFamilyRegistration)",
     );
+    expect(argumentParsing).toContain('argument != L"--package-family-name"');
     expect(argumentParsing).toContain(
-      'argument != L"--package-family-name"'
-    );
-    expect(argumentParsing).toContain(
-      "Package-family registration accepts only --package-family-name"
+      "Package-family registration accepts only --package-family-name",
     );
     expect(commandEntry).toContain("emit_package_family_registration(");
     expect(commandEntry).toContain(
-      "is_valid_package_family_name(registration_package_family_name)"
+      "is_valid_package_family_name(registration_package_family_name)",
     );
     expect(commandEntry).toContain("return 0;");
     expect(commandEntry).not.toContain("current_process_has_package_identity");
@@ -232,77 +526,75 @@ describe("Windows Store native update helper boundary", () => {
     const journalSerialization = sourceBetween(
       source,
       "std::vector<unsigned char> serialize_cleanup_journal(",
-      "LegacyCleanupJournal deserialize_cleanup_journal("
+      "LegacyCleanupJournal deserialize_cleanup_journal(",
     );
     const journalDeserialization = sourceBetween(
       source,
       "LegacyCleanupJournal deserialize_cleanup_journal(",
-      "void write_cleanup_journal_atomic("
+      "void write_cleanup_journal_atomic(",
     );
     const sourceGeneration = sourceBetween(
       source,
       "LegacySourceExecutableIdentity capture_source_executable_identity(",
-      "LegacyAuthorityCapture capture_legacy_cleanup_authority("
+      "LegacyAuthorityCapture capture_legacy_cleanup_authority(",
     );
     const sourceLeaseNormalization = sourceBetween(
       source,
       "std::wstring normalize_source_lease_state_path_for_hash(",
-      "std::wstring legacy_transition_source_lease_pipe_name()"
+      "std::wstring legacy_transition_source_lease_pipe_name()",
     );
     const sourceLeaseName = sourceBetween(
       source,
       "std::wstring legacy_transition_source_lease_pipe_name()",
-      "std::wstring legacy_transition_cleanup_active_pipe_name()"
+      "std::wstring legacy_transition_cleanup_active_pipe_name()",
     );
 
     expect(journalSerialization).toContain(
-      "constexpr uint32_t journal_version = 2;"
+      "constexpr uint32_t journal_version = 2;",
     );
     expect(journalDeserialization).toContain(
-      "constexpr uint32_t journal_version = 2;"
+      "constexpr uint32_t journal_version = 2;",
     );
     expect(journalSerialization).toContain(
-      "journal.authority.source_executable_identity ? 1U : 0U"
+      "journal.authority.source_executable_identity ? 1U : 0U",
     );
     for (const field of [
       "identity.volume_serial_number",
       "identity.file_index",
       "identity.file_size",
-      "identity.last_write_time"
+      "identity.last_write_time",
     ]) {
       expect(journalSerialization).toContain(field);
     }
     expect(journalDeserialization).toContain(
-      "Cleanup journal has an invalid executable-generation flag"
+      "Cleanup journal has an invalid executable-generation flag",
     );
     expect(journalDeserialization).toContain(
-      "journal.authority.source_executable_identity = LegacySourceExecutableIdentity{"
+      "journal.authority.source_executable_identity = LegacySourceExecutableIdentity{",
     );
     expect(sourceGeneration).toContain("GetFileInformationByHandle");
     expect(sourceGeneration).toContain("source_executable_identities_match(");
     expect(sourceGeneration).toContain(
-      "Legacy executable generation changed after broker authority capture"
+      "Legacy executable generation changed after broker authority capture",
     );
     for (const field of [
       "volume_serial_number",
       "file_index",
       "file_size",
-      "last_write_time"
+      "last_write_time",
     ]) {
       expect(sourceGeneration).toContain(`first.${field} == second.${field}`);
     }
 
     expect(sourceLeaseNormalization).toContain(
-      "character >= L'A' && character <= L'Z'"
+      "character >= L'A' && character <= L'Z'",
     );
-    expect(sourceLeaseNormalization).toContain(
-      "character + (L'a' - L'A')"
-    );
+    expect(sourceLeaseNormalization).toContain("character + (L'a' - L'A')");
     expect(sourceLeaseNormalization).not.toMatch(
-      /\b(?:towlower|tolower|CharLowerBuffW|LCMapStringW|_wcslwr)\b/u
+      /\b(?:towlower|tolower|CharLowerBuffW|LCMapStringW|_wcslwr)\b/u,
     );
     expect(sourceLeaseName).toContain(
-      "utf8(normalize_source_lease_state_path_for_hash(state_path))"
+      "utf8(normalize_source_lease_state_path_for_hash(state_path))",
     );
   });
 
@@ -311,74 +603,100 @@ describe("Windows Store native update helper boundary", () => {
     const broker = sourceBetween(
       source,
       "int run_legacy_cleanup_broker(",
-      "void finalize_legacy_cleanup_via_broker("
+      "void finalize_legacy_cleanup_via_broker(",
     );
     const acknowledgementClient = sourceBetween(
       source,
       "void acknowledge_legacy_cleanup_via_broker(",
-      "void launch_store_update_finalizer_breakaway("
+      "void launch_store_update_finalizer_breakaway(",
     );
     const finalizerClient = sourceBetween(
       source,
       "void finalize_legacy_cleanup_via_broker(",
-      "bool matching_acknowledged_cleanup_proof_exists("
+      "bool matching_acknowledged_cleanup_proof_exists(",
     );
     const authorization = sourceBetween(
       source,
       "void authorize_nsis_mutation(",
-      "LegacyCleanupBrokerResponse cleanup_broker_error_response("
+      "LegacyCleanupBrokerResponse cleanup_broker_error_response(",
     );
     const sourceGeneration = sourceBetween(
       source,
       "LegacySourceExecutableIdentity capture_source_executable_identity(",
-      "LegacyAuthorityCapture capture_legacy_cleanup_authority("
+      "LegacyAuthorityCapture capture_legacy_cleanup_authority(",
     );
     const durableIdentity = sourceBetween(
       source,
       "bool equivalent_transition_options(",
-      "void validate_persisted_authority_shape("
+      "void validate_persisted_authority_shape(",
     );
 
-    expect(broker).toContain("Native cleanup broker must start without package identity");
+    expect(broker).toContain(
+      "Native cleanup broker must start without package identity",
+    );
     expect(broker).toContain("validate_cleanup_broker_executable()");
-    expect(broker).toContain("validate_cleanup_broker_client(pipe.get(), options, authority_capture)");
-    expect(broker).toContain("options.package_family_name != broker_bound_package_family_name");
+    expect(broker).toContain(
+      "validate_cleanup_broker_client(pipe.get(), options, authority_capture)",
+    );
+    expect(broker).toContain(
+      "options.package_family_name != broker_bound_package_family_name",
+    );
     expect(broker).toContain("LegacyCleanupBrokerMessage::Cleanup");
     expect(broker).toContain("LegacyCleanupBrokerMessage::Acknowledge");
     expect(broker).toContain("write_cleanup_journal_atomic(prepared_journal)");
     expect(broker).toContain("write_cleanup_journal_atomic(completed_journal)");
-    expect(broker).toContain("write_cleanup_journal_atomic(acknowledged_journal)");
+    expect(broker).toContain(
+      "write_cleanup_journal_atomic(acknowledged_journal)",
+    );
     expect(broker).toContain("verify_complete_cleanup_postconditions");
     const cleanupMutationIndex = broker.indexOf(
-      "finalize_legacy_cleanup_unpacked(trusted_options, true)"
+      "finalize_legacy_cleanup_unpacked(trusted_options, true)",
     );
     const nativePostcheckIndex = broker.indexOf(
       "verify_complete_cleanup_postconditions(",
-      cleanupMutationIndex
+      cleanupMutationIndex,
     );
     const completedJournalIndex = broker.indexOf(
       "write_cleanup_journal_atomic(completed_journal)",
-      cleanupMutationIndex
+      cleanupMutationIndex,
     );
     expect(cleanupMutationIndex).toBeGreaterThan(-1);
     expect(nativePostcheckIndex).toBeGreaterThan(cleanupMutationIndex);
     expect(completedJournalIndex).toBeGreaterThan(nativePostcheckIndex);
     expect(broker).toContain("cleanup-complete-awaiting-store-ack");
     expect(broker).toContain("cleanup-acknowledged-durable");
-    expect(broker).toContain("acknowledgedJournalAndNativePostconditionsMatch=true");
+    expect(broker).toContain(
+      "acknowledgedJournalAndNativePostconditionsMatch=true",
+    );
     expect(broker).toContain('"broker-response-write"');
-    expect(broker).toContain('"durableStatePreserved=true; continueListening="');
+    expect(broker).toContain(
+      '"durableStatePreserved=true; continueListening="',
+    );
     expect(broker).not.toContain("if (SUCCEEDED(response.hresult))");
-    expect(acknowledgementClient).toContain("matching_acknowledged_cleanup_proof_exists(options)");
-    expect(acknowledgementClient).toContain("durableAcknowledgementMatched=true");
-    expect(finalizerClient).toContain("matching_acknowledged_cleanup_proof_exists(options)");
-    expect(finalizerClient).toContain("durableAcknowledgementMatched=true; finalizeReplay=true");
+    expect(acknowledgementClient).toContain(
+      "matching_acknowledged_cleanup_proof_exists(options)",
+    );
+    expect(acknowledgementClient).toContain(
+      "durableAcknowledgementMatched=true",
+    );
+    expect(finalizerClient).toContain(
+      "matching_acknowledged_cleanup_proof_exists(options)",
+    );
+    expect(finalizerClient).toContain(
+      "durableAcknowledgementMatched=true; finalizeReplay=true",
+    );
     expect(durableIdentity).toContain("attempt_id is intentionally excluded");
     expect(durableIdentity).not.toContain("first.attempt_id");
     expect(durableIdentity).not.toContain("second.attempt_id");
-    expect(authorization).toContain("require_parent_held_transition_mutation_mutex()");
-    expect(authorization).toContain("exclusive_pipe_name_is_owned(legacy_transition_cleanup_active_pipe_name())");
-    expect(authorization).toContain("any_allowed_memmy_package_is_registered()");
+    expect(authorization).toContain(
+      "require_parent_held_transition_mutation_mutex()",
+    );
+    expect(authorization).toContain(
+      "exclusive_pipe_name_is_owned(legacy_transition_cleanup_active_pipe_name())",
+    );
+    expect(authorization).toContain(
+      "any_allowed_memmy_package_is_registered()",
+    );
     expect(authorization).toContain("validate_persisted_authority_shape");
     expect(sourceGeneration).toContain("GetFileInformationByHandle");
     expect(sourceGeneration).toContain("dwVolumeSerialNumber");
@@ -391,42 +709,52 @@ describe("Windows Store native update helper boundary", () => {
     const authorization = sourceBetween(
       source,
       "void require_post_mutex_cleanup_authorization(",
-      "scoped_handle create_transition_mutation_mutex()"
+      "scoped_handle create_transition_mutation_mutex()",
     );
     const broker = sourceBetween(
       source,
       "int run_legacy_cleanup_broker(",
-      "void finalize_legacy_cleanup_via_broker("
+      "void finalize_legacy_cleanup_via_broker(",
     );
 
-    expect(authorization).toContain("exclusive_pipe_name_is_owned(legacy_transition_source_lease_pipe_name())");
-    expect(authorization).toContain("registered_package_full_names(options.package_family_name)");
+    expect(authorization).toContain(
+      "exclusive_pipe_name_is_owned(legacy_transition_source_lease_pipe_name())",
+    );
+    expect(authorization).toContain(
+      "registered_package_full_names(options.package_family_name)",
+    );
     expect(authorization).toContain("HRESULT_FROM_WIN32(ERROR_RETRY)");
-    expect(broker.match(/require_post_mutex_cleanup_authorization\(trusted_options\)/gu)).toHaveLength(2);
+    expect(
+      broker.match(
+        /require_post_mutex_cleanup_authorization\(trusted_options\)/gu,
+      ),
+    ).toHaveLength(2);
 
-    const replayMutex = broker.indexOf("transition_mutation_ownership.acquire(transition_mutation_mutex.get())");
+    const replayMutex = broker.indexOf(
+      "transition_mutation_ownership.acquire(transition_mutation_mutex.get())",
+    );
     const replayAuthorization = broker.indexOf(
       "require_post_mutex_cleanup_authorization(trusted_options)",
-      replayMutex
+      replayMutex,
     );
     const replayPostcheck = broker.indexOf(
       "verify_complete_cleanup_postconditions(",
-      replayAuthorization
+      replayAuthorization,
     );
     expect(replayAuthorization).toBeGreaterThan(replayMutex);
     expect(replayPostcheck).toBeGreaterThan(replayAuthorization);
 
     const cleanupMutex = broker.indexOf(
       "transition_mutation_ownership.acquire(transition_mutation_mutex.get())",
-      replayMutex + 1
+      replayMutex + 1,
     );
     const cleanupAuthorization = broker.indexOf(
       "require_post_mutex_cleanup_authorization(trusted_options)",
-      cleanupMutex
+      cleanupMutex,
     );
     const authorityMutationAttestation = broker.indexOf(
       '"broker-authority-mutation-attestation"',
-      cleanupAuthorization
+      cleanupAuthorization,
     );
     expect(cleanupAuthorization).toBeGreaterThan(cleanupMutex);
     expect(authorityMutationAttestation).toBeGreaterThan(cleanupAuthorization);
@@ -437,14 +765,22 @@ describe("Windows Store native update helper boundary", () => {
     const finalize = sourceBetween(
       source,
       "void finalize_legacy_cleanup_unpacked(",
-      "DWORD current_process_session_id()"
+      "DWORD current_process_session_id()",
     );
-    const processStop = finalize.indexOf("stop_legacy_processes(options.legacy_install_directory)");
-    const destructiveDelete = finalize.indexOf("remove_legacy_install_directory(options)");
+    const processStop = finalize.indexOf(
+      "stop_legacy_processes(options.legacy_install_directory)",
+    );
+    const destructiveDelete = finalize.indexOf(
+      "remove_legacy_install_directory(options)",
+    );
 
     expect(finalize).toContain("if (authority_was_attested)");
-    expect(finalize).toContain("else\n            {\n                prepare_legacy_takeover(options);");
-    expect(processStop).toBeGreaterThan(finalize.indexOf("if (authority_was_attested)"));
+    expect(finalize).toContain(
+      "else\n            {\n                prepare_legacy_takeover(options);",
+    );
+    expect(processStop).toBeGreaterThan(
+      finalize.indexOf("if (authority_was_attested)"),
+    );
     expect(destructiveDelete).toBeGreaterThan(processStop);
   });
 
@@ -453,110 +789,161 @@ describe("Windows Store native update helper boundary", () => {
     const packageRegistration = sourceBetween(
       source,
       "bool any_allowed_memmy_package_is_registered()",
-      "void validate_offline_cleanup_broker_stop()"
+      "void validate_offline_cleanup_broker_stop()",
     );
     const nativeInstallRetirement = sourceBetween(
       source,
       "void retire_orphaned_cleanup_journal_for_native_install()",
-      "void send_broker_frame("
+      "void send_broker_frame(",
     );
     const orphanValidation = sourceBetween(
       source,
       "void validate_orphaned_cleanup_journal_for_native_install(",
-      "void retire_orphaned_cleanup_journal_for_native_install()"
+      "void retire_orphaned_cleanup_journal_for_native_install()",
     );
     const offlineStop = sourceBetween(
       source,
       "void validate_offline_cleanup_broker_stop()",
-      "void throw_broker_response_failure("
+      "void throw_broker_response_failure(",
     );
     const onlineStop = sourceBetween(
       source,
       "else if (message == LegacyCleanupBrokerMessage::Stop)",
-      "else if (message == LegacyCleanupBrokerMessage::Acknowledge)"
+      "else if (message == LegacyCleanupBrokerMessage::Acknowledge)",
     );
 
     expect(packageRegistration).toContain(
-      "registered_package_full_names(allowed_memmy_package_family)"
+      "registered_package_full_names(allowed_memmy_package_family)",
     );
     expect(packageRegistration).toContain(
-      "registered_package_full_names(allowed_memmy_agent_package_family)"
+      "registered_package_full_names(allowed_memmy_agent_package_family)",
     );
     expect(packageRegistration).toContain(".empty() ||");
 
     expect(orphanValidation).toContain(
-      "Refusing to retire a cleanup journal while a Memmy Store package remains registered"
+      "Refusing to retire a cleanup journal while a Memmy Store package remains registered",
     );
     expectSourceOrder(
       orphanValidation,
       "registered_package_full_names(allowed_memmy_agent_package_family)",
-      "if (journal.phase == LegacyCleanupJournalPhase::Acknowledged)"
+      "if (journal.phase == LegacyCleanupJournalPhase::Acknowledged)",
     );
     expectSourceOrder(
       nativeInstallRetirement,
       "validate_orphaned_cleanup_journal_for_native_install(*journal)",
-      "delete_cleanup_journal_file("
+      "delete_cleanup_journal_file(",
     );
     expect(offlineStop).toContain(
-      "Refusing offline cleanup broker shutdown while a Memmy Store package is registered"
+      "Refusing offline cleanup broker shutdown while a Memmy Store package is registered",
     );
     expectSourceOrder(
       offlineStop,
       "if (any_allowed_memmy_package_is_registered())",
-      "delete_cleanup_journal_file("
+      "delete_cleanup_journal_file(",
     );
     expect(onlineStop).toContain(
-      "Refusing to stop a cleanup broker while a Memmy Store package is registered"
+      "Refusing to stop a cleanup broker while a Memmy Store package is registered",
     );
     expectSourceOrder(
       onlineStop,
       "if (any_allowed_memmy_package_is_registered())",
-      "delete_cleanup_journal_file("
+      "delete_cleanup_journal_file(",
     );
     expect(source.match(/delete_cleanup_journal_file\(/gu)).toHaveLength(5);
   });
 
   it("recovers only a fixed orphan journal under exclusive cleanup and mutation locks without starting a broker", async () => {
     const source = await readFile(helperSourcePath, "utf8");
-    const recovery = sourceBetween(source,
-      "bool recover_orphaned_cleanup_journal()", "void require_parent_held_transition_mutation_mutex()");
-    const validation = sourceBetween(source,
+    const recovery = sourceBetween(
+      source,
+      "bool recover_orphaned_cleanup_journal()",
+      "void require_parent_held_transition_mutation_mutex()",
+    );
+    const validation = sourceBetween(
+      source,
       "void validate_orphaned_cleanup_journal_for_native_install(",
-      "void retire_orphaned_cleanup_journal_for_native_install()");
-    const entry = sourceBetween(source,
+      "void retire_orphaned_cleanup_journal_for_native_install()",
+    );
+    const entry = sourceBetween(
+      source,
       "if (command == Command::RecoverLegacyCleanupJournal)",
-      "if (command == Command::EnsureLegacyCleanupBroker ||");
-    const routing = sourceBetween(source,
+      "if (command == Command::EnsureLegacyCleanupBroker ||",
+    );
+    const routing = sourceBetween(
+      source,
       "bool is_legacy_transition_command(Command command)",
-      "bool is_legacy_cleanup_diagnostic_command(Command command)");
-    const ownership = sourceBetween(source, "class scoped_mutex_ownership", "struct ProcessSnapshotEntry");
+      "bool is_legacy_cleanup_diagnostic_command(Command command)",
+    );
+    const ownership = sourceBetween(
+      source,
+      "class scoped_mutex_ownership",
+      "struct ProcessSnapshotEntry",
+    );
 
     expect(entry).toContain("if (argc != 2)");
-    expectSourceOrder(entry, "Orphan cleanup journal recovery accepts no options", "recover_orphaned_cleanup_journal()");
+    expectSourceOrder(
+      entry,
+      "Orphan cleanup journal recovery accepts no options",
+      "recover_orphaned_cleanup_journal()",
+    );
     expect(entry).toContain('recovered ? "recovered" : "no-journal"');
     expect(routing).toContain("Command::RecoverLegacyCleanupJournal");
-    expectSourceOrder(recovery, "current_process_has_package_identity()", "scoped_handle cleanup_guard(");
+    expectSourceOrder(
+      recovery,
+      "current_process_has_package_identity()",
+      "scoped_handle cleanup_guard(",
+    );
     expect(recovery).toContain("legacy_transition_cleanup_active_pipe_name()");
-    expect(recovery).toContain("PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE");
-    expectSourceOrder(recovery, "if (!cleanup_guard)", "create_transition_mutation_mutex()");
-    expectSourceOrder(recovery, "mutation_ownership.acquire(mutation_mutex.get())", "read_cleanup_journal()");
-    expectSourceOrder(recovery, "read_cleanup_journal()", "validate_orphaned_cleanup_journal_for_native_install(*journal)");
-    expectSourceOrder(recovery, "validate_orphaned_cleanup_journal_for_native_install(*journal)", "delete_cleanup_journal_file(");
+    expect(recovery).toContain(
+      "PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE",
+    );
+    expectSourceOrder(
+      recovery,
+      "if (!cleanup_guard)",
+      "create_transition_mutation_mutex()",
+    );
+    expectSourceOrder(
+      recovery,
+      "mutation_ownership.acquire(mutation_mutex.get())",
+      "read_cleanup_journal()",
+    );
+    expectSourceOrder(
+      recovery,
+      "read_cleanup_journal()",
+      "validate_orphaned_cleanup_journal_for_native_install(*journal)",
+    );
+    expectSourceOrder(
+      recovery,
+      "validate_orphaned_cleanup_journal_for_native_install(*journal)",
+      "delete_cleanup_journal_file(",
+    );
     expect(recovery).toContain("return false;");
     expect(recovery).toContain("return true;");
     expect(ownership).toContain("WaitForSingleObject(handle_, 15000)");
     expect(ownership).toContain("~scoped_mutex_ownership() noexcept");
-    expect(validation).toContain("validate_persisted_authority_shape(journal.authority, journal.options)");
-    expect(validation).toContain("require_allowed_memmy_package_identity(journal.options)");
-    expect(validation).toContain("registered_package_full_names(allowed_memmy_package_family)");
-    expect(validation).toContain("registered_package_full_names(allowed_memmy_agent_package_family)");
+    expect(validation).toContain(
+      "validate_persisted_authority_shape(journal.authority, journal.options)",
+    );
+    expect(validation).toContain(
+      "require_allowed_memmy_package_identity(journal.options)",
+    );
+    expect(validation).toContain(
+      "registered_package_full_names(allowed_memmy_package_family)",
+    );
+    expect(validation).toContain(
+      "registered_package_full_names(allowed_memmy_agent_package_family)",
+    );
     expect(validation).toContain("capture_legacy_cleanup_authority()");
     expect(validation).toContain("FILE_ATTRIBUTE_REPARSE_POINT");
     for (const forbidden of [
-      "ensure_legacy_cleanup_broker(", "launch_cleanup_broker_process(",
-      "register_cleanup_broker_run_value(", "try_stop_cleanup_broker(",
-      "finalize_legacy_cleanup_unpacked(", "remove_legacy_install_directory(",
-      "legacy_transition_source_lease_pipe_name()", "exclusive_pipe_name_is_owned("
+      "ensure_legacy_cleanup_broker(",
+      "launch_cleanup_broker_process(",
+      "register_cleanup_broker_run_value(",
+      "try_stop_cleanup_broker(",
+      "finalize_legacy_cleanup_unpacked(",
+      "remove_legacy_install_directory(",
+      "legacy_transition_source_lease_pipe_name()",
+      "exclusive_pipe_name_is_owned(",
     ]) {
       expect(recovery + validation + entry).not.toContain(forbidden);
     }
@@ -567,26 +954,26 @@ describe("Windows Store native update helper boundary", () => {
     const legacyClassification = sourceBetween(
       source,
       "bool is_legacy_transition_command(Command command)",
-      "bool is_legacy_cleanup_diagnostic_command(Command command)"
+      "bool is_legacy_cleanup_diagnostic_command(Command command)",
     );
     const argumentParsing = sourceBetween(
       source,
       "bool store_only_option_was_provided = false;",
-      "init_apartment(apartment_type::single_threaded);"
+      "init_apartment(apartment_type::single_threaded);",
     );
     const handoffOptions = sourceBetween(
       source,
       "bool has_handoff_options(const StoreInstallHandoffOptions& options)",
-      "int run_message_loop()"
+      "int run_message_loop()",
     );
     const authorizationEntry = sourceBetween(
       source,
       "if (command == Command::AuthorizeNsisMutation)",
-      "if (command == Command::PrepareLegacyTakeover)"
+      "if (command == Command::PrepareLegacyTakeover)",
     );
-    const classifiedCommands = [...legacyClassification.matchAll(
-      /command == Command::([A-Za-z]+)/gu
-    )].map((match) => match[1]);
+    const classifiedCommands = [
+      ...legacyClassification.matchAll(/command == Command::([A-Za-z]+)/gu),
+    ].map((match) => match[1]);
 
     expect(classifiedCommands).toEqual([
       "PrepareLegacyTakeover",
@@ -603,19 +990,21 @@ describe("Windows Store native update helper boundary", () => {
       "FinalizeLegacyCleanup",
       "AckLegacyCleanup",
       "FinalizeLegacyCleanupBreakawayLauncher",
-      "FinalizeLegacyCleanupUnpackaged"
+      "FinalizeLegacyCleanupUnpackaged",
     ]);
     expect(argumentParsing).toContain(
-      "if (is_legacy_transition_command(command) &&"
+      "if (is_legacy_transition_command(command) &&",
     );
     expect(argumentParsing).toContain(
-      "store_only_option_was_provided || owner != nullptr || has_handoff_options(options)"
+      "store_only_option_was_provided || owner != nullptr || has_handoff_options(options)",
     );
     expect(argumentParsing).toContain(
-      "Legacy transition commands do not accept Store handoff or UI options"
+      "Legacy transition commands do not accept Store handoff or UI options",
     );
     for (const field of [
       "external_helper_path",
+      "external_ready_path",
+      "ready_path",
       "state_path",
       "result_path",
       "log_path",
@@ -625,7 +1014,9 @@ describe("Windows Store native update helper boundary", () => {
       "created_at",
       "aumid",
       "package_family_name",
-      "mode"
+      "mode",
+      "attempt_id",
+      "external_helper_sha256",
     ]) {
       expect(handoffOptions).toContain(`options.${field}`);
     }
@@ -634,16 +1025,18 @@ describe("Windows Store native update helper boundary", () => {
       "--state-path",
       "--result-path",
       "--log-path",
+      "--external-ready-path",
+      "--ready-path",
       "--old-pid",
       "--baseline-package-version",
       "--baseline-package-full-name",
       "--created-at",
-      "--mode"
+      "--mode",
     ]) {
       const optionBranch = sourceBetween(
         argumentParsing,
         `if (argument == L"${option}")`,
-        "continue;"
+        "continue;",
       );
       expect(optionBranch).toContain("store_only_option_was_provided = true;");
     }
@@ -657,17 +1050,17 @@ describe("Windows Store native update helper boundary", () => {
       "aumid",
       "package_family_name",
       "transition_id",
-      "attempt_id"
+      "attempt_id",
     ]) {
       expect(authorizationEntry).toContain(`legacy_options.${field}.empty()`);
     }
     expect(authorizationEntry).toContain(
-      "NSIS mutation authorization accepts no options"
+      "NSIS mutation authorization accepts no options",
     );
     expectSourceOrder(
       authorizationEntry,
       "NSIS mutation authorization accepts no options",
-      "authorize_nsis_mutation();"
+      "authorize_nsis_mutation();",
     );
   });
 
@@ -676,12 +1069,12 @@ describe("Windows Store native update helper boundary", () => {
     const breakawayEntry = sourceBetween(
       source,
       "if (command == Command::FinalizeLegacyCleanupBreakawayLauncher)",
-      "if (command == Command::FinalizeLegacyCleanupUnpackaged)"
+      "if (command == Command::FinalizeLegacyCleanupUnpackaged)",
     );
     const unpackagedEntry = sourceBetween(
       source,
       "if (command == Command::FinalizeLegacyCleanupUnpackaged)",
-      "if (command == Command::HandoffInstall)"
+      "if (command == Command::HandoffInstall)",
     );
 
     for (const entry of [breakawayEntry, unpackagedEntry]) {
@@ -698,12 +1091,12 @@ describe("Windows Store native update helper boundary", () => {
     const initialization = sourceBetween(
       source,
       "void initialize_legacy_cleanup_diagnostics(",
-      "std::filesystem::path legacy_cleanup_process_result_path("
+      "std::filesystem::path legacy_cleanup_process_result_path(",
     );
     const childResultHandling = sourceBetween(
       source,
       "void run_legacy_cleanup_process(",
-      "void finalize_legacy_cleanup_unpacked("
+      "void finalize_legacy_cleanup_unpacked(",
     );
 
     expect(initialization).not.toContain("noexcept");
@@ -714,10 +1107,10 @@ describe("Windows Store native update helper boundary", () => {
     expect(initialization).toContain("ProcessIdToSessionId");
     expect(initialization).toContain("APPMODEL_ERROR_NO_PACKAGE");
     expect(initialization).toContain(
-      "Unable to initialize the fixed legacy cleanup diagnostic log"
+      "Unable to initialize the fixed legacy cleanup diagnostic log",
     );
     expect(childResultHandling).toContain(
-      "const HRESULT child_exit_hresult = static_cast<HRESULT>(exit_code)"
+      "const HRESULT child_exit_hresult = static_cast<HRESULT>(exit_code)",
     );
     expect(childResultHandling).toContain("child-result-channel");
   });
@@ -727,17 +1120,17 @@ describe("Windows Store native update helper boundary", () => {
     const authorityValidation = sourceBetween(
       source,
       "bool validate_legacy_install_authority(",
-      "ULONGLONG query_process_creation_time("
+      "ULONGLONG query_process_creation_time(",
     );
     const registryDelete = sourceBetween(
       source,
       "void delete_registry_tree_if_present(",
-      "void delete_registry_value_if_present("
+      "void delete_registry_value_if_present(",
     );
     const destructiveCleanup = sourceBetween(
       source,
       "void finalize_legacy_cleanup_unpacked(",
-      "void launch_store_update_finalizer_breakaway("
+      "void launch_store_update_finalizer_breakaway(",
     );
 
     expect(authorityValidation).toContain("recorded_install_directory_32");
@@ -746,13 +1139,17 @@ describe("Windows Store native update helper boundary", () => {
     expect(authorityValidation).toContain("KEY_WOW64_64KEY");
     expect(authorityValidation).toContain("authority_matches");
     expect(registryDelete).toContain(
-      "DELETE | KEY_ENUMERATE_SUB_KEYS | KEY_QUERY_VALUE | KEY_SET_VALUE | view_access"
+      "DELETE | KEY_ENUMERATE_SUB_KEYS | KEY_QUERY_VALUE | KEY_SET_VALUE | view_access",
     );
     expect(registryDelete).toContain("RegDeleteTreeW(key, nullptr)");
     expect(registryDelete).toContain("RegDeleteKeyExW(");
     expect(registryDelete).not.toContain("view=process-default");
-    expect(destructiveCleanup.match(/delete_registry_tree_if_present\(/gu)).toHaveLength(4);
-    expect(destructiveCleanup.match(/registry_tree_exists\(/gu)).toHaveLength(4);
+    expect(
+      destructiveCleanup.match(/delete_registry_tree_if_present\(/gu),
+    ).toHaveLength(4);
+    expect(destructiveCleanup.match(/registry_tree_exists\(/gu)).toHaveLength(
+      4,
+    );
     expect(destructiveCleanup).toContain("RegOpenKeyExW(post-check)");
   });
 
@@ -761,61 +1158,60 @@ describe("Windows Store native update helper boundary", () => {
     const shortcutCreation = sourceBetween(
       source,
       "void create_apps_folder_shortcut(",
-      "std::string utf8("
+      "std::string utf8(",
     );
     const destructiveCleanup = sourceBetween(
       source,
       "void finalize_legacy_cleanup_unpacked(",
-      "void launch_store_update_finalizer_breakaway("
+      "void launch_store_update_finalizer_breakaway(",
     );
 
     expect(shortcutCreation).not.toContain("error-ignored");
     expect(shortcutCreation).not.toContain("path-present-unverified");
     expect(shortcutCreation).toContain(
-      "Unable to remove the existing Memmy desktop shortcut"
+      "Unable to remove the existing Memmy desktop shortcut",
     );
     expect(shortcutCreation).not.toContain(
-      "Windows did not report the created Memmy desktop shortcut path"
+      "Windows did not report the created Memmy desktop shortcut path",
     );
     expect(shortcutCreation).not.toMatch(
-      /set_legacy_cleanup_failure_context\(\s*"SHGetNameFromIDList"/u
+      /set_legacy_cleanup_failure_context\(\s*"SHGetNameFromIDList"/u,
     );
     expect(shortcutCreation).not.toMatch(
-      /if\s*\(\s*FAILED\(created_path_result\)/u
+      /if\s*\(\s*FAILED\(created_path_result\)/u,
     );
     expect(shortcutCreation).not.toContain(
-      "check_hresult(created_path_result)"
+      "check_hresult(created_path_result)",
     );
     expect(shortcutCreation).toContain("path-resolution-unavailable");
+    expect(shortcutCreation).toContain("!created_shortcut_path.empty() &&");
     expect(shortcutCreation).toContain(
-      "!created_shortcut_path.empty() &&"
+      "normalize_absolute_path(created_shortcut_path) !=",
     );
     expect(shortcutCreation).toContain(
-      "normalize_absolute_path(created_shortcut_path) !="
+      "Windows created the Memmy desktop shortcut at an unexpected path",
     );
     expect(shortcutCreation).toContain(
-      "Windows created the Memmy desktop shortcut at an unexpected path"
-    );
-    expect(shortcutCreation).toContain(
-      "Windows did not create the expected Memmy desktop shortcut"
+      "Windows did not create the expected Memmy desktop shortcut",
     );
     expect(shortcutCreation).toContain("FILE_ATTRIBUTE_DIRECTORY");
     expect(shortcutCreation).toContain("FILE_ATTRIBUTE_REPARSE_POINT");
     expect(shortcutCreation).toContain(
-      "The created Memmy desktop shortcut is not a regular file"
+      "The created Memmy desktop shortcut is not a regular file",
     );
-    expect(shortcutCreation.indexOf("check_hresult(link_result);")).toBeLessThan(
-      shortcutCreation.indexOf("std::filesystem::exists(")
-    );
+    expect(
+      shortcutCreation.indexOf("check_hresult(link_result);"),
+    ).toBeLessThan(shortcutCreation.indexOf("std::filesystem::exists("));
     expect(destructiveCleanup).toContain("FOLDERID_Programs");
     expect(destructiveCleanup).toContain(
-      "Unable to delete the legacy Memmy Start Menu shortcut"
+      "Unable to delete the legacy Memmy Start Menu shortcut",
     );
     expect(destructiveCleanup).toContain(
-      "The legacy Memmy launch proxy directory is still present after cleanup"
+      "The legacy Memmy launch proxy directory is still present after cleanup",
     );
-    expect(destructiveCleanup.match(/GetFileAttributesW\(post-check\)/gu).length)
-      .toBeGreaterThanOrEqual(2);
+    expect(
+      destructiveCleanup.match(/GetFileAttributesW\(post-check\)/gu).length,
+    ).toBeGreaterThanOrEqual(2);
   });
 
   it("keeps Store transition control files outside any removable legacy install tree", async () => {
@@ -823,24 +1219,24 @@ describe("Windows Store native update helper boundary", () => {
     const diagnosticPathResolution = sourceBetween(
       source,
       "std::filesystem::path resolve_legacy_cleanup_diagnostics_directory(",
-      "void initialize_legacy_cleanup_diagnostics("
+      "void initialize_legacy_cleanup_diagnostics(",
     );
     const authorityValidation = sourceBetween(
       source,
       "bool validate_legacy_install_authority(",
-      "ULONGLONG query_process_creation_time("
+      "ULONGLONG query_process_creation_time(",
     );
     const treeDeletion = sourceBetween(
       source,
       "DeleteTreeResult delete_directory_tree_once(",
-      "void remove_legacy_install_directory("
+      "void remove_legacy_install_directory(",
     );
 
     expect(diagnosticPathResolution).toContain(
-      "paths_overlap(options.legacy_install_directory, memmy_directory)"
+      "paths_overlap(options.legacy_install_directory, memmy_directory)",
     );
     expect(authorityValidation).toContain(
-      "paths_overlap(legacy_install_directory, store_control_directory)"
+      "paths_overlap(legacy_install_directory, store_control_directory)",
     );
     expect(treeDeletion).toContain("RemoveDirectoryW(empty-directory)");
   });

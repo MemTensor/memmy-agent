@@ -1,9 +1,10 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   STORE_UPDATE_INSTALL_STALE_MS,
+  clearWindowsStoreInstallStateForAttempt,
   createWindowsStoreInstallState,
   readWindowsStoreInstallState,
   resolveWindowsStoreInstallNamespaceDirectory,
@@ -14,6 +15,7 @@ import {
 } from "../src/main/windows-store-install-state.js";
 
 const temporaryDirectories: string[] = [];
+const TEST_ATTEMPT_ID = "12345678-1234-4234-8234-123456789abc";
 
 afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
@@ -38,6 +40,7 @@ describe("Windows Store install state", () => {
     const directory = await createTemporaryDirectory();
     const statePath = join(directory, "store-update-install-state-v2.json");
     const state = createWindowsStoreInstallState({
+      attemptId: TEST_ATTEMPT_ID,
       mode: "manual",
       baselinePackageVersion: "1.0.12.0",
       baselinePackageFullName: "NeutralCo.MemmyStoreTest_1.0.12.0_x64__abc123def4567",
@@ -52,6 +55,7 @@ describe("Windows Store install state", () => {
     await expect(readWindowsStoreInstallState(statePath)).resolves.toEqual(state);
     expect(JSON.parse(await readFile(statePath, "utf8"))).toMatchObject({
       schemaVersion: 2,
+      attemptId: TEST_ATTEMPT_ID,
       mode: "manual",
       status: "installing",
       baselinePackageVersion: "1.0.12.0",
@@ -64,8 +68,55 @@ describe("Windows Store install state", () => {
     });
   });
 
+  it("reads a pre-attempt schema-v2 state for backward startup compatibility", async () => {
+    const directory = await createTemporaryDirectory();
+    const statePath = join(directory, "store-update-install-state-v2.json");
+    const state = createWindowsStoreInstallState({
+      attemptId: TEST_ATTEMPT_ID,
+      mode: "silent",
+      baselinePackageVersion: "1.0.12.0",
+      baselinePackageFullName: "NeutralCo.MemmyStoreTest_1.0.12.0_x64__abc123def4567",
+      oldPid: 4321,
+      aumid: "NeutralCo.MemmyStoreTest_abc123def4567!Memmy",
+      packageFamilyName: "NeutralCo.MemmyStoreTest_abc123def4567",
+      now: new Date("2026-08-05T10:00:00.000Z")
+    });
+    const oldSchemaV2State: Record<string, unknown> = { ...state };
+    delete oldSchemaV2State.attemptId;
+    await writeFile(statePath, `${JSON.stringify(oldSchemaV2State)}\n`, "utf8");
+
+    await expect(readWindowsStoreInstallState(statePath)).resolves.toEqual(oldSchemaV2State);
+  });
+
+  it("clears state only when its attempt nonce still matches", async () => {
+    const directory = await createTemporaryDirectory();
+    const statePath = join(directory, "store-update-install-state-v2.json");
+    const state = createWindowsStoreInstallState({
+      attemptId: TEST_ATTEMPT_ID,
+      mode: "manual",
+      baselinePackageVersion: "1.0.12.0",
+      baselinePackageFullName: "NeutralCo.MemmyStoreTest_1.0.12.0_x64__abc123def4567",
+      oldPid: 4321,
+      aumid: "NeutralCo.MemmyStoreTest_abc123def4567!Memmy",
+      packageFamilyName: "NeutralCo.MemmyStoreTest_abc123def4567"
+    });
+    await writeWindowsStoreInstallState(statePath, state);
+
+    await expect(clearWindowsStoreInstallStateForAttempt(
+      statePath,
+      "87654321-4321-4321-8321-cba987654321"
+    )).resolves.toBe(false);
+    await expect(readWindowsStoreInstallState(statePath)).resolves.toEqual(state);
+    await expect(clearWindowsStoreInstallStateForAttempt(
+      statePath,
+      TEST_ATTEMPT_ID
+    )).resolves.toBe(true);
+    await expect(readWindowsStoreInstallState(statePath)).resolves.toBeNull();
+  });
+
   it("blocks every old-version launch while a fresh install is active", () => {
     const state = createWindowsStoreInstallState({
+      attemptId: TEST_ATTEMPT_ID,
       mode: "manual",
       baselinePackageVersion: "1.0.12.0",
       baselinePackageFullName: "NeutralCo.MemmyStoreTest_1.0.12.0_x64__abc123def4567",
@@ -87,6 +138,7 @@ describe("Windows Store install state", () => {
     "clears the %s barrier when the installed package identity changed",
     (mode) => {
     const state = createWindowsStoreInstallState({
+      attemptId: TEST_ATTEMPT_ID,
       mode,
       baselinePackageVersion: "1.0.12.0",
       baselinePackageFullName: "NeutralCo.MemmyStoreTest_1.0.12.0_x64__abc123def4567",
@@ -110,6 +162,7 @@ describe("Windows Store install state", () => {
     (mode) => {
       const state = {
         ...createWindowsStoreInstallState({
+          attemptId: TEST_ATTEMPT_ID,
           mode,
           baselinePackageVersion: "1.0.12.0",
           baselinePackageFullName: "NeutralCo.MemmyStoreTest_1.0.12.0_x64__abc123def4567",
@@ -137,6 +190,7 @@ describe("Windows Store install state", () => {
 
   it("turns an expired install into a recoverable failure instead of a permanent lock", () => {
     const state = createWindowsStoreInstallState({
+      attemptId: TEST_ATTEMPT_ID,
       mode: "silent",
       baselinePackageVersion: "1.0.12.0",
       baselinePackageFullName: "NeutralCo.MemmyStoreTest_1.0.12.0_x64__abc123def4567",
@@ -169,6 +223,7 @@ describe("Windows Store install state", () => {
     const directory = await createTemporaryDirectory();
     const statePath = join(directory, "store-update-install-state-v2.json");
     const state = createWindowsStoreInstallState({
+      attemptId: TEST_ATTEMPT_ID,
       mode: "manual",
       baselinePackageVersion: "1.0.12.0",
       baselinePackageFullName: "NeutralCo.MemmyStoreTest_1.0.12.0_x64__abc123def4567",
