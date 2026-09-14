@@ -74,10 +74,15 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Test Linux launcher and installer contracts
+        env:
+          # Release packaging provisions the Office rendering executables; they are
+          # unavailable to pull request and branch builds.
+          MEMMY_LINUX_CLI_ALLOW_MISSING_OFFICE_PAYLOAD: ${{ (github.event_name == 'pull_request' || github.event_name == 'push') && '1' || '0' }}
         run: npm run test:linux-cli
       - name: Build Linux CLI release assets
         env:
           VERSION: ${{ steps.version.outputs.version }}
+          MEMMY_LINUX_CLI_ALLOW_MISSING_OFFICE_PAYLOAD: ${{ (github.event_name == 'pull_request' || github.event_name == 'push') && '1' || '0' }}
         run: bash scripts/internal/linux/build-cli-archive.sh --version "$VERSION" --output release-assets
       - uses: actions/upload-artifact@v4
         with:

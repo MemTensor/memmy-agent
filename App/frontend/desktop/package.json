@@ -16,6 +16,7 @@
     "@vitejs/plugin-react": "^6.0.2",
     "@xyflow/react": "^12.11.2",
     "electron-log": "^5.4.4",
+    "jszip": "^3.10.2",
     "katex": "^0.16.47",
     "lucide-react": "^1.16.0",
     "react": "^19.2.6",

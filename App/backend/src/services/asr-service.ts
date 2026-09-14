@@ -84,7 +84,9 @@ async function transcribeWithAccount(
       uuid,
       audioBase64: input.audioBase64,
       mimeType: input.mimeType,
-      durationMs: input.durationMs
+      durationMs: input.durationMs,
+      diarization: input.diarization,
+      hotwords: input.hotwords
     });
   } catch (error) {
     throw withActualModelContext(error, context);
@@ -95,7 +97,8 @@ async function transcribeWithAccount(
     modelId: context.model,
     provider: context.provider,
     source: context.source,
-    transcribedAt: now()
+    transcribedAt: now(),
+    ...(result.segments?.length ? { segments: result.segments } : {})
   });
 }
 

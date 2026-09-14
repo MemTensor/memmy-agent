@@ -16,6 +16,8 @@ import { join } from "node:path";
 import {
   closeRuntimeSession,
   completeRuntimeTurn,
+  completeSourceTurn,
+  readCodexSourceTurn,
   loadRuntimeL3,
   notifyRuntimeBoundary,
   openRuntimeSession,
@@ -57,7 +59,8 @@ async function main() {
   if (isStopEvent(payload)) {
     try {
       await captureCompletedTurn(payload);
-    } catch {
+    } catch (error) {
+      reportCaptureFailure("request_failed", error, payload);
       // Memory capture must not interrupt host turn completion.
     }
     writeStopOutput();
@@ -88,7 +91,8 @@ async function main() {
     try {
       const started = await startCapturedTurn(payload, prompt);
       writeTurnStartOutput(started);
-    } catch {
+    } catch (error) {
+      reportCaptureFailure("start_failed", error, payload);
       writeAllowOutput();
     }
     return;
@@ -223,6 +227,10 @@ function isAgentResponseEvent(payload) {
 }
 
 async function captureCompletedTurn(payload) {
+  if (MODE === "codex") {
+    await captureCodexSourceTurn(payload);
+    return;
+  }
   const pending = await readTurnState(payload);
   const status = completedTurnStatus(payload);
   if (status === "cancelled") {
@@ -262,6 +270,59 @@ async function captureCompletedTurn(payload) {
     sourceMemoryIds: Array.isArray(pending && pending.sourceMemoryIds) ? pending.sourceMemoryIds : undefined
   });
   await clearTurnState(payload);
+}
+
+async function captureCodexSourceTurn(payload) {
+  const status = completedTurnStatus(payload);
+  if (status === "cancelled") {
+    await clearTurnState(payload);
+    return;
+  }
+  const transcriptPath = normalizeText(payload.transcript_path || payload.transcriptPath);
+  if (!transcriptPath) {
+    reportCaptureFailure("transcript_unavailable", undefined, payload);
+    return;
+  }
+  const pending = await readTurnState(payload);
+  const expectedTurnId = platformTurnId(payload);
+  const expectedConversationId = normalizeText(payload.session_id || payload.sessionId || payload.conversation_id || payload.conversationId || payload.thread_id || payload.threadId);
+  const parsed = await readCodexSourceTurn(transcriptPath, {
+    turnId: expectedTurnId || undefined,
+    conversationId: expectedConversationId || undefined,
+    stop: status === "succeeded"
+  });
+  if (!parsed.turn) {
+    reportCaptureFailure(parsed.reason || "identity_unresolved", undefined, payload);
+    return;
+  }
+  if (status === "failed" && parsed.turn.status !== "failed") {
+    reportCaptureFailure("turn_status_unresolved", undefined, payload);
+    return;
+  }
+  if (isResumeCommand(parsed.turn.query)) {
+    await clearTurnState(payload);
+    return;
+  }
+  const result = await completeSourceTurn({
+    configUrl: CONFIG_URL,
+    turn: parsed.turn,
+    sessionId: normalizeText(pending && pending.sessionId) || undefined,
+    sourceMemoryIds: Array.isArray(pending && pending.sourceMemoryIds) ? pending.sourceMemoryIds : undefined
+  });
+  if (result.status === "stored" || result.status === "existing" || result.status === "rejected") {
+    await clearTurnState(payload);
+    return;
+  }
+  reportCaptureFailure(normalizeText(result.reason) || normalizeText(result.status) || "unexpected_response", undefined, payload);
+}
+
+function reportCaptureFailure(reason, error, payload = {}) {
+  process.stderr.write(JSON.stringify({
+    event: "memmy.hook.capture_failed", source: SOURCE, reason,
+    sourceSessionId: sessionStateKey(payload), sourceTurnId: platformTurnId(payload) || undefined,
+    transcriptPath: normalizeText(payload.transcript_path || payload.transcriptPath) || undefined,
+    error: error ? formatError(error) : undefined
+  }) + "\n");
 }
 
 async function startCapturedTurn(payload, prompt) {

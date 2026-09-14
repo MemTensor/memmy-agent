@@ -1,6 +1,7 @@
 import type {
   AsrModelId,
   AsrProvider,
+  AsrTranscriptSegment,
   AuthorizeIntegrationResponse,
   AccountInvitationView,
   HealthStatus,
@@ -48,6 +49,8 @@ export interface CloudAccountProfile {
   hasFinishedGuide: boolean | null;
   /** Cloud per-user flag: this account has already received the improvement-program token grant. */
   improvementProgramGranted: boolean | null;
+  /** Cloud per-user grants, e.g. `plugin:<pluginId>`. Null when the cloud did not report any. */
+  entitlements: string[] | null;
   region: string | null;
   registeredAt: string | null;
   rawProfile: Record<string, unknown>;
@@ -190,6 +193,10 @@ export interface CloudAsrTranscriptionInput {
   audioBase64: string;
   mimeType: string;
   durationMs?: number;
+  /** Requests speaker separation. Honoured only by upstream models that support it. */
+  diarization?: boolean;
+  /** Domain terms biasing recognition. */
+  hotwords?: readonly string[];
 }
 
 /** Contract for cloud asr transcription result. */
@@ -197,6 +204,8 @@ export interface CloudAsrTranscriptionResult {
   text: string;
   modelId: AsrModelId;
   provider: AsrProvider;
+  /** Present only when diarization was requested and the upstream model returned it. */
+  segments?: AsrTranscriptSegment[];
 }
 
 export interface CloudClient {

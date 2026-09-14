@@ -157,6 +157,16 @@ describe("MemoriesSubPage", () => {
     })).toBe(Array.from({ length: 21 }, (_value, index) => `word${index + 1}`).join(" "));
   });
 
+  it("Work Memory 列表标题使用 work topic，而不是 requirement 摘要", () => {
+    expect(displayMemoryTitle({
+      id: "memory-work-topic",
+      kind: "work_memory",
+      title: "SFT training pipeline",
+      summary: "固定数据清洗流程",
+      memoryLayer: "L1"
+    })).toBe("SFT training pipeline");
+  });
+
   it("span 列表展示子目标，详情只展示子目标和摘要", () => {
     const spanItem = {
       ...memoryListItemFixture,

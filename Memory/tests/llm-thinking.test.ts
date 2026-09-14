@@ -81,7 +81,8 @@ describe("memory LLM thinking configuration", () => {
     ["Zhipu", "zhipu", "https://open.bigmodel.cn/api/paas/v4", "glm-5.1"],
     ["Kimi", "kimi", "https://api.moonshot.cn/v1", "kimi-k2.6"],
     ["Baidu", "baidu", "https://api.baiduqianfan.ai/v1", "deepseek-v3.2"],
-    ["Doubao", "doubao", "https://ark.cn-beijing.volces.com/api/v3", "doubao-seed-2.0-lite"]
+    ["Doubao", "doubao", "https://ark.cn-beijing.volces.com/api/v3", "doubao-seed-2.0-lite"],
+    ["Xiaomi MiMo", "xiaomi", "https://api.xiaomimimo.com/v1", "mimo-v2.5-pro"]
   ] as const)("maps %s thinking.type for online and evolution calls", async (_label, vendor, endpoint, model) => {
     const fetchMock = openAiFetch();
     vi.stubGlobal("fetch", fetchMock);
@@ -99,6 +100,27 @@ describe("memory LLM thinking configuration", () => {
       thinkingMode: "enabled"
     });
     expect(requestBody(fetchMock)).toMatchObject({ thinking: { type: "enabled" } });
+  });
+
+  it("leaves StepFun requests free of thinking switches", async () => {
+    const fetchMock = openAiFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createLlmClient(llmConfig({
+      vendor: "stepfun",
+      endpoint: "https://api.stepfun.com/v1",
+      model: "step-3.5-flash",
+      enableThinking: true
+    }));
+
+    await client.complete([{ role: "user", content: "filter" }], {
+      operation: "retrieval.filter",
+      thinkingMode: "disabled"
+    });
+
+    const body = requestBody(fetchMock);
+    expect(body).not.toHaveProperty("thinking");
+    expect(body).not.toHaveProperty("enable_thinking");
+    expect(body).not.toHaveProperty("reasoning_effort");
   });
 
   it.each([

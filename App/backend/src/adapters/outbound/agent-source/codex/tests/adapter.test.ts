@@ -27,23 +27,23 @@ describe("codex source adapter", () => {
 
     expect(messages).toEqual([
       expect.objectContaining({
-        messageId: "019e72be-500b-7f02-9400-112c5a194e5c:2",
+        messageId: "019e72be-500b-7f02-9400-112c5a194e5c:000000000002",
         conversationId: "019e72be-500b-7f02-9400-112c5a194e5c",
         role: "user",
         content: `Use OPENAI_API_KEY=${SYNTHETIC_API_KEY}`
       }),
       expect.objectContaining({
-        messageId: "019e72be-500b-7f02-9400-112c5a194e5c:3",
+        messageId: "019e72be-500b-7f02-9400-112c5a194e5c:000000000003",
         role: "tool",
         content: expect.stringContaining("Tool: shell")
       }),
       expect.objectContaining({
-        messageId: "019e72be-500b-7f02-9400-112c5a194e5c:4",
+        messageId: "019e72be-500b-7f02-9400-112c5a194e5c:000000000004",
         role: "tool",
         content: expect.stringContaining("Output:")
       }),
       expect.objectContaining({
-        messageId: "019e72be-500b-7f02-9400-112c5a194e5c:5",
+        messageId: "019e72be-500b-7f02-9400-112c5a194e5c:000000000005",
         role: "assistant",
         content: "Done"
       })

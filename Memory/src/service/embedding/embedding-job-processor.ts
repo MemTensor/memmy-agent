@@ -39,6 +39,7 @@ import {
   traceSummaryEmbeddingText,
   updateMemoryVectorField
 } from "./embedding-pipeline.js";
+import { canonicalWorkMemoryText } from "../work-memory/work-memory-pipeline.js";
 
 type TraceMeta = NonNullable<ReturnType<typeof traceMetaFromMemory>>;
 type TurnCaptureDecision = {
@@ -198,6 +199,19 @@ export class EmbeddingJobProcessor {
     }
     if (!processingJobMatchesMemory(job, memory)) return null;
 
+    if (memory.memoryLayer === "L1" && kindFromMemory(memory) === "work_memory") {
+      const internal = memory.properties.internal_info;
+      const topic = typeof internal.work_topic === "string" ? internal.work_topic : "Work requirements";
+      const requirement = typeof internal.requirement === "string" ? internal.requirement : "";
+      const reason = typeof internal.reason === "string" ? internal.reason : "";
+      return {
+        job,
+        memory,
+        text: canonicalWorkMemoryText(topic, requirement, reason),
+        role: "document",
+        vectorField: "vec_summary"
+      };
+    }
     if (memory.memoryLayer === "L1") {
       if (memoryNeedsImportSummary(memory)) {
         this.deps.enqueueImportSummaryIfMissing(memory, this.deps.nowIso());

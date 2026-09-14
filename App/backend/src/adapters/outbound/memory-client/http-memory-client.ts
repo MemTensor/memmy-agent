@@ -4,6 +4,7 @@ import {
   ApiErrorBodySchema,
   CloseSessionOutputSchema,
   CompleteTurnOutputSchema,
+  SourceTurnCompleteOutputSchema,
   DeleteMemoryOutputSchema,
   EmbeddingInferenceOutputSchema,
   DeletePanelTaskOutputSchema,
@@ -165,6 +166,10 @@ export function createHttpMemoryClient(
         body,
         context
       });
+    },
+
+    async completeSourceTurn(input, context) {
+      return request("POST", "completeSourceTurn", SourceTurnCompleteOutputSchema, { body: input, context });
     },
 
     async search(input, context) {

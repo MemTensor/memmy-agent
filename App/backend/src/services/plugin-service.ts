@@ -53,11 +53,23 @@ export interface CreatePluginServiceOptions {
   artifactManager: PluginArtifactManager;
   skillManager?: PluginSkillManager;
   localArtifactService?: PluginLocalArtifactService;
+  /** Resolves whether the signed-in account holds a manifest-declared entitlement. */
+  isEntitlementGranted?: (entitlement: string) => boolean;
 }
 
 export function createPluginService(options: CreatePluginServiceOptions): PluginService {
   const skillManager = options.skillManager ?? noopPluginSkillManager;
   const localArtifacts = options.localArtifactService ?? createPluginLocalArtifactService();
+  const isEntitlementGranted = options.isEntitlementGranted ?? (() => true);
+  // Enforced here rather than only in the reconciler so a direct local-API call cannot bypass it.
+  const assertEntitled = (manifest: { id: string; requiredEntitlement?: string }) => {
+    const entitlement = manifest.requiredEntitlement;
+    if (!entitlement || isEntitlementGranted(entitlement)) return;
+    throw pluginError(
+      "plugin_entitlement_required",
+      `Plugin requires an account entitlement that is not granted: ${manifest.id}`
+    );
+  };
   const required = (id: string) => {
     const plugin = options.repository.get(id);
     if (!plugin) throw pluginError("plugin_unavailable", `Plugin not found: ${id}`);
@@ -112,6 +124,7 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
       if (!options.runtimeHost.supports(manifest.runtime.adapter)) {
         throw pluginError("plugin_adapter_unsupported", `Unsupported plugin adapter: ${manifest.runtime.adapter}`);
       }
+      assertEntitled(manifest);
 
       const existing = options.repository.get(pluginId);
       if (existing) {
@@ -145,6 +158,7 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
       if (!options.runtimeHost.supports(manifest.runtime.adapter)) {
         throw pluginError("plugin_adapter_unsupported", `Unsupported plugin adapter: ${manifest.runtime.adapter}`);
       }
+      assertEntitled(manifest);
       if (previous.version === manifest.version) {
         if (!manifestsEqual(previous.manifest, manifest)) {
           throw pluginError("conflict", `Plugin release manifest changed: ${id}@${manifest.version}`);
@@ -254,6 +268,7 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
     async enable(id) {
       const plugin = required(id);
       if (plugin.state === "active") return publicPlugin(plugin);
+      assertEntitled(plugin.manifest);
       if (!hasAllPermissions(plugin)) {
         throw pluginError("plugin_permission_denied", "Plugin permissions have not been approved");
       }
@@ -303,6 +318,8 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
       const call = CapabilityCallSchema.parse(rawCall);
       const plugin = required(call.pluginId);
       if (plugin.state !== "active") throw pluginError("plugin_unavailable", `Plugin is not active: ${plugin.id}`);
+      // Covers the window between a grant being revoked and the reconciler disabling the plugin.
+      assertEntitled(plugin.manifest);
       if (!hasAllPermissions(plugin)) throw pluginError("plugin_permission_denied", "Plugin permissions have changed");
       if (!plugin.manifest.capabilities.some((capability) => capability.id === call.capabilityId)) {
         throw pluginError("plugin_unavailable", `Capability not found: ${call.capabilityId}`);

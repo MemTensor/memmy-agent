@@ -30,8 +30,6 @@ import { Select } from "../components/Select.js";
 import { formatMessage, type MessageKey, type MessageValues, zhCNMessages } from "../i18n/messages.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import {
-  AGENT_ATTACHMENT_MAX_COUNT,
-  AGENT_FILE_TARGET_MAX_BYTES,
   agentAttachmentAccept,
   classifyAgentAttachmentFile,
   safeAgentAttachmentFilename,
@@ -212,7 +210,6 @@ const TRANSLATABLE_AGENT_ERROR_KEYS = new Set<MessageKey>([
   "home.media.error.sendSize",
   "home.media.error.sendFileSize",
   "home.media.error.sendTooManyImages",
-  "home.media.error.sendTooManyAttachments",
   "home.media.error.sendReadFailed",
   "home.media.error.sendFailed",
   "home.media.error.messageTooBig",
@@ -3097,7 +3094,6 @@ export function HomePage() {
       const validation = await validateAgentMediaFiles(files, t, pendingAttachmentsRef.current[scopeKey] ?? []);
       const validFiles = validation.files;
       if (!validFiles.length) {
-        setComposerMediaErrorForScope(scopeKey, t("home.media.error.duplicateAttachment"));
         return;
       }
       const nextPending = validFiles.map((item) => fileToPendingAttachment(item.file, item.sourceKey, item.classification));
@@ -3319,6 +3315,7 @@ export function HomePage() {
         </div>
       ) : null}
       topBarBorder={Boolean(hasActiveConversation || environmentScope) && !sidePreviewOpen}
+      windowsTitlebarSafe={Boolean(hasActiveConversation || environmentScope)}
     >
       <div
         className={`agent-workspace-layout${environmentPanelOpen ? " agent-workspace-layout--environment-open" : ""}${sidePreviewOpen ? " agent-workspace-layout--preview-open" : ""}`}
@@ -3523,6 +3520,7 @@ export function HomePage() {
                 plugins={installedPlugins}
                 client={clients?.plugins ?? null}
                 uploadFiles={clients ? (files) => clients.memmyAgent.uploadAgentMedia(files) : undefined}
+                asrClient={clients?.asr}
                 onAddArtifact={(artifact) => setCurrentComposerDraft((current) => appendPluginArtifact(current, artifact))}
                 onOpenArtifact={(artifact) => {
                   setPreviewPanelOpen(false);
@@ -4465,11 +4463,6 @@ export async function validateAgentMediaFiles(files: File[], t?: HomeTranslate, 
   if (classifications.some((item) => !item)) {
     throw new Error(translate("home.media.error.unsupported"));
   }
-  for (const [index] of classifications.entries()) {
-    if (files[index]!.size > AGENT_FILE_TARGET_MAX_BYTES) {
-      throw new Error(translate("home.media.error.fileTooLarge"));
-    }
-  }
 
   const seenSourceKeys = new Set(existingAttachments.map((item) => item.sourceKey));
   const resultFiles: ValidatedAgentMediaFile[] = [];
@@ -4485,9 +4478,6 @@ export async function validateAgentMediaFiles(files: File[], t?: HomeTranslate, 
     }
     seenSourceKeys.add(sourceKey);
     resultFiles.push({ file, classification, sourceKey });
-    if (existingAttachments.length + resultFiles.length > AGENT_ATTACHMENT_MAX_COUNT) {
-      throw new Error(translate("home.media.error.tooManyAttachments"));
-    }
   }
 
   return { files: resultFiles, duplicateCount };

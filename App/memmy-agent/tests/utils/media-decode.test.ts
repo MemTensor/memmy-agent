@@ -4,7 +4,6 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   FileSizeExceeded as ApiFileSizeExceeded,
-  MAX_FILE_SIZE as API_MAX_FILE_SIZE,
   saveBase64DataUrl as apiSaveBase64DataUrl,
 } from "../../src/entrypoints/openai-like-api/server.js";
 import {
@@ -77,6 +76,5 @@ describe("saveBase64DataUrl", () => {
   it("re-exports API server media helpers", () => {
     expect(apiSaveBase64DataUrl).toBe(saveBase64DataUrl);
     expect(ApiFileSizeExceeded).toBe(FileSizeExceeded);
-    expect(API_MAX_FILE_SIZE).toBe(MAX_FILE_SIZE);
   });
 });

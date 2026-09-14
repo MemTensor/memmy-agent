@@ -35,7 +35,13 @@ const CommandRuntimeConfigSchema = z.object({
   env: z.record(z.string(), z.string()).default({}),
   secretEnv: z.record(z.string(), z.string().min(1)).default({}),
   timeoutMs: z.number().int().positive().max(3_600_000).default(300_000),
-  maxOutputBytes: z.number().int().positive().max(MAX_OUTPUT_BYTES).default(10 * 1024 * 1024)
+  maxOutputBytes: z.number().int().positive().max(MAX_OUTPUT_BYTES).default(10 * 1024 * 1024),
+  /**
+   * Requests an unsandboxed child process.  Only honoured for plugins whose
+   * manifest declares a `requiredEntitlement` the account actually holds, so a
+   * third-party plugin cannot exempt itself by editing its own runtime config.
+   */
+  sandbox: z.enum(["required", "none"]).default("required")
 });
 export type CommandRuntimeConfig = z.infer<typeof CommandRuntimeConfigSchema>;
 
@@ -72,20 +78,43 @@ export interface CreateCommandPluginAdapterOptions {
   pluginDataRoot?: string;
   /** Host-owned services callable over the private command runtime protocol. */
   hostServices?: PluginHostServiceInvoker;
+  /** Resolves whether the signed-in account holds a manifest-declared entitlement. */
+  isEntitlementGranted?: (entitlement: string) => boolean;
+}
+
+/**
+ * An unsandboxed child process is only granted to plugins the Host distributes
+ * itself.  A manifest-declared entitlement is that signal: entitlements are
+ * issued by the cloud, so a third-party plugin can declare one but no account
+ * will ever hold it, and the sandbox stays on.
+ */
+function sandboxExempt(
+  config: CommandRuntimeConfig,
+  context: PluginRuntimeContext,
+  isEntitlementGranted: (entitlement: string) => boolean
+): boolean {
+  if (config.sandbox !== "none") return false;
+  const entitlement = context.plugin.manifest.requiredEntitlement;
+  return Boolean(entitlement && isEntitlementGranted(entitlement));
 }
 
 export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOptions = {}): PluginAdapter {
   const platform = options.platform ?? process.platform;
   const spawnFn = options.spawnFn ?? spawn;
-  const buildLaunch = options.buildLaunch ?? ((context, config, networkEnabled, runtimeDependencies) => buildPluginSandboxLaunch(
-    context,
-    config,
-    platform,
-    networkEnabled,
-    options.fileInputRoots ?? [],
-    options.pluginDataRoot,
-    runtimeDependencies.readRoots,
-    runtimeDependencies.executableRoots
+  const isEntitlementGranted = options.isEntitlementGranted ?? (() => false);
+  const buildLaunch = options.buildLaunch ?? ((context, config, networkEnabled, runtimeDependencies) => (
+    sandboxExempt(config, context, isEntitlementGranted)
+      ? buildDirectLaunch(context, config)
+      : buildPluginSandboxLaunch(
+        context,
+        config,
+        platform,
+        networkEnabled,
+        options.fileInputRoots ?? [],
+        options.pluginDataRoot,
+        runtimeDependencies.readRoots,
+        runtimeDependencies.executableRoots
+      )
   ));
   const allowedNetworkHosts = new Set((options.allowedNetworkHosts ?? []).map((host) => host.trim().toLowerCase()).filter(Boolean));
 
@@ -98,6 +127,9 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
 
     async activate(context) {
       const config = validateCommandConfig(context.plugin.manifest.runtime, context.rootPath, platform);
+      if (config.sandbox === "none" && !sandboxExempt(config, context, isEntitlementGranted) && !isSandboxablePlatform(platform)) {
+        throw new Error(`Sandboxed command plugins are unsupported on ${platform}`);
+      }
       const requestedNetworkHosts = context.plugin.manifest.permissions
         .filter((permission) => permission.type === "network")
         .flatMap((permission) => permission.hosts);
@@ -348,15 +380,54 @@ async function writeChildMessage(child: ChildProcessWithoutNullStreams, message:
   });
 }
 
+function isSandboxablePlatform(platform: NodeJS.Platform): boolean {
+  return platform === "darwin" || platform === "linux";
+}
+
 function validateCommandConfig(runtime: PluginRuntime, rootPath: string | null, platform: NodeJS.Platform): CommandRuntimeConfig {
   if (runtime.adapter !== "command") throw new Error(`Expected command runtime, got ${runtime.adapter}`);
   if (!rootPath) throw new Error("Command plugin requires an installed artifact");
-  if (platform !== "darwin" && platform !== "linux") throw new Error(`Command plugins are unsupported on ${platform}`);
   const config = CommandRuntimeConfigSchema.parse(runtime.config ?? {});
+  if (config.sandbox === "required" && !isSandboxablePlatform(platform)) {
+    throw new Error(`Sandboxed command plugins are unsupported on ${platform}`);
+  }
   if (isAbsolute(config.command) || config.command.split(/[\\/]/).includes("..")) {
     throw new Error("Plugin command must be relative to its artifact root");
   }
   return config;
+}
+
+/** Resolves the child process entrypoint without any sandbox wrapper. */
+async function resolveCommandEntrypoint(
+  context: PluginRuntimeContext,
+  config: Pick<CommandRuntimeConfig, "command" | "args" | "cwd"> & Partial<Pick<CommandRuntimeConfig, "interpreter">>
+): Promise<{ root: string; runtimeCommand: string; runtimeArgs: string[]; cwd: string; interpreter: "direct" | "node" }> {
+  const root = await realpath(context.rootPath!);
+  const command = await canonicalDescendant(root, resolve(root, config.command));
+  const info = await lstat(command);
+  if (!info.isFile() || info.isSymbolicLink()) throw new Error("Plugin command must be a regular file");
+  const interpreter = config.interpreter ?? "direct";
+  if (interpreter === "direct") await access(command, fsConstants.X_OK);
+  const runtimeCommand = interpreter === "node" ? await realpath(process.execPath) : command;
+  const runtimeArgs = interpreter === "node" ? [command, ...config.args] : config.args;
+  const cwd = await canonicalDescendant(root, resolve(root, config.cwd), true);
+  if (!(await lstat(cwd)).isDirectory()) throw new Error("Plugin command cwd must be a directory");
+  return { root, runtimeCommand, runtimeArgs, cwd, interpreter };
+}
+
+/**
+ * Launches a Host-distributed plugin directly.  The artifact path checks are
+ * kept because they guard against a tampered package pointing outside its own
+ * root; only the OS sandbox wrapper is dropped.  Environment scrubbing, secret
+ * injection and the network permission check all live in `activate` and still
+ * apply.
+ */
+export async function buildDirectLaunch(
+  context: PluginRuntimeContext,
+  config: Pick<CommandRuntimeConfig, "command" | "args" | "cwd"> & Partial<Pick<CommandRuntimeConfig, "interpreter">>
+): Promise<SandboxLaunch> {
+  const { runtimeCommand, runtimeArgs, cwd } = await resolveCommandEntrypoint(context, config);
+  return { command: runtimeCommand, args: runtimeArgs, cwd };
 }
 
 export async function buildPluginSandboxLaunch(
@@ -369,17 +440,8 @@ export async function buildPluginSandboxLaunch(
   runtimeReadRoots: readonly string[] = [],
   runtimeExecutableRoots: readonly string[] = []
 ): Promise<SandboxLaunch> {
-  const root = await realpath(context.rootPath!);
-  const command = await canonicalDescendant(root, resolve(root, config.command));
-  const info = await lstat(command);
-  if (!info.isFile() || info.isSymbolicLink()) throw new Error("Plugin command must be a regular file");
-  const interpreter = config.interpreter ?? "direct";
-  if (interpreter === "direct") await access(command, fsConstants.X_OK);
-  const runtimeCommand = interpreter === "node" ? await realpath(process.execPath) : command;
+  const { root, runtimeCommand, runtimeArgs, cwd, interpreter } = await resolveCommandEntrypoint(context, config);
   const runtimeRoot = interpreter === "node" ? resolve(dirname(runtimeCommand), "..") : null;
-  const runtimeArgs = interpreter === "node" ? [command, ...config.args] : config.args;
-  const cwd = await canonicalDescendant(root, resolve(root, config.cwd), true);
-  if (!(await lstat(cwd)).isDirectory()) throw new Error("Plugin command cwd must be a directory");
   const filesystem = await filesystemRules(context, fileInputRoots, pluginDataRoot);
 
   if (platform === "darwin") {

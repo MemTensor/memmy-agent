@@ -45,7 +45,7 @@ export function PluginSurfacePage() {
         {plugin && surface && supportsCapability ? (
           <SandboxedPluginSurface plugin={plugin} context={activeSurface} calls={visibleCalls} height={surface.height ?? 720} />
         ) : (
-          <PluginCapabilityHost calls={visibleCalls} plugins={plugins} client={clients?.plugins ?? null} uploadFiles={clients ? (files) => clients.memmyAgent.uploadAgentMedia(files) : undefined} />
+          <PluginCapabilityHost calls={visibleCalls} plugins={plugins} client={clients?.plugins ?? null} uploadFiles={clients ? (files) => clients.memmyAgent.uploadAgentMedia(files) : undefined} asrClient={clients?.asr} />
         )}
       </main>
     </AppFrame>
@@ -110,7 +110,7 @@ function SandboxedPluginSurface(props: {
     return () => window.removeEventListener("message", receive);
   }, [clients, props.calls, props.context.conversationId, props.plugin]);
 
-  if (failed) return <PluginCapabilityHost calls={props.calls} plugins={[props.plugin]} client={clients?.plugins ?? null} uploadFiles={clients ? (files) => clients.memmyAgent.uploadAgentMedia(files) : undefined} />;
+  if (failed) return <PluginCapabilityHost calls={props.calls} plugins={[props.plugin]} client={clients?.plugins ?? null} uploadFiles={clients ? (files) => clients.memmyAgent.uploadAgentMedia(files) : undefined} asrClient={clients?.asr} />;
   if (html === null) return <p className="py-8 text-center text-sm text-text-ink/45" role="status">{t("plugin.ui.rendererLoading")}</p>;
   return <iframe ref={iframeRef} title={`${props.plugin.manifest.name} ${t("plugin.surface.title")}`} sandbox="allow-scripts" referrerPolicy="no-referrer" srcDoc={document} className="w-full rounded-card border border-border-stone/30 bg-background-paper" style={{ height: props.height }} onLoad={() => iframeRef.current?.contentWindow?.postMessage(message, "*")} />;
 }

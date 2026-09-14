@@ -77,6 +77,9 @@ export interface WorkerJobProcessors {
     embedMemory(job: EvolutionJobRecord): MaybePromise<void>;
     embedUserMemory(job: EvolutionJobRecord): MaybePromise<void>;
   };
+  workMemory: {
+    extract(job: EvolutionJobRecord): MaybePromise<void>;
+  };
 }
 
 export interface WorkerJobHandlerDeps {
@@ -275,6 +278,9 @@ export async function processJob(
       return;
     case "l2_association":
       await deps.processors.evolution.associateL2(job);
+      return;
+    case "work_memory_extract":
+      await deps.processors.workMemory.extract(job);
       return;
     default:
       throw new Error(`unsupported job type: ${job.jobType}`);
@@ -614,6 +620,10 @@ export function evolutionJobDedupeKey(input: Pick<EnqueueJobInput, "jobType" | "
     case "skill_trial_resolve": {
       const trial = payloadString("trialId") ?? target;
       return trial ? `skill_trial_resolve:${trial}` : input.episodeId ? `skill_trial_resolve:${input.episodeId}` : undefined;
+    }
+    case "work_memory_extract": {
+      const trajectoryHash = payloadString("trajectoryHash");
+      return trajectoryHash ? `work_memory_extract:${trajectoryHash}` : undefined;
     }
   }
 }

@@ -19,11 +19,20 @@ const PluginNetworkHostSchema = z.string().trim().min(1).max(253).transform((val
   return value.split(".").every((label) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label));
 }, "Network host must be an exact DNS hostname without a scheme, port, path, or wildcard");
 
+/** Account grant identifier, namespaced by the issuer, e.g. `plugin:<pluginId>`. */
+const PluginEntitlementSchema = z.string().trim().min(1).max(128).regex(/^[a-z0-9][a-z0-9:._-]*$/);
+
 export const PluginRuntimeSchema = z.object({
   adapter: z.enum(["mcp", "http", "command"]),
   config: z.record(z.string(), z.unknown()).optional()
 });
 export type PluginRuntime = z.infer<typeof PluginRuntimeSchema>;
+
+export const PluginModelPolicySchema = z.object({
+  /** Restricts host-service inference to presets served by the signed-in account. */
+  requiredSource: z.literal("account")
+});
+export type PluginModelPolicy = z.infer<typeof PluginModelPolicySchema>;
 
 export const PluginCapabilityControlSchema = z.object({
   action: z.literal("cancel"),
@@ -119,7 +128,11 @@ export const PluginManifestSchema = z.object({
   configSchema: JsonSchemaSchema.optional(),
   skills: z.array(PluginSkillContributionSchema).max(20).optional(),
   commands: z.array(PluginCommandContributionSchema).max(100).optional(),
-  ui: PluginUiSchema.optional()
+  ui: PluginUiSchema.optional(),
+  /** Account grant the Host verifies before installing, enabling, or invoking this plugin. */
+  requiredEntitlement: PluginEntitlementSchema.optional(),
+  /** Host-enforced restriction on the model presets this plugin may reach through host services. */
+  modelPolicy: PluginModelPolicySchema.optional()
 }).superRefine((manifest, context) => {
   const ids = new Set<string>();
   for (const [index, capability] of manifest.capabilities.entries()) {
@@ -196,7 +209,7 @@ export type CapabilityCall = z.infer<typeof CapabilityCallSchema>;
 
 export const PluginInteractionRequestSchema = z.object({
   interactionId: z.string().trim().min(1),
-  type: z.enum(["question", "approval", "file-input", "custom"]),
+  type: z.enum(["question", "approval", "file-input", "audio-record", "custom"]),
   payload: z.unknown(),
   responseSchema: JsonSchemaSchema.optional()
 });

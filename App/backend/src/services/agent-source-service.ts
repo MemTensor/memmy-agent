@@ -46,6 +46,9 @@ import {
 } from "./managed-agent-history.js";
 import {
   orderedTurns,
+  sourceTurnFromMessages,
+  sourceTurnFailureReason,
+  buildSourceTurnRequest,
   renderTurnClipped,
   stableTurnIdentity,
   isCompleteTurn,
@@ -114,7 +117,7 @@ export interface CreateAgentSourceServiceOptions {
   sourceRegistry: SourceRegistry;
   agentSourceRepository: AgentSourceRepository;
   ingestionService: IngestionService;
-  memoryClient: Pick<MemoryClient, "addMemory" | "enqueueImportSummaries" | "getMemoryProcessingStatus" | "runWorker">;
+  memoryClient: Pick<MemoryClient, "addMemory" | "completeSourceTurn" | "enqueueImportSummaries" | "getMemoryProcessingStatus" | "runWorker">;
   skillDistributionService: SkillDistributionService;
   agentSourceAnalytics?: AgentSourceLifecycleAnalytics;
   getScanPermission?: () => Promise<ScanPermission>;
@@ -139,7 +142,7 @@ export function createAgentSourceService(options: CreateAgentSourceServiceOption
       if (!scanOptions.scanJobId && !options.scanStoreDirectory) {
         const collected = await this.collectAll(scanOptions);
         const results = await this.ingestCollected(collected, scanOptions);
-        const failures = await this.processImportSummaries(results.flatMap((result) => result.memoryIds ?? []), { ...scanOptions, progressSourceId: "all" });
+        const failures = await this.processImportSummaries(results.filter((result) => result.sourceId !== "codex").flatMap((result) => result.memoryIds ?? []), { ...scanOptions, progressSourceId: "all" });
         appendProcessingFailuresToResults(results, failures);
         return results;
       }
@@ -177,7 +180,7 @@ export function createAgentSourceService(options: CreateAgentSourceServiceOption
       if (!scanOptions.scanJobId && !options.scanStoreDirectory) {
         const collected = await this.collectOne(sourceId, scanOptions);
         const result = await ingestCollectedSource(options, collected, scanOptions, now);
-        const failures = await processPendingImportSummaries(options, result.memoryIds ?? [], { ...scanOptions, progressSourceId: sourceId });
+        const failures = sourceId === "codex" ? [] : await processPendingImportSummaries(options, result.memoryIds ?? [], { ...scanOptions, progressSourceId: sourceId });
         appendProcessingFailures(result, failures);
         return result;
       }
@@ -738,7 +741,7 @@ async function preparePersistentSource(options: CreateAgentSourceServiceOptions,
   let first = true;
   let latest: ConversationMessage | null = null;
   const flushTurn = () => {
-    if (!currentTurn.length || !isCompleteTurn(currentTurn)) return;
+    if (!currentTurn.length || (sourceId !== "codex" && !isCompleteTurn(currentTurn))) return;
     const firstMessage = currentTurn[0]!;
     const lastMessage = currentTurn[currentTurn.length - 1]!;
     const turn = { sourceId, conversationId: firstMessage.conversationId, turnIndex, messages: currentTurn };
@@ -781,14 +784,14 @@ async function preparePersistentSource(options: CreateAgentSourceServiceOptions,
         hash.update("[");
         first = true;
       }
-      if (message.role === "user" && currentTurn.length > 0) {
+      if (currentTurn.length > 0 && (sourceId === "codex" ? message.rawMeta.sourceTurnId !== currentTurn[0]?.rawMeta.sourceTurnId : message.role === "user")) {
         flushTurn();
         currentTurn = [];
       }
       currentTurn.push(message);
       if (!first) hash.update(",");
       first = false;
-      hash.update(JSON.stringify({ messageId: message.messageId, role: message.role, content: message.content, createdAt: message.createdAt, toolName: hashMetaString(message, "toolName") ?? hashMetaString(message, "hermesToolName"), toolCallId: hashMetaString(message, "toolCallId") ?? hashMetaString(message, "hermesToolCallId") }));
+      hash.update(JSON.stringify({ messageId: message.messageId, role: message.role, content: message.content, createdAt: message.createdAt, toolName: hashMetaString(message, "toolName") ?? hashMetaString(message, "hermesToolName"), toolCallId: hashMetaString(message, "toolCallId") ?? hashMetaString(message, "hermesToolCallId"), ...(sourceId === "codex" ? { sourceTurn: message.rawMeta } : {}) }));
       latest = message;
     }
     const last = page[page.length - 1]!;
@@ -859,6 +862,32 @@ async function ingestPersistentSource(
     if (conversationMeta?.selected === false) continue;
     const selectedTurn = store.getTurnMeta(sourceId, turn.conversationId, stableTurnIdentity(turn));
     if (selectedTurn && !selectedTurn.selected) continue;
+    if (sourceId === "codex") {
+      try {
+        const sourceTurn = sourceTurnFromMessages(turn.messages);
+        if (!sourceTurn) throw new Error(sourceTurnFailureReason(turn.messages));
+        const result = await options.memoryClient.completeSourceTurn(buildSourceTurnRequest(sourceTurn, "agent_source_scan"));
+        if (result.status === "pending" || result.status === "conflict") throw new Error(result.reason ?? result.status);
+        const ids = result.result?.l1MemoryIds ?? [];
+        if (result.status === "stored") {
+          memoryIdCount += ids.length;
+          memoryIds.push(...ids.slice(0, Math.max(0, 1000 - memoryIds.length)));
+        } else {
+          deduped += turn.messages.length;
+        }
+        // The Memory transaction already registered normal capture jobs. Do not enqueue import summaries.
+        if (ids.length === 0) store.saveResult({ sourceId, conversationId: turn.conversationId });
+        for (const memoryId of ids) store.saveResult({ sourceId, conversationId: turn.conversationId, memoryId });
+      } catch (error) {
+        activeConversationFailed = true;
+        const reason = error instanceof Error ? error.message : "native turn ingestion failed";
+        errorCount += 1;
+        if (errors.length < 1000) errors.push({ conversationId: turn.conversationId, reason });
+        store.saveResult({ sourceId, conversationId: turn.conversationId, error: reason });
+      }
+      emitProgress(scanOptions, { sourceId, phase: "add", current: memoryIdCount + deduped, total: store.count(sourceId), message: "Capturing conversation turns" });
+      continue;
+    }
     let turnSucceeded = true;
     // One turn is one memory. Splitting an agentic turn fans a single exchange
     // out into hundreds of near-empty tool-call fragments, so an oversized turn
@@ -1294,7 +1323,8 @@ function conversationContentHash(messages: readonly ConversationMessage[]): stri
     content: message.content,
     createdAt: message.createdAt,
     toolName: conversationMetaString(message, "toolName") ?? conversationMetaString(message, "hermesToolName"),
-    toolCallId: conversationMetaString(message, "toolCallId") ?? conversationMetaString(message, "hermesToolCallId")
+    toolCallId: conversationMetaString(message, "toolCallId") ?? conversationMetaString(message, "hermesToolCallId"),
+    ...(message.sourceId === "codex" ? { sourceTurn: message.rawMeta } : {})
   }));
   return createHash("sha256").update(JSON.stringify(content)).digest("hex");
 }
@@ -1381,6 +1411,14 @@ function buildConversationMemoryUnits(sourceId: string, messages: readonly Conve
   let current: ConversationMessage[] = [];
 
   for (const message of messages) {
+    if (sourceId === "codex") {
+      if (current.length > 0 && current[0]?.rawMeta.sourceTurnId !== message.rawMeta.sourceTurnId) {
+        pushCompleteMemoryUnit(sourceId, current, units);
+        current = [];
+      }
+      current.push(message);
+      continue;
+    }
     if (message.role === "user") {
       pushCompleteMemoryUnit(sourceId, current, units);
       current = [message];
@@ -1401,7 +1439,7 @@ function pushCompleteMemoryUnit(
   messages: readonly ConversationMessage[],
   units: SourceMemoryUnit[]
 ): void {
-  if (!isCompleteMemoryTurn(messages)) {
+  if (messages.length === 0 || (sourceId !== "codex" && !isCompleteMemoryTurn(messages))) {
     return;
   }
   const userMessage = messages[0]!;

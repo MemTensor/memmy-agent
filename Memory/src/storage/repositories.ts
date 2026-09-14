@@ -29,11 +29,13 @@ import type {
   MemoryStatsRow,
   MemoryStatus,
   RecallHit,
+  SourceTurnCompleteResponse,
   UserMemoryRecord,
   UserMemoryStatus,
   UserMemoryType
 } from "../types.js";
 import { DEFAULT_NAMESPACE_SOURCE } from "../types.js";
+import { agentSourceFamilyRoots, normalizeAgentIdKey } from "../utils/agent-source-id.js";
 import { newId, stableHash } from "../utils/id.js";
 import { asStringArray, parseJson, toJson } from "../utils/json.js";
 import { nowIso } from "../utils/time.js";
@@ -55,6 +57,7 @@ type SqlValue = string | number | Buffer | null;
 const BUNDLE_TABLES = [
   "memories",
   "memory_capture_claims",
+  "source_turn_captures",
   "l3_world_model_scopes",
   "user_memories",
   "sessions",
@@ -81,7 +84,7 @@ const BUNDLE_TABLES = [
   "audit_logs"
 ] as const;
 const CLEAR_MEMORY_TABLES = [
-  ...BUNDLE_TABLES,
+  ...BUNDLE_TABLES.filter((table) => table !== "source_turn_captures"),
   "memories_fts",
   "user_memories_fts",
   "memory_vector_entries",
@@ -1678,6 +1681,41 @@ export class MemoryProcessingRepository {
   }
 }
 
+export interface SourceTurnCaptureScope {
+  userId: string;
+  source: string;
+  profileId: string;
+  namespaceKey: string;
+  conversationId: string;
+}
+
+export interface SourceTurnCaptureRecord extends SourceTurnCaptureScope {
+  turnId: string;
+  contentHash: string;
+  sessionId?: string;
+  episodeId?: string;
+  rawTurnId?: string;
+  response: SourceTurnCompleteResponse;
+  startedAt: string;
+  completedAt: string;
+  sequence?: number;
+  createdAt: string;
+}
+
+function sourceTurnCaptureFromSql(row: Record<string, unknown>): SourceTurnCaptureRecord {
+  return {
+    userId: String(row.user_id), source: String(row.source), profileId: String(row.profile_id),
+    namespaceKey: String(row.namespace_key), conversationId: String(row.conversation_id), turnId: String(row.turn_id),
+    contentHash: String(row.content_hash), sessionId: typeof row.session_id === "string" ? row.session_id : undefined,
+    episodeId: typeof row.episode_id === "string" ? row.episode_id : undefined,
+    rawTurnId: typeof row.raw_turn_id === "string" ? row.raw_turn_id : undefined,
+    response: parseJson(String(row.response_json), { status: "pending", reason: "source_capture_response_missing" }),
+    startedAt: String(row.started_at), completedAt: String(row.completed_at),
+    sequence: typeof row.source_sequence === "number" ? row.source_sequence : undefined,
+    createdAt: String(row.created_at)
+  };
+}
+
 export class RuntimeRepository {
   private readonly scheduledLogPrunes = new Set<LogTableName>();
 
@@ -1717,6 +1755,90 @@ export class RuntimeRepository {
       value: parseJson(row.value_json, undefined),
       updatedAt: row.updated_at
     }));
+  }
+
+  getSourceTurnCapture(scope: SourceTurnCaptureScope, turnId: string): SourceTurnCaptureRecord | undefined {
+    const row = this.db.prepare(`SELECT * FROM source_turn_captures
+      WHERE user_id = @userId AND source = @source AND profile_id = @profileId
+        AND namespace_key = @namespaceKey AND conversation_id = @conversationId AND turn_id = @turnId`
+    ).get({ ...scope, turnId }) as Record<string, unknown> | undefined;
+    return row ? sourceTurnCaptureFromSql(row) : undefined;
+  }
+
+  latestSourceTurnCapture(scope: SourceTurnCaptureScope): SourceTurnCaptureRecord | undefined {
+    const row = this.db.prepare(`SELECT * FROM source_turn_captures
+      WHERE user_id = @userId AND source = @source AND profile_id = @profileId
+        AND namespace_key = @namespaceKey AND conversation_id = @conversationId AND session_id IS NOT NULL
+      ORDER BY completed_at DESC, source_sequence DESC LIMIT 1`
+    ).get(scope) as Record<string, unknown> | undefined;
+    return row ? sourceTurnCaptureFromSql(row) : undefined;
+  }
+
+  sourceTurnCaptureNeighbors(scope: SourceTurnCaptureScope, startedAt: string): {
+    before?: SourceTurnCaptureRecord;
+    after?: SourceTurnCaptureRecord;
+  } {
+    const prefix = `SELECT * FROM source_turn_captures
+      WHERE user_id = @userId AND source = @source AND profile_id = @profileId
+        AND namespace_key = @namespaceKey AND conversation_id = @conversationId AND session_id IS NOT NULL`;
+    const before = this.db.prepare(`${prefix} AND started_at < @startedAt ORDER BY started_at DESC LIMIT 1`)
+      .get({ ...scope, startedAt }) as Record<string, unknown> | undefined;
+    const after = this.db.prepare(`${prefix} AND started_at > @startedAt ORDER BY started_at ASC LIMIT 1`)
+      .get({ ...scope, startedAt }) as Record<string, unknown> | undefined;
+    return { before: before ? sourceTurnCaptureFromSql(before) : undefined,
+      after: after ? sourceTurnCaptureFromSql(after) : undefined };
+  }
+
+  insertSourceTurnCapture(capture: SourceTurnCaptureRecord): void {
+    this.db.prepare(`INSERT INTO source_turn_captures (
+      user_id, source, profile_id, namespace_key, conversation_id, turn_id, content_hash,
+      session_id, episode_id, raw_turn_id, response_json, started_at, completed_at, source_sequence, created_at
+    ) VALUES (@userId, @source, @profileId, @namespaceKey, @conversationId, @turnId, @contentHash,
+      @sessionId, @episodeId, @rawTurnId, @responseJson, @startedAt, @completedAt, @sequence, @createdAt)`
+    ).run({ ...capture, sessionId: capture.sessionId ?? null, episodeId: capture.episodeId ?? null,
+      rawTurnId: capture.rawTurnId ?? null, responseJson: toJson(capture.response), sequence: capture.sequence ?? null });
+  }
+
+  orderEpisodeTurnsBySourceTime(episodeId: string): void {
+    const episode = this.getEpisode(episodeId);
+    if (!episode) throw new Error(`episode not found: ${episodeId}`);
+    const rawTimes = new Map(episode.rawTurnIds.map((id) => [id, this.getRawTurn(id)?.createdAt ?? ""]));
+    const rawTurnIds = [...episode.rawTurnIds].sort((a, b) => rawTimes.get(a)!.localeCompare(rawTimes.get(b)!));
+    const memoryTime = this.db.prepare(`SELECT created_at,
+      COALESCE(json_extract(info_json, '$.raw_turn_id'), json_extract(properties_json, '$.internal_info.raw_turn_id')) AS raw_turn_id
+      FROM memories WHERE id = ?`);
+    const memoryTimes = new Map(episode.l1MemoryIds.map((id) => {
+      const row = memoryTime.get(id) as { created_at: string; raw_turn_id: string | null } | undefined;
+      return [id, rawTimes.get(row?.raw_turn_id ?? "") ?? row?.created_at ?? ""];
+    }));
+    const l1MemoryIds = [...episode.l1MemoryIds].sort((a, b) => memoryTimes.get(a)!.localeCompare(memoryTimes.get(b)!));
+    this.db.prepare(`UPDATE episodes SET raw_turn_ids_json = ?, l1_memory_ids_json = ? WHERE id = ?`)
+      .run(toJson(rawTurnIds), toJson(l1MemoryIds), episodeId);
+  }
+
+  sourceConversationSessions(input: { userId: string; source: string; profileId: string; conversationId: string }): SessionRecord[] {
+    return (this.db.prepare(`SELECT * FROM sessions WHERE user_id = @userId AND source = @source
+      AND profile_id = @profileId AND (host_session_key = @conversationId OR conversation_id = @conversationId
+        OR (@source = 'codex' AND host_session_key = 'codex-memory-' || @conversationId))
+      ORDER BY opened_at DESC`).all(input) as SqlSessionRow[]).map(sessionFromSql);
+  }
+
+  bindSessionSourceConversation(id: string, conversationId: string): boolean {
+    const result = this.db.prepare(`UPDATE sessions SET conversation_id = @conversationId
+      WHERE id = @id AND status = 'open' AND (conversation_id IS NULL OR conversation_id = '')`)
+      .run({ id, conversationId });
+    return result.changes === 1;
+  }
+
+  bindRawTurnSourceConversation(
+    scope: Pick<RawTurnRecord, "id" | "sessionId" | "userId" | "turnId">,
+    conversationId: string
+  ): boolean {
+    const result = this.db.prepare(`UPDATE raw_turns SET conversation_id = @conversationId
+      WHERE id = @id AND session_id = @sessionId AND user_id = @userId AND turn_id = @turnId
+        AND (conversation_id IS NULL OR conversation_id = '' OR conversation_id = @conversationId)`)
+      .run({ ...scope, conversationId });
+    return result.changes === 1;
   }
 
   createSession(session: SessionRecord): SessionRecord {
@@ -2664,70 +2786,81 @@ export class RuntimeRepository {
   }
 
   enqueueJob(job: EvolutionJobRecord): EvolutionJobRecord {
-    const transaction = this.db.transaction(() => {
-      const existing = job.dedupeKey ? this.getActiveJobByDedupeKey(job.dedupeKey) : undefined;
-      if (existing) {
-        const updatedAt = job.updatedAt ?? nowIso();
-        const payload = mergeJobPayload(existing.payload, job.payload);
-        this.db
-          .prepare(
-            `UPDATE evolution_jobs
-             SET status = CASE WHEN status = 'failed' THEN 'queued' ELSE status END,
-                 session_id = COALESCE(@sessionId, session_id),
-                 episode_id = COALESCE(@episodeId, episode_id),
-                 target_memory_id = COALESCE(@targetMemoryId, target_memory_id),
-                 payload_json = @payloadJson,
-                 max_attempts = MAX(max_attempts, @maxAttempts),
-                 leased_until = CASE WHEN status = 'failed' THEN NULL ELSE leased_until END,
-                 last_error = CASE WHEN status = 'failed' THEN NULL ELSE last_error END,
-                 updated_at = @updatedAt
-             WHERE id = @id`
-          )
-          .run({
-            id: existing.id,
-            sessionId: job.sessionId ?? null,
-            episodeId: job.episodeId ?? null,
-            targetMemoryId: job.targetMemoryId ?? null,
-            payloadJson: toJson(payload),
-            maxAttempts: job.maxAttempts,
-            updatedAt
-          });
-        return this.getJob(existing.id) ?? {
-          ...existing,
-          payload,
-          updatedAt,
-          status: existing.status === "failed" ? "queued" : existing.status,
-          leasedUntil: existing.status === "failed" ? null : existing.leasedUntil,
-          lastError: existing.status === "failed" ? null : existing.lastError
-        };
-      }
+    return this.db.transaction(() => this.enqueueJobInTransaction(job))();
+  }
+
+  enqueueJobInTransaction(job: EvolutionJobRecord): EvolutionJobRecord {
+    const existing = job.dedupeKey ? this.getActiveJobByDedupeKey(job.dedupeKey) : undefined;
+    if (existing) {
+      const updatedAt = job.updatedAt ?? nowIso();
+      const payload = mergeJobPayload(existing.payload, job.payload);
       this.db
         .prepare(
-          `INSERT INTO evolution_jobs (
-            id, job_type, status, dedupe_key, user_id, session_id, episode_id, target_memory_id,
-            scope_key, scope_seq, payload_json, attempts, max_attempts, leased_until, last_error,
-            created_at, updated_at
-          ) VALUES (
-            @id, @jobType, @status, @dedupeKey, @userId, @sessionId, @episodeId, @targetMemoryId,
-            @scopeKey, @scopeSeq, @payloadJson, @attempts, @maxAttempts, @leasedUntil, @lastError,
-            @createdAt, @updatedAt
-          )`
+          `UPDATE evolution_jobs
+           SET status = CASE WHEN status = 'failed' THEN 'queued' ELSE status END,
+               session_id = COALESCE(@sessionId, session_id),
+               episode_id = COALESCE(@episodeId, episode_id),
+               target_memory_id = COALESCE(@targetMemoryId, target_memory_id),
+               payload_json = @payloadJson,
+               max_attempts = MAX(max_attempts, @maxAttempts),
+               leased_until = CASE WHEN status = 'failed' THEN NULL ELSE leased_until END,
+               last_error = CASE WHEN status = 'failed' THEN NULL ELSE last_error END,
+               updated_at = @updatedAt
+           WHERE id = @id`
         )
         .run({
-          ...job,
-          dedupeKey: job.dedupeKey ?? null,
+          id: existing.id,
           sessionId: job.sessionId ?? null,
           episodeId: job.episodeId ?? null,
           targetMemoryId: job.targetMemoryId ?? null,
-          scopeKey: job.scopeKey ?? null,
-          scopeSeq: job.scopeSeq ?? null,
-          payloadJson: toJson(job.payload),
-          leasedUntil: job.leasedUntil ?? null,
-          lastError: job.lastError ?? null
+          payloadJson: toJson(payload),
+          maxAttempts: job.maxAttempts,
+          updatedAt
         });
-      return job;
-    });
-    return transaction();
+      return this.getJob(existing.id) ?? {
+        ...existing,
+        payload,
+        updatedAt,
+        status: existing.status === "failed" ? "queued" : existing.status,
+        leasedUntil: existing.status === "failed" ? null : existing.leasedUntil,
+        lastError: existing.status === "failed" ? null : existing.lastError
+      };
+    }
+    this.db
+      .prepare(
+        `INSERT INTO evolution_jobs (
+          id, job_type, status, dedupe_key, user_id, session_id, episode_id, target_memory_id,
+          scope_key, scope_seq, payload_json, attempts, max_attempts, leased_until, last_error,
+          created_at, updated_at
+        ) VALUES (
+          @id, @jobType, @status, @dedupeKey, @userId, @sessionId, @episodeId, @targetMemoryId,
+          @scopeKey, @scopeSeq, @payloadJson, @attempts, @maxAttempts, @leasedUntil, @lastError,
+          @createdAt, @updatedAt
+        )`
+      )
+      .run({
+        ...job,
+        dedupeKey: job.dedupeKey ?? null,
+        sessionId: job.sessionId ?? null,
+        episodeId: job.episodeId ?? null,
+        targetMemoryId: job.targetMemoryId ?? null,
+        scopeKey: job.scopeKey ?? null,
+        scopeSeq: job.scopeSeq ?? null,
+        payloadJson: toJson(job.payload),
+        leasedUntil: job.leasedUntil ?? null,
+        lastError: job.lastError ?? null
+      });
+    return job;
+  }
+
+  /** Allocate the next FIFO sequence for Work Memory jobs in a merge scope. */
+  nextWorkMemoryScopeSeq(scopeKey: string): number {
+    const row = this.db.prepare(
+      `SELECT COALESCE(MAX(scope_seq), 0) + 1 AS next_seq
+       FROM evolution_jobs
+       WHERE job_type = 'work_memory_extract' AND scope_key = ?`
+    ).get(scopeKey) as { next_seq: number };
+    return Number(row.next_seq);
   }
 
   listJobs(status?: JobStatus, limit = 50, userId?: string): EvolutionJobRecord[] {
@@ -2944,14 +3077,14 @@ export class RuntimeRepository {
                OR CAST(json_extract(payload_json, '$.runAfter') AS TEXT) <= ?
              )
              AND (
-               job_type <> 'l3_world_model_update'
+               job_type NOT IN ('l3_world_model_update', 'work_memory_extract')
                OR (
                  scope_key IS NOT NULL
                  AND scope_seq IS NOT NULL
                  AND NOT EXISTS (
                    SELECT 1
                    FROM evolution_jobs AS leased_l3_job
-                   WHERE leased_l3_job.job_type = 'l3_world_model_update'
+                   WHERE leased_l3_job.job_type = evolution_jobs.job_type
                      AND leased_l3_job.scope_key = evolution_jobs.scope_key
                      AND leased_l3_job.status = 'leased'
                      AND leased_l3_job.id <> evolution_jobs.id
@@ -2959,7 +3092,7 @@ export class RuntimeRepository {
                  AND NOT EXISTS (
                    SELECT 1
                    FROM evolution_jobs AS earlier_l3_job
-                   WHERE earlier_l3_job.job_type = 'l3_world_model_update'
+                   WHERE earlier_l3_job.job_type = evolution_jobs.job_type
                      AND earlier_l3_job.scope_key = evolution_jobs.scope_key
                      AND earlier_l3_job.scope_seq < evolution_jobs.scope_seq
                      AND earlier_l3_job.status IN ('queued', 'leased', 'failed')
@@ -3954,23 +4087,11 @@ export class RuntimeRepository {
     const tools = input.toolNames?.length ? input.toolNames : ["memory_add", "memory_search"] satisfies Array<ApiLogRecord["toolName"]>;
     const placeholders = tools.map(() => "?").join(", ");
     const sourceAgent = input.sourceAgent?.trim();
-    const excludedSourceAgents = Array.from(new Set(
-      (input.excludedSourceAgents ?? []).map(normalizeAgentIdKey).filter(Boolean)
-    ));
-    const excludedPlaceholders = excludedSourceAgents.map(() => "?").join(", ");
-    const sourceAgentFilter = sourceAgent
-      ? `AND lower(replace(replace(TRIM(source_agent), '-', '_'), ' ', '_')) = ?`
-      : excludedSourceAgents.length > 0
-        ? `AND (
-             NULLIF(TRIM(source_agent), '') IS NULL
-             OR lower(replace(replace(TRIM(source_agent), '-', '_'), ' ', '_')) NOT IN (${excludedPlaceholders})
-           )`
-        : "";
-    const parameters = sourceAgent
-      ? [...tools, normalizeAgentIdKey(sourceAgent)]
-      : excludedSourceAgents.length > 0
-        ? [...tools, ...excludedSourceAgents]
-        : tools;
+    const agentFilter = sourceAgent
+      ? agentIdMatchClause("source_agent", sourceAgent)
+      : agentIdExclusionClause("source_agent", input.excludedSourceAgents ?? []);
+    const sourceAgentFilter = agentFilter ? `AND ${agentFilter.sql}` : "";
+    const parameters = agentFilter ? [...tools, ...agentFilter.params] : tools;
     const total = this.db
       .prepare(`SELECT COUNT(*) AS n FROM api_logs WHERE tool_name IN (${placeholders}) ${sourceAgentFilter}`)
       .get(...parameters) as { n: number };
@@ -4035,6 +4156,10 @@ export class RuntimeRepository {
       }>
     };
     this.db.transaction(() => {
+      const hadRuntimeData = Boolean(this.db.prepare(`SELECT EXISTS(
+        SELECT 1 FROM memories UNION ALL SELECT 1 FROM sessions UNION ALL
+        SELECT 1 FROM raw_turns UNION ALL SELECT 1 FROM source_turn_captures
+      )`).pluck().get());
       for (const table of BUNDLE_TABLES) {
         const rows = Array.isArray(tables[table]) ? tables[table] as Array<Record<string, unknown>> : [];
         for (const row of rows) {
@@ -4044,6 +4169,12 @@ export class RuntimeRepository {
             recordMigrationMap(result.migrationMap, table, identity.sourceId, identity.sourceId);
           }
           const existed = identity !== undefined && this.rowExists(table, identity.columns, identity.values);
+          if (table === "runtime_kv" && normalized.key === "source_turn_capture_activated_at") {
+            const outcome = this.mergeSourceTurnActivation(normalized, hadRuntimeData);
+            const counts = result[outcome];
+            counts[table] = (counts[table] ?? 0) + 1;
+            continue;
+          }
           if (existed && conflictStrategy === "skip") {
             result.conflicts.push({
               table,
@@ -4093,6 +4224,30 @@ export class RuntimeRepository {
     })();
     this.scheduleLogTablesPrune();
     return result;
+  }
+
+  private mergeSourceTurnActivation(
+    row: Record<string, unknown>,
+    hadRuntimeData: boolean
+  ): "inserted" | "replaced" | "skipped" {
+    const imported = typeof row.value_json === "string" ? parseJson<unknown>(row.value_json, undefined) : undefined;
+    if (typeof imported !== "string" || !Number.isFinite(Date.parse(imported))) {
+      throw new Error("invalid source turn activation boundary in bundle");
+    }
+    const key = "source_turn_capture_activated_at";
+    const existing = this.getKv(key);
+    if (existing && (typeof existing.value !== "string" || !Number.isFinite(Date.parse(existing.value)))) {
+      throw new Error("invalid source turn activation boundary in target database");
+    }
+    // A new database contains only the automatically initialized boundary. A full restore
+    // inherits the backup's original start. Merging into existing data must never widen
+    // the historical capture window of either database; known identities remain reusable.
+    if (existing && (existing.value === imported ||
+        (hadRuntimeData && Date.parse(existing.value as string) >= Date.parse(imported)))) {
+      return "skipped";
+    }
+    this.setKv(key, imported, typeof row.updated_at === "string" ? row.updated_at : nowIso());
+    return existing ? "replaced" : "inserted";
   }
 
   private rowExists(table: BundleTableName, columns: string[], values: Array<string | number>): boolean {
@@ -4324,6 +4479,24 @@ export class L3WorldModelRepository {
     at?: string;
   }): FreezeL3WorldModelBatchesResult {
     return this.db.transaction(() => this.freezeBatchesInTransaction(input))();
+  }
+
+  /** Freeze L3 batches and run boundary-owned work in the same transaction. */
+  freezeBatchesWithCallback(
+    input: {
+      sessionId: string;
+      trigger: L3WorldModelBatchTrigger;
+      throughL1MemoryId?: string;
+      episodeId?: string;
+      at?: string;
+    },
+    callback: (result: FreezeL3WorldModelBatchesResult) => void
+  ): FreezeL3WorldModelBatchesResult {
+    return this.db.transaction(() => {
+      const result = this.freezeBatchesInTransaction(input);
+      callback(result);
+      return result;
+    })();
   }
 
   getBatch(batchId: string): L3WorldModelEvidenceBatchRecord | undefined {
@@ -5139,8 +5312,14 @@ export class Repositories {
       return this.db.transaction(() => {
         const cleared: Record<string, number> = {};
         for (const table of tables) {
-          cleared[table] = this.db.prepare(`DELETE FROM "${table}"`).run().changes;
+          if (table === "runtime_kv") {
+            cleared[table] = this.db.prepare(`DELETE FROM runtime_kv WHERE key != 'source_turn_capture_activated_at'`).run().changes;
+          } else {
+            cleared[table] = this.db.prepare(`DELETE FROM "${table}"`).run().changes;
+          }
         }
+        // Keep source tombstones, but a deleted Session must not block future turns.
+        this.db.prepare(`UPDATE source_turn_captures SET session_id = NULL, episode_id = NULL, raw_turn_id = NULL`).run();
         if (existing.has("sqlite_sequence")) {
           const sequenceTables = tables.filter((table) => !table.startsWith("memory_vec_"));
           if (sequenceTables.length) {
@@ -5517,6 +5696,7 @@ function userMemoryPanelFilter(input: {
   }
   const sourceAgent = input.sourceAgent?.trim();
   if (sourceAgent) {
+    const match = agentIdMatchClause("sessions.source", sourceAgent);
     clauses.push(`EXISTS (
       SELECT 1
       FROM raw_turns
@@ -5527,9 +5707,9 @@ function userMemoryPanelFilter(input: {
           SELECT CAST(value AS TEXT) FROM json_each(user_memories.source_turn_refs_json)
         )
       )
-      AND lower(replace(replace(TRIM(sessions.source), '-', '_'), ' ', '_')) = ?
+      AND ${match.sql}
     )`);
-    params.push(normalizeAgentIdKey(sourceAgent));
+    params.push(...match.params);
   }
   return { where: clauses.join(" AND "), params };
 }
@@ -5602,6 +5782,9 @@ export function titleFromValue(value: string): string {
 
 function listTitleForMemory(memory: MemoryRow): string {
   const internal = memory.properties.internal_info;
+  if (internal.memory_kind === "work_memory" && typeof internal.work_topic === "string" && internal.work_topic.trim()) {
+    return internal.work_topic.trim();
+  }
   const policy = recordValue(internal.policy);
   const world = recordValue(internal.world_model);
   const skill = recordValue(internal.skill);
@@ -5640,6 +5823,9 @@ function listTitleForMemory(memory: MemoryRow): string {
 
 function listSummaryForMemory(memory: MemoryRow): string {
   const internal = memory.properties.internal_info;
+  if (internal.memory_kind === "work_memory" && typeof internal.requirement === "string") {
+    return internal.requirement.trim();
+  }
   const policy = recordValue(internal.policy);
   const world = recordValue(internal.world_model);
   const skill = recordValue(internal.skill);
@@ -5909,8 +6095,41 @@ function isShortAsciiTerm(term: string): boolean {
   return /^[\x20-\x7e]{1,2}$/.test(term);
 }
 
-function normalizeAgentIdKey(value: string): string {
-  return value.trim().toLowerCase().replace(/[\s-]+/gu, "_");
+function normalizedAgentIdSql(column: string): string {
+  return `lower(replace(replace(TRIM(${column}), '-', '_'), ' ', '_'))`;
+}
+
+/**
+ * Matches one Agent filter value against a source column. Known Agents also match the
+ * ids derived from them ("memmy-onboarding" under "memmy-agent"), because the panel
+ * shows all of them as the same Agent.
+ */
+function agentIdMatchClause(column: string, value: string): { sql: string; params: string[] } {
+  const normalizedColumn = normalizedAgentIdSql(column);
+  const roots = agentSourceFamilyRoots(value);
+  if (roots.length === 0) {
+    return { sql: `${normalizedColumn} = ?`, params: [normalizeAgentIdKey(value)] };
+  }
+  return {
+    sql: `(${roots.map(() => `${normalizedColumn} = ? OR ${normalizedColumn} LIKE ? ESCAPE '\\'`).join(" OR ")})`,
+    params: roots.flatMap((root) => [root, `${escapeLikePattern(root)}\\_%`])
+  };
+}
+
+/** True when the column matches none of the excluded Agents (the "other Agents" filter). */
+function agentIdExclusionClause(column: string, values: readonly string[]): { sql: string; params: string[] } | undefined {
+  const matches = Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)))
+    .map((value) => agentIdMatchClause(column, value));
+  if (matches.length === 0) {
+    return undefined;
+  }
+  return {
+    sql: `(
+      NULLIF(TRIM(${column}), '') IS NULL
+      OR NOT (${matches.map((match) => match.sql).join(" OR ")})
+    )`,
+    params: matches.flatMap((match) => match.params)
+  };
 }
 
 function layerWeight(layer: MemoryLayer): number {
@@ -5941,6 +6160,8 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
   addArrayClause("memory_layer", filter.memoryLayer);
   addArrayClause("status", filter.status);
   addArrayClause("id", filter.ids);
+  addMemoryKindClause(filter.memoryKind);
+  addWorkMemoryScopeClause(filter.workMemoryUserId, filter.workMemoryProjectId);
   addTagClauses(filter.tags);
 
   return {
@@ -5964,17 +6185,15 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
 
   function addAgentIdClause(value: string | undefined, excludedValues: string[] | undefined): void {
     if (value?.trim()) {
-      clauses.push("lower(replace(replace(trim(agent_id), '-', '_'), ' ', '_')) = ?");
-      params.push(normalizeAgentIdKey(value));
+      const match = agentIdMatchClause("agent_id", value);
+      clauses.push(match.sql);
+      params.push(...match.params);
       return;
     }
-    const excluded = Array.from(new Set((excludedValues ?? []).map(normalizeAgentIdKey).filter(Boolean)));
-    if (excluded.length > 0) {
-      clauses.push(`(
-        NULLIF(TRIM(agent_id), '') IS NULL
-        OR lower(replace(replace(trim(agent_id), '-', '_'), ' ', '_')) NOT IN (${excluded.map(() => "?").join(", ")})
-      )`);
-      params.push(...excluded);
+    const exclusion = agentIdExclusionClause("agent_id", excludedValues ?? []);
+    if (exclusion) {
+      clauses.push(exclusion.sql);
+      params.push(...exclusion.params);
     }
   }
 
@@ -5988,6 +6207,35 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
     }
     clauses.push(`${column} IN (${values.map(() => "?").join(", ")})`);
     params.push(...values);
+  }
+
+  function addMemoryKindClause(value: MemoryKind | MemoryKind[] | undefined): void {
+    if (value === undefined) return;
+    const values = Array.isArray(value) ? value : [value];
+    if (values.length === 0) return;
+    const expression = `COALESCE(
+      json_extract(properties_json, '$.internal_info.memory_kind'),
+      CASE memory_layer
+        WHEN 'L1' THEN 'trace'
+        WHEN 'L2' THEN 'policy'
+        WHEN 'L3' THEN 'world_model'
+        WHEN 'Skill' THEN 'skill'
+        ELSE 'trace'
+      END
+    )`;
+    clauses.push(`${expression} IN (${values.map(() => "?").join(", ")})`);
+    params.push(...values);
+  }
+
+  function addWorkMemoryScopeClause(userId: string | undefined, projectId: string | null | undefined): void {
+    if (userId === undefined || projectId === undefined) return;
+    const normalizedProjectExpression = "NULLIF(TRIM(CAST(json_extract(info_json, '$.project_id') AS TEXT)), '')";
+    clauses.push(`(
+      COALESCE(json_extract(properties_json, '$.internal_info.memory_kind'), 'trace') != 'work_memory'
+      OR (user_id = ? AND ${projectId === null ? `${normalizedProjectExpression} IS NULL` : `${normalizedProjectExpression} = ?`})
+    )`);
+    params.push(userId);
+    if (projectId !== null) params.push(projectId);
   }
 
   function addTagClauses(tags: string[] | undefined): void {
@@ -6025,13 +6273,14 @@ function buildEpisodeWhere(userId?: string, query?: string, sourceAgent?: string
 
   const normalizedSourceAgent = sourceAgent?.trim();
   if (normalizedSourceAgent) {
+    const match = agentIdMatchClause("sessions.source", normalizedSourceAgent);
     clauses.push(`EXISTS (
       SELECT 1
       FROM sessions
       WHERE sessions.id = episodes.session_id
-        AND lower(replace(replace(TRIM(sessions.source), '-', '_'), ' ', '_')) = ?
+        AND ${match.sql}
     )`);
-    params.push(normalizeAgentIdKey(normalizedSourceAgent));
+    params.push(...match.params);
   }
 
   const normalizedQuery = query?.trim();
@@ -6824,6 +7073,7 @@ function bundleIdentity(
 ): BundleIdentity | undefined {
   const newTableIdentityColumns: Partial<Record<BundleTableName, string[]>> = {
     memory_capture_claims: ["user_id", "source", "qa_hash"],
+    source_turn_captures: ["user_id", "source", "profile_id", "namespace_key", "conversation_id", "turn_id"],
     l3_world_model_scopes: ["scope_key"],
     l3_world_model_session_cursors: ["session_id"],
     l3_world_model_input_traces: ["session_id", "trace_seq"],

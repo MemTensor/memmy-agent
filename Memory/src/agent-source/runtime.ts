@@ -34,6 +34,9 @@ import type { ConversationMessage, ScanProgress, SourceAdapter } from "./adapter
 import {
   isCompleteTurn,
   orderedTurns,
+  sourceTurnFromMessages,
+  sourceTurnFailureReason,
+  buildSourceTurnRequest,
   renderTurnClipped,
   stableTurnIdentity,
   legacyTurnId,
@@ -784,6 +787,29 @@ async function ingestStagedMessages(
     if (conversationMeta?.selected === false) continue;
     const selectedTurn = store.getTurnMeta(sourceId, turn.conversationId, stableTurnIdentity(turn));
     if (selectedTurn && !selectedTurn.selected) continue;
+    if (sourceId === "codex") {
+      try {
+        const sourceTurn = sourceTurnFromMessages(turn.messages);
+        if (!sourceTurn) throw new Error(sourceTurnFailureReason(turn.messages));
+        const result = service.completeSourceTurn(buildSourceTurnRequest(sourceTurn, "agent_source_scan"));
+        if (result.status === "pending" || result.status === "conflict") throw new Error(result.reason ?? result.status);
+        const ids = result.result?.l1MemoryIds ?? [];
+        if (result.status === "stored") written += ids.length;
+        if (ids.length === 0) store.saveResult({ sourceId, conversationId: turn.conversationId });
+        for (const memoryId of ids) store.saveResult({ sourceId, conversationId: turn.conversationId, memoryId });
+        messageCount += turn.messages.length;
+        if (result.status === "stored") scheduleWorker?.();
+      } catch (error) {
+        activeConversationFailed = true;
+        const reason = error instanceof Error ? error.message : "native turn ingestion failed";
+        errorCount += 1;
+        if (errors.length < 1000) errors.push(`${turn.conversationId}: ${reason}`);
+        store.saveResult({ sourceId, conversationId: turn.conversationId, error: reason });
+      }
+      processed += turn.messages.length;
+      onProgress({ sourceId, phase: "add", current: processed, total: store.count(sourceId), message: "Capturing conversation turns" });
+      continue;
+    }
     let succeeded = true;
     // One turn is one memory. Splitting an agentic turn fans a single exchange
     // out into hundreds of near-empty tool-call fragments, so an oversized turn
@@ -834,7 +860,7 @@ async function prepareStandaloneSource(
   sourceHash.update("[");
   let firstSourceMessage = true;
   const flushTurn = () => {
-    if (!currentTurn.length || !isCompleteTurn(currentTurn)) return;
+    if (!currentTurn.length || (sourceId !== "codex" && !isCompleteTurn(currentTurn))) return;
     const firstMessage = currentTurn[0]!;
     const lastMessage = currentTurn[currentTurn.length - 1]!;
     const turn = { sourceId, conversationId: firstMessage.conversationId, turnIndex: 0, messages: currentTurn };
@@ -878,7 +904,7 @@ async function prepareStandaloneSource(
         hash.update("[");
         first = true;
       }
-      if (message.role === "user" && currentTurn.length > 0) {
+      if (currentTurn.length > 0 && (sourceId === "codex" ? message.rawMeta.sourceTurnId !== currentTurn[0]?.rawMeta.sourceTurnId : message.role === "user")) {
         flushTurn();
         currentTurn = [];
       }
@@ -891,7 +917,8 @@ async function prepareStandaloneSource(
         content: message.content,
         createdAt: message.createdAt,
         toolName: hashMeta(message, "toolName") ?? hashMeta(message, "hermesToolName"),
-        toolCallId: hashMeta(message, "toolCallId") ?? hashMeta(message, "hermesToolCallId")
+        toolCallId: hashMeta(message, "toolCallId") ?? hashMeta(message, "hermesToolCallId"),
+        ...(sourceId === "codex" ? { sourceTurn: message.rawMeta } : {})
       };
       const serialized = JSON.stringify(hashable);
       if (!firstSourceMessage) sourceHash.update(",");

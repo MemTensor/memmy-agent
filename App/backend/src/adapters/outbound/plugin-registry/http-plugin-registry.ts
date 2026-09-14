@@ -15,6 +15,8 @@ const PluginReleaseSchema = z.object({
 export interface CreateHttpPluginRegistryOptions {
   baseUrl: string;
   fetchFn?: typeof fetch;
+  /** Supplies account credentials so the registry can gate entitlement-restricted releases. */
+  authHeaders?: () => Record<string, string>;
 }
 
 export function createHttpPluginRegistry(options: CreateHttpPluginRegistryOptions): PluginRegistry {
@@ -27,10 +29,15 @@ export function createHttpPluginRegistry(options: CreateHttpPluginRegistryOption
       const url = new URL(`/api/v1/plugins/${encodeURIComponent(pluginId)}`, baseUrl);
       if (version) url.searchParams.set("version", version);
       const response = await fetchFn(url, {
-        headers: { accept: "application/json" },
+        headers: { accept: "application/json", ...options.authHeaders?.() },
         redirect: "error",
         signal: AbortSignal.timeout(15_000)
       });
+      if (response.status === 401 || response.status === 403) {
+        throw Object.assign(new Error(`Plugin release is not available for this account: ${pluginId}`), {
+          code: "plugin_entitlement_required" as const
+        });
+      }
       if (response.status === 404) {
         throw Object.assign(new Error(`Plugin release not found: ${pluginId}`), { code: "not_found" as const });
       }

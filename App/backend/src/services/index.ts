@@ -73,6 +73,9 @@ import { createTurnService, type TurnService } from "./turn-service.js";
 import { createPluginService, type PluginRuntimeHost, type PluginService } from "./plugin-service.js";
 import { createPluginLocalArtifactService } from "./plugin-local-artifact-service.js";
 import { createPluginModelInferenceService } from "./plugin-model-inference-service.js";
+import { reconcileEntitledPlugins } from "./plugin-entitlement-reconcile-service.js";
+import { createPluginAsrService } from "./plugin-asr-service.js";
+import { createPluginHostServiceRouter } from "./plugin-host-service-router.js";
 
 export interface BackendServices {
   memoryClient: MemoryClient;
@@ -151,14 +154,41 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
   const progressBus = options.progressBus ?? createProgressBus();
   const memmyConfigWriter = options.memmyConfigWriter ?? createUnavailableMemmyConfigWriter();
   const accountSessionRepository = options.appStateStore.repositories.accountSession;
-  const pluginHostServices = options.pluginHostServices ?? createPluginModelInferenceService({
-    resolveModel: async () => {
+  const pluginRepository = options.appStateStore.repositories.plugins;
+  const isEntitlementGranted = (entitlement: string) => accountSessionRepository.getEntitlements().includes(entitlement);
+  /** Lets the plugin registry gate entitlement-restricted releases and downloads. */
+  const pluginRegistryAuthHeaders = (): Record<string, string> => {
+    const cloudUuid = accountSessionRepository.getCloudUuid();
+    return cloudUuid ? { authorization: `Bearer ${cloudUuid}` } : {};
+  };
+  const asrService = createAsrService({
+    bootstrapRepository: options.appStateStore.repositories.bootstrap,
+    accountSessionRepository: options.appStateStore.repositories.accountSession,
+    memmyConfigWriter,
+    cloudClient: options.cloudClient
+  });
+  const pluginFileInputRoots = [join(resolveAgentDataRoot(process.env), "media")];
+  const pluginModelInference = createPluginModelInferenceService({
+    resolveModel: async (pluginId) => {
       const userMode = options.appStateStore.repositories.bootstrap.getAppSettings().userMode;
-      if (userMode !== "account" && userMode !== "byok") return null;
       const account = accountSessionRepository.get();
+      const activeAccountId = account.authenticated ? account.profile.userId : null;
+
+      if (pluginRepository.get(pluginId)?.manifest.modelPolicy?.requiredSource === "account") {
+        if (userMode !== "account" || !activeAccountId) return null;
+        const preset = await memmyConfigWriter.resolveAssignedModel?.({
+          mode: "account",
+          activeAccountId,
+          capability: "agent"
+        });
+        // Account mode still permits BYOK presets, so the resolved source must be checked too.
+        return preset?.ok && preset.context.source === "account" ? preset : null;
+      }
+
+      if (userMode !== "account" && userMode !== "byok") return null;
       return await memmyConfigWriter.resolveAssignedModel?.({
         mode: userMode,
-        activeAccountId: account.authenticated ? account.profile.userId : null,
+        activeAccountId,
         capability: "agent"
       }) ?? null;
     },
@@ -166,29 +196,39 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       ? (input, inferenceOptions) => options.memoryClient.embeddingInference!(input, inferenceOptions)
       : undefined
   });
+  const pluginHostServices = options.pluginHostServices ?? createPluginHostServiceRouter([
+    { services: ["model-inference", "embedding-inference"], invoker: pluginModelInference },
+    {
+      services: ["asr"],
+      invoker: createPluginAsrService({ asr: asrService, audioRoots: pluginFileInputRoots })
+    }
+  ]);
   const pluginRuntimeHost = options.pluginRuntimeHost ?? createPluginRuntimeHost(new PluginAdapterRegistry([
     createMcpPluginAdapter(),
     createHttpPluginAdapter(),
     createCommandPluginAdapter({
       allowedNetworkHosts: options.commandPluginNetworkAllowlist ?? resolveCommandPluginNetworkAllowlist(process.env),
-      fileInputRoots: [join(resolveAgentDataRoot(process.env), "media")],
+      fileInputRoots: pluginFileInputRoots,
       pluginDataRoot: join(dirname(options.appStateStore.databasePath), "plugin-data"),
-      hostServices: pluginHostServices
+      hostServices: pluginHostServices,
+      isEntitlementGranted
     })
   ]));
   const plugins = createPluginService({
-    repository: options.appStateStore.repositories.plugins,
+    repository: pluginRepository,
     secretStore: options.appStateStore.secretStore,
     registry: options.pluginRegistry ?? unavailablePluginRegistry,
     runtimeHost: pluginRuntimeHost,
     artifactManager: options.pluginArtifactManager ?? createPluginArtifactManager({
       installRoot: join(dirname(options.appStateStore.databasePath), "plugins"),
-      trustedLocalRoots: options.trustedBundledPluginRoots
+      trustedLocalRoots: options.trustedBundledPluginRoots,
+      authHeaders: pluginRegistryAuthHeaders
     }),
     skillManager: createPluginSkillManager({ skillsRoot: join(resolveAgentWorkspace(process.env), "skills") }),
     localArtifactService: createPluginLocalArtifactService({
       pluginDataRoot: join(dirname(options.appStateStore.databasePath), "plugin-data")
-    })
+    }),
+    isEntitlementGranted
   });
   const sourceRegistry =
     options.sourceRegistry ??
@@ -269,7 +309,16 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       bootstrapRepository: options.appStateStore.repositories.bootstrap,
       memmyConfigWriter: options.memmyConfigWriter,
       memoryClient: options.memoryClient,
-      accountChannel: options.accountChannel
+      accountChannel: options.accountChannel,
+      onAccountGrantsRefreshed: async () => {
+        const failures = await reconcileEntitledPlugins({
+          plugins,
+          entitlements: accountSessionRepository.getEntitlements()
+        });
+        for (const failure of failures) {
+          console.warn(`Entitled plugin reconciliation failed for ${failure.pluginId}: ${failure.message}`);
+        }
+      }
     }),
     integrations: createIntegrationService({
       cloudClient: options.cloudClient,
@@ -322,12 +371,7 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
     byokTokenUsage: createByokTokenUsageService({
       repository: options.appStateStore.repositories.byokTokenUsage
     }),
-    asr: createAsrService({
-      bootstrapRepository: options.appStateStore.repositories.bootstrap,
-      accountSessionRepository: options.appStateStore.repositories.accountSession,
-      memmyConfigWriter,
-      cloudClient: options.cloudClient
-    }),
+    asr: asrService,
     tokenQuota: createTokenQuotaService({
       cloudClient: options.cloudClient,
       accountSessionRepository: options.appStateStore.repositories.accountSession
