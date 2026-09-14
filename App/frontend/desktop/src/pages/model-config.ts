@@ -251,6 +251,18 @@ export function createModelFormValues(config: ModelConfig, primary: PrimaryModel
   };
 }
 
+/** Converts resolved form values into the inheritance source for a weaker model role. */
+export function modelFormValuesAsPrimary(values: ModelConfigFormValues): PrimaryModelValues {
+  return {
+    protocol: toProtocol(values.provider),
+    modelId: values.model,
+    endpoint: values.endpoint,
+    apiKey: values.apiKey,
+    apiKeyMasked: values.apiKeyMasked,
+    configured: Boolean(values.apiKey.trim() || values.hasExistingApiKey)
+  };
+}
+
 export function hydrateModelConfigForm(
   saved: ModelProviderConfig,
   defaultEmbeddingMode: ModelConfigEmbeddingMode
@@ -310,6 +322,11 @@ export function hydrateModelConfigForm(
     imageGenApiKey,
     imageGenApiKeyMasked
   );
+  const skillModel = hydrateRoleModelConfig(saved.memmyMemory?.evolution, primary);
+  const memoryModel = hydrateRoleModelConfig(
+    saved.memmyMemory?.summary,
+    modelFormValuesAsPrimary(createModelFormValues(skillModel, primary))
+  );
 
   return {
     protocol,
@@ -335,8 +352,8 @@ export function hydrateModelConfigForm(
     imageGenApiKey,
     imageGenApiKeyMasked,
     imageGenValidation: hasImageGenApiKey(imageGenValues) ? createSavedValidation(imageGenValues) : createIdleValidation(),
-    memoryModel: hydrateRoleModelConfig(saved.memmyMemory?.summary, primary),
-    skillModel: hydrateRoleModelConfig(saved.memmyMemory?.evolution, primary)
+    memoryModel,
+    skillModel
   };
 }
 
@@ -352,13 +369,18 @@ export function createMemmyMemoryProviderConfig(
   skillModel: ModelConfig,
   primary: PrimaryModelValues
 ): MemmyMemoryProviderConfig {
+  const evolutionValues = createModelFormValues(skillModel, primary);
+  const summaryValues = createModelFormValues(
+    memoryModel,
+    modelFormValuesAsPrimary(evolutionValues)
+  );
   return {
     summary: {
-      ...toRoleModelProviderConfig(createModelFormValues(memoryModel, primary)),
+      ...toRoleModelProviderConfig(summaryValues),
       mode: memoryModel.reuse ? "follow" : "fixed"
     },
     evolution: {
-      ...toRoleModelProviderConfig(createModelFormValues(skillModel, primary)),
+      ...toRoleModelProviderConfig(evolutionValues),
       mode: skillModel.reuse ? "follow" : "fixed"
     }
   };

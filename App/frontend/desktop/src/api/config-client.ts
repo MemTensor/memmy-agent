@@ -135,6 +135,7 @@ export interface ConfigClient {
   setImprovementProgram(accepted: boolean): Promise<SetImprovementProgramResponse>;
   getTokenUsage(): Promise<TokenUsageDto>;
   updateScanPermission(permission: ScanPermission): Promise<Partial<OnboardingStateDto>>;
+  getScanPreferences(): Promise<ScanPreferences>;
   updateScanPreferences(preferences: Partial<ScanPreferences>): Promise<ScanPreferences>;
   getModelConfig(): Promise<ModelProviderConfig>;
   saveModelCatalog(config: ModelConfigInput | ModelConfigView): Promise<ModelProviderConfig>;
@@ -213,6 +214,14 @@ export function createHttpConfigClient(config: RuntimeConfig): ConfigClient {
         schema: ScanPreferencesSchema,
         init: { method: "PATCH" },
         body: PatchScanPreferencesInputSchema.parse(preferences)
+      });
+    },
+
+    async getScanPreferences() {
+      return requestJson({
+        config,
+        path: "/api/app/scan-preferences",
+        schema: ScanPreferencesSchema
       });
     },
 
@@ -754,17 +763,10 @@ function fromModelConfigView(view: ModelConfigView): ModelProviderConfig {
     apiKey: selectedEndpoint?.apiKey ?? "",
     apiKeyMasked: selectedEndpoint?.apiKeyMasked ?? "",
     configured: view.configured,
-    embedding: embeddingPreset && embeddingEndpoint ? {
-      mode: "custom",
-      endpoint: embeddingEndpoint.apiBase,
-      model: embeddingPreset.model,
-      apiKey: embeddingEndpoint.apiKey,
-      apiKeyMasked: embeddingEndpoint.apiKeyMasked,
-      configured: embeddingPreset.available
-    } : null,
+    embedding: memoryEmbeddingFromView(view, embeddingPreset, embeddingEndpoint),
     memmyMemory: {
-      summary: fromPresetRole(view, summaryPreset, selected),
-      evolution: fromPresetRole(view, evolutionPreset, selected)
+      summary: fromPresetRole(view, summaryPreset, selected, view.memorySettings?.roleRouting.summary),
+      evolution: fromPresetRole(view, evolutionPreset, selected, view.memorySettings?.roleRouting.evolution)
     },
     asr: asrPreset ? fromOptionalPreset(view, asrPreset) : null,
     imageGen: imagePreset ? fromOptionalPreset(view, imagePreset) : null
@@ -774,18 +776,35 @@ function fromModelConfigView(view: ModelConfigView): ModelProviderConfig {
 function fromPresetRole(
   view: ModelConfigView,
   preset: ModelConfigView["providers"][number]["models"][number] | null,
-  primary: ModelConfigView["providers"][number]["models"][number] | null
+  primary: ModelConfigView["providers"][number]["models"][number] | null,
+  routing?: "follow" | "fixed"
 ): RoleModelProviderConfig {
   const selected = preset ?? primary;
   const endpoint = selected ? findEndpoint(view, selected) : null;
   return {
-    mode: preset ? "fixed" : "follow",
+    mode: routing ?? (preset ? "fixed" : "follow"),
     provider: selected?.provider ?? "openai",
     endpoint: endpoint?.apiBase ?? "",
     model: selected?.model ?? "",
     apiKey: endpoint?.apiKey ?? "",
     apiKeyMasked: endpoint?.apiKeyMasked ?? "",
     configured: Boolean(selected?.available)
+  };
+}
+
+function memoryEmbeddingFromView(
+  view: ModelConfigView,
+  preset: ModelConfigView["providers"][number]["models"][number] | null,
+  endpoint: ModelConfigView["providers"][number]["endpoints"][number] | null
+): EmbeddingProviderConfig {
+  const mode = view.memorySettings?.embeddingMode ?? (preset ? "custom" : "local");
+  return {
+    mode,
+    endpoint: endpoint?.apiBase ?? "",
+    model: preset?.model ?? "",
+    apiKey: endpoint?.apiKey ?? "",
+    apiKeyMasked: endpoint?.apiKeyMasked ?? "",
+    configured: mode === "local" || Boolean(preset?.available)
   };
 }
 

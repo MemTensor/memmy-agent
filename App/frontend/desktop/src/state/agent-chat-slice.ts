@@ -120,6 +120,8 @@ export interface AgentChatMessage {
   traces?: string[];
   toolEvents?: AgentToolProgressEvent[];
   fileEdits?: AgentFileEdit[];
+  agentUi?: unknown;
+  questionResponse?: unknown;
   activitySegmentId?: string;
   compactionId?: string;
   compactionStatus?: AgentCompactionStatus;
@@ -2357,7 +2359,9 @@ function stoppedMessagePayloadEquivalent(left: AgentChatMessage, right: AgentCha
     && JSON.stringify(left.media ?? []) === JSON.stringify(right.media ?? [])
     && JSON.stringify(left.traces ?? []) === JSON.stringify(right.traces ?? [])
     && JSON.stringify(left.toolEvents ?? []) === JSON.stringify(right.toolEvents ?? [])
-    && JSON.stringify(left.fileEdits ?? []) === JSON.stringify(right.fileEdits ?? []);
+    && JSON.stringify(left.fileEdits ?? []) === JSON.stringify(right.fileEdits ?? [])
+    && JSON.stringify(left.agentUi ?? null) === JSON.stringify(right.agentUi ?? null)
+    && JSON.stringify(left.questionResponse ?? null) === JSON.stringify(right.questionResponse ?? null);
 }
 
 function isSnapshotMissingLatestUserMessage(currentMessages: AgentChatMessage[], snapshot: AgentChatMessage[]): boolean {
@@ -2396,6 +2400,8 @@ function messagesEquivalent(left: AgentChatMessage, right: AgentChatMessage | un
     && JSON.stringify(left.traces ?? []) === JSON.stringify(right.traces ?? [])
     && JSON.stringify(left.toolEvents ?? []) === JSON.stringify(right.toolEvents ?? [])
     && JSON.stringify(left.fileEdits ?? []) === JSON.stringify(right.fileEdits ?? [])
+    && JSON.stringify(left.agentUi ?? null) === JSON.stringify(right.agentUi ?? null)
+    && JSON.stringify(left.questionResponse ?? null) === JSON.stringify(right.questionResponse ?? null)
     && left.activitySegmentId === right.activitySegmentId;
 }
 
@@ -2844,6 +2850,8 @@ function reduceChatContentEvent(state: AgentState, event: MemmyAgentWsEvent): Ag
             ? setSuppressAssistantStreamUntilTurnEnd(nextState, chatId, true)
             : nextState;
         }
+      case "agent_question_response":
+        return applyAgentQuestionResponse(activeState, event);
       case "file_edit":
         return appendFileEditTrace(activeState, event);
       case "context_compaction":
@@ -2857,6 +2865,7 @@ function reduceChatContentEvent(state: AgentState, event: MemmyAgentWsEvent): Ag
 function isChatContentEvent(event: string): boolean {
   return [
     "user",
+    "agent_question_response",
     "delta",
     "stream_end",
     "reasoning_delta",
@@ -2866,6 +2875,29 @@ function isChatContentEvent(event: string): boolean {
     "context_compaction",
     "retry_wait"
   ].includes(event);
+}
+
+function agentQuestionRequestId(agentUi: unknown): string | null {
+  if (!agentUi || typeof agentUi !== "object" || Array.isArray(agentUi)) return null;
+  const card = (agentUi as Record<string, unknown>).questionCard;
+  if (!card || typeof card !== "object" || Array.isArray(card)) return null;
+  const requestId = (card as Record<string, unknown>).requestId;
+  return typeof requestId === "string" && requestId.trim() ? requestId.trim() : null;
+}
+
+function applyAgentQuestionResponse(state: AgentState, event: MemmyAgentWsEvent): AgentState {
+  const requestId = typeof event.request_id === "string" ? event.request_id.trim() : "";
+  if (!requestId || !Array.isArray(event.answers)) return state;
+  const index = state.messages.findIndex(
+    (message) => agentQuestionRequestId(message.agentUi) === requestId,
+  );
+  if (index < 0) return state;
+  const messages = [...state.messages];
+  messages[index] = {
+    ...messages[index]!,
+    questionResponse: { requestId, answers: event.answers },
+  };
+  return syncCurrentMessages({ ...state, messages });
 }
 
 function appendExternalUserMessage(
@@ -3852,8 +3884,9 @@ function appendAssistantMessage(state: AgentState, event: MemmyAgentWsEvent): Ag
   const text = typeof event.text === "string" ? event.text : typeof event.content === "string" ? event.content : "";
   const media = Array.isArray(event.media_urls) ? normalizeMedia(event.media_urls) : undefined;
   const modelError = normalizeModelError(event.model_error);
+  const agentUi = event.agent_ui;
   const messages = [...state.messages];
-  const forceNewAssistant = isCronProactiveEvent(event);
+  const forceNewAssistant = isCronProactiveEvent(event) || agentUi != null;
   const lastIndex = latestMessageIndexForTurn(messages, turnId);
   const last = lastIndex >= 0 ? messages[lastIndex] : undefined;
   let closedActivity = false;
@@ -3892,12 +3925,13 @@ function appendAssistantMessage(state: AgentState, event: MemmyAgentWsEvent): Ag
       content: modelError ? text : text || target.content,
       ...(media?.length ? { media } : {}),
       ...(modelError ? { modelError } : {}),
+      ...(agentUi != null ? { agentUi } : {}),
       ...(typeof event.latency_ms === "number" ? { latencyMs: event.latency_ms } : {}),
       ...(turnId ? { turnId } : {}),
       isStreaming: true
     };
   } else {
-    if (!text.trim() && !media?.length && !modelError) {
+    if (!text.trim() && !media?.length && !modelError && agentUi == null) {
       return closedActivity ? syncCurrentMessages({ ...state, messages }) : state;
     }
     const next: AgentChatMessage = {
@@ -3908,6 +3942,7 @@ function appendAssistantMessage(state: AgentState, event: MemmyAgentWsEvent): Ag
       createdAt: Date.now(),
       ...(media?.length ? { media } : {}),
       ...(modelError ? { modelError } : {}),
+      ...(agentUi != null ? { agentUi } : {}),
       ...(typeof event.latency_ms === "number" ? { latencyMs: event.latency_ms } : {})
     };
     messages.push(next);
@@ -4531,6 +4566,8 @@ function normalizeThreadMessage(message: Record<string, unknown>, index: number)
         : undefined;
     const fileEdits = Array.isArray(message.fileEdits) ? normalizeFileEdits(message.fileEdits) : undefined;
     const modelError = normalizeModelError(message.modelError ?? message.model_error);
+    const agentUi = message.agentUi ?? message.agent_ui;
+    const questionResponse = message.questionResponse ?? message.question_response;
     const content = kind === "context_compaction"
       ? String(message.content ?? "") || contextCompactionFallbackText(compactionStatus)
       : String(message.content ?? "");
@@ -4548,6 +4585,8 @@ function normalizeThreadMessage(message: Record<string, unknown>, index: number)
       ...(kind !== "context_compaction" && Array.isArray(message.traces) ? { traces: message.traces.map(String) } : {}),
       ...(kind !== "context_compaction" && rawToolEvents ? { toolEvents: normalizeToolProgressEvents(rawToolEvents) } : {}),
       ...(kind !== "context_compaction" && fileEdits?.length ? { fileEdits } : {}),
+      ...(kind !== "context_compaction" && agentUi != null ? { agentUi } : {}),
+      ...(kind !== "context_compaction" && questionResponse != null ? { questionResponse } : {}),
       ...(kind !== "context_compaction" && typeof message.activitySegmentId === "string" ? { activitySegmentId: message.activitySegmentId } : {}),
       ...(kind === "context_compaction" ? { compactionId, compactionStatus } : {}),
       ...(createdAt == null ? {} : { createdAt }),

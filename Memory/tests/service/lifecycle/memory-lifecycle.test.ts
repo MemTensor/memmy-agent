@@ -2,7 +2,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { canonicalJson, sha256Hex } from "@memmy/local-api-contracts";
+import { canonicalJson, sha256Hex } from "../../../src/contracts/index.js";
 import { Repositories } from "../../../src/storage/repositories.js";
 import { createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
 import {

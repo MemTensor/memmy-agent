@@ -9,6 +9,7 @@ import {
   AgentSourceScanJobResponseSchema,
   AgentSourceScanStatusResponseSchema,
   AgentSourceViewSchema,
+  ScanResultPageSchema,
   ManagedAgentSourceImportInputSchema,
   ManagedAgentSourceImportResultSchema,
   ManagedAgentSourceUpdateInputSchema,
@@ -23,9 +24,12 @@ import { withErrorEnvelope } from "../../../../services/error-envelope.js";
 import type { AgentSourceAutoInjectService } from "../../../../services/agent-source-auto-inject-service.js";
 import type { AgentSourceService } from "../../../../services/agent-source-service.js";
 import {
+  deleteDurableScanStore,
   deletePersistedScanResume,
+  readDurableScanResults,
   readLatestPersistedScanResume
 } from "../../../../services/agent-source-scan-journal.js";
+import { migrateLegacyScanJournals } from "../../../../services/agent-source-scan-migration.js";
 import type { ProgressBus } from "../../../../services/progress-bus.js";
 import {
   type AgentSourceScanJobState,
@@ -67,6 +71,7 @@ export function registerAgentSourceRoutes(app: FastifyInstance, options: Registe
     lastProgress: PipelineProgress & { jobId: string };
     resume: RouteScanResumeState | null;
   };
+  if (options.scanProcess?.databasePath) migrateLegacyScanJournals(options.scanProcess.databasePath);
   const restoredScanJob = toPausedScanJob(readLatestPersistedScanResume(options.scanProcess?.databasePath));
   let pausedScanJob: PausedScanJob | null = restoredScanJob;
   let lastScanProgress: (PipelineProgress & { jobId: string }) | null = restoredScanJob?.lastProgress ?? null;
@@ -135,6 +140,15 @@ export function registerAgentSourceRoutes(app: FastifyInstance, options: Registe
     }));
   });
 
+  app.get("/api/agent-sources/scan/jobs/:jobId/results", { preHandler: options.authenticateRuntimeToken }, async (request, reply) => {
+    if (!options.scanProcess) return reply.send({ items: [], nextCursor: null });
+    const params = request.params as { jobId: string };
+    const query = request.query as { cursor?: string; limit?: string };
+    const limit = Math.min(500, Math.max(1, Number.parseInt(query.limit ?? "100", 10) || 100));
+    const cursor = query.cursor ?? "0";
+    return reply.send(ScanResultPageSchema.parse(readDurableScanResults(options.scanProcess.databasePath, params.jobId, cursor, limit)));
+  });
+
   app.post("/api/agent-sources/scan", { preHandler: options.authenticateRuntimeToken }, async (request, reply) => {
     const input = AgentSourceScanInputSchema.parse(request.body);
     const sourceId = input.sourceId;
@@ -156,7 +170,10 @@ export function registerAgentSourceRoutes(app: FastifyInstance, options: Registe
       return reply.send(AgentSourceScanJobResponseSchema.parse({ jobId: activeScanJob.jobId }));
     }
 
-    const pausedJob = pausedScanJob?.resume && pausedScanJob.sourceId === sourceId && pausedScanJob.mode === mode ? pausedScanJob : null;
+    const pausedJob = pausedScanJob && pausedScanJob.sourceId === sourceId && pausedScanJob.mode === mode
+      && (pausedScanJob.resume || options.scanProcess)
+      ? pausedScanJob
+      : null;
     if (!pausedJob) {
       cleanupResumeState(pausedScanJob?.resume ?? null);
       pausedScanJob = null;
@@ -218,8 +235,10 @@ export function registerAgentSourceRoutes(app: FastifyInstance, options: Registe
       activeScanJob = null;
       abortScanJob(canceledJob);
       cleanupResumeState(canceledJob.resume);
+      deleteDurableScanStore(options.scanProcess?.databasePath, canceledJob.jobId);
     }
     cleanupResumeState(pausedScanJob?.resume ?? null);
+    if (pausedScanJob) deleteDurableScanStore(options.scanProcess?.databasePath, pausedScanJob.jobId);
     pausedScanJob = null;
     lastScanProgress = null;
     return reply.send(OkResponseSchema.parse({ ok: true }));
@@ -547,6 +566,7 @@ export function registerAgentSourceRoutes(app: FastifyInstance, options: Registe
 
     deletePersistedScanResume(options.scanProcess?.databasePath, resume.jobId);
   }
+
 }
 
 function toPausedScanJob(

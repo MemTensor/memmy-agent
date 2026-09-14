@@ -1,10 +1,12 @@
 /** Trusted plugin registry boundary. */
 import type { PluginManifest } from "@memmy/local-api-contracts";
 
-export interface PluginArtifactDescriptor {
-  url: string;
+export type PluginArtifactDescriptor = {
   sha256: string;
-}
+} & (
+  | { url: string; localPath?: never }
+  | { localPath: string; url?: never }
+);
 
 export interface PluginRelease {
   manifest: PluginManifest;
@@ -16,6 +18,28 @@ export interface PluginRegistry {
 }
 
 export { createHttpPluginRegistry, type CreateHttpPluginRegistryOptions } from "./http-plugin-registry.js";
+export {
+  loadBundledPluginCatalog,
+  type BundledPluginCatalog,
+  type BundledPluginRelease
+} from "./bundled-plugin-registry.js";
+
+/** Resolves bundled releases first while retaining an optional development registry fallback. */
+export function createCompositePluginRegistry(
+  primary: PluginRegistry,
+  fallback?: PluginRegistry
+): PluginRegistry {
+  return {
+    async resolve(pluginId, version) {
+      try {
+        return await primary.resolve(pluginId, version);
+      } catch (error) {
+        if (!fallback || (error as { code?: unknown })?.code !== "not_found") throw error;
+        return fallback.resolve(pluginId, version);
+      }
+    }
+  };
+}
 
 export function createInMemoryPluginRegistry(releases: PluginRelease[]): PluginRegistry {
   return {

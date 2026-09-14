@@ -1,5 +1,5 @@
 import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
-import type { ActualModelContext } from "@memmy/local-api-contracts";
+import type { ActualModelContext } from "../contracts/index.js";
 
 const logger = createMemoryLogger("model-http");
 
@@ -64,7 +64,7 @@ export async function postJsonWithRetry<T>(
       }
     } catch (error) {
       lastError = error;
-      if (attempt < input.maxRetries) {
+      if (attempt < input.maxRetries && isRetryableModelRequestError(error)) {
         const delayMs = Math.min(1_000 * Math.pow(2, attempt), 8_000);
         logger.warn("request.retry_scheduled", {
           provider: input.provider,
@@ -77,17 +77,18 @@ export async function postJsonWithRetry<T>(
           ...memoryErrorFields(error)
         });
         await sleep(delayMs);
-      } else {
-        logger.error("request.failed", {
-          provider: input.provider,
-          operation: input.operation,
-          model: input.model,
-          endpoint: safeEndpoint(input.url),
-          attempt: attempt + 1,
-          maxAttempts: input.maxRetries + 1,
-          ...memoryErrorFields(error)
-        });
+        continue;
       }
+      logger.error("request.failed", {
+        provider: input.provider,
+        operation: input.operation,
+        model: input.model,
+        endpoint: safeEndpoint(input.url),
+        attempt: attempt + 1,
+        maxAttempts: input.maxRetries + 1,
+        ...memoryErrorFields(error)
+      });
+      break;
     }
   }
   const normalized = lastError instanceof Error ? lastError : new Error(String(lastError));
@@ -107,6 +108,13 @@ export function bearer(apiKey?: string): Record<string, string> {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableModelRequestError(error: unknown): boolean {
+  if (error instanceof ModelHttpError) {
+    return error.httpStatus === 408 || error.httpStatus === 429 || error.httpStatus >= 500;
+  }
+  return error instanceof TypeError || (error instanceof Error && error.name === "AbortError");
 }
 
 function clip(value: string, max: number): string {

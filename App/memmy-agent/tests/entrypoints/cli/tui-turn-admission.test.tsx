@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
+  clearTerminalScreen,
   tuiQueuePreview,
   tuiQueueSourceLabel,
 } from "../../../src/entrypoints/cli/tui.js";
@@ -12,9 +13,36 @@ const source = readFileSync(
 
 describe("Ink TUI Turn admission", () => {
   it("maps Enter to queue and Tab to steer", () => {
-    expect(source).toContain('submit(inputRef.current, "queue");');
+    expect(source).toContain("dispatchTuiInput(inputRef.current);");
+    expect(source).toContain('submit(value, "queue");');
     expect(source).toContain('submit(inputRef.current, "steer");');
     expect(source).toContain("gateway.submit(text, turnAdmission, request.clientRequestId)");
+  });
+
+  it("handles slash completion before Queue and never routes slash Tab to Steer", () => {
+    const ctrlC = source.indexOf('if (key.ctrl && value === "c")');
+    const slashEscape = source.indexOf("if (slashMenuOpen && key.escape)");
+    const slashTab = source.indexOf("if (key.tab && slashInput)");
+    const enter = source.indexOf("if (key.return)", slashTab);
+    const steer = source.indexOf("if (key.tab && gatewayState.ownedByTui)", enter);
+    expect(ctrlC).toBeGreaterThanOrEqual(0);
+    expect(slashEscape).toBeGreaterThan(ctrlC);
+    expect(slashTab).toBeGreaterThan(slashEscape);
+    expect(enter).toBeGreaterThan(slashTab);
+    expect(steer).toBeGreaterThan(enter);
+    expect(source).toContain('const slashInput = inputRef.current.trimStart().startsWith("/");');
+  });
+
+  it("keeps only stop, last-compaction, and quit local", () => {
+    expect(source).toContain('if (action === "local-stop")');
+    expect(source).toContain("gateway.stopOwnedTurn()");
+    expect(source).toContain('if (action === "local-last-compaction")');
+    expect(source).toContain("gateway.readLastCompaction()");
+    expect(source).toContain('if (action === "local-quit")');
+    expect(source).toContain('submit(value, "queue");');
+    expect(source).not.toContain('action === "local-new"');
+    expect(source).not.toContain('action === "local-restart"');
+    expect(source).not.toContain('action === "local-help"');
   });
 
   it("keeps the composer active while the Session is busy", () => {
@@ -40,6 +68,16 @@ describe("Ink TUI Turn admission", () => {
     const clearIndex = source.indexOf('setDraft("", 0);', sendIndex);
     expect(sendIndex).toBeGreaterThanOrEqual(0);
     expect(clearIndex).toBeGreaterThan(sendIndex);
+  });
+
+  it("clears local messages and terminal scrollback after the Session resets", () => {
+    const write = vi.fn();
+    clearTerminalScreen(write);
+
+    expect(write).toHaveBeenCalledWith("\x1b[2J\x1b[H\x1b[3J");
+    expect(source).toContain("handledSessionResetVersionRef.current === gatewayState.sessionResetVersion");
+    expect(source).toContain("setLocalMessages([]);");
+    expect(source).toContain("clearTerminalScreen(write);");
   });
 
   it("renders fixed queue sources and normalizes only the preview", () => {

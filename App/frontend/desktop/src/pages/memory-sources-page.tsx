@@ -91,6 +91,11 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
   const [cliInstallBusy, setCliInstallBusy] = useState(false);
   const [cliInstallMessage, setCliInstallMessage] = useState("");
   const [cliInstallError, setCliInstallError] = useState("");
+  const [cliAppInfo, setCliAppInfo] = useState<{
+    platform: string;
+    isPackaged: boolean;
+    isWindowsStore: boolean;
+  } | null>(null);
   const [managedSyncingSourceId, setManagedSyncingSourceId] = useState<string | null>(null);
   const [managedSyncCompletedSourceId, setManagedSyncCompletedSourceId] = useState<string | null>(null);
   const scanProgress = state.agentSources.scanProgress;
@@ -106,6 +111,28 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
   const scanPercent = scanProgress && hasDeterminateScanProgress ? formatActiveScanPercent(scanProgress.current, scanProgress.total) : 0;
   const scannableSources = state.agentSources.items.filter((source) => source.available);
   const memoryServiceAddress = formatMemoryServiceAddress(clients?.runtimeConfig.memory?.baseUrl);
+  const cliPathMessageKey = resolveMemoryCliPathMessageKey(
+    cliAppInfo?.platform,
+    cliAppInfo?.isPackaged,
+    cliAppInfo?.isWindowsStore
+  );
+
+  useEffect(() => {
+    const bridge = typeof window === "undefined" ? undefined : window.memmy;
+    if (!bridge) {
+      return;
+    }
+
+    let active = true;
+    void bridge.getAppInfo().then((appInfo) => {
+      if (active) {
+        setCliAppInfo(appInfo);
+      }
+    }).catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     setMemoryServiceStatus((current) => current === "checking" ? memoryServiceStatusFromBootstrap(state.bootstrap?.health.memory) : current);
@@ -136,6 +163,24 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
       });
     return () => {
       active = false;
+    };
+  }, [clients, dispatch]);
+
+  useEffect(() => {
+    if (!clients) return;
+    let active = true;
+    const refresh = () => {
+      void clients.config.getScanPreferences()
+        .then((preferences) => {
+          if (active) dispatch(appActions.scanPreferencesUpdated(preferences));
+        })
+        .catch(() => undefined);
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 5_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
     };
   }, [clients, dispatch]);
 
@@ -550,7 +595,7 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
   }
 
   /**
-   * Lets the user pick a path via the desktop bridge and creates a consistent memory.sqlite snapshot.
+   * Lets the user pick a path and exports Memory through the standalone HTTP service.
    */
   function exportLocalData() {
     if (localDataBusy) {
@@ -621,7 +666,7 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
             title={t("memory.cli")}
             okLabel={t("memory.cliInstalled")}
             errLabel={t("memory.cliNotInstalled")}
-            value={t("memory.cliPath")}
+            value={t(cliPathMessageKey)}
             description={t("memory.cliDescription")}
             actionLabel={t(cliInstallBusy ? "memory.cliInstalling" : "memory.reinstallPath")}
             onAction={reinstallCliTools}
@@ -928,15 +973,17 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
         </div>
         <div className="space-y-1">
           <ToggleRow
-            label={t("memory.autoScan")}
-            description={t("memory.autoScanDescription")}
-            checked={
-              state.agentSources.scanPreferences.autoScanKnownAgents
-              || state.agentSources.scanPreferences.watchFileChanges
-            }
-            onChange={(checked) =>
-              updateScanPreferences({ autoScanKnownAgents: checked, watchFileChanges: checked })
-            }
+            label={t("memory.startupScan")}
+            description={t("memory.startupScanDescription")}
+            checked={state.agentSources.scanPreferences.autoScanKnownAgents}
+            onChange={(checked) => updateScanPreferences({ autoScanKnownAgents: checked })}
+          />
+          <Divider />
+          <ToggleRow
+            label={t("memory.scheduledScan")}
+            description={t("memory.scheduledScanDescription")}
+            checked={state.agentSources.scanPreferences.watchFileChanges}
+            onChange={(checked) => updateScanPreferences({ watchFileChanges: checked })}
           />
           <Divider />
           <ToggleRow
@@ -1152,6 +1199,16 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
       )}
     </div>
   );
+}
+
+export function resolveMemoryCliPathMessageKey(
+  platform: string | undefined,
+  isPackaged: boolean | undefined,
+  isWindowsStore: boolean | undefined
+): MessageKey {
+  return platform === "win32" && isPackaged === true && isWindowsStore !== true
+    ? "memory.cliPathWindows"
+    : "memory.cliPath";
 }
 
 function FullScanTargetOption(props: {

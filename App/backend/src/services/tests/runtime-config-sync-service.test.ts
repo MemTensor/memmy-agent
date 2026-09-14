@@ -5,7 +5,10 @@ import { dirname, join } from "node:path";
 import YAML from "yaml";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createAppStateStore, type AppStateStore } from "../../infrastructure/app-state-store/index.js";
-import { createMemmyConfigWriter } from "../../infrastructure/memmy-config/index.js";
+import {
+  createMemmyConfigWriter,
+  writeAccountModelProjectionToMemmyConfig
+} from "../../infrastructure/memmy-config/index.js";
 import { createAppConfigService } from "../app-config-service.js";
 import { syncRuntimeConfigWithAppState } from "../runtime-config-sync-service.js";
 
@@ -76,7 +79,7 @@ describe("syncRuntimeConfigWithAppState", () => {
       ...context,
       accountChannel: "email"
     })).resolves.toMatchObject({
-      source: "runtime_config", mode: "account", hydratedAppState: true, wroteConfig: false
+      source: "runtime_config", mode: "account", hydratedAppState: true, wroteConfig: true
     });
     expect(context.store.repositories.bootstrap.getAppSettings().userMode).toBe("account");
     expect(context.store.repositories.accountSession.get()).toMatchObject({
@@ -84,6 +87,42 @@ describe("syncRuntimeConfigWithAppState", () => {
       profile: { userId: "owner-a" }
     });
     expect(context.store.db.prepare("SELECT uuid FROM cloud_accounts WHERE uuid = ?").get("cloud-token-a")).toBeUndefined();
+  });
+
+  it("refreshes local BYOK Agent candidates into an already authenticated account during startup", async () => {
+    const context = createContext();
+    seedAccountSession(context);
+    context.writeConfig(currentByokCatalog());
+    await writeAccountModelProjectionToMemmyConfig({
+      cloudUuid: "cloud-token-a",
+      userId: "owner-a"
+    }, context.memmyConfigPath);
+
+    const stale = YAML.parse(readFileSync(context.memmyConfigPath, "utf8"));
+    stale.app.userMode = "account";
+    stale.app.accountByokLocalSelectionBaseline = {
+      ownerAccountId: "owner-a",
+      candidates: ["agent"]
+    };
+    stale.modelAssignments.account.agent.candidates = stale.modelAssignments.account.agent.candidates
+      .filter((presetId: string) => stale.modelPresets[presetId]?.source === "account");
+    stale.modelAssignments.account.agent.default = stale.modelAssignments.account.agent.candidates[0];
+    context.writeConfig(stale);
+
+    await expect(syncRuntimeConfigWithAppState({
+      ...context,
+      accountChannel: "email"
+    })).resolves.toMatchObject({
+      source: "runtime_config",
+      mode: "account",
+      hydratedAppState: true,
+      wroteConfig: true,
+      reason: "refreshed_account_projection_and_hydrated_account"
+    });
+
+    const saved = YAML.parse(readFileSync(context.memmyConfigPath, "utf8"));
+    expect(saved.modelAssignments.account.agent.candidates).toContain("agent");
+    expect(saved.app.accountByokLocalSelectionBaseline).toBeUndefined();
   });
 
   it("keeps an unmarked legacy email session when the INTL package starts", async () => {
@@ -103,7 +142,7 @@ describe("syncRuntimeConfigWithAppState", () => {
       ...context,
       accountChannel: "email"
     })).resolves.toMatchObject({
-      source: "runtime_config", mode: "account", hydratedAppState: true, wroteConfig: false
+      source: "runtime_config", mode: "account", hydratedAppState: true, wroteConfig: true
     });
     expect(context.store.repositories.accountSession.get()).toMatchObject({
       authenticated: true,

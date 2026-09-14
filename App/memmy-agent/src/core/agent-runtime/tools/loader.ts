@@ -6,6 +6,7 @@ import { ToolContext } from "./context.js";
 import { ToolRegistry } from "./registry.js";
 import { ApplyPatchTool } from "./apply-patch.js";
 import { AgentSourceTool } from "./agent-source.js";
+import { AskQuestionTool } from "./ask-question.js";
 import { CronTool } from "./cron.js";
 import { ListExecSessionsTool, WriteStdinTool } from "./exec-session.js";
 import { ReadFileTool, WriteFileTool, EditFileTool, ListDirTool } from "./filesystem.js";
@@ -41,6 +42,7 @@ type ToolClass = (new (...args: any[]) => Tool) & {
 const BUILTIN_TOOL_CLASSES: ToolClass[] = [
   AgentSourceTool,
   ApplyPatchTool,
+  AskQuestionTool,
   CreateGoalTool,
   CronTool,
   EditFileTool,

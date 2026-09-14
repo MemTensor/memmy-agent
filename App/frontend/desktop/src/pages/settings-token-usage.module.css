@@ -240,14 +240,6 @@
   line-height: var(--codex-leading-xs);
 }
 
-.byokPurposeTitle {
-  margin-top: 16px;
-  padding-bottom: 6px;
-  color: var(--usage-secondary);
-  font-size: var(--codex-text-xs);
-  font-weight: 600;
-}
-
 .byokPurposeRows {
   display: flex;
   flex-direction: column;

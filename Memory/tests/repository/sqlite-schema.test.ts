@@ -84,6 +84,7 @@ describe("repository sqlite schema contract", () => {
         "recall_events",
         "memory_change_log",
         "idempotency_keys",
+        "memory_capture_claims",
         "l3_world_model_project_environment_state",
         "evolution_jobs",
         "embedding_retry_queue",
@@ -262,6 +263,81 @@ describe("repository sqlite schema contract", () => {
         "profile_scan_id"
       ]));
       db.close();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("backfills hook QA claims when migrating a v6 database", () => {
+    const root = mkdtempSync(join(tmpdir(), "mindock-repo-v7-qa-claim-migration-"));
+    const dbPath = join(root, "memory.sqlite");
+    const at = "2026-01-01T00:00:00.000Z";
+    try {
+      const seeded = new MemoryDb({ path: dbPath });
+      seeded.db.prepare(
+        `INSERT INTO sessions (
+           id, user_id, source, profile_id, status, meta_json,
+           opened_at, last_seen_at, updated_at
+         ) VALUES (?, ?, 'codex', 'default', 'open', '{}', ?, ?, ?)`
+      ).run("qa-session", "qa-user", at, at, at);
+      seeded.db.prepare(
+        `INSERT INTO episodes (
+           id, session_id, user_id, status, l1_memory_ids_json, raw_turn_ids_json,
+           feedback_ids_json, decision_repair_ids_json, l2_policy_ids_json,
+           l3_world_model_ids_json, skill_memory_ids_json, turn_count,
+           reward_detail_json, pipeline_status, meta_json, opened_at, updated_at
+         ) VALUES (?, ?, ?, 'open', '["qa-memory"]', '["qa-turn"]',
+                   '[]', '[]', '[]', '[]', '[]', 1, '{}', 'idle', '{}', ?, ?)`
+      ).run("qa-episode", "qa-session", "qa-user", at, at);
+      seeded.db.prepare(
+        `INSERT INTO raw_turns (
+           id, session_id, episode_id, turn_id, user_id, user_text, assistant_text,
+           tool_calls_json, tool_results_json, source_memory_ids_json, usage_json,
+           message_payload_json, status, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, '[]', '[]', '[]', '{}',
+                   '{"turn_complete":{}}', 'succeeded', ?)`
+      ).run(
+        "qa-turn",
+        "qa-session",
+        "qa-episode",
+        "turn-1",
+        "qa-user",
+        "迁移后不要重复写入。",
+        "会通过 QA claim 判重。",
+        at
+      );
+      seeded.db.prepare(
+        `INSERT INTO memories (
+           id, timeline, user_id, session_id, agent_id, memory_type, status,
+           visibility, memory_key, memory_value, tags_json, info_json,
+           properties_json, memory_layer, content_hash, version,
+           created_at, updated_at
+         ) VALUES (?, ?, ?, ?, 'codex', 'LongTermMemory', 'activated',
+                   'private', 'trace:qa-session:turn-1:0', 'legacy hook trace', '[]',
+                   '{"raw_turn_id":"qa-turn"}',
+                   '{"internal_info":{"raw_turn_id":"qa-turn","step_index":0}}',
+                   'L1', 'qa-hash', 1, ?, ?)`
+      ).run("qa-memory", at, "qa-user", "qa-session", at, at);
+      seeded.db.exec(`
+        DROP TABLE memory_capture_claims;
+        DELETE FROM schema_migrations;
+        INSERT INTO schema_migrations (id, version, applied_at, checksum)
+        VALUES ('006_l3_world_model', 6, '${at}', 'v6');
+      `);
+      seeded.close();
+
+      const migrated = new MemoryDb({ path: dbPath });
+      expect(migrated.db.prepare(
+        `SELECT user_id, source, primary_memory_id, captured_by
+         FROM memory_capture_claims`
+      ).get()).toEqual({
+        user_id: "qa-user",
+        source: "codex",
+        primary_memory_id: "qa-memory",
+        captured_by: "turn_complete"
+      });
+      expect(existsSync(`${dbPath}.pre-v${SCHEMA_VERSION}.bak`)).toBe(true);
+      migrated.close();
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

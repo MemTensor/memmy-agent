@@ -427,10 +427,11 @@ export async function cmdGoal(ctx: CommandContext): Promise<OutboundMessage> {
   const runtime = ctx.loop?.goalRuntime;
   if (!runtime) return reply(ctx, "Goal runtime is unavailable.", { renderAs: "text" });
   const rawArgs = ctx.args.trim();
-  const [first = "", ...remaining] = rawArgs.split(/\s+/);
+  const match = /^(\S+)(?:\s+([\s\S]*))?$/.exec(rawArgs);
+  const first = match?.[1] ?? "";
   const command = first.toLowerCase();
   const explicitSubcommand = GOAL_COMMAND_SUBCOMMANDS.has(command);
-  const argument = explicitSubcommand ? remaining.join(" ").trim() : rawArgs;
+  const argument = explicitSubcommand ? (match?.[2] ?? "").trim() : rawArgs;
   const current = runtime.get(ctx.key);
   try {
     if (!rawArgs || command === "status") {

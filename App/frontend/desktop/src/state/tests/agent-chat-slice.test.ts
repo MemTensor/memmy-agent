@@ -5488,6 +5488,65 @@ describe("agent chat slice", () => {
     expect(state.activeTurnIdByChatId["chat-1"]).toBe("turn-new");
     expect(state.isSending).toBe(true);
   });
+
+  it("preserves structured Agent UI on live and hydrated assistant messages", () => {
+    const agentUi = {
+      questionCard: {
+        version: 1,
+        requestId: "question-1",
+        questions: [{
+          id: "choice",
+          prompt: "请选择",
+          options: [{ id: "a", label: "A" }, { id: "b", label: "B" }],
+          allowMultiple: false,
+          allowOther: true
+        }]
+      }
+    };
+    let live = agentReducer(initialAgentState, {
+      type: "agent/wsEvent",
+      event: { event: "ready", chat_id: "chat-1" }
+    });
+    live = agentReducer(live, {
+      type: "agent/wsEvent",
+      event: {
+        event: "message",
+        chat_id: "chat-1",
+        content: "请选择",
+        agent_ui: agentUi
+      }
+    });
+
+    expect(live.messages[0]?.agentUi).toEqual(agentUi);
+    live = agentReducer(live, {
+      type: "agent/wsEvent",
+      event: {
+        event: "agent_question_response",
+        chat_id: "chat-1",
+        request_id: "question-1",
+        answers: [{ questionId: "choice", selectedOptionIds: ["a"] }]
+      }
+    });
+    expect(live.messages[0]?.questionResponse).toEqual({
+      requestId: "question-1",
+      answers: [{ questionId: "choice", selectedOptionIds: ["a"] }]
+    });
+
+    const hydrated = loadHistory(initialAgentState, "websocket:chat-1", [{
+      role: "assistant",
+      content: "请选择",
+      agent_ui: agentUi,
+      questionResponse: {
+        requestId: "question-1",
+        answers: [{ questionId: "choice", selectedOptionIds: ["b"] }]
+      }
+    }]);
+    expect(hydrated.messages[0]?.agentUi).toEqual(agentUi);
+    expect(hydrated.messages[0]?.questionResponse).toEqual({
+      requestId: "question-1",
+      answers: [{ questionId: "choice", selectedOptionIds: ["b"] }]
+    });
+  });
 });
 
 function recoveryStateWithPendingMessage(content: string): AgentState {

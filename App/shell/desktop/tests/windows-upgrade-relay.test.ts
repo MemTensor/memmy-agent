@@ -1,6 +1,6 @@
 import { execFile as execFileCallback, spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
-import { copyFile, mkdtemp, mkdir, readFile, rename, rm, utimes, writeFile } from "node:fs/promises";
+import { copyFile, mkdtemp, mkdir, readFile as readFileRaw, rename, rm, symlink, utimes, writeFile as writeFileRaw } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -15,6 +15,30 @@ const temporaryDirectories: string[] = [];
 const helperProcesses: ChildProcess[] = [];
 const descendantProcessIds: number[] = [];
 const describeOnWindows = process.platform === "win32" ? describe : describe.skip;
+
+async function writeFile(path: string, data: string | Uint8Array, encoding?: BufferEncoding): Promise<void> {
+  if (path.toLowerCase().endsWith("app.sqlite") && typeof data === "string") {
+    const sqliteFixture = Buffer.alloc(4096);
+    Buffer.from("SQLite format 3\0", "ascii").copy(sqliteFixture, 0);
+    sqliteFixture[16] = 0x10;
+    sqliteFixture[17] = 0x00;
+    Buffer.from(data, "utf8").copy(sqliteFixture, 100);
+    await writeFileRaw(path, sqliteFixture);
+    return;
+  }
+  await writeFileRaw(path, data, encoding);
+}
+
+function readFile(path: string, encoding: "utf8"): Promise<string>;
+function readFile(path: string): Promise<Buffer>;
+async function readFile(path: string, encoding?: "utf8"): Promise<string | Buffer> {
+  if (path.toLowerCase().endsWith("app.sqlite") && encoding === "utf8") {
+    const contents = await readFileRaw(path);
+    const markerEnd = contents.indexOf(0, 100);
+    return contents.subarray(100, markerEnd < 0 ? contents.length : markerEnd).toString("utf8");
+  }
+  return encoding ? readFileRaw(path, encoding) : readFileRaw(path);
+}
 
 afterEach(async () => {
   await Promise.all(helperProcesses.splice(0).map(async (process) => {
@@ -56,11 +80,14 @@ const createRelayFixture = async (
     failMigrationComplete?: boolean;
     failMigrationRollback?: boolean;
     failFirstMigrationRollback?: boolean;
+    replaceTargetWithJunctionAfterPrepare?: boolean;
+    relocate?: boolean;
   } = {}
 ) => {
   const root = await mkdtemp(join(tmpdir(), "memmy-upgrade-relay-"));
   temporaryDirectories.push(root);
   const installDir = join(root, "installed Memmy");
+  const targetInstallDir = options.relocate ? join(root, "relocated Memmy") : installDir;
   const dataDir = join(installDir, "data", "Memmy");
   const workDir = join(root, "relay-work");
   const backupRoot = join(`${installDir}.memmy-upgrade-backup`, basename(workDir));
@@ -81,7 +108,10 @@ const createRelayFixture = async (
   await copyFile(migrationScriptPath, join(workDir, "MemmyWindowsDataMigration.ps1"));
   if (options.failMigrationPrepare) {
     await writeFile(join(workDir, "MemmyWindowsDataMigration.ps1"), "Write-Error 'injected migration failure'\r\nexit 5\r\n", "utf8");
-  } else if (options.failMigrationComplete || options.failMigrationRollback || options.failFirstMigrationRollback) {
+  } else if (options.failMigrationComplete
+    || options.failMigrationRollback
+    || options.failFirstMigrationRollback
+    || options.replaceTargetWithJunctionAfterPrepare) {
     const copiedMigrationPath = join(workDir, "MemmyWindowsDataMigration.ps1");
     let copiedMigration = await readFile(copiedMigrationPath, "utf8");
     if (options.failMigrationComplete) {
@@ -103,6 +133,14 @@ const createRelayFixture = async (
         `elseif ($Mode -eq "Rollback") {\r\n    if (-not (Test-Path -LiteralPath '${firstRollbackMarker}')) { Set-Content -LiteralPath '${firstRollbackMarker}' -Value 'failed'; throw "injected first Rollback failure" }`
       );
     }
+    if (options.replaceTargetWithJunctionAfterPrepare) {
+      const redirectedTarget = join(root, "post-prepare-redirected-target").replaceAll("'", "''");
+      await mkdir(redirectedTarget, { recursive: true });
+      copiedMigration = copiedMigration.replace(
+        'Write-MigrationLog -Message "Migration preparation completed."',
+        `Write-MigrationLog -Message "Migration preparation completed."\r\n    New-Item -ItemType Junction -Path $TargetInstallDir -Target '${redirectedTarget}' -ErrorAction Stop | Out-Null`
+      );
+    }
     await writeFile(copiedMigrationPath, copiedMigration, "utf8");
   }
   await writeFile(join(dataDir, "sentinel.txt"), "keep-me", "utf8");
@@ -114,7 +152,7 @@ const createRelayFixture = async (
   const windowsDirectory = process.env.SystemRoot ?? "C:\\Windows";
   const appStubPath = join(windowsDirectory, "System32", "where.exe");
   await writeFile(join(installDir, "Memmy.exe"), await readFile(appStubPath));
-  const escapedInstallDir = installDir.replaceAll("%", "%%");
+  const escapedTargetInstallDir = targetInstallDir.replaceAll("%", "%%");
   const escapedAppStubPath = appStubPath.replaceAll("%", "%%");
   const installerLines = [
     "@echo off",
@@ -132,9 +170,9 @@ const createRelayFixture = async (
     installerLines.push(`start "" /b "${powershellPath.replaceAll("%", "%%")}" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${descendantScriptPath.replaceAll("%", "%%")}"`);
   }
   installerLines.push(
-    `rmdir /s /q "${escapedInstallDir}"`,
-    `mkdir "${escapedInstallDir}"`,
-    `copy /y "${escapedAppStubPath}" "${escapedInstallDir}\\Memmy.exe" >nul`,
+    `rmdir /s /q "${escapedTargetInstallDir}"`,
+    `mkdir "${escapedTargetInstallDir}"`,
+    `copy /y "${escapedAppStubPath}" "${escapedTargetInstallDir}\\Memmy.exe" >nul`,
     "if not defined MEMMY_UPGRADE_WORK_DIR goto installer_done",
     ">\"%MEMMY_UPGRADE_WORK_DIR%\\child-reopen-intent.txt\" echo(%MEMMY_UPGRADE_REOPEN_AFTER_INSTALL%",
     ":installer_done",
@@ -145,6 +183,7 @@ const createRelayFixture = async (
   return {
     root,
     installDir,
+    targetInstallDir,
     dataDir,
     workDir,
     backupRoot,
@@ -234,7 +273,7 @@ const runDataMigration = async (
 
 const runRelay = async (
   fixture: Awaited<ReturnType<typeof createRelayFixture>>,
-  options: { appDataPath?: string; legacyHelperPid?: number; reopenAfterInstall?: "0" | "1"; installedVersion?: string } = {}
+  options: { appDataPath?: string; legacyHelperPid?: number; reopenAfterInstall?: "0" | "1"; installedVersion?: string; installerMode?: "Silent" | "Interactive" } = {}
 ) => {
   const powershellPath = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
   return execFile(powershellPath, buildRelayArguments(fixture, options), {
@@ -246,7 +285,7 @@ const runRelay = async (
 
 const buildRelayArguments = (
   fixture: Awaited<ReturnType<typeof createRelayFixture>>,
-  options: { legacyHelperPid?: number; reopenAfterInstall?: "0" | "1"; installedVersion?: string } = {}
+  options: { legacyHelperPid?: number; reopenAfterInstall?: "0" | "1"; installedVersion?: string; installerMode?: "Silent" | "Interactive" } = {}
 ) => [
     "-NoProfile",
     "-ExecutionPolicy",
@@ -255,8 +294,10 @@ const buildRelayArguments = (
     relayScriptPath,
     "-InstallerPath",
     fixture.installerPath,
-    "-InstallDir",
+    "-SourceInstallDir",
     fixture.installDir,
+    "-TargetInstallDir",
+    fixture.targetInstallDir,
     "-OriginalInstallerPid",
     "2147483647",
     "-LegacyHelperPid",
@@ -265,6 +306,8 @@ const buildRelayArguments = (
     "10.",
     "-InstalledVersion",
     options.installedVersion ?? "1.0.9",
+    "-InstallerMode",
+    options.installerMode ?? "Silent",
     "-ReopenAfterInstall",
     options.reopenAfterInstall ?? "0",
     "-ReadyPath",
@@ -326,6 +369,91 @@ const waitForPathPresent = async (path: string) => {
 };
 
 describeOnWindows("Windows upgrade relay", () => {
+  it("revalidates relocation safety immediately before starting the child installer", async () => {
+    const source = await readFile(relayScriptPath, "utf8");
+    const safetyCalls = [...source.matchAll(/^\s+Assert-MemmyRelocationTargetIsSafe(?:\s|$)/gmu)];
+    const migrationPrepare = source.indexOf("Invoke-MemmyDataMigration -Mode Prepare");
+    const childStart = source.indexOf("$installerProcess = Start-Process -FilePath $InstallerPath");
+
+    expect(safetyCalls).toHaveLength(2);
+    expect(safetyCalls[1]?.index).toBeGreaterThan(migrationPrepare);
+    expect(safetyCalls[1]?.index).toBeLessThan(childStart);
+    expect(source).toContain("Assert-MemmyNoReparsePath $normalizedTargetInstallDir 'target installDir'");
+    expect(source).toContain("Assert-MemmyNoReparsePath $targetRuntimeHomePath 'target runtimeHomePath'");
+  });
+
+  it("rejects a relocation target that crosses a directory junction", async () => {
+    const fixture = await createRelayFixture(0, { relocate: true });
+    const redirectedTarget = join(fixture.root, "redirected-target");
+    await mkdir(redirectedTarget, { recursive: true });
+    await symlink(redirectedTarget, fixture.targetInstallDir, "junction");
+
+    await expect(runRelay(fixture)).rejects.toMatchObject({ code: 1 });
+    expect(existsSync(join(redirectedTarget, "Memmy.exe"))).toBe(false);
+    expect(existsSync(fixture.dataDir)).toBe(true);
+    const log = await readFile(fixture.logPath, "utf8");
+    expect(log).toContain("target installDir crosses a reparse point");
+  }, 15_000);
+
+  it("rejects a relocation target replaced with a junction after migration preparation", async () => {
+    const fixture = await createRelayFixture(0, {
+      relocate: true,
+      replaceTargetWithJunctionAfterPrepare: true
+    });
+    const redirectedTarget = join(fixture.root, "post-prepare-redirected-target");
+
+    await expect(runRelay(fixture)).rejects.toMatchObject({ code: 1 });
+    expect(existsSync(join(redirectedTarget, "Memmy.exe"))).toBe(false);
+    expect(existsSync(fixture.dataDir)).toBe(true);
+    const log = await readFile(fixture.logPath, "utf8");
+    expect(log).toContain("target installDir crosses a reparse point");
+  }, 15_000);
+
+  it("rejects a relocation source that crosses a directory junction before moving data", async () => {
+    const fixture = await createRelayFixture(0, { relocate: true });
+    const realSource = join(fixture.root, "real-source");
+    await rename(fixture.installDir, realSource);
+    await symlink(realSource, fixture.installDir, "junction");
+
+    await expect(runRelay(fixture)).rejects.toMatchObject({ code: 1 });
+
+    expect(existsSync(join(realSource, "data", "Memmy", "sentinel.txt"))).toBe(true);
+    expect(existsSync(fixture.backupRoot)).toBe(false);
+    expect(existsSync(join(fixture.targetInstallDir, "Memmy.exe"))).toBe(false);
+    const log = await readFile(fixture.logPath, "utf8");
+    expect(log).toContain("source installDir crosses a reparse point");
+  }, 15_000);
+
+  it("waits for the running source installation before relocating", async () => {
+    const fixture = await createRelayFixture(0, { relocate: true });
+    const pingPath = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "PING.EXE");
+    await copyFile(pingPath, join(fixture.installDir, "Memmy.exe"));
+    const sourceProcess = spawn(join(fixture.installDir, "Memmy.exe"), ["127.0.0.1", "-n", "8"], {
+      windowsHide: true,
+      stdio: "ignore"
+    });
+    helperProcesses.push(sourceProcess);
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
+    expect(sourceProcess.exitCode).toBeNull();
+
+    await runRelay(fixture);
+
+    expect(sourceProcess.exitCode).not.toBeNull();
+    const log = await readFile(fixture.logPath, "utf8");
+    expect(log).not.toContain("forcing remaining installed app processes to exit");
+  }, 20_000);
+
+  it("keeps interactive relay children visible while silent updates stay hidden", async () => {
+    const source = await readFile(relayScriptPath, "utf8");
+
+    expect(source).toContain("[ValidateSet('Silent', 'Interactive')][string]$InstallerMode");
+    expect(source).toContain("$arguments = @('--updated', '--memmy-upgrade-relayed', '/currentuser', ('/D=' + $normalizedTargetInstallDir))");
+    expect(source).toContain("$arguments = @('/S') + $arguments");
+    expect(source).not.toContain("$arguments = @('/S', '--updated') + $arguments");
+    expect(source).toMatch(/InstallerMode -eq 'Interactive'[\s\S]*WindowStyle Normal/u);
+    expect(source).toMatch(/InstallerMode -eq 'Silent'[\s\S]*'\/S'[\s\S]*WindowStyle Hidden/u);
+  });
+
   it("migrates install-local data outside the installation directory before a verified upgrade", async () => {
     expect(existsSync(relayScriptPath)).toBe(true);
     const fixture = await createRelayFixture(0);
@@ -379,6 +507,171 @@ describeOnWindows("Windows upgrade relay", () => {
     await waitForPathAbsent(fixture.workDir);
     expect(existsSync(fixture.workDir)).toBe(false);
   }, 15_000);
+
+  it("relocates a completed external-v1 runtime from the source drive to the selected target drive", async () => {
+    const fixture = await createRelayFixture(0, { relocate: true });
+    const sourceRuntimeHomePath = fixture.legacyRuntimeHomePath;
+    const sourceWorkspacePath = join(sourceRuntimeHomePath, "workspace");
+    const targetWorkspacePath = join(fixture.targetRuntimeHomePath, "workspace");
+    const sessionPath = join(sourceWorkspacePath, "sessions", "websocket_relocation.jsonl");
+    await rm(join(fixture.installDir, "data"), { recursive: true, force: true });
+    await Promise.all([
+      mkdir(dirname(fixture.installationRecordPath), { recursive: true }),
+      mkdir(fixture.targetUserDataPath, { recursive: true }),
+      mkdir(dirname(sessionPath), { recursive: true })
+    ]);
+    await Promise.all([
+      writeFile(join(fixture.targetUserDataPath, "app.sqlite"), "external-account", "utf8"),
+      writeFile(join(sourceRuntimeHomePath, "config.yaml"), `workspace: '${sourceWorkspacePath}'\n`, "utf8"),
+      writeFile(sessionPath, `${JSON.stringify({
+        key: "websocket:relocation",
+        metadata: { webui: true, webuiProjectId: null, webuiWorkspaceCwd: sourceWorkspacePath }
+      })}\n{\"role\":\"user\",\"content\":\"keep relocation history\"}\n`, "utf8"),
+      writeFile(fixture.installationRecordPath, JSON.stringify({
+        schemaVersion: 1,
+        dataLayoutGeneration: "external-v1",
+        installDir: fixture.installDir,
+        userDataPath: fixture.targetUserDataPath,
+        runtimeHomePath: sourceRuntimeHomePath,
+        appVersion: "1.1.0"
+      }), "utf8"),
+      writeFile(
+        join(fixture.targetUserDataPath, "data-root.txt"),
+        Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(`${sourceRuntimeHomePath}\r\n`, "utf16le")])
+      )
+    ]);
+
+    await runRelay(fixture, { installedVersion: "1.1.0" });
+
+    expect(existsSync(join(fixture.targetInstallDir, "Memmy.exe"))).toBe(true);
+    await expect(readFile(join(fixture.targetUserDataPath, "app.sqlite"), "utf8"))
+      .resolves.toBe("external-account");
+    const migratedConfig = await readFile(join(fixture.targetRuntimeHomePath, "config.yaml"), "utf8");
+    expect(migratedConfig).toContain(targetWorkspacePath);
+    expect(migratedConfig).not.toContain(sourceWorkspacePath);
+    const migratedSession = await readFile(
+      join(fixture.targetRuntimeHomePath, "workspace", "sessions", "websocket_relocation.jsonl"),
+      "utf8"
+    );
+    expect(migratedSession).toContain("keep relocation history");
+    expect(migratedSession).toContain(targetWorkspacePath.replaceAll("\\", "\\\\"));
+    expect(existsSync(sourceRuntimeHomePath)).toBe(true);
+    expect(JSON.parse(await readFile(fixture.migrationStatePath, "utf8"))).toMatchObject({
+      phase: "awaiting-app-verification",
+      sourceInstallDir: fixture.installDir,
+      targetInstallDir: fixture.targetInstallDir,
+      runtimeSourceAuthority: "persisted-external-authority",
+      runtimeSourcePath: sourceRuntimeHomePath
+    });
+  }, 15_000);
+
+  it("rolls an external-v1 relocation back to the source runtime when the child installer fails", async () => {
+    const fixture = await createRelayFixture(2, { relocate: true });
+    const sourceRuntimeHomePath = fixture.legacyRuntimeHomePath;
+    await rm(join(fixture.installDir, "data"), { recursive: true, force: true });
+    await Promise.all([
+      mkdir(dirname(fixture.installationRecordPath), { recursive: true }),
+      mkdir(fixture.targetUserDataPath, { recursive: true }),
+      mkdir(sourceRuntimeHomePath, { recursive: true })
+    ]);
+    await Promise.all([
+      writeFile(join(fixture.targetUserDataPath, "app.sqlite"), "external-account", "utf8"),
+      writeFile(join(sourceRuntimeHomePath, "config.yaml"), "source-runtime", "utf8"),
+      writeFile(fixture.installationRecordPath, JSON.stringify({
+        schemaVersion: 1,
+        dataLayoutGeneration: "external-v1",
+        installDir: fixture.installDir,
+        userDataPath: fixture.targetUserDataPath,
+        runtimeHomePath: sourceRuntimeHomePath,
+        appVersion: "1.1.0"
+      }), "utf8"),
+      writeFile(
+        join(fixture.targetUserDataPath, "data-root.txt"),
+        Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(`${sourceRuntimeHomePath}\r\n`, "utf16le")])
+      )
+    ]);
+
+    await expect(runRelay(fixture, { installedVersion: "1.1.0" })).rejects.toMatchObject({ code: 2 });
+
+    expect(existsSync(join(fixture.installDir, "Memmy.exe"))).toBe(true);
+    expect(existsSync(fixture.targetRuntimeHomePath)).toBe(false);
+    await expect(readFile(join(sourceRuntimeHomePath, "config.yaml"), "utf8"))
+      .resolves.toBe("source-runtime");
+    const pointerBytes = await readFile(join(fixture.targetUserDataPath, "data-root.txt"));
+    expect(pointerBytes.subarray(2).toString("utf16le").trim()).toBe(sourceRuntimeHomePath);
+    expect(existsSync(fixture.migrationStatePath)).toBe(false);
+  }, 15_000);
+
+  it("does not accept an unrelated existing runtime as persisted external authority", async () => {
+    const fixture = await createRelayFixture(0, { relocate: true });
+    const unrelatedRuntimeHomePath = join(fixture.root, "unrelated-existing-runtime");
+    await rm(join(fixture.installDir, "data"), { recursive: true, force: true });
+    await Promise.all([
+      mkdir(dirname(fixture.installationRecordPath), { recursive: true }),
+      mkdir(fixture.targetUserDataPath, { recursive: true }),
+      mkdir(unrelatedRuntimeHomePath, { recursive: true })
+    ]);
+    await Promise.all([
+      writeFile(join(fixture.targetUserDataPath, "app.sqlite"), "external-account", "utf8"),
+      writeFile(join(unrelatedRuntimeHomePath, "config.yaml"), "unrelated-runtime", "utf8"),
+      writeFile(fixture.installationRecordPath, JSON.stringify({
+        schemaVersion: 1,
+        dataLayoutGeneration: "external-v1",
+        installDir: fixture.installDir,
+        userDataPath: fixture.targetUserDataPath,
+        runtimeHomePath: unrelatedRuntimeHomePath,
+        appVersion: "1.1.0"
+      }), "utf8"),
+      writeFile(
+        join(fixture.targetUserDataPath, "data-root.txt"),
+        Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(`${unrelatedRuntimeHomePath}\r\n`, "utf16le")])
+      )
+    ]);
+
+    await runRelay(fixture, { installedVersion: "1.1.0" });
+
+    expect(existsSync(join(fixture.targetRuntimeHomePath, "config.yaml"))).toBe(false);
+    const migrationLog = await readFile(fixture.migrationLogPath, "utf8");
+    expect(migrationLog).toContain("Ignoring an invalid external-v1 runtime source");
+    expect(migrationLog).not.toContain("authority=persisted-external-authority");
+  }, 15_000);
+
+  it("recovers a persisted install-local backup when the executable and install data are gone", async () => {
+    const fixture = await createRelayFixture(0);
+    const failedBackup = join(
+      `${fixture.installDir}.memmy-migration-failed`,
+      "20260825120000-0123456789abcdef0123456789abcdef",
+      "data-backup",
+    );
+    await mkdir(dirname(failedBackup), { recursive: true });
+    await rename(join(fixture.installDir, "data"), failedBackup);
+    await rm(join(fixture.installDir, "Memmy.exe"), { force: true });
+    await mkdir(dirname(fixture.installationRecordPath), { recursive: true });
+    await writeFile(fixture.installationRecordPath, JSON.stringify({
+      schemaVersion: 1,
+      dataLayoutGeneration: "install-local-v1",
+      installDir: fixture.installDir,
+      sourceDataPath: failedBackup,
+      sourceGeneration: `legacy-install:${fixture.installDir.toLowerCase()}`,
+      sourceAppVersion: "1.0.9",
+    }), "utf8");
+
+    await runRelay(fixture);
+
+    await expect(readFile(join(fixture.targetUserDataPath, "sentinel.txt"), "utf8"))
+      .resolves.toBe("keep-me");
+    await expect(readFile(join(fixture.targetUserDataPath, "app.sqlite"), "utf8"))
+      .resolves.toBe("account-state");
+    expect(JSON.parse(await readFile(fixture.migrationStatePath, "utf8"))).toMatchObject({
+      phase: "awaiting-app-verification",
+      sourceAuthority: "persisted-install-authority",
+      sourceDataPath: failedBackup,
+    });
+    const migrationLog = await readFile(fixture.migrationLogPath, "utf8");
+    expect(migrationLog).toContain(`Using the persisted trusted install-local source: ${failedBackup}`);
+    const relayLog = await readFile(fixture.logPath, "utf8");
+    expect(relayLog).not.toContain("data moved to");
+  });
 
   it("runs migration when the previous installer did not record a DisplayVersion", async () => {
     const fixture = await createRelayFixture(0);

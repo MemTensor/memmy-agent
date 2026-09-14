@@ -12,6 +12,7 @@ import {
   type CapabilityEvent
 } from "@memmy/local-api-contracts";
 import { randomUUID } from "node:crypto";
+import { createReadStream } from "node:fs";
 import { z } from "zod";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { PluginService } from "../../../../services/plugin-service.js";
@@ -30,6 +31,7 @@ const CapabilityParamsSchema = PluginParamsSchema.extend({ capabilityId: z.strin
 const CallParamsSchema = PluginParamsSchema.extend({ callId: z.string().trim().min(1) });
 const InteractionParamsSchema = CallParamsSchema.extend({ interactionId: z.string().trim().min(1) });
 const UiParamsSchema = PluginParamsSchema.extend({ slot: PluginUiSlotSchema });
+const ArtifactParamsSchema = PluginParamsSchema.extend({ token: z.string().uuid() });
 
 export function registerPluginRoutes(app: FastifyInstance, options: RegisterPluginRoutesOptions): void {
   const protectedRoute = { preHandler: options.authenticateRuntimeToken };
@@ -52,6 +54,19 @@ export function registerPluginRoutes(app: FastifyInstance, options: RegisterPlug
     const { id, slot } = UiParamsSchema.parse(request.params);
     return reply.send(PluginUiRendererResponseSchema.parse({ html: await options.plugins.readUi(id, slot) }));
   }));
+
+  const sendArtifact = async (request: FastifyRequest, reply: FastifyReply, disposition: "inline" | "attachment") => {
+    const { id, token } = ArtifactParamsSchema.parse(request.params);
+    const artifact = await options.plugins.openArtifact(id, token);
+    return reply
+      .type(artifact.mediaType)
+      .header("content-disposition", contentDisposition(disposition, artifact.name))
+      .header("content-security-policy", "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:")
+      .header("x-content-type-options", "nosniff")
+      .send(createReadStream(artifact.path));
+  };
+  app.get("/api/v1/plugins/:id/artifacts/:token/preview", protectedRoute, withErrorEnvelope((request, reply) => sendArtifact(request, reply, "inline")));
+  app.get("/api/v1/plugins/:id/artifacts/:token/download", protectedRoute, withErrorEnvelope((request, reply) => sendArtifact(request, reply, "attachment")));
 
   app.put("/api/v1/plugins/:id/config", protectedRoute, withErrorEnvelope(async (request, reply) => {
     const { id } = PluginParamsSchema.parse(request.params);
@@ -145,6 +160,11 @@ export function registerPluginRoutes(app: FastifyInstance, options: RegisterPlug
       return reply.send({ ok: true });
     })
   );
+}
+
+function contentDisposition(disposition: "inline" | "attachment", name: string): string {
+  const fallback = name.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 128) || "artifact";
+  return `${disposition}; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(name)}`;
 }
 
 async function refreshAgentTools(options: RegisterPluginRoutesOptions): Promise<void> {

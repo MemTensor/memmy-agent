@@ -590,6 +590,15 @@ export type MemmyAgentSendMessageInput = {
   modelPreset?: string | null;
 };
 
+export type MemmyAgentQuestionResponseInput = {
+  requestId: string;
+  answers: Array<{
+    questionId: string;
+    selectedOptionIds: string[];
+    otherText?: string;
+  }>;
+};
+
 export interface MemmyAgentNewChatResult {
   chatId: string;
   modelPreset: string;
@@ -730,6 +739,12 @@ export interface MemmyAgentWebSocketConnection {
     input: MemmyAgentSendMessageInput,
     expectedGeneration: number
   ): Promise<MemmyAgentMessageSubmissionResult>;
+  respondToQuestion(
+    chatId: string,
+    response: MemmyAgentQuestionResponseInput,
+    expectedGeneration: number,
+    timeoutMs?: number
+  ): Promise<void>;
   removeQueuedMessage(
     chatId: string,
     clientRequestId: string,
@@ -1314,6 +1329,7 @@ const GOAL_CONTROL_TIMEOUT_MS = 15_000;
 const GOAL_CONTROL_HYDRATE_TIMEOUT_MS = 5_000;
 const QUEUE_REMOVE_TIMEOUT_MS = 15_000;
 const QUEUE_STEER_TIMEOUT_MS = 15_000;
+const QUESTION_RESPONSE_TIMEOUT_MS = 15_000;
 
 interface MemmyAgentWebSocketSessionInput {
   bootstrap(options?: { force?: boolean }): Promise<MemmyAgentBootstrap>;
@@ -1345,6 +1361,13 @@ interface PendingGoalControl {
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout> | null;
   calibrating: boolean;
+}
+
+interface PendingQuestionResponse {
+  chatId: string;
+  resolve: () => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
 }
 
 interface PendingMessageAttempt {
@@ -1398,6 +1421,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
   private readonly pendingQueueRemovals = new Map<string, PendingQueueRemoval>();
   private readonly pendingQueueSteers = new Map<string, PendingQueueSteer>();
   private readonly pendingGoalControls = new Map<string, PendingGoalControl>();
+  private readonly pendingQuestionResponses = new Map<string, PendingQuestionResponse>();
   private connectionGeneration = 0;
   private transportOpenGeneration: number | null = null;
   private readyGeneration: number | null = null;
@@ -1527,6 +1551,49 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
       expectedGeneration,
       "chat_composer"
     ).firstPromise;
+  }
+
+  respondToQuestion(
+    chatId: string,
+    response: MemmyAgentQuestionResponseInput,
+    expectedGeneration: number,
+    timeoutMs = QUESTION_RESPONSE_TIMEOUT_MS
+  ): Promise<void> {
+    this.assertReadyGeneration(expectedGeneration);
+    const key = messageAttemptKey(chatId, response.requestId);
+    if (this.pendingQuestionResponses.has(key)) {
+      return Promise.reject(new Error("Question response is already pending"));
+    }
+    return new Promise<void>((resolve, reject) => {
+      const pending: PendingQuestionResponse = {
+        chatId,
+        resolve,
+        reject,
+        timer: setTimeout(() => {
+          if (this.pendingQuestionResponses.get(key) === pending) {
+            this.pendingQuestionResponses.delete(key);
+          }
+          reject(new Error("Question response timed out"));
+        }, timeoutMs)
+      };
+      this.pendingQuestionResponses.set(key, pending);
+      try {
+        this.sendOrdinaryFrame({
+          type: "agent_question_response",
+          chat_id: chatId,
+          request_id: response.requestId,
+          answers: response.answers.map((answer) => ({
+            question_id: answer.questionId,
+            selected_option_ids: answer.selectedOptionIds,
+            ...(answer.otherText ? { other_text: answer.otherText } : {})
+          }))
+        }, expectedGeneration);
+      } catch (error) {
+        this.pendingQuestionResponses.delete(key);
+        clearTimeout(pending.timer);
+        reject(asError(error, "Unable to answer question"));
+      }
+    });
   }
 
   removeQueuedMessage(
@@ -1903,6 +1970,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     this.rejectPendingQueueRemovals(new Error("queue removal cancelled"));
     this.rejectPendingQueueSteers(new Error("queue steer cancelled"));
     this.rejectPendingGoalControls(new Error("Goal control cancelled"));
+    this.rejectPendingQuestionResponses(new Error("Question response cancelled"));
     this.rejectInitialReady(new Error("Agent gateway connection cancelled"));
     this.clearReadyHandshakeTimer();
     if (this.reconnectTimer) {
@@ -2004,6 +2072,8 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
       this.resolvePendingQueueRemoval(normalized);
     } else if (normalized.event === "queue_steer_result") {
       this.resolvePendingQueueSteer(normalized);
+    } else if (normalized.event === "agent_question_response_result") {
+      this.resolvePendingQuestionResponse(normalized);
     }
 
     if (normalized.event === "attached") {
@@ -2095,6 +2165,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     this.rejectPendingRunStatusSnapshots(new Error("run status snapshot failed because websocket closed"), generation);
     this.rejectPendingQueueRemovals(new Error("queue removal failed because websocket closed"));
     this.rejectPendingQueueSteers(new Error("queue steer failed because websocket closed"));
+    this.rejectPendingQuestionResponses(new Error("question response failed because websocket closed"));
     if (this.intentionallyClosed) {
       return;
     }
@@ -2556,6 +2627,27 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     pending.reject(new MemmyAgentGoalControlError(
       typeof event.error === "string" ? event.error : "invalid_transition"
     ));
+  }
+
+  private resolvePendingQuestionResponse(event: MemmyAgentWsEvent): void {
+    const chatId = event.chat_id;
+    const requestId = typeof event.request_id === "string" ? event.request_id : null;
+    if (!chatId || !requestId) return;
+    const key = messageAttemptKey(chatId, requestId);
+    const pending = this.pendingQuestionResponses.get(key);
+    if (!pending) return;
+    this.pendingQuestionResponses.delete(key);
+    clearTimeout(pending.timer);
+    if (event.ok === true) pending.resolve();
+    else pending.reject(new Error(typeof event.error === "string" ? event.error : "Unable to answer question"));
+  }
+
+  private rejectPendingQuestionResponses(error: Error): void {
+    for (const [key, pending] of this.pendingQuestionResponses) {
+      this.pendingQuestionResponses.delete(key);
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
   }
 
   private beginGoalControlCalibration(key: string, pending: PendingGoalControl): void {

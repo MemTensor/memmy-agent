@@ -12,19 +12,23 @@ export function verifyPackageVersion({ repoRoot = defaultRepoRoot, expected, run
   const failures = [];
   const sourceManifests = [
     "package.json",
-    "Memory/package.json",
-    "Memory/src/cli/npm/package.json",
     "App/memmy-agent/package.json",
     "App/shell/desktop/package.json",
   ];
   for (const relativePath of sourceManifests) {
     checkJsonVersion(join(repoRoot, relativePath), expected, failures, relativePath);
   }
+  const memoryPackage = readJson(join(repoRoot, "Memory/package.json"), failures, "Memory/package.json");
+  const memoryVersion = memoryPackage?.version;
+  if (!/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(memoryVersion ?? "")) {
+    failures.push("Memory/package.json version must use semantic version syntax");
+  }
+  checkJsonVersion(join(repoRoot, "Memory/src/cli/npm/package.json"), memoryVersion, failures, "Memory CLI package");
 
   const rootLock = readJson(join(repoRoot, "package-lock.json"), failures, "package-lock.json");
   checkValue(rootLock?.version, expected, failures, "package-lock.json.version");
   checkValue(rootLock?.packages?.[""]?.version, expected, failures, "package-lock.json packages['']");
-  checkValue(rootLock?.packages?.Memory?.version, expected, failures, "package-lock.json packages.Memory");
+  checkValue(rootLock?.packages?.Memory?.version, memoryVersion, failures, "package-lock.json packages.Memory");
   checkValue(
     rootLock?.packages?.["App/shell/desktop"]?.version,
     expected,
@@ -47,12 +51,12 @@ export function verifyPackageVersion({ repoRoot = defaultRepoRoot, expected, run
 
   if (runtimeRoot) {
     const runtime = resolve(runtimeRoot);
-    for (const component of ["memory", "memmy-agent"]) {
+    for (const [component, componentVersion] of [["memory", memoryVersion], ["memmy-agent", expected]]) {
       const prefix = `staged ${component}`;
-      checkJsonVersion(join(runtime, component, "package.json"), expected, failures, `${prefix} package`);
+      checkJsonVersion(join(runtime, component, "package.json"), componentVersion, failures, `${prefix} package`);
       const lock = readJson(join(runtime, component, "package-lock.json"), failures, `${prefix} lock`);
-      checkValue(lock?.version, expected, failures, `${prefix} lock version`);
-      checkValue(lock?.packages?.[""]?.version, expected, failures, `${prefix} lock root`);
+      checkValue(lock?.version, componentVersion, failures, `${prefix} lock version`);
+      checkValue(lock?.packages?.[""]?.version, componentVersion, failures, `${prefix} lock root`);
     }
   }
 

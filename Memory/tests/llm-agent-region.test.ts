@@ -29,6 +29,14 @@ describe("memory account model agent region", () => {
     );
   });
 
+  it("locates the desktop manifest beside the app ASAR for standalone Memory", () => {
+    const modelDirectory = resolve("app-root/Resources/memory-runtime/dist/src/model");
+
+    expect(packagedDesktopEditionManifestPath(modelDirectory)).toBe(
+      resolve("app-root/Resources/app.asar/dist/main/desktop-edition.json")
+    );
+  });
+
   it.each([
     [{ accountChannel: "email" }, "intl"],
     [{ accountChannel: "phone" }, "cn"],

@@ -50,7 +50,8 @@ export async function loadFirstEncounterReport(request: FirstEncounterReportRequ
     path: "/api/onboarding/insight-report",
     schema: OnboardingInsightReportResponseSchema,
     body: OnboardingInsightReportInputSchema.parse({
-      locale: request.language
+      locale: request.language,
+      detectedAgents: toDetectedAgents(request.agents)
     })
   });
   const payload = toFirstEncounterReportPayload(response, request.language);
@@ -75,7 +76,8 @@ export async function streamFirstEncounterReport(
       },
       body: JSON.stringify(OnboardingInsightReportInputSchema.parse({
         locale: request.language,
-        stream: true
+        stream: true,
+        detectedAgents: toDetectedAgents(request.agents)
       }))
     });
 
@@ -120,6 +122,14 @@ export async function streamFirstEncounterReport(
     console.warn("stream first encounter report failed", error);
     throw error;
   }
+}
+
+function toDetectedAgents(agents: readonly DiscoveredAgent[]) {
+  return agents.map((agent) => ({
+    sourceId: agent.sourceId,
+    displayName: agent.name,
+    recentSessionCount: agent.conversations
+  }));
 }
 
 async function* readInsightReportStreamEvents(body: ReadableStream<Uint8Array>): AsyncIterable<OnboardingInsightReportStreamEvent> {

@@ -13,7 +13,9 @@ import type { UpdateCoordinatorValue } from "../../app/update-coordinator.js";
 import {
   LOG_LEVEL_STORAGE_KEY,
   SettingsPageView,
+  finalizeAccountLogout,
   formatUsageUpdatedAt,
+  hasConfiguredByokAgentModel,
   isPendingQuotaRequestError,
   resolveQuotaEligibilityMessage,
   resolveSettingsTabFromHash,
@@ -247,6 +249,7 @@ describe("resolveSettingsTabFromHash", () => {
     expect(resolveSettingsTabFromHash("#model-config-add")).toBe("model");
     expect(resolveSettingsTabFromHash("#token-usage")).toBe("tokens");
     expect(resolveSettingsTabFromHash("#about")).toBe("about");
+    expect(resolveSettingsTabFromHash("#plugins")).toBeNull();
     expect(resolveSettingsTabFromHash("#unknown")).toBeNull();
   });
 });
@@ -665,9 +668,14 @@ describe("SettingsPageView", () => {
     expect(styles).toContain(".byokUsageList");
     expect(styles).not.toContain(".backButton");
     expect(source).toContain("const byokUsageByKind = TOKEN_USAGE_SCENES.map");
-    expect(source).toContain("props.byokUsage.byModel.map");
-    expect(source).toContain("function ByokModelUsageRow");
-    expect(source).toContain('t("settings.token.historicalUnclassified")');
+    expect(source).toContain("const classifiedByokModels = props.byokUsage.byModel.filter");
+    expect(source).toContain("const uniqueByokModels = new Map<string, ByokTokenUsageByModel>();");
+    expect(source).not.toContain("function ByokModelUsageRow");
+    expect(source).not.toContain("usageStyles.byokPurposeTitle");
+    expect(styles).not.toContain(".byokPurposeTitle");
+    expect(source).not.toContain('t("settings.token.byModel")');
+    expect(source).not.toContain('t("settings.token.byPurpose")');
+    expect(source).not.toContain('t("settings.token.historicalUnclassified")');
     expect(source).not.toContain("getTaskModelCandidates(workspace, workspaceMode)");
     expect(source).toContain('"settings.token.modelBreakdownPending"');
     expect(source).toContain("usageSceneMeta(props.usage.scene, t)");
@@ -752,7 +760,7 @@ describe("SettingsPageView", () => {
     expect(html).toContain("打磨 Agent 技能与偏好");
     expect(html).toContain("Embedding 检索");
     expect(html).toContain("记忆向量化检索");
-    expect(html).not.toContain("Xenova/all-MiniLM-L6-v2");
+    expect(html).toContain("Memmy Platform 本地 Embedding");
     expect(html).toContain("语音识别 ASR");
     expect(html).toContain("生图模型");
     expect(html).toContain("未配置");
@@ -860,6 +868,92 @@ describe("SettingsPageView", () => {
     expect(source).toContain("accountClient?.updateProfile");
     expect(source).toContain("accountClient?.logout");
     expect(source).toContain("appActions.accountCleared()");
+  });
+
+  it("退出登录后刷新 canonical 配置，并按实际 BYOK Agent 模型决定落点", async () => {
+    const catalogWithUnselectedByokAgent = createCatalog(true);
+    catalogWithUnselectedByokAgent.modelAssignments.byok.agent = { candidates: [], default: null };
+    expect(hasConfiguredByokAgentModel(catalogWithUnselectedByokAgent)).toBe(true);
+    expect(hasConfiguredByokAgentModel(createCatalog(false))).toBe(false);
+
+    const dispatch = vi.fn();
+    const canonicalModelConfig = {
+      ...createAccountModeWithSavedModelState().modelConfig,
+      catalog: catalogWithUnselectedByokAgent
+    };
+    const configClient = {
+      getModelConfig: vi.fn(async () => canonicalModelConfig),
+      updateSettings: vi.fn(async (settings) => settings)
+    };
+
+    await expect(finalizeAccountLogout({
+      modelConfig: createAccountModeState().modelConfig,
+      configClient,
+      dispatch
+    })).resolves.toBe("byok");
+
+    expect(configClient.getModelConfig).toHaveBeenCalledOnce();
+    expect(configClient.updateSettings).toHaveBeenCalledWith({ userMode: "byok" });
+    expect(dispatch.mock.calls.map(([action]) => action.type)).toEqual([
+      "modelConfig/updated",
+      "account/cleared",
+      "settings/updated",
+      "settings/updated"
+    ]);
+  });
+
+  it("退出后的 canonical 刷新失败时仅使用缓存 BYOK catalog 回退", async () => {
+    const dispatch = vi.fn();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const configClient = {
+      getModelConfig: vi.fn(async () => { throw new Error("model config offline"); }),
+      updateSettings: vi.fn(async (settings) => settings)
+    };
+
+    try {
+      await expect(finalizeAccountLogout({
+        modelConfig: createAccountModeWithSavedModelState().modelConfig,
+        configClient,
+        dispatch
+      })).resolves.toBe("byok");
+    } finally {
+      warn.mockRestore();
+    }
+
+    expect(dispatch.mock.calls.map(([action]) => action.type)).toEqual([
+      "account/cleared",
+      "settings/updated",
+      "settings/updated"
+    ]);
+  });
+
+  it("退出后的模式保存失败不回滚已清除账号，并继续返回欢迎页落点", async () => {
+    const dispatch = vi.fn();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const canonicalModelConfig = createAccountModeState().modelConfig;
+    const configClient = {
+      getModelConfig: vi.fn(async () => canonicalModelConfig),
+      updateSettings: vi.fn(async () => { throw new Error("settings offline"); })
+    };
+
+    try {
+      await expect(finalizeAccountLogout({
+        modelConfig: createAccountModeWithSavedModelState().modelConfig,
+        configClient,
+        dispatch
+      })).resolves.toBe("unset");
+    } finally {
+      warn.mockRestore();
+    }
+
+    expect(dispatch.mock.calls.map(([action]) => action.type)).toEqual([
+      "modelConfig/updated",
+      "account/cleared",
+      "settings/updated"
+    ]);
+    const source = readFileSync(settingsPageSourcePath, "utf8");
+    expect(source).toContain('if (nextUserMode === "unset")');
+    expect(source).toContain('dispatch(appActions.navigate("/welcome"))');
   });
 
   it("中文输入法组合输入中的 Enter 只确认候选，不保存账户昵称", () => {

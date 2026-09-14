@@ -187,7 +187,8 @@ function RuntimeApp() {
           bootstrap: effectiveBootstrap,
           preferredMode: launchModeOverride ?? persistedPreferredMode,
           accountSession,
-          guidanceCompleted
+          guidanceCompleted,
+          modelConfig
         });
         const initialPath = resolveLaunchInitialView({
           defaultPath: defaultInitialPath,

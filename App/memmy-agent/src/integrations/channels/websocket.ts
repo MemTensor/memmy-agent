@@ -18,6 +18,11 @@ import {
   parseTurnSource,
   type TurnSource,
 } from "../../core/runtime-messages/index.js";
+import {
+  respondToAgentQuestion,
+  type AgentQuestionAnswer,
+  type AgentQuestionResponse,
+} from "../../core/agent-runtime/tools/ask-question.js";
 import { builtinCommandPalette } from "../../command/builtin.js";
 import { loadConfig } from "../../config/loader.js";
 import {
@@ -231,6 +236,7 @@ const CHAT_ID_RE = /^[A-Za-z0-9_:-]{1,64}$/;
 const API_KEY_RE = /^[A-Za-z0-9_:.-]{1,128}$/;
 const WEBUI_LANGUAGE_VALUES = new Set<WebuiLanguage>(["zh-CN", "en-US"]);
 const TURN_CONTENT_EVENTS = new Set([
+  "agent_question_response",
   "context_compaction",
   "delta",
   "file_edit",
@@ -256,6 +262,42 @@ const MCP_PRESET_ACTIONS_BY_PATH: Record<string, string> = {
   "/api/settings/mcp-presets/tools": "tools",
   "/api/settings/mcp-presets/reload": "reload",
 };
+
+function normalizeAgentQuestionResponse(
+  requestId: unknown,
+  value: unknown,
+): AgentQuestionResponse | null {
+  if (typeof requestId !== "string" || !UUID_RE.test(requestId)) return null;
+  if (!Array.isArray(value) || value.length < 1 || value.length > 4) return null;
+  const answers: AgentQuestionAnswer[] = [];
+  for (const raw of value) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+    const item = raw as Record<string, unknown>;
+    const questionId = typeof item.question_id === "string"
+      ? item.question_id.trim()
+      : typeof item.questionId === "string"
+        ? item.questionId.trim()
+        : "";
+    const rawSelected = Array.isArray(item.selected_option_ids)
+      ? item.selected_option_ids
+      : Array.isArray(item.selectedOptionIds)
+        ? item.selectedOptionIds
+        : null;
+    if (!questionId || questionId.length > 64 || !rawSelected || rawSelected.length > 8) return null;
+    const selectedOptionIds = rawSelected.map((entry) => typeof entry === "string" ? entry.trim() : "");
+    if (selectedOptionIds.some((entry) => !entry || entry.length > 64)) return null;
+    const rawOtherText = item.other_text ?? item.otherText;
+    if (rawOtherText != null && typeof rawOtherText !== "string") return null;
+    const otherText = typeof rawOtherText === "string" ? rawOtherText.trim() : "";
+    if (otherText.length > 2_000) return null;
+    answers.push({
+      questionId,
+      selectedOptionIds,
+      ...(otherText ? { otherText } : {}),
+    });
+  }
+  return { requestId, answers };
+}
 
 const MAX_ATTACHMENTS_PER_MESSAGE = 4;
 const MAX_IMAGE_BYTES = 6 * 1024 * 1024;
@@ -3414,6 +3456,43 @@ export class WebSocketChannel extends BaseChannel {
 
   async dispatchEnvelope(connection: any, clientId: string, envelope: Record<string, any>): Promise<void> {
     const type = envelope.type;
+    if (type === "agent_question_response") {
+      const chatId = typeof envelope.chat_id === "string" && isValidGuiChatId(envelope.chat_id)
+        ? envelope.chat_id
+        : "";
+      const response = normalizeAgentQuestionResponse(envelope.request_id, envelope.answers);
+      if (
+        !chatId
+        || !response
+        || !this.connectionChats.get(connection)?.has(chatId)
+      ) {
+        await this.safeSendTo(connection, {
+          event: "agent_question_response_result",
+          chat_id: chatId,
+          request_id: typeof envelope.request_id === "string" ? envelope.request_id : "",
+          ok: false,
+          error: "invalid_request",
+        });
+        return;
+      }
+      const result = respondToAgentQuestion({ chatId, response });
+      if (result.ok) {
+        await this.sendTurnPayload(chatId, {
+          event: "agent_question_response",
+          chat_id: chatId,
+          request_id: response.requestId,
+          answers: response.answers,
+        });
+      }
+      await this.safeSendTo(connection, {
+        event: "agent_question_response_result",
+        chat_id: chatId,
+        request_id: response.requestId,
+        ok: result.ok,
+        ...(!result.ok ? { error: result.error } : {}),
+      });
+      return;
+    }
     if (type === "queue_snapshot_request") {
       const chatId = typeof envelope.chat_id === "string" && isValidGuiChatId(envelope.chat_id)
         ? envelope.chat_id

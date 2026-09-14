@@ -1,10 +1,12 @@
 param(
   [Parameter(Mandatory = $true)][string]$InstallerPath,
-  [Parameter(Mandatory = $true)][string]$InstallDir,
+  [Parameter(Mandatory = $true)][string]$SourceInstallDir,
+  [Parameter(Mandatory = $true)][string]$TargetInstallDir,
   [Parameter(Mandatory = $true)][int]$OriginalInstallerPid,
   [Parameter(Mandatory = $true)][int]$LegacyHelperPid,
   [Parameter(Mandatory = $true)][string]$ExpectedVersion,
   [string]$InstalledVersion = '',
+  [Parameter(Mandatory = $true)][ValidateSet('Silent', 'Interactive')][string]$InstallerMode,
   [Parameter(Mandatory = $true)][ValidateSet('0', '1')][string]$ReopenAfterInstall,
   [Parameter(Mandatory = $true)][string]$ReadyPath,
   [Parameter(Mandatory = $true)][string]$WorkDir,
@@ -18,16 +20,18 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$normalizedInstallDir = [System.IO.Path]::GetFullPath($InstallDir).TrimEnd('\')
-$dataPath = Join-Path $normalizedInstallDir 'data'
-$backupParent = "$normalizedInstallDir.memmy-upgrade-backup"
+$normalizedSourceInstallDir = [System.IO.Path]::GetFullPath($SourceInstallDir).TrimEnd('\')
+$normalizedTargetInstallDir = [System.IO.Path]::GetFullPath($TargetInstallDir).TrimEnd('\')
+$dataPath = Join-Path $normalizedSourceInstallDir 'data'
+$backupParent = "$normalizedSourceInstallDir.memmy-upgrade-backup"
 $backupRoot = Join-Path $backupParent (Split-Path -Leaf $WorkDir)
 $backupPath = Join-Path $backupRoot 'data-backup'
 $installerDataPath = Join-Path $backupRoot 'installer-created-data'
 $stagingRoot = Split-Path -Parent $WorkDir
 $lockPath = Join-Path $stagingRoot 'active.lock'
 $lockStatePath = Join-Path $stagingRoot 'active.lock\state.json'
-$appExe = Join-Path $normalizedInstallDir 'Memmy.exe'
+$sourceAppExe = Join-Path $normalizedSourceInstallDir 'Memmy.exe'
+$appExe = Join-Path $normalizedTargetInstallDir 'Memmy.exe'
 $migrationScriptPath = Join-Path $WorkDir 'MemmyWindowsDataMigration.ps1'
 $targetUserDataPath = if ($TargetUserDataPathOverride) { $TargetUserDataPathOverride } else { Join-Path $env:APPDATA 'Memmy' }
 $dataPointerPath = Join-Path $targetUserDataPath 'data-root.txt'
@@ -35,7 +39,7 @@ $migrationStatePath = if ($MigrationStatePathOverride) { $MigrationStatePathOver
 $migrationLogPath = if ($MigrationLogPathOverride) { $MigrationLogPathOverride } else { Join-Path $env:LOCALAPPDATA 'Memmy\upgrade-logs\data-migration.log' }
 $installationRecordPath = if ($InstallationRecordPathOverride) { $InstallationRecordPathOverride } else { Join-Path $env:LOCALAPPDATA 'Memmy\data-layout\last-install.json' }
 $legacyRuntimeHomePath = if ($LegacyRuntimeHomePathOverride) { $LegacyRuntimeHomePathOverride } else { Join-Path $env:USERPROFILE '.memmy' }
-$installDriveRoot = [System.IO.Path]::GetPathRoot($normalizedInstallDir)
+$installDriveRoot = [System.IO.Path]::GetPathRoot($normalizedTargetInstallDir)
 $targetRuntimeHomePath = if ($TargetRuntimeHomePathOverride) {
   $TargetRuntimeHomePathOverride
 } elseif ([string]::Equals($installDriveRoot, 'C:\', [System.StringComparison]::OrdinalIgnoreCase)) {
@@ -68,20 +72,151 @@ function Write-MemmyUpgradeLog([string]$Message) {
   Add-Content -LiteralPath $LogPath -Value ('[{0:O}] {1}' -f (Get-Date), $Message)
 }
 
+function Test-MemmySamePath([string]$Left, [string]$Right) {
+  return [string]::Equals(
+    [System.IO.Path]::GetFullPath($Left).TrimEnd('\'),
+    [System.IO.Path]::GetFullPath($Right).TrimEnd('\'),
+    [System.StringComparison]::OrdinalIgnoreCase
+  )
+}
+
+function Test-MemmySameOrDescendantPath([string]$Candidate, [string]$Parent) {
+  $normalizedCandidate = [System.IO.Path]::GetFullPath($Candidate).TrimEnd('\')
+  $normalizedParent = [System.IO.Path]::GetFullPath($Parent).TrimEnd('\')
+  return (Test-MemmySamePath $normalizedCandidate $normalizedParent) -or
+    $normalizedCandidate.StartsWith("$normalizedParent\", [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Assert-MemmyNoReparsePath([string]$Path, [string]$Description) {
+  $currentPath = [System.IO.Path]::GetFullPath($Path)
+  while (-not (Test-Path -LiteralPath $currentPath)) {
+    $parentPath = [System.IO.Path]::GetDirectoryName($currentPath)
+    if (-not $parentPath -or (Test-MemmySamePath $parentPath $currentPath)) {
+      throw "$Description has no existing trusted ancestor"
+    }
+    $currentPath = $parentPath
+  }
+
+  while ($currentPath) {
+    $item = Get-Item -LiteralPath $currentPath -Force -ErrorAction Stop
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+      throw "$Description crosses a reparse point: $($item.FullName)"
+    }
+    if ($item -is [System.IO.FileInfo]) {
+      $currentPath = $item.DirectoryName
+    } elseif ($item.Parent) {
+      $currentPath = $item.Parent.FullName
+    } else {
+      $currentPath = $null
+    }
+  }
+}
+
+function Test-MemmyDirectoryContainsData([string]$Path, [string[]]$ExcludedTopLevelNames = @()) {
+  if (-not (Test-Path -LiteralPath $Path -PathType Container)) { return $false }
+  foreach ($item in @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction Stop)) {
+    if ($ExcludedTopLevelNames -contains $item.Name) { continue }
+    if (-not $item.PSIsContainer) { return $true }
+    if ($null -ne (Get-ChildItem -LiteralPath $item.FullName -Recurse -Force -File -ErrorAction Stop |
+        Select-Object -First 1)) {
+      return $true
+    }
+  }
+  return $false
+}
+
+function Test-MemmyPreparedMigrationTarget {
+  if (-not (Test-Path -LiteralPath $migrationStatePath -PathType Leaf)) { return $false }
+  try {
+    $migrationState = Get-Content -LiteralPath $migrationStatePath -Raw -Encoding UTF8 |
+      ConvertFrom-Json -ErrorAction Stop
+    return [int]$migrationState.schemaVersion -eq 2 -and
+      [string]$migrationState.owner -eq 'relay' -and
+      [string]$migrationState.phase -eq 'prepared' -and
+      $migrationState.targetInstallDir -and
+      $migrationState.targetUserDataPath -and
+      $migrationState.targetRuntimeHomePath -and
+      (Test-MemmySamePath ([string]$migrationState.targetInstallDir) $normalizedTargetInstallDir) -and
+      (Test-MemmySamePath ([string]$migrationState.targetUserDataPath) $targetUserDataPath) -and
+      (Test-MemmySamePath ([string]$migrationState.targetRuntimeHomePath) $targetRuntimeHomePath)
+  } catch {
+    return $false
+  }
+}
+
+function Assert-MemmyRelocationTargetIsSafe([switch]$AllowPreparedMigrationTarget) {
+  if (Test-MemmySamePath $normalizedSourceInstallDir $normalizedTargetInstallDir) { return }
+  Assert-MemmyNoReparsePath $normalizedTargetInstallDir 'target installDir'
+  Assert-MemmyNoReparsePath $targetRuntimeHomePath 'target runtimeHomePath'
+  if ((Test-MemmySameOrDescendantPath $normalizedTargetInstallDir $normalizedSourceInstallDir) -or
+      (Test-MemmySameOrDescendantPath $normalizedSourceInstallDir $normalizedTargetInstallDir)) {
+    throw 'selected target overlaps the source installation directory'
+  }
+  if (Test-Path -LiteralPath (Join-Path $normalizedTargetInstallDir 'Memmy.exe') -PathType Leaf) {
+    throw 'selected target already contains Memmy.exe'
+  }
+  if (Test-MemmyDirectoryContainsData (Join-Path $normalizedTargetInstallDir 'data')) {
+    throw 'selected target already contains install-local Memmy data'
+  }
+
+  if (Test-MemmyDirectoryContainsData $targetRuntimeHomePath @('updates')) {
+    $targetRuntimeIsRecordedSource = $AllowPreparedMigrationTarget -and
+      (Test-MemmyPreparedMigrationTarget)
+    try {
+      if (-not $targetRuntimeIsRecordedSource -and
+          (Test-Path -LiteralPath $installationRecordPath -PathType Leaf)) {
+        $record = Get-Content -LiteralPath $installationRecordPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+        if ([int]$record.schemaVersion -eq 1 -and
+            [string]$record.dataLayoutGeneration -eq 'external-v1' -and
+            $record.installDir -and $record.userDataPath -and $record.runtimeHomePath) {
+          $targetRuntimeIsRecordedSource =
+            (Test-MemmySamePath ([string]$record.installDir) $normalizedSourceInstallDir) -and
+            (Test-MemmySamePath ([string]$record.userDataPath) $targetUserDataPath) -and
+            (Test-MemmySamePath ([string]$record.runtimeHomePath) $targetRuntimeHomePath)
+        }
+      }
+    } catch {
+      $targetRuntimeIsRecordedSource = $false
+    }
+    if (-not $targetRuntimeIsRecordedSource) {
+      throw 'selected installation drive already contains Memmy runtime data'
+    }
+  }
+}
+
+function Assert-MemmyRelaySourceIsSafe {
+  Assert-MemmyNoReparsePath $normalizedSourceInstallDir 'source installDir'
+  Assert-MemmyNoReparsePath $dataPath 'source data path'
+  Assert-MemmyNoReparsePath $backupParent 'upgrade backup parent'
+  Assert-MemmyNoReparsePath $backupRoot 'upgrade backup root'
+  Assert-MemmyNoReparsePath $stagingRoot 'upgrade staging root'
+  Assert-MemmyNoReparsePath $WorkDir 'upgrade workDir'
+  Assert-MemmyNoReparsePath $normalizedInstallerPath 'staged installer path'
+}
+
 function Invoke-MemmyDataMigration([ValidateSet('Prepare', 'Complete', 'Rollback', 'RequireRecovery')][string]$Mode) {
   if (-not (Test-Path -LiteralPath $migrationScriptPath -PathType Leaf)) {
     throw "data migration helper is missing: $migrationScriptPath"
   }
   $powershellPath = Join-Path $PSHOME 'powershell.exe'
+  $migrationSourcePath = if (Test-Path -LiteralPath $backupPath -PathType Container) { $backupPath } else { $dataPath }
+  $migrationSourceAuthority = if (Test-Path -LiteralPath $backupPath -PathType Container) {
+    'relay-backup-authority'
+  } elseif (Test-Path -LiteralPath $sourceAppExe -PathType Leaf) {
+    'current-install-authority'
+  } else {
+    'untrusted-residual'
+  }
   $arguments = @(
     '-NoProfile',
     '-NonInteractive',
     '-ExecutionPolicy', 'Bypass',
     '-File', $migrationScriptPath,
     '-Mode', $Mode,
-    '-SourceDataPath', $backupPath,
-    '-SourceAuthority', 'relay-backup-authority',
-    '-SourceInstallDir', $normalizedInstallDir,
+    '-SourceDataPath', $migrationSourcePath,
+    '-SourceAuthority', $migrationSourceAuthority,
+    '-SourceInstallDir', $normalizedSourceInstallDir,
+    '-TargetInstallDir', $normalizedTargetInstallDir,
     '-InstallationRecordPath', $installationRecordPath,
     '-LegacyRuntimeHomePath', $legacyRuntimeHomePath,
     '-TargetUserDataPath', $targetUserDataPath,
@@ -140,14 +275,15 @@ function Wait-MemmyProcessExit([int]$ProcessId, [int]$TimeoutSeconds) {
 }
 
 function Get-MemmyInstallProcesses {
-  $expectedPath = [System.IO.Path]::GetFullPath($appExe)
+  $expectedPaths = @($sourceAppExe, $appExe) |
+    ForEach-Object { [System.IO.Path]::GetFullPath($_) } |
+    Select-Object -Unique
   foreach ($process in @(Get-Process -Name 'Memmy' -ErrorAction SilentlyContinue)) {
     try {
-      if ([string]::Equals(
-          [System.IO.Path]::GetFullPath($process.Path),
-          $expectedPath,
-          [System.StringComparison]::OrdinalIgnoreCase
-        )) {
+      $processPath = [System.IO.Path]::GetFullPath($process.Path)
+      if ($expectedPaths | Where-Object {
+          [string]::Equals($_, $processPath, [System.StringComparison]::OrdinalIgnoreCase)
+        }) {
         $process
       }
     } catch {
@@ -192,9 +328,13 @@ function Assert-MemmySameVolume([string]$Source, [string]$Destination) {
 
 function Move-MemmyDirectory([string]$Source, [string]$Destination) {
   Assert-MemmySameVolume -Source $Source -Destination $Destination
+  Assert-MemmyNoReparsePath $Source 'directory move source'
+  Assert-MemmyNoReparsePath $Destination 'directory move destination'
   New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Destination) | Out-Null
   for ($attempt = 1; $attempt -le 120; $attempt++) {
     try {
+      Assert-MemmyNoReparsePath $Source 'directory move source'
+      Assert-MemmyNoReparsePath $Destination 'directory move destination'
       [System.IO.Directory]::Move($Source, $Destination)
       return
     } catch {
@@ -218,7 +358,7 @@ function Write-MemmyRelayState {
     }
   }
   $state = [ordered]@{
-    schemaVersion = 3
+    schemaVersion = 4
     phase = $relayPhase
     stateUpdatedAtUtc = [DateTime]::UtcNow.ToString('O')
     relayPid = $PID
@@ -226,7 +366,9 @@ function Write-MemmyRelayState {
     installerPid = $installerPid
     installerStartedAtUtc = $installerStartedAtUtc
     installerPath = $normalizedInstallerPath
-    installDir = $normalizedInstallDir
+    installDir = $normalizedSourceInstallDir
+    sourceInstallDir = $normalizedSourceInstallDir
+    targetInstallDir = $normalizedTargetInstallDir
     workDir = [System.IO.Path]::GetFullPath($WorkDir).TrimEnd('\')
     backupRoot = $backupRoot
     migrationStatePath = $migrationStatePath
@@ -262,7 +404,7 @@ function Restore-MemmyData {
     Move-MemmyDirectory -Source $dataPath -Destination $installerDataPath
     Write-MemmyUpgradeLog "preserved installer-created data at $installerDataPath"
   }
-  New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+  New-Item -ItemType Directory -Force -Path $normalizedSourceInstallDir | Out-Null
   Move-MemmyDirectory -Source $backupPath -Destination $dataPath
   if (-not (Test-Path -LiteralPath $dataPath -PathType Container)) {
     throw "restored data directory is unavailable: $dataPath"
@@ -298,7 +440,7 @@ function Start-MemmyInstalledApp {
     Write-MemmyUpgradeLog "app executable is unavailable for reopen: $appExe"
     return
   }
-  Start-Process -FilePath $appExe -WorkingDirectory $InstallDir -WindowStyle Normal
+  Start-Process -FilePath $appExe -WorkingDirectory $normalizedTargetInstallDir -WindowStyle Normal
   Write-MemmyUpgradeLog "started app $appExe"
 }
 
@@ -341,7 +483,13 @@ function Schedule-MemmyStagingCleanup {
 
 try {
   New-Item -ItemType Directory -Force -Path $WorkDir | Out-Null
-  Write-MemmyUpgradeLog "relay starting installer=$InstallerPath installDir=$InstallDir expected=$ExpectedVersion reopenFallback=$ReopenAfterInstall"
+  Write-MemmyUpgradeLog "relay starting installer=$InstallerPath sourceInstallDir=$SourceInstallDir targetInstallDir=$TargetInstallDir mode=$InstallerMode expected=$ExpectedVersion reopenFallback=$ReopenAfterInstall"
+  Assert-MemmyRelaySourceIsSafe
+  Assert-MemmyRelocationTargetIsSafe
+  if ((Test-MemmySameOrDescendantPath $normalizedInstallerPath $normalizedSourceInstallDir) -or
+      (Test-MemmySameOrDescendantPath $normalizedInstallerPath $normalizedTargetInstallDir)) {
+    throw 'staged installer must be outside both source and target installation directories'
+  }
   $roamingMarkerPath = Join-Path $targetUserDataPath 'prepared-required-update.json'
   $legacyMarkerPath = Join-Path $dataPath 'Memmy\prepared-required-update.json'
   $markerPath = if (Test-Path -LiteralPath $roamingMarkerPath -PathType Leaf) { $roamingMarkerPath } else { $legacyMarkerPath }
@@ -353,6 +501,7 @@ try {
   Write-MemmyUpgradeLog "relay ready reopen=$resolvedReopenAfterInstall"
   Wait-MemmyProcessExit -ProcessId $OriginalInstallerPid -TimeoutSeconds 120
   Wait-MemmyInstallProcessesExit -TimeoutSeconds 20
+  Assert-MemmyRelaySourceIsSafe
 
   if (Test-Path -LiteralPath $dataPath -PathType Container) {
     if (Test-Path -LiteralPath $backupRoot) {
@@ -378,14 +527,27 @@ try {
     Write-MemmyUpgradeLog "data migration Prepare failed safely; continuing installation without migration: $migrationFailure"
   }
 
-  $arguments = @('/S', '--updated', '--memmy-upgrade-relayed', '/currentuser', ('/D=' + $InstallDir))
+  # Both visible and silent relay children are upgrades. Keeping --updated for the visible child
+  # makes electron-builder preserve the existing shortcuts and launch proxy while the old
+  # installation is removed. /S controls visibility independently.
+  $arguments = @('--updated', '--memmy-upgrade-relayed', '/currentuser', ('/D=' + $normalizedTargetInstallDir))
+  if ($InstallerMode -eq 'Silent') {
+    $arguments = @('/S') + $arguments
+  }
   $env:MEMMY_UPGRADE_WORK_DIR = $WorkDir
   $env:MEMMY_UPGRADE_BACKUP_ROOT = $backupRoot
   $env:MEMMY_UPGRADE_REOPEN_AFTER_INSTALL = $resolvedReopenAfterInstall
-  Write-MemmyUpgradeLog "child installer context workDir=$env:MEMMY_UPGRADE_WORK_DIR backupRoot=$env:MEMMY_UPGRADE_BACKUP_ROOT reopen=$env:MEMMY_UPGRADE_REOPEN_AFTER_INSTALL"
+  $env:MEMMY_UPGRADE_SOURCE_INSTALL_DIR = $normalizedSourceInstallDir
+  $env:MEMMY_UPGRADE_TARGET_INSTALL_DIR = $normalizedTargetInstallDir
+  Write-MemmyUpgradeLog "child installer context workDir=$env:MEMMY_UPGRADE_WORK_DIR backupRoot=$env:MEMMY_UPGRADE_BACKUP_ROOT source=$env:MEMMY_UPGRADE_SOURCE_INSTALL_DIR target=$env:MEMMY_UPGRADE_TARGET_INSTALL_DIR reopen=$env:MEMMY_UPGRADE_REOPEN_AFTER_INSTALL mode=$InstallerMode"
   $relayPhase = 'installer-starting'
   Write-MemmyRelayState
-  $installerProcess = Start-Process -FilePath $InstallerPath -ArgumentList $arguments -PassThru -WindowStyle Hidden
+  Assert-MemmyRelocationTargetIsSafe -AllowPreparedMigrationTarget:$migrationPrepared
+  if ($InstallerMode -eq 'Interactive') {
+    $installerProcess = Start-Process -FilePath $InstallerPath -ArgumentList $arguments -PassThru -WindowStyle Normal
+  } else {
+    $installerProcess = Start-Process -FilePath $InstallerPath -ArgumentList $arguments -PassThru -WindowStyle Hidden
+  }
   $installerProcess.WaitForExit()
   $installerExit = if ($null -eq $installerProcess.ExitCode) { 1 } else { $installerProcess.ExitCode }
   Write-MemmyUpgradeLog "installer exit $installerExit"

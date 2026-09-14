@@ -1,0 +1,11 @@
+name: memmy
+version: 2.1.0
+description: Thin Hermes HTTP adapter for the standalone Memmy Memory service.
+author: MemTensor
+pip_dependencies: []
+requires_env: []
+hooks:
+  - on_turn_start
+  - on_session_end
+  - on_pre_compress
+  - on_delegation

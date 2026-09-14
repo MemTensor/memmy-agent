@@ -66,6 +66,7 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
       | "workspace"
       | "profileLabel"
       | "userId"
+      | "retrievalLayers"
       | "getAnalyticsClientId"
       | "getAnalyticsUserId"
       | "getAnalyticsUserMode"
@@ -74,6 +75,7 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
     workspace: string | null;
     profileLabel: string | null;
     userId: string | null;
+    retrievalLayers: NonNullable<MemmyMemoryHookOptions["retrievalLayers"]> | null;
     getAnalyticsClientId: (() => string | null | undefined) | null;
     getAnalyticsUserId: (() => string | null | undefined) | null;
     getAnalyticsUserMode: (() => string | null | undefined) | null;
@@ -97,6 +99,7 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
       profileId: options.profileId ?? PROFILE_ID,
       profileLabel: options.profileLabel ?? PROFILE_ID,
       userId: options.userId ?? null,
+      retrievalLayers: options.retrievalLayers ?? null,
       getAnalyticsClientId: options.getAnalyticsClientId ?? null,
       getAnalyticsUserId: options.getAnalyticsUserId ?? null,
       getAnalyticsUserMode: options.getAnalyticsUserMode ?? null,
@@ -145,11 +148,13 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
     const sessionKey = this.sessionKeyFromContext(ctx);
     if (!sessionKey) return;
     try {
-      await this.prepareL3Session(ctx, sessionKey, false);
+      await this.ensureSession(ctx, sessionKey);
+      const state = this.sessionStateBySessionKey.get(sessionKey);
+      if (state?.protocol === "v2") await this.loadL3Context(sessionKey, state);
       this.clearMemoryUnavailable(sessionKey);
     } catch (error) {
       this.rememberUnavailableL3(sessionKey);
-      this.warnMemoryUnavailable(sessionKey, "session-start", error);
+      this.warnMemoryUnavailable(sessionKey, "recall", error);
     }
   }
 
@@ -157,7 +162,7 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
     const sessionKey = this.sessionKeyFromContext(ctx);
     if (!sessionKey) return;
     try {
-      await this.prepareL3Session(ctx, sessionKey, false);
+      await this.ensureSession(ctx, sessionKey);
       this.clearMemoryUnavailable(sessionKey);
     } catch (error) {
       this.warnMemoryUnavailable(sessionKey, "session-start", error);
@@ -190,7 +195,12 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
       const events = this.eventsFor(sessionKey, ctx);
       this.analytics.track(events.turnStarted, this.turnAnalyticsParams(turn));
 
-      const searchBase = this.memoryOpParams(turn, MEMORY_OP_MODES.turnStart, "all", sessionKey, ctx);
+      const retrievalLayerLabel = this.options.retrievalLayers === null
+        ? "all"
+        : this.options.retrievalLayers.length > 0
+          ? this.options.retrievalLayers.join("+")
+          : "none";
+      const searchBase = this.memoryOpParams(turn, MEMORY_OP_MODES.turnStart, retrievalLayerLabel, sessionKey, ctx);
       this.analytics.track(events.searchStarted, searchBase);
       const searchStartedAt = Date.now();
       try {
@@ -198,6 +208,7 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
           ...this.requestEnvelope(sessionKey, ctx),
           sessionId,
           query: userText || "(conversation continued)",
+          layers: this.options.retrievalLayers ?? undefined,
         }));
         turn.episodeId = stringOrUndefined(response?.episodeId);
         turn.sourceMemoryIds = arrayOfStrings(response?.sourceMemoryIds);
@@ -206,7 +217,7 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
         this.injectMemoryContext(messages, response?.injectedContext);
         turn.messageStartIndex = messages.length;
         this.analytics.track(events.searchSucceeded, {
-          ...this.memoryOpParams(turn, MEMORY_OP_MODES.turnStart, "all", sessionKey, ctx),
+          ...this.memoryOpParams(turn, MEMORY_OP_MODES.turnStart, retrievalLayerLabel, sessionKey, ctx),
           duration_ms: elapsedMs(searchStartedAt),
           success: true,
           hit_count: hitCountFromSearchResponse(response),
@@ -342,7 +353,6 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
           throughL1MemoryId: head.throughL1MemoryId,
         });
       }
-      await this.loadL3Context(sessionKey, state);
       this.clearMemoryUnavailable(sessionKey);
     } catch (error) {
       this.warnMemoryUnavailable(sessionKey, "recall", error);
@@ -564,19 +574,22 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
     return resolved;
   }
 
-  private async prepareL3Session(ctx: AgentHookContext, sessionKey: string, force: boolean): Promise<void> {
-    await this.ensureSession(ctx, sessionKey);
-    const state = this.sessionStateBySessionKey.get(sessionKey);
-    if (!state || state.protocol !== "v2") return;
-    if (!force && state.l3Cache.loadedAt) return;
-    await this.loadL3Context(sessionKey, state);
-  }
-
   private async loadL3Context(sessionKey: string, state: MemmyMemorySessionState): Promise<void> {
     const response = await this.client.l3WorldModelContext(
       state.memorySessionId,
       this.l3Envelope(sessionKey, state),
     );
+    const loadedAt = new Date().toISOString();
+    const current = state.l3Cache;
+    if (
+      response.memoryId !== null
+      && current.status === "loaded"
+      && current.memoryId === response.memoryId
+      && current.memoryVersion === response.memoryVersion
+    ) {
+      state.l3Cache = { ...current, loadedAt };
+      return;
+    }
     state.l3Cache = {
       sessionId: state.memorySessionId,
       projectId: response.projectId,
@@ -585,7 +598,7 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
       memoryVersion: response.memoryVersion,
       renderedContext: response.renderedContext,
       sourceMemoryIds: [...response.sourceMemoryIds],
-      loadedAt: new Date().toISOString(),
+      loadedAt,
     };
   }
 

@@ -44,6 +44,7 @@ function createService(): PluginService {
     list: vi.fn(() => [plugin]),
     get: vi.fn(() => plugin),
     readUi: vi.fn(async (_id, slot) => `<main>${slot}</main>`),
+    openArtifact: vi.fn(async () => ({ path: new URL(import.meta.url).pathname, name: "report.txt", mediaType: "text/plain" })),
     install: vi.fn(async () => plugin),
     update: vi.fn(async () => plugin),
     configure: vi.fn(() => plugin),
@@ -106,6 +107,20 @@ describe("plugin routes", () => {
     expect(response.json()).toEqual({ html: "<main>renderer</main>" });
     expect(plugins.readUi).toHaveBeenCalledWith(plugin.id, "renderer");
     expect((await app.inject({ method: "GET", url: `/api/v1/plugins/${plugin.id}/ui/surface` })).json()).toEqual({ html: "<main>surface</main>" });
+  });
+
+  it("serves Host-validated plugin artifacts for preview and download", async () => {
+    const plugins = createService();
+    app = createApp(plugins);
+
+    const preview = await app.inject({ method: "GET", url: `/api/v1/plugins/${plugin.id}/artifacts/00000000-0000-4000-8000-000000000000/preview` });
+    const download = await app.inject({ method: "GET", url: `/api/v1/plugins/${plugin.id}/artifacts/00000000-0000-4000-8000-000000000000/download` });
+
+    expect(preview.statusCode).toBe(200);
+    expect(preview.headers["content-disposition"]).toContain("inline");
+    expect(preview.headers["content-security-policy"]).toContain("sandbox");
+    expect(download.headers["content-disposition"]).toContain("attachment");
+    expect(plugins.openArtifact).toHaveBeenCalledTimes(2);
   });
 
   it("streams capability events and returns only the terminal event", async () => {

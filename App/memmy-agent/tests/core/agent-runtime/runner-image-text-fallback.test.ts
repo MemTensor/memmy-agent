@@ -215,14 +215,16 @@ describe("AgentRunner account image-to-text fallback", () => {
     expect(provider.imageCalls).toHaveLength(0);
   });
 
-  it("treats an unknown exact model as text-only and never calls the provider", async () => {
+  // An unknown BYOK model is deferred to the provider instead; see
+  // tests/core/agent-runtime/runner-byok-image-input.test.ts.
+  it("treats a catalog text-only model as text-only and never calls the provider", async () => {
     const provider = new AccountFallbackProvider([], []);
 
     const result = await new AgentRunner(provider).run(new AgentRunSpec({
       initialMessages: [imageMessage()],
       provider,
-      model: "unknown-vision-model",
-      actualModelContext: modelContext("byok", "unknown-vision-model", "custom"),
+      model: "deepseek-v4-pro",
+      actualModelContext: modelContext("byok", "deepseek-v4-pro", "custom"),
     }));
 
     expect(result.response).toMatchObject({
@@ -231,7 +233,7 @@ describe("AgentRunner account image-to-text fallback", () => {
       errorCategory: "image_input_unsupported",
       errorShouldRetry: false,
       actualProvider: "custom",
-      actualModel: "unknown-vision-model",
+      actualModel: "deepseek-v4-pro",
     });
     expect(provider.mainCalls).toHaveLength(0);
     expect(provider.imageCalls).toHaveLength(0);

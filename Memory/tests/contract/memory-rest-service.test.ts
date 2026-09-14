@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { canonicalJson, sha256Hex } from "@memmy/local-api-contracts";
+import { canonicalJson, sha256Hex } from "../../src/contracts/index.js";
 import {
   DEFAULT_MEMMY_CONFIG,
   MemoryDb,
@@ -47,6 +47,31 @@ async function withServerClosed(
 }
 
 describe("MemoryService / REST contract", () => {
+
+  it("exposes the current embedding model through a read-scoped inference endpoint", async () => {
+    const seenTexts: string[] = [];
+    const seenRoles: Array<"query" | "document" | undefined> = [];
+    const { db, service } = createTestService({ embedder: createCapturingEmbedder(seenTexts, seenRoles) });
+    const server = createMemoryHttpServer({ service });
+    await withServerClosed(server, async () => {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("expected TCP address");
+      const response = await fetch(`http://127.0.0.1:${address.port}/api/v1/models/embedding/infer`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ texts: ["section", "evidence"], role: "document" })
+      });
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({
+        embeddings: [[1, 0, 0], [0, 1, 0]],
+        model: { provider: "local", model: "capturing-test-embedding", mode: "local", dimension: 3 }
+      });
+      expect(seenTexts).toEqual(["section", "evidence"]);
+      expect(seenRoles).toEqual(["document", "document"]);
+    });
+    db.close();
+  });
 
   it("uses the caller timezone for offset-less memory times and rejects invalid zones", async () => {
     const { db, service } = createTestService();
@@ -177,7 +202,7 @@ describe("MemoryService / REST contract", () => {
       const client = new MemoryRestClient({ endpoint: `http://127.0.0.1:${address.port}` });
       const namespace = {
         source: "codex",
-        profileId: "default",
+        profileId: "matrix-profile",
         sessionKey: "codex:rest-v2",
         userId: "rest-v2-user"
       } as const;
@@ -192,6 +217,7 @@ describe("MemoryService / REST contract", () => {
         workspaceHostId: "c".repeat(64)
       }) as { sessionId: string; projectId: string };
       expect(opened.projectId).toMatch(/^ws_/u);
+      expect(new Repositories(db.db).runtime.getSession(opened.sessionId)?.profileId).toBe("matrix-profile");
       const envelope = {
         requestId: "91ae733d-25af-4ab0-8cbd-49c447b34d98",
         adapterId: "codex-memory",
@@ -316,6 +342,7 @@ describe("MemoryService / REST contract", () => {
       sessionId: opened.sessionId,
       turnId: "cursor-http-turn",
       query: "Continue the hook lifecycle repair",
+      layers: ["L2"],
       contextHints: {
         agentIdentity: "cursor-agent",
         hostProvider: "cursor"
@@ -361,6 +388,9 @@ describe("MemoryService / REST contract", () => {
       tool_name: "memory_search",
       retrieval_mode: "turn_start"
     });
+    expect(db.db.prepare(
+      "SELECT layers_json FROM recall_events WHERE id = ?"
+    ).get(started.searchEventId)).toEqual({ layers_json: '["L2"]' });
     const duplicateStartResponse = await fetch(baseUrl + "/turns/start", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -475,7 +505,7 @@ describe("MemoryService / REST contract", () => {
         answer: "embedding jobs should drain after REST turn complete"
       })
     });
-    const complete = await completeResponse.json() as { l1MemoryId: string };
+    const complete = await completeResponse.json() as { episodeId: string; l1MemoryId: string };
     expect(completeResponse.status).toBe(200);
 
     const closeResponse = await fetch(
@@ -487,6 +517,14 @@ describe("MemoryService / REST contract", () => {
       }
     );
     expect(closeResponse.status).toBe(200);
+    await expect(closeResponse.json()).resolves.toMatchObject({
+      ok: true,
+      sessionId: session.sessionId,
+      status: "closed",
+      closedEpisodeIds: [complete.episodeId],
+      changeSeq: expect.any(Number),
+      syncCursor: expect.any(String)
+    });
 
     await waitFor(() => {
       const row = db.db.prepare(

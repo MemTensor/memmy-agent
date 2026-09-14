@@ -14,6 +14,12 @@ import { Ajv } from "ajv";
 import type { PluginRegistry } from "../adapters/outbound/plugin-registry/index.js";
 import type { PluginArtifactManager } from "../adapters/outbound/plugin-artifact/index.js";
 import type { PluginRuntimeHost } from "../adapters/outbound/plugin-runtime/index.js";
+import { noopPluginSkillManager, type PluginSkillManager } from "../adapters/outbound/plugin-skill/index.js";
+import {
+  createPluginLocalArtifactService,
+  type HostedPluginArtifact,
+  type PluginLocalArtifactService
+} from "./plugin-local-artifact-service.js";
 import type { PluginRecord, PluginRepository } from "../infrastructure/app-state-store/repositories/plugin-repo.js";
 import type { SecretStore } from "../infrastructure/app-state-store/index.js";
 
@@ -24,6 +30,7 @@ export interface PluginService {
   list(): InstalledPlugin[];
   get(id: string): InstalledPlugin;
   readUi(id: string, slot: PluginUiSlot): Promise<string>;
+  openArtifact(id: string, token: string): Promise<HostedPluginArtifact>;
   install(pluginId: string, version?: string): Promise<InstalledPlugin>;
   update(id: string, version?: string): Promise<InstalledPlugin>;
   configure(id: string, input: UpdatePluginConfigInput): InstalledPlugin;
@@ -44,13 +51,35 @@ export interface CreatePluginServiceOptions {
   registry: PluginRegistry;
   runtimeHost: PluginRuntimeHost;
   artifactManager: PluginArtifactManager;
+  skillManager?: PluginSkillManager;
+  localArtifactService?: PluginLocalArtifactService;
 }
 
 export function createPluginService(options: CreatePluginServiceOptions): PluginService {
+  const skillManager = options.skillManager ?? noopPluginSkillManager;
+  const localArtifacts = options.localArtifactService ?? createPluginLocalArtifactService();
   const required = (id: string) => {
     const plugin = options.repository.get(id);
     if (!plugin) throw pluginError("plugin_unavailable", `Plugin not found: ${id}`);
     return plugin;
+  };
+  const activateContributions = async (plugin: PluginRecord, secrets: Readonly<Record<string, string>>) => {
+    await options.runtimeHost.activate(plugin, secrets);
+    try {
+      await skillManager.activate(plugin);
+    } catch (error) {
+      await options.runtimeHost.deactivate(plugin.id).catch(() => undefined);
+      await skillManager.deactivate(plugin.id).catch(() => undefined);
+      throw error;
+    }
+  };
+  const deactivateContributions = async (pluginId: string) => {
+    const results = await Promise.allSettled([
+      options.runtimeHost.deactivate(pluginId),
+      skillManager.deactivate(pluginId)
+    ]);
+    const failure = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+    if (failure) throw failure.reason;
   };
 
   return {
@@ -67,6 +96,11 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
       const entry = plugin.manifest.ui?.[slot]?.entry;
       if (!entry) throw pluginError("plugin_unavailable", `Plugin has no UI ${slot}: ${id}`);
       return options.artifactManager.readTextFile(plugin, entry, 512 * 1024);
+    },
+
+    async openArtifact(id, token) {
+      required(id);
+      return localArtifacts.open(id, token);
     },
 
     async install(pluginId, version) {
@@ -135,7 +169,7 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
       try {
         validateConfig(draft, draft.config);
         const secrets = pendingApproval ? {} : readSecrets(draft, options.secretStore);
-        if (previous.state === "active") await options.runtimeHost.deactivate(id);
+        if (previous.state === "active") await deactivateContributions(id);
         let updated = options.repository.save({
           manifest,
           state: draft.state,
@@ -143,13 +177,13 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
         });
         updated = options.repository.setApprovedPermissions(id, approvedPermissions);
         if (previous.state === "active" && !pendingApproval) {
-          await options.runtimeHost.activate(updated, secrets);
+          await activateContributions(updated, secrets);
           updated = options.repository.setState(id, "active");
         }
         if (artifact.rootPath !== previous.rootPath) await options.artifactManager.remove(previous);
         return publicPlugin(updated);
       } catch (error) {
-        await options.runtimeHost.deactivate(id).catch(() => undefined);
+        await deactivateContributions(id).catch(() => undefined);
         let restored = options.repository.save({
           manifest: previous.manifest,
           state: previous.state === "active" ? "disabled" : previous.state,
@@ -161,7 +195,7 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
         let rollbackError: unknown;
         if (previous.state === "active") {
           try {
-            await options.runtimeHost.activate(restored, readSecrets(restored, options.secretStore));
+            await activateContributions(restored, readSecrets(restored, options.secretStore));
             options.repository.setState(id, "active");
           } catch (restoreError) {
             rollbackError = restoreError;
@@ -203,7 +237,7 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
       if (plugin.state === "active" && !samePermissions(approved, plugin.approvedPermissions)) {
         options.repository.setState(id, "disabling");
         try {
-          await options.runtimeHost.deactivate(id);
+          await deactivateContributions(id);
           options.repository.setState(id, "disabled");
         } catch (error) {
           options.repository.setState(id, "failed", errorMessage(error));
@@ -227,7 +261,7 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
       const secrets = readSecrets(plugin, options.secretStore);
       options.repository.setState(id, "enabling");
       try {
-        await options.runtimeHost.activate(plugin, secrets);
+        await activateContributions(plugin, secrets);
         return publicPlugin(options.repository.setState(id, "active"));
       } catch (error) {
         options.repository.setState(id, "failed", errorMessage(error));
@@ -242,7 +276,7 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
       }
       options.repository.setState(id, "disabling");
       try {
-        await options.runtimeHost.deactivate(id);
+        await deactivateContributions(id);
         return publicPlugin(options.repository.setState(id, "disabled"));
       } catch (error) {
         options.repository.setState(id, "failed", errorMessage(error));
@@ -257,6 +291,8 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
         plugin = required(id);
       }
       await options.artifactManager.remove(plugin);
+      await skillManager.deactivate(id);
+      localArtifacts.revokePlugin(id);
       for (const key of declaredSecretKeys(plugin.manifest.permissions)) {
         options.secretStore.delete(secretRef(id, key));
       }
@@ -281,7 +317,9 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
             outcome = "error";
             errorCode = event.code;
           }
-          yield event;
+          yield event.type === "artifact"
+            ? { ...event, artifact: await localArtifacts.host(plugin, event.artifact) }
+            : event;
         }
       } catch (error) {
         outcome = "error";
@@ -322,7 +360,7 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
         try {
           if (!hasAllPermissions(plugin)) throw new Error("Plugin permissions have changed");
           validateConfig(plugin, plugin.config);
-          await options.runtimeHost.activate(plugin, readSecrets(plugin, options.secretStore));
+          await activateContributions(plugin, readSecrets(plugin, options.secretStore));
         } catch (error) {
           options.repository.setState(plugin.id, "failed", errorMessage(error));
         }
@@ -332,7 +370,7 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
     async shutdown() {
       await Promise.allSettled(options.repository.list()
         .filter((plugin) => plugin.state === "active" || plugin.state === "enabling")
-        .map((plugin) => options.runtimeHost.deactivate(plugin.id)));
+        .map((plugin) => deactivateContributions(plugin.id)));
     }
   };
 }

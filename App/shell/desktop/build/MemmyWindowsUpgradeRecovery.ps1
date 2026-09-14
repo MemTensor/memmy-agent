@@ -226,6 +226,11 @@ function Invoke-MemmyMigrationRecovery(
   } else {
     Split-Path -Parent $migrationSourcePath
   }
+  $migrationTargetInstallDir = if ($migrationState.targetInstallDir) {
+    [string]$migrationState.targetInstallDir
+  } else {
+    $normalizedInstallDir
+  }
 
   $powershellPath = Join-Path $PSHOME 'powershell.exe'
   & $powershellPath @(
@@ -237,6 +242,7 @@ function Invoke-MemmyMigrationRecovery(
     '-SourceDataPath', $migrationSourcePath,
     '-SourceAuthority', $migrationSourceAuthority,
     '-SourceInstallDir', $migrationSourceInstallDir,
+    '-TargetInstallDir', $migrationTargetInstallDir,
     '-LegacyRuntimeHomePath', $expectedLegacyRuntimeHomePath,
     '-TargetUserDataPath', $expectedTargetUserDataPath,
     '-TargetRuntimeHomePath', $expectedTargetRuntimeHomePath,
@@ -355,10 +361,30 @@ try {
     throw "recovery state has an unsupported phase: $phase"
   }
   $stateInstallDir = Resolve-MemmyNormalizedPath ([string]$state.installDir)
+  $stateSourceInstallDir = $stateInstallDir
+  $stateTargetInstallDir = $stateInstallDir
+  if ([int]$state.schemaVersion -ge 4) {
+    $stateSourceInstallDir = Resolve-MemmyNormalizedPath ([string]$state.sourceInstallDir)
+    $stateTargetInstallDir = Resolve-MemmyNormalizedPath ([string]$state.targetInstallDir)
+    if (-not [string]::Equals($stateInstallDir, $stateSourceInstallDir, [System.StringComparison]::OrdinalIgnoreCase)) {
+      throw "recovery state compatibility install directory does not match sourceInstallDir"
+    }
+    $dataPath = Join-Path $stateSourceInstallDir 'data'
+    $expectedBackupParent = "$stateSourceInstallDir.memmy-upgrade-backup"
+    if (-not $TargetRuntimeHomePathOverride) {
+      $targetInstallRoot = [System.IO.Path]::GetPathRoot($stateTargetInstallDir)
+      $expectedTargetRuntimeHomePath = if ([string]::Equals($targetInstallRoot, 'C:\', [System.StringComparison]::OrdinalIgnoreCase)) {
+        $expectedLegacyRuntimeHomePath
+      } else {
+        Resolve-MemmyNormalizedPath (Join-Path $targetInstallRoot 'MemmyData\.memmy')
+      }
+    }
+  }
   $stateWorkDir = Resolve-MemmyNormalizedPath ([string]$state.workDir)
   $stateInstallerPath = Resolve-MemmyNormalizedPath ([string]$state.installerPath)
   $backupRoot = Resolve-MemmyNormalizedPath ([string]$state.backupRoot)
-  if (-not [string]::Equals($stateInstallDir, $normalizedInstallDir, [System.StringComparison]::OrdinalIgnoreCase)) {
+  if (-not [string]::Equals($stateSourceInstallDir, $normalizedInstallDir, [System.StringComparison]::OrdinalIgnoreCase) -and
+      -not [string]::Equals($stateTargetInstallDir, $normalizedInstallDir, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "recovery state install directory does not match launcher install directory"
   }
   if ([int]$state.schemaVersion -ge 3) {

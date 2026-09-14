@@ -133,7 +133,7 @@ export function createWorkbuddyInsightSampler(input: { root: string }): Onboardi
     sourceId: "workbuddy",
     displayName: "WorkBuddy",
     root: input.root,
-    matchesFile: (name) => name.endsWith(".jsonl"),
+    matchesFile: (name) => name.endsWith(".jsonl") && !/\.jsonl\.bak-/u.test(name),
     shouldParseLine: isPotentialWorkbuddyMessageLine,
     extractMessage: extractWorkbuddySampledMessage
   });
@@ -144,7 +144,7 @@ export function createPiInsightSampler(input: { root: string }): OnboardingInsig
     sourceId: "pi",
     displayName: "Pi",
     root: input.root,
-    matchesFile: (name) => name.endsWith(".jsonl"),
+    matchesFile: (name) => name.endsWith(".jsonl") && !/\.jsonl\.bak-/u.test(name),
     shouldParseLine: (line) => /"type"\s*:\s*"message"/u.test(line),
     extractMessage: extractPiSampledMessage
   });
@@ -155,7 +155,7 @@ export function createQwenworkInsightSampler(input: { root: string }): Onboardin
     sourceId: "qwenwork",
     displayName: "QwenWork",
     root: input.root,
-    matchesFile: (name) => name.endsWith(".jsonl"),
+    matchesFile: (name) => name.endsWith(".jsonl") && !/\.jsonl\.bak-/u.test(name),
     shouldParseLine: (line) => /"type"\s*:\s*"(?:user|assistant|system)"/u.test(line),
     extractMessage: extractQwenworkSampledMessage
   });
@@ -166,7 +166,7 @@ export function createCodexInsightSampler(input: { root: string }): OnboardingIn
     sourceId: "codex",
     displayName: "Codex",
     root: input.root,
-    matchesFile: (name) => name.startsWith("rollout-") && name.endsWith(".jsonl"),
+    matchesFile: (name) => name.startsWith("rollout-") && name.endsWith(".jsonl") && !/\.jsonl\.bak-/u.test(name),
     shouldParseLine: isPotentialCodexMessageLine,
     extractMessage: extractCodexMessage
   });
@@ -177,7 +177,7 @@ export function createClaudeCodeInsightSampler(input: { root: string }): Onboard
     sourceId: "claude_code",
     displayName: "Claude Code",
     root: input.root,
-    matchesFile: (name) => name.endsWith(".jsonl"),
+    matchesFile: (name) => name.endsWith(".jsonl") && !/\.jsonl\.bak-/u.test(name),
     extractMessage: extractClaudeCodeMessage
   });
 }
@@ -188,7 +188,7 @@ export function createHermesInsightSampler(input: { root: string }): OnboardingI
     sourceId: "hermes",
     displayName: "Hermes",
     root: join(input.root, "sessions"),
-    matchesFile: (name) => name.endsWith(".jsonl"),
+    matchesFile: (name) => name.endsWith(".jsonl") && !/\.jsonl\.bak-/u.test(name),
     extractMessage: extractGenericJsonlMessage
   });
 

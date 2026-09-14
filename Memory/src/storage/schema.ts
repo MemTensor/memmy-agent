@@ -1,7 +1,8 @@
 import type Database from "better-sqlite3";
+import { memoryCaptureQaHash, normalizeMemoryCaptureSource } from "../utils/memory-capture-claim.js";
 
-export const SCHEMA_VERSION = 6;
-export const SCHEMA_MIGRATION_ID = "006_l3_world_model";
+export const SCHEMA_VERSION = 7;
+export const SCHEMA_MIGRATION_ID = "007_memory_capture_claims";
 const API_LOG_SOURCE_AGENT_MIGRATION_FROM_VERSION = 2;
 const PROCESSING_TAGS = new Set([
   "摘要排队中",
@@ -468,6 +469,18 @@ const statements = [
     expires_at TEXT
   )`,
 
+  `CREATE TABLE IF NOT EXISTS memory_capture_claims (
+    user_id TEXT NOT NULL,
+    source TEXT NOT NULL,
+    qa_hash TEXT NOT NULL,
+    primary_memory_id TEXT NOT NULL,
+    captured_by TEXT NOT NULL CHECK (captured_by IN ('turn_complete', 'agent_source_scan')),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, source, qa_hash)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_memory_capture_claims_primary_memory
+    ON memory_capture_claims (primary_memory_id)`,
+
   `CREATE TABLE IF NOT EXISTS l3_world_model_project_environment_state (
     user_id TEXT NOT NULL,
     project_id TEXT NOT NULL,
@@ -607,7 +620,7 @@ export function migrate(db: Database.Database): void {
   const hasMemories = tableExists(db, "memories");
   const version = currentSchemaVersion(db);
 
-  if (hasMemories && version !== SCHEMA_VERSION && version !== 2 && version !== 3 && version !== 4 && version !== 5) {
+  if (hasMemories && version !== SCHEMA_VERSION && version !== 2 && version !== 3 && version !== 4 && version !== 5 && version !== 6) {
     throw new Error(
       `Unsupported memory database schema version ${version}; the database was left unchanged`
     );
@@ -653,6 +666,9 @@ export function migrate(db: Database.Database): void {
         migrateLegacyWorldModels(db, now);
         backfillLegacyAdapterHostSessionKeys(db, now);
       }
+      if (hasMemories && version > 0 && version < 7) {
+        backfillMemoryCaptureClaims(db);
+      }
 
       db.prepare(
         `INSERT INTO schema_migrations (id, version, applied_at, checksum)
@@ -665,6 +681,61 @@ export function migrate(db: Database.Database): void {
     })();
   } finally {
     db.pragma(`foreign_keys = ${foreignKeys ? "ON" : "OFF"}`);
+  }
+}
+
+function backfillMemoryCaptureClaims(db: Database.Database): void {
+  const rows = db.prepare(
+    `SELECT raw_turns.user_id,
+            sessions.source,
+            raw_turns.user_text,
+            raw_turns.assistant_text,
+            raw_turns.created_at,
+            memories.id AS primary_memory_id
+     FROM raw_turns
+     INNER JOIN sessions ON sessions.id = raw_turns.session_id
+     INNER JOIN memories ON memories.id = (
+       SELECT candidate.id
+       FROM memories AS candidate
+       WHERE candidate.memory_layer = 'L1'
+         AND candidate.deleted_at IS NULL
+         AND COALESCE(
+           json_extract(candidate.properties_json, '$.internal_info.raw_turn_id'),
+           json_extract(candidate.info_json, '$.raw_turn_id')
+         ) = raw_turns.id
+       ORDER BY COALESCE(
+                  json_extract(candidate.properties_json, '$.internal_info.step_index'),
+                  0
+                ) ASC,
+                candidate.created_at ASC,
+                candidate.id ASC
+       LIMIT 1
+     )
+     WHERE raw_turns.deleted_at IS NULL
+       AND raw_turns.user_text IS NOT NULL
+       AND raw_turns.assistant_text IS NOT NULL
+     ORDER BY raw_turns.created_at ASC, raw_turns.id ASC`
+  ).all() as Array<{
+    user_id: string;
+    source: string;
+    user_text: string;
+    assistant_text: string;
+    created_at: string;
+    primary_memory_id: string;
+  }>;
+  const insert = db.prepare(
+    `INSERT OR IGNORE INTO memory_capture_claims (
+       user_id, source, qa_hash, primary_memory_id, captured_by, created_at
+     ) VALUES (?, ?, ?, ?, 'turn_complete', ?)`
+  );
+  for (const row of rows) {
+    insert.run(
+      row.user_id,
+      normalizeMemoryCaptureSource(row.source),
+      memoryCaptureQaHash(row.user_text, row.assistant_text),
+      row.primary_memory_id,
+      row.created_at
+    );
   }
 }
 

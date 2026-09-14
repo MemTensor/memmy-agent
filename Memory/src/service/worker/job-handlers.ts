@@ -536,6 +536,14 @@ export function classifyProcessingError(error: unknown): {
   if (/trace payload is missing|memory content is missing|corrupt|malformed memory/.test(normalized)) {
     return { code: "memory_corrupt", retryAction: "none" };
   }
+  if (error instanceof ModelHttpError && error.httpStatus === 400 &&
+    /maximum.{0,40}(?:input|context).{0,40}(?:length|tokens?)|input.{0,40}(?:too long|token limit)|too many tokens/i.test(message)) {
+    return { code: "model_input_too_long", retryAction: "none" };
+  }
+  if (error instanceof ModelHttpError && error.httpStatus >= 400 && error.httpStatus < 500 &&
+    error.httpStatus !== 408 && error.httpStatus !== 429) {
+    return { code: "invalid_model_request", retryAction: "none" };
+  }
   if (/timeout|timed out|network|connect|temporar|rate.?limit|\b429\b|\b5\d\d\b/.test(normalized)) {
     return { code: "transient_provider_error", retryAction: "retry" };
   }

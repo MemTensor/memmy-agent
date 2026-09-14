@@ -6,7 +6,7 @@ import { appActions, type AppAction } from "../state/app-actions.js";
 
 /** Contract for persist login mode selection input. */
 export interface PersistLoginModeSelectionInput {
-  configClient?: Pick<ConfigClient, "updateSettings" | "updateOnboarding">
+  configClient?: Pick<ConfigClient, "updateSettings" | "updateOnboarding" | "getModelConfig">
     & Partial<Pick<ConfigClient, "getTokenUsage">>;
   dispatch: Dispatch<AppAction>;
   userMode: Extract<AppSettingsDto["userMode"], "account" | "byok">;
@@ -17,6 +17,9 @@ export interface PersistLoginModeSelectionInput {
 export async function persistLoginModeSelection(input: PersistLoginModeSelectionInput): Promise<void> {
   const settingsPatch = { userMode: input.userMode };
   const savedSettings = await saveSettingsPatch(input.configClient, settingsPatch);
+  const modelConfig = input.userMode === "account"
+    ? await requireCanonicalModelConfig(input.configClient)
+    : null;
 
   if (input.userMode === "account" && input.configClient?.getTokenUsage) {
     try {
@@ -30,6 +33,7 @@ export async function persistLoginModeSelection(input: PersistLoginModeSelection
   }
 
   input.dispatch(appActions.settingsUpdated(savedSettings));
+  if (modelConfig) input.dispatch(appActions.modelConfigUpdated(modelConfig));
 
   if (!input.onboarding) {
     return;
@@ -37,6 +41,14 @@ export async function persistLoginModeSelection(input: PersistLoginModeSelection
 
   const savedOnboarding = await saveOnboardingPatch(input.configClient, input.onboarding);
   input.dispatch(appActions.onboardingUpdated(savedOnboarding));
+}
+
+/** Loads the post-login canonical model catalog required before account-mode rendering. */
+async function requireCanonicalModelConfig(
+  configClient: PersistLoginModeSelectionInput["configClient"]
+) {
+  if (!configClient) throw new Error("Config client is unavailable after account login");
+  return configClient.getModelConfig();
 }
 
 /** Writes save settings patch. */

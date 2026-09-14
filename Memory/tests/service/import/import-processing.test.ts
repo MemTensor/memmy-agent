@@ -430,7 +430,7 @@ describe("MemoryService / import / processing", () => {
     db.close();
   });
 
-  it("sanitizes provider failures and retries only the failed summary stage", async () => {
+  it("sanitizes deterministic provider failures and allows manual summary retry", async () => {
     const root = createTestRoot("mindock-memory-processing-retry-summary-");
     const db = new MemoryDb({ path: join(root, "memory.sqlite") });
     const llmCalls: Array<{
@@ -460,14 +460,12 @@ describe("MemoryService / import / processing", () => {
     const added = addAgentSourceImport(service, namespace, "retry this protected summary", "protected-summary");
 
     await service.runWorkerOnce(1);
-    await service.runWorkerOnce(1);
-    await service.runWorkerOnce(1);
 
     const failed = service.memoryProcessingStatus([added.id], { namespace }).items[0];
     expect(failed).toMatchObject({
       state: "failed",
       stage: "summary",
-      attemptCount: 3,
+      attemptCount: 1,
       retryAction: "open_settings",
       errorCode: "model_configuration"
     });
@@ -556,7 +554,7 @@ describe("MemoryService / import / processing", () => {
     db.close();
   });
 
-  it("persists quota details and derives automatic retry state after reopening", async () => {
+  it("persists terminal quota details and derives queue state after reopening", async () => {
     const root = createTestRoot("mindock-memory-processing-quota-");
     const dbPath = join(root, "memory.sqlite");
     const db = new MemoryDb({ path: dbPath });
@@ -586,13 +584,13 @@ describe("MemoryService / import / processing", () => {
     await service.runWorkerOnce(1);
 
     expect(service.memoryProcessingStatus([added.id], { namespace }).items[0]).toMatchObject({
-      state: "summary_pending",
+      state: "failed",
       stage: "summary",
       attemptCount: 1,
-      retryAction: "retry",
+      retryAction: "open_settings",
       errorCode: "40309",
       errorMessage: detail,
-      autoRetryScheduled: true
+      autoRetryScheduled: false
     });
     db.close();
 
@@ -601,12 +599,12 @@ describe("MemoryService / import / processing", () => {
     expect(repos.processing.get(added.id)).toMatchObject({
       errorCode: "40309",
       errorMessage: detail,
-      autoRetryScheduled: true
+      autoRetryScheduled: false
     });
     reopened.db.prepare(
       `UPDATE evolution_jobs SET status = 'queued' WHERE target_memory_id = ?`
     ).run(added.id);
-    expect(repos.processing.get(added.id)?.autoRetryScheduled).toBe(true);
+    expect(repos.processing.get(added.id)?.autoRetryScheduled).toBe(false);
     reopened.db.prepare(
       `UPDATE evolution_jobs SET status = 'leased' WHERE target_memory_id = ?`
     ).run(added.id);
@@ -643,12 +641,12 @@ describe("MemoryService / import / processing", () => {
     const namespace = { source: "codex", profileId: "default", userId: "html-response-user" };
     const added = addAgentSourceImport(service, namespace, "bad model endpoint", "html-response");
 
-    await runWorkerRounds(service, 3, 1);
+    await service.runWorkerOnce(1);
 
     expect(service.memoryProcessingStatus([added.id], { namespace }).items[0]).toMatchObject({
       state: "failed",
       stage: "summary",
-      attemptCount: 3,
+      attemptCount: 1,
       retryAction: "open_settings",
       errorCode: "model_configuration",
       errorMessage: expect.stringContaining("HTTP 200")

@@ -44,6 +44,7 @@ export function createMemmyMemoryIntegration(
   const hook = new MemmyMemoryHook(client, {
     workspace: options.workspace ?? null,
     userId: resolved.userId,
+    retrievalLayers: resolved.retrievalLayers,
     // Prefer disk config: AgentLoop keeps a cloned in-memory Config that stays
     // stale after desktop switches account ↔ byok and rewrites config.yaml.
     getAnalyticsUserId: () => resolveLiveLoggedInAnalyticsUserId(),

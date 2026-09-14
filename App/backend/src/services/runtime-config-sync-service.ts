@@ -263,6 +263,10 @@ async function hydrateAccountRuntimeConfig(
       reason: "account_projection_has_no_matching_local_session"
     };
   }
+  const projection = await writeAccountModelProjectionToMemmyConfig({
+    cloudUuid: state.cloudUuid,
+    userId: session.profile.userId
+  }, options.memmyConfigPath);
   appStateStore.repositories.bootstrap.updateAppSettings({ userMode: "account" });
   return {
     source: "runtime_config",
@@ -270,8 +274,10 @@ async function hydrateAccountRuntimeConfig(
     provider: "memmy_account",
     model: "agent_chat",
     hydratedAppState: true,
-    wroteConfig: false,
-    reason: "hydrated_account_from_runtime_config"
+    wroteConfig: projection.changed,
+    reason: projection.changed
+      ? "refreshed_account_projection_and_hydrated_account"
+      : "hydrated_account_from_runtime_config"
   };
 }
 

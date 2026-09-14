@@ -77,6 +77,94 @@ describe("BYOK setup save feedback", () => {
     expect(container.querySelector('[role="alert"]')).toBeNull();
   });
 
+  it("defaults a genuinely absent BYOK embedding assignment to the local model", async () => {
+    const catalog = configuredCatalog(false);
+    catalog.modelAssignments.byok.embedding = null;
+    mocks.state = {
+      ...createInitialAppState(),
+      modelConfig: { ...savedModelConfig(catalog), embedding: null }
+    };
+    mocks.clients = createClients(vi.fn(async () => savedModelConfig(catalog)));
+
+    await render(<ApiKeyPage />);
+
+    expect(combobox("apiKey.embeddingMode").textContent).toContain("apiKey.localEmbedding");
+    expect(hasField("apiKey.embeddingModel")).toBe(false);
+    expect(hasField("apiKey.embeddingEndpoint")).toBe(false);
+    expect(hasField("apiKey.embeddingKey")).toBe(false);
+  });
+
+  it("keeps an explicit invalid BYOK embedding assignment in custom mode", async () => {
+    const catalog = configuredCatalog(false);
+    catalog.modelAssignments.byok.embedding = "missing-embedding-preset";
+    mocks.state = {
+      ...createInitialAppState(),
+      modelConfig: { ...savedModelConfig(catalog), embedding: null }
+    };
+    mocks.clients = createClients(vi.fn(async () => savedModelConfig(catalog)));
+
+    await render(<ApiKeyPage />);
+
+    expect(combobox("apiKey.embeddingMode").textContent).toContain("apiKey.customEmbedding");
+    expect(hasField("apiKey.embeddingModel")).toBe(true);
+    expect(button("apiKey.next").disabled).toBe(true);
+  });
+
+  it("saves local embedding without deleting the custom preset or account assignment", async () => {
+    const initialCatalog = catalogWithSharedEmbeddingAssignment();
+    const embeddingPresetId = initialCatalog.modelAssignments.byok.embedding;
+    const server = createCatalogServer(initialCatalog);
+    mocks.state = { ...createInitialAppState(), modelConfig: maskedSavedModelConfig(server.catalog()) };
+    mocks.clients = createClients(server.saveModelCatalog, { getModelConfig: server.getModelConfig });
+    await render(<ApiKeyPage />);
+
+    await selectOption("apiKey.embeddingMode", "apiKey.localEmbedding");
+    await click(button("apiKey.next"));
+
+    const saved = server.catalog();
+    expect(saved.modelAssignments.byok.embedding).toBeNull();
+    expect(saved.modelAssignments.account.embedding).toBe(embeddingPresetId);
+    expect(saved.providers.flatMap((provider) => provider.models).map((model) => model.presetId))
+      .toContain(embeddingPresetId);
+  });
+
+  it("reuses masked custom embedding identity after a partial local-mode save", async () => {
+    const initialCatalog = catalogWithSharedEmbeddingAssignment();
+    const initialEmbeddingEndpointId = assignedCatalogEndpointId(
+      createModelWorkspace(initialCatalog),
+      "byok",
+      "embedding"
+    );
+    const initialEmbeddingPresetId = initialCatalog.modelAssignments.byok.embedding;
+    const initialProviderCount = initialCatalog.providers.length;
+    const initialPresetCount = initialCatalog.providers.flatMap((provider) => provider.models).length;
+    const server = createCatalogServer(initialCatalog);
+    const updateSettings = vi.fn(async (settings: unknown) => settings)
+      .mockRejectedValueOnce(new Error("settings offline"));
+    mocks.state = { ...createInitialAppState(), modelConfig: maskedSavedModelConfig(server.catalog()) };
+    mocks.clients = createClients(server.saveModelCatalog, {
+      getModelConfig: server.getModelConfig,
+      updateSettings
+    });
+    await render(<ApiKeyPage />);
+
+    await selectOption("apiKey.embeddingMode", "apiKey.localEmbedding");
+    await click(button("apiKey.next"));
+    expect(server.catalog().modelAssignments.byok.embedding).toBeNull();
+
+    await selectOption("apiKey.embeddingMode", "apiKey.customEmbedding");
+    await click(button("apiKey.next"));
+
+    const restored = server.catalog();
+    expect(server.saveModelCatalog).toHaveBeenCalledTimes(2);
+    expect(assignedCatalogEndpointId(createModelWorkspace(restored), "byok", "embedding"))
+      .toBe(initialEmbeddingEndpointId);
+    expect(restored.modelAssignments.byok.embedding).toBe(initialEmbeddingPresetId);
+    expect(restored.modelAssignments.account.embedding).toBe(initialEmbeddingPresetId);
+    expect(restored.providers).toHaveLength(initialProviderCount);
+    expect(restored.providers.flatMap((provider) => provider.models)).toHaveLength(initialPresetCount);
+  });
+
   it("shows a first-step conflict, stays put, and allows a successful retry", async () => {
     const firstSave = deferred<ModelProviderConfig>();
     const saveModelCatalog = vi.fn()
@@ -119,8 +207,33 @@ describe("BYOK setup save feedback", () => {
     expect(mocks.dispatch).toHaveBeenCalledWith(appActions.navigate("/api-key-models"));
   });
 
+  it("saves the catalog again when a partial custom save is retried as local", async () => {
+    const initialCatalog = catalogWithSharedEmbeddingAssignment();
+    const server = createCatalogServer(initialCatalog);
+    const updateSettings = vi.fn(async (settings: unknown) => settings)
+      .mockRejectedValueOnce(new Error("settings offline"));
+    mocks.state = { ...createInitialAppState(), modelConfig: maskedSavedModelConfig(server.catalog()) };
+    mocks.clients = createClients(server.saveModelCatalog, {
+      getModelConfig: server.getModelConfig,
+      updateSettings
+    });
+    await render(<ApiKeyPage />);
+
+    await click(button("apiKey.next"));
+    expect(server.saveModelCatalog).toHaveBeenCalledTimes(1);
+    expect(server.catalog().modelAssignments.byok.embedding).not.toBeNull();
+
+    await selectOption("apiKey.embeddingMode", "apiKey.localEmbedding");
+    await click(button("apiKey.next"));
+
+    expect(server.saveModelCatalog).toHaveBeenCalledTimes(2);
+    expect(server.catalog().modelAssignments.byok.embedding).toBeNull();
+    expect(server.catalog().modelAssignments.account.embedding)
+      .toBe(initialCatalog.modelAssignments.account.embedding);
+  });
+
   it("reuses first-step endpoint identities when only the model changes after partial success", async () => {
-    const server = createCatalogServer();
+    const server = createCatalogServer(configuredCatalog(false));
     const updateSettings = vi.fn(async (settings: unknown) => settings)
       .mockRejectedValueOnce(new Error("settings offline"));
     mocks.state = { ...createInitialAppState(), modelConfig: savedModelConfig(server.catalog()) };
@@ -176,7 +289,7 @@ describe("BYOK setup save feedback", () => {
   });
 
   it("invalidates only the changed first-step credential identity", async () => {
-    const server = createCatalogServer();
+    const server = createCatalogServer(configuredCatalog(false));
     const updateSettings = vi.fn(async (settings: unknown) => settings)
       .mockRejectedValueOnce(new Error("settings offline"));
     mocks.state = { ...createInitialAppState(), modelConfig: savedModelConfig(server.catalog()) };
@@ -373,6 +486,31 @@ describe("BYOK setup save feedback", () => {
     return target;
   }
 
+  function combobox(labelText: string): HTMLButtonElement {
+    const label = [...container.querySelectorAll(".select-control__label")]
+      .find((candidate) => candidate.textContent === labelText);
+    const target = label?.parentElement?.querySelector('button[role="combobox"]');
+    if (!(target instanceof HTMLButtonElement)) {
+      throw new Error(`combobox not found: ${labelText}`);
+    }
+    return target;
+  }
+
+  async function selectOption(labelText: string, optionText: string) {
+    await click(combobox(labelText));
+    const target = [...container.querySelectorAll('button[role="option"]')]
+      .find((candidate) => candidate.textContent?.includes(optionText));
+    if (!(target instanceof HTMLButtonElement)) {
+      throw new Error(`option not found: ${optionText}`);
+    }
+    await click(target);
+  }
+
+  function hasField(labelText: string): boolean {
+    return [...container.querySelectorAll("label")]
+      .some((candidate) => candidate.textContent === labelText);
+  }
+
   async function changeField(labelText: string, value: string) {
     const label = [...container.querySelectorAll("label")]
       .find((candidate) => candidate.textContent === labelText);
@@ -515,6 +653,12 @@ function configuredCatalog(includeOptional = true): ModelConfigView {
   });
   workspace = assignCatalogPreset(image.workspace, "byok", "image_generation", image.presetId);
   return catalogFromInput(modelConfigInput(workspace), empty, 1);
+}
+
+function catalogWithSharedEmbeddingAssignment(): ModelConfigView {
+  const catalog = configuredCatalog(false);
+  catalog.modelAssignments.account.embedding = catalog.modelAssignments.byok.embedding;
+  return catalog;
 }
 
 function endpointCount(catalog: ModelConfigView): number {

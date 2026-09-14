@@ -1,4 +1,5 @@
-import type { LlmConfig } from "../config/index.js";
+import { get_encoding } from "tiktoken";
+import { MEMORY_SUMMARY_MAX_TOKENS, type LlmConfig } from "../config/index.js";
 import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
 import { resolveMemoryAgentRegion } from "./agent-region.js";
 import { bearer, postJsonWithRetry, trimTrailingSlash } from "./http.js";
@@ -62,11 +63,20 @@ const ANTHROPIC_THINKING_BUDGET_TOKENS = 4096;
 const ANTHROPIC_MIN_THINKING_OUTPUT_TOKENS = ANTHROPIC_THINKING_BUDGET_TOKENS + 4096;
 const GEMINI_THINKING_BUDGET_ENABLED = -1;
 const GEMINI_THINKING_BUDGET_DISABLED = 0;
+const SUMMARY_CONTEXT_TOKEN_LIMIT = 8_192;
+const SUMMARY_INPUT_TOKEN_BUDGET = 7_000;
+const SUMMARY_CONTEXT_SAFETY_MARGIN = 512;
+// The largest summary-role operation is span.big_turn; retries must leave
+// room for its evidence rather than requesting the entire 8K window as output.
+const SUMMARY_OUTPUT_TOKEN_LIMIT = 4_096;
+const SUMMARY_INPUT_TRUNCATION_MARKER = "\n[... input truncated ...]\n";
 
 interface ThinkingControl {
   enabled: boolean;
   fields: Record<string, unknown>;
 }
+
+let summaryEncoder: ReturnType<typeof get_encoding> | undefined;
 
 export interface CreateLlmClientOptions {
   modelRole?: MemoryLlmModelRole;
@@ -105,12 +115,17 @@ class HttpLlmClient implements LlmClient {
     options: LlmCompletionOptions
   ): Promise<LlmCallResult> {
     const startedAt = Date.now();
+    const callOptions = {
+      ...options,
+      temperature: options.temperature ?? this.config.temperature,
+      maxTokens: this.outputTokenBudget(options.maxTokens)
+    };
     const fields = {
       role: this.options.modelRole ?? "unspecified",
       operation: options.operation,
       provider: this.config.provider,
       model: this.config.model,
-      maxTokens: options.maxTokens ?? this.config.maxTokens,
+      maxTokens: callOptions.maxTokens,
       timeoutMs: options.timeoutMs ?? this.config.timeoutMs,
       maxRetries: options.maxRetries ?? this.config.maxRetries,
       jsonMode: options.jsonMode ?? false
@@ -127,14 +142,12 @@ class HttpLlmClient implements LlmClient {
       logger.error("request.rejected", { ...fields, ...memoryErrorFields(error) });
       throw error;
     }
-    const callOptions = {
-      ...options,
-      temperature: options.temperature ?? this.config.temperature,
-      maxTokens: options.maxTokens ?? this.config.maxTokens
-    };
     logger.debug("request.started", fields);
     try {
-      const result = await this.completeOnce(messages, callOptions);
+      const requestMessages = this.options.modelRole === "memory_summary"
+        ? constrainSummaryMessages(messages, callOptions.maxTokens!, fields)
+        : messages;
+      const result = await this.completeOnce(requestMessages, callOptions);
       this.lastOkAt = new Date().toISOString();
       this.lastError = undefined;
       logger.info("request.succeeded", {
@@ -163,7 +176,7 @@ class HttpLlmClient implements LlmClient {
     let malformedRetriesRemaining = Math.max(0, this.config.malformedRetries);
     let lengthRetryUsed = false;
     let previousWasTruncated = false;
-    let maxTokens = options.maxTokens ?? this.config.maxTokens;
+    let maxTokens = this.outputTokenBudget(options.maxTokens);
     let jsonAttempt = 0;
 
     while (true) {
@@ -186,7 +199,7 @@ class HttpLlmClient implements LlmClient {
         parseError !== undefined && looksLikeTruncatedJson(result.text, parseError)
       );
       const expandedMaxTokens = truncated && !lengthRetryUsed
-        ? doubleMaxTokens(maxTokens)
+        ? doubleMaxTokens(maxTokens, this.options.modelRole === "memory_summary" ? SUMMARY_OUTPUT_TOKEN_LIMIT : undefined)
         : undefined;
       if (expandedMaxTokens !== undefined) {
         logger.warn("json.truncated_retry", {
@@ -265,6 +278,13 @@ class HttpLlmClient implements LlmClient {
       lastOkAt: this.lastOkAt,
       lastError: this.lastError
     };
+  }
+
+  private outputTokenBudget(requested: number | undefined): number | undefined {
+    const maxTokens = requested ?? this.config.maxTokens;
+    return this.options.modelRole === "memory_summary"
+      ? Math.min(maxTokens ?? MEMORY_SUMMARY_MAX_TOKENS, SUMMARY_OUTPUT_TOKEN_LIMIT)
+      : maxTokens;
   }
 
   private completeOnce(messages: LlmMessage[], options: Required<Pick<LlmCompletionOptions, "operation">> & LlmCompletionOptions): Promise<LlmCallResult> {
@@ -559,6 +579,78 @@ class HttpLlmClient implements LlmClient {
       usage: extractModelTokenUsage(response)
     });
   }
+}
+
+function constrainSummaryMessages(
+  messages: LlmMessage[],
+  outputTokens: number,
+  fields: Record<string, unknown>
+): LlmMessage[] {
+  summaryEncoder ??= get_encoding("cl100k_base");
+  const encoded = messages.map((message) => summaryEncoder!.encode(message.content, [], []));
+  const inputTokens = encoded.reduce((total, tokens) => total + tokens.length, 0);
+  // cl100k_base is an estimate for compatible providers. The margin also
+  // reserves space for their chat template and special tokens.
+  const budget = Math.min(
+    SUMMARY_INPUT_TOKEN_BUDGET,
+    SUMMARY_CONTEXT_TOKEN_LIMIT - outputTokens - SUMMARY_CONTEXT_SAFETY_MARGIN
+  );
+  if (inputTokens <= budget) return messages;
+
+  const systemTokens = encoded.reduce((total, tokens, index) =>
+    total + (messages[index]!.role === "system" ? tokens.length : 0), 0);
+  const contentCount = messages.filter((message) => message.role !== "system").length;
+  const markerTokens = summaryEncoder.encode(SUMMARY_INPUT_TRUNCATION_MARKER, [], []).length + 2;
+  if (systemTokens + contentCount * markerTokens > budget) {
+    throw new Error("Summary system instructions exceed the input token budget");
+  }
+  // Keep system instructions intact regardless of message order. Short
+  // messages keep their contents; long evidence messages share the remainder.
+  let remaining = budget - systemTokens;
+  let remainingCount = contentCount;
+  const result = [...messages];
+  const contentIndices = messages.map((_message, index) => index)
+    .filter((index) => messages[index]!.role !== "system")
+    .sort((a, b) => encoded[a]!.length - encoded[b]!.length);
+  for (const index of contentIndices) {
+    const tokens = encoded[index]!;
+    const limit = Math.floor(remaining / remainingCount);
+    const content = tokens.length <= limit
+      ? messages[index]!.content
+      : truncateSummaryContent(tokens, limit, markerTokens);
+    remaining -= summaryEncoder.encode(content, [], []).length;
+    remainingCount -= 1;
+    result[index] = { ...messages[index]!, content };
+  }
+  logger.warn("request.input_truncated", {
+    ...fields,
+    inputTokens,
+    inputTokenBudget: budget,
+    outputTokensReserved: outputTokens
+  });
+  return result;
+}
+
+function truncateSummaryContent(tokens: Uint32Array, budget: number, markerTokens: number): string {
+  let keep = Math.max(0, budget - markerTokens);
+  while (true) {
+    const head = Math.ceil(keep / 2);
+    const tail = keep - head;
+    const content = decodeSummaryTokens(tokens.slice(0, head)) + SUMMARY_INPUT_TRUNCATION_MARKER +
+      decodeSummaryTokens(tail > 0 ? tokens.slice(-tail) : tokens.slice(0, 0));
+    const length = summaryEncoder!.encode(content, [], []).length;
+    if (length <= budget) return content;
+    keep = Math.max(0, keep - Math.max(1, length - budget));
+  }
+}
+
+function decodeSummaryTokens(tokens: Uint32Array): string {
+  const bytes = summaryEncoder!.decode(tokens);
+  let start = 0;
+  while (start < bytes.length && (bytes[start]! & 0xc0) === 0x80) start += 1;
+  // A token can contain only part of a UTF-8 character. Streaming decoding
+  // drops an incomplete trailing character without inserting U+FFFD.
+  return new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes.subarray(start), { stream: true });
 }
 
 function openAiCompatibleThinkingControl(input: {
@@ -942,9 +1034,10 @@ function parseJsonObject(text: string): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
-function doubleMaxTokens(value: number | undefined): number | undefined {
+function doubleMaxTokens(value: number | undefined, limit = Number.MAX_SAFE_INTEGER): number | undefined {
   if (value === undefined || !Number.isFinite(value) || value <= 0) return undefined;
-  return Math.min(Number.MAX_SAFE_INTEGER, Math.max(1, Math.floor(value)) * 2);
+  const expanded = Math.min(limit, Math.max(1, Math.floor(value)) * 2);
+  return expanded > value ? expanded : undefined;
 }
 
 function normalizeFinishReason(value: string | undefined): LlmCallResult["finishReason"] {

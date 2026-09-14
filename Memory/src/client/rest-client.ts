@@ -20,7 +20,7 @@ import {
   type L3WorldModelRequestEnvelope,
   type L3WorldModelTraceHeadResponse,
   type SessionL3WorldModelContextResponse
-} from "@memmy/local-api-contracts";
+} from "../contracts/index.js";
 import { resolveTimeZone } from "../utils/time.js";
 
 export type MemoryRestQueryValue =

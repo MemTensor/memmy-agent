@@ -50,7 +50,9 @@ describe("UpdateCoordinatorProvider", () => {
         name: "Memmy",
         version: "2.1.0",
         platform: "darwin",
-        arch: "arm64"
+        arch: "arm64",
+        isPackaged: true,
+        isWindowsStore: false
       })),
       checkForUpdates,
       downloadUpdate
@@ -124,7 +126,9 @@ describe("UpdateCoordinatorProvider", () => {
         name: "Memmy",
         version: "2.1.0",
         platform: "darwin",
-        arch: "arm64"
+        arch: "arm64",
+        isPackaged: true,
+        isWindowsStore: false
       })),
       checkForUpdates,
       downloadUpdate
@@ -185,7 +189,9 @@ describe("UpdateCoordinatorProvider", () => {
         name: "Memmy",
         version: "2.1.0",
         platform: "darwin",
-        arch: "arm64"
+        arch: "arm64",
+        isPackaged: true,
+        isWindowsStore: false
       })),
       checkForUpdates,
       openUpdateInstaller
@@ -242,7 +248,9 @@ describe("UpdateCoordinatorProvider", () => {
         name: "Memmy",
         version: "2.1.0",
         platform: "darwin",
-        arch: "arm64"
+        arch: "arm64",
+        isPackaged: true,
+        isWindowsStore: false
       })),
       checkForUpdates: vi.fn(async () => ({
         status: "available" as const,

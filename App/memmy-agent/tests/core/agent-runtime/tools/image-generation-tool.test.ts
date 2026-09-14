@@ -144,7 +144,8 @@ describe("ImageGenerationTool", () => {
   });
 
   it("enables only when the image capability assignment resolves", () => {
-    const config = new ImageGenerationToolConfig({ enabled: true });
+    const config = new ImageGenerationToolConfig();
+    expect(config.enabled).toBe(true);
     const selection = assignedImageSelection({
       provider: "memmy_account",
       model: "image_gen",

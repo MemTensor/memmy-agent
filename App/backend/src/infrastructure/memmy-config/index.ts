@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
+  BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID,
   resolveAssignedModel as resolveCatalogAssignment,
   resolveCloudServiceBaseUrl,
   type ActualModelContext,
@@ -36,6 +37,7 @@ import { normalizeTimeZoneOffset } from "../../utils/time-zone.js";
 const MEMMY_ACCOUNT_PROVIDER = "memmy_account";
 const MEMMY_ACCOUNT_MODEL = "agent_chat";
 const MEMMY_ACCOUNT_IMAGE_MODEL = "image_gen";
+const LEGACY_ACCOUNT_BYOK_LOCAL_SELECTION_BASELINE = "accountByokLocalSelectionBaseline";
 const ACCOUNT_MODELS = {
   agent: MEMMY_ACCOUNT_MODEL,
   memory_summary: "memory_summary",
@@ -46,6 +48,43 @@ const ACCOUNT_MODELS = {
 } as const;
 type AccountCapability = keyof typeof ACCOUNT_MODELS;
 type AccountPresetIds = Record<AccountCapability, string>;
+
+export type BundledPluginPreferences = Record<string, { enabled: boolean }>;
+
+/**
+ * Reads explicit enablement for first-party bundled plugins.
+ *
+ * Missing entries deliberately default to enabled in the bootstrap service.
+ * A malformed file returns null so startup preserves the previous plugin state.
+ */
+export async function readBundledPluginPreferences(
+  configPath: string,
+  pluginIds: readonly string[]
+): Promise<BundledPluginPreferences | null> {
+  let root: unknown;
+  try {
+    root = YAML.parse(await readFile(configPath, "utf8")) ?? {};
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return {};
+    console.warn(`Bundled plugin preferences could not be read: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  }
+  if (!root || typeof root !== "object" || Array.isArray(root)) return null;
+  const plugins = (root as Record<string, unknown>).plugins;
+  if (plugins === undefined) return {};
+  if (!plugins || typeof plugins !== "object" || Array.isArray(plugins)) return null;
+
+  const preferences: BundledPluginPreferences = {};
+  for (const pluginId of pluginIds) {
+    const entry = (plugins as Record<string, unknown>)[pluginId];
+    if (entry === undefined) continue;
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
+    const enabled = (entry as Record<string, unknown>).enabled;
+    if (typeof enabled !== "boolean") return null;
+    preferences[pluginId] = { enabled };
+  }
+  return preferences;
+}
 
 /** Handles resolve memmy account api base. */
 export function resolveMemmyAccountApiBase(): string {
@@ -130,7 +169,12 @@ export interface MemmyConfigWriter {
   /**
    * Clear the account-mode runtime login projection.
    */
-  clearAccountModelProjection?(input?: { ownerAccountId?: string; force?: boolean }): Promise<RuntimeProjectionResult>;
+  clearAccountModelProjection?(input?: {
+    ownerAccountId?: string;
+    force?: boolean;
+    syncSelectedByokToLocal?: boolean;
+    expectedCloudUuid?: string;
+  }): Promise<RuntimeProjectionResult>;
 
   /**
    * Patch a single memmy-agent channel config.
@@ -519,6 +563,7 @@ export async function writeAccountModelProjectionToMemmyConfig(
     const appConfig = isRecord(config.app) ? { ...config.app } : {};
     if (normalizedCloudUuid) appConfig.cloudUuid = normalizedCloudUuid;
     if (normalizedUserId) appConfig.userId = normalizedUserId;
+    delete appConfig[LEGACY_ACCOUNT_BYOK_LOCAL_SELECTION_BASELINE];
     setAppConfig(config, appConfig);
     delete config.uuid;
     delete config.identity;
@@ -537,6 +582,12 @@ export async function writeAccountModelProjectionToMemmyConfig(
       ? { ...existingAccountProvider.endpoints }
       : {};
     const existingPlatform = isRecord(existingEndpoints.platform) ? existingEndpoints.platform : {};
+    const existingMemory = isRecord(config.memmyMemory) ? config.memmyMemory : {};
+    const existingRoleRouting = isRecord(existingMemory.roleRouting) ? existingMemory.roleRouting : {};
+    let memoryConfigAffected = existingRoleRouting.summary !== "fixed"
+      || existingRoleRouting.evolution !== "fixed"
+      || existingString(existingAccountProvider.apiKey) !== effectiveCloudUuid
+      || existingString(existingAccountProvider.ownerAccountId) !== ownerAccountId;
     providers[MEMMY_ACCOUNT_PROVIDER] = {
       ...existingAccountProvider,
       ownerAccountId,
@@ -576,13 +627,81 @@ export async function writeAccountModelProjectionToMemmyConfig(
     config.modelPresets = presets;
     updateAccountAssignment(config, ownerAccountId, presetIds);
 
+    const memory = { ...existingMemory };
+    const roleRouting = { ...existingRoleRouting };
+    const projectedAccountProvider = asRecord(providers[MEMMY_ACCOUNT_PROVIDER])!;
+    const projectedPlatformEndpoint = asRecord(asRecord(projectedAccountProvider.endpoints)?.platform)!;
+    const accountApiBase = existingString(projectedPlatformEndpoint.apiBase)!;
+    const accountApiKey = existingString(projectedPlatformEndpoint.apiKey)
+      ?? existingString(projectedAccountProvider.apiKey)!;
+    const accountConnection = {
+      provider: "openai_compatible",
+      sourceProvider: MEMMY_ACCOUNT_PROVIDER,
+      endpoint: accountApiBase,
+      apiKey: accountApiKey
+    };
+    const accountEmbeddingIsLocal = existingString(
+      asRecord(asRecord(config.modelAssignments)?.account)?.embedding
+    ) === BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID;
+    const previousEmbedding = isRecord(existingMemory.embedding) ? existingMemory.embedding : {};
+
+    // Account mode owns dedicated models for both memory roles. Persist the
+    // route and the resolved connections so a freshly installed config cannot
+    // inherit agent_chat or retain a stale BYOK memory endpoint.
+    roleRouting.summary = "fixed";
+    roleRouting.evolution = "fixed";
+    memory.userId = ownerAccountId;
+    memory.roleRouting = roleRouting;
+    memory.summary = {
+      ...withoutMemoryConnection(previousMemoryRecord(existingMemory.summary)),
+      ...accountConnection,
+      model: ACCOUNT_MODELS.memory_summary
+    };
+    memory.evolution = {
+      ...withoutMemoryConnection(previousMemoryRecord(existingMemory.evolution)),
+      ...accountConnection,
+      model: ACCOUNT_MODELS.memory_evolution
+    };
+    memory.embedding = accountEmbeddingIsLocal
+      ? { ...withoutMemoryConnection(previousEmbedding), mode: "local", provider: "local" }
+      : {
+          ...withoutMemoryConnection(previousEmbedding),
+          ...accountConnection,
+          model: ACCOUNT_MODELS.embedding,
+          mode: "cloud"
+        };
+    memoryConfigAffected = memoryConfigAffected
+      || existingString(existingMemory.userId) !== ownerAccountId
+      || !accountMemoryConnectionMatches(
+        existingMemory.summary,
+        ACCOUNT_MODELS.memory_summary,
+        accountApiBase,
+        accountApiKey
+      )
+      || !accountMemoryConnectionMatches(
+        existingMemory.evolution,
+        ACCOUNT_MODELS.memory_evolution,
+        accountApiBase,
+        accountApiKey
+      )
+      || (accountEmbeddingIsLocal
+        ? previousEmbedding.mode !== "local" || previousEmbedding.provider !== "local"
+        : previousEmbedding.mode !== "cloud"
+          || !accountMemoryConnectionMatches(
+            previousEmbedding,
+            ACCOUNT_MODELS.embedding,
+            accountApiBase,
+            accountApiKey
+          ));
+    config.memmyMemory = memory;
+
     const agents = isRecord(config.agents) ? { ...config.agents } : {};
     const defaults = isRecord(agents.defaults) ? { ...agents.defaults } : {};
     const currentDefault = existingString(defaults.modelPreset);
     if (!currentDefault || !isRecord(presets[currentDefault])) defaults.modelPreset = presetIds.agent;
     agents.defaults = defaults;
     config.agents = agents;
-    return { memoryConfigAffected: false };
+    return { memoryConfigAffected };
   });
   return { changed: result.changed, memoryConfigAffected: result.value.memoryConfigAffected };
 }
@@ -594,9 +713,15 @@ export async function writeAccountModelProjectionToMemmyConfig(
  */
 export async function clearAccountModelProjectionFromMemmyConfig(
   configPath = resolveDefaultMemmyConfigPath(),
-  input: { ownerAccountId?: string; force?: boolean } = {}
+  input: {
+    ownerAccountId?: string;
+    force?: boolean;
+    syncSelectedByokToLocal?: boolean;
+    expectedCloudUuid?: string;
+  } = {}
 ): Promise<RuntimeProjectionResult> {
   const requestedOwnerAccountId = input.ownerAccountId?.trim();
+  const expectedCloudUuid = input.expectedCloudUuid?.trim();
   const result = await mutateRuntimeConfig(configPath, (config) => {
     const appConfig = isRecord(config.app) ? { ...config.app } : {};
     const providers = isRecord(config.providers) ? { ...config.providers } : {};
@@ -604,6 +729,7 @@ export async function clearAccountModelProjectionFromMemmyConfig(
     if (input.force) {
       delete appConfig.cloudUuid;
       delete appConfig.userId;
+      delete appConfig[LEGACY_ACCOUNT_BYOK_LOCAL_SELECTION_BASELINE];
       setAppConfig(config, appConfig);
       delete config.uuid;
       delete config.identity;
@@ -620,10 +746,19 @@ export async function clearAccountModelProjectionFromMemmyConfig(
       config.modelAssignments = assignments;
       return { memoryConfigAffected: false };
     }
+    const currentCloudUuid = existingString(appConfig.cloudUuid) ?? existingString(accountProvider?.apiKey);
+    if (expectedCloudUuid && currentCloudUuid !== expectedCloudUuid) {
+      return { memoryConfigAffected: false };
+    }
     const ownerAccountId = requestedOwnerAccountId
       ?? existingString(appConfig.userId)
       ?? existingString(accountProvider?.ownerAccountId);
     if (!ownerAccountId) return { memoryConfigAffected: false };
+    delete appConfig[LEGACY_ACCOUNT_BYOK_LOCAL_SELECTION_BASELINE];
+
+    if (input.syncSelectedByokToLocal) {
+      syncSelectedAccountByokCandidatesToLocal(config, ownerAccountId);
+    }
 
     if (!existingString(appConfig.userId) || appConfig.userId === ownerAccountId) {
       delete appConfig.cloudUuid;
@@ -727,15 +862,23 @@ function updateAccountAssignment(
 ): void {
   const assignments = isRecord(config.modelAssignments) ? { ...config.modelAssignments } : {};
   const existing = isRecord(assignments.account) ? { ...assignments.account } : {};
+  const sameOwner = existingString(existing.ownerAccountId) === ownerAccountId;
   const presets = isRecord(config.modelPresets) ? config.modelPresets : {};
   const agent = isRecord(existing.agent) ? { ...existing.agent } : {};
   const currentCandidates = Array.isArray(agent.candidates)
     ? agent.candidates.filter((value): value is string => typeof value === "string")
     : [];
-  const candidates = currentCandidates.filter((presetId) => assignmentPresetIsUsable(
-    presets, presetId, "agent", ownerAccountId
-  ));
-  if (!candidates.includes(presetIds.agent)) candidates.push(presetIds.agent);
+  const platformCandidates = [...new Set(currentCandidates.filter((presetId) => {
+    const preset = asRecord(presets[presetId]);
+    return preset?.source === "account"
+      && assignmentPresetIsUsable(presets, presetId, "agent", ownerAccountId);
+  }))];
+  if (!platformCandidates.includes(presetIds.agent)) platformCandidates.push(presetIds.agent);
+
+  const byok = isRecord(assignments.byok) ? assignments.byok : {};
+  const byokAgent = isRecord(byok.agent) ? byok.agent : {};
+  const localCandidates = selectedUsableByokAgentCandidates(byokAgent, presets, ownerAccountId);
+  const candidates = [...platformCandidates, ...localCandidates];
   const currentDefault = existingString(agent.default);
   agent.candidates = candidates;
   agent.default = currentDefault && candidates.includes(currentDefault) ? currentDefault : presetIds.agent;
@@ -750,12 +893,54 @@ function updateAccountAssignment(
   const next: Record<string, unknown> = { ...existing, ownerAccountId, agent };
   for (const [field, capability] of Object.entries(singles) as Array<[keyof typeof singles, AccountCapability]>) {
     const current = existingString(existing[field]);
-    next[field] = current && assignmentPresetIsUsable(presets, current, capability, ownerAccountId)
+    const keepBuiltInLocalEmbedding = field === "embedding"
+      && sameOwner
+      && current === BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID;
+    next[field] = keepBuiltInLocalEmbedding
       ? current
-      : presetIds[capability];
+      : current && assignmentPresetIsUsable(presets, current, capability, ownerAccountId)
+        ? current
+        : presetIds[capability];
   }
   assignments.account = next;
   config.modelAssignments = assignments;
+}
+
+function syncSelectedAccountByokCandidatesToLocal(
+  config: Record<string, unknown>,
+  ownerAccountId: string
+): void {
+  const assignments = isRecord(config.modelAssignments) ? { ...config.modelAssignments } : {};
+  const account = isRecord(assignments.account) ? assignments.account : {};
+  if (existingString(account.ownerAccountId) !== ownerAccountId) return;
+
+  const presets = isRecord(config.modelPresets) ? config.modelPresets : {};
+  const accountAgent = isRecord(account.agent) ? account.agent : {};
+  const selectedByokCandidates = selectedUsableByokAgentCandidates(accountAgent, presets, ownerAccountId);
+
+  const byok = isRecord(assignments.byok) ? { ...assignments.byok } : {};
+  const byokAgent = isRecord(byok.agent) ? { ...byok.agent } : {};
+  if (selectedByokCandidates.length === 0) return;
+
+  const localDefault = existingString(byokAgent.default);
+  byokAgent.candidates = selectedByokCandidates;
+  byokAgent.default = localDefault && selectedByokCandidates.includes(localDefault)
+    ? localDefault
+    : selectedByokCandidates[0];
+  byok.agent = byokAgent;
+  assignments.byok = byok;
+  config.modelAssignments = assignments;
+}
+
+function selectedUsableByokAgentCandidates(
+  agent: Record<string, unknown>,
+  presets: Record<string, unknown>,
+  ownerAccountId: string
+): string[] {
+  return [...new Set((Array.isArray(agent.candidates) ? agent.candidates : [])
+    .filter((value): value is string => typeof value === "string")
+    .filter((presetId) => asRecord(presets[presetId])?.source === "byok"
+      && assignmentPresetIsUsable(presets, presetId, "agent", ownerAccountId)))];
 }
 
 function assignmentPresetIsUsable(
@@ -850,6 +1035,36 @@ function normalizeChannelNameForConfig(value: string): string {
 
 function existingString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+const MEMORY_CONNECTION_FIELDS = [
+  "provider", "sourceProvider", "vendor", "endpoint", "apiBase", "baseUrl",
+  "model", "modelId", "apiKey", "extraHeaders", "extraBody", "custom",
+  "actualModelContext", "selectionError"
+] as const;
+
+function previousMemoryRecord(value: unknown): Record<string, unknown> {
+  return isRecord(value) ? value : {};
+}
+
+function withoutMemoryConnection(value: Record<string, unknown>): Record<string, unknown> {
+  const next = { ...value };
+  for (const key of MEMORY_CONNECTION_FIELDS) delete next[key];
+  return next;
+}
+
+function accountMemoryConnectionMatches(
+  value: unknown,
+  model: string,
+  endpoint: string,
+  apiKey: string
+): boolean {
+  const memory = previousMemoryRecord(value);
+  return memory.provider === "openai_compatible"
+    && memory.sourceProvider === MEMMY_ACCOUNT_PROVIDER
+    && memory.endpoint === endpoint
+    && memory.model === model
+    && memory.apiKey === apiKey;
 }
 
 /**

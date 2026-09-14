@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const packageJsonPath = join(packageRoot, "package.json");
 const binDirectory = join(packageRoot, "bin");
-const defaultBinaryBaseUrl = "https://memos-test.oss-cn-shanghai.aliyuncs.com";
+const defaultReleasesUrl = "https://github.com/MemTensor/memmy-agent/releases";
 
 try {
   if (shouldSkipDownload()) {
@@ -26,7 +26,8 @@ try {
 
   const target = resolveTarget(process.platform, process.arch);
   const assetName = `memmy-memory-${version}-${target}.tar.gz`;
-  const downloadUrl = process.env.MEMMY_MEMORY_BINARY_URL || `${defaultBinaryBaseUrl}/${assetName}`;
+  const downloadUrl = process.env.MEMMY_MEMORY_BINARY_URL ||
+    `${defaultReleasesUrl}/download/memory-v${version}/${assetName}`;
   const archivePath = join(tmpdir(), `${assetName}.${process.pid}.download`);
 
   await mkdir(binDirectory, { recursive: true });

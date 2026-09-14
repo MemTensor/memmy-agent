@@ -16,6 +16,10 @@ export interface ResolveMemoryAgentRegionOptions {
 export function packagedDesktopEditionManifestPath(
   modelDirectory = import.meta.dirname
 ): string {
+  const normalized = resolve(modelDirectory).replace(/\\/g, "/");
+  if (normalized.includes("/memory-runtime/dist/")) {
+    return resolve(modelDirectory, "../../../../app.asar/dist/main/desktop-edition.json");
+  }
   return resolve(modelDirectory, "../../../../main/desktop-edition.json");
 }
 

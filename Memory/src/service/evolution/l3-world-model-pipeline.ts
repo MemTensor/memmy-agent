@@ -3,7 +3,7 @@ import {
   canonicalJson,
   sha256Hex,
   type JsonValue
-} from "@memmy/local-api-contracts";
+} from "../../contracts/index.js";
 import type { LlmClient } from "../../model/types.js";
 import type {
   EvolutionJobRecord,

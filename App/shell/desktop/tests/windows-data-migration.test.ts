@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, open, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, readFile as readFileRaw, rename, rm, symlink, writeFile as writeFileRaw } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -8,6 +8,30 @@ import { afterEach, describe, expect, it } from "vitest";
 const scriptPath = new URL("../build/MemmyWindowsDataMigration.ps1", import.meta.url).pathname
   .replace(/^\/(?:[A-Za-z]:)/u, (value) => value.slice(1));
 const temporaryDirectories: string[] = [];
+
+async function writeFile(path: string, data: string | Uint8Array, encoding?: BufferEncoding): Promise<void> {
+  if (path.toLowerCase().endsWith("app.sqlite") && typeof data === "string") {
+    const sqliteFixture = Buffer.alloc(4096);
+    Buffer.from("SQLite format 3\0", "ascii").copy(sqliteFixture, 0);
+    sqliteFixture[16] = 0x10;
+    sqliteFixture[17] = 0x00;
+    Buffer.from(data, "utf8").copy(sqliteFixture, 100);
+    await writeFileRaw(path, sqliteFixture);
+    return;
+  }
+  await writeFileRaw(path, data, encoding);
+}
+
+function readFile(path: string, encoding: "utf8"): Promise<string>;
+function readFile(path: string): Promise<Buffer>;
+async function readFile(path: string, encoding?: "utf8"): Promise<string | Buffer> {
+  if (path.toLowerCase().endsWith("app.sqlite") && encoding === "utf8") {
+    const contents = await readFileRaw(path);
+    const markerEnd = contents.indexOf(0, 100);
+    return contents.subarray(100, markerEnd < 0 ? contents.length : markerEnd).toString("utf8");
+  }
+  return encoding ? readFileRaw(path, encoding) : readFileRaw(path);
+}
 
 afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((directory) =>
@@ -56,6 +80,29 @@ describe.runIf(process.platform === "win32")("Windows data migration helper", ()
       join(fixture.sourceDataPath, ".memmy")
     ]);
     expect(existsSync(fixture.lockPath)).toBe(true);
+  });
+
+  it("rejects a migration target whose existing ancestor is a directory junction", async () => {
+    const fixture = await createFixture();
+    const redirectedDrive = join(fixture.root, "redirected-drive");
+    const targetDrive = dirname(dirname(fixture.targetRuntimeHomePath));
+    await Promise.all([
+      mkdir(join(fixture.sourceDataPath, "Memmy"), { recursive: true }),
+      mkdir(join(fixture.sourceDataPath, ".memmy"), { recursive: true }),
+      mkdir(redirectedDrive, { recursive: true })
+    ]);
+    await Promise.all([
+      writeFile(join(fixture.sourceDataPath, "Memmy", "app.sqlite"), "login-state", "utf8"),
+      writeFile(join(fixture.sourceDataPath, ".memmy", "config.yaml"), "runtime-state", "utf8"),
+      symlink(redirectedDrive, targetDrive, "junction")
+    ]);
+
+    const prepared = runMigration("Prepare", fixture, false, "", "current-install-authority", "1.1.0");
+
+    expect(prepared.status).toBe(1);
+    expect(prepared.stdout + prepared.stderr)
+      .toMatch(/target runtimeHomePath cr\s*osses a reparse point/u);
+    expect(existsSync(join(redirectedDrive, "MemmyData", ".memmy", "config.yaml"))).toBe(false);
   });
 
   it("rebases only staged Windows runtime defaults and standalone session bindings", async () => {
@@ -417,7 +464,35 @@ describe.runIf(process.platform === "win32")("Windows data migration helper", ()
     });
   });
 
-  it("trusts the exact user-selected install directory after a legacy uninstall removed its registry entry", async () => {
+  it("keeps valid targets when trusted install anchors are structurally incomplete", async () => {
+    const fixture = await createFixture();
+    await Promise.all([
+      mkdir(join(fixture.sourceDataPath, "Memmy"), { recursive: true }),
+      mkdir(join(fixture.sourceDataPath, ".memmy"), { recursive: true }),
+      mkdir(fixture.targetUserDataPath, { recursive: true }),
+      mkdir(fixture.targetRuntimeHomePath, { recursive: true })
+    ]);
+    await Promise.all([
+      writeFileRaw(join(fixture.sourceDataPath, "Memmy", "app.sqlite"), "not-a-sqlite-database", "utf8"),
+      writeFileRaw(join(fixture.sourceDataPath, ".memmy", "config.yaml"), "", "utf8"),
+      writeFile(join(fixture.targetUserDataPath, "app.sqlite"), "verified-login", "utf8"),
+      writeFile(join(fixture.targetRuntimeHomePath, "config.yaml"), "verified-runtime", "utf8")
+    ]);
+
+    const prepared = runMigration("Prepare", fixture);
+    expect(prepared.status, prepared.stderr || prepared.stdout).toBe(0);
+    await expect(readFile(join(fixture.targetUserDataPath, "app.sqlite"), "utf8"))
+      .resolves.toBe("verified-login");
+    await expect(readFile(join(fixture.targetRuntimeHomePath, "config.yaml"), "utf8"))
+      .resolves.toBe("verified-runtime");
+    expect(JSON.parse(await readFile(fixture.statePath, "utf8"))).toMatchObject({
+      accountSourceAuthority: "target-existing",
+      runtimeSourceAuthority: "target-existing",
+      preparedCopies: []
+    });
+  });
+
+  it("keeps verified targets when a user-selected install directory has no registry or persisted authority", async () => {
     const fixture = await createFixture();
     await Promise.all([
       mkdir(join(fixture.sourceDataPath, "Memmy"), { recursive: true }),
@@ -432,18 +507,19 @@ describe.runIf(process.platform === "win32")("Windows data migration helper", ()
       writeFile(join(fixture.targetRuntimeHomePath, "config.yaml"), "historical-runtime", "utf8")
     ]);
 
-    const prepared = runMigration("Prepare", fixture, false, "", "selected-install-authority");
+    const prepared = runMigration("Prepare", fixture, false, "", "untrusted-residual");
     expect(prepared.status, prepared.stderr || prepared.stdout).toBe(0);
     await expect(readFile(join(fixture.targetUserDataPath, "app.sqlite"), "utf8"))
-      .resolves.toBe("selected-login");
+      .resolves.toBe("historical-login");
     await expect(readFile(join(fixture.targetRuntimeHomePath, "config.yaml"), "utf8"))
-      .resolves.toBe("selected-runtime");
+      .resolves.toBe("historical-runtime");
     expect(JSON.parse(await readFile(fixture.statePath, "utf8"))).toMatchObject({
-      sourceAuthority: "selected-install-authority"
+      sourceAuthority: "untrusted-residual",
+      preparedCopies: []
     });
   });
 
-  it("does not trust a selected install residual already marked as the verified external generation", async () => {
+  it("does not trust a user-selected residual already marked as the verified external generation", async () => {
     const fixture = await createFixture();
     await Promise.all([
       mkdir(join(fixture.sourceDataPath, "Memmy"), { recursive: true }),
@@ -466,7 +542,7 @@ describe.runIf(process.platform === "win32")("Windows data migration helper", ()
       }), "utf8")
     ]);
 
-    expect(runMigration("Prepare", fixture, false, "", "selected-install-authority").status).toBe(0);
+    expect(runMigration("Prepare", fixture, false, "", "untrusted-residual").status).toBe(0);
     await expect(readFile(join(fixture.targetUserDataPath, "app.sqlite"), "utf8")).resolves.toBe("verified-login");
     await expect(readFile(join(fixture.targetRuntimeHomePath, "config.yaml"), "utf8")).resolves.toBe("verified-runtime");
   });
@@ -574,7 +650,7 @@ describe.runIf(process.platform === "win32")("Windows data migration helper", ()
     });
   });
 
-  it("keeps the exact user-selected install source instead of an older persisted install record", async () => {
+  it("uses the persisted install source instead of an arbitrary user-selected residual", async () => {
     const fixture = await createFixture();
     const olderInstallDir = join(fixture.root, "older-install");
     const olderDataPath = join(olderInstallDir, "data");
@@ -600,13 +676,13 @@ describe.runIf(process.platform === "win32")("Windows data migration helper", ()
       }), "utf8")
     ]);
 
-    const prepared = runMigration("Prepare", fixture, false, "", "selected-install-authority");
+    const prepared = runMigration("Prepare", fixture, false, "", "untrusted-residual");
     expect(prepared.status, prepared.stderr || prepared.stdout).toBe(0);
-    await expect(readFile(join(fixture.targetUserDataPath, "app.sqlite"), "utf8")).resolves.toBe("selected-login");
-    await expect(readFile(join(fixture.targetRuntimeHomePath, "config.yaml"), "utf8")).resolves.toBe("selected-runtime");
+    await expect(readFile(join(fixture.targetUserDataPath, "app.sqlite"), "utf8")).resolves.toBe("older-login");
+    await expect(readFile(join(fixture.targetRuntimeHomePath, "config.yaml"), "utf8")).resolves.toBe("older-runtime");
     expect(JSON.parse(await readFile(fixture.statePath, "utf8"))).toMatchObject({
-      sourceAuthority: "selected-install-authority",
-      sourceDataPath: fixture.sourceDataPath
+      sourceAuthority: "persisted-install-authority",
+      sourceDataPath: olderDataPath
     });
   });
 
@@ -944,7 +1020,7 @@ function runMigration(
   fixture: MigrationFixture,
   acquireLock = false,
   allowedRememberedRuntimeHomePath = "",
-  sourceAuthority: "current-install-authority" | "selected-install-authority" | "relay-backup-authority" | "persisted-install-authority" | "untrusted-residual" = "current-install-authority",
+  sourceAuthority: "current-install-authority" | "relay-backup-authority" | "persisted-install-authority" | "untrusted-residual" = "current-install-authority",
   sourceInstalledVersion = ""
 ) {
   const args = [
@@ -956,6 +1032,7 @@ function runMigration(
     "-SourceDataPath", fixture.sourceDataPath,
     "-SourceAuthority", sourceAuthority,
     "-SourceInstallDir", dirname(fixture.sourceDataPath),
+    "-TargetInstallDir", join(fixture.root, "new-install"),
     "-SourceInstalledVersion", sourceInstalledVersion,
     "-InstallationRecordPath", fixture.installationRecordPath,
     "-LegacyRuntimeHomePath", fixture.legacyRuntimeHomePath,

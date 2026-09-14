@@ -11,7 +11,7 @@ import {
   canonicalJson,
   isLocalWorkspaceUri,
   type WorkspaceUri
-} from "@memmy/local-api-contracts";
+} from "../../contracts/index.js";
 import {
   PROJECT_ENVIRONMENT_SCAN_POLICY,
   deterministicReadCandidates,

@@ -20,6 +20,7 @@ import {
   resolveAgentSourceScanButtonState,
   resolveAgentSourceConnectionAction,
   resolveManagedAgentSourceSyncButtonState,
+  resolveMemoryCliPathMessageKey,
   resolveMemoryDocsUrl,
   resolveAgentSourceStatusLabelKey,
   resolveScanContinueSourceId,
@@ -29,6 +30,16 @@ import {
 import { SourcesSubPage } from "../sources-sub-page.js";
 
 describe("SourcesSubPage", () => {
+  it("为 Windows CLI 卡片提供 .cmd 命令入口而不是 macOS 安装路径", () => {
+    expect((zhCNMessages as Record<string, string>)["memory.cliPathWindows"]).toBe("memmy-memory.cmd");
+    expect((enUSMessages as Record<string, string>)["memory.cliPathWindows"]).toBe("memmy-memory.cmd");
+    expect(resolveMemoryCliPathMessageKey("win32", true, false)).toBe("memory.cliPathWindows");
+    expect(resolveMemoryCliPathMessageKey("win32", false, false)).toBe("memory.cliPath");
+    expect(resolveMemoryCliPathMessageKey("win32", true, true)).toBe("memory.cliPath");
+    expect(resolveMemoryCliPathMessageKey("darwin", true, false)).toBe("memory.cliPath");
+    expect(resolveMemoryCliPathMessageKey(undefined, undefined, undefined)).toBe("memory.cliPath");
+  });
+
   it("只用 Hook 描述 Cursor、Claude Code 和 Codex 的接入操作", () => {
     expect(zhCNMessages["memory.hookInstalled"]).toBe("已安装 Hook");
     expect(zhCNMessages["memory.hookNotInstalled"]).toBe("未安装 Hook");

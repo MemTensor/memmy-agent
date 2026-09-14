@@ -28,7 +28,7 @@ export class MemmyMemoryHttpError extends Error {
 
 type FetchLike = typeof fetch;
 
-export const DEFAULT_MEMOS_MEMORY_TIMEOUT_MS = 20_000;
+export const DEFAULT_MEMOS_MEMORY_TIMEOUT_MS = 60_000;
 
 export class MemmyMemoryClient {
   baseUrl: string;

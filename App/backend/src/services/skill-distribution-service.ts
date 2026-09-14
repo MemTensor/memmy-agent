@@ -134,7 +134,13 @@ async function findSkillFiles(skillsRoot: string): Promise<string[]> {
       if (entry.isFile() && entry.name.toLowerCase() === "skill.md") {
         files.push(entryPath);
       } else if (depth < 2 && (entry.isDirectory() || entry.isSymbolicLink())) {
-        const entryStat = await stat(entryPath);
+        let entryStat;
+        try {
+          entryStat = await stat(entryPath);
+        } catch (error) {
+          if (isNodeError(error) && error.code === "ENOENT") continue;
+          throw error;
+        }
         if (entryStat.isDirectory()) await visit(entryPath, depth + 1);
       }
     }

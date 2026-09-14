@@ -15,6 +15,7 @@ import {
   assignCatalogPreset,
   createModelWorkspace,
   modelConfigInput,
+  setModelAssignment,
   upsertByokPreset
 } from "../state/model-workspace.js";
 import {
@@ -38,7 +39,7 @@ import {
   testModelConnection
 } from "./model-config.js";
 
-type EmbeddingMode = "custom";
+type EmbeddingMode = "local" | "custom";
 
 interface EmbeddingCustomConfig {
   model: string;
@@ -97,7 +98,10 @@ export function ApiKeyPage() {
     hasExistingApiKey: Boolean(apiKeyMasked)
   };
   const [llmValidation, setLlmValidation] = useState<ModelConfigValidationState>(initialModelForm.llmValidation);
-  const initialEmbeddingMode: EmbeddingMode = "custom";
+  const initialWorkspace = createModelWorkspace(state.modelConfig);
+  const initialEmbeddingMode: EmbeddingMode = initialWorkspace.catalog.modelAssignments.byok.embedding
+    ? "custom"
+    : "local";
   const [embeddingMode, setEmbeddingMode] = useState<EmbeddingMode>(initialEmbeddingMode);
   const [embeddingConfig, setEmbeddingConfig] = useState<EmbeddingCustomConfig>({
     model: initialModelForm.embModelId,
@@ -116,7 +120,7 @@ export function ApiKeyPage() {
   };
   const [embeddingValidation, setEmbeddingValidation] = useState<ModelConfigValidationState>(initialModelForm.embValidation);
   const canSave = canSaveModelConfig(modelFormValues, llmValidation)
-    && canSaveOptionalModelConfig(true, embeddingFormValues, embeddingValidation);
+    && canSaveOptionalModelConfig(embeddingMode === "custom", embeddingFormValues, embeddingValidation);
   const [savePending, setSavePending] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const testedKey = createModelConfigValidationKey(modelFormValues);
@@ -137,9 +141,8 @@ export function ApiKeyPage() {
     embeddingConfig.apiKey,
     embeddingConfig.apiKeyMasked
   );
-  const saveSignature = `${testedKey}\n${embeddingTestKey}`;
+  const saveSignature = `${embeddingMode}\n${testedKey}\n${embeddingTestKey}`;
   const savedCatalogSignatureRef = useRef<string | null>(null);
-  const initialWorkspace = createModelWorkspace(state.modelConfig);
   const initialAgentEndpointId = assignedCatalogEndpointId(initialWorkspace, "byok", "agent");
   const initialEmbeddingEndpointId = assignedCatalogEndpointId(initialWorkspace, "byok", "embedding");
   const savedEndpointIdentitiesRef = useRef<Partial<Record<"agent" | "embedding", SavedEndpointIdentity>>>({
@@ -211,20 +214,24 @@ export function ApiKeyPage() {
         });
         workspace = assignCatalogPreset(agent.workspace, "byok", "agent", agent.presetId);
         const savedEmbeddingIdentity = savedEndpointIdentitiesRef.current.embedding;
-        const embeddingEndpointId = savedEmbeddingIdentity?.credentialSignature === embeddingCredentialSignature
-          ? savedEmbeddingIdentity.endpointId
-          : undefined;
-        const embedding = upsertByokPreset(workspace, {
-          provider: "openai",
-          ...(embeddingEndpointId ? { endpointId: embeddingEndpointId } : {}),
-          endpoint: embeddingConfig.endpoint,
-          protocol: "openai-embeddings",
-          ...(embeddingConfig.apiKey.trim() ? { apiKey: embeddingConfig.apiKey.trim() } : {}),
-          ...(embeddingConfig.apiKeyMasked ? { apiKeyMasked: embeddingConfig.apiKeyMasked } : {}),
-          model: embeddingConfig.model,
-          capabilities: ["embedding"]
-        });
-        workspace = assignCatalogPreset(embedding.workspace, "byok", "embedding", embedding.presetId);
+        if (embeddingMode === "custom") {
+          const embeddingEndpointId = savedEmbeddingIdentity?.credentialSignature === embeddingCredentialSignature
+            ? savedEmbeddingIdentity.endpointId
+            : undefined;
+          const embedding = upsertByokPreset(workspace, {
+            provider: "openai",
+            ...(embeddingEndpointId ? { endpointId: embeddingEndpointId } : {}),
+            endpoint: embeddingConfig.endpoint,
+            protocol: "openai-embeddings",
+            ...(embeddingConfig.apiKey.trim() ? { apiKey: embeddingConfig.apiKey.trim() } : {}),
+            ...(embeddingConfig.apiKeyMasked ? { apiKeyMasked: embeddingConfig.apiKeyMasked } : {}),
+            model: embeddingConfig.model,
+            capabilities: ["embedding"]
+          });
+          workspace = assignCatalogPreset(embedding.workspace, "byok", "embedding", embedding.presetId);
+        } else {
+          workspace = setModelAssignment(workspace, "byok", "embedding", null);
+        }
         const saved = await clients.config.saveModelCatalog(modelConfigInput(workspace));
         if (!saved.catalog?.modelAssignments.byok.agent.candidates.length) {
           throw new Error("persisted BYOK Agent assignment is empty");
@@ -240,6 +247,8 @@ export function ApiKeyPage() {
             : {}),
           ...(savedEmbeddingEndpointId
             ? { embedding: { endpointId: savedEmbeddingEndpointId, credentialSignature: embeddingCredentialSignature } }
+            : embeddingMode === "local" && savedEmbeddingIdentity
+              ? { embedding: savedEmbeddingIdentity }
             : {})
         };
         savedCatalogSignatureRef.current = saveSignature;
@@ -330,10 +339,11 @@ export function ApiKeyPage() {
               onValueChange={(value) => setEmbeddingMode(value as EmbeddingMode)}
               className="select-control--subtle"
               options={[
+                { value: "local", label: t("apiKey.localEmbedding") },
                 { value: "custom", label: t("apiKey.customEmbedding") }
               ]}
             />
-            {(
+            {embeddingMode === "custom" ? (
               <>
                 <ConfigField
                   label={t("apiKey.embeddingModel")}
@@ -361,7 +371,7 @@ export function ApiKeyPage() {
                   <TestButton status={embeddingValidation.status} onClick={testEmbeddingConnection} label={t("apiKey.test")} />
                 </div>
               </>
-            )}
+            ) : null}
           </div>
         </div>
 

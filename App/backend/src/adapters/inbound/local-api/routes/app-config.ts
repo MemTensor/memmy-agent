@@ -59,6 +59,15 @@ export function registerAppConfigRoutes(app: FastifyInstance, options: RegisterA
     })
   );
 
+  app.get(
+    "/api/app/scan-preferences",
+    { preHandler: options.authenticateRuntimeToken },
+    withErrorEnvelope(async (_request, reply) => {
+      const response = ScanPreferencesSchema.parse(await options.appConfig.getScanPreferences());
+      return reply.send(response);
+    })
+  );
+
   app.patch(
     "/api/app/onboarding",
     { preHandler: options.authenticateRuntimeToken },

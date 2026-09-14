@@ -14,7 +14,7 @@ import { formatZonedTime } from "../utils/time.js";
 import {
   renderL3WorldModelFields,
   type L3WorldModelFields
-} from "@memmy/local-api-contracts";
+} from "../contracts/index.js";
 
 export interface CapturedTraceStep {
   key: string;

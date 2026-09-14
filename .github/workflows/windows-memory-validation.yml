@@ -1,0 +1,93 @@
+name: Windows Memory validation
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/windows-memory-validation.yml"
+      - "tests/windows-memory-workflow.test.ts"
+      - "Memory/**"
+      - "AgentSourceCore/**"
+      - "App/shell/desktop/build/**"
+      - "App/shell/desktop/tests/windows-standard-upgrade-check.test.ts"
+      - "package.json"
+      - "package-lock.json"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: windows-2025
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          architecture: x64
+          cache: npm
+      - name: Require a logged-in interactive Windows session
+        id: interactive-session
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $interactive = [Environment]::UserInteractive
+          $sessionId = (Get-Process -Id $PID).SessionId
+          Write-Host "UserInteractive=$interactive; SessionId=$sessionId"
+          if (-not $interactive -or $sessionId -le 0) {
+            throw 'Native Memory validation requires a logged-in interactive desktop session.'
+          }
+          $sessions = quser.exe $sessionId 2>&1
+          $queryExitCode = $LASTEXITCODE
+          $sessionText = $sessions -join "`n"
+          $activeSession = $sessionText -match ("\s{0}\s+Active\s" -f $sessionId)
+          Write-Host $sessionText
+          Write-Host "quserExitCode=$queryExitCode; ActiveSession=$activeSession"
+          if (($queryExitCode -ne 0) -or (-not $activeSession)) {
+            throw "The runner process must belong to an active logged-in user session (quser exit $queryExitCode; matched=$activeSession)."
+          }
+          node -e "if (process.platform !== 'win32' || process.arch !== 'x64' || process.versions.node.split('.')[0] !== '22') process.exit(1)"
+          if ($LASTEXITCODE -ne 0) { throw 'Expected Windows x64 with Node 22.' }
+      - name: Install workspace dependencies
+        run: npm ci
+      - name: Build shared Agent source contracts
+        run: npm run build -w @memmy/agent-source-core
+      - name: Test Windows Memory contracts and temporary upgrade layouts
+        run: >-
+          node node_modules/vitest/vitest.mjs run
+          tests/windows-memory-workflow.test.ts
+          Memory/tests/runtime-installer-windows.test.ts
+          App/shell/desktop/tests/windows-standard-upgrade-check.test.ts
+          --reporter=default --reporter=json --outputFile=windows-memory-unit-results.json
+      - name: Test the native temporary Memory task
+        timeout-minutes: 5
+        env:
+          MEMMY_WINDOWS_SERVICE_INTEGRATION: "1"
+        run: |
+          node node_modules/vitest/vitest.mjs run Memory/tests/runtime-installer-windows.integration.test.ts --reporter=default --reporter=json --outputFile=windows-memory-native-results.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $report = Get-Content windows-memory-native-results.json -Raw | ConvertFrom-Json
+          if ($report.numTotalTests -lt 1 -or $report.numPendingTests -ne 0 -or $report.numPassedTests -ne $report.numTotalTests) {
+            throw 'Native Memory validation must execute and pass every selected test; skips are not accepted.'
+          }
+      - name: Record validation scope
+        if: ${{ always() }}
+        run: |
+          @'
+          This job validates Windows Memory launcher contracts, an isolated temporary scheduled task, and temporary upgrade layouts.
+          It does not install or launch a signed Electron package. Transient console flashes and signed-package installation still require manual acceptance.
+          '@ | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: windows-memory-validation-results
+          path: |
+            windows-memory-unit-results.json
+            windows-memory-native-results.json
+          if-no-files-found: warn
+          retention-days: 7

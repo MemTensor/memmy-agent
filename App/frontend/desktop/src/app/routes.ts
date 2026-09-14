@@ -65,6 +65,15 @@ export interface ResolveInitialViewInput {
   preferredMode: PreferredMode | null;
   accountSession?: AccountSessionView;
   guidanceCompleted?: boolean;
+  modelConfig?: ByokAgentModelAvailability | null;
+}
+
+export interface ByokAgentModelAvailability {
+  catalog?: {
+    modelAssignments: {
+      byok: { agent: { candidates: readonly string[] } };
+    };
+  } | null;
 }
 
 /** Contract for pet launch guard input. */
@@ -127,7 +136,8 @@ export function resolveInitialView(input: ResolveInitialViewInput): AppRoutePath
       return "/welcome";
     }
 
-    if (hasCompletedAccountGuide(input.accountSession) || input.guidanceCompleted) {
+    if (!shouldShowFirstEncounterReport(input.bootstrap.onboarding) &&
+      (hasCompletedAccountGuide(input.accountSession) || input.guidanceCompleted)) {
       return input.preferredMode === "pet" ? "/pet" : "/main";
     }
 
@@ -135,6 +145,11 @@ export function resolveInitialView(input: ResolveInitialViewInput): AppRoutePath
   }
 
   if (input.bootstrap.app.userMode === "byok") {
+    if (input.modelConfig !== undefined &&
+      !input.modelConfig?.catalog?.modelAssignments.byok.agent.candidates.length) {
+      return "/api-key";
+    }
+
     if (input.bootstrap.onboarding.completed) {
       return input.preferredMode === "pet" ? "/pet" : "/main";
     }
@@ -152,6 +167,16 @@ function hasCompletedAccountGuide(session: AccountSessionView | undefined): bool
 
 /** Handles reconcile initial onboarding. */
 export function reconcileInitialOnboarding(input: ReconcileInitialOnboardingInput): AppBootstrapResponse {
+  const firstEncounterPending = shouldShowFirstEncounterReport(input.bootstrap.onboarding);
+  if (firstEncounterPending && input.bootstrap.onboarding.completed) {
+    const onboarding = input.bootstrap.app.userMode === "byok"
+      ? buildByokOnboardingGuidePatch(input.bootstrap.onboarding)
+      : input.bootstrap.app.userMode === "account" && input.accountSession?.authenticated
+        ? buildAccountOnboardingStartPatch(input.bootstrap.onboarding)
+        : null;
+    return onboarding ? { ...input.bootstrap, onboarding } : input.bootstrap;
+  }
+
   if (
     input.bootstrap.app.userMode !== "account" ||
     !input.accountSession?.authenticated ||
@@ -165,7 +190,7 @@ export function reconcileInitialOnboarding(input: ReconcileInitialOnboardingInpu
     ...input.bootstrap,
     onboarding: {
       ...input.bootstrap.onboarding,
-      ...buildAccountOnboardingStartPatch()
+      ...buildAccountOnboardingStartPatch(input.bootstrap.onboarding)
     }
   };
 }
@@ -209,7 +234,7 @@ export function resolveByokModelCompletion(input: ResolveByokModelCompletionInpu
   }
 
   return {
-    onboardingPatch: buildByokOnboardingGuidePatch(),
+    onboardingPatch: buildByokOnboardingGuidePatch(input.onboarding),
     nextRoute: "/onboarding"
   };
 }
@@ -217,13 +242,7 @@ export function resolveByokModelCompletion(input: ResolveByokModelCompletionInpu
 /** Contract for resolve byok entry input. */
 export interface ResolveByokEntryInput {
   onboarding: OnboardingStateDto | undefined;
-  modelConfig?: {
-    catalog?: {
-      modelAssignments: {
-        byok: { agent: { candidates: string[] } };
-      };
-    };
-  } | null;
+  modelConfig?: ByokAgentModelAvailability | null;
 }
 
 /** Contract for resolve byok entry result. */
@@ -244,7 +263,7 @@ export function resolveByokEntry(input: ResolveByokEntryInput): ResolveByokEntry
   }
 
   return {
-    onboardingPatch: buildByokOnboardingSetupPatch(),
+    onboardingPatch: buildByokOnboardingSetupPatch(input.onboarding),
     nextRoute: "/api-key"
   };
 }
@@ -670,13 +689,18 @@ export function buildOnboardingCompletionPatch(completedAt: string): Partial<Onb
  *
  * @returns the local onboarding patch for the first-time flow after account registration.
  */
-export function buildAccountOnboardingStartPatch(): OnboardingStateDto {
+export function buildAccountOnboardingStartPatch(
+  installationState?: Pick<OnboardingStateDto, "scanPermission" | "firstEncounterReportStatus">
+): OnboardingStateDto {
   return {
     completed: false,
     currentStep: "scan_permission_required",
     hasAcceptedTerms: true,
     acceptedTermsVersion: null,
-    scanPermission: "unset",
+    scanPermission: installationState?.scanPermission ?? "unset",
+    ...(installationState?.firstEncounterReportStatus
+      ? { firstEncounterReportStatus: installationState.firstEncounterReportStatus }
+      : {}),
     improvementProgram: "unset",
     completedAt: null
   };
@@ -687,13 +711,18 @@ export function buildAccountOnboardingStartPatch(): OnboardingStateDto {
  *
  * @returns the onboarding patch for the BYOK first-time flow before entering the API Key configuration page.
  */
-export function buildByokOnboardingSetupPatch(): OnboardingStateDto {
+export function buildByokOnboardingSetupPatch(
+  installationState?: Pick<OnboardingStateDto, "scanPermission" | "firstEncounterReportStatus">
+): OnboardingStateDto {
   return {
     completed: false,
     currentStep: "byok_setup_required",
     hasAcceptedTerms: true,
     acceptedTermsVersion: null,
-    scanPermission: "unset",
+    scanPermission: installationState?.scanPermission ?? "unset",
+    ...(installationState?.firstEncounterReportStatus
+      ? { firstEncounterReportStatus: installationState.firstEncounterReportStatus }
+      : {}),
     improvementProgram: "not_applicable",
     completedAt: null
   };
@@ -704,11 +733,17 @@ export function buildByokOnboardingSetupPatch(): OnboardingStateDto {
  *
  * @returns the patch for entering `/onboarding` after BYOK model configuration completes.
  */
-export function buildByokOnboardingGuidePatch(): OnboardingStateDto {
+export function buildByokOnboardingGuidePatch(
+  installationState?: Pick<OnboardingStateDto, "scanPermission" | "firstEncounterReportStatus">
+): OnboardingStateDto {
   return {
-    ...buildByokOnboardingSetupPatch(),
+    ...buildByokOnboardingSetupPatch(installationState),
     currentStep: "scan_permission_required"
   };
+}
+
+export function shouldShowFirstEncounterReport(onboarding: OnboardingStateDto): boolean {
+  return (onboarding.firstEncounterReportStatus ?? "pending") === "pending";
 }
 
 /**

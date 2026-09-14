@@ -18,7 +18,7 @@ describe("RuntimeApp bootstrap loading", () => {
     const source = readFileSync(resolve(__dirname, "../..", "app.tsx"), "utf8");
 
     expect(source).toContain("const guidanceCompleted = readGuidanceCompleted(");
-    expect(source).toContain("accountSession,\n          guidanceCompleted");
+    expect(source).toContain("accountSession,\n          guidanceCompleted,\n          modelConfig");
   });
 
   it("handles existing main-window route targets without reloading the renderer", () => {

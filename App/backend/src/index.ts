@@ -7,26 +7,24 @@ import { createAppStateStore } from "./infrastructure/app-state-store/index.js";
 import { createHttpCloudClient, type CloudClient } from "./adapters/outbound/cloud-client/index.js";
 import {
   createHttpMemoryClient,
-  createMemosSqliteMemoryClient,
-  discoverMemosSqliteSources,
   type MemoryClient,
   type MemoryLayerConfig
 } from "./adapters/outbound/memory-client/index.js";
 import { resolveDefaultRuntimeConfigPath, writeRuntimeConfigFile } from "./infrastructure/cli-binary/index.js";
 import {
   createMemmyConfigWriter,
+  readBundledPluginPreferences,
   readConfiguredAgentTimeZone,
   readAgentGatewayBootstrapSecret
 } from "./infrastructure/memmy-config/index.js";
+import {
+  createMemoryScanPreferencesStore,
+  ensureMemoryScanPreferences
+} from "./infrastructure/memmy-config/agent-access.js";
 import { createPermissionManager } from "./permission/index.js";
 import { createLocalApiServer } from "./adapters/inbound/local-api/server.js";
 import { createBackendServices, type BootstrapScenario } from "./services/index.js";
 import type { PluginService } from "./services/plugin-service.js";
-import {
-  createAgentSourceAutoScanService,
-  DEFAULT_AGENT_SOURCE_AUTO_SCAN_INTERVAL_MS,
-  type AgentSourceAutoScanService
-} from "./services/agent-source-auto-scan-service.js";
 import { resolveCloudClientConfig, type CloudClientConfig } from "./config/service-urls.js";
 import { resetAccountRuntimeForDesktopInstallChange } from "./services/desktop-install-state-service.js";
 import {
@@ -35,7 +33,14 @@ import {
 } from "./services/runtime-config-sync-service.js";
 import { loadCloudServiceEnv } from "./load-env.js";
 import type { MemmyAgentAdminClient } from "./adapters/outbound/memmy-agent-admin-client/index.js";
-import { createHttpPluginRegistry } from "./adapters/outbound/plugin-registry/index.js";
+import {
+  createCompositePluginRegistry,
+  createHttpPluginRegistry,
+  loadBundledPluginCatalog,
+  type BundledPluginCatalog,
+  type PluginRegistry
+} from "./adapters/outbound/plugin-registry/index.js";
+import { reconcileBundledPlugins } from "./services/bundled-plugin-bootstrap-service.js";
 
 export type { BootstrapScenario };
 export { loadCloudServiceEnv };
@@ -65,12 +70,10 @@ export interface CreateLocalBackendOptions {
   desktopInstallFingerprint?: string;
   /** Login channel supported by the current desktop package. */
   accountChannel?: AccountChannel;
-  /** Agent source auto scan interval in ms. Defaults to one hour. */
-  agentSourceAutoScanIntervalMs?: number;
-  /** Agent source startup scan delay in ms. Defaults to five minutes. */
-  agentSourceAutoScanInitialDelayMs?: number;
   /** Running Agent Gateway client; when present, refreshes MCP after startup config writes. */
   memmyAgentAdminClient?: MemmyAgentAdminClient;
+  /** Directory containing immutable `*.release.json` files and their MPP archives. */
+  bundledPluginDirectory?: string;
 }
 
 export interface LocalBackend {
@@ -90,7 +93,6 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
   }
   const appStateStore = createAppStateStore({ databasePath: options.databasePath });
   let server: Awaited<ReturnType<typeof createLocalApiServer>> | null = null;
-  let autoScan: AgentSourceAutoScanService | null = null;
   let pluginService: PluginService | null = null;
 
   try {
@@ -107,6 +109,11 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       memmyConfigPath,
       accountChannel: options.accountChannel
     });
+    await ensureMemoryScanPreferences(
+      memmyConfigPath,
+      appStateStore.repositories.bootstrap.getScanPreferences()
+    );
+    const scanPreferencesStore = createMemoryScanPreferencesStore(memmyConfigPath);
 
     const permissionManager = createPermissionManager({
       appStateStore,
@@ -134,6 +141,27 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       });
     const memmyConfigWriter = createMemmyConfigWriter({ configPath: memmyConfigPath });
     const configuredTimeZone = await readConfiguredAgentTimeZone(memmyConfigPath);
+    const bundledCatalog = await tryLoadBundledPluginCatalog(
+      options.bundledPluginDirectory ?? process.env.MEMMY_BUNDLED_PLUGINS_DIR
+    );
+    const bundledPreferences = bundledCatalog
+      ? await readBundledPluginPreferences(
+          memmyConfigPath,
+          bundledCatalog.releases.map((release) => release.id)
+        )
+      : {};
+    if (bundledCatalog && bundledPreferences) {
+      for (const release of bundledCatalog.releases) {
+        if (
+          bundledPreferences[release.id]?.enabled === false
+          && appStateStore.repositories.plugins.get(release.id)?.state === "active"
+        ) {
+          // No plugin runtime exists yet, so persist the disabled state before
+          // restoreActive() can reactivate a plugin disabled in config.yaml.
+          appStateStore.repositories.plugins.setState(release.id, "disabled");
+        }
+      }
+    }
     const services = createBackendServices({
       appStateStore,
       agentAdapterRegistry,
@@ -143,13 +171,30 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       bootstrapScenario: options.bootstrapScenario,
       memmyConfigWriter,
       memmyConfigPath,
+      scanPreferencesStore,
       accountChannel: options.accountChannel,
       memmyAgentAdminClient: options.memmyAgentAdminClient,
       memmyAgentAdminBootstrapSecret: await readAgentGatewayBootstrapSecret(memmyConfigPath),
-      pluginRegistry: configuredPluginRegistry(process.env)
+      pluginRegistry: configuredPluginRegistry(process.env, bundledCatalog?.registry),
+      trustedBundledPluginRoots: bundledCatalog ? [bundledCatalog.trustedArtifactRoot] : undefined
     });
     pluginService = services.plugins;
     await services.plugins.restoreActive();
+    if (bundledCatalog && bundledPreferences) {
+      const failures = await reconcileBundledPlugins({
+        plugins: services.plugins,
+        releases: bundledCatalog.releases,
+        enabledById: Object.fromEntries(
+          bundledCatalog.releases.map((release) => [
+            release.id,
+            bundledPreferences[release.id]?.enabled !== false
+          ])
+        )
+      });
+      for (const failure of failures) {
+        console.warn(`Bundled plugin bootstrap failed for ${failure.pluginId}: ${failure.message}`);
+      }
+    }
     const localToken = await permissionManager.getRuntimeToken();
     const composioMcpToken = `mmt_${randomBytes(32).toString("base64url")}`;
     server = createLocalApiServer({
@@ -179,7 +224,10 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       type: "streamableHttp",
       url: `http://127.0.0.1:${(address as AddressInfo).port}/mcp/plugins`,
       headers: { "x-memmy-mcp-token": composioMcpToken },
-      toolTimeout: 3600
+      // Interaction capabilities can legitimately wait while the user reads a
+      // long card or leaves the app in the background. Non-interactive command
+      // work remains bounded by the plugin runtime's own timeout.
+      toolTimeout: 7 * 24 * 60 * 60
     });
     await reloadAgentMcp(options.memmyAgentAdminClient);
 
@@ -190,17 +238,7 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       memory: options.memoryBaseUrl ? { baseUrl: options.memoryBaseUrl } : undefined
     });
     await writeRuntimeConfigFile(runtimeConfig, options.runtimeConfigPath ?? resolveDefaultRuntimeConfigPath());
-    autoScan = createAgentSourceAutoScanService({
-      baseUrl: runtimeConfig.baseUrl,
-      localToken,
-      intervalMs: options.agentSourceAutoScanIntervalMs ?? DEFAULT_AGENT_SOURCE_AUTO_SCAN_INTERVAL_MS,
-      initialDelayMs: options.agentSourceAutoScanInitialDelayMs,
-      getScanPreferences: () => appStateStore.repositories.bootstrap.getScanPreferences()
-    });
-    autoScan.start();
-
     const boundServer = server;
-    const boundAutoScan = autoScan;
     const boundPluginService = services.plugins;
     return {
       runtimeConfig,
@@ -211,7 +249,6 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
         return appStateStore.repositories.bootstrap.recordLastLaunchMode(mode);
       },
       async close() {
-        boundAutoScan.close();
         try {
           await boundServer.close();
         } finally {
@@ -221,7 +258,6 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       }
     };
   } catch (error) {
-    autoScan?.close();
     await server?.close().catch(() => undefined);
     await pluginService?.shutdown();
     appStateStore.close();
@@ -229,9 +265,26 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
   }
 }
 
-function configuredPluginRegistry(env: NodeJS.ProcessEnv) {
+function configuredPluginRegistry(
+  env: NodeJS.ProcessEnv,
+  bundledRegistry?: PluginRegistry
+): PluginRegistry | undefined {
   const baseUrl = env.MEMMY_PLUGIN_REGISTRY_URL?.trim();
-  return baseUrl ? createHttpPluginRegistry({ baseUrl }) : undefined;
+  const remoteRegistry = baseUrl ? createHttpPluginRegistry({ baseUrl }) : undefined;
+  return bundledRegistry
+    ? createCompositePluginRegistry(bundledRegistry, remoteRegistry)
+    : remoteRegistry;
+}
+
+async function tryLoadBundledPluginCatalog(directory: string | undefined): Promise<BundledPluginCatalog | null> {
+  const normalized = directory?.trim();
+  if (!normalized) return null;
+  try {
+    return await loadBundledPluginCatalog(normalized);
+  } catch (error) {
+    console.warn(`Bundled plugins are unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  }
 }
 
 async function reloadAgentMcp(client: MemmyAgentAdminClient | undefined): Promise<void> {
@@ -283,10 +336,8 @@ export function readMemoryLayerConfig(env: NodeJS.ProcessEnv): MemoryLayerConfig
 /**
  * Creates the default MemoryClient.
  *
- * Priority:
- * 1. The standard HTTP memory layer pointed to by MEMMY_MEMORY_LAYER_URL.
- * 2. A read-only client over this project's MemoryService SQLite database.
- * Fails outright when no real data source is available, to avoid the desktop app silently showing fake data.
+ * Memory is a process boundary: Desktop always talks to it over HTTP and never
+ * reads the service-owned SQLite database.
  */
 function createDefaultMemoryClient(env: NodeJS.ProcessEnv): MemoryClient {
   const memoryLayerConfig = readMemoryLayerConfig(env);
@@ -294,12 +345,5 @@ function createDefaultMemoryClient(env: NodeJS.ProcessEnv): MemoryClient {
     return createHttpMemoryClient(memoryLayerConfig);
   }
 
-  if (env.MEMMY_DISABLE_MEMOS_SQLITE !== "1") {
-    const sources = discoverMemosSqliteSources(env);
-    if (sources.length > 0) {
-      return createMemosSqliteMemoryClient({ sources });
-    }
-  }
-
-  throw new Error("MEMMY_MEMORY_LAYER_URL or a local Memmy memory SQLite source is required");
+  throw new Error("MEMMY_MEMORY_LAYER_URL is required");
 }

@@ -16,6 +16,17 @@ icon: Rocket
 
 ## 快速设置
 
+Linux x64 或 arm64 的纯终端用户需先安装 Node.js 22 或更高版本，并确认 systemd 用户会话可用，然后执行：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MemTensor/memmy-agent/main/scripts/install.sh | bash
+memmy
+```
+
+安装器会以 `memmy-memory.service` 启动本地 Memory Service。如果尚未配置可用模型，首次裸执行 `memmy` 会打开现有配置向导；保存后启用 `memmy-gateway.service`，等待就绪并进入 TUI。两个 `systemd --user` 服务都不会因退出 TUI 或关闭终端而停止，并会在以后登录时自动启动；安装器不启用 linger。安装器 launcher 还会刷新权限为 `0600` 的私有文件 `~/.memmy/systemd/gateway.env`，确保配置引用的凭据和终端 `PATH` 对常驻 Gateway 可用。
+
+可用 `systemctl --user status memmy-memory.service` 和 `systemctl --user status memmy-gateway.service` 查看状态。安装器不会修改外部 Agent；只有用户明确执行 `memmy-memory init` 或 `memmy-memory init --agent <agent>` 时，才安装对应的 Memory 集成。
+
 下载并安装 Memmy 桌面应用。首次启动会自动完成：
 
 1. 设置 `MEMMY_HOME` 和 `MEMMY_CONFIG`。
@@ -36,9 +47,9 @@ node dist/main.js --help
 - **API Key 模式**：分三步配置主模型 + Embedding、记忆相关模型、可选的 ASR 与图像生成模型，每一步都提供真实连接测试。
 
 ```bash
-memmy onboard          # 初始化配置和 workspace
-memmy onboard --wizard # 终端菜单式配置模型、Provider、工具
-memmy status           # 检查配置与运行状态
+memmy onboard            # 终端菜单式配置模型、Provider、工具
+memmy onboard --defaults # 非交互式初始化配置和 workspace
+memmy status             # 检查配置与运行状态
 ```
 
 进入主工作台，在输入框发送第一条消息。`Enter` 发送，`Shift + Enter` 换行，输入 `/` 可打开 Slash command 面板。

@@ -1,6 +1,6 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { runCommand } from "../../Memory/src/cli/commands.js";
 import { PROJECT_VERSION } from "../../Memory/src/cli/project-version.js";
@@ -21,6 +21,22 @@ afterEach(() => {
 });
 
 describe("memory layer smoke plan", () => {
+  it("keeps the executable Memory smoke entrypoint wired into the repository", () => {
+    const repoRoot = resolve(import.meta.dirname, "../..");
+    const manifest = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")) as {
+      scripts: Record<string, string>;
+    };
+
+    expect(existsSync(join(repoRoot, "tests/smoke/tsconfig.json"))).toBe(true);
+    expect(existsSync(join(repoRoot, "tests/smoke/memory-layer-smoke.ts"))).toBe(true);
+    expect(manifest.scripts["smoke:memory-layer:typecheck"])
+      .toBe("tsc -p tests/smoke/tsconfig.json --noEmit");
+    expect(manifest.scripts["smoke:memory-layer"])
+      .toContain("npm run smoke:memory-layer:test");
+    expect(manifest.scripts["smoke:memory-layer"])
+      .toContain("tsx tests/smoke/memory-layer-smoke.ts");
+  });
+
   it("stores, processes, reads, and recalls a verified turn through the real Memory service", async () => {
     const root = mkdtempSync(join(tmpdir(), "memmy-memory-smoke-"));
     tempRoots.push(root);

@@ -12,6 +12,7 @@ import {
 import type { AppStateStore } from "../infrastructure/app-state-store/index.js";
 import type { CloudClient, CloudHealth } from "../adapters/outbound/cloud-client/index.js";
 import type { MemoryClient } from "../adapters/outbound/memory-client/index.js";
+import type { ScanPreferencesStore } from "../infrastructure/memmy-config/agent-access.js";
 
 export type BootstrapScenario = "onboarding" | "completed";
 
@@ -24,6 +25,7 @@ export interface CreateBootstrapServiceOptions {
   memoryClient: MemoryClient;
   cloudClient: CloudClient;
   bootstrapScenario?: BootstrapScenario;
+  scanPreferencesStore?: Pick<ScanPreferencesStore, "getScanPreferences">;
 }
 
 export function createBootstrapService(options: CreateBootstrapServiceOptions): BootstrapService {
@@ -52,7 +54,7 @@ export function createBootstrapService(options: CreateBootstrapServiceOptions): 
               }
             : onboarding,
         privacy: bootstrap.getPrivacySettings(),
-        scanPreferences: bootstrap.getScanPreferences(),
+        scanPreferences: options.scanPreferencesStore?.getScanPreferences() ?? bootstrap.getScanPreferences(),
         tokenUsage: tokenUsage ?? createTokenUsagePlaceholder(promotions.agentChatTokenTotal),
         health: {
           localApi: "ok",

@@ -232,13 +232,18 @@ async function processConversation(
 
     try {
       const added = await options.memoryClient.addMemory(request);
-      stats.written += turn.messages.length;
-      stats.writtenMemories += 1;
-      stats.memoryIds.push(added.id);
+      if (added.duplicate) {
+        stats.deduped += turn.messages.length;
+        stats.dedupedMemories += 1;
+      } else {
+        stats.written += turn.messages.length;
+        stats.writtenMemories += 1;
+        stats.memoryIds.push(added.id);
+      }
       options.memoryAddAnalytics?.trackAddSucceeded({
         ...addAnalyticsBase,
         durationMs: Date.now() - addStartedAt,
-        storedCount: 1
+        storedCount: added.duplicate ? 0 : 1
       });
 
       for (const dedupKey of dedupKeys) {

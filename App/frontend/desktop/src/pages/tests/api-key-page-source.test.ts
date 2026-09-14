@@ -31,6 +31,11 @@ describe("ApiKeyPage source", () => {
     expect(fieldsSource).toContain("auth-code-form-input");
     expect(source).toContain("testEmbeddingConnection");
     expect(source).toContain('"embedding"');
+    expect(source).toContain('type EmbeddingMode = "local" | "custom"');
+    expect(source).toContain('{ value: "local", label: t("apiKey.localEmbedding") }');
+    expect(source).toContain('canSaveOptionalModelConfig(embeddingMode === "custom"');
+    expect(source).toContain('const saveSignature = `${embeddingMode}\\n${testedKey}\\n${embeddingTestKey}`');
+    expect(source).toContain('workspace = setModelAssignment(workspace, "byok", "embedding", null)');
     expect(source).not.toContain("testAsrConnection");
     expect(source).not.toContain("testImageGenConnection");
     expect(source).not.toContain("optionalModelMissingWarning");
