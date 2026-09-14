@@ -128,6 +128,27 @@ export function createMockMemoryClient(options: CreateMockMemoryClientOptions = 
       };
     },
 
+    async completeSourceTurn(input) {
+      failIfNeeded();
+      const l1MemoryId = randomUUID();
+      return {
+        status: "stored",
+        result: {
+          turnId: input.sourceTurn.turnId,
+          sessionId: input.sessionId ?? randomUUID(),
+          episodeId: randomUUID(),
+          rawTurnId: randomUUID(),
+          l1MemoryId,
+          l1MemoryIds: [l1MemoryId],
+          closedEpisodeIds: [],
+          scheduledEvolution: false,
+          jobs: [],
+          ...nextChange(),
+          serverTime: now()
+        }
+      };
+    },
+
     async search(input) {
       failIfNeeded();
       const injectedContext = {

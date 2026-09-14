@@ -2,7 +2,7 @@ import { mutateRuntimeConfig } from "@memmy/migrations";
 import type { AgentGatewayStartupIssue } from "@memmy/local-api-contracts";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { mkdir, readdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -22,6 +22,12 @@ const HTTP_TIMEOUT_MS = 1_000;
 const STOP_MANAGED_CHILD_GRACE_MS = 1_000;
 const MEMORY_STOP_COMMAND_TIMEOUT_MS = 10_000;
 const MEMORY_RESTART_STOP_TIMEOUT_MS = 10_000;
+const PROCESS_QUERY_TIMEOUT_MS = 10_000;
+const MEMORY_OWNER_PROGRESS_WINDOWS = 5;
+const MEMORY_OWNER_CPU_PROGRESS_MS = 1_000;
+const MEMORY_SERVER_ENTRY_SUFFIX = "/dist/src/server/index.js";
+// Elapsed-time columns and lock timestamps are second-granular on some systems.
+const STALE_LOCK_TOLERANCE_MS = 5_000;
 
 type RuntimeEnv = Record<string, string | undefined>;
 type ConfigRecord = Record<string, unknown>;
@@ -789,11 +795,13 @@ export async function ensureMemoryService(
     if (lock) {
       // A legacy scheduled service may still be migrating its database. Wait
       // before repairing the launcher, because repair ends that scheduled task.
-      try {
-        await waitForExistingMemoryService(healthUrl, healthHeaders, lock);
-      } catch (error) {
-        if (readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath)) throw error;
-      }
+      await adoptOrRecoverMemoryOwner(
+        runtimeConfig,
+        await memoryVerificationEntry(runtimeConfig, entries),
+        healthUrl,
+        healthHeaders,
+        lock
+      );
       const remainingLock = readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath);
       if (remainingLock && remainingLock.pid !== lock.pid) {
         throw new Error("Memory database ownership changed before launcher repair");
@@ -835,13 +843,13 @@ export async function ensureMemoryService(
       // Never switch the stable pointer while an older service still owns
       // the database. It may be in migrations before its HTTP endpoint is
       // available; let that owner finish before activating a new runtime.
-      let existingReady = false;
-      try {
-        await waitForExistingMemoryService(healthUrl, healthHeaders, existingLock);
-        existingReady = true;
-      } catch (error) {
-        if (readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath)) throw error;
-      }
+      const existingReady = await adoptOrRecoverMemoryOwner(
+        runtimeConfig,
+        await memoryVerificationEntry(runtimeConfig, entries),
+        healthUrl,
+        healthHeaders,
+        existingLock
+      );
       if (existingReady && !(await stopOlderBundledMemoryRuntime(runtimeConfig, options, shouldStop))) return;
     }
     if (shouldStop?.()) return;
@@ -923,7 +931,7 @@ async function stopOlderBundledMemoryRuntime(
     || running.endpoint !== runtimeConfig.memoryBaseUrl
     || running.serviceVersion !== installed.version
     || running.protocolVersion !== SUPPORTED_MEMORY_PROTOCOL_VERSION
-    || !isPackagedMemoryServiceProcess(lock.pid, installed.entrypoint, true)) return false;
+    || !isPackagedMemoryServiceProcess(lock.pid, installed.entrypoint, serviceHome, true)) return false;
 
   const healthUrl = `${runtimeConfig.memoryBaseUrl}/api/v1/health`;
   const healthHeaders = memoryAuthHeaders(runtimeConfig.memoryToken);
@@ -1091,17 +1099,11 @@ async function startManagedMemoryService(
   if (shouldStop?.()) return;
   const healthUrl = runtimeConfig.memoryBaseUrl + "/api/v1/health";
   const healthHeaders = memoryAuthHeaders(runtimeConfig.memoryToken);
+  // A service can release its lock, or stop responding altogether, while the
+  // health waiter runs. Either way this Desktop instance then takes over.
   const existingLock = readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath);
-  if (existingLock) {
-    try {
-      await waitForExistingMemoryService(healthUrl, healthHeaders, existingLock);
-      return;
-    } catch (error) {
-      // A service can release its lock while the health waiter is still
-      // running. In that case this Desktop instance may safely take over;
-      // preserve the original error while the lock owner is still alive.
-      if (readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath)) throw error;
-    }
+  if (existingLock && await adoptOrRecoverMemoryOwner(runtimeConfig, entry, healthUrl, healthHeaders, existingLock)) {
+    return;
   }
   if (shouldStop?.()) return;
 
@@ -1304,7 +1306,7 @@ async function restartManagedMemoryService(
         // bounded compatibility wait. If it exited, continue with install.
         if (readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath)) {
           await stopLockedMemoryService(
-            runtimeConfig.memoryDatabasePath,
+            runtimeConfig,
             installed?.entrypoint ?? entries.memoryEntry
           );
         }
@@ -1338,7 +1340,7 @@ async function restartManagedMemoryService(
         const lockAfterFailure = readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath);
         if (lockAfterFailure) {
           await stopLockedMemoryService(
-            runtimeConfig.memoryDatabasePath,
+            runtimeConfig,
             installed?.entrypoint ?? entries.memoryEntry
           );
         }
@@ -1354,7 +1356,7 @@ async function restartManagedMemoryService(
           });
         } catch {
           await stopLockedMemoryService(
-            runtimeConfig.memoryDatabasePath,
+            runtimeConfig,
             installed?.entrypoint ?? entries.memoryEntry
           );
         }
@@ -1958,6 +1960,110 @@ export function readLiveMemoryServerLock(databasePath: string): MemoryServerLock
   }
 }
 
+/**
+ * Reuses the live database owner, or stops one that no longer makes progress.
+ * Migrations can outlast a single startup wait and run before the owner serves
+ * HTTP, so an owner that still burns CPU or writes to the database keeps its
+ * ownership for another window instead of being terminated mid-migration.
+ *
+ * @returns True when the existing owner became ready and can be reused.
+ */
+async function adoptOrRecoverMemoryOwner(
+  runtimeConfig: PackagedRuntimeConfig,
+  memoryEntry: string,
+  healthUrl: string,
+  healthHeaders: Record<string, string>,
+  lock: MemoryServerLock
+): Promise<boolean> {
+  let progress = sampleMemoryOwnerProgress(lock.pid, runtimeConfig.memoryDatabasePath);
+  for (let window = 0; window < MEMORY_OWNER_PROGRESS_WINDOWS; window += 1) {
+    try {
+      await waitForExistingMemoryService(healthUrl, healthHeaders, lock);
+      return true;
+    } catch (error) {
+      // An owner that released the database, or a new one that replaced it,
+      // is left to the caller: it starts or adopts a service of its own.
+      const remaining = readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath);
+      if (!remaining || remaining.pid !== lock.pid) return false;
+      const current = sampleMemoryOwnerProgress(lock.pid, runtimeConfig.memoryDatabasePath);
+      if (!hasMemoryOwnerProgressed(progress, current)) {
+        console.warn(`Stopping unresponsive Memory owner pid ${lock.pid}: ${errorMessage(error)}`);
+        await stopLockedMemoryService(runtimeConfig, memoryEntry);
+        return false;
+      }
+      progress = current;
+    }
+  }
+  throw new Error(`Memory service pid ${lock.pid} kept working on the database without becoming ready at ${healthUrl}`);
+}
+
+async function memoryVerificationEntry(
+  runtimeConfig: PackagedRuntimeConfig,
+  entries: RuntimeEntryPaths
+): Promise<string> {
+  return (await readInstalledMemoryRuntime(runtimeConfig.configPath))?.entrypoint ?? entries.memoryEntry;
+}
+
+export interface MemoryOwnerProgress {
+  cpuMs?: number;
+  databaseBytes: number;
+  databaseMtimeMs: number;
+}
+
+export function sampleMemoryOwnerProgress(pid: number, databasePath: string): MemoryOwnerProgress {
+  const base = resolve(databasePath);
+  let databaseBytes = 0;
+  let databaseMtimeMs = 0;
+  for (const suffix of ["", "-wal", "-shm", "-journal"]) {
+    try {
+      const stats = statSync(`${base}${suffix}`);
+      databaseBytes += stats.size;
+      databaseMtimeMs = Math.max(databaseMtimeMs, stats.mtimeMs);
+    } catch {
+      // Journal companions only exist while a write transaction is open.
+    }
+  }
+  const cpuMs = readProcessCpuMs(pid);
+  return { ...(cpuMs === undefined ? {} : { cpuMs }), databaseBytes, databaseMtimeMs };
+}
+
+export function hasMemoryOwnerProgressed(previous: MemoryOwnerProgress, current: MemoryOwnerProgress): boolean {
+  if (previous.cpuMs !== undefined && current.cpuMs !== undefined
+    && current.cpuMs >= previous.cpuMs + MEMORY_OWNER_CPU_PROGRESS_MS) {
+    return true;
+  }
+  return current.databaseBytes !== previous.databaseBytes
+    || current.databaseMtimeMs > previous.databaseMtimeMs;
+}
+
+function readProcessCpuMs(pid: number): number | undefined {
+  try {
+    if (process.platform === "win32") {
+      // The counters are ASCII digits in 100-nanosecond units.
+      const query = [
+        "$ErrorActionPreference = 'Stop'",
+        `$process = Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}"`,
+        "if (-not $process) { exit 2 }",
+        "[string][math]::Floor(($process.KernelModeTime + $process.UserModeTime) / 10000)"
+      ].join("; ");
+      const total = Number(execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", query], {
+        encoding: "utf8",
+        windowsHide: true,
+        timeout: PROCESS_QUERY_TIMEOUT_MS
+      }).trim());
+      return Number.isFinite(total) ? total : undefined;
+    }
+    const output = execFileSync("ps", ["-p", String(pid), "-o", "time="], {
+      encoding: "utf8",
+      timeout: PROCESS_QUERY_TIMEOUT_MS
+    });
+    const seconds = parseElapsedSeconds(output.trim());
+    return seconds === undefined ? undefined : seconds * 1_000;
+  } catch {
+    return undefined;
+  }
+}
+
 async function waitForExistingMemoryService(
   healthUrl: string,
   healthHeaders: Record<string, string>,
@@ -1978,13 +2084,20 @@ async function waitForExistingMemoryService(
   }
 }
 
-async function stopLockedMemoryService(databasePath: string, memoryEntry: string): Promise<void> {
+async function stopLockedMemoryService(
+  runtimeConfig: PackagedRuntimeConfig,
+  memoryEntry: string
+): Promise<void> {
+  const databasePath = runtimeConfig.memoryDatabasePath;
   const lock = readLiveMemoryServerLock(databasePath);
   if (!lock) return;
   if (lock.pid === process.pid) {
     throw new Error("Memory server lock unexpectedly belongs to the desktop process");
   }
-  if (!isPackagedMemoryServiceProcess(lock.pid, memoryEntry)) {
+  const identity = readProcessIdentity(lock.pid);
+  const serviceHome = join(dirname(runtimeConfig.configPath), "memory-service");
+  if (!identity || !matchesMemoryServiceCommandLine(identity.commandLine, memoryEntry, serviceHome)) {
+    if (removeStaleMemoryServerLock(databasePath, lock, identity)) return;
     throw new Error(`Refusing to stop unverified process pid ${lock.pid} from the Memory server lock`);
   }
 
@@ -1996,23 +2109,129 @@ async function stopLockedMemoryService(databasePath: string, memoryEntry: string
   }
 }
 
-function isPackagedMemoryServiceProcess(pid: number, memoryEntry: string, exactEntryOnly = false): boolean {
+function isPackagedMemoryServiceProcess(
+  pid: number,
+  memoryEntry: string,
+  serviceHome: string,
+  exactEntryOnly = false
+): boolean {
+  const identity = readProcessIdentity(pid);
+  return identity !== undefined
+    && matchesMemoryServiceCommandLine(identity.commandLine, memoryEntry, serviceHome, exactEntryOnly);
+}
+
+/**
+ * Recognizes a Memory server started from this home, including runtimes an
+ * earlier Desktop activated. An upgrade rewrites the installed pointer before
+ * the previous runtime releases the database, so the surviving lock owner is
+ * expected to run an entry the active pointer no longer names.
+ */
+export function matchesMemoryServiceCommandLine(
+  commandLine: string,
+  memoryEntry: string,
+  serviceHome: string,
+  exactEntryOnly = false
+): boolean {
+  const command = normalizeProcessPath(commandLine);
+  if (command.includes(normalizeProcessPath(resolve(memoryEntry)))) return true;
+  if (exactEntryOnly) return false;
+  const entryIndex = command.indexOf(MEMORY_SERVER_ENTRY_SUFFIX);
+  const installedRoot = `${normalizeProcessPath(resolve(serviceHome, "runtime"))}/`;
+  if (entryIndex > 0 && command.lastIndexOf(installedRoot, entryIndex) >= 0) return true;
+  return command.includes(`/memory-runtime${MEMORY_SERVER_ENTRY_SUFFIX}`)
+    || command.includes(`/dist/runtime/memory${MEMORY_SERVER_ENTRY_SUFFIX}`);
+}
+
+function normalizeProcessPath(value: string): string {
+  const normalized = value.replaceAll("\\", "/");
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+interface ProcessIdentity {
+  commandLine: string;
+  startedAtMs?: number;
+}
+
+function readProcessIdentity(pid: number): ProcessIdentity | undefined {
   try {
-    const command = process.platform === "win32"
-      ? execFileSync("powershell.exe", [
-        "-NoProfile",
-        "-Command",
-        `(Get-CimInstance Win32_Process -Filter \"ProcessId = ${pid}\").CommandLine`
-      ], { encoding: "utf8", windowsHide: true })
-      : execFileSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8" });
-    const normalizedCommand = command.replaceAll("\\", "/");
-    const normalizedEntry = resolve(memoryEntry).replaceAll("\\", "/");
-    return normalizedCommand.includes(normalizedEntry)
-      || (!exactEntryOnly && (normalizedCommand.includes("/memory-runtime/dist/src/server/index.js")
-        || normalizedCommand.includes("/dist/runtime/memory/src/server/index.js")));
+    return process.platform === "win32" ? readWindowsProcessIdentity(pid) : readPosixProcessIdentity(pid);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Win32_Process holds Unicode paths, so the payload is transported as base64
+ * instead of through the console code page, which corrupts non-ASCII home
+ * directories on localized Windows installs.
+ */
+function readWindowsProcessIdentity(pid: number): ProcessIdentity | undefined {
+  const query = [
+    "$ErrorActionPreference = 'Stop'",
+    `$process = Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}"`,
+    "if (-not $process) { exit 2 }",
+    "$created = if ($process.CreationDate) { $process.CreationDate.ToUniversalTime().ToString('o') } else { '' }",
+    "[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($created + '|' + [string]$process.CommandLine))"
+  ].join("; ");
+  const encoded = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", query], {
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: PROCESS_QUERY_TIMEOUT_MS
+  }).replace(/\s+/g, "");
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) return undefined;
+  const decoded = Buffer.from(encoded, "base64").toString("utf8");
+  const separator = decoded.indexOf("|");
+  if (separator < 0) return undefined;
+  const startedAtMs = Date.parse(decoded.slice(0, separator));
+  return {
+    commandLine: decoded.slice(separator + 1),
+    ...(Number.isFinite(startedAtMs) ? { startedAtMs } : {})
+  };
+}
+
+function readPosixProcessIdentity(pid: number): ProcessIdentity | undefined {
+  const output = execFileSync("ps", ["-p", String(pid), "-o", "etime=,command="], {
+    encoding: "utf8",
+    timeout: PROCESS_QUERY_TIMEOUT_MS
+  });
+  const parsed = /^\s*(\S+)\s+([\s\S]*)$/.exec(output);
+  if (!parsed) return undefined;
+  const elapsedMs = parseElapsedSeconds(parsed[1]!);
+  return {
+    commandLine: parsed[2]!,
+    ...(elapsedMs === undefined ? {} : { startedAtMs: Date.now() - elapsedMs * 1_000 })
+  };
+}
+
+/** Parses a `ps` time column, formatted as `[[dd-]hh:]mm:ss[.ff]`. */
+function parseElapsedSeconds(value: string): number | undefined {
+  const parsed = /^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+(?:\.\d+)?)$/.exec(value);
+  if (!parsed) return undefined;
+  const part = (group: string | undefined): number => (group ? Number(group) : 0);
+  return part(parsed[1]) * 86_400 + part(parsed[2]) * 3_600 + part(parsed[3]) * 60 + part(parsed[4]);
+}
+
+/**
+ * Drops a lock whose pid the operating system has already reassigned. Only a
+ * process that is demonstrably not a Memory server and that started after the
+ * lock was written qualifies, so a live owner is never disowned.
+ */
+function removeStaleMemoryServerLock(
+  databasePath: string,
+  lock: MemoryServerLock,
+  identity: ProcessIdentity | undefined
+): boolean {
+  if (identity?.startedAtMs === undefined) return false;
+  if (normalizeProcessPath(identity.commandLine).includes(MEMORY_SERVER_ENTRY_SUFFIX)) return false;
+  const lockPath = `${resolve(databasePath)}.server.lock`;
+  try {
+    if (identity.startedAtMs <= statSync(lockPath).mtimeMs + STALE_LOCK_TOLERANCE_MS) return false;
+    rmSync(lockPath, { force: true });
   } catch {
     return false;
   }
+  console.warn(`Removed a Memory server lock left for reused pid ${lock.pid}`);
+  return true;
 }
 
 function terminateProcessByPid(pid: number, force: boolean): void {

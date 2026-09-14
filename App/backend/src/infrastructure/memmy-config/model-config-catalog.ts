@@ -1,5 +1,6 @@
 import {
   BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID,
+  CatalogProviderIdSchema,
   type CatalogEndpointInput,
   type CatalogProviderId,
   type ModelAssignment,
@@ -854,9 +855,7 @@ function isStringRecord(value: unknown): value is Record<string, string> {
 }
 
 function isCatalogProviderId(value: unknown): value is CatalogProviderId {
-  return typeof value === "string" && [
-    "openai", "anthropic", "gemini", "deepseek", "zhipu", "dashscope", "moonshot", "minimax", "qianfan", "volcengine", ACCOUNT_PROVIDER
-  ].includes(value);
+  return CatalogProviderIdSchema.safeParse(value).success;
 }
 
 function isEndpointProtocol(value: unknown): value is ModelEndpointProtocol {

@@ -1,5 +1,5 @@
-export const POLARDB_SCHEMA_VERSION = "runtime-v3";
-export const POLARDB_MIGRATION_ID = "003_memory_capture_claims";
+export const POLARDB_SCHEMA_VERSION = "runtime-v4";
+export const POLARDB_MIGRATION_ID = "004_source_turn_captures";
 
 export function polardbMigrationSql(): string[] {
   return [
@@ -286,6 +286,35 @@ export function polardbMigrationSql(): string[] {
       created_at TIMESTAMPTZ NOT NULL,
       expires_at TIMESTAMPTZ
     )`,
+  `CREATE TABLE IF NOT EXISTS source_turn_captures (
+    user_id TEXT NOT NULL,
+    source TEXT NOT NULL,
+    profile_id TEXT NOT NULL,
+    namespace_key TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    turn_id TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    session_id TEXT,
+    episode_id TEXT,
+    raw_turn_id TEXT,
+    response JSONB NOT NULL,
+    started_at TIMESTAMPTZ NOT NULL,
+    completed_at TIMESTAMPTZ NOT NULL,
+    source_sequence INTEGER,
+    created_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (user_id, source, profile_id, namespace_key, conversation_id, turn_id)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_source_turn_captures_conversation
+    ON source_turn_captures (user_id, source, profile_id, namespace_key, conversation_id, completed_at DESC)`,
+
+    `CREATE TABLE IF NOT EXISTS runtime_kv (
+      key TEXT PRIMARY KEY,
+      value JSONB NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL
+    )`,
+    `INSERT INTO runtime_kv (key, value, updated_at)
+      VALUES ('source_turn_capture_activated_at', to_jsonb(CURRENT_TIMESTAMP::text), CURRENT_TIMESTAMP)
+      ON CONFLICT(key) DO NOTHING`,
     `CREATE TABLE IF NOT EXISTS memory_capture_claims (
       user_id TEXT NOT NULL,
       source TEXT NOT NULL,

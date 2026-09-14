@@ -44,6 +44,7 @@ export function writeComposerReferenceDrag(
 }
 
 export function readComposerReferenceDrag(dataTransfer: DataTransfer): ComposerContextReference | null {
+  if (typeof dataTransfer.getData !== "function") return null;
   const payload = dataTransfer.getData(MEMMY_COMPOSER_REFERENCE_MIME);
   if (!payload) return null;
   try {

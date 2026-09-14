@@ -588,7 +588,7 @@ describe("AgentLoop direct processing", () => {
     expect(outbound.some((message) => message.metadata?.webuiMessageQueued)).toBe(false);
   });
 
-  it("extracts document media before building prompt and keeps image media for multimodal content", async () => {
+  it("generates attachment manifest for document media and keeps image media for multimodal content", async () => {
     const p = provider(["read it"]);
     const root = workspace();
     const note = path.join(root, "note.txt");
@@ -606,11 +606,13 @@ describe("AgentLoop direct processing", () => {
     await agent.processDirect("summarize", { sessionKey: "cli:test", media: [note, png] });
 
     const sent = p.calls[0].messages.at(-1).content;
-    expect(JSON.stringify(sent)).toContain("Quarterly revenue is $5M");
+    // Document now appears as manifest, not inline text
+    expect(JSON.stringify(sent)).toContain("note.txt");
+    expect(JSON.stringify(sent)).toContain("attachments");
     expect(JSON.stringify(sent)).toContain("data:image/png;base64");
     const session = agent.sessions.getOrCreate("cli:test");
-    expect(session.messages[0].content).toContain("Quarterly revenue is $5M");
-    expect(session.messages[0].media).toEqual([png]);
+    // History stores original content (no text extraction), media stored separately
+    expect(session.messages[0].media).toEqual([note, png]);
   });
 
   it("falls back to the empty-response message and truncates oversized tool outputs when saving turns", async () => {

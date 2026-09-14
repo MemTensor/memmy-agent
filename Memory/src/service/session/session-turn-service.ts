@@ -23,7 +23,8 @@ import {
   type EpisodeRecord,
   type EvolutionJobRecord,
   type RawTurnRecord,
-  type SessionRecord
+  type SessionRecord,
+  type SourceTurnCaptureScope
 } from "../../storage/repositories.js";
 import type {
   FeedbackRequest,
@@ -43,6 +44,10 @@ import type {
   ToolCallPayload,
   ToolObserveRequest,
   TurnCompleteRequest,
+  SourceTurnCompleteRequest,
+  SourceTurnCompleteResponse,
+  SourceTurnIdentity,
+  TurnCompletionResult,
   TurnStartRequest
 } from "../../types.js";
 import { MemoryServiceError } from "../../utils/error.js";
@@ -104,7 +109,7 @@ type SessionTurnDependencies = {
   readonly skillLlm: LlmClient;
   synthesizeDecisionRepairDraft: SynthesizeDecisionRepairDraft;
 } & Record<string, any>;
-interface CompleteTurnResponse { turnId: string; sessionId: string; episodeId: string; rawTurnId: string; userMemoryId: string; userMemoryIds: string[]; l1MemoryId: string; l1MemoryIds: string[]; closedEpisodeIds: string[]; scheduledEvolution: boolean; jobs: JobRef[]; changeSeq: number; syncCursor: string; etag: string; serverTime: string; duplicate?: boolean; }
+type CompleteTurnResponse = TurnCompletionResult;
 type EndTopicDecision = TurnRelationDecision & { relation: "end_topic" };
 interface EpisodeTurnRoute { episode: EpisodeRecord; endTopicDecision?: EndTopicDecision; }
 type TurnRouteAction = "create_first" | "append" | "split" | "end_topic";
@@ -471,7 +476,7 @@ export class SessionTurnService {
 
   constructor(private readonly deps: SessionTurnDependencies) {}
 
-  openSession(request: SessionOpenRequest): {
+  openSession(request: SessionOpenRequest, options: { createNew?: boolean; at?: string } = {}): {
     sessionId: string;
     userId: string;
     source: string;
@@ -504,7 +509,7 @@ export class SessionTurnService {
       }
     }
     const namespace = normalizeNamespace(request.namespace);
-    const at = nowIso();
+    const at = options.at ?? nowIso();
     if (request.l3WorldModelProtocolVersion === undefined && (
       request.l3WorldModelTransition !== undefined ||
       request.workspaceUri !== undefined ||
@@ -519,7 +524,7 @@ export class SessionTurnService {
       }
       return body;
     }
-    if (request.sessionId) {
+    if (request.sessionId && !options.createNew) {
       const existingSession = this.deps.repos.runtime.getSession(request.sessionId);
       if (existingSession) {
         this.deps.assertSessionInScope(existingSession, request.namespace);
@@ -551,7 +556,7 @@ export class SessionTurnService {
       }
     }
     const hostSessionKey = namespace.sessionKey;
-    if (hostSessionKey) {
+    if (hostSessionKey && !options.createNew) {
       const existingSession = this.deps.repos.runtime.findOpenSessionByHostKey({
         userId: namespace.userId,
         source: request.source ?? namespace.source,
@@ -1204,7 +1209,227 @@ export class SessionTurnService {
     };
   }
 
-  completeTurn(turnId: string, request: TurnCompleteRequest & Record<string, unknown>): CompleteTurnResponse {
+  completeSourceTurn(request: SourceTurnCompleteRequest): SourceTurnCompleteResponse {
+    const identity = request.sourceTurn;
+    if (!identity || ![identity.source, identity.profileId, identity.conversationId, identity.turnId,
+      identity.startedAt, identity.completedAt, identity.completionEvidence].every((value) => typeof value === "string" && value.trim())) {
+      return { status: "pending", reason: "identity_unresolved" };
+    }
+    const startedAtMs = Date.parse(identity.startedAt);
+    const completedAtMs = Date.parse(identity.completedAt);
+    if (!Number.isFinite(startedAtMs) || !Number.isFinite(completedAtMs) || completedAtMs < startedAtMs ||
+        (identity.sequence !== undefined && (!Number.isSafeInteger(identity.sequence) || identity.sequence < 0))) {
+      return { status: "pending", reason: "source_turn_boundary_unresolved" };
+    }
+    if (request.channel !== "hook" && request.channel !== "agent_source_scan") {
+      throw new MemoryServiceError("invalid_argument", "invalid source capture channel");
+    }
+    const namespace = normalizeNamespace(request.namespace ?? {
+      source: identity.source, profileId: identity.profileId, sessionKey: identity.conversationId
+    });
+    if (namespace.source !== identity.source || namespace.profileId !== identity.profileId ||
+        (request.source && request.source !== identity.source) ||
+        (namespace.sessionKey && namespace.sessionKey !== identity.conversationId)) {
+      throw new MemoryServiceError("forbidden", "source_turn_namespace_conflict");
+    }
+    const sourceTurn: SourceTurnIdentity = {
+      ...identity,
+      startedAt: new Date(startedAtMs).toISOString(),
+      completedAt: new Date(completedAtMs).toISOString()
+    };
+    const scope: SourceTurnCaptureScope = {
+      userId: namespace.userId,
+      source: identity.source,
+      profileId: identity.profileId,
+      namespaceKey: stableHash({ tenantId: namespace.tenantId ?? null, projectId: namespace.projectId ?? null,
+        workspaceId: namespace.workspaceId ?? null }),
+      conversationId: identity.conversationId
+    };
+    const normalized = sanitizeTurnCompleteRequest({ ...request, sessionId: request.sessionId ?? "" });
+    const contentHash = stableHash({
+      query: normalized.query, answer: normalized.answer, status: normalized.status ?? "succeeded",
+      reasoningSummary: normalized.reasoningSummary ?? null,
+      toolCalls: normalizeCompleteTurnToolCalls(normalized), toolResults: normalizeCompleteTurnToolResults(normalized)
+    });
+    return this.deps.repos.transaction(() => {
+      // A durable source identity is checked before touching an open Session. Deleted memories
+      // and closed Sessions therefore cannot turn a retry into a second capture.
+      const existing = this.deps.repos.runtime.getSourceTurnCapture(scope, identity.turnId);
+      if (existing) {
+        if (existing.contentHash !== contentHash) {
+          return { status: "conflict", reason: "source_turn_content_conflict" };
+        }
+        const result = existing.response.result;
+        if (!result) return existing.response;
+        const responseResult = { ...result, duplicate: true, scheduledEvolution: false, jobs: [] };
+        const memories = result.l1MemoryIds.map((id) => this.deps.repos.memories.getIncludingDeleted(id));
+        if (memories.some((memory) => isRecord(memory?.properties.internal_info.capture_decision) &&
+            memory.properties.internal_info.capture_decision.status === "rejected")) {
+          return { status: "rejected", reason: "capture_policy", result: responseResult };
+        }
+        if (memories.length > 0 && memories.every((memory) => !memory || memory.status === "deleted" || memory.deletedAt)) {
+          return { status: "rejected", reason: "capture_deleted", result: responseResult };
+        }
+        if (existing.response.status === "rejected") {
+          return { ...existing.response, result: responseResult };
+        }
+        return { status: "existing", result: responseResult };
+      }
+      const activation = this.deps.repos.runtime.getKv("source_turn_capture_activated_at")?.value;
+      if (typeof activation !== "string" || !Number.isFinite(Date.parse(activation))) {
+        return { status: "pending", reason: "source_capture_activation_unresolved" };
+      }
+      if (completedAtMs <= Date.parse(activation)) {
+        return { status: "rejected", reason: "legacy_before_activation" };
+      }
+      if (!normalized.query.trim() || !normalized.answer.trim() || normalized.status === "cancelled") {
+        return { status: "pending", reason: "source_turn_incomplete" };
+      }
+      if (!this.deps.memoryAddEnabled()) {
+        return { status: "pending", reason: "memory_add_disabled" };
+      }
+      const previous = this.deps.repos.runtime.latestSourceTurnCapture(scope);
+      let gapEpisode: EpisodeRecord | undefined;
+      let targetSessionId = previous?.sessionId;
+      if (previous && (startedAtMs < Date.parse(previous.startedAt) || completedAtMs < Date.parse(previous.completedAt))) {
+        const neighbors = this.deps.repos.runtime.sourceTurnCaptureNeighbors(scope, sourceTurn.startedAt);
+        const before = neighbors.before;
+        const after = neighbors.after;
+        if (!before?.episodeId || before.episodeId !== after?.episodeId || before.sessionId !== after.sessionId ||
+            Date.parse(before.completedAt) > startedAtMs || completedAtMs > Date.parse(after.startedAt)) {
+          return { status: "pending", reason: "source_turn_out_of_order" };
+        }
+        const candidate = this.deps.repos.runtime.getEpisode(before.episodeId);
+        const beforeRaw = before.rawTurnId ? this.deps.repos.runtime.getRawTurn(before.rawTurnId) : undefined;
+        if (!candidate || candidate.status !== "open" || !beforeRaw) {
+          return { status: "pending", reason: "source_episode_closed" };
+        }
+        const relation = classifyTurnRelation({
+          prevUserText: beforeRaw.userText ?? "", prevAssistantText: beforeRaw.assistantText ?? "",
+          newUserText: normalized.query, gapMs: startedAtMs - Date.parse(before.completedAt), prevTags: []
+        });
+        if (relation.relation === "new_task" || relation.relation === "end_topic" || explicitEndTopicDecision(normalized.query)) {
+          return { status: "pending", reason: "source_turn_out_of_order" };
+        }
+        gapEpisode = candidate;
+        targetSessionId = before.sessionId;
+      }
+      const resolved = this.resolveSourceSession({ ...request, namespace }, sourceTurn, scope, targetSessionId);
+      if ("status" in resolved && resolved.status === "pending") return resolved;
+      const session = resolved as SessionRecord;
+      const observed = this.deps.repos.runtime.getRawTurnBySessionTurn(session.id, identity.turnId);
+      if (observed && this.deps.repos.runtime.getEpisode(observed.episodeId)?.status !== "open") {
+        return { status: "pending", reason: "source_episode_closed" };
+      }
+      const requestedEpisodeId = gapEpisode?.id ?? request.episodeId;
+      const episode = requestedEpisodeId
+        ? this.deps.repos.runtime.getEpisode(requestedEpisodeId)
+        : this.deps.repos.runtime.latestEpisodeForSession(session.id);
+      if (request.episodeId && (!episode || episode.sessionId !== session.id || episode.userId !== session.userId)) {
+        throw new MemoryServiceError("forbidden", "source_episode_scope_conflict");
+      }
+      if (episode && episode.status !== "open") {
+        const proposal = this.proposeEpisodeRoute(session, normalized.query, undefined, sourceTurn.startedAt);
+        // Only an unambiguously new task after closure may create a fresh Episode. Never
+        // reopen an evaluated Episode merely because an offline turn arrived late.
+        if (request.episodeId || proposal.relationDecision.relation !== "new_task" ||
+            startedAtMs < Date.parse(episode.closedAt ?? episode.updatedAt)) {
+          return { status: "pending", reason: "source_episode_closed" };
+        }
+      }
+      if (episode && !gapEpisode) {
+        const laterRaw = episode.rawTurnIds.map((id) => this.deps.repos.runtime.getRawTurn(id))
+          .some((raw) => raw && raw.turnId !== identity.turnId && Date.parse(raw.createdAt) > startedAtMs);
+        if (laterRaw) return { status: "pending", reason: "source_turn_out_of_order" };
+      }
+      if (observed && isRecord(observed.messagePayload?.turn_complete)) {
+        // An old writer has already completed this turn without the source ledger. Do not
+        // adopt it into the new lifecycle or rewrite its contents during this release.
+        return { status: "pending", reason: "legacy_source_turn_already_completed" };
+      }
+      // Bind only this verified live Session immediately before capture. Keep its original
+      // host key, workspace and protocol so Hook recall and SessionEnd still reach it.
+      if (!session.conversationId && !this.deps.repos.runtime.bindSessionSourceConversation(session.id, identity.conversationId)) {
+        throw new MemoryServiceError("conflict", "source_session_scope_conflict");
+      }
+      if (observed && !this.deps.repos.runtime.bindRawTurnSourceConversation({
+        id: observed.id, sessionId: session.id, userId: session.userId, turnId: identity.turnId
+      }, identity.conversationId)) {
+        throw new MemoryServiceError("forbidden", "source_raw_turn_scope_conflict");
+      }
+      const result = this.completeTurn(identity.turnId, { ...normalized, sessionId: session.id,
+        ...(gapEpisode ? { episodeId: gapEpisode.id } : {}) }, sourceTurn);
+      if (gapEpisode) this.deps.repos.runtime.orderEpisodeTurnsBySourceTime(gapEpisode.id);
+      const response: SourceTurnCompleteResponse = result.l1MemoryIds.length > 0
+        ? { status: "stored", result }
+        : { status: "rejected", reason: "capture_policy", result };
+      this.deps.repos.runtime.insertSourceTurnCapture({
+        ...scope, turnId: identity.turnId, contentHash,
+        sessionId: result.sessionId, episodeId: result.episodeId, rawTurnId: result.rawTurnId,
+        startedAt: sourceTurn.startedAt, completedAt: sourceTurn.completedAt, sequence: identity.sequence,
+        response, createdAt: nowIso()
+      });
+      return response;
+    });
+  }
+
+  private resolveSourceSession(
+    request: SourceTurnCompleteRequest,
+    identity: SourceTurnIdentity,
+    scope: SourceTurnCaptureScope,
+    mappedSessionId?: string
+  ): SessionRecord | { status: "pending"; reason: string } {
+    const namespace = normalizeNamespace(request.namespace);
+    const inScope = (candidate: SessionRecord): boolean =>
+      candidate.userId === namespace.userId && candidate.source === identity.source && candidate.profileId === identity.profileId &&
+      (!candidate.conversationId || candidate.conversationId === identity.conversationId) &&
+      (candidate.hostSessionKey === identity.conversationId || candidate.conversationId === identity.conversationId ||
+        (identity.source === "codex" && candidate.hostSessionKey === `codex-memory-${identity.conversationId}`)) &&
+      (!namespace.projectId || candidate.projectId === namespace.projectId) &&
+      (!namespace.workspaceId || candidate.workspaceId === namespace.workspaceId) &&
+      (candidate.meta.source_namespace_key === undefined || candidate.meta.source_namespace_key === scope.namespaceKey) &&
+      (!namespace.tenantId || candidate.meta.source_namespace_key === scope.namespaceKey);
+    const canStartAfter = (candidate: SessionRecord): boolean => candidate.status === "closed" &&
+      Date.parse(identity.startedAt) >= Date.parse(candidate.closedAt ?? candidate.updatedAt);
+    if (mappedSessionId) {
+      const mapped = this.deps.repos.runtime.getSession(mappedSessionId);
+      if (!mapped) return { status: "pending", reason: "source_session_missing" };
+      if (!inScope(mapped)) throw new MemoryServiceError("forbidden", "source_session_scope_conflict");
+      if (mapped.status === "open") return mapped;
+      if (!canStartAfter(mapped)) return { status: "pending", reason: "source_session_closed" };
+    }
+    if (request.sessionId) {
+      const supplied = this.deps.repos.runtime.getSession(request.sessionId);
+      if (!supplied) return { status: "pending", reason: "source_session_missing" };
+      if (!inScope(supplied)) throw new MemoryServiceError("forbidden", "source_session_scope_conflict");
+      if (supplied.status === "open") return supplied;
+      if (!canStartAfter(supplied)) return { status: "pending", reason: "source_session_closed" };
+    }
+    const candidates = this.deps.repos.runtime.sourceConversationSessions(scope).filter(inScope);
+    const open = candidates.filter((candidate) => candidate.status === "open");
+    if (open.length > 1) return { status: "pending", reason: "source_session_ambiguous" };
+    if (candidates.some((candidate) => candidate.status !== "open" && !canStartAfter(candidate))) {
+      return { status: "pending", reason: "source_session_closed" };
+    }
+    if (open[0]) return open[0];
+    // The source lookup has already made the strict reuse decision. The legacy host-key
+    // lookup does not include every namespace dimension and must not run a second time.
+    const opened = this.openSession({
+      namespace: { ...namespace, sessionKey: identity.conversationId },
+      source: identity.source,
+      profileId: identity.profileId,
+      workspacePath: request.workspacePath,
+      meta: { conversationId: identity.conversationId, source_namespace_key: scope.namespaceKey },
+      timeZone: request.timeZone
+    }, { createNew: true, at: identity.startedAt });
+    return this.deps.repos.runtime.getSession(opened.sessionId)!;
+  }
+
+  completeTurn(
+    turnId: string,
+    request: TurnCompleteRequest & Record<string, unknown>,
+    sourceTurn?: SourceTurnIdentity
+  ): CompleteTurnResponse {
     request = sanitizeTurnCompleteRequest(request);
     if (request.status === "cancelled") {
       throw new MemoryServiceError("invalid_argument", "cancelled turns are not persisted");
@@ -1219,7 +1444,7 @@ export class SessionTurnService {
       return this.deps.completeTurnNoWrite(turnId, request);
     }
     const startedAt = Date.now();
-    const idempotencyKey = request.adapterId && request.requestId
+    const idempotencyKey = !sourceTurn && request.adapterId && request.requestId
       ? `turn.complete:${request.adapterId}:${request.requestId}`
       : undefined;
     const requestHash = stableHash({
@@ -1253,7 +1478,7 @@ export class SessionTurnService {
       if (existingRawTurn && isRecord(existingRawTurn.messagePayload?.turn_complete)) {
         const at = nowIso();
         const episode = this.deps.requireEpisode(existingRawTurn.episodeId);
-        const existingCaptureClaim = existingRawTurn.userText && existingRawTurn.assistantText
+        const existingCaptureClaim = !sourceTurn && existingRawTurn.userText && existingRawTurn.assistantText
           ? this.deps.repos.captureClaims.get(
               session.userId,
               normalizeMemoryCaptureSource(session.source),
@@ -1315,7 +1540,7 @@ export class SessionTurnService {
       const endTopicDecision =
         explicitEndTopicDecision(request.query) ??
         (existingRawTurn ? endTopicDecisionFromRawTurn(existingRawTurn) : undefined);
-      const at = nowIso();
+      const at = sourceTurn?.completedAt ?? nowIso();
       const recalledProposal = turnRouteProposalFromRecallRequest(turnStartRecall?.request);
       let route: CommittedTurnRoute;
       if (request.episodeId) {
@@ -1352,6 +1577,7 @@ export class SessionTurnService {
           !this.episodeRelationContext(latest).prevUserText
         );
         const proposalIsCurrent = Boolean(recalledProposal) &&
+          !(sourceTurn && latest && latest.status !== "open") &&
           (recalledProposal?.baseEpisodeId === latest?.id || proposalUsesObservedUnboundEpisode) &&
           !(recalledProposal?.action === "append" &&
             latest?.status === "closed" &&
@@ -1382,14 +1608,15 @@ export class SessionTurnService {
         } else {
           const proposal = proposalIsCurrent
             ? recalledProposal!
-            : this.proposeEpisodeRoute(session, request.query, endTopicDecision);
+            : this.proposeEpisodeRoute(session, request.query, endTopicDecision, sourceTurn?.startedAt);
           route = this.commitTurnRouteProposal(
             session,
             proposal,
             request.query,
             "turn.complete",
             at,
-            !proposalIsCurrent
+            !proposalIsCurrent,
+            sourceTurn?.startedAt
           );
         }
       }
@@ -1405,7 +1632,12 @@ export class SessionTurnService {
           at
         );
       }
-      this.deps.repos.runtime.touchSession(session.id, at);
+      let activityAt = at;
+      if (sourceTurn) {
+        activityAt = new Date(Math.max(Date.parse(at), Date.parse(session.lastSeenAt ?? session.updatedAt),
+          Date.parse(episode.updatedAt))).toISOString();
+      }
+      this.deps.repos.runtime.touchSession(session.id, activityAt);
       const rawTurnId = rawTurnIdForSessionTurn(session.id, turnId);
       const requestToolCalls = normalizeCompleteTurnToolCalls(completionRequest);
       const requestToolResults = normalizeCompleteTurnToolResults(completionRequest);
@@ -1453,6 +1685,7 @@ export class SessionTurnService {
           sourceMemoryIds,
           usage: isRecord(request.usage) ? request.usage : {},
           messagePayload: {
+            ...(sourceTurn ? { source_turn: sourceTurn } : {}),
             turn_start: turnStartPayload,
             turn_complete: {
               completed_at: at,
@@ -1461,7 +1694,7 @@ export class SessionTurnService {
             }
           },
           status: request.status ?? "succeeded",
-          createdAt: at
+          createdAt: sourceTurn?.startedAt ?? at
         });
       const rawTurnCreated = !existingRawTurn;
       const rawTurnFirstCompleted = rawTurnCreated
@@ -1469,6 +1702,7 @@ export class SessionTurnService {
       const completedObservedRawTurn = existingRawTurn
         ? {
             ...completeObservedRawTurn(existingRawTurn, completionRequest, at),
+            ...(sourceTurn ? { createdAt: sourceTurn.startedAt } : {}),
             episodeId: episode.id
           }
         : undefined;
@@ -1477,6 +1711,7 @@ export class SessionTurnService {
             ...completedObservedRawTurn,
             messagePayload: {
               ...completedObservedRawTurn.messagePayload,
+              ...(sourceTurn ? { source_turn: sourceTurn } : {}),
               turn_start: turnStartPayload
             }
           })
@@ -1514,11 +1749,11 @@ export class SessionTurnService {
           intentDecision
         });
       }
-      this.deps.repos.runtime.appendEpisodeRawTurn(episode.id, rawTurn.id, at);
+      this.deps.repos.runtime.appendEpisodeRawTurn(episode.id, rawTurn.id, activityAt);
 
       const userMemoryCapture = this.captureUserMemory(rawTurn, request, at);
       const requestTags = this.deps.normalizeRequestTags(request.tags);
-      const capturedSteps = this.captureEpisodeIncrementalSteps(episode, rawTurn, at)
+      const capturedSteps = this.captureEpisodeIncrementalSteps(episode, rawTurn, at, Boolean(sourceTurn))
         .map((step) => {
           const stepRawTurnId = step.rawTurnId ?? rawTurn.id;
           return stepRawTurnId === rawTurn.id && requestTags.length > 0
@@ -1624,7 +1859,7 @@ export class SessionTurnService {
           createdAt: at
         });
 
-        let captureClaimed = captureClaimByRawTurnId.get(stepRawTurnId);
+        let captureClaimed = sourceTurn ? true : captureClaimByRawTurnId.get(stepRawTurnId);
         if (captureClaimed === undefined) {
           const qaQuery = sourceRawTurn.userText ?? "";
           const qaAnswer = sourceRawTurn.assistantText ?? "";
@@ -1655,7 +1890,7 @@ export class SessionTurnService {
                     createdAt: at
                   });
                 }
-                this.deps.repos.runtime.appendEpisodeTurn(episode.id, stepRawTurnId, existing.id, at);
+                this.deps.repos.runtime.appendEpisodeTurn(episode.id, stepRawTurnId, existing.id, activityAt);
               }
             }
           } else {
@@ -1690,7 +1925,7 @@ export class SessionTurnService {
           source: "turn.complete.capture.v7",
           createdAt: at
         });
-        this.deps.repos.runtime.appendEpisodeTurn(episode.id, stepRawTurnId, upsert.memory.id, at);
+        this.deps.repos.runtime.appendEpisodeTurn(episode.id, stepRawTurnId, upsert.memory.id, activityAt);
         const existingProcessing = this.deps.repos.processing.get(upsert.memory.id);
         const contentChanged = Boolean(
           !upsert.created && upsert.previous?.contentHash !== upsert.memory.contentHash
@@ -2550,7 +2785,8 @@ export class SessionTurnService {
   private captureEpisodeIncrementalSteps(
     episode: EpisodeRecord,
     currentRawTurn: RawTurnRecord,
-    at: string
+    at: string,
+    currentTurnOnly = false
   ): ReturnType<typeof captureTurnSteps> {
     const seenRawTurnIds = new Set(
       episode.l1MemoryIds
@@ -2559,7 +2795,7 @@ export class SessionTurnService {
         .map((memory) => this.deps.rawTurnIdFromMemory(memory))
         .filter((id): id is string => Boolean(id))
     );
-    const rawTurns = uniq([...episode.rawTurnIds, currentRawTurn.id])
+    const rawTurns = uniq(currentTurnOnly ? [currentRawTurn.id] : [...episode.rawTurnIds, currentRawTurn.id])
       .map((id) => id === currentRawTurn.id ? currentRawTurn : this.deps.repos.runtime.getRawTurn(id))
       .filter((rawTurn): rawTurn is RawTurnRecord =>
         Boolean(rawTurn && (rawTurn.id === currentRawTurn.id || !seenRawTurnIds.has(rawTurn.id)))
@@ -2742,7 +2978,8 @@ export class SessionTurnService {
   private proposeEpisodeRoute(
     session: SessionRecord,
     userText: string,
-    forcedDecision?: TurnRelationDecision
+    forcedDecision?: TurnRelationDecision,
+    at = nowIso()
   ): TurnRouteProposal {
     const latest = this.deps.repos.runtime.latestEpisodeForSession(session.id);
     const relationContext = latest ? this.episodeRelationContext(latest) : undefined;
@@ -2751,11 +2988,11 @@ export class SessionTurnService {
       prevAssistantText: relationContext?.prevAssistantText ?? "",
       newUserText: userText,
       gapMs: relationContext?.lastTurnAtMs
-        ? Math.max(0, Date.now() - relationContext.lastTurnAtMs)
+        ? Math.max(0, Date.parse(at) - relationContext.lastTurnAtMs)
         : undefined,
       prevTags: relationContext?.tags ?? []
     });
-    return this.buildTurnRouteProposal(latest, decision, relationContext?.lastTurnAtMs);
+    return this.buildTurnRouteProposal(latest, decision, relationContext?.lastTurnAtMs, at);
   }
 
   private async proposeEpisodeRouteWithLlm(
@@ -2806,14 +3043,15 @@ export class SessionTurnService {
     userText: string,
     source: string,
     at: string,
-    proposalStale: boolean
+    proposalStale: boolean,
+    sourceStartedAt?: string
   ): CommittedTurnRoute {
     const decision = proposal.relationDecision;
     const closedEpisodeIds: string[] = [];
     const jobs: EvolutionJobRecord[] = [];
     if (proposal.action === "create_first") {
       return {
-        episode: this.ensureEpisode(session),
+        episode: this.ensureEpisode(session, undefined, sourceStartedAt),
         closedEpisodeIds,
         jobs,
         proposal,
@@ -2946,7 +3184,7 @@ export class SessionTurnService {
         });
       }
     }
-    const next = this.ensureEpisode(session);
+    const next = this.ensureEpisode(session, undefined, sourceStartedAt);
     const episode = this.deps.repos.runtime.updateEpisodeMeta(next.id, {
       relation: decision.relation,
       relationDecision: decision,
@@ -3194,7 +3432,7 @@ export class SessionTurnService {
     });
   }
 
-  ensureEpisode(session: SessionRecord, episodeId?: string): EpisodeRecord {
+  ensureEpisode(session: SessionRecord, episodeId?: string, at = nowIso()): EpisodeRecord {
     if (episodeId) {
       const existing = this.deps.repos.runtime.getEpisode(episodeId);
       if (existing) {
@@ -3207,7 +3445,6 @@ export class SessionTurnService {
       return latest;
     }
 
-    const at = nowIso();
     const episode = this.deps.repos.runtime.createEpisode({
       id: episodeId ?? newId("episode"),
       sessionId: session.id,
