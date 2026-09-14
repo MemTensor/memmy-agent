@@ -28,15 +28,54 @@ export type DesktopUpdateCheckStatus = "not-configured" | "latest" | "available"
 
 export type DesktopUpdateMode = "manual" | "silent" | "force";
 
+export type DesktopUpdateProvider = "legacy-installer" | "microsoft-store" | "store-migration";
+
+declare const desktopUpdateOfferTokenBrand: unique symbol;
+declare const desktopStoreMigrationTokenBrand: unique symbol;
+
+export type DesktopUpdateOfferToken = string & {
+  readonly [desktopUpdateOfferTokenBrand]: "DesktopUpdateOfferToken";
+};
+
+export type DesktopStoreMigrationToken = string & {
+  readonly [desktopStoreMigrationTokenBrand]: "DesktopStoreMigrationToken";
+};
+
+export interface DesktopWindowsStoreUpdateMetadata {
+  baselinePackageVersion: string;
+  baselinePackageFullName: string;
+  canSilentlyDownload: boolean;
+}
+
+export type DesktopPreparedUpdateHandle =
+  | {
+      kind: "installer-file";
+      filePath: string;
+    }
+  | {
+      kind: "microsoft-store";
+      baselinePackageVersion: string;
+      baselinePackageFullName: string;
+    }
+  | {
+      kind: "store-migration";
+      offerToken: DesktopStoreMigrationToken;
+    };
+
 export interface DesktopUpdateCheckResult {
   status: DesktopUpdateCheckStatus;
   currentVersion: string;
+  offerToken?: DesktopUpdateOfferToken;
+  provider?: DesktopUpdateProvider;
   latestVersion?: string;
   minSupportedVersion?: string;
   updateMode?: DesktopUpdateMode;
   force?: boolean;
   downloadUrl?: string;
-  preparedUpdatePath?: string;
+  windowsStore?: DesktopWindowsStoreUpdateMetadata;
+  /** Main-owned migration offer; it is not an installer until download succeeds. */
+  storeMigrationOffer?: Extract<DesktopPreparedUpdateHandle, { kind: "store-migration" }>;
+  preparedUpdate?: DesktopPreparedUpdateHandle;
   releaseNotes?: string;
   publishedAt?: string;
 }
@@ -45,16 +84,26 @@ export interface DesktopUpdateDownloadOptions {
   openInstaller?: boolean;
 }
 
-export interface DesktopUpdateDownloadProgress {
-  downloadUrl: string;
-  filePath: string;
-  transferredBytes: number;
-  totalBytes: number | null;
-  percent: number | null;
-}
+export type DesktopUpdateDownloadProgress =
+  | {
+      kind: "installer-file";
+      downloadUrl: string;
+      filePath: string;
+      transferredBytes: number;
+      totalBytes: number | null;
+      percent: number | null;
+    }
+  | {
+      kind: "microsoft-store";
+      state: string;
+      transferredBytes: number;
+      totalBytes: number | null;
+      percent: number | null;
+    };
 
 export interface DesktopUpdateInstallResult {
-  filePath: string;
+  preparedUpdate: DesktopPreparedUpdateHandle;
+  filePath?: string;
   opened: boolean;
   willQuit?: boolean;
   background?: boolean;

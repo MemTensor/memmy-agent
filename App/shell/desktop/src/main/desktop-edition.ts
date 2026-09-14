@@ -5,6 +5,12 @@ interface DesktopEditionManifest {
   edition?: unknown;
   accountChannel?: unknown;
   signing?: unknown;
+  windowsStoreMigration?: unknown;
+}
+
+export interface DesktopWindowsStoreMigrationConfig {
+  internalEnabled: boolean;
+  storeDestination: Record<string, unknown>;
 }
 
 export function resolveDesktopEdition(rawManifest: string | null | undefined, envAccountChannel?: string): DesktopEdition {
@@ -27,6 +33,28 @@ export function resolveDesktopPackageSigning(rawManifest: string | null | undefi
   }
 
   return envPackageSigning?.trim().toLowerCase() === "unsigned" ? "unsigned" : "signed";
+}
+
+export function resolveDesktopWindowsStoreMigrationConfig(
+  rawManifest: string | null | undefined
+): DesktopWindowsStoreMigrationConfig | null {
+  const manifest = parseDesktopEditionManifest(rawManifest);
+  const value = manifest?.windowsStoreMigration;
+  if (!isRecord(value)
+      || value.internalEnabled !== true && value.internalEnabled !== false
+      || !isRecord(value.storeDestination)) {
+    return null;
+  }
+  const keys = Object.keys(value);
+  if (keys.length !== 2
+      || !keys.includes("internalEnabled")
+      || !keys.includes("storeDestination")) {
+    return null;
+  }
+  return {
+    internalEnabled: value.internalEnabled,
+    storeDestination: value.storeDestination
+  };
 }
 
 export function desktopUserDataDirectoryName(edition: DesktopEdition): string {

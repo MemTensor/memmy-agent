@@ -1,21 +1,26 @@
 import { createHash } from "node:crypto";
 import { createReadStream, existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { chmod, copyFile, cp, mkdir, open, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, open, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import { loadMemmyConfig } from "../config/index.js";
 import { MEMORY_PROTOCOL_VERSION, MEMORY_SERVICE_VERSION } from "../version.js";
+import { copyBundledMemoryRuntime } from "./bundled-runtime-copy.js";
 
 const DEFAULT_RELEASES_URL = "https://github.com/MemTensor/memmy-agent/releases";
 const INSTALL_LOCK_TIMEOUT_MS = 15_000;
-/** Time allowed for a new lock file to record its owner before it counts as abandoned. */
-const INSTALL_LOCK_WRITE_GRACE_MS = 2_000;
 const SERVICE_STOP_TIMEOUT_MS = 5_000;
 export const DEFAULT_HEALTH_CHECK_TIMEOUT_MS = 120_000;
 
-export interface RuntimeAssetDescriptor { name: string; sha256: string; size?: number; url?: string; }
+export interface RuntimeAssetDescriptor {
+  name: string;
+  sha256: string;
+  size?: number;
+  url?: string;
+  contentId?: string;
+}
 export interface MemoryReleaseManifest {
   version: string;
   protocolVersion: number;
@@ -43,6 +48,10 @@ export interface MemoryRuntimeInstallOptions {
   agents?: string[];
   /** Desktop uses a newer compatible installation instead of replacing it with its bundled copy. */
   preferInstalledCompatible?: boolean;
+  /** Desktop replaces an equal-version runtime so bundled content fixes are not skipped. */
+  replaceSameVersion?: boolean;
+  /** Desktop replaces an equal-version runtime only when its host executable authority changed. */
+  replaceSameVersionOnExecutableChange?: boolean;
 }
 
 export interface InstalledRuntimePointer {
@@ -71,7 +80,44 @@ export async function installMemoryRuntime(options: MemoryRuntimeInstallOptions 
   const installationPath = join(serviceHome, "installation.json");
   const previous = await readJsonFile<InstalledRuntimePointer>(currentPath);
   const versionComparison = previous ? compareVersions(manifest.version, previous.version) : 1;
-  if (previous && options.preferInstalledCompatible && previous.protocolVersion === MEMORY_PROTOCOL_VERSION && versionComparison <= 0) {
+  const requestedRuntimeExecutable = options.nodeExecutable ?? process.execPath;
+  const executableAuthorityChanged = Boolean(
+    previous && previous.runtimeExecutable !== requestedRuntimeExecutable
+  );
+  const installedContentId = previous
+    ? await readRuntimeContentId(previous.runtimeDir)
+    : undefined;
+  const identicalRuntimeContent = Boolean(
+    descriptor.contentId
+      && installedContentId
+      && descriptor.contentId === installedContentId
+  );
+  const packagedRuntimeContentChanged = Boolean(
+    descriptor.contentId
+      && descriptor.contentId !== installedContentId
+  );
+  const rebindingSameVersion = Boolean(
+    previous
+      && versionComparison === 0
+      && options.replaceSameVersionOnExecutableChange
+      && executableAuthorityChanged
+      && identicalRuntimeContent
+  );
+  const replacingSameVersion = Boolean(
+    previous
+      && versionComparison === 0
+      && (
+        options.replaceSameVersion
+        || (
+          options.replaceSameVersionOnExecutableChange
+          && (
+            packagedRuntimeContentChanged
+            || (executableAuthorityChanged && !identicalRuntimeContent)
+          )
+        )
+      )
+  );
+  if (previous && options.preferInstalledCompatible && previous.protocolVersion === MEMORY_PROTOCOL_VERSION && versionComparison <= 0 && !replacingSameVersion && !rebindingSameVersion) {
     return reuseInstalledRuntime(previous, home, serviceHome, options, healthCheckTimeoutMs);
   }
   if (previous && versionComparison < 0) {
@@ -84,7 +130,7 @@ export async function installMemoryRuntime(options: MemoryRuntimeInstallOptions 
     target,
     runtimeDir,
     entrypoint: join(runtimeDir, "dist", "src", "server", "index.js"),
-    runtimeExecutable: options.nodeExecutable ?? process.execPath,
+    runtimeExecutable: requestedRuntimeExecutable,
     activatedAt: new Date().toISOString()
   };
   const launcher = launcherPaths(home);
@@ -95,14 +141,19 @@ export async function installMemoryRuntime(options: MemoryRuntimeInstallOptions 
   await mkdir(runtimeRoot, { recursive: true });
   const installLock = await acquireInstallLock(join(serviceHome, "install.lock"));
   let stagedPath: string | undefined;
+  let replacementBackupPath: string | undefined;
   let installedRuntimeCreated = false;
+  let activationCommitted = false;
+  let installResult: Record<string, unknown> | undefined;
   try {
-    if (!existsSync(pointer.entrypoint)) {
+    const installingRuntime = !existsSync(pointer.entrypoint) || replacingSameVersion;
+    let unpacked: string | undefined;
+    if (installingRuntime) {
       stagedPath = join(runtimeRoot, `.staging-${process.pid}-${Date.now()}`);
       await mkdir(stagedPath, { recursive: true });
-      const unpacked = join(stagedPath, "unpacked");
+      unpacked = join(stagedPath, "unpacked");
       if (options.runtimeDirectory) {
-        await cp(resolveHome(options.runtimeDirectory), unpacked, { recursive: true });
+        await copyBundledMemoryRuntime(resolveHome(options.runtimeDirectory), unpacked);
       } else {
         const archivePath = join(stagedPath, descriptor.name);
         await obtainRuntimeAsset(options, manifest, descriptor, archivePath);
@@ -114,42 +165,79 @@ export async function installMemoryRuntime(options: MemoryRuntimeInstallOptions 
         extractTarGzip(archivePath, unpacked);
       }
       await validateRuntime(unpacked, manifest.version, target, manifest.protocolVersion);
-      await mkdir(dirname(runtimeDir), { recursive: true });
-      await rm(runtimeDir, { recursive: true, force: true });
-      await rename(unpacked, runtimeDir);
-      installedRuntimeCreated = true;
     } else {
       await validateRuntime(runtimeDir, manifest.version, target, manifest.protocolVersion);
     }
 
-    const switching = !previous || previous.runtimeDir !== runtimeDir;
+    const switching = !previous || previous.runtimeDir !== runtimeDir || rebindingSameVersion;
     const repairLegacyTask = Boolean(options.skipServiceRegistration && previous && isLegacyWindowsTask(home));
-    if (!options.skipServiceRegistration || repairLegacyTask) {
-      // End an already running .cmd task as well as any surviving legacy service.
-      if (process.platform === "win32") await stopInstalledMemoryService(home);
-      else if (switching && previous) stopUserService();
-    }
-    await writeJsonAtomic(currentPath, pointer);
-    await writeStableLauncher(home, serviceHome, pointer.runtimeExecutable!);
-    if (!options.skipServiceRegistration) registerAndStartUserService(home, serviceHome);
-    else if (repairLegacyTask) tryRepairLegacyWindowsTaskRegistration(home, serviceHome);
+    let previousServiceStopAttempted = false;
+    let serviceStartAttempted = false;
+    try {
+      if (!options.skipServiceRegistration || repairLegacyTask) {
+        // Stop the existing Windows task before replacing runtime files or launchers.
+        if (process.platform === "win32" || ((replacingSameVersion || rebindingSameVersion) && previous)) {
+          previousServiceStopAttempted = true;
+          await stopInstalledMemoryService(home);
+        } else if (switching && previous) {
+          previousServiceStopAttempted = true;
+          stopUserService();
+        }
+      }
+      if (unpacked) {
+        await mkdir(dirname(runtimeDir), { recursive: true });
+        if (replacingSameVersion && existsSync(runtimeDir)) {
+          const backupPath = join(runtimeRoot, `.replacement-backup-${process.pid}-${Date.now()}`);
+          await rename(runtimeDir, backupPath);
+          replacementBackupPath = backupPath;
+        } else {
+          await rm(runtimeDir, { recursive: true, force: true });
+        }
+        await rename(unpacked, runtimeDir);
+        installedRuntimeCreated = true;
+      }
+      await writeJsonAtomic(currentPath, pointer);
+      await writeStableLauncher(home, serviceHome, pointer.runtimeExecutable!);
+      if (!options.skipServiceRegistration) {
+        serviceStartAttempted = true;
+        registerAndStartUserService(home, serviceHome);
+      } else if (repairLegacyTask) {
+        tryRepairLegacyWindowsTaskRegistration(home, serviceHome);
+      }
 
-    if (!options.skipHealthCheck) {
-      try {
+      if (!options.skipHealthCheck) {
         await waitForRuntimeHealth(
           options.endpoint ?? "http://127.0.0.1:18960",
           manifest.version,
           healthCheckTimeoutMs
         );
-      } catch (error) {
-        if (!options.skipServiceRegistration && previous) {
-          if (process.platform === "win32") await stopInstalledMemoryService(home);
-          else stopUserService();
+      }
+
+      await writeJsonAtomic(installationPath, {
+        serviceVersion: manifest.version,
+        protocolVersion: manifest.protocolVersion,
+        target,
+        installedAt: new Date().toISOString(),
+        agents: options.agents ?? await installedAgents(home),
+        releaseSource: options.releaseBaseUrl ?? DEFAULT_RELEASES_URL
+      });
+      activationCommitted = true;
+    } catch (error) {
+      try {
+        if (!options.skipServiceRegistration && previous && serviceStartAttempted) {
+          await stopInstalledMemoryService(home);
+        }
+        if (replacementBackupPath) {
+          await rm(runtimeDir, { recursive: true, force: true });
+          await rename(replacementBackupPath, runtimeDir);
+          replacementBackupPath = undefined;
         }
         if (previous) {
           await writeJsonAtomic(currentPath, previous);
           await writeStableLauncher(home, serviceHome, previous.runtimeExecutable ?? process.execPath);
-          if (!options.skipServiceRegistration) registerAndStartUserService(home, serviceHome);
+          if (!options.skipServiceRegistration && (previousServiceStopAttempted || serviceStartAttempted)) {
+            registerAndStartUserService(home, serviceHome);
+          }
         } else {
           await cleanupFailedFirstInstall({
             currentPath,
@@ -161,22 +249,49 @@ export async function installMemoryRuntime(options: MemoryRuntimeInstallOptions 
             unregisterService: !options.skipServiceRegistration
           });
         }
-        throw error;
+      } catch (rollbackError) {
+        throw new AggregateError(
+          [error, rollbackError],
+          "Memory runtime activation failed and the previous runtime could not be fully restored"
+        );
       }
+      throw error;
     }
 
-    await writeJsonAtomic(installationPath, {
-      serviceVersion: manifest.version,
-      protocolVersion: manifest.protocolVersion,
-      target,
-      installedAt: new Date().toISOString(),
-      agents: options.agents ?? await installedAgents(home),
-      releaseSource: options.releaseBaseUrl ?? DEFAULT_RELEASES_URL
-    });
-    return { ok: true, upgraded: Boolean(previous), previousVersion: previous?.version, ...pointer, launcher };
+    let backupCleanupWarning: string | undefined;
+    if (replacementBackupPath) {
+      const committedBackupPath = replacementBackupPath;
+      replacementBackupPath = undefined;
+      try {
+        await rm(committedBackupPath, { recursive: true, force: true });
+      } catch (error) {
+        backupCleanupWarning = `activated Memory runtime, but failed to remove backup ${committedBackupPath}: ${error instanceof Error ? error.message : String(error)}`;
+      }
+    }
+    installResult = {
+      ok: true,
+      upgraded: Boolean(previous),
+      previousVersion: previous?.version,
+      ...(rebindingSameVersion ? { rebound: true } : {}),
+      ...pointer,
+      launcher,
+      ...(backupCleanupWarning ? { warning: backupCleanupWarning } : {})
+    };
+    return installResult;
   } finally {
-    if (stagedPath) await rm(stagedPath, { recursive: true, force: true });
-    await installLock.release();
+    try {
+      if (stagedPath) await rm(stagedPath, { recursive: true, force: true });
+    } catch (error) {
+      if (!activationCommitted) throw error;
+      if (installResult) {
+        const cleanupWarning = `activated Memory runtime, but failed to remove staging directory ${stagedPath}: ${error instanceof Error ? error.message : String(error)}`;
+        installResult.warning = typeof installResult.warning === "string"
+          ? `${installResult.warning}; ${cleanupWarning}`
+          : cleanupWarning;
+      }
+    } finally {
+      await installLock.release();
+    }
   }
 }
 
@@ -288,6 +403,7 @@ export function restartInstalledMemoryService(): Promise<void> {
 export interface StopInstalledMemoryServiceDependencies {
   stopUserService?: () => void;
   fetch?: typeof fetch;
+  isProcessRunning?: (pid: number) => boolean;
 }
 
 interface MemoryRuntimeState {
@@ -305,9 +421,16 @@ export async function stopInstalledMemoryService(
     join(resolvedHome, "memory-service", "runtime.json")
   );
   (dependencies.stopUserService ?? stopUserService)();
+  const runtimePid = Number.isSafeInteger(runtimeState?.pid) && runtimeState!.pid! > 0
+    ? runtimeState!.pid
+    : undefined;
+  const isRunning = dependencies.isProcessRunning ?? processIsRunning;
 
   if (!runtimeState?.endpoint) {
-    return { ok: true, action: "stop" };
+    if (runtimePid && !await waitForRuntimeProcessStop(runtimePid, isRunning)) {
+      throw new Error(`Memory service process ${runtimePid} did not stop`);
+    }
+    return { ok: true, action: "stop", ...(runtimePid ? { pid: runtimePid } : {}) };
   }
 
   const endpoint = loopbackEndpoint(runtimeState.endpoint);
@@ -319,8 +442,8 @@ export async function stopInstalledMemoryService(
   if (probe === "unexpected") {
     throw new Error(`refusing to stop an unexpected service at ${endpoint}`);
   }
+  let shutdownError: unknown;
   if (probe === "memory") {
-    let shutdownError: unknown;
     try {
       const response = await request(`${endpoint}/api/v1/admin/shutdown`, {
         method: "POST",
@@ -337,14 +460,14 @@ export async function stopInstalledMemoryService(
     } catch (error) {
       shutdownError = error;
     }
-    const stopped = await waitForMemoryRuntimeStop(endpoint, headers, request);
-    if (!stopped) {
-      throw shutdownError instanceof Error
-        ? shutdownError
-        : new Error(`Memory service did not stop at ${endpoint}`);
-    }
   }
-  return { ok: true, action: "stop", ...(runtimeState.pid ? { pid: runtimeState.pid } : {}) };
+  const stopped = await waitForMemoryRuntimeStop(endpoint, headers, request, runtimePid, isRunning);
+  if (!stopped) {
+    throw shutdownError instanceof Error
+      ? shutdownError
+      : new Error(`Memory service did not stop at ${endpoint}${runtimePid ? ` (process ${runtimePid})` : ""}`);
+  }
+  return { ok: true, action: "stop", ...(runtimePid ? { pid: runtimePid } : {}) };
 }
 
 async function probeMemoryRuntime(
@@ -368,14 +491,36 @@ async function probeMemoryRuntime(
 async function waitForMemoryRuntimeStop(
   endpoint: string,
   headers: Record<string, string>,
-  request: typeof fetch
+  request: typeof fetch,
+  pid: number | undefined,
+  isRunning: (pid: number) => boolean
 ): Promise<boolean> {
   const deadline = Date.now() + SERVICE_STOP_TIMEOUT_MS;
   while (Date.now() < deadline) {
-    if (await probeMemoryRuntime(endpoint, headers, request) === "stopped") return true;
+    const endpointStopped = await probeMemoryRuntime(endpoint, headers, request) === "stopped";
+    const processStopped = !pid || !isRunning(pid);
+    if (endpointStopped && processStopped) return true;
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
   }
   return false;
+}
+
+async function waitForRuntimeProcessStop(pid: number, isRunning: (pid: number) => boolean): Promise<boolean> {
+  const deadline = Date.now() + SERVICE_STOP_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (!isRunning(pid)) return true;
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+  }
+  return false;
+}
+
+function processIsRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return isNodeError(error) && error.code === "EPERM";
+  }
 }
 
 function loopbackEndpoint(value: string): string {
@@ -455,6 +600,7 @@ async function resolveReleaseManifest(
     const protocolVersion = typeof metadata?.protocolVersion === "number"
       ? metadata.protocolVersion
       : MEMORY_PROTOCOL_VERSION;
+    const contentId = parseOptionalRuntimeContentId(metadata?.contentId);
     return {
       version,
       protocolVersion,
@@ -462,7 +608,8 @@ async function resolveReleaseManifest(
         [packagedTarget]: {
           name: basename(path),
           sha256: "0".repeat(64),
-          url: pathToFileURL(path).href
+          url: pathToFileURL(path).href,
+          ...(contentId ? { contentId } : {})
         }
       }
     };
@@ -491,7 +638,14 @@ function parseReleaseManifest(value: unknown): MemoryReleaseManifest {
     if (!isRecord(asset) || typeof asset.name !== "string" || !asset.name || typeof asset.sha256 !== "string" || !/^[a-f0-9]{64}$/i.test(asset.sha256)) {
       throw new Error(`Memory release asset is invalid: ${target}`);
     }
-    assets[target] = { name: asset.name, sha256: asset.sha256.toLowerCase(), ...(typeof asset.size === "number" ? { size: asset.size } : {}), ...(typeof asset.url === "string" ? { url: asset.url } : {}) };
+    const contentId = parseOptionalRuntimeContentId(asset.contentId);
+    assets[target] = {
+      name: asset.name,
+      sha256: asset.sha256.toLowerCase(),
+      ...(typeof asset.size === "number" ? { size: asset.size } : {}),
+      ...(typeof asset.url === "string" ? { url: asset.url } : {}),
+      ...(contentId ? { contentId } : {})
+    };
   }
   return { version: value.version, protocolVersion: value.protocolVersion as number, assets };
 }
@@ -550,6 +704,24 @@ async function validateRuntime(path: string, version: string, target: string, pr
   }
   const entrypoint = join(path, "dist", "src", "server", "index.js");
   if (!existsSync(entrypoint)) throw new Error(`Memory runtime entrypoint is missing: ${entrypoint}`);
+}
+
+async function readRuntimeContentId(runtimeDirectory: string): Promise<string | undefined> {
+  const metadata = await readJsonFile<Record<string, unknown>>(
+    join(runtimeDirectory, "memory-runtime.json")
+  );
+  const value = metadata?.contentId;
+  return typeof value === "string" && /^[a-f0-9]{64}$/i.test(value)
+    ? value.toLowerCase()
+    : undefined;
+}
+
+function parseOptionalRuntimeContentId(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !/^[a-f0-9]{64}$/i.test(value)) {
+    throw new Error("Memory runtime content identity is invalid");
+  }
+  return value.toLowerCase();
 }
 
 function extractTarGzip(archivePath: string, destination: string): void {
@@ -849,7 +1021,6 @@ function resolveHealthCheckTimeoutMs(value: number | undefined): number {
 async function acquireInstallLock(path: string): Promise<{ release(): Promise<void> }> {
   await mkdir(dirname(path), { recursive: true });
   const startedAt = Date.now();
-  let reclaimed = false;
   for (;;) {
     try {
       const handle = await open(path, "wx", 0o600);
@@ -857,66 +1028,9 @@ async function acquireInstallLock(path: string): Promise<{ release(): Promise<vo
       return { async release() { await handle.close(); await unlink(path).catch(() => undefined); } };
     } catch (error) {
       if (!isNodeError(error) || error.code !== "EEXIST") throw error;
-      // An installer that crashed or was killed never runs release(), so its
-      // lock file outlives it and would otherwise block every later install.
-      // Reclaim it once per call when its owner is gone; a live owner still
-      // gets the full wait so concurrent installers stay serialized.
-      if (!reclaimed && !(await isInstallLockHeldByLiveOwner(path))) {
-        reclaimed = true;
-        await unlink(path).catch((unlinkError: unknown) => {
-          if (!isNodeError(unlinkError) || unlinkError.code !== "ENOENT") throw unlinkError;
-        });
-        continue;
-      }
       if (Date.now() - startedAt > INSTALL_LOCK_TIMEOUT_MS) throw new Error(`timed out waiting for installer lock: ${path}`);
       await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
     }
-  }
-}
-
-/**
- * Reports whether an existing installer lock still belongs to a running process.
- *
- * A lock whose pid cannot be read counts as abandoned once it is older than the
- * write grace period: interrupted writes can leave the file empty, and holding
- * the install back on an unreadable lock strands the runtime with no recovery.
- * @param path Path of the lock file to inspect.
- * @returns Whether the recorded owner process is still alive.
- */
-async function isInstallLockHeldByLiveOwner(path: string): Promise<boolean> {
-  let contents: string;
-  try {
-    contents = await readFile(path, "utf8");
-  } catch (error) {
-    // The owner released the lock while it was being inspected.
-    if (isNodeError(error) && error.code === "ENOENT") return false;
-    throw error;
-  }
-  const pid = Number.parseInt(contents.trim(), 10);
-  if (Number.isInteger(pid) && pid > 0) {
-    if (pid === process.pid) return true;
-    try {
-      process.kill(pid, 0);
-      return true;
-    } catch (error) {
-      // EPERM means the pid is live but owned by another user.
-      return isNodeError(error) && error.code === "EPERM";
-    }
-  }
-  // The pid is missing or unreadable. Between open() and writeFile() the lock
-  // exists with no owner recorded, so treat it as live until it is old enough
-  // that the writing process must have failed.
-  const age = await installLockAgeMs(path);
-  return age !== undefined && age < INSTALL_LOCK_WRITE_GRACE_MS;
-}
-
-async function installLockAgeMs(path: string): Promise<number | undefined> {
-  try {
-    return Date.now() - (await stat(path)).mtimeMs;
-  } catch (error) {
-    // A vanished lock is released, not abandoned.
-    if (isNodeError(error) && error.code === "ENOENT") return undefined;
-    throw error;
   }
 }
 

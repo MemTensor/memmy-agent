@@ -518,6 +518,8 @@ function setupOptions(parsed: ParsedArgs): MemoryCliSetupOptions {
     releaseBaseUrl: optionString(parsed.options, "release-base-url"),
     nodeExecutable: optionString(parsed.options, "node-executable"),
     preferInstalledCompatible: optionBoolean(parsed.options, "use-compatible-installed"),
+    replaceSameVersion: optionBoolean(parsed.options, "replace-same-version"),
+    replaceSameVersionOnExecutableChange: optionBoolean(parsed.options, "replace-same-version-on-executable-change"),
     skipServiceRegistration: optionBoolean(parsed.options, "skip-service-registration"),
     skipHealthCheck: optionBoolean(parsed.options, "skip-health-check"),
     healthCheckTimeoutMs: positiveIntegerOption(parsed, "health-check-timeout-ms"),

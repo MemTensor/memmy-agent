@@ -1,5 +1,5 @@
 /** Global.d module. */
-import type { DesktopAppInfo, DesktopImageActionRequest, DesktopImageSaveResult, DesktopMemoryServiceRestartResult, DesktopProjectDirectorySelection, DesktopUpdateCheckResult, DesktopUpdateDownloadProgress, DesktopUpdateInstallResult } from "@memmy/desktop-interface";
+import type { DesktopAppInfo, DesktopImageActionRequest, DesktopImageSaveResult, DesktopMemoryServiceRestartResult, DesktopPreparedUpdateHandle, DesktopProjectDirectorySelection, DesktopUpdateCheckResult, DesktopUpdateDownloadProgress, DesktopUpdateInstallResult, DesktopUpdateOfferToken } from "@memmy/desktop-interface";
 
 declare global {
   type MemmyMicrophoneAccessStatus = "not-determined" | "granted" | "denied" | "restricted" | "unsupported";
@@ -32,9 +32,9 @@ declare global {
       getAppInfo(): Promise<DesktopAppInfo>;
       getInstallationId(): Promise<string>;
       checkForUpdates(): Promise<DesktopUpdateCheckResult>;
-      downloadUpdate(update: DesktopUpdateCheckResult, options?: import("@memmy/desktop-interface").DesktopUpdateDownloadOptions): Promise<DesktopUpdateInstallResult>;
+      downloadUpdate(offerToken: DesktopUpdateOfferToken, options?: import("@memmy/desktop-interface").DesktopUpdateDownloadOptions): Promise<DesktopUpdateInstallResult>;
       onUpdateDownloadProgress(callback: (progress: DesktopUpdateDownloadProgress) => void): () => void;
-      openUpdateInstaller(filePath: string): Promise<DesktopUpdateInstallResult>;
+      openUpdateInstaller(preparedUpdate: DesktopPreparedUpdateHandle): Promise<DesktopUpdateInstallResult>;
       openExternal(url: string): Promise<void>;
       openAgentTool(sourceId: string, prompt: string): Promise<{ opened: boolean }>;
       openMailto(mailtoUrl: string): Promise<void>;

@@ -2,9 +2,11 @@ const { contextBridge, ipcRenderer }: typeof import("electron") = require("elect
 type IpcRendererEvent = import("electron").IpcRendererEvent;
 type DesktopAppInfo = import("@memmy/desktop-interface").DesktopAppInfo;
 type DesktopUpdateCheckResult = import("@memmy/desktop-interface").DesktopUpdateCheckResult;
+type DesktopUpdateOfferToken = import("@memmy/desktop-interface").DesktopUpdateOfferToken;
 type DesktopUpdateDownloadOptions = import("@memmy/desktop-interface").DesktopUpdateDownloadOptions;
 type DesktopUpdateDownloadProgress = import("@memmy/desktop-interface").DesktopUpdateDownloadProgress;
 type DesktopUpdateInstallResult = import("@memmy/desktop-interface").DesktopUpdateInstallResult;
+type DesktopPreparedUpdateHandle = import("@memmy/desktop-interface").DesktopPreparedUpdateHandle;
 type DesktopMenuBarIconResult = import("@memmy/desktop-interface").DesktopMenuBarIconResult;
 type DesktopImageActionRequest = import("@memmy/desktop-interface").DesktopImageActionRequest;
 type DesktopImageSaveResult = import("@memmy/desktop-interface").DesktopImageSaveResult;
@@ -28,9 +30,9 @@ interface MemmyPreloadApi {
   getAppInfo(): Promise<DesktopAppInfo>;
   getInstallationId(): Promise<string>;
   checkForUpdates(): Promise<DesktopUpdateCheckResult>;
-  downloadUpdate(update: DesktopUpdateCheckResult, options?: DesktopUpdateDownloadOptions): Promise<DesktopUpdateInstallResult>;
+  downloadUpdate(offerToken: DesktopUpdateOfferToken, options?: DesktopUpdateDownloadOptions): Promise<DesktopUpdateInstallResult>;
   onUpdateDownloadProgress(callback: (progress: DesktopUpdateDownloadProgress) => void): () => void;
-  openUpdateInstaller(filePath: string): Promise<DesktopUpdateInstallResult>;
+  openUpdateInstaller(preparedUpdate: DesktopPreparedUpdateHandle): Promise<DesktopUpdateInstallResult>;
   openExternal(url: string): Promise<void>;
   openAgentTool(sourceId: string, prompt: string): Promise<{ opened: boolean }>;
   openMailto(mailtoUrl: string): Promise<void>;
@@ -134,8 +136,8 @@ const memmyPreloadApi: MemmyPreloadApi = {
     return ipcRenderer.invoke("memmy:check-for-updates");
   },
 
-  async downloadUpdate(update: DesktopUpdateCheckResult, options?: DesktopUpdateDownloadOptions): Promise<DesktopUpdateInstallResult> {
-    return ipcRenderer.invoke("memmy:download-update", update, options);
+  async downloadUpdate(offerToken: DesktopUpdateOfferToken, options?: DesktopUpdateDownloadOptions): Promise<DesktopUpdateInstallResult> {
+    return ipcRenderer.invoke("memmy:download-update", offerToken, options);
   },
 
   onUpdateDownloadProgress(callback: (progress: DesktopUpdateDownloadProgress) => void): () => void {
@@ -146,8 +148,8 @@ const memmyPreloadApi: MemmyPreloadApi = {
     return () => ipcRenderer.removeListener("memmy:update-download-progress", listener);
   },
 
-  async openUpdateInstaller(filePath: string): Promise<DesktopUpdateInstallResult> {
-    return ipcRenderer.invoke("memmy:open-update-installer", filePath);
+  async openUpdateInstaller(preparedUpdate: DesktopPreparedUpdateHandle): Promise<DesktopUpdateInstallResult> {
+    return ipcRenderer.invoke("memmy:open-update-installer", preparedUpdate);
   },
 
   async openExternal(url: string): Promise<void> {

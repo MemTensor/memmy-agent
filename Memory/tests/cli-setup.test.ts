@@ -14,6 +14,7 @@ import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import YAML from "yaml";
 import { formatOutput, runCommand } from "../src/cli/commands.js";
+import { runtimeTarget } from "../src/cli/runtime-installer.js";
 import { renderSetupResult } from "../src/cli/render/index.js";
 
 const roots: string[] = [];
@@ -756,6 +757,51 @@ describe("memmy-memory CLI setup commands", () => {
     });
   });
 
+  it("passes Desktop executable-change rebinding from CLI parsing to the runtime installer", async () => {
+    const root = tempRoot();
+    const home = join(root, "home");
+    const firstRuntime = createPackagedRuntimeFixture(root, "first-runtime", "a".repeat(64));
+    await runCommand({
+      argv: [
+        "install",
+        "--home", home,
+        "--config", join(home, "config.yaml"),
+        "--db", join(home, "memory.sqlite"),
+        "--service-only",
+        "--skip-agent-skills",
+        "--skip-legacy-migration",
+        "--runtime-directory", firstRuntime,
+        "--node-executable", "/nsis/Memmy.exe",
+        "--skip-service-registration",
+        "--skip-health-check"
+      ]
+    });
+
+    const storeRuntime = createPackagedRuntimeFixture(root, "store-runtime", "a".repeat(64));
+    const result = await runCommand({
+      argv: [
+        "install",
+        "--home", home,
+        "--config", join(home, "config.yaml"),
+        "--db", join(home, "memory.sqlite"),
+        "--service-only",
+        "--skip-agent-skills",
+        "--skip-legacy-migration",
+        "--runtime-directory", storeRuntime,
+        "--node-executable", "/windowsapps/Memmy.exe",
+        "--use-compatible-installed",
+        "--replace-same-version-on-executable-change",
+        "--skip-service-registration",
+        "--skip-health-check"
+      ]
+    }) as { runtime: Record<string, unknown> };
+
+    expect(result.runtime).toMatchObject({
+      rebound: true,
+      runtimeExecutable: "/windowsapps/Memmy.exe"
+    });
+  });
+
   it("does not replace an existing non-memmy-memory binary without force", async () => {
     const root = tempRoot();
     const source = join(root, "index.js");
@@ -807,6 +853,19 @@ function createAllAgentRoots(root: string): void {
   mkdirSync(join(root, ".config", "opencode"), { recursive: true });
   mkdirSync(join(root, ".openclaw", "workspace"), { recursive: true });
   mkdirSync(join(root, ".hermes"), { recursive: true });
+}
+
+function createPackagedRuntimeFixture(root: string, name: string, contentId: string): string {
+  const runtime = join(root, name);
+  mkdirSync(join(runtime, "dist", "src", "server"), { recursive: true });
+  writeFileSync(join(runtime, "dist", "src", "server", "index.js"), "// runtime fixture\n");
+  writeFileSync(join(runtime, "memory-runtime.json"), JSON.stringify({
+    version: "2.1.0",
+    protocolVersion: 1,
+    target: runtimeTarget(process.platform, process.arch),
+    contentId
+  }));
+  return runtime;
 }
 
 function setEnv(key: string, value: string): void {

@@ -627,14 +627,132 @@ function Test-DirectoryContainsData {
     return $false
   }
   foreach ($item in @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction Stop)) {
-    if ($ExcludeTopLevelNames -contains $item.Name) { continue }
+    $isReparsePoint = ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+    if ($ExcludeTopLevelNames -contains $item.Name) {
+      if (-not $item.PSIsContainer -or $isReparsePoint) { return $true }
+      continue
+    }
+    if ($isReparsePoint) { return $true }
     if (-not $item.PSIsContainer) { return $true }
-    if ($null -ne (Get-ChildItem -LiteralPath $item.FullName -Recurse -Force -File -ErrorAction Stop |
+    if ($null -ne (Get-ChildItem -LiteralPath $item.FullName -Recurse -Force -ErrorAction Stop |
+        Where-Object {
+          -not $_.PSIsContainer -or
+            ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+        } |
         Select-Object -First 1)) {
       return $true
     }
   }
   return $false
+}
+
+function Test-JsonObjectHasExactProperties([object]$Value, [string[]]$ExpectedNames) {
+  if ($null -eq $Value -or $Value -isnot [System.Management.Automation.PSCustomObject]) { return $false }
+  $actualNames = @($Value.PSObject.Properties.Name)
+  if ($actualNames.Count -ne $ExpectedNames.Count) { return $false }
+  foreach ($name in $actualNames) {
+    if ($ExpectedNames -cnotcontains [string]$name) { return $false }
+  }
+  return $true
+}
+
+function Test-CanonicalUtcTimestamp([object]$Value) {
+  if ($Value -isnot [string]) { return $false }
+  $parsed = [DateTimeOffset]::MinValue
+  $styles = [Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal
+  if (-not [DateTimeOffset]::TryParseExact(
+      [string]$Value,
+      "yyyy-MM-dd'T'HH:mm:ss.fff'Z'",
+      [Globalization.CultureInfo]::InvariantCulture,
+      $styles,
+      [ref]$parsed)) {
+    return $false
+  }
+  return $parsed.ToUniversalTime().ToString(
+    "yyyy-MM-dd'T'HH:mm:ss.fff'Z'",
+    [Globalization.CultureInfo]::InvariantCulture) -ceq [string]$Value
+}
+
+function Test-WorkspaceMigrationLedgerJson([object]$State) {
+  if (-not (Test-JsonObjectHasExactProperties $State @('formatVersion', 'scope', 'applied'))) { return $false }
+  $formatVersion = $State.formatVersion
+  if (($formatVersion -isnot [int]) -and ($formatVersion -isnot [long])) { return $false }
+  if ($formatVersion -ne 1 -and $formatVersion -ne 2) { return $false }
+  if ($State.scope -isnot [string] -or [string]$State.scope -cne 'agent-workspace') { return $false }
+  if ($State.applied -isnot [System.Array]) { return $false }
+
+  $identities = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+  foreach ($record in @($State.applied)) {
+    $expectedRecordNames = if ($formatVersion -eq 1) {
+      @('id', 'introducedIn', 'appliedAt')
+    } else {
+      @('id', 'introducedIn', 'appliedAt', 'target')
+    }
+    if (-not (Test-JsonObjectHasExactProperties $record $expectedRecordNames)) { return $false }
+    if ($record.id -isnot [string] -or -not [string]$record.id.Trim()) { return $false }
+    if ($record.introducedIn -isnot [string]) { return $false }
+    if (-not (Test-CanonicalUtcTimestamp $record.appliedAt)) { return $false }
+
+    $targetType = 'agent-workspace'
+    $targetKey = $null
+    if ($formatVersion -eq 2) {
+      $target = $record.target
+      if ($null -eq $target -or $target -isnot [System.Management.Automation.PSCustomObject] -or
+          $target.type -isnot [string]) {
+        return $false
+      }
+      $targetType = [string]$target.type
+      if ($targetType -ceq 'agent-workspace') {
+        if (-not (Test-JsonObjectHasExactProperties $target @('type'))) { return $false }
+      }
+      elseif ($targetType -ceq 'runtime-config' -or $targetType -ceq 'session-dag') {
+        if (-not (Test-JsonObjectHasExactProperties $target @('type', 'key'))) { return $false }
+        if ($target.key -isnot [string] -or [string]$target.key -cnotmatch '^[a-f0-9]{64}$') { return $false }
+        $targetKey = [string]$target.key
+      }
+      else {
+        return $false
+      }
+    }
+
+    $identity = "{0}:{1}:{2}" -f [string]$record.id, $targetType, [string]$targetKey
+    if (-not $identities.Add($identity)) { return $false }
+  }
+  return $true
+}
+
+function Test-DirectoryContainsOnlyValidWorkspaceMigrationLedger([string]$Path) {
+  if (-not (Test-Path -LiteralPath $Path -PathType Container)) { return $false }
+  try {
+    $rootItem = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if (($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $false }
+    $rootChildren = @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction Stop |
+      Where-Object { $_.Name -ine 'updates' })
+    if ($rootChildren.Count -ne 1) { return $false }
+    $workspace = $rootChildren[0]
+    if (-not $workspace.PSIsContainer -or $workspace.Name -ine 'workspace' -or
+        ($workspace.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $false }
+
+    $workspaceChildren = @(Get-ChildItem -LiteralPath $workspace.FullName -Force -ErrorAction Stop)
+    if ($workspaceChildren.Count -ne 1) { return $false }
+    $migrationDirectory = $workspaceChildren[0]
+    if (-not $migrationDirectory.PSIsContainer -or $migrationDirectory.Name -ine '.memmy-migrations' -or
+        ($migrationDirectory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $false }
+
+    $migrationChildren = @(Get-ChildItem -LiteralPath $migrationDirectory.FullName -Force -ErrorAction Stop)
+    if ($migrationChildren.Count -ne 1) { return $false }
+    $stateFile = $migrationChildren[0]
+    if ($stateFile.PSIsContainer -or $stateFile.Name -ine 'agent-workspace.json' -or
+        ($stateFile.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $stateFile.Length -gt 1MB) { return $false }
+
+    $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
+    $source = $utf8.GetString([IO.File]::ReadAllBytes($stateFile.FullName))
+    $state = $source | ConvertFrom-Json -ErrorAction Stop
+    return Test-WorkspaceMigrationLedgerJson $state
+  } catch {
+    return $false
+  }
 }
 
 function Copy-DirectoryContents {
@@ -1423,6 +1541,13 @@ try {
         $targetRuntimeHadData = Test-DirectoryContainsData `
           -Path $TargetRuntimeHomePath `
           -ExcludeTopLevelNames @("updates")
+        $targetRuntimeHasOnlyValidWorkspaceMigrationLedger =
+          Test-DirectoryContainsOnlyValidWorkspaceMigrationLedger -Path $TargetRuntimeHomePath
+        $targetRuntimeBlocksSourceSelection =
+          $targetRuntimeHadData -and -not $targetRuntimeHasOnlyValidWorkspaceMigrationLedger
+        if ($targetRuntimeHasOnlyValidWorkspaceMigrationLedger) {
+          Write-MigrationLog -Message "Valid workspace migration ledger will be preserved transactionally without blocking the runtime source."
+        }
         $runtimeSourcePath = if ($installRuntimeHomePath -and
             (Test-CompleteInstallRuntimeData -Path $installRuntimeHomePath)) {
           Get-NormalizedPath -Path $installRuntimeHomePath
@@ -1430,7 +1555,7 @@ try {
           $null
         }
         $runtimeSourceAuthority = if ($runtimeSourcePath) { $effectiveSourceAuthority } else { "target-existing" }
-        if (-not $runtimeSourcePath -and -not $targetRuntimeHadData) {
+        if (-not $runtimeSourcePath -and -not $targetRuntimeBlocksSourceSelection) {
           foreach ($candidate in @($verifiedExternalRuntimeHomePath, $rememberedRuntimeHomePath, $LegacyRuntimeHomePath)) {
             if ($candidate -and
                 -not (Test-SamePath -Left $candidate -Right $TargetRuntimeHomePath) -and

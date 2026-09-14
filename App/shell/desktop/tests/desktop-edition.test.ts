@@ -3,7 +3,8 @@ import {
   desktopRuntimeHomeDirectoryName,
   desktopUserDataDirectoryName,
   resolveDesktopEdition,
-  resolveDesktopPackageSigning
+  resolveDesktopPackageSigning,
+  resolveDesktopWindowsStoreMigrationConfig
 } from "../src/main/desktop-edition.js";
 
 describe("desktop edition identity", () => {
@@ -39,5 +40,37 @@ describe("desktop edition identity", () => {
   it("falls back to the build signing identity when the manifest is absent", () => {
     expect(resolveDesktopPackageSigning(null)).toBe("signed");
     expect(resolveDesktopPackageSigning(JSON.stringify({ signing: "unknown" }), "unsigned")).toBe("unsigned");
+  });
+
+  it("reads only the explicit allowlisted Windows Store migration runtime config", () => {
+    const storeDestination = {
+      edition: "cn",
+      storeId: "9MZGLKWMZZV6",
+      packageFamilyName: "Memtensor.Memmy_eyack96k521x2",
+      aumid: "Memtensor.Memmy_eyack96k521x2!Memmy"
+    };
+    expect(resolveDesktopWindowsStoreMigrationConfig(JSON.stringify({
+      windowsStoreMigration: { internalEnabled: true, storeDestination }
+    }))).toEqual({ internalEnabled: true, storeDestination });
+    expect(resolveDesktopWindowsStoreMigrationConfig(JSON.stringify({
+      windowsStoreMigration: { internalEnabled: false, storeDestination }
+    }))?.internalEnabled).toBe(false);
+  });
+
+  it("fails closed for missing, malformed, or expanded Store migration config", () => {
+    expect(resolveDesktopWindowsStoreMigrationConfig(null)).toBeNull();
+    expect(resolveDesktopWindowsStoreMigrationConfig(JSON.stringify({
+      windowsStoreMigration: { storeDestination: {} }
+    }))).toBeNull();
+    expect(resolveDesktopWindowsStoreMigrationConfig(JSON.stringify({
+      windowsStoreMigration: { internalEnabled: "true", storeDestination: {} }
+    }))).toBeNull();
+    expect(resolveDesktopWindowsStoreMigrationConfig(JSON.stringify({
+      windowsStoreMigration: {
+        internalEnabled: true,
+        storeDestination: {},
+        unexpected: "value"
+      }
+    }))).toBeNull();
   });
 });

@@ -1,5 +1,6 @@
 import Database from "better-sqlite3";
-import { copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -83,27 +84,34 @@ function packagedNativeBindingPath(): string | undefined {
   const moduleDir = dirname(fileURLToPath(import.meta.url));
   const candidates = [
     resolve(moduleDir, "../../../node_modules/better-sqlite3/build/Release/better_sqlite3.node"),
-    resolve(moduleDir, "node_modules/better-sqlite3/build/Release/better_sqlite3.node")
+    resolve(moduleDir, "node_modules/better-sqlite3/build/Release/better_sqlite3.node"),
+    resolve(moduleDir, "../../../../node_modules/better-sqlite3/build/Release/better_sqlite3.node")
   ];
   const source = candidates.find((candidate) => existsSync(candidate));
   if (!source) return undefined;
-  const targetDirectory = join(tmpdir(), "memmy-memory-native");
-  const target = join(targetDirectory, "better_sqlite3.node");
-  // Refresh on every start so an upgraded package cannot reuse a stale
-  // native addon left by a previous executable with the same temp path.
-  mkdirSync(targetDirectory, { recursive: true, mode: 0o700 });
-  copyFileSync(source, target);
-  return target;
+  return packagedNativeAssetPath(source);
 }
 
 function packagedNativeAssetPath(source: string): string {
   if (!(process as NodeJS.Process & { pkg?: unknown }).pkg) return source;
   if (!existsSync(source)) return source;
-  const targetDirectory = join(tmpdir(), "memmy-memory-native");
+  const contents = readFileSync(source);
+  const digest = createHash("sha256").update(contents).digest("hex");
+  // Keep upgrades separate from native libraries already loaded by older processes.
+  const targetDirectory = join(tmpdir(), "memmy-memory-native", digest);
   const target = join(targetDirectory, basename(source));
-  if (!existsSync(target)) {
-    mkdirSync(targetDirectory, { recursive: true, mode: 0o700 });
-    copyFileSync(source, target);
+  const isComplete = () => existsSync(target) && readFileSync(target).equals(contents);
+  if (isComplete()) return target;
+  mkdirSync(targetDirectory, { recursive: true, mode: 0o700 });
+  const temporaryPath = `${target}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temporaryPath, contents, { flag: "wx", mode: 0o600 });
+    renameSync(temporaryPath, target);
+  } catch (error) {
+    // Another extractor may publish and load the same asset before our rename.
+    if (!isComplete()) throw error;
+  } finally {
+    rmSync(temporaryPath, { force: true });
   }
   return target;
 }

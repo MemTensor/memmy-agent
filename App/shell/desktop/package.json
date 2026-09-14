@@ -10,7 +10,7 @@
     "version:sync": "npm --prefix ../../.. run version:sync",
     "prebuild": "npm run version:sync",
     "pretypecheck": "npm run version:sync",
-    "pretest": "npm run version:sync",
+    "pretest": "npm run version:sync && node -e \"if(process.platform==='win32'){const r=require('node:child_process').spawnSync('powershell.exe',['-NoProfile','-ExecutionPolicy','Bypass','-File','../../../scripts/internal/build-windows-store-update-helper.ps1'],{stdio:'inherit'});if(r.status!==0)process.exit(r.status??1)}\"",
     "build": "npm run build -w @memmy/frontend-desktop && npm run build:main && node -e \"require('node:fs').cpSync('../../frontend/desktop/dist', 'dist/renderer', { recursive: true })\"",
     "build:main": "npm run build -w @memmy/desktop-interface && npm run build -w @memmy/backend && node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json",
     "build:runtime": "npm --prefix ../../.. run memory:build && npm --prefix ../../memmy-agent run build",

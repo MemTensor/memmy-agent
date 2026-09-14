@@ -9,11 +9,9 @@ import { afterEach, describe, expect, it } from "vitest";
 const execFile = promisify(execFileCallback);
 const describeOnWindows = process.platform === "win32" ? describe : describe.skip;
 const desktopRoot = resolve(import.meta.dirname, "..");
+const repositoryRoot = resolve(desktopRoot, "..", "..", "..");
 const electronBuilderCli = resolve(
-  desktopRoot,
-  "..",
-  "..",
-  "..",
+  repositoryRoot,
   "node_modules",
   "electron-builder",
   "out",
@@ -35,11 +33,19 @@ describeOnWindows("Windows installer NSIS compilation", () => {
     const prepackagedRoot = join(root, "win-unpacked");
     const outputRoot = join(root, "out");
     const artifactPath = join(outputRoot, "Memmy-nsis-compile-check.exe");
-    await mkdir(join(prepackagedRoot, "resources"), { recursive: true });
-    await copyFile(
-      join(process.env.SystemRoot ?? "C:\\Windows", "System32", "where.exe"),
-      join(prepackagedRoot, "Memmy.exe")
+    await mkdir(join(prepackagedRoot, "resources", "native"), { recursive: true });
+    const fixtureExecutable = join(
+      process.env.SystemRoot ?? "C:\\Windows",
+      "System32",
+      "where.exe"
     );
+    await Promise.all([
+      copyFile(fixtureExecutable, join(prepackagedRoot, "Memmy.exe")),
+      copyFile(
+        fixtureExecutable,
+        join(prepackagedRoot, "resources", "native", "MemmyStoreUpdate.exe")
+      )
+    ]);
 
     await execFile(process.execPath, [
       electronBuilderCli,

@@ -3,16 +3,29 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
-const [sourcePackagePath, runtimePackagePath, runtimeMetadataPath] = process.argv.slice(2);
-if (!sourcePackagePath || !runtimePackagePath || !runtimeMetadataPath) {
+const [
+  sourcePackagePath,
+  agentSourceCorePackagePath,
+  runtimePackagePath,
+  runtimeMetadataPath,
+] = process.argv.slice(2);
+if (!sourcePackagePath || !agentSourceCorePackagePath
+    || !runtimePackagePath || !runtimeMetadataPath) {
   throw new Error(
-    "Usage: create-memory-runtime-manifest.mjs <source-package> <runtime-package> <runtime-metadata>",
+    "Usage: create-memory-runtime-manifest.mjs <source-package> <agent-source-core-package> <runtime-package> <runtime-metadata>",
   );
 }
 
 const sourcePackage = JSON.parse(await readFile(sourcePackagePath, "utf8"));
+const agentSourceCorePackage = JSON.parse(
+  await readFile(agentSourceCorePackagePath, "utf8"),
+);
 const dependencies = { ...(sourcePackage.dependencies ?? {}) };
-delete dependencies["@memmy/agent-source-core"];
+if (!agentSourceCorePackage.name
+    || dependencies[agentSourceCorePackage.name] !== agentSourceCorePackage.version) {
+  throw new Error("Memory and AgentSourceCore workspace versions do not match");
+}
+dependencies[agentSourceCorePackage.name] = "file:./workspace-packages/agent-source-core";
 
 const runtimePackage = {
   name: "@memmy/packaged-memory-runtime",

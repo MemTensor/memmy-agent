@@ -158,8 +158,9 @@ try {
     $encodedCommand
   ) -WindowStyle Hidden -PassThru
 
+  $promptDeadline = (Get-Date).AddSeconds(30)
   while (-not $promptProcess.HasExited) {
-    if (Test-MemmyUpdatePromptDone) {
+    if ((Get-Date) -ge $promptDeadline -or (Test-MemmyUpdatePromptDone)) {
       Stop-Process -Id $promptProcess.Id -Force -ErrorAction SilentlyContinue
       break
     }
