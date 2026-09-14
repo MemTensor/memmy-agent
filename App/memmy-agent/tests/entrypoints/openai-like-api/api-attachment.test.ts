@@ -290,7 +290,7 @@ describe("API multipart attachment uploads", () => {
     expect(calls[0].media).toHaveLength(2);
   });
 
-  it("returns 413 for oversized multipart files", async () => {
+  it("accepts large multipart files without a per-file size limit", async () => {
     tempRoot();
     const app = createApp({ processDirect: async () => "ok" }, "m");
     const form = new FormData();
@@ -299,7 +299,7 @@ describe("API multipart attachment uploads", () => {
 
     const response = await app.fetch(new Request("http://localhost/v1/chat/completions", { method: "POST", body: form }));
 
-    expect(response.status).toBe(413);
+    expect(response.status).toBe(200);
   });
 
   it("defaults text when multipart message is missing", async () => {

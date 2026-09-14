@@ -107,7 +107,6 @@ import {
   removeSessionDagFiles,
   type SessionDagQueueManager,
 } from "../../session-dag/index.js";
-import { MAX_FILE_SIZE } from "../../utils/media-decode.js";
 
 type Query = Record<string, string[]>;
 type HttpRequestLike = { path: string; method?: string; headers?: http.IncomingHttpHeaders | Record<string, any>; body?: Buffer | string };
@@ -164,7 +163,6 @@ type WebuiUploadClassification = {
   kind: "image" | "file";
   mime: string;
   extension: string;
-  maxBytes: number;
 };
 type WebuiQueuedMessage = {
   client_request_id: string;
@@ -251,9 +249,7 @@ const MCP_PRESET_ACTIONS_BY_PATH: Record<string, string> = {
   "/api/settings/mcp-presets/reload": "reload",
 };
 
-const MAX_ATTACHMENTS_PER_MESSAGE = 4;
-const MAX_IMAGE_BYTES = 6 * 1024 * 1024;
-const MAX_WEBUI_UPLOAD_BODY_BYTES = MAX_ATTACHMENTS_PER_MESSAGE * MAX_FILE_SIZE + 1024 * 1024;
+const MAX_WEBUI_UPLOAD_BODY_BYTES = 256 * 1024 * 1024;
 // Control characters and the escaped path separators are intentional filename exclusions.
 // eslint-disable-next-line no-control-regex, no-useless-escape
 const UNSAFE_FILENAME_CHARS = /[<>:"\/\\|?*\x00-\x1F]/g;
@@ -2112,7 +2108,6 @@ export class WebSocketChannel extends BaseChannel {
 
     const files = form.getAll("files");
     if (!files.length) return httpError(400, "missing files");
-    if (files.length > MAX_ATTACHMENTS_PER_MESSAGE) return httpError(400, "too many attachments");
 
     const mediaDir = path.join(getMediaDir("websocket"), "webui");
     fs.mkdirSync(mediaDir, { recursive: true });
@@ -2134,7 +2129,6 @@ export class WebSocketChannel extends BaseChannel {
         const originalName = typeof file.name === "string" && file.name.trim() ? file.name : "attachment";
         const classification = classifyWebuiUploadAttachment(originalName, declaredMime, bytes);
         if (!classification) return failUpload(httpError(415, "unsupported attachment mime"));
-        if (bytes.length > classification.maxBytes) return failUpload(httpError(413, classification.kind === "image" ? "image too large" : "file too large"));
         const safeOriginalName = safeFilename(originalName).replace(/\.[^.]*$/, "") + classification.extension;
         const filename = `${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}-${safeOriginalName}`;
         const target = path.join(mediaDir, filename);
@@ -2960,7 +2954,6 @@ export class WebSocketChannel extends BaseChannel {
   resolveEnvelopeMediaPaths(value: any): [string[], string | null] {
     if (value == null) return [[], null];
     if (!Array.isArray(value)) return [[], "malformed"];
-    if (value.length > MAX_ATTACHMENTS_PER_MESSAGE) return [[], "too_many_attachments"];
     const mediaRoot = realpathIfExists(getMediaDir("websocket"));
     const out: string[] = [];
     for (const item of value) {
@@ -2977,7 +2970,6 @@ export class WebSocketChannel extends BaseChannel {
       const bytes = fs.readFileSync(resolved);
       const classification = classifySavedWebuiAttachment(resolved, bytes);
       if (!classification) return [[], "mime"];
-      if (stat.size > classification.maxBytes) return [[], "size"];
       out.push(resolved);
     }
     return [out, null];
@@ -4914,7 +4906,6 @@ function classifyWebuiUploadAttachment(name: string, declaredMime: string, bytes
       kind: "image",
       mime: sniffedImage,
       extension: extensionForImageMime(sniffedImage),
-      maxBytes: MAX_IMAGE_BYTES,
     };
   }
 
@@ -4934,7 +4925,6 @@ function classifySavedWebuiAttachment(filePath: string, bytes: Buffer): WebuiUpl
       kind: "image",
       mime: sniffedImage,
       extension: extensionForImageMime(sniffedImage),
-      maxBytes: MAX_IMAGE_BYTES,
     };
   }
 
@@ -4951,7 +4941,6 @@ function classifyFileAttachmentByName(name: string): WebuiUploadClassification |
     kind: "file",
     mime,
     extension,
-    maxBytes: MAX_FILE_SIZE,
   };
 }
 
