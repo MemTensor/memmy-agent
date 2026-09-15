@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   listWorkspaceFiles,
+  readWorkspaceFile,
   WorkspaceFilesError,
 } from "../../../src/entrypoints/frontend-bridge/workspace-files.js";
 
@@ -112,5 +113,34 @@ describe("workspace files", () => {
       code: "workspace_files_symlink_not_expandable",
       status: 400,
     }));
+  });
+
+  it("reads a bounded regular file with metadata", () => {
+    const root = makeRoot();
+    fs.mkdirSync(path.join(root, "src"));
+    fs.writeFileSync(path.join(root, "src", "index.ts"), "export {};\n", "utf8");
+
+    expect(readWorkspaceFile(root, "src/index.ts")).toMatchObject({
+      path: "src/index.ts",
+      name: "index.ts",
+      size: 11,
+      body: Buffer.from("export {};\n"),
+    });
+  });
+
+  it("rejects traversal, directories, and oversized files", () => {
+    const root = makeRoot();
+    fs.mkdirSync(path.join(root, "src"));
+    fs.writeFileSync(path.join(root, "large.txt"), "12345", "utf8");
+
+    expect(() => readWorkspaceFile(root, "../secret")).toThrowError(
+      expect.objectContaining({ code: "workspace_files_path_invalid", status: 400 }),
+    );
+    expect(() => readWorkspaceFile(root, "src")).toThrowError(
+      expect.objectContaining({ code: "workspace_file_not_found", status: 404 }),
+    );
+    expect(() => readWorkspaceFile(root, "large.txt", 4)).toThrowError(
+      expect.objectContaining({ code: "workspace_file_too_large", status: 413 }),
+    );
   });
 });

@@ -306,6 +306,10 @@ const WorkspaceFilesListingSchema = z.object({
   truncated: z.boolean()
 });
 
+const WorkspaceFileActionResponseSchema = z.object({
+  ok: z.literal(true)
+});
+
 const ProjectMutationResponseSchema = z.object({
   project: ProjectSchema,
   snapshot: SessionSnapshotSchema
@@ -483,6 +487,7 @@ export type WorkspaceEnvironmentFile = z.infer<typeof WorkspaceEnvironmentFileSc
 export type WorkspaceEnvironmentState = z.infer<typeof WorkspaceEnvironmentStateSchema>;
 export type WorkspaceEnvironmentDiff = z.infer<typeof WorkspaceEnvironmentDiffSchema>;
 export type WorkspaceEnvironmentScope = { kind: "session" | "project"; key: string };
+export type WorkspaceFilesScope = WorkspaceEnvironmentScope;
 export type WorkspaceFileEntry = z.infer<typeof WorkspaceFileEntrySchema>;
 export type WorkspaceFilesListing = z.infer<typeof WorkspaceFilesListingSchema>;
 export type MemmyAgentProject = z.infer<typeof ProjectSchema>;
@@ -706,7 +711,10 @@ export interface MemmyAgentClient {
   listSessions(): Promise<MemmyAgentSessionSummary[]>;
   readWorkspaceEnvironment(scope: WorkspaceEnvironmentScope): Promise<WorkspaceEnvironmentState>;
   readWorkspaceEnvironmentDiff(scope: WorkspaceEnvironmentScope, path: string): Promise<WorkspaceEnvironmentDiff>;
-  listWorkspaceFiles(sessionKey: string, path?: string): Promise<WorkspaceFilesListing>;
+  listWorkspaceFiles(scope: WorkspaceFilesScope | string, path?: string): Promise<WorkspaceFilesListing>;
+  readWorkspaceFile(scope: WorkspaceFilesScope | string, path: string, signal?: AbortSignal): Promise<Blob>;
+  openWorkspaceFile(scope: WorkspaceFilesScope | string, path: string): Promise<void>;
+  revealWorkspaceFile(scope: WorkspaceFilesScope | string, path: string): Promise<void>;
   switchWorkspaceEnvironmentBranch(
     scope: WorkspaceEnvironmentScope,
     branch: string,
@@ -1069,12 +1077,36 @@ class HttpMemmyAgentClient implements MemmyAgentClient {
     );
   }
 
-  async listWorkspaceFiles(sessionKey: string, path = ""): Promise<WorkspaceFilesListing> {
+  async listWorkspaceFiles(scope: WorkspaceFilesScope | string, path = ""): Promise<WorkspaceFilesListing> {
+    const normalizedScope = typeof scope === "string" ? { kind: "session" as const, key: scope } : scope;
+    const collection = normalizedScope.kind === "session" ? "sessions" : "projects";
     const query = path ? `?${new URLSearchParams({ path }).toString()}` : "";
     return this.request(
-      `/api/sessions/${encodeURIComponent(sessionKey)}/workspace/files${query}`,
+      `/api/${collection}/${encodeURIComponent(normalizedScope.key)}/workspace/files${query}`,
       WorkspaceFilesListingSchema
     );
+  }
+
+  async readWorkspaceFile(
+    scope: WorkspaceFilesScope | string,
+    path: string,
+    signal?: AbortSignal
+  ): Promise<Blob> {
+    const normalizedScope = typeof scope === "string" ? { kind: "session" as const, key: scope } : scope;
+    const collection = normalizedScope.kind === "session" ? "sessions" : "projects";
+    const query = new URLSearchParams({ path });
+    return this.requestBlob(
+      `/api/${collection}/${encodeURIComponent(normalizedScope.key)}/workspace/file?${query.toString()}`,
+      signal
+    );
+  }
+
+  async openWorkspaceFile(scope: WorkspaceFilesScope | string, path: string): Promise<void> {
+    await this.workspaceFileAction(scope, path, "open");
+  }
+
+  async revealWorkspaceFile(scope: WorkspaceFilesScope | string, path: string): Promise<void> {
+    await this.workspaceFileAction(scope, path, "reveal");
   }
 
   async switchWorkspaceEnvironmentBranch(
@@ -1350,6 +1382,41 @@ class HttpMemmyAgentClient implements MemmyAgentClient {
     } finally {
       if (timeout) clearTimeout(timeout);
     }
+  }
+
+  private async requestBlob(path: string, signal?: AbortSignal): Promise<Blob> {
+    const send = (boot: MemmyAgentBootstrap) => this.fetchFn(new URL(path, this.baseUrl), {
+      headers: { Authorization: `Bearer ${boot.token}` },
+      ...(signal ? { signal } : {})
+    });
+    let boot = await this.bootstrap();
+    let response = await send(boot);
+    if (response.status === 401) {
+      this.boot = null;
+      this.bootExpiresAtMs = 0;
+      boot = await this.bootstrap({ force: true });
+      response = await send(boot);
+    }
+    if (!response.ok) {
+      const parsed = await parseRequestError(response);
+      throw new MemmyAgentRequestError(parsed.message, response.status, parsed.code, parsed.data);
+    }
+    return response.blob();
+  }
+
+  private async workspaceFileAction(
+    scope: WorkspaceFilesScope | string,
+    path: string,
+    action: "open" | "reveal"
+  ): Promise<void> {
+    const normalizedScope = typeof scope === "string" ? { kind: "session" as const, key: scope } : scope;
+    const collection = normalizedScope.kind === "session" ? "sessions" : "projects";
+    const query = new URLSearchParams({ path });
+    await this.request(
+      `/api/${collection}/${encodeURIComponent(normalizedScope.key)}/workspace/file/${action}?${query.toString()}`,
+      WorkspaceFileActionResponseSchema,
+      { method: "POST" }
+    );
   }
 }
 

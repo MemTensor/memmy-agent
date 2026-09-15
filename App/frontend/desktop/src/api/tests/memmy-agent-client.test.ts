@@ -180,11 +180,16 @@ describe("memmy-agent client", () => {
     expect(calls).toContain("/api/projects/project-1/environment/branch");
   });
 
-  it("loads session workspace files lazily", async () => {
-    const calls: string[] = [];
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+  it("lists and reads scoped workspace files with authenticated actions", async () => {
+    const calls: Array<{ url: string; method: string; authorization?: string }> = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input));
-      calls.push(`${url.pathname}${url.search}`);
+      const headers = init?.headers as Record<string, string> | undefined;
+      calls.push({
+        url: `${url.pathname}${url.search}`,
+        method: init?.method ?? "GET",
+        authorization: headers?.Authorization
+      });
       if (url.pathname === "/webui/bootstrap") return json(bootstrap);
       if (url.pathname.endsWith("/workspace/files")) {
         return json({
@@ -200,6 +205,15 @@ describe("memmy-agent client", () => {
           truncated: false
         });
       }
+      if (url.pathname.endsWith("/workspace/file")) {
+        return new Response("export {};\n", {
+          status: 200,
+          headers: { "content-type": "text/plain; charset=utf-8" }
+        });
+      }
+      if (url.pathname.endsWith("/workspace/file/open") || url.pathname.endsWith("/workspace/file/reveal")) {
+        return json({ ok: true });
+      }
       return json({ error: "not found" }, 404);
     });
     const client = createMemmyAgentClient({
@@ -207,7 +221,7 @@ describe("memmy-agent client", () => {
       fetchFn: fetchMock as typeof fetch
     });
 
-    await expect(client.listWorkspaceFiles("websocket:chat-1", "src")).resolves.toMatchObject({
+    await expect(client.listWorkspaceFiles({ kind: "project", key: "project-1" }, "src")).resolves.toMatchObject({
       root: { kind: "project", label: "Memmy" },
       path: "src",
       entries: [{
@@ -216,7 +230,22 @@ describe("memmy-agent client", () => {
         kind: "file"
       }]
     });
-    expect(calls).toContain("/api/sessions/websocket%3Achat-1/workspace/files?path=src");
+    const blob = await client.readWorkspaceFile({ kind: "project", key: "project-1" }, "src/index.ts");
+    await expect(blob.text()).resolves.toBe("export {};\n");
+    await expect(client.openWorkspaceFile({ kind: "project", key: "project-1" }, "src/index.ts")).resolves.toBeUndefined();
+    await expect(client.revealWorkspaceFile({ kind: "project", key: "project-1" }, "src/index.ts")).resolves.toBeUndefined();
+    expect(calls).toContainEqual(expect.objectContaining({
+      url: "/api/projects/project-1/workspace/files?path=src",
+      authorization: "Bearer agent-token"
+    }));
+    expect(calls).toContainEqual(expect.objectContaining({
+      url: "/api/projects/project-1/workspace/file?path=src%2Findex.ts",
+      authorization: "Bearer agent-token"
+    }));
+    expect(calls).toContainEqual(expect.objectContaining({
+      url: "/api/projects/project-1/workspace/file/open?path=src%2Findex.ts",
+      method: "POST"
+    }));
   });
 
   it("prefers env override, then current origin, then local gateway default for base URL", () => {

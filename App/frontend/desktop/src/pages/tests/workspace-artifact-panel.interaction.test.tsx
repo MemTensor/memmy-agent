@@ -87,24 +87,20 @@ describe("WorkspaceArtifactPanel", () => {
   let root: Root;
   let onAddToChat: ReturnType<typeof vi.fn<(reference: ComposerContextReference) => void>>;
   let loadDirectory: ReturnType<typeof vi.fn<(
-    sessionKey: string,
+    scope: { kind: "session"; key: string },
     relativePath: string
   ) => Promise<WorkspaceFilesListing>>>;
-  let loadPreview: ReturnType<typeof vi.fn<(path: string) => Promise<{
-    title: string;
-    sections: Array<{ heading: string; body: string }>;
-  } | null>>>;
+  let loadFile: ReturnType<typeof vi.fn<(path: string) => Promise<Blob>>>;
 
   beforeEach(async () => {
-    window.localStorage.clear();
+    if (typeof window.localStorage?.clear === "function") window.localStorage.clear();
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
     onAddToChat = vi.fn();
-    loadDirectory = vi.fn(async (_sessionKey, relativePath) => listing(relativePath));
-    loadPreview = vi.fn(async (path) => ({
-      title: path.split("/").pop()!,
-      sections: [{ heading: "真实文件预览", body: path }]
+    loadDirectory = vi.fn(async (_scope, relativePath) => listing(relativePath));
+    loadFile = vi.fn(async (path) => new Blob([path], {
+      type: path.endsWith(".pdf") ? "application/pdf" : "text/plain"
     }));
     await renderPreview();
   });
@@ -114,26 +110,25 @@ describe("WorkspaceArtifactPanel", () => {
     document.body.replaceChildren();
   });
 
-  it("loads the active real root and preserves the literature file-tree shell", () => {
-    expect(loadDirectory).toHaveBeenCalledWith(SESSION_KEY, "");
-    expect(loadDirectory).toHaveBeenCalledWith(SESSION_KEY, "downloads");
-    expect(loadDirectory).toHaveBeenCalledWith(SESSION_KEY, "outputs");
-    expect(loadDirectory).not.toHaveBeenCalledWith(SESSION_KEY, "notes");
+  it("loads only the active real root until a folder is expanded", () => {
+    expect(loadDirectory).toHaveBeenCalledWith({ kind: "session", key: SESSION_KEY }, "");
+    expect(loadDirectory).toHaveBeenCalledTimes(1);
+    expect(container.querySelector(".workspace-artifact-file-root")?.textContent).toBe("memmy-agent");
     expect(folderButtons().map((button) => button.textContent)).toEqual(["downloads", "outputs", "notes"]);
-    expect(fileButtonLabels()).toEqual([
-      "研究资料.pdf",
-      "证据.pdf",
-      "综述.tex"
-    ]);
-    expect(activeTab()?.textContent).toContain("研究资料.pdf");
-    expect(container.querySelector(".workspace-artifact-preview-document")?.textContent).toContain("真实文件预览");
-    expect(container.querySelector(".workspace-artifact-preview-crumb")?.textContent).toContain("memmy-agent");
+    expect(fileButtonLabels()).toEqual([]);
+    expect(activeTab()).toBeNull();
     expect(container.querySelectorAll('[role="separator"]')).toHaveLength(2);
+    const preview = container.querySelector(".workspace-artifact-preview-main")!;
+    const browser = container.querySelector(".workspace-artifact-file-browser")!;
+    expect(preview.compareDocumentPosition(browser) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
-  it("collapses folders and toggles the whole file tree without losing the open tab", () => {
+  it("collapses folders and toggles the whole file tree without losing the open tab", async () => {
+    await expandFolder("downloads");
+    const research = fileButtons().find((button) => button.textContent?.trim() === "研究资料.pdf")!;
+    act(() => research.click());
     act(() => folderButtons()[0]!.click());
-    expect(fileButtonLabels()).not.toContain("研究资料.pdf");
+    expect(activeTab()?.textContent).toContain("研究资料.pdf");
 
     const toggle = container.querySelector<HTMLButtonElement>(".workspace-artifact-file-browser__toggle")!;
     act(() => toggle.click());
@@ -156,11 +151,14 @@ describe("WorkspaceArtifactPanel", () => {
       await Promise.resolve();
     });
 
-    expect(loadDirectory).toHaveBeenCalledWith(SESSION_KEY, "notes");
+    expect(loadDirectory).toHaveBeenCalledWith({ kind: "session", key: SESSION_KEY }, "notes");
     expect(fileButtonLabels()).toContain("README.md");
   });
 
   it("opens real files in closable tabs and falls back to the previous tab", async () => {
+    await expandFolder("downloads");
+    const research = fileButtons().find((button) => button.textContent?.trim() === "研究资料.pdf")!;
+    act(() => research.click());
     const evidence = fileButtons().find((button) => button.textContent?.trim() === "证据.pdf")!;
     await act(async () => {
       evidence.click();
@@ -169,17 +167,53 @@ describe("WorkspaceArtifactPanel", () => {
 
     expect(container.querySelectorAll('[role="tab"]')).toHaveLength(2);
     expect(activeTab()?.textContent).toContain("证据.pdf");
-    expect(loadPreview).toHaveBeenLastCalledWith("downloads/证据.pdf");
+    expect(loadFile).toHaveBeenLastCalledWith("downloads/证据.pdf", expect.any(AbortSignal));
 
     await act(async () => {
-      activeTab()!.querySelector<HTMLButtonElement>(".workspace-artifact-file-tab__close")!.click();
+      const close = activeTab()!.querySelector<HTMLButtonElement>(".workspace-artifact-file-tab__close")!;
+      close.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true }));
+      close.dispatchEvent(
+        new PointerEvent("pointerup", { bubbles: true, cancelable: true })
+      );
       await Promise.resolve();
     });
     expect(container.querySelectorAll('[role="tab"]')).toHaveLength(1);
     expect(activeTab()?.textContent).toContain("研究资料.pdf");
   });
 
-  it("adds the session-relative file path to chat from the context menu", () => {
+  it("preserves open tabs while the side preview is hidden or its listing refreshes", async () => {
+    await expandFolder("downloads");
+    const research = fileButtons().find((button) => button.textContent?.trim() === "研究资料.pdf")!;
+    act(() => research.click());
+    const evidence = fileButtons().find((button) => button.textContent?.trim() === "证据.pdf")!;
+    act(() => evidence.click());
+
+    await renderPreview(0, true);
+    expect(container.querySelector('[role="tab"]')).toBeNull();
+
+    await renderPreview(0, false);
+    expect(container.querySelectorAll('[role="tab"]')).toHaveLength(2);
+    expect(activeTab()?.textContent).toContain("证据.pdf");
+
+    await renderPreview(1, false);
+    expect(container.querySelectorAll('[role="tab"]')).toHaveLength(2);
+    expect(activeTab()?.textContent).toContain("证据.pdf");
+  });
+
+  it("shows the selected path below the tabs and toggles the file tree from that bar", async () => {
+    await expandFolder("downloads");
+    const research = fileButtons().find((button) => button.textContent?.trim() === "研究资料.pdf")!;
+    act(() => research.click());
+
+    const bar = container.querySelector(".workspace-artifact-breadcrumb-bar")!;
+    expect(bar.textContent).toContain("memmy-agent");
+    expect(bar.textContent).toContain("downloads");
+    expect(bar.textContent).toContain("研究资料.pdf");
+    expect(bar.querySelector(".workspace-artifact-file-browser__toggle")).not.toBeNull();
+  });
+
+  it("adds the session-relative file path to chat from the context menu", async () => {
+    await expandFolder("outputs");
     const latex = fileButtons().find((button) => button.textContent?.trim() === "综述.tex")!;
     act(() => latex.dispatchEvent(new MouseEvent("contextmenu", {
       bubbles: true,
@@ -198,7 +232,8 @@ describe("WorkspaceArtifactPanel", () => {
     });
   });
 
-  it("writes the session-relative path reference when a file is dragged", () => {
+  it("writes the session-relative path reference when a file is dragged", async () => {
+    await expandFolder("downloads");
     const dataTransfer = new TestDataTransfer();
     const evidence = fileButtons().find((button) => button.textContent?.trim() === "证据.pdf")!;
     const event = new Event("dragstart", { bubbles: true, cancelable: true });
@@ -223,12 +258,12 @@ describe("WorkspaceArtifactPanel", () => {
   });
 
   it("does not reload merely because an inline loader identity changes", async () => {
-    const replacement = vi.fn(async (_sessionKey: string, relativePath: string) => listing(relativePath));
+    const replacement = vi.fn(async (_scope: { kind: "session"; key: string }, relativePath: string) => listing(relativePath));
     loadDirectory = replacement;
     await renderPreview();
 
     expect(replacement).not.toHaveBeenCalled();
-    expect(fileButtonLabels()).toContain("研究资料.pdf");
+    expect(folderButtons()).toHaveLength(3);
   });
 
   it("ignores a nested directory response from an older refresh generation", async () => {
@@ -254,17 +289,18 @@ describe("WorkspaceArtifactPanel", () => {
     expect(container.textContent).not.toContain("README.md");
   });
 
-  async function renderPreview(refreshKey = 0) {
+  async function renderPreview(refreshKey = 0, hidden = false) {
     await act(async () => {
       root.render(
         <I18nProvider language="zh-CN">
           <WorkspaceArtifactPanel
-            sessionKey={SESSION_KEY}
+            scope={{ kind: "session", key: SESSION_KEY }}
             rootLabel="memmy-agent"
             loadDirectory={loadDirectory}
-            loadPreview={loadPreview}
+            loadFile={loadFile}
             onAddToChat={onAddToChat}
             refreshKey={refreshKey}
+            hidden={hidden}
           />
         </I18nProvider>
       );
@@ -287,6 +323,14 @@ describe("WorkspaceArtifactPanel", () => {
 
   function activeTab(): HTMLDivElement | null {
     return container.querySelector<HTMLDivElement>(".workspace-artifact-file-tab--active");
+  }
+
+  async function expandFolder(name: string) {
+    await act(async () => {
+      folderButtons().find((button) => button.textContent === name)!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
   }
 });
 
