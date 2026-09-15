@@ -107,6 +107,13 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       runtimeToken: options.localToken
     });
     const memoryClient = options.memoryClient ?? createDefaultMemoryClient(process.env);
+    const memmyConfigWriter = createMemmyConfigWriter({
+      configPath: memmyConfigPath,
+      accountChannel: options.accountChannel
+    });
+    await memmyConfigWriter.writeMemoryLanguage?.(
+      appStateStore.repositories.bootstrap.getAppSettings().language
+    );
     const memoryConfigReload = options.memoryReady
       ? options.memoryReady.then(() => memoryClient.reloadConfig({ reason: "desktop_startup" }))
       : memoryClient.reloadConfig({ reason: "desktop_startup" });
@@ -126,7 +133,6 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       createDefaultAgentAdapterRegistry({
         pluginDirectories: options.agentAdapterPluginDirectories
       });
-    const memmyConfigWriter = createMemmyConfigWriter({ configPath: memmyConfigPath });
     const configuredTimeZone = await readConfiguredAgentTimeZone(memmyConfigPath);
     const services = createBackendServices({
       appStateStore,

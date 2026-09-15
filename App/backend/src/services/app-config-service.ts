@@ -105,6 +105,7 @@ export function createAppConfigService(options: CreateAppConfigServiceOptions): 
       }
       if (input.language) {
         await options.memmyConfigWriter?.writeMemoryLanguage?.(input.language);
+        await options.memoryClient?.reloadConfig({ reason: "app_language_saved" });
       }
       const settings = options.bootstrapRepository.updateAppSettings(input);
       preserveCompletedGuideWhenSwitchingToByok(previousOnboarding, options);

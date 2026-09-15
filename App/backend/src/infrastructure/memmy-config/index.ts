@@ -10,7 +10,9 @@ import {
   type ActualModelContext,
   type ModelConfigInput,
   type ModelConfigView,
+  type AccountChannel,
   type Language,
+  resolveMemoryLanguage,
   type ModelProvider,
   type ModelSelectionResolution,
   type ResolvedProviderSnapshot,
@@ -168,6 +170,8 @@ export interface CreateMemmyConfigWriterOptions {
    * - configPath: defaults to ~/.memmy/config.yaml; tests can inject a temporary path.
    */
   configPath?: string;
+  /** Package login channel. Resolves the `system` language to zh-CN or en-US. */
+  accountChannel?: AccountChannel;
 }
 
 /**
@@ -205,12 +209,10 @@ export function createMemmyConfigWriter(options: CreateMemmyConfigWriterOptions 
     },
 
     async writeMemoryLanguage(language) {
+      const resolved = resolveMemoryLanguage(language, options.accountChannel);
       await mutateRuntimeConfig(configPath, (config) => {
         const memory = asRecord(config.memmyMemory) ?? {};
-        // "system" is not a language Memory can write in; clearing it lets Memory
-        // fall back to reading the language from the conversation.
-        if (language === "system") delete memory.language;
-        else memory.language = language;
+        memory.language = resolved;
         config.memmyMemory = memory;
       });
     },
