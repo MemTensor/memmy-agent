@@ -8,7 +8,16 @@ import {
 import type { PluginHostServiceCall, PluginHostServiceInvoker } from "../adapters/outbound/plugin-runtime/index.js";
 
 const MAX_INPUT_CHARACTERS = 200_000;
-const MAX_OUTPUT_TOKENS = 8_192;
+/**
+ * Ceiling a plugin may ask for, sized for a reasoning model's own consumption.
+ *
+ * The answer is not all a caller pays for: asking the account gateway for a
+ * list of two dozen records measured 5.8k reasoning tokens on top of 4.3k of
+ * answer, so 8192 cut the answer off mid-object while nothing about the request
+ * was unreasonable. A budget is a ceiling, not a reservation — an unused one
+ * costs nothing.
+ */
+const MAX_OUTPUT_TOKENS = 32_768;
 /**
  * Matches the budget an ordinary chat turn gets, for the same reason.
  *
@@ -95,7 +104,7 @@ export function createPluginModelInferenceService(options: CreatePluginModelInfe
             deadlineTimeout(call, options.timeoutMs ?? attemptInput.timeoutMs ?? DEFAULT_TIMEOUT_MS),
             attemptInput.timeoutMs ?? DEFAULT_TIMEOUT_MS
           );
-          return await infer(resolved, attemptInput, fetchImpl, timeoutMs, call.signal);
+          return await infer(resolved, attemptInput, input.responseFormat, fetchImpl, timeoutMs, call.signal);
         } catch (error) {
           lastError = error;
           // Some OpenAI-compatible gateways occasionally return an empty choice
@@ -128,6 +137,8 @@ export function createPluginModelInferenceService(options: CreatePluginModelInfe
 async function infer(
   resolved: Extract<ModelSelectionResolution, { ok: true }>,
   input: z.output<typeof ModelInferenceInputSchema>,
+  /** What the plugin asked for, which the JSON compatibility fallback rewrites below. */
+  requestedFormat: z.output<typeof ModelInferenceInputSchema>["responseFormat"],
   fetchImpl: typeof fetch,
   timeoutMs: number,
   callerSignal?: AbortSignal
@@ -146,20 +157,37 @@ async function infer(
       const retryable = response.status === 408 || response.status === 429 || response.status >= 500;
       throw serviceError("model_inference_failed", `Current user model returned HTTP ${response.status}`, retryable);
     }
-    const body = await response.json();
+    // Not every 200 carries JSON: the account gateway answers a bare
+    // `stream timeout` when its own upstream stalls, which parses to a
+    // SyntaxError that says nothing about the model and retries nothing. It is
+    // a transient upstream failure, so it is named and retried as one.
+    const raw = await response.text();
+    let body: unknown;
+    try {
+      body = JSON.parse(raw);
+    } catch {
+      throw serviceError(
+        "model_inference_failed",
+        `Current user model returned a non-JSON body: ${raw.trim().slice(0, 200) || "(empty)"}`,
+        true
+      );
+    }
     const parsed = extractResponse(protocol, body);
-    if (!parsed.content.trim()) throw serviceError("model_empty_response", "Current user model returned no content", true);
-    // A JSON body cut off at the token ceiling can never parse, and handing it
-    // back makes the caller report a malformed response when the real problem
-    // is the budget. Text callers still get their partial answer plus the
-    // finish reason, which is theirs to interpret.
-    if (input.responseFormat === "json" && isTruncated(parsed.finishReason)) {
+    // An exhausted budget surfaces two ways, and a reasoning model reaches it
+    // before writing anything: no content at all, or content cut mid-object.
+    // Both are the same problem and no retry can fix either, so they are named
+    // as the ceiling. Reported against what the plugin asked for rather than
+    // the current attempt, because the fallback below rewrites the format and
+    // would otherwise hand a half-written body back as if it were the answer.
+    // Text callers keep a partial answer plus the finish reason to judge it by.
+    if (isTruncated(parsed.finishReason) && (!parsed.content.trim() || requestedFormat === "json")) {
       throw serviceError(
         "model_response_truncated",
-        `Current user model hit its ${maxTokens}-token output limit before finishing the JSON response`,
+        `Current user model hit its ${maxTokens}-token output limit before finishing the response`,
         false
       );
     }
+    if (!parsed.content.trim()) throw serviceError("model_empty_response", "Current user model returned no content", true);
     return { ...parsed, model: { provider: resolved.context.provider, model: resolved.context.model } };
   } catch (error) {
     if (callerSignal?.aborted) throw cancelledError();

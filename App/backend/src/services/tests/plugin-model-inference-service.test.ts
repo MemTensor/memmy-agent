@@ -330,6 +330,78 @@ describe("plugin model inference Host service", () => {
       .resolves.toMatchObject({ content: "{\"risks\":[{\"item\":\"unfinis", finishReason: "length" });
   });
 
+  it("names the ceiling when reasoning consumes the whole budget, rather than calling it an empty answer", async () => {
+    const fetch = vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: "" }, finish_reason: "length" }],
+      usage: { completion_tokens: 512, completion_tokens_details: { reasoning_tokens: 512 } }
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    const service = createPluginModelInferenceService({
+      resolveModel: async () => resolved(),
+      fetch: fetch as typeof globalThis.fetch,
+      retryBaseDelayMs: 0
+    });
+    await expect(service.invoke({
+      pluginId: "legal-labor", callId: "reasoned-away", conversationId: "v", service: "model-inference",
+      input: { messages: [{ role: "user", content: "Diagnose" }], maxOutputTokens: 512 }
+    })).rejects.toMatchObject({ code: "model_response_truncated", retryable: false });
+    // Nothing about this is a JSON compatibility problem, so dropping the JSON
+    // constraint and asking again would only spend the same budget twice.
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps reporting truncation after the JSON compatibility fallback rewrote the format", async () => {
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        choices: [{ message: { content: "" }, finish_reason: "stop" }]
+      }), { status: 200, headers: { "content-type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        choices: [{ message: { content: "{\"records\":[{\"item\":\"cut" }, finish_reason: "length" }]
+      }), { status: 200, headers: { "content-type": "application/json" } }));
+    const service = createPluginModelInferenceService({
+      resolveModel: async () => resolved(),
+      fetch: fetch as typeof globalThis.fetch,
+      retryBaseDelayMs: 0
+    });
+    // The fallback asks again without response_format, but the caller still
+    // wants JSON: handing it this body would make it report a malformed answer.
+    await expect(service.invoke({
+      pluginId: "legal-labor", callId: "fallback-truncated", conversationId: "v", service: "model-inference",
+      input: { messages: [{ role: "user", content: "Diagnose" }], responseFormat: "json", maxAttempts: 1 }
+    })).rejects.toMatchObject({ code: "model_response_truncated" });
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("treats a non-JSON gateway body as the transient upstream failure it is", async () => {
+    const fetch = vi.fn()
+      // What the account gateway answers, verbatim, when its upstream stalls.
+      .mockResolvedValueOnce(new Response("stream timeout", { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        choices: [{ message: { content: "{\"records\":[]}" }, finish_reason: "stop" }]
+      }), { status: 200, headers: { "content-type": "application/json" } }));
+    const service = createPluginModelInferenceService({
+      resolveModel: async () => resolved(),
+      fetch: fetch as typeof globalThis.fetch,
+      retryBaseDelayMs: 0
+    });
+    await expect(service.invoke({
+      pluginId: "legal-labor", callId: "stream-timeout", conversationId: "v", service: "model-inference",
+      input: { messages: [{ role: "user", content: "Diagnose" }], responseFormat: "json" }
+    })).resolves.toMatchObject({ content: "{\"records\":[]}" });
+    expect(fetch).toHaveBeenCalledTimes(2);
+
+    const exhausted = createPluginModelInferenceService({
+      resolveModel: async () => resolved(),
+      fetch: (async () => new Response("stream timeout", { status: 200 })) as typeof globalThis.fetch,
+      retryBaseDelayMs: 0
+    });
+    // The body is quoted back, because "no content" and "a body we could not
+    // read" send whoever is looking at this to different places.
+    await expect(exhausted.invoke({
+      pluginId: "legal-labor", callId: "stream-timeout-twice", conversationId: "v", service: "model-inference",
+      input: { messages: [{ role: "user", content: "Diagnose" }] }
+    })).rejects.toMatchObject({ code: "model_inference_failed", message: expect.stringContaining("stream timeout") });
+  });
+
   it("retries transient gateway failures with the configured retry policy", async () => {
     const fetch = vi.fn()
       .mockResolvedValueOnce(new Response("bad gateway", { status: 502 }))
