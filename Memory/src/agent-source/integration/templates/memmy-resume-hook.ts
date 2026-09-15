@@ -39,6 +39,9 @@ const RESUME_CONTEXT_MAX_CHARS = 24000;
 async function main() {
   const input = await readStdin();
   const payload = parseJson(input) || {};
+  // Cursor also executes hooks inherited from Claude settings. Its own hook
+  // owns these events; recording them as claude_code would duplicate the turn.
+  if (MODE === "claude-code" && normalizeText(payload.cursor_version)) return;
   if (isL3LifecycleEvent(payload)) {
     try {
       await handleL3LifecycleEvent(payload);
