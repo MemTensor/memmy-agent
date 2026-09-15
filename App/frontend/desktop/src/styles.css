@@ -13003,7 +13003,9 @@ input[type="checkbox"].check-sky:checked::after {
   gap: 10px;
   margin-bottom: 8px;
   padding: 8px 10px 8px 12px;
-  border: 1px solid color-mix(in srgb, var(--color-border-stone) 50%, transparent);
+  /* Idle carries the brand tint, so the bar reads as an offered action; the
+     live state below switches to the recording colour. */
+  border: 1px solid color-mix(in srgb, var(--color-action-sky) 35%, transparent);
   border-radius: var(--radius-card, 12px);
   background: var(--color-background-paper);
   flex-wrap: wrap;
@@ -13015,11 +13017,19 @@ input[type="checkbox"].check-sky:checked::after {
 }
 
 .recording-bar__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex: none;
-  color: color-mix(in srgb, var(--color-text-ink) 55%, transparent);
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-accent-neon-mint) 22%, var(--color-background-paper));
+  color: var(--color-action-sky);
 }
 
 .recording-bar--live .recording-bar__icon {
+  background: color-mix(in srgb, var(--color-status-error) 10%, var(--color-background-paper));
   color: var(--color-status-error);
 }
 
@@ -13374,4 +13384,24 @@ input[type="checkbox"].check-sky:checked::after {
   font-size: 11px;
   line-height: 1.5;
   color: color-mix(in srgb, var(--color-text-ink) 48%, transparent);
+}
+
+/* Trailing call to action, pushed to the card's right edge. */
+.home-scenario-card__cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex: 0 0 auto;
+  align-self: center;
+  margin-left: auto;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-accent-neon-mint) 22%, var(--color-background-paper));
+  color: var(--color-action-sky);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.home-scenario-card:hover .home-scenario-card__cta {
+  background: color-mix(in srgb, var(--color-accent-neon-mint) 34%, var(--color-background-paper));
 }

@@ -117,7 +117,7 @@ import {
 } from "./workspace-artifact-panel.js";
 import { Mic, Pause, Plus, Send } from "./memory/memory-prototype-icons.js";
 import { resolveWorkspaceEnvironmentScope, useWorkspaceEnvironment } from "./use-workspace-environment.js";
-import { ArrowDown, BookOpenText, CalendarCheck2, Check, ChevronDown, Folder, History, PanelRight, Plus as LucidePlus, RotateCw, SlidersHorizontal, SquareSlash, Target, X } from "lucide-react";
+import { ArrowDown, ArrowRight, BookOpenText, CalendarCheck2, Check, ChevronDown, Folder, History, PanelRight, Plus as LucidePlus, RotateCw, SlidersHorizontal, SquareSlash, Target, X } from "lucide-react";
 
 export { agentChatScopeKey, updateComposerDraftForScope };
 export { hydrateAgentThreadInBackground };
@@ -3450,9 +3450,10 @@ export function HomePage() {
               <AgentOperationErrorSlot message={agentError} />
               <div className="home-empty-composer-stack">
                 {/*
-                  The pinned buttons belong to the composer, not to a
-                  conversation: a lawyer opening the app to record an interview
-                  should not have to say something first to reach the recorder.
+                  The empty screen offers the scenario cards, so the pinned
+                  buttons stay out of it and appear once a flow is under way.
+                  A card already in flight still renders here, since a recording
+                  must stay reachable wherever the user navigates.
                 */}
                 <PluginCapabilityHost
                   region="pinned"
@@ -3462,11 +3463,6 @@ export function HomePage() {
                   uploadFiles={clients ? (files) => clients.memmyAgent.uploadAgentMedia(files) : undefined}
                   asrClient={clients?.asr}
                   onRecordingSession={setRecordingSession}
-                />
-                <PinnedPluginCommandBar
-                  targets={selectPinnedPluginCommands(pluginCommandTargets)}
-                  disabled={!clients}
-                  onInvoke={invokePinnedPluginCommand}
                 />
                 <div
                   ref={composerShellRef}
@@ -3592,6 +3588,10 @@ export function HomePage() {
                         <span className="home-scenario-card__body">
                           <span className="home-scenario-card__title">{scenario.name}</span>
                           <span className="home-scenario-card__description">{scenario.description}</span>
+                        </span>
+                        <span className="home-scenario-card__cta" aria-hidden="true">
+                          {t("home.scenario.try")}
+                          <ArrowRight size={12} />
                         </span>
                       </button>
                     );

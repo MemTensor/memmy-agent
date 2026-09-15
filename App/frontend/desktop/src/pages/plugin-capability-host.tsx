@@ -170,7 +170,7 @@ export function PluginCapabilityHost(props: PluginCapabilityHostProps) {
         // one card that has to stay out of the way for hours.
         if (isBarePresentation(call)) return <div key={call.callId}>{cards}</div>;
         return (
-          <div key={call.callId} className="rounded-card border border-border-stone/35 bg-background-paper p-3 shadow-sm">
+          <div key={call.callId} className="rounded-card border border-border-stone/30 bg-background-paper p-3 shadow-sm">
             <div className="mb-2 flex items-start justify-between gap-2">
               <p className="text-xs font-medium text-text-ink/55">
                 {plugin?.manifest.name ?? call.pluginId}
@@ -267,7 +267,7 @@ function ProgressCard(props: {
     }
   };
   return (
-    <div className="rounded-card bg-canvas-oat/55 px-3 py-2.5" role="status" aria-live="polite">
+    <div className="rounded-card bg-canvas-oat/50 px-3 py-2.5" role="status" aria-live="polite">
       <div className="flex items-center gap-2 text-sm text-text-ink/75">
         {completed
           ? <Check size={15} className="text-status-success" aria-hidden="true" />
@@ -374,7 +374,7 @@ function InteractionCard(props: {
   }
 
   return (
-    <div className="rounded-card border border-action-sky/25 bg-action-sky/[0.04] px-3 py-3">
+    <div className="rounded-card border border-action-sky/25 bg-action-sky/8 px-3 py-3">
       <div className="flex items-start gap-2">
         <HelpCircle size={16} className="mt-0.5 shrink-0 text-action-sky" aria-hidden="true" />
         <div className="min-w-0 flex-1">
@@ -390,7 +390,7 @@ function InteractionCard(props: {
             ) : options.length > 0 ? (
               <>
                 {options.map((option, index) => multiple ? (
-                  <label key={`${index}:${option.label}`} className="inline-flex cursor-pointer items-center gap-1.5 rounded-btn border border-border-stone/45 bg-background-paper px-3 py-1.5 text-xs text-text-ink/65">
+                  <label key={`${index}:${option.label}`} className="inline-flex cursor-pointer items-center gap-1.5 rounded-btn border border-border-stone/40 bg-background-paper px-3 py-1.5 text-xs text-text-ink/65">
                     <input
                       type="checkbox"
                       disabled={disabled}
@@ -574,7 +574,7 @@ function AudioRecordCard(props: {
 
   return (
     <div className={`recording-bar${recorder.isRecording ? " recording-bar--live" : ""}`}>
-      <Mic size={15} className="recording-bar__icon" aria-hidden="true" />
+      <span className="recording-bar__icon" aria-hidden="true"><Mic size={14} /></span>
       <p className="recording-bar__title">
         {recorder.isRecording
           ? (recorder.status === "paused" ? t("plugin.ui.audio.paused") : t("plugin.ui.audio.recording"))
@@ -764,7 +764,7 @@ function FileInputCard(props: {
     }
   };
   return (
-    <div className="rounded-card border border-action-sky/25 bg-action-sky/[0.04] px-3 py-3">
+    <div className="rounded-card border border-action-sky/25 bg-action-sky/8 px-3 py-3">
       <div className="flex items-start gap-2">
         <Paperclip size={16} className="mt-0.5 shrink-0 text-action-sky" aria-hidden="true" />
         <div className="min-w-0 flex-1">
@@ -776,12 +776,12 @@ function FileInputCard(props: {
           </div>
           {props.description ? <p className="mt-1 whitespace-pre-line text-xs text-text-ink/50">{props.description}</p> : null}
           <div className="mt-2 flex items-center gap-2">
-            <label className="cursor-pointer rounded-btn border border-border-stone/45 bg-background-paper px-3 py-1.5 text-xs text-text-ink/65">
+            <label className="cursor-pointer rounded-btn border border-border-stone/40 bg-background-paper px-3 py-1.5 text-xs text-text-ink/65">
               {t("plugin.ui.chooseFiles")}
               <input className="sr-only" type="file" accept={accept || undefined} multiple={payload.multiple === true} disabled={props.disabled} onChange={choose} />
             </label>
             {payload.allowDirectory === true ? (
-              <label className="cursor-pointer rounded-btn border border-border-stone/45 bg-background-paper px-3 py-1.5 text-xs text-text-ink/65">
+              <label className="cursor-pointer rounded-btn border border-border-stone/40 bg-background-paper px-3 py-1.5 text-xs text-text-ink/65">
                 {t("plugin.ui.chooseFolder")}
                 {/*
                   webkitdirectory is not in the React typings but is what every
@@ -809,7 +809,7 @@ function FileInputCard(props: {
           {fileStates.length ? (
             <ul className="mt-2 space-y-1.5" aria-label={t("plugin.ui.selectedFiles")}>
               {fileStates.map((item, index) => (
-                <li key={`${item.file.name}:${item.file.size}:${index}`} className={`flex items-start gap-2 rounded-btn border px-2.5 py-2 text-xs ${item.status === "blocked" ? "border-status-error/20 bg-status-error-soft/35 text-text-ink/55" : "border-border-stone/30 bg-background-paper text-text-ink/65"}`}>
+                <li key={`${item.file.name}:${item.file.size}:${index}`} className={`flex items-start gap-2 rounded-btn border px-2.5 py-2 text-xs ${item.status === "blocked" ? "border-status-error/20 bg-status-error-soft text-text-ink/55" : "border-border-stone/30 bg-background-paper text-text-ink/65"}`}>
                   {item.status === "blocked" ? <AlertCircle size={14} className="mt-0.5 shrink-0 text-status-error" aria-hidden="true" /> : <Check size={14} className="mt-0.5 shrink-0 text-status-success" aria-hidden="true" />}
                   <span className="min-w-0 flex-1">
                     <span className="block truncate font-medium">{item.file.name}</span>
@@ -845,7 +845,7 @@ function ResponseButton(props: { children: string; disabled: boolean; onClick?: 
       type="submit"
       disabled={props.disabled}
       onClick={props.onClick}
-      className={`rounded-btn border px-3 py-1.5 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${props.secondary ? "border-border-stone/45 bg-background-paper text-text-ink/60 hover:bg-canvas-oat" : "border-action-sky/30 bg-action-sky/10 text-action-sky hover:bg-action-sky/15"}`}
+      className={`rounded-btn border px-3 py-1.5 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${props.secondary ? "border-border-stone/40 bg-background-paper text-text-ink/60 hover:bg-canvas-oat" : "border-action-sky/30 bg-action-sky/10 text-action-sky hover:bg-action-sky/15"}`}
     >
       {props.children}
     </button>
@@ -916,7 +916,7 @@ function ArtifactCollection(props: {
     <div className="overflow-hidden rounded-card border border-border-stone/30">
       <button
         type="button"
-        className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm text-text-ink/70 transition-colors hover:bg-canvas-oat/45"
+        className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm text-text-ink/70 transition-colors hover:bg-canvas-oat/40"
         aria-expanded={expanded}
         onClick={() => setExpanded((current) => !current)}
       >
@@ -926,7 +926,7 @@ function ArtifactCollection(props: {
         <ChevronRight size={15} className={`text-text-ink/40 transition-transform ${expanded ? "rotate-90" : ""}`} aria-hidden="true" />
       </button>
       {expanded ? (
-        <div className="max-h-72 space-y-1.5 overflow-y-auto border-t border-border-stone/25 p-2">
+        <div className="max-h-72 space-y-1.5 overflow-y-auto border-t border-border-stone/30 p-2">
           {props.events.map((event) => (
             <ArtifactCard
               key={`artifact:${event.artifact.id}`}
@@ -1043,7 +1043,7 @@ export function orderPluginCallsForDisplay(calls: PluginUiCall[]): PluginUiCall[
 
 function ErrorCard(props: { event: Extract<CapabilityEvent, { type: "error" }> }) {
   return (
-    <div className="flex items-start gap-2 rounded-card border border-status-error/25 bg-status-error-soft/40 px-3 py-2.5 text-sm text-status-error" role="alert">
+    <div className="flex items-start gap-2 rounded-card border border-status-error/20 bg-status-error-soft px-3 py-2.5 text-sm text-status-error" role="alert">
       <AlertCircle size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
       <span>{props.event.message}</span>
     </div>
