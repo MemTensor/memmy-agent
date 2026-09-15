@@ -13,6 +13,7 @@
  * retrieval, which belong to earlier tasks.
  */
 import { languageSteeringLine, type PromptLanguage } from "../../algorithm/plugin-algorithms.js";
+import type { MemoryLanguage } from "../../config/index.js";
 import type { JsonValue } from "../../contracts/index.js";
 import type { LlmClient } from "../../model/types.js";
 import type {
@@ -106,6 +107,8 @@ export interface EpisodeTitleMeta {
 interface EpisodeTitleServiceDeps {
   repos: Pick<Repositories, "runtime">;
   readonly llm: LlmClient;
+  /** Interface language of the host app, when it pins one. */
+  readonly language?: MemoryLanguage;
   nowIso(): string;
   namespaceIdFromSession(session: SessionRecord): string;
 }
@@ -193,7 +196,9 @@ export class EpisodeTitleService {
     return {
       input,
       sourceHash: stableHash(input as unknown as Record<string, unknown>),
-      language: titleLanguage(turns),
+      // The user's own interface language wins; detection only covers hosts that
+      // do not pin one, such as a CLI agent.
+      language: promptLanguageFor(this.deps.language) ?? titleLanguage(turns),
       totalTurnCount: selected.totalTurnCount
     };
   }
@@ -261,6 +266,12 @@ export function episodeTitleMeta(episode: EpisodeRecord): EpisodeTitleMeta | und
     sourceTurnCount: typeof meta.sourceTurnCount === "number" ? meta.sourceTurnCount : 0,
     sourceHash
   };
+}
+
+function promptLanguageFor(language: MemoryLanguage | undefined): PromptLanguage | undefined {
+  if (language === "zh-CN") return "zh";
+  if (language === "en-US") return "en";
+  return undefined;
 }
 
 /**

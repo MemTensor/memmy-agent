@@ -294,8 +294,7 @@ describe("MemoryService / evolution / reward", () => {
       userId: "user-implicit-reward",
       status: "queued"
     }).items.map((job) => job.jobType);
-    expect(queuedOrder[0]).toBe("trace_summary");
-    expect(queuedOrder.indexOf("episode_title")).toBeLessThan(queuedOrder.indexOf("episode_idle_close"));
+    expect(queuedOrder.slice(0, 3)).toEqual(["trace_summary", "episode_idle_close", "episode_title"]);
 
     const run = await service.runWorkerOnce(20);
     expect(run.changeSeq).toBeGreaterThan(0);

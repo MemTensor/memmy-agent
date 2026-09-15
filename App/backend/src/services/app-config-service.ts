@@ -103,6 +103,9 @@ export function createAppConfigService(options: CreateAppConfigServiceOptions): 
       if (input.userMode) {
         await options.memmyConfigWriter?.writeUserMode?.(input.userMode);
       }
+      if (input.language) {
+        await options.memmyConfigWriter?.writeMemoryLanguage?.(input.language);
+      }
       const settings = options.bootstrapRepository.updateAppSettings(input);
       preserveCompletedGuideWhenSwitchingToByok(previousOnboarding, options);
       return settings;

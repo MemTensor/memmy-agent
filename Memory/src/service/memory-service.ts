@@ -292,6 +292,7 @@ export class MemoryService {
     this.episodeTitle = new EpisodeTitleService({
       repos: this.repos,
       get llm() { return episodeTitleOwner.llm; },
+      get language() { return episodeTitleOwner.config.language; },
       nowIso,
       namespaceIdFromSession
     });

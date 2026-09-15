@@ -33,11 +33,15 @@ function titleLlm(
 
 function respondWith(title: string, summary: string): {
   llm: LlmClient;
-  calls: Array<{ operation: string; input: string }>;
+  calls: Array<{ operation: string; input: string; system: string }>;
 } {
-  const calls: Array<{ operation: string; input: string }> = [];
+  const calls: Array<{ operation: string; input: string; system: string }> = [];
   const llm = titleLlm(async (messages, options) => {
-    calls.push({ operation: options.operation, input: messages.at(-1)?.content ?? "" });
+    calls.push({
+      operation: options.operation,
+      input: messages.at(-1)?.content ?? "",
+      system: messages.find((message) => message.role === "system")?.content ?? ""
+    });
     return JSON.stringify({ title, summary });
   });
   return { llm, calls };
@@ -70,7 +74,10 @@ function completeOneTurn(service: MemoryService, key = "episode-title"): { episo
   return { episodeId: completed.episodeId, l1MemoryIds: completed.l1MemoryIds };
 }
 
-function createTitleService(db: MemoryDb, llm: LlmClient, nowIso = () => "2026-02-02T03:04:05.000Z"): {
+function createTitleService(db: MemoryDb, llm: LlmClient, options: {
+  language?: "zh-CN" | "en-US";
+  nowIso?: () => string;
+} = {}): {
   repos: Repositories;
   titleService: EpisodeTitleService;
 } {
@@ -80,10 +87,15 @@ function createTitleService(db: MemoryDb, llm: LlmClient, nowIso = () => "2026-0
     titleService: new EpisodeTitleService({
       repos,
       llm,
-      nowIso,
+      language: options.language,
+      nowIso: options.nowIso ?? (() => "2026-02-02T03:04:05.000Z"),
       namespaceIdFromSession: (session) => session.id
     })
   };
+}
+
+function systemPromptOf(calls: Array<{ system: string }>): string {
+  return calls[0]?.system ?? "";
 }
 
 function episodeTitleJobs(db: MemoryDb): Array<{ stage: string; status: string }> {
@@ -344,16 +356,36 @@ describe("episode title generation", () => {
   it("steers the model to Chinese for a Chinese task that quotes code", async () => {
     const { db, service } = createTestService();
     const { episodeId } = completeOneTurn(service);
-    const prompts: string[] = [];
-    const llm = titleLlm(async (messages) => {
-      prompts.push(messages.find((message) => message.role === "system")?.content ?? "");
-      return JSON.stringify({ title: "修复架构硬编码", summary: "改为读取 process.arch。" });
-    });
+    const { llm, calls } = respondWith("修复架构硬编码", "改为读取 process.arch。");
     const { titleService } = createTitleService(db, llm);
 
     await titleService.generate(titleJob(episodeId, "provisional"));
 
-    expect(prompts[0]).toContain("Simplified Chinese");
+    expect(systemPromptOf(calls)).toContain("Simplified Chinese");
+  });
+
+  it("follows the interface language the host app is set to, over the language of the turns", async () => {
+    const { db, service } = createTestService();
+    const { episodeId } = completeOneTurn(service);
+    const { llm, calls } = respondWith("Fix packaging arch", "Read process.arch instead.");
+    const { titleService } = createTitleService(db, llm, { language: "en-US" });
+
+    await titleService.generate(titleJob(episodeId, "provisional"));
+
+    // The turns are Chinese, but the user reads the app in English.
+    expect(systemPromptOf(calls)).toContain("English");
+    expect(systemPromptOf(calls)).not.toContain("Simplified Chinese");
+  });
+
+  it("falls back to the language of the turns when the host pins none", async () => {
+    const { db, service } = createTestService();
+    const { episodeId } = completeOneTurn(service);
+    const { llm, calls } = respondWith("修复架构硬编码", "改为读取 process.arch。");
+    const { titleService } = createTitleService(db, llm, { language: undefined });
+
+    await titleService.generate(titleJob(episodeId, "provisional"));
+
+    expect(systemPromptOf(calls)).toContain("Simplified Chinese");
   });
 
   it("queues the final title job even when the closing episode also schedules reflection or reward", () => {

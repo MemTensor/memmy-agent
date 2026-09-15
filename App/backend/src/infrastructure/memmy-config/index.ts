@@ -10,6 +10,7 @@ import {
   type ActualModelContext,
   type ModelConfigInput,
   type ModelConfigView,
+  type Language,
   type ModelProvider,
   type ModelSelectionResolution,
   type ResolvedProviderSnapshot,
@@ -120,6 +121,9 @@ export interface MemmyConfigWriter {
   /** Atomically persist the active account/BYOK namespace without rewriting the model catalog. */
   writeUserMode?(mode: UserMode): Promise<void>;
 
+  /** Publish the interface language so Memory can write memories in it. */
+  writeMemoryLanguage?(language: Language): Promise<void>;
+
   writeModelConfig?(input: ModelConfigInput): Promise<ModelConfigView>;
 
   /**
@@ -197,6 +201,17 @@ export function createMemmyConfigWriter(options: CreateMemmyConfigWriterOptions 
         const app = asRecord(config.app);
         if (app) app.userMode = mode;
         else config.app = { userMode: mode };
+      });
+    },
+
+    async writeMemoryLanguage(language) {
+      await mutateRuntimeConfig(configPath, (config) => {
+        const memory = asRecord(config.memmyMemory) ?? {};
+        // "system" is not a language Memory can write in; clearing it lets Memory
+        // fall back to reading the language from the conversation.
+        if (language === "system") delete memory.language;
+        else memory.language = language;
+        config.memmyMemory = memory;
       });
     },
 
