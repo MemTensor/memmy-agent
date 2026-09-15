@@ -91,7 +91,8 @@ describe("MemoryService / session / lifecycle", () => {
     expect(complete.l1MemoryIds).toEqual([complete.l1MemoryId]);
     expect(complete.jobs.map((job) => job.jobType)).toEqual([
       "trace_summary",
-      "episode_idle_close"
+      "episode_idle_close",
+      "episode_title"
     ]);
     const idleCloseJobs = db.db.prepare(
       `SELECT COUNT(*) AS count
