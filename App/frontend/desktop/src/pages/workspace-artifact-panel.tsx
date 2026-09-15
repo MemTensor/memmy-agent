@@ -2,6 +2,8 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
+  useReducer,
   useRef,
   useState,
   type DragEvent,
@@ -11,55 +13,91 @@ import {
 import {
   ChevronDown,
   ChevronRight,
+  Download,
+  ExternalLink,
   Folder,
-  PanelLeftClose,
-  PanelLeftOpen,
+  FolderSearch,
+  PanelRightClose,
+  PanelRightOpen,
+  RotateCw,
   X
 } from "lucide-react";
-import type { WorkspaceFileEntry, WorkspaceFilesListing } from "../api/memmy-agent-client.js";
+import type {
+  WorkspaceFileEntry,
+  WorkspaceFilesListing,
+  WorkspaceFilesScope
+} from "../api/memmy-agent-client.js";
 import { FileTypeIcon } from "../components/file-type-icon.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { writeComposerReferenceDrag } from "../lib/composer-file-reference.js";
 import type { ComposerContextReference } from "../state/agent-composer-state.js";
+import { startBrowserDownload } from "./agent-message-content.js";
+import { FilePreview } from "./file-preview/file-preview.js";
+import type { FilePreviewResource, FilePreviewViewState } from "./file-preview/file-preview-types.js";
 import { SidebarResizeHandle, useResizableSidebar } from "./sidebar-resize.js";
 
 const WORKSPACE_ARTIFACT_WIDTH_STORAGE_KEY = "memmy.workspaceArtifact.previewWidth";
 const WORKSPACE_ARTIFACT_BROWSER_WIDTH_STORAGE_KEY = "memmy.workspaceArtifact.fileBrowserWidth";
 const ROOT_DIRECTORY_KEY = "";
 
+interface PreviewTabsState {
+  paths: string[];
+  activePath: string | null;
+}
+
+type PreviewTabsAction =
+  | { type: "select"; path: string }
+  | { type: "activate"; path: string }
+  | { type: "close"; path: string }
+  | { type: "reset" };
+
+function previewTabsReducer(state: PreviewTabsState, action: PreviewTabsAction): PreviewTabsState {
+  if (action.type === "reset") return { paths: [], activePath: null };
+  if (action.type === "select") {
+    return {
+      paths: state.paths.includes(action.path) ? state.paths : [...state.paths, action.path],
+      activePath: action.path
+    };
+  }
+  if (action.type === "activate") {
+    return state.paths.includes(action.path) ? { ...state, activePath: action.path } : state;
+  }
+  const closedIndex = state.paths.indexOf(action.path);
+  if (closedIndex < 0) return state;
+  const paths = state.paths.filter((path) => path !== action.path);
+  return {
+    paths,
+    activePath: state.activePath === action.path
+      ? paths[Math.min(closedIndex, paths.length - 1)] ?? null
+      : state.activePath
+  };
+}
+
 export type WorkspaceArtifactEntry = WorkspaceFileEntry;
 
-export interface WorkspaceArtifactSection {
-  heading: string;
-  body: string;
-}
-
-/** Renderer-safe preview produced from a session-scoped artifact. */
-export interface WorkspaceArtifactContent {
-  title: string;
-  sections: WorkspaceArtifactSection[];
-}
-
 export interface WorkspaceArtifactPanelProps {
-  /** Identifies the active session; the gateway resolves its project root/cwd. */
-  sessionKey: string;
+  /** Identifies the active session/project whose root is authoritative. */
+  scope: WorkspaceFilesScope;
   /** Fallback label until the gateway returns its authoritative root label. */
   rootLabel: string;
   /** Loads one real directory level. An empty relative path means the root. */
-  loadDirectory: (sessionKey: string, relativePath: string) => Promise<WorkspaceFilesListing>;
-  /** Loads renderer-safe content for a selected session-relative file path. */
-  loadPreview: (relativePath: string) => Promise<WorkspaceArtifactContent | null>;
+  loadDirectory: (scope: WorkspaceFilesScope, relativePath: string) => Promise<WorkspaceFilesListing>;
+  /** Loads one validated scope-relative file as renderer-safe bytes. */
+  loadFile: (relativePath: string, signal?: AbortSignal) => Promise<Blob>;
+  openFile?: (relativePath: string) => Promise<void>;
+  revealFile?: (relativePath: string) => Promise<void>;
   /** Receives the same session-relative path reference produced by dragging. */
   onAddToChat: (reference: ComposerContextReference) => void;
   /** Bump when a completed turn may have generated new workspace files. */
   refreshKey?: string | number;
   /** Reports the persisted outer pane width to layouts that anchor overlays beside it. */
   onWidthChange?: (width: number) => void;
+  /** Hides the pane without unmounting it, preserving open tabs and view state. */
+  hidden?: boolean;
   /** Controls rendered at the far right of the native file-tab toolbar. */
   toolbarEnd?: ReactNode;
   emptyLabel?: string;
   emptyDetail?: string;
-  previewUnavailableLabel?: string;
   truncatedLabel?: string;
 }
 
@@ -71,26 +109,17 @@ function fileReference(path: string, name: string): ComposerContextReference {
   return { kind: "path", id: path, label: name };
 }
 
-function firstFile(entries: WorkspaceFileEntry[]): WorkspaceFileEntry | null {
-  return entries.find((entry) => entry.kind === "file") ?? null;
-}
-
-function shouldOpenByDefault(entry: WorkspaceFileEntry): boolean {
-  return entry.kind === "directory" && (entry.name === "downloads" || entry.name === "outputs");
-}
-
 /**
- * Directory data is loaded lazily from the active session. The component never
+ * Directory data is loaded lazily from the active scope. The component never
  * creates mock files or accepts a renderer-controlled workspace root.
  */
 export function WorkspaceArtifactPanel(props: WorkspaceArtifactPanelProps): ReactNode {
   const { t } = useTranslation();
   const loadDirectoryRef = useRef(props.loadDirectory);
-  const loadPreviewRef = useRef(props.loadPreview);
   const rootLabelRef = useRef(props.rootLabel);
   const requestGenerationRef = useRef(0);
+  const scopeIdentityRef = useRef<string | null>(null);
   loadDirectoryRef.current = props.loadDirectory;
-  loadPreviewRef.current = props.loadPreview;
   rootLabelRef.current = props.rootLabel;
 
   const [listingsByDirectory, setListingsByDirectory] = useState<
@@ -98,12 +127,14 @@ export function WorkspaceArtifactPanel(props: WorkspaceArtifactPanelProps): Reac
   >({});
   const [loadingDirectories, setLoadingDirectories] = useState<Record<string, boolean>>({});
   const [treeLoadFailed, setTreeLoadFailed] = useState(false);
-  const [previewPath, setPreviewPath] = useState<string | null>(null);
-  const [openPreviewTabs, setOpenPreviewTabs] = useState<string[]>([]);
-  const [previewContent, setPreviewContent] = useState<WorkspaceArtifactContent | null>(null);
-  const [previewLoading, setPreviewLoading] = useState(false);
+  const [{ paths: openPreviewTabs, activePath: previewPath }, dispatchPreviewTabs] = useReducer(
+    previewTabsReducer,
+    { paths: [], activePath: null }
+  );
+  const [previewViewState, setPreviewViewState] = useState<Record<string, FilePreviewViewState>>({});
   const [fileTreeOpen, setFileTreeOpen] = useState(true);
   const [collapsedPreviewFolders, setCollapsedPreviewFolders] = useState<Record<string, boolean>>({});
+  const [internalRefreshKey, setInternalRefreshKey] = useState(0);
   const [fileContextMenu, setFileContextMenu] = useState<{
     reference: ComposerContextReference;
     x: number;
@@ -118,9 +149,10 @@ export function WorkspaceArtifactPanel(props: WorkspaceArtifactPanelProps): Reac
   });
   const fileBrowserResize = useResizableSidebar({
     storageKey: WORKSPACE_ARTIFACT_BROWSER_WIDTH_STORAGE_KEY,
-    defaultWidth: 200,
-    minWidth: 160,
-    maxWidth: 360
+    defaultWidth: 180,
+    minWidth: 140,
+    maxWidth: 320,
+    resizeDirection: -1
   });
 
   useEffect(() => {
@@ -128,14 +160,14 @@ export function WorkspaceArtifactPanel(props: WorkspaceArtifactPanelProps): Reac
   }, [previewResize.width, props.onWidthChange]);
 
   const requestDirectory = useCallback(async (
-    sessionKey: string,
+    scope: WorkspaceFilesScope,
     relativePath: string,
     generation: number
   ): Promise<WorkspaceFilesListing | null> => {
     if (requestGenerationRef.current !== generation) return null;
     setLoadingDirectories((state) => ({ ...state, [relativePath]: true }));
     try {
-      const listing = await loadDirectoryRef.current(sessionKey, relativePath);
+      const listing = await loadDirectoryRef.current(scope, relativePath);
       if (requestGenerationRef.current !== generation) return null;
       setListingsByDirectory((state) => ({ ...state, [relativePath]: listing }));
       return listing;
@@ -149,42 +181,19 @@ export function WorkspaceArtifactPanel(props: WorkspaceArtifactPanelProps): Reac
   useEffect(() => {
     const generation = requestGenerationRef.current + 1;
     requestGenerationRef.current = generation;
+    const scopeIdentity = `${props.scope.kind}:${props.scope.key}`;
+    const scopeChanged = scopeIdentityRef.current !== scopeIdentity;
+    scopeIdentityRef.current = scopeIdentity;
     setListingsByDirectory({});
     setLoadingDirectories({});
     setTreeLoadFailed(false);
-    setPreviewPath(null);
-    setOpenPreviewTabs([]);
-    setPreviewContent(null);
-    setCollapsedPreviewFolders({});
+    if (scopeChanged) {
+      dispatchPreviewTabs({ type: "reset" });
+      setPreviewViewState({});
+      setCollapsedPreviewFolders({});
+    }
 
-    void requestDirectory(props.sessionKey, ROOT_DIRECTORY_KEY, generation).then(async (rootListing) => {
-      if (!rootListing || requestGenerationRef.current !== generation) return;
-      const rootFile = firstFile(rootListing.entries);
-      if (rootFile) {
-        setPreviewPath(rootFile.path);
-        setOpenPreviewTabs([rootFile.path]);
-      }
-      const defaultOpenFolders = rootListing.entries.filter(shouldOpenByDefault);
-      if (!defaultOpenFolders.length) return;
-      setCollapsedPreviewFolders(Object.fromEntries(
-        defaultOpenFolders.map((entry) => [entry.path, false])
-      ));
-      // Keep the committed downloads-before-outputs initial selection deterministic.
-      for (const folder of defaultOpenFolders) {
-        const listing = await requestDirectory(props.sessionKey, folder.path, generation).catch(() => null);
-        if (requestGenerationRef.current !== generation) return;
-        if (!listing) continue;
-        if (!rootFile) {
-          const initialFile = firstFile(listing.entries);
-          if (initialFile) {
-            setPreviewPath((current) => current ?? initialFile.path);
-            setOpenPreviewTabs((tabs) => (
-              tabs.length ? tabs : [initialFile.path]
-            ));
-          }
-        }
-      }
-    }).catch(() => {
+    void requestDirectory(props.scope, ROOT_DIRECTORY_KEY, generation).catch(() => {
       if (requestGenerationRef.current !== generation) return;
       setListingsByDirectory((state) => ({
         ...state,
@@ -203,30 +212,7 @@ export function WorkspaceArtifactPanel(props: WorkspaceArtifactPanelProps): Reac
         requestGenerationRef.current += 1;
       }
     };
-  }, [props.refreshKey, props.sessionKey, requestDirectory]);
-
-  useEffect(() => {
-    const generation = requestGenerationRef.current;
-    let stale = false;
-    setPreviewContent(null);
-    if (!previewPath) {
-      setPreviewLoading(false);
-      return () => {
-        stale = true;
-      };
-    }
-    setPreviewLoading(true);
-    void loadPreviewRef.current(previewPath).then((content) => {
-      if (!stale && requestGenerationRef.current === generation) setPreviewContent(content);
-    }).catch(() => {
-      if (!stale && requestGenerationRef.current === generation) setPreviewContent(null);
-    }).finally(() => {
-      if (!stale && requestGenerationRef.current === generation) setPreviewLoading(false);
-    });
-    return () => {
-      stale = true;
-    };
-  }, [previewPath]);
+  }, [internalRefreshKey, props.refreshKey, props.scope.kind, props.scope.key, requestDirectory]);
 
   useEffect(() => {
     if (!fileContextMenu) return;
@@ -240,16 +226,26 @@ export function WorkspaceArtifactPanel(props: WorkspaceArtifactPanelProps): Reac
   }, [fileContextMenu]);
 
   function selectPreviewFile(path: string) {
-    setPreviewPath(path);
-    setOpenPreviewTabs((tabs) => (tabs.includes(path) ? tabs : [...tabs, path]));
+    dispatchPreviewTabs({ type: "select", path });
   }
 
   function closePreviewTab(path: string) {
-    setOpenPreviewTabs((tabs) => {
-      const next = tabs.filter((tab) => tab !== path);
-      if (previewPath === path) setPreviewPath(next[next.length - 1] ?? null);
-      return next;
+    dispatchPreviewTabs({ type: "close", path });
+    setPreviewViewState((current) => {
+      if (!(path in current)) return current;
+      const nextState = { ...current };
+      delete nextState[path];
+      return nextState;
     });
+  }
+
+  function revealBreadcrumbDirectory(path: string) {
+    setFileTreeOpen(true);
+    if (!path) return;
+    setCollapsedPreviewFolders((state) => ({ ...state, [path]: false }));
+    if (listingsByDirectory[path] === undefined && !loadingDirectories[path]) {
+      void requestDirectory(props.scope, path, requestGenerationRef.current).catch(() => undefined);
+    }
   }
 
   function beginFileDrag(event: DragEvent<HTMLElement>, path: string, name: string) {
@@ -270,7 +266,7 @@ export function WorkspaceArtifactPanel(props: WorkspaceArtifactPanelProps): Reac
     setCollapsedPreviewFolders((state) => ({ ...state, [entry.path]: !collapsed }));
     if (collapsed && listingsByDirectory[entry.path] === undefined && !loadingDirectories[entry.path]) {
       const generation = requestGenerationRef.current;
-      void requestDirectory(props.sessionKey, entry.path, generation).catch(() => {
+      void requestDirectory(props.scope, entry.path, generation).catch(() => {
         if (requestGenerationRef.current !== generation) return;
         setListingsByDirectory((state) => ({
           ...state,
@@ -312,7 +308,7 @@ export function WorkspaceArtifactPanel(props: WorkspaceArtifactPanelProps): Reac
           aria-expanded={!collapsed}
           onClick={() => toggleDirectory(entry)}
         >
-          {collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
+          {collapsed ? <ChevronRight size={11} /> : <ChevronDown size={11} />}
           <strong>{entry.name}</strong>
         </button>
         {!collapsed ? (
@@ -339,7 +335,32 @@ export function WorkspaceArtifactPanel(props: WorkspaceArtifactPanelProps): Reac
   const resolvedRootLabel = rootListing?.root.label || props.rootLabel;
   const emptyLabel = props.emptyLabel ?? t("workspaceArtifact.noFiles");
   const emptyDetail = props.emptyDetail ?? resolvedRootLabel;
-  const previewUnavailableLabel = props.previewUnavailableLabel ?? t("common.preview");
+  const previewResource = useMemo<FilePreviewResource | null>(() => previewPath ? {
+    id: `${props.scope.kind}:${props.scope.key}:${previewPath}`,
+    name: fileNameFromPath(previewPath),
+    path: previewPath,
+    load: (signal) => props.loadFile(previewPath, signal),
+    open: props.openFile ? () => props.openFile!(previewPath) : undefined,
+    reveal: props.revealFile ? () => props.revealFile!(previewPath) : undefined,
+    download: async () => {
+      const blob = await props.loadFile(previewPath);
+      const objectUrl = URL.createObjectURL(blob);
+      startBrowserDownload(objectUrl, fileNameFromPath(previewPath));
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+    },
+    openRelativePath: selectPreviewFile,
+    loadRelativePath: (path, signal) => props.loadFile(path, signal)
+  } : null, [
+    previewPath,
+    props.loadFile,
+    props.openFile,
+    props.revealFile,
+    props.scope.kind,
+    props.scope.key
+  ]);
+  const breadcrumbParts = previewPath?.replace(/\\/g, "/").split("/").filter(Boolean) ?? [];
+
+  if (props.hidden) return null;
 
   return (
     <>
@@ -352,19 +373,8 @@ export function WorkspaceArtifactPanel(props: WorkspaceArtifactPanelProps): Reac
         onResizeStart={previewResize.beginResize}
         onResizeBy={previewResize.resizeBy}
       />
-      <aside className="workspace-artifact-preview-pane workspace-artifact-preview-pane--lifted" style={previewResize.sidebarStyle}>
+      <aside className="workspace-artifact-preview-pane workspace-artifact-preview-pane--workspace workspace-artifact-preview-pane--lifted" style={previewResize.sidebarStyle}>
         <header className="workspace-artifact-preview-toolbar">
-          {hasEntries ? (
-            <button
-              type="button"
-              className="workspace-artifact-file-browser__toggle"
-              aria-label={t("workspaceArtifact.toggleFiles")}
-              aria-expanded={fileTreeOpen}
-              onClick={() => setFileTreeOpen((open) => !open)}
-            >
-              {fileTreeOpen ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}
-            </button>
-          ) : null}
           <div className="workspace-artifact-file-tabs" role="tablist" aria-label={t("workspaceArtifact.openFiles")}>
             {openPreviewTabs.map((path) => {
               const active = previewPath === path;
@@ -375,7 +385,7 @@ export function WorkspaceArtifactPanel(props: WorkspaceArtifactPanelProps): Reac
                     role="tab"
                     aria-selected={active}
                     title={path}
-                    onClick={() => setPreviewPath(path)}
+                    onClick={() => dispatchPreviewTabs({ type: "activate", path })}
                   >
                     {fileNameFromPath(path)}
                   </button>
@@ -383,7 +393,14 @@ export function WorkspaceArtifactPanel(props: WorkspaceArtifactPanelProps): Reac
                     type="button"
                     className="workspace-artifact-file-tab__close"
                     aria-label={t("common.close")}
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onPointerUp={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      closePreviewTab(path);
+                    }}
                     onClick={(event) => {
+                      event.preventDefault();
                       event.stopPropagation();
                       closePreviewTab(path);
                     }}
@@ -394,24 +411,64 @@ export function WorkspaceArtifactPanel(props: WorkspaceArtifactPanelProps): Reac
               );
             })}
           </div>
-          {props.toolbarEnd ? (
-            <div className="workspace-artifact-preview-toolbar__actions">{props.toolbarEnd}</div>
-          ) : null}
+          <div className="workspace-artifact-preview-toolbar__actions">
+            <button type="button" aria-label={t("filePreview.refresh")} title={t("filePreview.refresh")} onClick={() => setInternalRefreshKey((key) => key + 1)}><RotateCw size={14} /></button>
+            {previewResource?.open ? <button type="button" aria-label={t("filePreview.open")} title={t("filePreview.open")} onClick={() => void previewResource.open?.()}><ExternalLink size={14} /></button> : null}
+            {previewResource?.reveal ? <button type="button" aria-label={t("filePreview.reveal")} title={t("filePreview.reveal")} onClick={() => void previewResource.reveal?.()}><FolderSearch size={14} /></button> : null}
+            {previewResource?.download ? <button type="button" aria-label={t("filePreview.download")} title={t("filePreview.download")} onClick={() => void previewResource.download?.()}><Download size={14} /></button> : null}
+            {props.toolbarEnd}
+          </div>
         </header>
+        <div className="workspace-artifact-breadcrumb-bar">
+          <nav className="workspace-artifact-breadcrumbs" aria-label={t("workspaceArtifact.breadcrumbs")}>
+            <button type="button" title={resolvedRootLabel} onClick={() => revealBreadcrumbDirectory("")}>
+              {resolvedRootLabel}
+            </button>
+            {breadcrumbParts.map((part, index) => {
+              const isFile = index === breadcrumbParts.length - 1;
+              const path = breadcrumbParts.slice(0, index + 1).join("/");
+              return (
+                <span key={path} className="workspace-artifact-breadcrumb">
+                  <ChevronRight size={11} aria-hidden="true" />
+                  {isFile
+                    ? <strong title={path}>{part}</strong>
+                    : <button type="button" title={path} onClick={() => revealBreadcrumbDirectory(path)}>{part}</button>}
+                </span>
+              );
+            })}
+          </nav>
+          {hasEntries ? (
+            <button
+              type="button"
+              className="workspace-artifact-file-browser__toggle"
+              aria-label={t("workspaceArtifact.toggleFiles")}
+              aria-expanded={fileTreeOpen}
+              onClick={() => setFileTreeOpen((open) => !open)}
+            >
+              {fileTreeOpen ? <PanelRightClose size={15} /> : <PanelRightOpen size={15} />}
+            </button>
+          ) : null}
+        </div>
         <div className="workspace-artifact-preview-body">
-          <aside
-            className={`workspace-artifact-file-browser${fileTreeOpen && hasEntries ? "" : " workspace-artifact-file-browser--collapsed"}`}
-            style={fileBrowserResize.sidebarStyle}
-          >
-            {fileTreeOpen && hasEntries ? (
-              <nav className="workspace-artifact-file-list">
-                {(rootListing?.entries ?? []).map(renderEntry)}
-                {rootListing?.truncated ? (
-                  <span className="workspace-artifact-file-item" title={props.truncatedLabel}>{props.truncatedLabel ?? "…"}</span>
-                ) : null}
-              </nav>
-            ) : null}
-          </aside>
+          <section className="workspace-artifact-preview-main">
+            {previewPath && previewResource ? (
+              <FilePreview
+                resource={previewResource}
+                viewState={previewViewState[previewPath]}
+                onViewStateChange={(state) => setPreviewViewState((current) => ({ ...current, [previewPath]: state }))}
+              />
+            ) : (
+              <div className="workspace-artifact-preview-empty">
+                <Folder size={28} aria-hidden="true" />
+                <strong>
+                  {rootLoading
+                    ? t("common.loading")
+                    : emptyLabel}
+                </strong>
+                <small>{treeLoadFailed ? resolvedRootLabel : emptyDetail}</small>
+              </div>
+            )}
+          </section>
           {fileTreeOpen && hasEntries ? (
             <SidebarResizeHandle
               label={t("workspaceArtifact.resizeFiles")}
@@ -423,32 +480,22 @@ export function WorkspaceArtifactPanel(props: WorkspaceArtifactPanelProps): Reac
               onResizeBy={fileBrowserResize.resizeBy}
             />
           ) : null}
-          <section className="workspace-artifact-preview-main">
-            {previewPath && previewContent ? (
-              <article className="workspace-artifact-preview-document">
-                <div className="workspace-artifact-preview-crumb">{resolvedRootLabel} › {fileNameFromPath(previewPath)}</div>
-                <h2>{previewContent.title}</h2>
-                {previewContent.sections.map((section) => (
-                  <section key={section.heading}>
-                    <h3>{section.heading}</h3>
-                    <p>{section.body}</p>
-                  </section>
-                ))}
-              </article>
-            ) : (
-              <div className="workspace-artifact-preview-empty">
-                <Folder size={28} aria-hidden="true" />
-                <strong>
-                  {rootLoading || previewLoading
-                    ? t("common.loading")
-                    : previewPath
-                      ? previewUnavailableLabel
-                      : emptyLabel}
-                </strong>
-                <small>{treeLoadFailed ? resolvedRootLabel : emptyDetail}</small>
-              </div>
-            )}
-          </section>
+          <aside
+            className={`workspace-artifact-file-browser${fileTreeOpen && hasEntries ? "" : " workspace-artifact-file-browser--collapsed"}`}
+            style={fileBrowserResize.sidebarStyle}
+          >
+            {fileTreeOpen && hasEntries ? (
+              <nav className="workspace-artifact-file-list">
+                <div className="workspace-artifact-file-root" title={resolvedRootLabel}>
+                  {resolvedRootLabel}
+                </div>
+                {(rootListing?.entries ?? []).map(renderEntry)}
+                {rootListing?.truncated ? (
+                  <span className="workspace-artifact-file-item" title={props.truncatedLabel}>{props.truncatedLabel ?? "…"}</span>
+                ) : null}
+              </nav>
+            ) : null}
+          </aside>
         </div>
       </aside>
       {fileContextMenu ? (

@@ -3,9 +3,9 @@
   "plugins": [
     {
       "id": "literature-review",
-      "version": "0.5.19",
-      "sha256": "1e0bcb98d0873ac5aae201b71f0533ec6227b249a80fbe0cd1e0df1226880eea",
-      "releaseFile": "literature-review-0.5.19.release.json"
+      "version": "0.5.20",
+      "sha256": "9ae113026b956b8f8c5d7074a5ad819c2ff262c03645bc2b27e7f05b96234fd0",
+      "releaseFile": "literature-review-0.5.20.release.json"
     }
   ]
 }

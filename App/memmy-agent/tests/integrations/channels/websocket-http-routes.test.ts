@@ -443,6 +443,30 @@ describe("WebSocket HTTP route helpers", () => {
       }],
     });
 
+    const fileResponse = await channel.dispatchHttp(localConnection, {
+      path: `/api/sessions/${encoded}/workspace/file?path=src%2Findex.ts`,
+      headers,
+    });
+    expect(fileResponse?.status).toBe(200);
+    expect(fileResponse?.headers).toMatchObject({
+      "content-type": "text/plain; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff",
+    });
+    expect(Buffer.from(fileResponse?.body as Buffer).toString("utf8")).toBe("export {};\n");
+
+    const revealResponse = await channel.dispatchHttp(localConnection, {
+      path: `/api/sessions/${encoded}/workspace/file/reveal?path=src%2Findex.ts`,
+      method: "POST",
+      headers,
+    });
+    expect(revealResponse?.status).toBe(200);
+    const [revealCommand, revealArgs] = expectedRevealInvocation(fs.realpathSync(path.join(root, "src", "index.ts")));
+    expect(childProcessMocks.spawn).toHaveBeenLastCalledWith(revealCommand, revealArgs, {
+      detached: true,
+      stdio: "ignore",
+    });
+
     const traversalResponse = await channel.dispatchHttp(localConnection, {
       path: `/api/sessions/${encoded}/workspace/files?path=..%2Foutside`,
       headers,
@@ -480,6 +504,22 @@ describe("WebSocket HTTP route helpers", () => {
         size: 7,
       }],
     });
+
+    const projectListing = await channel.dispatchHttp(localConnection, {
+      path: `/api/projects/${encodeURIComponent(project.id)}/workspace/files`,
+      headers,
+    });
+    expect(projectListing?.status).toBe(200);
+    expect(responseJson(projectListing!)).toMatchObject({
+      root: { kind: "project", label: "Research project" },
+      entries: [expect.objectContaining({ path: "project.md" })],
+    });
+
+    const projectFile = await channel.dispatchHttp(localConnection, {
+      path: `/api/projects/${encodeURIComponent(project.id)}/workspace/file?path=project.md`,
+      headers,
+    });
+    expect(Buffer.from(projectFile?.body as Buffer).toString("utf8")).toBe("project");
   });
 
   it("does not fall back to the task cwd when a bound project is missing", async () => {

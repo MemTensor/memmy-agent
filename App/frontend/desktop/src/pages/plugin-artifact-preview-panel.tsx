@@ -1,14 +1,14 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
-import { AlertCircle, Download, FileOutput, X } from "lucide-react";
+import { useEffect, useMemo } from "react";
+import { Download, FileOutput, X } from "lucide-react";
 import type { PluginArtifactRef } from "@memmy/local-api-contracts";
 import type { PluginsClient } from "../api/plugins-client.js";
 import { useTranslation } from "../i18n/use-translation.js";
-import { readDocxBlocks, type DocxBlock, type DocxTextSpan } from "../lib/office-preview.js";
 import { startBrowserDownload } from "./agent-message-content.js";
+import { FilePreview } from "./file-preview/file-preview.js";
+import type { FilePreviewResource } from "./file-preview/file-preview-types.js";
 import { SidebarResizeHandle, useResizableSidebar } from "./sidebar-resize.js";
 
 const PLUGIN_ARTIFACT_WIDTH_STORAGE_KEY = "memmy.pluginArtifact.previewWidth";
-const DOCX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
 export interface PluginArtifactPreviewPanelProps {
   artifact: PluginArtifactRef;
@@ -19,12 +19,6 @@ export interface PluginArtifactPreviewPanelProps {
 
 export function PluginArtifactPreviewPanel(props: PluginArtifactPreviewPanelProps) {
   const { t } = useTranslation();
-  const generation = useRef(0);
-  const [state, setState] = useState<
-    | { status: "loading" }
-    | { status: "ready"; blob: Blob; objectUrl: string | null; text: string | null; document: DocxBlock[] | null }
-    | { status: "error" }
-  >({ status: "loading" });
   const resize = useResizableSidebar({
     storageKey: PLUGIN_ARTIFACT_WIDTH_STORAGE_KEY,
     defaultWidth: 560,
@@ -32,54 +26,28 @@ export function PluginArtifactPreviewPanel(props: PluginArtifactPreviewPanelProp
     maxWidth: 880,
     resizeDirection: -1
   });
-
   useEffect(() => props.onWidthChange?.(resize.width), [props.onWidthChange, resize.width]);
 
-  useEffect(() => {
-    const current = generation.current + 1;
-    generation.current = current;
-    let objectUrl: string | null = null;
-    setState({ status: "loading" });
-    void props.readArtifact(props.artifact.uri).then(async (blob) => {
-      if (generation.current !== current) return;
-      const mediaType = props.artifact.mediaType.toLowerCase();
-      if (isTextPreview(mediaType)) {
-        setState({ status: "ready", blob, objectUrl: null, text: await blob.text(), document: null });
-        return;
-      }
-      if (mediaType === "application/pdf" || mediaType.startsWith("image/")) {
-        objectUrl = URL.createObjectURL(blob);
-        setState({ status: "ready", blob, objectUrl, text: null, document: null });
-        return;
-      }
-      if (mediaType === DOCX_MEDIA_TYPE) {
-        // A malformed or password-protected package must still offer a download,
-        // so a parse failure degrades to the unavailable placeholder.
-        const blocks = await readDocxBlocks(blob).catch(() => null);
-        if (generation.current !== current) return;
-        setState({ status: "ready", blob, objectUrl: null, text: null, document: blocks });
-        return;
-      }
-      setState({ status: "ready", blob, objectUrl: null, text: null, document: null });
-    }).catch(() => {
-      if (generation.current === current) setState({ status: "error" });
-    });
-    return () => {
-      if (generation.current === current) generation.current += 1;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-    };
-  }, [props.artifact.id, props.artifact.uri, props.artifact.mediaType, props.readArtifact]);
-
   const download = async () => {
-    const blob = state.status === "ready"
-      ? state.blob
-      : await props.readArtifact(props.artifact.downloadUri ?? props.artifact.uri);
+    const blob = await props.readArtifact(props.artifact.downloadUri ?? props.artifact.uri);
     const objectUrl = URL.createObjectURL(blob);
     startBrowserDownload(objectUrl, props.artifact.name);
     window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
   };
-
-  const mediaType = props.artifact.mediaType.toLowerCase();
+  const resource = useMemo<FilePreviewResource>(() => ({
+    id: `plugin:${props.artifact.id}`,
+    name: props.artifact.name,
+    mediaType: props.artifact.mediaType,
+    load: () => props.readArtifact(props.artifact.uri),
+    download
+  }), [
+    props.artifact.id,
+    props.artifact.mediaType,
+    props.artifact.name,
+    props.artifact.uri,
+    props.artifact.downloadUri,
+    props.readArtifact
+  ]);
   return (
     <>
       <SidebarResizeHandle
@@ -91,7 +59,7 @@ export function PluginArtifactPreviewPanel(props: PluginArtifactPreviewPanelProp
         onResizeStart={resize.beginResize}
         onResizeBy={resize.resizeBy}
       />
-      <aside className="workspace-artifact-preview-pane workspace-artifact-preview-pane--lifted" style={resize.sidebarStyle} aria-label={t("plugin.ui.artifactPreview")}>
+      <aside className="workspace-artifact-preview-pane workspace-artifact-preview-pane--plugin workspace-artifact-preview-pane--lifted" style={resize.sidebarStyle} aria-label={t("plugin.ui.artifactPreview")}>
         <header className="workspace-artifact-preview-toolbar">
           <div className="workspace-artifact-file-tabs">
             <div className="workspace-artifact-file-tab workspace-artifact-file-tab--active">
@@ -110,73 +78,10 @@ export function PluginArtifactPreviewPanel(props: PluginArtifactPreviewPanelProp
         </header>
         <div className="workspace-artifact-preview-body">
           <section className="workspace-artifact-preview-main">
-            {state.status === "loading" ? (
-              <div className="workspace-artifact-preview-empty"><FileOutput size={28} /><strong>{t("common.loading")}</strong></div>
-            ) : state.status === "error" ? (
-              <div className="workspace-artifact-preview-empty" role="alert"><AlertCircle size={28} /><strong>{t("plugin.ui.previewFailed")}</strong></div>
-            ) : state.text !== null ? (
-              <article className="workspace-artifact-preview-document"><pre className="whitespace-pre-wrap break-words font-sans text-sm leading-relaxed">{state.text}</pre></article>
-            ) : state.document !== null ? (
-              <article className="workspace-artifact-preview-document"><DocxPreview blocks={state.document} /></article>
-            ) : state.objectUrl && mediaType.startsWith("image/") ? (
-              <div className="flex h-full w-full items-center justify-center overflow-auto bg-canvas-oat/40 p-4"><img src={state.objectUrl} alt={props.artifact.name} className="max-h-full max-w-full object-contain" /></div>
-            ) : state.objectUrl && mediaType === "application/pdf" ? (
-              <iframe title={props.artifact.name} src={state.objectUrl} className="h-full w-full border-0 bg-background-paper" />
-            ) : (
-              <div className="workspace-artifact-preview-empty"><FileOutput size={28} /><strong>{t("plugin.ui.previewUnavailable")}</strong><small>{t("plugin.ui.downloadToView")}</small></div>
-            )}
+            <FilePreview resource={resource} />
           </section>
         </div>
       </aside>
     </>
   );
-}
-
-function isTextPreview(mediaType: string): boolean {
-  return mediaType.startsWith("text/") || mediaType === "application/json" || mediaType === "application/x-bibtex";
-}
-
-/** Renders parsed Word content as React nodes, so no document markup is injected. */
-function DocxPreview(props: { blocks: DocxBlock[] }) {
-  return (
-    <div className="space-y-2 text-sm leading-relaxed text-text-ink/80">
-      {props.blocks.map((block, index) => {
-        if (block.kind === "table") {
-          return (
-            <table key={index} className="w-full table-auto border-collapse text-xs">
-              <tbody>
-                {block.rows.map((row, rowIndex) => (
-                  <tr key={rowIndex}>
-                    {row.map((cell, cellIndex) => (
-                      <td key={cellIndex} className="border border-border-stone/40 px-2 py-1 align-top">
-                        {cell.map((span, spanIndex) => <DocxSpan key={spanIndex} span={span} />)}
-                      </td>
-                    ))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          );
-        }
-        // An empty paragraph is the document's own vertical spacing; keep it visible.
-        if (!block.spans.length) return <div key={index} className="h-3" />;
-        const content = block.spans.map((span, spanIndex) => <DocxSpan key={spanIndex} span={span} />);
-        if (block.headingLevel === null) {
-          return <p key={index} className="whitespace-pre-wrap break-words">{content}</p>;
-        }
-        const Heading = `h${Math.min(6, block.headingLevel + 1)}` as "h2";
-        return (
-          <Heading key={index} className={`mt-3 break-words font-semibold text-text-ink/90 ${block.headingLevel === 1 ? "text-base" : "text-sm"}`}>
-            {content}
-          </Heading>
-        );
-      })}
-    </div>
-  );
-}
-
-function DocxSpan(props: { span: DocxTextSpan }) {
-  const { text, bold, italic } = props.span;
-  if (!bold && !italic) return <>{text}</>;
-  return <span className={`${bold ? "font-semibold" : ""} ${italic ? "italic" : ""}`.trim()}>{text}</span>;
 }

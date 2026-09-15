@@ -85,6 +85,8 @@ import {
 } from "../../entrypoints/frontend-bridge/projects.js";
 import {
   listWorkspaceFiles,
+  readWorkspaceFile,
+  resolveWorkspaceFile,
   WorkspaceFilesError,
   type WorkspaceFilesRootKind,
 } from "../../entrypoints/frontend-bridge/workspace-files.js";
@@ -324,6 +326,11 @@ const TEXT_MIME_BY_EXTENSION: Record<string, string> = {
   ".ini": "text/plain",
   ".cfg": "text/plain",
 };
+const CODE_TEXT_EXTENSIONS = new Set([
+  ".astro", ".bib", ".c", ".cc", ".cjs", ".cpp", ".css", ".cts", ".go", ".gql",
+  ".graphql", ".h", ".hpp", ".java", ".jsx", ".mjs", ".mts", ".properties", ".py",
+  ".rb", ".rs", ".sh", ".sql", ".svelte", ".tex", ".ts", ".tsx", ".vue",
+]);
 const AUDIO_MIME_BY_EXTENSION: Record<string, string> = {
   ".aac": "audio/aac",
   ".flac": "audio/flac",
@@ -2016,9 +2023,14 @@ export class WebSocketChannel extends BaseChannel {
     return this.workspaceEnvironmentResponse(request, result.context, view);
   }
 
-  handleWorkspaceFiles(request: HttpRequestLike, key: string): HttpLikeResponse {
+  handleWorkspaceFiles(
+    request: HttpRequestLike,
+    key: string,
+    view: "listing" | "file" | "open" | "reveal" = "listing",
+  ): HttpLikeResponse {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
-    if ((request.method ?? "GET").toUpperCase() !== "GET") return httpError(405, "method not allowed");
+    const expectedMethod = view === "open" || view === "reveal" ? "POST" : "GET";
+    if ((request.method ?? "GET").toUpperCase() !== expectedMethod) return httpError(405, "method not allowed");
     if (!this.sessionManager) return httpError(503, "session manager unavailable");
 
     try {
@@ -2050,12 +2062,7 @@ export class WebSocketChannel extends BaseChannel {
         rootKind = "project";
         rootLabel = project.name;
       }
-      const [, query] = parseRequestPath(String(request.path ?? ""));
-      return httpJsonResponse(listWorkspaceFiles(rootPath, {
-        rootKind,
-        rootLabel,
-        relativePath: queryFirst(query, "path") ?? "",
-      }));
+      return this.workspaceFilesResponse(request, rootPath, rootKind, rootLabel, view);
     } catch (error) {
       if (error instanceof WorkspaceFilesError) {
         return httpJsonResponse(
@@ -2075,6 +2082,99 @@ export class WebSocketChannel extends BaseChannel {
         { status: 500 },
       );
     }
+  }
+
+  handleProjectWorkspaceFiles(
+    request: HttpRequestLike,
+    rawId: string,
+    view: "listing" | "file" | "open" | "reveal" = "listing",
+  ): HttpLikeResponse {
+    if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+    const expectedMethod = view === "open" || view === "reveal" ? "POST" : "GET";
+    if ((request.method ?? "GET").toUpperCase() !== expectedMethod) return httpError(405, "method not allowed");
+    try {
+      const id = decodeApiKey(rawId);
+      if (!id) throw new WebuiProjectError("project_not_found", 404);
+      const project = this.activeProject(id);
+      const rootPath = assertWebuiWorkspaceAvailable(project.rootPath);
+      if (rootPath !== project.rootPath) {
+        throw new WebuiProjectError("project_directory_unavailable", 422);
+      }
+      return this.workspaceFilesResponse(request, rootPath, "project", project.name, view);
+    } catch (error) {
+      if (error instanceof WorkspaceFilesError) {
+        return httpJsonResponse(
+          { code: error.code, message: error.message },
+          { status: error.status },
+        );
+      }
+      if (error instanceof WebuiProjectError) return this.projectErrorResponse(error);
+      return httpJsonResponse(
+        { code: "workspace_files_unavailable", message: "workspace files unavailable" },
+        { status: 500 },
+      );
+    }
+  }
+
+  private workspaceFilesResponse(
+    request: HttpRequestLike,
+    rootPath: string,
+    rootKind: WorkspaceFilesRootKind,
+    rootLabel: string,
+    view: "listing" | "file" | "open" | "reveal",
+  ): HttpLikeResponse {
+    const [, query] = parseRequestPath(String(request.path ?? ""));
+    const relativePath = queryFirst(query, "path") ?? "";
+    if (view === "listing") {
+      return httpJsonResponse(listWorkspaceFiles(rootPath, {
+        rootKind,
+        rootLabel,
+        relativePath,
+      }));
+    }
+
+    if (view === "open") {
+      const file = resolveWorkspaceFile(rootPath, relativePath);
+      const result = openPathWithSystemDefault(file.absolutePath);
+      return result.ok
+        ? httpJsonResponse({ ok: true })
+        : httpJsonResponse({ code: "workspace_file_open_failed", message: result.message }, { status: 500 });
+    }
+    if (view === "reveal") {
+      const file = resolveWorkspaceFile(rootPath, relativePath);
+      try {
+        revealFileInSystemManager(file.absolutePath);
+        return httpJsonResponse({ ok: true });
+      } catch {
+        return httpJsonResponse(
+          { code: "workspace_file_reveal_failed", message: "workspace_file_reveal_failed" },
+          { status: 500 },
+        );
+      }
+    }
+    const file = readWorkspaceFile(rootPath, relativePath);
+    const extension = path.extname(file.name).toLowerCase();
+    const mime = DOCUMENT_MIME_BY_EXTENSION[extension]
+      ?? TEXT_MIME_BY_EXTENSION[extension]
+      ?? (CODE_TEXT_EXTENSIONS.has(extension) ? "text/plain" : String(lookupMime(file.name) || "application/octet-stream"));
+    const contentType = mime.startsWith("text/") || [
+      "application/json",
+      "application/javascript",
+      "application/xml",
+    ].includes(mime)
+      ? `${mime}; charset=utf-8`
+      : mime;
+    return {
+      status: 200,
+      headers: {
+        "content-type": contentType,
+        "content-length": String(file.size),
+        "cache-control": "no-store",
+        "content-security-policy": "default-src 'none'; sandbox",
+        "x-content-type-options": "nosniff",
+      },
+      body: file.body,
+    };
   }
 
   handleWebuiThreadGet(request: any, key: string): HttpLikeResponse {
@@ -2870,6 +2970,12 @@ export class WebSocketChannel extends BaseChannel {
     if (match) return this.handleWorkspaceEnvironment(request, match[1], "diff");
     match = got.match(/^\/api\/sessions\/([^/]+)\/environment\/branch$/);
     if (match) return this.handleWorkspaceEnvironment(request, match[1], "branch");
+    match = got.match(/^\/api\/sessions\/([^/]+)\/workspace\/file\/open$/);
+    if (match) return this.handleWorkspaceFiles(request, match[1], "open");
+    match = got.match(/^\/api\/sessions\/([^/]+)\/workspace\/file\/reveal$/);
+    if (match) return this.handleWorkspaceFiles(request, match[1], "reveal");
+    match = got.match(/^\/api\/sessions\/([^/]+)\/workspace\/file$/);
+    if (match) return this.handleWorkspaceFiles(request, match[1], "file");
     match = got.match(/^\/api\/sessions\/([^/]+)\/workspace\/files$/);
     if (match) return this.handleWorkspaceFiles(request, match[1]);
     match = got.match(/^\/api\/sessions\/([^/]+)\/webui-thread$/);
@@ -2886,6 +2992,14 @@ export class WebSocketChannel extends BaseChannel {
     if (match) return this.handleProjectWorkspaceEnvironment(request, match[1], "diff");
     match = got.match(/^\/api\/projects\/([^/]+)\/environment\/branch$/);
     if (match) return this.handleProjectWorkspaceEnvironment(request, match[1], "branch");
+    match = got.match(/^\/api\/projects\/([^/]+)\/workspace\/file\/open$/);
+    if (match) return this.handleProjectWorkspaceFiles(request, match[1], "open");
+    match = got.match(/^\/api\/projects\/([^/]+)\/workspace\/file\/reveal$/);
+    if (match) return this.handleProjectWorkspaceFiles(request, match[1], "reveal");
+    match = got.match(/^\/api\/projects\/([^/]+)\/workspace\/file$/);
+    if (match) return this.handleProjectWorkspaceFiles(request, match[1], "file");
+    match = got.match(/^\/api\/projects\/([^/]+)\/workspace\/files$/);
+    if (match) return this.handleProjectWorkspaceFiles(request, match[1]);
     match = got.match(/^\/api\/projects\/([^/]+)\/reveal$/);
     if (match) return this.handleProjectReveal(request, match[1]);
     match = got.match(/^\/api\/projects\/([^/]+)$/);

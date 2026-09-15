@@ -17,6 +17,8 @@ describe("shared file icon system", () => {
       ["README.md", undefined, "markdown"],
       ["notes.txt", undefined, "text"],
       ["config.toml", undefined, "code"],
+      ["module.mjs", "text/plain", "code"],
+      ["references.bib", "application/octet-stream", "text"],
       ["photo.webp", undefined, "image"],
       ["clip.mov", undefined, "video"],
       ["voice.wav", undefined, "audio"],
