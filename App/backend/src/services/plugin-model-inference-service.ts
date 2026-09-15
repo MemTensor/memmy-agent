@@ -9,7 +9,14 @@ import type { PluginHostServiceCall, PluginHostServiceInvoker } from "../adapter
 
 const MAX_INPUT_CHARACTERS = 200_000;
 const MAX_OUTPUT_TOKENS = 8_192;
-const DEFAULT_OUTPUT_TOKENS = 2_048;
+/**
+ * Matches the budget an ordinary chat turn gets, for the same reason.
+ *
+ * A reasoning model spends this budget on its own reasoning before it writes
+ * anything, so 2048 was not a smaller answer but an empty one: the reasoning
+ * alone reached the ceiling and the response carried no content.
+ */
+const DEFAULT_OUTPUT_TOKENS = 4_096;
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_TIMEOUT_MS = 300_000;
 const DEFAULT_MAX_ATTEMPTS = 2;
@@ -142,6 +149,17 @@ async function infer(
     const body = await response.json();
     const parsed = extractResponse(protocol, body);
     if (!parsed.content.trim()) throw serviceError("model_empty_response", "Current user model returned no content", true);
+    // A JSON body cut off at the token ceiling can never parse, and handing it
+    // back makes the caller report a malformed response when the real problem
+    // is the budget. Text callers still get their partial answer plus the
+    // finish reason, which is theirs to interpret.
+    if (input.responseFormat === "json" && isTruncated(parsed.finishReason)) {
+      throw serviceError(
+        "model_response_truncated",
+        `Current user model hit its ${maxTokens}-token output limit before finishing the JSON response`,
+        false
+      );
+    }
     return { ...parsed, model: { provider: resolved.context.provider, model: resolved.context.model } };
   } catch (error) {
     if (callerSignal?.aborted) throw cancelledError();
@@ -320,6 +338,12 @@ function thinkingStrategyFor(
       ? "reasoning-none"
       : "omit";
   }
+  // The account gateway hides the upstream model behind an opaque slug such as
+  // `agent_chat`, so no vendor rule below can match one. It is left alone on
+  // purpose: the gateway validates request fields, and a switch aimed at
+  // whichever model sits behind the slug today would start failing the day it
+  // fronts another one. Account callers get the same reasoning behaviour as an
+  // ordinary chat turn, which is what the budget below is sized for.
   if (context.protocol !== "openai-chat-completions" && context.protocol !== "memmy-account") return "omit";
   return openAiChatThinkingStrategy(context.provider, provider.apiBase, slug);
 }
@@ -472,6 +496,12 @@ function extractResponse(protocol: string, value: unknown): Omit<PluginModelInfe
     ...usage(body.usage, "prompt_tokens", "completion_tokens", "total_tokens"),
     ...(reasoningTokens !== undefined ? { reasoningTokens } : {})
   } };
+}
+
+/** Recognises each protocol's way of saying the output hit the token ceiling. */
+function isTruncated(finishReason: string): boolean {
+  const reason = finishReason.trim().toLowerCase();
+  return reason === "length" || reason === "max_tokens" || reason === "incomplete";
 }
 
 function endpoint(base: string, suffix: string): string {
