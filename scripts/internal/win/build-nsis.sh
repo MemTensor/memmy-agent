@@ -1025,6 +1025,17 @@ PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm_with_configured_script_shell ci --prefix 
 package_step_start "Build Memory workspace"
 npm_with_configured_script_shell run build -w @memmy/memory
 
+if [ "${MEMMY_WINDOWS_TARGET:-nsis}" = "appx" ]; then
+  package_step_start "Build Windows Store Memory install lock"
+  powershell.exe \
+    -NoProfile \
+    -ExecutionPolicy Bypass \
+    -File "$(to_node_readable_path "$MEMORY_DIR/native/windows-install-lock/build.ps1")" \
+    -Architecture x64 \
+    -OutputDirectory "$(to_node_readable_path "$MEMORY_DIR/dist/native")"
+  require_packaged_runtime_file "$MEMORY_DIR/dist/native/memory-install-lock.node"
+fi
+
 package_step_start "Build memmy-agent runtime"
 npm_with_configured_script_shell run build --prefix "$AGENT_DIR"
 
@@ -1054,6 +1065,11 @@ cp -R "$MIGRATIONS_DIR/dist" "$MIGRATIONS_STAGING_DIR/dist"
 
 mkdir -p "$RUNTIME_DIR/memory/dist"
 cp -R "$MEMORY_DIR/dist/src" "$RUNTIME_DIR/memory/dist/src"
+if [ "${MEMMY_WINDOWS_TARGET:-nsis}" = "appx" ]; then
+  mkdir -p "$RUNTIME_DIR/memory/dist/native"
+  cp "$MEMORY_DIR/dist/native/memory-install-lock.node" "$RUNTIME_DIR/memory/dist/native/memory-install-lock.node"
+  require_packaged_runtime_file "$RUNTIME_DIR/memory/dist/native/memory-install-lock.node"
+fi
 cp -R "$MEMORY_DIR/dist/viewer" "$RUNTIME_DIR/memory/dist/viewer"
 cp -R "$MEMORY_DIR/adapters" "$RUNTIME_DIR/memory/adapters"
 mkdir -p "$RUNTIME_DIR/memory/workspace-packages/agent-source-core/dist/src"

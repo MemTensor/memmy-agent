@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
+const STORE_COPY_CONCURRENCY = 8;
+
 /** Copy into the installer's private staging directory, before pointer activation. */
 export const copyBundledMemoryRuntime = async (source: string, destination: string): Promise<void> => {
   if (process.platform !== "win32" || !/(?:^|[\\/])WindowsApps[\\/]/i.test(source)) {
@@ -22,18 +24,44 @@ export const copyBundledMemoryRuntime = async (source: string, destination: stri
 };
 
 const copyStoreRuntimeDirectory = async (source: string, destination: string): Promise<void> => {
-  await mkdir(destination, { recursive: true });
-  for (const entry of await readdir(source, { withFileTypes: true })) {
-    const sourcePath = join(source, entry.name);
-    const destinationPath = join(destination, entry.name);
-    if (entry.isDirectory()) {
-      await copyStoreRuntimeDirectory(sourcePath, destinationPath);
-    } else if (entry.isFile()) {
-      await copyStoreRuntimeFile(sourcePath, destinationPath);
-    } else {
-      throw new Error(`Unsupported Store runtime entry: ${sourcePath}`);
+  // Share the limit across the whole tree, including each file's staged hash
+  // verification. Small Store dependency files otherwise pay the I/O cost serially.
+  const pending = new Set<Promise<void>>();
+  let failed = false;
+  let firstError: unknown;
+  const recordFailure = (error: unknown) => {
+    if (!failed) firstError = error;
+    failed = true;
+  };
+  const visit = async (directory: string, target: string): Promise<void> => {
+    if (failed) return;
+    await mkdir(target, { recursive: true });
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      if (failed) return;
+      const sourcePath = join(directory, entry.name);
+      const destinationPath = join(target, entry.name);
+      if (entry.isDirectory()) {
+        await visit(sourcePath, destinationPath);
+      } else if (entry.isFile()) {
+        const task = copyStoreRuntimeFile(sourcePath, destinationPath)
+          .catch(recordFailure)
+          .finally(() => pending.delete(task));
+        pending.add(task);
+        if (pending.size === STORE_COPY_CONCURRENCY) await Promise.race(pending);
+      } else {
+        throw new Error(`Unsupported Store runtime entry: ${sourcePath}`);
+      }
     }
+  };
+  try {
+    await visit(source, destination);
+  } catch (error) {
+    recordFailure(error);
   }
+  // File and traversal errors must both drain all started writes before the
+  // installer removes staging or rolls back. This set contains at most 8 tasks.
+  await Promise.all(pending);
+  if (failed) throw firstError;
 };
 
 const copyStoreRuntimeFile = async (source: string, destination: string): Promise<void> => {

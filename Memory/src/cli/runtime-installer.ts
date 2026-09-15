@@ -8,6 +8,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { loadMemmyConfig } from "../config/index.js";
 import { MEMORY_PROTOCOL_VERSION, MEMORY_SERVICE_VERSION } from "../version.js";
 import { copyBundledMemoryRuntime } from "./bundled-runtime-copy.js";
+import { acquireWindowsStoreInstallLock, isWindowsStoreInstall } from "./windows-store-install-lock.js";
 
 const DEFAULT_RELEASES_URL = "https://github.com/MemTensor/memmy-agent/releases";
 const INSTALL_LOCK_TIMEOUT_MS = 15_000;
@@ -65,6 +66,27 @@ export interface InstalledRuntimePointer {
 }
 
 export async function installMemoryRuntime(options: MemoryRuntimeInstallOptions = {}): Promise<Record<string, unknown>> {
+  const home = resolveHome(options.home ?? "~/.memmy");
+  if (options.dryRun || !isWindowsStoreInstall({ ...options, home })) {
+    return installMemoryRuntimeUnderLock(options);
+  }
+  // Store recovery and activation decisions share one exclusive file handle.
+  // Read the installation pointer only after acquiring it: a waiting installer
+  // must observe the runtime activated by the preceding owner.
+  const serviceHome = join(home, "memory-service");
+  await mkdir(serviceHome, { recursive: true });
+  const installLock = await acquireWindowsStoreInstallLock(join(serviceHome, "install.lock"));
+  try {
+    return await installMemoryRuntimeUnderLock(options, installLock);
+  } finally {
+    await installLock.release();
+  }
+}
+
+async function installMemoryRuntimeUnderLock(
+  options: MemoryRuntimeInstallOptions,
+  heldInstallLock?: { release(): Promise<void> }
+): Promise<Record<string, unknown>> {
   const healthCheckTimeoutMs = resolveHealthCheckTimeoutMs(options.healthCheckTimeoutMs);
   const home = resolveHome(options.home ?? "~/.memmy");
   const serviceHome = join(home, "memory-service");
@@ -118,7 +140,7 @@ export async function installMemoryRuntime(options: MemoryRuntimeInstallOptions 
       )
   );
   if (previous && options.preferInstalledCompatible && previous.protocolVersion === MEMORY_PROTOCOL_VERSION && versionComparison <= 0 && !replacingSameVersion && !rebindingSameVersion) {
-    return reuseInstalledRuntime(previous, home, serviceHome, options, healthCheckTimeoutMs);
+    return reuseInstalledRuntime(previous, home, serviceHome, options, healthCheckTimeoutMs, heldInstallLock);
   }
   if (previous && versionComparison < 0) {
     throw new Error(`refusing to downgrade Memory from ${previous.version} to ${manifest.version}`);
@@ -139,7 +161,7 @@ export async function installMemoryRuntime(options: MemoryRuntimeInstallOptions 
   }
 
   await mkdir(runtimeRoot, { recursive: true });
-  const installLock = await acquireInstallLock(join(serviceHome, "install.lock"));
+  const installLock = heldInstallLock ?? await acquireInstallLockForContext(serviceHome, { home });
   let stagedPath: string | undefined;
   let replacementBackupPath: string | undefined;
   let installedRuntimeCreated = false;
@@ -290,7 +312,7 @@ export async function installMemoryRuntime(options: MemoryRuntimeInstallOptions 
           : cleanupWarning;
       }
     } finally {
-      await installLock.release();
+      if (!heldInstallLock) await installLock.release();
     }
   }
 }
@@ -311,7 +333,7 @@ export async function installedAgents(home = "~/.memmy"): Promise<string[]> {
 export async function startInstalledMemoryService(home = "~/.memmy"): Promise<Record<string, unknown>> {
   const resolvedHome = resolveHome(home);
   const serviceHome = join(resolvedHome, "memory-service");
-  const installLock = await acquireInstallLock(join(serviceHome, "install.lock"));
+  const installLock = await acquireInstallLockForContext(serviceHome, { home: resolvedHome });
   try {
     const pointer = await currentInstalledRuntime(resolvedHome);
     if (!pointer) throw new Error("Memory is not installed");
@@ -332,7 +354,7 @@ export async function repairInstalledWindowsMemoryService(home = "~/.memmy"): Pr
     return { ok: true, repaired: false };
   }
   const serviceHome = join(resolvedHome, "memory-service");
-  const installLock = await acquireInstallLock(join(serviceHome, "install.lock"));
+  const installLock = await acquireInstallLockForContext(serviceHome, { home: resolvedHome });
   try {
     if (!isLegacyWindowsTask(resolvedHome)) return { ok: true, repaired: false };
     const pointer = await currentInstalledRuntime(resolvedHome);
@@ -536,10 +558,11 @@ async function reuseInstalledRuntime(
   home: string,
   serviceHome: string,
   options: MemoryRuntimeInstallOptions,
-  healthCheckTimeoutMs: number
+  healthCheckTimeoutMs: number,
+  heldInstallLock?: { release(): Promise<void> }
 ): Promise<Record<string, unknown>> {
   if (options.dryRun) return { ok: true, reused: true, dryRun: true, ...pointer };
-  const installLock = await acquireInstallLock(join(serviceHome, "install.lock"));
+  const installLock = heldInstallLock ?? await acquireInstallLockForContext(serviceHome, { home });
   try {
     // Another installer may have activated a newer runtime while we waited.
     pointer = await currentInstalledRuntime(home) ?? pointer;
@@ -558,7 +581,7 @@ async function reuseInstalledRuntime(
     }
     return { ok: true, reused: true, ...pointer };
   } finally {
-    await installLock.release();
+    if (!heldInstallLock) await installLock.release();
   }
 }
 
@@ -1032,6 +1055,16 @@ async function acquireInstallLock(path: string): Promise<{ release(): Promise<vo
       await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
     }
   }
+}
+
+async function acquireInstallLockForContext(
+  serviceHome: string,
+  context: Parameters<typeof isWindowsStoreInstall>[0]
+): Promise<{ release(): Promise<void> }> {
+  const path = join(serviceHome, "install.lock");
+  return isWindowsStoreInstall(context)
+    ? acquireWindowsStoreInstallLock(path)
+    : acquireInstallLock(path);
 }
 
 async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
