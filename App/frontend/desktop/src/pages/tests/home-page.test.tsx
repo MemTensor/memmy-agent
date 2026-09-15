@@ -28,6 +28,9 @@ import {
   buildComposerCommandDraft,
   buildAgentRoutedPluginPrompt,
   collectPluginCommandTargets,
+  collectPluginScenarios,
+  selectPinnedPluginCommands,
+  selectSlashPluginCommands,
   clipboardAttachmentFilesFromDataTransfer,
   dataTransferHasAttachmentFiles,
   hasActiveAgentConversation,
@@ -110,6 +113,76 @@ describe("HomePage", () => {
     const targets = collectPluginCommandTargets([plugin], ["/status"]);
     expect(targets.map((item) => item.command.command)).toEqual(["/review"]);
     expect(parsePluginCommandInvocation("/review agent memory", targets)).toMatchObject({ arguments: "agent memory", plugin });
+  });
+
+  it("pins only the commands that asked to be pinned", () => {
+    const plugin = InstalledPluginSchema.parse({
+      id: "com.example.review",
+      version: "1.0.0",
+      manifest: {
+        apiVersion: "memmy/v1",
+        id: "com.example.review",
+        name: "Review",
+        version: "1.0.0",
+        runtime: { adapter: "http" },
+        capabilities: [{ id: "run", name: "Run", description: "Run", inputSchema: {}, outputSchema: {}, execution: "job" }],
+        commands: [
+          { command: "/guide", name: "Guidance", description: "Open the guidance card", capabilityId: "run", pinned: true },
+          { command: "/record", name: "Record", description: "Record an interview", capabilityId: "run", pinned: true },
+          { command: "/review", name: "Review", description: "Create a review", capabilityId: "run" }
+        ],
+        permissions: []
+      },
+      state: "active",
+      approvedPermissions: [],
+      config: {},
+      lastError: null,
+      createdAt: "2026-08-31T00:00:00.000Z",
+      updatedAt: "2026-08-31T00:00:00.000Z"
+    });
+    const targets = collectPluginCommandTargets([plugin]);
+
+    // A pinned button is a shortcut for the same command, so it is selected
+    // from the same targets the slash commands resolve against.
+    expect(selectPinnedPluginCommands(targets).map((item) => item.command.command)).toEqual(["/guide", "/record"]);
+    // Plugins that pin nothing must leave the composer layout alone.
+    expect(selectPinnedPluginCommands(targets.filter((item) => item.command.command === "/review"))).toEqual([]);
+    // A pinned command already has a button; listing it in the palette too
+    // would offer the same action twice.
+    expect(selectSlashPluginCommands(targets).map((item) => item.command.command)).toEqual(["/review"]);
+  });
+
+  it("collects scenario entry cards only from plugins that can serve them", () => {
+    const manifest = {
+      apiVersion: "memmy/v1" as const,
+      id: "com.example.legal",
+      name: "Legal",
+      version: "1.0.0",
+      runtime: { adapter: "command" as const },
+      capabilities: [{ id: "run", name: "Run", description: "Run", inputSchema: {}, outputSchema: {}, execution: "job" as const }],
+      permissions: [],
+      scenarios: [
+        { id: "risk", name: "用工风险诊断", description: "企业资料、访谈录音，一键生成风险诊断报告", icon: "scale", prompt: "帮我生成一份用工风险诊断报告。" }
+      ]
+    };
+    const base = {
+      id: "com.example.legal",
+      version: "1.0.0",
+      approvedPermissions: [],
+      config: {},
+      lastError: null,
+      createdAt: "2026-08-31T00:00:00.000Z",
+      updatedAt: "2026-08-31T00:00:00.000Z"
+    };
+    const active = InstalledPluginSchema.parse({ ...base, manifest, state: "active" });
+    const disabled = InstalledPluginSchema.parse({ ...base, manifest, state: "disabled" });
+
+    expect(collectPluginScenarios([active])).toEqual([
+      { ...manifest.scenarios[0], pluginId: "com.example.legal" }
+    ]);
+    // A disabled plugin cannot serve the work its card would start, so
+    // offering the card would dead-end.
+    expect(collectPluginScenarios([disabled])).toEqual([]);
   });
 
   it("converts Agent-routed plugin commands into explicit Skill prompts", () => {
@@ -478,7 +551,7 @@ describe("HomePage", () => {
     expect(source).toContain("const previewToggle = previewScope ? (");
     expect(source).toContain("<PanelRight size={15}");
     expect(source).toContain("<WorkspaceArtifactPanel");
-    expect(source).toContain("hidden={!previewPanelOpen || pluginArtifactPreview !== null}");
+    expect(source).toContain("hidden={!previewPanelOpen || pluginArtifactPreview !== null || recordingSession !== null}");
     expect(source).toContain("toolbarEnd={previewToggle}");
     expect(source).toContain("{!sidePreviewOpen ? previewToggle : null}");
     expect(source).toContain("agent-environment-toggle--with-preview");

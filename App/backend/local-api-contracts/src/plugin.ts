@@ -113,9 +113,34 @@ export const PluginCommandContributionSchema = z.object({
   agentSkillId: PluginIdentifierSchema.optional(),
   argHint: z.string().trim().max(128).optional(),
   icon: z.string().trim().min(1).max(64).optional(),
-  surface: z.boolean().optional()
+  surface: z.boolean().optional(),
+  /**
+   * Also offer this command as a fixed button above the composer.
+   *
+   * For capabilities the user reaches repeatedly and out of order, where
+   * finding a slash command each time is the wrong interaction.
+   */
+  pinned: z.boolean().optional()
 });
 export type PluginCommandContribution = z.infer<typeof PluginCommandContributionSchema>;
+
+/**
+ * An entry card offered on the empty home screen.
+ *
+ * A scenario is the way in for someone who does not yet know what to type. The
+ * card fills the composer with its prompt rather than invoking anything, so the
+ * user reads and can edit the request before it is sent, and the Agent picks up
+ * the work through its normal Skill routing.
+ */
+export const PluginScenarioContributionSchema = z.object({
+  id: PluginIdentifierSchema,
+  name: z.string().trim().min(1).max(64),
+  description: z.string().trim().min(1).max(200),
+  icon: z.string().trim().min(1).max(64).optional(),
+  /** Text placed in the composer when the card is clicked. */
+  prompt: z.string().trim().min(1).max(2_000)
+});
+export type PluginScenarioContribution = z.infer<typeof PluginScenarioContributionSchema>;
 
 export const PluginManifestSchema = z.object({
   apiVersion: z.literal("memmy/v1"),
@@ -128,6 +153,7 @@ export const PluginManifestSchema = z.object({
   configSchema: JsonSchemaSchema.optional(),
   skills: z.array(PluginSkillContributionSchema).max(20).optional(),
   commands: z.array(PluginCommandContributionSchema).max(100).optional(),
+  scenarios: z.array(PluginScenarioContributionSchema).max(8).optional(),
   ui: PluginUiSchema.optional(),
   /** Account grant the Host verifies before installing, enabling, or invoking this plugin. */
   requiredEntitlement: PluginEntitlementSchema.optional(),
@@ -323,10 +349,23 @@ export const UpdatePluginInputSchema = z.object({
 });
 export type UpdatePluginInput = z.infer<typeof UpdatePluginInputSchema>;
 
+/**
+ * Who asked for a capability call.
+ *
+ * The Host reads this to decide how a card behaves when the user closes it.
+ * An agent-invoked card is a step in the model's turn, so closing it has to
+ * answer — otherwise the turn stalls. A user-invoked card is not part of any
+ * turn, so closing it just closes it. Defaults to `agent` because tool calls
+ * are the common case and predate this field.
+ */
+export const PluginInvocationOriginSchema = z.enum(["user", "agent"]);
+export type PluginInvocationOrigin = z.infer<typeof PluginInvocationOriginSchema>;
+
 export const InvokePluginCapabilityInputSchema = z.object({
   conversationId: z.string().trim().min(1),
   input: z.unknown(),
-  deadline: z.string().datetime().optional()
+  deadline: z.string().datetime().optional(),
+  origin: PluginInvocationOriginSchema.default("agent")
 });
 export type InvokePluginCapabilityInput = z.infer<typeof InvokePluginCapabilityInputSchema>;
 
@@ -351,6 +390,7 @@ export const PluginCapabilityEventPayloadSchema = z.object({
   capabilityId: PluginIdentifierSchema,
   callId: z.string().min(1),
   conversationId: z.string().min(1),
+  origin: PluginInvocationOriginSchema.default("agent"),
   event: CapabilityEventSchema
 });
 export type PluginCapabilityEventPayload = z.infer<typeof PluginCapabilityEventPayloadSchema>;

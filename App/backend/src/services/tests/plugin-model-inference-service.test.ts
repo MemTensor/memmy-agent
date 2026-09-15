@@ -274,6 +274,134 @@ describe("plugin model inference Host service", () => {
     expect(secondBody.response_format).toBeUndefined();
   });
 
+  it("leaves the account gateway's reasoning alone and budgets it like a chat turn", async () => {
+    const account = resolved();
+    if (!account.ok) throw new Error("fixture");
+    account.context.protocol = "memmy-account";
+    account.context.provider = "memmy_account";
+    account.context.model = "agent_chat";
+    account.context.source = "account";
+    account.provider.protocol = "memmy-account";
+    account.provider.provider = "memmy_account";
+    account.provider.apiBase = "https://account.example/api/agentExternal/v1";
+    let body: Record<string, unknown> = {};
+    const fetch = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ choices: [{ message: { content: "{}" }, finish_reason: "stop" }] }));
+    });
+    await createPluginModelInferenceService({
+      resolveModel: async () => account,
+      fetch: fetch as typeof globalThis.fetch
+    }).invoke({
+      pluginId: "legal-labor", callId: "account-thinking", conversationId: "v", service: "model-inference",
+      input: { messages: [{ role: "user", content: "Diagnose" }], thinkingMode: "disabled" }
+    });
+    // The slug is opaque, so no vendor switch is guessed at: the model reasons
+    // as it would in an ordinary chat turn, on the same 4096-token budget.
+    expect(body).toMatchObject({ max_tokens: 4_096 });
+    for (const key of ["thinking", "enable_thinking", "reasoning_effort", "reasoning"]) {
+      expect(body).not.toHaveProperty(key);
+    }
+  });
+
+  it("reports a JSON response cut off at the token ceiling instead of returning half of it", async () => {
+    const fetch = vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: "{\"risks\":[{\"item\":\"unfinis" }, finish_reason: "length" }]
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    const service = createPluginModelInferenceService({
+      resolveModel: async () => resolved(),
+      fetch: fetch as typeof globalThis.fetch,
+      retryBaseDelayMs: 0
+    });
+    const call = {
+      pluginId: "legal-labor", callId: "truncated", conversationId: "v", service: "model-inference",
+      input: { messages: [{ role: "user", content: "Diagnose" }], responseFormat: "json" as const, maxOutputTokens: 512 }
+    };
+    await expect(service.invoke(call)).rejects.toMatchObject({
+      code: "model_response_truncated",
+      retryable: false
+    });
+    // Retrying cannot help, so the ceiling is reported after a single attempt.
+    expect(fetch).toHaveBeenCalledTimes(1);
+
+    // A text caller still gets the partial answer, along with the finish reason
+    // it needs to judge whether the answer is usable.
+    await expect(service.invoke({ ...call, input: { ...call.input, responseFormat: "text" as const } }))
+      .resolves.toMatchObject({ content: "{\"risks\":[{\"item\":\"unfinis", finishReason: "length" });
+  });
+
+  it("names the ceiling when reasoning consumes the whole budget, rather than calling it an empty answer", async () => {
+    const fetch = vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: "" }, finish_reason: "length" }],
+      usage: { completion_tokens: 512, completion_tokens_details: { reasoning_tokens: 512 } }
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    const service = createPluginModelInferenceService({
+      resolveModel: async () => resolved(),
+      fetch: fetch as typeof globalThis.fetch,
+      retryBaseDelayMs: 0
+    });
+    await expect(service.invoke({
+      pluginId: "legal-labor", callId: "reasoned-away", conversationId: "v", service: "model-inference",
+      input: { messages: [{ role: "user", content: "Diagnose" }], maxOutputTokens: 512 }
+    })).rejects.toMatchObject({ code: "model_response_truncated", retryable: false });
+    // Nothing about this is a JSON compatibility problem, so dropping the JSON
+    // constraint and asking again would only spend the same budget twice.
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps reporting truncation after the JSON compatibility fallback rewrote the format", async () => {
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        choices: [{ message: { content: "" }, finish_reason: "stop" }]
+      }), { status: 200, headers: { "content-type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        choices: [{ message: { content: "{\"records\":[{\"item\":\"cut" }, finish_reason: "length" }]
+      }), { status: 200, headers: { "content-type": "application/json" } }));
+    const service = createPluginModelInferenceService({
+      resolveModel: async () => resolved(),
+      fetch: fetch as typeof globalThis.fetch,
+      retryBaseDelayMs: 0
+    });
+    // The fallback asks again without response_format, but the caller still
+    // wants JSON: handing it this body would make it report a malformed answer.
+    await expect(service.invoke({
+      pluginId: "legal-labor", callId: "fallback-truncated", conversationId: "v", service: "model-inference",
+      input: { messages: [{ role: "user", content: "Diagnose" }], responseFormat: "json", maxAttempts: 1 }
+    })).rejects.toMatchObject({ code: "model_response_truncated" });
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("treats a non-JSON gateway body as the transient upstream failure it is", async () => {
+    const fetch = vi.fn()
+      // What the account gateway answers, verbatim, when its upstream stalls.
+      .mockResolvedValueOnce(new Response("stream timeout", { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        choices: [{ message: { content: "{\"records\":[]}" }, finish_reason: "stop" }]
+      }), { status: 200, headers: { "content-type": "application/json" } }));
+    const service = createPluginModelInferenceService({
+      resolveModel: async () => resolved(),
+      fetch: fetch as typeof globalThis.fetch,
+      retryBaseDelayMs: 0
+    });
+    await expect(service.invoke({
+      pluginId: "legal-labor", callId: "stream-timeout", conversationId: "v", service: "model-inference",
+      input: { messages: [{ role: "user", content: "Diagnose" }], responseFormat: "json" }
+    })).resolves.toMatchObject({ content: "{\"records\":[]}" });
+    expect(fetch).toHaveBeenCalledTimes(2);
+
+    const exhausted = createPluginModelInferenceService({
+      resolveModel: async () => resolved(),
+      fetch: (async () => new Response("stream timeout", { status: 200 })) as typeof globalThis.fetch,
+      retryBaseDelayMs: 0
+    });
+    // The body is quoted back, because "no content" and "a body we could not
+    // read" send whoever is looking at this to different places.
+    await expect(exhausted.invoke({
+      pluginId: "legal-labor", callId: "stream-timeout-twice", conversationId: "v", service: "model-inference",
+      input: { messages: [{ role: "user", content: "Diagnose" }] }
+    })).rejects.toMatchObject({ code: "model_inference_failed", message: expect.stringContaining("stream timeout") });
+  });
+
   it("retries transient gateway failures with the configured retry policy", async () => {
     const fetch = vi.fn()
       .mockResolvedValueOnce(new Response("bad gateway", { status: 502 }))

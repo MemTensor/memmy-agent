@@ -20,7 +20,7 @@ describe("plugin asr host service", () => {
     rmSync(outside, { recursive: true, force: true });
   });
 
-  it("transcribes an upload and forwards diarization and hotwords", async () => {
+  it("transcribes an upload and forwards diarization", async () => {
     const audioPath = join(root, "interview.m4a");
     writeFileSync(audioPath, Buffer.from("fake-audio"));
     const received: AsrTranscriptionInput[] = [];
@@ -41,12 +41,11 @@ describe("plugin asr host service", () => {
       }
     });
 
-    const response = await service.invoke(call({ path: audioPath, diarization: true, hotwords: ["劳动合同"] }));
+    const response = await service.invoke(call({ path: audioPath, diarization: true }));
 
     expect(received[0]).toMatchObject({
       mimeType: "audio/mp4",
       diarization: true,
-      hotwords: ["劳动合同"],
       audioBase64: Buffer.from("fake-audio").toString("base64")
     });
     expect(response).toMatchObject({ text: "hello", segments: [{ speakerId: 0, text: "hello" }] });

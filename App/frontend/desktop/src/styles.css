@@ -13679,3 +13679,447 @@ input[type="checkbox"].check-sky:checked::after {
     transition: none;
   }
 }
+
+/* Pinned plugin command buttons, sitting between the cards and the composer. */
+.pinned-command-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 2px 8px;
+}
+
+.pinned-command-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 45%, transparent);
+  border-radius: 999px;
+  background: var(--color-background-paper);
+  color: color-mix(in srgb, var(--color-text-ink) 70%, transparent);
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+  transition: border-color 120ms ease, color 120ms ease, background-color 120ms ease;
+}
+
+.pinned-command-chip:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--color-brand-primary) 45%, transparent);
+  background: color-mix(in srgb, var(--color-brand-primary) 6%, var(--color-background-paper));
+  color: var(--color-brand-primary);
+}
+
+.pinned-command-chip:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Recording bar above the composer, and the panel it transcribes into. */
+.recording-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+  padding: 8px 10px 8px 12px;
+  /* Idle carries the brand tint, so the bar reads as an offered action; the
+     live state below switches to the recording colour. */
+  border: 1px solid color-mix(in srgb, var(--color-action-sky) 35%, transparent);
+  border-radius: var(--radius-card, 12px);
+  background: var(--color-background-paper);
+  flex-wrap: wrap;
+}
+
+.recording-bar--live {
+  border-color: color-mix(in srgb, var(--color-status-error) 35%, transparent);
+  background: color-mix(in srgb, var(--color-status-error) 4%, var(--color-background-paper));
+}
+
+.recording-bar__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-accent-neon-mint) 22%, var(--color-background-paper));
+  color: var(--color-action-sky);
+}
+
+.recording-bar--live .recording-bar__icon {
+  background: color-mix(in srgb, var(--color-status-error) 10%, var(--color-background-paper));
+  color: var(--color-status-error);
+}
+
+.recording-bar__title {
+  flex: none;
+  font-size: 13px;
+  font-weight: 500;
+  color: color-mix(in srgb, var(--color-text-ink) 80%, transparent);
+}
+
+.recording-bar__clock {
+  flex: none;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: color-mix(in srgb, var(--color-text-ink) 45%, transparent);
+}
+
+.recording-bar__actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  flex: none;
+}
+
+.recording-bar__button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 50%, transparent);
+  border-radius: var(--radius-btn, 8px);
+  background: var(--color-background-paper);
+  font-size: 12px;
+  color: color-mix(in srgb, var(--color-text-ink) 70%, transparent);
+}
+
+.recording-bar__button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--color-border-stone) 80%, transparent);
+  color: var(--color-text-ink);
+}
+
+.recording-bar__button--primary {
+  border-color: transparent;
+  background: var(--color-action-sky);
+  color: #fff;
+}
+
+.recording-bar__button--primary:hover:not(:disabled) {
+  background: var(--color-action-sky-hover);
+  color: #fff;
+}
+
+.recording-bar__button:disabled {
+  opacity: 0.5;
+}
+
+.recording-bar__close {
+  padding: 2px 4px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: color-mix(in srgb, var(--color-text-ink) 40%, transparent);
+}
+
+.recording-bar__close:hover {
+  color: var(--color-text-ink);
+}
+
+.recording-bar__note {
+  flex-basis: 100%;
+  font-size: 11px;
+  color: color-mix(in srgb, var(--color-text-ink) 50%, transparent);
+}
+
+.recording-bar__note--warning {
+  color: var(--color-status-error);
+}
+
+.recording-bar__note--done {
+  color: var(--color-status-success);
+}
+
+/* Loudness readout. Bars are laid out centre-out so quiet audio reads as a flat line. */
+.recording-waveform {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 22px;
+  flex: 1 1 120px;
+  min-width: 80px;
+  overflow: hidden;
+}
+
+.recording-waveform__bar {
+  flex: 1 1 0;
+  min-width: 1px;
+  border-radius: 1px;
+  background: color-mix(in srgb, var(--color-text-ink) 18%, transparent);
+  transition: height 90ms linear;
+}
+
+.recording-waveform--active .recording-waveform__bar {
+  background: color-mix(in srgb, var(--color-action-sky) 55%, transparent);
+}
+
+.recording-panel__heading {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 500;
+  color: color-mix(in srgb, var(--color-text-ink) 85%, transparent);
+}
+
+.recording-panel__action {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 9px;
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 50%, transparent);
+  border-radius: var(--radius-btn, 8px);
+  font-size: 12px;
+  white-space: nowrap;
+  color: color-mix(in srgb, var(--color-text-ink) 70%, transparent);
+}
+
+.recording-panel__action--primary {
+  border-color: transparent;
+  background: var(--color-action-sky);
+  color: #fff;
+}
+
+.recording-panel__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+.recording-panel__status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 40%, transparent);
+  border-radius: var(--radius-card, 12px);
+  font-size: 13px;
+  font-weight: 500;
+  color: color-mix(in srgb, var(--color-text-ink) 80%, transparent);
+}
+
+.recording-panel__pulse {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--color-status-error);
+  animation: recording-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes recording-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
+
+.recording-panel__status-time {
+  margin-left: auto;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: color-mix(in srgb, var(--color-text-ink) 45%, transparent);
+}
+
+.recording-panel__lines {
+  margin-top: 8px;
+}
+
+.recording-panel__line {
+  display: flex;
+  gap: 10px;
+  padding: 5px 2px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: color-mix(in srgb, var(--color-text-ink) 80%, transparent);
+}
+
+.recording-panel__line--pending {
+  color: color-mix(in srgb, var(--color-text-ink) 38%, transparent);
+}
+
+.recording-panel__line-time {
+  flex: none;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: color-mix(in srgb, var(--color-text-ink) 38%, transparent);
+}
+
+.recording-panel__player {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 40%, transparent);
+  border-radius: var(--radius-card, 12px);
+}
+
+.recording-panel__player-button {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  color: color-mix(in srgb, var(--color-text-ink) 70%, transparent);
+}
+
+.recording-panel__player-button:hover {
+  background: color-mix(in srgb, var(--color-text-ink) 6%, transparent);
+}
+
+.recording-panel__player-time {
+  flex: none;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: color-mix(in srgb, var(--color-text-ink) 45%, transparent);
+}
+
+.recording-panel__player-scrubber {
+  flex: 1 1 auto;
+  min-width: 0;
+  accent-color: var(--color-action-sky);
+}
+
+.recording-panel__section {
+  margin: 16px 0 4px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-border-stone) 35%, transparent);
+  font-size: 12px;
+  font-weight: 500;
+  color: color-mix(in srgb, var(--color-text-ink) 70%, transparent);
+}
+
+.recording-panel__turn {
+  padding: 8px 2px;
+}
+
+.recording-panel__turn-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.recording-panel__speaker-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+  border-radius: 5px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--color-action-sky);
+}
+
+.recording-panel__speaker-badge[data-speaker="1"] { background: #d9777a; }
+.recording-panel__speaker-badge[data-speaker="2"] { background: #7aa7d9; }
+.recording-panel__speaker-badge[data-speaker="3"] { background: #86b87f; }
+.recording-panel__speaker-badge[data-speaker="4"] { background: #c49a5e; }
+.recording-panel__speaker-badge[data-speaker="5"] { background: #9b85c9; }
+
+.recording-panel__speaker-name {
+  font-size: 12px;
+  font-weight: 500;
+  color: color-mix(in srgb, var(--color-text-ink) 70%, transparent);
+}
+
+.recording-panel__turn-time {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: color-mix(in srgb, var(--color-text-ink) 38%, transparent);
+}
+
+.recording-panel__turn-text {
+  margin-top: 4px;
+  padding-left: 23px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: color-mix(in srgb, var(--color-text-ink) 85%, transparent);
+}
+
+.recording-panel__flat-text {
+  font-size: 13px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  color: color-mix(in srgb, var(--color-text-ink) 85%, transparent);
+}
+
+/* Scenario entry cards a plugin contributes to the empty home screen. */
+.home-scenario-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 10px;
+  margin: 18px 2px 0;
+}
+
+.home-scenario-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 45%, transparent);
+  border-radius: 11px;
+  background: var(--color-background-paper);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+
+.home-scenario-card:hover {
+  border-color: color-mix(in srgb, var(--color-border-stone) 80%, transparent);
+  background: color-mix(in srgb, var(--color-canvas-oat) 45%, var(--color-background-paper));
+}
+
+.home-scenario-card__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 26px;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--color-accent-neon-mint) 16%, var(--color-background-paper));
+  color: var(--color-action-sky);
+}
+
+.home-scenario-card__body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.home-scenario-card__title {
+  font-size: 13px;
+  font-weight: 500;
+  color: color-mix(in srgb, var(--color-text-ink) 88%, transparent);
+}
+
+.home-scenario-card__description {
+  font-size: 11px;
+  line-height: 1.5;
+  color: color-mix(in srgb, var(--color-text-ink) 48%, transparent);
+}
+
+/* Trailing call to action, pushed to the card's right edge. */
+.home-scenario-card__cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex: 0 0 auto;
+  align-self: center;
+  margin-left: auto;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-accent-neon-mint) 22%, var(--color-background-paper));
+  color: var(--color-action-sky);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.home-scenario-card:hover .home-scenario-card__cta {
+  background: color-mix(in srgb, var(--color-accent-neon-mint) 34%, var(--color-background-paper));
+}

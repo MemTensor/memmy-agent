@@ -1080,14 +1080,25 @@ export const ModelConfigViewSchema = z.object({
 export type ModelConfigView = z.infer<typeof ModelConfigViewSchema>;
 
 /** Schema for asr transcription input. */
+/**
+ * Largest audio payload a single transcription may carry, in decoded bytes.
+ *
+ * The upstream file-transcription API caps one inline audio item at 20 MiB of
+ * base64, which leaves roughly this much actual audio. An hours-long interview
+ * therefore has to be recorded at a bitrate that fits, because splitting it
+ * restarts speaker numbering and destroys the diarization.
+ */
+export const ASR_MAX_AUDIO_BYTES = 15 * 1024 * 1024;
+
+/** Base64 inflates by 4/3; the route needs headroom for that plus the JSON envelope. */
+export const ASR_MAX_REQUEST_BYTES = Math.ceil(ASR_MAX_AUDIO_BYTES * 4 / 3) + 64 * 1024;
+
 export const AsrTranscriptionInputSchema = z.object({
-    audioBase64: z.string().min(1),
+    audioBase64: z.string().min(1).max(Math.ceil(ASR_MAX_AUDIO_BYTES * 4 / 3)),
     mimeType: z.string().min(1),
     durationMs: z.number().int().nonnegative().optional(),
     /** Requests speaker separation. Honoured only by upstream models that support it. */
-    diarization: z.boolean().optional(),
-    /** Domain terms biasing recognition, e.g. jargon the base model mistranscribes. */
-    hotwords: z.array(z.string().trim().min(1).max(64)).max(200).optional()
+    diarization: z.boolean().optional()
 });
 export type AsrTranscriptionInput = z.infer<typeof AsrTranscriptionInputSchema>;
 

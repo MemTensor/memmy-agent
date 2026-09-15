@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { UploadedAgentMedia, UploadAgentMediaInput } from "../../api/memmy-agent-client.js";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
 import { PluginUiProvider, usePluginUi, reducePluginUiCalls, type PluginUiCall } from "../../app/plugin-ui-context.js";
-import { buildRendererDocument, PluginCapabilityHost, resolveRendererInteractionStates, resolveSafeArtifactUri, selectVisiblePluginCalls } from "../plugin-capability-host.js";
+import { buildRendererDocument, isBarePresentation, occludeUserRaisedCalls, PluginCapabilityHost, readQuestions, resolveRendererInteractionStates, resolveSafeArtifactUri, selectRegionPluginCalls, selectVisiblePluginCalls, summarizeAcceptedFormats } from "../plugin-capability-host.js";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -40,7 +40,6 @@ const plugin = InstalledPluginSchema.parse({
   createdAt: "2026-08-31T00:00:00.000Z",
   updatedAt: "2026-08-31T00:00:00.000Z"
 });
-
 describe("PluginCapabilityHost", () => {
   let container: HTMLDivElement;
   let root: Root;
@@ -55,6 +54,66 @@ describe("PluginCapabilityHost", () => {
     act(() => root.unmount());
     document.body.replaceChildren();
     vi.restoreAllMocks();
+  });
+
+  it("closes a card the user raised without answering the model", async () => {
+    const respond = vi.fn(async () => undefined);
+    const cancel = vi.fn(async () => undefined);
+    const client = { getUi: vi.fn(), cancel, respond };
+    const call: PluginUiCall = { pluginId: plugin.id, capabilityId: "run", callId: "pinned", conversationId: "websocket:chat-1", origin: "user", events: [
+      { type: "interaction", request: { interactionId: "guide", type: "question", payload: { title: "Guidance" } } }
+    ] };
+    await act(async () => root.render(<PluginUiProvider><I18nProvider language="en-US"><PluginCapabilityHost region="pinned" calls={[call]} plugins={[plugin]} client={client} /></I18nProvider></PluginUiProvider>));
+
+    const close = container.querySelector<HTMLButtonElement>('button[aria-label="Close card"]');
+    expect(close).not.toBeNull();
+    await act(async () => close!.click());
+
+    // The plugin is told to stop waiting, but no answer is posted: the user
+    // dismissed a card they opened themselves, which is not a turn.
+    expect(cancel).toHaveBeenCalledWith(plugin.id, "pinned");
+    expect(respond).not.toHaveBeenCalled();
+    // And the card goes away rather than being replaced by a cancellation error.
+    expect(container.textContent).not.toContain("Guidance");
+  });
+
+  it("renders a live user-raised card above the composer and not in the transcript", async () => {
+    const client = { getUi: vi.fn(), cancel: vi.fn(), respond: vi.fn(async () => undefined) };
+    const call: PluginUiCall = { pluginId: plugin.id, capabilityId: "run", callId: "pinned", conversationId: "websocket:chat-1", origin: "user", events: [
+      { type: "interaction", request: { interactionId: "guide", type: "question", payload: { title: "Guidance" } } }
+    ] };
+
+    await act(async () => root.render(<PluginUiProvider><I18nProvider language="en-US"><PluginCapabilityHost region="flow" calls={[call]} plugins={[plugin]} client={client} /></I18nProvider></PluginUiProvider>));
+    expect(container.textContent).not.toContain("Guidance");
+
+    await act(async () => root.render(<PluginUiProvider><I18nProvider language="en-US"><PluginCapabilityHost region="pinned" calls={[call]} plugins={[plugin]} client={client} /></I18nProvider></PluginUiProvider>));
+    expect(container.textContent).toContain("Guidance");
+  });
+
+  it("moves a finished user-raised card into the transcript so its deliverables stay in history", async () => {
+    const client = { getUi: vi.fn(), cancel: vi.fn(), respond: vi.fn(async () => undefined) };
+    const call: PluginUiCall = { pluginId: plugin.id, capabilityId: "run", callId: "done", conversationId: "websocket:chat-1", origin: "user", events: [
+      { type: "artifact", artifact: { id: "a1", name: "报告.docx", mediaType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", uri: "memmy-plugin://demo/a1" } },
+      { type: "result", result: {} }
+    ] };
+
+    await act(async () => root.render(<PluginUiProvider><I18nProvider language="en-US"><PluginCapabilityHost region="pinned" calls={[call]} plugins={[plugin]} client={client} /></I18nProvider></PluginUiProvider>));
+    expect(container.textContent).not.toContain("报告.docx");
+
+    await act(async () => root.render(<PluginUiProvider><I18nProvider language="en-US"><PluginCapabilityHost region="flow" calls={[call]} plugins={[plugin]} client={client} /></I18nProvider></PluginUiProvider>));
+    expect(container.textContent).toContain("报告.docx");
+  });
+
+  it("offers no close button on a card the Agent raised", async () => {
+    const client = { getUi: vi.fn(), cancel: vi.fn(), respond: vi.fn(async () => undefined) };
+    const call: PluginUiCall = { pluginId: plugin.id, capabilityId: "run", callId: "asked", conversationId: "websocket:chat-1", origin: "agent", events: [
+      { type: "interaction", request: { interactionId: "upload", type: "question", payload: { title: "Which company?" } } }
+    ] };
+    await act(async () => root.render(<PluginUiProvider><I18nProvider language="en-US"><PluginCapabilityHost calls={[call]} plugins={[plugin]} client={client} /></I18nProvider></PluginUiProvider>));
+
+    // Closing this one outright would leave the Agent's turn waiting forever,
+    // so it keeps only the skip path that answers.
+    expect(container.querySelector('button[aria-label="Close card"]')).toBeNull();
   });
 
   it("routes accepted chat feedback only to its live card and retires the old interaction", async () => {
@@ -216,6 +275,96 @@ describe("PluginCapabilityHost", () => {
     expect(respond).toHaveBeenCalledWith(plugin.id, "call-1", "q-1", "Broad");
     expect(container.textContent).not.toContain("Scope");
     expect(container.textContent).toContain("report.md");
+  });
+
+  it("asks every question on one card and reports only the ones answered", async () => {
+    const respond = vi.fn(async () => undefined);
+    const call: PluginUiCall = {
+      pluginId: plugin.id,
+      capabilityId: "run",
+      callId: "gaps",
+      conversationId: "chat-1",
+      events: [
+        { type: "interaction", request: {
+          interactionId: "gap-round", type: "question",
+          payload: {
+            title: "Fill in what is missing",
+            questions: [
+              { id: "company", label: "Registered company name", type: "text", required: false },
+              { id: "region", label: "Where are contributions paid?", type: "text", required: false },
+              { id: "signed", label: "Are written contracts signed?", type: "text", required: false, options: ["Yes", "No"] }
+            ]
+          }
+        } }
+      ]
+    };
+
+    await act(async () => root.render(
+      <I18nProvider language="en-US">
+        <PluginCapabilityHost calls={[call]} plugins={[plugin]} client={{ getUi: vi.fn(), cancel: vi.fn(async () => undefined), respond }} />
+      </I18nProvider>
+    ));
+
+    // Every question is on screen: a card that shows only its title leaves the
+    // user with nothing to answer.
+    expect(container.textContent).toContain("Registered company name");
+    expect(container.textContent).toContain("Where are contributions paid?");
+    expect(container.textContent).toContain("0 of 3 answered");
+    const inputs = container.querySelectorAll<HTMLInputElement>("input");
+    expect(inputs).toHaveLength(2);
+    // A question carrying options is answered by picking one, not by typing it.
+    expect(container.querySelectorAll("select")).toHaveLength(1);
+
+    const answer = (field: HTMLInputElement | HTMLSelectElement, value: string) => act(() => {
+      const isSelect = field instanceof HTMLSelectElement;
+      const prototype = isSelect ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
+      Object.getOwnPropertyDescriptor(prototype, "value")?.set?.call(field, value);
+      field.dispatchEvent(new Event(isSelect ? "change" : "input", { bubbles: true }));
+    });
+    await answer(inputs[0]!, "  Example Ltd  ");
+    await answer(container.querySelector<HTMLSelectElement>("select")!, "No");
+    expect(container.textContent).toContain("2 of 3 answered");
+
+    await act(async () => container.querySelector<HTMLFormElement>("form")?.requestSubmit());
+    // The skipped question is absent rather than empty: the plugin marks what
+    // the user passed over as unverified, and "" is not that.
+    expect(respond).toHaveBeenCalledWith(plugin.id, "gaps", "gap-round", {
+      answers: { company: "Example Ltd", signed: "No" }
+    });
+  });
+
+  it("holds the answer back until every required question has one", async () => {
+    const respond = vi.fn(async () => undefined);
+    const call: PluginUiCall = {
+      pluginId: plugin.id,
+      capabilityId: "run",
+      callId: "required",
+      conversationId: "chat-1",
+      events: [
+        { type: "interaction", request: {
+          interactionId: "one-required", type: "question",
+          payload: { title: "Confirm", questions: [{ id: "headcount", label: "Headcount", required: true }] }
+        } }
+      ]
+    };
+
+    await act(async () => root.render(
+      <I18nProvider language="en-US">
+        <PluginCapabilityHost calls={[call]} plugins={[plugin]} client={{ getUi: vi.fn(), cancel: vi.fn(async () => undefined), respond }} />
+      </I18nProvider>
+    ));
+
+    expect(container.textContent).toContain("Headcount *");
+    const submit = container.querySelector<HTMLButtonElement>("form button");
+    expect(submit?.disabled).toBe(true);
+    await act(() => {
+      const field = container.querySelector<HTMLInputElement>("input")!;
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(field, "320");
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(container.querySelector<HTMLButtonElement>("form button")?.disabled).toBe(false);
+    await act(async () => container.querySelector<HTMLFormElement>("form")?.requestSubmit());
+    expect(respond).toHaveBeenCalledWith(plugin.id, "required", "one-required", { answers: { headcount: "320" } });
   });
 
   it("keeps active progress above a collapsed multi-file delivery", async () => {
@@ -792,7 +941,6 @@ describe("PluginCapabilityHost", () => {
     );
   });
 });
-
 describe("plugin UI event reduction", () => {
   it("marks an interaction stale when a newer task artifact is observed", () => {
     const calls: PluginUiCall[] = [
@@ -937,6 +1085,35 @@ describe("plugin UI event reduction", () => {
     expect(selectVisiblePluginCalls(calls.slice(0, -1), new Set([`${plugin.id}:latest-active:outline`])).map((call) => call.callId)).toEqual(["artifact"]);
   });
 
+  it("hides a card the user raised while the Agent waits on one of its own", () => {
+    const base = { pluginId: plugin.id, capabilityId: "run", conversationId: "chat-1" };
+    const pinned = { ...base, callId: "pinned", origin: "user" as const, events: [{ type: "interaction" as const, request: { interactionId: "guide", type: "custom" as const, payload: {} } }] };
+    const asked = { ...base, callId: "asked", origin: "agent" as const, events: [{ type: "interaction" as const, request: { interactionId: "upload", type: "file-input" as const, payload: {} } }] };
+
+    // Two live cards competing for one answer is ambiguous, and the Agent's is
+    // the one blocking progress.
+    expect(occludeUserRaisedCalls([pinned, asked]).map((call) => call.callId)).toEqual(["asked"]);
+  });
+
+  it("brings the user's card back once the Agent's card is no longer waiting", () => {
+    const base = { pluginId: plugin.id, capabilityId: "run", conversationId: "chat-1" };
+    const pinned = { ...base, callId: "pinned", origin: "user" as const, events: [{ type: "interaction" as const, request: { interactionId: "guide", type: "custom" as const, payload: {} } }] };
+    const answered = { ...base, callId: "asked", origin: "agent" as const, events: [{ type: "interaction" as const, request: { interactionId: "upload", type: "file-input" as const, payload: {} } }, { type: "result" as const, output: {} }] };
+
+    // Occlusion is presentation only; nothing was cancelled on the way in.
+    expect(occludeUserRaisedCalls([pinned, answered]).map((call) => call.callId)).toEqual(["pinned", "asked"]);
+  });
+
+  it("leaves the user's non-interactive cards visible while the Agent waits", () => {
+    const base = { pluginId: plugin.id, capabilityId: "run", conversationId: "chat-1" };
+    const delivered = { ...base, callId: "delivered", origin: "user" as const, events: [{ type: "artifact" as const, artifact: { id: "docx", name: "report.docx", mediaType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", uri: "/api/v1/plugins/review/artifacts/token/preview" } }] };
+    const asked = { ...base, callId: "asked", origin: "agent" as const, events: [{ type: "interaction" as const, request: { interactionId: "upload", type: "file-input" as const, payload: {} } }] };
+
+    // Only cards asking for input can be confused with each other; a delivered
+    // file is not competing for an answer.
+    expect(occludeUserRaisedCalls([delivered, asked]).map((call) => call.callId)).toEqual(["delivered", "asked"]);
+  });
+
   it("does not spin a progress indicator that has reached 100 percent", async () => {
     const progressContainer = document.createElement("div");
     document.body.append(progressContainer);
@@ -964,5 +1141,89 @@ describe("plugin UI event reduction", () => {
     const document = buildRendererDocument("<html><head><title>x</title></head><body>x</body></html>");
     expect(document).toContain("default-src 'none'");
     expect(document).toContain("form-action 'none'");
+  });
+});
+describe("readQuestions", () => {
+  it("drops entries that cannot be asked or answered, and keeps the rest in order", () => {
+    expect(readQuestions([
+      { id: "a", label: "First" },
+      // No id: its answer would have nowhere to go.
+      { label: "Nowhere to put this" },
+      // No label: it would render as a blank row.
+      { id: "b" },
+      // A repeat id would overwrite the earlier answer.
+      { id: "a", label: "First again" },
+      { id: "c", prompt: "Pick one", options: [{ label: "Yes", value: true }, "No"], required: true }
+    ])).toEqual([
+      { id: "a", label: "First", options: [], required: false },
+      // Options are read as labels, because answers are strings on the wire.
+      { id: "c", label: "Pick one", options: ["Yes", "No"], required: true }
+    ]);
+  });
+
+  it("treats a card with no questions as the single-answer card it has always been", () => {
+    expect(readQuestions(undefined)).toEqual([]);
+    expect(readQuestions("not a list")).toEqual([]);
+  });
+});
+describe("summarizeAcceptedFormats", () => {
+  const t = ((key: string) => ({
+    "plugin.ui.format.image": "图片",
+    "plugin.ui.format.media": "音视频",
+    "plugin.ui.format.separator": "、"
+  } as Record<string, string>)[key] ?? key) as never;
+
+  it("groups extensions into the file kinds a person recognises", () => {
+    expect(summarizeAcceptedFormats(".pdf,.docx,.xlsx,.txt,.md,.png,.m4a", t))
+      .toBe("PDF、Word、Excel、TXT/MD、图片、音视频");
+  });
+
+  it("lists an extension it has no family for rather than dropping it", () => {
+    expect(summarizeAcceptedFormats(".pdf,.eml", t)).toBe("PDF、.eml");
+  });
+
+  it("names a family once however many of its extensions are accepted", () => {
+    expect(summarizeAcceptedFormats(".doc,.docx", t)).toBe("Word");
+  });
+});
+describe("isBarePresentation", () => {
+  const call = (events: PluginUiCall["events"]): PluginUiCall => ({
+    pluginId: "demo", capabilityId: "run", callId: "c", conversationId: "websocket:chat-1", origin: "user", events
+  });
+
+  it("treats a recording interaction as drawing its own chrome", () => {
+    expect(isBarePresentation(call([
+      { type: "interaction", request: { interactionId: "r", type: "audio-record", payload: {} } }
+    ]))).toBe(true);
+  });
+
+  it("boxes a recording card that also reports progress", () => {
+    expect(isBarePresentation(call([
+      { type: "progress", message: "准备中" },
+      { type: "interaction", request: { interactionId: "r", type: "audio-record", payload: {} } }
+    ]))).toBe(false);
+  });
+
+  it("boxes every other interaction", () => {
+    expect(isBarePresentation(call([
+      { type: "interaction", request: { interactionId: "q", type: "question", payload: {} } }
+    ]))).toBe(false);
+  });
+});
+describe("selectRegionPluginCalls", () => {
+  const call = (origin: "user" | "agent", callId: string, events: PluginUiCall["events"]): PluginUiCall => ({
+    pluginId: "demo", capabilityId: "run", callId, conversationId: "websocket:chat-1", origin, events
+  });
+  const live: PluginUiCall["events"] = [{ type: "interaction", request: { interactionId: "i", type: "question", payload: {} } }];
+  const finished: PluginUiCall["events"] = [{ type: "result", result: {} }];
+
+  it("keeps only live user-raised calls above the composer", () => {
+    const calls = [
+      call("user", "live-user", live),
+      call("user", "done-user", finished),
+      call("agent", "live-agent", live)
+    ];
+    expect(selectRegionPluginCalls(calls, "pinned").map((item) => item.callId)).toEqual(["live-user"]);
+    expect(selectRegionPluginCalls(calls, "flow").map((item) => item.callId)).toEqual(["done-user", "live-agent"]);
   });
 });

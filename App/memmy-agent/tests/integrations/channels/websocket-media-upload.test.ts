@@ -27,6 +27,21 @@ function tinyPdfBytes(): Buffer {
   return Buffer.from("%PDF-1.7\n1 0 obj\n<<>>\nendobj\n", "utf8");
 }
 
+function tinyWavBytes(): Buffer {
+  const bytes = Buffer.alloc(64);
+  bytes.write("RIFF", 0, "ascii");
+  bytes.writeUInt32LE(56, 4);
+  bytes.write("WAVEfmt ", 8, "ascii");
+  return bytes;
+}
+
+function tinyM4aBytes(): Buffer {
+  const bytes = Buffer.alloc(32);
+  bytes.writeUInt32BE(32, 0);
+  bytes.write("ftypM4A ", 4, "ascii");
+  return bytes;
+}
+
 async function multipartBody(entries: Array<{ name: string; bytes: Buffer; mime: string }>): Promise<{ body: Buffer; contentType: string }> {
   const form = new FormData();
   for (const entry of entries) {
@@ -129,6 +144,60 @@ describe("WebUI media upload route", () => {
     ]);
     expect(path.basename(attachments[1].path)).toMatch(/^[a-f0-9]{12}-小短文\.pdf$/u);
     expect(jsonBody(response).images).toEqual([]);
+  });
+
+  it("accepts recordings as audio attachments regardless of the browser's media type", async () => {
+    tmpRoot();
+    const channel = new WebSocketChannel({}, new MessageBus());
+    const token = await bootstrapToken(channel);
+    const { body, contentType } = await multipartBody([
+      { name: "interview.wav", bytes: tinyWavBytes(), mime: "audio/wav" },
+      // Safari labels the same recording audio/x-m4a, Chrome audio/mp4.
+      { name: "interview.m4a", bytes: tinyM4aBytes(), mime: "audio/x-m4a" },
+      { name: "interview-no-type.wav", bytes: tinyWavBytes(), mime: "" }
+    ]);
+
+    const response = await channel.dispatchHttp({ remoteAddress: ["127.0.0.1"] }, {
+      path: "/api/webui/media/upload",
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": contentType },
+      body
+    });
+
+    expect(response?.status).toBe(200);
+    const attachments = jsonBody(response).attachments;
+    expect(attachments).toEqual([
+      expect.objectContaining({ name: "interview.wav", kind: "audio", mime: "audio/wav" }),
+      expect.objectContaining({ name: "interview.m4a", kind: "audio", mime: "audio/mp4" }),
+      expect.objectContaining({ name: "interview-no-type.wav", kind: "audio", mime: "audio/wav" })
+    ]);
+    expect(jsonBody(response).images).toEqual([]);
+    // The `asr` host service reads audio off disk, so it has to land in the media root.
+    for (const attachment of attachments) {
+      expect(path.relative(fs.realpathSync(getMediaDir("websocket")), attachment.path).startsWith("..")).toBe(false);
+    }
+  });
+
+  it("rejects audio whose container does not match its extension", async () => {
+    tmpRoot();
+    const channel = new WebSocketChannel({}, new MessageBus());
+    const token = await bootstrapToken(channel);
+    const cases = [
+      { name: "payload.wav", bytes: Buffer.from("not a riff header at all"), mime: "audio/wav" },
+      { name: "payload.m4a", bytes: tinyWavBytes(), mime: "audio/mp4" },
+      { name: "script.wav", bytes: tinyWavBytes(), mime: "text/html" }
+    ];
+
+    for (const entry of cases) {
+      const { body, contentType } = await multipartBody([entry]);
+      const response = await channel.dispatchHttp({ remoteAddress: ["127.0.0.1"] }, {
+        path: "/api/webui/media/upload",
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": contentType },
+        body
+      });
+      expect(response?.status, entry.name).toBe(415);
+    }
   });
 
   it("rejects videos, SVG, MIME spoofing, old Office, and archives", async () => {

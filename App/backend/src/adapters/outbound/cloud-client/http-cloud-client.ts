@@ -59,6 +59,14 @@ import type {
 
 const DEFAULT_TIMEOUT_MS = 5_000;
 const CLOUD_COMPOSIO_ROUTER_TIMEOUT_MS = 60_000;
+/** Uploading and transcribing even a short clip outruns the default timeout. */
+const CLOUD_ASR_TIMEOUT_MS = 120_000;
+/**
+ * Speaker separation runs as an upstream batch job the cloud polls on our
+ * behalf, so the desktop stays blocked for the whole job. Measured at roughly
+ * two minutes for a two-hour recording.
+ */
+const CLOUD_ASR_DIARIZATION_TIMEOUT_MS = 600_000;
 const CLOUD_COMPOSIO_UNAVAILABLE_MESSAGE = "工具连接服务暂时不可用";
 const CLOUD_COMPOSIO_SERVICE_UNAVAILABLE_CODE = 60020;
 const CLOUD_COMPOSIO_TOOLKIT_UNSUPPORTED_CODE = 60021;
@@ -344,13 +352,16 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
     },
 
     async transcribeAudio(input: CloudAsrTranscriptionInput): Promise<CloudAsrTranscriptionResult> {
-      const data = await requestCloudData<unknown>(fetchImpl, baseUrl, timeoutMs, "/api/agentAsr/transcriptions", {
+      const asrTimeoutMs = Math.max(
+        timeoutMs,
+        input.diarization ? CLOUD_ASR_DIARIZATION_TIMEOUT_MS : CLOUD_ASR_TIMEOUT_MS
+      );
+      const data = await requestCloudData<unknown>(fetchImpl, baseUrl, asrTimeoutMs, "/api/agentAsr/transcriptions", {
         body: {
           audioBase64: input.audioBase64,
           mimeType: input.mimeType,
           ...(input.durationMs === undefined ? {} : { durationMs: input.durationMs }),
-          ...(input.diarization ? { diarization: true } : {}),
-          ...(input.hotwords?.length ? { hotwords: [...input.hotwords] } : {})
+          ...(input.diarization ? { diarization: true } : {})
         },
         lang: "zh",
         bearerCredential: input.uuid

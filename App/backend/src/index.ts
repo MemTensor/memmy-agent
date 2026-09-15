@@ -25,7 +25,11 @@ import { createPermissionManager } from "./permission/index.js";
 import { createLocalApiServer } from "./adapters/inbound/local-api/server.js";
 import { createBackendServices, type BootstrapScenario } from "./services/index.js";
 import type { PluginService } from "./services/plugin-service.js";
-import { resolveCloudClientConfig, type CloudClientConfig } from "./config/service-urls.js";
+import {
+  resolveCloudClientConfig,
+  resolvePluginRegistryBaseUrl,
+  type CloudClientConfig
+} from "./config/service-urls.js";
 import { resetAccountRuntimeForDesktopInstallChange } from "./services/desktop-install-state-service.js";
 import {
   syncRuntimeConfigForStartup,
@@ -285,7 +289,7 @@ function configuredPluginRegistry(
   bundledRegistry?: PluginRegistry,
   authHeaders?: () => Record<string, string>
 ): PluginRegistry | undefined {
-  const baseUrl = env.MEMMY_PLUGIN_REGISTRY_URL?.trim();
+  const baseUrl = resolvePluginRegistryBaseUrl(env);
   const remoteRegistry = baseUrl ? createHttpPluginRegistry({ baseUrl, authHeaders }) : undefined;
   return bundledRegistry
     ? createCompositePluginRegistry(bundledRegistry, remoteRegistry)

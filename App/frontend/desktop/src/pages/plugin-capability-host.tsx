@@ -32,10 +32,19 @@ import type {
 import type { AsrClient } from "../api/asr-client.js";
 import type { UploadAgentMediaInput, UploadedAgentMedia } from "../api/memmy-agent-client.js";
 import type { PluginsClient } from "../api/plugins-client.js";
-import { useAsrRecorder } from "./asr-recorder.js";
+import { asrRecordingTimeRemainingMs, useAsrRecorder } from "./asr-recorder.js";
 import { usePluginChatFeedback, type PluginChatFeedback, type PluginUiCall } from "../app/plugin-ui-context.js";
+import type { MessageKey } from "../i18n/messages.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { classifyAgentAttachmentFile } from "../lib/agent-attachment.js";
+import { mergeLiveLines, type AsrLiveLine } from "../lib/asr-live-transcription.js";
+import { pushWaveformLevel } from "../lib/audio-pcm-tap.js";
+import { persistRecording } from "../lib/recording-deliverables.js";
+import {
+  formatClock,
+  type RecordingPanelSession,
+  type RecordingPanelTranscript
+} from "./interview-recording-panel.js";
 import { materializePluginUploadFile } from "../lib/plugin-upload-file.js";
 import { startBrowserDownload } from "./agent-message-content.js";
 
@@ -55,7 +64,21 @@ interface PluginCapabilityHostProps {
   asrClient?: AsrClient;
   onAddArtifact?: (artifact: PluginArtifactRef) => void;
   onOpenArtifact?: (artifact: PluginArtifactRef) => void;
+  /**
+   * Which region this host is filling.
+   *
+   * A card the user raised themselves belongs next to the control that raised
+   * it, above the composer, where it stays reachable. A card the model asked
+   * for belongs in the transcript at the point of the turn that asked. Both
+   * regions mount a host; each renders only the calls that belong to it.
+   */
+  region?: PluginCardRegion;
+  /** Opens the side panel that a recording interaction transcribes into. */
+  onRecordingSession?: (session: RecordingPanelSession | null) => void;
 }
+
+/** Where a plugin card is rendered. */
+export type PluginCardRegion = "flow" | "pinned";
 
 export interface PluginRendererInteractionState {
   interactionId: string;
@@ -70,11 +93,19 @@ export interface PluginRendererInteractionState {
 export function PluginCapabilityHost(props: PluginCapabilityHostProps) {
   const { t } = useTranslation();
   const [answeredInteractions, setAnsweredInteractions] = useState<Set<string>>(() => new Set());
+  const [dismissedCalls, setDismissedCalls] = useState<Set<string>>(() => new Set());
   const plugins = useMemo(() => new Map(props.plugins.map((plugin) => [plugin.id, plugin])), [props.plugins]);
   const interactionStates = useMemo(() => resolveRendererInteractionStates(props.calls), [props.calls]);
+  const region = props.region ?? "flow";
   const calls = useMemo(
-    () => selectVisiblePluginCalls(props.calls, answeredInteractions),
-    [answeredInteractions, props.calls]
+    () => selectRegionPluginCalls(
+      occludeUserRaisedCalls(
+        selectVisiblePluginCalls(props.calls, answeredInteractions)
+          .filter((call) => !dismissedCalls.has(`${call.pluginId}:${call.callId}`))
+      ),
+      region
+    ),
+    [answeredInteractions, dismissedCalls, props.calls, region]
   );
   const orderedCalls = useMemo(() => orderPluginCallsForDisplay(calls), [calls]);
   if (calls.length === 0) return null;
@@ -107,6 +138,17 @@ export function PluginCapabilityHost(props: PluginCapabilityHostProps) {
           if (!props.client) return Promise.reject(new Error("Plugin client unavailable"));
           return props.client.cancel(call.pluginId, call.callId);
         };
+        // Closing a card the user raised themselves is not an answer. The call
+        // is cancelled so the plugin stops waiting, and the card is dropped
+        // locally so a cancellation error does not take its place — the user
+        // asked for it to go away, not to be told it went away.
+        const dismiss = async () => {
+          setDismissedCalls((current) => new Set(current).add(`${call.pluginId}:${call.callId}`));
+          await cancel().catch(() => undefined);
+        };
+        const dismissable = call.origin === "user"
+          && call.events.some((event) => event.type === "interaction")
+          && !call.events.some((event) => event.type === "result" || event.type === "error");
         const cards = (
           <GenericPluginCards
             events={call.events}
@@ -115,17 +157,36 @@ export function PluginCapabilityHost(props: PluginCapabilityHostProps) {
             onRespond={respond}
             onCancel={cancel}
             onUploadFiles={props.uploadFiles}
+            onDismiss={dismissable ? () => void dismiss() : undefined}
+            onRecordingSession={props.onRecordingSession}
             asrClient={props.asrClient}
             onAddArtifact={props.onAddArtifact}
             onOpenArtifact={props.onOpenArtifact}
             onReadArtifact={props.client?.readArtifact}
           />
         );
+        // The recording bar is a single line with its own controls and close
+        // button, so wrapping it in card chrome would double the height of the
+        // one card that has to stay out of the way for hours.
+        if (isBarePresentation(call)) return <div key={call.callId}>{cards}</div>;
         return (
-          <div key={call.callId} className="rounded-card border border-border-stone/35 bg-background-paper p-3 shadow-sm">
-            <p className="mb-2 text-xs font-medium text-text-ink/55">
-              {plugin?.manifest.name ?? call.pluginId}
-            </p>
+          <div key={call.callId} className="rounded-card border border-border-stone/30 bg-background-paper p-3 shadow-sm">
+            <div className="mb-2 flex items-start justify-between gap-2">
+              <p className="text-xs font-medium text-text-ink/55">
+                {plugin?.manifest.name ?? call.pluginId}
+              </p>
+              {dismissable ? (
+                <button
+                  type="button"
+                  aria-label={t("plugin.ui.dismissCard")}
+                  title={t("plugin.ui.dismissCard")}
+                  className="-mr-1 -mt-1 rounded px-1 text-xs text-text-ink/45 hover:text-text-ink/80"
+                  onClick={() => void dismiss()}
+                >
+                  ✕
+                </button>
+              ) : null}
+            </div>
             {usesRenderer && renderer ? (
               <SandboxedPluginRenderer
                 call={call}
@@ -153,6 +214,8 @@ function GenericPluginCards(props: {
   onRespond(interactionId: string, response: unknown): Promise<void>;
   onCancel(): Promise<void>;
   onUploadFiles?: (files: UploadAgentMediaInput[]) => Promise<UploadedAgentMedia[]>;
+  onDismiss?: () => void;
+  onRecordingSession?: (session: RecordingPanelSession | null) => void;
   asrClient?: AsrClient;
   onAddArtifact?: (artifact: PluginArtifactRef) => void;
   onOpenArtifact?: (artifact: PluginArtifactRef) => void;
@@ -166,7 +229,7 @@ function GenericPluginCards(props: {
         if (event.type === "progress") return terminal ? null : <ProgressCard key="progress" event={event} canCancel={Boolean(event.cancellable)} onCancel={props.onCancel} />;
         if (event.type === "task-list") return terminal ? null : <TaskCard key="tasks" event={event} />;
         if (event.type === "interaction") {
-          return terminal ? null : <InteractionCard key={`interaction:${event.request.interactionId}`} request={event.request} conversationId={props.conversationId} pluginId={props.pluginId} onRespond={props.onRespond} onUploadFiles={props.onUploadFiles} asrClient={props.asrClient} />;
+          return terminal ? null : <InteractionCard key={`interaction:${event.request.interactionId}`} request={event.request} conversationId={props.conversationId} pluginId={props.pluginId} onRespond={props.onRespond} onUploadFiles={props.onUploadFiles} onDismiss={props.onDismiss} onRecordingSession={props.onRecordingSession} asrClient={props.asrClient} />;
         }
         if (event.type === "error") return <ErrorCard key="error" event={event} />;
         return null;
@@ -204,7 +267,7 @@ function ProgressCard(props: {
     }
   };
   return (
-    <div className="rounded-card bg-canvas-oat/55 px-3 py-2.5" role="status" aria-live="polite">
+    <div className="rounded-card bg-canvas-oat/50 px-3 py-2.5" role="status" aria-live="polite">
       <div className="flex items-center gap-2 text-sm text-text-ink/75">
         {completed
           ? <Check size={15} className="text-status-success" aria-hidden="true" />
@@ -258,6 +321,8 @@ function InteractionCard(props: {
   request: PluginInteractionRequest;
   onRespond(interactionId: string, response: unknown): Promise<void>;
   onUploadFiles?: (files: UploadAgentMediaInput[]) => Promise<UploadedAgentMedia[]>;
+  onDismiss?: () => void;
+  onRecordingSession?: (session: RecordingPanelSession | null) => void;
   asrClient?: AsrClient;
 }) {
   const { t } = useTranslation();
@@ -269,8 +334,9 @@ function InteractionCard(props: {
     ?? (props.request.type === "approval" ? t("plugin.ui.approval") : t("plugin.ui.question"));
   const description = firstString(payload, ["description", "detail", "hint"]);
   const options = readOptions(payload.options);
+  const questions = readQuestions(payload.questions);
   const multiple = payload.multiple === true;
-  const allowText = options.length === 0 || payload.allowText === true;
+  const allowText = questions.length === 0 && (options.length === 0 || payload.allowText === true);
   const disabled = status === "submitting" || status === "answered";
 
   const submit = async (response: unknown) => {
@@ -292,17 +358,33 @@ function InteractionCard(props: {
   }
 
   if (props.request.type === "audio-record") {
-    return <AudioRecordCard request={props.request} title={title} description={description} status={status} onStatus={setStatus} onRespond={props.onRespond} asrClient={props.asrClient} />;
+    return (
+      <AudioRecordCard
+        request={props.request}
+        title={title}
+        description={description}
+        status={status}
+        onStatus={setStatus}
+        onRespond={props.onRespond}
+        onDismiss={props.onDismiss}
+        onRecordingSession={props.onRecordingSession}
+        asrClient={props.asrClient}
+        uploadFiles={props.onUploadFiles}
+      />
+    );
   }
 
   return (
-    <div className="rounded-card border border-action-sky/25 bg-action-sky/[0.04] px-3 py-3">
+    <div className="rounded-card border border-action-sky/25 bg-action-sky/8 px-3 py-3">
       <div className="flex items-start gap-2">
         <HelpCircle size={16} className="mt-0.5 shrink-0 text-action-sky" aria-hidden="true" />
         <div className="min-w-0 flex-1">
           <p className="text-sm font-medium text-text-ink/80">{title}</p>
           {description ? <p className="mt-1 text-xs leading-relaxed text-text-ink/50">{description}</p> : null}
           <div className="mt-2 flex flex-wrap gap-2">
+            {questions.length > 0 ? (
+              <QuestionFields questions={questions} disabled={disabled} onSubmit={(answers) => void submit({ answers })} />
+            ) : null}
             {props.request.type === "approval" ? (
               <>
                 <ResponseButton disabled={disabled} onClick={() => void submit(true)}>{t("plugin.ui.approve")}</ResponseButton>
@@ -312,7 +394,7 @@ function InteractionCard(props: {
             ) : options.length > 0 ? (
               <>
                 {options.map((option, index) => multiple ? (
-                  <label key={`${index}:${option.label}`} className="inline-flex cursor-pointer items-center gap-1.5 rounded-btn border border-border-stone/45 bg-background-paper px-3 py-1.5 text-xs text-text-ink/65">
+                  <label key={`${index}:${option.label}`} className="inline-flex cursor-pointer items-center gap-1.5 rounded-btn border border-border-stone/40 bg-background-paper px-3 py-1.5 text-xs text-text-ink/65">
                     <input
                       type="checkbox"
                       disabled={disabled}
@@ -356,6 +438,11 @@ function InteractionCard(props: {
  * text only, so a plugin needs no microphone or raw-audio access. Speaker
  * separation is requested through the payload and applied upstream, which is why
  * the card exposes no speaker controls.
+ *
+ * The card itself is one line: an interview runs for hours, and a card that
+ * tall would push the conversation off screen for the whole session. The
+ * transcript goes to the side panel instead, which the card drives through
+ * `onRecordingSession`.
  */
 function AudioRecordCard(props: {
   request: PluginInteractionRequest;
@@ -364,17 +451,30 @@ function AudioRecordCard(props: {
   status: "idle" | "submitting" | "answered" | "error";
   onStatus(value: "idle" | "submitting" | "answered" | "error"): void;
   onRespond(interactionId: string, response: unknown): Promise<void>;
+  onDismiss?: () => void;
+  onRecordingSession?: (session: RecordingPanelSession | null) => void;
   asrClient?: AsrClient;
+  uploadFiles?: (files: UploadAgentMediaInput[]) => Promise<UploadedAgentMedia[]>;
 }) {
   const { t } = useTranslation();
   const payload = asRecord(props.request.payload);
   const diarization = payload.diarization === true;
-  const hotwords = readStrings(payload.hotwords);
   const allowSkip = payload.allowSkip === true;
-  const recorder = useAsrRecorder(props.asrClient);
   const [elapsedMs, setElapsedMs] = useState(0);
+  const [levels, setLevels] = useState<number[]>([]);
+  const [lines, setLines] = useState<AsrLiveLine[]>([]);
+  const [transcript, setTranscript] = useState<RecordingPanelTranscript | null>(null);
+  const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const recorder = useAsrRecorder(props.asrClient, {
+    live: {
+      onLine: (line) => setLines((current) => mergeLiveLines(current, line)),
+      onLevel: (level) => setLevels((current) => pushWaveformLevel(current, level, WAVEFORM_BARS))
+    }
+  });
   const answered = props.status === "answered";
   const busy = props.status === "submitting" || recorder.isTranscribing;
+
+  const remainingMs = asrRecordingTimeRemainingMs(elapsedMs);
 
   useEffect(() => {
     if (recorder.status !== "recording") return;
@@ -382,21 +482,41 @@ function AudioRecordCard(props: {
     return () => window.clearInterval(timer);
   }, [recorder.status]);
 
+  // An object URL outlives the render that made it, so it is revoked when the
+  // card goes away rather than left for the tab to collect.
+  useEffect(() => () => {
+    if (audioUrl) URL.revokeObjectURL(audioUrl);
+  }, [audioUrl]);
+
   const finish = async () => {
     props.onStatus("submitting");
     try {
-      const result = await recorder.finishAndTranscribe({ diarization, hotwords });
+      const result = await recorder.finishAndTranscribe({ diarization });
+      setAudioUrl(URL.createObjectURL(result.recording));
+      setTranscript({ text: result.text, segments: result.segments ?? [] });
+      // The recording and its transcript are deliverables in their own right,
+      // so both are persisted and handed back as files. The plugin still never
+      // receives audio bytes, only a Host-owned path.
+      const files = await persistRecording(result, t, props.uploadFiles);
       await props.onRespond(props.request.interactionId, {
         text: result.text,
         segments: result.segments ?? [],
-        durationMs: elapsedMs,
-        transcribedAt: result.transcribedAt
+        durationMs: result.durationMs ?? elapsedMs,
+        transcribedAt: result.transcribedAt,
+        ...files
       });
       props.onStatus("answered");
     } catch {
       props.onStatus("error");
     }
   };
+  // A whole recording travels as one payload, so it has a hard ceiling. Stop at
+  // it and transcribe what was captured rather than losing the interview.
+  useEffect(() => {
+    if (recorder.status !== "recording" || remainingMs > 0) return;
+    void finish();
+  }, [recorder.status, remainingMs]);
+
   const skip = async () => {
     recorder.cancel();
     props.onStatus("submitting");
@@ -408,56 +528,144 @@ function AudioRecordCard(props: {
     }
   };
 
+  const start = () => {
+    setElapsedMs(0);
+    setLines([]);
+    setLevels([]);
+    setTranscript(null);
+    void recorder.start().catch(() => undefined);
+  };
+
+  // The panel mirrors the card, so it is published from the card's own state
+  // rather than kept in a second copy that could drift.
+  const panelStatus: RecordingPanelSession["status"] = recorder.status === "paused"
+    ? "paused"
+    : recorder.isTranscribing
+      ? "transcribing"
+      : recorder.isRecording
+        ? "recording"
+        : "done";
+  const panelOpen = recorder.isRecording || recorder.isTranscribing || transcript !== null;
+  const publish = props.onRecordingSession;
+  useEffect(() => {
+    if (!publish) return;
+    if (!panelOpen) {
+      publish(null);
+      return;
+    }
+    publish({
+      title: props.title,
+      status: panelStatus,
+      elapsedMs,
+      lines,
+      transcript,
+      audioUrl,
+      onPause: () => recorder.pause(),
+      onResume: () => recorder.resume(),
+      onFinish: () => void finish(),
+      onClose: () => publish(null)
+    });
+  }, [publish, panelOpen, panelStatus, elapsedMs, lines, transcript, audioUrl, props.title]);
+  useEffect(() => () => publish?.(null), [publish]);
+
+  const error = !props.asrClient
+    ? t("plugin.ui.audio.unavailable")
+    : recorder.error && !answered
+      ? recorder.error.message
+      : props.status === "error"
+        ? t("plugin.ui.responseFailed")
+        : null;
+
   return (
-    <div className="rounded-card border border-action-sky/25 bg-action-sky/[0.04] px-3 py-3">
-      <div className="flex items-start gap-2">
-        <Mic size={16} className="mt-0.5 shrink-0 text-action-sky" aria-hidden="true" />
-        <div className="min-w-0 flex-1">
-          <p className="text-sm font-medium text-text-ink/80">{props.title}</p>
-          {props.description ? <p className="mt-1 text-xs leading-relaxed text-text-ink/50">{props.description}</p> : null}
-          <div className="mt-2 flex flex-wrap items-center gap-2">
-            {recorder.isRecording ? (
-              <>
-                {recorder.status === "paused" ? (
-                  <ResponseButton disabled={busy || answered} onClick={() => recorder.resume()}>{t("plugin.ui.audio.resume")}</ResponseButton>
-                ) : (
-                  <ResponseButton disabled={busy || answered} secondary onClick={() => recorder.pause()}>{t("plugin.ui.audio.pause")}</ResponseButton>
-                )}
-                <ResponseButton disabled={busy || answered} onClick={() => void finish()}>{t("plugin.ui.audio.stop")}</ResponseButton>
-                <ResponseButton disabled={busy || answered} secondary onClick={() => { recorder.cancel(); setElapsedMs(0); }}>{t("plugin.ui.audio.discard")}</ResponseButton>
-              </>
-            ) : (
-              <ResponseButton
-                disabled={busy || answered || recorder.isStarting || !props.asrClient}
-                onClick={() => { setElapsedMs(0); void recorder.start().catch(() => undefined); }}
-              >
-                {t("plugin.ui.audio.start")}
-              </ResponseButton>
-            )}
-            {allowSkip && !recorder.isRecording && !answered ? (
-              <ResponseButton disabled={busy} secondary onClick={() => void skip()}>{t("plugin.ui.skip")}</ResponseButton>
-            ) : null}
-            <span className="text-xs tabular-nums text-text-ink/45" role="timer" aria-label={t("plugin.ui.audio.elapsed")}>
-              {formatElapsed(elapsedMs)}
-            </span>
-          </div>
-          {recorder.isTranscribing ? <p className="mt-2 text-xs text-text-ink/50" role="status">{t("plugin.ui.audio.transcribing")}</p> : null}
-          {!props.asrClient ? <p className="mt-2 text-xs text-status-error" role="alert">{t("plugin.ui.audio.unavailable")}</p> : null}
-          {recorder.error && props.status !== "answered" ? <p className="mt-2 text-xs text-status-error" role="alert">{recorder.error.message}</p> : null}
-          {answered ? <p className="mt-2 text-xs text-status-success" role="status">{t("plugin.ui.answered")}</p> : null}
-          {props.status === "error" ? <p className="mt-2 text-xs text-status-error" role="alert">{t("plugin.ui.responseFailed")}</p> : null}
-        </div>
+    <div className={`recording-bar${recorder.isRecording ? " recording-bar--live" : ""}`}>
+      <span className="recording-bar__icon" aria-hidden="true"><Mic size={14} /></span>
+      <p className="recording-bar__title">
+        {recorder.isRecording
+          ? (recorder.status === "paused" ? t("plugin.ui.audio.paused") : t("plugin.ui.audio.recording"))
+          : props.title}
+      </p>
+      <span className="recording-bar__clock" role="timer" aria-label={t("plugin.ui.audio.elapsed")}>
+        {formatClock(elapsedMs)}
+      </span>
+      <Waveform levels={levels} active={recorder.status === "recording"} />
+      <div className="recording-bar__actions">
+        {recorder.isRecording ? (
+          <>
+            <button
+              type="button"
+              className="recording-bar__button"
+              disabled={busy || answered}
+              onClick={() => (recorder.status === "paused" ? recorder.resume() : recorder.pause())}
+            >
+              {recorder.status === "paused" ? t("plugin.ui.audio.resume") : t("plugin.ui.audio.pause")}
+            </button>
+            <button type="button" className="recording-bar__button recording-bar__button--primary" disabled={busy || answered} onClick={() => void finish()}>
+              {t("plugin.ui.audio.stop")}
+            </button>
+          </>
+        ) : (
+          <button
+            type="button"
+            className="recording-bar__button recording-bar__button--primary"
+            disabled={busy || answered || recorder.isStarting || !props.asrClient}
+            onClick={start}
+          >
+            {t("plugin.ui.audio.start")}
+          </button>
+        )}
+        {allowSkip && !recorder.isRecording && !answered ? (
+          <button type="button" className="recording-bar__button" disabled={busy} onClick={() => void skip()}>
+            {t("plugin.ui.skip")}
+          </button>
+        ) : null}
+        {props.onDismiss ? (
+          <button
+            type="button"
+            className="recording-bar__close"
+            aria-label={t("plugin.ui.dismissCard")}
+            title={t("plugin.ui.dismissCard")}
+            onClick={() => {
+              recorder.cancel();
+              props.onDismiss?.();
+            }}
+          >
+            ✕
+          </button>
+        ) : null}
       </div>
+      {recorder.isRecording && remainingMs <= REMAINING_WARNING_MS ? (
+        <span className="recording-bar__note recording-bar__note--warning" role="status">
+          {t("plugin.ui.audio.remaining", { time: formatClock(remainingMs) })}
+        </span>
+      ) : null}
+      {recorder.isTranscribing ? <span className="recording-bar__note" role="status">{t("plugin.ui.audio.transcribing")}</span> : null}
+      {answered ? <span className="recording-bar__note recording-bar__note--done" role="status">{t("plugin.ui.answered")}</span> : null}
+      {error ? <span className="recording-bar__note recording-bar__note--warning" role="alert">{error}</span> : null}
     </div>
   );
 }
 
-/** Formats a recording duration as mm:ss. */
-function formatElapsed(elapsedMs: number): string {
-  const totalSeconds = Math.floor(elapsedMs / 1_000);
-  const minutes = String(Math.floor(totalSeconds / 60)).padStart(2, "0");
-  const seconds = String(totalSeconds % 60).padStart(2, "0");
-  return `${minutes}:${seconds}`;
+/** Point at which the recording card starts counting down to the hard stop. */
+const REMAINING_WARNING_MS = 5 * 60 * 1_000;
+
+/** How many bars the recording waveform shows. */
+const WAVEFORM_BARS = 48;
+
+/** Live loudness readout for the recording bar. */
+function Waveform(props: { levels: number[]; active: boolean }) {
+  // Padded to full width so the bars stay put as readings arrive instead of
+  // the whole waveform sliding across the bar.
+  const padded = [
+    ...new Array(Math.max(0, WAVEFORM_BARS - props.levels.length)).fill(0),
+    ...props.levels
+  ];
+  return (
+    <div className={`recording-waveform${props.active ? " recording-waveform--active" : ""}`} aria-hidden="true">
+      {padded.map((level, index) => (
+        <span key={index} className="recording-waveform__bar" style={{ height: `${Math.round(8 + level * 92)}%` }} />
+      ))}
+    </div>
+  );
 }
 
 function FileInputCard(props: {
@@ -532,7 +740,7 @@ function FileInputCard(props: {
     props.onStatus("submitting");
     try {
       const uploaded = await props.onUploadFiles(readyFiles.map((file) => {
-        const classification = classifyAgentAttachmentFile(file)!;
+        const classification = classifyAgentAttachmentFile(file, { allowAudio: true })!;
         return { blob: file, name: file.name, kind: classification.kind, mime: classification.mime };
       }));
       const feedback = pendingFeedback.current;
@@ -560,27 +768,52 @@ function FileInputCard(props: {
     }
   };
   return (
-    <div className="rounded-card border border-action-sky/25 bg-action-sky/[0.04] px-3 py-3">
+    <div className="rounded-card border border-action-sky/25 bg-action-sky/8 px-3 py-3">
       <div className="flex items-start gap-2">
         <Paperclip size={16} className="mt-0.5 shrink-0 text-action-sky" aria-hidden="true" />
         <div className="min-w-0 flex-1">
-          <p className="text-sm font-medium text-text-ink/80">{props.title}</p>
-          {props.description ? <p className="mt-1 text-xs text-text-ink/50">{props.description}</p> : null}
+          <div className="flex items-start gap-2">
+            <p className="min-w-0 flex-1 text-sm font-medium text-text-ink/80">{props.title}</p>
+            {files.length ? (
+              <span className="shrink-0 text-xs text-text-ink/40">{t("plugin.ui.fileCount", { count: files.length })}</span>
+            ) : null}
+          </div>
+          {props.description ? <p className="mt-1 whitespace-pre-line text-xs text-text-ink/50">{props.description}</p> : null}
           <div className="mt-2 flex items-center gap-2">
-            <label className="cursor-pointer rounded-btn border border-border-stone/45 bg-background-paper px-3 py-1.5 text-xs text-text-ink/65">
+            <label className="cursor-pointer rounded-btn border border-border-stone/40 bg-background-paper px-3 py-1.5 text-xs text-text-ink/65">
               {t("plugin.ui.chooseFiles")}
               <input className="sr-only" type="file" accept={accept || undefined} multiple={payload.multiple === true} disabled={props.disabled} onChange={choose} />
             </label>
+            {payload.allowDirectory === true ? (
+              <label className="cursor-pointer rounded-btn border border-border-stone/40 bg-background-paper px-3 py-1.5 text-xs text-text-ink/65">
+                {t("plugin.ui.chooseFolder")}
+                {/*
+                  webkitdirectory is not in the React typings but is what every
+                  Chromium build implements, and the desktop shell is Chromium.
+                */}
+                <input
+                  className="sr-only"
+                  type="file"
+                  multiple
+                  disabled={props.disabled}
+                  onChange={choose}
+                  {...{ webkitdirectory: "" } as Record<string, string>}
+                />
+              </label>
+            ) : null}
             <span className="min-w-0 flex-1 truncate text-xs text-text-ink/45">
               {files.length ? t("plugin.ui.filesReadySummary", { ready: readyFiles.length, blocked: files.length - readyFiles.length }) : t("plugin.ui.noFiles")}
             </span>
             {minFiles === 0 && files.length === 0 ? <ResponseButton disabled={props.disabled} secondary onClick={() => void skip()}>{t("plugin.ui.skip")}</ResponseButton> : null}
-            <ResponseButton disabled={props.disabled || readyFiles.length === 0 || Boolean(validationError) || !props.onUploadFiles} onClick={() => void upload()}>{t("plugin.ui.upload")}</ResponseButton>
+            <ResponseButton disabled={props.disabled || readyFiles.length === 0 || Boolean(validationError) || !props.onUploadFiles} onClick={() => void upload()}>
+              {firstString(payload, ["submitLabel"]) ?? t("plugin.ui.upload")}
+            </ResponseButton>
           </div>
+          {accept ? <p className="mt-2 text-xs text-text-ink/35">{t("plugin.ui.acceptedFormats", { formats: summarizeAcceptedFormats(accept, t) })}</p> : null}
           {fileStates.length ? (
             <ul className="mt-2 space-y-1.5" aria-label={t("plugin.ui.selectedFiles")}>
               {fileStates.map((item, index) => (
-                <li key={`${item.file.name}:${item.file.size}:${index}`} className={`flex items-start gap-2 rounded-btn border px-2.5 py-2 text-xs ${item.status === "blocked" ? "border-status-error/20 bg-status-error-soft/35 text-text-ink/55" : "border-border-stone/30 bg-background-paper text-text-ink/65"}`}>
+                <li key={`${item.file.name}:${item.file.size}:${index}`} className={`flex items-start gap-2 rounded-btn border px-2.5 py-2 text-xs ${item.status === "blocked" ? "border-status-error/20 bg-status-error-soft text-text-ink/55" : "border-border-stone/30 bg-background-paper text-text-ink/65"}`}>
                   {item.status === "blocked" ? <AlertCircle size={14} className="mt-0.5 shrink-0 text-status-error" aria-hidden="true" /> : <Check size={14} className="mt-0.5 shrink-0 text-status-success" aria-hidden="true" />}
                   <span className="min-w-0 flex-1">
                     <span className="block truncate font-medium">{item.file.name}</span>
@@ -610,13 +843,80 @@ function FileInputCard(props: {
   );
 }
 
+/**
+ * One form for a card that asks several things at once.
+ *
+ * A plugin that needs twenty blanks filled has no way to ask for them one at a
+ * time without twenty consecutive cards, so `payload.questions` collects them
+ * into a single form answered as `{ answers: { [id]: value } }`.
+ *
+ * A blank is left out of the answers entirely rather than sent as an empty
+ * string: skipping a question and answering it with nothing are different
+ * statements, and the plugin marks the skipped ones as unverified.
+ */
+function QuestionFields(props: {
+  questions: PluginQuestionField[];
+  disabled: boolean;
+  onSubmit: (answers: Record<string, string>) => void;
+}) {
+  const { t } = useTranslation();
+  const [answers, setAnswers] = useState<Record<string, string>>({});
+  const filled = props.questions.filter((question) => (answers[question.id] ?? "").trim());
+  const incomplete = props.questions.some((question) => question.required && !(answers[question.id] ?? "").trim());
+  const set = (id: string, value: string) => setAnswers((current) => ({ ...current, [id]: value }));
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    props.onSubmit(Object.fromEntries(filled.map((question) => [question.id, answers[question.id]!.trim()])));
+  };
+
+  return (
+    <form className="flex w-full flex-col gap-2" onSubmit={submit}>
+      <div className="flex max-h-72 flex-col gap-2 overflow-y-auto pr-1">
+        {props.questions.map((question) => (
+          <label key={question.id} className="flex flex-col gap-1">
+            <span className="text-xs text-text-ink/65">{question.required ? `${question.label} *` : question.label}</span>
+            {question.options.length > 0 ? (
+              <select
+                value={answers[question.id] ?? ""}
+                onChange={(event) => set(question.id, event.target.value)}
+                disabled={props.disabled}
+                className="rounded-input border border-border-stone/50 bg-background-paper px-3 py-1.5 text-sm text-text-ink outline-none focus:border-action-sky disabled:opacity-60"
+              >
+                <option value="">{t("plugin.ui.optionalPlaceholder")}</option>
+                {question.options.map((option, index) => (
+                  <option key={`${index}:${option}`} value={option}>{option}</option>
+                ))}
+              </select>
+            ) : (
+              <input
+                value={answers[question.id] ?? ""}
+                onChange={(event) => set(question.id, event.target.value)}
+                disabled={props.disabled}
+                placeholder={question.required ? t("plugin.ui.responsePlaceholder") : t("plugin.ui.optionalPlaceholder")}
+                className="rounded-input border border-border-stone/50 bg-background-paper px-3 py-1.5 text-sm text-text-ink outline-none focus:border-action-sky disabled:opacity-60"
+              />
+            )}
+          </label>
+        ))}
+      </div>
+      <div className="flex items-center justify-end gap-2">
+        <span className="text-xs text-text-ink/40">
+          {t("plugin.ui.answerCount", { filled: filled.length, total: props.questions.length })}
+        </span>
+        <ResponseButton disabled={props.disabled || incomplete}>{t("plugin.ui.submit")}</ResponseButton>
+      </div>
+    </form>
+  );
+}
+
 function ResponseButton(props: { children: string; disabled: boolean; onClick?: () => void; secondary?: boolean }) {
   return (
     <button
       type="submit"
       disabled={props.disabled}
       onClick={props.onClick}
-      className={`rounded-btn border px-3 py-1.5 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${props.secondary ? "border-border-stone/45 bg-background-paper text-text-ink/60 hover:bg-canvas-oat" : "border-action-sky/30 bg-action-sky/10 text-action-sky hover:bg-action-sky/15"}`}
+      className={`rounded-btn border px-3 py-1.5 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${props.secondary ? "border-border-stone/40 bg-background-paper text-text-ink/60 hover:bg-canvas-oat" : "border-action-sky/30 bg-action-sky/10 text-action-sky hover:bg-action-sky/15"}`}
     >
       {props.children}
     </button>
@@ -687,7 +987,7 @@ function ArtifactCollection(props: {
     <div className="overflow-hidden rounded-card border border-border-stone/30">
       <button
         type="button"
-        className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm text-text-ink/70 transition-colors hover:bg-canvas-oat/45"
+        className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm text-text-ink/70 transition-colors hover:bg-canvas-oat/40"
         aria-expanded={expanded}
         onClick={() => setExpanded((current) => !current)}
       >
@@ -697,7 +997,7 @@ function ArtifactCollection(props: {
         <ChevronRight size={15} className={`text-text-ink/40 transition-transform ${expanded ? "rotate-90" : ""}`} aria-hidden="true" />
       </button>
       {expanded ? (
-        <div className="max-h-72 space-y-1.5 overflow-y-auto border-t border-border-stone/25 p-2">
+        <div className="max-h-72 space-y-1.5 overflow-y-auto border-t border-border-stone/30 p-2">
           {props.events.map((event) => (
             <ArtifactCard
               key={`artifact:${event.artifact.id}`}
@@ -746,6 +1046,60 @@ export function selectVisiblePluginCalls(calls: PluginUiCall[], answered: Readon
   });
 }
 
+/**
+ * Hides user-raised cards while the Agent is waiting on one of its own.
+ *
+ * User-raised cards are pinned entry points the user opens whenever it suits
+ * them, so they can already be on screen when the model asks its own question.
+ * Two live cards competing for the same answer is ambiguous, and the Agent's is
+ * the one blocking progress, so it wins. Nothing is cancelled — the hidden card
+ * comes back once the Agent's interaction is answered.
+ *
+ * @param calls Visible calls.
+ * @returns Calls with occluded ones removed.
+ */
+export function occludeUserRaisedCalls(calls: PluginUiCall[]): PluginUiCall[] {
+  const agentIsWaiting = calls.some((call) => (
+    call.origin === "agent"
+    && call.events.some((event) => event.type === "interaction")
+    && !call.events.some((event) => event.type === "result" || event.type === "error")
+  ));
+  if (!agentIsWaiting) return calls;
+  return calls.filter((call) => call.origin !== "user" || !call.events.some((event) => event.type === "interaction"));
+}
+
+/**
+ * Reports whether a call renders its own chrome and should not be boxed.
+ *
+ * @param call The call being rendered.
+ * @returns True when the call's only live event is a recording interaction.
+ */
+export function isBarePresentation(call: PluginUiCall): boolean {
+  const live = call.events.filter((event) => event.type !== "artifact");
+  return live.length > 0
+    && live.every((event) => event.type === "interaction" && event.request.type === "audio-record");
+}
+
+/**
+ * Splits calls between the pinned region and the transcript.
+ *
+ * A call the user raised stays above the composer for as long as it is live; a
+ * call the model raised belongs in the transcript. Once a user-raised call has
+ * delivered its result it moves to the transcript too, so the pinned region
+ * holds only what is still actionable and the deliverables stay in the history.
+ *
+ * @param calls Visible calls.
+ * @param region The region being rendered.
+ * @returns The calls that belong to that region.
+ */
+export function selectRegionPluginCalls(calls: PluginUiCall[], region: PluginCardRegion): PluginUiCall[] {
+  const isLiveUserCall = (call: PluginUiCall) => (
+    call.origin === "user"
+    && !call.events.some((event) => event.type === "result" || event.type === "error")
+  );
+  return calls.filter((call) => (region === "pinned" ? isLiveUserCall(call) : !isLiveUserCall(call)));
+}
+
 /** Keep active work closest to the current Agent turn and completed deliveries at the bottom. */
 export function orderPluginCallsForDisplay(calls: PluginUiCall[]): PluginUiCall[] {
   const isCompletedDelivery = (call: PluginUiCall) => (
@@ -760,7 +1114,7 @@ export function orderPluginCallsForDisplay(calls: PluginUiCall[]): PluginUiCall[
 
 function ErrorCard(props: { event: Extract<CapabilityEvent, { type: "error" }> }) {
   return (
-    <div className="flex items-start gap-2 rounded-card border border-status-error/25 bg-status-error-soft/40 px-3 py-2.5 text-sm text-status-error" role="alert">
+    <div className="flex items-start gap-2 rounded-card border border-status-error/20 bg-status-error-soft px-3 py-2.5 text-sm text-status-error" role="alert">
       <AlertCircle size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
       <span>{props.event.message}</span>
     </div>
@@ -863,7 +1217,7 @@ function SandboxedPluginRenderer(props: {
         uploading.current.add(interactionId);
         const uploadFiles = props.onUploadFiles;
         void Promise.all(files.map(async (file: File) => {
-          const classification = classifyAgentAttachmentFile(file)!;
+          const classification = classifyAgentAttachmentFile(file, { allowAudio: true })!;
           return { blob: await materializePluginUploadFile(file), name: file.name, kind: classification.kind, mime: classification.mime };
         })).then(uploadFiles).then(
           (uploaded) => reply({ ok: true, files: uploaded }),
@@ -1016,6 +1370,38 @@ function readOptions(value: unknown): Array<{ label: string; value: unknown }> {
   });
 }
 
+export interface PluginQuestionField {
+  id: string;
+  label: string;
+  /** Answers are strings on the wire, so option values are read as their labels. */
+  options: string[];
+  required: boolean;
+}
+
+/**
+ * Reads the fields of a multi-question card.
+ *
+ * An entry without an id has nowhere to put its answer and one without a label
+ * asks the user nothing, so both are dropped rather than rendered blank.
+ */
+export function readQuestions(value: unknown): PluginQuestionField[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  return value.flatMap((item) => {
+    const question = asRecord(item);
+    const id = firstString(question, ["id", "key", "name"]);
+    const label = firstString(question, ["label", "question", "prompt", "title"]);
+    if (!id || !label || seen.has(id)) return [];
+    seen.add(id);
+    return [{
+      id,
+      label,
+      options: readOptions(question.options).map((option) => option.label),
+      required: question.required === true
+    }];
+  });
+}
+
 function readStrings(value: unknown): string[] {
   if (typeof value === "string") return value.split(",").map((item) => item.trim()).filter(Boolean);
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map((item) => item.trim()) : [];
@@ -1053,7 +1439,7 @@ function classifyPluginInputFile(
   const name = file.name.toLowerCase();
   const rule = rules.find((item) => item.extensions.some((extension) => name.endsWith(extension)));
   if (rule) return { file, status: "blocked", code: rule.code, message: rule.message };
-  if (!matchesAccept(file, accept) || !classifyAgentAttachmentFile(file)) {
+  if (!matchesAccept(file, accept) || !classifyAgentAttachmentFile(file, { allowAudio: true })) {
     return { file, status: "blocked", code: "file_unsupported", message: t("plugin.ui.fileUnsupported") };
   }
   if (maxBytes && file.size > maxBytes) {
@@ -1065,6 +1451,44 @@ function classifyPluginInputFile(
 function validateReadyFileCount(files: File[], maxFiles: number | null, t: ReturnType<typeof useTranslation>["t"]): string | null {
   if (maxFiles && files.length > maxFiles) return t("plugin.ui.fileCountExceeded");
   return null;
+}
+
+/**
+ * Extension families the accept hint is summarized into, in reading order.
+ *
+ * Format names that are trademarks read the same in every language and stay
+ * literal; the two that describe a kind of file rather than a format are
+ * translated.
+ */
+const ACCEPT_FAMILIES: ReadonlyArray<{ label: string | MessageKey; translate?: true; extensions: readonly string[] }> = [
+  { label: "PDF", extensions: [".pdf"] },
+  { label: "Word", extensions: [".doc", ".docx"] },
+  { label: "Excel", extensions: [".xls", ".xlsx", ".xlsm", ".csv"] },
+  { label: "PPT", extensions: [".ppt", ".pptx"] },
+  { label: "TXT/MD", extensions: [".txt", ".md"] },
+  { label: "plugin.ui.format.image", translate: true, extensions: [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".heic"] },
+  { label: "plugin.ui.format.media", translate: true, extensions: [".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".amr", ".mp4", ".mov", ".webm"] }
+];
+
+/**
+ * Summarizes an accept list into the file kinds a person recognises.
+ *
+ * A raw extension list is long enough to be unreadable, and the user only
+ * needs to know whether what they have in hand will be taken.
+ *
+ * @param accept The card's accept list.
+ * @param t The translator, for the families named by kind rather than format.
+ * @returns A joined summary, listing unrecognised extensions as themselves.
+ */
+export function summarizeAcceptedFormats(accept: string, t: ReturnType<typeof useTranslation>["t"]): string {
+  const entries = accept.split(",").map((entry) => entry.trim().toLowerCase()).filter(Boolean);
+  const labels = ACCEPT_FAMILIES
+    .filter((family) => family.extensions.some((extension) => entries.includes(extension)))
+    .map((family) => (family.translate ? t(family.label as MessageKey) : family.label));
+  const unmatched = entries.filter((entry) => (
+    entry.startsWith(".") && !ACCEPT_FAMILIES.some((family) => family.extensions.includes(entry))
+  ));
+  return [...labels, ...unmatched].join(t("plugin.ui.format.separator"));
 }
 
 function matchesAccept(file: File, accept: string): boolean {

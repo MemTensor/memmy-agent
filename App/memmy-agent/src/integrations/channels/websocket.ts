@@ -174,7 +174,7 @@ type ResolvedArtifactPath = {
   mediaUrl?: string;
 };
 type WebuiUploadClassification = {
-  kind: "image" | "file";
+  kind: "image" | "file" | "audio";
   mime: string;
   extension: string;
 };
@@ -331,6 +331,16 @@ const CODE_TEXT_EXTENSIONS = new Set([
   ".graphql", ".h", ".hpp", ".java", ".jsx", ".mjs", ".mts", ".properties", ".py",
   ".rb", ".rs", ".sh", ".sql", ".svelte", ".tex", ".ts", ".tsx", ".vue",
 ]);
+const AUDIO_MIME_BY_EXTENSION: Record<string, string> = {
+  ".aac": "audio/aac",
+  ".flac": "audio/flac",
+  ".m4a": "audio/mp4",
+  ".mp3": "audio/mpeg",
+  ".ogg": "audio/ogg",
+  ".opus": "audio/opus",
+  ".wav": "audio/wav",
+  ".webm": "audio/webm",
+};
 const FILE_MIME_ALLOWED = new Set([
   ...Object.values(DOCUMENT_MIME_BY_EXTENSION),
   ...Object.values(TEXT_MIME_BY_EXTENSION),
@@ -5204,6 +5214,13 @@ function classifyWebuiUploadAttachment(name: string, declaredMime: string, bytes
 
   const fileClassification = classifyFileAttachmentByName(name);
   if (!fileClassification) return null;
+  if (fileClassification.kind === "audio") {
+    // Browsers disagree on the media type of the same recording and file
+    // pickers often report none at all, so the extension and the container
+    // signature decide; the declared type only has to not contradict them.
+    if (declaredMime && !declaredMime.startsWith("audio/") && declaredMime !== "application/octet-stream") return null;
+    return fileBytesMatchClassification(fileClassification, bytes) ? fileClassification : null;
+  }
   const isDocument = Boolean(DOCUMENT_MIME_BY_EXTENSION[fileClassification.extension]);
   if (declaredMime && isDocument && declaredMime !== fileClassification.mime) return null;
   if (declaredMime && !isDocument && !FILE_MIME_ALLOWED.has(declaredMime) && !declaredMime.startsWith("text/")) return null;
@@ -5228,6 +5245,14 @@ function classifySavedWebuiAttachment(filePath: string, bytes: Buffer): WebuiUpl
 
 function classifyFileAttachmentByName(name: string): WebuiUploadClassification | null {
   const extension = path.extname(name).toLowerCase();
+  const audioMime = AUDIO_MIME_BY_EXTENSION[extension];
+  if (audioMime) {
+    return {
+      kind: "audio",
+      mime: audioMime,
+      extension,
+    };
+  }
   const mime = DOCUMENT_MIME_BY_EXTENSION[extension] ?? TEXT_MIME_BY_EXTENSION[extension];
   if (!mime) return null;
   return {
@@ -5238,10 +5263,44 @@ function classifyFileAttachmentByName(name: string): WebuiUploadClassification |
 }
 
 function fileBytesMatchClassification(classification: WebuiUploadClassification, bytes: Buffer): boolean {
+  if (classification.kind === "audio") return looksLikeAudio(classification.extension, bytes);
   if (classification.kind !== "file") return true;
   if (classification.extension === ".pdf") return looksLikePdf(bytes);
   if (DOCUMENT_MIME_BY_EXTENSION[classification.extension]) return looksLikeZip(bytes);
   return looksLikeText(bytes);
+}
+
+/**
+ * Checks the container signature of an audio upload.
+ *
+ * The extension picks the media type, so without this an attacker could hand
+ * any payload an audio name and have it stored under a media type the rest of
+ * the pipeline trusts.
+ */
+function looksLikeAudio(extension: string, bytes: Buffer): boolean {
+  const tag = (offset: number, value: string): boolean =>
+    bytes.length >= offset + value.length && bytes.subarray(offset, offset + value.length).toString("ascii") === value;
+
+  switch (extension) {
+    case ".wav":
+      return tag(0, "RIFF") && tag(8, "WAVE");
+    case ".flac":
+      return tag(0, "fLaC");
+    case ".ogg":
+    case ".opus":
+      return tag(0, "OggS");
+    case ".m4a":
+      return tag(4, "ftyp");
+    case ".webm":
+      return bytes.length >= 4 && bytes[0] === 0x1a && bytes[1] === 0x45 && bytes[2] === 0xdf && bytes[3] === 0xa3;
+    case ".mp3":
+      // ID3-tagged, or a bare MPEG frame sync.
+      return tag(0, "ID3") || (bytes.length >= 2 && bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0);
+    case ".aac":
+      return tag(0, "ADIF") || (bytes.length >= 2 && bytes[0] === 0xff && (bytes[1] & 0xf6) === 0xf0);
+    default:
+      return false;
+  }
 }
 
 function looksLikePdf(bytes: Buffer): boolean {

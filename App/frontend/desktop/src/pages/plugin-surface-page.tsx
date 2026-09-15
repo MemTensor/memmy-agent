@@ -85,7 +85,7 @@ function SandboxedPluginSurface(props: {
         const capability = props.plugin.manifest.capabilities.find((item) => item.id === data.capabilityId);
         const allowed = props.plugin.manifest.ui?.surface?.capabilities;
         if (!capability || (allowed && !allowed.includes(capability.id))) return;
-        void clients.plugins.invoke(props.plugin.id, capability.id, { conversationId: props.context.conversationId, input: data.input }).then(
+        void clients.plugins.invoke(props.plugin.id, capability.id, { conversationId: props.context.conversationId, input: data.input, origin: "user" }).then(
           (result) => iframeRef.current?.contentWindow?.postMessage({ type: "memmy.plugin.invoke-result", version: 1, requestId: data.requestId, ok: true, result }, "*"),
           () => iframeRef.current?.contentWindow?.postMessage({ type: "memmy.plugin.invoke-result", version: 1, requestId: data.requestId, ok: false }, "*")
         );

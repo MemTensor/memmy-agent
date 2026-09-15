@@ -677,7 +677,15 @@ NODE
     VITE_MEMMY_AGENT_WEBUI_URL="$("$MEMMY_RUNTIME_NODE_PATH" - "$MEMMY_CONFIG_PATH" <<'NODE'
 const fs = require("node:fs");
 const YAML = require("yaml");
-const config = YAML.parse(fs.readFileSync(process.argv[2], "utf8")) || {};
+// build_and_install_memory_cli is what creates config.yaml, and it runs after
+// this, so on a first run the file is simply not there yet.  The defaults
+// below already cover that case; only a malformed config is worth failing on.
+let config = {};
+try {
+  config = YAML.parse(fs.readFileSync(process.argv[2], "utf8")) || {};
+} catch (error) {
+  if (error?.code !== "ENOENT") throw error;
+}
 const websocket = config?.channels?.websocket || {};
 const configuredHost = typeof websocket.host === "string" && websocket.host.trim()
   ? websocket.host.trim()

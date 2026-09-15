@@ -85,8 +85,7 @@ async function transcribeWithAccount(
       audioBase64: input.audioBase64,
       mimeType: input.mimeType,
       durationMs: input.durationMs,
-      diarization: input.diarization,
-      hotwords: input.hotwords
+      diarization: input.diarization
     });
   } catch (error) {
     throw withActualModelContext(error, context);
