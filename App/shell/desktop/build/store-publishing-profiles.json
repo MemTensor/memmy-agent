@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 2,
+  "publisher": "CN=2CA03910-614F-4524-BAEC-BAE9D6F10DD0",
+  "publisherDisplayName": "Memtensor",
+  "windowsDisplayName": "Memmy",
+  "legacyNsisAumid": "cn.memtensor.memmy",
+  "applications": {
+    "cn": {
+      "storeListingDisplayName": "Memmy",
+      "storeProductId": "9MZGLKWMZZV6",
+      "acquisitionUri": "https://get.microsoft.com/installer/download/9MZGLKWMZZV6",
+      "identityName": "Memtensor.Memmy",
+      "manifestApplicationId": "Memmy",
+      "packageFamilyName": "Memtensor.Memmy_eyack96k521x2"
+    },
+    "intl": {
+      "storeListingDisplayName": "Memmy Agent",
+      "storeProductId": "9NFVJC9K7ZK9",
+      "acquisitionUri": "https://get.microsoft.com/installer/download/9NFVJC9K7ZK9",
+      "identityName": "Memtensor.MemmyAgent",
+      "manifestApplicationId": "Memmy",
+      "packageFamilyName": "Memtensor.MemmyAgent_eyack96k521x2"
+    }
+  }
+}

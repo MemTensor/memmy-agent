@@ -63,6 +63,194 @@ describeOnWindows("Windows standard upgrade safety check", { timeout: 60_000 }, 
     expect(result.stdout).toContain("installation-blocked:selected installation drive already contains Memmy runtime data");
   });
 
+  it("allows relocation when the target runtime contains only the owned workspace migration state", () => {
+    const fixture = createFixture();
+    fixture.targetInstallDir = join(fixture.root, "other-drive", "Memmy");
+    fixture.targetRuntimeHomePath = join(fixture.root, "other-drive", "MemmyData", ".memmy");
+    writeJson(join(
+      fixture.targetRuntimeHomePath,
+      "workspace",
+      ".memmy-migrations",
+      "agent-workspace.json",
+    ), {
+      formatVersion: 2,
+      scope: "agent-workspace",
+      applied: [
+        {
+          id: "v1.0.4/0001-add-webui-session-binding",
+          introducedIn: "1.0.4",
+          appliedAt: "2026-09-01T03:45:36.847Z",
+          target: { type: "agent-workspace" },
+        },
+        {
+          id: "v1.0.7/0004-add-goal-dag-boundary",
+          introducedIn: "1.0.7",
+          appliedAt: "2026-09-01T03:45:36.856Z",
+          target: { type: "session-dag", key: "65ff44b99f6eb228b610f9005abbbad3fb6aef991001cd674079e4e1c98cee3b" },
+        },
+      ],
+    });
+    writeFile(join(fixture.targetRuntimeHomePath, "updates", "cached-installer.exe"), "cache");
+
+    const result = runCheck(fixture);
+
+    expect(result.status, result.stderr || result.stdout).toBe(1);
+    expect(result.stdout).toContain("relay-required:installation target differs from the installed application");
+  });
+
+  it("allows relocation when the target contains only a valid version 1 workspace migration ledger", () => {
+    const fixture = createFixture();
+    fixture.targetInstallDir = join(fixture.root, "other-drive", "Memmy");
+    fixture.targetRuntimeHomePath = join(fixture.root, "other-drive", "MemmyData", ".memmy");
+    writeJson(join(
+      fixture.targetRuntimeHomePath,
+      "workspace",
+      ".memmy-migrations",
+      "agent-workspace.json",
+    ), {
+      formatVersion: 1,
+      scope: "agent-workspace",
+      applied: [{
+        id: "v1.0.4/0001-add-webui-session-binding",
+        introducedIn: "1.0.4",
+        appliedAt: "2026-09-01T03:45:36.847Z",
+      }],
+    });
+
+    const result = runCheck(fixture);
+
+    expect(result.status, result.stderr || result.stdout).toBe(1);
+    expect(result.stdout).toContain("relay-required:installation target differs from the installed application");
+  });
+
+  it("blocks relocation when the owned workspace migration state is accompanied by user data", () => {
+    const fixture = createFixture();
+    fixture.targetInstallDir = join(fixture.root, "other-drive", "Memmy");
+    fixture.targetRuntimeHomePath = join(fixture.root, "other-drive", "MemmyData", ".memmy");
+    writeJson(join(
+      fixture.targetRuntimeHomePath,
+      "workspace",
+      ".memmy-migrations",
+      "agent-workspace.json",
+    ), {
+      formatVersion: 2,
+      scope: "agent-workspace",
+      applied: [],
+    });
+    writeFile(join(fixture.targetRuntimeHomePath, "workspace", "USER.md"), "keep me");
+
+    const result = runCheck(fixture);
+
+    expect(result.status).toBe(2);
+    expect(result.stdout).toContain("installation-blocked:selected installation drive already contains Memmy runtime data");
+  });
+
+  it("blocks relocation when the owned workspace migration state is invalid", () => {
+    const fixture = createFixture();
+    fixture.targetInstallDir = join(fixture.root, "other-drive", "Memmy");
+    fixture.targetRuntimeHomePath = join(fixture.root, "other-drive", "MemmyData", ".memmy");
+    writeFile(join(
+      fixture.targetRuntimeHomePath,
+      "workspace",
+      ".memmy-migrations",
+      "agent-workspace.json",
+    ), "{broken");
+
+    const result = runCheck(fixture);
+
+    expect(result.status).toBe(2);
+    expect(result.stdout).toContain("installation-blocked:selected installation drive already contains Memmy runtime data");
+  });
+
+  it.each([
+    ["string format version", { formatVersion: "2", scope: "agent-workspace", applied: [] }],
+    ["non-array applied", { formatVersion: 2, scope: "agent-workspace", applied: null }],
+    ["extra root field", { formatVersion: 2, scope: "agent-workspace", applied: [], extra: true }],
+    ["version 1 record with a target", {
+      formatVersion: 1,
+      scope: "agent-workspace",
+      applied: [{
+        id: "v1.0.4/0001-add-webui-session-binding",
+        introducedIn: "1.0.4",
+        appliedAt: "2026-09-01T03:45:36.847Z",
+        target: { type: "agent-workspace" },
+      }],
+    }],
+    ["noncanonical timestamp", {
+      formatVersion: 2,
+      scope: "agent-workspace",
+      applied: [{
+        id: "v1.0.4/0001-add-webui-session-binding",
+        introducedIn: "1.0.4",
+        appliedAt: "2026-09-01T03:45:36Z",
+        target: { type: "agent-workspace" },
+      }],
+    }],
+    ["uppercase target hash", {
+      formatVersion: 2,
+      scope: "agent-workspace",
+      applied: [{
+        id: "v1.0.7/0004-add-goal-dag-boundary",
+        introducedIn: "1.0.7",
+        appliedAt: "2026-09-01T03:45:36.856Z",
+        target: { type: "session-dag", key: "65FF44B99F6EB228B610F9005ABBBAD3FB6AEF991001CD674079E4E1C98CEE3B" },
+      }],
+    }],
+    ["duplicate target identity", {
+      formatVersion: 2,
+      scope: "agent-workspace",
+      applied: [
+        {
+          id: "v1.0.4/0001-add-webui-session-binding",
+          introducedIn: "1.0.4",
+          appliedAt: "2026-09-01T03:45:36.847Z",
+          target: { type: "agent-workspace" },
+        },
+        {
+          id: "v1.0.4/0001-add-webui-session-binding",
+          introducedIn: "1.0.4",
+          appliedAt: "2026-09-01T03:45:36.848Z",
+          target: { type: "agent-workspace" },
+        },
+      ],
+    }],
+  ])("blocks relocation when the migration ledger has %s", (_caseName, state) => {
+    const fixture = createFixture();
+    fixture.targetInstallDir = join(fixture.root, "other-drive", "Memmy");
+    fixture.targetRuntimeHomePath = join(fixture.root, "other-drive", "MemmyData", ".memmy");
+    writeJson(join(
+      fixture.targetRuntimeHomePath,
+      "workspace",
+      ".memmy-migrations",
+      "agent-workspace.json",
+    ), state);
+
+    const result = runCheck(fixture);
+
+    expect(result.status).toBe(2);
+    expect(result.stdout).toContain("installation-blocked:selected installation drive already contains Memmy runtime data");
+  });
+
+  it("blocks relocation when the migration ledger directory is a junction", () => {
+    const fixture = createFixture();
+    fixture.targetInstallDir = join(fixture.root, "other-drive", "Memmy");
+    fixture.targetRuntimeHomePath = join(fixture.root, "other-drive", "MemmyData", ".memmy");
+    const redirectedDirectory = join(fixture.root, "redirected-migration-state");
+    writeJson(join(redirectedDirectory, "agent-workspace.json"), {
+      formatVersion: 2,
+      scope: "agent-workspace",
+      applied: [],
+    });
+    const migrationDirectory = join(fixture.targetRuntimeHomePath, "workspace", ".memmy-migrations");
+    mkdirSync(dirname(migrationDirectory), { recursive: true });
+    symlinkSync(redirectedDirectory, migrationDirectory, "junction");
+
+    const result = runCheck(fixture);
+
+    expect(result.status).toBe(2);
+    expect(result.stdout).toContain("installation-blocked:selected installation drive already contains Memmy runtime data");
+  });
+
   it("allows an empty legacy data directory because it contains no data to preserve", () => {
     const fixture = createFixture();
     mkdirSync(join(fixture.installDir, "data"));

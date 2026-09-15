@@ -32,14 +32,7 @@ const requiredFiles = [
   "node_modules/@memmy/backend/dist/src/adapters/outbound/skill-writer/workspace-bridge/memmy-workspace-bridge.mjs",
 ];
 if (platform === "win32") {
-  requiredFiles.push(
-    "dist/runtime/memory/package.json",
-    "dist/runtime/memory/node_modules/@memmy/agent-source-core/package.json",
-    "dist/runtime/memory/node_modules/@memmy/agent-source-core/dist/src/index.js",
-    `dist/runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/${platform}/${arch}/onnxruntime_binding.node`,
-    `dist/runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/${platform}/${arch}/onnxruntime.dll`,
-    "dist/runtime/memmy-agent/dist/main.js.map",
-  );
+  requiredFiles.push("dist/runtime/memmy-agent/dist/main.js.map");
 }
 const entrySet = new Set(entries);
 for (const file of requiredFiles) {
@@ -47,12 +40,16 @@ for (const file of requiredFiles) {
 }
 
 if (platform === "win32") {
-  const onnxRuntimePrefix = "dist/runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/";
-  const targetOnnxRuntimePrefix = `${onnxRuntimePrefix}${platform}/${arch}/`;
-  if (entries.some((entry) => entry.startsWith(onnxRuntimePrefix)
-    && !entry.startsWith(targetOnnxRuntimePrefix)
-    && !targetOnnxRuntimePrefix.startsWith(`${entry.replace(/\/+$/u, "")}/`))) {
-    throw new Error("Packaged ASAR contains an incompatible onnxruntime-node platform");
+  const forbiddenMemoryEntry = entries.find((entry) =>
+    entry === "dist/runtime/memory" || entry.startsWith("dist/runtime/memory/"));
+  if (forbiddenMemoryEntry) {
+    throw new Error(`Packaged Windows ASAR contains forbidden Memory runtime: ${forbiddenMemoryEntry}`);
+  }
+
+  const forbiddenEmbeddingModelEntry = entries.find((entry) =>
+    entry === "dist/embedding-models" || entry.startsWith("dist/embedding-models/"));
+  if (forbiddenEmbeddingModelEntry) {
+    throw new Error(`Packaged Windows ASAR contains forbidden embedding models: ${forbiddenEmbeddingModelEntry}`);
   }
 
   const optionalPeerToolchainPattern = /^dist\/runtime\/memmy-agent\/node_modules\/(?:vitest|vite|rolldown)(?:\/|$)|^dist\/runtime\/memmy-agent\/node_modules\/@vitest(?:\/|$)|^dist\/runtime\/memmy-agent\/node_modules\/@rolldown\/binding-[^/]+(?:\/|$)/u;
@@ -74,12 +71,6 @@ const versionedFiles = [
   ["dist/runtime/memmy-agent/package.json", false, expectedDesktop],
   ["dist/runtime/memmy-agent/package-lock.json", true, expectedDesktop],
 ];
-if (platform === "win32") {
-  versionedFiles.splice(1, 0,
-    ["dist/runtime/memory/package.json", false, expectedMemory],
-    ["dist/runtime/memory/package-lock.json", true, expectedMemory],
-  );
-}
 for (const [file, lock, expectedVersion] of versionedFiles) {
   // electron-builder excludes npm lockfiles by default. The staged-runtime
   // version guard validates them before packaging; re-check any that are kept.
@@ -94,7 +85,11 @@ for (const [file, lock, expectedVersion] of versionedFiles) {
 }
 
 const memoryVersionSummary = expectedMemory ? ` and Memory version ${expectedMemory}` : "";
-console.log(`Verified packaged ASAR boundary and version ${expectedDesktop}${memoryVersionSummary}`);
+if (platform === "win32") {
+  console.log(`Verified packaged ASAR boundary and desktop version ${expectedDesktop}; Memory is external`);
+} else {
+  console.log(`Verified packaged ASAR boundary and version ${expectedDesktop}${memoryVersionSummary}`);
+}
 
 function readAsarJson(path, file) {
   try {

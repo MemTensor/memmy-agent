@@ -2,6 +2,7 @@ param(
   [Parameter(Mandatory = $true)][string]$InstallDir,
   [Parameter(Mandatory = $true)][string]$LockPath,
   [Parameter(Mandatory = $true)][string]$LogPath,
+  [switch]$PreparedInstallerLock,
   [string]$DirectMigrationStatePath = '',
   [string]$DirectMigrationScriptPath = '',
   [string]$DirectMigrationLogPath = '',
@@ -12,6 +13,89 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# A timed-out updater can exit while its installer is still replacing files.
+# Recover that guard from shortcuts and direct application launches after both exit.
+if ($PreparedInstallerLock) {
+  $preparedMutex = $null
+  $preparedMutexHeld = $false
+  try {
+    $preparedLock = [System.IO.Path]::GetFullPath($LockPath).TrimEnd('\')
+    if ((Split-Path -Leaf $preparedLock) -ne 'prepared-required-update.json.lock') { throw 'Unexpected prepared installer lock path' }
+    $hasher = [System.Security.Cryptography.SHA256]::Create()
+    try { $digest = [BitConverter]::ToString($hasher.ComputeHash([Text.Encoding]::UTF8.GetBytes($preparedLock.ToLowerInvariant()))).Replace('-', '') }
+    finally { $hasher.Dispose() }
+    $preparedMutex = [System.Threading.Mutex]::new($false, ('Local\MemmyPreparedUpdateRecovery-' + $digest))
+    try { $preparedMutexHeld = $preparedMutex.WaitOne(1000) }
+    catch [System.Threading.AbandonedMutexException] { $preparedMutexHeld = $true }
+    if (!$preparedMutexHeld) { exit 10 }
+    if (!(Test-Path -LiteralPath $preparedLock)) { exit 0 }
+    if ((Get-Item -LiteralPath $preparedLock).Attributes -band [System.IO.FileAttributes]::ReparsePoint) { throw 'Prepared installer lock must not be a reparse point' }
+    $preparedStatePath = Join-Path $preparedLock 'state.json'
+    $preparedState = Get-Content -LiteralPath $preparedStatePath -Raw | ConvertFrom-Json
+    $preparedApp = Join-Path ([System.IO.Path]::GetFullPath($InstallDir).TrimEnd('\')) 'Memmy.exe'
+    if ($preparedState.schemaVersion -ne 1 -or !$preparedState.ownerToken -or
+        ![string]::Equals([string]$preparedState.appExe, $preparedApp, [System.StringComparison]::OrdinalIgnoreCase)) {
+      throw 'Prepared installer lock belongs to another application'
+    }
+    function Test-PreparedInstallerProcess($ProcessIdValue, $StartedAtTicks, [string]$ExpectedPath) {
+      if (!$ProcessIdValue -or !$StartedAtTicks) { return $false }
+      $candidate = Get-Process -Id ([int]$ProcessIdValue) -ErrorAction SilentlyContinue
+      if (!$candidate) { return $false }
+      if ([string]$candidate.StartTime.ToUniversalTime().Ticks -ne [string]$StartedAtTicks) { return $false }
+      if (!$ExpectedPath) { return $true }
+      # An elevated installer can hide its path from the unelevated launcher.
+      # A matching PID and start time still owns the guard in that case.
+      if (!$candidate.Path) { return $true }
+      return [string]::Equals($candidate.Path, $ExpectedPath, [System.StringComparison]::OrdinalIgnoreCase)
+    }
+    if (Test-PreparedInstallerProcess $preparedState.installerPid $preparedState.installerStartedAtTicks ([string]$preparedState.installerPath)) { exit 10 }
+    # The updater may be writing its final result; do not race its normal lock release.
+    if (Test-PreparedInstallerProcess $preparedState.helperPid $preparedState.helperStartedAtTicks '') { exit 10 }
+    if (!$preparedState.installerPid -and $preparedState.installerPath) {
+      # Covers a helper crash between process creation and publishing its PID.
+      $installerName = [System.IO.Path]::GetFileNameWithoutExtension([string]$preparedState.installerPath)
+      $unrecordedInstaller = @(Get-Process -Name $installerName -ErrorAction SilentlyContinue | Where-Object {
+        !$_.Path -or [string]::Equals($_.Path, [string]$preparedState.installerPath, [System.StringComparison]::OrdinalIgnoreCase)
+      })
+      if ($unrecordedInstaller.Count -gt 0) { exit 10 }
+    }
+
+    $archive = $preparedLock + '.released-' + [Guid]::NewGuid().ToString('N')
+    if (![string]::Equals((Split-Path -Parent ([System.IO.Path]::GetFullPath($archive))),
+        (Split-Path -Parent $preparedLock), [System.StringComparison]::OrdinalIgnoreCase)) { throw 'Prepared installer archive is outside its owner directory' }
+    $marker = $preparedLock.Substring(0, $preparedLock.Length - '.lock'.Length)
+    $installedTarget = $false
+    if ($preparedState.expectedVersion -and (Test-Path -LiteralPath $preparedApp)) {
+      try {
+        $actualVersion = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($preparedApp).ProductVersion
+        $installedTarget = ([version]$actualVersion -ge [version]$preparedState.expectedVersion)
+      } catch { $installedTarget = $false }
+    }
+    if ($installedTarget) {
+      Remove-Item -LiteralPath $marker -Force -ErrorAction SilentlyContinue
+      Remove-Item -LiteralPath "$marker.attempt" -Force -ErrorAction SilentlyContinue
+    } elseif (Test-Path -LiteralPath $marker) {
+      $attempted = if ($preparedState.expectedVersion) { $preparedState.expectedVersion } else { 'unknown' }
+      Set-Content -LiteralPath "$marker.attempt" -Value $attempted -Encoding UTF8
+    }
+    Remove-Item -LiteralPath "$marker.prompt" -Force -ErrorAction SilentlyContinue
+    $latestState = Get-Content -LiteralPath $preparedStatePath -Raw | ConvertFrom-Json
+    if ($latestState.ownerToken -ne $preparedState.ownerToken) { exit 10 }
+    # Archive only the verified guard within its parent; never move application or user data.
+    Move-Item -LiteralPath $preparedLock -Destination $archive -ErrorAction Stop
+    New-Item -ItemType Directory -Path (Split-Path -Parent $LogPath) -Force | Out-Null
+    Add-Content -LiteralPath $LogPath -Value "Prepared installer has exited; recovered lock $archive"
+    exit 0
+  } catch {
+    Write-Warning $_.Exception.Message
+    exit 2
+  } finally {
+    if ($preparedMutexHeld) { $preparedMutex.ReleaseMutex() }
+    if ($preparedMutex) { $preparedMutex.Dispose() }
+  }
+}
+
 $normalizedInstallDir = [System.IO.Path]::GetFullPath($InstallDir).TrimEnd('\')
 $dataPath = Join-Path $normalizedInstallDir 'data'
 $expectedBackupParent = "$normalizedInstallDir.memmy-upgrade-backup"

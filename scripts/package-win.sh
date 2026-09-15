@@ -126,6 +126,10 @@ package_install_error_trap
 package_log "Package request: platform=win version=$VERSION arch=$ARCH edition=$EDITION sign=$SIGN"
 
 if [ "${#PASSTHROUGH_ARGS[@]}" -gt 0 ]; then
+  if [ "${MEMMY_WINDOWS_TARGET:-nsis}" = "appx" ]; then
+    echo "Windows AppX packaging does not accept electron-builder passthrough arguments. Store identity and output configuration are managed by the canonical packaging scripts." >&2
+    exit 1
+  fi
   for passthrough_arg in "${PASSTHROUGH_ARGS[@]}"; do
     case "$passthrough_arg" in
       --config|--config=*|--config.extraMetadata|--config.extraMetadata=*|--config.extraMetadata.version|--config.extraMetadata.version=*)
@@ -184,6 +188,10 @@ if [ ! -f "$BASE_SCRIPT" ]; then
 fi
 
 export MEMMY_DESKTOP_VERSION="$VERSION"
+unset MEMMY_WINDOWS_BUILD_LOCK_HELD
+unset MEMMY_WINDOWS_BUILD_LOCK_TOKEN
+unset MEMMY_WINDOWS_BUILD_LOCK_OWNER_PID
+unset MEMMY_WINDOWS_BUILD_LOCK_OWNER_FILE
 package_step_start "Run Windows internal package script"
 if [ "${#PASSTHROUGH_ARGS[@]}" -gt 0 ]; then
   bash "$BASE_SCRIPT" "${PASSTHROUGH_ARGS[@]}"

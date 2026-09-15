@@ -31,7 +31,7 @@ interface PackagedWindowsCliInstallDependencies {
   ensureUserPath?: (directory: string) => Promise<boolean>;
 }
 
-export type CliInstallStrategy = "packaged-windows" | "posix";
+export type CliInstallStrategy = "packaged-windows" | "packaged-windows-store" | "posix";
 
 const execFileAsync = promisify(execFile);
 
@@ -40,16 +40,64 @@ export const resolveCliInstallStrategy = (
   isPackaged: boolean,
   isWindowsStore = false
 ): CliInstallStrategy => {
-  return platform === "win32" && isPackaged && !isWindowsStore ? "packaged-windows" : "posix";
+  if (platform !== "win32" || !isPackaged) return "posix";
+  return isWindowsStore ? "packaged-windows-store" : "packaged-windows";
 };
 
 export const installPackagedWindowsCliTools = async (
   resourcesPath: string,
   dependencies: PackagedWindowsCliInstallDependencies = {}
 ): Promise<CliInstallResult> => {
+  return installWindowsCliLaunchers(
+    win32.join(resourcesPath, "cli"),
+    "Packaged Windows CLI launcher",
+    dependencies
+  );
+};
+
+export const resolvePackagedWindowsStoreCliDirectory = (storeUserDataPath: string): string => {
+  const trimmedPath = storeUserDataPath.trim();
+  if (!trimmedPath || !win32.isAbsolute(trimmedPath)) {
+    throw new Error("Windows Store userData path must be absolute");
+  }
+
+  const normalizedUserDataPath = win32.normalize(trimmedPath);
+  if (/(?:^|\\)windowsapps(?:\\|$)/iu.test(normalizedUserDataPath)) {
+    throw new Error("Windows Store CLI directory must not use a versioned WindowsApps path");
+  }
+
+  const localStateDirectory = win32.dirname(normalizedUserDataPath);
+  const packageFamilyDirectory = win32.dirname(localStateDirectory);
+  const packagesDirectory = win32.dirname(packageFamilyDirectory);
+  if (
+    win32.basename(normalizedUserDataPath).toLowerCase() !== "memmy"
+    || win32.basename(localStateDirectory).toLowerCase() !== "localstate"
+    || win32.basename(packagesDirectory).toLowerCase() !== "packages"
+    || !win32.basename(packageFamilyDirectory).includes("_")
+  ) {
+    throw new Error("Windows Store CLI requires a stable Packages\\<PFN>\\LocalState\\Memmy userData path");
+  }
+  return win32.join(normalizedUserDataPath, "cli");
+};
+
+export const installPackagedWindowsStoreCliTools = async (
+  storeUserDataPath: string,
+  dependencies: PackagedWindowsCliInstallDependencies = {}
+): Promise<CliInstallResult> => {
+  return installWindowsCliLaunchers(
+    resolvePackagedWindowsStoreCliDirectory(storeUserDataPath),
+    "Windows Store LocalState CLI launcher",
+    dependencies
+  );
+};
+
+const installWindowsCliLaunchers = async (
+  binDirectory: string,
+  launcherDescription: string,
+  dependencies: PackagedWindowsCliInstallDependencies
+): Promise<CliInstallResult> => {
   const accessFile = dependencies.accessFile ?? ((path: string) => access(path, fsConstants.R_OK));
   const ensureUserPath = dependencies.ensureUserPath ?? ensureWindowsCliDirectoryOnPath;
-  const binDirectory = win32.join(resourcesPath, "cli");
   const entries = [
     { name: "memmy-memory", source: win32.join(binDirectory, "memmy-memory.cmd") },
     { name: "memmy", source: win32.join(binDirectory, "memmy.cmd") }
@@ -59,7 +107,7 @@ export const installPackagedWindowsCliTools = async (
     try {
       await accessFile(entry.source);
     } catch (cause) {
-      throw new Error(`Packaged Windows CLI launcher is missing or unreadable: ${entry.source}`, { cause });
+      throw new Error(`${launcherDescription} is missing or unreadable: ${entry.source}`, { cause });
     }
   }
 
@@ -104,16 +152,47 @@ export const mergeWindowsUserPath = (
   };
 };
 
+export const findConflictingWindowsStoreCliPath = (
+  pathValue: string,
+  directory: string
+): string | null => {
+  const target = parseWindowsStoreCliDirectory(directory);
+  if (!target) return null;
+
+  const expected = normalizeWindowsPathSegment(directory);
+  for (const segment of pathValue.split(";")) {
+    const trimmedSegment = segment.trim();
+    if (!trimmedSegment || normalizeWindowsPathSegment(trimmedSegment) === expected) {
+      continue;
+    }
+    const candidate = parseWindowsStoreCliDirectory(trimmedSegment);
+    if (candidate && candidate.packageFamilyName !== target.packageFamilyName) {
+      return trimmedSegment;
+    }
+  }
+  return null;
+};
+
 export const ensureWindowsCliDirectoryOnPath = async (
   directory: string,
   accessLayer: WindowsUserPathAccess = defaultWindowsUserPathAccess
 ): Promise<boolean> => {
-  const userPath = mergeWindowsUserPath(await accessLayer.readUserPath(), directory);
+  const currentUserPath = await accessLayer.readUserPath();
+  const currentProcessPath = accessLayer.readProcessPath();
+  const conflictingStorePath = findConflictingWindowsStoreCliPath(currentUserPath, directory)
+    ?? findConflictingWindowsStoreCliPath(currentProcessPath, directory);
+  if (conflictingStorePath) {
+    throw new Error(
+      `Another Memmy Microsoft Store CLI is already registered in PATH: ${conflictingStorePath}`
+    );
+  }
+
+  const userPath = mergeWindowsUserPath(currentUserPath, directory);
   if (userPath.changed) {
     await accessLayer.writeUserPath(userPath.value);
   }
 
-  const processPath = mergeWindowsUserPath(accessLayer.readProcessPath(), directory);
+  const processPath = mergeWindowsUserPath(currentProcessPath, directory);
   if (processPath.changed) {
     accessLayer.writeProcessPath(processPath.value);
   }
@@ -133,11 +212,36 @@ export const ensureWindowsCliDirectoryOnPath = async (
 };
 
 const normalizeWindowsPathSegment = (value: string): string => {
-  const normalizedSlashes = value.trim().replaceAll("/", "\\");
+  const trimmedValue = value.trim();
+  const unquotedValue = trimmedValue.length >= 2
+    && trimmedValue.startsWith('"')
+    && trimmedValue.endsWith('"')
+    ? trimmedValue.slice(1, -1)
+    : trimmedValue;
+  const normalizedSlashes = unquotedValue.replaceAll("/", "\\");
   const withoutTrailingSlashes = normalizedSlashes.length > 3
     ? normalizedSlashes.replace(/\\+$/u, "")
     : normalizedSlashes;
   return withoutTrailingSlashes.toLocaleLowerCase("en-US");
+};
+
+const parseWindowsStoreCliDirectory = (
+  value: string
+): { packageFamilyName: string } | null => {
+  const normalizedPath = normalizeWindowsPathSegment(value);
+  if (!win32.isAbsolute(normalizedPath)) return null;
+
+  const segments = normalizedPath.split("\\");
+  const packagesIndex = segments.lastIndexOf("packages");
+  if (packagesIndex < 0 || segments.length !== packagesIndex + 5) return null;
+  const packageFamilyName = segments[packagesIndex + 1] ?? "";
+  if (!packageFamilyName.includes("_")
+      || segments[packagesIndex + 2] !== "localstate"
+      || segments[packagesIndex + 3] !== "memmy"
+      || segments[packagesIndex + 4] !== "cli") {
+    return null;
+  }
+  return { packageFamilyName };
 };
 
 const defaultWindowsUserPathAccess: WindowsUserPathAccess = {

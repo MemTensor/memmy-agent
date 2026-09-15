@@ -8,6 +8,8 @@ directories:
 
 files:
   - dist/**/*
+  - "!dist/runtime/memory{,/**/*}"
+  - "!dist/embedding-models{,/**/*}"
   - package.json
   - "!**/node_modules/*/{test,tests,__tests__,doc,docs,example,examples,coverage,.github}"
   - "!**/node_modules/*/{test,tests,__tests__,doc,docs,example,examples,coverage,.github}/**/*"
@@ -50,6 +52,10 @@ extraResources:
       - "**/*"
   - from: build/icon.ico
     to: icon.ico
+  - from: dist/native
+    to: native
+    filter:
+      - "MemmyStoreUpdate.exe"
 
 win:
   icon: build/icon.ico

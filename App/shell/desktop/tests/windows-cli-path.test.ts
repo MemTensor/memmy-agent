@@ -3,9 +3,12 @@ import { describe, expect, it, vi } from "vitest";
 import {
   WINDOWS_USER_PATH_LOCATION,
   ensureWindowsCliDirectoryOnPath,
+  findConflictingWindowsStoreCliPath,
   installPackagedWindowsCliTools,
+  installPackagedWindowsStoreCliTools,
   mergeWindowsUserPath,
   resolveCliInstallStrategy,
+  resolvePackagedWindowsStoreCliDirectory,
   type WindowsUserPathAccess
 } from "../src/main/windows-cli-path.js";
 
@@ -78,12 +81,64 @@ describe("Windows packaged CLI installation", () => {
     }
   );
 
-  it("selects the Windows packaged strategy without changing macOS or development mode", () => {
+  it("selects distinct NSIS and Store packaged strategies without changing other platforms", () => {
     expect(resolveCliInstallStrategy("win32", true, false)).toBe("packaged-windows");
     expect(resolveCliInstallStrategy("win32", false, false)).toBe("posix");
-    expect(resolveCliInstallStrategy("win32", true, true)).toBe("posix");
+    expect(resolveCliInstallStrategy("win32", false, true)).toBe("posix");
+    expect(resolveCliInstallStrategy("win32", true, true)).toBe("packaged-windows-store");
     expect(resolveCliInstallStrategy("darwin", true, false)).toBe("posix");
     expect(resolveCliInstallStrategy("linux", true, false)).toBe("posix");
+  });
+
+  it("registers Store launchers only from the stable package LocalState CLI directory", async () => {
+    const storeUserDataPath = "C:\\Users\\lee\\AppData\\Local\\Packages\\Memtensor.Memmy_eyack96k521x2\\LocalState\\Memmy";
+    const binDirectory = `${storeUserDataPath}\\cli`;
+    const accessed: string[] = [];
+    const ensureUserPath = vi.fn(async () => true);
+
+    const result = await installPackagedWindowsStoreCliTools(storeUserDataPath, {
+      accessFile: async (path) => {
+        accessed.push(path);
+      },
+      ensureUserPath
+    });
+
+    expect(resolvePackagedWindowsStoreCliDirectory(storeUserDataPath)).toBe(binDirectory);
+    expect(accessed).toEqual([
+      `${binDirectory}\\memmy-memory.cmd`,
+      `${binDirectory}\\memmy.cmd`
+    ]);
+    expect(ensureUserPath).toHaveBeenCalledWith(binDirectory);
+    expect(result).toEqual({
+      ok: true,
+      binDirectory,
+      installed: [
+        { name: "memmy-memory", source: `${binDirectory}\\memmy-memory.cmd`, target: `${binDirectory}\\memmy-memory.cmd` },
+        { name: "memmy", source: `${binDirectory}\\memmy.cmd`, target: `${binDirectory}\\memmy.cmd` }
+      ],
+      pathUpdated: true,
+      profilePaths: [WINDOWS_USER_PATH_LOCATION]
+    });
+    expect(result.binDirectory.toLowerCase()).not.toContain("\\windowsapps\\");
+  });
+
+  it.each([
+    "Memtensor.Memmy_eyack96k521x2",
+    "Memtensor.MemmyAgent_eyack96k521x2"
+  ])("keeps the %s Store CLI directory stable across package versions", (packageFamilyName) => {
+    const storeUserDataPath = `C:\\Users\\lee\\AppData\\Local\\Packages\\${packageFamilyName}\\LocalState\\Memmy`;
+
+    expect(resolvePackagedWindowsStoreCliDirectory(storeUserDataPath)).toBe(`${storeUserDataPath}\\cli`);
+  });
+
+  it("rejects versioned WindowsApps and non-LocalState Store CLI roots", () => {
+    expect(() => resolvePackagedWindowsStoreCliDirectory(
+      "C:\\Program Files\\WindowsApps\\Memtensor.Memmy_1.1.2.0_x64__eyack96k521x2\\resources"
+    )).toThrow("WindowsApps");
+    expect(() => resolvePackagedWindowsStoreCliDirectory(
+      "C:\\Users\\lee\\AppData\\Roaming\\Memmy"
+    )).toThrow("LocalState\\Memmy");
+    expect(() => resolvePackagedWindowsStoreCliDirectory("LocalState\\Memmy")).toThrow("absolute");
   });
 });
 
@@ -155,6 +210,32 @@ describe("Windows user PATH registration", () => {
     await expect(ensureWindowsCliDirectoryOnPath(cliDirectory, fixture.access)).resolves.toBe(false);
     expect(fixture.writes).toHaveLength(1);
     expect(fixture.broadcastEnvironmentChange).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects registering the CN and Intl Store CLI directories at the same time", async () => {
+    const cnCli = "C:\\Users\\lee\\AppData\\Local\\Packages\\Memtensor.Memmy_eyack96k521x2\\LocalState\\Memmy\\cli";
+    const intlCli = "C:\\Users\\lee\\AppData\\Local\\Packages\\Memtensor.MemmyAgent_eyack96k521x2\\LocalState\\Memmy\\cli";
+    const fixture = createPathFixture(`C:\\Tools;${cnCli}`, `C:\\Tools;${cnCli}`);
+
+    expect(findConflictingWindowsStoreCliPath(fixture.userPath(), intlCli)).toBe(cnCli);
+    await expect(ensureWindowsCliDirectoryOnPath(intlCli, fixture.access)).rejects.toThrow(
+      `Another Memmy Microsoft Store CLI is already registered in PATH: ${cnCli}`
+    );
+    expect(fixture.writes).toEqual([]);
+    expect(fixture.broadcastEnvironmentChange).not.toHaveBeenCalled();
+  });
+
+  it("does not treat the same Store CLI directory or an NSIS CLI directory as a Store conflict", async () => {
+    const storeCli = "C:\\Users\\lee\\AppData\\Local\\Packages\\Memtensor.Memmy_eyack96k521x2\\LocalState\\Memmy\\cli";
+    const existing = `C:\\Tools;${storeCli.toLocaleLowerCase("en-US")}\\`;
+    const fixture = createPathFixture(existing, existing);
+
+    expect(findConflictingWindowsStoreCliPath(existing, storeCli)).toBeNull();
+    expect(findConflictingWindowsStoreCliPath(
+      "C:\\Program Files\\Memmy\\resources\\cli",
+      "D:\\Memmy\\resources\\cli"
+    )).toBeNull();
+    await expect(ensureWindowsCliDirectoryOnPath(storeCli, fixture.access)).resolves.toBe(false);
   });
 });
 

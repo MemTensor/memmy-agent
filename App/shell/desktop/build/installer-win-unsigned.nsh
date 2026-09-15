@@ -30,6 +30,7 @@
 ; electron-builder omits its own $pid declaration whenever customCheckAppRunning exists, so this
 ; declaration must be visible while compiling both the installer and the generated uninstaller.
 Var pid
+Var MemmyTransitionMutationMutexHandle
 
 ; Keep electron-builder's localized running-app prompt and its normal-then-forced termination
 ; retries. Force the exact-image/current-user cmd fallback instead of the default $INSTDIR prefix
@@ -37,9 +38,47 @@ Var pid
 ; the live Memmy process, and delete resources underneath the tray process. _CHECK_APP_RUNNING
 ; aborts before file or shortcut cleanup if the process still exists after the forced retry.
 !macro customCheckAppRunning
+  !ifndef BUILD_UNINSTALLER
+    ; Visible assisted installs run .onInit on the UI thread and this section on
+    ; the install worker. Acquire a fresh worker-owned window before closing the
+    ; app or preparing data; Win32 mutex ownership cannot cross those threads.
+    Call MemmyResumeInstallerMutationWindow
+    Pop $0
+    StrCmp $0 "1" memmy_check_app_running_mutation_ready
+    DetailPrint "A Memmy Store transition started before installation could prepare the old application."
+    SetErrorLevel 6
+    Quit
+
+    memmy_check_app_running_mutation_ready:
+  !endif
+  !ifdef BUILD_UNINSTALLER
+    ; The old uninstaller must prove it still owns the legacy transition before
+    ; it is allowed to close either the NSIS app or an active Store app. Keep
+    ; this acquire/authorize/check/release sequence on the same NSIS thread.
+    Call un.MemmyAcquireTransitionMutationMutex
+    Pop $0
+    StrCmp $0 "1" memmy_un_check_app_running_authorize
+    DetailPrint "Another Memmy Store transition is mutating this installation."
+    SetErrorLevel 6
+    Quit
+
+    memmy_un_check_app_running_authorize:
+      Call un.MemmyAuthorizeTransitionMutation
+      Pop $0
+      StrCmp $0 "1" memmy_un_check_app_running_authorized
+      Call un.MemmyReleaseTransitionMutationMutex
+      DetailPrint "A registered Memmy Store package still owns this installation transition."
+      SetErrorLevel 6
+      Quit
+
+    memmy_un_check_app_running_authorized:
+  !endif
   !insertmacro IS_POWERSHELL_AVAILABLE
   StrCpy $IsPowerShellAvailable "1"
   !insertmacro _CHECK_APP_RUNNING
+  !ifdef BUILD_UNINSTALLER
+    Call un.MemmyReleaseTransitionMutationMutex
+  !endif
 
   ; Data migration is an installer transaction. The uninstaller only performs the shared
   ; close-and-verify flow above and must never prepare or mutate migration state.
@@ -64,6 +103,12 @@ Var pid
       StrCpy $appExe "$MemmyUpgradeSourceInstallDir\${PRODUCT_FILENAME}.exe"
 
     memmy_check_app_running_complete:
+      ; electron-builder synchronously launches the previous uninstaller next. A
+      ; current Memmy uninstaller owns the same mutation mutex, so release this
+      ; installer's preparation window before that child starts. The result hook
+      ; reacquires the mutex and repeats package authorization before any new
+      ; application files or registry values are written.
+      Call MemmyReleaseTransitionMutationMutex
   !endif
 !macroend
 
@@ -99,11 +144,37 @@ Var pid
   Var MemmyMigrationLockPath
   Var MemmyMigrationLogPath
   Var MemmyInstallerPid
+  Var MemmyOldUninstallExecFailed
 
   ; Completed external-v1 installations can use electron-builder's standard NSIS upgrade.
   ; Legacy or uncertain layouts still relay through a copy outside $INSTDIR so old install-local
   ; data survives the uninstall. The relayed child carries an explicit marker to prevent recursion.
   !macro customInit
+    ${If} $installMode == "all"
+      DetailPrint "Memmy Store transition installation supports current-user scope only."
+      SetErrorLevel 6
+      Quit
+    ${EndIf}
+
+    Call MemmyAcquireTransitionMutationMutex
+    Pop $0
+    StrCmp $0 "1" memmy_custom_init_mutex_ready
+    DetailPrint "Another Memmy Store transition is mutating this installation."
+    SetErrorLevel 6
+    Quit
+
+    memmy_custom_init_mutex_ready:
+    ; Recheck package registration only after owning the mutation mutex. This
+    ; closes the cleanup-response/Store-ACK window without stopping the broker;
+    ; a cancelled installer therefore cannot strand its recovery journal.
+    Call MemmyAuthorizeTransitionMutation
+    Pop $0
+    StrCmp $0 "1" memmy_custom_init_authorized
+    DetailPrint "A registered Memmy Store package still owns this installation transition."
+    SetErrorLevel 6
+    Quit
+
+    memmy_custom_init_authorized:
     StrCpy $MemmyDirectMigrationPrepared "0"
     StrCpy $MemmyStandardUpgradeSafe "0"
     StrCpy $MemmyPreparedInstallDir ""
@@ -133,6 +204,12 @@ Var pid
     ${EndIf}
 
     memmy_custom_init_done:
+      ; Silent installs continue on this thread, but use the same explicit
+      ; section boundary as visible installs. Release here so customCheckAppRunning
+      ; always starts a newly authorized mutation window.
+      ${If} ${Silent}
+        Call MemmyReleaseTransitionMutationMutex
+      ${EndIf}
   !macroend
 
   !macro customPageAfterChangeDir
@@ -170,7 +247,21 @@ Var pid
   ; electron-builder quits directly when the old uninstaller returns a failure code,
   ; so recover the prepared migration before preserving its existing error behavior.
   !macro customUnInstallCheck
-    IfErrors memmy_uninstall_check_exec_failed memmy_uninstall_check_restore_target_app_exe
+    StrCpy $MemmyOldUninstallExecFailed "0"
+    IfErrors 0 +2
+    StrCpy $MemmyOldUninstallExecFailed "1"
+    ; Reacquire and reauthorize before inspecting or recovering any installer
+    ; transaction state. A Store cleanup may have legitimately won the released
+    ; window while the previous uninstaller was running.
+    Call MemmyResumeInstallerMutationWindow
+    Pop $0
+    StrCmp $0 "1" memmy_uninstall_check_mutation_ready
+    DetailPrint "A Memmy Store transition started before installation files could be written."
+    SetErrorLevel 6
+    Quit
+
+    memmy_uninstall_check_mutation_ready:
+      StrCmp $MemmyOldUninstallExecFailed "1" memmy_uninstall_check_exec_failed memmy_uninstall_check_restore_target_app_exe
 
     memmy_uninstall_check_exec_failed:
       StrCmp $MemmyIsRelayedUpgrade "1" 0 memmy_uninstall_check_exec_failed_report
@@ -178,7 +269,7 @@ Var pid
 
     memmy_uninstall_check_exec_failed_report:
       DetailPrint `Uninstall was not successful. Not able to launch uninstaller!`
-      Return
+      Goto memmy_uninstall_check_complete
 
     memmy_uninstall_check_restore_target_app_exe:
       StrCmp $MemmyIsRelayedUpgrade "1" 0 memmy_uninstall_check_result
@@ -192,6 +283,44 @@ Var pid
         SetErrorLevel 2
         Quit
       ${EndIf}
+
+    memmy_uninstall_check_complete:
+      ; Per-user installs have only the SHELL_CONTEXT pass. Keep all-users
+      ; builds correct as well: their HKEY_CURRENT_USER pass must be allowed to
+      ; run its own uninstaller before the final mutation window is acquired.
+      ${If} $installMode == "all"
+        Call MemmyReleaseTransitionMutationMutex
+      ${EndIf}
+  !macroend
+
+  !macro customUnInstallCheckCurrentUser
+    StrCpy $MemmyOldUninstallExecFailed "0"
+    IfErrors 0 +2
+    StrCpy $MemmyOldUninstallExecFailed "1"
+    Call MemmyResumeInstallerMutationWindow
+    Pop $0
+    StrCmp $0 "1" memmy_current_user_uninstall_check_mutation_ready
+    DetailPrint "A Memmy Store transition started before installation files could be written."
+    SetErrorLevel 6
+    Quit
+
+    memmy_current_user_uninstall_check_mutation_ready:
+      StrCmp $MemmyOldUninstallExecFailed "1" memmy_current_user_uninstall_check_exec_failed memmy_current_user_uninstall_check_result
+
+    memmy_current_user_uninstall_check_exec_failed:
+      DetailPrint `Uninstall was not successful. Not able to launch uninstaller!`
+      Goto memmy_current_user_uninstall_check_complete
+
+    memmy_current_user_uninstall_check_result:
+      ${If} $R0 != 0
+        Call MemmyRecoverDirectDataMigration
+        MessageBox MB_OK|MB_ICONEXCLAMATION "$(uninstallFailed): $R0"
+        DetailPrint `Uninstall was not successful. Uninstaller error code: $R0.`
+        SetErrorLevel 2
+        Quit
+      ${EndIf}
+
+    memmy_current_user_uninstall_check_complete:
   !macroend
 
   !macro customInstall
@@ -202,14 +331,210 @@ Var pid
     Call MemmyClearRelayedUpgradeMarkers
     ; Release the direct-install barrier only after every install-time mutation is complete.
     Call MemmyCompleteDirectDataMigration
+    ; The unpackaged app prepares its cleanup broker on startup and before Store handoff.
+    ; Do not spawn a resident broker here: older updaters wait for the whole installer tree.
   !macroend
 !endif
 
 !ifdef BUILD_UNINSTALLER
   !macro customUnInstall
+    Call un.MemmyAcquireTransitionMutationMutex
+    Pop $0
+    StrCmp $0 "1" memmy_custom_uninstall_mutex_ready
+    DetailPrint "Another Memmy Store transition is mutating this installation."
+    SetErrorLevel 6
+    Quit
+
+    memmy_custom_uninstall_mutex_ready:
+    Call un.MemmyAuthorizeTransitionMutation
+    Pop $0
+    StrCmp $0 "1" memmy_custom_uninstall_authorized
+    DetailPrint "A registered Memmy Store package still owns this installation transition."
+    SetErrorLevel 6
+    Quit
+
+    memmy_custom_uninstall_authorized:
+    Call un.MemmyRemoveLegacyCleanupBroker
     Call un.MemmyRemoveCliFromUserPath
     Call un.MemmyRemoveLaunchProxy
   !macroend
+!endif
+
+!ifndef BUILD_UNINSTALLER
+Function MemmyAuthorizeTransitionMutation
+  ; Always extract this installer's helper. Depending on the fixed broker copy
+  ; would fail open on a fresh machine or after that recovery file was removed.
+  StrCpy $R4 "$OUTDIR"
+  InitPluginsDir
+  SetOutPath "$PLUGINSDIR"
+  ClearErrors
+  File /oname=MemmyStoreMutationGate.exe "${PROJECT_DIR}\dist\native\MemmyStoreUpdate.exe"
+  IfErrors memmy_mutation_authorization_failed
+  SetOutPath "$R4"
+  StrCpy $R5 "$PLUGINSDIR\MemmyStoreMutationGate.exe"
+  IfFileExists "$R5" 0 memmy_mutation_authorization_failed
+  nsExec::ExecToStack '$\"$R5$\" authorize-nsis-mutation'
+  Pop $0
+  Pop $1
+  DetailPrint "$1"
+  StrCmp $0 "0" memmy_mutation_authorized
+
+  memmy_mutation_authorization_failed:
+  SetOutPath "$R4"
+  Push "0"
+  Return
+
+  memmy_mutation_authorized:
+    Push "1"
+FunctionEnd
+
+Function MemmyAcquireTransitionMutationMutex
+  StrCmp $MemmyTransitionMutationMutexHandle "" memmy_mutation_mutex_create
+  Push "1"
+  Return
+
+  memmy_mutation_mutex_create:
+  System::Call 'kernel32::CreateMutexW(p 0, i 0, w "Local\MemmyStoreTransitionNsisMutation") p.r0'
+  StrCmp $0 "0" memmy_mutation_mutex_failed
+  System::Call 'kernel32::WaitForSingleObject(p r0, i 0) i.r1'
+  StrCmp $1 "0" memmy_mutation_mutex_acquired
+  StrCmp $1 "128" memmy_mutation_mutex_acquired
+  System::Call 'kernel32::CloseHandle(p r0)'
+
+  memmy_mutation_mutex_failed:
+    Push "0"
+    Return
+
+  memmy_mutation_mutex_acquired:
+    StrCpy $MemmyTransitionMutationMutexHandle $0
+    Push "1"
+FunctionEnd
+
+Function MemmyReleaseTransitionMutationMutex
+  StrCmp $MemmyTransitionMutationMutexHandle "" memmy_mutation_mutex_release_done
+  System::Call 'kernel32::ReleaseMutex(p $MemmyTransitionMutationMutexHandle)'
+  System::Call 'kernel32::CloseHandle(p $MemmyTransitionMutationMutexHandle)'
+  StrCpy $MemmyTransitionMutationMutexHandle ""
+
+  memmy_mutation_mutex_release_done:
+FunctionEnd
+
+Function MemmyResumeInstallerMutationWindow
+  Call MemmyAcquireTransitionMutationMutex
+  Pop $0
+  StrCmp $0 "1" memmy_resume_mutation_authorize
+  Push "0"
+  Return
+
+  memmy_resume_mutation_authorize:
+    Call MemmyAuthorizeTransitionMutation
+    Pop $0
+    StrCmp $0 "1" memmy_resume_mutation_ready
+    Call MemmyReleaseTransitionMutationMutex
+    Push "0"
+    Return
+
+  memmy_resume_mutation_ready:
+    Push "1"
+FunctionEnd
+!endif
+
+!ifdef BUILD_UNINSTALLER
+Function un.MemmyAuthorizeTransitionMutation
+  StrCpy $R4 "$OUTDIR"
+  InitPluginsDir
+  SetOutPath "$PLUGINSDIR"
+  ClearErrors
+  File /oname=MemmyStoreMutationGate.exe "${PROJECT_DIR}\dist\native\MemmyStoreUpdate.exe"
+  IfErrors memmy_un_mutation_authorization_failed
+  SetOutPath "$R4"
+  StrCpy $R5 "$PLUGINSDIR\MemmyStoreMutationGate.exe"
+  IfFileExists "$R5" 0 memmy_un_mutation_authorization_failed
+  nsExec::ExecToStack '$\"$R5$\" authorize-nsis-mutation'
+  Pop $0
+  Pop $1
+  DetailPrint "$1"
+  StrCmp $0 "0" memmy_un_mutation_authorized
+
+  memmy_un_mutation_authorization_failed:
+  SetOutPath "$R4"
+  Push "0"
+  Return
+
+  memmy_un_mutation_authorized:
+    Push "1"
+FunctionEnd
+
+Function un.MemmyAcquireTransitionMutationMutex
+  StrCmp $MemmyTransitionMutationMutexHandle "" memmy_un_mutation_mutex_create
+  Push "1"
+  Return
+
+  memmy_un_mutation_mutex_create:
+  System::Call 'kernel32::CreateMutexW(p 0, i 0, w "Local\MemmyStoreTransitionNsisMutation") p.r0'
+  StrCmp $0 "0" memmy_un_mutation_mutex_failed
+  System::Call 'kernel32::WaitForSingleObject(p r0, i 0) i.r1'
+  StrCmp $1 "0" memmy_un_mutation_mutex_acquired
+  StrCmp $1 "128" memmy_un_mutation_mutex_acquired
+  System::Call 'kernel32::CloseHandle(p r0)'
+
+  memmy_un_mutation_mutex_failed:
+    Push "0"
+    Return
+
+  memmy_un_mutation_mutex_acquired:
+    StrCpy $MemmyTransitionMutationMutexHandle $0
+    Push "1"
+FunctionEnd
+
+Function un.MemmyReleaseTransitionMutationMutex
+  StrCmp $MemmyTransitionMutationMutexHandle "" memmy_un_mutation_mutex_release_done
+  System::Call 'kernel32::ReleaseMutex(p $MemmyTransitionMutationMutexHandle)'
+  System::Call 'kernel32::CloseHandle(p $MemmyTransitionMutationMutexHandle)'
+  StrCpy $MemmyTransitionMutationMutexHandle ""
+
+  memmy_un_mutation_mutex_release_done:
+FunctionEnd
+!endif
+
+!ifdef BUILD_UNINSTALLER
+Function un.MemmyRemoveLegacyCleanupBroker
+  StrCpy $R5 "$LOCALAPPDATA\Memmy\store-transition\broker\MemmyStoreUpdate.exe"
+  IfFileExists "$R5" 0 memmy_broker_remove_registration
+  nsExec::ExecToStack '$\"$R5$\" stop-legacy-cleanup-broker'
+  Pop $0
+  Pop $1
+  DetailPrint "$1"
+  StrCmp $0 "0" memmy_broker_remove_registration
+  DetailPrint "The cleanup broker remains installed because a Store transition still needs it."
+  SetErrorLevel 6
+  Quit
+
+  memmy_broker_remove_registration:
+  SetRegView 32
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Memmy Store Transition Broker"
+  SetRegView 64
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Memmy Store Transition Broker"
+  ; Restore electron-builder's architecture-selected registry view before its
+  ; later uninstall/install-key cleanup executes. This custom include is parsed
+  ; before common.nsh defines check64BitAndSetRegView, so mirror its build-arch
+  ; selection directly here.
+  !ifdef APP_64
+    SetRegView 64
+  !else
+    !ifdef APP_ARM64
+      SetRegView 64
+    !else
+      SetRegView 32
+    !endif
+  !endif
+  IfFileExists "$R5" 0 memmy_broker_remove_done
+  Sleep 250
+  Delete "$R5"
+  RMDir "$LOCALAPPDATA\Memmy\store-transition\broker"
+
+  memmy_broker_remove_done:
+FunctionEnd
 !endif
 
 !ifndef BUILD_UNINSTALLER
@@ -534,12 +859,29 @@ Function MemmyRecoverDirectDataMigration
   memmy_direct_recover_done:
 FunctionEnd
 
+; A user can close the installer while it is synchronously waiting for the old
+; uninstaller. That is the one interval where this process deliberately does
+; not own the mutation mutex. Never roll back prepared data in that interval;
+; reacquire and reauthorize first, or leave the durable prepared state for the
+; next protected startup/installer recovery.
+Function MemmyRecoverDirectDataMigrationAfterAbort
+  StrCmp $MemmyDirectMigrationPrepared "1" 0 memmy_abort_recover_done
+  ; These callbacks execute on the UI thread and may run while the install
+  ; worker owns the process-global handle. Never infer mutex ownership from that
+  ; handle here. Preserve the durable prepared/recovery-required state for the
+  ; next protected startup or installer attempt instead of racing the worker or
+  ; Store cleanup.
+  DetailPrint "Prepared Memmy data recovery was deferred to the next protected startup or installer attempt."
+
+  memmy_abort_recover_done:
+FunctionEnd
+
 Function .onInstFailed
-  Call MemmyRecoverDirectDataMigration
+  Call MemmyRecoverDirectDataMigrationAfterAbort
 FunctionEnd
 
 Function MemmyOnUserAbort
-  Call MemmyRecoverDirectDataMigration
+  Call MemmyRecoverDirectDataMigrationAfterAbort
 FunctionEnd
 
 Function MemmyValidateInstallPage
@@ -557,6 +899,7 @@ Function MemmyValidateInstallPage
     GetFullPathName $1 "$INSTDIR"
     GetFullPathName $2 "$MemmyUpgradeTargetInstallDir"
     StrCmp $1 $2 0 memmy_validate_page_relayed_target_failed
+    Call MemmyReleaseTransitionMutationMutex
     Abort
 
   memmy_validate_page_relayed_target_failed:
@@ -572,6 +915,7 @@ Function MemmyValidateInstallPage
     StrCpy $MemmyFinalDirectoryReady "1"
     Call MemmyRelayLegacyUpgrade
     StrCmp $MemmyUpgradeRoute "blocked" memmy_validate_page_show_error
+    Call MemmyReleaseTransitionMutationMutex
     Abort
 
   memmy_validate_page_show_error:
@@ -848,6 +1192,19 @@ Function MemmyInstallLaunchProxy
   FileWrite $1 "  languagePath = legacyUserDataRoot & $\"\update-prompt-language.txt$\"$\r$\n"
   FileWrite $1 "End If$\r$\n"
   FileWrite $1 "lockPath = markerPath & $\".lock$\"$\r$\n"
+  FileWrite $1 "If fso.FolderExists(lockPath) And fso.FileExists(recoveryPath) Then$\r$\n"
+  FileWrite $1 "  On Error Resume Next$\r$\n"
+  FileWrite $1 "  Set recoveryProcess = shell.Exec(Chr(34) & powerShellPath & Chr(34) & $\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File $\" & Chr(34) & recoveryPath & Chr(34) & $\" -PreparedInstallerLock -InstallDir $\" & Chr(34) & fso.GetParentFolderName(appExe) & Chr(34) & $\" -LockPath $\" & Chr(34) & lockPath & Chr(34) & $\" -LogPath $\" & Chr(34) & upgradeLogPath & Chr(34))$\r$\n"
+  FileWrite $1 "  If Err.Number = 0 Then$\r$\n"
+  FileWrite $1 "    For recoveryPoll = 1 To 50$\r$\n"
+  FileWrite $1 "      If recoveryProcess.Status <> 0 Then Exit For$\r$\n"
+  FileWrite $1 "      WScript.Sleep 100$\r$\n"
+  FileWrite $1 "    Next$\r$\n"
+  FileWrite $1 "    If recoveryProcess.Status = 0 Then recoveryProcess.Terminate$\r$\n"
+  FileWrite $1 "  End If$\r$\n"
+  FileWrite $1 "  Err.Clear$\r$\n"
+  FileWrite $1 "  On Error GoTo 0$\r$\n"
+  FileWrite $1 "End If$\r$\n"
   FileWrite $1 "relayLockPath = shell.ExpandEnvironmentStrings($\"%LOCALAPPDATA%$\") & $\"\Memmy\upgrade-staging\active.lock$\"$\r$\n"
   FileWrite $1 "If fso.FolderExists(relayLockPath) And fso.FileExists(recoveryPath) Then$\r$\n"
   FileWrite $1 "  shell.Run Chr(34) & powerShellPath & Chr(34) & $\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File $\" & Chr(34) & recoveryPath & Chr(34) & $\" -InstallDir $\" & Chr(34) & fso.GetParentFolderName(appExe) & Chr(34) & $\" -LockPath $\" & Chr(34) & relayLockPath & Chr(34) & $\" -LogPath $\" & Chr(34) & upgradeLogPath & Chr(34) & $\" -DirectMigrationStatePath $\" & Chr(34) & migrationStatePath & Chr(34) & $\" -DirectMigrationScriptPath $\" & Chr(34) & migrationRecoveryPath & Chr(34) & $\" -DirectMigrationLogPath $\" & Chr(34) & migrationLogPath & Chr(34), 0, True$\r$\n"

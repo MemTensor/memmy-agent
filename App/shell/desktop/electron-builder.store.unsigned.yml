@@ -1,0 +1,5 @@
+extends: electron-builder.store.yml
+
+win:
+  signExecutable: false
+  forceCodeSigning: false

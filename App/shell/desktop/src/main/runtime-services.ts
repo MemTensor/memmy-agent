@@ -62,6 +62,8 @@ export interface StartManagedRuntimeServicesOptions extends StartPackagedRuntime
   beforeStartServices?: (input: { databasePath: string; configPath: string }) => Promise<void>;
   /** Unpacked Memory runtime shipped as an offline Desktop resource. */
   offlineMemoryRuntimeDirectory?: string;
+  /** Reconcile equal-version bundled content only for a packaged Store app. */
+  isWindowsStore?: boolean;
 }
 
 export type PackagedRuntimeServices = ManagedRuntimeServices;
@@ -166,7 +168,7 @@ export async function startManagedRuntimeServices(
   options: StartManagedRuntimeServicesOptions
 ): Promise<ManagedRuntimeServices> {
   const entries = resolveRuntimeEntryPaths(options);
-  const migrationTargets = await resolvePackagedRuntimeMigrationTargets();
+  const migrationTargets = await resolvePackagedRuntimeMigrationTargets(process.env, options.isWindowsStore === true);
   const memmyConfigPreexisting = existsSync(migrationTargets.configPath);
   await runPackagedMigrationCommand({
     agentEntry: entries.agentEntry,
@@ -442,14 +444,71 @@ export async function preparePackagedRuntimeConfig(
   };
 }
 
+/**
+ * Stops the bundled Memory instance before a prepared Store package replaces the app.
+ *
+ * This path is used before runtime services have started, so it resolves the same configured
+ * Memory home without creating or mutating config and invokes the same bounded CLI stop command
+ * used by normal Desktop shutdown.
+ */
+export async function stopBundledMemoryForStoreUpdate(options: {
+  runtimeDirectory: string;
+  runtimeExecutable?: string;
+  env?: Record<string, string | undefined>;
+  timeoutMs?: number;
+  spawnProcess?: typeof spawn;
+}): Promise<void> {
+  const runtimeConfig = await preparePackagedRuntimeConfig({
+    ...(options.env ? { env: options.env } : {}),
+    ensureDirectories: false,
+    fillMissingAgentSecret: false,
+    writeConfig: false
+  });
+  const runtimeOptions = options.runtimeExecutable
+    ? { runtimeExecutable: options.runtimeExecutable }
+    : {};
+  await runBundledMemoryCli(
+    options.runtimeDirectory,
+    runtimeConfig,
+    runtimeOptions,
+    ["stop", "--home", dirname(runtimeConfig.configPath)],
+    options.timeoutMs ?? MEMORY_STOP_COMMAND_TIMEOUT_MS,
+    options.spawnProcess ?? spawn
+  );
+}
+
 export async function resolvePackagedRuntimeMigrationTargets(
-  env: RuntimeEnv = process.env
+  env: RuntimeEnv = process.env,
+  isWindowsStore = false
 ): Promise<{ configPath: string; agentWorkspace?: string }> {
   const memmyHome = resolvePath(env.MEMMY_HOME ?? "~/.memmy");
   const configPath = resolvePath(env.MEMMY_CONFIG ?? join(memmyHome, "config.yaml"));
   const explicitWorkspace = stringValue(env.MEMMY_AGENT_WORKSPACE);
-  if (!explicitWorkspace) return { configPath };
-  const agentWorkspace = resolvePath(explicitWorkspace);
+  if (!explicitWorkspace && !isWindowsStore) return { configPath };
+  if (!explicitWorkspace) {
+    const configSource = await readFile(configPath, "utf8").catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return "";
+      throw error;
+    });
+    if (configSource.trim()) {
+      let parsed: unknown;
+      try {
+        parsed = YAML.parse(configSource);
+      } catch {
+        return { configPath };
+      }
+      if (parsed !== null && parsed !== undefined && parsed !== "") {
+        if (!isRecord(parsed)) return { configPath };
+        const agents = isRecord(parsed.agents) ? parsed.agents : null;
+        const defaults = agents && isRecord(agents.defaults) ? agents.defaults : null;
+        const legacyAgent = isRecord(parsed.agent) ? parsed.agent : null;
+        if (stringValue(defaults?.workspace) ?? stringValue(legacyAgent?.workspace)) {
+          return { configPath };
+        }
+      }
+    }
+  }
+  const agentWorkspace = resolvePath(explicitWorkspace ?? join(memmyHome, "workspace"));
   await mkdir(agentWorkspace, { recursive: true });
   return { configPath, agentWorkspace: await realpath(agentWorkspace) };
 }
@@ -880,7 +939,7 @@ export async function ensureMemoryService(
   );
 }
 
-/** Only replace a runtime installed by this Desktop, after its migrations finish. */
+/** Only replace a runtime owned by this Desktop, after its migrations finish. */
 async function stopOlderBundledMemoryRuntime(
   runtimeConfig: PackagedRuntimeConfig,
   options: StartManagedRuntimeServicesOptions,
@@ -905,7 +964,7 @@ async function stopOlderBundledMemoryRuntime(
   const installedVersion = parseStableMemoryVersion(installed.version);
   if (!bundledVersion || !installedVersion) return false;
   const difference = bundledVersion.map((part, index) => part - installedVersion[index]!).find((delta) => delta !== 0) ?? 0;
-  if (difference <= 0 || bundled.protocolVersion !== SUPPORTED_MEMORY_PROTOCOL_VERSION
+  if (difference < 0 || bundled.protocolVersion !== SUPPORTED_MEMORY_PROTOCOL_VERSION
     || installed.protocolVersion !== SUPPORTED_MEMORY_PROTOCOL_VERSION) return false;
 
   // The standalone CLI records its own Node executable. Sharing a home or a
@@ -916,6 +975,25 @@ async function stopOlderBundledMemoryRuntime(
   const runtimeRelative = relative(join(serviceHome, "runtime"), installed.runtimeDir);
   if (!runtimeRelative || runtimeRelative.startsWith("..") || isAbsolute(runtimeRelative)
     || resolve(installed.entrypoint) !== resolve(installed.runtimeDir, "dist/src/server/index.js")) return false;
+  if (difference === 0) {
+    // A Store build can ship different bytes without changing Memory's business
+    // version. The installer already handles that replacement, but a healthy
+    // service must first release its database and runtime directory. Do not
+    // broaden this takeover to other channels or another executable's service.
+    if (!options.isWindowsStore || (options.platform ?? process.platform) !== "win32") return false;
+    const bundledContentId = parseMemoryRuntimeContentId(bundled.contentId);
+    if (!bundledContentId) return false;
+    let installedContentId: string | undefined;
+    try {
+      const metadata: unknown = JSON.parse(await readFile(join(installed.runtimeDir, "memory-runtime.json"), "utf8"));
+      if (!isRecord(metadata) || metadata.version !== installed.version
+        || metadata.protocolVersion !== SUPPORTED_MEMORY_PROTOCOL_VERSION) return false;
+      installedContentId = parseMemoryRuntimeContentId(metadata.contentId);
+    } catch {
+      return false;
+    }
+    if (installedContentId === bundledContentId) return false;
+  }
   const lock = readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath);
   if (!lock || lock.pid === process.pid || running.pid !== lock.pid
     || typeof running.configPath !== "string" || resolve(running.configPath) !== resolve(runtimeConfig.configPath)
@@ -962,6 +1040,10 @@ function parseStableMemoryVersion(value: unknown): number[] | undefined {
   if (typeof value !== "string" || !/^\d+\.\d+\.\d+$/.test(value)) return undefined;
   const parts = value.split(".").map(Number);
   return parts.every(Number.isSafeInteger) ? parts : undefined;
+}
+
+function parseMemoryRuntimeContentId(value: unknown): string | undefined {
+  return typeof value === "string" && /^[a-f0-9]{64}$/iu.test(value) ? value.toLowerCase() : undefined;
 }
 
 function hasPreviousMemoryRuntimeMarker(configPath: string): boolean {
@@ -1036,6 +1118,7 @@ export function bundledMemoryInstallArguments(
     "--memmy-config-preexisting", String(memmyConfigPreexisting),
     "--node-executable", nodeExecutable,
     "--non-interactive",
+    ...(process.platform === "win32" ? ["--replace-same-version-on-executable-change"] : []),
     // Desktop has prepared its config. Legacy plugin import needs a separate
     // explicit CLI install so config selection or old data cannot block startup.
     "--skip-legacy-migration",
@@ -1163,16 +1246,17 @@ async function startManagedMemoryService(
 async function runBundledMemoryCli(
   runtimeDirectory: string,
   runtimeConfig: PackagedRuntimeConfig,
-  options: StartManagedRuntimeServicesOptions,
+  options: { runtimeExecutable?: string },
   commandArgs: string[],
-  timeoutMs?: number
+  timeoutMs?: number,
+  spawnProcess: typeof spawn = spawn
 ): Promise<void> {
   const cliEntry = join(runtimeDirectory, "dist", "src", "cli", "index.js");
   if (!existsSync(cliEntry)) throw new Error(`Bundled Memory CLI is missing: ${cliEntry}`);
   const executable = options.runtimeExecutable ?? process.execPath;
   const args = [cliEntry, ...commandArgs];
   await new Promise<void>((resolveInstall, rejectInstall) => {
-    const child = spawn(executable, args, {
+    const child = spawnProcess(executable, args, {
       env: {
         ...process.env,
         ELECTRON_RUN_AS_NODE: "1",
@@ -1203,8 +1287,8 @@ async function runBundledMemoryCli(
     });
     if (timeoutMs !== undefined) {
       const timer = setTimeout(() => {
+        terminateProcessTreeSync(child, STOP_MANAGED_CHILD_GRACE_MS);
         finish(new Error("Bundled Memory command timed out after " + timeoutMs + "ms"));
-        try { child.kill(); } catch { /* the process may already have exited */ }
       }, timeoutMs);
       timeout = timer;
       if (settled) clearTimeout(timer);
@@ -2138,12 +2222,15 @@ export function terminateManagedChildrenForDesktopExit(
   terminateManagedChildrenSync(children.filter((child) => stopMemory || !child.persistOnDesktopExit));
 }
 
-function terminateProcessTreeSync(child: ChildProcess): void {
+function terminateProcessTreeSync(child: ChildProcess, timeoutMs?: number): void {
   if (child.exitCode != null || child.signalCode != null) return;
   const pid = child.pid;
   if (process.platform === "win32" && pid !== undefined) {
     try {
-      execFileSync("taskkill", ["/F", "/T", "/PID", String(pid)], { stdio: "ignore" });
+      execFileSync("taskkill", ["/F", "/T", "/PID", String(pid)], {
+        stdio: "ignore",
+        ...(timeoutMs === undefined ? {} : { timeout: timeoutMs })
+      });
       return;
     } catch {
       // Fall through to the direct-child fallback if taskkill cannot inspect the process tree.

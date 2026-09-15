@@ -392,13 +392,15 @@ describe("SettingsPageView", () => {
     expect(settingsSource).not.toContain("setPreparedUpdatePath");
 
     expect(coordinatorSource).toContain("export function UpdateCoordinatorProvider");
-    expect(coordinatorSource).toContain("bridge.downloadUpdate(update, { openInstaller: false })");
+    expect(coordinatorSource).toContain("const offerToken = update.offerToken;");
+    expect(coordinatorSource).toContain("bridge.downloadUpdate(offerToken, { openInstaller: false })");
+    expect(coordinatorSource).not.toContain("bridge.downloadUpdate(update,");
     expect(coordinatorSource).toContain('phase: "prepared"');
     expect(coordinatorSource).toContain('dialog: "install-confirm"');
-    expect(coordinatorSource).toContain("preparedUpdatePath: installResult.filePath");
+    expect(coordinatorSource).toContain("validatePreparedUpdateHandle(installResult.preparedUpdate)");
     expect(coordinatorSource).toContain('current.phase === "prepared"');
     expect(coordinatorSource).toContain('dialog: "install-confirm"');
-    expect(coordinatorSource).toContain("bridge.openUpdateInstaller(preparedPath)");
+    expect(coordinatorSource).toContain("bridge.openUpdateInstaller(preparedUpdate)");
     expect(coordinatorSource).toContain("bridge.notifyUpdateAvailable");
     expect(coordinatorSource).toContain("isForegroundUpdateFlow(updateStateRef.current)");
 
@@ -434,6 +436,7 @@ describe("SettingsPageView", () => {
       createUpdateViewModel({
         phase: "downloading",
         downloadProgress: {
+          kind: "installer-file",
           downloadUrl: "https://updates.example.com/Memmy.dmg",
           filePath: "/tmp/Memmy.dmg",
           transferredBytes: 524_288,

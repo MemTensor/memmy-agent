@@ -409,6 +409,23 @@ describeOnWindows("Windows upgrade relay", () => {
     expect(log).toContain("target installDir crosses a reparse point");
   }, 15_000);
 
+  it("rejects a relocation target whose owned workspace migration state is accompanied by user data", async () => {
+    const fixture = await createRelayFixture(0, { relocate: true });
+    await mkdir(join(fixture.targetRuntimeHomePath, "workspace", ".memmy-migrations"), { recursive: true });
+    await writeFile(join(
+      fixture.targetRuntimeHomePath,
+      "workspace",
+      ".memmy-migrations",
+      "agent-workspace.json",
+    ), JSON.stringify({ formatVersion: 2, scope: "agent-workspace", applied: [] }), "utf8");
+    await writeFile(join(fixture.targetRuntimeHomePath, "workspace", "USER.md"), "keep me", "utf8");
+
+    await expect(runRelay(fixture)).rejects.toMatchObject({ code: 1 });
+
+    const log = await readFile(fixture.logPath, "utf8");
+    expect(log).toContain("selected installation drive already contains Memmy runtime data");
+  }, 15_000);
+
   it("rejects a relocation source that crosses a directory junction before moving data", async () => {
     const fixture = await createRelayFixture(0, { relocate: true });
     const realSource = join(fixture.root, "real-source");
@@ -518,7 +535,8 @@ describeOnWindows("Windows upgrade relay", () => {
     await Promise.all([
       mkdir(dirname(fixture.installationRecordPath), { recursive: true }),
       mkdir(fixture.targetUserDataPath, { recursive: true }),
-      mkdir(dirname(sessionPath), { recursive: true })
+      mkdir(dirname(sessionPath), { recursive: true }),
+      mkdir(join(fixture.targetRuntimeHomePath, "workspace", ".memmy-migrations"), { recursive: true })
     ]);
     await Promise.all([
       writeFile(join(fixture.targetUserDataPath, "app.sqlite"), "external-account", "utf8"),
@@ -538,6 +556,11 @@ describeOnWindows("Windows upgrade relay", () => {
       writeFile(
         join(fixture.targetUserDataPath, "data-root.txt"),
         Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(`${sourceRuntimeHomePath}\r\n`, "utf16le")])
+      ),
+      writeFile(
+        join(fixture.targetRuntimeHomePath, "workspace", ".memmy-migrations", "agent-workspace.json"),
+        JSON.stringify({ formatVersion: 2, scope: "agent-workspace", applied: [] }),
+        "utf8"
       )
     ]);
 
@@ -556,13 +579,25 @@ describeOnWindows("Windows upgrade relay", () => {
     expect(migratedSession).toContain("keep relocation history");
     expect(migratedSession).toContain(targetWorkspacePath.replaceAll("\\", "\\\\"));
     expect(existsSync(sourceRuntimeHomePath)).toBe(true);
-    expect(JSON.parse(await readFile(fixture.migrationStatePath, "utf8"))).toMatchObject({
+    const migrationState = JSON.parse(await readFile(fixture.migrationStatePath, "utf8"));
+    expect(migrationState).toMatchObject({
       phase: "awaiting-app-verification",
       sourceInstallDir: fixture.installDir,
       targetInstallDir: fixture.targetInstallDir,
       runtimeSourceAuthority: "persisted-external-authority",
       runtimeSourcePath: sourceRuntimeHomePath
     });
+    const runtimeCopy = migrationState.preparedCopies.find(
+      (copy: { DestinationPath: string }) => copy.DestinationPath === fixture.targetRuntimeHomePath,
+    );
+    expect(runtimeCopy?.BackupPath).toBeTruthy();
+    if (!runtimeCopy?.BackupPath) throw new Error("Runtime migration backup was not recorded");
+    await expect(readFile(join(
+      runtimeCopy.BackupPath,
+      "workspace",
+      ".memmy-migrations",
+      "agent-workspace.json",
+    ), "utf8")).resolves.toContain('"scope":"agent-workspace"');
   }, 15_000);
 
   it("rolls an external-v1 relocation back to the source runtime when the child installer fails", async () => {

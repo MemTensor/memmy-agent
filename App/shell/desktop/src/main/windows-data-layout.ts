@@ -18,6 +18,14 @@ export interface WindowsDataMigrationConsistency {
   categorySourcesShareGeneration: boolean;
 }
 
+export interface WindowsCurrentInstallAuthority {
+  installDirectory: string;
+  userDataPath: string;
+  runtimeHomePath: string;
+  appVersion: string;
+  recordedAt: string;
+}
+
 export interface ResolveWindowsDataLayoutOptions {
   platform: NodeJS.Platform;
   isPackaged: boolean;
@@ -26,6 +34,12 @@ export interface ResolveWindowsDataLayoutOptions {
   appDataPath: string;
   localAppDataPath: string;
   homeDirectory: string;
+  storeUserDataPath?: string;
+  storeRuntimeHomePath?: string;
+}
+
+export interface RecordWindowsDataLayoutAfterBootOptions {
+  writeInstallationAuthority?: boolean;
 }
 
 export const resolveWindowsDataLayout = (
@@ -35,7 +49,9 @@ export const resolveWindowsDataLayout = (
     return null;
   }
 
-  const userDataPath = win32.join(options.appDataPath, "Memmy");
+  const userDataPath = options.isWindowsStore
+    ? resolveExplicitWindowsStoreUserDataPath(options.storeUserDataPath)
+    : win32.join(options.appDataPath, "Memmy");
   const legacyRuntimeHomePath = win32.join(options.homeDirectory, ".memmy");
   const installationRoot = win32.parse(options.executablePath).root;
   const useLegacyRuntimeHome = options.isWindowsStore
@@ -53,12 +69,40 @@ export const resolveWindowsDataLayout = (
   return {
     userDataPath,
     runtimeHomePath,
-    updatesPath: win32.join(dataContainerPath, "updates"),
+    updatesPath: win32.join(options.isWindowsStore ? runtimeHomePath : dataContainerPath, "updates"),
     pointerPath: win32.join(userDataPath, "data-root.txt"),
-    migrationStatePath: win32.join(localAppDataPath, "Memmy", "data-migration", "state.json"),
+    migrationStatePath: options.isWindowsStore
+      ? win32.join(userDataPath, "store-data-migration.json")
+      : win32.join(localAppDataPath, "Memmy", "data-migration", "state.json"),
     installationRecordPath: win32.join(localAppDataPath, "Memmy", "data-layout", "last-install.json"),
     legacyInstallDataPath: win32.join(win32.dirname(options.executablePath), "data")
   };
+};
+
+const resolveExplicitWindowsStoreUserDataPath = (storeUserDataPath: string | undefined): string => {
+  const trimmedPath = storeUserDataPath?.trim();
+  if (!trimmedPath) {
+    throw new Error("Windows Store data layout requires storeUserDataPath");
+  }
+  if (!win32.isAbsolute(trimmedPath)) {
+    throw new Error("Windows Store storeUserDataPath must be an absolute path");
+  }
+  const normalizedPath = win32.normalize(trimmedPath);
+  const profileParent = win32.dirname(normalizedPath);
+  const isStoreGeneration = /^(?:standalone|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/u.test(win32.basename(profileParent))
+    && win32.basename(win32.dirname(profileParent)) === "store-data";
+  const localStateDirectory = isStoreGeneration ? win32.dirname(win32.dirname(profileParent)) : profileParent;
+  const packageFamilyDirectory = win32.dirname(localStateDirectory);
+  const packagesDirectory = win32.dirname(packageFamilyDirectory);
+  if (
+    win32.basename(normalizedPath).toLowerCase() !== "memmy"
+    || win32.basename(localStateDirectory).toLowerCase() !== "localstate"
+    || win32.basename(packagesDirectory).toLowerCase() !== "packages"
+    || !win32.basename(packageFamilyDirectory).includes("_")
+  ) {
+    throw new Error("Windows Store storeUserDataPath must resolve to Packages\\<PFN>\\LocalState\\Memmy");
+  }
+  return normalizedPath;
 };
 
 interface WindowsDataMigrationState {
@@ -184,17 +228,88 @@ export const recoverWindowsDataMigrationForStartup = async (
 
 export const recordWindowsDataLayoutAfterBoot = async (
   layout: WindowsDataLayout,
-  appVersion: string
+  appVersion: string,
+  options: RecordWindowsDataLayoutAfterBootOptions = {}
 ): Promise<void> => {
+  await writeWindowsDataRootPointerAtomically(layout.pointerPath, layout.runtimeHomePath);
+  if (options.writeInstallationAuthority === false) return;
   await writeJsonAtomically(layout.installationRecordPath, {
     schemaVersion: 1,
     dataLayoutGeneration: "external-v1",
+    installationOwner: "nsis",
     installDir: win32.dirname(layout.legacyInstallDataPath),
     userDataPath: layout.userDataPath,
     runtimeHomePath: layout.runtimeHomePath,
     appVersion,
     recordedAt: new Date().toISOString()
   });
+};
+
+const writeWindowsDataRootPointerAtomically = async (
+  pointerPath: string,
+  runtimeHomePath: string
+): Promise<void> => {
+  await mkdir(win32.dirname(pointerPath), { recursive: true });
+  const temporaryPath = `${pointerPath}.tmp-${process.pid}-${randomUUID()}`;
+  const pointerBytes = Buffer.concat([
+    Buffer.from([0xff, 0xfe]),
+    Buffer.from(`${runtimeHomePath}\r\n`, "utf16le")
+  ]);
+  try {
+    await writeFile(temporaryPath, pointerBytes, { flag: "wx" });
+    await rename(temporaryPath, pointerPath);
+  } catch (error) {
+    await rm(temporaryPath, { force: true });
+    throw error;
+  }
+};
+
+export const readWindowsCurrentInstallAuthority = async (
+  layout: WindowsDataLayout,
+  executablePath: string,
+  expectedAppVersion: string
+): Promise<WindowsCurrentInstallAuthority> => {
+  const record = JSON.parse(await readFile(layout.installationRecordPath, "utf8")) as unknown;
+  if (!isRecord(record)
+      || record.schemaVersion !== 1
+      || record.dataLayoutGeneration !== "external-v1"
+      || (record.installationOwner !== undefined && record.installationOwner !== "nsis")
+      || typeof record.installDir !== "string"
+      || typeof record.userDataPath !== "string"
+      || typeof record.runtimeHomePath !== "string"
+      || typeof record.appVersion !== "string"
+      || typeof record.recordedAt !== "string") {
+    throw new Error("Windows current-install authority record is invalid");
+  }
+
+  const normalizedExecutablePath = win32.normalize(executablePath);
+  const expectedInstallDirectory = win32.dirname(normalizedExecutablePath);
+  const recordedAt = new Date(record.recordedAt);
+  if (!win32.isAbsolute(executablePath)
+      || win32.extname(normalizedExecutablePath).toLowerCase() !== ".exe"
+      || containsWindowsAppsSegment(normalizedExecutablePath)
+      || !sameWindowsPath(record.installDir, expectedInstallDirectory)
+      || !sameWindowsPath(record.userDataPath, layout.userDataPath)
+      || !sameWindowsPath(record.runtimeHomePath, layout.runtimeHomePath)
+      || record.appVersion !== expectedAppVersion
+      || !Number.isFinite(recordedAt.getTime())
+      || recordedAt.toISOString() !== record.recordedAt) {
+    throw new Error("Windows current-install authority does not match the running installation");
+  }
+
+  const pointerBytes = await readFile(layout.pointerPath);
+  const pointerValue = decodeWindowsDataRootPointer(pointerBytes).trim();
+  if (!pointerValue || !sameWindowsPath(pointerValue, layout.runtimeHomePath)) {
+    throw new Error("Windows data-root pointer does not match the running installation");
+  }
+
+  return {
+    installDirectory: win32.normalize(record.installDir),
+    userDataPath: win32.normalize(record.userDataPath),
+    runtimeHomePath: win32.normalize(record.runtimeHomePath),
+    appVersion: record.appVersion,
+    recordedAt: record.recordedAt
+  };
 };
 
 /**
@@ -284,6 +399,19 @@ const sameWindowsRoot = (left: string, right: string): boolean =>
 
 const sameWindowsPath = (left: string, right: string): boolean =>
   win32.normalize(left).toLowerCase() === win32.normalize(right).toLowerCase();
+
+const containsWindowsAppsSegment = (value: string): boolean =>
+  win32.normalize(value).split(win32.sep).some((segment) => segment.toLowerCase() === "windowsapps");
+
+const decodeWindowsDataRootPointer = (value: Buffer): string => {
+  if (value.length >= 2 && value[0] === 0xff && value[1] === 0xfe) {
+    return value.subarray(2).toString("utf16le");
+  }
+  return value.toString("utf8").replace(/^\uFEFF/u, "");
+};
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
 
 const isValidatedTargetBackup = (backupPath: string, layout: WindowsDataLayout): boolean => {
   const normalizedBackupPath = win32.normalize(backupPath);

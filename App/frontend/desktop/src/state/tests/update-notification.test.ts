@@ -10,9 +10,9 @@ describe("decideUpdateNotification", () => {
         soundEnabled: true,
         status: "available",
         latestVersion: "0.0.2",
-        alreadyNotifiedVersion: null
+        alreadyNotifiedKey: null
       })
-    ).toEqual({ silent: false, version: "0.0.2" });
+    ).toEqual({ key: "0.0.2", silent: false, version: "0.0.2" });
   });
 
   it("通知声音关闭时返回静音通知", () => {
@@ -22,9 +22,9 @@ describe("decideUpdateNotification", () => {
         soundEnabled: false,
         status: "available",
         latestVersion: "0.0.2",
-        alreadyNotifiedVersion: null
+        alreadyNotifiedKey: null
       })
-    ).toEqual({ silent: true, version: "0.0.2" });
+    ).toEqual({ key: "0.0.2", silent: true, version: "0.0.2" });
   });
 
   it("软件更新通知关闭时不弹通知", () => {
@@ -34,7 +34,7 @@ describe("decideUpdateNotification", () => {
         soundEnabled: true,
         status: "available",
         latestVersion: "0.0.2",
-        alreadyNotifiedVersion: null
+        alreadyNotifiedKey: null
       })
     ).toBeNull();
   });
@@ -46,7 +46,7 @@ describe("decideUpdateNotification", () => {
         soundEnabled: true,
         status: "latest",
         latestVersion: "0.0.1",
-        alreadyNotifiedVersion: null
+        alreadyNotifiedKey: null
       })
     ).toBeNull();
   });
@@ -58,7 +58,7 @@ describe("decideUpdateNotification", () => {
         soundEnabled: true,
         status: "available",
         latestVersion: "0.0.2",
-        alreadyNotifiedVersion: "0.0.2"
+        alreadyNotifiedKey: "0.0.2"
       })
     ).toBeNull();
   });
@@ -69,7 +69,32 @@ describe("decideUpdateNotification", () => {
         enabled: true,
         soundEnabled: true,
         status: "available",
-        alreadyNotifiedVersion: null
+        alreadyNotifiedKey: null
+      })
+    ).toBeNull();
+  });
+
+  it("Store 未提供目标版本时按包基线键通知且不会重复", () => {
+    expect(
+      decideUpdateNotification({
+        enabled: true,
+        soundEnabled: true,
+        status: "available",
+        notificationKey: "Memtensor.Memmy_1.1.1.0_x64__eyack96k521x2",
+        alreadyNotifiedKey: null
+      })
+    ).toEqual({
+      key: "Memtensor.Memmy_1.1.1.0_x64__eyack96k521x2",
+      silent: false
+    });
+
+    expect(
+      decideUpdateNotification({
+        enabled: true,
+        soundEnabled: true,
+        status: "available",
+        notificationKey: "Memtensor.Memmy_1.1.1.0_x64__eyack96k521x2",
+        alreadyNotifiedKey: "Memtensor.Memmy_1.1.1.0_x64__eyack96k521x2"
       })
     ).toBeNull();
   });

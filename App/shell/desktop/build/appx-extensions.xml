@@ -1,0 +1,22 @@
+<rescap3:Extension Category="windows.desktopAppMigration">
+  <rescap3:DesktopAppMigration>
+    <rescap3:DesktopApp AumId="__MEMMY_LEGACY_NSIS_AUMID__" />
+    <rescap3:DesktopApp ShortcutPath="%USERPROFILE%\Desktop\Memmy.lnk" />
+    <rescap3:DesktopApp ShortcutPath="%APPDATA%\Microsoft\Windows\Start Menu\Programs\Memmy.lnk" />
+  </rescap3:DesktopAppMigration>
+</rescap3:Extension>
+<desktop:Extension
+  Category="windows.startupTask"
+  Executable="__MEMMY_STORE_EXECUTABLE__"
+  EntryPoint="Windows.FullTrustApplication">
+  <desktop:StartupTask
+    TaskId="MemmyStartupTask"
+    Enabled="false"
+    DisplayName="Memmy" />
+</desktop:Extension>
+<desktop7:Extension Category="windows.shortcut">
+  <desktop7:Shortcut
+    File="$(Desktop)\Memmy.lnk"
+    Icon="$(Package)\app\resources\icon.ico"
+    Description="Memmy" />
+</desktop7:Extension>

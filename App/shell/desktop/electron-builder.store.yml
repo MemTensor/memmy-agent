@@ -1,0 +1,26 @@
+extends: electron-builder.win.yml
+
+win:
+  target:
+    - target: appx
+      arch:
+        - x64
+
+appx:
+  artifactName: Memmy-${version}-${arch}.msix
+  identityName: MEMMY_STORE_IDENTITY_REQUIRED
+  applicationId: MEMMY_STORE_APPLICATION_ID_REQUIRED
+  publisher: MEMMY_STORE_PUBLISHER_REQUIRED
+  publisherDisplayName: MEMMY_STORE_PUBLISHER_DISPLAY_NAME_REQUIRED
+  displayName: MEMMY_WINDOWS_DISPLAY_NAME_REQUIRED
+  addAutoLaunchExtension: false
+  capabilities:
+    - runFullTrust
+  backgroundColor: transparent
+  languages:
+    - zh-CN
+    - en-US
+  minVersion: 10.0.17763.0
+  maxVersionTested: 10.0.26100.0
+  customManifestPath: build/appx-manifest.xml
+  customExtensionsPath: build/appx-extensions.xml

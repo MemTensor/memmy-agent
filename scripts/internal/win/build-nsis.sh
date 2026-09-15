@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 source "$ROOT_DIR/scripts/internal/shared/package-logging.sh"
+source "$ROOT_DIR/scripts/internal/shared/windows-build-lock.sh"
 DESKTOP_DIR="$ROOT_DIR/App/shell/desktop"
 AGENT_DIR="$ROOT_DIR/App/memmy-agent"
 MEMORY_DIR="$ROOT_DIR/Memory"
@@ -87,6 +88,10 @@ fi
 MEMORY_VERSION="$(read_package_version "$MEMORY_DIR/package.json")"
 node "$ROOT_DIR/scripts/internal/shared/verify-package-version.mjs" --expected "$DESKTOP_VERSION"
 export MEMMY_VERSION_SYNC_CHECK_ONLY=1
+if [ "${MEMMY_WINDOWS_TARGET:-nsis}" = "appx" ] && [ "$#" -gt 0 ]; then
+  echo "Windows AppX packaging does not accept electron-builder passthrough arguments. Store identity and output configuration are managed by the canonical packaging scripts." >&2
+  exit 1
+fi
 for builder_arg in "$@"; do
   case "$builder_arg" in
     --config.extraMetadata.version="$DESKTOP_VERSION")
@@ -111,6 +116,58 @@ else
   PACKAGE_SIGNING="signed"
 fi
 
+BUILDER_CONFIG="${MEMMY_WINDOWS_BUILDER_CONFIG:-$BUILDER_CONFIG}"
+PACKAGE_TARGET="${MEMMY_WINDOWS_TARGET:-nsis}"
+case "$PACKAGE_TARGET" in
+  nsis|appx)
+    ;;
+  *)
+    echo "Unsupported Windows package target: $PACKAGE_TARGET" >&2
+    exit 1
+    ;;
+esac
+
+if [ "$PACKAGE_TARGET" = "appx" ] && [ "$#" -gt 0 ]; then
+  echo "Windows AppX packaging does not accept electron-builder passthrough arguments. Store identity and output configuration are managed by the canonical packaging scripts." >&2
+  exit 1
+fi
+
+require_windows_appx_env() {
+  local variable_name
+  for variable_name in \
+    MEMMY_WINDOWS_APPX_IDENTITY_NAME \
+    MEMMY_WINDOWS_APPX_APPLICATION_ID \
+    MEMMY_WINDOWS_APPX_PUBLISHER \
+    MEMMY_WINDOWS_APPX_PUBLISHER_DISPLAY_NAME \
+    MEMMY_WINDOWS_APPX_DISPLAY_NAME \
+    MEMMY_WINDOWS_APPX_CUSTOM_MANIFEST_PATH \
+    MEMMY_WINDOWS_APPX_PACKAGE_VERSION \
+    MEMMY_WINDOWS_APPX_CUSTOM_EXTENSIONS_PATH \
+    MEMMY_WINDOWS_APPX_ARTIFACT_NAME; do
+    if [ -z "${!variable_name:-}" ]; then
+      echo "$variable_name is required for Windows AppX packaging." >&2
+      exit 1
+    fi
+  done
+}
+
+if [ "$PACKAGE_TARGET" = "appx" ]; then
+  require_windows_appx_env
+fi
+
+WINDOWS_BUILD_LOCK_PATH="$(to_node_readable_path "$DESKTOP_DIR/release/.memmy-windows-package-build")"
+if ! memmy_windows_build_lock_is_held "$WINDOWS_BUILD_LOCK_PATH"; then
+  WINDOWS_BUILD_BASH_PATH="$(to_node_readable_path "$(command -v bash)")"
+  WINDOWS_BUILD_SCRIPT_PATH="$(to_node_readable_path "$ROOT_DIR/scripts/internal/win/build-nsis.sh")"
+  WINDOWS_BUILD_SCRIPT_PATH="${WINDOWS_BUILD_SCRIPT_PATH//\\//}"
+  node "$ROOT_DIR/scripts/internal/shared/run-with-file-lock.mjs" \
+    "$WINDOWS_BUILD_LOCK_PATH" \
+    "$WINDOWS_BUILD_BASH_PATH" \
+    "$WINDOWS_BUILD_SCRIPT_PATH" \
+    "$@"
+  exit $?
+fi
+
 case "${MEMMY_ACCOUNT_CHANNEL:-phone}" in
   email)
     PACKAGE_EDITION="intl"
@@ -124,11 +181,32 @@ case "${MEMMY_ACCOUNT_CHANNEL:-phone}" in
     ;;
 esac
 
+if [ "$PACKAGE_TARGET" = "appx" ]; then
+  if ! command -v powershell.exe >/dev/null 2>&1; then
+    echo "powershell.exe is required to validate the canonical Windows Store publishing profile." >&2
+    exit 1
+  fi
+  powershell.exe \
+    -NoProfile \
+    -ExecutionPolicy Bypass \
+    -File "$(to_node_readable_path "$ROOT_DIR/scripts/internal/assert-windows-store-build-profile.ps1")" \
+    -Channel "$PACKAGE_EDITION"
+fi
+
 FINAL_EXE="$DESKTOP_DIR/release/Memmy-$DESKTOP_VERSION-win32-$PACKAGE_ARCH-$PACKAGE_EDITION-$PACKAGE_SIGNING.exe"
 ARTIFACT_NAME="Memmy-$DESKTOP_VERSION-win32-$PACKAGE_ARCH-$PACKAGE_EDITION-$PACKAGE_SIGNING.\${ext}"
+if [ -n "${MEMMY_WINDOWS_ARTIFACT_NAME:-}" ]; then
+  ARTIFACT_NAME="$MEMMY_WINDOWS_ARTIFACT_NAME"
+fi
+if [ "$PACKAGE_TARGET" = "appx" ]; then
+  ARTIFACT_NAME="$MEMMY_WINDOWS_APPX_ARTIFACT_NAME"
+  FINAL_ARTIFACT="${MEMMY_WINDOWS_FINAL_ARTIFACT:-$DESKTOP_DIR/release/$ARTIFACT_NAME}"
+else
+  FINAL_ARTIFACT="${MEMMY_WINDOWS_FINAL_ARTIFACT:-$FINAL_EXE}"
+fi
 package_log_init "win-$DESKTOP_VERSION-$PACKAGE_ARCH-$PACKAGE_EDITION-$PACKAGE_SIGNING" "$DESKTOP_DIR/release/logs"
 package_install_error_trap
-package_log "Windows package context: version=$DESKTOP_VERSION arch=$PACKAGE_ARCH edition=$PACKAGE_EDITION signing=$PACKAGE_SIGNING installer=$FINAL_EXE"
+package_log "Windows package context: version=$DESKTOP_VERSION arch=$PACKAGE_ARCH edition=$PACKAGE_EDITION signing=$PACKAGE_SIGNING target=$PACKAGE_TARGET artifact=$FINAL_ARTIFACT"
 
 log() {
   package_log "$*"
@@ -338,6 +416,7 @@ install_better_sqlite3_prebuild_with_download_fallback() {
 create_memory_runtime_manifest() {
   node "$ROOT_DIR/scripts/internal/win/create-memory-runtime-manifest.mjs" \
     "$MEMORY_DIR/package.json" \
+    "$AGENT_SOURCE_CORE_DIR/package.json" \
     "$RUNTIME_DIR/memory/package.json" \
     "$RUNTIME_DIR/memory/memory-runtime.json"
 
@@ -365,6 +444,7 @@ write_desktop_edition_manifest() {
     --output "$DESKTOP_DIR/dist/main/desktop-edition.json" \
     --edition "$edition" \
     --account-channel "$account_channel" \
+    --windows-store-publishing-config "$DESKTOP_DIR/build/store-publishing-profiles.json" \
     --signing "$PACKAGE_SIGNING"
 }
 
@@ -374,7 +454,7 @@ create_memory_runtime_lock() {
 
 create_windows_cli_launcher() {
   local output_path="$1"
-  local asar_entry="$2"
+  local resource_entry="$2"
 
   cat > "$output_path" <<EOF
 @echo off
@@ -384,7 +464,7 @@ set "SCRIPT_DIR=%~dp0"
 for %%I in ("%SCRIPT_DIR%..") do set "RESOURCES_DIR=%%~fI"
 for %%I in ("%RESOURCES_DIR%\..") do set "APP_DIR=%%~fI"
 set "APP_EXEC=%APP_DIR%\Memmy.exe"
-set "ENTRY=%RESOURCES_DIR%\app.asar\\$asar_entry"
+set "ENTRY=%RESOURCES_DIR%\\$resource_entry"
 
 if not exist "%APP_EXEC%" (
   echo Cannot find Memmy executable: "%APP_EXEC%" 1>&2
@@ -406,12 +486,34 @@ require_windows_signing_env() {
   local csc_sha1="${WIN_CSC_SHA1:-${CSC_SHA1:-}}"
   local csc_subject="${WIN_CSC_SUBJECT_NAME:-${CSC_SUBJECT_NAME:-}}"
   local timestamp_server="${WIN_CSC_TIMESTAMP_SERVER:-${CSC_TIMESTAMP_SERVER:-http://timestamp.digicert.com}}"
+  local signing_source="${MEMMY_WINDOWS_SIGNING_SOURCE:-auto}"
+  local resolved_signing_source
 
-  if [ -n "$csc_link" ] && [ -n "$csc_password" ]; then
-    return
-  fi
+  case "$signing_source" in
+    auto)
+      if [ -n "$csc_sha1" ] || [ -n "$csc_subject" ]; then
+        resolved_signing_source="certificate-store"
+      elif [ -n "$csc_link" ] || [ -n "$csc_password" ]; then
+        resolved_signing_source="pfx"
+      else
+        resolved_signing_source=""
+      fi
+      ;;
+    certificate-store|pfx)
+      resolved_signing_source="$signing_source"
+      ;;
+    *)
+      echo "MEMMY_WINDOWS_SIGNING_SOURCE must be auto, certificate-store, or pfx." >&2
+      exit 1
+      ;;
+  esac
 
-  if [ -n "$csc_sha1" ] || [ -n "$csc_subject" ]; then
+  if [ "$resolved_signing_source" = "certificate-store" ]; then
+    if [ -z "$csc_sha1" ] && [ -z "$csc_subject" ]; then
+      echo "Windows certificate-store signing requires WIN_CSC_SHA1 or WIN_CSC_SUBJECT_NAME." >&2
+      exit 1
+    fi
+    unset WIN_CSC_LINK CSC_LINK WIN_CSC_KEY_PASSWORD CSC_KEY_PASSWORD
     if [ -n "$csc_sha1" ]; then
       WINDOWS_SIGNING_BUILDER_ARGS+=(--config.win.signtoolOptions.certificateSha1="$csc_sha1")
     fi
@@ -422,7 +524,12 @@ require_windows_signing_env() {
     return
   fi
 
-  if [ -n "$csc_link" ] || [ -n "$csc_password" ]; then
+  if [ "$resolved_signing_source" = "pfx" ]; then
+    if [ -n "$csc_link" ] && [ -n "$csc_password" ]; then
+      unset WIN_CSC_SHA1 CSC_SHA1 WIN_CSC_SUBJECT_NAME CSC_SUBJECT_NAME
+      WINDOWS_SIGNING_BUILDER_ARGS+=(--config.win.signtoolOptions.rfc3161TimeStampServer="$timestamp_server")
+      return
+    fi
     cat >&2 <<'EOF'
 Windows PFX signing requires both:
   WIN_CSC_LINK=/absolute/path/to/windows-code-signing.pfx
@@ -436,14 +543,15 @@ Windows signed packaging requires a Windows code-signing certificate.
 
 Use one of these methods:
 
-1. PFX certificate:
+1. SimplySign / Windows certificate store (preferred):
+  WIN_CSC_SHA1=<certificate SHA1 thumbprint>
+
+2. PFX certificate:
   WIN_CSC_LINK=/absolute/path/to/windows-code-signing.pfx
   WIN_CSC_KEY_PASSWORD=...
 
-2. SimplySign / Windows certificate store:
-  WIN_CSC_SHA1=<certificate SHA1 thumbprint>
-
 Optional:
+  MEMMY_WINDOWS_SIGNING_SOURCE=auto|certificate-store|pfx
   WIN_CSC_TIMESTAMP_SERVER=http://timestamp.digicert.com
 
 Electron-builder fallback names are also accepted:
@@ -514,19 +622,168 @@ verify_packaged_file_matches_runtime() {
   fi
 }
 
+resolve_windows_store_package_family_name() {
+  if [ -n "${MEMMY_STORE_PACKAGE_FAMILY_NAME:-}" ]; then
+    printf '%s\n' "$MEMMY_STORE_PACKAGE_FAMILY_NAME"
+    return
+  fi
+
+  local publishing_config
+  publishing_config="$(to_node_readable_path "$DESKTOP_DIR/build/store-publishing-profiles.json")"
+  node - "$publishing_config" "$PACKAGE_EDITION" <<'NODE'
+const { readFileSync } = require("node:fs");
+
+const [configPath, edition] = process.argv.slice(2);
+const config = JSON.parse(readFileSync(configPath, "utf8"));
+const packageFamilyName = config?.applications?.[edition]?.packageFamilyName;
+if (typeof packageFamilyName !== "string" || !packageFamilyName) {
+  throw new Error(`Missing Windows Store package family for edition ${edition}`);
+}
+process.stdout.write(packageFamilyName);
+NODE
+}
+
+verify_signed_packaged_windows_store_helper() {
+  local packaged_helper="$1"
+  local packaged_main_executable="$2"
+  local helper_windows_path
+  local main_windows_path
+  helper_windows_path="$(to_node_readable_path "$packaged_helper")"
+  main_windows_path="$(to_node_readable_path "$packaged_main_executable")"
+
+  MEMMY_HELPER_SIGNATURE_PATH="$helper_windows_path" \
+  MEMMY_MAIN_SIGNATURE_PATH="$main_windows_path" \
+  powershell.exe -NoProfile -NonInteractive -Command '& {
+    $HelperPath = [Environment]::GetEnvironmentVariable("MEMMY_HELPER_SIGNATURE_PATH", "Process")
+    $MainPath = [Environment]::GetEnvironmentVariable("MEMMY_MAIN_SIGNATURE_PATH", "Process")
+    if ([string]::IsNullOrWhiteSpace($HelperPath) -or [string]::IsNullOrWhiteSpace($MainPath)) {
+      throw "Packaged helper signature paths are missing"
+    }
+    $helperSignature = Get-AuthenticodeSignature -LiteralPath $HelperPath
+    $mainSignature = Get-AuthenticodeSignature -LiteralPath $MainPath
+    if ($helperSignature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
+      throw "Packaged Windows Store transition helper signature is not valid: $($helperSignature.Status)"
+    }
+    if ($mainSignature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
+      throw "Packaged Memmy executable signature is not valid: $($mainSignature.Status)"
+    }
+    if (-not $helperSignature.SignerCertificate -or
+        -not $mainSignature.SignerCertificate -or
+        $helperSignature.SignerCertificate.Thumbprint -ne $mainSignature.SignerCertificate.Thumbprint) {
+      throw "Packaged helper and Memmy executable are not signed by the same certificate"
+    }
+  }'
+}
+
+verify_packaged_windows_store_helper_protocol() {
+  local packaged_helper="$1"
+  local package_family_name
+  local query_stderr
+  local query_output
+  package_family_name="$(resolve_windows_store_package_family_name)"
+  query_stderr="$(mktemp)"
+  if ! query_output="$("$packaged_helper" package-family-registration \
+      --package-family-name "$package_family_name" 2>"$query_stderr")"; then
+    cat "$query_stderr" >&2
+    rm -f "$query_stderr"
+    echo "Packaged Windows Store transition helper protocol check failed." >&2
+    exit 1
+  fi
+  if [ -s "$query_stderr" ]; then
+    cat "$query_stderr" >&2
+    rm -f "$query_stderr"
+    echo "Packaged Windows Store transition helper wrote unexpected stderr." >&2
+    exit 1
+  fi
+  rm -f "$query_stderr"
+
+  MEMMY_HELPER_QUERY_OUTPUT="$query_output" node - "$package_family_name" <<'NODE'
+const [expectedPackageFamilyName] = process.argv.slice(2);
+const record = JSON.parse(process.env.MEMMY_HELPER_QUERY_OUTPUT ?? "");
+const expectedKeys = ["packageFamilyName", "packageFullNames", "registered", "type"].sort();
+const actualKeys = Object.keys(record).sort();
+if (JSON.stringify(actualKeys) !== JSON.stringify(expectedKeys) ||
+    record.type !== "package-family-registration" ||
+    record.packageFamilyName !== expectedPackageFamilyName ||
+    typeof record.registered !== "boolean" ||
+    !Array.isArray(record.packageFullNames) ||
+    record.packageFullNames.some(value => typeof value !== "string" || !value) ||
+    record.registered !== (record.packageFullNames.length > 0)) {
+  throw new Error("Packaged Windows Store transition helper returned an invalid protocol record");
+}
+NODE
+}
+
+verify_packaged_directory_file_set() {
+  local runtime_directory="$1"
+  local packaged_directory="$2"
+  local description="$3"
+
+  node - "$runtime_directory" "$packaged_directory" "$description" <<'NODE'
+const { readdirSync } = require("node:fs");
+const { join, relative, sep } = require("node:path");
+
+const [runtimeDirectory, packagedDirectory, description] = process.argv.slice(2);
+const listFiles = (root, directory = root, files = []) => {
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) {
+      listFiles(root, path, files);
+    } else {
+      files.push(relative(root, path).split(sep).join("/"));
+    }
+  }
+  return files;
+};
+
+const runtimeFiles = listFiles(runtimeDirectory).sort();
+const packagedFiles = listFiles(packagedDirectory).sort();
+const runtimeSet = new Set(runtimeFiles);
+const packagedSet = new Set(packagedFiles);
+const missing = runtimeFiles.filter((file) => !packagedSet.has(file));
+const extra = packagedFiles.filter((file) => !runtimeSet.has(file));
+if (missing.length > 0 || extra.length > 0) {
+  throw new Error(`${description} file set differs from staged runtime: missing=${missing.slice(0, 20).join(",") || "none"}; extra=${extra.slice(0, 20).join(",") || "none"}`);
+}
+console.log(`Verified ${description} file set (${runtimeFiles.length} files)`);
+NODE
+}
+
 verify_windows_native_module() {
+  require_packaged_runtime_file "$RUNTIME_DIR/memory/node_modules/@memmy/agent-source-core/dist/src/index.js"
+  if [ -L "$RUNTIME_DIR/memory/node_modules/@memmy/agent-source-core" ]; then
+    echo "Packaged Memory AgentSourceCore must not be a symbolic link." >&2
+    exit 1
+  fi
   verify_windows_x64_native_module \
     "$RUNTIME_DIR/memory/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
     "Memory better-sqlite3"
 }
 
 verify_windows_memory_workspace_artifacts() {
-  require_packaged_runtime_file "$RUNTIME_AGENT_SOURCE_CORE_DIR/package.json"
-  require_packaged_runtime_file "$RUNTIME_AGENT_SOURCE_CORE_DIR/dist/src/index.js"
-  if [ -L "$RUNTIME_AGENT_SOURCE_CORE_DIR" ]; then
-    echo "Packaged agent source core must not be a symbolic link." >&2
+  require_packaged_runtime_file "$RUNTIME_MEMORY_AGENT_SOURCE_CORE_DIR/package.json"
+  require_packaged_runtime_file "$RUNTIME_MEMORY_AGENT_SOURCE_CORE_DIR/dist/src/index.js"
+  verify_windows_agent_source_core_runtime "$RUNTIME_MEMORY_AGENT_SOURCE_CORE_DIR"
+  if [ -L "$RUNTIME_MEMORY_AGENT_SOURCE_CORE_DIR" ]; then
+    echo "Packaged Memory AgentSourceCore must not be a symbolic link." >&2
     exit 1
   fi
+}
+
+verify_windows_agent_source_core_runtime() {
+  local package_dir="$1"
+  local compiled_entry
+  for compiled_entry in index codex-source-turn jsonl-lines secret-redactor; do
+    require_packaged_runtime_file "$package_dir/dist/src/$compiled_entry.js"
+  done
+  node --input-type=module - "$(to_node_readable_path "$package_dir/dist/src/index.js")" <<'NODE'
+import { pathToFileURL } from "node:url";
+const core = await import(pathToFileURL(process.argv[2]).href);
+if (typeof core.readCodexSourceTurn !== "function") {
+  throw new Error("Packaged AgentSourceCore does not export the Codex source-turn reader");
+}
+console.log("Verified independent AgentSourceCore runtime import");
+NODE
 }
 
 verify_windows_onnxruntime_module() {
@@ -621,7 +878,7 @@ verify_pruned_windows_runtime() {
 }
 
 verify_packaged_windows_unpacked_artifacts() {
-  local unpacked_runtime="$DESKTOP_DIR/release/win-unpacked/resources/app.asar.unpacked/dist/runtime"
+  local unpacked_agent_runtime="$DESKTOP_DIR/release/win-unpacked/resources/app.asar.unpacked/dist/runtime/memmy-agent"
   local packaged_memory_runtime="$DESKTOP_DIR/release/win-unpacked/resources/memory-runtime"
   local packaged_agent_source_core="$packaged_memory_runtime/node_modules/@memmy/agent-source-core"
   local packaged_embedding_model="$DESKTOP_DIR/release/win-unpacked/resources/embedding-models/$EMBEDDING_MODEL_ID"
@@ -632,56 +889,91 @@ verify_packaged_windows_unpacked_artifacts() {
   verify_packaged_runtime_config_boundary "$DESKTOP_DIR/release/win-unpacked/resources"
   require_packaged_runtime_file "$packaged_agent_source_core/package.json"
   require_packaged_runtime_file "$packaged_agent_source_core/dist/src/index.js"
+  verify_windows_agent_source_core_runtime "$packaged_agent_source_core"
   if [ -L "$packaged_agent_source_core" ]; then
     echo "Packaged offline Memory agent source core must not be a symbolic link." >&2
     exit 1
   fi
+  verify_packaged_directory_file_set \
+    "$RUNTIME_DIR/memory" \
+    "$packaged_memory_runtime" \
+    "external Memory runtime"
+  require_packaged_runtime_file "$packaged_memory_runtime/package.json"
+  require_packaged_runtime_file "$packaged_memory_runtime/memory-runtime.json"
+  require_packaged_runtime_file "$packaged_memory_runtime/dist/src/server/index.js"
+  require_packaged_runtime_file "$packaged_memory_runtime/dist/src/cli/index.js"
+  require_packaged_runtime_file "$packaged_memory_runtime/node_modules/@memmy/agent-source-core/dist/src/index.js"
+  require_packaged_runtime_file "$packaged_memory_runtime/workspace-packages/agent-source-core/dist/src/index.js"
+  verify_packaged_file_matches_runtime \
+    "$RUNTIME_DIR/memory/package.json" \
+    "$packaged_memory_runtime/package.json" \
+    "Memory package manifest"
+  verify_packaged_file_matches_runtime \
+    "$RUNTIME_DIR/memory/memory-runtime.json" \
+    "$packaged_memory_runtime/memory-runtime.json" \
+    "Memory runtime manifest"
+  verify_packaged_file_matches_runtime \
+    "$RUNTIME_DIR/memory/dist/src/cli/index.js" \
+    "$packaged_memory_runtime/dist/src/cli/index.js" \
+    "Memory CLI entrypoint"
+  verify_packaged_file_matches_runtime \
+    "$RUNTIME_DIR/memory/node_modules/@memmy/agent-source-core/dist/src/index.js" \
+    "$packaged_memory_runtime/node_modules/@memmy/agent-source-core/dist/src/index.js" \
+    "Memory AgentSourceCore entrypoint"
   verify_windows_x64_native_module \
-    "$unpacked_runtime/memory/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
+    "$packaged_memory_runtime/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
     "packaged Memory better-sqlite3"
   verify_windows_x64_native_module \
-    "$unpacked_runtime/memmy-agent/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
+    "$unpacked_agent_runtime/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
     "packaged memmy-agent better-sqlite3"
   verify_packaged_file_matches_runtime \
     "$RUNTIME_DIR/memory/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
-    "$unpacked_runtime/memory/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
+    "$packaged_memory_runtime/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
     "Memory better-sqlite3 module"
   verify_packaged_file_matches_runtime \
     "$RUNTIME_DIR/memmy-agent/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
-    "$unpacked_runtime/memmy-agent/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
+    "$unpacked_agent_runtime/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
     "memmy-agent better-sqlite3 module"
-  require_packaged_runtime_file "$unpacked_runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/win32/x64/onnxruntime.dll"
-  require_packaged_runtime_glob "$unpacked_runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/win32/x64/*.dll"
-  require_packaged_runtime_glob "$unpacked_runtime/memory/node_modules/@img/sharp-win32-x64/lib/libvips*.dll"
-  require_packaged_runtime_file "$unpacked_runtime/memmy-agent/node_modules/@memmy/migrations/dist/index.js"
-  require_packaged_runtime_file "$unpacked_runtime/memmy-agent/node_modules/@memmy/migrations/dist/state-store.js"
+  require_packaged_runtime_file "$packaged_memory_runtime/node_modules/onnxruntime-node/bin/napi-v3/win32/x64/onnxruntime.dll"
+  require_packaged_runtime_glob "$packaged_memory_runtime/node_modules/onnxruntime-node/bin/napi-v3/win32/x64/*.dll"
+  require_packaged_runtime_glob "$packaged_memory_runtime/node_modules/@img/sharp-win32-x64/lib/libvips*.dll"
+  require_packaged_runtime_absent "$packaged_memory_runtime/node_modules/onnxruntime-node/bin/napi-v3/darwin"
+  require_packaged_runtime_absent "$packaged_memory_runtime/node_modules/onnxruntime-node/bin/napi-v3/linux"
+  require_packaged_runtime_absent "$packaged_memory_runtime/node_modules/onnxruntime-node/bin/napi-v3/win32/arm64"
+  require_packaged_runtime_file "$packaged_memory_runtime/embedding-models/$EMBEDDING_MODEL_ID/config.json"
+  require_packaged_runtime_file "$packaged_memory_runtime/embedding-models/$EMBEDDING_MODEL_ID/tokenizer.json"
+  require_packaged_runtime_file "$packaged_memory_runtime/embedding-models/$EMBEDDING_MODEL_ID/onnx/model_quantized.onnx"
+  require_packaged_runtime_file "$unpacked_agent_runtime/node_modules/@memmy/migrations/dist/index.js"
+  require_packaged_runtime_file "$unpacked_agent_runtime/node_modules/@memmy/migrations/dist/state-store.js"
   verify_migration_state_compatibility_module \
-    "$unpacked_runtime/memmy-agent/node_modules/@memmy/migrations/dist/state-store.js"
+    "$unpacked_agent_runtime/node_modules/@memmy/migrations/dist/state-store.js"
   require_packaged_runtime_file "$packaged_embedding_model/config.json"
   require_packaged_runtime_file "$packaged_embedding_model/tokenizer.json"
   require_packaged_runtime_file "$packaged_embedding_model/onnx/model_quantized.onnx"
-  if [ -L "$unpacked_runtime/memmy-agent/node_modules/@memmy/migrations" ]; then
+  if [ -L "$unpacked_agent_runtime/node_modules/@memmy/migrations" ]; then
     echo "Packaged migrations package must not be a symbolic link." >&2
     exit 1
   fi
-  require_packaged_runtime_file "$unpacked_runtime/memmy-agent/node_modules/openclaw/node_modules/@lydell/node-pty-win32-x64/prebuilds/win32-x64/conpty/conpty.dll"
-  require_packaged_runtime_file "$unpacked_runtime/memmy-agent/node_modules/openclaw/node_modules/@lydell/node-pty-win32-x64/prebuilds/win32-x64/conpty/OpenConsole.exe"
+  require_packaged_runtime_file "$unpacked_agent_runtime/node_modules/openclaw/node_modules/@lydell/node-pty-win32-x64/prebuilds/win32-x64/conpty/conpty.dll"
+  require_packaged_runtime_file "$unpacked_agent_runtime/node_modules/openclaw/node_modules/@lydell/node-pty-win32-x64/prebuilds/win32-x64/conpty/OpenConsole.exe"
 }
 
 verify_packaged_runtime_config_boundary() {
   local resources_root="$1"
   local asar_file="$resources_root/app.asar"
   local forbidden_env
+  local expected_memory_version
 
   forbidden_env="$(find "$resources_root" \( -type f -o -type l \) \( -name ".env" -o -name ".env.*" \) -print -quit)"
   if [ -n "$forbidden_env" ]; then
     echo "Packaged resources contain a forbidden environment file." >&2
     exit 1
   fi
+  expected_memory_version="$(read_package_version "$RUNTIME_DIR/memory/package.json")"
   node "$ROOT_DIR/scripts/internal/shared/verify-packaged-asar.mjs" \
     --asar "$(to_node_readable_path "$asar_file")" \
     --expected "$DESKTOP_VERSION" \
-    --expected-memory "$MEMORY_VERSION" \
+    --expected-memory "$expected_memory_version" \
     --platform win32 \
     --arch "$PACKAGE_ARCH"
 }
@@ -733,11 +1025,32 @@ PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm_with_configured_script_shell ci --prefix 
 package_step_start "Build Memory workspace"
 npm_with_configured_script_shell run build -w @memmy/memory
 
+if [ "${MEMMY_WINDOWS_TARGET:-nsis}" = "appx" ]; then
+  package_step_start "Build Windows Store Memory install lock"
+  powershell.exe \
+    -NoProfile \
+    -ExecutionPolicy Bypass \
+    -File "$(to_node_readable_path "$MEMORY_DIR/native/windows-install-lock/build.ps1")" \
+    -Architecture x64 \
+    -OutputDirectory "$(to_node_readable_path "$MEMORY_DIR/dist/native")"
+  require_packaged_runtime_file "$MEMORY_DIR/dist/native/memory-install-lock.node"
+fi
+
 package_step_start "Build memmy-agent runtime"
 npm_with_configured_script_shell run build --prefix "$AGENT_DIR"
 
 package_step_start "Build Electron desktop shell"
 npm_with_configured_script_shell run build -w @memmy/desktop
+package_step_start "Build Windows Store transition native helper"
+if ! command -v powershell.exe >/dev/null 2>&1; then
+  echo "powershell.exe is required for Windows native helper compilation." >&2
+  exit 1
+fi
+powershell.exe \
+  -NoProfile \
+  -ExecutionPolicy Bypass \
+  -File "$(to_node_readable_path "$ROOT_DIR/scripts/internal/build-windows-store-update-helper.ps1")"
+require_packaged_runtime_file "$DESKTOP_DIR/dist/native/MemmyStoreUpdate.exe"
 package_step_start "Write desktop edition manifest"
 write_desktop_edition_manifest
 
@@ -752,20 +1065,32 @@ cp -R "$MIGRATIONS_DIR/dist" "$MIGRATIONS_STAGING_DIR/dist"
 
 mkdir -p "$RUNTIME_DIR/memory/dist"
 cp -R "$MEMORY_DIR/dist/src" "$RUNTIME_DIR/memory/dist/src"
+if [ "${MEMMY_WINDOWS_TARGET:-nsis}" = "appx" ]; then
+  mkdir -p "$RUNTIME_DIR/memory/dist/native"
+  cp "$MEMORY_DIR/dist/native/memory-install-lock.node" "$RUNTIME_DIR/memory/dist/native/memory-install-lock.node"
+  require_packaged_runtime_file "$RUNTIME_DIR/memory/dist/native/memory-install-lock.node"
+fi
 cp -R "$MEMORY_DIR/dist/viewer" "$RUNTIME_DIR/memory/dist/viewer"
 cp -R "$MEMORY_DIR/adapters" "$RUNTIME_DIR/memory/adapters"
+mkdir -p "$RUNTIME_DIR/memory/workspace-packages/agent-source-core/dist/src"
+cp "$AGENT_SOURCE_CORE_DIR/package.json" "$RUNTIME_DIR/memory/workspace-packages/agent-source-core/package.json"
+cp -R "$AGENT_SOURCE_CORE_DIR/dist/src/." "$RUNTIME_DIR/memory/workspace-packages/agent-source-core/dist/src/"
 package_step_start "Create Windows Memory runtime manifest"
 create_memory_runtime_manifest
 
 package_step_start "Install Windows x64 Memory runtime dependencies"
 npm_ci_win_x64 "$RUNTIME_DIR/memory"
 install_better_sqlite3_win_x64 "$RUNTIME_DIR/memory"
-package_step_start "Stage Windows Memory workspace runtime packages"
-RUNTIME_AGENT_SOURCE_CORE_DIR="$RUNTIME_DIR/memory/node_modules/@memmy/agent-source-core"
-rm -rf "$RUNTIME_AGENT_SOURCE_CORE_DIR"
-mkdir -p "$RUNTIME_AGENT_SOURCE_CORE_DIR"
-cp "$AGENT_SOURCE_CORE_DIR/package.json" "$RUNTIME_AGENT_SOURCE_CORE_DIR/package.json"
-cp -R "$AGENT_SOURCE_CORE_DIR/dist" "$RUNTIME_AGENT_SOURCE_CORE_DIR/dist"
+package_step_start "Materialize Windows Memory workspace runtime package"
+RUNTIME_MEMORY_AGENT_SOURCE_CORE_DIR="$RUNTIME_DIR/memory/node_modules/@memmy/agent-source-core"
+rm -rf "$RUNTIME_MEMORY_AGENT_SOURCE_CORE_DIR"
+mkdir -p "$RUNTIME_MEMORY_AGENT_SOURCE_CORE_DIR/dist/src"
+cp "$AGENT_SOURCE_CORE_DIR/package.json" "$RUNTIME_MEMORY_AGENT_SOURCE_CORE_DIR/package.json"
+cp -R "$AGENT_SOURCE_CORE_DIR/dist/src/." "$RUNTIME_MEMORY_AGENT_SOURCE_CORE_DIR/dist/src/"
+if [ -L "$RUNTIME_MEMORY_AGENT_SOURCE_CORE_DIR" ]; then
+  echo "Packaged Memory AgentSourceCore must not be a symbolic link." >&2
+  exit 1
+fi
 package_step_start "Verify Windows x64 Memory runtime artifacts"
 verify_windows_memory_workspace_artifacts
 verify_windows_native_module
@@ -893,6 +1218,14 @@ package_step_start "Verify pruned Windows runtime boundaries"
 verify_windows_agent_html_lint_runtime
 verify_pruned_windows_runtime
 
+package_step_start "Bundle Windows native runtime dependencies"
+powershell.exe \
+  -NoProfile \
+  -ExecutionPolicy Bypass \
+  -File "$(to_node_readable_path "$ROOT_DIR/scripts/internal/prepare-windows-native-dependencies.ps1")" \
+  -RuntimeRoot "$(to_node_readable_path "$RUNTIME_DIR")" \
+  -Architecture "$PACKAGE_ARCH"
+
 package_step_start "Prune and verify Windows runtime versions"
 node "$ROOT_DIR/scripts/internal/shared/prune-runtime-env-files.mjs" "$RUNTIME_DIR"
 RUNTIME_NODE_DIR="$(to_node_readable_path "$RUNTIME_DIR")"
@@ -901,15 +1234,20 @@ node "$ROOT_DIR/scripts/internal/shared/verify-package-version.mjs" \
   --runtime-root "$RUNTIME_NODE_DIR"
 
 package_step_start "Create Windows CLI launchers and embedding model"
-create_windows_cli_launcher "$CLI_BIN_DIR/memmy-memory.cmd" "dist\\runtime\\memory\\dist\\src\\cli\\index.js"
-create_windows_cli_launcher "$CLI_BIN_DIR/memmy.cmd" "dist\\runtime\\memmy-agent\\dist\\main.js"
+create_windows_cli_launcher "$CLI_BIN_DIR/memmy-memory.cmd" "memory-runtime\\dist\\src\\cli\\index.js"
+create_windows_cli_launcher "$CLI_BIN_DIR/memmy.cmd" "app.asar\\dist\\runtime\\memmy-agent\\dist\\main.js"
 node "$ROOT_DIR/scripts/internal/shared/prepare-embedding-model.mjs" "$EMBEDDING_MODELS_DIR"
 cp -R "$EMBEDDING_MODELS_DIR" "$RUNTIME_DIR/memory/embedding-models"
 
-package_step_start "Patch electron-builder NSIS template"
-patch_electron_builder_nsis_refresh
+package_step_start "Stamp Windows Memory runtime content identity"
+node "$ROOT_DIR/scripts/internal/win/stamp-memory-runtime-content-id.mjs" "$RUNTIME_DIR/memory"
 
-package_step_start "Run electron-builder Windows NSIS packaging"
+if [ "$PACKAGE_TARGET" = "nsis" ]; then
+  package_step_start "Patch electron-builder NSIS template"
+  patch_electron_builder_nsis_refresh
+fi
+
+package_step_start "Run electron-builder Windows $PACKAGE_TARGET packaging"
 cd "$DESKTOP_DIR"
 
 BUILDER_ARGS=(--config "$BUILDER_CONFIG")
@@ -923,14 +1261,52 @@ if [ "${#WINDOWS_SIGNING_BUILDER_ARGS[@]}" -gt 0 ]; then
   BUILDER_ARGS+=("${WINDOWS_SIGNING_BUILDER_ARGS[@]}")
 fi
 
-npx electron-builder "${BUILDER_ARGS[@]}" --win nsis --x64 "$@" --config.artifactName="$ARTIFACT_NAME"
+BUILDER_ARGS+=(--win "$PACKAGE_TARGET" --x64)
+if [ "$PACKAGE_TARGET" = "nsis" ] && [ "$#" -gt 0 ]; then
+  BUILDER_ARGS+=("$@")
+fi
+if [ "$PACKAGE_TARGET" = "appx" ]; then
+  BUILDER_ARGS+=(--config.appx.identityName="$MEMMY_WINDOWS_APPX_IDENTITY_NAME")
+  BUILDER_ARGS+=(--config.appx.applicationId="$MEMMY_WINDOWS_APPX_APPLICATION_ID")
+  BUILDER_ARGS+=(--config.appx.publisher="$MEMMY_WINDOWS_APPX_PUBLISHER")
+  BUILDER_ARGS+=(--config.appx.publisherDisplayName="$MEMMY_WINDOWS_APPX_PUBLISHER_DISPLAY_NAME")
+  BUILDER_ARGS+=(--config.appx.displayName="$MEMMY_WINDOWS_APPX_DISPLAY_NAME")
+  BUILDER_ARGS+=(--config.appx.customManifestPath="$MEMMY_WINDOWS_APPX_CUSTOM_MANIFEST_PATH")
+  BUILDER_ARGS+=(--config.appx.customExtensionsPath="$MEMMY_WINDOWS_APPX_CUSTOM_EXTENSIONS_PATH")
+  BUILDER_ARGS+=(--config.appx.artifactName="$MEMMY_WINDOWS_APPX_ARTIFACT_NAME")
+fi
+BUILDER_ARGS+=(--config.artifactName="$ARTIFACT_NAME")
+npx electron-builder "${BUILDER_ARGS[@]}"
 package_step_start "Verify packaged Windows app artifacts"
 verify_packaged_windows_unpacked_artifacts
+powershell.exe \
+  -NoProfile \
+  -ExecutionPolicy Bypass \
+  -File "$(to_node_readable_path "$ROOT_DIR/scripts/internal/prepare-windows-native-dependencies.ps1")" \
+  -RuntimeRoot "$(to_node_readable_path "$DESKTOP_DIR/release/win-unpacked")" \
+  -Architecture "$PACKAGE_ARCH" \
+  -VerifyOnly
+require_packaged_runtime_file "$DESKTOP_DIR/release/win-unpacked/resources/native/MemmyStoreUpdate.exe"
+verify_windows_x64_native_module \
+  "$DESKTOP_DIR/release/win-unpacked/resources/native/MemmyStoreUpdate.exe" \
+  "packaged Windows Store transition helper"
+if [ "$PACKAGE_SIGNING" = "unsigned" ]; then
+  verify_packaged_file_matches_runtime \
+    "$DESKTOP_DIR/dist/native/MemmyStoreUpdate.exe" \
+    "$DESKTOP_DIR/release/win-unpacked/resources/native/MemmyStoreUpdate.exe" \
+    "Windows Store transition helper"
+else
+  verify_signed_packaged_windows_store_helper \
+    "$DESKTOP_DIR/release/win-unpacked/resources/native/MemmyStoreUpdate.exe" \
+    "$DESKTOP_DIR/release/win-unpacked/Memmy.exe"
+fi
+verify_packaged_windows_store_helper_protocol \
+  "$DESKTOP_DIR/release/win-unpacked/resources/native/MemmyStoreUpdate.exe"
 
-if [ ! -f "$FINAL_EXE" ]; then
-  echo "Packaging completed without the expected installer: $FINAL_EXE" >&2
+if [ ! -f "$FINAL_ARTIFACT" ]; then
+  echo "Packaging completed without the expected artifact: $FINAL_ARTIFACT" >&2
   exit 1
 fi
 
 package_log_finish 0
-log "Done. Windows installer is ready: $FINAL_EXE"
+log "Done. Windows artifact is ready: $FINAL_ARTIFACT"

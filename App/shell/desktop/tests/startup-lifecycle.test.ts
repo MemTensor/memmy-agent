@@ -92,6 +92,7 @@ function setup(options: { delay?: number; error?: Error; apiError?: Error; clean
     showPackagedStartupError: () => { events.push("error-dialog"); },
     resolveCurrentDesktopEdition: () => "cn", initLogger: noop, forceLightWindowChrome: noop,
     installPreparedRequiredUpdateBeforeBoot: async () => false,
+    isWindowsStoreApp: () => false,
     registerIpcHandlers: noop, installBundledCliIfNeeded: async () => {}, startPackagedRendererServerIfNeeded: async () => {},
     windowsDataLayout: null,
     startManagedRuntimeServices: async () => {
