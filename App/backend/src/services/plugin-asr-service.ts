@@ -1,12 +1,14 @@
 /** Host-owned `asr` service letting plugins transcribe audio the user has uploaded. */
 import { readFile, realpath, stat } from "node:fs/promises";
 import { relative, resolve, sep } from "node:path";
-import { AsrTranscriptionResponseSchema, type AsrTranscriptionResponse } from "@memmy/local-api-contracts";
+import {
+  ASR_MAX_AUDIO_BYTES,
+  AsrTranscriptionResponseSchema,
+  type AsrTranscriptionResponse
+} from "@memmy/local-api-contracts";
 import type { PluginHostServiceInvoker } from "../adapters/outbound/plugin-runtime/index.js";
 import type { AsrService } from "./asr-service.js";
 import { z } from "zod";
-
-const MAX_AUDIO_BYTES = 200 * 1024 * 1024;
 
 const PluginAsrInputSchema = z.object({
   /** Path to an audio file inside a Host-owned upload root. */
@@ -14,9 +16,7 @@ const PluginAsrInputSchema = z.object({
   mimeType: z.string().trim().min(1).max(128).optional(),
   durationMs: z.number().int().nonnegative().optional(),
   /** Requests speaker separation. Honoured only by upstream models that support it. */
-  diarization: z.boolean().optional(),
-  /** Domain terms biasing recognition. */
-  hotwords: z.array(z.string().trim().min(1).max(64)).max(200).optional()
+  diarization: z.boolean().optional()
 });
 
 const MIME_TYPE_BY_EXTENSION: Readonly<Record<string, string>> = {
@@ -57,7 +57,9 @@ export function createPluginAsrService(options: CreatePluginAsrServiceOptions): 
       const info = await stat(path);
       if (!info.isFile()) throw serviceError("invalid_argument", "ASR input must be a regular file", false);
       if (info.size === 0) throw serviceError("invalid_argument", "ASR input file is empty", false);
-      if (info.size > MAX_AUDIO_BYTES) {
+      if (info.size > ASR_MAX_AUDIO_BYTES) {
+        // Rejected here so an oversized upload fails with a clear reason rather
+        // than as an opaque error from the upstream transcription API.
         throw serviceError("invalid_argument", "ASR input file exceeded the size limit", false);
       }
 
@@ -65,8 +67,7 @@ export function createPluginAsrService(options: CreatePluginAsrServiceOptions): 
         audioBase64: (await readFile(path)).toString("base64"),
         mimeType: input.mimeType ?? guessMimeType(path),
         durationMs: input.durationMs,
-        diarization: input.diarization,
-        hotwords: input.hotwords
+        diarization: input.diarization
       });
       return AsrTranscriptionResponseSchema.parse(response);
     }

@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { UploadedAgentMedia, UploadAgentMediaInput } from "../../api/memmy-agent-client.js";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
 import { PluginUiProvider, usePluginUi, reducePluginUiCalls, type PluginUiCall } from "../../app/plugin-ui-context.js";
-import { buildRendererDocument, PluginCapabilityHost, resolveRendererInteractionStates, resolveSafeArtifactUri, selectVisiblePluginCalls } from "../plugin-capability-host.js";
+import { buildRendererDocument, occludeUserRaisedCalls, PluginCapabilityHost, resolveRendererInteractionStates, resolveSafeArtifactUri, selectVisiblePluginCalls } from "../plugin-capability-host.js";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -55,6 +55,39 @@ describe("PluginCapabilityHost", () => {
     act(() => root.unmount());
     document.body.replaceChildren();
     vi.restoreAllMocks();
+  });
+
+  it("closes a card the user raised without answering the model", async () => {
+    const respond = vi.fn(async () => undefined);
+    const cancel = vi.fn(async () => undefined);
+    const client = { getUi: vi.fn(), cancel, respond };
+    const call: PluginUiCall = { pluginId: plugin.id, capabilityId: "run", callId: "pinned", conversationId: "websocket:chat-1", origin: "user", events: [
+      { type: "interaction", request: { interactionId: "guide", type: "question", payload: { title: "Guidance" } } }
+    ] };
+    await act(async () => root.render(<PluginUiProvider><I18nProvider language="en-US"><PluginCapabilityHost calls={[call]} plugins={[plugin]} client={client} /></I18nProvider></PluginUiProvider>));
+
+    const close = container.querySelector<HTMLButtonElement>('button[aria-label="Close card"]');
+    expect(close).not.toBeNull();
+    await act(async () => close!.click());
+
+    // The plugin is told to stop waiting, but no answer is posted: the user
+    // dismissed a card they opened themselves, which is not a turn.
+    expect(cancel).toHaveBeenCalledWith(plugin.id, "pinned");
+    expect(respond).not.toHaveBeenCalled();
+    // And the card goes away rather than being replaced by a cancellation error.
+    expect(container.textContent).not.toContain("Guidance");
+  });
+
+  it("offers no close button on a card the Agent raised", async () => {
+    const client = { getUi: vi.fn(), cancel: vi.fn(), respond: vi.fn(async () => undefined) };
+    const call: PluginUiCall = { pluginId: plugin.id, capabilityId: "run", callId: "asked", conversationId: "websocket:chat-1", origin: "agent", events: [
+      { type: "interaction", request: { interactionId: "upload", type: "question", payload: { title: "Which company?" } } }
+    ] };
+    await act(async () => root.render(<PluginUiProvider><I18nProvider language="en-US"><PluginCapabilityHost calls={[call]} plugins={[plugin]} client={client} /></I18nProvider></PluginUiProvider>));
+
+    // Closing this one outright would leave the Agent's turn waiting forever,
+    // so it keeps only the skip path that answers.
+    expect(container.querySelector('button[aria-label="Close card"]')).toBeNull();
   });
 
   it("routes accepted chat feedback only to its live card and retires the old interaction", async () => {
@@ -935,6 +968,35 @@ describe("plugin UI event reduction", () => {
     expect(selectVisiblePluginCalls(calls).map((call) => call.callId)).toEqual(["artifact", "latest-active", "failed"]);
     expect(selectVisiblePluginCalls(calls.slice(0, -1)).map((call) => call.callId)).toEqual(["artifact", "latest-active"]);
     expect(selectVisiblePluginCalls(calls.slice(0, -1), new Set([`${plugin.id}:latest-active:outline`])).map((call) => call.callId)).toEqual(["artifact"]);
+  });
+
+  it("hides a card the user raised while the Agent waits on one of its own", () => {
+    const base = { pluginId: plugin.id, capabilityId: "run", conversationId: "chat-1" };
+    const pinned = { ...base, callId: "pinned", origin: "user" as const, events: [{ type: "interaction" as const, request: { interactionId: "guide", type: "custom" as const, payload: {} } }] };
+    const asked = { ...base, callId: "asked", origin: "agent" as const, events: [{ type: "interaction" as const, request: { interactionId: "upload", type: "file-input" as const, payload: {} } }] };
+
+    // Two live cards competing for one answer is ambiguous, and the Agent's is
+    // the one blocking progress.
+    expect(occludeUserRaisedCalls([pinned, asked]).map((call) => call.callId)).toEqual(["asked"]);
+  });
+
+  it("brings the user's card back once the Agent's card is no longer waiting", () => {
+    const base = { pluginId: plugin.id, capabilityId: "run", conversationId: "chat-1" };
+    const pinned = { ...base, callId: "pinned", origin: "user" as const, events: [{ type: "interaction" as const, request: { interactionId: "guide", type: "custom" as const, payload: {} } }] };
+    const answered = { ...base, callId: "asked", origin: "agent" as const, events: [{ type: "interaction" as const, request: { interactionId: "upload", type: "file-input" as const, payload: {} } }, { type: "result" as const, output: {} }] };
+
+    // Occlusion is presentation only; nothing was cancelled on the way in.
+    expect(occludeUserRaisedCalls([pinned, answered]).map((call) => call.callId)).toEqual(["pinned", "asked"]);
+  });
+
+  it("leaves the user's non-interactive cards visible while the Agent waits", () => {
+    const base = { pluginId: plugin.id, capabilityId: "run", conversationId: "chat-1" };
+    const delivered = { ...base, callId: "delivered", origin: "user" as const, events: [{ type: "artifact" as const, artifact: { id: "docx", name: "report.docx", mediaType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", uri: "/api/v1/plugins/review/artifacts/token/preview" } }] };
+    const asked = { ...base, callId: "asked", origin: "agent" as const, events: [{ type: "interaction" as const, request: { interactionId: "upload", type: "file-input" as const, payload: {} } }] };
+
+    // Only cards asking for input can be confused with each other; a delivered
+    // file is not competing for an answer.
+    expect(occludeUserRaisedCalls([delivered, asked]).map((call) => call.callId)).toEqual(["delivered", "asked"]);
   });
 
   it("does not spin a progress indicator that has reached 100 percent", async () => {

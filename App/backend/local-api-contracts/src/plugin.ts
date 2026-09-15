@@ -113,7 +113,14 @@ export const PluginCommandContributionSchema = z.object({
   agentSkillId: PluginIdentifierSchema.optional(),
   argHint: z.string().trim().max(128).optional(),
   icon: z.string().trim().min(1).max(64).optional(),
-  surface: z.boolean().optional()
+  surface: z.boolean().optional(),
+  /**
+   * Also offer this command as a fixed button above the composer.
+   *
+   * For capabilities the user reaches repeatedly and out of order, where
+   * finding a slash command each time is the wrong interaction.
+   */
+  pinned: z.boolean().optional()
 });
 export type PluginCommandContribution = z.infer<typeof PluginCommandContributionSchema>;
 
@@ -323,10 +330,23 @@ export const UpdatePluginInputSchema = z.object({
 });
 export type UpdatePluginInput = z.infer<typeof UpdatePluginInputSchema>;
 
+/**
+ * Who asked for a capability call.
+ *
+ * The Host reads this to decide how a card behaves when the user closes it.
+ * An agent-invoked card is a step in the model's turn, so closing it has to
+ * answer — otherwise the turn stalls. A user-invoked card is not part of any
+ * turn, so closing it just closes it. Defaults to `agent` because tool calls
+ * are the common case and predate this field.
+ */
+export const PluginInvocationOriginSchema = z.enum(["user", "agent"]);
+export type PluginInvocationOrigin = z.infer<typeof PluginInvocationOriginSchema>;
+
 export const InvokePluginCapabilityInputSchema = z.object({
   conversationId: z.string().trim().min(1),
   input: z.unknown(),
-  deadline: z.string().datetime().optional()
+  deadline: z.string().datetime().optional(),
+  origin: PluginInvocationOriginSchema.default("agent")
 });
 export type InvokePluginCapabilityInput = z.infer<typeof InvokePluginCapabilityInputSchema>;
 
@@ -351,6 +371,7 @@ export const PluginCapabilityEventPayloadSchema = z.object({
   capabilityId: PluginIdentifierSchema,
   callId: z.string().min(1),
   conversationId: z.string().min(1),
+  origin: PluginInvocationOriginSchema.default("agent"),
   event: CapabilityEventSchema
 });
 export type PluginCapabilityEventPayload = z.infer<typeof PluginCapabilityEventPayloadSchema>;

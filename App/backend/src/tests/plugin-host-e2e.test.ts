@@ -1,5 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,6 +14,8 @@ import {
   PluginAdapterRegistry
 } from "../adapters/outbound/plugin-runtime/index.js";
 import { createPluginSkillManager } from "../adapters/outbound/plugin-skill/index.js";
+import { createPluginAsrService } from "../services/plugin-asr-service.js";
+import { createPluginHostServiceRouter } from "../services/plugin-host-service-router.js";
 import { createAppStateStore, type AppStateStore } from "../infrastructure/app-state-store/index.js";
 import { createPluginService } from "../services/plugin-service.js";
 import { createPluginLocalArtifactService } from "../services/plugin-local-artifact-service.js";
@@ -224,6 +227,117 @@ describe("plugin host end to end", () => {
     expect(existsSync(join(skillsRoot, "literature-review"))).toBe(false);
     expect((await client.listTools()).tools).toHaveLength(0);
   });
+
+  it("gates a closed-source plugin on its entitlement and runs its recording flow unsandboxed", async () => {
+    root = mkdtempSync(join(tmpdir(), "memmy-sealed-plugin-e2e-"));
+    const artifactRoot = join(root, "plugin");
+    const mediaRoot = join(root, "agent-data", "media");
+    const pluginDataRoot = join(root, "plugin-data");
+    mkdirSync(join(artifactRoot, "runtime"), { recursive: true });
+    mkdirSync(mediaRoot, { recursive: true });
+    writeFileSync(join(artifactRoot, "package.json"), JSON.stringify({ type: "module" }));
+    writeFileSync(join(artifactRoot, "runtime", "command.js"), recordingPluginFixture());
+    const recordingPath = join(mediaRoot, "interview.webm");
+    writeFileSync(recordingPath, "opus bytes");
+
+    store = createAppStateStore({ databasePath: join(root, "app.sqlite") });
+    const manifest = sealedRecordingManifest();
+    let granted: string[] = [];
+    const isEntitlementGranted = (entitlement: string) => granted.includes(entitlement);
+    let spawnedCommand = "";
+    const transcribe = vi.fn(async () => ({
+      text: "Q: start date? A: March 2021.",
+      modelId: "qwen-audio-3.0-asr-flash-filetrans",
+      provider: "memmy_account" as const,
+      source: "account" as const,
+      transcribedAt: new Date().toISOString(),
+      segments: [
+        { speakerId: 0, text: "start date?", startMs: 0, endMs: 1200 },
+        { speakerId: 1, text: "March 2021.", startMs: 1200, endMs: 2600 }
+      ]
+    }));
+    const runtimeHost = createPluginRuntimeHost(new PluginAdapterRegistry([
+      createCommandPluginAdapter({
+        fileInputRoots: [mediaRoot],
+        pluginDataRoot,
+        isEntitlementGranted,
+        hostServices: createPluginHostServiceRouter([{
+          services: ["asr"],
+          invoker: createPluginAsrService({ asr: { transcribe } as never, audioRoots: [mediaRoot] })
+        }]),
+        spawnFn: ((command, args, options) => {
+          spawnedCommand = command;
+          return spawn(command, args, options as Parameters<typeof spawn>[2]) as ReturnType<typeof spawn>;
+        }) as typeof spawn
+      })
+    ]));
+    const service = createPluginService({
+      repository: store.repositories.plugins,
+      secretStore: store.secretStore,
+      registry: createInMemoryPluginRegistry([{ manifest }]),
+      runtimeHost,
+      artifactManager: {
+        install: async () => ({ artifactHash: "fixture", rootPath: artifactRoot }),
+        readTextFile: async (_plugin, relativePath) => readFileSync(join(artifactRoot, relativePath), "utf8"),
+        remove: async () => undefined
+      },
+      localArtifactService: createPluginLocalArtifactService({ pluginDataRoot }),
+      isEntitlementGranted
+    });
+
+    // Without the grant the release may be reachable but must not install.
+    await expect(service.install(manifest.id)).rejects.toMatchObject({ code: "plugin_entitlement_required" });
+
+    granted = ["plugin:legal-labor"];
+    await service.install(manifest.id);
+    service.configure(manifest.id, { config: {}, secrets: {} });
+    await service.approvePermissions(manifest.id, manifest.permissions);
+    await service.enable(manifest.id);
+
+    const iterator = service.invoke({
+      callId: "call-record",
+      pluginId: manifest.id,
+      capabilityId: "collect_interview",
+      conversationId: "chat-1",
+      input: {}
+    })[Symbol.asyncIterator]();
+    const interaction = await iterator.next();
+    expect(interaction.value).toMatchObject({
+      type: "interaction",
+      request: { type: "audio-record" }
+    });
+
+    // The card records, the Host transcribes, and the plugin only ever sees
+    // paths: it holds neither the microphone nor the ASR credentials.
+    const interactionId = interaction.value?.type === "interaction" ? interaction.value.request.interactionId : "";
+    await service.respond(manifest.id, "call-record", interactionId, {
+      audio: { path: recordingPath, name: "interview.webm", mime: "audio/webm" },
+      transcript: { path: recordingPath, name: "interview.txt", mime: "text/plain" }
+    });
+
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: {
+        type: "result",
+        output: { speakers: [0, 1], text: "Q: start date? A: March 2021." }
+      }
+    });
+    // Speaker separation is the whole reason this goes through the Host service.
+    expect(transcribe).toHaveBeenCalledWith(expect.objectContaining({ diarization: true }));
+    expect(spawnedCommand).not.toMatch(/sandbox-exec|bwrap/u);
+
+    // Revocation has to bite before the reconciler gets around to disabling
+    // the plugin, otherwise a revoked account keeps running the copy it
+    // already downloaded.
+    granted = [];
+    const revoked = service.invoke({
+      callId: "call-after-revoke",
+      pluginId: manifest.id,
+      capabilityId: "collect_interview",
+      conversationId: "chat-1",
+      input: {}
+    })[Symbol.asyncIterator]();
+    await expect(revoked.next()).rejects.toMatchObject({ code: "plugin_entitlement_required" });
+  });
 });
 
 function commandReviewManifest() {
@@ -298,6 +412,79 @@ process.stdout.write(JSON.stringify({
   artifact: { id: "review", name: "review.md", mediaType: "text/markdown", uri: pathToFileURL(outputPath).href }
 }) + "\\n");
 process.stdout.write(JSON.stringify({ type: "result", output: { ok: true } }) + "\\n");
+lines.close();
+`;
+}
+
+
+function sealedRecordingManifest() {
+  return {
+    apiVersion: "memmy/v1" as const,
+    id: "closed-source-interview",
+    name: "Interview Collector",
+    version: "1.0.0",
+    requiredEntitlement: "plugin:legal-labor",
+    modelPolicy: { requiredSource: "account" as const },
+    runtime: {
+      adapter: "command" as const,
+      config: {
+        command: "runtime/command.js",
+        interpreter: "node",
+        inputMode: "stdin-json",
+        outputMode: "ndjson",
+        interactive: true,
+        sandbox: "none" as const
+      }
+    },
+    capabilities: [{
+      id: "collect_interview",
+      name: "Collect interview",
+      description: "Record an interview and transcribe it with speaker separation.",
+      inputSchema: { type: "object" },
+      outputSchema: { type: "object" },
+      execution: "job" as const
+    }],
+    permissions: [
+      { type: "host-service" as const, services: ["asr"] }
+    ],
+    configSchema: { type: "object", additionalProperties: false }
+  };
+}
+
+function recordingPluginFixture(): string {
+  return `
+import { createInterface } from "node:readline";
+const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
+const iterator = lines[Symbol.asyncIterator]();
+JSON.parse((await iterator.next()).value);
+process.stdout.write(JSON.stringify({
+  type: "interaction",
+  request: {
+    interactionId: "interview-recording",
+    type: "audio-record",
+    payload: { title: "Record the interview" },
+    responseSchema: {
+      type: "object",
+      required: ["audio"],
+      properties: { audio: { type: "object", required: ["path"] } }
+    }
+  }
+}) + "\\n");
+const response = JSON.parse((await iterator.next()).value).response;
+process.stdout.write(JSON.stringify({
+  type: "host-service-request",
+  requestId: "asr-1",
+  service: "asr",
+  input: { path: response.audio.path, mimeType: response.audio.mime, diarization: true }
+}) + "\\n");
+const transcription = JSON.parse((await iterator.next()).value).response;
+process.stdout.write(JSON.stringify({
+  type: "result",
+  output: {
+    text: transcription.text,
+    speakers: [...new Set(transcription.segments.map((segment) => segment.speakerId))]
+  }
+}) + "\\n");
 lines.close();
 `;
 }

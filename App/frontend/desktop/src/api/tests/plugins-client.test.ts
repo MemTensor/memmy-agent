@@ -10,7 +10,9 @@ describe("plugins client", () => {
     const fetchMock = vi.fn(async (request: URL, init?: RequestInit) => {
       if (request.pathname.endsWith("/invoke")) {
         expect(init?.method).toBe("POST");
-        expect(JSON.parse(String(init?.body))).toEqual({ conversationId: "chat-1", input: { topic: "memory" } });
+        // The client parses through the contract, so a caller that says nothing
+        // about origin sends the Agent default rather than omitting the field.
+        expect(JSON.parse(String(init?.body))).toEqual({ conversationId: "chat-1", input: { topic: "memory" }, origin: "agent" });
         return Response.json({ callId: "call-1", event: { type: "result", output: { ok: true } } });
       }
       return Response.json({ html: request.pathname.endsWith("/surface") ? "surface" : "renderer" });

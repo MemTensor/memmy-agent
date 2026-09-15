@@ -1,5 +1,6 @@
 /** Asr module. */
 import {
+  ASR_MAX_REQUEST_BYTES,
   AsrTranscriptionInputSchema,
   AsrTranscriptionResponseSchema
 } from "@memmy/local-api-contracts";
@@ -17,7 +18,13 @@ export interface RegisterAsrRoutesOptions {
 export function registerAsrRoutes(app: FastifyInstance, options: RegisterAsrRoutesOptions): void {
   app.post(
     "/api/asr/transcriptions",
-    { preHandler: options.authenticateRuntimeToken },
+    {
+      preHandler: options.authenticateRuntimeToken,
+      // Fastify defaults to 1 MiB, which only fits a couple of minutes of
+      // speech. Raised here rather than server-wide so every other route keeps
+      // the tight default.
+      bodyLimit: ASR_MAX_REQUEST_BYTES
+    },
     withErrorEnvelope(async (request, reply) => {
       const input = AsrTranscriptionInputSchema.parse(request.body);
       const response = AsrTranscriptionResponseSchema.parse(await options.asr.transcribe(input));

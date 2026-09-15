@@ -195,8 +195,6 @@ export interface CloudAsrTranscriptionInput {
   durationMs?: number;
   /** Requests speaker separation. Honoured only by upstream models that support it. */
   diarization?: boolean;
-  /** Domain terms biasing recognition. */
-  hotwords?: readonly string[];
 }
 
 /** Contract for cloud asr transcription result. */

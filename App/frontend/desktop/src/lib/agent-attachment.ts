@@ -2,6 +2,8 @@ import { agentImageAccept, agentImageExtensionForMime, isAgentImageMime, type Ag
 
 export const AGENT_ATTACHMENT_MAX_COUNT = 4;
 export const AGENT_FILE_TARGET_MAX_BYTES = 10 * 1024 * 1024;
+/** Recordings run far past the document limit, so audio carries its own ceiling. */
+export const AGENT_AUDIO_TARGET_MAX_BYTES = 200 * 1024 * 1024;
 
 const AGENT_ATTACHMENT_UNSAFE_FILENAME_CHARS = /[<>:"\/\\|?*\x00-\x1F]/g;
 
@@ -28,11 +30,24 @@ export const AGENT_TEXT_MIME_BY_EXTENSION = {
   ".cfg": "text/plain",
 } as const;
 
+export const AGENT_AUDIO_MIME_BY_EXTENSION = {
+  ".aac": "audio/aac",
+  ".flac": "audio/flac",
+  ".m4a": "audio/mp4",
+  ".mp3": "audio/mpeg",
+  ".ogg": "audio/ogg",
+  ".opus": "audio/opus",
+  ".wav": "audio/wav",
+  ".webm": "audio/webm",
+} as const;
+
 export type AgentFileMime =
   | typeof AGENT_DOCUMENT_MIME_BY_EXTENSION[keyof typeof AGENT_DOCUMENT_MIME_BY_EXTENSION]
   | typeof AGENT_TEXT_MIME_BY_EXTENSION[keyof typeof AGENT_TEXT_MIME_BY_EXTENSION]
   | "text/xml"
   | "text/yaml";
+
+export type AgentAudioMime = typeof AGENT_AUDIO_MIME_BY_EXTENSION[keyof typeof AGENT_AUDIO_MIME_BY_EXTENSION];
 
 const AGENT_FILE_MIME_TYPES: readonly AgentFileMime[] = [
   ...new Set<AgentFileMime>([
@@ -49,13 +64,23 @@ const AGENT_FILE_EXTENSIONS = new Set([
   ...Object.keys(AGENT_TEXT_MIME_BY_EXTENSION),
 ]);
 
-export type AgentUploadMime = AgentImageMime | AgentFileMime;
-export type AgentAttachmentKind = "image" | "file";
+export type AgentUploadMime = AgentImageMime | AgentFileMime | AgentAudioMime;
+export type AgentAttachmentKind = "image" | "file" | "audio";
 
 export interface AgentAttachmentClassification {
   kind: AgentAttachmentKind;
   mime: AgentUploadMime;
   extension: string;
+}
+
+export interface ClassifyAgentAttachmentOptions {
+  /**
+   * Accepts audio files. Off by default: the chat composer hands attachments to
+   * the model as documents, where a recording is useless. Surfaces that route
+   * audio somewhere that understands it — the plugin file-input card feeding the
+   * `asr` host service — opt in.
+   */
+  allowAudio?: boolean;
 }
 
 export function agentAttachmentAccept(): string {
@@ -70,7 +95,10 @@ export function agentAttachmentAccept(): string {
   ].join(",");
 }
 
-export function classifyAgentAttachmentFile(file: Pick<File, "name" | "type">): AgentAttachmentClassification | null {
+export function classifyAgentAttachmentFile(
+  file: Pick<File, "name" | "type">,
+  options: ClassifyAgentAttachmentOptions = {},
+): AgentAttachmentClassification | null {
   const declaredMime = String(file.type ?? "").toLowerCase();
   if (isAgentImageMime(declaredMime)) {
     return {
@@ -81,6 +109,24 @@ export function classifyAgentAttachmentFile(file: Pick<File, "name" | "type">): 
   }
 
   const extension = fileExtension(file.name);
+
+  const audioMime = AGENT_AUDIO_MIME_BY_EXTENSION[extension as keyof typeof AGENT_AUDIO_MIME_BY_EXTENSION];
+  if (audioMime) {
+    // Browsers label the same recording audio/mp4, audio/x-m4a or nothing at
+    // all depending on the platform, so the extension decides and the declared
+    // type only has to not contradict it. The Host verifies the container
+    // signature before storing the upload.
+    const contradicts = declaredMime !== "" && !declaredMime.startsWith("audio/") && declaredMime !== "application/octet-stream";
+    if (!options.allowAudio || contradicts) {
+      return null;
+    }
+    return {
+      kind: "audio",
+      mime: audioMime,
+      extension,
+    };
+  }
+
   if (!AGENT_FILE_EXTENSIONS.has(extension)) {
     return null;
   }

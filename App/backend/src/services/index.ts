@@ -76,6 +76,7 @@ import { createPluginModelInferenceService } from "./plugin-model-inference-serv
 import { reconcileEntitledPlugins } from "./plugin-entitlement-reconcile-service.js";
 import { createPluginAsrService } from "./plugin-asr-service.js";
 import { createPluginHostServiceRouter } from "./plugin-host-service-router.js";
+import { resolvePluginModelSelection } from "./plugin-model-policy.js";
 
 export interface BackendServices {
   memoryClient: MemoryClient;
@@ -169,29 +170,12 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
   });
   const pluginFileInputRoots = [join(resolveAgentDataRoot(process.env), "media")];
   const pluginModelInference = createPluginModelInferenceService({
-    resolveModel: async (pluginId) => {
-      const userMode = options.appStateStore.repositories.bootstrap.getAppSettings().userMode;
-      const account = accountSessionRepository.get();
-      const activeAccountId = account.authenticated ? account.profile.userId : null;
-
-      if (pluginRepository.get(pluginId)?.manifest.modelPolicy?.requiredSource === "account") {
-        if (userMode !== "account" || !activeAccountId) return null;
-        const preset = await memmyConfigWriter.resolveAssignedModel?.({
-          mode: "account",
-          activeAccountId,
-          capability: "agent"
-        });
-        // Account mode still permits BYOK presets, so the resolved source must be checked too.
-        return preset?.ok && preset.context.source === "account" ? preset : null;
-      }
-
-      if (userMode !== "account" && userMode !== "byok") return null;
-      return await memmyConfigWriter.resolveAssignedModel?.({
-        mode: userMode,
-        activeAccountId,
-        capability: "agent"
-      }) ?? null;
-    },
+    resolveModel: (pluginId) => resolvePluginModelSelection({
+      accountOnly: pluginRepository.get(pluginId)?.manifest.modelPolicy?.requiredSource === "account",
+      userMode: options.appStateStore.repositories.bootstrap.getAppSettings().userMode,
+      account: accountSessionRepository.get(),
+      resolveAssignedModel: memmyConfigWriter.resolveAssignedModel
+    }),
     embeddingInference: options.memoryClient.embeddingInference
       ? (input, inferenceOptions) => options.memoryClient.embeddingInference!(input, inferenceOptions)
       : undefined

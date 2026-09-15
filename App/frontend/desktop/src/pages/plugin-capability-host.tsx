@@ -32,10 +32,11 @@ import type {
 import type { AsrClient } from "../api/asr-client.js";
 import type { UploadAgentMediaInput, UploadedAgentMedia } from "../api/memmy-agent-client.js";
 import type { PluginsClient } from "../api/plugins-client.js";
-import { useAsrRecorder } from "./asr-recorder.js";
+import { asrRecordingTimeRemainingMs, useAsrRecorder } from "./asr-recorder.js";
 import { usePluginChatFeedback, type PluginChatFeedback, type PluginUiCall } from "../app/plugin-ui-context.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { classifyAgentAttachmentFile } from "../lib/agent-attachment.js";
+import { persistRecording } from "../lib/recording-deliverables.js";
 import { materializePluginUploadFile } from "../lib/plugin-upload-file.js";
 import { startBrowserDownload } from "./agent-message-content.js";
 
@@ -70,11 +71,15 @@ export interface PluginRendererInteractionState {
 export function PluginCapabilityHost(props: PluginCapabilityHostProps) {
   const { t } = useTranslation();
   const [answeredInteractions, setAnsweredInteractions] = useState<Set<string>>(() => new Set());
+  const [dismissedCalls, setDismissedCalls] = useState<Set<string>>(() => new Set());
   const plugins = useMemo(() => new Map(props.plugins.map((plugin) => [plugin.id, plugin])), [props.plugins]);
   const interactionStates = useMemo(() => resolveRendererInteractionStates(props.calls), [props.calls]);
   const calls = useMemo(
-    () => selectVisiblePluginCalls(props.calls, answeredInteractions),
-    [answeredInteractions, props.calls]
+    () => occludeUserRaisedCalls(
+      selectVisiblePluginCalls(props.calls, answeredInteractions)
+        .filter((call) => !dismissedCalls.has(`${call.pluginId}:${call.callId}`))
+    ),
+    [answeredInteractions, dismissedCalls, props.calls]
   );
   const orderedCalls = useMemo(() => orderPluginCallsForDisplay(calls), [calls]);
   if (calls.length === 0) return null;
@@ -107,6 +112,17 @@ export function PluginCapabilityHost(props: PluginCapabilityHostProps) {
           if (!props.client) return Promise.reject(new Error("Plugin client unavailable"));
           return props.client.cancel(call.pluginId, call.callId);
         };
+        // Closing a card the user raised themselves is not an answer. The call
+        // is cancelled so the plugin stops waiting, and the card is dropped
+        // locally so a cancellation error does not take its place — the user
+        // asked for it to go away, not to be told it went away.
+        const dismiss = async () => {
+          setDismissedCalls((current) => new Set(current).add(`${call.pluginId}:${call.callId}`));
+          await cancel().catch(() => undefined);
+        };
+        const dismissable = call.origin === "user"
+          && call.events.some((event) => event.type === "interaction")
+          && !call.events.some((event) => event.type === "result" || event.type === "error");
         const cards = (
           <GenericPluginCards
             events={call.events}
@@ -123,9 +139,22 @@ export function PluginCapabilityHost(props: PluginCapabilityHostProps) {
         );
         return (
           <div key={call.callId} className="rounded-card border border-border-stone/35 bg-background-paper p-3 shadow-sm">
-            <p className="mb-2 text-xs font-medium text-text-ink/55">
-              {plugin?.manifest.name ?? call.pluginId}
-            </p>
+            <div className="mb-2 flex items-start justify-between gap-2">
+              <p className="text-xs font-medium text-text-ink/55">
+                {plugin?.manifest.name ?? call.pluginId}
+              </p>
+              {dismissable ? (
+                <button
+                  type="button"
+                  aria-label={t("plugin.ui.dismissCard")}
+                  title={t("plugin.ui.dismissCard")}
+                  className="-mr-1 -mt-1 rounded px-1 text-xs text-text-ink/45 hover:text-text-ink/80"
+                  onClick={() => void dismiss()}
+                >
+                  ✕
+                </button>
+              ) : null}
+            </div>
             {usesRenderer && renderer ? (
               <SandboxedPluginRenderer
                 call={call}
@@ -292,7 +321,7 @@ function InteractionCard(props: {
   }
 
   if (props.request.type === "audio-record") {
-    return <AudioRecordCard request={props.request} title={title} description={description} status={status} onStatus={setStatus} onRespond={props.onRespond} asrClient={props.asrClient} />;
+    return <AudioRecordCard request={props.request} title={title} description={description} status={status} onStatus={setStatus} onRespond={props.onRespond} asrClient={props.asrClient} uploadFiles={props.onUploadFiles} />;
   }
 
   return (
@@ -365,16 +394,18 @@ function AudioRecordCard(props: {
   onStatus(value: "idle" | "submitting" | "answered" | "error"): void;
   onRespond(interactionId: string, response: unknown): Promise<void>;
   asrClient?: AsrClient;
+  uploadFiles?: (files: UploadAgentMediaInput[]) => Promise<UploadedAgentMedia[]>;
 }) {
   const { t } = useTranslation();
   const payload = asRecord(props.request.payload);
   const diarization = payload.diarization === true;
-  const hotwords = readStrings(payload.hotwords);
   const allowSkip = payload.allowSkip === true;
   const recorder = useAsrRecorder(props.asrClient);
   const [elapsedMs, setElapsedMs] = useState(0);
   const answered = props.status === "answered";
   const busy = props.status === "submitting" || recorder.isTranscribing;
+
+  const remainingMs = asrRecordingTimeRemainingMs(elapsedMs);
 
   useEffect(() => {
     if (recorder.status !== "recording") return;
@@ -385,18 +416,30 @@ function AudioRecordCard(props: {
   const finish = async () => {
     props.onStatus("submitting");
     try {
-      const result = await recorder.finishAndTranscribe({ diarization, hotwords });
+      const result = await recorder.finishAndTranscribe({ diarization });
+      // The recording and its transcript are deliverables in their own right,
+      // so both are persisted and handed back as files. The plugin still never
+      // receives audio bytes, only a Host-owned path.
+      const files = await persistRecording(result, t, props.uploadFiles);
       await props.onRespond(props.request.interactionId, {
         text: result.text,
         segments: result.segments ?? [],
-        durationMs: elapsedMs,
-        transcribedAt: result.transcribedAt
+        durationMs: result.durationMs ?? elapsedMs,
+        transcribedAt: result.transcribedAt,
+        ...files
       });
       props.onStatus("answered");
     } catch {
       props.onStatus("error");
     }
   };
+  // A whole recording travels as one payload, so it has a hard ceiling. Stop at
+  // it and transcribe what was captured rather than losing the interview.
+  useEffect(() => {
+    if (recorder.status !== "recording" || remainingMs > 0) return;
+    void finish();
+  }, [recorder.status, remainingMs]);
+
   const skip = async () => {
     recorder.cancel();
     props.onStatus("submitting");
@@ -440,6 +483,11 @@ function AudioRecordCard(props: {
             <span className="text-xs tabular-nums text-text-ink/45" role="timer" aria-label={t("plugin.ui.audio.elapsed")}>
               {formatElapsed(elapsedMs)}
             </span>
+            {recorder.isRecording && remainingMs <= REMAINING_WARNING_MS ? (
+              <span className="text-xs tabular-nums text-status-error" role="status">
+                {t("plugin.ui.audio.remaining", { time: formatElapsed(remainingMs) })}
+              </span>
+            ) : null}
           </div>
           {recorder.isTranscribing ? <p className="mt-2 text-xs text-text-ink/50" role="status">{t("plugin.ui.audio.transcribing")}</p> : null}
           {!props.asrClient ? <p className="mt-2 text-xs text-status-error" role="alert">{t("plugin.ui.audio.unavailable")}</p> : null}
@@ -451,6 +499,9 @@ function AudioRecordCard(props: {
     </div>
   );
 }
+
+/** Point at which the recording card starts counting down to the hard stop. */
+const REMAINING_WARNING_MS = 5 * 60 * 1_000;
 
 /** Formats a recording duration as mm:ss. */
 function formatElapsed(elapsedMs: number): string {
@@ -531,7 +582,7 @@ function FileInputCard(props: {
     props.onStatus("submitting");
     try {
       const uploaded = await props.onUploadFiles(readyFiles.map((file) => {
-        const classification = classifyAgentAttachmentFile(file)!;
+        const classification = classifyAgentAttachmentFile(file, { allowAudio: true })!;
         return { blob: file, name: file.name, kind: classification.kind, mime: classification.mime };
       }));
       const feedback = pendingFeedback.current;
@@ -745,6 +796,28 @@ export function selectVisiblePluginCalls(calls: PluginUiCall[], answered: Readon
   });
 }
 
+/**
+ * Hides user-raised cards while the Agent is waiting on one of its own.
+ *
+ * User-raised cards are pinned entry points the user opens whenever it suits
+ * them, so they can already be on screen when the model asks its own question.
+ * Two live cards competing for the same answer is ambiguous, and the Agent's is
+ * the one blocking progress, so it wins. Nothing is cancelled — the hidden card
+ * comes back once the Agent's interaction is answered.
+ *
+ * @param calls Visible calls.
+ * @returns Calls with occluded ones removed.
+ */
+export function occludeUserRaisedCalls(calls: PluginUiCall[]): PluginUiCall[] {
+  const agentIsWaiting = calls.some((call) => (
+    call.origin === "agent"
+    && call.events.some((event) => event.type === "interaction")
+    && !call.events.some((event) => event.type === "result" || event.type === "error")
+  ));
+  if (!agentIsWaiting) return calls;
+  return calls.filter((call) => call.origin !== "user" || !call.events.some((event) => event.type === "interaction"));
+}
+
 /** Keep active work closest to the current Agent turn and completed deliveries at the bottom. */
 export function orderPluginCallsForDisplay(calls: PluginUiCall[]): PluginUiCall[] {
   const isCompletedDelivery = (call: PluginUiCall) => (
@@ -861,7 +934,7 @@ function SandboxedPluginRenderer(props: {
         uploading.current.add(interactionId);
         const uploadFiles = props.onUploadFiles;
         void Promise.all(files.map(async (file: File) => {
-          const classification = classifyAgentAttachmentFile(file)!;
+          const classification = classifyAgentAttachmentFile(file, { allowAudio: true })!;
           return { blob: await materializePluginUploadFile(file), name: file.name, kind: classification.kind, mime: classification.mime };
         })).then(uploadFiles).then(
           (uploaded) => reply({ ok: true, files: uploaded }),
@@ -1051,7 +1124,7 @@ function classifyPluginInputFile(
   const name = file.name.toLowerCase();
   const rule = rules.find((item) => item.extensions.some((extension) => name.endsWith(extension)));
   if (rule) return { file, status: "blocked", code: rule.code, message: rule.message };
-  if (!matchesAccept(file, accept) || !classifyAgentAttachmentFile(file)) {
+  if (!matchesAccept(file, accept) || !classifyAgentAttachmentFile(file, { allowAudio: true })) {
     return { file, status: "blocked", code: "file_unsupported", message: t("plugin.ui.fileUnsupported") };
   }
   if (maxBytes && file.size > maxBytes) {

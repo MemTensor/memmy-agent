@@ -431,9 +431,30 @@ const UploadedAgentFileSchema = z.object({
   bytes: z.number()
 });
 
+const UploadedAgentAudioMimeSchema = z.union([
+  z.literal("audio/aac"),
+  z.literal("audio/flac"),
+  z.literal("audio/mp4"),
+  z.literal("audio/mpeg"),
+  z.literal("audio/ogg"),
+  z.literal("audio/opus"),
+  z.literal("audio/wav"),
+  z.literal("audio/webm")
+]);
+
+const UploadedAgentAudioSchema = z.object({
+  path: z.string(),
+  url: z.string(),
+  name: z.string(),
+  kind: z.literal("audio"),
+  mime: UploadedAgentAudioMimeSchema,
+  bytes: z.number()
+});
+
 const UploadedAgentMediaSchema = z.discriminatedUnion("kind", [
   UploadedAgentImageSchema,
-  UploadedAgentFileSchema
+  UploadedAgentFileSchema,
+  UploadedAgentAudioSchema
 ]);
 
 const UploadedAgentMediaResponseSchema = z.object({
@@ -2937,7 +2958,7 @@ const AGENT_UPLOAD_UNSAFE_FILENAME_CHARS = new RegExp(
 function uploadFilenameForMedia(name: string, mime: UploadedAgentMedia["mime"], kind: UploadedAgentMedia["kind"]): string {
   const fallback = kind === "image" ? "image" : "attachment";
   const base = uploadFilenameBase(name, fallback);
-  if (kind === "file") {
+  if (kind === "file" || kind === "audio") {
     return base;
   }
 

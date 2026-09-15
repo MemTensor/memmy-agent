@@ -35,16 +35,19 @@ export function createPluginSkillManager(options: CreatePluginSkillManagerOption
         assertDescendant(skillsRoot, target);
         await assertAvailableTarget(target, plugin.id);
         const temp = await mkdtemp(join(skillsRoot, ".plugin-skill-"));
+        // `cp` refuses to write into a directory that already exists while
+        // `errorOnExist` is set, and mkdtemp just created one, so stage inside
+        // it rather than onto it.
+        const staged = join(temp, "skill");
         try {
-          await cp(sourceDirectory, temp, { recursive: true, errorOnExist: true, force: false, verbatimSymlinks: true });
-          const copiedEntry = join(temp, "SKILL.md");
+          await cp(sourceDirectory, staged, { recursive: true, errorOnExist: true, force: false, verbatimSymlinks: true });
+          const copiedEntry = join(staged, "SKILL.md");
           if (!(await lstat(copiedEntry)).isFile()) throw new Error(`Plugin skill directory does not contain SKILL.md: ${skill.entry}`);
-          await writeFile(join(temp, OWNER_FILE), JSON.stringify({ pluginId: plugin.id, skillId: skill.id, version: plugin.version }), "utf8");
+          await writeFile(join(staged, OWNER_FILE), JSON.stringify({ pluginId: plugin.id, skillId: skill.id, version: plugin.version }), "utf8");
           await rm(target, { recursive: true, force: true });
-          await rename(temp, target);
-        } catch (error) {
+          await rename(staged, target);
+        } finally {
           await rm(temp, { recursive: true, force: true });
-          throw error;
         }
       }
     },

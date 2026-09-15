@@ -332,4 +332,100 @@ describe("CommandPluginAdapter", () => {
     expect(profile).toContain(`(subpath ${JSON.stringify(dependency.readRoots[0])})`);
     expect(profile).toContain(`(subpath ${JSON.stringify(dependency.executableRoots[0])})`);
   });
+
+  describe("sandbox: none", () => {
+    /**
+     * Activates a `sandbox: "none"` plugin and reports the command that was
+     * actually spawned, which is how the sandbox decision is observable:
+     * the sandboxed path launches the sandbox binary, the exempt path
+     * launches the plugin itself.
+     */
+    async function spawnedCommandFor(options: {
+      entitlement: string | null;
+      granted: string[];
+      platform?: NodeJS.Platform;
+    }): Promise<string> {
+      let spawnedCommand = "";
+      const adapter = createCommandPluginAdapter({
+        platform: options.platform ?? "darwin",
+        isEntitlementGranted: (entitlement) => options.granted.includes(entitlement),
+        spawnFn: ((command, _args, spawnOptions) => {
+          spawnedCommand = command;
+          // Runs something harmless instead, so the assertion is about which
+          // launch was chosen rather than about the sandbox working here.
+          return spawn(process.execPath, ["-e", "console.log('{}')"], spawnOptions as Parameters<typeof spawn>[2]);
+        }) as typeof spawn
+      });
+      const pluginContext = context();
+      pluginContext.plugin.manifest.runtime.config = {
+        ...pluginContext.plugin.manifest.runtime.config,
+        sandbox: "none"
+      };
+      if (options.entitlement) pluginContext.plugin.manifest.requiredEntitlement = options.entitlement;
+      const session = await adapter.activate(pluginContext);
+      await collect(adapter.invoke(session, {
+        callId: "call-1",
+        pluginId: pluginContext.plugin.id,
+        capabilityId: "run",
+        conversationId: "conversation-1",
+        input: {}
+      }));
+      return spawnedCommand;
+    }
+
+    it("runs a plugin unsandboxed when the account holds its declared entitlement", async () => {
+      const command = await spawnedCommandFor({
+        entitlement: "plugin:legal-labor",
+        granted: ["plugin:legal-labor"]
+      });
+
+      expect(command).not.toMatch(/sandbox-exec|bwrap/u);
+      expect(command).toContain("runtime/plugin");
+    });
+
+    it("keeps the sandbox on when the account does not hold the entitlement", async () => {
+      // A third-party plugin can copy `sandbox: "none"` and any entitlement
+      // name into its manifest, so the grant has to come from the account.
+      const command = await spawnedCommandFor({
+        entitlement: "plugin:legal-labor",
+        granted: []
+      });
+
+      expect(command).toMatch(/sandbox-exec$/u);
+    });
+
+    it("keeps the sandbox on when the manifest declares no entitlement at all", async () => {
+      const command = await spawnedCommandFor({ entitlement: null, granted: ["plugin:legal-labor"] });
+
+      expect(command).toMatch(/sandbox-exec$/u);
+    });
+
+    it("runs unsandboxed on Windows for an entitled plugin", async () => {
+      // Windows has no sandbox implementation, so an entitled first-party
+      // plugin is the only way a command plugin runs there at all.
+      const command = await spawnedCommandFor({
+        entitlement: "plugin:legal-labor",
+        granted: ["plugin:legal-labor"],
+        platform: "win32"
+      });
+
+      expect(command).not.toMatch(/sandbox-exec|bwrap/u);
+    });
+
+    it("refuses to activate an unentitled plugin on Windows", async () => {
+      const adapter = createCommandPluginAdapter({
+        platform: "win32",
+        isEntitlementGranted: () => false
+      });
+      const pluginContext = context();
+      pluginContext.plugin.manifest.runtime.config = {
+        ...pluginContext.plugin.manifest.runtime.config,
+        sandbox: "none"
+      };
+
+      // Falling back to an unsandboxed child process here would hand every
+      // third-party plugin the thing the sandbox exists to prevent.
+      await expect(adapter.activate(pluginContext)).rejects.toThrow(/unsupported on win32/u);
+    });
+  });
 });

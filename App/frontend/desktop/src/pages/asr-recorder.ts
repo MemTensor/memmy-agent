@@ -1,7 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AsrTranscriptionResponse } from "@memmy/local-api-contracts";
+import { ASR_MAX_AUDIO_BYTES, type AsrTranscriptionResponse } from "@memmy/local-api-contracts";
 import type { AsrClient } from "../api/asr-client.js";
 import { formatMessage, type MessageKey, zhCNMessages } from "../i18n/messages.js";
+
+/**
+ * Opus bitrate for recordings, mono.
+ *
+ * Chosen so a two-hour interview still fits {@link ASR_MAX_AUDIO_BYTES} in a
+ * single request. Opus is designed for speech at this rate, and ASR cares about
+ * intelligibility rather than fidelity.
+ */
+export const ASR_AUDIO_BITS_PER_SECOND = 16_000;
+
+/** Longest recording that fits the payload ceiling at the pinned bitrate. */
+export const ASR_MAX_RECORDING_MS = Math.floor((ASR_MAX_AUDIO_BYTES * 8) / ASR_AUDIO_BITS_PER_SECOND) * 1_000;
 
 const EMPTY_AUDIO_ERROR_MESSAGE = formatMessage(zhCNMessages["asr.error.emptyAudio"]);
 const MICROPHONE_PERMISSION_ERROR_MESSAGE = formatMessage(zhCNMessages["asr.error.microphonePermissionDenied"]);
@@ -12,8 +24,6 @@ export type MicrophoneAccessStatus = "not-determined" | "granted" | "denied" | "
 export interface AsrTranscribeOptions {
   /** Requests speaker separation. Honoured only by upstream models that support it. */
   diarization?: boolean;
-  /** Domain terms biasing recognition. */
-  hotwords?: readonly string[];
 }
 
 export interface AsrRecorder {
@@ -26,7 +36,15 @@ export interface AsrRecorder {
   pause(): void;
   resume(): void;
   cancel(): void;
-  finishAndTranscribe(options?: AsrTranscribeOptions): Promise<AsrTranscriptionResponse>;
+  finishAndTranscribe(options?: AsrTranscribeOptions): Promise<AsrRecordingTranscription>;
+}
+
+/** A finished recording together with its transcript. */
+export interface AsrRecordingTranscription extends AsrTranscriptionResponse {
+  /** The audio as captured, for callers that have to keep or upload the original. */
+  recording: Blob;
+  recordingMimeType: string;
+  durationMs: number | undefined;
 }
 
 export interface EncodedAudio {
@@ -113,7 +131,11 @@ export function useAsrRecorder(asrClient?: AsrClient, options: AsrRecorderOption
       setStatus("starting");
       let stream: MediaStream;
       try {
-        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        // Mono at speech sample rate: a stereo track doubles the payload for no
+        // recognition benefit, and diarization requires a single channel.
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: { channelCount: 1, sampleRate: 16_000, echoCancellation: true, noiseSuppression: true }
+        });
       } catch (mediaError) {
         if (isMicrophonePermissionDenial(mediaError)) {
           throw new MicrophonePermissionError("denied");
@@ -178,17 +200,23 @@ export function useAsrRecorder(asrClient?: AsrClient, options: AsrRecorderOption
       stopStream(streamRef.current);
       streamRef.current = null;
       startedAtRef.current = null;
+      if (blob.size > ASR_MAX_AUDIO_BYTES) {
+        // Fail here with the recording still in hand rather than letting the
+        // gateway reject the payload after a long upload.
+        throw new Error(formatMessage(zhCNMessages["asr.error.audioTooLarge"]));
+      }
       const encoded = await blobToAudioBase64(blob, options.emptyAudioMessage);
       const result = await asrClient.transcribe({
         audioBase64: encoded.audioBase64,
         mimeType: encoded.mimeType,
         durationMs,
-        ...(transcribeOptions.diarization ? { diarization: true } : {}),
-        ...(transcribeOptions.hotwords?.length ? { hotwords: [...transcribeOptions.hotwords] } : {})
+        ...(transcribeOptions.diarization ? { diarization: true } : {})
       });
       chunksRef.current = [];
       setStatus("idle");
-      return result;
+      // The recording travels back with the transcript: it is one of the
+      // deliverables, and callers cannot re-derive it once the chunks are gone.
+      return { ...result, recording: blob, recordingMimeType: encoded.mimeType, durationMs };
     } catch (caught) {
       const nextError = caught instanceof Error ? caught : new Error(String(caught));
       setError(nextError);
@@ -282,12 +310,31 @@ export function mergeVoiceTranscript(current: string, transcript: string): strin
 /**
  * Picks a recording format supported by the browser.
  *
+ * The bitrate is pinned rather than left to the browser: a whole transcription
+ * has to travel as one inline payload, and the browser default is high enough
+ * that an interview would blow past {@link ASR_MAX_AUDIO_BYTES} after a few
+ * minutes. Splitting the audio is not an alternative — speaker numbering
+ * restarts per transcription, so a split recording loses its diarization.
+ *
  * @returns The MediaRecorder init options.
  */
 function pickRecorderOptions(): MediaRecorderOptions {
   const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
   const mimeType = candidates.find((candidate) => MediaRecorder.isTypeSupported(candidate));
-  return mimeType ? { mimeType } : {};
+  return {
+    ...(mimeType ? { mimeType } : {}),
+    audioBitsPerSecond: ASR_AUDIO_BITS_PER_SECOND
+  };
+}
+
+/**
+ * Reports how much recording time is left before the payload ceiling.
+ *
+ * @param elapsedMs Recording time so far.
+ * @returns Remaining milliseconds, floored at zero.
+ */
+export function asrRecordingTimeRemainingMs(elapsedMs: number): number {
+  return Math.max(0, ASR_MAX_RECORDING_MS - elapsedMs);
 }
 
 /**

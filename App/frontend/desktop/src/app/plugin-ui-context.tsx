@@ -8,13 +8,15 @@ import {
   useState,
   type ReactNode
 } from "react";
-import type { CapabilityEvent, PluginCapabilityEventPayload } from "@memmy/local-api-contracts";
+import type { CapabilityEvent, PluginCapabilityEventPayload, PluginInvocationOrigin } from "@memmy/local-api-contracts";
 
 export interface PluginUiCall {
   pluginId: string;
   capabilityId: string;
   callId: string;
   conversationId: string;
+  /** Who asked for this call; decides occlusion and what closing a card means. */
+  origin: PluginInvocationOrigin;
   events: CapabilityEvent[];
 }
 
@@ -86,6 +88,7 @@ export function reducePluginUiCalls(
       capabilityId: payload.capabilityId,
       callId: payload.callId,
       conversationId: payload.conversationId,
+      origin: payload.origin,
       events: [payload.event]
     }].slice(-MAX_PLUGIN_CALLS);
   }

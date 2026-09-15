@@ -85,6 +85,10 @@ export function buildPluginMcpServer(
           capabilityId: tool.capability.id,
           callId,
           conversationId,
+          // This route is the Agent's own way into a capability, so its cards
+          // are part of a turn and closing one has to answer rather than
+          // silently leave the turn waiting.
+          origin: "agent",
           event
         });
         await sendTransportProgress(

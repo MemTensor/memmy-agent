@@ -132,6 +132,7 @@ export function registerPluginRoutes(app: FastifyInstance, options: RegisterPlug
             capabilityId,
             callId,
             conversationId: input.conversationId,
+            origin: input.origin,
             event
           });
           if (event.type === "result" || event.type === "error") terminal = event;

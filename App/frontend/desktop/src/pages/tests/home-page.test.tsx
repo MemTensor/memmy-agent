@@ -28,6 +28,7 @@ import {
   buildComposerCommandDraft,
   buildAgentRoutedPluginPrompt,
   collectPluginCommandTargets,
+  selectPinnedPluginCommands,
   clipboardAttachmentFilesFromDataTransfer,
   dataTransferHasAttachmentFiles,
   hasActiveAgentConversation,
@@ -110,6 +111,40 @@ describe("HomePage", () => {
     const targets = collectPluginCommandTargets([plugin], ["/status"]);
     expect(targets.map((item) => item.command.command)).toEqual(["/review"]);
     expect(parsePluginCommandInvocation("/review agent memory", targets)).toMatchObject({ arguments: "agent memory", plugin });
+  });
+
+  it("pins only the commands that asked to be pinned", () => {
+    const plugin = InstalledPluginSchema.parse({
+      id: "com.example.review",
+      version: "1.0.0",
+      manifest: {
+        apiVersion: "memmy/v1",
+        id: "com.example.review",
+        name: "Review",
+        version: "1.0.0",
+        runtime: { adapter: "http" },
+        capabilities: [{ id: "run", name: "Run", description: "Run", inputSchema: {}, outputSchema: {}, execution: "job" }],
+        commands: [
+          { command: "/guide", name: "Guidance", description: "Open the guidance card", capabilityId: "run", pinned: true },
+          { command: "/record", name: "Record", description: "Record an interview", capabilityId: "run", pinned: true },
+          { command: "/review", name: "Review", description: "Create a review", capabilityId: "run" }
+        ],
+        permissions: []
+      },
+      state: "active",
+      approvedPermissions: [],
+      config: {},
+      lastError: null,
+      createdAt: "2026-08-31T00:00:00.000Z",
+      updatedAt: "2026-08-31T00:00:00.000Z"
+    });
+    const targets = collectPluginCommandTargets([plugin]);
+
+    // A pinned button is a shortcut for the same command, so it is selected
+    // from the same targets the slash commands resolve against.
+    expect(selectPinnedPluginCommands(targets).map((item) => item.command.command)).toEqual(["/guide", "/record"]);
+    // Plugins that pin nothing must leave the composer layout alone.
+    expect(selectPinnedPluginCommands(targets.filter((item) => item.command.command === "/review"))).toEqual([]);
   });
 
   it("converts Agent-routed plugin commands into explicit Skill prompts", () => {

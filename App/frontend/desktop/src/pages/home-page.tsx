@@ -469,6 +469,51 @@ export function collectPluginCommandTargets(plugins: InstalledPlugin[], reserved
   ));
 }
 
+/**
+ * Selects the commands a plugin asked to pin above the composer.
+ *
+ * Pinned commands are the ones the user reaches repeatedly and out of order,
+ * where hunting for a slash command each time is the wrong interaction. They
+ * are a shortcut for the same invocation, not a separate path, so they are
+ * drawn from the same targets the slash commands resolve against.
+ *
+ * @param targets Available plugin commands.
+ * @returns Targets whose command declares itself pinned.
+ */
+export function selectPinnedPluginCommands(targets: PluginCommandTarget[]): PluginCommandTarget[] {
+  return targets.filter((target) => target.command.pinned === true);
+}
+
+/**
+ * Fixed buttons above the composer for the commands a plugin pinned.
+ *
+ * Renders nothing when no plugin pinned anything, so the composer keeps its
+ * usual layout for everyone else.
+ */
+function PinnedPluginCommandBar(props: {
+  targets: PluginCommandTarget[];
+  disabled: boolean;
+  onInvoke(target: PluginCommandTarget): void;
+}) {
+  if (props.targets.length === 0) return null;
+  return (
+    <div className="mb-2 flex flex-wrap gap-2">
+      {props.targets.map((target) => (
+        <button
+          key={`${target.plugin.id}:${target.command.command}`}
+          type="button"
+          disabled={props.disabled}
+          title={target.command.description}
+          className="rounded-tag border border-border-stone/40 bg-background-paper px-3 py-1 text-xs text-text-ink/75 hover:border-border-stone/70 hover:text-text-ink disabled:opacity-50"
+          onClick={() => props.onInvoke(target)}
+        >
+          {target.command.name}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 export function parsePluginCommandInvocation(input: string, targets: PluginCommandTarget[]): {
   plugin: InstalledPlugin;
   contribution: PluginCommandContribution;
@@ -936,7 +981,9 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
     input.dispatch(agentActions.userMessageQueued({
       chatId,
       content: displayText,
-      media: uploadedAttachments.map((item) => ({ url: item.url, name: item.name, kind: item.kind, path: item.path })),
+      // Upload kinds and chat media kinds are separate vocabularies; anything
+      // the thread cannot render inline is just a file.
+      media: uploadedAttachments.map((item) => ({ url: item.url, name: item.name, kind: item.kind === "image" ? "image" as const : "file" as const, path: item.path })),
       focus,
       clientRequestId,
       ...(capturedTarget ? { target: capturedTarget } : {})
@@ -1846,6 +1893,24 @@ export function HomePage() {
     COMPOSER_GOAL_COMMAND,
     ...slashCommands.map((command) => command.command)
   ]);
+  // A pinned button is a shortcut for typing the command, so it invokes the
+  // same capability the same way. `origin: "user"` is what tells the card it
+  // may be closed outright instead of having to answer the model.
+  const invokePinnedPluginCommand = (target: PluginCommandTarget) => {
+    if (!clients) return;
+    const conversationId = state.agent.currentChatId ?? state.agent.currentSessionKey ?? chatScopeKey;
+    void clients.plugins.invoke(target.plugin.id, target.command.capabilityId, {
+      conversationId,
+      input: { command: target.command.command, arguments: "", context: { references: [] } },
+      origin: "user"
+    }).catch((error) => {
+      dispatch(agentActions.operationFailed("chat", createAgentOperationError({
+        source: "send",
+        message: error instanceof Error ? error.message : "network_unavailable",
+        scopeKey: chatScopeKey
+      })));
+    });
+  };
   const pluginSlashCommands: SlashCommandPaletteItem[] = pluginCommandTargets.map(({ command }) => ({
     command: command.command,
     title: command.name,
@@ -2327,7 +2392,7 @@ export function HomePage() {
         openSurface({ pluginId: plugin.id, capabilityId: contribution.capabilityId, conversationId, input: invocationInput });
         dispatch(appActions.navigate("/plugin"));
       }
-      void clients.plugins.invoke(plugin.id, contribution.capabilityId, { conversationId, input: invocationInput }).catch((error) => {
+      void clients.plugins.invoke(plugin.id, contribution.capabilityId, { conversationId, input: invocationInput, origin: "user" }).catch((error) => {
         dispatch(agentActions.operationFailed("chat", createAgentOperationError({
           source: "send",
           message: error instanceof Error ? error.message : "network_unavailable",
@@ -3570,6 +3635,11 @@ export function HomePage() {
                   </p>
                 ) : null}
                 <AgentOperationErrorSlot message={agentError} />
+                <PinnedPluginCommandBar
+                  targets={selectPinnedPluginCommands(pluginCommandTargets)}
+                  disabled={!clients}
+                  onInvoke={invokePinnedPluginCommand}
+                />
                 <div className="agent-composer-stack">
                   <AgentQueuedMessageList
                     items={currentQueuedMessages}
