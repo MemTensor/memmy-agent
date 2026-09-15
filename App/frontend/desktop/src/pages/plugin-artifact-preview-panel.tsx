@@ -3,19 +3,12 @@ import { AlertCircle, Download, FileOutput, X } from "lucide-react";
 import type { PluginArtifactRef } from "@memmy/local-api-contracts";
 import type { PluginsClient } from "../api/plugins-client.js";
 import { useTranslation } from "../i18n/use-translation.js";
-import {
-  readDocxBlocks,
-  readXlsxSheets,
-  type DocxBlock,
-  type DocxTextSpan,
-  type XlsxSheet
-} from "../lib/office-preview.js";
+import { readDocxBlocks, type DocxBlock, type DocxTextSpan } from "../lib/office-preview.js";
 import { startBrowserDownload } from "./agent-message-content.js";
 import { SidebarResizeHandle, useResizableSidebar } from "./sidebar-resize.js";
 
 const PLUGIN_ARTIFACT_WIDTH_STORAGE_KEY = "memmy.pluginArtifact.previewWidth";
 const DOCX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-const XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 
 export interface PluginArtifactPreviewPanelProps {
   artifact: PluginArtifactRef;
@@ -29,7 +22,7 @@ export function PluginArtifactPreviewPanel(props: PluginArtifactPreviewPanelProp
   const generation = useRef(0);
   const [state, setState] = useState<
     | { status: "loading" }
-    | { status: "ready"; blob: Blob; objectUrl: string | null; text: string | null; office: OfficePreview | null }
+    | { status: "ready"; blob: Blob; objectUrl: string | null; text: string | null; document: DocxBlock[] | null }
     | { status: "error" }
   >({ status: "loading" });
   const resize = useResizableSidebar({
@@ -51,23 +44,23 @@ export function PluginArtifactPreviewPanel(props: PluginArtifactPreviewPanelProp
       if (generation.current !== current) return;
       const mediaType = props.artifact.mediaType.toLowerCase();
       if (isTextPreview(mediaType)) {
-        setState({ status: "ready", blob, objectUrl: null, text: await blob.text(), office: null });
+        setState({ status: "ready", blob, objectUrl: null, text: await blob.text(), document: null });
         return;
       }
       if (mediaType === "application/pdf" || mediaType.startsWith("image/")) {
         objectUrl = URL.createObjectURL(blob);
-        setState({ status: "ready", blob, objectUrl, text: null, office: null });
+        setState({ status: "ready", blob, objectUrl, text: null, document: null });
         return;
       }
-      if (mediaType === DOCX_MEDIA_TYPE || mediaType === XLSX_MEDIA_TYPE) {
+      if (mediaType === DOCX_MEDIA_TYPE) {
         // A malformed or password-protected package must still offer a download,
         // so a parse failure degrades to the unavailable placeholder.
-        const office = await readOfficePreview(mediaType, blob).catch(() => null);
+        const blocks = await readDocxBlocks(blob).catch(() => null);
         if (generation.current !== current) return;
-        setState({ status: "ready", blob, objectUrl: null, text: null, office });
+        setState({ status: "ready", blob, objectUrl: null, text: null, document: blocks });
         return;
       }
-      setState({ status: "ready", blob, objectUrl: null, text: null, office: null });
+      setState({ status: "ready", blob, objectUrl: null, text: null, document: null });
     }).catch(() => {
       if (generation.current === current) setState({ status: "error" });
     });
@@ -123,10 +116,8 @@ export function PluginArtifactPreviewPanel(props: PluginArtifactPreviewPanelProp
               <div className="workspace-artifact-preview-empty" role="alert"><AlertCircle size={28} /><strong>{t("plugin.ui.previewFailed")}</strong></div>
             ) : state.text !== null ? (
               <article className="workspace-artifact-preview-document"><pre className="whitespace-pre-wrap break-words font-sans text-sm leading-relaxed">{state.text}</pre></article>
-            ) : state.office?.kind === "docx" ? (
-              <article className="workspace-artifact-preview-document"><DocxPreview blocks={state.office.blocks} /></article>
-            ) : state.office?.kind === "xlsx" ? (
-              <XlsxPreview sheets={state.office.sheets} />
+            ) : state.document !== null ? (
+              <article className="workspace-artifact-preview-document"><DocxPreview blocks={state.document} /></article>
             ) : state.objectUrl && mediaType.startsWith("image/") ? (
               <div className="flex h-full w-full items-center justify-center overflow-auto bg-canvas-oat/40 p-4"><img src={state.objectUrl} alt={props.artifact.name} className="max-h-full max-w-full object-contain" /></div>
             ) : state.objectUrl && mediaType === "application/pdf" ? (
@@ -143,24 +134,6 @@ export function PluginArtifactPreviewPanel(props: PluginArtifactPreviewPanelProp
 
 function isTextPreview(mediaType: string): boolean {
   return mediaType.startsWith("text/") || mediaType === "application/json" || mediaType === "application/x-bibtex";
-}
-
-type OfficePreview =
-  | { kind: "docx"; blocks: DocxBlock[] }
-  | { kind: "xlsx"; sheets: XlsxSheet[] };
-
-/**
- * Parses an Office artifact into previewable data.
- *
- * @param mediaType the artifact media type.
- * @param blob the artifact contents.
- * @returns the parsed preview.
- */
-async function readOfficePreview(mediaType: string, blob: Blob): Promise<OfficePreview> {
-  if (mediaType === DOCX_MEDIA_TYPE) {
-    return { kind: "docx", blocks: await readDocxBlocks(blob) };
-  }
-  return { kind: "xlsx", sheets: await readXlsxSheets(blob) };
 }
 
 /** Renders parsed Word content as React nodes, so no document markup is injected. */
@@ -206,58 +179,4 @@ function DocxSpan(props: { span: DocxTextSpan }) {
   const { text, bold, italic } = props.span;
   if (!bold && !italic) return <>{text}</>;
   return <span className={`${bold ? "font-semibold" : ""} ${italic ? "italic" : ""}`.trim()}>{text}</span>;
-}
-
-/** Renders each worksheet as a table, with the first row treated as the header. */
-function XlsxPreview(props: { sheets: XlsxSheet[] }) {
-  const { t } = useTranslation();
-  const [activeIndex, setActiveIndex] = useState(0);
-  const sheet = props.sheets[Math.min(activeIndex, props.sheets.length - 1)];
-  if (!sheet) {
-    return <div className="workspace-artifact-preview-empty"><FileOutput size={28} /><strong>{t("plugin.ui.previewUnavailable")}</strong></div>;
-  }
-
-  const [header, ...body] = sheet.rows;
-  return (
-    <div className="flex h-full min-h-0 flex-col">
-      {props.sheets.length > 1 ? (
-        <div className="flex shrink-0 gap-1 overflow-x-auto border-b border-border-stone/35 px-2 py-1.5" role="tablist" aria-label={t("plugin.ui.sheets")}>
-          {props.sheets.map((candidate, index) => (
-            <button
-              key={`${candidate.name}:${index}`}
-              type="button"
-              role="tab"
-              aria-selected={index === activeIndex}
-              onClick={() => setActiveIndex(index)}
-              className={`shrink-0 rounded-btn px-2.5 py-1 text-xs transition-colors ${index === activeIndex ? "bg-action-sky/10 font-medium text-action-sky" : "text-text-ink/55 hover:bg-canvas-oat"}`}
-            >
-              {candidate.name}
-            </button>
-          ))}
-        </div>
-      ) : null}
-      <div className="min-h-0 flex-1 overflow-auto">
-        <table className="w-full border-collapse text-xs">
-          {header ? (
-            <thead className="sticky top-0 bg-background-paper">
-              <tr>
-                {header.map((cell, index) => (
-                  <th key={index} scope="col" className="whitespace-nowrap border border-border-stone/40 px-2 py-1 text-left font-medium text-text-ink/70">{cell}</th>
-                ))}
-              </tr>
-            </thead>
-          ) : null}
-          <tbody>
-            {body.map((row, rowIndex) => (
-              <tr key={rowIndex}>
-                {row.map((cell, cellIndex) => (
-                  <td key={cellIndex} className="border border-border-stone/40 px-2 py-1 align-top text-text-ink/75">{cell}</td>
-                ))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
 }

@@ -12779,6 +12779,40 @@ input[type="checkbox"].check-sky:checked::after {
   }
 }
 
+/* Pinned plugin command buttons, sitting between the cards and the composer. */
+.pinned-command-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 2px 8px;
+}
+
+.pinned-command-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 45%, transparent);
+  border-radius: 999px;
+  background: var(--color-background-paper);
+  color: color-mix(in srgb, var(--color-text-ink) 70%, transparent);
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+  transition: border-color 120ms ease, color 120ms ease, background-color 120ms ease;
+}
+
+.pinned-command-chip:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--color-brand-primary) 45%, transparent);
+  background: color-mix(in srgb, var(--color-brand-primary) 6%, var(--color-background-paper));
+  color: var(--color-brand-primary);
+}
+
+.pinned-command-chip:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 /* Recording bar above the composer, and the panel it transcribes into. */
 .recording-bar {
   display: flex;

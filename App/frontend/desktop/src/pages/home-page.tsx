@@ -529,19 +529,23 @@ function PinnedPluginCommandBar(props: {
 }) {
   if (props.targets.length === 0) return null;
   return (
-    <div className="mb-2 flex flex-wrap gap-2">
-      {props.targets.map((target) => (
-        <button
-          key={`${target.plugin.id}:${target.command.command}`}
-          type="button"
-          disabled={props.disabled}
-          title={target.command.description}
-          className="rounded-tag border border-border-stone/40 bg-background-paper px-3 py-1 text-xs text-text-ink/75 hover:border-border-stone/70 hover:text-text-ink disabled:opacity-50"
-          onClick={() => props.onInvoke(target)}
-        >
-          {target.command.name}
-        </button>
-      ))}
+    <div className="pinned-command-bar">
+      {props.targets.map((target) => {
+        const Icon = resolveContributionIcon(target.command.icon);
+        return (
+          <button
+            key={`${target.plugin.id}:${target.command.command}`}
+            type="button"
+            disabled={props.disabled}
+            title={target.command.description}
+            className="pinned-command-chip"
+            onClick={() => props.onInvoke(target)}
+          >
+            <Icon size={13} aria-hidden="true" />
+            {target.command.name}
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -3434,6 +3438,25 @@ export function HomePage() {
             <div className="home-empty-mid__composer">
               <AgentOperationErrorSlot message={agentError} />
               <div className="home-empty-composer-stack">
+                {/*
+                  The pinned buttons belong to the composer, not to a
+                  conversation: a lawyer opening the app to record an interview
+                  should not have to say something first to reach the recorder.
+                */}
+                <PluginCapabilityHost
+                  region="pinned"
+                  calls={visiblePluginCalls}
+                  plugins={installedPlugins}
+                  client={clients?.plugins ?? null}
+                  uploadFiles={clients ? (files) => clients.memmyAgent.uploadAgentMedia(files) : undefined}
+                  asrClient={clients?.asr}
+                  onRecordingSession={setRecordingSession}
+                />
+                <PinnedPluginCommandBar
+                  targets={selectPinnedPluginCommands(pluginCommandTargets)}
+                  disabled={!clients}
+                  onInvoke={invokePinnedPluginCommand}
+                />
                 <div
                   ref={composerShellRef}
                   className={`relative home-empty-composer agent-composer-shell rounded-card-lg${slashMenuOpen ? " home-empty-composer--menu-open" : ""}`}
