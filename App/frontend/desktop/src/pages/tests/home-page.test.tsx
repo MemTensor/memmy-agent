@@ -28,7 +28,9 @@ import {
   buildComposerCommandDraft,
   buildAgentRoutedPluginPrompt,
   collectPluginCommandTargets,
+  collectPluginScenarios,
   selectPinnedPluginCommands,
+  selectSlashPluginCommands,
   clipboardAttachmentFilesFromDataTransfer,
   dataTransferHasAttachmentFiles,
   hasActiveAgentConversation,
@@ -145,6 +147,42 @@ describe("HomePage", () => {
     expect(selectPinnedPluginCommands(targets).map((item) => item.command.command)).toEqual(["/guide", "/record"]);
     // Plugins that pin nothing must leave the composer layout alone.
     expect(selectPinnedPluginCommands(targets.filter((item) => item.command.command === "/review"))).toEqual([]);
+    // A pinned command already has a button; listing it in the palette too
+    // would offer the same action twice.
+    expect(selectSlashPluginCommands(targets).map((item) => item.command.command)).toEqual(["/review"]);
+  });
+
+  it("collects scenario entry cards only from plugins that can serve them", () => {
+    const manifest = {
+      apiVersion: "memmy/v1" as const,
+      id: "com.example.legal",
+      name: "Legal",
+      version: "1.0.0",
+      runtime: { adapter: "command" as const },
+      capabilities: [{ id: "run", name: "Run", description: "Run", inputSchema: {}, outputSchema: {}, execution: "job" as const }],
+      permissions: [],
+      scenarios: [
+        { id: "risk", name: "用工风险诊断", description: "企业资料、访谈录音，一键生成风险诊断报告", icon: "scale", prompt: "帮我生成一份用工风险诊断报告。" }
+      ]
+    };
+    const base = {
+      id: "com.example.legal",
+      version: "1.0.0",
+      approvedPermissions: [],
+      config: {},
+      lastError: null,
+      createdAt: "2026-08-31T00:00:00.000Z",
+      updatedAt: "2026-08-31T00:00:00.000Z"
+    };
+    const active = InstalledPluginSchema.parse({ ...base, manifest, state: "active" });
+    const disabled = InstalledPluginSchema.parse({ ...base, manifest, state: "disabled" });
+
+    expect(collectPluginScenarios([active])).toEqual([
+      { ...manifest.scenarios[0], pluginId: "com.example.legal" }
+    ]);
+    // A disabled plugin cannot serve the work its card would start, so
+    // offering the card would dead-end.
+    expect(collectPluginScenarios([disabled])).toEqual([]);
   });
 
   it("converts Agent-routed plugin commands into explicit Skill prompts", () => {

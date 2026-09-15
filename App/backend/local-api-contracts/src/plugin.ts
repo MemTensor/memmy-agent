@@ -124,6 +124,24 @@ export const PluginCommandContributionSchema = z.object({
 });
 export type PluginCommandContribution = z.infer<typeof PluginCommandContributionSchema>;
 
+/**
+ * An entry card offered on the empty home screen.
+ *
+ * A scenario is the way in for someone who does not yet know what to type. The
+ * card fills the composer with its prompt rather than invoking anything, so the
+ * user reads and can edit the request before it is sent, and the Agent picks up
+ * the work through its normal Skill routing.
+ */
+export const PluginScenarioContributionSchema = z.object({
+  id: PluginIdentifierSchema,
+  name: z.string().trim().min(1).max(64),
+  description: z.string().trim().min(1).max(200),
+  icon: z.string().trim().min(1).max(64).optional(),
+  /** Text placed in the composer when the card is clicked. */
+  prompt: z.string().trim().min(1).max(2_000)
+});
+export type PluginScenarioContribution = z.infer<typeof PluginScenarioContributionSchema>;
+
 export const PluginManifestSchema = z.object({
   apiVersion: z.literal("memmy/v1"),
   id: PluginIdentifierSchema,
@@ -135,6 +153,7 @@ export const PluginManifestSchema = z.object({
   configSchema: JsonSchemaSchema.optional(),
   skills: z.array(PluginSkillContributionSchema).max(20).optional(),
   commands: z.array(PluginCommandContributionSchema).max(100).optional(),
+  scenarios: z.array(PluginScenarioContributionSchema).max(8).optional(),
   ui: PluginUiSchema.optional(),
   /** Account grant the Host verifies before installing, enabling, or invoking this plugin. */
   requiredEntitlement: PluginEntitlementSchema.optional(),

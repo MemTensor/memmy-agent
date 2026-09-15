@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { UploadedAgentMedia, UploadAgentMediaInput } from "../../api/memmy-agent-client.js";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
 import { PluginUiProvider, usePluginUi, reducePluginUiCalls, type PluginUiCall } from "../../app/plugin-ui-context.js";
-import { buildRendererDocument, occludeUserRaisedCalls, PluginCapabilityHost, resolveRendererInteractionStates, resolveSafeArtifactUri, selectVisiblePluginCalls } from "../plugin-capability-host.js";
+import { buildRendererDocument, isBarePresentation, occludeUserRaisedCalls, PluginCapabilityHost, resolveRendererInteractionStates, resolveSafeArtifactUri, selectRegionPluginCalls, selectVisiblePluginCalls, summarizeAcceptedFormats } from "../plugin-capability-host.js";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -64,7 +64,7 @@ describe("PluginCapabilityHost", () => {
     const call: PluginUiCall = { pluginId: plugin.id, capabilityId: "run", callId: "pinned", conversationId: "websocket:chat-1", origin: "user", events: [
       { type: "interaction", request: { interactionId: "guide", type: "question", payload: { title: "Guidance" } } }
     ] };
-    await act(async () => root.render(<PluginUiProvider><I18nProvider language="en-US"><PluginCapabilityHost calls={[call]} plugins={[plugin]} client={client} /></I18nProvider></PluginUiProvider>));
+    await act(async () => root.render(<PluginUiProvider><I18nProvider language="en-US"><PluginCapabilityHost region="pinned" calls={[call]} plugins={[plugin]} client={client} /></I18nProvider></PluginUiProvider>));
 
     const close = container.querySelector<HTMLButtonElement>('button[aria-label="Close card"]');
     expect(close).not.toBeNull();
@@ -76,6 +76,33 @@ describe("PluginCapabilityHost", () => {
     expect(respond).not.toHaveBeenCalled();
     // And the card goes away rather than being replaced by a cancellation error.
     expect(container.textContent).not.toContain("Guidance");
+  });
+
+  it("renders a live user-raised card above the composer and not in the transcript", async () => {
+    const client = { getUi: vi.fn(), cancel: vi.fn(), respond: vi.fn(async () => undefined) };
+    const call: PluginUiCall = { pluginId: plugin.id, capabilityId: "run", callId: "pinned", conversationId: "websocket:chat-1", origin: "user", events: [
+      { type: "interaction", request: { interactionId: "guide", type: "question", payload: { title: "Guidance" } } }
+    ] };
+
+    await act(async () => root.render(<PluginUiProvider><I18nProvider language="en-US"><PluginCapabilityHost region="flow" calls={[call]} plugins={[plugin]} client={client} /></I18nProvider></PluginUiProvider>));
+    expect(container.textContent).not.toContain("Guidance");
+
+    await act(async () => root.render(<PluginUiProvider><I18nProvider language="en-US"><PluginCapabilityHost region="pinned" calls={[call]} plugins={[plugin]} client={client} /></I18nProvider></PluginUiProvider>));
+    expect(container.textContent).toContain("Guidance");
+  });
+
+  it("moves a finished user-raised card into the transcript so its deliverables stay in history", async () => {
+    const client = { getUi: vi.fn(), cancel: vi.fn(), respond: vi.fn(async () => undefined) };
+    const call: PluginUiCall = { pluginId: plugin.id, capabilityId: "run", callId: "done", conversationId: "websocket:chat-1", origin: "user", events: [
+      { type: "artifact", artifact: { id: "a1", name: "报告.docx", mediaType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", uri: "memmy-plugin://demo/a1" } },
+      { type: "result", result: {} }
+    ] };
+
+    await act(async () => root.render(<PluginUiProvider><I18nProvider language="en-US"><PluginCapabilityHost region="pinned" calls={[call]} plugins={[plugin]} client={client} /></I18nProvider></PluginUiProvider>));
+    expect(container.textContent).not.toContain("报告.docx");
+
+    await act(async () => root.render(<PluginUiProvider><I18nProvider language="en-US"><PluginCapabilityHost region="flow" calls={[call]} plugins={[plugin]} client={client} /></I18nProvider></PluginUiProvider>));
+    expect(container.textContent).toContain("报告.docx");
   });
 
   it("offers no close button on a card the Agent raised", async () => {
@@ -1028,3 +1055,68 @@ describe("plugin UI event reduction", () => {
     expect(document).toContain("form-action 'none'");
   });
 });
+
+describe("summarizeAcceptedFormats", () => {
+  const t = ((key: string) => ({
+    "plugin.ui.format.image": "图片",
+    "plugin.ui.format.media": "音视频",
+    "plugin.ui.format.separator": "、"
+  } as Record<string, string>)[key] ?? key) as never;
+
+  it("groups extensions into the file kinds a person recognises", () => {
+    expect(summarizeAcceptedFormats(".pdf,.docx,.xlsx,.txt,.md,.png,.m4a", t))
+      .toBe("PDF、Word、Excel、TXT/MD、图片、音视频");
+  });
+
+  it("lists an extension it has no family for rather than dropping it", () => {
+    expect(summarizeAcceptedFormats(".pdf,.eml", t)).toBe("PDF、.eml");
+  });
+
+  it("names a family once however many of its extensions are accepted", () => {
+    expect(summarizeAcceptedFormats(".doc,.docx", t)).toBe("Word");
+  });
+});
+
+describe("isBarePresentation", () => {
+  const call = (events: PluginUiCall["events"]): PluginUiCall => ({
+    pluginId: "demo", capabilityId: "run", callId: "c", conversationId: "websocket:chat-1", origin: "user", events
+  });
+
+  it("treats a recording interaction as drawing its own chrome", () => {
+    expect(isBarePresentation(call([
+      { type: "interaction", request: { interactionId: "r", type: "audio-record", payload: {} } }
+    ]))).toBe(true);
+  });
+
+  it("boxes a recording card that also reports progress", () => {
+    expect(isBarePresentation(call([
+      { type: "progress", message: "准备中" },
+      { type: "interaction", request: { interactionId: "r", type: "audio-record", payload: {} } }
+    ]))).toBe(false);
+  });
+
+  it("boxes every other interaction", () => {
+    expect(isBarePresentation(call([
+      { type: "interaction", request: { interactionId: "q", type: "question", payload: {} } }
+    ]))).toBe(false);
+  });
+});
+
+describe("selectRegionPluginCalls", () => {
+  const call = (origin: "user" | "agent", callId: string, events: PluginUiCall["events"]): PluginUiCall => ({
+    pluginId: "demo", capabilityId: "run", callId, conversationId: "websocket:chat-1", origin, events
+  });
+  const live: PluginUiCall["events"] = [{ type: "interaction", request: { interactionId: "i", type: "question", payload: {} } }];
+  const finished: PluginUiCall["events"] = [{ type: "result", result: {} }];
+
+  it("keeps only live user-raised calls above the composer", () => {
+    const calls = [
+      call("user", "live-user", live),
+      call("user", "done-user", finished),
+      call("agent", "live-agent", live)
+    ];
+    expect(selectRegionPluginCalls(calls, "pinned").map((item) => item.callId)).toEqual(["live-user"]);
+    expect(selectRegionPluginCalls(calls, "flow").map((item) => item.callId)).toEqual(["done-user", "live-agent"]);
+  });
+});
+

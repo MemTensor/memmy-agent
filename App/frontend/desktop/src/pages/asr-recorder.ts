@@ -2,6 +2,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ASR_MAX_AUDIO_BYTES, type AsrTranscriptionResponse } from "@memmy/local-api-contracts";
 import type { AsrClient } from "../api/asr-client.js";
 import { formatMessage, type MessageKey, zhCNMessages } from "../i18n/messages.js";
+import {
+  createChunkedLiveTranscriber,
+  type AsrLiveLine,
+  type AsrLiveTranscriber
+} from "../lib/asr-live-transcription.js";
+import { createPcmTap, PCM_TAP_SAMPLE_RATE, type PcmTap } from "../lib/audio-pcm-tap.js";
 
 /**
  * Opus bitrate for recordings, mono.
@@ -54,6 +60,20 @@ export interface EncodedAudio {
 
 export interface AsrRecorderOptions {
   emptyAudioMessage?: string;
+  /**
+   * Transcribes the recording while it is still running.
+   *
+   * Supplying this opens a second read of the microphone stream for raw
+   * samples. The lines it reports are provisional: they carry no speaker
+   * labels, because speaker numbering only means something across a whole
+   * recording, which the diarized pass at the end produces.
+   */
+  live?: {
+    onLine(line: AsrLiveLine): void;
+    /** Receives a 0..1 loudness reading per captured block, for the waveform. */
+    onLevel?(level: number): void;
+    onError?(error: Error): void;
+  };
 }
 
 export interface MicrophoneAccessBridge {
@@ -94,16 +114,32 @@ export function useAsrRecorder(asrClient?: AsrClient, options: AsrRecorderOption
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const startedAtRef = useRef<number | null>(null);
+  const tapRef = useRef<PcmTap | null>(null);
+  const liveRef = useRef<AsrLiveTranscriber | null>(null);
+  const pausedRef = useRef(false);
+  // Held in a ref so a caller passing fresh handler closures each render does
+  // not restart the recording.
+  const liveOptionsRef = useRef(options.live);
+  liveOptionsRef.current = options.live;
+
+  const releaseLiveCapture = useCallback(() => {
+    liveRef.current?.cancel();
+    liveRef.current = null;
+    void tapRef.current?.close();
+    tapRef.current = null;
+  }, []);
 
   const cancel = useCallback(() => {
     stopRecorderSilently(recorderRef.current);
     recorderRef.current = null;
     chunksRef.current = [];
     startedAtRef.current = null;
+    releaseLiveCapture();
+    pausedRef.current = false;
     stopStream(streamRef.current);
     streamRef.current = null;
     setStatus("idle");
-  }, []);
+  }, [releaseLiveCapture]);
 
   useEffect(() => cancel, [cancel]);
 
@@ -153,6 +189,25 @@ export function useAsrRecorder(asrClient?: AsrClient, options: AsrRecorderOption
       };
       recorder.start();
       startedAtRef.current = Date.now();
+      pausedRef.current = false;
+      const live = liveOptionsRef.current;
+      if (live) {
+        const transcriber = createChunkedLiveTranscriber(asrClient, {
+          sampleRate: PCM_TAP_SAMPLE_RATE,
+          onLine: (line) => liveOptionsRef.current?.onLine(line),
+          onError: (liveError) => liveOptionsRef.current?.onError?.(liveError)
+        });
+        liveRef.current = transcriber;
+        tapRef.current = createPcmTap(stream, {
+          sampleRate: PCM_TAP_SAMPLE_RATE,
+          onSamples: (samples) => {
+            if (!pausedRef.current) transcriber.push(samples);
+          },
+          onLevel: (level) => {
+            if (!pausedRef.current) liveOptionsRef.current?.onLevel?.(level);
+          }
+        });
+      }
       setStatus("recording");
     } catch (caught) {
       const nextError = caught instanceof Error ? caught : new Error(String(caught));
@@ -160,18 +215,22 @@ export function useAsrRecorder(asrClient?: AsrClient, options: AsrRecorderOption
       recorderRef.current = null;
       chunksRef.current = [];
       startedAtRef.current = null;
+      releaseLiveCapture();
       stopStream(streamRef.current);
       streamRef.current = null;
       setError(nextError);
       setStatus("error");
       throw nextError;
     }
-  }, [asrClient, cancel]);
+  }, [asrClient, cancel, releaseLiveCapture]);
 
   const pause = useCallback(() => {
     const recorder = recorderRef.current;
     if (!recorder || recorder.state !== "recording") return;
     recorder.pause();
+    // The tap keeps delivering blocks while paused; dropping them here keeps
+    // the paused stretch out of both the waveform and the live segments.
+    pausedRef.current = true;
     setStatus("paused");
   }, []);
 
@@ -179,6 +238,7 @@ export function useAsrRecorder(asrClient?: AsrClient, options: AsrRecorderOption
     const recorder = recorderRef.current;
     if (!recorder || recorder.state !== "paused") return;
     recorder.resume();
+    pausedRef.current = false;
     setStatus("recording");
   }, []);
 
@@ -197,6 +257,15 @@ export function useAsrRecorder(asrClient?: AsrClient, options: AsrRecorderOption
       const durationMs = startedAtRef.current ? Math.max(0, Date.now() - startedAtRef.current) : undefined;
       const blob = await stopRecorder(recorder, chunksRef.current);
       recorderRef.current = null;
+      // Close the tap before the final pass so no further live segments are
+      // started, but let the tail of what was already captured finish: those
+      // lines are what the user is reading while the diarized pass runs.
+      await tapRef.current?.close();
+      tapRef.current = null;
+      const live = liveRef.current;
+      liveRef.current = null;
+      await live?.finish();
+      pausedRef.current = false;
       stopStream(streamRef.current);
       streamRef.current = null;
       startedAtRef.current = null;
@@ -221,11 +290,12 @@ export function useAsrRecorder(asrClient?: AsrClient, options: AsrRecorderOption
       const nextError = caught instanceof Error ? caught : new Error(String(caught));
       setError(nextError);
       setStatus("error");
+      releaseLiveCapture();
       stopStream(streamRef.current);
       streamRef.current = null;
       throw nextError;
     }
-  }, [asrClient, options.emptyAudioMessage]);
+  }, [asrClient, options.emptyAudioMessage, releaseLiveCapture]);
 
   return {
     status,

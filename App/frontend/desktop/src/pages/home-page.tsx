@@ -1,6 +1,6 @@
 /** Home page module. */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type CSSProperties, type DragEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject, type SetStateAction, type UIEvent } from "react";
-import type { AgentGatewayStartupIssue, InstalledPlugin, PluginArtifactRef, PluginCommandContribution } from "@memmy/local-api-contracts";
+import type { AgentGatewayStartupIssue, InstalledPlugin, PluginArtifactRef, PluginCommandContribution, PluginScenarioContribution } from "@memmy/local-api-contracts";
 import { hydrateAgentThreadInBackground, refreshAgentTaskList, useAgentRuntimeBridge, type AgentTaskStateCoordinator } from "../app/agent-runtime-bridge.js";
 import { useApiClients } from "../app/providers.js";
 import { usePluginUi } from "../app/plugin-ui-context.js";
@@ -67,6 +67,7 @@ import {
   filterSlashCommands,
   localizeSlashCommands,
   readRecentSlashCommands,
+  resolveContributionIcon,
   slashQueryFromInput,
   updateRecentSlashCommands,
   writeRecentSlashCommands,
@@ -83,6 +84,7 @@ import {
   type AgentQuestionResponse,
 } from "./agent-question-card.js";
 import { PluginCapabilityHost } from "./plugin-capability-host.js";
+import { InterviewRecordingPanel, type RecordingPanelSession } from "./interview-recording-panel.js";
 import { PluginArtifactPreviewPanel } from "./plugin-artifact-preview-panel.js";
 import { AgentWorkspaceContext } from "./agent-workspace-context.js";
 import { AppFrame } from "./app-frame.js";
@@ -482,6 +484,36 @@ export function collectPluginCommandTargets(plugins: InstalledPlugin[], reserved
  */
 export function selectPinnedPluginCommands(targets: PluginCommandTarget[]): PluginCommandTarget[] {
   return targets.filter((target) => target.command.pinned === true);
+}
+
+/**
+ * Selects the commands the slash palette should list.
+ *
+ * @param targets Available plugin commands.
+ * @returns Targets that have no pinned button standing in for them.
+ */
+export function selectSlashPluginCommands(targets: PluginCommandTarget[]): PluginCommandTarget[] {
+  return targets.filter((target) => target.command.pinned !== true);
+}
+
+/** A scenario card together with the plugin that contributed it. */
+export interface PluginScenarioTarget extends PluginScenarioContribution {
+  pluginId: string;
+}
+
+/**
+ * Collects the scenario entry cards contributed by enabled plugins.
+ *
+ * Only active plugins contribute: a disabled plugin cannot serve the work its
+ * card would start, so offering it would dead-end.
+ *
+ * @param plugins Installed plugins.
+ * @returns Scenario cards to offer on the empty home screen.
+ */
+export function collectPluginScenarios(plugins: InstalledPlugin[]): PluginScenarioTarget[] {
+  return plugins
+    .filter((plugin) => plugin.state === "active")
+    .flatMap((plugin) => (plugin.manifest.scenarios ?? []).map((scenario) => ({ ...scenario, pluginId: plugin.id })));
 }
 
 /**
@@ -1114,6 +1146,7 @@ export function HomePage() {
   const [environmentPanelOpen, setEnvironmentPanelOpen] = useState(false);
   const [previewPanelOpen, setPreviewPanelOpen] = useState(false);
   const [pluginArtifactPreview, setPluginArtifactPreview] = useState<PluginArtifactRef | null>(null);
+  const [recordingSession, setRecordingSession] = useState<RecordingPanelSession | null>(null);
   const [installedPlugins, setInstalledPlugins] = useState<InstalledPlugin[]>([]);
   const [previewPanelWidth, setPreviewPanelWidth] = useState(520);
   const [isCreatingChat, setIsCreatingChat] = useState(false);
@@ -1887,6 +1920,7 @@ export function HomePage() {
     argHint: "",
     synthetic: true
   };
+  const pluginScenarios = collectPluginScenarios(installedPlugins);
   const pluginCommandTargets = collectPluginCommandTargets(installedPlugins, [
     "/stop",
     "/last-compaction",
@@ -1911,7 +1945,10 @@ export function HomePage() {
       })));
     });
   };
-  const pluginSlashCommands: SlashCommandPaletteItem[] = pluginCommandTargets.map(({ command }) => ({
+  // A pinned command already has a button of its own above the composer.
+  // Listing it in the palette too would offer the same action twice under two
+  // different names, so the palette shows only the commands without a button.
+  const pluginSlashCommands: SlashCommandPaletteItem[] = selectSlashPluginCommands(pluginCommandTargets).map(({ command }) => ({
     command: command.command,
     title: command.name,
     description: command.description,
@@ -3296,7 +3333,7 @@ export function HomePage() {
     />
   ) : null;
 
-  const sidePreviewOpen = previewPanelOpen || pluginArtifactPreview !== null;
+  const sidePreviewOpen = previewPanelOpen || pluginArtifactPreview !== null || recordingSession !== null;
   const previewToggle = hasActiveConversation ? (
     <button
       type="button"
@@ -3313,7 +3350,16 @@ export function HomePage() {
     </button>
   ) : null;
 
-  const previewPanel = pluginArtifactPreview && clients ? (
+  // A running interview takes over the side panel: the transcript arriving
+  // there is the thing the user is watching, and it is transient, so it takes
+  // precedence over the file previews the panel otherwise shows.
+  const previewPanel = recordingSession ? (
+    <InterviewRecordingPanel
+      session={recordingSession}
+      onWidthChange={setPreviewPanelWidth}
+      toolbarEnd={previewToggle}
+    />
+  ) : pluginArtifactPreview && clients ? (
     <PluginArtifactPreviewPanel
       key={pluginArtifactPreview.id}
       artifact={pluginArtifactPreview}
@@ -3492,29 +3538,56 @@ export function HomePage() {
                   />
                 </div>
               </div>
-              <div className="home-prompt-suggestions" aria-label={t("home.empty")}>
-                <button
-                  type="button"
-                  onClick={() => selectHomeSuggestion(t("home.suggestionPrompt.one"))}
-                >
-                  <span className="home-prompt-suggestions__icon" aria-hidden="true"><BookOpenText size={15} /></span>
-                  <span>{t("home.suggestion.one")}</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => selectHomeSuggestion(t("home.suggestionPrompt.two"))}
-                >
-                  <span className="home-prompt-suggestions__icon" aria-hidden="true"><CalendarCheck2 size={15} /></span>
-                  <span>{t("home.suggestion.two")}</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => selectHomeSuggestion(t("home.suggestionPrompt.three"))}
-                >
-                  <span className="home-prompt-suggestions__icon" aria-hidden="true"><History size={15} /></span>
-                  <span>{t("home.suggestion.three")}</span>
-                </button>
-              </div>
+              {pluginScenarios.length > 0 ? (
+                /*
+                  An installed plugin replaces the generic starters rather than
+                  queueing behind them: someone who has the plugin installed is
+                  here for its scenarios, and stacking both sets buries them.
+                */
+                <div className="home-scenario-cards" aria-label={t("home.empty")}>
+                  {pluginScenarios.map((scenario) => {
+                    const Icon = resolveContributionIcon(scenario.icon);
+                    return (
+                      <button
+                        key={`${scenario.pluginId}:${scenario.id}`}
+                        type="button"
+                        className="home-scenario-card"
+                        onClick={() => selectHomeSuggestion(scenario.prompt)}
+                      >
+                        <span className="home-scenario-card__icon" aria-hidden="true"><Icon size={16} /></span>
+                        <span className="home-scenario-card__body">
+                          <span className="home-scenario-card__title">{scenario.name}</span>
+                          <span className="home-scenario-card__description">{scenario.description}</span>
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="home-prompt-suggestions" aria-label={t("home.empty")}>
+                  <button
+                    type="button"
+                    onClick={() => selectHomeSuggestion(t("home.suggestionPrompt.one"))}
+                  >
+                    <span className="home-prompt-suggestions__icon" aria-hidden="true"><BookOpenText size={15} /></span>
+                    <span>{t("home.suggestion.one")}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => selectHomeSuggestion(t("home.suggestionPrompt.two"))}
+                  >
+                    <span className="home-prompt-suggestions__icon" aria-hidden="true"><CalendarCheck2 size={15} /></span>
+                    <span>{t("home.suggestion.two")}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => selectHomeSuggestion(t("home.suggestionPrompt.three"))}
+                  >
+                    <span className="home-prompt-suggestions__icon" aria-hidden="true"><History size={15} /></span>
+                    <span>{t("home.suggestion.three")}</span>
+                  </button>
+                </div>
+              )}
             </div>
           </div>
           <div className="home-empty-below">
@@ -3570,6 +3643,7 @@ export function HomePage() {
                 onAnswerQuestion={answerAgentQuestion}
               />
               <PluginCapabilityHost
+                region="flow"
                 calls={visiblePluginCalls}
                 plugins={installedPlugins}
                 client={clients?.plugins ?? null}
@@ -3635,6 +3709,20 @@ export function HomePage() {
                   </p>
                 ) : null}
                 <AgentOperationErrorSlot message={agentError} />
+                {/*
+                  Cards the user raised themselves sit with the buttons that
+                  raise them, directly above the composer, so they stay
+                  reachable instead of scrolling away up the transcript.
+                */}
+                <PluginCapabilityHost
+                  region="pinned"
+                  calls={visiblePluginCalls}
+                  plugins={installedPlugins}
+                  client={clients?.plugins ?? null}
+                  uploadFiles={clients ? (files) => clients.memmyAgent.uploadAgentMedia(files) : undefined}
+                  asrClient={clients?.asr}
+                  onRecordingSession={setRecordingSession}
+                />
                 <PinnedPluginCommandBar
                   targets={selectPinnedPluginCommands(pluginCommandTargets)}
                   disabled={!clients}
