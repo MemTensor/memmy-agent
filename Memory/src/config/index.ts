@@ -533,6 +533,30 @@ function parseConfigFile(path: string): Record<string, unknown> {
   return isRecord(parsed) ? parsed : {};
 }
 
+/**
+ * Build a partial config from the environment. Every key below is optional; `compactRecord`
+ * drops the ones that are unset, so what this returns is merged over the config file rather
+ * than replacing it.
+ *
+ * Four variables decide where requests leave the process, and they are the ones worth knowing
+ * about before anything else:
+ *
+ *   MEMMY_MEMORY_URL        the memory service   (alias: MEMORY_SERVICE_URL)
+ *   MEMMY_SUMMARY_ENDPOINT  the summary model
+ *   MEMMY_EVOLUTION_ENDPOINT the evolution model
+ *   MEMMY_EMBEDDING_ENDPOINT the embedding model
+ *
+ * Unset, each falls through to whatever the config file and the provider defaults resolve to,
+ * so a missing endpoint is not an error here -- it surfaces later, as a call to the wrong host.
+ *
+ * Five keys accept a legacy alias as a second choice, always `MEMMY_*` first:
+ * MEMMY_MEMORY_DOMAIN ?? MEMMY_DOMAIN, MEMMY_MEMORY_USER_ID ?? MEMMY_USER_ID ??
+ * MEMORY_SERVICE_USER_ID, MEMMY_MEMORY_DB ?? MEMORY_SERVICE_DB, MEMMY_MEMORY_URL ??
+ * MEMORY_SERVICE_URL, MEMMY_MEMORY_TOKEN ?? MEMORY_SERVICE_TOKEN.
+ *
+ * The remaining keys follow the shape MEMMY_<SECTION>_<FIELD> for the summary, evolution,
+ * embedding and algorithm sections; the literal names are in the object below.
+ */
 function configFromEnv(): Record<string, unknown> {
   return compactRecord({
     domain: process.env.MEMMY_MEMORY_DOMAIN ?? process.env.MEMMY_DOMAIN,
