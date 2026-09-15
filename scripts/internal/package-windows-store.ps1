@@ -6,8 +6,7 @@ param(
   [ValidateSet("cn", "intl")]
   [string]$Channel,
   [string]$Version,
-  [ValidateRange(0, 99)]
-  [int]$StoreBuild = 0,
+  [AllowEmptyString()][string]$StoreBuild = '',
   [switch]$Install
 )
 
@@ -428,13 +427,12 @@ $appVersion = if ($Version) {
   (Get-Content -Raw -LiteralPath (Join-Path $desktopDirectory "package.json") |
     ConvertFrom-Json).version
 }
-$packageVersionInfo = Resolve-MemmyWindowsStorePackageVersion `
-  -AppVersion $appVersion `
-  -StoreBuild $StoreBuild
+$packageVersionInfo = Resolve-MemmyWindowsStorePackageVersion -AppVersion $appVersion -StoreBuild $StoreBuild
 $storePackageVersion = $packageVersionInfo.PackageVersion
-$storeBuildLabel = $packageVersionInfo.StoreBuildLabel
+$artifactVersionLabel = $packageVersionInfo.ArtifactVersionLabel
 Write-Host "Application version: $appVersion"
-Write-Host "Store package version: $storePackageVersion (StoreBuild $storeBuildLabel)"
+Write-Host "Store package version: $storePackageVersion"
+Write-Host "Artifact version label: $artifactVersionLabel"
 
 if ($env:MEMMY_STORE_PUBLISHING_CONFIG_PATH) {
   throw "MEMMY_STORE_PUBLISHING_CONFIG_PATH is not supported by the canonical Windows Store packaging entrypoint."
@@ -468,7 +466,7 @@ if ($Mode -eq "StoreUpload") {
     -ExpectedPublisher $profile.Publisher
 }
 
-$artifactBaseName = "Memmy-$appVersion-$storeBuildLabel-win32-x64-$resolvedChannel"
+$artifactBaseName = "Memmy-$artifactVersionLabel-win32-x64-$resolvedChannel"
 $unsignedArtifactName = "$artifactBaseName-unsigned.msix"
 $unsignedArtifactPath = Join-Path $desktopDirectory "release\$unsignedArtifactName"
 $localTestArtifactName = "$artifactBaseName-signed.msix"
@@ -487,7 +485,7 @@ if ($Mode -eq "LocalTest") {
 }
 foreach ($artifactPath in $finalArtifactPaths) {
   if (Test-Path -LiteralPath $artifactPath) {
-    throw "Refusing to overwrite an existing Windows Store package. Increase -StoreBuild or remove the exact local artifact after verifying it is safe: $artifactPath"
+    throw "Refusing to overwrite an existing Windows Store package. Choose a newer app version or another explicit -StoreBuild, or remove the exact local artifact after verifying it is safe: $artifactPath"
   }
 }
 
@@ -615,7 +613,7 @@ try {
   try {
     foreach ($artifactPath in $finalArtifactPaths) {
       if (Test-Path -LiteralPath $artifactPath) {
-        throw "Refusing to overwrite an existing Windows Store package. Increase -StoreBuild or remove the exact local artifact after verifying it is safe: $artifactPath"
+        throw "Refusing to overwrite an existing Windows Store package. Choose a newer app version or another explicit -StoreBuild, or remove the exact local artifact after verifying it is safe: $artifactPath"
       }
     }
     Assert-MsixIsUnsigned -PackagePath $unsignedStagingArtifactPath

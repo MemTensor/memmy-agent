@@ -365,8 +365,7 @@ describe("Windows Store packaging identity", () => {
   it("keeps the displayed app version separate from the generated MSIX package version", () => {
     const source = readFileSync(packageScriptPath, "utf8");
 
-    expect(source).toContain("[ValidateRange(0, 99)]");
-    expect(source).toContain("[int]$StoreBuild = 0");
+    expect(source).toContain("[AllowEmptyString()][string]$StoreBuild = ''");
     expect(source).toContain("Resolve-MemmyWindowsStorePackageVersion");
     expect(source).toContain(
       "MEMMY_WINDOWS_APPX_CUSTOM_MANIFEST_PATH = $generatedManifestRelativePath",
@@ -375,8 +374,9 @@ describe("Windows Store packaging identity", () => {
     expect(source).not.toContain("--version $storePackageVersion");
     expect(source).toContain("-ExpectedPackageVersion $storePackageVersion");
     expect(source).toContain(
-      '$artifactBaseName = "Memmy-$appVersion-$storeBuildLabel-win32-x64-$resolvedChannel"',
+      '$artifactBaseName = "Memmy-$artifactVersionLabel-win32-x64-$resolvedChannel"',
     );
+    expect(source).toContain("$artifactVersionLabel = $packageVersionInfo.ArtifactVersionLabel");
     expect(source).toContain(
       '$unsignedArtifactName = "$artifactBaseName-unsigned.msix"',
     );
@@ -538,33 +538,39 @@ describe.runIf(process.platform === "win32")(
       );
     });
 
-    it("defaults StoreBuild to 00 and derives the MSIX version from the app patch version", () => {
+    it("defaults to the app version without a StoreBuild suffix", () => {
       const result = invokePackageVersionResolver("1.1.2");
 
       expect(result.status, result.stderr).toBe(0);
       expect(JSON.parse(result.stdout)).toEqual({
         AppVersion: "1.1.2",
-        StoreBuild: 0,
-        StoreBuildLabel: "00",
-        PackageVersion: "1.1.200.0",
+        StoreBuild: null,
+        StoreBuildLabel: "",
+        ArtifactVersionLabel: "1.1.2",
+        PackageVersion: "1.1.2.0",
       });
     });
 
     it.each([
-      ["1.1.2", 1, "01", "1.1.201.0"],
-      ["1.1.2", 99, "99", "1.1.299.0"],
-      ["1.1.3", 0, "00", "1.1.300.0"],
-      ["1.2.0", 0, "00", "1.2.0.0"],
+      ["1.1.2", 1, "1", "1.1.21.0", "1.1.2-1"],
+      ["1.1.2", 99, "99", "1.1.299.0", "1.1.2-99"],
+      ["1.1.3", 0, "0", "1.1.30.0", "1.1.3-0"],
+      ["1.2.0", 0, "0", "1.2.0.0", "1.2.0-0"],
+      ["1.1.99", 99, "99", "1.1.9999.0", "1.1.99-99"],
+      ["1.2.100", 0, "0", "1.2.1000.0", "1.2.100-0"],
+      ["1.2.101", 7, "7", "1.2.1017.0", "1.2.101-7"],
+      ["1.2.901", 1, "1", "1.2.9011.0", "1.2.901-1"],
     ])(
       "maps app %s and StoreBuild %i (%s) to MSIX %s",
-      (appVersion, storeBuild, storeBuildLabel, packageVersion) => {
+      (appVersion, storeBuild, storeBuildLabel, packageVersion, artifactVersionLabel) => {
         const result = invokePackageVersionResolver(appVersion, storeBuild);
 
         expect(result.status, result.stderr).toBe(0);
         expect(JSON.parse(result.stdout)).toEqual({
           AppVersion: appVersion,
-          StoreBuild: storeBuild,
+          StoreBuild: String(storeBuild),
           StoreBuildLabel: storeBuildLabel,
+          ArtifactVersionLabel: artifactVersionLabel,
           PackageVersion: packageVersion,
         });
       },
@@ -577,13 +583,23 @@ describe.runIf(process.platform === "win32")(
       expect(`${result.stdout}\n${result.stderr}`).toContain("StoreBuild");
     });
 
-    it("rejects an encoded MSIX build segment above 65535", () => {
-      const result = invokePackageVersionResolver("1.1.656");
+    it("uses the app version directly when StoreBuild is omitted", () => {
+      const result = invokePackageVersionResolver("1.1.901");
 
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout).PackageVersion).toBe("1.1.901.0");
+    });
+
+    it("manually appends StoreBuild to the app patch when supplied", () => {
+      const result = invokePackageVersionResolver("1.1.9", "01");
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout).PackageVersion).toBe("1.1.901.0");
+    });
+
+    it("rejects an app patch above the MSIX segment limit", () => {
+      const result = invokePackageVersionResolver("1.2.65536");
       expect(result.status).not.toBe(0);
-      expect(`${result.stdout}\n${result.stderr}`).toContain(
-        "must not exceed 65535",
-      );
+      expect(`${result.stdout}\n${result.stderr}`).toContain("between 0 and 65535");
     });
 
     it.each(["cn", "intl"] as const)("generates the %s Store package name and version separately from the Windows app name", (channel) => {
@@ -612,6 +628,21 @@ describe.runIf(process.platform === "win32")(
           "<DisplayName>${storeListingDisplayName}</DisplayName>",
         ),
       ).toBe(manifestTemplate);
+    });
+
+    it("keeps the Store-reserved fourth MSIX version segment at zero for three-digit app versions", () => {
+      const listingName = readPublishingConfig().applications.intl.storeListingDisplayName;
+      const result = invokeVersionedManifestGenerator("1.2.901.0", listingName);
+
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout)).toContain('Version="1.2.901.0"');
+    });
+
+    it("rejects a nonzero Store-reserved fourth MSIX version segment", () => {
+      const listingName = readPublishingConfig().applications.intl.storeListingDisplayName;
+      const result = invokeVersionedManifestGenerator("1.2.901.99", listingName);
+      expect(result.status).not.toBe(0);
+      expect(`${result.stdout}\n${result.stderr}`).toContain("end in .0");
     });
 
     it.each(["cn", "intl"] as const)("strictly validates %s Store identity and display names from an unpacked manifest", (channel) => {
@@ -1155,7 +1186,7 @@ function invokeUnpackedManifestVerifier(
 
 function invokePackageVersionResolver(
   appVersion: string,
-  storeBuild?: number,
+  storeBuild?: string | number,
 ) {
   const command = [
     `. '${quotePowerShellLiteral(packageVersionResolverPath)}'`,

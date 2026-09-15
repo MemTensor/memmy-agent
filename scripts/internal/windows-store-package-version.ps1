@@ -3,7 +3,7 @@ Set-StrictMode -Version Latest
 function Resolve-MemmyWindowsStorePackageVersion {
   param(
     [Parameter(Mandatory = $true)][string]$AppVersion,
-    [ValidateRange(0, 99)][int]$StoreBuild = 0
+    [AllowEmptyString()][string]$StoreBuild = ''
   )
 
   if ($AppVersion -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') {
@@ -23,16 +23,30 @@ function Resolve-MemmyWindowsStorePackageVersion {
     throw "Windows Store AppVersion major segment must be between 1 and 65535: $AppVersion"
   }
 
-  [uint64]$encodedBuild = ([uint64]$numericSegments[2] * 100) + [uint64]$StoreBuild
-  if ($encodedBuild -gt 65535) {
-    throw "Encoded MSIX build segment must not exceed 65535: AppVersion=$AppVersion StoreBuild=$StoreBuild EncodedBuild=$encodedBuild"
+  $patch = [uint64]$numericSegments[2]
+  $storeBuildText = if ([string]::IsNullOrEmpty($StoreBuild)) { $null } else { $StoreBuild }
+  if ($null -ne $storeBuildText -and $storeBuildText -notmatch '^\d{1,2}$') {
+    throw "StoreBuild must be omitted or contain one or two decimal digits: $StoreBuild"
+  }
+
+  if ($null -eq $storeBuildText) {
+    $packageBuild = $patch
+    $artifactVersionLabel = $AppVersion
+  } else {
+    [uint64]$packageBuild = 0
+    $candidateBuild = "$patch$storeBuildText"
+    if (-not [uint64]::TryParse($candidateBuild, [ref]$packageBuild) -or $packageBuild -gt 65535) {
+      throw "MSIX build segment must not exceed 65535: AppVersion=$AppVersion StoreBuild=$storeBuildText PackageBuild=$candidateBuild"
+    }
+    $artifactVersionLabel = "$AppVersion-$storeBuildText"
   }
 
   return [pscustomobject]@{
     AppVersion = $AppVersion
-    StoreBuild = $StoreBuild
-    StoreBuildLabel = $StoreBuild.ToString("00")
-    PackageVersion = "$($numericSegments[0]).$($numericSegments[1]).$encodedBuild.0"
+    StoreBuild = $storeBuildText
+    StoreBuildLabel = if ($null -eq $storeBuildText) { '' } else { $storeBuildText }
+    ArtifactVersionLabel = $artifactVersionLabel
+    PackageVersion = "$($numericSegments[0]).$($numericSegments[1]).$packageBuild.0"
   }
 }
 
